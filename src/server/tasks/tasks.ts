@@ -89,6 +89,7 @@ import {
   convertDocs,
   type Docs,
   docNames,
+  largeRepoProblem,
   NEW_COMMAND,
   type Plan,
   parsePlan,
@@ -97,6 +98,7 @@ import {
   sizeFloor,
   toPlan,
 } from "./plan";
+import { type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo } from "./repos";
 import { firstFree, remoteBranches } from "./worktree";
 
 type TaskSizeInput = z.infer<typeof taskSizeInput>;
@@ -554,6 +556,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       ? { ...Object.fromEntries(TASK_DOCS.flatMap((d) => (docs[d] === undefined ? [] : [[d, docs[d]]]))), version: docs.version }
       : null,
     parts,
+    repos: repoDtos(db, t),
     questions: (db.query(Q.questions).all({ id: t.id }) as FullQuestionRow[]).map((q) => ({
       id: q.id,
       source: q.source,
@@ -658,6 +661,14 @@ export function createTaskService(opts: TaskServiceOptions) {
   const busyResult = (c: RunConflict): TaskResult => ({ status: 409, error: c.error, running: c.running });
   const profile = () => profileOf(settings.profiles(), DEFAULT_PROFILE);
   const taskFiles = (db: Database, t: TaskRow) => taskFilesOf(db, review.dataDir, t);
+  const repoDeps: RepoDeps = {
+    dataDir: review.dataDir,
+    provider: () => settings.provider(),
+    remote: (project, repo) => review.taskRemote(project, repo),
+    now,
+  };
+  // spec.md section 6.16.5: the interview and the spec run read every repository with access edit or read.
+  const repos = (t: TaskRow) => (d: Database, head: string) => resolveTaskRepos(d, repoDeps, taskRow(d, t.id) ?? t, head);
 
   function insertStep(db: Database, task: number, kind: "interview" | "spec", run: number) {
     db.query(Q.stepInsert).get({ task, kind, run, now: now() });
@@ -695,6 +706,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       task: t.id,
       kind: "interview",
       key: `task:${t.id}:interview:${round}`,
+      repos: repos(t),
       project: t.project,
       repo: t.repo,
       branch: t.target_branch,
@@ -775,6 +787,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       task: t.id,
       kind: "spec",
       key: `task:${t.id}:spec`,
+      repos: repos(t),
       project: t.project,
       repo: t.repo,
       branch: t.target_branch,
@@ -925,6 +938,7 @@ export function createTaskService(opts: TaskServiceOptions) {
           issue: pr ? null : JSON.stringify(issue),
           now: fetchedAt,
         }) as { id: number };
+        saveMainRepo(db, { id: row.id, project: input.project, repo: input.repo }, branch, null, fetchedAt);
         const r = review.taskRun(db, interviewRun(db, taskRow(db, row.id) as TaskRow, 1));
         if (r.status !== 202) throw new Refused(r.conflict.error, r.conflict);
         return row.id;
@@ -1054,7 +1068,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     const l = loadPlan(db, id, input.version);
     if ("status" in l) return l;
     const { t, docs } = l;
-    const problem = sizeProblem(db, t, docs, input.size);
+    const problem = sizeProblem(db, t, docs, input.size) ?? largeRepoProblem(input.size, docs.parsed.parts, repoDtos(db, t));
     if (problem) return conflict(db, t, problem);
     const repo = repoSettings(db, t.project, t.repo);
     const offered = commandsOf(docs.parsed, repo.commands);
@@ -1156,6 +1170,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       db.transaction(() => {
         const cur = taskRow(db, id);
         if (!cur || cur.version !== input.version) throw new Refused(TASK_CHANGED);
+        saveMainRepo(db, cur, input.branch, null, now());
         if (!rerun) return patch(db, id, cur.version, { target_branch: input.branch }, now());
         const fields: Patch = { target_branch: input.branch, docs_json: null, estimate_json: null, size: null, size_by: null };
         patch(db, id, cur.version, { ...fields, base_commit: null, blocked_json: null }, now());

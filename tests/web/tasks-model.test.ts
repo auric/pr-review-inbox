@@ -110,6 +110,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     settings: {},
     docs: null,
     parts: [],
+    repos: [],
     questions: [],
     steps: [],
     createdAt: NOW - 30 * MIN,

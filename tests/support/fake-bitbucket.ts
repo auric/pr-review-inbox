@@ -124,11 +124,19 @@ type WriteBody = Record<string, unknown> & {
 // Create: HTTP 201, version 0, state OPEN. The PR author leaves the reviewers without an error (U74). A second open PR of the same refs: 409.
 // PUT and reopen: version + 1, or 409 on a stale version. Build stats: the five keys of Data Center 9.x. writes: each write body.
 // o.defaultBranch: absent gives main, null gives none. o.branches: more branch names. o.writable: false hides it from REPO_WRITE.
+// o.restrictions: the branch restriction values; absent gives HTTP 401 AuthorisationException, as Gate G15 recorded for a plain token.
+// o.clone: other clone links in place of the http and ssh links of the fake.
 export function repoWrites(
   fake: FakeBitbucket,
   project = "PROJ",
   repo = "repo",
-  o: { defaultBranch?: string | null; branches?: string[]; writable?: boolean } = {},
+  o: {
+    defaultBranch?: string | null;
+    branches?: string[];
+    writable?: boolean;
+    restrictions?: unknown[];
+    clone?: { href: string; name: string }[];
+  } = {},
 ) {
   const path = `/rest/api/1.0/projects/${project}/repos/${repo}`;
   const user = (name: string) => ({
@@ -141,7 +149,7 @@ export function repoWrites(
     slug: repo,
     project: { key: project },
     links: {
-      clone: [
+      clone: o.clone ?? [
         { href: `${fake.url}/scm/${project.toLowerCase()}/${repo}.git`, name: "http" },
         { href: `ssh://git@127.0.0.1:7999/${project.toLowerCase()}/${repo}.git`, name: "ssh" },
       ],
@@ -278,6 +286,18 @@ export function repoWrites(
       .map(({ writable: _, ...r }) => r);
     return { status: 200, body: { size: values.length, limit: Number(q.get("limit") ?? 25), start: 0, isLastPage: true, values } };
   };
+
+  fake.routes[key("GET", `/rest/branch-permissions/latest/projects/${project}/repos/${repo}/restrictions`)] = () =>
+    o.restrictions
+      ? { status: 200, body: { size: o.restrictions.length, limit: 100, start: 0, isLastPage: true, values: o.restrictions } }
+      : {
+          status: 401,
+          body: {
+            errors: [
+              { message: "You are not permitted to access this resource", exceptionName: "com.atlassian.bitbucket.AuthorisationException" },
+            ],
+          },
+        };
 
   return { path, prs, builds, writes, repository, branches };
 }

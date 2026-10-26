@@ -19,7 +19,9 @@ import { type BranchRemote, cachePath, diffArgs, gitSetup, longPath, noUrl } fro
 import type { Settings } from "../settings";
 import { endStep, insertStep } from "./implement";
 import type { Plan } from "./plan";
+import { preflight } from "./preflight";
 import { pushTaskBranch } from "./push";
+import { taskRepos } from "./repos";
 import { advance, advancePart, docsOf, TASK_CHANGED, type TaskResult, type TaskRow, taskDto, taskRow, taskSettingsOf } from "./tasks";
 
 const MAX_ROWS = 2000;
@@ -125,6 +127,21 @@ export function createPrOpener(deps: OpenPrDeps) {
     } catch (e) {
       return fail(409, writeProblem(e, "create", { project: t.project, repo: t.repo }).sentence);
     }
+    // spec.md section 6.16.7: the pre-flight runs again before each push.
+    const main = taskRepos(db, t).find((r) => r.role === "main")?.id ?? 0;
+    const pf = await preflight(
+      db,
+      {
+        dataDir: deps.review.dataDir,
+        provider: () => deps.settings.provider().catch(() => null),
+        remote: (project, repo) => deps.review.taskRemote(project, repo),
+        now,
+      },
+      t,
+      part.branch,
+      new Map([[main, part.pushed]]),
+    );
+    if (pf) return fail(409, pf.text);
     const branches = (db.query(Q.branches).all({ task: id }) as { branch: string }[]).map((b) => b.branch);
     let r: Awaited<ReturnType<typeof pushTaskBranch>>;
     try {

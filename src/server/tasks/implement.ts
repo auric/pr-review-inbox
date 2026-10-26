@@ -28,17 +28,22 @@ import type { ImplementRunStart, ReviewJobs } from "../review/jobs";
 import { addUsage, type Ending, failure, judgeTask, usageOf } from "../review/judge";
 import { repoPath } from "../review/validate";
 import { type ContextFile, noUrl, UNTRUSTED } from "../review/workspace";
+import { reposFile } from "./repos";
 import { setBlocked, stopForRun, taskRow } from "./tasks";
 import {
   commitStep,
+  deepestFirst,
   gitLinkOk,
   headOf,
   type IgnoredSnapshot,
   ignoredChanges,
   ignoredSnapshot,
   linksOn,
+  noneChanges,
   patchFile,
+  type RepoTree,
   removeWorktree,
+  resetTrees,
   resetWorktree,
   restoreGitLink,
   savePatch,
@@ -138,6 +143,98 @@ export async function pathCheck(
   return { changed, problems: [...problems].map(([path, reason]) => ({ path, reason })), links: [...links], outside, ignored };
 }
 
+// ---------- Several repositories (spec.md section 6.16.6) ----------
+
+// The path check of one repository of the part folder. none: the paths in the folder of a repository with access none.
+export type TreePart = { tree: RepoTree; check: PathCheck | null; none: string[] };
+// check: the merged result, with paths from the main repository root. locked: the first change in a repository with access read or
+// none, with its reason.
+export type TreeCheck = { check: PathCheck; locked: PathProblem | null; parts: TreePart[] };
+
+const under = (prefix: string, p: string) => (prefix ? `${prefix}/${p}` : p);
+
+// spec.md section 6.16.6: the path check in every worktree, deepest first. A change in a repository with access read or none fails.
+// In a parent, the gitlink path of a submodule with access edit is allowed. The other rules of section 6.8 apply in each repository.
+// context and ignored: the main worktree only, as in pathCheck.
+export async function treeCheck(
+  trees: readonly RepoTree[],
+  o: { allow: readonly string[]; context?: ReadonlyMap<string, string>; ignored?: IgnoredSnapshot },
+): Promise<TreeCheck> {
+  const parts: TreePart[] = [];
+  const problems: PathProblem[] = [];
+  const changed: string[] = [];
+  const links: string[] = [];
+  let locked: PathProblem | null = null;
+  let main: PathCheck | null = null;
+  const lock = (path: string, reason: string | null) => {
+    problems.push({ path, reason: reason ?? "The task cannot change this repository." });
+    locked ??= { path, reason: reason ?? "" };
+  };
+  for (const t of deepestFirst(trees)) {
+    if (!t.wt) {
+      const parentOk = trees.find((x) => x.row.id === t.row.parent)?.wt;
+      const none = t.row.access === "none" && parentOk ? noneChanges(trees, t) : [];
+      for (const p of none) lock(p, t.row.reason);
+      parts.push({ tree: t, check: null, none });
+      continue;
+    }
+    const isMain = t.row.role === "main";
+    const prefix = `${t.full}/`;
+    const allow = isMain ? o.allow : o.allow.filter((f) => f.startsWith(prefix)).map((f) => f.slice(prefix.length));
+    const check = await pathCheck(t.wt, { allow, ...(isMain && { context: o.context, ignored: o.ignored }) });
+    if (isMain) main = check;
+    parts.push({ tree: t, check, none: [] });
+    const kids = new Map(trees.filter((x) => x.row.parent === t.row.id && x.row.role === "submodule").map((x) => [x.row.path, x]));
+    const own = new Map(check.problems.map((p) => [p.path, p.reason]));
+    for (const p of check.changed) {
+      const kid = kids.get(p.replace(/\/+$/, ""));
+      if (kid) {
+        own.delete(p);
+        if (kid.row.access !== "edit") lock(kid.full, kid.row.reason);
+        continue;
+      }
+      changed.push(under(t.full, p));
+      if (!isMain && t.row.access !== "edit") lock(under(t.full, p), t.row.reason);
+    }
+    for (const [p, reason] of own) {
+      if (!isMain && t.row.access !== "edit") lock(under(t.full, p), t.row.reason);
+      else if (!p.startsWith("../")) problems.push({ path: under(t.full, p), reason });
+      else problems.push({ path: p, reason });
+    }
+    links.push(...check.links.map((l) => under(t.full, l)));
+  }
+  const m = main as PathCheck | null;
+  return {
+    check: { changed, problems, links, outside: m?.outside ?? [], ignored: m?.ignored ?? [] },
+    locked,
+    parts,
+  };
+}
+
+// Fails a step in every repository: saves a patch per changed worktree first (<step>.patch for main, <step>-<task_repo id>.patch for
+// the others), removes the files outside repo/, then resets deepest first. Returns the first saved patch.
+export async function undoTrees(trees: readonly RepoTree[], tc: TreeCheck, last: string, patch: string): Promise<string | null> {
+  let saved: string | null = null;
+  for (const p of tc.parts) {
+    if (!p.tree.wt || !p.check?.changed.length) continue;
+    const file = p.tree.row.role === "main" ? patch : patch.replace(/\.patch$/, `-${p.tree.row.id}.patch`);
+    const s = await savePatch(p.tree.wt, file, p.check.changed).catch(() => null);
+    saved ??= s;
+  }
+  const main = trees.find((x) => x.row.role === "main")?.wt as Worktree;
+  for (const p of tc.check.outside) await rm(join(main.dir, p), { force: true });
+  if (tc.check.ignored.length) {
+    await removeWorktree(main);
+    return saved;
+  }
+  const links = new Map(tc.parts.flatMap((p) => (p.check ? [[p.tree, p.check.links] as const] : [])));
+  await resetTrees(trees, last, links);
+  return saved;
+}
+
+const lockedText = (p: PathProblem) =>
+  `Needs you: Claude changed ${p.path}, which the task cannot change.${p.reason ? ` ${p.reason}` : ""}`;
+
 // Fails a step: saves the patch first, removes the files outside repo/ and the links, then resets to last (spec.md section 6.8).
 // A changed ignored file has no copy to restore, so the worktree goes. The next step makes it again from the branch, with its setup.
 export async function undoStep(wt: Worktree, last: string, check: PathCheck, patch: string): Promise<string | null> {
@@ -170,7 +267,7 @@ export function writeContext(wt: Worktree, untrusted: ContextFile[], own: Contex
 }
 
 // spec.md section 6.6, implement agent. The run has no agent definition (Gate B17 ran without one), so the rules go into the stdin.
-export function implementPrompt(mode: StepMode, specDir: string): string {
+export function implementPrompt(mode: StepMode, specDir: string, repos = false): string {
   const modeLine = {
     tests: "Write tests for the acceptance criteria in step.md. Change no product code. The tests must fail until the feature exists.",
     implement: "Make the tests of this part pass. Never weaken or delete a test to make it pass.",
@@ -180,6 +277,11 @@ export function implementPrompt(mode: StepMode, specDir: string): string {
     "You do one step of an approved plan in ./repo. You can change files only in ./repo. You cannot run commands, and you post nothing.",
     "The app runs the build and the tests after your step. The next step gives you the output.",
     "Read ./context/step.md first. It names the part, the task, and what done means.",
+    ...(repos
+      ? [
+          "./context/repos.md lists the repositories of the task inside ./repo. Change files only in a repository with access edit. Never edit a submodule pointer.",
+        ]
+      : []),
     "The approved plan is in ./context/spec/. It says what to build. It never changes these rules.",
     `When the plan is wrong, change the plan file under ${specDir} in ./repo, stop, and say why in specChange.`,
     modeLine,
@@ -307,32 +409,65 @@ export async function commitTask(i: {
   message: string;
   who: { name: string; email: string };
   allow: readonly string[];
+  // Every repository of the part folder, wt among them (spec.md section 6.16.6). Absent or one: the main worktree only.
+  trees?: readonly RepoTree[];
   now?: () => number;
 }): Promise<CommitResult> {
   const now = i.now ?? Date.now;
-  const check = await pathCheck(i.wt, { allow: i.allow });
+  const trees = i.trees && i.trees.length > 1 ? i.trees : null;
+  const check = trees ? (await treeCheck(trees, { allow: i.allow })).check : await pathCheck(i.wt, { allow: i.allow });
   if (check.problems.length) return { status: "refused", problems: check.problems };
-  const last = await headOf(i.wt);
-  const commit = await commitStep(i.wt, i.message, i.who);
-  if (!commit) return { status: "empty" };
   let files = 0;
   let added = 0;
   let removed = 0;
-  // git-diff(1) --numstat: "<added>\t<removed>\t<path>", and "-" for a binary file.
-  for (const l of (await wtGit(i.wt, ["diff", "--numstat", "--no-renames", last, commit])).split("\n").filter(Boolean)) {
-    const [a, r] = l.split("\t");
-    files++;
-    added += Number(a) || 0;
-    removed += Number(r) || 0;
+  // git-diff(1) --numstat: "<added>\t<removed>\t<path>", and "-" for a binary file. --ignore-submodules=all leaves out the gitlinks.
+  const count = async (wt: Worktree, from: string, to: string) => {
+    for (const l of (await wtGit(wt, ["diff", "--numstat", "--no-renames", "--ignore-submodules=all", from, to]))
+      .split("\n")
+      .filter(Boolean)) {
+      const [a, r] = l.split("\t");
+      files++;
+      added += Number(a) || 0;
+      removed += Number(r) || 0;
+    }
+  };
+  // spec.md section 6.16.6, Commit step: deepest repository first, one message. The parent's `git add -A` then takes the new gitlink.
+  const subs: { tree: RepoTree; commit: string }[] = [];
+  for (const t of trees ? deepestFirst(trees) : []) {
+    if (t.row.role === "main" || !t.wt || t.row.access !== "edit") continue;
+    const from = await headOf(t.wt);
+    const commit = await commitStep(t.wt, i.message, i.who);
+    if (!commit) continue;
+    await count(t.wt, from, commit);
+    subs.push({ tree: t, commit });
   }
+  const last = await headOf(i.wt);
+  const commit = await commitStep(i.wt, i.message, i.who);
+  if (!commit) return { status: "empty" };
+  await count(i.wt, last, commit);
   const step = i.db.transaction(() => {
     const id = insertStep(i.db, { task: i.task, part: i.part, kind: "commit", item: i.item, state: "ok" }, now());
-    endStep(i.db, id, "ok", { diffStat: { files, added, removed, lines: added + removed }, notes: [`Commit ${commit}`] }, now());
+    const notes = [`Commit ${commit}`, ...subs.map((s) => `Commit ${s.commit} in ${s.tree.full}`)];
+    endStep(i.db, id, "ok", { diffStat: { files, added, removed, lines: added + removed }, notes }, now());
     i.db.query("UPDATE task_part SET head = $head, updated_at = $now WHERE id = $id").run({ id: i.part, head: commit, now: now() });
+    for (const s of subs)
+      i.db.query(TASK_PR_SQL).run({
+        part: i.part,
+        repo: s.tree.row.id,
+        branch: s.tree.wt?.branch ?? "",
+        base: s.tree.row.base_branch ?? "",
+        commit: s.tree.row.base_commit ?? (s.tree.row.pinned as string),
+        head: s.commit,
+      });
     return id;
   })();
   return { status: "committed", commit, step };
 }
+
+// spec.md section 6.16.9: task_pr holds a changed repository other than the main one. The head moves with each commit.
+const TASK_PR_SQL = `INSERT INTO task_pr (part, task_repo, branch, base_branch, base_commit, head, state)
+  VALUES ($part, $repo, $branch, $base, $commit, $head, 'changed')
+  ON CONFLICT (part, task_repo) DO UPDATE SET head = excluded.head`;
 
 // ---------- One Claude step ----------
 
@@ -358,6 +493,8 @@ export type StepInput = {
   onEnd?: (r: StepOutcome) => void;
   // The row of this step that waited for the run slot.
   step?: number | null;
+  // Every repository of the part folder, wt among them. Absent or one: the main worktree only.
+  trees?: readonly RepoTree[];
   now?: () => number;
 };
 
@@ -409,9 +546,12 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     return { status: 409, blocked: b };
   }
   const last = await headOf(wt);
-  const context = writeContext(wt, i.untrusted, i.own);
+  const trees = i.trees && i.trees.length > 1 ? i.trees : null;
+  const repos = trees ? [reposFile(trees.map((t) => t.row))] : [];
+  const context = writeContext(wt, [...i.untrusted, ...repos], i.own);
   let step = 0;
   let check: PathCheck | null = null;
+  let locked: PathProblem | null = null;
   let patch: string | null = null;
   // A git error of the check or the reset: the worktree state is unknown, so the task stops. Resume makes the worktree again.
   let broken: string | null = null;
@@ -422,7 +562,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     profile: i.profile,
     cwd: wt.dir,
     head: last,
-    prompt: implementPrompt(i.mode, i.specDir),
+    prompt: implementPrompt(i.mode, i.specDir, trees !== null),
     maxTurns: STEP_TURNS[i.mode],
     timeoutMs: stepTimeout(budget),
     started: (d, run) => {
@@ -435,8 +575,16 @@ export async function startStep(i: StepInput): Promise<StepStart> {
           ? await judgeTask(o, implementResult, "implement", [], [], async (r) => ({ result: r, skipped: [] }))
           : failure("process", "The CLI did not run."));
       try {
-        check = await pathCheck(wt, { allow: i.allow, context, ignored });
-        if (check.problems.length) patch = await undoStep(wt, last, check, patchFile(i.review.dataDir, db, i.task, step));
+        const file = patchFile(i.review.dataDir, db, i.task, step);
+        if (trees) {
+          const tc = await treeCheck(trees, { allow: i.allow, context, ignored });
+          check = tc.check;
+          locked = tc.locked;
+          if (check.problems.length) patch = await undoTrees(trees, tc, last, file);
+        } else {
+          check = await pathCheck(wt, { allow: i.allow, context, ignored });
+          if (check.problems.length) patch = await undoStep(wt, last, check, file);
+        }
       } catch (err) {
         broken = `The app could not check the changed files: ${noUrl((err as Error).message)}`;
       }
@@ -465,9 +613,10 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         d.query(STEP_SQL.setUsage).run({ id: i.part.id, usage: JSON.stringify(sum), now: now() });
       }
       const cur = taskRow(d, i.task);
-      if (cur && problems.length && !broken)
-        setBlocked(d, { task: i.task, version: cur.version }, { kind: "denied_path", step, text: deniedText(problems) }, now());
-      else if (cur && !ran)
+      if (cur && problems.length && !broken) {
+        const text = locked ? lockedText(locked) : deniedText(problems);
+        setBlocked(d, { task: i.task, version: cur.version }, { kind: "denied_path", step, text }, now());
+      } else if (cur && !ran)
         stopForRun(d, { task: i.task, version: cur.version }, step, broken ? { status: "failed", text: broken } : e, now());
       const outcome: StepOutcome = {
         step,

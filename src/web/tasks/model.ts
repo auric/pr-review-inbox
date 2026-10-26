@@ -345,6 +345,7 @@ const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {
   denied_path: "Needs you: a file the app does not commit",
   push: "Needs you: the push",
   slot: "Waiting for the run slot",
+  preflight: "Needs you: a check before the build",
   error: "Needs you: an error",
 };
 export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {

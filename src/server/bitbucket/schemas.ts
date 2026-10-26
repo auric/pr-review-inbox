@@ -157,6 +157,21 @@ export const branch = z.object({
   default: z.boolean().optional().catch(undefined),
 });
 
+// GET .../projects/{p}/repos/{r} and the values of GET /rest/api/1.0/repos (Gate G16): project.key, slug, name, links.clone with http
+// and ssh.
+export const repository = z.object({
+  slug: z.string(),
+  name: z.string(),
+  project: z.object({ key: z.string() }),
+  links: z.object({ clone: z.array(z.object({ href: z.string(), name: z.string() })).optional() }).optional(),
+});
+
+// GET /rest/branch-permissions/latest/.../restrictions values (Data Center 9.6 REST): type, and the matcher with its id and type id.
+export const restriction = z.object({
+  type: z.string(),
+  matcher: z.object({ id: z.string(), type: z.object({ id: z.string() }) }),
+});
+
 export const page = <T extends z.ZodType>(item: T) =>
   z.object({
     start: z.number(),

@@ -1109,3 +1109,20 @@ describe("routes (spec.md section 6.11)", () => {
     SLOW,
   );
 });
+
+test(
+  "pre-flight: a base branch that is gone blocks before any Claude step (spec.md section 6.16.7, AC-B42)",
+  async () => {
+    const s = await setup();
+    s.db.query("UPDATE task SET target_branch = 'gone' WHERE id = $id").run({ id: s.task });
+    await s.build();
+    expect(s.blocked()).toEqual({
+      kind: "preflight",
+      step: null,
+      text: "Needs you: gone no longer exists in PROJ/repo. Pick another base branch.",
+    });
+    expect(s.runCalls()).toEqual([]);
+    expect(s.steps()).toEqual([]);
+  },
+  SLOW,
+);

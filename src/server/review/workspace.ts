@@ -500,6 +500,39 @@ export async function remoteHead(dataDir: string, remote: BranchRemote, long: Lo
   return branch;
 }
 
+// Fetches refspecs from remote into the bare cache of project/repo, which it makes when missing. One call per cache runs at a time.
+export async function fetchInto(
+  dataDir: string,
+  project: string,
+  repo: string,
+  remote: BranchRemote,
+  refspecs: string[],
+  long: LongGit = {},
+) {
+  const dir = longData(dataDir);
+  const cache = cachePath(dir, { project, repo, id: 0 });
+  const { empty, env } = gitSetup(dir);
+  await locked(cache, async () => {
+    await initCache(cache, env);
+    try {
+      await git(
+        [`--git-dir=${cache}`, "fetch", "--no-tags", "--no-write-fetch-head", "--quiet", "--end-of-options", remote.url, ...refspecs],
+        {
+          env: gitEnv(empty, remote.config),
+          ...long,
+        },
+      );
+    } catch (e) {
+      throw fetchError(e, remote.config);
+    }
+  });
+  return cache;
+}
+
+// A repository of a task snapshot inside the main folder (spec.md section 6.16.5, Snapshots). path: from the main repository root, a
+// gitlink path of its parent. The parents come before their children.
+export type SnapshotRepo = { path: string; cache: string; commit: string };
+
 export type TaskWorkspaceInput = {
   dataDir: string;
   runId: string;
@@ -512,6 +545,8 @@ export type TaskWorkspaceInput = {
   files?: ContextFile[];
   attachments?: AttachmentFile[];
   long?: LongGit;
+  // The submodule folders of the fetched head. Absent: none, as in the review snapshot of a PR.
+  nested?: (cache: string, head: string) => Promise<SnapshotRepo[]>;
 };
 
 // A task run reads the newest head of the target branch (spec.md section 6.14). HEAD, BASE, and TARGET of the git tools are all
@@ -556,9 +591,17 @@ export async function prepareTaskWorkspace(input: TaskWorkspaceInput): Promise<W
     return (await g(["rev-parse", "--verify", "--quiet", `${target}^{commit}`])).trim();
   });
   if (!HEAD.test(head)) throw new WorkspaceError(`The branch ${input.branch} has no commit.`);
+  const nested = input.nested ? await input.nested(cache, head) : [];
   const at = { sourceHead: head, targetHead: head, mergeBase: head, rangeBase: head, diff: "" };
-  return taskSnapshot({ dataDir, cache, env, runId, task: input.task, files, attachments, long: input.long }, at);
+  return taskSnapshot({ dataDir, cache, env, runId, task: input.task, files, attachments, long: input.long, nested }, at);
 }
+
+// The mode-120000 paths of a commit.
+const linksAt = async (cache: string, env: Record<string, string>, commit: string) =>
+  (await git([`--git-dir=${cache}`, "ls-tree", "-r", "-z", "--full-tree", commit], { env }))
+    .split("\0")
+    .filter((r) => r.startsWith("120000 "))
+    .map((r) => r.slice(r.indexOf("\t") + 1));
 
 // The run folder of a task run at the commit at.sourceHead of the cache: a sanitized detached worktree and the context files, in the
 // layout of prepareWorkspace.
@@ -572,10 +615,12 @@ async function taskSnapshot(
     files: ContextFile[];
     attachments: AttachmentFile[];
     long?: LongGit;
+    nested?: SnapshotRepo[];
   },
   at: Pick<Workspace, "sourceHead" | "targetHead" | "mergeBase" | "rangeBase" | "diff">,
 ): Promise<Workspace> {
   const { cache, env } = i;
+  const nested = i.nested ?? [];
   const g = (args: string[]) => git([`--git-dir=${cache}`, ...args], { env });
   const head = at.sourceHead;
   const keep = async (ref = "base") => {
@@ -591,7 +636,7 @@ async function taskSnapshot(
   const remove = async () => {
     try {
       await rm(run, RM_TREE);
-      await g(["worktree", "prune"]);
+      for (const c of new Set([cache, ...nested.map((n) => n.cache)])) await git([`--git-dir=${c}`, "worktree", "prune"], { env });
     } catch (e) {
       log(`Could not remove the run folder ${run}: ${(e as Error).message}`);
     }
@@ -601,10 +646,16 @@ async function taskSnapshot(
     mkdirSync(context, { recursive: true });
     mkdirSync(app, { recursive: true });
     await git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, head], { env, ...i.long });
-    const links = (await g(["ls-tree", "-r", "-z", "--full-tree", head]))
-      .split("\0")
-      .filter((r) => r.startsWith("120000 "))
-      .map((r) => r.slice(r.indexOf("\t") + 1));
+    const links = await linksAt(cache, env, head);
+    // spec.md section 6.16.5, Snapshots: each submodule with access edit or read at its gitlink path, detached at its pinned commit.
+    for (const n of nested) {
+      const at = resolve(repo, n.path);
+      const r = relative(repo, at);
+      if (!r || r.startsWith("..") || isAbsolute(r) || !HEAD.test(n.commit))
+        throw new WorkspaceError(`A submodule path is outside the worktree: ${n.path}`);
+      await git([`--git-dir=${n.cache}`, "worktree", "add", "--detach", at, n.commit], { env, ...i.long });
+      links.push(...(await linksAt(n.cache, env, n.commit)).map((l) => `${n.path}/${l}`));
+    }
     await sanitize(repo, links);
     for (const f of i.files) writeFileSync(join(context, f.name), UNTRUSTED + f.text);
     if (i.attachments.length) await copyAttachments(join(i.dataDir, "attachments"), join(context, "attachments"), i.attachments);

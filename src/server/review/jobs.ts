@@ -184,6 +184,7 @@ import {
   prepareTaskWorkspace,
   prepareWorkspace,
   pruneWorkspaces,
+  type SnapshotRepo,
   UNTRUSTED,
   type Workspace,
 } from "./workspace";
@@ -286,6 +287,8 @@ export type TaskRunStart = {
   started: (db: Database, run: number) => void;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
   keep?: string;
+  // spec.md section 6.16.5: resolves the repositories of the task at the fetched head and gives the submodule folders of the snapshot.
+  repos?: (db: Database, head: string) => Promise<SnapshotRepo[]>;
 };
 
 // docs/plans/review-v2/spec.md section 6.7: one Claude step of a task part in its worktree. src/server/tasks/implement.ts builds it.
@@ -1118,6 +1121,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         files: t.files,
         attachments: t.attachments,
         long: { signal: j.abort.signal, timeoutMs: RUN_TIMEOUT_MS },
+        ...(t.repos && { nested: (_cache: string, head: string) => (t.repos as NonNullable<TaskRunStart["repos"]>)(j.db, head) }),
       });
     } catch (e) {
       if (j.cancelled) return cancelledEnding();

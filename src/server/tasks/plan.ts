@@ -6,6 +6,7 @@
 import { oneLine } from "../../shared/consult";
 import {
   CHECK_TIMEOUT_SEC,
+  LARGE_REPOS_TEXT,
   type SpecResult,
   sizeRank,
   type TaskCommand,
@@ -30,6 +31,19 @@ export function sizeFloor(e: Pick<SpecResult["estimate"], "db" | "api" | "lines"
 }
 
 export const atLeast = (size: TaskSize, minimum: TaskSize): TaskSize => (sizeRank(size) >= sizeRank(minimum) ? size : minimum);
+
+// spec.md section 6.16.5, Size: a large plan stays in one repository. It names another one when the task has an added repository or a
+// task of the plan lists a file inside a submodule folder. repos: the task repositories with their paths from the main root.
+export function largeRepoProblem(
+  size: TaskSize,
+  parts: readonly { tasks: readonly { files: readonly string[] }[] }[],
+  repos: readonly { role: string; path: string | null }[],
+): string | null {
+  if (size !== "large") return null;
+  const subs = repos.filter((r) => r.role === "submodule" && r.path).map((r) => `${r.path}/`);
+  const named = parts.some((p) => p.tasks.some((t) => t.files.some((f) => subs.some((s) => (repoPath(f) ?? f).startsWith(s)))));
+  return named || repos.some((r) => r.role === "added") ? LARGE_REPOS_TEXT : null;
+}
 
 // ---------- The stored plan (task.docs_json.parsed) ----------
 

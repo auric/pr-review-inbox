@@ -35,6 +35,8 @@ import {
   PREFIX_MAX,
   PREFIXES_MAX,
   type QuestionSource,
+  type RepoAccess,
+  type RepoRole,
   type SizeSource,
   type SpecResult,
   type StepDetail,
@@ -1317,6 +1319,20 @@ export type TaskPartDto = {
   waiting: string[];
 };
 
+// A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a
+// submodule that maps to no Bitbucket repository. reason: why the task cannot change it.
+export type TaskRepoDto = {
+  id: number;
+  role: RepoRole;
+  project: string | null;
+  repo: string | null;
+  path: string | null;
+  depth: number;
+  access: RepoAccess;
+  reason: string | null;
+  baseBranch: string | null;
+};
+
 // A point of the newest own review of a part that the loop does not fix: not a confirmed blocker or major (spec.md section 6.7).
 // "Fix these too" fixes them.
 export type TaskPointDto = { id: number; severity: string; path: string; line: number | null; text: string };
@@ -1394,6 +1410,8 @@ export type TaskDto = TaskRowDto & {
   settings: TaskSettings;
   docs: (Partial<Record<TaskDoc, string>> & { version: number }) | null;
   parts: TaskPartDto[];
+  // Every repository of the task, the main one first.
+  repos: TaskRepoDto[];
   questions: TaskQuestionDto[];
   steps: TaskStepDto[];
   createdAt: number;

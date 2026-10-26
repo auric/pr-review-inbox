@@ -93,6 +93,26 @@ export const BRANCH_PAGE = 25;
 export const DEFAULT_BRANCH_PREFIXES = ["feature/", "bugfix/", "hotfix/"] as const;
 // spec.md section 6.16.4: a taken name gets -2 to -99.
 export const BRANCH_SUFFIX_MAX = 99;
+// spec.md section 6.16.5: the repository list stops after 10 pages of 100. A spec run proposes at most 2 other repositories.
+export const REPO_PAGE = 100;
+export const REPO_LIST_MAX = 1000;
+export const PROPOSALS_MAX = 2;
+
+// spec.md section 6.16.5: the repositories of a task (task_repo.role, task_repo.access) and the reasons that the plan screen shows.
+export const REPO_ROLES = ["main", "submodule", "added"] as const;
+export type RepoRole = (typeof REPO_ROLES)[number];
+export const REPO_ACCESS = ["edit", "read", "none"] as const;
+export type RepoAccess = (typeof REPO_ACCESS)[number];
+export const REPO_REASON = {
+  noWrite: "The token cannot push to it.",
+  nested: "It is a nested submodule. Only first-level submodules are editable.",
+  otherServer: "It comes from another server.",
+  noMatch: "Its URL matches no repository on your Bitbucket server.",
+  twice: (path: string) => `The same repository is already in the task at ${path}.`,
+  noBranch: "Its pinned commit is on no branch of the server.",
+} as const;
+// spec.md section 6.16.5, Size.
+export const LARGE_REPOS_TEXT = "Needs you: large tasks change one repository for now. Make it medium, or split the task.";
 export const CHECK_TIMEOUT_SEC = 600;
 // spec.md section 0: the limits of one Claude step of a part (STEP_TIME, STEP_TURNS), the Claude time of one part (PART_TIME, in
 // minutes), and the output of one command (OUTPUT_TAIL: stored bytes; FAILURE_TAIL: bytes in context/failure.md).
@@ -203,6 +223,7 @@ export const BLOCKED_KINDS = [
   "denied_path",
   "push",
   "slot",
+  "preflight",
   "error",
 ] as const;
 export type BlockedKind = (typeof BLOCKED_KINDS)[number];
@@ -363,6 +384,11 @@ export const specResult = z.object({
     .nullable()
     .default(null),
   questions: z.array(z.string().max(300)).max(10).default([]),
+  // spec.md section 6.16.5, Proposals: other repositories from context/repo-list.md that the change needs.
+  repos: z
+    .array(z.object({ project: z.string().max(100), repo: z.string().max(100), reason: z.string().max(300) }))
+    .max(PROPOSALS_MAX)
+    .default([]),
   coverage,
 });
 export type SpecResult = z.infer<typeof specResult>;

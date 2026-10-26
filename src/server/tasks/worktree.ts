@@ -13,6 +13,7 @@ import { BRANCH_SUFFIX_MAX } from "../../shared/task";
 import { dbStem } from "../context/attachments";
 import { GitError, git, gitEnv } from "../review/git";
 import { type BranchRemote, cachePath, gitSetup, locked, longPath, noUrl, WorkspaceError } from "../review/workspace";
+import { fullPath, sourceOf, type TaskRepoRow } from "./repos";
 
 // spec.md section 6.8: the sparse patterns of a task worktree, in this order. The matching paths are absent on disk, and a commit keeps
 // them unchanged.
@@ -152,6 +153,11 @@ export async function mergeBase(dataDir: string, cache: string, a: string, b: st
 
 // The first of name, name-2, name-3, ... that neither the remote (`git ls-remote --heads`) nor the cache has as a branch.
 export async function freeBranch(dataDir: string, cache: string, remote: BranchRemote, name: string): Promise<string> {
+  return firstFree(name, await takenBranches(dataDir, cache, remote, name));
+}
+
+// The branches name and name-* of the remote and of the cache.
+export async function takenBranches(dataDir: string, cache: string, remote: BranchRemote, name: string): Promise<Set<string>> {
   const { env } = gitSetup(longPath(dataDir));
   const taken = new Set((await remoteBranches(dataDir, remote, name)).keys());
   const local = existsSync(join(cache, "HEAD"))
@@ -164,7 +170,7 @@ export async function freeBranch(dataDir: string, cache: string, remote: BranchR
         .filter(Boolean)
     : [];
   for (const b of local) taken.add(b);
-  return firstFree(name, taken);
+  return taken;
 }
 
 // git in the worktree. --git-dir and --work-tree name both folders, so a changed repo/.git file cannot point git at another repository.
@@ -207,6 +213,8 @@ export async function restoreGitLink(wt: Pick<Worktree, "repo" | "admin">) {
   // A link goes without a walk, so its target stays.
   if (st?.isDirectory() && !st.isSymbolicLink()) await rm(p, RM_TREE);
   else if (st) await rm(p, { force: true });
+  // A step can delete the folder of a submodule worktree.
+  mkdirSync(wt.repo, { recursive: true });
   writeFileSync(p, `gitdir: ${wt.admin.replaceAll("\\", "/")}\n`);
 }
 
@@ -221,6 +229,10 @@ export type WorktreeInput = {
   // The local branch of the cache, named like the remote branch. A missing branch starts at base.
   branch: string;
   base: string;
+  // A submodule worktree (spec.md section 6.16.5, Worktrees): its folder inside the parent worktree. Absent: part-<ord>/repo.
+  at?: string;
+  // Access read: a detached worktree at base. branch is not used.
+  detach?: boolean;
 };
 
 // The worktree of a part: the existing one, or a new one from the branch in the cache (spec.md section 6.14: "The worktree folder is
@@ -232,39 +244,42 @@ export async function openWorktree(i: WorktreeInput): Promise<Worktree> {
   if (!existsSync(join(cache, "HEAD"))) throw new WorkspaceError(`The app has no copy of ${i.project}/${i.repo} yet.`);
   if (!HEAD.test(i.base)) throw new WorkspaceError(`Invalid commit hash: ${i.base}`);
   const { dir: gitDir, empty, env: plain } = gitSetup(dataDir);
-  await git(["check-ref-format", "--branch", i.branch], { env: plain }).catch(() => {
-    throw new WorkspaceError(`${i.branch} is not a valid branch name.`);
-  });
+  const branch = i.detach ? "" : i.branch;
+  if (!i.detach)
+    await git(["check-ref-format", "--branch", branch], { env: plain }).catch(() => {
+      throw new WorkspaceError(`${branch} is not a valid branch name.`);
+    });
   const hooks = join(gitDir, "no-hooks");
   mkdirSync(hooks, { recursive: true });
   // core.hooksPath: commits and checkouts of the app run no hook (spec.md section 6.7).
   const env = gitEnv(empty, [["core.hooksPath", hooks]]);
   const dir = partDir(dataDir, i.db, i.task, i.ord);
-  const repo = join(dir, "repo");
+  const repo = i.at ?? join(dir, "repo");
+  if (!inside(join(dir, "repo"), repo)) throw new WorkspaceError(`A submodule path is outside the worktree: ${repo}`);
   const context = join(dir, "context");
   mkdirSync(context, { recursive: true });
   const c = (args: string[]) => git([`--git-dir=${cache}`, ...args], { env });
   return locked(cache, async () => {
     const found = existsSync(repo) ? adminOf(cache, repo) : null;
     if (found) {
-      const wt: Worktree = { dir, repo, context, admin: found, cache, branch: i.branch, env };
+      const wt: Worktree = { dir, repo, context, admin: found, cache, branch, env };
       if (!gitLinkOk(wt)) await restoreGitLink(wt);
       const head = await wtGit(wt, ["symbolic-ref", "-q", "HEAD"]).catch(() => "");
-      if (head.trim() === `refs/heads/${i.branch}`) return wt;
+      if (i.detach ? !head.trim() : head.trim() === `refs/heads/${branch}`) return wt;
     }
     await rm(repo, RM_TREE);
     await c(["worktree", "prune"]);
-    const has = await c(["rev-parse", "--verify", "--quiet", `refs/heads/${i.branch}^{commit}`]).catch(() => "");
+    const has = i.detach ? "" : await c(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]).catch(() => "");
     if (!has.trim()) {
       const base = await c(["rev-parse", "--verify", "--quiet", `${i.base}^{commit}`]).catch(() => "");
       if (base.trim() !== i.base)
         throw new WorkspaceError(`The base commit ${i.base.slice(0, 12)} is not in the app copy of the repository.`);
-      await c(["branch", "--no-track", "--end-of-options", i.branch, i.base]);
+      if (!i.detach) await c(["branch", "--no-track", "--end-of-options", branch, i.base]);
     }
-    await c(["worktree", "add", "--no-checkout", repo, i.branch]);
+    await c(["worktree", "add", "--no-checkout", ...(i.detach ? ["--detach", repo, i.base] : [repo, branch])]);
     const admin = adminOf(cache, repo);
     if (!admin) throw new WorkspaceError("git made no worktree entry for the task folder.");
-    const wt: Worktree = { dir, repo, context, admin, cache, branch: i.branch, env };
+    const wt: Worktree = { dir, repo, context, admin, cache, branch, env };
     // sparse-checkout enables extensions.worktreeConfig, so the --worktree values stay in the git folder of this worktree.
     await wtGit(wt, ["sparse-checkout", "set", "--no-cone", ...SPARSE]);
     for (const [k, v] of [
@@ -286,7 +301,8 @@ export const headOf = async (wt: Worktree) => (await wtGit(wt, ["rev-parse", "--
 export type StatusEntry = { xy: string; path: string };
 
 export async function status(wt: Worktree): Promise<StatusEntry[]> {
-  const parts = (await wtGit(wt, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).split("\0");
+  // spec.md section 6.16.6: --ignore-submodules=none lists a gitlink path when its worktree has changes or a new HEAD.
+  const parts = (await wtGit(wt, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"])).split("\0");
   const out: StatusEntry[] = [];
   for (let k = 0; k < parts.length; k++) {
     const p = parts[k] as string;
@@ -381,6 +397,96 @@ export async function resetWorktree(wt: Worktree, last: string, links: string[] 
 export async function removeWorktree(wt: Worktree) {
   await rm(wt.dir, RM_TREE);
   await locked(wt.cache, () => git([`--git-dir=${wt.cache}`, "worktree", "prune"], { env: wt.env }));
+}
+
+// ---------- Several repositories (spec.md sections 6.16.5 and 6.16.6) ----------
+
+// One repository of a part folder. full: the path from the main repository root, "" for main. wt null: access none, an empty folder
+// at full that the app keeps empty, or a submodule under such a folder.
+export type RepoTree = { row: TaskRepoRow; full: string; wt: Worktree | null };
+
+// The worktrees of the submodules inside the main worktree, parents first: `git worktree add` from the cache of each repository at its
+// pinned commit, on the task branch for access edit, detached for access read. The gitlink folder that the parent checkout made takes
+// the worktree.
+export async function openRepoTrees(i: {
+  dataDir: string;
+  db: Database;
+  task: number;
+  ord: number;
+  branch: string;
+  main: Worktree;
+  rows: readonly TaskRepoRow[];
+}): Promise<RepoTree[]> {
+  const out: RepoTree[] = [];
+  for (const row of i.rows) {
+    if (row.role === "main") {
+      out.push({ row, full: "", wt: i.main });
+      continue;
+    }
+    if (row.role !== "submodule") continue;
+    const full = fullPath(i.rows, row);
+    const parent = out.find((x) => x.row.id === row.parent);
+    const src = sourceOf(i.rows, row);
+    if (row.access === "none" || !parent?.wt || !row.pinned || !src.project || !src.repo) {
+      out.push({ row, full, wt: null });
+      continue;
+    }
+    const at = join(i.main.repo, ...full.split("/"));
+    const wt = await openWorktree({
+      dataDir: i.dataDir,
+      db: i.db,
+      project: src.project,
+      repo: src.repo,
+      task: i.task,
+      ord: i.ord,
+      branch: i.branch,
+      base: row.pinned,
+      at,
+      detach: row.access !== "edit",
+    });
+    out.push({ row, full, wt });
+  }
+  return out;
+}
+
+export const deepestFirst = (trees: readonly RepoTree[]) => [...trees].sort((a, b) => b.row.depth - a.row.depth);
+
+const folderOf = (trees: readonly RepoTree[], t: RepoTree) => {
+  const main = trees.find((x) => x.row.role === "main")?.wt as Worktree;
+  return join(main.repo, ...t.full.split("/"));
+};
+
+// The paths in the folder of a repository with access none: it must stay an empty folder. A missing folder counts as a change of it.
+export function noneChanges(trees: readonly RepoTree[], t: RepoTree): string[] {
+  const p = folderOf(trees, t);
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  if (!st?.isDirectory() || st.isSymbolicLink()) return [t.full];
+  return readdirSync(p).map((n) => `${t.full}/${n}`);
+}
+
+// Empties the folder of a repository with access none. A link or a file in its place goes, and the folder comes back.
+export async function clearNone(trees: readonly RepoTree[], t: RepoTree) {
+  const p = folderOf(trees, t);
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  if (st && (!st.isDirectory() || st.isSymbolicLink())) await rm(p, { force: true });
+  else if (st) for (const n of readdirSync(p)) await rm(join(p, n), lstatSync(join(p, n)).isSymbolicLink() ? { force: true } : RM_TREE);
+  mkdirSync(p, { recursive: true });
+}
+
+// spec.md section 6.16.6, Reset: each repository returns to its last commit, deepest first. A submodule with access read returns to its
+// pinned commit. The main worktree goes last. links: the links of each worktree, as in resetWorktree. `git clean -ffd` in a parent
+// keeps the gitlink folders, because they are tracked entries.
+export async function resetTrees(trees: readonly RepoTree[], mainLast: string, links: ReadonlyMap<RepoTree, string[]> = new Map()) {
+  for (const t of deepestFirst(trees)) {
+    if (t.row.role === "main") continue;
+    if (!t.wt) {
+      if (t.row.access === "none" && trees.find((x) => x.row.id === t.row.parent)?.wt) await clearNone(trees, t);
+      continue;
+    }
+    await resetWorktree(t.wt, t.row.access === "edit" ? await headOf(t.wt) : (t.row.pinned as string), links.get(t));
+  }
+  const main = trees.find((x) => x.row.role === "main");
+  if (main?.wt) await resetWorktree(main.wt, mainLast, links.get(main));
 }
 
 // spec.md section 6.7: `git add -A`, then `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name

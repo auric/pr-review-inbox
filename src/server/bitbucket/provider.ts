@@ -3,7 +3,7 @@
 
 // ForgeProvider for Bitbucket Server. It returns forge-neutral types from src/shared/types.ts.
 import { z } from "zod";
-import { BRANCH_PAGE } from "../../shared/task";
+import { BRANCH_PAGE, REPO_LIST_MAX, REPO_PAGE } from "../../shared/task";
 import {
   anchorSpan,
   type Change,
@@ -32,6 +32,8 @@ import {
   pullRequest,
   type RawComment,
   type RawDiff,
+  repository,
+  restriction,
   type user,
 } from "./schemas";
 
@@ -166,6 +168,12 @@ export type BuildStats = { successful: number; inProgress: number; failed: numbe
 export type BranchPage = { branches: { name: string; isDefault: boolean }[]; more: boolean };
 // config: for git fetch and push only, in the GIT_CONFIG env. It holds the token as an http.extraHeader value.
 export type RepoRemote = { url: string; config: [string, string][] };
+// A repository with its clone links as Bitbucket gives them (spec.md section 6.16.5, Mapping).
+export type RepoInfo = { project: string; slug: string; name: string; clone: { href: string; name: string }[] };
+// complete false: the list stopped at REPO_LIST_MAX or at a bad page cursor.
+export type RepoList = { repos: RepoInfo[]; complete: boolean };
+// A branch restriction (Data Center 9.6 REST): type such as read-only, matcher type such as BRANCH, matcher id such as refs/heads/main.
+export type Restriction = { type: string; matcherType: string; matcherId: string };
 
 export function createBitbucketProvider(opts: ClientOptions) {
   const client = createClient(opts);
@@ -231,6 +239,28 @@ export function createBitbucketProvider(opts: ClientOptions) {
     ...(opts.caFile ? [["http.sslCAInfo", opts.caFile] as [string, string]] : []),
   ];
 
+  const toRepo = (r: z.infer<typeof repository>): RepoInfo => ({
+    project: r.project.key,
+    slug: r.slug,
+    name: r.name,
+    clone: r.links?.clone ?? [],
+  });
+
+  // spec.md section 6.16.5, Gate G16: pages of REPO_PAGE with isLastPage and nextPageStart, at most REPO_LIST_MAX items. A bad cursor
+  // stops the list. A failed page throws a ForgeError.
+  async function pages<T extends z.ZodType>(path: string, item: T): Promise<{ items: z.infer<T>[]; complete: boolean }> {
+    const items: z.infer<T>[] = [];
+    let start = 0;
+    while (items.length < REPO_LIST_MAX) {
+      const p = (await client.get(`${path}${path.includes("?") ? "&" : "?"}start=${start}&limit=${REPO_PAGE}`, page(item))).data;
+      items.push(...p.values);
+      if (p.isLastPage) return { items: items.slice(0, REPO_LIST_MAX), complete: items.length <= REPO_LIST_MAX };
+      if (typeof p.nextPageStart !== "number" || p.nextPageStart <= start) return { items, complete: false };
+      start = p.nextPageStart;
+    }
+    return { items: items.slice(0, REPO_LIST_MAX), complete: false };
+  }
+
   // One page of OPEN PRs of a repository. branch: only the PRs from this branch.
   // Pending Gate G9: the open-PR list of a repository is checked only by the gate fake (spec.md section 2.8).
   async function listOpenPullRequests(project: string, repo: string, branch?: string): Promise<ListResult<PullRequest>> {
@@ -277,6 +307,39 @@ export function createBitbucketProvider(opts: ClientOptions) {
     },
 
     listOpenPullRequests,
+
+    // The origin of the configured Bitbucket URL.
+    origin,
+
+    // spec.md section 6.16.5, Mapping: a repository by project key and slug, with its clone links. 404 throws a ForgeError.
+    async repository(project: string, repo: string): Promise<RepoInfo> {
+      return toRepo((await client.get(repoPath(project, repo), repository)).data);
+    },
+
+    // spec.md section 6.16.7 step 1, Gates G15 and G16: the repositories that the token can push to. filter: the project key (projectkey
+    // since 8.0) and the repository name.
+    async writableRepos(filter?: { project: string; name?: string }): Promise<RepoList> {
+      const q = filter
+        ? `&projectkey=${encodeURIComponent(filter.project)}${filter.name === undefined ? "" : `&name=${encodeURIComponent(filter.name)}`}`
+        : "";
+      const r = await pages(`${API}/repos?permission=REPO_WRITE${q}`, repository);
+      return { repos: r.items.map(toRepo), complete: r.complete };
+    },
+
+    // Gate G16: the repositories that the token can read, with their clone links. The mapping of a submodule URL searches them when
+    // the candidate key of the URL names no repository with that clone link.
+    async readableRepos(): Promise<RepoList> {
+      const r = await pages(`${API}/repos?permission=REPO_READ`, repository);
+      return { repos: r.items.map(toRepo), complete: r.complete };
+    },
+
+    // spec.md section 6.16.7 step 3: the branch restrictions. The search needs REPO_ADMIN; Gate G15 got HTTP 401 for a plain token, which
+    // throws a ForgeError of kind auth.
+    async restrictions(project: string, repo: string): Promise<Restriction[]> {
+      const path = `/rest/branch-permissions/latest/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}/restrictions`;
+      const r = await pages(path, restriction);
+      return r.items.map((x) => ({ type: x.type, matcherType: x.matcher.type.id, matcherId: x.matcher.id }));
+    },
 
     // spec.md section 6.16.10, Gate G13: the default branch name without refs/heads/. A repository without one gives 404 (ForgeError).
     async defaultBranch(project: string, repo: string): Promise<string> {

@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 34;
+const LATEST = 35;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1169,6 +1169,63 @@ test("migration from a version-33 database keeps every task setting; last_base i
     expect(db.query("SELECT * FROM repo_task_settings").all()).toEqual(
       (before as Record<string, unknown>[]).map((r) => ({ ...r, last_base: null })),
     );
+  } finally {
+    db.close();
+  }
+});
+
+test("migration from a version-34 database adds task_repo with a main row per task, and task_pr", () => {
+  const path = join(dir, "v34.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [...V30, "031_pr_notes.sql", "032_ask_parent.sql", "033_task.sql", "034_task_base.sql"]);
+  old.exec("PRAGMA user_version = 34");
+  old.exec(`INSERT INTO task (project, repo, key, title, state, target_branch, base_commit, spec_dir, created_at, updated_at)
+    VALUES ('P', 'r', 'ABC-1', 'One', 'implementing', 'develop', 'abc', 'specs/ABC-1/', 7, 7)`);
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("SELECT task, role, project, repo, depth, access, base_branch, base_commit, created_at FROM task_repo").all()).toEqual([
+      {
+        task: 1,
+        role: "main",
+        project: "P",
+        repo: "r",
+        depth: 0,
+        access: "edit",
+        base_branch: "develop",
+        base_commit: "abc",
+        created_at: 7,
+      },
+    ]);
+    // task_repo_one: a repository once per task; a submodule without a Bitbucket repository has project NULL.
+    const sub = (project: string | null, repo: string | null) =>
+      db
+        .query(`INSERT INTO task_repo (task, role, project, repo, parent, path, depth, access, created_at)
+          VALUES (1, 'submodule', $project, $repo, 1, 'x', 1, 'none', 1)`)
+        .run({ project, repo });
+    expect(() => sub("P", "r")).toThrow(/UNIQUE/);
+    sub(null, null);
+    sub(null, null);
+    expect(() => db.run("INSERT INTO task_repo (task, role, depth, access, created_at) VALUES (1, 'other', 0, 'edit', 1)")).toThrow(
+      /CHECK/,
+    );
+    expect(() => db.run("INSERT INTO task_repo (task, role, depth, access, created_at) VALUES (1, 'added', 0, 'write', 1)")).toThrow(
+      /CHECK/,
+    );
+    db.run(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+      VALUES (1, 1, 'single', 'One', 'b', 'develop', 'implementing', 1, 1)`);
+    const pr = (state: string) =>
+      db
+        .query(`INSERT INTO task_pr (part, task_repo, branch, base_branch, base_commit, state) VALUES (1, 2, 'b', 'main', 'c', $state)`)
+        .run({ state });
+    expect(() => pr("open")).toThrow(/CHECK/);
+    pr("changed");
+    expect(() => pr("changed")).toThrow(/UNIQUE/);
+    // A removed task removes its repositories and their PR rows.
+    db.run("DELETE FROM task WHERE id = 1");
+    expect(db.query("SELECT (SELECT COUNT(*) FROM task_repo) + (SELECT COUNT(*) FROM task_pr) AS n").get()).toEqual({ n: 0 });
   } finally {
     db.close();
   }

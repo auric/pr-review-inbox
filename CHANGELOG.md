@@ -33,6 +33,7 @@
 - "Open the PR" shows the branch, the target, the reviewers, and the line count. Nothing goes to Bitbucket before "Push and open PR". The app pushes only the task branch, never the target branch, and always with a lease, so it never overwrites the push of someone else. It opens one pull request, says which reviewers Bitbucket did not add, and follows the pull request in the inbox.
 - "Close the task" ends a task. Its branch and pull request stay.
 - This version builds small tasks: one pull request with the plan and the code. A medium or large plan waits after its approval.
+- Before the build and before each push, the app checks that the token can push to the repository, that the base branch still exists, and that no branch rule it can read forbids the task branch. A failed check stops the task with one sentence that says what to fix, and Claude starts no step.
 
 ### Ask Claude about a finding
 
