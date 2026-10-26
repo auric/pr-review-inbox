@@ -114,8 +114,10 @@ export function candidate(url: string): { project: string; repo: string } | null
   return NAME.test(project) && NAME.test(repo) ? { project, repo } : null;
 }
 
-// spec.md section 6.16.5: the repository maps only when one of its clone links equals the URL after normalizeUrl.
-export const cloneMatch = (info: RepoInfo, url: string) => info.clone.some((c) => normalizeUrl(c.href) === url);
+// spec.md section 6.16.5: the repository maps only when one of its clone links equals the URL after normalizeUrl, both without one
+// trailing "/" and then one trailing ".git".
+const repoKey = (url: string | null) => url?.replace(/\/$/, "").replace(/\.git$/, "") ?? null;
+export const cloneMatch = (info: RepoInfo, url: string) => info.clone.some((c) => repoKey(normalizeUrl(c.href)) === repoKey(url));
 
 // ---------- Write permission (spec.md section 6.16.7 step 1, Gate G15) ----------
 

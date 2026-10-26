@@ -682,11 +682,12 @@ export function createTaskService(opts: TaskServiceOptions) {
   const stopTask = (db: Database, t: TaskRow, step: number | null, e: Ending) =>
     stopForRun(db, { task: t.id, version: t.version }, step, e, now());
 
-  // The effect after a run end: the next run of the task. A refused start stops the task with the reason.
-  function startNext(db: Database, id: number, next: (t: TaskRow) => TaskRunStart) {
+  // The effect after a run end: the next run of the task. A refused start stops the task with the reason. state: the task state that
+  // the next run belongs to. A Stop between the run end and this effect leaves another state, and no run starts.
+  function startNext(db: Database, id: number, state: TaskRow["state"], next: (t: TaskRow) => TaskRunStart) {
     return () => {
       const t = taskRow(db, id);
-      if (!t) return;
+      if (t?.state !== state || t.blocked_json !== null) return;
       const r = review.taskRun(db, next(t));
       if (r.status !== 202)
         db.transaction(() => {
@@ -772,7 +773,7 @@ export function createTaskService(opts: TaskServiceOptions) {
         const a = advance(d, { task: t.id, version: cur.version }, { type: "ANSWERED" }, {}, now());
         if (a.status !== 200) return undefined;
         patch(d, t.id, a.version, { blocked_json: null }, now());
-        return startNext(d, t.id, (x) => specRun(d, x));
+        return startNext(d, t.id, "spec_draft", (x) => specRun(d, x));
       },
     };
   }

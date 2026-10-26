@@ -1490,7 +1490,7 @@ Constants: BRANCH_MAX = 100 (characters of the whole branch name, with a suffix)
 
 - The New task form names the main repository (task.project, task.repo; task_repo role main).
 - Submodules: at workspace prepare, the app reads the gitlinks (mode 160000) of the base commit with `git ls-tree -r -z <base>` and their URLs with `git config --blob <base>:.gitmodules --null --list`. A relative URL resolves against the parent's http clone URL (git-submodule(1), "relative URL"). The app never runs `git submodule`, never runs hooks, and never reads `.gitmodules` from disk (the sparse checkout hides it).
-- Mapping without guesses: the app takes the last two path segments of the URL as the candidate project key and slug, reads GET /rest/api/1.0/projects/{p}/repos/{r}, and accepts the match only when one of its links.clone hrefs equals the submodule URL after removing user info and lowercasing scheme and host. Same server: the matched http link has the origin of the configured Bitbucket URL.
+- Mapping without guesses: the app takes the last two path segments of the URL as the candidate project key and slug, reads GET /rest/api/1.0/projects/{p}/repos/{r}, and accepts the match only when one of its links.clone hrefs equals the submodule URL after removing user info, lowercasing scheme and host, and removing one trailing "/" and then one trailing ".git" on both sides. The path keeps its case. Same server: the matched http link has the origin of the configured Bitbucket URL.
 - Access per repository (task_repo.access, task_repo.reason):
 
 | Case | Access | Reason shown |

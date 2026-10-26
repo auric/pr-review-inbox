@@ -2047,6 +2047,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       return job?.id === run && job.db === db && cancelActive() ? "cancelled" : "not_running";
     },
 
+    // The task Stop only. cancel() finds no task run, because runRow joins pull_request and a task run has pr NULL.
+    cancelTask(db: Database, task: number): boolean {
+      return job?.pr === null && job.db === db && job.t.task === task && cancelActive();
+    },
+
     // The run that holds the one slot, or null.
     busy: (): RunConflict | null => (job ? busyConflict(job) : null),
 

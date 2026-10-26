@@ -513,7 +513,8 @@ export type StepOutcome = {
 export type StepStart =
   | { status: 202; run: number; done: Promise<void> }
   | { status: 409; conflict: RunConflict }
-  | { status: 409; blocked: TaskBlocked };
+  | { status: 409; blocked: TaskBlocked }
+  | { status: 409; stopped: true };
 
 const deniedText = (p: PathProblem[]) => {
   const names = p.slice(0, 3).map((x) => x.path);
@@ -630,5 +631,14 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       return i.onEnd ? () => i.onEnd?.(outcome) : undefined;
     },
   };
+  // A Stop during the awaits above finds no run to cancel.
+  const cur = taskRow(db, i.task);
+  if (cur?.state !== "implementing" || cur.blocked_json !== null) {
+    const id =
+      i.step ??
+      insertStep(db, { task: i.task, part: i.part.id, kind: i.mode, attempt: i.attempt, item: i.item, state: "cancelled" }, now());
+    endStep(db, id, "cancelled", { notes: ["The build stopped before the step started."] }, now());
+    return { status: 409, stopped: true };
+  }
   return i.review.taskRun(db, start);
 }

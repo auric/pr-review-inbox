@@ -224,7 +224,6 @@ const Q = {
   lines: "UPDATE task_part SET lines = $lines, updated_at = $now WHERE id = $id",
   clone: "SELECT path FROM repo_clone WHERE project = $project AND repo = $repo",
   points: "SELECT id, payload_json FROM review_item WHERE run = $run AND kind = 'finding' ORDER BY id",
-  running: "SELECT id FROM review_run WHERE task = $task AND status = 'running'",
   question: `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, recommended, step, asked_at)
     VALUES ($task, 'loop', (SELECT COALESCE(MAX(round), 0) + 1 FROM task_question WHERE task = $task), 0, $text, $why, $kind, $options,
       $recommended, $step, $now)`,
@@ -703,6 +702,8 @@ export function createLoop(opts: LoopOptions) {
           return undefined;
         },
       };
+      // headOf() awaited: a Stop can come before the run starts.
+      guard(c);
       const s = review.taskRun(c.db, start);
       if (s.status === 409) {
         waiting = await waitSlot(c, { kind: "review", item: "review", attempt }, s.conflict.running, waiting);
@@ -1042,7 +1043,7 @@ export function createLoop(opts: LoopOptions) {
       })();
       if (error) return conflict(db, id, error);
       pauseAsked.delete(id);
-      for (const r of db.query(Q.running).all({ task: id }) as { id: number }[]) review.cancel(db, r.id);
+      review.cancelTask(db, id);
       aborts.get(id)?.abort();
       gates.get(id)?.();
       slotWaits.get(id)?.();

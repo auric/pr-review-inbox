@@ -715,6 +715,53 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
+    "Stop while a Claude step runs cancels its run at once",
+    async () => {
+      const s = await setup({ seq: { "implement:tests": [{ delayMs: 5000, writes: [TEST_FILE] }] } });
+      s.loop.build(s.db, s.task);
+      const running = () => s.db.query("SELECT 1 FROM review_run WHERE task = $t AND status = 'running'").get({ t: s.task }) !== null;
+      await until(running);
+      const t0 = Date.now();
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(Date.now() - t0).toBeLessThan(3000);
+      const runs = s.db.query("SELECT kind, status FROM review_run WHERE task = $t").all({ t: s.task });
+      expect(runs).toEqual([{ kind: "implement", status: "cancelled" }]);
+      expect(s.flow()).toEqual(["commit:plan:ok", "tests:P1:cancelled"]);
+      expect(s.t().state).toBe("stopped");
+    },
+    SLOW,
+  );
+
+  test(
+    "Stop before a Claude step starts its run starts no run",
+    async () => {
+      const s = await setup();
+      // git ls-files --ignored runs in startStep after the guard of the step and before the run starts.
+      const spawn = Bun.spawn;
+      let fired = false;
+      (Bun as { spawn: unknown }).spawn = ((cmd: unknown, o: unknown) => {
+        if (!fired && Array.isArray(cmd) && cmd.includes("ls-files") && cmd.includes("--ignored")) {
+          fired = true;
+          s.loop.stop(s.db, s.task, { version: s.t().version });
+        }
+        return (spawn as (a: unknown, b: unknown) => unknown)(cmd, o);
+      }) as unknown;
+      cleanup.push(() => {
+        (Bun as { spawn: unknown }).spawn = spawn;
+      });
+      await s.build();
+      expect(fired).toBe(true);
+      expect(s.runCalls()).toHaveLength(0);
+      expect(s.db.query("SELECT COUNT(*) AS n FROM review_run WHERE task = $t").get({ t: s.task })).toEqual({ n: 0 });
+      expect(s.flow()).toEqual(["commit:plan:ok", "tests:P1:cancelled"]);
+      expect(JSON.parse((s.steps().at(-1) as Step).detail_json).notes).toEqual(["The build stopped before the step started."]);
+      expect(s.t().state).toBe("stopped");
+    },
+    SLOW,
+  );
+
+  test(
     "AC-B20: a change of a plan file blocks with spec_change; Reject resets the step, and the step runs again",
     async () => {
       const plan = { path: `repo/specs/${KEY}/plan.md`, text: "# Plan: changed\n" };

@@ -16,6 +16,7 @@ import { changedLines } from "../../src/server/tasks/loop";
 import { largeRepoProblem } from "../../src/server/tasks/plan";
 import {
   candidate,
+  cloneMatch,
   hostOf,
   normalizeUrl,
   readGitlinks,
@@ -89,6 +90,19 @@ describe("URLs (git-submodule(1) relative URLs, spec.md section 6.16.5)", () => 
     expect(normalizeUrl("git@host.example.invalid:proj/lib.git")).toBeNull();
     // No trailing slash or .git rewrite: the match stays exact.
     expect(normalizeUrl("https://h.example.invalid/scm/p/r")).not.toBe(normalizeUrl("https://h.example.invalid/scm/p/r.git"));
+  });
+  test("cloneMatch ignores one trailing slash and one trailing .git on both sides; path case and host still count", () => {
+    const info = (href: string) => ({ clone: [{ name: "http", href }] }) as unknown as Parameters<typeof cloneMatch>[0];
+    const url = (u: string) => normalizeUrl(u) as string;
+    const git = info("http://u@H.example.invalid/scm/proj/lib.git");
+    expect(cloneMatch(git, url("http://h.example.invalid/scm/proj/lib.git"))).toBe(true);
+    expect(cloneMatch(git, url("http://h.example.invalid/scm/proj/lib"))).toBe(true);
+    expect(cloneMatch(git, url("http://h.example.invalid/scm/proj/lib/"))).toBe(true);
+    expect(cloneMatch(git, url("http://h.example.invalid/scm/proj/lib.git/"))).toBe(true);
+    expect(cloneMatch(info("http://h.example.invalid/scm/proj/lib/"), url("http://h.example.invalid/scm/proj/lib.git"))).toBe(true);
+    expect(cloneMatch(git, url("http://h.example.invalid/scm/proj/Lib.git"))).toBe(false);
+    expect(cloneMatch(git, url("http://h.example.invalid/scm/proj/lib//"))).toBe(false);
+    expect(cloneMatch(git, url("http://other.example.invalid/scm/proj/lib.git"))).toBe(false);
   });
   test("hostOf reads http, ssh, scp-like, and IPv6 forms", () => {
     expect(hostOf("https://u@Git.Example.Invalid:8443/a/b.git")).toBe("git.example.invalid");

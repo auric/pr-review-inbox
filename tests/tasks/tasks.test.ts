@@ -16,6 +16,7 @@ import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
+import { advance, setBlocked } from "../../src/server/tasks/tasks";
 import type { ApiError, BranchCheckDto, BranchSearchDto, RunConflict, TaskConflict, TaskDto, TaskRowDto } from "../../src/shared/dto";
 import { FAKE_TOKEN, FAKE_USER, key, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
@@ -267,6 +268,70 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       expect(t.blocked).toEqual({ kind: "error", step: t.steps[0]?.id ?? -1, text: "The run was cancelled." });
       expect(t.steps[0]?.state).toBe("cancelled");
       expect(existsSync(join(realpathSync.native(h.dir), "runs", String(run)))).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "Stop during the interview run cancels the run at once",
+    async () => {
+      const h = await setup();
+      await h.connectJira();
+      h.scenario({ hang: true });
+      const a = await h.create();
+      await until(() => h.runCalls().length === 1);
+      const t0 = Date.now();
+      const stop = await h.json<TaskDto>(`/api/tasks/${a.body.id}/stop`, { body: { version: (await h.get(a.body.id)).version } });
+      expect([stop.status, stop.body.state]).toEqual([200, "stopped"]);
+      await h.settle();
+      expect(Date.now() - t0).toBeLessThan(10_000);
+      expect(h.runs(a.body.id).map((r) => [r.kind, r.status])).toEqual([["interview", "cancelled"]]);
+      const t = await h.get(a.body.id);
+      expect([t.state, t.stoppedFrom, t.steps[0]?.state]).toEqual(["stopped", "interview", "cancelled"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "Stop right as the interview run ends starts no spec run",
+    async () => {
+      const h = await setup();
+      await h.connectJira();
+      h.scenario({ interview: { done: true, summary: "S.", questions: [], unknowns: [], coverage: NO_COVERAGE } });
+      // The run end, its finish, and the effect that starts the spec run are one synchronous sequence, so no request can come between
+      // them. The hook applies the state change of Stop right after the outer commit of the finish, before the effect.
+      const tx = h.db.transaction.bind(h.db);
+      let fired = false;
+      let depth = 0;
+      h.db.transaction = ((fn: (...a: unknown[]) => unknown) => {
+        const run = tx(fn);
+        return (...a: unknown[]) => {
+          depth++;
+          let r: unknown;
+          try {
+            r = run(...a);
+          } finally {
+            depth--;
+          }
+          if (depth > 0) return r;
+          const t = h.db.query("SELECT id, version FROM task WHERE state = 'spec_draft'").get() as { id: number; version: number } | null;
+          if (!fired && t) {
+            fired = true;
+            const s = advance(h.db, { task: t.id, version: t.version }, { type: "STOP" }, {}, Date.now());
+            if (s.status === 200) setBlocked(h.db, { task: t.id, version: s.version }, null, Date.now());
+          }
+          return r;
+        };
+      }) as typeof h.db.transaction;
+      cleanup.push(() => {
+        h.db.transaction = tx;
+      });
+      const c = await h.create();
+      await h.settle();
+      expect(fired).toBe(true);
+      expect(h.runs(c.body.id).map((r) => [r.kind, r.status])).toEqual([["interview", "completed"]]);
+      const t = await h.get(c.body.id);
+      expect([t.state, t.stoppedFrom]).toEqual(["stopped", "spec_draft"]);
     },
     SLOW,
   );
