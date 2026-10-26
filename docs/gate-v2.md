@@ -1,6 +1,6 @@
 # Gate v2: CLI and Bitbucket facts for review v2 and task building
 
-This gate records facts that review v2 and the task builder need (docs/plans/review-v2/tasks.md, WP-G0). You run each check on your own machine. B17 to B20 use your Claude Code login. G1 to G7 write to a Bitbucket test repository. G9, G12, and G13 to G17 only read from it.
+This gate records facts that review v2 and the task builder need (docs/plans/review-v2/tasks.md, WP-G0). You run each check on your own machine. B17 to B20 use your Claude Code login. G1 to G7 write to a Bitbucket test repository. G9, G12, and G13 to G18 only read from it.
 
 | Checks | Run before | Script |
 |---|---|---|
@@ -14,6 +14,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | G13, G14 | WP-BR1 merges. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G15 | WP-MR1. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G16, G17 | WP-MR2. Read only. | `scripts/gate/bitbucket-write.ts` |
+| G18 | WP-TU1 merges. Read only. | `scripts/gate/bitbucket-write.ts` |
 
 ## Record the results
 
@@ -153,3 +154,26 @@ G13 to G17 send only GET requests (tasks.md WP-GB, spec.md section 6.16). They n
 | G17 | Reads the newest merged PR (`GET .../pull-requests?state=MERGED&limit=1`) and its activities (`GET .../pull-requests/{id}/activities?limit=50`). | PASS: `properties.mergeCommit.id` or the commit of the MERGED activity is a 40-character commit ID. INFO: neither field is there, so the app uses the fallback sentence of spec.md section 6.16.8. SKIPPED: no merged PR. |
 
 Record G13 to G17 in their "Review v2" rows of integration-check.md. A FAIL of G13 makes the app use `git ls-remote --symref` for the default branch. A FAIL of G14 blocks the base picker of WP-BR2.
+
+## Part G18, read only: the merge result of an open PR
+
+G18 sends only GET requests (tasks.md WP-TU1, spec.md section 6.18.5). It needs no `--authorize-writes` and no `--target`. It needs `--repo` with your test repository. Token, origin rule, and output rules are the same as for G1 to G7. A token with Repository read is enough.
+
+### Before you run
+
+1. Open one PR in the test repository, and make it conflict with its target branch by hand: change the same line in the target branch and in the PR branch.
+2. Open the PR page once, so that Bitbucket checks the merge.
+3. Run the dry run: `bun scripts/gate/bitbucket-write.ts --dry-run --only G18`. It must print `dry run: PASS`.
+
+### Run
+
+- `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G18`
+- The console and `.gate0/bitbucket-write/result.g18.json` hold only status codes, counts, key names, and enum-like values. They never hold a branch name, a repository name, a project key, or a host.
+
+### What the check does
+
+| Check | What it does | PASS |
+|---|---|---|
+| G18 | Reads the open PRs (`GET .../pull-requests?state=OPEN&limit=50`) and records the keys of `properties` and `properties.mergeResult`, and each pair of outcome and current. | Each open PR has `properties.mergeResult` with a string `outcome` and a boolean `current`, and one PR reports `CONFLICTED` with current true. INFO: no PR reports `CONFLICTED`; check the conflicted PR and run again. SKIPPED: no open PR. |
+
+Record G18 in its "Review v2" row of integration-check.md. The app reads outcome `CONFLICTED` with current true as a PR with conflicts (src/shared/task.ts MERGE_CONFLICTED). A different outcome value changes that constant before WP-TU1 merges.

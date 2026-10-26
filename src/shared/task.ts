@@ -4,7 +4,7 @@
 // Build a Jira task (docs/plans/review-v2/spec.md sections 6.2, 6.3, and 6.5): the stored values and the results of the task runs.
 // zod parses the CLI output. The CLI gets z.toJSONSchema(schema, { target: "draft-07" }).
 import { z } from "zod";
-import { coverage } from "./review";
+import { coverage, MAX_QUESTION } from "./review";
 
 export const TASK_STATES = [
   "interview",
@@ -60,6 +60,10 @@ export const STEP_KINDS = [
   "question",
   "spec_change",
   "size",
+  // spec.md section 6.18: Tell Claude, Update from the base branch, and the resolve step of a conflict.
+  "instruct",
+  "update",
+  "resolve",
 ] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
@@ -116,10 +120,17 @@ export const LARGE_REPOS_TEXT = "Needs you: large tasks change one repository fo
 export const CHECK_TIMEOUT_SEC = 600;
 // spec.md section 0: the limits of one Claude step of a part (STEP_TIME, STEP_TURNS), the Claude time of one part (PART_TIME, in
 // minutes), and the output of one command (OUTPUT_TAIL: stored bytes; FAILURE_TAIL: bytes in context/failure.md).
-export const STEP_MODES = ["tests", "implement", "fix"] as const;
+export const STEP_MODES = ["tests", "implement", "fix", "instruct", "resolve"] as const;
 export type StepMode = (typeof STEP_MODES)[number];
 export const STEP_TIME_MS = 20 * 60_000;
-export const STEP_TURNS: Record<StepMode, number> = { tests: 60, implement: 80, fix: 40 };
+export const STEP_TURNS: Record<StepMode, number> = { tests: 60, implement: 80, fix: 40, instruct: 80, resolve: 40 };
+// spec.md section 6.18: the text of "Tell Claude" (MAX_QUESTION of spec.md section 0), the conflict stops of one repository in one
+// update, and the least time between two base checks of one task.
+export const MAX_INSTRUCTION = MAX_QUESTION;
+export const RESOLVE_STOPS = 10;
+export const BASE_CHECK_AGE_MS = 60_000;
+// spec.md section 6.18.5: properties.mergeResult.outcome of a PR with conflicts. Gate G18 has not verified this value.
+export const MERGE_CONFLICTED = "CONFLICTED";
 export const PART_TIME_MIN = 120;
 // spec.md section 6.7, Budgets: "Continue with 60 more min?".
 export const MORE_TIME_MIN = 60;
@@ -224,6 +235,7 @@ export const BLOCKED_KINDS = [
   "push",
   "slot",
   "preflight",
+  "update",
   "error",
 ] as const;
 export type BlockedKind = (typeof BLOCKED_KINDS)[number];
@@ -263,6 +275,34 @@ export const taskSettings = z.object({
 });
 export type TaskSettings = z.infer<typeof taskSettings>;
 
+// spec.md section 6.18.2: an instruct step. blockedBefore: the reason that the task had at the send; a stop or a failure restores it.
+// committed: the step made its commit.
+export const instructDetail = z.object({
+  text: z.string(),
+  part: z.number().int(),
+  blockedBefore: taskBlocked.nullable(),
+  result: z.enum(["done", "no_change", "stopped", "failed"]).nullable().default(null),
+  committed: z.boolean().default(false),
+});
+export type InstructDetail = z.infer<typeof instructDetail>;
+
+const repoHead = z.object({ taskRepo: z.number().int(), head: z.string() });
+// spec.md section 6.18.3: an update step. preHeads: the head, base_commit, and pinned commit of every repository of the part before any
+// git command; an abort and Undo restore them. postHeads: the heads after the update. result: green or red checks, an abort with its
+// reason, or a restart of the app during the update (recovered: the app reset the repositories after that restart).
+export const updateDetail = z.object({
+  repos: z.array(z.object({ taskRepo: z.number().int(), base: z.string(), mode: z.enum(["rebase", "merge"]), newBaseHead: z.string() })),
+  preHeads: z.array(repoHead.extend({ baseCommit: z.string().nullable(), pinned: z.string().nullable() })),
+  postHeads: z.array(repoHead).default([]),
+  stops: z.number().int().default(0),
+  resolved: z.boolean().default(false),
+  result: z.enum(["green", "red", "aborted", "restart"]).nullable().default(null),
+  reason: z.string().nullable().default(null),
+  undone: z.boolean().default(false),
+  recovered: z.boolean().default(false),
+});
+export type UpdateDetail = z.infer<typeof updateDetail>;
+
 // task_step.detail_json. Every key has a default, so an older row still parses.
 export const stepDetail = z.object({
   commands: z
@@ -283,6 +323,16 @@ export const stepDetail = z.object({
   notes: z.array(z.string()).default([]),
   // The checks of the tests step: the new tests must fail before the code exists (spec.md section 6.7, AC-B10).
   expectRed: z.boolean().default(false),
+  // A Claude step: its summary, and needsBase with its reason (spec.md section 6.18.2).
+  summary: z.string().nullable().default(null),
+  needsBase: z.object({ reason: z.string() }).nullable().default(null),
+  // spec.md section 6.18.6.
+  instruct: instructDetail.nullable().default(null),
+  update: updateDetail.nullable().default(null),
+  resolve: z
+    .object({ taskRepo: z.number().int(), paths: z.array(z.string()) })
+    .nullable()
+    .default(null),
 });
 export type StepDetail = z.infer<typeof stepDetail>;
 
@@ -408,6 +458,9 @@ export const implementResult = z.object({
     .nullable()
     .default(null),
   specChange: z.string().max(1000).default("").describe("Why you changed a plan file. Empty when you did not."),
+  // spec.md section 6.18.2.
+  needsBase: z.boolean().default(false).describe("true when the change needs the newest base branch."),
+  needsBaseReason: z.string().max(300).default(""),
   notes: z.array(z.string().max(500)).max(20).default([]),
   coverage,
 });

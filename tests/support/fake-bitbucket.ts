@@ -185,6 +185,9 @@ export function repoWrites(
     author: { user: user(FAKE_USER), role: "AUTHOR", approved: false, status: "UNAPPROVED" },
     reviewers: reviewersOf(body),
     participants: [],
+    // As fixtures/bitbucket/dashboard-pull-requests-page.json records them. A test sets mergeResult.outcome to MERGE_CONFLICTED
+    // (docs/plans/review-v2/spec.md section 6.18.5; Gate G18 has not verified that value).
+    properties: { mergeResult: { outcome: "CLEAN" as string, current: true }, resolvedTaskCount: 0, commentCount: 0, openTaskCount: 0 },
     links: { self: [{ href: `${fake.url}/projects/${project}/repos/${repo}/pull-requests/${id}` }] },
   });
   const prs = new Map<number, ReturnType<typeof newPr>>();

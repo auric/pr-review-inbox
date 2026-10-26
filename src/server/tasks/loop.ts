@@ -8,21 +8,27 @@
 // and the ticks of the plan file tell what is done.
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { initialTransition } from "xstate";
 import { indentBlock, oneLine } from "../../shared/consult";
 import type { TaskAnswersInput } from "../../shared/dto";
 import type { FindingPayload } from "../../shared/review";
 import {
+  BASE_CHECK_AGE_MS,
   FAILURE_TAIL,
   type ImplementResult,
+  type InstructDetail,
   LARGE_REPOS_TEXT,
+  RESOLVE_STOPS,
   type StepMode,
+  stepDetail,
   TASK_STATE_TEXT,
   type TaskBlocked,
   type TaskSize,
   taskBlocked,
   taskSettings,
+  type UpdateDetail,
+  updateDetail,
 } from "../../shared/task";
 import type { Live } from "../live";
 import { log } from "../log";
@@ -35,21 +41,37 @@ import { repoPath } from "../review/validate";
 import { type BranchRemote, type ContextFile, cachePath, longPath, noUrl } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import { CHECK_KINDS, type ChecksResult, checkStep, type Scope } from "./checks";
-import { commitTask, endStep, insertStep, type PathProblem, partBudget, runningStep, type StepOutcome, startStep } from "./implement";
+import {
+  commitTask,
+  endStep,
+  insertStep,
+  type PathProblem,
+  partBudget,
+  patchStep,
+  runningStep,
+  type StepInput,
+  type StepOutcome,
+  startStep,
+  stepDetailOf,
+} from "./implement";
 import { type Answer, answerProblem, type QuestionRow } from "./interview";
 import { partMachine } from "./machine";
 import { type Docs, docNames, type Plan, type PlanPart, type PlanTask, parsePlan, parseTasks, partStepFile, stepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
-import { sourceOf, type TaskRepoRow, taskRepos } from "./repos";
+import { sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
 import {
   advance,
   advancePart,
+  baseCheckOf,
   budgetOf,
+  currentPart,
   docsOf,
+  instructTarget,
   moreTime,
   mustFixPoint,
   openPoints,
   repoSettings,
+  setBaseMoves,
   setBlocked,
   setSettings,
   stepAnswers,
@@ -61,7 +83,28 @@ import {
   taskFilesOf,
   taskRow,
   taskSettingsOf,
+  undoTarget,
+  updateTarget,
+  WORKING,
 } from "./tasks";
+import {
+  type BaseMove,
+  baseIn,
+  checkBase,
+  commitPointer,
+  conflictsFile,
+  continueUpdate,
+  fetchBase,
+  followGitlinks,
+  headsOf,
+  markerLeft,
+  pointerFor,
+  resetToPre,
+  resolveProblems,
+  resolveSnapshot,
+  startUpdate,
+  UpdateAbort,
+} from "./update";
 import {
   branchName,
   firstFree,
@@ -96,6 +139,13 @@ const BUSY = "The build still ends its step. Try again when it ends.";
 
 // The loop stops here: a reason now blocks the task, or the task stopped. The reason is already stored.
 class Halt extends Error {}
+// The run of an instruct or resolve step failed or was cancelled: its driver restores the earlier reason or aborts the update (spec.md
+// section 6.18.7). text: the sentence of the CLI.
+class StepFailed extends Halt {
+  constructor(readonly text: string) {
+    super(text);
+  }
+}
 
 // gitignore(5) pattern rules: a pattern without "/" matches a name at any depth, a "/" at the start or in the middle anchors it to the
 // top folder, and a "/" at the end matches a folder and every path below it.
@@ -189,7 +239,17 @@ export function reviewFailure(points: Point[]): ContextFile {
   return { name: "failure.md", text: out.join("\n") };
 }
 
-type PartRow = { id: number; ord: number; kind: string; title: string; branch: string; base_branch: string; state: string };
+type PartRow = {
+  id: number;
+  ord: number;
+  kind: string;
+  title: string;
+  branch: string;
+  base_branch: string;
+  state: string;
+  head: string | null;
+  pushed: string | null;
+};
 
 type Ctx = {
   db: Database;
@@ -210,10 +270,15 @@ type Ctx = {
   profile: Profile;
   // Every repository of the part folder, main first (spec.md section 6.16.5). One entry for a task with one repository.
   trees: RepoTree[];
+  // build: the build of the part, in state implementing. instruct and update (spec.md section 6.18): one step on a built part, also in
+  // state ready.
+  mode: DriverMode;
 };
 
+type DriverMode = "build" | "instruct" | "update";
+
 const Q = {
-  parts: "SELECT id, ord, kind, title, branch, base_branch, state FROM task_part WHERE task = $task ORDER BY ord",
+  parts: "SELECT id, ord, kind, title, branch, base_branch, state, head, pushed FROM task_part WHERE task = $task ORDER BY ord",
   // pushed: the lease of the first push, the fetched remote head for Continue (spec.md section 6.16.4).
   insertPart: `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, pushed, state, created_at, updated_at)
     VALUES ($task, $ord, $kind, $title, $branch, $base, $pushed, $state, $now, $now) RETURNING id`,
@@ -230,6 +295,20 @@ const Q = {
   openLoop: "SELECT * FROM task_question WHERE task = $task AND source = 'loop' AND answer_json IS NULL ORDER BY id",
   answer: "UPDATE task_question SET answer_json = $answer, answered_at = $now WHERE id = $id AND answer_json IS NULL",
   step: "SELECT id, part, kind, item, state, detail_json FROM task_step WHERE id = $id AND task = $task",
+  rowAttempt: "SELECT attempt FROM task_step WHERE id = $id",
+  stepState: "SELECT state FROM task_step WHERE id = $id",
+  // spec.md section 6.18.2: "I<n>" names the rows of the n-th Tell Claude send; "U<n>" the rows of the n-th update.
+  sends: "SELECT COUNT(*) AS n FROM task_step WHERE task = $task AND kind = $kind",
+  restarts: `SELECT id, part, detail_json FROM task_step WHERE task = $task AND kind = 'update'
+    AND json_extract(detail_json, '$.update.result') = 'restart' AND COALESCE(json_extract(detail_json, '$.update.recovered'), 0) = 0`,
+  restartTasks: `SELECT DISTINCT task FROM task_step WHERE kind = 'update' AND json_extract(detail_json, '$.update.result') = 'restart'
+    AND COALESCE(json_extract(detail_json, '$.update.recovered'), 0) = 0`,
+  baseCommit: "UPDATE task SET base_commit = $base WHERE id = $id",
+  repoBase: "UPDATE task_repo SET base_commit = $base WHERE id = $id",
+  repoPin: "UPDATE task_repo SET pinned = $pinned, base_commit = $base WHERE id = $id",
+  prBase: "UPDATE task_pr SET base_commit = $base, head = $head WHERE part = $part AND task_repo = $repo",
+  prHead: "UPDATE task_pr SET head = $head WHERE part = $part AND task_repo = $repo",
+  partHead: "UPDATE task_part SET head = $head, updated_at = $now WHERE id = $id",
   subLines: "UPDATE task_pr SET lines = $lines WHERE part = $part AND task_repo = $repo",
   subBase: "UPDATE task_repo SET base_commit = $base WHERE id = $id",
   subLease: `INSERT INTO task_pr (part, task_repo, branch, base_branch, base_commit, head, pushed, state)
@@ -264,6 +343,11 @@ export function createLoop(opts: LoopOptions) {
   const gates = new Map<number, () => void>();
   const slotWaits = new Map<number, () => void>();
   const aborts = new Map<number, AbortController>();
+  // spec.md section 6.18: the driver of an instruct step or an update, and its Stop. A Stop of them keeps the task state.
+  const modes = new Map<number, Exclude<DriverMode, "build">>();
+  const stopping = new Set<number>();
+  // The base checks that run in the background, so shutdown() awaits them.
+  const checking = new Map<number, Promise<unknown>>();
   let closing = false;
 
   const changed = (id: number) => live.broadcast("changed", { tasks: [id] });
@@ -280,11 +364,12 @@ export function createLoop(opts: LoopOptions) {
   const parts = (db: Database, id: number) => db.query(Q.parts).all({ task: id }) as PartRow[];
   const building = (db: Database, id: number) => parts(db, id).find((p) => p.state === "implementing") ?? null;
 
-  // Sets the reason while the task builds. block() also ends the driver.
+  // Sets the reason while the task builds, or while an instruct step or an update runs on a built part (spec.md section 6.18). block()
+  // also ends the driver.
   function reason(db: Database, id: number, b: TaskBlocked | null) {
     db.transaction(() => {
       const cur = taskRow(db, id);
-      if (cur?.state === "implementing") setBlocked(db, { task: id, version: cur.version }, b, now());
+      if (cur?.state === "implementing" || cur?.state === "ready") setBlocked(db, { task: id, version: cur.version }, b, now());
     })();
     changed(id);
   }
@@ -292,10 +377,14 @@ export function createLoop(opts: LoopOptions) {
     reason(c.db, c.id, b);
     throw new Halt();
   }
-  // The loop goes on only while the task builds with no reason.
-  function guard(c: Ctx) {
+  // The loop goes on only while the task builds with no reason. An instruct step or an update also runs in state ready.
+  const isLive = (c: Pick<Ctx, "db" | "id" | "mode">) => {
     const t = taskRow(c.db, c.id);
-    if (closing || !t || t.state !== "implementing" || t.blocked_json !== null) throw new Halt();
+    const state = t?.state === "implementing" || (c.mode !== "build" && t?.state === "ready");
+    return !closing && !stopping.has(c.id) && state && t?.blocked_json === null;
+  };
+  function guard(c: Ctx) {
+    if (!isLive(c)) throw new Halt();
   }
 
   const preflightDeps: PreflightDeps = {
@@ -359,7 +448,7 @@ export function createLoop(opts: LoopOptions) {
   // Waits for the run slot (design.md B12). The step row waits too, and the reason says whose run holds the slot.
   async function waitSlot(
     c: Ctx,
-    s: { kind: "tests" | "implement" | "fix" | "review"; item: string; attempt: number },
+    s: { kind: StepMode | "review"; item: string; attempt: number },
     holder: { pr: number | null; kind: string; task?: number },
     waiting: number | null,
   ): Promise<number> {
@@ -393,11 +482,10 @@ export function createLoop(opts: LoopOptions) {
     slotWaits.delete(c.id);
     c.db.transaction(() => {
       const cur = taskRow(c.db, c.id);
-      if (cur?.state === "implementing" && blockedOf(cur)?.kind === "slot")
+      if ((cur?.state === "implementing" || cur?.state === "ready") && blockedOf(cur)?.kind === "slot")
         setBlocked(c.db, { task: c.id, version: cur.version }, null, now());
     })();
-    const t = taskRow(c.db, c.id);
-    if (closing || !t || t.state !== "implementing" || t.blocked_json !== null) {
+    if (!isLive(c)) {
       endStep(c.db, step, "cancelled", { notes: ["The build stopped while the step waited for the run slot."] }, now());
       changed(c.id);
       throw new Halt();
@@ -414,19 +502,27 @@ export function createLoop(opts: LoopOptions) {
     guard(c);
   }
 
-  // One Claude step in the run slot (implement.ts). It returns only a step with a result: a denied path, a failed run, a question, and a
-  // plan change set their reason and halt.
-  async function claude(
+  // One Claude step in the run slot (implement.ts), with its outcome. row: the step row that the route wrote (an instruct or a resolve
+  // step). A run that did not start (a stop, a reason such as the time budget) halts.
+  async function runStep(
     c: Ctx,
     mode: StepMode,
     item: string,
-    o: { allow: string[]; step: (attempt: number) => ContextFile; failure?: ContextFile },
-  ): Promise<StepOutcome & { result: ImplementResult; fresh: string[] }> {
-    let waiting: number | null = null;
+    o: {
+      allow: string[];
+      step: (attempt: number) => ContextFile;
+      failure?: ContextFile;
+      row?: number;
+      instructions?: string;
+      resolveCheck?: StepInput["resolveCheck"];
+    },
+  ): Promise<{ r: StepOutcome | null; before: Set<string> }> {
+    let waiting: number | null = o.row ?? null;
     for (;;) {
       await gate(c);
       guard(c);
-      const attempt = nextAttempt(c, mode, item);
+      const attempt =
+        o.row === undefined ? nextAttempt(c, mode, item) : (c.db.query(Q.rowAttempt).get({ id: o.row }) as { attempt: number }).attempt;
       const before = new Set(await dirty(c.trees));
       const answers = stepAnswers(c.db, c.id);
       // spec.md section 6.17: the task text and the included files as they are at this step.
@@ -452,6 +548,9 @@ export function createLoop(opts: LoopOptions) {
         },
         step: waiting,
         trees: c.trees,
+        instructions: o.instructions,
+        resolveCheck: o.resolveCheck,
+        live: () => isLive(c),
         now,
       });
       if (s.status === 409 && "conflict" in s) {
@@ -462,34 +561,48 @@ export function createLoop(opts: LoopOptions) {
       if (s.status !== 202) throw new Halt();
       await s.done;
       changed(c.id);
-      const r = out as StepOutcome | null;
-      // No result: implement.ts stopped the task, or it set the denied path. No outcome: restart recovery ended the run first.
-      if (!r?.result) throw new Halt();
-      const fresh = r.changed.filter((p) => !before.has(p));
-      const spec = fresh.filter((p) => under(p, c.t.spec_dir));
-      if (spec.length) {
-        const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "spec_change", item, attempt, state: "ok" }, now());
-        endStep(c.db, step, "ok", { specChange: { paths: spec }, notes: r.result.specChange ? [r.result.specChange] : [] }, now());
-        block(c, { kind: "spec_change", step, text: "Needs you: Claude proposes a change to the spec." });
-      }
-      const q = r.result.question;
-      if (q) {
-        c.db.transaction(() => {
-          c.db.query(Q.question).run({
-            task: c.id,
-            text: q.text,
-            why: q.why,
-            kind: q.options.length >= 2 ? "choice" : "text",
-            options: JSON.stringify(q.options.length >= 2 ? q.options : []),
-            recommended: q.options.length >= 2 && q.recommended !== null && q.recommended < q.options.length ? q.recommended : null,
-            step: r.step,
-            now: now(),
-          });
-        })();
-        block(c, { kind: "question", step: r.step, text: `Needs you: Claude asks: ${oneLine(q.text)}` });
-      }
-      return { ...r, result: r.result, fresh };
+      return { r: out as StepOutcome | null, before };
     }
+  }
+
+  // One Claude step that returns only with a result: a denied path, a failed run, a question, and a plan change set their reason and
+  // halt. A failed instruct step throws StepFailed: its driver restores the earlier reason (spec.md section 6.18.7).
+  async function claude(
+    c: Ctx,
+    mode: StepMode,
+    item: string,
+    o: { allow: string[]; step: (attempt: number) => ContextFile; failure?: ContextFile; row?: number; instructions?: string },
+  ): Promise<StepOutcome & { result: ImplementResult; fresh: string[] }> {
+    const { r, before } = await runStep(c, mode, item, o);
+    // No result: implement.ts stopped the task, or it set the denied path. No outcome: restart recovery ended the run first.
+    if (!r?.result) throw r && !r.problems.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
+    const fresh = r.changed.filter((p) => !before.has(p));
+    const spec = fresh.filter((p) => under(p, c.t.spec_dir));
+    if (spec.length) {
+      const attempt = (c.db.query(Q.rowAttempt).get({ id: r.step }) as { attempt: number }).attempt;
+      const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "spec_change", item, attempt, state: "ok" }, now());
+      endStep(c.db, step, "ok", { specChange: { paths: spec }, notes: r.result.specChange ? [r.result.specChange] : [] }, now());
+      block(c, { kind: "spec_change", step, text: "Needs you: Claude proposes a change to the spec." });
+    }
+    const q = r.result.question;
+    if (q) {
+      c.db.transaction(() => {
+        c.db.query(Q.question).run({
+          task: c.id,
+          text: q.text,
+          why: q.why,
+          kind: q.options.length >= 2 ? "choice" : "text",
+          options: JSON.stringify(q.options.length >= 2 ? q.options : []),
+          recommended: q.options.length >= 2 && q.recommended !== null && q.recommended < q.options.length ? q.recommended : null,
+          step: r.step,
+          now: now(),
+        });
+      })();
+      block(c, { kind: "question", step: r.step, text: `Needs you: Claude asks: ${oneLine(q.text)}` });
+    }
+    // spec.md section 6.18.2: needsBase runs the base check at once.
+    if (r.result.needsBase) await refreshBases(c.db, c.id);
+    return { ...r, result: r.result, fresh };
   }
 
   // The approved checks with their step row. A stop kills the commands (AC-B19).
@@ -527,6 +640,16 @@ export function createLoop(opts: LoopOptions) {
 
   // spec.md section 6.1: the changed lines of the part against the line budget. Over it, the part waits for the user's choice.
   async function sizeCheck(c: Ctx) {
+    const n = await countLines(c);
+    if (n.lines <= c.budget || c.keep) return;
+    const text = `Needs you: this PR would have ${n.lines} changed lines, over your ${c.budget} limit.`;
+    const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "size", item: null, state: "failed" }, now());
+    endStep(c.db, step, "failed", { diffStat: n, notes: [text] }, now());
+    block(c, { kind: "size", step, text });
+  }
+
+  // The changed lines of the part and of each changed submodule, stored in task_part.lines and task_pr.lines.
+  async function countLines(c: Ctx): Promise<LineCount> {
     const n = await changedLines(c.wt, c.base, await headOf(c.wt), c.exclude);
     c.db.query(Q.lines).run({ id: c.part.id, lines: n.lines, now: now() });
     // spec.md section 6.16.6, Line budget: the sum over the changed repositories.
@@ -538,11 +661,7 @@ export function createLoop(opts: LoopOptions) {
       n.removed += m.removed;
       n.lines += m.lines;
     }
-    if (n.lines <= c.budget || c.keep) return;
-    const text = `Needs you: this PR would have ${n.lines} changed lines, over your ${c.budget} limit.`;
-    const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "size", item: null, state: "failed" }, now());
-    endStep(c.db, step, "failed", { diffStat: n, notes: [text] }, now());
-    block(c, { kind: "size", step, text });
+    return n;
   }
 
   const deniedText = (p: PathProblem[]) =>
@@ -667,7 +786,7 @@ export function createLoop(opts: LoopOptions) {
         : null;
       const plans = planFiles(c).map((f) => `## ${f.name.slice("spec/".length)}\n\n${f.text}`);
       const goals = c.plan.parts.map((x) => `- Part ${x.n}: ${oneLine(x.title)}. ${oneLine(x.goal)}`);
-      let ended: { step: number; run: number; ok: boolean } | null = null;
+      let ended: { step: number; run: number; ok: boolean; text: string | null } | null = null;
       let step = 0;
       const start: TaskReviewStart = {
         task: c.id,
@@ -701,8 +820,9 @@ export function createLoop(opts: LoopOptions) {
             now(),
           );
           const cur = taskRow(d, c.id);
-          if (!ok && cur) stopForRun(d, { task: c.id, version: cur.version }, step, e, now());
-          ended = { step, run: run.id, ok };
+          // An instruct step or an update restores its own reason (spec.md section 6.18).
+          if (!ok && cur && c.mode === "build") stopForRun(d, { task: c.id, version: cur.version }, step, e, now());
+          ended = { step, run: run.id, ok, text: e.text ?? null };
           return undefined;
         },
       };
@@ -716,7 +836,8 @@ export function createLoop(opts: LoopOptions) {
       changed(c.id);
       await s.done;
       changed(c.id);
-      const r = ended as { step: number; run: number; ok: boolean } | null;
+      const r = ended as { step: number; run: number; ok: boolean; text: string | null } | null;
+      if (r && !r.ok && c.mode !== "build") throw new StepFailed(r.text ?? "The review failed.");
       if (!r?.ok) throw new Halt();
       const points = (c.db.query(Q.points).all({ run: r.run }) as { id: number; payload_json: string }[]).map((x) => ({
         id: x.id,
@@ -837,7 +958,7 @@ export function createLoop(opts: LoopOptions) {
     return openRepoTrees({ dataDir, db, task: t.id, ord: part.ord, branch: part.branch, main: wt, rows });
   }
 
-  async function context(db: Database, t: TaskRow, part: PartRow): Promise<Ctx> {
+  async function context(db: Database, t: TaskRow, part: PartRow, mode: DriverMode = "build"): Promise<Ctx> {
     const docs = docsOf(t);
     if (!docs || !t.base_commit || !t.size) throw new Error("The task has no approved plan.");
     const repo = repoSettings(db, t.project, t.repo);
@@ -871,6 +992,7 @@ export function createLoop(opts: LoopOptions) {
       who: await identity(clone?.path ?? null),
       // AC-B12: the own review runs the finder and the verify phase.
       profile: { ...p, verifier: { ...p.verifier, mode: "on" } },
+      mode,
     };
   }
 
@@ -921,8 +1043,20 @@ export function createLoop(opts: LoopOptions) {
     changed(t.id);
   }
 
+  // The parts that wait for their build, one after another.
+  async function buildParts(db: Database, id: number) {
+    for (;;) {
+      const t = taskRow(db, id);
+      if (closing || !t || t.state !== "implementing" || t.blocked_json !== null) return;
+      const part = building(db, id);
+      if (!part) return;
+      await runPart(db, t, part);
+    }
+  }
+
   async function drive(db: Database, id: number, reset: boolean) {
     try {
+      await recoverUpdates(db, id);
       if (reset) {
         const t = taskRow(db, id);
         const part = building(db, id);
@@ -951,13 +1085,7 @@ export function createLoop(opts: LoopOptions) {
         }
       }
       await ensureParts(db, id);
-      for (;;) {
-        const t = taskRow(db, id);
-        if (closing || !t || t.state !== "implementing" || t.blocked_json !== null) return;
-        const part = building(db, id);
-        if (!part) return;
-        await runPart(db, t, part);
-      }
+      await buildParts(db, id);
     } catch (e) {
       failed(db, id, e);
     }
@@ -1002,13 +1130,418 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
-  // points: the part whose listed points the driver fixes. Absent: the build of the next part.
-  function kick(db: Database, id: number, reset = false, points?: number) {
-    if (drivers.has(id) || closing) return;
-    const p = (points === undefined ? drive(db, id, reset) : drivePoints(db, id, points)).finally(() => {
-      if (drivers.get(id) === p) drivers.delete(id);
+  // One driver per task. mode: an instruct step or an update, whose Stop keeps the task state.
+  function start(id: number, f: () => Promise<void>, mode?: Exclude<DriverMode, "build">) {
+    if (drivers.has(id) || closing) return false;
+    if (mode) modes.set(id, mode);
+    const p = f().finally(() => {
+      if (drivers.get(id) !== p) return;
+      drivers.delete(id);
+      modes.delete(id);
+      stopping.delete(id);
     });
     drivers.set(id, p);
+    return true;
+  }
+
+  // points: the part whose listed points the driver fixes. Absent: the build of the next part.
+  function kick(db: Database, id: number, reset = false, points?: number) {
+    start(id, () => (points === undefined ? drive(db, id, reset) : drivePoints(db, id, points)));
+  }
+
+  // ---------- Tell Claude and Update from the base branch (spec.md section 6.18) ----------
+
+  const itemOf = (db: Database, row: number) =>
+    (db.query("SELECT item FROM task_step WHERE id = $id").get({ id: row }) as { item: string }).item;
+  const lastBefore = (db: Database, part: number, row: number) =>
+    (db.query("SELECT MAX(id) AS id FROM task_step WHERE part = $part AND id < $row").get({ part, row }) as { id: number | null }).id ??
+    row;
+  const isOpen = (db: Database, row: number) => {
+    const s = (db.query(Q.stepState).get({ id: row }) as { state: string } | null)?.state;
+    return s === "waiting" || s === "running";
+  };
+  const firstLine = (text: string) => (text.trim().split(/\r?\n/)[0] ?? "").slice(0, 72).trimEnd();
+  // spec.md section 6.18.3 (Q60): one base names itself; several give "N base branches".
+  const baseLabel = (bases: string[]) => {
+    const u = [...new Set(bases)];
+    return u.length === 1 ? (u[0] as string) : `${u.length} base branches`;
+  };
+  const repoName = (r: { project: string | null; repo: string | null }) => `${r.project}/${r.repo}`;
+  const setReason = (db: Database, id: number, b: TaskBlocked | null) => {
+    const cur = taskRow(db, id);
+    if (cur && (cur.state === "implementing" || cur.state === "ready")) setBlocked(db, { task: id, version: cur.version }, b, now());
+  };
+
+  // spec.md section 6.18.5, Base check of the current part. It stores the counts for the Task view. A failed read keeps the last
+  // result.
+  async function refreshBases(db: Database, id: number): Promise<BaseMove[]> {
+    const t = taskRow(db, id);
+    const part = t && (t.state === "implementing" || t.state === "ready") ? currentPart(db, t) : null;
+    if (!t || !part) return [];
+    const out: BaseMove[] = [];
+    try {
+      for (const r of updateRepos(db, t, part)) out.push(await checkBase(dataDir, id, r, await review.taskRemote(r.project, r.repo)));
+    } catch (e) {
+      log(`Task ${id}: the base check failed: ${noUrl((e as Error).message)}`);
+      return out;
+    }
+    setBaseMoves(
+      db,
+      id,
+      out.map((m) => ({ taskRepo: m.taskRepo, newCommits: m.newCommits })),
+      now(),
+    );
+    changed(id);
+    return out;
+  }
+
+  // spec.md section 6.18.4, Restart: an update that ran at the last stop (recoverTasks marked it). In each repository its rebase or merge
+  // is aborted, and the repository goes back to its head before the update.
+  async function recoverUpdates(db: Database, id: number) {
+    const t = taskRow(db, id);
+    for (const s of db.query(Q.restarts).all({ task: id }) as { id: number; part: number | null; detail_json: string }[]) {
+      const d = stepDetail.parse(JSON.parse(s.detail_json)).update;
+      const part = parts(db, id).find((p) => p.id === s.part);
+      if (d && part && t?.base_commit) {
+        const wt = await openWorktree({
+          dataDir,
+          db,
+          project: t.project,
+          repo: t.repo,
+          task: id,
+          ord: part.ord,
+          branch: part.branch,
+          base: t.base_commit,
+        });
+        await resetToPre(await trees(db, t, part, wt), d.preHeads);
+        log(`Task ${id}: the update of step ${s.id} stopped at a restart. The repositories are back at their heads before it.`);
+      }
+      if (d) patchStep(db, s.id, { update: { ...d, recovered: true } });
+    }
+  }
+
+  // spec.md sections 6.18.1 and 6.18.2: one Tell Claude send. row: its instruct step, which the route wrote. The step gets the path
+  // check, the checks with their fixes, one commit, the size check, and the own review, as any implement step. The app never reads the
+  // text: it goes to Claude as "Your instructions" only.
+  async function driveInstruct(db: Database, id: number, row: number) {
+    const info = stepDetailOf(db, row).instruct as InstructDetail;
+    let c: Ctx | null = null;
+    try {
+      await recoverUpdates(db, id);
+      const t = taskRow(db, id) as TaskRow;
+      const part = parts(db, id).find((p) => p.id === info.part) as PartRow;
+      c = await context(db, t, part, "instruct");
+      const ctx = c;
+      // Changes that an earlier stop or the red checks of the build left go to a patch first.
+      await undo(c.trees, db, id, lastBefore(db, part.id, row));
+      refreshPlan(c);
+      const item = itemOf(db, row);
+      const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((k) => k.files));
+      const step = (a: number) => partStepFile(ctx.plan, ctx.plan.parts, "instruct", a);
+      const r = await claude(c, "instruct", item, { allow, step, row, instructions: info.text });
+      if (!r.changed.length) {
+        // Step 2: Claude changed no file. No check, commit, or review runs, and the task waits as before the send.
+        patchStep(db, row, { instruct: { ...info, result: "no_change" } });
+        reason(db, id, info.blockedBefore);
+        return;
+      }
+      await greenOrFix(c, item, allow, step);
+      await commit(c, item, `${t.key}: ${firstLine(info.text)}`, allow);
+      if (part.state === "implementing") {
+        // The part of a build that waited: the build goes on from the new commit and ends with the checks and the own review.
+        patchStep(db, row, { instruct: { ...info, result: "done", committed: true } });
+        await buildParts(db, id);
+        return;
+      }
+      await ownReview(c);
+      patchStep(db, row, { instruct: { ...info, result: "done", committed: true } });
+      changed(id);
+      await refreshBases(db, id);
+    } catch (e) {
+      await endInstruct(db, id, row, info, c, e);
+    }
+  }
+
+  // The end of a send that did not finish. A Stop or a failed run (spec.md sections 6.18.1 and 6.18.7) resets every repository to its
+  // last commit with the patch saved, and restores the reason that the task had before the send. A new reason of the step (a question,
+  // red checks, a plan change, the line limit, a review blocker, a denied path) stays.
+  async function endInstruct(db: Database, id: number, row: number, info: InstructDetail, c: Ctx | null, e: unknown) {
+    const stopped = stopping.has(id);
+    if (!stopped && !(e instanceof StepFailed)) {
+      if (isOpen(db, row)) endStep(db, row, "cancelled", { notes: ["The step did not start."] }, now());
+      failed(db, id, e);
+      changed(id);
+      return;
+    }
+    try {
+      if (c) await undo(c.trees, db, id, row);
+    } catch (err) {
+      failed(db, id, err);
+      return;
+    }
+    const committed = db.query(Q.committed).get({ part: info.part, item: itemOf(db, row) }) !== null;
+    const text = stopped
+      ? committed
+        ? "Stopped after the commit. The own review did not run."
+        : "Stopped. Your instructions changed nothing. The text is back in the box."
+      : `Failed: ${(e as StepFailed).text}`;
+    db.transaction(() => {
+      if (isOpen(db, row)) endStep(db, row, "cancelled", {}, now());
+      const d = stepDetailOf(db, row);
+      patchStep(db, row, { instruct: { ...info, result: stopped ? "stopped" : "failed", committed }, notes: [...d.notes, text] });
+      setReason(db, id, info.blockedBefore);
+    })();
+    changed(id);
+  }
+
+  // spec.md sections 6.18.3 and 6.18.4: one update of a built part. row: its update step, which the route wrote. Each repository takes
+  // its own picked base, deepest first: a rebase before the first push, else a merge. A conflict goes to a resolve step. Any failure
+  // before the checks aborts the update in every repository.
+  async function driveUpdate(db: Database, id: number, partId: number, row: number) {
+    let c: Ctx | null = null;
+    let pre: UpdateDetail["preHeads"] | null = null;
+    let phase: "git" | "checks" | "review" = "git";
+    let label = taskRow(db, id)?.target_branch ?? "";
+    try {
+      await recoverUpdates(db, id);
+      const t = taskRow(db, id) as TaskRow;
+      let part = parts(db, id).find((p) => p.id === partId) as PartRow;
+      c = await context(db, t, part, "update");
+      const ctx = c;
+      await undo(c.trees, db, id, lastBefore(db, part.id, row));
+      refreshPlan(c);
+      if (!c.who) throw new UpdateAbort("set user.name and user.email in your git config");
+      const who = c.who;
+      const repos = updateRepos(db, t, part);
+      const changedIds = new Set(repos.filter((r) => r.row.role !== "main").map((r) => r.row.id));
+      label = baseLabel(repos.map((r) => r.base));
+      // Step 1: the heads of every repository before any git command that changes one.
+      pre = await headsOf(c.trees, t.base_commit);
+      patchStep(db, row, { update: updateDetail.parse({ repos: [], preHeads: pre }) });
+      // Step 2: the fetched head of each base. A PR that Bitbucket reports with conflicts takes the update too.
+      const conflicted = new Set(
+        taskDto(db, t)
+          .bases.filter((b) => b.conflicted)
+          .map((b) => b.taskRepo),
+      );
+      const plan = new Map<number, { newBaseHead: string; mode: "rebase" | "merge" }>();
+      for (const r of repos) {
+        guard(ctx);
+        const head = await fetchBase(dataDir, id, r, await review.taskRemote(r.project, r.repo));
+        if ((head !== r.baseCommit && !(await baseIn(dataDir, r, head))) || conflicted.has(r.row.id))
+          plan.set(r.row.id, { newBaseHead: head, mode: r.published ? "merge" : "rebase" });
+      }
+      if (!plan.size) throw new UpdateAbort(`${label} has no new commits`);
+      label = baseLabel(repos.filter((r) => plan.has(r.row.id)).map((r) => r.base));
+      patchStep(db, row, {
+        update: updateDetail.parse({
+          repos: repos.flatMap((r) => {
+            const p = plan.get(r.row.id);
+            return p ? [{ taskRepo: r.row.id, base: r.base, ...p }] : [];
+          }),
+          preHeads: pre,
+        }),
+      });
+      let stops = 0;
+      let resolved = false;
+      for (const r of repos) {
+        const tree = ctx.trees.find((x) => x.row.id === r.row.id);
+        if (!tree?.wt) throw new UpdateAbort(`${repoName(r)} has no worktree`);
+        const wt = tree.wt;
+        const p = plan.get(r.row.id);
+        if (p) {
+          guard(ctx);
+          const o = { ...p, baseCommit: r.baseCommit, key: t.key, base: r.base, full: tree.full };
+          let stop = await startUpdate(wt, o, who);
+          let n = 0;
+          while (stop) {
+            guard(ctx);
+            if (++n > RESOLVE_STOPS) throw new UpdateAbort(`more than ${RESOLVE_STOPS} conflict stops in ${repoName(r)}`);
+            const links = new Map<string, string>();
+            for (const g of stop.gitlinks) {
+              const kid = ctx.trees.find((x) => x.row.parent === tree.row.id && x.row.path === g);
+              if (!kid?.wt) throw new UpdateAbort(`The update changes ${tree.full ? `${tree.full}/${g}` : g}, which the task cannot edit`);
+              const parent = { wt, name: repoName(r), base: r.base, newBaseHead: p.newBaseHead };
+              links.set(
+                g,
+                await pointerFor(dataDir, parent, { path: g, name: repoName(kid.row), cache: kid.wt.cache, head: await headOf(kid.wt) }),
+              );
+            }
+            if (stop.files.length) {
+              await resolveConflicts(ctx, tree, r, p, stop.files, row);
+              resolved = true;
+            }
+            stop = await continueUpdate(wt, p.mode, tree.full, stop.files, links, who);
+          }
+          stops += n;
+          patchStep(db, row, { update: { ...(stepDetailOf(db, row).update as UpdateDetail), stops, resolved } });
+        }
+        // spec.md section 6.18.3, Pointer: the gitlink of each changed submodule moves to its updated head.
+        for (const kid of ctx.trees.filter((x) => x.row.parent === tree.row.id && changedIds.has(x.row.id) && x.wt && x.row.path))
+          await commitPointer(
+            wt,
+            kid.row.path as string,
+            await headOf(kid.wt as Worktree),
+            `${t.key}: point ${kid.row.path} at the updated task branch`,
+            who,
+          );
+      }
+      const followed = await followGitlinks(dataDir, id, ctx.trees, changedIds, (project, repo) => review.taskRemote(project, repo));
+      const post = (await headsOf(ctx.trees, null)).map(({ taskRepo, head }) => ({ taskRepo, head }));
+      // Step 5: base_commit moves to the new base head, and the heads move to the new commits.
+      db.transaction(() => {
+        for (const r of repos) {
+          const p = plan.get(r.row.id);
+          const head = post.find((h) => h.taskRepo === r.row.id)?.head as string;
+          if (r.row.role === "main") {
+            if (p) db.query(Q.baseCommit).run({ id, base: p.newBaseHead });
+            if (p && r.row.id) db.query(Q.repoBase).run({ id: r.row.id, base: p.newBaseHead });
+            db.query(Q.partHead).run({ id: part.id, head, now: now() });
+          } else {
+            if (p) db.query(Q.repoBase).run({ id: r.row.id, base: p.newBaseHead });
+            db.query(Q.prBase).run({ part: part.id, repo: r.row.id, base: p?.newBaseHead ?? r.baseCommit, head });
+          }
+        }
+        for (const f of followed) db.query(Q.repoPin).run({ id: f.row.id, pinned: f.commit, base: f.commit });
+        patchStep(db, row, { update: { ...(stepDetailOf(db, row).update as UpdateDetail), postHeads: post, stops, resolved } });
+      })();
+      phase = "checks";
+      part = parts(db, id).find((x) => x.id === partId) as PartRow;
+      c = await context(db, taskRow(db, id) as TaskRow, part, "update");
+      await countLines(c);
+      // spec.md section 6.18.3, Checks (Q56): red keeps the update and waits for the user. No fix step runs.
+      const k = await checks(c, itemOf(db, row));
+      db.transaction(() => {
+        endStep(db, row, "ok", {}, now());
+        patchStep(db, row, { update: { ...(stepDetailOf(db, row).update as UpdateDetail), result: k.green ? "green" : "red" } });
+        if (!k.green) setReason(db, id, { kind: "red", step: k.step, text: `Needs you: the tests fail after the update from ${label}.` });
+      })();
+      changed(id);
+      // Q57: Claude wrote code in a resolve step, so the own review runs.
+      phase = "review";
+      if (k.green && resolved) await ownReview(c);
+      await refreshBases(db, id);
+    } catch (e) {
+      await endUpdate(db, id, row, c, pre, label, phase, e);
+    }
+  }
+
+  // One resolve step (spec.md section 6.18.4): context/conflicts.md, the path check against the unmerged paths of this stop, and the
+  // marker check. Its changes go to patches/<step>.patch. A question, a changed path without a conflict, a remaining marker, or a failed
+  // run aborts the update.
+  async function resolveConflicts(
+    c: Ctx,
+    tree: RepoTree,
+    r: UpdateRepo,
+    p: { newBaseHead: string; mode: "rebase" | "merge" },
+    paths: string[],
+    row: number,
+  ) {
+    const wt = tree.wt as Worktree;
+    const item = itemOf(c.db, row);
+    const at = (x: string) => (tree.full ? `${tree.full}/${x}` : x);
+    const rrow = insertStep(
+      c.db,
+      { task: c.id, part: c.part.id, kind: "resolve", item, attempt: nextAttempt(c, "resolve", item), state: "waiting" },
+      now(),
+    );
+    patchStep(c.db, rrow, { resolve: { taskRepo: tree.row.id, paths } });
+    const file = conflictsFile({ name: repoName(r), full: tree.full, base: r.base, newBaseHead: p.newBaseHead, mode: p.mode, paths });
+    const before = await resolveSnapshot(c.trees, tree);
+    const { r: out } = await runStep(c, "resolve", item, {
+      allow: [],
+      step: (a) => partStepFile(c.plan, c.plan.parts, "resolve", a),
+      failure: file,
+      row: rrow,
+      resolveCheck: (context, ignored) => resolveProblems(c.trees, tree, paths, before, context, ignored),
+    });
+    if (out) {
+      const saved = await savePatch(wt, patchFile(dataDir, c.db, c.id, rrow), paths, true).catch(() => null);
+      if (saved) patchStep(c.db, rrow, { patch: basename(saved) });
+    }
+    if (!out) throw new Halt();
+    if (!out.result) {
+      const bad = out.problems[0];
+      if (bad) throw new UpdateAbort(`Claude changed ${bad.path}, which has no conflict`);
+      throw new StepFailed(out.text ?? "The resolve step failed.");
+    }
+    const q = out.result.question;
+    if (q) throw new UpdateAbort(`Claude could not resolve ${at(paths[0] as string)}: ${oneLine(q.text).replace(/\.$/, "")}`);
+    const left = await markerLeft(wt, paths);
+    if (left) throw new UpdateAbort(`conflict markers remain in ${at(left)}`);
+  }
+
+  // Resets every repository to its head before the update and restores the base, head, and pinned commits of the rows.
+  async function restoreUpdate(db: Database, c: Ctx, pre: UpdateDetail["preHeads"]) {
+    await resetToPre(c.trees, pre);
+    db.transaction(() => {
+      for (const h of pre) {
+        const tree = c.trees.find((x) => x.row.id === h.taskRepo);
+        if (!tree) continue;
+        if (tree.row.role === "main") {
+          if (h.baseCommit) db.query(Q.baseCommit).run({ id: c.id, base: h.baseCommit });
+          if (h.taskRepo && h.baseCommit) db.query(Q.repoBase).run({ id: h.taskRepo, base: h.baseCommit });
+          db.query(Q.partHead).run({ id: c.part.id, head: h.head, now: now() });
+        } else {
+          db.query(Q.repoPin).run({ id: h.taskRepo, pinned: h.pinned, base: h.baseCommit });
+          db.query(Q.prHead).run({ part: c.part.id, repo: h.taskRepo, head: h.head });
+          if (h.baseCommit) db.query(Q.prBase).run({ part: c.part.id, repo: h.taskRepo, base: h.baseCommit, head: h.head });
+        }
+      }
+    })();
+  }
+
+  // The end of an update that did not finish (spec.md section 6.18.4, Abort). Before the checks, and on a Stop during the checks, every
+  // repository goes back to its head before the update, and the reason "update" says why. A reason of the own review after a resolve
+  // step stays.
+  async function endUpdate(
+    db: Database,
+    id: number,
+    row: number,
+    c: Ctx | null,
+    pre: UpdateDetail["preHeads"] | null,
+    label: string,
+    phase: "git" | "checks" | "review",
+    e: unknown,
+  ) {
+    const stopped = stopping.has(id);
+    if (phase === "review") {
+      if (!(e instanceof Halt) || (!stopped && !(e instanceof StepFailed))) failed(db, id, e);
+      changed(id);
+      return;
+    }
+    const why = (
+      e instanceof UpdateAbort
+        ? e.message
+        : stopped
+          ? "you stopped it"
+          : e instanceof StepFailed
+            ? e.text
+            : e instanceof Halt
+              ? (blockedOf(taskRow(db, id) as TaskRow)?.text ?? "the update could not go on")
+              : `the app could not update: ${noUrl((e as Error).message)}`
+    ).replace(/\.$/, "");
+    try {
+      if (c && pre) {
+        if (phase === "checks") await restoreUpdate(db, c, pre);
+        else await resetToPre(c.trees, pre);
+      }
+    } catch (err) {
+      if (isOpen(db, row)) endStep(db, row, "failed", { notes: [why] }, now());
+      failed(db, id, err);
+      return;
+    }
+    db.transaction(() => {
+      if (isOpen(db, row)) endStep(db, row, "failed", { notes: [why] }, now());
+      const d = stepDetailOf(db, row).update;
+      if (d) patchStep(db, row, { update: { ...d, result: "aborted", reason: why } });
+      const end = /[?!]$/.test(why) ? "" : ".";
+      setReason(db, id, { kind: "update", step: row, text: `The update from ${label} stopped: ${why}${end} The branch is as it was.` });
+    })();
+    const t = taskRow(db, id);
+    const part = c && parts(db, id).find((p) => p.id === c.part.id);
+    if (phase === "checks" && t && part) await countLines(await context(db, t, part, "update")).catch(() => undefined);
+    changed(id);
   }
 
   // The checks of a mutation: the task and its version.
@@ -1039,6 +1572,17 @@ export function createLoop(opts: LoopOptions) {
     stop(db: Database, id: number, input: { version: number }): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
+      // spec.md section 6.18.1 (Q61) and section 6.18.4: a Stop of an instruct step or an update keeps the task state. Its driver resets
+      // the repositories and restores the reason.
+      if (modes.has(id)) {
+        stopping.add(id);
+        review.cancelTask(db, id);
+        aborts.get(id)?.abort();
+        gates.get(id)?.();
+        slotWaits.get(id)?.();
+        changed(id);
+        return { status: 200, task: dto(db, id) };
+      }
       const error = db.transaction((): string | null => {
         const r = advance(db, { task: id, version: t.version }, { type: "STOP" }, {}, now());
         if (r.status !== 200) return r.error;
@@ -1118,7 +1662,12 @@ export function createLoop(opts: LoopOptions) {
         if (problem) return { status: 400, error: problem };
       }
       if (drivers.has(id)) return conflict(db, id, BUSY);
-      db.transaction(() => {
+      // The question of an instruct step: the send runs again from the last commit with the answer in context/answers.md (spec.md
+      // section 6.18.2).
+      const asked = open[0]?.step
+        ? (db.query(Q.step).get({ id: open[0].step, task: id }) as { kind: string; item: string | null } | null)
+        : null;
+      const again = db.transaction((): number | null => {
         const at = now();
         for (const q of open) {
           const a = given.get(q.id);
@@ -1128,8 +1677,15 @@ export function createLoop(opts: LoopOptions) {
           db.query(Q.answer).run({ id: q.id, answer: JSON.stringify(answer), now: at });
         }
         setBlocked(db, { task: id, version: t.version }, null, at);
+        const info = asked?.kind === "instruct" && open[0]?.step ? stepDetailOf(db, open[0].step).instruct : null;
+        if (!info || !asked?.item) return null;
+        const attempt = (db.query(Q.attempt).get({ part: info.part, kind: "instruct", item: asked.item }) as { n: number }).n;
+        const row = insertStep(db, { task: id, part: info.part, kind: "instruct", item: asked.item, attempt, state: "waiting" }, at);
+        patchStep(db, row, { instruct: { ...info, result: null, committed: false } });
+        return row;
       })();
-      kick(db, id, true);
+      if (again === null) kick(db, id, true);
+      else start(id, () => driveInstruct(db, id, again), "instruct");
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -1173,7 +1729,8 @@ export function createLoop(opts: LoopOptions) {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
       const b = blockedOf(t);
-      if (t.state !== "implementing" || b?.kind !== "spec_change" || b.step !== stepId)
+      // An instruct step on a part with an open PR waits in state ready (spec.md section 6.18.2).
+      if ((t.state !== "implementing" && t.state !== "ready") || b?.kind !== "spec_change" || b.step !== stepId)
         return conflict(db, id, "No change to the spec waits for this step.");
       if (drivers.has(id)) return conflict(db, id, BUSY);
       const row = db.query(Q.step).get({ id: stepId, task: id }) as { part: number; item: string | null; detail_json: string } | null;
@@ -1182,6 +1739,14 @@ export function createLoop(opts: LoopOptions) {
       const detail = JSON.parse(row.detail_json) as { specChange?: { paths: string[] } | null; notes?: string[] };
       const note = (s: string) => ({ specChange: detail.specChange ?? null, notes: [...(detail.notes ?? []), s] });
       if (!input.accept) {
+        // The build resets a part that it builds. A built part goes back to its last commit here.
+        if (part.state !== "implementing")
+          try {
+            const c = await context(db, t, part, "instruct");
+            await undo(c.trees, db, id, stepId);
+          } catch (e) {
+            return conflict(db, id, `The app could not reset the step: ${noUrl((e as Error).message)}`);
+          }
         db.transaction(() => {
           endStep(db, stepId, "cancelled", note("The user rejected the change."), now());
           setBlocked(db, { task: id, version: t.version }, null, now());
@@ -1233,6 +1798,126 @@ export function createLoop(opts: LoopOptions) {
       return { status: 200, task: dto(db, id) };
     },
 
+    // POST /api/tasks/:id/instructions (spec.md section 6.18.2): one send starts exactly one instruct step. The text goes to Claude only.
+    instruct(db: Database, id: number, input: { version: number; part?: number; text: string }): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      if (drivers.has(id)) return conflict(db, id, WORKING);
+      const target = instructTarget(db, t, input.part);
+      if ("error" in target) return conflict(db, id, target.error);
+      const part = target.part;
+      const row = db.transaction(() => {
+        const n = (db.query(Q.sends).get({ task: id, kind: "instruct" }) as { n: number }).n + 1;
+        const r = insertStep(db, { task: id, part: part.id, kind: "instruct", item: `I${n}`, state: "waiting" }, now());
+        patchStep(db, r, { instruct: { text: input.text, part: part.id, blockedBefore: blockedOf(t), result: null, committed: false } });
+        // The version moves, so a second tab gets 409 with the current task (spec.md section 6.18.7).
+        setBlocked(db, { task: id, version: t.version }, null, now());
+        return r;
+      })();
+      start(id, () => driveInstruct(db, id, row), "instruct");
+      changed(id);
+      return { status: 202, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/update (spec.md section 6.18.6): 409 when no base moved and no PR reports conflicts.
+    async update(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      if (drivers.has(id)) return conflict(db, id, WORKING);
+      // A base check of the Task view fetches into the same refs: the update waits for it.
+      await checking.get(id);
+      const target = updateTarget(db, t, partId);
+      if ("error" in target) return conflict(db, id, target.error);
+      const moves = await refreshBases(db, id);
+      const cur = taskRow(db, id) as TaskRow;
+      const bases = taskDto(db, cur).bases;
+      if (!moves.some((m) => m.newCommits > 0) && !bases.some((b) => b.conflicted)) {
+        const names = [...new Set(bases.map((b) => b.branch))];
+        return conflict(db, id, names.length === 1 ? `${names[0]} has no new commits.` : "The base branches have no new commits.");
+      }
+      const again = load(db, id, cur.version);
+      if ("status" in again) return again;
+      if (drivers.has(id)) return conflict(db, id, WORKING);
+      const ready = updateTarget(db, again, partId);
+      if ("error" in ready) return conflict(db, id, ready.error);
+      const row = db.transaction(() => {
+        const n = (db.query(Q.sends).get({ task: id, kind: "update" }) as { n: number }).n + 1;
+        const r = insertStep(db, { task: id, part: partId, kind: "update", item: `U${n}`, state: "running" }, now());
+        setBlocked(db, { task: id, version: again.version }, null, now());
+        return r;
+      })();
+      start(id, () => driveUpdate(db, id, partId, row), "update");
+      changed(id);
+      return { status: 202, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/update/undo (spec.md section 6.18.3, Checks): every repository goes back to its head before the
+    // update, and base_commit comes back. 409 after the next push.
+    async undoUpdate(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      if (drivers.has(id)) return conflict(db, id, WORKING);
+      const u = undoTarget(db, t, partId);
+      if ("error" in u) return conflict(db, id, u.error);
+      const work = (async (): Promise<string | null> => {
+        const part = parts(db, id).find((p) => p.id === u.part.id) as PartRow;
+        const c = await context(db, t, part, "update");
+        for (const h of u.detail.postHeads) {
+          const tree = c.trees.find((x) => x.row.id === h.taskRepo);
+          if (tree?.wt && (await headOf(tree.wt)) !== h.head) return "The branch changed after the update.";
+        }
+        await restoreUpdate(db, c, u.detail.preHeads);
+        db.transaction(() => {
+          patchStep(db, u.step, { update: { ...u.detail, undone: true } });
+          const cur = taskRow(db, id) as TaskRow;
+          setBlocked(db, { task: id, version: cur.version }, null, now());
+        })();
+        await countLines(await context(db, taskRow(db, id) as TaskRow, part, "update"));
+        return null;
+      })();
+      const held = work.then(
+        () => undefined,
+        () => undefined,
+      );
+      drivers.set(id, held);
+      try {
+        const error = await work;
+        if (error) return conflict(db, id, error);
+      } catch (e) {
+        return conflict(db, id, `The app could not undo the update: ${noUrl((e as Error).message)}`);
+      } finally {
+        if (drivers.get(id) === held) drivers.delete(id);
+        changed(id);
+      }
+      return { status: 200, task: dto(db, id) };
+    },
+
+    // GET /api/tasks/:id (spec.md section 6.18.5): a base check in the background, at most once per BASE_CHECK_AGE per task.
+    baseCheck(db: Database, id: number) {
+      const last = baseCheckOf(db, id);
+      const t = taskRow(db, id);
+      if (closing || checking.has(id) || drivers.has(id) || (last && now() - last.at < BASE_CHECK_AGE_MS)) return;
+      if (!t || (t.state !== "implementing" && t.state !== "ready")) return;
+      setBaseMoves(db, id, last?.moves ?? [], now());
+      const p = refreshBases(db, id)
+        .catch((e) => log(`Task ${id}: the base check failed: ${noUrl((e as Error).message)}`))
+        .finally(() => checking.delete(id));
+      checking.set(id, p);
+    },
+
+    // The first open of the database: the updates that a restart stopped (spec.md section 6.18.4, Restart).
+    recover(db: Database) {
+      for (const { task } of db.query(Q.restartTasks).all() as { task: number }[])
+        start(task, async () => {
+          try {
+            await recoverUpdates(db, task);
+          } catch (e) {
+            log(`Task ${task}: could not reset the update that a restart stopped: ${noUrl((e as Error).message)}`);
+          }
+          changed(task);
+        });
+    },
+
     // Resolves when the build of the task waits or ends.
     idle(id: number): Promise<void> {
       return drivers.get(id) ?? Promise.resolve();
@@ -1246,7 +1931,7 @@ export function createLoop(opts: LoopOptions) {
       for (const a of aborts.values()) a.abort();
       for (const g of gates.values()) g();
       for (const w of slotWaits.values()) w();
-      await Promise.all([...drivers.values()]);
+      await Promise.all([...drivers.values(), ...checking.values()]);
     },
   };
 }

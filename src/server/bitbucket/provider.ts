@@ -218,6 +218,7 @@ export function createBitbucketProvider(opts: ClientOptions) {
       targetBranchUrl: branchUrl(repoUrl, p.toRef.id),
       authorUrl: own(p.author.user.links?.self?.[0]?.href),
       updatedDate: p.updatedDate,
+      mergeResult: p.properties?.mergeResult,
     };
   }
 

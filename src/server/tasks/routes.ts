@@ -27,6 +27,7 @@ import {
   taskBaseInput,
   taskCreateInput,
   taskDocInput,
+  taskInstructionsInput,
   taskIssueInput,
   taskLimitInput,
   taskListInput,
@@ -35,6 +36,7 @@ import {
   taskSizeInput,
   taskVersionInput,
 } from "../../shared/dto";
+import { MAX_INSTRUCTION } from "../../shared/task";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { ReviewJobs } from "../review/jobs";
@@ -97,8 +99,21 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
     working: loop.running,
     syncNow: () => void opts.sync?.syncNow().catch((e) => log(`The sync after a task PR failed: ${noUrl((e as Error).message)}`)),
   });
-  // TaskDto.working comes from the loop, which only this layer knows.
-  const live = (t: TaskDto): TaskDto => ({ ...t, working: loop.running(t.id) });
+  // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works.
+  const live = (t: TaskDto): TaskDto => {
+    const working = loop.running(t.id);
+    return { ...t, working, canInstruct: t.canInstruct && !working };
+  };
+  // spec.md section 6.18.4, Restart: the first open of a database resets the updates that a restart stopped.
+  const recovered = new WeakSet<object>();
+  const openDb = () => {
+    const db = review.open();
+    if (db && !recovered.has(db)) {
+      recovered.add(db);
+      loop.recover(db);
+    }
+    return db;
+  };
 
   function answer(c: Context, r: TaskResult) {
     if ("task" in r && r.status !== 409) return c.json(live(r.task), r.status);
@@ -124,7 +139,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
       })
       // spec.md section 6.17: a tick or an untick of one attachment of the task.
       .put("/tasks/:id/files/:att", fileParam, body(attachmentInput, "Give include true or false."), async (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, att } = c.req.valid("param");
         return answer(c, await tasks.file(db, id, att, c.req.valid("json").include));
@@ -136,29 +151,32 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
           return r.success ? r.data : c.json<ApiError>({ error: "Use state open or all." }, 400);
         }),
         (c) => {
-          const db = review.open();
+          const db = openDb();
           return c.json(db ? tasks.list(db, c.req.valid("query").state) : [], 200);
         },
       )
       .get("/tasks/:id", idParam, (c) => {
-        const db = review.open();
+        const db = openDb();
         const t = db && tasks.get(db, c.req.valid("param").id);
+        // spec.md section 6.18.5: the Task view opens, so a base check runs in the background at most once per BASE_CHECK_AGE.
+        if (db && t) loop.baseCheck(db, t.id);
         return t ? c.json(live(t), 200) : c.json<ApiError>({ error: "Task not found." }, 404);
       })
       .post("/tasks/:id/answers", idParam, body(taskAnswersInput, "Invalid answers."), (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id } = c.req.valid("param");
-        // A question of a build step waits in state implementing. The interview asks in state interview.
-        const building = taskRow(db, id)?.state === "implementing";
+        // A question of a build step or an instruct step waits in state implementing or ready. The interview asks in state interview.
+        const state = taskRow(db, id)?.state;
+        const building = state === "implementing" || state === "ready";
         return answer(c, building ? loop.answer(db, id, c.req.valid("json")) : tasks.answers(db, id, c.req.valid("json")));
       })
       .put("/tasks/:id/docs", idParam, body(taskDocInput, "Invalid plan file."), (c) => {
-        const db = review.open();
+        const db = openDb();
         return db ? answer(c, tasks.docs(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       .post("/tasks/:id/plan", idParam, body(taskPlanInput, "Invalid plan approval."), (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id } = c.req.valid("param");
         const r = tasks.plan(db, id, c.req.valid("json"));
@@ -167,15 +185,15 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         return answer(c, r);
       })
       .post("/tasks/:id/pause", idParam, body(taskVersionInput, "Give the task version."), (c) => {
-        const db = review.open();
+        const db = openDb();
         return db ? answer(c, loop.pause(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       .post("/tasks/:id/stop", idParam, body(taskVersionInput, "Give the task version."), (c) => {
-        const db = review.open();
+        const db = openDb();
         return db ? answer(c, loop.stop(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       .post("/tasks/:id/resume", idParam, body(taskVersionInput, "Give the task version."), (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id } = c.req.valid("param");
         const t = taskRow(db, id);
@@ -183,11 +201,11 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         return answer(c, before ? tasks.resume(db, id, c.req.valid("json")) : loop.resume(db, id, c.req.valid("json")));
       })
       .post("/tasks/:id/close", idParam, body(taskVersionInput, "Give the task version."), (c) => {
-        const db = review.open();
+        const db = openDb();
         return db ? answer(c, tasks.close(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       .post("/tasks/:id/limit", idParam, body(taskLimitInput, "Give the task version, and keep true or a line limit."), (c) => {
-        const db = review.open();
+        const db = openDb();
         return db ? answer(c, loop.limit(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       .post(
@@ -195,31 +213,54 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         stepParam,
         body(specChangeInput, "Give the task version and accept true or false."),
         async (c) => {
-          const db = review.open();
+          const db = openDb();
           if (!db) return c.json(unconfigured, 409);
           const { id, step } = c.req.valid("param");
           return answer(c, await loop.specChange(db, id, step, c.req.valid("json")));
         },
       )
       .post("/tasks/:id/size", idParam, body(taskSizeInput, "Pick small, medium, or large."), (c) => {
-        const db = review.open();
+        const db = openDb();
         return db ? answer(c, tasks.size(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       // spec.md section 6.12, "Open the PR": the push of the part branch and one PR create, only on this click.
       .post("/tasks/:id/parts/:part/pr", partParam, body(taskReviewersInput, "Give the task version and the reviewers."), async (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
         return answer(c, await prs.open(db, id, part, c.req.valid("json")));
       })
+      // spec.md section 6.18.6: "Tell Claude". The text goes to Claude only; the app never reads it for commands.
+      .post(
+        "/tasks/:id/instructions",
+        idParam,
+        body(taskInstructionsInput, `Give the task version and 1 to ${MAX_INSTRUCTION} characters of text.`),
+        (c) => {
+          const db = openDb();
+          return db ? answer(c, loop.instruct(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
+        },
+      )
+      // spec.md section 6.18.6: "Update from <base>" and "Undo the update". Neither pushes.
+      .post("/tasks/:id/parts/:part/update", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        return answer(c, await loop.update(db, id, part, c.req.valid("json")));
+      })
+      .post("/tasks/:id/parts/:part/update/undo", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        return answer(c, await loop.undoUpdate(db, id, part, c.req.valid("json")));
+      })
       .post("/tasks/:id/parts/:part/fix", partParam, body(taskVersionInput, "Give the task version."), (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
         return answer(c, loop.fixPoints(db, id, part, c.req.valid("json")));
       })
       .get("/tasks/:id/parts/:part/diff", partParam, async (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
         const t = taskRow(db, id);
@@ -234,7 +275,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
       })
       // The run log of a task run (RunLog.tsx). GET /api/runs/:id gives 404 for it.
       .get("/tasks/:id/runs/:run", runParam, (c) => {
-        const db = review.open();
+        const db = openDb();
         const { id, run } = c.req.valid("param");
         const d = db && review.taskRunLog(db, id, run);
         return d ? c.json(d, 200) : c.json<ApiError>({ error: "Run not found." }, 404);
@@ -248,7 +289,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
           return r.success ? r.data : c.json<ApiError>({ error: "Invalid branch prefix." }, 400);
         }),
         async (c) => {
-          const db = review.open();
+          const db = openDb();
           if (!db) return c.json(unconfigured, 409);
           const r = await tasks.branch(db, c.req.valid("param").id, c.req.valid("query"));
           return "name" in r ? c.json<BranchCheckDto>(r, 200) : answer(c, r);
@@ -256,7 +297,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
       )
       // spec.md section 6.16.3: a base change. 202 when the plan runs again.
       .put("/tasks/:id/base", idParam, body(taskBaseInput, "Give the task version and a branch name."), async (c) => {
-        const db = review.open();
+        const db = openDb();
         return db ? answer(c, await tasks.base(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       // spec.md section 6.16.3: the base picker. One page of the branch search and the default branch.
@@ -288,13 +329,13 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         },
       )
       .get("/repos/:project/:repo/task-settings", repoParam, (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { project, repo } = c.req.valid("param");
         return c.json<RepoTaskSettingsDto>(repoSettings(db, project, repo), 200);
       })
       .put("/repos/:project/:repo/task-settings", repoParam, body(repoTaskSettingsInput, "Invalid task settings."), (c) => {
-        const db = review.open();
+        const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { project, repo } = c.req.valid("param");
         const s = c.req.valid("json");

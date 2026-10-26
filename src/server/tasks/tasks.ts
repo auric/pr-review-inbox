@@ -41,12 +41,14 @@ import {
   type InterviewResult,
   interviewJsonSchema,
   interviewResult,
+  MERGE_CONFLICTED,
   MORE_TIME_MIN,
   PART_STATE_TEXT,
   PART_TIME_MIN,
   type PartState,
   type SizeSource,
   SPEC_TURNS,
+  type StepDetail,
   specJsonSchema,
   specResult,
   stepDetail,
@@ -114,7 +116,7 @@ import {
   sizeFloor,
   toPlan,
 } from "./plan";
-import { type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo } from "./repos";
+import { type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, updateRepos } from "./repos";
 import { firstFree, remoteBranches } from "./worktree";
 
 type TaskSizeInput = z.infer<typeof taskSizeInput>;
@@ -145,6 +147,11 @@ const SQL = {
       OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id AND p.state = 'implementing'))
     ORDER BY t.id`,
   failSteps: "UPDATE task_step SET state = 'failed', ended_at = $now WHERE state IN ('waiting', 'running')",
+  // spec.md section 6.18.4, Restart: an update that ran at the last stop. The loop aborts its rebase or merge and resets every repository
+  // to the heads before it (loop.ts recoverUpdates).
+  restartUpdates: `UPDATE task_step SET detail_json = json_insert(json_set(detail_json, '$.update.result', 'restart'), '$.notes[#]',
+      'The app stopped during the update.')
+    WHERE kind = 'update' AND state IN ('waiting', 'running') AND json_type(detail_json, '$.update') = 'object'`,
 };
 
 type StateRow = { state: TaskState; stopped_from: TaskState | null; size: TaskSize | null; version: number };
@@ -198,6 +205,7 @@ export function advancePart(
 export function recoverTasks(db: Database, now = Date.now()) {
   db.transaction(() => {
     const tasks = db.query(SQL.running).all() as { id: number; version: number }[];
+    db.query(SQL.restartUpdates).run();
     db.query(SQL.failSteps).run({ now });
     // A done or failed task refuses STOP and keeps its state.
     for (const t of tasks) advance(db, { task: t.id, version: t.version }, { type: "STOP" }, {}, now);
@@ -533,6 +541,148 @@ function planDto(db: Database, t: TaskRow, docs: Docs): TaskPlanDto {
   };
 }
 
+// ---------- Tell Claude and Update from the base branch (spec.md section 6.18) ----------
+
+export const WORKING = "Claude or the checks are working.";
+// spec.md section 6.18.1: the reasons that keep the Tell Claude box. A part that the loop builds has a worktree; a built part waits.
+const BOX_REASONS = new Set<TaskBlocked["kind"]>(["red", "size", "blocker", "denied_path", "update"]);
+const HAS_WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
+const BUILT = new Set<PartState>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
+const blockedOf = (t: TaskRow): TaskBlocked | null => {
+  const r = t.blocked_json === null ? null : taskBlocked.safeParse(JSON.parse(t.blocked_json));
+  return r?.success ? r.data : null;
+};
+
+// spec.md section 6.18.5: the newest base check of each task, by database. The loop writes it, and the Task view reads it.
+const baseChecks = new WeakMap<Database, Map<number, { at: number; moves: { taskRepo: number; newCommits: number }[] }>>();
+export function setBaseMoves(db: Database, task: number, moves: { taskRepo: number; newCommits: number }[], at: number) {
+  const m = baseChecks.get(db) ?? new Map();
+  m.set(task, { at, moves });
+  baseChecks.set(db, m);
+}
+export const baseCheckOf = (db: Database, task: number) => baseChecks.get(db)?.get(task) ?? null;
+
+// spec.md section 6.18.2: the part of a send: the part in the body, else the part of the reason, else the part that the loop builds,
+// else the last part that is not merged.
+export function currentPart(db: Database, t: TaskRow, partId?: number): PartRow | null {
+  const all = db.query(Q.parts).all({ id: t.id }) as PartRow[];
+  if (partId !== undefined) return all.find((p) => p.id === partId) ?? null;
+  const step = blockedOf(t)?.step;
+  const own = step ? (db.query("SELECT part FROM task_step WHERE id = $id").get({ id: step }) as { part: number | null } | null) : null;
+  return (
+    all.find((p) => p.id === own?.part) ??
+    all.find((p) => p.state === "implementing") ??
+    all.findLast((p) => HAS_WORKTREE.has(p.state)) ??
+    null
+  );
+}
+
+// The part of a Tell Claude send (spec.md section 6.18.1), or the sentence of the 409 in a state without the box.
+export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string } {
+  if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
+  const b = blockedOf(t);
+  if (b && !BOX_REASONS.has(b.kind)) return { error: b.text };
+  if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
+  const part = currentPart(db, t, partId);
+  if (!part || !HAS_WORKTREE.has(part.state))
+    return { error: partId === undefined ? TASK_STATE_TEXT[t.state] : "This part has no worktree." };
+  // No reason and a part in the build: the loop works on it.
+  if (!b && !BUILT.has(part.state)) return { error: WORKING };
+  return { part };
+}
+
+// The part of "Update from <base>" (spec.md section 6.18.3): a built part with no step that runs. "Try again" after a stopped update.
+export function updateTarget(db: Database, t: TaskRow, partId: number): { part: PartRow } | { error: string } {
+  if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
+  const b = blockedOf(t);
+  if (b && b.kind !== "update") return { error: b.text };
+  if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
+  const part = currentPart(db, t, partId);
+  if (!part || !BUILT.has(part.state)) return { error: "This part is not built yet." };
+  return { part };
+}
+
+// "Undo the update" (spec.md section 6.18.3, Checks): the newest update of the part ended with its checks, and no push and no commit
+// came after it.
+export function undoTarget(
+  db: Database,
+  t: TaskRow,
+  partId: number,
+): { part: PartRow; step: number; detail: NonNullable<StepDetail["update"]> } | { error: string } {
+  const none = { error: "No update of this part waits for Undo." };
+  if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
+  const b = blockedOf(t);
+  if (b && b.kind !== "red") return { error: b.text };
+  const part = currentPart(db, t, partId);
+  if (!part) return none;
+  const u = db
+    .query("SELECT id, state, detail_json FROM task_step WHERE part = $part AND kind = 'update' ORDER BY id DESC LIMIT 1")
+    .get({ part: part.id }) as { id: number; state: string; detail_json: string } | null;
+  const d = u ? stepDetail.parse(JSON.parse(u.detail_json)).update : null;
+  if (u?.state !== "ok" || !d || d.undone || (d.result !== "green" && d.result !== "red")) return none;
+  if (
+    db.query("SELECT 1 FROM task_step WHERE part = $part AND kind = 'push' AND state = 'ok' AND id > $id").get({ part: part.id, id: u.id })
+  )
+    return { error: "The update is on the server now. Undo works only before the next push." };
+  if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
+  const rows = repoDtos(db, t);
+  for (const h of d.postHeads) {
+    const role = rows.find((r) => r.id === h.taskRepo)?.role;
+    const now =
+      role === "main"
+        ? part.head
+        : role === "submodule"
+          ? ((
+              db.query("SELECT head FROM task_pr WHERE part = $part AND task_repo = $repo").get({ part: part.id, repo: h.taskRepo }) as {
+                head: string | null;
+              } | null
+            )?.head ?? h.head)
+          : h.head;
+    if (now !== h.head) return { error: "The branch changed after the update." };
+  }
+  return { part, step: u.id, detail: d };
+}
+
+// spec.md section 6.18.6, TaskDto bases: each repository that the update can change, with the count of the newest base check and the
+// merge result of its synced PR. outcome CONFLICTED with current true marks the PR conflicted (Gate G18 has not verified the value).
+function basesOf(db: Database, t: TaskRow): TaskDto["bases"] {
+  const part = t.state === "implementing" || t.state === "ready" ? currentPart(db, t) : null;
+  if (!part || !BUILT.has(part.state)) return [];
+  const check = baseCheckOf(db, t.id);
+  const conflicted = (pr: number | null) => {
+    const r =
+      pr === null
+        ? null
+        : (db.query("SELECT merge_result FROM pr_merge_result WHERE pr = $id").get({ id: pr }) as { merge_result: string | null } | null);
+    if (!r?.merge_result) return false;
+    const m = JSON.parse(r.merge_result) as { outcome?: unknown; current?: unknown };
+    return m.outcome === MERGE_CONFLICTED && m.current === true;
+  };
+  return updateRepos(db, t, part).map((r) => ({
+    taskRepo: r.row.id,
+    branch: r.base,
+    newCommits: check?.moves.find((m) => m.taskRepo === r.row.id)?.newCommits ?? 0,
+    conflicted: conflicted(
+      r.row.role === "main"
+        ? part.pr
+        : ((
+            db.query("SELECT pr FROM task_pr WHERE part = $part AND task_repo = $repo").get({ part: part.id, repo: r.row.id }) as {
+              pr: number | null;
+            } | null
+          )?.pr ?? null),
+    ),
+  }));
+}
+
+// spec.md section 6.18.2: the newest Claude step that asked for the newest base, when no update ran after it. steps: newest first.
+function needsBaseOf(steps: { kind: string; state: string; detail: StepDetail }[]): TaskDto["needsBase"] {
+  for (const s of steps) {
+    if (s.kind === "update" && s.state === "ok" && !s.detail.update?.undone) return null;
+    if (s.detail.needsBase) return s.detail.needsBase;
+  }
+  return null;
+}
+
 export function taskDto(db: Database, t: TaskRow): TaskDto {
   const parts = (db.query(Q.parts).all({ id: t.id }) as PartRow[]).map((p): TaskPartDto => {
     const synced =
@@ -557,6 +707,20 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     };
   });
   const docs = docsOf(t);
+  const steps = (db.query(Q.steps).all({ id: t.id }) as StepRow[]).map((s) => ({
+    id: s.id,
+    part: s.part,
+    ord: s.ord,
+    kind: s.kind,
+    run: s.run,
+    state: s.state,
+    attempt: s.attempt,
+    item: s.item,
+    detail: stepDetail.parse(JSON.parse(s.detail_json)),
+    startedAt: s.started_at,
+    endedAt: s.ended_at,
+  }));
+  const current = currentPart(db, t);
   return {
     ...rowDto(db, t),
     originPr: t.origin_pr,
@@ -588,19 +752,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       askedAt: q.asked_at,
       answeredAt: q.answered_at,
     })),
-    steps: (db.query(Q.steps).all({ id: t.id }) as StepRow[]).map((s) => ({
-      id: s.id,
-      part: s.part,
-      ord: s.ord,
-      kind: s.kind,
-      run: s.run,
-      state: s.state,
-      attempt: s.attempt,
-      item: s.item,
-      detail: stepDetail.parse(JSON.parse(s.detail_json)),
-      startedAt: s.started_at,
-      endedAt: s.ended_at,
-    })),
+    steps,
     createdAt: t.created_at,
     interview: interviewOf(db, t.id),
     plan: docs ? planDto(db, t, docs) : null,
@@ -611,6 +763,11 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     working: false,
     attachments: taskIssue(db, t)?.issue.attachments ?? [],
     files: taskFileDtos(db, t.id),
+    bases: basesOf(db, t),
+    needsBase: needsBaseOf(steps),
+    // The routes also clear it while the loop works.
+    canInstruct: !("error" in instructTarget(db, t)),
+    canUndoUpdate: current !== null && !("error" in undoTarget(db, t, current.id)),
   };
 }
 

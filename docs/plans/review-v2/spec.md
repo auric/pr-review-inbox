@@ -1745,14 +1745,15 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
   5. Size check. Over the budget blocks with size.
   6. Own review of the part (base..head), with at most REVIEW_FIX_TRIES fix steps.
   7. The waiting state again. Before the first push of the part: "Open PR for part k of n". After it: the row "implementing, not pushed" with "Push to <branch>". The push stays a click.
-- A question in the result blocks with question. A changed plan file blocks with spec_change.
+- A question in the result blocks with question. The answer runs the send again from the last commit, with the answer in context/answers.md. A changed plan file blocks with spec_change.
+- A part that waited in its build (blocked red, size, blocker, or denied_path before the part was ready): after step 5, the build of the part goes on from the new commit. The build ends with the full checks and the own review, so step 6 runs there (WP-TU1).
 - The app never parses the text. Words such as "push", "rebase", or "merge" go to Claude as text. Each git action stays its own button.
 - needsBase: the app runs the base check of section 6.18.5 at once. A moved base gives the row "Claude asks for the base" with "Update from <base>" and the line "Claude says: <needsBaseReason>". A base that did not move gives the line "Claude asked for the newest <base>. The branch already has it." and no button.
 
 #### 6.18.3 Update from the base branch
 
 - Base: each repository uses the base that the user picked for the task: task.target_branch for the main repository, task_repo.base_branch for the others (section 6.16.3), for example release/2.1. The app never uses a fixed develop or master, and never the default branch here. The label names it: "Update from release/2.1". When the repositories to update have different bases, the label is "Update from 2 base branches", and the status lists one line per repository: "PROJ/lib from develop · 3 new commits" (Q60).
-- Repositories: each repository of the part with access edit whose base moved (section 6.18.5), deepest first. A parent of an updated submodule also takes the pointer step, also when its own base did not move.
+- Repositories: each repository of the part with access edit and commits of the task (the main repository always) whose base moved (section 6.18.5), deepest first. A parent of an updated submodule also takes the pointer step, also when its own base did not move.
 - Mode per repository. Published means that the task branch exists on the server: the pushed column is set (task_part.pushed for the main repository, task_pr.pushed for the others), or the task continues on a remote branch (section 6.16.4). Not published: rebase. Published: merge. After the first push, the update never needs a force push: the merge commit holds the pushed commit, so the next push passes the fast-forward check of section 6.8.
 - Steps:
   1. The app writes the head of every repository of the part into the step detail (preHeads) before any git command.
@@ -1762,7 +1763,8 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
   5. The app sets base_commit to the new base head (task.base_commit, task_pr.base_commit) and counts the lines of `<base_commit>..<head>` again (section 6.1).
 - Pointer: after a submodule update, its new head S differs from the gitlink in the parent. A gitlink conflict in a parent rebase or merge never goes to Claude. The app resolves it to S when the gitlink of the parent's new base head is an ancestor of S (`git merge-base --is-ancestor` in the submodule cache). Else the update aborts with "The new <base> of PROJ/app points <path> at a commit that the PROJ/lib task branch does not contain." After the parent update, the app writes S with `git update-index --cacheinfo 160000,<S>,<path>` and commits "<KEY>: point <path> at the updated task branch", unless the gitlink is already S.
 - All or nothing: a failed repository aborts the update of every repository (section 6.18.4, Abort).
-- Checks: after all repositories, the checks of section 6.7 run once for the part. Green: the step ends ok, and the task goes back to its waiting state. Red: blocked red "Needs you: the tests fail after the update from <base>." with "See why", the Tell Claude box, and More "Undo the update" (Q56). Undo resets each repository to its preHead and restores base_commit. Undo exists until the next push of the part.
+- A submodule without commits of the task takes no rebase or merge. After its parent update, its worktree moves to the gitlink of the parent's new head (read access too), and task_repo.pinned follows. A missing commit is fetched from the submodule base branch, then from every branch; else the update aborts (WP-TU1). Without this, the parent status shows the old gitlink as a change, and the path check of the next step fails.
+- Checks: after all repositories, the checks of section 6.7 run once for the part. Green: the step ends ok, and the task goes back to its waiting state. Red: blocked red "Needs you: the tests fail after the update from <base>." with "See why", the Tell Claude box, and More "Undo the update" (Q56). Undo resets each repository to its preHead and restores base_commit. Undo exists until the next push of the part, and only while no later commit changed a head of the update (WP-TU1). A Stop during these checks aborts the update as in section 6.18.4. A Stop during the own review after a resolve step keeps the update.
 - The update pushes nothing. The next push is the existing click: "Open PR" or "Push to <branch>".
 - No confirm: a rebase changes only commits that are not on the server, and a merge adds a commit (AC-UX6 stays).
 
@@ -1810,7 +1812,7 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 
 #### 6.18.6 Data and routes
 
-- Migration (the next free number, 037 unless taken): rebuild task_step with kind adding 'instruct', 'update', and 'resolve'. 'rebase' stays for the stack (section 6.8). `ALTER TABLE pull_request ADD COLUMN merge_result TEXT;` (JSON {outcome, current}).
+- Migration (the next free number, 037 unless taken): rebuild task_step with kind adding 'instruct', 'update', and 'resolve'. 'rebase' stays for the stack (section 6.8). `CREATE TABLE pr_merge_result (pr INTEGER PRIMARY KEY REFERENCES pull_request (id) ON DELETE CASCADE, merge_result TEXT)` (JSON {outcome, current}). A table of its own, as pr_branch_link: an ALTER of pull_request makes the migration check every child table of pull_request, so an old orphan row there would block the upgrade (db.ts touched; WP-TU1).
 - task.blocked kind adds "update" (section 6.18.4).
 - task_step.detail_json: instruct {text, part, blockedBefore}; update {repos: [{taskRepo, base, mode, newBaseHead}], preHeads, stops, result}; resolve {taskRepo, paths}.
 - TaskDto adds `bases: [{taskRepo, branch, newCommits, conflicted}]`, `needsBase: {reason} | null`, `canInstruct: boolean`, and `canUndoUpdate: boolean`.
@@ -1818,7 +1820,7 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 | Route | Body | Result |
 |---|---|---|
 | POST /api/tasks/:id/instructions | `{version, part?: id, text: 1 to 4,000 characters after trim}` | 202 TaskDto; 409 "Claude or the checks are working." while a step runs; 409 with the state sentence in a state without the box |
-| POST /api/tasks/:id/parts/:part/update | `{version}` | 202; 409 "<base> has no new commits." when no base moved and no PR is conflicted |
+| POST /api/tasks/:id/parts/:part/update | `{version}` | 202; 409 "<base> has no new commits." (several bases: "The base branches have no new commits.") when no base moved and no PR is conflicted |
 | POST /api/tasks/:id/parts/:part/update/undo | `{version}` | 200; 409 after a push |
 
 - POST /api/tasks/:id/parts/:part/update replaces POST /api/tasks/:id/parts/:part/rebase of section 6.16.11. Every mutation keeps the version check of section 6.11.

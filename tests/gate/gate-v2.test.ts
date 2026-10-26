@@ -64,14 +64,14 @@ describe("claude-checks.ts B17 to B20", () => {
   });
 });
 
-describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G17", () => {
+describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G18", () => {
   test("a dry run passes all checks against the loopback fake and prints no host", () => {
     const r = run(BITBUCKET_WRITE, ["--dry-run"], GIT_DIR);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     for (const id of ["G1", "G2", "G3", "G4", "G5", "G6"]) expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("INFO    G7 ");
-    for (const id of ["G9", "G12", "G13", "G14", "G15", "G16", "G17"]) expect(r.out).toContain(`PASS    ${id} `);
+    for (const id of ["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18"]) expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("(stale info)");
     const g3 = r.out.split("\n").find((l) => l.startsWith("PASS    G3 ")) ?? "";
     expect(g3).toContain("of the new gate commit: HTTP 200 keys=failed,inProgress,successful counts=0/0/0");
@@ -96,7 +96,7 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G17", () => {
     expect(r.code).toBe(0);
     const g9 = r.out.split("\n").find((l) => l.startsWith("PASS    G9 ")) ?? "";
     expect(g9).toContain("open PRs (limit 50): HTTP 200 count=2 isLastPage=true page schema=ok");
-    expect(g9).toContain("PR keys=author,fromRef,id,links,participants,reviewers,state,title,toRef,updatedDate,version");
+    expect(g9).toContain("PR keys=author,fromRef,id,links,participants,properties,reviewers,state,title,toRef,updatedDate,version");
     expect(g9).toContain("X-AUSERNAME=present");
     const g12 = r.out.split("\n").find((l) => l.startsWith("PASS    G12 ")) ?? "";
     expect(g12).toContain("open PRs read=2 without the user=1");
@@ -130,6 +130,17 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G17", () => {
     expect(r.out).not.toContain("G1 ");
     for (const secret of ["Dry Repo", "dry-lib", "dry-repo", "feature/", "refs/heads/main", "DRY", "127.0.0.1", tmpdir()])
       expect(r.out).not.toContain(secret);
+    expect(r.out).toContain("dry run: PASS");
+  }, 120_000);
+
+  test("a dry run of the read check G18 passes and prints only key names, outcomes, and counts", () => {
+    const r = run(BITBUCKET_WRITE, ["--dry-run", "--only", "G18"], GIT_DIR);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    const g18 = r.out.split("\n").find((l) => l.startsWith("PASS    G18 ")) ?? "";
+    expect(g18).toContain("mergeResult keys=current,outcome with outcome and current=2 of 2");
+    expect(g18).toContain("outcomes=CLEAN/current=true,CONFLICTED/current=true; CONFLICTED with current true=true");
+    for (const secret of ["dry-user", "dry-other", "Dry peer", "127.0.0.1", tmpdir()]) expect(r.out).not.toContain(secret);
     expect(r.out).toContain("dry run: PASS");
   }, 120_000);
 

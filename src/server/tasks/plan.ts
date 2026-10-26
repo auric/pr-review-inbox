@@ -553,18 +553,27 @@ export function stepFile(p: Plan, taskId: string, attempt: number): ContextFile 
 
 // step.md of a step for whole plan parts (spec.md section 6.7): the tests step, with the acceptance lines and the tests that the plan
 // names, or the fix of the points of the own review, which stay in ./context/failure.md.
-export function partStepFile(p: Plan, parts: PlanPart[], what: "tests" | "review" | "checks", attempt: number): ContextFile {
+// The instruct and resolve steps of spec.md section 6.18 add a "- Mode:" line.
+export function partStepFile(
+  p: Plan,
+  parts: PlanPart[],
+  what: "tests" | "review" | "checks" | "instruct" | "resolve",
+  attempt: number,
+): ContextFile {
   const files = new Set(parts.flatMap((x) => x.tasks.flatMap((t) => t.files)).map((f) => repoPath(f) ?? f));
   const map = p.map.filter((e) => files.has(repoPath(e.path) ?? e.path));
+  const task = {
+    tests: "- Task: write the tests of the acceptance lines below. They must fail until the feature exists.",
+    checks: "- Task: fix the failed checks of the whole part in ./context/failure.md.",
+    review: "- Task: fix the points of the review in ./context/failure.md.",
+    instruct: '- Mode: instruct\n- Task: do the request of "Your instructions" in the message.',
+    resolve: "- Mode: resolve\n- Task: resolve the conflicts that ./context/conflicts.md lists.",
+  }[what];
   const out = [
     "# Step",
     "",
     ...parts.map((x) => `- Part ${x.n} of ${p.parts.length}: ${oneLine(x.title)} (kind: ${x.kind}). Goal: ${oneLine(x.goal)}`),
-    what === "tests"
-      ? "- Task: write the tests of the acceptance lines below. They must fail until the feature exists."
-      : what === "checks"
-        ? "- Task: fix the failed checks of the whole part in ./context/failure.md."
-        : "- Task: fix the points of the review in ./context/failure.md.",
+    task,
     `- Attempt: ${attempt}`,
     "",
   ];

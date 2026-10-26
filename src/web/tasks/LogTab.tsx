@@ -26,6 +26,9 @@ const KIND: Record<TaskStepDto["kind"], string> = {
   question: "Question",
   spec_change: "Plan change",
   size: "Line limit",
+  instruct: "Your instructions",
+  update: "Update from the base",
+  resolve: "Conflicts",
 };
 
 const ICON: Record<StepLook, { icon: typeof CircleCheck; className?: string }> = {

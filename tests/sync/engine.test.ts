@@ -13,6 +13,7 @@ import { createLive, type LiveEvent } from "../../src/server/live";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings, type Settings } from "../../src/server/settings";
 import { createSyncEngine, type Timers } from "../../src/server/sync/engine";
+import { MERGE_CONFLICTED } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, fixture, key, type Reply, startFakeBitbucket } from "../support/fake-bitbucket";
 import {
   ACTIVITIES_PATH,
@@ -1203,6 +1204,30 @@ describe("scheduling", () => {
     expect(engine.status()).toMatchObject({ state: "unconfigured", nextAt: null });
     expect(timers.pending.size).toBe(0);
     expect(fake.requests).toEqual([]);
+  });
+});
+
+describe("merge result (docs/plans/review-v2/spec.md section 6.18.5)", () => {
+  test("the sync stores properties.mergeResult of a PR as JSON; a PR without it stores NULL", async () => {
+    // The properties of the sanitized dashboard fixture with the outcome of a PR with conflicts. Gate G18 has not verified CONFLICTED.
+    const page = fixture<{ values: { properties?: Record<string, unknown> }[] }>("dashboard-pull-requests-page.json").body;
+    const recorded = page.values.find((v) => v.properties?.mergeResult)?.properties;
+    expect(recorded?.mergeResult).toEqual({ outcome: "CLEAN", current: true });
+    const pr = ownPr();
+    pr.properties = { ...recorded, mergeResult: { outcome: MERGE_CONFLICTED, current: true } };
+    world.author = [pr];
+    const h = await setup();
+    await h.cycle();
+    const stored = () =>
+      (
+        h.db().query("SELECT m.merge_result FROM pr_merge_result m JOIN pull_request p ON p.id = m.pr WHERE p.pr_id = 2").get() as {
+          merge_result: string | null;
+        }
+      ).merge_result;
+    expect(JSON.parse(stored() as string)).toEqual({ outcome: "CONFLICTED", current: true });
+    world.author = [ownPr()];
+    await h.cycle();
+    expect(stored()).toBeNull();
   });
 });
 

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { ForgeError } from "../../src/server/bitbucket/client";
 import { NoCloneLink, type WriteProblem, writeProblem } from "../../src/server/bitbucket/errors";
 import { createBitbucketProvider } from "../../src/server/bitbucket/provider";
+import { MERGE_CONFLICTED } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, repoWrites, startFakeBitbucket, TEST_CA_FILE } from "../support/fake-bitbucket";
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
@@ -101,6 +102,19 @@ describe("createPullRequest", () => {
       author: { login: FAKE_USER },
     });
     expect(r.pr.reviewers.map((x) => x.login)).toEqual(["asmith"]);
+  });
+
+  test("reads properties.mergeResult: CLEAN after the create, CONFLICTED when the server reports it (spec.md section 6.18.5)", async () => {
+    const { provider, repo } = setup();
+    const r = await provider.createPullRequest("PROJ", "repo", input());
+    if (r.status !== "created") throw new Error("not created");
+    expect(r.pr.mergeResult).toEqual({ outcome: "CLEAN", current: true });
+    const pr = repo.prs.get(r.pr.ref.id);
+    if (pr) pr.properties.mergeResult = { outcome: MERGE_CONFLICTED, current: false };
+    expect((await provider.getPullRequest(r.pr.ref)).mergeResult).toEqual({ outcome: "CONFLICTED", current: false });
+    // Another shape is no error: the PR then has no merge result.
+    if (pr) (pr.properties as unknown as Record<string, unknown>).mergeResult = { outcome: 1 };
+    expect((await provider.getPullRequest(r.pr.ref)).mergeResult).toBeUndefined();
   });
 
   test("reports the PR author as a dropped reviewer (U74)", async () => {

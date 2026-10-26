@@ -230,6 +230,61 @@ export function repoDtos(db: Database, t: TaskRef): TaskRepoDto[] {
   }));
 }
 
+// One repository that "Update from <base>" can change (spec.md section 6.18.3, Repositories): the main repository, or a submodule with
+// access edit and commits of the task. baseCommit: task.base_commit or task_repo.base_commit. head: the task branch head. published: the
+// task branch exists on the server (task_part.pushed or task_pr.pushed; Continue sets it at the start, spec.md section 6.16.4).
+export type UpdateRepo = {
+  row: TaskRepoRow;
+  project: string;
+  repo: string;
+  base: string;
+  baseCommit: string;
+  head: string;
+  published: boolean;
+};
+
+// The repositories of a part that the update can change, deepest first and the main repository last.
+export function updateRepos(
+  db: Database,
+  t: TaskRef & { target_branch: string },
+  part: { id: number; head: string | null; pushed: string | null },
+): UpdateRepo[] {
+  const rows = taskRepos(db, t);
+  const out: UpdateRepo[] = [];
+  for (const row of [...rows].sort((a, b) => b.depth - a.depth)) {
+    if (row.role !== "submodule" || row.access !== "edit" || !row.project || !row.repo || !row.base_branch) continue;
+    const pr = db
+      .query("SELECT head, pushed FROM task_pr WHERE part = $part AND task_repo = $repo")
+      .get({ part: part.id, repo: row.id }) as {
+      head: string | null;
+      pushed: string | null;
+    } | null;
+    const baseCommit = row.base_commit ?? row.pinned;
+    if (!pr?.head || !baseCommit || pr.head === baseCommit) continue;
+    out.push({
+      row,
+      project: row.project,
+      repo: row.repo,
+      base: row.base_branch,
+      baseCommit,
+      head: pr.head,
+      published: pr.pushed !== null,
+    });
+  }
+  const main = rows.find((r) => r.role === "main") as TaskRepoRow;
+  if (t.base_commit && part.head)
+    out.push({
+      row: main,
+      project: t.project,
+      repo: t.repo,
+      base: t.target_branch,
+      baseCommit: t.base_commit,
+      head: part.head,
+      published: part.pushed !== null,
+    });
+  return out;
+}
+
 // The main row for a new task, or its new base.
 export function saveMainRepo(
   db: Database,

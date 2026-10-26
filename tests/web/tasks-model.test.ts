@@ -133,6 +133,10 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     working: false,
     attachments: [],
     files: [],
+    bases: [],
+    needsBase: null,
+    canInstruct: false,
+    canUndoUpdate: false,
     ...o,
   };
 }

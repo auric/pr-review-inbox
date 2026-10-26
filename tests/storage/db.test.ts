@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 36;
+const LATEST = 37;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1226,6 +1226,51 @@ test("migration from a version-34 database adds task_repo with a main row per ta
     // A removed task removes its repositories and their PR rows.
     db.run("DELETE FROM task WHERE id = 1");
     expect(db.query("SELECT (SELECT COUNT(*) FROM task_repo) + (SELECT COUNT(*) FROM task_pr) AS n").get()).toEqual({ n: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+test("migration from a version-36 database keeps every task step with its ID; instruct, update, resolve, and pr_merge_result are new", () => {
+  const path = join(dir, "v36.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+  ]);
+  old.exec("PRAGMA user_version = 36");
+  old.exec(`INSERT INTO pull_request (id, project, repo, pr_id) VALUES (1, 'P', 'r', 1);
+    INSERT INTO task (id, project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+      VALUES (1, 'P', 'r', 'ABC-1', 'One', 'implementing', 'main', 'specs/ABC-1/', 1, 1);
+    INSERT INTO task_part (id, task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+      VALUES (1, 1, 1, 'single', 'One', 'b', 'main', 'implementing', 1, 1);
+    INSERT INTO task_step (id, task, part, ord, kind, state, attempt, item, detail_json, started_at, ended_at)
+      VALUES (7, 1, 1, 1, 'rebase', 'ok', 2, 'P1', '{"notes":["x"]}', 3, 4), (9, 1, NULL, 2, 'commit', 'running', 1, NULL, '{}', 5, NULL);`);
+  const before = old.query("SELECT * FROM task_step ORDER BY id").all();
+  const columnsBefore = columns(old, "task_step");
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(columns(db, "task_step")).toEqual(columnsBefore);
+    expect(db.query("SELECT * FROM task_step ORDER BY id").all()).toEqual(before);
+    for (const kind of ["instruct", "update", "resolve"])
+      db.query("INSERT INTO task_step (task, part, ord, kind, state, started_at) VALUES (1, 1, 3, $kind, 'running', 1)").run({ kind });
+    expect(() => db.run("INSERT INTO task_step (task, ord, kind, state, started_at) VALUES (1, 4, 'other', 'ok', 1)")).toThrow(/CHECK/);
+    // pull_request keeps its columns. The merge result has its own table; a removed PR removes its row.
+    db.run(`INSERT INTO pr_merge_result (pr, merge_result) VALUES (1, '{"outcome":"CLEAN","current":true}')`);
+    expect(() => db.run("INSERT INTO pr_merge_result (pr, merge_result) VALUES (2, NULL)")).toThrow(/FOREIGN KEY/);
+    db.run("DELETE FROM pull_request WHERE id = 1");
+    expect(db.query("SELECT COUNT(*) AS n FROM pr_merge_result").get()).toEqual({ n: 0 });
+    // The rebuilt table keeps its foreign keys: a removed task removes its steps.
+    db.run("DELETE FROM task WHERE id = 1");
+    expect(db.query("SELECT COUNT(*) AS n FROM task_step").get()).toEqual({ n: 0 });
   } finally {
     db.close();
   }

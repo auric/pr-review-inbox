@@ -6,10 +6,12 @@
 // G9 and G12 (WP-PG) only read: the open PRs of the repository and the changes of an open PR without the token user.
 // G13 to G17 (WP-GB) only read: the default branch, the branch search, the write permission and branch restrictions, the
 // repository list, and the merge commit of a merged PR.
+// G18 (WP-TU1) only reads: properties.mergeResult of the open PRs, with one PR that the user made conflicted by hand.
 // Usage: bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes [--only G1,G2] [G3 ...]
 //          [--reviewer <user slug>] [--build-commit <commit>] [--readonly-token-env <VAR>] [--jira-key <KEY>] [--keep]
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G13,G14,G15,G16,G17
+//        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G18
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --authorize-writes --cleanup
 //        bun scripts/gate/bitbucket-write.ts --dry-run [--only G1,G2]
 // --dry-run: the same steps against a loopback fake server and a local bare repository. It reads no secret, and nothing leaves the machine.
@@ -22,6 +24,7 @@ import { join, resolve } from "node:path";
 import type { z } from "zod";
 import { change, page, pullRequest } from "../../src/server/bitbucket/schemas";
 import { gitEnv } from "../../src/server/review/git";
+import { MERGE_CONFLICTED } from "../../src/shared/task";
 
 const SERVICE = "review-loop";
 const ROOT = resolve(import.meta.dir, "../..");
@@ -32,10 +35,10 @@ const G5_WAIT_MS = 30_000;
 const G5_POLL_MS = 2_000;
 // Every branch that the script creates or deletes has this prefix. The target branch never gets a push.
 const PREFIX = "rl-gate-";
-const CHECKS = ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9", "G12", "G13", "G14", "G15", "G16", "G17"] as const;
+const CHECKS = ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18"] as const;
 type CheckId = (typeof CHECKS)[number];
 // These checks send only GET requests. They need no --authorize-writes and no --target.
-const READ_ONLY = new Set<CheckId>(["G9", "G12", "G13", "G14", "G15", "G16", "G17"]);
+const READ_ONLY = new Set<CheckId>(["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18"]);
 // The open-PR list of G9 and G12: one page, as provider.listOpenPullRequests reads it (spec.md section 2.8).
 const OPEN_PR_LIMIT = 50;
 // G14: the page size of the base branch picker (spec.md section 6.16). G16: the repository pages that the app reads at most.
@@ -47,6 +50,7 @@ const USAGE = [
   "         [--reviewer <user slug>] [--build-commit <commit>] [--readonly-token-env <VAR>] [--jira-key <KEY>] [--keep]",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G13,G14,G15,G16,G17",
+  "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G18",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --authorize-writes --cleanup",
   "       bun scripts/gate/bitbucket-write.ts --dry-run [--only G1,G2]",
 ].join("\n");
@@ -751,6 +755,34 @@ async function g17(s: Session): Promise<Result> {
   };
 }
 
+// ---------- G18: the merge result of the open PRs (spec.md section 6.18.5) ----------
+// PASS: each open PR carries properties.mergeResult with a string outcome and a boolean current, and one PR reports CONFLICTED with
+// current true. INFO: no open PR reports CONFLICTED; make one conflicted by hand and run again.
+async function g18(s: Session): Promise<Result> {
+  const r = await s.openPrs();
+  if (r.status !== 200) return { check: "G18", status: "FAIL", evidence: `open PRs: ${pageLine(r)}` };
+  const values = valuesOf(r.body) as { properties?: { mergeResult?: { outcome?: unknown; current?: unknown } } }[];
+  if (!values.length)
+    return {
+      check: "G18",
+      status: "SKIPPED",
+      evidence: "The test repository has no open PR. Open one, make it conflicted, and run again.",
+    };
+  const results = values.map((v) => v.properties?.mergeResult);
+  const typed = results.filter((m) => typeof m?.outcome === "string" && typeof m?.current === "boolean");
+  const outcomes = [
+    ...new Set(results.map((m) => `${enumLike(m?.outcome)}/current=${typeof m?.current === "boolean" ? m.current : "absent"}`)),
+  ]
+    .sort()
+    .join(",");
+  const conflicted = results.some((m) => m?.outcome === MERGE_CONFLICTED && m.current === true);
+  return {
+    check: "G18",
+    status: typed.length !== values.length ? "FAIL" : conflicted ? "PASS" : "INFO",
+    evidence: `open PRs: ${pageLine(r)} properties keys=${keyUnion(values.map((v) => v.properties))} mergeResult keys=${keyUnion(results)} with outcome and current=${typed.length} of ${values.length} outcomes=${outcomes}; CONFLICTED with current true=${conflicted}`,
+  };
+}
+
 const RUNNERS: Record<CheckId, (s: Session) => Promise<Result>> = {
   G1: g1,
   G2: g2,
@@ -766,6 +798,7 @@ const RUNNERS: Record<CheckId, (s: Session) => Promise<Result>> = {
   G15: g15,
   G16: g16,
   G17: g17,
+  G18: g18,
 };
 
 async function runGate(ctx: Ctx) {
@@ -836,7 +869,14 @@ function fakeServer(token: string, origin: string, buildCommit: string) {
     toRef: peerRef("main"),
     links: {},
   });
-  const peers = [peer(102, "dry-other", "dry-reviewer"), peer(101, "dry-user", "dry-reviewer")];
+  // G18: 102 reports conflicts, 101 is clean.
+  const merge = (outcome: string) => ({
+    properties: { mergeResult: { outcome, current: true }, resolvedTaskCount: 0, commentCount: 0, openTaskCount: 0 },
+  });
+  const peers = [
+    { ...peer(102, "dry-other", "dry-reviewer"), ...merge(MERGE_CONFLICTED) },
+    { ...peer(101, "dry-user", "dry-reviewer"), ...merge("CLEAN") },
+  ];
   const peerChanges: Record<number, unknown[]> = {
     101: [{ path: { toString: "README.md" }, type: "MODIFY" }],
     102: [
@@ -1043,7 +1083,7 @@ if (DRY) {
   const writes = cleanupMode || selected.some((c) => !READ_ONLY.has(c));
   if (writes && !flags.has("--authorize-writes"))
     usage(
-      "Refused: G1 to G7 create branches and pull requests and delete a branch. Add --authorize-writes for your test repository, or select only the read checks G9, G12, and G13 to G17.",
+      "Refused: G1 to G7 create branches and pull requests and delete a branch. Add --authorize-writes for your test repository, or select only the read checks G9, G12, and G13 to G18.",
     );
   const repo = parseRepoUrl(opt["--repo"]);
   const target = opt["--target"];

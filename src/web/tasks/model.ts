@@ -353,6 +353,7 @@ const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {
   push: "Needs you: the push",
   slot: "Waiting for the run slot",
   preflight: "Needs you: a check before the build",
+  update: "Needs you: the update stopped",
   error: "Needs you: an error",
 };
 export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {

@@ -358,8 +358,9 @@ export function linksOn(repo: string, p: string): string[] {
 }
 
 // Saves the changes of paths as a binary patch against HEAD, for the user and for Resume (spec.md section 6.7). A copy of the index
-// keeps the skip-worktree bits, so the files that sparse checkout hides do not show as deleted. Links are left out.
-export async function savePatch(wt: Worktree, file: string, paths: string[]): Promise<string | null> {
+// keeps the skip-worktree bits, so the files that sparse checkout hides do not show as deleted. Links are left out. only: the patch
+// holds these paths only; a paused merge or rebase has other staged paths (spec.md section 6.18.4).
+export async function savePatch(wt: Worktree, file: string, paths: string[], only = false): Promise<string | null> {
   const list = paths.filter((p) => p && !p.endsWith("/") && linksOn(wt.repo, p).length === 0);
   if (!list.length) return null;
   const tmp = mkdtempSync(join(tmpdir(), "rl-patch-"));
@@ -368,7 +369,11 @@ export async function savePatch(wt: Worktree, file: string, paths: string[]): Pr
     copyFileSync(join(wt.admin, "index"), index);
     const extra = { GIT_INDEX_FILE: index };
     await wtGit(wt, ["add", "-A", "--sparse", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: `${list.join("\0")}\0`, extra });
-    const diff = await wtGit(wt, ["diff", "--cached", "--binary", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD"], { extra });
+    const diff = await wtGit(
+      wt,
+      ["diff", "--cached", "--binary", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD", ...(only ? ["--", ...list] : [])],
+      { extra },
+    );
     mkdirSync(join(file, ".."), { recursive: true });
     writeFileSync(file, diff);
     return file;

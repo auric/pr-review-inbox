@@ -32,6 +32,12 @@ export const pullRequest = z.object({
   fromRef: ref,
   toRef: ref,
   links,
+  // docs/plans/review-v2/spec.md section 6.18.5: fixtures/bitbucket/dashboard-pull-requests-page.json holds {"outcome": "CLEAN",
+  // "current": true}. Another shape is no error: the PR then has no merge result.
+  properties: z
+    .object({ mergeResult: z.object({ outcome: z.string(), current: z.boolean() }).optional().catch(undefined) })
+    .optional()
+    .catch(undefined),
 });
 
 const anchor = z.object({

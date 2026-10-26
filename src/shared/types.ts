@@ -36,6 +36,8 @@ export type PullRequest = {
   // The user page of the author. Present only when it has the configured origin.
   authorUrl?: string;
   updatedDate: number;
+  // properties.mergeResult (docs/plans/review-v2/spec.md section 6.18.5). current false: Bitbucket has not checked the newest heads.
+  mergeResult?: { outcome: string; current: boolean };
 };
 
 // A line of the diff around an inline comment. n: the new line number of an added or context line, the old one of a removed line.

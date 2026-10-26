@@ -30,6 +30,7 @@ import type { RunErrorKind, RunEvent, RunStatus } from "./run-log";
 import {
   commandId,
   INTERVIEW_QUESTIONS,
+  MAX_INSTRUCTION,
   type PartKind,
   type PartState,
   PREFIX_MAX,
@@ -1296,8 +1297,15 @@ export const taskPushInput = z.object({ version, force: z.literal(true).optional
 export const taskSizeInput = z.object({ version, size: taskSize });
 // POST /api/tasks/:id/spec-change/:step.
 export const specChangeInput = z.object({ version, accept: z.boolean() });
-// POST /api/tasks/:id/pause, /resume, /stop, /close, /parts/:part/retarget, and /parts/:part/fix ("Fix these too").
+// POST /api/tasks/:id/pause, /resume, /stop, /close, /parts/:part/retarget, /parts/:part/fix ("Fix these too"), /parts/:part/update,
+// and /parts/:part/update/undo (spec.md section 6.18.6).
 export const taskVersionInput = z.object({ version });
+// POST /api/tasks/:id/instructions (spec.md section 6.18.6): "Tell Claude". part: absent takes the part of the current state.
+export const taskInstructionsInput = z.object({
+  version,
+  part: positiveInt.optional(),
+  text: z.string().trim().min(1).max(MAX_INSTRUCTION),
+});
 // POST /api/tasks/:id/limit (spec.md section 6.1, a part over the line limit): keep, "Keep one PR"; lineBudget, "Change the limit" for
 // this task.
 export const taskLimitInput = z.union([
@@ -1469,7 +1477,17 @@ export type TaskDto = TaskRowDto & {
   // include true goes to ./context/attachments/ of each Claude step.
   attachments: AttachmentMeta[];
   files: AttachmentDto[];
+  // spec.md section 6.18.6. bases: each repository of the building part that the update would change, with the commits of its base
+  // since the branch point (the newest base check) and a Bitbucket PR that reports conflicts. needsBase: the newest Claude step asked for
+  // the newest base, and no update ran after it. canInstruct: the Tell Claude box can send. canUndoUpdate: "Undo the update" can run.
+  bases: TaskBaseDto[];
+  needsBase: { reason: string } | null;
+  canInstruct: boolean;
+  canUndoUpdate: boolean;
 };
+
+// taskRepo: task_repo.id. branch: the base branch that the user picked for the repository.
+export type TaskBaseDto = { taskRepo: number; branch: string; newCommits: number; conflicted: boolean };
 
 // 409 of a task mutation: the version is old, or the state takes no such change. task: the current task.
 export type TaskConflict = ApiError & { task: TaskDto };
