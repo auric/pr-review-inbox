@@ -35,6 +35,10 @@
 - "Close the task" ends a task. Its branch and pull request stay.
 - This version builds small tasks: one pull request with the plan and the code. A medium or large plan waits after its approval.
 - Before the build and before each push, the app checks that the token can push to the repository, that the base branch still exists, and that no branch rule it can read forbids the task branch. A failed check stops the task with one sentence that says what to fix, and Claude starts no step.
+- Claude now gets the Jira attachments of the task, also for a task without a pull request. "Build a Jira task" first shows "Read the task": it lists the attachments of the issue with a box each, before Claude starts. With "Ask before Claude reads a Jira attachment" off, every box starts ticked. Else the company AI policy question comes once at the first tick.
+- The new Attachments tab of a task has the same boxes and "Include all". A change applies from the next step. A tick downloads the file from Jira once.
+- Every Claude step of a task gets the ticked files: the questions, the plan, the tests, the code, the fixes, and its own review.
+- PDFs now go to Claude as files, up to 5 MB each and 20 MB per run, also with "Include in runs" in the review brief. Office files and archives stay listed by name only.
 
 ### Ask Claude about a finding
 

@@ -4,11 +4,25 @@
 // docs/plans/review-v2/spec.md sections 6.12, 6.16, and 7.2 (WP-B5, WP-BR2): the small task walkthrough in the browser. Build on the
 // task chip of a PR, the questions with the recommended answers, the plan approval with the "Branch type" chips, "Other…", the base
 // picker with its confirm, and the first-use warning, the build with a stop at the line limit and "Keep one PR", "Open the PR" with its
-// confirm, Close, and a second task of the same key that continues on the existing branch. Then Settings > Tasks. Runs against serve.ts
+// confirm, Close, and a second task of the same key that continues on the existing branch. The Build form with its attachment boxes
+// and the policy question, and the Attachments tab (spec.md section 6.17). Then Settings > Tasks. Runs against serve.ts
 // only: the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote. The approved test command is "bun test" in the task
 // worktree.
 import { test as base, expect, type Page } from "@playwright/test";
-import { APP_PORT, control, E2E_JIRA_TOKEN, E2E_TOKEN, FAKE_URL, JIRA_ISSUE, JIRA_URL, makeClone, openApp, taskRemote } from "./control";
+import {
+  APP_PORT,
+  control,
+  E2E_JIRA_TOKEN,
+  E2E_TOKEN,
+  FAKE_URL,
+  JIRA_ISSUE,
+  JIRA_URL,
+  jiraRequests,
+  makeClone,
+  openApp,
+  runFiles,
+  taskRemote,
+} from "./control";
 
 const APP = `http://127.0.0.1:${APP_PORT}`;
 const PR_TITLE = "Batch cache writes in the sync worker";
@@ -322,6 +336,85 @@ test("a small task: chip, questions, plan with the branch and the warning, a sto
   await primary(page).click();
   expect((await sent).postDataJSON()).toMatchObject({ prefix: "task/", existing: "continue" });
   await expect(page.locator('[aria-current="step"]')).toHaveText("Build", { timeout: 60_000 });
+});
+
+// docs/plans/review-v2/spec.md section 6.17: fixtures/jira/issue.json lists a PNG and a log. The fake Jira serves both.
+test("the Build form lists the attachments with boxes and asks the policy question once; each step gets the ticked files", async ({
+  page,
+}) => {
+  test.setTimeout(240_000);
+  await control("claude", {
+    stream: "task",
+    spec: SPEC,
+    review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
+  });
+  await openApp(page);
+  await page.getByLabel("Bitbucket URL").fill(FAKE_URL);
+  await page.getByLabel("Access token").fill(E2E_TOKEN);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByLabel("Access token")).toBeHidden();
+  await control("state", { task: true });
+  expect((await api(page, "PUT", "/api/settings/jira", { baseUrl: JIRA_URL, token: E2E_JIRA_TOKEN })).status).toBe(200);
+  await page.reload();
+
+  // 1. The form: the key and the repository, then "Read the task" reads the summary and the attachments.
+  await page.getByRole("button", { name: /^Tasks: / }).click();
+  await page.getByRole("button", { name: "Build a Jira task" }).click();
+  const form = page.getByRole("form", { name: "Build a Jira task" });
+  await form.getByLabel("Jira key").fill(JIRA_ISSUE);
+  await form.getByLabel("Main repository").selectOption("PROJ1/sample-repo-2");
+  await form.getByRole("button", { name: "Read the task" }).click();
+  await expect(form.getByText(TITLE)).toBeVisible();
+  const shot = form.getByRole("checkbox", { name: /screenshot\.png/ });
+  const log = form.getByRole("checkbox", { name: /sync-worker\.log/ });
+  // A new data folder asks before the first tick, so no box starts ticked.
+  await expect(shot).not.toBeChecked();
+  await expect(log).not.toBeChecked();
+  await expect(form.getByRole("button", { name: "Include all" })).toBeVisible();
+
+  // 2. The first tick asks the company AI policy question. The box ticks only after the answer, and the answer is kept.
+  await shot.click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading")).toHaveText("Include screenshot.png?");
+  const include = dialog.getByRole("button", { name: "Include", exact: true });
+  await expect(include).toBeDisabled();
+  await dialog.getByRole("checkbox", { name: /My company AI policy allows/ }).check();
+  const saved = page.waitForResponse((r) => r.request().method() === "PUT" && new URL(r.url()).pathname === "/api/settings");
+  await include.click();
+  await expect(dialog).toBeHidden();
+  expect((await saved).status()).toBe(200);
+  await expect(shot).toBeChecked();
+  await log.click();
+  await expect(log).toBeChecked();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  // 3. Build: the app downloads the ticked files into the task, and the interview gets both.
+  await form.getByRole("button", { name: "Build this task" }).click();
+  await expect(page).toHaveURL(/\/tasks\/\d+$/);
+  await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
+  const [interview] = await runFiles();
+  expect(interview?.attachments).toEqual(["10100.png", "10101.txt"]);
+  expect(interview?.task).toContain("- screenshot.png: 2048 bytes, image/png. Included as ./attachments/10100.png.");
+  expect((await jiraRequests()).filter((r) => r.includes("/secure/attachment/"))).toEqual([
+    "GET /secure/attachment/10100/screenshot.png",
+    "GET /secure/attachment/10101/sync-worker.log",
+  ]);
+
+  // 4. The Attachments tab: an untick applies from the next step. The spec run after the answers gets the image only.
+  await page.getByRole("tab", { name: "Attachments" }).click();
+  const panel = page.getByRole("tabpanel");
+  await expect(panel.getByRole("checkbox", { name: /screenshot\.png/ })).toBeChecked();
+  await panel.getByRole("checkbox", { name: /sync-worker\.log/ }).click();
+  await expect(panel.getByRole("checkbox", { name: /sync-worker\.log/ })).not.toBeChecked();
+  await expect(panel.getByText(/Downloaded\. \S+ does not get it\./)).toBeVisible();
+  await expect(panel.getByText("A change applies from the next step.", { exact: false })).toBeVisible();
+  await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();
+  await expect(status(page)).toHaveText("The plan is ready: small, 1 PR, about 5 changed lines.", { timeout: 60_000 });
+  const spec = (await runFiles()).at(-1);
+  expect(spec?.attachments).toEqual(["10100.png"]);
+  expect(spec?.task).toContain("- sync-worker.log: 512 bytes, text/plain. Not included.");
+  // The untick downloaded nothing again.
+  expect((await jiraRequests()).filter((r) => r.includes("/secure/attachment/"))).toHaveLength(2);
 });
 
 test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat", async ({ page }) => {

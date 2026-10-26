@@ -9,6 +9,8 @@ import { validator } from "hono/validator";
 import type { z } from "zod";
 import {
   type ApiError,
+  ATT_ID,
+  attachmentInput,
   type BranchCheckDto,
   type BranchSearchDto,
   branchCheckInput,
@@ -20,10 +22,12 @@ import {
   specChangeInput,
   type TaskConflict,
   type TaskDto,
+  type TaskIssueDto,
   taskAnswersInput,
   taskBaseInput,
   taskCreateInput,
   taskDocInput,
+  taskIssueInput,
   taskLimitInput,
   taskListInput,
   taskPlanInput,
@@ -60,6 +64,10 @@ const partParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
   const part = positive(v.part);
   return id && part ? { id, part } : c.json<ApiError>({ error: "Invalid task or part ID." }, 400);
+});
+const fileParam = validator("param", (v: Record<string, string>, c) => {
+  const id = positive(v.id);
+  return id && ATT_ID.test(v.att ?? "") ? { id, att: v.att as string } : c.json<ApiError>({ error: "Invalid task or attachment ID." }, 400);
 });
 const runParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
@@ -109,6 +117,18 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
       .post("/tasks", body(taskCreateInput, "Give a project, a repository, and a Jira key such as ABC-12."), async (c) =>
         answer(c, await tasks.create(c.req.valid("json"))),
       )
+      // spec.md section 6.17: the attachments of a key for the form, before the task exists.
+      .post("/tasks/issue", body(taskIssueInput, "Give a Jira key such as ABC-12."), async (c) => {
+        const r = await tasks.issue(c.req.valid("json").key);
+        return "attachments" in r ? c.json<TaskIssueDto>(r, 200) : answer(c, r);
+      })
+      // spec.md section 6.17: a tick or an untick of one attachment of the task.
+      .put("/tasks/:id/files/:att", fileParam, body(attachmentInput, "Give include true or false."), async (c) => {
+        const db = review.open();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, att } = c.req.valid("param");
+        return answer(c, await tasks.file(db, id, att, c.req.valid("json").include));
+      })
       .get(
         "/tasks",
         validator("query", (v, c) => {

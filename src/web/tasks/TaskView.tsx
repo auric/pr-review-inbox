@@ -16,7 +16,9 @@ import type { TaskDoc } from "../../shared/task";
 import type { Layer } from "../keys";
 import type { PrRef } from "../lib/route";
 import { RunLog } from "../review/RunLog";
+import { trackerOf } from "../review/tasks";
 import { Hint } from "../shell/Hint";
+import { TaskFiles } from "./Attachments";
 import { DiffTab } from "./DiffTab";
 import { type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
 import { LogTab, stepId } from "./LogTab";
@@ -30,8 +32,15 @@ import { StepStrip } from "./StepStrip";
 // The shell keys of the Task view (keys.ts): j and k move over the steps and parts, Enter runs the primary action, Esc closes the run log.
 export type TaskApi = { step: (d: 1 | -1) => void; primary: () => void; layer: (target: EventTarget | null) => Layer; close: () => void };
 
-type Tab = "questions" | "spec" | "plan" | "log" | "diff";
-const TAB_LABEL: Record<Tab, string> = { questions: "Questions", spec: "Spec", plan: "Plan", log: "Log", diff: "Diff" };
+type Tab = "questions" | "attachments" | "spec" | "plan" | "log" | "diff";
+const TAB_LABEL: Record<Tab, string> = {
+  questions: "Questions",
+  attachments: "Attachments",
+  spec: "Spec",
+  plan: "Plan",
+  log: "Log",
+  diff: "Diff",
+};
 
 // The time of a running step changes every 15 s.
 function useTick(on: boolean) {
@@ -74,6 +83,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const part = currentPart(t);
   const tabs: Tab[] = [
     ...(t.questions.length ? ["questions" as const] : []),
+    // spec.md section 6.17: the files of the task, when its issue lists any.
+    ...(t.attachments.length || t.files.length ? ["attachments" as const] : []),
     ...(docList(t).length ? ["spec" as const] : []),
     "plan",
     "log",
@@ -293,6 +304,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         </div>
         <div id="task-panel" role="tabpanel" aria-labelledby={`task-tab-${shown}`} tabIndex={-1} className="outline-none">
           {shown === "questions" && <AnsweredList questions={t.questions} />}
+          {shown === "attachments" && <TaskFiles t={t} runner={runner} source={trackerOf(meta)?.name ?? "issue"} />}
           {shown === "spec" && (
             <SpecDocs
               t={t}

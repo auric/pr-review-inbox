@@ -5,9 +5,15 @@
 // waits for, at most one primary action, and the More actions, per state. Pure: tests/web/tasks-model.test.ts has one test per row.
 // runner: the short name of the CLI from meta, because UI code names no product (tests/ui/names.test.ts).
 import {
+  type AttachmentDto,
+  type AttachmentMeta,
   type BranchCheckDto,
   type BranchSearchDto,
   branchPrefix,
+  fileOnly,
+  listedKind,
+  listedOnly,
+  RUN_TEXT_BYTES,
   type TaskDto,
   type TaskPartDto,
   type TaskQuestionDto,
@@ -15,6 +21,7 @@ import {
   type TaskStepDto,
 } from "../../shared/dto";
 import { branchName, type TaskSize } from "../../shared/task";
+import { attachmentRows, sizeText } from "../review/tasks";
 
 export type ActionKind =
   | "answer"
@@ -430,3 +437,44 @@ export const branchesError = (message: string, project: string, repo: string) =>
 // The step strip of the server (stepStrip), with the current step: its index, or -1 for a failed or stopped task.
 export const stripSteps = (t: Pick<TaskDto, "strip">) =>
   t.strip.steps.map((label, i) => ({ label, current: i === t.strip.current, done: i < t.strip.current }));
+
+// ---------- Attachments of a task (spec.md section 6.17) ----------
+
+// One attachment of the form or of the Attachments tab. kind: from the file bytes after the download, else from the listed type.
+// why: the reason that it stays listed only, null when it has a box.
+export type FileChoice = {
+  id: string;
+  filename: string;
+  size: number;
+  type: string | null;
+  kind: "image" | "pdf" | "text" | "file";
+  why: string | null;
+  file: AttachmentDto | null;
+};
+
+export function fileChoices(attachments: AttachmentMeta[], files: AttachmentDto[]): FileChoice[] {
+  return attachmentRows({ attachments, files }).map((r) => {
+    const f = r.file;
+    const kind = f ? (f.image ? "image" : f.pdf ? "pdf" : f.text ? "text" : "file") : (listedKind(r.type) ?? "file");
+    // A row that the listing no longer names is a downloaded file, so its bytes decide too.
+    const why = f ? fileOnly(f) : listedOnly({ mimeType: r.type, size: r.size });
+    return { id: r.id, filename: r.filename, size: r.size, type: r.type, kind, why, file: f };
+  });
+}
+
+// The boxes that start ticked in the form: every box when the setting askAttachments is off, else none.
+export const firstPicks = (rows: FileChoice[], ask: boolean): string[] => (ask ? [] : rows.filter((r) => r.why === null).map((r) => r.id));
+
+// The state line of a file in the Attachments tab.
+export function fileChoiceState(r: FileChoice, runner: string): string {
+  if (r.why) return r.why;
+  if (!r.file) return "Not downloaded. A tick downloads it.";
+  if (!r.file.include) return `Downloaded. ${runner} does not get it.`;
+  return r.kind === "text" && r.file.size > RUN_TEXT_BYTES
+    ? `${runner} gets it, cut at ${RUN_TEXT_BYTES / 1024} KB.`
+    : `${runner} gets it in each step.`;
+}
+
+const KIND_TEXT = { image: "image", pdf: "PDF", text: "text", file: "file" } as const;
+// "2 KB, image/png": the size and the type of a file.
+export const fileMeta = (r: FileChoice) => `${sizeText(r.size)}, ${r.type ?? KIND_TEXT[r.kind]}`;

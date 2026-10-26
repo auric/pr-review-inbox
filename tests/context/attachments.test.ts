@@ -4,21 +4,41 @@
 // Plan r3 S-ATT: safe names, sniffing, the Jira download, the store, the start-up sweep, and the run inclusion. No test calls a real server.
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
-import { attachmentsRoot, dbStem, MAX_NAME, RETENTION_MS, rasterOf, safeName, store, sweep } from "../../src/server/context/attachments";
+import {
+  attachmentsRoot,
+  dbStem,
+  isPdf,
+  MAX_NAME,
+  RETENTION_MS,
+  rasterOf,
+  safeName,
+  store,
+  sweep,
+  taskFileDir,
+} from "../../src/server/context/attachments";
 import { createJiraSource } from "../../src/server/context/jira";
 import { ContextError } from "../../src/server/context/source";
+import { taskFileContext } from "../../src/server/context/task-file";
 import { createLive } from "../../src/server/live";
 import { createReviewJobs } from "../../src/server/review/jobs";
-import { UNTRUSTED } from "../../src/server/review/workspace";
+import { attachmentBytes, UNTRUSTED } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { openDb } from "../../src/server/storage/db";
-import { type IssueContext, RUN_TEXT_BYTES } from "../../src/shared/dto";
+import {
+  type IssueContext,
+  listedKind,
+  listedOnly,
+  MAX_ATTACHMENT_BYTES,
+  RUN_IMAGE_BYTES,
+  RUN_PDF_BYTES,
+  RUN_TEXT_BYTES,
+} from "../../src/shared/dto";
 import { FAKE_TOKEN, FAKE_USER, key, startFakeBitbucket } from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
 import { attachmentPath, ISSUE_KEY, JIRA_TOKEN, logOf, pngOf, startFakeJira } from "../support/fake-jira";
@@ -282,6 +302,122 @@ describe("sweep", () => {
   });
 });
 
+describe("task files (docs/plans/review-v2/spec.md section 6.17)", () => {
+  const PDF = Buffer.from("%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n", "latin1");
+  const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+  test("store sniffs a PDF by its first bytes; the listed type and size pick the boxes", async () => {
+    const dataDir = fresh();
+    expect(await store(dataDir, "db-x/tasks/a/1-spec.pdf", (write) => write(PDF))).toMatchObject({ pdf: true, image: false, text: false });
+    expect(await store(dataDir, "db-x/tasks/a/2-a.png", (write) => write(pngOf(300)))).toMatchObject({ pdf: false, image: true });
+    expect(isPdf(Buffer.from("%PDF"))).toBe(false);
+    expect(listedKind("application/pdf")).toBe("pdf");
+    expect(listedKind("image/png")).toBe("image");
+    expect(listedKind("image/svg+xml")).toBe("text");
+    expect(listedKind("text/plain; charset=UTF-8")).toBe("text");
+    expect(listedKind("application/json")).toBe("text");
+    expect(listedKind("application/vnd.api+json")).toBe("text");
+    expect(listedKind(DOCX)).toBeNull();
+    expect(listedKind("application/zip")).toBeNull();
+    expect(listedKind(null)).toBeNull();
+    expect(listedOnly({ mimeType: DOCX, size: 10 })).toBe("Listed only: only images, PDFs, and text files go to runs.");
+    expect(listedOnly({ mimeType: "application/pdf", size: RUN_PDF_BYTES })).toBeNull();
+    expect(listedOnly({ mimeType: "application/pdf", size: RUN_PDF_BYTES + 1 })).toBe("Listed only: runs get PDFs up to 5 MB.");
+    expect(listedOnly({ mimeType: "image/png", size: RUN_IMAGE_BYTES + 1 })).toBe("Listed only: runs get images up to 5 MB.");
+    expect(listedOnly({ mimeType: "text/plain", size: MAX_ATTACHMENT_BYTES + 1 })).toBe("Listed only: the file is over 100 MB.");
+  });
+
+  test("a task gets its included files: PDFs under the file and run caps, office files listed only; the sweep keeps them", async () => {
+    const dataDir = fresh();
+    const db = openDb(join(dataDir, "db-0123456789abcdef.sqlite"));
+    cleanup.push(() => db.close());
+    // size: the listed size, which the caps count. spec.pdf and three PDFs of 5 MB fit. The fourth passes the run total of 20 MB.
+    const files: [string, string, string, Uint8Array, number, boolean][] = [
+      ["21", "screen.png", "image/png", pngOf(300), 300, true],
+      ["22", "run.log", "text/plain", Buffer.from("line\n"), 5, true],
+      ["23", "spec.pdf", "application/pdf", PDF, PDF.length, true],
+      ["24", "a.pdf", "application/pdf", PDF, RUN_PDF_BYTES, true],
+      ["25", "b.pdf", "application/pdf", PDF, RUN_PDF_BYTES, true],
+      ["26", "c.pdf", "application/pdf", PDF, RUN_PDF_BYTES, true],
+      ["27", "d.pdf", "application/pdf", PDF, RUN_PDF_BYTES, true],
+      ["28", "big.pdf", "application/pdf", PDF, RUN_PDF_BYTES + 1, true],
+      ["29", "off.png", "image/png", pngOf(300), 300, false],
+    ];
+    const issue: IssueContext = {
+      key: "ABC-7",
+      summary: "Read the files",
+      status: "Open",
+      description: "See ![screen.png](attachment:21).",
+      comments: [],
+      commentsTotal: 0,
+      truncated: false,
+      format: "markdown",
+      attachments: [
+        ...files.map(([id, filename, mimeType, , size]) => ({ id, filename, mimeType, size, created: null })),
+        { id: "30", filename: "plan.docx", mimeType: DOCX, size: 4, created: null },
+        { id: "31", filename: "later.log", mimeType: "text/plain", size: 4, created: null },
+      ],
+    };
+    const { id: task } = db
+      .query(
+        `INSERT INTO task (project, repo, key, title, state, target_branch, spec_dir, issue_json, created_at, updated_at)
+          VALUES ('P', 'r', 'ABC-7', 'Read the files', 'interview', 'main', 'specs/ABC-7/', $json, 0, 0) RETURNING id`,
+      )
+      .get({ json: JSON.stringify(issue) }) as { id: number };
+    for (const [id, filename, mime, body, size, include] of files) {
+      const rel = `${taskFileDir(db, "f")}/${id}-${filename}`;
+      const made = await store(dataDir, rel, (write) => write(body));
+      db.query(
+        `INSERT INTO task_file (task, att_id, filename, mime, size, file, sha256, image, text, pdf, include, downloaded_at)
+          VALUES ($task, $id, $filename, $mime, $size, $rel, $sha, $image, $text, $pdf, $include, 0)`,
+      ).run({
+        task,
+        id,
+        filename,
+        mime,
+        size,
+        rel,
+        sha: made.sha256,
+        image: made.image ? 1 : 0,
+        text: made.text ? 1 : 0,
+        pdf: made.pdf ? 1 : 0,
+        include: include ? 1 : 0,
+      });
+    }
+    const t = { id: task, key: "ABC-7", origin_pr: null, issue_json: JSON.stringify(issue), created_at: 0 };
+    const { files: md, attachments } = taskFileContext(db, dataDir, t);
+    expect(attachments.map((a) => a.name)).toEqual(["21.png", "22.txt", "23.pdf", "24.pdf", "25.pdf", "26.pdf"]);
+    expect(attachments.filter((a) => a.text).map((a) => a.name)).toEqual(["22.txt"]);
+    const text = md[0]?.text ?? "";
+    for (const line of [
+      "See ![screen.png](./attachments/21.png).",
+      `- spec.pdf: ${PDF.length} bytes, application/pdf. Included as ./attachments/23.pdf.`,
+      `- d.pdf: ${RUN_PDF_BYTES} bytes, application/pdf. Not included: a run gets at most 20 MB of PDFs.`,
+      `- big.pdf: ${RUN_PDF_BYTES + 1} bytes, application/pdf. Not included: PDFs over 5 MB are listed only.`,
+      "- off.png: 300 bytes, image/png. Not included.",
+      `- plan.docx: 4 bytes, ${DOCX}. Listed only: only images, PDFs, and text files go to runs.`,
+      "- later.log: 4 bytes, text/plain. Not included.",
+    ])
+      expect(text).toContain(line);
+    // The run copies a PDF byte for byte.
+    const pdf = attachments.find((a) => a.name === "23.pdf");
+    // The root is the long path of the data folder, as the runs pass it.
+    const root = attachmentsRoot(realpathSync.native(dataDir));
+    expect(Buffer.from(await attachmentBytes(root, pdf as NonNullable<typeof pdf>)).equals(PDF)).toBe(true);
+    // No data folder: task.md alone.
+    expect(taskFileContext(db, null, t).attachments).toEqual([]);
+    // The start-up sweep keeps the files of a task while its row stays, and drops them with it.
+    writeFileSync(join(attachmentsRoot(dataDir), taskFileDir(db, "f"), "99-orphan.txt"), "x");
+    sweep(db, dataDir);
+    const left = () => readdirSync(join(attachmentsRoot(dataDir), taskFileDir(db, "f"))).sort();
+    expect(left()).toHaveLength(files.length);
+    db.query("DELETE FROM task WHERE id = $task").run({ task });
+    sweep(db, dataDir);
+    expect(readdirSync(join(attachmentsRoot(dataDir), dbStem(db)))).toEqual([]);
+    expect(left).toThrow();
+  });
+});
+
 describe("run inclusion", () => {
   test("a run copies only included images and text; text gets the banner and the cut; others are listed only; stdin has no attachment text", async () => {
     const dir = fresh();
@@ -388,7 +524,7 @@ describe("run inclusion", () => {
       "### Attachments (6)",
       "- shot.png: 300 bytes, image/png. Included as ./attachments/10.png.",
       "- notes.log: 36 bytes, image/png. Included as ./attachments/11.txt.",
-      "- dump.bin: 10 bytes, image/png. Not included: only images and text files go to runs.",
+      "- dump.bin: 10 bytes, image/png. Not included: only images, PDFs, and text files go to runs.",
       "- other.png: 300 bytes, image/png. Not included.",
       `- big.log: ${RUN_TEXT_BYTES + 100} bytes, image/png. Included as ./attachments/15.txt, cut at 256 KB.`,
       "- never.txt: 3 bytes, text/plain. Not downloaded.",

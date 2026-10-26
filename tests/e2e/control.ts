@@ -284,6 +284,14 @@ export async function runAttachments(): Promise<string[] | null> {
   return ((await res.json()) as { files: string[] | null }).files;
 }
 
+// docs/plans/review-v2/spec.md section 6.17: the names in context/attachments/ and the task.md text of each fake CLI run since the
+// last reset, oldest first. No hang run is needed.
+export async function runFiles(): Promise<{ attachments: string[]; task: string | null }[]> {
+  const res = await fetch(`${FAKE_URL}/__control/run-files`, { method: "POST", headers: auth });
+  if (!res.ok) throw new Error(`control run-files: ${res.status}`);
+  return ((await res.json()) as { runs: { attachments: string[]; task: string | null }[] }).runs;
+}
+
 // The file paths under skills/ of the newest fake CLI run, or null before the first run. As runAttachments, start a hang run first.
 export async function runSkills(): Promise<string[] | null> {
   const res = await fetch(`${FAKE_URL}/__control/run-skills`, { method: "POST", headers: auth });

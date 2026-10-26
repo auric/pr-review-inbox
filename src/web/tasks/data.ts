@@ -4,7 +4,7 @@
 // Server state of the tasks (docs/plans/review-v2/spec.md section 6.11). Keys: ['tasks'], ['task', id], ['task', id, 'diff', head],
 // ['task', id, 'run', run], ['task', id, 'branch', prefix], ['task-settings', project, repo], ['branches', project, repo, filter].
 // live.ts refetches ['tasks'] and ['task', id] with the keys under it when SSE `changed` names the task.
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import type {
   BranchCheckDto,
@@ -15,6 +15,7 @@ import type {
   TaskCreateInput,
   TaskDiffDto,
   TaskDto,
+  TaskIssueDto,
   TaskPlanInput,
   TaskRowDto,
 } from "../../shared/dto";
@@ -103,6 +104,18 @@ export const useRepoTaskSettings = (project: string, repo: string) =>
 // POST /api/tasks: 201 with a new task, or 200 with the open task of the same key.
 export async function createTask(input: TaskCreateInput): Promise<TaskDto> {
   return read<TaskDto>(await api.api.tasks.$post({ json: input }));
+}
+
+// POST /api/tasks/issue (spec.md section 6.17): the summary and the attachments of a key. One tracker read on the user's click.
+export async function readIssue(key: string): Promise<TaskIssueDto> {
+  return read<TaskIssueDto>(await api.api.tasks.issue.$post({ json: { key } }));
+}
+
+// PUT /api/tasks/:id/files/:att (spec.md section 6.17): a tick downloads the file once and includes it. The answer holds the task.
+export async function putTaskFile(qc: QueryClient, id: number, att: string, include: boolean): Promise<TaskDto> {
+  const dto = await read<TaskDto>(await api.api.tasks[":id"].files[":att"].$put({ param: { id: String(id), att }, json: { include } }));
+  qc.setQueryData(["task", id], dto);
+  return dto;
 }
 
 // A 409 of a task mutation holds the current task (TaskConflict). The view takes it, so the next click sends the new version.

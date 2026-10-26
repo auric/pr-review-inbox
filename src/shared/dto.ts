@@ -841,6 +841,7 @@ export type IssueContext = {
 };
 
 // A downloaded attachment (plan r3 S-ATT). include: the file goes to context/attachments/ of each run. downloadedAt: ms.
+// image, text, pdf: from the file bytes (attachments.ts store).
 export type AttachmentDto = {
   id: string;
   filename: string;
@@ -848,6 +849,7 @@ export type AttachmentDto = {
   sha256: string;
   image: boolean;
   text: boolean;
+  pdf: boolean;
   include: boolean;
   downloadedAt: number;
 };
@@ -866,6 +868,42 @@ export const RUN_IMAGE_BYTES = 5 * 1024 * 1024;
 export const RUN_IMAGES = 20;
 export const RUN_TEXT_BYTES = 256 * 1024;
 export const RUN_TEXT_TOTAL = 1024 * 1024;
+// docs/plans/review-v2/spec.md section 6.17: PDFs go to runs as files. The Read tool of the CLI reads them page by page.
+export const RUN_PDF_BYTES = RUN_IMAGE_BYTES;
+export const RUN_PDF_TOTAL = 20 * 1024 * 1024;
+
+const RASTER_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const ONLY_KINDS = "Listed only: only images, PDFs, and text files go to runs.";
+
+// spec.md section 6.17: the kind of a listed attachment before its download, from the listed media type. text: a text/* type or a
+// JSON or XML MIME type (WHATWG MIME Sniffing, section 4.6, "MIME type groups"). null: runs never get it. After the download, the
+// file bytes decide (task-file.ts).
+export function listedKind(mimeType: string | null): "image" | "pdf" | "text" | null {
+  const essence = (mimeType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  const sub = essence.slice(essence.indexOf("/") + 1);
+  if (RASTER_TYPES.has(essence)) return "image";
+  if (essence === "application/pdf") return "pdf";
+  if (essence.startsWith("text/") || essence === "application/json" || sub.endsWith("+json")) return "text";
+  if (essence === "application/xml" || sub.endsWith("+xml")) return "text";
+  return null;
+}
+
+// Why a listed attachment cannot go to runs, or null when a task can give it to Claude. The run caps can still leave it out.
+export function listedOnly(a: Pick<AttachmentMeta, "mimeType" | "size">): string | null {
+  const kind = listedKind(a.mimeType);
+  if (!kind) return ONLY_KINDS;
+  if (a.size > MAX_ATTACHMENT_BYTES) return `Listed only: the file is over ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`;
+  if (kind === "image" && a.size > RUN_IMAGE_BYTES) return `Listed only: runs get images up to ${RUN_IMAGE_BYTES / 1024 / 1024} MB.`;
+  if (kind === "pdf" && a.size > RUN_PDF_BYTES) return `Listed only: runs get PDFs up to ${RUN_PDF_BYTES / 1024 / 1024} MB.`;
+  return null;
+}
+
+// Why a downloaded file cannot go to runs, or null. The file bytes decide, with the same caps as task-file.ts.
+export function fileOnly(f: Pick<AttachmentDto, "image" | "pdf" | "text" | "size">): string | null {
+  if (f.image) return f.size > RUN_IMAGE_BYTES ? `Listed only: runs get images up to ${RUN_IMAGE_BYTES / 1024 / 1024} MB.` : null;
+  if (f.pdf) return f.size > RUN_PDF_BYTES ? `Listed only: runs get PDFs up to ${RUN_PDF_BYTES / 1024 / 1024} MB.` : null;
+  return f.text ? null : ONLY_KINDS;
+}
 
 // PUT /api/settings/jira. Empty baseUrl disconnects Jira and clears the token. Absent or empty token keeps the stored token.
 export const jiraSettingsInput = z.object({
@@ -1197,13 +1235,18 @@ const repoName = z.string().trim().min(1).max(255);
 const taskReviewers = z.array(z.string().trim().min(1).max(255)).max(MAX_TASK_REVIEWERS);
 const taskSize = z.enum(TASK_SIZES);
 
-// POST /api/tasks. 201 with the new task, or 200 with the open task of the same key.
+// POST /api/tasks. 201 with the new task, or 200 with the open task of the same key. files: the attachment IDs that Claude gets
+// (spec.md section 6.17). Absent: every file that can go to runs when the setting askAttachments is off, else none.
 export const taskCreateInput = z.object({
   project: repoName,
   repo: repoName,
   key: z.string().regex(TASK_KEY),
   originPr: positiveInt.optional(),
+  files: z.array(z.string().regex(ATT_ID)).max(200).optional(),
 });
+// POST /api/tasks/issue: the issue of a key before the task exists (spec.md section 6.17). One Jira read on the user's click.
+export const taskIssueInput = z.object({ key: z.string().regex(TASK_KEY) });
+export type TaskIssueDto = { key: string; summary: string; status: string | null; attachments: AttachmentMeta[] };
 // GET /api/tasks.
 export const taskListInput = z.object({ state: z.enum(["open", "all"]).default("open") });
 // POST /api/tasks/:id/answers. question: a task_question ID. choice: the index of an option. recommended: use every recommended answer.
@@ -1422,6 +1465,10 @@ export type TaskDto = TaskRowDto & {
   points: TaskPointDto[];
   // The build loop works on the task now, also between two steps.
   working: boolean;
+  // spec.md section 6.17: the attachments that the issue of the task lists, and the files that the task downloaded. A file with
+  // include true goes to ./context/attachments/ of each Claude step.
+  attachments: AttachmentMeta[];
+  files: AttachmentDto[];
 };
 
 // 409 of a task mutation: the version is old, or the state takes no such change. task: the current task.

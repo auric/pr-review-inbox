@@ -71,7 +71,7 @@ To try PR Review Inbox without a Bitbucket server, run `bun run demo` from sourc
 
 1. Open http://127.0.0.1:7317.
 2. Enter your Bitbucket URL and access token, then click Save. PR Review Inbox tests the connection first.
-3. Optional: in Settings, Jira, connect Jira. The review brief can then fetch the task text. The first "Include in runs" on a task attachment asks you to confirm your company AI policy. "Ask before Claude reads a Jira attachment" in the same section asks again.
+3. Optional: in Settings, Jira, connect Jira. The review brief can then fetch the task text. The first "Include in runs" on a task attachment, or the first attachment box of a Build task, asks you to confirm your company AI policy. "Ask before Claude reads a Jira attachment" in the same section asks again.
 4. The inbox lists the pull requests on your Bitbucket dashboard. To follow another one, paste its URL into the filter.
 5. Open a pull request and press `r` to open the review brief. Add a note. With two or more review profiles, pick one.
 6. Click Start review, or press `Ctrl+Enter`.
@@ -181,7 +181,7 @@ Press `w`, or click "Explain this PR", to open the walkthrough page of the pull 
 
 ### Build a Jira task
 
-Click "Build" on the task chip of a pull request, or open Tasks in the sidebar and use "Build a Jira task" with a key and a repository. Claude reads the task and the code, then asks a few questions. Each question says why it matters and offers options, and the recommended option starts selected. "Use the recommended answers" sends them all.
+Click "Build" on the task chip of a pull request, or open Tasks in the sidebar and use "Build a Jira task" with a key and a repository. "Read the task" shows the summary and the attachments of the issue, each with a box. Claude gets the ticked files in every step: images and PDFs up to 5 MB, and text files. Office files and archives stay listed by name only. With "Ask before Claude reads a Jira attachment" off in Settings, Jira, every box starts ticked. Else the first tick asks you to confirm your company AI policy. "Build this task" downloads the ticked files into the task. The Attachments tab of the task has the same boxes and "Include all", and a change applies from the next step. Build on a task chip has no form: it gives Claude every file with a box when the question is off, else none. Claude reads the task and the code, then asks a few questions. Each question says why it matters and offers options, and the recommended option starts selected. "Use the recommended answers" sends them all.
 
 ![The Task view with the step strip, the status sentence, and the questions with the recommended options](docs/screenshots/task-questions.webp)
 

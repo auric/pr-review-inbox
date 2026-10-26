@@ -429,6 +429,8 @@ export function createLoop(opts: LoopOptions) {
       const attempt = nextAttempt(c, mode, item);
       const before = new Set(await dirty(c.trees));
       const answers = stepAnswers(c.db, c.id);
+      // spec.md section 6.17: the task text and the included files as they are at this step.
+      const task = taskFilesOf(c.db, dataDir, c.t);
       let out: StepOutcome | null = null;
       const s = await startStep({
         db: c.db,
@@ -440,7 +442,8 @@ export function createLoop(opts: LoopOptions) {
         item,
         attempt,
         profile: c.profile,
-        untrusted: [...taskFilesOf(c.db, dataDir, c.t).files.filter((f) => f.name === "task.md"), ...(o.failure ? [o.failure] : [])],
+        untrusted: [...task.files.filter((f) => f.name === "task.md"), ...(o.failure ? [o.failure] : [])],
+        attachments: task.attachments,
         own: [...(answers ? [answers] : []), o.step(attempt), ...planFiles(c)],
         allow: o.allow,
         specDir: c.t.spec_dir,
@@ -648,12 +651,12 @@ export function createLoop(opts: LoopOptions) {
   // repository; its run reads that repository's base..head (spec.md section 6.16.5, Snapshots).
   async function reviewRun(c: Ctx, sub?: ChangedSub): Promise<{ step: number; points: Point[] }> {
     let waiting: number | null = null;
-    const issue = taskFilesOf(c.db, dataDir, c.t)
-      .files.map((f) => f.text)
-      .join("\n\n");
     for (;;) {
       await gate(c);
       guard(c);
+      // spec.md section 6.17: the task text and the included files as they are at this step.
+      const task = taskFilesOf(c.db, dataDir, c.t);
+      const issue = task.files.map((f) => f.text).join("\n\n");
       const head = sub ? sub.head : await headOf(c.wt);
       const attempt = nextAttempt(c, "review", "review");
       const src = sub
@@ -683,6 +686,7 @@ export function createLoop(opts: LoopOptions) {
             text: `# ${c.t.key}: ${oneLine(c.t.title)}\n\nThis change has no pull request yet. The app builds it for task ${c.t.key} on the branch ${c.part.branch}.${sub ? ` This review covers the submodule at ${oneLine(sub.tree.full)} only.` : ""}\n\n## Goal\n\n${goals.join("\n")}\n`,
           },
         ],
+        attachments: task.attachments,
         started: (d, run) => {
           step = runningStep(d, { task: c.id, part: c.part.id, kind: "review", run, item: "review", attempt }, waiting, now());
         },

@@ -4,11 +4,13 @@
 // Imported task text (plan r2, task context UI): the pure rules. TaskChips.tsx and Brief.tsx hold the requests.
 import {
   type AttachmentDto,
+  fileOnly,
   JIRA_KEY,
   MAX_ATTACHMENT_BYTES,
   type MetaDto,
   type PrTask,
   RUN_IMAGE_BYTES,
+  RUN_PDF_BYTES,
   RUN_TEXT_BYTES,
   type RunDto,
   type TaskContextDto,
@@ -97,7 +99,8 @@ export type AttachmentRow = {
 };
 
 // The same list and order as task.md (task-file.ts): the listing, then the downloaded files that the listing no longer names.
-export function attachmentRows(t: TaskContextDto): AttachmentRow[] {
+// t: a fetched task of a PR, or a Build task (TaskDto) with its own files.
+export function attachmentRows(t: Pick<TaskContextDto, "attachments" | "files">): AttachmentRow[] {
   const files = new Map(t.files.map((f) => [f.id, f]));
   const listed = t.attachments ?? [];
   const named = new Set(listed.map((a) => a.id));
@@ -130,18 +133,20 @@ export function fileKind(r: AttachmentRow): "image" | "text" | "file" {
   return r.type?.startsWith("image/") ? "image" : r.type?.startsWith("text/") ? "text" : "file";
 }
 
-export const typeText = (r: AttachmentRow) => r.type ?? (r.file?.image ? "image" : r.file?.text ? "text" : "unknown type");
+export const typeText = (r: AttachmentRow) =>
+  r.type ?? (r.file?.image ? "image" : r.file?.pdf ? "PDF" : r.file?.text ? "text" : "unknown type");
 
 export const canDownload = (r: AttachmentRow) => !r.file && r.listed && r.size <= MAX_ATTACHMENT_BYTES;
 
-// Same rules as task-file.ts: runs get raster images up to RUN_IMAGE_BYTES and text files. The run caps can still leave one out.
-export const includable = (f: AttachmentDto) => (f.image ? f.size <= RUN_IMAGE_BYTES : f.text);
+// Same rules as task-file.ts: runs get raster images and PDFs up to their caps, and text files. The run caps can still leave one out.
+export const includable = (f: AttachmentDto) => fileOnly(f) === null;
 
 export function fileState(r: AttachmentRow): string {
   const f = r.file;
   const gone = r.listed ? "" : " The task no longer lists it.";
   if (!f) return r.size > MAX_ATTACHMENT_BYTES ? `Over ${MAX_ATTACHMENT_BYTES / MB} MB, too large to download.` : `Not downloaded.${gone}`;
   if (f.image && f.size > RUN_IMAGE_BYTES) return `Downloaded. Runs list images over ${RUN_IMAGE_BYTES / MB} MB by name only.${gone}`;
+  if (f.pdf && f.size > RUN_PDF_BYTES) return `Downloaded. Runs list PDFs over ${RUN_PDF_BYTES / MB} MB by name only.${gone}`;
   if (!includable(f)) return `Downloaded. Runs list it by name only.${gone}`;
   if (!f.include) return `Downloaded.${gone}`;
   return `Included in runs${f.text && f.size > RUN_TEXT_BYTES ? `, cut at ${RUN_TEXT_BYTES / KB} KB` : ""}.${gone}`;

@@ -324,6 +324,8 @@ export type TaskReviewStart = {
   head: string;
   taskKey: string;
   files: ContextFile[];
+  // The included files of the task for context/attachments/ (spec.md section 6.17).
+  attachments: AttachmentFile[];
   started: (db: Database, run: number) => void;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
 };
@@ -1229,6 +1231,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         base: t.base,
         head: t.head,
         files: t.files,
+        attachments: t.attachments,
       });
     } catch (e) {
       if (j.cancelled) return cancelledEnding();
@@ -1262,7 +1265,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     );
     const context: ReviewContext = {
       taskFile: true,
-      attachments: false,
+      attachments: t.attachments.length > 0,
       history: false,
       questions: false,
       rereview: false,
@@ -1280,7 +1283,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       task: t.taskKey,
       tasks: [],
       taskFile: true,
-      attachments: false,
+      attachments: t.attachments.length > 0,
       instructions: instructions.text,
     };
     j.phase = "finding";

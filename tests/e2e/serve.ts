@@ -753,6 +753,15 @@ r[key("POST", "/__control/run-attachments")] = () => {
   const dir = join(cwd, "context", "attachments");
   return ok({ files: existsSync(dir) ? readdirSync(dir).sort() : [] });
 };
+// docs/plans/review-v2/spec.md section 6.17: for each fake CLI run since the last reset, the names in context/attachments/ and
+// context/task.md at its start. The fake CLI records them, so the run folder need not exist.
+r[key("POST", "/__control/run-files")] = () => {
+  const record = join(claudeDir, "calls.jsonl");
+  const runs = readRecords<{ argv?: string[]; attachments?: string[]; context?: Record<string, string> }>(record).filter((c) =>
+    c.argv?.includes("-p"),
+  );
+  return ok({ runs: runs.map((c) => ({ attachments: c.attachments ?? [], task: c.context?.["task.md"] ?? null })) });
+};
 // The file paths under skills/ of the newest fake CLI run, with "/" separators. null: no run.
 r[key("POST", "/__control/run-skills")] = () => {
   const cwd = runCwd();

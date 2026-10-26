@@ -4,14 +4,28 @@
 // docs/plans/review-v2/spec.md sections 6.12 and 7.1 (WP-B5, AC-UX1, AC-UX3, AC-UX9): one test per state row of the Task view table for
 // small tasks, the status line of a Tasks row, and the plain-word helpers.
 import { describe, expect, test } from "bun:test";
-import type { BranchCheckDto, TaskDto, TaskPartDto, TaskQuestionDto, TaskRowDto, TaskStepDto } from "../../src/shared/dto";
+import type {
+  AttachmentDto,
+  AttachmentMeta,
+  BranchCheckDto,
+  TaskDto,
+  TaskPartDto,
+  TaskQuestionDto,
+  TaskRowDto,
+  TaskStepDto,
+} from "../../src/shared/dto";
 import { stepDetail } from "../../src/shared/task";
 import {
   branchApproval,
   branchesError,
   branchNote,
   elapsed,
+  type FileChoice,
+  fileChoiceState,
+  fileChoices,
+  fileMeta,
   firstPick,
+  firstPicks,
   pickedPrefix,
   plannedBranch,
   planSentence,
@@ -117,6 +131,8 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     reviewers: [],
     points: [],
     working: false,
+    attachments: [],
+    files: [],
     ...o,
   };
 }
@@ -521,5 +537,83 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     expect(rowStatus(row({ state: "ready" })).text).toBe("Waiting for review");
     expect(rowStatus(row({ state: "stopped" })).text).toBe("Stopped");
     expect(rowStatus(row({ state: "done", closedAt: NOW })).text).toBe("Closed");
+  });
+});
+
+describe("the attachments of a task (spec.md section 6.17)", () => {
+  const MB = 1024 * 1024;
+  const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const meta = (id: string, filename: string, mimeType: string | null, size = 2048): AttachmentMeta => ({
+    id,
+    filename,
+    mimeType,
+    size,
+    created: null,
+  });
+  const file = (id: string, o: Partial<AttachmentDto> = {}): AttachmentDto => ({
+    id,
+    filename: `f${id}`,
+    size: 2048,
+    sha256: "0".repeat(64),
+    image: false,
+    text: false,
+    pdf: false,
+    include: false,
+    downloadedAt: 1,
+    ...o,
+  });
+  const LISTING = [
+    meta("1", "screen.png", "image/png"),
+    meta("2", "run.log", "text/plain; charset=UTF-8", 512),
+    meta("3", "spec.pdf", "application/pdf"),
+    meta("4", "plan.docx", DOCX),
+    meta("5", "logs.zip", "application/zip"),
+    meta("6", "huge.png", "image/png", 5 * MB + 1),
+    meta("7", "data.json", "application/json"),
+    meta("8", "unknown.bin", null),
+  ];
+
+  test("before the download, the listed type and size give the box; office files and archives stay listed only", () => {
+    const rows = fileChoices(LISTING, []);
+    expect(rows.map((r) => [r.id, r.kind, r.why])).toEqual([
+      ["1", "image", null],
+      ["2", "text", null],
+      ["3", "pdf", null],
+      ["4", "file", "Listed only: only images, PDFs, and text files go to runs."],
+      ["5", "file", "Listed only: only images, PDFs, and text files go to runs."],
+      ["6", "image", "Listed only: runs get images up to 5 MB."],
+      ["7", "text", null],
+      ["8", "file", "Listed only: only images, PDFs, and text files go to runs."],
+    ]);
+    expect(fileMeta(rows[0] as FileChoice)).toBe("2 KB, image/png");
+    expect(fileMeta({ ...(rows[7] as FileChoice), size: 10 })).toBe("10 B, file");
+  });
+
+  test("with the setting off every box starts ticked; asking starts with none", () => {
+    const rows = fileChoices(LISTING, []);
+    expect(firstPicks(rows, false)).toEqual(["1", "2", "3", "7"]);
+    expect(firstPicks(rows, true)).toEqual([]);
+    expect(firstPicks([], false)).toEqual([]);
+  });
+
+  test("after the download the bytes decide, and the state line says what the runner gets", () => {
+    const rows = fileChoices(LISTING, [
+      file("1", { image: true, include: true }),
+      // A listed PNG that is an HTML login page: no box.
+      file("6", { size: 100 }),
+      file("2", { text: true, size: 300 * 1024, include: true }),
+      file("3", { pdf: true }),
+      file("9", { filename: "old.txt", text: true }),
+    ]);
+    const by = (id: string) => rows.find((r) => r.id === id) as FileChoice;
+    expect(by("6")).toMatchObject({ kind: "file", why: "Listed only: only images, PDFs, and text files go to runs." });
+    expect(by("3")).toMatchObject({ kind: "pdf", why: null });
+    // A downloaded file that the listing no longer names keeps its box.
+    expect(by("9")).toMatchObject({ kind: "text", why: null });
+    expect(fileChoiceState(by("1"), R)).toBe("Claude gets it in each step.");
+    expect(fileChoiceState(by("2"), R)).toBe("Claude gets it, cut at 256 KB.");
+    expect(fileChoiceState(by("3"), R)).toBe("Downloaded. Claude does not get it.");
+    expect(fileChoiceState(by("7"), R)).toBe("Not downloaded. A tick downloads it.");
+    expect(fileChoiceState(by("4"), R)).toBe("Listed only: only images, PDFs, and text files go to runs.");
   });
 });

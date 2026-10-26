@@ -3,7 +3,7 @@
 
 // The sanitized, pinned work folder of one review run (plan v3 WP6). The layout matches claude.ts:
 // <dataDir>/runs/<id>/work/{repo,context} is the CLI cwd, <dataDir>/runs/<id>/app holds the app files.
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir, rename, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { indentBlock, oneLine } from "../../shared/consult";
@@ -32,8 +32,8 @@ const RENAME = new Set(["claude.md", "claude.local.md", "agents.md"]);
 const RM_TREE = { recursive: true, force: true, maxRetries: 3 } as const;
 // Names of the extra context files. pr.md belongs to the workspace.
 const FILE_NAME = /^[a-z-]+\.md$/;
-// Plan r3: context/attachments/<attachment ID>.<ext>. Only .txt is text.
-const ATTACHMENT_NAME = /^[0-9]{1,18}\.(png|jpg|gif|webp|txt)$/;
+// Plan r3: context/attachments/<attachment ID>.<ext>. Only .txt is text. docs/plans/review-v2/spec.md section 6.17 adds .pdf.
+export const ATTACHMENT_NAME = /^[0-9]{1,18}\.(png|jpg|gif|webp|pdf|txt)$/;
 // A fixed identity and date give the same range base commit for the same inputs.
 const RANGE_IDENTITY = {
   GIT_AUTHOR_NAME: "Review Loop",
@@ -306,7 +306,7 @@ export function locked<T>(key: string, f: () => Promise<T>): Promise<T> {
 }
 
 // The long path of the data folder, created when missing.
-function longData(dataDir: string) {
+export function longData(dataDir: string) {
   mkdirSync(dataDir, { recursive: true });
   return realpathSync.native(dataDir);
 }
@@ -388,32 +388,31 @@ async function rangeBaseOf(g: (args: string[], extra?: Record<string, string>) =
   }
 }
 
-// root: <dataDir>/attachments with the long data folder path. A source that resolves outside it, also by a link, is refused.
+// The bytes of one attachment in context/attachments/. root: <dataDir>/attachments with the long data folder path. A source that
+// resolves outside it, also by a link, is refused. A text file gets the UNTRUSTED banner and is cut at RUN_TEXT_BYTES.
+export async function attachmentBytes(root: string, a: AttachmentFile): Promise<Uint8Array> {
+  let src: string;
+  try {
+    src = realpathSync.native(a.src);
+  } catch {
+    throw new WorkspaceError(`Attachment ${a.name} has no source file.`);
+  }
+  const r = relative(root, src);
+  if (!r || r.startsWith("..") || isAbsolute(r) || !statSync(src).isFile())
+    throw new WorkspaceError(`Attachment ${a.name} is not a file in the attachments folder.`);
+  if (!a.text) return readFileSync(src);
+  const bytes = await Bun.file(src)
+    .slice(0, RUN_TEXT_BYTES + 1)
+    .bytes();
+  const cut = bytes.length > RUN_TEXT_BYTES;
+  // stream: true holds back a UTF-8 sequence that the cut splits.
+  const text = new TextDecoder().decode(bytes.subarray(0, RUN_TEXT_BYTES), { stream: cut });
+  return Buffer.from(UNTRUSTED + text + (cut ? `\n\n[The app cut this file at ${RUN_TEXT_BYTES} bytes.]\n` : ""));
+}
+
 async function copyAttachments(root: string, dir: string, list: AttachmentFile[]) {
   mkdirSync(dir);
-  for (const a of list) {
-    let src: string;
-    try {
-      src = realpathSync.native(a.src);
-    } catch {
-      throw new WorkspaceError(`Attachment ${a.name} has no source file.`);
-    }
-    const r = relative(root, src);
-    if (!r || r.startsWith("..") || isAbsolute(r) || !statSync(src).isFile())
-      throw new WorkspaceError(`Attachment ${a.name} is not a file in the attachments folder.`);
-    const out = join(dir, a.name);
-    if (!a.text) {
-      copyFileSync(src, out);
-      continue;
-    }
-    const bytes = await Bun.file(src)
-      .slice(0, RUN_TEXT_BYTES + 1)
-      .bytes();
-    const cut = bytes.length > RUN_TEXT_BYTES;
-    // stream: true holds back a UTF-8 sequence that the cut splits.
-    const text = new TextDecoder().decode(bytes.subarray(0, RUN_TEXT_BYTES), { stream: cut });
-    writeFileSync(out, UNTRUSTED + text + (cut ? `\n\n[The app cut this file at ${RUN_TEXT_BYTES} bytes.]\n` : ""));
-  }
+  for (const a of list) writeFileSync(join(dir, a.name), await attachmentBytes(root, a));
 }
 
 export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace> {
@@ -677,6 +676,8 @@ export type CommitWorkspaceInput = {
   head: string;
   // Names match FILE_NAME. pr.md is allowed: the snapshot has no PR text of its own.
   files?: ContextFile[];
+  // Names match ATTACHMENT_NAME (spec.md section 6.17).
+  attachments?: AttachmentFile[];
   long?: LongGit;
 };
 
@@ -688,6 +689,9 @@ export async function prepareCommitWorkspace(input: CommitWorkspaceInput): Promi
   for (const c of [input.base, input.head]) if (!HEAD.test(c)) throw new WorkspaceError(`Invalid commit hash: ${c}`);
   const files = input.files ?? [];
   for (const f of files) if (!FILE_NAME.test(f.name)) throw new WorkspaceError(`Invalid context file name: ${f.name}`);
+  const attachments = input.attachments ?? [];
+  for (const a of attachments)
+    if (!ATTACHMENT_NAME.test(a.name) || a.text !== a.name.endsWith(".txt")) throw new WorkspaceError(`Invalid attachment name: ${a.name}`);
   const dataDir = longData(input.dataDir);
   const cache = cachePath(dataDir, { project: input.project, repo: input.repo, id: input.task });
   if (!existsSync(join(cache, "HEAD"))) throw new WorkspaceError(`The app has no copy of ${input.project}/${input.repo} yet.`);
@@ -699,7 +703,7 @@ export async function prepareCommitWorkspace(input: CommitWorkspaceInput): Promi
   }
   const diff = await g(["diff", ...diffArgs, input.base, input.head]);
   const at = { sourceHead: input.head, targetHead: input.base, mergeBase: input.base, rangeBase: input.base, diff };
-  return taskSnapshot({ dataDir, cache, env, runId, task: input.task, files, attachments: [], long: input.long }, at);
+  return taskSnapshot({ dataDir, cache, env, runId, task: input.task, files, attachments, long: input.long }, at);
 }
 
 // Deletes every run folder and prunes the worktree entries of every cache. Call it only when no run is active.

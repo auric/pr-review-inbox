@@ -134,6 +134,7 @@ const file = (id: string, o: Partial<AttachmentDto> = {}): AttachmentDto => ({
   sha256: "0".repeat(64),
   image: false,
   text: false,
+  pdf: false,
   include: false,
   downloadedAt: 1,
   ...o,
@@ -201,6 +202,12 @@ test("fileState names the download and run state in words", () => {
   expect(includable(file("1", { image: true, size: 5 * MB + 1 }))).toBe(false);
   expect(includable(file("1", { text: true, size: 50 * MB }))).toBe(true);
   expect(includable(file("1"))).toBe(false);
+  // docs/plans/review-v2/spec.md section 6.17: a PDF goes to runs up to 5 MB.
+  expect(includable(file("1", { pdf: true, size: 5 * MB }))).toBe(true);
+  expect(includable(file("1", { pdf: true, size: 5 * MB + 1 }))).toBe(false);
+  expect(fileState(r({ file: file("1", { pdf: true, include: true }) }))).toBe("Included in runs.");
+  expect(fileState(r({ file: file("1", { pdf: true, size: 5 * MB + 1 }) }))).toBe("Downloaded. Runs list PDFs over 5 MB by name only.");
+  expect(typeText({ id: "1", filename: "x", size: 1, type: null, file: file("1", { pdf: true }), listed: true })).toBe("PDF");
 });
 
 test("the images resolver maps only a downloaded raster image to the local image route", () => {

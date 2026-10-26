@@ -713,6 +713,7 @@ function Shell({ stale }: { stale: boolean }) {
             focused={ks.focus === "list" && !showSettings}
             repos={repoTree(all)}
             tracker={trackerOf(meta.data)?.name ?? "issue"}
+            runner={meta.data.runner.short}
             banner={<Banner stale={stale} status={status.data} now={now} forge={forge} onSettings={() => openSettings()} />}
             onSelect={openTask}
             onOpen={openTask}

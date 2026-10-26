@@ -11,10 +11,12 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { TASK_KEY, type TaskCreateInput, type TaskRowDto } from "../../shared/dto";
+import { TASK_KEY, type TaskCreateInput, type TaskIssueDto, type TaskRowDto } from "../../shared/dto";
 import { useMinute } from "../shell/ListPane";
 import { ago, type ProjectRepos } from "../shell/model";
-import { rowStatus } from "./model";
+import { askText, boxId, FilePicker, NoAttachments, usePolicy } from "./Attachments";
+import { readIssue } from "./data";
+import { fileChoices, firstPicks, rowStatus } from "./model";
 
 const kbd = "border border-rule-strong bg-transparent font-mono text-[11px] text-ink-2";
 const groupHead = "m-0 flex items-center gap-2 border-b bg-pane-2 px-4 pt-[9px] pb-1.5 text-xs font-semibold text-ink-2";
@@ -36,6 +38,8 @@ export function TaskList(props: {
   repos: ProjectRepos[];
   // The tracker name from meta, such as the name of the issue tracker.
   tracker: string;
+  // The short name of the CLI from meta.
+  runner: string;
   banner: ReactNode;
   onSelect: (id: number) => void;
   onOpen: (id: number) => void;
@@ -73,7 +77,7 @@ export function TaskList(props: {
             <span className="sr-only"> open tasks</span>
           </span>
         </div>
-        <NewTask repos={props.repos} tracker={props.tracker} onCreate={props.onCreate} />
+        <NewTask repos={props.repos} tracker={props.tracker} runner={props.runner} onCreate={props.onCreate} />
       </header>
       <div>{props.banner}</div>
       <div className="relative overflow-auto overscroll-contain" id="rows" tabIndex={-1}>
@@ -122,13 +126,18 @@ export function TaskList(props: {
   );
 }
 
-function NewTask(props: { repos: ProjectRepos[]; tracker: string; onCreate: (input: TaskCreateInput) => Promise<void> }) {
+// spec.md section 6.17: two steps. "Read the task" reads the summary and the attachments of the key (one tracker read on the click).
+// Then the boxes pick the files that the runner gets, and "Build this task" creates the task. A new key goes back to the first step.
+function NewTask(props: { repos: ProjectRepos[]; tracker: string; runner: string; onCreate: (input: TaskCreateInput) => Promise<void> }) {
   const all = props.repos.flatMap((g) => g.repos.map((r) => ({ project: g.project, repo: r.repo, key: r.key })));
   const [open, setOpen] = useState(false);
   const [key, setKey] = useState("");
   const [repo, setRepo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [issue, setIssue] = useState<TaskIssueDto | null>(null);
+  const [picks, setPicks] = useState<ReadonlySet<string>>(new Set());
+  const policy = usePolicy(props.runner, props.tracker);
   const chosen = all.find((r) => r.key === (repo || all[0]?.key));
   if (!open)
     return (
@@ -138,6 +147,22 @@ function NewTask(props: { repos: ProjectRepos[]; tracker: string; onCreate: (inp
       </Button>
     );
   const k = key.trim().toUpperCase();
+  const read = issue?.key === k ? issue : null;
+  const rows = read ? fileChoices(read.attachments, []) : [];
+  const tick = (ids: string[], on: boolean) =>
+    setPicks((p) => {
+      const n = new Set(p);
+      for (const id of ids) {
+        if (on) n.add(id);
+        else n.delete(id);
+      }
+      return n;
+    });
+  const close = () => {
+    setOpen(false);
+    setIssue(null);
+    setError(null);
+  };
   return (
     <form
       aria-label={`Build a ${props.tracker} task`}
@@ -149,9 +174,20 @@ function NewTask(props: { repos: ProjectRepos[]; tracker: string; onCreate: (inp
         setBusy(true);
         setError(null);
         try {
-          await props.onCreate({ project: chosen.project, repo: chosen.repo, key: k });
+          if (!read) {
+            const i = await readIssue(k);
+            setIssue(i);
+            setPicks(new Set(firstPicks(fileChoices(i.attachments, []), policy.asking)));
+            return;
+          }
+          await props.onCreate({
+            project: chosen.project,
+            repo: chosen.repo,
+            key: k,
+            files: rows.flatMap((r) => (picks.has(r.id) ? [r.id] : [])),
+          });
           setKey("");
-          setOpen(false);
+          close();
         } catch (err) {
           setError((err as Error).message);
         } finally {
@@ -194,6 +230,43 @@ function NewTask(props: { repos: ProjectRepos[]; tracker: string; onCreate: (inp
           ))}
         </select>
       </div>
+      <p aria-live="polite" className="sr-only">
+        {read ? `${read.key}: ${rows.length === 1 ? "1 attachment" : `${rows.length} attachments`}.` : ""}
+      </p>
+      {read && (
+        <div className="grid gap-2">
+          <p className="m-0 text-sm">
+            <span className="text-ink-2">Task: </span>
+            <span className="font-medium [overflow-wrap:anywhere]">{read.summary}</span>
+          </p>
+          {rows.length ? (
+            <FilePicker
+              id="new-task-file"
+              rows={rows}
+              checked={picks}
+              disabled={busy}
+              note={`${props.runner} reads the ticked files in each step. The task screen can change them later.`}
+              onToggle={(r, on) =>
+                on ? policy.ask(askText(props.runner, [r], boxId("new-task-file", r)), () => tick([r.id], true)) : tick([r.id], false)
+              }
+              onAll={() => {
+                const todo = rows.filter((r) => r.why === null && !picks.has(r.id));
+                // "Include all" goes away when every box is ticked, so the focus goes to the first new box.
+                const first = boxId("new-task-file", todo[0] ?? { id: "" });
+                policy.ask(askText(props.runner, todo, first), () => {
+                  tick(
+                    todo.map((r) => r.id),
+                    true,
+                  );
+                  requestAnimationFrame(() => document.getElementById(first)?.focus());
+                });
+              }}
+            />
+          ) : (
+            <NoAttachments runner={props.runner} />
+          )}
+        </div>
+      )}
       {error && (
         <p role="alert" className="m-0 flex items-start gap-1.5 text-sm text-destructive">
           <CircleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
@@ -202,12 +275,13 @@ function NewTask(props: { repos: ProjectRepos[]; tracker: string; onCreate: (inp
       )}
       <div className="flex gap-2">
         <Button type="submit" size="sm" disabled={busy || !all.length}>
-          {busy ? "Starting…" : "Build this task"}
+          {read ? (busy ? "Starting…" : "Build this task") : busy ? "Reading…" : "Read the task"}
         </Button>
-        <Button type="button" size="sm" variant="outline" onClick={() => setOpen(false)}>
+        <Button type="button" size="sm" variant="outline" onClick={close}>
           Cancel
         </Button>
       </div>
+      {policy.dialog}
       {!all.length && (
         <p className="m-0 text-xs text-muted-foreground">Repositories appear here after the first check of your pull requests.</p>
       )}

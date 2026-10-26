@@ -40,6 +40,9 @@ export const attachmentsRoot = (dataDir: string) => join(dataDir, "attachments")
 // The database file name without .sqlite (config.ts dbPath). Each Bitbucket origin keeps its own folder.
 export const dbStem = (db: Database) => basename(db.filename).replace(/\.sqlite$/i, "");
 export const taskDir = (db: Database, pr: number, key: string) => `${dbStem(db)}/${pr}/${key}`;
+// The files of a Build task (docs/plans/review-v2/spec.md section 6.17). folder: a new random name for each download, because the
+// downloads of a new task come before its row exists.
+export const taskFileDir = (db: Database, folder: string) => `${dbStem(db)}/tasks/${folder}`;
 
 // The absolute path of rel, or null when it leaves the attachments folder.
 export function resolveFile(dataDir: string, rel: string): string | null {
@@ -64,19 +67,29 @@ export function rasterOf(b: Uint8Array): Raster | null {
   return null;
 }
 
-// The raster type by the first bytes of the file. Throws when the file cannot be read.
-export function rasterOfFile(path: string): Raster | null {
+// WHATWG MIME Sniffing, "Identifying a resource with an unknown MIME type": the pattern "%PDF-" gives application/pdf.
+export const isPdf = (b: Uint8Array) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46 && b[4] === 0x2d;
+
+// The raster type or "pdf" by the first bytes of the file. Throws when the file cannot be read.
+export function sniffFile(path: string): Raster | "pdf" | null {
   const fd = openSync(path, "r");
   try {
     const b = Buffer.alloc(SNIFF_BYTES);
-    return rasterOf(b.subarray(0, readSync(fd, b, 0, SNIFF_BYTES, 0)));
+    const head = b.subarray(0, readSync(fd, b, 0, SNIFF_BYTES, 0));
+    return rasterOf(head) ?? (isPdf(head) ? "pdf" : null);
   } finally {
     closeSync(fd);
   }
 }
 
+// The raster type by the first bytes of the file. Throws when the file cannot be read.
+export function rasterOfFile(path: string): Raster | null {
+  const kind = sniffFile(path);
+  return kind === "pdf" ? null : kind;
+}
+
 // text: UTF-8 that decodes with fatal errors and has no NUL byte. The source media type is never used.
-export type Stored = { sha256: string; image: boolean; text: boolean };
+export type Stored = { sha256: string; image: boolean; text: boolean; pdf: boolean };
 
 // fill passes the bytes to write. They go to <file>.part, which is renamed when fill ends. A failure leaves no file.
 // A second store of the same file while one runs fails with the fs code EEXIST.
@@ -122,17 +135,19 @@ export async function store(dataDir: string, rel: string, fill: (write: (chunk: 
     if (!closed) await fh.close().catch(() => {});
     if (!done) rmSync(part, { force: true });
   }
-  return { sha256: hash.digest("hex"), image: rasterOf(head.subarray(0, headBytes)) !== null, text } satisfies Stored;
+  const sniffed = head.subarray(0, headBytes);
+  return { sha256: hash.digest("hex"), image: rasterOf(sniffed) !== null, text, pdf: isPdf(sniffed) } satisfies Stored;
 }
 
 // Start-up cleanup of the folder of this database: the rows and files of PRs archived over RETENTION_MS ago,
-// then every file and folder without a row, .part files included. Other databases keep their folders.
+// then every file and folder without a row, .part files included. Other databases keep their folders. The files of a task stay
+// while its row stays.
 export function sweep(db: Database, dataDir: string, now = Date.now()) {
   db.query(
     "DELETE FROM task_attachment WHERE pr IN (SELECT id FROM pull_request WHERE archived_at IS NOT NULL AND archived_at < $before)",
   ).run({ before: now - RETENTION_MS });
   const keep = new Set<string>();
-  for (const { file } of db.query("SELECT file FROM task_attachment").all() as { file: string }[]) {
+  for (const { file } of db.query("SELECT file FROM task_attachment UNION ALL SELECT file FROM task_file").all() as { file: string }[]) {
     for (let i = file.indexOf("/"); i > 0; i = file.indexOf("/", i + 1)) keep.add(file.slice(0, i));
     keep.add(file);
   }

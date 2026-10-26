@@ -18,7 +18,6 @@ import {
   LoaderCircle,
   Paperclip,
   Save,
-  ShieldAlert,
   Trash2,
 } from "lucide-react";
 import {
@@ -33,10 +32,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -62,10 +59,9 @@ import {
   type Volume,
 } from "../../shared/dto";
 import { api } from "../api";
-import { dialogKeys } from "../fix/CloneDialog";
 import { formatRoute } from "../lib/route";
 import { useSkills } from "../meta";
-import { read, useSaveSettings, useSettings } from "../shell/data";
+import { read, useSettings } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { failText } from "../shell/model";
 import { loadLastProfile, putBrief, useSaveProfile } from "./data";
@@ -82,6 +78,7 @@ import {
   VOLUME_LINE,
   VOLUME_NAME,
 } from "./model";
+import { mustAsk, PolicyDialog } from "./PolicyDialog";
 import { keyParam, TaskChips, taskKey, useTaskChips } from "./TaskChips";
 import {
   type AttachmentRow,
@@ -260,11 +257,7 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
   // The last asked file stays while the dialog plays its close transition.
   const asked = useRef<AttachmentRow | null>(null);
   if (asking) asked.current = asking;
-  // The policy box asks until the user ticks it once. Settings, askAttachments, keeps the answer. The dialog opens with focus on it.
-  const [allowed, setAllowed] = useState(false);
-  const allow = useRef<HTMLInputElement>(null);
   const settings = useSettings().data;
-  const save = useSaveSettings();
   const base = `att-${t.key}`;
   if (!rows.length) return null;
 
@@ -345,13 +338,7 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
   const confirm = () => {
     const r = asking;
     setAsking(null);
-    if (!r || !allowed) return;
-    void act(r, "include");
-    if (settings?.askAttachments)
-      save.mutate(
-        { baseUrl: settings.baseUrl ?? "", caFile: settings.caFile ?? "", askAttachments: false },
-        { onError: (e) => toast.add({ title: `The policy answer was not saved: ${e.message}` }) },
-      );
+    if (r) void act(r, "include");
   };
 
   const todo = rows.filter(canDownload).length;
@@ -457,9 +444,7 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
                           disabled={wait}
                           onCheckedChange={(on) => {
                             if (!on) return void act(r, "exclude");
-                            // Unknown settings ask.
-                            if (settings?.askAttachments === false) return void act(r, "include");
-                            setAllowed(false);
+                            if (!mustAsk(settings?.askAttachments)) return void act(r, "include");
                             setAsking(r);
                           }}
                         />
@@ -513,56 +498,23 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
           );
         })}
       </ul>
-      <Dialog open={asking !== null} onOpenChange={(on) => !on && setAsking(null)}>
-        <DialogContent
-          className="sm:max-w-[480px]"
-          initialFocus={allow}
-          finalFocus={() => (shown ? document.getElementById(`${base}-${shown.id}-inc`) : null)}
-          onKeyDown={dialogKeys(() => setAsking(null))}
-        >
-          {shown && (
-            <>
-              <DialogHeader>
-                <DialogTitle>Include {shown.filename} in runs?</DialogTitle>
-                <DialogDescription>
-                  {shown.file?.image
-                    ? `${runner} can then open this image in every run on this pull request: reviews, reply drafts, questions, and fixes.`
-                    : `${runner} can then read this text in every run on this pull request: reviews, reply drafts, questions, and fixes. It reads it as untrusted data.`}
-                </DialogDescription>
-              </DialogHeader>
-              <Alert role="note">
-                <ShieldAlert aria-hidden />
-                <AlertTitle>Company AI policy</AlertTitle>
-                <AlertDescription>
-                  {runner} sends the content of the files that it reads to its AI model. Check that your company AI policy allows this for
-                  task attachments.
-                </AlertDescription>
-              </Alert>
-              <label className="flex cursor-pointer items-start gap-2 text-sm">
-                <input
-                  ref={allow}
-                  type="checkbox"
-                  className="mt-0.5 size-4 shrink-0 accent-primary"
-                  checked={allowed}
-                  onChange={(e) => setAllowed(e.target.checked)}
-                />
-                <span>My company AI policy allows sending task attachments to an AI service.</span>
-              </label>
-              <p className="m-0 text-xs text-muted-foreground">
-                PR Review Inbox asks this only once. The {props.source} section in Settings turns the question back on.
-              </p>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setAsking(null)}>
-                  Cancel
-                </Button>
-                <Button disabled={!allowed} onClick={confirm}>
-                  Include in runs
-                </Button>
-              </DialogFooter>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+      <PolicyDialog
+        open={asking !== null}
+        title={shown ? `Include ${shown.filename} in runs?` : ""}
+        description={
+          shown?.file?.image
+            ? `${runner} can then open this image in every run on this pull request: reviews, reply drafts, questions, and fixes.`
+            : shown?.file?.pdf
+              ? `${runner} can then read this PDF in every run on this pull request: reviews, reply drafts, questions, and fixes. It reads it as untrusted data.`
+              : `${runner} can then read this text in every run on this pull request: reviews, reply drafts, questions, and fixes. It reads it as untrusted data.`
+        }
+        action="Include in runs"
+        runner={runner}
+        source={props.source}
+        finalFocus={() => (shown ? document.getElementById(`${base}-${shown.id}-inc`) : null)}
+        onClose={() => setAsking(null)}
+        onConfirm={confirm}
+      />
     </section>
   );
 }

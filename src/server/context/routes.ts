@@ -24,7 +24,7 @@ import type { Live } from "../live";
 import { log } from "../log";
 import type { ReviewJobs } from "../review/jobs";
 import type { Settings } from "../settings";
-import { openFolder, RASTER_TYPE, type Raster, rasterOfFile, resolveFile, safeName, store, taskDir } from "./attachments";
+import { openFolder, RASTER_TYPE, type Raster, rasterOfFile, resolveFile, safeName, sniffFile, store, taskDir } from "./attachments";
 import { ContextError, type ContextErrorKind, type ContextSource } from "./source";
 
 // Fixed texts. A Jira answer body never reaches the client. The task routes use them too.
@@ -40,8 +40,8 @@ export const FAILED: Record<ContextErrorKind, string> = {
   network: "Cannot reach Jira.",
 };
 
-// A download names the file, not the issue.
-const DOWNLOAD_FAILED: Record<ContextErrorKind, string> = {
+// A download names the file, not the issue. The task files use them too.
+export const DOWNLOAD_FAILED: Record<ContextErrorKind, string> = {
   ...FAILED,
   forbidden: "Jira refused access to this file.",
   not_found: "Jira has no such file, or the token may not see it.",
@@ -91,13 +91,23 @@ type FileRow = {
   downloaded_at: number;
 };
 const FILE_COLUMNS = "att_id, filename, size, file, sha256, image, text, include, downloaded_at";
-const fileDto = (r: FileRow): AttachmentDto => ({
+// task_attachment has no pdf column, so the stored file tells. A missing file is no PDF.
+function pdfOf(dataDir: string, file: string): boolean {
+  try {
+    const path = resolveFile(dataDir, file);
+    return path !== null && sniffFile(path) === "pdf";
+  } catch {
+    return false;
+  }
+}
+const fileDto = (r: FileRow, pdf: boolean): AttachmentDto => ({
   id: r.att_id,
   filename: r.filename,
   size: r.size,
   sha256: r.sha256,
   image: r.image === 1,
   text: r.text === 1,
+  pdf,
   include: r.include === 1,
   downloadedAt: r.downloaded_at,
 });
@@ -105,7 +115,7 @@ const fileRow = (db: Database, pr: number, key: string, att: string) =>
   db
     .query(`SELECT ${FILE_COLUMNS} FROM task_attachment WHERE pr = $pr AND key = $key AND att_id = $att`)
     .get({ pr, key, att }) as FileRow | null;
-const toDto = (db: Database, pr: number, r: Row): TaskContextDto => ({
+const toDto = (db: Database, dataDir: string, pr: number, r: Row): TaskContextDto => ({
   ...(JSON.parse(r.json) as IssueContext),
   source: r.source,
   fetchedAt: r.fetched_at,
@@ -113,7 +123,7 @@ const toDto = (db: Database, pr: number, r: Row): TaskContextDto => ({
     db
       .query(`SELECT ${FILE_COLUMNS} FROM task_attachment WHERE pr = $pr AND key = $key ORDER BY att_id`)
       .all({ pr, key: r.key }) as FileRow[]
-  ).map(fileDto),
+  ).map((f) => fileDto(f, pdfOf(dataDir, f.file))),
 });
 const isFile = (path: string | null): path is string => {
   try {
@@ -166,7 +176,7 @@ export function createContextRoutes(opts: {
       if (!db || !hasPr(db, id)) return c.json(prNotFound, 404);
       const rows = db.query("SELECT key, source, json, fetched_at FROM task_context WHERE pr = $id ORDER BY key").all({ id }) as Row[];
       return c.json(
-        rows.map((r) => toDto(db, id, r)),
+        rows.map((r) => toDto(db, review.dataDir, id, r)),
         200,
       );
     })
@@ -203,7 +213,7 @@ export function createContextRoutes(opts: {
       })();
       if (!stored) return c.json<ApiError>({ error: "This pull request does not name that task." }, 404);
       live.broadcast("changed", { prs: [id] });
-      return c.json(toDto(db, id, row), 200);
+      return c.json(toDto(db, review.dataDir, id, row), 200);
     })
     .delete("/prs/:id/task-context/:key", params, (c) => {
       const db = settings.db();
@@ -230,7 +240,7 @@ export function createContextRoutes(opts: {
       const meta = (JSON.parse(task.json) as IssueContext).attachments?.find((a) => a.id === att);
       if (!meta) return c.json<ApiError>({ error: "The task lists no such attachment. Fetch the task again." }, 404);
       const old = fileOf(p);
-      if (old) return c.json(fileDto(old.row), 200);
+      if (old) return c.json(fileDto(old.row, pdfOf(review.dataDir, old.row.file)), 200);
       if (meta.size > MAX_ATTACHMENT_BYTES)
         return c.json<ApiError>({ error: `The file is larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.` }, 413);
       const { used } = db
@@ -307,7 +317,7 @@ export function createContextRoutes(opts: {
         return c.json(noTask, 404);
       }
       live.broadcast("changed", { prs: [id] });
-      return c.json(fileDto(row), 200);
+      return c.json(fileDto(row, made.pdf), 200);
     })
     .get("/prs/:id/task-context/:key/files/:att", fileParams, (c) => {
       // Save: always a download, never shown by the browser.
@@ -347,7 +357,7 @@ export function createContextRoutes(opts: {
           .get({ id, key, att, include: c.req.valid("json").include ? 1 : 0 }) as FileRow | null;
         if (!row) return c.json(noFile, 404);
         live.broadcast("changed", { prs: [id] });
-        return c.json(fileDto(row), 200);
+        return c.json(fileDto(row, pdfOf(review.dataDir, row.file)), 200);
       },
     )
     .delete("/prs/:id/task-context/:key/files/:att", fileParams, (c) => {

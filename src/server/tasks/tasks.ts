@@ -8,26 +8,30 @@ import type { Database } from "bun:sqlite";
 import { initialTransition, transition } from "xstate";
 import type { z } from "zod";
 import { oneLine } from "../../shared/consult";
-import type {
-  BranchCheckDto,
-  IssueContext,
-  RepoTaskSettingsDto,
-  RepoTaskSettingsInput,
-  RunConflict,
-  RunUsage,
-  TaskAnswersInput,
-  TaskCreateInput,
-  TaskDto,
-  TaskInterviewDto,
-  TaskPartDto,
-  TaskPlanDto,
-  TaskPlanInput,
-  TaskPointDto,
-  TaskQuestionDto,
-  TaskRowDto,
-  TaskStepDto,
-  taskDocInput,
-  taskSizeInput,
+import {
+  type AttachmentMeta,
+  type BranchCheckDto,
+  fileOnly,
+  type IssueContext,
+  listedOnly,
+  type RepoTaskSettingsDto,
+  type RepoTaskSettingsInput,
+  type RunConflict,
+  type RunUsage,
+  type TaskAnswersInput,
+  type TaskCreateInput,
+  type TaskDto,
+  type TaskInterviewDto,
+  type TaskIssueDto,
+  type TaskPartDto,
+  type TaskPlanDto,
+  type TaskPlanInput,
+  type TaskPointDto,
+  type TaskQuestionDto,
+  type TaskRowDto,
+  type TaskStepDto,
+  type taskDocInput,
+  type taskSizeInput,
 } from "../../shared/dto";
 import type { FindingPayload } from "../../shared/review";
 import {
@@ -62,7 +66,7 @@ import { NoCloneLink } from "../bitbucket/errors";
 import type { ForgeProvider } from "../bitbucket/provider";
 import { FAILED as JIRA_FAILED } from "../context/routes";
 import { ContextError, type ContextSource } from "../context/source";
-import { issueFile, taskContext } from "../context/task-file";
+import { taskFileContext, taskIssue } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
 import { DEFAULT_PROFILE, interviewAgent, profileOf, specAgent } from "../review/catalog";
@@ -72,6 +76,18 @@ import { type Ending, judgeTask } from "../review/judge";
 import { buildInterviewPrompt, buildSpecPrompt } from "../review/prompt";
 import { type ContextFile, noUrl, remoteHead } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
+import {
+  dropFetched,
+  type Fetched,
+  fetchFiles,
+  pickProblem,
+  saveFetched,
+  setInclude,
+  TaskFileError,
+  taskFileDto,
+  taskFileDtos,
+  usedBytes,
+} from "./files";
 import {
   type Answer,
   afterAnswers,
@@ -593,21 +609,19 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     points: openPoints(db, t.id).map(({ payload: _, ...p }) => p),
     // The routes set it from the loop.
     working: false,
+    attachments: taskIssue(db, t)?.issue.attachments ?? [],
+    files: taskFileDtos(db, t.id),
   };
 }
 
 export type TaskResult =
   | { status: 200 | 201 | 202; task: TaskDto }
-  | { status: 400 | 404 | 502; error: string }
+  | { status: 400 | 404 | 413 | 502; error: string }
   | { status: 422; error: string; line: number }
   | { status: 409; error: string; task?: TaskDto; running?: RunConflict["running"] };
 
-// task.md of a task: the one task of its origin PR with its attachments, else the fetched issue with its attachments listed.
-export function taskFilesOf(db: Database, dataDir: string, t: TaskRow) {
-  if (t.origin_pr !== null) return taskContext(db, t.origin_pr, dataDir, t.key);
-  if (t.issue_json === null) return { files: [], attachments: [] };
-  return { files: [issueFile(t.key, JSON.parse(t.issue_json) as IssueContext, t.created_at)], attachments: [] };
-}
+// task.md of a task and its included files (spec.md section 6.17): the issue of its origin PR or of its create, with the task files.
+export const taskFilesOf = (db: Database, dataDir: string, t: TaskRow) => taskFileContext(db, dataDir, t);
 
 // context/answers.md of a build step: the interview answers and the answered questions of the loop.
 export function stepAnswers(db: Database, id: number): ContextFile | null {
@@ -884,21 +898,19 @@ export function createTaskService(opts: TaskServiceOptions) {
     let issue: IssueContext;
     if (stored) issue = JSON.parse(stored.json) as IssueContext;
     else {
-      let source: ContextSource | null;
-      try {
-        source = await settings.jira();
-      } catch {
-        return { status: 502, error: "Cannot read the Jira CA file." };
-      }
-      if (!source) return { status: 409, error: "Set up Jira in Settings first." };
-      try {
-        issue = await source.fetchIssue(input.key);
-      } catch (e) {
-        if (!(e instanceof ContextError)) throw e;
-        log(`Jira fetch for a task failed: ${e.message}`);
-        return { status: 502, error: JIRA_FAILED[e.kind] };
-      }
+      const got = await fetchIssue(input.key);
+      if ("status" in got) return got;
+      issue = got.issue;
     }
+    // spec.md section 6.17: the files that Claude gets. Without a pick, the setting askAttachments decides: off gives every file that
+    // can go to runs, on gives none until the user ticks one.
+    const listing = issue.attachments ?? [];
+    const ids = input.files ?? (settings.config()?.askAttachments === false ? listing.filter((a) => !listedOnly(a)).map((a) => a.id) : []);
+    const picked = [...new Set(ids)].map((x) => listing.find((a) => a.id === x));
+    if (picked.some((a) => !a)) return { status: 400, error: "The task lists no such attachment. Read the task again." };
+    const files = picked as AttachmentMeta[];
+    const problem = pickProblem(files, 0);
+    if (problem) return problem;
     // spec.md section 6.16.3: the origin PR target no longer sets the base.
     let branch: string;
     try {
@@ -915,6 +927,13 @@ export function createTaskService(opts: TaskServiceOptions) {
       if (e instanceof NoCloneLink) return { status: 409, error: e.message };
       return { status: 502, error: `Cannot read the default branch of ${input.project}/${input.repo}. ${noUrl((e as Error).message)}` };
     }
+    // The downloads come before the task row, so the interview of the same transaction reads the files.
+    let fetched: Fetched[] = [];
+    if (files.length) {
+      const got = await download(db, files);
+      if ("status" in got) return got;
+      fetched = got.fetched;
+    }
     const fetchedAt = now();
     let id: number;
     let status: 200 | 201 = 201;
@@ -923,6 +942,7 @@ export function createTaskService(opts: TaskServiceOptions) {
         const again = open();
         if (again) {
           status = 200;
+          dropFetched(review.dataDir, fetched);
           return again.id;
         }
         if (pr && !stored) db.query(Q.storeContext).run({ pr: pr.id, key: input.key, json: JSON.stringify(issue), at: fetchedAt });
@@ -940,16 +960,98 @@ export function createTaskService(opts: TaskServiceOptions) {
           now: fetchedAt,
         }) as { id: number };
         saveMainRepo(db, { id: row.id, project: input.project, repo: input.repo }, branch, null, fetchedAt);
+        saveFetched(db, row.id, fetched);
         const r = review.taskRun(db, interviewRun(db, taskRow(db, row.id) as TaskRow, 1));
         if (r.status !== 202) throw new Refused(r.conflict.error, r.conflict);
         return row.id;
       })();
     } catch (e) {
+      dropFetched(review.dataDir, fetched);
       if (e instanceof Refused && e.running) return busyResult(e.running);
       throw e;
     }
     changed(id, pr && !stored ? pr.id : undefined);
     return { status, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
+  // One Jira read of a key. A failure gives the fixed sentence of its kind.
+  async function fetchIssue(key: string): Promise<{ issue: IssueContext } | TaskResult> {
+    const source = await jira();
+    if ("status" in source) return source;
+    try {
+      return { issue: await source.fetchIssue(key) };
+    } catch (e) {
+      if (!(e instanceof ContextError)) throw e;
+      log(`Jira fetch for a task failed: ${e.message}`);
+      return { status: 502, error: JIRA_FAILED[e.kind] };
+    }
+  }
+
+  async function jira(): Promise<ContextSource | TaskResult> {
+    let source: ContextSource | null;
+    try {
+      source = await settings.jira();
+    } catch {
+      return { status: 502, error: "Cannot read the Jira CA file." };
+    }
+    return source ?? { status: 409, error: "Set up Jira in Settings first." };
+  }
+
+  async function download(db: Database, files: AttachmentMeta[]): Promise<{ fetched: Fetched[] } | TaskResult> {
+    const source = await jira();
+    if ("status" in source) return source;
+    try {
+      return { fetched: await fetchFiles(db, review.dataDir, source, files) };
+    } catch (e) {
+      if (e instanceof TaskFileError) return { status: 502, error: e.message };
+      throw e;
+    }
+  }
+
+  // POST /api/tasks/issue (spec.md section 6.17): the summary and the attachments of a key before its task exists.
+  async function issue(key: string): Promise<TaskIssueDto | TaskResult> {
+    if (!review.open()) return { status: 409, error: "Configure the Bitbucket URL and token first." };
+    const got = await fetchIssue(key);
+    if ("status" in got) return got;
+    const i = got.issue;
+    return { key, summary: i.summary, status: i.status, attachments: i.attachments ?? [] };
+  }
+
+  // PUT /api/tasks/:id/files/:att (spec.md section 6.17): a tick downloads a listed file once and includes it. An untick keeps the
+  // file and leaves it out. The next Claude step of the task reads the change. No task version: the task state does not change.
+  async function file(db: Database, id: number, att: string, include: boolean): Promise<TaskResult> {
+    const t = taskRow(db, id);
+    if (!t) return { status: 404, error: "Task not found." };
+    const have = taskFileDto(db, id, att);
+    if (have || !include) {
+      if (have && include) {
+        const why = fileOnly(have);
+        if (why) return { status: 400, error: `${have.filename}: ${why}` };
+      }
+      if (have && have.include !== include) {
+        setInclude(db, id, att, include);
+        changed(id);
+      }
+      return { status: 200, task: taskDto(db, t) };
+    }
+    const meta = taskIssue(db, t)?.issue.attachments?.find((a) => a.id === att);
+    if (!meta) return { status: 404, error: "The task lists no such attachment." };
+    const problem = pickProblem([meta], usedBytes(db, id));
+    if (problem) return problem;
+    const got = await download(db, [meta]);
+    if ("status" in got) return got;
+    // The task can go away during the download.
+    const saved = db.transaction(() => {
+      if (!taskRow(db, id)) return false;
+      saveFetched(db, id, got.fetched);
+      return true;
+    })();
+    if (!saved) {
+      dropFetched(review.dataDir, got.fetched);
+      return { status: 404, error: "Task not found." };
+    }
+    changed(id);
+    return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
   // The checks of every mutation: the task, its version, its state, and no running step.
@@ -1242,6 +1344,8 @@ export function createTaskService(opts: TaskServiceOptions) {
 
   return {
     create,
+    issue,
+    file,
     answers,
     size,
     docs,

@@ -321,13 +321,16 @@ async function main() {
     ...(list?.length ? list[Math.min(earlier, list.length - 1)] : undefined),
   };
   const record = (x: Record<string, unknown>) => appendFileSync(s.record, `${JSON.stringify(x)}\n`);
-  // The Markdown files of ./context at the start, by path under it. A run folder goes away after its run.
+  // The Markdown files of ./context at the start, by path under it, and the names in ./context/attachments/. A run folder goes away
+  // after its run.
   const context: Record<string, string> = {};
   const ctx = join(process.cwd(), "context");
   if (run && existsSync(ctx))
     for (const f of readdirSync(ctx, { recursive: true, encoding: "utf8" }))
       if (f.endsWith(".md") && statSync(join(ctx, f)).isFile()) context[f.replaceAll("\\", "/")] = readFileSync(join(ctx, f), "utf8");
-  record({ argv: args, env: process.env, cwd: process.cwd(), stdin, pid: process.pid, context });
+  const att = join(ctx, "attachments");
+  const attachments = run && existsSync(att) ? readdirSync(att).sort() : [];
+  record({ argv: args, env: process.env, cwd: process.cwd(), stdin, pid: process.pid, context, attachments });
 
   if (args[0] === "--version") {
     console.log(s.version ?? "2.1.295 (Claude Code)");

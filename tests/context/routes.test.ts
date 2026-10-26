@@ -212,6 +212,7 @@ describe("task attachments (plan r3 S-ATT)", () => {
         sha256: sha(PNG),
         image: true,
         text: false,
+        pdf: false,
         include: false,
         downloadedAt: expect.any(Number),
       },
