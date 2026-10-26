@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Settings > Tasks (docs/plans/review-v2/spec.md section 6.16.1): the ordered list "Branch prefixes" of the plan screen chips, with the
-// row controls of TaskRules.tsx. Each change saves by itself (autosave.tsx). A row with a problem holds the save back.
+// row controls of TaskRules.tsx, and the approved commands of each task repository (TaskCommands.tsx). Each change saves by itself
+// (autosave.tsx). A row with a problem holds the save back.
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, CircleAlert, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -24,6 +25,7 @@ import {
   prefixProblems,
   toPrefixDrafts,
 } from "./prefixes";
+import { TaskCommands } from "./TaskCommands";
 
 const iconBtn =
   "inline-grid size-[30px] shrink-0 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-ink-2 hover:bg-hover hover:text-foreground disabled:cursor-default disabled:opacity-35 disabled:hover:bg-transparent";
@@ -196,6 +198,7 @@ export function BranchPrefixes({ settings }: { settings: SettingsDto }) {
           </span>
         )}
       </div>
+      <TaskCommands />
     </section>
   );
 }

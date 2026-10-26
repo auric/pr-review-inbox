@@ -18,6 +18,7 @@ import {
   type DiscussTurnDto,
   type ExplainDto,
   type FixDto,
+  type InstructionFileDto,
   MOVED_ON,
   type MovedConflict,
   type PrTask,
@@ -116,7 +117,7 @@ import { prFixes } from "./fix-routes";
 import { gitEnv } from "./git";
 import { gitMcpServer } from "./git-mcp";
 import { createImprover } from "./improve";
-import { projectInstructions } from "./instructions";
+import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, projectInstructions } from "./instructions";
 import {
   type CandidateLink,
   type CheckRun,
@@ -177,6 +178,7 @@ import {
   type AttachmentFile,
   type BranchRemote,
   type ContextFile,
+  cachePath,
   type GitRemote,
   longPath,
   noUrl,
@@ -291,9 +293,15 @@ export type TaskRunStart = {
   repos?: (db: Database, head: string) => Promise<SnapshotRepo[]>;
 };
 
+// spec.md section 6.7: one repository of an implement step. commit: the target commit in the cache of the repository. path: the folder
+// of a submodule in ./repo, null for the main repository. paths: the files of the step from the repository root, whose folders can add
+// a CLAUDE.md.
+export type InstructionRepo = { project: string; repo: string; commit: string; path: string | null; paths: string[] };
+
 // docs/plans/review-v2/spec.md section 6.7: one Claude step of a task part in its worktree. src/server/tasks/implement.ts builds it.
 // cwd: the part folder with repo/ (the task worktree) and context/. head: the worktree HEAD at the start. after: runs at every end,
 // also when the CLI did not start (o null, early: that ending). It judges the outcome and runs the path check. finish: as TaskRunStart.
+// instructions: the repositories whose project instructions the step gets, main first. prompt: the stdin from their combined text.
 export type ImplementRunStart = {
   task: number;
   kind: Extract<TaskRunKind, "implement">;
@@ -301,7 +309,8 @@ export type ImplementRunStart = {
   profile: Profile;
   cwd: string;
   head: string;
-  prompt: string;
+  instructions: InstructionRepo[];
+  prompt: (instructions: string) => string;
   maxTurns: number;
   timeoutMs: number;
   started: (db: Database, run: number) => void;
@@ -607,6 +616,50 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           .join(", ")}.`,
       );
     return instructions;
+  }
+
+  // spec.md section 6.7: the project instructions of an implement step, from the cache of each repository at its target commit. The
+  // step gets them in its stdin: the part folder is the cwd, and a CLAUDE.md there would be a file outside repo/ for the path check.
+  // The global file loads once, with the main repository. A submodule section applies to its folder only.
+  async function implementInstructions(j: TaskJob, repos: InstructionRepo[]): Promise<string> {
+    const head = `# Project instructions\n\n${INSTRUCTIONS_TRUST}\n\n`;
+    const parts: string[] = [];
+    const files: InstructionFileDto[] = [];
+    let bytes = 0;
+    const notLoaded: string[] = [];
+    for (const [k, r] of repos.entries()) {
+      const b = await projectInstructions(
+        j.db,
+        r,
+        {
+          cache: cachePath(longPath(dataDir), { project: r.project, repo: r.repo, id: 0 }),
+          env: gitEnv("/dev/null"),
+          commit: r.commit,
+          paths: r.paths,
+        },
+        k === 0 && settings.globalInstructions() ? (opts.claudeConfigDir ?? claudeConfigDir()) : null,
+      );
+      const where = r.path === null ? "" : `${r.path}/`;
+      files.push(...b.files.map((f) => ({ ...f, path: f.source === "target" ? `${where}${f.path}` : f.path })));
+      bytes += b.bytes;
+      notLoaded.push(...b.notLoaded.map((g) => (r.path === null ? g : `${r.project}/${r.repo}: ${g}`)));
+      if (!b.text) continue;
+      const body = b.text.slice(head.length);
+      parts.push(
+        r.path === null
+          ? body
+          : `## Repository ${r.project}/${r.repo} at ./repo/${r.path}: these instructions apply to the files under ./repo/${r.path}/ only\n\n${body}`,
+      );
+    }
+    j.db.query(SQL.instructions).run({ id: j.id, json: JSON.stringify({ files, bytes, notLoaded }) });
+    for (const g of notLoaded) log(`Task run ${j.id}: project instructions not loaded: ${g}.`);
+    if (files.length)
+      log(
+        `Task run ${j.id} project instructions: ${files
+          .map((f) => `${f.source === "settings" ? "settings text" : `${f.path} from ${f.source}`} (${f.bytes} bytes)`)
+          .join(", ")}.`,
+      );
+    return parts.length ? `# Project instructions\n\n${IMPLEMENT_TRUST}\n\n${parts.join("\n")}` : "";
   }
 
   // The docs servers and the user servers of the profile. A picked codegraph server indexes the snapshot first. null: Cancel came.
@@ -1185,6 +1238,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       notify(j.id, undefined, t.task);
       log(`Task run ${j.id}: implement step of task ${t.task} at ${t.head.slice(0, 12)}.`);
       try {
+        const instructions = await implementInstructions(j, t.instructions);
         // No await between the cancel check and run(), so a later Cancel reaches the process.
         if (j.cancelled) early = cancelledEnding();
         else
@@ -1192,7 +1246,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
             {
               implement: true,
               cwd,
-              prompt: t.prompt,
+              prompt: t.prompt(instructions),
               schema: implementJsonSchema(),
               maxTurns: t.maxTurns,
               model: j.profile.model,

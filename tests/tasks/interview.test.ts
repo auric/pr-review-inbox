@@ -201,10 +201,21 @@ describe("agents and stdin (spec.md section 6.6)", () => {
       "Start with the integration map. Find the code with the codegraph tools when the run has them, else with Grep.",
       'When one exists, write the decision as "the same way as X in Y".',
       "The line caps are: Change 10, Decision 10, Alternatives 3, and Risks and rollout 6.",
-      "The repository's CLAUDE.md and AGENTS.md are the standing rules. Do not repeat them in the plan.",
+      "The Project instructions section holds the standing rules of the repository. Follow them, and do not repeat them in the plan.",
+      "When the Project instructions name a build, test, or setup command, use that command. They win over the repository files.",
+      "Else take the commands from the repository files, such as package.json, a Makefile, or the CI configuration.",
+      "The app runs each command without a shell, from the repository root of a fresh checkout.",
+      "On Windows, the Python of a venv is .venv/Scripts/python.exe, not .venv/bin/python.",
+      "When the project needs a venv, add a setup command that creates it first, such as python -m venv .venv.",
       "For small, write only change and leave design and spec null.",
     ])
       expect(p).toContain(line);
+    // The Project instructions rule comes before the repository files rule.
+    expect(p.indexOf("When the Project instructions name")).toBeLessThan(p.indexOf("Else take the commands from the repository files"));
+    expect(p).not.toContain("Take them from the repository files");
+    expect(specAgent(general, 250, "win32").prompt).toContain("The commands run on Windows.");
+    expect(specAgent(general, 250, "linux").prompt).toContain("The commands run on Linux.");
+    expect(specAgent(general, 250, "aix").prompt).toContain("The commands run on aix.");
   });
 
   test("the stdin: the task line, the Tools section of a task run, an empty Your instructions, and the round", () => {

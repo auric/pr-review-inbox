@@ -12,25 +12,30 @@ import { Badge } from "@/components/ui/badge";
 import { FieldLegend, FieldSet } from "@/components/ui/field";
 import { cn } from "@/lib/utils";
 import type { TaskDto, TaskPlanInput } from "../../shared/dto";
-import { PART_STATE_TEXT, sizeRank, TASK_SIZES, type TaskSize } from "../../shared/task";
+import { PART_STATE_TEXT, sizeRank, TASK_SIZES, type TaskCommand, type TaskSize } from "../../shared/task";
 import { useSettings } from "../shell/data";
 import { BranchSection } from "./BranchSection";
+import { CommandsEditor } from "./CommandsEditor";
+import { type CommandDraft, draftProblem, draftsToCommands, toDraft } from "./commands";
 import { useBranchCheck } from "./data";
 import { type BranchPick, branchApproval, codeParts, firstPick, pickedPrefix, prefixProblem, SIZE_LINE } from "./model";
 
 export const PLAN_FORM = "task-plan";
 
-// spec.md section 6.3 commands_json kinds. The build needs a test command to see red and green tests (loop.ts NO_TEST).
-const KIND: Record<string, string> = { setup: "Setup", build: "Build", test: "Test", lint: "Lint" };
-
-export function planProblem(t: TaskDto, picked: ReadonlySet<string>, warned: boolean): string | null {
+// spec.md section 6.3: the build needs a test command to see red and green tests (loop.ts NO_TEST).
+export function planProblem(t: TaskDto, picks: readonly CommandDraft[], warned: boolean): string | null {
   const plan = t.plan;
   if (!plan) return "The plan is not ready yet.";
-  if (!plan.commands.some((c) => c.kind === "test" && picked.has(c.id)))
-    return "Pick at least one test command. The build runs it to see failing and passing tests.";
+  const bad = picks.find((d) => draftProblem(d));
+  if (bad) return `Fix the command ${bad.name.trim() || "without a name"} first. ${draftProblem(bad)}`;
+  if (!picks.some((c) => c.kind === "test")) return "Pick at least one test command. The build runs it to see failing and passing tests.";
   if (plan.warning && !warned) return "Read the warning and tick “I understand” first.";
   return null;
 }
+
+// A picked command goes as its ID when the user did not change it, else as the whole edited command.
+const sameCommand = (a: TaskCommand, b: TaskCommand) =>
+  a.name === b.name && a.kind === b.kind && JSON.stringify(a.argv) === JSON.stringify(b.argv);
 
 // The branch picks per task. A base change writes the plan again, and this screen comes back with the picks.
 const branchPicks = new Map<number, BranchPick>();
@@ -46,6 +51,7 @@ export function PlanApproval(props: {
   const { t, runner } = props;
   const plan = t.plan;
   const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(plan?.commands.map((c) => c.id) ?? []));
+  const [drafts, setDrafts] = useState<CommandDraft[]>(() => plan?.commands.map(toDraft) ?? []);
   const [warned, setWarned] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const settings = useSettings();
@@ -68,7 +74,8 @@ export function PlanApproval(props: {
       else n.delete(id);
       return n;
     });
-  const picks = plan.commands.filter((c) => picked.has(c.id));
+  const picks = drafts.filter((c) => picked.has(c.id));
+  const saved = new Set(plan.commands.filter((c) => c.saved).map((c) => c.id));
   return (
     <form
       id={PLAN_FORM}
@@ -82,10 +89,14 @@ export function PlanApproval(props: {
           setProblem(branch.problem);
           return document.getElementById("task-prefix")?.focus();
         }
-        const p = planProblem(t, picked, warned);
+        const p = planProblem(t, picks, warned);
         setProblem(p);
         if (p) return;
-        props.onApprove({ size, commands: picks.map((c) => c.id), ...(plan.warning && { warning: true }), ...branch });
+        const commands = (draftsToCommands(picks) ?? []).map((c) => {
+          const offered = plan.commands.find((o) => o.id === c.id);
+          return offered && sameCommand(offered, c) ? c.id : c;
+        });
+        props.onApprove({ size, commands, ...(plan.warning && { warning: true }), ...branch });
       }}
     >
       <FieldSet className="gap-1.5">
@@ -146,29 +157,17 @@ export function PlanApproval(props: {
       <FieldSet className="gap-1.5">
         <FieldLegend className="text-sm font-semibold">Commands that the app runs after each step</FieldLegend>
         {plan.commands.length === 0 && (
-          <p className="m-0 text-sm text-ink-2">The plan names no command. Ask for a plan with a test command, or edit the plan.</p>
+          <p className="m-0 text-sm text-ink-2">The plan names no command. Add a test command, or ask for a plan with one.</p>
         )}
-        {plan.commands.map((c) => (
-          <label
-            key={c.id}
-            className="-mx-1.5 grid min-h-6 cursor-pointer grid-cols-[auto_minmax(0,1fr)] gap-x-2 rounded-[5px] px-1.5 py-1 hover:bg-hover"
-          >
-            <input
-              type="checkbox"
-              checked={picked.has(c.id)}
-              className="m-0 mt-[3px] size-4 accent-foreground"
-              onChange={(e) => toggle(c.id, e.target.checked)}
-            />
-            <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm">
-              <span className="font-medium">{c.name}</span>
-              <Badge variant="quiet">{KIND[c.kind] ?? c.kind}</Badge>
-              {c.saved && <span className="text-xs text-muted-foreground">approved before</span>}
-              <code translate="no" className="basis-full font-mono text-xs [overflow-wrap:anywhere] text-ink-2">
-                {c.argv.join(" ")}
-              </code>
-            </span>
-          </label>
-        ))}
+        <CommandsEditor
+          idPrefix="plan-cmd"
+          drafts={drafts}
+          onChange={(next) => setDrafts(next)}
+          picked={picked}
+          onPick={toggle}
+          saved={saved}
+          newPrefix="new-u"
+        />
       </FieldSet>
       {plan.warning && (
         <Alert>
@@ -177,7 +176,7 @@ export function PlanApproval(props: {
             <p className="m-0">
               The app will run these commands in a copy of the repository:{" "}
               <span translate="no" className="font-mono">
-                {picks.length ? picks.map((c) => c.argv.join(" ")).join(", ") : "none picked"}
+                {picks.length ? picks.map((c) => c.line).join(", ") : "none picked"}
               </span>
               . They run code that {runner} writes. On Windows nothing limits what that code can read or reach. Run this only for code you
               would run yourself.

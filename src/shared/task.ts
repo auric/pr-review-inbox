@@ -246,12 +246,13 @@ export type TaskBlocked = z.infer<typeof taskBlocked>;
 export const COMMAND_KINDS = ["setup", "build", "test", "lint"] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
 export const commandId = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
+export const MAX_TASK_COMMAND_ARGS = 32;
 // repo_task_settings.commands_json. argv lists only: no shell form exists.
 export const taskCommand = z.object({
   id: commandId,
   name: z.string().trim().min(1).max(60),
   kind: z.enum(COMMAND_KINDS),
-  argv: z.array(z.string().min(1).max(1000)).min(1).max(32),
+  argv: z.array(z.string().min(1).max(1000)).min(1).max(MAX_TASK_COMMAND_ARGS),
   timeoutSec: z.number().int().min(1).max(3600),
 });
 export type TaskCommand = z.infer<typeof taskCommand>;
@@ -306,7 +307,17 @@ export type UpdateDetail = z.infer<typeof updateDetail>;
 // task_step.detail_json. Every key has a default, so an older row still parses.
 export const stepDetail = z.object({
   commands: z
-    .array(z.object({ name: z.string(), argv: z.array(z.string()), exit: z.number().int().nullable(), ms: z.number(), tail: z.string() }))
+    .array(
+      z.object({
+        name: z.string(),
+        argv: z.array(z.string()),
+        exit: z.number().int().nullable(),
+        ms: z.number(),
+        tail: z.string(),
+        // The reason when the command never started, such as "Not found: .venv/bin/python". null: it started.
+        notRun: z.string().nullable().default(null),
+      }),
+    )
     .default([]),
   diffStat: z
     .object({ files: z.number().int(), added: z.number().int(), removed: z.number().int(), lines: z.number().int() })

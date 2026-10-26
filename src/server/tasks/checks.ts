@@ -43,17 +43,20 @@ export function checkEnv(home: string | null): Record<string, string> {
 
 // The program of argv[0]: a path is taken as is (relative to cwd), a bare name goes through PATH of env.
 // Windows: a .cmd or .bat file runs through cmd.exe, which parses the arguments again (CVE-2024-27980), so it is refused.
-export function program(argv0: string, cwd: string, env: Record<string, string>): { path: string } | { error: string } {
+// reason: the short text of the Log row.
+export function program(argv0: string, cwd: string, env: Record<string, string>): { path: string } | { error: string; reason: string } {
   const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
   const path = /[\\/]/.test(argv0)
     ? isAbsolute(argv0)
       ? argv0
       : resolve(cwd, argv0)
     : Bun.which(argv0, { PATH: env[pathKey] ?? "", cwd });
-  if (!path || !statSync(path, { throwIfNoEntry: false })?.isFile()) return { error: `The command ${argv0} is not found.` };
+  if (!path || !statSync(path, { throwIfNoEntry: false })?.isFile())
+    return { error: `The command ${argv0} is not found.`, reason: `Not found: ${argv0}` };
   if (process.platform === "win32" && [".cmd", ".bat"].includes(extname(path).toLowerCase()))
     return {
       error: `${argv0} is a ${extname(path)} script, which runs through cmd.exe. Use the program itself, such as node.exe with the script.`,
+      reason: `Refused: ${argv0} runs through cmd.exe`,
     };
   return { path };
 }
@@ -89,17 +92,18 @@ export async function runCommand(
 ): Promise<CommandResult> {
   const started = performance.now();
   const base = { name: cmd.name, argv: cmd.argv };
-  const done = (exit: number | null, tail: string, timedOut = false, stopped = false): CommandResult => ({
+  const done = (exit: number | null, tail: string, timedOut = false, stopped = false, notRun: string | null = null): CommandResult => ({
     ...base,
     exit,
     ms: Math.round(performance.now() - started),
     tail,
+    notRun,
     timedOut,
     stopped,
   });
   if (o.signal?.aborted) return done(null, "The app stopped the checks before this command.", false, true);
   const prog = program(cmd.argv[0] as string, o.cwd, o.env);
-  if ("error" in prog) return done(null, prog.error);
+  if ("error" in prog) return done(null, prog.error, false, false, prog.reason);
   const out = tailBuffer(o.tailBytes ?? OUTPUT_TAIL);
   const spawn = () =>
     Bun.spawn([prog.path, ...cmd.argv.slice(1)], {
@@ -115,7 +119,7 @@ export async function runCommand(
   try {
     p = spawn();
   } catch (e) {
-    return done(null, `The command ${cmd.argv[0]} did not start: ${(e as Error).message}`);
+    return done(null, `The command ${cmd.argv[0]} did not start: ${(e as Error).message}`, false, false, `Did not start: ${cmd.argv[0]}`);
   }
   let timedOut = false;
   let stopped = false;
@@ -419,7 +423,9 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
   try {
     for (const c of list) {
       const r = await runCommand(c, { cwd: i.wt.repo, env, signal: i.signal });
-      log(`Task check ${c.name}: exit ${r.exit ?? "none"} in ${r.ms} ms${r.timedOut ? " (timed out)" : r.stopped ? " (stopped)" : ""}.`);
+      log(
+        `Task check ${c.name}: ${r.notRun ?? `exit ${r.exit ?? "none"}`} in ${r.ms} ms${r.timedOut ? " (timed out)" : r.stopped ? " (stopped)" : ""}.`,
+      );
       commands.push(r);
       if (r.stopped) break;
     }
@@ -449,7 +455,7 @@ export async function checkStep(
       step,
       !r.commands.length && i.scope ? "skipped" : r.green ? "ok" : r.commands.some((c) => c.stopped) ? "cancelled" : "failed",
       {
-        commands: r.commands.map(({ name, argv, exit, ms, tail }) => ({ name, argv, exit, ms, tail })),
+        commands: r.commands.map(({ name, argv, exit, ms, tail, notRun }) => ({ name, argv, exit, ms, tail, notRun })),
         notes: r.notes,
         expectRed: i.expectRed ?? false,
       },

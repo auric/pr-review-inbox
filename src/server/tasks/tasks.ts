@@ -1332,11 +1332,19 @@ export function createTaskService(opts: TaskServiceOptions) {
     if (problem) return conflict(db, t, problem);
     const repo = repoSettings(db, t.project, t.repo);
     const offered = commandsOf(docs.parsed, repo.commands);
-    if (new Set(input.commands).size !== input.commands.length) return { status: 400, error: "Each command is picked once." };
+    const ids = input.commands.map((c) => (typeof c === "string" ? c : c.id));
+    if (new Set(ids).size !== ids.length) return { status: 400, error: "Each command is picked once." };
     const picked: TaskCommand[] = [];
-    for (const cid of input.commands) {
-      const c = offered.find((x) => x.id === cid);
-      if (!c) return { status: 400, error: `Command ${cid} is not in the plan.` };
+    for (const x of input.commands) {
+      // spec.md section 6.3: an edited or added command is the user's own argv list.
+      if (typeof x !== "string") {
+        if (!x.id.startsWith(NEW_COMMAND) && !offered.some((o) => o.id === x.id))
+          return { status: 400, error: `Command ${x.id} is not in the plan.` };
+        picked.push(x);
+        continue;
+      }
+      const c = offered.find((o) => o.id === x);
+      if (!c) return { status: 400, error: `Command ${x} is not in the plan.` };
       const { saved: _, ...cmd } = c;
       picked.push(cmd);
     }

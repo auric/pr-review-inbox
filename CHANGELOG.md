@@ -44,6 +44,11 @@
 - "Update from <base>" brings the new commits of the base branch that you picked, for example release/2.1, into the task branch. It rebases before the first push and merges after it, so no push needs force. The view offers it when the base has new commits, when Bitbucket reports conflicts in the pull request, or when Claude says that a change needs the newest base. With several repositories, each one updates from its own base, and the view lists one line per repository.
 - Claude resolves the conflicts of an update in a step that may change only the files with conflicts. A remaining conflict marker, a question, or another changed file stops the update and puts every repository back: "The branch is as it was." with "Try again". Red tests after an update offer "Undo the update". The update pushes nothing.
 - A commit after the pull request opened stays local for now. The view says "Your change has new commits that are not on the server yet.", and this version has no button to push them.
+- Every Claude step of a build now follows your project instructions from Settings: the CLAUDE.md files of the target branch, your clone files, and your extra text. With submodules, each repository adds its own instructions for its folder.
+- Settings, Project instructions now lists the repositories of your tasks, also without a pull request in the inbox.
+- The plan now takes its commands from your project instructions first. It knows your operating system, so on Windows it proposes `.venv/Scripts/python.exe` and a setup command that creates the venv.
+- You can now edit the commands on the plan screen: change the name, the kind, or the command line, remove one, or add one. Settings, Tasks, Commands edits the saved commands of each repository.
+- The Log tab now says why a command did not start, such as "Not found: .venv/bin/python", instead of "stopped".
 
 ### Ask Claude about a finding
 

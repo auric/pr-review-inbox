@@ -821,7 +821,10 @@ export function interviewAgent(p: Profile, round: number): AgentSpec {
   };
 }
 
-export const specRules = (budget: number) => [
+const OS_NAME: Record<string, string> = { win32: "Windows", linux: "Linux", darwin: "macOS" };
+
+// platform: process.platform of the machine that runs the commands (checks.ts runs them without a shell).
+export const specRules = (budget: number, platform: string = process.platform) => [
   "You write the plan for one task: design, behavior, and the parts with their tasks. You cannot change files, and you post nothing.",
   "Read ./context/task.md and ./context/answers.md first. The answers of the user win over the task text.",
   "Base the design on code that you read. Name the files and functions that change.",
@@ -832,7 +835,12 @@ export const specRules = (budget: number) => [
   "When the repository uses feature flags, put new behavior behind a flag. Name the flag and the part that removes it.",
   "For each unknown that only code can answer, plan a spike part. A spike is never merged. Its result updates the plan.",
   "Give each part acceptance criteria that a test can prove, and name the test for each criterion.",
-  'In testing, give the commands that build and test the repository as argument lists, such as ["bun","test"]. Take them from the repository files, such as package.json, a Makefile, or the CI configuration.',
+  'In testing, give the commands that build and test the repository as argument lists, such as ["bun","test"].',
+  "When the Project instructions name a build, test, or setup command, use that command. They win over the repository files.",
+  "Else take the commands from the repository files, such as package.json, a Makefile, or the CI configuration.",
+  `The commands run on ${OS_NAME[platform] ?? platform}. The app runs each command without a shell, from the repository root of a fresh checkout.`,
+  "On Windows, the Python of a venv is .venv/Scripts/python.exe, not .venv/bin/python.",
+  "When the project needs a venv, add a setup command that creates it first, such as python -m venv .venv.",
   "When the tests need a service, such as a database, make its setup the first task.",
   "Propose a size. Small: one pull request under the budget, with no schema or API change. Medium: one code pull request after a plan review. Large: more code pull requests.",
   "Estimate the changed lines of each part from the files that you read. Do not count lock files.",
@@ -843,15 +851,15 @@ export const specRules = (budget: number) => [
   "Write the documents in plain words with short sentences. Keep each section under its line cap.",
   "The line caps are: Change 10, Decision 10, Alternatives 3, and Risks and rollout 6. Behavior 15, Edge cases 10, and Out of scope 5.",
   "Do not restate code that a reader can open from a map line. Do not add sections that the template does not have.",
-  "The repository's CLAUDE.md and AGENTS.md are the standing rules. Do not repeat them in the plan.",
+  "The Project instructions section holds the standing rules of the repository. Follow them, and do not repeat them in the plan.",
   "For each task, give the files that it changes and the existing tests to run. Give one done check that a test or a command proves.",
   "For small, write only change and leave design and spec null. For medium and large, write design and spec and leave change empty.",
 ];
 
-export function specAgent(p: Profile, budget: number): AgentSpec {
+export function specAgent(p: Profile, budget: number, platform: string = process.platform): AgentSpec {
   return {
     description: "Read-only plan of one task.",
-    prompt: [...specRules(budget), ...TRUST, COVERAGE_RULE, ...docsRule(p)].join("\n"),
+    prompt: [...specRules(budget, platform), ...TRUST, COVERAGE_RULE, ...docsRule(p)].join("\n"),
   };
 }
 

@@ -14,6 +14,7 @@ import { createLive } from "../../src/server/live";
 import { DEFAULT_PROFILE, profileOf } from "../../src/server/review/catalog";
 import { IMPLEMENT_TOOLS, implementArgs } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
+import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
@@ -21,6 +22,7 @@ import {
   ciPath,
   commitTask,
   implementPrompt,
+  instructionRepos,
   partBudget,
   type StepInput,
   type StepOutcome,
@@ -35,7 +37,7 @@ import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { fakeRunner } from "../support/review-fixture";
 import { taskCache, taskRemote } from "./fixture";
 
-for (const m of ["tasks/implement", "tasks/worktree", "review/claude", "review/jobs"])
+for (const m of ["tasks/implement", "tasks/worktree", "review/claude", "review/jobs", "review/instructions"])
   console.log(`implement.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
@@ -265,7 +267,17 @@ describe("implement run", () => {
       expect(keys).not.toContain("ANTHROPIC_API_KEY");
       expect(call.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe("1");
       expect(JSON.stringify(call.env)).not.toContain(SECRET);
-      expect(call.stdin).toBe(implementPrompt("implement", "specs/K-1/"));
+      // The target branch CLAUDE.md of the fixture holds its own path as text.
+      expect(call.stdin).toBe(
+        implementPrompt(
+          "implement",
+          "specs/K-1/",
+          false,
+          false,
+          "",
+          `# Project instructions\n\n${IMPLEMENT_TRUST}\n\n## From the target branch: CLAUDE.md (applies to all files)\n\nCLAUDE.md\n`,
+        ),
+      );
       // Gate B17: --restricted refuses a write outside the cwd. The fake does the same.
       expect(s.calls().some((c) => c.refused === "../outside.txt")).toBe(true);
       expect(existsSync(resolve(s.wt.dir, "..", "outside.txt"))).toBe(false);
@@ -276,6 +288,74 @@ describe("implement run", () => {
       // The token is in no file of the task folder, the cache config, or the worktree.
       for (const t of [...files(join(s.wt.dir, "..")), readFileSync(join(s.wt.admin, "..", "..", "config"), "utf8")])
         expect(t).not.toContain(SECRET);
+    },
+    SLOW,
+  );
+
+  test(
+    "every step mode gets the Project instructions of the task repository at its target commit; the worktree still hides CLAUDE.md",
+    async () => {
+      const s = await setup();
+      saveInstructionSettings(s.db, { project: "PROJ", repo: "repo" }, { target: true, local: [], extra: "IMPLEMENT-RULES-CANARY" });
+      for (const mode of ["tests", "implement", "fix", "instruct", "resolve"] as const) {
+        s.scenario({ writes: [] });
+        await s.step({ mode, attempt: 1, item: `T1.${mode}`, ...(mode === "instruct" && { instructions: "Rename the flag." }) });
+        const call = s.runCalls().at(-1) as Call;
+        const at = call.stdin.indexOf("# Project instructions");
+        expect(at).toBeGreaterThan(call.stdin.indexOf("- Mode:"));
+        const section = call.stdin.slice(at);
+        expect(section).toContain(IMPLEMENT_TRUST);
+        expect(section).not.toContain(INSTRUCTIONS_TRUST);
+        expect(section).toContain("## From the target branch: CLAUDE.md");
+        expect(section).toContain("IMPLEMENT-RULES-CANARY");
+        expect(call.stdin).toContain('Only the "Project instructions"');
+        if (mode === "instruct") expect(call.stdin.endsWith("# Your instructions\n\nRename the flag.")).toBe(true);
+      }
+      // The sparse rule stays: the CLI sees no CLAUDE.md in ./repo, and the part folder gets none.
+      expect(existsSync(join(s.wt.repo, "CLAUDE.md"))).toBe(false);
+      expect(existsSync(join(s.wt.dir, "CLAUDE.md"))).toBe(false);
+      // SQLite holds the sources and sizes, never the text.
+      const row = s.db.query("SELECT instructions_json FROM review_run WHERE kind = 'implement' ORDER BY id DESC LIMIT 1").get() as {
+        instructions_json: string;
+      };
+      expect(JSON.parse(row.instructions_json).files.map((f: { source: string; path: string }) => [f.source, f.path])).toEqual([
+        ["target", "CLAUDE.md"],
+        ["settings", ""],
+      ]);
+      expect(row.instructions_json).not.toContain("CANARY");
+    },
+    SLOW,
+  );
+
+  test(
+    "multi-repo: the main repository and each submodule with access edit give their own instructions, scoped to their folder",
+    async () => {
+      const s = await setup();
+      const add = (o: { project: string; repo: string; parent: number | null; path: string; access: string }) =>
+        (
+          s.db
+            .query(
+              `INSERT INTO task_repo (task, role, project, repo, parent, path, depth, access, base_commit, pinned, created_at)
+              VALUES ($task, 'submodule', $project, $repo, $parent, $path, 1, $access, NULL, $pin, 1) RETURNING id`,
+            )
+            .get({ task: s.task, ...o, pin: "b".repeat(40) }) as { id: number }
+        ).id;
+      const main = (
+        s.db
+          .query(
+            `INSERT INTO task_repo (task, role, project, repo, depth, access, base_branch, base_commit, created_at)
+            VALUES ($task, 'main', 'PROJ', 'repo', 0, 'edit', 'main', $base, 1) RETURNING id`,
+          )
+          .get({ task: s.task, base: s.base }) as { id: number }
+      ).id;
+      const lib = add({ project: "PROJ", repo: "lib", parent: main, path: "libs/lib", access: "edit" });
+      add({ project: "PROJ", repo: "deep", parent: lib, path: "deep", access: "edit" });
+      add({ project: "PROJ", repo: "docs", parent: main, path: "docs", access: "read" });
+      expect(instructionRepos(s.db, s.task, ["src/app.ts", "libs/lib/a.ts", "libs/lib/deep/b.ts"])).toEqual([
+        { project: "PROJ", repo: "repo", commit: s.base, path: null, paths: ["src/app.ts", "libs/lib/a.ts", "libs/lib/deep/b.ts"] },
+        { project: "PROJ", repo: "lib", commit: "b".repeat(40), path: "libs/lib", paths: ["a.ts", "deep/b.ts"] },
+        { project: "PROJ", repo: "deep", commit: "b".repeat(40), path: "libs/lib/deep", paths: ["b.ts"] },
+      ]);
     },
     SLOW,
   );

@@ -15,7 +15,7 @@ import { createSettings } from "../../src/server/settings";
 import { CHECK_KINDS, checkEnv, checkStep, runChecks, runCommand, runEntries, scopedCommands } from "../../src/server/tasks/checks";
 import { saveRepoSettings } from "../../src/server/tasks/tasks";
 import { openWorktree, type Worktree } from "../../src/server/tasks/worktree";
-import type { TaskCommand } from "../../src/shared/task";
+import { stepDetail, type TaskCommand } from "../../src/shared/task";
 import { taskCache, taskRemote } from "./fixture";
 
 console.log(`checks.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/checks", import.meta.dir)}`);
@@ -315,6 +315,20 @@ describe("app-run checks", () => {
     },
     SLOW,
   );
+
+  test("a command that never starts keeps the reason for the Log row; a command that ran has none", async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-notrun-")));
+    dirs.push(dir);
+    mkdirSync(join(dir, "repo"));
+    const opts = { cwd: join(dir, "repo"), env: checkEnv(null) };
+    const missing = await runCommand({ name: "setup", argv: [".venv/bin/python", "-m", "pip"], timeoutSec: 30 }, opts);
+    expect([missing.exit, missing.notRun, missing.stopped]).toEqual([null, "Not found: .venv/bin/python", false]);
+    expect(missing.tail).toBe("The command .venv/bin/python is not found.");
+    const ran = await runCommand({ name: "ok", argv: [BUN, "-e", "1"], timeoutSec: 30 }, opts);
+    expect([ran.exit, ran.notRun]).toEqual([0, null]);
+    // An older detail row without the key still parses.
+    expect(stepDetail.parse({ commands: [{ name: "x", argv: ["x"], exit: null, ms: 0, tail: "" }] }).commands[0]?.notRun).toBeNull();
+  });
 
   test("the output tail keeps the last 64 KB", async () => {
     const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb3-tail-")));

@@ -82,8 +82,19 @@ type CommitRow = FixCommitRow & { project: string; repo: string };
 
 const SQL = {
   pr: "SELECT id, project, repo, pr_id, source_branch, source_head, target_head FROM pull_request WHERE id = $id",
-  repos: `SELECT p.project, p.repo, MAX(p.id) AS pr, c.path AS clone FROM pull_request p
-    LEFT JOIN repo_clone c ON c.project = p.project AND c.repo = p.repo GROUP BY p.project, p.repo ORDER BY p.project, p.repo`,
+  // The repositories of the stored PRs and of the tasks. pr: null for a repository that only tasks name.
+  repos: `SELECT k.project, k.repo, (SELECT MAX(p.id) FROM pull_request p WHERE p.project = k.project AND p.repo = k.repo) AS pr,
+      c.path AS clone
+    FROM (SELECT project, repo FROM pull_request UNION SELECT project, repo FROM task_repo WHERE project IS NOT NULL AND repo IS NOT NULL) k
+    LEFT JOIN repo_clone c ON c.project = k.project AND c.repo = k.repo ORDER BY k.project, k.repo`,
+  // The newest target commit of a repository: the target head of its newest PR, else the base commit of its newest task.
+  repoHead: `SELECT COALESCE(
+      (SELECT target_head FROM pull_request WHERE project = $project AND repo = $repo AND target_head IS NOT NULL ORDER BY id DESC LIMIT 1),
+      (SELECT COALESCE(base_commit, pinned) FROM task_repo WHERE project = $project AND repo = $repo
+        AND COALESCE(base_commit, pinned) IS NOT NULL ORDER BY id DESC LIMIT 1)) AS head`,
+  // A repository of a PR or a task. A task repository can have no stored PR.
+  known: `SELECT 1 FROM pull_request WHERE project = $project AND repo = $repo
+    UNION ALL SELECT 1 FROM task_repo WHERE project = $project AND repo = $repo LIMIT 1`,
   clone: "SELECT path FROM repo_clone WHERE project = $project AND repo = $repo",
   saveClone: `INSERT INTO repo_clone (project, repo, path, updated_at) VALUES ($project, $repo, $path, $now)
     ON CONFLICT (project, repo) DO UPDATE SET path = excluded.path, updated_at = excluded.updated_at`,
@@ -165,6 +176,17 @@ const positiveId = (what: string) =>
 const prParam = positiveId("pull request");
 const runParam = positiveId("run");
 const commitParam = positiveId("fix commit");
+// The name rule of the task routes (src/server/tasks/routes.ts repoParam).
+const REPO_NAME = /^[A-Za-z0-9~_][A-Za-z0-9._~-]{0,254}$/;
+const repoParam = validator("param", (v: Record<string, string>, c) =>
+  REPO_NAME.test(v.project ?? "") && REPO_NAME.test(v.repo ?? "")
+    ? { project: v.project as string, repo: v.repo as string }
+    : c.json<ApiError>({ error: "Invalid repository." }, 400),
+);
+const instructionsBody = validator("json", (v, c) => {
+  const r = instructionsInput.safeParse(v);
+  return r.success ? r.data : c.json<ApiError>({ error: "Invalid project instructions." }, 400);
+});
 
 const unconfigured = { error: "Configure the Bitbucket URL and token first." } satisfies ApiError;
 const notFound = (what: string) => ({ error: `${what} not found.` }) satisfies ApiError;
@@ -221,6 +243,38 @@ export function createFixRoutes(opts: {
   // GET and PUT: no network. The synced source head stands for the live head.
   const cloneState = (db: Database, pr: PrRow): Promise<CloneDto> =>
     checkClone(cloneOf(db, pr), { branch: pr.source_branch ?? "", ...(pr.source_head ? { live: pr.source_head } : {}) });
+  // Reads the sources as a run does, with no network. The target branch comes from the cache at head.
+  async function instructionPreview(
+    db: Database,
+    k: { project: string; repo: string },
+    head: string | null,
+  ): Promise<InstructionPreviewDto> {
+    const cache = cachePath(dataDir(), { project: k.project, repo: k.repo, id: 0 });
+    const cached = head !== null && existsSync(cache);
+    const b = await projectInstructions(
+      db,
+      k,
+      cached ? { cache, env: env(), commit: head } : null,
+      settings.globalInstructions() ? review.configDir() : null,
+    );
+    const isFile = (p: string) => {
+      try {
+        return statSync(p).isFile();
+      } catch {
+        return false;
+      }
+    };
+    const found = b.clone ? CLONE_INSTRUCTION_FILES.filter((f) => isFile(join(b.clone as string, f))) : [];
+    return {
+      readAt: Date.now(),
+      found,
+      target: !b.settings.target ? "off" : cached ? "read" : "no-cache",
+      files: b.files,
+      bytes: b.bytes,
+      text: b.text,
+      notLoaded: b.notLoaded,
+    };
+  }
 
   function insert(
     db: Database,
@@ -652,57 +706,38 @@ export function createFixRoutes(opts: {
         return c.json<GlobalInstructionsDto>({ on: settings.globalInstructions(), path: join(review.configDir(), GLOBAL_FILE) }, 200);
       },
     )
-    .put(
-      "/prs/:id/instructions",
-      prParam,
-      validator("json", (v, c) => {
-        const r = instructionsInput.safeParse(v);
-        return r.success ? r.data : c.json<ApiError>({ error: "Invalid project instructions." }, 400);
-      }),
-      (c) => {
-        const db = review.open();
-        if (!db) return c.json(unconfigured, 409);
-        const pr = prRow(db, c.req.valid("param").id);
-        if (!pr) return c.json(notFound("Pull request"), 404);
-        saveInstructionSettings(db, pr, c.req.valid("json"));
-        return c.json<InstructionsInput>(instructionSettings(db, pr), 200);
-      },
-    )
-    .get("/prs/:id/instructions/preview", prParam, async (c) => {
-      // Reads the sources as a run does, with no network. The target branch comes from the cache, at the synced target head.
+    .put("/prs/:id/instructions", prParam, instructionsBody, (c) => {
       const db = review.open();
       if (!db) return c.json(unconfigured, 409);
       const pr = prRow(db, c.req.valid("param").id);
       if (!pr) return c.json(notFound("Pull request"), 404);
-      const cache = cacheOf(pr);
-      const cached = pr.target_head !== null && existsSync(cache);
-      const b = await projectInstructions(
-        db,
-        pr,
-        cached ? { cache, env: env(), commit: pr.target_head as string } : null,
-        settings.globalInstructions() ? review.configDir() : null,
-      );
-      const isFile = (p: string) => {
-        try {
-          return statSync(p).isFile();
-        } catch {
-          return false;
-        }
-      };
-      const found = b.clone ? CLONE_INSTRUCTION_FILES.filter((f) => isFile(join(b.clone as string, f))) : [];
+      saveInstructionSettings(db, pr, c.req.valid("json"));
+      return c.json<InstructionsInput>(instructionSettings(db, pr), 200);
+    })
+    .get("/prs/:id/instructions/preview", prParam, async (c) => {
+      const db = review.open();
+      if (!db) return c.json(unconfigured, 409);
+      const pr = prRow(db, c.req.valid("param").id);
+      if (!pr) return c.json(notFound("Pull request"), 404);
       c.header("Cache-Control", "no-store");
-      return c.json<InstructionPreviewDto>(
-        {
-          readAt: Date.now(),
-          found,
-          target: !b.settings.target ? "off" : cached ? "read" : "no-cache",
-          files: b.files,
-          bytes: b.bytes,
-          text: b.text,
-          notLoaded: b.notLoaded,
-        },
-        200,
-      );
+      return c.json<InstructionPreviewDto>(await instructionPreview(db, pr, pr.target_head), 200);
+    })
+    .put("/repos/:project/:repo/instructions", repoParam, instructionsBody, (c) => {
+      const db = review.open();
+      if (!db) return c.json(unconfigured, 409);
+      const k = c.req.valid("param");
+      if (!db.query(SQL.known).get(k)) return c.json(notFound("Repository"), 404);
+      saveInstructionSettings(db, k, c.req.valid("json"));
+      return c.json<InstructionsInput>(instructionSettings(db, k), 200);
+    })
+    .get("/repos/:project/:repo/instructions/preview", repoParam, async (c) => {
+      const db = review.open();
+      if (!db) return c.json(unconfigured, 409);
+      const k = c.req.valid("param");
+      if (!db.query(SQL.known).get(k)) return c.json(notFound("Repository"), 404);
+      const head = (db.query(SQL.repoHead).get(k) as { head: string | null } | null)?.head ?? null;
+      c.header("Cache-Control", "no-store");
+      return c.json<InstructionPreviewDto>(await instructionPreview(db, k, head), 200);
     })
     .get("/clones", (c) => {
       const db = review.open();

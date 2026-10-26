@@ -26,7 +26,7 @@ import { SaveStatus, TYPING_MS, useSaver } from "./autosave";
 
 const reposKey = ["instructions"] as const;
 const globalKey = ["instructions", "global"] as const;
-const previewKey = (pr: number) => ["instructions", pr, "preview"] as const;
+const previewKey = (r: Pick<InstructionRepoDto, "project" | "repo">) => ["instructions", r.project, r.repo, "preview"] as const;
 const name = (r: Pick<InstructionRepoDto, "project" | "repo">) => `${r.project}/${r.repo}`;
 // UI code holds no product name (tests/ui/names.test.ts), so the file names come from the shared list.
 const MAIN = CLONE_INSTRUCTION_FILES[0];
@@ -65,7 +65,7 @@ export function ProjectInstructions() {
         </ul>
       ) : (
         <p className="m-0 text-sm text-muted-foreground">
-          No repository yet. A repository shows here after the inbox loads one of its pull requests.
+          No repository yet. A repository shows here after the inbox loads one of its pull requests or a task uses it.
         </p>
       )}
     </section>
@@ -124,15 +124,15 @@ function RepoRow({ r }: { r: InstructionRepoDto }) {
   const [s, setS] = useState<InstructionsInput>(r.settings);
   const latest = useRef(s);
   const saved = useRef(r.settings);
-  const id = `instr-${r.pr}`;
+  // A DOM ID from the repository key. Project keys and slugs hold no space.
+  const id = `instr-${r.project}-${r.repo}`.replace(/[^A-Za-z0-9_-]/g, "_");
+  const param = { project: r.project, repo: r.repo };
   const { state, saver } = useSaver(
     () => (JSON.stringify(latest.current) === JSON.stringify(saved.current) ? null : latest.current),
     async (input: InstructionsInput) => {
-      saved.current = await read<InstructionsInput>(
-        await api.api.prs[":id"].instructions.$put({ param: { id: String(r.pr) }, json: input }),
-      );
+      saved.current = await read<InstructionsInput>(await api.api.repos[":project"][":repo"].instructions.$put({ param, json: input }));
       void qc.invalidateQueries({ queryKey: reposKey });
-      void qc.invalidateQueries({ queryKey: previewKey(r.pr) });
+      void qc.invalidateQueries({ queryKey: previewKey(r) });
     },
   );
   const change = (patch: Partial<InstructionsInput>, delay = 0) => {
@@ -141,9 +141,9 @@ function RepoRow({ r }: { r: InstructionRepoDto }) {
     saver.request(delay);
   };
   const preview = useQuery({
-    queryKey: previewKey(r.pr),
+    queryKey: previewKey(r),
     enabled: open,
-    queryFn: async () => read<InstructionPreviewDto>(await api.api.prs[":id"].instructions.preview.$get({ param: { id: String(r.pr) } })),
+    queryFn: async () => read<InstructionPreviewDto>(await api.api.repos[":project"][":repo"].instructions.preview.$get({ param })),
   });
   const p = preview.data;
   // Ticked files that the clone does not have now.

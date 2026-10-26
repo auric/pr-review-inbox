@@ -206,7 +206,7 @@ function StepBody({ s, onRunLog, onDiff }: { s: TaskStepDto; onRunLog: (run: num
               {c.argv.join(" ")}
             </code>
             <span className={cn(c.exit !== 0 && look !== "expected" && "font-semibold text-destructive")}>
-              {c.exit === null ? "stopped" : `exit ${c.exit}`}
+              {c.notRun ?? (c.exit === null ? "stopped" : `exit ${c.exit}`)}
             </span>
             <span className="text-muted-foreground">{seconds(c.ms)}</span>
           </summary>

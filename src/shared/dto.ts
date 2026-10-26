@@ -1088,8 +1088,9 @@ export const instructionsInput = z.object({
   extra: z.string().max(EXTRA_INSTRUCTIONS_MAX),
 });
 export type InstructionsInput = z.infer<typeof instructionsInput>;
-// GET /api/instructions: one row per repository of a stored PR. pr: the newest PR of the repository. clone: null when not set.
-export type InstructionRepoDto = { project: string; repo: string; pr: number; clone: string | null; settings: InstructionsInput };
+// GET /api/instructions: one row per repository of a stored PR or a task. pr: the newest PR of the repository, null when only tasks
+// name it. clone: null when not set. PUT /api/repos/:project/:repo/instructions saves by repository.
+export type InstructionRepoDto = { project: string; repo: string; pr: number | null; clone: string | null; settings: InstructionsInput };
 // path: from the repository or clone root. Empty for the settings text.
 // path: from the config folder for the global source.
 // scope: the folder of a CLAUDE.md of a changed folder on the target branch. The file applies to <scope>/** only. Absent: all files.
@@ -1266,7 +1267,9 @@ export const taskDocInput = z.object({ version, doc: z.enum(TASK_DOCS), text: z.
 export const taskPlanInput = z.object({
   version,
   size: taskSize,
-  commands: z.array(commandId).max(MAX_TASK_COMMANDS),
+  // An ID picks an offered command as it is. A whole command is one that the user edited or added on the plan screen. Its ID is an
+  // offered ID or starts with "new-".
+  commands: z.array(z.union([commandId, taskCommand])).max(MAX_TASK_COMMANDS),
   warning: z.literal(true).optional(),
   // spec.md section 6.16. Absent prefix: the first prefix of Settings > Tasks. Absent existing: continue.
   prefix: branchPrefix.optional(),

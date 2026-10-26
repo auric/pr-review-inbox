@@ -22,6 +22,8 @@ import {
   type ApiError,
   type BranchCheckDto,
   type BranchSearchDto,
+  type InstructionPreviewDto,
+  type InstructionRepoDto,
   MAX_ATTACHMENT_BYTES,
   MAX_PR_ATTACHMENT_BYTES,
   RUN_IMAGE_BYTES,
@@ -406,6 +408,53 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
   );
 
   test(
+    "a task with no PR: the interview and the plan runs get the Project instructions of its repository and the target branch CLAUDE.md",
+    async () => {
+      const h = await setup();
+      h.jira.addIssue("ABC-43", "Typed task");
+      await h.connectJira();
+      const put = await h.json("/api/repos/PROJ/repo/instructions", {
+        method: "PUT",
+        body: { target: true, local: [], extra: "TEST-COMMAND-CANARY: run build/unittests, never ctest." },
+      });
+      expect(put.status).toBe(200);
+      const c = await h.create({ project: "PROJ", repo: "repo", key: "ABC-43" });
+      expect(c.body.originPr).toBeNull();
+      await h.settle();
+      await h.recommend(await h.get(c.body.id));
+      const calls = h.runCalls();
+      expect(h.runs(c.body.id).map((r) => r.kind)).toEqual(["interview", "spec"]);
+      for (const call of calls) {
+        const section = call.stdin.slice(call.stdin.indexOf("# Project instructions"), call.stdin.indexOf("# Your instructions"));
+        expect(section).toContain("## From the target branch: CLAUDE.md");
+        expect(section).toContain("Name each lock after the data it guards.");
+        expect(section).toContain("TEST-COMMAND-CANARY: run build/unittests, never ctest.");
+      }
+      // A repository that only a task names shows in the list with no PR and saves by its key.
+      h.db
+        .query(
+          "INSERT INTO task_repo (task, role, project, repo, depth, access, pinned, created_at) VALUES ($task, 'submodule', 'PROJ', 'lib', 1, 'edit', $pin, 1)",
+        )
+        .run({ task: c.body.id, pin: h.remote.target });
+      const list = await h.json<InstructionRepoDto[]>("/api/instructions");
+      expect(list.body.map((r) => [r.project, r.repo, r.pr])).toEqual([
+        ["PROJ", "lib", null],
+        ["PROJ", "repo", h.pr],
+      ]);
+      const lib = { target: false, local: [], extra: "LIB-RULES" };
+      expect(await h.json("/api/repos/PROJ/lib/instructions", { method: "PUT", body: lib })).toEqual({ status: 200, body: lib });
+      const preview = await h.json<InstructionPreviewDto>("/api/repos/PROJ/lib/instructions/preview");
+      expect([preview.status, preview.body.target, preview.body.text.includes("LIB-RULES")]).toEqual([200, "off", true]);
+      const repoPreview = await h.json<InstructionPreviewDto>("/api/repos/PROJ/repo/instructions/preview");
+      expect([repoPreview.body.target, repoPreview.body.text.includes("Name each lock")]).toEqual(["read", true]);
+      expect((await h.json("/api/repos/PROJ/none/instructions", { method: "PUT", body: lib })).status).toBe(404);
+      expect((await h.json("/api/repos/PROJ/lib/instructions", { method: "PUT", body: { ...lib, extra: 1 } })).status).toBe(400);
+      expect((await h.json("/api/repos/..%2Fx/lib/instructions", { method: "PUT", body: lib })).status).toBe(400);
+    },
+    SLOW,
+  );
+
+  test(
     "a failed interview run stops the task with the reason; Resume runs the interview again; Stop and Resume keep open questions",
     async () => {
       const h = await setup();
@@ -685,6 +734,35 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
         "/api/repos/PROJ/repo/task-settings",
       );
       expect([settings.body.commands.length, settings.body.warnedAt, settings.body.lineBudget]).toEqual([1, row.warned_at, 400]);
+    },
+    SLOW,
+  );
+
+  test(
+    "plan approval with edited commands: an edited proposal and an added command are stored as the user wrote them",
+    async () => {
+      const h = await setup();
+      const t = await h.toPlan();
+      const edited = { id: "new-1", name: "unit", kind: "test", argv: ["build/unittests", "--all"], timeoutSec: 600 };
+      const added = { id: "new-u1", name: "venv", kind: "setup", argv: ["python", "-m", "venv", ".venv"], timeoutSec: 600 };
+      const body = { version: t.version, size: "small", warning: true };
+      // An object needs an offered ID or a "new-" ID, and the IDs stay unique.
+      expect((await h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [{ ...added, id: "cmd9" }] } })).body).toEqual(
+        {
+          error: "Command cmd9 is not in the plan.",
+        },
+      );
+      expect((await h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: ["new-1", edited] } })).status).toBe(400);
+      expect((await h.json(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [{ ...added, argv: [] }] } })).status).toBe(400);
+      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [added, edited] } });
+      expect(ok.status).toBe(200);
+      const row = h.db.query("SELECT commands_json FROM repo_task_settings WHERE project = 'PROJ' AND repo = 'repo'").get() as {
+        commands_json: string;
+      };
+      expect(JSON.parse(row.commands_json)).toEqual([
+        { ...added, id: "cmd1" },
+        { ...edited, id: "cmd2" },
+      ]);
     },
     SLOW,
   );
