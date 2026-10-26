@@ -220,6 +220,17 @@ export async function taskRemote(): Promise<{ heads: Record<string, string>; cre
   return (await res.json()) as { heads: Record<string, string>; creates: Record<string, unknown>[] };
 }
 
+// The release base of the task tests (spec.md section 6.18). serve.ts makes it at the target of PR 1001, and a reset puts it back.
+export const RELEASE = "release/2.1";
+
+// spec.md section 6.18.5: move adds one commit with these files to a branch of the local remote. conflicted sets properties.mergeResult
+// of every task PR to CONFLICTED (or CLEAN), then one sync stores it. Answers the new head of the moved branch.
+export async function taskBase(change: { move?: { branch: string; files: Record<string, string> }; conflicted?: boolean }) {
+  const res = await fetch(`${FAKE_URL}/__control/task-base`, { method: "POST", headers: auth, body: JSON.stringify(change) });
+  if (!res.ok) throw new Error(`control task-base: ${res.status}`);
+  return ((await res.json()) as { head: string | null }).head;
+}
+
 // ---------- Fix it (plan r3): the user's clone ----------
 
 const auth = { Authorization: `Bearer ${E2E_TOKEN}`, "Content-Type": "application/json" };

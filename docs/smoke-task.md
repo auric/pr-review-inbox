@@ -1,6 +1,6 @@
 # Build a Jira task manual smoke test
 
-This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Parts M (medium task) and L (large task) come with the later work packages.
+This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Part U is Gate UTU: "Tell Claude" and "Update from <base>" on a release base (`tests/e2e/task-tell.e2e.ts` is its automated twin). Parts M (medium task) and L (large task) come with the later work packages.
 
 ## Rules
 
@@ -10,8 +10,8 @@ This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket
 - Use a new, empty data folder. Never use the data folder of your daily instance.
 - Nothing goes to Bitbucket before "Push and open PR". Check Bitbucket after each part.
 - Do not copy tokens, host names, code, task text, or file names into files, issues, or chat. Record counts, times, states, and the shape of the sentences only.
-- Expect about 35 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P, seven in part R, and four in part D. A run is one interview, one plan, one tests step, one code step, one fix, or one own review.
-- In this document, `<BITBUCKET_URL>` is the base URL of the Bitbucket server, `<JIRA_URL>` is the base URL of the Jira server, `<REPO>` is the test repository as `<project>/<repo>`, `<TARGET>` is its default branch, `<BASE2>` is a second branch of `<REPO>`, and `<KEY1>` to `<KEY5>` are the keys of the five Jira tasks.
+- Expect about 45 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P, seven in part R, four in part D, and ten in part U. A run is one interview, one plan, one tests step, one code step, one fix, one own review, one "Tell Claude" step, or one resolve step.
+- In this document, `<BITBUCKET_URL>` is the base URL of the Bitbucket server, `<JIRA_URL>` is the base URL of the Jira server, `<REPO>` is the test repository as `<project>/<repo>`, `<TARGET>` is its default branch, `<BASE2>` is a second branch of `<REPO>`, `<RELEASE>` is a third branch of `<REPO>` that acts as a release branch, and `<KEY1>` to `<KEY6>` are the keys of the six Jira tasks.
 
 ## Preparation
 
@@ -23,7 +23,7 @@ This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket
 6. Run `bun run start`. Expect "PR Review Inbox (source): http://127.0.0.1:7317/".
 7. Open the URL. Enter `<BITBUCKET_URL>` and your access token. Click Save. Click "Check now". Expect `<REPO>` under Repositories in the sidebar. If it is missing, open a pull request in `<REPO>` and click "Check now" again.
 8. Open Settings and go to the section "Jira". Enter `<JIRA_URL>` in "Jira URL" and your token in "Personal access token". Click "Save Jira settings". Expect "Saved. Jira accepted the token."
-9. Write five small Jira tasks for `<REPO>`: `<KEY1>` to `<KEY5>`. Each one names one source file and the behavior to change. Give `<KEY5>` a summary of more than 100 characters. `<REPO>` has its own test command, for example `bun test`, `npm test`, or `pytest`. Make sure that `<REPO>` has a second branch `<BASE2>` at a commit that the tasks can build on.
+9. Write six small Jira tasks for `<REPO>`: `<KEY1>` to `<KEY6>`. Each one names one source file and the behavior to change. Give `<KEY5>` a summary of more than 100 characters. `<REPO>` has its own test command, for example `bun test`, `npm test`, or `pytest`. Make sure that `<REPO>` has a second branch `<BASE2>` and a third branch `<RELEASE>` at commits that the tasks can build on, and that you can push to `<RELEASE>` from a clone of your own.
 
 ## S. A small task from the key to the pull request (Gate US)
 
@@ -84,6 +84,24 @@ Run this part after part S. It needs the branch `smoke/<KEY1>-<slug>` and the op
 4. When Claude does not write the file, record "not written" and the reason from the notes of the step in the Log.
 5. Click "Stop", then "Close the task" in "More actions". Check Bitbucket: nothing is new.
 
+## U. Tell Claude and Update from the base branch (Gate UTU)
+
+Run this part after part S. You need a clone of `<REPO>` of your own to move `<RELEASE>`. The app never uses that clone.
+
+1. Start `<KEY6>` as in S1. Answer the questions. On the plan screen, pick `<RELEASE>` in "Base branch" and click "Write the plan again". Expect `<REPO> into <RELEASE>` in the header. Approve the plan. Wait for "Your change is ready and checked by Claude." with the button "Open the PR".
+2. Expect the box "Tell Claude" under the main button, with the hint "Claude makes one change step. … Pushes and other git actions stay buttons." Expect "Send to Claude" disabled while the box is empty. Expect one main button on the page.
+3. Type a small change for the source file of the task, such as a new name for one variable, and add "Then push the branch." Press Ctrl+Enter. Expect "Claude works on your instructions." with no main button, an empty box, and the hint "Claude or the checks are working. You can send when this step ends." Type a word in the box. Expect "Send to Claude" disabled. Clear the box.
+4. Expect "Running the tests.", then "Claude checks its own change.", then "Your change is ready and checked by Claude." again. Open the Log tab. Expect the group "Your instructions" with your text, "Done: `<n>` files changed. Checks green. Checked by Claude.", and the steps "Checks", "Commit", and "Own review" inside it. Click "Show the diff" on the commit. Expect the Diff tab with your change. Check Bitbucket: no branch of `<KEY6>` exists, although the text said "push".
+5. Type a question in the box, such as "Which function reads this value?". Click "Send to Claude". Expect the group "Your instructions" with "Claude changed no file: `<answer>`", and no new "Checks" or "Commit" row in it.
+6. Type another change, send it, and click Stop in "More actions" while "Claude works on your instructions." shows. Expect "Your change is ready and checked by Claude.", the line "Stopped. Your instructions changed nothing. The text is back in the box.", and your text in the box. Click "Send to Claude" again. Expect the step to run and end with "Your change is ready and checked by Claude." Record the time from the first send to Stop.
+7. In your own clone, add one commit to `<RELEASE>` that changes a file of `<REPO>` that the task does not change. Push it. In the app, reload the Task view after one minute. Expect "`<RELEASE>` has 1 new commit since the branch point." with the main button "Update from `<RELEASE>`" and "Open the PR as is" in "More actions".
+8. Click "Update from `<RELEASE>`". Expect "Updating your change from `<RELEASE>`: rebasing.", then "Running the tests.", then "Your change is ready and checked by Claude." Check Bitbucket: still no branch of `<KEY6>`. Record the commit IDs that the Diff tab or the Log shows, if any.
+9. Click "Open the PR", then "Push and open PR". Expect "Waiting for the review of your PR. Nothing to do." Check Bitbucket: the task branch has the new `<RELEASE>` commit under the task commits, and no merge commit. This is the rebase before the first push.
+10. In your own clone, add one commit to `<RELEASE>` that changes the same lines of the source file as the task. Push it. Wait until Bitbucket shows a conflict in the pull request. In the app, click "Check now", then reload the Task view after one minute. Expect "Bitbucket reports conflicts between your PR and `<RELEASE>`." with the main button "Update from `<RELEASE>`". When the row says "Waiting for the review of your PR. `<RELEASE>` has 1 new commit." instead, record it: Gate G18 decides the value that marks a conflict. Use "Update from `<RELEASE>`" in "More actions" then.
+11. Click "Update from `<RELEASE>`". Expect "Updating your change from `<RELEASE>`: merging.", then "Claude resolves the conflicts in `<file>`.", then the checks and the own review. When Claude resolves the conflict, expect "Your change has new commits that are not on the server yet." The Log shows "Update from the base" and a "Conflicts" step. When the update stops instead, expect "The update from `<RELEASE>` stopped: `<reason>`. The branch is as it was." with the main button "Try again". Record which case you saw and the reason.
+12. Check Bitbucket: the task branch has no new commit since step 9. No push happened without a click. This version has no button to push the merge commit, so record "not pushed".
+13. Open "More actions" and click "Close the task". Delete the extra commits on `<RELEASE>` from your own clone if the repository allows it, else record their IDs for clean up.
+
 ## Record
 
 - The commit of preparation step 1, the OS, the Bun version, the `git` version, and the `claude` version.
@@ -93,4 +111,5 @@ Run this part after part S. It needs the branch `smoke/<KEY1>-<slug>` and the op
 - Every stop for a file that the app does not commit, with the path type only (for example "a CLAUDE.md file").
 - From part B: the length of the long branch name, whether the plan came back on `<BASE2>` with the answers, the pull request number after "Continue on", and the part branch after "Start a new branch".
 - From parts P, R, and D: each expected stop as seen, not seen, or not reached.
+- From part U: the result line of each "Your instructions" group, the rebase result of step 9, the row of step 10 (conflict row or base row), and the case of step 11 with its reason.
 - Clean up: delete the `smoke/` branches and the pull request on Bitbucket, close the Jira tasks, and delete the data folder.

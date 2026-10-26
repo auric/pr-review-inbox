@@ -42,6 +42,8 @@ export type ActionKind =
   | "show-diff"
   | "fix-points"
   | "go-pr"
+  | "update"
+  | "undo-update"
   | "close";
 export type Action = { kind: ActionKind; label: string };
 
@@ -53,6 +55,8 @@ export type TaskView = {
   status: string;
   // A second line: the elapsed time of a running step, or the reason of a stop.
   detail: string | null;
+  // One line per repository whose base moved or whose PR has conflicts, when the update changes several (spec.md section 6.18.5).
+  lines: string[];
   primary: Action | null;
   more: Action[];
   screen: Screen;
@@ -100,11 +104,158 @@ function partWords(t: TaskDto, part: number | null) {
   return part !== null && codeParts(t).length > 1 ? ` for part ${part}` : "";
 }
 
+// ---------- The Tell box and Update from the base branch (spec.md section 6.18) ----------
+
+// spec.md section 6.18.3 (Q60): one base names itself; several give "2 base branches".
+export function baseLabel(branches: string[]): string {
+  const u = [...new Set(branches)];
+  return u.length === 1 ? (u[0] as string) : `${u.length} base branches`;
+}
+
+// The repositories that the update would change: a base with new commits, or a PR that the server reports with conflicts.
+export const movedBases = (t: Pick<TaskDto, "bases">) => t.bases.filter((b) => b.newCommits > 0 || b.conflicted);
+
+// "release/2.1 has 5 new commits": the news of the bases with new commits.
+function baseNews(t: TaskDto): string {
+  const moved = t.bases.filter((b) => b.newCommits > 0);
+  const label = baseLabel(moved.map((b) => b.branch));
+  if (moved.length === 1) return `${label} has ${plural(moved[0]?.newCommits ?? 0, "new commit")}`;
+  return new Set(moved.map((b) => b.branch)).size === 1
+    ? `${label} has new commits in ${moved.length} repositories`
+    : "The base branches have new commits";
+}
+
+// spec.md section 6.18.5, Several repositories: "PROJ/lib from develop · 3 new commits", deepest first. One repository needs no line.
+export function baseLines(t: Pick<TaskDto, "bases" | "repos">): string[] {
+  const moved = movedBases(t);
+  if (moved.length < 2) return [];
+  const repo = (id: number) => t.repos.find((r) => r.id === id);
+  return moved
+    .toSorted((a, b) => (repo(b.taskRepo)?.depth ?? 0) - (repo(a.taskRepo)?.depth ?? 0))
+    .map((b) => {
+      const r = repo(b.taskRepo);
+      const name = r?.project && r.repo ? `${r.project}/${r.repo}` : (r?.path ?? "the main repository");
+      const news = [...(b.newCommits > 0 ? [plural(b.newCommits, "new commit")] : []), ...(b.conflicted ? ["the PR has conflicts"] : [])];
+      return `${name} from ${b.branch} · ${news.join(", ")}`;
+    });
+}
+
+// A send of the Tell box (an instruct step) with the steps that it ran. The loop gives the checks, fixes, and commit of a send the item of
+// its instruct step (I1, I2), and its own review the item "review" (loop.ts driveInstruct).
+export type SendGroup = { send: TaskStepDto; steps: TaskStepDto[] };
+export type LogRow = { step: TaskStepDto } | SendGroup;
+
+// The rows of the Log tab, newest first: each send with its steps in one group (spec.md section 6.18.1, Step history).
+export function logRows(steps: TaskStepDto[]): LogRow[] {
+  const out: LogRow[] = [];
+  let g: SendGroup | null = null;
+  for (const s of steps.toReversed()) {
+    if (s.kind === "instruct") {
+      g = { send: s, steps: [] };
+      out.push(g);
+    } else if (g && s.part === g.send.part && (s.item === g.send.item || s.item === "review")) g.steps.unshift(s);
+    else {
+      g = null;
+      out.push({ step: s });
+    }
+  }
+  return out.reverse();
+}
+
+// The send or the update that the loop works on now, else null.
+export function activeSend(t: Pick<TaskDto, "steps" | "working">): TaskStepDto | null {
+  const open = runningStep(t);
+  if (!open && !t.working) return null;
+  if (open?.kind === "update" || open?.kind === "resolve") return open;
+  const update = t.steps.find((s) => s.kind === "update" && (s.state === "running" || s.state === "waiting"));
+  if (update) return update;
+  const first = logRows(t.steps)[0];
+  if (!first || !("send" in first)) return null;
+  return !open || first.send === open || first.steps.includes(open) ? first.send : null;
+}
+
+// spec.md section 6.18.1: a stopped or failed send gives its text back to the box. A later send replaces it.
+export function stoppedSend(t: Pick<TaskDto, "steps">): { id: number; text: string } | null {
+  const s = t.steps.find((x) => x.kind === "instruct");
+  const i = s?.detail.instruct;
+  return s && i && (i.result === "stopped" || i.result === "failed") ? { id: s.id, text: i.text } : null;
+}
+
+// spec.md section 6.18.1: the sentence of a stop or a failure of the newest send ("Stopped. Your instructions changed nothing. The
+// text is back in the box."), while nothing newer ran.
+function sendNote(t: TaskDto): string | null {
+  const first = logRows(t.steps)[0];
+  if (!first || !("send" in first)) return null;
+  const r = first.send.detail.instruct?.result;
+  return r === "stopped" || r === "failed" ? (first.send.detail.notes.at(-1) ?? null) : null;
+}
+
+// The Log tab result of a send (spec.md section 6.18.1, Step history).
+export function sendResult(g: SendGroup, runner: string): string {
+  const i = g.send.detail.instruct;
+  switch (i?.result) {
+    case "done": {
+      const files = g.steps.find((s) => s.kind === "commit")?.detail.diffStat?.files ?? g.send.detail.diffStat?.files ?? 0;
+      const checked = g.steps.some((s) => s.kind === "review" && s.state === "ok") ? ` Checked by ${runner}.` : "";
+      return `Done: ${plural(files, "file")} changed. Checks green.${checked}`;
+    }
+    case "no_change":
+      return `${runner} changed no file: ${g.send.detail.summary ?? ""}`.trimEnd();
+    case "stopped":
+      return "Stopped";
+    case "failed":
+      return g.send.detail.notes.findLast((n) => n.startsWith("Failed: ")) ?? "Failed";
+    default: {
+      const open = [g.send, ...g.steps].some((s) => s.state === "running" || s.state === "waiting");
+      return open ? STEP_TEXT.running : STEP_TEXT[stepLook(g.send)];
+    }
+  }
+}
+
+// spec.md section 6.18.1: the Tell box. none: no box. open: it can send. busy: a step, a check, or an update runs; the box keeps
+// its text and waits. tasks.ts instructTarget has the same rules on the server.
+export type TellBox = "none" | "open" | "busy";
+const BOX_REASONS = new Set<NonNullable<TaskDto["blocked"]>["kind"]>(["red", "size", "blocker", "denied_path", "update"]);
+const WORKTREE = new Set<TaskPartDto["state"]>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
+const BUILT = new Set<TaskPartDto["state"]>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
+export function tellBox(t: TaskDto): TellBox {
+  if (t.state !== "implementing" && t.state !== "ready") return "none";
+  const b = t.blocked;
+  if (b && !BOX_REASONS.has(b.kind)) return "none";
+  const part = currentPart(t);
+  if (!part || !WORKTREE.has(part.state)) return "none";
+  // The first build of the part runs. A send from a reason of that build keeps the box while it runs.
+  if (!b && !BUILT.has(part.state) && !activeSend(t)) return "none";
+  return t.canInstruct ? "open" : "busy";
+}
+
+// The update, the resolve step, or the base of a running update step.
+function updateSentence(t: TaskDto, s: TaskStepDto, runner: string): string {
+  if (s.kind === "resolve") {
+    const p = s.detail.resolve?.paths ?? [];
+    const what = p.length > 1 ? `${p[0]} and ${plural(p.length - 1, "more file")}` : (p[0] ?? "the files");
+    return `${runner} resolves the conflicts in ${what}.`;
+  }
+  const repos = s.detail.update?.repos ?? [];
+  const bases = repos.length ? repos.map((r) => r.base) : movedBases(t).map((b) => b.branch);
+  const label = bases.length ? baseLabel(bases) : t.targetBranch;
+  const ord = t.parts.find((p) => p.id === s.part)?.ord ?? null;
+  const what = ord !== null && codeParts(t).length > 1 ? `part ${ord}` : "your change";
+  const modes = new Set(repos.map((r) => r.mode));
+  const how = modes.size === 2 ? ": rebasing and merging" : modes.has("merge") ? ": merging" : modes.has("rebase") ? ": rebasing" : "";
+  return `Updating ${what} from ${label}${how}.`;
+}
+
 // One sentence for a running step: who works, and on what.
 export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string): string {
   const ord = t.parts.find((p) => p.id === s.part)?.ord ?? null;
   const of = partWords(t, ord);
   switch (s.kind) {
+    case "instruct":
+      return `${runner} works on your instructions${of}.`;
+    case "update":
+    case "resolve":
+      return updateSentence(t, s, runner);
     case "interview":
       return `${runner} is reading the task and the code.`;
     case "spec":
@@ -149,6 +300,9 @@ const DOING: Partial<Record<TaskStepDto["kind"], string>> = {
   size: "the line limit",
   spec_change: "a change to the plan",
   question: "a question",
+  instruct: "your instructions",
+  update: "the update from the base",
+  resolve: "the conflicts of the update",
 };
 export function stoppedAt(t: TaskDto): string {
   const s = t.steps[0];
@@ -179,10 +333,11 @@ function waitingFor(names: string[]): string {
 
 const stepFor = (t: TaskDto, id: number | null) => (id === null ? null : (t.steps.find((s) => s.id === id) ?? null));
 
-export function taskView(t: TaskDto, o: { runner: string; now: number }): TaskView {
+// forge: the short name of the code host from meta, for the conflict row (spec.md section 6.18.5).
+export function taskView(t: TaskDto, o: { runner: string; forge: string; now: number }): TaskView {
   const R = o.runner;
   const run = runningStep(t);
-  const base = { detail: null, more: [], needsYou: false, running: false } satisfies Partial<TaskView>;
+  const base = { detail: null, lines: [], more: [], needsYou: false, running: false } satisfies Partial<TaskView>;
   const working = (status: string, more: Action[], screen: Screen = "build"): TaskView => ({
     ...base,
     status,
@@ -260,8 +415,9 @@ export function taskView(t: TaskDto, o: { runner: string; now: number }): TaskVi
     };
 
   const part = currentPart(t);
+  const prs = codeParts(t);
+  const last = prs.at(-1);
   if (t.state === "ready") {
-    const prs = codeParts(t);
     if (prs.length && prs.every((p) => p.prState === "MERGED" || p.state === "merged" || p.state === "abandoned"))
       return {
         ...base,
@@ -269,32 +425,33 @@ export function taskView(t: TaskDto, o: { runner: string; now: number }): TaskVi
         primary: CLOSE,
         screen: "end",
       };
-    const last = prs.at(-1);
     if (last?.prState === "DECLINED")
       return { ...base, status: "The PR was declined on the server.", primary: CLOSE, screen: "pr", needsYou: true };
-    const of = prs.length > 1 && last ? ` of part ${last.ord}` : "";
-    return {
-      ...base,
-      status: `Waiting for ${waitingFor(last?.waiting ?? [])}${of}. Nothing to do.`,
-      primary: { kind: "go-pr", label: "Go to the PR" },
-      more: [CLOSE],
-      screen: "pr",
-    };
   }
 
-  // implementing
+  // implementing, and ready with a send, an update, or a reason of them (spec.md section 6.18).
+  const goPr: Action = { kind: "go-pr", label: "Go to the PR" };
+  const hasPr = part?.remotePr != null;
   if (b) {
     const step = stepFor(t, b.step);
+    // The server takes Resume, Continue, and the line limit in state implementing only.
+    const loopOnly = new Set<ActionKind>(["resume", "continue", "keep-size", "change-limit"]);
+    const keep = (a: Action | null) => (a && (t.state === "implementing" || !loopOnly.has(a.kind)) ? a : null);
     const blocked = (primary: Action | null, more: Action[], screen: Screen = "build"): TaskView => ({
       ...base,
       status: b.text,
-      primary,
-      more,
+      primary: keep(primary),
+      more: more.filter((a) => keep(a) !== null),
       screen,
-      needsYou: primary !== null,
+      needsYou: true,
     });
     switch (b.kind) {
       case "red":
+        // spec.md section 6.18.3, Checks: red checks after an update keep it until "Undo the update".
+        return blocked(
+          { kind: "see-why", label: "See why" },
+          t.canUndoUpdate ? [{ kind: "undo-update", label: "Undo the update" }, STOP] : [{ kind: "resume", label: "Resume" }, STOP],
+        );
       case "blocker":
         return blocked({ kind: "see-why", label: "See why" }, [{ kind: "resume", label: "Resume" }, STOP]);
       case "question":
@@ -310,35 +467,91 @@ export function taskView(t: TaskDto, o: { runner: string; now: number }): TaskVi
         return blocked({ kind: "continue", label: "Continue with 60 more minutes" }, [STOP]);
       case "slot":
         return { ...working(b.text, [STOP]), detail: step ? elapsed(o.now - step.startedAt) : null };
+      case "update":
+        // spec.md section 6.18.4: "The update from <base> stopped: <reason>. The branch is as it was."
+        return blocked(
+          { kind: "update", label: "Try again" },
+          hasPr ? [goPr] : [{ kind: "show-diff", label: "Show the diff" }],
+          hasPr ? "pr" : "build",
+        );
       default:
         // denied_path, push, and error: one sentence with the cause, and Resume starts the step again from the last commit.
         return blocked({ kind: "resume", label: "Resume" }, [STOP]);
     }
   }
-  if (run) {
-    const checks = run.kind === "check";
-    return working(stepSentence(t, run, R), checks ? [STOP] : [{ kind: "pause", label: "Pause after this step" }, STOP]);
+  const send = activeSend(t);
+  const pause: Action = { kind: "pause", label: "Pause after this step" };
+  // A send or an update ends by itself, and Pause applies to the build only.
+  const stopOnly = !!send || t.state === "ready";
+  if (run) return working(stepSentence(t, run, R), stopOnly || run.kind === "check" ? [STOP] : [pause, STOP]);
+  if (t.working || (t.state === "implementing" && part?.state !== "self_reviewed"))
+    return working(t.working ? "The app prepares the next step." : `${R} is building your change.`, stopOnly ? [STOP] : [pause, STOP]);
+
+  // The waits of a built part (spec.md sections 6.12 and 6.18.5).
+  const moved = t.bases.some((x) => x.newCommits > 0);
+  const conflicted = t.bases.filter((x) => x.conflicted);
+  const bases = movedBases(t);
+  const update: Action | null = bases.length ? { kind: "update", label: `Update from ${baseLabel(bases.map((x) => x.branch))}` } : null;
+  const asked = t.needsBase;
+  const label = (list: TaskDto["bases"]) => (list.length ? baseLabel(list.map((x) => x.branch)) : t.targetBranch);
+  const detail = sendNote(t) ?? (asked && !moved ? `${R} asked for the newest ${label(t.bases)}. The branch already has it.` : null);
+  const why = asked?.reason.trim().replace(/[^.?!]$/, "$&.");
+  const askedStatus = asked && `${R} says the branch needs the newest ${label(bases)}${why ? `: ${why}` : "."}`;
+  const wait = (status: string, primary: Action | null, more: Action[], screen: Screen, needsYou: boolean): TaskView => ({
+    ...base,
+    status,
+    detail,
+    lines: baseLines(t),
+    primary,
+    more,
+    screen,
+    needsYou,
+  });
+
+  if (t.state === "implementing" && part) {
+    const n = prs.length;
+    const more: Action[] = [
+      { kind: "show-diff", label: "Show the diff" },
+      ...(t.points.length ? [{ kind: "fix-points" as const, label: "Fix the small points too" }] : []),
+    ];
+    const asIs: Action = { kind: "open-pr", label: "Open the PR as is" };
+    if (update && moved && askedStatus) return wait(askedStatus, update, [asIs, ...more], "ready", true);
+    if (update && moved) return wait(`${baseNews(t)} since the branch point.`, update, [asIs, ...more], "ready", true);
+    return wait(
+      n > 1 ? `Part ${part.ord} of ${n} is ready and checked by ${R}.` : `Your change is ready and checked by ${R}.`,
+      { kind: "open-pr", label: n > 1 ? `Open PR for part ${part.ord} of ${n}` : "Open the PR" },
+      more,
+      "ready",
+      true,
+    );
   }
-  if (part?.state === "self_reviewed" && !t.working) {
-    const n = codeParts(t).length;
-    const label = n > 1 ? `Open PR for part ${part.ord} of ${n}` : "Open the PR";
-    const status = n > 1 ? `Part ${part.ord} of ${n} is ready and checked by ${R}.` : `Your change is ready and checked by ${R}.`;
-    return {
-      ...base,
-      status,
-      primary: { kind: "open-pr", label },
-      more: [
-        { kind: "show-diff", label: "Show the diff" },
-        ...(t.points.length ? [{ kind: "fix-points" as const, label: "Fix the small points too" }] : []),
-      ],
-      screen: "ready",
-      needsYou: true,
-    };
+
+  const of = prs.length > 1 && last ? ` of part ${last.ord}` : "";
+  if (update && conflicted.length) {
+    const pr = prs.length > 1 && last ? `the PR for part ${last.ord}` : "your PR";
+    return wait(
+      `${o.forge} reports conflicts between ${pr} and ${baseLabel(conflicted.map((x) => x.branch))}.`,
+      update,
+      [goPr, CLOSE],
+      "pr",
+      true,
+    );
   }
-  return working(t.working ? "The app prepares the next step." : `${R} is building your change.`, [
-    { kind: "pause", label: "Pause after this step" },
-    STOP,
-  ]);
+  if (update && askedStatus) return wait(askedStatus, update, [goPr, CLOSE], "pr", true);
+  // spec.md section 6.18.2, step 7: a commit after the push. "Push to <branch>" has no route yet, so the row has no primary action.
+  if (part?.pushed && part.head && part.head !== part.pushed) {
+    const who = prs.length > 1 ? `Part ${part.ord}` : "Your change";
+    return wait(
+      `${who} has new commits that are not on the server yet.`,
+      null,
+      [{ kind: "show-diff", label: "Show the diff" }, goPr, ...(update ? [update] : []), CLOSE],
+      "pr",
+      false,
+    );
+  }
+  const waiting = `Waiting for ${waitingFor(last?.waiting ?? [])}${of}.`;
+  if (update && moved) return wait(`${waiting} ${baseNews(t)}.`, goPr, [update, CLOSE], "pr", false);
+  return wait(`${waiting} Nothing to do.`, goPr, [CLOSE], "pr", false);
 }
 
 // spec.md section 6.12, Inbox: the status in the meta line of a Tasks row.

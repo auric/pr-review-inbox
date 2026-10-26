@@ -31,6 +31,7 @@ import {
   JIRA_ISSUE,
   JIRA_URL,
   type PostControl,
+  RELEASE,
   type Scenario,
 } from "./control";
 
@@ -293,6 +294,9 @@ const remoteEnv = gitEnv(join(claudeDir, "empty.gitconfig"));
 const remoteGit = (args: string[]) => git(["--git-dir", remote.remote, ...args], { env: remoteEnv });
 // A task of PR A builds on the default branch of its repository, the target of PR A (spec.md section 6.16.3). The recorded PR names topic/sample-4.
 await remoteGit(["update-ref", `refs/heads/${(A.pr.toRef as unknown as { displayId: string }).displayId}`, remote.target]);
+// A release base that a task can pick (spec.md section 6.18.3). /__control/task-base moves it, and a reset puts it back.
+const releaseBase = () => remoteGit(["update-ref", `refs/heads/${RELEASE}`, remote.target]);
+await releaseBase();
 
 // The dashboard and the PR route share the PR A object, so both report the pushed head and the description.
 // The git remote moves the PR ref too, so a review after the push fetches the pushed head (plan r2 UI-RR).
@@ -458,10 +462,10 @@ r[key("GET", `${A.path}/comments/1000010`)] = () => (sc.reply === "deleted" ? NO
 // The push goes to the local git remote (repoRemote below). The open-PR list and the repository GET stay absent, as before, so the PR
 // context of the other tests does not change. A created PR gets an empty activity page, so its sync is complete.
 // The default branch of the repository is the target of PR A, so a task builds there (spec.md section 6.16.3). The branch search
-// also lists main of the local remote, so the base picker has a second branch.
+// also lists main and the release base of the local remote, so the base picker has more branches.
 const taskRepo = repoWrites(fake, "PROJ1", "sample-repo-2", {
   defaultBranch: (A.pr.toRef as unknown as { displayId: string }).displayId,
-  branches: ["main"],
+  branches: ["main", RELEASE],
 });
 delete r[key("GET", `${taskRepo.path}/pull-requests`)];
 delete r[key("GET", taskRepo.path)];
@@ -665,6 +669,7 @@ r[key("POST", "/__control/reset")] = async () => {
   taskRepo.writes.length = 0;
   for (const ref of (await remoteGit(["for-each-ref", "--format=%(refname)", "refs/heads/task/"])).split("\n").filter(Boolean))
     await remoteGit(["update-ref", "-d", ref]);
+  await releaseBase();
   fake.requests.length = 0;
   jira.requests.length = 0;
   Object.assign(folders, { opens: false, paths: [] });
@@ -726,6 +731,45 @@ r[key("POST", "/__control/writes")] = () =>
 r[key("POST", "/__control/task-remote")] = async () => {
   const lines = (await remoteGit(["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"])).split("\n").filter(Boolean);
   return ok({ heads: Object.fromEntries(lines.map((l) => l.split(" "))), creates: taskRepo.writes.map((w) => w.body) });
+};
+// spec.md section 6.18.5 (WP-TU2): move adds one commit with the given files to a branch of the local remote, as a colleague's merge
+// into the base does. conflicted sets properties.mergeResult of every task PR, and one sync stores it. Answers the new head.
+const baseEnv = {
+  ...remoteEnv,
+  GIT_AUTHOR_NAME: "e2e",
+  GIT_AUTHOR_EMAIL: "e2e@example.invalid",
+  GIT_COMMITTER_NAME: "e2e",
+  GIT_COMMITTER_EMAIL: "e2e@example.invalid",
+  GIT_INDEX_FILE: join(claudeDir, "base.index"),
+};
+const baseGit = async (args: string[], stdin?: string) =>
+  (await git(["--git-dir", remote.remote, ...args], { env: baseEnv, stdin })).trim();
+r[key("POST", "/__control/task-base")] = async (req) => {
+  const c = (await req.json()) as { move?: { branch: string; files: Record<string, string> }; conflicted?: boolean };
+  let head: string | null = null;
+  if (c.move) {
+    const ref = `refs/heads/${c.move.branch}`;
+    const parent = await baseGit(["rev-parse", ref]);
+    await baseGit(["read-tree", parent]);
+    for (const [path, text] of Object.entries(c.move.files)) {
+      const blob = await baseGit(["hash-object", "-w", "--no-filters", "--stdin"], text);
+      await baseGit(["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`]);
+    }
+    head = await baseGit([
+      "commit-tree",
+      await baseGit(["write-tree"]),
+      "-p",
+      parent,
+      "-m",
+      `Change ${Object.keys(c.move.files).join(", ")}`,
+    ]);
+    await baseGit(["update-ref", ref, head, parent]);
+  }
+  if (c.conflicted !== undefined) {
+    for (const pr of taskRepo.prs.values()) pr.properties.mergeResult = { outcome: c.conflicted ? "CONFLICTED" : "CLEAN", current: true };
+    await app.sync.syncNow();
+  }
+  return ok({ head });
 };
 // ---------- Jira attachments (plan r3 S-ATT) ----------
 // Every request to the fake Jira since the last reset.

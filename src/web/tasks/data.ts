@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Server state of the tasks (docs/plans/review-v2/spec.md section 6.11). Keys: ['tasks'], ['task', id], ['task', id, 'diff', head],
-// ['task', id, 'run', run], ['task', id, 'branch', prefix], ['task-settings', project, repo], ['branches', project, repo, filter].
+// Server state of the tasks (docs/plans/review-v2/spec.md sections 6.11 and 6.18.6). Keys: ['tasks'], ['task', id],
+// ['task', id, 'diff', head], ['task', id, 'run', run], ['task', id, 'branch', prefix], ['task-settings', project, repo],
+// ['branches', project, repo, filter].
 // live.ts refetches ['tasks'] and ['task', id] with the keys under it when SSE `changed` names the task.
 import { keepPreviousData, type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -130,7 +131,10 @@ export type TaskAction =
   | { kind: "limit"; lineBudget: number }
   | { kind: "change"; step: number; accept: boolean }
   | { kind: "pr"; part: number; reviewers: string[] }
-  | { kind: "fix"; part: number };
+  | { kind: "fix"; part: number }
+  // spec.md section 6.18.6: a send of the Tell box (the part of the current state), "Update from <base>", and "Undo the update".
+  | { kind: "instruct"; text: string }
+  | { kind: "update" | "undo"; part: number };
 
 async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
   const param = id$(t.id);
@@ -170,6 +174,12 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       );
     case "fix":
       return read(await tasks.parts[":part"].fix.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "instruct":
+      return read(await tasks.instructions.$post({ param, json: { version, text: a.text } }));
+    case "update":
+      return read(await tasks.parts[":part"].update.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "undo":
+      return read(await tasks.parts[":part"].update.undo.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
   }
 }
 

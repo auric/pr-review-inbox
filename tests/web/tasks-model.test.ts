@@ -26,16 +26,21 @@ import {
   fileMeta,
   firstPick,
   firstPicks,
+  logRows,
   pickedPrefix,
   plannedBranch,
   planSentence,
   prefixProblem,
   rowStatus,
+  type SendGroup,
   STEP_TEXT,
+  sendResult,
   stepLook,
   stoppedAt,
+  stoppedSend,
   type TaskView,
   taskView,
+  tellBox,
 } from "../../src/web/tasks/model";
 
 console.log(`tasks-model.test.ts imported from ${Bun.resolveSync("../../src/web/tasks/model", import.meta.dir)}`);
@@ -154,7 +159,7 @@ const PLAN: NonNullable<TaskDto["plan"]> = {
 };
 const ESTIMATE: NonNullable<TaskDto["estimate"]> = { parts: 1, lines: 80, files: 1, modules: [], db: false, api: false, unknowns: [] };
 
-const view = (t: TaskDto) => taskView(t, { runner: R, now: NOW });
+const view = (t: TaskDto) => taskView(t, { runner: R, forge: "Bitbucket", now: NOW });
 const shape = (v: TaskView) => ({
   status: v.status,
   primary: v.primary?.label ?? null,
@@ -385,6 +390,8 @@ describe("rules over every row (spec.md section 7.1)", () => {
     building({ state: "stopped", stoppedFrom: "implementing" }),
     building({ state: "ready", parts: [part({ state: "pr_open", remotePr: 1 })] }),
     building({ state: "done" }),
+    // spec.md section 6.18.5.
+    ...Object.values(tellRows()),
   ];
 
   test("AC-UX1: at most one primary action, and no primary action also in More", () => {
@@ -396,6 +403,344 @@ describe("rules over every row (spec.md section 7.1)", () => {
 
   test("AC-UX3: every state has one status sentence that ends with a full stop or a question mark", () => {
     for (const t of all()) expect(view(t).status).toMatch(/^\S.*[.?]$/);
+  });
+});
+
+// ---------- Tell Claude and Update from the base branch (spec.md section 6.18, WP-TU2) ----------
+
+const REL = "release/2.1";
+const PR_PART = { state: "pr_open" as const, remotePr: 101, prState: "OPEN", pushed: "a".repeat(40), waiting: ["Anna Lee"] };
+const moved = (n = 5, o: Partial<TaskDto["bases"][number]> = {}) => [{ taskRepo: 1, branch: REL, newCommits: n, conflicted: false, ...o }];
+const instruct = (o: Partial<TaskStepDto> & { result?: "done" | "no_change" | "stopped" | "failed" | null; notes?: string[] }) =>
+  step({
+    id: 30,
+    kind: "instruct",
+    part: 7,
+    item: "I1",
+    ...o,
+    detail: stepDetail.parse({
+      instruct: { text: "Rename the flag to useNewParser.", part: 7, blockedBefore: null, result: o.result ?? null },
+      notes: o.notes ?? [],
+      summary: "Echo: the flag is named well.",
+    }),
+  });
+const updateStep = (o: Partial<TaskStepDto> = {}) =>
+  step({
+    id: 40,
+    kind: "update",
+    part: 7,
+    item: "U1",
+    state: "running",
+    endedAt: null,
+    detail: stepDetail.parse({
+      update: { repos: [{ taskRepo: 1, base: REL, mode: "merge", newBaseHead: "c".repeat(40) }], preHeads: [] },
+    }),
+    ...o,
+  });
+
+// One task per row of the spec.md section 6.18.5 table, and the waits with the box.
+function tellRows() {
+  const ready = building({ parts: [part({ state: "self_reviewed" })], targetBranch: REL, canInstruct: true });
+  const open = building({ state: "ready", parts: [part(PR_PART)], targetBranch: REL, canInstruct: true });
+  return {
+    ready,
+    open,
+    baseMoved: { ...ready, bases: moved() },
+    conflicts: { ...open, bases: moved(0, { conflicted: true }) },
+    openMoved: { ...open, bases: moved() },
+    asks: { ...ready, bases: moved(), needsBase: { reason: "the new parser API is only on release/2.1" } },
+    updating: { ...open, canInstruct: false, steps: [updateStep()] },
+    resolving: {
+      ...open,
+      canInstruct: false,
+      steps: [
+        step({
+          id: 41,
+          kind: "resolve",
+          part: 7,
+          item: "U1",
+          state: "running",
+          endedAt: null,
+          detail: stepDetail.parse({ resolve: { taskRepo: 1, paths: ["src/a.ts"] } }),
+        }),
+        updateStep(),
+      ],
+    },
+    updateRed: {
+      ...open,
+      canUndoUpdate: true,
+      blocked: { kind: "red" as const, step: 42, text: `Needs you: the tests fail after the update from ${REL}.` },
+    },
+    updateStopped: {
+      ...open,
+      blocked: {
+        kind: "update" as const,
+        step: 40,
+        text: `The update from ${REL} stopped: conflict markers remain in src/a.ts. The branch is as it was.`,
+      },
+    },
+    instructRunning: { ...open, canInstruct: false, steps: [instruct({ state: "running", endedAt: null })] },
+    notPushed: { ...open, parts: [part({ ...PR_PART, head: "d".repeat(40) })] },
+  };
+}
+
+describe("the rows of Update from the base branch and Tell Claude (spec.md section 6.18.5)", () => {
+  const rows = tellRows();
+
+  test("implementing, base moved (before the PR): the count, Update from <base>, and Open the PR as is in More", () => {
+    expect(shape(view(rows.baseMoved))).toEqual({
+      status: "release/2.1 has 5 new commits since the branch point.",
+      primary: "Update from release/2.1",
+      more: ["Open the PR as is", "Show the diff"],
+      screen: "ready",
+    });
+  });
+
+  test("waiting, PR conflicts: the forge reports conflicts, Update from <base>, Go to the PR in More", () => {
+    expect(shape(view(rows.conflicts))).toEqual({
+      status: "Bitbucket reports conflicts between your PR and release/2.1.",
+      primary: "Update from release/2.1",
+      more: ["Go to the PR", "Close the task"],
+      screen: "pr",
+    });
+  });
+
+  test("waiting, base moved (PR open): the review wait first, Update from <base> in More", () => {
+    expect(shape(view(rows.openMoved))).toEqual({
+      status: "Waiting for Anna Lee's review. release/2.1 has 5 new commits.",
+      primary: "Go to the PR",
+      more: ["Update from release/2.1", "Close the task"],
+      screen: "pr",
+    });
+  });
+
+  test("Claude asks for the base: the reason, Update from <base>, and the More items of the state before", () => {
+    expect(shape(view(rows.asks))).toEqual({
+      status: "Claude says the branch needs the newest release/2.1: the new parser API is only on release/2.1.",
+      primary: "Update from release/2.1",
+      more: ["Open the PR as is", "Show the diff"],
+      screen: "ready",
+    });
+  });
+
+  test("AC-B55: Claude asks, but the base did not move: the line under the status and no Update button", () => {
+    const v = view({ ...rows.asks, bases: moved(0) });
+    expect(v.detail).toBe("Claude asked for the newest release/2.1. The branch already has it.");
+    expect(v.primary?.label).toBe("Open the PR");
+    expect([v.primary, ...v.more].some((a) => a?.kind === "update")).toBe(false);
+  });
+
+  test("updating: the mode of the update, then the files of a resolve step; Stop only", () => {
+    expect(shape(view(rows.updating))).toEqual({
+      status: "Updating your change from release/2.1: merging.",
+      primary: null,
+      more: ["Stop"],
+      screen: "build",
+    });
+    expect(shape(view(rows.resolving))).toMatchObject({ status: "Claude resolves the conflicts in src/a.ts.", more: ["Stop"] });
+    // Before the update step writes its repositories, the bases of the task name the label.
+    const early = updateStep({ detail: stepDetail.parse({}) });
+    expect(view({ ...rows.updating, bases: moved(), steps: [early] }).status).toBe("Updating your change from release/2.1.");
+  });
+
+  test("update red: See why, then Undo the update and Stop", () => {
+    expect(shape(view(rows.updateRed))).toEqual({
+      status: "Needs you: the tests fail after the update from release/2.1.",
+      primary: "See why",
+      more: ["Undo the update", "Stop"],
+      screen: "build",
+    });
+  });
+
+  test("update stopped: the reason with 'The branch is as it was.', Try again, Go to the PR in More", () => {
+    expect(shape(view(rows.updateStopped))).toEqual({
+      status: "The update from release/2.1 stopped: conflict markers remain in src/a.ts. The branch is as it was.",
+      primary: "Try again",
+      more: ["Go to the PR"],
+      screen: "pr",
+    });
+  });
+
+  test("instruct running: Claude works on your instructions, with the part when the task has more; Stop only", () => {
+    expect(shape(view(rows.instructRunning))).toEqual({
+      status: "Claude works on your instructions.",
+      primary: null,
+      more: ["Stop"],
+      screen: "build",
+    });
+    const two = { ...rows.instructRunning, parts: [part({ ...PR_PART, id: 6 }), part({ ...PR_PART, id: 7, ord: 2 })] };
+    expect(view(two).status).toBe("Claude works on your instructions for part 2.");
+    // The checks of a send also end by themselves: no Pause.
+    const checks = step({ id: 31, kind: "check", part: 7, item: "I1", state: "running", endedAt: null });
+    expect(view({ ...rows.ready, canInstruct: false, steps: [checks, instruct({})] }).more.map((a) => a.label)).toEqual(["Stop"]);
+  });
+
+  test("implementing, not pushed: the sentence only, because 'Push to <branch>' has no route yet", () => {
+    expect(shape(view(rows.notPushed))).toEqual({
+      status: "Your change has new commits that are not on the server yet.",
+      primary: null,
+      more: ["Show the diff", "Go to the PR", "Close the task"],
+      screen: "pr",
+    });
+  });
+
+  test("several repositories: one label for two bases, and one line per repository, deepest first", () => {
+    const repos: TaskDto["repos"] = [
+      { id: 1, role: "main", project: "PROJ", repo: "app", path: null, depth: 0, access: "edit", reason: null, baseBranch: REL },
+      {
+        id: 2,
+        role: "submodule",
+        project: "PROJ",
+        repo: "lib",
+        path: "lib",
+        depth: 1,
+        access: "edit",
+        reason: null,
+        baseBranch: "develop",
+      },
+    ];
+    const bases = [...moved(5), { taskRepo: 2, branch: "develop", newCommits: 1, conflicted: false }];
+    const v = view({ ...rows.baseMoved, repos, bases });
+    expect(v.primary?.label).toBe("Update from 2 base branches");
+    expect(v.status).toBe("The base branches have new commits since the branch point.");
+    expect(v.lines).toEqual(["PROJ/lib from develop · 1 new commit", "PROJ/app from release/2.1 · 5 new commits"]);
+    // The same base in both repositories names it once.
+    const same = view({ ...rows.baseMoved, repos, bases: bases.map((b) => ({ ...b, branch: REL })) });
+    expect(same.primary?.label).toBe("Update from release/2.1");
+    expect(same.status).toBe("release/2.1 has new commits in 2 repositories since the branch point.");
+  });
+
+  test("a reason after the PR opened: no Resume, Continue, or line limit, because the server takes them while building only", () => {
+    const red = view({ ...rows.open, blocked: { kind: "red", step: 4, text: "Needs you: the tests of part 1 stay red after 3 tries." } });
+    expect(shape(red)).toMatchObject({ primary: "See why", more: ["Stop"] });
+    const denied = view({ ...rows.open, blocked: { kind: "denied_path", step: 4, text: "Needs you: the step changed .env." } });
+    expect(shape(denied)).toMatchObject({ primary: null, more: ["Stop"] });
+    expect(denied.needsYou).toBe(true);
+  });
+
+  test("AC-B56: a stopped send gives its text back, and the status line says so; a later send replaces it", () => {
+    const note = "Stopped. Your instructions changed nothing. The text is back in the box.";
+    const stopped = { ...rows.ready, steps: [instruct({ state: "cancelled", result: "stopped", notes: [note] })] };
+    expect(stoppedSend(stopped)).toEqual({ id: 30, text: "Rename the flag to useNewParser." });
+    expect(view(stopped).detail).toBe(note);
+    expect(view(stopped).primary?.label).toBe("Open the PR");
+    const later = { ...stopped, steps: [instruct({ id: 32, item: "I2", result: "done" }), ...stopped.steps] };
+    expect(stoppedSend(later)).toBeNull();
+    expect(view(later).detail).toBeNull();
+  });
+});
+
+describe("AC-B52: the Tell Claude box shows in the states of spec.md section 6.18.1 and in no other state", () => {
+  const rows = tellRows();
+  const blockedAs = (kind: NonNullable<TaskDto["blocked"]>["kind"], o: Partial<TaskDto> = {}) =>
+    building({
+      parts: [part({ state: "self_reviewed" })],
+      canInstruct: true,
+      blocked: { kind, step: 4, text: `Needs you: ${kind}.` },
+      ...o,
+    });
+
+  test("the waits after the build started and the reasons red, size, blocker, denied_path, and update: the box can send", () => {
+    const withBox: Record<string, TaskDto> = {
+      "implementing, ready": rows.ready,
+      "implementing, waiting (an earlier part in review)": building({ parts: [part(PR_PART)], canInstruct: true }),
+      "implementing, lower merged": building({
+        parts: [part({ id: 6, state: "merged" }), part({ ...PR_PART, id: 7, ord: 2 })],
+        canInstruct: true,
+      }),
+      "implementing, base moved": rows.baseMoved,
+      "implementing, not pushed": rows.notPushed,
+      ready: rows.open,
+      "waiting, PR conflicts": rows.conflicts,
+      "Claude asks for the base": rows.asks,
+      "update red": rows.updateRed,
+      "update stopped": rows.updateStopped,
+      "blocked red": blockedAs("red"),
+      "blocked size": blockedAs("size"),
+      "blocked blocker": blockedAs("blocker"),
+      "blocked denied_path": blockedAs("denied_path"),
+      // A reason of the build itself: the part has a worktree, but is not built yet.
+      "blocked red in the build": blockedAs("red", { parts: [part()] }),
+    };
+    for (const [name, t] of Object.entries(withBox)) expect([name, tellBox(t)]).toEqual([name, "open"]);
+  });
+
+  test("while a send, an update, or a check of them runs, the box stays and waits", () => {
+    for (const t of [rows.instructRunning, rows.updating, rows.resolving]) expect(tellBox(t)).toBe("busy");
+    // A send from a reason of the build: the part is not built, and the send runs.
+    const fromBuild = building({ parts: [part()], steps: [instruct({ state: "running", endedAt: null })] });
+    expect(tellBox(fromBuild)).toBe("busy");
+  });
+
+  test("no box before a worktree exists, for the other reasons, in a stopped, failed, or done task, and in the first build", () => {
+    const without: Record<string, TaskDto> = {
+      interview: task({ canInstruct: false }),
+      spec_draft: task({ state: "spec_draft", plan: PLAN }),
+      spec_pr_open: task({ state: "spec_pr_open" }),
+      spec_approved: task({ state: "spec_approved" }),
+      "blocked question": blockedAs("question"),
+      "blocked spec_change": blockedAs("spec_change"),
+      "blocked budget": blockedAs("budget"),
+      "blocked slot": blockedAs("slot"),
+      "blocked preflight": blockedAs("preflight"),
+      "blocked push": blockedAs("push"),
+      "blocked error": blockedAs("error"),
+      stopped: building({ state: "stopped", stoppedFrom: "implementing", parts: [part({ state: "self_reviewed" })] }),
+      failed: building({ state: "failed", parts: [part({ state: "self_reviewed" })] }),
+      done: building({ state: "done", parts: [part({ ...PR_PART, state: "merged" })] }),
+      "ready, every PR merged": building({ state: "ready", parts: [part({ ...PR_PART, state: "merged", prState: "MERGED" })] }),
+      "implementing, running (the first build)": building({
+        steps: [step({ id: 9, kind: "tests", part: 7, item: "P1", state: "running", endedAt: null })],
+      }),
+      "implementing, checks (the first build)": building({
+        steps: [step({ id: 9, kind: "check", part: 7, item: "T1.1", state: "running", endedAt: null })],
+      }),
+      "implementing, no part yet": building({ parts: [] }),
+    };
+    for (const [name, t] of Object.entries(without)) expect([name, tellBox(t)]).toEqual([name, "none"]);
+  });
+});
+
+describe("AC-B57: the 'Your instructions' group of the Log tab (spec.md section 6.18.1, Step history)", () => {
+  const commit = step({
+    id: 33,
+    kind: "commit",
+    part: 7,
+    item: "I1",
+    detail: stepDetail.parse({ diffStat: { files: 3, added: 9, removed: 2, lines: 11 } }),
+  });
+  const steps = [
+    step({ id: 35, kind: "push", part: 7, item: null }),
+    step({ id: 34, kind: "review", part: 7, item: "review" }),
+    commit,
+    step({ id: 32, kind: "fix", part: 7, item: "I1" }),
+    step({ id: 31, kind: "check", part: 7, item: "I1" }),
+    instruct({ result: "done" }),
+    step({ id: 29, kind: "review", part: 7, item: "review" }),
+    step({ id: 28, kind: "implement", part: 7, item: "T1" }),
+  ];
+  const group = (rows: ReturnType<typeof logRows>) => rows.find((r): r is SendGroup => "send" in r) as SendGroup;
+
+  test("the send holds its checks, fixes, commit, and own review; the steps before and after it stay rows", () => {
+    const rows = logRows(steps);
+    expect(rows.map((r) => ("send" in r ? `group ${r.send.id}` : `step ${r.step.id}`))).toEqual([
+      "step 35",
+      "group 30",
+      "step 29",
+      "step 28",
+    ]);
+    expect(group(rows).steps.map((s) => s.id)).toEqual([34, 33, 32, 31]);
+  });
+
+  test("the result line of each end of a send", () => {
+    expect(sendResult(group(logRows(steps)), R)).toBe("Done: 3 files changed. Checks green. Checked by Claude.");
+    const one = (o: Parameters<typeof instruct>[0]) => ({ send: instruct(o), steps: [] });
+    expect(sendResult(one({ result: "no_change" }), R)).toBe("Claude changed no file: Echo: the flag is named well.");
+    expect(sendResult(one({ result: "stopped" }), R)).toBe("Stopped");
+    expect(sendResult(one({ result: "failed", notes: ["Failed: the usage limit is reached."] }), R)).toBe(
+      "Failed: the usage limit is reached.",
+    );
+    expect(sendResult(one({ state: "running", endedAt: null }), R)).toBe("Running");
   });
 });
 

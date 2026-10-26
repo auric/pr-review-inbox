@@ -6,7 +6,7 @@
 // The demo gets its own temp folder, so the script can delete every file that the demo makes. The run log shows paths in it.
 // So on Windows the folder is at the drive root, outside the user profile. SHOTS_TEMP sets another parent folder.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type Browser, chromium, type Locator, type Page } from "@playwright/test";
@@ -78,6 +78,37 @@ const toTop = (l: Locator, gap = 0) =>
     while (pane && pane.scrollHeight <= pane.clientHeight) pane = pane.parentElement;
     pane?.scrollBy({ top: -gap });
   }, gap);
+
+// A colleague's commit on topic/sample-4, the base of the demo task. scripts/demo.ts keeps its git remote in
+// <temp>/review-loop-demo-claude-*/remote.git. git gets an empty config, so no signing or hook of the user runs.
+function moveDemoBase() {
+  const dir = readdirSync(temp).find((n) => n.startsWith("review-loop-demo-claude-"));
+  if (!dir) throw new Error("The git remote of the demo is missing.");
+  const config = join(temp, "empty.gitconfig");
+  writeFileSync(config, "");
+  const env = {
+    ...process.env,
+    GIT_DIR: join(temp, dir, "remote.git"),
+    GIT_INDEX_FILE: join(temp, "base.index"),
+    GIT_CONFIG_GLOBAL: config,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Demo",
+    GIT_AUTHOR_EMAIL: "demo@example.invalid",
+    GIT_COMMITTER_NAME: "Demo",
+    GIT_COMMITTER_EMAIL: "demo@example.invalid",
+  };
+  const git = (args: string[], input?: string) => {
+    const r = spawnSync("git", args, { env, input, encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const ref = "refs/heads/topic/sample-4";
+  const parent = git(["rev-parse", ref]);
+  git(["read-tree", parent]);
+  const blob = git(["hash-object", "-w", "--stdin"], "Release notes.\n");
+  git(["update-index", "--add", "--cacheinfo", `100644,${blob},docs/release.md`]);
+  git(["update-ref", ref, git(["commit-tree", git(["write-tree"]), "-p", parent, "-m", "Add the release notes"]), parent]);
+}
 
 const row = (page: Page, title: string) => page.locator("[data-row]", { hasText: title }).first();
 const runRow = (page: Page, kind: string) => page.locator(`#runline [data-run-kind='${kind}']`);
@@ -229,6 +260,18 @@ async function shots(browser: Browser) {
   await page.locator("[data-primary]", { hasText: "Open the PR" }).waitFor({ timeout: 3 * RUN_MS });
   await rest();
   await save(page, "task-build");
+  // The base of the task moves (spec.md section 6.18.5). The app checks the base at most once a minute when the view loads, so the page
+  // loads again until the row shows "Update from <base>" with the Tell Claude box under it.
+  moveDemoBase();
+  const update = page.locator("[data-primary]", { hasText: "Update from topic/sample-4" });
+  for (let i = 0; !(await update.isVisible()); i++) {
+    if (i >= 15) throw new Error("The base check did not offer the update.");
+    await page.waitForTimeout(10_000);
+    await page.reload();
+    await update.waitFor({ timeout: 5_000 }).catch(() => undefined);
+  }
+  await rest();
+  await save(page, "task-update");
 
   await page.goto(`${BASE}/settings/profiles`);
   await page.locator("#h-profiles").waitFor();

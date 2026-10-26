@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The Task view (docs/plans/review-v2/spec.md sections 6.12 and 7): a header with the key, the title, and the size, the step strip, one
-// status sentence in a polite live region, one primary button, a More menu, the content of the current step, then the tabs Questions,
-// Spec, Plan, Log, and Diff. model.ts decides the sentence and the actions. Focus moves to the new primary button after a state change.
+// status sentence in a polite live region, one primary button, a More menu, the Tell box (section 6.18.1), the content of the
+// current step, then the tabs Questions, Spec, Plan, Log, and Diff. model.ts decides the sentence and the actions. Focus moves to the
+// new primary button after a state change.
 import { Ellipsis } from "lucide-react";
 import { forwardRef, type ReactNode, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -22,12 +23,13 @@ import { TaskFiles } from "./Attachments";
 import { DiffTab } from "./DiffTab";
 import { type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
 import { LogTab, stepId } from "./LogTab";
-import { type Action, type ActionKind, currentPart, openQuestions, runningStep, stripSteps, taskView } from "./model";
+import { type Action, type ActionKind, currentPart, openQuestions, runningStep, stoppedSend, stripSteps, taskView, tellBox } from "./model";
 import { OpenPrDialog } from "./OpenPrDialog";
 import { PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
 import { AnsweredList, QuestionsForm } from "./Questions";
 import { docList, SpecDocs } from "./SpecDocs";
 import { StepStrip } from "./StepStrip";
+import { TellClaude } from "./TellClaude";
 
 // The shell keys of the Task view (keys.ts): j and k move over the steps and parts, Enter runs the primary action, Esc closes the run log.
 export type TaskApi = { step: (d: 1 | -1) => void; primary: () => void; layer: (target: EventTarget | null) => Layer; close: () => void };
@@ -79,8 +81,9 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const runner = meta.runner.short;
   const act = useTaskAction(t);
   const [errorText, setErrorText] = useState<string | null>(null);
-  const view = taskView(t, { runner, now: useTick(runningStep(t) !== null) });
+  const view = taskView(t, { runner, forge: meta.forge.name, now: useTick(runningStep(t) !== null) });
   const part = currentPart(t);
+  const box = tellBox(t);
   const tabs: Tab[] = [
     ...(t.questions.length ? ["questions" as const] : []),
     // spec.md section 6.17: the files of the task, when its issue lists any.
@@ -166,6 +169,10 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         const p = [...t.parts].reverse().find((x) => x.remotePr !== null);
         return p?.remotePr && onPr({ project: t.project, repo: t.repo, id: p.remotePr });
       }
+      case "update":
+        return part && send({ kind: "update", part: part.id });
+      case "undo-update":
+        return part && send({ kind: "undo", part: part.id });
     }
   };
 
@@ -194,7 +201,9 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
     focusAfter.current = mark;
     const a = document.activeElement;
     const inside = !a || a === document.body || !!root.current?.contains(a);
-    if (inside && !prOpen) (primaryRef.current ?? document.getElementById("task-status"))?.focus({ preventScroll: true });
+    // A user who types in the Tell box keeps the focus there.
+    const typing = !!a?.closest("[data-tell]");
+    if (inside && !typing && !prOpen) (primaryRef.current ?? document.getElementById("task-status"))?.focus({ preventScroll: true });
   }, [mark, prOpen]);
 
   const busy = act.isPending;
@@ -229,6 +238,15 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             {view.status}
           </p>
           {view.detail && <p className="m-0 text-sm text-ink-2">{view.detail}</p>}
+          {view.lines.length > 0 && (
+            <ul aria-label="Repositories to update" className="m-0 grid list-none gap-0.5 p-0 text-sm text-ink-2">
+              {view.lines.map((l) => (
+                <li key={l} translate="no">
+                  {l}
+                </li>
+              ))}
+            </ul>
+          )}
           {errorText && (
             <p role="alert" className="m-0 text-sm text-destructive">
               {errorText}
@@ -260,6 +278,18 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
           </div>
         )}
       </header>
+
+      {box !== "none" && (
+        <TellClaude
+          runner={runner}
+          busy={box === "busy" || busy}
+          restore={stoppedSend(t)}
+          onSend={(text) => {
+            setErrorText(null);
+            return act.mutateAsync({ kind: "instruct", text });
+          }}
+        />
+      )}
 
       <Content
         t={t}
@@ -317,12 +347,26 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             />
           )}
           {shown === "plan" && <PlanParts t={t} />}
-          {shown === "log" && <LogTab t={t} onRunLog={(r) => setRunLog({ run: r, raw: false, n: (runLog?.n ?? 0) + 1 })} />}
+          {shown === "log" && (
+            <LogTab
+              t={t}
+              runner={runner}
+              onRunLog={(r) => setRunLog({ run: r, raw: false, n: (runLog?.n ?? 0) + 1 })}
+              onDiff={
+                tabs.includes("diff")
+                  ? () => {
+                      setTab("diff");
+                      focus("task-tab-diff");
+                    }
+                  : undefined
+              }
+            />
+          )}
           {shown === "diff" && <DiffTab task={t.id} part={part} />}
         </div>
       </section>
 
-      {part && view.primary?.kind === "open-pr" && (
+      {part && [view.primary, ...view.more].some((a) => a?.kind === "open-pr") && (
         <OpenPrDialog
           key={`${part.id}:${t.reviewers.join(",")}`}
           t={t}
