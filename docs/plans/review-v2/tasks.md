@@ -6,6 +6,8 @@ Progress (2026-10-23, HEAD 4b04c77): parts 1 to 4 are merged except WP-D2 (in pr
 
 Update (2026-10-23): the user decided Q42 to Q46 (design.md section 10.4): a global branch prefix list, the full summary in the branch name, a base branch picker, "Continue on <branch>", and several repositories with submodules. They add WP-GB (gate G13 to G17), WP-BR1 and WP-BR2 (branches and base), and WP-MR1 to WP-MR3 (several repositories), all before WP-B6 (section 1, waves W9a and W9b).
 
+Update (2026-10-26): the user decided Q52 and Q53 (design.md section 10.6): the "Tell Claude" box and "Update from <base>" (spec.md section 6.18). They add WP-TU1 and WP-TU2 (wave W9c) and Gate G18. "Update from <base>" replaces the moved-base rebase of WP-MR2.
+
 ## 0. Rules for every work package
 
 - Read CLAUDE.md of the repository first. In a worktree, also read the CLAUDE.md of the main checkout (first path of `git worktree list`). Read the three plan files.
@@ -42,7 +44,9 @@ Update (2026-10-23): the user decided Q42 to Q46 (design.md section 10.4): a glo
 | UBR | User smoke docs/smoke-task.md part B (branch type, base picker, existing branch) | W9a |
 | W9b | WP-MR1, then WP-MR2, then WP-MR3 | UBR |
 | UN | User smoke docs/smoke-task.md part N (a main repository with a submodule, and an added repository) | W9b |
-| W10 | WP-B6 ∥ WP-B7 | UN (the medium code PR uses the several-repository PR flow of WP-MR2) |
+| W9c | WP-TU1, then WP-TU2 | UN; G18 recorded before WP-TU1 merges (until then the fake Bitbucket follows the DC 9.6 docs) |
+| UTU | User smoke docs/smoke-task.md part U (Tell Claude, Update from a release branch before and after the first push, a conflict) | W9c |
+| W10 | WP-B6 ∥ WP-B7 | UN and UTU (the medium code PR uses the several-repository PR flow of WP-MR2) |
 | UM | User smoke part M (medium task) | W10 |
 | W11 | WP-B8, then WP-B9 ∥ WP-B10 | UM |
 | UL | User smoke part L (large task with a stack) | W11 |
@@ -75,6 +79,7 @@ What each task size needs:
 |---|---|
 | Small | WP-G0, WP-D6, WP-B0, WP-B1 (push, create PR, repository remote), WP-B2, WP-B3, WP-B4, WP-B5, WP-GB, WP-BR1, WP-BR2 |
 | Several repositories (small and medium) | WP-MR1, WP-MR2, WP-MR3 |
+| Tell Claude and Update from the base branch (small and medium) | WP-TU1, WP-TU2 |
 | Medium | Small, plus WP-B6 (spec PR, gate, Fix on task branches) and WP-B7 (UI) |
 | Large | Medium, plus WP-B8 (stack, retarget, rebase, replan, builds gate), WP-B9 (UI), WP-B10 (notifications and inbox rows) |
 
@@ -92,11 +97,11 @@ Shared-file ownership (merge order):
 | src/web/review/ReplyDraft.tsx | WP-PN → WP-D3 |
 | src/web/review/Drafts.tsx, Brief.tsx, RunLine.tsx | WP-R4 → WP-D3 |
 | src/web/pr/Markdown.tsx | WP-X2 |
-| src/server/bitbucket/* | WP-PN (listOpenPullRequests, buildStats; reads only) → WP-B1 → WP-BR1 (defaultBranch, listBranches) → WP-MR1 (writableRepos, restrictions, repository by key) → WP-MR2 (mergeCommit) |
+| src/server/bitbucket/* | WP-PN (listOpenPullRequests, buildStats; reads only) → WP-B1 → WP-BR1 (defaultBranch, listBranches) → WP-MR1 (writableRepos, restrictions, repository by key) → WP-MR2 (mergeCommit) → WP-TU1 (properties.mergeResult in the PR schema) |
 | scripts/eval/* | WP-M1 → WP-PN (`--replies` mode, adds only) |
 | the task migration (next free number, 033 unless WP-D2 takes it), src/shared/task.ts, src/server/tasks/machine.ts, the xstate dependency | WP-B0 (later owners add events and guards only, with the table test) |
-| src/server/tasks/* | WP-B2 → WP-B3 → WP-B4 → WP-BR1 → WP-MR1 → WP-MR2 → WP-B6 → WP-B8 |
-| src/web/tasks/* | WP-B5 → WP-BR2 → WP-MR3 → WP-B7 → WP-B9 → WP-B10 |
+| src/server/tasks/* | WP-B2 → WP-B3 → WP-B4 → WP-BR1 → WP-MR1 → WP-MR2 → WP-TU1 → WP-B6 → WP-B8 |
+| src/web/tasks/* | WP-B5 → WP-BR2 → WP-MR3 → WP-TU2 → WP-B7 → WP-B9 → WP-B10 |
 | src/web/settings/Settings.tsx (section "Tasks"), src/web/settings/BranchPrefixes.tsx (new) | WP-BR2 |
 | the task repositories migration (next free number: task_repo, task_pr, repo_task_settings.last_base) | WP-BR1 (last_base only) → WP-MR1 (adds the tables in its own migration) |
 | tests/e2e/serve.ts, control.ts, tests/support/fake-claude.ts, fake-bitbucket.ts | WP-R1 → WP-PN → WP-B1 → WP-A1 (on hold) (the later owner adds only) |
@@ -325,11 +330,11 @@ Shared-file ownership (merge order):
 - Run: `bun test tests/tasks tests/storage tests/review`; `bun run check`.
 - Depends: WP-BR2, UB recorded (G15).
 
-### WP-MR2. Several repositories: proposals, push and PR order, links, retries, moved base, pointer move (implementer-xhigh, W9b after WP-MR1)
+### WP-MR2. Several repositories: proposals, push and PR order, links, retries, moved-base check, pointer move (implementer-xhigh, W9b after WP-MR1)
 
-- Files: src/server/tasks/{plan.ts (context/repo-list.md, proposal validation, Add and Skip, the spec run again), pr.ts (rows, pushes deepest first, creates submodules first, Related PRs links with updatePullRequest, per-row retry), push.ts (rows), rebase.ts (new or in loop.ts: rebase onto a moved base, checks again), pointer.ts (new: merge commit read, ancestry check, gitlink commit, push on click), routes.ts (repos/:taskRepo, parts/:part/prs, parts/:part/rebase, prs/:taskPr/pointer)}; src/server/review/catalog.ts and prompt.ts (spec agent lines for proposals); src/server/bitbucket/{provider.ts (mergeCommit), schemas.ts}; src/server/sync/* (task_pr merged state on sync); tests/support/fake-bitbucket.ts (merged PR with properties.mergeCommit and a MERGED activity); tests/tasks/{proposals.test.ts, multi-pr.test.ts, pointer.test.ts} (new).
-- Behavior: spec.md sections 6.16.5 (proposals), 6.16.8, 6.16.10 (mergeCommit), 6.16.11. AC-B38, AC-B39, AC-B40, AC-B41, AC-B43, AC-B44.
-- Tests: the push and create order; a failed submodule push stops the parent push; a refused create leaves the other PR and retries one row without a second create; both descriptions link each other; a moved base gives the count and the rebase; a deleted base blocks; the pointer move with properties.mergeCommit, with only the MERGED activity, and with neither (the fallback sentence); a proposal outside the list is dropped.
+- Files: src/server/tasks/{plan.ts (context/repo-list.md, proposal validation, Add and Skip, the spec run again), pr.ts (rows, pushes deepest first, creates submodules first, Related PRs links with updatePullRequest, per-row retry, the moved-base check and count before the dialog), push.ts (rows), pointer.ts (new: merge commit read, ancestry check, gitlink commit, push on click), routes.ts (repos/:taskRepo, parts/:part/prs, prs/:taskPr/pointer)}; src/server/review/catalog.ts and prompt.ts (spec agent lines for proposals); src/server/bitbucket/{provider.ts (mergeCommit), schemas.ts}; src/server/sync/* (task_pr merged state on sync); tests/support/fake-bitbucket.ts (merged PR with properties.mergeCommit and a MERGED activity); tests/tasks/{proposals.test.ts, multi-pr.test.ts, pointer.test.ts} (new).
+- Behavior: spec.md sections 6.16.5 (proposals), 6.16.8 (without the update itself), 6.16.10 (mergeCommit), 6.16.11 (without parts/:part/update). AC-B38, AC-B39, AC-B40, AC-B41, AC-B43 (the count and the sentence), AC-B44. "Update from <base>" and its route replace the old "Rebase onto it" and parts/:part/rebase, and move to WP-TU1 (spec.md section 6.18). WP-MR2 adds no rebase code.
+- Tests: the push and create order; a failed submodule push stops the parent push; a refused create leaves the other PR and retries one row without a second create; both descriptions link each other; a moved base gives the count and the sentence "<base> has N new commits since the branch point."; a deleted base blocks; the pointer move with properties.mergeCommit, with only the MERGED activity, and with neither (the fallback sentence); a proposal outside the list is dropped.
 - Control mutation: create the main PR before the submodule PR. The AC-B38 order test must fail.
 - Run: `bun test tests/tasks`; `bun run check`.
 - Depends: WP-MR1, UB recorded (G16, G17).
@@ -345,6 +350,27 @@ Shared-file ownership (merge order):
 ### Gate UN: several-repository smoke (user)
 
 - docs/smoke-task.md part N on two test repositories, the main one with a same-server submodule: a small task that changes both, the pre-flight on a repository without write, "Push and open 2 PRs", the links, the merge of the submodule PR, and "Point … at the merged commit". Also a proposal: Add once and Skip once.
+
+### WP-TU1. Tell Claude and Update from the base branch: server (implementer-xhigh, W9c)
+
+- Files: src/server/storage/migrations/<next free number>_task_update.sql (task_step rebuild with kinds instruct, update, resolve; pull_request.merge_result); src/server/storage/db.ts; src/shared/task.ts (implementResult needsBase and needsBaseReason, the step kinds, blocked kind update, RESOLVE_STOPS, BASE_CHECK_AGE); src/shared/dto.ts (instructions input, update and undo inputs, TaskDto bases, needsBase, canInstruct, canUndoUpdate); src/server/bitbucket/schemas.ts (properties.mergeResult); src/server/sync/* (store merge_result of task PRs on the normal sync); src/server/tasks/{update.ts (new: base check, rebase or merge per repository, pointer step, conflict loop, marker check, abort and reset, undo, restart recovery), implement.ts (modes instruct and resolve, context/conflicts.md, the resolve path check with the unmerged paths), loop.ts (the instruct step through checks, commit, size, and own review; Stop back to the earlier waiting state), push.ts ("Get their commits" merges after an update merge), tasks.ts (state rows, canInstruct), routes.ts (POST instructions, parts/:part/update, parts/:part/update/undo)}; src/server/review/catalog.ts and prompt.ts (the instruct and resolve lines); scripts/gate/bitbucket-write.ts (G18, read only: properties.mergeResult of the open PRs of the test repository); docs/gate-v2.md (part G18); integration-check.md (row G18, "not run"); tests/support/fake-bitbucket.ts (mergeResult CLEAN and CONFLICTED); tests/support/fake-claude.ts (instruct and resolve results); tests/tasks/{instruct.test.ts, update.test.ts} (new); tests/storage/db.test.ts.
+- Behavior: spec.md sections 6.18.2 to 6.18.7, the 6.5 schema keys, the 6.2 blocked kind. AC-B53, AC-B54, AC-B55, AC-B56, AC-B57 (server part), AC-B58 to AC-B65.
+- Tests (temp bare remotes and worktrees, fake CLI, fake Bitbucket): one send gives one instruct step and one fake CLI call; a text with "push" and "rebase" gives no git push, fetch, rebase, or merge (spy on git argv); 409 while a step runs; Stop resets to the last commit and restores blocked; needsBase with and without a moved base; the release/2.1 base in the fetch argv; rebase before the first push and merge after it and after Continue, then a normal push passes the fast-forward check; a conflict on one file resolves and continues; an edit outside the unmerged paths, a remaining marker, a question, and RESOLVE_STOPS + 1 stops each abort and reset every repository to its preHead; a submodule update moves the parent gitlink; a gitlink conflict resolves only when the new parent base points at an ancestor; a restart during an update aborts and resets; red checks after an update block, and Undo restores the heads and base_commit; mergeResult CONFLICTED with current true marks the PR, current false does not.
+- Control mutations: let the resolve path check accept any path (the AC-B60 abort test must fail); use the default branch instead of the picked base (AC-B58 must fail); rebase after the first push (AC-B59 must fail).
+- Run: `bun test tests/tasks tests/storage tests/bitbucket`; `bun scripts/gate/bitbucket-write.ts --dry-run --only G18`; `bun run check`.
+- Depends: WP-MR3, UN. G18 recorded before merge. The README and CHANGELOG lines come with WP-TU2.
+
+### WP-TU2. Tell Claude and Update from the base branch: UI (frontend-implementer, W9c after WP-TU1, ports 7657/7658/7659)
+
+- Files: src/web/tasks/{TellClaude.tsx (new: the box with its label, counter, busy hint, Ctrl+Enter), TaskView.tsx (the box under the primary button in the listed states; the update rows), model.ts (the rows of spec.md section 6.18.5 and the box state list), data.ts (useInstruct, useUpdate, useUndoUpdate), LogTab.tsx (the "Your instructions" group)}; tests/web/tasks-model.test.ts; tests/web/ui-words.test.ts; tests/e2e/task-tell.e2e.ts (new); docs/smoke-task.md (part U); README.md ("Build a Jira task"); CHANGELOG.md.
+- Behavior: spec.md sections 6.18.1, 6.18.5 (rows), 6.12 (the box line). AC-B52, AC-B57, AC-B62 (UI), AC-B58 (label).
+- Tests: the model table gives the box in every listed state and in no other state; e2e: send with Ctrl+Enter, the busy hint, Stop puts the text back, the label "Update from release/2.1" on a fake release base, the conflict row from a CONFLICTED fake PR, the update stopped row with "The branch is as it was."; AC-UX1 counts one primary per screen.
+- Gates: screenshots (a waiting state with the box, the update row), README update, web-design-guidelines (text area label, live region for the status), axe.
+- Run: `bun run test:e2e`; `bun run screenshots`; `bun run check`.
+
+### Gate UTU: Tell Claude and base update smoke (user)
+
+- docs/smoke-task.md part U on the test repository: a small task on a release branch base. Tell Claude once with a change and once with a question. Move the release branch, then "Update from <base>" before the first push (rebase). Push, move the release branch again with a conflicting change, and check the conflict row, the resolve step, and the merge commit. Check that no push happens without a click.
 
 ### WP-B6. Spec PR flow (implementer-xhigh, W10)
 
@@ -405,6 +431,8 @@ Shared-file ownership (merge order):
 | G9, G12 (UG) | `bun scripts/gate/bitbucket-write.ts --only G9,G12` on the test repository | after WP-PG, before WP-PN uses the Bitbucket peer reads | spec of WP-PG. |
 | G13 to G17 (UB) | `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G13,G14,G15,G16,G17` on the test repository (read only) | after WP-GB, before WP-BR1 merges (G13, G14), WP-MR1 (G15), and WP-MR2 (G16, G17) | docs/gate-v2.md part G13 to G17. |
 | Smoke task B and N (UBR, UN) | docs/smoke-task.md parts B and N | after W9a and W9b | Every step as written. Nothing pushes without a click. |
+| G18 | `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G18` on the test repository (read only), with one open PR that the user made conflicted by hand | after WP-TU1 is written, before it merges | docs/gate-v2.md part G18: the key properties.mergeResult and the outcome value of a conflicted PR. |
+| Smoke task U (UTU) | docs/smoke-task.md part U | after W9c | Every step as written. Nothing pushes without a click. |
 | Reply eval (PR context) | `bun run eval -- --replies --real --repeat 2` | after WP-PN | The recommended pass of WP-PN. |
 | G8, G10, G11 (on hold) | `bun scripts/gate/bitbucket-write.ts --only G8,G10,G11` on the test repository | before WP-A2 (G10) and WP-A5 (G8) | spec of WP-GA. |
 | UA1 (on hold) | docs/smoke-autopilot.md part 1 | after WA3 | A draft for each scripted comment, one notification per burst, "Post this reply" posts once, nothing posts by itself. |

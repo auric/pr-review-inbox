@@ -933,7 +933,7 @@ Task states (task.state):
 | failed | yes | yes | yes | An error that Resume cannot fix, such as a deleted repository. |
 | stopped | yes | yes | yes | The user stopped it, or a restart or usage limit stopped it. Resume continues. |
 
-task.blocked holds the reason when the loop waits for the user: {kind: "question" | "red" | "blocker" | "budget" | "size" | "spec_change" | "denied_path" | "push" | "slot" | "preflight" | "error", step, text}. preflight comes from section 6.16.7. It is null while Claude or the app works, and while the app waits for colleagues.
+task.blocked holds the reason when the loop waits for the user: {kind: "question" | "red" | "blocker" | "budget" | "size" | "spec_change" | "denied_path" | "push" | "slot" | "preflight" | "update" | "error", step, text}. preflight comes from section 6.16.7. update comes from section 6.18.4. It is null while Claude or the app works, and while the app waits for colleagues.
 
 Part states (task_part.state): planned → implementing → self_reviewed → pr_open → changes_requested → approved → merged. Side states: declined, abandoned (a spike, or a part that a replan removed). approved means the PR gate passed: approvals, no "Needs work", no open blocker task, and builds green or none. A new colleague comment or a "Needs work" moves approved back to changes_requested.
 
@@ -1184,6 +1184,9 @@ export const implementResult = z.object({
   tests: z.array(z.string()).max(50).default([]).describe("The test files that this step added or changed."),
   question: z.object({ text: z.string().max(300), why: z.string().max(300), options: z.array(z.object({ label: z.string().max(120), detail: z.string().max(300) })).max(5), recommended: z.number().int().min(0).nullable() }).nullable().default(null),
   specChange: z.string().max(1000).default("").describe("Why you changed a plan file. Empty when you did not."),
+  // Section 6.18.2.
+  needsBase: z.boolean().default(false).describe("true when the change needs the newest base branch."),
+  needsBaseReason: z.string().max(300).default(""),
   notes: z.array(z.string().max(500)).max(20).default([]),
   coverage,
 });
@@ -1241,7 +1244,7 @@ Spec agent:
 | "For small, write only change and leave design and spec null. For medium and large, write design and spec and leave change empty." | Size-scaled documents. |
 | TRUST lines, the coverage line, and the docs rule | Kept. |
 
-Implement agent (modes tests, implement, fix):
+Implement agent (modes tests, implement, fix; section 6.18 adds instruct and resolve):
 
 | Line | Reason |
 |---|---|
@@ -1349,7 +1352,7 @@ Section 6.16.10 adds the reads for the base branch, the branch search, the write
 | GET /api/tasks/:id/parts/:part/diff | | DiffDto (existing rows) |
 | GET, PUT /api/repos/:project/:repo/task-settings | repo_task_settings fields (no branchPrefix, section 6.16.1) | 200 |
 
-Section 6.17.4 adds POST /api/tasks/issue and PUT /api/tasks/:id/files/:att. Section 6.16.11 adds the routes for the branch search, the branch check, the base change, the repository proposals, "Push and open N PRs", the rebase onto a moved base, and the pointer move.
+Section 6.17.4 adds POST /api/tasks/issue and PUT /api/tasks/:id/files/:att. Section 6.16.11 adds the routes for the branch search, the branch check, the base change, the repository proposals, "Push and open N PRs", the update from the base branch (section 6.18.6), and the pointer move. Section 6.18.6 adds POST /api/tasks/:id/instructions.
 
 - Every mutation checks task.version and returns 409 with the current TaskDto on a mismatch.
 - Fix on a task PR: the Apply dialog of a fix run on a PR whose branch is a task_part branch commits into that part's worktree (mode "task"). The push stays a separate click: "Push to <branch>".
@@ -1386,12 +1389,16 @@ Primary button per state:
 | blocked preflight, base gone | "Needs you: develop no longer exists in PROJ/repo. Pick another base branch." | "Pick a base branch" | Stop |
 | blocked preflight, branch rule | "Needs you: a branch rule in PROJ/repo forbids pushes to <branch>. Pick another prefix." | "Change the branch" | Stop |
 | blocked size, large with repos | "Needs you: large tasks change one repository for now. Make it medium, or split the task." | "Make it medium" | Close the task |
-| implementing, base moved | "develop has 5 new commits since the build started." | "Rebase onto it" | Open the PR as is |
+| implementing, base moved | "develop has 5 new commits since the branch point." | "Update from develop" | Open the PR as is |
 | implementing, PRs partly open | "2 of 3 PRs are open. The PR for PROJ/lib failed." | "Try again for PROJ/lib" | Go to the PRs |
 | ready, submodule merged | "The PROJ/lib PR merged. PROJ/app still points at the task branch commit." | "Point PROJ/app at the merged commit" | Go to the PR |
 | stopped | "Stopped at: part 2, task T2.3, running the tests." | "Resume" | Close the task |
 | ready | "All PRs are open. Waiting for the review of part 4." | "Go to the PR" | Close the task |
 | done | "Done. All 4 PRs merged." | "Close the task" | none |
+
+Section 6.18.5 adds the rows for the base update, the instruct step, and new commits that are not pushed.
+
+- Tell Claude: the waiting states after the build started show the box "Tell Claude" under the primary button (section 6.18.1).
 
 - Questions tab: a form. Each question shows its text, "Why it matters: …", radio buttons for the options with "Recommended" on one, which starts selected, and an optional text field "Add a note (optional)". Buttons: primary "Send answers", secondary "Use the recommended answers".
 - Spec tab: the documents rendered with Markdown.tsx. "Edit" switches a document to a text area. "Save" stores it (before the first push) or commits it to the spec branch (after it; the push is a separate click).
@@ -1452,7 +1459,7 @@ Primary button per state:
 22. AC-B22. The token is never in argv, in the worktree, in the env of a check command, in SQLite, or in a log (spy test on spawn and the run folder scan).
 23. AC-B23. The Bitbucket client maps 401, 403, 404, and 409 of create and update to one sentence and one button each.
 
-Section 6.16.13 holds AC-B24 to AC-B45. Section 6.17.5 holds AC-B46 to AC-B51.
+Section 6.16.13 holds AC-B24 to AC-B45. Section 6.17.5 holds AC-B46 to AC-B51. Section 6.18.8 holds AC-B52 to AC-B65.
 
 ### 6.16 Branches, base branch, and several repositories (design.md B16 to B21, section 10.4, user decisions of 2026-10-23)
 
@@ -1531,7 +1538,7 @@ blocked.kind adds "preflight". The checks send GET requests and `git ls-remote` 
 
 #### 6.16.8 Open the PRs
 
-- The base moved: before the dialog, the app runs `git ls-remote` for each base. When a base head differs from base_commit, it fetches and counts `git rev-list --count <base_commit>..<new head>`. Status: "develop has 5 new commits since the build started." (one line per repository). Primary "Rebase onto it": `git rebase --onto <new head> <base_commit> <branch>` per repository, deepest first, then the checks again (no Claude step). A conflict uses the section 6.8 path ("Let Claude fix it"). Secondary "Open the PR as is".
+- The base moved: before the dialog, the app runs `git ls-remote` for each base. When a base head differs from base_commit, it fetches and counts `git rev-list --count <base_commit>..<new head>`. Status: "develop has 5 new commits since the branch point." (one line per repository). Primary "Update from <base>": the update of section 6.18.3 with the task's own base of each repository (rebase before the first push, merge after it), deepest first, then the checks again. A conflict goes to the resolve step of section 6.18.4. Secondary "Open the PR as is".
 - Dialog "Push and open PRs": one row per changed repository, submodules first, the main repository last. A row shows "PROJ/repo · <branch> → <base> · 3 files, 42 lines", the reviewers (chips; default: the reviewers of the user's newest PR in that repository), and its state: "Waiting", "Pushing", "Opening the PR", "PR #12 open", or "Failed: <sentence>". Primary "Push and open 3 PRs" (one row: "Push and open PR").
 - Order: all pushes first, deepest first. A failed push stops the pushes of the parents, because a parent commit points at the submodule commit. Then the PR creates, submodules first. A failed create does not stop the other creates.
 - Links: each description ends with "Related PRs:" and one line per other PR of the task ("PROJ/lib #41", with its link). After the last create, the app updates the descriptions of the earlier PRs with updatePullRequest (fresh GET, version check; section 6.9).
@@ -1593,7 +1600,7 @@ ALTER TABLE repo_task_settings ADD COLUMN last_base TEXT;
 | PUT /api/tasks/:id/base | `{version, taskRepo, branch}` | 200; 202 when the plan runs again |
 | POST /api/tasks/:id/repos/:taskRepo | `{version, add: boolean}` | 202 (Add, the spec run starts) or 200 (Skip) |
 | POST /api/tasks/:id/parts/:part/prs | `{version, rows: [{taskRepo, reviewers: slug[] max 20}]}` | 202; one row is a retry |
-| POST /api/tasks/:id/parts/:part/rebase | `{version}` | 202 |
+| POST /api/tasks/:id/parts/:part/update | `{version}` | 202 (section 6.18.6; it replaces /rebase) |
 | POST /api/tasks/:id/prs/:taskPr/pointer | `{version}` | 202 |
 | GET, PUT /api/settings | adds taskBranchPrefixes | 200 |
 
@@ -1602,7 +1609,7 @@ POST /api/tasks/:id/parts/:part/pr stays for a task with one repository. Every m
 #### 6.16.12 Edge cases
 
 - The Jira key does not exist, or the token cannot see it: "Jira has no issue <KEY>, or your Jira token cannot see it." No task is made.
-- The base branch moves during the build: section 6.16.8. The base branch is deleted: pre-flight step 2, also before the push.
+- The base branch moves during the build: sections 6.16.8 and 6.18. The base branch is deleted: pre-flight step 2, also before the push.
 - A submodule URL maps to no Bitbucket repository: access none, an empty folder, and the reason in context/repos.md and on the plan screen.
 - A submodule pointer change without file changes: it cannot come from Claude (no gitlink write). The app changes a pointer only after commits in the submodule, or with "Point … at the merged commit" (Q50).
 - Nested submodules: deeper levels are read-only worktrees (same server) or empty folders (other servers). A deeper level never gets a branch or a PR.
@@ -1633,7 +1640,7 @@ POST /api/tasks/:id/parts/:part/pr stays for a task with one repository. Every m
 17. AC-B40. A failed submodule push stops the parent push.
 18. AC-B41. After the submodule PR merges (fake MERGED activity with a commit), "Point PROJ/app at the merged commit" commits the gitlink at that commit and pushes with a lease after the click.
 19. AC-B42. Pre-flight: a repository without REPO_WRITE blocks before any Claude step (fake CLI call counter stays 0). A 401 on the restriction search skips the rule check. A BRANCH restriction with the exact task branch blocks with "Pick another prefix".
-20. AC-B43. A moved base shows "<base> has N new commits since the build started." with "Rebase onto it" and "Open the PR as is". A deleted base blocks with "Pick a base branch".
+20. AC-B43. A moved base shows "<base> has N new commits since the branch point." with "Update from <base>" and "Open the PR as is". A deleted base blocks with "Pick a base branch".
 21. AC-B44. A proposal from the spec result shows with Add and Skip. A proposal outside context/repo-list.md is dropped. Only an added repository gets a worktree, a branch, and a PR.
 22. AC-B45. A large plan with a second repository blocks with "large tasks change one repository for now".
 
@@ -1697,6 +1704,151 @@ CREATE TABLE task_file (
 4. AC-B49. A PDF goes to runs as a file. An office file and an image over 5 MB stay listed only, and the create and the tick refuse them.
 5. AC-B50. The tests, implement, fix, and own review steps of a part get the included files, and the path check passes with them.
 6. AC-B51. The form lists the attachments with boxes, asks the policy question once, and the Attachments tab change reaches the next step (e2e).
+
+### 6.18 Tell Claude and Update from the base branch (design.md B22 to B27, section 10.6, user decisions of 2026-10-26)
+
+Two controls for the waits of a task. "Tell Claude" sends free text that starts one implement step. "Update from <base>" brings the newest base branch into the task branch. Git actions stay app buttons. The app never reads the text for commands. Claude never runs git. This section replaces "Rebase onto it" of section 6.16.8.
+
+Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10 conflict stops per repository and update, BASE_CHECK_AGE = 60 s. STEP_TURNS adds instruct 80 and resolve 40. STEP_TIME applies to both.
+
+#### 6.18.1 Tell Claude: what the user sees
+
+- Place: the box sits under the status sentence and the primary button, above the content of the current step. It has the label "Tell Claude", a text area with the placeholder "What should Claude change? For example: rename the flag to useNewParser.", and the secondary button "Send to Claude". The hint under it says "Claude makes one change step. The app then runs the checks and its own review, and waits for you. Pushes and other git actions stay buttons." Ctrl+Enter sends, as in the Ask panel (AskPanel.tsx:186).
+- States with the box (a part worktree exists): implementing ready, implementing waiting, implementing lower merged, implementing base moved, implementing PRs partly open, implementing not pushed, ready, ready submodule merged, the update rows of section 6.18.5 that wait for the user, blocked red, blocked size, blocked blocker, and blocked denied_path.
+- States without the box: interview, spec_draft, spec_pr_open, and spec_approved (no worktree yet; Q54); blocked question (its form takes the text: "Add a note (optional)"); blocked spec_change ("Review the change" first); blocked budget, slot, and preflight; stopped and failed (Q55); done.
+- The box adds no primary button (AC-UX1).
+- Empty: "Send to Claude" is disabled while the trimmed text is empty. Over MAX_INSTRUCTION, the counter says "4,120 of 4,000 characters", and the button stays disabled.
+- Busy: while a Claude step, a check, or an update runs, the box stays visible and editable and keeps the text. "Send to Claude" is disabled, and the hint says "Claude or the checks are working. You can send when this step ends." There is no queue.
+- Send: POST /api/tasks/:id/instructions. A 202 clears the box. The status says "Claude works on your instructions for part 2. About 4 min left." A 409 keeps the text and shows the sentence of the answer.
+- Stop: More "Stop" during an instruct step ends the CLI process tree, as Stop does elsewhere. Every repository of the part goes back to its last commit, deepest first, and the discarded changes go to `<task folder>/patches/<step>.patch`. A commit that the step already made stays. The step ends cancelled. The task goes back to the waiting state that it had before the send: the same blocked value, not stopped (Q61). The box gets the text back. Status: "Stopped. Your instructions changed nothing. The text is back in the box." After a commit, the sentence is "Stopped after the commit. The own review did not run."
+- Step history: the Log tab shows one group row "Your instructions" with the time, the text as plain text (3 lines, then "Show all"), and the result: "Done: 3 files changed. Checks green. Checked by Claude.", "Claude changed no file: <summary>", "Stopped", or "Failed: <sentence>". The rows of the step follow inside the group: the implement run, the checks, the fix steps, the commit, and the own review, as for any implement step. The commit row opens its diff in the Diff tab.
+
+#### 6.18.2 Tell Claude: the run
+
+- One send starts exactly one step of kind instruct (task_step.kind 'instruct'; run kind implement, mode instruct). The step belongs to the part in the body, else to the part of the current state, else to the last part that is not merged.
+- stdin: the text is the only content of "Your instructions", as for Discuss (BRIEF section 7). The prompt rules come first and stay in force. The text can steer the change, but it never changes the tools, the denied paths, the path check, or the trust lines. The context files are those of section 6.7. context/step.md says "Mode: instruct" and holds the part goal and its acceptance lines.
+- Prompt lines (implement agent, mode instruct):
+
+| Line | Reason |
+|---|---|
+| "instruct: "Your instructions" hold the user's request for this part. Do it in ./repo within the approved plan." | Mode. |
+| "When the request needs the newest base branch, set needsBase to true and say why in needsBaseReason. Do not try to merge, rebase, or fetch. You cannot run git." | Git stays with the app (B23). |
+| "When the request is a question, answer it in summary and change no file." | An answer without a change. |
+| "When the request conflicts with the plan, change the plan file under <spec_dir> in ./repo, stop, and say why in specChange." | Living spec (B13). |
+
+- Schema: implementResult (section 6.5) adds `needsBase: z.boolean().default(false)` and `needsBaseReason: z.string().max(300).default("")`. Every implement mode can set them.
+- After the run, the steps of one task of section 6.7 apply:
+  1. Path check (sections 6.8 and 6.16.6). A denied path resets the step and blocks with denied_path.
+  2. No changed path: the step ends ok, and the Log shows the summary. No check, commit, or review runs. The task goes back to its waiting state.
+  3. Checks. Red starts at most TEST_FIX_TRIES fix steps, then blocks with red.
+  4. Commit `<KEY>: <first line of the text, cut at 72 characters>` in each changed repository, deepest first (Q62).
+  5. Size check. Over the budget blocks with size.
+  6. Own review of the part (base..head), with at most REVIEW_FIX_TRIES fix steps.
+  7. The waiting state again. Before the first push of the part: "Open PR for part k of n". After it: the row "implementing, not pushed" with "Push to <branch>". The push stays a click.
+- A question in the result blocks with question. A changed plan file blocks with spec_change.
+- The app never parses the text. Words such as "push", "rebase", or "merge" go to Claude as text. Each git action stays its own button.
+- needsBase: the app runs the base check of section 6.18.5 at once. A moved base gives the row "Claude asks for the base" with "Update from <base>" and the line "Claude says: <needsBaseReason>". A base that did not move gives the line "Claude asked for the newest <base>. The branch already has it." and no button.
+
+#### 6.18.3 Update from the base branch
+
+- Base: each repository uses the base that the user picked for the task: task.target_branch for the main repository, task_repo.base_branch for the others (section 6.16.3), for example release/2.1. The app never uses a fixed develop or master, and never the default branch here. The label names it: "Update from release/2.1". When the repositories to update have different bases, the label is "Update from 2 base branches", and the status lists one line per repository: "PROJ/lib from develop · 3 new commits" (Q60).
+- Repositories: each repository of the part with access edit whose base moved (section 6.18.5), deepest first. A parent of an updated submodule also takes the pointer step, also when its own base did not move.
+- Mode per repository. Published means that the task branch exists on the server: the pushed column is set (task_part.pushed for the main repository, task_pr.pushed for the others), or the task continues on a remote branch (section 6.16.4). Not published: rebase. Published: merge. After the first push, the update never needs a force push: the merge commit holds the pushed commit, so the next push passes the fast-forward check of section 6.8.
+- Steps:
+  1. The app writes the head of every repository of the part into the step detail (preHeads) before any git command.
+  2. It fetches the base branch of each repository into its cache (section 6.16.5).
+  3. Rebase: `git rebase --onto <new base head> <base_commit> <branch>` in the worktree. Merge: `git merge --no-ff -m "<KEY>: merge <base> into <branch>" <new base head>`. Both use the isolated git config, the empty core.hooksPath, the user's name and email, and GIT_EDITOR=true.
+  4. A conflict goes to section 6.18.4.
+  5. The app sets base_commit to the new base head (task.base_commit, task_pr.base_commit) and counts the lines of `<base_commit>..<head>` again (section 6.1).
+- Pointer: after a submodule update, its new head S differs from the gitlink in the parent. A gitlink conflict in a parent rebase or merge never goes to Claude. The app resolves it to S when the gitlink of the parent's new base head is an ancestor of S (`git merge-base --is-ancestor` in the submodule cache). Else the update aborts with "The new <base> of PROJ/app points <path> at a commit that the PROJ/lib task branch does not contain." After the parent update, the app writes S with `git update-index --cacheinfo 160000,<S>,<path>` and commits "<KEY>: point <path> at the updated task branch", unless the gitlink is already S.
+- All or nothing: a failed repository aborts the update of every repository (section 6.18.4, Abort).
+- Checks: after all repositories, the checks of section 6.7 run once for the part. Green: the step ends ok, and the task goes back to its waiting state. Red: blocked red "Needs you: the tests fail after the update from <base>." with "See why", the Tell Claude box, and More "Undo the update" (Q56). Undo resets each repository to its preHead and restores base_commit. Undo exists until the next push of the part.
+- The update pushes nothing. The next push is the existing click: "Open PR" or "Push to <branch>".
+- No confirm: a rebase changes only commits that are not on the server, and a merge adds a commit (AC-UX6 stays).
+
+#### 6.18.4 Conflicts
+
+- A rebase or merge that stops lists the unmerged paths with `git diff --name-only -z --diff-filter=U`. A gitlink path follows the pointer rule of section 6.18.3. A path outside the sparse patterns, a link, or a denied path never goes to Claude: the update aborts with "The update changes <path>, which the task cannot edit."
+- A resolve step (task_step.kind 'resolve'; run kind implement, mode resolve) gets context/conflicts.md, written by the app as untrusted data: the repository, the base and its new head, the mode, and each unmerged path. The file names the sides "base side" and "task side", never ours and theirs, because a rebase and a merge swap them. The step also gets the included attachments (section 6.17.3).
+- Prompt lines (implement agent, mode resolve):
+
+| Line | Reason |
+|---|---|
+| "resolve: The app paused a merge or a rebase in ./repo. ./context/conflicts.md lists the files with conflicts." | Mode. |
+| "Edit only those files. Remove every conflict marker. Keep the changes of the base side and the intent of the task side." | The allowed set. |
+| "Make no other change: no refactor, no new file, and no test change that the conflict does not need." | Scope. |
+| "When you cannot resolve a conflict safely, change nothing, set question, and stop." | No guess. |
+| "You cannot run git. The app continues the merge or the rebase after your step." | Git stays with the app. |
+
+- Path check: the allowed set is the unmerged paths of this stop. Each changed path must be in the set (an edit or a delete). Any other change aborts the update: a new file, another path, or a denied path.
+- Marker check: in each unmerged path that still exists, no line may start with `<<<<<<<`, `|||||||`, or `>>>>>>>` at the marker size, followed by a space or the line end (git-merge(1), "How conflicts are presented"). The size comes from `git check-attr conflict-marker-size -- <path>`, else 7. The app does not check a lone `=======` line, because it is valid text in Markdown and reStructuredText (Q63).
+- Continue: `git add -- <paths>` (`git rm -- <path>` for a deleted path), then `git rebase --continue` or `git commit --no-edit` for a merge. A rebase that stops again gets the next resolve step, at most RESOLVE_STOPS per repository (Q58).
+- After a resolve step, the own review runs on the part as after an implement step (Q57).
+- Abort, when markers remain, the step fails, the step sets question, the user stops, the path check fails, or a repository reaches RESOLVE_STOPS: `git rebase --abort` or `git merge --abort` in the stopped repository, then `git reset --hard <preHead>` and `git clean -ffd` in every repository of the update, deepest first. base_commit stays. The changes of each resolve step go to `<task folder>/patches/<step>.patch`. blocked kind update holds the reason.
+- Status after an abort: "The update from <base> stopped: <reason>. The branch is as it was." with the primary "Try again" and More "Go to the PR". Reasons: "conflict markers remain in <path>", "Claude could not resolve <path>: <question>", "Claude changed <path>, which has no conflict", "more than 10 conflict stops in PROJ/repo", "you stopped it", or the pointer sentence.
+- Restart: the start-up recovery finds a running update or resolve step. In each repository it runs `git rebase --abort` when `git rev-parse --git-path rebase-merge` exists, or `git merge --abort` when MERGE_HEAD exists. Then it resets to the preHeads of the step detail. The step ends failed with kind restart.
+
+#### 6.18.5 When the app suggests the update
+
+- Base check (GET reads and `git ls-remote` only, no Claude): at the entry of each waiting state, when the Task view opens (at most once per BASE_CHECK_AGE per task), before the PR dialog (section 6.16.8), and after an implement result with needsBase. For each repository with access edit: `git ls-remote --heads <url> refs/heads/<base>`. The base moved when its head differs from base_commit and, after a fetch, is not an ancestor of the task head (`git merge-base --is-ancestor`). The count is `git rev-list --count <base_commit>..<new head>`.
+- PR conflicts: the normal PR sync stores properties.mergeResult of each task PR ({outcome, current}; the sanitized fixture fixtures/bitbucket/dashboard-pull-requests-page.json shows `{"outcome": "CLEAN", "current": true}`). outcome "CONFLICTED" with current true marks the PR conflicted. The value "CONFLICTED" is not verified: Gate G18. No new polling loop.
+- Rows of the section 6.12 table (they replace the row "implementing, base moved"):
+
+| State | Status sentence | Primary | Secondary (More) |
+|---|---|---|---|
+| implementing, base moved (before the PR) | "release/2.1 has 5 new commits since the branch point." | "Update from release/2.1" | Open the PR as is |
+| waiting, PR conflicts | "Bitbucket reports conflicts between the PR for part 2 and release/2.1." | "Update from release/2.1" | Go to the PR |
+| waiting, base moved (PR open) | "Waiting for Anna's review. release/2.1 has 5 new commits." | "Go to the PR" | Update from release/2.1 |
+| Claude asks for the base | "Claude says the branch needs the newest release/2.1: <reason>" | "Update from release/2.1" | the More items of the state before |
+| updating | "Updating part 2 from release/2.1: merging." or "Claude resolves the conflicts in src/a.ts." | none | Stop |
+| update red | "Needs you: the tests fail after the update from release/2.1." | "See why" | Undo the update, Stop |
+| update stopped | "The update from release/2.1 stopped: conflict markers remain in src/a.ts. The branch is as it was." | "Try again" | Go to the PR |
+| instruct running | "Claude works on your instructions for part 2. About 4 min left." | none | Stop |
+| implementing, not pushed | "Part 2 has 2 new commits that are not on the server yet." | "Push to <branch>" | Show the diff |
+
+- Several repositories: one line per moved or conflicted repository under the status sentence, deepest first.
+
+#### 6.18.6 Data and routes
+
+- Migration (the next free number, 037 unless taken): rebuild task_step with kind adding 'instruct', 'update', and 'resolve'. 'rebase' stays for the stack (section 6.8). `ALTER TABLE pull_request ADD COLUMN merge_result TEXT;` (JSON {outcome, current}).
+- task.blocked kind adds "update" (section 6.18.4).
+- task_step.detail_json: instruct {text, part, blockedBefore}; update {repos: [{taskRepo, base, mode, newBaseHead}], preHeads, stops, result}; resolve {taskRepo, paths}.
+- TaskDto adds `bases: [{taskRepo, branch, newCommits, conflicted}]`, `needsBase: {reason} | null`, `canInstruct: boolean`, and `canUndoUpdate: boolean`.
+
+| Route | Body | Result |
+|---|---|---|
+| POST /api/tasks/:id/instructions | `{version, part?: id, text: 1 to 4,000 characters after trim}` | 202 TaskDto; 409 "Claude or the checks are working." while a step runs; 409 with the state sentence in a state without the box |
+| POST /api/tasks/:id/parts/:part/update | `{version}` | 202; 409 "<base> has no new commits." when no base moved and no PR is conflicted |
+| POST /api/tasks/:id/parts/:part/update/undo | `{version}` | 200; 409 after a push |
+
+- POST /api/tasks/:id/parts/:part/update replaces POST /api/tasks/:id/parts/:part/rebase of section 6.16.11. Every mutation keeps the version check of section 6.11.
+
+#### 6.18.7 Edge cases
+
+- The base moves again during the update: the update uses the head that it fetched. The next base check shows the new count.
+- A colleague pushed to the task branch after the update: the next push fails the lease (section 6.8). "Get their commits" then fetches and merges the remote head, because a rebase drops the merge commit of the update.
+- The base was deleted: the pre-flight blocks with "Pick a base branch" (section 6.16.7). Update stays hidden.
+- A submodule PR merged, and the parent points at the merge commit (pointer_state merged_commit): the submodule takes no update. The parent update keeps that gitlink.
+- Two tabs send "Tell Claude": the version check lets one through. The other gets 409 with the current task and keeps its text.
+- The CLI hits the usage limit in an instruct or resolve step: the instruct step follows Stop; the update aborts. Both show the CLI text.
+- Stacked branches: the medium code branch and the large parts target another task branch. Q59 holds the recommended rule. Section 6.8 "Rebase" stays for the stack until WP-B8.
+
+#### 6.18.8 Acceptance criteria
+
+1. AC-B52. The box shows in each state of the section 6.18.1 list and in no other state. Each state keeps one primary button (AC-UX1).
+2. AC-B53. A send starts exactly one instruct step (fake CLI call counter 1) with the text as the only content of "Your instructions", the implement tools, and the path check. A denied path resets the step and blocks with denied_path.
+3. AC-B54. The text "push the branch and rebase onto develop" starts one instruct step and no git push, fetch, rebase, or merge (spy on git argv). While a step runs, "Send to Claude" is disabled and the route returns 409.
+4. AC-B55. A result with needsBase true and a moved base shows "Update from <base>" with Claude's reason. With a base that did not move, it shows "The branch already has it." and no button.
+5. AC-B56. Stop during an instruct step kills the process tree, resets the worktrees to the last commit, writes the patch file, and returns the task to its earlier waiting state with the text back in the box.
+6. AC-B57. The Log tab shows the "Your instructions" group with the text and the rows of the step. A step without a changed file shows "Claude changed no file" and runs no check.
+7. AC-B58. With base release/2.1 picked and develop as the default branch (fake Bitbucket), the label is "Update from release/2.1", and the fetch argv names refs/heads/release/2.1.
+8. AC-B59. Before the first push, the update runs `git rebase --onto`, and no merge commit exists. After the first push, and with "Continue on <branch>", it runs `git merge --no-ff`, and the next push passes the fast-forward check with no force confirm.
+9. AC-B60. A conflict starts a resolve step with context/conflicts.md. An edit to a file without a conflict, a remaining marker, or a question aborts the update, resets every repository to its preHead, and says "The branch is as it was."
+10. AC-B61. A clean resolve continues the rebase or the merge, runs the checks and the own review, sets base_commit to the new base head, and counts the lines again.
+11. AC-B62. A moved base shows the count. A synced task PR with mergeResult CONFLICTED and current true shows the conflict row. current false shows no conflict row.
+12. AC-B63. With a submodule on develop and the main repository on release/2.1, each updates from its own base, the submodule first, and the parent gitlink points at the new submodule head. A gitlink conflict resolves to that head when the new parent base points at an ancestor, else the update aborts with the pointer sentence. A failed submodule update leaves the parent unchanged.
+13. AC-B64. An app restart during an update aborts the rebase or the merge and resets each repository to its preHead.
+14. AC-B65. Red checks after an update block with "Undo the update". Undo restores the preHeads and base_commit. After a push, Undo returns 409.
 
 ## 7. UX rules check
 
@@ -1797,6 +1949,7 @@ Large task (a feature with an API change, 4 parts):
 | next free number, base branch (WP-BR1) | `ALTER TABLE repo_task_settings ADD COLUMN last_base TEXT;` (section 6.16.9). No rebuild. branch_prefix stays unused. |
 | next free number, task repositories (WP-MR1) | Create task_repo and task_pr and the index task_repo_one (section 6.16.9). A task_repo row role main for each existing task. No rebuild. |
 | 036_task_file.sql (task attachments) | Create task_file (section 6.17.2). No rebuild. |
+| next free number, 037 unless taken (Tell Claude and the base update) | Rebuild task_step with kind adding 'instruct', 'update', and 'resolve'. `ALTER TABLE pull_request ADD COLUMN merge_result TEXT;` (section 6.18.6). |
 | next free number, autopilot (on hold) | Rebuild review_run with kind adding 'autopilot' and the column autopilot_json. Rebuild event with kind adding 'autopilot_draft', 'autopilot_posted', 'dependency_merged'. post gains auto, not_before, deleted_at. Create pr_autopilot, autopilot_queue, autopilot_turn, pr_dependency (section 11.11). pr_note comes from 031. It takes the next free number when part 7 resumes. |
 
 db.test.ts per migration: the version number, a database of the version before with runs, events, items, posts, fix rows, and consult rows keeps every child row; foreign_key_check is empty; the CHECK takes the new kinds and refuses a bogus one; a second open changes nothing.
@@ -1810,7 +1963,8 @@ db.test.ts per migration: the version number, a database of the version before w
 | POST /api/items/:id (action reason, use-revision and keep-mine for findings) | 1, 2, 4 |
 | GET /api/stats/review | 4 |
 | /api/tasks… and /api/repos/:project/:repo/task-settings (section 6.11) | 6 |
-| GET /api/repos/:project/:repo/branches; GET /api/tasks/:id/branch; PUT /api/tasks/:id/base; POST /api/tasks/:id/repos/:taskRepo, /parts/:part/prs, /parts/:part/rebase, /prs/:taskPr/pointer; settings key taskBranchPrefixes (section 6.16.11) | 6 |
+| GET /api/repos/:project/:repo/branches; GET /api/tasks/:id/branch; PUT /api/tasks/:id/base; POST /api/tasks/:id/repos/:taskRepo, /parts/:part/prs, /parts/:part/update, /prs/:taskPr/pointer; settings key taskBranchPrefixes (section 6.16.11) | 6 |
+| POST /api/tasks/:id/instructions; POST /api/tasks/:id/parts/:part/update/undo (section 6.18.6) | 6 |
 | POST /api/tasks/issue; PUT /api/tasks/:id/files/:att; POST /api/tasks gains files (section 6.17.4) | 6 |
 | GET, POST /api/prs/:id/notes; PUT, DELETE /api/notes/:id (section 2.9) | 2 |
 | POST /api/prs/:id/ask gains parent; GET /api/prs/:id/asks gives parent (section 2.15) | 2 |
@@ -1834,6 +1988,7 @@ The review start route keeps its input. Modules and volume come from the profile
 | 10 Open questions | Q7 colleague's app: point to design.md section 9. |
 | 11 Sources | The research links of design.md section 3. |
 | 2, 3.5, 3.6, 7 Plan (part 6, branches and several repositories, 2026-10-23) | 2: several repositories for small and medium tasks. 3.5: task workspaces check out same-server submodules (first level editable); the review snapshot keeps "No submodules". 3.6 outbound reads: the default branch, the branch search, the repositories with write permission, the branch restrictions, and the merge commit of a merged PR. 7 Plan: task_repo, task_pr, repo_task_settings.last_base, the global prefix list, the new routes. |
+| 2, 3.6, 7 Plan (part 6, Tell Claude and Update from the base branch, 2026-10-26) | 2: the "Tell Claude" box in the waiting states, and "Update from <base>" with the task's own base. 3.6: the update rebases before the first push and merges after it, so it never needs a force push. 7 Plan: run modes instruct and resolve, the task_step kinds, pull_request.merge_result, the new routes. |
 | 3.5, 3.6, 7 Plan (part 2, PR context and notes) | 3.5: runs get context/pr-context.md (untrusted) and context/notes.md (the user's kept notes), rebuilt per run with no LLM call. 3.6 outbound reads: the open-PR list, the change list of an open PR, and build stats of the PR head. 7 Plan: the pr_note table, the notes routes, the cites and notes keys of the reply and discuss results. Ask follow-ups: the last 3 turns of a conversation go into the Ask stdin as data; review_run.parent_run. |
 | 5 Constitution, 3.6, Hard rules (part 7, on hold: do not change BRIEF.md until part 7 resumes) | Principle 1 and the hard rule "Nothing goes to Bitbucket without an explicit user action" add ", unless the user turned on Autopilot for that PR" (Q25, decided 2026-10-22), with the safeguards list of design.md section 10.1. Principle 4 allows reply runs from a sync on PRs in draft or post mode. 3.6 outbound adds comment delete of own Autopilot replies, the open-PR list, and the blocking-PR read. 7 Plan adds run kind autopilot, the guard phase, the part 7 tables, and the Autopilot mark. CLAUDE.md "Hard rules" gets the same rule text. |
 
