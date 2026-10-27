@@ -13,7 +13,7 @@ import type { TaskDto } from "../../src/shared/dto";
 import { readRecords } from "../support/fake-claude";
 import { builtTask, cleanup, implement, KEY, remoteCommit, SLOW, until } from "./update-fixture";
 
-for (const m of ["tasks/loop", "tasks/implement", "tasks/tasks", "tasks/update"])
+for (const m of ["tasks/loop", "tasks/implement", "tasks/tasks", "tasks/update", "review/jobs", "review/claude"])
   console.log(`instruct.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
@@ -137,6 +137,53 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
     },
     SLOW,
   );
+
+  // The windows between the send and the CLI start. git ls-files --ignored runs in startStep before the run takes the slot. The first
+  // `auth status` is the check of the run in the slot (jobs.ts implementSteps), the second one the check of runner.run before the spawn.
+  const WINDOWS = [
+    { name: "before the run takes the slot", argv: ["ls-files", "--ignored"], nth: 1, runs: [] },
+    { name: "after the run takes the slot", argv: ["auth", "status"], nth: 1, runs: [{ status: "cancelled" }] },
+    { name: "in the runner before the spawn", argv: ["auth", "status"], nth: 2, runs: [{ status: "cancelled" }] },
+  ];
+  for (const w of WINDOWS)
+    test(
+      `AC-B56: a Stop ${w.name} starts no CLI, restores the earlier reason, and the next send runs`,
+      async () => {
+        const s = await builtTask({ seq: { "implement:instruct": [{ writes: [MORE] }] } });
+        s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
+        const head = s.part().head;
+        const spawn = Bun.spawn;
+        let seen = 0;
+        let stopped: number | null = null;
+        (Bun as { spawn: unknown }).spawn = ((cmd: unknown, o: unknown) => {
+          if (stopped === null && Array.isArray(cmd) && w.argv.every((a) => cmd.includes(a)) && ++seen === w.nth)
+            stopped = s.loop.stop(s.db, s.task, { version: s.t().version }).status;
+          return (spawn as (a: unknown, b: unknown) => unknown)(cmd, o);
+        }) as unknown;
+        try {
+          expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the flag." }).status).toBe(202);
+          await s.loop.idle(s.task);
+        } finally {
+          (Bun as { spawn: unknown }).spawn = spawn;
+        }
+        expect(stopped as number | null).toBe(200);
+        expect(s.runCalls()).toEqual([]);
+        expect(s.db.query("SELECT status FROM review_run WHERE task = $t").all({ t: s.task })).toEqual(w.runs);
+        expect([s.t().state, s.blocked(), s.loop.running(s.task)]).toEqual(["implementing", RED, false]);
+        const row = s.steps()[0];
+        expect(row?.state).toBe("cancelled");
+        expect(row?.detail.instruct).toMatchObject({ text: "Add the flag.", result: "stopped", committed: false });
+        expect(row?.detail.notes.at(-1)).toBe("Stopped. Your instructions changed nothing. The text is back in the box.");
+        expect(s.part().head).toBe(head);
+        expect(taskDto(s.db, s.t()).canInstruct).toBe(true);
+        expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the flag." }).status).toBe(202);
+        await s.loop.idle(s.task);
+        expect(s.flow()).toEqual(["instruct:I1:cancelled", "instruct:I2:ok", "check:I2:ok", "commit:I2:ok", "review:review:ok"]);
+        expect(s.runCalls().map(s.modeOf)).toEqual(["instruct", "review"]);
+        expect(s.steps()[1]?.detail.instruct).toMatchObject({ result: "done", committed: true });
+      },
+      SLOW,
+    );
 
   test(
     "AC-B53: a denied path resets the step and blocks with denied_path",

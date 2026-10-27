@@ -9,6 +9,7 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import {
   APP_PORT,
+  type ClaudeScenario,
   control,
   E2E_JIRA_TOKEN,
   E2E_TOKEN,
@@ -18,7 +19,6 @@ import {
   makeClone,
   openApp,
   RELEASE,
-  runArgv,
   taskBase,
   taskRemote,
 } from "./control";
@@ -65,6 +65,21 @@ test("the README title says that the app works", () => expect(readFileSync("READ
 `;
 // The text of the user's send. "push" and "rebase" go to Claude as words only (spec.md section 6.18.2).
 const ASK = "Say in the title that it works well. Then push the branch and rebase onto develop.";
+const WELL = { writes: [{ path: "repo/README.md", text: "# Sample works well\n" }] };
+const CLAUDE = {
+  stream: "task",
+  spec: SPEC,
+  review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
+  seq: {
+    "implement:tests": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }] }],
+    "implement:implement": [{ writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
+    "implement:fix": [{ writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
+    // The first send runs until Stop, if its CLI starts at all.
+    "implement:instruct": [{ hang: true }],
+    // The resolve step changes nothing, so the conflict markers stay.
+    "implement:resolve": [{}],
+  },
+} satisfies ClaudeScenario;
 
 const test = base.extend<{ seen: { urls: string[]; logs: string[] } }>({
   seen: [
@@ -107,20 +122,7 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   page,
 }) => {
   test.setTimeout(600_000);
-  await control("claude", {
-    stream: "task",
-    spec: SPEC,
-    review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
-    seq: {
-      "implement:tests": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }] }],
-      "implement:implement": [{ writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
-      "implement:fix": [{ writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
-      // The first send runs until Stop. The second one changes the title.
-      "implement:instruct": [{ hang: true }, { writes: [{ path: "repo/README.md", text: "# Sample works well\n" }] }],
-      // The resolve step changes nothing, so the conflict markers stay.
-      "implement:resolve": [{}],
-    },
-  });
+  await control("claude", CLAUDE);
   await openApp(page);
   await page.getByLabel("Bitbucket URL").fill(FAKE_URL);
   await page.getByLabel("Access token").fill(E2E_TOKEN);
@@ -175,10 +177,8 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   await text.fill("A second idea");
   await expect(sendButton).toBeDisabled();
   await text.fill("");
-  // The Stop comes after the CLI of the send started. A Stop before that start leaves the run going (reported with WP-TU2).
-  await expect.poll(async () => (await runArgv())?.stdin.includes("- Mode: instruct") ?? false, { timeout: 30_000 }).toBe(true);
 
-  // 4. Stop: the task waits as before, and the text is back in the box.
+  // 4. Stop at once, mostly before the CLI of the send starts: the task waits as before, and the text is back in the box.
   await more(page, "Stop");
   await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 60_000 });
   await expect(page.getByText("Stopped. Your instructions changed nothing. The text is back in the box.").first()).toBeVisible();
@@ -188,6 +188,8 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   expect(await taskRemote()).toEqual(before);
 
   // 5. A colleague changes the README title on the release base. The second send changes the code, and its end checks the base.
+  // The fake CLI takes its seq entry by the count of earlier CLI runs. A send that stopped before its CLI started made none.
+  await control("claude", { ...CLAUDE, seq: { ...CLAUDE.seq, "implement:instruct": [WELL] } });
   await taskBase({ move: { branch: RELEASE, files: { "README.md": "# Sample from the release branch\n" } } });
   await sendButton.click();
   await expect(status(page)).toHaveText(`${RELEASE} has 1 new commit since the branch point.`, { timeout: 180_000 });
