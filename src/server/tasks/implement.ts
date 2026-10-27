@@ -772,7 +772,9 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     const id =
       i.step ??
       insertStep(db, { task: i.task, part: i.part.id, kind: i.mode, attempt: i.attempt, item: i.item, state: "cancelled" }, now());
-    endStep(db, id, "cancelled", { notes: ["The build stopped before the step started."] }, now());
+    const note =
+      i.mode === "instruct" || i.mode === "resolve" ? "Stopped before Claude started." : "The build stopped before the step started.";
+    endStep(db, id, "cancelled", { notes: [note] }, now());
     return { status: 409, stopped: true };
   }
   return i.review.taskRun(db, start);

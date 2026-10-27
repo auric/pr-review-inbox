@@ -4,7 +4,7 @@
 // docs/plans/review-v2/spec.md sections 6.18.1 and 6.18.2 (WP-TU1, AC-B53 to AC-B57): "Tell Claude" on a built small task part. The
 // fake CLI writes real files in the part worktree, a bun script is the test command, and a temp bare remote holds the repository.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { taskDto } from "../../src/server/tasks/tasks";
@@ -141,9 +141,9 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
   // The windows between the send and the CLI start. git ls-files --ignored runs in startStep before the run takes the slot. The first
   // `auth status` is the check of the run in the slot (jobs.ts implementSteps), the second one the check of runner.run before the spawn.
   const WINDOWS = [
-    { name: "before the run takes the slot", argv: ["ls-files", "--ignored"], nth: 1, runs: [] },
-    { name: "after the run takes the slot", argv: ["auth", "status"], nth: 1, runs: [{ status: "cancelled" }] },
-    { name: "in the runner before the spawn", argv: ["auth", "status"], nth: 2, runs: [{ status: "cancelled" }] },
+    { name: "before the run takes the slot", argv: ["ls-files", "--ignored"], nth: 1, runs: [], notes: ["Stopped before Claude started."] },
+    { name: "after the run takes the slot", argv: ["auth", "status"], nth: 1, runs: [{ status: "cancelled" }], notes: [] },
+    { name: "in the runner before the spawn", argv: ["auth", "status"], nth: 2, runs: [{ status: "cancelled" }], notes: [] },
   ];
   for (const w of WINDOWS)
     test(
@@ -173,7 +173,7 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
         const row = s.steps()[0];
         expect(row?.state).toBe("cancelled");
         expect(row?.detail.instruct).toMatchObject({ text: "Add the flag.", result: "stopped", committed: false });
-        expect(row?.detail.notes.at(-1)).toBe("Stopped. Your instructions changed nothing. The text is back in the box.");
+        expect(row?.detail.notes).toEqual([...w.notes, "Stopped. Your instructions changed nothing. The text is back in the box."]);
         expect(s.part().head).toBe(head);
         expect(taskDto(s.db, s.t()).canInstruct).toBe(true);
         expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the flag." }).status).toBe(202);
@@ -213,6 +213,57 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
       await s.loop.idle(s.task);
       expect(dto().needsBase).toEqual({ reason: "The parser of the base is needed." });
       expect(dto().bases[0]?.newCommits).toBe(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.18.5: a send runs the base check at its end; the last change notice comes after the driver leaves, also after a failed check",
+    async () => {
+      const s = await builtTask({ seq: { "implement:instruct": [{ implement: implement() }, { writes: [MORE] }] } });
+      const seen: boolean[] = [];
+      const broadcast = s.live.broadcast;
+      s.live.broadcast = (event, data) => {
+        if (event === "changed" && (data as { tasks?: number[] }).tasks?.includes(s.task)) seen.push(s.loop.running(s.task));
+        broadcast(event, data);
+      };
+      // A send without a changed file ends at once. The check at the driver end still sees the new base commit.
+      await remoteCommit(s.r, "main", { "README.md": "new readme\n" });
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Explain the flag." }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect(taskDto(s.db, s.t()).bases[0]?.newCommits).toBe(1);
+      expect(seen.at(-1)).toBe(false);
+      // The remote is gone, so the check fails. The page still gets a notice after the driver leaves.
+      renameSync(s.r.remote, `${s.r.remote}.gone`);
+      seen.length = 0;
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the flag." }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect(s.flow().slice(-4)).toEqual(["instruct:I2:ok", "check:I2:ok", "commit:I2:ok", "review:review:ok"]);
+      expect(seen.at(-1)).toBe(false);
+      expect(taskDto(s.db, s.t()).canInstruct).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.18.5: the check before the PR dialog ignores BASE_CHECK_AGE and sends one change notice",
+    async () => {
+      const s = await builtTask();
+      const seen: number[] = [];
+      const broadcast = s.live.broadcast;
+      s.live.broadcast = (event, data) => {
+        if (event === "changed" && (data as { tasks?: number[] }).tasks?.includes(s.task)) seen.push(s.task);
+        broadcast(event, data);
+      };
+      const first = await s.loop.checkBases(s.db, s.task);
+      expect(first.status === 200 && first.task.bases[0]?.newCommits).toBe(0);
+      await remoteCommit(s.r, "main", { "README.md": "new readme\n" });
+      // A GET within BASE_CHECK_AGE runs no check. The check before the dialog runs.
+      s.loop.baseCheck(s.db, s.task);
+      const r = await s.loop.checkBases(s.db, s.task);
+      expect(r.status === 200 && r.task.bases[0]?.newCommits).toBe(1);
+      expect(seen).toEqual([s.task, s.task]);
+      expect((await s.loop.checkBases(s.db, s.task + 99)).status).toBe(404);
     },
     SLOW,
   );

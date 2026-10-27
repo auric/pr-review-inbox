@@ -144,7 +144,9 @@ export type TaskAction =
   | { kind: "fix"; part: number }
   // spec.md section 6.18.6: a send of the Tell box (the part of the current state), "Update from <base>", and "Undo the update".
   | { kind: "instruct"; text: string }
-  | { kind: "update" | "undo"; part: number };
+  | { kind: "update" | "undo"; part: number }
+  // spec.md section 6.18.5: the base check before the PR dialog.
+  | { kind: "base-check" };
 
 async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
   const param = id$(t.id);
@@ -190,6 +192,8 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       return read(await tasks.parts[":part"].update.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "undo":
       return read(await tasks.parts[":part"].update.undo.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "base-check":
+      return read(await tasks["base-check"].$post({ param }));
   }
 }
 

@@ -160,9 +160,16 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return focus("task-change");
       case "reject-change":
         return t.blocked?.step && send({ kind: "change", step: t.blocked.step, accept: false });
-      case "open-pr":
+      case "open-pr": {
         setPrError(null);
-        return setPrOpen(true);
+        setErrorText(null);
+        // spec.md section 6.18.5: the base check runs before the dialog. A base that moved now shows its row with "Open the PR as is".
+        const moved = (x: TaskDto) => x.bases.some((b) => b.newCommits > 0);
+        return act.mutate(
+          { kind: "base-check" },
+          { onSuccess: (d) => (moved(t) || !moved(d) ? setPrOpen(true) : undefined), onError: () => setPrOpen(true) },
+        );
+      }
       case "show-diff":
         setTab("diff");
         return focus("task-tab-diff");

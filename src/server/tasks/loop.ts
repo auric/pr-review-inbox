@@ -1131,23 +1131,30 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
-  // One driver per task. mode: an instruct step or an update, whose Stop keeps the task state.
-  function start(id: number, f: () => Promise<void>, mode?: Exclude<DriverMode, "build">) {
+  // One driver per task. mode: an instruct step or an update, whose Stop keeps the task state. spec.md section 6.18.5: a driver ends at a
+  // waiting state, so the base check runs before the driver leaves. The change notice comes after it, so a page reads working false.
+  function start(db: Database, id: number, f: () => Promise<void>, mode?: Exclude<DriverMode, "build">) {
     if (drivers.has(id) || closing) return false;
     if (mode) modes.set(id, mode);
-    const p = f().finally(() => {
-      if (drivers.get(id) !== p) return;
-      drivers.delete(id);
-      modes.delete(id);
-      stopping.delete(id);
-    });
+    const p = f()
+      .then(async () => {
+        if (!closing && !stopping.has(id)) await refreshBases(db, id);
+      })
+      .catch((e) => log(`Task ${id}: the driver end failed: ${noUrl((e as Error).message)}`))
+      .finally(() => {
+        if (drivers.get(id) !== p) return;
+        drivers.delete(id);
+        modes.delete(id);
+        stopping.delete(id);
+        changed(id);
+      });
     drivers.set(id, p);
     return true;
   }
 
   // points: the part whose listed points the driver fixes. Absent: the build of the next part.
   function kick(db: Database, id: number, reset = false, points?: number) {
-    start(id, () => (points === undefined ? drive(db, id, reset) : drivePoints(db, id, points)));
+    start(db, id, () => (points === undefined ? drive(db, id, reset) : drivePoints(db, id, points)));
   }
 
   // ---------- Tell Claude and Update from the base branch (spec.md section 6.18) ----------
@@ -1174,7 +1181,7 @@ export function createLoop(opts: LoopOptions) {
   };
 
   // spec.md section 6.18.5, Base check of the current part. It stores the counts for the Task view. A failed read keeps the last
-  // result.
+  // result. The caller sends the change notice after the check, also after a failure.
   async function refreshBases(db: Database, id: number): Promise<BaseMove[]> {
     const t = taskRow(db, id);
     const part = t && (t.state === "implementing" || t.state === "ready") ? currentPart(db, t) : null;
@@ -1192,9 +1199,19 @@ export function createLoop(opts: LoopOptions) {
       out.map((m) => ({ taskRepo: m.taskRepo, newCommits: m.newCommits })),
       now(),
     );
-    changed(id);
     return out;
   }
+  // A base check outside a driver. Each end sends one change notice.
+  const check = (db: Database, id: number) => {
+    const p = refreshBases(db, id)
+      .catch((e) => log(`Task ${id}: the base check failed: ${noUrl((e as Error).message)}`))
+      .finally(() => {
+        checking.delete(id);
+        changed(id);
+      });
+    checking.set(id, p);
+    return p;
+  };
 
   // spec.md section 6.18.4, Restart: an update that ran at the last stop (recoverTasks marked it). In each repository its rebase or merge
   // is aborted, and the repository goes back to its head before the update.
@@ -1257,7 +1274,6 @@ export function createLoop(opts: LoopOptions) {
       await ownReview(c);
       patchStep(db, row, { instruct: { ...info, result: "done", committed: true } });
       changed(id);
-      await refreshBases(db, id);
     } catch (e) {
       await endInstruct(db, id, row, info, c, e);
     }
@@ -1421,7 +1437,6 @@ export function createLoop(opts: LoopOptions) {
       // Q57: Claude wrote code in a resolve step, so the own review runs.
       phase = "review";
       if (k.green && resolved) await ownReview(c);
-      await refreshBases(db, id);
     } catch (e) {
       await endUpdate(db, id, row, c, pre, label, phase, e);
     }
@@ -1686,7 +1701,7 @@ export function createLoop(opts: LoopOptions) {
         return row;
       })();
       if (again === null) kick(db, id, true);
-      else start(id, () => driveInstruct(db, id, again), "instruct");
+      else start(db, id, () => driveInstruct(db, id, again), "instruct");
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -1815,7 +1830,7 @@ export function createLoop(opts: LoopOptions) {
         setBlocked(db, { task: id, version: t.version }, null, now());
         return r;
       })();
-      start(id, () => driveInstruct(db, id, row), "instruct");
+      start(db, id, () => driveInstruct(db, id, row), "instruct");
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -1847,7 +1862,7 @@ export function createLoop(opts: LoopOptions) {
         setBlocked(db, { task: id, version: again.version }, null, now());
         return r;
       })();
-      start(id, () => driveUpdate(db, id, partId, row), "update");
+      start(db, id, () => driveUpdate(db, id, partId, row), "update");
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -1900,22 +1915,26 @@ export function createLoop(opts: LoopOptions) {
       if (closing || checking.has(id) || drivers.has(id) || (last && now() - last.at < BASE_CHECK_AGE_MS)) return;
       if (!t || (t.state !== "implementing" && t.state !== "ready")) return;
       setBaseMoves(db, id, last?.moves ?? [], now());
-      const p = refreshBases(db, id)
-        .catch((e) => log(`Task ${id}: the base check failed: ${noUrl((e as Error).message)}`))
-        .finally(() => checking.delete(id));
-      checking.set(id, p);
+      check(db, id);
+    },
+
+    // POST /api/tasks/:id/base-check (spec.md section 6.18.5): the base check before the PR dialog, without the BASE_CHECK_AGE limit. A
+    // running check gives its result. A working driver runs its own check at its end.
+    async checkBases(db: Database, id: number): Promise<TaskResult> {
+      if (!taskRow(db, id)) return { status: 404, error: "Task not found." };
+      if (!closing && !drivers.has(id)) await (checking.get(id) ?? check(db, id));
+      return { status: 200, task: dto(db, id) };
     },
 
     // The first open of the database: the updates that a restart stopped (spec.md section 6.18.4, Restart).
     recover(db: Database) {
       for (const { task } of db.query(Q.restartTasks).all() as { task: number }[])
-        start(task, async () => {
+        start(db, task, async () => {
           try {
             await recoverUpdates(db, task);
           } catch (e) {
             log(`Task ${task}: could not reset the update that a restart stopped: ${noUrl((e as Error).message)}`);
           }
-          changed(task);
         });
     },
 

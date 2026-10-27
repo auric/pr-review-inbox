@@ -3,7 +3,8 @@
 
 // docs/plans/review-v2/spec.md section 6.18 (WP-TU2): "Tell Claude" and "Update from <base>" in the browser. A small task on the
 // release base release/2.1: the box sends with Ctrl+Enter, waits while the step runs, and gets its text back after Stop. A second send
-// changes the code while the release base moved, so the view offers "Update from release/2.1". After the PR opens, the fake PR reports
+// changes the code. Then the release base moves, so "Open the PR" checks the base and offers "Update from release/2.1" instead of the
+// dialog. After the PR opens, the fake PR reports
 // conflicts, and the update stops at a conflict that the resolve step leaves. Each screen has at most one primary button (AC-UX1).
 // Runs against serve.ts only: the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote.
 import { test as base, expect, type Page } from "@playwright/test";
@@ -187,20 +188,28 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   // The words "push" and "rebase" moved nothing on the server.
   expect(await taskRemote()).toEqual(before);
 
-  // 5. A colleague changes the README title on the release base. The second send changes the code, and its end checks the base.
-  // The fake CLI takes its seq entry by the count of earlier CLI runs. A send that stopped before its CLI started made none.
+  // 5. The second send changes the code. The fake CLI takes its seq entry by the count of earlier CLI runs. A send that stopped before
+  // its CLI started made none.
   await control("claude", { ...CLAUDE, seq: { ...CLAUDE.seq, "implement:instruct": [WELL] } });
-  await taskBase({ move: { branch: RELEASE, files: { "README.md": "# Sample from the release branch\n" } } });
   await sendButton.click();
-  await expect(status(page)).toHaveText(`${RELEASE} has 1 new commit since the branch point.`, { timeout: 180_000 });
+  const groups = page.locator("[data-send]");
+  await expect(groups).toHaveCount(2);
+  await expect(groups.first()).toContainText(/Done: 1 file changed\. Checks green\./, { timeout: 180_000 });
+  await expect(primary(page)).toHaveText("Open the PR");
+  await expect(primary(page)).toBeEnabled();
+
+  // A colleague changes the README title on the release base. "Open the PR" checks the base first (spec.md section 6.18.5): no dialog
+  // opens, and the row offers the update with "Open the PR as is" in More.
+  await taskBase({ move: { branch: RELEASE, files: { "README.md": "# Sample from the release branch\n" } } });
+  await primary(page).click();
+  await expect(status(page)).toHaveText(`${RELEASE} has 1 new commit since the branch point.`, { timeout: 60_000 });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(primary(page)).toHaveCount(1);
   await expect(primary(page)).toHaveText(`Update from ${RELEASE}`);
   expect(Object.keys((await taskRemote()).heads).filter((b) => b.startsWith("task/"))).toEqual([]);
 
   // The Log tab: one group per send with its text, its result, and its steps (AC-B57). The commit opens the Diff tab.
   await page.getByRole("tab", { name: "Log" }).click();
-  const groups = page.locator("[data-send]");
-  await expect(groups).toHaveCount(2);
   await expect(groups.first()).toContainText(ASK);
   await expect(groups.first()).toContainText(/Done: 1 file changed\. Checks green\./);
   await expect(groups.nth(1)).toContainText("Stopped");

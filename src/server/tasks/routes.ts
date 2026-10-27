@@ -246,6 +246,11 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         const { id, part } = c.req.valid("param");
         return answer(c, await prs.open(db, id, part, c.req.valid("json")));
       })
+      // spec.md section 6.18.5: the base check before the PR dialog. It reads the remote only.
+      .post("/tasks/:id/base-check", idParam, async (c) => {
+        const db = openDb();
+        return db ? answer(c, await loop.checkBases(db, c.req.valid("param").id)) : c.json(unconfigured, 409);
+      })
       // spec.md section 6.18.6: "Tell Claude". The text goes to Claude only; the app never reads it for commands.
       .post(
         "/tasks/:id/instructions",
