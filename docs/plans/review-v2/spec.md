@@ -1297,7 +1297,7 @@ part state self_reviewed         -> primary "Open PR for part k of n" (or open a
 
 - Checks: the app runs each command of kind build, test, and lint in the order of commands_json. The cwd is repo/. The env is the scrubbed env plus CI=1. HOME is a temp folder when isolate_home is on. Each command has CHECK_TIMEOUT. Exit 0 for all commands is green. The step keeps each command's exit code, time, and the last 64 KB of output.
 - Scoped check (checks.ts scopedCommands): after a task, the app narrows the one approved test command to the Run line of the task. It knows bun test, pytest (also `python -m pytest` and `uv run pytest`), jest, `vitest run`, `go test`, `cargo test`, and ctest. The approved argv must hold flags only (go test: also `./...`; ctest: any flag values) and no test filter of its own. A Run line adds only test files and test names: files as the runner's path filter, names as its name filter (pytest `-k`, jest and vitest `-t`, go `-run '^(A|B)$'`, ctest `-R '^(A|B)$'`, cargo one command per name). go test maps a file to its package folder only when no later task can name a test in it. ctest and cargo take names only. A refused Run line runs the approved command without the test files of the later tasks: bun `--path-ignore-patterns`, pytest `--ignore`, vitest `--exclude`. jest has no such option, because `--testPathIgnorePatterns` replaces the configured list. Else the step is skipped with a note, and the full checks at the end of the part gate the tests.
-- Own review: profile = the PR brief default profile of the repository, else general. Intent = task.md plus the plan files as context/task.md, and the included files in context/attachments/. The minor points stay listed under the part. "Fix these too" starts one fix step with them.
+- Own review: profile = the profile of the task (section 6.19.1), with the verify phase on. Intent = task.md plus the plan files as context/task.md, and the included files in context/attachments/. The minor points stay listed under the part. "Fix these too" starts one fix step with them.
 - Commit: `git add -A` in the worktree, then `git commit -F -` with the isolated git config, `core.hooksPath` empty, and the user's name and email. The commit never runs hooks.
 - Budgets: the part shows time, turns, and the usage that the CLI reports. Over PART_TIME: blocked budget with "Needs you: part 2 used its 120 min. Continue with 60 more min?" A cost limit (settings_json.partCost) applies only when the result events report a cost (Gate B19). Else the UI says "Cost is not reported by your CLI." and only time and turns limit the part.
 - Spec change: a step that changes a file under spec_dir blocks with spec_change. "Review the change" shows the word diff. Accept keeps the commit. While the spec PR is open, the change goes to the spec branch. After the spec PR merged, the change goes to the current part branch. The part PR text then gets the line "This PR also changes the spec: <files>." More offers "Ask colleagues to review the spec change first". It opens a separate spec-change PR from the target branch. The part waits until that PR passes the spec gate.
@@ -1344,7 +1344,8 @@ Section 6.16.10 adds the reads for the base branch, the branch search, the write
 
 | Route | Body or query | Result |
 |---|---|---|
-| POST /api/tasks | `{project, repo, key: /^[A-Z][A-Z0-9_]+-[0-9]+$/, originPr?: id, files?: attId[]}` (section 6.16.3 drops `target`; section 6.17.4 adds `files`) | 201 TaskDto, interview started; 200 with the open task of the same key |
+| POST /api/tasks | `{project, repo, key: /^[A-Z][A-Z0-9_]+-[0-9]+$/, originPr?: id, files?: attId[], profile?: profileId}` (section 6.16.3 drops `target`; section 6.17.4 adds `files`; section 6.19.1 adds `profile`) | 201 TaskDto, interview started; 200 with the open task of the same key |
+| GET /api/tasks/profile | `?project&repo` | `{profile}`: the preselected profile of the Build form (section 6.19.1) |
 | GET /api/tasks | `?state=open|all` | TaskRowDto[] |
 | GET /api/tasks/:id | | TaskDto (parts, open questions, recent steps, docs, gates, budgets) |
 | POST /api/tasks/:id/answers | `{version, answers: [{question: id, choice?: int, text?: string max 2000}], recommended?: true}` | 202, next run started |
@@ -1368,8 +1369,8 @@ Section 6.17.4 adds POST /api/tasks/issue and PUT /api/tasks/:id/files/:att. Sec
 
 ### 6.12 UI: the Task view
 
-- Start: the Jira chip menu item "Build this task" (one click: POST /api/tasks, then the Task view). The sidebar view "Tasks" with "Build a Jira task" (key and "Main repository", picked from the known ones, then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16).
-- Route `/tasks/:id`. Layout: a header (key, title, size line), the step strip, one status sentence, one primary button, a More menu, then the content of the current step. Tabs under the content, all secondary: Questions, Attachments (section 6.17.1), Spec, Spec PR (medium, large), Plan, Log, Diff.
+- Start: the Jira chip menu item "Build this task" (one click: POST /api/tasks, then the Task view). The sidebar view "Tasks" with "Build a Jira task" (key, "Main repository", picked from the known ones, and "Profile" (section 6.19.1), then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16).
+- Route `/tasks/:id`. Layout: a header (key, title, size line, repository line, profile name), the step strip, one status sentence, one primary button, a More menu, then the content of the current step. Tabs under the content, all secondary: Questions, Attachments (section 6.17.1), Spec, Spec PR (medium, large), Plan, Log, Diff.
 - Step strip per size: small "Questions › Plan › Build › Done"; medium "Questions › Plan › Spec review › Build › Done"; large "Questions › Plan › Spec review › Build parts (2 of 4) › Done". The current step is bold with aria-current="step".
 
 Primary button per state:
@@ -1860,6 +1861,38 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 12. AC-B63. With a submodule on develop and the main repository on release/2.1, each updates from its own base, the submodule first, and the parent gitlink points at the new submodule head. A gitlink conflict resolves to that head when the new parent base points at an ancestor, else the update aborts with the pointer sentence. A failed submodule update leaves the parent unchanged.
 13. AC-B64. An app restart during an update aborts the rebase or the merge and resets each repository to its preHead.
 14. AC-B65. Red checks after an update block with "Undo the update". Undo restores the preHeads and base_commit. After a push, Undo returns 409.
+
+### 6.19 The profile and the tools of a task
+
+#### 6.19.1 Profile
+
+- task.profile (migration 038) holds the profile ID that the user picked. A task made before it holds NULL.
+- The Build form has a "Profile" select under "Main repository". It lists the review profiles and no Explain profile. GET /api/tasks/profile preselects the profile of the newest task of the repository, else general, else the first review profile. "Build this task" on a chip sends no profile, so the server uses the same preselection.
+- POST /api/tasks refuses an unknown profile and an Explain profile with 400 "Pick a review profile from the list. An Explain profile cannot build a task." It creates no task then.
+- Each step reads the profile of its task at its start (taskProfileId), as a review run reads its profile at its start. The run row keeps the profile ID, name, and revision of that step. A profile edit reaches the next step, never a running one. A deleted profile falls back to general, else the first review profile.
+- The Task view header shows "Profile: <name>" after the repository line.
+
+#### 6.19.2 Tools of each step
+
+| Step | Skills | MCP |
+|---|---|---|
+| interview, spec | ./skills of the run folder, listed in the rl-main prompt (skillLines) | the profile servers, the git MCP of the snapshot, CodeGraph of the snapshot |
+| own review | as a review run | as a review run |
+| tests, implement, fix, instruct, resolve | context/skills of the part folder, listed in stdin with the path ./context/skills | the profile servers, the git MCP of the task cache (HEAD the worktree head, BASE and TARGET the task base), CodeGraph of repo/ of the part |
+
+- An implement run keeps `--restricted`, `--strict-mcp-config`, and `--tools Read,Grep,Glob,Edit,Write`. It adds `--mcp-config` (a file in <dataDir>/runs/<run>/app, outside the cwd), the ticked tools in `--allowedTools`, and the unticked tools of each picked server in `--disallowedTools`. No shell, no Agent, and no web tool.
+- writeContext writes context/ again before each step. The run copies the skills into context/skills and adds their bytes to the context map, so the path check accepts them and fails a step that changes them. The untrusted-data line of the stdin excepts ./context/skills.
+- A picked CodeGraph server indexes repo/ of the part before each step: a sync from the codegraph cache of the repository, else an init. The app deletes repo/.codegraph after the run and before the path check. The cache keeps the index for the next step.
+- A missing always-use skill fails the step with the review run error. An unread always-use skill adds a coverage line.
+
+#### 6.19.3 Acceptance criteria
+
+1. AC-B66. GET /api/tasks/profile gives general for a repository with no task, and the profile of the newest task after a task with another profile.
+2. AC-B67. POST /api/tasks with profile explain or an unknown ID gives 400 and creates no task. With a review profile, TaskDto.profile holds it, and a task without a profile holds general.
+3. AC-B68. The interview and the spec run of a task with a custom profile get its model, its skills in ./skills, and the skill lines in the rl-main prompt. Their run rows hold its ID and name.
+4. AC-B69. The tests, implement, and fix steps and the own review of a part get the model and the skills of the task profile: the implement modes in context/skills with the ./context/skills lines in stdin, the own review in ./skills.
+5. AC-B70. An implement run argv holds `--restricted`, `--mcp-config` with the git MCP of the task cache, the ticked tools in `--allowedTools`, and the unticked tools in `--disallowedTools`. The CodeGraph server has `--path` repo/ of the part. The first step runs init and the second runs sync in repo/. repo/.codegraph is gone after each step, and the path check passes.
+6. AC-B71. The Build form preselects the profile of the newest task of the repository, and the created task shows "Profile: <name>" in its header (e2e).
 
 ## 7. UX rules check
 

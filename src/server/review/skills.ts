@@ -150,7 +150,7 @@ function copyOne(s: Skill, to: string): CopiedSkill {
 }
 
 // One line per skill: line breaks in the front matter text become spaces.
-function indexText(skills: Skill[]): string {
+function indexText(skills: Skill[], root: string): string {
   const one = (s: string) => s.replace(/\s+/g, " ").trim();
   return [
     "# Skills",
@@ -159,7 +159,7 @@ function indexText(skills: Skill[]): string {
     "",
     ...skills.map((s) => {
       const d = one(s.description).slice(0, MAX_INDEX_DESCRIPTION);
-      return `- ./skills/${skillFolder(s.id)}/SKILL.md: ${one(s.name)}${d ? `. ${d}` : ""}`;
+      return `- ./${root}/${skillFolder(s.id)}/SKILL.md: ${one(s.name)}${d ? `. ${d}` : ""}`;
     }),
     "",
   ].join("\n");
@@ -192,9 +192,14 @@ export function alwaysProblems(ids: string[], config = claudeConfigDir()): strin
   });
 }
 
-// dest: <work>/skills. gaps: one line for each listed skill that the run does not get.
-// Above SKILL_INDEX_AFTER copied skills, dest also gets SKILL_INDEX.
-export function copySkills(ids: string[], dest: string, config = claudeConfigDir()): { copied: CopiedSkill[]; gaps: string[] } {
+// dest: <work>/skills, or <part folder>/context/skills for an implement run. root: dest from the run cwd, for the index.
+// gaps: one line for each listed skill that the run does not get. Above SKILL_INDEX_AFTER copied skills, dest also gets SKILL_INDEX.
+export function copySkills(
+  ids: string[],
+  dest: string,
+  config = claudeConfigDir(),
+  root = "skills",
+): { copied: CopiedSkill[]; gaps: string[] } {
   const copied: CopiedSkill[] = [];
   const gaps: string[] = [];
   if (!ids.length) return { copied, gaps };
@@ -224,6 +229,6 @@ export function copySkills(ids: string[], dest: string, config = claudeConfigDir
       gaps.push(`Skill ${id}: copy failed (${(e as Error).message})`);
     }
   }
-  if (listed.length > SKILL_INDEX_AFTER) writeFileSync(join(dest, SKILL_INDEX), indexText(listed));
+  if (listed.length > SKILL_INDEX_AFTER) writeFileSync(join(dest, SKILL_INDEX), indexText(listed, root));
   return { copied, gaps };
 }

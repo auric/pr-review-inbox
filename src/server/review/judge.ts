@@ -183,12 +183,13 @@ function unavailable(o: RunOutcome, servers: string[], gaps: string[]): string[]
 }
 
 // rl-main calls have no parent. stream.ts gives Read targets with "/" and relative to the run folder when the path is inside it.
-export function unreadAlways(o: RunOutcome, always: { id: string; folder: string }[]): string[] {
+// root: the skills folder from the run folder (skillLines).
+export function unreadAlways(o: RunOutcome, always: { id: string; folder: string }[], root = "skills"): string[] {
   const read = new Set(
     o.events.filter((e) => e.tool === "Read" && e.parent === null && e.status === "ok").map((e) => e.target.replace(/^(\.\/)+/, "")),
   );
   return always
-    .filter((s) => !read.has(`skills/${s.folder}/SKILL.md`))
+    .filter((s) => !read.has(`${root}/${s.folder}/SKILL.md`))
     .map((s) => `Skill ${s.id} (always use): the model did not read SKILL.md.`);
 }
 

@@ -330,7 +330,19 @@ async function main() {
       if (f.endsWith(".md") && statSync(join(ctx, f)).isFile()) context[f.replaceAll("\\", "/")] = readFileSync(join(ctx, f), "utf8");
   const att = join(ctx, "attachments");
   const attachments = run && existsSync(att) ? readdirSync(att).sort() : [];
-  record({ argv: args, env: process.env, cwd: process.cwd(), stdin, pid: process.pid, context, attachments });
+  // The files of ./skills, and the servers of --mcp-config. The run folder and the MCP file go away after the run.
+  const sk = join(process.cwd(), "skills");
+  const skills =
+    run && existsSync(sk)
+      ? readdirSync(sk, { recursive: true, encoding: "utf8" })
+          .map((f) => f.replaceAll("\\", "/"))
+          .sort()
+      : [];
+  const mcpFile = run ? flag("--mcp-config") : undefined;
+  const mcp = mcpFile ? (JSON.parse(readFileSync(mcpFile, "utf8")) as { mcpServers: Record<string, unknown> }).mcpServers : null;
+  const agentsFile = run ? flag("--agents") : undefined;
+  const agents = agentsFile ? (JSON.parse(readFileSync(agentsFile, "utf8")) as Record<string, { prompt: string }>) : null;
+  record({ argv: args, env: process.env, cwd: process.cwd(), stdin, pid: process.pid, context, attachments, skills, mcp, agents });
 
   if (args[0] === "--version") {
     console.log(s.version ?? "2.1.295 (Claude Code)");
@@ -408,9 +420,15 @@ async function main() {
   const rewrite = (l: string) => {
     const e = JSON.parse(l);
     // A resume or an implement run with --tools and --strict-mcp-config: init lists those tools and StructuredOutput. Gates B16 and B17
-    // check the real CLI.
-    if (e.type === "system" && e.subtype === "init" && (resume !== undefined || kind === "implement"))
-      return JSON.stringify({ ...e, tools: [...(flag("--tools") ?? "").split(",").filter(Boolean), "StructuredOutput"], mcp_servers: [] });
+    // check the real CLI. An implement run with --mcp-config lists each server of that file as connected.
+    if (e.type === "system" && e.subtype === "init" && (resume !== undefined || kind === "implement")) {
+      const servers = kind === "implement" && mcp ? Object.keys(mcp) : [];
+      return JSON.stringify({
+        ...e,
+        tools: [...(flag("--tools") ?? "").split(",").filter(Boolean), "StructuredOutput"],
+        mcp_servers: servers.map((name) => ({ name, status: "connected" })),
+      });
+    }
     // Gate B8: init lists the agent tool as Task. The real CLI lists it only when --tools names Agent.
     if (e.type === "system" && e.subtype === "init" && Array.isArray(e.tools) && noTools)
       return JSON.stringify({ ...e, tools: e.tools.filter((t: unknown) => t === "StructuredOutput"), mcp_servers: [] });

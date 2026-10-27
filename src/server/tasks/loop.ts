@@ -32,7 +32,7 @@ import {
 } from "../../shared/task";
 import type { Live } from "../live";
 import { log } from "../log";
-import { DEFAULT_PROFILE, type Profile, profileOf } from "../review/catalog";
+import type { Profile } from "../review/catalog";
 import { identity } from "../review/clone";
 import { fold } from "../review/edits";
 import type { ReviewJobs, TaskReviewStart } from "../review/jobs";
@@ -81,6 +81,7 @@ import {
   type TaskRow,
   taskDto,
   taskFilesOf,
+  taskProfile,
   taskRow,
   taskSettingsOf,
   undoTarget,
@@ -973,7 +974,7 @@ export function createLoop(opts: LoopOptions) {
       base: t.base_commit,
     });
     const clone = db.query(Q.clone).get({ project: t.project, repo: t.repo }) as { path: string } | null;
-    const p = profileOf(settings.profiles(), DEFAULT_PROFILE);
+    const p = taskProfile(settings.profiles(), t);
     return {
       db,
       id: t.id,

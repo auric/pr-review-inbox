@@ -1238,14 +1238,19 @@ const taskReviewers = z.array(z.string().trim().min(1).max(255)).max(MAX_TASK_RE
 const taskSize = z.enum(TASK_SIZES);
 
 // POST /api/tasks. 201 with the new task, or 200 with the open task of the same key. files: the attachment IDs that Claude gets
-// (spec.md section 6.17). Absent: every file that can go to runs when the setting askAttachments is off, else none.
+// (spec.md section 6.17). Absent: every file that can go to runs when the setting askAttachments is off, else none. profile: the
+// review profile of every step (spec.md section 6.2). Absent: the preselection of GET /api/tasks/profile.
 export const taskCreateInput = z.object({
   project: repoName,
   repo: repoName,
   key: z.string().regex(TASK_KEY),
   originPr: positiveInt.optional(),
   files: z.array(z.string().regex(ATT_ID)).max(200).optional(),
+  profile: profileId.optional(),
 });
+// GET /api/tasks/profile: the profile that the Build form preselects for a repository (spec.md section 6.2).
+export const taskProfileInput = z.object({ project: repoName, repo: repoName });
+export type TaskProfileDto = { profile: ProfileId };
 // POST /api/tasks/issue: the issue of a key before the task exists (spec.md section 6.17). One Jira read on the user's click.
 export const taskIssueInput = z.object({ key: z.string().regex(TASK_KEY) });
 export type TaskIssueDto = { key: string; summary: string; status: string | null; attachments: AttachmentMeta[] };
@@ -1454,6 +1459,8 @@ export type TaskDto = TaskRowDto & {
   plan: TaskPlanDto | null;
   strip: { steps: string[]; current: number };
   originPr: number | null;
+  // The stored profile ID (spec.md section 6.2). null: a task made before profiles. taskProfileId gives the profile of the steps.
+  profile: ProfileId | null;
   stoppedFrom: TaskState | null;
   sizeBy: SizeSource | null;
   targetBranch: string;

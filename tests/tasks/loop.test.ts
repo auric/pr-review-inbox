@@ -6,14 +6,14 @@
 // remote holds the repository. No test starts the real CLI, reaches a forge, or touches the user's clone or data folder.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { store, taskFileDir } from "../../src/server/context/attachments";
 import { createLive } from "../../src/server/live";
-import { DEFAULT_PROFILE, profileOf } from "../../src/server/review/catalog";
+import { DEFAULT_PROFILE, profileOf, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import { git } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
@@ -34,7 +34,7 @@ import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
 import { recoverTasks, taskRow } from "../../src/server/tasks/tasks";
 import { openWorktree, status } from "../../src/server/tasks/worktree";
-import type { RunConflict, TaskDto } from "../../src/shared/dto";
+import type { ProfileInput, RunConflict, TaskDto } from "../../src/shared/dto";
 import { specResult, type TaskBlocked } from "../../src/shared/task";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { logOf, pngOf } from "../support/fake-jira";
@@ -121,7 +121,15 @@ const point = (severity: string) => ({
 });
 const CLEAN = review([]);
 
-type Call = { argv: string[]; cwd: string; stdin: string; context: Record<string, string>; attachments: string[] };
+type Call = {
+  argv: string[];
+  cwd: string;
+  stdin: string;
+  context: Record<string, string>;
+  attachments: string[];
+  skills?: string[];
+  agents?: Record<string, { prompt: string }> | null;
+};
 type Step = { id: number; kind: string; state: string; item: string | null; attempt: number; run: number | null; detail_json: string };
 
 const dirs: string[] = [];
@@ -138,6 +146,10 @@ type Setup = {
   testGlobs?: string[] | null;
   settings?: Record<string, unknown>;
   spec?: typeof SPEC;
+  // The Claude config folder of the runs and the profiles of the settings. profile: the profile of the task row.
+  config?: string;
+  profiles?: ProfileInput[];
+  profile?: string;
   // The approved test command. Default: the bun script CHECK.
   argv?: string[];
 };
@@ -159,7 +171,7 @@ async function setup(o: Setup = {}) {
     },
   });
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: "http://127.0.0.1:9", userSlug: "u", notifications: false });
+  writeConfig(dataDir, { baseUrl: "http://127.0.0.1:9", userSlug: "u", notifications: false, ...(o.profiles && { profiles: o.profiles }) });
   const settings = createSettings({ dir: dataDir, secrets: createSecrets(null), jiraSecrets: createSecrets(null, "jira-token") });
   const live = createLive();
   const events: { event: string; data: unknown }[] = [];
@@ -175,6 +187,7 @@ async function setup(o: Setup = {}) {
     runnerCommand: runner.command,
     repoRemote: async () => ({ url: r.remote, config: [] }),
     listTools: stubListTools,
+    claudeConfigDir: o.config ?? join(root, "no-claude-config"),
   });
   // The first open runs the restart recovery, so it comes before the task rows.
   const db = jobs.open() as Database;
@@ -211,8 +224,9 @@ async function setup(o: Setup = {}) {
       db
         .query(
           `INSERT INTO task (project, repo, key, title, state, size, size_by, target_branch, base_commit, spec_dir, docs_json, estimate_json,
-            settings_json, created_at, updated_at)
-          VALUES ('PROJ', 'repo', $key, $title, 'implementing', 'small', 'claude', 'main', $base, $dir, $docs, $estimate, $settings, $now, $now)
+            settings_json, profile, created_at, updated_at)
+          VALUES ('PROJ', 'repo', $key, $title, 'implementing', 'small', 'claude', 'main', $base, $dir, $docs, $estimate, $settings, $profile,
+            $now, $now)
           RETURNING id`,
         )
         .get({
@@ -223,6 +237,7 @@ async function setup(o: Setup = {}) {
           docs: JSON.stringify(docs),
           estimate: JSON.stringify(plan.estimate),
           settings: JSON.stringify(o.settings ?? {}),
+          profile: o.profile ?? null,
           now,
         }) as { id: number }
     ).id;
@@ -361,6 +376,35 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.part().lines).toBe((await changedLines(w, s.base, s.part().head as string, LOCK_GLOBS)).lines);
       // Live events for the UI.
       expect(s.events.some((e) => e.event === "changed" && JSON.stringify(e.data).includes(`"tasks":[${s.task}]`))).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.2: every Claude step of the part uses the profile of the task: its model and its skills, also in the own review",
+    async () => {
+      const config = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-loop-config-")));
+      dirs.push(config);
+      mkdirSync(join(config, "skills", "tdd"), { recursive: true });
+      writeFileSync(join(config, "skills", "tdd", "SKILL.md"), "---\nname: tdd\ndescription: Test first.\n---\n\nWrite the test first.\n");
+      const strict = { ...SHIPPED_PROFILES[0], id: "strict", name: "Strict", model: "sonnet", skills: ["tdd"] } as ProfileInput;
+      const s = await setup({ config, profiles: [...SHIPPED_PROFILES, strict], profile: "strict" });
+      await s.build();
+      expect(s.part().state).toBe("self_reviewed");
+      const calls = s.runCalls();
+      expect(calls.map(s.modeOf)).toEqual(["tests", "implement", "fix", "review"]);
+      for (const c of calls) expect(c.argv[c.argv.indexOf("--model") + 1]).toBe("sonnet");
+      // The implement modes: the skill sits in context/skills, outside repo/, and the stdin names it there.
+      for (const c of calls.slice(0, 3)) {
+        expect(c.context["skills/tdd/SKILL.md"]).toContain("Write the test first.");
+        expect(c.stdin).toContain("The user chose these skills: ./context/skills/tdd/SKILL.md.");
+      }
+      // The own review: the skill in ./skills of the run folder, named in the rl-main prompt.
+      const own = calls[3] as Call;
+      expect(own.skills).toContain("tdd/SKILL.md");
+      expect(own.agents?.["rl-main"]?.prompt).toContain("The user chose these skills: ./skills/tdd/SKILL.md.");
+      const runs = s.db.query("SELECT DISTINCT profile, profile_name FROM review_run WHERE task = $task").all({ task: s.task });
+      expect(runs).toEqual([{ profile: "strict", profile_name: "Strict" }]);
     },
     SLOW,
   );

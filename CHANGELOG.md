@@ -15,6 +15,8 @@
 ### Build a Jira task
 
 - A new Tasks view in the sidebar lists your tasks with their status, such as "Building part 1 of 1" or "Needs you: tests stay red". "Build a Jira task" there starts a task from a key and a repository. "Build" on a task chip of a pull request starts it in one click. A second click opens the same task.
+- The Build form has a "Profile" select. It starts on the profile of your last task in that repository, else your default profile. Every step of the task uses that profile: its model, its skills, and its MCP tools. The task page shows the profile name in its header. "Build" on a task chip uses the same profile choice.
+- The steps that write code now get the read-only git tools, the skills of the profile, and the MCP tools that you ticked in the profile. A CodeGraph server in the profile indexes the task worktree before each step. They still get no shell and no web tools.
 - Each task has its own page with the steps "Questions › Plan › Build › Done", one sentence that says who must act now, and one main button. The tabs Questions, Spec, Plan, Log, and Diff hold the details. Each step with a run links to its run log.
 - Claude first reads the task and the code, then asks up to 8 questions as a form. Each question says why it matters, and the recommended option starts selected. "Use the recommended answers" sends them all. Claude asks a second round at most once.
 - Claude then writes a short change plan into `specs/<KEY>/plan.md`: the code to change with file and line, the pattern to copy, the tests, and the tasks. A map line that names code that does not exist is marked. You can edit the plan files before the approval. A line of the tasks list that does not parse is named, and the old text stays.

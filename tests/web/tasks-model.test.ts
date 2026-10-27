@@ -14,7 +14,7 @@ import type {
   TaskRowDto,
   TaskStepDto,
 } from "../../src/shared/dto";
-import { stepDetail } from "../../src/shared/task";
+import { stepDetail, taskProfileId } from "../../src/shared/task";
 import {
   branchApproval,
   branchesError,
@@ -119,6 +119,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     plan: null,
     strip: { steps: ["Questions", "Plan", "Build", "Done"], current: 0 },
     originPr: 5,
+    profile: "general",
     stoppedFrom: null,
     sizeBy: null,
     targetBranch: "main",
@@ -964,5 +965,16 @@ describe("the attachments of a task (spec.md section 6.17)", () => {
     expect(fileChoiceState(by("3"), R)).toBe("Downloaded. Claude does not get it.");
     expect(fileChoiceState(by("7"), R)).toBe("Not downloaded. A tick downloads it.");
     expect(fileChoiceState(by("4"), R)).toBe("Listed only: only images, PDFs, and text files go to runs.");
+  });
+});
+
+describe("taskProfileId (spec.md section 6.2)", () => {
+  const p = (id: string, explain = false) => ({ id, explain });
+  test("the stored review profile, else general, else the first review profile; never an Explain profile", () => {
+    expect(taskProfileId([p("general"), p("strict")], "strict")).toBe("strict");
+    expect(taskProfileId([p("general"), p("explain", true)], "explain")).toBe("general");
+    expect(taskProfileId([p("general"), p("strict")], "gone")).toBe("general");
+    expect(taskProfileId([p("general")], null)).toBe("general");
+    expect(taskProfileId([p("explain", true), p("strict")], null)).toBe("strict");
   });
 });

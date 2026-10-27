@@ -62,6 +62,7 @@ import {
   type TaskSize,
   type TaskState,
   taskBlocked,
+  taskProfileId,
   taskSettings,
 } from "../../shared/task";
 import { NoCloneLink } from "../bitbucket/errors";
@@ -71,7 +72,7 @@ import { ContextError, type ContextSource } from "../context/source";
 import { taskFileContext, taskIssue } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
-import { DEFAULT_PROFILE, interviewAgent, profileOf, specAgent } from "../review/catalog";
+import { interviewAgent, type Profile, profileOf, specAgent } from "../review/catalog";
 import { gitEnv } from "../review/git";
 import type { ReviewJobs, TaskRunStart } from "../review/jobs";
 import { type Ending, judgeTask } from "../review/judge";
@@ -238,14 +239,16 @@ export type TaskRow = {
   created_at: number;
   updated_at: number;
   closed_at: number | null;
+  profile: string | null;
 };
 
 const Q = {
   row: "SELECT * FROM task WHERE id = $id",
   open: "SELECT * FROM task WHERE project = $project AND repo = $repo AND key = $key AND state NOT IN ('done', 'failed')",
   list: "SELECT * FROM task WHERE $all OR state NOT IN ('done', 'failed') ORDER BY updated_at DESC, id DESC LIMIT 200",
-  insert: `INSERT INTO task (project, repo, key, title, origin_pr, state, target_branch, spec_dir, issue_json, created_at, updated_at)
-    VALUES ($project, $repo, $key, $title, $origin, $state, $target, $spec_dir, $issue, $now, $now) RETURNING id`,
+  insert: `INSERT INTO task (project, repo, key, title, origin_pr, state, target_branch, spec_dir, issue_json, profile, created_at, updated_at)
+    VALUES ($project, $repo, $key, $title, $origin, $state, $target, $spec_dir, $issue, $profile, $now, $now) RETURNING id`,
+  lastProfile: "SELECT profile FROM task WHERE project = $project AND repo = $repo AND profile IS NOT NULL ORDER BY id DESC LIMIT 1",
   pr: "SELECT id, project, repo, target_branch FROM pull_request WHERE id = $id",
   prTask: "SELECT 1 FROM pr_task WHERE pr = $pr AND key = $key",
   context: "SELECT json FROM task_context WHERE pr = $pr AND key = $key",
@@ -299,6 +302,15 @@ type SettingsRow = {
 };
 
 export const taskRow = (db: Database, id: number) => db.query(Q.row).get({ id }) as TaskRow | null;
+
+// spec.md section 6.2: each step reads the profile of its task at the step start, as a review run reads its profile at its start.
+export const taskProfile = (list: Profile[], t: Pick<TaskRow, "profile">): Profile => profileOf(list, taskProfileId(list, t.profile));
+
+// The profile that the Build form preselects: the profile of the newest task of the repository, else the default profile.
+export function preselectProfile(db: Database, list: Profile[], project: string, repo: string): string {
+  const last = db.query(Q.lastProfile).get({ project, repo }) as { profile: string } | null;
+  return taskProfileId(list, last?.profile ?? null);
+}
 
 // The settings of a repository, with the defaults of spec.md section 6.3 when no row exists (AC-UX4: no setup first).
 export function repoSettings(db: Database, project: string, repo: string): RepoTaskSettingsDto {
@@ -724,6 +736,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
   return {
     ...rowDto(db, t),
     originPr: t.origin_pr,
+    profile: t.profile,
     stoppedFrom: t.stopped_from,
     sizeBy: t.size_by,
     targetBranch: t.target_branch,
@@ -830,7 +843,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     task: taskDto(db, (taskRow(db, t.id) ?? t) as TaskRow),
   });
   const busyResult = (c: RunConflict): TaskResult => ({ status: 409, error: c.error, running: c.running });
-  const profile = () => profileOf(settings.profiles(), DEFAULT_PROFILE);
+  const profile = (t: TaskRow) => taskProfile(settings.profiles(), t);
   const taskFiles = (db: Database, t: TaskRow) => taskFilesOf(db, review.dataDir, t);
   const repoDeps: RepoDeps = {
     dataDir: review.dataDir,
@@ -870,7 +883,7 @@ export function createTaskService(opts: TaskServiceOptions) {
   }
 
   function interviewRun(db: Database, t: TaskRow, round: number): TaskRunStart {
-    const p = profile();
+    const p = profile(t);
     const { files, attachments } = taskFiles(db, t);
     const answers = round > 1 ? answersFile(interviewRows(db, t.id), interviewOf(db, t.id)) : null;
     const max = INTERVIEW_QUESTIONS[Math.min(round, INTERVIEW_QUESTIONS.length) - 1] ?? 0;
@@ -950,7 +963,7 @@ export function createTaskService(opts: TaskServiceOptions) {
   }
 
   function specRun(db: Database, t: TaskRow): TaskRunStart {
-    const p = profile();
+    const p = profile(t);
     const budget = budgetOf(db, t);
     const { files, attachments } = taskFiles(db, t);
     const answers = answersFile(interviewRows(db, t.id), interviewOf(db, t.id));
@@ -1048,6 +1061,9 @@ export function createTaskService(opts: TaskServiceOptions) {
       if (!db.query(Q.prTask).get({ pr: pr.id, key: input.key }))
         return { status: 404, error: "This pull request does not name that task." };
     }
+    const list = settings.profiles();
+    if (input.profile !== undefined && taskProfileId(list, input.profile) !== input.profile)
+      return { status: 400, error: "Pick a review profile from the list. An Explain profile cannot build a task." };
     const busy = review.busy();
     if (busy) return busyResult(busy);
     // The task text: the fetched text of the origin PR, else one Jira fetch on this click (BRIEF 3.6, decision Q4).
@@ -1114,6 +1130,7 @@ export function createTaskService(opts: TaskServiceOptions) {
           target: branch,
           spec_dir: repo.specDir.replaceAll("{key}", input.key),
           issue: pr ? null : JSON.stringify(issue),
+          profile: input.profile ?? preselectProfile(db, list, input.project, input.repo),
           now: fetchedAt,
         }) as { id: number };
         saveMainRepo(db, { id: row.id, project: input.project, repo: input.repo }, branch, null, fetchedAt);

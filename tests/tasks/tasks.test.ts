@@ -6,12 +6,13 @@
 // CLI, the fake Bitbucket, the fake Jira, and a temp git remote. No test starts the real CLI or reaches a forge or Jira.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
+import { SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
@@ -26,6 +27,7 @@ import {
   type InstructionRepoDto,
   MAX_ATTACHMENT_BYTES,
   MAX_PR_ATTACHMENT_BYTES,
+  type ProfileInput,
   RUN_IMAGE_BYTES,
   type RunConflict,
   type TaskConflict,
@@ -50,7 +52,16 @@ const HEADERS = { host: `127.0.0.1:${PORT}`, origin: ORIGIN, "x-rl-session": SES
 const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
 const SUMMARY = "Flush the cache before the write lock";
 
-type Call = { argv: string[]; cwd: string; stdin: string; childPid?: number; context: Record<string, string>; attachments: string[] };
+type Call = {
+  argv: string[];
+  cwd: string;
+  stdin: string;
+  childPid?: number;
+  context: Record<string, string>;
+  attachments: string[];
+  skills?: string[];
+  agents?: Record<string, { prompt: string }> | null;
+};
 
 const dirs: string[] = [];
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -67,7 +78,7 @@ const until = async (f: () => boolean, ms = 20_000) => {
   }
 };
 
-async function setup() {
+async function setup(o: { config?: string; profiles?: ProfileInput[] } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rl-wpb2-"));
   dirs.push(root);
   const remote = await reviewRemote(root, { 2: "source" });
@@ -84,7 +95,7 @@ async function setup() {
     () => jira.stop(),
   );
   const dir = join(root, "data");
-  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
+  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, ...(o.profiles && { profiles: o.profiles }) });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir, secrets, jiraSecrets: createSecrets(null, "jira-token") });
@@ -104,6 +115,7 @@ async function setup() {
     gitRemote: remote.gitRemote,
     repoRemote: async () => ({ url: remote.remote, config: [] }),
     listTools: stubListTools,
+    claudeConfigDir: o.config ?? join(root, "no-claude-config"),
   });
   const app = createApp({ port: PORT, token: SESSION, live, settings, review });
   cleanup.unshift(async () => {
@@ -196,6 +208,47 @@ async function setup() {
 
 const specWith = (o: Record<string, unknown>) => ({ ...echoSpec(), ...o });
 
+describe("the profile of a task (spec.md section 6.2)", () => {
+  test(
+    "the task keeps the picked profile; the interview and the spec run use its model and skills; the next Build form preselects it",
+    async () => {
+      const config = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-task-config-")));
+      dirs.push(config);
+      mkdirSync(join(config, "skills", "tdd"), { recursive: true });
+      writeFileSync(join(config, "skills", "tdd", "SKILL.md"), "---\nname: tdd\ndescription: Test first.\n---\n\nWrite the test first.\n");
+      const strict = { ...SHIPPED_PROFILES[0], id: "strict", name: "Strict", model: "sonnet", skills: ["tdd"] } as ProfileInput;
+      const h = await setup({ config, profiles: [...SHIPPED_PROFILES, strict] });
+      await h.connectJira();
+      const pick = async () => (await h.json<{ profile: string }>("/api/tasks/profile?project=PROJ&repo=repo")).body.profile;
+      expect(await pick()).toBe("general");
+      expect((await h.json("/api/tasks/profile?project=PROJ")).status).toBe(400);
+      const base = { project: "PROJ", repo: "repo", key: ISSUE_KEY, originPr: h.pr };
+      // An Explain profile gives no code, and an unknown profile is no pick.
+      for (const profile of ["explain", "nope"]) expect((await h.create({ ...base, profile })).status).toBe(400);
+      expect(h.db.query("SELECT COUNT(*) AS n FROM task").get()).toEqual({ n: 0 });
+      const c = await h.create({ ...base, profile: "strict" });
+      expect([c.status, c.body.profile]).toEqual([201, "strict"]);
+      await h.settle();
+      expect(await pick()).toBe("strict");
+      const t = await h.recommend(await h.get(c.body.id));
+      expect(t.plan).not.toBeNull();
+      const calls = h.runCalls();
+      expect(calls.length).toBe(2);
+      for (const call of calls) {
+        expect(call.argv[call.argv.indexOf("--model") + 1]).toBe("sonnet");
+        expect(call.skills).toContain("tdd/SKILL.md");
+        expect(call.agents?.["rl-main"]?.prompt).toContain("The user chose these skills: ./skills/tdd/SKILL.md.");
+      }
+      const rows = h.db.query("SELECT kind, profile, profile_name FROM review_run WHERE task = $task ORDER BY id").all({ task: c.body.id });
+      expect(rows).toEqual([
+        { kind: "interview", profile: "strict", profile_name: "Strict" },
+        { kind: "spec", profile: "strict", profile_name: "Strict" },
+      ]);
+    },
+    SLOW,
+  );
+});
+
 describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
   test(
     "AC-B1: Build this task on a chip creates one task and a read-only interview of the target head; a second click opens the same task",
@@ -211,6 +264,7 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
         originPr: h.pr,
         targetBranch: "main",
         specDir: `specs/${ISSUE_KEY}/`,
+        profile: "general",
       });
       const again = await h.create();
       expect([again.status, again.body.id]).toEqual([200, a.body.id]);

@@ -11,11 +11,12 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { TASK_KEY, type TaskCreateInput, type TaskIssueDto, type TaskRowDto } from "../../shared/dto";
+import { type ProfileDto, TASK_KEY, type TaskCreateInput, type TaskIssueDto, type TaskRowDto } from "../../shared/dto";
+import { taskProfileId } from "../../shared/task";
 import { useMinute } from "../shell/ListPane";
 import { ago, type ProjectRepos } from "../shell/model";
 import { askText, boxId, FilePicker, NoAttachments, usePolicy } from "./Attachments";
-import { readIssue } from "./data";
+import { readIssue, useTaskProfile } from "./data";
 import { fileChoices, firstPicks, rowStatus } from "./model";
 
 const kbd = "border border-rule-strong bg-transparent font-mono text-[11px] text-ink-2";
@@ -40,6 +41,8 @@ export function TaskList(props: {
   tracker: string;
   // The short name of the CLI from meta.
   runner: string;
+  // The profiles from meta. The Build form picks the profile of the task from them.
+  profiles: ProfileDto[];
   banner: ReactNode;
   onSelect: (id: number) => void;
   onOpen: (id: number) => void;
@@ -77,7 +80,7 @@ export function TaskList(props: {
             <span className="sr-only"> open tasks</span>
           </span>
         </div>
-        <NewTask repos={props.repos} tracker={props.tracker} runner={props.runner} onCreate={props.onCreate} />
+        <NewTask repos={props.repos} tracker={props.tracker} runner={props.runner} profiles={props.profiles} onCreate={props.onCreate} />
       </header>
       <div>{props.banner}</div>
       <div className="relative overflow-auto overscroll-contain" id="rows" tabIndex={-1}>
@@ -128,17 +131,29 @@ export function TaskList(props: {
 
 // spec.md section 6.17: two steps. "Read the task" reads the summary and the attachments of the key (one tracker read on the click).
 // Then the boxes pick the files that the runner gets, and "Build this task" creates the task. A new key goes back to the first step.
-function NewTask(props: { repos: ProjectRepos[]; tracker: string; runner: string; onCreate: (input: TaskCreateInput) => Promise<void> }) {
+function NewTask(props: {
+  repos: ProjectRepos[];
+  tracker: string;
+  runner: string;
+  profiles: ProfileDto[];
+  onCreate: (input: TaskCreateInput) => Promise<void>;
+}) {
   const all = props.repos.flatMap((g) => g.repos.map((r) => ({ project: g.project, repo: r.repo, key: r.key })));
   const [open, setOpen] = useState(false);
   const [key, setKey] = useState("");
   const [repo, setRepo] = useState("");
+  // The user's pick for the chosen repository. null: the preselection of the server.
+  const [picked, setPicked] = useState<{ repo: string; profile: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [issue, setIssue] = useState<TaskIssueDto | null>(null);
   const [picks, setPicks] = useState<ReadonlySet<string>>(new Set());
   const policy = usePolicy(props.runner, props.tracker);
   const chosen = all.find((r) => r.key === (repo || all[0]?.key));
+  // spec.md section 6.2: an Explain profile gives no code, so the picker leaves it out.
+  const choices = props.profiles.filter((p) => !p.explain);
+  const pre = useTaskProfile(open ? (chosen ?? null) : null).data?.profile;
+  const profile = (picked?.repo === chosen?.key ? picked?.profile : null) ?? pre ?? taskProfileId(props.profiles, null);
   if (!open)
     return (
       <Button variant="outline" size="sm" className="justify-self-start" onClick={() => setOpen(true)}>
@@ -185,6 +200,7 @@ function NewTask(props: { repos: ProjectRepos[]; tracker: string; runner: string
             repo: chosen.repo,
             key: k,
             files: rows.flatMap((r) => (picks.has(r.id) ? [r.id] : [])),
+            profile,
           });
           setKey("");
           close();
@@ -229,6 +245,28 @@ function NewTask(props: { repos: ProjectRepos[]; tracker: string; runner: string
             </option>
           ))}
         </select>
+      </div>
+      <div className="grid gap-1 text-sm">
+        <label htmlFor="new-task-profile" className="text-ink-2">
+          Profile
+        </label>
+        <select
+          id="new-task-profile"
+          name="profile"
+          aria-describedby="new-task-profile-help"
+          className="h-8 rounded-md border border-input bg-pane px-2 text-sm"
+          value={profile}
+          onChange={(e) => chosen && setPicked({ repo: chosen.key, profile: e.target.value })}
+        >
+          {choices.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <p id="new-task-profile-help" className="m-0 text-xs text-muted-foreground">
+          Every step uses its model, skills, and MCP tools.
+        </p>
       </div>
       <p aria-live="polite" className="sr-only">
         {read ? `${read.key}: ${rows.length === 1 ? "1 attachment" : `${rows.length} attachments`}.` : ""}

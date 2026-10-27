@@ -3,7 +3,7 @@
 
 // Server state of the tasks (docs/plans/review-v2/spec.md sections 6.11 and 6.18.6). Keys: ['tasks'], ['task', id],
 // ['task', id, 'diff', head], ['task', id, 'run', run], ['task', id, 'branch', prefix], ['task-settings', project, repo],
-// ['branches', project, repo, filter].
+// ['branches', project, repo, filter], ['task-profile', project, repo].
 // live.ts refetches ['tasks'] and ['task', id] with the keys under it when SSE `changed` names the task.
 import { keepPreviousData, type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -18,6 +18,7 @@ import type {
   TaskDto,
   TaskIssueDto,
   TaskPlanInput,
+  TaskProfileDto,
   TaskRowDto,
 } from "../../shared/dto";
 import type { TaskDoc, TaskSize } from "../../shared/task";
@@ -100,6 +101,15 @@ export const useRepoTaskSettings = (project: string, repo: string) =>
   useQuery({
     queryKey: ["task-settings", project, repo],
     queryFn: async () => read<RepoTaskSettingsDto>(await repoSettings$().$get({ param: { project, repo } })),
+  });
+
+// GET /api/tasks/profile (spec.md section 6.2): the profile that the Build form preselects for a repository. null: no request.
+export const useTaskProfile = (r: { project: string; repo: string } | null) =>
+  useQuery({
+    queryKey: ["task-profile", r?.project, r?.repo],
+    enabled: r !== null,
+    queryFn: async () =>
+      read<TaskProfileDto>(await api.api.tasks.profile.$get({ query: { project: r?.project ?? "", repo: r?.repo ?? "" } })),
   });
 
 // POST /api/tasks: 201 with a new task, or 200 with the open task of the same key.

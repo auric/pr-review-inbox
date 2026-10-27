@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { DEFAULT_PROFILE, profileOf } from "../../src/server/review/catalog";
+import { DEFAULT_PROFILE, DOCS_RULE, profileOf } from "../../src/server/review/catalog";
 import { IMPLEMENT_TOOLS, implementArgs } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
-import { createReviewJobs } from "../../src/server/review/jobs";
+import { createReviewJobs, IMPLEMENT_MCP_LINES } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import {
@@ -34,7 +34,7 @@ import { taskRow } from "../../src/server/tasks/tasks";
 import { headOf, openWorktree, resetWorktree, status, type Worktree } from "../../src/server/tasks/worktree";
 import { implementJsonSchema, STEP_TIME_MS, type TaskBlocked } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
-import { fakeRunner } from "../support/review-fixture";
+import { fakeRunner, stubListTools } from "../support/review-fixture";
 import { taskCache, taskRemote } from "./fixture";
 
 for (const m of ["tasks/implement", "tasks/worktree", "review/claude", "review/jobs", "review/instructions"])
@@ -46,7 +46,16 @@ const FIXTURE = resolve(import.meta.dir, "../../fixtures/claude/b17-write-confin
 const MAX_TURNS_FIXTURE = resolve(import.meta.dir, "../../fixtures/claude/b5-max-turns.jsonl");
 const SECRET = "Bearer secret-token-4411";
 
-type Call = { argv: string[]; cwd: string; stdin: string; env: Record<string, string>; refused?: string };
+type Call = {
+  argv: string[];
+  cwd: string;
+  stdin: string;
+  env: Record<string, string>;
+  refused?: string;
+  context?: Record<string, string>;
+  mcp?: Record<string, { args?: string[]; env?: Record<string, string> }> | null;
+};
+const flag = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
 
 const dirs: string[] = [];
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -55,7 +64,7 @@ afterEach(async () => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 3 });
 });
 
-async function setup() {
+async function setup(o: { claudeConfigDir?: string } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb3-impl-")));
   dirs.push(root);
   const r = await taskRemote(root);
@@ -72,6 +81,8 @@ async function setup() {
     live: createLive(),
     dataDir,
     runnerCommand: runner.command,
+    listTools: stubListTools,
+    claudeConfigDir: o.claudeConfigDir ?? join(root, "no-claude-config"),
     // The fetch config carries the token. It must never reach the worktree, a context file, or the CLI env.
     repoRemote: async () => ({ url: r.remote, config: [["http.extraHeader", `Authorization: ${SECRET}`]] }),
   });
@@ -257,8 +268,32 @@ describe("implement run", () => {
       const [call] = s.runCalls();
       if (!call) throw new Error("no run");
       const p = profileOf(s.settings.profiles(), DEFAULT_PROFILE);
+      // The MCP file sits in the run folder outside the cwd, and it goes with the run.
+      const mcpFile = flag(call.argv, "--mcp-config");
+      expect(mcpFile && !mcpFile.toLowerCase().startsWith(s.wt.dir.toLowerCase())).toBe(true);
+      expect(existsSync(mcpFile as string)).toBe(false);
       const spec = { implement: true as const, cwd: s.wt.dir, prompt: "", schema: implementJsonSchema(), maxTurns: 80 };
-      expect(call.argv).toEqual(implementArgs({ ...spec, model: p?.model, effort: p?.effort }).args);
+      const expected = implementArgs({ ...spec, model: p?.model, effort: p?.effort }).args;
+      const at = expected.indexOf("--tools");
+      expect(call.argv).toEqual([
+        ...expected.slice(0, at),
+        "--mcp-config",
+        mcpFile as string,
+        "--tools",
+        "Read,Grep,Glob,Edit,Write",
+        "--allowedTools",
+        "Read,Grep,Glob,Edit,Write,mcp__rl-git,mcp__learn,mcp__deepwiki",
+        ...expected.slice(at + 4),
+      ]);
+      expect(Object.keys(call.mcp ?? {})).toEqual(["rl-git", "learn", "deepwiki"]);
+      // BRIEF.md part 6: the read-only git MCP server reads the task cache. HEAD is the worktree head, BASE the base of the task.
+      expect(call.mcp?.["rl-git"]?.args?.slice(-5)).toEqual([
+        "--git-mcp",
+        `--git-dir=${s.wt.cache}`,
+        `--head=${s.base}`,
+        `--base=${s.base}`,
+        `--target=${s.base}`,
+      ]);
       expect(realpathSync.native(call.cwd)).toBe(realpathSync.native(s.wt.dir));
       expect(JSON.stringify(call.argv).toLowerCase()).not.toContain(s.clone.toLowerCase().replaceAll("\\", "\\\\"));
       expect(call.cwd.toLowerCase().startsWith(s.clone.toLowerCase())).toBe(false);
@@ -276,6 +311,7 @@ describe("implement run", () => {
           false,
           "",
           `# Project instructions\n\n${IMPLEMENT_TRUST}\n\n## From the target branch: CLAUDE.md (applies to all files)\n\nCLAUDE.md\n`,
+          { skills: [], mcp: [...IMPLEMENT_MCP_LINES, DOCS_RULE] },
         ),
       );
       // Gate B17: --restricted refuses a write outside the cwd. The fake does the same.
@@ -689,4 +725,82 @@ describe("implement run", () => {
       expect(ciPath(p)).toBe(true);
     for (const p of ["src/Jenkinsfile", ".github/CODEOWNERS", ".github/workflows", "docs/.gitlab-ci.yml"]) expect(ciPath(p)).toBe(false);
   });
+});
+
+describe("implement run with the profile tools", () => {
+  test(
+    "the step gets the profile skills in context/skills, the ticked MCP tools, the git MCP server, and a codegraph index of repo/",
+    async () => {
+      const config = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-impl-config-")));
+      dirs.push(config);
+      const log = join(config, "cg.jsonl");
+      const FAKE_CG = join(import.meta.dir, "../support/fake-codegraph/codegraph.js");
+      const FAKE_MCP = join(import.meta.dir, "../support/fake-mcp.ts");
+      writeFileSync(
+        join(config, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            fake: { command: process.execPath, args: [FAKE_MCP], env: {} },
+            cg: { command: process.execPath, args: [FAKE_CG, "serve", "--mcp", "--path", "/user/clone"], env: { FAKE_CG_LOG: log } },
+          },
+        }),
+      );
+      mkdirSync(join(config, "skills", "tdd"), { recursive: true });
+      writeFileSync(join(config, "skills", "tdd", "SKILL.md"), "---\nname: tdd\ndescription: Test first.\n---\n\nWrite the test first.\n");
+      const s = await setup({ claudeConfigDir: config });
+      const profile = {
+        ...profileOf(s.settings.profiles(), DEFAULT_PROFILE),
+        skills: ["tdd"],
+        alwaysSkills: ["tdd"],
+        mcp: [
+          { server: "fake", tools: ["search"] },
+          { server: "cg", tools: ["codegraph_explore"] },
+        ],
+      };
+      const first = await s.step({ profile });
+      expect(first.outcome?.status).toBe("completed");
+      expect(first.outcome?.problems).toEqual([]);
+      // The index goes before the path check, and the cache keeps it for the next step.
+      expect(existsSync(join(s.wt.repo, ".codegraph"))).toBe(false);
+      expect(existsSync(join(s.dataDir, "cache", "codegraph", "PROJ", "repo", "codegraph.db"))).toBe(true);
+      const [call] = s.runCalls();
+      if (!call) throw new Error("no run");
+      // Gate B17 stays: --restricted, the five built-in tools, no shell, no Agent, no web tools.
+      expect(call.argv).toContain("--restricted");
+      expect(call.argv).toContain("--strict-mcp-config");
+      expect(flag(call.argv, "--tools")).toBe("Read,Grep,Glob,Edit,Write");
+      expect(call.argv.join(" ")).not.toMatch(/Bash|PowerShell|Agent|WebFetch|WebSearch/);
+      const allowed = (flag(call.argv, "--allowedTools") ?? "").split(",");
+      expect(allowed).toEqual(expect.arrayContaining(["mcp__rl-git", "mcp__fake__search", "mcp__cg__codegraph_explore"]));
+      expect(allowed).not.toContain("mcp__fake__lookup");
+      const denied = (flag(call.argv, "--disallowedTools") ?? "").split(",");
+      expect(denied).toEqual(expect.arrayContaining(["mcp__fake__lookup", "mcp__fake__delete_item"]));
+      expect(Object.keys(call.mcp ?? {}).sort()).toEqual(["cg", "deepwiki", "fake", "learn", "rl-git"]);
+      // CodeGraph indexes the worktree repo/ of the part, not a cache snapshot.
+      const cg = call.mcp?.cg?.args ?? [];
+      expect(cg.slice(-3).map((x) => x.toLowerCase())).toEqual(["--path", s.wt.repo.toLowerCase(), "--no-watch"]);
+      // The skills sit in context/, outside repo/, and the stdin names them there.
+      expect(call.context?.["skills/tdd/SKILL.md"]).toContain("Write the test first.");
+      expect(call.stdin).toContain("Before you start, read ./context/skills/tdd/SKILL.md and follow it for the whole run.");
+      expect(call.stdin).toContain("except the skills in ./context/skills/");
+      expect(call.stdin).toContain("The user added these MCP tools: mcp__fake__search, mcp__cg__codegraph_explore.");
+      expect(call.stdin).toContain(IMPLEMENT_MCP_LINES[0] as string);
+
+      const second = await s.step({ profile, attempt: 2 });
+      expect(second.outcome?.problems).toEqual([]);
+      const index = readFileSync(log, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l) as { cmd: string; cwd: string })
+        .filter((x) => x.cmd !== "serve");
+      // Each step indexes repo/ again, so the index follows the edits of the earlier steps.
+      expect(index.map((x) => [x.cmd, x.cwd.toLowerCase()])).toEqual([
+        ["init", s.wt.repo.toLowerCase()],
+        ["status", s.wt.repo.toLowerCase()],
+        ["sync", s.wt.repo.toLowerCase()],
+        ["status", s.wt.repo.toLowerCase()],
+      ]);
+    },
+    SLOW,
+  );
 });

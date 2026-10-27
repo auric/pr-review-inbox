@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { MetaDto, TaskDto } from "../../shared/dto";
-import type { TaskDoc } from "../../shared/task";
+import { type TaskDoc, taskProfileId } from "../../shared/task";
 import type { Layer } from "../keys";
 import type { PrRef } from "../lib/route";
 import { RunLog } from "../review/RunLog";
@@ -79,6 +79,9 @@ export const TaskView = forwardRef<TaskApi, { id: number; meta: MetaDto; onPr: (
 
 const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRef) => void }>(function Loaded({ t, meta, onPr }, ref) {
   const runner = meta.runner.short;
+  // spec.md section 6.2: the profile that the next step uses, by the same rule as the server.
+  const profileId = taskProfileId(meta.profiles, t.profile);
+  const profileName = meta.profiles.find((p) => p.id === profileId)?.name;
   const act = useTaskAction(t);
   const [errorText, setErrorText] = useState<string | null>(null);
   const view = taskView(t, { runner, forge: meta.forge.name, now: useTick(runningStep(t) !== null) });
@@ -231,6 +234,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
           <span translate="no" className="text-xs text-muted-foreground">
             {t.project}/{t.repo} into {t.targetBranch}
           </span>
+          {profileName && <span className="text-xs text-muted-foreground">Profile: {profileName}</span>}
         </div>
         <StepStrip steps={stripSteps(t)} />
         <div className="grid gap-0.5">

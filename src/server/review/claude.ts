@@ -67,10 +67,13 @@ export type ResumeSpec = {
 };
 
 // docs/plans/review-v2/spec.md section 6.7: one Claude step of a task (run kind implement). cwd: the part folder with repo/, the task
-// worktree, and context/. The run gets no agent and no MCP server. timeoutMs: lower than the runner limit.
+// worktree, and context/. The run gets no agent. timeoutMs: lower than the runner limit. appDir and mcpServers: the MCP servers of
+// the profile and the git MCP server, as in RunSpec. appDir must be outside cwd. Absent: no MCP server.
 export type ImplementSpec = {
   implement: true;
   cwd: string;
+  appDir?: string;
+  mcpServers?: Record<string, McpServerSpec>;
   prompt: string;
   schema: Record<string, unknown>;
   maxTurns: number;
@@ -166,31 +169,18 @@ function removeCwdFolders(cwd: string, projectsDir: string) {
     }
 }
 
-// Writes the MCP and agents files and returns the CLI arguments and the init tool allowlist.
-function prepare(spec: RunSpec) {
-  const reviewers = Object.keys(spec.agents);
-  const servers = Object.entries(spec.mcpServers);
-  for (const n of [...reviewers, ...servers.flatMap(([s, c]) => [s, ...c.tools, ...("user" in c ? c.deny : [])])])
+// Checks the servers and writes mcp.json into appDir. tools: the full names of the chosen tools. allow: the --allowedTools entries.
+// denied: the other tools of the user servers.
+function writeMcp(appDir: string, mcpServers: Record<string, McpServerSpec>) {
+  const servers = Object.entries(mcpServers);
+  for (const n of servers.flatMap(([s, c]) => [s, ...c.tools, ...("user" in c ? c.deny : [])]))
     if (!NAME.test(n)) throw new Error(`Invalid agent, server, or tool name: ${n}`);
-  if (reviewers.includes(MAIN_AGENT)) throw new Error(`${MAIN_AGENT} cannot be a review agent.`);
-  if (spec.noTools && (reviewers.length || servers.length)) throw new Error("A run without tools cannot have agents or MCP servers.");
   for (const [s, c] of servers)
     if ("url" in c && new URL(c.url).protocol !== "https:") throw new Error(`MCP server ${s} needs an https URL.`);
-  for (const a of [spec, spec.main, ...Object.values(spec.agents)]) {
-    if (a.model != null && !modelName.safeParse(a.model).success) throw new Error(`Invalid model name: ${a.model}`);
-    if (a.effort != null && !EFFORTS.includes(a.effort)) throw new Error(`Invalid effort: ${a.effort}`);
-  }
-
-  // Gate B9: agent tool lists need full MCP tool names. --allowedTools needs mcp__<server>; a wildcard does not work.
-  const mcpTools = servers.flatMap(([s, c]) => c.tools.map((t) => `mcp__${s}__${t}`));
-  const builtins = spec.noTools ? [] : READ_TOOLS;
-  const readTools = [...builtins, ...mcpTools];
-  const denied = servers.flatMap(([s, c]) => ("user" in c ? c.deny.map((t) => `mcp__${s}__${t}`) : []));
-  const agentTool = reviewers.length ? [`Agent(${reviewers.join(", ")})`] : [];
-  mkdirSync(spec.appDir, { recursive: true });
-  const mcpFile = join(spec.appDir, "mcp.json");
+  mkdirSync(appDir, { recursive: true });
+  const file = join(appDir, "mcp.json");
   writeFileSync(
-    mcpFile,
+    file,
     // code.claude.com/docs/en/mcp: a remote entry needs "type": "http"; without it the CLI reads the entry as stdio.
     JSON.stringify({
       mcpServers: Object.fromEntries(
@@ -203,6 +193,33 @@ function prepare(spec: RunSpec) {
     // A user entry can hold secrets. Windows ignores the mode; the run folder is in the user's data folder.
     { mode: 0o600 },
   );
+  return {
+    file,
+    // Gate B9: agent tool lists need full MCP tool names. --allowedTools needs mcp__<server>; a wildcard does not work.
+    tools: servers.flatMap(([s, c]) => c.tools.map((t) => `mcp__${s}__${t}`)),
+    allow: servers.flatMap(([s, c]) => ("user" in c ? c.tools.map((t) => `mcp__${s}__${t}`) : [`mcp__${s}`])),
+    denied: servers.flatMap(([s, c]) => ("user" in c ? c.deny.map((t) => `mcp__${s}__${t}`) : [])),
+  };
+}
+
+// Writes the MCP and agents files and returns the CLI arguments and the init tool allowlist.
+function prepare(spec: RunSpec) {
+  const reviewers = Object.keys(spec.agents);
+  const servers = Object.keys(spec.mcpServers);
+  for (const n of reviewers) if (!NAME.test(n)) throw new Error(`Invalid agent, server, or tool name: ${n}`);
+  if (reviewers.includes(MAIN_AGENT)) throw new Error(`${MAIN_AGENT} cannot be a review agent.`);
+  if (spec.noTools && (reviewers.length || servers.length)) throw new Error("A run without tools cannot have agents or MCP servers.");
+  for (const a of [spec, spec.main, ...Object.values(spec.agents)]) {
+    if (a.model != null && !modelName.safeParse(a.model).success) throw new Error(`Invalid model name: ${a.model}`);
+    if (a.effort != null && !EFFORTS.includes(a.effort)) throw new Error(`Invalid effort: ${a.effort}`);
+  }
+
+  const mcp = writeMcp(spec.appDir, spec.mcpServers);
+  const builtins = spec.noTools ? [] : READ_TOOLS;
+  const readTools = [...builtins, ...mcp.tools];
+  const denied = mcp.denied;
+  const agentTool = reviewers.length ? [`Agent(${reviewers.join(", ")})`] : [];
+  const mcpFile = mcp.file;
   const agentsFile = join(spec.appDir, "agents.json");
   // Gate B9: without StructuredOutput in the rl-main tools, no result carries structured_output.
   const agents = {
@@ -234,12 +251,7 @@ function prepare(spec: RunSpec) {
     // code.claude.com/docs/en/cli-reference: --tools "" disables all built-in tools. StructuredOutput comes from --json-schema.
     "--tools",
     [...builtins, ...(reviewers.length ? ["Agent"] : [])].join(","),
-    ...(spec.noTools
-      ? []
-      : [
-          "--allowedTools",
-          [...READ_TOOLS, ...servers.flatMap(([s, c]) => ("user" in c ? c.tools.map((t) => `mcp__${s}__${t}`) : [`mcp__${s}`]))].join(","),
-        ]),
+    ...(spec.noTools ? [] : ["--allowedTools", [...READ_TOOLS, ...mcp.allow].join(",")]),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
     ...(denied.length ? ["--disallowedTools", denied.join(",")] : []),
     "--agents",
@@ -299,12 +311,13 @@ export function resumeArgs(spec: ResumeSpec) {
 }
 
 // The CLI arguments of an implement run: the flags of Gate B17 (scripts/gate/claude-checks.ts b17) and the runner output flags. No
-// --permission-mode: -p denies a call without an allow rule, and --allowedTools pre-approves the five tools. No --mcp-config.
-// The init check accepts only the five tools and StructuredOutput.
+// --permission-mode: -p denies a call without an allow rule, and --allowedTools pre-approves the five tools and the chosen MCP tools.
+// The MCP flags are those of a review run (prepare). The init check accepts only these tools, the denied MCP tools, and StructuredOutput.
 export function implementArgs(spec: ImplementSpec) {
   const tools = IMPLEMENT_TOOLS.join(",");
   if (spec.model != null && !modelName.safeParse(spec.model).success) throw new Error(`Invalid model name: ${spec.model}`);
   if (spec.effort != null && !EFFORTS.includes(spec.effort)) throw new Error(`Invalid effort: ${spec.effort}`);
+  const mcp = spec.appDir && spec.mcpServers ? writeMcp(spec.appDir, spec.mcpServers) : null;
   const args = [
     "-p",
     "--output-format",
@@ -312,10 +325,13 @@ export function implementArgs(spec: ImplementSpec) {
     "--verbose",
     "--restricted",
     "--strict-mcp-config",
+    ...(mcp ? ["--mcp-config", mcp.file] : []),
     "--tools",
     tools,
     "--allowedTools",
-    tools,
+    [...IMPLEMENT_TOOLS, ...(mcp?.allow ?? [])].join(","),
+    // A deny rule wins over every allow rule. The other tools of a user server stay off.
+    ...(mcp?.denied.length ? ["--disallowedTools", mcp.denied.join(",")] : []),
     "--json-schema",
     JSON.stringify(spec.schema),
     "--max-turns",
@@ -324,7 +340,9 @@ export function implementArgs(spec: ImplementSpec) {
     ...(spec.effort ? ["--effort", spec.effort] : []),
     "--no-session-persistence",
   ];
-  return { args, allowed: new Set([...IMPLEMENT_TOOLS, "StructuredOutput"]) };
+  if (JSON.stringify(args).length > MAX_ARGV)
+    throw new Error("The MCP tool lists are too long for the command line. Pick fewer MCP servers.");
+  return { args, allowed: new Set([...IMPLEMENT_TOOLS, ...(mcp?.tools ?? []), ...(mcp?.denied ?? []), "StructuredOutput"]) };
 }
 
 export function createClaudeRunner(opts: RunnerOptions = {}) {

@@ -487,3 +487,12 @@ export const replanResult = z.object({
   coverage,
 });
 export type ReplanResult = z.infer<typeof replanResult>;
+
+// The profile of a task step (spec.md section 6.2): the stored profile while it exists and is no Explain profile, else the shipped
+// default profile (DEFAULT_PROFILE in src/server/review/catalog.ts), else the first review profile.
+export function taskProfileId(profiles: readonly { id: string; explain: boolean }[], want: string | null): string {
+  const ok = (id: string | null): id is string => id !== null && profiles.some((p) => p.id === id && !p.explain);
+  if (ok(want)) return want;
+  if (ok("general")) return "general";
+  return profiles.find((p) => !p.explain)?.id ?? profiles[0]?.id ?? "general";
+}

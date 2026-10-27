@@ -879,28 +879,29 @@ export function replanAgent(p: Profile, budget: number): AgentSpec {
   };
 }
 
-// folders: the skill folders in ./skills of this run. The skill text comes from the user's own Claude Code setup.
+// folders: the skill folders in ./<root> of this run. root: skills, or context/skills for an implement run. The skill text comes from the
+// user's own Claude Code setup.
 // Above SKILL_INDEX_AFTER skills, copySkills writes the index and the model reads only the skills that apply.
 // always: the folders of the always-use skills. They come first in both modes.
-export function skillLines(folders: string[], always: string[] = []): string[] {
+export function skillLines(folders: string[], always: string[] = [], root = "skills"): string[] {
   if (!folders.length) return [];
   const first = folders.filter((f) => always.includes(f));
   const rest = folders.filter((f) => !always.includes(f));
   const pinned = first.length
     ? [
-        ...first.map((f) => `Before you start, read ./skills/${f}/SKILL.md and follow it for the whole run.`),
+        ...first.map((f) => `Before you start, read ./${root}/${f}/SKILL.md and follow it for the whole run.`),
         "This skill adds checks. It does not remove the task, the rules, or the output format above.",
       ]
     : [];
   const read =
     folders.length > SKILL_INDEX_AFTER
       ? [
-          `The user chose ${folders.length} skills. ./skills/${SKILL_INDEX} lists the name, the description, and the folder of each one.`,
-          `Read skills/${SKILL_INDEX}. Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.`,
+          `The user chose ${folders.length} skills. ./${root}/${SKILL_INDEX} lists the name, the description, and the folder of each one.`,
+          `Read ${root}/${SKILL_INDEX}. Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.`,
         ]
       : rest.length
         ? [
-            `The user chose these skills: ${rest.map((f) => `./skills/${f}/SKILL.md`).join(", ")}.`,
+            `The user chose these skills: ${rest.map((f) => `./${root}/${f}/SKILL.md`).join(", ")}.`,
             "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
           ]
         : [];

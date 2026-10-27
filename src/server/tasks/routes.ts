@@ -23,6 +23,7 @@ import {
   type TaskConflict,
   type TaskDto,
   type TaskIssueDto,
+  type TaskProfileDto,
   taskAnswersInput,
   taskBaseInput,
   taskCreateInput,
@@ -32,6 +33,7 @@ import {
   taskLimitInput,
   taskListInput,
   taskPlanInput,
+  taskProfileInput,
   taskReviewersInput,
   taskSizeInput,
   taskVersionInput,
@@ -44,7 +46,7 @@ import { noUrl } from "../review/workspace";
 import type { Settings } from "../settings";
 import { createLoop } from "./loop";
 import { createPrOpener, partDiff } from "./pr";
-import { createTaskService, repoSettings, saveRepoSettings, type TaskResult, taskRow } from "./tasks";
+import { createTaskService, preselectProfile, repoSettings, saveRepoSettings, type TaskResult, taskRow } from "./tasks";
 
 const unconfigured = { error: "Configure the Bitbucket URL and token first." } satisfies ApiError;
 const NAME = /^[A-Za-z0-9~_][A-Za-z0-9._~-]{0,254}$/;
@@ -153,6 +155,20 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         (c) => {
           const db = openDb();
           return c.json(db ? tasks.list(db, c.req.valid("query").state) : [], 200);
+        },
+      )
+      // spec.md section 6.2: the profile that the Build form preselects for a repository. It comes before /tasks/:id.
+      .get(
+        "/tasks/profile",
+        validator("query", (v, c) => {
+          const r = taskProfileInput.safeParse(v);
+          return r.success ? r.data : c.json<ApiError>({ error: "Invalid repository." }, 400);
+        }),
+        (c) => {
+          const db = openDb();
+          if (!db) return c.json(unconfigured, 409);
+          const { project, repo } = c.req.valid("query");
+          return c.json<TaskProfileDto>({ profile: preselectProfile(db, opts.settings.profiles(), project, repo) }, 200);
         },
       )
       .get("/tasks/:id", idParam, (c) => {
