@@ -131,6 +131,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     docs: null,
     parts: [],
     repos: [],
+    prs: [],
     questions: [],
     steps: [],
     createdAt: NOW - 30 * MIN,
@@ -587,7 +588,19 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
 
   test("several repositories: one label for two bases, and one line per repository, deepest first", () => {
     const repos: TaskDto["repos"] = [
-      { id: 1, role: "main", project: "PROJ", repo: "app", path: null, depth: 0, access: "edit", reason: null, baseBranch: REL },
+      {
+        id: 1,
+        role: "main",
+        project: "PROJ",
+        repo: "app",
+        path: null,
+        depth: 0,
+        access: "edit",
+        reason: null,
+        baseBranch: REL,
+        proposal: null,
+        proposalReason: null,
+      },
       {
         id: 2,
         role: "submodule",
@@ -598,6 +611,8 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
         access: "edit",
         reason: null,
         baseBranch: "develop",
+        proposal: null,
+        proposalReason: null,
       },
     ];
     const bases = [...moved(5), { taskRepo: 2, branch: "develop", newCommits: 1, conflicted: false }];

@@ -561,6 +561,47 @@ describe("follow state (A15)", () => {
     expect(requests(from, "/activities")).toHaveLength(1);
   });
 
+  test("docs/plans/review-v2/spec.md section 6.16.8: the code PR row of a task repository follows its PR to merged", async () => {
+    const h = await setup();
+    await h.cycle();
+    const pr = h.pr(2) as { id: number; project: string; repo: string };
+    const db = h.db();
+    const one = <T>(sql: string, p: Record<string, string | number>) => db.query(sql).get(p) as T;
+    const task = one<{ id: number }>(
+      `INSERT INTO task (project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+        VALUES ($project, $repo, 'ABC-1', 'Task', 'ready', 'main', 'specs/', 1, 1) RETURNING id`,
+      { project: pr.project, repo: pr.repo },
+    ).id;
+    const part = one<{ id: number }>(
+      `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+        VALUES ($task, 1, 'single', 'Task', 'feature/ABC-1-task', 'main', 'pr_open', 1, 1) RETURNING id`,
+      { task },
+    ).id;
+    const repo = one<{ id: number }>(
+      `INSERT INTO task_repo (task, role, project, repo, depth, access, base_branch, created_at)
+        VALUES ($task, 'submodule', $project, $repo, 1, 'edit', 'main', 1) RETURNING id`,
+      { task, project: pr.project, repo: pr.repo },
+    ).id;
+    db.query(
+      `INSERT INTO task_pr (part, task_repo, branch, base_branch, base_commit, head, pushed, pr, remote_pr, state, pointer_state)
+        VALUES ($part, $repo, 'feature/ABC-1-task', 'main', $base, $head, $head, $pr, 2, 'pr_open', 'task_branch')`,
+    ).run({ part, repo, base: "a".repeat(40), head: "b".repeat(40), pr: pr.id });
+    world.author = [];
+    const merged = ownPr();
+    merged.state = "MERGED";
+    fake.routes[key("GET", PR_PATH)] = { status: 200, body: merged };
+    h.sent.length = 0;
+    await h.cycle();
+    expect(db.query("SELECT state, pointer_state FROM task_pr").get()).toEqual({ state: "merged", pointer_state: "task_branch" });
+    expect(h.sent.find(([e]) => e === "changed")?.[1]).toMatchObject({ tasks: [task] });
+    // A later cycle keeps merged and names no task.
+    h.sent.length = 0;
+    h.clock.t += 3_600_000;
+    await h.cycle();
+    expect(db.query("SELECT state FROM task_pr").get()).toEqual({ state: "merged" });
+    expect(h.sent.find(([e]) => e === "changed")?.[1]).not.toHaveProperty("tasks");
+  });
+
   test("a followed MERGED PR gets no single-PR GET after it is stored, but new comments still arrive", async () => {
     const base = byUser(inline(), 1000003, OTHER);
     world.own = base;

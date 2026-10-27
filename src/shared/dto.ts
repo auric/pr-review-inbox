@@ -1297,6 +1297,20 @@ export type BranchCheckDto = {
 export const taskBaseInput = z.object({ version, branch: branchName });
 // POST /api/tasks/:id/spec-pr and POST /api/tasks/:id/parts/:part/pr.
 export const taskReviewersInput = z.object({ version, reviewers: taskReviewers });
+// POST /api/tasks/:id/parts/:part/prs (spec.md section 6.16.8): the rows of "Push and open PRs". One row is a retry. The cap bounds the
+// request only.
+export const taskPrsInput = z.object({
+  version,
+  rows: z
+    .array(z.object({ taskRepo: positiveInt, reviewers: taskReviewers }))
+    .min(1)
+    .max(100),
+});
+// POST /api/tasks/:id/repos/:taskRepo (spec.md section 6.16.5): Add (true) or Skip (false) of a proposed repository.
+export const taskRepoChoiceInput = z.object({ version, add: z.boolean() });
+// POST /api/tasks/:id/prs/:taskPr/pointer (spec.md section 6.16.8). newest: the user confirmed the newest base commit, because
+// Bitbucket named no merge commit.
+export const taskPointerInput = z.object({ version, newest: z.literal(true).optional() });
 // POST /api/tasks/:id/build. override: start without the approval of the spec PR.
 export const taskBuildInput = z.object({ version, override: z.literal(true).optional() });
 // POST /api/tasks/:id/parts/:part/push. force: the confirmed rebase push. It keeps the lease.
@@ -1379,7 +1393,8 @@ export type TaskPartDto = {
 };
 
 // A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a
-// submodule that maps to no Bitbucket repository. reason: why the task cannot change it.
+// submodule that maps to no Bitbucket repository. reason: why the task cannot change it. proposal: a repository of role added that a
+// spec run proposed ("Add" and "Skip"), with Claude's reason; only proposal added is in the task.
 export type TaskRepoDto = {
   id: number;
   role: RepoRole;
@@ -1390,6 +1405,37 @@ export type TaskRepoDto = {
   access: RepoAccess;
   reason: string | null;
   baseBranch: string | null;
+  proposal: "proposed" | "added" | "skipped" | null;
+  proposalReason: string | null;
+};
+
+// spec.md section 6.16.9: task_pr.state. The main repository row takes it from its part.
+export type TaskPrState = "changed" | "pushed" | "pr_open" | "merged" | "declined" | "failed";
+
+// One row of "Push and open PRs" (spec.md section 6.16.8): a changed repository of a part, the submodules deepest first and the main
+// repository last. id: task_pr.id for the pointer route, null for the main repository. error: the sentence of the last failed push,
+// create, or pointer move. running: the step of the row that runs now. pointer: the gitlink of the parent after the PR of a submodule
+// merged. reviewers: the first reviewer chips, as TaskDto.reviewers for this repository.
+export type TaskPrDto = {
+  id: number | null;
+  part: number;
+  taskRepo: number;
+  role: RepoRole;
+  project: string;
+  repo: string;
+  path: string | null;
+  branch: string;
+  baseBranch: string;
+  head: string | null;
+  pushed: string | null;
+  lines: number | null;
+  pr: number | null;
+  remotePr: number | null;
+  state: TaskPrState;
+  error: string | null;
+  running: "push" | "pr" | null;
+  pointer: "task_branch" | "merged_commit" | null;
+  reviewers: string[];
 };
 
 // A point of the newest own review of a part that the loop does not fix: not a confirmed blocker or major (spec.md section 6.7).
@@ -1473,6 +1519,8 @@ export type TaskDto = TaskRowDto & {
   parts: TaskPartDto[];
   // Every repository of the task, the main one first.
   repos: TaskRepoDto[];
+  // The rows of each built part (spec.md section 6.16.8).
+  prs: TaskPrDto[];
   questions: TaskQuestionDto[];
   steps: TaskStepDto[];
   createdAt: number;

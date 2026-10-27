@@ -16,6 +16,7 @@ import {
   type Volume,
 } from "../../shared/dto";
 import { FIX_EDIT_RULES, FIX_WHY_RULES } from "../../shared/review";
+import { PROPOSALS_MAX } from "../../shared/task";
 import { type AgentSpec, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
 import { SKILL_INDEX, SKILL_INDEX_AFTER } from "./skills";
@@ -854,6 +855,8 @@ export const specRules = (budget: number, platform: string = process.platform) =
   "The Project instructions section holds the standing rules of the repository. Follow them, and do not repeat them in the plan.",
   "For each task, give the files that it changes and the existing tests to run. Give one done check that a test or a command proves.",
   "For small, write only change and leave design and spec null. For medium and large, write design and spec and leave change empty.",
+  "./context/repo-list.md lists the other repositories that the token can push to. Name one in repos only when the change needs code in it, and say why in reason.",
+  `Name at most ${PROPOSALS_MAX} repositories. Never name the main repository, a submodule of it, or a repository that the list shows as skipped.`,
 ];
 
 export function specAgent(p: Profile, budget: number, platform: string = process.platform): AgentSpec {

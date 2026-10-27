@@ -75,9 +75,12 @@ export async function multiRepo(root: string, fake: FakeBitbucket, o: MultiOptio
     },
     { lib: lib.base, vendor: vendorCommit, ...(typeof o.extraLinks === "function" ? o.extraLinks(lib.base) : o.extraLinks) },
   );
-  repoWrites(fake, "PROJ", "app");
-  repoWrites(fake, "PROJ", "lib", { writable: o.libWritable ?? true });
-  repoWrites(fake, "PROJ", "deep");
+  // The fake write endpoints of each repository, for the PR tests.
+  const forges: Record<string, ReturnType<typeof repoWrites>> = {
+    app: repoWrites(fake, "PROJ", "app"),
+    lib: repoWrites(fake, "PROJ", "lib", { writable: o.libWritable ?? true }),
+    deep: repoWrites(fake, "PROJ", "deep"),
+  };
   const remotes: Record<string, string> = { app: app.remote, lib: lib.remote, deep: deep.remote };
   const remoteCalls: string[] = [];
   const remote = async (project: string, repo: string) => {
@@ -87,7 +90,7 @@ export async function multiRepo(root: string, fake: FakeBitbucket, o: MultiOptio
     return { url, config: [] as [string, string][] };
   };
   const provider = createBitbucketProvider({ baseUrl: fake.url, token: FAKE_TOKEN });
-  return { app, lib, deep, vendorCommit, remote, remoteCalls, provider, remotes };
+  return { app, lib, deep, vendorCommit, remote, remoteCalls, provider, remotes, forges };
 }
 
 export type Multi = Awaited<ReturnType<typeof multiRepo>>;

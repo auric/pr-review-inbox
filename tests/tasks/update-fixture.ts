@@ -22,11 +22,11 @@ import { resolveTaskRepos, taskRepos } from "../../src/server/tasks/repos";
 import { taskRow } from "../../src/server/tasks/tasks";
 import { commitStep, headOf, openRepoTrees, openWorktree, type RepoTree, type Worktree } from "../../src/server/tasks/worktree";
 import { type StepDetail, specResult, stepDetail, type TaskBlocked } from "../../src/shared/task";
-import { startFakeBitbucket } from "../support/fake-bitbucket";
+import { FAKE_TOKEN, FAKE_USER, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
 import { taskCache, taskRemote } from "./fixture";
-import { depsOf, mainCache, multiRepo } from "./repos-fixture";
+import { bareRepo, depsOf, mainCache, multiRepo } from "./repos-fixture";
 
 export const KEY = "TU-1";
 export const BRANCH = "feature/TU-1-add-the-feature";
@@ -129,15 +129,24 @@ export const until = async (f: () => boolean, ms = 60_000) => {
   }
 };
 
-// The app side: the fake CLI, the settings, the review jobs, the loop, the test command, the user's identity, and the task row.
-async function app(root: string, remote: (project: string, repo: string) => Promise<Remote>, repo: string, seq: FakeScenario["seq"]) {
+// The app side: the fake CLI, the settings, the review jobs, the loop, the test command, the user's identity, and the task row. forge:
+// the fake Bitbucket becomes the configured server with its token.
+async function app(
+  root: string,
+  remote: (project: string, repo: string) => Promise<Remote>,
+  repo: string,
+  seq: FakeScenario["seq"],
+  forge?: string,
+) {
   const runner = fakeRunner(root);
   const stream = claudeStream(root, "tu1", "claude/b6-hostile-repo.jsonl");
   const scenario = (s: FakeScenario["seq"]) => runner.write({ fixture: stream, seq: { review: [{ review: CLEAN }], ...s } });
   scenario(seq);
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: "http://127.0.0.1:9", userSlug: "u", notifications: false });
-  const settings = createSettings({ dir: dataDir, secrets: createSecrets(null), jiraSecrets: createSecrets(null, "jira-token") });
+  writeConfig(dataDir, { baseUrl: forge ?? "http://127.0.0.1:9", userSlug: forge ? FAKE_USER : "u", notifications: false });
+  const secrets = createSecrets(null);
+  if (forge) await secrets.set(FAKE_TOKEN);
+  const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });
   const live = createLive();
   const jobs = createReviewJobs({ settings, live, dataDir, runnerCommand: runner.command, repoRemote: remote, listTools: stubListTools });
   const db = jobs.open() as Database;
@@ -264,15 +273,22 @@ export async function builtTask(o: Setup = {}) {
 
 // PROJ/app with the submodules of repos-fixture.ts: lib (edit), lib/deep (read), and vendor (another server). The base of app is
 // appBase; lib takes its default branch main. One commit changes src/feature.ts in app and lib.c in lib, with the parent gitlink.
-export async function multiTask(o: { seq?: FakeScenario["seq"]; appBase?: string } = {}) {
+// forge: the fake Bitbucket is the configured server. other: a second editable submodule PROJ/other at other/, which the commit also
+// changes.
+export async function multiTask(o: { seq?: FakeScenario["seq"]; appBase?: string; forge?: boolean; other?: boolean } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-tu1m-")));
   dirs.push(root);
   const fake = startFakeBitbucket();
   cleanups.push(() => fake.stop());
-  const m = await multiRepo(root, fake);
+  const other = o.other ? await bareRepo(root, "other", { "other.c": "int other;\n" }) : null;
+  const m = await multiRepo(root, fake, other ? { extraLinks: { other: other.base }, extraModules: { other: "../other.git" } } : {});
+  if (other) {
+    m.remotes.other = other.remote;
+    m.forges.other = repoWrites(fake, "PROJ", "other");
+  }
   const appBase = o.appBase ?? "main";
   if (appBase !== "main") await git(["--git-dir", m.app.remote, "update-ref", `refs/heads/${appBase}`, m.app.base], { env: m.app.env });
-  const a = await app(root, m.remote, "app", o.seq);
+  const a = await app(root, m.remote, "app", o.seq, o.forge ? fake.url : undefined);
   const { db, dataDir } = a;
   const { id: task, plan } = a.addTask(m.app.base, appBase);
   await mainCache(dataDir, m);
@@ -303,6 +319,7 @@ export async function multiTask(o: { seq?: FakeScenario["seq"]; appBase?: string
     [`specs/${KEY}/plan.md`]: plan,
     "src/feature.ts": "export const feature = 'works';\n",
     "lib/lib.c": "int lib = 2;\n",
+    ...(other && { "other/other.c": "int other = 2;\n" }),
   });
   const r = await commitTask({
     db,
@@ -316,5 +333,5 @@ export async function multiTask(o: { seq?: FakeScenario["seq"]; appBase?: string
     trees: await trees(),
   });
   if (r.status !== "committed") throw new Error(`The fixture commit failed: ${JSON.stringify(r)}`);
-  return { root, m, fake, ...a, base: m.app.base, task, wt, trees, tree, ...views(root, db, task, wt, m.app.base) };
+  return { root, m, fake, other, ...a, base: m.app.base, task, wt, trees, tree, ...views(root, db, task, wt, m.app.base) };
 }

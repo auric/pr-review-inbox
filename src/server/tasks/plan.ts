@@ -37,12 +37,60 @@ export const atLeast = (size: TaskSize, minimum: TaskSize): TaskSize => (sizeRan
 export function largeRepoProblem(
   size: TaskSize,
   parts: readonly { tasks: readonly { files: readonly string[] }[] }[],
-  repos: readonly { role: string; path: string | null }[],
+  repos: readonly { role: string; path: string | null; proposal?: string | null }[],
 ): string | null {
   if (size !== "large") return null;
   const subs = repos.filter((r) => r.role === "submodule" && r.path).map((r) => `${r.path}/`);
   const named = parts.some((p) => p.tasks.some((t) => t.files.some((f) => subs.some((s) => (repoPath(f) ?? f).startsWith(s)))));
-  return named || repos.some((r) => r.role === "added") ? LARGE_REPOS_TEXT : null;
+  return named || repos.some((r) => r.role === "added" && (r.proposal ?? "added") === "added") ? LARGE_REPOS_TEXT : null;
+}
+
+// ---------- Proposals (spec.md section 6.16.5) ----------
+
+export type ListedRepo = { project: string; slug: string; name: string };
+
+// context/repo-list.md of a spec run: one line "PROJ/slug · name" per repository with REPO_WRITE, then the proposals that the user
+// skipped. list null: the app could not read the list, and error says why. The names come from the server, so the file is untrusted.
+export function repoListFile(
+  list: { repos: readonly ListedRepo[]; complete: boolean } | null,
+  skipped: readonly string[],
+  error = "",
+): ContextFile {
+  const out = ["# Repositories that you may propose", ""];
+  if (!list) out.push(`The app could not read the repository list. ${oneLine(error)} Propose no repository.`, "");
+  else {
+    out.push('Each line is one repository that the token can push to: "PROJECT/slug · name".', "");
+    for (const r of list.repos) out.push(`- ${oneLine(r.project)}/${oneLine(r.slug)} · ${oneLine(r.name)}`);
+    if (!list.complete) out.push("", `The list stops after ${list.repos.length} repositories.`);
+    out.push("");
+  }
+  if (skipped.length) out.push("## Skipped by the user", "", "Do not propose these again.", "", ...skipped.map((s) => `- ${s}`), "");
+  return { name: "repo-list.md", text: out.join("\n") };
+}
+
+type RepoKey = { project: string | null; repo: string | null };
+
+// The proposals of a spec result that the app keeps: each one in the list, at most once, not a repository of the task (the main
+// repository, a submodule, or an added one), and not one that the user skipped. skipped gets a line for each dropped proposal.
+export function checkProposals(
+  repos: SpecResult["repos"],
+  list: readonly ListedRepo[],
+  task: readonly RepoKey[],
+  userSkipped: readonly RepoKey[],
+  skipped: string[],
+): SpecResult["repos"] {
+  const kept: SpecResult["repos"] = [];
+  for (const r of repos) {
+    const name = `${oneLine(r.project)}/${oneLine(r.repo)}`;
+    const same = (x: RepoKey) => x.project === r.project && x.repo === r.repo;
+    if (!list.some((x) => x.project === r.project && x.slug === r.repo))
+      skipped.push(`Claude proposed ${name}, which is not in context/repo-list.md, so the plan leaves it out.`);
+    else if (task.some(same) || kept.some(same))
+      skipped.push(`Claude proposed ${name}, which is already in the task, so the plan leaves it out.`);
+    else if (userSkipped.some(same)) skipped.push(`Claude proposed ${name} again, which you skipped, so the plan leaves it out.`);
+    else kept.push(r);
+  }
+  return kept;
 }
 
 // ---------- The stored plan (task.docs_json.parsed) ----------

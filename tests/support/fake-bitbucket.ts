@@ -228,6 +228,28 @@ export function repoWrites(
     };
   }
 
+  // spec.md section 6.16.10, shaped as Gate G17 recorded it: a merged PR has no properties.mergeCommit, and its MERGED activity carries
+  // commit {id, parents, message}. o.activity: the commit of the MERGED activity, null for an activity without one. o.property:
+  // properties.mergeCommit.id, which the gate did not see.
+  function merge(id: number, o: { activity?: string | null; property?: string } = {}) {
+    const pr = prs.get(id);
+    if (!pr) throw new Error(`The fake has no PR ${id}.`);
+    pr.state = "MERGED";
+    pr.open = false;
+    pr.closed = true;
+    bump(pr);
+    if (o.property) (pr.properties as Record<string, unknown>).mergeCommit = { id: o.property };
+    const commit = o.activity ? { commit: { id: o.activity, parents: [{ id: "0".repeat(40) }], message: "Merge pull request" } } : {};
+    const values = [
+      { id: 2, action: "MERGED", createdDate: pr.updatedDate, user: user(FAKE_USER), ...commit },
+      { id: 1, action: "OPENED", createdDate: pr.createdDate, user: user(FAKE_USER) },
+    ];
+    fake.routes[key("GET", `${path}/pull-requests/${id}/activities`)] = {
+      status: 200,
+      body: { size: values.length, limit: 25, start: 0, isLastPage: true, values },
+    };
+  }
+
   fake.routes[key("GET", path)] = { status: 200, body: { ...repository, id: 1, name: repo, scmId: "git", state: "AVAILABLE" } };
   fake.routes[key("POST", `${path}/pull-requests`)] = async (req) => {
     const body = await read(req);
@@ -302,7 +324,7 @@ export function repoWrites(
           },
         };
 
-  return { path, prs, builds, writes, repository, branches };
+  return { path, prs, builds, writes, repository, branches, merge };
 }
 
 type ListedRepo = { slug: string; name: string; project: { key: string }; writable: boolean } & Record<string, unknown>;

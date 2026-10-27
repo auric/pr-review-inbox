@@ -5,7 +5,7 @@
 // URLs of .gitmodules in that commit, the mapping to Bitbucket repositories without guesses, the access of each repository, the fetch
 // per repository, and the task_repo rows. The app never runs `git submodule` and never reads .gitmodules from disk.
 import type { Database } from "bun:sqlite";
-import type { TaskRepoDto } from "../../shared/dto";
+import type { TaskPrDto, TaskRepoDto } from "../../shared/dto";
 import { REPO_REASON, type RepoAccess, type RepoRole } from "../../shared/task";
 import { ForgeError } from "../bitbucket/client";
 import type { ForgeProvider, RepoInfo } from "../bitbucket/provider";
@@ -157,10 +157,14 @@ export type TaskRepoRow = {
   base_commit: string | null;
   pinned: string | null;
   source: number | null;
+  proposal: "proposed" | "added" | "skipped" | null;
+  proposal_reason: string | null;
 };
 
 const Q = {
-  rows: "SELECT * FROM task_repo WHERE task = $task ORDER BY depth, id",
+  // A proposed or skipped repository is no repository of the task (spec.md section 6.16.5, Proposals).
+  rows: "SELECT * FROM task_repo WHERE task = $task AND (proposal IS NULL OR proposal = 'added') ORDER BY depth, id",
+  all: "SELECT * FROM task_repo WHERE task = $task ORDER BY depth, id",
   main: "SELECT id FROM task_repo WHERE task = $task AND role = 'main'",
   mainInsert: `INSERT INTO task_repo (task, role, project, repo, depth, access, base_branch, base_commit, created_at)
     VALUES ($task, 'main', $project, $repo, 0, 'edit', $base, $commit, $now)`,
@@ -195,6 +199,8 @@ export function taskRepos(db: Database, t: TaskRef): TaskRepoRow[] {
     base_commit: t.base_commit,
     pinned: null,
     source: null,
+    proposal: null,
+    proposal_reason: null,
   };
   return [main, ...rows];
 }
@@ -215,19 +221,137 @@ export function setAccess(db: Database, id: number, access: RepoAccess, reason: 
   db.query(Q.access).run({ id, access, reason });
 }
 
+// Every row of the task, the proposals too, for the plan screen.
 export function repoDtos(db: Database, t: TaskRef): TaskRepoDto[] {
-  const rows = taskRepos(db, t);
+  const own = taskRepos(db, t);
+  const rows = [...own, ...(db.query(Q.all).all({ task: t.id }) as TaskRepoRow[]).filter((r) => !own.some((x) => x.id === r.id))];
   return rows.map((r) => ({
     id: r.id,
     role: r.role,
     project: r.project,
     repo: r.repo,
-    path: r.role === "main" ? null : fullPath(rows, r),
+    path: r.role === "main" ? null : r.role === "added" ? null : fullPath(rows, r),
     depth: r.depth,
     access: r.access,
     reason: r.reason,
     baseBranch: r.base_branch,
+    proposal: r.proposal,
+    proposalReason: r.proposal_reason,
   }));
+}
+
+// ---------- The code PRs of a part (spec.md section 6.16.8) ----------
+
+type PartRef = {
+  id: number;
+  branch: string;
+  base_branch?: string;
+  state: string;
+  head: string | null;
+  pushed: string | null;
+  lines: number | null;
+  pr: number | null;
+  remote_pr: number | null;
+};
+type TaskPrRow = {
+  id: number;
+  task_repo: number;
+  branch: string;
+  base_branch: string;
+  base_commit: string;
+  head: string | null;
+  pushed: string | null;
+  lines: number | null;
+  pr: number | null;
+  remote_pr: number | null;
+  state: TaskPrDto["state"];
+  error: string | null;
+  pointer_state: TaskPrDto["pointer"];
+};
+const PART_PR: Record<string, TaskPrDto["state"]> = { merged: "merged", declined: "declined", abandoned: "declined" };
+
+// A row of the PR dialog with its place in the repository tree.
+export type PrRow = Omit<TaskPrDto, "reviewers"> & { parent: number | null; depth: number; access: RepoAccess };
+
+// The changed repositories of a part: each task_pr row, the submodules deepest first, then the main repository. The main row takes its
+// state from the part, and its failure from its newest push or pr step (item "<project>/<repo>", or the part branch of the one-PR route).
+export function prRows(db: Database, t: TaskRef, part: PartRef): PrRow[] {
+  const rows = taskRepos(db, t);
+  const main = rows.find((r) => r.role === "main") as TaskRepoRow;
+  const steps = db
+    .query("SELECT kind, state, item, detail_json FROM task_step WHERE part = $part AND kind IN ('push', 'pr') ORDER BY id DESC")
+    .all({ part: part.id }) as { kind: "push" | "pr"; state: string; item: string | null; detail_json: string }[];
+  const newest = (items: string[]) => steps.find((s) => s.item !== null && items.includes(s.item));
+  const running = (items: string[]) => {
+    const s = newest(items);
+    return s?.state === "running" ? s.kind : null;
+  };
+  const prs = db.query("SELECT * FROM task_pr WHERE part = $part").all({ part: part.id }) as TaskPrRow[];
+  const out: PrRow[] = [];
+  for (const p of prs) {
+    const r = rows.find((x) => x.id === p.task_repo);
+    if (!r?.project || !r.repo) continue;
+    out.push({
+      id: p.id,
+      part: part.id,
+      taskRepo: r.id,
+      role: r.role,
+      project: r.project,
+      repo: r.repo,
+      path: r.role === "submodule" ? fullPath(rows, r) : null,
+      branch: p.branch,
+      baseBranch: p.base_branch,
+      head: p.head,
+      pushed: p.pushed,
+      lines: p.lines,
+      pr: p.pr,
+      remotePr: p.remote_pr,
+      state: p.state,
+      error: p.error,
+      running: running([`${r.project}/${r.repo}`]),
+      pointer: p.pointer_state,
+      parent: r.parent,
+      depth: r.depth,
+      access: r.access,
+    });
+  }
+  out.sort((a, b) => b.depth - a.depth || a.taskRepo - b.taskRepo);
+  const items = [`${t.project}/${t.repo}`, part.branch];
+  const last = newest(items);
+  const failed = last?.state === "failed" && part.remote_pr === null;
+  const state: TaskPrDto["state"] =
+    part.remote_pr !== null
+      ? (PART_PR[part.state] ?? "pr_open")
+      : failed
+        ? "failed"
+        : part.pushed !== null && part.pushed === part.head
+          ? "pushed"
+          : "changed";
+  const notes = failed ? ((JSON.parse(last.detail_json) as { notes?: string[] }).notes ?? []) : [];
+  out.push({
+    id: null,
+    part: part.id,
+    taskRepo: main.id,
+    role: "main",
+    project: t.project,
+    repo: t.repo,
+    path: null,
+    branch: part.branch,
+    baseBranch: t.target_branch,
+    head: part.head,
+    pushed: part.pushed,
+    lines: part.lines,
+    pr: part.pr,
+    remotePr: part.remote_pr,
+    state,
+    error: notes[0] ?? null,
+    running: running(items),
+    pointer: null,
+    parent: null,
+    depth: 0,
+    access: main.access,
+  });
+  return out;
 }
 
 // One repository that "Update from <base>" can change (spec.md section 6.18.3, Repositories): the main repository, or a submodule with

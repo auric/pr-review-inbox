@@ -48,6 +48,7 @@ import {
   type PartState,
   type SizeSource,
   SPEC_TURNS,
+  type SpecResult,
   type StepDetail,
   specJsonSchema,
   specResult,
@@ -105,19 +106,22 @@ import { type PartEvent, partMachine, type TaskEvent, taskMachine } from "./mach
 import {
   atLeast,
   checkMap,
+  checkProposals,
   convertDocs,
   type Docs,
   docNames,
+  type ListedRepo,
   largeRepoProblem,
   NEW_COMMAND,
   type Plan,
   parsePlan,
   parseTasks,
   renderDocs,
+  repoListFile,
   sizeFloor,
   toPlan,
 } from "./plan";
-import { type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, updateRepos } from "./repos";
+import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, updateRepos } from "./repos";
 import { firstFree, remoteBranches } from "./worktree";
 
 type TaskSizeInput = z.infer<typeof taskSizeInput>;
@@ -277,6 +281,12 @@ const Q = {
     ON CONFLICT (project, repo) DO UPDATE SET commands_json = excluded.commands_json,
       warned_at = COALESCE(repo_task_settings.warned_at, excluded.warned_at), last_base = excluded.last_base, updated_at = excluded.updated_at`,
   lastBase: "SELECT last_base FROM repo_task_settings WHERE project = $project AND repo = $repo",
+  // spec.md section 6.16.5, Proposals: a proposed repository has access none until Add.
+  dropProposals: "DELETE FROM task_repo WHERE task = $task AND role = 'added' AND proposal = 'proposed'",
+  propose: `INSERT OR IGNORE INTO task_repo (task, role, project, repo, depth, access, proposal, proposal_reason, created_at)
+    VALUES ($task, 'added', $project, $repo, 0, 'none', 'proposed', $reason, $now)`,
+  proposal: "SELECT role, project, repo, proposal FROM task_repo WHERE id = $id AND task = $task",
+  choose: "UPDATE task_repo SET proposal = $proposal, access = $access, base_branch = $base WHERE id = $id",
   openPr: `SELECT id FROM pull_request WHERE project = $project AND repo = $repo AND source_branch = $branch AND target_branch = $base
     AND state = 'OPEN' ORDER BY id DESC LIMIT 1`,
   // branch_prefix stays in the table. No code reads or writes it (spec.md section 6.16.1).
@@ -416,8 +426,9 @@ export function openPoints(db: Database, id: number): (TaskPointDto & { payload:
   });
 }
 
-// spec.md section 6.9, Reviewers: the reviewers of the task settings, else the reviewers of your newest PR in this repository.
-function defaultReviewers(db: Database, t: TaskRow): string[] {
+// spec.md section 6.9, Reviewers: the reviewers of the task settings, else the reviewers of your newest PR in this repository. Several
+// repositories (section 6.16.8): project and repo name the repository of a row.
+function defaultReviewers(db: Database, t: TaskRow, project = t.project, repo = t.repo): string[] {
   const own = settingsOf(t).reviewers;
   if (own) return own;
   const r = db
@@ -425,7 +436,7 @@ function defaultReviewers(db: Database, t: TaskRow): string[] {
       `SELECT reviewers_json FROM pull_request WHERE project = $project AND repo = $repo AND my_role = 'AUTHOR'
         AND reviewers_json IS NOT NULL ORDER BY id DESC LIMIT 1`,
     )
-    .get({ project: t.project, repo: t.repo }) as { reviewers_json: string } | null;
+    .get({ project, repo }) as { reviewers_json: string } | null;
   const list = r ? (JSON.parse(r.reviewers_json) as { slug: string; login?: string | null }[]) : [];
   return [...new Set(list.map((x) => x.login ?? x.slug))];
 }
@@ -696,7 +707,8 @@ function needsBaseOf(steps: { kind: string; state: string; detail: StepDetail }[
 }
 
 export function taskDto(db: Database, t: TaskRow): TaskDto {
-  const parts = (db.query(Q.parts).all({ id: t.id }) as PartRow[]).map((p): TaskPartDto => {
+  const partRows = db.query(Q.parts).all({ id: t.id }) as PartRow[];
+  const parts = partRows.map((p): TaskPartDto => {
     const synced =
       p.pr === null ? null : (db.query(Q.partPr).get({ id: p.pr }) as { state: string | null; reviewers_json: string | null } | null);
     const reviewers = synced?.reviewers_json ? (JSON.parse(synced.reviewers_json) as { name: string; status: string }[]) : [];
@@ -750,6 +762,14 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       : null,
     parts,
     repos: repoDtos(db, t),
+    prs: partRows
+      .filter((p) => p.head !== null)
+      .flatMap((p) =>
+        prRows(db, t, p).map(({ parent: _, depth: __, access: ___, ...r }) => ({
+          ...r,
+          reviewers: defaultReviewers(db, t, r.project, r.repo),
+        })),
+      ),
     questions: (db.query(Q.questions).all({ id: t.id }) as FullQuestionRow[]).map((q) => ({
       id: q.id,
       source: q.source,
@@ -962,22 +982,52 @@ export function createTaskService(opts: TaskServiceOptions) {
     };
   }
 
+  // spec.md section 6.16.5, Proposals: the repositories with REPO_WRITE (Gate G16), at most REPO_LIST_MAX.
+  async function writableList(): Promise<{ repos: ListedRepo[]; complete: boolean } | { error: string }> {
+    try {
+      const p = await settings.provider();
+      if (!p) return { error: "Configure the Bitbucket URL and token first." };
+      const r = await p.writableRepos();
+      return { repos: r.repos.map((x) => ({ project: x.project, slug: x.slug, name: x.name })), complete: r.complete };
+    } catch (e) {
+      return { error: noUrl((e as Error).message) };
+    }
+  }
+
   function specRun(db: Database, t: TaskRow): TaskRunStart {
     const p = profile(t);
     const budget = budgetOf(db, t);
     const { files, attachments } = taskFiles(db, t);
     const answers = answersFile(interviewRows(db, t.id), interviewOf(db, t.id));
     let plan: Plan | null = null;
+    let listed: ListedRepo[] = [];
+    let proposals: SpecResult["repos"] = [];
+    // The untrusted files of the snapshot: the task files, then context/repo-list.md.
+    const untrusted = [...files];
     return {
       task: t.id,
       kind: "spec",
       key: `task:${t.id}:spec`,
-      repos: repos(t),
+      repos: async (d, head) => {
+        const out = await repos(t)(d, head);
+        const l = await writableList();
+        listed = "error" in l ? [] : l.repos;
+        const skipped = repoDtos(d, t).filter((r) => r.proposal === "skipped");
+        // prepareTaskWorkspace writes the files after this hook resolves, so the list joins them here.
+        untrusted.push(
+          repoListFile(
+            "error" in l ? null : l,
+            skipped.map((r) => `${r.project}/${r.repo}`),
+            "error" in l ? l.error : "",
+          ),
+        );
+        return out;
+      },
       project: t.project,
       repo: t.repo,
       branch: t.target_branch,
       profile: p,
-      files,
+      files: untrusted,
       attachments,
       own: answers ? [answers] : [],
       maxTurns: SPEC_TURNS,
@@ -1005,8 +1055,17 @@ export function createTaskService(opts: TaskServiceOptions) {
               ? [`Map line ${i + 1}: ${oneLine(e.path)}${e.line === null ? "" : `:${e.line}`} is not found at ${base.slice(0, 12)}.`]
               : [],
           );
+          const rows = repoDtos(db, t);
+          const inTask = rows.filter((x) => x.proposal === null || x.proposal === "added");
+          proposals = checkProposals(
+            r.repos,
+            listed,
+            inTask,
+            rows.filter((x) => x.proposal === "skipped"),
+            skipped,
+          );
           plan = toPlan(r, base, missing, skipped);
-          return { result: r, skipped };
+          return { result: { ...r, repos: proposals }, skipped };
         }),
       started: (d, run) => insertStep(d, t.id, "spec", run),
       finish: (d, run, e) => {
@@ -1038,6 +1097,9 @@ export function createTaskService(opts: TaskServiceOptions) {
           },
           now(),
         );
+        // spec.md section 6.16.5: the proposals of this run replace the ones that wait for Add or Skip.
+        d.query(Q.dropProposals).run({ task: t.id });
+        for (const x of proposals) d.query(Q.propose).run({ task: t.id, project: x.project, repo: x.repo, reason: x.reason, now: now() });
         return undefined;
       },
       keep: "base",
@@ -1470,6 +1532,64 @@ export function createTaskService(opts: TaskServiceOptions) {
     return { status: rerun ? 202 : 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
+  // POST /api/tasks/:id/repos/:taskRepo (spec.md section 6.16.5, Proposals). Add takes the proposed repository into the task with its
+  // preselected base branch, and the spec run writes the plan again with it. Skip keeps it out, and the next spec run lists it as
+  // skipped.
+  async function repoChoice(db: Database, id: number, taskRepo: number, input: { version: number; add: boolean }): Promise<TaskResult> {
+    const l = loadPlan(db, id, input.version);
+    if ("status" in l) return l;
+    const row = db.query(Q.proposal).get({ id: taskRepo, task: id }) as {
+      role: string;
+      project: string | null;
+      repo: string | null;
+      proposal: string | null;
+    } | null;
+    if (!row) return { status: 404, error: "Repository not found." };
+    if (row.role !== "added" || row.proposal !== "proposed" || !row.project || !row.repo)
+      return conflict(db, l.t, "No proposal waits for this repository.");
+    const { project, repo } = row;
+    if (!input.add) {
+      db.transaction(() => {
+        db.query(Q.choose).run({ id: taskRepo, proposal: "skipped", access: "none", base: null });
+        patch(db, id, l.t.version, {}, now());
+      })();
+      changed(id);
+      return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
+    }
+    let base: string;
+    try {
+      const last = (db.query(Q.lastBase).get({ project, repo }) as { last_base: string | null } | null)?.last_base ?? null;
+      base = await preselectBase({
+        last,
+        provider: await settings.provider(),
+        project,
+        repo,
+        remoteHead: async () => remoteHead(review.dataDir, await review.taskRemote(project, repo)),
+      });
+    } catch (e) {
+      if (e instanceof NoCloneLink) return { status: 409, error: e.message };
+      return { status: 502, error: `Cannot read the branches of ${project}/${repo}. ${noUrl((e as Error).message)}` };
+    }
+    const busy = review.busy();
+    if (busy) return busyResult(busy);
+    try {
+      db.transaction(() => {
+        const cur = taskRow(db, id);
+        if (!cur || cur.version !== input.version || cur.state !== "spec_draft") throw new Refused(TASK_CHANGED);
+        db.query(Q.choose).run({ id: taskRepo, proposal: "added", access: "edit", base });
+        const fields: Patch = { docs_json: null, estimate_json: null, size: null, size_by: null, base_commit: null, blocked_json: null };
+        patch(db, id, cur.version, fields, now());
+        const r = review.taskRun(db, specRun(db, taskRow(db, id) as TaskRow));
+        if (r.status !== 202) throw new Refused(r.conflict.error, r.conflict);
+      })();
+    } catch (e) {
+      if (!(e instanceof Refused)) throw e;
+      return e.running ? busyResult(e.running) : conflict(db, l.t, e.message);
+    }
+    changed(id);
+    return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
   // POST /api/tasks/:id/resume of a task that stopped before its build (spec.md section 6.2): the state before the stop, then the run
   // that the stop ended. An interview with open questions waits for the answers again. loop.ts resumes a build.
   function resume(db: Database, id: number, input: { version: number }): TaskResult {
@@ -1534,6 +1654,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     plan,
     branch,
     base,
+    repoChoice,
     resume,
     close,
     get(db: Database, id: number): TaskDto | null {

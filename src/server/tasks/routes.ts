@@ -33,7 +33,10 @@ import {
   taskLimitInput,
   taskListInput,
   taskPlanInput,
+  taskPointerInput,
   taskProfileInput,
+  taskPrsInput,
+  taskRepoChoiceInput,
   taskReviewersInput,
   taskSizeInput,
   taskVersionInput,
@@ -73,6 +76,16 @@ const fileParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
   return id && ATT_ID.test(v.att ?? "") ? { id, att: v.att as string } : c.json<ApiError>({ error: "Invalid task or attachment ID." }, 400);
 });
+const taskRepoParam = validator("param", (v: Record<string, string>, c) => {
+  const id = positive(v.id);
+  const taskRepo = positive(v.taskRepo);
+  return id && taskRepo ? { id, taskRepo } : c.json<ApiError>({ error: "Invalid task or repository ID." }, 400);
+});
+const taskPrParam = validator("param", (v: Record<string, string>, c) => {
+  const id = positive(v.id);
+  const taskPr = positive(v.taskPr);
+  return id && taskPr ? { id, taskPr } : c.json<ApiError>({ error: "Invalid task or PR ID." }, 400);
+});
 const runParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
   const run = positive(v.run);
@@ -101,6 +114,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
     working: loop.running,
     syncNow: () => void opts.sync?.syncNow().catch((e) => log(`The sync after a task PR failed: ${noUrl((e as Error).message)}`)),
   });
+  review.onStop(() => prs.shutdown());
   // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works.
   const live = (t: TaskDto): TaskDto => {
     const working = loop.running(t.id);
@@ -246,6 +260,37 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         const { id, part } = c.req.valid("param");
         return answer(c, await prs.open(db, id, part, c.req.valid("json")));
       })
+      // spec.md section 6.16.8: "Push and open N PRs" and "Try again" of one row. The pushes and the creates run after the 202.
+      .post(
+        "/tasks/:id/parts/:part/prs",
+        partParam,
+        body(taskPrsInput, "Give the task version and the rows with their reviewers."),
+        async (c) => {
+          const db = openDb();
+          if (!db) return c.json(unconfigured, 409);
+          const { id, part } = c.req.valid("param");
+          return answer(c, await prs.openRows(db, id, part, c.req.valid("json")));
+        },
+      )
+      // spec.md section 6.16.8: "Point <parent> at the merged commit". The commit and the push run after the 202.
+      .post("/tasks/:id/prs/:taskPr/pointer", taskPrParam, body(taskPointerInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, taskPr } = c.req.valid("param");
+        return answer(c, await prs.pointer(db, id, taskPr, c.req.valid("json")));
+      })
+      // spec.md section 6.16.5: Add or Skip of a proposed repository. Add writes the plan again (202).
+      .post(
+        "/tasks/:id/repos/:taskRepo",
+        taskRepoParam,
+        body(taskRepoChoiceInput, "Give the task version and add true or false."),
+        async (c) => {
+          const db = openDb();
+          if (!db) return c.json(unconfigured, 409);
+          const { id, taskRepo } = c.req.valid("param");
+          return answer(c, await tasks.repoChoice(db, id, taskRepo, c.req.valid("json")));
+        },
+      )
       // spec.md section 6.18.5: the base check before the PR dialog. It reads the remote only.
       .post("/tasks/:id/base-check", idParam, async (c) => {
         const db = openDb();

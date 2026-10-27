@@ -34,8 +34,13 @@ export const pullRequest = z.object({
   links,
   // docs/plans/review-v2/spec.md section 6.18.5: fixtures/bitbucket/dashboard-pull-requests-page.json holds {"outcome": "CLEAN",
   // "current": true}. Another shape is no error: the PR then has no merge result.
+  // mergeCommit: not in the docs schema, and Gate G17 found none on a merged PR. The app reads it only as the fallback of spec.md section
+  // 6.16.10.
   properties: z
-    .object({ mergeResult: z.object({ outcome: z.string(), current: z.boolean() }).optional().catch(undefined) })
+    .object({
+      mergeResult: z.object({ outcome: z.string(), current: z.boolean() }).optional().catch(undefined),
+      mergeCommit: z.object({ id: z.string() }).optional().catch(undefined),
+    })
     .optional()
     .catch(undefined),
 });
@@ -127,6 +132,8 @@ export const activity = z.object({
   comment: comment.optional(),
   // A diff in another shape only loses the excerpt. It must not fail the activities page.
   diff: diff.optional().catch(undefined),
+  // Gate G17: the MERGED activity carries commit {id, parents, message}.
+  commit: z.object({ id: z.string() }).optional().catch(undefined),
 });
 
 // PR commits page values (Gate v3 U15). An author without a forge account can lack slug and displayName.

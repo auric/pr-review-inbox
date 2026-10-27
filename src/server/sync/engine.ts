@@ -20,7 +20,8 @@ export type Timers = { set(fn: () => unknown, ms: number): unknown; clear(handle
 type Params = Record<string, string | number | null>;
 type PrKey = { id: number; project: string; repo: string; pr_id: number; state: string | null };
 type Outcome = { state: SyncState; error?: string; pause?: boolean; retryAfterMs?: number };
-type Tally = { startedAt: number; changed: Set<number>; events: number };
+// tasks: the tasks whose code PR rows changed.
+type Tally = { startedAt: number; changed: Set<number>; events: number; tasks: Set<number> };
 
 class Cancelled extends Error {}
 class Unauthorized extends Error {}
@@ -58,6 +59,13 @@ const SQL = {
   // docs/plans/review-v2/spec.md section 6.18.5: properties.mergeResult of the PR, NULL when the server names none.
   mergeResult: `INSERT INTO pr_merge_result (pr, merge_result) VALUES ($pr, $result)
     ON CONFLICT (pr) DO UPDATE SET merge_result = excluded.merge_result`,
+  // docs/plans/review-v2/spec.md section 6.16.8: the code PR of a task repository follows its synced PR. Bitbucket cannot reopen a
+  // merged PR, so merged stays.
+  taskPr: `UPDATE task_pr SET state = CASE $state WHEN 'MERGED' THEN 'merged' WHEN 'DECLINED' THEN 'declined' ELSE 'pr_open' END
+    WHERE pr = $pr AND state IN ('pr_open', 'declined')
+      AND state IS NOT (CASE $state WHEN 'MERGED' THEN 'merged' WHEN 'DECLINED' THEN 'declined' ELSE 'pr_open' END)
+    RETURNING part`,
+  partTask: "SELECT task FROM task_part WHERE id = $part",
   offDashboard:
     "UPDATE pull_request SET on_dashboard = 0 WHERE on_dashboard = 1 AND id NOT IN (SELECT value FROM json_each($ids)) RETURNING id",
   prState: "SELECT my_role, initialized_at, source_head, target_head, meta_head, state FROM pull_request WHERE id = $id",
@@ -216,6 +224,10 @@ export function createSyncEngine(opts: { settings: Settings; live: Live; now?: (
       }) as { id: number };
       run(SQL.branchLink, { pr: id, source: pr.sourceBranchUrl ?? null, target: pr.targetBranchUrl ?? null, author: pr.authorUrl ?? null });
       run(SQL.mergeResult, { pr: id, result: pr.mergeResult ? JSON.stringify(pr.mergeResult) : null });
+      for (const r of db.query(SQL.taskPr).all({ pr: id, state: pr.state }) as { part: number }[]) {
+        const t = db.query(SQL.partTask).get({ part: r.part }) as { task: number } | null;
+        if (t) tally.tasks.add(t.task);
+      }
       settings.applyTasks(db, id, tasks);
       const before = row && {
         role: row.my_role,
@@ -459,7 +471,7 @@ export function createSyncEngine(opts: { settings: Settings; live: Live; now?: (
 
   async function runCycle(gen: number): Promise<void> {
     status.nextAt = null;
-    const tally: Tally = { startedAt: now(), changed: new Set(), events: 0 };
+    const tally: Tally = { startedAt: now(), changed: new Set(), events: 0, tasks: new Set() };
     let out: Outcome;
     try {
       out = await cycle(gen, tally);
@@ -474,7 +486,7 @@ export function createSyncEngine(opts: { settings: Settings; live: Live; now?: (
     }
     if (gen !== generation) return;
     // Step 6: everything below runs after the commits.
-    live.broadcast("changed", { prs: [...tally.changed] });
+    live.broadcast("changed", { prs: [...tally.changed], ...(tally.tasks.size > 0 && { tasks: [...tally.tasks] }) });
     if (tally.events) live.broadcast("events", { count: tally.events });
     if (out.state !== "ok" && (out.state !== status.state || out.error !== status.error))
       log(`Sync ${out.state}${out.error ? `: ${out.error}` : ""}`);

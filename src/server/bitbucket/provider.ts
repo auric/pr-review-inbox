@@ -406,6 +406,18 @@ export function createBitbucketProvider(opts: ClientOptions) {
       return toPr(await client.put(prPath(ref), body, pullRequest));
     },
 
+    // spec.md section 6.16.10, Gate G17: the merge commit of a merged PR. The commit of the MERGED activity comes first;
+    // properties.mergeCommit only when no MERGED activity names a commit. null: Bitbucket names none. A failed read throws.
+    async mergeCommit(ref: PrRef): Promise<string | null> {
+      const r = await client.list(`${prPath(ref)}/activities`, activity);
+      const id = r.items.find((a) => a.action === "MERGED" && a.commit && HASH.test(a.commit.id))?.commit?.id;
+      if (id) return id;
+      // The MERGED activity can be on a page that the list did not read.
+      if (!r.complete) throw r.error instanceof ForgeError ? r.error : new ForgeError("shape", `${prPath(ref)}/activities`);
+      const p = (await client.get(prPath(ref), pullRequest)).data.properties?.mergeCommit?.id;
+      return p && HASH.test(p) ? p : null;
+    },
+
     // spec.md section 6.8 "Open the PR again". Bitbucket REST docs: POST .../reopen?version=<n>, as decline in the gate cleanup.
     // Not checked on Data Center 9.x. A stale version or a refused reopen throws a ForgeError.
     async reopenPullRequest(ref: PrRef, version: number): Promise<PullRequest> {
