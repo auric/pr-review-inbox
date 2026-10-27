@@ -231,6 +231,22 @@ export async function taskBase(change: { move?: { branch: string; files: Record<
   return ((await res.json()) as { head: string | null }).head;
 }
 
+// spec.md section 6.16.8 (WP-MR3): the task of PROJ1/app with its submodule PROJ1/lib (serve.ts). clone: the user's clone of PROJ1/app.
+// refuse: the next PR create of lib gets HTTP 403. merge: the open PR of lib merges, then one sync. branch: the app branch whose gitlink
+// of lib the answer names.
+export type TaskRepos = {
+  heads: { app: Record<string, string>; lib: Record<string, string> };
+  gitlink: string | null;
+  merged: string | null;
+  creates: string[];
+  prs: Record<"app" | "lib", { id: number; state: string; description: string }[]>;
+};
+export async function taskRepos(change: { clone?: boolean; refuse?: boolean; merge?: boolean; branch?: string } = {}): Promise<TaskRepos> {
+  const res = await fetch(`${FAKE_URL}/__control/task-repos`, { method: "POST", headers: auth, body: JSON.stringify(change) });
+  if (!res.ok) throw new Error(`control task-repos: ${res.status}`);
+  return (await res.json()) as TaskRepos;
+}
+
 // ---------- Fix it (plan r3): the user's clone ----------
 
 const auth = { Authorization: `Bearer ${E2E_TOKEN}`, "Content-Type": "application/json" };

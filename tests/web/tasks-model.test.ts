@@ -2,20 +2,25 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // docs/plans/review-v2/spec.md sections 6.12 and 7.1 (WP-B5, AC-UX1, AC-UX3, AC-UX9): one test per state row of the Task view table for
-// small tasks, the status line of a Tasks row, and the plain-word helpers.
+// small tasks, the status line of a Tasks row, and the plain-word helpers. WP-MR3 adds the rows of several repositories (section 6.16).
 import { describe, expect, test } from "bun:test";
+import { noMergeText } from "../../src/server/tasks/pointer";
 import type {
   AttachmentDto,
   AttachmentMeta,
   BranchCheckDto,
   TaskDto,
   TaskPartDto,
+  TaskPrDto,
   TaskQuestionDto,
+  TaskRepoDto,
   TaskRowDto,
   TaskStepDto,
 } from "../../src/shared/dto";
 import { stepDetail, taskProfileId } from "../../src/shared/task";
 import {
+  ACCESS_TEXT,
+  basePicks,
   branchApproval,
   branchesError,
   branchNote,
@@ -26,15 +31,26 @@ import {
   fileMeta,
   firstPick,
   firstPicks,
+  inTask,
+  listText,
   logRows,
+  NO_MERGE,
+  partRows,
   pickedPrefix,
   plannedBranch,
   planSentence,
+  pointerRow,
   prefixProblem,
+  proposals,
+  prRowLook,
+  repoName,
+  roleText,
+  rowSize,
   rowStatus,
   type SendGroup,
   STEP_TEXT,
   sendResult,
+  showRepos,
   stepLook,
   stoppedAt,
   stoppedSend,
@@ -991,5 +1007,268 @@ describe("taskProfileId (spec.md section 6.2)", () => {
     expect(taskProfileId([p("general"), p("strict")], "gone")).toBe("general");
     expect(taskProfileId([p("general")], null)).toBe("general");
     expect(taskProfileId([p("explain", true), p("strict")], null)).toBe("strict");
+  });
+});
+
+// ---------- Several repositories (spec.md sections 6.12, 6.16.5, and 6.16.8; WP-MR3) ----------
+
+const repoRow = (o: Partial<TaskRepoDto> & Pick<TaskRepoDto, "id" | "role">): TaskRepoDto => ({
+  project: "PROJ",
+  repo: "repo",
+  path: null,
+  depth: 0,
+  access: "edit",
+  reason: null,
+  baseBranch: "main",
+  proposal: null,
+  proposalReason: null,
+  ...o,
+});
+// PROJ/repo holds lib (an editable submodule) and vendor (another server). The spec run proposed PROJ/client, and the user skipped
+// PROJ/old.
+const REPOS: TaskRepoDto[] = [
+  repoRow({ id: 1, role: "main" }),
+  repoRow({ id: 2, role: "submodule", repo: "lib", path: "lib", depth: 1, baseBranch: "develop" }),
+  repoRow({
+    id: 3,
+    role: "submodule",
+    project: null,
+    repo: null,
+    path: "vendor",
+    depth: 1,
+    access: "none",
+    reason: "It comes from another server.",
+    baseBranch: null,
+  }),
+  repoRow({
+    id: 4,
+    role: "added",
+    repo: "client",
+    access: "none",
+    baseBranch: null,
+    proposal: "proposed",
+    proposalReason: "The client calls the changed API.",
+  }),
+  repoRow({ id: 5, role: "added", repo: "old", access: "none", baseBranch: null, proposal: "skipped" }),
+];
+const prRow = (o: Partial<TaskPrDto> & Pick<TaskPrDto, "taskRepo" | "repo">): TaskPrDto => ({
+  id: o.taskRepo === 1 ? null : 50 + o.taskRepo,
+  part: 7,
+  role: o.taskRepo === 1 ? "main" : "submodule",
+  project: "PROJ",
+  path: o.taskRepo === 1 ? null : o.repo,
+  branch: "feature/ABC-12-trim-spaces-in-user-names",
+  baseBranch: "main",
+  head: "a".repeat(40),
+  pushed: null,
+  files: 2,
+  lines: 30,
+  pr: null,
+  remotePr: null,
+  state: "changed",
+  error: null,
+  running: null,
+  pointer: null,
+  reviewers: ["anna"],
+  ...o,
+});
+const LIB = prRow({ taskRepo: 2, repo: "lib" });
+const MAIN = prRow({ taskRepo: 1, repo: "repo" });
+const opened = (r: TaskPrDto, remotePr: number): TaskPrDto => ({
+  ...r,
+  pushed: r.head,
+  remotePr,
+  pr: remotePr + 1000,
+  state: "pr_open",
+  pointer: r.role === "submodule" ? "task_branch" : null,
+});
+const multi = (prs: TaskPrDto[], o: Partial<TaskDto> = {}) =>
+  building({ parts: [part({ state: "self_reviewed" })], repos: REPOS, prs, ...o });
+const READY_OPEN = { state: "ready" as const, parts: [part(PR_PART)] };
+
+describe("the rows of several repositories (spec.md sections 6.12 and 6.16.8)", () => {
+  test("implementing, ready: the repository count, and Open 2 PRs; the moved base keeps Open the PR as is", () => {
+    expect(shape(view(multi([LIB, MAIN])))).toEqual({
+      status: "Your change in 2 repositories is ready and checked by Claude.",
+      primary: "Open 2 PRs",
+      more: ["Show the diff"],
+      screen: "ready",
+    });
+    const moved2 = view(multi([LIB, MAIN], { bases: [{ taskRepo: 2, branch: "develop", newCommits: 3, conflicted: false }] }));
+    expect(shape(moved2)).toMatchObject({
+      status: "develop has 3 new commits since the branch point.",
+      primary: "Update from develop",
+      more: ["Open the PR as is", "Show the diff"],
+    });
+    // One changed repository keeps the one-PR words.
+    expect(view(multi([MAIN])).primary?.label).toBe("Open the PR");
+  });
+
+  test("AC-B39: PRs partly open: the count, the failed repository, Try again for it, and the reason under the status", () => {
+    const why = "The token cannot create pull requests in PROJ/lib. Give it Repository write in Bitbucket, then try again.";
+    const other = prRow({ taskRepo: 6, repo: "other" });
+    const v = view(multi([{ ...LIB, state: "failed", error: why }, opened(other, 41), opened(MAIN, 101)], READY_OPEN));
+    expect(shape(v)).toEqual({
+      status: "2 of 3 PRs are open. The PR for PROJ/lib failed.",
+      primary: "Try again for PROJ/lib",
+      more: ["Go to the PR"],
+      screen: "pr",
+    });
+    expect(v.detail).toBe(why);
+    expect(v.needsYou).toBe(true);
+    // A failed push of the child stops the parent: both rows fail, and nothing is open yet.
+    const both = view(
+      multi([
+        { ...LIB, state: "failed", error: "The push of feature/x failed: refused." },
+        { ...MAIN, state: "failed", error: "PROJ/repo waits, because PROJ/lib is not on the server yet." },
+      ]),
+    );
+    expect(shape(both)).toEqual({
+      status: "0 of 2 PRs are open. The PRs for PROJ/lib and PROJ/repo failed.",
+      primary: "Try again for 2 PRs",
+      more: ["Show the diff"],
+      screen: "pr",
+    });
+  });
+
+  test("AC-B41: ready, submodule merged: the pointer sentence and Point <parent> at the merged commit; after the 409, the newest base", () => {
+    const merged = { ...opened(LIB, 41), state: "merged" as const };
+    const v = view(multi([merged, opened(MAIN, 101)], READY_OPEN));
+    expect(shape(v)).toEqual({
+      status: "The PROJ/lib PR merged. PROJ/repo still points at the task branch commit.",
+      primary: "Point PROJ/repo at the merged commit",
+      more: ["Go to the PR"],
+      screen: "pr",
+    });
+    const newest = taskView(multi([merged, opened(MAIN, 101)], READY_OPEN), { runner: R, forge: "Bitbucket", now: NOW, newest: 52 });
+    expect(newest.primary).toEqual({ kind: "pointer", label: "Point PROJ/repo at the newest main commit" });
+    // A failed move keeps the row and shows its sentence.
+    const failed = view(multi([{ ...merged, error: "PROJ/repo has changes that are not committed." }, opened(MAIN, 101)], READY_OPEN));
+    expect(failed.detail).toBe("PROJ/repo has changes that are not committed.");
+    // After the move, the task waits for the review again.
+    const pointed = view(multi([{ ...merged, pointer: "merged_commit" }, opened(MAIN, 101)], READY_OPEN));
+    expect(shape(pointed)).toMatchObject({ status: "Waiting for Anna Lee's review. Nothing to do.", primary: "Go to the PR" });
+  });
+
+  test("ready, all PRs open: the count, then the review wait", () => {
+    expect(shape(view(multi([opened(LIB, 41), opened(MAIN, 101)], READY_OPEN)))).toEqual({
+      status: "All 2 PRs are open. Waiting for Anna Lee's review. Nothing to do.",
+      primary: "Go to the PR",
+      more: ["Close the task"],
+      screen: "pr",
+    });
+  });
+
+  test("the running steps of the rows name the repository; the one-PR route keeps the branch words", () => {
+    const run = (kind: "push" | "pr", item: string) => step({ id: 60, kind, part: 7, item, state: "running", endedAt: null });
+    expect(view(multi([LIB, MAIN], { steps: [run("push", "PROJ/lib")] })).status).toBe("Pushing the branch to PROJ/lib.");
+    expect(view(multi([LIB, MAIN], { steps: [run("pr", "PROJ/repo")] })).status).toBe("Opening the PR in PROJ/repo.");
+    expect(view(building({ steps: [run("push", "feature/ABC-12-x")] })).status).toBe("Pushing the branch.");
+    const pointer = step({ id: 61, kind: "commit", part: 7, item: "pointer", state: "running", endedAt: null });
+    expect(view(multi([LIB, MAIN], { ...READY_OPEN, steps: [pointer] })).status).toBe("Pointing PROJ/repo at the merged commit.");
+  });
+
+  test("blocked pre-flight: the sentence of what to fix, Try again, and Stop", () => {
+    const text = "Needs you: the token cannot push to PROJ/lib. Give it Repository write in Bitbucket, then try again.";
+    expect(shape(view(building({ blocked: { kind: "preflight", step: null, text } })))).toEqual({
+      status: text,
+      primary: "Try again",
+      more: ["Stop"],
+      screen: "build",
+    });
+  });
+
+  test("AC-UX1 and AC-UX3 over the new rows: one primary at most, and one sentence with a full stop", () => {
+    const merged = { ...opened(LIB, 41), state: "merged" as const };
+    for (const t of [
+      multi([LIB, MAIN]),
+      multi([{ ...LIB, state: "failed", error: "x." }, opened(MAIN, 101)], READY_OPEN),
+      multi([merged, opened(MAIN, 101)], READY_OPEN),
+      multi([opened(LIB, 41), opened(MAIN, 101)], READY_OPEN),
+      building({ blocked: { kind: "preflight", step: null, text: "Needs you: x." } }),
+    ]) {
+      const v = view(t);
+      expect(v.more.some((a) => a.kind === v.primary?.kind)).toBe(false);
+      expect(v.status).toMatch(/^\S.*[.?]$/);
+    }
+  });
+});
+
+describe("the row states of Push and open PRs (spec.md section 6.16.8)", () => {
+  const push = (id: number, state: TaskStepDto["state"], item = "PROJ/lib") => step({ id, kind: "push", part: 7, item, state });
+  test("each state in words: Waiting, Pushing, Opening the PR, PR #n open, merged, and Failed with the sentence", () => {
+    expect(prRowLook(LIB, [], null)).toEqual({ state: "waiting", text: "Waiting" });
+    expect(prRowLook({ ...LIB, running: "push" }, [], 5)).toEqual({ state: "running", text: "Pushing" });
+    expect(prRowLook({ ...LIB, running: "pr" }, [], 5)).toEqual({ state: "running", text: "Opening the PR" });
+    expect(prRowLook(opened(LIB, 41), [], null)).toEqual({ state: "open", text: "PR #41 open" });
+    expect(prRowLook({ ...opened(LIB, 41), state: "merged" }, [], null)).toEqual({ state: "open", text: "PR #41 merged" });
+    expect(prRowLook({ ...LIB, state: "failed", error: "Refused." }, [], null)).toEqual({ state: "failed", text: "Failed: Refused." });
+  });
+
+  test("a sent row waits until a step of its repository ends after the send, so an old failure does not show again", () => {
+    const old = { ...LIB, state: "failed" as const, error: "Refused." };
+    // The send came after step 9. Only the old failed push of step 8 exists, and a step of another repository does not count.
+    expect(prRowLook(old, [push(8, "failed"), push(10, "ok", "PROJ/repo")], 9)).toEqual({ state: "waiting", text: "Waiting" });
+    expect(prRowLook(old, [push(10, "running")], 9)).toEqual({ state: "waiting", text: "Waiting" });
+    // The new push failed again.
+    expect(prRowLook(old, [push(10, "failed")], 9)).toEqual({ state: "failed", text: "Failed: Refused." });
+    // The push passed, and the create waits.
+    expect(prRowLook({ ...LIB, state: "pushed" }, [push(10, "ok")], 9)).toEqual({ state: "waiting", text: "Waiting" });
+  });
+
+  test("the size of a row, the list words, the rows of a part, and the merged submodule row", () => {
+    expect(rowSize(LIB)).toBe("2 files, 30 lines");
+    expect(rowSize({ files: 1, lines: null })).toBe("1 file");
+    expect(rowSize({ files: null, lines: null })).toBeNull();
+    expect(listText(["A"])).toBe("A");
+    expect(listText(["A", "B"])).toBe("A and B");
+    expect(listText(["A", "B", "C"])).toBe("A, B, and C");
+    expect(partRows({ prs: [LIB, { ...MAIN, part: 8 }] }, { id: 7 })).toEqual([LIB]);
+    expect(partRows({ prs: [LIB] }, null)).toEqual([]);
+    expect(pointerRow([{ ...opened(LIB, 41), state: "merged" }, opened(MAIN, 101)])?.taskRepo).toBe(2);
+    expect(pointerRow([{ ...opened(LIB, 41), state: "merged", pointer: "merged_commit" }])).toBeNull();
+  });
+
+  test("NO_MERGE is a part of the 409 sentence of the pointer route, and of no other sentence of that route", () => {
+    expect(noMergeText("PROJ/repo", "main", "PROJ/lib")).toContain(NO_MERGE);
+    expect("The PROJ/lib PR is not merged yet.").not.toContain(NO_MERGE);
+  });
+});
+
+describe("the repositories of the plan screen (spec.md sections 6.16.3 and 6.16.5, AC-B33, AC-B44)", () => {
+  test("the task repositories with their access and role; a proposal shows apart; a skipped row is no repository of the task", () => {
+    const t = task({ repos: REPOS });
+    expect(inTask(t).map((r) => [repoName(r), roleText(r), ACCESS_TEXT[r.access], r.reason])).toEqual([
+      ["PROJ/repo", "Main repository", "Can change", null],
+      ["PROJ/lib", "Submodule at lib", "Can change", null],
+      ["vendor", "Submodule at vendor", "Not available", "It comes from another server."],
+    ]);
+    expect(proposals(t).map((r) => [repoName(r), r.proposalReason])).toEqual([["PROJ/client", "The client calls the changed API."]]);
+    expect(showRepos(t)).toBe(true);
+    // One repository and no proposal keep the one base picker of the branch section.
+    expect(showRepos(task({ repos: [REPOS[0] as TaskRepoDto] }))).toBe(false);
+    expect(showRepos(task({ repos: [REPOS[0] as TaskRepoDto, REPOS[3] as TaskRepoDto] }))).toBe(true);
+    // An added repository after Add is in the task.
+    const added = repoRow({ id: 4, role: "added", repo: "client", proposal: "added", baseBranch: "main" });
+    expect(roleText(added)).toBe("Added repository");
+    expect(inTask(task({ repos: [REPOS[0] as TaskRepoDto, added] }))).toHaveLength(2);
+  });
+
+  test("the approval sends the base of each repository that the task changes; the main base is the task target", () => {
+    expect(basePicks(task({ repos: REPOS, targetBranch: "release/2.1" }))).toEqual([
+      { taskRepo: 1, branch: "release/2.1" },
+      { taskRepo: 2, branch: "develop" },
+    ]);
+    // A task made before its rows has the main row 0, which the route does not take.
+    expect(basePicks(task({ repos: [repoRow({ id: 0, role: "main" })] }))).toEqual([]);
+  });
+
+  test("the plan sentence says that each changed repository gets its own PR", () => {
+    expect(planSentence(task({ state: "spec_draft", plan: PLAN, estimate: ESTIMATE, repos: REPOS }))).toBe(
+      "The plan is ready: small, 1 PR per changed repository, about 80 changed lines.",
+    );
+    expect(planSentence(task({ state: "spec_draft", plan: PLAN, estimate: ESTIMATE, repos: [REPOS[0] as TaskRepoDto] }))).toBe(
+      "The plan is ready: small, 1 PR, about 80 changed lines.",
+    );
   });
 });

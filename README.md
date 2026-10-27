@@ -201,14 +201,22 @@ When the base branch of the task has new commits since the branch point, the vie
 
 ![The change is ready, the base branch has a new commit, and the Tell Claude box waits under Update from the base](docs/screenshots/task-update.webp)
 
+A task can change more than one repository. When the main repository has submodules, the plan screen lists each repository of the task. Each row says what Claude may do there: "Can change", "Read only", or "Not available", with the reason. A first-level submodule on the same Bitbucket server can change when your token can push to it. A nested submodule stays read only, and a submodule of another server stays an empty folder. Each repository that the task changes has its own "Base branch". The plan can also need another repository that your token can push to. Then the plan screen says "Claude proposes another repository: <name>." with the reason. "Add" takes it into the task and writes the plan again. "Skip" keeps it out.
+
+![The plan screen of a task with a submodule: each repository with its access, a base branch for each one that can change, and a proposal with Add and Skip](docs/screenshots/task-repos-plan.webp)
+
+When the build changes several repositories, "Open 2 PRs" opens one dialog with a row per repository, the submodules first. Each row shows the branch, the base, the file and line counts, and its own reviewers. "Push and open 2 PRs" pushes every branch first. Then it opens the pull requests, the submodules first. Each description links the other pull requests. The rows show "Pushing", "Opening the PR", "PR #12 open", or "Failed: <reason>". A failed row has its own "Try again", and a retry never opens a second pull request. When a submodule pull request merges, the view says that the main repository still points at the task branch commit. It offers "Point <repository> at the merged commit". The click commits the new pointer and pushes the main branch with a lease. When Bitbucket does not name the merge commit, the view asks to point at the newest commit of the submodule base instead.
+
+![The dialog that pushes and opens the pull requests of a repository and its submodule, one row each with its reviewers](docs/screenshots/task-repos-prs.webp)
+
 What keeps this safe:
 
 - Claude edits files only in a git worktree in the data folder of the app, never in your clone. It has no shell, no web access, and no agents. The worktree hides `.claude/`, `.mcp.json`, CLAUDE.md, AGENTS.md, and git hook folders. A step that writes such a file, or a file outside the worktree, is undone, its changes go to a patch file, and the task stops.
 - The app runs only the commands that you approved, as argument lists without a shell, with no token in their environment. The first build in a repository asks you to confirm a warning: the commands run code that Claude wrote, and on Windows nothing limits what that code can read or reach.
-- Nothing goes to Bitbucket before "Push and open PR". The app pushes only the branch of the task, never the target branch, and always with a lease, so it never overwrites the push of someone else.
+- Nothing goes to Bitbucket before "Push and open PR" or "Push and open 2 PRs". The app pushes only the branch of the task, never the target branch, and always with a lease, so it never overwrites the push of someone else. "Point <repository> at the merged commit" pushes only after its click.
 - Claude never runs git. "Tell Claude" sends your text to Claude only, and every git action stays a button. A failed update puts every repository of the task back at its commit before the update.
 
-This version builds small tasks: one pull request with the plan and the code. A medium or large plan waits after its approval, because the plan review pull request and the parts come in a later version. The task notices no merge by itself yet: close it when its pull request is done. A commit after the pull request opened, from "Tell Claude" or an update, stays local for now: the view says that the new commits are not on the server yet, and this version has no button to push them.
+This version builds small tasks: one pull request with the plan and the code in each changed repository. A medium or large plan waits after its approval, because the plan review pull request and the parts come in a later version. The task notices no merge by itself yet: close it when its pull request is done. A commit after the pull request opened, from "Tell Claude" or an update, stays local for now: the view says that the new commits are not on the server yet, and this version has no button to push them.
 
 <details>
 <summary>The states of a task</summary>

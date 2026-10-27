@@ -1,6 +1,6 @@
 # Build a Jira task manual smoke test
 
-This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Part U is Gate UTU: "Tell Claude" and "Update from <base>" on a release base (`tests/e2e/task-tell.e2e.ts` is its automated twin). Parts M (medium task) and L (large task) come with the later work packages.
+This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Part U is Gate UTU: "Tell Claude" and "Update from <base>" on a release base (`tests/e2e/task-tell.e2e.ts` is its automated twin). Part N is a task that changes a repository and its submodule (`tests/e2e/task-repos.e2e.ts` is its automated twin). Parts M (medium task) and L (large task) come with the later work packages.
 
 ## Rules
 
@@ -10,8 +10,8 @@ This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket
 - Use a new, empty data folder. Never use the data folder of your daily instance.
 - Nothing goes to Bitbucket before "Push and open PR". Check Bitbucket after each part.
 - Do not copy tokens, host names, code, task text, or file names into files, issues, or chat. Record counts, times, states, and the shape of the sentences only.
-- Expect about 45 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P, seven in part R, four in part D, and ten in part U. A run is one interview, one plan, one tests step, one code step, one fix, one own review, one "Tell Claude" step, or one resolve step.
-- In this document, `<BITBUCKET_URL>` is the base URL of the Bitbucket server, `<JIRA_URL>` is the base URL of the Jira server, `<REPO>` is the test repository as `<project>/<repo>`, `<TARGET>` is its default branch, `<BASE2>` is a second branch of `<REPO>`, `<RELEASE>` is a third branch of `<REPO>` that acts as a release branch, and `<KEY1>` to `<KEY6>` are the keys of the six Jira tasks.
+- Expect about 52 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P, seven in part R, four in part D, ten in part U, and seven in part N. A run is one interview, one plan, one tests step, one code step, one fix, one own review, one "Tell Claude" step, or one resolve step.
+- In this document, `<BITBUCKET_URL>` is the base URL of the Bitbucket server, `<JIRA_URL>` is the base URL of the Jira server, `<REPO>` is the test repository as `<project>/<repo>`, `<TARGET>` is its default branch, `<BASE2>` is a second branch of `<REPO>`, `<RELEASE>` is a third branch of `<REPO>` that acts as a release branch, and `<KEY1>` to `<KEY6>` are the keys of the six Jira tasks. Part N uses `<MAIN>`, a second personal test repository with a first-level submodule `<SUB>` of the same server at the folder `<PATH>`, and the Jira task `<KEY7>`. You can push to both, and the inbox knows `<MAIN>`.
 
 ## Preparation
 
@@ -102,6 +102,22 @@ Run this part after part S. You need a clone of `<REPO>` of your own to move `<R
 12. Check Bitbucket: the task branch has no new commit since step 9. No push happened without a click. This version has no button to push the merge commit, so record "not pushed".
 13. Open "More actions" and click "Close the task". Delete the extra commits on `<RELEASE>` from your own clone if the repository allows it, else record their IDs for clean up.
 
+## N. Several repositories: a repository and its submodule
+
+Write `<KEY7>` so that it changes one file in `<PATH>` and adds or changes one test in `<MAIN>`. The app never runs `git submodule` and never uses your clone of `<MAIN>` for the build.
+
+1. Start `<KEY7>` on `<MAIN>` as in S1. Answer the questions. Expect "The plan is ready: small, 1 PR per changed repository, about `<n>` changed lines."
+2. Expect the section "Repositories" with "The task branch goes to each repository that Claude can change. Each one gets its own PR." Expect one row per repository: `<MAIN>` with "Main repository" and "Can change", and `<SUB>` with "Submodule at `<PATH>`" and "Can change". Each of them has its own "Base branch". The section "Branch" has no "Base branch" of its own. A nested submodule shows "Read only" with "It is a nested submodule. Only first-level submodules are editable." A submodule of another server shows "Not available" with "It comes from another server." Record each row with its access and reason.
+3. When the plan shows "Claude proposes another repository: `<name>`." with a reason, "Add", and "Skip", click "Skip". Expect the proposal to go and the plan to stay. When no proposal shows, record "none".
+4. Approve the plan. Expect the build to change both repositories. Expect "Your change in 2 repositories is ready and checked by Claude." with the main button "Open 2 PRs". Check Bitbucket: no task branch exists in `<MAIN>` or `<SUB>`.
+5. Click "Open 2 PRs". Expect the dialog "Push `<branch>` and open 2 PRs?" with "Submodules go first, because their parent points at their commit." Expect two rows, `<SUB>` first. Each row shows "`<branch>` → `<base>` · `<n>` files, `<n>` lines", "Reviewers", and "Waiting". Expect one main button, "Push and open 2 PRs".
+6. Click "Push and open 2 PRs". Expect the rows to show "Pushing", "Opening the PR", and "PR #`<n>` open". They can pass quickly. Expect the dialog to close, then "All 2 PRs are open. Waiting for the review of your PR. Nothing to do." The box under the status lists both pull requests with links.
+7. Check Bitbucket: each repository has one new pull request from the task branch into its base. The pull request of `<SUB>` is the older one. Each description ends with "Related PRs:" and a link to the other pull request. The gitlink `<PATH>` on the task branch of `<MAIN>` points at the head of the task branch of `<SUB>`. No base branch has a new commit.
+8. Merge the pull request of `<SUB>` in Bitbucket with a merge commit. In the app, click "Check now". Expect "The `<SUB>` PR merged. `<MAIN>` still points at the task branch commit." with the main button "Point `<MAIN>` at the merged commit". Check Bitbucket: the task branch of `<MAIN>` has no new commit yet.
+9. Click "Point `<MAIN>` at the merged commit". Expect "Pointing `<MAIN>` at the merged commit.", then "Pushing the branch to `<MAIN>`.", then "Waiting for the review of your PR. Nothing to do." Check Bitbucket: the task branch of `<MAIN>` has the new commit "`<KEY7>`: point `<PATH>` at the merged commit", and its gitlink is the merge commit. When the view asks "Bitbucket did not name the merge commit. Point `<MAIN>` at the newest `<base>` commit of `<SUB>`?", record it, then click "Point `<MAIN>` at the newest `<base>` commit".
+10. A refused create shows "Failed: `<reason>`" on its row with its own "Try again", and the status "1 of 2 PRs are open. The PR for `<SUB>` failed." with "Try again for `<SUB>`". Real Bitbucket refuses a create only without Repository write, so `tests/e2e/task-repos.e2e.ts` covers it. Record "covered by the e2e test".
+11. Open "More actions" and click "Close the task".
+
 ## Record
 
 - The commit of preparation step 1, the OS, the Bun version, the `git` version, and the `claude` version.
@@ -112,4 +128,5 @@ Run this part after part S. You need a clone of `<REPO>` of your own to move `<R
 - From part B: the length of the long branch name, whether the plan came back on `<BASE2>` with the answers, the pull request number after "Continue on", and the part branch after "Start a new branch".
 - From parts P, R, and D: each expected stop as seen, not seen, or not reached.
 - From part U: the result line of each "Your instructions" group, the rebase result of step 9, the row of step 10 (conflict row or base row), and the case of step 11 with its reason.
-- Clean up: delete the `smoke/` branches and the pull request on Bitbucket, close the Jira tasks, and delete the data folder.
+- From part N: the repository rows with their access and reason, the proposal (name or "none"), the order of the two creates, and whether Bitbucket named the merge commit.
+- Clean up: delete the `smoke/` branches and the pull requests on Bitbucket, the task branches of `<MAIN>` and `<SUB>`, close the Jira tasks, and delete the data folder.

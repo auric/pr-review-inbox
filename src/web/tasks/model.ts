@@ -16,11 +16,13 @@ import {
   RUN_TEXT_BYTES,
   type TaskDto,
   type TaskPartDto,
+  type TaskPrDto,
   type TaskQuestionDto,
+  type TaskRepoDto,
   type TaskRowDto,
   type TaskStepDto,
 } from "../../shared/dto";
-import { branchName, type TaskSize } from "../../shared/task";
+import { branchName, type RepoAccess, type TaskSize } from "../../shared/task";
 import { attachmentRows, sizeText } from "../review/tasks";
 
 export type ActionKind =
@@ -44,6 +46,8 @@ export type ActionKind =
   | "go-pr"
   | "update"
   | "undo-update"
+  | "retry-prs"
+  | "pointer"
   | "close";
 export type Action = { kind: ActionKind; label: string };
 
@@ -274,11 +278,12 @@ export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string): string
     case "review":
       return `${runner} checks its own change${of}.`;
     case "commit":
-      return `Saving the change as a commit${of}.`;
+      return s.item === "pointer" ? `Pointing ${t.project}/${t.repo} at the merged commit.` : `Saving the change as a commit${of}.`;
+    // A step of the PR rows names its repository (pr.ts runRows). The one-PR route names the part branch.
     case "push":
-      return "Pushing the branch.";
+      return s.item && t.prs.some((r) => prName(r) === s.item) ? `Pushing the branch to ${s.item}.` : "Pushing the branch.";
     case "pr":
-      return "Opening the PR.";
+      return s.item && t.prs.some((r) => prName(r) === s.item) ? `Opening the PR in ${s.item}.` : "Opening the PR.";
     default:
       return `The app works on the task${of}.`;
   }
@@ -319,7 +324,9 @@ export function stoppedAt(t: TaskDto): string {
 // spec.md section 6.12, spec_draft ready: "The plan is ready: medium, 1 code PR, about 300 changed lines."
 export function planSentence(t: TaskDto): string {
   const size = t.size ?? t.plan?.proposed ?? "small";
-  const prs = size === "small" ? "1 PR" : size === "medium" ? "1 code PR" : plural(t.estimate?.parts ?? 2, "part");
+  // spec.md section 6.16.8: each changed repository gets its own PR, and the build shows which ones change.
+  const each = inTask(t).filter((r) => r.access === "edit").length > 1 ? " per changed repository" : "";
+  const prs = size === "small" ? `1 PR${each}` : size === "medium" ? `1 code PR${each}` : plural(t.estimate?.parts ?? 2, "part");
   const lines = t.estimate ? `, about ${t.estimate.lines.toLocaleString("en-US")} changed lines` : "";
   return `The plan is ready: ${size}, ${prs}${lines}.`;
 }
@@ -333,8 +340,9 @@ function waitingFor(names: string[]): string {
 
 const stepFor = (t: TaskDto, id: number | null) => (id === null ? null : (t.steps.find((s) => s.id === id) ?? null));
 
-// forge: the short name of the code host from meta, for the conflict row (spec.md section 6.18.5).
-export function taskView(t: TaskDto, o: { runner: string; forge: string; now: number }): TaskView {
+// forge: the short name of the code host from meta, for the conflict row (spec.md section 6.18.5). newest: the task_pr ID whose merge
+// commit the forge did not name, after the user saw that 409; the pointer button then points at the newest base commit.
+export function taskView(t: TaskDto, o: { runner: string; forge: string; now: number; newest?: number | null }): TaskView {
   const R = o.runner;
   const run = runningStep(t);
   const base = { detail: null, lines: [], more: [], needsYou: false, running: false } satisfies Partial<TaskView>;
@@ -467,6 +475,10 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
         return blocked({ kind: "continue", label: "Continue with 60 more minutes" }, [STOP]);
       case "slot":
         return { ...working(b.text, [STOP]), detail: step ? elapsed(o.now - step.startedAt) : null };
+      case "preflight":
+        // spec.md section 6.16.7: the sentence says what to fix on the forge. The base and the prefix change only before the build
+        // (tasks.ts base), so every pre-flight reason gets "Try again", which runs the checks again.
+        return blocked({ kind: "resume", label: "Try again" }, [STOP]);
       case "update":
         // spec.md section 6.18.4: "The update from <base> stopped: <reason>. The branch is as it was."
         return blocked(
@@ -486,6 +498,43 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   if (run) return working(stepSentence(t, run, R), stopOnly || run.kind === "check" ? [STOP] : [pause, STOP]);
   if (t.working || (t.state === "implementing" && part?.state !== "self_reviewed"))
     return working(t.working ? "The app prepares the next step." : `${R} is building your change.`, stopOnly ? [STOP] : [pause, STOP]);
+
+  // spec.md section 6.16.8: the PR rows of a part that changes several repositories. A failed row comes first, then the pointer of a
+  // merged submodule.
+  const rows = partRows(t, part);
+  if (rows.length > 1) {
+    const failed = rows.filter((r) => r.state === "failed" && r.remotePr === null);
+    const opened = rows.filter((r) => r.remotePr !== null).length;
+    const first = failed[0];
+    if (first) {
+      const one = failed.length === 1;
+      return {
+        ...base,
+        status: `${opened} of ${rows.length} PRs are open. The ${one ? "PR" : "PRs"} for ${listText(failed.map(prName))} failed.`,
+        detail: first.error,
+        primary: { kind: "retry-prs", label: one ? `Try again for ${prName(first)}` : `Try again for ${failed.length} PRs` },
+        more: opened ? [goPr] : [{ kind: "show-diff", label: "Show the diff" }],
+        screen: "pr",
+        needsYou: true,
+      };
+    }
+    const sub = pointerRow(rows);
+    if (sub) {
+      const parent = `${t.project}/${t.repo}`;
+      return {
+        ...base,
+        status: `The ${prName(sub)} PR merged. ${parent} still points at the task branch commit.`,
+        detail: sub.error,
+        primary: {
+          kind: "pointer",
+          label: o.newest === sub.id ? `Point ${parent} at the newest ${sub.baseBranch} commit` : `Point ${parent} at the merged commit`,
+        },
+        more: [goPr],
+        screen: "pr",
+        needsYou: true,
+      };
+    }
+  }
 
   // The waits of a built part (spec.md sections 6.12 and 6.18.5).
   const moved = t.bases.some((x) => x.newCommits > 0);
@@ -517,6 +566,14 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
     const asIs: Action = { kind: "open-pr", label: "Open the PR as is" };
     if (update && moved && askedStatus) return wait(askedStatus, update, [asIs, ...more], "ready", true);
     if (update && moved) return wait(`${baseNews(t)} since the branch point.`, update, [asIs, ...more], "ready", true);
+    if (rows.length > 1)
+      return wait(
+        `Your change in ${rows.length} repositories is ready and checked by ${R}.`,
+        { kind: "open-pr", label: `Open ${plural(rows.filter((r) => r.remotePr === null).length, "PR")}` },
+        more,
+        "ready",
+        true,
+      );
     return wait(
       n > 1 ? `Part ${part.ord} of ${n} is ready and checked by ${R}.` : `Your change is ready and checked by ${R}.`,
       { kind: "open-pr", label: n > 1 ? `Open PR for part ${part.ord} of ${n}` : "Open the PR" },
@@ -549,9 +606,88 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
       false,
     );
   }
-  const waiting = `Waiting for ${waitingFor(last?.waiting ?? [])}${of}.`;
+  const allOpen = rows.length > 1 && rows.every((r) => r.state === "pr_open");
+  const waiting = `${allOpen ? `All ${rows.length} PRs are open. ` : ""}Waiting for ${waitingFor(last?.waiting ?? [])}${of}.`;
   if (update && moved) return wait(`${waiting} ${baseNews(t)}.`, goPr, [update, CLOSE], "pr", false);
   return wait(`${waiting} Nothing to do.`, goPr, [CLOSE], "pr", false);
+}
+
+// ---------- Several repositories (spec.md sections 6.16.5 and 6.16.8) ----------
+
+export const prName = (r: Pick<TaskPrDto, "project" | "repo">) => `${r.project}/${r.repo}`;
+
+// "A", "A and B", "A, B, and C".
+export function listText(names: string[]): string {
+  if (names.length < 3) return names.join(" and ");
+  return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}`;
+}
+
+// The PR rows of a part: the submodules deepest first, the main repository last (TaskDto.prs).
+export const partRows = (t: Pick<TaskDto, "prs">, part: Pick<TaskPartDto, "id"> | null): TaskPrDto[] =>
+  part ? t.prs.filter((r) => r.part === part.id) : [];
+
+// The merged submodule PR whose parent still points at the task branch commit, first in the row order.
+export const pointerRow = (rows: TaskPrDto[]): TaskPrDto | null =>
+  rows.find((r) => r.id !== null && r.role === "submodule" && r.state === "merged" && r.pointer === "task_branch") ?? null;
+
+// A part of the 409 sentence of the pointer route when the forge names no merge commit (pointer.ts noMergeText). The same button then
+// sends newest. UI code names no product, so the forge name stays out.
+export const NO_MERGE = " did not name the merge commit.";
+
+// The state of one row in "Push and open PRs". sentAt: the newest step ID when the user sent this row in the open dialog, else null. A
+// sent row waits until a push or PR step of its repository ends after that step, so an old failure does not show again.
+export type RowLook = { state: "waiting" | "running" | "open" | "failed"; text: string };
+export function prRowLook(r: TaskPrDto, steps: readonly TaskStepDto[], sentAt: number | null): RowLook {
+  if (r.running === "push") return { state: "running", text: "Pushing" };
+  if (r.running === "pr") return { state: "running", text: "Opening the PR" };
+  if (r.remotePr !== null) {
+    const word = r.state === "merged" ? "merged" : r.state === "declined" ? "declined" : "open";
+    return { state: "open", text: `PR #${r.remotePr} ${word}` };
+  }
+  const name = prName(r);
+  const ended = (s: TaskStepDto) =>
+    sentAt !== null &&
+    s.id > sentAt &&
+    s.item === name &&
+    (s.kind === "push" || s.kind === "pr") &&
+    s.state !== "running" &&
+    s.state !== "waiting";
+  if (sentAt !== null && !steps.some(ended)) return { state: "waiting", text: "Waiting" };
+  if (r.state === "failed") return { state: "failed", text: r.error ? `Failed: ${r.error}` : "Failed" };
+  return { state: "waiting", text: "Waiting" };
+}
+
+// "3 files, 42 lines" of a row, or null before the first line count.
+export function rowSize(r: Pick<TaskPrDto, "files" | "lines">): string | null {
+  const parts = [...(r.files === null ? [] : [plural(r.files, "file")]), ...(r.lines === null ? [] : [plural(r.lines, "line")])];
+  return parts.length ? parts.join(", ") : null;
+}
+
+// "PROJ/lib", or the folder of a submodule that maps to no repository of the forge.
+export const repoName = (r: Pick<TaskRepoDto, "project" | "repo" | "path">) =>
+  r.project && r.repo ? `${r.project}/${r.repo}` : (r.path ?? "the main repository");
+
+// The repositories of the task, the main one first. A proposed or skipped row is no repository of the task.
+export const inTask = (t: Pick<TaskDto, "repos">) => t.repos.filter((r) => r.role !== "added" || (r.proposal ?? "added") === "added");
+export const proposals = (t: Pick<TaskDto, "repos">) => t.repos.filter((r) => r.role === "added" && r.proposal === "proposed");
+// The plan screen lists the repositories with a base picker each when the task has more than one, or a proposal.
+export const showRepos = (t: Pick<TaskDto, "repos">) => inTask(t).length > 1 || proposals(t).length > 0;
+
+export const ACCESS_TEXT: Record<RepoAccess, string> = { edit: "Can change", read: "Read only", none: "Not available" };
+
+export function roleText(r: Pick<TaskRepoDto, "role" | "path">): string {
+  if (r.role === "main") return "Main repository";
+  if (r.role === "added") return "Added repository";
+  return r.path ? `Submodule at ${r.path}` : "Submodule";
+}
+
+// The base of each repository that the task changes (spec.md section 6.16.3). The plan approval sends them, and the server refuses a base
+// that the plan was not written on. A task made before its rows has the main row 0, which the route does not take.
+export function basePicks(t: Pick<TaskDto, "repos" | "targetBranch">): { taskRepo: number; branch: string }[] {
+  return inTask(t).flatMap((r) => {
+    const branch = r.role === "main" ? t.targetBranch : r.baseBranch;
+    return r.id > 0 && r.access === "edit" && r.project && r.repo && branch ? [{ taskRepo: r.id, branch }] : [];
+  });
 }
 
 // spec.md section 6.12, Inbox: the status in the meta line of a Tasks row.

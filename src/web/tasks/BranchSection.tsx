@@ -3,6 +3,7 @@
 
 // The branch part of the plan approval (docs/plans/review-v2/spec.md sections 6.16.1 to 6.16.4): the "Branch type" chips of
 // Settings > Tasks plus "Other…", the planned name, the "Base branch" combobox, and the choice for a name that exists on the server.
+// A task with several repositories gets one BaseField per repository in the repository list (PlanTab.tsx RepoSection).
 // The chips are native radios, so the arrow keys move over them. The combobox follows the WAI-ARIA pattern of an editable combobox with
 // a list: the arrow keys move over the branches, Enter picks one, and Esc closes the list.
 import { Check, ChevronDown } from "lucide-react";
@@ -24,7 +25,6 @@ import { type BranchPick, branchesError, branchNote, pickedPrefix, plannedBranch
 const chip =
   "flex min-h-6 cursor-pointer items-center rounded-md px-2.5 py-0.5 text-sm text-ink-2 hover:text-foreground has-checked:bg-sel has-checked:font-semibold has-checked:text-foreground has-focus-visible:outline-2 has-focus-visible:outline-ring";
 const radio = "m-0 mt-[3px] size-4 accent-foreground";
-const optId = (i: number) => `task-base-option-${i}`;
 
 export type BranchCheck = { checked: string | null; data: BranchCheckDto | undefined; error: Error | null; refetch: () => unknown };
 
@@ -38,6 +38,8 @@ export function BranchSection(props: {
   check: BranchCheck;
   onPick: (p: BranchPick) => void;
   onBase: (branch: string) => Promise<unknown>;
+  // false: the task has several repositories, so the repository list holds the base pickers (PlanTab.tsx RepoSection).
+  base?: boolean;
 }) {
   const { t, size, pick, check } = props;
   const prs = usePrs();
@@ -200,14 +202,34 @@ export function BranchSection(props: {
           </label>
         </div>
       )}
-      <BaseField t={t} onBase={props.onBase} />
+      {props.base !== false && (
+        <BaseField
+          id="task-base"
+          project={t.project}
+          repo={t.repo}
+          base={t.targetBranch}
+          help="The task branch starts here, and the PR goes into it."
+          onBase={props.onBase}
+        />
+      )}
     </FieldSet>
   );
 }
 
-// spec.md section 6.16.3: the base branch combobox. The closed field shows the base. A pick other than the base asks one confirm,
-// because the plan exists on this screen.
-function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Promise<unknown> }) {
+// spec.md section 6.16.3: the base branch combobox of one repository. The closed field shows the base. A pick other than the base asks
+// one confirm, because the plan exists on this screen. name: the repository for screen readers and the confirm, when the screen lists
+// several.
+export function BaseField(props: {
+  id: string;
+  project: string;
+  repo: string;
+  base: string;
+  name?: string;
+  help?: string;
+  onBase: (branch: string) => Promise<unknown>;
+}) {
+  const { id, base, onBase } = props;
+  const optId = (i: number) => `${id}-option-${i}`;
   // null: the list is closed.
   const [text, setText] = useState<string | null>(null);
   const [active, setActive] = useState(0);
@@ -216,7 +238,7 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const q = useBranches(t.project, t.repo, text ?? "");
+  const q = useBranches(props.project, props.repo, text ?? "");
   const open = text !== null;
   const items = q.data?.branches ?? [];
   const at = Math.min(active, Math.max(0, items.length - 1));
@@ -224,8 +246,8 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
   const shown = open && (items.length > 0 || note !== null);
 
   useEffect(() => {
-    if (open) listRef.current?.querySelector(`#${optId(at)}`)?.scrollIntoView({ block: "nearest" });
-  }, [open, at]);
+    if (open) listRef.current?.querySelector(`#${id}-option-${at}`)?.scrollIntoView({ block: "nearest" });
+  }, [open, at, id]);
 
   const close = () => {
     setText(null);
@@ -234,7 +256,7 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
   // key: the keyboard picked it, so the confirm opens with no animation.
   const choose = (branch: string, key: boolean) => {
     close();
-    if (branch === t.targetBranch) return;
+    if (branch === base) return;
     setError(null);
     setTo({ branch, key });
   };
@@ -271,24 +293,24 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
 
   return (
     <Field className="gap-1.5">
-      <FieldLabel htmlFor="task-base">Base branch</FieldLabel>
+      <FieldLabel htmlFor={id}>Base branch{props.name && <span className="sr-only"> of {props.name}</span>}</FieldLabel>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <div className="relative w-full max-w-[44ch]">
           <Input
             ref={input}
-            id="task-base"
+            id={id}
             name="baseBranch"
             role="combobox"
             aria-expanded={open}
-            aria-controls="task-base-list"
+            aria-controls={`${id}-list`}
             aria-autocomplete="list"
             aria-activedescendant={open && items[at] ? optId(at) : undefined}
-            aria-describedby="task-base-help"
+            aria-describedby={props.help ? `${id}-help` : undefined}
             autoComplete="off"
             spellCheck={false}
             placeholder="Search branches…"
             className="h-8 pr-8 font-mono placeholder:font-sans"
-            value={text ?? t.targetBranch}
+            value={text ?? base}
             onFocus={(e) => e.currentTarget.select()}
             onClick={() => {
               if (!open) setText("");
@@ -317,7 +339,7 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
           {shown && (
             <div className="absolute top-full left-0 z-20 mt-1 grid w-full min-w-[16rem] gap-0.5 rounded-lg border bg-popover p-1 text-popover-foreground shadow-md">
               {items.length > 0 && (
-                <div ref={listRef} id="task-base-list" role="listbox" aria-label="Branches" className="grid max-h-60 overflow-auto">
+                <div ref={listRef} id={`${id}-list`} role="listbox" aria-label="Branches" className="grid max-h-60 overflow-auto">
                   {items.map((b, i) => (
                     // The input keeps the focus: a press on an option does not move it. aria-activedescendant names the option.
                     // biome-ignore lint/a11y/useKeyWithClickEvents: the arrow keys and Enter of the combobox pick an option.
@@ -332,12 +354,12 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
                       onMouseMove={() => setActive(i)}
                       onClick={() => choose(b.name, false)}
                     >
-                      <Check aria-hidden className={cn("size-3.5 shrink-0", b.name !== t.targetBranch && "invisible")} />
+                      <Check aria-hidden className={cn("size-3.5 shrink-0", b.name !== base && "invisible")} />
                       <span translate="no" className="min-w-0 truncate font-mono text-[12.5px]">
                         {b.name}
                       </span>
                       {b.isDefault && <span className="shrink-0 text-xs text-muted-foreground">(default)</span>}
-                      {b.name === t.targetBranch && <span className="sr-only">, the base now</span>}
+                      {b.name === base && <span className="sr-only">, the base now</span>}
                     </div>
                   ))}
                 </div>
@@ -346,12 +368,12 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
             </div>
           )}
         </div>
-        {q.data?.defaultBranch === t.targetBranch && <span className="text-xs text-muted-foreground">(default)</span>}
+        {q.data?.defaultBranch === base && <span className="text-xs text-muted-foreground">(default)</span>}
       </div>
-      <FieldDescription id="task-base-help">The task branch starts here, and the PR goes into it.</FieldDescription>
+      {props.help && <FieldDescription id={`${id}-help`}>{props.help}</FieldDescription>}
       {q.error && (
         <p role="alert" className="m-0 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-destructive">
-          <span>{branchesError(q.error.message, t.project, t.repo)}</span>
+          <span>{branchesError(q.error.message, props.project, props.repo)}</span>
           <Button type="button" variant="outline" size="xs" onClick={() => void q.refetch()}>
             Try again
           </Button>
@@ -366,10 +388,16 @@ function BaseField({ t, onBase }: { t: TaskDto; onBase: (branch: string) => Prom
         <DialogContent className="sm:max-w-[480px]" instant={to?.key} finalFocus={input} onKeyDown={dialogKeys(() => !busy && setTo(null))}>
           <DialogHeader>
             <DialogTitle>
-              The plan was written on <span translate="no">{t.targetBranch}</span>. Write it again on{" "}
-              <span translate="no">{to?.branch}</span>?
+              The plan was written on <span translate="no">{base}</span>. Write it again on <span translate="no">{to?.branch}</span>?
             </DialogTitle>
-            <DialogDescription>The plan starts again. Your answers stay.</DialogDescription>
+            <DialogDescription>
+              {props.name && (
+                <>
+                  The base of <span translate="no">{props.name}</span> changes.{" "}
+                </>
+              )}
+              The plan starts again. Your answers stay.
+            </DialogDescription>
           </DialogHeader>
           {error && (
             <p role="alert" className="m-0 text-sm text-destructive">

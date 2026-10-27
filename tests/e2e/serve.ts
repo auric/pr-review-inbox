@@ -22,6 +22,7 @@ import { readRecords } from "../support/fake-claude";
 import { startFakeJira } from "../support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../support/review-fixture";
 import * as S from "../support/scenarios";
+import { taskRepoSet } from "../support/task-repos";
 import {
   APP_PORT,
   type ClaudeScenario,
@@ -478,6 +479,14 @@ r[key("POST", `${taskRepo.path}/pull-requests`)] = async (req) => {
   return res;
 };
 
+// ---------- Several repositories (docs/plans/review-v2/spec.md section 6.16, WP-MR3) ----------
+// PROJ1/app holds the submodule PROJ1/lib on the fake and a submodule of another server. Each has its own temp bare remote. The lib test
+// of a task reads lib/lib.c from the app worktree.
+const multi = await taskRepoSet(claudeDir, fake, "PROJ1", {
+  app: { "README.md": "# App\n", "src/app.ts": "export const app = 1;\n" },
+  lib: { "lib.c": "int lib = 1;\n" },
+});
+
 // ---------- Fix it (plan r3): the user's clone ----------
 // Clones live outside the data folder, as a real clone does.
 const clonesDir = join(realpathSync.native(claudeDir), "clones");
@@ -613,8 +622,12 @@ function boot() {
   const live = createLive();
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets });
   const sync = createSyncEngine({ settings, live });
-  // A task (docs/plans/review-v2/spec.md section 6.2) builds on main of the local remote and pushes its branch there.
-  const repoRemote = async () => ({ url: remote.remote, config: [] as [string, string][] });
+  // A task (docs/plans/review-v2/spec.md section 6.2) builds on main of the local remote and pushes its branch there. PROJ1/app and
+  // PROJ1/lib have their own remotes.
+  const repoRemote = async (project: string, repo: string) => ({
+    url: multi.remotes[`${project}/${repo}`] ?? remote.remote,
+    config: [] as [string, string][],
+  });
   const review = createReviewJobs({
     settings,
     live,
@@ -670,6 +683,7 @@ r[key("POST", "/__control/reset")] = async () => {
   for (const ref of (await remoteGit(["for-each-ref", "--format=%(refname)", "refs/heads/task/"])).split("\n").filter(Boolean))
     await remoteGit(["update-ref", "-d", ref]);
   await releaseBase();
+  await multi.reset();
   fake.requests.length = 0;
   jira.requests.length = 0;
   Object.assign(folders, { opens: false, paths: [] });
@@ -770,6 +784,37 @@ r[key("POST", "/__control/task-base")] = async (req) => {
     await app.sync.syncNow();
   }
   return ok({ head });
+};
+// spec.md section 6.16.8 (WP-MR3): the task of PROJ1/app and PROJ1/lib. clone: the user's clone of PROJ1/app, so the task commits carry
+// its identity, never the identity of the user's git config. refuse: the next PR create of lib gets HTTP 403. merge: the open PR of lib
+// merges, and one sync reads it. Answers the branches of both remotes, the gitlink of lib on branch, the merge commit, the PR creates of
+// both in request order, and the PRs of the fake.
+r[key("POST", "/__control/task-repos")] = async (req) => {
+  const c = (await req.json()) as { clone?: boolean; refuse?: boolean; merge?: boolean; branch?: string };
+  if (c.clone) {
+    mkdirSync(clonesDir, { recursive: true });
+    const path = realpathSync.native(mkdtempSync(join(clonesDir, "app-")));
+    await git(["clone", "-q", "--no-checkout", multi.app.remote, path], { env: remoteEnv });
+    for (const [k, v] of CLONE_CONFIG) await inClone(path, ["config", k, v]);
+    app.settings
+      .db()
+      ?.query(
+        `INSERT INTO repo_clone (project, repo, path, updated_at) VALUES ('PROJ1', 'app', $path, $now)
+        ON CONFLICT (project, repo) DO UPDATE SET path = excluded.path, updated_at = excluded.updated_at`,
+      )
+      .run({ path, now: Date.now() });
+  }
+  if (c.refuse !== undefined) multi.flags.refuse = c.refuse;
+  const merged = c.merge ? await multi.mergeLib() : null;
+  if (merged) await app.sync.syncNow();
+  const creates = fake.requests.filter((x) => /^POST \/rest\/api\/1\.0\/projects\/PROJ1\/repos\/(app|lib)\/pull-requests$/.test(x));
+  const prs = Object.fromEntries(
+    Object.entries(multi.forges).map(([n, f]) => [
+      n,
+      [...f.prs.values()].map((p) => ({ id: p.id, state: p.state, description: p.description ?? "" })),
+    ]),
+  );
+  return ok({ heads: await multi.heads(), gitlink: c.branch ? await multi.gitlink(c.branch) : null, merged, creates, prs });
 };
 // ---------- Jira attachments (plan r3 S-ATT) ----------
 // Every request to the fake Jira since the last reset.

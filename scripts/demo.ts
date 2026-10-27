@@ -26,6 +26,7 @@ import { FAKE_TOKEN, FAKE_USER, fixture, key, repoWrites, startFakeBitbucket } f
 import { JIRA_TOKEN, startFakeJira } from "../tests/support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../tests/support/review-fixture";
 import * as S from "../tests/support/scenarios";
+import { taskRepoSet } from "../tests/support/task-repos";
 
 // No import reads these at load time. Every call below also gets the folder and the memory store explicitly.
 const dataDir = mkdtempSync(join(tmpdir(), "review-loop-demo-"));
@@ -282,6 +283,40 @@ const TASK_FLUSH = [
   "",
 ].join("\n");
 
+// A task of several repositories (docs/plans/review-v2/spec.md section 6.16): ABC-10720 on PROJ1/app, which holds the submodule PROJ1/lib.
+// The plan changes lib/lock.c in the submodule and adds a test in the main repository, and the spec run proposes PROJ1/sample-repo-4.
+// The fake CLI gives the Nth run of a kind the Nth seq entry, so these entries follow the ABC-10688 runs of scripts/screenshots.ts.
+const MULTI_KEY = "ABC-10720";
+const MULTI_SPEC = {
+  ...TASK_SPEC,
+  title: "Count the lock waits",
+  estimate: { parts: 1, lines: 12, files: 2, modules: ["lock"], db: false, api: false, unknowns: [] },
+  map: [{ path: "lib/lock.c", line: 1, symbol: "lock_waits", kind: "change", what: "Count each wait for the lock." }],
+  change: "The lock library counts each wait, so the cache can report long lock waits.",
+  parts: [
+    {
+      n: 1,
+      kind: "part",
+      title: "Count the waits",
+      goal: "lock_waits() returns the number of waits.",
+      lines: 12,
+      acceptance: [{ id: "A1", text: "lock_wait() adds one to the count." }],
+      tests: [{ test: "tests/lock.test.ts", proves: ["A1"] }],
+      tasks: [
+        { id: "T1", title: "Count each wait", files: ["lib/lock.c"], run: ["tests/lock.test.ts"], done: "tests/lock.test.ts passes." },
+      ],
+    },
+  ],
+  repos: [{ project: "PROJ1", repo: "sample-repo-4", reason: "The flush code that reads the wait count lives there." }],
+  coverage: { read: ["lib/lock.c"], skipped: [], unavailable: [], notChecked: [] },
+};
+const MULTI_TEST = `import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+
+test("lock_wait counts each wait", () => expect(readFileSync("lib/lock.c", "utf8")).toContain("waits++"));
+`;
+const MULTI_LOCK = "static int waits;\n\nint lock_waits(void) { return waits; }\n\nvoid lock_wait(void) { waits++; }\n";
+
 // The verify phase of a review run gets one tool call and no subagent (docs/plans/review-v2/spec.md section 1.6).
 const NO_AGENTS = claudeStream(claudeDir, "check", "claude/b6-hostile-repo.jsonl");
 runner.write({
@@ -295,8 +330,15 @@ runner.write({
   spec: TASK_SPEC,
   taskReview: { summary: "The lock moves into the loop.", risks: [], questions: [], findings: [], coverage: READ_FLUSH },
   seq: {
-    "implement:tests": [{ writes: [{ path: "repo/tests/flush.test.ts", text: TASK_TEST }] }],
-    "implement:implement": [{ writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] }],
+    spec: [{ spec: TASK_SPEC }, { spec: MULTI_SPEC }],
+    "implement:tests": [
+      { writes: [{ path: "repo/tests/flush.test.ts", text: TASK_TEST }] },
+      { writes: [{ path: "repo/tests/lock.test.ts", text: MULTI_TEST }] },
+    ],
+    "implement:implement": [
+      { writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] },
+      { writes: [{ path: "repo/lib/lock.c", text: MULTI_LOCK }] },
+    ],
     "implement:fix": [{ writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] }],
   },
   // The task runs get no subagent, as the verify phase.
@@ -848,6 +890,13 @@ fake.routes[key("POST", `${taskWrites.path}/pull-requests`)] = async (req) => {
   return res;
 };
 
+// The task of several repositories: PROJ1/app with the submodule PROJ1/lib and a submodule of another server, each in a temp remote.
+const multi = await taskRepoSet(claudeDir, fake, "PROJ1", {
+  app: { "README.md": "# Cache service\n", "src/cache/wait.ts": "export const maxWaitMs = 50;\n" },
+  lib: { "lock.c": "int lock_waits(void) { return 0; }\n" },
+});
+jira.addIssue(MULTI_KEY, "Count the lock waits");
+
 // The user's clone of PROJ1/sample-repo-4: a temp clone of the demo remote on the PR source branch at its head, outside the data
 // folder. Its own identity and no signing, so a commit never waits for a prompt. The commit runs the user's hooks, as Apply does.
 const cloneDir = realpathSync.native(mkdtempSync(join(tmpdir(), "review-loop-demo-clone-")));
@@ -898,8 +947,8 @@ const review = createReviewJobs({
   runnerCommand: runner.command,
   listTools: stubListTools,
   gitRemote: remote.gitRemote,
-  // A task pushes its branch to the demo remote, on "Open the PR" only.
-  repoRemote: async () => ({ url: remote.remote, config: [] }),
+  // A task pushes its branch to the demo remote, on "Open the PR" only. PROJ1/app and PROJ1/lib have their own remotes.
+  repoRemote: async (project, repo) => ({ url: multi.remotes[`${project}/${repo}`] ?? remote.remote, config: [] }),
 });
 
 await sync.syncNow();
@@ -916,6 +965,14 @@ db?.query("INSERT INTO repo_task_settings (project, repo, branch_prefix, updated
     now: Date.now(),
   },
 );
+// The clone of PROJ1/app gives the commits of ABC-10720 their identity. It sits in the folder of the fake CLI, which the stop removes.
+const appClone = join(claudeDir, "app-clone");
+await git(["clone", "-q", "--no-checkout", multi.app.remote, appClone], { env: cloneEnv });
+for (const [k, v] of cloneConfig) await git(["-C", appClone, "config", k, v], { env: cloneEnv });
+db?.query("INSERT INTO repo_clone (project, repo, path, updated_at) VALUES ('PROJ1', 'app', $path, $now)").run({
+  path: appClone,
+  now: Date.now(),
+});
 phase = 2;
 await sync.syncNow();
 
@@ -1240,6 +1297,7 @@ console.log(`PR Review Inbox demo: http://127.0.0.1:${server.port}/ (pid ${proce
 console.log(`Fake Bitbucket: ${fake.url}. Fake Jira: ${jira.url}. Data: ${dataDir}`);
 console.log(`Follow by URL: paste ${fake.url}/projects/PROJ3/repos/tools/pull-requests/5 into the filter.`);
 console.log(`Fix it: open "Release the write lock after each entry", draft replies, then fix. Apply commits in ${cloneDir}.`);
+console.log(`Several repositories: scripts/screenshots.ts builds ${MULTI_KEY} of PROJ1/app through the API, after ABC-10688.`);
 
 async function stop() {
   sync.stop();

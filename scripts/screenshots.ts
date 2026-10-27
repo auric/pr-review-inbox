@@ -315,6 +315,48 @@ async function shots(browser: Browser) {
     await save(p, `explain-${scheme}`);
     await c.close();
   }
+
+  // Several repositories (spec.md section 6.16, scripts/demo.ts MULTI_*): ABC-10720 of PROJ1/app with its submodule PROJ1/lib. The plan
+  // lists the repositories with a base picker each and the proposal of the spec run. The build changes both repositories, so the PR
+  // dialog has two rows. The task comes last, so the sidebar of the shots above keeps its task count, and after ABC-10688, so the fake CLI
+  // gives it its own runs. The Build form lists only repositories with PRs, so the task starts through the API, as the page sends it.
+  const multi = await browser.newContext({ viewport: WIDE, colorScheme: "light", reducedMotion: "reduce" });
+  const m = await multi.newPage();
+  await m.goto(`${BASE}/`);
+  const made = await m.evaluate(async () => {
+    const res = await fetch("/api/tasks", {
+      method: "POST",
+      headers: {
+        "X-RL-Session": document.querySelector<HTMLMetaElement>('meta[name="rl-session"]')?.content ?? "",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ project: "PROJ1", repo: "app", key: "ABC-10720" }),
+    });
+    return (await res.json()) as { id: number };
+  });
+  await m.goto(`${BASE}/tasks/${made.id}`);
+  const asked = m.locator("#task-questions");
+  await asked.waitFor({ timeout: RUN_MS });
+  await asked.getByRole("button", { name: "Send answers" }).click();
+  const repos = m.getByRole("list", { name: "Repositories of the task" });
+  await repos.waitFor({ timeout: RUN_MS });
+  await m.getByRole("checkbox", { name: "I understand" }).check();
+  const calm = async () => {
+    await m.mouse.move(0, 0);
+    await m.waitForTimeout(400);
+    await m.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  };
+  await calm();
+  await toTop(m.locator("fieldset", { has: repos }), 64);
+  await save(m, "task-repos-plan");
+  await m.locator("[data-primary]").click();
+  const openPrs = m.locator("[data-primary]", { hasText: "Open 2 PRs" });
+  await openPrs.waitFor({ timeout: 3 * RUN_MS });
+  await openPrs.click();
+  await m.getByRole("dialog").getByRole("button", { name: "Push and open 2 PRs" }).waitFor();
+  await calm();
+  await save(m, "task-repos-prs");
+  await multi.close();
 }
 
 mkdirSync(OUT, { recursive: true });

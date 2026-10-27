@@ -133,7 +133,10 @@ export async function putTaskFile(qc: QueryClient, id: number, att: string, incl
 export type TaskAction =
   | { kind: "answers"; input: Omit<TaskAnswersInput, "version"> }
   | { kind: "plan"; input: Omit<TaskPlanInput, "version"> }
-  | { kind: "base"; branch: string }
+  // taskRepo: a repository of the task other than the main one (spec.md section 6.16.3).
+  | { kind: "base"; branch: string; taskRepo?: number }
+  // spec.md section 6.16.5: Add or Skip of a proposed repository.
+  | { kind: "repo"; taskRepo: number; add: boolean }
   | { kind: "docs"; doc: TaskDoc; text: string }
   | { kind: "size"; size: TaskSize }
   | { kind: "pause" | "stop" | "resume" | "close" }
@@ -141,6 +144,9 @@ export type TaskAction =
   | { kind: "limit"; lineBudget: number }
   | { kind: "change"; step: number; accept: boolean }
   | { kind: "pr"; part: number; reviewers: string[] }
+  // spec.md section 6.16.8: "Push and open N PRs" and the retry of some rows (202), and "Point <parent> at the merged commit".
+  | { kind: "prs"; part: number; rows: { taskRepo: number; reviewers: string[] }[] }
+  | { kind: "pointer"; taskPr: number; newest?: true }
   | { kind: "fix"; part: number }
   // spec.md section 6.18.6: a send of the Tell box (the part of the current state), "Update from <base>", and "Undo the update".
   | { kind: "instruct"; text: string }
@@ -159,7 +165,14 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       return read(await tasks.plan.$post({ param, json: { version, ...a.input } }));
     // 200, or 202 when the plan runs again on the new base. Both hold the task.
     case "base":
-      return read(await tasks.base.$put({ param, json: { version, branch: a.branch } }));
+      return read(
+        await tasks.base.$put({ param, json: { version, branch: a.branch, ...(a.taskRepo !== undefined && { taskRepo: a.taskRepo }) } }),
+      );
+    // 202 after Add (the plan runs again), 200 after Skip.
+    case "repo":
+      return read(
+        await tasks.repos[":taskRepo"].$post({ param: { ...param, taskRepo: String(a.taskRepo) }, json: { version, add: a.add } }),
+      );
     case "docs":
       return read(await tasks.docs.$put({ param, json: { version, doc: a.doc, text: a.text } }));
     case "size":
@@ -183,6 +196,15 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
     case "pr":
       return read(
         await tasks.parts[":part"].pr.$post({ param: { ...param, part: String(a.part) }, json: { version, reviewers: a.reviewers } }),
+      );
+    case "prs":
+      return read(await tasks.parts[":part"].prs.$post({ param: { ...param, part: String(a.part) }, json: { version, rows: a.rows } }));
+    case "pointer":
+      return read(
+        await tasks.prs[":taskPr"].pointer.$post({
+          param: { ...param, taskPr: String(a.taskPr) },
+          json: { version, ...(a.newest && { newest: a.newest }) },
+        }),
       );
     case "fix":
       return read(await tasks.parts[":part"].fix.$post({ param: { ...param, part: String(a.part) }, json: { version } }));

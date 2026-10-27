@@ -51,6 +51,11 @@
 - The plan now takes its commands from your project instructions first. It knows your operating system, so on Windows it proposes `.venv/Scripts/python.exe` and a setup command that creates the venv.
 - You can now edit the commands on the plan screen: change the name, the kind, or the command line, remove one, or add one. Settings, Tasks, Commands edits the saved commands of each repository.
 - The Log tab now says why a command did not start, such as "Not found: .venv/bin/python", instead of "stopped".
+- A task can now change a repository and its submodules. The plan screen lists each repository of the task with "Can change", "Read only", or "Not available" and the reason, and a "Base branch" for each one that can change.
+- When the plan needs another repository that your token can push to, the plan screen says "Claude proposes another repository: <name>." with the reason. "Add" takes it into the task and writes the plan again. "Skip" keeps it out.
+- When the build changes several repositories, "Open 2 PRs" opens one dialog with a row per repository, the submodules first. Each row has its branch, base, size, and reviewers. "Push and open 2 PRs" pushes all branches first, then opens the pull requests. Each description links the others. Each row shows its state. A failed row has its own "Try again", and the status names the failed repository, such as "1 of 2 PRs are open. The PR for PROJ/lib failed."
+- When a submodule pull request merges, "Point <repository> at the merged commit" commits the new submodule pointer in the main repository and pushes it with a lease.
+- A check before the build that fails now offers "Try again" instead of "Resume".
 
 ### Ask Claude about a finding
 

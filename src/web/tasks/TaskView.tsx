@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 import type { MetaDto, TaskDto } from "../../shared/dto";
 import { type TaskDoc, taskProfileId } from "../../shared/task";
 import type { Layer } from "../keys";
-import type { PrRef } from "../lib/route";
+import { formatRoute, listRoute, type PrRef } from "../lib/route";
 import { RunLog } from "../review/RunLog";
 import { trackerOf } from "../review/tasks";
 import { Hint } from "../shell/Hint";
@@ -23,8 +23,23 @@ import { TaskFiles } from "./Attachments";
 import { DiffTab } from "./DiffTab";
 import { type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
 import { LogTab, stepId } from "./LogTab";
-import { type Action, type ActionKind, currentPart, openQuestions, runningStep, stoppedSend, stripSteps, taskView, tellBox } from "./model";
-import { OpenPrDialog } from "./OpenPrDialog";
+import {
+  type Action,
+  type ActionKind,
+  currentPart,
+  NO_MERGE,
+  openQuestions,
+  partRows,
+  pointerRow,
+  prName,
+  prRowLook,
+  runningStep,
+  stoppedSend,
+  stripSteps,
+  taskView,
+  tellBox,
+} from "./model";
+import { OpenPrDialog, OpenPrsDialog, type PrRowInput } from "./OpenPrDialog";
 import { PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
 import { AnsweredList, QuestionsForm } from "./Questions";
 import { docList, SpecDocs } from "./SpecDocs";
@@ -84,8 +99,16 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const profileName = meta.profiles.find((p) => p.id === profileId)?.name;
   const act = useTaskAction(t);
   const [errorText, setErrorText] = useState<string | null>(null);
-  const view = taskView(t, { runner, forge: meta.forge.name, now: useTick(runningStep(t) !== null) });
+  // spec.md section 6.16.8: the task_pr ID whose merge commit the forge did not name. The pointer button then sends newest.
+  const [newest, setNewest] = useState<number | null>(null);
+  const view = taskView(t, { runner, forge: meta.forge.name, now: useTick(runningStep(t) !== null), newest });
   const part = currentPart(t);
+  // The PR rows of a part that changes several repositories. One row keeps the one-PR dialog and route.
+  const rows = partRows(t, part);
+  const several = rows.length > 1;
+  // The reviewers that the user picked per repository, and the newest step ID when each row went to the server (model.ts prRowLook).
+  const [picks, setPicks] = useState<Record<number, string[]>>({});
+  const [sent, setSent] = useState<Record<number, number>>({});
   const box = tellBox(t);
   const tabs: Tab[] = [
     ...(t.questions.length ? ["questions" as const] : []),
@@ -120,6 +143,25 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
     });
   };
   const focus = (id: string) => requestAnimationFrame(() => document.getElementById(id)?.focus({ preventScroll: false }));
+  // spec.md section 6.16.8: "Push and open N PRs" and "Try again" of some rows. The pushes and creates run after the 202, and the rows
+  // show their progress from the task.
+  const sendRows = (list: PrRowInput[]) => {
+    if (!part || !list.length) return;
+    const at = Math.max(0, ...t.steps.map((s) => s.id));
+    const inDialog = prOpen;
+    setPrError(null);
+    setErrorText(null);
+    setSent((s) => ({ ...s, ...Object.fromEntries(list.map((r) => [r.taskRepo, at])) }));
+    act.mutate(
+      { kind: "prs", part: part.id, rows: list },
+      {
+        onError: (e) => {
+          setSent((s) => Object.fromEntries(Object.entries(s).filter(([k]) => !list.some((r) => String(r.taskRepo) === k))));
+          (inDialog ? setPrError : setErrorText)(e.message);
+        },
+      },
+    );
+  };
 
   const run = (kind: ActionKind) => {
     switch (kind) {
@@ -177,12 +219,36 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return part && send({ kind: "fix", part: part.id });
       case "go-pr": {
         const p = [...t.parts].reverse().find((x) => x.remotePr !== null);
-        return p?.remotePr && onPr({ project: t.project, repo: t.repo, id: p.remotePr });
+        if (p?.remotePr) return onPr({ project: t.project, repo: t.repo, id: p.remotePr });
+        // The main PR failed, so the first open PR of another repository.
+        const r = rows.find((x) => x.remotePr !== null);
+        return r?.remotePr && onPr({ project: r.project, repo: r.repo, id: r.remotePr });
       }
       case "update":
         return part && send({ kind: "update", part: part.id });
       case "undo-update":
         return part && send({ kind: "undo", part: part.id });
+      case "retry-prs":
+        return sendRows(
+          rows
+            .filter((r) => r.state === "failed" && r.remotePr === null)
+            .map((r) => ({ taskRepo: r.taskRepo, reviewers: picks[r.taskRepo] ?? r.reviewers })),
+        );
+      case "pointer": {
+        const id = pointerRow(rows)?.id;
+        if (id == null) return;
+        setErrorText(null);
+        return act.mutate(
+          { kind: "pointer", taskPr: id, ...(newest === id && { newest: true as const }) },
+          {
+            onSuccess: () => setNewest(null),
+            onError: (e) => {
+              setErrorText(e.message);
+              if (e.message.includes(NO_MERGE)) setNewest(id);
+            },
+          },
+        );
+      }
     }
   };
 
@@ -215,6 +281,13 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
     const typing = !!a?.closest("[data-tell]");
     if (inside && !typing && !prOpen) (primaryRef.current ?? document.getElementById("task-status"))?.focus({ preventScroll: true });
   }, [mark, prOpen]);
+
+  // spec.md section 6.16.8: the dialog of several rows stays open while the server works, and closes when every row has its PR.
+  const allOpen = several && rows.every((r) => r.remotePr !== null);
+  useEffect(() => {
+    if (allOpen) setPrOpen(false);
+  }, [allOpen]);
+  const openPrAction = [view.primary, ...view.more].some((a) => a?.kind === "open-pr");
 
   const busy = act.isPending;
   const primary = view.primary;
@@ -311,8 +384,9 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         limit={limit}
         onLimit={setLimit}
         onSend={send}
-        onBase={(branch) => act.mutateAsync({ kind: "base", branch })}
+        onBase={(branch, taskRepo) => act.mutateAsync({ kind: "base", branch, ...(taskRepo !== undefined && { taskRepo }) })}
         onRun={run}
+        onPr={onPr}
       />
 
       <section aria-label="Details" className="grid gap-3">
@@ -377,7 +451,21 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         </div>
       </section>
 
-      {part && [view.primary, ...view.more].some((a) => a?.kind === "open-pr") && (
+      {part && several && (prOpen || openPrAction) && (
+        <OpenPrsDialog
+          t={t}
+          rows={rows}
+          open={prOpen}
+          busy={busy}
+          error={prError}
+          picks={picks}
+          sent={sent}
+          onPick={(id, list) => setPicks((p) => ({ ...p, [id]: list }))}
+          onOpenChange={setPrOpen}
+          onSend={sendRows}
+        />
+      )}
+      {part && !several && openPrAction && (
         <OpenPrDialog
           key={`${part.id}:${t.reviewers.join(",")}`}
           t={t}
@@ -421,9 +509,10 @@ function Content(props: {
   limit: string;
   onLimit: (v: string) => void;
   onSend: (a: TaskAction, after?: () => void) => void;
-  // PUT /api/tasks/:id/base. The confirm of the base picker shows its error.
-  onBase: (branch: string) => Promise<unknown>;
+  // PUT /api/tasks/:id/base. The confirm of the base picker shows its error. taskRepo: absent for the main repository.
+  onBase: (branch: string, taskRepo?: number) => Promise<unknown>;
   onRun: (k: ActionKind) => void;
+  onPr: (ref: PrRef) => void;
 }) {
   const { t, runner, screen, busy } = props;
   const b = t.blocked;
@@ -474,6 +563,7 @@ function Content(props: {
         onSize={(size) => props.onSend({ kind: "size", size })}
         onApprove={(input) => props.onSend({ kind: "plan", input })}
         onBase={props.onBase}
+        onRepo={(taskRepo, add) => props.onSend({ kind: "repo", taskRepo, add })}
       />
     );
   }
@@ -605,6 +695,46 @@ function Content(props: {
       "Build",
     );
   }
+
+  const rows = partRows(t, part);
+  if (screen === "pr" && rows.length > 1)
+    return box(
+      <ul aria-label="Pull requests of the task" className="m-0 grid list-none gap-2.5 p-0 text-sm">
+        {rows.map((r) => {
+          const look = prRowLook(r, t.steps, null);
+          const id = r.remotePr;
+          return (
+            <li key={r.taskRepo} className="grid gap-0.5">
+              <div className="flex flex-wrap items-baseline gap-x-2.5">
+                <span translate="no" className="font-medium">
+                  {prName(r)}
+                </span>
+                {id !== null ? (
+                  // The link opens the PR in My PRs, as "Go to the PR" does. A click with a modifier key keeps the browser default.
+                  <a
+                    href={formatRoute({ ...listRoute("mine"), pr: { project: r.project, repo: r.repo, id } })}
+                    className="text-ink-2 underline underline-offset-2 hover:text-foreground"
+                    onClick={(e) => {
+                      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                      e.preventDefault();
+                      props.onPr({ project: r.project, repo: r.repo, id });
+                    }}
+                  >
+                    {look.text}
+                  </a>
+                ) : (
+                  <span className={look.state === "failed" ? "text-destructive" : "text-ink-2"}>{look.text}</span>
+                )}
+              </div>
+              <span translate="no" className="font-mono text-xs text-ink-2 [overflow-wrap:anywhere]">
+                {r.branch} → {r.baseBranch}
+              </span>
+            </li>
+          );
+        })}
+      </ul>,
+      "Pull requests",
+    );
 
   if (screen === "pr") {
     const p = [...t.parts].reverse().find((x) => x.remotePr !== null);

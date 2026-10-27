@@ -2,23 +2,39 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The plan approval (docs/plans/review-v2/spec.md sections 6.1, 6.4, 6.8, 6.12, and 6.16): the size with its one-line meaning and the
-// rule lines, the branch (BranchSection.tsx), the approved commands with the first-use warning, and the map check line. The header
-// button "Approve the plan" submits this form.
+// rule lines, the branch (BranchSection.tsx), the repositories of a task with several (section 6.16.5), the approved commands with the
+// first-use warning, and the map check line. The header button "Approve the plan" submits this form.
 // PlanParts is the Plan tab: the parts with their state in plain words, the tasks with check marks, and the lines against the limit.
 import { Check, Circle } from "lucide-react";
 import { useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { FieldLegend, FieldSet } from "@/components/ui/field";
 import { cn } from "@/lib/utils";
 import type { TaskDto, TaskPlanInput } from "../../shared/dto";
 import { PART_STATE_TEXT, sizeRank, TASK_SIZES, type TaskCommand, type TaskSize } from "../../shared/task";
 import { useSettings } from "../shell/data";
-import { BranchSection } from "./BranchSection";
+import { BaseField, BranchSection } from "./BranchSection";
 import { CommandsEditor } from "./CommandsEditor";
 import { type CommandDraft, draftProblem, draftsToCommands, toDraft } from "./commands";
 import { useBranchCheck } from "./data";
-import { type BranchPick, branchApproval, codeParts, firstPick, pickedPrefix, prefixProblem, SIZE_LINE } from "./model";
+import {
+  ACCESS_TEXT,
+  type BranchPick,
+  basePicks,
+  branchApproval,
+  codeParts,
+  firstPick,
+  inTask,
+  pickedPrefix,
+  prefixProblem,
+  proposals,
+  repoName,
+  roleText,
+  SIZE_LINE,
+  showRepos,
+} from "./model";
 
 export const PLAN_FORM = "task-plan";
 
@@ -46,10 +62,13 @@ export function PlanApproval(props: {
   busy: boolean;
   onSize: (size: TaskSize) => void;
   onApprove: (input: Omit<TaskPlanInput, "version">) => void;
-  onBase: (branch: string) => Promise<unknown>;
+  // taskRepo: absent for the main repository.
+  onBase: (branch: string, taskRepo?: number) => Promise<unknown>;
+  onRepo: (taskRepo: number, add: boolean) => void;
 }) {
   const { t, runner } = props;
   const plan = t.plan;
+  const several = showRepos(t);
   const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(plan?.commands.map((c) => c.id) ?? []));
   const [drafts, setDrafts] = useState<CommandDraft[]>(() => plan?.commands.map(toDraft) ?? []);
   const [warned, setWarned] = useState(false);
@@ -96,7 +115,7 @@ export function PlanApproval(props: {
           const offered = plan.commands.find((o) => o.id === c.id);
           return offered && sameCommand(offered, c) ? c.id : c;
         });
-        props.onApprove({ size, commands, ...(plan.warning && { warning: true }), ...branch });
+        props.onApprove({ size, commands, ...(plan.warning && { warning: true }), ...branch, ...(several && { bases: basePicks(t) }) });
       }}
     >
       <FieldSet className="gap-1.5">
@@ -146,8 +165,10 @@ export function PlanApproval(props: {
         pick={pick}
         check={check}
         onPick={setPick}
-        onBase={props.onBase}
+        onBase={(branch) => props.onBase(branch)}
+        base={!several}
       />
+      {several && <RepoSection t={t} runner={runner} busy={props.busy} onBase={props.onBase} onRepo={props.onRepo} />}
       {plan.missing > 0 && (
         <p className="m-0 text-sm text-ink-2">
           {plan.missing === 1 ? "1 map line names code that does not exist." : `${plan.missing} map lines name code that does not exist.`}{" "}
@@ -199,6 +220,96 @@ export function PlanApproval(props: {
         </p>
       )}
     </form>
+  );
+}
+
+// spec.md sections 6.16.3 and 6.16.5: the repositories of the task with their access, the reason of each one that the task cannot change,
+// a base picker for each one that it changes, and the proposals of the spec run with Add and Skip. The proposal reason is the text of
+// the runner.
+function RepoSection(props: {
+  t: TaskDto;
+  runner: string;
+  busy: boolean;
+  onBase: (branch: string, taskRepo?: number) => Promise<unknown>;
+  onRepo: (taskRepo: number, add: boolean) => void;
+}) {
+  const { t, runner } = props;
+  return (
+    <FieldSet className="gap-2">
+      <FieldLegend className="text-sm font-semibold">Repositories</FieldLegend>
+      <p className="m-0 text-sm text-ink-2">The task branch goes to each repository that {runner} can change. Each one gets its own PR.</p>
+      <ul aria-label="Repositories of the task" className="m-0 grid list-none gap-2 p-0">
+        {inTask(t).map((r) => {
+          const name = repoName(r);
+          const main = r.role === "main";
+          return (
+            <li key={r.id} className="grid gap-2 rounded-md border bg-card px-3 py-2.5">
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                <span translate="no" className="text-sm font-semibold [overflow-wrap:anywhere]">
+                  {name}
+                </span>
+                <span translate="no" className="text-xs text-ink-2">
+                  {roleText(r)}
+                </span>
+                <Badge variant={r.access === "edit" ? "soft" : "quiet"}>{ACCESS_TEXT[r.access]}</Badge>
+              </div>
+              {r.reason && <p className="m-0 text-xs text-ink-2">{r.reason}</p>}
+              {r.access === "edit" && r.project && r.repo && (
+                <BaseField
+                  id={main ? "task-base" : `task-base-${r.id}`}
+                  project={r.project}
+                  repo={r.repo}
+                  base={main ? t.targetBranch : (r.baseBranch ?? "")}
+                  name={name}
+                  onBase={(branch) => props.onBase(branch, main ? undefined : r.id)}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {proposals(t).map((p) => {
+        const name = repoName(p);
+        return (
+          <section
+            key={p.id}
+            aria-labelledby={`task-proposal-${p.id}`}
+            className="grid gap-2 rounded-md border border-dashed bg-card px-3 py-2.5"
+          >
+            <p id={`task-proposal-${p.id}`} className="m-0 text-sm [overflow-wrap:anywhere]">
+              {runner} proposes another repository:{" "}
+              <span translate="no" className="font-semibold">
+                {name}
+              </span>
+              .{p.proposalReason && ` ${p.proposalReason}`}
+            </p>
+            <p className="m-0 text-xs text-ink-2">Add writes the plan again with this repository. Skip keeps it out of the task.</p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-label={`Add ${name}`}
+                disabled={props.busy}
+                onClick={() => props.onRepo(p.id, true)}
+              >
+                Add
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={`Skip ${name}`}
+                disabled={props.busy}
+                onClick={() => props.onRepo(p.id, false)}
+              >
+                Skip
+              </Button>
+            </div>
+          </section>
+        );
+      })}
+    </FieldSet>
   );
 }
 
