@@ -9,16 +9,18 @@ import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createBitbucketProvider } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
+import { fetchInto } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { commitTask } from "../../src/server/tasks/implement";
 import { createLoop } from "../../src/server/tasks/loop";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
-import { resolveTaskRepos, taskRepos } from "../../src/server/tasks/repos";
+import { type RepoDeps, resolveTaskRepos, taskRepos } from "../../src/server/tasks/repos";
 import { taskRow } from "../../src/server/tasks/tasks";
 import { commitStep, headOf, openRepoTrees, openWorktree, type RepoTree, type Worktree } from "../../src/server/tasks/worktree";
 import { type StepDetail, specResult, stepDetail, type TaskBlocked } from "../../src/shared/task";
@@ -334,4 +336,67 @@ export async function multiTask(o: { seq?: FakeScenario["seq"]; appBase?: string
   });
   if (r.status !== "committed") throw new Error(`The fixture commit failed: ${JSON.stringify(r)}`);
   return { root, m, fake, other, ...a, base: m.app.base, task, wt, trees, tree, ...views(root, db, task, wt, m.app.base) };
+}
+
+// PROJ/app with the added repository PROJ/lib (spec.md section 6.16.5, Proposals: the user clicked Add), and the fake Bitbucket as the
+// configured server. The spec-run resolve fetched the base of lib. built: one part with one commit in app and lib; else no part, so the
+// loop builds it.
+export async function addedTask(o: { seq?: FakeScenario["seq"]; built?: boolean } = {}) {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-mr2a-")));
+  dirs.push(root);
+  const fake = startFakeBitbucket();
+  cleanups.push(() => fake.stop());
+  const appRepo = await bareRepo(root, "app", { "README.md": "app\n", "src/app.ts": "export const app = 1;\n" });
+  const lib = await bareRepo(root, "lib", { "lib.c": "int lib;\n", "CLAUDE.md": "lib rules\n" });
+  const forges = { app: repoWrites(fake, "PROJ", "app"), lib: repoWrites(fake, "PROJ", "lib") };
+  const remotes: Record<string, string> = { app: appRepo.remote, lib: lib.remote };
+  const remote = async (project: string, repo: string) => {
+    const url = remotes[repo];
+    if (project !== "PROJ" || !url) throw new Error(`No remote for ${project}/${repo}.`);
+    return { url, config: [] as [string, string][] };
+  };
+  const a = await app(root, remote, "app", o.seq, fake.url);
+  const { db, dataDir } = a;
+  const { id: task, plan } = a.addTask(appRepo.base, "main");
+  await fetchInto(dataDir, "PROJ", "app", { url: appRepo.remote, config: [] }, ["+refs/heads/main:refs/rl/task/1/target"]);
+  const libRow = (
+    db
+      .query(
+        `INSERT INTO task_repo (task, role, project, repo, depth, access, base_branch, proposal, proposal_reason, created_at)
+        VALUES ($task, 'added', 'PROJ', 'lib', 0, 'edit', 'main', 'added', 'The client lives there.', 1) RETURNING id`,
+      )
+      .get({ task }) as { id: number }
+  ).id;
+  const deps: RepoDeps = { dataDir, provider: async () => createBitbucketProvider({ baseUrl: fake.url, token: FAKE_TOKEN }), remote };
+  const t = () => taskRow(db, task) as NonNullable<ReturnType<typeof taskRow>>;
+  const snapshot = await resolveTaskRepos(db, deps, t(), appRepo.base);
+  const wt = () => openWorktree({ dataDir, db, project: "PROJ", repo: "app", task, ord: 1, branch: BRANCH, base: appRepo.base });
+  const trees = async () => openRepoTrees({ dataDir, db, task, ord: 1, branch: BRANCH, main: await wt(), rows: taskRepos(db, t()) });
+  if (o.built) {
+    const part = (
+      db
+        .query(
+          `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+          VALUES ($task, 1, 'single', 'Add the feature', $branch, 'main', 'self_reviewed', 1, 1) RETURNING id`,
+        )
+        .get({ task, branch: BRANCH }) as { id: number }
+    ).id;
+    const all = await trees();
+    const main = all[0]?.wt as Worktree;
+    await write(main, { [`specs/${KEY}/plan.md`]: plan, "src/feature.ts": "export const feature = 'works';\n" });
+    await write(all.find((x) => x.row.id === libRow)?.wt as Worktree, { "lib.c": "int lib = 2;\n" });
+    const r = await commitTask({
+      db,
+      task,
+      part,
+      wt: main,
+      item: "T1.1",
+      message: `${KEY}: Add the plan`,
+      who: WHO,
+      allow: [],
+      trees: all,
+    });
+    if (r.status !== "committed") throw new Error(`The fixture commit failed: ${JSON.stringify(r)}`);
+  }
+  return { root, fake, forges, appRepo, lib, libRow, snapshot, deps, ...a, task, wt, trees, ...views(root, db, task, wt, appRepo.base) };
 }

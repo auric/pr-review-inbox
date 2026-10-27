@@ -528,8 +528,8 @@ export async function fetchInto(
   return cache;
 }
 
-// A repository of a task snapshot inside the main folder (spec.md section 6.16.5, Snapshots). path: from the main repository root, a
-// gitlink path of its parent. The parents come before their children.
+// A repository of a task snapshot (spec.md section 6.16.5, Snapshots). path: from the main repository root, a gitlink path of its parent,
+// or ../repos/<project>/<slug> for an added repository beside the main folder. The parents come before their children.
 export type SnapshotRepo = { path: string; cache: string; commit: string };
 
 export type TaskWorkspaceInput = {
@@ -646,16 +646,23 @@ async function taskSnapshot(
     mkdirSync(app, { recursive: true });
     await git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, head], { env, ...i.long });
     const links = await linksAt(cache, env, head);
-    // spec.md section 6.16.5, Snapshots: each submodule with access edit or read at its gitlink path, detached at its pinned commit.
+    // spec.md section 6.16.5, Snapshots: each submodule with access edit or read at its gitlink path, detached at its pinned commit. An
+    // added repository goes to work/repos/<project>/<slug>, the same path as in the part folder, and gets its own sanitize.
+    const beside: { at: string; links: string[] }[] = [];
     for (const n of nested) {
       const at = resolve(repo, n.path);
       const r = relative(repo, at);
-      if (!r || r.startsWith("..") || isAbsolute(r) || !HEAD.test(n.commit))
+      const added = relative(join(work, "repos"), at);
+      const outside = !r || r.startsWith("..") || isAbsolute(r);
+      if ((outside && (!added || added.startsWith("..") || isAbsolute(added))) || !HEAD.test(n.commit))
         throw new WorkspaceError(`A submodule path is outside the worktree: ${n.path}`);
       await git([`--git-dir=${n.cache}`, "worktree", "add", "--detach", at, n.commit], { env, ...i.long });
-      links.push(...(await linksAt(n.cache, env, n.commit)).map((l) => `${n.path}/${l}`));
+      const own = await linksAt(n.cache, env, n.commit);
+      if (outside) beside.push({ at, links: own });
+      else links.push(...own.map((l) => `${n.path}/${l}`));
     }
     await sanitize(repo, links);
+    for (const b of beside) await sanitize(b.at, b.links);
     for (const f of i.files) writeFileSync(join(context, f.name), UNTRUSTED + f.text);
     if (i.attachments.length) await copyAttachments(join(i.dataDir, "attachments"), join(context, "attachments"), i.attachments);
     return { run, work, repo, context, app, cache, ...at, via: "branch" as const, keep, remove };

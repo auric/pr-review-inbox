@@ -121,7 +121,7 @@ import {
   sizeFloor,
   toPlan,
 } from "./plan";
-import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, updateRepos } from "./repos";
+import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, taskRepos, updateRepos } from "./repos";
 import { firstFree, remoteBranches } from "./worktree";
 
 type TaskSizeInput = z.infer<typeof taskSizeInput>;
@@ -287,6 +287,10 @@ const Q = {
     VALUES ($task, 'added', $project, $repo, 0, 'none', 'proposed', $reason, $now)`,
   proposal: "SELECT role, project, repo, proposal FROM task_repo WHERE id = $id AND task = $task",
   choose: "UPDATE task_repo SET proposal = $proposal, access = $access, base_branch = $base WHERE id = $id",
+  // spec.md section 6.16.3: the base pick of a repository other than the main one, and its last pick at the plan approval.
+  repoBase: "UPDATE task_repo SET base_branch = $base WHERE id = $id",
+  lastBasePick: `INSERT INTO repo_task_settings (project, repo, last_base, updated_at) VALUES ($project, $repo, $base, $now)
+    ON CONFLICT (project, repo) DO UPDATE SET last_base = excluded.last_base, updated_at = excluded.updated_at`,
   openPr: `SELECT id FROM pull_request WHERE project = $project AND repo = $repo AND source_branch = $branch AND target_branch = $base
     AND state = 'OPEN' ORDER BY id DESC LIMIT 1`,
   // branch_prefix stays in the table. No code reads or writes it (spec.md section 6.16.1).
@@ -487,6 +491,7 @@ type PartRow = {
   head: string | null;
   pushed: string | null;
   lines: number | null;
+  files: number | null;
   usage_json: string | null;
 };
 type StepRow = {
@@ -1409,6 +1414,20 @@ export function createTaskService(opts: TaskServiceOptions) {
     const { t, docs } = l;
     const problem = sizeProblem(db, t, docs, input.size) ?? largeRepoProblem(input.size, docs.parsed.parts, repoDtos(db, t));
     if (problem) return conflict(db, t, problem);
+    // spec.md section 6.16.3: each pick names a repository of the task with access edit and the base that the plan was written on. A
+    // different base goes through PUT /api/tasks/:id/base, which writes the plan again.
+    const rows = taskRepos(db, t);
+    const picks = input.bases ?? [];
+    if (new Set(picks.map((b) => b.taskRepo)).size !== picks.length)
+      return { status: 400, error: "Each repository takes one base branch." };
+    for (const b of picks) {
+      const r = rows.find((x) => x.id === b.taskRepo);
+      if (r?.access !== "edit" || !r.project || !r.repo)
+        return { status: 400, error: `Repository ${b.taskRepo} is not a repository that the task changes.` };
+      const stored = r.role === "main" ? t.target_branch : r.base_branch;
+      if (b.branch !== stored)
+        return conflict(db, t, `The plan was written on ${stored}. Change the base branch of ${r.project}/${r.repo} first.`);
+    }
     const repo = repoSettings(db, t.project, t.repo);
     const offered = commandsOf(docs.parsed, repo.commands);
     const ids = input.commands.map((c) => (typeof c === "string" ? c : c.id));
@@ -1448,6 +1467,10 @@ export function createTaskService(opts: TaskServiceOptions) {
           base: t.target_branch,
           now: at,
         });
+        for (const b of picks) {
+          const r = rows.find((x) => x.id === b.taskRepo) as (typeof rows)[number];
+          if (r.role !== "main") db.query(Q.lastBasePick).run({ project: r.project, repo: r.repo, base: b.branch, now: at });
+        }
         // spec.md section 6.16: the branch prefix and the existing-branch pick go with the approval.
         const s: TaskSettings = {
           ...settingsOf(t),
@@ -1494,22 +1517,31 @@ export function createTaskService(opts: TaskServiceOptions) {
   }
 
   // PUT /api/tasks/:id/base (spec.md section 6.16.3). Before the plan: the base changes. With a plan: the plan goes, and the spec run
-  // writes it again on the new base head. The answers stay.
-  async function base(db: Database, id: number, input: { version: number; branch: string }): Promise<TaskResult> {
+  // writes it again on the new base head. The answers stay. taskRepo: a repository of the task with access edit other than the main
+  // one; its pick goes to task_repo.base_branch.
+  async function base(db: Database, id: number, input: { version: number; taskRepo?: number; branch: string }): Promise<TaskResult> {
     const t = taskRow(db, id);
     if (!t) return { status: 404, error: "Task not found." };
     if (t.version !== input.version) return conflict(db, t, TASK_CHANGED);
     if (t.state !== "interview" && t.state !== "spec_draft") return conflict(db, t, "The base branch changes only before the build.");
     if (db.query(Q.busy).get({ id })) return conflict(db, t, "Claude is still working on this task. Wait for the step to end.");
-    if (input.branch === t.target_branch) return { status: 200, task: taskDto(db, t) };
+    const rows = taskRepos(db, t);
+    const own = input.taskRepo === undefined || rows.find((r) => r.id === input.taskRepo)?.role === "main";
+    const row = own ? null : rows.find((r) => r.id === input.taskRepo);
+    if (row === undefined) return { status: 404, error: "Repository not found." };
+    if (row && (row.access !== "edit" || !row.project || !row.repo))
+      return conflict(db, t, `The task cannot change ${row.project && row.repo ? `${row.project}/${row.repo}` : row.path}.`);
+    const project = row?.project ?? t.project;
+    const repo = row?.repo ?? t.repo;
+    if (input.branch === (row ? row.base_branch : t.target_branch)) return { status: 200, task: taskDto(db, t) };
     let found: boolean;
     try {
-      found = (await remoteBranches(review.dataDir, await review.taskRemote(t.project, t.repo), input.branch)).has(input.branch);
+      found = (await remoteBranches(review.dataDir, await review.taskRemote(project, repo), input.branch)).has(input.branch);
     } catch (e) {
       if (e instanceof NoCloneLink) return { status: 409, error: e.message };
-      return { status: 502, error: `Cannot read the branches of ${t.project}/${t.repo}. ${noUrl((e as Error).message)}` };
+      return { status: 502, error: `Cannot read the branches of ${project}/${repo}. ${noUrl((e as Error).message)}` };
     }
-    if (!found) return conflict(db, t, `${input.branch} does not exist in ${t.project}/${t.repo}.`);
+    if (!found) return conflict(db, t, `${input.branch} does not exist in ${project}/${repo}.`);
     const rerun = t.state === "spec_draft";
     const busy = rerun ? review.busy() : null;
     if (busy) return busyResult(busy);
@@ -1517,9 +1549,16 @@ export function createTaskService(opts: TaskServiceOptions) {
       db.transaction(() => {
         const cur = taskRow(db, id);
         if (!cur || cur.version !== input.version) throw new Refused(TASK_CHANGED);
-        saveMainRepo(db, cur, input.branch, null, now());
-        if (!rerun) return patch(db, id, cur.version, { target_branch: input.branch }, now());
-        const fields: Patch = { target_branch: input.branch, docs_json: null, estimate_json: null, size: null, size_by: null };
+        if (row) db.query(Q.repoBase).run({ id: row.id, base: input.branch });
+        else saveMainRepo(db, cur, input.branch, null, now());
+        if (!rerun) return patch(db, id, cur.version, row ? {} : { target_branch: input.branch }, now());
+        const fields: Patch = {
+          ...(!row && { target_branch: input.branch }),
+          docs_json: null,
+          estimate_json: null,
+          size: null,
+          size_by: null,
+        };
         patch(db, id, cur.version, { ...fields, base_commit: null, blocked_json: null }, now());
         const r = review.taskRun(db, specRun(db, taskRow(db, id) as TaskRow));
         if (r.status !== 202) throw new Refused(r.conflict.error, r.conflict);

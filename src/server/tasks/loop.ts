@@ -287,7 +287,7 @@ const Q = {
   attempt: "SELECT COALESCE(MAX(attempt), 0) + 1 AS n FROM task_step WHERE part = $part AND kind = $kind AND item = $item",
   committed: "SELECT 1 FROM task_step WHERE part = $part AND kind = 'commit' AND item = $item AND state = 'ok'",
   lastStep: "SELECT MAX(id) AS id FROM task_step WHERE part = $part",
-  lines: "UPDATE task_part SET lines = $lines, updated_at = $now WHERE id = $id",
+  lines: "UPDATE task_part SET lines = $lines, files = $files, updated_at = $now WHERE id = $id",
   clone: "SELECT path FROM repo_clone WHERE project = $project AND repo = $repo",
   points: "SELECT id, payload_json FROM review_item WHERE run = $run AND kind = 'finding' ORDER BY id",
   question: `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, recommended, step, asked_at)
@@ -310,7 +310,7 @@ const Q = {
   prBase: "UPDATE task_pr SET base_commit = $base, head = $head WHERE part = $part AND task_repo = $repo",
   prHead: "UPDATE task_pr SET head = $head WHERE part = $part AND task_repo = $repo",
   partHead: "UPDATE task_part SET head = $head, updated_at = $now WHERE id = $id",
-  subLines: "UPDATE task_pr SET lines = $lines WHERE part = $part AND task_repo = $repo",
+  subLines: "UPDATE task_pr SET lines = $lines, files = $files WHERE part = $part AND task_repo = $repo",
   subBase: "UPDATE task_repo SET base_commit = $base WHERE id = $id",
   subLease: `INSERT INTO task_pr (part, task_repo, branch, base_branch, base_commit, head, pushed, state)
     VALUES ($part, $repo, $branch, $base, $commit, $lease, $lease, 'changed') ON CONFLICT (part, task_repo) DO NOTHING`,
@@ -327,8 +327,8 @@ async function dirty(trees: readonly RepoTree[]): Promise<string[]> {
 const noneDirty = (trees: readonly RepoTree[], t: RepoTree) =>
   t.row.access === "none" && !!trees.find((x) => x.row.id === t.row.parent)?.wt && noneChanges(trees, t).length > 0;
 
-// A changed submodule with access edit: its task branch head differs from its base and the diff is not empty (spec.md section
-// 6.16.6, Changed repositories).
+// A changed submodule or added repository with access edit: its task branch head differs from its base and the diff is not empty
+// (spec.md section 6.16.6, Changed repositories).
 type ChangedSub = { tree: RepoTree; base: string; head: string };
 
 export type LoopOptions = { review: ReviewJobs; settings: Settings; live: Live; now?: () => number };
@@ -406,7 +406,7 @@ export function createLoop(opts: LoopOptions) {
   async function changedSubs(c: Ctx): Promise<ChangedSub[]> {
     const out: ChangedSub[] = [];
     for (const tree of c.trees) {
-      if (tree.row.role !== "submodule" || tree.row.access !== "edit" || !tree.wt) continue;
+      if (tree.row.role === "main" || tree.row.access !== "edit" || !tree.wt) continue;
       const base = tree.row.base_commit ?? tree.row.pinned;
       const head = await headOf(tree.wt);
       if (!base || head === base) continue;
@@ -649,14 +649,15 @@ export function createLoop(opts: LoopOptions) {
     block(c, { kind: "size", step, text });
   }
 
-  // The changed lines of the part and of each changed submodule, stored in task_part.lines and task_pr.lines.
+  // The changed lines and files of the part and of each changed repository, stored in task_part and task_pr (spec.md section 6.16.8:
+  // the dialog row names both).
   async function countLines(c: Ctx): Promise<LineCount> {
     const n = await changedLines(c.wt, c.base, await headOf(c.wt), c.exclude);
-    c.db.query(Q.lines).run({ id: c.part.id, lines: n.lines, now: now() });
+    c.db.query(Q.lines).run({ id: c.part.id, lines: n.lines, files: n.files, now: now() });
     // spec.md section 6.16.6, Line budget: the sum over the changed repositories.
     for (const s of await changedSubs(c)) {
       const m = await changedLines(s.tree.wt as Worktree, s.base, s.head, c.exclude);
-      c.db.query(Q.subLines).run({ part: c.part.id, repo: s.tree.row.id, lines: m.lines });
+      c.db.query(Q.subLines).run({ part: c.part.id, repo: s.tree.row.id, lines: m.lines, files: m.files });
       n.files += m.files;
       n.added += m.added;
       n.removed += m.removed;
@@ -803,7 +804,7 @@ export function createLoop(opts: LoopOptions) {
           { name: "task.md", text: `${issue || "(no task text)"}\n\n# The plan of the task\n\n${plans.join("\n\n")}\n` },
           {
             name: "pr.md",
-            text: `# ${c.t.key}: ${oneLine(c.t.title)}\n\nThis change has no pull request yet. The app builds it for task ${c.t.key} on the branch ${c.part.branch}.${sub ? ` This review covers the submodule at ${oneLine(sub.tree.full)} only.` : ""}\n\n## Goal\n\n${goals.join("\n")}\n`,
+            text: `# ${c.t.key}: ${oneLine(c.t.title)}\n\nThis change has no pull request yet. The app builds it for task ${c.t.key} on the branch ${c.part.branch}.${sub ? ` This review covers the ${sub.tree.row.role === "added" ? "repository" : "submodule"} at ${oneLine(sub.tree.full)} only.` : ""}\n\n## Goal\n\n${goals.join("\n")}\n`,
           },
         ],
         attachments: task.attachments,
@@ -894,8 +895,9 @@ export function createLoop(opts: LoopOptions) {
     let lease: string | null = null;
     let base = t.base_commit;
     // spec.md section 6.16.4 with several repositories: Continue takes the remote branch where it exists; New takes the first suffix that
-    // is free in every repository with access edit.
-    const subs = taskRepos(db, t).filter((r) => r.role === "submodule" && r.access === "edit" && r.project && r.repo && r.pinned);
+    // is free in every repository with access edit. A submodule starts at its pinned commit, an added repository at its base commit.
+    const startOf = (r: TaskRepoRow) => r.pinned ?? r.base_commit;
+    const subs = taskRepos(db, t).filter((r) => r.role !== "main" && r.access === "edit" && r.project && r.repo && startOf(r));
     const subRemotes = await Promise.all(subs.map((r) => review.taskRemote(r.project as string, r.repo as string)));
     const subHeads = await Promise.all(subRemotes.map((r) => remoteBranches(dataDir, r, name)));
     const subLeases: { row: TaskRepoRow; lease: string; base: string }[] = [];
@@ -911,8 +913,8 @@ export function createLoop(opts: LoopOptions) {
         if (!subHeads[k]?.has(name)) continue;
         const subCache = cachePath(longPath(dataDir), { project: row.project as string, repo: row.repo as string, id });
         const l = await takeRemoteBranch(dataDir, subCache, subRemotes[k] as BranchRemote, id, name);
-        const mb = await mergeBase(dataDir, subCache, row.pinned as string, l);
-        if (!mb) throw new Error(`${name} in ${row.project}/${row.repo} shares no commit with the pinned commit. Start a new branch.`);
+        const mb = await mergeBase(dataDir, subCache, startOf(row) as string, l);
+        if (!mb) throw new Error(`${name} in ${row.project}/${row.repo} shares no commit with its start commit. Start a new branch.`);
         subLeases.push({ row, lease: l, base: mb });
       }
     } else if (!subs.length) branch = await freeBranch(dataDir, cache, remote, name);

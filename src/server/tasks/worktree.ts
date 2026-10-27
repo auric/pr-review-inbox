@@ -13,7 +13,7 @@ import { BRANCH_SUFFIX_MAX } from "../../shared/task";
 import { dbStem } from "../context/attachments";
 import { GitError, git, gitEnv } from "../review/git";
 import { type BranchRemote, cachePath, gitSetup, locked, longPath, noUrl, WorkspaceError } from "../review/workspace";
-import { fullPath, sourceOf, type TaskRepoRow } from "./repos";
+import { ADDED_ROOT, fullPath, sourceOf, type TaskRepoRow } from "./repos";
 
 // spec.md section 6.8: the sparse patterns of a task worktree, in this order. The matching paths are absent on disk, and a commit keeps
 // them unchanged.
@@ -229,7 +229,8 @@ export type WorktreeInput = {
   // The local branch of the cache, named like the remote branch. A missing branch starts at base.
   branch: string;
   base: string;
-  // A submodule worktree (spec.md section 6.16.5, Worktrees): its folder inside the parent worktree. Absent: part-<ord>/repo.
+  // A submodule worktree (spec.md section 6.16.5, Worktrees): its folder inside the parent worktree, or part-<ord>/repos/<project>/<slug>
+  // for an added repository. Absent: part-<ord>/repo.
   at?: string;
   // Access read: a detached worktree at base. branch is not used.
   detach?: boolean;
@@ -255,7 +256,8 @@ export async function openWorktree(i: WorktreeInput): Promise<Worktree> {
   const env = gitEnv(empty, [["core.hooksPath", hooks]]);
   const dir = partDir(dataDir, i.db, i.task, i.ord);
   const repo = i.at ?? join(dir, "repo");
-  if (!inside(join(dir, "repo"), repo)) throw new WorkspaceError(`A submodule path is outside the worktree: ${repo}`);
+  if (!inside(join(dir, "repo"), repo) && !(repo !== join(dir, ADDED_ROOT) && inside(join(dir, ADDED_ROOT), repo)))
+    throw new WorkspaceError(`A submodule path is outside the worktree: ${repo}`);
   const context = join(dir, "context");
   mkdirSync(context, { recursive: true });
   const c = (args: string[]) => git([`--git-dir=${cache}`, ...args], { env });
@@ -412,7 +414,8 @@ export type RepoTree = { row: TaskRepoRow; full: string; wt: Worktree | null };
 
 // The worktrees of the submodules inside the main worktree, parents first: `git worktree add` from the cache of each repository at its
 // pinned commit, on the task branch for access edit, detached for access read. The gitlink folder that the parent checkout made takes
-// the worktree.
+// the worktree. An added repository gets its worktree at repos/<project>/<slug> of the part folder, on the task branch from its base
+// commit.
 export async function openRepoTrees(i: {
   dataDir: string;
   db: Database;
@@ -426,6 +429,27 @@ export async function openRepoTrees(i: {
   for (const row of i.rows) {
     if (row.role === "main") {
       out.push({ row, full: "", wt: i.main });
+      continue;
+    }
+    if (row.role === "added") {
+      const full = fullPath(i.rows, row);
+      if (row.access !== "edit" || !row.project || !row.repo || !row.base_commit) {
+        out.push({ row, full, wt: null });
+        continue;
+      }
+      const at = join(i.main.dir, ADDED_ROOT, row.project, row.repo);
+      const wt = await openWorktree({
+        dataDir: i.dataDir,
+        db: i.db,
+        project: row.project,
+        repo: row.repo,
+        task: i.task,
+        ord: i.ord,
+        branch: i.branch,
+        base: row.base_commit,
+        at,
+      });
+      out.push({ row, full, wt });
       continue;
     }
     if (row.role !== "submodule") continue;
@@ -455,6 +479,11 @@ export async function openRepoTrees(i: {
 }
 
 export const deepestFirst = (trees: readonly RepoTree[]) => [...trees].sort((a, b) => b.row.depth - a.row.depth);
+
+// The worktree folders of the added repositories, relative to the part folder (repos/<project>/<slug>). The check of the files outside
+// repo/ leaves them to their own path check.
+export const addedFolders = (trees: readonly RepoTree[]) =>
+  trees.filter((t) => t.row.role === "added" && t.wt).map((t) => t.full.replace(/^\.\.\//, ""));
 
 const folderOf = (trees: readonly RepoTree[], t: RepoTree) => {
   const main = trees.find((x) => x.row.role === "main")?.wt as Worktree;

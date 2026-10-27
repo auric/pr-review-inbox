@@ -14,6 +14,7 @@ import { type BranchRemote, type ContextFile, cachePath, fetchInto, gitSetup, lo
 import { outsideRepo, type PathProblem, sparseHidden } from "./implement";
 import { sourceOf, type TaskRepoRow, type UpdateRepo } from "./repos";
 import {
+  addedFolders,
   deepestFirst,
   gitLinkOk,
   headOf,
@@ -336,7 +337,8 @@ export async function resolveProblems(
     }
     for (const p of changed) problems.push({ path: under(t.full, p), reason: "The path has no conflict." });
   }
-  for (const p of outsideRepo(main, context)) problems.push({ path: `../${p}`, reason: "A step may change files only in repo/." });
+  for (const p of outsideRepo(main, context, addedFolders(trees)))
+    problems.push({ path: `../${p}`, reason: "A step may change files only in repo/." });
   for (const p of ignoredChanges(ignored, await ignoredSnapshot(main)))
     problems.push({ path: p, reason: "A step may not write a file that git ignores." });
   return problems;

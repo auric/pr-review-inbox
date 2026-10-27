@@ -1276,9 +1276,14 @@ export const taskPlanInput = z.object({
   // offered ID or starts with "new-".
   commands: z.array(z.union([commandId, taskCommand])).max(MAX_TASK_COMMANDS),
   warning: z.literal(true).optional(),
-  // spec.md section 6.16. Absent prefix: the first prefix of Settings > Tasks. Absent existing: continue.
+  // spec.md section 6.16. Absent prefix: the first prefix of Settings > Tasks. Absent existing: continue. bases: the base pick of each
+  // repository of the task (section 6.16.3); each one must be the base that the plan was written on. Absent: the stored bases.
   prefix: branchPrefix.optional(),
   existing: z.enum(["continue", "new"]).optional(),
+  bases: z
+    .array(z.object({ taskRepo: positiveInt, branch: branchName }))
+    .max(100)
+    .optional(),
 });
 // GET /api/repos/:project/:repo/branches (spec.md section 6.16.3).
 export const branchSearchInput = z.object({ filter: z.string().max(255).default("") });
@@ -1293,8 +1298,9 @@ export type BranchCheckDto = {
   openPr: number | null;
   nextFree: string;
 };
-// PUT /api/tasks/:id/base (spec.md section 6.16.3): 200, or 202 when the plan runs again on the new base.
-export const taskBaseInput = z.object({ version, branch: branchName });
+// PUT /api/tasks/:id/base (spec.md section 6.16.3): 200, or 202 when the plan runs again on the new base. taskRepo: the repository of
+// the pick (task_repo.id). Absent: the main repository.
+export const taskBaseInput = z.object({ version, taskRepo: positiveInt.optional(), branch: branchName });
 // POST /api/tasks/:id/spec-pr and POST /api/tasks/:id/parts/:part/pr.
 export const taskReviewersInput = z.object({ version, reviewers: taskReviewers });
 // POST /api/tasks/:id/parts/:part/prs (spec.md section 6.16.8): the rows of "Push and open PRs". One row is a retry. The cap bounds the
@@ -1428,6 +1434,8 @@ export type TaskPrDto = {
   baseBranch: string;
   head: string | null;
   pushed: string | null;
+  // The changed files and lines of the row's diff (spec.md section 6.1, Counting). null before the first line count.
+  files: number | null;
   lines: number | null;
   pr: number | null;
   remotePr: number | null;

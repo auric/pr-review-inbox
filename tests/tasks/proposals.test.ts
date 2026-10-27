@@ -113,7 +113,7 @@ async function setup(specs: unknown[]) {
         summary_json: string | null;
       }[]
     ).map((x) => (JSON.parse(x.summary_json ?? "{}") as { coverage?: { skipped?: string[] } }).coverage?.skipped ?? []);
-  return { db, task, get, post, settle, calls, skippedOf };
+  return { db, task, get, post, settle, calls, skippedOf, base: r.base };
 }
 
 const proposal = (t: TaskDto, name: string) => t.repos.find((r) => r.repo === name);
@@ -159,7 +159,9 @@ describe("proposals of the spec run (spec.md section 6.16.5)", () => {
       expect(added.status).toBe(202);
       const second = await s.settle();
       expect(s.calls()).toHaveLength(2);
-      expect(proposal(second, "lib")).toMatchObject({ access: "edit", proposal: "added", baseBranch: "main" });
+      expect(proposal(second, "lib")).toMatchObject({ access: "edit", proposal: "added", baseBranch: "main", path: "../repos/PROJ/lib" });
+      // The spec run fetched the base of the added repository for its snapshot.
+      expect(s.db.query("SELECT base_commit FROM task_repo WHERE id = $id").get({ id: lib })).toEqual({ base_commit: s.base });
       expect(taskRepos(s.db, taskRow(s.db, s.task) as NonNullable<ReturnType<typeof taskRow>>).map((r) => r.repo)).toEqual(["repo", "lib"]);
       expect(proposal(second, "tools")).toMatchObject({ proposal: "proposed", access: "none" });
       expect(s.skippedOf()[1]).toContain("Claude proposed PROJ/repo, which is already in the task, so the plan leaves it out.");
@@ -187,6 +189,59 @@ describe("proposals of the spec run (spec.md section 6.16.5)", () => {
           "Claude proposed PROJ/lib, which is already in the task, so the plan leaves it out.",
         ]),
       );
+    },
+    SLOW,
+  );
+});
+
+describe("the base pick of each repository (spec.md sections 6.16.3 and 6.16.11)", () => {
+  test(
+    "PUT base with taskRepo picks the base of the added repository and writes the plan again; the plan approval checks bases[]",
+    async () => {
+      const s = await setup([{ ...echoSpec(), repos: [repo("PROJ", "lib")] }, echoSpec(), echoSpec()]);
+      expect((await s.post("/resume")).status).toBe(200);
+      const lib = proposal(await s.settle(), "lib")?.id as number;
+      expect((await s.post(`/repos/${lib}`, { add: true })).status).toBe(202);
+      const added = await s.settle();
+      const main = added.repos.find((r) => r.role === "main")?.id as number;
+
+      // Validation: a repository of another task or none, a proposal that is not added, and a branch that the repository lacks.
+      expect((await s.post("/base", { taskRepo: 9999, branch: "develop" }, "PUT")).status).toBe(404);
+      const bad = await s.post<TaskConflict>("/base", { taskRepo: lib, branch: "nope" }, "PUT");
+      expect([bad.status, bad.body.error]).toEqual([409, "nope does not exist in PROJ/lib."]);
+      expect((await s.post("/base", { taskRepo: lib, branch: "bad..name" }, "PUT")).status).toBe(400);
+      // The same base changes nothing.
+      expect((await s.post("/base", { taskRepo: lib, branch: "main" }, "PUT")).status).toBe(200);
+      expect(s.calls()).toHaveLength(2);
+
+      const picked = await s.post("/base", { taskRepo: lib, branch: "develop" }, "PUT");
+      expect(picked.status).toBe(202);
+      const again = await s.settle();
+      expect(s.calls()).toHaveLength(3);
+      expect([proposal(again, "lib")?.baseBranch, again.targetBranch]).toEqual(["develop", "main"]);
+
+      const approve = (bases: unknown) => s.post<TaskDto & TaskConflict>("/plan", { size: "small", commands: [], warning: true, bases });
+      const stale = await approve([{ taskRepo: lib, branch: "main" }]);
+      expect([stale.status, stale.body.error]).toEqual([409, "The plan was written on develop. Change the base branch of PROJ/lib first."]);
+      expect((await approve([{ taskRepo: 9999, branch: "main" }])).status).toBe(400);
+      expect(
+        (
+          await approve([
+            { taskRepo: lib, branch: "develop" },
+            { taskRepo: lib, branch: "develop" },
+          ])
+        ).status,
+      ).toBe(400);
+      const ok = await approve([
+        { taskRepo: main, branch: "main" },
+        { taskRepo: lib, branch: "develop" },
+      ]);
+      expect([ok.status, ok.body.state]).toEqual([200, "implementing"]);
+      // The approval remembers the last pick of each repository (spec.md section 6.16.3, Preselection).
+      expect(s.db.query("SELECT repo, last_base FROM repo_task_settings ORDER BY repo").all()).toEqual([
+        { repo: "lib", last_base: "develop" },
+        { repo: "repo", last_base: "main" },
+      ]);
     },
     SLOW,
   );

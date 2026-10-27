@@ -162,14 +162,20 @@ export type TaskRepoRow = {
 };
 
 const Q = {
-  // A proposed or skipped repository is no repository of the task (spec.md section 6.16.5, Proposals).
-  rows: "SELECT * FROM task_repo WHERE task = $task AND (proposal IS NULL OR proposal = 'added') ORDER BY depth, id",
-  all: "SELECT * FROM task_repo WHERE task = $task ORDER BY depth, id",
+  // A proposed or skipped repository is no repository of the task (spec.md section 6.16.5, Proposals). The main row comes first: an
+  // added row has depth 0 too.
+  rows: `SELECT * FROM task_repo WHERE task = $task AND (proposal IS NULL OR proposal = 'added')
+    ORDER BY depth, role <> 'main', id`,
+  all: "SELECT * FROM task_repo WHERE task = $task ORDER BY depth, role <> 'main', id",
   main: "SELECT id FROM task_repo WHERE task = $task AND role = 'main'",
   mainInsert: `INSERT INTO task_repo (task, role, project, repo, depth, access, base_branch, base_commit, created_at)
     VALUES ($task, 'main', $project, $repo, 0, 'edit', $base, $commit, $now)`,
   mainUpdate: "UPDATE task_repo SET base_branch = $base, base_commit = $commit WHERE id = $id",
   dropSubs: "DELETE FROM task_repo WHERE task = $task AND role = 'submodule'",
+  // The base pick of each mapped submodule stays for the next resolve (spec.md section 6.16.3, Picker).
+  subBases: "SELECT project, repo, base_branch FROM task_repo WHERE task = $task AND role = 'submodule' AND project IS NOT NULL",
+  added: "SELECT * FROM task_repo WHERE task = $task AND role = 'added' AND proposal = 'added' ORDER BY id",
+  addedBase: "UPDATE task_repo SET base_commit = $commit WHERE id = $id",
   insert: `INSERT INTO task_repo (task, role, project, repo, url, parent, path, depth, access, reason, base_branch, base_commit, pinned,
     source, created_at)
     VALUES ($task, 'submodule', $project, $repo, $url, $parent, $path, $depth, $access, $reason, $base, $commit, $pinned, $source, $now)
@@ -205,8 +211,13 @@ export function taskRepos(db: Database, t: TaskRef): TaskRepoRow[] {
   return [main, ...rows];
 }
 
-// The path of a row from the main repository root: the paths of its parents and its own. "" for main.
+// spec.md section 6.16.5, Worktrees and Snapshots: an added repository sits at repos/<project>/<slug> of the part folder, beside repo/.
+export const ADDED_ROOT = "repos";
+
+// The path of a row from the main repository root: the paths of its parents and its own. "" for main. An added repository gives
+// ../repos/<project>/<slug>.
 export function fullPath(rows: readonly TaskRepoRow[], r: TaskRepoRow): string {
+  if (r.role === "added") return `../${ADDED_ROOT}/${r.project}/${r.repo}`;
   const out: string[] = [];
   for (let x: TaskRepoRow | undefined = r; x && x.role !== "main"; x = rows.find((y) => y.id === x?.parent)) out.unshift(x.path ?? "");
   return out.join("/");
@@ -230,7 +241,7 @@ export function repoDtos(db: Database, t: TaskRef): TaskRepoDto[] {
     role: r.role,
     project: r.project,
     repo: r.repo,
-    path: r.role === "main" ? null : r.role === "added" ? null : fullPath(rows, r),
+    path: r.role === "main" || (r.role === "added" && r.proposal !== "added") ? null : fullPath(rows, r),
     depth: r.depth,
     access: r.access,
     reason: r.reason,
@@ -250,6 +261,7 @@ type PartRef = {
   head: string | null;
   pushed: string | null;
   lines: number | null;
+  files: number | null;
   pr: number | null;
   remote_pr: number | null;
 };
@@ -262,6 +274,7 @@ type TaskPrRow = {
   head: string | null;
   pushed: string | null;
   lines: number | null;
+  files: number | null;
   pr: number | null;
   remote_pr: number | null;
   state: TaskPrDto["state"];
@@ -298,11 +311,12 @@ export function prRows(db: Database, t: TaskRef, part: PartRef): PrRow[] {
       role: r.role,
       project: r.project,
       repo: r.repo,
-      path: r.role === "submodule" ? fullPath(rows, r) : null,
+      path: fullPath(rows, r),
       branch: p.branch,
       baseBranch: p.base_branch,
       head: p.head,
       pushed: p.pushed,
+      files: p.files,
       lines: p.lines,
       pr: p.pr,
       remotePr: p.remote_pr,
@@ -340,6 +354,7 @@ export function prRows(db: Database, t: TaskRef, part: PartRef): PrRow[] {
     baseBranch: t.target_branch,
     head: part.head,
     pushed: part.pushed,
+    files: part.files,
     lines: part.lines,
     pr: part.pr,
     remotePr: part.remote_pr,
@@ -354,9 +369,10 @@ export function prRows(db: Database, t: TaskRef, part: PartRef): PrRow[] {
   return out;
 }
 
-// One repository that "Update from <base>" can change (spec.md section 6.18.3, Repositories): the main repository, or a submodule with
-// access edit and commits of the task. baseCommit: task.base_commit or task_repo.base_commit. head: the task branch head. published: the
-// task branch exists on the server (task_part.pushed or task_pr.pushed; Continue sets it at the start, spec.md section 6.16.4).
+// One repository that "Update from <base>" can change (spec.md section 6.18.3, Repositories): the main repository, or a submodule or an
+// added repository with access edit and commits of the task. baseCommit: task.base_commit or task_repo.base_commit. head: the task
+// branch head. published: the task branch exists on the server (task_part.pushed or task_pr.pushed; Continue sets it at the start,
+// spec.md section 6.16.4).
 export type UpdateRepo = {
   row: TaskRepoRow;
   project: string;
@@ -376,7 +392,7 @@ export function updateRepos(
   const rows = taskRepos(db, t);
   const out: UpdateRepo[] = [];
   for (const row of [...rows].sort((a, b) => b.depth - a.depth)) {
-    if (row.role !== "submodule" || row.access !== "edit" || !row.project || !row.repo || !row.base_branch) continue;
+    if (row.role === "main" || row.access !== "edit" || !row.project || !row.repo || !row.base_branch) continue;
     const pr = db
       .query("SELECT head, pushed FROM task_pr WHERE part = $part AND task_repo = $repo")
       .get({ part: part.id, repo: row.id }) as {
@@ -484,6 +500,12 @@ export async function resolveTaskRepos(db: Database, deps: RepoDeps, t: TaskRef,
   const top = await readGitlinks(mainCache, env, head);
   const found: Found[] = [];
   const caches = new Map<number, string>();
+  const kept = new Map(
+    (db.query(Q.subBases).all({ task: t.id }) as { project: string; repo: string; base_branch: string | null }[]).map((r) => [
+      `${r.project}/${r.repo}`,
+      r.base_branch,
+    ]),
+  );
   if (top.length) {
     const p = await deps.provider();
     if (!p) throw new WorkspaceError("Configure the Bitbucket URL and token first.");
@@ -563,8 +585,17 @@ export async function resolveTaskRepos(db: Database, deps: RepoDeps, t: TaskRef,
               : found[first];
         const project = src?.project as string;
         const repo = src?.repo as string;
-        row.base = await baseOf(p, deps, project, repo, await deps.remote(project, repo));
-        const cache = await fetchPinned(deps, t.id, project, repo, row.base, l.pinned);
+        const picked = own ? kept.get(k) : null;
+        let cache: string | null | undefined;
+        if (picked) {
+          row.base = picked;
+          // A kept base that is gone on the server falls back to the default branch.
+          cache = await fetchPinned(deps, t.id, project, repo, picked, l.pinned).catch(() => undefined);
+        }
+        if (cache === undefined) {
+          row.base = await baseOf(p, deps, project, repo, await deps.remote(project, repo));
+          cache = await fetchPinned(deps, t.id, project, repo, row.base, l.pinned);
+        }
         if (!cache) {
           Object.assign(row, { access: "none", reason: REPO_REASON.noBranch, project: null, repo: null, source: null });
           if (own) seen.delete(k);
@@ -577,8 +608,21 @@ export async function resolveTaskRepos(db: Database, deps: RepoDeps, t: TaskRef,
     };
     await walk(-1, http(main), 1, "", top);
   }
+  // spec.md section 6.16.5, Fetch: an added repository fetches its base branch into its own cache. Its base head is the start of the
+  // task branch there.
+  const added: { id: number; full: string; cache: string; head: string }[] = [];
+  for (const r of db.query(Q.added).all({ task: t.id }) as TaskRepoRow[]) {
+    if (!r.project || !r.repo || !r.base_branch) continue;
+    const ref = `refs/rl/task/${t.id}/added/${r.id}`;
+    const remote = await deps.remote(r.project, r.repo);
+    const cache = await fetchInto(deps.dataDir, r.project, r.repo, remote, [`+refs/heads/${r.base_branch}:${ref}`], deps.long);
+    const at = (await git([`--git-dir=${cache}`, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { env }).catch(() => "")).trim();
+    if (!HASH.test(at)) throw new WorkspaceError(`${r.base_branch} has no commit in ${r.project}/${r.repo}.`);
+    added.push({ id: r.id, full: fullPath([], r), cache, head: at });
+  }
   db.transaction(() => {
     saveMainRepo(db, t, t.target_branch, head, now());
+    for (const a of added) db.query(Q.addedBase).run({ id: a.id, commit: a.head });
     db.query(Q.dropSubs).run({ task: t.id });
     const mainId = (db.query(Q.main).get({ task: t.id }) as { id: number }).id;
     const ids: number[] = [];
@@ -604,10 +648,13 @@ export async function resolveTaskRepos(db: Database, deps: RepoDeps, t: TaskRef,
       ids.push(id);
     }
   })();
-  return found.flatMap((f, i) => {
-    const cache = caches.get(i);
-    return cache && f.access !== "none" ? [{ path: f.full, cache, commit: f.pinned }] : [];
-  });
+  return [
+    ...found.flatMap((f, i) => {
+      const cache = caches.get(i);
+      return cache && f.access !== "none" ? [{ path: f.full, cache, commit: f.pinned }] : [];
+    }),
+    ...added.map((a) => ({ path: a.full, cache: a.cache, commit: a.head })),
+  ];
 }
 
 // context/repos.md (spec.md section 6.16.5): each repository with its path, access, base branch, and reason. Untrusted data: the paths

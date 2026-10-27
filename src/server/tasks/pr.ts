@@ -52,10 +52,12 @@ type PartRow = {
   pr: number | null;
   remote_pr: number | null;
   lines: number | null;
+  files: number | null;
 };
 
 const Q = {
-  part: "SELECT id, ord, kind, title, branch, state, head, pushed, pr, remote_pr, lines FROM task_part WHERE id = $part AND task = $task",
+  part: `SELECT id, ord, kind, title, branch, state, head, pushed, pr, remote_pr, lines, files FROM task_part
+    WHERE id = $part AND task = $task`,
   branches: "SELECT branch FROM task_part WHERE task = $task",
   // The code parts that wait for their PR after this one opens. None left: LAST_PR_OPEN.
   unopened:
