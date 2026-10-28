@@ -41,6 +41,14 @@ export async function openApp(page: Page, path = "/"): Promise<void> {
   if (lost.length) throw new Error(`App assets failed twice: ${lost.join(", ")}`);
 }
 
+// Picks a repository in the "Main repository" combobox of the Build form (spec.md section 6.12).
+export async function pickRepo(form: Locator, repo: string): Promise<void> {
+  // The click opens the list with an empty text, so the fill changes the text even when the field shows the repository already.
+  await form.getByLabel("Main repository").click();
+  await form.getByLabel("Main repository").fill(repo);
+  await form.getByRole("listbox", { name: "Repositories" }).getByRole("option", { name: repo, exact: true }).click();
+}
+
 // Two review profiles of the user after the shipped Review profile: the edited Over-engineering and Security profiles that the
 // version 5 upgrade keeps (docs/plans/review-v2/spec.md section 1.2). Tests of the profile editor and the brief need several profiles.
 const OWN_PROFILES = [
@@ -130,6 +138,8 @@ export type Scenario = {
   // PR 1001 (synthetic, integration-check.md U56): Maria resolves the inline thread 1000401 on src/cache/flush.ts new line 3, which
   // has her reply 1000402. I resolve the general thread 1000403.
   resolved: boolean;
+  // The repository list of the token (GET /rest/api/1.0/repos) answers HTTP 500.
+  noRepoList: boolean;
 };
 
 // The next fake Claude Code run. tree: a subagent run with drafts. schema: a result that fails the schema. limit: a usage limit.

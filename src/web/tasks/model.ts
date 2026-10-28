@@ -828,3 +828,25 @@ export function fileChoiceState(r: FileChoice, runner: string): string {
 const KIND_TEXT = { image: "image", pdf: "PDF", text: "text", file: "file" } as const;
 // "2 KB, image/png": the size and the type of a file.
 export const fileMeta = (r: FileChoice) => `${sizeText(r.size)}, ${r.type ?? KIND_TEXT[r.kind]}`;
+
+// ---------- The repository of the Build form (spec.md section 6.12) ----------
+
+export type RepoChoice = { project: string; repo: string; key: string };
+export const REPOS_SHOWN = 50;
+
+// The known repositories (of the stored PRs and of the tasks) first, then the listed ones of the forge, each key once.
+export function repoChoices(known: { project: string; repo: string }[], listed: { project: string; repo: string }[]): RepoChoice[] {
+  const out = new Map<string, RepoChoice>();
+  for (const r of [...known].sort((a, b) => `${a.project}/${a.repo}`.localeCompare(`${b.project}/${b.repo}`)).concat(listed)) {
+    const key = `${r.project}/${r.repo}`;
+    if (!out.has(key)) out.set(key, { project: r.project, repo: r.repo, key });
+  }
+  return [...out.values()];
+}
+
+// The choices whose key holds the text, case-insensitive, at most REPOS_SHOWN. more: the matches that the list leaves out.
+export function repoMatches(choices: RepoChoice[], text: string): { items: RepoChoice[]; more: number } {
+  const q = text.trim().toLowerCase();
+  const all = q ? choices.filter((c) => c.key.toLowerCase().includes(q)) : choices;
+  return { items: all.slice(0, REPOS_SHOWN), more: Math.max(0, all.length - REPOS_SHOWN) };
+}

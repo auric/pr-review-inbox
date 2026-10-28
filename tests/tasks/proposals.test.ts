@@ -19,7 +19,7 @@ import { createSettings } from "../../src/server/settings";
 import { checkProposals, largeRepoProblem, repoListFile } from "../../src/server/tasks/plan";
 import { taskRepos } from "../../src/server/tasks/repos";
 import { taskRow } from "../../src/server/tasks/tasks";
-import type { TaskConflict, TaskDto } from "../../src/shared/dto";
+import type { TaskConflict, TaskDto, TaskRepoListDto } from "../../src/shared/dto";
 import { LARGE_REPOS_TEXT } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoSpec, readRecords } from "../support/fake-claude";
@@ -113,10 +113,20 @@ async function setup(specs: unknown[]) {
         summary_json: string | null;
       }[]
     ).map((x) => (JSON.parse(x.summary_json ?? "{}") as { coverage?: { skipped?: string[] } }).coverage?.skipped ?? []);
-  return { db, task, get, post, settle, calls, skippedOf, base: r.base };
+  return { db, task, get, post, settle, calls, skippedOf, json, base: r.base };
 }
 
 const proposal = (t: TaskDto, name: string) => t.repos.find((r) => r.repo === name);
+
+describe("the repositories of the Build form (spec.md section 6.12)", () => {
+  test("GET /api/tasks/repos lists the repositories that the token can push to, with or without a stored PR", async () => {
+    const s = await setup([]);
+    const r = await s.json<TaskRepoListDto>("/api/tasks/repos");
+    expect(r.status).toBe(200);
+    expect(r.body.complete).toBe(true);
+    expect(r.body.repos.map((x) => `${x.project}/${x.repo}`).sort()).toEqual(["PROJ/lib", "PROJ/repo", "PROJ/tools"]);
+  });
+});
 
 describe("proposals of the spec run (spec.md section 6.16.5)", () => {
   test(
@@ -124,7 +134,15 @@ describe("proposals of the spec run (spec.md section 6.16.5)", () => {
     async () => {
       const s = await setup([
         { ...echoSpec(), repos: [repo("PROJ", "lib"), repo("PROJ", "nope")] },
-        { ...echoSpec(), repos: [repo("PROJ", "tools"), repo("PROJ", "repo")] },
+        {
+          ...echoSpec(),
+          repos: [repo("PROJ", "tools"), repo("PROJ", "repo")],
+          map: [
+            ...echoSpec().map,
+            { path: "../repos/PROJ/lib/src/app.ts", line: 1, symbol: "", kind: "change", what: "In the added repository." },
+            { path: "../repos/PROJ/lib/gone.ts", line: null, symbol: "", kind: "change", what: "Not in the added repository." },
+          ],
+        },
         { ...echoSpec(), repos: [repo("PROJ", "tools"), repo("PROJ", "lib")] },
       ]);
       expect((await s.post("/resume")).status).toBe(200);
@@ -165,6 +183,11 @@ describe("proposals of the spec run (spec.md section 6.16.5)", () => {
       expect(taskRepos(s.db, taskRow(s.db, s.task) as NonNullable<ReturnType<typeof taskRow>>).map((r) => r.repo)).toEqual(["repo", "lib"]);
       expect(proposal(second, "tools")).toMatchObject({ proposal: "proposed", access: "none" });
       expect(s.skippedOf()[1]).toContain("Claude proposed PROJ/repo, which is already in the task, so the plan leaves it out.");
+      // The map check reads the added repository for its lines.
+      expect(second.plan?.missing).toBe(1);
+      expect((s.skippedOf()[1] ?? []).filter((x) => x.startsWith("Map line"))).toEqual([
+        `Map line 3: ../repos/PROJ/lib/gone.ts is not found at ${s.base.slice(0, 12)}.`,
+      ]);
       // A large plan with an added repository blocks.
       expect(largeRepoProblem("large", [], second.repos)).toBe(LARGE_REPOS_TEXT);
 

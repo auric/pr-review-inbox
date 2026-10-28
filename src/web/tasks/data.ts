@@ -3,7 +3,7 @@
 
 // Server state of the tasks (docs/plans/review-v2/spec.md sections 6.11 and 6.18.6). Keys: ['tasks'], ['task', id],
 // ['task', id, 'diff', head], ['task', id, 'run', run], ['task', id, 'branch', prefix], ['task-settings', project, repo],
-// ['branches', project, repo, filter], ['task-profile', project, repo].
+// ['branches', project, repo, filter], ['task-profile', project, repo], ['task-repos'].
 // live.ts refetches ['tasks'] and ['task', id] with the keys under it when SSE `changed` names the task.
 import { keepPreviousData, type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -19,6 +19,7 @@ import type {
   TaskIssueDto,
   TaskPlanInput,
   TaskProfileDto,
+  TaskRepoListDto,
   TaskRowDto,
 } from "../../shared/dto";
 import type { TaskDoc, TaskSize } from "../../shared/task";
@@ -110,6 +111,15 @@ export const useTaskProfile = (r: { project: string; repo: string } | null) =>
     enabled: r !== null,
     queryFn: async () =>
       read<TaskProfileDto>(await api.api.tasks.profile.$get({ query: { project: r?.project ?? "", repo: r?.repo ?? "" } })),
+  });
+
+// GET /api/tasks/repos: one forge read of up to REPO_LIST_MAX repositories, only while the Build form is open.
+export const useTaskRepos = (enabled: boolean) =>
+  useQuery({
+    queryKey: ["task-repos"],
+    enabled,
+    staleTime: 5 * 60_000,
+    queryFn: async () => read<TaskRepoListDto>(await api.api.tasks.repos.$get()),
   });
 
 // POST /api/tasks: 201 with a new task, or 200 with the open task of the same key.

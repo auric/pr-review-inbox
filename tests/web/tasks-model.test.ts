@@ -43,6 +43,9 @@ import {
   prefixProblem,
   proposals,
   prRowLook,
+  REPOS_SHOWN,
+  repoChoices,
+  repoMatches,
   repoName,
   roleText,
   rowSize,
@@ -1270,5 +1273,30 @@ describe("the repositories of the plan screen (spec.md sections 6.16.3 and 6.16.
     expect(planSentence(task({ state: "spec_draft", plan: PLAN, estimate: ESTIMATE, repos: [REPOS[0] as TaskRepoDto] }))).toBe(
       "The plan is ready: small, 1 PR, about 80 changed lines.",
     );
+  });
+});
+
+describe("the repository of the Build form (spec.md section 6.12)", () => {
+  test("known repositories come first and sorted, then the listed ones, each key once; the search ignores case and caps the list", () => {
+    const all = repoChoices(
+      [
+        { project: "PROJ", repo: "zeta" },
+        { project: "PROJ", repo: "alpha" },
+        { project: "PROJ", repo: "zeta" },
+      ],
+      [
+        { project: "PROJ", repo: "alpha" },
+        { project: "OTHER", repo: "beta" },
+      ],
+    );
+    expect(all.map((r) => r.key)).toEqual(["PROJ/alpha", "PROJ/zeta", "OTHER/beta"]);
+    expect(repoMatches(all, " other/B ").items.map((r) => r.key)).toEqual(["OTHER/beta"]);
+    expect(repoMatches(all, "")).toEqual({ items: all, more: 0 });
+    const many = repoChoices(
+      [],
+      Array.from({ length: REPOS_SHOWN + 3 }, (_, i) => ({ project: "P", repo: `r${i}` })),
+    );
+    const m = repoMatches(many, "p/r");
+    expect([m.items.length, m.more]).toEqual([REPOS_SHOWN, 3]);
   });
 });

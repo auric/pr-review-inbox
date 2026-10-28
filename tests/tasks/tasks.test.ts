@@ -100,6 +100,17 @@ async function setup(o: { config?: string; profiles?: ProfileInput[] } = {}) {
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir, secrets, jiraSecrets: createSecrets(null, "jira-token") });
   const db = settings.db() as Database;
+  // hold() makes the next remote lookups wait until release.
+  let held: (() => Promise<void>) | null = null;
+  const hold = () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    held = () => {
+      entered.resolve();
+      return release.promise;
+    };
+    return { entered: entered.promise, release: () => release.resolve() };
+  };
   const live = createLive();
   const events: { event: string; data: unknown }[] = [];
   const broadcast = live.broadcast;
@@ -113,7 +124,10 @@ async function setup(o: { config?: string; profiles?: ProfileInput[] } = {}) {
     dataDir: dir,
     runnerCommand: runner.command,
     gitRemote: remote.gitRemote,
-    repoRemote: async () => ({ url: remote.remote, config: [] }),
+    repoRemote: async () => {
+      await held?.();
+      return { url: remote.remote, config: [] };
+    },
     listTools: stubListTools,
     claudeConfigDir: o.config ?? join(root, "no-claude-config"),
   });
@@ -203,6 +217,7 @@ async function setup(o: { config?: string; profiles?: ProfileInput[] } = {}) {
     dir,
     fake,
     branchAt,
+    hold,
   };
 }
 
@@ -1036,6 +1051,22 @@ describe("base branch and branch check (spec.md sections 6.16.3 and 6.16.4)", ()
       // Without a prefix: the first prefix of Settings > Tasks.
       expect((await h.json<BranchCheckDto>(`/api/tasks/${t.id}/branch`)).body.name).toStartWith(`feature/${ISSUE_KEY}-`);
       expect((await h.json(`/api/tasks/${t.id}/branch?prefix=bad..`)).status).toBe(400);
+    },
+    SLOW,
+  );
+
+  test(
+    "a branch check that waits for the remote ends cleanly when a shutdown closes the database",
+    async () => {
+      const h = await setup();
+      const t = await h.toPlan();
+      const gate = h.hold();
+      const pending = h.json<BranchCheckDto>(`/api/tasks/${t.id}/branch?prefix=task/`);
+      await gate.entered;
+      h.db.close();
+      gate.release();
+      const r = await pending;
+      expect([r.status, r.body.openPr, r.body.exists]).toEqual([200, null, []]);
     },
     SLOW,
   );

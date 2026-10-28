@@ -1047,7 +1047,7 @@ The app writes its own lean format for a change to an existing repository (desig
 - Folder: repo_task_settings.spec_dir with `{key}` replaced by the Jira key. Default `specs/<KEY>/`.
 - Small: one `plan.md` of about one screen (about 50 lines without the tasks) with three level-2 sections: "## Integration map", "## Change", "## Tasks". Medium and large: design.md, spec.md, and tasks.md, each short.
 - The app renders the Integration map from specResult.map and the tasks from specResult.parts. Claude writes only the prose fields. No section restates code that a reader can open from a map line.
-- Map check (deterministic): each map entry names a path that exists at the base commit of the task worktree (`git cat-file -e <base>:<path>`), and its line, when set, is at most the line count of that file. A failed entry stays in the map with the mark "(not found at <base>)" and counts in coverage.skipped. "Approve the plan" shows "2 map lines name code that does not exist." The user can still approve.
+- Map check (deterministic): each map entry names a path that exists at the base commit of the task worktree (`git cat-file -e <base>:<path>`), and its line, when set, is at most the line count of that file. A path under the snapshot path of a submodule or an added repository (section 6.16.5, Snapshots) is checked in that repository at its snapshot commit. The longest matching path wins. A failed entry stays in the map with the mark "(not found at <base>)" and counts in coverage.skipped. "Approve the plan" shows "2 map lines name code that does not exist." The user can still approve.
 
 Templates (headings and the one-line guidance that the spec agent gets; the caps are prompt rules, and the schema caps of section 6.5 are the hard limits):
 
@@ -1369,7 +1369,7 @@ Section 6.17.4 adds POST /api/tasks/issue and PUT /api/tasks/:id/files/:att. Sec
 
 ### 6.12 UI: the Task view
 
-- Start: the Jira chip menu item "Build this task" (one click: POST /api/tasks, then the Task view). The sidebar view "Tasks" with "Build a Jira task" (key, "Main repository", picked from the known ones, and "Profile" (section 6.19.1), then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16).
+- Start: the Jira chip menu item "Build this task" (one click: POST /api/tasks, then the Task view). The sidebar view "Tasks" with "Build a Jira task" (key, "Main repository", and "Profile" (section 6.19.1), then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16).
 - Route `/tasks/:id`. Layout: a header (key, title, size line, repository line, profile name), the step strip, one status sentence, one primary button, a More menu, then the content of the current step. Tabs under the content, all secondary: Questions, Attachments (section 6.17.1), Spec, Spec PR (medium, large), Plan, Log, Diff.
 - Step strip per size: small "Questions › Plan › Build › Done"; medium "Questions › Plan › Spec review › Build › Done"; large "Questions › Plan › Spec review › Build parts (2 of 4) › Done". The current step is bold with aria-current="step".
 
@@ -1666,7 +1666,7 @@ The attachments of the Jira key belong to the task, with or without an origin PR
 
 #### 6.17.1 What the user sees
 
-- "Build a Jira task" form: the key and "Main repository", then the primary "Read the task". It reads the issue once (POST /api/tasks/issue) and shows the summary and the attachments, each with a box. The primary then reads "Build this task". A new key goes back to "Read the task".
+- "Build a Jira task" form: the key and "Main repository", then the primary "Read the task". "Main repository" is a searchable combobox. It lists the repositories of the stored PRs and of the tasks first, then the repositories that the token can push to (GET /api/tasks/repos: REPO_WRITE, Gate G16, at most REPO_LIST_MAX). The form reads that list once while it is open. A failed list keeps the known repositories and says "Cannot list the other repositories." with the reason. The list shows at most 50 matches. The typed text narrows it. It reads the issue once (POST /api/tasks/issue) and shows the summary and the attachments, each with a box. The primary then reads "Build this task". A new key goes back to "Read the task".
 - With the setting "Ask before Claude reads a Jira attachment" off, every box starts ticked. Else no box starts ticked, and the first tick opens the company AI policy dialog of the PR brief. Its confirm ticks the box and turns the setting off.
 - A file without a box shows why: "Listed only: only images, PDFs, and text files go to runs.", "Listed only: runs get images up to 5 MB.", "Listed only: runs get PDFs up to 5 MB.", or "Listed only: the file is over 100 MB.".
 - "Include all" ticks every box. It asks the policy question once when the setting asks.

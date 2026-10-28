@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The Tasks view of the list pane (docs/plans/review-v2/spec.md section 6.12): "Build a task" with a key, a repository from the known
-// ones (the base branch starts at the last pick or the default branch, spec.md section 6.16.3), then one row per task with
-// "<KEY> <title> · <repo>" and the status in the meta line.
+// The Tasks view of the list pane (docs/plans/review-v2/spec.md section 6.12): "Build a task" with a key, a repository of the stored PRs,
+// of the tasks, or of the forge list (the base branch starts at the last pick or the default branch, spec.md section 6.16.3), then one
+// row per task with "<KEY> <title> · <repo>" and the status in the meta line.
 import { CircleAlert, Menu, Plus } from "lucide-react";
 import { memo, type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -12,12 +12,13 @@ import { Kbd } from "@/components/ui/kbd";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { type ProfileDto, TASK_KEY, type TaskCreateInput, type TaskIssueDto, type TaskRowDto } from "../../shared/dto";
-import { taskProfileId } from "../../shared/task";
+import { REPO_LIST_MAX, taskProfileId } from "../../shared/task";
 import { useMinute } from "../shell/ListPane";
 import { ago, type ProjectRepos } from "../shell/model";
 import { askText, boxId, FilePicker, NoAttachments, usePolicy } from "./Attachments";
-import { readIssue, useTaskProfile } from "./data";
-import { fileChoices, firstPicks, rowStatus } from "./model";
+import { readIssue, useTaskProfile, useTaskRepos } from "./data";
+import { fileChoices, firstPicks, repoChoices, rowStatus } from "./model";
+import { RepoField } from "./RepoField";
 
 const kbd = "border border-rule-strong bg-transparent font-mono text-[11px] text-ink-2";
 const groupHead = "m-0 flex items-center gap-2 border-b bg-pane-2 px-4 pt-[9px] pb-1.5 text-xs font-semibold text-ink-2";
@@ -80,7 +81,14 @@ export function TaskList(props: {
             <span className="sr-only"> open tasks</span>
           </span>
         </div>
-        <NewTask repos={props.repos} tracker={props.tracker} runner={props.runner} profiles={props.profiles} onCreate={props.onCreate} />
+        <NewTask
+          repos={props.repos}
+          used={props.rows ?? []}
+          tracker={props.tracker}
+          runner={props.runner}
+          profiles={props.profiles}
+          onCreate={props.onCreate}
+        />
       </header>
       <div>{props.banner}</div>
       <div className="relative overflow-auto overscroll-contain" id="rows" tabIndex={-1}>
@@ -133,13 +141,19 @@ export function TaskList(props: {
 // Then the boxes pick the files that the runner gets, and "Build this task" creates the task. A new key goes back to the first step.
 function NewTask(props: {
   repos: ProjectRepos[];
+  // The tasks: their repositories are choices too, with or without a stored PR.
+  used: TaskRowDto[];
   tracker: string;
   runner: string;
   profiles: ProfileDto[];
   onCreate: (input: TaskCreateInput) => Promise<void>;
 }) {
-  const all = props.repos.flatMap((g) => g.repos.map((r) => ({ project: g.project, repo: r.repo, key: r.key })));
   const [open, setOpen] = useState(false);
+  const listed = useTaskRepos(open);
+  const all = repoChoices(
+    [...props.repos.flatMap((g) => g.repos.map((r) => ({ project: g.project, repo: r.repo }))), ...props.used],
+    listed.data?.repos ?? [],
+  );
   const [key, setKey] = useState("");
   const [repo, setRepo] = useState("");
   // The user's pick for the chosen repository. null: the preselection of the server.
@@ -150,6 +164,13 @@ function NewTask(props: {
   const [picks, setPicks] = useState<ReadonlySet<string>>(new Set());
   const policy = usePolicy(props.runner, props.tracker);
   const chosen = all.find((r) => r.key === (repo || all[0]?.key));
+  const listNote = listed.isPending
+    ? "Reading the other repositories…"
+    : listed.error
+      ? `Cannot list the other repositories. ${listed.error.message}`
+      : listed.data?.complete === false
+        ? `The list stops at ${REPO_LIST_MAX} repositories.`
+        : null;
   // spec.md section 6.2: an Explain profile gives no code, so the picker leaves it out.
   const choices = props.profiles.filter((p) => !p.explain);
   const pre = useTaskProfile(open ? (chosen ?? null) : null).data?.profile;
@@ -232,19 +253,7 @@ function NewTask(props: {
         <label htmlFor="new-task-repo" className="text-ink-2">
           Main repository
         </label>
-        <select
-          id="new-task-repo"
-          name="repository"
-          className="h-8 rounded-md border border-input bg-pane px-2 text-sm"
-          value={chosen?.key ?? ""}
-          onChange={(e) => setRepo(e.target.value)}
-        >
-          {all.map((r) => (
-            <option key={r.key} value={r.key}>
-              {r.key}
-            </option>
-          ))}
-        </select>
+        <RepoField id="new-task-repo" value={chosen?.key ?? ""} choices={all} note={listNote} onPick={setRepo} />
       </div>
       <div className="grid gap-1 text-sm">
         <label htmlFor="new-task-profile" className="text-ink-2">
@@ -312,7 +321,7 @@ function NewTask(props: {
         </p>
       )}
       <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={busy || !all.length}>
+        <Button type="submit" size="sm" disabled={busy || !chosen}>
           {read ? (busy ? "Starting…" : "Build this task") : busy ? "Reading…" : "Read the task"}
         </Button>
         <Button type="button" size="sm" variant="outline" onClick={close}>
@@ -320,9 +329,6 @@ function NewTask(props: {
         </Button>
       </div>
       {policy.dialog}
-      {!all.length && (
-        <p className="m-0 text-xs text-muted-foreground">Repositories appear here after the first check of your pull requests.</p>
-      )}
     </form>
   );
 }

@@ -20,6 +20,7 @@ import {
   jiraRequests,
   makeClone,
   openApp,
+  pickRepo,
   runFiles,
   taskRemote,
 } from "./control";
@@ -362,7 +363,7 @@ test("the Build form lists the attachments with boxes and asks the policy questi
   await page.getByRole("button", { name: "Build a Jira task" }).click();
   const form = page.getByRole("form", { name: "Build a Jira task" });
   await form.getByLabel("Jira key").fill(JIRA_ISSUE);
-  await form.getByLabel("Main repository").selectOption("PROJ1/sample-repo-2");
+  await pickRepo(form, "PROJ1/sample-repo-2");
   await form.getByRole("button", { name: "Read the task" }).click();
   await expect(form.getByText(TITLE)).toBeVisible();
   const shot = form.getByRole("checkbox", { name: /screenshot\.png/ });

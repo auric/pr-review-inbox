@@ -24,6 +24,7 @@ import {
   type TaskDto,
   type TaskIssueDto,
   type TaskProfileDto,
+  type TaskRepoListDto,
   taskAnswersInput,
   taskBaseInput,
   taskCreateInput,
@@ -185,6 +186,13 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
           return c.json<TaskProfileDto>({ profile: preselectProfile(db, opts.settings.profiles(), project, repo) }, 200);
         },
       )
+      // spec.md section 6.12: the Build form lists the repositories that the token can push to. It comes before /tasks/:id.
+      .get("/tasks/repos", async (c) => {
+        const r = await tasks.writableList();
+        if ("error" in r) return c.json<ApiError>({ error: r.error }, 502);
+        c.header("Cache-Control", "no-store");
+        return c.json<TaskRepoListDto>({ repos: r.repos.map((x) => ({ project: x.project, repo: x.slug })), complete: r.complete }, 200);
+      })
       .get("/tasks/:id", idParam, (c) => {
         const db = openDb();
         const t = db && tasks.get(db, c.req.valid("param").id);

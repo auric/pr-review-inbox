@@ -16,7 +16,7 @@ import {
 } from "../../shared/task";
 import { git } from "../review/git";
 import { repoPath } from "../review/validate";
-import type { ContextFile } from "../review/workspace";
+import type { ContextFile, SnapshotRepo } from "../review/workspace";
 
 // ---------- Size rules (spec.md section 6.1) ----------
 
@@ -171,27 +171,46 @@ export function toPlan(r: SpecResult, base: string, missing: boolean[], skipped:
 const lineCount = (text: string) => (text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0));
 
 // true for each entry that names no file or folder at base, or a line past the end of its file. A line in a folder fails too.
+// nested: the other repositories of the snapshot (spec.md section 6.16.5). An entry under the path of one is checked in that
+// repository at its commit. The longest path wins, so a submodule of an added repository takes its own entries.
 export async function checkMap(
   map: Pick<MapEntry, "path" | "line">[],
   base: string,
   cache: string,
   env: Record<string, string>,
+  nested: Pick<SnapshotRepo, "path" | "cache" | "commit">[] = [],
 ): Promise<boolean[]> {
-  const g = (args: string[], stdin?: string) => git([`--git-dir=${cache}`, ...args], { env, stdin });
-  const paths = map.map((e) => (/[\p{Cc}]/u.test(e.path) ? null : repoPath(e.path)));
-  const asked = paths.flatMap((p) => (p === null ? [] : [`${base}:${p}`]));
-  const rows = asked.length ? (await g(["cat-file", "--batch-check"], `${asked.join("\n")}\n`)).split("\n") : [];
-  const found = new Map<string, { sha: string; type: string }>();
-  asked.forEach((q, i) => {
-    const m = /^([0-9a-f]{40,64}) (\w+) \d+$/.exec(rows[i] ?? "");
-    if (m) found.set(q, { sha: m[1] as string, type: m[2] as string });
+  const g = (dir: string, args: string[], stdin?: string) => git([`--git-dir=${dir}`, ...args], { env, stdin });
+  // The cache and the object name of each entry. null: an invalid path.
+  const asked = map.map((e): { cache: string; object: string } | null => {
+    if (/[\p{Cc}]/u.test(e.path)) return null;
+    const raw = e.path.replaceAll("\\", "/").replace(/^(\.\/)+/, "");
+    const n = nested.filter((r) => raw === r.path || raw.startsWith(`${r.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
+    if (!n) {
+      const p = repoPath(raw);
+      return p === null ? null : { cache, object: `${base}:${p}` };
+    }
+    const rest = raw.slice(n.path.length + 1);
+    // "<commit>:" names the root tree of the repository.
+    if (rest === "") return { cache: n.cache, object: `${n.commit}:` };
+    const p = repoPath(rest);
+    return p === null ? null : { cache: n.cache, object: `${n.commit}:${p}` };
   });
+  const found = new Map<string, { sha: string; type: string }>();
+  for (const dir of new Set(asked.flatMap((a) => (a ? [a.cache] : [])))) {
+    const objects = [...new Set(asked.flatMap((a) => (a?.cache === dir ? [a.object] : [])))];
+    const rows = (await g(dir, ["cat-file", "--batch-check"], `${objects.join("\n")}\n`)).split("\n");
+    objects.forEach((q, i) => {
+      const m = /^([0-9a-f]{40,64}) (\w+) \d+$/.exec(rows[i] ?? "");
+      if (m) found.set(`${dir}\0${q}`, { sha: m[1] as string, type: m[2] as string });
+    });
+  }
   const lines = new Map<string, number>();
   const out: boolean[] = [];
   for (const [i, e] of map.entries()) {
-    const p = paths[i];
-    const f = p === null || p === undefined ? undefined : found.get(`${base}:${p}`);
-    if (!f) {
+    const a = asked[i];
+    const f = a ? found.get(`${a.cache}\0${a.object}`) : undefined;
+    if (!a || !f) {
       out.push(true);
       continue;
     }
@@ -203,7 +222,7 @@ export async function checkMap(
       out.push(true);
       continue;
     }
-    if (!lines.has(f.sha)) lines.set(f.sha, lineCount(await g(["cat-file", "blob", f.sha])));
+    if (!lines.has(f.sha)) lines.set(f.sha, lineCount(await g(a.cache, ["cat-file", "blob", f.sha])));
     out.push(e.line > (lines.get(f.sha) ?? 0));
   }
   return out;

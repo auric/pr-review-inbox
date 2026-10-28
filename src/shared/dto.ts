@@ -1251,6 +1251,8 @@ export const taskCreateInput = z.object({
 // GET /api/tasks/profile: the profile that the Build form preselects for a repository (spec.md section 6.2).
 export const taskProfileInput = z.object({ project: repoName, repo: repoName });
 export type TaskProfileDto = { profile: ProfileId };
+// GET /api/tasks/repos: the repositories that the token can push to, for the Build form. complete: false when REPO_LIST_MAX cut it.
+export type TaskRepoListDto = { repos: { project: string; repo: string }[]; complete: boolean };
 // POST /api/tasks/issue: the issue of a key before the task exists (spec.md section 6.17). One Jira read on the user's click.
 export const taskIssueInput = z.object({ key: z.string().regex(TASK_KEY) });
 export type TaskIssueDto = { key: string; summary: string; status: string | null; attachments: AttachmentMeta[] };

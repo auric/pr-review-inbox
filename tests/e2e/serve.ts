@@ -213,6 +213,7 @@ const INITIAL: Scenario = {
   native: false,
   consult: false,
   resolved: false,
+  noRepoList: false,
 };
 let sc: Scenario = { ...INITIAL };
 
@@ -486,6 +487,14 @@ const multi = await taskRepoSet(claudeDir, fake, "PROJ1", {
   app: { "README.md": "# App\n", "src/app.ts": "export const app = 1;\n" },
   lib: { "lib.c": "int lib = 1;\n" },
 });
+// Each repoWrites call above replaces the list route, so the scenario wraps the last one.
+const repoList = fake.routes[key("GET", "/rest/api/1.0/repos")];
+fake.routes[key("GET", "/rest/api/1.0/repos")] = (req) =>
+  sc.noRepoList
+    ? { status: 500, body: { errors: [{ message: "Synthetic failure." }] } }
+    : typeof repoList === "function"
+      ? repoList(req)
+      : (repoList ?? { status: 404 });
 
 // ---------- Fix it (plan r3): the user's clone ----------
 // Clones live outside the data folder, as a real clone does.

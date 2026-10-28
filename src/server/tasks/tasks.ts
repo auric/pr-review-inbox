@@ -78,7 +78,7 @@ import { gitEnv } from "../review/git";
 import type { ReviewJobs, TaskRunStart } from "../review/jobs";
 import { type Ending, judgeTask } from "../review/judge";
 import { buildInterviewPrompt, buildSpecPrompt } from "../review/prompt";
-import { type ContextFile, noUrl, remoteHead } from "../review/workspace";
+import { type ContextFile, noUrl, remoteHead, type SnapshotRepo } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import {
   dropFetched,
@@ -1007,6 +1007,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     let plan: Plan | null = null;
     let listed: ListedRepo[] = [];
     let proposals: SpecResult["repos"] = [];
+    let nested: SnapshotRepo[] = [];
     // The untrusted files of the snapshot: the task files, then context/repo-list.md.
     const untrusted = [...files];
     return {
@@ -1015,6 +1016,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       key: `task:${t.id}:spec`,
       repos: async (d, head) => {
         const out = await repos(t)(d, head);
+        nested = out;
         const l = await writableList();
         listed = "error" in l ? [] : l.repos;
         const skipped = repoDtos(d, t).filter((r) => r.proposal === "skipped");
@@ -1054,7 +1056,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       judge: (o, ws, servers, gaps) =>
         judgeTask(o, specResult, "spec", servers, gaps, async (r) => {
           const base = ws.sourceHead;
-          const missing = await checkMap(r.map, base, ws.cache, gitEnv("/dev/null"));
+          const missing = await checkMap(r.map, base, ws.cache, gitEnv("/dev/null"), nested);
           const skipped = r.map.flatMap((e, i) =>
             missing[i]
               ? [`Map line ${i + 1}: ${oneLine(e.path)}${e.line === null ? "" : `:${e.line}`} is not found at ${base.slice(0, 12)}.`]
@@ -1497,6 +1499,10 @@ export function createTaskService(opts: TaskServiceOptions) {
     const prefix = input.prefix ?? settingsOf(t).branchPrefix ?? (branchPrefixesOf(settings.config())[0] as string);
     const small = (t.size ?? docsOf(t)?.parsed.proposed ?? "small") === "small";
     const name = branchName(prefix, t.key, small ? { kind: "small", title: t.title } : { kind: "spec" });
+    // The query comes before the remote read: a shutdown can close db while the read runs.
+    const pr = db.query(Q.openPr).get({ project: t.project, repo: t.repo, branch: name, base: input.base ?? t.target_branch }) as {
+      id: number;
+    } | null;
     let heads: Map<string, string>;
     try {
       heads = await remoteBranches(review.dataDir, await review.taskRemote(t.project, t.repo), name);
@@ -1505,9 +1511,6 @@ export function createTaskService(opts: TaskServiceOptions) {
       return { status: 502, error: `Cannot read the branches of ${t.project}/${t.repo}. ${noUrl((e as Error).message)}` };
     }
     const head = heads.get(name);
-    const pr = db.query(Q.openPr).get({ project: t.project, repo: t.repo, branch: name, base: input.base ?? t.target_branch }) as {
-      id: number;
-    } | null;
     return {
       name,
       exists: head ? [{ taskRepo: null, project: t.project, repo: t.repo, head }] : [],
@@ -1696,6 +1699,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     repoChoice,
     resume,
     close,
+    writableList,
     get(db: Database, id: number): TaskDto | null {
       const t = taskRow(db, id);
       return t && taskDto(db, t);

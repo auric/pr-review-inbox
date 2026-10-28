@@ -292,31 +292,31 @@ describe("size change of the files", () => {
   });
 });
 
-// A bare repository with src/a.ts (3 lines) and README.md (2 lines, no final newline) at base.
-async function mapRepo() {
+// A bare repository with one commit of files.
+async function mapRepo(name: string, files: Record<string, string>) {
   const empty = join(root, "empty.gitconfig");
   writeFileSync(empty, "");
-  const repo = join(root, "map.git");
+  const repo = join(root, `${name}.git`);
   const env = {
     ...gitEnv(empty),
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@example.invalid",
     GIT_COMMITTER_NAME: "t",
     GIT_COMMITTER_EMAIL: "t@example.invalid",
-    GIT_INDEX_FILE: join(root, "map.index"),
+    GIT_INDEX_FILE: join(root, `${name}.index`),
   };
   const g = async (args: string[]) => (await git(["--git-dir", repo, ...args], { env })).trim();
   await git(["init", "-q", "--bare", "--template=", repo], { env });
-  const blob = async (name: string, text: string) => {
-    const f = join(root, name);
+  for (const [i, [path, text]] of Object.entries(files).entries()) {
+    const f = join(root, `${name}-${i}`);
     writeFileSync(f, text);
-    return g(["hash-object", "-w", f]);
-  };
-  await g(["update-index", "--add", "--cacheinfo", `100644,${await blob("three", "a\nb\nc\n")},src/a.ts`]);
-  await g(["update-index", "--add", "--cacheinfo", `100644,${await blob("two", "a\nb")},README.md`]);
+    await g(["update-index", "--add", "--cacheinfo", `100644,${await g(["hash-object", "-w", f])},${path}`]);
+  }
   return { repo, empty, base: await g(["commit-tree", await g(["write-tree"]), "-m", "base"]) };
 }
-const ready = mapRepo();
+// src/a.ts (3 lines) and README.md (2 lines, no final newline) at base.
+const ready = mapRepo("map", { "src/a.ts": "a\nb\nc\n", "README.md": "a\nb" });
+const sub = mapRepo("sub", { "lib.ts": "x\ny\n" });
 
 describe("map check (spec.md section 6.4)", () => {
   test("an existing file and line passes; a missing path or a line past the end fails; a folder takes no line", async () => {
@@ -334,6 +334,43 @@ describe("map check (spec.md section 6.4)", () => {
       { path: "src/a.ts\nx", line: null },
     ];
     expect(await checkMap(map, base, repo, gitEnv(empty))).toEqual([false, true, false, true, true, false, true, false, true, true]);
+  });
+
+  test("spec.md section 6.16.5: an entry under a submodule or an added repository is checked in that repository", async () => {
+    const { repo, empty, base } = await ready;
+    const s = await sub;
+    const nested = [
+      { path: "lib", cache: s.repo, commit: s.base },
+      { path: "../repos/P/s", cache: s.repo, commit: s.base },
+    ];
+    const map = [
+      { path: "lib/lib.ts", line: 2 },
+      { path: "lib/lib.ts", line: 3 },
+      { path: "lib", line: null },
+      { path: "lib/", line: 1 },
+      { path: "../repos/P/s/lib.ts", line: 1 },
+      { path: "..\\repos\\P\\s\\lib.ts", line: null },
+      { path: "lib/src/a.ts", line: null },
+      { path: "src/a.ts", line: 3 },
+      { path: "libx/lib.ts", line: null },
+      { path: "../repos/P/s/../../x/lib.ts", line: null },
+      { path: "../repos/P/other/lib.ts", line: null },
+    ];
+    expect(await checkMap(map, base, repo, gitEnv(empty), nested)).toEqual([
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+    ]);
+    // Without the other repositories, every entry outside the main repository fails.
+    expect(await checkMap(map.slice(0, 1), base, repo, gitEnv(empty))).toEqual([true]);
   });
 
   test("the plan keeps a failed entry with its mark, so it counts", async () => {
