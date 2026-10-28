@@ -38,17 +38,16 @@ Plan decisions that follow from D1 to D3 and the comparison:
 - A package that changes the UI runs `bun run screenshots`, checks each image for real names, hosts, and paths, updates README.md, and runs the web-design-guidelines review.
 - A package that changes review agent text raises REVIEW_PROMPT_VERSION, except when a snapshot test proves the default prompt bytes are unchanged.
 - A package that adds a profile field keeps profileRevision of an unchanged profile the same when the field holds its default (as WP-R1 did).
-- No test, script, or eval run reads the user's live data folder. The local set builder reads only a copy.
+- No test or eval run reads the user's live data folder. Only the local set builder reads it, strictly read only: a temp copy of the database and read-only git commands on the cache. It writes nothing there.
 
 ## 3. Waves
 
 | Wave | Packages (∥ = parallel worktrees) | Needs |
 |---|---|---|
 | W1 | WP-V1 | the user's go (given 2026-10-28) |
-| U-V1 | User gate: build the local set, run the baseline twice | WP-V1 |
-| W2 | WP-V2 ∥ WP-V3 | U-V1 |
-| U-V2 | User gate: the variant matrix (section 5) | WP-V2, WP-V3 |
-| W2b | WP-V4 | U-V2 |
+| W2 | WP-V2 ∥ WP-V3 | WP-V1 |
+| U-V1 | User gate: `bun run eval:ab`, the shipped profile against the candidate (section 5) | WP-V1, WP-V2, WP-V3 |
+| W2b | WP-V4 | U-V1 |
 | W3 | WP-V5, then WP-V6, then WP-V7, then WP-V8 (shared files, merge order); WP-V9 after each server part merges | WP-V4; WP-V5 also needs the BRIEF 3.5 approval (section 6) |
 | U-V3 | User gate: CodeGraph on against off, and the pre-existing count; smoke docs/smoke-review-v3.md | W3 |
 | W4 | WP-V10a, then WP-V10b; WP-VCI0 (gate, read only) | U-V3 (V10); D3 facts and the BRIEF 3.6 approval (VCI) |
@@ -91,7 +90,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 ### WP-V1. Local eval set from the user's decisions (implementer-xhigh, W1; idea 1)
 
 - Files: scripts/eval/local.ts (new: `bun run eval:local -- --db <copy> --cache <copy> --out <folder>`); scripts/eval/cases.ts (set `local`, read from REVIEW_LOOP_EVAL_LOCAL; a case kind with a git bundle remote instead of base files and head.patch); scripts/eval/run.ts (remote from the bundle; PR title, description, and task text from the case); scripts/eval/score.ts (near-line match, tolerance in the result); scripts/eval/compare.ts (refuses two results with a different set fingerprint or tolerance); package.json script `eval:local`; .gitignore (`eval-local/`); tests/eval/local.test.ts (new); docs/eval/local.md (new: how to build and run; no data).
-- Input: a copy of the SQLite file and a copy of the cache folder. The builder refuses a path inside the live data folder (config dataDir). It opens the copy read only.
+- Input: the SQLite file and the cache folder of the data folder of the app (config dataDir), or the `--db` and `--cache` paths. The builder reads them strictly read only. It refuses an `--out` folder inside the live data folder.
 - Selection, deterministic:
   - One case per reviewed (PR, head commit). Base and head come from the run row (merge base, head).
   - Bugs: findings that the user posted, at their anchor (path, side, line, lineEnd), with the severity of the posted text.
@@ -102,12 +101,12 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 - Repository: one git bundle per repository with the needed base and head commits, from the cache copy. The PR text, task text, and attachments-list come from the DB copy as context files. No call to Bitbucket or Jira.
 - Scoring: a hit is an item on the same path and side whose range overlaps the posted range widened by T lines (default 3, section 9 Q2). The result file records T. Must-not-raise uses the existing trap match with T = 0.
 - Output: `<out>/cases/<id>/case.json`, `<out>/bundles/<repo>.bundle`, and `<out>/MANIFEST.json` (counts and a fingerprint). No path, host, or name goes to stdout beyond counts.
-- Tests: a synthetic DB copy and a temp repo built by the test. Cases: posted to bug, `bug` and `intended` to trap, `worth` to extra, refuted and unrestored skipped, opposite decisions dropped, two runs on one head merged, a live data folder path refused, the output folder is git-ignored (`git check-ignore`).
+- Tests: a synthetic DB copy and a temp repo built by the test. Cases: posted to bug, `bug` and `intended` to trap, `worth` to extra, refuted and unrestored skipped, opposite decisions dropped, two runs on one head merged, an `--out` folder in the live data folder refused, the output folder is git-ignored (`git check-ignore`).
 - Control mutation: map `worth` to a trap. The neutral-discard test must fail.
 - Eval measure: the set itself. U-V1 checks that it can tell variants apart.
 - Depends: none.
 - Implementation notes (2026-10-28):
-  - docs/eval/local.md gives the build and run steps. `--cache` is the copy of the `git` folder of the data folder. `--user` overrides `userSlug` of `config.json` beside the database copy.
+  - docs/eval/local.md gives the build and run steps. `--db` and `--cache` default to the database and the `git` folder of the data folder. `--user` overrides `userSlug` of `config.json` beside the database file.
   - The case key is (PR, head, merge base), because old-side lines are numbered at the merge base. Runs on one head with one merge base make one case.
   - The decision on a carried finding is on its newest copy, as stats.ts reads it. Each run item of the chain gets that decision at its own anchor. A discard that stats.ts userDiscard does not count (fix commit, closing re-review, session reject) is left out.
   - The user's own comments (Q1) are root inline comments that the outbox did not post. The anchor toHash names the head of the case. An old-side comment also needs fromHash equal to the merge base. They score as human recall. A hit on one also counts for precision.
@@ -116,12 +115,13 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
   - A case has no PR comments: they show the answers. The task rows come from pr_task and task_context. Attachment files stay out.
   - The builder reads a temp copy of the database, because a read-only open of a WAL file still makes -shm and -wal files beside it. The bundle comes from a temp repository that borrows the objects of the cache copy (alternates).
 
-### Gate U-V1. Build the set and run the baseline (user)
+### Gate U-V1. Shipped profile against the candidate (user)
 
-- The user copies the data folder (closed app), runs `bun run eval:local`, and checks MANIFEST.json counts.
-- Recommended minimum: 30 cases, 40 posted findings, 20 must-not-raise findings (section 9 Q3).
-- The user runs `bun run eval -- --real --set local --repeat 2` on the current shipped profile. The spread between the two repeats sets the minimum gain of section 0.
-- The user also runs set v1 and hard once on the same commit as the guard baseline. Prompt version 2.3 differs from the G-EVAL-1 files (2.2).
+- The user closes the app, runs `bun run eval:ab`, and sends the printed tables. docs/eval/local.md gives the flags.
+- The command builds the local set from the data folder, read only. Then it runs the shipped profile (A) and the candidate of section 5 (B) on that set, with `--repeat 1`. It prints one table for the review cases and one for the re-review cases. It skips a mode without cases.
+- Recommended minimum: 30 cases, 40 posted findings, 20 must-not-raise findings (section 9 Q3). The build output says when the set is smaller.
+- The synthetic sets v1 and hard are not part of the gate. The orchestrator records the aggregate numbers in docs/eval/results.md.
+- A mixed result: the user bisects with `--candidate-variants` and `--candidate-modules`.
 
 ### WP-V2. Prompt switches for wave 2 (implementer-xhigh, W2; ideas 3, 4, 7, 9)
 
@@ -134,8 +134,8 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
   - The verifier switch exists already (profile verifier.mode, eval `--verifier`). This package adds nothing for it.
 - Tests: the default prompt of each run kind is byte for byte the same as before (snapshot); each variant adds only its lines; prompt_version "2.3+order+signal" for two variants; an old profile without `variants` loads with an empty list and the same profileRevision; `--variants bogus` exits 2.
 - Control mutation: add the "order" lines without the variant. The default snapshot test must fail.
-- Eval measure: section 5 matrix.
-- Depends: U-V1.
+- Eval measure: gate U-V1.
+- Depends: WP-V1.
 - Implementation notes (2026-10-28):
   - No PROFILES_VERSION bump. No shipped value changed, and the zod default fills `variants` with an empty list. config.ts and settings.ts stay as they were.
   - An unknown stored variant name drops on load now, as an unknown module ID does. The list keeps the VARIANTS order.
@@ -144,7 +144,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
   - Only a review or re-review run records the variants in prompt_version. Ask, reply, fix, discuss, and Explain rows keep REVIEW_PROMPT_VERSION. The eval result file records the same text in `promptVersion`.
   - "rereview-strict" changes only the re-review stdin. Without `--rereview` (WP-V3), it changes no prompt, but the prompt version still names it.
   - The tests are in tests/review/prompt.test.ts, tests/review/jobs.test.ts, and tests/eval/harness.test.ts. tests/review/catalog.test.ts does not exist. The snapshot hashes come from the default prompts of each run kind at commit d76bed0.
-  - docs/eval/local.md gives the U-V2 commands.
+  - docs/eval/local.md gives the gate U-V1 command.
 
 ### WP-V3. Re-review eval mode (implementer, W2; measure for idea 9)
 
@@ -163,12 +163,8 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
   - Score: a re-raise is a shown item that is no carried copy, hits no bug or own comment, and overlaps (with T) a posted or discarded earlier finding. It counts as noise and as `reRaises` (per case run). It takes precedence over an extra. Open and dropped findings get no re-raise check.
   - The earlier lines move to the head through `git diff -M` from the earlier head to the head (new side) or between the merge bases (old side). A range that the diff touches gets lines null and no re-raise check, because a new finding there can be about the new code.
   - Verdicts: only a posted finding has a later user state (its thread). A fixed verdict makes a resolve proposal (rereview.ts resolveProposals). verdictOk: proposal present equals thread resolved. Carried open findings get no verdict score.
-  - `--variants rereview-strict` without `--rereview` exits 2. compare refuses a `--rereview` result against a plain one, so run F has its own re-review baseline (docs/eval/local.md).
+  - `--variants rereview-strict` without `--rereview` exits 2. compare refuses a `--rereview` result against a plain one, so `eval:ab` compares the re-review cases in their own table.
   - Left out: questions of the earlier run, and posted findings of runs before the earlier run.
-
-### Gate U-V2. Variant matrix (user)
-
-Section 5 lists the runs. The user runs each with `--repeat 2` and `bun run eval:compare` against the U-V1 baseline. The orchestrator records the aggregate numbers in docs/eval/results.md.
 
 ### WP-V4. Ship the winners (implementer, W2b)
 
@@ -176,7 +172,7 @@ Section 5 lists the runs. The user runs each with `--repeat 2` and `bun run eval
 - Behavior: the winners become the default text, not a variant. The `variants` field keeps only names that still exist. An unknown stored name drops on load.
 - Tests: upgrade of an unedited and of an edited shipped profile; a stored lost variant drops.
 - Control mutation: upgrade an edited profile. The edited-profile test must fail.
-- Depends: U-V2. When no variant wins, this package only removes the variant code.
+- Depends: U-V1. When no variant wins, this package only removes the variant code.
 
 ### WP-V5. CodeGraph by default (implementer-xhigh, W3; idea 2, D2)
 
@@ -260,19 +256,14 @@ Section 5 lists the runs. The user runs each with `--repeat 2` and `bun run eval
 - Behavior: the finder maps the sketch points to the change. The comment never quotes the sketch. Only a "missing" or "diverges" point with a trigger becomes a finding.
 - Eval measure: design-gap cases of the local set; discard rate in stats; cost per posted finding.
 
-## 5. Variant matrix for U-V2
+## 5. Candidate for U-V1
 
-Each row: `--set local --repeat 2`, then the guard sets once. Compare with the U-V1 baseline.
+The baseline (A) is the shipped profile. The candidate (B) adds to it. The verify mode stays as shipped.
 
-| Run | Flags | Question |
+| Mode | Candidate | Question |
 |---|---|---|
-| A | `--verifier off` | Does the verify phase earn its cost? |
-| B | `--variants signal --verifier off` | Does a high-signal single pass match the two-phase pipeline? |
-| C | `--variants signal --verifier on` | Does high-signal help the two-phase pipeline? |
-| D | `--modules <shipped>,failures` | Does the failure checklist raise recall without noise? |
-| E | `--variants order` | Does the ordered process raise recall at the same minutes? |
-| F | `--rereview --variants rereview-strict`, against a `--rereview` baseline | Does the strict re-review cut noise and re-raises? |
-| G | the best of A to E combined | Do the winners add up? |
+| Review cases | `--variants signal,order` and `--modules <shipped>,failures` | Do the high-signal rules, the ordered process, and the failure checklist raise recall without noise? |
+| Re-review cases | the review candidate plus `rereview-strict` | Does the strict re-review also cut noise and re-raises? |
 
 ## 6. BRIEF 3.5 wording draft (needs approval at merge)
 
@@ -318,7 +309,7 @@ The user decided on 2026-10-28: the user's own inline comments count as must-fin
 | Q6 | Minimum severity for pre-existing items? | Decided 2026-10-28: major. They pass the verify phase when it is on. At most 5 per run (PREEXISTING_MAX, WP-V6). |
 | Q7 | Review checks: per repository and global, at most 20 per run? | Decided 2026-10-28: yes. |
 | Q8 | If run B wins, does the shipped profile turn the verifier off? | Decided 2026-10-28: yes. The switch stays in the profile. |
-| Q9 | Cost exception when recall rises a lot? | Decided 2026-10-28: none. The user decides each case after U-V2. |
+| Q9 | Cost exception when recall rises a lot? | Decided 2026-10-28: none. The user decides each case after U-V1. |
 | Q10 | CI server type and version? | Open. It has no default. Needed before WP-VCI0. |
 | Q11 | CI auth: token type, scope, and store name? | Decided 2026-10-28: a read-only token in the OS store under its own name. |
 | Q12 | Which builds: the build status of the PR head, matched by commit? | Decided 2026-10-28: yes. The CI origin comes from Settings, never from the build status URL. |

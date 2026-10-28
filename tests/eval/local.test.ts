@@ -324,25 +324,21 @@ describe("eval:local selection", () => {
 
 describe("eval:local refusals", () => {
   test(
-    "a path in the live data folder is refused before any read",
+    "an --out folder in the live data folder is refused, and a data folder without baseUrl needs --db",
     async () => {
-      const inLive = join(LIVE, "db-x.sqlite");
-      for (const args of [
-        ["--db", inLive, "--cache", cache],
-        ["--db", dbFile, "--cache", join(LIVE, "git")],
-        ["--db", dbFile, "--cache", cache, "--out", join(LIVE, "eval")],
-      ]) {
-        const r = await bun([LOCAL, ...args]);
-        expect(r.code).toBe(2);
-        expect(r.stderr).toContain("is inside the live data folder of the app");
-      }
-      expect(readdirSync(LIVE)).toEqual([]);
+      const r = await bun([LOCAL, "--db", dbFile, "--cache", cache, "--out", join(LIVE, "eval")]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("Refused: --out is inside the live data folder of the app");
       // The app default folder stays live while REVIEW_LOOP_DATA_DIR names another folder (config.ts dataDir).
       if (process.platform !== "darwin") {
-        const r = await bun([LOCAL, "--db", join(APPDATA, "review-loop", "db-x.sqlite"), "--cache", cache]);
-        expect(r.code).toBe(2);
-        expect(r.stderr).toContain("Refused: --db is inside the live data folder");
+        const d = await bun([LOCAL, "--db", dbFile, "--cache", cache, "--out", join(APPDATA, "review-loop", "eval")]);
+        expect(d.code).toBe(2);
+        expect(d.stderr).toContain("Refused: --out is inside the live data folder");
       }
+      const none = await bun([LOCAL]);
+      expect(none.code).toBe(2);
+      expect(none.stderr).toContain("config.json has no baseUrl");
+      expect(readdirSync(LIVE)).toEqual([]);
     },
     SLOW,
   );

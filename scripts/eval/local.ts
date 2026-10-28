@@ -2,17 +2,18 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Builds the local eval set from your own decisions (docs/plans/review-v3.md WP-V1). docs/eval/local.md gives the steps.
-// Usage: bun run eval:local -- --db <copy> --cache <copy> [--out <folder>] [--user <slug>]
-// --db: a copy of the db-*.sqlite file. --cache: a copy of the git folder. Both come from a copy of the data folder of the closed app.
-// The builder refuses a path in the live data folder. It reads a temp copy of the database and writes nothing to the copies.
-// stdout gets counts only: no path, host, or name. Exit codes: 0 done, 1 a build error, 2 a usage error or a refused path.
+// Usage: bun run eval:local -- [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>]
+// Default --db and --cache: the database and the git folder of the data folder of the app. Close the app first.
+// The builder only reads --db and --cache: it reads a temp copy of the database, and its git commands only read the cache.
+// It refuses an --out folder in the live data folder. stdout gets counts only: no path, host, or name.
+// Exit codes: 0 done, 1 a build error, 2 a usage error or a refused path.
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { dataDir } from "../../src/server/config";
+import { dataDir, dbPath } from "../../src/server/config";
 import { git, gitEnv } from "../../src/server/review/git";
 import { type StatsPayload, userDiscard } from "../../src/server/review/stats";
 import { diffArgs } from "../../src/server/review/workspace";
@@ -35,8 +36,7 @@ import {
 import { overlaps } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE =
-  "Usage: bun run eval:local -- --db <copy of db-*.sqlite> --cache <copy of the git folder> [--out <folder>] [--user <slug>]";
+export const USAGE = "Usage: bun run eval:local -- [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>]";
 // cachePath of src/server/review/workspace.ts: a project key or a repository slug that is a safe folder name.
 const NAME = /^[A-Za-z0-9~_][A-Za-z0-9._~-]*$/;
 // docs/plans/review-v3.md WP-V1: Not a bug and Intended must not come back. The other codes and no code are neutral.
@@ -95,11 +95,21 @@ function outRefusal(out: string): string | null {
     : null;
 }
 
-// The user slug of config.json beside the database copy, or null.
-function userOf(db: string): string | null {
+// A string field of config.json in dir, or null. readConfig is not used: it can write a backup file.
+function configField(dir: string, key: "userSlug" | "baseUrl"): string | null {
   try {
-    const c = JSON.parse(readFileSync(join(dirname(db), "config.json"), "utf8")) as { userSlug?: unknown };
-    return typeof c.userSlug === "string" && c.userSlug ? c.userSlug : null;
+    const v = (JSON.parse(readFileSync(join(dir, "config.json"), "utf8")) as Record<string, unknown>)[key];
+    return typeof v === "string" && v ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// The database of the app in its data folder (config.ts dbPath), or null without a base URL.
+function liveDb(dir: string): string | null {
+  const url = configField(dir, "baseUrl");
+  try {
+    return url ? dbPath(dir, url) : null;
   } catch {
     return null;
   }
@@ -382,7 +392,7 @@ export type Manifest = {
 async function build(o: { db: string; cache: string; out: string; me: string }): Promise<Manifest> {
   const tmp = mkdtempSync(join(tmpdir(), "rl-eval-local-"));
   try {
-    // A read-only open of a WAL database still makes -shm and -wal files beside it. The temp copy keeps them out of your copy.
+    // A read-only open of a WAL database still makes -shm and -wal files beside it. The temp copy keeps them out of the data folder.
     const file = join(tmp, "db.sqlite");
     copyFileSync(o.db, file);
     if (existsSync(`${o.db}-wal`)) copyFileSync(`${o.db}-wal`, `${file}-wal`);
@@ -452,7 +462,8 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       const temp = join(tmp, `bundle-${repositories}.git`);
       await git(["init", "-q", "--bare", "--template=", temp], { env });
       mkdirSync(join(temp, "objects", "info"), { recursive: true });
-      // The temp repository borrows the objects of the cache copy, so the copy gets no write.
+      // The temp repository borrows the objects of the cache, so the cache gets no write. Against the cache itself, the builder runs
+      // only cat-file and diff, which read.
       writeFileSync(join(temp, "objects", "info", "alternates"), `${join(cache, "objects").replaceAll("\\", "/")}\n`);
       const commits = [...new Set([...ok, ...rrOk].flatMap(need))];
       await git(["--git-dir", temp, "update-ref", "--stdin"], { env, stdin: commits.map((c) => `create refs/eval/${c} ${c}\n`).join("") });
@@ -574,19 +585,21 @@ export async function main(argv: string[]): Promise<number> {
     console.error(`${(e as Error).message}\n${USAGE}`);
     return 2;
   }
-  if (!v.db || !v.cache) {
-    console.error(`Give --db and --cache.\n${USAGE}`);
+  // The data folder of the app, as config.ts dataDir gives it.
+  const app = dataDir();
+  const appDb = v.db ?? liveDb(app);
+  if (!appDb) {
+    console.error(`No database in the data folder of the app: config.json has no baseUrl. Pass --db.\n${USAGE}`);
     return 2;
   }
-  const paths = { "--db": resolve(v.db), "--cache": resolve(v.cache), "--out": resolve(v.out ?? localDir()) };
-  // The checks run before any read of the paths.
-  const live = liveFolders();
-  for (const [flag, p] of Object.entries(paths))
-    if (live.some((d) => isInside(p, d))) {
-      console.error(`Refused: ${flag} is inside the live data folder of the app. Close the app, copy its data folder, and pass the copy.`);
-      return 2;
-    }
-  const { "--db": db, "--cache": cache, "--out": out } = paths;
+  const db = resolve(appDb);
+  const cache = resolve(v.cache ?? join(app, "git"));
+  const out = resolve(v.out ?? localDir());
+  // The builder only reads --db and --cache. It writes only into --out, so --out must be outside every live data folder.
+  if (liveFolders().some((d) => isInside(out, d))) {
+    console.error("Refused: --out is inside the live data folder of the app. Use eval-local/ or a folder outside the data folder.");
+    return 2;
+  }
   if (isInside(out, REPO) && !(await ignored(out))) {
     console.error("Refused: --out is inside this repository, and git does not ignore it. Use eval-local/ or a folder outside it.");
     return 2;
@@ -600,9 +613,9 @@ export async function main(argv: string[]): Promise<number> {
     console.error("The --db file or the --cache folder does not exist.");
     return 2;
   }
-  const me = v.user ?? userOf(db);
+  const me = v.user ?? configField(dirname(db), "userSlug");
   if (!me) {
-    console.error("No user slug. Pass --user <slug>, or keep config.json of the copy beside the database file.");
+    console.error("No user slug. Pass --user <slug>, or keep config.json beside the database file.");
     return 2;
   }
   try {
