@@ -34,6 +34,7 @@ import {
   type PostControl,
   RELEASE,
   type Scenario,
+  type TaskBaseChange,
 } from "./control";
 
 const dataDir = mkdtempSync(join(tmpdir(), "review-loop-e2e-"));
@@ -768,8 +769,9 @@ const baseEnv = {
 const baseGit = async (args: string[], stdin?: string) =>
   (await git(["--git-dir", remote.remote, ...args], { env: baseEnv, stdin })).trim();
 r[key("POST", "/__control/task-base")] = async (req) => {
-  const c = (await req.json()) as { move?: { branch: string; files: Record<string, string> }; conflicted?: boolean };
+  const c = (await req.json()) as TaskBaseChange;
   let head: string | null = null;
+  if (c.remove) await baseGit(["update-ref", "-d", `refs/heads/${c.remove}`]);
   if (c.move) {
     const ref = `refs/heads/${c.move.branch}`;
     const parent = await baseGit(["rev-parse", ref]);

@@ -369,6 +369,7 @@ export async function headsOf(trees: readonly RepoTree[], mainBase: string | nul
         head: await headOf(t.wt),
         baseCommit: t.row.role === "main" ? mainBase : t.row.base_commit,
         pinned: t.row.pinned,
+        baseChanged: t.row.base_changed === 1,
       });
   return out;
 }

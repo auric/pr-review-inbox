@@ -234,8 +234,10 @@ export async function taskRemote(): Promise<{ heads: Record<string, string>; cre
 export const RELEASE = "release/2.1";
 
 // spec.md section 6.18.5: move adds one commit with these files to a branch of the local remote. conflicted sets properties.mergeResult
-// of every task PR to CONFLICTED (or CLEAN), then one sync stores it. Answers the new head of the moved branch.
-export async function taskBase(change: { move?: { branch: string; files: Record<string, string> }; conflicted?: boolean }) {
+// of every task PR to CONFLICTED (or CLEAN), then one sync stores it. remove deletes a branch (spec.md section 6.16.7); a reset puts the
+// release base back. Answers the new head of the moved branch.
+export type TaskBaseChange = { move?: { branch: string; files: Record<string, string> }; conflicted?: boolean; remove?: string };
+export async function taskBase(change: TaskBaseChange) {
   const res = await fetch(`${FAKE_URL}/__control/task-base`, { method: "POST", headers: auth, body: JSON.stringify(change) });
   if (!res.ok) throw new Error(`control task-base: ${res.status}`);
   return ((await res.json()) as { head: string | null }).head;

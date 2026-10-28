@@ -20,6 +20,7 @@ import { RunLog } from "../review/RunLog";
 import { trackerOf } from "../review/tasks";
 import { Hint } from "../shell/Hint";
 import { TaskFiles } from "./Attachments";
+import { BaseField } from "./BranchSection";
 import { DiffTab } from "./DiffTab";
 import { type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
 import { LogTab, stepId } from "./LogTab";
@@ -27,6 +28,7 @@ import {
   type Action,
   type ActionKind,
   currentPart,
+  goneBase,
   NO_MERGE,
   openQuestions,
   partRows,
@@ -50,6 +52,9 @@ import { TellClaude } from "./TellClaude";
 export type TaskApi = { step: (d: 1 | -1) => void; primary: () => void; layer: (target: EventTarget | null) => Layer; close: () => void };
 
 type Tab = "questions" | "attachments" | "spec" | "plan" | "log" | "diff";
+// The base picker of "Pick a base branch" (spec.md section 6.16.7).
+const PICK_BASE = "task-pick-base";
+
 const TAB_LABEL: Record<Tab, string> = {
   questions: "Questions",
   attachments: "Attachments",
@@ -228,6 +233,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return part && send({ kind: "update", part: part.id });
       case "undo-update":
         return part && send({ kind: "undo", part: part.id });
+      case "pick-base":
+        return focus(PICK_BASE);
       case "retry-prs":
         return sendRows(
           rows
@@ -291,6 +298,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
 
   const busy = act.isPending;
   const primary = view.primary;
+  const gone = goneBase(t);
   const button = (a: Action) =>
     a.kind === "approve" ? (
       <Button ref={primaryRef} data-primary type="submit" form={PLAN_FORM} disabled={busy}>
@@ -337,6 +345,17 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             </p>
           )}
         </div>
+        {gone && (
+          <BaseField
+            id={PICK_BASE}
+            project={gone.project}
+            repo={gone.repo}
+            base={gone.branch}
+            name={gone.name}
+            gone
+            onBase={(branch) => act.mutateAsync({ kind: "base", branch, taskRepo: gone.taskRepo })}
+          />
+        )}
         {(primary || view.more.length > 0) && (
           <div className="flex flex-wrap items-center gap-2">
             {primary && button(primary)}

@@ -32,7 +32,7 @@ import {
 } from "../../src/server/tasks/loop";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
-import { recoverTasks, taskRow } from "../../src/server/tasks/tasks";
+import { recoverTasks, taskDto, taskRow } from "../../src/server/tasks/tasks";
 import { openWorktree, status } from "../../src/server/tasks/worktree";
 import type { ProfileInput, RunConflict, TaskDto } from "../../src/shared/dto";
 import { specResult, type TaskBlocked } from "../../src/shared/task";
@@ -40,6 +40,7 @@ import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude
 import { logOf, pngOf } from "../support/fake-jira";
 import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
 import { taskCache, taskRemote } from "./fixture";
+import { remoteCommit } from "./update-fixture";
 
 for (const m of ["tasks/loop", "tasks/implement", "tasks/tasks", "tasks/push", "tasks/worktree", "review/jobs", "review/workspace"])
   console.log(`loop.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -152,6 +153,8 @@ type Setup = {
   profile?: string;
   // The approved test command. Default: the bun script CHECK.
   argv?: string[];
+  // Runs before each remote lookup, so a test can hold one.
+  remote?: () => Promise<void>;
 };
 
 async function setup(o: Setup = {}) {
@@ -185,7 +188,10 @@ async function setup(o: Setup = {}) {
     live,
     dataDir,
     runnerCommand: runner.command,
-    repoRemote: async () => ({ url: r.remote, config: [] }),
+    repoRemote: async () => {
+      await o.remote?.();
+      return { url: r.remote, config: [] };
+    },
     listTools: stubListTools,
     claudeConfigDir: o.config ?? join(root, "no-claude-config"),
   });
@@ -1241,6 +1247,48 @@ describe("restart recovery and the helpers", () => {
 
 describe("routes (spec.md section 6.11)", () => {
   test(
+    "spec.md section 6.18.5: Keep one PR during the base check at the driver end waits for that check and gets 200",
+    async () => {
+      // The base check at the driver end waits at this gate. The build itself reads the remote before the size reason.
+      const gate = Promise.withResolvers<void>();
+      let held = false;
+      let blockedNow = () => false;
+      const s = await setup({
+        budget: 5,
+        remote: async () => {
+          if (!blockedNow()) return;
+          held = true;
+          await gate.promise;
+        },
+      });
+      blockedNow = () => s.blocked()?.kind === "size";
+      const SESSION = "s".repeat(64);
+      const ORIGIN = "http://127.0.0.1:7317";
+      const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
+      const call = async (path: string, body: unknown) => {
+        const res = await app.request(`${ORIGIN}${path}`, {
+          method: "POST",
+          headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        return { status: res.status, body: (await res.json()) as TaskDto & { error?: string } };
+      };
+      // The loop of the app starts the build through Resume of a stopped build.
+      s.db.query("UPDATE task SET state = 'stopped', stopped_from = 'implementing' WHERE id = $id").run({ id: s.task });
+      expect((await call(`/api/tasks/${s.task}/resume`, { version: s.t().version })).status).toBe(200);
+      await until(() => held, 120_000);
+      expect(s.blocked()?.kind).toBe("size");
+      const keep = call(`/api/tasks/${s.task}/limit`, { version: s.t().version, keep: true });
+      await Bun.sleep(200);
+      gate.resolve();
+      const r = await keep;
+      expect([r.status, r.body.error]).toEqual([200, undefined]);
+      expect(r.body.settings).toMatchObject({ keepOnePr: true });
+    },
+    SLOW,
+  );
+
+  test(
     "pause, stop, resume, and answers go to the loop; a version mismatch gives 409 with the task",
     async () => {
       const s = await setup({ mode: "green" });
@@ -1284,9 +1332,46 @@ test(
       kind: "preflight",
       step: null,
       text: "Needs you: gone no longer exists in PROJ/repo. Pick another base branch.",
+      base: { taskRepo: 0, branch: "gone" },
     });
     expect(s.runCalls()).toEqual([]);
     expect(s.steps()).toEqual([]);
+  },
+  SLOW,
+);
+
+test(
+  "Pick a base branch before any commit: the new head becomes the base commit, and the build goes on (spec.md section 6.16.7)",
+  async () => {
+    const s = await setup();
+    // develop has a commit that main does not have, so the old base commit is not the new head.
+    const env = s.r.env;
+    await git(["--git-dir", s.r.remote, "update-ref", "refs/heads/develop", s.base], { env });
+    const dev = await remoteCommit(s.r, "develop", { "develop.txt": "develop\n" });
+    s.db.query("UPDATE task SET target_branch = 'gone' WHERE id = $id").run({ id: s.task });
+    await s.build();
+    expect(s.blocked()?.base).toEqual({ taskRepo: 0, branch: "gone" });
+    const base = (branch: string) => s.loop.base(s.db, s.task, { version: s.t().version, taskRepo: 0, branch });
+    expect(await base("nope")).toMatchObject({ status: 409, error: "nope does not exist in PROJ/repo." });
+    expect(await base("gone")).toMatchObject({
+      status: 409,
+      error: "Needs you: gone no longer exists in PROJ/repo. Pick another base branch.",
+    });
+    expect((await base("develop")).status).toBe(200);
+    await s.loop.idle(s.task);
+    expect([s.t().target_branch, s.t().base_commit]).toEqual(["develop", dev]);
+    expect(
+      s.db.query("SELECT base_branch, base_commit, base_changed FROM task_repo WHERE task = $id AND role = 'main'").get({ id: s.task }),
+    ).toEqual({ base_branch: "develop", base_commit: dev, base_changed: 0 });
+    expect(s.blocked()).toBeNull();
+    // The build ran from the new base: the part starts at the develop commit.
+    expect(s.part().state).toBe("self_reviewed");
+    const w = await s.wt();
+    await git([`--git-dir=${w.admin}`, "merge-base", "--is-ancestor", dev, "HEAD"], { env: w.env });
+    // No base change waits after the build.
+    expect(taskDto(s.db, s.t()).bases.every((b) => !b.changed)).toBe(true);
+    // A reason that is not a gone base takes no base change.
+    expect(await base("main")).toMatchObject({ status: 409, error: "The base branch changes only before the build." });
   },
   SLOW,
 );

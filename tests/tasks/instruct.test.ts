@@ -207,7 +207,7 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
       await s.loop.idle(s.task);
       const dto = () => taskDto(s.db, s.t());
       expect(dto().needsBase).toEqual({ reason: "The parser of the base is needed." });
-      expect(dto().bases).toEqual([{ taskRepo: expect.any(Number), branch: "main", newCommits: 0, conflicted: false }]);
+      expect(dto().bases).toEqual([{ taskRepo: expect.any(Number), branch: "main", newCommits: 0, conflicted: false, changed: false }]);
       await remoteCommit(s.r, "main", { "README.md": "new readme\n" });
       expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Use the new parser." }).status).toBe(202);
       await s.loop.idle(s.task);

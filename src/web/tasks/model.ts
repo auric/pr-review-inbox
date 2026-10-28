@@ -48,6 +48,7 @@ export type ActionKind =
   | "undo-update"
   | "retry-prs"
   | "pointer"
+  | "pick-base"
   | "close";
 export type Action = { kind: ActionKind; label: string };
 
@@ -116,8 +117,9 @@ export function baseLabel(branches: string[]): string {
   return u.length === 1 ? (u[0] as string) : `${u.length} base branches`;
 }
 
-// The repositories that the update would change: a base with new commits, or a PR that the server reports with conflicts.
-export const movedBases = (t: Pick<TaskDto, "bases">) => t.bases.filter((b) => b.newCommits > 0 || b.conflicted);
+// The repositories that the update would change: a base with new commits, a PR that the server reports with conflicts, or a base that
+// "Pick a base branch" changed (spec.md section 6.16.7).
+export const movedBases = (t: Pick<TaskDto, "bases">) => t.bases.filter((b) => b.newCommits > 0 || b.conflicted || b.changed);
 
 // "release/2.1 has 5 new commits": the news of the bases with new commits.
 function baseNews(t: TaskDto): string {
@@ -139,7 +141,11 @@ export function baseLines(t: Pick<TaskDto, "bases" | "repos">): string[] {
     .map((b) => {
       const r = repo(b.taskRepo);
       const name = r?.project && r.repo ? `${r.project}/${r.repo}` : (r?.path ?? "the main repository");
-      const news = [...(b.newCommits > 0 ? [plural(b.newCommits, "new commit")] : []), ...(b.conflicted ? ["the PR has conflicts"] : [])];
+      const news = [
+        ...(b.changed ? ["new base"] : []),
+        ...(b.newCommits > 0 ? [plural(b.newCommits, "new commit")] : []),
+        ...(b.conflicted ? ["the PR has conflicts"] : []),
+      ];
       return `${name} from ${b.branch} · ${news.join(", ")}`;
     });
 }
@@ -476,9 +482,11 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
       case "slot":
         return { ...working(b.text, [STOP]), detail: step ? elapsed(o.now - step.startedAt) : null };
       case "preflight":
-        // spec.md section 6.16.7: the sentence says what to fix on the forge. The base and the prefix change only before the build
-        // (tasks.ts base), so every pre-flight reason gets "Try again", which runs the checks again.
-        return blocked({ kind: "resume", label: "Try again" }, [STOP]);
+        // spec.md section 6.16.7: a base that is gone gets "Pick a base branch". Every other reason says what to fix on the forge, and
+        // "Try again" runs the checks again.
+        return b.base
+          ? blocked({ kind: "pick-base", label: "Pick a base branch" }, [{ kind: "resume", label: "Try again" }, STOP])
+          : blocked({ kind: "resume", label: "Try again" }, [STOP]);
       case "update":
         // spec.md section 6.18.4: "The update from <base> stopped: <reason>. The branch is as it was."
         return blocked(
@@ -539,6 +547,11 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   // The waits of a built part (spec.md sections 6.12 and 6.18.5).
   const moved = t.bases.some((x) => x.newCommits > 0);
   const conflicted = t.bases.filter((x) => x.conflicted);
+  const picked = t.bases.filter((x) => x.changed);
+  // spec.md section 6.16.7: the commits stand on the old base, so the PR waits for the update.
+  const pickedStatus = picked.length
+    ? `The base branch is now ${baseLabel(picked.map((x) => x.branch))}. Update the branch before the PR.`
+    : null;
   const bases = movedBases(t);
   const update: Action | null = bases.length ? { kind: "update", label: `Update from ${baseLabel(bases.map((x) => x.branch))}` } : null;
   const asked = t.needsBase;
@@ -564,6 +577,7 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
       ...(t.points.length ? [{ kind: "fix-points" as const, label: "Fix the small points too" }] : []),
     ];
     const asIs: Action = { kind: "open-pr", label: "Open the PR as is" };
+    if (update && pickedStatus) return wait(pickedStatus, update, more, "ready", true);
     if (update && moved && askedStatus) return wait(askedStatus, update, [asIs, ...more], "ready", true);
     if (update && moved) return wait(`${baseNews(t)} since the branch point.`, update, [asIs, ...more], "ready", true);
     if (rows.length > 1)
@@ -584,6 +598,7 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   }
 
   const of = prs.length > 1 && last ? ` of part ${last.ord}` : "";
+  if (update && pickedStatus) return wait(pickedStatus, update, [goPr, CLOSE], "pr", true);
   if (update && conflicted.length) {
     const pr = prs.length > 1 && last ? `the PR for part ${last.ord}` : "your PR";
     return wait(
@@ -849,4 +864,16 @@ export function repoMatches(choices: RepoChoice[], text: string): { items: RepoC
   const q = text.trim().toLowerCase();
   const all = q ? choices.filter((c) => c.key.toLowerCase().includes(q)) : choices;
   return { items: all.slice(0, REPOS_SHOWN), more: Math.max(0, all.length - REPOS_SHOWN) };
+}
+
+// ---------- Pick a base branch (spec.md section 6.16.7) ----------
+
+// The repository whose base the pre-flight did not find, for the base picker under the status. null: no such reason.
+export function goneBase(t: Pick<TaskDto, "blocked" | "repos" | "project" | "repo">) {
+  const b = t.blocked?.kind === "preflight" ? t.blocked.base : undefined;
+  if (!b) return null;
+  const r = t.repos.find((x) => x.id === b.taskRepo);
+  const project = r?.project ?? t.project;
+  const repo = r?.repo ?? t.repo;
+  return { taskRepo: b.taskRepo, branch: b.branch, project, repo, name: `${project}/${repo}` };
 }

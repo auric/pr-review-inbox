@@ -159,6 +159,8 @@ export type TaskRepoRow = {
   source: number | null;
   proposal: "proposed" | "added" | "skipped" | null;
   proposal_reason: string | null;
+  // 1: "Pick a base branch" changed base_branch after commits on the old base (spec.md section 6.16.7).
+  base_changed: number;
 };
 
 const Q = {
@@ -207,6 +209,7 @@ export function taskRepos(db: Database, t: TaskRef): TaskRepoRow[] {
     source: null,
     proposal: null,
     proposal_reason: null,
+    base_changed: 0,
   };
   return [main, ...rows];
 }

@@ -240,7 +240,13 @@ export const BLOCKED_KINDS = [
 ] as const;
 export type BlockedKind = (typeof BLOCKED_KINDS)[number];
 // task.blocked_json: why the loop waits for the user. null while Claude or the app works, and while the app waits for colleagues.
-export const taskBlocked = z.object({ kind: z.enum(BLOCKED_KINDS), step: z.number().int().positive().nullable(), text: z.string() });
+// base: the pre-flight found no base branch of this task_repo (spec.md section 6.16.7), so "Pick a base branch" can change it.
+export const taskBlocked = z.object({
+  kind: z.enum(BLOCKED_KINDS),
+  step: z.number().int().positive().nullable(),
+  text: z.string(),
+  base: z.object({ taskRepo: z.number().int().nonnegative(), branch: z.string() }).optional(),
+});
 export type TaskBlocked = z.infer<typeof taskBlocked>;
 
 export const COMMAND_KINDS = ["setup", "build", "test", "lint"] as const;
@@ -293,7 +299,10 @@ const repoHead = z.object({ taskRepo: z.number().int(), head: z.string() });
 // reason, or a restart of the app during the update (recovered: the app reset the repositories after that restart).
 export const updateDetail = z.object({
   repos: z.array(z.object({ taskRepo: z.number().int(), base: z.string(), mode: z.enum(["rebase", "merge"]), newBaseHead: z.string() })),
-  preHeads: z.array(repoHead.extend({ baseCommit: z.string().nullable(), pinned: z.string().nullable() })),
+  // baseChanged: the flag of "Pick a base branch" (spec.md section 6.16.7), which an abort and Undo restore.
+  preHeads: z.array(
+    repoHead.extend({ baseCommit: z.string().nullable(), pinned: z.string().nullable(), baseChanged: z.boolean().default(false) }),
+  ),
   postHeads: z.array(repoHead).default([]),
   stops: z.number().int().default(0),
   resolved: z.boolean().default(false),

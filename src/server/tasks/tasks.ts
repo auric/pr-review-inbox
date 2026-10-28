@@ -690,6 +690,7 @@ function basesOf(db: Database, t: TaskRow): TaskDto["bases"] {
     taskRepo: r.row.id,
     branch: r.base,
     newCommits: check?.moves.find((m) => m.taskRepo === r.row.id)?.newCommits ?? 0,
+    changed: r.row.base_changed === 1,
     conflicted: conflicted(
       r.row.role === "main"
         ? part.pr

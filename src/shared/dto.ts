@@ -1554,8 +1554,9 @@ export type TaskDto = TaskRowDto & {
   canUndoUpdate: boolean;
 };
 
-// taskRepo: task_repo.id. branch: the base branch that the user picked for the repository.
-export type TaskBaseDto = { taskRepo: number; branch: string; newCommits: number; conflicted: boolean };
+// taskRepo: task_repo.id. branch: the base branch that the user picked for the repository. changed: "Pick a base branch" set the branch
+// after commits on the old base, so the update must run before the PR (spec.md section 6.16.7).
+export type TaskBaseDto = { taskRepo: number; branch: string; newCommits: number; conflicted: boolean; changed: boolean };
 
 // 409 of a task mutation: the version is old, or the state takes no such change. task: the current task.
 export type TaskConflict = ApiError & { task: TaskDto };

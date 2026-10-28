@@ -104,7 +104,7 @@ export async function preflight(
     } catch (e) {
       return blocked(`Needs you: Cannot read the branches of ${name}. ${reason(e, remote?.config)}`);
     }
-    if (!base || !found.has(base)) return blocked(baseGoneText(base, name));
+    if (!base || !found.has(base)) return { ...blocked(baseGoneText(base, name)), base: { taskRepo: r.id, branch: base } };
     // Step 3: the branch rules, only when the token can read them (HTTP 401 for a plain token, Gate G15).
     if (p) {
       try {

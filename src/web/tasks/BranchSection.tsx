@@ -218,7 +218,7 @@ export function BranchSection(props: {
 
 // spec.md section 6.16.3: the base branch combobox of one repository. The closed field shows the base. A pick other than the base asks
 // one confirm, because the plan exists on this screen. name: the repository for screen readers and the confirm, when the screen lists
-// several.
+// several. gone: "Pick a base branch" of the pre-flight (spec.md section 6.16.7), whose base no longer exists and whose plan stays.
 export function BaseField(props: {
   id: string;
   project: string;
@@ -226,6 +226,7 @@ export function BaseField(props: {
   base: string;
   name?: string;
   help?: string;
+  gone?: boolean;
   onBase: (branch: string) => Promise<unknown>;
 }) {
   const { id, base, onBase } = props;
@@ -387,17 +388,31 @@ export function BaseField(props: {
       >
         <DialogContent className="sm:max-w-[480px]" instant={to?.key} finalFocus={input} onKeyDown={dialogKeys(() => !busy && setTo(null))}>
           <DialogHeader>
-            <DialogTitle>
-              The plan was written on <span translate="no">{base}</span>. Write it again on <span translate="no">{to?.branch}</span>?
-            </DialogTitle>
-            <DialogDescription>
-              {props.name && (
-                <>
-                  The base of <span translate="no">{props.name}</span> changes.{" "}
-                </>
-              )}
-              The plan starts again. Your answers stay.
-            </DialogDescription>
+            {props.gone ? (
+              <>
+                <DialogTitle>
+                  Build on <span translate="no">{to?.branch}</span>?
+                </DialogTitle>
+                <DialogDescription>
+                  <span translate="no">{base}</span> no longer exists{props.name && <> in {props.name}</>}. The plan stays. Commits of the
+                  task move onto <span translate="no">{to?.branch}</span> when you update the branch before the PR.
+                </DialogDescription>
+              </>
+            ) : (
+              <>
+                <DialogTitle>
+                  The plan was written on <span translate="no">{base}</span>. Write it again on <span translate="no">{to?.branch}</span>?
+                </DialogTitle>
+                <DialogDescription>
+                  {props.name && (
+                    <>
+                      The base of <span translate="no">{props.name}</span> changes.{" "}
+                    </>
+                  )}
+                  The plan starts again. Your answers stay.
+                </DialogDescription>
+              </>
+            )}
           </DialogHeader>
           {error && (
             <p role="alert" className="m-0 text-sm text-destructive">
@@ -409,7 +424,7 @@ export function BaseField(props: {
               Cancel
             </Button>
             <Button disabled={busy} onClick={() => void confirm()}>
-              {busy ? "Starting…" : error ? "Try again" : "Write the plan again"}
+              {busy ? "Starting…" : error ? "Try again" : props.gone ? `Use ${to?.branch ?? ""}` : "Write the plan again"}
             </Button>
           </DialogFooter>
         </DialogContent>

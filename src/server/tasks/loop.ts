@@ -58,7 +58,7 @@ import { type Answer, answerProblem, type QuestionRow } from "./interview";
 import { partMachine } from "./machine";
 import { type Docs, docNames, type Plan, type PlanPart, type PlanTask, parsePlan, parseTasks, partStepFile, stepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
-import { sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
+import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
 import {
   advance,
   advancePart,
@@ -314,6 +314,14 @@ const Q = {
   subBase: "UPDATE task_repo SET base_commit = $base WHERE id = $id",
   subLease: `INSERT INTO task_pr (part, task_repo, branch, base_branch, base_commit, head, pushed, state)
     VALUES ($part, $repo, $branch, $base, $commit, $lease, $lease, 'changed') ON CONFLICT (part, task_repo) DO NOTHING`,
+  // spec.md section 6.16.7, "Pick a base branch": a push, a Continue lease, or a PR of the repository refuses it.
+  mainSent: "SELECT 1 FROM task_part WHERE task = $task AND (pushed IS NOT NULL OR remote_pr IS NOT NULL OR pr IS NOT NULL)",
+  repoSent: "SELECT 1 FROM task_pr WHERE task_repo = $repo AND (pushed IS NOT NULL OR remote_pr IS NOT NULL OR pr IS NOT NULL)",
+  target: "UPDATE task SET target_branch = $branch, base_commit = $base WHERE id = $id",
+  partBranch: "UPDATE task_part SET base_branch = $branch WHERE task = $task",
+  repoBranch: "UPDATE task_repo SET base_branch = $branch, base_commit = $base WHERE id = $id",
+  prBranch: "UPDATE task_pr SET base_branch = $branch WHERE task_repo = $repo",
+  baseChanged: "UPDATE task_repo SET base_changed = $changed WHERE task = $task AND (id = $id OR ($main = 1 AND role = 'main'))",
 };
 
 // The changed paths of every worktree, from the main repository root.
@@ -349,6 +357,8 @@ export function createLoop(opts: LoopOptions) {
   const stopping = new Set<number>();
   // The base checks that run in the background, so shutdown() awaits them.
   const checking = new Map<number, Promise<unknown>>();
+  // The drivers whose work ended and that run only the base check at their end (spec.md section 6.18.5).
+  const ending = new Set<number>();
   let closing = false;
 
   const changed = (id: number) => live.broadcast("changed", { tasks: [id] });
@@ -1140,10 +1150,13 @@ export function createLoop(opts: LoopOptions) {
     if (mode) modes.set(id, mode);
     const p = f()
       .then(async () => {
-        if (!closing && !stopping.has(id)) await refreshBases(db, id);
+        if (closing || stopping.has(id)) return;
+        ending.add(id);
+        await refreshBases(db, id);
       })
       .catch((e) => log(`Task ${id}: the driver end failed: ${noUrl((e as Error).message)}`))
       .finally(() => {
+        ending.delete(id);
         if (drivers.get(id) !== p) return;
         drivers.delete(id);
         modes.delete(id);
@@ -1347,7 +1360,9 @@ export function createLoop(opts: LoopOptions) {
       for (const r of repos) {
         guard(ctx);
         const head = await fetchBase(dataDir, id, r, await review.taskRemote(r.project, r.repo));
-        if ((head !== r.baseCommit && !(await baseIn(dataDir, r, head))) || conflicted.has(r.row.id))
+        // spec.md section 6.16.7: a picked base can be behind the old one, so its head is in the branch. The rebase still drops the
+        // commits of the old base.
+        if ((head !== r.baseCommit && !(await baseIn(dataDir, r, head))) || conflicted.has(r.row.id) || r.row.base_changed === 1)
           plan.set(r.row.id, { newBaseHead: head, mode: r.published ? "merge" : "rebase" });
       }
       if (!plan.size) throw new UpdateAbort(`${label} has no new commits`);
@@ -1412,6 +1427,7 @@ export function createLoop(opts: LoopOptions) {
         for (const r of repos) {
           const p = plan.get(r.row.id);
           const head = post.find((h) => h.taskRepo === r.row.id)?.head as string;
+          if (p) db.query(Q.baseChanged).run({ task: id, id: r.row.id, main: r.row.role === "main" ? 1 : 0, changed: 0 });
           if (r.row.role === "main") {
             if (p) db.query(Q.baseCommit).run({ id, base: p.newBaseHead });
             if (p && r.row.id) db.query(Q.repoBase).run({ id: r.row.id, base: p.newBaseHead });
@@ -1496,6 +1512,7 @@ export function createLoop(opts: LoopOptions) {
       for (const h of pre) {
         const tree = c.trees.find((x) => x.row.id === h.taskRepo);
         if (!tree) continue;
+        if (h.baseChanged) db.query(Q.baseChanged).run({ task: c.id, id: h.taskRepo, main: tree.row.role === "main" ? 1 : 0, changed: 1 });
         if (tree.row.role === "main") {
           if (h.baseCommit) db.query(Q.baseCommit).run({ id: c.id, base: h.baseCommit });
           if (h.taskRepo && h.baseCommit) db.query(Q.repoBase).run({ id: h.taskRepo, base: h.baseCommit });
@@ -1837,6 +1854,61 @@ export function createLoop(opts: LoopOptions) {
       return { status: 202, task: dto(db, id) };
     },
 
+    // PUT /api/tasks/:id/base after the build started (spec.md section 6.16.7, "Pick a base branch"): only the repository whose base the
+    // pre-flight did not find, and only before its first push and PR. Before any part, the new head becomes the base commit. Else
+    // base_changed makes the next update rebase the commits from the old base commit onto the new base.
+    async base(db: Database, id: number, input: { version: number; taskRepo?: number; branch: string }): Promise<TaskResult> {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      const b = blockedOf(t);
+      const rows = taskRepos(db, t);
+      const row = rows.find((r) => (input.taskRepo === undefined ? r.role === "main" : r.id === input.taskRepo));
+      if (b?.kind !== "preflight" || !b.base || !row || row.id !== b.base.taskRepo)
+        return conflict(db, id, "The base branch changes only before the build.");
+      if (drivers.has(id)) return conflict(db, id, BUSY);
+      const main = row.role === "main";
+      const project = row.project ?? t.project;
+      const repo = row.repo ?? t.repo;
+      const name = `${project}/${repo}`;
+      if (db.query(main ? Q.mainSent : Q.repoSent).get(main ? { task: id } : { repo: row.id }))
+        return conflict(db, id, `The base branch of ${name} changes only before its first push and PR.`);
+      if (input.branch === b.base.branch) return conflict(db, id, b.text);
+      let head: string | null = null;
+      try {
+        const remote = await review.taskRemote(project, repo);
+        if ((await remoteBranches(dataDir, remote, input.branch)).has(input.branch))
+          head = await fetchBase(dataDir, id, { row, project, repo, base: input.branch } as UpdateRepo, remote);
+      } catch (e) {
+        return conflict(db, id, `Cannot read the branches of ${name}. ${noUrl((e as Error).message)}`);
+      }
+      if (!head) return conflict(db, id, `${input.branch} does not exist in ${name}.`);
+      const newHead = head;
+      const error = db.transaction((): string | null => {
+        const cur = taskRow(db, id);
+        if (!cur || cur.version !== input.version) return TASK_CHANGED;
+        if (drivers.has(id)) return BUSY;
+        // A submodule starts at the gitlink of its parent, not at its base head, so it always takes the update.
+        const fresh = parts(db, id).length === 0 && row.role !== "submodule";
+        if (main) {
+          const base = fresh ? newHead : cur.base_commit;
+          db.query(Q.target).run({ id, branch: input.branch, base });
+          saveMainRepo(db, cur, input.branch, base, now());
+          db.query(Q.partBranch).run({ task: id, branch: input.branch });
+        } else {
+          db.query(Q.repoBranch).run({ id: row.id, branch: input.branch, base: fresh ? newHead : row.base_commit });
+          db.query(Q.prBranch).run({ repo: row.id, branch: input.branch });
+        }
+        if (!fresh) db.query(Q.baseChanged).run({ task: id, id: row.id, main: main ? 1 : 0, changed: 1 });
+        setBlocked(db, { task: id, version: cur.version }, null, now());
+        return null;
+      })();
+      if (error) return conflict(db, id, error);
+      log(`Task ${id}: the base branch of ${name} is now ${input.branch}.`);
+      kick(db, id, true);
+      changed(id);
+      return { status: 200, task: dto(db, id) };
+    },
+
     // POST /api/tasks/:id/parts/:part/update (spec.md section 6.18.6): 409 when no base moved and no PR reports conflicts.
     async update(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
       const t = load(db, id, input.version);
@@ -1849,7 +1921,7 @@ export function createLoop(opts: LoopOptions) {
       const moves = await refreshBases(db, id);
       const cur = taskRow(db, id) as TaskRow;
       const bases = taskDto(db, cur).bases;
-      if (!moves.some((m) => m.newCommits > 0) && !bases.some((b) => b.conflicted)) {
+      if (!moves.some((m) => m.newCommits > 0) && !bases.some((b) => b.conflicted || b.changed)) {
         const names = [...new Set(bases.map((b) => b.branch))];
         return conflict(db, id, names.length === 1 ? `${names[0]} has no new commits.` : "The base branches have no new commits.");
       }
@@ -1946,6 +2018,11 @@ export function createLoop(opts: LoopOptions) {
     },
     // true while a driver works on the task.
     running: (id: number) => drivers.has(id),
+    // The user action routes call it first. The waiting state shows before the driver ends its base check, so the route waits for that
+    // check. A driver that still runs a step is not awaited, and the route refuses as before.
+    async settle(id: number) {
+      if (ending.has(id)) await drivers.get(id);
+    },
 
     // At app stop (review.stop()): no new step, the checks are killed, and the drivers end.
     async shutdown() {

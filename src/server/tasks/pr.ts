@@ -28,7 +28,7 @@ import type { Plan } from "./plan";
 import { commitGitlink, noMergeText, pointerTarget } from "./pointer";
 import { type PreflightDeps, preflight } from "./preflight";
 import { type PushResult, pushTaskBranch } from "./push";
-import { fullPath, type PrRow, prRows, type TaskRepoRow, taskRepos } from "./repos";
+import { fullPath, type PrRow, prRows, type TaskRepoRow, taskRepos, updateRepos } from "./repos";
 import { advance, advancePart, docsOf, TASK_CHANGED, type TaskResult, type TaskRow, taskDto, taskRow, taskSettingsOf } from "./tasks";
 
 const MAX_ROWS = 2000;
@@ -150,6 +150,13 @@ export function createPrOpener(deps: OpenPrDeps) {
     remote: (project, repo) => deps.review.taskRemote(project, repo),
     now,
   };
+  // spec.md section 6.16.7: after "Pick a base branch" the commits stand on the old base until the update rebases them.
+  const baseChanged = (db: Database, t: TaskRow, part: PartRow) => {
+    const list = updateRepos(db, t, part).filter((r) => r.row.base_changed === 1);
+    return list.length
+      ? `The base branch is now ${[...new Set(list.map((r) => r.base))].join(", ")}. Update from it first, so the PR has only your commits.`
+      : null;
+  };
   const fresh = (db: Database, id: number, partId: number) => {
     const t = taskRow(db, id) as TaskRow;
     const part = db.query(Q.part).get({ part: partId, task: id }) as PartRow;
@@ -170,6 +177,8 @@ export function createPrOpener(deps: OpenPrDeps) {
     if (deps.working(id) || db.query(Q.busy).get({ id })) return conflict(db, id, BUSY);
     const docs = docsOf(t);
     if (!docs) return conflict(db, id, "The task has no approved plan.");
+    const moved = baseChanged(db, t, part);
+    if (moved) return conflict(db, id, moved);
     opening.add(id);
     try {
       return await push(db, t, part, docs.parsed, input.reviewers);
@@ -301,6 +310,8 @@ export function createPrOpener(deps: OpenPrDeps) {
     if (!part) return { status: 404, error: "Part not found." };
     if (!BUILT.has(part.state) || !part.head) return conflict(db, id, "This part is not ready for its PR.");
     if (!docsOf(t)) return conflict(db, id, "The task has no approved plan.");
+    const moved = baseChanged(db, t, part);
+    if (moved) return conflict(db, id, moved);
     const all = prRows(db, t, part);
     const ids = input.rows.map((r) => r.taskRepo);
     if (new Set(ids).size !== ids.length) return { status: 400, error: "Each repository is listed once." };

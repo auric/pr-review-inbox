@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { createApp } from "../../src/server/app";
 import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
 import { pushTaskBranch } from "../../src/server/tasks/push";
@@ -410,4 +411,107 @@ describe("When the app suggests the update (spec.md section 6.18.5)", () => {
     expect(await markerLeft(w, ["gone.txt"])).toBeNull();
     expect(existsSync(join(w.repo, "gone.txt"))).toBe(false);
   });
+});
+
+describe("Pick a base branch after commits (spec.md section 6.16.7)", () => {
+  // develop moves one commit past main, and the part moves onto it. Then develop goes away on the server, so the build blocks.
+  const goneDevelop = async () => {
+    const s = await builtTask({ base: "develop" });
+    const old = await remoteCommit(s.r, "develop", { "develop.txt": "old base\n" }, "develop only");
+    expect((await update(s)).status).toBe(202);
+    expect(s.t().base_commit).toBe(old);
+    await git(["--git-dir", s.r.remote, "update-ref", "-d", "refs/heads/develop"], { env: s.r.env });
+    s.loop.build(s.db, s.task);
+    await s.loop.idle(s.task);
+    expect(s.blocked()?.base).toEqual({ taskRepo: 0, branch: "develop" });
+    const pick = (branch: string) => s.loop.base(s.db, s.task, { version: s.t().version, taskRepo: 0, branch });
+    return { s, old, pick };
+  };
+
+  test(
+    "a picked base behind the old one: the update rebases from the old base commit, so the branch keeps no commit of the old base",
+    async () => {
+      const { s, old, pick } = await goneDevelop();
+      expect((await pick("main")).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect([s.t().target_branch, s.t().base_commit, s.blocked()]).toEqual(["main", old, null]);
+      const before = taskDto(s.db, s.t());
+      expect(before.bases).toEqual([{ taskRepo: expect.any(Number), branch: "main", newCommits: 0, conflicted: false, changed: true }]);
+      expect((await update(s)).status).toBe(202);
+      expect(s.steps().findLast((x) => x.kind === "update")?.detail.update).toMatchObject({
+        result: "green",
+        repos: [{ base: "main", mode: "rebase", newBaseHead: s.base }],
+      });
+      expect(s.t().base_commit).toBe(s.base);
+      const w = await s.wt();
+      const hasOld = await git([`--git-dir=${w.admin}`, "merge-base", "--is-ancestor", old, "HEAD"], { env: w.env }).then(
+        () => true,
+        () => false,
+      );
+      expect(hasOld).toBe(false);
+      expect((await git([`--git-dir=${w.admin}`, "ls-tree", "HEAD", "develop.txt"], { env: w.env })).trim()).toBe("");
+      expect(await s.log()).toEqual([`${KEY}: Add the plan|${s.base}`]);
+      expect(taskDto(s.db, s.t()).bases.every((b) => !b.changed)).toBe(true);
+      expect(s.db.query("SELECT base_changed FROM task_repo WHERE task = $id AND role = 'main'").get({ id: s.task })).toEqual({
+        base_changed: 0,
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "both Open the PR routes answer 409 with the update sentence while the base change waits for its update",
+    async () => {
+      const { s, pick } = await goneDevelop();
+      expect((await pick("main")).status).toBe(200);
+      await s.loop.idle(s.task);
+      const SESSION = "s".repeat(64);
+      const ORIGIN = "http://127.0.0.1:7317";
+      const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
+      const call = async (path: string, body: unknown) => {
+        const res = await app.request(`${ORIGIN}${path}`, {
+          method: "POST",
+          headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        return { status: res.status, error: ((await res.json()) as { error?: string }).error };
+      };
+      const sentence = "The base branch is now main. Update from it first, so the PR has only your commits.";
+      const main = taskDto(s.db, s.t()).bases[0]?.taskRepo as number;
+      const part = s.part().id;
+      expect(await call(`/api/tasks/${s.task}/parts/${part}/pr`, { version: s.t().version, reviewers: [] })).toEqual({
+        status: 409,
+        error: sentence,
+      });
+      expect(
+        await call(`/api/tasks/${s.task}/parts/${part}/prs`, { version: s.t().version, rows: [{ taskRepo: main, reviewers: [] }] }),
+      ).toEqual({ status: 409, error: sentence });
+      // Nothing went to the temp remote. After the update, the refusal goes, and the route pushes there.
+      expect(s.part().pushed).toBeNull();
+      expect((await update(s)).status).toBe(202);
+      expect((await call(`/api/tasks/${s.task}/parts/${part}/pr`, { version: s.t().version, reviewers: [] })).error).not.toBe(sentence);
+      expect(s.part().pushed).toBe(s.part().head);
+    },
+    SLOW,
+  );
+
+  test(
+    "a push, a Continue lease, or a PR of the repository refuses Pick a base branch",
+    async () => {
+      const { s, pick } = await goneDevelop();
+      const refused = "The base branch of PROJ/repo changes only before its first push and PR.";
+      const id = s.part().id;
+      s.db.query("UPDATE task_part SET pushed = head WHERE id = $id").run({ id });
+      expect(await pick("main")).toMatchObject({ status: 409, error: refused });
+      s.db.query("UPDATE task_part SET pushed = NULL, remote_pr = 5 WHERE id = $id").run({ id });
+      expect(await pick("main")).toMatchObject({ status: 409, error: refused });
+      s.db.query("UPDATE task_part SET remote_pr = NULL WHERE id = $id").run({ id });
+      expect(s.t().target_branch).toBe("develop");
+      expect((await pick("main")).status).toBe(200);
+      await s.loop.idle(s.task);
+      // The task is not blocked now, so a second pick has no reason to answer.
+      expect(await pick("main")).toMatchObject({ status: 409, error: "The base branch changes only before the build." });
+    },
+    SLOW,
+  );
 });

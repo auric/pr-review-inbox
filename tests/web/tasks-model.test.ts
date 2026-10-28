@@ -31,6 +31,7 @@ import {
   fileMeta,
   firstPick,
   firstPicks,
+  goneBase,
   inTask,
   listText,
   logRows,
@@ -431,7 +432,9 @@ describe("rules over every row (spec.md section 7.1)", () => {
 
 const REL = "release/2.1";
 const PR_PART = { state: "pr_open" as const, remotePr: 101, prState: "OPEN", pushed: "a".repeat(40), waiting: ["Anna Lee"] };
-const moved = (n = 5, o: Partial<TaskDto["bases"][number]> = {}) => [{ taskRepo: 1, branch: REL, newCommits: n, conflicted: false, ...o }];
+const moved = (n = 5, o: Partial<TaskDto["bases"][number]> = {}) => [
+  { taskRepo: 1, branch: REL, newCommits: n, conflicted: false, changed: false, ...o },
+];
 const instruct = (o: Partial<TaskStepDto> & { result?: "done" | "no_change" | "stopped" | "failed" | null; notes?: string[] }) =>
   step({
     id: 30,
@@ -634,7 +637,7 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
         proposalReason: null,
       },
     ];
-    const bases = [...moved(5), { taskRepo: 2, branch: "develop", newCommits: 1, conflicted: false }];
+    const bases = [...moved(5), { taskRepo: 2, branch: "develop", newCommits: 1, conflicted: false, changed: false }];
     const v = view({ ...rows.baseMoved, repos, bases });
     expect(v.primary?.label).toBe("Update from 2 base branches");
     expect(v.status).toBe("The base branches have new commits since the branch point.");
@@ -1097,7 +1100,9 @@ describe("the rows of several repositories (spec.md sections 6.12 and 6.16.8)", 
       more: ["Show the diff"],
       screen: "ready",
     });
-    const moved2 = view(multi([LIB, MAIN], { bases: [{ taskRepo: 2, branch: "develop", newCommits: 3, conflicted: false }] }));
+    const moved2 = view(
+      multi([LIB, MAIN], { bases: [{ taskRepo: 2, branch: "develop", newCommits: 3, conflicted: false, changed: false }] }),
+    );
     expect(shape(moved2)).toMatchObject({
       status: "develop has 3 new commits since the branch point.",
       primary: "Update from develop",
@@ -1179,6 +1184,24 @@ describe("the rows of several repositories (spec.md sections 6.12 and 6.16.8)", 
       more: ["Stop"],
       screen: "build",
     });
+  });
+
+  test("spec.md section 6.16.7: a gone base gets Pick a base branch with its picker; a picked base waits for the update", () => {
+    const text = "Needs you: develop no longer exists in PROJ/lib. Pick another base branch.";
+    const gone = building({ blocked: { kind: "preflight", step: null, text, base: { taskRepo: 2, branch: "develop" } } });
+    expect(shape(view(gone))).toEqual({ status: text, primary: "Pick a base branch", more: ["Try again", "Stop"], screen: "build" });
+    expect(goneBase({ ...gone, repos: [{ ...REPOS[0], id: 2, project: "PROJ", repo: "lib" } as TaskRepoDto] })).toEqual({
+      taskRepo: 2,
+      branch: "develop",
+      project: "PROJ",
+      repo: "lib",
+      name: "PROJ/lib",
+    });
+    expect(goneBase(building({ blocked: { kind: "preflight", step: null, text: "Needs you: x." } }))).toBeNull();
+    const picked = view({ ...tellRows().ready, bases: moved(0, { changed: true }) });
+    expect(picked.status).toBe(`The base branch is now ${REL}. Update the branch before the PR.`);
+    expect(picked.primary?.label).toBe(`Update from ${REL}`);
+    expect(picked.more.map((a) => a.label)).not.toContain("Open the PR as is");
   });
 
   test("AC-UX1 and AC-UX3 over the new rows: one primary at most, and one sentence with a full stop", () => {

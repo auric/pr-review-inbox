@@ -200,13 +200,14 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         if (db && t) loop.baseCheck(db, t.id);
         return t ? c.json(live(t), 200) : c.json<ApiError>({ error: "Task not found." }, 404);
       })
-      .post("/tasks/:id/answers", idParam, body(taskAnswersInput, "Invalid answers."), (c) => {
+      .post("/tasks/:id/answers", idParam, body(taskAnswersInput, "Invalid answers."), async (c) => {
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id } = c.req.valid("param");
         // A question of a build step or an instruct step waits in state implementing or ready. The interview asks in state interview.
         const state = taskRow(db, id)?.state;
         const building = state === "implementing" || state === "ready";
+        if (building) await loop.settle(id);
         return answer(c, building ? loop.answer(db, id, c.req.valid("json")) : tasks.answers(db, id, c.req.valid("json")));
       })
       .put("/tasks/:id/docs", idParam, body(taskDocInput, "Invalid plan file."), (c) => {
@@ -230,10 +231,11 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         const db = openDb();
         return db ? answer(c, loop.stop(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
-      .post("/tasks/:id/resume", idParam, body(taskVersionInput, "Give the task version."), (c) => {
+      .post("/tasks/:id/resume", idParam, body(taskVersionInput, "Give the task version."), async (c) => {
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id } = c.req.valid("param");
+        await loop.settle(id);
         const t = taskRow(db, id);
         const before = t?.state === "stopped" && t.stopped_from !== "implementing";
         return answer(c, before ? tasks.resume(db, id, c.req.valid("json")) : loop.resume(db, id, c.req.valid("json")));
@@ -242,9 +244,12 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         const db = openDb();
         return db ? answer(c, tasks.close(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
-      .post("/tasks/:id/limit", idParam, body(taskLimitInput, "Give the task version, and keep true or a line limit."), (c) => {
+      .post("/tasks/:id/limit", idParam, body(taskLimitInput, "Give the task version, and keep true or a line limit."), async (c) => {
         const db = openDb();
-        return db ? answer(c, loop.limit(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
+        if (!db) return c.json(unconfigured, 409);
+        const { id } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, loop.limit(db, id, c.req.valid("json")));
       })
       .post(
         "/tasks/:id/spec-change/:step",
@@ -254,6 +259,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
           const db = openDb();
           if (!db) return c.json(unconfigured, 409);
           const { id, step } = c.req.valid("param");
+          await loop.settle(id);
           return answer(c, await loop.specChange(db, id, step, c.req.valid("json")));
         },
       )
@@ -266,6 +272,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
+        await loop.settle(id);
         return answer(c, await prs.open(db, id, part, c.req.valid("json")));
       })
       // spec.md section 6.16.8: "Push and open N PRs" and "Try again" of one row. The pushes and the creates run after the 202.
@@ -277,6 +284,7 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
           const db = openDb();
           if (!db) return c.json(unconfigured, 409);
           const { id, part } = c.req.valid("param");
+          await loop.settle(id);
           return answer(c, await prs.openRows(db, id, part, c.req.valid("json")));
         },
       )
@@ -309,9 +317,12 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         "/tasks/:id/instructions",
         idParam,
         body(taskInstructionsInput, `Give the task version and 1 to ${MAX_INSTRUCTION} characters of text.`),
-        (c) => {
+        async (c) => {
           const db = openDb();
-          return db ? answer(c, loop.instruct(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
+          if (!db) return c.json(unconfigured, 409);
+          const { id } = c.req.valid("param");
+          await loop.settle(id);
+          return answer(c, loop.instruct(db, id, c.req.valid("json")));
         },
       )
       // spec.md section 6.18.6: "Update from <base>" and "Undo the update". Neither pushes.
@@ -319,18 +330,21 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
+        await loop.settle(id);
         return answer(c, await loop.update(db, id, part, c.req.valid("json")));
       })
       .post("/tasks/:id/parts/:part/update/undo", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
+        await loop.settle(id);
         return answer(c, await loop.undoUpdate(db, id, part, c.req.valid("json")));
       })
-      .post("/tasks/:id/parts/:part/fix", partParam, body(taskVersionInput, "Give the task version."), (c) => {
+      .post("/tasks/:id/parts/:part/fix", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
+        await loop.settle(id);
         return answer(c, loop.fixPoints(db, id, part, c.req.valid("json")));
       })
       .get("/tasks/:id/parts/:part/diff", partParam, async (c) => {
@@ -372,7 +386,13 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
       // spec.md section 6.16.3: a base change. 202 when the plan runs again.
       .put("/tasks/:id/base", idParam, body(taskBaseInput, "Give the task version and a branch name."), async (c) => {
         const db = openDb();
-        return db ? answer(c, await tasks.base(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
+        if (!db) return c.json(unconfigured, 409);
+        const id = c.req.valid("param").id;
+        // spec.md section 6.16.7: after the build started, only "Pick a base branch" of the pre-flight changes a base.
+        const state = tasks.get(db, id)?.state;
+        const built = state === "implementing" || state === "ready";
+        if (built) await loop.settle(id);
+        return answer(c, await (built ? loop.base(db, id, c.req.valid("json")) : tasks.base(db, id, c.req.valid("json"))));
       })
       // spec.md section 6.16.3: the base picker. One page of the branch search and the default branch.
       .get(
