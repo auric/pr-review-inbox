@@ -479,11 +479,15 @@ export const DO_NOT_FLAG = [
   "a choice between two correct designs",
   "a missing test, unless the Tests check is on",
 ];
+// docs/plans/review-v3.md section 5: the "rules2" variant adds this item to the list of the finder and of the verify phase.
+export const RULES2_DO_NOT_FLAG = "generated files, lock files, and vendored third-party code";
+const doNotFlagItems = (p: Partial<Pick<Profile, "variants">>) =>
+  [...DO_NOT_FLAG, ...(has(p, "rules2") ? [RULES2_DO_NOT_FLAG] : [])].map((l) => `- ${l}`);
 const doNotFlag = (p: FinderProfile) => [
   checked(p)
     ? "Do not report the points below. The check step refutes them, so they only cost time:"
     : "Do not report the points below. They only cost the user time:",
-  ...DO_NOT_FLAG.map((l) => `- ${l}`),
+  ...doNotFlagItems(p),
 ];
 
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.
@@ -603,11 +607,18 @@ export const MODULES: Record<ModuleId, { label: string; lines: string[] }> = {
 // spec.md section 1.3: rules needs project instructions, and intent needs a goal. Else the section adds nothing.
 const lacks = (id: ModuleId, c: ReviewContext) => (id === "rules" && !c.instructions) || (id === "intent" && !c.goal);
 
+// docs/plans/review-v3.md section 5: the "rules2" variant adds these lines to the rules section.
+export const RULES2_RULES = [
+  "Give a finding that only breaks a project rule severity minor, unless the break also causes a real bug.",
+  "Report a change that makes a statement of the project instructions out of date.",
+  "For example, the instructions name a file, a command, or a behavior that the change removes or renames.",
+];
+
 // The sections in MODULE_IDS order, so the click order of the checkboxes does not change the prompt.
-export function moduleSections(p: Pick<Profile, "modules">, c: ReviewContext): string[] {
+export function moduleSections(p: Pick<Profile, "modules"> & Partial<Pick<Profile, "variants">>, c: ReviewContext): string[] {
   return MODULE_IDS.filter((id) => p.modules.includes(id) && !lacks(id, c)).flatMap((id) => [
     `Check section ${id}:`,
-    ...MODULES[id].lines.map((l) => `- ${l}`),
+    ...[...MODULES[id].lines, ...(id === "rules" && has(p, "rules2") ? RULES2_RULES : [])].map((l) => `- ${l}`),
   ]);
 }
 
@@ -1026,8 +1037,17 @@ const VERIFY_OPENING = [
   './context/candidates.md lists the findings. The heading "## Candidate N" holds candidate N.',
 ];
 
+// docs/plans/review-v3.md section 5: the "rules2" variant gives the verify phase these examples of false positives.
+export const RULES2_REFUTE = [
+  "Examples of candidates to refute:",
+  "- a missing null check, when each caller already passes a value that is not null",
+  "- a race on data that only one thread owns",
+  "- a style preference that the candidate reports as a bug",
+  "- a problem in unchanged code that the change does not reach",
+];
+
 // spec.md section 1.6: the rules of rl-verify and rl-verifier. One rubric and one do-not-flag list for both phases.
-export function verifyRules(p: Pick<Profile, "volume" | "verifier">, c: ReviewContext): string[] {
+export function verifyRules(p: FinderProfile, c: ReviewContext): string[] {
   return [
     "For each candidate, read the code at its anchor and its cause. Then follow its trigger through the code.",
     "Give one entry in verdicts for each candidate.",
@@ -1045,7 +1065,8 @@ export function verifyRules(p: Pick<Profile, "volume" | "verifier">, c: ReviewCo
     "Raise it only when the code shows a worse result than the candidate says.",
     ...rubric(p),
     "The do-not-flag list:",
-    ...DO_NOT_FLAG.map((l) => `- ${l}`),
+    ...doNotFlagItems(p),
+    ...(has(p, "rules2") ? RULES2_REFUTE : []),
     "Look for no new problems. A finder already ran.",
   ];
 }

@@ -26,7 +26,10 @@ const TMP = mkdtempSync(join(tmpdir(), "rl-eval-ab-test-"));
 afterAll(() => rmSync(TMP, { recursive: true, force: true, maxRetries: 3 }));
 const LIVE = join(TMP, "live");
 const APPDATA = join(TMP, "appdata");
-const CACHE = join(LIVE, "git", "PROJ", "repo.git");
+// Distinctive synthetic names: the eval:ab output must show none of them.
+const REPO_NAME = "zebracornrepo";
+const PR_TITLE = "Quokkaflux calc helpers";
+const CACHE = join(LIVE, "git", "PROJ", `${REPO_NAME}.git`);
 mkdirSync(LIVE, { recursive: true });
 mkdirSync(APPDATA, { recursive: true });
 
@@ -78,8 +81,8 @@ async function makeLive() {
   const db = openDb(dbPath(LIVE, BASE_URL));
   db.query(
     `INSERT INTO pull_request (id, project, repo, pr_id, title, description, author_slug, source_head, target_head)
-      VALUES (1, 'PROJ', 'repo', 7, 'Add the calc helpers', 'Synthetic PR.', 'author', $head, $base)`,
-  ).run({ head, base });
+      VALUES (1, 'PROJ', $repo, 7, $title, 'Synthetic PR.', 'author', $head, $base)`,
+  ).run({ head, base, repo: REPO_NAME, title: PR_TITLE });
   const { id: run } = db
     .query(
       `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, status, started_at)
@@ -135,8 +138,9 @@ beforeAll(async () => {
 
 const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   repeat: "1",
-  variants: ["signal", "order"],
+  variants: ["signal", "order", "rules2"],
   modules: ["failures"],
+  effort: null,
   build: [],
   results: null,
   runner: ["fake"],
@@ -147,15 +151,24 @@ describe("eval:ab arguments", () => {
   test("defaults, overrides, and the build flags", () => {
     const o = parseAb(["--repeat", "2", "--db", "x.sqlite", "--runner", "cli", "a"]);
     if ("error" in o) throw new Error(o.error);
-    expect(o).toMatchObject({ repeat: "2", variants: ["signal", "order"], modules: ["failures"], runner: ["cli", "a"] });
+    expect(o).toMatchObject({
+      repeat: "2",
+      variants: ["signal", "order", "rules2"],
+      modules: ["failures"],
+      effort: null,
+      runner: ["cli", "a"],
+    });
     expect(o.build).toEqual(["--db", "x.sqlite"]);
     const none = parseAb(["--candidate-variants", "", "--candidate-modules", ""]);
     expect(none).toMatchObject({ variants: [], modules: [] });
+    expect(parseAb(["--candidate-effort", "max"])).toMatchObject({ effort: "max" });
   });
 
   test("unknown names, a bad repeat, and an unknown flag are errors", () => {
     expect(parseAb(["--candidate-variants", "loud"])).toMatchObject({ error: expect.stringContaining("--variants must be") });
     expect(parseAb(["--candidate-modules", "magic"])).toMatchObject({ error: expect.stringContaining("--modules must be") });
+    expect(parseAb(["--candidate-variants", "rules3"])).toMatchObject({ error: expect.stringContaining("--variants must be") });
+    expect(parseAb(["--candidate-effort", "huge"])).toMatchObject({ error: expect.stringContaining("--candidate-effort must be one of") });
     expect(parseAb(["--repeat", "0"])).toMatchObject({ error: expect.stringContaining("--repeat must be") });
     expect("error" in parseAb(["--set", "v1"])).toBe(true);
     expect(parseAb(["--runner"])).toMatchObject({ error: "--runner needs a command." });
@@ -163,22 +176,39 @@ describe("eval:ab arguments", () => {
 
   test("the candidate of each mode", () => {
     const shippedModules = "security,concurrency,api,rules,intent";
-    expect(runArgs("review", "baseline", opts(), "o")).toEqual(["--set", "local", "--repeat", "1", "--out", "o", "--runner", "fake"]);
-    expect(runArgs("review", "candidate", opts(), "o")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "signal,order", "--modules", `${shippedModules},failures`],
-      ...["--out", "o", "--runner", "fake"],
+    expect(runArgs("review", "baseline", opts(), "o")).toEqual([
+      "--set",
+      "local",
+      "--repeat",
+      "1",
+      "--ordinals",
+      "--out",
+      "o",
+      "--runner",
+      "fake",
     ]);
+    expect(runArgs("review", "candidate", opts(), "o")).toEqual([
+      ...["--set", "local", "--repeat", "1", "--variants", "signal,order,rules2", "--modules", `${shippedModules},failures`],
+      ...["--ordinals", "--out", "o", "--runner", "fake"],
+    ]);
+    // --candidate-effort: only the candidate gets --effort.
+    expect(runArgs("review", "candidate", opts({ effort: "xhigh" }), "")).toEqual([
+      ...["--set", "local", "--repeat", "1", "--variants", "signal,order,rules2", "--modules", `${shippedModules},failures`],
+      ...["--effort", "xhigh", "--ordinals", "--runner", "fake"],
+    ]);
+    expect(runArgs("review", "baseline", opts({ effort: "xhigh" }), "")).not.toContain("--effort");
     expect(runArgs("rereview", "baseline", opts({ runner: null }), "")).toEqual([
       "--set",
       "local",
       "--repeat",
       "1",
       "--rereview",
+      "--ordinals",
       "--real",
     ]);
     expect(runArgs("rereview", "candidate", opts({ runner: null }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "signal,order,rereview-strict"],
-      ...["--modules", `${shippedModules},failures`, "--real"],
+      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "signal,order,rules2,rereview-strict"],
+      ...["--modules", `${shippedModules},failures`, "--ordinals", "--real"],
     ]);
     // Bisect: no variants and no extra module. rereview-strict changes nothing in a review run, so the review candidate drops it.
     const bare = opts({ variants: ["rereview-strict"], modules: [] });
@@ -189,6 +219,7 @@ describe("eval:ab arguments", () => {
       "1",
       "--modules",
       shippedModules,
+      "--ordinals",
       "--runner",
       "fake",
     ]);
@@ -254,7 +285,19 @@ describe("eval:ab end to end with the fake CLI", () => {
       );
       const out = join(TMP, "set", "eval-local");
       const results = join(TMP, "results");
-      const r = await bun([AB, "--out", out, "--results", results, "--runner", process.execPath, FAKE, scenario]);
+      const r = await bun([
+        AB,
+        "--out",
+        out,
+        "--results",
+        results,
+        "--candidate-effort",
+        "low",
+        "--runner",
+        process.execPath,
+        FAKE,
+        scenario,
+      ]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
 
@@ -277,10 +320,17 @@ describe("eval:ab end to end with the fake CLI", () => {
       };
       const a = file("baseline");
       const b = file("candidate");
+      // No case ID, repository name, PR title, or set path in the output. The case shows as an ordinal.
+      const id = a.cases[0]?.id as string;
+      expect(id).toBeTruthy();
+      for (const s of [id, REPO_NAME, PR_TITLE, PATH, out]) expect(r.stdout).not.toContain(s);
+      expect(r.stdout).toContain("[1/1] case 1 #1:");
       expect(a.profile.variants).toEqual([]);
       expect(a.profile.modules).not.toContain("failures");
-      expect(b.profile.variants).toEqual(["order", "signal"]);
+      expect(b.profile.variants).toEqual(["order", "rules2", "signal"]);
       expect(b.profile.modules).toContain("failures");
+      expect(a.requested?.effort).not.toBe("low");
+      expect(b.requested?.effort).toBe("low");
       expect(a.fingerprint).toBe(b.fingerprint as string);
       expect(readdirSync(results).sort()).toEqual(["review-baseline", "review-candidate"]);
     },

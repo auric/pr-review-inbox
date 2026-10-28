@@ -262,8 +262,16 @@ The baseline (A) is the shipped profile. The candidate (B) adds to it. The verif
 
 | Mode | Candidate | Question |
 |---|---|---|
-| Review cases | `--variants signal,order` and `--modules <shipped>,failures` | Do the high-signal rules, the ordered process, and the failure checklist raise recall without noise? |
+| Review cases | `--variants signal,order,rules2` and `--modules <shipped>,failures` | Do the high-signal rules, the ordered process, the failure checklist, and the rule changes raise recall without noise? |
 | Re-review cases | the review candidate plus `rereview-strict` | Does the strict re-review also cut noise and re-raises? |
+
+The `rules2` variant holds five ideas. `bun run eval:ab -- --candidate-effort <level>` also runs the candidate at another effort.
+
+1. Severity: a finding that only breaks a project rule gets severity minor, unless it causes a real bug.
+2. Out-of-date docs: the rules section flags a change that makes a CLAUDE.md or project instructions statement out of date.
+3. REVIEW.md: a review or re-review run reads `REVIEW.md` at the target branch root, with the CLAUDE.md caps and trust line.
+4. Do-not-flag: generated files, lock files, and vendored third-party code.
+5. Verify examples: the verify phase gets four generic false positives to refute.
 
 ## 6. BRIEF 3.5 wording draft (needs approval at merge)
 

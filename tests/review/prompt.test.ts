@@ -28,6 +28,9 @@ import {
   promptVersion,
   RETIRED_PROFILES,
   type ReviewContext,
+  RULES2_DO_NOT_FLAG,
+  RULES2_REFUTE,
+  RULES2_RULES,
   replyAgent,
   reviewerAgent,
   rubric,
@@ -769,14 +772,52 @@ describe("review v3 prompt switches", () => {
     expect(mainAgent(strict, RE).prompt).toBe(mainAgent(general, RE).prompt);
   });
 
+  test("rules2 adds its lines to the rules section, the do-not-flag lists, and the verify phase only", () => {
+    const r2 = withVariants("rules2");
+    const rules = ["Check section rules:", ...MODULES.rules.lines.map((l) => `- ${l}`)].join("\n");
+    const rulesOn = `${rules}\n${RULES2_RULES.map((l) => `- ${l}`).join("\n")}`;
+    const lastItem = `- ${DO_NOT_FLAG.at(-1)}`;
+    const itemOn = `${lastItem}\n- ${RULES2_DO_NOT_FLAG}`;
+    for (const agent of [mainAgent, reviewerAgent]) {
+      const off = agent(general, FULL).prompt;
+      expect(off).not.toContain(RULES2_DO_NOT_FLAG);
+      expect(off).not.toContain(RULES2_RULES[0] as string);
+      expect(agent(r2, FULL).prompt).toBe(off.replace(lastItem, itemOn).replace(rules, rulesOn));
+    }
+    // No rules section without instructions: the section lines stay out, the do-not-flag item stays in.
+    const bare = { ...FULL, instructions: false };
+    expect(mainAgent(r2, bare).prompt).toBe(mainAgent(general, bare).prompt.replace(lastItem, itemOn));
+    for (const agent of [verifyAgent, verifierAgent]) {
+      const off = agent(general, FULL).prompt;
+      expect(off).not.toContain(RULES2_REFUTE[0] as string);
+      expect(agent(r2, FULL).prompt).toBe(off.replace(lastItem, `${itemOn}\n${RULES2_REFUTE.join("\n")}`));
+    }
+    expect(RULES2_RULES[0]).toContain("severity minor");
+    expect(RULES2_RULES[1]).toContain("out of date");
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
+    expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
+    expect(promptVersion(withVariants("order", "rules2", "signal"))).toBe("2.3+order+rules2+signal");
+  });
+
   test("ASD-STE100: every switch line has at most 20 words", () => {
-    expect(longSentences([...SIGNAL_RULES, ...ORDER_RULES, ...STRICT_REREVIEW, ...MODULES.failures.lines])).toEqual([]);
+    expect(
+      longSentences([
+        ...SIGNAL_RULES,
+        ...ORDER_RULES,
+        ...STRICT_REREVIEW,
+        ...MODULES.failures.lines,
+        ...RULES2_RULES,
+        RULES2_DO_NOT_FLAG,
+        ...RULES2_REFUTE,
+      ]),
+    ).toEqual([]);
   });
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
     expect(promptVersion(withVariants("signal", "order"))).toBe("2.3+order+signal");
-    expect(VARIANTS).toEqual(["order", "rereview-strict", "signal"]);
+    expect(VARIANTS).toEqual(["order", "rereview-strict", "rules2", "signal"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
     expect(parsed.variants).toEqual([]);

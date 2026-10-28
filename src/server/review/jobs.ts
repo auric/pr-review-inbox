@@ -622,13 +622,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   }
 
   // The run reads every source again. The text goes to the prompts and the run folder. SQLite and the log get the paths and sizes only.
-  // paths: the changed files, whose folders can add a CLAUDE.md.
+  // paths: the changed files, whose folders can add a CLAUDE.md. The variants change only the prompts of a review or re-review run.
   async function loadInstructions(j: Job | TaskJob, ws: Workspace, ref: { project: string; repo: string }, paths: string[]) {
     const instructions = await projectInstructions(
       j.db,
       { project: ref.project, repo: ref.repo },
       { cache: ws.cache, env: gitEnv("/dev/null"), commit: ws.targetHead, paths },
       settings.globalInstructions() ? (opts.claudeConfigDir ?? claudeConfigDir()) : null,
+      j.kind === "review" && j.profile.variants.includes("rules2"),
     );
     if (instructions.text) writeFileSync(join(ws.work, "CLAUDE.md"), instructions.text);
     j.db

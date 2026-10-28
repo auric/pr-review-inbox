@@ -82,7 +82,8 @@ const header = (r: EvalResult) => {
   return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), verifier ${verifierOf(r)}, ${r.runner} CLI, ${runs}`;
 };
 
-export function summaryText(r: EvalResult, s: Score = score(r)): string {
+// name: the label of a case in the rows. eval:ab passes ordinals, so its output holds no case ID.
+export function summaryText(r: EvalResult, s: Score = score(r), name = (id: string) => id): string {
   const rows = [["metric", "all cases"], ...METRICS.map((m) => [LABEL[m], cell(m, s.suite[m])])];
   const ids = Object.keys(s.cases);
   const perCase = [
@@ -90,7 +91,7 @@ export function summaryText(r: EvalResult, s: Score = score(r)): string {
     ...ids.map((id) => {
       const c = s.cases[id] as Score["cases"][string];
       return [
-        id,
+        name(id),
         cell("recall", c.recall),
         cell("precision", c.precision),
         cell("falsePositives", c.falsePositives),
@@ -125,16 +126,17 @@ export function refusal(a: EvalResult, b: EvalResult): string | null {
   return null;
 }
 
-export function compareText(a: EvalResult, b: EvalResult): string {
+export function compareText(a: EvalResult, b: EvalResult, name = (id: string) => id): string {
   const sa = score(a);
   const sb = score(b);
   const ta = truth(a);
   const tb = truth(b);
   const out = [`A: ${header(a)}`, `B: ${header(b)}`];
   const only = [...new Set([...ta.keys(), ...tb.keys()])].filter((id) => !(ta.has(id) && tb.has(id)));
-  if (only.length) out.push(`Cases in one file only: ${only.join(", ")}. The "all cases" rows do not compare.`);
+  if (only.length) out.push(`Cases in one file only: ${only.map(name).join(", ")}. The "all cases" rows do not compare.`);
   const changed = [...ta.keys()].filter((id) => tb.has(id) && ta.get(id) !== tb.get(id));
-  if (changed.length) out.push(`Cases whose fixture changed between A and B: ${changed.join(", ")}. Their numbers do not compare.`);
+  if (changed.length)
+    out.push(`Cases whose fixture changed between A and B: ${changed.map(name).join(", ")}. Their numbers do not compare.`);
   // The flags compare only when both files record them. A file made before "models" existed records only the init model of each run.
   const qa = a.requested;
   const qb = b.requested;
@@ -160,7 +162,7 @@ export function compareText(a: EvalResult, b: EvalResult): string {
       ...ids.map((id) => {
         const x = sa.cases[id]?.[m] ?? null;
         const y = sb.cases[id]?.[m] ?? null;
-        return [id, cell(m, x), cell(m, y), delta(m, x, y)];
+        return [name(id), cell(m, x), cell(m, y), delta(m, x, y)];
       }),
     ];
     out.push("", LABEL[m], table(rows));

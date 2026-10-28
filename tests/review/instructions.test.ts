@@ -218,6 +218,73 @@ describe("target branch", () => {
     expect(bad.files).toEqual([]);
     expect(bad.notLoaded[0]).toContain("the app cannot read the target branch commit");
   });
+
+  // docs/plans/review-v3.md section 5, the "rules2" variant: REVIEW.md at the repository root, with the CLAUDE.md caps and trust line.
+  test("review reads REVIEW.md at the root after the root CLAUDE.md files, with the same caps; off reads none", async () => {
+    const dir = join(root, "review-md");
+    mkdirSync(dir);
+    const empty = join(dir, "empty.gitconfig");
+    writeFileSync(empty, "");
+    const bare = join(dir, "repo.git");
+    const env = {
+      ...gitEnv(empty),
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.invalid",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.invalid",
+      GIT_INDEX_FILE: join(dir, "index"),
+    };
+    const g = async (args: string[], stdin?: string) => (await git(["--git-dir", bare, ...args], { env, stdin })).trim();
+    await git(["init", "-q", "--bare", "--template=", bare], { env });
+    const commitOf = async (files: Record<string, string>) => {
+      const entries: string[] = [];
+      for (const [p, text] of Object.entries(files)) entries.push(`100644 ${await g(["hash-object", "-w", "--stdin"], text)}\t${p}`);
+      await g(["read-tree", "--empty"]);
+      await g(["update-index", "--add", "--index-info"], `${entries.join("\n")}\n`);
+      return g(["commit-tree", await g(["write-tree"]), "-m", "target"]);
+    };
+    const commit = await commitOf({
+      "CLAUDE.md": "Root rules.\n",
+      "REVIEW.md": "Review rules. @docs/review-extra.md\n",
+      "docs/review-extra.md": "Extra review rules.\n",
+      "sub/REVIEW.md": "Nested review rules.\n",
+      "sub/CLAUDE.md": "Sub rules.\n",
+    });
+    const read = (review: boolean) =>
+      buildInstructions({ target: treeReader(bare, env, commit), scoped: ["sub"], review, clone: null, local: [], extra: "" });
+    const off = await read(false);
+    expect(off.files.map((f) => f.path)).toEqual(["CLAUDE.md", "sub/CLAUDE.md"]);
+    expect(off.text).not.toContain("Review rules.");
+    const on = await read(true);
+    expect(on.files.map((f) => f.path)).toEqual(["CLAUDE.md", "REVIEW.md", "docs/review-extra.md", "sub/CLAUDE.md"]);
+    expect(on.text.startsWith(`# Project instructions\n\n${INSTRUCTIONS_TRUST}\n\n`)).toBe(true);
+    expect(on.text.split(INSTRUCTIONS_TRUST).length).toBe(2);
+    expect(on.text).toContain("## From the target branch: REVIEW.md (applies to all files)\n\nReview rules. `@docs/review-extra.md`\n");
+    expect(on.text).not.toContain("Nested review rules.");
+    expect(on.sources.map((s) => s.text)).toContain("Review rules. `@docs/review-extra.md`\n");
+    expect(on.bytes).toBe(
+      off.bytes + Buffer.byteLength("Review rules. @docs/review-extra.md\n") + Buffer.byteLength("Extra review rules.\n"),
+    );
+    // A REVIEW.md without CLAUDE.md loads alone. A missing REVIEW.md is no gap.
+    const only = await commitOf({ "REVIEW.md": "Only review rules.\n" });
+    const alone = await buildInstructions({ target: treeReader(bare, env, only), review: true, clone: null, local: [], extra: "" });
+    expect(alone.files.map((f) => f.path)).toEqual(["REVIEW.md"]);
+    const none = await commitOf({ "CLAUDE.md": "Root rules.\n" });
+    const missing = await buildInstructions({ target: treeReader(bare, env, none), review: true, clone: null, local: [], extra: "" });
+    expect(missing.notLoaded).toEqual([]);
+    // FILE_CAP and TOTAL_CAP apply as for CLAUDE.md.
+    const big = await commitOf({ "CLAUDE.md": "Root rules.\n", "REVIEW.md": "x".repeat(FILE_CAP + 1) });
+    const over = await buildInstructions({ target: treeReader(bare, env, big), review: true, clone: null, local: [], extra: "" });
+    expect(over.files.map((f) => f.path)).toEqual(["CLAUDE.md"]);
+    expect(over.notLoaded).toEqual([`REVIEW.md from the target branch (the file is over ${FILE_CAP / 1024} KB)`]);
+    const first = FILE_CAP - 10;
+    const full = await commitOf({ "CLAUDE.md": "c".repeat(first), "REVIEW.md": "r".repeat(TOTAL_CAP - first + 1) });
+    const capped = await buildInstructions({ target: treeReader(bare, env, full), review: true, clone: null, local: [], extra: "" });
+    expect(capped.files.map((f) => f.path)).toEqual(["CLAUDE.md"]);
+    expect(capped.notLoaded).toEqual([
+      `REVIEW.md from the target branch (the instructions are over ${TOTAL_CAP.toLocaleString("en-US")} bytes)`,
+    ]);
+  }, 60_000);
 });
 
 // docs/plans/review-v2/spec.md section 1.3: the CLAUDE.md files of the changed folders, with a scope header.

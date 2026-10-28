@@ -87,9 +87,10 @@ const TASK_KEY = "EVAL-1";
 const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
-  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--runner <command> <args...>]
+  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
---rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.`;
+--rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
+--ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.`;
 // docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin.
 const REREVIEW_ONLY: readonly Variant[] = ["rereview-strict"];
 
@@ -112,6 +113,8 @@ export type Options = {
   variants: Variant[] | null;
   // docs/plans/review-v3.md WP-V3: run the re-review cases as re-reviews.
   rereview: boolean;
+  // eval:ab: the output names no case. Case IDs, run errors, and coverage text can hold names from the user's own repositories.
+  ordinals: boolean;
   repeat: number;
   out: string;
   keep: boolean;
@@ -139,6 +142,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         verifier: { type: "string" },
         variants: { type: "string" },
         rereview: { type: "boolean", default: false },
+        ordinals: { type: "boolean", default: false },
         repeat: { type: "string", default: "1" },
         out: { type: "string" },
         keep: { type: "boolean", default: false },
@@ -194,6 +198,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     verifier: verifier as VerifierSetup["mode"] | null,
     variants: variants as Variant[] | null,
     rereview,
+    ordinals: v.ordinals ?? false,
     repeat,
     out: resolve(v.out ?? join(REPO, "eval-results")),
     keep: v.keep ?? false,
@@ -677,6 +682,7 @@ export async function main(argv: string[]): Promise<number> {
     console.log(runSetup(profile));
     if (o.real) console.log(WARNING);
     const total = cases.length * o.repeat;
+    const name = (id: string) => (o.ordinals ? `case ${cases.findIndex((c) => c.id === id) + 1}` : id);
     let n = 0;
     for (let repeat = 1; repeat <= o.repeat && !stopping; repeat++)
       for (const c of cases) {
@@ -713,13 +719,14 @@ export async function main(argv: string[]): Promise<number> {
         // judge.ts: skipped or unavailable coverage entries make a run incomplete.
         const cov = run.status === "incomplete" ? run.coverage : null;
         const gaps = cov
-          ? (["skipped", "unavailable"] as const).map((k) => (cov[k].length ? `\n    ${k}: ${cov[k].join("; ")}` : "")).join("")
+          ? (["skipped", "unavailable"] as const)
+              .map((k) => (!cov[k].length ? "" : o.ordinals ? `, ${cov[k].length} ${k}` : `\n    ${k}: ${cov[k].join("; ")}`))
+              .join("")
           : "";
-        console.log(
-          `[${n}/${total}] ${c.id} #${repeat}: ${run.status}${time}, ${shown} shown, ${recall}${run.error ? ` (${run.error})` : ""}${gaps}`,
-        );
+        const error = !run.error ? "" : o.ordinals ? " (an error: the result file holds it)" : ` (${run.error})`;
+        console.log(`[${n}/${total}] ${name(c.id)} #${repeat}: ${run.status}${time}, ${shown} shown, ${recall}${error}${gaps}`);
       }
-    console.log(`\n${summaryText(result)}\nResult: ${file}`);
+    console.log(`\n${summaryText(result, score(result), name)}\nResult: ${file}`);
     return stopping ? 130 : 0;
   } catch (e) {
     console.error(`The eval failed: ${(e as Error).stack ?? e}`);

@@ -155,7 +155,7 @@ describe("eval harness without --real (AC-M2)", () => {
     for (const [flag, value, message] of [
       ["--effort", "huge", "--effort must be one of"],
       ["--model", "bad name", "--model must be a model alias"],
-      ["--variants", "bogus", "--variants must be a comma list of order, rereview-strict, signal."],
+      ["--variants", "bogus", "--variants must be a comma list of order, rereview-strict, rules2, signal."],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
       const r = await bun([RUN, flag, value, "--runner", process.execPath, FAKE, "none.json"]);

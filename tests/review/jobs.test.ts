@@ -23,6 +23,7 @@ import {
   SIGNAL_RULES,
 } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
+import { INSTRUCTIONS_TRUST } from "../../src/server/review/instructions";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { LANGUAGE_INTRO } from "../../src/server/review/languages";
 import { STRICT_REREVIEW } from "../../src/server/review/prompt";
@@ -188,7 +189,11 @@ async function remoteRepo(root: string, extra: Record<string, Entry> = {}) {
     return g(["commit-tree", await g(["write-tree"]), ...(parent ? ["-p", parent] : []), "-m", msg]);
   }
   const base = await commit(null, { "src/app.ts": APP, "README.md": "# Sample\n" }, "base");
-  const target = await commit(base, { "docs/main.md": "main\n", "CLAUDE.md": TARGET_RULES }, "main moves");
+  const target = await commit(
+    base,
+    { "docs/main.md": "main\n", "CLAUDE.md": TARGET_RULES, "REVIEW.md": "REVIEW-RULES-CANARY\n" },
+    "main moves",
+  );
   const source = await commit(
     base,
     {
@@ -1603,6 +1608,47 @@ describe("language checks", () => {
       expect(h.db.query("SELECT kind, prompt_version FROM review_run ORDER BY id").all()).toEqual([
         ...[1, 2, 3].map(() => ({ kind: "review", prompt_version: switched })),
         { kind: "ask", prompt_version: REVIEW_PROMPT_VERSION },
+      ]);
+      // Without rules2, no run reads REVIEW.md.
+      for (const r of [review, rereview]) expect(r.stdin).not.toContain("REVIEW-RULES-CANARY");
+    },
+    SLOW,
+  );
+
+  test(
+    "review v3 rules2: a review run reads REVIEW.md of the target branch as project instructions; an ask run does not",
+    async () => {
+      const h = await setup();
+      const variants: ProfileInput["variants"] = ["rules2"];
+      expect(
+        (await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [{ ...general, variants }] } })).status,
+      ).toBe(200);
+      await h.brief(NOTE, "general");
+      const review = await hungAgents(h, h.start);
+      const section = stdinSection(review.stdin, "Project instructions") ?? "";
+      // One trust line for all files. REVIEW.md follows the root CLAUDE.md and its import.
+      expect(section.startsWith(`# Project instructions\n\n${INSTRUCTIONS_TRUST}\n\n`)).toBe(true);
+      expect(section.split(INSTRUCTIONS_TRUST).length).toBe(2);
+      const heads = [
+        "## From the target branch: CLAUDE.md",
+        "## From the target branch: docs/main.md (imported by CLAUDE.md)",
+        "## From the target branch: REVIEW.md (applies to all files)\n\nREVIEW-RULES-CANARY",
+      ];
+      const at = heads.map((x) => section.indexOf(x));
+      expect(at.every((i, k) => i > (at[k - 1] ?? -1))).toBe(true);
+      expect(review.agents["rl-reviewer"]?.prompt).toContain("REVIEW-RULES-CANARY");
+      const ask = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
+      expect(ask.stdin).toContain("TARGET-RULES-CANARY");
+      expect(ask.stdin).not.toContain("REVIEW-RULES-CANARY");
+      const rows = h.db.query("SELECT kind, instructions_json FROM review_run ORDER BY id").all() as {
+        kind: string;
+        instructions_json: string;
+      }[];
+      expect(
+        rows.map((r) => [r.kind, (JSON.parse(r.instructions_json) as { files: { path: string }[] }).files.map((f) => f.path)]),
+      ).toEqual([
+        ["review", ["CLAUDE.md", "docs/main.md", "REVIEW.md"]],
+        ["ask", ["CLAUDE.md", "docs/main.md"]],
       ]);
     },
     SLOW,

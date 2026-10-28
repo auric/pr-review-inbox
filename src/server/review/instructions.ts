@@ -22,6 +22,8 @@ export const TOTAL_CAP = 120_000;
 export const MAX_HOPS = 4;
 // Claude Code reads these files at the project root (memory docs). A committed CLAUDE.local.md is not a project file.
 export const TARGET_FILES = ["CLAUDE.md", ".claude/CLAUDE.md"] as const;
+// docs/plans/review-v3.md section 5: with the "rules2" variant, a review run also reads the review rules at the repository root.
+export const REVIEW_FILE = "REVIEW.md";
 // The user memory file in the Claude config folder (memory docs).
 export const GLOBAL_FILE = "CLAUDE.md";
 // The first line of the combined text. Instructions in the prompt need the same limits as the agent rules.
@@ -240,10 +242,12 @@ export async function changedFolders(cache: string, env: Record<string, string>,
 
 // Order: the global file, the target branch, the clone files in the ticked order, the settings text. An import follows its file.
 // global: null when the global switch is off. scoped: folders whose <folder>/CLAUDE.md the target reader loads after the root files.
+// review: the target reader also loads REVIEW_FILE after the root files.
 export async function buildInstructions(o: {
   global?: Reader | null;
   target: Reader | null;
   scoped?: readonly string[];
+  review?: boolean;
   clone: Reader | null;
   local: readonly string[];
   extra: string;
@@ -301,7 +305,7 @@ export async function buildInstructions(o: {
   if (o.global) await source("global", o.global, [GLOBAL_FILE], false);
   if (o.target) {
     const seen = new Set<string>();
-    await source("target", o.target, TARGET_FILES, true, seen);
+    await source("target", o.target, o.review ? [...TARGET_FILES, REVIEW_FILE] : TARGET_FILES, true, seen);
     for (const dir of o.scoped ?? []) await source("target", o.target, [`${dir}/CLAUDE.md`], true, seen, dir);
   }
   if (o.local.length) {
@@ -353,12 +357,14 @@ export const clonePathOf = (db: Database, k: RepoKey) =>
   (db.query(SQL.clone).get({ project: k.project, repo: k.repo }) as { path: string } | null)?.path ?? null;
 
 // target: the cache clone and the target head, or null when no cache has the commit. paths: the changed files of a run, whose folders
-// can add a CLAUDE.md. global: the config folder, or null when the switch is off. Reads every source again.
+// can add a CLAUDE.md. global: the config folder, or null when the switch is off. review: also read REVIEW_FILE from the target.
+// Reads every source again.
 export async function projectInstructions(
   db: Database,
   k: RepoKey,
   target: { cache: string; env: Record<string, string>; commit: string; paths?: readonly string[] } | null,
   global: string | null = null,
+  review = false,
 ): Promise<Built & { settings: InstructionsInput; clone: string | null }> {
   const settings = instructionSettings(db, k);
   const clone = clonePathOf(db, k);
@@ -367,6 +373,7 @@ export async function projectInstructions(
     global: global === null ? null : configReader(global),
     target: tree ? treeReader(tree.cache, tree.env, tree.commit) : null,
     scoped: tree ? await changedFolders(tree.cache, tree.env, tree.commit, tree.paths ?? []) : [],
+    review,
     clone: clone ? cloneReader(clone) : null,
     local: settings.local,
     extra: settings.extra,

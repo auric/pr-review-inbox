@@ -159,7 +159,7 @@ export const MODULE_IDS = [
 export type ModuleId = (typeof MODULE_IDS)[number];
 // docs/plans/review-v3.md V2 and V3: eval switches. The UI and the Improve prompt do not offer them until WP-V4 ships or deletes them.
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
-export const VARIANTS = ["order", "rereview-strict", "signal"] as const;
+export const VARIANTS = ["order", "rereview-strict", "rules2", "signal"] as const;
 export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];
