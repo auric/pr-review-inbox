@@ -5,7 +5,7 @@
 // and lines, the refuted list, the phase line, and the run log groups. Pure rules only.
 import { describe, expect, test } from "bun:test";
 import { MODULES } from "../../src/server/review/catalog";
-import { MODULE_IDS, type ReviewItemDto, type RunDto, type RunSummary, type Volume } from "../../src/shared/dto";
+import { MODULE_IDS, type ReviewItemDto, type RunDto, type RunSummary, TRIAL_MODULES, type Volume } from "../../src/shared/dto";
 import type { FindingPayload, VerifyMark } from "../../src/shared/review";
 import type { RunEvent } from "../../src/shared/run-log";
 import {
@@ -260,7 +260,8 @@ describe("run log groups (design.md section 5.1)", () => {
 describe("checks and volume of a profile (spec.md sections 1.1 to 1.4)", () => {
   test("the labels are the module labels of the review prompt", () => {
     expect(MODULE_LABEL).toEqual(Object.fromEntries(MODULE_IDS.map((m) => [m, MODULES[m].label])) as typeof MODULE_LABEL);
-    expect([...SHOWN_CHECKS, ...MORE_CHECKS].sort()).toEqual([...MODULE_IDS].sort());
+    // docs/plans/review-v3.md WP-V2: a trial module stays out of the brief until WP-V4.
+    expect([...SHOWN_CHECKS, ...MORE_CHECKS, ...TRIAL_MODULES].sort()).toEqual([...MODULE_IDS].sort());
     expect(VOLUME_LINE.balanced).toBe("Balanced: must-fix and worth-fixing points. Unsure points wait in a fold.");
   });
 
@@ -283,6 +284,7 @@ describe("checks and volume of a profile (spec.md sections 1.1 to 1.4)", () => {
       modules: ["security" as const],
       volume: "quiet" as const,
       verifier: { mode: "on" as const, model: null, effort: "high" as const },
+      variants: [],
     };
     const [d] = toDrafts([base]);
     expect(d?.verifier).toEqual({ mode: "on", model: "", effort: "high" });

@@ -64,6 +64,7 @@ describe("improveBody", () => {
         modules: [],
         volume: "balanced",
         verifier: { mode: "on", model: null, effort: null },
+        variants: [],
       },
     ]);
     if (!d) throw new Error("no draft");

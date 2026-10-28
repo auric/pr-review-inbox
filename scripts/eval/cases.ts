@@ -35,6 +35,7 @@ export const MODULE_IDS = [
   "simplify",
   "rules",
   "intent",
+  "failures",
 ] as const;
 export const LANGUAGES = ["typescript", "cpp", "python"] as const;
 

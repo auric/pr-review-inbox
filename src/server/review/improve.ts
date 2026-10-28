@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { DEFAULT_VERIFIER, type ImproveDto, type ImproveInput, MAX_NOTE, MODULE_IDS, profilePrompt } from "../../shared/dto";
+import { DEFAULT_VERIFIER, type ImproveDto, type ImproveInput, MAX_NOTE, MODULE_IDS, profilePrompt, TRIAL_MODULES } from "../../shared/dto";
 import { improveResult } from "../../shared/review";
 import { log } from "../log";
 import { MODULES, sharedRules } from "./catalog";
@@ -91,7 +91,7 @@ export function buildImprovePrompt(i: ImproveInput): string {
       ? ["Explain runs get no check sections."]
       : [
           "Review runs add the check sections that the profile turns on. Never repeat their checks in the new prompt.",
-          ...MODULE_IDS.map((id) => `- ${id}: ${MODULES[id].label}`),
+          ...MODULE_IDS.filter((id) => !TRIAL_MODULES.includes(id)).map((id) => `- ${id}: ${MODULES[id].label}`),
         ]),
     "",
     "# Language checks",

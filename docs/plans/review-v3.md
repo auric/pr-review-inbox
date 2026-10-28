@@ -136,6 +136,15 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 - Control mutation: add the "order" lines without the variant. The default snapshot test must fail.
 - Eval measure: section 5 matrix.
 - Depends: U-V1.
+- Implementation notes (2026-10-28):
+  - No PROFILES_VERSION bump. No shipped value changed, and the zod default fills `variants` with an empty list. config.ts and settings.ts stay as they were.
+  - An unknown stored variant name drops on load now, as an unknown module ID does. The list keeps the VARIANTS order.
+  - "failures" is a trial module (TRIAL_MODULES in dto.ts). The brief, the profile editor, and the Improve prompt do not offer it. The eval selects it with `--modules`. The profile editor keeps `variants` on a save, with no control for them.
+  - "signal" changes the finder rules, so rl-main and rl-reviewer both get it. "order" goes to rl-main only, after the check sections.
+  - Only a review or re-review run records the variants in prompt_version. Ask, reply, fix, discuss, and Explain rows keep REVIEW_PROMPT_VERSION. The eval result file records the same text in `promptVersion`.
+  - "rereview-strict" changes only the re-review stdin. Without `--rereview` (WP-V3), it changes no prompt, but the prompt version still names it.
+  - The tests are in tests/review/prompt.test.ts, tests/review/jobs.test.ts, and tests/eval/harness.test.ts. tests/review/catalog.test.ts does not exist. The snapshot hashes come from the default prompts of each run kind at commit d76bed0.
+  - docs/eval/local.md gives the U-V2 commands.
 
 ### WP-V3. Re-review eval mode (implementer, W2; measure for idea 9)
 

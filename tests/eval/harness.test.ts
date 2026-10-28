@@ -124,10 +124,35 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(profileOf(["--verifier", "on", "--profile-version", "4"]).verifier).toEqual(DEFAULT_VERIFIER);
   });
 
-  test("an invalid --model or --effort exits 2 with the usage text", async () => {
+  test("--variants sets the variants of the run profile; without it the profile keeps its own (docs/plans/review-v3.md WP-V2)", () => {
+    const profileOf = (argv: string[]) => {
+      const p = evalProfile(parseOptions(argv) as Options);
+      if ("error" in p) throw new Error(p.error);
+      return p.profile;
+    };
+    expect(parseOptions([])).toMatchObject({ variants: null });
+    expect(parseOptions(["--variants", "signal, order"])).toMatchObject({ variants: ["signal", "order"] });
+    for (const bad of ["bogus", "signal,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
+    expect(profileOf([]).variants).toEqual([]);
+    expect(profileOf(["--variants", "signal,order"]).variants).toEqual(["order", "signal"]);
+    expect(profileOf(["--variants", "rereview-strict", "--profile-version", "4"]).variants).toEqual(["rereview-strict"]);
+  });
+
+  test("--modules takes only module IDs of this app version, so a typo never runs a profile without the check", () => {
+    expect(parseOptions(["--modules", "security, failures"])).toMatchObject({ modules: ["security", "failures"] });
+    expect(parseOptions(["--modules", ""])).toMatchObject({ modules: [] });
+    for (const bad of ["failure", "security,", "core"]) expect(parseOptions(["--modules", bad])).toHaveProperty("error");
+    const p = evalProfile(parseOptions(["--modules", "security,concurrency,api,rules,intent,failures"]) as Options);
+    if ("error" in p) throw new Error(p.error);
+    expect(p.profile.modules).toEqual(["security", "concurrency", "api", "rules", "intent", "failures"]);
+  });
+
+  test("an invalid --model, --effort, --modules, or --variants exits 2 with the usage text", async () => {
     for (const [flag, value, message] of [
       ["--effort", "huge", "--effort must be one of"],
       ["--model", "bad name", "--model must be a model alias"],
+      ["--variants", "bogus", "--variants must be a comma list of order, rereview-strict, signal."],
+      ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
       const r = await bun([RUN, flag, value, "--runner", process.execPath, FAKE, "none.json"]);
       expect(r.code).toBe(2);
@@ -525,7 +550,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
   );
 
   test(
-    "--model and --effort reach the CLI, the result file records them, and compare warns on a mismatch",
+    "--model and --effort reach the CLI, the result file records them with the --variants prompt version, and compare warns on a mismatch",
     async () => {
       const [c] = loadCases("ts-cache-race");
       if (!c) throw new Error("The case ts-cache-race is missing.");
@@ -549,11 +574,25 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         }),
       );
       const out = join(dir, "out");
-      const args = ["--cases", c.id, "--model", "haiku", "--effort", "low", "--verifier", "off", "--out", out];
+      const args = [
+        "--cases",
+        c.id,
+        "--model",
+        "haiku",
+        "--effort",
+        "low",
+        "--verifier",
+        "off",
+        "--variants",
+        "signal,order",
+        "--out",
+        out,
+      ];
       const r = await bun([RUN, ...args, "--runner", process.execPath, FAKE, scenario]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      expect(r.stdout).toContain("model haiku, effort low, verifier off");
+      const version = `${REVIEW_PROMPT_VERSION}+order+signal`;
+      expect(r.stdout).toContain(`with variants signal, order, model haiku, effort low, verifier off, prompt version ${version}`);
       expect(r.stdout).not.toContain(DEFAULT_MODEL_WARNING);
       const argv = readRecords<{ argv: string[] }>(record).find((x) => x.argv.includes("-p"))?.argv ?? [];
       expect(argv[argv.indexOf("--model") + 1]).toBe("haiku");
@@ -562,7 +601,8 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const files = readdirSync(out).filter((f) => f.endsWith(".json"));
       const a = JSON.parse(readFileSync(join(out, files[0] as string), "utf8")) as EvalResult;
       expect(a.requested).toEqual({ model: "haiku", effort: "low", verifier: "off" });
-      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" } });
+      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["order", "signal"] });
+      expect(a.promptVersion).toBe(version);
       const [run] = a.runs;
       expect(run).toMatchObject({ status: "completed", effort: "low" });
       expect(run?.models?.length).toBeGreaterThan(0);

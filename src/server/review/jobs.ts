@@ -81,6 +81,7 @@ import {
   type Profile,
   profileOf,
   profileRevision,
+  promptVersion,
   REVIEWER,
   type ReviewContext,
   replyAgent,
@@ -1657,7 +1658,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       model: profile.model,
       effort: profile.effort ?? "default",
       effort_default: profile.effort ? null : runEffort(profile.model),
-      prompt_version: REVIEW_PROMPT_VERSION,
+      // The variants change only the prompts of a review or re-review run.
+      prompt_version: kind === "review" ? promptVersion(profile) : REVIEW_PROMPT_VERSION,
       parent,
       item: discuss?.item ?? null,
     }) as { id: number };

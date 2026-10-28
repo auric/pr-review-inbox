@@ -9,6 +9,7 @@ import {
   contextBlock,
   DISCUSS_RULES,
   DO_NOT_FLAG,
+  discussAgent,
   explainAgent,
   FIX_REPLY_RULES,
   FOLLOW_UP_RULE,
@@ -21,14 +22,17 @@ import {
   moduleSections,
   NO_CONTEXT,
   NOTES_RULES,
+  ORDER_RULES,
   PR_CONTEXT_RULES,
   profileRevision,
+  promptVersion,
   RETIRED_PROFILES,
   type ReviewContext,
   replyAgent,
   reviewerAgent,
   rubric,
   SHIPPED_PROFILES,
+  SIGNAL_RULES,
   VERIFY_BATCH,
   VERIFY_DELEGATE,
   VERIFY_SPLIT,
@@ -40,18 +44,22 @@ import {
   withInstructions,
   withVerifyDelegation,
 } from "../../src/server/review/catalog";
+import { buildImprovePrompt } from "../../src/server/review/improve";
 import { INSTRUCTIONS_TRUST } from "../../src/server/review/instructions";
 import {
   buildAskPrompt,
+  buildDiscussPrompt,
+  buildExplainPrompt,
   buildFixPrompt,
   buildPrompt,
   buildReplyPrompt,
   buildRereviewPrompt,
   buildVerifyPrompt,
   type PromptInput,
+  STRICT_REREVIEW,
 } from "../../src/server/review/prompt";
 import { SESSION_FIX_RULES } from "../../src/shared/consult";
-import { MODULE_IDS, type ModuleId, VOLUMES } from "../../src/shared/dto";
+import { MODULE_IDS, type ModuleId, type ProfileInput, profileInput, TRIAL_MODULES, VARIANTS, VOLUMES } from "../../src/shared/dto";
 import { FIX_WHY_RULES, fixJsonSchema, REVIEW_PROMPT_VERSION, replyJsonSchema, replyResult } from "../../src/shared/review";
 
 console.log(`prompt.test.ts imported from ${Bun.resolveSync("../../src/server/review/catalog", import.meta.dir)}`);
@@ -491,13 +499,13 @@ describe("review v2 finder prompt", () => {
     // Update the hashes and raise the version together. Stats and the eval compare runs by prompt version.
     // WP-PN: every review run but Explain has ./context/pr-context.md, so the hashes cover the PR context rules.
     const run = { ...FULL, prContext: true, notes: true };
-    const finder = [mainAgent(allModules, run), reviewerAgent(allModules, run), withDelegation(mainAgent(general), "always")]
+    // docs/plans/review-v3.md WP-V2: a trial module is an eval switch, so it stays out of the hash.
+    const known = { ...allModules, modules: allModules.modules.filter((m) => !TRIAL_MODULES.includes(m)) };
+    const finder = [mainAgent(known, run), reviewerAgent(known, run), withDelegation(mainAgent(general), "always")]
       .map((a) => a.prompt)
       .join("\n---\n");
     // WP-R3: the agents of the verify phase are review agents too.
-    const check = [withVerifyDelegation(verifyAgent(allModules, run), true), verifierAgent(allModules, run)]
-      .map((a) => a.prompt)
-      .join("\n---\n");
+    const check = [withVerifyDelegation(verifyAgent(known, run), true), verifierAgent(known, run)].map((a) => a.prompt).join("\n---\n");
     expect({ version: REVIEW_PROMPT_VERSION, finder: sha(finder), check: sha(check) }).toEqual({
       version: "2.3",
       finder: "94ad3e1c7159338f63bbb3b7d360c77344908912743d5b244efc8e8abf08128c",
@@ -644,6 +652,138 @@ describe("review v2 finder prompt", () => {
       expect(a.prompt).toContain("\nThe app lowers a finding to minor at most when you set evidenceStatus to unverified.\n");
     }
     expect(mainAgent(general).prompt).toContain("A second step checks each finding");
+  });
+});
+
+// docs/plans/review-v3.md WP-V2: the prompt switches of wave 2. Each one is opt-in, and the default prompts keep their bytes.
+describe("review v3 prompt switches", () => {
+  const FULL: ReviewContext = {
+    taskFile: true,
+    attachments: true,
+    history: true,
+    questions: true,
+    rereview: false,
+    instructions: true,
+    goal: true,
+    prContext: true,
+    notes: true,
+  };
+  const RE = { ...FULL, rereview: true };
+  const full: PromptInput = {
+    ...input,
+    taskFile: true,
+    attachments: true,
+    history: true,
+    questions: true,
+    prContext: true,
+    notes: true,
+    instructions: "# Project instructions\n\nRULE\n",
+  };
+  const rereviewInput = { ...full, since: "c".repeat(40), rangeBase: "d".repeat(40), earlier: [1, 2], posted: [2] };
+  const withVariants = (...variants: ProfileInput["variants"]) => ({ ...general, variants });
+
+  test("the default prompt of each run kind is byte for byte the same as before WP-V2 (hashes of d76bed0)", () => {
+    const threads = [{ thread: 1, replyTo: 2 }];
+    const kinds: Record<string, string[]> = {
+      review: [mainAgent(general, FULL).prompt, reviewerAgent(general, FULL).prompt, buildPrompt(full)],
+      rereview: [mainAgent(general, RE).prompt, reviewerAgent(general, RE).prompt, buildRereviewPrompt(rereviewInput)],
+      verify: [
+        verifyAgent(general, FULL).prompt,
+        verifierAgent(general, FULL).prompt,
+        buildVerifyPrompt({ ...full, count: 3, rereview: false }),
+      ],
+      explain: [mainAgent(explain, FULL).prompt, buildExplainPrompt({ ...full, profile: explain, note: "" })],
+      ask: [askAgent(general, FULL).prompt, buildAskPrompt({ ...full, question: "Why?" })],
+      reply: [replyAgent(general, FULL).prompt, buildReplyPrompt({ ...full, threads })],
+      fix: [fixAgent(general, FULL).prompt, buildFixPrompt({ ...full, threads, findings: [3] })],
+      discuss: [discussAgent(general, FULL).prompt, buildDiscussPrompt({ ...full, message: "Why?" })],
+      improve: [
+        buildImprovePrompt({
+          name: "General",
+          note: "N",
+          prompt: "P",
+          explain: false,
+          docs: true,
+          languageChecks: true,
+          model: null,
+          effort: null,
+          goal: "G",
+        }),
+      ],
+    };
+    expect(Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, sha(v.join("\n---\n"))]))).toEqual({
+      review: "1d350acf460cb3bfea2c2a2d3e0d8f1bb6b43a02eda41e5fd6f3cfe99a1b63f4",
+      rereview: "a293594e1da4e8830d6f44191c2458bc584102dac3a5e5067d4f78aed95b682d",
+      verify: "d80c61cae723da363e2890e94335fd13132bb35d716b6b1f3b1cb5b77b189fd1",
+      explain: "0a2d403ba5bfeea12a2f6249229f77ff3a19b646d202100aec744db3c4eb8b53",
+      ask: "65e099f1000e6883cf1961cc02b33bef2864530efc61821d835f6667c6cb0f58",
+      reply: "cd085ab743e2fe4908fcf1207db6cf3d061fdd5152161fc51ae9a9dfdea08de5",
+      fix: "ef25cb6860a0d699bf3385b19d000b1fb9315c829b481c56ded5562e5b0ec0a0",
+      discuss: "1f8484da378fa9c68d8c1738e16e719ca970d43657734853de5f879824c8422d",
+      improve: "733af22bec691ea649d4496642e46f5992c8fec16eaa50342dc1cbec52882eb9",
+    });
+    expect(SHIPPED_PROFILES.map((p) => p.variants)).toEqual([[], []]);
+    for (const p of SHIPPED_PROFILES) for (const m of TRIAL_MODULES) expect(p.modules).not.toContain(m);
+  });
+
+  test("signal replaces only the first finder rule of rl-main and rl-reviewer, with the verify phase on or off", () => {
+    for (const mode of ["on", "off"] as const) {
+      const plain = { ...general, verifier: { ...general.verifier, mode } };
+      const signal = { ...plain, variants: ["signal" as const] };
+      for (const main of [true, false]) expect(finderRules(signal, main)).toEqual([...SIGNAL_RULES, ...finderRules(plain, main).slice(1)]);
+      const first = finderRules(plain, true)[0] as string;
+      expect(mainAgent(signal, FULL).prompt).toBe(mainAgent(plain, FULL).prompt.replace(first, SIGNAL_RULES.join("\n")));
+      expect(reviewerAgent(signal, FULL).prompt).toBe(reviewerAgent(plain, FULL).prompt.replace(first, SIGNAL_RULES.join("\n")));
+      expect(verifyAgent(signal, FULL).prompt).toBe(verifyAgent(plain, FULL).prompt);
+    }
+  });
+
+  test("order adds its lines to rl-main only, after the check sections", () => {
+    const order = withVariants("order");
+    const sections = moduleSections(general, FULL).join("\n");
+    expect(mainAgent(order, FULL).prompt).toBe(mainAgent(general, FULL).prompt.replace(sections, `${sections}\n${ORDER_RULES.join("\n")}`));
+    expect(reviewerAgent(order, FULL).prompt).toBe(reviewerAgent(general, FULL).prompt);
+    expect(buildPrompt({ ...full, profile: order })).toBe(buildPrompt(full));
+  });
+
+  test("the failures module is a trial module with its own section, an ordered checklist with a trigger rule", () => {
+    expect(TRIAL_MODULES).toEqual(["failures"]);
+    expect(MODULES.failures.label).toBe("Failure paths");
+    const p = { ...general, modules: [...general.modules, "failures" as const] };
+    const section = ["Check section failures:", ...MODULES.failures.lines.map((l) => `- ${l}`)].join("\n");
+    const shipped = moduleSections(general, FULL).join("\n");
+    expect(mainAgent(p, FULL).prompt).toBe(mainAgent(general, FULL).prompt.replace(shipped, `${shipped}\n${section}`));
+    expect(MODULES.failures.lines.at(-1)).toBe(
+      "Report a row only when the code does not handle it, and give its trigger. A handled row gives no finding.",
+    );
+  });
+
+  test("rereview-strict adds its lines to the re-review stdin only", () => {
+    const strict = withVariants("rereview-strict");
+    const text = buildRereviewPrompt({ ...rereviewInput, profile: strict });
+    expect(text.replace(`${STRICT_REREVIEW.join("\n")}\n`, "")).toBe(buildRereviewPrompt(rereviewInput));
+    expect(text).toContain(`Posted findings: 2.`);
+    expect(text.indexOf(STRICT_REREVIEW[0] as string)).toBeGreaterThan(text.indexOf("Posted findings: 2."));
+    expect(text.indexOf(STRICT_REREVIEW[0] as string)).toBeLessThan(text.indexOf("# Tools"));
+    expect(buildPrompt({ ...full, profile: strict })).toBe(buildPrompt(full));
+    expect(mainAgent(strict, RE).prompt).toBe(mainAgent(general, RE).prompt);
+  });
+
+  test("ASD-STE100: every switch line has at most 20 words", () => {
+    expect(longSentences([...SIGNAL_RULES, ...ORDER_RULES, ...STRICT_REREVIEW, ...MODULES.failures.lines])).toEqual([]);
+  });
+
+  test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
+    expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
+    expect(promptVersion(withVariants("signal", "order"))).toBe("2.3+order+signal");
+    expect(VARIANTS).toEqual(["order", "rereview-strict", "signal"]);
+    const { variants: _, ...old } = general;
+    const parsed = profileInput.parse(old);
+    expect(parsed.variants).toEqual([]);
+    expect(profileRevision(parsed)).toBe(profileRevision(general));
+    expect(profileInput.parse({ ...old, variants: ["signal", "bogus", 7, "order", "signal"] }).variants).toEqual(["order", "signal"]);
+    const revisions = [general, withVariants("signal"), withVariants("order"), withVariants("order", "signal")].map(profileRevision);
+    expect(new Set(revisions).size).toBe(revisions.length);
   });
 });
 

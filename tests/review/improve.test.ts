@@ -15,7 +15,7 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { CHECKLISTS } from "../../src/server/review/languages";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
-import { DEFAULT_VERIFIER, type ImproveDto, type ImproveInput, MAX_NOTE, MODULE_IDS } from "../../src/shared/dto";
+import { DEFAULT_VERIFIER, type ImproveDto, type ImproveInput, MAX_NOTE, MODULE_IDS, TRIAL_MODULES } from "../../src/shared/dto";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner } from "../support/review-fixture";
 
@@ -82,7 +82,9 @@ describe("buildImprovePrompt", () => {
       expect(shared).toContain(l);
     expect(shared).toContain("learn and deepwiki tools");
     const sections = section(p, "Check sections");
-    for (const id of MODULE_IDS) expect(sections).toContain(`\n- ${id}: ${MODULES[id].label}\n`);
+    for (const id of MODULE_IDS)
+      if (TRIAL_MODULES.includes(id)) expect(sections).not.toContain(`- ${id}: `);
+      else expect(sections).toContain(`\n- ${id}: ${MODULES[id].label}\n`);
     expect(sections).toContain("Never repeat their checks in the new prompt.");
     expect(section(buildImprovePrompt({ ...INPUT, explain: true }), "Check sections")).toBe(
       "# Check sections\n\nExplain runs get no check sections.\n",

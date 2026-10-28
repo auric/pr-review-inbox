@@ -144,8 +144,23 @@ export type ReviewerSetup = z.infer<typeof reviewerSetup>;
 export const DEFAULT_REVIEWER: ReviewerSetup = { model: null, effort: null, mode: "auto" };
 
 // docs/plans/review-v2/spec.md sections 1.2 to 1.4: the check sections of the finder prompt, the volume, and the verify phase.
-export const MODULE_IDS = ["security", "concurrency", "performance", "tests", "api", "docs", "simplify", "rules", "intent"] as const;
+export const MODULE_IDS = [
+  "security",
+  "concurrency",
+  "performance",
+  "tests",
+  "api",
+  "docs",
+  "simplify",
+  "rules",
+  "intent",
+  "failures",
+] as const;
 export type ModuleId = (typeof MODULE_IDS)[number];
+// docs/plans/review-v3.md V2 and V3: eval switches. The UI and the Improve prompt do not offer them until WP-V4 ships or deletes them.
+export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
+export const VARIANTS = ["order", "rereview-strict", "signal"] as const;
+export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];
 export const VERIFIER_MODES = ["on", "off"] as const;
@@ -165,6 +180,7 @@ export const DEFAULT_VERIFIER: VerifierSetup = { mode: "on", model: null, effort
 // alwaysSkills: chosen skills that every run reads first. A run does not start without them. Absent in older profiles.
 // languageChecks: review runs get the checklists for the languages of the change. Absent in older profiles.
 // modules, volume, verifier: absent in profiles saved before PROFILES_VERSION 5. A module ID that this version does not know drops.
+// variants: absent in older profiles. A variant name that this version does not know drops. The list keeps the VARIANTS order.
 export const profilePrompt = z.string().trim().min(1).max(MAX_NOTE);
 export const profileInput = z
   .object({
@@ -201,6 +217,11 @@ export const profileInput = z
       .transform((l) => [...new Set(l.filter((m) => m !== null))]),
     volume: z.enum(VOLUMES).default("balanced"),
     verifier: verifierSetup.default(() => ({ ...DEFAULT_VERIFIER })),
+    variants: z
+      .array(z.enum(VARIANTS).nullable().catch(null))
+      .max(20)
+      .default([])
+      .transform((l) => VARIANTS.filter((v) => l.includes(v))),
   })
   .refine((p) => p.alwaysSkills.every((id) => p.skills.includes(id)), {
     message: "Each always-use skill must be a chosen skill.",

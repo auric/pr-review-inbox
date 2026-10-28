@@ -26,6 +26,7 @@ import {
   type ReviewerMode,
   type SettingsDto,
   type SkillDto,
+  TRIAL_MODULES,
   VOLUMES,
   type Volume,
 } from "../../shared/dto";
@@ -637,7 +638,7 @@ function ChecksField(props: RowProps) {
         <p className="m-0 text-xs text-muted-foreground">{off ?? "Each check adds a checklist to review runs of this profile."}</p>
       </div>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-x-4 gap-y-1">
-        {MODULE_IDS.map((m) => (
+        {MODULE_IDS.filter((m) => !TRIAL_MODULES.includes(m)).map((m) => (
           <label key={m} className="flex min-h-6 cursor-pointer items-center gap-2 text-sm text-foreground has-disabled:cursor-default">
             <input
               type="checkbox"

@@ -12,7 +12,14 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { PROFILES_VERSION, writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { type ListTools, profileOf, profileRevision, SHIPPED_PROFILES, shippedProfileAt } from "../../src/server/review/catalog";
+import {
+  type ListTools,
+  profileOf,
+  profileRevision,
+  promptVersion,
+  SHIPPED_PROFILES,
+  shippedProfileAt,
+} from "../../src/server/review/catalog";
 import { createClaudeRunner } from "../../src/server/review/claude";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
@@ -24,9 +31,12 @@ import {
   EFFORTS,
   type Effort,
   type IssueContext,
+  MODULE_IDS,
   modelName,
   profileList,
   type RunDetail,
+  VARIANTS,
+  type Variant,
   VERIFIER_MODES,
   type VerifierSetup,
 } from "../../src/shared/dto";
@@ -52,7 +62,7 @@ const TASK_KEY = "EVAL-1";
 const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
-  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--repeat 2] [--out <folder>] [--keep] [--runner <command> <args...>]
+  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.`;
 
 export type Options = {
@@ -70,6 +80,8 @@ export type Options = {
   effort: Effort | null;
   // null: no flag, so the verify mode of the profile applies.
   verifier: VerifierSetup["mode"] | null;
+  // null: no flag, so the variants of the profile apply (docs/plans/review-v3.md WP-V2).
+  variants: Variant[] | null;
   repeat: number;
   out: string;
   keep: boolean;
@@ -95,6 +107,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         model: { type: "string" },
         effort: { type: "string" },
         verifier: { type: "string" },
+        variants: { type: "string" },
         repeat: { type: "string", default: "1" },
         out: { type: "string" },
         keep: { type: "boolean", default: false },
@@ -125,6 +138,13 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   const verifier = v.verifier ?? null;
   if (verifier !== null && !(VERIFIER_MODES as readonly string[]).includes(verifier))
     return { error: `--verifier must be one of ${VERIFIER_MODES.join(", ")}.` };
+  // An empty value runs no check section.
+  const modules = v.modules === undefined ? null : v.modules.trim() ? v.modules.split(",").map((s) => s.trim()) : [];
+  if (modules?.some((x) => !(MODULE_IDS as readonly string[]).includes(x)))
+    return { error: `--modules must be a comma list of ${MODULE_IDS.join(", ")}.` };
+  const variants = v.variants === undefined ? null : v.variants.split(",").map((s) => s.trim());
+  if (variants?.some((x) => !(VARIANTS as readonly string[]).includes(x)))
+    return { error: `--variants must be a comma list of ${VARIANTS.join(", ")}.` };
   return {
     real: v.real ?? false,
     runner,
@@ -132,19 +152,20 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     cases: v.cases ?? "all",
     profile: v.profile ?? "general",
     profileVersion,
-    modules: v.modules === undefined ? null : v.modules.split(",").map((s) => s.trim()),
+    modules,
     volume: volume as Volume | null,
     model: model?.data ?? null,
     effort: effort as Effort | null,
     verifier: verifier as VerifierSetup["mode"] | null,
+    variants: variants as Variant[] | null,
     repeat,
     out: resolve(v.out ?? join(REPO, "eval-results")),
     keep: v.keep ?? false,
   };
 }
 
-// The profile of the run with the --modules, --volume, --model, --effort, and --verifier values. A field that this app version does not know is an error, so a
-// result file never names a setup that did not run.
+// The profile of the run with the --modules, --volume, --model, --effort, --verifier, and --variants values. A field that this app
+// version does not know is an error, so a result file never names a setup that did not run.
 export function evalProfile(o: Options) {
   const shipped = SHIPPED_PROFILES.some((p) => p.id === o.profile) && shippedProfileAt(o.profile, o.profileVersion ?? PROFILES_VERSION);
   if (!shipped) return { error: `Unknown profile ${o.profile}. Shipped profiles: ${SHIPPED_PROFILES.map((p) => p.id).join(", ")}.` };
@@ -154,6 +175,7 @@ export function evalProfile(o: Options) {
     ...(o.model && { model: o.model }),
     ...(o.effort && { effort: o.effort }),
     ...(o.verifier && shipped && { verifier: { ...shipped.verifier, mode: o.verifier } }),
+    ...(o.variants && { variants: o.variants }),
   };
   const list = profileList.safeParse(SHIPPED_PROFILES.map((p) => (p.id === o.profile ? { ...shipped, ...extra } : p)));
   if (!list.success) return { error: `Invalid profile: ${list.error.issues.map((i) => i.message).join("; ")}` };
@@ -166,7 +188,8 @@ export function evalProfile(o: Options) {
 
 const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-const profileText = (o: Options) => `profile ${o.profile}${o.profileVersion === null ? "" : ` of profile version ${o.profileVersion}`}`;
+const profileText = (o: Options) =>
+  `profile ${o.profile}${o.profileVersion === null ? "" : ` of profile version ${o.profileVersion}`}${o.variants?.length ? ` with variants ${o.variants.join(", ")}` : ""}`;
 
 function plan(o: Options, cases: EvalCase[], profile: { model: string | null; effort: string | null }) {
   const lines = [`Eval plan: ${count(cases.length, "case")}, ${count(o.repeat, "repeat")}, ${profileText(o)}, set ${o.set}.`];
@@ -464,7 +487,7 @@ export async function main(argv: string[]): Promise<number> {
       createdAt: new Date().toISOString(),
       commit,
       dirty,
-      promptVersion: PROMPT_VERSION,
+      promptVersion: promptVersion(profile),
       profileVersion: o.profileVersion ?? PROFILES_VERSION,
       cliVersion: checked.version,
       runner: o.real ? "real" : "fake",
@@ -495,7 +518,7 @@ export async function main(argv: string[]): Promise<number> {
       bundles: new Map(),
     };
     console.log(
-      `Eval: set ${o.set}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, verifier ${requested.verifier}, prompt version ${PROMPT_VERSION}, CLI ${checked.version}.`,
+      `Eval: set ${o.set}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, verifier ${requested.verifier}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
     );
     console.log(runSetup(profile));
     if (o.real) console.log(WARNING);

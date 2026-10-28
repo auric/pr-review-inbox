@@ -68,6 +68,8 @@ export type Draft = {
   modules: ProfileInput["modules"];
   volume: ProfileInput["volume"];
   verifier: { mode: ProfileInput["verifier"]["mode"]; model: string; effort: Effort | "" };
+  // docs/plans/review-v3.md WP-V2: eval switches. The editor has no control for them, and a save keeps them.
+  variants: ProfileInput["variants"];
 };
 
 let lastKey = 0;
@@ -127,6 +129,7 @@ export function toProfiles(list: Draft[]): ProfileInput[] {
       modules: d.modules,
       volume: d.volume,
       verifier: { mode: d.verifier.mode, model: d.verifier.model.trim() || null, effort: d.verifier.effort || null },
+      variants: d.variants,
     };
   });
 }
@@ -153,6 +156,7 @@ const KEYS = [
   "modules",
   "volume",
   "verifier",
+  "variants",
 ];
 export const sameProfiles = (a: ProfileInput[], b: ProfileInput[]) => JSON.stringify(a, KEYS) === JSON.stringify(b, KEYS);
 
@@ -206,6 +210,7 @@ const newProfile = (id: string): ProfileInput => ({
   modules: [],
   volume: "balanced",
   verifier: { mode: "on", model: null, effort: null },
+  variants: [],
 });
 
 // The list that an autosave sends. A field with a problem keeps its saved value, so the other fields still save.

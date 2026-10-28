@@ -52,6 +52,7 @@ const p = (id: string, name: string, o: Partial<ProfileInput> = {}): ProfileInpu
   modules: [],
   volume: "balanced",
   verifier: { mode: "on", model: null, effort: null },
+  variants: [],
   ...o,
 });
 const SAVED = [p("general", "General"), p("security", "Security"), p("explain", "Explain", { explain: true, docs: false, maxTurns: 12 })];

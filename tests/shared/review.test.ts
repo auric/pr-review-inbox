@@ -272,7 +272,18 @@ describe("profile fields of review v2 (spec.md section 1.2)", () => {
       "security",
       "tests",
     ]);
-    expect(MODULE_IDS).toEqual(["security", "concurrency", "performance", "tests", "api", "docs", "simplify", "rules", "intent"]);
+    expect(MODULE_IDS).toEqual([
+      "security",
+      "concurrency",
+      "performance",
+      "tests",
+      "api",
+      "docs",
+      "simplify",
+      "rules",
+      "intent",
+      "failures",
+    ]);
     for (const bad of [
       { volume: "loud" },
       { verifier: { mode: "maybe" } },

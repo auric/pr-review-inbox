@@ -144,6 +144,13 @@ export function buildExplainPrompt(i: PromptInput): string {
   ].join("\n");
 }
 
+// docs/plans/review-v3.md WP-V2, idea 9: the "rereview-strict" variant.
+export const STRICT_REREVIEW = [
+  "Report only blocker and major findings. Give no minor findings and no nits.",
+  "Never report a problem that an earlier run raised, unless the new commits made it worse.",
+  "",
+];
+
 // Plan r2 S-RR: the earlier findings appear as IDs only. Their text stays in ./context/findings.md.
 export function buildRereviewPrompt(i: RereviewInput): string {
   const full = i.rangeBase === i.mergeBase;
@@ -166,6 +173,7 @@ export function buildRereviewPrompt(i: RereviewInput): string {
           "",
         ]
       : []),
+    ...(i.profile.variants.includes("rereview-strict") ? STRICT_REREVIEW : []),
     ...(i.questions ? QUESTIONS_TASK : []),
     ...common(i, i),
   ].join("\n");

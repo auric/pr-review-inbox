@@ -10,10 +10,19 @@ import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { createLive, type LiveEvent } from "../../src/server/live";
-import { DOC_SERVERS, DOCS_RULE, type ListTools, profileRevision, SHIPPED_PROFILES } from "../../src/server/review/catalog";
+import {
+  DOC_SERVERS,
+  DOCS_RULE,
+  type ListTools,
+  ORDER_RULES,
+  profileRevision,
+  SHIPPED_PROFILES,
+  SIGNAL_RULES,
+} from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { LANGUAGE_INTRO } from "../../src/server/review/languages";
+import { STRICT_REREVIEW } from "../../src/server/review/prompt";
 import { type GitRemote, UNTRUSTED } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
@@ -1378,6 +1387,7 @@ describe("editable profiles (M4)", () => {
         modules: [],
         volume: "balanced" as const,
         verifier: { mode: "on" as const, model: null, effort: null },
+        variants: [],
       };
       expect((await putProfiles(h, [perf, general])).status).toBe(200);
       expect((await h.json<BriefDto>(`/api/prs/${h.pr}/brief`)).body.profile).toBe("perf");
@@ -1545,6 +1555,36 @@ describe("language checks", () => {
       await ts.brief(NOTE, "general");
       const plain = await hungAgents(ts, ts.start);
       for (const name of ["rl-main", "rl-reviewer"]) expect(plain.agents[name]?.prompt).not.toContain(INTRO);
+    },
+    SLOW,
+  );
+
+  test(
+    "review v3 WP-V2: the profile variants reach rl-main, rl-reviewer, and the re-review stdin; only review rows record them",
+    async () => {
+      const h = await setup();
+      const variants: ProfileInput["variants"] = ["signal", "order", "rereview-strict"];
+      expect(
+        (await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [{ ...general, variants }] } })).status,
+      ).toBe(200);
+      await h.brief(NOTE, "general");
+      const review = await hungAgents(h, h.start);
+      for (const name of ["rl-main", "rl-reviewer"]) expect(review.agents[name]?.prompt).toContain(`\n${SIGNAL_RULES.join("\n")}\n`);
+      expect(review.agents["rl-main"]?.prompt).toContain(`\n${ORDER_RULES.join("\n")}\n`);
+      expect(review.agents["rl-reviewer"]?.prompt).not.toContain(ORDER_RULES[0] as string);
+      expect(review.stdin).not.toContain(STRICT_REREVIEW[0] as string);
+
+      h.scenario({ fixture: subagentRun() });
+      const base = await h.finish((await h.start()).body.id);
+      h.db.query("UPDATE review_run SET source_head = $head WHERE id = $id").run({ head: h.repo.base, id: base.run.id });
+      const rereview = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/rereview`, { method: "POST" }));
+      expect(rereview.stdin).toContain(`\n${STRICT_REREVIEW.join("\n")}\n`);
+      await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
+      const switched = `${REVIEW_PROMPT_VERSION}+order+rereview-strict+signal`;
+      expect(h.db.query("SELECT kind, prompt_version FROM review_run ORDER BY id").all()).toEqual([
+        ...[1, 2, 3].map(() => ({ kind: "review", prompt_version: switched })),
+        { kind: "ask", prompt_version: REVIEW_PROMPT_VERSION },
+      ]);
     },
     SLOW,
   );

@@ -295,6 +295,7 @@ describe("settings API", () => {
     modules: [],
     volume: "balanced",
     verifier: { mode: "on", model: null, effort: null },
+    variants: [],
   };
 
   test("saved profiles and checkSeconds persist offline, with no secret in config.json", async () => {

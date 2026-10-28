@@ -54,6 +54,46 @@ bun run eval -- --real --set hard
 - Set v1 and set hard give the guard baseline. Prompt version 2.3 differs from the G-EVAL-1 files (2.2).
 - Each local case unpacks its bundle into a temp folder. A big repository needs disk space and time for each case.
 
+## Run the variant matrix (gate U-V2)
+
+Each row of review-v3.md section 5 runs the local set twice and each guard set once, on one commit. Use the `--model` and `--effort` flags of the U-V1 baseline, or none when the baseline had none. In PowerShell:
+
+```
+$env:REVIEW_LOOP_EVAL_LOCAL = "D:\eval-local"
+
+# A: the verify phase off
+bun run eval -- --real --set local --repeat 2 --verifier off
+bun run eval -- --real --set v1 --verifier off
+bun run eval -- --real --set hard --verifier off
+
+# B: high signal, one pass
+bun run eval -- --real --set local --repeat 2 --variants signal --verifier off
+bun run eval -- --real --set v1 --variants signal --verifier off
+bun run eval -- --real --set hard --variants signal --verifier off
+
+# C: high signal with the verify phase
+bun run eval -- --real --set local --repeat 2 --variants signal --verifier on
+bun run eval -- --real --set v1 --variants signal --verifier on
+bun run eval -- --real --set hard --variants signal --verifier on
+
+# D: the failure checklist on top of the shipped checks
+bun run eval -- --real --set local --repeat 2 --modules security,concurrency,api,rules,intent,failures
+bun run eval -- --real --set v1 --modules security,concurrency,api,rules,intent,failures
+bun run eval -- --real --set hard --modules security,concurrency,api,rules,intent,failures
+
+# E: the ordered process
+bun run eval -- --real --set local --repeat 2 --variants order
+bun run eval -- --real --set v1 --variants order
+bun run eval -- --real --set hard --variants order
+```
+
+- F (strict re-review) needs the `--rereview` mode of WP-V3: `bun run eval -- --real --set local --repeat 2 --rereview --variants rereview-strict`. Without `--rereview`, the variant changes no prompt.
+- G: put the winning flags of A to E into one command, for example `--variants order,signal --verifier off`. Run it as the rows above.
+- Compare each file with the U-V1 baseline of the same set: `bun run eval:compare eval-results/<baseline>.json eval-results/<variant>.json`.
+- compare warns that the profiles or the verify modes differ. That is expected: the switch is the change that you measure.
+- The result file records the variants in `promptVersion`, such as `2.3+order+signal`. The `--modules` value shows in `profile.modules`.
+- Only the aggregate numbers go to docs/eval/results.md. Keep the result files out of git.
+
 ## Score
 
 - A shown finding hits a bug or your comment when it is on the same path and side, and its lines overlap the range widened by T lines on each end. A local run records T = 3 in the result file as `tolerance`.

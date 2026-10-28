@@ -584,9 +584,10 @@ export const MODULE_LABEL: Record<ModuleId, string> = {
   simplify: "Simplify (what to delete)",
   rules: "Project rules",
   intent: "Matches the task",
+  failures: "Failure paths",
 };
 // spec.md section 1.1: the checks in view, then the checks under "More checks". The language checklists are the profile field
-// languageChecks, the last one under "More checks".
+// languageChecks, the last one under "More checks". TRIAL_MODULES are in neither list.
 export const SHOWN_CHECKS: readonly ModuleId[] = ["security", "concurrency", "performance", "tests", "api", "simplify"];
 export const MORE_CHECKS: readonly ModuleId[] = ["docs", "rules", "intent"];
 export const LANGUAGE_LABEL = "Language checklists (C++, C, Python)";

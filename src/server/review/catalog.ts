@@ -13,9 +13,10 @@ import {
   type ModuleId,
   type ProfileId,
   type ProfileInput,
+  type Variant,
   type Volume,
 } from "../../shared/dto";
-import { FIX_EDIT_RULES, FIX_WHY_RULES } from "../../shared/review";
+import { FIX_EDIT_RULES, FIX_WHY_RULES, REVIEW_PROMPT_VERSION } from "../../shared/review";
 import { PROPOSALS_MAX } from "../../shared/task";
 import { type AgentSpec, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
@@ -116,6 +117,7 @@ export const SHIPPED_PROFILES: Profile[] = [
     modules: ["security", "concurrency", "api", "rules", "intent"],
     volume: "balanced",
     verifier: { mode: "on", model: null, effort: "medium" },
+    variants: [],
     prompt: REVIEW_LENS,
   },
   {
@@ -132,6 +134,7 @@ export const SHIPPED_PROFILES: Profile[] = [
     modules: [],
     volume: "balanced",
     verifier: { mode: "off", model: null, effort: null },
+    variants: [],
     ...EXPLAIN_V2,
   },
 ];
@@ -164,6 +167,7 @@ const v4Profile = (p: Pick<Profile, "id" | "name" | "note" | "prompt" | "languag
   modules: [],
   volume: "balanced",
   verifier: { ...DEFAULT_VERIFIER },
+  variants: [],
 });
 export const RETIRED_PROFILES: Partial<Record<string, Profile>> = {
   over: v4Profile({
@@ -213,7 +217,10 @@ export const profileRevision = (p: Profile) =>
     .update(p.modules.length ? `modules${JSON.stringify(p.modules)}` : "")
     .update(p.volume === "balanced" ? "" : `volume${p.volume}`)
     .update(sameValue(p.verifier, DEFAULT_VERIFIER) ? "" : `verifier${JSON.stringify(p.verifier, ["mode", "model", "effort"])}`)
+    .update(p.variants.length ? `variants${JSON.stringify(p.variants)}` : "")
     .digest("hex");
+// docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.3+order+signal".
+export const promptVersion = (p: Pick<Profile, "variants">) => [REVIEW_PROMPT_VERSION, ...[...p.variants].sort()].join("+");
 // docs/plans/review-v2/spec.md section 0 and design.md R8: in mode auto, a smaller change gets no Agent tool.
 export const REVIEWER_MIN_LINES = 1200;
 export const REVIEWER_MIN_FILES = 30;
@@ -419,15 +426,30 @@ export function contextBlock(c: ReviewContext): string[] {
   ];
 }
 
-type FinderProfile = Pick<Profile, "verifier" | "volume">;
+// variants: absent for the Improve prompt, which shows the shipped text.
+type FinderProfile = Pick<Profile, "verifier" | "volume"> & Partial<Pick<Profile, "variants">>;
 const checked = (p: FinderProfile) => p.verifier.mode === "on";
+const has = (p: Partial<Pick<Profile, "variants">>, v: Variant) => p.variants?.includes(v) === true;
+
+// docs/plans/review-v3.md WP-V2, idea 3: the "signal" variant replaces the first finder rule, with the verify phase on or off.
+export const SIGNAL_RULES = [
+  "Report only problems that the code proves. A review with no finding is a good result.",
+  "Never report a finding without a trigger.",
+  "Give at most 3 nits.",
+  "Set confidence to high only after you read the code that proves the problem.",
+  "Leave out each finding with low confidence.",
+];
 
 // spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for.
 export function finderRules(p: FinderProfile, main: boolean): string[] {
   return [
-    checked(p)
-      ? "Report every problem that you find. A second step checks each finding, so do not leave out a finding because you are not sure."
-      : "Report every problem that you find, with its severity and its confidence.",
+    ...(has(p, "signal")
+      ? SIGNAL_RULES
+      : [
+          checked(p)
+            ? "Report every problem that you find. A second step checks each finding, so do not leave out a finding because you are not sure."
+            : "Report every problem that you find, with its severity and its confidence.",
+        ]),
     "Report only problems that the change adds or makes reachable. BASE..HEAD is the change.",
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
     "Give each path from the repository root, for example src/app.ts, not repo/src/app.ts.",
@@ -558,6 +580,22 @@ export const MODULES: Record<ModuleId, { label: string; lines: string[] }> = {
       "Report a change that the goal does not explain only when it changes behavior for users.",
     ],
   },
+  // docs/plans/review-v3.md WP-V2, idea 4. A trial module (TRIAL_MODULES).
+  failures: {
+    label: "Failure paths",
+    lines: [
+      "Check each changed function against the rows below, in this order.",
+      "Error paths: each error is handled, passed up, or reported. No error is lost.",
+      "Edge values: empty, zero, negative, maximum, null, and missing input.",
+      "Partial failure and retries: a step fails after an earlier step changed state. A retry repeats no side effect.",
+      "Order: the code works when events, callbacks, or messages arrive in another order.",
+      "Timeouts: each wait on the network, a process, or a lock has a limit.",
+      "Leaks: each file, socket, lock, process, and subscription is released on every path, also on the error paths.",
+      "Callers and callees: each caller handles the new errors and values. Each callee gets the input that it expects.",
+      "Visibility: each failure reaches a log, an error, or the user.",
+      "Report a row only when the code does not handle it, and give its trigger. A handled row gives no finding.",
+    ],
+  },
 };
 
 // spec.md section 1.3: rules needs project instructions, and intent needs a goal. Else the section adds nothing.
@@ -653,6 +691,17 @@ export const ANSWERED_RULES = [
   "Never put secrets, tokens, passwords, or credentials into a reply.",
 ];
 
+// docs/plans/review-v3.md WP-V2, idea 7: the "order" variant. Only rl-main gets it.
+export const ORDER_RULES = [
+  "Work in this order:",
+  "1. Call git_diff with stat_only for the changed files. Call git_log with since BASE for the commits of the change.",
+  "2. Read each changed file to its end, not only the changed lines.",
+  "3. Read the callers and the callees of each changed function.",
+  "4. Apply each check section above, when the prompt has check sections.",
+  "5. Compare each candidate finding with the do-not-flag list. Leave out each candidate that the list names.",
+  "6. Give the result.",
+];
+
 // spec.md section 1.5: the agent prompt order of rl-main. The caller adds languages, skills, MCP tools, and the delegation lines.
 // An Explain profile gets the Explain agent: it gives no findings and judges no answer.
 export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec {
@@ -667,6 +716,7 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec 
       ...doNotFlag(p),
       ...rubric(p),
       ...moduleSections(p, c),
+      ...(has(p, "order") ? ORDER_RULES : []),
       ...(c.questions ? ANSWERED_RULES : []),
       COVERAGE_RULE,
       ...docsRule(p),
