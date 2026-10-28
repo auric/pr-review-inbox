@@ -29,6 +29,12 @@ const SYNTHETIC = "<synthetic>";
 const count = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
 const modelOf = (v: unknown) => (typeof v === "string" && v && v !== SYNTHETIC ? v : null);
 
+// The character cap of StreamState.notes. Over the cap, the oldest notes go first.
+export const NOTES_MAX = 200_000;
+
+// One note of a run: a text block of rl-main, or the report of a finished Agent call. from: "rl-main", or the Agent call.
+export type RunNote = { from: string; text: string };
+
 export type StreamState = {
   inits: SDKSystemMessage[];
   results: SDKResultMessage[];
@@ -36,6 +42,8 @@ export type StreamState = {
   rateLimitRejected: boolean;
   // Tools in an init event that are not in the allowlist.
   badTools: string[];
+  // The notes of the run in stream order, at most NOTES_MAX characters. A salvage run reads them (spec.md section 1.6).
+  notes: RunNote[];
 };
 
 const slash = (p: string) => p.replaceAll("\\", "/");
@@ -66,10 +74,10 @@ function note(text: string) {
   return t ? t.slice(0, NOTE_MAX) : null;
 }
 
-function resultText(b: ContentBlock) {
+function resultText(b: ContentBlock, sep = " ") {
   const c = b.content;
   if (typeof c === "string") return c;
-  return Array.isArray(c) ? c.map((x) => x?.text ?? "").join(" ") : "";
+  return Array.isArray(c) ? c.map((x) => x?.text ?? "").join(sep) : "";
 }
 
 const blocks = (c: unknown): ContentBlock[] => (Array.isArray(c) ? c.filter((b) => b && typeof b === "object") : []);
@@ -80,8 +88,17 @@ export function createStreamParser(opts: { cwd: string; allowedTools: Set<string
   const events = new Map<string, RunEvent>();
   // A background Agent call gets its tool_result at launch. Only its task_notification ends it.
   const background = new Set<string>();
-  const state: StreamState = { inits: [], results: [], apiErrors: [], rateLimitRejected: false, badTools: [] };
+  const state: StreamState = { inits: [], results: [], apiErrors: [], rateLimitRejected: false, badTools: [], notes: [] };
   let seq = 0;
+  let noteChars = 0;
+
+  function addNote(from: string, raw: string) {
+    const text = raw.trim();
+    if (!text) return;
+    state.notes.push({ from, text: text.slice(-NOTES_MAX) });
+    noteChars += Math.min(text.length, NOTES_MAX);
+    while (noteChars > NOTES_MAX) noteChars -= (state.notes.shift() as RunNote).text.length;
+  }
 
   function end(changed: Map<string, RunEvent>, id: string, status: RunEventStatus, text: string | null) {
     const e = events.get(id);
@@ -119,6 +136,7 @@ export function createStreamParser(opts: { cwd: string; allowedTools: Set<string
       if (a.parent_tool_use_id && events.get(a.parent_tool_use_id)?.model === null)
         agentStats(changed, a.parent_tool_use_id, modelOf(a.message?.model), null);
       for (const b of blocks(a.message?.content)) {
+        if (b.type === "text" && !a.parent_tool_use_id && typeof b.text === "string") addNote("rl-main", b.text);
         if (b.type !== "tool_use" || !b.id || !b.name || b.name === "StructuredOutput" || events.has(b.id)) continue;
         const tool = AGENT_TOOLS.has(b.name) ? "Agent" : b.name;
         const input = b.input && typeof b.input === "object" ? b.input : {};
@@ -147,6 +165,9 @@ export function createStreamParser(opts: { cwd: string; allowedTools: Set<string
       for (const b of blocks(u.message?.content)) {
         if (b.type !== "tool_result" || !b.tool_use_id) continue;
         if (r) agentStats(changed, b.tool_use_id, modelOf(r.resolvedModel), count(r.totalTokens));
+        const call = events.get(b.tool_use_id);
+        if (call?.tool === "Agent" && call.status === "running" && !b.is_error && !background.has(b.tool_use_id))
+          addNote(`${call.agent ?? "Agent"} report: ${call.target}`, resultText(b, "\n"));
         if (b.is_error) end(changed, b.tool_use_id, "error", note(resultText(b)));
         else if (!background.has(b.tool_use_id)) end(changed, b.tool_use_id, "ok", null);
       }

@@ -325,6 +325,7 @@ describe("settings API", () => {
     for (const body of [
       { profiles: [custom, { ...custom, name: "Other" }] },
       { profiles: [{ ...custom, maxTurns: 1 }] },
+      { profiles: [{ ...custom, maxTurns: 1001 }] },
       { profiles: [] },
       { profiles: [{ ...custom, id: "Bad ID" }] },
       { checkSeconds: 45 },

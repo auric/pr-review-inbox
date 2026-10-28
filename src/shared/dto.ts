@@ -191,7 +191,7 @@ export const profileInput = z
     explain: z.boolean(),
     docs: z.boolean(),
     languageChecks: z.boolean().default(false),
-    maxTurns: z.number().int().min(2).max(200),
+    maxTurns: z.number().int().min(2).max(1000),
     skills: z
       .array(skillId)
       .max(MAX_PROFILE_SKILLS)

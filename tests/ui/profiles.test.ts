@@ -164,7 +164,7 @@ describe("profile editor model", () => {
     expect(problems({ ...base, name: "  ", prompt: "", maxTurns: "" })).toEqual({
       name: "Enter a name.",
       prompt: "Enter a prompt.",
-      maxTurns: "Enter a turn cap from 2 to 200.",
+      maxTurns: "Enter a turn cap from 2 to 1000.",
     });
     expect(problems({ ...base, name: "n".repeat(61) }).name).toBe("Use 60 characters or fewer for the name.");
     expect(problems({ ...base, note: "n".repeat(201) }).note).toBe("Use 200 characters or fewer for the note.");
@@ -185,7 +185,7 @@ describe("profile editor model", () => {
       { prompt: " \n " },
       { prompt: "p".repeat(MAX_NOTE) },
       { prompt: "p".repeat(MAX_NOTE + 1) },
-      ...["1", "2", "200", "201", "2.5", "", " 12 ", "abc", "-3", "1e2"].map((maxTurns) => ({ maxTurns })),
+      ...["1", "2", "200", "201", "1000", "1001", "2.5", "", " 12 ", "abc", "-3", "1e2"].map((maxTurns) => ({ maxTurns })),
       ...MODELS.map((model) => ({ model })),
       ...MODELS.map((model) => ({ reviewer: { model, effort: "" as const, mode: "always" as const } })),
       { effort: "xhigh" as const },
@@ -327,6 +327,8 @@ describe("profile editor model", () => {
     expect(ok({ maxTurns: LIMITS.minTurns - 1 })).toBe(false);
     expect(ok({ maxTurns: LIMITS.maxTurns })).toBe(true);
     expect(ok({ maxTurns: LIMITS.maxTurns + 1 })).toBe(false);
+    expect(ok({ maxTurns: 1000 })).toBe(true);
+    expect(ok({ maxTurns: 1001 })).toBe(false);
     expect(LIMITS.skills).toBe(200);
     expect(ok({ skills: Array.from({ length: LIMITS.skills }, (_, i) => `s${i}`) })).toBe(true);
     expect(ok({ skills: Array.from({ length: LIMITS.skills + 1 }, (_, i) => `s${i}`) })).toBe(false);

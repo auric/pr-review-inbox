@@ -11,6 +11,9 @@
 - "Keep" and "Dismiss" of a note suggestion on a reply draft now stay together on one line.
 - A review no longer shows "incomplete" only because the app could not read the build status.
 - A finding that cites a project rule from another folder now stays in the list. Only a quoted rule that no instruction file holds drops the finding.
+- The turn cap of a profile now goes up to 1000 turns.
+- A review that reaches its turn cap now keeps the findings from its notes so far. A short second run turns the notes into findings, and the check step checks them. The coverage says that the review reached its turn cap.
+- When the profile of a review brief is deleted, the review now uses your first review profile, never the Explain profile.
 
 ### Build a Jira task
 

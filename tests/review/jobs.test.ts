@@ -11,10 +11,13 @@ import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { createLive, type LiveEvent } from "../../src/server/live";
 import {
+  DEFAULT_PROFILE,
   DOC_SERVERS,
   DOCS_RULE,
   type ListTools,
   ORDER_RULES,
+  type Profile,
+  profileOf,
   profileRevision,
   SHIPPED_PROFILES,
   SIGNAL_RULES,
@@ -1360,6 +1363,22 @@ describe("editable profiles (M4)", () => {
         else process.env.CLAUDE_CONFIG_DIR = saved;
         rmSync(config, { recursive: true, force: true });
       }
+    },
+    SLOW,
+  );
+
+  test(
+    "a deleted Review profile falls back to the first review profile, never to an Explain profile first in the list",
+    async () => {
+      const h = await setup();
+      const explain = SHIPPED_PROFILES.find((p) => p.explain) as ProfileInput;
+      const perf = { ...GENERAL, id: "perf", name: "Performance" };
+      expect((await putProfiles(h, [explain, perf])).status).toBe(200);
+      expect((await h.json<BriefDto>(`/api/prs/${h.pr}/brief`)).body.profile).toBe("perf");
+      const list = [explain, perf] as Profile[];
+      expect(profileOf(list, DEFAULT_PROFILE).id).toBe("perf");
+      expect(profileOf(list, explain.id).id).toBe(explain.id);
+      expect(profileOf([explain] as Profile[], DEFAULT_PROFILE).id).toBe(explain.id);
     },
     SLOW,
   );

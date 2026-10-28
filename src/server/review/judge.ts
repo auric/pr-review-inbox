@@ -679,12 +679,35 @@ export async function judgeExplain(o: RunOutcome, ws: Workspace, servers: string
   });
 }
 
-// A cancel during the verify phase. The run keeps the log and the usage of both processes, and no item.
-export function cancelledCheck(o: RunOutcome, check: RunOutcome): Ending {
+// A cancel during the verify phase or the salvage run. The run keeps the log and the usage of both processes, and no item.
+export function cancelledCheck(o: RunOutcome, check: RunOutcome, phase = "Check phase"): Ending {
   return {
     ...cancelledEnding(o),
-    raw: cap(`${rawOutput(o)}\n# Check phase\n\n${rawOutput(check)}`),
+    raw: cap(`${rawOutput(o)}\n# ${phase}\n\n${rawOutput(check)}`),
     usage: addUsage(usageOf(o), usageOf(check)),
+  };
+}
+
+// spec.md section 1.6, salvage: the finder reached its turn cap, and no salvage result came. The run fails with the finder text and
+// why. s: the salvage run, when it started.
+export function salvageFailed(o: RunOutcome, why: string, s?: RunOutcome): Ending {
+  return {
+    status: "failed",
+    kind: "max_turns",
+    text: [o.text, why].filter((x) => x).join(" "),
+    raw: cap(s ? `${rawOutput(o)}\n# Salvage phase\n\n${rawOutput(s)}` : rawOutput(o)),
+    outcome: o,
+    usage: addUsage(usageOf(o), s ? usageOf(s) : null),
+  };
+}
+
+// The finder result of a salvage run: the raw output of both processes and the coverage line that names the turn cap.
+export function salvaged(f: Found, o: RunOutcome, line: string): Found {
+  const c = f.summary.coverage;
+  return {
+    ...f,
+    raw: cap(`${rawOutput(o)}\n# Salvage phase\n\n${f.raw}`),
+    summary: { ...f.summary, coverage: { ...c, notChecked: [line, ...c.notChecked] } },
   };
 }
 

@@ -24,7 +24,7 @@ export const LIMITS = {
   note: 200,
   prompt: MAX_NOTE,
   minTurns: 2,
-  maxTurns: 200,
+  maxTurns: 1000,
   skills: MAX_PROFILE_SKILLS,
   mcp: MAX_PROFILE_MCP,
   mcpTools: MAX_MCP_TOOLS,

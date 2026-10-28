@@ -9,7 +9,7 @@ import { EFFORTS, type Effort, modelName } from "../../shared/dto";
 import type { RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
 import { log } from "../log";
 import { RUNTIME_ENV } from "./git";
-import { classify, createStreamParser } from "./stream";
+import { classify, createStreamParser, type RunNote } from "./stream";
 
 // Gate B ran on this version. Older versions have other flags and event shapes.
 export const MIN_CLI_VERSION = "2.1.295";
@@ -97,6 +97,8 @@ export type RunOutcome = {
   result: SDKResultMessage | null;
   init: SDKSystemMessage | null;
   events: RunEvent[];
+  // The rl-main text and the subagent reports of the stream (stream.ts StreamState.notes). Absent: the run did not start.
+  notes?: RunNote[];
   exitCode: number | null;
   stderrTail: string;
 };
@@ -466,7 +468,14 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const tail = parser.stop();
       if (tail.length) onEvents(tail);
       const verdict = classify(parser.state, { exitCode, cancelled: self.cancelled, timedOut });
-      return { ...verdict, init: parser.state.inits[0] ?? null, events: parser.events(), exitCode, stderrTail: stderr };
+      return {
+        ...verdict,
+        init: parser.state.inits[0] ?? null,
+        events: parser.events(),
+        notes: parser.state.notes,
+        exitCode,
+        stderrTail: stderr,
+      };
     } finally {
       if (proc && proc.exitCode === null && self.pid !== undefined) {
         await killTree(self.pid);

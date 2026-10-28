@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClaudeRunner, type RunnerOptions, type RunSpec } from "../../src/server/review/claude";
-import { classify, createStreamParser } from "../../src/server/review/stream";
+import { classify, createStreamParser, NOTES_MAX } from "../../src/server/review/stream";
 import type { RunEvent } from "../../src/shared/run-log";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 
@@ -215,6 +215,48 @@ describe("outcomes", () => {
       kind: "schema",
       text: "Schema retries used up",
     });
+  });
+
+  test("notes: rl-main text and Agent reports in order, no subagent text, no failed call", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set() });
+    const lines = readFileSync(join(import.meta.dir, "../../fixtures/claude-synthetic/max-turns-notes.jsonl"), "utf8");
+    for (const l of lines.split("\n").filter(Boolean)) p.line(l);
+    expect(p.state.notes).toEqual([
+      { from: "rl-main", text: "Plan: read src/server/app.ts first. MAIN-PLAN" },
+      { from: "rl-reviewer report: Review web", text: "Finding: src/server/app.ts:22 b1 is wrong. REPORT-MARK" },
+      { from: "rl-main", text: "Note: web/main.ts:2 looks fine. MAIN-LAST" },
+    ]);
+    const q = createStreamParser({ cwd: "/w", allowedTools: new Set() });
+    const use = { type: "tool_use", id: "t1", name: "Agent", input: { subagent_type: "rl-reviewer", description: "D" } };
+    q.line(JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { content: [use] } }));
+    q.line(
+      JSON.stringify({
+        type: "user",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: "denied" }] },
+      }),
+    );
+    expect(q.state.notes).toEqual([]);
+  });
+
+  test("a time limit wins over a max_turns result, so the salvage trigger never sees a timeout", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(["Task", "Read", "Grep", "Glob", "StructuredOutput"]) });
+    const lines = readFileSync(join(import.meta.dir, "../../fixtures/claude-synthetic/max-turns-notes.jsonl"), "utf8");
+    for (const l of lines.split("\n").filter(Boolean)) p.line(l);
+    expect(classify(p.state, { exitCode: 1, cancelled: false, timedOut: false }).kind).toBe("max_turns");
+    expect(classify(p.state, { exitCode: null, cancelled: false, timedOut: true }).kind).toBe("process");
+    expect(classify(p.state, { exitCode: null, cancelled: true, timedOut: false }).status).toBe("cancelled");
+  });
+
+  test("notes: over NOTES_MAX characters, the oldest notes go first", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set() });
+    const say = (text: string) =>
+      p.line(JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text }] } }));
+    const big = Math.floor(NOTES_MAX / 3);
+    for (const c of ["a", "b", "c", "d"]) say(c.repeat(big));
+    expect(p.state.notes.map((n) => n.text[0])).toEqual(["b", "c", "d"]);
+    say("e".repeat(NOTES_MAX + 10));
+    expect(p.state.notes).toEqual([{ from: "rl-main", text: "e".repeat(NOTES_MAX) }]);
   });
 
   test("no result event: process error with the stderr tail", async () => {

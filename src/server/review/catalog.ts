@@ -196,8 +196,10 @@ export const FORMER_NAMES: Partial<Record<string, string>> = {
 // The module of general that replaces a retired profile.
 export const RETIRED_MODULE: Partial<Record<string, ModuleId>> = { over: "simplify", security: "security" };
 
-// list: at least one profile (profileList).
-export const profileOf = (list: Profile[], id: string): Profile => list.find((p) => p.id === id) ?? (list[0] as Profile);
+// list: at least one profile (profileList). An unknown ID gets the first review profile, never an Explain profile while a review
+// profile exists.
+export const profileOf = (list: Profile[], id: string): Profile =>
+  list.find((p) => p.id === id) ?? list.find((p) => !p.explain) ?? (list[0] as Profile);
 // JSON text with sorted object keys, so equal arrays and objects compare equal whatever their key order.
 const canon = (v: unknown) =>
   JSON.stringify(v, (_k, x: unknown) =>
@@ -1058,6 +1060,30 @@ export function verifyAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpe
   return {
     description: "Read-only check of the findings of one review.",
     prompt: [...VERIFY_OPENING, ...contextBlock(c), ...verifyRules(p, c), COVERAGE_RULE, ...docsRule(p)].join("\n"),
+  };
+}
+
+// spec.md section 1.6, salvage: one short run after a finder that reached its turn cap. Six turns leave room for a few Reads and
+// the schema answer.
+export const SALVAGE_MAX_TURNS = 6;
+
+// The main agent of the salvage run. No Agent tool and no skills. The caller adds the MCP tools.
+export function salvageAgent(p: Profile): AgentSpec {
+  return {
+    description: "Read-only finish of a review that reached its turn cap.",
+    prompt: [
+      "You finish a code review that reached its turn cap. You cannot change files, and you post nothing.",
+      "./context/salvage-notes.md holds the notes of that review: the text of the reviewer and the reports of its subagents.",
+      "Report only the problems that the notes support with a concrete file and line.",
+      "When you are not sure of a line, check it with Read.",
+      "Invent nothing. Look for no new problems.",
+      "./repo holds the source branch at the head commit. The rl-git tool git_diff shows the change from BASE to HEAD.",
+      LARGE_FILE_RULE,
+      ...TRUST,
+      ...finderRules(p, true).filter((l) => !l.startsWith("Report every problem")),
+      ...rubric(p),
+      COVERAGE_RULE,
+    ].join("\n"),
   };
 }
 

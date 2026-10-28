@@ -33,6 +33,8 @@ export type RunEvent = {
 // docs/plans/review-v2/design.md section 5.1: the events of the verify phase share the run with the finder events. Their id and parent
 // carry this prefix, so the tool_use ids of two processes never collide, and their seq follows the last finder event.
 export const CHECK_EVENT = "check:";
+// The events of a salvage run (docs/plans/review-v2/spec.md section 1.6) get this prefix. They count as finder events.
+export const SALVAGE_EVENT = "salvage:";
 export const eventPhase = (e: Pick<RunEvent, "id">): "find" | "check" => (e.id.startsWith(CHECK_EVENT) ? "check" : "find");
 
 // ---------- stream-json messages (SDKMessage) ----------

@@ -51,7 +51,7 @@ import {
   reviewJsonSchema,
   verifyJsonSchema,
 } from "../../shared/review";
-import { CHECK_EVENT, type RunEvent } from "../../shared/run-log";
+import { CHECK_EVENT, type RunEvent, SALVAGE_EVENT } from "../../shared/run-log";
 import { implementJsonSchema, type TaskRunKind } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { PrRef } from "../../shared/types";
@@ -86,6 +86,8 @@ import {
   type ReviewContext,
   replyAgent,
   reviewerAgent,
+  SALVAGE_MAX_TURNS,
+  salvageAgent,
   skillLines,
   VERIFIER,
   VERIFY_SPLIT,
@@ -112,6 +114,7 @@ import {
   notesFile,
   prContextFile,
   questionsFile,
+  salvageNotesFile,
 } from "./context-files";
 import { runEffort } from "./defaults";
 import { parseDiff } from "./diffmap";
@@ -123,6 +126,7 @@ import { gitMcpServer } from "./git-mcp";
 import { createImprover } from "./improve";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, projectInstructions } from "./instructions";
 import {
+  addUsage,
   type CandidateLink,
   type CheckRun,
   cancelledCheck,
@@ -138,6 +142,8 @@ import {
   judgeReplies,
   judgeSession,
   markCopy,
+  salvaged,
+  salvageFailed,
   settle,
   unreadAlways,
   usageOf,
@@ -153,6 +159,7 @@ import {
   buildPrompt,
   buildReplyPrompt,
   buildRereviewPrompt,
+  buildSalvagePrompt,
   buildVerifyPrompt,
   type PromptInput,
   type ReplyThread,
@@ -946,7 +953,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         notify(j.id);
       },
     );
-    const find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
+    let find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
     // The runner ignores a cancel that comes after the process ended.
     if (j.cancelled) return cancelled(o);
     const servers = Object.keys(mcpServers);
@@ -967,9 +974,27 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (question !== null) return noted(judgeAsk(o, servers, gaps));
     if (explain) return noted(await judgeExplain(o, ws, servers, gaps));
     const rereview = carry && { carry, items: [...current(j.db, earlier), ...carry.posted].map(earlierItem) };
-    const found = await judge(o, ws, profile, servers, gaps, rereview, j.asked, instructions.sources);
-    if (!("candidates" in found)) return noted(found);
-    const v = await verifyPhase(j, ws, o, found, {
+    // docs/plans/review-v2/spec.md section 1.6, salvage. A cancel returned above. A time limit gives kind process.
+    const line = `The review reached its turn cap (${profile.maxTurns}). These findings come from its notes so far.`;
+    const s =
+      finder && o.status === "failed" && o.kind === "max_turns"
+        ? await salvagePhase(j, ws, o, {
+            profile,
+            input,
+            schema: spec.schema,
+            rereview: carry && { rangeBase: ws.rangeBase, earlier: [...earlier, ...carry.posted].map((r) => r.id) },
+            used,
+            mcpServers,
+            line,
+          })
+        : null;
+    if (s && "status" in s) return noted(s);
+    const judged = await judge(s?.o ?? o, ws, profile, servers, gaps, rereview, j.asked, instructions.sources);
+    if (s && !("candidates" in judged)) return noted(salvageFailed(o, `The salvage run from its notes failed: ${judged.text}`, s.o));
+    if (!("candidates" in judged)) return noted(judged);
+    const found = s ? salvaged(judged, o, line) : judged;
+    if (s) find = { ...find, endedAt: s.endedAt, usage: addUsage(find.usage, usageOf(s.o)) };
+    const v = await verifyPhase(j, ws, s?.o ?? o, found, {
       profile,
       context,
       input,
@@ -1016,6 +1041,80 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       folders: skills.copied.map((s) => s.folder),
       always: alwaysCopied.map((s) => s.folder),
     };
+  }
+
+  // docs/plans/review-v2/spec.md section 1.6, salvage: one new run after a finder that reached its turn cap, in the same workspace, run
+  // row, and run slot. It reads only the notes of that finder. It is no resume (BRIEF 3.5). o: the finder outcome. line: the coverage
+  // line. An Ending: no notes, a failed salvage run, or Cancel.
+  async function salvagePhase(
+    j: Job,
+    ws: Workspace,
+    o: RunOutcome,
+    r: {
+      profile: Profile;
+      input: PromptInput;
+      schema: Record<string, unknown>;
+      rereview: { rangeBase: string; earlier: number[] } | null;
+      used: McpUse[];
+      mcpServers: Record<string, McpServerSpec>;
+      line: string;
+    },
+  ): Promise<{ o: RunOutcome; endedAt: number } | Ending> {
+    const notes = o.notes ?? [];
+    if (!notes.length) return salvageFailed(o, "The run left no notes to salvage.");
+    const file = salvageNotesFile(notes);
+    writeFileSync(join(ws.context, file.name), file.text);
+    log(`Review run ${j.id}: the finder reached its turn cap. A salvage run reads ${notes.length} notes.`);
+    const offset = o.events.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
+    const at = now();
+    const mark: RunEvent = {
+      id: `${SALVAGE_EVENT}start`,
+      seq: offset,
+      parent: null,
+      tool: "Salvage",
+      target: `context/${file.name}`,
+      status: "ok",
+      note: r.line,
+      agent: null,
+      model: null,
+      tokens: null,
+      builtin: false,
+      startedAt: at,
+      endedAt: at,
+    };
+    const tag = (e: RunEvent): RunEvent => ({
+      ...e,
+      id: SALVAGE_EVENT + e.id,
+      parent: e.parent === null ? null : SALVAGE_EVENT + e.parent,
+      seq: e.seq + offset + 1,
+    });
+    j.db.transaction(() => upsertEvents(j.db, j.id, [mark]))();
+    notify(j.id);
+    // No await between this check and run(), so a later Cancel reaches the new process.
+    if (j.cancelled) return cancelledEnding(o);
+    const s = await runner.run(
+      {
+        cwd: ws.work,
+        appDir: ws.app,
+        prompt: buildSalvagePrompt(r.input, r.rereview),
+        schema: r.schema,
+        main: withMcp(salvageAgent(r.profile), r.used),
+        maxTurns: SALVAGE_MAX_TURNS,
+        model: r.profile.model,
+        effort: r.profile.effort,
+        // With agents {}, the CLI gets no Agent tool.
+        agents: {},
+        mcpServers: r.mcpServers,
+      },
+      (events) => {
+        j.db.transaction(() => upsertEvents(j.db, j.id, events.map(tag)))();
+        notify(j.id);
+      },
+    );
+    j.db.transaction(() => upsertEvents(j.db, j.id, s.events.map(tag)))();
+    if (j.cancelled) return cancelledCheck(o, s, "Salvage phase");
+    if (s.status !== "completed") return salvageFailed(o, `The salvage run from its notes failed: ${s.text ?? s.kind}`, s);
+    return { o: { ...s, init: o.init ?? s.init, events: [...o.events, mark, ...s.events.map(tag)] }, endedAt: now() };
   }
 
   // docs/plans/review-v2/spec.md section 1.6: the verify phase in the same workspace, run row, and run slot. An Ending: Cancel came.
