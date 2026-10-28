@@ -6,9 +6,9 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { z } from "zod";
-import { parseDiff } from "../../src/server/review/diffmap";
+import { type DiffFile, parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
-import { severities } from "../../src/shared/review";
+import { finding, severities } from "../../src/shared/review";
 
 const REPO = resolve(import.meta.dir, "../..");
 const EVAL_DIR = join(REPO, "fixtures/eval");
@@ -21,6 +21,8 @@ export const SET_NAMES: readonly EvalSet[] = [...(Object.keys(SETS) as FixtureSe
 // eval-local/ is git-ignored as a safety net (docs/plans/review-v3.md Q4).
 export const localDir = () => resolve(process.env.REVIEW_LOOP_EVAL_LOCAL || join(REPO, "eval-local"));
 export const setDir = (set: EvalSet) => (set === "local" ? join(localDir(), "cases") : SETS[set]);
+// The re-review cases of the local set (docs/plans/review-v3.md WP-V3). A plain run never reads them.
+export const rereviewDir = () => join(localDir(), "rereview");
 export const CASES_DIR = SETS.v1;
 const CASE_ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 // spec.md section 1.3: core and the module IDs.
@@ -49,6 +51,20 @@ export const evalBug = z.object({ ...place, severityMin: z.enum(severities), mod
 export const evalTrap = z.object({ ...place, why: z.string().min(1) });
 // A real issue that is no seeded bug. A shown item on it counts for no metric but extras.
 export const evalExtra = z.object({ ...spot, note: z.string().min(1) });
+// A finding of the earlier run of a re-review case (docs/plans/review-v3.md WP-V3). The spot is its item anchor at the earlier head.
+// status: its state when the re-review started. open: new or accepted, so the re-review carries it. dropped: discarded, but not by
+// you (the check refuted it, or a fix commit closed it). resolved: posted only, the later state of its thread, or null when no thread
+// exists. payload: the stored finding as review_item.payload_json holds it.
+export const earlierStatuses = ["open", "posted", "discarded", "dropped"] as const;
+export const evalEarlier = z.object({
+  id: z.string().min(1),
+  ...spot,
+  status: z.enum(earlierStatuses),
+  resolved: z.boolean().nullable(),
+  body: z.string(),
+  payload: finding.loose(),
+});
+const rereviewBlock = z.object({ earlier: z.array(evalEarlier).min(1) });
 // tests/eval/harness.test.ts checks the bug, trap, and line counts of each set.
 export const caseFile = z.object({
   id: z.string().regex(CASE_ID),
@@ -60,6 +76,8 @@ export const caseFile = z.object({
   bugs: z.array(evalBug).max(3),
   traps: z.array(evalTrap).min(1).max(4),
   extras: z.array(evalExtra).optional(),
+  // A re-review case: earlier.patch beside head.patch makes the earlier head. bugs, traps, and extras are at the head.
+  rereview: rereviewBlock.optional(),
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1) });
@@ -75,15 +93,19 @@ export const localCaseFile = caseFile.extend({
   tasks: z.array(z.object({ key: z.string().min(1), source: z.string().min(1), json: z.string().nullable() })),
   bundle: z.object({ file: z.string().regex(/^[0-9a-f]{16}\.bundle$/), base: commit, head: commit }),
   changedLines: z.number().int().min(0),
+  // since: the head of the earlier run. sinceBase: its merge base. The bundle holds both.
+  rereview: rereviewBlock.extend({ since: commit, sinceBase: commit }).optional(),
 });
 export type EvalBug = z.infer<typeof evalBug>;
+export type EvalEarlier = z.infer<typeof evalEarlier>;
 export type EvalTrap = z.infer<typeof evalTrap>;
 export type EvalExtra = z.infer<typeof evalExtra>;
 export type EvalHuman = z.infer<typeof evalHuman>;
 export type CaseFile = z.infer<typeof caseFile>;
 export type LocalCaseFile = z.infer<typeof localCaseFile>;
 // The repository of a local case. bundle: the absolute path of the bundle file. hash: the SHA-256 of case.json, for the set fingerprint.
-export type LocalRepo = { bundle: string; base: string; head: string; hash: string };
+// since, sinceBase: the earlier head and its merge base of a re-review case.
+export type LocalRepo = { bundle: string; base: string; head: string; hash: string; since?: string; sinceBase?: string };
 // base: the files of base/ by repository path. changedLines: added and removed lines of head.patch. A local case has an empty base
 // and patch, and local names its bundle.
 export type EvalCase = Omit<CaseFile, "language"> & {
@@ -110,12 +132,30 @@ const files = (root: string, dir = root): string[] =>
     return statSync(p).isDirectory() ? files(root, p) : [relative(root, p).replaceAll("\\", "/")];
   });
 
+// A range at the newer commit of a parsed diff. null: a hunk deletes or inserts a line inside the range, or deletes the file. A file
+// outside the diff keeps its lines. diffmap.ts: an add row sits before the old-side line `old`, a del row removes the line `old`.
+export function mapSpot(files: DiffFile[], s: { path: string; lines: [number, number] }): { path: string; lines: [number, number] } | null {
+  const f = files.find((x) => x.oldPath === s.path);
+  if (!f) return s;
+  if (f.path === null) return null;
+  const [start, end] = s.lines;
+  let shift = 0;
+  for (const r of f.rows) {
+    if (r.kind === "ctx") continue;
+    if (r.kind === "del" ? r.old >= start && r.old <= end : r.old > start && r.old <= end) return null;
+    if (r.kind === "del" ? r.old < start : r.old <= start) shift += r.kind === "del" ? -1 : 1;
+  }
+  return { path: f.path, lines: [start + shift, end + shift] };
+}
+
 export const changedLines = (patch: string) => parseDiff(patch).reduce((n, f) => n + f.rows.filter((r) => r.kind !== "ctx").length, 0);
 
 // Claude Code loads these files as instructions when a session reads files in their folder. A case stores each one with
 // FIXTURE_SUFFIX, so the fixtures never steer a session in this repository. buildRepo writes it under its real name.
 export const INSTRUCTION_FILE = /^(CLAUDE\.md|CLAUDE\.local\.md|AGENTS\.md)$/i;
 export const FIXTURE_SUFFIX = ".fixture";
+// The patch from base/ to the earlier head of a re-review fixture. head.patch also starts at base/.
+export const EARLIER_PATCH = "earlier.patch";
 
 export function loadCase(dir: string): EvalCase {
   const text = readFileSync(join(dir, "case.json"), "utf8");
@@ -127,7 +167,21 @@ export function loadCase(dir: string): EvalCase {
     const bundle = resolve(dir, "../../bundles", c.bundle.file);
     if (!existsSync(bundle)) throw new Error(`Case ${c.id}: the bundle ${c.bundle.file} is missing. Build the set again.`);
     const hash = createHash("sha256").update(text).digest("hex");
-    return { ...c, dir, base: new Map(), patch: "", local: { bundle, base: c.bundle.base, head: c.bundle.head, hash } };
+    const { rereview, ...rest } = c;
+    return {
+      ...rest,
+      ...(rereview && { rereview: { earlier: rereview.earlier } }),
+      dir,
+      base: new Map(),
+      patch: "",
+      local: {
+        bundle,
+        base: c.bundle.base,
+        head: c.bundle.head,
+        hash,
+        ...(rereview && { since: rereview.since, sinceBase: rereview.sinceBase }),
+      },
+    };
   }
   const c = caseFile.parse(raw);
   if (c.id !== folder) throw new Error(`Case ${c.id} is in the folder ${folder}.`);
@@ -142,6 +196,7 @@ export function loadCase(dir: string): EvalCase {
   );
   if (!base.size) throw new Error(`Case ${c.id} has no base files.`);
   const patch = readFileSync(join(dir, "head.patch"), "utf8");
+  if (c.rereview && !existsSync(join(dir, EARLIER_PATCH))) throw new Error(`Case ${c.id} has a rereview block but no ${EARLIER_PATCH}.`);
   return { ...c, dir, base, patch, changedLines: changedLines(patch) };
 }
 
@@ -177,8 +232,9 @@ const AUTHOR = {
 };
 
 // A bare repository in root: main holds the base commit, feature and refs/pull-requests/1/from hold base plus head.patch.
-// The git config is isolated, so no user filter or hook changes the files.
-export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr">, root: string) {
+// The git config is isolated, so no user filter or hook changes the files. A re-review fixture also makes the earlier head (base plus
+// earlier.patch, child of base), and the head becomes its child, as a push of new commits does.
+export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr" | "rereview">, root: string) {
   const empty = join(root, "empty.gitconfig");
   writeFileSync(empty, "");
   const url = join(root, "remote.git");
@@ -194,17 +250,28 @@ export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr">, root: 
   const shas = (await g(["hash-object", "-w", "--no-filters", "--stdin-paths"], `${blobs.join("\n")}\n`)).split("\n");
   await g(["update-index", "--index-info"], `${entries.map(([p], i) => `100644 ${shas[i]}\t${p}`).join("\n")}\n`);
   const base = await g(["commit-tree", await g(["write-tree"]), "-m", "base"]);
+  let since: string | undefined;
+  if (c.rereview) {
+    await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, EARLIER_PATCH)]);
+    since = await g(["commit-tree", await g(["write-tree"]), "-p", base, "-m", "earlier"]);
+    await g(["read-tree", base]);
+  }
   await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, "head.patch")]);
-  const head = await g(["commit-tree", await g(["write-tree"]), "-p", base, "-m", c.pr.title]);
+  const head = await g(["commit-tree", await g(["write-tree"]), "-p", since ?? base, "-m", c.pr.title]);
+  await pointRefs(url, env, base, head);
+  // The file text of a commit, for checks of the case lines.
+  const show = (commit: string, path: string) => git(["--git-dir", url, "show", `${commit}:${path}`], { env });
+  return { url, base, head, env, show, ...(since && { since, sinceBase: base }) };
+}
+
+// Points the remote refs of buildRepo at one head and its target: the earlier head of a re-review first, then the head.
+export async function pointRefs(url: string, env: Record<string, string>, target: string, head: string) {
   for (const [ref, sha] of [
-    ["refs/heads/main", base],
+    ["refs/heads/main", target],
     ["refs/heads/feature", head],
     ["refs/pull-requests/1/from", head],
   ] as const)
-    await g(["update-ref", ref, sha]);
-  // The file text of a commit, for checks of the case lines.
-  const show = (commit: string, path: string) => git(["--git-dir", url, "show", `${commit}:${path}`], { env });
-  return { url, base, head, env, show };
+    await git(["--git-dir", url, "update-ref", ref, sha], { env });
 }
 
 // The remote of a local case, with the refs of buildRepo. shared: one bare repository per bundle file, made in root on first use.
@@ -220,11 +287,6 @@ export async function bundleRepo(local: LocalRepo, root: string, shared: Map<str
     await git(["--git-dir", url, "fetch", "-q", "--no-tags", "--end-of-options", local.bundle, "+refs/*:refs/*"], { env });
     shared.set(local.bundle, url);
   }
-  for (const [ref, sha] of [
-    ["refs/heads/main", local.base],
-    ["refs/heads/feature", local.head],
-    ["refs/pull-requests/1/from", local.head],
-  ] as const)
-    await git(["--git-dir", url, "update-ref", ref, sha], { env });
-  return { url, base: local.base, head: local.head };
+  await pointRefs(url, env, local.base, local.head);
+  return { url, env, base: local.base, head: local.head, since: local.since, sinceBase: local.sinceBase };
 }

@@ -16,12 +16,16 @@ const LABEL: Record<Metric, string> = {
   extras: "extras matched: shown findings on a known real issue that is no seeded bug, per case",
   severityOk: "severity ok: found bugs at or above their minimum severity",
   candidateRecall: "candidate recall: bugs that any finding matched, hidden ones included",
+  reRaises: "re-raises: shown new findings on an earlier finding that you posted or discarded, per case (--rereview)",
+  verdictOk: "verdict ok: posted earlier findings whose fixed verdict matches your later resolve (--rereview)",
   minutes: "minutes per case",
   costUsd: "cost per case in USD, as the CLI reports it",
   notCompleted: "runs that did not complete, per repeat",
 };
-const RATE = new Set<Metric>(["recall", "humanRecall", "precision", "trapRate", "severityOk", "candidateRecall"]);
+const RATE = new Set<Metric>(["recall", "humanRecall", "precision", "trapRate", "severityOk", "candidateRecall", "verdictOk"]);
 const DIGITS: Record<Metric, number> = {
+  reRaises: 2,
+  verdictOk: 1,
   recall: 1,
   humanRecall: 1,
   precision: 1,
@@ -108,10 +112,12 @@ export function suiteDelta(a: Score, b: Score, names: [string, string]): string 
 
 // Case truth that differs between two files: the numbers of that case do not compare.
 const truth = (r: EvalResult) =>
-  new Map(r.cases.map((c) => [c.id, JSON.stringify([c.head, c.bugs, c.traps, c.extras ?? [], c.human ?? []])]));
+  new Map(r.cases.map((c) => [c.id, JSON.stringify([c.head, c.bugs, c.traps, c.extras ?? [], c.human ?? [], c.earlier ?? []])]));
 
 // docs/plans/review-v3.md WP-V1: two results compare only on the same case set and the same tolerance. Else the reason, for exit 2.
 export function refusal(a: EvalResult, b: EvalResult): string | null {
+  if (!!a.rereview !== !!b.rereview)
+    return "A and B ran different modes: one ran --rereview, the other did not. Compare two --rereview results.";
   if ((a.fingerprint ?? null) !== (b.fingerprint ?? null))
     return `A and B ran different case sets: fingerprint ${a.fingerprint?.slice(0, 12) ?? "none"} and ${b.fingerprint?.slice(0, 12) ?? "none"}. Run both on one build of the local set and with the same --cases.`;
   if ((a.tolerance ?? 0) !== (b.tolerance ?? 0))

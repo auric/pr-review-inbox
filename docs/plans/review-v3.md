@@ -1,6 +1,6 @@
 # Review v3 plan
 
-Status: planned, 2026-10-28. WP-V1 is code complete. Gate U-V1 is next. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
+Status: planned, 2026-10-28. WP-V1, WP-V2, and WP-V3 are code complete. Gate U-V1 is next. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
 
 Sources: a comparison of our review pipeline with a similar app (2026-10-28, not in the repository), BRIEF.md sections 3.5 and 3.6, docs/plans/review-v2/design.md (R1 to R17, M1 to M4), docs/plans/review-v2/tasks.md (package format), scripts/eval/, and src/server/review/{catalog.ts, prompt.ts, validate.ts, codegraph.ts, jobs.ts}. Never name the other app, its author, or any company, host, or project in this repository.
 
@@ -153,6 +153,18 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 - Tests: fake CLI with two scripted outputs; a re-raise counts as noise; a new posted finding counts as a hit.
 - Control mutation: skip the re-raise check. The re-raise test must fail.
 - Depends: WP-V1.
+- Implementation notes (2026-10-28):
+  - The earlier run is seeded, not run. `--rereview` writes the earlier run into the temp database as the app had it when the re-review started, then calls the re-review of jobs.ts. One CLI run per case (two with the verify phase). The seed holds your real triage, so a re-raise of your decision is measurable. A live run at A would give other findings with no decision.
+  - Seed: open findings (new or accepted) as new, so the re-review carries them. Posted findings with a confirmed inline post and an open root comment of the eval user, so the re-review lists them as posted. Discarded findings as discarded. The harness also fetches the earlier head into the cache first, as the review of A did in the app.
+  - Synthetic sets: a fixture case with a `rereview` block and `earlier.patch` (fixtures/eval/README.md). The head is a child of the earlier head. Sets v1 and hard have no such case yet, so `--rereview --set v1` exits 2.
+  - Local set: one case per re-review run (since_head set) in `rereview/` of the out folder. Its earlier run is the newest finished non-Explain review run of the PR before it (run-rows.ts baseRun). A missing run, or a run at another head, skips the case. MANIFEST.json `rereview.skipped.noEarlier` counts it.
+  - The state of an earlier finding at the re-review start: a copy in the re-review run means open. Else its stored status. A discard by the check or by a fix commit is `dropped`: seeded as discarded, but no decision. `resolved` is the thread_resolved of the post comment of a posted finding.
+  - Bugs, traps, and extras of a re-review case come from the items of the re-review run only, carried copies included. Your own comments stay out: the re-review checks only the new commits.
+  - Score: a re-raise is a shown item that is no carried copy, hits no bug or own comment, and overlaps (with T) a posted or discarded earlier finding. It counts as noise and as `reRaises` (per case run). It takes precedence over an extra. Open and dropped findings get no re-raise check.
+  - The earlier lines move to the head through `git diff -M` from the earlier head to the head (new side) or between the merge bases (old side). A range that the diff touches gets lines null and no re-raise check, because a new finding there can be about the new code.
+  - Verdicts: only a posted finding has a later user state (its thread). A fixed verdict makes a resolve proposal (rereview.ts resolveProposals). verdictOk: proposal present equals thread resolved. Carried open findings get no verdict score.
+  - `--variants rereview-strict` without `--rereview` exits 2. compare refuses a `--rereview` result against a plain one, so run F has its own re-review baseline (docs/eval/local.md).
+  - Left out: questions of the earlier run, and posted findings of runs before the earlier run.
 
 ### Gate U-V2. Variant matrix (user)
 
@@ -259,7 +271,7 @@ Each row: `--set local --repeat 2`, then the guard sets once. Compare with the U
 | C | `--variants signal --verifier on` | Does high-signal help the two-phase pipeline? |
 | D | `--modules <shipped>,failures` | Does the failure checklist raise recall without noise? |
 | E | `--variants order` | Does the ordered process raise recall at the same minutes? |
-| F | `--rereview --variants rereview-strict` | Does the strict re-review cut noise and re-raises? |
+| F | `--rereview --variants rereview-strict`, against a `--rereview` baseline | Does the strict re-review cut noise and re-raises? |
 | G | the best of A to E combined | Do the winners add up? |
 
 ## 6. BRIEF 3.5 wording draft (needs approval at merge)

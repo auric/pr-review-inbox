@@ -32,7 +32,7 @@ Builder rules:
 
 - The builder refuses a path in the live data folder. The default data folder stays live when `REVIEW_LOOP_DATA_DIR` names another folder.
 - The builder reads a temp copy of the database. It writes nothing to your copies.
-- `--out`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/` in the repository, which git ignores. The builder refuses a folder in the repository that git does not ignore, and a folder with other files. A new build replaces `cases/`, `bundles/`, and `MANIFEST.json`.
+- `--out`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/` in the repository, which git ignores. The builder refuses a folder in the repository that git does not ignore, and a folder with other files. A new build replaces `cases/`, `rereview/`, `bundles/`, and `MANIFEST.json`. Build the set again after an update to this version, so it gets `rereview/`.
 - `--user <slug>`: your user slug. Default: `userSlug` of `config.json` beside the database file.
 - The builder prints counts only: no path, host, or name.
 - A case whose commits are not in the cache copy goes out of the set. The count shows it.
@@ -87,12 +87,32 @@ bun run eval -- --real --set v1 --variants order
 bun run eval -- --real --set hard --variants order
 ```
 
-- F (strict re-review) needs the `--rereview` mode of WP-V3: `bun run eval -- --real --set local --repeat 2 --rereview --variants rereview-strict`. Without `--rereview`, the variant changes no prompt.
+- F (strict re-review) runs the re-review cases of the set (see "Re-review cases" below) with its own baseline, not the U-V1 baseline. Run both on one commit:
+
+```
+# F: the re-review baseline, then the strict re-review
+bun run eval -- --real --set local --repeat 2 --rereview
+bun run eval -- --real --set local --repeat 2 --rereview --variants rereview-strict
+bun run eval:compare eval-results/<rereview baseline>.json eval-results/<rereview strict>.json
+```
+
+- F needs no guard run: `rereview-strict` changes only the re-review stdin, and sets v1 and hard have no re-review case. `--variants rereview-strict` without `--rereview` exits with code 2.
 - G: put the winning flags of A to E into one command, for example `--variants order,signal --verifier off`. Run it as the rows above.
-- Compare each file with the U-V1 baseline of the same set: `bun run eval:compare eval-results/<baseline>.json eval-results/<variant>.json`.
+- Compare each file with the U-V1 baseline of the same set: `bun run eval:compare eval-results/<baseline>.json eval-results/<variant>.json`. compare refuses a `--rereview` result against a plain result, with exit code 2.
 - compare warns that the profiles or the verify modes differ. That is expected: the switch is the change that you measure.
 - The result file records the variants in `promptVersion`, such as `2.3+order+signal`. The `--modules` value shows in `profile.modules`.
 - Only the aggregate numbers go to docs/eval/results.md. Keep the result files out of git.
+
+## Re-review cases (WP-V3)
+
+- One re-review case for each completed or incomplete re-review run in the copy. A re-review run is a review run with an earlier head (`since_head`).
+- The earlier run: the newest finished review run of the same PR before the re-review, as the app picks it. Its head must be the earlier head of the re-review. Else the case goes out, and the count of re-reviews without their earlier run shows it.
+- Must find, must not raise, and neutral: your decisions on the items of the re-review run only, by the rules above. A carried copy counts too. Your own comments do not count, because a re-review checks only the new commits.
+- Earlier findings: each anchored finding of the earlier run, with its state when the re-review started. A finding with a copy in the re-review was open. A posted finding keeps the later state of its thread (resolved or not). A discard that is not yours (the check, a fix commit) stays in the run, but it is no decision.
+- `bun run eval -- --rereview` seeds the earlier run into the temp database as the app had it: open findings as new, posted findings with a confirmed post and an open thread of yours, discarded findings as discarded. Then it runs a re-review, as the c key does in the app.
+- A re-raise: a shown new finding on an earlier finding that you posted or discarded. It counts as noise and as `re-raises`. The earlier lines move with the diff from the earlier head to the head. When that diff touches them, they get no re-raise check. A carried copy is no re-raise.
+- verdict ok: posted earlier findings whose verdict matches the later state of their thread. A fixed verdict gives a resolve proposal. It is right when you resolved the thread later. open and outdated give no proposal, so they are right when the thread stayed open.
+- Questions of the earlier run and posted findings of runs before it stay out of the seed.
 
 ## Score
 
@@ -110,5 +130,6 @@ bun run eval:rescore eval-results/<file>.json --tolerance 10 --out eval-results/
 ## Layout of the out folder
 
 - `cases/<id>/case.json`: one case. The ID is `pr<local PR row>-<head>-<merge base>`, with short hashes.
-- `bundles/<hash>.bundle`: one git bundle per repository with the base and head commits of its cases. The name hides the project and the repository.
-- `MANIFEST.json`: the counts, the left-out counts, and the fingerprint.
+- `rereview/<id>/case.json`: one re-review case. The ID is `pr<local PR row>-rr<re-review run>`. Only `--rereview` reads this folder.
+- `bundles/<hash>.bundle`: one git bundle per repository with the base and head commits of its cases, and the earlier heads and merge bases of its re-review cases. The name hides the project and the repository.
+- `MANIFEST.json`: the counts, the left-out counts, and the fingerprint. `rereview` holds the same for the re-review cases.

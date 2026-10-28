@@ -135,7 +135,11 @@ describe("eval harness without --real (AC-M2)", () => {
     for (const bad of ["bogus", "signal,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
     expect(profileOf([]).variants).toEqual([]);
     expect(profileOf(["--variants", "signal,order"]).variants).toEqual(["order", "signal"]);
-    expect(profileOf(["--variants", "rereview-strict", "--profile-version", "4"]).variants).toEqual(["rereview-strict"]);
+    expect(profileOf(["--variants", "rereview-strict", "--rereview", "--profile-version", "4"]).variants).toEqual(["rereview-strict"]);
+    // WP-V3: rereview-strict changes only the re-review stdin, so a run without --rereview would measure no change.
+    expect(parseOptions(["--variants", "signal,rereview-strict"])).toEqual({
+      error: "--variants rereview-strict changes only the re-review prompt. Add --rereview, or the run measures no change.",
+    });
   });
 
   test("--modules takes only module IDs of this app version, so a typo never runs a profile without the check", () => {

@@ -17,10 +17,12 @@ import { git, gitEnv } from "../../src/server/review/git";
 import { type StatsPayload, userDiscard } from "../../src/server/review/stats";
 import { diffArgs } from "../../src/server/review/workspace";
 import { isMe } from "../../src/shared/me";
+import { finding } from "../../src/shared/review";
 import { type ExcerptLine, threadSpot } from "../../src/shared/types";
 import {
   changedLines,
   type EvalBug,
+  type EvalEarlier,
   type EvalExtra,
   type EvalHuman,
   type EvalTrap,
@@ -42,7 +44,7 @@ const TRAP_CODES = new Set(["bug", "intended"]);
 // docs/plans/review-v3.md Q3.
 const MINIMUM = { cases: 30, bugs: 40, traps: 20 };
 // The builder writes only these names into --out. It removes them before a new build.
-const OUT_NAMES = new Set(["cases", "bundles", "MANIFEST.json"]);
+const OUT_NAMES = new Set(["cases", "rereview", "bundles", "MANIFEST.json"]);
 
 // ---------- Paths ----------
 
@@ -107,9 +109,14 @@ function userOf(db: string): string | null {
 
 const SQL = {
   // stats.ts: running, failed, and cancelled runs store no findings to triage. The self-review of a task (pr NULL) counts nowhere.
-  runs: `SELECT id, pr, source_head AS head, merge_base AS base FROM review_run
-    WHERE pr IS NOT NULL AND kind = 'review' AND status IN ('completed', 'incomplete') ORDER BY id`,
-  items: `SELECT i.id, i.run, i.status, i.path, i.side, i.line, i.line_end, i.payload_json,
+  // since: the earlier head of a re-review. explain: the run is an old Explain run, which run-rows.ts baseRun skips.
+  runs: `SELECT id, pr, source_head AS head, merge_base AS base, since_head AS since, COALESCE(explain, profile = 'explain') AS explain
+    FROM review_run WHERE pr IS NOT NULL AND kind = 'review' AND status IN ('completed', 'incomplete') ORDER BY id`,
+  // The thread of a posted finding: its confirmed inline post holds one finding (run-rows.ts posted).
+  threads: `SELECT json_extract(p.items_json, '$[0].id') AS item, c.thread_resolved AS resolved FROM post p
+    JOIN comment c ON c.pr = p.pr AND c.comment_id = p.remote_id AND c.parent_id IS NULL AND c.tombstoned_at IS NULL
+    WHERE p.kind = 'inline' AND p.state = 'confirmed' AND p.remote_id IS NOT NULL`,
+  items: `SELECT i.id, i.run, i.status, i.path, i.side, i.line, i.line_end, i.body, i.payload_json,
       EXISTS (SELECT 1 FROM review_item c WHERE c.kind = 'finding' AND json_extract(c.payload_json, '$.carried.from') = i.id) AS copied
     FROM review_item i JOIN review_run r ON r.id = i.run
     WHERE i.kind = 'finding' AND r.pr IS NOT NULL AND r.kind = 'review' AND r.status IN ('completed', 'incomplete') ORDER BY i.id`,
@@ -122,7 +129,7 @@ const SQL = {
     ORDER BY t.pr, t.ord`,
 };
 
-type RunRow = { id: number; pr: number; head: string; base: string | null };
+type RunRow = { id: number; pr: number; head: string; base: string | null; since: string | null; explain: number };
 type ItemRow = {
   id: number;
   run: number;
@@ -131,6 +138,7 @@ type ItemRow = {
   side: string | null;
   line: number | null;
   line_end: number | null;
+  body: string;
   payload_json: string;
   copied: number;
 };
@@ -158,6 +166,13 @@ export type Draft = {
   human: EvalHuman[];
 };
 
+// A re-review case (docs/plans/review-v3.md WP-V3): one re-review run, the decisions on its own items, and its earlier run.
+export type RereviewDraft = Omit<Draft, "runs" | "human"> & { run: number; since: string; sinceBase: string; earlier: EvalEarlier[] };
+
+// noEarlier: a re-review run whose earlier run is not in the copy, or does not match its earlier head. badPayload: an earlier finding
+// whose stored payload is no finding.
+export type RereviewSkipped = { noEarlier: number; badPayload: number; missingCommits: number; emptyCases: number };
+
 export type Skipped = {
   refuted: number;
   notYours: number;
@@ -172,9 +187,13 @@ export type Skipped = {
 };
 
 export const caseId = (d: Pick<Draft, "pr" | "head" | "base">) => `pr${d.pr}-${d.head.slice(0, 12)}-${d.base.slice(0, 8)}`;
+export const rereviewId = (d: Pick<RereviewDraft, "pr" | "run">) => `pr${d.pr}-rr${d.run}`;
 
 // Pure: the database rows to drafts. me: the user slug, as isMe reads it.
-export function select(db: Database, me: string): { drafts: Draft[]; skipped: Skipped } {
+export function select(
+  db: Database,
+  me: string,
+): { drafts: Draft[]; skipped: Skipped; rereviews: RereviewDraft[]; rereviewSkipped: RereviewSkipped } {
   const skipped: Skipped = {
     refuted: 0,
     notYours: 0,
@@ -189,7 +208,29 @@ export function select(db: Database, me: string): { drafts: Draft[]; skipped: Sk
   };
   const drafts = new Map<string, Draft>();
   const byRun = new Map<number, Draft>();
-  for (const r of db.query(SQL.runs).all() as RunRow[]) {
+  const rrSkipped: RereviewSkipped = { noEarlier: 0, badPayload: 0, missingCommits: 0, emptyCases: 0 };
+  const rrByRun = new Map<number, RereviewDraft & { from: number }>();
+  const runs = db.query(SQL.runs).all() as RunRow[];
+  for (const [k, r] of runs.entries()) {
+    if (r.since !== null && r.base !== null) {
+      // run-rows.ts baseRun: the newest finished review run of the PR when the re-review started.
+      const e = runs.slice(0, k).findLast((x) => x.pr === r.pr && x.explain === 0);
+      if (!e || e.head !== r.since || e.base === null) rrSkipped.noEarlier++;
+      else
+        rrByRun.set(r.id, {
+          pr: r.pr,
+          run: r.id,
+          from: e.id,
+          head: r.head,
+          base: r.base,
+          since: e.head,
+          sinceBase: e.base,
+          bugs: [],
+          traps: [],
+          extras: [],
+          earlier: [],
+        });
+    }
     if (r.base === null) {
       skipped.noMergeBase++;
       continue;
@@ -222,23 +263,58 @@ export function select(db: Database, me: string): { drafts: Draft[]; skipped: Sk
     const spot: Spot = { path: i.path, side: i.side, lines: [i.line, i.line_end ?? i.line] };
     const end = last(i);
     const code = end.p.discardReason?.code;
+    // A re-review case gets the decisions on the items of its own run.
+    const rr = rrByRun.get(i.run);
+    const to = rr ? [d, rr] : [d];
     if (end.status === "posted") {
       const module = end.p.module ?? "core";
-      d.bugs.push({
+      const bug: EvalBug = {
         id: `item-${i.id}`,
         ...spot,
         severityMin: end.p.severity,
         module: (MODULE_IDS as readonly string[]).includes(module) ? (module as EvalBug["module"]) : "core",
         note: `Posted finding ${end.id}.`,
-      });
+      };
+      for (const x of to) x.bugs.push(bug);
     } else if (end.status !== "discarded") skipped.undecided++;
     // The check is under test, so its verdict is no truth. A restore removes discardedBy.
     else if (end.p.discardedBy === "verify") skipped.refuted++;
     // A fix commit, a closing re-review, or a session reject discarded it, not you.
     else if (!userDiscard(end.p, end.copied === 1)) skipped.notYours++;
-    else if (code && TRAP_CODES.has(code)) d.traps.push({ id: `item-${i.id}`, ...spot, why: `Discarded as ${code}: finding ${end.id}.` });
-    else d.extras.push({ ...spot, note: `Discarded ${code ? `as ${code}` : "without a reason"}: finding ${end.id}.` });
+    else if (code && TRAP_CODES.has(code)) {
+      for (const x of to) x.traps.push({ id: `item-${i.id}`, ...spot, why: `Discarded as ${code}: finding ${end.id}.` });
+    } else
+      for (const x of to) x.extras.push({ ...spot, note: `Discarded ${code ? `as ${code}` : "without a reason"}: finding ${end.id}.` });
   }
+
+  // The earlier findings of each re-review case, with their state when the re-review started. A copy in the re-review shows that the
+  // finding was new or accepted then. Questions of the earlier run stay out.
+  const resolved = new Map((db.query(SQL.threads).all() as { item: number; resolved: number }[]).map((t) => [t.item, t.resolved === 1]));
+  for (const rr of rrByRun.values())
+    for (const i of items) {
+      if (i.run !== rr.from || i.p.revises !== undefined || i.path === null || i.line === null || (i.side !== "new" && i.side !== "old"))
+        continue;
+      const carried = copyOf.get(i.id)?.run === rr.run;
+      const status = carried || i.status === "new" || i.status === "accepted" ? "open" : i.status;
+      if (status !== "open" && status !== "posted" && status !== "discarded") continue;
+      const payload = finding.loose().safeParse(i.p);
+      if (!payload.success) {
+        rrSkipped.badPayload++;
+        continue;
+      }
+      // Only your own discard is a decision. Others stay in the earlier run, as the app had them, with no re-raise check.
+      const yours = status !== "discarded" || (i.p.discardedBy !== "verify" && userDiscard(i.p, i.copied === 1));
+      rr.earlier.push({
+        id: `item-${i.id}`,
+        path: i.path,
+        side: i.side,
+        lines: [i.line, i.line_end ?? i.line],
+        status: yours ? status : "dropped",
+        resolved: status === "posted" ? (resolved.get(i.id) ?? null) : null,
+        body: i.body,
+        payload: payload.data,
+      });
+    }
 
   const byPr = Map.groupBy(drafts.values(), (d) => d.pr);
   for (const c of db.query(SQL.comments).all() as CommentRow[]) {
@@ -279,7 +355,12 @@ export function select(db: Database, me: string): { drafts: Draft[]; skipped: Sk
     d.human = keep(d.human, d.traps);
     d.traps = traps;
   }
-  return { drafts: [...drafts.values()], skipped };
+  // The same rule for a re-review case. Its items are in a plain case too, which counts them.
+  const rereviews = [...rrByRun.values()].map(({ from: _, ...rr }) => {
+    const apart = <T extends Spot>(list: T[], other: Spot[]) => list.filter((x) => !other.some((y) => hit(x, y)));
+    return { ...rr, bugs: apart(rr.bugs, rr.traps), traps: apart(rr.traps, rr.bugs) };
+  });
+  return { drafts: [...drafts.values()], skipped, rereviews, rereviewSkipped: rrSkipped };
 }
 
 // ---------- Build ----------
@@ -290,6 +371,12 @@ export type Manifest = {
   fingerprint: string;
   counts: { cases: number; runs: number; repositories: number; bugs: number; traps: number; extras: number; human: number };
   skipped: Skipped;
+  // The re-review cases in rereview/ (docs/plans/review-v3.md WP-V3). bun run eval --rereview runs them.
+  rereview: {
+    fingerprint: string;
+    counts: { cases: number; bugs: number; traps: number; extras: number; earlier: number };
+    skipped: RereviewSkipped;
+  };
 };
 
 async function build(o: { db: string; cache: string; out: string; me: string }): Promise<Manifest> {
@@ -321,27 +408,44 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
     mkdirSync(join(o.out, "cases"), { recursive: true });
     mkdirSync(join(o.out, "bundles"), { recursive: true });
 
+    // A re-review case needs something to find, to avoid, or to not raise again.
+    const rrSkipped = sel.rereviewSkipped;
+    const rereviews = sel.rereviews.filter(
+      (r) => r.bugs.length || r.traps.length || r.earlier.some((e) => e.status === "posted" || e.status === "discarded"),
+    );
+    rrSkipped.emptyCases += sel.rereviews.length - rereviews.length;
+    mkdirSync(join(o.out, "rereview"), { recursive: true });
+
     const written: { id: string; hash: string }[] = [];
+    const rrWritten: { id: string; hash: string }[] = [];
     let runs = 0;
     let repositories = 0;
-    const byRepo = Map.groupBy(drafts, (d) => {
-      const p = prs.get(d.pr) as PrRow;
+    const repoOf = (pr: number) => {
+      const p = prs.get(pr) as PrRow;
       return `${p.project}/${p.repo}`;
-    });
-    for (const [key, list] of [...byRepo].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    };
+    const byRepo = Map.groupBy(drafts, (d) => repoOf(d.pr));
+    const rrByRepo = Map.groupBy(rereviews, (d) => repoOf(d.pr));
+    for (const key of [...new Set([...byRepo.keys(), ...rrByRepo.keys()])].sort()) {
+      const list = byRepo.get(key) ?? [];
+      const rrs = rrByRepo.get(key) ?? [];
       const [project = "", repo = ""] = key.split("/");
       const cache = join(o.cache, project, `${repo}.git`);
       if (!NAME.test(project) || !NAME.test(repo) || !existsSync(cache)) {
         skipped.missingCommits += list.length;
+        rrSkipped.missingCommits += rrs.length;
         continue;
       }
       const g = (args: string[], stdin?: string) => git(["--git-dir", cache, ...args], { env, stdin });
-      const shas = [...new Set(list.flatMap((d) => [d.base, d.head]))];
+      const need = (d: Draft | RereviewDraft) => ("since" in d ? [d.base, d.head, d.since, d.sinceBase] : [d.base, d.head]);
+      const shas = [...new Set([...list, ...rrs].flatMap(need))];
       const types = (await g(["cat-file", "--batch-check=%(objecttype)"], `${shas.join("\n")}\n`)).split("\n");
       const present = new Set(shas.filter((_, k) => types[k] === "commit"));
-      const ok = list.filter((d) => present.has(d.base) && present.has(d.head));
+      const ok = list.filter((d) => need(d).every((c) => present.has(c)));
+      const rrOk = rrs.filter((d) => need(d).every((c) => present.has(c)));
       skipped.missingCommits += list.length - ok.length;
-      if (!ok.length) continue;
+      rrSkipped.missingCommits += rrs.length - rrOk.length;
+      if (!ok.length && !rrOk.length) continue;
 
       // The bundle name hides the project key and the repository slug.
       const bundle = `${createHash("sha256").update(key).digest("hex").slice(0, 16)}.bundle`;
@@ -350,7 +454,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       mkdirSync(join(temp, "objects", "info"), { recursive: true });
       // The temp repository borrows the objects of the cache copy, so the copy gets no write.
       writeFileSync(join(temp, "objects", "info", "alternates"), `${join(cache, "objects").replaceAll("\\", "/")}\n`);
-      const commits = [...new Set(ok.flatMap((d) => [d.base, d.head]))];
+      const commits = [...new Set([...ok, ...rrOk].flatMap(need))];
       await git(["--git-dir", temp, "update-ref", "--stdin"], { env, stdin: commits.map((c) => `create refs/eval/${c} ${c}\n`).join("") });
       await git(["--git-dir", temp, "bundle", "create", "-q", join(o.out, "bundles", bundle), "--all"], { env });
       repositories++;
@@ -377,11 +481,36 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
         written.push({ id: c.id, hash: createHash("sha256").update(text).digest("hex") });
         runs += d.runs;
       }
+      for (const d of rrOk) {
+        const p = prs.get(d.pr) as PrRow;
+        const title = p.title?.trim() || `PR ${p.pr_id}`;
+        const c: LocalCaseFile = localCaseFile.parse({
+          id: rereviewId(d),
+          title,
+          language: "unknown",
+          pr: { title, description: p.description ?? "" },
+          bugs: d.bugs,
+          traps: d.traps,
+          extras: d.extras,
+          human: [],
+          tasks: tasks.filter((t) => t.pr === d.pr).map(({ key, source, json }) => ({ key, source, json })),
+          bundle: { file: bundle, base: d.base, head: d.head },
+          changedLines: changedLines(await g(["diff", ...diffArgs, d.base, d.head])),
+          rereview: { since: d.since, sinceBase: d.sinceBase, earlier: d.earlier },
+        });
+        const text = `${JSON.stringify(c, null, 2)}\n`;
+        mkdirSync(join(o.out, "rereview", c.id));
+        writeFileSync(join(o.out, "rereview", c.id, "case.json"), text);
+        rrWritten.push({ id: c.id, hash: createHash("sha256").update(text).digest("hex") });
+      }
     }
 
     const ids = new Set(written.map((w) => w.id));
     const kept = drafts.filter((d) => ids.has(caseId(d)));
     const total = (k: "bugs" | "traps" | "extras" | "human") => kept.reduce((n, d) => n + d[k].length, 0);
+    const rrIds = new Set(rrWritten.map((w) => w.id));
+    const rrKept = rereviews.filter((d) => rrIds.has(rereviewId(d)));
+    const rrTotal = (k: "bugs" | "traps" | "extras" | "earlier") => rrKept.reduce((n, d) => n + d[k].length, 0);
     const manifest: Manifest = {
       format: 1,
       createdAt: new Date().toISOString(),
@@ -396,6 +525,17 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
         human: total("human"),
       },
       skipped,
+      rereview: {
+        fingerprint: setFingerprint(rrWritten),
+        counts: {
+          cases: rrWritten.length,
+          bugs: rrTotal("bugs"),
+          traps: rrTotal("traps"),
+          extras: rrTotal("extras"),
+          earlier: rrTotal("earlier"),
+        },
+        skipped: rrSkipped,
+      },
     };
     writeFileSync(join(o.out, "MANIFEST.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     return manifest;
@@ -405,12 +545,14 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
 }
 
 export function report(m: Manifest): string {
-  const { counts: n, skipped: s } = m;
+  const { counts: n, skipped: s, rereview: r } = m;
   const lines = [
     `Local eval set: ${n.cases} cases from ${n.runs} review runs in ${n.repositories} repositories.`,
     `Must find: ${n.bugs} posted findings and ${n.human} of your own comments. Must not raise: ${n.traps}. Neutral: ${n.extras}.`,
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
+    `Re-review cases: ${r.counts.cases}, with ${r.counts.earlier} earlier findings. Must find: ${r.counts.bugs}. Must not raise: ${r.counts.traps}. Neutral: ${r.counts.extras}.`,
+    `Re-reviews left out: ${r.skipped.noEarlier} without their earlier run, ${r.skipped.missingCommits} with missing commits, ${r.skipped.emptyCases} with nothing to measure. Earlier findings left out: ${r.skipped.badPayload} with a payload that is no finding.`,
   ];
   if (n.cases < MINIMUM.cases || n.bugs < MINIMUM.bugs || n.traps < MINIMUM.traps)
     lines.push(

@@ -5,7 +5,7 @@
 import type { RunPhase, RunUsage, VerifySummary, Volume } from "../../src/shared/dto";
 import type { AnchorState, Check, Coverage, DisplayGroup, Severity, Side } from "../../src/shared/review";
 import type { RunStatus } from "../../src/shared/run-log";
-import type { EvalBug, EvalExtra, EvalHuman, EvalSet, EvalTrap } from "./cases";
+import type { EvalBug, EvalEarlier, EvalExtra, EvalHuman, EvalSet, EvalTrap } from "./cases";
 
 export type { Check, Severity, Volume };
 // run.ts sets it with displayGroup of src/shared/review.ts. Scoring reads the stored group, so older result files keep their groups:
@@ -36,6 +36,8 @@ export type EvalItem = {
   confidence: string;
   evidenceStatus: string;
   agent: string | null;
+  // A re-review only: the copy of an earlier finding (payload carried). Absent in files made before this field existed: false.
+  carried?: boolean;
 };
 
 export type EvalDropped = { path: string; side: Side; line: number; lineEnd: number | null; severity: Severity; reason: string };
@@ -66,6 +68,19 @@ export type CaseRun = {
   items: EvalItem[];
   dropped: EvalDropped[];
   questions: number;
+  // A re-review only: the IDs of the posted earlier findings whose thread got a resolve proposal (a fixed verdict).
+  resolves?: string[];
+};
+
+// An earlier finding of a re-review case (cases.ts evalEarlier). lines: its range at the head of the case, or null when the change from
+// the earlier head to the head touches it. resolved: the later state of the thread of a posted finding, else null.
+export type EarlierInfo = {
+  id: string;
+  path: string;
+  side: Side;
+  lines: [number, number] | null;
+  status: EvalEarlier["status"];
+  resolved: boolean | null;
 };
 
 export type EvalCaseInfo = {
@@ -81,6 +96,8 @@ export type EvalCaseInfo = {
   extras?: EvalExtra[];
   // Local set only: your own inline comments.
   human?: EvalHuman[];
+  // A re-review case only: the findings of the earlier run.
+  earlier?: EarlierInfo[];
 };
 
 export type EvalResult = {
@@ -106,6 +123,8 @@ export type EvalResult = {
   tolerance?: number;
   // Local set only: setFingerprint of the cases that ran.
   fingerprint?: string;
+  // --rereview: each case ran as a re-review after its seeded earlier run. Absent: false.
+  rereview?: boolean;
   repeat: number;
   cases: EvalCaseInfo[];
   runs: CaseRun[];
@@ -133,6 +152,8 @@ export const METRICS = [
   "extras",
   "severityOk",
   "candidateRecall",
+  "reRaises",
+  "verdictOk",
   "minutes",
   "costUsd",
   "notCompleted",
@@ -155,6 +176,10 @@ type Tally = {
   extraHits: number;
   severityOk: number;
   candidates: number;
+  rereview: boolean;
+  reRaises: number;
+  verdicts: number;
+  verdictOk: number;
   minutes: number | null;
   costUsd: number | null;
   notCompleted: number;
@@ -164,6 +189,12 @@ type Tally = {
 function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
   const shown = r.items.filter((i) => i.group === "main");
   const human = c.human ?? [];
+  // docs/plans/review-v3.md WP-V3: a re-raise is a new item on an earlier finding that you posted or discarded. Its lines must be the
+  // same at both heads. The copy of a carried finding is no re-raise.
+  const decided = (c.earlier ?? []).flatMap((e) =>
+    e.lines && (e.status === "posted" || e.status === "discarded") ? [{ path: e.path, side: e.side, lines: e.lines }] : [],
+  );
+  const scored = (c.earlier ?? []).filter((e) => e.status === "posted" && e.resolved !== null);
   const found = c.bugs.filter((b) => shown.some((i) => matches(i, b, t)));
   let severityOk = 0;
   for (const b of found) {
@@ -172,8 +203,10 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
   }
   // An item on your own comment is a true finding too. Only recall keeps the comments apart (humanRecall).
   const bugHit = (i: EvalItem) => c.bugs.some((b) => matches(i, b, t)) || human.some((h) => matches(i, h, t));
+  // A re-raise is noise, also on an extra.
+  const reRaise = (i: EvalItem) => !i.carried && !bugHit(i) && decided.some((e) => matches(i, e, t));
   // An item on an extra counts as neither a bug hit, nor noise, nor a false positive. It leaves the shown count.
-  const extraHit = (i: EvalItem) => !bugHit(i) && (c.extras ?? []).some((x) => matches(i, x, t));
+  const extraHit = (i: EvalItem) => !bugHit(i) && !reRaise(i) && (c.extras ?? []).some((x) => matches(i, x, t));
   const trapHit = (i: EvalItem) => !extraHit(i) && c.traps.some((x) => matches(i, x));
   const extraHits = shown.filter(extraHit).length;
   return {
@@ -189,6 +222,11 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
     extraHits,
     severityOk,
     candidates: c.bugs.filter((b) => r.items.some((i) => matches(i, b, t))).length,
+    rereview: c.earlier !== undefined,
+    reRaises: shown.filter(reRaise).length,
+    // A fixed verdict on a posted finding is right when you resolved its thread later. open and outdated give no proposal.
+    verdicts: scored.length,
+    verdictOk: scored.filter((e) => (r.resolves ?? []).includes(e.id) === e.resolved).length,
     minutes: r.minutes,
     costUsd: r.usage ? r.usage.costUsd : null,
     notCompleted: r.status === "completed" ? 0 : 1,
@@ -196,7 +234,7 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
 }
 
 const ratio = (a: number, b: number) => (b === 0 ? null : a / b);
-const sum = (ts: Tally[], k: keyof Tally) => ts.reduce((s, t) => s + (t[k] ?? 0), 0);
+const sum = (ts: Tally[], k: Exclude<keyof Tally, "rereview">) => ts.reduce((s, t) => s + (t[k] ?? 0), 0);
 // null when no run reports the value.
 const meanOf = (xs: (number | null)[]) => {
   const v = xs.filter((x): x is number => x !== null);
@@ -215,6 +253,9 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     extras: ratio(sum(ts, "extraHits"), ts.length),
     severityOk: ratio(sum(ts, "severityOk"), sum(ts, "found")),
     candidateRecall: ratio(sum(ts, "candidates"), sum(ts, "bugs")),
+    // null outside a re-review, so plain results show no value.
+    reRaises: ts.some((x) => x.rereview) ? ratio(sum(ts, "reRaises"), ts.length) : null,
+    verdictOk: ratio(sum(ts, "verdictOk"), sum(ts, "verdicts")),
     minutes: meanOf(ts.map((t) => t.minutes)),
     costUsd: meanOf(ts.map((t) => t.costUsd)),
     notCompleted: sum(ts, "notCompleted"),

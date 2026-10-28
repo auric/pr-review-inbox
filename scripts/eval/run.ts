@@ -6,6 +6,7 @@
 // Each case runs the review pipeline of this checkout: a temp git remote, a temp data folder, a temp database with one PR row, and
 // memory secrets. No run reaches Bitbucket or the user's data folder. The real CLI runs only with --real.
 // Exit codes: 0 done, 1 a failed CLI check or a harness error, 2 a usage error or no --real.
+import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,10 +22,11 @@ import {
   shippedProfileAt,
 } from "../../src/server/review/catalog";
 import { createClaudeRunner } from "../../src/server/review/claude";
+import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
 import { createReviewJobs, type ReviewJobs } from "../../src/server/review/jobs";
-import type { GitRemote } from "../../src/server/review/workspace";
+import { diffArgs, type GitRemote, syncCache } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import {
@@ -40,11 +42,34 @@ import {
   VERIFIER_MODES,
   type VerifierSetup,
 } from "../../src/shared/dto";
-import { checkOf, displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION } from "../../src/shared/review";
+import { checkOf, displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION, type ReplyPayload } from "../../src/shared/review";
 import { stubListTools } from "../../tests/support/review-fixture";
-import { buildRepo, bundleRepo, type EvalCase, type EvalSet, loadCases, localDir, SET_NAMES, setDir, setFingerprint } from "./cases";
+import {
+  buildRepo,
+  bundleRepo,
+  type EvalCase,
+  type EvalEarlier,
+  type EvalSet,
+  loadCases,
+  localDir,
+  mapSpot,
+  pointRefs,
+  rereviewDir,
+  SET_NAMES,
+  setDir,
+  setFingerprint,
+} from "./cases";
 import { summaryText } from "./compare";
-import { type CaseRun, type EvalCaseInfo, type EvalItem, type EvalResult, LOCAL_TOLERANCE, score, type Volume } from "./score";
+import {
+  type CaseRun,
+  type EarlierInfo,
+  type EvalCaseInfo,
+  type EvalItem,
+  type EvalResult,
+  LOCAL_TOLERANCE,
+  score,
+  type Volume,
+} from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
 export const WARNING = "Each case runs your Claude CLI and uses your plan quota.";
@@ -61,9 +86,12 @@ const PROJECT = "EVAL";
 const TASK_KEY = "EVAL-1";
 const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
-export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
+export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
   [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--runner <command> <args...>]
---real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.`;
+--real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
+--rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.`;
+// docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin.
+const REREVIEW_ONLY: readonly Variant[] = ["rereview-strict"];
 
 export type Options = {
   real: boolean;
@@ -82,6 +110,8 @@ export type Options = {
   verifier: VerifierSetup["mode"] | null;
   // null: no flag, so the variants of the profile apply (docs/plans/review-v3.md WP-V2).
   variants: Variant[] | null;
+  // docs/plans/review-v3.md WP-V3: run the re-review cases as re-reviews.
+  rereview: boolean;
   repeat: number;
   out: string;
   keep: boolean;
@@ -108,6 +138,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         effort: { type: "string" },
         verifier: { type: "string" },
         variants: { type: "string" },
+        rereview: { type: "boolean", default: false },
         repeat: { type: "string", default: "1" },
         out: { type: "string" },
         keep: { type: "boolean", default: false },
@@ -145,6 +176,10 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   const variants = v.variants === undefined ? null : v.variants.split(",").map((s) => s.trim());
   if (variants?.some((x) => !(VARIANTS as readonly string[]).includes(x)))
     return { error: `--variants must be a comma list of ${VARIANTS.join(", ")}.` };
+  const rereview = v.rereview ?? false;
+  const idle = variants?.filter((x) => (REREVIEW_ONLY as readonly string[]).includes(x)) ?? [];
+  if (idle.length && !rereview)
+    return { error: `--variants ${idle.join(",")} changes only the re-review prompt. Add --rereview, or the run measures no change.` };
   return {
     real: v.real ?? false,
     runner,
@@ -158,6 +193,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     effort: effort as Effort | null,
     verifier: verifier as VerifierSetup["mode"] | null,
     variants: variants as Variant[] | null,
+    rereview,
     repeat,
     out: resolve(v.out ?? join(REPO, "eval-results")),
     keep: v.keep ?? false,
@@ -192,11 +228,13 @@ const profileText = (o: Options) =>
   `profile ${o.profile}${o.profileVersion === null ? "" : ` of profile version ${o.profileVersion}`}${o.variants?.length ? ` with variants ${o.variants.join(", ")}` : ""}`;
 
 function plan(o: Options, cases: EvalCase[], profile: { model: string | null; effort: string | null }) {
-  const lines = [`Eval plan: ${count(cases.length, "case")}, ${count(o.repeat, "repeat")}, ${profileText(o)}, set ${o.set}.`];
+  const lines = [
+    `Eval plan: ${count(cases.length, "case")}, ${count(o.repeat, "repeat")}, ${profileText(o)}, set ${o.set}${o.rereview ? ", re-reviews" : ""}.`,
+  ];
   const w = Math.max(...cases.map((c) => c.id.length));
   for (const c of cases)
     lines.push(
-      `  ${c.id.padEnd(w)}  ${c.language.padEnd(10)}  ${String(c.changedLines).padStart(4)} changed lines  ${count(c.bugs.length, "bug")}  ${count(c.traps.length, "trap")}${c.human ? `  ${count(c.human.length, "own comment")}` : ""}`,
+      `  ${c.id.padEnd(w)}  ${c.language.padEnd(10)}  ${String(c.changedLines).padStart(4)} changed lines  ${count(c.bugs.length, "bug")}  ${count(c.traps.length, "trap")}${c.human ? `  ${count(c.human.length, "own comment")}` : ""}${o.rereview && c.rereview ? `  ${count(c.rereview.earlier.length, "earlier finding")}` : ""}`,
     );
   lines.push(runSetup(profile), WARNING, "Add --real to run it.");
   return lines.join("\n");
@@ -240,8 +278,83 @@ function items(d: RunDetail, volume: Volume | undefined): EvalItem[] {
         confidence: p.confidence,
         evidenceStatus: p.evidenceStatus,
         agent: p.agent,
+        ...((p as { carried?: unknown }).carried !== undefined && { carried: true }),
       },
     ];
+  });
+}
+
+// docs/plans/review-v3.md WP-V3: the earlier run of a re-review case, as the app stored it when the re-review started. A posted finding
+// gets a confirmed inline post and an open thread of yours, so the re-review lists it as posted. Returns the earlier ID by thread root.
+function seedEarlier(
+  db: Database,
+  pr: number,
+  profile: string,
+  at: { since: string; sinceBase: string },
+  earlier: EvalEarlier[],
+  user: string,
+): Map<number, string> {
+  const now = Date.now();
+  const { id: run } = db
+    .query(
+      `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, status, started_at, finished_at, explain)
+        VALUES ($pr, 'review', $profile, '', 'eval-earlier', $head, $base, $base, 'completed', $now, $now, 0) RETURNING id`,
+    )
+    .get({ pr, profile, head: at.since, base: at.sinceBase, now }) as { id: number };
+  const roots = new Map<number, string>();
+  const status = { open: "new", posted: "posted", discarded: "discarded", dropped: "discarded" } as const;
+  for (const [k, e] of earlier.entries()) {
+    const { id: item } = db
+      .query(
+        `INSERT INTO review_item (run, kind, payload_json, body, path, side, line, line_end, status)
+          VALUES ($run, 'finding', $payload, $body, $path, $side, $line, $end, $status) RETURNING id`,
+      )
+      .get({
+        run,
+        payload: JSON.stringify(e.payload),
+        body: e.body,
+        path: e.path,
+        side: e.side,
+        line: e.lines[0],
+        end: e.lines[1],
+        status: status[e.status],
+      }) as { id: number };
+    if (e.status !== "posted") continue;
+    const root = k + 1;
+    db.query(
+      `INSERT INTO post (pr, run, kind, idem_key, body, destination_json, items_json, state, remote_id, created_at, updated_at)
+        VALUES ($pr, $run, 'inline', $key, $body, '{}', $items, 'confirmed', $root, $now, $now)`,
+    ).run({ pr, run, key: `eval-earlier-${item}`, body: e.body, items: JSON.stringify([{ id: item, revision: 0 }]), root, now });
+    const anchor = {
+      path: e.path,
+      line: e.lines[0],
+      lineType: e.side === "new" ? "ADDED" : "REMOVED",
+      fileType: e.side === "new" ? "TO" : "FROM",
+      diffType: "EFFECTIVE",
+      fromHash: at.sinceBase,
+      toHash: at.since,
+    };
+    db.query(
+      `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, created_at, updated_at)
+        VALUES ($pr, $root, 0, NULL, $root, $user, $body, $anchor, $now, $now)`,
+    ).run({ pr, root, user, body: e.body, anchor: JSON.stringify(anchor), now });
+    roots.set(root, e.id);
+  }
+  return roots;
+}
+
+// The earlier findings at the head of the case. New-side lines move with the diff from the earlier head to the head, old-side lines
+// with the diff from the earlier merge base to the merge base.
+async function earlierAt(
+  repo: { url: string; env: Record<string, string>; base: string; head: string; since: string; sinceBase: string },
+  earlier: EvalEarlier[],
+): Promise<EarlierInfo[]> {
+  const diff = async (from: string, to: string) =>
+    from === to ? [] : parseDiff(await git(["--git-dir", repo.url, "diff", ...diffArgs, from, to], { env: repo.env }));
+  const sides = { new: await diff(repo.since, repo.head), old: await diff(repo.sinceBase, repo.base) };
+  return earlier.map((e) => {
+    const m = mapSpot(sides[e.side], e);
+    return { id: e.id, path: m?.path ?? e.path, side: e.side, lines: m?.lines ?? null, status: e.status, resolved: e.resolved };
   });
 }
 
@@ -278,9 +391,16 @@ type Context = {
   onJobs: (j: ReviewJobs | null) => void;
   // bundleRepo: the bare repository of each bundle file.
   bundles: Map<string, string>;
+  rereview: boolean;
 };
 
-async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run: CaseRun; head: string; base: string }> {
+const USER = "eval-reviewer";
+
+async function runCase(
+  c: EvalCase,
+  repeat: number,
+  ctx: Context,
+): Promise<{ run: CaseRun; head: string; base: string; earlier?: EarlierInfo[] }> {
   const root = mkdtempSync(join(ctx.tmp, `${c.id}-${repeat}-`));
   let base = "";
   let head = "";
@@ -289,8 +409,12 @@ async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run
     const repo = c.local ? await bundleRepo(c.local, ctx.tmp, ctx.bundles) : await buildRepo(c, join(root, "remote"));
     base = repo.base;
     head = repo.head;
+    const { since, sinceBase } = repo;
+    const rr = ctx.rereview && c.rereview && since && sinceBase ? { ...repo, since, sinceBase, earlier: c.rereview.earlier } : null;
+    if (ctx.rereview && !rr) return { run: errorRun(c, repeat, "The case has no earlier run."), head, base };
+    const earlier = rr ? await earlierAt(rr, rr.earlier) : undefined;
     const dir = join(root, "data");
-    writeConfig(dir, { baseUrl: BASE_URL, userSlug: "eval-reviewer", notifications: false, profiles: ctx.profiles });
+    writeConfig(dir, { baseUrl: BASE_URL, userSlug: USER, notifications: false, profiles: ctx.profiles });
     const settings = createSettings({ dir, secrets: createSecrets(null), jiraSecrets: createSecrets(null, "jira-token") });
     const db = settings.db();
     if (!db) throw new Error("The temp database did not open.");
@@ -311,6 +435,16 @@ async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run
     });
     ctx.onJobs(jobs);
     try {
+      // The app fetched the earlier head into its cache when it reviewed it. A rebase can drop that head from the new source branch.
+      if (rr) {
+        await pointRefs(rr.url, rr.env, rr.sinceBase, rr.since);
+        await syncCache({
+          dataDir: dir,
+          pr: { ref: { project: PROJECT, repo: c.id, id: 1 }, sourceHead: rr.since, targetHead: rr.sinceBase },
+          remote,
+        });
+        await pointRefs(rr.url, rr.env, base, head);
+      }
       const { id: pr } = db
         .query(
           `INSERT INTO pull_request (project, repo, pr_id, title, description, author_slug, author_name, my_role, state, source_head,
@@ -365,16 +499,24 @@ async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run
       if (c.instructions !== undefined)
         saveInstructionSettings(db, { project: PROJECT, repo: c.id }, { target: true, local: [], extra: c.instructions });
       jobs.saveBrief(db, pr, { note: "", profile: ctx.profile });
-      const started = jobs.review(db, pr);
+      const roots = rr ? seedEarlier(db, pr, ctx.profile, rr, rr.earlier, USER) : new Map<number, string>();
+      const started = rr ? jobs.rereview(db, pr) : jobs.review(db, pr);
       if (started.status !== 202) {
         const why = "error" in started ? started.error : "conflict" in started ? started.conflict.error : `status ${started.status}`;
-        return { run: errorRun(c, repeat, `The run did not start: ${why}`), head, base };
+        return { run: errorRun(c, repeat, `The run did not start: ${why}`), head, base, earlier };
       }
       await jobs.wait();
       const d = jobs.run(db, started.run.id);
-      if (!d) return { run: errorRun(c, repeat, "The run row is missing."), head, base };
+      if (!d) return { run: errorRun(c, repeat, "The run row is missing."), head, base, earlier };
       const r = d.run;
+      // rereview.ts resolveProposals: a fixed verdict on a posted finding gives a resolve proposal on its thread.
+      const resolves = d.items.flatMap((i) => {
+        const p = i.kind === "reply" ? (i.payload as ReplyPayload) : null;
+        const id = p?.origin === "resolve" ? roots.get(p.thread) : undefined;
+        return id === undefined ? [] : [id];
+      });
       return {
+        earlier,
         run: {
           case: c.id,
           repeat,
@@ -403,6 +545,7 @@ async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run
             reason: x.reason,
           })),
           questions: d.items.filter((i) => i.kind === "question").length,
+          ...(rr && { resolves }),
         },
         head,
         base,
@@ -439,7 +582,16 @@ export async function main(argv: string[]): Promise<number> {
       throw new Error(
         "No local set. Build it with bun run eval:local, and point REVIEW_LOOP_EVAL_LOCAL at its folder (docs/eval/local.md).",
       );
-    cases = loadCases(o.cases, setDir(o.set));
+    const dir = o.rereview && o.set === "local" ? rereviewDir() : setDir(o.set);
+    if (!existsSync(dir))
+      throw new Error("The local set has no re-review cases. Build it again with bun run eval:local (docs/eval/local.md).");
+    cases = loadCases(o.cases, dir);
+    if (o.rereview) {
+      const plain = cases.filter((c) => !c.rereview).map((c) => c.id);
+      if (o.cases !== "all" && plain.length) throw new Error(`No re-review case: ${plain.join(", ")}.`);
+      cases = cases.filter((c) => c.rereview);
+      if (!cases.length) throw new Error(`Set ${o.set} has no re-review case. fixtures/eval/README.md gives the case format.`);
+    }
   } catch (e) {
     console.error((e as Error).message);
     return 2;
@@ -499,6 +651,7 @@ export async function main(argv: string[]): Promise<number> {
       ...(o.set === "local" && {
         fingerprint: setFingerprint(cases.flatMap((c) => (c.local ? [{ id: c.id, hash: c.local.hash }] : []))),
       }),
+      ...(o.rereview && { rereview: true }),
       repeat: o.repeat,
       cases: [],
       runs: [],
@@ -516,9 +669,10 @@ export async function main(argv: string[]): Promise<number> {
         jobs = j;
       },
       bundles: new Map(),
+      rereview: o.rereview,
     };
     console.log(
-      `Eval: set ${o.set}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, verifier ${requested.verifier}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
+      `Eval: set ${o.set}${o.rereview ? " (re-reviews)" : ""}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, verifier ${requested.verifier}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
     );
     console.log(runSetup(profile));
     if (o.real) console.log(WARNING);
@@ -528,8 +682,8 @@ export async function main(argv: string[]): Promise<number> {
       for (const c of cases) {
         if (stopping) break;
         n++;
-        const { run, head, base } = await runCase(c, repeat, ctx);
-        if (!info.has(c.id) && head) {
+        const { run, head, base, earlier } = await runCase(c, repeat, ctx);
+        if (!info.has(c.id) && head && (earlier || !o.rereview)) {
           info.set(c.id, {
             id: c.id,
             title: c.title,
@@ -541,6 +695,7 @@ export async function main(argv: string[]): Promise<number> {
             traps: c.traps,
             extras: c.extras ?? [],
             ...(c.human && { human: c.human }),
+            ...(earlier && { earlier }),
           });
           result.cases = [...info.values()];
         }
