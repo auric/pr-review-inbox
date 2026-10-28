@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Re-scores an eval result file with the bugs, traps, and extras of the current case fixtures, offline (docs/plans/review-v2/spec.md section 4.3).
-// Usage: bun run eval:rescore <result.json> [--out <file>]. Exit codes: 0 done, 2 a usage error or an unreadable file.
+// --tolerance N scores with another near-line tolerance (docs/plans/review-v3.md WP-V1). A local case keeps its stored truth.
+// Usage: bun run eval:rescore <result.json> [--tolerance N] [--out <file>]. Exit codes: 0 done, 2 a usage error or an unreadable file.
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,13 +15,20 @@ import { type EvalResult, score } from "./score";
 export type CaseTruth = { head: string; bugs: EvalBug[]; traps: EvalTrap[]; extras: EvalExtra[] };
 
 // current: the truth of the current fixtures by case ID. A case with no fixture keeps its stored bugs and traps.
-export function rescore(r: EvalResult, current: Map<string, CaseTruth>, at: string): { result: EvalResult; notes: string[] } {
+// tolerance: the new tolerance of the result, or undefined to keep it.
+export function rescore(
+  r: EvalResult,
+  current: Map<string, CaseTruth>,
+  at: string,
+  tolerance?: number,
+): { result: EvalResult; notes: string[] } {
   const notes: string[] = [];
   const changed: string[] = [];
   const cases = r.cases.map((c) => {
     const now = current.get(c.id);
     if (!now) {
-      notes.push(`Case ${c.id} has no fixture now. It keeps its stored bugs and traps.`);
+      // The local set has no fixtures by design.
+      if (r.set !== "local") notes.push(`Case ${c.id} has no fixture now. It keeps its stored bugs and traps.`);
       return c;
     }
     if (now.head !== c.head)
@@ -31,7 +39,9 @@ export function rescore(r: EvalResult, current: Map<string, CaseTruth>, at: stri
     return { ...c, bugs: now.bugs, traps: now.traps, extras: now.extras };
   });
   notes.push(changed.length ? `Cases with new bugs, traps, or extras: ${changed.join(", ")}.` : "No case has new bugs, traps, or extras.");
-  return { result: { ...r, cases, rescoredAt: at }, notes };
+  if (tolerance !== undefined && tolerance !== (r.tolerance ?? 0))
+    notes.push(`The tolerance goes from ${r.tolerance ?? 0} to ${tolerance} lines.`);
+  return { result: { ...r, cases, rescoredAt: at, ...(tolerance !== undefined && { tolerance }) }, notes };
 }
 
 // The head commit of each fixture comes from the same deterministic build as an eval run.
@@ -54,13 +64,22 @@ async function currentTruth(r: EvalResult): Promise<Map<string, CaseTruth>> {
 export async function main(argv: string[]): Promise<number> {
   let file: string;
   let out: string | undefined;
+  let tolerance: number | undefined;
   try {
-    const { values, positionals } = parseArgs({ args: argv, strict: true, allowPositionals: true, options: { out: { type: "string" } } });
+    const { values, positionals } = parseArgs({
+      args: argv,
+      strict: true,
+      allowPositionals: true,
+      options: { out: { type: "string" }, tolerance: { type: "string" } },
+    });
     if (positionals.length !== 1) throw new Error("Give one result file.");
     file = positionals[0] as string;
     out = values.out;
+    tolerance = values.tolerance === undefined ? undefined : Number(values.tolerance);
+    if (tolerance !== undefined && !(Number.isInteger(tolerance) && tolerance >= 0))
+      throw new Error("--tolerance must be a whole number of lines, 0 or more.");
   } catch (e) {
-    console.error(`${(e as Error).message}\nUsage: bun run eval:rescore <result.json> [--out <file>]`);
+    console.error(`${(e as Error).message}\nUsage: bun run eval:rescore <result.json> [--tolerance N] [--out <file>]`);
     return 2;
   }
   let before: EvalResult;
@@ -70,7 +89,7 @@ export async function main(argv: string[]): Promise<number> {
     console.error((e as Error).message);
     return 2;
   }
-  const { result, notes } = rescore(before, await currentTruth(before), new Date().toISOString());
+  const { result, notes } = rescore(before, await currentTruth(before), new Date().toISOString(), tolerance);
   console.log([`Re-scored ${file} with the current case fixtures.`, ...notes, ""].join("\n"));
   console.log(`${suiteDelta(score(before), score(result), ["stored", "current"])}\n\n${summaryText(result)}`);
   if (out) {

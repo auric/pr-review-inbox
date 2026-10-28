@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The eval cases of fixtures/eval (docs/plans/review-v2/spec.md section 4.3) and the temp git repository of one case.
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { z } from "zod";
@@ -9,10 +10,17 @@ import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { severities } from "../../src/shared/review";
 
-const EVAL_DIR = resolve(import.meta.dir, "../../fixtures/eval");
+const REPO = resolve(import.meta.dir, "../..");
+const EVAL_DIR = join(REPO, "fixtures/eval");
 // v1: the 12 cases of the first baseline. hard: bugs that need unchanged code, bigger diffs, more traps, and cases with no bug.
 export const SETS = { v1: join(EVAL_DIR, "cases"), hard: join(EVAL_DIR, "hard") } as const;
-export type EvalSet = keyof typeof SETS;
+export type FixtureSet = keyof typeof SETS;
+// local: the set from your own decisions (docs/eval/local.md). It holds company code, so it never enters git.
+export type EvalSet = FixtureSet | "local";
+export const SET_NAMES: readonly EvalSet[] = [...(Object.keys(SETS) as FixtureSet[]), "local"];
+// eval-local/ is git-ignored as a safety net (docs/plans/review-v3.md Q4).
+export const localDir = () => resolve(process.env.REVIEW_LOOP_EVAL_LOCAL || join(REPO, "eval-local"));
+export const setDir = (set: EvalSet) => (set === "local" ? join(localDir(), "cases") : SETS[set]);
 export const CASES_DIR = SETS.v1;
 const CASE_ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 // spec.md section 1.3: core and the module IDs.
@@ -52,12 +60,48 @@ export const caseFile = z.object({
   traps: z.array(evalTrap).min(1).max(4),
   extras: z.array(evalExtra).optional(),
 });
+// Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
+export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1) });
+const commit = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
+// A case of the local set (docs/plans/review-v3.md WP-V1). A git bundle in ../../bundles/ holds the repository, so the case has no
+// base/ folder and no head.patch. The limits of the fixture sets do not apply. tasks: the pr_task rows with their task_context JSON.
+export const localCaseFile = caseFile.extend({
+  language: z.string().min(1),
+  bugs: z.array(evalBug),
+  traps: z.array(evalTrap),
+  extras: z.array(evalExtra),
+  human: z.array(evalHuman),
+  tasks: z.array(z.object({ key: z.string().min(1), source: z.string().min(1), json: z.string().nullable() })),
+  bundle: z.object({ file: z.string().regex(/^[0-9a-f]{16}\.bundle$/), base: commit, head: commit }),
+  changedLines: z.number().int().min(0),
+});
 export type EvalBug = z.infer<typeof evalBug>;
 export type EvalTrap = z.infer<typeof evalTrap>;
 export type EvalExtra = z.infer<typeof evalExtra>;
+export type EvalHuman = z.infer<typeof evalHuman>;
 export type CaseFile = z.infer<typeof caseFile>;
-// base: the files of base/ by repository path. changedLines: added and removed lines of head.patch.
-export type EvalCase = CaseFile & { dir: string; base: Map<string, string>; patch: string; changedLines: number };
+export type LocalCaseFile = z.infer<typeof localCaseFile>;
+// The repository of a local case. bundle: the absolute path of the bundle file. hash: the SHA-256 of case.json, for the set fingerprint.
+export type LocalRepo = { bundle: string; base: string; head: string; hash: string };
+// base: the files of base/ by repository path. changedLines: added and removed lines of head.patch. A local case has an empty base
+// and patch, and local names its bundle.
+export type EvalCase = Omit<CaseFile, "language"> & {
+  language: string;
+  dir: string;
+  base: Map<string, string>;
+  patch: string;
+  changedLines: number;
+  human?: EvalHuman[];
+  tasks?: LocalCaseFile["tasks"];
+  local?: LocalRepo;
+};
+
+// The fingerprint of a local set: the hash of each case.json in ID order. compare.ts refuses two results with different ones.
+export function setFingerprint(cases: { id: string; hash: string }[]): string {
+  const h = createHash("sha256");
+  for (const c of [...cases].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) h.update(`${c.id} ${c.hash}\n`);
+  return h.digest("hex");
+}
 
 const files = (root: string, dir = root): string[] =>
   readdirSync(dir).flatMap((f) => {
@@ -73,8 +117,18 @@ export const INSTRUCTION_FILE = /^(CLAUDE\.md|CLAUDE\.local\.md|AGENTS\.md)$/i;
 export const FIXTURE_SUFFIX = ".fixture";
 
 export function loadCase(dir: string): EvalCase {
-  const c = caseFile.parse(JSON.parse(readFileSync(join(dir, "case.json"), "utf8")));
+  const text = readFileSync(join(dir, "case.json"), "utf8");
+  const raw = JSON.parse(text) as unknown;
   const folder = dir.replaceAll("\\", "/").split("/").at(-1);
+  if (raw !== null && typeof raw === "object" && "bundle" in raw) {
+    const c = localCaseFile.parse(raw);
+    if (c.id !== folder) throw new Error(`Case ${c.id} is in the folder ${folder}.`);
+    const bundle = resolve(dir, "../../bundles", c.bundle.file);
+    if (!existsSync(bundle)) throw new Error(`Case ${c.id}: the bundle ${c.bundle.file} is missing. Build the set again.`);
+    const hash = createHash("sha256").update(text).digest("hex");
+    return { ...c, dir, base: new Map(), patch: "", local: { bundle, base: c.bundle.base, head: c.bundle.head, hash } };
+  }
+  const c = caseFile.parse(raw);
   if (c.id !== folder) throw new Error(`Case ${c.id} is in the folder ${folder}.`);
   const baseDir = join(dir, "base");
   const base = new Map(
@@ -150,4 +204,26 @@ export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr">, root: 
   // The file text of a commit, for checks of the case lines.
   const show = (commit: string, path: string) => git(["--git-dir", url, "show", `${commit}:${path}`], { env });
   return { url, base, head, env, show };
+}
+
+// The remote of a local case, with the refs of buildRepo. shared: one bare repository per bundle file, made in root on first use.
+// Cases run one at a time, so the refs of a case hold while it runs.
+export async function bundleRepo(local: LocalRepo, root: string, shared: Map<string, string>) {
+  const empty = join(root, "empty.gitconfig");
+  writeFileSync(empty, "");
+  const env = gitEnv(empty);
+  let url = shared.get(local.bundle);
+  if (url === undefined) {
+    url = join(root, `bundle-${shared.size}.git`);
+    await git(["init", "-q", "--bare", "--template=", url], { env });
+    await git(["--git-dir", url, "fetch", "-q", "--no-tags", "--end-of-options", local.bundle, "+refs/*:refs/*"], { env });
+    shared.set(local.bundle, url);
+  }
+  for (const [ref, sha] of [
+    ["refs/heads/main", local.base],
+    ["refs/heads/feature", local.head],
+    ["refs/pull-requests/1/from", local.head],
+  ] as const)
+    await git(["--git-dir", url, "update-ref", ref, sha], { env });
+  return { url, base: local.base, head: local.head };
 }

@@ -32,6 +32,7 @@
     "eval": "bun scripts/eval/run.ts",
     "eval:compare": "bun scripts/eval/compare.ts",
     "eval:rescore": "bun scripts/eval/rescore.ts",
+    "eval:local": "bun scripts/eval/local.ts",
     "screenshots": "bun run build && node scripts/screenshots.ts"
   },
   "dependencies": {

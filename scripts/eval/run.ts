@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The review eval harness (docs/plans/review-v2/spec.md section 4.3). fixtures/eval/README.md gives the commands.
+// The review eval harness (docs/plans/review-v2/spec.md section 4.3). fixtures/eval/README.md gives the commands, docs/eval/local.md
+// those of the local set.
 // Each case runs the review pipeline of this checkout: a temp git remote, a temp data folder, a temp database with one PR row, and
 // memory secrets. No run reaches Bitbucket or the user's data folder. The real CLI runs only with --real.
 // Exit codes: 0 done, 1 a failed CLI check or a harness error, 2 a usage error or no --real.
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -31,9 +32,9 @@ import {
 } from "../../src/shared/dto";
 import { checkOf, displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION } from "../../src/shared/review";
 import { stubListTools } from "../../tests/support/review-fixture";
-import { buildRepo, type EvalCase, type EvalSet, loadCases, SETS } from "./cases";
+import { buildRepo, bundleRepo, type EvalCase, type EvalSet, loadCases, localDir, SET_NAMES, setDir, setFingerprint } from "./cases";
 import { summaryText } from "./compare";
-import { type CaseRun, type EvalCaseInfo, type EvalItem, type EvalResult, score, type Volume } from "./score";
+import { type CaseRun, type EvalCaseInfo, type EvalItem, type EvalResult, LOCAL_TOLERANCE, score, type Volume } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
 export const WARNING = "Each case runs your Claude CLI and uses your plan quota.";
@@ -50,7 +51,7 @@ const PROJECT = "EVAL";
 const TASK_KEY = "EVAL-1";
 const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
-export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${Object.keys(SETS).join("|")}] [--cases all|id,id] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
+export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
   [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--repeat 2] [--out <folder>] [--keep] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.`;
 
@@ -107,7 +108,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   }
   if (v.real && runner) return { error: "Pass --real or --runner, not both." };
   const set = v.set ?? "v1";
-  if (!Object.hasOwn(SETS, set)) return { error: `--set must be one of ${Object.keys(SETS).join(", ")}.` };
+  if (!(SET_NAMES as readonly string[]).includes(set)) return { error: `--set must be one of ${SET_NAMES.join(", ")}.` };
   const repeat = Number(v.repeat);
   if (!Number.isInteger(repeat) || repeat < 1 || repeat > MAX_REPEAT) return { error: `--repeat must be 1 to ${MAX_REPEAT}.` };
   const profileVersion = v["profile-version"] === undefined ? null : Number(v["profile-version"]);
@@ -172,7 +173,7 @@ function plan(o: Options, cases: EvalCase[], profile: { model: string | null; ef
   const w = Math.max(...cases.map((c) => c.id.length));
   for (const c of cases)
     lines.push(
-      `  ${c.id.padEnd(w)}  ${c.language.padEnd(10)}  ${String(c.changedLines).padStart(4)} changed lines  ${count(c.bugs.length, "bug")}  ${count(c.traps.length, "trap")}`,
+      `  ${c.id.padEnd(w)}  ${c.language.padEnd(10)}  ${String(c.changedLines).padStart(4)} changed lines  ${count(c.bugs.length, "bug")}  ${count(c.traps.length, "trap")}${c.human ? `  ${count(c.human.length, "own comment")}` : ""}`,
     );
   lines.push(runSetup(profile), WARNING, "Add --real to run it.");
   return lines.join("\n");
@@ -252,6 +253,8 @@ type Context = {
   profile: string;
   keep: boolean;
   onJobs: (j: ReviewJobs | null) => void;
+  // bundleRepo: the bare repository of each bundle file.
+  bundles: Map<string, string>;
 };
 
 async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run: CaseRun; head: string; base: string }> {
@@ -260,7 +263,7 @@ async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run
   let head = "";
   try {
     mkdirSync(join(root, "remote"));
-    const repo = await buildRepo(c, join(root, "remote"));
+    const repo = c.local ? await bundleRepo(c.local, ctx.tmp, ctx.bundles) : await buildRepo(c, join(root, "remote"));
     base = repo.base;
     head = repo.head;
     const dir = join(root, "data");
@@ -319,6 +322,22 @@ async function runCase(c: EvalCase, repeat: number, ctx: Context): Promise<{ run
           json: JSON.stringify(issue),
           now: Date.now(),
         });
+      }
+      // A local case: the stored task rows of the PR. The attachment files stay out, so task.md lists them without their files.
+      for (const [ord, t] of (c.tasks ?? []).entries()) {
+        db.query("INSERT INTO pr_task (pr, key, source, url, ord) VALUES ($pr, $key, $source, NULL, $ord)").run({
+          pr,
+          key: t.key,
+          source: t.source,
+          ord,
+        });
+        if (t.json !== null)
+          db.query("INSERT INTO task_context (pr, key, source, json, fetched_at) VALUES ($pr, $key, 'jira', $json, $now)").run({
+            pr,
+            key: t.key,
+            json: t.json,
+            now: Date.now(),
+          });
       }
       if (c.instructions !== undefined)
         saveInstructionSettings(db, { project: PROJECT, repo: c.id }, { target: true, local: [], extra: c.instructions });
@@ -392,7 +411,12 @@ export async function main(argv: string[]): Promise<number> {
   }
   let cases: EvalCase[];
   try {
-    cases = loadCases(o.cases, SETS[o.set]);
+    // eval:local writes MANIFEST.json last, so a failed build gives no set.
+    if (o.set === "local" && !existsSync(join(localDir(), "MANIFEST.json")))
+      throw new Error(
+        "No local set. Build it with bun run eval:local, and point REVIEW_LOOP_EVAL_LOCAL at its folder (docs/eval/local.md).",
+      );
+    cases = loadCases(o.cases, setDir(o.set));
   } catch (e) {
     console.error((e as Error).message);
     return 2;
@@ -448,6 +472,10 @@ export async function main(argv: string[]): Promise<number> {
       volume,
       requested,
       set: o.set,
+      tolerance: o.set === "local" ? LOCAL_TOLERANCE : 0,
+      ...(o.set === "local" && {
+        fingerprint: setFingerprint(cases.flatMap((c) => (c.local ? [{ id: c.id, hash: c.local.hash }] : []))),
+      }),
       repeat: o.repeat,
       cases: [],
       runs: [],
@@ -464,6 +492,7 @@ export async function main(argv: string[]): Promise<number> {
       onJobs: (j) => {
         jobs = j;
       },
+      bundles: new Map(),
     };
     console.log(
       `Eval: set ${o.set}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, verifier ${requested.verifier}, prompt version ${PROMPT_VERSION}, CLI ${checked.version}.`,
@@ -488,6 +517,7 @@ export async function main(argv: string[]): Promise<number> {
             bugs: c.bugs,
             traps: c.traps,
             extras: c.extras ?? [],
+            ...(c.human && { human: c.human }),
           });
           result.cases = [...info.values()];
         }

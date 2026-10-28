@@ -2,13 +2,14 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Prints the scores of eval result files (docs/plans/review-v2/spec.md section 4.3).
-// Usage: bun run eval:compare <a.json> <b.json>. Exit codes: 0 done, 2 a usage error or an unreadable file.
+// Usage: bun run eval:compare <a.json> <b.json>. Exit codes: 0 done, 2 a usage error, an unreadable file, or a refusal().
 import { readFileSync } from "node:fs";
 import { type EvalResult, METRICS, type Metric, type Score, type Stat, score } from "./score";
 
 const LABEL: Record<Metric, string> = {
   recall: "recall: seeded bugs with a shown finding",
-  precision: "precision: shown findings that match a bug",
+  humanRecall: "human recall: your own inline comments with a shown finding (local set)",
+  precision: "precision: shown findings that match a bug or one of your own comments",
   trapRate: "trap rate: shown findings on a trap, per trap",
   noise: "noise: shown findings on no bug and no trap, per case",
   falsePositives: "false positives: shown findings on no bug, trap hits included, per case",
@@ -19,9 +20,10 @@ const LABEL: Record<Metric, string> = {
   costUsd: "cost per case in USD, as the CLI reports it",
   notCompleted: "runs that did not complete, per repeat",
 };
-const RATE = new Set<Metric>(["recall", "precision", "trapRate", "severityOk", "candidateRecall"]);
+const RATE = new Set<Metric>(["recall", "humanRecall", "precision", "trapRate", "severityOk", "candidateRecall"]);
 const DIGITS: Record<Metric, number> = {
   recall: 1,
+  humanRecall: 1,
   precision: 1,
   trapRate: 1,
   noise: 2,
@@ -72,7 +74,8 @@ const header = (r: EvalResult) => {
   const q = r.requested ?? { model: "not recorded", effort: "not recorded" };
   const runs = `${r.cases.length} case${r.cases.length === 1 ? "" : "s"} x ${r.repeat}`;
   const rescored = r.rescoredAt ? `, re-scored ${r.rescoredAt}` : "";
-  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, set ${r.set ?? "v1"}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), verifier ${verifierOf(r)}, ${r.runner} CLI, ${runs}`;
+  const set = `set ${r.set ?? "v1"}${r.fingerprint ? ` (fingerprint ${r.fingerprint.slice(0, 12)})` : ""}, tolerance ${r.tolerance ?? 0} lines`;
+  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), verifier ${verifierOf(r)}, ${r.runner} CLI, ${runs}`;
 };
 
 export function summaryText(r: EvalResult, s: Score = score(r)): string {
@@ -104,7 +107,17 @@ export function suiteDelta(a: Score, b: Score, names: [string, string]): string 
 }
 
 // Case truth that differs between two files: the numbers of that case do not compare.
-const truth = (r: EvalResult) => new Map(r.cases.map((c) => [c.id, JSON.stringify([c.head, c.bugs, c.traps, c.extras ?? []])]));
+const truth = (r: EvalResult) =>
+  new Map(r.cases.map((c) => [c.id, JSON.stringify([c.head, c.bugs, c.traps, c.extras ?? [], c.human ?? []])]));
+
+// docs/plans/review-v3.md WP-V1: two results compare only on the same case set and the same tolerance. Else the reason, for exit 2.
+export function refusal(a: EvalResult, b: EvalResult): string | null {
+  if ((a.fingerprint ?? null) !== (b.fingerprint ?? null))
+    return `A and B ran different case sets: fingerprint ${a.fingerprint?.slice(0, 12) ?? "none"} and ${b.fingerprint?.slice(0, 12) ?? "none"}. Run both on one build of the local set and with the same --cases.`;
+  if ((a.tolerance ?? 0) !== (b.tolerance ?? 0))
+    return `A and B use different tolerances: ${a.tolerance ?? 0} and ${b.tolerance ?? 0} lines. Re-score one with bun run eval:rescore --tolerance.`;
+  return null;
+}
 
 export function compareText(a: EvalResult, b: EvalResult): string {
   const sa = score(a);
@@ -162,7 +175,10 @@ if (import.meta.main) {
     process.exit(2);
   }
   try {
-    console.log(compareText(readResult(files[0] as string), readResult(files[1] as string)));
+    const [a, b] = [readResult(files[0] as string), readResult(files[1] as string)];
+    const refused = refusal(a, b);
+    if (refused) throw new Error(refused);
+    console.log(compareText(a, b));
   } catch (e) {
     console.error((e as Error).message);
     process.exit(2);

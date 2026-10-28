@@ -7,7 +7,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildRepo, type EvalCase, type EvalSet, FIXTURE_SUFFIX, INSTRUCTION_FILE, loadCases, SETS } from "../../scripts/eval/cases";
+import { buildRepo, type EvalCase, FIXTURE_SUFFIX, type FixtureSet, INSTRUCTION_FILE, loadCases, SETS } from "../../scripts/eval/cases";
 import { compareText } from "../../scripts/eval/compare";
 import { DEFAULT_MODEL_WARNING, evalProfile, type Options, parseOptions, WARNING } from "../../scripts/eval/run";
 import { type EvalResult, score } from "../../scripts/eval/score";
@@ -144,7 +144,7 @@ describe("eval harness without --real (AC-M2)", () => {
 });
 
 // The bug, trap, and changed-line limits of each set (fixtures/eval/README.md).
-const LIMITS: Record<EvalSet, { bugs: [number, number]; traps: [number, number]; lines: [number, number] }> = {
+const LIMITS: Record<FixtureSet, { bugs: [number, number]; traps: [number, number]; lines: [number, number] }> = {
   v1: { bugs: [1, 3], traps: [1, 2], lines: [150, 500] },
   hard: { bugs: [0, 3], traps: [3, 4], lines: [150, 1500] },
 };
@@ -152,7 +152,7 @@ const within = (n: number, [lo, hi]: [number, number]) => n >= lo && n <= hi;
 
 describe("eval cases", () => {
   const cases = loadCases("all");
-  const sets = Object.entries(SETS).map(([set, dir]) => [set as EvalSet, loadCases("all", dir)] as const);
+  const sets = Object.entries(SETS).map(([set, dir]) => [set as FixtureSet, loadCases("all", dir)] as const);
   let instructionFiles = 0;
 
   test(

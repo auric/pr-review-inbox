@@ -1,6 +1,6 @@
 # Review v3 plan
 
-Status: planned, 2026-10-28. Not started. The user decided D1 to D3 on 2026-10-28 (section 1). Section 9 holds the open questions with the recommended defaults. The plan uses the defaults until the user answers.
+Status: planned, 2026-10-28. WP-V1 is code complete. Gate U-V1 is next. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
 
 Sources: a comparison of our review pipeline with a similar app (2026-10-28, not in the repository), BRIEF.md sections 3.5 and 3.6, docs/plans/review-v2/design.md (R1 to R17, M1 to M4), docs/plans/review-v2/tasks.md (package format), scripts/eval/, and src/server/review/{catalog.ts, prompt.ts, validate.ts, codegraph.ts, jobs.ts}. Never name the other app, its author, or any company, host, or project in this repository.
 
@@ -106,6 +106,15 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 - Control mutation: map `worth` to a trap. The neutral-discard test must fail.
 - Eval measure: the set itself. U-V1 checks that it can tell variants apart.
 - Depends: none.
+- Implementation notes (2026-10-28):
+  - docs/eval/local.md gives the build and run steps. `--cache` is the copy of the `git` folder of the data folder. `--user` overrides `userSlug` of `config.json` beside the database copy.
+  - The case key is (PR, head, merge base), because old-side lines are numbered at the merge base. Runs on one head with one merge base make one case.
+  - The decision on a carried finding is on its newest copy, as stats.ts reads it. Each run item of the chain gets that decision at its own anchor. A discard that stats.ts userDiscard does not count (fix commit, closing re-review, session reject) is left out.
+  - The user's own comments (Q1) are root inline comments that the outbox did not post. The anchor toHash names the head of the case. An old-side comment also needs fromHash equal to the merge base. They score as human recall. A hit on one also counts for precision.
+  - T widens bugs, human comments, and extras. Traps use T = 0. Fixture sets record T = 0, so old result files compare as before.
+  - The result fingerprint hashes the case files that ran. A run with `--cases` gets another fingerprint than the MANIFEST, so compare refuses it against a full run.
+  - A case has no PR comments: they show the answers. The task rows come from pr_task and task_context. Attachment files stay out.
+  - The builder reads a temp copy of the database, because a read-only open of a WAL file still makes -shm and -wal files beside it. The bundle comes from a temp repository that borrows the objects of the cache copy (alternates).
 
 ### Gate U-V1. Build the set and run the baseline (user)
 
@@ -160,7 +169,7 @@ Section 5 lists the runs. The user runs each with `--repeat 2` and `bun run eval
 ### WP-V6. Pre-existing group (implementer-xhigh, W3 after WP-V5; idea 8, D1)
 
 - Files: src/server/review/catalog.ts (finder rule: report a blocker or major problem in unchanged code as pre-existing; the other rules keep "only what the change adds"); src/shared/review.ts (finding `preexisting: boolean`, default false; DisplayGroup "preexisting"; PREEXISTING_MAX); src/server/review/validate.ts (an unchanged anchor with no changed cause: keep when preexisting is true, severity is blocker or major, and the anchor quote holds; else drop "unchanged" as today); src/server/review/judge.ts (cap and order); src/server/publish/ (Post all and the post plan skip preexisting items; a single post needs a click on that item); src/server/review/stats.ts (count and post rate); docs/plans/review-v2/design.md R6 (pointer, done in this plan); tests/review/{validate.test.ts, judge.test.ts, stats.test.ts}, tests/publish/*.
-- Behavior: pre-existing items go through the verify phase when it is on. At most PREEXISTING_MAX (5, the eval tunes it) per run, by severity then confidence. Discuss and Fix work on them as on any finding.
+- Behavior: pre-existing items go through the verify phase when it is on. At most PREEXISTING_MAX (5, decided 2026-10-28) per run, by severity then confidence. Discuss and Fix work on them as on any finding.
 - Tests: a minor pre-existing finding drops "unchanged"; a major one stays in the group; a changed-cause finding stays a normal finding; Post all skips the group; the cap.
 - Control mutation: let Post all take preexisting items. The post-plan test must fail.
 - Eval measure: pre-existing items do not count as noise on the local set. U-V3 records the count per run. The post rate comes from stats after two weeks of use.
@@ -274,20 +283,22 @@ No BRIEF 3.6 change: the server is a local stdio process and calls no origin. WP
 - The current prompt version is 2.3. The G-EVAL-1 files are 2.2, so U-V1 runs a new baseline.
 - A default CodeGraph through npx would download a package. V5 forbids it.
 
-## 9. Open questions (recommended defaults)
+## 9. Questions
 
-| ID | Question | Default |
+The user decided on 2026-10-28: the user's own inline comments count as must-find items, the other questions take their recommended defaults, and pre-existing items cap at 5 per run.
+
+| ID | Question | Answer |
 |---|---|---|
-| Q1 | Do the user's own inline comments (not from a finding) count as bugs in the local set? | Yes, as kind "human", scored apart. Else the set only measures what the pipeline already found. |
-| Q2 | Near-line tolerance T for posted findings? | 3 lines, same path and side. U-V1 also reports T = 0 and T = 10. |
-| Q3 | Minimum set size? | 30 cases, 40 posted, 20 must-not-raise. Else widen the date range. |
-| Q4 | Where does the set live? | A folder outside the repository, named by REVIEW_LOOP_EVAL_LOCAL. `eval-local/` stays git-ignored as a safety net. |
-| Q5 | CodeGraph for other repositories of the same Jira story? | Later, after U-V3. Reuse the several-repository workspace code of part 6. Needs a BRIEF 3.5 check. |
-| Q6 | Minimum severity for pre-existing items? | major. They pass the verify phase when it is on. |
-| Q7 | Review checks: per repository and global, at most 20 per run? | Yes. |
-| Q8 | If run B wins, does the shipped profile turn the verifier off? | Yes. The switch stays in the profile. |
-| Q9 | Cost exception when recall rises a lot? | None. The user decides each case after U-V2. |
-| Q10 | CI server type and version? | Needed before WP-VCI0. |
-| Q11 | CI auth: token type, scope, and store name? | A read-only token in the OS store under its own name. |
-| Q12 | Which builds: the build status of the PR head, matched by commit? | Yes. The CI origin comes from Settings, never from the build status URL. |
-| Q13 | Log size cap and retention? | 2 MB tail per failed stage, kept only in the run folder. |
+| Q1 | Do the user's own inline comments (not from a finding) count as bugs in the local set? | Decided 2026-10-28: yes. They are must-find items of kind "human" and score apart as human recall. |
+| Q2 | Near-line tolerance T for posted findings? | Decided 2026-10-28: 3 lines, same path and side. U-V1 also reports T = 0 and T = 10 with `eval:rescore --tolerance`. |
+| Q3 | Minimum set size? | Decided 2026-10-28: 30 cases, 40 posted, 20 must-not-raise. The builder uses all runs of the copy, so a smaller set needs more reviewed PRs first. |
+| Q4 | Where does the set live? | Decided 2026-10-28: a folder outside the repository, named by REVIEW_LOOP_EVAL_LOCAL. `eval-local/` stays git-ignored as a safety net. |
+| Q5 | CodeGraph for other repositories of the same Jira story? | Decided 2026-10-28: later, after U-V3. Reuse the several-repository workspace code of part 6. Needs a BRIEF 3.5 check. |
+| Q6 | Minimum severity for pre-existing items? | Decided 2026-10-28: major. They pass the verify phase when it is on. At most 5 per run (PREEXISTING_MAX, WP-V6). |
+| Q7 | Review checks: per repository and global, at most 20 per run? | Decided 2026-10-28: yes. |
+| Q8 | If run B wins, does the shipped profile turn the verifier off? | Decided 2026-10-28: yes. The switch stays in the profile. |
+| Q9 | Cost exception when recall rises a lot? | Decided 2026-10-28: none. The user decides each case after U-V2. |
+| Q10 | CI server type and version? | Open. It has no default. Needed before WP-VCI0. |
+| Q11 | CI auth: token type, scope, and store name? | Decided 2026-10-28: a read-only token in the OS store under its own name. |
+| Q12 | Which builds: the build status of the PR head, matched by commit? | Decided 2026-10-28: yes. The CI origin comes from Settings, never from the build status URL. |
+| Q13 | Log size cap and retention? | Decided 2026-10-28: 2 MB tail per failed stage, kept only in the run folder. |

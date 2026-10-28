@@ -61,11 +61,12 @@ bun run eval -- --real --set hard --repeat 2
 
 ## Re-score a result file
 
-`bun run eval:rescore <result.json> [--out <file>]` scores the runs of a result file again with the bugs, traps, and extras of the current case files. It needs no CLI and no network.
+`bun run eval:rescore <result.json> [--tolerance N] [--out <file>]` scores the runs of a result file again with the bugs, traps, and extras of the current case files. It needs no CLI and no network.
 
 - It prints the suite numbers with the stored and the current bugs and traps, and the delta. `--out` writes the re-scored result file, which `eval:compare` reads. It never changes the input file.
-- It finds each case by its ID in all sets. A case with no fixture keeps its stored bugs and traps.
+- It finds each case by its ID in all sets. A case with no fixture keeps its stored bugs and traps. A case of the local set always keeps them.
 - It builds each case repository again and warns when the head commit differs from the file: the runs then reviewed other code.
+- `--tolerance N` scores with the near-line tolerance N and records it in the output file (docs/eval/local.md).
 
 Re-score a baseline after you add `alt` places or `extras`, then compare it with a later run:
 
@@ -84,12 +85,12 @@ Run the same command on the new head, then compare the two files:
 bun run eval:compare eval-results/<baseline>.json eval-results/<new>.json
 ```
 
-It prints one table per metric with the delta, for all cases and for each case. It warns when a case changed between the two files; the numbers of such a case do not compare. It also warns when the two files used different models, efforts, or verify modes, or profiles with different revisions. The revision hashes each profile field that changes the run, so a file without a profile version still compares by its revision.
+It prints one table per metric with the delta, for all cases and for each case. It warns when a case changed between the two files; the numbers of such a case do not compare. It also warns when the two files used different models, efforts, or verify modes, or profiles with different revisions. The revision hashes each profile field that changes the run, so a file without a profile version still compares by its revision. It refuses two files with different set fingerprints or tolerances, with exit code 2. A file without these fields reads as no fingerprint and tolerance 0.
 
 ## Options
 
 - `--real`: run the `claude` CLI on PATH. Without `--real` or `--runner`, the harness prints the plan and exits with code 2.
-- `--set v1` or `--set hard`: the case set, `fixtures/eval/cases/` or `fixtures/eval/hard/`. Default: v1.
+- `--set v1`, `--set hard`, or `--set local`: the case set, `fixtures/eval/cases/`, `fixtures/eval/hard/`, or the local set from your own decisions in `REVIEW_LOOP_EVAL_LOCAL` (docs/eval/local.md). Default: v1.
 - `--cases all` or `--cases id,id`: the cases of the set to run. Default: all.
 - `--profile <id>`: a shipped review profile. Default: `general`.
 - `--profile-version N`: run the shipped values of the profile at profile version N, 1 to the current version (5). The result file records it as `profileVersion`. Default: no flag, so the current shipped profile runs. The flag changes only the profile. The prompts and the schema stay those of the current pipeline.
@@ -106,9 +107,11 @@ It prints one table per metric with the delta, for all cases and for each case. 
 ## Metrics
 
 - An item matches a bug or a trap when the path and the side are the same and the line ranges overlap, both ends included. An item on an `alt` place matches too.
+- The result file records the tolerance T as `tolerance`: 0 for sets v1 and hard, 3 for the local set. T widens each bug, human comment, and extra range by T lines on each end. A trap always uses 0.
+- human recall: local set only. Your own inline comments with a shown match, over all of them.
 - Shown items: the main list of the run. Prompt version 1 has no verify phase, so it shows each finding. Version 2 uses the volume rules of spec.md section 1.4.
 - recall: bugs with a shown match, over all bugs.
-- precision: shown items that match a bug, over shown items.
+- precision: shown items that match a bug or one of your own comments, over shown items.
 - trap rate: shown items on a trap that match no bug, over all traps.
 - noise: shown items that match no bug and no trap, per case.
 - false positives: shown items that match no bug, trap hits included, per case. For a case with no bug, it is the number of shown items.

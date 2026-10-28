@@ -5,7 +5,7 @@
 import type { RunPhase, RunUsage, VerifySummary, Volume } from "../../src/shared/dto";
 import type { AnchorState, Check, Coverage, DisplayGroup, Severity, Side } from "../../src/shared/review";
 import type { RunStatus } from "../../src/shared/run-log";
-import type { EvalBug, EvalExtra, EvalSet, EvalTrap } from "./cases";
+import type { EvalBug, EvalExtra, EvalHuman, EvalSet, EvalTrap } from "./cases";
 
 export type { Check, Severity, Volume };
 // run.ts sets it with displayGroup of src/shared/review.ts. Scoring reads the stored group, so older result files keep their groups:
@@ -79,6 +79,8 @@ export type EvalCaseInfo = {
   traps: EvalTrap[];
   // Absent in files made before this field existed: none.
   extras?: EvalExtra[];
+  // Local set only: your own inline comments.
+  human?: EvalHuman[];
 };
 
 export type EvalResult = {
@@ -100,20 +102,30 @@ export type EvalResult = {
   set?: EvalSet;
   // Set by eval:rescore, which replaces the bugs and traps of each case with the current fixture.
   rescoredAt?: string;
+  // T: an item matches a bug, a human comment, or an extra within T lines of its range. Traps always use T = 0. Absent: 0.
+  tolerance?: number;
+  // Local set only: setFingerprint of the cases that ran.
+  fingerprint?: string;
   repeat: number;
   cases: EvalCaseInfo[];
   runs: CaseRun[];
 };
 
+// The tolerance of a run on the local set (docs/plans/review-v3.md Q2). Fixture sets run with 0.
+export const LOCAL_TOLERANCE = 3;
+
 // Both ends inclusive (spec.md section 4.3).
 export const overlaps = (a: [number, number], b: [number, number]) => a[0] <= b[1] && b[0] <= a[1];
 type Spot = { path: string; side: Side; lines: [number, number] };
-// An item on the main place or on any alt place of a bug or trap matches it.
-const matches = (i: EvalItem, r: Spot & { alt?: Spot[] }) =>
-  [r, ...(r.alt ?? [])].some((p) => i.path === p.path && i.side === p.side && overlaps([i.line, i.lineEnd], p.lines));
+// An item on the main place or on any alt place of a bug or trap matches it. t widens each place by t lines on both ends.
+const matches = (i: EvalItem, r: Spot & { alt?: Spot[] }, t = 0) =>
+  [r, ...(r.alt ?? [])].some(
+    (p) => i.path === p.path && i.side === p.side && overlaps([i.line, i.lineEnd], [p.lines[0] - t, p.lines[1] + t]),
+  );
 
 export const METRICS = [
   "recall",
+  "humanRecall",
   "precision",
   "trapRate",
   "noise",
@@ -133,6 +145,8 @@ export type Score = { suite: Record<Metric, Stat>; cases: Record<string, Record<
 type Tally = {
   bugs: number;
   found: number;
+  human: number;
+  humanFound: number;
   shown: number;
   shownMatched: number;
   traps: number;
@@ -146,22 +160,27 @@ type Tally = {
   notCompleted: number;
 };
 
-function tally(c: EvalCaseInfo, r: CaseRun): Tally {
+// t: the tolerance of the result. Traps use t = 0 (docs/plans/review-v3.md WP-V1).
+function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
   const shown = r.items.filter((i) => i.group === "main");
-  const found = c.bugs.filter((b) => shown.some((i) => matches(i, b)));
+  const human = c.human ?? [];
+  const found = c.bugs.filter((b) => shown.some((i) => matches(i, b, t)));
   let severityOk = 0;
   for (const b of found) {
-    const best = Math.max(...shown.filter((i) => matches(i, b)).map((i) => RANK[i.severity]));
+    const best = Math.max(...shown.filter((i) => matches(i, b, t)).map((i) => RANK[i.severity]));
     if (best >= RANK[b.severityMin]) severityOk++;
   }
-  const bugHit = (i: EvalItem) => c.bugs.some((b) => matches(i, b));
+  // An item on your own comment is a true finding too. Only recall keeps the comments apart (humanRecall).
+  const bugHit = (i: EvalItem) => c.bugs.some((b) => matches(i, b, t)) || human.some((h) => matches(i, h, t));
   // An item on an extra counts as neither a bug hit, nor noise, nor a false positive. It leaves the shown count.
-  const extraHit = (i: EvalItem) => !bugHit(i) && (c.extras ?? []).some((x) => matches(i, x));
-  const trapHit = (i: EvalItem) => !extraHit(i) && c.traps.some((t) => matches(i, t));
+  const extraHit = (i: EvalItem) => !bugHit(i) && (c.extras ?? []).some((x) => matches(i, x, t));
+  const trapHit = (i: EvalItem) => !extraHit(i) && c.traps.some((x) => matches(i, x));
   const extraHits = shown.filter(extraHit).length;
   return {
     bugs: c.bugs.length,
     found: found.length,
+    human: human.length,
+    humanFound: human.filter((h) => shown.some((i) => matches(i, h, t))).length,
     shown: shown.length - extraHits,
     shownMatched: shown.filter(bugHit).length,
     traps: c.traps.length,
@@ -169,7 +188,7 @@ function tally(c: EvalCaseInfo, r: CaseRun): Tally {
     noise: shown.filter((i) => !bugHit(i) && !extraHit(i) && !trapHit(i)).length,
     extraHits,
     severityOk,
-    candidates: c.bugs.filter((b) => r.items.some((i) => matches(i, b))).length,
+    candidates: c.bugs.filter((b) => r.items.some((i) => matches(i, b, t))).length,
     minutes: r.minutes,
     costUsd: r.usage ? r.usage.costUsd : null,
     notCompleted: r.status === "completed" ? 0 : 1,
@@ -188,6 +207,7 @@ const meanOf = (xs: (number | null)[]) => {
 function metrics(ts: Tally[]): Record<Metric, number | null> {
   return {
     recall: ratio(sum(ts, "found"), sum(ts, "bugs")),
+    humanRecall: ratio(sum(ts, "humanFound"), sum(ts, "human")),
     precision: ratio(sum(ts, "shownMatched"), sum(ts, "shown")),
     trapRate: ratio(sum(ts, "trapHits"), sum(ts, "traps")),
     noise: ratio(sum(ts, "noise"), ts.length),
@@ -215,7 +235,7 @@ export function score(r: EvalResult): Score {
   const byId = new Map(r.cases.map((c) => [c.id, c]));
   const runs = r.runs.flatMap((x) => {
     const c = byId.get(x.case);
-    return c ? [{ repeat: x.repeat, case: c.id, t: tally(c, x) }] : [];
+    return c ? [{ repeat: x.repeat, case: c.id, t: tally(c, x, r.tolerance ?? 0) }] : [];
   });
   const repeats = [...new Set(runs.map((x) => x.repeat))].sort((a, b) => a - b);
   const suite = stats(repeats.map((n) => metrics(runs.filter((x) => x.repeat === n).map((x) => x.t))));
