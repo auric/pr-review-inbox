@@ -41,7 +41,7 @@ import {
 } from "../../src/shared/dto";
 import { FAKE_TOKEN, FAKE_USER, key, startFakeBitbucket } from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
-import { attachmentPath, ISSUE_KEY, JIRA_TOKEN, logOf, pngOf, startFakeJira } from "../support/fake-jira";
+import { attachmentPath, cloudAttachmentPath, ISSUE_KEY, JIRA_EMAIL, JIRA_TOKEN, logOf, pngOf, startFakeJira } from "../support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../support/review-fixture";
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
@@ -196,6 +196,53 @@ describe("Jira download", () => {
     expect((await failure(download({ id: "3", filename: "none.log", size: 10 }))).kind).toBe("not_found");
     fake.token = "rotated";
     expect((await failure(download({ id: "2", filename: "b.log", size: 5 }))).kind).toBe("auth");
+  });
+});
+
+describe("Jira Cloud download", () => {
+  function setup() {
+    const fake = startFakeJira({ cloud: true });
+    cleanup.push(fake.stop);
+    const media = fake.media;
+    if (!media) throw new Error("no media server");
+    media.token = JIRA_TOKEN;
+    const source = createJiraSource({ baseUrl: fake.url, token: JIRA_TOKEN, email: JIRA_EMAIL });
+    const got: Uint8Array[] = [];
+    const download = (a: { id: string; filename: string; size: number }) =>
+      source.download(a, async (c) => {
+        got.push(c);
+      });
+    return { fake, media, got, download };
+  }
+
+  test("requests the content endpoint with redirect=false and gets the bytes on the same origin", async () => {
+    const { fake, media, got, download } = setup();
+    await download({ id: "10100", filename: "screenshot.png", size: 2048 });
+    expect(fake.requests).toEqual(["GET /rest/api/2/attachment/content/10100?redirect=false"]);
+    expect(Buffer.concat(got).equals(pngOf(2048))).toBe(true);
+    expect(media.requests).toEqual([]);
+  });
+
+  test("a 303 to another origin is refused, and the other server gets no request", async () => {
+    const { fake, media, download } = setup();
+    media.routes[key("GET", "/file/10100")] = { status: 200, body: pngOf(2048) };
+    fake.routes[key("GET", cloudAttachmentPath("10100"))] = { status: 303, headers: { Location: `${media.url}/file/10100` } };
+    const e = await failure(download({ id: "10100", filename: "screenshot.png", size: 2048 }));
+    expect([e.kind, e.status]).toEqual(["redirect", undefined]);
+    expect(e.message).toBe("redirect: /rest/api/2/attachment/content/10100");
+    expect(media.requests).toEqual([]);
+  });
+
+  test("the size check holds; a bad ID sends no request", async () => {
+    const { fake, got, download } = setup();
+    fake.attach(ISSUE_KEY, { id: "1", filename: "a.log", mimeType: "text/plain", body: logOf(1024 * 1024), size: 10 });
+    expect((await failure(download({ id: "1", filename: "a.log", size: 10 }))).kind).toBe("shape");
+    expect(Buffer.concat(got).length).toBeLessThanOrEqual(10);
+    fake.attach(ISSUE_KEY, { id: "2", filename: "b.log", mimeType: "text/plain", body: logOf(5), size: 10 });
+    expect((await failure(download({ id: "2", filename: "b.log", size: 10 }))).kind).toBe("shape");
+    fake.requests.length = 0;
+    expect((await failure(download({ id: "../1", filename: "a.log", size: 10 }))).kind).toBe("not_found");
+    expect(fake.requests).toEqual([]);
   });
 });
 

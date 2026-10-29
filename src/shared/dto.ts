@@ -290,7 +290,8 @@ export type SettingsDto = {
   // By shipped profile ID: the edited fields, and the edited fields whose shipped value changed after the edit.
   profileEdits: Record<string, { fields: string[]; newer: string[] }>;
   // baseUrl: null when Jira is not connected.
-  jira: { baseUrl: string | null; caFile: string | null; tokenStored: boolean };
+  // email: the Atlassian account email of Jira Cloud. null for Server/Data Center.
+  jira: { baseUrl: string | null; caFile: string | null; email: string | null; tokenStored: boolean };
   // The opt-in of "Ask your session" (docs/plans/session-consult.md part C). Default off.
   sessions: boolean;
   // Ask the company AI policy question before a task attachment is included in runs. Default on.
@@ -939,10 +940,16 @@ export function fileOnly(f: Pick<AttachmentDto, "image" | "pdf" | "text" | "size
 }
 
 // PUT /api/settings/jira. Empty baseUrl disconnects Jira and clears the token. Absent or empty token keeps the stored token.
+// An email selects Jira Cloud. Absent or empty email selects Server/Data Center.
 export const jiraSettingsInput = z.object({
   baseUrl: z.string().trim().max(2048),
   token: z.string().trim().optional(),
   caFile: z.string().trim().optional(),
+  email: z
+    .string()
+    .trim()
+    .pipe(z.union([z.literal(""), z.email()]))
+    .optional(),
 });
 export type JiraSettingsInput = z.infer<typeof jiraSettingsInput>;
 

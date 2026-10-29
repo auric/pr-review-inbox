@@ -21,7 +21,7 @@ import type { PullRequest } from "../shared/types";
 import { ForgeError } from "./bitbucket/client";
 import { createBitbucketProvider, type ForgeProvider } from "./bitbucket/provider";
 import { type Config, ConfigWriteError, dataDir, dbPath, PROFILES_VERSION, readConfig, writeConfig } from "./config";
-import { createJiraSource } from "./context/jira";
+import { createJiraSource, JiraDeploymentError } from "./context/jira";
 import { ContextError, type ContextSource } from "./context/source";
 import { listPrs } from "./inbox/queries";
 import { log } from "./log";
@@ -156,6 +156,7 @@ export function createSettings(
       jira: {
         baseUrl: c?.jira?.baseUrl ?? null,
         caFile: c?.jira?.caFile ?? null,
+        email: c?.jira?.email ?? null,
         tokenStored: c?.jira !== undefined && (await jiraSecrets.get()) !== null,
       },
       sessions: c?.sessions === true,
@@ -261,7 +262,7 @@ export function createSettings(
 
   type JiraSaveError = { status: 400 | 409; error: string };
 
-  // PUT /api/settings/jira (src/server/context/routes.ts). Checks the token with GET /rest/api/2/myself before it saves.
+  // PUT /api/settings/jira (src/server/context/routes.ts). Checks the deployment type and the token (jira.ts check) before it saves.
   const saveJira = (input: JiraSettingsInput): Promise<SettingsDto | JiraSaveError> =>
     serial<SettingsDto | JiraSaveError>(async () => {
       const bad = (error: string): JiraSaveError => ({ status: 400, error });
@@ -278,24 +279,26 @@ export function createSettings(
       const baseUrl = normalize(input.baseUrl);
       if (!baseUrl) return bad("Give the Jira base URL only, for example https://host or https://host/context.");
       const caFile = input.caFile || undefined;
+      const email = input.email || undefined;
       const sameOrigin = prev.jira !== undefined && originOf(prev.jira.baseUrl) === originOf(baseUrl);
       const token = input.token || (sameOrigin ? await jiraSecrets.get() : null);
       if (!token) return bad("Enter the Jira token. A new Jira URL needs a new token.");
       let source: ContextSource;
       try {
-        source = createJiraSource({ baseUrl, token, caFile });
+        source = createJiraSource({ baseUrl, token, caFile, email });
       } catch (e) {
         return bad((e as { code?: unknown }).code ? "Cannot read the CA file." : (e as Error).message);
       }
       try {
         await source.check();
       } catch (e) {
+        if (e instanceof JiraDeploymentError) return bad(e.message);
         if (!(e instanceof ContextError)) throw e;
         log(`Jira check failed: ${e.message}`);
         return bad(e.kind === "auth" ? "Jira rejected the token." : `Jira check failed: ${e.message}`);
       }
       if (input.token) await jiraSecrets.set(token);
-      const next: Config = { ...prev, jira: { baseUrl, caFile } };
+      const next: Config = { ...prev, jira: { baseUrl, caFile, email } };
       writeConfig(dir, next);
       config = next;
       log(`Jira settings saved for ${originOf(baseUrl)}.`);
@@ -486,7 +489,7 @@ export function createSettings(
     async jira(): Promise<ContextSource | null> {
       const j = current()?.jira;
       const token = j && (await jiraSecrets.get());
-      return j && token ? createJiraSource({ baseUrl: j.baseUrl, token, caFile: j.caFile }) : null;
+      return j && token ? createJiraSource({ baseUrl: j.baseUrl, token, caFile: j.caFile, email: j.email }) : null;
     },
     // Runs after a successful PUT that changes baseUrl, token, or caFile, after the new config is written and its database is open.
     onSettingsChanged(fn: (s: SettingsState) => void) {

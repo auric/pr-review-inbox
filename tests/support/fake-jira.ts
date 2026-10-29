@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Fake Jira Server for tests and the demo. It listens on 127.0.0.1 only and serves fixtures/jira/ payloads.
+// Fake Jira for tests and the demo. It listens on 127.0.0.1 only and serves fixtures/jira/ payloads.
+// Default: Jira Server/Data Center with a Bearer PAT. cloud: Jira Cloud with Basic auth of JIRA_EMAIL and the token.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { key, startFakeBitbucket } from "./fake-bitbucket";
+import { key, type Reply, startFakeBitbucket } from "./fake-bitbucket";
 
 export const JIRA_TOKEN = "fake-jira-token-fedcba9876543210";
 export const ISSUE_KEY = "ABC-42";
+export const JIRA_EMAIL = "jdoe@example.com";
 
 // Reads a raw response body from fixtures/jira/.
 export function jiraFixture<T = Record<string, unknown>>(name: string): T {
@@ -51,25 +53,45 @@ export function logOf(size: number): Uint8Array {
 
 // The download path of an attachment (plan r3 S-ATT).
 export const attachmentPath = (id: string, filename: string) => `/secure/attachment/${id}/${encodeURIComponent(filename)}`;
+// The Jira Cloud download path of an attachment, without the query.
+export const cloudAttachmentPath = (id: string) => `/rest/api/2/attachment/content/${id}`;
 
 type Page = { startAt: number; maxResults: number; total: number; comments: unknown[] };
 type Attachment = { id: string; filename: string; mimeType: string | null; size: number };
 type Issue = { key: string; fields: { summary: string; attachment: Attachment[] } };
 
-export function startFakeJira(opts: { port?: number; https?: boolean } = {}) {
+export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: boolean } = {}) {
   const fake = startFakeBitbucket(opts);
+  // cloud: the 303 target of an attachment download without redirect=false. It is another origin.
+  const media = opts.cloud ? startFakeBitbucket() : null;
   fake.token = JIRA_TOKEN;
   fake.user = null;
-  fake.routes[key("GET", "/rest/api/2/myself")] = { status: 200, body: jiraFixture("myself.json") };
+  // serverInfo allows anonymous access on Server/Data Center and Cloud.
+  fake.authorized = (req) =>
+    new URL(req.url).pathname === "/rest/api/2/serverInfo" ||
+    req.headers.get("authorization") ===
+      (opts.cloud ? `Basic ${Buffer.from(`${JIRA_EMAIL}:${fake.token}`).toString("base64")}` : `Bearer ${fake.token}`);
+  fake.routes[key("GET", "/rest/api/2/myself")] = {
+    status: 200,
+    body: opts.cloud
+      ? { accountId: "5b10ac8d82e05b22cc7d4ef5", accountType: "atlassian", displayName: "Jordan Doe", active: true }
+      : jiraFixture("myself.json"),
+  };
+  fake.routes[key("GET", "/rest/api/2/serverInfo")] = {
+    status: 200,
+    body: { baseUrl: fake.url, version: opts.cloud ? "1001.0.0-SNAPSHOT" : "9.12.0", deploymentType: opts.cloud ? "Cloud" : "Server" },
+  };
   const issues = new Map<string, Issue>();
 
   // Serves body at the download path, with mimeType as Content-Type.
   function serve(a: { id: string; filename: string; mimeType: string | null }, body: Uint8Array) {
-    fake.routes[key("GET", attachmentPath(a.id, a.filename))] = {
-      status: 200,
-      body,
-      headers: a.mimeType ? { "Content-Type": a.mimeType } : {},
-    };
+    const ok: Reply = { status: 200, body, headers: a.mimeType ? { "Content-Type": a.mimeType } : {} };
+    if (!media) {
+      fake.routes[key("GET", attachmentPath(a.id, a.filename))] = ok;
+      return;
+    }
+    fake.routes[key("GET", cloudAttachmentPath(a.id))] = (req) =>
+      new URL(req.url).searchParams.get("redirect") === "false" ? ok : { status: 303, headers: { Location: `${media.url}/file/${a.id}` } };
   }
 
   // Serves issue.json and the two comment pages under this key. The fixture attachments get a PNG and a log of their sizes.
@@ -97,7 +119,16 @@ export function startFakeJira(opts: { port?: number; https?: boolean } = {}) {
     serve(a, a.body);
   }
 
-  return Object.assign(fake, { addIssue, attach });
+  const stop = fake.stop;
+  return Object.assign(fake, {
+    addIssue,
+    attach,
+    media,
+    stop() {
+      stop();
+      media?.stop();
+    },
+  });
 }
 
 export type FakeJira = ReturnType<typeof startFakeJira>;

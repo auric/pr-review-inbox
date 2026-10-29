@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Jira Server REST 2 client (BRIEF section 7, Jira 9.12 docs). The only module that sends requests to Jira. GET only.
+// Jira REST 2 client for Server/Data Center (BRIEF section 7, Jira 9.12 docs) and Jira Cloud. The only module that sends requests to Jira. GET only.
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { ATT_ID, type AttachmentMeta, type IssueContext, JIRA_KEY } from "../../shared/dto";
@@ -25,6 +25,8 @@ export const MAX_ATTACHMENTS = 200;
 // Plan r3: an attachment download follows at most this many redirects, each inside the configured origin and base path.
 export const MAX_HOPS = 3;
 const ATTACHMENT_PATH = "/secure/attachment";
+// Jira Cloud OpenAPI: redirect=false gives 200 with the bytes in place of a 303 to another host.
+const CLOUD_ATTACHMENT_PATH = "/rest/api/2/attachment/content";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 // Deep nesting keeps the converter busy for minutes (1 MB of nested div: over 90 s).
 // A field budget starts when its worker is ready. The total budget starts when the first worker is ready.
@@ -104,7 +106,13 @@ function createConverter(base: string, fieldMs: number, totalMs: number) {
 }
 
 // Lenient: unknown keys pass. The real shapes are not recorded (integration-check.md, Release 2).
-const myself = z.object({ name: z.string() });
+// Jira Cloud has no name (GDPR user privacy migration). It gives accountId and displayName.
+const myself = z
+  .object({ displayName: z.string().nullish(), name: z.string().nullish(), accountId: z.string().nullish() })
+  .transform((m) => m.displayName || m.name || m.accountId)
+  .pipe(z.string().min(1));
+// Jira Cloud always gives deploymentType "Cloud". Server/Data Center can omit it.
+const serverInfo = z.object({ deploymentType: z.string().nullish() });
 const issue = z.object({
   fields: z.object({
     summary: z.string(),
@@ -157,6 +165,8 @@ async function readBody(res: Response): Promise<string | null> {
 export type JiraOptions = {
   baseUrl: string;
   token: string;
+  // Present: Jira Cloud, with Basic auth of email and API token. Absent: Server/Data Center, with the token as Bearer.
+  email?: string;
   caFile?: string;
   timeoutMs?: number;
   convertMs?: { field: number; total: number };
@@ -178,6 +188,14 @@ function failed(e: unknown, endpoint: string, timedOut: boolean): ContextError {
   return new ContextError(timedOut ? "timeout" : "network", endpoint, undefined, safe);
 }
 
+// check() throws it when the auth form does not match the deployment type. The message is a fixed sentence for the user.
+export class JiraDeploymentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JiraDeploymentError";
+  }
+}
+
 // Throws a plain Error for a bad URL scheme, and an fs error with a `code` for an unreadable CA file.
 export function createJiraSource(opts: JiraOptions): ContextSource {
   const url = new URL(opts.baseUrl);
@@ -190,6 +208,8 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
   const ca = opts.caFile ? readFileSync(opts.caFile, "utf8") : undefined;
   const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
   const convertMs = opts.convertMs ?? { field: CONVERT_FIELD_MS, total: CONVERT_TOTAL_MS };
+  const cloud = opts.email !== undefined;
+  const authorization = cloud ? `Basic ${Buffer.from(`${opts.email}:${opts.token}`).toString("base64")}` : `Bearer ${opts.token}`;
 
   async function get<T extends z.ZodType>(path: string, schema: T): Promise<z.infer<T>> {
     const endpoint = path.split("?")[0] ?? path;
@@ -202,7 +222,7 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
         method: "GET",
         redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
-        headers: { Authorization: `Bearer ${opts.token}`, Accept: "application/json" },
+        headers: { Authorization: authorization, Accept: "application/json" },
         tls: ca ? { ca } : undefined,
       });
       text = await readBody(res);
@@ -224,7 +244,16 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
 
   return {
     ...JIRA,
-    check: async () => (await get("/rest/api/2/myself", myself)).name,
+    // serverInfo is optional: a failed read or an absent deploymentType does not block the check.
+    async check() {
+      const info = await get("/rest/api/2/serverInfo", serverInfo).catch(() => null);
+      const type = info?.deploymentType;
+      if (type === "Cloud" && !cloud)
+        throw new JiraDeploymentError("This is Jira Cloud. Enter your Atlassian account email and an API token.");
+      if (type && type !== "Cloud" && cloud)
+        throw new JiraDeploymentError("This Jira is Server or Data Center. Use a personal access token and no email.");
+      return get("/rest/api/2/myself", myself);
+    },
     async fetchIssue(key) {
       if (!JIRA_KEY.test(key)) throw new ContextError("not_found", "/rest/api/2/issue");
       const path = `/rest/api/2/issue/${encodeURIComponent(key)}`;
@@ -299,9 +328,10 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
     // The path never comes from the server (the content URL is not used). A token never leaves the configured origin.
     // timeoutMs applies until the answer headers and then between two body chunks.
     async download(att, write) {
-      if (!ATT_ID.test(att.id)) throw new ContextError("not_found", ATTACHMENT_PATH);
-      const endpoint = `${ATTACHMENT_PATH}/${att.id}`;
-      let target = new URL(`${base}${endpoint}/${encodeURIComponent(att.filename)}`);
+      const root = cloud ? CLOUD_ATTACHMENT_PATH : ATTACHMENT_PATH;
+      if (!ATT_ID.test(att.id)) throw new ContextError("not_found", root);
+      const endpoint = `${root}/${att.id}`;
+      let target = new URL(cloud ? `${base}${endpoint}?redirect=false` : `${base}${endpoint}/${encodeURIComponent(att.filename)}`);
       for (let hop = 0; ; hop++) {
         if (target.origin !== url.origin || !target.pathname.startsWith(basePath)) throw new ContextError("redirect", endpoint);
         const abort = new AbortController();
@@ -322,7 +352,7 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
               method: "GET",
               redirect: "manual",
               signal: abort.signal,
-              headers: { Authorization: `Bearer ${opts.token}` },
+              headers: { Authorization: authorization },
               tls: ca ? { ca } : undefined,
             });
           } catch (e) {

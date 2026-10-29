@@ -22,7 +22,7 @@ export class ContextError extends Error {
 export type ContextSource = {
   id: "jira";
   name: string;
-  // Checks the URL and the token. Returns the user name. Throws a ContextError.
+  // Checks the URL and the token. Returns the user name. Throws a ContextError, or a JiraDeploymentError for the wrong auth form.
   check(): Promise<string>;
   // Throws a ContextError.
   fetchIssue(key: string): Promise<IssueContext>;

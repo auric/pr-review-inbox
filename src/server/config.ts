@@ -35,7 +35,8 @@ const config = z.object({
   // Absent: a config from before PROFILES_VERSION. settings.ts upgrades the unedited fields of its shipped profiles.
   profilesVersion: z.number().optional().catch(undefined),
   // Absent: no Jira connection. The Jira token lives in the secret store under "jira-token".
-  jira: z.object({ baseUrl: z.string(), caFile: z.string().optional() }).optional().catch(undefined),
+  // email: present for Jira Cloud only. It is personal data: never put it in prompts or logs.
+  jira: z.object({ baseUrl: z.string(), caFile: z.string().optional(), email: z.string().optional() }).optional().catch(undefined),
   // Absent: off. On: each run reads the global CLAUDE.md of the Claude config folder (src/server/review/instructions.ts).
   globalInstructions: z.boolean().optional().catch(undefined),
   // Absent: off. On: "Ask your session" lists the transcripts of the Claude config folder (src/server/review/sessions.ts).

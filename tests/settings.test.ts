@@ -14,7 +14,7 @@ import { createSecrets, type SecretBackend } from "../src/server/secrets";
 import { createSettings, type Settings } from "../src/server/settings";
 import { profileInput, type SettingsDto } from "../src/shared/dto";
 import { FAKE_TOKEN, type FakeBitbucket, fixture, key, startFakeBitbucket, TEST_CA_FILE } from "./support/fake-bitbucket";
-import { type FakeJira, JIRA_TOKEN, startFakeJira } from "./support/fake-jira";
+import { type FakeJira, JIRA_EMAIL, JIRA_TOKEN, startFakeJira } from "./support/fake-jira";
 import { DASHBOARD_PATH } from "./support/scenarios";
 
 const DEFAULT_RULES = (["branch", "title", "description"] as const).map((source) => ({
@@ -82,7 +82,7 @@ describe("settings API", () => {
       profiles: SHIPPED_PROFILES,
       shippedProfiles: SHIPPED_PROFILES,
       profileEdits: UNEDITED,
-      jira: { baseUrl: null, caFile: null, tokenStored: false },
+      jira: { baseUrl: null, caFile: null, email: null, tokenStored: false },
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
@@ -111,7 +111,7 @@ describe("settings API", () => {
       profiles: SHIPPED_PROFILES,
       shippedProfiles: SHIPPED_PROFILES,
       profileEdits: UNEDITED,
-      jira: { baseUrl: null, caFile: null, tokenStored: false },
+      jira: { baseUrl: null, caFile: null, email: null, tokenStored: false },
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
@@ -895,6 +895,7 @@ describe("Jira settings (plan r2 S-JIRA)", () => {
     expect((await s.call("PUT", "/jira", { baseUrl: `${jira.url}/`, token: JIRA_TOKEN })).body.jira).toEqual({
       baseUrl: jira.url,
       caFile: null,
+      email: null,
       tokenStored: true,
     });
     expect((await s.call("PUT", "", { baseUrl: fake.url, notifications: true })).status).toBe(200);
@@ -934,7 +935,7 @@ describe("Jira settings (plan r2 S-JIRA)", () => {
       "Jira check failed: redirect 302: /rest/api/2/myself",
     );
     expect(s.config().jira).toBeUndefined();
-    expect((await s.call("GET", "")).body.jira).toEqual({ baseUrl: null, caFile: null, tokenStored: false });
+    expect((await s.call("GET", "")).body.jira).toEqual({ baseUrl: null, caFile: null, email: null, tokenStored: false });
   });
 
   test("an empty baseUrl disconnects Jira and deletes the token from the store", async () => {
@@ -950,10 +951,61 @@ describe("Jira settings (plan r2 S-JIRA)", () => {
     expect([...store.entries()]).toEqual([["jira-token", JIRA_TOKEN]]);
     const r = await s.call("PUT", "/jira", { baseUrl: "" });
     expect(r.status).toBe(200);
-    expect(r.body.jira).toEqual({ baseUrl: null, caFile: null, tokenStored: false });
+    expect(r.body.jira).toEqual({ baseUrl: null, caFile: null, email: null, tokenStored: false });
     expect(store.size).toBe(0);
     expect(s.config().jira).toBeUndefined();
     expect(s.config().baseUrl).toBe(fake.url);
     expect(await s.settings.jira()).toBeNull();
+  });
+
+  test("Jira Cloud: the email goes to config.json, the token only to the store; a Bitbucket PUT keeps it; disconnect clears both", async () => {
+    const cloud = startFakeJira({ cloud: true });
+    try {
+      const store = new Map<string, string>();
+      const backend: SecretBackend = {
+        get: async (o) => store.get(o.name) ?? null,
+        set: async (o) => void store.set(o.name, o.value),
+        delete: async (o) => store.delete(o.name),
+      };
+      const s = jiraSetup(backend);
+      await s.bitbucket();
+      const r = await s.call("PUT", "/jira", { baseUrl: cloud.url, token: JIRA_TOKEN, email: ` ${JIRA_EMAIL} ` });
+      expect(r.status).toBe(200);
+      expect(r.body.jira).toEqual({ baseUrl: cloud.url, caFile: null, email: JIRA_EMAIL, tokenStored: true });
+      expect(s.config().jira).toEqual({ baseUrl: cloud.url, email: JIRA_EMAIL });
+      expect(readFileSync(join(dir, "config.json"), "utf8")).not.toContain(JIRA_TOKEN);
+      expect([...store.entries()]).toEqual([["jira-token", JIRA_TOKEN]]);
+      expect((await s.call("PUT", "", { baseUrl: fake.url, token: FAKE_TOKEN, markAi: false })).status).toBe(200);
+      expect(s.config().jira).toEqual({ baseUrl: cloud.url, email: JIRA_EMAIL });
+      cloud.requests.length = 0;
+      expect(await (await s.settings.jira())?.check()).toBe("Jordan Doe");
+      expect(cloud.requests).toEqual(["GET /rest/api/2/serverInfo", "GET /rest/api/2/myself"]);
+      const off = await s.call("PUT", "/jira", { baseUrl: "" });
+      expect(off.body.jira).toEqual({ baseUrl: null, caFile: null, email: null, tokenStored: false });
+      expect(s.config().jira).toBeUndefined();
+      expect(store.size).toBe(0);
+    } finally {
+      cloud.stop();
+    }
+  });
+
+  test("Jira deployment mismatch and a bad email give 400 and store nothing", async () => {
+    const cloud = startFakeJira({ cloud: true });
+    try {
+      const s = jiraSetup();
+      await s.bitbucket();
+      expect((await s.call("PUT", "/jira", { baseUrl: cloud.url, token: JIRA_TOKEN })).body.error).toBe(
+        "This is Jira Cloud. Enter your Atlassian account email and an API token.",
+      );
+      expect((await s.call("PUT", "/jira", { baseUrl: jira.url, token: JIRA_TOKEN, email: JIRA_EMAIL })).body.error).toBe(
+        "This Jira is Server or Data Center. Use a personal access token and no email.",
+      );
+      const bad = await s.call("PUT", "/jira", { baseUrl: cloud.url, token: JIRA_TOKEN, email: "not-an-email" });
+      expect([bad.status, bad.body.error]).toEqual([400, "Invalid Jira settings."]);
+      expect(s.config().jira).toBeUndefined();
+      expect((await s.call("PUT", "/jira", { baseUrl: jira.url, token: JIRA_TOKEN, email: "" })).body.jira.email).toBeNull();
+    } finally {
+      cloud.stop();
+    }
   });
 });

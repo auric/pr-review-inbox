@@ -98,7 +98,7 @@ test("connect Jira, fetch a task, show a fetch error, fetch again, remove, and d
   await expect(token).toHaveAttribute("placeholder", "Stored. Leave empty to keep it.");
   const dto = await (await request.get(`${APP}/api/settings`)).text();
   expect(dto).not.toContain(E2E_JIRA_TOKEN);
-  expect(JSON.parse(dto).jira).toEqual({ baseUrl: JIRA_URL, caFile: null, tokenStored: true });
+  expect(JSON.parse(dto).jira).toEqual({ baseUrl: JIRA_URL, caFile: null, email: null, tokenStored: true });
   // The reload keeps the settings URL, so Settings opens again by itself (plan pr-view-v4 section 5).
   await page.reload();
   await expect(page).toHaveURL(/\/settings$/);
@@ -238,6 +238,7 @@ test("connect Jira, fetch a task, show a fetch error, fetch again, remove, and d
   expect(JSON.parse(await (await request.get(`${APP}/api/settings`)).text()).jira).toEqual({
     baseUrl: null,
     caFile: null,
+    email: null,
     tokenStored: false,
   });
   await closeSettings(page);

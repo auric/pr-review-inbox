@@ -40,6 +40,8 @@ export function startFakeBitbucket(opts: FakeOptions = {}) {
     token: FAKE_TOKEN,
     // null omits the X-AUSERNAME header.
     user: FAKE_USER as string | null,
+    // null accepts only "Bearer <token>".
+    authorized: null as ((req: Request) => boolean) | null,
     inFlight: 0,
     maxInFlight: 0,
   };
@@ -58,7 +60,7 @@ export function startFakeBitbucket(opts: FakeOptions = {}) {
       state.inFlight++;
       state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
       try {
-        if (req.headers.get("authorization") !== `Bearer ${state.token}`) {
+        if (state.authorized ? !state.authorized(req) : req.headers.get("authorization") !== `Bearer ${state.token}`) {
           return Response.json({ errors: [{ message: "Authentication failed." }] }, { status: 401 });
         }
         const route =

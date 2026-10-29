@@ -87,8 +87,8 @@ describe("task context API", () => {
     expect(((await (await s.call("GET", "/meta")).json()) as MetaDto).context).toEqual([{ id: "jira", name: "Jira", configured: false }]);
     const res = await s.connect();
     expect(res.status).toBe(200);
-    expect(((await res.json()) as SettingsDto).jira).toEqual({ baseUrl: jira.url, caFile: null, tokenStored: true });
-    expect(jira.requests).toEqual(["GET /rest/api/2/myself"]);
+    expect(((await res.json()) as SettingsDto).jira).toEqual({ baseUrl: jira.url, caFile: null, email: null, tokenStored: true });
+    expect(jira.requests).toEqual(["GET /rest/api/2/serverInfo", "GET /rest/api/2/myself"]);
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).jira).toEqual({ baseUrl: jira.url });
     expect(((await (await s.call("GET", "/meta")).json()) as MetaDto).context).toEqual([{ id: "jira", name: "Jira", configured: true }]);
   });

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { CAPS, CONVERT_FIELD_MS, createJiraSource, MAX_ATTACHMENTS, MAX_BODY_BYTES, MAX_HTML_BYTES } from "../../src/server/context/jira";
 import { ContextError } from "../../src/server/context/source";
 import { key, startFakeBitbucket } from "../support/fake-bitbucket";
-import { type FakeJira, ISSUE_KEY, JIRA_TOKEN, startFakeJira } from "../support/fake-jira";
+import { type FakeJira, ISSUE_KEY, JIRA_EMAIL, JIRA_TOKEN, startFakeJira } from "../support/fake-jira";
 
 const stops: (() => void)[] = [];
 afterEach(() => {
@@ -37,10 +37,27 @@ const COMMENTS = (start: number) => `${ISSUE}/comment?startAt=${start}&maxResult
 const page = (comments: unknown[]) => ({ status: 200, body: { startAt: 0, maxResults: 100, total: comments.length, comments } });
 
 describe("Jira client", () => {
-  test("check sends the PAT as Bearer and returns the user name", async () => {
+  test("check sends the PAT as Bearer and returns the display name", async () => {
     const { fake, source } = setup();
+    let auth: string | null = null;
+    fake.routes[key("GET", "/rest/api/2/myself")] = (req) => {
+      auth = req.headers.get("authorization");
+      return { status: 200, body: { name: "jdoe", displayName: "Jordan Doe" } };
+    };
+    expect(await source.check()).toBe("Jordan Doe");
+    expect(auth as string | null).toBe(`Bearer ${JIRA_TOKEN}`);
+    expect(fake.requests).toEqual(["GET /rest/api/2/serverInfo", "GET /rest/api/2/myself"]);
+  });
+
+  test("myself falls back to name, then accountId; a body without all three gives kind shape", async () => {
+    const { fake, source } = setup();
+    const me = key("GET", "/rest/api/2/myself");
+    fake.routes[me] = { status: 200, body: { name: "jdoe" } };
     expect(await source.check()).toBe("jdoe");
-    expect(fake.requests).toEqual(["GET /rest/api/2/myself"]);
+    fake.routes[me] = { status: 200, body: { accountId: "5b10ac8d82e05b22cc7d4ef5", displayName: null } };
+    expect(await source.check()).toBe("5b10ac8d82e05b22cc7d4ef5");
+    fake.routes[me] = { status: 200, body: { displayName: "", emailAddress: "jdoe@example.com" } };
+    expect((await failure(source.check())).kind).toBe("shape");
   });
 
   test("a wrong token gives kind auth; the error holds no token and no body", async () => {
@@ -49,7 +66,68 @@ describe("Jira client", () => {
     expect(e.kind).toBe("auth");
     expect(e.status).toBe(401);
     expect(e.message).toBe("auth 401: /rest/api/2/myself");
-    expect(fake.requests.length).toBe(1);
+    expect(e.message).not.toContain("wrong-token-AAAA");
+    expect(fake.requests).toEqual(["GET /rest/api/2/serverInfo", "GET /rest/api/2/myself"]);
+  });
+
+  test("Cloud: an email sends Basic base64(email:token) in check, fetchIssue, and download", async () => {
+    const fake = startFakeJira({ cloud: true });
+    stops.push(fake.stop);
+    const seen = new Set<string | null>();
+    const authorized = fake.authorized;
+    fake.authorized = (req) => {
+      seen.add(req.headers.get("authorization"));
+      return authorized?.(req) ?? false;
+    };
+    const source = createJiraSource({ baseUrl: fake.url, token: JIRA_TOKEN, email: JIRA_EMAIL });
+    expect(await source.check()).toBe("Jordan Doe");
+    await source.fetchIssue(ISSUE_KEY);
+    await source.download({ id: "10100", filename: "screenshot.png", size: 2048 }, async () => {});
+    expect([...seen]).toEqual([`Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64")}`]);
+  });
+
+  test("Cloud: a wrong token gives kind auth, and no error text holds the token, the email, or the header", async () => {
+    const fake = startFakeJira({ cloud: true });
+    stops.push(fake.stop);
+    const token = "wrong-cloud-token-BBBB";
+    const source = createJiraSource({ baseUrl: fake.url, token, email: JIRA_EMAIL });
+    const header = Buffer.from(`${JIRA_EMAIL}:${token}`).toString("base64");
+    const errors = [
+      await failure(source.check()),
+      await failure(source.fetchIssue(ISSUE_KEY)),
+      await failure(source.download({ id: "10100", filename: "screenshot.png", size: 2048 }, async () => {})),
+    ];
+    for (const e of errors) {
+      expect(e.kind).toBe("auth");
+      for (const text of [e.message, String(e.stack), JSON.stringify(e)]) {
+        for (const secret of [token, JIRA_EMAIL, header]) expect(text).not.toContain(secret);
+      }
+    }
+  });
+
+  test("check: Cloud serverInfo without an email, or an email on Server, fails before myself", async () => {
+    const cloud = startFakeJira({ cloud: true });
+    stops.push(cloud.stop);
+    await expect(createJiraSource({ baseUrl: cloud.url, token: JIRA_TOKEN }).check()).rejects.toThrow(
+      "This is Jira Cloud. Enter your Atlassian account email and an API token.",
+    );
+    expect(cloud.requests).toEqual(["GET /rest/api/2/serverInfo"]);
+    const { fake } = setup();
+    await expect(createJiraSource({ baseUrl: fake.url, token: JIRA_TOKEN, email: JIRA_EMAIL }).check()).rejects.toThrow(
+      "This Jira is Server or Data Center. Use a personal access token and no email.",
+    );
+    expect(fake.requests).toEqual(["GET /rest/api/2/serverInfo"]);
+  });
+
+  test("check: a failed serverInfo or one without deploymentType does not block", async () => {
+    const { fake, source } = setup();
+    const info = key("GET", "/rest/api/2/serverInfo");
+    fake.routes[info] = { status: 500 };
+    expect(await source.check()).toBe("Jordan Doe");
+    fake.routes[info] = { status: 200, body: { version: "9.12.0" } };
+    expect(await source.check()).toBe("Jordan Doe");
+    fake.routes[info] = { status: 200, body: "not json" };
+    expect(await createJiraSource({ baseUrl: fake.url, token: JIRA_TOKEN }).check()).toBe("Jordan Doe");
   });
 
   test("fetchIssue reads the issue and two comment pages with rendered HTML, and converts it to Markdown", async () => {
