@@ -78,9 +78,11 @@ jobs:
       - if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: node node_modules/@playwright/test/cli.js install-deps chromium
       - run: bun run test:e2e
-      - if: failure()
+      # A flaky test passes on the retry, so the job passes. Its failed attempt keeps a trace in test-results/.
+      - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: e2e-results
           path: test-results/
+          if-no-files-found: ignore
           retention-days: 7

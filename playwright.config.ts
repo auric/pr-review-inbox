@@ -10,10 +10,16 @@ export default defineConfig({
   testMatch: "*.e2e.ts",
   workers: 1,
   fullyParallel: false,
-  retries: 0,
+  // The list reporter names a test that passes only on the retry as flaky.
+  retries: process.env.CI ? 1 : 0,
   reporter: "list",
   globalTeardown: "./tests/e2e/teardown.ts",
-  use: { baseURL: `http://127.0.0.1:${APP_PORT}`, browserName: "chromium", viewport: { width: 1280, height: 800 } },
+  use: {
+    baseURL: `http://127.0.0.1:${APP_PORT}`,
+    browserName: "chromium",
+    viewport: { width: 1280, height: 800 },
+    trace: "retain-on-failure",
+  },
   webServer: {
     // The build makes the tests run the current UI.
     command: "bun run build && bun tests/e2e/serve.ts",

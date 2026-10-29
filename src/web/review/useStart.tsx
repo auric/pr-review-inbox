@@ -12,8 +12,8 @@ import type { ThreadModel } from "../pr/threads";
 import { Hint } from "../shell/Hint";
 import { failText, prKey } from "../shell/model";
 import type { BriefMode } from "./Brief";
-import { saveLastProfile, useBrief, useRuns, useStartReplies, useStartRereview, useStartReview } from "./data";
-import { briefState, newCommits, plural, rereviewState, shortHash } from "./model";
+import { saveLastProfile, useBrief, usePrRuns, useRuns, useStartReplies, useStartRereview, useStartReview } from "./data";
+import { activeRun, briefState, newCommits, plural, rereviewState, shortHash } from "./model";
 import type { Focus } from "./useReview";
 
 // The open brief and the review that its Start begins.
@@ -48,7 +48,7 @@ export function useStart(
   const { meta, latest, newest, focusAfter } = o;
   const qc = useQueryClient();
   const brief = useBrief(pr.id);
-  const active = useRuns().data?.find((r) => r.status === "running") ?? null;
+  const active = activeRun(useRuns().data, usePrRuns(pr.id).data);
   const start = useStartReview(pr.id);
   const startReplies = useStartReplies(pr.id);
   const startRereview = useStartRereview(pr.id);

@@ -386,6 +386,13 @@ export const latestReview = (runs: RunDto[] | undefined) =>
   runs?.find((r) => r.kind === "review") ??
   null;
 
+// The run that holds the only slot, from GET /api/runs. The PR runs refetch apart from it, and the run line shows them.
+// SQL.end leaves the running status only once, so an end in the PR runs is newer than "running" in all runs.
+export function activeRun(all: RunDto[] | undefined, pr: RunDto[] | undefined): RunDto | null {
+  const r = all?.find((x) => x.status === "running");
+  return r && !pr?.some((x) => x.id === r.id && x.status !== "running") ? r : null;
+}
+
 // docs/plans/review-v2/spec.md section 3.2: the newest explain run with a result, as the Explain page shows it. Its questions join
 // the Drafts.
 export const latestExplain = (runs: RunDto[] | undefined) =>

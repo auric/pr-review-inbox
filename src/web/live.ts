@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // One EventSource for all tabs of the app. EventSource reconnects by itself.
-import type { InvalidateQueryFilters, QueryClient } from "@tanstack/react-query";
+import type { InvalidateQueryFilters, Query, QueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 // Dispatches "events" when the server stored new notification events.
@@ -52,9 +52,19 @@ export type LiveMessage =
   | { type: "events" }
   | { type: "resync" };
 
-export function applyLive(qc: Pick<QueryClient, "invalidateQueries">, m: LiveMessage) {
-  if (m.type === "changed") for (const f of changedFilters(m.data)) qc.invalidateQueries(f);
-  if (m.type === "resync") qc.invalidateQueries();
+type Qc = Pick<QueryClient, "invalidateQueries" | "cancelQueries">;
+
+// TanStack Query gives an invalidated query in its first load the request that is out. That request can be older than the change.
+// So the change cancels it, and the invalidate sends a new one. The filter keeps to the queries that the invalidate refetches.
+function refetch(qc: Qc, f?: InvalidateQueryFilters) {
+  const first = (q: Query) => q.state.data === undefined && !q.isDisabled() && !q.isStatic() && (f?.predicate?.(q) ?? true);
+  void qc.cancelQueries({ queryKey: f?.queryKey, type: "active", fetchStatus: "fetching", predicate: first }, { silent: true });
+  void qc.invalidateQueries(f);
+}
+
+export function applyLive(qc: Qc, m: LiveMessage) {
+  if (m.type === "changed") for (const f of changedFilters(m.data)) refetch(qc, f);
+  if (m.type === "resync") refetch(qc);
   // Each tab claims the new events. The server gives each event to one tab only.
   if (m.type !== "changed") liveEvents.dispatchEvent(new Event("events"));
 }
@@ -69,7 +79,7 @@ const LOCK = "rl-live";
 
 // Browsers allow 6 HTTP/1.1 connections per host across all tabs. The tab that holds the lock owns the only stream
 // and forwards its messages to the other tabs. A hidden tab keeps the stream, because notifications need it.
-export function connectLive(qc: Pick<QueryClient, "invalidateQueries">, env: LiveEnv): () => void {
+export function connectLive(qc: Qc, env: LiveEnv): () => void {
   const stop = new AbortController();
   const { locks, channel } = env;
   // Resolves on disconnect, which frees the lock.

@@ -9,6 +9,7 @@ import type { AnchoredFinding, Carried, Question, ReplyPayload } from "../../src
 import type { RunEvent } from "../../src/shared/run-log";
 import type { Turn } from "../../src/shared/turn";
 import {
+  activeRun,
   agentDetails,
   agentInfo,
   agentPath,
@@ -529,6 +530,16 @@ describe("reply drafts", () => {
     expect(latestReview(runs)?.id).toBe(7);
     expect(latestReview([run({ id: 9, kind: "reply" })])).toBeNull();
     expect(latestReview(undefined)).toBeNull();
+  });
+
+  test("the slot is free when the PR runs show the end of the run that all runs still show as running", () => {
+    const running = run({ id: 5, status: "running" });
+    expect(activeRun([running], undefined)?.id).toBe(5);
+    expect(activeRun([running], [running])?.id).toBe(5);
+    expect(activeRun([running], [run({ id: 5, status: "completed" })])).toBeNull();
+    // A run of another PR is not in the PR runs, so it holds the slot.
+    expect(activeRun([running], [run({ id: 4, status: "completed" })])?.id).toBe(5);
+    expect(activeRun([run({ id: 5, status: "completed" })], [running])).toBeNull();
   });
 
   test("a cancelled or failed review run keeps the drafts and the re-review base of the review before it", () => {

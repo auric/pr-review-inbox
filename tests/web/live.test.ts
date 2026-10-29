@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 import { describe, expect, test } from "bun:test";
-import { QueryClient, type QueryKey } from "@tanstack/react-query";
-import { changedFilters, connectLive, diffRefresh, type LiveEnv, liveEvents } from "../../src/web/live";
+import { QueryClient, type QueryKey, QueryObserver } from "@tanstack/react-query";
+import { applyLive, changedFilters, connectLive, diffRefresh, type LiveEnv, liveEvents } from "../../src/web/live";
 
 const KEYS: QueryKey[] = [
   ["prs"],
@@ -30,6 +30,25 @@ describe("live event keys", () => {
 
   test("a PR event refetches a diff index that asks for the code", async () => {
     expect(await stale(changedFilters({ prs: [1] }), { fetch: true })).toContain('["pr",1,"diff"]');
+  });
+
+  test("a change during the first load of a query sends a new request, because the request out can be older than the change", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const answers: ((v: string) => void)[] = [];
+    const queryFn = () => new Promise<string>((r) => answers.push(r));
+    const stop = new QueryObserver(qc, { queryKey: ["pr", 1], queryFn }).subscribe(() => {});
+    try {
+      expect(answers).toHaveLength(1);
+      applyLive(qc, { type: "changed", data: { prs: [1] } });
+      expect(answers).toHaveLength(2);
+      answers[0]?.("before the change");
+      answers[1]?.("after the change");
+      await settle();
+      expect(qc.getQueryData<string>(["pr", 1])).toBe("after the change");
+      expect(qc.getQueryState(["pr", 1])?.status).toBe("success");
+    } finally {
+      stop();
+    }
   });
 
   test("a source head change refetches the diff index and pages of that PR only", async () => {
@@ -119,7 +138,10 @@ function tabs() {
       locks: useLocks ? locks : undefined,
       channel: ch as unknown as LiveEnv["channel"],
     };
-    const close = connectLive({ invalidateQueries: (f?: unknown) => void calls.push(f ?? "all") } as never, env);
+    const close = connectLive(
+      { invalidateQueries: (f?: unknown) => void calls.push(f ?? "all"), cancelQueries: async () => {} } as never,
+      env,
+    );
     return { calls, close };
   };
   return { open, sources };
