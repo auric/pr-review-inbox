@@ -25,6 +25,7 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `--repeat N`: run each side N times (1 to 10). Default: 1.
 - `--candidate-variants a,b`: the variants that the candidate adds. Default: `signal,order,rules2`. An empty value adds none.
 - `--candidate-modules a,b`: the modules that the candidate adds to the shipped modules. Default: `failures`. An empty value adds none.
+- `--effort low|medium|high|xhigh|max`: the effort of the baseline and candidate runs. Default: none, so both sides run with the effort of the shipped profile. The eval header shows the effort of each run.
 - `--candidate-effort low|medium|high|xhigh|max`: the effort of the candidate runs. Default: none, so the candidate runs with the effort of the baseline. With this flag, the table says that the efforts differ.
 - `--db <file>` and `--cache <folder>`: another database file and git folder. Default: those of the data folder.
 - `--out <folder>`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/`, which git ignores.

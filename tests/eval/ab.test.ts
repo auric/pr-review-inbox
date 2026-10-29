@@ -140,6 +140,7 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   repeat: "1",
   variants: ["signal", "order", "rules2"],
   modules: ["failures"],
+  baseEffort: null,
   effort: null,
   build: [],
   results: null,
@@ -155,6 +156,7 @@ describe("eval:ab arguments", () => {
       repeat: "2",
       variants: ["signal", "order", "rules2"],
       modules: ["failures"],
+      baseEffort: null,
       effort: null,
       runner: ["cli", "a"],
     });
@@ -162,6 +164,7 @@ describe("eval:ab arguments", () => {
     const none = parseAb(["--candidate-variants", "", "--candidate-modules", ""]);
     expect(none).toMatchObject({ variants: [], modules: [] });
     expect(parseAb(["--candidate-effort", "max"])).toMatchObject({ effort: "max" });
+    expect(parseAb(["--effort", "medium"])).toMatchObject({ baseEffort: "medium", effort: null });
   });
 
   test("unknown names, a bad repeat, and an unknown flag are errors", () => {
@@ -169,6 +172,7 @@ describe("eval:ab arguments", () => {
     expect(parseAb(["--candidate-modules", "magic"])).toMatchObject({ error: expect.stringContaining("--modules must be") });
     expect(parseAb(["--candidate-variants", "rules3"])).toMatchObject({ error: expect.stringContaining("--variants must be") });
     expect(parseAb(["--candidate-effort", "huge"])).toMatchObject({ error: expect.stringContaining("--candidate-effort must be one of") });
+    expect(parseAb(["--effort", "huge"])).toMatchObject({ error: expect.stringContaining("--effort must be one of") });
     expect(parseAb(["--repeat", "0"])).toMatchObject({ error: expect.stringContaining("--repeat must be") });
     expect("error" in parseAb(["--set", "v1"])).toBe(true);
     expect(parseAb(["--runner"])).toMatchObject({ error: "--runner needs a command." });
@@ -197,6 +201,14 @@ describe("eval:ab arguments", () => {
       ...["--effort", "xhigh", "--ordinals", "--runner", "fake"],
     ]);
     expect(runArgs("review", "baseline", opts({ effort: "xhigh" }), "")).not.toContain("--effort");
+    // --effort: both sides get it. --candidate-effort overrides the candidate only.
+    const effortOf = (a: string[]) => a[a.indexOf("--effort") + 1];
+    for (const mode of ["review", "rereview"] as const) {
+      expect(effortOf(runArgs(mode, "baseline", opts({ baseEffort: "medium" }), ""))).toBe("medium");
+      expect(effortOf(runArgs(mode, "candidate", opts({ baseEffort: "medium" }), ""))).toBe("medium");
+      expect(effortOf(runArgs(mode, "baseline", opts({ baseEffort: "medium", effort: "low" }), ""))).toBe("medium");
+      expect(effortOf(runArgs(mode, "candidate", opts({ baseEffort: "medium", effort: "low" }), ""))).toBe("low");
+    }
     expect(runArgs("rereview", "baseline", opts({ runner: null }), "")).toEqual([
       "--set",
       "local",

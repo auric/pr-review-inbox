@@ -4,7 +4,7 @@
 // Gate U-V1 in one command (docs/plans/review-v3.md, docs/eval/local.md): build the local set from the data folder of the app, then
 // run the shipped profile (baseline) and the candidate on it, for the review cases and the re-review cases, and print one table each.
 // Usage: bun run eval:ab -- [--repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--db f] [--cache d] [--out d]
-//   [--candidate-effort e] [--user slug] [--results d] [--runner <command> <args...>]
+//   [--effort e] [--candidate-effort e] [--user slug] [--results d] [--runner <command> <args...>]
 // Without --runner, the runs use the claude CLI on PATH. Exit codes: 0 done, 1 a build error or a failed run, 2 a usage error.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -17,9 +17,10 @@ import { checkoutState, evalProfile, parseOptions, main as runMain } from "./run
 import { type EvalResult, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants signal,order,rules2] [--candidate-modules failures] [--candidate-effort ${EFFORTS.join("|")}] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--runner <command> <args...>]
+export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants signal,order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
 --candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. An empty value adds nothing.
+--effort: the effort of the baseline and candidate runs. Default: the effort of the shipped profile.
 --candidate-effort: the effort of the candidate runs. Default: the effort of the baseline.
 --runner runs the given CLI instead of the claude CLI on PATH and must come last.`;
 const DEFAULT_VARIANTS = "signal,order,rules2";
@@ -32,6 +33,8 @@ export type AbOptions = {
   repeat: string;
   variants: string[];
   modules: string[];
+  // null: both sides run with the effort of the shipped profile.
+  baseEffort: string | null;
   // null: the candidate runs with the effort of the baseline.
   effort: string | null;
   build: string[];
@@ -55,6 +58,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
         repeat: { type: "string", default: "1" },
         "candidate-variants": { type: "string", default: DEFAULT_VARIANTS },
         "candidate-modules": { type: "string", default: DEFAULT_MODULES },
+        effort: { type: "string" },
         "candidate-effort": { type: "string" },
         db: { type: "string" },
         cache: { type: "string" },
@@ -71,13 +75,17 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     repeat: v.repeat ?? "1",
     variants: list(v["candidate-variants"] ?? DEFAULT_VARIANTS),
     modules: list(v["candidate-modules"] ?? DEFAULT_MODULES),
+    baseEffort: v.effort ?? null,
     effort: v["candidate-effort"] ?? null,
     build,
     results: v.results === undefined ? null : resolve(v.results),
     runner,
   };
-  if (o.effort !== null && !(EFFORTS as readonly string[]).includes(o.effort))
-    return { error: `--candidate-effort must be one of ${EFFORTS.join(", ")}.` };
+  for (const [flag, e] of [
+    ["--effort", o.baseEffort],
+    ["--candidate-effort", o.effort],
+  ] as const)
+    if (e !== null && !(EFFORTS as readonly string[]).includes(e)) return { error: `${flag} must be one of ${EFFORTS.join(", ")}.` };
   // The eval runner checks each name and the repeat count.
   for (const mode of ["review", "rereview"] as const)
     for (const side of ["baseline", "candidate"] as const) {
@@ -106,8 +114,9 @@ export function runArgs(mode: Mode, side: "baseline" | "candidate", o: AbOptions
     const variants = [...new Set([...base.variants, ...extra])];
     if (variants.length) args.push("--variants", variants.join(","));
     args.push("--modules", [...new Set([...base.modules, ...o.modules])].join(","));
-    if (o.effort !== null) args.push("--effort", o.effort);
   }
+  const effort = (side === "candidate" ? o.effort : null) ?? o.baseEffort;
+  if (effort !== null) args.push("--effort", effort);
   args.push("--ordinals");
   if (out) args.push("--out", out);
   args.push(...(o.runner ? ["--runner", ...o.runner] : ["--real"]));
