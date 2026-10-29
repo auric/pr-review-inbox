@@ -153,7 +153,11 @@ export const changedLines = (patch: string) => parseDiff(patch).reduce((n, f) =>
 // Claude Code loads these files as instructions when a session reads files in their folder. A case stores each one with
 // FIXTURE_SUFFIX, so the fixtures never steer a session in this repository. buildRepo writes it under its real name.
 export const INSTRUCTION_FILE = /^(CLAUDE\.md|CLAUDE\.local\.md|AGENTS\.md)$/i;
+// The GitHub dependency graph reads these manifests and raises Dependabot alerts for the pinned sample versions. A case stores
+// each one with FIXTURE_SUFFIX too. Nothing installs them.
+export const MANIFEST_FILE = /^(package\.json|pyproject\.toml|requirements.*\.txt)$/i;
 export const FIXTURE_SUFFIX = ".fixture";
+const storedRenamed = (name: string) => INSTRUCTION_FILE.test(name) || MANIFEST_FILE.test(name);
 // The patch from base/ to the earlier head of a re-review fixture. head.patch also starts at base/.
 export const EARLIER_PATCH = "earlier.patch";
 
@@ -189,9 +193,9 @@ export function loadCase(dir: string): EvalCase {
   const base = new Map(
     files(baseDir).map((p) => {
       const name = (q: string) => q.split("/").at(-1) ?? "";
-      if (INSTRUCTION_FILE.test(name(p))) throw new Error(`Case ${c.id}: store ${p} as ${p}${FIXTURE_SUFFIX}.`);
+      if (storedRenamed(name(p))) throw new Error(`Case ${c.id}: store ${p} as ${p}${FIXTURE_SUFFIX}.`);
       const real = p.slice(0, -FIXTURE_SUFFIX.length);
-      return [p.endsWith(FIXTURE_SUFFIX) && INSTRUCTION_FILE.test(name(real)) ? real : p, readFileSync(join(baseDir, p), "utf8")];
+      return [p.endsWith(FIXTURE_SUFFIX) && storedRenamed(name(real)) ? real : p, readFileSync(join(baseDir, p), "utf8")];
     }),
   );
   if (!base.size) throw new Error(`Case ${c.id} has no base files.`);

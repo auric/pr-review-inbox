@@ -174,7 +174,7 @@ The web bundle and the compiled binary include these packages.
 | vfile-message | 4.0.3 | MIT |
 | which | 2.0.2 | ISC |
 | xstate | 5.33.2 | MIT |
-| zod | 4.6.5 | MIT |
+| zod | 4.6.6 | MIT |
 | zod-to-json-schema | 3.25.2 | ISC |
 
 ### @base-ui/react 1.8.0
@@ -6613,7 +6613,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### zod 4.6.5
+### zod 4.6.6
 
 License: MIT. Ships in the web bundle, compiled binary.
 

@@ -7,7 +7,16 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildRepo, type EvalCase, FIXTURE_SUFFIX, type FixtureSet, INSTRUCTION_FILE, loadCases, SETS } from "../../scripts/eval/cases";
+import {
+  buildRepo,
+  type EvalCase,
+  FIXTURE_SUFFIX,
+  type FixtureSet,
+  INSTRUCTION_FILE,
+  loadCases,
+  MANIFEST_FILE,
+  SETS,
+} from "../../scripts/eval/cases";
 import { compareText } from "../../scripts/eval/compare";
 import { DEFAULT_MODEL_WARNING, evalProfile, type Options, parseOptions, WARNING } from "../../scripts/eval/run";
 import { type EvalResult, score } from "../../scripts/eval/score";
@@ -238,6 +247,13 @@ describe("eval cases", () => {
       INSTRUCTION_FILE.test(p.replaceAll("\\", "/").split("/").at(-1) ?? ""),
     );
     expect(loaded).toEqual([]);
+  });
+
+  test("no file under fixtures has a manifest name that the GitHub dependency graph reads", () => {
+    const manifests = [...new Bun.Glob("fixtures/**").scanSync({ cwd: ROOT, dot: true })].filter((p) =>
+      MANIFEST_FILE.test(p.replaceAll("\\", "/").split("/").at(-1) ?? ""),
+    );
+    expect(manifests).toEqual([]);
   });
 
   test("the set has 4 cases per language and one case of about 500 changed lines", () => {
