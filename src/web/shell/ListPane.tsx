@@ -8,6 +8,8 @@ import {
   BellOff,
   ChevronRight,
   CircleAlert,
+  CircleDashed,
+  CircleX,
   History,
   Hourglass,
   LoaderCircle,
@@ -26,6 +28,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { PrRow, RunDto } from "../../shared/dto";
 import type { PrRef } from "../../shared/types";
+import { BUILD_WORD, buildHint } from "../pr/build";
 import type { ReadyLine } from "../publish/model";
 import { runWhy } from "../review/model";
 import { createHints, Hint, type Hints, HintTrigger, SharedHint } from "./Hint";
@@ -340,6 +343,25 @@ const Row = memo(function Row({
                   {p.staleDrafts}
                   <span className="@max-[26rem]/row:sr-only"> reply</span> {p.staleDrafts === 1 ? "draft" : "drafts"} out of date
                 </span>
+              </span>
+            </HintTrigger>
+          )}
+          {/* docs/plans/ci-builds.md, Layer A: failed and running only. A passed build is the normal case. */}
+          {(p.build?.state === "failed" || p.build?.state === "running") && (
+            <HintTrigger hints={hints} label={buildHint(p.build)}>
+              <span
+                data-build={p.build.state}
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-[5px] whitespace-nowrap",
+                  p.build.state === "failed" && "text-destructive",
+                )}
+              >
+                {p.build.state === "failed" ? (
+                  <CircleX aria-hidden className="size-[15px] shrink-0" />
+                ) : (
+                  <CircleDashed aria-hidden className="size-[15px] shrink-0" />
+                )}
+                <span>{BUILD_WORD[p.build.state]}</span>
               </span>
             </HintTrigger>
           )}

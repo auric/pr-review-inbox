@@ -9,6 +9,7 @@ import {
   type AttachmentMeta,
   type BranchCheckDto,
   type BranchSearchDto,
+  type BuildDto,
   branchPrefix,
   fileOnly,
   listedKind,
@@ -23,6 +24,7 @@ import {
   type TaskStepDto,
 } from "../../shared/dto";
 import { branchName, type RepoAccess, type TaskSize } from "../../shared/task";
+import { namedBuild } from "../pr/build";
 import { attachmentRows, sizeText } from "../review/tasks";
 
 export type ActionKind =
@@ -90,6 +92,11 @@ export function elapsed(ms: number): string {
 }
 
 export const codeParts = (t: Pick<TaskDto, "parts">) => t.parts.filter((p) => p.kind !== "spec");
+// The build of the newest code part with an open PR. The task view status and its build line use it.
+export const prBuild = (t: Pick<TaskDto, "parts">): BuildDto | null => {
+  const p = codeParts(t).at(-1);
+  return p?.remotePr != null ? p.build : null;
+};
 export const openQuestions = (t: Pick<TaskDto, "questions">, source: TaskQuestionDto["source"]): TaskQuestionDto[] => {
   const open = t.questions.filter((q) => q.source === source && q.answer === null);
   const round = Math.max(0, ...open.map((q) => q.round));
@@ -621,10 +628,17 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
       false,
     );
   }
+  // docs/plans/ci-builds.md, Layer A: the build of the newest PR.
+  const build = prBuild(t);
+  if (build?.state === "failed") {
+    const name = namedBuild(build)?.name;
+    return wait(`The build of your PR failed${name ? `: ${name}` : ""}.`, goPr, [...(update ? [update] : []), CLOSE], "pr", true);
+  }
   const allOpen = rows.length > 1 && rows.every((r) => r.state === "pr_open");
   const waiting = `${allOpen ? `All ${rows.length} PRs are open. ` : ""}Waiting for ${waitingFor(last?.waiting ?? [])}${of}.`;
-  if (update && moved) return wait(`${waiting} ${baseNews(t)}.`, goPr, [update, CLOSE], "pr", false);
-  return wait(`${waiting} Nothing to do.`, goPr, [CLOSE], "pr", false);
+  const ci = build?.state === "running" ? " The build runs." : build?.state === "passed" ? " The build passed." : "";
+  if (update && moved) return wait(`${waiting}${ci} ${baseNews(t)}.`, goPr, [update, CLOSE], "pr", false);
+  return wait(`${waiting}${ci || " Nothing to do."}`, goPr, [CLOSE], "pr", false);
 }
 
 // ---------- Several repositories (spec.md sections 6.16.5 and 6.16.8) ----------

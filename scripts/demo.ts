@@ -22,7 +22,7 @@ import { createReviewJobs } from "../src/server/review/jobs";
 import { createSecrets } from "../src/server/secrets";
 import { createSettings } from "../src/server/settings";
 import { createSyncEngine } from "../src/server/sync/engine";
-import { FAKE_TOKEN, FAKE_USER, fixture, key, repoWrites, startFakeBitbucket } from "../tests/support/fake-bitbucket";
+import { buildStatuses, FAKE_TOKEN, FAKE_USER, fixture, key, repoWrites, startFakeBitbucket } from "../tests/support/fake-bitbucket";
 import { JIRA_TOKEN, startFakeJira } from "../tests/support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../tests/support/review-fixture";
 import * as S from "../tests/support/scenarios";
@@ -896,6 +896,20 @@ const multi = await taskRepoSet(claudeDir, fake, "PROJ1", {
   lib: { "lock.c": "int lock_waits(void) { return 0; }\n" },
 });
 jira.addIssue(MULTI_KEY, "Count the lock waits");
+
+// docs/plans/ci-builds.md, Layer A: the build statuses by commit. PR 81 alone has HEAD_B, so its build fails and the others pass.
+// repoWrites replaces the stats route, so this comes after the last call.
+const ciUrl = (job: string, n: number) => `https://ci.example.test/job/${job}/${n}/`;
+const builds = buildStatuses(fake);
+builds.set(HEAD_A, [
+  { key: "lint", state: "SUCCESSFUL", name: "lint", url: ciUrl("lint", 412) },
+  { key: "unit", state: "SUCCESSFUL", name: "unit tests", url: ciUrl("unit", 977) },
+]);
+builds.set(HEAD_B, [
+  { key: "unit", state: "FAILED", name: "unit tests", url: ciUrl("unit", 978) },
+  { key: "lint", state: "SUCCESSFUL", name: "lint", url: ciUrl("lint", 413) },
+  { key: "e2e", state: "INPROGRESS", name: "e2e", url: ciUrl("e2e", 120) },
+]);
 
 // The user's clone of PROJ1/sample-repo-4: a temp clone of the demo remote on the PR source branch at its head, outside the data
 // folder. Its own identity and no signing, so a commit never waits for a prompt. The commit runs the user's hooks, as Apply does.

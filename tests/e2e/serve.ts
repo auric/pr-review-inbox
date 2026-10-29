@@ -17,7 +17,16 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { createSyncEngine } from "../../src/server/sync/engine";
-import { FAKE_USER, fixture, key, type Reply, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
+import {
+  buildStatuses,
+  FAKE_USER,
+  type FakeBuild,
+  fixture,
+  key,
+  type Reply,
+  repoWrites,
+  startFakeBitbucket,
+} from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
 import { startFakeJira } from "../support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../support/review-fixture";
@@ -496,6 +505,8 @@ fake.routes[key("GET", "/rest/api/1.0/repos")] = (req) =>
     : typeof repoList === "function"
       ? repoList(req)
       : (repoList ?? { status: 404 });
+// docs/plans/ci-builds.md, Layer A: the build statuses by commit. repoWrites replaces the stats route, so this comes after the last call.
+const builds = buildStatuses(fake);
 
 // ---------- Fix it (plan r3): the user's clone ----------
 // Clones live outside the data folder, as a real clone does.
@@ -694,6 +705,7 @@ r[key("POST", "/__control/reset")] = async () => {
     await remoteGit(["update-ref", "-d", ref]);
   await releaseBase();
   await multi.reset();
+  builds.clear();
   fake.requests.length = 0;
   jira.requests.length = 0;
   Object.assign(folders, { opens: false, paths: [] });
@@ -705,6 +717,14 @@ r[key("POST", "/__control/reset")] = async () => {
   rmSync(join(claudeDir, "calls.jsonl"), { force: true });
   app = boot();
   return NO_CONTENT;
+};
+// Sets the build statuses of the source head of PR pr, or of commit. The next sync cycle reads them. A reset clears them.
+r[key("POST", "/__control/build")] = async (req) => {
+  const b = (await req.json()) as { pr?: number; commit?: string; builds: FakeBuild[] };
+  const head = b.commit ?? (b.pr === undefined ? undefined : PRS[b.pr]?.pr.fromRef.latestCommit);
+  if (!head) return NOT_FOUND;
+  builds.set(head, b.builds);
+  return ok({ head });
 };
 // Writes the synthetic transcripts: one on the source branch of PR 1004, one on main. A reset deletes them.
 r[key("POST", "/__control/sessions")] = () => {

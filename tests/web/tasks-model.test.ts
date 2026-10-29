@@ -9,6 +9,7 @@ import type {
   AttachmentDto,
   AttachmentMeta,
   BranchCheckDto,
+  BuildDto,
   TaskDto,
   TaskPartDto,
   TaskPrDto,
@@ -41,6 +42,7 @@ import {
   plannedBranch,
   planSentence,
   pointerRow,
+  prBuild,
   prefixProblem,
   proposals,
   prRowLook,
@@ -383,6 +385,36 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
       more: ["Close the task"],
       screen: "pr",
     });
+  });
+
+  // docs/plans/ci-builds.md, Layer A: the build rows come after the "not pushed" row.
+  test("ready with a build: failed needs you, running and passed wait; Go to the PR stays", () => {
+    const b = (state: BuildDto["state"], builds: BuildDto["builds"]): BuildDto => ({
+      head: "a".repeat(40),
+      state,
+      counts: { successful: 1, inProgress: state === "running" ? 1 : 0, failed: state === "failed" ? 1 : 0, cancelled: 0, unknown: 0 },
+      builds,
+      readAt: NOW,
+    });
+    const at = (build: BuildDto | null) =>
+      view(building({ state: "ready", parts: [part({ state: "pr_open", remotePr: 101, prState: "OPEN", waiting: ["Anna Lee"], build })] }));
+    const failed = at(b("failed", [{ name: "unit tests", state: "FAILED", url: null }]));
+    expect(shape(failed)).toEqual({
+      status: "The build of your PR failed: unit tests.",
+      primary: "Go to the PR",
+      more: ["Close the task"],
+      screen: "pr",
+    });
+    expect(failed.needsYou).toBe(true);
+    expect(at(b("failed", null)).status).toBe("The build of your PR failed.");
+    const running = at(b("running", []));
+    expect(running.status).toBe("Waiting for Anna Lee's review. The build runs.");
+    expect(running.needsYou).toBe(false);
+    expect(at(b("passed", [])).status).toBe("Waiting for Anna Lee's review. The build passed.");
+    expect(at(b("other", [])).status).toBe("Waiting for Anna Lee's review. Nothing to do.");
+    // A part without a PR has no build row.
+    const unopened = building({ state: "ready", parts: [part({ state: "pr_open", build: b("failed", []) })] });
+    expect(prBuild(unopened)).toBeNull();
   });
 
   test("ready with a merged PR: Done, Close the task", () => {

@@ -16,6 +16,7 @@ import type { MetaDto, TaskDto } from "../../shared/dto";
 import { type TaskDoc, taskProfileId } from "../../shared/task";
 import type { Layer } from "../keys";
 import { formatRoute, listRoute, type PrRef } from "../lib/route";
+import { BuildLine } from "../pr/Header";
 import { RunLog } from "../review/RunLog";
 import { trackerOf } from "../review/tasks";
 import { Hint } from "../shell/Hint";
@@ -33,6 +34,7 @@ import {
   openQuestions,
   partRows,
   pointerRow,
+  prBuild,
   prName,
   prRowLook,
   runningStep,
@@ -330,6 +332,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             {view.status}
           </p>
           {view.detail && <p className="m-0 text-sm text-ink-2">{view.detail}</p>}
+          {view.screen === "pr" && <BuildLine b={prBuild(t)} className="text-sm text-ink-2" />}
           {view.lines.length > 0 && (
             <ul aria-label="Repositories to update" className="m-0 grid list-none gap-0.5 p-0 text-sm text-ink-2">
               {view.lines.map((l) => (
@@ -744,6 +747,7 @@ function Content(props: {
                 ) : (
                   <span className={look.state === "failed" ? "text-destructive" : "text-ink-2"}>{look.text}</span>
                 )}
+                <BuildLine b={r.build} className="text-ink-2" />
               </div>
               <span translate="no" className="font-mono text-xs text-ink-2 [overflow-wrap:anywhere]">
                 {r.branch} → {r.baseBranch}

@@ -8,6 +8,10 @@ import {
   Archive,
   BookOpenText,
   Check,
+  CircleCheck,
+  CircleDashed,
+  CircleQuestionMark,
+  CircleX,
   ClipboardCopy,
   Copy,
   Ellipsis,
@@ -36,13 +40,15 @@ import {
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
-import type { PrRow } from "../../shared/dto";
+import type { BuildState } from "../../shared/build";
+import type { BuildDto, PrRow } from "../../shared/dto";
 import { archived } from "../../shared/views";
 import type { ConsultUi } from "../consult/Consult";
 import { useMeta } from "../meta";
 import { useArchive, useFollow } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { prKey, taskHint } from "../shell/model";
+import { BUILD_WORD, countsText, namedBuild } from "./build";
 import { Avatar, NewMark } from "./Thread";
 import { visitText } from "./threads";
 
@@ -177,6 +183,53 @@ function TaskChip({ t, onTaskIds }: { t: PrRow["tasks"][number]; onTaskIds: () =
         {t.key}
       </button>
     </Hint>
+  );
+}
+
+export const BUILD_ICON: Record<BuildState, typeof Check> = {
+  failed: CircleX,
+  running: CircleDashed,
+  passed: CircleCheck,
+  other: CircleQuestionMark,
+  none: CircleQuestionMark,
+};
+
+// docs/plans/ci-builds.md, Layer A: the state word, the named build, and the counts. The word carries the state, not only the color.
+// The build page opens only in the browser.
+export function BuildLine({ b, className }: { b: BuildDto | null; className?: string }) {
+  const word = b && BUILD_WORD[b.state];
+  if (!b || !word) return null;
+  const s = namedBuild(b);
+  const href = webLink(s?.url ?? null);
+  const Icon = BUILD_ICON[b.state];
+  return (
+    <span data-build={b.state} className={cn("inline-flex min-w-0 flex-wrap items-center gap-x-1.5", className)}>
+      <span className={cn("inline-flex items-center gap-1.5 font-medium", b.state === "failed" && "text-destructive")}>
+        <Icon aria-hidden className="size-[15px] shrink-0" />
+        {word}
+        {s && ":"}
+      </span>
+      {/* A flex box drops the spaces from the layout, but the text keeps them. */}{" "}
+      {s &&
+        (href ? (
+          <Hint label="Open the build page">
+            <a
+              href={href}
+              {...external}
+              className="rl-hit inline-flex min-w-0 items-center gap-1 rounded underline decoration-rule-strong decoration-dotted underline-offset-3 [overflow-wrap:anywhere] hover:text-pen hover:decoration-current hover:decoration-solid"
+            >
+              {s.name}
+              <ExternalLink aria-hidden className="size-3 shrink-0" />
+            </a>
+          </Hint>
+        ) : (
+          <span className="[overflow-wrap:anywhere]">{s.name}</span>
+        ))}{" "}
+      <span className="text-muted-foreground">
+        ({countsText(b)}
+        {b.builds === null && "; details not available"})
+      </span>
+    </span>
   );
 }
 
@@ -516,6 +569,7 @@ export function Header(props: {
               ))}
             </span>
           )}
+          <BuildLine b={pr.build} />
         </div>
       </header>
       <ActionBar top={top} label={key} title={title}>
