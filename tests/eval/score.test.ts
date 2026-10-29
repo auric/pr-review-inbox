@@ -3,6 +3,7 @@
 
 // docs/plans/review-v2 AC-M1: the eval scorer gives the documented numbers on a hand-made result. No process, no file.
 import { describe, expect, test } from "bun:test";
+import type { EvalBug } from "../../scripts/eval/cases";
 import { compareText, summaryText } from "../../scripts/eval/compare";
 import { rescore } from "../../scripts/eval/rescore";
 import { type CaseRun, type EvalItem, type EvalResult, overlaps, score } from "../../scripts/eval/score";
@@ -327,5 +328,66 @@ describe("eval:rescore", () => {
       "Case b has no fixture now. It keeps its stored bugs and traps.",
       "No case has new bugs, traps, or extras.",
     ]);
+  });
+});
+
+describe("recall leaves out the bugs that the volume cannot show", () => {
+  const bug = (id: string, line: number, severityMin: EvalBug["severityMin"]): EvalBug => ({
+    id,
+    path: "v.ts",
+    side: "new",
+    lines: [line, line],
+    severityMin,
+    module: "core",
+    note: "n",
+  });
+  const result = (volume: "balanced" | "quiet", items: EvalItem[]): EvalResult => ({
+    ...RESULT,
+    volume,
+    repeat: 1,
+    cases: [
+      {
+        id: "v",
+        title: "Case v",
+        language: "typescript",
+        changedLines: 50,
+        base: "b",
+        head: "h",
+        bugs: [bug("N", 10, "nit"), bug("M", 20, "minor"), bug("J", 30, "major")],
+        traps: [],
+      },
+    ],
+    runs: [run("v", 1, items)],
+  });
+
+  test("balanced: a nit bug leaves the recall count", () => {
+    const r = result("balanced", [
+      item({ path: "v.ts", side: "new", line: 10, lineEnd: 10, severity: "nit", group: "fold" }),
+      item({ path: "v.ts", side: "new", line: 20, lineEnd: 20, severity: "minor" }),
+      item({ path: "v.ts", side: "new", line: 30, lineEnd: 30, severity: "major" }),
+    ]);
+    const s = score(r);
+    expect(s.suite.recall).toEqual({ mean: 1, min: 1, max: 1 });
+    expect(s.suite.candidateRecall?.mean).toBe(1);
+    expect(s.leftOut).toEqual({ count: 1, severities: ["nit"] });
+    expect(summaryText(r)).toContain("Must-find items this volume cannot show: 1 (nit).");
+    expect(score(rescore(r, new Map(), "2026-10-22T01:00:00.000Z").result).suite.recall).toEqual(s.suite.recall);
+  });
+
+  test("quiet: nit and minor bugs leave the recall count", () => {
+    const r = result("quiet", [
+      item({ path: "v.ts", side: "new", line: 20, lineEnd: 20, severity: "minor", group: "fold" }),
+      item({ path: "v.ts", side: "new", line: 30, lineEnd: 30, severity: "major" }),
+    ]);
+    const s = score(r);
+    expect(s.suite.recall).toEqual({ mean: 1, min: 1, max: 1 });
+    expect(s.leftOut).toEqual({ count: 2, severities: ["nit", "minor"] });
+    expect(summaryText(r)).toContain("Must-find items this volume cannot show: 2 (nit, minor).");
+    expect(compareText(r, r)).toContain("Must-find items this volume cannot show: A 2, B 2.");
+  });
+
+  test("no volume counts every bug", () => {
+    expect(score(RESULT).leftOut).toEqual({ count: 0, severities: [] });
+    expect(summaryText(RESULT)).toContain("Must-find items this volume cannot show: 0.");
   });
 });

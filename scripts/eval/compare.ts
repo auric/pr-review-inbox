@@ -100,7 +100,9 @@ export function summaryText(r: EvalResult, s: Score = score(r), name = (id: stri
       ];
     }),
   ];
-  return [header(r), "", table(rows), "", table(perCase)].join("\n");
+  const { count, severities } = s.leftOut;
+  const left = `Must-find items this volume cannot show: ${count}${severities.length ? ` (${severities.join(", ")})` : ""}.`;
+  return [header(r), left, "", table(rows), "", table(perCase)].join("\n");
 }
 
 // One row per metric: the "all cases" numbers of two scores and the delta.
@@ -131,7 +133,11 @@ export function compareText(a: EvalResult, b: EvalResult, name = (id: string) =>
   const sb = score(b);
   const ta = truth(a);
   const tb = truth(b);
-  const out = [`A: ${header(a)}`, `B: ${header(b)}`];
+  const out = [
+    `A: ${header(a)}`,
+    `B: ${header(b)}`,
+    `Must-find items this volume cannot show: A ${sa.leftOut.count}, B ${sb.leftOut.count}. Recall leaves them out.`,
+  ];
   const only = [...new Set([...ta.keys(), ...tb.keys()])].filter((id) => !(ta.has(id) && tb.has(id)));
   if (only.length) out.push(`Cases in one file only: ${only.map(name).join(", ")}. The "all cases" rows do not compare.`);
   const changed = [...ta.keys()].filter((id) => tb.has(id) && ta.get(id) !== tb.get(id));

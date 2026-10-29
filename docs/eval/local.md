@@ -17,6 +17,7 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `rules2` adds generated files, lock files, and vendored third-party code to the do-not-flag list. The verify phase gets four examples of false positives to refute.
 - Re-review cases: the candidate also adds `rereview-strict`.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
+- Recall leaves out each must-find item that the volume of the run cannot show: nit items under `balanced`, and nit and minor items under `quiet`.
 - The builder only reads the data folder: a temp copy of the database, and read-only git commands on the cache. It refuses an `--out` folder in the data folder.
 
 ## Optional flags

@@ -3,7 +3,15 @@
 
 // Scoring of an eval result file (docs/plans/review-v2/spec.md section 4.3). Pure: no file, no process, no clock.
 import type { RunPhase, RunUsage, VerifySummary, Volume } from "../../src/shared/dto";
-import type { AnchorState, Check, Coverage, DisplayGroup, Severity, Side } from "../../src/shared/review";
+import {
+  type AnchorState,
+  type Check,
+  type Coverage,
+  type DisplayGroup,
+  displayGroup,
+  type Severity,
+  type Side,
+} from "../../src/shared/review";
 import type { RunStatus } from "../../src/shared/run-log";
 import type { EvalBug, EvalEarlier, EvalExtra, EvalHuman, EvalSet, EvalTrap } from "./cases";
 
@@ -13,6 +21,15 @@ export type { Check, Severity, Volume };
 export type Group = DisplayGroup;
 
 const RANK: Record<Severity, number> = { nit: 0, minor: 1, major: 2, blocker: 3 };
+
+// The severities that the volume never shows in the main group, from displayGroup. Recall leaves out the bugs of these severities.
+export const unshowable = (volume: Volume | null): Severity[] =>
+  (Object.keys(RANK) as Severity[]).filter((s) => displayGroup({ severity: s }, volume ?? undefined) !== "main");
+// The bugs that recall counts under the volume of the result.
+export const mustFind = (c: Pick<EvalCaseInfo, "bugs">, volume: Volume | null): EvalBug[] => {
+  const out = unshowable(volume);
+  return c.bugs.filter((b) => !out.includes(b.severityMin));
+};
 
 // One finding item of a run. path, side, line, lineEnd: the anchor that the app stored.
 export type EvalItem = {
@@ -160,11 +177,17 @@ export const METRICS = [
 ] as const;
 export type Metric = (typeof METRICS)[number];
 export type Stat = { mean: number; min: number; max: number } | null;
-export type Score = { suite: Record<Metric, Stat>; cases: Record<string, Record<Metric, Stat>> };
+// leftOut: the bugs of all cases that recall leaves out under the volume, and their severities.
+export type Score = {
+  suite: Record<Metric, Stat>;
+  cases: Record<string, Record<Metric, Stat>>;
+  leftOut: { count: number; severities: Severity[] };
+};
 
 // The counts of one run of one case.
 type Tally = {
   bugs: number;
+  allBugs: number;
   found: number;
   human: number;
   humanFound: number;
@@ -186,7 +209,7 @@ type Tally = {
 };
 
 // t: the tolerance of the result. Traps use t = 0 (docs/plans/review-v3.md WP-V1).
-function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
+function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): Tally {
   const shown = r.items.filter((i) => i.group === "main");
   const human = c.human ?? [];
   // docs/plans/review-v3.md WP-V3: a re-raise is a new item on an earlier finding that you posted or discarded. Its lines must be the
@@ -195,7 +218,8 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
     e.lines && (e.status === "posted" || e.status === "discarded") ? [{ path: e.path, side: e.side, lines: e.lines }] : [],
   );
   const scored = (c.earlier ?? []).filter((e) => e.status === "posted" && e.resolved !== null);
-  const found = c.bugs.filter((b) => shown.some((i) => matches(i, b, t)));
+  const bugs = mustFind(c, volume);
+  const found = bugs.filter((b) => shown.some((i) => matches(i, b, t)));
   let severityOk = 0;
   for (const b of found) {
     const best = Math.max(...shown.filter((i) => matches(i, b, t)).map((i) => RANK[i.severity]));
@@ -210,7 +234,8 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number): Tally {
   const trapHit = (i: EvalItem) => !extraHit(i) && c.traps.some((x) => matches(i, x));
   const extraHits = shown.filter(extraHit).length;
   return {
-    bugs: c.bugs.length,
+    bugs: bugs.length,
+    allBugs: c.bugs.length,
     found: found.length,
     human: human.length,
     humanFound: human.filter((h) => shown.some((i) => matches(i, h, t))).length,
@@ -252,7 +277,7 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     falsePositives: ratio(sum(ts, "shown") - sum(ts, "shownMatched"), ts.length),
     extras: ratio(sum(ts, "extraHits"), ts.length),
     severityOk: ratio(sum(ts, "severityOk"), sum(ts, "found")),
-    candidateRecall: ratio(sum(ts, "candidates"), sum(ts, "bugs")),
+    candidateRecall: ratio(sum(ts, "candidates"), sum(ts, "allBugs")),
     // null outside a re-review, so plain results show no value.
     reRaises: ts.some((x) => x.rereview) ? ratio(sum(ts, "reRaises"), ts.length) : null,
     verdictOk: ratio(sum(ts, "verdictOk"), sum(ts, "verdicts")),
@@ -276,7 +301,7 @@ export function score(r: EvalResult): Score {
   const byId = new Map(r.cases.map((c) => [c.id, c]));
   const runs = r.runs.flatMap((x) => {
     const c = byId.get(x.case);
-    return c ? [{ repeat: x.repeat, case: c.id, t: tally(c, x, r.tolerance ?? 0) }] : [];
+    return c ? [{ repeat: x.repeat, case: c.id, t: tally(c, x, r.tolerance ?? 0, r.volume) }] : [];
   });
   const repeats = [...new Set(runs.map((x) => x.repeat))].sort((a, b) => a - b);
   const suite = stats(repeats.map((n) => metrics(runs.filter((x) => x.repeat === n).map((x) => x.t))));
@@ -285,7 +310,9 @@ export function score(r: EvalResult): Score {
     const mine = runs.filter((x) => x.case === c.id);
     if (mine.length) cases[c.id] = stats(mine.map((x) => metrics([x.t])));
   }
-  return { suite, cases };
+  const severities = unshowable(r.volume);
+  const count = r.cases.reduce((n, c) => n + c.bugs.length - mustFind(c, r.volume).length, 0);
+  return { suite, cases, leftOut: { count, severities } };
 }
 
 // ---------- Reply cases (docs/plans/review-v2/spec.md section 2.13, `--replies`) ----------

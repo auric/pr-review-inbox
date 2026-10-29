@@ -67,6 +67,7 @@ import {
   type EvalItem,
   type EvalResult,
   LOCAL_TOLERANCE,
+  mustFind,
   score,
   type Volume,
 } from "./score";
@@ -708,12 +709,8 @@ export async function main(argv: string[]): Promise<number> {
         result.runs.push(run);
         save(file, result);
         const s = info.has(c.id) ? score({ ...result, runs: [run] }).cases[c.id] : undefined;
-        const recall =
-          c.bugs.length === 0
-            ? "no seeded bug"
-            : s?.recall
-              ? `${Math.round(s.recall.mean * c.bugs.length)}/${c.bugs.length} bugs`
-              : "no score";
+        const counted = mustFind(c, result.volume).length;
+        const recall = counted === 0 ? "no seeded bug" : s?.recall ? `${Math.round(s.recall.mean * counted)}/${counted} bugs` : "no score";
         const time = run.minutes === null ? "" : `, ${run.minutes.toFixed(1)} min`;
         const shown = run.items.filter((i) => i.group === "main").length;
         // judge.ts: skipped or unavailable coverage entries make a run incomplete.
