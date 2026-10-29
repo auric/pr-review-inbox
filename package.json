@@ -35,6 +35,7 @@
     "eval:local": "bun scripts/eval/local.ts",
     "eval:ab": "bun scripts/eval/ab.ts",
     "gate:ci": "bun scripts/gate/ci.ts",
+    "gate:jira": "bun scripts/gate/jira.ts",
     "screenshots": "bun run build && node scripts/screenshots.ts"
   },
   "dependencies": {

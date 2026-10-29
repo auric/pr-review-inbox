@@ -119,9 +119,141 @@ export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: bo
     serve(a, a.body);
   }
 
+  // Sub-tasks (spec.md section 6.20). Shapes follow the Jira 9.12.0 REST docs (issue-getIssue, issue-getTransitions). The parent gets
+  // subtasks, issuelinks, and one comment with a file link. Each sub-task gets parent. Every issue gets transitions.
+  // The transition POST needs JSON and X-Atlassian-Token: no-check, as the app sends it. Real Jira may not need the header.
+  const self = (path: string) => `${fake.url}/rest/api/2/${path}`;
+  const CATEGORIES = { new: [2, "blue-gray", "To Do"], indeterminate: [4, "yellow", "In Progress"], done: [3, "green", "Done"] } as const;
+  type Category = keyof typeof CATEGORIES;
+  const STATUS_IDS: Record<Category, string> = { new: "10000", indeterminate: "3", done: "10001" };
+  const statusOf = (category: Category) => {
+    const [id, colorName, name] = CATEGORIES[category];
+    return {
+      self: self(`status/${STATUS_IDS[category]}`),
+      description: "",
+      iconUrl: `${fake.url}/images/icons/statuses/generic.png`,
+      name,
+      id: STATUS_IDS[category],
+      statusCategory: { self: self(`statuscategory/${id}`), id, key: category, colorName, name },
+    };
+  };
+  const issueType = (subtask: boolean) => ({
+    self: self("issuetype/10003"),
+    id: subtask ? "10003" : "10002",
+    name: subtask ? "Sub-task" : "Task",
+    subtask,
+  });
+  const ref = (k: string) => {
+    const i = issues.get(k) as (Issue & { fields: Record<string, unknown> }) | undefined;
+    if (!i) throw new Error(`No issue ${k}.`);
+    return {
+      id: k.replace(/\D/g, ""),
+      key: k,
+      self: self(`issue/${k}`),
+      fields: { summary: i.fields.summary, status: i.fields.status, issuetype: i.fields.issuetype },
+    };
+  };
+  const TRANSITIONS: [string, Category][] = [
+    ["11", "new"],
+    ["21", "indeterminate"],
+    ["31", "done"],
+  ];
+  const transitions = new Map<string, string[]>();
+  function transitionRoutes(k: string) {
+    const path = `/rest/api/2/issue/${k}/transitions`;
+    fake.routes[key("GET", path)] = () => ({
+      status: 200,
+      body: {
+        expand: "transitions",
+        transitions: TRANSITIONS.map(([id, c]) => ({
+          id,
+          name: CATEGORIES[c][2],
+          to: statusOf(c),
+          hasScreen: false,
+          isGlobal: true,
+          isInitial: false,
+          isConditional: false,
+        })),
+      },
+    });
+    fake.routes[key("POST", path)] = async (req) => {
+      if (req.headers.get("x-atlassian-token") !== "no-check") return { status: 403, body: "XSRF check failed" };
+      if (!req.headers.get("content-type")?.startsWith("application/json")) return { status: 415, body: null };
+      const id = ((await req.json().catch(() => null)) as { transition?: { id?: unknown } } | null)?.transition?.id;
+      const t = TRANSITIONS.find(([tid]) => tid === id);
+      if (!t) return { status: 400, body: { errorMessages: ["Transition id is not valid for this issue."], errors: {} } };
+      const status = statusOf(t[1]);
+      (issues.get(k)?.fields as Record<string, unknown>).status = status;
+      for (const i of issues.values())
+        for (const s of ((i.fields as Record<string, unknown>).subtasks ?? []) as { key: string; fields: { status: unknown } }[])
+          if (s.key === k) s.fields.status = status;
+      transitions.set(k, [...(transitions.get(k) ?? []), String(id)]);
+      return { status: 204 };
+    };
+  }
+
+  // Adds a parent with these sub-tasks. links: [from, to] pairs, as "from is blocked by to".
+  function addSubtasks(
+    parentKey: string,
+    subtasks: { key: string; summary: string; category: Category }[],
+    links: [string, string][] = [],
+  ) {
+    addIssue(parentKey, "Split the cache work into sub-tasks");
+    const parent = issues.get(parentKey)?.fields as Record<string, unknown>;
+    Object.assign(parent, { status: statusOf("indeterminate"), issuetype: issueType(false) });
+    for (const s of subtasks) {
+      addIssue(s.key, s.summary);
+      Object.assign(issues.get(s.key)?.fields as Record<string, unknown>, {
+        status: statusOf(s.category),
+        issuetype: issueType(true),
+        parent: ref(parentKey),
+        issuelinks: [],
+      });
+      transitionRoutes(s.key);
+    }
+    transitionRoutes(parentKey);
+    parent.subtasks = subtasks.map((s) => ref(s.key));
+    const link = (to: string, n: number) => ({
+      id: String(10200 + n),
+      self: self(`issueLink/${10200 + n}`),
+      type: { id: "10000", name: "Blocks", inward: "is blocked by", outward: "blocks", self: self("issueLinkType/10000") },
+      inwardIssue: ref(to),
+    });
+    parent.issuelinks = [];
+    links.forEach(([from, to], n) => {
+      const f = issues.get(from)?.fields as Record<string, unknown>;
+      f.issuelinks = [...((f.issuelinks as unknown[]) ?? []), link(to, n)];
+    });
+    // One link from the parent to its first sub-task, so the parent read has an issuelinks entry.
+    if (subtasks[0]) parent.issuelinks = [link(subtasks[0].key, links.length)];
+    const att = issues.get(parentKey)?.fields.attachment.find((a) => a.mimeType !== "image/png");
+    const href = att ? (opts.cloud ? cloudAttachmentPath(att.id) : attachmentPath(att.id, att.filename)) : "";
+    fake.routes[key("GET", `/rest/api/2/issue/${parentKey}/comment`)] = {
+      status: 200,
+      body: {
+        startAt: 0,
+        maxResults: 100,
+        total: 1,
+        comments: [
+          {
+            self: self(`issue/${parentKey}/comment/10010`),
+            id: "10010",
+            author: { name: "asmith", displayName: "Alex Smith", active: true },
+            body: `The log is attached: [^${att?.filename}]`,
+            renderedBody: `<p>The log is attached: <span class="nobr"><a href="${href}" title="${att?.filename} attached to ${parentKey}">${att?.filename}</a></span></p>`,
+            created: "2026-01-07T10:00:00.000+0000",
+            updated: "2026-01-07T10:00:00.000+0000",
+          },
+        ],
+      },
+    };
+  }
+
   const stop = fake.stop;
   return Object.assign(fake, {
     addIssue,
+    addSubtasks,
+    transitions,
     attach,
     media,
     stop() {

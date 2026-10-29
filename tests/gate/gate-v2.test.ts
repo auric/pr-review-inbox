@@ -64,14 +64,14 @@ describe("claude-checks.ts B17 to B20", () => {
   });
 });
 
-describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G18", () => {
+describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
   test("a dry run passes all checks against the loopback fake and prints no host", () => {
     const r = run(BITBUCKET_WRITE, ["--dry-run"], GIT_DIR);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     for (const id of ["G1", "G2", "G3", "G4", "G5", "G6"]) expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("INFO    G7 ");
-    for (const id of ["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18"]) expect(r.out).toContain(`PASS    ${id} `);
+    for (const id of ["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G19"]) expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("(stale info)");
     const g3 = r.out.split("\n").find((l) => l.startsWith("PASS    G3 ")) ?? "";
     expect(g3).toContain("of the new gate commit: HTTP 200 keys=failed,inProgress,successful counts=0/0/0");
@@ -144,6 +144,22 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G18", () => {
     expect(r.out).toContain("dry run: PASS");
   }, 120_000);
 
+  test("a dry run of G19 squash-merges into a gate branch and runs the three merges with no force push", () => {
+    const r = run(BITBUCKET_WRITE, ["--dry-run", "--only", "G19"], GIT_DIR);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    const g19 = r.out.split("\n").find((l) => l.startsWith("PASS    G19 ")) ?? "";
+    expect(g19).toContain("squash merge of the lower PR: HTTP 200 state=MERGED; lower branch kept=true");
+    expect(g19).toContain("commit parents=1; MERGED commit is the base head=true git parents=1");
+    expect(g19).toContain("tree of S equals merge-tree --write-tree S^1 A_final=true");
+    expect(g19).toContain("merges on the upper branch: S^1, ours S, M1");
+    expect(g19).toContain("push without force or lease: exit=0");
+    expect(g19).toContain("toRef moved=true; upper PR changes: HTTP 200 count=1 isLastPage=true only the upper file=true");
+    expect(r.out).toContain("declined PRs=not open,HTTP 200; deleted branches=ok,ok,ok");
+    for (const secret of ["rl-gate-", "refs/heads/", "127.0.0.1", tmpdir()]) expect(r.out).not.toContain(secret);
+    expect(r.out).toContain("dry run: PASS");
+  }, 120_000);
+
   test.each([
     [[], "--repo is required"],
     [["--repo", REPO, "--only", "G13,G1"], "Refused: G1 to G7 create branches"],
@@ -156,6 +172,8 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G18", () => {
     [["--repo", REPO, "--target", "main", "--authorize-writes", "G2"], "G2 needs --reviewer"],
     [["--repo", REPO, "--target", "main", "--authorize-writes", "G7", "--jira-key", "lower-1"], "G7 needs --jira-key"],
     [["--repo", REPO, "--authorize-writes", "G1"], "--target is required"],
+    [["--repo", REPO, "--only", "G19"], "Refused: G1 to G7 create branches"],
+    [["--repo", REPO, "--authorize-writes", "G19"], "--target is required"],
     [["--repo", REPO, "--target", "rl-gate-x", "--authorize-writes"], "--target is not a usable branch name"],
     [["--repo", "https://example.invalid/browse", "--target", "main", "--authorize-writes"], "--repo is not a repository URL"],
     [["--repo", REPO, "--target", "main", "--authorize-writes", "G3", "--build-commit", "xyz"], "--build-commit needs a commit ID"],

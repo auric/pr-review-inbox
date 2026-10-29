@@ -7,11 +7,13 @@
 // G13 to G17 (WP-GB) only read: the default branch, the branch search, the write permission and branch restrictions, the
 // repository list, and the merge commit of a merged PR.
 // G18 (WP-TU1) only reads: properties.mergeResult of the open PRs, with one PR that the user made conflicted by hand.
+// G19 (WP-ST-G) WRITES: three gate branches, two PRs, a squash merge of the lower PR into the gate base branch, and a push of the upper branch.
 // Usage: bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes [--only G1,G2] [G3 ...]
 //          [--reviewer <user slug>] [--build-commit <commit>] [--readonly-token-env <VAR>] [--jira-key <KEY>] [--keep]
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G13,G14,G15,G16,G17
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G18
+//        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes --only G19
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --authorize-writes --cleanup
 //        bun scripts/gate/bitbucket-write.ts --dry-run [--only G1,G2]
 // --dry-run: the same steps against a loopback fake server and a local bare repository. It reads no secret, and nothing leaves the machine.
@@ -35,7 +37,7 @@ const G5_WAIT_MS = 30_000;
 const G5_POLL_MS = 2_000;
 // Every branch that the script creates or deletes has this prefix. The target branch never gets a push.
 const PREFIX = "rl-gate-";
-const CHECKS = ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18"] as const;
+const CHECKS = ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G19"] as const;
 type CheckId = (typeof CHECKS)[number];
 // These checks send only GET requests. They need no --authorize-writes and no --target.
 const READ_ONLY = new Set<CheckId>(["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18"]);
@@ -51,6 +53,7 @@ const USAGE = [
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G13,G14,G15,G16,G17",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G18",
+  "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes --only G19",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --authorize-writes --cleanup",
   "       bun scripts/gate/bitbucket-write.ts --dry-run [--only G1,G2]",
 ].join("\n");
@@ -213,8 +216,11 @@ function session(ctx: Ctx) {
     }
   }
 
-  function git(args: string[], opts: { env?: Record<string, string>; stdin?: string } = {}) {
-    const r = Bun.spawnSync(["git", `--git-dir=${cache}`, ...args], {
+  // cwd: a worktree of the cache. git then finds its own git dir.
+  type GitOpts = { env?: Record<string, string>; stdin?: string; cwd?: string };
+  function git(args: string[], opts: GitOpts = {}) {
+    const r = Bun.spawnSync(opts.cwd ? ["git", ...args] : ["git", `--git-dir=${cache}`, ...args], {
+      cwd: opts.cwd,
       env: opts.env ?? env,
       stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
       stdout: "pipe",
@@ -223,7 +229,7 @@ function session(ctx: Ctx) {
     });
     return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
   }
-  function must(args: string[], opts: { env?: Record<string, string>; stdin?: string } = {}) {
+  function must(args: string[], opts: GitOpts = {}) {
     const r = git(args, opts);
     if (r.code !== 0) {
       const f = gitFacts(r.out + r.err);
@@ -278,10 +284,12 @@ function session(ctx: Ctx) {
     return must(["commit-tree", tree, "-p", parent, "-m", `Gate ${label}`]);
   }
   // refspec "<commit>" pushes it to the branch; null deletes the branch. lease "" means: the branch must not exist.
-  async function push(branch: string, commit: string | null, lease: string, token = ctx.token) {
+  // lease null sends no lease, so only a fast-forward passes.
+  async function push(branch: string, commit: string | null, lease: string | null, token = ctx.token) {
     if (!branch.startsWith(PREFIX)) throw new Error("refusing to push a branch without the gate prefix");
     const spec = `${commit ?? ""}:refs/heads/${branch}`;
-    const r = git(["push", "--porcelain", await url(), `--force-with-lease=refs/heads/${branch}:${lease}`, spec], { env: envFor(token) });
+    const leaseArg = lease === null ? [] : [`--force-with-lease=refs/heads/${branch}:${lease}`];
+    const r = git(["push", "--porcelain", await url(), ...leaseArg, spec], { env: envFor(token) });
     return { code: r.code, ...gitFacts(r.out + r.err) };
   }
   async function remoteAt(branch: string) {
@@ -391,6 +399,10 @@ function session(ctx: Ctx) {
     repoPath,
     stamp,
     name,
+    dir,
+    url,
+    git,
+    must,
     call,
     commitOn,
     push,
@@ -783,6 +795,108 @@ async function g18(s: Session): Promise<Result> {
   };
 }
 
+// ---------- G19: the squash merge of a lower PR and the update of the upper PR (spec.md section 6.20.10) ----------
+// The lower PR merges into a gate base branch, never into --target. The base moves before and after the merge, so S^1 is not in
+// the upper branch and M1 is not S. Then all three merges run.
+async function g19(s: Session): Promise<Result> {
+  const fail = (evidence: string): Result => ({ check: "G19", status: "FAIL", evidence });
+  const v = s.must(["version"]).match(/(\d+)\.(\d+)/);
+  if (!v || Number(v[1]) < 2 || (Number(v[1]) === 2 && Number(v[2]) < 38))
+    return fail("the local git is older than 2.38. It has no merge-tree --write-tree. Update git and run again.");
+  const base = await s.branch("g19-base", await s.targetHead());
+  const low = await s.branch("g19-lower", base.sha);
+  const up = await s.branch("g19-upper", low.sha);
+  const base2 = s.commitOn(base.sha, "g19-base-2");
+  const mv1 = await s.push(base.name, base2, base.sha);
+  if (mv1.code !== 0) return fail(`move of the base branch: exit=${mv1.code} markers=${mv1.markers.join(",") || "none"}`);
+  s.branches.set(base.name, base2);
+  const lowPr = await s.createPr(low.name, base.name, `Review gate G19 lower ${s.stamp}`);
+  const upPr = await s.createPr(up.name, low.name, `Review gate G19 upper ${s.stamp}`);
+  const lowId = lowPr.pr.id;
+  const upId = upPr.pr.id;
+  if (typeof lowId !== "number" || typeof upId !== "number")
+    return fail(`create PRs: lower HTTP ${lowPr.status}${errs(lowPr.body)}; upper HTTP ${upPr.status}${errs(upPr.body)}`);
+
+  // strategyId selects the merge strategy of this merge (RestPullRequestMergeRequest). The repository must allow squash.
+  const before = await s.getPr(lowId);
+  const merge = await s.call("POST", `${s.prPath(lowId)}/merge?version=${String(before.pr.version)}`, { strategyId: "squash" });
+  const after = await s.getPr(lowId);
+  const mergeLine = `squash merge of the lower PR: HTTP ${merge.status}${errs(merge.body)} state=${enumLike(after.pr.state)}`;
+  if (merge.status !== 200 || after.pr.state !== "MERGED") return fail(mergeLine);
+  const kept = (await s.remoteAt(low.name)) === low.sha;
+  const acts = await s.call("GET", `${s.prPath(lowId)}/activities?limit=${OPEN_PR_LIMIT}`);
+  const act = (valuesOf(acts.body) as { action?: unknown; commit?: { id?: unknown; parents?: unknown } }[]).find(
+    (a) => a.action === "MERGED",
+  );
+  const sq = act?.commit?.id;
+  const actParents = Array.isArray(act?.commit?.parents) ? act.commit.parents.length : null;
+  const actLine = `activities: ${pageLine(acts)} MERGED activity=${!!act} commit keys=${keysOf(act?.commit).join(",") || "none"} commit parents=${actParents ?? "absent"}`;
+  if (typeof sq !== "string" || !SHA.test(sq)) return fail(`${mergeLine}; lower branch kept=${kept}; ${actLine}; commit id=false`);
+
+  s.must(["fetch", "-q", "--no-tags", await s.url(), `refs/heads/${base.name}`]);
+  const baseHead = s.must(["rev-parse", "FETCH_HEAD"]);
+  s.branches.set(base.name, baseHead);
+  if (s.git(["cat-file", "-e", `${sq}^{commit}`]).code !== 0)
+    return fail(`${mergeLine}; ${actLine}; the MERGED commit is not in the fetched base branch`);
+  const parents = s.must(["rev-list", "--parents", "-n", "1", sq]).split(/\s+/).slice(1);
+  const s1 = parents[0] ?? "";
+  // merge-tree exits 1 on a conflict. Its first line is then still a tree, so the exit code decides.
+  const mt = s.git(["merge-tree", "--write-tree", s1, low.sha]);
+  const treeOk = parents.length === 1 && mt.code === 0 && mt.out.split(/\r?\n/)[0] === s.must(["rev-parse", `${sq}^{tree}`]);
+  const sqLine = `${mergeLine}; lower branch kept=${kept}; ${actLine}; MERGED commit is the base head=${sq === baseHead} git parents=${parents.length} S^1 is the moved base=${s1 === base2}; tree of S equals merge-tree --write-tree S^1 A_final=${treeOk}`;
+
+  const m1 = s.commitOn(baseHead, "g19-base-3");
+  const mv2 = await s.push(base.name, m1, baseHead);
+  if (mv2.code !== 0) return fail(`${sqLine}; move of the base after the merge: exit=${mv2.code}`);
+  s.branches.set(base.name, m1);
+  const wt = join(s.dir, "g19-upper");
+  s.must(["worktree", "add", "-q", "--detach", wt, up.sha]);
+  const inWt = (args: string[]) => s.must(args, { cwd: wt });
+  const steps: string[] = [];
+  if (s.git(["merge-base", "--is-ancestor", s1, up.sha]).code === 0) steps.push("S^1 skipped");
+  else {
+    inWt(["merge", "--no-ff", "-q", "-m", "G19: merge the base into the upper branch", s1]);
+    steps.push("S^1");
+  }
+  inWt(["merge", "--no-ff", "-q", "-s", "ours", "-m", "G19: record the squash merge of the lower branch", sq]);
+  steps.push("ours S");
+  if (m1 === sq) steps.push("M1 skipped");
+  else {
+    inWt(["merge", "--no-ff", "-q", "-m", "G19: merge the base into the upper branch", m1]);
+    steps.push("M1");
+  }
+  const newUp = inWt(["rev-parse", "HEAD"]);
+  const upperFile = `rl-gate/${s.stamp}-g19-upper.txt`;
+  const onlyUpper = (paths: string[]) => paths.length === 1 && paths[0] === upperFile;
+  const local = s
+    .must(["diff", "--name-only", `${m1}...${newUp}`])
+    .split(/\r?\n/)
+    .filter(Boolean);
+  const p = await s.push(up.name, newUp, null);
+  if (p.code === 0) s.branches.set(up.name, newUp);
+  const g = await s.getPr(upId);
+  const put = await s.call("PUT", s.prPath(upId), { version: g.pr.version, toRef: s.ref(base.name) });
+  const moved = isRef((await s.getPr(upId)).pr, base.name);
+  const ch = await s.call("GET", `${s.prPath(upId)}/changes?limit=${OPEN_PR_LIMIT}`);
+  const paths = (valuesOf(ch.body) as { path?: { toString?: unknown } }[]).map((c) => String(c.path?.toString));
+  const pass =
+    kept &&
+    sq === baseHead &&
+    (actParents === null || actParents === 1) &&
+    treeOk &&
+    onlyUpper(local) &&
+    p.code === 0 &&
+    put.status === 200 &&
+    moved &&
+    ch.status === 200 &&
+    onlyUpper(paths);
+  return {
+    check: "G19",
+    status: pass ? "PASS" : "FAIL",
+    evidence: `${sqLine}; merges on the upper branch: ${steps.join(", ")}; local diff M1...upper lists only the upper file=${onlyUpper(local)} (count ${local.length}); push without force or lease: exit=${p.code} markers=${p.markers.join(",") || "none"}; PUT the target to the base: HTTP ${put.status}${errs(put.body)} toRef moved=${moved}; upper PR changes: ${pageLine(ch)} only the upper file=${onlyUpper(paths)}`,
+  };
+}
+
 const RUNNERS: Record<CheckId, (s: Session) => Promise<Result>> = {
   G1: g1,
   G2: g2,
@@ -799,6 +913,7 @@ const RUNNERS: Record<CheckId, (s: Session) => Promise<Result>> = {
   G16: g16,
   G17: g17,
   G18: g18,
+  G19: g19,
 };
 
 async function runGate(ctx: Ctx) {
@@ -837,9 +952,14 @@ const part = selected.length === CHECKS.length ? "" : `.${selected.join("-").toL
 
 // ---------- dry run: a loopback fake server and a local bare repository ----------
 // The fake declines a PR whose target or source branch is gone. That is one possible G5 outcome, not a verified one.
-function fakeServer(token: string, origin: string, buildCommit: string) {
-  const exists = (b: string) =>
-    Bun.spawnSync(["git", `--git-dir=${origin}`, "rev-parse", "--verify", "-q", b], { stdout: "pipe", stderr: "pipe" }).exitCode === 0;
+function fakeServer(token: string, origin: string, buildCommit: string, env: Record<string, string>) {
+  const og = (args: string[]) => {
+    const r = Bun.spawnSync(["git", `--git-dir=${origin}`, ...args], { env, stdout: "pipe", stderr: "pipe" });
+    return { code: r.exitCode, out: r.stdout.toString().trim() };
+  };
+  const exists = (b: string) => og(["rev-parse", "--verify", "-q", b]).code === 0;
+  // G19: the activities of the gate PRs that the fake merged.
+  const activities = new Map<number, unknown[]>();
   const prs = new Map<
     number,
     Record<string, unknown> & { version: number; state: string; fromRef: { id: string }; toRef: { id: string } }
@@ -973,7 +1093,41 @@ function fakeServer(token: string, origin: string, buildCommit: string) {
         if (!at) return json(200, { size: peers.length, limit: 50, start: 0, isLastPage: true, values: peers });
         return json(200, { values: [...prs.values()].filter((x) => x.fromRef.id === at && x.state === "OPEN"), isLastPage: true });
       }
+      const am = p.match(/\/pull-requests\/(\d+)\/activities$/);
+      if (req.method === "GET" && am && activities.has(Number(am[1]))) {
+        const values = activities.get(Number(am[1])) ?? [];
+        return json(200, { size: values.length, limit: 50, start: 0, isLastPage: true, values });
+      }
+      const mm = p.match(/\/pull-requests\/(\d+)\/merge$/);
+      if (req.method === "POST" && mm) {
+        const pr = prs.get(Number(mm[1]));
+        if (pr?.state !== "OPEN") return json(404, { errors: [{ exceptionName: "dry.NoSuchPullRequest" }] });
+        if (Number(url.searchParams.get("version")) !== pr.version) return json(409, { errors: [{ exceptionName: "dry.OutOfDate" }] });
+        if (((await req.json()) as { strategyId?: unknown }).strategyId !== "squash")
+          return json(400, { errors: [{ exceptionName: "dry.UnsupportedStrategy" }] });
+        // shortcut: the fake squash uses the 3-way merge tree, the same rule that G19 checks. Only the live server confirms the rule.
+        const to = og(["rev-parse", pr.toRef.id]).out;
+        const tree = og(["merge-tree", "--write-tree", to, pr.fromRef.id]);
+        if (tree.code !== 0) return json(409, { errors: [{ exceptionName: "dry.MergeConflict" }] });
+        const sq = og(["commit-tree", tree.out.split("\n")[0] ?? "", "-p", to, "-m", "dry squash"]).out;
+        og(["update-ref", pr.toRef.id, sq, to]);
+        Object.assign(pr, { state: "MERGED", version: pr.version + 1 });
+        activities.set(Number(mm[1]), [
+          { id: 2, action: "MERGED", commit: { id: sq, displayId: sq.slice(0, 11), parents: [{ id: to, displayId: to.slice(0, 11) }] } },
+          { id: 1, action: "OPENED" },
+        ]);
+        return json(200, pr);
+      }
       const cm = p.match(/\/pull-requests\/(\d+)\/changes$/);
+      const gatePr = cm ? prs.get(Number(cm[1])) : undefined;
+      if (req.method === "GET" && gatePr) {
+        // A PR diff starts at the merge base of the target and the source.
+        const names = og(["diff", "--name-only", `${gatePr.toRef.id}...${gatePr.fromRef.id}`])
+          .out.split("\n")
+          .filter(Boolean);
+        const values = names.map((n) => ({ path: { toString: n }, type: "ADD" }));
+        return json(200, { size: values.length, limit: 50, start: 0, isLastPage: true, values });
+      }
       if (req.method === "GET" && cm) {
         const values = peerChanges[Number(cm[1])];
         if (!values) return json(404, { errors: [{ exceptionName: "dry.NoSuchPullRequest" }] });
@@ -1053,7 +1207,7 @@ if (DRY) {
   const first = g([`--git-dir=${origin}`, "commit-tree", g([`--git-dir=${origin}`, "write-tree"]), "-m", "dry"]);
   g([`--git-dir=${origin}`, "update-ref", "refs/heads/main", first]);
   const token = "dry-run-token";
-  const server = fakeServer(token, origin, first);
+  const server = fakeServer(token, origin, first, env);
   try {
     const { results, tail } = await runGate({
       base: `http://127.0.0.1:${server.port}/ctx`,
@@ -1083,7 +1237,7 @@ if (DRY) {
   const writes = cleanupMode || selected.some((c) => !READ_ONLY.has(c));
   if (writes && !flags.has("--authorize-writes"))
     usage(
-      "Refused: G1 to G7 create branches and pull requests and delete a branch. Add --authorize-writes for your test repository, or select only the read checks G9, G12, and G13 to G18.",
+      "Refused: G1 to G7 create branches and pull requests and delete a branch, and G19 merges a gate pull request. Add --authorize-writes for your test repository, or select only the read checks G9, G12, and G13 to G18.",
     );
   const repo = parseRepoUrl(opt["--repo"]);
   const target = opt["--target"];
