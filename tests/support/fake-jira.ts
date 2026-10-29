@@ -11,6 +11,8 @@ import { key, type Reply, startFakeBitbucket } from "./fake-bitbucket";
 export const JIRA_TOKEN = "fake-jira-token-fedcba9876543210";
 export const ISSUE_KEY = "ABC-42";
 export const JIRA_EMAIL = "jdoe@example.com";
+// The parent of addSubtaskSet().
+export const SUBTASK_PARENT = "ABC-10";
 
 // Reads a raw response body from fixtures/jira/.
 export function jiraFixture<T = Record<string, unknown>>(name: string): T {
@@ -182,14 +184,19 @@ export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: bo
       const id = ((await req.json().catch(() => null)) as { transition?: { id?: unknown } } | null)?.transition?.id;
       const t = TRANSITIONS.find(([tid]) => tid === id);
       if (!t) return { status: 400, body: { errorMessages: ["Transition id is not valid for this issue."], errors: {} } };
-      const status = statusOf(t[1]);
-      (issues.get(k)?.fields as Record<string, unknown>).status = status;
-      for (const i of issues.values())
-        for (const s of ((i.fields as Record<string, unknown>).subtasks ?? []) as { key: string; fields: { status: unknown } }[])
-          if (s.key === k) s.fields.status = status;
+      setStatus(k, t[1]);
       transitions.set(k, [...(transitions.get(k) ?? []), String(id)]);
       return { status: 204 };
     };
+  }
+
+  // Changes the status of an issue and of its entry in the parent subtasks, as a transition or a Jira automation does.
+  function setStatus(k: string, category: Category) {
+    const status = statusOf(category);
+    (issues.get(k)?.fields as Record<string, unknown>).status = status;
+    for (const i of issues.values())
+      for (const s of ((i.fields as Record<string, unknown>).subtasks ?? []) as { key: string; fields: { status: unknown } }[])
+        if (s.key === k) s.fields.status = status;
   }
 
   // Adds a parent with these sub-tasks. links: [from, to] pairs, as "from is blocked by to".
@@ -249,10 +256,30 @@ export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: bo
     };
   }
 
+  // The WP-ST1 set: ABC-11 done, ABC-12 in progress, ABC-13 and ABC-14 to do. ABC-13 is blocked by ABC-12.
+  function addSubtaskSet() {
+    addSubtasks(
+      SUBTASK_PARENT,
+      [
+        { key: "ABC-11", summary: "Batch the cache writes", category: "done" },
+        { key: "ABC-12", summary: "Add the event generator", category: "indeterminate" },
+        { key: "ABC-13", summary: "Flush before the write lock", category: "new" },
+        { key: "ABC-14", summary: "Measure the lock wait", category: "new" },
+      ],
+      [["ABC-13", "ABC-12"]],
+    );
+  }
+
+  // The number of requests with this method and path, any query.
+  const count = (method: string, path: string) => fake.requests.filter((r) => r.split("?")[0] === `${method} ${path}`).length;
+
   const stop = fake.stop;
   return Object.assign(fake, {
     addIssue,
     addSubtasks,
+    addSubtaskSet,
+    setStatus,
+    count,
     transitions,
     attach,
     media,

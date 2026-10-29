@@ -3,10 +3,19 @@
 
 // Plan r2 S-JIRA and r3 S-JMD: the Jira REST client against the fake Jira. No test calls a real server.
 import { afterEach, describe, expect, test } from "bun:test";
-import { CAPS, CONVERT_FIELD_MS, createJiraSource, MAX_ATTACHMENTS, MAX_BODY_BYTES, MAX_HTML_BYTES } from "../../src/server/context/jira";
+import {
+  CAPS,
+  CONVERT_FIELD_MS,
+  createJiraSource,
+  JiraRefusedError,
+  MAX_ATTACHMENTS,
+  MAX_BODY_BYTES,
+  MAX_HTML_BYTES,
+} from "../../src/server/context/jira";
 import { ContextError } from "../../src/server/context/source";
-import { key, startFakeBitbucket } from "../support/fake-bitbucket";
-import { type FakeJira, ISSUE_KEY, JIRA_EMAIL, JIRA_TOKEN, startFakeJira } from "../support/fake-jira";
+import type { IssueSubtask } from "../../src/shared/dto";
+import { key, type Reply, startFakeBitbucket } from "../support/fake-bitbucket";
+import { type FakeJira, ISSUE_KEY, JIRA_EMAIL, JIRA_TOKEN, jiraFixture, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira";
 
 const stops: (() => void)[] = [];
 afterEach(() => {
@@ -30,7 +39,7 @@ async function failure(p: Promise<unknown>): Promise<ContextError> {
 }
 
 const ISSUE = `/rest/api/2/issue/${ISSUE_KEY}`;
-const ISSUE_QUERY = "?fields=summary,description,status,attachment&expand=renderedFields";
+const ISSUE_QUERY = "?fields=summary,description,status,attachment,parent,subtasks,issuelinks&expand=renderedFields";
 const COMMENTS = (start: number) => `${ISSUE}/comment?startAt=${start}&maxResults=100&expand=renderedBody`;
 
 // One comment page with these comments.
@@ -158,6 +167,9 @@ describe("Jira client", () => {
         { id: "10100", filename: "screenshot.png", mimeType: "image/png", size: 2048, created: "2026-01-05T09:10:00.000+0000" },
         { id: "10101", filename: "sync-worker.log", mimeType: "text/plain", size: 512, created: "2026-01-06T14:00:00.000+0000" },
       ],
+      parent: null,
+      subtasks: [],
+      links: [],
     });
     // Links to Jira resolve against the configured base. The attachment image becomes a token, never a remote image.
     expect(issue.description).toContain("| Flush \\| now | Alex Smith |");
@@ -386,5 +398,187 @@ describe("Jira client", () => {
     const { fake } = setup();
     fake.routes[key("GET", "/jira/rest/api/2/myself")] = { status: 200, body: { name: "ctx" } };
     expect(await createJiraSource({ baseUrl: `${fake.url}/jira/`, token: JIRA_TOKEN }).check()).toBe("ctx");
+  });
+});
+
+// WP-ST1 (spec.md section 6.20.9): sub-tasks, links, the status read, and transitions. Every test runs as Server and as Cloud.
+describe.each([false, true])("Jira sub-tasks (cloud=%p)", (cloud) => {
+  const PARENT = SUBTASK_PARENT;
+  const SIBLINGS = ["ABC-11", "ABC-12", "ABC-13", "ABC-14"];
+  const MOVE = "/rest/api/2/issue/ABC-12/transitions";
+  const SET: IssueSubtask[] = [
+    { key: "ABC-11", summary: "Batch the cache writes", status: "Done", category: "done" },
+    { key: "ABC-12", summary: "Add the event generator", status: "In Progress", category: "indeterminate" },
+    { key: "ABC-13", summary: "Flush before the write lock", status: "To Do", category: "new" },
+    { key: "ABC-14", summary: "Measure the lock wait", status: "To Do", category: "new" },
+  ];
+
+  function start() {
+    const fake = startFakeJira({ cloud });
+    stops.push(fake.stop);
+    fake.addSubtaskSet();
+    return { fake, source: createJiraSource({ baseUrl: fake.url, token: JIRA_TOKEN, email: cloud ? JIRA_EMAIL : undefined }) };
+  }
+
+  test("the parent read gives the sub-tasks with status and category, and links to its sub-tasks; no /subtask path", async () => {
+    const { fake, source } = start();
+    const issue = await source.fetchIssue(PARENT);
+    expect(issue.parent).toBeNull();
+    expect(issue.subtasks).toEqual(SET);
+    expect(issue.links).toEqual([{ text: "is blocked by", key: "ABC-11" }]);
+    expect(fake.requests[0]).toBe(`GET /rest/api/2/issue/${PARENT}${ISSUE_QUERY}`);
+
+    const sub = await source.fetchSubtask(PARENT, SIBLINGS, "ABC-13");
+    expect(sub?.parent).toBe(PARENT);
+    expect(sub?.subtasks).toEqual([]);
+    expect(sub?.links).toEqual([{ text: "is blocked by", key: "ABC-12" }]);
+    expect(sub?.summary).toBe("Flush before the write lock");
+    expect(sub?.status).toBe("To Do");
+    await source.subtaskStatuses(PARENT);
+    await source.transitions("ABC-12");
+    expect(fake.requests.filter((r) => /\/subtask(\/|$)/.test(r.split("?")[0] ?? ""))).toEqual([]);
+  });
+
+  test("a sub-task read whose parent names another key gives null and reads no comments", async () => {
+    const { fake, source } = start();
+    fake.addSubtasks("ABC-20", [{ key: "ABC-21", summary: "Other work", category: "new" }]);
+    expect(await source.fetchSubtask(PARENT, SIBLINGS, "ABC-21")).toBeNull();
+    expect(await source.fetchSubtask(PARENT, SIBLINGS, ISSUE_KEY)).toBeNull();
+    expect(fake.count("GET", "/rest/api/2/issue/ABC-21")).toBe(1);
+    expect(fake.count("GET", "/rest/api/2/issue/ABC-21/comment")).toBe(0);
+    // A link to a key that is not a sibling is left out.
+    expect((await source.fetchSubtask(PARENT, ["ABC-11"], "ABC-13"))?.links).toEqual([]);
+  });
+
+  test("odd sub-task and link shapes are left out; the rest of the issue reads", async () => {
+    const { fake, source } = start();
+    const path = `/rest/api/2/issue/${PARENT}`;
+    fake.routes[key("GET", path)] = { status: 200, body: jiraFixture("subtasks-odd.json") };
+    const odd: IssueSubtask[] = [
+      { key: "ABC-11", summary: "Batch the cache writes", status: "Done", category: "done" },
+      { key: "ABC-12", summary: "Add the event generator", status: "In Review", category: null },
+      { key: "ABC-13", summary: "Flush before the write lock", status: "Triage", category: null },
+      { key: "ABC-14", summary: "", status: null, category: null },
+      { key: "ABC-15", summary: "", status: null, category: null },
+    ];
+    const issue = await source.fetchIssue(PARENT);
+    expect(issue.summary).toBe("Split the cache work into sub-tasks");
+    expect(issue.status).toBe("In Progress");
+    expect(issue.parent).toBeNull();
+    expect(issue.subtasks).toEqual(odd);
+    expect(issue.links).toEqual([
+      { text: "is blocked by", key: "ABC-12" },
+      { text: "relates to", key: "ABC-13" },
+    ]);
+    expect(await source.subtaskStatuses(PARENT)).toEqual(odd);
+
+    const body = jiraFixture<{ fields: Record<string, unknown> }>("subtasks-odd.json");
+    for (const [subtasks, issuelinks, parent] of [
+      [undefined, undefined, undefined],
+      [{}, "blocks", { id: "1" }],
+      [null, null, null],
+    ]) {
+      Object.assign(body.fields, { subtasks, issuelinks, parent });
+      fake.routes[key("GET", path)] = { status: 200, body };
+      const r = await source.fetchIssue(PARENT);
+      expect([r.parent, r.subtasks, r.links]).toEqual([null, [], []]);
+    }
+  });
+
+  test("the status read is one GET of the subtasks field and shows a changed status", async () => {
+    const { fake, source } = start();
+    expect(await source.subtaskStatuses(PARENT)).toEqual(SET);
+    fake.setStatus("ABC-12", "done");
+    expect((await source.subtaskStatuses(PARENT))[1]).toEqual({ ...(SET[1] as IssueSubtask), status: "Done", category: "done" });
+    expect(fake.requests).toEqual([`GET /rest/api/2/issue/${PARENT}?fields=subtasks`, `GET /rest/api/2/issue/${PARENT}?fields=subtasks`]);
+    // The read has no other content, so a body without the list is an error, never an empty list.
+    fake.routes[key("GET", `/rest/api/2/issue/${PARENT}`)] = { status: 200, body: { fields: {} } };
+    expect((await failure(source.subtaskStatuses(PARENT))).kind).toBe("shape");
+    fake.routes[key("GET", `/rest/api/2/issue/${PARENT}`)] = { status: 401, body: null };
+    expect((await failure(source.subtaskStatuses(PARENT))).kind).toBe("auth");
+  });
+
+  test("the transitions GET lists ID, name, and target status; odd entries are left out", async () => {
+    const { fake, source } = start();
+    expect(await source.transitions("ABC-12")).toEqual([
+      { id: "11", name: "To Do", to: "To Do" },
+      { id: "21", name: "In Progress", to: "In Progress" },
+      { id: "31", name: "Done", to: "Done" },
+    ]);
+    expect(fake.requests).toEqual([`GET ${MOVE}`]);
+    fake.routes[key("GET", MOVE)] = { status: 200, body: jiraFixture("subtasks-transitions-odd.json") };
+    expect(await source.transitions("ABC-12")).toEqual([
+      { id: "21", name: "Start review", to: "In Review" },
+      { id: "31", name: "Done", to: null },
+      { id: "41", name: "Reopen", to: null },
+    ]);
+    fake.routes[key("GET", MOVE)] = { status: 200, body: { expand: "transitions" } };
+    expect((await failure(source.transitions("ABC-12"))).kind).toBe("shape");
+    expect(fake.requests.filter((r) => r.startsWith("POST "))).toEqual([]);
+  });
+
+  test("the POST sends the JSON body with X-Atlassian-Token: no-check, gets 204, and changes the status", async () => {
+    const { fake, source } = start();
+    const real = fake.routes[key("POST", MOVE)] as (req: Request) => Promise<Reply>;
+    let seen: unknown = null;
+    fake.routes[key("POST", MOVE)] = async (req) => {
+      seen = { type: req.headers.get("content-type"), xsrf: req.headers.get("x-atlassian-token"), body: await req.clone().text() };
+      return real(req);
+    };
+    expect(await source.transition("ABC-12", "31")).toBeUndefined();
+    expect(seen).toEqual({ type: "application/json", xsrf: "no-check", body: '{"transition":{"id":"31"}}' });
+    expect(fake.transitions.get("ABC-12")).toEqual(["31"]);
+    expect((await source.subtaskStatuses(PARENT))[1]?.category).toBe("done");
+    expect(fake.count("POST", MOVE)).toBe(1);
+  });
+
+  test.each([400, 401, 404, 409, 422, 500])("HTTP %p of the POST gives the sentence, one POST, no token", async (status) => {
+    const { fake, source } = start();
+    if (status !== 400)
+      fake.routes[key("POST", MOVE)] = { status, body: { errorMessages: [`echo ${JIRA_TOKEN}`] }, headers: { "X-Echo": JIRA_TOKEN } };
+    // The fake gives its own 400 for an ID that is not a transition of the issue.
+    const e = await failure(source.transition("ABC-12", "99"));
+    expect(e).toBeInstanceOf(JiraRefusedError);
+    expect(e.kind).toBe("server");
+    expect(e.status).toBe(status);
+    expect(e.message).toBe(`Jira refused the move (HTTP ${status}). Move ABC-12 in Jira.`);
+    expect(`${e} ${e.stack} ${JSON.stringify(e)}`).not.toContain(JIRA_TOKEN);
+    expect(fake.count("POST", MOVE)).toBe(1);
+    expect(fake.transitions.size).toBe(0);
+  });
+
+  test("a redirect of the POST is an error and is not followed; a 200 page is no success", async () => {
+    const { fake, source } = start();
+    fake.routes[key("POST", MOVE)] = { status: 302, headers: { Location: `${fake.url}/login?token=${JIRA_TOKEN}` } };
+    const e = await failure(source.transition("ABC-12", "21"));
+    expect(e.kind).toBe("redirect");
+    expect(e.status).toBe(302);
+    expect(`${e} ${JSON.stringify(e)}`).not.toContain(JIRA_TOKEN);
+    expect(fake.requests).toEqual([`POST ${MOVE}`]);
+    fake.routes[key("POST", MOVE)] = { status: 200, body: "<html>Log in</html>" };
+    expect((await failure(source.transition("ABC-12", "21"))).kind).toBe("shape");
+  });
+
+  test("the POST path guard refuses a free key or ID before any request", async () => {
+    const { fake, source } = start();
+    const bad: [string, string][] = [
+      ["ABC-12/../../myself", "21"],
+      ["../ABC-12", "21"],
+      ["abc-12", "21"],
+      ["ABC-12?x=1", "21"],
+      ["", "21"],
+      ["ABC-12", "21/../x"],
+      ["ABC-12", "12345678901"],
+      ["ABC-12", " 21"],
+      ["ABC-12", "2e1"],
+      ["ABC-12", ""],
+    ];
+    for (const [k, id] of bad) expect((await failure(source.transition(k, id))).kind).toBe("not_found");
+    for (const k of ["ABC-12/../x", "abc-1"]) {
+      expect((await failure(source.transitions(k))).kind).toBe("not_found");
+      expect((await failure(source.subtaskStatuses(k))).kind).toBe("not_found");
+      expect((await failure(source.fetchSubtask(PARENT, SIBLINGS, k))).kind).toBe("not_found");
+    }
+    expect(fake.requests).toEqual([]);
   });
 });

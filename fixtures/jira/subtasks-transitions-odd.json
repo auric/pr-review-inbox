@@ -1,0 +1,12 @@
+{
+  "expand": "transitions",
+  "transitions": [
+    {"id": "21", "name": "Start review", "to": {"self": "https://jira.example.test/rest/api/2/status/10002", "name": "In Review", "id": "10002", "statusCategory": {"id": 4, "key": "indeterminate", "name": "In Progress"}}, "hasScreen": false, "isGlobal": false, "isInitial": false, "isConditional": false},
+    {"id": "31", "name": "Done"},
+    {"id": "41", "name": "Reopen", "to": "Open"},
+    {"id": 51, "name": "A numeric ID"},
+    {"id": "61/../x", "name": "A path in the ID"},
+    {"id": "71"},
+    null
+  ]
+}

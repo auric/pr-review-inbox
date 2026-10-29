@@ -10,6 +10,8 @@ The shapes follow the response examples of the Jira Server platform REST API 9.1
 | `issue.json` | `GET /rest/api/2/issue/{key}?fields=summary,description,status,attachment&expand=renderedFields` | `#api/2/issue-getIssue`; the status object follows `#api/2/status-getStatuses`; the attachment objects follow `#api/2/attachment-getAttachment` |
 | `comments-p0.json` | `GET /rest/api/2/issue/{key}/comment?startAt=0&expand=renderedBody` | `#api/2/issue-getComments` |
 | `comments-p1.json` | `GET /rest/api/2/issue/{key}/comment?startAt=2&expand=renderedBody` | `#api/2/issue-getComments` |
+| `subtasks-odd.json` | `GET /rest/api/2/issue/ABC-10?fields=...,parent,subtasks,issuelinks` | `#api/2/issue-getIssue`; odd `subtasks`, `issuelinks`, and `parent` shapes for the lenient parse (spec.md section 6.20.9) |
+| `subtasks-transitions-odd.json` | `GET /rest/api/2/issue/{key}/transitions` | `#api/2/issue-getTransitions`; odd entries for the lenient parse |
 
 - The two comment pages hold `maxResults: 2`, so one issue needs two pages. The app asks for 100 per page. The server cap on `maxResults` is not documented.
 - Host names use `example.test`. Names and texts are invented.

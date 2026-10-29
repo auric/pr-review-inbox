@@ -872,7 +872,15 @@ export type IssueContext = {
   truncated: boolean;
   format?: "markdown";
   attachments?: AttachmentMeta[];
+  // spec.md section 6.20.8. parent: the parent key of a sub-task. links: only links to other sub-tasks of the parent.
+  parent?: string | null;
+  subtasks?: IssueSubtask[];
+  links?: IssueLink[];
 };
+// category: statusCategory.key of Jira. null when absent or another value.
+export type IssueSubtask = { key: string; summary: string; status: string | null; category: "new" | "indeterminate" | "done" | null };
+// text: the link text of the server, as in "ABC-13 is blocked by ABC-12".
+export type IssueLink = { text: string; key: string };
 
 // A downloaded attachment (plan r3 S-ATT). include: the file goes to context/attachments/ of each run. downloadedAt: ms.
 // image, text, pdf: from the file bytes (attachments.ts store).

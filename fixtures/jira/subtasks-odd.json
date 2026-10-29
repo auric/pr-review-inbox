@@ -1,0 +1,35 @@
+{
+  "expand": "renderedFields",
+  "id": "10010",
+  "self": "https://jira.example.test/rest/api/2/issue/10010",
+  "key": "ABC-10",
+  "fields": {
+    "summary": "Split the cache work into sub-tasks",
+    "description": "Each sub-task gets its own PR.",
+    "status": {"name": "In Progress", "id": "3", "statusCategory": {"id": 4, "key": "indeterminate", "name": "In Progress"}},
+    "attachment": [],
+    "parent": "ABC-1",
+    "subtasks": [
+      {"id": "10011", "key": "ABC-11", "self": "https://jira.example.test/rest/api/2/issue/10011", "fields": {"summary": "Batch the cache writes", "status": {"name": "Done", "id": "10001", "statusCategory": {"id": 3, "key": "done", "colorName": "green", "name": "Done"}}, "issuetype": {"id": "10003", "name": "Sub-task", "subtask": true}}},
+      {"id": "10012", "key": "ABC-12", "fields": {"summary": "Add the event generator", "status": {"name": "In Review"}}},
+      {"id": "10013", "key": "ABC-13", "fields": {"summary": "Flush before the write lock", "status": {"name": "Triage", "statusCategory": {"id": 1, "key": "undefined", "name": "No Category"}}}},
+      {"id": "10014", "key": "ABC-14", "fields": "odd"},
+      {"id": "10015", "key": "ABC-15", "fields": {"summary": 15, "status": {"name": ["Open"], "statusCategory": "new"}}},
+      {"id": "10016", "fields": {"summary": "An entry without a key"}},
+      {"id": "10017", "key": "abc-17", "fields": {"summary": "A key in lower case"}},
+      "ABC-18",
+      null
+    ],
+    "issuelinks": [
+      {"id": "10200", "type": {"id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"}, "inwardIssue": {"id": "10012", "key": "ABC-12"}},
+      {"id": "10201", "type": {"id": "10001", "name": "Relates", "inward": "relates to", "outward": "relates to"}, "outwardIssue": {"id": "10013", "key": "ABC-13", "fields": {"summary": "Flush before the write lock"}}},
+      {"id": "10202", "type": {"id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"}, "outwardIssue": {"id": "20001", "key": "XYZ-1"}},
+      {"id": "10203", "type": {"id": "10000", "name": "Blocks"}, "inwardIssue": {"id": "10014", "key": "ABC-14"}},
+      {"id": "10204", "type": {"id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"}, "inwardIssue": {"key": "ABC-11"}, "outwardIssue": {"key": "ABC-14"}},
+      {"id": "10205", "type": {"id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"}},
+      {"id": "10206", "type": {"id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"}, "inwardIssue": {"key": "ABC-10"}},
+      42
+    ]
+  },
+  "renderedFields": {"description": "<p>Each sub-task gets its own PR.</p>"}
+}
