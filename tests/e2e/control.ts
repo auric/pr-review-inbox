@@ -307,6 +307,13 @@ export async function jiraRequests(): Promise<string[]> {
   return ((await res.json()) as { requests: string[] }).requests;
 }
 
+// The URL of the Jira Cloud fake and the email that it accepts with E2E_JIRA_TOKEN.
+export async function jiraCloud(): Promise<{ url: string; email: string }> {
+  const res = await fetch(`${FAKE_URL}/__control/jira-cloud`, { method: "POST", headers: auth });
+  if (!res.ok) throw new Error(`control jira-cloud: ${res.status}`);
+  return (await res.json()) as { url: string; email: string };
+}
+
 // The app opens a folder through a recorder in serve.ts. opens: the answer of the next calls; false gives 501 with the path.
 // A reset sets false. Answers with every folder path that the app asked to open since the last reset.
 export async function openFolder(change: { opens?: boolean } = {}): Promise<string[]> {

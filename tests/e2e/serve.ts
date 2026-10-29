@@ -28,7 +28,7 @@ import {
   startFakeBitbucket,
 } from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
-import { startFakeJira } from "../support/fake-jira";
+import { JIRA_EMAIL, startFakeJira } from "../support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../support/review-fixture";
 import * as S from "../support/scenarios";
 import { taskRepoSet } from "../support/task-repos";
@@ -440,6 +440,9 @@ fake.token = E2E_TOKEN;
 const jira = startFakeJira({ port: Number(new URL(JIRA_URL).port) });
 jira.token = E2E_JIRA_TOKEN;
 jira.addIssue(JIRA_ISSUE);
+// A Jira Cloud fake on a free port for the email login. It needs JIRA_EMAIL and E2E_JIRA_TOKEN.
+const jiraCloud = startFakeJira({ cloud: true });
+jiraCloud.token = E2E_JIRA_TOKEN;
 const r = fake.routes;
 r[key("GET", S.DASHBOARD_PATH)] = (req) => {
   if (new URL(req.url).searchParams.get("role") === "AUTHOR") return sc.down ? DROP : ok(S.onePage(sc.author ? [D.pr] : []));
@@ -864,6 +867,7 @@ r[key("POST", "/__control/task-repos")] = async (req) => {
 // Every request to the fake Jira since the last reset.
 r[key("POST", "/__control/live")] = () => ok({ streams: app.live.size() });
 r[key("POST", "/__control/jira-requests")] = () => ok({ requests: jira.requests });
+r[key("POST", "/__control/jira-cloud")] = () => ok({ url: jiraCloud.url, email: JIRA_EMAIL });
 // Sets the answer of the next open-folder calls. Answers with every folder that the app asked to open since the last reset.
 r[key("POST", "/__control/open-folder")] = async (req) => {
   const { opens } = (await req.json()) as { opens?: boolean };
@@ -955,6 +959,7 @@ async function stop() {
   await halt();
   fake.stop();
   jira.stop();
+  jiraCloud.stop();
   rmSync(dataDir, { recursive: true, force: true });
   rmSync(claudeDir, { recursive: true, force: true });
   process.exit(0);

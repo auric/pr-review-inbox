@@ -259,6 +259,17 @@ MCP redirect of a user-added server (e4f671a):
 26. Start a redirector on this machine: `bun -e "Bun.serve({ hostname: '127.0.0.1', port: 7601, fetch: () => Response.redirect('<URL of the server of step 25>', 307) })"`. Add a second entry `smoke-redirect` of the same type with the URL `http://127.0.0.1:7601/mcp`. Reload Settings. Open the tools of `smoke-redirect`. Expect "Could not list the tools of smoke-redirect: <reason>." and no tool list. Record the reason. [ ] pass [ ] fail
 27. Stop the redirector with Ctrl+C. Remove both entries from your Claude config. Reload Settings. Expect neither server in the list. [ ] pass [ ] fail
 
+## N. Jira Cloud
+
+Run this part only with a Jira Cloud test site and an issue with an attached image. `<CLOUD_URL>` is the site URL, for example https://example.atlassian.net. Make an API token without scopes for your Atlassian account. Do not record the site, the email, or the token.
+
+1. Open Settings, Jira. Enter `<CLOUD_URL>` and the API token, and leave the email empty. Click "Save Jira settings". Expect "This is Jira Cloud. Enter your Atlassian account email and an API token." [ ] pass [ ] fail
+2. Enter your Atlassian account email. Click "Save Jira settings". Expect "Saved. Jira accepted the token." Reload. Expect the email in the field and the token field empty with "Stored. Leave empty to keep it." (U75, U77) [ ] pass [ ] fail
+3. Open a test pull request that names `<KEY>`. Press Shift+R. Click "Fetch `<KEY>` from Jira". Expect the summary, the description, and the comments as text (U81). [ ] pass [ ] fail
+4. In the Jira browser tab, open `<CLOUD_URL>/rest/api/2/issue/<KEY>?fields=attachment&expand=renderedFields`. Find the `img` tag of the attached image in `renderedFields.description`. Record the path form of its `src` with the ids replaced by `<id>`, for example `/rest/api/2/attachment/content/<id>` (U79). [ ] pass [ ] fail
+5. Download the image with Download on its row. Expect "Downloaded." If step 4 shows a `/secure/attachment/` or `/secure/thumbnail/` path, expect the image inline in the description. Else expect its alt text. A failure shows a fixed text. Record it, and the kind and status of "Jira download failed: …" in the terminal (U78). [ ] pass [ ] fail
+6. Click Disconnect, then "Disconnect Jira". Expect the URL and the email fields empty. [ ] pass [ ] fail
+
 ## H. Record
 
 - The build commit from the startup line.
@@ -269,5 +280,6 @@ MCP redirect of a user-added server (e4f671a):
 - From part J: the reason that the fix run gave for T9 in step 4.
 - From part K: the item count and the size of the copy, the count of entries per verdict, and the count of skipped rows. From steps 14 to 17: the count of listed sessions, the size and the token estimate of the picked session, the token count of the session run (hint of its time), and the count of new transcripts. Record no text and no path.
 - From part L: the gate lines of steps 2 and 4. Update U62 to U67 in integration-check.md.
+- From part N: the result of each step and the `src` path form of step 4. Update U75 to U81 in integration-check.md.
 - From part M: the count and the outcomes of the `answered` entries of step 4, the answered-thread counts of steps 3 and 11, and the redirect reason of step 26. Record no text.
 - B11, B12, B15, and B16, the tag names from E5, and the shapes from F1. From part I: the languages of step 4, the severity counts of step 6, and any coverage line from step 5. Update the "Release 3 (not run)" rows in integration-check.md.

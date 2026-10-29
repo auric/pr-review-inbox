@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Jira Cloud now works. In Settings, Jira, enter your Atlassian account email and an API token without scopes. For Jira Server or Data Center, leave the email empty and use a personal access token. A login form that does not fit the Jira type shows a clear message.
 - The app is now named PR Review Inbox. Its old name was Kierto. The repository is now github.com/auric/pr-review-inbox. Your data, settings, and stored tokens stay.
 - An Ask answer now shows Mermaid flowchart, sequence, and class diagrams as pictures, with "Show code" and "Copy code". A diagram that does not render shows its code and the first error line. Other diagram types show as code.
 - Ask now keeps a conversation. The "Follow up" box under the newest answer sends the last three questions and answers with your question, so Claude knows what "it" means. "New question" starts fresh. Earlier conversations show under "Earlier questions".

@@ -13,6 +13,7 @@ import {
   FAKE_URL,
   JIRA_ISSUE,
   JIRA_URL,
+  jiraCloud,
   jiraRequests,
   openApp,
   openFolder,
@@ -81,7 +82,36 @@ test("without Jira settings, the brief offers Set up Jira and no Fetch", async (
   await expect(brief(page).getByRole("button", { name: /^Fetch / })).toHaveCount(0);
   await brief(page).getByRole("button", { name: "Set up Jira" }).click();
   await expect(page.getByLabel("Jira URL")).toBeFocused();
-  await expect(page.getByLabel("Personal access token")).toHaveAttribute("placeholder", "Personal access token…");
+  await expect(page.getByLabel("Personal access token or API token")).toHaveAttribute("placeholder", "Token…");
+});
+
+test("Jira Cloud: a Server login shows the fixed error, and the email saves and comes back", async ({ page, request }) => {
+  const cloud = await jiraCloud();
+  await open(page);
+  await openSettings(page);
+  const email = page.getByLabel("Atlassian account email (Jira Cloud only)");
+  await expect(email).toHaveValue("");
+  // A personal access token without an email does not fit Jira Cloud. The save shows the server sentence.
+  await page.getByLabel("Jira URL").fill(cloud.url);
+  await page.getByLabel("Personal access token or API token").fill(E2E_JIRA_TOKEN);
+  await page.getByRole("button", { name: "Save Jira settings" }).click();
+  await expect(page.getByText("This is Jira Cloud. Enter your Atlassian account email and an API token.")).toBeVisible();
+  // An email on a Server/Data Center Jira gives the other sentence.
+  await page.getByLabel("Jira URL").fill(JIRA_URL);
+  await email.fill(cloud.email);
+  await page.getByRole("button", { name: "Save Jira settings" }).click();
+  await expect(page.getByText("This Jira is Server or Data Center. Use a personal access token and no email.")).toBeVisible();
+  expect(JSON.parse(await (await request.get(`${APP}/api/settings`)).text()).jira.baseUrl).toBeNull();
+
+  await page.getByLabel("Jira URL").fill(cloud.url);
+  await page.getByRole("button", { name: "Save Jira settings" }).click();
+  await expect(page.getByText("Saved. Jira accepted the token.")).toBeVisible();
+  const dto = await (await request.get(`${APP}/api/settings`)).text();
+  expect(dto).not.toContain(E2E_JIRA_TOKEN);
+  expect(JSON.parse(dto).jira).toEqual({ baseUrl: cloud.url, caFile: null, email: cloud.email, tokenStored: true });
+  await page.reload();
+  await expect(page.getByLabel("Atlassian account email (Jira Cloud only)")).toHaveValue(cloud.email);
+  await expect(page.getByLabel("Jira URL")).toHaveValue(cloud.url);
 });
 
 test("connect Jira, fetch a task, show a fetch error, fetch again, remove, and disconnect", async ({ page, request }) => {

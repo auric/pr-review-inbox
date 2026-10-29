@@ -424,3 +424,17 @@ Run: `bun run gate:ci -- <PR URL> --jenkins <Jenkins URL> --jenkins-user <user> 
 | CI9. POST `api/json?tree=_class` without and with the crumb: token exempt, crumb needed, or denied | INFO (2026-10-29) | POST with the token only: HTTP 200. Verdict: an API token is exempt from the crumb. |
 | CI10. Build POST (`--authorize-build`): Location shape, queue classes, build number | NOT RUN | Layer B is on hold. |
 | CI11. Scan POST (`--authorize-scan`): HTTP status, jobs before and after, new job, auto-built without a POST, indexing status | NOT RUN | Layer B is on hold. The job is not a multibranch project, so no scan applies. |
+
+## Jira Cloud (not run)
+
+Status: NOT RUN, 2026-10-29. No check ran against a real Jira Cloud site. The rows come from the Atlassian docs and the fake Jira in `tests/support/fake-jira.ts`. Part N of docs/smoke-r3.md records the real results.
+
+| Fact | Result | Evidence |
+|---|---|---|
+| U75. Jira Cloud accepts Basic auth of the Atlassian account email and an unscoped API token on `https://<site>.atlassian.net` | UNVERIFIED | https://developer.atlassian.com/cloud/jira/platform/basic-auth-for-rest-apis/. The app sends Basic when the email is set, else Bearer. |
+| U76. Scoped API tokens do not work on the site URL | UNVERIFIED | https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/: a scoped token needs `https://api.atlassian.com/ex/jira/{cloudId}`. The app does not support scoped tokens. The exact status on the site URL is not documented. |
+| U77. Cloud `GET /rest/api/2/myself` has `accountId` and `displayName`, and no `name` | UNVERIFIED | https://developer.atlassian.com/cloud/jira/platform/deprecation-notice-user-privacy-api-migration-guide/. The check accepts a user without `name`. |
+| U78. Cloud serves `/secure/attachment/<id>/<name>` to Basic API token auth | UNVERIFIED | Not relied on. The app downloads from `GET /rest/api/2/attachment/content/{id}?redirect=false` (Cloud OpenAPI: 200 with redirect=false, else 303 to another host; https://dac-static.atlassian.com/cloud/jira/platform/swagger.v3.json). |
+| U79. The `src` format of an attached image in the Cloud rendered HTML | UNVERIFIED | markdown.ts maps only `/secure/attachment/<id>/...` and `/secure/thumbnail/<id>/...`. Another format shows the alt text, and the attachment list still shows the file. Part N step 4 records it. |
+| U80. Server and Data Center `serverInfo.deploymentType` values are `Server` or `DataCenter`, and can be absent | UNVERIFIED | https://docs.atlassian.com/software/jira/docs/api/REST/9.12.0/ (api/2/serverInfo) lists the field without values. The app treats only `Cloud` as Cloud, and an absent value blocks nothing. |
+| U81. Cloud REST v2 keeps `description` and comment `body` as strings | UNVERIFIED | https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/: v3 uses ADF. The app stays on v2. |

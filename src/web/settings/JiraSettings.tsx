@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Issue tracker settings (plan r2, task context UI): the base URL, the personal access token, and the CA file.
+// Issue tracker settings (plan r2, task context UI): the base URL, the Cloud account email, the token, and the CA file.
 // The server checks the token with the tracker before it saves. PR Review Inbox calls the tracker only on this save and on a Fetch click.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -25,7 +25,7 @@ export function JiraSettings({ settings }: { settings: SettingsDto }) {
 function TrackerSettings({ tracker, runner, settings }: { tracker: Tracker; runner: string; settings: SettingsDto }) {
   const qc = useQueryClient();
   const { name } = tracker;
-  const { baseUrl, caFile, tokenStored } = settings[tracker.id];
+  const { baseUrl, caFile, email, tokenStored } = settings[tracker.id];
   // The token lives only in this field until submit. The server never sends it back.
   const [token, setToken] = useState("");
   const [saved, setSaved] = useState<"saved" | "disconnected" | null>(null);
@@ -59,7 +59,13 @@ function TrackerSettings({ tracker, runner, settings }: { tracker: Tracker; runn
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     setSaved(null);
-    save.mutate({ baseUrl: String(f.get("baseUrl") ?? ""), token, caFile: String(f.get("caFile") ?? "") });
+    // The server keeps no email it does not get, so the save always sends the field.
+    save.mutate({
+      baseUrl: String(f.get("baseUrl") ?? ""),
+      token,
+      caFile: String(f.get("caFile") ?? ""),
+      email: String(f.get("email") ?? ""),
+    });
   }
 
   return (
@@ -95,10 +101,28 @@ function TrackerSettings({ tracker, runner, settings }: { tracker: Tracker; runn
               autoComplete="url"
               spellCheck={false}
             />
-            <FieldDescription>The base URL only. Include the context path if your server has one.</FieldDescription>
+            <FieldDescription>
+              The base URL only. Include the context path if your server has one. {name} Cloud: https://example.atlassian.net
+            </FieldDescription>
           </Field>
           <Field>
-            <FieldLabel htmlFor="tracker-token">Personal access token</FieldLabel>
+            <FieldLabel htmlFor="tracker-email">Atlassian account email ({name} Cloud only)</FieldLabel>
+            <Input
+              id="tracker-email"
+              name="email"
+              type="email"
+              defaultValue={email ?? ""}
+              placeholder="name@example.com"
+              autoComplete="email"
+              spellCheck={false}
+            />
+            <FieldDescription>
+              {name} Cloud: enter your email and an API token without scopes. Server or Data Center: leave the email empty and use a
+              personal access token.
+            </FieldDescription>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="tracker-token">Personal access token or API token</FieldLabel>
             <Input
               id="tracker-token"
               name="token"
@@ -107,7 +131,7 @@ function TrackerSettings({ tracker, runner, settings }: { tracker: Tracker; runn
               spellCheck={false}
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder={tokenStored ? "Stored. Leave empty to keep it." : "Personal access token…"}
+              placeholder={tokenStored ? "Stored. Leave empty to keep it." : "Token…"}
             />
             <FieldDescription>
               {memory
