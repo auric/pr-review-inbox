@@ -405,3 +405,22 @@ Run: `bun scripts/gate/claude-checks.ts --only B17,B18,B19,B20`. Bitbucket: `bun
 | G16. Repositories with REPO_WRITE: paging, keys, clone link names | PASS (2026-10-23) | GET /rest/api/1.0/repos?permission=REPO_WRITE&limit=100: 2 pages, 200 repositories, the last page has isLastPage=true. Repository keys include links, with the clone link names http and ssh. Project keys include key. The app follows nextPageStart and stops at REPO_LIST_MAX (10 pages). |
 | G17. Merge commit of a merged PR: properties.mergeCommit and the MERGED activity commit | PASS (2026-10-23) | Newest merged PR: properties keys commentCount, openTaskCount, resolvedTaskCount. It has no mergeCommit. The MERGED activity of GET .../activities carries a commit object with id, parents, and message. The same-commit comparison is false, because properties had no mergeCommit. The app reads the merge commit from the MERGED activity commit. |
 | G18. Merge result of the open PRs: properties.mergeResult outcome and current, with one PR made conflicted by hand | NOT RUN | `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G18` (read only). Until it runs, the app reads outcome `CONFLICTED` with current true as a PR with conflicts (MERGE_CONFLICTED in src/shared/task.ts). The sanitized dashboard fixture shows only `{"outcome": "CLEAN", "current": true}`. |
+
+## CI builds (not run)
+
+Status: CI1 to CI11 are not run. CI1 to CI9 only read. CI9 sends one POST to `api/json?tree=_class`, which starts nothing. CI10 starts one build and CI11 scans the multibranch project, only behind their flags. The plan has no CI4.
+
+Run: `bun run gate:ci -- <PR URL> --jenkins <Jenkins URL> --jenkins-user <user> [--job <folder/project>] [--authorize-build] [--authorize-scan]`. Tokens: `GATE_BITBUCKET_TOKEN` (else the stored token), `GATE_JENKINS_TOKEN`. Output: `.gate0/ci/result.json`. Dry run: `bun run gate:ci -- --dry-run`.
+
+| Fact | Result | Evidence |
+|---|---|---|
+| CI1. GET the PR: state, head present | NOT RUN | |
+| CI2. GET the build stats of the head: HTTP status, keys, counts | NOT RUN | |
+| CI3. GET the build status list of the head: count, keys, states, URL origin, URL path shape, last job segment, display/redirect | NOT RUN | |
+| CI5. Jenkins whoAmI: 401 vs 403, authenticated, anonymous, user name, version | NOT RUN | |
+| CI6. Jenkins crumbIssuer: crumb field or 404 (CSRF off), Set-Cookie | NOT RUN | |
+| CI7. Multibranch project: _class, buildable, job count, PR-<id> jobs, %2F names, branch job, PR job | NOT RUN | |
+| CI8. PR or branch job: buildable, inQueue, lastBuild, parameters | NOT RUN | |
+| CI9. POST `api/json?tree=_class` without and with the crumb: token exempt, crumb needed, or denied | NOT RUN | |
+| CI10. Build POST (`--authorize-build`): Location shape, queue classes, build number | NOT RUN | |
+| CI11. Scan POST (`--authorize-scan`): HTTP status, jobs before and after, new job, auto-built without a POST, indexing status | NOT RUN | |
