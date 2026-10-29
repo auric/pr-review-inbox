@@ -3,6 +3,7 @@
 
 // ForgeProvider for Bitbucket Server. It returns forge-neutral types from src/shared/types.ts.
 import { z } from "zod";
+import type { BuildCounts, BuildStatus } from "../../shared/build";
 import { BRANCH_PAGE, REPO_LIST_MAX, REPO_PAGE } from "../../shared/task";
 import {
   anchorSpan,
@@ -23,6 +24,7 @@ import {
   activity,
   branch,
   buildStats,
+  buildStatuses,
   change,
   comment,
   commit,
@@ -43,6 +45,8 @@ const DASHBOARD = `${API}/dashboard/pull-requests`;
 const OPEN_PR_LIMIT = 50;
 const HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const HEADS = "refs/heads/";
+// docs/plans/ci-builds.md, Layer A: one page of build statuses.
+const STATUS_LIMIT = 25;
 
 const repoPath = (project: string, repo: string) => `${API}/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}`;
 const prPath = (ref: PrRef) => `${repoPath(ref.project, ref.repo)}/pull-requests/${ref.id}`;
@@ -141,6 +145,16 @@ export function newestFirst(list: Commit[]): Commit[] {
 export const branchUrl = (repoUrl: string | undefined, ref: string | undefined): string | undefined =>
   repoUrl && ref ? `${repoUrl.replace(/\/+$/, "")}?at=${encodeURIComponent(ref)}` : undefined;
 
+// A link of another server, such as a CI build page. Only http(s) stays, so the browser never gets a javascript: or file: link.
+const httpUrl = (href: string | undefined): string | null => {
+  try {
+    const u = new URL(href ?? "");
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
+};
+
 // A new-side line of the diff between two fixed commits. fromHash: the target head. toHash: the reviewed source head (I8).
 // line: the new-side line of an added line, the old-side line of a context line (Gate v3 U4).
 export type NewAnchor = { path: string; srcPath: string | null; line: number; lineType: "add" | "ctx"; fromHash: string; toHash: string };
@@ -163,7 +177,7 @@ export type CreateResult = { status: "created"; pr: PullRequest; dropped: string
 // version: the PR version that the caller read. toBranch: the new target branch (retarget).
 export type PrUpdate = { version: number; title?: string; description?: string; reviewers?: string[]; toBranch?: string };
 // All zeros: no build reported a status for the commit (spec.md section 6.10).
-export type BuildStats = { successful: number; inProgress: number; failed: number; cancelled: number; unknown: number };
+export type BuildStats = BuildCounts;
 // more: the search has more branches than one page.
 export type BranchPage = { branches: { name: string; isDefault: boolean }[]; more: boolean };
 // config: for git fetch and push only, in the GIT_CONFIG env. It holds the token as an http.extraHeader value.
@@ -429,6 +443,14 @@ export function createBitbucketProvider(opts: ClientOptions) {
       if (!HASH.test(commitId)) throw new Error(`Invalid commit hash: ${commitId}`);
       const s = (await client.get(`/rest/build-status/1.0/commits/stats/${commitId}`, buildStats)).data;
       return { successful: s.successful, inProgress: s.inProgress, failed: s.failed, cancelled: s.cancelled ?? 0, unknown: s.unknown ?? 0 };
+    },
+
+    // docs/plans/ci-builds.md, Layer A: the first page of statuses of the commit. CI probe CI3: the url path of a Jenkins status does not
+    // start with /job/, so the app parses no job path from it and keeps it only as a browser link.
+    async buildStatuses(commitId: string): Promise<BuildStatus[]> {
+      if (!HASH.test(commitId)) throw new Error(`Invalid commit hash: ${commitId}`);
+      const { data } = await client.get(`/rest/build-status/latest/commits/${commitId}?limit=${STATUS_LIMIT}`, buildStatuses);
+      return data.values.map((s) => ({ name: s.name || s.key, state: s.state, url: httpUrl(s.url) }));
     },
 
     // Replies have no activity of their own. They are nested in comment.comments[] of the root comment.

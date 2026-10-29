@@ -7,7 +7,7 @@ import type { Comment, PullRequest, Role } from "../../shared/types";
 
 const MAX_BACKOFF_MS = 15 * 60_000;
 
-export type EventKind = "comment_new" | "commits_pushed" | "reviewer_added" | "draft_stale";
+export type EventKind = "comment_new" | "commits_pushed" | "reviewer_added" | "draft_stale" | "build_failed" | "build_passed";
 export type NewEvent = { kind: EventKind; ref: string };
 
 export function roleOf(pr: PullRequest, me: string): Role | null {

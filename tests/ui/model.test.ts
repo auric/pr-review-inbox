@@ -60,6 +60,7 @@ const row = (o: Partial<PrRow>): PrRow => ({
   tasks: [],
   lastActivity: 0,
   checkpoint: null,
+  build: null,
   ...o,
 });
 

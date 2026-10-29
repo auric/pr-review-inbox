@@ -327,6 +327,34 @@ export function repoWrites(
   return { path, prs, builds, writes, repository, branches, merge };
 }
 
+export type FakeBuild = { key: string; state: string; name?: string; url?: string };
+const STAT: Record<string, "successful" | "inProgress" | "failed" | "cancelled"> = {
+  SUCCESSFUL: "successful",
+  INPROGRESS: "inProgress",
+  FAILED: "failed",
+  CANCELLED: "cancelled",
+};
+
+// The build-status reads (docs/plans/ci-builds.md, Layer A), shaped as Gate G3 and the CI probe CI3 recorded them: the five stats keys of
+// Data Center 9.x, and list values with dateAdded, description, key, name, state, url. The stats count the statuses of the commit.
+// Returns the statuses by commit. repoWrites replaces the stats route, so call this after it.
+export function buildStatuses(fake: FakeBitbucket) {
+  const statuses = new Map<string, FakeBuild[]>();
+  const of = (req: Request) => statuses.get(new URL(req.url).pathname.split("/").pop() ?? "") ?? [];
+  fake.routes[key("GET", "/rest/build-status/1.0/commits/stats/*")] = (req) => {
+    const counts = { successful: 0, inProgress: 0, failed: 0, cancelled: 0, unknown: 0 };
+    for (const s of of(req)) counts[STAT[s.state] ?? "unknown"]++;
+    return { status: 200, body: counts };
+  };
+  fake.routes[key("GET", "/rest/build-status/latest/commits/*")] = (req) => {
+    const limit = Number(new URL(req.url).searchParams.get("limit") ?? 25);
+    const all = of(req);
+    const values = all.slice(0, limit).map((s, i) => ({ dateAdded: 1_790_000_000_000 + i, description: `Build ${s.key}`, ...s }));
+    return { status: 200, body: { size: values.length, limit, start: 0, isLastPage: all.length <= limit, values } };
+  };
+  return statuses;
+}
+
 type ListedRepo = { slug: string; name: string; project: { key: string }; writable: boolean } & Record<string, unknown>;
 const listedRepos = new WeakMap<FakeBitbucket, ListedRepo[]>();
 const reposOf = (fake: FakeBitbucket) => {

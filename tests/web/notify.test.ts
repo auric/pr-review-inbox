@@ -44,6 +44,14 @@ describe("planNotes", () => {
     ]);
   });
 
+  // docs/plans/ci-builds.md, Layer A.
+  test("a build event joins the other events of its PR", () => {
+    expect(planNotes([ev(1, { kind: "build_failed" }), ev(1), ev(2, { kind: "build_passed" })], false).map((x) => x.body)).toEqual([
+      "PROJ1/repo-1 #10: build failed, 1 new comment",
+      "PROJ1/repo-2 #20: build passed",
+    ]);
+  });
+
   test("the first claim of a tab gives one digest", () => {
     expect(planNotes([ev(1), ev(2), ev(2)], true)).toEqual([
       { title: "PR Review Inbox", body: "3 updates in 2 pull requests", tag: "digest", pr: null },

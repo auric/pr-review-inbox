@@ -71,6 +71,7 @@ import type { ForgeProvider } from "../bitbucket/provider";
 import { FAILED as JIRA_FAILED } from "../context/routes";
 import { ContextError, type ContextSource } from "../context/source";
 import { taskFileContext, taskIssue } from "../context/task-file";
+import { buildOf } from "../inbox/builds";
 import type { Live } from "../live";
 import { log } from "../log";
 import { interviewAgent, type Profile, profileOf, specAgent } from "../review/catalog";
@@ -734,6 +735,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       usage: p.usage_json === null ? null : (JSON.parse(p.usage_json) as RunUsage),
       prState: synced?.state ?? null,
       waiting: reviewers.filter((r) => r.status !== "APPROVED").map((r) => r.name),
+      build: buildOf(db, p.pr),
     };
   });
   const docs = docsOf(t);
@@ -774,6 +776,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
         prRows(db, t, p).map(({ parent: _, depth: __, access: ___, ...r }) => ({
           ...r,
           reviewers: defaultReviewers(db, t, r.project, r.repo),
+          build: buildOf(db, r.pr),
         })),
       ),
     questions: (db.query(Q.questions).all({ id: t.id }) as FullQuestionRow[]).map((q) => ({

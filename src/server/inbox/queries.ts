@@ -21,6 +21,7 @@ import type {
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { Reviewer, Role, User } from "../../shared/types";
 import { byArchive, byInbox } from "../../shared/views";
+import { BUILD_COLUMNS, type RawBuild, toBuild } from "./builds";
 import { openDrafts, staleCount } from "./stale";
 
 const CLAIMED_TTL_MS = 30 * 86_400_000;
@@ -40,8 +41,9 @@ function scoped(scope: string) {
       p.on_dashboard, p.followed, p.archived_at, p.reviewers_json, p.seen_at,
       (SELECT COUNT(*) FROM comment c WHERE ${UNREAD}) AS unread,
       MAX(COALESCE(p.updated_date, 0), COALESCE((SELECT MAX(c.updated_at) FROM comment c WHERE c.pr = p.id), 0)) AS last_activity,
-      k.scope IS NOT NULL AS has_checkpoint, k.last_complete_at, k.incomplete_reason, k.last_error
+      k.scope IS NOT NULL AS has_checkpoint, k.last_complete_at, k.incomplete_reason, k.last_error, ${BUILD_COLUMNS}
     FROM pull_request p LEFT JOIN sync_checkpoint k ON k.scope = 'pr:' || p.id LEFT JOIN pr_branch_link b ON b.pr = p.id
+      LEFT JOIN pr_build pb ON pb.pr = p.id
     WHERE ${where}`,
     // One query for the comments of all PRs in the scope.
     turns: `SELECT c.pr, c.comment_id, c.root_id, c.author_slug, c.author_name, c.author_login, c.text, c.thread_resolved, c.created_at,
@@ -83,7 +85,7 @@ const SQL = {
   checkpoint: "SELECT last_complete_at, incomplete_reason, last_error FROM sync_checkpoint WHERE scope = $scope",
 };
 
-type RawRow = {
+type RawRow = RawBuild & {
   id: number;
   project: string;
   repo: string;
@@ -219,6 +221,7 @@ const toRow = (r: RawRow, t: Turns, tasks: PrTask[], staleDrafts: number): PrRow
   tasks,
   lastActivity: r.last_activity,
   checkpoint: r.has_checkpoint ? toCheckpoint(r) : null,
+  build: toBuild(r, r.source_head),
 });
 
 function selectRows(db: Database, me: string, sql: Scope, id: number | null): PrRow[] {

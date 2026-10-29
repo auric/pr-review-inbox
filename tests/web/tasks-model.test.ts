@@ -98,6 +98,7 @@ const part = (o: Partial<TaskPartDto> = {}): TaskPartDto => ({
   usage: null,
   prState: null,
   waiting: [],
+  build: null,
   ...o,
 });
 
@@ -1076,6 +1077,7 @@ const prRow = (o: Partial<TaskPrDto> & Pick<TaskPrDto, "taskRepo" | "repo">): Ta
   running: null,
   pointer: null,
   reviewers: ["anna"],
+  build: null,
   ...o,
 });
 const LIB = prRow({ taskRepo: 2, repo: "lib" });

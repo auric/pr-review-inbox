@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Polling sync (plan G4): dashboard, PR states, comments, delete checks, events. One cycle at a time.
+// Polling sync (plan G4): dashboard, PR states, build status, comments, delete checks, events. One cycle at a time.
+import type { BuildCounts, BuildStatus } from "../../shared/build";
 import type { CheckpointReason, SyncState, SyncStatus } from "../../shared/dto";
 import { isMe } from "../../shared/me";
 import type { Change, Commit, ForgeErrorInfo, IncompleteReason, PrRef, PullRequest } from "../../shared/types";
@@ -11,6 +12,7 @@ import { staleKeys } from "../inbox/stale";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { Settings, TaskPlan } from "../settings";
+import { buildChanged, buildEvents, keptBuilds, type StoredBuild } from "./builds";
 import { type NewEvent, nextDelay, parseRetryAfter, prEvents, reconcile, roleOf, type StoredComment } from "./reconcile";
 
 const NETWORK = new Set(["network", "timeout"]);
@@ -102,6 +104,12 @@ const SQL = {
   tombstone: "UPDATE comment SET tombstoned_at = $now WHERE pr = $pr AND comment_id = $id AND tombstoned_at IS NULL",
   initialized: "UPDATE pull_request SET initialized_at = COALESCE(initialized_at, $now) WHERE id = $id",
   event: "INSERT INTO event (pr, kind, ref, created_at, digest) VALUES ($pr, $kind, $ref, $now, $digest) ON CONFLICT DO NOTHING",
+  // docs/plans/ci-builds.md, Layer A.
+  buildPr: "SELECT source_head, my_role, initialized_at FROM pull_request WHERE id = $id",
+  build: "SELECT head, stats_json FROM pr_build WHERE pr = $pr",
+  buildUpsert: `INSERT INTO pr_build (pr, head, stats_json, builds_json, read_at) VALUES ($pr, $head, $stats, $builds, $now)
+    ON CONFLICT (pr) DO UPDATE SET head = excluded.head, stats_json = excluded.stats_json, builds_json = excluded.builds_json,
+      read_at = excluded.read_at`,
   lastComplete: "SELECT last_complete_at FROM sync_checkpoint WHERE scope = $scope",
   checkpointDone: `INSERT INTO sync_checkpoint (scope, last_complete_at, incomplete_reason, last_error, updated_at) VALUES ($scope, $now, $reason, $error, $now)
     ON CONFLICT (scope) DO UPDATE SET last_complete_at = excluded.last_complete_at, incomplete_reason = excluded.incomplete_reason,
@@ -445,11 +453,52 @@ export function createSyncEngine(opts: { settings: Settings; live: Live; now?: (
       tally.events += events;
     };
 
+    // docs/plans/ci-builds.md, Layer A: the build stats of the source head, and the status list only after a change. It runs before
+    // syncPr, so initialized_at still marks the first sync after a follow.
+    const syncBuild = async (row: PrKey) => {
+      type State = { source_head: string | null; my_role: string | null; initialized_at: number | null };
+      const { pr, prev } = tx(() => ({
+        pr: db.query(SQL.buildPr).get({ id: row.id }) as State,
+        prev: db.query(SQL.build).get({ pr: row.id }) as StoredBuild | null,
+      }));
+      const head = pr.source_head;
+      if (!head) return;
+      let stats: BuildCounts;
+      try {
+        stats = await forge.buildStats(head);
+        reached = true;
+      } catch (e) {
+        if (!(e instanceof ForgeError)) throw e;
+        failed(e.kind, e);
+        return;
+      }
+      if (!buildChanged(prev, head, stats)) return;
+      if (gen !== generation) throw new Cancelled();
+      // A failed list read keeps the counts. The list is read again after the next change.
+      let builds: BuildStatus[] | null = null;
+      try {
+        builds = keptBuilds(await forge.buildStatuses(head));
+      } catch (e) {
+        if (!(e instanceof ForgeError)) throw e;
+        failed(e.kind, e);
+      }
+      const events = tx(() => {
+        if (!db.query(SQL.watched).get({ id: row.id })) return null;
+        run(SQL.buildUpsert, { pr: row.id, head, stats: JSON.stringify(stats), builds: builds && JSON.stringify(builds), now: now() });
+        const first = !prev || pr.initialized_at === null;
+        return addEvents(row.id, buildEvents(stats, head, { mine: pr.my_role === "AUTHOR", first }));
+      });
+      if (events === null) return;
+      tally.changed.add(row.id);
+      tally.events += events;
+    };
+
     // Steps 3 to 5 for each followed, non-archived PR.
     // ponytail: one PR at a time; run two workers if the cycle time grows too long (plan R1).
     for (const row of tx(() => db.query(SQL.polled).all({}) as PrKey[])) {
       if (skip.has(row.id) || resting(row)) continue;
       try {
+        if (row.state === "OPEN") await syncBuild(row);
         await syncPr(row);
         if (row.state === "MERGED" || row.state === "DECLINED") closedPolledAt.set(row.id, tally.startedAt);
       } catch (e) {

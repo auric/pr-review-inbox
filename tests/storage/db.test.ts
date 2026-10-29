@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 40;
+const LATEST = 41;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1305,6 +1305,61 @@ test("migration from a version-38 database keeps the code PR rows; their file co
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
     expect(db.query("SELECT lines, files FROM task_part").get()).toEqual({ lines: 42, files: null });
     expect(db.query("SELECT lines, files FROM task_pr").get()).toEqual({ lines: 7, files: null });
+  } finally {
+    db.close();
+  }
+});
+
+// docs/plans/ci-builds.md, Layer A: 041_build_status.sql rebuilds event as 029_draft_stale.sql did.
+test("migration from a version-40 database keeps every event with its ID; the build kinds and pr_build are new", () => {
+  const path = join(dir, "v40.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+  ]);
+  old.exec("PRAGMA user_version = 40");
+  old.exec("PRAGMA foreign_keys = ON");
+  old.exec(`INSERT INTO pull_request (id, project, repo, pr_id) VALUES (1, 'P', 'r', 1), (2, 'P', 'r', 2);
+    INSERT INTO event (id, pr, kind, ref, created_at, digest, claimed_at)
+      VALUES (3, 1, 'comment_new', '10', 1, 0, NULL), (5, 1, 'draft_stale', '12:out-of-date:11', 2, 1, 7), (9, 2, 'reviewer_added', '4', 3, 0, NULL);`);
+  const events = old.query("SELECT * FROM event ORDER BY id").all();
+  const eventColumns = columns(old, "event");
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(columns(db, "event")).toEqual(eventColumns);
+    expect(db.query("SELECT * FROM event ORDER BY id").all()).toEqual(events);
+    expect(db.query("SELECT name FROM sqlite_master WHERE tbl_name = 'event' AND type = 'index' AND sql IS NOT NULL").all()).toEqual([
+      { name: "event_unclaimed" },
+    ]);
+    const insert = (kind: string, ref: string) =>
+      db.query("INSERT INTO event (pr, kind, ref, created_at) VALUES (1, $kind, $ref, 4)").run({ kind, ref });
+    insert("build_failed", "a".repeat(40));
+    insert("build_passed", "a".repeat(40));
+    expect(() => insert("build_failed", "a".repeat(40))).toThrow(/UNIQUE/);
+    expect(() => insert("bogus", "x")).toThrow(/CHECK/);
+    expect(db.query("SELECT MAX(id) AS id FROM event").get()).toEqual({ id: 11 });
+    expect(columns(db, "pr_build")).toEqual(["pr", "head", "stats_json", "builds_json", "read_at"]);
+    db.run("INSERT INTO pr_build (pr, head, stats_json, builds_json, read_at) VALUES (2, 'b', '{}', NULL, 1)");
+    expect(() => db.run("INSERT INTO pr_build (pr, head, stats_json, read_at) VALUES (99, 'b', '{}', 1)")).toThrow(/FOREIGN KEY/);
+    expect(() => db.run("INSERT INTO pr_build (pr, head, read_at) VALUES (1, 'b', 1)")).toThrow(/NOT NULL/);
+    // A removed PR removes its build row and its events.
+    db.run("DELETE FROM pull_request WHERE id = 2");
+    expect(db.query("SELECT COUNT(*) AS n FROM pr_build").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT id FROM event ORDER BY id").all()).toEqual([{ id: 3 }, { id: 5 }, { id: 10 }, { id: 11 }]);
   } finally {
     db.close();
   }

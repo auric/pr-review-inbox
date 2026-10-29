@@ -1177,7 +1177,11 @@ describe("scheduling", () => {
     const h = await setup();
     await h.cycle();
     const sent = await switchDuring(h, REVIEW_ACTIVITIES);
-    expect(sent.filter((r) => !r.startsWith(`GET ${DASHBOARD_PATH}`))).toEqual([`GET ${REVIEW_ACTIVITIES}?limit=50&start=0`]);
+    // The build stats read of the PR comes before its comment fetch (docs/plans/ci-builds.md, Layer A).
+    expect(sent.filter((r) => !r.startsWith(`GET ${DASHBOARD_PATH}`))).toEqual([
+      `GET /rest/build-status/1.0/commits/stats/${reviewPr().fromRef.latestCommit}`,
+      `GET ${REVIEW_ACTIVITIES}?limit=50&start=0`,
+    ]);
   });
 
   test("a settings change during the off-dashboard step sends no further PR request to the old origin", async () => {
@@ -1300,12 +1304,12 @@ describe("forge data", () => {
     expect(h.pr(2).meta_head).toBe(`${HEAD}:${TARGET}`);
     const from = fake.requests.length;
     await h.cycle();
-    expect(requests(from, "/commits")).toEqual([]);
-    expect(requests(from, "/changes")).toEqual([]);
+    expect(requests(from, COMMITS)).toEqual([]);
+    expect(requests(from, CHANGES)).toEqual([]);
     pushed();
     await h.cycle();
-    expect(requests(from, "/commits")).toHaveLength(1);
-    expect(requests(from, "/changes")).toHaveLength(1);
+    expect(requests(from, COMMITS)).toHaveLength(1);
+    expect(requests(from, CHANGES)).toHaveLength(1);
     expect(h.pr(2).meta_head).toBe(`${NEXT}:${TARGET}`);
   });
 

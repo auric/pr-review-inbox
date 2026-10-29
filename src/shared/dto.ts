@@ -3,6 +3,7 @@
 
 // API request and response shapes shared by server and UI.
 import { z } from "zod";
+import type { BuildCounts, BuildState, BuildStatus } from "./build";
 import {
   type Anchor,
   type AnchoredFinding,
@@ -328,6 +329,11 @@ export type Cause = { thread: number; msg: number; author: string; snippet: stri
 
 export type PrTask = { key: string; source: TaskSource; url: string | null };
 
+// docs/plans/ci-builds.md, Layer A: the Bitbucket build status of the synced source head. builds: at most 10, failed first, then in
+// progress; null when the list read failed. readAt: ms of the read that saw the last change. A field of this type is null before the first
+// read, and when the stored read has another head than the synced source head.
+export type BuildDto = { head: string; state: BuildState; counts: BuildCounts; builds: BuildStatus[] | null; readAt: number };
+
 // Metadata fields are null for a PR followed by URL until its first sync cycle.
 export type PrRow = {
   id: number;
@@ -374,6 +380,7 @@ export type PrRow = {
   // ms: the newest of the PR update and the comment updates.
   lastActivity: number;
   checkpoint: CheckpointDto | null;
+  build: BuildDto | null;
 };
 
 // WP4 fills the optional forge fields below. The detail renders each part only when its field is present.
@@ -426,7 +433,7 @@ export type FollowState = { id: number; followed: boolean; archivedAt: number | 
 export type ClaimedEvent = {
   id: number;
   pr: number;
-  kind: "comment_new" | "commits_pushed" | "reviewer_added" | "draft_stale";
+  kind: "comment_new" | "commits_pushed" | "reviewer_added" | "draft_stale" | "build_failed" | "build_passed";
   ref: string;
   createdAt: number;
   // true: the event came after a sync gap of more than 2 check intervals. Show one summary per PR.
@@ -1423,6 +1430,7 @@ export type TaskPartDto = {
   usage: RunUsage | null;
   prState: string | null;
   waiting: string[];
+  build: BuildDto | null;
 };
 
 // A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a
@@ -1471,6 +1479,7 @@ export type TaskPrDto = {
   running: "push" | "pr" | null;
   pointer: "task_branch" | "merged_commit" | null;
   reviewers: string[];
+  build: BuildDto | null;
 };
 
 // A point of the newest own review of a part that the loop does not fix: not a confirmed blocker or major (spec.md section 6.7).

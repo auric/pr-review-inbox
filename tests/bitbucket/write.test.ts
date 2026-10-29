@@ -7,7 +7,16 @@ import { ForgeError } from "../../src/server/bitbucket/client";
 import { NoCloneLink, type WriteProblem, writeProblem } from "../../src/server/bitbucket/errors";
 import { createBitbucketProvider } from "../../src/server/bitbucket/provider";
 import { MERGE_CONFLICTED } from "../../src/shared/task";
-import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, repoWrites, startFakeBitbucket, TEST_CA_FILE } from "../support/fake-bitbucket";
+import {
+  buildStatuses,
+  FAKE_TOKEN,
+  FAKE_USER,
+  type FakeBitbucket,
+  key,
+  repoWrites,
+  startFakeBitbucket,
+  TEST_CA_FILE,
+} from "../support/fake-bitbucket";
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
 
@@ -247,6 +256,40 @@ describe("buildStats", () => {
     const before = fake.requests.length;
     expect(await caught(provider.buildStats("../../api/1.0/users"))).toBeInstanceOf(Error);
     expect(fake.requests.length).toBe(before);
+  });
+});
+
+// docs/plans/ci-builds.md, Layer A.
+describe("buildStatuses", () => {
+  test("reads one page of 25 and keeps the name, the state, and an http(s) link", async () => {
+    const { provider } = setup();
+    const statuses = buildStatuses(fake);
+    statuses.set(HEAD, [
+      { key: "ci-main", name: "sample-ci » main #3", state: "FAILED", url: "https://ci.example.invalid/x/y/job/main/3/" },
+      { key: "lint", state: "SUCCESSFUL", url: "http://lint.example.invalid/r/1" },
+      { key: "evil", name: "Evil", state: "SUCCESSFUL", url: "javascript:alert(1)" },
+      { key: "file", name: "File", state: "INPROGRESS", url: "file:///etc/passwd" },
+      { key: "relative", name: "Relative", state: "UNKNOWN", url: "/browse/1" },
+      { key: "none", name: "None", state: "CANCELLED" },
+    ]);
+    expect(await provider.buildStatuses(HEAD)).toEqual([
+      { name: "sample-ci » main #3", state: "FAILED", url: "https://ci.example.invalid/x/y/job/main/3/" },
+      { name: "lint", state: "SUCCESSFUL", url: "http://lint.example.invalid/r/1" },
+      { name: "Evil", state: "SUCCESSFUL", url: null },
+      { name: "File", state: "INPROGRESS", url: null },
+      { name: "Relative", state: "UNKNOWN", url: null },
+      { name: "None", state: "CANCELLED", url: null },
+    ]);
+    expect(fake.requests).toEqual([`GET /rest/build-status/latest/commits/${HEAD}?limit=25`]);
+  });
+
+  test("a bad hash sends no request, a 404 throws not_found, and a value without a key is a shape error", async () => {
+    const { provider } = setup();
+    expect(await caught(provider.buildStatuses("../../api/1.0/users"))).toBeInstanceOf(Error);
+    expect(fake.requests).toEqual([]);
+    expect(await caught(provider.buildStatuses(HEAD))).toMatchObject({ kind: "not_found", status: 404 });
+    fake.routes[key("GET", `/rest/build-status/latest/commits/${HEAD}`)] = { status: 200, body: { values: [{ state: "FAILED" }] } };
+    expect(await caught(provider.buildStatuses(HEAD))).toMatchObject({ kind: "shape" });
   });
 });
 

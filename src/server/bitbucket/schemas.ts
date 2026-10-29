@@ -159,6 +159,19 @@ export const buildStats = z.object({
   unknown: z.number().optional().catch(undefined),
 });
 
+// GET /rest/build-status/latest/commits/{commit} (CI probe CI3): values with dateAdded, description, key, name, state, url. No buildNumber
+// and no ref. The REST docs mark name and url optional.
+export const buildStatuses = z.object({
+  values: z.array(
+    z.object({
+      key: z.string(),
+      state: z.string(),
+      name: z.string().optional().catch(undefined),
+      url: z.string().optional().catch(undefined),
+    }),
+  ),
+});
+
 // GET .../default-branch (Gate G13): keys displayId, id, type. The id starts with refs/heads/.
 export const defaultBranch = z.object({ id: z.string(), displayId: z.string() });
 

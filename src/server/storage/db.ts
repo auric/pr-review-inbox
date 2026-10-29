@@ -42,6 +42,7 @@ import m037_task_update from "./migrations/037_task_update.sql" with { type: "te
 import m038_task_profile from "./migrations/038_task_profile.sql" with { type: "text" };
 import m039_task_files from "./migrations/039_task_files.sql" with { type: "text" };
 import m040_task_base_changed from "./migrations/040_task_base_changed.sql" with { type: "text" };
+import m041_build_status from "./migrations/041_build_status.sql" with { type: "text" };
 
 // Index i holds the SQL that raises user_version from i to i + 1. The list order, not the file number, sets the version.
 const MIGRATIONS = [
@@ -85,6 +86,7 @@ const MIGRATIONS = [
   m038_task_profile,
   m039_task_files,
   m040_task_base_changed,
+  m041_build_status,
 ];
 
 const tables = (db: Database) =>

@@ -287,7 +287,7 @@ type TaskPrRow = {
 const PART_PR: Record<string, TaskPrDto["state"]> = { merged: "merged", declined: "declined", abandoned: "declined" };
 
 // A row of the PR dialog with its place in the repository tree.
-export type PrRow = Omit<TaskPrDto, "reviewers"> & { parent: number | null; depth: number; access: RepoAccess };
+export type PrRow = Omit<TaskPrDto, "reviewers" | "build"> & { parent: number | null; depth: number; access: RepoAccess };
 
 // The changed repositories of a part: each task_pr row, the submodules deepest first, then the main repository. The main row takes its
 // state from the part, and its failure from its newest push or pr step (item "<project>/<repo>", or the part branch of the one-PR route).
