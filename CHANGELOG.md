@@ -19,6 +19,7 @@
 - "Duplicate" on a profile adds a copy of it with all its settings.
 - Agent model, Agent effort, and Check model now say "Same as the main run" and name its model or effort when the app knows it. A help line under each pair says which agent it sets.
 - Settings now save while config.json is open in an editor or another program. When the save still cannot write the file, the message tells you to close it there.
+- The app now shows the build status that your CI posts to Bitbucket for each open followed PR. A list row shows "Build failed" or "Build running". The PR header shows the build counts and links to the named build. A task shows "The build of your PR failed: <name>." or that the build runs or passed, also on each PR row of a task with several repositories. Your own PRs notify you when a build fails or passes, but not while a build runs.
 
 ### Build a Jira task
 

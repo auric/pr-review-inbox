@@ -1350,6 +1350,7 @@ Section 6.16.10 adds the reads for the base branch, the branch search, the write
 
 - Spec gate: the spec PR has at least `approvals` approvals in reviewers_json, no reviewer with status NEEDS_WORK, and no open blocker task. Or it merged. Or the user clicks "Start without approval" and confirms "Colleagues have not approved the spec yet. Start building anyway?".
 - Part gate: the same review rules on the part PR, plus buildStats of its head: failed 0 and inProgress 0. No build statuses at all count as green, and the UI says "No builds reported." The user can override with one confirm.
+- The part gate reads the build counts from `pr_build` (docs/plans/ci-builds.md, Layer A). The sync writes that row for the source head of each open followed PR. A row for an older head counts as not read.
 - The app reads the gate facts on each sync of the PR (no new polling loop). A PR that is not followed gets followed when the task opens it.
 
 ### 6.11 Routes (zod inputs)
@@ -1420,6 +1421,16 @@ Primary button per state:
 
 Section 6.18.5 adds the rows for the base update, the instruct step, and new commits that are not pushed.
 
+Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not pushed" row. They derive from the build status of the PR head and change no task state.
+
+| Case | Status sentence | Needs you | Primary |
+|---|---|---|---|
+| a build failed | "The build of your PR failed: <name>." | yes | "Go to the PR" |
+| a build runs | "Waiting for <names>. The build runs." | no | "Go to the PR" |
+| all builds passed | "Waiting for <names>. The build passed." | no | "Go to the PR" |
+
+- A build line under the status links to the build page. The step strip does not change. A task with several repositories shows the build text on each PR row.
+
 - Tell Claude: the waiting states after the build started show the box "Tell Claude" under the primary button (section 6.18.1).
 
 - Questions tab: a form. Each question shows its text, "Why it matters: …", radio buttons for the options with "Recommended" on one, which starts selected, and an optional text field "Add a note (optional)". Buttons: primary "Send answers", secondary "Use the recommended answers".
@@ -1437,7 +1448,8 @@ Section 6.18.5 adds the rows for the base update, the instruct step, and new com
 
 - task_event kinds: needs_you (ref: step ID), part_ready (ref: part ID and head), spec_approved (ref: spec PR head). One tab claims each event (as draft_stale). The notifications setting applies.
 - Texts: "<KEY> needs you: the tests stay red." / "<KEY>: part 2 of 4 is ready for its PR." / "<KEY>: the spec is approved. You can start building."
-- No notification for a running step, a green check, a commit, or a wait.
+- No notification for a running step, a green check of the app, a commit, or a wait.
+- Build status (docs/plans/ci-builds.md, Layer A): the PR events build_failed and build_passed (ref: the source head) notify only for the user's own PRs, task PRs included. Texts: "build failed" and "build passed". They never fire on the first build read of a PR or while a build runs. Each kind fires at most once per head.
 
 ### 6.14 Edge cases
 
