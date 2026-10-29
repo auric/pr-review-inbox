@@ -8,6 +8,8 @@ Update (2026-10-23): the user decided Q42 to Q46 (design.md section 10.4): a glo
 
 Update (2026-10-26): the user decided Q52 and Q53 (design.md section 10.6): the "Tell Claude" box and "Update from <base>" (spec.md section 6.18). They add WP-TU1 and WP-TU2 (wave W9c) and Gate G18. "Update from <base>" replaces the moved-base rebase of WP-MR2.
 
+Update (2026-10-29): the user approved Q64 to Q76 (design.md section 10.8): build a Jira task with sub-tasks, one branch and one PR per sub-task (spec.md section 6.20). They add WP-ST-D, WP-ST-G, WP-ST1 to WP-ST7 (wave W9d), Gates G19 and J1 to J4, and the user smoke UT. WP-B8 shrinks to the large-task wiring of the sub-task engine. The prerequisites exist: WP-CA1 of docs/plans/ci-builds.md (pr_build, 2734de5) and Jira Cloud auth (698b7aa, de32843).
+
 ## 0. Rules for every work package
 
 - Read CLAUDE.md of the repository first. In a worktree, also read the CLAUDE.md of the main checkout (first path of `git worktree list`). Read the three plan files.
@@ -46,6 +48,8 @@ Update (2026-10-26): the user decided Q52 and Q53 (design.md section 10.6): the 
 | UN | User smoke docs/smoke-task.md part N (a main repository with a submodule, and an added repository) | W9b |
 | W9c | WP-TU1, then WP-TU2 | UN; G18 recorded before WP-TU1 merges (until then the fake Bitbucket follows the DC 9.6 docs) |
 | UTU | User smoke docs/smoke-task.md part U (Tell Claude, Update from a release branch before and after the first push, a conflict) | W9c |
+| W9d | WP-ST-D, then WP-ST-G, then WP-ST1, WP-ST2, WP-ST3, WP-ST4, WP-ST5, WP-ST6, WP-ST7 (one branch, one after another) | UTU; the user approved the rule changes (2026-10-29); G19 and J1 to J4 recorded before WP-ST4 and WP-ST5 merge (until then the fakes follow the docs) |
+| UT | User smoke docs/smoke-task.md part T (a parent with 4 sub-tasks, 2 in review outside the app, one squash merge) | W9d |
 | W10 | WP-B6 ∥ WP-B7 | UN and UTU (the medium code PR uses the several-repository PR flow of WP-MR2) |
 | UM | User smoke part M (medium task) | W10 |
 | W11 | WP-B8, then WP-B9 ∥ WP-B10 | UM |
@@ -80,8 +84,9 @@ What each task size needs:
 | Small | WP-G0, WP-D6, WP-B0, WP-B1 (push, create PR, repository remote), WP-B2, WP-B3, WP-B4, WP-B5, WP-GB, WP-BR1, WP-BR2 |
 | Several repositories (small and medium) | WP-MR1, WP-MR2, WP-MR3 |
 | Tell Claude and Update from the base branch (small and medium) | WP-TU1, WP-TU2 |
+| Sub-tasks (one small PR per Jira sub-task) | Small, Tell Claude, plus WP-ST-D, WP-ST-G, WP-ST1 to WP-ST7 |
 | Medium | Small, plus WP-B6 (spec PR, gate, Fix on task branches) and WP-B7 (UI) |
-| Large | Medium, plus WP-B8 (stack, retarget, rebase, replan, builds gate), WP-B9 (UI), WP-B10 (notifications and inbox rows) |
+| Large | Medium and the sub-task engine (WP-ST3 to WP-ST5), plus WP-B8 (large-task wiring, replan), WP-B9 (UI), WP-B10 (notifications and inbox rows) |
 
 Shared-file ownership (merge order):
 
@@ -100,8 +105,9 @@ Shared-file ownership (merge order):
 | src/server/bitbucket/* | WP-PN (listOpenPullRequests, buildStats; reads only) → WP-B1 → WP-BR1 (defaultBranch, listBranches) → WP-MR1 (writableRepos, restrictions, repository by key) → WP-MR2 (mergeCommit) → WP-TU1 (properties.mergeResult in the PR schema) |
 | scripts/eval/* | WP-M1 → WP-PN (`--replies` mode, adds only) |
 | the task migration (next free number, 033 unless WP-D2 takes it), src/shared/task.ts, src/server/tasks/machine.ts, the xstate dependency | WP-B0 (later owners add events and guards only, with the table test) |
-| src/server/tasks/* | WP-B2 → WP-B3 → WP-B4 → WP-BR1 → WP-MR1 → WP-MR2 → WP-TU1 → WP-B6 → WP-B8 |
-| src/web/tasks/* | WP-B5 → WP-BR2 → WP-MR3 → WP-TU2 → WP-B7 → WP-B9 → WP-B10 |
+| src/server/tasks/* | WP-B2 → WP-B3 → WP-B4 → WP-BR1 → WP-MR1 → WP-MR2 → WP-TU1 → WP-ST2 → WP-ST3 → WP-ST4 → WP-ST5 → WP-ST7 → WP-B6 → WP-B8 |
+| src/web/tasks/* | WP-B5 → WP-BR2 → WP-MR3 → WP-TU2 → WP-ST6 → WP-ST7 → WP-B7 → WP-B9 → WP-B10 |
+| src/server/context/jira.ts, tests/support/fake-jira.ts, scripts/gate/jira.ts (new) | WP-ST-G (gate script) → WP-ST1 → WP-ST5 (status read callers only) |
 | src/web/settings/Settings.tsx (section "Tasks"), src/web/settings/BranchPrefixes.tsx (new) | WP-BR2 |
 | the task repositories migration (next free number: task_repo, task_pr, repo_task_settings.last_base) | WP-BR1 (last_base only) → WP-MR1 (adds the tables in its own migration) |
 | tests/e2e/serve.ts, control.ts, tests/support/fake-claude.ts, fake-bitbucket.ts | WP-R1 → WP-PN → WP-B1 → WP-A1 (on hold) (the later owner adds only) |
@@ -372,6 +378,74 @@ Shared-file ownership (merge order):
 
 - docs/smoke-task.md part U on the test repository: a small task on a release branch base. Tell Claude once with a change and once with a question. Move the release branch, then "Update from <base>" before the first push (rebase). Push, move the release branch again with a conflicting change, and check the conflict row, the resolve step, and the merge commit. Check that no push happens without a click.
 
+### WP-ST-D. Docs for sub-tasks (implementer, W9d; done)
+
+- Files: docs/plans/review-v2/spec.md (section 6.20, AC-B15, sections 8 to 10 rows), design.md (B28 to B33, B10, the stack rules, section 10.8), tasks.md (these rows), BRIEF.md (sections 2, 3.6, 7), CLAUDE.md (hard rules, status line).
+- Tests: none.
+
+### WP-ST-G. Gate probes G19 and J1 to J4 (implementer, W9d)
+
+- Files: scripts/gate/bitbucket-write.ts (G19); scripts/gate/jira.ts (new, read only unless `--authorize-transition`); package.json (script); tests/gate/jira.test.ts (dry run, no names); integration-check.md (rows G19 and J1 to J4, "not run").
+- G19: squash-merge a lower PR with the branch kept. Record that the MERGED activity commit has one parent and that the tree check holds. Run the three merges on the upper branch, push, and PUT the target. GET .../pull-requests/{id}/changes lists only the upper files.
+- J1: the `subtasks` shape with statusCategory. J2: the `issuelinks` shape. J3: the transitions list, a non-image file link in a comment, and the image `src` of the Cloud rendered HTML (U79). J4: one POST transition on a test issue (204) with X-Atlassian-Token: no-check. Run J1 to J4 on Server or Data Center and on Cloud. Sanitized output only, as in the other gate scripts.
+- Done check: dry runs green. Then the user runs G19 and J1 to J4.
+
+### WP-ST1. Jira client: sub-tasks, links, status, transitions (implementer, W9d)
+
+- Files: src/server/context/jira.ts, source.ts; src/shared/dto.ts (IssueContext only: parent, subtasks, links); tests/support/fake-jira.ts (ABC-10 with ABC-11 to ABC-14, one "is blocked by" link, transitions per issue, a POST that changes the status, a status control, request counters, Server and Cloud modes); fixtures/jira/subtasks-*.json (synthetic); tests/context/jira.test.ts.
+- Behavior: spec.md section 6.20.9. AC-B73 (Jira part), AC-B86 (client part).
+- Tests: subtasks, parent, and links parse (lenient, unknown shapes dropped); the status read; the transitions GET; the POST body, headers, and 204; 400 and 500 give the sentence; a redirect is an error; the token is in no error; the POST path guard; no request to a `/subtask` path; both fake modes pass.
+- Control mutation: let transition() take a free path. The guard test must fail.
+
+### WP-ST2. Sub-task data, attachments, and plan (implementer-xhigh, W9d)
+
+- Files: src/server/storage/migrations/<next free number, 042 unless taken>_task_subtasks.sql; src/server/storage/db.ts; src/shared/task.ts; src/server/tasks/machine.ts (ADOPT_OPEN, ADOPT_MERGED); tasks.ts (create, task_subtask, found work in the spec hook, plan approval, plan-again); src/server/context/task-file.ts and the task attachment code (per-issue folders, the per-key image rewrite, the shared caps); src/server/review/catalog.ts (spec and interview lines); src/server/bitbucket/provider.ts (merged PR list); src/shared/dto.ts; src/server/tasks/routes.ts; tests/tasks/subtasks.test.ts (new); tests/tasks/machine.test.ts; tests/storage/db.test.ts; the README diagram.
+- Behavior: spec.md sections 6.20.1 to 6.20.5, 6.20.7, 6.20.8. AC-B72 (server part), AC-B73 to AC-B77.
+- Done check: the subtasks and machine tests; the fake write counter is 0 at the approval.
+- Control mutation: let a part run get every sub-task folder. The AC-B77 test must fail.
+
+### WP-ST3. Build several parts (implementer-xhigh, W9d)
+
+- Files: src/server/tasks/schedule.ts (new: nextPart); loop.ts (per-part key, spec dir, base, plan subset; part start; buildParts with the scheduler; per-part base check); repos.ts (updateRepos per part); tasks.ts (per-part DTO fields, currentPart, focus data); src/shared/task.ts (stepStrip); pr.ts (target, key, PR text); tests/tasks/schedule.test.ts (new); tests/tasks/subparts.test.ts (new).
+- Behavior: spec.md section 6.20.6. AC-B78, AC-B79 (build part), AC-B83.
+- Done check: the scheduler truth table; every single-part test stays unchanged.
+- Control mutation: ignore the limit in nextPart. Its test must fail.
+
+### WP-ST4. Push, update, and move (implementer-xhigh, W9d)
+
+- Files: pr.ts (push and move); update.ts (three-step merge, tree check, fallback); loop.ts (driveUpdate with the lower-merge facts, base_commit per part); push.ts (accept the found branch of "Continue on" with the part key; refuse an adopted branch); routes.ts (push, move, start, drop); tests/support/fake-bitbucket.ts (squash control: a one-parent commit with the 3-way tree and a MERGED activity with its ID); tests/tasks/stack.test.ts (new).
+- Behavior: spec.md section 6.20.10. AC-B15, AC-B79 to AC-B82.
+- Done check: the stack tests; no push argv after the first push has a force flag or `+`.
+- Control mutation: drop the tree check. The edited-squash test must fail.
+- Depends: G19 recorded before merge.
+
+### WP-ST5. Sync gate and Jira status (implementer, W9d)
+
+- Files: src/server/tasks/gates.ts (new: partGate, syncParts); src/server/sync/engine.ts (onTaskPrs); routes.ts (wiring, jira-check, jira-read, transitions); tasks.ts (status read); tests/tasks/gates.test.ts (new); tests/tasks/jira-status.test.ts (new).
+- Behavior: spec.md sections 6.20.9, 6.20.11. AC-B84 to AC-B86.
+- Done check: the gate tests; one status GET per 5 minutes per open sub-task task (fake clock).
+- Control mutation: count NEEDS_WORK as an approval. The gate test must fail.
+- Depends: J1 and J4 recorded before merge.
+
+### WP-ST6. Sub-task UI (frontend-implementer, W9d, ports 7667/7668/7669; skills shadcn, vercel-react-best-practices, web-design-guidelines)
+
+- Files: src/web/tasks/{TaskList.tsx (the mode choice and the sub-task attachment boxes on the form), PlanTab.tsx, SubtaskList.tsx (new), JiraMoveDialog.tsx (new), TaskView.tsx, model.ts, OpenPrDialog.tsx, AttachmentsTab grouping by issue, data.ts}; tests/web/tasks-model.test.ts; tests/web/ui-words.test.ts; tests/e2e/task-subtasks.e2e.ts (new); tests/e2e/serve.ts (controls /__control/squash and /__control/jira-status); scripts/demo.ts; docs/smoke-task.md (part T); README.md; CHANGELOG.md; docs/screenshots.
+- Behavior: spec.md sections 6.20.1, 6.20.3 (form), 6.20.5, 6.20.13. AC-B72 (UI), AC-B88.
+- Tests: the focus order; one sentence and one actor per row state; "ABC-12 (2 of 4)"; the AC-UX2 word scan; e2e: a parent with 4 sub-tasks (one tracked open PR, one done, two to build), change one start select, approve, build the first, open its PR, fake squash merge of the tracked PR, update, "Push and move", "Move in Jira" changes the fake status.
+- Gates: e2e green on own ports with the `E2E code:` line; screenshots checked for real names; AC-UX1 primary count; web-design-guidelines; axe.
+- Run: `bun run test:e2e`; `bun run screenshots`; `bun run check`.
+
+### WP-ST7. Plan changes from Jira (implementer, W9d after WP-ST6)
+
+- Files: tasks.ts (the status read marks new and removed keys; plan-again with add: built, open, and merged parts stay fixed, and Claude plans only the new keys; the attachment download of the new sub-task); src/web/tasks/PlanTab.tsx and SubtaskList.tsx (row "ABC-17 is new in Jira." with "Add to plan"; row "Removed in Jira." with Drop); tests/tasks/subtasks-add.test.ts (new); tests/web/tasks-model.test.ts.
+- Behavior: spec.md section 6.20.14. AC-B87.
+- Done check: a new key adds a part only after the user approves the changed plan.
+- Control mutation: let the add approval change a fixed part. Its test must fail.
+
+### Gate UT: sub-task smoke (user)
+
+- docs/smoke-task.md part T on the test repository: a parent with 4 sub-tasks and no links, 2 in review outside the app, 2 open, and one attachment on a sub-task. Approve the plan, build both open sub-tasks, squash-merge one lower PR, run the update and "Push and move", and move one issue with "Move in Jira". Add a new sub-task in Jira and use "Add to plan". Run it on Jira Server or Data Center and on Jira Cloud. Check that nothing goes to Bitbucket or Jira without a click.
+
 ### WP-B6. Spec PR flow (implementer-xhigh, W10)
 
 - Files: src/server/tasks/{specpr.ts (branch, commit of the plan files, push, create PR, link task_part to the PR row, follow), gates.ts (spec gate from the synced reviewers_json, tasks, and builds)} (new); src/server/sync/* (read build stats for task PR heads during the normal PR sync); src/server/review/fix-routes.ts and clone.ts (Apply mode "task": commit into the part worktree; push stays a click); tests/tasks/specpr.test.ts (new); tests/review/fix-task.test.ts (new).
@@ -388,11 +462,11 @@ Shared-file ownership (merge order):
 
 - docs/smoke-task.md part M: a task with one migration. The spec PR with one colleague comment, Draft replies and Fix on the spec, the approval, the code PR.
 
-### WP-B8. Stack manager (implementer-xhigh, W11)
+### WP-B8. Large-task wiring of the part engine (implementer-xhigh, W11)
 
-- Files: src/server/tasks/{stack.ts (part branches on the branch below, max open, retarget, rebase with conflict stop, lease pushes, replan after merges), gates.ts (part gate with build stats)} (new or extended); tests/tasks/stack.test.ts (new).
-- Behavior: design.md section 5.5 (stack rules); spec.md sections 6.8 (rebase), 6.10 (part gate), and 6.11 (retarget, push with force). AC-B14, AC-B15.
-- Tests (temp remote and fake Bitbucket): part 2 branches from part 1; part 3 waits at 2 open PRs; merge commit then retarget with one PUT; squash then rebase and a force push with a lease after confirm; a rebase conflict blocks with "Let Claude fix it"; a declined part PR offers "Open the PR again"; a replan with changed parts needs approval.
+- Files: src/server/tasks/{loop.ts, tasks.ts (large plans on the engine of WP-ST3 to WP-ST5: stacked parts on the spec branch, max open from repo_task_settings, replan after merges)}; tests/tasks/large.test.ts (new). schedule.ts, gates.ts, the push and move routes, and the three-step merge come from WP-ST3 to WP-ST5.
+- Behavior: design.md section 5.5 (stack rules); spec.md sections 6.10 (part gate), 6.11, and 6.20.10 (updates and the move after a merge). AC-B14, AC-B15.
+- Tests (temp remote and fake Bitbucket): part 2 branches from part 1; part 3 waits at 2 open PRs; merge commit then retarget with one PUT; squash then the three-step merge and "Push and move" with no force; a declined part PR offers "Open the PR again"; a replan with changed parts needs approval.
 - Control mutation: retarget without the confirm flag. Its test must fail.
 - Depends: Gates G4, G5, G6 recorded.
 - Gate G5 (2026-10-22, integration-check.md "Review v2"): a deleted target branch declines the stacked PR, and its toRef stays on the deleted branch. Retarget the upper PR before the lower branch goes away. Never delete a lower branch that an upper PR targets. Detect a declined upper PR and offer to open it again (spec.md section 6.8).
@@ -411,7 +485,7 @@ Shared-file ownership (merge order):
 
 ### Gate UL: large task smoke (user)
 
-- docs/smoke-task.md part L: a 3-part task with an API change. Merge part 1 with a merge commit and part 2 with a squash in Bitbucket. Check the retarget, the rebase confirm, and the lease push. Record the time per part and the reviewer comments per PR.
+- docs/smoke-task.md part L: a 3-part task with an API change. Merge part 1 with a merge commit and part 2 with a squash in Bitbucket. Check the retarget, the three-step merge, and "Push and move" with no force push. Record the time per part and the reviewer comments per PR.
 
 ### WP-CLOSE (implementer, W12)
 
@@ -433,6 +507,9 @@ Shared-file ownership (merge order):
 | Smoke task B and N (UBR, UN) | docs/smoke-task.md parts B and N | after W9a and W9b | Every step as written. Nothing pushes without a click. |
 | G18 | `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G18` on the test repository (read only), with one open PR that the user made conflicted by hand | after WP-TU1 is written, before it merges | docs/gate-v2.md part G18: the key properties.mergeResult and the outcome value of a conflicted PR. |
 | Smoke task U (UTU) | docs/smoke-task.md part U | after W9c | Every step as written. Nothing pushes without a click. |
+| G19 | `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G19` on the test repository (writes: a squash merge of a test PR) | after WP-ST-G, before WP-ST4 merges | The MERGED activity commit has one parent, the tree check holds, and the upper PR changes list only the upper files after the three merges and the PUT. |
+| J1 to J4 | `bun scripts/gate/jira.ts --only J1,J2,J3` (read only), then `--only J4 --authorize-transition` on a test issue; on Server or Data Center and on Cloud | after WP-ST-G, before WP-ST1 merges (J1, J2) and WP-ST5 merges (J3, J4) | The shapes of subtasks with statusCategory and of issuelinks, the transitions list, the comment and Cloud image links, and a 204 for the POST. |
+| Smoke task T (UT) | docs/smoke-task.md part T | after W9d | Every step as written. Nothing goes to Bitbucket or Jira without a click. |
 | Reply eval (PR context) | `bun run eval -- --replies --real --repeat 2` | after WP-PN | The recommended pass of WP-PN. |
 | G8, G10, G11 (on hold) | `bun scripts/gate/bitbucket-write.ts --only G8,G10,G11` on the test repository | before WP-A2 (G10) and WP-A5 (G8) | spec of WP-GA. |
 | UA1 (on hold) | docs/smoke-autopilot.md part 1 | after WA3 | A draft for each scripted comment, one notification per burst, "Post this reply" posts once, nothing posts by itself. |

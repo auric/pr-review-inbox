@@ -1483,7 +1483,7 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 12. AC-B12. The own review of a part runs the finder and verify phases on a sanitized snapshot of the part commit. A confirmed major starts a fix step. A remaining blocker after 2 fixes blocks.
 13. AC-B13. A part over the line budget blocks before its PR with the line counts and "Split into parts".
 14. AC-B14. Part PRs stack: part 2 targets the part 1 branch. With 2 open code PRs, part 3 waits and says why.
-15. AC-B15. After part 1 merges with a merge commit, "Move part 2 to main" sends one PUT with the new toRef. After a squash merge, it also offers the rebase with the force confirm and pushes with a lease.
+15. AC-B15. After part 1 merges with a merge commit, "Move part 2 to main" sends one PUT with the new toRef. After a squash merge, the update merges the base in three steps (section 6.20.10). It never needs a force push. "Push and move" pushes with a lease and retargets in one click with one confirm.
 16. AC-B16. A push refspec to the target branch or to a branch outside the task is refused before git runs (unit test with a spy git).
 17. AC-B17. A lease failure shows "Someone else pushed" and never forces. No push argv has a `+` refspec. A normal push whose commit does not contain the last pushed commit returns "needs force". A confirmed rebase push still fails on a stale lease.
 18. AC-B18. A user review start during an implement step gets 409 with "Pause building after this step". The loop waits for the free slot and then continues.
@@ -1932,6 +1932,329 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 5. AC-B70. An implement run argv holds `--restricted`, `--mcp-config` with the git MCP of the task cache, the ticked tools in `--allowedTools`, and the unticked tools in `--disallowedTools`. The CodeGraph server has `--path` repo/ of the part. The first step runs init and the second runs sync in repo/. repo/.codegraph is gone after each step, and the path check passes.
 6. AC-B71. The Build form preselects the profile of the newest task of the repository, and the created task shows "Profile: <name>" in its header (e2e).
 
+### 6.20 Sub-tasks: one branch and one PR per sub-task (design.md B28 to B33, section 10.8, user decisions of 2026-10-29)
+
+A Jira task with sub-tasks builds each sub-task as its own branch and PR. The feature reuses the task flow: one task row for the parent key, one task_part row per PR, the loop of one part (section 6.7), Tell Claude and the update (section 6.18), the PR rows (section 6.16.8), and the plan screen. There is no second flow. The parts share one engine with per-part bases, a scheduler, a part gate from the sync, a push route, and a move route. WP-B8 (large tasks) reuses this engine later.
+
+Every Jira call of this section works on Jira Server, Data Center, and Cloud. Both deployments use REST v2. Cloud uses Basic auth of `email:token` (BRIEF section 7). The app reads sub-tasks and links from the issue fields `subtasks`, `parent`, and `issuelinks`. It never calls the `/subtask` endpoint, which exists on Data Center only.
+
+Examples use the parent ABC-10, the sub-tasks ABC-11 to ABC-14, the repository PROJ/app, the base develop, and the reviewer Anna.
+
+Constants (src/shared/task.ts): SUBTASKS_READ = 20, SUBTASK_PARTS_MAX = 12 (the specResult parts cap in sub-task mode), MAX_OPEN_CAP = 5, MAX_OPEN_DEFAULT = 3, JIRA_STATUS_AGE_MS = 5 min, JIRA_VIEW_AGE_MS = 60 s, FOUND_CHANGES_MAX = 100 paths per tracked PR, FOUND_COMMITS_MAX = 20 subjects per found branch.
+
+#### 6.20.1 Start
+
+- "Read the task" reads the parent once. When the parent has sub-tasks, the form shows "ABC-10 has 4 sub-tasks: 2 open, 2 in review." and two radio buttons: "Build the sub-tasks, one PR each" and "Build ABC-10 as one task". The first one starts selected when at least one sub-task is not done (design.md Q64).
+- "Build this task" on the Jira chip uses the same rule, so one click still works.
+- The parent has no sub-tasks: the normal flow, and the form shows no choice.
+- The create click reads each sub-task that is not done: summary, text, status, parent, links, attachment list, and comments. It reads at most SUBTASKS_READ sub-tasks, in Jira order. A read sub-task whose `fields.parent.key` is not the parent key is dropped. Done sub-tasks keep only key, summary, and status from the parent read (design.md Q70).
+- The interview and the spec run get context/subtasks.md. The app writes it as untrusted data. Per sub-task, it holds the key, the status, the summary, the text, the attachments (section 6.20.3), the links to other sub-tasks of the parent, and the branches and PRs that name its key. A link line uses the link text of the server, for example "ABC-13 is blocked by ABC-12".
+
+#### 6.20.2 Found work (adoption)
+
+At the spec run start, the run hook does these reads for each sub-task that is not done. It reads the main repository only. The repository list hook of section 6.16.5 is the model.
+
+- Branch search: `listBranches(project, repo, <KEY>)` (Gate G14). One GET per key.
+- Open PRs of the repository: `listOpenPullRequests(project, repo)` once (one page).
+- The stored pull_request rows of the repository.
+- A match needs the key as a whole token in the branch name or the PR title: `(^|[^A-Za-z0-9])ABC-12($|[^0-9])`. So ABC-1 never matches ABC-12. This is the Jira convention that links branches and PRs to issues by key. The app uses no other rule.
+- An open PR from a matched branch counts as an open PR of the sub-task.
+- For each tracked open PR, its changed paths (`listChanges`, at most FOUND_CHANGES_MAX) go into subtasks.md.
+- For a branch without a PR, the app fetches it into `refs/rl/task/<id>/found/<n>`. It writes its commit subjects (at most FOUND_COMMITS_MAX) and its diff stat against the base.
+
+| Found | Plan screen row | Part |
+|---|---|---|
+| Jira done, no open PR | "Done in Jira. The app skips it." | none |
+| Exactly one open PR | "In review outside the app: PR #41 from <branch>. The app tracks it." | adopted part, state pr_open |
+| Two or more open PRs | A radio list of the PRs. "Approve the plan" stays disabled until the user picks one. | adopted part |
+| A merged PR, Jira not done | "Merged as PR #40. Jira says In Progress." with "Move in Jira" | adopted part, state merged |
+| A branch without a PR | Claude plans it. The part row offers "Continue on <branch>" (the default) or "Start a new branch" (section 6.16.4). A name that fails the push name rule offers only "Start a new branch" with "The app pushes only to names like feature/ABC-12-…". | normal part, lease on the remote head |
+| Nothing | Claude plans it. | normal part |
+
+- The app never pushes to the branch of an adopted part. It never runs Tell Claude or an update on it, and it opens no PR for it. It follows the PR, so the sync reads it (design.md Q68).
+- "Continue on <branch>" pushes to a found branch only when the name has the part's key and passes the push name rule (`<prefix><KEY>-`). The push guard accepts that branch because the user picked it for the part.
+
+#### 6.20.3 Attachments of sub-tasks
+
+The plan is one spec run for the parent. So that run gets the ticked attachments of the parent and of every open sub-task (design.md Q71).
+
+- The form lists the attachments of each open sub-task under that sub-task, each with a box. The default ticks follow the rules of section 6.17.1, as for the parent.
+- The create click downloads the ticked files of the parent and of the sub-tasks before the spec run, with the flow of section 6.17. A failed download fails the create, as in section 6.17.2.
+- Each issue gets its own folder in context/: the parent files stay in ./attachments/, and the files of a sub-task go to ./attachments/<sub-task key>/. The app stores the files by Jira attachment ID, so two files with the same name never collide.
+- subtasks.md lists the files under their sub-task with the task.md state lines: "Included as ./attachments/ABC-12/<name>.", "Not included.", a "Listed only: …" sentence, or the cap sentence of the run.
+- Each part run gets the parent files and only the files of the part's own sub-task keys. The interview and the spec run get all ticked files.
+- MAX_ATTACHMENTS (src/server/context/jira.ts) applies per issue. The caps of 100 MB per file and 500 MB per task cover the parent and its sub-tasks together.
+- Files added in comments are in the attachment list of the issue, so the same rules apply to them.
+- An image link in the description or a comment of a sub-task points to ./attachments/<sub-task key>/<file>. The ATTACHMENT_IMAGE rewrite of task-file.ts runs per key.
+- "Add to plan" (section 6.20.14) downloads the ticked files of the new sub-task just before its short plan run.
+- task_file gets the column `issue` (the Jira key of the file). The Attachments tab groups the files by issue.
+- Gate J3 checks two facts: a non-image file link in a comment points to the local file, and the rewrite matches the rendered HTML of Cloud (integration-check.md U79).
+
+#### 6.20.4 The plan (spec run)
+
+- One spec run for the parent. The spec result adds per part: `keys` (sub-task keys), `start` ("base" | "stack" | "merge"), `after` (a part number such as "2", or the key of an adopted sub-task), and `startReason` (one line). It adds `maxOpen` (1 to 5) and `maxOpenReason` (one line).
+- Prompt lines (catalog.ts, spec agent, only with subtasks.md):
+  - "./context/subtasks.md lists the sub-tasks with their status, text, links, and the branches and PRs that exist."
+  - "Plan one part per sub-task that is not done and has no open PR. Name its key in keys."
+  - "Split a sub-task into two parts only when it is over <budget> changed lines. Combine sub-tasks only when each one is too small to review alone and they change the same files. Say why in startReason."
+  - "Set start to base when the part needs no other sub-task, to stack when it needs code of a sub-task that is not merged, and to merge when it needs that sub-task merged first. Set after to that part number or key. In startReason, name the code or the Jira link that shows the need."
+  - "A Jira link such as is-blocked-by is a fact from the team. Follow it unless the code shows that it is wrong, and then say why."
+  - "Propose maxOpen from 1 to 5. In maxOpenReason, say in one line how many parts can run side by side, how big they are, and how long reviews take in ./context/pr-history.md."
+- context/pr-history.md holds the open PR count of the user in the repository (stored rows). It also holds the median open-to-merge time of the user's newest merged PRs. One GET of `.../pull-requests?state=MERGED&order=NEWEST&limit=50` gives them: closedDate minus createdDate, own PRs only. Without closedDate, the line says "No review time data." (design.md Q72).
+- App checks of the result. They use no guess. A failed check gives a coverage line and a plan screen line:
+  - keys: open sub-tasks of the parent that have no tracked PR.
+  - after: an existing part number other than its own, or an adopted key. No cycle.
+  - stack or merge after a done sub-task: start becomes base, with "ABC-13 needs ABC-12, which is done. It starts from develop."
+  - A sub-task without a part: "Claude planned no PR for ABC-14." The user can still approve.
+  - maxOpen outside 1 to 5, or absent: MAX_OPEN_DEFAULT.
+- task.size is small. Each part is one PR with its own plan.md and its code, as a small task (design.md Q65). There is no spec PR. The size rules of section 6.1 do not apply to the task. The line budget applies to each part (sizeCheck). task.subtasks = 1 tells the UI and the loop.
+- "Ask Claude again" (POST plan-again) starts the spec run again with the user's text as an answer line (section 6.12).
+
+#### 6.20.5 Plan screen (spec_draft, ready)
+
+- Status: "The plan is ready: 4 sub-tasks, 2 to build, about 600 changed lines." Primary "Approve the plan". More: Edit, Ask Claude again, Stop. No size control.
+- Section "Sub-tasks", one row per sub-task in Jira order: "ABC-12 Add the event generator · Jira: Open · about 200 lines". A "Starts:" select offers "From develop" (base), "On top of <part or tracked PR>" (stack), and "After <part or tracked PR> merges" (merge). A second select picks the other row. Claude's line stands under it: "Claude: it calls the handler of ABC-11 (link: is blocked by ABC-11)."
+- Split: "ABC-13 in 2 PRs. Claude: it is about 700 lines." Combine: "ABC-15 and ABC-16 in one PR. Claude: both change config.ts."
+- "Open PRs at once" number field (1 to 5) with "Claude proposes 3: two sub-tasks can run side by side, and your PRs take about 2 days to merge."
+- Errors inline: "ABC-13 cannot build on ABC-14, because ABC-14 builds on ABC-13." and "Pick the PR that the app tracks for ABC-11."
+- The branch type chips stay: one prefix for all parts. The branch name and its existing-branch choice move into each part row.
+- The approval pushes nothing and posts nothing. It sends ADOPT_OPEN or ADOPT_MERGED for each tracked PR.
+
+#### 6.20.6 Build and wait (scheduler)
+
+The pure function `nextPart(parts, maxOpen)` in src/server/tasks/schedule.ts decides. Its inputs per part are the state, start, after, the gate result, and override. It returns the part to start, or for each planned part the reason it waits. The server sends the reasons in the DTO, so the loop and the UI never disagree. nextPart is no XState machine. XState covers only the task and part machines of machine.ts.
+
+- One build at a time: no start while a part is implementing (design.md B12, one run slot).
+- Open count: parts in self_reviewed, pr_open, changes_requested, and approved, adopted parts included. At maxOpen, no part starts: "Waits: 3 PRs of this task are open, your limit."
+- base: the part starts.
+- stack: the part starts when the lower part passed the part gate (section 6.10). "Start <key> now" with the confirm "Colleagues have not approved ABC-11 yet. Start ABC-12 anyway?" overrides the gate (design.md B11). A lower part that merged before the start makes the part start from the base.
+- merge: the part starts when the lower part merged.
+- A lower sub-task that is done in Jira counts as met (design.md Q70).
+- Order: the first startable part by ord. The loop builds one part (section 6.7, unchanged), then asks the scheduler again. It stops when nothing can start. The sync and the user actions start it again (section 6.20.11).
+- While part 1 waits for its PR click, the loop can build part 2. The primary button stays the user's action (section 6.20.13).
+
+Start of a part:
+
+- Branch: `branchName(prefix, <first key>, {kind: "small", title: <sub-task summary>})`. A split part uses `{kind: "part", n, title}`. Then "Continue on <branch>" or the first free suffix (freeBranch and takeRemoteBranch).
+- Base branch (the PR target) and base commit: for base or merge, the newest head of the task base (fetch). For stack on an app part, the lower branch and its pushed head. For stack on an adopted part, the app fetches the lower branch and takes its head.
+- Stack across repositories (design.md Q67): the lower part has task_pr rows when it changed another repository. Then a stacked part blocks before its build: "Needs you: ABC-13 builds on ABC-12, which also changes PROJ/lib. Let ABC-13 wait for the merge of ABC-12." The primary "Wait for the merge" sets start to merge. Base and merge parts keep the several-repository flow of section 6.16.
+- Plan file: `specs/<KEY>/plan.md`, from the spec_dir template with the part's first key. A split part k of 2 or more uses `specs/<KEY>/part-<k>/`. It holds only that part: renderDocs(key, summary, "small", the plan narrowed to the part and its map entries). Separate files keep parallel branches free of add/add conflicts.
+- Commit messages and the PR title use the part key: "ABC-12 T2.1: …", "ABC-12: Add the event generator", a split part "ABC-13 (part 2 of 2): …", combined parts "ABC-15, ABC-16: …".
+- The PR text adds "Parent: ABC-10" and one line per sub-task PR: "ABC-11: #41 (in review) · ABC-12: this PR · ABC-13: next, builds on this PR". A lower part adds "Please keep this branch until ABC-13 moves to the new target." (section 6.9).
+
+#### 6.20.7 States
+
+Task states use the small path of the machine (APPROVE with size small): interview, spec_draft, implementing, ready, done. implementing holds while any part is planned, implementing, or self_reviewed. LAST_PR_OPEN fires when no such part is left. ALL_MERGED fires when every part merged or was dropped. A plan with tracked PRs only goes to ready at the approval.
+
+| From | Event | To | Who sends |
+|---|---|---|---|
+| planned | ADOPT_OPEN (new) | pr_open | plan approval, tracked open PR |
+| planned | ADOPT_MERGED (new) | merged | plan approval, tracked merged PR |
+| planned | START | implementing | scheduler |
+| implementing | REVIEWED | self_reviewed | loop |
+| self_reviewed | PR_OPENED | pr_open | PR route |
+| pr_open, approved | CHANGES_REQUESTED | changes_requested | sync: a reviewer with NEEDS_WORK |
+| pr_open, changes_requested | GATE_PASSED | approved | sync: the part gate passed |
+| open states | MERGED, DECLINED | merged, declined | sync |
+| declined | REOPENED | pr_open | "Open the PR again" |
+| planned, declined | ABANDON | abandoned | "Drop this sub-task" |
+
+- "Drop this sub-task" refuses while a started part builds on it: "ABC-13 builds on ABC-12. Move or drop ABC-13 first." A planned part that builds on it starts from the base, with a note.
+- PART_EVENTS adds ADOPT_OPEN and ADOPT_MERGED. The planned state takes both. tests/tasks/machine.test.ts and the README diagram snapshot follow (the machine.ts rule).
+
+#### 6.20.8 Data model (the next free migration number: `0NN_task_subtasks.sql`)
+
+```sql
+-- task.subtasks: 1 builds the Jira sub-tasks of task.key, one PR per part. task.size is small then.
+ALTER TABLE task ADD COLUMN subtasks INTEGER NOT NULL DEFAULT 0;
+-- One row per sub-task of the parent. category: statusCategory.key of Jira. issue_json: IssueContext of the last read (NULL for a
+-- done sub-task). links_json: [{text, key}] links to other sub-tasks of the parent. found_json: branches and PRs that name the key.
+-- removed_at: the status read no longer lists the key.
+CREATE TABLE task_subtask (
+  task INTEGER NOT NULL REFERENCES task (id) ON DELETE CASCADE,
+  key TEXT NOT NULL, ord INTEGER NOT NULL, summary TEXT NOT NULL,
+  status TEXT, category TEXT CHECK (category IN ('new','indeterminate','done')),
+  issue_json TEXT, links_json TEXT NOT NULL DEFAULT '[]', found_json TEXT NOT NULL DEFAULT '[]',
+  read_at INTEGER NOT NULL, status_at INTEGER, added_at INTEGER, removed_at INTEGER,
+  PRIMARY KEY (task, key)
+);
+-- keys_json: the sub-task keys of the part. start_mode, after_part: section 6.20.6. base_commit: the branch point of the part; NULL
+-- takes task.base_commit. spec_dir: the plan folder of the part; NULL takes task.spec_dir. adopted: 1 for a PR that the app did not
+-- create; the app never pushes to its branch. override: the user started a part that builds on an unapproved PR.
+ALTER TABLE task_part ADD COLUMN keys_json TEXT;
+ALTER TABLE task_part ADD COLUMN start_mode TEXT CHECK (start_mode IN ('base','stack','merge'));
+ALTER TABLE task_part ADD COLUMN after_part INTEGER REFERENCES task_part (id) ON DELETE SET NULL;
+ALTER TABLE task_part ADD COLUMN base_commit TEXT;
+ALTER TABLE task_part ADD COLUMN spec_dir TEXT;
+ALTER TABLE task_part ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE task_part ADD COLUMN override INTEGER NOT NULL DEFAULT 0;
+-- issue: the Jira key of the file. NULL is the task key.
+ALTER TABLE task_file ADD COLUMN issue TEXT;
+```
+
+- task_file keeps its primary key (task, att_id): a Jira attachment ID is unique on its server.
+- maxOpen goes to task.settings_json.maxOpen. Sub-task mode caps it at MAX_OPEN_CAP. repo_task_settings.max_open stays for large tasks.
+- No new task_event kind and no new step kind. The retarget and push step kinds exist (033).
+- Schemas (src/shared/task.ts): specPart adds `keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([])`, `start: z.enum(["base","stack","merge"]).default("base")`, `after: z.string().max(40).nullable().default(null)`, and `startReason: z.string().max(300).default("")`. specResult adds `maxOpen: z.number().int().min(1).max(5).nullable().default(null)` and `maxOpenReason: z.string().max(300).default("")`.
+- DTO (src/shared/dto.ts): taskCreateInput adds `subtasks?: boolean` and `subtaskFiles?: {key, files: attId[]}[]`. taskPlanInput adds `subtasks?: {parts: [{n, start, after: string | null, existing?: "continue" | "new"}] (max 12), track: [{key, pr: positiveInt}] (max 20), maxOpen: 1..5}`. TaskDto adds `subtasks: SubtaskDto[] | null` ({key, summary, status, category, statusAt, links, found, parts: id[], added, removed}) and `plan.maxOpen: {value, reason}`. TaskPartDto adds keys, start, after, adopted, specDir, bases (per part), lower ({key, how: "merge" | "squash" | "other"} or null, set after the lower part merged), gate ({pass, why}), and wait (the scheduler reason or null). IssueContext adds optional `parent`, `subtasks`, and `links`.
+
+#### 6.20.9 Jira reads and writes (src/server/context/jira.ts only)
+
+| Call | Request | When |
+|---|---|---|
+| Parent and sub-task read | GET /rest/api/2/issue/{key}?fields=summary,description,status,attachment,parent,subtasks,issuelinks&expand=renderedFields, plus the comment pages as today | "Read the task", the create click, "Read Jira again", "Add to plan" |
+| Status sync | GET /rest/api/2/issue/{parent}?fields=subtasks. One GET gives the status of every sub-task. | the sync cycle, at most every JIRA_STATUS_AGE_MS per open sub-task task; the Task view open, at most every JIRA_VIEW_AGE_MS; after the app opens a PR |
+| Transitions list | GET /rest/api/2/issue/{key}/transitions | the "Move in Jira" click |
+| Move | POST /rest/api/2/issue/{key}/transitions with `{"transition":{"id":"<id>"}}`, Content-Type application/json, X-Atlassian-Token: no-check. 204 is the success. | the dialog confirm only |
+
+- Both deployments use the same requests on REST v2. A bad transition ID gives 400, 404, or 500 on Server and Data Center, and 400, 401, 404, 409, or 422 on Cloud.
+- Parsing stays lenient (zod, unknown keys pass). subtasks entries: key, fields.summary, fields.status.name, fields.status.statusCategory.key. parent: key. issuelinks: type.inward, type.outward, inwardIssue.key, outwardIssue.key. Only links to other sub-tasks of the parent stay. The status category is null when absent.
+- One new method may POST: `transition(key, id)`. It checks the key (JIRA_KEY) and the ID (`^\d{1,10}$`), and it builds the path from the base URL. Same origin, no redirect, 30 s timeout, body cap. Errors keep the kind, the status, and the endpoint only. Every 4xx and 5xx of the POST gives "Jira refused the move (HTTP 400). Move ABC-12 in Jira." No retry.
+- The POST goes to Jira only after the user confirms the dialog. Nothing goes to Jira without an explicit user action.
+- A transition with required fields fails with 400 on both deployments. The sentence covers it. The app sends no fields.
+- Row hints, never a move: "Jira says To Do, but the PR is open." and "The PR merged. Jira says In Review." Each has the row action "Move in Jira". The parent row gets the same action: "All sub-tasks merged. Jira says In Progress for ABC-10."
+- Cloud removed its old search endpoint. That does not matter here: the app makes no search call.
+
+#### 6.20.10 Updates and the move after a merge
+
+Changes in a lower part, before its merge:
+
+- A gets review changes: Tell Claude on A (an app part) or the author's push (an adopted part). An app part then shows "ABC-11 has 2 new commits that are not on the server yet." with "Push to <branch>". The push route does the normal fast-forward push with the lease.
+- B (on top of A) sees A's head move in the per-part base check: "ABC-11 has 2 new commits." with "Update from ABC-11" in More. It is not urgent: B's PR diff against A's branch stays clean, because Bitbucket diffs from the merge base.
+- The update is section 6.18.3 with B's own base. Before B's first push: `git rebase --onto <A head> <B base_commit> <B>`. After it: `git merge --no-ff <A head>`. Conflicts go to the resolve step. Then "Push to <B branch>": a fast-forward with the lease. No force push.
+- A chain (C on B on A) updates one level at a time. The row of the next part says what to do.
+
+After the lower part merged. The sync sees A MERGED. A_final is A's last head: task_part.pushed for an app part, pull_request.source_head for an adopted part. M1 is the fetched head of the target. S is the merge commit from `provider.mergeCommit` (the MERGED activity commit, Gate G17).
+
+1. A_final is an ancestor of M1 (a merge commit or a fast-forward): B needs no git work. Row: "ABC-11 merged. ABC-12 must point to develop now." The primary "Move ABC-12 to develop" sends one PUT with the new toRef after one confirm. updatePullRequest fills the title, the description, and the reviewers from a fresh GET. B's base_commit becomes `merge-base(B, M1)`.
+2. Else, B is not pushed yet: the update runs `git rebase --onto M1 <B base_commit> <B>`. No confirm, because no commit is on the server. base_commit = M1.
+3. Else, B is pushed (a squash merge is expected). The three-step merge replaces a rebase and a force push. The app never force-pushes after the first push.
+   - a. A_final is not an ancestor of B: merge A_final into B first, when the cache has it (`git cat-file -e`). Else take the fallback (d).
+   - b. Squash check: S exists, has one parent, is an ancestor of M1, and `git merge-tree --write-tree S^1 A_final` prints the tree of S. Any failure takes the fallback. A git before 2.38 has no `merge-tree --write-tree` and takes the fallback.
+   - c. Three merges in B's worktree, each with the isolated git config, the empty core.hooksPath, and the user's identity. First `git merge --no-ff -m "ABC-12: merge develop into <B>" S^1`. It is skipped when S^1 is in B, and conflicts go to the resolve step of section 6.18.4. Then `git merge --no-ff -s ours -m "ABC-12: record the squash merge of <A branch>" S`. It never conflicts: the tree check proves that B already holds every change of S. Then `git merge --no-ff -m "ABC-12: merge develop into <B>" M1`. It is skipped when M1 is S, and conflicts go to the resolve step.
+   - d. Fallback: `git merge --no-ff M1`. Conflicts where B changed A's lines go to the resolve step. The status says "Bitbucket merged ABC-11 in a way that the app cannot match. The update merges develop, and conflicts can come up."
+   - e. The checks and the own review run as after any update (section 6.18.3). base_commit = M1. Nothing is pushed.
+   - f. Row: "ABC-12 is up to date with develop. Push it and move its PR to develop." The primary is "Push and move to develop". Confirm: "Push <B branch> and move its PR from <A branch> to develop?" The click pushes (fast-forward, lease), then sends the PUT. A failed PUT after a good push: "The PR still points at <A branch>." with "Try again" (PUT only).
+4. "Undo the update" (section 6.18.3) stays until the push.
+
+Why the diff is clean: after step c, the newest merge has M1 as a parent. So `merge-base(B, develop) = M1`, and the PR diff is tree(B) minus tree(M1): only B's changes. B's pushed head is an ancestor of the new head, so the push passes the fast-forward check of push.ts with no force.
+
+When the diff is not clean, or the update needs Claude:
+
+- Between the push and the PUT, B still targets A's branch, and its diff shows the develop changes. The one click keeps that window to seconds.
+- The fallback path covers another merge strategy, a squash that the merger edited, a squash with server-side conflict fixes, and an A_final that is not in the cache. The diff is clean after the merge. Its content is right only when the resolve step kept B's changes over A's lines. The checks and the own review then run.
+- B and develop changed the same lines: real conflicts in step c go to the resolve step.
+- The Commits tab of B's PR still lists A's old commits and the merge commits, because the target does not hold them. The Diff tab is clean. The squash of B removes them.
+- A's branch deleted at the merge: Bitbucket declines B within 30 s (Gate G5). B gets the side state declined. The update runs as above, then "Push and open the PR again" reopens the PR with the new target. A failed reopen creates a new PR (section 6.8).
+- After the merge, M1 is an ancestor of B, so a merge-base diff and a merge-preview diff give the same files. Gate G19 confirms it on the server.
+- Other merge strategies than a merge commit and a squash take the plain merge with the resolve step, and the status says why (design.md Q73).
+
+#### 6.20.11 Sync, gate, and loop start
+
+- New src/server/tasks/gates.ts: `partGate(db, part, approvals)` reads pull_request.reviewers_json (the APPROVED count, any NEEDS_WORK), properties.openTaskCount when the sync stores it (else no task rule), and the pr_build row of the head (failed 0 and inProgress 0; no build counts as green). It returns {pass, why}.
+- `syncParts(db, prIds)` runs after each sync cycle for the task parts linked to the changed PRs. It sends MERGED, DECLINED, CHANGES_REQUESTED, and GATE_PASSED through advancePart, then LAST_PR_OPEN or ALL_MERGED through advance. It returns the IDs of the changed tasks.
+- The sync engine gets one callback `onTaskPrs(fn)`, called after the cycle commits, with the changed PR IDs (the pattern of settings.onTasksChanged). createTaskRoutes registers it: the gates, then `loop.kick(id)` for a task in implementing with a startable part, then the Jira status read for due tasks.
+- The Jira status read runs during the sync, at most every JIRA_STATUS_AGE_MS per open sub-task task. A task in done or failed gets no read.
+- The loop never pushes or posts. A kick only starts Claude steps of the plan that the user approved.
+
+#### 6.20.12 Routes (zod inputs; a version check on every mutation)
+
+| Route | Body | Result |
+|---|---|---|
+| POST /api/tasks | adds `subtasks?: boolean` and `subtaskFiles?` | as today |
+| POST /api/tasks/:id/plan | adds `subtasks` (section 6.20.8) | 409 with the order or pick sentence |
+| POST /api/tasks/:id/plan-again | `{version, text: 1..2000, add?: true}` | 202. The spec run starts again with the text as an answer line. add true runs the short plan run of section 6.20.14. |
+| POST /api/tasks/:id/parts/:part/start | `{version, override: true}` | 202; 409 when the part cannot start for another reason |
+| POST /api/tasks/:id/parts/:part/push | `{version}` | 202; 409 for an adopted part, "needs force", or a lease failure (section 6.11 lists the route) |
+| POST /api/tasks/:id/parts/:part/move | `{version, push?: true}` | 202. push true pushes first. 409 when the lower part did not merge. |
+| POST /api/tasks/:id/parts/:part/drop | `{version}` | 200; 409 while a started part builds on it |
+| POST /api/tasks/:id/jira-check | none | 200 TaskDto after the status read (at most once per JIRA_VIEW_AGE_MS) |
+| POST /api/tasks/:id/jira-read | `{version}` | 200. "Read Jira again": texts, links, statuses. |
+| GET /api/tasks/:id/jira/:key/transitions | none | `{transitions: [{id, name, to}]}`. The key must be the parent or a sub-task of the task. |
+| POST /api/tasks/:id/jira/:key/transitions | `{id: /^\d{1,10}$/}` | 200 with the new status; 502 with the sentence |
+
+The update and instruct routes take the part in the path or the body, as today. The UI always sends the focused part.
+
+#### 6.20.13 Task view
+
+- Header: key, title, "Sub-tasks: 4, one PR each", repository, profile.
+- Step strip: "Questions › Plan › Build sub-tasks (2 of 4) › Done". stepStrip gets the subtasks flag. Done counts parts merged or dropped, plus sub-tasks done in Jira.
+- The status sentence and the one primary button belong to the focused sub-task. Default focus, first match: the part of task.blocked; a part ready for its PR click; a part whose lower part merged; a part with a moved base, conflicts, or commits not on the server; the part that Claude builds; the first part that waits for review. A click on a row moves the focus.
+- Sub-task list under the status, one row each, with the actor:
+
+| Row state | Text | Actor | Row action (secondary) |
+|---|---|---|---|
+| planned, limit | "Waits: 3 PRs of this task are open, your limit." | reviewers | Change the limit |
+| planned, review | "Waits for a review of ABC-11." | Anna | Start now |
+| planned, merge | "Waits for ABC-11 to merge." | Anna | none |
+| implementing | "Claude builds it." | Claude | none |
+| self_reviewed | "Ready. Open its PR." | you | Open the PR |
+| pr_open | "In review by Anna." | Anna | Go to the PR |
+| changes_requested | "Anna asks for changes." | you | Tell Claude (moves the focus) |
+| approved | "Approved. Waits for the merge." | merger | Go to the PR |
+| lower merged | "ABC-11 merged. Move ABC-12 to develop." | you | the move action |
+| merged | "Merged." | nobody | none |
+| adopted | "In review outside the app: PR #41." | Anna | Go to the PR |
+| done in Jira | "Done in Jira." | nobody | none |
+| new in Jira | "ABC-17 is new in Jira." | you | Add to plan |
+| removed in Jira | "Removed in Jira." | you | Drop |
+
+- Every row shows "Jira: <status>" and the More item "Move in Jira…". The dialog lists the transitions as radio buttons ("Start review → In Review") with the primary "Move in Jira".
+- Sentences use "ABC-12 (2 of 4)" for "part k of n". No UI text uses the words of AC-UX2: "builds on" and "after … merges" replace "stack".
+- The Tell box, the update rows of section 6.18.5, and the PR rows of section 6.16.8 apply to the focused part.
+
+#### 6.20.14 Plan changes from Jira (design.md Q75)
+
+- The status read compares the sub-task keys of the parent with the task_subtask rows.
+- A key that is new in Jira after the approval gets a task_subtask row with added_at. Its row says "ABC-17 is new in Jira." with "Add to plan".
+- "Add to plan" reads the new sub-task, downloads its ticked attachments (section 6.20.3), and runs a short plan run. That run plans parts for the new keys only. It gets subtasks.md with every sub-task, so it can set after to an existing part.
+- The changed plan goes to the plan screen. The user approves it before any new part starts. Built, open, and merged parts stay fixed: the approval refuses a change to them with 409.
+- A key that Jira no longer lists gets removed_at. Its row says "Removed in Jira." with Drop. Drop sends ABANDON for a planned or declined part, with the rules of section 6.20.7. An open PR stays open: the user closes it in Bitbucket.
+- The app adds no sub-task by itself and changes no plan without the approval.
+
+#### 6.20.15 Edge cases
+
+- Over SUBTASKS_READ sub-tasks: the first 20 in Jira order, and "ABC-10 has 26 sub-tasks. The app reads the first 20."
+- Over SUBTASK_PARTS_MAX parts: the spec result fails its schema, and the plan screen says so.
+- A sub-task moves to Done in Jira while its part is planned: the row says "Done in Jira." with "Drop this sub-task".
+- A tracked PR is declined: its row says "Declined outside the app." Parts that build on it wait. "Drop this sub-task" frees them to start from the base.
+- A colleague pushes to an app part branch: the lease fails ("Someone else pushed", section 6.8).
+- Two tabs move the same part: the version check lets one through.
+- Jira 401, 403, or 429 during the status sync: the last status stays, the log keeps the kind only, and the row title gives the read time.
+- A file name repeats across the parent and a sub-task: the files are stored by attachment ID, so both stay.
+
+#### 6.20.16 Acceptance criteria
+
+1. AC-B72. A parent with an open sub-task preselects "Build the sub-tasks, one PR each" on the form and on the chip. A parent with no sub-tasks shows no choice.
+2. AC-B73. The create in sub-task mode reads each open sub-task once and no done one (fake Jira counter). No request goes to a `/subtask` path. A sub-task whose parent field names another key is dropped.
+3. AC-B74. The key token match finds feature/ABC-12-x and "ABC-12: x", and ABC-1 does not match ABC-12. Two open PRs for one key need a pick (409 sentence).
+4. AC-B75. The plan approval checks: a cycle, an unknown after, a stack on a done sub-task (it becomes base), maxOpen 6 (refused), and maxOpen absent (3). The approval pushes and posts nothing (fake write counter 0).
+5. AC-B76. An adopted part reaches pr_open by ADOPT_OPEN, and its PR is followed. A push, an update, and Tell Claude on it return 409 before git runs.
+6. AC-B77. The ticked files of the parent and of each open sub-task download before the spec run, into ./attachments/ and ./attachments/<key>/. A part run gets the parent files and only its own sub-task files. Two files with the same name in two issues both stay. The caps count the parent and the sub-tasks together.
+7. AC-B78. The nextPart truth table: one build at a time; the limit counts self_reviewed, open, and adopted parts; stack waits for the gate; override starts it; merge waits for merged; a lower part merged before the start gives a base start; the order is by ord.
+8. AC-B79. B branches from A's pushed head, and its PR targets A's branch. New commits on A show in B's base check. The update merges, and the push is a fast-forward with the lease and no `+`.
+9. AC-B80. A merged with a merge commit gives one PUT and no git merge (argv spy).
+10. AC-B81. A squash-merged gives the three merges (argv spy), and `git diff develop...B` lists only B's files. An edited squash fails the tree check and takes the fallback with a resolve step. B not pushed takes `rebase --onto`.
+11. AC-B82. No push argv after the first push has a force flag or a `+` refspec. "Push and move" with a failed PUT keeps the push and offers "Try again".
+12. AC-B83. A part on a part that changed another repository blocks with "Wait for the merge".
+13. AC-B84. The part gate counts approvals, NEEDS_WORK, openTaskCount, and pr_build failed and in progress. The kick callback fires only for a task with a startable part.
+14. AC-B85. The sync reads the Jira status once per JIRA_STATUS_AGE_MS per open sub-task task (fake clock), and never for a closed task. The view read runs at most once per JIRA_VIEW_AGE_MS. A failed read keeps the stored status.
+15. AC-B86. "Move in Jira" lists the transitions, and only the confirm sends one POST with X-Atlassian-Token: no-check. A 400 gives "Jira refused the move (HTTP 400). Move ABC-12 in Jira." The fake Jira runs as Server and as Cloud, and both pass.
+16. AC-B87. A new key in Jira gives the row "ABC-17 is new in Jira." "Add to plan" adds a part only after the user approves the changed plan. No built, open, or merged part changes. A removed key gives "Removed in Jira." with Drop.
+17. AC-B88. The Task view shows one row per sub-task with one sentence and one actor, "ABC-12 (2 of 4)", and one primary button for the focused part. The AC-UX2 word scan covers the new strings (e2e).
+
+#### 6.20.17 Unverified (a gate or the smoke confirms)
+
+- Jira `subtasks` entries carry status.statusCategory on Server, Data Center, and Cloud (J1). The field ID `subtasks` exists on both.
+- The `issuelinks` shape on both deployments (J2).
+- The transitions list, and the attachment links in comments and in the rendered HTML of Cloud (J3, U79).
+- Jira Data Center accepts the JSON POST of a transition with X-Atlassian-Token: no-check (J4).
+- The MERGED activity of a Bitbucket squash merge names the squash commit, with one parent (G19; G17 saw a merge commit only).
+- The Bitbucket squash tree equals `git merge-tree --write-tree S^1 A_final` (G19). The tree check falls back safely when it does not.
+- The repository PR list returns createdDate and closedDate for merged PRs.
+- A reopen of a declined PR with a deleted toRef (section 6.8).
+- git 2.38 or later for `merge-tree --write-tree`. An older git takes the fallback.
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule
@@ -2032,6 +2355,7 @@ Large task (a feature with an API change, 4 parts):
 | next free number, task repositories (WP-MR1) | Create task_repo and task_pr and the index task_repo_one (section 6.16.9). A task_repo row role main for each existing task. No rebuild. |
 | 036_task_file.sql (task attachments) | Create task_file (section 6.17.2). No rebuild. |
 | next free number, 037 unless taken (Tell Claude and the base update) | Rebuild task_step with kind adding 'instruct', 'update', and 'resolve'. `ALTER TABLE pull_request ADD COLUMN merge_result TEXT;` (section 6.18.6). |
+| next free number, `0NN_task_subtasks.sql` (WP-ST2) | `ALTER TABLE task ADD COLUMN subtasks`; create task_subtask; task_part adds keys_json, start_mode, after_part, base_commit, spec_dir, adopted, override; task_file adds issue (section 6.20.8). No rebuild. |
 | 039_task_files.sql (WP-MR2) | `ALTER TABLE task_part ADD COLUMN files INTEGER;` and `ALTER TABLE task_pr ADD COLUMN files INTEGER;` (section 6.16.9). No rebuild. |
 | next free number, autopilot (on hold) | Rebuild review_run with kind adding 'autopilot' and the column autopilot_json. Rebuild event with kind adding 'autopilot_draft', 'autopilot_posted', 'dependency_merged'. post gains auto, not_before, deleted_at. Create pr_autopilot, autopilot_queue, autopilot_turn, pr_dependency (section 11.11). pr_note comes from 031. It takes the next free number when part 7 resumes. |
 
@@ -2049,6 +2373,7 @@ db.test.ts per migration: the version number, a database of the version before w
 | GET /api/repos/:project/:repo/branches; GET /api/tasks/:id/branch; PUT /api/tasks/:id/base; POST /api/tasks/:id/repos/:taskRepo, /parts/:part/prs, /parts/:part/update, /prs/:taskPr/pointer; settings key taskBranchPrefixes (section 6.16.11) | 6 |
 | POST /api/tasks/:id/instructions; POST /api/tasks/:id/parts/:part/update/undo (section 6.18.6) | 6 |
 | POST /api/tasks/issue; PUT /api/tasks/:id/files/:att; POST /api/tasks gains files (section 6.17.4) | 6 |
+| POST /api/tasks/:id/plan-again, /parts/:part/start, /parts/:part/push, /parts/:part/move, /parts/:part/drop, /jira-check, /jira-read; GET, POST /api/tasks/:id/jira/:key/transitions; POST /api/tasks and /plan gain subtasks (section 6.20.12) | 6 |
 | GET, POST /api/prs/:id/notes; PUT, DELETE /api/notes/:id (section 2.9) | 2 |
 | POST /api/prs/:id/ask gains parent; GET /api/prs/:id/asks gives parent (section 2.15) | 2 |
 | /api/prs/:id/autopilot, /api/autopilot/…, /api/prs/:id/dependencies, /api/dependencies/:id, POST /api/items/:id/post-now (section 11.12) | 7 (on hold) |
@@ -2073,6 +2398,7 @@ The review start route keeps its input. Modules and volume come from the profile
 | 2, 3.5, 3.6, 7 Plan (part 6, branches and several repositories, 2026-10-23) | 2: several repositories for small and medium tasks. 3.5: task workspaces check out same-server submodules (first level editable); the review snapshot keeps "No submodules". 3.6 outbound reads: the default branch, the branch search, the repositories with write permission, the branch restrictions, and the merge commit of a merged PR. 7 Plan: task_repo, task_pr, repo_task_settings.last_base, the global prefix list, the new routes. |
 | 2, 3.6, 7 Plan (part 6, Tell Claude and Update from the base branch, 2026-10-26) | 2: the "Tell Claude" box in the waiting states, and "Update from <base>" with the task's own base. 3.6: the update rebases before the first push and merges after it, so it never needs a force push. 7 Plan: run modes instruct and resolve, the task_step kinds, pull_request.merge_result, the new routes. |
 | 3.5, 3.6, 7 Plan (part 2, PR context and notes) | 3.5: runs get context/pr-context.md (untrusted) and context/notes.md (the user's kept notes), rebuilt per run with no LLM call. 3.6 outbound reads: the open-PR list, the change list of an open PR, and build stats of the PR head. 7 Plan: the pr_note table, the notes routes, the cites and notes keys of the reply and discuss results. Ask follow-ups: the last 3 turns of a conversation go into the Ask stdin as data; review_run.parent_run. |
+| 2, 3.6, 7 Plan, Hard rules (part 6, sub-tasks, 2026-10-29) | 2: a task with sub-tasks builds one branch and one PR per sub-task; non-goal "No Jira change without a click". 3.6: Jira reads during the sync, one Jira POST of a transition after a confirm, the found-work GET reads. 7: task.subtasks, task_subtask, the new task_part and task_file columns, schedule.ts and gates.ts, the part gate after a squash merge. Hard rules: "Nothing goes to Bitbucket or Jira without an explicit user action"; "Continue on <branch>" for a found branch with the part key. |
 | 5 Constitution, 3.6, Hard rules (part 7, on hold: do not change BRIEF.md until part 7 resumes) | Principle 1 and the hard rule "Nothing goes to Bitbucket without an explicit user action" add ", unless the user turned on Autopilot for that PR" (Q25, decided 2026-10-22), with the safeguards list of design.md section 10.1. Principle 4 allows reply runs from a sync on PRs in draft or post mode. 3.6 outbound adds comment delete of own Autopilot replies, the open-PR list, and the blocking-PR read. 7 Plan adds run kind autopilot, the guard phase, the part 7 tables, and the Autopilot mark. CLAUDE.md "Hard rules" gets the same rule text. |
 
 ## 11. Part 7: Autopilot replies
