@@ -12,12 +12,15 @@ import {
   copyTargets,
   type Draft,
   defaultChoice,
+  editedOf,
   focusAfter,
   LIMITS,
   modelChoice,
   NEW_PROMPT,
   problems,
   profileId,
+  SHIPPED_FIELDS,
+  sameAsMain,
   sameProfiles,
   selectAll,
   setTools,
@@ -32,6 +35,7 @@ import {
   toProfiles,
   unmarkedListQuestion,
   unmarkedQuestion,
+  valueText,
 } from "../../src/web/settings/profiles";
 
 const p = (id: string, name: string, o: Partial<ProfileInput> = {}): ProfileInput => ({
@@ -424,5 +428,72 @@ describe("the no flag choice", () => {
     expect(defaultChoice(undefined)).toBe("Use my default");
     expect(defaultChoice({ value: "xhigh", sure: true })).toBe("Use my default (xhigh)");
     expect(defaultChoice({ value: "low", sure: false })).toBe("Use my default (low, from your settings)");
+  });
+});
+
+describe("shipped profile edits and Duplicate", () => {
+  const shipped = p("general", "Review", { maxTurns: 100, modules: ["security"], reviewer: { model: null, effort: "high", mode: "auto" } });
+  const names = { module: (m: string) => m.toUpperCase(), volume: (v: string) => v };
+
+  test("editedOf lists the fields that differ from the shipped profile, in form order", () => {
+    const [d] = toDrafts([shipped]) as [Draft];
+    expect(editedOf(d, shipped)).toEqual([]);
+    const e = { ...d, prompt: "Mine.", maxTurns: "60", reviewer: { ...d.reviewer, mode: "off" as const } };
+    expect(editedOf(e, shipped)).toEqual(["maxTurns", "prompt", "reviewer"]);
+    expect(SHIPPED_FIELDS.map(([k]) => k)).not.toContain("variants");
+  });
+
+  test("Reset to shipped sets one field back and keeps the other edits", () => {
+    let list = change(toDrafts([shipped]), { act: "edit", i: 0, patch: { prompt: "Mine.", maxTurns: "60" } });
+    list = change(list, { act: "reset", i: 0, field: "prompt", shipped });
+    expect(toProfiles(list)[0]).toEqual({ ...shipped, maxTurns: 60 });
+    expect(editedOf(list[0] as Draft, shipped)).toEqual(["maxTurns"]);
+    // A skill reset drops the Always use marks of the skills that leave.
+    list = change(list, { act: "edit", i: 0, patch: { skills: ["a"], alwaysSkills: ["a"] } });
+    list = change(list, { act: "reset", i: 0, field: "skills", shipped });
+    expect(toProfiles(list)[0]).toMatchObject({ skills: [], alwaysSkills: [] });
+  });
+
+  test("Duplicate adds a user profile with every field after its source, with a unique name and ID, and focuses its name", () => {
+    let list = change(toDrafts([shipped, SAVED[2] as ProfileInput]), { act: "edit", i: 0, patch: { prompt: "Mine." } });
+    list = change(list, { act: "duplicate", i: 0 });
+    list = change(list, { act: "duplicate", i: 0 });
+    const out = toProfiles(list);
+    expect(out.map((x) => [x.id, x.name])).toEqual([
+      ["general", "Review"],
+      ["review-copy-2", "Review copy 2"],
+      ["review-copy", "Review copy"],
+      ["explain", "Explain"],
+    ]);
+    expect(out[2]).toEqual({ ...shipped, id: "review-copy", name: "Review copy", prompt: "Mine." });
+    expect(new Set(list.map((d) => d.key)).size).toBe(4);
+    expect(profileList.safeParse(out).success).toBe(true);
+    // The copy does not share nested values with its source.
+    list = change(list, { act: "edit", i: 2, patch: { modules: [] } });
+    expect(toProfiles(list)[0]?.modules).toEqual(["security"]);
+    expect(focusAfter({ act: "duplicate", i: 0 }, 4)).toBe(profileId(1, "name"));
+    // A long name stays within the limit, and a full list takes no copy.
+    const long = change(toDrafts([p("x", "n".repeat(LIMITS.name))]), { act: "duplicate", i: 0 });
+    expect(toProfiles(long)[1]?.name.length).toBeLessThanOrEqual(LIMITS.name);
+    const full = toDrafts(Array.from({ length: MAX_PROFILES }, (_, i) => p(`p${i}`, `P${i}`)));
+    expect(change(full, { act: "duplicate", i: 0 })).toBe(full);
+  });
+
+  test("the agent pickers name the value of the main run when it is known", () => {
+    expect(sameAsMain("opus")).toBe("Same as the main run (opus)");
+    expect(sameAsMain("")).toBe("Same as the main run");
+    expect(sameAsMain(undefined)).toBe("Same as the main run");
+  });
+
+  test("valueText gives plain words for the shipped value dialog", () => {
+    expect(valueText("prompt", shipped, names)).toBe("Check Review.");
+    expect(valueText("maxTurns", shipped, names)).toBe("100");
+    expect(valueText("docs", shipped, names)).toBe("On");
+    expect(valueText("modules", shipped, names)).toBe("SECURITY");
+    expect(valueText("model", shipped, names)).toBe("Use my default");
+    expect(valueText("reviewer", shipped, names)).toBe("Auto, model same as the main run, effort high");
+    expect(valueText("verifier", shipped, names)).toBe("On, model same as the main run, effort medium");
+    expect(valueText("mcp", { ...shipped, mcp: [{ server: "docs", tools: ["a", "b"] }] }, names)).toBe("docs (a, b)");
+    expect(valueText("skills", shipped, names)).toBe("None");
   });
 });

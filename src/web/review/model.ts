@@ -496,7 +496,10 @@ export const setupText = (
 
 // ---------- Brief ----------
 
-export const profileOf = (profiles: ProfileDto[], id: string) => profiles.find((p) => p.id === id) ?? profiles[0];
+// The server rule (src/server/review/catalog.ts profileOf): an unknown ID gets the first review profile, never an Explain profile
+// while a review profile exists.
+export const profileOf = (profiles: ProfileDto[], id: string) =>
+  profiles.find((p) => p.id === id) ?? profiles.find((p) => !p.explain) ?? profiles[0];
 
 export type BriefState = {
   profile: string;

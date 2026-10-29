@@ -71,6 +71,8 @@ FORMER[4] holds the version 4 values that differ: general {name "General", note 
 
 Retire rule (settings.ts upgradeConfig) for a saved PROFILES_VERSION of 4 or lower: a profile with id security or over leaves the list when each field equals its version 4 shipped value. This includes skills, mcp, model, effort, and reviewer. Else the profile stays with all its fields and gets no later shipped upgrade. When security leaves, general gets "security" in modules. When over leaves, general gets "simplify". Both additions apply only while general.modules is unedited.
 
+Stored form (PROFILES_VERSION 7, catalog.ts storeProfiles and resolveProfiles): a profile with a shipped ID keeps only its id, each field that differs from the current shipped value, and `edited` (field to the first 16 hex digits of the sha256 of the canonical JSON of the shipped value at the time of the edit). Example: `{"id": "general", "prompt": "My prompt", "edited": {"prompt": "<hash>"}}`. An unedited shipped profile stores `{"id": "explain"}`. A file of version 6 or lower runs upgradeProfile and the retire rule first. Then each edited field gets the hash of its shipped value at the version of the file. A field whose hash differs from the hash of the current shipped value shows "A newer shipped version exists". A save keeps the hash while the value stays the same, and a changed value gets the current hash.
+
 ### 1.3 Modules
 
 | ID | Label | General default | Section text (finder and rl-reviewer) |

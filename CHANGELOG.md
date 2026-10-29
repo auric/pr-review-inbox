@@ -14,6 +14,11 @@
 - The turn cap of a profile now goes up to 1000 turns.
 - A review that reaches its turn cap now keeps the findings from its notes so far. A short second run turns the notes into findings, and the check step checks them. The coverage says that the review reached its turn cap.
 - When the profile of a review brief is deleted, the review now uses your first review profile, never the Explain profile.
+- An edited Review or Explain profile now keeps getting shipped updates for each field that you did not edit. Your edits stay as they are.
+- Settings, Review profiles, lists your edits to a shipped profile. "Reset to shipped" sets one field back. "A newer shipped version exists" shows when an update changed a field that you edited, and "View" shows both versions.
+- "Duplicate" on a profile adds a copy of it with all its settings.
+- Agent model, Agent effort, and Check model now say "Same as the main run" and name its model or effort when the app knows it. A help line under each pair says which agent it sets.
+- Settings now save while config.json is open in an editor or another program. When the save still cannot write the file, the message tells you to close it there.
 
 ### Build a Jira task
 

@@ -330,6 +330,10 @@ describe("brief state", () => {
     expect(s.hint).toBe("Open the review brief with your note. Pick the profile and start the review there. Key: r.");
     expect(briefState(brief(), null, 7, PROFILES).hint).toBe("Open the review brief. Pick the profile and start the review there. Key: r.");
     expect(briefState(brief({ profile: "over" }), null, 7, PROFILES).name).toBe("General");
+    // An unknown profile never falls back to an Explain profile while a review profile exists (the server rule).
+    const explainFirst = [...PROFILES].sort((a, b) => Number(b.explain) - Number(a.explain));
+    expect(explainFirst[0]?.explain).toBe(true);
+    expect(briefState(brief({ profile: "over" }), null, 7, explainFirst).name).toBe(explainFirst.find((p) => !p.explain)?.name as string);
   });
 
   // Decision D2 (plan pr-view-v4): the stored brief of the PR wins, else the last profile used on any PR.

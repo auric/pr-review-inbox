@@ -20,17 +20,21 @@ import { DEFAULT_BRANCH_PREFIXES } from "../shared/task";
 import type { PullRequest } from "../shared/types";
 import { ForgeError } from "./bitbucket/client";
 import { createBitbucketProvider, type ForgeProvider } from "./bitbucket/provider";
-import { type Config, dataDir, dbPath, PROFILES_VERSION, readConfig, writeConfig } from "./config";
+import { type Config, ConfigWriteError, dataDir, dbPath, PROFILES_VERSION, readConfig, writeConfig } from "./config";
 import { createJiraSource } from "./context/jira";
 import { ContextError, type ContextSource } from "./context/source";
 import { listPrs } from "./inbox/queries";
 import { log } from "./log";
 import {
   DEFAULT_PROFILE,
+  formerEdits,
+  nextEdits,
   type Profile,
+  profileEditState,
   RETIRED_MODULE,
   RETIRED_PROFILES,
   SHIPPED_PROFILES,
+  SPARSE_VERSION,
   sameValue,
   upgradeProfile,
 } from "./review/catalog";
@@ -65,8 +69,10 @@ const profilesOf = (c: Config | null): Profile[] => c?.profiles ?? SHIPPED_PROFI
 const upgradeConfig = (c: Config | null): Config | null => {
   if (!c?.profiles || c.profilesVersion === PROFILES_VERSION) return c;
   const version = c.profilesVersion ?? 1;
-  const profiles = c.profiles.map((p) => upgradeProfile(p, version));
-  return { ...c, profiles: version <= 4 ? retire(profiles) : profiles };
+  const upgraded = c.profiles.map((p) => upgradeProfile(p, version));
+  const profiles = version <= 4 ? retire(upgraded) : upgraded;
+  // From SPARSE_VERSION the file holds the edit hashes. An older file gets them from its own version (catalog.ts formerEdits).
+  return { ...c, profiles, profileEdits: version < SPARSE_VERSION ? formerEdits(profiles, version) : c.profileEdits };
 };
 
 // docs/plans/review-v2/spec.md section 1.2, retire rule: a Security or Over-engineering profile with every field at its version 4
@@ -145,6 +151,8 @@ export function createSettings(
       taskLink: c?.taskLink ?? null,
       checkSeconds: checkSecondsOf(c),
       profiles: profilesOf(c),
+      shippedProfiles: SHIPPED_PROFILES,
+      profileEdits: profileEditState(profilesOf(c), c?.profileEdits),
       jira: {
         baseUrl: c?.jira?.baseUrl ?? null,
         caFile: c?.jira?.caFile ?? null,
@@ -255,13 +263,14 @@ export function createSettings(
 
   // PUT /api/settings/jira (src/server/context/routes.ts). Checks the token with GET /rest/api/2/myself before it saves.
   const saveJira = (input: JiraSettingsInput): Promise<SettingsDto | JiraSaveError> =>
-    serial(async () => {
+    serial<SettingsDto | JiraSaveError>(async () => {
       const bad = (error: string): JiraSaveError => ({ status: 400, error });
       const prev = current();
       if (!prev) return { status: 409, error: "Configure the Bitbucket URL and token first." };
       if (!input.baseUrl) {
-        config = { ...prev, jira: undefined };
-        writeConfig(dir, config);
+        const next: Config = { ...prev, jira: undefined };
+        writeConfig(dir, next);
+        config = next;
         await jiraSecrets.clear();
         log("Jira disconnected.");
         return dto();
@@ -286,10 +295,14 @@ export function createSettings(
         return bad(e.kind === "auth" ? "Jira rejected the token." : `Jira check failed: ${e.message}`);
       }
       if (input.token) await jiraSecrets.set(token);
-      config = { ...prev, jira: { baseUrl, caFile } };
-      writeConfig(dir, config);
+      const next: Config = { ...prev, jira: { baseUrl, caFile } };
+      writeConfig(dir, next);
+      config = next;
       log(`Jira settings saved for ${originOf(baseUrl)}.`);
       return dto();
+    }).catch((e): JiraSaveError => {
+      if (e instanceof ConfigWriteError) return { status: 409, error: e.message };
+      throw e;
     });
 
   const routes = new Hono()
@@ -328,6 +341,12 @@ export function createSettings(
             markSeverity: input.markSeverity ?? prev?.markSeverity,
             checkSeconds: input.checkSeconds ?? prev?.checkSeconds,
             profiles: input.profiles === undefined ? prev?.profiles : (input.profiles ?? undefined),
+            profileEdits:
+              input.profiles === undefined
+                ? prev?.profileEdits
+                : input.profiles
+                  ? nextEdits(input.profiles, prev?.profiles, prev?.profileEdits)
+                  : undefined,
             jira: prev?.jira,
             globalInstructions: prev?.globalInstructions,
             sessions: input.sessions === undefined ? prev?.sessions : input.sessions || undefined,
@@ -338,8 +357,9 @@ export function createSettings(
           const notifications = input.notifications ?? prev?.notifications ?? false;
           // Same connection settings: save without a Bitbucket request, so the notifications toggle works offline.
           if (prev && prev.baseUrl === baseUrl && prev.caFile === caFile && !input.token) {
-            config = { ...prev, notifications, ...localFields };
-            writeConfig(dir, config);
+            const next: Config = { ...prev, notifications, ...localFields };
+            writeConfig(dir, next);
+            config = next;
             void recompute();
             return c.json(await dto());
           }
@@ -375,6 +395,9 @@ export function createSettings(
           oldDb?.close();
           void recompute();
           return c.json(await dto());
+        }).catch((e) => {
+          if (e instanceof ConfigWriteError) return c.json<ApiError>({ error: e.message }, 409);
+          throw e;
         }),
     )
     .post(

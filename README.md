@@ -84,6 +84,8 @@ To try PR Review Inbox without a Bitbucket server, run `bun run demo` from sourc
 
 A profile sets the prompt, the checks, the volume, the model, the effort, the reviewer agents, the check step, the skills, and the MCP servers of a run. PR Review Inbox ships Review and Explain. An update removes the old Security and Over-engineering profiles when you never edited them, and keeps them when you did. Skills and MCP servers come from your Claude Code config. "Improve prompt" proposes a clearer prompt, and you see the changes before you apply them.
 
+When you edit Review or Explain, the app keeps only the fields you changed. The other fields get each shipped update. "Your edits to the shipped profile" lists your changed fields, and "Reset to shipped" sets one field back. When an update changes the shipped value of a field you edited, the field shows "A newer shipped version exists", and "View" shows both versions. "Duplicate" on a profile adds a copy of it named "<name> copy" that you can change freely. Agent model and Agent effort default to "Same as the main run", and show its model or effort when the app knows it.
+
 The checks add checklists to the review: Security, Threads and races, Performance, Tests, Compatibility, Simplify (what to delete), Docs and comments, Project rules, Matches the task, and the language checklists for C++, C, and Python. The check step reads the code of each finding again and confirms it, refutes it, or marks it unsure. You can turn it off or give it its own model and effort.
 
 ![Settings, Review profiles: the prompt, the checks, and the volume](docs/screenshots/settings-profiles.webp)

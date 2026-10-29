@@ -4,7 +4,7 @@
 // Review profiles settings (M4, BRIEF US9): name, note, prompt, Explain, Docs, turn cap, and the run setup, in the order of the review brief.
 // Each change saves by itself (autosave.tsx). A field with a problem stays unsaved until the user fixes it.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, CircleAlert, Copy, Plus, RotateCcw, Sparkles, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CircleAlert, Copy, CopyPlus, Plus, RotateCcw, Sparkles, X } from "lucide-react";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,7 +34,7 @@ import { api } from "../api";
 import { dialogKeys } from "../fix/CloneDialog";
 import { useMeta, useSkills } from "../meta";
 import { MODULE_LABEL, VOLUME_LINE, VOLUME_NAME } from "../review/model";
-import { read } from "../shell/data";
+import { read, useSettings } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { SaveStatus, TYPING_MS, useSaver } from "./autosave";
 import { ImproveDialog } from "./ImproveDialog";
@@ -49,6 +49,7 @@ import {
   defaultChoice,
   type Edit,
   EFFORT_CHOICES,
+  editedOf,
   type Field,
   focusAfter,
   LIMITS,
@@ -56,6 +57,9 @@ import {
   problems,
   profileId,
   profileLabel,
+  SHIPPED_FIELDS,
+  type ShippedField,
+  sameAsMain,
   sameProfiles,
   selectAll,
   setTools,
@@ -66,8 +70,10 @@ import {
   toggleServer,
   toggleSkill,
   toPayload,
+  toProfiles,
   unmarkedListQuestion,
   unmarkedQuestion,
+  valueText,
 } from "./profiles";
 
 // The TaskRules.tsx control styles.
@@ -131,6 +137,10 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
   const [copied, setCopied] = useState<string | null>(null);
   // The key of the draft in the Improve prompt dialog.
   const [improving, setImproving] = useState<number | null>(null);
+  // The draft key and the field of the shipped value dialog.
+  const [viewing, setViewing] = useState<{ key: number; field: ShippedField } | null>(null);
+  const live = useSettings().data ?? settings;
+  const shippedOf = (id: string) => live.shippedProfiles.find((p) => p.id === id);
 
   // The cache holds the newest saved settings, also after a save in another section.
   const current = () => qc.getQueryData<SettingsDto>(["settings"]) ?? settings;
@@ -189,7 +199,7 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
     list.current = next;
     setDrafts(next);
     setCopied(null);
-    if (c.act === "add") setFocus({ id: focusAfter(c, next.length) as string, select: true });
+    if (c.act === "add" || c.act === "duplicate") setFocus({ id: focusAfter(c, next.length) as string, select: true });
     else if (c.act === "move") setFocus({ id: focusAfter(c, next.length) as string });
     saver.request(delay);
   };
@@ -252,6 +262,14 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
   const source = copying === null ? undefined : drafts[copying];
   const targets = copying === null ? [] : copyTargets(drafts, copying);
   const improveAt = drafts.findIndex((d) => d.key === improving);
+  const viewAt = viewing === null ? -1 : drafts.findIndex((d) => d.key === viewing.key);
+  const viewed = drafts[viewAt];
+  const viewedShipped = viewed && shippedOf(viewed.id);
+  const resetViewed = () => {
+    if (!viewing || !viewedShipped) return;
+    setViewing(null);
+    apply({ act: "reset", i: viewAt, field: viewing.field, shipped: viewedShipped });
+  };
   return (
     <section aria-labelledby="h-profiles" className="mt-6 grid max-w-[86ch] gap-3 border-t pt-4">
       {/* The save state stays in view while the list scrolls. -top-[18px] cancels the top padding of the Settings scroll pane. */}
@@ -290,6 +308,9 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
               onRemove={askRemove}
               onCopy={setCopying}
               onImprove={(j) => setImproving(list.current[j]?.key ?? null)}
+              shipped={shippedOf(d.id)}
+              newer={live.profileEdits[d.id]?.newer ?? []}
+              onView={(field) => setViewing({ key: d.key, field })}
             />
           ))}
         </ol>
@@ -386,6 +407,33 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
         onApply={applyProposal}
         onClose={() => setImproving(null)}
       />
+      <Dialog open={!!(viewing && viewed && viewedShipped)} onOpenChange={(on) => !on && setViewing(null)}>
+        <DialogContent className="sm:max-w-[640px]" onKeyDown={dialogKeys(() => setViewing(null))}>
+          {viewing && viewed && viewedShipped && (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  Shipped {fieldLabel(viewing.field)} of {viewedShipped.name}
+                </DialogTitle>
+                <DialogDescription>
+                  A newer shipped version exists. Your edit stays until you reset it. The other fields already get each shipped update.
+                </DialogDescription>
+              </DialogHeader>
+              <ValueBlock title="Shipped version" text={shownValue(viewing.field, viewedShipped)} />
+              <ValueBlock title="Your version" text={shownValue(viewing.field, toProfiles([viewed])[0] as ProfileInput)} />
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setViewing(null)}>
+                  Keep my version
+                </Button>
+                <Button onClick={resetViewed}>
+                  <RotateCcw data-icon="inline-start" />
+                  Reset to shipped
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -415,6 +463,71 @@ function ResetConfirm({ pending, onReset, onCancel }: { pending: boolean; onRese
           Cancel
         </Button>
       </div>
+    </fieldset>
+  );
+}
+
+const fieldLabel = (f: ShippedField) => (SHIPPED_FIELDS.find(([k]) => k === f)?.[1] ?? f).toLowerCase();
+const shownValue = (f: ShippedField, p: ProfileInput) =>
+  valueText(f, p, { module: (m) => MODULE_LABEL[m as ModuleId] ?? m, volume: (v) => VOLUME_NAME[v as Volume] ?? v });
+
+function ValueBlock({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="grid min-w-0 gap-1">
+      <p className="m-0 text-xs font-semibold text-muted-foreground">{title}</p>
+      <pre className="m-0 max-h-56 overflow-auto rounded-md bg-pane-2 p-2 font-sans text-sm whitespace-pre-wrap">{text}</pre>
+    </div>
+  );
+}
+
+// The edited fields of a profile with a shipped ID. Each field resets to its shipped value by itself.
+function ShippedEdits(props: RowProps & { shipped: ProfileInput }) {
+  const { d, i, shipped, newer } = props;
+  const edited = editedOf(d, shipped);
+  if (!edited.length) return null;
+  const head = profileId(i, "edits");
+  return (
+    <fieldset aria-labelledby={head} className="col-span-full grid min-w-0 gap-1.5 rounded-lg border px-3 py-2">
+      <p id={head} className="m-0 text-xs text-muted-foreground">
+        Your edits to the shipped {shipped.name} profile<span className="sr-only"> (profile {i + 1})</span>. The other fields get each
+        shipped update.
+      </p>
+      <ul className="m-0 grid list-none gap-1 p-0">
+        {edited.map((f) => {
+          const label = SHIPPED_FIELDS.find(([k]) => k === f)?.[1] ?? f;
+          return (
+            <li key={f} data-field={f} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              <span className="font-medium">{label}</span>
+              <Badge variant="secondary">Edited</Badge>
+              {newer.includes(f) && (
+                <>
+                  <span className="text-xs text-muted-foreground">A newer shipped version exists.</span>
+                  <Button variant="link" size="sm" className="h-auto px-0" aria-haspopup="dialog" onClick={() => props.onView(f)}>
+                    View
+                    <span className="sr-only">
+                      {" "}
+                      the shipped {label.toLowerCase()} of profile {i + 1}
+                    </span>
+                  </Button>
+                </>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="ml-auto text-ink-2"
+                onClick={() => props.onChange({ act: "reset", i, field: f, shipped })}
+              >
+                <RotateCcw data-icon="inline-start" />
+                Reset to shipped
+                <span className="sr-only">
+                  {" "}
+                  {label.toLowerCase()} of profile {i + 1}
+                </span>
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
     </fieldset>
   );
 }
@@ -451,6 +564,11 @@ type RowProps = {
   onRemove: (i: number) => void;
   onCopy: (i: number) => void;
   onImprove: (i: number) => void;
+  // The current shipped profile of the same ID. undefined: a user profile.
+  shipped: ProfileInput | undefined;
+  // The edited fields whose shipped value changed after the saved edit.
+  newer: string[];
+  onView: (field: ShippedField) => void;
 };
 
 function ProfileRow(props: RowProps) {
@@ -536,6 +654,18 @@ function ProfileRow(props: RowProps) {
             <ArrowDown aria-hidden className="size-[15px]" />
           </button>
         </Hint>
+        <Hint label="Duplicate">
+          <button
+            type="button"
+            id={profileId(i, "duplicate")}
+            className={iconBtn}
+            aria-label={`Duplicate ${label}`}
+            disabled={count >= LIMITS.profiles}
+            onClick={() => onChange({ act: "duplicate", i })}
+          >
+            <CopyPlus aria-hidden className="size-[15px]" />
+          </button>
+        </Hint>
         <Hint label="Remove">
           <button
             type="button"
@@ -606,6 +736,7 @@ function ProfileRow(props: RowProps) {
       </div>
       <ChecksField {...props} />
       <RunSetup {...props} found={found} />
+      {props.shipped && <ShippedEdits {...props} shipped={props.shipped} />}
       {errors.length > 0 && (
         <div className="col-span-full grid gap-1">
           {errors.map((f) => (
@@ -712,6 +843,10 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
   const mode = MODES.find(([m]) => m === d.reviewer.mode);
   const check = VERIFIER_MODES.find(([m]) => m === d.verifier.mode);
   const defaults = meta?.defaults;
+  // The model and the effort of the main run: the profile value, else the runner default that the server found.
+  const mainModel = d.model.trim() || defaults?.model?.value;
+  const mainEffort = d.effort || defaults?.effort[d.model.trim()]?.value;
+  const help = "m-0 text-xs text-muted-foreground";
   return (
     <fieldset aria-labelledby={head} className="col-span-full grid min-w-0 gap-2 rounded-lg bg-pane-2 px-3 pt-2.5 pb-3">
       <div className="grid gap-px">
@@ -742,12 +877,15 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
         <label htmlFor={profileId(i, "effort")} className={setupLabel}>
           Effort{of}
         </label>
-        <EffortPick
-          id={profileId(i, "effort")}
-          value={d.effort}
-          fallback={defaultChoice(defaults?.effort[d.model.trim()])}
-          onPick={(effort) => edit({ effort })}
-        />
+        <div className="grid min-w-0 gap-1">
+          <EffortPick
+            id={profileId(i, "effort")}
+            value={d.effort}
+            fallback={defaultChoice(defaults?.effort[d.model.trim()])}
+            onPick={(effort) => edit({ effort })}
+          />
+          <p className={help}>Model and effort of the lead agent that writes the findings.</p>
+        </div>
       </div>
       <div className={setupRow}>
         <span id={profileId(i, "reviewer")} className={setupLabel}>
@@ -789,6 +927,7 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
                 textId={profileId(i, "reviewer-model-id")}
                 label={`Agent model ID of profile ${i + 1}`}
                 value={d.reviewer.model}
+                fallback={sameAsMain(mainModel)}
                 disabled={!!noAgents || d.reviewer.mode === "off"}
                 error={found.reviewerModel ? profileId(i, "reviewerModel-error") : undefined}
                 onPick={(model) => reviewer({ model })}
@@ -801,11 +940,13 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
               <EffortPick
                 id={profileId(i, "reviewer-effort")}
                 value={d.reviewer.effort}
+                fallback={sameAsMain(mainEffort && ((EFFORT_NAME as Record<string, string>)[mainEffort] ?? mainEffort))}
                 disabled={!!noAgents || d.reviewer.mode === "off"}
                 onPick={(effort) => reviewer({ effort })}
               />
             </div>
           </div>
+          <p className={help}>Agent model and agent effort apply to the reviewer agents that split a big change.</p>
         </div>
       </div>
       <div className={setupRow}>
@@ -848,7 +989,7 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
                 textId={profileId(i, "verifier-model-id")}
                 label={`Check model ID of profile ${i + 1}`}
                 value={d.verifier.model}
-                fallback="Same as the profile"
+                fallback={sameAsMain(mainModel)}
                 disabled={!!noCheck || d.verifier.mode === "off"}
                 error={found.verifierModel ? profileId(i, "verifierModel-error") : undefined}
                 onPick={(model) => verifier({ model })}
@@ -867,6 +1008,7 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
               />
             </div>
           </div>
+          <p className={help}>Check model and check effort apply to the agent of the check step.</p>
         </div>
       </div>
       <SkillsField {...props} />

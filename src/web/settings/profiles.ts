@@ -260,7 +260,73 @@ export type Change =
   | { act: "remove"; i: number }
   | { act: "move"; i: number; d: -1 | 1 }
   | { act: "edit"; i: number; patch: Edit }
-  | { act: "copy"; i: number };
+  | { act: "copy"; i: number }
+  | { act: "duplicate"; i: number }
+  | { act: "reset"; i: number; field: ShippedField; shipped: ProfileInput };
+
+// The fields of a shipped profile that the editor can change and reset, in form order. variants has no control.
+export const SHIPPED_FIELDS = [
+  ["name", "Name"],
+  ["note", "Note"],
+  ["maxTurns", "Turn cap"],
+  ["prompt", "Prompt"],
+  ["explain", "Explain only"],
+  ["docs", "Documentation"],
+  ["languageChecks", "Language checks"],
+  ["modules", "Checks"],
+  ["volume", "Show"],
+  ["model", "Model"],
+  ["effort", "Effort"],
+  ["reviewer", "Reviewer agents"],
+  ["verifier", "Check step"],
+  ["skills", "Skills"],
+  ["alwaysSkills", "Always use"],
+  ["mcp", "MCP servers"],
+] as const satisfies readonly (readonly [keyof Edit, string])[];
+export type ShippedField = (typeof SHIPPED_FIELDS)[number][0];
+
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a, KEYS) === JSON.stringify(b, KEYS);
+// The fields of d that differ from its shipped profile, in form order.
+export function editedOf(d: Draft, shipped: ProfileInput): ShippedField[] {
+  const [p] = toProfiles([d]) as [ProfileInput];
+  return SHIPPED_FIELDS.flatMap(([k]) => (sameValue(p[k], shipped[k]) ? [] : [k]));
+}
+
+// The words for a field value in the shipped value dialog. names: display names of check modules and volumes.
+export function valueText(field: ShippedField, v: ProfileInput, names: { module: (m: string) => string; volume: (m: string) => string }) {
+  const flag = (x: string | null, none: string) => x ?? none;
+  const list = (l: string[]) => (l.length ? l.join(", ") : "None");
+  const mode = (m: string) => m.charAt(0).toUpperCase() + m.slice(1);
+  switch (field) {
+    case "explain":
+    case "docs":
+    case "languageChecks":
+      return v[field] ? "On" : "Off";
+    case "maxTurns":
+      return String(v.maxTurns);
+    case "modules":
+      return list(v.modules.map(names.module));
+    case "volume":
+      return names.volume(v.volume);
+    case "model":
+    case "effort":
+      return flag(v[field], "Use my default");
+    case "reviewer":
+      return `${mode(v.reviewer.mode)}, model ${flag(v.reviewer.model, "same as the main run")}, effort ${flag(v.reviewer.effort, "same as the main run")}`;
+    case "verifier":
+      return `${mode(v.verifier.mode)}, model ${flag(v.verifier.model, "same as the main run")}, effort ${flag(v.verifier.effort, "medium")}`;
+    case "skills":
+    case "alwaysSkills":
+      return list(v[field]);
+    case "mcp":
+      return list(v.mcp.map((m) => `${m.server} (${m.tools.join(", ")})`));
+    default:
+      return v[field];
+  }
+}
+
+// The text of the "no flag" choice of an agent picker. An agent inherits the model and the effort of the main run.
+export const sameAsMain = (v: string | null | undefined) => (v ? `Same as the main run (${v})` : "Same as the main run");
 
 const SETUP_KEYS = ["skills", "alwaysSkills", "mcp", "server", "tools"];
 // The skills, the Always use marks, and the MCP picks of a profile. A mark needs its skill (profileInput).
@@ -307,6 +373,25 @@ export function change(list: Draft[], c: Change): Draft[] {
       if (!from || !targets.length) return list;
       return list.map((d, j) => (targets.includes(j) ? { ...d, ...setupOf(from) } : d));
     }
+    case "duplicate": {
+      const from = list[c.i];
+      if (!from || list.length >= LIMITS.profiles) return list;
+      const base = `${from.name.trim().slice(0, LIMITS.name - 5)} copy`.trim();
+      const name = unique(base, new Set(list.map((d) => d.name.trim())), (n) => ` ${n}`, LIMITS.name);
+      const id = uniqueId(slug(name), new Set(list.map((d) => d.id)));
+      const out = [...list];
+      out.splice(c.i + 1, 0, { ...structuredClone(from), key: ++lastKey, id, name });
+      return out;
+    }
+    case "reset": {
+      const [s] = toDrafts([c.shipped]) as [Draft];
+      return list.map((d, i) => {
+        if (i !== c.i) return d;
+        const next = { ...d, [c.field]: s[c.field] };
+        // A mark needs its skill (profileInput).
+        return { ...next, alwaysSkills: next.alwaysSkills.filter((id) => next.skills.includes(id)) };
+      });
+    }
   }
 }
 
@@ -343,6 +428,8 @@ export type Part =
   | "up"
   | "down"
   | "remove"
+  | "duplicate"
+  | "edits"
   | `${Field}-error`;
 export const profileId = (i: number, part: Part) => `profile-${i}-${part}`;
 export const ADD_ID = "profile-add";
@@ -352,6 +439,8 @@ export function focusAfter(c: Change, n: number): string | null {
   switch (c.act) {
     case "add":
       return profileId(n - 1, "name");
+    case "duplicate":
+      return profileId(c.i + 1, "name");
     case "remove":
       // The remove button of the last profile is disabled.
       return n > 1 ? profileId(Math.min(c.i, n - 1), "remove") : ADD_ID;

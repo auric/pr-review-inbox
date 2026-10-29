@@ -284,6 +284,10 @@ export type SettingsDto = {
   checkSeconds: number;
   // With prompts. Meta lists them without.
   profiles: ProfileInput[];
+  // The current shipped profiles. The editor shows and resets the edited fields of a profile with a shipped ID.
+  shippedProfiles: ProfileInput[];
+  // By shipped profile ID: the edited fields, and the edited fields whose shipped value changed after the edit.
+  profileEdits: Record<string, { fields: string[]; newer: string[] }>;
   // baseUrl: null when Jira is not connected.
   jira: { baseUrl: string | null; caFile: string | null; tokenStored: boolean };
   // The opt-in of "Ask your session" (docs/plans/session-consult.md part C). Default off.

@@ -726,6 +726,19 @@ r[key("POST", "/__control/restart")] = async () => {
   app = boot();
   return NO_CONTENT;
 };
+// Marks an edited field of a stored shipped profile as an edit of an older shipped value, as after an app update, then restarts.
+r[key("POST", "/__control/shipped-older")] = async (req) => {
+  const { id, field } = (await req.json()) as { id: string; field: string };
+  const file = join(dataDir, "config.json");
+  const config = JSON.parse(readFileSync(file, "utf8")) as { profiles: { id: string; edited?: Record<string, string> }[] };
+  const entry = config.profiles.find((p) => p.id === id);
+  if (!entry?.edited?.[field]) return { status: 409, body: { error: `${id}.${field} is not edited` } };
+  entry.edited[field] = "0".repeat(16);
+  await halt();
+  writeFileSync(file, JSON.stringify(config));
+  app = boot();
+  return NO_CONTENT;
+};
 // Changes the PR A post scenario. Answers with the comment POST bodies that PR A got so far.
 r[key("POST", "/__control/posts")] = async (req) => {
   const change = (await req.json()) as PostControl;

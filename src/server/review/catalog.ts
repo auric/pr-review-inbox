@@ -13,6 +13,7 @@ import {
   type ModuleId,
   type ProfileId,
   type ProfileInput,
+  profileList,
   type Variant,
   type Volume,
 } from "../../shared/dto";
@@ -239,7 +240,8 @@ export const MIN_EDIT_TURNS = 100;
 
 // The shipped field values of each former PROFILES_VERSION (src/server/config.ts). The value of a field at version v is its entry at v,
 // else its entry at the next later version that has it, else the current value. So an entry holds each field whose value differs from that.
-// A change to a shipped value needs a PROFILES_VERSION bump and an entry with the old value. Without it, saved profiles keep the old value.
+// From PROFILES_VERSION 7, config.json keeps no unedited field of a shipped profile, so a change to a shipped value needs no entry here.
+// The entries serve the upgrade of files from before version 7.
 // languageChecks: absent before version 3, so a stored profile of that time parses as false.
 // modules, volume, verifier: absent before version 5, so a stored profile of that time parses with their defaults.
 // A retired profile (RETIRED_PROFILES) upgrades to its version 4 values and gets no entry from version 4 on.
@@ -288,6 +290,95 @@ export function upgradeProfile(p: Profile, version: number): Profile {
   const former: Former = Object.assign({}, ...FORMER_VERSIONS.filter((v) => v >= from).map((v) => FORMER[v]?.[p.id]));
   const unedited = (Object.keys(former) as (keyof Former)[]).filter((k) => sameValue(p[k], former[k]));
   return { ...p, ...Object.fromEntries(unedited.map((k) => [k, shipped[k]])) };
+}
+
+// ---------- Stored profiles (PROFILES_VERSION 7) ----------
+// config.json keeps a profile with a shipped ID as its edited fields only. Each other field comes from SHIPPED_PROFILES at read time.
+// The stored entry also holds `edited`: for each edited field, shippedHash of the shipped value when the user made the edit.
+// A profile with another ID keeps every field.
+export const SPARSE_VERSION = 7;
+// Profile ID, then field name, then shippedHash of the shipped value when the user made the edit.
+export type ProfileEdits = Partial<Record<string, Partial<Record<string, string>>>>;
+export const shippedHash = (v: unknown) => createHash("sha256").update(canon(v)).digest("hex").slice(0, 16);
+const shippedOf = (id: string) => SHIPPED_PROFILES.find((s) => s.id === id);
+// The fields of p that differ from the current shipped profile. Empty for a profile with another ID.
+export function editedFields(p: Profile): (keyof Profile)[] {
+  const shipped = shippedOf(p.id);
+  if (!shipped) return [];
+  return (Object.keys(p) as (keyof Profile)[]).filter((k) => k !== "id" && !sameValue(p[k], shipped[k]));
+}
+
+// The config.json form of a profile list. A field without a hash in edits gets the hash of the current shipped value.
+export function storeProfiles(list: Profile[], edits: ProfileEdits = {}): Record<string, unknown>[] {
+  return list.map((p) => {
+    const shipped = shippedOf(p.id);
+    if (!shipped) return p;
+    const keys = editedFields(p);
+    if (!keys.length) return { id: p.id };
+    return {
+      id: p.id,
+      ...Object.fromEntries(keys.map((k) => [k, p[k]])),
+      edited: Object.fromEntries(keys.map((k) => [k, edits[p.id]?.[k] ?? shippedHash(shipped[k])])),
+    };
+  });
+}
+
+// The full profiles of a stored list, or null when the list does not parse. version: profilesVersion of the file. A file from before
+// SPARSE_VERSION stores every field, and an absent field takes its profileInput default, so the old upgrade rules stay valid.
+export function resolveProfiles(stored: unknown[], version: number): { profiles: Profile[]; edits: ProfileEdits } | null {
+  const edits: ProfileEdits = {};
+  const list = stored.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const { edited, ...p } = entry as Record<string, unknown>;
+    const shipped = version >= SPARSE_VERSION && typeof p.id === "string" ? shippedOf(p.id) : undefined;
+    if (!shipped) return p;
+    if (edited && typeof edited === "object")
+      edits[shipped.id] = Object.fromEntries(Object.entries(edited).filter(([k, h]) => k in p && typeof h === "string"));
+    return { ...structuredClone(shipped), ...p };
+  });
+  const r = profileList.safeParse(list);
+  return r.success ? { profiles: r.data, edits } : null;
+}
+
+// The edits of a converted file: each edited field gets the hash of its shipped value at the version of the file.
+export function formerEdits(list: Profile[], version: number): ProfileEdits {
+  return Object.fromEntries(
+    list.map((p) => {
+      const then = shippedProfileAt(p.id, version);
+      return [p.id, Object.fromEntries(editedFields(p).map((k) => [k, shippedHash(then?.[k])]))];
+    }),
+  );
+}
+
+// The edits after a save of list. A field keeps its hash while its value stays the same. A changed or new edit gets the current hash.
+export function nextEdits(list: Profile[], prev: Profile[] | undefined, edits: ProfileEdits = {}): ProfileEdits {
+  return Object.fromEntries(
+    list.map((p) => {
+      const before = prev?.find((o) => o.id === p.id);
+      const shipped = shippedOf(p.id);
+      const hashes = editedFields(p).map((k) => {
+        const h = edits[p.id]?.[k];
+        return [k, h && before && sameValue(before[k], p[k]) ? h : shippedHash(shipped?.[k])];
+      });
+      return [p.id, Object.fromEntries(hashes)];
+    }),
+  );
+}
+
+// For each shipped profile in list: its edited fields, and the edited fields whose shipped value changed since the edit.
+export function profileEditState(list: Profile[], edits: ProfileEdits = {}): Record<string, { fields: string[]; newer: string[] }> {
+  return Object.fromEntries(
+    list.flatMap((p) => {
+      const shipped = shippedOf(p.id);
+      if (!shipped) return [];
+      const fields = editedFields(p);
+      const newer = fields.filter((k) => {
+        const h = edits[p.id]?.[k];
+        return h !== undefined && h !== shippedHash(shipped[k]);
+      });
+      return [[p.id, { fields, newer }]];
+    }),
+  );
 }
 
 // Returns the tool names of a remote MCP server. It throws when the server does not answer.

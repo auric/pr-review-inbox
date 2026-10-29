@@ -62,6 +62,8 @@ function setup(backend?: SecretBackend) {
   };
 }
 
+const UNEDITED = { general: { fields: [], newer: [] }, explain: { fields: [], newer: [] } };
+
 describe("settings API", () => {
   test("GET without config gives the not-configured shape", async () => {
     const s = setup();
@@ -78,6 +80,8 @@ describe("settings API", () => {
       taskLink: null,
       checkSeconds: 60,
       profiles: SHIPPED_PROFILES,
+      shippedProfiles: SHIPPED_PROFILES,
+      profileEdits: UNEDITED,
       jira: { baseUrl: null, caFile: null, tokenStored: false },
       sessions: false,
       askAttachments: true,
@@ -105,6 +109,8 @@ describe("settings API", () => {
       taskLink: null,
       checkSeconds: 60,
       profiles: SHIPPED_PROFILES,
+      shippedProfiles: SHIPPED_PROFILES,
+      profileEdits: UNEDITED,
       jira: { baseUrl: null, caFile: null, tokenStored: false },
       sessions: false,
       askAttachments: true,
@@ -477,7 +483,12 @@ describe("settings API", () => {
     expect((await again.get()).profiles).toEqual(upgraded);
     // A save stamps the version, so a cap of 40 set after the update stays.
     expect((await again.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
-    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ profiles: upgraded, profilesVersion: PROFILES_VERSION });
+    // The unedited shipped profiles store only their ID. The other profiles store every field.
+    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({
+      profiles: [{ id: "general" }, upgraded[1], upgraded[2], { id: "explain" }, custom],
+      profilesVersion: PROFILES_VERSION,
+    });
+    expect(readConfig(dir)?.profiles).toEqual(upgraded);
     const oldGeneral = { ...general, maxTurns: 40 };
     expect((await again.put({ baseUrl: fake.url, profiles: [oldGeneral] })).status).toBe(200);
     again.settings.close();
@@ -566,7 +577,13 @@ describe("settings API", () => {
     const again = setup();
     expect((await again.get()).profiles).toEqual(upgraded);
     expect((await again.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
-    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ profiles: upgraded, profilesVersion: PROFILES_VERSION });
+    // effort "high" equals the shipped effort, so the file does not keep it.
+    const { effort: _, ...stored } = setupEdits;
+    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({
+      profiles: [{ id: "general", ...stored }],
+      profilesVersion: PROFILES_VERSION,
+    });
+    expect(readConfig(dir)?.profiles).toEqual(upgraded);
     const setBack = { ...general, ...setupEdits, prompt: OLD_GENERAL, languageChecks: false, modules: [] };
     expect((await again.put({ baseUrl: fake.url, profiles: [setBack] })).status).toBe(200);
     again.settings.close();
@@ -576,7 +593,7 @@ describe("settings API", () => {
   // ---------- PROFILES_VERSION 5 (docs/plans/review-v2/spec.md section 1.2) ----------
 
   test("AC-R11: a version 4 config with unedited Security and Over-engineering profiles upgrades to two profiles; an edited one stays", async () => {
-    expect(PROFILES_VERSION).toBe(6);
+    expect(PROFILES_VERSION).toBe(7);
     const { write, load } = await oldConfig();
     write(4, [v4.general, v4.over, v4.security, v4.explain]);
     const two = await load();
@@ -656,6 +673,74 @@ describe("settings API", () => {
     const old = { ...explain, note: "Summary and questions only, at lower cost", prompt: V4_EXPLAIN, effort: null, maxTurns: 50 };
     write(6, [mine, over, security, old]);
     expect(await load()).toEqual([mine, over, security, old]);
+  });
+
+  // ---------- PROFILES_VERSION 7: a shipped profile stores only its edits ----------
+
+  // Sets shipped values of general for one test, as a later release would.
+  const shipLater = (patch: Partial<Profile>) => {
+    const was = { ...general };
+    Object.assign(general, patch);
+    return () => Object.assign(general, was);
+  };
+
+  test("an edited Review prompt converts to the prompt alone, resolves to the same profile, and keeps the edit when the shipped prompt changes", async () => {
+    const { file, write } = await oldConfig();
+    const mine = { ...general, prompt: "My prompt" };
+    write(6, [mine, explain, custom]);
+    const s = setup();
+    expect((await s.get()).profiles).toEqual([mine, explain, custom]);
+    expect((await s.get()).profileEdits).toEqual({ general: { fields: ["prompt"], newer: [] }, explain: { fields: [], newer: [] } });
+    expect((await s.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
+    s.settings.close();
+    const stored = JSON.parse(readFileSync(file, "utf8")).profiles;
+    expect(stored).toEqual([{ id: "general", prompt: "My prompt", edited: { prompt: expect.any(String) } }, { id: "explain" }, custom]);
+    expect(readConfig(dir)?.profiles).toEqual([mine, explain, custom]);
+    // A later release changes the shipped prompt and the turn cap. The edited prompt stays, and the unedited turn cap follows.
+    const restore = shipLater({ prompt: "A newer shipped prompt.", maxTurns: 120 });
+    try {
+      const later = setup();
+      const got = await later.get();
+      expect(got.profiles[0]).toEqual({ ...general, prompt: "My prompt", maxTurns: 120 });
+      expect(got.profileEdits.general).toEqual({ fields: ["prompt"], newer: ["prompt"] });
+      expect(got.shippedProfiles[0]?.prompt).toBe("A newer shipped prompt.");
+      // A save of the same prompt keeps the notice. A changed prompt is a new edit against the newer shipped prompt.
+      const res = await later.put({ baseUrl: fake.url, profiles: got.profiles });
+      expect(((await res.json()) as SettingsDto).profileEdits.general?.newer).toEqual(["prompt"]);
+      const changed = await later.put({ baseUrl: fake.url, profiles: [{ ...got.profiles[0], prompt: "My prompt 2" }, explain] });
+      expect(((await changed.json()) as SettingsDto).profileEdits.general).toEqual({ fields: ["prompt"], newer: [] });
+      // Reset to shipped: the saved value equals the shipped value, so the file keeps only the ID.
+      expect((await later.put({ baseUrl: fake.url, profiles: [{ ...general }, explain] })).status).toBe(200);
+      expect(JSON.parse(readFileSync(file, "utf8")).profiles).toEqual([{ id: "general" }, { id: "explain" }]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a version 5 Explain profile with an edited prompt keeps it and shows that a newer shipped prompt exists", async () => {
+    const { write, load } = await oldConfig();
+    const v5explain = {
+      ...explain,
+      note: "Summary and questions only, at lower cost",
+      prompt: "My walkthrough",
+      effort: null,
+      maxTurns: 50,
+    };
+    write(5, [general, v5explain]);
+    expect(await load()).toEqual([general, { ...explain, prompt: "My walkthrough" }]);
+    const s = setup();
+    expect((await s.get()).profileEdits.explain).toEqual({ fields: ["prompt"], newer: ["prompt"] });
+  });
+
+  test("a stored shipped profile with an invalid edit drops the profile list, as before", async () => {
+    const { file } = await oldConfig();
+    const spy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), profiles: [{ id: "general", maxTurns: 1 }] }));
+      expect((await setup().get()).profiles).toEqual(SHIPPED_PROFILES);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test("no profile retires without general; an edited general.modules gets no module", async () => {
