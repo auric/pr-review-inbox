@@ -499,8 +499,8 @@ describe("found work, the plan, and its approval (spec.md sections 6.20.2, 6.20.
       expect(followed).toEqual([gen, b].sort((x, y) => x - y).map((pr_id) => ({ pr_id, followed: 1 })));
       expect(done.subtasks?.find((s) => s.key === "ABC-12")?.parts).toEqual([tracked?.id ?? -1]);
 
-      // AC-B76: Tell Claude and an update on a tracked PR stop before git runs. The build loop of the approval ends first: it finds no
-      // part to start before WP-ST3.
+      // AC-B76: Tell Claude and an update on a tracked PR stop before git runs. The build loop of the approval ends first: part 1 builds
+      // on the tracked PR, so it waits for a review of that PR, and no part starts.
       const end = Date.now() + 20_000;
       while ((await h.get(t.id)).working) {
         if (Date.now() > end) throw new Error("Timed out.");

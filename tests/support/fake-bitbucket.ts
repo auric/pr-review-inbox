@@ -4,6 +4,7 @@
 // Fake Bitbucket Server for tests. It listens on 127.0.0.1 only and replays fixture payloads.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { git } from "../../src/server/review/git";
 
 const TLS_DIR = join(import.meta.dir, "../../fixtures/tls");
 export const TEST_CA_FILE = join(TLS_DIR, "ca.pem");
@@ -231,9 +232,9 @@ export function repoWrites(
   }
 
   // spec.md section 6.16.10, shaped as Gate G17 recorded it: a merged PR has no properties.mergeCommit, and its MERGED activity carries
-  // commit {id, parents, message}. o.activity: the commit of the MERGED activity, null for an activity without one. o.property:
-  // properties.mergeCommit.id, which the gate did not see.
-  function merge(id: number, o: { activity?: string | null; property?: string } = {}) {
+  // commit {id, parents, message}. o.activity: the commit of the MERGED activity, null for an activity without one. o.parents: its parent
+  // IDs, as forgeMerge returns them. o.property: properties.mergeCommit.id, which the gate did not see.
+  function merge(id: number, o: { activity?: string | null; parents?: string[]; property?: string } = {}) {
     const pr = prs.get(id);
     if (!pr) throw new Error(`The fake has no PR ${id}.`);
     pr.state = "MERGED";
@@ -241,7 +242,8 @@ export function repoWrites(
     pr.closed = true;
     bump(pr);
     if (o.property) (pr.properties as Record<string, unknown>).mergeCommit = { id: o.property };
-    const commit = o.activity ? { commit: { id: o.activity, parents: [{ id: "0".repeat(40) }], message: "Merge pull request" } } : {};
+    const parents = (o.parents ?? ["0".repeat(40)]).map((p) => ({ id: p }));
+    const commit = o.activity ? { commit: { id: o.activity, parents, message: "Merge pull request" } } : {};
     const values = [
       { id: 2, action: "MERGED", createdDate: pr.updatedDate, user: user(FAKE_USER), ...commit },
       { id: 1, action: "OPENED", createdDate: pr.createdDate, user: user(FAKE_USER) },
@@ -327,6 +329,31 @@ export function repoWrites(
         };
 
   return { path, prs, builds, writes, repository, branches, merge };
+}
+
+// The merge of a PR in a bare remote, as Bitbucket writes it (docs/plans/review-v2/spec.md section 6.20.10; Gate G19 confirms the squash
+// shape). squash: one commit with one parent, the target head, and the tree of the 3-way merge of target and source. Else a merge commit
+// with the target and the source heads as parents. edit: more files in the commit, as a merger who edits the squash. The target branch
+// moves to the commit. Pass the result to merge() of repoWrites for the MERGED activity.
+export async function forgeMerge(
+  r: { remote: string; env: Record<string, string> },
+  o: { target: string; source: string; squash: boolean; edit?: Record<string, string> },
+): Promise<{ commit: string; parents: string[] }> {
+  const g = async (args: string[], stdin?: string) => (await git(["--git-dir", r.remote, ...args], { env: r.env, stdin })).trim();
+  const target = await g(["rev-parse", `refs/heads/${o.target}`]);
+  const source = await g(["rev-parse", `refs/heads/${o.source}`]);
+  let tree = (await g(["merge-tree", "--write-tree", target, source])).split("\n")[0] as string;
+  if (o.edit) {
+    await g(["read-tree", tree]);
+    for (const [p, text] of Object.entries(o.edit))
+      await g(["update-index", "--add", "--cacheinfo", `100644,${await g(["hash-object", "-w", "--stdin"], text)},${p}`]);
+    tree = await g(["write-tree"]);
+  }
+  const parents = o.squash ? [target] : [target, source];
+  const message = o.squash ? `Squash merge of ${o.source}` : `Merge ${o.source}`;
+  const commit = await g(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", message]);
+  await g(["update-ref", `refs/heads/${o.target}`, commit]);
+  return { commit, parents };
 }
 
 export type FakeBuild = { key: string; state: string; name?: string; url?: string };

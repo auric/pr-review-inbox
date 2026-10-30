@@ -70,6 +70,9 @@ import {
   currentPart,
   instructTarget,
   keysOf,
+  type LowerPart,
+  lowerHowOf,
+  lowerOf,
   moreTime,
   mustFixPoint,
   openPoints,
@@ -79,6 +82,7 @@ import {
   scheduleOf,
   setBaseMoves,
   setBlocked,
+  setLowerHow,
   setSettings,
   stepAnswers,
   stopForRun,
@@ -91,6 +95,7 @@ import {
   taskRow,
   taskSettingsOf,
   undoTarget,
+  updateBase,
   updateTarget,
   WORKING,
 } from "./tasks";
@@ -104,7 +109,10 @@ import {
   fetchBase,
   followGitlinks,
   headsOf,
+  holds,
+  lowerMerge,
   markerLeft,
+  mergeInto,
   pointerFor,
   resetToPre,
   resolveProblems,
@@ -143,6 +151,10 @@ export const LOCK_GLOBS = ["bun.lock", "package-lock.json", "yarn.lock", "pnpm-l
 export const PAUSED = "Building is paused after the step. Continue?";
 // The part states with a worktree (tasks.ts HAS_WORKTREE).
 const WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
+// spec.md sections 6.20.6 and 6.20.7: a PR that colleagues review, a started part, and a part that keeps the task in implementing.
+const HAS_PR = new Set<PartState>(["pr_open", "changes_requested", "approved"]);
+const STARTED = new Set<PartState>([...WORKTREE, "declined"]);
+const WAITS_PR = new Set<PartState>(["planned", "implementing", "self_reviewed"]);
 const NO_TEST = "Needs you: approve a test command for this repository first. The build needs it to see red and green tests.";
 const BUSY = "The build still ends its step. Try again when it ends.";
 
@@ -337,6 +349,9 @@ const Q = {
   restartTasks: `SELECT DISTINCT task FROM task_step WHERE kind = 'update' AND json_extract(detail_json, '$.update.result') = 'restart'
     AND COALESCE(json_extract(detail_json, '$.update.recovered'), 0) = 0`,
   baseCommit: "UPDATE task SET base_commit = $base WHERE id = $id",
+  // spec.md section 6.20.8: the base commit of a part with its own base.
+  partBase: "UPDATE task_part SET base_commit = $base, updated_at = $now WHERE id = $id",
+  override: "UPDATE task_part SET override = 1, updated_at = $now WHERE id = $id AND state = 'planned'",
   repoBase: "UPDATE task_repo SET base_commit = $base WHERE id = $id",
   repoPin: "UPDATE task_repo SET pinned = $pinned, base_commit = $base WHERE id = $id",
   prBase: "UPDATE task_pr SET base_commit = $base, head = $head WHERE part = $part AND task_repo = $repo",
@@ -1311,19 +1326,36 @@ export function createLoop(opts: LoopOptions) {
     if (cur && (cur.state === "implementing" || cur.state === "ready")) setBlocked(db, { task: id, version: cur.version }, b, now());
   };
 
+  // The merge commit S of a merged lower part (provider.mergeCommit, Gate G17). null: no PR, no provider, or Bitbucket names none.
+  const mergeCommitOf = (t: TaskRow, lower: LowerPart) => async () => {
+    const p = lower.remotePr === null ? null : await settings.provider();
+    return p ? p.mergeCommit({ project: t.project, repo: t.repo, id: lower.remotePr as number }) : null;
+  };
+
   // spec.md section 6.18.5, Base check of the current part. A task with sub-tasks checks each built part on its own base (section
-  // 6.20.10). It stores the counts for the Task view. A failed read keeps the last result. The caller sends the change notice after the
-  // check, also after a failure.
+  // 6.20.10). A part whose lower part merged checks the task base, and the first check finds how the lower part merged. It stores the
+  // counts for the Task view. A failed read keeps the last result. The caller sends the change notice after the check, also after a failure.
   async function refreshBases(db: Database, id: number): Promise<(BaseMove & { part: number })[]> {
     const t = taskRow(db, id);
     if (!t || (t.state !== "implementing" && t.state !== "ready")) return [];
     const one = t.subtasks === 1 ? null : currentPart(db, t);
     const list = one ? [one] : t.subtasks === 1 ? parts(db, id).filter((p) => p.adopted === 0 && WORKTREE.has(p.state)) : [];
     const out: (BaseMove & { part: number })[] = [];
+    const cache = cachePath(longPath(dataDir), { project: t.project, repo: t.repo, id });
     try {
-      for (const part of list)
-        for (const r of updateRepos(db, t, part))
-          out.push({ part: part.id, ...(await checkBase(dataDir, id, r, await review.taskRemote(r.project, r.repo))) });
+      for (const part of list) {
+        const lower = lowerOf(db, t, part);
+        for (const r of updateRepos(db, t, updateBase(db, t, part))) {
+          const m = await checkBase(dataDir, id, r, await review.taskRemote(r.project, r.repo));
+          out.push({ part: part.id, ...m });
+          if (!lower || r.row.role !== "main" || !m.fetched || lowerHowOf(db, part.id)) continue;
+          const merged = await lowerMerge(dataDir, cache, lower.aFinal, m.fetched, mergeCommitOf(t, lower)).catch((e) => {
+            log(`Task ${id}: cannot read the merge of ${lower.name}: ${noUrl((e as Error).message)}`);
+            return null;
+          });
+          if (merged) setLowerHow(db, part.id, merged.how);
+        }
+      }
     } catch (e) {
       log(`Task ${id}: the base check failed: ${noUrl((e as Error).message)}`);
       return out;
@@ -1465,11 +1497,13 @@ export function createLoop(opts: LoopOptions) {
       refreshPlan(c);
       if (!c.who) throw new UpdateAbort("set user.name and user.email in your git config");
       const who = c.who;
-      const repos = updateRepos(db, t, part);
+      // spec.md section 6.20.10: a part whose lower part merged updates from the task base.
+      const lower = lowerOf(db, t, part);
+      const repos = updateRepos(db, t, updateBase(db, t, part));
       const changedIds = new Set(repos.filter((r) => r.row.role !== "main").map((r) => r.row.id));
       label = baseLabel(repos.map((r) => r.base));
       // Step 1: the heads of every repository before any git command that changes one.
-      pre = await headsOf(c.trees, t.base_commit);
+      pre = await headsOf(c.trees, baseOf(t, part));
       patchStep(db, row, { update: updateDetail.parse({ repos: [], preHeads: pre }) });
       // Step 2: the fetched head of each base. A PR that Bitbucket reports with conflicts takes the update too.
       const conflicted = new Set(
@@ -1505,26 +1539,33 @@ export function createLoop(opts: LoopOptions) {
         if (p) {
           guard(ctx);
           const o = { ...p, baseCommit: r.baseCommit, key: ctx.label, base: r.base, full: tree.full };
-          let stop = await startUpdate(wt, o, who);
+          const merges = lower && r.row.role === "main" && p.mode === "merge" ? await lowerMerges(ctx, r, lower, p.newBaseHead, row) : null;
           let n = 0;
-          while (stop) {
-            guard(ctx);
-            if (++n > RESOLVE_STOPS) throw new UpdateAbort(`more than ${RESOLVE_STOPS} conflict stops in ${repoName(r)}`);
-            const links = new Map<string, string>();
-            for (const g of stop.gitlinks) {
-              const kid = ctx.trees.find((x) => x.row.parent === tree.row.id && x.row.path === g);
-              if (!kid?.wt) throw new UpdateAbort(`The update changes ${tree.full ? `${tree.full}/${g}` : g}, which the task cannot edit`);
-              const parent = { wt, name: repoName(r), base: r.base, newBaseHead: p.newBaseHead };
-              links.set(
-                g,
-                await pointerFor(dataDir, parent, { path: g, name: repoName(kid.row), cache: kid.wt.cache, head: await headOf(kid.wt) }),
-              );
+          for (const m of merges ?? [null]) {
+            // A merge whose commit the branch holds is skipped (spec.md section 6.20.10 step 3c).
+            if (m && (await holds(wt, m.head))) continue;
+            const at = m ? { newBaseHead: m.head, mode: "merge" as const } : p;
+            let stop = m ? await mergeInto(wt, { ...m, full: tree.full }, who) : await startUpdate(wt, o, who);
+            while (stop) {
+              guard(ctx);
+              if (++n > RESOLVE_STOPS) throw new UpdateAbort(`more than ${RESOLVE_STOPS} conflict stops in ${repoName(r)}`);
+              const links = new Map<string, string>();
+              for (const g of stop.gitlinks) {
+                const kid = ctx.trees.find((x) => x.row.parent === tree.row.id && x.row.path === g);
+                if (!kid?.wt)
+                  throw new UpdateAbort(`The update changes ${tree.full ? `${tree.full}/${g}` : g}, which the task cannot edit`);
+                const parent = { wt, name: repoName(r), base: r.base, newBaseHead: at.newBaseHead };
+                links.set(
+                  g,
+                  await pointerFor(dataDir, parent, { path: g, name: repoName(kid.row), cache: kid.wt.cache, head: await headOf(kid.wt) }),
+                );
+              }
+              if (stop.files.length) {
+                await resolveConflicts(ctx, tree, r, at, stop.files, row);
+                resolved = true;
+              }
+              stop = await continueUpdate(wt, at.mode, tree.full, stop.files, links, who);
             }
-            if (stop.files.length) {
-              await resolveConflicts(ctx, tree, r, p, stop.files, row);
-              resolved = true;
-            }
-            stop = await continueUpdate(wt, p.mode, tree.full, stop.files, links, who);
           }
           stops += n;
           patchStep(db, row, { update: { ...(stepDetailOf(db, row).update as UpdateDetail), stops, resolved } });
@@ -1548,8 +1589,11 @@ export function createLoop(opts: LoopOptions) {
           const head = post.find((h) => h.taskRepo === r.row.id)?.head as string;
           if (p) db.query(Q.baseChanged).run({ task: id, id: r.row.id, main: r.row.role === "main" ? 1 : 0, changed: 0 });
           if (r.row.role === "main") {
-            if (p) db.query(Q.baseCommit).run({ id, base: p.newBaseHead });
-            if (p && r.row.id) db.query(Q.repoBase).run({ id: r.row.id, base: p.newBaseHead });
+            if (p && part.base_commit !== null) db.query(Q.partBase).run({ id: part.id, base: p.newBaseHead, now: now() });
+            else if (p) {
+              db.query(Q.baseCommit).run({ id, base: p.newBaseHead });
+              if (r.row.id) db.query(Q.repoBase).run({ id: r.row.id, base: p.newBaseHead });
+            }
             db.query(Q.partHead).run({ id: part.id, head, now: now() });
           } else {
             if (p) db.query(Q.repoBase).run({ id: r.row.id, base: p.newBaseHead });
@@ -1566,7 +1610,7 @@ export function createLoop(opts: LoopOptions) {
       // spec.md section 6.18.3, Checks (Q56): red keeps the update and waits for the user. No fix step runs.
       const k = await checks(c, itemOf(db, row));
       db.transaction(() => {
-        endStep(db, row, "ok", {}, now());
+        endStep(db, row, "ok", { notes: stepDetailOf(db, row).notes }, now());
         patchStep(db, row, { update: { ...(stepDetailOf(db, row).update as UpdateDetail), result: k.green ? "green" : "red" } });
         if (!k.green) setReason(db, id, { kind: "red", step: k.step, text: `Needs you: the tests fail after the update from ${label}.` });
       })();
@@ -1624,6 +1668,32 @@ export function createLoop(opts: LoopOptions) {
     if (left) throw new UpdateAbort(`conflict markers remain in ${at(left)}`);
   }
 
+  // spec.md section 6.20.10 step 3: the merges of a pushed part whose lower part merged, into the main repository. A merge commit or a
+  // fast-forward takes the plain merge. A squash that passes the squash check takes A_final (step a), then the base before S, S with
+  // `-s ours`, and the rest of the base (step c). Any other merge takes the plain merge (step d), and the update step says why.
+  async function lowerMerges(c: Ctx, r: UpdateRepo, lower: LowerPart, m1: string, row: number) {
+    const into = `${c.label}: merge ${r.base} into ${c.part.branch}`;
+    const plain = [{ head: m1, message: into }];
+    let merged: Awaited<ReturnType<typeof lowerMerge>>;
+    try {
+      merged = await lowerMerge(dataDir, c.wt.cache, lower.aFinal, m1, mergeCommitOf(c.t, lower));
+    } catch (e) {
+      throw new UpdateAbort(`the app cannot read the merge of ${lower.name}: ${noUrl((e as Error).message)}`);
+    }
+    setLowerHow(c.db, c.part.id, merged.how);
+    if (merged.how === "merge") return plain;
+    if (merged.s && merged.parent && lower.aFinal)
+      return [
+        { head: lower.aFinal, message: `${c.label}: merge ${lower.branch} into ${c.part.branch}` },
+        { head: merged.parent, message: into },
+        { head: merged.s, message: `${c.label}: record the squash merge of ${lower.branch}`, ours: true },
+        { head: m1, message: into },
+      ];
+    const why = `Bitbucket merged ${lower.name} in a way that the app cannot match. The update merges ${r.base}, and conflicts can come up.`;
+    patchStep(c.db, row, { notes: [...stepDetailOf(c.db, row).notes, why] });
+    return plain;
+  }
+
   // Resets every repository to its head before the update and restores the base, head, and pinned commits of the rows.
   async function restoreUpdate(db: Database, c: Ctx, pre: UpdateDetail["preHeads"]) {
     await resetToPre(c.trees, pre);
@@ -1633,8 +1703,11 @@ export function createLoop(opts: LoopOptions) {
         if (!tree) continue;
         if (h.baseChanged) db.query(Q.baseChanged).run({ task: c.id, id: h.taskRepo, main: tree.row.role === "main" ? 1 : 0, changed: 1 });
         if (tree.row.role === "main") {
-          if (h.baseCommit) db.query(Q.baseCommit).run({ id: c.id, base: h.baseCommit });
-          if (h.taskRepo && h.baseCommit) db.query(Q.repoBase).run({ id: h.taskRepo, base: h.baseCommit });
+          if (h.baseCommit && c.part.base_commit !== null) db.query(Q.partBase).run({ id: c.part.id, base: h.baseCommit, now: now() });
+          else if (h.baseCommit) {
+            db.query(Q.baseCommit).run({ id: c.id, base: h.baseCommit });
+            if (h.taskRepo) db.query(Q.repoBase).run({ id: h.taskRepo, base: h.baseCommit });
+          }
           db.query(Q.partHead).run({ id: c.part.id, head: h.head, now: now() });
         } else {
           db.query(Q.repoPin).run({ id: h.taskRepo, pinned: h.pinned, base: h.baseCommit });
@@ -1724,6 +1797,73 @@ export function createLoop(opts: LoopOptions) {
       const error = db.transaction((): string | null => {
         if (db.query(Q.waitMerge).run({ id: partId, now: now() }).changes !== 1) return "This part started already.";
         setBlocked(db, { task: id, version: t.version }, null, now());
+        return null;
+      })();
+      if (error) return conflict(db, id, error);
+      kick(db, id);
+      changed(id);
+      return { status: 200, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/start (spec.md section 6.20.6, design.md B11): "Start <key> now" of a part that waits for a review
+    // of its lower part. The part starts when the build slot is free. 409 when it waits for another reason, for example the limit.
+    startNow(db: Database, id: number, partId: number, input: { version: number }): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      const b = blockedOf(t);
+      if (t.state !== "implementing" || b) return conflict(db, id, b?.text ?? TASK_STATE_TEXT[t.state]);
+      const all = parts(db, id);
+      const part = all.find((p) => p.id === partId);
+      if (!part) return { status: 404, error: "Part not found." };
+      const lower = all.find((p) => p.id === part.after_part);
+      if (part.state !== "planned" || part.start_mode !== "stack" || !lower || !HAS_PR.has(lower.state) || lower.state === "approved")
+        return conflict(db, id, "This part does not wait for a review.");
+      // The schedule of this part alone with the override: no build and no earlier part holds it, so only the limit stays.
+      const probe = all
+        .filter((p) => p.id === partId || (p.state !== "planned" && p.state !== "implementing"))
+        .map((p) => (p.id === partId ? { ...p, override: 1 } : p));
+      const s = scheduleOf(db, t, probe);
+      if (s?.start?.id !== partId) return conflict(db, id, s?.waits.get(partId) ?? "This part cannot start.");
+      const error = db.transaction((): string | null => {
+        if (db.query(Q.override).run({ id: partId, now: now() }).changes !== 1) return "This part started already.";
+        setBlocked(db, { task: id, version: t.version }, null, now());
+        return null;
+      })();
+      if (error) return conflict(db, id, error);
+      kick(db, id);
+      changed(id);
+      return { status: 202, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/drop (spec.md section 6.20.7): "Drop this sub-task" sends ABANDON for a planned or declined part. 409
+    // while a started part builds on it. A planned part on top of it starts from the base (schedule.ts). The task is ready when no part
+    // waits for its PR, and done when every part merged or was dropped.
+    drop(db: Database, id: number, partId: number, input: { version: number }): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      if (t.state !== "implementing" && t.state !== "ready") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+      const all = parts(db, id);
+      const part = all.find((p) => p.id === partId);
+      if (!part) return { status: 404, error: "Part not found." };
+      if (part.state !== "planned" && part.state !== "declined")
+        return conflict(db, id, "Only a part that waits for its build or a declined PR can be dropped.");
+      const names = partNames(t.key, all);
+      const name = (p: PartRow) => names.get(p.id)?.text ?? t.key;
+      const upper = all.find(
+        (p) => p.after_part === partId && p.base_commit !== null && p.base_branch === part.branch && STARTED.has(p.state),
+      );
+      if (upper) return conflict(db, id, `${name(upper)} builds on ${name(part)}. Move or drop ${name(upper)} first.`);
+      const error = db.transaction((): string | null => {
+        const r = advancePart(db, { task: id, version: t.version, part: partId }, { type: "ABANDON" }, {}, now());
+        if (r.status !== 200) return r.error;
+        let version = r.version;
+        const rest = parts(db, id);
+        if (t.state === "implementing" && !rest.some((p) => WAITS_PR.has(p.state))) {
+          const a = advance(db, { task: id, version }, { type: "LAST_PR_OPEN" }, {}, now());
+          if (a.status === 200) version = a.version;
+        }
+        if (rest.every((p) => p.state === "merged" || p.state === "abandoned"))
+          advance(db, { task: id, version }, { type: "ALL_MERGED" }, {}, now());
         return null;
       })();
       if (error) return conflict(db, id, error);

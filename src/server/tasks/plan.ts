@@ -122,6 +122,8 @@ export type Plan = {
   testing: { commands: TaskCommand[]; services: string[]; notes: string };
   flag: SpecResult["flag"];
   questions: string[];
+  // The part count of the whole plan, for a plan that holds one part of it (spec.md section 6.20.6). Absent: parts.length.
+  partCount?: number;
 };
 // task.docs_json. approved: a medium or large plan waits for its spec PR.
 export type Docs = Partial<Record<TaskDoc, string>> & { version: number; parsed: Plan; approved: boolean };
@@ -595,7 +597,7 @@ export function stepFile(p: Plan, taskId: string, attempt: number): ContextFile 
   const text = [
     "# Step",
     "",
-    `- Part ${part.n} of ${p.parts.length}: ${oneLine(part.title)} (kind: ${part.kind})`,
+    `- Part ${part.n} of ${p.partCount ?? p.parts.length}: ${oneLine(part.title)} (kind: ${part.kind})`,
     `- Goal: ${oneLine(part.goal)}`,
     `- Task: ${t.id} ${oneLine(t.title)}`,
     `- Attempt: ${attempt}`,
@@ -639,7 +641,9 @@ export function partStepFile(
   const out = [
     "# Step",
     "",
-    ...parts.map((x) => `- Part ${x.n} of ${p.parts.length}: ${oneLine(x.title)} (kind: ${x.kind}). Goal: ${oneLine(x.goal)}`),
+    ...parts.map(
+      (x) => `- Part ${x.n} of ${p.partCount ?? p.parts.length}: ${oneLine(x.title)} (kind: ${x.kind}). Goal: ${oneLine(x.goal)}`,
+    ),
     task,
     `- Attempt: ${attempt}`,
     "",

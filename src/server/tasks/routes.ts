@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The task API of docs/plans/review-v2/spec.md section 6.11: create, list, read, answers, docs, plan, size, the build actions, the PR of
-// a part, close, and the repository task settings. Every input passes its zod schema. Every mutation checks task.version and gives 409
+// The task API of docs/plans/review-v2/spec.md sections 6.11 and 6.20.12: create, list, read, answers, docs, plan, size, the build
+// actions, the PR, the push, and the move of a part, close, and the repository task settings. Every input passes its zod schema. Every mutation checks task.version and gives 409
 // with the current task on a mismatch.
 import { type Context, Hono } from "hono";
 import { validator } from "hono/validator";
@@ -33,6 +33,7 @@ import {
   taskIssueInput,
   taskLimitInput,
   taskListInput,
+  taskMoveInput,
   taskPlanAgainInput,
   taskPlanInput,
   taskPointerInput,
@@ -41,6 +42,7 @@ import {
   taskRepoChoiceInput,
   taskReviewersInput,
   taskSizeInput,
+  taskStartInput,
   taskVersionInput,
 } from "../../shared/dto";
 import { MAX_INSTRUCTION } from "../../shared/task";
@@ -294,6 +296,49 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
           return answer(c, await prs.openRows(db, id, part, c.req.valid("json")));
         },
       )
+      // spec.md section 6.20.10: "Push to <branch>", a fast-forward push with the lease, only on this click.
+      .post("/tasks/:id/parts/:part/push", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, await prs.pushNow(db, id, part, c.req.valid("json")));
+      })
+      // spec.md section 6.20.10: "Move <key> to <base>" and "Push and move" after the lower part merged, only on this click.
+      .post(
+        "/tasks/:id/parts/:part/move",
+        partParam,
+        body(taskMoveInput, "Give the task version, and push true or nothing."),
+        async (c) => {
+          const db = openDb();
+          if (!db) return c.json(unconfigured, 409);
+          const { id, part } = c.req.valid("param");
+          await loop.settle(id);
+          return answer(c, await prs.move(db, id, part, c.req.valid("json")));
+        },
+      )
+      // spec.md section 6.20.6: "Start <key> now" and "Wait for the merge". section 6.20.7: "Drop this sub-task".
+      .post("/tasks/:id/parts/:part/start", partParam, body(taskStartInput, "Give the task version and override true."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, loop.startNow(db, id, part, c.req.valid("json")));
+      })
+      .post("/tasks/:id/parts/:part/wait-merge", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, loop.waitMerge(db, id, part, c.req.valid("json")));
+      })
+      .post("/tasks/:id/parts/:part/drop", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, loop.drop(db, id, part, c.req.valid("json")));
+      })
       // spec.md section 6.16.8: "Point <parent> at the merged commit". The commit and the push run after the 202.
       .post("/tasks/:id/prs/:taskPr/pointer", taskPrParam, body(taskPointerInput, "Give the task version."), async (c) => {
         const db = openDb();
@@ -358,10 +403,14 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         if (!db) return c.json(unconfigured, 409);
         const { id, part } = c.req.valid("param");
         const t = taskRow(db, id);
-        const p = t && tasks.get(db, id)?.parts.find((x) => x.id === part);
+        // spec.md section 6.20.6: a part with its own base commit diffs from it.
+        const p = db.query("SELECT head, base_commit FROM task_part WHERE id = $part AND task = $id").get({ part, id }) as {
+          head: string | null;
+          base_commit: string | null;
+        } | null;
         if (!t || !p) return c.json<ApiError>({ error: "Part not found." }, 404);
         try {
-          const d = await partDiff(review.dataDir, t, p.head);
+          const d = await partDiff(review.dataDir, t, p.head, p.base_commit ?? t.base_commit);
           return d ? c.json(d, 200) : c.json<ApiError>({ error: "This part has no commit yet." }, 409);
         } catch (e) {
           return c.json<ApiError>({ error: `Cannot read the diff: ${noUrl((e as Error).message)}` }, 502);

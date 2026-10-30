@@ -31,8 +31,10 @@ export type PushInput = {
   lease: string | null;
   // A rebase push: it may replace commits that the lease names. The caller gets the user's confirm first.
   force?: boolean;
-  // branches: the task_part branches of this task. target: the target branch of the repository.
-  task: { key: string; prefix: string; branches: string[]; target: string };
+  // branches: the task_part branches of this task that the app may push, no tracked PR. target: the target branch of the repository. key:
+  // the Jira key of the part. found: the found branch that the user picked with "Continue on <branch>" for the part (spec.md section
+  // 6.20.2). Its name has the key, but its suffix can break the name rule of the app.
+  task: { key: string; prefix: string; branches: string[]; target: string; found?: string[] };
   signal?: AbortSignal;
   // The tests pass a spy.
   git?: typeof git;
@@ -54,12 +56,13 @@ export function pushRefusal(input: Pick<PushInput, "branch" | "commit" | "lease"
   if (branch.toLowerCase() === task.target.toLowerCase()) return `The app never pushes to the target branch ${task.target}.`;
   if (!task.branches.includes(branch)) return `${branch} is not a branch of task ${task.key}.`;
   const head = `${task.prefix}${task.key}-`;
+  const suffix = branch.slice(head.length);
   if (
     !KEY.test(task.key) ||
     !SAFE.test(branch) ||
     branch.includes("..") ||
     !branch.startsWith(head) ||
-    !SUFFIX.test(branch.slice(head.length))
+    !(SUFFIX.test(suffix) || (suffix.length > 0 && task.found?.includes(branch)))
   )
     return `${branch} is not a task branch name.`;
   if (!HASH.test(input.commit) || (input.lease !== null && !HASH.test(input.lease))) return "The commit hash is invalid.";

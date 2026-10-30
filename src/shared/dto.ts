@@ -1425,6 +1425,9 @@ export const specChangeInput = z.object({ version, accept: z.boolean() });
 // POST /api/tasks/:id/pause, /resume, /stop, /close, /parts/:part/retarget, /parts/:part/fix ("Fix these too"), /parts/:part/update,
 // and /parts/:part/update/undo (spec.md section 6.18.6).
 export const taskVersionInput = z.object({ version });
+// spec.md section 6.20.12: "Start <key> now" overrides the review of the lower part. "Move" with push pushes first.
+export const taskStartInput = z.object({ version, override: z.literal(true) });
+export const taskMoveInput = z.object({ version, push: z.literal(true).optional() });
 // POST /api/tasks/:id/instructions (spec.md section 6.18.6): "Tell Claude". part: absent takes the part of the current state.
 export const taskInstructionsInput = z.object({
   version,

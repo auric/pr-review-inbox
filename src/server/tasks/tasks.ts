@@ -297,6 +297,7 @@ const Q = {
     ON CONFLICT (pr, key) DO UPDATE SET source = excluded.source, json = excluded.json, fetched_at = excluded.fetched_at`,
   parts: "SELECT * FROM task_part WHERE task = $id ORDER BY ord",
   partPr: "SELECT state, reviewers_json FROM pull_request WHERE id = $id",
+  lowerPr: "SELECT state, source_head FROM pull_request WHERE id = $id",
   codeParts: `SELECT p.ord, p.state, pr.state AS pr_state FROM task_part p LEFT JOIN pull_request pr ON pr.id = p.pr
     WHERE p.task = $id AND p.kind <> 'spec' ORDER BY p.ord`,
   questions: "SELECT * FROM task_question WHERE task = $id ORDER BY round, ord, id",
@@ -669,8 +670,7 @@ export function currentPart(db: Database, t: TaskRow, partId?: number): PartRow 
 // builds; the first part that waits for review.
 function focusOf(db: Database, t: TaskRow, all: PartRow[]): PartRow | undefined {
   const mine = all.filter((p) => p.adopted === 0);
-  const lowerMerged = (p: PartRow) =>
-    BUILT.has(p.state) && p.base_branch !== t.target_branch && all.find((x) => x.id === p.after_part)?.state === "merged";
+  const lowerMerged = (p: PartRow) => BUILT.has(p.state) && lowerOf(db, t, p, all) !== null;
   const behind = (p: PartRow) =>
     BUILT.has(p.state) &&
     ((p.pushed !== null && p.head !== p.pushed) || partBases(db, t, p).some((x) => x.newCommits > 0 || x.conflicted || x.changed));
@@ -713,6 +713,50 @@ export function partNames(taskKey: string, rows: readonly { id: number; ord: num
   return out;
 }
 
+// spec.md section 6.20.10: the lower part of a started part after it merged, while the PR of the part still targets the lower branch.
+// aFinal: the last head of the lower part, its pushed head for an app part, the synced source head for a tracked PR. The sync marks the
+// merge in the part state (WP-ST5) or in the synced PR state. null: no merged lower part, or the part moved.
+export type LowerPart = { id: number; name: string; branch: string; aFinal: string | null; remotePr: number | null };
+type LowerRow = Pick<PartRow, "id" | "ord" | "keys_json" | "branch" | "state" | "pushed" | "adopted" | "pr" | "remote_pr">;
+export function lowerOf(
+  db: Database,
+  t: Pick<TaskRow, "id" | "key" | "subtasks" | "target_branch">,
+  part: Pick<PartRow, "after_part" | "base_branch" | "base_commit" | "adopted">,
+  rows: readonly LowerRow[] = db.query(Q.parts).all({ id: t.id }) as PartRow[],
+): LowerPart | null {
+  if (t.subtasks !== 1 || part.after_part === null || part.base_commit === null || part.adopted === 1) return null;
+  const lower = rows.find((p) => p.id === part.after_part);
+  if (!lower || lower.branch !== part.base_branch || part.base_branch === t.target_branch) return null;
+  const pr =
+    lower.pr === null ? null : (db.query(Q.lowerPr).get({ id: lower.pr }) as { state: string | null; source_head: string | null } | null);
+  if (lower.state !== "merged" && pr?.state !== "MERGED") return null;
+  return {
+    id: lower.id,
+    name: partNames(t.key, rows).get(lower.id)?.text ?? t.key,
+    branch: lower.branch,
+    aFinal: lower.adopted === 1 ? (pr?.source_head ?? null) : lower.pushed,
+    remotePr: lower.remote_pr,
+  };
+}
+
+// spec.md section 6.20.10: a part whose lower part merged updates from the task base, and its base check reads the task base.
+export const updateBase = <P extends Parameters<typeof lowerOf>[2] & { base_branch: string }>(
+  db: Database,
+  t: Parameters<typeof lowerOf>[1],
+  part: P,
+  rows?: readonly LowerRow[],
+): P => (lowerOf(db, t, part, rows) ? { ...part, base_branch: t.target_branch } : part);
+
+// How the lower part of each part merged (TaskPartDto.lower), from the newest base check or update of the part. By database and part ID.
+type LowerHow = NonNullable<TaskPartDto["lower"]>["how"];
+const lowerHows = new WeakMap<Database, Map<number, LowerHow>>();
+export function setLowerHow(db: Database, part: number, how: LowerHow) {
+  const m = lowerHows.get(db) ?? new Map<number, LowerHow>();
+  m.set(part, how);
+  lowerHows.set(db, m);
+}
+export const lowerHowOf = (db: Database, part: number): LowerHow | null => lowerHows.get(db)?.get(part) ?? null;
+
 // spec.md section 6.20.6, Plan file: the docs of one part of a task with sub-tasks. The plan holds only this part (task_part.ord is its
 // plan part number) and the map entries of its files, under the first key and the summary of its sub-task. A task without sub-tasks
 // keeps its docs. null: no plan, or no plan part with this number.
@@ -728,6 +772,7 @@ export function partDocsOf(db: Database, t: TaskRow, part: { ord: number; keys_j
     estimate: { ...e, parts: 1, lines: pp.lines ?? e.lines },
     map: docs.parsed.map.filter((m) => files.has(repoPath(m.path) ?? m.path)),
     parts: [pp],
+    partCount: docs.parsed.parts.length,
   };
   const key = keysOf(part)[0] ?? t.key;
   const summary = subtaskRows(db, t.id).find((r) => r.key === key)?.summary ?? part.title;
@@ -862,7 +907,7 @@ export function partBases(db: Database, t: TaskRow, part: PartRow): TaskDto["bas
     const m = JSON.parse(r.merge_result) as { outcome?: unknown; current?: unknown };
     return m.outcome === MERGE_CONFLICTED && m.current === true;
   };
-  return updateRepos(db, t, part).map((r) => ({
+  return updateRepos(db, t, updateBase(db, t, part)).map((r) => ({
     taskRepo: r.row.id,
     branch: r.base,
     newCommits: check?.moves.find((m) => m.part === part.id && m.taskRepo === r.row.id)?.newCommits ?? 0,
@@ -904,6 +949,8 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
   const partRows = db.query(Q.parts).all({ id: t.id }) as PartRow[];
   const schedule = scheduleOf(db, t, partRows);
   const parts = partRows.map((p): TaskPartDto => {
+    const lower = lowerOf(db, t, p, partRows);
+    const how = lower && lowerHowOf(db, p.id);
     const synced =
       p.pr === null ? null : (db.query(Q.partPr).get({ id: p.pr }) as { state: string | null; reviewers_json: string | null } | null);
     const reviewers = synced?.reviewers_json ? (JSON.parse(synced.reviewers_json) as { name: string; status: string }[]) : [];
@@ -930,7 +977,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       adopted: p.adopted === 1,
       specDir: p.spec_dir,
       bases: partBases(db, t, p),
-      lower: null,
+      lower: lower && how ? { key: lower.name, how } : null,
       gate: null,
       wait: schedule?.waits.get(p.id) ?? null,
     };

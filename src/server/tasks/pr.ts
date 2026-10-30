@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// "Open the PR" of a task part (docs/plans/review-v2/spec.md sections 6.8, 6.9, 6.12, and 6.16.8) and the part diff of the Diff tab.
-// The pushes and the PR creates run only on the user's click: the routes are that click. push.ts refuses the target branch and every
-// branch that is not a part branch of the task before git runs. With several repositories, all pushes run first, deepest first, then
-// the creates, submodules first, and each description links the other PRs. "Point <parent> at the merged commit" commits the gitlink
-// of a merged submodule and pushes the parent, also only on its click.
+// "Open the PR" of a task part (docs/plans/review-v2/spec.md sections 6.8, 6.9, 6.12, and 6.16.8), "Push to <branch>" and the move of a
+// part after its lower part merged (section 6.20.10), and the part diff of the Diff tab. The pushes, the PR creates, and the PR moves run
+// only on the user's click: the routes are that click. push.ts refuses the target branch and every branch that is not a part branch of
+// the task before git runs. Each push is a fast-forward with the lease of the last push. With several repositories, all pushes run first,
+// deepest first, then the creates, submodules first, and each description links the other PRs. "Point <parent> at the merged commit"
+// commits the gitlink of a merged submodule and pushes the parent, also only on its click.
 import type { Database } from "bun:sqlite";
 import type { TaskDiffDto } from "../../shared/dto";
 import { TASK_STATE_TEXT } from "../../shared/task";
@@ -13,6 +14,7 @@ import type { PullRequest } from "../../shared/types";
 import { ForgeError } from "../bitbucket/client";
 import { writeProblem } from "../bitbucket/errors";
 import type { ForgeProvider } from "../bitbucket/provider";
+import { foundOf } from "../context/task-file";
 import { followKey } from "../inbox/queries";
 import type { Live } from "../live";
 import { log } from "../log";
@@ -28,14 +30,17 @@ import type { Plan } from "./plan";
 import { commitGitlink, noMergeText, pointerTarget } from "./pointer";
 import { type PreflightDeps, preflight } from "./preflight";
 import { type PushResult, pushTaskBranch } from "./push";
-import { fullPath, type PrRow, prRows, type TaskRepoRow, taskRepos, updateRepos } from "./repos";
+import { fullPath, type PrRow, prRows, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
 import {
+  ADOPTED,
   advance,
   advancePart,
   docsOf,
   keysOf,
+  lowerOf,
   partDocsOf,
   partNames,
+  setBlocked,
   TASK_CHANGED,
   type TaskResult,
   type TaskRow,
@@ -43,6 +48,8 @@ import {
   taskRow,
   taskSettingsOf,
 } from "./tasks";
+import { fetchBase } from "./update";
+import { mergeBase } from "./worktree";
 
 const MAX_ROWS = 2000;
 const MAX_LINE = 2000;
@@ -52,6 +59,8 @@ const RELATED = "Related PRs:";
 const BUSY = "Claude is still working on this task. Wait for the step to end.";
 // The part states with a built head (tasks.ts BUILT).
 const BUILT = new Set(["self_reviewed", "pr_open", "changes_requested", "approved"]);
+// spec.md section 6.20.10: a lower branch deleted at its merge declines the PR on top of it (Gate G5), and the move opens it again.
+const MOVABLE = new Set([...BUILT, "declined"]);
 
 type PartRow = {
   id: number;
@@ -69,6 +78,8 @@ type PartRow = {
   lines: number | null;
   files: number | null;
   keys_json: string | null;
+  after_part: number | null;
+  adopted: number;
 };
 
 // The rows of the PR list of a part of a task with sub-tasks (spec.md section 6.20.6).
@@ -87,11 +98,14 @@ type ListRow = {
 };
 
 const Q = {
-  part: `SELECT id, ord, kind, title, branch, base_branch, base_commit, state, head, pushed, pr, remote_pr, lines, files, keys_json
-    FROM task_part WHERE id = $part AND task = $task`,
+  part: `SELECT id, ord, kind, title, branch, base_branch, base_commit, state, head, pushed, pr, remote_pr, lines, files, keys_json,
+    after_part, adopted FROM task_part WHERE id = $part AND task = $task`,
   list: `SELECT id, ord, title, branch, base_branch, state, remote_pr, keys_json, start_mode, after_part, spec_dir FROM task_part
     WHERE task = $task ORDER BY ord`,
-  branches: "SELECT branch FROM task_part WHERE task = $task",
+  // spec.md section 6.20.2: never the branch of a PR that the app did not create.
+  branches: "SELECT branch FROM task_part WHERE task = $task AND adopted = 0",
+  found: "SELECT found_json FROM task_subtask WHERE task = $task AND key = $key",
+  retargeted: "UPDATE task_part SET base_branch = $branch, base_commit = $base, updated_at = $now WHERE id = $id",
   // The code parts that wait for their PR after this one opens. None left: LAST_PR_OPEN.
   unopened:
     "SELECT 1 FROM task_part WHERE task = $task AND id <> $part AND kind <> 'spec' AND state IN ('planned', 'implementing', 'self_reviewed')",
@@ -179,6 +193,17 @@ const textOf = (db: Database, t: TaskRow, part: { id: number }, plan: Plan, mark
 const targetOf = (t: TaskRow, part: Pick<PartRow, "base_branch" | "base_commit">) =>
   part.base_commit ? part.base_branch : t.target_branch;
 const keyOf = (t: TaskRow, part: Pick<PartRow, "keys_json">) => keysOf(part)[0] ?? t.key;
+// spec.md section 6.20.2: the found branch of the part key that the plan approval took for "Continue on <branch>". The approval stores
+// another name for "Start a new branch", so a part branch with a found name is a Continue.
+function continued(db: Database, t: TaskRow, part: Pick<PartRow, "branch" | "keys_json">): string[] {
+  const row = t.subtasks === 1 ? (db.query(Q.found).get({ task: t.id, key: keyOf(t, part) }) as { found_json: string } | null) : null;
+  return row && foundOf(row.found_json).some((f) => f.kind === "branch" && f.error === null && f.name === part.branch) ? [part.branch] : [];
+}
+// spec.md section 6.20.10: a part on a merged lower part moves before its PR opens.
+const movedFirst = (db: Database, t: TaskRow, part: PartRow) => {
+  const lower = lowerOf(db, t, part);
+  return lower ? `${lower.name} merged. Move this part to ${t.target_branch} first.` : null;
+};
 
 // spec.md section 6.16.8, Links: the description without an earlier link section, then "Related PRs:" and one line per other PR of the
 // task, with its link when Bitbucket gave one of the configured origin.
@@ -261,7 +286,7 @@ export function createPrOpener(deps: OpenPrDeps) {
     if (deps.working(id) || db.query(Q.busy).get({ id })) return conflict(db, id, BUSY);
     const docs = docsOf(t);
     if (!docs) return conflict(db, id, "The task has no approved plan.");
-    const moved = baseChanged(db, t, part);
+    const moved = baseChanged(db, t, part) ?? movedFirst(db, t, part);
     if (moved) return conflict(db, id, moved);
     opening.add(id);
     try {
@@ -306,7 +331,7 @@ export function createPrOpener(deps: OpenPrDeps) {
         commit: head,
         branch: part.branch,
         lease: part.pushed,
-        task: { key, prefix, branches, target: t.target_branch },
+        task: { key, prefix, branches, target: t.target_branch, found: continued(db, t, part) },
       });
     } catch (e) {
       return fail(502, `The push of ${part.branch} failed: ${noUrl((e as Error).message)}`);
@@ -395,7 +420,7 @@ export function createPrOpener(deps: OpenPrDeps) {
     if (!part) return { status: 404, error: "Part not found." };
     if (!BUILT.has(part.state) || !part.head) return conflict(db, id, "This part is not ready for its PR.");
     if (!docsOf(t)) return conflict(db, id, "The task has no approved plan.");
-    const moved = baseChanged(db, t, part);
+    const moved = baseChanged(db, t, part) ?? movedFirst(db, t, part);
     if (moved) return conflict(db, id, moved);
     const all = prRows(db, t, part);
     const ids = input.rows.map((r) => r.taskRepo);
@@ -420,7 +445,10 @@ export function createPrOpener(deps: OpenPrDeps) {
     return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
-  async function runRows(db: Database, id: number, partId: number, want: number[], reviewers: Map<number, string[]>) {
+  // The pushes of the changed rows of a part in the list, deepest first, each with its step. Returns the first failure. git: the push
+  // itself failed, not a refusal.
+  async function pushRows(db: Database, id: number, partId: number, want: number[]): Promise<{ error: string; git: boolean } | null> {
+    let first: { error: string; git: boolean } | null = null;
     const order = fresh(db, id, partId)
       .rows.filter((r) => want.includes(r.taskRepo))
       .map((r) => r.taskRepo);
@@ -433,12 +461,15 @@ export function createPrOpener(deps: OpenPrDeps) {
       // A parent commit points at the commit of each changed child, so a child that is not on the server stops the parent push. A merged
       // child is on its base branch.
       const child = rows.find((c) => c.parent === r.taskRepo && c.state !== "merged" && (c.head === null || c.pushed !== c.head));
-      let error: string | null;
+      let out: { error: string | null; failed: boolean };
       try {
-        error = child ? `${nameOf(r)} waits, because ${nameOf(child)} is not on the server yet.` : await pushOne(db, t, part, r);
+        out = child
+          ? { error: `${nameOf(r)} waits, because ${nameOf(child)} is not on the server yet.`, failed: false }
+          : await pushOne(db, t, part, r);
       } catch (e) {
-        error = `The push of ${r.branch} failed: ${noUrl((e as Error).message)}`;
+        out = { error: `The push of ${r.branch} failed: ${noUrl((e as Error).message)}`, failed: true };
       }
+      const error = out.error;
       db.transaction(() => {
         if (error) {
           endStep(db, step, "failed", { notes: [error] }, now());
@@ -450,7 +481,16 @@ export function createPrOpener(deps: OpenPrDeps) {
         endStep(db, step, "ok", { notes: [`Pushed ${r.head} to ${r.branch} of ${nameOf(r)}.`] }, now());
       })();
       changed(id);
+      if (error && !first) first = { error, git: out.failed };
     }
+    return first;
+  }
+
+  async function runRows(db: Database, id: number, partId: number, want: number[], reviewers: Map<number, string[]>) {
+    const order = fresh(db, id, partId)
+      .rows.filter((r) => want.includes(r.taskRepo))
+      .map((r) => r.taskRepo);
+    await pushRows(db, id, partId, want);
     const provider = await deps.settings.provider().catch(() => null);
     const urls = new Map<number, string>();
     let opened = 0;
@@ -504,10 +544,10 @@ export function createPrOpener(deps: OpenPrDeps) {
     deps.live.broadcast("changed", { prs: [row.id], tasks: [id] });
   }
 
-  // One push of a row from the cache of its repository, with the lease of its last push.
-  async function pushOne(db: Database, t: TaskRow, part: PartRow, r: PrRow): Promise<string | null> {
-    if (r.access !== "edit") return `The token cannot push to ${nameOf(r)}.`;
-    if (!r.head) return `${nameOf(r)} has no commit to push.`;
+  // One push of a row from the cache of its repository, with the lease of its last push. failed: the push itself failed, not a refusal.
+  async function pushOne(db: Database, t: TaskRow, part: PartRow, r: PrRow): Promise<{ error: string | null; failed: boolean }> {
+    if (r.access !== "edit") return { error: `The token cannot push to ${nameOf(r)}.`, failed: false };
+    if (!r.head) return { error: `${nameOf(r)} has no commit to push.`, failed: false };
     const key = keyOf(t, part);
     const prefix = taskSettingsOf(t).branchPrefix ?? part.branch.slice(0, Math.max(0, part.branch.indexOf(`${key}-`)));
     const branches = (db.query(Q.branches).all({ task: t.id }) as { branch: string }[]).map((b) => b.branch);
@@ -515,7 +555,7 @@ export function createPrOpener(deps: OpenPrDeps) {
     try {
       remote = await deps.review.taskRemote(r.project, r.repo);
     } catch (e) {
-      return writeProblem(e, "create", { project: r.project, repo: r.repo }).sentence;
+      return { error: writeProblem(e, "create", { project: r.project, repo: r.repo }).sentence, failed: false };
     }
     const dataDir = longPath(deps.review.dataDir);
     const res = await pushTaskBranch({
@@ -526,9 +566,15 @@ export function createPrOpener(deps: OpenPrDeps) {
       commit: r.head,
       branch: r.branch,
       lease: r.pushed,
-      task: { key, prefix, branches, target: r.role === "main" ? t.target_branch : r.baseBranch },
+      task: {
+        key,
+        prefix,
+        branches,
+        target: r.role === "main" ? t.target_branch : r.baseBranch,
+        found: continued(db, t, part),
+      },
     });
-    return pushSentence(res, r.branch);
+    return { error: pushSentence(res, r.branch), failed: res.status === "failed" };
   }
 
   // spec.md section 6.16.8, Links: after the last create, each open PR of the part lists the other PRs. A fresh read gives the version
@@ -669,7 +715,7 @@ export function createPrOpener(deps: OpenPrDeps) {
     changed(id);
     let error: string | null;
     try {
-      error = main.pushed === main.head ? null : await pushOne(db, f.t, f.part, main);
+      error = main.pushed === main.head ? null : (await pushOne(db, f.t, f.part, main)).error;
     } catch (e) {
       error = `The push of ${main.branch} failed: ${noUrl((e as Error).message)}`;
     }
@@ -682,10 +728,158 @@ export function createPrOpener(deps: OpenPrDeps) {
     deps.syncNow();
   }
 
+  // The checks of the push and the move: the part, not a tracked PR, with a built head.
+  function partOf(db: Database, t: TaskRow, partId: number, states: Set<string>): PartRow | TaskResult {
+    const part = db.query(Q.part).get({ part: partId, task: t.id }) as PartRow | null;
+    if (!part) return { status: 404, error: "Part not found." };
+    if (part.adopted === 1) return conflict(db, t.id, ADOPTED);
+    if (!states.has(part.state) || !part.head) return conflict(db, t.id, "This part has no built commit.");
+    return part;
+  }
+
+  // The pushes of every row of the part with commits that are not on the server, after the pre-flight.
+  async function pushChanged(db: Database, t: TaskRow, part: PartRow): Promise<TaskResult | null> {
+    const rows = prRows(db, t, part);
+    const want = rows.filter((r) => r.head && r.pushed !== r.head).map((r) => r.taskRepo);
+    if (!want.length) return null;
+    const pf = await preflight(db, preflightDeps, t, part.branch, new Map(rows.map((r) => [r.taskRepo, r.pushed])));
+    if (pf) return conflict(db, t.id, pf.text);
+    const failed = await pushRows(db, t.id, part.id, want);
+    return failed ? (failed.git ? { status: 502, error: failed.error } : conflict(db, t.id, failed.error)) : null;
+  }
+
+  // The version moves, so a second tab gets 409.
+  const bump = (db: Database, id: number) =>
+    db.transaction(() => setBlocked(db, { task: id, version: (taskRow(db, id) as TaskRow).version }, null, now()))();
+
+  // POST /api/tasks/:id/parts/:part/push (spec.md section 6.20.10): "Push to <branch>" of the commits that are not on the server yet, as a
+  // fast-forward with the lease of the last push. 409 for a tracked PR, a push that needs force, or a lease failure.
+  async function pushNow(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
+    const t = ready(db, id, input.version);
+    if ("status" in t) return t;
+    const part = partOf(db, t, partId, BUILT);
+    if ("status" in part) return part;
+    const moved = movedFirst(db, t, part);
+    if (moved) return conflict(db, id, moved);
+    if (!prRows(db, t, part).some((r) => r.head && r.pushed !== r.head)) return conflict(db, id, `${part.branch} has no new commits.`);
+    opening.add(id);
+    try {
+      const failed = await pushChanged(db, t, part);
+      if (failed) return failed;
+      bump(db, id);
+      return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
+    } finally {
+      opening.delete(id);
+      changed(id);
+    }
+  }
+
+  // POST /api/tasks/:id/parts/:part/move (spec.md section 6.20.10): the part whose lower part merged points at the task base. push: the
+  // pushes first. A PR gets one PUT of the new target. A part without a PR moves in the app only. The base commit becomes the merge base of
+  // the part and the newest task base. 409 when the lower part did not merge, or when the PR would show commits of the lower part.
+  async function move(db: Database, id: number, partId: number, input: { version: number; push?: true | undefined }): Promise<TaskResult> {
+    const t = ready(db, id, input.version);
+    if ("status" in t) return t;
+    const part = partOf(db, t, partId, MOVABLE);
+    if ("status" in part) return part;
+    const lower = lowerOf(db, t, part);
+    if (!lower || !part.base_commit) return conflict(db, id, "The part below this one did not merge.");
+    const name = partNames(t.key, db.query(Q.list).all({ task: id }) as ListRow[]).get(part.id)?.text ?? t.key;
+    const dataDir = deps.review.dataDir;
+    const cache = cachePath(longPath(dataDir), { project: t.project, repo: t.repo, id });
+    const holds = async (a: string, b: string) => (await mergeBase(dataDir, cache, a, b)) === a;
+    opening.add(id);
+    try {
+      let head: string;
+      try {
+        const main = taskRepos(db, t).find((r) => r.role === "main") as TaskRepoRow;
+        const at = { row: main, project: t.project, repo: t.repo, base: t.target_branch } as UpdateRepo;
+        head = await fetchBase(dataDir, id, at, await deps.review.taskRemote(t.project, t.repo));
+      } catch (e) {
+        return { status: 502, error: `Cannot read ${t.target_branch}. ${noUrl((e as Error).message)}` };
+      }
+      // The PR diff shows only the commits of the part when the task base holds its base commit (spec.md section 6.20.10).
+      if (!(await holds(part.base_commit, head))) return conflict(db, id, `Update ${name} from ${t.target_branch} first.`);
+      if (input.push && part.remote_pr !== null) {
+        const failed = await pushChanged(db, t, part);
+        if (failed) return failed;
+      }
+      const cur = fresh(db, id, partId).part;
+      const served = cur.remote_pr === null ? cur.head : cur.pushed;
+      if (!served || !(await holds(part.base_commit, served)))
+        return conflict(db, id, `The update of ${name} is not on the server yet. Push it and move it in one step.`);
+      const base = await mergeBase(dataDir, cache, cur.head as string, head);
+      if (!base) return conflict(db, id, `${name} shares no commit with ${t.target_branch}.`);
+      if (cur.remote_pr !== null) {
+        const error = await retarget(db, t, cur, lower.branch, t.target_branch);
+        if (error) return { status: 502, error };
+      }
+      db.query(Q.retargeted).run({ id: partId, branch: t.target_branch, base, now: now() });
+      bump(db, id);
+      log(`Task ${id}: ${name} moved from ${lower.branch} to ${t.target_branch}.`);
+      if (cur.remote_pr !== null) deps.syncNow();
+      return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
+    } finally {
+      opening.delete(id);
+      changed(id);
+    }
+  }
+
+  // The new target of the PR of a part, from a fresh read of the PR. A declined PR opens again first, or a new PR opens when Bitbucket
+  // refuses the reopen (spec.md section 6.8). One retarget step records it. Returns the sentence of a failure, or null.
+  async function retarget(db: Database, t: TaskRow, part: PartRow, from: string, to: string): Promise<string | null> {
+    const step = insertStep(db, { task: t.id, part: part.id, kind: "retarget", item: part.branch }, now());
+    changed(t.id);
+    const end = (error: string | null, note: string) => {
+      endStep(db, step, error ? "failed" : "ok", { notes: [error ?? note] }, now());
+      return error;
+    };
+    const provider = await deps.settings.provider().catch(() => null);
+    if (!provider) return end("Configure the Bitbucket URL and token first.", "");
+    const ref = { project: t.project, repo: t.repo, id: part.remote_pr as number };
+    const reopened = (pr: number, remote: number) =>
+      db.transaction(() => {
+        db.query(Q.linked).run({ id: part.id, pr, remote, now: now() });
+        const cur = taskRow(db, t.id) as TaskRow;
+        advancePart(db, { task: t.id, version: cur.version, part: part.id }, { type: "REOPENED" }, {}, now());
+      })();
+    try {
+      let pr = await provider.getPullRequest(ref);
+      if (part.state === "declined") {
+        try {
+          pr = await provider.reopenPullRequest(ref, pr.version);
+        } catch (e) {
+          log(`Task ${t.id}: Bitbucket did not open PR #${ref.id} again: ${noUrl((e as Error).message)}`);
+          const docs = docsOf(t) as NonNullable<ReturnType<typeof docsOf>>;
+          const text = textOf(db, t, part, docs.parsed, deps.settings.config()?.markAi ?? true);
+          const reviewers = pr.reviewers.map((r) => r.login);
+          const res = await provider.createPullRequest(t.project, t.repo, { ...text, from: part.branch, to, reviewers });
+          reopened(followKey(db, { project: t.project, repo: t.repo, pr_id: res.pr.ref.id }).id, res.pr.ref.id);
+          return end(null, `Opened PR #${res.pr.ref.id} into ${to}.`);
+        }
+        reopened(part.pr as number, ref.id);
+      }
+      if (pr.targetBranch !== to)
+        await provider.updatePullRequest(ref, {
+          version: pr.version,
+          title: pr.title,
+          description: pr.description ?? "",
+          reviewers: pr.reviewers.map((r) => r.login),
+          toBranch: to,
+        });
+      return end(null, `Moved PR #${ref.id} from ${from} to ${to}.`);
+    } catch (e) {
+      log(`Task ${t.id}: the move of PR #${ref.id} failed: ${noUrl((e as Error).message)}`);
+      return end(`The PR still points at ${from}.`, "");
+    }
+  }
+
   return {
     open,
     openRows,
     pointer,
+    pushNow,
+    move,
     // Resolves when the PR work of the task ends.
     idle: (id: number): Promise<void> => running.get(id) ?? Promise.resolve(),
     // At app stop: the PR work ends first.
@@ -695,13 +889,14 @@ export function createPrOpener(deps: OpenPrDeps) {
   };
 }
 
-// GET /api/tasks/:id/parts/:part/diff: the diff of the part head against the base commit, from the cache of the task.
-export async function partDiff(dataDir: string, t: TaskRow, partHead: string | null): Promise<TaskDiffDto | null> {
-  if (!t.base_commit || !partHead) return null;
+// GET /api/tasks/:id/parts/:part/diff: the diff of the part head against the base commit of the part, from the cache of the task. A part
+// of a task with sub-tasks has its own base commit (spec.md section 6.20.6); else the task base commit.
+export async function partDiff(dataDir: string, t: TaskRow, partHead: string | null, base = t.base_commit): Promise<TaskDiffDto | null> {
+  if (!base || !partHead) return null;
   const dir = longPath(dataDir);
   const { env } = gitSetup(dir);
   const cache = cachePath(dir, { project: t.project, repo: t.repo, id: t.id });
-  const text = await git([`--git-dir=${cache}`, "diff", ...diffArgs, t.base_commit, partHead], { env, timeoutMs: DIFF_MS });
+  const text = await git([`--git-dir=${cache}`, "diff", ...diffArgs, base, partHead], { env, timeoutMs: DIFF_MS });
   const files = parseDiff(text).map((f) => {
     let added = 0;
     let removed = 0;
@@ -712,5 +907,5 @@ export async function partDiff(dataDir: string, t: TaskRow, partHead: string | n
     const rows = f.rows.slice(0, MAX_ROWS).map((r) => (r.text.length > MAX_LINE ? { ...r, text: r.text.slice(0, MAX_LINE) } : r));
     return { path: f.path, oldPath: f.oldPath, binary: f.binary, added, removed, rows, more: f.rows.length - rows.length };
   });
-  return { base: t.base_commit, head: partHead, files };
+  return { base, head: partHead, files };
 }

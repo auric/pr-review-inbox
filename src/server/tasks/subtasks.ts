@@ -21,6 +21,7 @@ import type { ForgeProvider } from "../bitbucket/provider";
 import { foundOf } from "../context/task-file";
 import { git, gitEnv } from "../review/git";
 import { type BranchRemote, type ContextFile, cachePath, gitSetup, locked, longPath, noUrl } from "../review/workspace";
+import { firstFree } from "./worktree";
 
 export type SubtaskRow = {
   key: string;
@@ -424,7 +425,8 @@ export function approveSubtasks(o: {
       n: s.n,
       keys: s.keys,
       title: o.plan.find((p) => p.n === s.n)?.title ?? title,
-      branch: existing !== "new" && pushable ? pushable : planned,
+      // "Start a new branch" never takes a found name, or the part start would continue on it.
+      branch: existing === "new" ? firstFree(planned, new Set(found)) : (pushable ?? planned),
       base: t.target_branch,
       start: s.start,
       after: s.after,

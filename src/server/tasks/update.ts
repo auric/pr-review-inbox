@@ -3,8 +3,9 @@
 
 // "Update from <base>" of a task part (docs/plans/review-v2/spec.md sections 6.18.3 to 6.18.5, design.md B24 to B27): the base check,
 // the rebase or the merge in one repository, the unmerged paths, the marker check, the continue, the pointer of a parent, the reset to the
-// heads before the update, and the context file of a resolve step. Every git call runs in the worktree env or the cache env: the isolated
-// config and the empty core.hooksPath. The update pushes nothing.
+// heads before the update, and the context file of a resolve step. After a squash merge of the lower part, the squash check and the
+// three merges of section 6.20.10. Every git call runs in the worktree env or the cache env: the isolated config and the empty
+// core.hooksPath. The update pushes nothing.
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { UpdateDetail } from "../../shared/task";
@@ -153,6 +154,57 @@ export async function startUpdate(
       ? ["rebase", "--no-verify", "--onto", o.newBaseHead, o.baseCommit, wt.branch]
       : ["merge", "--no-ff", "--no-verify", "-m", `${o.key}: merge ${o.base} into ${wt.branch}`, o.newBaseHead];
   return run(wt, o.mode, o.full, args, who);
+}
+
+// One merge of an update after the lower part merged (spec.md section 6.20.10, steps 3a, 3c, and 3d). ours: `-s ours` records a commit
+// whose changes the branch already holds. Returns the first stop, or null when it ended clean.
+export async function mergeInto(
+  wt: Worktree,
+  o: { head: string; message: string; ours?: boolean; full: string },
+  who: { name: string; email: string },
+): Promise<Stop | null> {
+  if (!HASH.test(o.head)) throw new UpdateAbort(`Invalid commit hash: ${o.head}`);
+  const args = ["merge", "--no-ff", "--no-verify", ...(o.ours ? ["-s", "ours"] : []), "-m", o.message, o.head];
+  return run(wt, "merge", o.full, args, who);
+}
+
+// true: the worktree branch holds the commit (`git merge-base --is-ancestor`).
+export const holds = (wt: Worktree, commit: string) =>
+  wtGit(wt, ["merge-base", "--is-ancestor", commit, "HEAD"]).then(
+    () => true,
+    () => false,
+  );
+
+// spec.md section 6.20.10 step 3b, the squash check: S has one parent, S is an ancestor of M1, and `git merge-tree --write-tree S^1
+// A_final` prints the tree of S. Returns S^1, or null when any part fails. A git before 2.38 has no --write-tree, and a conflict exits 1:
+// both fail the check.
+export async function squashCheck(dataDir: string, cache: string, s: string, aFinal: string, m1: string): Promise<string | null> {
+  if (![s, aFinal, m1].every((h) => HASH.test(h))) return null;
+  try {
+    const [, parent, ...more] = (await cacheGit(dataDir, cache, ["rev-list", "--parents", "-n", "1", s])).trim().split(" ");
+    if (!parent || more.length || !(await isAncestor(dataDir, cache, s, m1))) return null;
+    const tree = (await cacheGit(dataDir, cache, ["merge-tree", "--write-tree", parent, aFinal])).split("\n")[0]?.trim();
+    return tree === (await cacheGit(dataDir, cache, ["rev-parse", `${s}^{tree}`])).trim() ? parent : null;
+  } catch {
+    return null;
+  }
+}
+
+export type LowerMerge = { how: "merge" | "squash" | "other"; s: string | null; parent: string | null };
+
+// spec.md section 6.20.10, after the lower part merged. merge: A_final is an ancestor of M1 (a merge commit or a fast-forward). squash: the
+// squash check of S holds. other: any other merge. mergeCommit reads S (provider.mergeCommit); it runs only when A_final is not in M1.
+export async function lowerMerge(
+  dataDir: string,
+  cache: string,
+  aFinal: string | null,
+  m1: string,
+  mergeCommit: () => Promise<string | null>,
+): Promise<LowerMerge> {
+  if (aFinal && HASH.test(aFinal) && (await isAncestor(dataDir, cache, aFinal, m1))) return { how: "merge", s: null, parent: null };
+  const s = await mergeCommit();
+  const parent = s && aFinal ? await squashCheck(dataDir, cache, s, aFinal, m1) : null;
+  return { how: parent ? "squash" : "other", s, parent };
 }
 
 async function run(wt: Worktree, mode: "rebase" | "merge", full: string, args: string[], who: { name: string; email: string }) {
@@ -359,7 +411,7 @@ export async function resetToPre(trees: readonly RepoTree[], pre: UpdateDetail["
 }
 
 // The heads of every repository of the part with a worktree, with the base and pinned commits of its row (spec.md section 6.18.3
-// step 1). The main repository takes task.base_commit.
+// step 1). The main repository takes mainBase: the base commit of the part, else task.base_commit.
 export async function headsOf(trees: readonly RepoTree[], mainBase: string | null): Promise<UpdateDetail["preHeads"]> {
   const out: UpdateDetail["preHeads"] = [];
   for (const t of trees)
