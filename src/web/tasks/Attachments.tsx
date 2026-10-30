@@ -15,7 +15,7 @@ import type { TaskDto } from "../../shared/dto";
 import { mustAsk, PolicyDialog } from "../review/PolicyDialog";
 import { useSettings } from "../shell/data";
 import { putTaskFile } from "./data";
-import { type FileChoice, fileChoiceState, fileChoices, fileMeta } from "./model";
+import { type FileChoice, type FileGroup, fileChoiceState, fileChoices, fileGroups, fileMeta } from "./model";
 
 const KIND_ICON = { image: FileImage, pdf: FileText, text: FileText, file: File } as const;
 const icon = "size-[15px] shrink-0";
@@ -23,10 +23,12 @@ const icon = "size-[15px] shrink-0";
 export const boxId = (base: string, r: Pick<FileChoice, "id">) => `${base}-${r.id}`;
 
 // The boxes of one task. checked: the ticked IDs. busy: the IDs that wait for the server. state: the second line after the size
-// and the type. A file without a box shows why it stays listed only.
+// and the type. A file without a box shows why it stays listed only. groups: one list per issue (fileGroups). rows then holds the
+// rows of all groups.
 export function FilePicker(props: {
   id: string;
   rows: FileChoice[];
+  groups?: FileGroup[] | null;
   checked: ReadonlySet<string>;
   busy?: ReadonlySet<string>;
   errors?: ReadonlyMap<string, string>;
@@ -61,6 +63,30 @@ export function FilePicker(props: {
           </Button>
         )}
       </div>
+      {props.groups
+        ? props.groups.map((g) => {
+            const head = `${props.id}-group-${g.key}`;
+            return (
+              <section key={g.key} data-group={g.key} aria-labelledby={head} className="grid min-w-0 gap-1">
+                <h3 id={head} className="m-0 mt-1 flex min-w-0 items-baseline gap-1.5 text-sm font-normal">
+                  <span translate="no" className="font-mono text-ink-2">
+                    {g.key}
+                  </span>
+                  <span className="min-w-0 truncate" title={g.summary}>
+                    {g.summary}
+                  </span>
+                  <span className="shrink-0 text-xs text-muted-foreground">({g.rows.length})</span>
+                </h3>
+                {list(g.rows)}
+              </section>
+            );
+          })
+        : list(rows)}
+    </FieldSet>
+  );
+
+  function list(rows: FileChoice[]) {
+    return (
       <ul className="m-0 grid list-none rounded-md border p-0">
         {rows.map((r) => {
           const Icon = busy.has(r.id) ? LoaderCircle : KIND_ICON[r.kind];
@@ -110,8 +136,8 @@ export function FilePicker(props: {
           );
         })}
       </ul>
-    </FieldSet>
-  );
+    );
+  }
 }
 
 // The empty state of the form: the issue lists no attachment.
@@ -176,7 +202,8 @@ export function askText(runner: string, files: FileChoice[], focus: string): Ask
 export function TaskFiles(props: { t: TaskDto; runner: string; source: string }) {
   const { t, runner } = props;
   const qc = useQueryClient();
-  const rows = fileChoices(t.attachments, t.files);
+  const groups = fileGroups(t);
+  const rows = groups ? groups.flatMap((g) => g.rows) : fileChoices(t.attachments, t.files);
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [errors, setErrors] = useState<ReadonlyMap<string, string>>(new Map());
   const [said, setSaid] = useState("");
@@ -233,6 +260,7 @@ export function TaskFiles(props: { t: TaskDto; runner: string; source: string })
       <FilePicker
         id={base}
         rows={rows}
+        groups={groups}
         checked={checked}
         busy={busy}
         errors={errors}

@@ -32,6 +32,7 @@ import {
   type FileChoice,
   fileChoiceState,
   fileChoices,
+  fileGroups,
   fileMeta,
   firstPick,
   firstPicks,
@@ -1061,6 +1062,41 @@ describe("the attachments of a task (spec.md section 6.17)", () => {
     expect(fileChoiceState(by("3"), R)).toBe("Downloaded. Claude does not get it.");
     expect(fileChoiceState(by("7"), R)).toBe("Not downloaded. A tick downloads it.");
     expect(fileChoiceState(by("4"), R)).toBe("Listed only: only images, PDFs, and text files go to runs.");
+  });
+
+  test("spec.md section 6.20.3: the tab groups the files by issue, the parent first and the sub-tasks in plan order", () => {
+    const groups = (t: TaskDto) => fileGroups(t)?.map((g) => [g.key, g.summary, g.rows.map((r) => r.id)]);
+    expect(fileGroups(task({ attachments: [meta("1", "a.png", "image/png")], files: [file("1")] }))).toBeNull();
+    const t = subTask(
+      // The plan builds ABC-14 before ABC-13.
+      [part({ id: 1, ord: 1, keys: ["ABC-14"] }), part({ id: 2, ord: 2, keys: ["ABC-13"] })],
+      {
+        attachments: [meta("1", "parent.png", "image/png")],
+        files: [file("1"), file("2", { issue: "ABC-13" }), file("9", { issue: "ABC-99" })],
+      },
+    );
+    t.subtasks = (t.subtasks ?? []).map((s) =>
+      s.key === "ABC-13"
+        ? { ...s, attachments: [meta("2", "a.log", "text/plain"), meta("3", "b.png", "image/png")] }
+        : s.key === "ABC-14"
+          ? { ...s, attachments: [meta("5", "d.png", "image/png")] }
+          : s,
+    );
+    t.subtasks.push(sub("ABC-15", { attachments: [meta("4", "c.pdf", "application/pdf")] }));
+    // ABC-11 and ABC-12 have no files, so they get no group. A stored key that the task no longer lists keeps its files.
+    expect(groups(t)).toEqual([
+      ["ABC-10", "Split the cache work", ["1"]],
+      ["ABC-14", "Summary of ABC-14", ["5"]],
+      ["ABC-13", "Summary of ABC-13", ["2", "3"]],
+      ["ABC-15", "Summary of ABC-15", ["4"]],
+      ["ABC-99", "", ["9"]],
+    ]);
+    // Without a plan, the sub-tasks follow the tracker order; a parent without files gets no group.
+    expect(groups({ ...t, parts: [], attachments: [], files: [] })).toEqual([
+      ["ABC-13", "Summary of ABC-13", ["2", "3"]],
+      ["ABC-14", "Summary of ABC-14", ["5"]],
+      ["ABC-15", "Summary of ABC-15", ["4"]],
+    ]);
   });
 });
 

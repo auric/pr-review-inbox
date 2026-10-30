@@ -23,7 +23,7 @@ import { createSecrets } from "../src/server/secrets";
 import { createSettings } from "../src/server/settings";
 import { createSyncEngine } from "../src/server/sync/engine";
 import { buildStatuses, FAKE_TOKEN, FAKE_USER, fixture, key, repoWrites, startFakeBitbucket } from "../tests/support/fake-bitbucket";
-import { JIRA_TOKEN, startFakeJira } from "../tests/support/fake-jira";
+import { JIRA_TOKEN, logOf, pngOf, startFakeJira } from "../tests/support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../tests/support/review-fixture";
 import * as S from "../tests/support/scenarios";
 import { taskRepoSet } from "../tests/support/task-repos";
@@ -937,6 +937,14 @@ jira.addSubtasks(
   ],
   [["ABC-10733", "ABC-10732"]],
 );
+// Jira gives each attachment its own ID, but addIssue lists the parent fixture files on each sub-task. So the sub-tasks list their own
+// files instead: ABC-10732 a log, ABC-10733 an image, and ABC-10734 none (spec.md section 6.20.3).
+for (const k of ["ABC-10731", "ABC-10732", "ABC-10733", "ABC-10734"]) {
+  const res = jira.routes[key("GET", `/rest/api/2/issue/${k}`)];
+  if (res && typeof res !== "function" && "body" in res) (res.body as { fields: { attachment: unknown[] } }).fields.attachment.length = 0;
+}
+jira.attach("ABC-10732", { id: "10110", filename: "lock-trace.log", mimeType: "text/plain", body: logOf(768) });
+jira.attach("ABC-10733", { id: "10111", filename: "wait-chart.png", mimeType: "image/png", body: pngOf(1536) });
 
 // docs/plans/ci-builds.md, Layer A: the build statuses by commit. PR 81 alone has HEAD_B, so its build fails and the others pass.
 // repoWrites replaces the stats route, so this comes after the last call.

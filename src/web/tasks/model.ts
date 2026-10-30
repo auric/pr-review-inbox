@@ -857,6 +857,28 @@ export function fileChoices(attachments: AttachmentMeta[], files: AttachmentDto[
   });
 }
 
+// spec.md section 6.20.3: the files of one issue in the Attachments tab. summary: "" for a key that the task no longer lists.
+export type FileGroup = { key: string; summary: string; rows: FileChoice[] };
+
+// The groups of the Attachments tab: the parent first, then the sub-tasks in plan order, then the rest in tracker order. A group without
+// files is left out. null: the task builds no sub-tasks, so the tab shows one list.
+export function fileGroups(t: Pick<TaskDto, "key" | "title" | "attachments" | "files" | "subtasks" | "parts">): FileGroup[] | null {
+  const subs = t.subtasks;
+  if (!subs) return null;
+  const planned = [...t.parts].sort((a, b) => a.ord - b.ord).flatMap((p) => p.keys);
+  const stored = t.files.flatMap((f) => (f.issue ? [f.issue] : []));
+  const keys = [...new Set([...planned, ...subs.map((s) => s.key), ...stored])].filter((k) => k !== t.key);
+  const of = (key: string) => t.files.filter((f) => (f.issue ?? t.key) === key);
+  const groups = [
+    { key: t.key, summary: t.title, rows: fileChoices(t.attachments, of(t.key)) },
+    ...keys.map((key) => {
+      const s = subs.find((x) => x.key === key);
+      return { key, summary: s?.summary ?? "", rows: fileChoices(s?.attachments ?? [], of(key)) };
+    }),
+  ];
+  return groups.filter((g) => g.rows.length > 0);
+}
+
 // The boxes that start ticked in the form: every box when the setting askAttachments is off, else none.
 export const firstPicks = (rows: FileChoice[], ask: boolean): string[] => (ask ? [] : rows.filter((r) => r.why === null).map((r) => r.id));
 

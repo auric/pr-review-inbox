@@ -154,7 +154,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const tabs: Tab[] = [
     ...(t.questions.length ? ["questions" as const] : []),
     // spec.md section 6.17: the files of the task, when its issue lists any.
-    ...(t.attachments.length || t.files.length ? ["attachments" as const] : []),
+    ...(t.attachments.length || t.files.length || t.subtasks?.some((s) => s.attachments.length) ? ["attachments" as const] : []),
     ...(docList(t).length ? ["spec" as const] : []),
     "plan",
     "log",

@@ -192,6 +192,18 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
   expect((await taskRemote()).creates).toEqual([]);
   expect(UX2.exec(await screenText(page))).toBeNull();
 
+  // The Attachments tab (spec.md section 6.20.3): one group per issue with files, the parent first, then the sub-tasks in plan order.
+  // ABC-11 is done, so the app read no files of it.
+  await page.getByRole("tab", { name: "Attachments" }).click();
+  const files = page.getByRole("tabpanel");
+  await expect(files.getByRole("heading", { level: 3 })).toHaveText([
+    /^ABC-10\s*Split the cache work into sub-tasks\s*\(2\)$/,
+    /^ABC-13\s*Flush before the write lock\s*\(2\)$/,
+    /^ABC-14\s*Measure the lock wait\s*\(2\)$/,
+    /^ABC-12\s*Add the event generator\s*\(2\)$/,
+  ]);
+  await expect(files.getByRole("region", { name: /^ABC-13/ }).getByRole("checkbox", { name: /screenshot\.png/ })).toBeVisible();
+
   // A click on a row shows that part above; its state has no primary button.
   await row(page, "ABC-14")
     .getByRole("button", { name: /^ABC-14/ })
