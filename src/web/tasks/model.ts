@@ -15,6 +15,7 @@ import {
   listedKind,
   listedOnly,
   RUN_TEXT_BYTES,
+  type SubtaskDto,
   type TaskDto,
   type TaskPartDto,
   type TaskPrDto,
@@ -23,7 +24,7 @@ import {
   type TaskRowDto,
   type TaskStepDto,
 } from "../../shared/dto";
-import { branchName, type RepoAccess, type TaskSize } from "../../shared/task";
+import { branchName, type FoundItem, type RepoAccess, START_MODES, type StartMode, type TaskSize } from "../../shared/task";
 import { namedBuild } from "../pr/build";
 import { attachmentRows, sizeText } from "../review/tasks";
 
@@ -51,7 +52,18 @@ export type ActionKind =
   | "retry-prs"
   | "pointer"
   | "pick-base"
-  | "close";
+  | "close"
+  // spec.md section 6.20: the actions of a task with sub-tasks. Each one acts on the focused part.
+  | "ask-again"
+  | "start-now"
+  | "wait-merge"
+  | "drop"
+  | "push"
+  | "move"
+  | "push-move"
+  | "tell"
+  | "tracker-move"
+  | "tracker-read";
 export type Action = { kind: ActionKind; label: string };
 
 // screen: the content under the header. questions: the Questions form. plan: the plan approval. change: the spec change review.
@@ -355,7 +367,8 @@ const stepFor = (t: TaskDto, id: number | null) => (id === null ? null : (t.step
 
 // forge: the short name of the code host from meta, for the conflict row (spec.md section 6.18.5). newest: the task_pr ID whose merge
 // commit the forge did not name, after the user saw that 409; the pointer button then points at the newest base commit.
-export function taskView(t: TaskDto, o: { runner: string; forge: string; now: number; newest?: number | null }): TaskView {
+// name: the focused part of a task with sub-tasks, such as "ABC-12 (2 of 4)" (spec.md section 6.20.13). The ready sentences use it.
+export function taskView(t: TaskDto, o: { runner: string; forge: string; now: number; newest?: number | null; name?: string }): TaskView {
   const R = o.runner;
   const run = runningStep(t);
   const base = { detail: null, lines: [], more: [], needsYou: false, running: false } satisfies Partial<TaskView>;
@@ -595,6 +608,7 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
         "ready",
         true,
       );
+    if (o.name) return wait(`${o.name} is ready and checked by ${R}.`, { kind: "open-pr", label: "Open the PR" }, more, "ready", true);
     return wait(
       n > 1 ? `Part ${part.ord} of ${n} is ready and checked by ${R}.` : `Your change is ready and checked by ${R}.`,
       { kind: "open-pr", label: n > 1 ? `Open PR for part ${part.ord} of ${n}` : "Open the PR" },
@@ -891,3 +905,416 @@ export function goneBase(t: Pick<TaskDto, "blocked" | "repos" | "project" | "rep
   const repo = r?.repo ?? t.repo;
   return { taskRepo: b.taskRepo, branch: b.branch, project, repo, name: `${project}/${repo}` };
 }
+
+// ---------- Sub-tasks: one PR per sub-task (spec.md section 6.20) ----------
+
+// tracker: the tracker name from meta. forge: the code host name from meta. UI code names no product.
+export type SubOpts = { runner: string; forge: string; tracker: string; now: number; newest?: number | null };
+
+const FINAL = new Set<TaskPartDto["state"]>(["merged", "abandoned"]);
+const WITH_PR = new Set<TaskPartDto["state"]>(["pr_open", "changes_requested", "approved"]);
+
+// "ABC-12", or "ABC-15, ABC-16" for a part that builds two sub-tasks.
+export const partName = (t: Pick<TaskDto, "key">, p: Pick<TaskPartDto, "keys">) => (p.keys.length ? p.keys.join(", ") : t.key);
+
+// The PR title of a part, as the server writes it (pr.ts subtaskPrText): "ABC-12: <title>", "ABC-13 (part 2 of 2): <title>" for a
+// split sub-task, "ABC-15, ABC-16: <title>" for two sub-tasks. A task without sub-tasks: "<KEY>: <task title>".
+export function prTitle(t: Pick<TaskDto, "key" | "title" | "parts" | "subtasks">, p: Pick<TaskPartDto, "id" | "keys" | "title">) {
+  if (!t.subtasks) return `${t.key}: ${t.title}`;
+  const key = p.keys[0] ?? t.key;
+  const twins = codeParts(t).filter((x) => (x.keys[0] ?? t.key) === key);
+  const name =
+    p.keys.length > 1
+      ? p.keys.join(", ")
+      : twins.length > 1
+        ? `${key} (part ${twins.findIndex((x) => x.id === p.id) + 1} of ${twins.length})`
+        : key;
+  return `${name}: ${p.title}`;
+}
+
+// "ABC-12 (2 of 4)": the part k of n of the task (spec.md section 6.20.13).
+export function partLabel(t: Pick<TaskDto, "key" | "parts">, p: Pick<TaskPartDto, "id" | "keys">): string {
+  const parts = codeParts(t);
+  return `${partName(t, p)} (${parts.findIndex((x) => x.id === p.id) + 1} of ${parts.length})`;
+}
+
+const subOf = (t: Pick<TaskDto, "subtasks">, key: string | undefined) => t.subtasks?.find((s) => s.key === key) ?? null;
+const lowerPart = (t: Pick<TaskDto, "parts">, p: Pick<TaskPartDto, "after">) =>
+  p.after === null ? null : (t.parts.find((x) => x.id === p.after) ?? null);
+// Each sub-task of the part is done in the tracker.
+const doneInTracker = (t: Pick<TaskDto, "subtasks">, p: Pick<TaskPartDto, "keys">) =>
+  p.keys.length > 0 && p.keys.every((k) => subOf(t, k)?.category === "done");
+const newCommits = (p: Pick<TaskPartDto, "pushed" | "head" | "adopted">) => !p.adopted && !!p.pushed && !!p.head && p.head !== p.pushed;
+
+// The part of a reason: the part that the reason names, else the part of its step.
+export function blockedPart(t: Pick<TaskDto, "blocked" | "steps">): number | null {
+  const b = t.blocked;
+  if (!b) return null;
+  return b.part ?? (b.step === null ? null : (t.steps.find((s) => s.id === b.step)?.part ?? null));
+}
+
+// spec.md section 6.20.13, the default focus, first match: the part of the reason; a part ready for its PR click; a part whose lower part
+// merged; a part with a moved base, conflicts, or commits not on the server; the part that the runner builds; the first part that waits
+// for a review. Then the first part that is not merged or dropped, then the first part.
+export function defaultFocus(t: TaskDto): TaskPartDto | null {
+  const parts = codeParts(t);
+  const b = blockedPart(t);
+  const tests: ((p: TaskPartDto) => boolean)[] = [
+    (p) => p.id === b,
+    (p) => p.state === "self_reviewed" && p.lower === null,
+    (p) => p.lower !== null && !FINAL.has(p.state),
+    (p) => movedBases(p).length > 0 || newCommits(p),
+    (p) => p.state === "implementing",
+    (p) => p.state === "pr_open" || p.state === "changes_requested",
+    (p) => !FINAL.has(p.state),
+  ];
+  for (const f of tests) {
+    const hit = parts.find(f);
+    if (hit) return hit;
+  }
+  return parts[0] ?? null;
+}
+
+// One row of the sub-task list: one sentence and one actor (spec.md section 6.20.13). part: null for a sub-task without a part.
+// action: the secondary action of the row. status: the tracker status of the first sub-task. hint: a tracker status that does not fit
+// the PR, never a move.
+export type SubRow = {
+  id: string;
+  part: TaskPartDto | null;
+  key: string;
+  summary: string;
+  label: string;
+  text: string;
+  actor: string;
+  action: Action | null;
+  status: string | null;
+  hint: string | null;
+};
+
+const trackerMove = (tracker: string): Action => ({ kind: "tracker-move", label: `Move in ${tracker}…` });
+
+// The sentence, the actor, and the row action of a part (spec.md section 6.20.13 table).
+function partRow(t: TaskDto, p: TaskPartDto, o: SubOpts): Pick<SubRow, "text" | "actor" | "action"> {
+  const R = o.runner;
+  const name = partName(t, p);
+  const who = p.waiting.length ? listText(p.waiting) : null;
+  const goPr: Action = { kind: "go-pr", label: "Go to the PR" };
+  const drop: Action = { kind: "drop", label: "Drop this sub-task" };
+  if (p.lower !== null && !FINAL.has(p.state) && p.state !== "planned")
+    return {
+      text: `${p.lower.key} merged. Move ${name} to ${t.targetBranch}.`,
+      actor: "You",
+      action: lowerAction(t, p)?.action ?? null,
+    };
+  switch (p.state) {
+    case "planned": {
+      if (doneInTracker(t, p)) return { text: `Done in ${o.tracker}.`, actor: "No one", action: drop };
+      if (p.keys.some((k) => subOf(t, k)?.removed != null)) return { text: `Removed in ${o.tracker}.`, actor: "You", action: drop };
+      const lower = lowerPart(t, p);
+      const text = p.wait ?? `${R} builds it next.`;
+      if (lower?.state === "declined") return { text, actor: "You", action: drop };
+      const lowerWho = lower?.waiting.length ? listText(lower.waiting) : "Reviewers";
+      if (lower && p.start === "merge" && !FINAL.has(lower.state)) return { text, actor: lowerWho, action: null };
+      if (lower && p.start === ON_TOP && WITH_PR.has(lower.state) && !lower.gate?.pass)
+        return { text, actor: lowerWho, action: { kind: "start-now", label: "Start now" } };
+      if (codeParts(t).some((x) => x.state === "implementing")) return { text, actor: R, action: null };
+      return { text, actor: p.wait ? "Reviewers" : R, action: null };
+    }
+    case "implementing":
+      return { text: `${R} builds it.`, actor: R, action: null };
+    case "self_reviewed":
+      return { text: "Ready. Open its PR.", actor: "You", action: { kind: "open-pr", label: "Open the PR" } };
+    case "pr_open":
+      if (p.adopted) return { text: `In review outside the app: PR #${p.remotePr}.`, actor: who ?? "Reviewers", action: goPr };
+      return { text: who ? `In review by ${who}.` : "In review.", actor: who ?? "Reviewers", action: goPr };
+    case "changes_requested":
+      if (p.adopted) return { text: `${who ?? "A reviewer"} asks for changes.`, actor: "The PR author", action: goPr };
+      return { text: `${who ?? "A reviewer"} asks for changes.`, actor: "You", action: { kind: "tell", label: `Tell ${R}` } };
+    case "approved":
+      return { text: "Approved. Waits for the merge.", actor: "The merger", action: goPr };
+    case "merged":
+      return { text: "Merged.", actor: "No one", action: null };
+    case "declined":
+      return { text: p.adopted ? "Declined outside the app." : "Declined.", actor: "You", action: drop };
+    case "abandoned":
+      return { text: "Dropped.", actor: "No one", action: null };
+  }
+}
+
+// spec.md section 6.20.9: the row hints. They say what does not fit and never move anything.
+function rowHint(p: TaskPartDto, sub: SubtaskDto | null, tracker: string): string | null {
+  if (!sub?.status) return null;
+  if (sub.category === "new" && WITH_PR.has(p.state)) return `${tracker} says ${sub.status}, but the PR is open.`;
+  if (p.state === "merged" && sub.category !== "done") return `The PR merged. ${tracker} says ${sub.status}.`;
+  return null;
+}
+
+// The rows in tracker order: each part at its first sub-task, then each sub-task that no part builds. A part that names no listed
+// sub-task comes last.
+export function subtaskRows(t: TaskDto, o: SubOpts): SubRow[] {
+  const parts = codeParts(t);
+  const out: SubRow[] = [];
+  const seen = new Set<number>();
+  const add = (p: TaskPartDto) => {
+    seen.add(p.id);
+    const sub = subOf(t, p.keys[0]);
+    out.push({
+      id: `part-${p.id}`,
+      part: p,
+      key: partName(t, p),
+      summary: sub?.summary ?? p.title,
+      label: partLabel(t, p),
+      ...partRow(t, p, o),
+      status: sub?.status ?? null,
+      hint: rowHint(p, sub, o.tracker),
+    });
+  };
+  for (const s of t.subtasks ?? []) {
+    const own = parts.filter((p) => !seen.has(p.id) && p.keys[0] === s.key);
+    for (const p of own) add(p);
+    if (own.length || parts.some((p) => p.keys.includes(s.key))) continue;
+    const row = { id: `sub-${s.key}`, part: null, key: s.key, summary: s.summary, label: s.key, status: s.status, hint: null };
+    if (s.category === "done") out.push({ ...row, text: `Done in ${o.tracker}.`, actor: "No one", action: null });
+    else if (s.removed !== null) out.push({ ...row, text: `Removed in ${o.tracker}.`, actor: "No one", action: null });
+    else if (s.added !== null) out.push({ ...row, text: `${s.key} is new in ${o.tracker}.`, actor: "You", action: null });
+    else out.push({ ...row, text: `${o.runner} planned no PR for ${s.key}.`, actor: "No one", action: null });
+  }
+  for (const p of parts) if (!seen.has(p.id)) add(p);
+  return out;
+}
+
+// spec.md section 6.20.9: the parent row hint, when every part merged or was dropped.
+export function parentHint(t: TaskDto, tracker: string): string | null {
+  const parts = codeParts(t);
+  if (!parts.length || !parts.every((p) => FINAL.has(p.state)) || !parts.some((p) => p.state === "merged")) return null;
+  return `All sub-tasks merged. ${tracker} says ${t.issueStatus ?? "an unknown status"} for ${t.key}.`;
+}
+
+// spec.md section 6.20.10: what a part whose lower part merged needs next. A squash or another merge needs the update first. A pushed
+// update goes to the server with the move.
+export function lowerAction(t: TaskDto, p: TaskPartDto): { status: string; action: Action } | null {
+  const lower = p.lower;
+  if (!lower) return null;
+  const name = partName(t, p);
+  const base = t.targetBranch;
+  if (lower.how !== "merge" && p.bases.some((b) => b.newCommits > 0))
+    return { status: `${lower.key} merged. Update ${name} from ${base} first.`, action: { kind: "update", label: `Update from ${base}` } };
+  if (p.remotePr !== null && newCommits(p))
+    return {
+      status: `${name} is up to date with ${base}. Push it and move its PR to ${base}.`,
+      action: { kind: "push-move", label: `Push and move to ${base}` },
+    };
+  return { status: `${lower.key} merged. ${name} must point to ${base} now.`, action: { kind: "move", label: `Move ${name} to ${base}` } };
+}
+
+// The line of how the lower part merged (spec.md section 6.20.10).
+export function lowerHow(t: TaskDto, p: TaskPartDto, forge: string): string | null {
+  const lower = p.lower;
+  if (!lower) return null;
+  const name = partName(t, p);
+  if (lower.how === "merge") return `${lower.key} merged with a merge commit, so ${name} needs no git work.`;
+  if (lower.how === "squash")
+    return `${forge} squashed ${lower.key} into one commit. The update records the squash, so the PR shows only the changes of ${name}.`;
+  return `${forge} merged ${lower.key} in a way that the app cannot match. The update merges ${t.targetBranch}, and conflicts can come up.`;
+}
+
+// spec.md section 6.20.1: "ABC-10 has 4 sub-tasks: 2 open, 1 in progress, 1 done." The words follow the status category of the tracker.
+const CATEGORY_TEXT = { new: "open", indeterminate: "in progress", done: "done" } as const;
+export function subtaskCount(key: string, list: { category: SubtaskDto["category"] }[]): string {
+  const parts = (["new", "indeterminate", "done"] as const).flatMap((c) => {
+    const n = list.filter((s) => s.category === c).length;
+    return n ? [`${n} ${CATEGORY_TEXT[c]}`] : [];
+  });
+  const other = list.filter((s) => s.category === null).length;
+  if (other) parts.push(`${other} with an unknown status`);
+  return `${key} has ${plural(list.length, "sub-task")}: ${parts.join(", ")}.`;
+}
+
+// spec.md section 6.20.5: "The plan is ready: 4 sub-tasks, 2 to build, about 600 changed lines."
+export function subPlanSentence(t: TaskDto): string {
+  const n = t.subtasks?.length ?? 0;
+  const build = livePlan(t).length;
+  const lines = t.estimate ? `, about ${t.estimate.lines.toLocaleString("en-US")} changed lines` : "";
+  return `The plan is ready: ${plural(n, "sub-task")}, ${build} to build${lines}.`;
+}
+
+// The Task view of a task with sub-tasks: the status and the one primary button of the focused part (spec.md section 6.20.13).
+// focus: the part that the user picked, else the default focus.
+export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): TaskView {
+  const read: Action = { kind: "tracker-read", label: `Read ${o.tracker} again` };
+  if (t.state === "spec_draft") {
+    const v = taskView(t, o);
+    if (v.primary?.kind !== "approve") return v;
+    return {
+      ...v,
+      status: subPlanSentence(t),
+      more: [{ kind: "edit-plan", label: "Edit" }, { kind: "ask-again", label: `Ask ${o.runner} again` }, read, STOP],
+    };
+  }
+  if (t.state !== "implementing" && t.state !== "ready") return taskView(t, o);
+  const p = focus ?? defaultFocus(t);
+  if (!p) return taskView(t, o);
+  const name = partLabel(t, p);
+  const extra = [trackerMove(o.tracker), read];
+  const withExtra = (v: TaskView): TaskView => ({ ...v, more: [...v.more.filter((a) => a.kind !== "close"), ...extra] });
+  // The task stays in implementing while another part builds or waits. The view of a part with a PR reads like a task in ready, and
+  // the loop work on another part is not the work of this part.
+  const run = runningStep(t);
+  const narrow: TaskDto = {
+    ...t,
+    working: t.working && (run ? run.part === p.id : p.state === "implementing"),
+    parts: [p],
+    bases: p.bases,
+    prs: t.prs.filter((r) => r.part === p.id),
+  };
+  const base = { detail: null, lines: [], needsYou: false, running: false } satisfies Partial<TaskView>;
+  const goPr: Action = { kind: "go-pr", label: "Go to the PR" };
+  const drop: Action = { kind: "drop", label: "Drop this sub-task" };
+  const b = t.blocked;
+  const bp = blockedPart(t);
+  if (b && (bp === p.id || bp === null)) {
+    // design.md Q67: a part on a part that changes another repository waits before its build.
+    if (p.state === "planned" && b.kind === "error" && b.step === null)
+      return {
+        ...base,
+        status: b.text,
+        primary: { kind: "wait-merge", label: "Wait for the merge" },
+        more: [STOP],
+        screen: "build",
+        needsYou: true,
+      };
+    return withExtra(taskView(narrow, { ...o, name }));
+  }
+  if (run && run.part === p.id) return withExtra(taskView(narrow, { ...o, name }));
+  switch (p.state) {
+    case "planned": {
+      const row = partRow(t, p, o);
+      const acts = [...(row.action && row.action.kind !== "drop" ? [row.action] : []), drop];
+      return { ...base, status: `${name}: ${row.text}`, primary: null, more: [...acts, ...extra], screen: "build" };
+    }
+    case "implementing":
+      return {
+        ...base,
+        status: `${o.runner} builds ${name}.`,
+        primary: null,
+        more: [{ kind: "pause", label: "Pause after this step" }, STOP],
+        screen: "build",
+        running: true,
+      };
+    case "merged":
+    case "abandoned":
+      return { ...base, status: `${name}: ${p.state === "merged" ? "merged" : "dropped"}.`, primary: null, more: extra, screen: "pr" };
+    case "declined":
+      return {
+        ...base,
+        status: `${name}: the PR was declined${p.adopted ? " outside the app" : ""}.`,
+        primary: null,
+        more: [drop, ...extra],
+        screen: "pr",
+        needsYou: true,
+      };
+  }
+  const lower = lowerAction(t, p);
+  if (lower)
+    return {
+      ...base,
+      status: lower.status,
+      detail: lowerHow(t, p, o.forge),
+      primary: lower.action,
+      more: [{ kind: "show-diff", label: "Show the diff" }, ...(p.remotePr !== null ? [goPr] : []), ...extra],
+      screen: p.remotePr !== null ? "pr" : "ready",
+      needsYou: true,
+    };
+  if (p.adopted) return { ...base, status: `${name}: ${partRow(t, p, o).text}`, primary: goPr, more: extra, screen: "pr" };
+  // spec.md section 6.20.10: commits after the push go to the server only on this click.
+  if (newCommits(p))
+    return {
+      ...base,
+      status: `${name} has new commits that are not on the server yet.`,
+      primary: { kind: "push", label: `Push to ${p.branch}` },
+      more: [{ kind: "show-diff", label: "Show the diff" }, goPr, ...extra],
+      screen: "pr",
+      needsYou: true,
+    };
+  if (p.state === "changes_requested")
+    return {
+      ...base,
+      status: `${name}: ${partRow(t, p, o).text} Tell ${o.runner} what to change.`,
+      primary: { kind: "tell", label: `Tell ${o.runner}` },
+      more: [goPr, ...extra],
+      screen: "pr",
+      needsYou: true,
+    };
+  const v = withExtra(taskView({ ...narrow, state: WITH_PR.has(p.state) ? "ready" : t.state }, { ...o, name }));
+  // A part that waits for colleagues says so in the words of its row.
+  return v.screen === "pr" && !v.needsYou && v.lines.length === 0 ? { ...v, status: `${name}: ${partRow(t, p, o).text}` } : v;
+}
+
+// ---------- The plan of a task with sub-tasks (spec.md section 6.20.5) ----------
+
+// START_MODES[1]: the part starts on top of the branch of another part. The UI words for it are "on top of" and "builds on".
+export const ON_TOP: StartMode = START_MODES[1];
+
+type Start = NonNullable<TaskDto["plan"]>["starts"][number];
+// The start of a plan part on the plan screen. after: a part number such as "2", or the key of a tracked sub-task.
+export type StartPick = { n: number; start: StartMode; after: string | null; existing?: "continue" | "new" };
+
+export const livePlan = (t: Pick<TaskDto, "plan">) => (t.plan?.starts ?? []).filter((s) => !s.skip);
+
+// "ABC-12", or "ABC-13 (2 of 2)" for part k of a split sub-task, as the server names a plan part.
+export function startLabel(s: Pick<Start, "n" | "keys">, live: Pick<Start, "n" | "keys">[]): string {
+  const key = s.keys[0];
+  if (key === undefined) return `Part ${s.n}`;
+  const twins = live.filter((x) => x.keys[0] === key);
+  const name = s.keys.join(", ");
+  return twins.length > 1 ? `${name} (${twins.findIndex((x) => x.n === s.n) + 1} of ${twins.length})` : name;
+}
+
+type FoundPr = Extract<FoundItem, { kind: "pr" }>;
+type FoundBranch = Extract<FoundItem, { kind: "branch" }>;
+// The PRs and branches that name a sub-task (spec.md section 6.20.2).
+export const openPrs = (s: Pick<SubtaskDto, "found">) => s.found.filter((f): f is FoundPr => f.kind === "pr" && f.state === "OPEN");
+export const mergedPr = (s: Pick<SubtaskDto, "found">) =>
+  s.found.find((f): f is FoundPr => f.kind === "pr" && f.state === "MERGED") ?? null;
+export const foundBranch = (s: Pick<SubtaskDto, "found">) => s.found.find((f): f is FoundBranch => f.kind === "branch") ?? null;
+
+// The sub-tasks with a tracked open PR. A plan part can build on them or start after them.
+export const trackedKeys = (t: Pick<TaskDto, "subtasks">) =>
+  (t.subtasks ?? []).filter((s) => s.category !== "done" && openPrs(s).length > 0).map((s) => s.key);
+
+// The starts of the plan as the runner proposed them.
+export function firstStarts(t: Pick<TaskDto, "plan">): StartPick[] {
+  return livePlan(t).map((s) => ({ n: s.n, start: s.start, after: s.start === "base" ? null : s.after }));
+}
+
+// The first cycle of the picked starts, as the sentence of the server: "ABC-13 cannot build on ABC-14, because ABC-14 builds on ABC-13."
+export function startCycle(picks: StartPick[], live: Pick<Start, "n" | "keys">[]): string | null {
+  const lower = (p: StartPick) =>
+    p.start !== "base" && p.after !== null && /^\d+$/.test(p.after) ? picks.find((x) => x.n === Number(p.after)) : undefined;
+  const label = (p: StartPick) => startLabel(live.find((s) => s.n === p.n) ?? { n: p.n, keys: [] }, live);
+  for (const p of picks) {
+    const seen = new Set<number>([p.n]);
+    for (let x = lower(p); x; x = lower(x)) {
+      if (x.n === p.n) {
+        const b = lower(p) as StartPick;
+        return `${label(p)} cannot build on ${label(b)}, because ${label(b)} builds on ${label(p)}.`;
+      }
+      if (seen.has(x.n)) break;
+      seen.add(x.n);
+    }
+  }
+  return null;
+}
+
+// spec.md section 6.20.6: the planned branch of a plan part. Part k of a split sub-task gets the part form of the name.
+export function startBranch(prefix: string, s: Pick<Start, "n" | "keys" | "title">, live: Pick<Start, "n" | "keys">[], summary: string) {
+  const key = s.keys[0] ?? "";
+  const twins = live.filter((x) => x.keys[0] === key);
+  const title = summary || s.title;
+  return twins.length > 1
+    ? branchName(prefix, key, { kind: "part", n: twins.findIndex((x) => x.n === s.n) + 1, title })
+    : branchName(prefix, key, { kind: "small", title });
+}
+
+// spec.md section 6.20.2: "Continue on <branch>" needs the key of the part and the push name rule (<prefix><KEY>-).
+export const continuable = (prefix: string, key: string, branch: string) => branch.startsWith(`${prefix}${key}-`);

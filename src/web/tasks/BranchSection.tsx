@@ -40,6 +40,8 @@ export function BranchSection(props: {
   onBase: (branch: string) => Promise<unknown>;
   // false: the task has several repositories, so the repository list holds the base pickers (PlanTab.tsx RepoSection).
   base?: boolean;
+  // A task with sub-tasks (spec.md section 6.20.5): the chips only. Each part row shows its branch name and its found branch.
+  chipsOnly?: boolean;
 }) {
   const { t, size, pick, check } = props;
   const prs = usePrs();
@@ -127,7 +129,7 @@ export function BranchSection(props: {
           )}
         </div>
       )}
-      {name !== null && (
+      {name !== null && !props.chipsOnly && (
         <div className="grid gap-1">
           <p className="m-0 text-sm">
             <span className="text-ink-2">{lead}</span>{" "}
@@ -152,7 +154,7 @@ export function BranchSection(props: {
           )}
         </div>
       )}
-      {found && pick && (
+      {found && pick && !props.chipsOnly && (
         <div role="radiogroup" aria-labelledby="task-exists" className="grid gap-1 rounded-md border bg-card px-3 py-2.5">
           <p id="task-exists" className="m-0 text-sm font-medium">
             <code translate="no" className="font-mono text-[13px] [overflow-wrap:anywhere]">

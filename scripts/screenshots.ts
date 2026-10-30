@@ -357,6 +357,42 @@ async function shots(browser: Browser) {
   await calm();
   await save(m, "task-repos-prs");
   await multi.close();
+
+  // A task with sub-tasks (spec.md section 6.20, scripts/demo.ts SUB_*): ABC-10730 of PROJ1/sample-repo-4. The plan screen lists each
+  // sub-task with its start, then the Task view lists the rows after the first part is built. It comes after ABC-10720, so the fake
+  // CLI gives it its own runs.
+  const subs = await browser.newContext({ viewport: WIDE, colorScheme: "light", reducedMotion: "reduce" });
+  const s = await subs.newPage();
+  await s.goto(`${BASE}/`);
+  const created = await s.evaluate(async () => {
+    const res = await fetch("/api/tasks", {
+      method: "POST",
+      headers: {
+        "X-RL-Session": document.querySelector<HTMLMetaElement>('meta[name="rl-session"]')?.content ?? "",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ project: "PROJ1", repo: "sample-repo-4", key: "ABC-10730", subtasks: true }),
+    });
+    return (await res.json()) as { id: number };
+  });
+  await s.goto(`${BASE}/tasks/${created.id}`);
+  const subAsked = s.locator("#task-questions");
+  await subAsked.waitFor({ timeout: RUN_MS });
+  await subAsked.getByRole("button", { name: "Send answers" }).click();
+  const planned = s.getByRole("list", { name: "Sub-tasks of the plan" });
+  await planned.waitFor({ timeout: RUN_MS });
+  const still = async () => {
+    await s.mouse.move(0, 0);
+    await s.waitForTimeout(400);
+    await s.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  };
+  await still();
+  await save(s, "task-subtasks-plan");
+  await s.locator("[data-primary]").click();
+  await s.locator("[data-primary]", { hasText: "Open the PR" }).waitFor({ timeout: 3 * RUN_MS });
+  await still();
+  await save(s, "task-subtasks");
+  await subs.close();
 }
 
 mkdirSync(OUT, { recursive: true });

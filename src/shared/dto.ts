@@ -1631,7 +1631,17 @@ export type TaskPlanDto = {
   // spec.md section 6.20.4, sub-task mode only (else null and []). maxOpen: the open PRs at once that Claude proposes. starts: the start
   // of each plan part with Claude's reason; skip: the part builds no open sub-task without a PR. notes: the lines of the app checks for the plan screen.
   maxOpen: { value: number; reason: string } | null;
-  starts: { n: number; keys: string[]; start: StartMode; after: string | null; reason: string; skip: boolean }[];
+  // title and lines: the plan part of the start, for the plan screen rows.
+  starts: {
+    n: number;
+    keys: string[];
+    start: StartMode;
+    after: string | null;
+    reason: string;
+    skip: boolean;
+    title: string;
+    lines: number | null;
+  }[];
   notes: string[];
 };
 
@@ -1696,6 +1706,8 @@ export type TaskDto = TaskRowDto & {
   canUndoUpdate: boolean;
   // spec.md section 6.20: the sub-tasks in Jira order. null: the task builds no sub-tasks.
   subtasks: SubtaskDto[] | null;
+  // spec.md section 6.20.9: the Jira status of the task key from the newest read, for the parent row hint. null: not known.
+  issueStatus: string | null;
 };
 
 // taskRepo: task_repo.id. branch: the base branch that the user picked for the repository. changed: "Pick a base branch" set the branch

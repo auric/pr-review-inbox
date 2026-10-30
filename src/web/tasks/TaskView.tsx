@@ -5,6 +5,7 @@
 // status sentence in a polite live region, one primary button, a More menu, the Tell box (section 6.18.1), the content of the
 // current step, then the tabs Questions, Spec, Plan, Log, and Diff. model.ts decides the sentence and the actions. Focus moves to the
 // new primary button after a state change.
+import { useQueryClient } from "@tanstack/react-query";
 import { Ellipsis } from "lucide-react";
 import { forwardRef, type ReactNode, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -12,42 +13,53 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem,
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import type { MetaDto, TaskDto } from "../../shared/dto";
+import type { MetaDto, TaskDto, TaskPartDto } from "../../shared/dto";
 import { type TaskDoc, taskProfileId } from "../../shared/task";
 import type { Layer } from "../keys";
 import { formatRoute, listRoute, type PrRef } from "../lib/route";
 import { BuildLine } from "../pr/Header";
 import { RunLog } from "../review/RunLog";
 import { trackerOf } from "../review/tasks";
+import { ApiError } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { TaskFiles } from "./Attachments";
 import { BaseField } from "./BranchSection";
 import { DiffTab } from "./DiffTab";
-import { type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
+import { checkTracker, type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
+import { JiraMoveDialog } from "./JiraMoveDialog";
 import { LogTab, stepId } from "./LogTab";
 import {
   type Action,
   type ActionKind,
+  codeParts,
   currentPart,
+  defaultFocus,
   goneBase,
   NO_MERGE,
   openQuestions,
+  parentHint,
+  partLabel,
+  partName,
   partRows,
   pointerRow,
   prBuild,
   prName,
   prRowLook,
   runningStep,
+  type SubRow,
   stoppedSend,
   stripSteps,
+  subtaskRows,
+  subtaskView,
   taskView,
   tellBox,
 } from "./model";
 import { OpenPrDialog, OpenPrsDialog, type PrRowInput } from "./OpenPrDialog";
-import { PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
+import { AskAgain, PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
 import { AnsweredList, QuestionsForm } from "./Questions";
 import { docList, SpecDocs } from "./SpecDocs";
 import { StepStrip } from "./StepStrip";
+import { type Confirm, ConfirmDialog, SubtaskList } from "./SubtaskList";
 import { TellClaude } from "./TellClaude";
 
 // The shell keys of the Task view (keys.ts): j and k move over the steps and parts, Enter runs the primary action, Esc closes the run log.
@@ -108,15 +120,37 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const [errorText, setErrorText] = useState<string | null>(null);
   // spec.md section 6.16.8: the task_pr ID whose merge commit the forge did not name. The pointer button then sends newest.
   const [newest, setNewest] = useState<number | null>(null);
-  const view = taskView(t, { runner, forge: meta.forge.name, now: useTick(runningStep(t) !== null), newest });
-  const part = currentPart(t);
+  const now = useTick(runningStep(t) !== null);
+  // spec.md section 6.20.13: a task with sub-tasks shows the status and the primary button of the focused part. A click on a row
+  // moves the focus. A part that is gone gives the default focus back.
+  const tracker = trackerOf(meta);
+  const trackerName = tracker?.name ?? "tracker";
+  const subs = t.subtasks !== null;
+  const [focusId, setFocusId] = useState<number | null>(null);
+  const focused = subs ? (codeParts(t).find((p) => p.id === focusId) ?? defaultFocus(t)) : null;
+  const opts = { runner, forge: meta.forge.name, tracker: trackerName, now, newest };
+  const view = subs ? subtaskView(t, focused, opts) : taskView(t, opts);
+  const part = focused ?? currentPart(t);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [moving, setMoving] = useState<{ key: string; status: string | null } | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [hold, setHold] = useState<string | null>(null);
+  // spec.md section 6.20.10: the part whose move failed after a good push. Its next move click is "Try again" (the target change only).
+  const [retry, setRetry] = useState<number | null>(null);
+  const qc = useQueryClient();
+  // spec.md section 6.20.12: the status read when the view opens. The server reads at most once per minute.
+  const source = tracker?.id;
+  useEffect(() => {
+    if (subs && source) checkTracker(qc, t.id, source).catch(() => {});
+  }, [subs, source, t.id, qc]);
   // The PR rows of a part that changes several repositories. One row keeps the one-PR dialog and route.
   const rows = partRows(t, part);
   const several = rows.length > 1;
   // The reviewers that the user picked per repository, and the newest step ID when each row went to the server (model.ts prRowLook).
   const [picks, setPicks] = useState<Record<number, string[]>>({});
   const [sent, setSent] = useState<Record<number, number>>({});
-  const box = tellBox(t);
+  // A tracked PR gets no Tell box: the app never changes its branch.
+  const box = subs ? (part && !part.adopted ? tellBox({ ...t, parts: [part], bases: part.bases }) : "none") : tellBox(t);
   const tabs: Tab[] = [
     ...(t.questions.length ? ["questions" as const] : []),
     // spec.md section 6.17: the files of the task, when its issue lists any.
@@ -170,8 +204,91 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
     );
   };
 
-  const run = (kind: ActionKind) => {
+  // spec.md sections 6.20.6 and 6.20.10: the part actions. A change on the code host waits for one confirm.
+  const partAction = (kind: ActionKind, p: NonNullable<typeof part>) => {
+    const name = partName(t, p);
+    const base = t.targetBranch;
+    const lower = p.after === null ? null : t.parts.find((x) => x.id === p.after);
+    const moveFail = (e: Error) => {
+      setErrorText(e.message);
+      if (e instanceof ApiError && e.status === 502) setRetry(p.id);
+    };
     switch (kind) {
+      case "start-now":
+        return setConfirm({
+          title: `Start ${name} now?`,
+          text: `Colleagues have not approved ${lower ? partName(t, lower) : "the sub-task below"} yet. Start ${name} anyway?`,
+          confirm: "Start now",
+          run: () => send({ kind: "start", part: p.id }),
+        });
+      case "wait-merge":
+        return send({ kind: "wait-merge", part: p.id });
+      case "drop":
+        return setConfirm({
+          title: `Drop ${name}?`,
+          text: "The app builds no PR for it. An open PR stays open.",
+          confirm: "Drop",
+          run: () => send({ kind: "drop", part: p.id }),
+        });
+      case "push":
+        return send({ kind: "push", part: p.id });
+      case "move": {
+        const go = () => {
+          setErrorText(null);
+          act.mutate({ kind: "move", part: p.id }, { onSuccess: () => setRetry(null), onError: moveFail });
+        };
+        if (p.remotePr === null || retry === p.id) return go();
+        return setConfirm({
+          title: `Move the PR of ${name} to ${base}?`,
+          text: `The app changes the target of PR #${p.remotePr} from ${p.baseBranch} to ${base}. It pushes nothing.`,
+          confirm: `Move to ${base}`,
+          run: go,
+        });
+      }
+      case "push-move":
+        return setConfirm({
+          title: `Push ${p.branch} and move its PR from ${p.baseBranch} to ${base}?`,
+          text: "The push adds the new commits on top. The app never overwrites commits on the server.",
+          confirm: "Push and move",
+          run: () => {
+            setErrorText(null);
+            act.mutate({ kind: "move", part: p.id, push: true }, { onSuccess: () => setRetry(null), onError: moveFail });
+          },
+        });
+      case "tell":
+        return requestAnimationFrame(() => root.current?.querySelector<HTMLElement>("[data-tell] textarea")?.focus());
+      case "tracker-move": {
+        const key = p.keys[0] ?? t.key;
+        return setMoving({ key, status: t.subtasks?.find((s) => s.key === key)?.status ?? null });
+      }
+    }
+  };
+  // A row action acts on the part of its row: the focus moves there first, so the status shows what follows.
+  const rowAction = (r: SubRow, a: Action) => {
+    if (!r.part) return;
+    setFocusId(r.part.id);
+    if (a.kind === "open-pr" || a.kind === "go-pr" || a.kind === "update") return run(a.kind, r.part);
+    return partAction(a.kind, r.part);
+  };
+
+  const run = (kind: ActionKind, target = part) => {
+    if (subs && target && ["start-now", "wait-merge", "drop", "push", "move", "push-move", "tell", "tracker-move"].includes(kind))
+      return partAction(kind, target);
+    switch (kind) {
+      case "ask-again":
+        setAsking(true);
+        return focus("plan-again");
+      case "tracker-read":
+        return source && send({ kind: "tracker-read", source });
+      case "start-now":
+      case "wait-merge":
+      case "drop":
+      case "push":
+      case "move":
+      case "push-move":
+      case "tell":
+      case "tracker-move":
+        return;
       case "answer":
         return requestAnimationFrame(() =>
           root.current
@@ -225,6 +342,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       case "fix-points":
         return part && send({ kind: "fix", part: part.id });
       case "go-pr": {
+        if (subs && target?.remotePr) return onPr({ project: t.project, repo: t.repo, id: target.remotePr });
         const p = [...t.parts].reverse().find((x) => x.remotePr !== null);
         if (p?.remotePr) return onPr({ project: t.project, repo: t.repo, id: p.remotePr });
         // The main PR failed, so the first open PR of another repository.
@@ -232,9 +350,9 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return r?.remotePr && onPr({ project: r.project, repo: r.repo, id: r.remotePr });
       }
       case "update":
-        return part && send({ kind: "update", part: part.id });
+        return target && send({ kind: "update", part: target.id });
       case "undo-update":
-        return part && send({ kind: "undo", part: part.id });
+        return target && send({ kind: "undo", part: target.id });
       case "pick-base":
         return focus(PICK_BASE);
       case "retry-prs":
@@ -276,9 +394,13 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   }));
 
   // spec.md section 7.1, AC-UX10: after a state change, focus moves to the new primary button. Focus elsewhere in the app stays.
-  const mark = `${t.state}:${t.blocked?.kind ?? ""}:${view.primary?.kind ?? ""}`;
+  // A click on a sub-task row changes the shown part, not the state, so the keyboard focus stays on the row.
+  const mark = `${t.state}:${t.blocked?.kind ?? ""}:${view.primary?.kind ?? ""}:${focused?.id ?? ""}`;
+  const userPick = useRef(focusId);
   useEffect(() => {
-    if (focusAfter.current === null) {
+    const moved = userPick.current !== focusId;
+    userPick.current = focusId;
+    if (focusAfter.current === null || moved) {
       focusAfter.current = mark;
       return;
     }
@@ -289,7 +411,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
     // A user who types in the Tell box keeps the focus there.
     const typing = !!a?.closest("[data-tell]");
     if (inside && !typing && !prOpen) (primaryRef.current ?? document.getElementById("task-status"))?.focus({ preventScroll: true });
-  }, [mark, prOpen]);
+  }, [mark, prOpen, focusId]);
 
   // spec.md section 6.16.8: the dialog of several rows stays open while the server works, and closes when every row has its PR.
   const allOpen = several && rows.every((r) => r.remotePr !== null);
@@ -303,14 +425,22 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const gone = goneBase(t);
   const button = (a: Action) =>
     a.kind === "approve" ? (
-      <Button ref={primaryRef} data-primary type="submit" form={PLAN_FORM} disabled={busy}>
+      <Button
+        ref={primaryRef}
+        data-primary
+        type="submit"
+        form={PLAN_FORM}
+        disabled={busy || hold !== null}
+        aria-describedby={hold !== null ? "plan-hold" : undefined}
+      >
         {a.label}
       </Button>
     ) : (
       <Button ref={primaryRef} data-primary disabled={busy} onClick={() => run(a.kind)}>
-        {a.label}
+        {a.kind === "move" && part && retry === part.id ? "Try again" : a.label}
       </Button>
     );
+  const subRows = subs && codeParts(t).length ? subtaskRows(t, opts) : [];
 
   return (
     <div ref={root} data-task={t.id} className="grid max-w-[920px] gap-5 px-6 pt-5 pb-10">
@@ -320,7 +450,11 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             {t.key}
           </code>
           <h2 className="m-0 min-w-0 text-[19px] font-bold tracking-[-0.01em] [overflow-wrap:anywhere]">{t.title}</h2>
-          {t.size && <span className="text-sm text-ink-2">Size: {t.size}</span>}
+          {subs ? (
+            <span className="text-sm text-ink-2">Sub-tasks: {t.subtasks?.length ?? 0}, one PR each</span>
+          ) : (
+            t.size && <span className="text-sm text-ink-2">Size: {t.size}</span>
+          )}
           <span translate="no" className="text-xs text-muted-foreground">
             {t.project}/{t.repo} into {t.targetBranch}
           </span>
@@ -328,11 +462,22 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         </div>
         <StepStrip steps={stripSteps(t)} />
         <div className="grid gap-0.5">
+          {subRows.length > 0 && focused && (
+            <p className="m-0 text-xs text-ink-2">
+              Shown:{" "}
+              <span translate="no" className="font-mono">
+                {partLabel(t, focused)}
+              </span>{" "}
+              {subRows.find((r) => r.part?.id === focused.id)?.summary}
+            </p>
+          )}
           <p id="task-status" tabIndex={-1} aria-live="polite" className="m-0 text-[15px] font-medium outline-none">
             {view.status}
           </p>
           {view.detail && <p className="m-0 text-sm text-ink-2">{view.detail}</p>}
-          {view.screen === "pr" && <BuildLine b={prBuild(t)} className="text-sm text-ink-2" />}
+          {view.screen === "pr" && (
+            <BuildLine b={subs ? (part?.remotePr != null ? part.build : null) : prBuild(t)} className="text-sm text-ink-2" />
+          )}
           {view.lines.length > 0 && (
             <ul aria-label="Repositories to update" className="m-0 grid list-none gap-0.5 p-0 text-sm text-ink-2">
               {view.lines.map((l) => (
@@ -385,6 +530,32 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         )}
       </header>
 
+      {subRows.length > 0 && (
+        <SubtaskList
+          rows={subRows}
+          focused={focused?.id ?? null}
+          primary={view.primary?.kind ?? null}
+          tracker={trackerName}
+          busy={busy}
+          parent={{ key: t.key, status: t.issueStatus, hint: parentHint(t, trackerName) }}
+          onFocus={(id) => {
+            setFocusId(id);
+            setErrorText(null);
+          }}
+          onAction={rowAction}
+          onMove={setMoving}
+        />
+      )}
+
+      {asking && view.screen === "plan" && (
+        <AskAgain
+          runner={runner}
+          busy={busy}
+          onCancel={() => setAsking(false)}
+          onSend={(text) => send({ kind: "plan-again", text }, () => setAsking(false))}
+        />
+      )}
+
       {box !== "none" && (
         <TellClaude
           runner={runner}
@@ -392,7 +563,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
           restore={stoppedSend(t)}
           onSend={(text) => {
             setErrorText(null);
-            return act.mutateAsync({ kind: "instruct", text });
+            return act.mutateAsync({ kind: "instruct", text, ...(subs && part && { part: part.id }) });
           }}
         />
       )}
@@ -409,6 +580,10 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         onBase={(branch, taskRepo) => act.mutateAsync({ kind: "base", branch, ...(taskRepo !== undefined && { taskRepo }) })}
         onRun={run}
         onPr={onPr}
+        part={part}
+        tracker={trackerName}
+        onMove={setMoving}
+        onHold={setHold}
       />
 
       <section aria-label="Details" className="grid gap-3">
@@ -505,6 +680,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
           }}
         />
       )}
+      <ConfirmDialog confirm={confirm} busy={busy} onClose={() => setConfirm(null)} />
+      {source && <JiraMoveDialog task={t.id} source={source} tracker={trackerName} issue={moving} onClose={() => setMoving(null)} />}
       {runLog && (
         <RunLog
           // A task run keeps its raw output on the server only. The PR raw route does not serve it.
@@ -535,11 +712,15 @@ function Content(props: {
   onBase: (branch: string, taskRepo?: number) => Promise<unknown>;
   onRun: (k: ActionKind) => void;
   onPr: (ref: PrRef) => void;
+  // The part of the view: the focused part of a task with sub-tasks, else the current part.
+  part: TaskPartDto | null;
+  tracker: string;
+  onMove: (issue: { key: string; status: string | null }) => void;
+  onHold: (reason: string | null) => void;
 }) {
-  const { t, runner, screen, busy } = props;
+  const { t, runner, screen, busy, part } = props;
   const b = t.blocked;
   const step = b?.step ? t.steps.find((s) => s.id === b.step) : undefined;
-  const part = currentPart(t);
   const box = (children: ReactNode, label: string, id?: string) => (
     <section
       id={id}
@@ -586,6 +767,9 @@ function Content(props: {
         onApprove={(input) => props.onSend({ kind: "plan", input })}
         onBase={props.onBase}
         onRepo={(taskRepo, add) => props.onSend({ kind: "repo", taskRepo, add })}
+        tracker={props.tracker}
+        onMove={props.onMove}
+        onHold={props.onHold}
       />
     );
   }
@@ -625,7 +809,9 @@ function Content(props: {
     return box(
       <>
         <p className="m-0 flex flex-wrap gap-x-5 gap-y-1 text-sm">
-          <span className="font-medium">{parts > 1 && part ? `Part ${part.ord} of ${parts}` : "Your change"}</span>
+          <span className="font-medium">
+            {t.subtasks && part ? partLabel(t, part) : parts > 1 && part ? `Part ${part.ord} of ${parts}` : "Your change"}
+          </span>
           {tasks.length > 0 && (
             <span className="text-ink-2">
               Tasks: {done} of {tasks.length} done
@@ -760,11 +946,11 @@ function Content(props: {
     );
 
   if (screen === "pr") {
-    const p = [...t.parts].reverse().find((x) => x.remotePr !== null);
+    const p = t.subtasks ? part : [...t.parts].reverse().find((x) => x.remotePr !== null);
     const notes = t.steps.find((s) => s.kind === "pr" && s.state === "ok")?.detail.notes ?? [];
     return box(
       <>
-        {p && (
+        {p?.remotePr != null && (
           <p className="m-0 text-sm">
             PR #{p.remotePr} from{" "}
             <span translate="no" className="font-mono text-xs">
@@ -772,7 +958,7 @@ function Content(props: {
             </span>{" "}
             into{" "}
             <span translate="no" className="font-mono text-xs">
-              {t.targetBranch}
+              {t.subtasks && p ? p.baseBranch : t.targetBranch}
             </span>
             .
           </p>

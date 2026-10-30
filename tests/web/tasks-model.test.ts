@@ -10,6 +10,7 @@ import type {
   AttachmentMeta,
   BranchCheckDto,
   BuildDto,
+  SubtaskDto,
   TaskDto,
   TaskPartDto,
   TaskPrDto,
@@ -25,6 +26,7 @@ import {
   branchApproval,
   branchesError,
   branchNote,
+  defaultFocus,
   elapsed,
   type FileChoice,
   fileChoiceState,
@@ -37,6 +39,8 @@ import {
   listText,
   logRows,
   NO_MERGE,
+  parentHint,
+  partLabel,
   partRows,
   pickedPrefix,
   plannedBranch,
@@ -46,6 +50,7 @@ import {
   prefixProblem,
   proposals,
   prRowLook,
+  prTitle,
   REPOS_SHOWN,
   repoChoices,
   repoMatches,
@@ -57,9 +62,14 @@ import {
   STEP_TEXT,
   sendResult,
   showRepos,
+  startCycle,
   stepLook,
   stoppedAt,
   stoppedSend,
+  subPlanSentence,
+  subtaskCount,
+  subtaskRows,
+  subtaskView,
   type TaskView,
   taskView,
   tellBox,
@@ -177,6 +187,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     canInstruct: false,
     canUndoUpdate: false,
     subtasks: null,
+    issueStatus: null,
     ...o,
   };
 }
@@ -1368,5 +1379,281 @@ describe("the repository of the Build form (spec.md section 6.12)", () => {
     );
     const m = repoMatches(many, "p/r");
     expect([m.items.length, m.more]).toEqual([REPOS_SHOWN, 3]);
+  });
+});
+
+// ---------- Sub-tasks (spec.md section 6.20, WP-ST6) ----------
+
+const SUB_OPTS = { runner: R, forge: "Forge", tracker: "Tracker", now: NOW };
+const sub = (key: string, o: Partial<SubtaskDto> = {}): SubtaskDto => ({
+  key,
+  summary: `Summary of ${key}`,
+  status: "To Do",
+  category: "new",
+  statusAt: NOW,
+  links: [],
+  found: [],
+  parts: [],
+  attachments: [],
+  added: null,
+  removed: null,
+  ...o,
+});
+// The parent ABC-10 with ABC-11 done in the tracker, ABC-12 as a tracked PR, and ABC-13 and ABC-14 built by the app.
+function subTask(parts: TaskPartDto[], o: Partial<TaskDto> = {}): TaskDto {
+  return task({
+    key: "ABC-10",
+    title: "Split the cache work",
+    state: "implementing",
+    size: "small",
+    parts,
+    subtasks: [
+      sub("ABC-11", { status: "Done", category: "done" }),
+      sub("ABC-12", { status: "In Review", category: "indeterminate" }),
+      sub("ABC-13"),
+      sub("ABC-14"),
+    ],
+    ...o,
+  });
+}
+const p12 = (o: Partial<TaskPartDto> = {}) =>
+  part({ id: 12, ord: 1, keys: ["ABC-12"], state: "pr_open", adopted: true, remotePr: 41, waiting: ["Anna"], ...o });
+const p13 = (o: Partial<TaskPartDto> = {}) =>
+  part({ id: 13, ord: 2, keys: ["ABC-13"], branch: "feature/ABC-13-flush", start: "base", ...o });
+const p14 = (o: Partial<TaskPartDto> = {}) =>
+  part({ id: 14, ord: 3, keys: ["ABC-14"], branch: "feature/ABC-14-measure", state: "planned", start: "base", head: null, ...o });
+
+describe("sub-task rows: one sentence and one actor (spec.md section 6.20.13)", () => {
+  test("the rows follow the tracker order, name the part k of n, and give the actor and the row action", () => {
+    const t = subTask([p12(), p13({ state: "implementing" }), p14({ start: "stack", after: 12, wait: "Waits for a review of ABC-12." })]);
+    const rows = subtaskRows(t, SUB_OPTS);
+    expect(rows.map((r) => [r.label, r.text, r.actor, r.action?.kind ?? null])).toEqual([
+      ["ABC-11", "Done in Tracker.", "No one", null],
+      ["ABC-12 (1 of 3)", "In review outside the app: PR #41.", "Anna", "go-pr"],
+      ["ABC-13 (2 of 3)", "Claude builds it.", "Claude", null],
+      ["ABC-14 (3 of 3)", "Waits for a review of ABC-12.", "Anna", "start-now"],
+    ]);
+    expect(partLabel(t, p13())).toBe("ABC-13 (2 of 3)");
+  });
+
+  test("each part state has one sentence and one actor", () => {
+    const cases: [Partial<TaskPartDto>, string, string][] = [
+      [{ state: "self_reviewed" }, "Ready. Open its PR.", "You"],
+      [{ state: "pr_open", remotePr: 52, waiting: ["Anna"] }, "In review by Anna.", "Anna"],
+      [{ state: "changes_requested", remotePr: 52, waiting: ["Anna"] }, "Anna asks for changes.", "You"],
+      [{ state: "approved", remotePr: 52 }, "Approved. Waits for the merge.", "The merger"],
+      [{ state: "merged", remotePr: 52 }, "Merged.", "No one"],
+      [{ state: "declined", remotePr: 52 }, "Declined.", "You"],
+      [{ state: "abandoned" }, "Dropped.", "No one"],
+      [
+        { state: "planned", head: null, wait: "Waits: 3 PRs of this task are open, your limit." },
+        "Waits: 3 PRs of this task are open, your limit.",
+        "Reviewers",
+      ],
+      [
+        { state: "pr_open", remotePr: 52, pushed: "c".repeat(40), lower: { key: "ABC-12", how: "merge" } },
+        "ABC-12 merged. Move ABC-13 to main.",
+        "You",
+      ],
+    ];
+    for (const [o, text, actor] of cases) {
+      const row = subtaskRows(subTask([p12(), p13(o)]), SUB_OPTS).find((r) => r.part?.id === 13);
+      expect([row?.text, row?.actor]).toEqual([text, actor]);
+    }
+  });
+
+  test("a planned part that waits for a merge names the reviewers of the lower part; done and removed sub-tasks offer Drop", () => {
+    const merge = subtaskRows(subTask([p12(), p14({ start: "merge", after: 12, wait: "Waits for ABC-12 to merge." })]), SUB_OPTS);
+    expect(merge.find((r) => r.part?.id === 14)).toMatchObject({ text: "Waits for ABC-12 to merge.", actor: "Anna", action: null });
+    const t = subTask([p14()]);
+    const done = { ...t, subtasks: (t.subtasks ?? []).map((s) => (s.key === "ABC-14" ? { ...s, category: "done" as const } : s)) };
+    expect(subtaskRows(done, SUB_OPTS).find((r) => r.part?.id === 14)).toMatchObject({
+      text: "Done in Tracker.",
+      action: { kind: "drop" },
+    });
+  });
+
+  test("a sub-task without a part says why; a new key and a planned-no-PR key get their own sentence", () => {
+    const t = subTask([p13({ state: "implementing" })], {
+      subtasks: [sub("ABC-13"), sub("ABC-14"), sub("ABC-17", { added: NOW })],
+    });
+    expect(subtaskRows(t, SUB_OPTS).map((r) => r.text)).toEqual([
+      "Claude builds it.",
+      "Claude planned no PR for ABC-14.",
+      "ABC-17 is new in Tracker.",
+    ]);
+  });
+
+  test("the row hints say what does not fit and the parent hint comes when every part merged", () => {
+    const t = subTask([p12({ adopted: false }), p13({ state: "merged", remotePr: 52 })]);
+    const open = {
+      ...t,
+      subtasks: (t.subtasks ?? []).map((s) => (s.key === "ABC-12" ? { ...s, status: "To Do", category: "new" as const } : s)),
+    };
+    const rows = subtaskRows(open, SUB_OPTS);
+    expect(rows.find((r) => r.part?.id === 12)?.hint).toBe("Tracker says To Do, but the PR is open.");
+    expect(rows.find((r) => r.part?.id === 13)?.hint).toBe("The PR merged. Tracker says To Do.");
+    expect(parentHint(t, "Tracker")).toBeNull();
+    const all = subTask([p12({ state: "merged" }), p13({ state: "merged" }), p14({ state: "abandoned" })], { issueStatus: "In Progress" });
+    expect(parentHint(all, "Tracker")).toBe("All sub-tasks merged. Tracker says In Progress for ABC-10.");
+  });
+});
+
+describe("the focused sub-task and its one primary button (spec.md sections 6.20.10 and 6.20.13, AC-UX1)", () => {
+  test("the default focus takes the first match of the spec order", () => {
+    const building = p13({ state: "implementing" });
+    const ready = p14({ state: "self_reviewed", head: "d".repeat(40) });
+    expect(defaultFocus(subTask([p12(), building, ready]))?.id).toBe(14);
+    expect(defaultFocus(subTask([p12(), building, p14()]))?.id).toBe(13);
+    expect(defaultFocus(subTask([p12(), p13({ state: "pr_open", remotePr: 52 }), p14()]))?.id).toBe(12);
+    const blocked = { kind: "red" as const, step: null, text: "Tests stay red.", part: 13 };
+    expect(defaultFocus(subTask([p12(), building, ready], { blocked }))?.id).toBe(13);
+    const moved = p13({
+      state: "pr_open",
+      remotePr: 52,
+      bases: [{ taskRepo: 1, branch: "main", newCommits: 2, conflicted: false, changed: false }],
+    });
+    expect(defaultFocus(subTask([p12(), moved, p14({ state: "implementing" })]))?.id).toBe(13);
+    const lower = p13({ state: "pr_open", remotePr: 52, lower: { key: "ABC-12", how: "merge" } });
+    expect(defaultFocus(subTask([p12({ state: "merged" }), lower, p14({ state: "implementing" })]))?.id).toBe(13);
+  });
+
+  test("the lower part merged: a merge commit moves at once, a squash updates first, a pushed update pushes and moves", () => {
+    const moved = [{ taskRepo: 1, branch: "main", newCommits: 2, conflicted: false, changed: false }];
+    const base = { state: "pr_open" as const, remotePr: 52, pushed: "a".repeat(40) };
+    const at = (o: Partial<TaskPartDto>) => {
+      const p = p13({ ...base, ...o });
+      return subtaskView(subTask([p12({ state: "merged" }), p]), p, SUB_OPTS);
+    };
+    const merge = at({ lower: { key: "ABC-12", how: "merge" }, bases: moved });
+    expect([merge.status, merge.primary]).toEqual([
+      "ABC-12 merged. ABC-13 must point to main now.",
+      { kind: "move", label: "Move ABC-13 to main" },
+    ]);
+    expect(merge.detail).toBe("ABC-12 merged with a merge commit, so ABC-13 needs no git work.");
+    const squash = at({ lower: { key: "ABC-12", how: "squash" }, bases: moved });
+    expect([squash.status, squash.primary?.kind]).toEqual(["ABC-12 merged. Update ABC-13 from main first.", "update"]);
+    const other = at({ lower: { key: "ABC-12", how: "other" }, bases: moved });
+    expect(other.detail).toBe("Forge merged ABC-12 in a way that the app cannot match. The update merges main, and conflicts can come up.");
+    const updated = at({ lower: { key: "ABC-12", how: "squash" }, head: "e".repeat(40) });
+    expect([updated.status, updated.primary]).toEqual([
+      "ABC-13 is up to date with main. Push it and move its PR to main.",
+      { kind: "push-move", label: "Push and move to main" },
+    ]);
+    // A part without a PR moves in the app only, then opens its PR.
+    const unpushed = at({ state: "self_reviewed", remotePr: null, pushed: null, lower: { key: "ABC-12", how: "squash" } });
+    expect(unpushed.primary?.kind).toBe("move");
+  });
+
+  test("new commits after the push get Push to <branch>; a tracked PR gets Go to the PR; a planned part has no primary", () => {
+    const pushed = p13({ state: "pr_open", remotePr: 52, pushed: "c".repeat(40) });
+    const v = subtaskView(subTask([p12(), pushed]), pushed, SUB_OPTS);
+    expect([v.status, v.primary]).toEqual([
+      "ABC-13 (2 of 2) has new commits that are not on the server yet.",
+      { kind: "push", label: "Push to feature/ABC-13-flush" },
+    ]);
+    const tracked = subtaskView(subTask([p12(), pushed]), p12(), SUB_OPTS);
+    expect([tracked.status, tracked.primary?.kind]).toEqual(["ABC-12 (1 of 2): In review outside the app: PR #41.", "go-pr"]);
+    const waits = p14({ start: "stack", after: 12, wait: "Waits for a review of ABC-12." });
+    const planned = subtaskView(subTask([p12(), waits]), waits, SUB_OPTS);
+    expect([planned.status, planned.primary, planned.more.map((a) => a.kind)]).toEqual([
+      "ABC-14 (2 of 2): Waits for a review of ABC-12.",
+      null,
+      ["start-now", "drop", "tracker-move", "tracker-read"],
+    ]);
+  });
+
+  test("a ready part opens its PR under its own name; the More menu keeps the tracker actions and no task Close", () => {
+    const ready = p13({ state: "self_reviewed" });
+    const v = subtaskView(subTask([p12(), ready]), ready, SUB_OPTS);
+    expect([v.status, v.primary]).toEqual(["ABC-13 (2 of 2) is ready and checked by Claude.", { kind: "open-pr", label: "Open the PR" }]);
+    expect(v.more.map((a) => a.label)).toEqual(["Show the diff", "Move in Tracker…", "Read Tracker again"]);
+  });
+
+  test("a part in review while another part builds: its own sentence and Go to the PR, not the build of the other part", () => {
+    const review = p13({ state: "pr_open", remotePr: 52, pushed: "a".repeat(40), waiting: ["Anna"] });
+    const t = subTask([p12(), review, p14({ state: "implementing", head: "f".repeat(40) })], { working: true });
+    const v = subtaskView(t, review, SUB_OPTS);
+    expect([v.status, v.primary?.kind, v.running]).toEqual(["ABC-13 (2 of 3): In review by Anna.", "go-pr", false]);
+    expect(subtaskView(t, null, SUB_OPTS).status).toBe("Claude builds ABC-14 (3 of 3).");
+  });
+
+  test("a part on a part that changes another repository waits: Wait for the merge", () => {
+    const text = "Needs you: ABC-14 builds on ABC-13, which also changes PROJ/lib. Let ABC-14 wait for the merge of ABC-13.";
+    const waits = p14({ start: "stack", after: 13 });
+    const t = subTask([p13({ state: "pr_open", remotePr: 52 }), waits], { blocked: { kind: "error", step: null, text, part: 14 } });
+    const v = subtaskView(t, null, SUB_OPTS);
+    expect([v.status, v.primary]).toEqual([text, { kind: "wait-merge", label: "Wait for the merge" }]);
+  });
+
+  test("AC-UX1: every part state has at most one primary action", () => {
+    const states: Partial<TaskPartDto>[] = [
+      { state: "planned", head: null },
+      { state: "implementing" },
+      { state: "self_reviewed" },
+      { state: "pr_open", remotePr: 52 },
+      { state: "changes_requested", remotePr: 52 },
+      { state: "approved", remotePr: 52 },
+      { state: "merged", remotePr: 52 },
+      { state: "declined", remotePr: 52 },
+      { state: "abandoned" },
+    ];
+    for (const o of states) {
+      const p = p13(o);
+      const v = subtaskView(subTask([p12(), p]), p, SUB_OPTS);
+      expect(v.more.some((a) => a.kind === v.primary?.kind)).toBe(false);
+      expect(typeof v.status).toBe("string");
+    }
+  });
+});
+
+describe("the plan of a task with sub-tasks (spec.md sections 6.20.1 and 6.20.5)", () => {
+  test("the plan sentence counts the sub-tasks and the parts to build; the Build form counts by status category", () => {
+    const starts = [
+      { n: 1, keys: ["ABC-13"], start: "base" as const, after: null, reason: "", skip: false, title: "Flush", lines: 200 },
+      { n: 2, keys: ["ABC-14"], start: "base" as const, after: null, reason: "", skip: false, title: "Measure", lines: 400 },
+    ];
+    const t = subTask([], { state: "spec_draft", plan: { ...PLAN, starts }, estimate: { ...ESTIMATE, lines: 600 } });
+    expect(subPlanSentence(t)).toBe("The plan is ready: 4 sub-tasks, 2 to build, about 600 changed lines.");
+    expect(subtaskView(t, null, SUB_OPTS).more.map((a) => a.kind)).toEqual(["edit-plan", "ask-again", "tracker-read", "stop"]);
+    expect(subtaskCount("ABC-10", t.subtasks ?? [])).toBe("ABC-10 has 4 sub-tasks: 2 open, 1 in progress, 1 done.");
+  });
+
+  test("a cycle of picked starts gives the sentence of the server", () => {
+    const live = [
+      { n: 1, keys: ["ABC-13"] },
+      { n: 2, keys: ["ABC-14"] },
+    ];
+    expect(
+      startCycle(
+        [
+          { n: 1, start: "stack", after: "2" },
+          { n: 2, start: "merge", after: "1" },
+        ],
+        live,
+      ),
+    ).toBe("ABC-13 cannot build on ABC-14, because ABC-14 builds on ABC-13.");
+    expect(
+      startCycle(
+        [
+          { n: 1, start: "base", after: null },
+          { n: 2, start: "stack", after: "1" },
+        ],
+        live,
+      ),
+    ).toBeNull();
+  });
+
+  test("the PR title names the part key, a split part, or two sub-tasks", () => {
+    const a = p13({ id: 20, title: "Flush first" });
+    const b = p13({ id: 21, ord: 3, title: "Flush second" });
+    const c = p14({ id: 22, keys: ["ABC-14", "ABC-15"], title: "Measure" });
+    const t = subTask([a, b, c]);
+    expect([prTitle(t, a), prTitle(t, b), prTitle(t, c)]).toEqual([
+      "ABC-13 (part 1 of 2): Flush first",
+      "ABC-13 (part 2 of 2): Flush second",
+      "ABC-14, ABC-15: Measure",
+    ]);
+    expect(prTitle(task(), part())).toBe("ABC-12: Trim spaces in user names");
   });
 });

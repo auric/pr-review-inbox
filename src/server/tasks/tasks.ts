@@ -620,7 +620,10 @@ function planDto(db: Database, t: TaskRow, docs: Docs): TaskPlanDto {
   const sub = subPlanOf(docs);
   return {
     maxOpen: sub?.maxOpen ?? null,
-    starts: sub?.starts ?? [],
+    starts: (sub?.starts ?? []).map((x) => {
+      const part = docs.parsed.parts.find((p) => p.n === x.n);
+      return { ...x, title: part?.title ?? "", lines: part?.lines ?? null };
+    }),
     notes: sub?.notes ?? [],
     proposed: docs.parsed.proposed,
     minimum: floor.minimum,
@@ -1068,6 +1071,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     canInstruct: !("error" in instructTarget(db, t)),
     canUndoUpdate: current !== null && !("error" in undoTarget(db, t, current.id)),
     subtasks: t.subtasks === 1 ? subtaskDtos(db, t.id, partRows) : null,
+    issueStatus: taskIssue(db, t)?.issue.status ?? null,
   };
 }
 

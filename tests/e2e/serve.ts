@@ -440,6 +440,8 @@ fake.token = E2E_TOKEN;
 const jira = startFakeJira({ port: Number(new URL(JIRA_URL).port) });
 jira.token = E2E_JIRA_TOKEN;
 jira.addIssue(JIRA_ISSUE);
+// docs/plans/review-v2/spec.md section 6.20: the parent ABC-10 with ABC-11 done, ABC-12 in progress, and ABC-13 and ABC-14 to do.
+jira.addSubtaskSet();
 // A Jira Cloud fake on a free port for the email login. It needs JIRA_EMAIL and E2E_JIRA_TOKEN.
 const jiraCloud = startFakeJira({ cloud: true });
 jiraCloud.token = E2E_JIRA_TOKEN;
@@ -482,6 +484,8 @@ const taskRepo = repoWrites(fake, "PROJ1", "sample-repo-2", {
   defaultBranch: (A.pr.toRef as unknown as { displayId: string }).displayId,
   branches: ["main", RELEASE],
 });
+// The list route comes back only in the sub-task scenario (/__control/subtasks), so the PR context of the other tests does not change.
+const listTaskPrs = r[key("GET", `${taskRepo.path}/pull-requests`)];
 delete r[key("GET", `${taskRepo.path}/pull-requests`)];
 delete r[key("GET", taskRepo.path)];
 const createTaskPr = r[key("POST", `${taskRepo.path}/pull-requests`)];
@@ -711,6 +715,10 @@ r[key("POST", "/__control/reset")] = async () => {
   builds.clear();
   fake.requests.length = 0;
   jira.requests.length = 0;
+  // The sub-task scenario: the statuses of the set come back, and the open-PR list of the task repository goes again.
+  jira.addSubtaskSet();
+  jira.transitions.clear();
+  delete r[key("GET", `${taskRepo.path}/pull-requests`)];
   Object.assign(folders, { opens: false, paths: [] });
   Object.assign(postA, { fail: null, hide: false });
   setClaude({ stream: "tree" });
@@ -863,6 +871,44 @@ r[key("POST", "/__control/task-repos")] = async (req) => {
   );
   return ok({ heads: await multi.heads(), gitlink: c.branch ? await multi.gitlink(c.branch) : null, merged, creates, prs });
 };
+// ---------- Sub-tasks (docs/plans/review-v2/spec.md section 6.20, WP-ST6) ----------
+// openPr: the open-PR list of PROJ1/sample-repo-2 comes back with one open PR of ABC-12 from feature/ABC-12-event-generator, so the plan
+// tracks it. Answers its PR ID. A reset removes the list route again.
+r[key("POST", "/__control/subtasks")] = async (req) => {
+  const c = (await req.json()) as { openPr?: boolean };
+  if (!c.openPr || !listTaskPrs) return ok({ pr: null });
+  r[key("GET", `${taskRepo.path}/pull-requests`)] = listTaskPrs;
+  const target = (A.pr.toRef as unknown as { displayId: string }).displayId;
+  const res = await (createTaskPr as (req: Request) => Promise<Reply>)(
+    new Request(`${fake.url}${taskRepo.path}/pull-requests`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: "ABC-12: Add the event generator",
+        fromRef: { id: "refs/heads/feature/ABC-12-event-generator" },
+        toRef: { id: `refs/heads/${target}` },
+      }),
+    }),
+  );
+  const id = "body" in res ? (res.body as { id?: number } | undefined)?.id : undefined;
+  if (id !== undefined) r[key("GET", `${taskRepo.path}/pull-requests/${id}/activities`)] = ok(S.onePage([]));
+  // The tracked PR is no PR that the app created, so the create count of the test leaves it out.
+  taskRepo.writes.length = 0;
+  return ok({ pr: id ?? null });
+};
+// The tracker status of each issue of the sub-task set, and the transition IDs that each issue got since the last reset. set: a
+// status change in the tracker, as a colleague or an automation makes it.
+r[key("POST", "/__control/jira-status")] = async (req) => {
+  const c = (await req.json().catch(() => ({}))) as { set?: { key: string; category: "new" | "indeterminate" | "done" } };
+  if (c.set) jira.setStatus(c.set.key, c.set.category);
+  const statuses: Record<string, string | null> = {};
+  for (const k of ["ABC-10", "ABC-11", "ABC-12", "ABC-13", "ABC-14"]) {
+    const res = jira.routes[key("GET", `/rest/api/2/issue/${k}`)];
+    const body = res && typeof res !== "function" && "body" in res ? (res.body as { fields?: { status?: { name?: string } } }) : null;
+    statuses[k] = body?.fields?.status?.name ?? null;
+  }
+  return ok({ statuses, transitions: Object.fromEntries(jira.transitions) });
+};
+
 // ---------- Jira attachments (plan r3 S-ATT) ----------
 // Every request to the fake Jira since the last reset.
 r[key("POST", "/__control/live")] = () => ok({ streams: app.live.size() });

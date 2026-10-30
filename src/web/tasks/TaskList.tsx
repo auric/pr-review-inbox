@@ -12,12 +12,12 @@ import { Kbd } from "@/components/ui/kbd";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { type ProfileDto, TASK_KEY, type TaskCreateInput, type TaskIssueDto, type TaskRowDto } from "../../shared/dto";
-import { REPO_LIST_MAX, taskProfileId } from "../../shared/task";
+import { REPO_LIST_MAX, SUBTASKS_READ, subtasksFirst, taskProfileId } from "../../shared/task";
 import { useMinute } from "../shell/ListPane";
 import { ago, type ProjectRepos } from "../shell/model";
 import { askText, boxId, FilePicker, NoAttachments, usePolicy } from "./Attachments";
 import { readIssue, useTaskProfile, useTaskRepos } from "./data";
-import { fileChoices, firstPicks, repoChoices, rowStatus } from "./model";
+import { fileChoices, firstPicks, repoChoices, rowStatus, subtaskCount } from "./model";
 import { RepoField } from "./RepoField";
 
 const kbd = "border border-rule-strong bg-transparent font-mono text-[11px] text-ink-2";
@@ -162,6 +162,10 @@ function NewTask(props: {
   const [error, setError] = useState<string | null>(null);
   const [issue, setIssue] = useState<TaskIssueDto | null>(null);
   const [picks, setPicks] = useState<ReadonlySet<string>>(new Set());
+  // spec.md sections 6.20.1 and 6.20.3: the mode of a key with sub-tasks, and the read of each open sub-task with its ticked files.
+  const [mode, setMode] = useState<"subtasks" | "one">("subtasks");
+  const [subs, setSubs] = useState<Record<string, TaskIssueDto | string>>({});
+  const [subPicks, setSubPicks] = useState<Record<string, ReadonlySet<string>>>({});
   const policy = usePolicy(props.runner, props.tracker);
   const chosen = all.find((r) => r.key === (repo || all[0]?.key));
   const listNote = listed.isPending
@@ -185,6 +189,31 @@ function NewTask(props: {
   const k = key.trim().toUpperCase();
   const read = issue?.key === k ? issue : null;
   const rows = read ? fileChoices(read.attachments, []) : [];
+  // The server reads the first SUBTASKS_READ sub-tasks in tracker order. A done one keeps its key, summary, and status only.
+  const subList = read?.subtasks ?? [];
+  const openSubs = subList.slice(0, SUBTASKS_READ).filter((s) => s.category !== "done");
+  const withSubs = subList.length > 0 && mode === "subtasks";
+  // One tracker read per open sub-task, on the click that shows the sub-task mode.
+  const loadSubs = (i: TaskIssueDto) => {
+    for (const s of i.subtasks.slice(0, SUBTASKS_READ).filter((x) => x.category !== "done")) {
+      if (subs[s.key] !== undefined) continue;
+      readIssue(s.key)
+        .then((d) => {
+          setSubs((x) => ({ ...x, [s.key]: d }));
+          setSubPicks((x) => ({ ...x, [s.key]: new Set(firstPicks(fileChoices(d.attachments, []), policy.asking)) }));
+        })
+        .catch((e: Error) => setSubs((x) => ({ ...x, [s.key]: e.message })));
+    }
+  };
+  const tickSub = (key: string, ids: string[], on: boolean) =>
+    setSubPicks((p) => {
+      const n = new Set(p[key] ?? []);
+      for (const id of ids) {
+        if (on) n.add(id);
+        else n.delete(id);
+      }
+      return { ...p, [key]: n };
+    });
   const tick = (ids: string[], on: boolean) =>
     setPicks((p) => {
       const n = new Set(p);
@@ -214,6 +243,12 @@ function NewTask(props: {
             const i = await readIssue(k);
             setIssue(i);
             setPicks(new Set(firstPicks(fileChoices(i.attachments, []), policy.asking)));
+            setSubs({});
+            setSubPicks({});
+            // spec.md section 6.20.1 (design.md Q64): the sub-task mode starts selected when one sub-task is not done.
+            const first = subtasksFirst(i.subtasks);
+            setMode(first ? "subtasks" : "one");
+            if (first) loadSubs(i);
             return;
           }
           await props.onCreate({
@@ -222,6 +257,13 @@ function NewTask(props: {
             key: k,
             files: rows.flatMap((r) => (picks.has(r.id) ? [r.id] : [])),
             profile,
+            ...(subList.length > 0 && { subtasks: withSubs }),
+            ...(withSubs && {
+              subtaskFiles: openSubs.flatMap((s) => {
+                const d = subs[s.key];
+                return d === undefined || typeof d === "string" ? [] : [{ key: s.key, files: [...(subPicks[s.key] ?? [])] }];
+              }),
+            }),
           });
           setKey("");
           close();
@@ -312,6 +354,86 @@ function NewTask(props: {
           ) : (
             <NoAttachments runner={props.runner} />
           )}
+          {subList.length > 0 && (
+            <fieldset className="m-0 grid gap-1 border-0 p-0">
+              <legend className="mb-1 p-0 text-sm">{subtaskCount(read.key, subList)}</legend>
+              {subList.length > SUBTASKS_READ && (
+                <p className="m-0 text-xs text-ink-2">
+                  {read.key} has {subList.length} sub-tasks. The app reads the first {SUBTASKS_READ}.
+                </p>
+              )}
+              {(["subtasks", "one"] as const).map((m) => (
+                <label key={m} className="flex min-h-6 cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name="new-task-mode"
+                    value={m}
+                    checked={mode === m}
+                    disabled={busy}
+                    className="m-0 size-4 accent-foreground"
+                    onChange={() => {
+                      setMode(m);
+                      if (m === "subtasks") loadSubs(read);
+                    }}
+                  />
+                  {m === "subtasks" ? "Build the sub-tasks, one PR each" : `Build ${read.key} as one task`}
+                </label>
+              ))}
+            </fieldset>
+          )}
+          {withSubs &&
+            openSubs.map((s) => {
+              const d = subs[s.key];
+              const subRows = d === undefined || typeof d === "string" ? [] : fileChoices(d.attachments, []);
+              const id = `new-task-file-${s.key}`;
+              const checked = subPicks[s.key] ?? new Set<string>();
+              return (
+                <section key={s.key} aria-label={`Files of ${s.key}`} className="grid gap-1 border-l-2 pl-2.5">
+                  <p className="m-0 text-sm">
+                    <span translate="no" className="font-mono text-ink-2">
+                      {s.key}
+                    </span>{" "}
+                    <span className="[overflow-wrap:anywhere]">{s.summary}</span>
+                  </p>
+                  {d === undefined ? (
+                    <p role="status" className="m-0 text-xs text-ink-2">
+                      Reading the files of {s.key}…
+                    </p>
+                  ) : typeof d === "string" ? (
+                    <p role="alert" className="m-0 text-xs text-destructive">
+                      Cannot read the files of {s.key}. {d} The app uses the file setting for it.
+                    </p>
+                  ) : subRows.length ? (
+                    <FilePicker
+                      id={id}
+                      rows={subRows}
+                      checked={checked}
+                      disabled={busy}
+                      note={`${props.runner} reads them for the plan and for the PR of ${s.key}.`}
+                      onToggle={(r, on) =>
+                        on
+                          ? policy.ask(askText(props.runner, [r], boxId(id, r)), () => tickSub(s.key, [r.id], true))
+                          : tickSub(s.key, [r.id], false)
+                      }
+                      onAll={() => {
+                        const todo = subRows.filter((r) => r.why === null && !checked.has(r.id));
+                        const first = boxId(id, todo[0] ?? { id: "" });
+                        policy.ask(askText(props.runner, todo, first), () => {
+                          tickSub(
+                            s.key,
+                            todo.map((r) => r.id),
+                            true,
+                          );
+                          requestAnimationFrame(() => document.getElementById(first)?.focus());
+                        });
+                      }}
+                    />
+                  ) : (
+                    <p className="m-0 text-xs text-ink-2">No files.</p>
+                  )}
+                </section>
+              );
+            })}
         </div>
       )}
       {error && (

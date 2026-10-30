@@ -317,6 +317,34 @@ test("lock_wait counts each wait", () => expect(readFileSync("lib/lock.c", "utf8
 `;
 const MULTI_LOCK = "static int waits;\n\nint lock_waits(void) { return waits; }\n\nvoid lock_wait(void) { waits++; }\n";
 
+// A task with sub-tasks (docs/plans/review-v2/spec.md section 6.20): the parent ABC-10730 on PROJ1/sample-repo-4. ABC-10731 is done,
+// ABC-10732 builds first, ABC-10733 starts after it merges, and ABC-10734 builds on top of it. The task comes after ABC-10720, so the
+// fake CLI gives it the third spec run and the third implement runs. Only the first part builds in the demo.
+const SUB_KEY = "ABC-10730";
+const subPart = (n: number, key: string, title: string, start: string, after: string | null, reason: string) => ({
+  ...TASK_SPEC.parts[0],
+  n,
+  title,
+  goal: `${title}.`,
+  lines: 40 * n,
+  keys: [key],
+  start,
+  after,
+  startReason: reason,
+});
+const SUB_SPEC = {
+  ...TASK_SPEC,
+  title: "Split the cache work into sub-tasks",
+  estimate: { parts: 3, lines: 240, files: 4, modules: ["cache"], db: false, api: false, unknowns: [] },
+  parts: [
+    subPart(1, "ABC-10732", "Lock per entry", "base", null, "It needs no other sub-task."),
+    subPart(2, "ABC-10733", "Report the lock wait", "merge", "1", "It reads the lock of ABC-10732 (link: is blocked by ABC-10732)."),
+    subPart(3, "ABC-10734", "Test the flush order", "stack", "1", "Its tests call the new lock of ABC-10732."),
+  ],
+  maxOpen: 2,
+  maxOpenReason: "Two sub-tasks can run side by side, and your PRs take about 2 days to merge.",
+};
+
 // The verify phase of a review run gets one tool call and no subagent (docs/plans/review-v2/spec.md section 1.6).
 const NO_AGENTS = claudeStream(claudeDir, "check", "claude/b6-hostile-repo.jsonl");
 runner.write({
@@ -330,14 +358,16 @@ runner.write({
   spec: TASK_SPEC,
   taskReview: { summary: "The lock moves into the loop.", risks: [], questions: [], findings: [], coverage: READ_FLUSH },
   seq: {
-    spec: [{ spec: TASK_SPEC }, { spec: MULTI_SPEC }],
+    spec: [{ spec: TASK_SPEC }, { spec: MULTI_SPEC }, { spec: SUB_SPEC }],
     "implement:tests": [
       { writes: [{ path: "repo/tests/flush.test.ts", text: TASK_TEST }] },
       { writes: [{ path: "repo/tests/lock.test.ts", text: MULTI_TEST }] },
+      { writes: [{ path: "repo/tests/flush.test.ts", text: TASK_TEST }] },
     ],
     "implement:implement": [
       { writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] },
       { writes: [{ path: "repo/lib/lock.c", text: MULTI_LOCK }] },
+      { writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] },
     ],
     "implement:fix": [{ writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] }],
   },
@@ -896,6 +926,17 @@ const multi = await taskRepoSet(claudeDir, fake, "PROJ1", {
   lib: { "lock.c": "int lock_waits(void) { return 0; }\n" },
 });
 jira.addIssue(MULTI_KEY, "Count the lock waits");
+// The task with sub-tasks: ABC-10733 is blocked by ABC-10732 in the tracker.
+jira.addSubtasks(
+  SUB_KEY,
+  [
+    { key: "ABC-10731", summary: "Batch the cache writes", category: "done" },
+    { key: "ABC-10732", summary: "Take the lock per entry", category: "indeterminate" },
+    { key: "ABC-10733", summary: "Report the lock wait", category: "new" },
+    { key: "ABC-10734", summary: "Test the flush order", category: "new" },
+  ],
+  [["ABC-10733", "ABC-10732"]],
+);
 
 // docs/plans/ci-builds.md, Layer A: the build statuses by commit. PR 81 alone has HEAD_B, so its build fails and the others pass.
 // repoWrites replaces the stats route, so this comes after the last call.

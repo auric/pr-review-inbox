@@ -13,14 +13,17 @@ import type {
   RepoTaskSettingsDto,
   RunDetail,
   TaskAnswersInput,
+  TaskContextDto,
   TaskCreateInput,
   TaskDiffDto,
   TaskDto,
   TaskIssueDto,
+  TaskJiraMoveDto,
   TaskPlanInput,
   TaskProfileDto,
   TaskRepoListDto,
   TaskRowDto,
+  TaskTransitionsDto,
 } from "../../shared/dto";
 import type { TaskDoc, TaskSize } from "../../shared/task";
 import { api } from "../api";
@@ -132,6 +135,30 @@ export async function readIssue(key: string): Promise<TaskIssueDto> {
   return read<TaskIssueDto>(await api.api.tasks.issue.$post({ json: { key } }));
 }
 
+// The issue tracker of a task: meta gives its id, and its id names the tracker routes of a task (spec.md section 6.20.12).
+export type TrackerId = TaskContextDto["source"];
+
+// POST /api/tasks/:id/<tracker>-check (spec.md section 6.20.12): the status read when the Task view opens. The server reads at most
+// once per minute, so each open may call it.
+export async function checkTracker(qc: QueryClient, id: number, source: TrackerId): Promise<void> {
+  const dto = await read<TaskDto>(await api.api.tasks[":id"][`${source}-check`].$post({ param: id$(id) }));
+  qc.setQueryData(["task", id], dto);
+}
+
+// GET /api/tasks/:id/<tracker>/:key/transitions: the moves that the tracker offers for the key now. A read only.
+export async function readTransitions(id: number, source: TrackerId, key: string): Promise<TaskTransitionsDto> {
+  return read<TaskTransitionsDto>(await api.api.tasks[":id"][source][":key"].transitions.$get({ param: { id: String(id), key } }));
+}
+
+// POST /api/tasks/:id/<tracker>/:key/transitions: the only tracker write. Only the confirm of the move dialog calls it.
+export async function moveIssue(qc: QueryClient, id: number, source: TrackerId, key: string, transition: string) {
+  const dto = await read<TaskJiraMoveDto>(
+    await api.api.tasks[":id"][source][":key"].transitions.$post({ param: { id: String(id), key }, json: { id: transition } }),
+  );
+  qc.setQueryData(["task", id], dto.task);
+  return dto;
+}
+
 // PUT /api/tasks/:id/files/:att (spec.md section 6.17): a tick downloads the file once and includes it. The answer holds the task.
 export async function putTaskFile(qc: QueryClient, id: number, att: string, include: boolean): Promise<TaskDto> {
   const dto = await read<TaskDto>(await api.api.tasks[":id"].files[":att"].$put({ param: { id: String(id), att }, json: { include } }));
@@ -158,11 +185,18 @@ export type TaskAction =
   | { kind: "prs"; part: number; rows: { taskRepo: number; reviewers: string[] }[] }
   | { kind: "pointer"; taskPr: number; newest?: true }
   | { kind: "fix"; part: number }
-  // spec.md section 6.18.6: a send of the Tell box (the part of the current state), "Update from <base>", and "Undo the update".
-  | { kind: "instruct"; text: string }
+  // spec.md section 6.18.6: a send of the Tell box, "Update from <base>", and "Undo the update". part: the focused part of a task
+  // with sub-tasks (spec.md section 6.20.12); absent takes the part of the current state.
+  | { kind: "instruct"; text: string; part?: number }
   | { kind: "update" | "undo"; part: number }
   // spec.md section 6.18.5: the base check before the PR dialog.
-  | { kind: "base-check" };
+  | { kind: "base-check" }
+  // spec.md section 6.20.12: "Ask the runner again" of the plan screen, the part routes, and "Read the tracker again".
+  | { kind: "plan-again"; text: string }
+  | { kind: "push" | "wait-merge" | "drop"; part: number }
+  | { kind: "move"; part: number; push?: true }
+  | { kind: "start"; part: number }
+  | { kind: "tracker-read"; source: TrackerId };
 
 async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
   const param = id$(t.id);
@@ -219,13 +253,34 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
     case "fix":
       return read(await tasks.parts[":part"].fix.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "instruct":
-      return read(await tasks.instructions.$post({ param, json: { version, text: a.text } }));
+      return read(
+        await tasks.instructions.$post({ param, json: { version, text: a.text, ...(a.part !== undefined && { part: a.part }) } }),
+      );
     case "update":
       return read(await tasks.parts[":part"].update.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "undo":
       return read(await tasks.parts[":part"].update.undo.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "base-check":
       return read(await tasks["base-check"].$post({ param }));
+    case "plan-again":
+      return read(await tasks["plan-again"].$post({ param, json: { version, text: a.text } }));
+    case "push":
+      return read(await tasks.parts[":part"].push.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "wait-merge":
+      return read(await tasks.parts[":part"]["wait-merge"].$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "drop":
+      return read(await tasks.parts[":part"].drop.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "move":
+      return read(
+        await tasks.parts[":part"].move.$post({
+          param: { ...param, part: String(a.part) },
+          json: { version, ...(a.push && { push: a.push }) },
+        }),
+      );
+    case "start":
+      return read(await tasks.parts[":part"].start.$post({ param: { ...param, part: String(a.part) }, json: { version, override: true } }));
+    case "tracker-read":
+      return read(await tasks[`${a.source}-read`].$post({ param, json: { version } }));
   }
 }
 

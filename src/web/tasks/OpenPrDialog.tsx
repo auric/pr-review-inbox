@@ -16,7 +16,7 @@ import type { TaskDto, TaskPartDto, TaskPrDto } from "../../shared/dto";
 import { MAX_TASK_REVIEWERS } from "../../shared/dto";
 import { dialogKeys } from "../fix/CloneDialog";
 import { useTaskDiff } from "./data";
-import { prName, prRowLook, type RowLook, rowSize } from "./model";
+import { prName, prRowLook, prTitle, type RowLook, rowSize } from "./model";
 
 export function OpenPrDialog(props: {
   t: TaskDto;
@@ -31,18 +31,20 @@ export function OpenPrDialog(props: {
   const [reviewers, setReviewers] = useState<string[]>(t.reviewers);
   const diff = useTaskDiff(t.id, part.id, part.head, props.open);
   const files = diff.data?.files.length;
+  // spec.md section 6.20.6: a part of a task with sub-tasks targets its own base, the branch of its lower part or the task base.
+  const target = t.subtasks ? part.baseBranch : t.targetBranch;
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="sm:max-w-[520px]" onKeyDown={dialogKeys(() => props.onOpenChange(false))}>
         <DialogHeader>
           <DialogTitle>
-            Push <span translate="no">{part.branch}</span> and open a PR into <span translate="no">{t.targetBranch}</span>?
+            Push <span translate="no">{part.branch}</span> and open a PR into <span translate="no">{target}</span>?
           </DialogTitle>
-          <DialogDescription>The app pushes only this branch, and only now. It never pushes to {t.targetBranch}.</DialogDescription>
+          <DialogDescription>The app pushes only this branch, and only now. It never pushes to {target}.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 text-sm">
           <p className="m-0">
-            <span className="text-ink-2">Title:</span> {t.key}: {t.title}
+            <span className="text-ink-2">Title:</span> {prTitle(t, part)}
           </p>
           <p className="m-0 text-ink-2">
             {files === undefined ? "" : `${files} ${files === 1 ? "file" : "files"}, `}
