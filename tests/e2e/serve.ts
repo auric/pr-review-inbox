@@ -873,9 +873,11 @@ r[key("POST", "/__control/task-repos")] = async (req) => {
 };
 // ---------- Sub-tasks (docs/plans/review-v2/spec.md section 6.20, WP-ST6) ----------
 // openPr: the open-PR list of PROJ1/sample-repo-2 comes back with one open PR of ABC-12 from feature/ABC-12-event-generator, so the plan
-// tracks it. Answers its PR ID. A reset removes the list route again.
+// tracks it. Answers its PR ID. A reset removes the list route again. add: a colleague adds the sub-task ABC-17 to ABC-10 in Jira
+// (spec.md section 6.20.14). A reset lists the four sub-tasks again.
 r[key("POST", "/__control/subtasks")] = async (req) => {
-  const c = (await req.json()) as { openPr?: boolean };
+  const c = (await req.json()) as { openPr?: boolean; add?: boolean };
+  if (c.add) jira.addSubtask("ABC-10", { key: "ABC-17", summary: "Add the lock probe", category: "new" });
   if (!c.openPr || !listTaskPrs) return ok({ pr: null });
   r[key("GET", `${taskRepo.path}/pull-requests`)] = listTaskPrs;
   const target = (A.pr.toRef as unknown as { displayId: string }).displayId;

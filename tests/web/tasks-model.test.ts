@@ -22,6 +22,7 @@ import type {
 import { stepDetail, taskProfileId } from "../../src/shared/task";
 import {
   ACCESS_TEXT,
+  addPlanSentence,
   basePicks,
   branchApproval,
   branchesError,
@@ -205,6 +206,7 @@ const PLAN: NonNullable<TaskDto["plan"]> = {
   maxOpen: null,
   starts: [],
   notes: [],
+  adding: false,
 };
 const ESTIMATE: NonNullable<TaskDto["estimate"]> = { parts: 1, lines: 80, files: 1, modules: [], db: false, api: false, unknowns: [] };
 
@@ -1482,6 +1484,42 @@ describe("sub-task rows: one sentence and one actor (spec.md section 6.20.13)", 
       "Claude planned no PR for ABC-14.",
       "ABC-17 is new in Tracker.",
     ]);
+  });
+
+  test("spec.md section 6.20.14: a new key offers Add to plan, a removed planned key offers Drop, and a changed plan waits for its approval", () => {
+    const t = subTask([p13({ state: "implementing" }), p14()], {
+      subtasks: [sub("ABC-13"), sub("ABC-14", { removed: NOW }), sub("ABC-17", { added: NOW })],
+    });
+    const rows = subtaskRows(t, SUB_OPTS);
+    expect(rows.map((r) => [r.key, r.text, r.actor, r.action?.kind ?? null, r.action?.label ?? null])).toEqual([
+      ["ABC-13", "Claude builds it.", "Claude", null, null],
+      ["ABC-14", "Removed in Tracker.", "You", "drop", "Drop"],
+      ["ABC-17", "ABC-17 is new in Tracker.", "You", "add-plan", "Add to plan"],
+    ]);
+    const start = {
+      n: 4,
+      keys: ["ABC-17"],
+      start: "base" as const,
+      after: null,
+      reason: "",
+      skip: false,
+      title: "Add the probe",
+      lines: 120,
+    };
+    const adding = { ...t, plan: { ...PLAN, approved: true, adding: true, starts: [start] } };
+    expect(subtaskRows(adding, SUB_OPTS).find((r) => r.key === "ABC-17")).toMatchObject({
+      text: "Claude planned ABC-17. Approve the changed plan.",
+      action: null,
+    });
+    const v = subtaskView(adding, null, SUB_OPTS);
+    expect([v.status, v.primary?.label, v.screen]).toEqual([
+      "The changed plan is ready: 1 new sub-task, about 120 changed lines.",
+      "Approve the changed plan",
+      "plan",
+    ]);
+    expect(addPlanSentence({ ...adding, plan: { ...adding.plan, starts: [] } })).toBe(
+      "The changed plan adds no sub-task. Approve it to close it.",
+    );
   });
 
   test("the row hints say what does not fit and the parent hint comes when every part merged", () => {

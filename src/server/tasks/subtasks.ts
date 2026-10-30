@@ -94,14 +94,16 @@ export type FoundDeps = {
 };
 
 // The found work at the spec run start (spec.md section 6.20.2), in the main repository only. head: the fetched base head. It writes
-// found_json of each open sub-task and returns the lines of failed reads. A failed read leaves the rest of the search.
+// found_json of each open sub-task and returns the lines of failed reads. A failed read leaves the rest of the search. keys: only these
+// sub-tasks, for the plan run of "Add to plan" (section 6.20.14).
 export async function findWork(
   db: Database,
   deps: FoundDeps,
   t: { id: number; project: string; repo: string },
   head: string,
+  keys?: ReadonlySet<string>,
 ): Promise<string[]> {
-  const rows = subtaskRows(db, t.id).filter(isOpen);
+  const rows = subtaskRows(db, t.id).filter((r) => isOpen(r) && (!keys || keys.has(r.key)));
   if (!rows.length) return [];
   const notes: string[] = [];
   const why = (e: unknown) => noUrl((e as Error).message);
@@ -302,11 +304,12 @@ const cycleText = ([a, b]: [SubtaskStart, SubtaskStart], live: SubtaskStart[]) =
   `${labelOf(a, live)} cannot build on ${labelOf(b, live)}, because ${labelOf(b, live)} builds on ${labelOf(a, live)}.`;
 
 // The app checks of a spec result in sub-task mode (spec.md section 6.20.4). They use no guess. Each failed check gives a note, which
-// is also a coverage line. base: the base branch of the task.
-export function checkSubtaskPlan(r: SpecResult, rows: SubtaskRow[], base: string): SubtaskPlan {
+// is also a coverage line. base: the base branch of the task. outside: the keys of the parts of an approved plan, which a part of
+// "Add to plan" can build on (section 6.20.14).
+export function checkSubtaskPlan(r: SpecResult, rows: SubtaskRow[], base: string, outside: Iterable<string> = []): SubtaskPlan {
   const notes: string[] = [];
   const can = buildable(rows);
-  const tracked = new Set(rows.filter((x) => trackedPr(x) !== null).map((x) => x.key));
+  const tracked = new Set([...rows.filter((x) => trackedPr(x) !== null).map((x) => x.key), ...outside]);
   const starts: SubtaskStart[] = r.parts.map((p, i) => {
     const n = i + 1;
     const keys = [...new Set(p.keys)].filter((k) => {
@@ -358,7 +361,7 @@ export type ApprovalInput = {
 
 // The checks of a sub-task plan approval (spec.md sections 6.20.4 and 6.20.5) and its part rows. A string is the sentence of the 409, a
 // {bad} the sentence of the 400. A plan part that builds no open sub-task without a tracked PR gets no row. The approval pushes nothing
-// and posts nothing.
+// and posts nothing. outside: key to branch of each part of an approved plan, which a part of "Add to plan" can build on (section 6.20.14).
 export function approveSubtasks(o: {
   t: { key: string; title: string; target_branch: string };
   plan: { n: number; title: string }[];
@@ -367,6 +370,7 @@ export function approveSubtasks(o: {
   input: ApprovalInput | undefined;
   prefix: string;
   specDir: string;
+  outside?: ReadonlyMap<string, string>;
 }): { parts: PlannedPart[]; maxOpen: number } | string | { bad: string } {
   const { t, rows, input } = o;
   const given = new Map((input?.parts ?? []).map((p) => [p.n, p]));
@@ -396,7 +400,7 @@ export function approveSubtasks(o: {
     ];
   });
   for (const n of given.keys()) if (!live.some((s) => s.n === n)) return { bad: `Part ${n} is not in the plan.` };
-  const trackedKeys = new Set(tracked.keys());
+  const trackedKeys = new Set([...tracked.keys(), ...(o.outside?.keys() ?? [])]);
   for (const s of live) {
     const ok = afterCheck(s, live, rows, trackedKeys);
     if (ok === null) return `${labelOf(s, live)} builds on ${s.after ?? "nothing"}, which is no part of the plan.`;
@@ -454,7 +458,8 @@ export function approveSubtasks(o: {
     const after = p.after;
     if (p.start !== "stack" || after === null) continue;
     const lower = /^\d+$/.test(after) ? parts.find((x) => x.n === Number(after)) : parts.find((x) => x.pr && x.keys[0] === after);
-    if (lower) p.base = lower.branch;
+    const branch = lower?.branch ?? o.outside?.get(after);
+    if (branch) p.base = branch;
   }
   return { parts, maxOpen: Math.min(input?.maxOpen ?? o.sub?.maxOpen.value ?? MAX_OPEN_DEFAULT, MAX_OPEN_CAP) };
 }

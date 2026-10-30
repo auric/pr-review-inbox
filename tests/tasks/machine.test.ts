@@ -38,7 +38,7 @@ const TASK_TABLE: Record<TaskState, Partial<Record<TaskEventType, TaskState>>> =
   spec_pr_open: { SPEC_GATE_PASSED: "spec_approved", OVERRIDE: "spec_approved", CLOSE: "done", STOP: "stopped", FAIL: "failed" },
   spec_approved: { START_BUILDING: "implementing", STOP: "stopped", FAIL: "failed" },
   implementing: { PART_READY: "implementing", LAST_PR_OPEN: "ready", STOP: "stopped", FAIL: "failed" },
-  ready: { ALL_MERGED: "done", CLOSE: "done", STOP: "stopped", FAIL: "failed" },
+  ready: { ALL_MERGED: "done", CLOSE: "done", START_BUILDING: "implementing", STOP: "stopped", FAIL: "failed" },
   done: { CLOSE: "done" },
   failed: {},
   stopped: { RESUME: "implementing", CLOSE: "done", FAIL: "failed" },
@@ -196,6 +196,7 @@ describe("machineMermaid", () => {
   implementing --> failed: FAIL
   ready --> done: ALL_MERGED
   ready --> done: CLOSE
+  ready --> implementing: START_BUILDING
   ready --> stopped: STOP
   ready --> failed: FAIL
   stopped --> interview: RESUME if stoppedFrom interview

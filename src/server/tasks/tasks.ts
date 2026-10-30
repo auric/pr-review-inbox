@@ -128,6 +128,7 @@ import {
   largeRepoProblem,
   NEW_COMMAND,
   type Plan,
+  type PlanPart,
   parsePlan,
   parseTasks,
   renderDocs,
@@ -144,6 +145,7 @@ import {
   type PlannedPart,
   prHistoryFile,
   type SubtaskPlan,
+  type SubtaskRow,
   saveSubtasks,
   subtaskDtos,
   subtaskRows,
@@ -286,10 +288,14 @@ const Q = {
       created_at, updated_at)
     VALUES ($task, $ord, 'single', $title, $branch, $base, $pr, $remote, $state, $keys, $start, $spec_dir, $adopted, $now, $now) RETURNING id`,
   afterPart: "UPDATE task_part SET after_part = $after WHERE id = $id",
-  addedSubtasks: "SELECT 1 FROM task_subtask WHERE task = $task AND added_at IS NOT NULL AND removed_at IS NULL",
   // spec.md section 6.20.11: the tasks that the status read of the sync covers.
   subtaskTasks: "SELECT id FROM task WHERE subtasks = 1 AND state NOT IN ('done', 'failed') ORDER BY id",
   subtaskStatus: "UPDATE task_subtask SET status = $status, category = $category, status_at = $at WHERE task = $task AND key = $key",
+  // spec.md section 6.20.14: a key that is new in Jira after the approval, and a key that Jira no longer lists.
+  subtaskNew: `INSERT INTO task_subtask (task, key, ord, summary, status, category, issue_json, links_json, read_at, status_at, added_at)
+    VALUES ($task, $key, $ord, $summary, $status, $category, NULL, '[]', $at, $at, $at)`,
+  subtaskGone: "UPDATE task_subtask SET removed_at = $at WHERE task = $task AND key = $key AND removed_at IS NULL",
+  subtaskBack: "UPDATE task_subtask SET removed_at = NULL WHERE task = $task AND key = $key",
   // "Read Jira again" (spec.md section 6.20.12). A done sub-task keeps its last text and links.
   subtaskRead: `UPDATE task_subtask SET summary = $summary, status = $status, category = $category, issue_json = COALESCE($issue, issue_json),
       links_json = COALESCE($links, links_json), read_at = $at, status_at = $at
@@ -610,21 +616,60 @@ function commandsOf(p: Plan, saved: TaskCommand[]): (TaskCommand & { saved: bool
 }
 
 // docs_json.subtasks: the checked sub-task plan of the spec run (spec.md section 6.20.4). null for a task without sub-tasks.
-type SubDocs = Docs & { subtasks?: SubtaskPlan };
+// docs_json.adding: the changed plan of "Add to plan" until its approval (section 6.20.14). Its part numbers come after every part
+// of the task, and its parts and map entries join parsed at the approval.
+type Adding = SubtaskPlan & { parts: PlanPart[]; map: Plan["map"] };
+type SubDocs = Docs & { subtasks?: SubtaskPlan; adding?: Adding };
 const subPlanOf = (docs: Docs): SubtaskPlan | null => (docs as SubDocs).subtasks ?? null;
+const addingOf = (docs: Docs | null): Adding | null => (docs as SubDocs | null)?.adding ?? null;
+
+// The prompt lines of the plan run of "Add to plan" (spec.md section 6.20.14).
+const addLines = (keys: string[]) =>
+  [
+    "# Add to the plan",
+    "",
+    `The plan is approved. These sub-tasks are new in Jira: ${keys.join(", ")}.`,
+    "Plan parts for these sub-tasks only. The other sub-tasks have parts already.",
+    "A new part can build on a part of the approved plan. Then set after to the key of its sub-task.",
+  ].join("\n");
+
+// The checked plan of "Add to plan" with each part number after top, so the new parts never take the number of a part of the task.
+// Task IDs T<part>.<n> and acceptance IDs A<part>.<n> follow the new numbers.
+function shiftAdded(plan: Plan, sub: SubtaskPlan, top: number): Adding {
+  const id = (s: string) => s.replace(/^([TA])(\d+)\./, (_, k: string, n: string) => `${k}${Number(n) + top}.`);
+  return {
+    ...sub,
+    starts: sub.starts.map((s) => ({
+      ...s,
+      n: s.n + top,
+      after: s.after !== null && /^\d+$/.test(s.after) ? String(Number(s.after) + top) : s.after,
+    })),
+    parts: plan.parts.map((p) => ({
+      ...p,
+      n: p.n + top,
+      acceptance: p.acceptance.map((a) => ({ ...a, id: id(a.id) })),
+      tests: p.tests.map((x) => ({ ...x, proves: x.proves.map(id) })),
+      tasks: p.tasks.map((x) => ({ ...x, id: id(x.id) })),
+    })),
+    map: plan.map,
+  };
+}
 
 function planDto(db: Database, t: TaskRow, docs: Docs): TaskPlanDto {
   const repo = repoSettings(db, t.project, t.repo);
   const budget = settingsOf(t).lineBudget ?? repo.lineBudget;
   const floor = sizeFloor(docs.parsed.estimate, budget);
-  const sub = subPlanOf(docs);
+  const adding = addingOf(docs);
+  const sub = adding ?? subPlanOf(docs);
+  const parts = adding?.parts ?? docs.parsed.parts;
   return {
     maxOpen: sub?.maxOpen ?? null,
     starts: (sub?.starts ?? []).map((x) => {
-      const part = docs.parsed.parts.find((p) => p.n === x.n);
+      const part = parts.find((p) => p.n === x.n);
       return { ...x, title: part?.title ?? "", lines: part?.lines ?? null };
     }),
     notes: sub?.notes ?? [],
+    adding: adding !== null,
     proposed: docs.parsed.proposed,
     minimum: floor.minimum,
     rules: floor.rules,
@@ -1121,9 +1166,11 @@ export async function preselectBase(d: {
 // spec.md sections 6.20.5 and 6.20.7: the part rows of an approved sub-task plan, in the transaction of the approval. A tracked PR gets
 // ADOPT_OPEN or ADOPT_MERGED, and the task follows it, so the sync reads it. A plan with tracked PRs only goes to ready. t.version: the
 // version after APPROVE. Nothing goes to Bitbucket or Jira.
-function approveParts(db: Database, t: TaskRow, parts: PlannedPart[], at: number) {
+// fixed: the part rows of an approved plan when "Add to plan" adds parts (spec.md section 6.20.14). A new part builds on one of them
+// by its key, and the new ords come after theirs.
+function approveParts(db: Database, t: TaskRow, parts: PlannedPart[], at: number, fixed: PartRow[] = []) {
   const state = String(initialTransition(partMachine)[0].value);
-  const top = Math.max(0, ...parts.map((p) => p.n ?? 0));
+  const top = Math.max(0, ...parts.map((p) => p.n ?? 0), ...fixed.map((p) => p.ord));
   const rows: { p: PlannedPart; id: number }[] = [];
   for (const p of parts) {
     const followed = p.pr ? followKey(db, { project: t.project, repo: t.repo, pr_id: p.pr.pr }) : null;
@@ -1148,7 +1195,9 @@ function approveParts(db: Database, t: TaskRow, parts: PlannedPart[], at: number
     const after = p.after;
     if (after === null) continue;
     const lower = /^\d+$/.test(after) ? rows.find((x) => x.p.n === Number(after)) : rows.find((x) => x.p.pr && x.p.keys[0] === after);
-    if (lower) db.query(Q.afterPart).run({ id, after: lower.id });
+    const old = lower ? null : fixed.find((x) => x.state !== "abandoned" && keysOf(x).includes(after));
+    const lowerId = lower?.id ?? old?.id;
+    if (lowerId !== undefined) db.query(Q.afterPart).run({ id, after: lowerId });
   }
   let version = t.version;
   for (const { p, id } of rows) {
@@ -1157,7 +1206,7 @@ function approveParts(db: Database, t: TaskRow, parts: PlannedPart[], at: number
     if (r.status !== 200) throw new Refused(r.error);
     version = r.version;
   }
-  if (rows.every((x) => x.p.pr)) {
+  if (!fixed.length && rows.every((x) => x.p.pr)) {
     const r = advance(db, { task: t.id, version }, { type: "LAST_PR_OPEN" }, {}, at);
     if (r.status !== 200) throw new Refused(r.error);
   }
@@ -1311,7 +1360,9 @@ export function createTaskService(opts: TaskServiceOptions) {
     }
   }
 
-  function specRun(db: Database, t: TaskRow): TaskRunStart {
+  // add: the keys of "Add to plan" (spec.md section 6.20.14). The run then plans parts for these keys only, and its checked plan waits
+  // in docs_json.adding. The approved plan and the task fields stay as they are.
+  function specRun(db: Database, t: TaskRow, add?: string[]): TaskRunStart {
     const p = profile(t);
     const budget = budgetOf(db, t);
     const { files, attachments } = taskFiles(db, t);
@@ -1350,6 +1401,7 @@ export function createTaskService(opts: TaskServiceOptions) {
             { provider: p, dataDir: review.dataDir, remote: () => review.taskRemote(t.project, t.repo) },
             t,
             head,
+            add && new Set(add),
           );
           for (const f of taskFiles(d, t, { searched: true, notes }).files) {
             const i = untrusted.findIndex((x) => x.name === f.name);
@@ -1369,8 +1421,8 @@ export function createTaskService(opts: TaskServiceOptions) {
       maxTurns: SPEC_TURNS,
       schema: specJsonSchema(),
       agent: specAgent(p, budget, process.platform, subtasks),
-      prompt: (head, instructions) =>
-        buildSpecPrompt({
+      prompt: (head, instructions) => {
+        const text = buildSpecPrompt({
           key: t.key,
           project: t.project,
           repo: t.repo,
@@ -1381,7 +1433,9 @@ export function createTaskService(opts: TaskServiceOptions) {
           answers: answers !== null,
           instructions,
           budget,
-        }),
+        });
+        return add ? `${text}\n\n${addLines(add)}` : text;
+      },
       judge: (o, ws, servers, gaps) =>
         judgeTask(o, specResult, "spec", servers, gaps, async (r) => {
           const base = ws.sourceHead;
@@ -1401,7 +1455,12 @@ export function createTaskService(opts: TaskServiceOptions) {
             skipped,
           );
           if (subtasks) {
-            sub = checkSubtaskPlan(r, subtaskRows(db, t.id), t.target_branch);
+            const all = subtaskRows(db, t.id);
+            // spec.md section 6.20.14: only the new keys can get parts. A part can build on a part of the approved plan by its key.
+            const outside = add
+              ? (db.query(Q.parts).all({ id: t.id }) as PartRow[]).filter((x) => x.state !== "abandoned").flatMap(keysOf)
+              : [];
+            sub = checkSubtaskPlan(r, add ? all.filter((x) => add.includes(x.key)) : all, t.target_branch, outside);
             skipped.push(...sub.notes);
           }
           plan = toPlan(r, base, missing, skipped);
@@ -1411,6 +1470,15 @@ export function createTaskService(opts: TaskServiceOptions) {
       finish: (d, run, e) => {
         const step = endStep(d, run.id, e);
         const cur = taskRow(d, t.id);
+        if (add) {
+          // A failed run keeps the approved plan and the build. The Log tab shows the step, and "Add to plan" can run again.
+          const docs = cur && (cur.state === "implementing" || cur.state === "ready") ? docsOf(cur) : null;
+          if (!cur || !docs || !plan || !sub || !e.result) return undefined;
+          const ords = (d.query(Q.parts).all({ id: t.id }) as PartRow[]).map((x) => x.ord);
+          const adding = shiftAdded(plan, sub, Math.max(0, ...ords, ...docs.parsed.parts.map((x) => x.n)));
+          patch(d, t.id, cur.version, { docs_json: JSON.stringify({ ...docs, adding }) }, now());
+          return undefined;
+        }
         if (cur?.state !== "spec_draft") return undefined;
         if (!plan || !e.result) {
           stopTask(d, cur, step, e);
@@ -1444,7 +1512,8 @@ export function createTaskService(opts: TaskServiceOptions) {
         for (const x of proposals) d.query(Q.propose).run({ task: t.id, project: x.project, repo: x.repo, reason: x.reason, now: now() });
         return undefined;
       },
-      keep: "base",
+      // The parts of "Add to plan" start from the newest base head, so the run keeps no base ref.
+      ...(!add && { keep: "base" }),
     };
   }
 
@@ -1809,6 +1878,8 @@ export function createTaskService(opts: TaskServiceOptions) {
 
   // POST /api/tasks/:id/plan: the plan approval with the size and the picked commands. The first plan of a repository needs the warning.
   function plan(db: Database, id: number, input: TaskPlanInput): TaskResult {
+    const t0 = taskRow(db, id);
+    if (t0?.subtasks === 1 && (t0.state === "implementing" || t0.state === "ready")) return approveAdded(db, t0, input);
     const l = loadPlan(db, id, input.version);
     if ("status" in l) return l;
     const { t, docs } = l;
@@ -1911,19 +1982,67 @@ export function createTaskService(opts: TaskServiceOptions) {
     return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
+  // POST /api/tasks/:id/plan while the task builds (spec.md section 6.20.14): the approval of the changed plan of "Add to plan". It adds
+  // parts for the new keys only. Every part of the approved plan stays as it is, so a start for one of them is refused with 409. An
+  // approval with no part ends the changed plan. The size, the commands, and the branch prefix stay those of the first approval.
+  function approveAdded(db: Database, t: TaskRow, input: TaskPlanInput): TaskResult {
+    const id = t.id;
+    if (t.version !== input.version) return conflict(db, t, TASK_CHANGED);
+    const docs = docsOf(t) as SubDocs | null;
+    const adding = addingOf(docs);
+    if (!docs || !adding) return conflict(db, t, "No changed plan waits for the approval.");
+    const fixed = db.query(Q.parts).all({ id }) as PartRow[];
+    const names = partNames(t.key, fixed);
+    for (const p of input.subtasks?.parts ?? []) {
+      const old = fixed.find((x) => x.ord === p.n);
+      if (old) return conflict(db, t, `${names.get(old.id)?.text ?? t.key} stays as it is. The changed plan only adds new sub-tasks.`);
+    }
+    const s = settingsOf(t);
+    const live = fixed.filter((x) => x.state !== "abandoned");
+    const a = approveSubtasks({
+      t,
+      plan: adding.parts,
+      sub: adding,
+      rows: newSubtasks(db, id),
+      input: input.subtasks ?? { parts: [], track: [], maxOpen: s.maxOpen ?? adding.maxOpen.value },
+      prefix: s.branchPrefix ?? (branchPrefixesOf(settings.config())[0] as string),
+      specDir: repoSettings(db, t.project, t.repo).specDir,
+      outside: new Map(live.flatMap((x) => keysOf(x).map((k) => [k, x.branch] as const))),
+    });
+    if (typeof a === "string") return conflict(db, t, a);
+    if ("bad" in a) return { status: 400, error: a.bad };
+    try {
+      db.transaction(() => {
+        const at = now();
+        const { adding: _, ...rest } = docs;
+        const next: SubDocs = {
+          ...rest,
+          version: docs.version + 1,
+          parsed: { ...docs.parsed, parts: [...docs.parsed.parts, ...adding.parts], map: [...docs.parsed.map, ...adding.map] },
+          ...(rest.subtasks && { subtasks: { ...rest.subtasks, starts: [...rest.subtasks.starts, ...adding.starts] } }),
+        };
+        const settingsJson = JSON.stringify({ ...s, maxOpen: a.maxOpen });
+        const v = patch(db, id, t.version, { docs_json: JSON.stringify(next), settings_json: settingsJson }, at);
+        approveParts(db, { ...t, version: v }, a.parts, at, fixed);
+        // spec.md section 6.20.7: implementing holds while a part waits for its build.
+        const cur = taskRow(db, id) as TaskRow;
+        if (cur.state === "ready" && a.parts.some((p) => !p.pr)) {
+          const r = advance(db, { task: id, version: cur.version }, { type: "START_BUILDING" }, {}, at);
+          if (r.status !== 200) throw new Refused(r.error);
+        }
+      })();
+    } catch (e) {
+      if (!(e instanceof Refused)) throw e;
+      return conflict(db, t, e.message);
+    }
+    changed(id);
+    return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
   // POST /api/tasks/:id/plan-again (spec.md sections 6.12 and 6.20.4): the spec run writes the plan again. The text goes to
   // context/answers.md as one more answered question. The earlier answers stay.
-  function planAgain(db: Database, id: number, input: TaskPlanAgainInput): TaskResult {
-    if (input.add) {
-      const t = taskRow(db, id);
-      if (!t) return { status: 404, error: "Task not found." };
-      // spec.md section 6.20.14: WP-ST7 adds the short plan run of the new keys. No code marks a key as new before it.
-      return conflict(
-        db,
-        t,
-        db.query(Q.addedSubtasks).get({ task: id }) ? "Claude cannot plan new sub-tasks yet." : "No sub-task is new in Jira.",
-      );
-    }
+  async function planAgain(db: Database, id: number, input: TaskPlanAgainInput): Promise<TaskResult> {
+    if (input.add) return addToPlan(db, id, input);
     const l = loadPlan(db, id, input.version);
     if ("status" in l) return l;
     const busy = review.busy();
@@ -1941,6 +2060,85 @@ export function createTaskService(opts: TaskServiceOptions) {
     } catch (e) {
       if (!(e instanceof Refused)) throw e;
       return e.running ? busyResult(e.running) : conflict(db, l.t, e.message);
+    }
+    changed(id);
+    return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
+  // spec.md section 6.20.14: the sub-tasks that are new in Jira after the approval, still listed, and in no part.
+  function newSubtasks(db: Database, id: number): SubtaskRow[] {
+    const taken = new Set((db.query(Q.parts).all({ id }) as PartRow[]).flatMap(keysOf));
+    return subtaskRows(db, id).filter((r) => r.added_at !== null && r.removed_at === null && !taken.has(r.key));
+  }
+
+  // POST /api/tasks/:id/plan-again with add (spec.md section 6.20.14), "Add to plan": one read of each new sub-task, the download of its
+  // ticked files (section 6.20.3), and a short plan run for the new keys only. The changed plan waits for the approval. Only reads go to
+  // Jira. The run gets a fixed line, not the text of the click.
+  async function addToPlan(db: Database, id: number, input: TaskPlanAgainInput): Promise<TaskResult> {
+    const t = taskRow(db, id);
+    if (!t) return { status: 404, error: "Task not found." };
+    const fresh = newSubtasks(db, id).filter((r) => r.category !== "done");
+    if (!fresh.length) return conflict(db, t, "No sub-task is new in Jira.");
+    if (t.version !== input.version) return conflict(db, t, TASK_CHANGED);
+    if (t.state !== "implementing" && t.state !== "ready") return conflict(db, t, TASK_STATE_TEXT[t.state]);
+    if (db.query(Q.busy).get({ id })) return conflict(db, t, "Claude is still working on this task. Wait for the step to end.");
+    const busy = review.busy();
+    if (busy) return busyResult(busy);
+    const source = await jira();
+    if ("status" in source) return source;
+    const siblings = subtaskRows(db, id).map((r) => r.key);
+    const read: { r: SubtaskRow; issue: IssueContext }[] = [];
+    try {
+      for (const r of fresh) {
+        const issue = await source.fetchSubtask(t.key, siblings, r.key);
+        if (!issue) return conflict(db, t, `${r.key} is no sub-task of ${t.key} now. Read Jira again.`);
+        read.push({ r, issue });
+      }
+    } catch (e) {
+      if (!(e instanceof ContextError)) throw e;
+      log(`Jira fetch for a sub-task failed: ${e.message}`);
+      return { status: 502, error: JIRA_FAILED[e.kind] };
+    }
+    // spec.md section 6.17: no form gave a pick for a new sub-task, so the setting askAttachments decides, as at the create click.
+    const askOff = settings.config()?.askAttachments === false;
+    const files: (AttachmentMeta & { issue?: string })[] = [];
+    for (const { r, issue } of askOff ? read : [])
+      for (const a of issue.attachments ?? [])
+        if (!listedOnly(a) && !taskFileDto(db, id, a.id) && !files.some((x) => x.id === a.id)) files.push({ ...a, issue: r.key });
+    const problem = pickProblem(files, usedBytes(db, id));
+    if (problem) return problem;
+    let fetched: Fetched[] = [];
+    if (files.length) {
+      const got = await download(db, files);
+      if ("status" in got) return got;
+      fetched = got.fetched;
+    }
+    try {
+      db.transaction(() => {
+        const at = now();
+        const cur = taskRow(db, id);
+        if (cur?.version !== t.version) throw new Refused(TASK_CHANGED);
+        for (const { r, issue } of read)
+          db.query(Q.subtaskRead).run({
+            task: id,
+            key: r.key,
+            summary: issue.summary,
+            status: issue.status ?? r.status,
+            category: r.category,
+            issue: JSON.stringify(issue),
+            links: JSON.stringify(issue.links ?? []),
+            at,
+          });
+        saveFetched(db, id, fetched);
+        patch(db, id, cur.version, {}, at);
+        const keys = read.map((x) => x.r.key);
+        const s = review.taskRun(db, specRun(db, taskRow(db, id) as TaskRow, keys));
+        if (s.status !== 202) throw new Refused(s.conflict.error, s.conflict);
+      })();
+    } catch (e) {
+      dropFetched(review.dataDir, fetched);
+      if (!(e instanceof Refused)) throw e;
+      return e.running ? busyResult(e.running) : conflict(db, t, e.message);
     }
     changed(id);
     return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
@@ -2145,7 +2343,9 @@ export function createTaskService(opts: TaskServiceOptions) {
   const statusReads = new WeakMap<Database, Map<number, number>>();
 
   // One GET of the parent gives the status of every sub-task. A failed read keeps the stored statuses. maxAge: the minimum time since the
-  // last read. Returns true when a status changed. Keys that are new or gone in Jira are left to "Add to plan" (section 6.20.14).
+  // last read. Returns true when a row changed. spec.md section 6.20.14: a key that Jira no longer lists gets removed_at. After the plan
+  // approval, a key that is new in Jira gets a row with added_at while fewer than SUBTASKS_READ rows are listed. No part follows until
+  // "Add to plan" and the approval of the changed plan.
   async function readStatuses(db: Database, id: number, maxAge: number): Promise<boolean> {
     const t = taskRow(db, id);
     if (t?.subtasks !== 1 || t.state === "done" || t.state === "failed") return false;
@@ -2174,8 +2374,35 @@ export function createTaskService(opts: TaskServiceOptions) {
         moved ||= r.status !== s.status || r.category !== s.category;
         db.query(Q.subtaskStatus).run({ task: id, key: s.key, status: s.status, category: s.category, at });
       }
-      return moved;
+      return markKeys(db, id, list, at) || moved;
     })();
+  }
+
+  // spec.md section 6.20.14: the key changes of one parent read. The caller runs it in its transaction. Returns true when a row changed.
+  function markKeys(db: Database, id: number, list: IssueSubtask[], at: number): boolean {
+    const rows = new Map(subtaskRows(db, id).map((r) => [r.key, r]));
+    const listed = new Set(list.map((s) => s.key));
+    let moved = false;
+    for (const r of rows.values()) {
+      const gone = !listed.has(r.key);
+      if (gone === (r.removed_at !== null)) continue;
+      if (gone) db.query(Q.subtaskGone).run({ task: id, key: r.key, at });
+      else db.query(Q.subtaskBack).run({ task: id, key: r.key });
+      moved = true;
+    }
+    const t = taskRow(db, id);
+    if (t && docsOf(t)?.approved) {
+      let count = [...rows.values()].filter((r) => listed.has(r.key)).length;
+      let ord = Math.max(0, ...[...rows.values()].map((r) => r.ord));
+      for (const s of list) {
+        if (rows.has(s.key) || count >= SUBTASKS_READ) continue;
+        ord++;
+        count++;
+        db.query(Q.subtaskNew).run({ task: id, key: s.key, ord, summary: s.summary, status: s.status, category: s.category, at });
+        moved = true;
+      }
+    }
+    return moved;
   }
 
   // spec.md section 6.20.11: the status read of the sync, at most every JIRA_STATUS_AGE_MS per open task with sub-tasks. It never
@@ -2233,6 +2460,7 @@ export function createTaskService(opts: TaskServiceOptions) {
           links: issue ? JSON.stringify(issue.links ?? []) : null,
           at,
         });
+      if (cur.subtasks === 1) markKeys(db, id, got.issue.subtasks ?? [], at);
     })();
     if (t.subtasks === 1) statusReads.get(db)?.set(id, at);
     changed(id);

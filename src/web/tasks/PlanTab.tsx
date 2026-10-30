@@ -281,6 +281,75 @@ export function PlanApproval(props: {
   );
 }
 
+// spec.md section 6.20.14: the approval of the changed plan of "Add to plan". It shows the new sub-tasks only. A new part can start
+// on a part of the approved plan. The header button "Approve the changed plan" submits this form.
+export function AddApproval(props: {
+  t: TaskDto;
+  runner: string;
+  tracker: string;
+  onApprove: (input: Omit<TaskPlanInput, "version">) => void;
+  onHold?: (reason: string | null) => void;
+}) {
+  const { t } = props;
+  const [starts, setStarts] = useState<StartPick[]>(() => firstStarts(t));
+  const [track, setTrack] = useState<Record<string, number>>({});
+  const [maxOpen, setMaxOpen] = useState(String(t.settings.maxOpen ?? t.plan?.maxOpen?.value ?? 3));
+  const [problem, setProblem] = useState<string | null>(null);
+  const keys = new Set((t.subtasks ?? []).filter((s) => s.added !== null && s.removed === null && !s.parts.length).map((s) => s.key));
+  const pickless = (t.subtasks ?? []).find((x) => keys.has(x.key) && openPrs(x).length > 1 && track[x.key] === undefined);
+  const hold = pickless ? `Pick the PR that the app tracks for ${pickless.key}.` : startCycle(starts, livePlan(t));
+  const onHold = props.onHold;
+  useEffect(() => onHold?.(hold), [hold, onHold]);
+  const outside = codeParts(t)
+    .filter((p) => p.state !== "abandoned" && p.keys[0])
+    .map((p) => ({ value: p.keys[0] as string, label: `${partLabel(t, p)} (approved plan)` }));
+  const prefix = t.settings.branchPrefix ?? null;
+  return (
+    <form
+      id={PLAN_FORM}
+      aria-label="Changed plan approval"
+      className="grid max-w-[72ch] gap-5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const p = hold ?? maxOpenProblem(maxOpen);
+        setProblem(p);
+        if (p) return;
+        props.onApprove({
+          size: "small",
+          commands: [],
+          subtasks: {
+            parts: starts.map((x) => ({ ...x, after: x.start === "base" ? null : x.after })),
+            track: Object.entries(track).map(([key, pr]) => ({ key, pr })),
+            maxOpen: Number(maxOpen),
+          },
+        });
+      }}
+    >
+      <p className="m-0 text-sm text-ink-2">The parts of the approved plan stay as they are. The approval pushes nothing.</p>
+      <SubtaskPlan
+        t={t}
+        runner={props.runner}
+        tracker={props.tracker}
+        prefix={prefix && prefixProblem(prefix) === null ? prefix : null}
+        starts={starts}
+        track={track}
+        maxOpen={maxOpen}
+        hold={hold}
+        only={keys}
+        outside={outside}
+        onStarts={setStarts}
+        onTrack={(key, pr) => setTrack((x) => ({ ...x, [key]: pr }))}
+        onMaxOpen={setMaxOpen}
+      />
+      {problem && (
+        <p role="alert" className="m-0 text-sm text-destructive">
+          {problem}
+        </p>
+      )}
+    </form>
+  );
+}
+
 // spec.md section 6.20.5: "Open PRs at once" takes a whole number from 1 to MAX_OPEN_CAP.
 function maxOpenProblem(text: string): string | null {
   const n = Number(text);
@@ -305,6 +374,9 @@ function SubtaskPlan(props: {
   onTrack: (key: string, pr: number) => void;
   onMaxOpen: (v: string) => void;
   onMove?: (issue: { key: string; status: string | null }) => void;
+  // spec.md section 6.20.14, the changed plan: only the new sub-tasks, and the parts of the approved plan that a new part can start on.
+  only?: ReadonlySet<string>;
+  outside?: { value: string; label: string }[];
 }) {
   const { t, runner, tracker } = props;
   const plan = t.plan;
@@ -314,10 +386,11 @@ function SubtaskPlan(props: {
   // The other rows that a part can start on: the other plan parts and the tracked PRs.
   const others = (n: number) => [
     ...live.filter((x) => x.n !== n).map((x) => ({ value: String(x.n), label: startLabel(x, live) })),
-    ...tracked.map((k) => ({ value: k, label: `${k} (its open PR)` })),
+    ...(props.outside ?? tracked.map((k) => ({ value: k, label: `${k} (its open PR)` }))),
   ];
   const shown = new Set<number>();
   const rows = (t.subtasks ?? []).flatMap((s) => {
+    if (props.only && !props.only.has(s.key)) return [];
     const own = live.filter((x) => x.keys[0] === s.key && !shown.has(x.n));
     for (const x of own) shown.add(x.n);
     const prs = openPrs(s);

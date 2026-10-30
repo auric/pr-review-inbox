@@ -63,7 +63,9 @@ export type ActionKind =
   | "push-move"
   | "tell"
   | "tracker-move"
-  | "tracker-read";
+  | "tracker-read"
+  // spec.md section 6.20.14: plan a sub-task that is new in the tracker.
+  | "add-plan";
 export type Action = { kind: ActionKind; label: string };
 
 // screen: the content under the header. questions: the Questions form. plan: the plan approval. change: the spec change review.
@@ -1009,7 +1011,8 @@ function partRow(t: TaskDto, p: TaskPartDto, o: SubOpts): Pick<SubRow, "text" | 
   switch (p.state) {
     case "planned": {
       if (doneInTracker(t, p)) return { text: `Done in ${o.tracker}.`, actor: "No one", action: drop };
-      if (p.keys.some((k) => subOf(t, k)?.removed != null)) return { text: `Removed in ${o.tracker}.`, actor: "You", action: drop };
+      if (p.keys.some((k) => subOf(t, k)?.removed != null))
+        return { text: `Removed in ${o.tracker}.`, actor: "You", action: { kind: "drop", label: "Drop" } };
       const lower = lowerPart(t, p);
       const text = p.wait ?? `${R} builds it next.`;
       if (lower?.state === "declined") return { text, actor: "You", action: drop };
@@ -1076,7 +1079,10 @@ export function subtaskRows(t: TaskDto, o: SubOpts): SubRow[] {
     const row = { id: `sub-${s.key}`, part: null, key: s.key, summary: s.summary, label: s.key, status: s.status, hint: null };
     if (s.category === "done") out.push({ ...row, text: `Done in ${o.tracker}.`, actor: "No one", action: null });
     else if (s.removed !== null) out.push({ ...row, text: `Removed in ${o.tracker}.`, actor: "No one", action: null });
-    else if (s.added !== null) out.push({ ...row, text: `${s.key} is new in ${o.tracker}.`, actor: "You", action: null });
+    else if (s.added !== null && t.plan?.adding && livePlan(t).some((x) => x.keys.includes(s.key)))
+      out.push({ ...row, text: `${o.runner} planned ${s.key}. Approve the changed plan.`, actor: "You", action: null });
+    else if (s.added !== null)
+      out.push({ ...row, text: `${s.key} is new in ${o.tracker}.`, actor: "You", action: { kind: "add-plan", label: "Add to plan" } });
     else out.push({ ...row, text: `${o.runner} planned no PR for ${s.key}.`, actor: "No one", action: null });
   }
   for (const p of parts) if (!seen.has(p.id)) add(p);
@@ -1138,6 +1144,17 @@ export function subPlanSentence(t: TaskDto): string {
   return `The plan is ready: ${plural(n, "sub-task")}, ${build} to build${lines}.`;
 }
 
+// spec.md section 6.20.14: "The changed plan is ready: 1 new sub-task, about 120 changed lines."
+export function addPlanSentence(t: TaskDto): string {
+  const live = livePlan(t);
+  const keys = new Set(live.flatMap((s) => s.keys));
+  const lines = live.reduce((n, s) => n + (s.lines ?? 0), 0);
+  const tail = lines ? `, about ${lines.toLocaleString("en-US")} changed lines` : "";
+  return keys.size
+    ? `The changed plan is ready: ${plural(keys.size, "new sub-task")}${tail}.`
+    : "The changed plan adds no sub-task. Approve it to close it.";
+}
+
 // The Task view of a task with sub-tasks: the status and the one primary button of the focused part (spec.md section 6.20.13).
 // focus: the part that the user picked, else the default focus.
 export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): TaskView {
@@ -1152,6 +1169,18 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
     };
   }
   if (t.state !== "implementing" && t.state !== "ready") return taskView(t, o);
+  // spec.md section 6.20.14: the changed plan of "Add to plan" waits for the approval before a new part starts.
+  if (t.plan?.adding)
+    return {
+      status: addPlanSentence(t),
+      detail: null,
+      lines: [],
+      needsYou: true,
+      running: false,
+      primary: { kind: "approve", label: "Approve the changed plan" },
+      more: [read],
+      screen: "plan",
+    };
   const p = focus ?? defaultFocus(t);
   if (!p) return taskView(t, o);
   const name = partLabel(t, p);

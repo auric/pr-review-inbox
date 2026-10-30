@@ -80,7 +80,8 @@ export const taskMachine = setup({
     },
     spec_approved: { on: { START_BUILDING: "implementing", ...halt } },
     implementing: { on: { PART_READY: "implementing", LAST_PR_OPEN: "ready", ...halt } },
-    ready: { on: { ALL_MERGED: "done", CLOSE: "done", ...halt } },
+    // spec.md section 6.20.14: the approval of a changed plan adds a part to build.
+    ready: { on: { ALL_MERGED: "done", CLOSE: "done", START_BUILDING: "implementing", ...halt } },
     stopped: {
       on: {
         RESUME: RESUMABLE.map((state) => ({ guard: { type: "stoppedFrom" as const, params: { state } }, target: state })),

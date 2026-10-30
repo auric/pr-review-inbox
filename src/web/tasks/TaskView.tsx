@@ -55,7 +55,7 @@ import {
   tellBox,
 } from "./model";
 import { OpenPrDialog, OpenPrsDialog, type PrRowInput } from "./OpenPrDialog";
-import { AskAgain, PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
+import { AddApproval, AskAgain, PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
 import { AnsweredList, QuestionsForm } from "./Questions";
 import { docList, SpecDocs } from "./SpecDocs";
 import { StepStrip } from "./StepStrip";
@@ -265,6 +265,13 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   };
   // A row action acts on the part of its row: the focus moves there first, so the status shows what follows.
   const rowAction = (r: SubRow, a: Action) => {
+    if (a.kind === "add-plan")
+      return setConfirm({
+        title: `Add ${r.key} to the plan?`,
+        text: `${runner} plans a PR for ${r.key}. The other sub-tasks stay as they are. You approve the changed plan before the app builds it.`,
+        confirm: "Add to plan",
+        run: () => send({ kind: "plan-again", text: `Add ${r.key} to the plan.`, add: true }),
+      });
     if (!r.part) return;
     setFocusId(r.part.id);
     if (a.kind === "open-pr" || a.kind === "go-pr" || a.kind === "update") return run(a.kind, r.part);
@@ -756,6 +763,16 @@ function Content(props: {
   }
 
   if (screen === "plan") {
+    if (t.plan?.adding)
+      return (
+        <AddApproval
+          t={t}
+          runner={runner}
+          tracker={props.tracker}
+          onApprove={(input) => props.onSend({ kind: "plan", input })}
+          onHold={props.onHold}
+        />
+      );
     if (!t.plan || t.plan.approved) return null;
     return (
       <PlanApproval

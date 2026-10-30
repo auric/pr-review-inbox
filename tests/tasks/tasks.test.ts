@@ -594,6 +594,7 @@ describe("answers (spec.md sections 6.2 and 6.11, AC-B2 and AC-B3)", () => {
         maxOpen: null,
         starts: [],
         notes: [],
+        adding: false,
       });
       expect(t.strip.current).toBe(1);
       // The base commit stays in the cache for later reads.

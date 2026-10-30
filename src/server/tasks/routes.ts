@@ -260,9 +260,9 @@ export function createTaskRoutes(opts: {
         return answer(c, r);
       })
       // spec.md section 6.20.12: "Ask Claude again" starts the spec run again (202).
-      .post("/tasks/:id/plan-again", idParam, body(taskPlanAgainInput, "Invalid plan request."), (c) => {
+      .post("/tasks/:id/plan-again", idParam, body(taskPlanAgainInput, "Invalid plan request."), async (c) => {
         const db = openDb();
-        return db ? answer(c, tasks.planAgain(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
+        return db ? answer(c, await tasks.planAgain(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       .post("/tasks/:id/pause", idParam, body(taskVersionInput, "Give the task version."), (c) => {
         const db = openDb();

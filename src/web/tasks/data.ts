@@ -192,7 +192,7 @@ export type TaskAction =
   // spec.md section 6.18.5: the base check before the PR dialog.
   | { kind: "base-check" }
   // spec.md section 6.20.12: "Ask the runner again" of the plan screen, the part routes, and "Read the tracker again".
-  | { kind: "plan-again"; text: string }
+  | { kind: "plan-again"; text: string; add?: true }
   | { kind: "push" | "wait-merge" | "drop"; part: number }
   | { kind: "move"; part: number; push?: true }
   | { kind: "start"; part: number }
@@ -263,7 +263,7 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
     case "base-check":
       return read(await tasks["base-check"].$post({ param }));
     case "plan-again":
-      return read(await tasks["plan-again"].$post({ param, json: { version, text: a.text } }));
+      return read(await tasks["plan-again"].$post({ param, json: { version, text: a.text, ...(a.add && { add: true as const }) } }));
     case "push":
       return read(await tasks.parts[":part"].push.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "wait-merge":

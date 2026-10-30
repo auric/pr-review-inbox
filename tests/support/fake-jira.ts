@@ -256,6 +256,20 @@ export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: bo
     };
   }
 
+  // Adds one sub-task to a parent, as a colleague does after the plan approval (spec.md section 6.20.14). The other issues keep their state.
+  function addSubtask(parentKey: string, s: { key: string; summary: string; category: Category }) {
+    addIssue(s.key, s.summary);
+    Object.assign(issues.get(s.key)?.fields as Record<string, unknown>, {
+      status: statusOf(s.category),
+      issuetype: issueType(true),
+      parent: ref(parentKey),
+      issuelinks: [],
+    });
+    transitionRoutes(s.key);
+    const parent = issues.get(parentKey)?.fields as Record<string, unknown>;
+    parent.subtasks = [...((parent.subtasks as unknown[]) ?? []), ref(s.key)];
+  }
+
   // The WP-ST1 set: ABC-11 done, ABC-12 in progress, ABC-13 and ABC-14 to do. ABC-13 is blocked by ABC-12.
   function addSubtaskSet() {
     addSubtasks(
@@ -277,6 +291,7 @@ export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: bo
   return Object.assign(fake, {
     addIssue,
     addSubtasks,
+    addSubtask,
     addSubtaskSet,
     setStatus,
     count,

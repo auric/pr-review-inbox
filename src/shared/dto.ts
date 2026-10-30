@@ -1643,6 +1643,9 @@ export type TaskPlanDto = {
     lines: number | null;
   }[];
   notes: string[];
+  // spec.md section 6.20.14: a changed plan with parts for sub-tasks that are new in Jira waits for the approval. starts, notes, and
+  // maxOpen then hold that changed plan only.
+  adding: boolean;
 };
 
 // One Jira sub-task of a task (spec.md section 6.20.8). statusAt: ms of the last status read. found: the branches and PRs that name the

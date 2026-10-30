@@ -5,7 +5,8 @@
 // sub-tasks in the browser. The parent ABC-10 has ABC-11 done, ABC-12 with an open PR, and ABC-13 and ABC-14 to build. The Build form
 // preselects the sub-task mode and lists the files of each open sub-task. The plan screen tracks the PR of ABC-12 and skips ABC-11.
 // One start select changes, the approval builds ABC-13, and its PR opens. ABC-14 waits for that merge. The sub-task list gives one
-// sentence and one actor per row. "Move in Jira" moves the fake status only after its confirm. Runs against serve.ts only.
+// sentence and one actor per row. "Move in Jira" moves the fake status only after its confirm. A sub-task that is new in Jira gets a
+// part only after "Add to plan" and the approval of the changed plan (WP-ST7, AC-B87). Runs against serve.ts only.
 import { test as base, expect, type Page } from "@playwright/test";
 import { APP_PORT, control, E2E_JIRA_TOKEN, E2E_TOKEN, FAKE_URL, JIRA_URL, makeClone, openApp, pickRepo, taskRemote } from "./control";
 
@@ -247,4 +248,39 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
   expect((await jiraStatus()).transitions).toEqual({ "ABC-13": ["21"] });
   const dto = (await api(page, "GET", `/api/tasks/${id}`)).json as { subtasks: { key: string }[] };
   expect(dto.subtasks.map((s) => s.key)).toEqual(["ABC-11", "ABC-12", "ABC-13", "ABC-14"]);
+
+  // 6. "Add to plan" (spec.md section 6.20.14, AC-B87): a colleague adds ABC-17 in Jira. "Read Jira again" shows it. Its part comes
+  // only with the approval of the changed plan, and nothing goes to Jira or Bitbucket.
+  const probe = {
+    ...part(1, "ABC-17", "Add the lock probe", "PROBE.md"),
+    start: "merge",
+    after: "ABC-13",
+    startReason: "It reads the flush.",
+  };
+  await control("claude", {
+    stream: "task",
+    interview: { done: true, summary: "One new sub-task.", questions: [], unknowns: [], coverage: NO_COVERAGE },
+    spec: { ...SPEC, estimate: { ...SPEC.estimate, parts: 1, lines: 100 }, parts: [probe] },
+    review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
+  });
+  await ask("subtasks", { add: true });
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Read Jira again" }).click();
+  await expect(row(page, "ABC-17")).toContainText("ABC-17 is new in Jira.");
+  await row(page, "ABC-17").getByRole("button", { name: "Add to plan: ABC-17" }).click();
+  const add = page.getByRole("dialog");
+  await expect(add.getByRole("heading")).toHaveText("Add ABC-17 to the plan?");
+  await add.getByRole("button", { name: "Add to plan" }).click();
+  await expect(status(page)).toHaveText("The changed plan is ready: 1 new sub-task, about 100 changed lines.", { timeout: 90_000 });
+  await expect(primary(page)).toHaveCount(1);
+  await expect(primary(page)).toHaveText("Approve the changed plan");
+  await expect(page.locator('[data-plan-row="ABC-17"]')).toContainText("about 100 lines");
+  const parts = async () => ((await api(page, "GET", `/api/tasks/${id}`)).json as { parts: unknown[] }).parts.length;
+  expect(await parts()).toBe(3);
+  expect(UX2.exec(await screenText(page))).toBeNull();
+  await primary(page).click();
+  await expect(row(page, "ABC-17")).toContainText("Waits for ABC-13 to merge.");
+  expect(await parts()).toBe(4);
+  expect((await taskRemote()).creates).toHaveLength(1);
+  expect((await jiraStatus()).transitions).toEqual({ "ABC-13": ["21"] });
 });
