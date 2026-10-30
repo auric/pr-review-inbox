@@ -132,6 +132,7 @@ async function setup() {
     stop() {},
     async syncNow() {},
     status: () => ({ running: false, state: "ok", lastCompleteAt: 5, nextAt: null, error: null }),
+    onTaskPrs() {},
   } satisfies SyncEngine;
   const review = createReviewJobs({
     settings,

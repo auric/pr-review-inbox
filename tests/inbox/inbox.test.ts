@@ -58,6 +58,7 @@ async function setup(me = ME) {
       syncs.count++;
     },
     status: () => ({ running: false, state: "ok", lastCompleteAt: 5, nextAt: null, error: null }),
+    onTaskPrs() {},
   } satisfies SyncEngine;
   const app = createApp({ port: PORT, token: SESSION, live, settings, sync });
   const db = settings.db() as Database;

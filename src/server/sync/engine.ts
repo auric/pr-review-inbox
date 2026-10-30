@@ -141,6 +141,7 @@ export function createSyncEngine(opts: { settings: Settings; live: Live; now?: (
   let failures = 0;
   // The start time of the last poll of each merged or declined PR.
   const closedPolledAt = new Map<number, number>();
+  const taskPrListeners: ((prs: number[]) => Promise<void> | void)[] = [];
   const status: Omit<SyncStatus, "running"> = { state: "idle", lastCompleteAt: null, nextAt: null, error: null };
 
   async function cycle(gen: number, tally: Tally): Promise<Outcome> {
@@ -537,6 +538,15 @@ export function createSyncEngine(opts: { settings: Settings; live: Live; now?: (
     // Step 6: everything below runs after the commits.
     live.broadcast("changed", { prs: [...tally.changed], ...(tally.tasks.size > 0 && { tasks: [...tally.tasks] }) });
     if (tally.events) live.broadcast("events", { count: tally.events });
+    // docs/plans/review-v2/spec.md section 6.20.11: every cycle, so the Jira status read runs also when no PR changed.
+    for (const fn of taskPrListeners) {
+      try {
+        await fn([...tally.changed]);
+      } catch (e) {
+        log(`The task update after the sync failed: ${(e as Error).message}`);
+      }
+      if (gen !== generation) return;
+    }
     if (out.state !== "ok" && (out.state !== status.state || out.error !== status.error))
       log(`Sync ${out.state}${out.error ? `: ${out.error}` : ""}`);
     if (out.state === "offline") failures++;
@@ -612,6 +622,10 @@ export function createSyncEngine(opts: { settings: Settings; live: Live; now?: (
       return r;
     },
     status: (): SyncStatus => ({ ...status, running: running !== null }),
+    // Runs after each cycle commits, with the IDs of the changed PRs. The cycle ends when fn resolves.
+    onTaskPrs(fn: (prs: number[]) => Promise<void> | void) {
+      taskPrListeners.push(fn);
+    },
   };
 }
 

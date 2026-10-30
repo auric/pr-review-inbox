@@ -43,6 +43,8 @@ import {
   type InterviewResult,
   interviewJsonSchema,
   interviewResult,
+  JIRA_STATUS_AGE_MS,
+  JIRA_VIEW_AGE_MS,
   MAX_OPEN_CAP,
   MAX_OPEN_DEFAULT,
   MERGE_CONFLICTED,
@@ -75,8 +77,9 @@ import {
 } from "../../shared/task";
 import { NoCloneLink } from "../bitbucket/errors";
 import type { ForgeProvider } from "../bitbucket/provider";
+import { JiraRefusedError } from "../context/jira";
 import { FAILED as JIRA_FAILED } from "../context/routes";
-import { ContextError, type ContextSource } from "../context/source";
+import { ContextError, type ContextSource, type JiraTransition } from "../context/source";
 import { type TaskFileOptions, taskFileContext, taskIssue } from "../context/task-file";
 import { buildOf } from "../inbox/builds";
 import { followKey } from "../inbox/queries";
@@ -102,6 +105,7 @@ import {
   taskFileDtos,
   usedBytes,
 } from "./files";
+import { approvalsOf, partGate } from "./gates";
 import {
   type Answer,
   afterAnswers,
@@ -283,6 +287,14 @@ const Q = {
     VALUES ($task, $ord, 'single', $title, $branch, $base, $pr, $remote, $state, $keys, $start, $spec_dir, $adopted, $now, $now) RETURNING id`,
   afterPart: "UPDATE task_part SET after_part = $after WHERE id = $id",
   addedSubtasks: "SELECT 1 FROM task_subtask WHERE task = $task AND added_at IS NOT NULL AND removed_at IS NULL",
+  // spec.md section 6.20.11: the tasks that the status read of the sync covers.
+  subtaskTasks: "SELECT id FROM task WHERE subtasks = 1 AND state NOT IN ('done', 'failed') ORDER BY id",
+  subtaskStatus: "UPDATE task_subtask SET status = $status, category = $category, status_at = $at WHERE task = $task AND key = $key",
+  // "Read Jira again" (spec.md section 6.20.12). A done sub-task keeps its last text and links.
+  subtaskRead: `UPDATE task_subtask SET summary = $summary, status = $status, category = $category, issue_json = COALESCE($issue, issue_json),
+      links_json = COALESCE($links, links_json), read_at = $at, status_at = $at
+    WHERE task = $task AND key = $key`,
+  setIssue: "UPDATE task SET issue_json = $issue WHERE id = $id",
   // "Ask Claude again" (spec.md section 6.20.4): the text of the user as an answered question of its own round.
   lastRound: "SELECT COALESCE(MAX(round), 0) AS round FROM task_question WHERE task = $task",
   againQuestion: `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, recommended, answer_json, step, asked_at,
@@ -516,7 +528,7 @@ const openQuestions = (db: Database, id: number) => {
   return rows.filter((q) => q.round === round);
 };
 
-type PartRow = {
+export type PartRow = {
   id: number;
   ord: number;
   kind: TaskPartDto["kind"];
@@ -948,6 +960,7 @@ function needsBaseOf(steps: { kind: string; state: string; detail: StepDetail }[
 export function taskDto(db: Database, t: TaskRow): TaskDto {
   const partRows = db.query(Q.parts).all({ id: t.id }) as PartRow[];
   const schedule = scheduleOf(db, t, partRows);
+  const approvals = approvalsOf(db, t);
   const parts = partRows.map((p): TaskPartDto => {
     const lower = lowerOf(db, t, p, partRows);
     const how = lower && lowerHowOf(db, p.id);
@@ -978,7 +991,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       specDir: p.spec_dir,
       bases: partBases(db, t, p),
       lower: lower && how ? { key: lower.name, how } : null,
-      gate: null,
+      gate: partGate(db, p, approvals),
       wait: schedule?.waits.get(p.id) ?? null,
     };
   });
@@ -2124,7 +2137,169 @@ export function createTaskService(opts: TaskServiceOptions) {
     return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
+  // spec.md section 6.20.9: the time of the last status read of each task, a failed one too. The sync and the Task view share it.
+  const statusReads = new WeakMap<Database, Map<number, number>>();
+
+  // One GET of the parent gives the status of every sub-task. A failed read keeps the stored statuses. maxAge: the minimum time since the
+  // last read. Returns true when a status changed. Keys that are new or gone in Jira are left to "Add to plan" (section 6.20.14).
+  async function readStatuses(db: Database, id: number, maxAge: number): Promise<boolean> {
+    const t = taskRow(db, id);
+    if (t?.subtasks !== 1 || t.state === "done" || t.state === "failed") return false;
+    const reads = statusReads.get(db) ?? new Map<number, number>();
+    statusReads.set(db, reads);
+    const last = reads.get(id);
+    if (last !== undefined && now() - last < maxAge) return false;
+    reads.set(id, now());
+    const source = await jira();
+    if ("status" in source) return false;
+    let list: IssueSubtask[];
+    try {
+      list = await source.subtaskStatuses(t.key);
+    } catch (e) {
+      if (!(e instanceof ContextError)) throw e;
+      log(`Jira status read for task ${id} failed: ${e.message}`);
+      return false;
+    }
+    const at = now();
+    return db.transaction(() => {
+      const rows = new Map(subtaskRows(db, id).map((r) => [r.key, r]));
+      let moved = false;
+      for (const s of list) {
+        const r = rows.get(s.key);
+        if (!r) continue;
+        moved ||= r.status !== s.status || r.category !== s.category;
+        db.query(Q.subtaskStatus).run({ task: id, key: s.key, status: s.status, category: s.category, at });
+      }
+      return moved;
+    })();
+  }
+
+  // spec.md section 6.20.11: the status read of the sync, at most every JIRA_STATUS_AGE_MS per open task with sub-tasks. It never
+  // writes to Jira. Returns the IDs of the tasks with a changed status.
+  async function syncStatuses(db: Database): Promise<number[]> {
+    const moved: number[] = [];
+    for (const { id } of db.query(Q.subtaskTasks).all() as { id: number }[])
+      if (await readStatuses(db, id, JIRA_STATUS_AGE_MS)) {
+        moved.push(id);
+        changed(id);
+      }
+    return moved;
+  }
+
+  // POST /api/tasks/:id/jira-check (spec.md section 6.20.12): the status read of the Task view, at most once per JIRA_VIEW_AGE_MS.
+  async function jiraCheck(db: Database, id: number): Promise<TaskResult> {
+    if (!taskRow(db, id)) return { status: 404, error: "Task not found." };
+    if (await readStatuses(db, id, JIRA_VIEW_AGE_MS)) changed(id);
+    return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
+  // The stored issue of the task: the task_context row of its origin PR, else task.issue_json (taskIssue reads the same place).
+  function saveIssue(db: Database, t: TaskRow, issue: IssueContext, at: number) {
+    if (t.origin_pr !== null) db.query(Q.storeContext).run({ pr: t.origin_pr, key: t.key, json: JSON.stringify(issue), at });
+    else db.query(Q.setIssue).run({ id: t.id, issue: JSON.stringify(issue) });
+  }
+
+  // POST /api/tasks/:id/jira-read (spec.md section 6.20.12), "Read Jira again": the texts, links, and statuses of the parent and of its
+  // sub-tasks. Only reads go to Jira.
+  async function jiraRead(db: Database, id: number, input: { version: number }): Promise<TaskResult> {
+    const t = taskRow(db, id);
+    if (!t) return { status: 404, error: "Task not found." };
+    if (t.version !== input.version) return conflict(db, t, TASK_CHANGED);
+    const got = await fetchIssue(t.key);
+    if ("status" in got) return got;
+    let subs: { sub: IssueSubtask; issue: IssueContext | null }[] = [];
+    if (t.subtasks === 1) {
+      const r = await readSubtasks(t.key, got.issue.subtasks ?? []);
+      if ("status" in r) return r;
+      subs = r.subs;
+    }
+    const at = now();
+    db.transaction(() => {
+      const cur = taskRow(db, id);
+      if (!cur) return;
+      saveIssue(db, cur, got.issue, at);
+      for (const { sub, issue } of subs)
+        db.query(Q.subtaskRead).run({
+          task: id,
+          key: sub.key,
+          summary: issue?.summary ?? sub.summary,
+          status: issue?.status ?? sub.status,
+          category: sub.category,
+          issue: issue ? JSON.stringify(issue) : null,
+          links: issue ? JSON.stringify(issue.links ?? []) : null,
+          at,
+        });
+    })();
+    if (t.subtasks === 1) statusReads.get(db)?.set(id, at);
+    changed(id);
+    return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
+  // The key of a Jira route must be the parent or a sub-task of the task.
+  function jiraKeyOf(db: Database, id: number, key: string): TaskRow | TaskResult {
+    const t = taskRow(db, id);
+    if (!t) return { status: 404, error: "Task not found." };
+    if (key !== t.key && !subtaskRows(db, id).some((r) => r.key === key))
+      return { status: 404, error: `${key} is not ${t.key} or a sub-task of it.` };
+    return t;
+  }
+
+  async function listTransitions(source: ContextSource, key: string): Promise<{ transitions: JiraTransition[] } | TaskResult> {
+    try {
+      return { transitions: await source.transitions(key) };
+    } catch (e) {
+      if (!(e instanceof ContextError)) throw e;
+      log(`Jira transitions read failed: ${e.message}`);
+      return { status: 502, error: JIRA_FAILED[e.kind] };
+    }
+  }
+
+  // GET /api/tasks/:id/jira/:key/transitions (spec.md section 6.20.12): the "Move in Jira" click. A read only.
+  async function jiraTransitions(db: Database, id: number, key: string): Promise<{ transitions: JiraTransition[] } | TaskResult> {
+    const t = jiraKeyOf(db, id, key);
+    if ("status" in t) return t;
+    const source = await jira();
+    return "status" in source ? source : listTransitions(source, key);
+  }
+
+  // POST /api/tasks/:id/jira/:key/transitions (spec.md section 6.20.9): the only Jira write, one POST after the user confirmed the dialog.
+  // The list read before it gives the new status and refuses a move that Jira no longer offers. No retry: a second POST can move twice.
+  async function jiraMove(
+    db: Database,
+    id: number,
+    key: string,
+    transition: string,
+  ): Promise<{ to: string | null; task: TaskDto } | TaskResult> {
+    const t = jiraKeyOf(db, id, key);
+    if ("status" in t) return t;
+    const source = await jira();
+    if ("status" in source) return source;
+    const list = await listTransitions(source, key);
+    if ("status" in list) return list;
+    const move = list.transitions.find((x) => x.id === transition);
+    if (!move) return { status: 409, error: `Jira does not offer this move for ${key} now. Open the list again.` };
+    try {
+      await source.transition(key, transition);
+    } catch (e) {
+      if (e instanceof JiraRefusedError) return { status: 502, error: e.message };
+      if (!(e instanceof ContextError)) throw e;
+      log(`Jira move failed: ${e.message}`);
+      return { status: 502, error: `${JIRA_FAILED[e.kind]} Check ${key} in Jira.` };
+    }
+    if (key === t.key) {
+      const stored = taskIssue(db, t)?.issue;
+      if (stored) saveIssue(db, t, { ...stored, status: move.to ?? stored.status }, now());
+    } else await readStatuses(db, id, 0);
+    changed(id);
+    return { to: move.to, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
   return {
+    syncStatuses,
+    jiraCheck,
+    jiraRead,
+    jiraTransitions,
+    jiraMove,
     create,
     issue,
     file,

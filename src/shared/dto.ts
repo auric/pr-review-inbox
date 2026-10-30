@@ -1428,6 +1428,12 @@ export const taskVersionInput = z.object({ version });
 // spec.md section 6.20.12: "Start <key> now" overrides the review of the lower part. "Move" with push pushes first.
 export const taskStartInput = z.object({ version, override: z.literal(true) });
 export const taskMoveInput = z.object({ version, push: z.literal(true).optional() });
+// POST /api/tasks/:id/jira/:key/transitions (spec.md section 6.20.12): the transition that the user confirmed in "Move in Jira".
+export const taskTransitionInput = z.object({ id: z.string().regex(/^\d{1,10}$/) });
+// GET /api/tasks/:id/jira/:key/transitions. to: the status name after the move, null when Jira names none.
+export type TaskTransitionsDto = { transitions: { id: string; name: string; to: string | null }[] };
+// The answer of the move. status: the new status of the issue.
+export type TaskJiraMoveDto = { status: string | null; task: TaskDto };
 // POST /api/tasks/:id/instructions (spec.md section 6.18.6): "Tell Claude". part: absent takes the part of the current state.
 export const taskInstructionsInput = z.object({
   version,

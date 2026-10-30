@@ -16,6 +16,7 @@ import {
   branchCheckInput,
   branchName,
   branchSearchInput,
+  JIRA_KEY,
   type RepoTaskSettingsDto,
   type RunConflict,
   repoTaskSettingsInput,
@@ -23,8 +24,10 @@ import {
   type TaskConflict,
   type TaskDto,
   type TaskIssueDto,
+  type TaskJiraMoveDto,
   type TaskProfileDto,
   type TaskRepoListDto,
+  type TaskTransitionsDto,
   taskAnswersInput,
   taskBaseInput,
   taskCreateInput,
@@ -43,6 +46,7 @@ import {
   taskReviewersInput,
   taskSizeInput,
   taskStartInput,
+  taskTransitionInput,
   taskVersionInput,
 } from "../../shared/dto";
 import { MAX_INSTRUCTION } from "../../shared/task";
@@ -51,6 +55,7 @@ import { log } from "../log";
 import type { ReviewJobs } from "../review/jobs";
 import { noUrl } from "../review/workspace";
 import type { Settings } from "../settings";
+import { lowerUnread, startable, syncParts } from "./gates";
 import { createLoop } from "./loop";
 import { createPrOpener, partDiff } from "./pr";
 import { createTaskService, preselectProfile, repoSettings, saveRepoSettings, type TaskResult, taskRow } from "./tasks";
@@ -95,6 +100,10 @@ const runParam = validator("param", (v: Record<string, string>, c) => {
   const run = positive(v.run);
   return id && run ? { id, run } : c.json<ApiError>({ error: "Invalid task or run ID." }, 400);
 });
+const jiraKeyParam = validator("param", (v: Record<string, string>, c) => {
+  const id = positive(v.id);
+  return id && JIRA_KEY.test(v.key ?? "") ? { id, key: v.key as string } : c.json<ApiError>({ error: "Invalid task ID or Jira key." }, 400);
+});
 const repoParam = validator("param", (v: Record<string, string>, c) =>
   NAME.test(v.project ?? "") && NAME.test(v.repo ?? "")
     ? { project: v.project as string, repo: v.repo as string }
@@ -106,7 +115,12 @@ const body = <T extends z.ZodType>(schema: T, error: string) =>
     return r.success ? (r.data as z.infer<T>) : c.json<ApiError>({ error }, 400);
   });
 
-export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings; live: Live; sync?: { syncNow: () => Promise<unknown> } }) {
+export function createTaskRoutes(opts: {
+  review: ReviewJobs;
+  settings: Settings;
+  live: Live;
+  sync?: { syncNow: () => Promise<unknown>; onTaskPrs?: (fn: (prs: number[]) => Promise<void>) => void };
+}) {
   const { review } = opts;
   const tasks = createTaskService({ review, settings: opts.settings, live: opts.live });
   const loop = createLoop({ review, settings: opts.settings, live: opts.live });
@@ -134,6 +148,25 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
     }
     return db;
   };
+
+  // spec.md section 6.20.11: after each sync cycle, the part gates, the loop start, and the Jira status read. Nothing here writes to
+  // Bitbucket or Jira. A kick starts only Claude steps of the plan that the user approved.
+  const kick = (db: NonNullable<ReturnType<typeof openDb>>, id: number) => {
+    if (startable(db, id)) loop.build(db, id);
+  };
+  opts.sync?.onTaskPrs?.(async (prs) => {
+    const db = openDb();
+    if (!db) return;
+    const moved = syncParts(db, prs);
+    if (moved.length) opts.live.broadcast("changed", { tasks: moved });
+    for (const id of moved) {
+      kick(db, id);
+      // spec.md section 6.20.10: the base check after the merge of a lower part tells how it merged (TaskPartDto.lower).
+      if (lowerUnread(db, id))
+        void loop.checkBases(db, id).catch((e) => log(`Task ${id}: the base check after a merge failed: ${noUrl((e as Error).message)}`));
+    }
+    for (const id of await tasks.syncStatuses(db)) kick(db, id);
+  });
 
   function answer(c: Context, r: TaskResult) {
     if ("task" in r && r.status !== 409) return c.json(live(r.task), r.status);
@@ -338,6 +371,42 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         const { id, part } = c.req.valid("param");
         await loop.settle(id);
         return answer(c, loop.drop(db, id, part, c.req.valid("json")));
+      })
+      // spec.md section 6.20.12: the status read of the Task view, at most once per JIRA_VIEW_AGE_MS.
+      .post("/tasks/:id/jira-check", idParam, async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id } = c.req.valid("param");
+        const r = await tasks.jiraCheck(db, id);
+        if (r.status === 200) kick(db, id);
+        return answer(c, r);
+      })
+      // spec.md section 6.20.12: "Read Jira again". Only reads go to Jira.
+      .post("/tasks/:id/jira-read", idParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id } = c.req.valid("param");
+        const r = await tasks.jiraRead(db, id, c.req.valid("json"));
+        if (r.status === 200) kick(db, id);
+        return answer(c, r);
+      })
+      // spec.md section 6.20.9: the "Move in Jira" click lists the transitions. The POST below is the only Jira write, and only the
+      // confirm of the dialog calls it.
+      .get("/tasks/:id/jira/:key/transitions", jiraKeyParam, async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, key } = c.req.valid("param");
+        const r = await tasks.jiraTransitions(db, id, key);
+        return "transitions" in r ? c.json<TaskTransitionsDto>(r, 200) : answer(c, r);
+      })
+      .post("/tasks/:id/jira/:key/transitions", jiraKeyParam, body(taskTransitionInput, "Give a transition ID."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, key } = c.req.valid("param");
+        const r = await tasks.jiraMove(db, id, key, c.req.valid("json").id);
+        if (!("to" in r)) return answer(c, r);
+        kick(db, id);
+        return c.json<TaskJiraMoveDto>({ status: r.to, task: live(r.task) }, 200);
       })
       // spec.md section 6.16.8: "Point <parent> at the merged commit". The commit and the push run after the 202.
       .post("/tasks/:id/prs/:taskPr/pointer", taskPrParam, body(taskPointerInput, "Give the task version."), async (c) => {
