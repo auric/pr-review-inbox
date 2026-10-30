@@ -2055,12 +2055,14 @@ Task states use the small path of the machine (APPROVE with size small): intervi
 | self_reviewed | PR_OPENED | pr_open | PR route |
 | pr_open, approved | CHANGES_REQUESTED | changes_requested | sync: a reviewer with NEEDS_WORK |
 | pr_open, changes_requested | GATE_PASSED | approved | sync: the part gate passed |
+| approved | GATE_FAILED (new) | pr_open | sync: the part gate fails with no NEEDS_WORK |
 | open states | MERGED, DECLINED | merged, declined | sync |
 | declined | REOPENED | pr_open | "Open the PR again" |
 | planned, declined | ABANDON | abandoned | "Drop this sub-task" |
 
 - "Drop this sub-task" refuses while a started part builds on it: "ABC-13 builds on ABC-12. Move or drop ABC-13 first." A planned part that builds on it starts from the base, with a note.
-- PART_EVENTS adds ADOPT_OPEN and ADOPT_MERGED. The planned state takes both. tests/tasks/machine.test.ts and the README diagram snapshot follow (the machine.ts rule).
+- An approved part leaves approved when a later sync finds that its part gate fails: a removed approval, a failed or running build, or a new commit with unread builds. A planned part that builds on it waits again.
+- PART_EVENTS adds ADOPT_OPEN, ADOPT_MERGED, and GATE_FAILED. The planned state takes both. tests/tasks/machine.test.ts and the README diagram snapshot follow (the machine.ts rule).
 
 #### 6.20.8 Data model (the next free migration number: `0NN_task_subtasks.sql`)
 
@@ -2152,9 +2154,9 @@ When the diff is not clean, or the update needs Claude:
 #### 6.20.11 Sync, gate, and loop start
 
 - New src/server/tasks/gates.ts: `partGate(db, part, approvals)` reads pull_request.reviewers_json (the APPROVED count, any NEEDS_WORK), properties.openTaskCount when the sync stores it (else no task rule), and the pr_build row of the head (failed 0 and inProgress 0; no build counts as green). It returns {pass, why}.
-- `syncParts(db, prIds)` runs after each sync cycle for the task parts linked to the changed PRs. It sends MERGED, DECLINED, CHANGES_REQUESTED, and GATE_PASSED through advancePart, then LAST_PR_OPEN or ALL_MERGED through advance. It returns the IDs of the changed tasks.
+- `syncParts(db, prIds)` runs after each sync cycle for the task parts linked to the changed PRs. It sends MERGED, DECLINED, CHANGES_REQUESTED, GATE_PASSED, and GATE_FAILED through advancePart, then LAST_PR_OPEN or ALL_MERGED through advance. It returns the IDs of the changed tasks.
 - The sync engine gets one callback `onTaskPrs(fn)`, called after the cycle commits, with the changed PR IDs (the pattern of settings.onTasksChanged). createTaskRoutes registers it: the gates, then `loop.kick(id)` for a task in implementing with a startable part, then the Jira status read for due tasks.
-- The Jira status read runs during the sync, at most every JIRA_STATUS_AGE_MS per open sub-task task. A task in done or failed gets no read.
+- The Jira status read runs during the sync, at most every JIRA_STATUS_AGE_MS per open sub-task task. A PR that the app opens makes the read of its task due in the sync cycle after it. A task in done or failed gets no read.
 - The loop never pushes or posts. A kick only starts Claude steps of the plan that the user approved.
 
 #### 6.20.12 Routes (zod inputs; a version check on every mutation)

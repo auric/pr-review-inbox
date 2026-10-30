@@ -52,7 +52,7 @@ const PART_TABLE: Record<PartState, Partial<Record<PartEventType, PartState>>> =
   self_reviewed: { PR_OPENED: "pr_open", ABANDON: "abandoned" },
   pr_open: { CHANGES_REQUESTED: "changes_requested", GATE_PASSED: "approved", MERGED: "merged", DECLINED: "declined" },
   changes_requested: { GATE_PASSED: "approved", MERGED: "merged", DECLINED: "declined" },
-  approved: { CHANGES_REQUESTED: "changes_requested", MERGED: "merged", DECLINED: "declined" },
+  approved: { CHANGES_REQUESTED: "changes_requested", GATE_FAILED: "pr_open", MERGED: "merged", DECLINED: "declined" },
   merged: {},
   declined: { REOPENED: "pr_open", ABANDON: "abandoned" },
   abandoned: {},
@@ -230,6 +230,7 @@ describe("machineMermaid", () => {
   changes_requested --> merged: MERGED
   changes_requested --> declined: DECLINED
   approved --> changes_requested: CHANGES_REQUESTED
+  approved --> pr_open: GATE_FAILED
   approved --> merged: MERGED
   approved --> declined: DECLINED
   merged --> [*]

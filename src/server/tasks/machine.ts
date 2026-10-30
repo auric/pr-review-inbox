@@ -36,6 +36,8 @@ export const PART_EVENTS = [
   "PR_OPENED",
   "CHANGES_REQUESTED",
   "GATE_PASSED",
+  // spec.md section 6.20.7: a later sync finds that the part gate of an approved part fails.
+  "GATE_FAILED",
   "MERGED",
   "DECLINED",
   "REOPENED",
@@ -116,7 +118,7 @@ export const partMachine = setup({
       },
     },
     changes_requested: { on: { GATE_PASSED: { guard: "gate", target: "approved" }, MERGED: "merged", DECLINED: "declined" } },
-    approved: { on: { CHANGES_REQUESTED: "changes_requested", MERGED: "merged", DECLINED: "declined" } },
+    approved: { on: { CHANGES_REQUESTED: "changes_requested", GATE_FAILED: "pr_open", MERGED: "merged", DECLINED: "declined" } },
     merged: { type: "final" },
     declined: { on: { REOPENED: "pr_open", ABANDON: "abandoned" } },
     abandoned: { type: "final" },

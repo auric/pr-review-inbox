@@ -29,8 +29,6 @@ export type PushInput = {
   branch: string;
   // null: a new branch, which the remote must not have. Else the commit that the app pushed last.
   lease: string | null;
-  // A rebase push: it may replace commits that the lease names. The caller gets the user's confirm first.
-  force?: boolean;
   // branches: the task_part branches of this task that the app may push, no tracked PR. target: the target branch of the repository. key:
   // the Jira key of the part. found: the found branch that the user picked with "Continue on <branch>" for the part (spec.md section
   // 6.20.2). Its name has the key, but its suffix can break the name rule of the app.
@@ -40,7 +38,7 @@ export type PushInput = {
   git?: typeof git;
 };
 
-// needs_force: the commit does not contain the lease, so the push rewrites published commits. It needs force and the confirm.
+// needs_force: the commit does not contain the lease, so the push would rewrite published commits. The app never force-pushes.
 // stale: the remote branch is not at the lease. The push changed nothing.
 export type PushResult =
   | { status: "pushed" }
@@ -81,7 +79,7 @@ export async function pushTaskBranch(input: PushInput): Promise<PushResult> {
   const clean = (m: string) => input.config.reduce((s, [, v]) => (v ? s.replaceAll(v, "[redacted]") : s), m);
   try {
     // An explicit lease forces any update that matches it (git push docs), so the fast-forward check runs here.
-    if (lease !== null && !input.force) {
+    if (lease !== null) {
       const behind = await run([`--git-dir=${input.cache}`, "rev-list", "--count", `${commit}..${lease}`], {
         env: gitEnv(input.emptyGlobal),
         ...long,

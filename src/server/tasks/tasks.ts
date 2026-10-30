@@ -850,7 +850,7 @@ type ScheduleRow = {
 };
 
 // spec.md section 6.20.6: the scheduler over the part rows of a task with sub-tasks. null for a task without sub-tasks. The sync sends
-// GATE_PASSED when the part gate passes (section 6.20.7), so the state approved holds the gate result.
+// GATE_PASSED when the part gate passes and GATE_FAILED when it fails later (section 6.20.7), so the state approved holds the gate result.
 export function scheduleOf(db: Database, t: TaskRow, rows: readonly ScheduleRow[]): Schedule | null {
   if (t.subtasks !== 1) return null;
   const done = new Set(
@@ -2417,6 +2417,9 @@ export function createTaskService(opts: TaskServiceOptions) {
     return moved;
   }
 
+  // spec.md section 6.20.9: after the app opens a PR, the next sync cycle reads the statuses whatever the time of the last read.
+  const statusDue = (db: Database, id: number) => void statusReads.get(db)?.delete(id);
+
   // POST /api/tasks/:id/jira-check (spec.md section 6.20.12): the status read of the Task view, at most once per JIRA_VIEW_AGE_MS.
   async function jiraCheck(db: Database, id: number): Promise<TaskResult> {
     if (!taskRow(db, id)) return { status: 404, error: "Task not found." };
@@ -2528,6 +2531,7 @@ export function createTaskService(opts: TaskServiceOptions) {
 
   return {
     syncStatuses,
+    statusDue,
     jiraCheck,
     jiraRead,
     jiraTransitions,

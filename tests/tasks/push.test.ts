@@ -91,31 +91,30 @@ describe("pushTaskBranch against a bare remote", () => {
     expect(await at(B("again"))).toBe(c.source);
   });
 
-  test("a later push uses the pushed lease; a rewrite needs force", async () => {
+  test("a later push uses the pushed lease; a rewrite is never pushed", async () => {
     await pushTaskBranch(input({ branch: B("ff") }));
-    expect(await pushTaskBranch(input({ branch: B("ff"), commit: c.next, lease: c.source }))).toEqual({ status: "pushed" });
-    expect(await at(B("ff"))).toBe(c.next);
-    expect(await pushTaskBranch(input({ branch: B("ff"), commit: c.native, lease: c.next }))).toEqual({ status: "needs_force" });
-    expect(await at(B("ff"))).toBe(c.next);
     const s = spy();
-    expect(await pushTaskBranch(input({ branch: B("ff"), commit: c.native, lease: c.next, force: true, git: s.run }))).toEqual({
-      status: "pushed",
-    });
-    expect(await at(B("ff"))).toBe(c.native);
+    expect(await pushTaskBranch(input({ branch: B("ff"), commit: c.next, lease: c.source, git: s.run }))).toEqual({ status: "pushed" });
+    expect(await at(B("ff"))).toBe(c.next);
     const push = s.calls.find((x) => x.args.includes("push"));
-    expect(push?.args).toContain(`--force-with-lease=refs/heads/${B("ff")}:${c.next}`);
-    expect(push?.args.at(-1)).toBe(`${c.native}:refs/heads/${B("ff")}`);
+    expect(push?.args).toContain(`--force-with-lease=refs/heads/${B("ff")}:${c.source}`);
+    expect(push?.args.at(-1)).toBe(`${c.next}:refs/heads/${B("ff")}`);
+    expect(push?.args.some((a) => a.startsWith("+") || a === "--force" || a === "-f")).toBe(false);
+    const r = spy();
+    expect(await pushTaskBranch(input({ branch: B("ff"), commit: c.native, lease: c.next, git: r.run }))).toEqual({
+      status: "needs_force",
+    });
+    expect(r.calls.some((x) => x.args.includes("push"))).toBe(false);
+    expect(await at(B("ff"))).toBe(c.next);
   });
 
-  test("a stale lease is refused with or without force, and the remote keeps the other commit (Gate G6)", async () => {
+  test("a stale lease is refused, and the remote keeps the other commit (Gate G6)", async () => {
     await pushTaskBranch(input({ branch: B("stale") }));
     // Someone else moves the branch.
     await git(["--git-dir", remote, "update-ref", `refs/heads/${B("stale")}`, c.native], { env });
-    for (const force of [false, true]) {
-      const r = await pushTaskBranch(input({ branch: B("stale"), commit: c.next, lease: c.source, force }));
-      expect(r).toEqual({ status: "stale", sentence: staleText(B("stale")) });
-      expect(await at(B("stale"))).toBe(c.native);
-    }
+    const r = await pushTaskBranch(input({ branch: B("stale"), commit: c.next, lease: c.source }));
+    expect(r).toEqual({ status: "stale", sentence: staleText(B("stale")) });
+    expect(await at(B("stale"))).toBe(c.native);
   });
 
   test("git itself forces a rewrite that matches an explicit lease, so the app checks it first", async () => {

@@ -360,9 +360,22 @@ describe("several parts with the scheduler (spec.md section 6.20.6)", () => {
       expect(review?.context["pr.md"]).toContain("# ABC-11: Part one");
 
       // The user opens the PR of part 1, and colleagues approve it (GATE_PASSED of the sync).
-      const op = createPrOpener({ review: s.jobs, settings: s.settings, live: s.live, working: s.loop.running, syncNow: () => {} });
+      // spec.md section 6.20.9: each PR open asks for the Jira status read of the next sync cycle.
+      const due: number[] = [];
+      const op = createPrOpener({
+        review: s.jobs,
+        settings: s.settings,
+        live: s.live,
+        working: s.loop.running,
+        syncNow: () => {},
+        opened: (db, id) => {
+          expect(db).toBe(s.db);
+          due.push(id);
+        },
+      });
       const opened = await op.open(s.db, s.task, s.p1, { version: s.dto().version, reviewers: [] });
       expect(opened.status).toBe(200);
+      expect(due).toEqual([s.task]);
       const pr1 = s.part(s.p1);
       expect(s.w.prs.get(pr1.remote_pr as number)?.toRef.id).toBe("refs/heads/main");
       const gate = advancePart(s.db, { task: s.task, version: s.t().version, part: s.p1 }, { type: "GATE_PASSED" }, { gate: true });

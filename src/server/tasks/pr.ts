@@ -237,6 +237,8 @@ export type OpenPrDeps = {
   working: (id: number) => boolean;
   // Starts a sync cycle, so the new PR shows in My PRs.
   syncNow: () => void;
+  // A PR of the task opened. The sync cycle after it reads the Jira statuses (spec.md section 6.20.9).
+  opened?: (db: Database, id: number) => void;
   live: Pick<Live, "broadcast">;
   now?: () => number;
 };
@@ -378,6 +380,7 @@ export function createPrOpener(deps: OpenPrDeps) {
       return a.status === 200 ? null : a.error;
     })();
     if (error) log(`Task ${id}: PR #${created.prId} is open, but the task state did not move: ${error}`);
+    deps.opened?.(db, id);
     deps.live.broadcast("changed", { prs: [row.id], tasks: [id] });
   }
 

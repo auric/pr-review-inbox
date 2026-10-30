@@ -152,6 +152,45 @@ describe("syncParts (spec.md sections 6.20.7 and 6.20.11)", () => {
     expect(stateOf(t.parts[0] as number)).toBe("approved");
   });
 
+  test("an approved part whose gate fails later goes back to pr_open, and the part on top of it waits again", () => {
+    const anna = (status: string) => JSON.stringify([{ slug: "anna", name: "Anna", login: null, status }]);
+    const p = pr("OPEN", [["Anna", "APPROVED"]]);
+    build(p, {});
+    const t = task([
+      { state: "pr_open", pr: p },
+      { state: "planned", start: "stack", after: 0 },
+    ]);
+    const lower = t.parts[0] as number;
+    const dto = () => taskDto(db, taskRow(db, t.id) as NonNullable<ReturnType<typeof taskRow>>);
+    expect(syncParts(db, [p], 5)).toEqual([t.id]);
+    expect(stateOf(lower)).toBe("approved");
+    expect(startable(db, t.id)).toBe(true);
+
+    // The reviewer removes the approval.
+    db.query("UPDATE pull_request SET reviewers_json = $json WHERE id = $id").run({ id: p, json: anna("UNAPPROVED") });
+    expect(syncParts(db, [p], 6)).toEqual([t.id]);
+    expect(stateOf(lower)).toBe("pr_open");
+    expect(startable(db, t.id)).toBe(false);
+    expect(dto().parts[1]?.wait).toBe(`Waits for a review of ${dto().parts[0]?.keys[0]}.`);
+
+    // A failed build.
+    db.query("UPDATE pull_request SET reviewers_json = $json WHERE id = $id").run({ id: p, json: anna("APPROVED") });
+    expect(syncParts(db, [p], 7)).toEqual([t.id]);
+    expect(stateOf(lower)).toBe("approved");
+    build(p, { failed: 1 });
+    expect(syncParts(db, [p], 8)).toEqual([t.id]);
+    expect(stateOf(lower)).toBe("pr_open");
+
+    // A new commit whose builds the app has not read yet.
+    build(p, {});
+    expect(syncParts(db, [p], 9)).toEqual([t.id]);
+    db.query("UPDATE pull_request SET source_head = $head WHERE id = $id").run({ id: p, head: OLD });
+    expect(syncParts(db, [p], 10)).toEqual([t.id]);
+    expect(stateOf(lower)).toBe("pr_open");
+    // A failed gate of a pr_open part changes nothing.
+    expect(syncParts(db, [p], 11)).toEqual([]);
+  });
+
   test("a failed gate sends no event; a PR that is not in the list is not read", () => {
     const p = pr("OPEN", []);
     build(p, {});

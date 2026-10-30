@@ -165,6 +165,26 @@ describe("the status read of the sync (spec.md section 6.20.11, AC-B85)", () => 
   });
 });
 
+describe("the status read after the app opens a PR (spec.md section 6.20.9)", () => {
+  test("statusDue makes the next sync cycle read within JIRA_STATUS_AGE_MS; a later cycle waits again", async () => {
+    const h = await setup();
+    const clock = { t: 1_000_000 };
+    const tasks = createTaskService({ review: h.review, settings: h.settings, live: h.live, now: () => clock.t });
+    await tasks.syncStatuses(h.db);
+    expect(h.reads()).toBe(1);
+    h.jira.setStatus("ABC-13", "indeterminate");
+    clock.t += 1_000;
+    tasks.statusDue(h.db, h.id);
+    expect(await tasks.syncStatuses(h.db)).toEqual([h.id]);
+    expect(h.reads()).toBe(2);
+    expect(h.statusOf("ABC-13")).toEqual({ status: "In Progress", category: "indeterminate" });
+    clock.t += 1_000;
+    expect(await tasks.syncStatuses(h.db)).toEqual([]);
+    expect(h.reads()).toBe(2);
+    expect(h.posts()).toEqual([]);
+  });
+});
+
 describe("the status read of the Task view (spec.md section 6.20.12, AC-B85)", () => {
   test("POST jira-check reads at most once per JIRA_VIEW_AGE_MS", async () => {
     const h = await setup();

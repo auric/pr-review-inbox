@@ -64,7 +64,8 @@ function eventOf(db: Database, part: { pr: number; pr_state: string | null }, ap
   if (part.pr_state === "DECLINED") return "DECLINED";
   const pr = db.query(SQL.pr).get({ id: part.pr }) as { reviewers_json: string | null } | null;
   if (asksOf(reviewersOf(pr?.reviewers_json ?? null)).length) return "CHANGES_REQUESTED";
-  return partGate(db, part, approvals)?.pass ? "GATE_PASSED" : null;
+  const gate = partGate(db, part, approvals);
+  return gate === null ? null : gate.pass ? "GATE_PASSED" : "GATE_FAILED";
 }
 
 // spec.md section 6.20.11: after a sync cycle, the part events of the parts that follow the changed PRs, then LAST_PR_OPEN or
