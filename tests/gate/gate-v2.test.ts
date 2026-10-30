@@ -17,12 +17,12 @@ const REPO = "https://example.invalid/projects/TEST/repos/test-repo";
 
 afterAll(() => rmSync(NO_TOOLS, { recursive: true, force: true }));
 
-function run(script: string, args: string[], path: string) {
+function run(script: string, args: string[], path: string, extra: Record<string, string> = {}) {
   const env: Record<string, string> = {};
   // MSYSTEM without git's usr\bin on PATH crashes Git for Windows on a local fetch.
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !["PATH", "MSYSTEM"].includes(k.toUpperCase())) env[k] = v;
   // A set token keeps the OS secret store out of every test.
-  Object.assign(env, { PATH: path, GATE_BITBUCKET_TOKEN: "test-token" });
+  Object.assign(env, { PATH: path, GATE_BITBUCKET_TOKEN: "test-token" }, extra);
   const r = Bun.spawnSync([process.execPath, script, ...args], { cwd: ROOT, env, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
   return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
 }
@@ -149,7 +149,9 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     const g19 = r.out.split("\n").find((l) => l.startsWith("PASS    G19 ")) ?? "";
-    expect(g19).toContain("squash merge of the lower PR: HTTP 200 state=MERGED; lower branch kept=true");
+    expect(g19).toContain(
+      "merge strategies: HTTP 200 enabled=no-ff,squash default=no-ff; squash merge of the lower PR: HTTP 200 state=MERGED; lower branch kept=true",
+    );
     expect(g19).toContain("commit parents=1; MERGED commit is the base head=true git parents=1");
     expect(g19).toContain("tree of S equals merge-tree --write-tree S^1 A_final=true");
     expect(g19).toContain("merges on the upper branch: S^1, ours S, M1");
@@ -158,6 +160,24 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
     expect(r.out).toContain("declined PRs=not open,HTTP 200; deleted branches=ok,ok,ok");
     for (const secret of ["rl-gate-", "refs/heads/", "127.0.0.1", tmpdir()]) expect(r.out).not.toContain(secret);
     expect(r.out).toContain("dry run: PASS");
+  }, 120_000);
+
+  test("a dry run of G19 without squash prints the masked merge errors and the settings hint", () => {
+    const r = run(BITBUCKET_WRITE, ["--dry-run", "--only", "G19"], GIT_DIR, { GATE_DRY_SQUASH: "off" });
+    expect(r.err).toBe("");
+    expect(r.code).toBe(1);
+    const g19 = r.out.split("\n").find((l) => l.startsWith("FAIL    G19 ")) ?? "";
+    expect(g19).toContain(
+      "merge strategies: HTTP 200 enabled=no-ff default=no-ff; squash merge of the lower PR: HTTP 400 dry.ArgumentValidation state=OPEN",
+    );
+    expect(g19).toContain(
+      "state=OPEN; errors: context=strategyId message=Squash is not enabled for <masked>/<masked>, <value> into <masked>, user <masked>.; The repository does not enable squash.",
+    );
+    expect(g19).toContain("Enable squash in the repository settings (Merge strategies) and run again.");
+    expect(r.out).toContain("declined PRs=HTTP 200,HTTP 200; deleted branches=ok,ok,ok");
+    for (const secret of ["rl-gate-", "refs/heads/", "dry-repo", "DRY/", "dry-user", "127.0.0.1", tmpdir()])
+      expect(r.out).not.toContain(secret);
+    expect(r.out).toContain("dry run: FAIL");
   }, 120_000);
 
   test.each([

@@ -19,6 +19,8 @@
 // --dry-run: the same steps against a loopback fake server and a local bare repository. It reads no secret, and nothing leaves the machine.
 // Token: GATE_BITBUCKET_TOKEN, else the token of scripts/gate0/set-token.ts. The stored token goes only to the stored URL origin.
 // Console output and .gate0/bitbucket-write/*.json hold only status codes, booleans, key names, enum-like strings, and gate branch names.
+// One exception: G19 prints the Bitbucket error messages of a failed merge, with every known name masked.
+// GATE_DRY_SQUASH=off (dry run only): the fake repository disables squash, so G19 shows its failure output.
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +29,7 @@ import type { z } from "zod";
 import { change, page, pullRequest } from "../../src/server/bitbucket/schemas";
 import { gitEnv } from "../../src/server/review/git";
 import { MERGE_CONFLICTED } from "../../src/shared/task";
+import { forms, clean as maskNeedles } from "./ci";
 
 const SERVICE = "review-loop";
 const ROOT = resolve(import.meta.dir, "../..");
@@ -190,6 +193,15 @@ function session(ctx: Ctx) {
     ] as const)
       if (v) out = out.split(v).join(r);
     return out;
+  };
+
+  // Bitbucket error messages are free text. They can name the server, the repository, a branch, a PR, or a user.
+  const mask = (text: string, user?: string | null) => {
+    const names = [ctx.project, ctx.project.replace(/^~/, ""), ctx.repo, ctx.target, ctx.reviewer, ctx.jiraKey, user, ...branches.keys()];
+    const needles = names.filter((v): v is string => !!v).flatMap((v) => forms(v).map((value) => ({ kind: "name", value })));
+    return maskNeedles(clean(text), needles)
+      .replace(new RegExp(String.raw`'[^']*'|"[^"]*"|\S+://\S+|refs/heads/\S+|${PREFIX}\S+`, "g"), "<value>")
+      .slice(0, 200);
   };
 
   async function call(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<Call> {
@@ -396,6 +408,7 @@ function session(ctx: Ctx) {
 
   return {
     ctx,
+    mask,
     repoPath,
     stamp,
     name,
@@ -803,6 +816,15 @@ async function g19(s: Session): Promise<Result> {
   const v = s.must(["version"]).match(/(\d+)\.(\d+)/);
   if (!v || Number(v[1]) < 2 || (Number(v[1]) === 2 && Number(v[2]) < 38))
     return fail("the local git is older than 2.38. It has no merge-tree --write-tree. Update git and run again.");
+  // GET .../settings/pull-requests gives mergeConfig, the effective merge strategies of the repository (DC 9.6 REST, REPO_READ).
+  const set = await s.call("GET", `${s.repoPath}/settings/pull-requests`);
+  const mc = (
+    set.body as { mergeConfig?: { defaultStrategy?: { id?: unknown }; strategies?: { id?: unknown; enabled?: unknown }[] } } | null
+  )?.mergeConfig;
+  const strategy = (id: unknown) => (typeof id === "string" && /^[a-z0-9-]+$/.test(id) ? id : "<value>");
+  const enabled = (mc?.strategies ?? []).filter((x) => x.enabled === true).map((x) => strategy(x.id));
+  const squashOff = set.status === 200 && !enabled.includes("squash");
+  const setLine = `merge strategies: HTTP ${set.status} enabled=${enabled.join(",") || "none"} default=${mc?.defaultStrategy ? strategy(mc.defaultStrategy.id) : "absent"}`;
   const base = await s.branch("g19-base", await s.targetHead());
   const low = await s.branch("g19-lower", base.sha);
   const up = await s.branch("g19-upper", low.sha);
@@ -817,12 +839,21 @@ async function g19(s: Session): Promise<Result> {
   if (typeof lowId !== "number" || typeof upId !== "number")
     return fail(`create PRs: lower HTTP ${lowPr.status}${errs(lowPr.body)}; upper HTTP ${upPr.status}${errs(upPr.body)}`);
 
-  // strategyId selects the merge strategy of this merge (RestPullRequestMergeRequest). The repository must allow squash.
+  // DC 9.6 REST: version is a query parameter, strategyId is a body field (RestPullRequestMergeRequest). The repository must enable squash.
   const before = await s.getPr(lowId);
   const merge = await s.call("POST", `${s.prPath(lowId)}/merge?version=${String(before.pr.version)}`, { strategyId: "squash" });
   const after = await s.getPr(lowId);
-  const mergeLine = `squash merge of the lower PR: HTTP ${merge.status}${errs(merge.body)} state=${enumLike(after.pr.state)}`;
-  if (merge.status !== 200 || after.pr.state !== "MERGED") return fail(mergeLine);
+  const mergeLine = `${setLine}; squash merge of the lower PR: HTTP ${merge.status}${errs(merge.body)} state=${enumLike(after.pr.state)}`;
+  if (merge.status !== 200 || after.pr.state !== "MERGED") {
+    const details = ((merge.body as { errors?: { context?: unknown; message?: unknown }[] } | null)?.errors ?? []).map(
+      (e) =>
+        `${typeof e.context === "string" && /^[A-Za-z0-9_.]+$/.test(e.context) ? `context=${e.context} ` : ""}message=${typeof e.message === "string" ? s.mask(e.message, merge.user) : "absent"}`,
+    );
+    const hint = squashOff
+      ? "; The repository does not enable squash. Enable squash in the repository settings (Merge strategies) and run again."
+      : "";
+    return fail(`${mergeLine}; errors: ${details.join(" | ") || "none"}${hint}`);
+  }
   const kept = (await s.remoteAt(low.name)) === low.sha;
   const acts = await s.call("GET", `${s.prPath(lowId)}/activities?limit=${OPEN_PR_LIMIT}`);
   const act = (valuesOf(acts.body) as { action?: unknown; commit?: { id?: unknown; parents?: unknown } }[]).find(
@@ -952,7 +983,7 @@ const part = selected.length === CHECKS.length ? "" : `.${selected.join("-").toL
 
 // ---------- dry run: a loopback fake server and a local bare repository ----------
 // The fake declines a PR whose target or source branch is gone. That is one possible G5 outcome, not a verified one.
-function fakeServer(token: string, origin: string, buildCommit: string, env: Record<string, string>) {
+function fakeServer(token: string, origin: string, buildCommit: string, env: Record<string, string>, squash: boolean) {
   const og = (args: string[]) => {
     const r = Bun.spawnSync(["git", `--git-dir=${origin}`, ...args], { env, stdout: "pipe", stderr: "pipe" });
     return { code: r.exitCode, out: r.stdout.toString().trim() };
@@ -1054,6 +1085,16 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
       }
       if (req.method === "GET" && p === "/ctx/rest/branch-permissions/latest/projects/DRY/repos/dry-repo/restrictions")
         return json(401, { errors: [{ exceptionName: "com.atlassian.bitbucket.AuthorisationException" }] });
+      if (req.method === "GET" && p === `${repoPath}/settings/pull-requests`)
+        return json(200, {
+          mergeConfig: {
+            defaultStrategy: { id: "no-ff", enabled: true },
+            strategies: [
+              { id: "no-ff", enabled: true },
+              { id: "squash", enabled: squash },
+            ],
+          },
+        });
       if (req.method === "GET" && (p === `${repoPath}/default-branch` || p === `${repoPath}/branches/default`))
         return json(200, branchOf("main"));
       if (req.method === "GET" && p === `${repoPath}/branches`) {
@@ -1105,6 +1146,17 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
         if (Number(url.searchParams.get("version")) !== pr.version) return json(409, { errors: [{ exceptionName: "dry.OutOfDate" }] });
         if (((await req.json()) as { strategyId?: unknown }).strategyId !== "squash")
           return json(400, { errors: [{ exceptionName: "dry.UnsupportedStrategy" }] });
+        // Invented message text with names in it. It tests the masking, not the live wording.
+        if (!squash)
+          return json(400, {
+            errors: [
+              {
+                context: "strategyId",
+                message: `Squash is not enabled for DRY/dry-repo, ${pr.fromRef.id} into ${pr.toRef.id.replace("refs/heads/", "")}, user dry-user.`,
+                exceptionName: "dry.ArgumentValidation",
+              },
+            ],
+          });
         // shortcut: the fake squash uses the 3-way merge tree, the same rule that G19 checks. Only the live server confirms the rule.
         const to = og(["rev-parse", pr.toRef.id]).out;
         const tree = og(["merge-tree", "--write-tree", to, pr.fromRef.id]);
@@ -1207,7 +1259,7 @@ if (DRY) {
   const first = g([`--git-dir=${origin}`, "commit-tree", g([`--git-dir=${origin}`, "write-tree"]), "-m", "dry"]);
   g([`--git-dir=${origin}`, "update-ref", "refs/heads/main", first]);
   const token = "dry-run-token";
-  const server = fakeServer(token, origin, first, env);
+  const server = fakeServer(token, origin, first, env, process.env.GATE_DRY_SQUASH !== "off");
   try {
     const { results, tail } = await runGate({
       base: `http://127.0.0.1:${server.port}/ctx`,
