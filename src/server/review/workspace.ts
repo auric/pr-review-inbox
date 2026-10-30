@@ -5,7 +5,7 @@
 // <dataDir>/runs/<id>/work/{repo,context} is the CLI cwd, <dataDir>/runs/<id>/app holds the app files.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir, rename, rm } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { indentBlock, oneLine } from "../../shared/consult";
 import { RUN_TEXT_BYTES } from "../../shared/dto";
 import { type Comment, commentLines, type ExcerptLine, type PrRef, type PullRequest } from "../../shared/types";
@@ -34,6 +34,8 @@ const RM_TREE = { recursive: true, force: true, maxRetries: 3 } as const;
 const FILE_NAME = /^[a-z-]+\.md$/;
 // Plan r3: context/attachments/<attachment ID>.<ext>. Only .txt is text. docs/plans/review-v2/spec.md section 6.17 adds .pdf.
 export const ATTACHMENT_NAME = /^[0-9]{1,18}\.(png|jpg|gif|webp|pdf|txt)$/;
+// docs/plans/review-v2/spec.md section 6.20.3: a task run puts the files of a Jira sub-task into context/attachments/<sub-task key>/.
+export const TASK_ATTACHMENT_NAME = /^(?:[A-Z][A-Z0-9_]*-[1-9][0-9]*\/)?[0-9]{1,18}\.(png|jpg|gif|webp|pdf|txt)$/;
 // A fixed identity and date give the same range base commit for the same inputs.
 const RANGE_IDENTITY = {
   GIT_AUTHOR_NAME: "Review Loop",
@@ -412,7 +414,11 @@ export async function attachmentBytes(root: string, a: AttachmentFile): Promise<
 
 async function copyAttachments(root: string, dir: string, list: AttachmentFile[]) {
   mkdirSync(dir);
-  for (const a of list) writeFileSync(join(dir, a.name), await attachmentBytes(root, a));
+  for (const a of list) {
+    const to = join(dir, a.name);
+    mkdirSync(dirname(to), { recursive: true });
+    writeFileSync(to, await attachmentBytes(root, a));
+  }
 }
 
 export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace> {
@@ -559,7 +565,8 @@ export async function prepareTaskWorkspace(input: TaskWorkspaceInput): Promise<W
   for (const f of files) if (!FILE_NAME.test(f.name)) throw new WorkspaceError(`Invalid context file name: ${f.name}`);
   const attachments = input.attachments ?? [];
   for (const a of attachments)
-    if (!ATTACHMENT_NAME.test(a.name) || a.text !== a.name.endsWith(".txt")) throw new WorkspaceError(`Invalid attachment name: ${a.name}`);
+    if (!TASK_ATTACHMENT_NAME.test(a.name) || a.text !== a.name.endsWith(".txt"))
+      throw new WorkspaceError(`Invalid attachment name: ${a.name}`);
   const dataDir = longData(input.dataDir);
   const cache = cachePath(dataDir, { project: input.project, repo: input.repo, id: input.task });
   const { empty, env } = gitSetup(dataDir);
@@ -698,7 +705,8 @@ export async function prepareCommitWorkspace(input: CommitWorkspaceInput): Promi
   for (const f of files) if (!FILE_NAME.test(f.name)) throw new WorkspaceError(`Invalid context file name: ${f.name}`);
   const attachments = input.attachments ?? [];
   for (const a of attachments)
-    if (!ATTACHMENT_NAME.test(a.name) || a.text !== a.name.endsWith(".txt")) throw new WorkspaceError(`Invalid attachment name: ${a.name}`);
+    if (!TASK_ATTACHMENT_NAME.test(a.name) || a.text !== a.name.endsWith(".txt"))
+      throw new WorkspaceError(`Invalid attachment name: ${a.name}`);
   const dataDir = longData(input.dataDir);
   const cache = cachePath(dataDir, { project: input.project, repo: input.repo, id: input.task });
   if (!existsSync(join(cache, "HEAD"))) throw new WorkspaceError(`The app has no copy of ${input.project}/${input.repo} yet.`);

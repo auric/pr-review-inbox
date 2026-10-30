@@ -139,6 +139,56 @@ export const FAILURE_TAIL = 32 * 1024;
 
 export const sizeRank = (s: TaskSize) => TASK_SIZES.indexOf(s);
 
+// The key rule of a Jira read. dto.ts exports it too.
+export const JIRA_KEY = /^[A-Z][A-Z0-9_]*-[1-9][0-9]*$/;
+// spec.md section 6.20: sub-tasks, one PR per part. SUBTASK_PARTS_MAX: the specResult parts cap. JIRA_*_AGE_MS: the least time between
+// two Jira status reads of one task by the sync and by the Task view. FOUND_*: the changed paths of a tracked PR and the commit
+// subjects of a found branch in context/subtasks.md.
+export const SUBTASKS_READ = 20;
+export const SUBTASK_PARTS_MAX = 12;
+export const MAX_OPEN_CAP = 5;
+export const MAX_OPEN_DEFAULT = 3;
+export const JIRA_STATUS_AGE_MS = 5 * 60_000;
+export const JIRA_VIEW_AGE_MS = 60_000;
+export const FOUND_CHANGES_MAX = 100;
+export const FOUND_COMMITS_MAX = 20;
+export const START_MODES = ["base", "stack", "merge"] as const;
+export type StartMode = (typeof START_MODES)[number];
+
+// spec.md section 6.20.1: "Build the sub-tasks, one PR each" starts selected when at least one sub-task is not done (design.md Q64).
+export const subtasksFirst = (subtasks: readonly { category: string | null }[]) => subtasks.some((s) => s.category !== "done");
+
+// spec.md section 6.20.2: the key as a whole token, the Jira convention that links branches and PRs to issues. ABC-1 never matches
+// ABC-12.
+export const namesKey = (text: string, key: string) => JIRA_KEY.test(key) && new RegExp(`(^|[^A-Za-z0-9])${key}($|[^0-9])`).test(text);
+
+// task_subtask.found_json (spec.md section 6.20.2): a PR or a branch that names the key. pr: the Bitbucket PR number. changes: the
+// changed paths of an open PR, at most FOUND_CHANGES_MAX. A branch without a PR: ref is the fetched task ref, subjects its commit
+// subjects, stat its diff stat against the base. error: why the app could not read it.
+export const foundItem = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("pr"),
+    pr: z.number().int().positive(),
+    title: z.string(),
+    branch: z.string(),
+    target: z.string(),
+    state: z.enum(["OPEN", "MERGED"]),
+    head: z.string().nullable().default(null),
+    changes: z.array(z.string()).default([]),
+    more: z.boolean().default(false),
+  }),
+  z.object({
+    kind: z.literal("branch"),
+    name: z.string(),
+    ref: z.string().nullable().default(null),
+    head: z.string().nullable().default(null),
+    subjects: z.array(z.string()).default([]),
+    stat: z.string().default(""),
+    error: z.string().nullable().default(null),
+  }),
+]);
+export type FoundItem = z.infer<typeof foundItem>;
+
 // spec.md section 6.16.2: lowercase ASCII letters, digits, and hyphens from the title. No length cut here.
 export function slug(title: string) {
   return title
@@ -404,6 +454,11 @@ const specPart = z.object({
     )
     .min(1)
     .max(15),
+  // spec.md section 6.20.4: sub-task mode only. after: a part number such as "2", or the key of a tracked sub-task.
+  keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([]),
+  start: z.enum(START_MODES).default("base"),
+  after: z.string().max(40).nullable().default(null),
+  startReason: z.string().max(300).default(""),
 });
 
 export const specResult = z.object({
@@ -441,7 +496,7 @@ export const specResult = z.object({
     .object({ behavior: z.string().max(3000), edgeCases: z.string().max(2000), outOfScope: z.string().max(1000) })
     .nullable()
     .default(null),
-  parts: z.array(specPart).min(1).max(12),
+  parts: z.array(specPart).min(1).max(SUBTASK_PARTS_MAX),
   testing: z.object({
     commands: z
       .array(z.object({ name: z.string().max(60), kind: z.enum(COMMAND_KINDS), argv: z.array(z.string().max(1000)).min(1).max(32) }))
@@ -459,6 +514,9 @@ export const specResult = z.object({
     .array(z.object({ project: z.string().max(100), repo: z.string().max(100), reason: z.string().max(300) }))
     .max(PROPOSALS_MAX)
     .default([]),
+  // spec.md section 6.20.4: the open PRs at once that Claude proposes in sub-task mode.
+  maxOpen: z.number().int().min(1).max(MAX_OPEN_CAP).nullable().default(null),
+  maxOpenReason: z.string().max(300).default(""),
   coverage,
 });
 export type SpecResult = z.infer<typeof specResult>;

@@ -45,9 +45,9 @@ const TASK_TABLE: Record<TaskState, Partial<Record<TaskEventType, TaskState>>> =
 };
 
 // Part states (spec.md section 6.2): planned → implementing → self_reviewed → pr_open → changes_requested → approved → merged, with
-// the side states declined and abandoned.
+// the side states declined and abandoned. spec.md section 6.20.7: the plan approval follows a PR that the app did not create.
 const PART_TABLE: Record<PartState, Partial<Record<PartEventType, PartState>>> = {
-  planned: { START: "implementing", ABANDON: "abandoned" },
+  planned: { START: "implementing", ABANDON: "abandoned", ADOPT_OPEN: "pr_open", ADOPT_MERGED: "merged" },
   implementing: { REVIEWED: "self_reviewed", ABANDON: "abandoned" },
   self_reviewed: { PR_OPENED: "pr_open", ABANDON: "abandoned" },
   pr_open: { CHANGES_REQUESTED: "changes_requested", GATE_PASSED: "approved", MERGED: "merged", DECLINED: "declined" },
@@ -215,6 +215,8 @@ describe("machineMermaid", () => {
   [*] --> planned
   planned --> implementing: START
   planned --> abandoned: ABANDON
+  planned --> pr_open: ADOPT_OPEN
+  planned --> merged: ADOPT_MERGED
   implementing --> self_reviewed: REVIEWED
   implementing --> abandoned: ABANDON
   self_reviewed --> pr_open: PR_OPENED

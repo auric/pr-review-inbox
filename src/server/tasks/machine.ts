@@ -40,6 +40,9 @@ export const PART_EVENTS = [
   "DECLINED",
   "REOPENED",
   "ABANDON",
+  // spec.md section 6.20.7: the plan approval follows an open or merged PR that the app did not create.
+  "ADOPT_OPEN",
+  "ADOPT_MERGED",
 ] as const;
 export type PartEvent = { type: (typeof PART_EVENTS)[number] };
 
@@ -99,7 +102,7 @@ export const partMachine = setup({
   initial: "planned",
   context: { gate: false },
   states: {
-    planned: { on: { START: "implementing", ABANDON: "abandoned" } },
+    planned: { on: { START: "implementing", ABANDON: "abandoned", ADOPT_OPEN: "pr_open", ADOPT_MERGED: "merged" } },
     implementing: { on: { REVIEWED: "self_reviewed", ABANDON: "abandoned" } },
     self_reviewed: { on: { PR_OPENED: "pr_open", ABANDON: "abandoned" } },
     // Bitbucket merges or declines a PR whatever the app's review rules say.

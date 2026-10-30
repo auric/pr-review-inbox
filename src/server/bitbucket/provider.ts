@@ -36,7 +36,7 @@ import {
   type RawDiff,
   repository,
   restriction,
-  type user,
+  user,
 } from "./schemas";
 
 const API = "/rest/api/1.0";
@@ -47,6 +47,16 @@ const HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const HEADS = "refs/heads/";
 // docs/plans/ci-builds.md, Layer A: one page of build statuses.
 const STATUS_LIMIT = 25;
+// docs/plans/review-v2/spec.md section 6.20.4: one page of the newest merged PRs.
+const MERGED_LIMIT = 50;
+const mergedPr = z.object({
+  id: z.number(),
+  title: z.string(),
+  author: z.object({ user }),
+  createdDate: z.number(),
+  closedDate: z.number().optional(),
+  fromRef: z.object({ displayId: z.string() }),
+});
 
 const repoPath = (project: string, repo: string) => `${API}/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}`;
 const prPath = (ref: PrRef) => `${repoPath(ref.project, ref.repo)}/pull-requests/${ref.id}`;
@@ -186,6 +196,8 @@ export type RepoRemote = { url: string; config: [string, string][] };
 export type RepoInfo = { project: string; slug: string; name: string; clone: { href: string; name: string }[] };
 // complete false: the list stopped at REPO_LIST_MAX or at a bad page cursor.
 export type RepoList = { repos: RepoInfo[]; complete: boolean };
+// A merged PR of a repository (spec.md section 6.20.4). closedDate: null when the server gives none (spec.md section 6.20.17).
+export type MergedPr = { id: number; title: string; author: User; branch: string; createdDate: number; closedDate: number | null };
 // A branch restriction (Data Center 9.6 REST): type such as read-only, matcher type such as BRANCH, matcher id such as refs/heads/main.
 export type Restriction = { type: string; matcherType: string; matcherId: string };
 
@@ -374,6 +386,20 @@ export function createBitbucketProvider(opts: ClientOptions) {
         })),
         more: !data.isLastPage,
       };
+    },
+
+    // spec.md section 6.20.4: one page of the newest merged PRs of a repository, for the review times of context/pr-history.md.
+    async mergedPullRequests(project: string, repo: string): Promise<MergedPr[]> {
+      const path = `${repoPath(project, repo)}/pull-requests?state=MERGED&order=NEWEST&limit=${MERGED_LIMIT}`;
+      const { data } = await client.get(path, page(mergedPr));
+      return data.values.map((p) => ({
+        id: p.id,
+        title: p.title,
+        author: toUser(p.author.user),
+        branch: p.fromRef.displayId,
+        createdDate: p.createdDate,
+        closedDate: p.closedDate ?? null,
+      }));
     },
 
     // One POST, never repeated (spec.md section 6.9, Gate G2: HTTP 201 with the PR).

@@ -969,10 +969,22 @@ export const INTERVIEW_RULES = [
 // Round 2 only.
 export const INTERVIEW_ANSWERS_RULE = "./context/answers.md holds the user's answers to round 1. Do not ask again what they settle.";
 
-export function interviewAgent(p: Profile, round: number): AgentSpec {
+// spec.md section 6.20: the interview and the spec run of a task that builds its Jira sub-tasks get context/subtasks.md.
+export const SUBTASKS_RULE =
+  "./context/subtasks.md lists the sub-tasks with their status, text, links, and the branches and PRs that exist.";
+
+// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.1).
+export function interviewAgent(p: Profile, round: number, subtasks = false): AgentSpec {
   return {
     description: "Read-only questions before the plan of one task.",
-    prompt: [...INTERVIEW_RULES, ...(round > 1 ? [INTERVIEW_ANSWERS_RULE] : []), ...TRUST, COVERAGE_RULE, ...docsRule(p)].join("\n"),
+    prompt: [
+      ...INTERVIEW_RULES,
+      ...(round > 1 ? [INTERVIEW_ANSWERS_RULE] : []),
+      ...(subtasks ? [SUBTASKS_RULE] : []),
+      ...TRUST,
+      COVERAGE_RULE,
+      ...docsRule(p),
+    ].join("\n"),
   };
 }
 
@@ -1013,10 +1025,28 @@ export const specRules = (budget: number, platform: string = process.platform) =
   `Name at most ${PROPOSALS_MAX} repositories. Never name the main repository, a submodule of it, or a repository that the list shows as skipped.`,
 ];
 
-export function specAgent(p: Profile, budget: number, platform: string = process.platform): AgentSpec {
+// spec.md section 6.20.4: the lines of the spec run in sub-task mode.
+export const subtaskSpecRules = (budget: number) => [
+  SUBTASKS_RULE,
+  "Plan one part per sub-task that is not done and has no open PR. Name its key in keys.",
+  `Split a sub-task into two parts only when it is over ${budget} changed lines.`,
+  "Combine sub-tasks only when each one is too small to review alone and they change the same files. Say why in startReason.",
+  "Set start to base when the part needs no other sub-task.",
+  "Set start to stack when the part needs code of a sub-task that is not merged.",
+  "Set start to merge when the part needs that sub-task merged first.",
+  "Set after to that part number or key. In startReason, name the code or the Jira link that shows the need.",
+  "A Jira link such as is-blocked-by is a fact from the team. Follow it unless the code shows that it is wrong, and then say why.",
+  "Propose maxOpen from 1 to 5. In maxOpenReason, say in one line how many parts can run side by side.",
+  "Also say how big they are, and how long reviews take in ./context/pr-history.md.",
+];
+
+// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.4).
+export function specAgent(p: Profile, budget: number, platform: string = process.platform, subtasks = false): AgentSpec {
   return {
     description: "Read-only plan of one task.",
-    prompt: [...specRules(budget, platform), ...TRUST, COVERAGE_RULE, ...docsRule(p)].join("\n"),
+    prompt: [...specRules(budget, platform), ...(subtasks ? subtaskSpecRules(budget) : []), ...TRUST, COVERAGE_RULE, ...docsRule(p)].join(
+      "\n",
+    ),
   };
 }
 

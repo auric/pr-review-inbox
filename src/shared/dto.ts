@@ -30,8 +30,11 @@ import {
 import type { RunErrorKind, RunEvent, RunStatus } from "./run-log";
 import {
   commandId,
+  type FoundItem,
   INTERVIEW_QUESTIONS,
+  JIRA_KEY,
   MAX_INSTRUCTION,
+  MAX_OPEN_CAP,
   type PartKind,
   type PartState,
   PREFIX_MAX,
@@ -41,9 +44,13 @@ import {
   type RepoRole,
   type SizeSource,
   type SpecResult,
+  START_MODES,
+  type StartMode,
   type StepDetail,
   type StepKind,
   type StepState,
+  SUBTASK_PARTS_MAX,
+  SUBTASKS_READ,
   TASK_DOCS,
   TASK_SIZES,
   type TaskBlocked,
@@ -855,7 +862,7 @@ export type ImproveDto =
 
 // ---------- Task context (plan r2 S-JIRA) ----------
 
-export const JIRA_KEY = /^[A-Z][A-Z0-9_]*-[1-9][0-9]*$/;
+export { JIRA_KEY };
 
 // The listing of one issue attachment (plan r3 S-JMD). id: digits only. created: the timestamp text from the source.
 export type AttachmentMeta = { id: string; filename: string; mimeType: string | null; size: number; created: string | null };
@@ -894,6 +901,8 @@ export type AttachmentDto = {
   pdf: boolean;
   include: boolean;
   downloadedAt: number;
+  // A file of a Jira sub-task (spec.md section 6.20.3): the sub-task key. Absent: the task key.
+  issue?: string;
 };
 // fetchedAt: ms. files: the downloaded attachments.
 export type TaskContextDto = IssueContext & { source: "jira"; fetchedAt: number; files: AttachmentDto[] };
@@ -1294,6 +1303,13 @@ export const taskCreateInput = z.object({
   originPr: positiveInt.optional(),
   files: z.array(z.string().regex(ATT_ID)).max(200).optional(),
   profile: profileId.optional(),
+  // spec.md section 6.20.1. true: build the sub-tasks of the key, one PR each. false: one task. Absent: sub-tasks when one is not done.
+  // subtaskFiles: the ticked files of each open sub-task. Absent: the rule of files for each sub-task.
+  subtasks: z.boolean().optional(),
+  subtaskFiles: z
+    .array(z.object({ key: z.string().regex(JIRA_KEY), files: z.array(z.string().regex(ATT_ID)).max(200) }))
+    .max(SUBTASKS_READ)
+    .optional(),
 });
 // GET /api/tasks/profile: the profile that the Build form preselects for a repository (spec.md section 6.2).
 export const taskProfileInput = z.object({ project: repoName, repo: repoName });
@@ -1302,7 +1318,14 @@ export type TaskProfileDto = { profile: ProfileId };
 export type TaskRepoListDto = { repos: { project: string; repo: string }[]; complete: boolean };
 // POST /api/tasks/issue: the issue of a key before the task exists (spec.md section 6.17). One Jira read on the user's click.
 export const taskIssueInput = z.object({ key: z.string().regex(TASK_KEY) });
-export type TaskIssueDto = { key: string; summary: string; status: string | null; attachments: AttachmentMeta[] };
+// subtasks: the sub-tasks of the key in Jira order, from the same read (spec.md section 6.20.1).
+export type TaskIssueDto = {
+  key: string;
+  summary: string;
+  status: string | null;
+  attachments: AttachmentMeta[];
+  subtasks: IssueSubtask[];
+};
 // GET /api/tasks.
 export const taskListInput = z.object({ state: z.enum(["open", "all"]).default("open") });
 // POST /api/tasks/:id/answers. question: a task_question ID. choice: the index of an option. recommended: use every recommended answer.
@@ -1333,6 +1356,31 @@ export const taskPlanInput = z.object({
     .array(z.object({ taskRepo: positiveInt, branch: branchName }))
     .max(100)
     .optional(),
+  // spec.md section 6.20.5: the plan of a sub-task task. parts: the start of each plan part n; after names a part number or a tracked
+  // sub-task key. existing: the found branch of the part key. track: the PR that the app follows for a sub-task with several open PRs.
+  subtasks: z
+    .object({
+      parts: z
+        .array(
+          z.object({
+            n: positiveInt,
+            start: z.enum(START_MODES),
+            after: z.string().max(40).nullable(),
+            existing: z.enum(["continue", "new"]).optional(),
+          }),
+        )
+        .max(SUBTASK_PARTS_MAX),
+      track: z.array(z.object({ key: z.string().regex(JIRA_KEY), pr: positiveInt })).max(SUBTASKS_READ),
+      maxOpen: z.number().int().min(1).max(MAX_OPEN_CAP),
+    })
+    .optional(),
+});
+// POST /api/tasks/:id/plan-again (spec.md section 6.20.12): the spec run starts again with text as an answer line. add: plan the sub-tasks
+// that are new in Jira (section 6.20.14).
+export const taskPlanAgainInput = z.object({
+  version,
+  text: z.string().trim().min(1).max(MAX_TASK_ANSWER),
+  add: z.literal(true).optional(),
 });
 // GET /api/repos/:project/:repo/branches (spec.md section 6.16.3).
 export const branchSearchInput = z.object({ filter: z.string().max(255).default("") });
@@ -1407,6 +1455,7 @@ export const repoTaskSettingsInput = z.object({
 export type TaskCreateInput = z.infer<typeof taskCreateInput>;
 export type TaskAnswersInput = z.infer<typeof taskAnswersInput>;
 export type TaskPlanInput = z.infer<typeof taskPlanInput>;
+export type TaskPlanAgainInput = z.infer<typeof taskPlanAgainInput>;
 export type RepoTaskSettingsInput = z.infer<typeof repoTaskSettingsInput>;
 // warnedAt: the first-use warning of the repository was accepted then.
 export type RepoTaskSettingsDto = RepoTaskSettingsInput & { project: string; repo: string; warnedAt: number | null };
@@ -1446,6 +1495,13 @@ export type TaskPartDto = {
   prState: string | null;
   waiting: string[];
   build: BuildDto | null;
+  // spec.md section 6.20.8: the sub-task keys, the start, the part ID that it starts after, a PR that the app did not create, and the
+  // plan folder (null: TaskDto.specDir). A part of a task without sub-tasks has keys [] and start null.
+  keys: string[];
+  start: StartMode | null;
+  after: number | null;
+  adopted: boolean;
+  specDir: string | null;
 };
 
 // A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a
@@ -1556,6 +1612,27 @@ export type TaskPlanDto = {
   commands: (TaskCommand & { saved: boolean })[];
   warning: boolean;
   approved: boolean;
+  // spec.md section 6.20.4, sub-task mode only (else null and []). maxOpen: the open PRs at once that Claude proposes. starts: the start
+  // of each plan part with Claude's reason; skip: the part builds no open sub-task without a PR. notes: the lines of the app checks for the plan screen.
+  maxOpen: { value: number; reason: string } | null;
+  starts: { n: number; keys: string[]; start: StartMode; after: string | null; reason: string; skip: boolean }[];
+  notes: string[];
+};
+
+// One Jira sub-task of a task (spec.md section 6.20.8). statusAt: ms of the last status read. found: the branches and PRs that name the
+// key. parts: the task_part IDs that build or follow it. added, removed: ms of the status read that found the key new or gone.
+export type SubtaskDto = {
+  key: string;
+  summary: string;
+  status: string | null;
+  category: IssueSubtask["category"];
+  statusAt: number | null;
+  links: IssueLink[];
+  found: FoundItem[];
+  parts: number[];
+  attachments: AttachmentMeta[];
+  added: number | null;
+  removed: number | null;
 };
 
 // GET /api/tasks/:id. docs: the plan files before their first push, null before the spec run. strip: the step strip (stepStrip).
@@ -1601,6 +1678,8 @@ export type TaskDto = TaskRowDto & {
   needsBase: { reason: string } | null;
   canInstruct: boolean;
   canUndoUpdate: boolean;
+  // spec.md section 6.20: the sub-tasks in Jira order. null: the task builds no sub-tasks.
+  subtasks: SubtaskDto[] | null;
 };
 
 // taskRepo: task_repo.id. branch: the base branch that the user picked for the repository. changed: "Pick a base branch" set the branch

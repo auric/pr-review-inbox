@@ -11,8 +11,18 @@ import { DOWNLOAD_FAILED } from "../context/routes";
 import { ContextError, type ContextSource } from "../context/source";
 import { log } from "../log";
 
-// A downloaded file before its row. file: the path under <dataDir>/attachments.
-export type Fetched = { meta: AttachmentMeta; file: string; sha256: string; image: boolean; text: boolean; pdf: boolean; at: number };
+// A downloaded file before its row. file: the path under <dataDir>/attachments. issue: the sub-task key of the file (spec.md section
+// 6.20.3), absent for the task key.
+export type Fetched = {
+  meta: AttachmentMeta;
+  file: string;
+  sha256: string;
+  image: boolean;
+  text: boolean;
+  pdf: boolean;
+  at: number;
+  issue?: string;
+};
 
 // The words of a failed download for the user. The Jira answer never reaches them.
 export class TaskFileError extends Error {}
@@ -28,17 +38,18 @@ type Row = {
   pdf: number;
   include: number;
   downloaded_at: number;
+  issue: string | null;
 };
 
 const SQL = {
   list: "SELECT * FROM task_file WHERE task = $task ORDER BY att_id",
   one: "SELECT * FROM task_file WHERE task = $task AND att_id = $att",
   used: "SELECT COALESCE(SUM(size), 0) AS used FROM task_file WHERE task = $task",
-  insert: `INSERT INTO task_file (task, att_id, filename, mime, size, file, sha256, image, text, pdf, include, downloaded_at)
-    VALUES ($task, $att, $filename, $mime, $size, $file, $sha256, $image, $text, $pdf, 1, $at)
+  insert: `INSERT INTO task_file (task, att_id, filename, mime, size, file, sha256, image, text, pdf, include, downloaded_at, issue)
+    VALUES ($task, $att, $filename, $mime, $size, $file, $sha256, $image, $text, $pdf, 1, $at, $issue)
     ON CONFLICT (task, att_id) DO UPDATE SET filename = excluded.filename, mime = excluded.mime, size = excluded.size,
       file = excluded.file, sha256 = excluded.sha256, image = excluded.image, text = excluded.text, pdf = excluded.pdf, include = 1,
-      downloaded_at = excluded.downloaded_at`,
+      downloaded_at = excluded.downloaded_at, issue = excluded.issue`,
   include: "UPDATE task_file SET include = $include WHERE task = $task AND att_id = $att",
 };
 
@@ -52,6 +63,7 @@ const dto = (r: Row): AttachmentDto => ({
   pdf: r.pdf === 1,
   include: r.include === 1,
   downloadedAt: r.downloaded_at,
+  ...(r.issue !== null && { issue: r.issue }),
 });
 
 export const taskFileDtos = (db: Database, task: number): AttachmentDto[] => (db.query(SQL.list).all({ task }) as Row[]).map(dto);
@@ -85,15 +97,20 @@ export function dropFetched(dataDir: string, fetched: Fetched[]) {
 }
 
 // Downloads the files one after the other into a new folder, so Jira never gets parallel downloads from the app. A failure removes
-// the files of this call and throws TaskFileError with the file name.
-export async function fetchFiles(db: Database, dataDir: string, jira: ContextSource, list: AttachmentMeta[]): Promise<Fetched[]> {
+// the files of this call and throws TaskFileError with the file name. issue: the sub-task key of each file, absent for the task key.
+export async function fetchFiles(
+  db: Database,
+  dataDir: string,
+  jira: ContextSource,
+  list: (AttachmentMeta & { issue?: string })[],
+): Promise<Fetched[]> {
   const folder = taskFileDir(db, crypto.randomUUID());
   const out: Fetched[] = [];
-  for (const meta of list) {
+  for (const { issue, ...meta } of list) {
     const file = `${folder}/${meta.id}-${safeName(meta.filename)}`;
     try {
       const made = await store(dataDir, file, (write) => jira.download(meta, write));
-      out.push({ meta, file, ...made, at: Date.now() });
+      out.push({ meta, file, ...made, at: Date.now(), ...(issue !== undefined && { issue }) });
     } catch (e) {
       dropFetched(dataDir, out);
       if (!(e instanceof ContextError)) throw e;
@@ -120,6 +137,7 @@ export function saveFetched(db: Database, task: number, fetched: Fetched[]) {
       text: f.text ? 1 : 0,
       pdf: f.pdf ? 1 : 0,
       at: f.at,
+      issue: f.issue ?? null,
     });
 }
 

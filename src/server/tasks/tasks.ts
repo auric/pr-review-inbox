@@ -13,6 +13,7 @@ import {
   type BranchCheckDto,
   fileOnly,
   type IssueContext,
+  type IssueSubtask,
   listedOnly,
   type RepoTaskSettingsDto,
   type RepoTaskSettingsInput,
@@ -24,6 +25,7 @@ import {
   type TaskInterviewDto,
   type TaskIssueDto,
   type TaskPartDto,
+  type TaskPlanAgainInput,
   type TaskPlanDto,
   type TaskPlanInput,
   type TaskPointDto,
@@ -49,11 +51,14 @@ import {
   type SizeSource,
   SPEC_TURNS,
   type SpecResult,
+  type StartMode,
   type StepDetail,
+  SUBTASKS_READ,
   specJsonSchema,
   specResult,
   stepDetail,
   stepStrip,
+  subtasksFirst,
   TASK_DEFAULTS,
   TASK_DOCS,
   TASK_STATE_TEXT,
@@ -70,8 +75,9 @@ import { NoCloneLink } from "../bitbucket/errors";
 import type { ForgeProvider } from "../bitbucket/provider";
 import { FAILED as JIRA_FAILED } from "../context/routes";
 import { ContextError, type ContextSource } from "../context/source";
-import { taskFileContext, taskIssue } from "../context/task-file";
+import { type TaskFileOptions, taskFileContext, taskIssue } from "../context/task-file";
 import { buildOf } from "../inbox/builds";
+import { followKey } from "../inbox/queries";
 import type { Live } from "../live";
 import { log } from "../log";
 import { interviewAgent, type Profile, profileOf, specAgent } from "../review/catalog";
@@ -123,6 +129,17 @@ import {
   toPlan,
 } from "./plan";
 import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, taskRepos, updateRepos } from "./repos";
+import {
+  approveSubtasks,
+  checkSubtaskPlan,
+  findWork,
+  type PlannedPart,
+  prHistoryFile,
+  type SubtaskPlan,
+  saveSubtasks,
+  subtaskDtos,
+  subtaskRows,
+} from "./subtasks";
 import { firstFree, remoteBranches } from "./worktree";
 
 type TaskSizeInput = z.infer<typeof taskSizeInput>;
@@ -245,14 +262,29 @@ export type TaskRow = {
   updated_at: number;
   closed_at: number | null;
   profile: string | null;
+  // spec.md section 6.20.8: 1 builds the Jira sub-tasks of key, one PR per part.
+  subtasks: number;
 };
 
 const Q = {
   row: "SELECT * FROM task WHERE id = $id",
   open: "SELECT * FROM task WHERE project = $project AND repo = $repo AND key = $key AND state NOT IN ('done', 'failed')",
   list: "SELECT * FROM task WHERE $all OR state NOT IN ('done', 'failed') ORDER BY updated_at DESC, id DESC LIMIT 200",
-  insert: `INSERT INTO task (project, repo, key, title, origin_pr, state, target_branch, spec_dir, issue_json, profile, created_at, updated_at)
-    VALUES ($project, $repo, $key, $title, $origin, $state, $target, $spec_dir, $issue, $profile, $now, $now) RETURNING id`,
+  insert: `INSERT INTO task (project, repo, key, title, origin_pr, state, target_branch, spec_dir, issue_json, profile, subtasks, created_at,
+      updated_at)
+    VALUES ($project, $repo, $key, $title, $origin, $state, $target, $spec_dir, $issue, $profile, $subtasks, $now, $now) RETURNING id`,
+  // spec.md section 6.20.5: the part rows of an approved sub-task plan. ord: the plan part number; a tracked PR comes after the parts.
+  insertPart: `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, pr, remote_pr, state, keys_json, start_mode, spec_dir, adopted,
+      created_at, updated_at)
+    VALUES ($task, $ord, 'single', $title, $branch, $base, $pr, $remote, $state, $keys, $start, $spec_dir, $adopted, $now, $now) RETURNING id`,
+  afterPart: "UPDATE task_part SET after_part = $after WHERE id = $id",
+  addedSubtasks: "SELECT 1 FROM task_subtask WHERE task = $task AND added_at IS NOT NULL AND removed_at IS NULL",
+  // "Ask Claude again" (spec.md section 6.20.4): the text of the user as an answered question of its own round.
+  lastRound: "SELECT COALESCE(MAX(round), 0) AS round FROM task_question WHERE task = $task",
+  againQuestion: `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, recommended, answer_json, step, asked_at,
+      answered_at)
+    VALUES ($task, 'interview', $round, 0, 'What should the new plan change?', 'You asked Claude to write the plan again.', 'text', '[]',
+      NULL, $answer, NULL, $now, $now)`,
   lastProfile: "SELECT profile FROM task WHERE project = $project AND repo = $repo AND profile IS NOT NULL ORDER BY id DESC LIMIT 1",
   pr: "SELECT id, project, repo, target_branch FROM pull_request WHERE id = $id",
   prTask: "SELECT 1 FROM pr_task WHERE pr = $pr AND key = $key",
@@ -494,6 +526,11 @@ type PartRow = {
   lines: number | null;
   files: number | null;
   usage_json: string | null;
+  keys_json: string | null;
+  start_mode: StartMode | null;
+  after_part: number | null;
+  spec_dir: string | null;
+  adopted: number;
 };
 type StepRow = {
   id: number;
@@ -553,11 +590,19 @@ function commandsOf(p: Plan, saved: TaskCommand[]): (TaskCommand & { saved: bool
   ];
 }
 
+// docs_json.subtasks: the checked sub-task plan of the spec run (spec.md section 6.20.4). null for a task without sub-tasks.
+type SubDocs = Docs & { subtasks?: SubtaskPlan };
+const subPlanOf = (docs: Docs): SubtaskPlan | null => (docs as SubDocs).subtasks ?? null;
+
 function planDto(db: Database, t: TaskRow, docs: Docs): TaskPlanDto {
   const repo = repoSettings(db, t.project, t.repo);
   const budget = settingsOf(t).lineBudget ?? repo.lineBudget;
   const floor = sizeFloor(docs.parsed.estimate, budget);
+  const sub = subPlanOf(docs);
   return {
+    maxOpen: sub?.maxOpen ?? null,
+    starts: sub?.starts ?? [],
+    notes: sub?.notes ?? [],
     proposed: docs.parsed.proposed,
     minimum: floor.minimum,
     rules: floor.rules,
@@ -601,14 +646,18 @@ export function currentPart(db: Database, t: TaskRow, partId?: number): PartRow 
   return (
     all.find((p) => p.id === own?.part) ??
     all.find((p) => p.state === "implementing") ??
-    all.findLast((p) => HAS_WORKTREE.has(p.state)) ??
+    all.findLast((p) => p.adopted === 0 && HAS_WORKTREE.has(p.state)) ??
     null
   );
 }
 
+// spec.md section 6.20.2: the app never pushes to the branch of a PR that it did not create, and never changes it.
+export const ADOPTED = "This PR is in review outside the app. The app does not change it.";
+
 // The part of a Tell Claude send (spec.md section 6.18.1), or the sentence of the 409 in a state without the box.
 export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string } {
   if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
+  if (partId !== undefined && currentPart(db, t, partId)?.adopted) return { error: ADOPTED };
   const b = blockedOf(t);
   if (b && !BOX_REASONS.has(b.kind)) return { error: b.text };
   if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
@@ -623,6 +672,7 @@ export function instructTarget(db: Database, t: TaskRow, partId?: number): { par
 // The part of "Update from <base>" (spec.md section 6.18.3): a built part with no step that runs. "Try again" after a stopped update.
 export function updateTarget(db: Database, t: TaskRow, partId: number): { part: PartRow } | { error: string } {
   if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
+  if (currentPart(db, t, partId)?.adopted) return { error: ADOPTED };
   const b = blockedOf(t);
   if (b && b.kind !== "update") return { error: b.text };
   if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
@@ -736,6 +786,11 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       prState: synced?.state ?? null,
       waiting: reviewers.filter((r) => r.status !== "APPROVED").map((r) => r.name),
       build: buildOf(db, p.pr),
+      keys: p.keys_json === null ? [] : (JSON.parse(p.keys_json) as string[]),
+      start: p.start_mode,
+      after: p.after_part,
+      adopted: p.adopted === 1,
+      specDir: p.spec_dir,
     };
   });
   const docs = docsOf(t);
@@ -810,6 +865,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     // The routes also clear it while the loop works.
     canInstruct: !("error" in instructTarget(db, t)),
     canUndoUpdate: current !== null && !("error" in undoTarget(db, t, current.id)),
+    subtasks: t.subtasks === 1 ? subtaskDtos(db, t.id, partRows) : null,
   };
 }
 
@@ -820,7 +876,8 @@ export type TaskResult =
   | { status: 409; error: string; task?: TaskDto; running?: RunConflict["running"] };
 
 // task.md of a task and its included files (spec.md section 6.17): the issue of its origin PR or of its create, with the task files.
-export const taskFilesOf = (db: Database, dataDir: string, t: TaskRow) => taskFileContext(db, dataDir, t);
+// A task with sub-tasks adds subtasks.md (spec.md section 6.20.3). o.keys: the sub-task keys of a part run.
+export const taskFilesOf = (db: Database, dataDir: string, t: TaskRow, o: TaskFileOptions = {}) => taskFileContext(db, dataDir, t, o);
 
 // context/answers.md of a build step: the interview answers and the answered questions of the loop.
 export function stepAnswers(db: Database, id: number): ContextFile | null {
@@ -855,6 +912,51 @@ export async function preselectBase(d: {
   return d.remoteHead();
 }
 
+// spec.md sections 6.20.5 and 6.20.7: the part rows of an approved sub-task plan, in the transaction of the approval. A tracked PR gets
+// ADOPT_OPEN or ADOPT_MERGED, and the task follows it, so the sync reads it. A plan with tracked PRs only goes to ready. t.version: the
+// version after APPROVE. Nothing goes to Bitbucket or Jira.
+function approveParts(db: Database, t: TaskRow, parts: PlannedPart[], at: number) {
+  const state = String(initialTransition(partMachine)[0].value);
+  const top = Math.max(0, ...parts.map((p) => p.n ?? 0));
+  const rows: { p: PlannedPart; id: number }[] = [];
+  for (const p of parts) {
+    const followed = p.pr ? followKey(db, { project: t.project, repo: t.repo, pr_id: p.pr.pr }) : null;
+    const row = db.query(Q.insertPart).get({
+      task: t.id,
+      ord: p.n ?? top + rows.filter((x) => x.p.n === null).length + 1,
+      title: p.title,
+      branch: p.branch,
+      base: p.base,
+      pr: followed?.id ?? null,
+      remote: p.pr?.pr ?? null,
+      state,
+      keys: JSON.stringify(p.keys),
+      start: p.start,
+      spec_dir: p.specDir,
+      adopted: p.pr ? 1 : 0,
+      now: at,
+    }) as { id: number };
+    rows.push({ p, id: row.id });
+  }
+  for (const { p, id } of rows) {
+    const after = p.after;
+    if (after === null) continue;
+    const lower = /^\d+$/.test(after) ? rows.find((x) => x.p.n === Number(after)) : rows.find((x) => x.p.pr && x.p.keys[0] === after);
+    if (lower) db.query(Q.afterPart).run({ id, after: lower.id });
+  }
+  let version = t.version;
+  for (const { p, id } of rows) {
+    if (!p.pr) continue;
+    const r = advancePart(db, { task: t.id, version, part: id }, { type: p.pr.state === "MERGED" ? "ADOPT_MERGED" : "ADOPT_OPEN" }, {}, at);
+    if (r.status !== 200) throw new Refused(r.error);
+    version = r.version;
+  }
+  if (rows.every((x) => x.p.pr)) {
+    const r = advance(db, { task: t.id, version }, { type: "LAST_PR_OPEN" }, {}, at);
+    if (r.status !== 200) throw new Refused(r.error);
+  }
+}
+
 export type TaskServiceOptions = {
   review: ReviewJobs;
   settings: Settings;
@@ -873,7 +975,7 @@ export function createTaskService(opts: TaskServiceOptions) {
   });
   const busyResult = (c: RunConflict): TaskResult => ({ status: 409, error: c.error, running: c.running });
   const profile = (t: TaskRow) => taskProfile(settings.profiles(), t);
-  const taskFiles = (db: Database, t: TaskRow) => taskFilesOf(db, review.dataDir, t);
+  const taskFiles = (db: Database, t: TaskRow, o: TaskFileOptions = {}) => taskFilesOf(db, review.dataDir, t, o);
   const repoDeps: RepoDeps = {
     dataDir: review.dataDir,
     provider: () => settings.provider(),
@@ -930,7 +1032,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       own: answers ? [answers] : [],
       maxTurns: INTERVIEW_TURNS,
       schema: interviewJsonSchema(),
-      agent: interviewAgent(p, round),
+      agent: interviewAgent(p, round, t.subtasks === 1),
       prompt: (head, instructions) =>
         buildInterviewPrompt({
           key: t.key,
@@ -1009,10 +1111,12 @@ export function createTaskService(opts: TaskServiceOptions) {
     const { files, attachments } = taskFiles(db, t);
     const answers = answersFile(interviewRows(db, t.id), interviewOf(db, t.id));
     let plan: Plan | null = null;
+    let sub: SubtaskPlan | null = null;
     let listed: ListedRepo[] = [];
     let proposals: SpecResult["repos"] = [];
     let nested: SnapshotRepo[] = [];
-    // The untrusted files of the snapshot: the task files, then context/repo-list.md.
+    const subtasks = t.subtasks === 1;
+    // The untrusted files of the snapshot: the task files, then context/repo-list.md, then context/pr-history.md of a sub-task task.
     const untrusted = [...files];
     return {
       task: t.id,
@@ -1032,6 +1136,21 @@ export function createTaskService(opts: TaskServiceOptions) {
             "error" in l ? l.error : "",
           ),
         );
+        if (subtasks) {
+          // spec.md section 6.20.2: the found work, then subtasks.md again with its result.
+          const p = await settings.provider().catch(() => null);
+          const notes = await findWork(
+            d,
+            { provider: p, dataDir: review.dataDir, remote: () => review.taskRemote(t.project, t.repo) },
+            t,
+            head,
+          );
+          for (const f of taskFiles(d, t, { searched: true, notes }).files) {
+            const i = untrusted.findIndex((x) => x.name === f.name);
+            if (i >= 0) untrusted[i] = f;
+          }
+          untrusted.push(await prHistoryFile(d, p, settings.config()?.userSlug ?? null, t.project, t.repo));
+        }
         return out;
       },
       project: t.project,
@@ -1043,7 +1162,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       own: answers ? [answers] : [],
       maxTurns: SPEC_TURNS,
       schema: specJsonSchema(),
-      agent: specAgent(p, budget),
+      agent: specAgent(p, budget, process.platform, subtasks),
       prompt: (head, instructions) =>
         buildSpecPrompt({
           key: t.key,
@@ -1075,6 +1194,10 @@ export function createTaskService(opts: TaskServiceOptions) {
             rows.filter((x) => x.proposal === "skipped"),
             skipped,
           );
+          if (subtasks) {
+            sub = checkSubtaskPlan(r, subtaskRows(db, t.id), t.target_branch);
+            skipped.push(...sub.notes);
+          }
           plan = toPlan(r, base, missing, skipped);
           return { result: { ...r, repos: proposals }, skipped };
         }),
@@ -1087,12 +1210,14 @@ export function createTaskService(opts: TaskServiceOptions) {
           stopTask(d, cur, step, e);
           return undefined;
         }
-        const size = atLeast(plan.proposed, sizeFloor(plan.estimate, budgetOf(d, cur)).minimum);
-        const docs: Docs = {
+        // spec.md section 6.20.4: each part of a sub-task task is one small PR. The size rules of section 6.1 do not apply.
+        const size = subtasks ? "small" : atLeast(plan.proposed, sizeFloor(plan.estimate, budgetOf(d, cur)).minimum);
+        const docs: SubDocs = {
           ...renderDocs(cur.key, cur.title, size, plan),
           version: (docsOf(cur)?.version ?? 0) + 1,
           parsed: plan,
           approved: false,
+          ...(sub && { subtasks: sub }),
         };
         patch(
           d,
@@ -1102,7 +1227,7 @@ export function createTaskService(opts: TaskServiceOptions) {
             docs_json: JSON.stringify(docs),
             estimate_json: JSON.stringify(plan.estimate),
             size,
-            size_by: size === plan.proposed ? "claude" : "rule",
+            size_by: size === plan.proposed && !subtasks ? "claude" : "rule",
             base_commit: run.head,
             blocked_json: null,
           },
@@ -1150,11 +1275,38 @@ export function createTaskService(opts: TaskServiceOptions) {
     }
     // spec.md section 6.17: the files that Claude gets. Without a pick, the setting askAttachments decides: off gives every file that
     // can go to runs, on gives none until the user ticks one.
+    const askOff = settings.config()?.askAttachments === false;
     const listing = issue.attachments ?? [];
-    const ids = input.files ?? (settings.config()?.askAttachments === false ? listing.filter((a) => !listedOnly(a)).map((a) => a.id) : []);
+    const ids = input.files ?? (askOff ? listing.filter((a) => !listedOnly(a)).map((a) => a.id) : []);
     const picked = [...new Set(ids)].map((x) => listing.find((a) => a.id === x));
     if (picked.some((a) => !a)) return { status: 400, error: "The task lists no such attachment. Read the task again." };
-    const files = picked as AttachmentMeta[];
+    const files: (AttachmentMeta & { issue?: string })[] = picked as AttachmentMeta[];
+    // spec.md section 6.20.1: sub-task mode when the parent has sub-tasks and the user picked it, else when one is not done.
+    const listed = issue.subtasks ?? [];
+    const withSubtasks = listed.length > 0 && (input.subtasks ?? subtasksFirst(listed));
+    if (input.subtaskFiles && !withSubtasks) return { status: 400, error: `${input.key} has no sub-tasks to build.` };
+    let subs: { sub: IssueSubtask; issue: IssueContext | null }[] = [];
+    if (withSubtasks) {
+      const got = await readSubtasks(input.key, listed);
+      if ("status" in got) return got;
+      subs = got.subs;
+      for (const f of input.subtaskFiles ?? [])
+        if (!subs.some((s) => s.issue && s.sub.key === f.key))
+          return { status: 400, error: `${f.key} is no open sub-task of ${input.key}.` };
+      // spec.md section 6.20.3: the ticked files of each open sub-task, with the rule of files when the form sent no pick.
+      for (const { sub, issue: i } of subs) {
+        const list = i?.attachments ?? [];
+        const want =
+          input.subtaskFiles?.find((f) => f.key === sub.key)?.files ?? (askOff ? list.filter((a) => !listedOnly(a)).map((a) => a.id) : []);
+        for (const id of new Set(want)) {
+          const a = list.find((x) => x.id === id);
+          if (!a) return { status: 400, error: "The task lists no such attachment. Read the task again." };
+          // A Jira attachment ID is unique on its server. The first issue that lists it keeps it.
+          if (!files.some((x) => x.id === id)) files.push({ ...a, issue: sub.key });
+        }
+      }
+    }
+    // The caps of section 6.17 count the files of the parent and of its sub-tasks together.
     const problem = pickProblem(files, 0);
     if (problem) return problem;
     // spec.md section 6.16.3: the origin PR target no longer sets the base.
@@ -1204,9 +1356,11 @@ export function createTaskService(opts: TaskServiceOptions) {
           spec_dir: repo.specDir.replaceAll("{key}", input.key),
           issue: pr ? null : JSON.stringify(issue),
           profile: input.profile ?? preselectProfile(db, list, input.project, input.repo),
+          subtasks: withSubtasks ? 1 : 0,
           now: fetchedAt,
         }) as { id: number };
         saveMainRepo(db, { id: row.id, project: input.project, repo: input.repo }, branch, null, fetchedAt);
+        saveSubtasks(db, row.id, subs, fetchedAt);
         saveFetched(db, row.id, fetched);
         const r = review.taskRun(db, interviewRun(db, taskRow(db, row.id) as TaskRow, 1));
         if (r.status !== 202) throw new Refused(r.conflict.error, r.conflict);
@@ -1234,6 +1388,32 @@ export function createTaskService(opts: TaskServiceOptions) {
     }
   }
 
+  // spec.md section 6.20.1: one read of each sub-task that is not done, at most SUBTASKS_READ in Jira order, one after the other. A done
+  // sub-task keeps the key, summary, and status of the parent read. A sub-task of another parent is dropped.
+  async function readSubtasks(
+    parent: string,
+    listed: IssueSubtask[],
+  ): Promise<{ subs: { sub: IssueSubtask; issue: IssueContext | null }[] } | TaskResult> {
+    const source = await jira();
+    if ("status" in source) return source;
+    const siblings = listed.map((s) => s.key);
+    const subs: { sub: IssueSubtask; issue: IssueContext | null }[] = [];
+    try {
+      for (const sub of listed.slice(0, SUBTASKS_READ)) {
+        if (sub.category === "done") subs.push({ sub, issue: null });
+        else {
+          const issue = await source.fetchSubtask(parent, siblings, sub.key);
+          if (issue) subs.push({ sub, issue });
+        }
+      }
+    } catch (e) {
+      if (!(e instanceof ContextError)) throw e;
+      log(`Jira fetch for a sub-task failed: ${e.message}`);
+      return { status: 502, error: JIRA_FAILED[e.kind] };
+    }
+    return { subs };
+  }
+
   async function jira(): Promise<ContextSource | TaskResult> {
     let source: ContextSource | null;
     try {
@@ -1244,7 +1424,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     return source ?? { status: 409, error: "Set up Jira in Settings first." };
   }
 
-  async function download(db: Database, files: AttachmentMeta[]): Promise<{ fetched: Fetched[] } | TaskResult> {
+  async function download(db: Database, files: (AttachmentMeta & { issue?: string })[]): Promise<{ fetched: Fetched[] } | TaskResult> {
     const source = await jira();
     if ("status" in source) return source;
     try {
@@ -1261,7 +1441,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     const got = await fetchIssue(key);
     if ("status" in got) return got;
     const i = got.issue;
-    return { key, summary: i.summary, status: i.status, attachments: i.attachments ?? [] };
+    return { key, summary: i.summary, status: i.status, attachments: i.attachments ?? [], subtasks: i.subtasks ?? [] };
   }
 
   // PUT /api/tasks/:id/files/:att (spec.md section 6.17): a tick downloads a listed file once and includes it. An untick keeps the
@@ -1281,7 +1461,15 @@ export function createTaskService(opts: TaskServiceOptions) {
       }
       return { status: 200, task: taskDto(db, t) };
     }
-    const meta = taskIssue(db, t)?.issue.attachments?.find((a) => a.id === att);
+    // spec.md section 6.20.3: a file of a sub-task goes to the folder of its key. The task cap counts the files of every issue.
+    let meta: (AttachmentMeta & { issue?: string }) | undefined = taskIssue(db, t)?.issue.attachments?.find((a) => a.id === att);
+    for (const r of t.subtasks === 1 && !meta ? subtaskRows(db, id) : []) {
+      const a = r.issue_json === null ? undefined : (JSON.parse(r.issue_json) as IssueContext).attachments?.find((x) => x.id === att);
+      if (a) {
+        meta = { ...a, issue: r.key };
+        break;
+      }
+    }
     if (!meta) return { status: 404, error: "The task lists no such attachment." };
     const problem = pickProblem([meta], usedBytes(db, id));
     if (problem) return problem;
@@ -1418,7 +1606,11 @@ export function createTaskService(opts: TaskServiceOptions) {
     const l = loadPlan(db, id, input.version);
     if ("status" in l) return l;
     const { t, docs } = l;
-    const problem = sizeProblem(db, t, docs, input.size) ?? largeRepoProblem(input.size, docs.parsed.parts, repoDtos(db, t));
+    // spec.md section 6.20.4: a sub-task task is small. The size rules of section 6.1 do not apply to it.
+    const subtasks = t.subtasks === 1;
+    if (input.subtasks && !subtasks) return { status: 400, error: `${t.key} builds no sub-tasks.` };
+    const size = subtasks ? "small" : input.size;
+    const problem = subtasks ? null : (sizeProblem(db, t, docs, size) ?? largeRepoProblem(size, docs.parsed.parts, repoDtos(db, t)));
     if (problem) return conflict(db, t, problem);
     // spec.md section 6.16.3: each pick names a repository of the task with access edit and the base that the plan was written on. A
     // different base goes through PUT /api/tasks/:id/base, which writes the plan again.
@@ -1453,6 +1645,22 @@ export function createTaskService(opts: TaskServiceOptions) {
       picked.push(cmd);
     }
     if (repo.warnedAt === null && !input.warning) return { status: 409, error: "Accept the warning first", task: taskDto(db, t) };
+    const prefix = input.prefix ?? (branchPrefixesOf(settings.config())[0] as string);
+    let sub: { parts: PlannedPart[]; maxOpen: number } | null = null;
+    if (subtasks) {
+      const a = approveSubtasks({
+        t,
+        plan: docs.parsed.parts,
+        sub: subPlanOf(docs),
+        rows: subtaskRows(db, id),
+        input: input.subtasks,
+        prefix,
+        specDir: repo.specDir,
+      });
+      if (typeof a === "string") return conflict(db, t, a);
+      if ("bad" in a) return { status: 400, error: a.bad };
+      sub = a;
+    }
     // A picked proposal gets the first free ID cmd<n>, so the IDs of the repository stay unique.
     const used = new Set(picked.filter((c) => !c.id.startsWith(NEW_COMMAND)).map((c) => c.id));
     let n = 1;
@@ -1477,15 +1685,17 @@ export function createTaskService(opts: TaskServiceOptions) {
           const r = rows.find((x) => x.id === b.taskRepo) as (typeof rows)[number];
           if (r.role !== "main") db.query(Q.lastBasePick).run({ project: r.project, repo: r.repo, base: b.branch, now: at });
         }
-        // spec.md section 6.16: the branch prefix and the existing-branch pick go with the approval.
+        // spec.md section 6.16: the branch prefix and the existing-branch pick go with the approval. Section 6.20.8: maxOpen too.
         const s: TaskSettings = {
           ...settingsOf(t),
-          branchPrefix: input.prefix ?? (branchPrefixesOf(settings.config())[0] as string),
+          branchPrefix: prefix,
           existing: input.existing ?? "continue",
+          ...(sub && { maxOpen: sub.maxOpen }),
         };
-        const v = patch(db, id, t.version, { ...resized(t, docs, input.size, true), settings_json: JSON.stringify(s) }, at);
+        const v = patch(db, id, t.version, { ...resized(t, docs, size, true), settings_json: JSON.stringify(s) }, at);
         const r = advance(db, { task: id, version: v }, { type: "APPROVE" }, {}, at);
         if (r.status !== 200) throw new Refused(r.error);
+        if (sub) approveParts(db, { ...t, version: r.version }, sub.parts, at);
       })();
     } catch (e) {
       if (!(e instanceof Refused)) throw e;
@@ -1493,6 +1703,41 @@ export function createTaskService(opts: TaskServiceOptions) {
     }
     changed(id);
     return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
+  // POST /api/tasks/:id/plan-again (spec.md sections 6.12 and 6.20.4): the spec run writes the plan again. The text goes to
+  // context/answers.md as one more answered question. The earlier answers stay.
+  function planAgain(db: Database, id: number, input: TaskPlanAgainInput): TaskResult {
+    if (input.add) {
+      const t = taskRow(db, id);
+      if (!t) return { status: 404, error: "Task not found." };
+      // spec.md section 6.20.14: WP-ST7 adds the short plan run of the new keys. No code marks a key as new before it.
+      return conflict(
+        db,
+        t,
+        db.query(Q.addedSubtasks).get({ task: id }) ? "Claude cannot plan new sub-tasks yet." : "No sub-task is new in Jira.",
+      );
+    }
+    const l = loadPlan(db, id, input.version);
+    if ("status" in l) return l;
+    const busy = review.busy();
+    if (busy) return busyResult(busy);
+    try {
+      db.transaction(() => {
+        const at = now();
+        const round = (db.query(Q.lastRound).get({ task: id }) as { round: number }).round + 1;
+        db.query(Q.againQuestion).run({ task: id, round, answer: JSON.stringify({ choice: null, text: input.text }), now: at });
+        const fields: Patch = { docs_json: null, estimate_json: null, size: null, size_by: null, base_commit: null, blocked_json: null };
+        patch(db, id, l.t.version, fields, at);
+        const r = review.taskRun(db, specRun(db, taskRow(db, id) as TaskRow));
+        if (r.status !== 202) throw new Refused(r.conflict.error, r.conflict);
+      })();
+    } catch (e) {
+      if (!(e instanceof Refused)) throw e;
+      return e.running ? busyResult(e.running) : conflict(db, l.t, e.message);
+    }
+    changed(id);
+    return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
   // GET /api/tasks/:id/branch (spec.md section 6.16.4): the planned name, where it exists on the server, the open PR from it to the
@@ -1698,6 +1943,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     size,
     docs,
     plan,
+    planAgain,
     branch,
     base,
     repoChoice,

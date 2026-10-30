@@ -101,6 +101,11 @@ const part = (o: Partial<TaskPartDto> = {}): TaskPartDto => ({
   prState: null,
   waiting: [],
   build: null,
+  keys: [],
+  start: null,
+  after: null,
+  adopted: false,
+  specDir: null,
   ...o,
 });
 
@@ -167,6 +172,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     needsBase: null,
     canInstruct: false,
     canUndoUpdate: false,
+    subtasks: null,
     ...o,
   };
 }
@@ -181,6 +187,9 @@ const PLAN: NonNullable<TaskDto["plan"]> = {
   commands: [{ id: "new-1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: false }],
   warning: true,
   approved: false,
+  maxOpen: null,
+  starts: [],
+  notes: [],
 };
 const ESTIMATE: NonNullable<TaskDto["estimate"]> = { parts: 1, lines: 80, files: 1, modules: [], db: false, api: false, unknowns: [] };
 

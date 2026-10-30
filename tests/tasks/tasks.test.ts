@@ -591,6 +591,9 @@ describe("answers (spec.md sections 6.2 and 6.11, AC-B2 and AC-B3)", () => {
         commands: [{ id: "new-1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: false }],
         warning: true,
         approved: false,
+        maxOpen: null,
+        starts: [],
+        notes: [],
       });
       expect(t.strip.current).toBe(1);
       // The base commit stays in the cache for later reads.

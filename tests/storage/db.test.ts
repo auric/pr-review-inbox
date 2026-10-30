@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 41;
+const LATEST = 42;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1360,6 +1360,88 @@ test("migration from a version-40 database keeps every event with its ID; the bu
     db.run("DELETE FROM pull_request WHERE id = 2");
     expect(db.query("SELECT COUNT(*) AS n FROM pr_build").get()).toEqual({ n: 0 });
     expect(db.query("SELECT id FROM event ORDER BY id").all()).toEqual([{ id: 3 }, { id: 5 }, { id: 10 }, { id: 11 }]);
+  } finally {
+    db.close();
+  }
+});
+
+// docs/plans/review-v2/spec.md section 6.20.8: 042_task_subtasks.sql adds task.subtasks, task_subtask, the part columns of several
+// parts, and task_file.issue. Existing rows keep their values and get the defaults.
+test("migration from a version-41 database keeps the task rows; the sub-task columns and task_subtask are new", () => {
+  const path = join(dir, "v41.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+    "041_build_status.sql",
+  ]);
+  old.exec("PRAGMA user_version = 41");
+  old.exec(`INSERT INTO task (id, project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+      VALUES (1, 'P', 'r', 'ABC-1', 'One', 'implementing', 'main', 'specs/ABC-1/', 1, 1);
+    INSERT INTO task_part (id, task, ord, kind, title, branch, base_branch, state, lines, created_at, updated_at)
+      VALUES (1, 1, 1, 'single', 'One', 'b', 'main', 'self_reviewed', 42, 1, 1);
+    INSERT INTO task_file (task, att_id, filename, size, file, sha256, image, text, pdf, include, downloaded_at)
+      VALUES (1, '7', 'a.png', 3, 'f', 's', 1, 0, 0, 1, 1);`);
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(db.query("SELECT subtasks FROM task").get()).toEqual({ subtasks: 0 });
+    expect(
+      db.query("SELECT lines, keys_json, start_mode, after_part, base_commit, spec_dir, adopted, override FROM task_part").get(),
+    ).toEqual({
+      lines: 42,
+      keys_json: null,
+      start_mode: null,
+      after_part: null,
+      base_commit: null,
+      spec_dir: null,
+      adopted: 0,
+      override: 0,
+    });
+    expect(db.query("SELECT att_id, issue FROM task_file").get()).toEqual({ att_id: "7", issue: null });
+    expect(columns(db, "task_subtask")).toEqual([
+      "task",
+      "key",
+      "ord",
+      "summary",
+      "status",
+      "category",
+      "issue_json",
+      "links_json",
+      "found_json",
+      "read_at",
+      "status_at",
+      "added_at",
+      "removed_at",
+    ]);
+    db.run("INSERT INTO task_subtask (task, key, ord, summary, category, read_at) VALUES (1, 'ABC-2', 1, 'Two', 'new', 1)");
+    expect(db.query("SELECT links_json, found_json FROM task_subtask").get()).toEqual({ links_json: "[]", found_json: "[]" });
+    expect(() => db.run("INSERT INTO task_subtask (task, key, ord, summary, read_at) VALUES (1, 'ABC-2', 2, 'Again', 1)")).toThrow(
+      /UNIQUE/,
+    );
+    expect(() =>
+      db.run("INSERT INTO task_subtask (task, key, ord, summary, category, read_at) VALUES (1, 'ABC-3', 2, 'x', 'odd', 1)"),
+    ).toThrow(/CHECK/);
+    expect(() => db.run("UPDATE task_part SET start_mode = 'later' WHERE id = 1")).toThrow(/CHECK/);
+    // A part that starts after another part loses the link when that part goes. A removed task removes its sub-tasks.
+    db.run(`INSERT INTO task_part (id, task, ord, kind, title, branch, base_branch, state, start_mode, after_part, created_at, updated_at)
+      VALUES (2, 1, 2, 'single', 'Two', 'c', 'b', 'planned', 'stack', 1, 1, 1)`);
+    db.run("DELETE FROM task_part WHERE id = 1");
+    expect(db.query("SELECT after_part FROM task_part WHERE id = 2").get()).toEqual({ after_part: null });
+    db.run("DELETE FROM task WHERE id = 1");
+    expect(db.query("SELECT COUNT(*) AS n FROM task_subtask").get()).toEqual({ n: 0 });
   } finally {
     db.close();
   }

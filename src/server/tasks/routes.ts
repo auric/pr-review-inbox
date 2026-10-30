@@ -33,6 +33,7 @@ import {
   taskIssueInput,
   taskLimitInput,
   taskListInput,
+  taskPlanAgainInput,
   taskPlanInput,
   taskPointerInput,
   taskProfileInput,
@@ -222,6 +223,11 @@ export function createTaskRoutes(opts: { review: ReviewJobs; settings: Settings;
         // spec.md section 6.2: a small plan approval starts part 1.
         if (r.status === 200 && "task" in r && r.task.state === "implementing") loop.build(db, id);
         return answer(c, r);
+      })
+      // spec.md section 6.20.12: "Ask Claude again" starts the spec run again (202).
+      .post("/tasks/:id/plan-again", idParam, body(taskPlanAgainInput, "Invalid plan request."), (c) => {
+        const db = openDb();
+        return db ? answer(c, tasks.planAgain(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
       .post("/tasks/:id/pause", idParam, body(taskVersionInput, "Give the task version."), (c) => {
         const db = openDb();
