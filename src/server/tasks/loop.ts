@@ -19,7 +19,9 @@ import {
   type ImplementResult,
   type InstructDetail,
   LARGE_REPOS_TEXT,
+  type PartState,
   RESOLVE_STOPS,
+  type StartMode,
   type StepMode,
   stepDetail,
   TASK_STATE_TEXT,
@@ -30,6 +32,7 @@ import {
   type UpdateDetail,
   updateDetail,
 } from "../../shared/task";
+import { foundOf } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { Profile } from "../review/catalog";
@@ -65,12 +68,15 @@ import {
   baseCheckOf,
   budgetOf,
   currentPart,
-  docsOf,
   instructTarget,
+  keysOf,
   moreTime,
   mustFixPoint,
   openPoints,
+  partDocsOf,
+  partNames,
   repoSettings,
+  scheduleOf,
   setBaseMoves,
   setBlocked,
   setSettings,
@@ -135,6 +141,8 @@ export const REVIEW_FIX_TRIES = 2;
 // spec.md section 6.1, Counting: the excluded globs when the repository sets none.
 export const LOCK_GLOBS = ["bun.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock", "*.lock"];
 export const PAUSED = "Building is paused after the step. Continue?";
+// The part states with a worktree (tasks.ts HAS_WORKTREE).
+const WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 const NO_TEST = "Needs you: approve a test command for this repository first. The build needs it to see red and green tests.";
 const BUSY = "The build still ends its step. Try again when it ends.";
 
@@ -190,6 +198,8 @@ export async function changedLines(wt: Worktree, base: string, head: string, exc
 
 // "<spec_dir>/<name>.md" as a repository path.
 const specPath = (specDir: string, name: string) => `${specDir.replace(/\/+$/, "")}/${name}.md`;
+// spec.md section 6.20.8: task_part.base_commit is the branch point of a part. NULL takes task.base_commit.
+const baseOf = (t: { base_commit: string | null }, p: { base_commit: string | null }) => p.base_commit ?? t.base_commit;
 const onDisk = (wt: Worktree, path: string) => join(wt.repo, ...path.split("/"));
 const under = (path: string, dir: string) => {
   const a = path.split("/").map(fold);
@@ -247,9 +257,16 @@ type PartRow = {
   title: string;
   branch: string;
   base_branch: string;
-  state: string;
+  state: PartState;
   head: string | null;
   pushed: string | null;
+  keys_json: string | null;
+  start_mode: StartMode | null;
+  after_part: number | null;
+  base_commit: string | null;
+  spec_dir: string | null;
+  adopted: number;
+  override: number;
 };
 
 type Ctx = {
@@ -259,6 +276,12 @@ type Ctx = {
   part: PartRow;
   wt: Worktree;
   base: string;
+  // spec.md section 6.20.6: the Jira key, the name in commit messages, the title, and the plan folder of the part. The task key, the task
+  // title, and task.spec_dir for a task without sub-tasks.
+  key: string;
+  label: string;
+  title: string;
+  specDir: string;
   size: TaskSize;
   docs: Docs;
   plan: Plan;
@@ -279,7 +302,16 @@ type Ctx = {
 type DriverMode = "build" | "instruct" | "update";
 
 const Q = {
-  parts: "SELECT id, ord, kind, title, branch, base_branch, state, head, pushed FROM task_part WHERE task = $task ORDER BY ord",
+  parts: `SELECT id, ord, kind, title, branch, base_branch, state, head, pushed, keys_json, start_mode, after_part, base_commit, spec_dir,
+    adopted, override FROM task_part WHERE task = $task ORDER BY ord`,
+  // spec.md section 6.20.6, Start of a part: its branch, its base branch and commit, and the lease of Continue.
+  partStart: `UPDATE task_part SET branch = $branch, base_branch = $base, base_commit = $commit, pushed = $pushed, updated_at = $now
+    WHERE id = $id AND state = 'planned'`,
+  // The first other repository that a part changed (spec.md section 6.16.9, task_pr).
+  otherRepo: `SELECT r.project, r.repo FROM task_pr p JOIN task_repo r ON r.id = p.task_repo WHERE p.part = $part AND r.project IS NOT NULL
+    ORDER BY p.id LIMIT 1`,
+  waitMerge: "UPDATE task_part SET start_mode = 'merge', updated_at = $now WHERE id = $id AND state = 'planned'",
+  found: "SELECT found_json FROM task_subtask WHERE task = $task AND key = $key",
   // pushed: the lease of the first push, the fetched remote head for Continue (spec.md section 6.16.4).
   insertPart: `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, pushed, state, created_at, updated_at)
     VALUES ($task, $ord, $kind, $title, $branch, $base, $pushed, $state, $now, $now) RETURNING id`,
@@ -427,22 +459,24 @@ export function createLoop(opts: LoopOptions) {
 
   const nextAttempt = (c: Ctx, kind: string, item: string) =>
     (c.db.query(Q.attempt).get({ part: c.part.id, kind, item }) as { n: number }).n;
+  // spec.md section 6.20.3: a part of a task with sub-tasks gets the files of its own sub-task keys only.
+  const filesFor = (c: Ctx) => (c.t.subtasks === 1 ? { keys: keysOf(c.part) } : {});
 
   // ---------- Context of a Claude step (spec.md section 6.7) ----------
 
   // The plan files of the branch: context/spec/<name>.md.
   function planFiles(c: Ctx): ContextFile[] {
     return docNames(c.size).flatMap((n) => {
-      const p = onDisk(c.wt, specPath(c.t.spec_dir, n));
+      const p = onDisk(c.wt, specPath(c.specDir, n));
       return existsSync(p) ? [{ name: `spec/${n}.md`, text: readFileSync(p, "utf8") }] : [];
     });
   }
 
   // The plan as the branch holds it, with the ticks of the done tasks.
-  function readPlan(c: Pick<Ctx, "wt" | "t" | "size" | "docs">): Plan | { error: string } {
+  function readPlan(c: Pick<Ctx, "wt" | "specDir" | "size" | "docs">): Plan | { error: string } {
     const name = c.size === "small" ? "plan" : "tasks";
-    const p = onDisk(c.wt, specPath(c.t.spec_dir, name));
-    if (!existsSync(p)) return { error: `The branch has no ${specPath(c.t.spec_dir, name)}.` };
+    const p = onDisk(c.wt, specPath(c.specDir, name));
+    if (!existsSync(p)) return { error: `The branch has no ${specPath(c.specDir, name)}.` };
     const text = readFileSync(p, "utf8").replaceAll("\r\n", "\n");
     const r = name === "plan" ? parsePlan(text, c.docs.parsed.parts) : parseTasks(text, c.docs.parsed.parts);
     return "error" in r ? { error: r.error } : { ...c.docs.parsed, parts: r.parts };
@@ -536,8 +570,9 @@ export function createLoop(opts: LoopOptions) {
         o.row === undefined ? nextAttempt(c, mode, item) : (c.db.query(Q.rowAttempt).get({ id: o.row }) as { attempt: number }).attempt;
       const before = new Set(await dirty(c.trees));
       const answers = stepAnswers(c.db, c.id);
-      // spec.md section 6.17: the task text and the included files as they are at this step.
-      const task = taskFilesOf(c.db, dataDir, c.t);
+      // spec.md section 6.17: the task text and the included files as they are at this step. Section 6.20.3: a part gets the files of the
+      // task and of its own sub-tasks only.
+      const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
       let out: StepOutcome | null = null;
       const s = await startStep({
         db: c.db,
@@ -549,11 +584,12 @@ export function createLoop(opts: LoopOptions) {
         item,
         attempt,
         profile: c.profile,
-        untrusted: [...task.files.filter((f) => f.name === "task.md"), ...(o.failure ? [o.failure] : [])],
+        untrusted: [...task.files, ...(o.failure ? [o.failure] : [])],
         attachments: task.attachments,
         own: [...(answers ? [answers] : []), o.step(attempt), ...planFiles(c)],
         allow: o.allow,
-        specDir: c.t.spec_dir,
+        specDir: c.specDir,
+        base: c.base,
         onEnd: (x) => {
           out = x;
         },
@@ -588,7 +624,7 @@ export function createLoop(opts: LoopOptions) {
     // No result: implement.ts stopped the task, or it set the denied path. No outcome: restart recovery ended the run first.
     if (!r?.result) throw r && !r.problems.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
     const fresh = r.changed.filter((p) => !before.has(p));
-    const spec = fresh.filter((p) => under(p, c.t.spec_dir));
+    const spec = fresh.filter((p) => under(p, c.specDir));
     if (spec.length) {
       const attempt = (c.db.query(Q.rowAttempt).get({ id: r.step }) as { attempt: number }).attempt;
       const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "spec_change", item, attempt, state: "ok" }, now());
@@ -755,7 +791,7 @@ export function createLoop(opts: LoopOptions) {
       }
       const k = await checks(c, item, CHECK_KINDS, undefined, true);
       if (k.green) block(c, { kind: "red", step: k.step, text: "Tests pass before the change. See why." });
-      await commit(c, item, `${c.t.key} ${item}: Add the failing tests of part ${pp.n}`, allow);
+      await commit(c, item, `${c.label} ${item}: Add the failing tests of part ${pp.n}`, allow);
       return;
     }
   }
@@ -768,11 +804,11 @@ export function createLoop(opts: LoopOptions) {
     await claude(c, "implement", task.id, { allow: task.files, step });
     await greenOrFix(c, task.id, task.files, step, { run: task.run, later });
     const name = c.size === "small" ? "plan" : "tasks";
-    const p = onDisk(c.wt, specPath(c.t.spec_dir, name));
+    const p = onDisk(c.wt, specPath(c.specDir, name));
     const ticked = existsSync(p) ? tickTask(readFileSync(p, "utf8"), task.id) : null;
     if (ticked === null) block(c, { kind: "error", step: null, text: `Needs you: ${name}.md has no open task ${task.id}.` });
     writeFileSync(p, ticked);
-    await commit(c, task.id, `${c.t.key} ${task.id}: ${oneLine(task.title)}`, task.files);
+    await commit(c, task.id, `${c.label} ${task.id}: ${oneLine(task.title)}`, task.files);
     refreshPlan(c);
     const s = taskSettings.safeParse(JSON.parse(taskRow(c.db, c.id)?.settings_json ?? "{}"));
     if (s.success && s.data.pauseAfterTask) block(c, { kind: "question", step: null, text: `Task ${task.id} is done. Continue?` });
@@ -786,7 +822,7 @@ export function createLoop(opts: LoopOptions) {
       await gate(c);
       guard(c);
       // spec.md section 6.17: the task text and the included files as they are at this step.
-      const task = taskFilesOf(c.db, dataDir, c.t);
+      const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
       const issue = task.files.map((f) => f.text).join("\n\n");
       const head = sub ? sub.head : await headOf(c.wt);
       const attempt = nextAttempt(c, "review", "review");
@@ -809,12 +845,12 @@ export function createLoop(opts: LoopOptions) {
         repo: src?.repo ?? c.t.repo,
         base: sub ? sub.base : c.base,
         head,
-        taskKey: c.t.key,
+        taskKey: c.key,
         files: [
           { name: "task.md", text: `${issue || "(no task text)"}\n\n# The plan of the task\n\n${plans.join("\n\n")}\n` },
           {
             name: "pr.md",
-            text: `# ${c.t.key}: ${oneLine(c.t.title)}\n\nThis change has no pull request yet. The app builds it for task ${c.t.key} on the branch ${c.part.branch}.${sub ? ` This review covers the ${sub.tree.row.role === "added" ? "repository" : "submodule"} at ${oneLine(sub.tree.full)} only.` : ""}\n\n## Goal\n\n${goals.join("\n")}\n`,
+            text: `# ${c.label}: ${oneLine(c.title)}\n\nThis change has no pull request yet. The app builds it for task ${c.key} on the branch ${c.part.branch}.${sub ? ` This review covers the ${sub.tree.row.role === "added" ? "repository" : "submodule"} at ${oneLine(sub.tree.full)} only.` : ""}\n\n## Goal\n\n${goals.join("\n")}\n`,
           },
         ],
         attachments: task.attachments,
@@ -883,27 +919,22 @@ export function createLoop(opts: LoopOptions) {
       }
       await claude(c, "fix", "review", { allow, step, failure: reviewFailure(must) });
       await greenOrFix(c, "review", allow, step);
-      await commit(c, "review", `${c.t.key}: Fix the review points of part ${c.part.ord}`, allow);
+      await commit(c, "review", `${c.label}: Fix the review points of part ${c.part.ord}`, allow);
     }
   }
 
   // ---------- The driver ----------
 
-  // A small task gets one part (spec.md section 6.16.4). A name that exists on the server: Continue builds on its remote head and
-  // leases the first push on it. New takes the first free suffix.
-  async function ensureParts(db: Database, id: number) {
-    const t = taskRow(db, id);
-    if (t?.state !== "implementing" || parts(db, id).length) return;
-    if (t.size !== "small") throw new Error(`The app builds a ${t.size ?? "task without a size"} task only after its spec PR.`);
-    if (!t.base_commit) throw new Error("The task has no approved plan.");
-    const s = taskSettingsOf(t);
-    const prefix = s.branchPrefix ?? (branchPrefixesOf(settings.config())[0] as string);
-    const name = branchName(prefix, t.key, { kind: "small", title: t.title });
+  // The branch of a part from its planned name (spec.md section 6.16.4). A name that exists on the server: Continue builds on its remote
+  // head and leases the first push on it. New takes the first free suffix. from: the start commit in the main repository. label: its
+  // branch, for the error text.
+  async function branchOf(db: Database, t: TaskRow, name: string, existing: "continue" | "new" | undefined, from: string, label: string) {
+    const id = t.id;
     const remote = await review.taskRemote(t.project, t.repo);
     const cache = cachePath(longPath(dataDir), { project: t.project, repo: t.repo, id });
     let branch = name;
     let lease: string | null = null;
-    let base = t.base_commit;
+    let base = from;
     // spec.md section 6.16.4 with several repositories: Continue takes the remote branch where it exists; New takes the first suffix that
     // is free in every repository with access edit. A submodule starts at its pinned commit, an added repository at its base commit.
     const startOf = (r: TaskRepoRow) => r.pinned ?? r.base_commit;
@@ -912,11 +943,11 @@ export function createLoop(opts: LoopOptions) {
     const subHeads = await Promise.all(subRemotes.map((r) => remoteBranches(dataDir, r, name)));
     const subLeases: { row: TaskRepoRow; lease: string; base: string }[] = [];
     const mainHeads = await remoteBranches(dataDir, remote, name);
-    if ((mainHeads.has(name) || subHeads.some((h) => h.has(name))) && s.existing !== "new") {
+    if ((mainHeads.has(name) || subHeads.some((h) => h.has(name))) && existing !== "new") {
       if (mainHeads.has(name)) {
         lease = await takeRemoteBranch(dataDir, cache, remote, id, name);
-        const mb = await mergeBase(dataDir, cache, t.base_commit, lease);
-        if (!mb) throw new Error(`${name} on the server shares no commit with ${t.target_branch}. Start a new branch.`);
+        const mb = await mergeBase(dataDir, cache, from, lease);
+        if (!mb) throw new Error(`${name} on the server shares no commit with ${label}. Start a new branch.`);
         base = mb;
       }
       for (const [k, row] of subs.entries()) {
@@ -936,32 +967,107 @@ export function createLoop(opts: LoopOptions) {
       }
       branch = firstFree(name, taken);
     }
+    return { branch, lease, base, subLeases };
+  }
+
+  // A submodule that continues a remote branch: its base and its lease (spec.md section 6.16.4). In the transaction of the part start.
+  function saveSubLeases(db: Database, part: number, b: Awaited<ReturnType<typeof branchOf>>) {
+    for (const x of b.subLeases) {
+      db.query(Q.subBase).run({ id: x.row.id, base: x.base });
+      db.query(Q.subLease).run({ part, repo: x.row.id, branch: b.branch, base: x.row.base_branch ?? "", commit: x.base, lease: x.lease });
+    }
+  }
+
+  // A small task gets one part (spec.md section 6.16.4).
+  async function ensureParts(db: Database, id: number) {
+    const t = taskRow(db, id);
+    if (t?.state !== "implementing" || parts(db, id).length) return;
+    if (t.size !== "small") throw new Error(`The app builds a ${t.size ?? "task without a size"} task only after its spec PR.`);
+    if (!t.base_commit) throw new Error("The task has no approved plan.");
+    const s = taskSettingsOf(t);
+    const prefix = s.branchPrefix ?? (branchPrefixesOf(settings.config())[0] as string);
+    const name = branchName(prefix, t.key, { kind: "small", title: t.title });
+    const b = await branchOf(db, t, name, s.existing, t.base_commit, t.target_branch);
     db.transaction(() => {
       const cur = taskRow(db, id);
       if (cur?.state !== "implementing" || parts(db, id).length) return;
       const at = now();
       // The line budget and the own review count the whole PR diff from here (spec.md section 6.16.4).
-      db.query(Q.setBase).run({ id, base });
+      db.query(Q.setBase).run({ id, base: b.base });
       const row = db.query(Q.insertPart).get({
         task: id,
         ord: 1,
         kind: "single",
         title: cur.title,
-        branch,
+        branch: b.branch,
         base: cur.target_branch,
-        pushed: lease,
+        pushed: b.lease,
         state: String(initialTransition(partMachine)[0].value),
         now: at,
       }) as { id: number };
-      // A submodule that continues a remote branch: its base and its lease (spec.md section 6.16.4).
-      for (const x of subLeases) {
-        db.query(Q.subBase).run({ id: x.row.id, base: x.base });
-        db.query(Q.subLease).run({ part: row.id, repo: x.row.id, branch, base: x.row.base_branch ?? "", commit: x.base, lease: x.lease });
-      }
+      saveSubLeases(db, row.id, b);
       const r = advancePart(db, { task: id, version: cur.version, part: row.id }, { type: "START" }, {}, at);
       if (r.status !== 200) throw new Error(r.error);
     })();
     changed(id);
+  }
+
+  // spec.md section 6.20.6, Start of a part: the part that the scheduler picks. A part on top of another part branches from the pushed
+  // head of the lower part, or from the fetched head of a tracked lower branch. Else it branches from the fetched head of the task base.
+  // Its branch continues the found branch of its key that the plan approval took (Continue), else it takes the first free suffix.
+  // Returns the part in state implementing, or null when no part starts.
+  async function startPart(db: Database, id: number): Promise<PartRow | null> {
+    const t = taskRow(db, id);
+    if (t?.state !== "implementing" || t.blocked_json !== null) return null;
+    const all = parts(db, id);
+    const pick = scheduleOf(db, t, all)?.start;
+    const part = pick ? all.find((p) => p.id === pick.id) : undefined;
+    if (!pick || !part) return null;
+    const lower = pick.on === null ? null : (all.find((p) => p.id === pick.on) ?? null);
+    const names = partNames(t.key, all);
+    const name = (p: PartRow) => names.get(p.id)?.text ?? t.key;
+    if (lower) {
+      // design.md Q67: a part on top of a part that also changed another repository waits for its merge.
+      const other = db.query(Q.otherRepo).get({ part: lower.id }) as { project: string; repo: string } | null;
+      if (other) {
+        const text = `Needs you: ${name(part)} builds on ${name(lower)}, which also changes ${other.project}/${other.repo}. Let ${name(part)} wait for the merge of ${name(lower)}.`;
+        reason(db, id, { kind: "error", step: null, part: part.id, text });
+        return null;
+      }
+    }
+    const baseBranch = lower ? lower.branch : t.target_branch;
+    const main = taskRepos(db, t).find((r) => r.role === "main") as TaskRepoRow;
+    const from =
+      lower?.adopted === 0 && lower.pushed
+        ? lower.pushed
+        : await fetchBase(
+            dataDir,
+            id,
+            { row: main, project: t.project, repo: t.repo, base: baseBranch } as UpdateRepo,
+            await review.taskRemote(t.project, t.repo),
+          );
+    const found = db.query(Q.found).get({ task: id, key: keysOf(part)[0] ?? t.key }) as { found_json: string } | null;
+    const picked = !!found && foundOf(found.found_json).some((f) => f.kind === "branch" && f.error === null && f.name === part.branch);
+    const b = await branchOf(db, t, part.branch, picked ? "continue" : "new", from, baseBranch);
+    // spec.md section 6.16.7: the pre-flight passes before any Claude step of the part.
+    const pf = await preflight(db, preflightDeps, t, b.branch, null);
+    if (pf) {
+      reason(db, id, pf);
+      return null;
+    }
+    const started = db.transaction((): boolean => {
+      const cur = taskRow(db, id);
+      if (cur?.state !== "implementing" || cur.blocked_json !== null || building(db, id)) return false;
+      const at = now();
+      const row = { id: part.id, branch: b.branch, base: baseBranch, commit: b.base, pushed: b.lease, now: at };
+      if (db.query(Q.partStart).run(row).changes !== 1) return false;
+      saveSubLeases(db, part.id, b);
+      const r = advancePart(db, { task: id, version: cur.version, part: part.id }, { type: "START" }, {}, at);
+      if (r.status !== 200) throw new Error(r.error);
+      return true;
+    })();
+    changed(id);
+    return started ? (building(db, id) ?? null) : null;
   }
 
   // The worktrees of every repository of a part (spec.md section 6.16.5). One repository: the main worktree only.
@@ -972,8 +1078,10 @@ export function createLoop(opts: LoopOptions) {
   }
 
   async function context(db: Database, t: TaskRow, part: PartRow, mode: DriverMode = "build"): Promise<Ctx> {
-    const docs = docsOf(t);
-    if (!docs || !t.base_commit || !t.size) throw new Error("The task has no approved plan.");
+    // spec.md section 6.20.6: a part of a task with sub-tasks has its own plan, base commit, and plan folder.
+    const docs = partDocsOf(db, t, part);
+    const base = baseOf(t, part);
+    if (!docs || !base || !t.size) throw new Error("The task has no approved plan.");
     const repo = repoSettings(db, t.project, t.repo);
     const wt = await openWorktree({
       dataDir,
@@ -983,10 +1091,11 @@ export function createLoop(opts: LoopOptions) {
       task: t.id,
       ord: part.ord,
       branch: part.branch,
-      base: t.base_commit,
+      base,
     });
     const clone = db.query(Q.clone).get({ project: t.project, repo: t.repo }) as { path: string } | null;
     const p = taskProfile(settings.profiles(), t);
+    const name = t.subtasks === 1 ? partNames(t.key, parts(db, t.id)).get(part.id) : undefined;
     return {
       db,
       id: t.id,
@@ -994,7 +1103,11 @@ export function createLoop(opts: LoopOptions) {
       part,
       wt,
       trees: await trees(db, t, part, wt),
-      base: t.base_commit,
+      base,
+      key: name?.key ?? t.key,
+      label: name?.commit ?? t.key,
+      title: name ? part.title : t.title,
+      specDir: part.spec_dir ?? t.spec_dir,
       size: t.size,
       docs,
       plan: docs.parsed,
@@ -1018,13 +1131,13 @@ export function createLoop(opts: LoopOptions) {
     const c = await context(db, t, part);
     guard(c);
     // spec.md section 6.4: the plan files go into the part branch first.
-    const missing = docNames(c.size).filter((n) => !existsSync(onDisk(c.wt, specPath(t.spec_dir, n))) && c.docs[n] !== undefined);
+    const missing = docNames(c.size).filter((n) => !existsSync(onDisk(c.wt, specPath(c.specDir, n))) && c.docs[n] !== undefined);
     for (const n of missing) {
-      const p = onDisk(c.wt, specPath(t.spec_dir, n));
+      const p = onDisk(c.wt, specPath(c.specDir, n));
       mkdirSync(dirname(p), { recursive: true });
       writeFileSync(p, c.docs[n] as string);
     }
-    if (missing.length) await commit(c, "plan", `${t.key}: Add the plan`, []);
+    if (missing.length) await commit(c, "plan", `${c.label}: Add the plan`, []);
     // spec.md section 6.7: the setup commands once per worktree.
     if (!existsSync(setupMark(c.wt))) {
       if (repo.commands.some((x) => x.kind === "setup")) {
@@ -1045,7 +1158,7 @@ export function createLoop(opts: LoopOptions) {
     // All approved checks once before the own review: the scoped checks of the tasks did not run build, lint, or the other tests.
     const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((t) => t.files));
     await greenOrFix(c, "checks", allow, (a) => partStepFile(c.plan, c.plan.parts, "checks", a));
-    await commit(c, "checks", `${t.key}: Fix the checks of part ${part.ord}`, allow);
+    await commit(c, "checks", `${c.label}: Fix the checks of part ${part.ord}`, allow);
     await ownReview(c);
     db.transaction(() => {
       const cur = taskRow(db, t.id);
@@ -1056,14 +1169,15 @@ export function createLoop(opts: LoopOptions) {
     changed(t.id);
   }
 
-  // The parts that wait for their build, one after another.
+  // The parts that wait for their build, one after another. A task with sub-tasks asks the scheduler for the next part after each part
+  // (spec.md section 6.20.6) and stops when no part can start.
   async function buildParts(db: Database, id: number) {
     for (;;) {
       const t = taskRow(db, id);
       if (closing || !t || t.state !== "implementing" || t.blocked_json !== null) return;
-      const part = building(db, id);
+      const part = building(db, id) ?? (t.subtasks === 1 ? await startPart(db, id) : null);
       if (!part) return;
-      await runPart(db, t, part);
+      await runPart(db, taskRow(db, id) as TaskRow, part);
     }
   }
 
@@ -1073,7 +1187,8 @@ export function createLoop(opts: LoopOptions) {
       if (reset) {
         const t = taskRow(db, id);
         const part = building(db, id);
-        if (t?.base_commit && part) {
+        const base = t && part ? baseOf(t, part) : null;
+        if (t && part && base) {
           const wt = await openWorktree({
             dataDir,
             db,
@@ -1082,15 +1197,16 @@ export function createLoop(opts: LoopOptions) {
             task: id,
             ord: part.ord,
             branch: part.branch,
-            base: t.base_commit,
+            base,
           });
           const last = (db.query(Q.lastStep).get({ part: part.id }) as { id: number | null }).id ?? 0;
           await undo(await trees(db, t, part, wt), db, id, last);
         }
       }
-      // spec.md section 6.16.7: the pre-flight passes before any Claude step of the build.
+      // spec.md section 6.16.7: the pre-flight passes before any Claude step of the build. A part of a task with sub-tasks runs it at its
+      // start (startPart).
       const t0 = taskRow(db, id);
-      if (t0?.state === "implementing" && t0.blocked_json === null) {
+      if (t0?.state === "implementing" && t0.blocked_json === null && (t0.subtasks !== 1 || building(db, id))) {
         const b = await preflight(db, preflightDeps, t0, plannedBranch(db, t0), null);
         if (b) {
           reason(db, id, b);
@@ -1137,7 +1253,7 @@ export function createLoop(opts: LoopOptions) {
       const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
       await claude(c, "fix", "points", { allow, step, failure: reviewFailure(points) });
       await greenOrFix(c, "points", allow, step);
-      await commit(c, "points", `${t.key}: Fix the small review points of part ${part.ord}`, allow);
+      await commit(c, "points", `${c.label}: Fix the small review points of part ${part.ord}`, allow);
     } catch (e) {
       failed(db, id, e);
     }
@@ -1195,15 +1311,19 @@ export function createLoop(opts: LoopOptions) {
     if (cur && (cur.state === "implementing" || cur.state === "ready")) setBlocked(db, { task: id, version: cur.version }, b, now());
   };
 
-  // spec.md section 6.18.5, Base check of the current part. It stores the counts for the Task view. A failed read keeps the last
-  // result. The caller sends the change notice after the check, also after a failure.
-  async function refreshBases(db: Database, id: number): Promise<BaseMove[]> {
+  // spec.md section 6.18.5, Base check of the current part. A task with sub-tasks checks each built part on its own base (section
+  // 6.20.10). It stores the counts for the Task view. A failed read keeps the last result. The caller sends the change notice after the
+  // check, also after a failure.
+  async function refreshBases(db: Database, id: number): Promise<(BaseMove & { part: number })[]> {
     const t = taskRow(db, id);
-    const part = t && (t.state === "implementing" || t.state === "ready") ? currentPart(db, t) : null;
-    if (!t || !part) return [];
-    const out: BaseMove[] = [];
+    if (!t || (t.state !== "implementing" && t.state !== "ready")) return [];
+    const one = t.subtasks === 1 ? null : currentPart(db, t);
+    const list = one ? [one] : t.subtasks === 1 ? parts(db, id).filter((p) => p.adopted === 0 && WORKTREE.has(p.state)) : [];
+    const out: (BaseMove & { part: number })[] = [];
     try {
-      for (const r of updateRepos(db, t, part)) out.push(await checkBase(dataDir, id, r, await review.taskRemote(r.project, r.repo)));
+      for (const part of list)
+        for (const r of updateRepos(db, t, part))
+          out.push({ part: part.id, ...(await checkBase(dataDir, id, r, await review.taskRemote(r.project, r.repo))) });
     } catch (e) {
       log(`Task ${id}: the base check failed: ${noUrl((e as Error).message)}`);
       return out;
@@ -1211,7 +1331,7 @@ export function createLoop(opts: LoopOptions) {
     setBaseMoves(
       db,
       id,
-      out.map((m) => ({ taskRepo: m.taskRepo, newCommits: m.newCommits })),
+      out.map((m) => ({ part: m.part, taskRepo: m.taskRepo, newCommits: m.newCommits })),
       now(),
     );
     return out;
@@ -1235,7 +1355,8 @@ export function createLoop(opts: LoopOptions) {
     for (const s of db.query(Q.restarts).all({ task: id }) as { id: number; part: number | null; detail_json: string }[]) {
       const d = stepDetail.parse(JSON.parse(s.detail_json)).update;
       const part = parts(db, id).find((p) => p.id === s.part);
-      if (d && part && t?.base_commit) {
+      const base = t && part ? baseOf(t, part) : null;
+      if (d && t && part && base) {
         const wt = await openWorktree({
           dataDir,
           db,
@@ -1244,7 +1365,7 @@ export function createLoop(opts: LoopOptions) {
           task: id,
           ord: part.ord,
           branch: part.branch,
-          base: t.base_commit,
+          base,
         });
         await resetToPre(await trees(db, t, part, wt), d.preHeads);
         log(`Task ${id}: the update of step ${s.id} stopped at a restart. The repositories are back at their heads before it.`);
@@ -1279,7 +1400,7 @@ export function createLoop(opts: LoopOptions) {
         return;
       }
       await greenOrFix(c, item, allow, step);
-      await commit(c, item, `${t.key}: ${firstLine(info.text)}`, allow);
+      await commit(c, item, `${c.label}: ${firstLine(info.text)}`, allow);
       if (part.state === "implementing") {
         // The part of a build that waited: the build goes on from the new commit and ends with the checks and the own review.
         patchStep(db, row, { instruct: { ...info, result: "done", committed: true } });
@@ -1352,9 +1473,7 @@ export function createLoop(opts: LoopOptions) {
       patchStep(db, row, { update: updateDetail.parse({ repos: [], preHeads: pre }) });
       // Step 2: the fetched head of each base. A PR that Bitbucket reports with conflicts takes the update too.
       const conflicted = new Set(
-        taskDto(db, t)
-          .bases.filter((b) => b.conflicted)
-          .map((b) => b.taskRepo),
+        (taskDto(db, t).parts.find((x) => x.id === part.id)?.bases ?? []).filter((b) => b.conflicted).map((b) => b.taskRepo),
       );
       const plan = new Map<number, { newBaseHead: string; mode: "rebase" | "merge" }>();
       for (const r of repos) {
@@ -1385,7 +1504,7 @@ export function createLoop(opts: LoopOptions) {
         const p = plan.get(r.row.id);
         if (p) {
           guard(ctx);
-          const o = { ...p, baseCommit: r.baseCommit, key: t.key, base: r.base, full: tree.full };
+          const o = { ...p, baseCommit: r.baseCommit, key: ctx.label, base: r.base, full: tree.full };
           let stop = await startUpdate(wt, o, who);
           let n = 0;
           while (stop) {
@@ -1416,7 +1535,7 @@ export function createLoop(opts: LoopOptions) {
             wt,
             kid.row.path as string,
             await headOf(kid.wt as Worktree),
-            `${t.key}: point ${kid.row.path} at the updated task branch`,
+            `${ctx.label}: point ${kid.row.path} at the updated task branch`,
             who,
           );
       }
@@ -1591,6 +1710,26 @@ export function createLoop(opts: LoopOptions) {
     // spec.md section 6.2: a small plan approval starts part 1.
     build(db: Database, id: number) {
       kick(db, id);
+    },
+
+    // "Wait for the merge" (spec.md section 6.20.6, design.md Q67): the part that waits before its build, because its lower part also
+    // changed another repository, starts after that merge. The reason goes, and the build goes on with the other parts.
+    waitMerge(db: Database, id: number, partId: number, input: { version: number }): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      const b = blockedOf(t);
+      if (t.state !== "implementing" || b?.kind !== "error" || b.part !== partId)
+        return conflict(db, id, "This part does not wait for you.");
+      if (drivers.has(id)) return conflict(db, id, BUSY);
+      const error = db.transaction((): string | null => {
+        if (db.query(Q.waitMerge).run({ id: partId, now: now() }).changes !== 1) return "This part started already.";
+        setBlocked(db, { task: id, version: t.version }, null, now());
+        return null;
+      })();
+      if (error) return conflict(db, id, error);
+      kick(db, id);
+      changed(id);
+      return { status: 200, task: dto(db, id) };
     },
 
     // POST /api/tasks/:id/pause: the next Claude step of the build waits until Resume (AC-B18).
@@ -1806,7 +1945,7 @@ export function createLoop(opts: LoopOptions) {
             writeFileSync(f, text);
           }
         }
-        const message = row.item ? `${t.key} ${row.item}: Change the plan` : `${t.key}: Change the plan`;
+        const message = row.item ? `${c.label} ${row.item}: Change the plan` : `${c.label}: Change the plan`;
         const r = await commitTask({
           db,
           task: id,
@@ -1918,9 +2057,9 @@ export function createLoop(opts: LoopOptions) {
       await checking.get(id);
       const target = updateTarget(db, t, partId);
       if ("error" in target) return conflict(db, id, target.error);
-      const moves = await refreshBases(db, id);
+      const moves = (await refreshBases(db, id)).filter((m) => m.part === partId);
       const cur = taskRow(db, id) as TaskRow;
-      const bases = taskDto(db, cur).bases;
+      const bases = taskDto(db, cur).parts.find((x) => x.id === partId)?.bases ?? [];
       if (!moves.some((m) => m.newCommits > 0) && !bases.some((b) => b.conflicted || b.changed)) {
         const names = [...new Set(bases.map((b) => b.branch))];
         return conflict(db, id, names.length === 1 ? `${names[0]} has no new commits.` : "The base branches have no new commits.");

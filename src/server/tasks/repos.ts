@@ -260,6 +260,8 @@ type PartRef = {
   id: number;
   branch: string;
   base_branch?: string;
+  // spec.md section 6.20.6: set for a part with its own base, whose PR targets base_branch.
+  base_commit?: string | null;
   state: string;
   head: string | null;
   pushed: string | null;
@@ -354,7 +356,7 @@ export function prRows(db: Database, t: TaskRef, part: PartRef): PrRow[] {
     repo: t.repo,
     path: null,
     branch: part.branch,
-    baseBranch: t.target_branch,
+    baseBranch: part.base_commit && part.base_branch ? part.base_branch : t.target_branch,
     head: part.head,
     pushed: part.pushed,
     files: part.files,
@@ -386,11 +388,12 @@ export type UpdateRepo = {
   published: boolean;
 };
 
-// The repositories of a part that the update can change, deepest first and the main repository last.
+// The repositories of a part that the update can change, deepest first and the main repository last. A part with its own base commit
+// (spec.md section 6.20.6) takes its base branch and commit in the main repository, else the task base.
 export function updateRepos(
   db: Database,
   t: TaskRef & { target_branch: string },
-  part: { id: number; head: string | null; pushed: string | null },
+  part: { id: number; head: string | null; pushed: string | null; base_branch?: string; base_commit?: string | null },
 ): UpdateRepo[] {
   const rows = taskRepos(db, t);
   const out: UpdateRepo[] = [];
@@ -415,13 +418,15 @@ export function updateRepos(
     });
   }
   const main = rows.find((r) => r.role === "main") as TaskRepoRow;
-  if (t.base_commit && part.head)
+  const own = part.base_commit && part.base_branch ? { base: part.base_branch, commit: part.base_commit } : null;
+  const baseCommit = own?.commit ?? t.base_commit;
+  if (baseCommit && part.head)
     out.push({
       row: main,
       project: t.project,
       repo: t.repo,
-      base: t.target_branch,
-      baseCommit: t.base_commit,
+      base: own?.base ?? t.target_branch,
+      baseCommit,
       head: part.head,
       published: part.pushed !== null,
     });

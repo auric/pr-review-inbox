@@ -106,6 +106,10 @@ const part = (o: Partial<TaskPartDto> = {}): TaskPartDto => ({
   after: null,
   adopted: false,
   specDir: null,
+  bases: [],
+  lower: null,
+  gate: null,
+  wait: null,
   ...o,
 });
 

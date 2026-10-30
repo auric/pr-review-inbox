@@ -29,7 +29,20 @@ import { commitGitlink, noMergeText, pointerTarget } from "./pointer";
 import { type PreflightDeps, preflight } from "./preflight";
 import { type PushResult, pushTaskBranch } from "./push";
 import { fullPath, type PrRow, prRows, type TaskRepoRow, taskRepos, updateRepos } from "./repos";
-import { advance, advancePart, docsOf, TASK_CHANGED, type TaskResult, type TaskRow, taskDto, taskRow, taskSettingsOf } from "./tasks";
+import {
+  advance,
+  advancePart,
+  docsOf,
+  keysOf,
+  partDocsOf,
+  partNames,
+  TASK_CHANGED,
+  type TaskResult,
+  type TaskRow,
+  taskDto,
+  taskRow,
+  taskSettingsOf,
+} from "./tasks";
 
 const MAX_ROWS = 2000;
 const MAX_LINE = 2000;
@@ -46,6 +59,8 @@ type PartRow = {
   kind: string;
   title: string;
   branch: string;
+  base_branch: string;
+  base_commit: string | null;
   state: string;
   head: string | null;
   pushed: string | null;
@@ -53,11 +68,29 @@ type PartRow = {
   remote_pr: number | null;
   lines: number | null;
   files: number | null;
+  keys_json: string | null;
+};
+
+// The rows of the PR list of a part of a task with sub-tasks (spec.md section 6.20.6).
+type ListRow = {
+  id: number;
+  ord: number;
+  title: string;
+  branch: string;
+  base_branch: string;
+  state: string;
+  remote_pr: number | null;
+  keys_json: string | null;
+  start_mode: string | null;
+  after_part: number | null;
+  spec_dir: string | null;
 };
 
 const Q = {
-  part: `SELECT id, ord, kind, title, branch, state, head, pushed, pr, remote_pr, lines, files FROM task_part
-    WHERE id = $part AND task = $task`,
+  part: `SELECT id, ord, kind, title, branch, base_branch, base_commit, state, head, pushed, pr, remote_pr, lines, files, keys_json
+    FROM task_part WHERE id = $part AND task = $task`,
+  list: `SELECT id, ord, title, branch, base_branch, state, remote_pr, keys_json, start_mode, after_part, spec_dir FROM task_part
+    WHERE task = $task ORDER BY ord`,
   branches: "SELECT branch FROM task_part WHERE task = $task",
   // The code parts that wait for their PR after this one opens. None left: LAST_PR_OPEN.
   unopened:
@@ -95,6 +128,57 @@ export function prText(t: Pick<TaskRow, "key" | "title" | "spec_dir">, plan: Pla
   const description = out.join("\n");
   return { title: `${t.key}: ${t.title}`, description: mark ? AI_MARK + description : description };
 }
+
+// spec.md section 6.20.6: the PR text of a part of a task with sub-tasks. The title and the plan link name the part. The description adds
+// the parent key, one line with the PR of each part, and a keep-branch sentence for each part that builds on this one (section 6.9).
+// null: the part has no plan part.
+export function subtaskPrText(db: Database, t: TaskRow, partId: number, mark: boolean): { title: string; description: string } | null {
+  const rows = db.query(Q.list).all({ task: t.id }) as ListRow[];
+  const part = rows.find((p) => p.id === partId);
+  const docs = part ? partDocsOf(db, t, part) : null;
+  if (!part || !docs) return null;
+  const names = partNames(t.key, rows);
+  const name = (p: ListRow) => names.get(p.id)?.text ?? t.key;
+  const own = prText(
+    { key: names.get(part.id)?.commit ?? t.key, title: part.title, spec_dir: part.spec_dir ?? t.spec_dir },
+    docs.parsed,
+    false,
+    "plan.md",
+  );
+  const stateOf = (p: ListRow) => {
+    if (p.id === part.id) return "this PR";
+    if (p.remote_pr !== null)
+      return `#${p.remote_pr} (${p.state === "merged" ? "merged" : p.state === "declined" ? "declined" : "in review"})`;
+    if (p.after_part !== part.id) return "next";
+    return p.start_mode === "merge" ? "next, after this PR merges" : "next, builds on this PR";
+  };
+  const live = rows.filter((p) => p.state !== "abandoned");
+  // A planned part takes the branch of its lower part at its start.
+  const uppers = live.filter(
+    (p) =>
+      p.after_part === part.id &&
+      p.start_mode === "stack" &&
+      p.state !== "merged" &&
+      (p.state === "planned" || p.base_branch === part.branch),
+  );
+  const description = [
+    own.description,
+    "",
+    `Parent: ${t.key}`,
+    live.map((p) => `${name(p)}: ${stateOf(p)}`).join(" · "),
+    ...uppers.map((p) => `Please keep this branch until ${name(p)} moves to the new target.`),
+  ].join("\n");
+  return { title: own.title, description: mark ? AI_MARK + description : description };
+}
+
+// The PR text of a part: the text of its sub-task part, else the text of the task.
+const textOf = (db: Database, t: TaskRow, part: { id: number }, plan: Plan, mark: boolean) =>
+  (t.subtasks === 1 ? subtaskPrText(db, t, part.id, mark) : null) ?? prText(t, plan, mark, t.size === "small" ? "plan.md" : "tasks.md");
+
+// spec.md section 6.20.6: the PR target of a part with its own base, else the task base. The push guard takes the key of the part.
+const targetOf = (t: TaskRow, part: Pick<PartRow, "base_branch" | "base_commit">) =>
+  part.base_commit ? part.base_branch : t.target_branch;
+const keyOf = (t: TaskRow, part: Pick<PartRow, "keys_json">) => keysOf(part)[0] ?? t.key;
 
 // spec.md section 6.16.8, Links: the description without an earlier link section, then "Related PRs:" and one line per other PR of the
 // task, with its link when Bitbucket gave one of the configured origin.
@@ -191,8 +275,9 @@ export function createPrOpener(deps: OpenPrDeps) {
   async function push(db: Database, t: TaskRow, part: PartRow, plan: Plan, reviewers: string[]): Promise<TaskResult> {
     const id = t.id;
     const head = part.head as string;
+    const key = keyOf(t, part);
     // The prefix of the plan approval. A part made before spec.md section 6.16 keeps the prefix that its stored branch carries.
-    const prefix = taskSettingsOf(t).branchPrefix ?? part.branch.slice(0, Math.max(0, part.branch.indexOf(`${t.key}-`)));
+    const prefix = taskSettingsOf(t).branchPrefix ?? part.branch.slice(0, Math.max(0, part.branch.indexOf(`${key}-`)));
     const step = insertStep(db, { task: id, part: part.id, kind: "push", item: part.branch }, now());
     changed(id);
     const fail = (status: 409 | 502, error: string, at = step): TaskResult => {
@@ -221,7 +306,7 @@ export function createPrOpener(deps: OpenPrDeps) {
         commit: head,
         branch: part.branch,
         lease: part.pushed,
-        task: { key: t.key, prefix, branches, target: t.target_branch },
+        task: { key, prefix, branches, target: t.target_branch },
       });
     } catch (e) {
       return fail(502, `The push of ${part.branch} failed: ${noUrl((e as Error).message)}`);
@@ -235,12 +320,12 @@ export function createPrOpener(deps: OpenPrDeps) {
 
     const prStep = insertStep(db, { task: id, part: part.id, kind: "pr", item: part.branch }, now());
     changed(id);
-    const text = prText(t, plan, deps.settings.config()?.markAi ?? true, t.size === "small" ? "plan.md" : "tasks.md");
+    const text = textOf(db, t, part, plan, deps.settings.config()?.markAi ?? true);
     let created: { prId: number; dropped: string[] };
     try {
       const provider = await deps.settings.provider();
       if (!provider) return fail(409, "Configure the Bitbucket URL and token first.", prStep);
-      const res = await provider.createPullRequest(t.project, t.repo, { ...text, from: part.branch, to: t.target_branch, reviewers });
+      const res = await provider.createPullRequest(t.project, t.repo, { ...text, from: part.branch, to: targetOf(t, part), reviewers });
       created = { prId: res.pr.ref.id, dropped: res.status === "created" ? res.dropped : [] };
     } catch (e) {
       // The step must end in every case, or the task stays busy.
@@ -259,7 +344,7 @@ export function createPrOpener(deps: OpenPrDeps) {
     const error = db.transaction((): string | null => {
       db.query(Q.linked).run({ id: part.id, pr: row.id, remote: created.prId, now: now() });
       const dropped = created.dropped.length ? [`Bitbucket did not add these reviewers: ${created.dropped.join(", ")}.`] : [];
-      endStep(db, prStep, "ok", { notes: [`Opened PR #${created.prId} into ${t.target_branch}.`, ...dropped] }, now());
+      endStep(db, prStep, "ok", { notes: [`Opened PR #${created.prId} into ${targetOf(t, part)}.`, ...dropped] }, now());
       const cur = taskRow(db, id) as TaskRow;
       const p = advancePart(db, { task: id, version: cur.version, part: part.id }, { type: "PR_OPENED" }, {}, now());
       if (p.status !== 200) return p.error;
@@ -378,7 +463,7 @@ export function createPrOpener(deps: OpenPrDeps) {
       try {
         if (!provider) throw new Error("Configure the Bitbucket URL and token first.");
         const docs = docsOf(t) as NonNullable<ReturnType<typeof docsOf>>;
-        const text = prText(t, docs.parsed, deps.settings.config()?.markAi ?? true, t.size === "small" ? "plan.md" : "tasks.md");
+        const text = textOf(db, t, part, docs.parsed, deps.settings.config()?.markAi ?? true);
         const others = rows
           .filter((o) => o !== r && o.remotePr !== null)
           .map((o) => ({ name: nameOf(o), id: o.remotePr as number, url: urls.get(o.taskRepo) }));
@@ -423,7 +508,8 @@ export function createPrOpener(deps: OpenPrDeps) {
   async function pushOne(db: Database, t: TaskRow, part: PartRow, r: PrRow): Promise<string | null> {
     if (r.access !== "edit") return `The token cannot push to ${nameOf(r)}.`;
     if (!r.head) return `${nameOf(r)} has no commit to push.`;
-    const prefix = taskSettingsOf(t).branchPrefix ?? part.branch.slice(0, Math.max(0, part.branch.indexOf(`${t.key}-`)));
+    const key = keyOf(t, part);
+    const prefix = taskSettingsOf(t).branchPrefix ?? part.branch.slice(0, Math.max(0, part.branch.indexOf(`${key}-`)));
     const branches = (db.query(Q.branches).all({ task: t.id }) as { branch: string }[]).map((b) => b.branch);
     let remote: BranchRemote;
     try {
@@ -440,7 +526,7 @@ export function createPrOpener(deps: OpenPrDeps) {
       commit: r.head,
       branch: r.branch,
       lease: r.pushed,
-      task: { key: t.key, prefix, branches, target: r.baseBranch },
+      task: { key, prefix, branches, target: r.role === "main" ? t.target_branch : r.baseBranch },
     });
     return pushSentence(res, r.branch);
   }

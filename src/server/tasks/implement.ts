@@ -28,7 +28,15 @@ import { deniedPath, fold } from "../review/edits";
 import type { ImplementRunStart, InstructionRepo, ReviewJobs } from "../review/jobs";
 import { addUsage, type Ending, failure, judgeTask, usageOf } from "../review/judge";
 import { repoPath } from "../review/validate";
-import { ATTACHMENT_NAME, type AttachmentFile, attachmentBytes, type ContextFile, longData, noUrl, UNTRUSTED } from "../review/workspace";
+import {
+  type AttachmentFile,
+  attachmentBytes,
+  type ContextFile,
+  longData,
+  noUrl,
+  TASK_ATTACHMENT_NAME,
+  UNTRUSTED,
+} from "../review/workspace";
 import { fullPath, reposFile, taskRepos } from "./repos";
 import { setBlocked, stopForRun, taskRow } from "./tasks";
 import {
@@ -275,7 +283,7 @@ export async function writeContext(
   for (const n of files.keys()) if (!CONTEXT_NAME.test(n)) throw new Error(`Invalid context file name: ${n}`);
   if (files.size !== untrusted.length + own.length) throw new Error("Each context file name is used once.");
   for (const a of attachments.list) {
-    if (!ATTACHMENT_NAME.test(a.name) || a.text !== a.name.endsWith(".txt") || files.has(`attachments/${a.name}`))
+    if (!TASK_ATTACHMENT_NAME.test(a.name) || a.text !== a.name.endsWith(".txt") || files.has(`attachments/${a.name}`))
       throw new Error(`Invalid attachment name: ${a.name}`);
     files.set(`attachments/${a.name}`, await attachmentBytes(attachments.root, a));
   }
@@ -583,8 +591,10 @@ export type StepInput = {
   attachments?: AttachmentFile[];
   // The Files lines of the step's task. A CI configuration path passes the path check only when it is listed.
   allow: readonly string[];
-  // task.spec_dir: the plan files in the repository.
+  // task.spec_dir, or task_part.spec_dir of a part (spec.md section 6.20.6): the plan files in the repository.
   specDir: string;
+  // The branch point of the part for the git MCP server. Absent: task.base_commit.
+  base?: string;
   // The effect after the end commit, with the run slot free: the next step of the loop.
   onEnd?: (r: StepOutcome) => void;
   // The row of this step that waited for the run slot.
@@ -703,7 +713,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     cwd: wt.dir,
     cache: wt.cache,
     head: last,
-    base: row?.base_commit ?? last,
+    base: i.base ?? row?.base_commit ?? last,
     context,
     instructions: instructionRepos(db, i.task, i.allow),
     prompt: (project, lines) => implementPrompt(i.mode, i.specDir, trees !== null, attachments.length > 0, i.instructions, project, lines),

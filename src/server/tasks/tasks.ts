@@ -43,6 +43,8 @@ import {
   type InterviewResult,
   interviewJsonSchema,
   interviewResult,
+  MAX_OPEN_CAP,
+  MAX_OPEN_DEFAULT,
   MERGE_CONFLICTED,
   MORE_TIME_MIN,
   PART_STATE_TEXT,
@@ -85,6 +87,7 @@ import { gitEnv } from "../review/git";
 import type { ReviewJobs, TaskRunStart } from "../review/jobs";
 import { type Ending, judgeTask } from "../review/judge";
 import { buildInterviewPrompt, buildSpecPrompt } from "../review/prompt";
+import { repoPath } from "../review/validate";
 import { type ContextFile, noUrl, remoteHead, type SnapshotRepo } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import {
@@ -129,6 +132,7 @@ import {
   toPlan,
 } from "./plan";
 import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, taskRepos, updateRepos } from "./repos";
+import { nextPart, type Schedule } from "./schedule";
 import {
   approveSubtasks,
   checkSubtaskPlan,
@@ -529,8 +533,10 @@ type PartRow = {
   keys_json: string | null;
   start_mode: StartMode | null;
   after_part: number | null;
+  base_commit: string | null;
   spec_dir: string | null;
   adopted: number;
+  override: number;
 };
 type StepRow = {
   id: number;
@@ -627,9 +633,11 @@ const blockedOf = (t: TaskRow): TaskBlocked | null => {
   return r?.success ? r.data : null;
 };
 
-// spec.md section 6.18.5: the newest base check of each task, by database. The loop writes it, and the Task view reads it.
-const baseChecks = new WeakMap<Database, Map<number, { at: number; moves: { taskRepo: number; newCommits: number }[] }>>();
-export function setBaseMoves(db: Database, task: number, moves: { taskRepo: number; newCommits: number }[], at: number) {
+// spec.md section 6.18.5: the newest base check of each task, by database. The loop writes it, and the Task view reads it. part: the
+// task_part of the check (spec.md section 6.20.10, the base check of each part).
+export type BaseMoves = { part: number; taskRepo: number; newCommits: number }[];
+const baseChecks = new WeakMap<Database, Map<number, { at: number; moves: BaseMoves }>>();
+export function setBaseMoves(db: Database, task: number, moves: BaseMoves, at: number) {
   const m = baseChecks.get(db) ?? new Map();
   m.set(task, { at, moves });
   baseChecks.set(db, m);
@@ -637,18 +645,130 @@ export function setBaseMoves(db: Database, task: number, moves: { taskRepo: numb
 export const baseCheckOf = (db: Database, task: number) => baseChecks.get(db)?.get(task) ?? null;
 
 // spec.md section 6.18.2: the part of a send: the part in the body, else the part of the reason, else the part that the loop builds,
-// else the last part that is not merged.
+// else the last part that is not merged. A task with sub-tasks takes the default focus of spec.md section 6.20.13 after the part of the
+// reason.
 export function currentPart(db: Database, t: TaskRow, partId?: number): PartRow | null {
   const all = db.query(Q.parts).all({ id: t.id }) as PartRow[];
   if (partId !== undefined) return all.find((p) => p.id === partId) ?? null;
-  const step = blockedOf(t)?.step;
-  const own = step ? (db.query("SELECT part FROM task_step WHERE id = $id").get({ id: step }) as { part: number | null } | null) : null;
+  const b = blockedOf(t);
+  const own = b?.step
+    ? (db.query("SELECT part FROM task_step WHERE id = $id").get({ id: b.step }) as { part: number | null } | null)
+    : null;
+  const ownId = b?.part ?? own?.part;
   return (
-    all.find((p) => p.id === own?.part) ??
+    all.find((p) => p.id === ownId) ??
+    (t.subtasks === 1 ? focusOf(db, t, all) : undefined) ??
     all.find((p) => p.state === "implementing") ??
     all.findLast((p) => p.adopted === 0 && HAS_WORKTREE.has(p.state)) ??
     null
   );
+}
+
+// spec.md section 6.20.13, the default focus after the part of the reason: a part ready for its PR click; a part whose lower part merged
+// while its PR still targets the lower branch; a part with a moved base, conflicts, or commits not on the server; the part that Claude
+// builds; the first part that waits for review.
+function focusOf(db: Database, t: TaskRow, all: PartRow[]): PartRow | undefined {
+  const mine = all.filter((p) => p.adopted === 0);
+  const lowerMerged = (p: PartRow) =>
+    BUILT.has(p.state) && p.base_branch !== t.target_branch && all.find((x) => x.id === p.after_part)?.state === "merged";
+  const behind = (p: PartRow) =>
+    BUILT.has(p.state) &&
+    ((p.pushed !== null && p.head !== p.pushed) || partBases(db, t, p).some((x) => x.newCommits > 0 || x.conflicted || x.changed));
+  return (
+    mine.find((p) => p.state === "self_reviewed") ??
+    mine.find(lowerMerged) ??
+    mine.find(behind) ??
+    mine.find((p) => p.state === "implementing") ??
+    mine.find((p) => HAS_PR.has(p.state))
+  );
+}
+
+// ---------- The parts of a task with sub-tasks (spec.md section 6.20.6) ----------
+
+const HAS_PR = new Set<PartState>(["pr_open", "changes_requested", "approved"]);
+
+export const keysOf = (p: { keys_json: string | null }): string[] => (p.keys_json === null ? [] : (JSON.parse(p.keys_json) as string[]));
+
+export type PartName = { key: string; text: string; commit: string };
+
+// The names of each part. key: the first sub-task key, else the task key. text: the name in a sentence, "ABC-13 (2 of 2)" for part k of
+// a sub-task in n parts. commit: the name in commit messages and the PR title, "ABC-13 (part 2 of 2)" for a split part. Combined
+// sub-tasks give "ABC-15, ABC-16" in both.
+export function partNames(taskKey: string, rows: readonly { id: number; ord: number; keys_json: string | null }[]): Map<number, PartName> {
+  const out = new Map<number, PartName>();
+  for (const p of rows) {
+    const keys = keysOf(p);
+    const key = keys[0] ?? taskKey;
+    const twins = rows.filter((x) => (keysOf(x)[0] ?? taskKey) === key).sort((a, b) => a.ord - b.ord);
+    const k = twins.findIndex((x) => x.id === p.id) + 1;
+    const split = twins.length > 1;
+    if (keys.length > 1) out.set(p.id, { key, text: keys.join(", "), commit: keys.join(", ") });
+    else
+      out.set(p.id, {
+        key,
+        text: split ? `${key} (${k} of ${twins.length})` : key,
+        commit: split ? `${key} (part ${k} of ${twins.length})` : key,
+      });
+  }
+  return out;
+}
+
+// spec.md section 6.20.6, Plan file: the docs of one part of a task with sub-tasks. The plan holds only this part (task_part.ord is its
+// plan part number) and the map entries of its files, under the first key and the summary of its sub-task. A task without sub-tasks
+// keeps its docs. null: no plan, or no plan part with this number.
+export function partDocsOf(db: Database, t: TaskRow, part: { ord: number; keys_json: string | null; title: string }): Docs | null {
+  const docs = docsOf(t);
+  if (!docs || t.subtasks !== 1) return docs;
+  const pp = docs.parsed.parts.find((x) => x.n === part.ord);
+  if (!pp) return null;
+  const files = new Set(pp.tasks.flatMap((x) => x.files).map((f) => repoPath(f) ?? f));
+  const e = docs.parsed.estimate;
+  const plan: Plan = {
+    ...docs.parsed,
+    estimate: { ...e, parts: 1, lines: pp.lines ?? e.lines },
+    map: docs.parsed.map.filter((m) => files.has(repoPath(m.path) ?? m.path)),
+    parts: [pp],
+  };
+  const key = keysOf(part)[0] ?? t.key;
+  const summary = subtaskRows(db, t.id).find((r) => r.key === key)?.summary ?? part.title;
+  return { ...renderDocs(key, summary, "small", plan), version: docs.version, parsed: plan, approved: docs.approved };
+}
+
+type ScheduleRow = {
+  id: number;
+  ord: number;
+  state: PartState;
+  keys_json: string | null;
+  start_mode: StartMode | null;
+  after_part: number | null;
+  override: number;
+};
+
+// spec.md section 6.20.6: the scheduler over the part rows of a task with sub-tasks. null for a task without sub-tasks. The sync sends
+// GATE_PASSED when the part gate passes (section 6.20.7), so the state approved holds the gate result.
+export function scheduleOf(db: Database, t: TaskRow, rows: readonly ScheduleRow[]): Schedule | null {
+  if (t.subtasks !== 1) return null;
+  const done = new Set(
+    subtaskRows(db, t.id)
+      .filter((r) => r.category === "done")
+      .map((r) => r.key),
+  );
+  const names = partNames(t.key, rows);
+  const parts = rows.map((p) => {
+    const keys = keysOf(p);
+    return {
+      id: p.id,
+      ord: p.ord,
+      label: names.get(p.id)?.text ?? t.key,
+      state: p.state,
+      start: p.start_mode,
+      after: p.after_part,
+      gate: p.state === "approved",
+      override: p.override === 1,
+      done: keys.length > 0 && keys.every((k) => done.has(k)),
+    };
+  });
+  return nextPart(parts, Math.min(settingsOf(t).maxOpen ?? MAX_OPEN_DEFAULT, MAX_OPEN_CAP));
 }
 
 // spec.md section 6.20.2: the app never pushes to the branch of a PR that it did not create, and never changes it.
@@ -726,7 +846,12 @@ export function undoTarget(
 // merge result of its synced PR. outcome CONFLICTED with current true marks the PR conflicted (Gate G18 has not verified the value).
 function basesOf(db: Database, t: TaskRow): TaskDto["bases"] {
   const part = t.state === "implementing" || t.state === "ready" ? currentPart(db, t) : null;
-  if (!part || !BUILT.has(part.state)) return [];
+  return part ? partBases(db, t, part) : [];
+}
+
+// The bases of one built part that the app created (spec.md section 6.20.10, the base check of each part).
+export function partBases(db: Database, t: TaskRow, part: PartRow): TaskDto["bases"] {
+  if (!BUILT.has(part.state) || part.adopted === 1) return [];
   const check = baseCheckOf(db, t.id);
   const conflicted = (pr: number | null) => {
     const r =
@@ -740,7 +865,7 @@ function basesOf(db: Database, t: TaskRow): TaskDto["bases"] {
   return updateRepos(db, t, part).map((r) => ({
     taskRepo: r.row.id,
     branch: r.base,
-    newCommits: check?.moves.find((m) => m.taskRepo === r.row.id)?.newCommits ?? 0,
+    newCommits: check?.moves.find((m) => m.part === part.id && m.taskRepo === r.row.id)?.newCommits ?? 0,
     changed: r.row.base_changed === 1,
     conflicted: conflicted(
       r.row.role === "main"
@@ -754,6 +879,18 @@ function basesOf(db: Database, t: TaskRow): TaskDto["bases"] {
   }));
 }
 
+// spec.md section 6.20.13, the step strip of a task with sub-tasks: a sub-task is done when Jira says so, or when each of its parts
+// merged or was dropped. null for a task without sub-tasks.
+function subtaskCount(db: Database, t: TaskRow, rows: PartRow[]): { done: number; total: number } | null {
+  if (t.subtasks !== 1) return null;
+  const subs = subtaskRows(db, t.id);
+  const closed = (key: string) => {
+    const own = rows.filter((p) => keysOf(p).includes(key));
+    return own.length > 0 && own.every((p) => p.state === "merged" || p.state === "abandoned");
+  };
+  return { done: subs.filter((s) => s.category === "done" || closed(s.key)).length, total: subs.length };
+}
+
 // spec.md section 6.18.2: the newest Claude step that asked for the newest base, when no update ran after it. steps: newest first.
 function needsBaseOf(steps: { kind: string; state: string; detail: StepDetail }[]): TaskDto["needsBase"] {
   for (const s of steps) {
@@ -765,6 +902,7 @@ function needsBaseOf(steps: { kind: string; state: string; detail: StepDetail }[
 
 export function taskDto(db: Database, t: TaskRow): TaskDto {
   const partRows = db.query(Q.parts).all({ id: t.id }) as PartRow[];
+  const schedule = scheduleOf(db, t, partRows);
   const parts = partRows.map((p): TaskPartDto => {
     const synced =
       p.pr === null ? null : (db.query(Q.partPr).get({ id: p.pr }) as { state: string | null; reviewers_json: string | null } | null);
@@ -791,6 +929,10 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       after: p.after_part,
       adopted: p.adopted === 1,
       specDir: p.spec_dir,
+      bases: partBases(db, t, p),
+      lower: null,
+      gate: null,
+      wait: schedule?.waits.get(p.id) ?? null,
     };
   });
   const docs = docsOf(t);
@@ -853,7 +995,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     createdAt: t.created_at,
     interview: interviewOf(db, t.id),
     plan: docs ? planDto(db, t, docs) : null,
-    strip: stepStrip({ size: t.size, state: t.state, stoppedFrom: t.stopped_from, parts }),
+    strip: stepStrip({ size: t.size, state: t.state, stoppedFrom: t.stopped_from, parts, subtasks: subtaskCount(db, t, partRows) }),
     reviewers: defaultReviewers(db, t),
     points: openPoints(db, t.id).map(({ payload: _, ...p }) => p),
     // The routes set it from the loop.

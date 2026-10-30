@@ -220,15 +220,21 @@ export function branchName(
 
 // spec.md section 6.12: the step strip of the Task view. current: the index of the current step, -1 for a failed task.
 // A task without a size shows the small strip. Large counts the code parts: the first one that did not merge is the current one.
+// subtasks (spec.md section 6.20.13): the done and all sub-tasks of a task that builds its Jira sub-tasks.
 export function stepStrip(t: {
   size: TaskSize | null;
   state: TaskState;
   stoppedFrom: TaskState | null;
   parts: { kind: PartKind; state: PartState }[];
+  subtasks?: { done: number; total: number } | null;
 }): { steps: string[]; current: number } {
   const code = t.parts.filter((p) => p.kind !== "spec");
   const left = code.findIndex((p) => p.state !== "merged" && p.state !== "abandoned");
-  const build = t.size === "large" && code.length ? `Build parts (${left < 0 ? code.length : left + 1} of ${code.length})` : "Build";
+  const build = t.subtasks
+    ? `Build sub-tasks (${t.subtasks.done} of ${t.subtasks.total})`
+    : t.size === "large" && code.length
+      ? `Build parts (${left < 0 ? code.length : left + 1} of ${code.length})`
+      : "Build";
   const review = t.size === "medium" || t.size === "large";
   const steps = ["Questions", "Plan", ...(review ? ["Spec review"] : []), build, "Done"];
   const state = t.state === "stopped" ? t.stoppedFrom : t.state;
@@ -290,12 +296,14 @@ export const BLOCKED_KINDS = [
 ] as const;
 export type BlockedKind = (typeof BLOCKED_KINDS)[number];
 // task.blocked_json: why the loop waits for the user. null while Claude or the app works, and while the app waits for colleagues.
-// base: the pre-flight found no base branch of this task_repo (spec.md section 6.16.7), so "Pick a base branch" can change it.
+// base: the pre-flight found no base branch of this task_repo (spec.md section 6.16.7), so "Pick a base branch" can change it. part: the
+// task_part that the reason is about when no step names it (spec.md section 6.20.6, a part that waits before its build).
 export const taskBlocked = z.object({
   kind: z.enum(BLOCKED_KINDS),
   step: z.number().int().positive().nullable(),
   text: z.string(),
   base: z.object({ taskRepo: z.number().int().nonnegative(), branch: z.string() }).optional(),
+  part: z.number().int().positive().optional(),
 });
 export type TaskBlocked = z.infer<typeof taskBlocked>;
 

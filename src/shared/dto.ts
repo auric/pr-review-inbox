@@ -1502,6 +1502,13 @@ export type TaskPartDto = {
   after: number | null;
   adopted: boolean;
   specDir: string | null;
+  // spec.md sections 6.20.6 and 6.20.8. bases: the base check of this built part, as TaskDto.bases. lower: the merge of the lower part,
+  // null until it merged. gate: the part gate of a part with a PR, null without a gate result. wait: the reason of the scheduler for a
+  // planned part.
+  bases: TaskBaseDto[];
+  lower: { key: string; how: "merge" | "squash" | "other" } | null;
+  gate: { pass: boolean; why: string } | null;
+  wait: string | null;
 };
 
 // A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a
