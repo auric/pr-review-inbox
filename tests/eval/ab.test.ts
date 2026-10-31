@@ -7,9 +7,11 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { type AbOptions, failedRuns, parseAb, runArgs } from "../../scripts/eval/ab";
+import { type AbOptions, failedRuns, modeText, parseAb, reuseRefusal, runArgs } from "../../scripts/eval/ab";
+import { evalProfile, parseOptions } from "../../scripts/eval/run";
 import type { EvalResult } from "../../scripts/eval/score";
-import { dbPath } from "../../src/server/config";
+import { dbPath, PROFILES_VERSION } from "../../src/server/config";
+import { profileRevision, promptVersion } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
 import { openDb } from "../../src/server/storage/db";
 import { claudeStream } from "../support/review-fixture";
@@ -144,8 +146,72 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   effort: null,
   build: [],
   results: null,
+  baseline: null,
   runner: ["fake"],
   ...o,
+});
+
+// A result header as eval:ab writes it for one side, with no case and no run.
+function header(mode: "review" | "rereview", side: "baseline" | "candidate", o = opts()): EvalResult {
+  const p = parseOptions(runArgs(mode, side, o, ""));
+  const e = "error" in p ? p : evalProfile(p);
+  if ("error" in e) throw new Error(e.error);
+  const profile = e.profile;
+  return {
+    format: 1,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    commit: "abc",
+    dirty: false,
+    promptVersion: promptVersion(profile),
+    profileVersion: PROFILES_VERSION,
+    cliVersion: "1.0.0",
+    runner: "fake",
+    profile: { ...profile, revision: profileRevision(profile) },
+    volume: null,
+    requested: { model: profile.model ?? "default", effort: profile.effort ?? "default", verifier: profile.verifier.mode },
+    set: "local",
+    tolerance: 3,
+    fingerprint: "f".repeat(64),
+    ...(mode === "rereview" && { rereview: true }),
+    repeat: 1,
+    cases: [],
+    runs: [],
+  };
+}
+
+describe("eval:ab --baseline checks", () => {
+  const FP = "f".repeat(64);
+  test("a matching stored baseline passes, each mismatch is refused", () => {
+    for (const mode of ["review", "rereview"] as const) expect(reuseRefusal(mode, header(mode, "baseline"), opts(), FP)).toBeNull();
+    const a = header("review", "baseline");
+    const refused = (r: Partial<EvalResult>, o = opts()) => reuseRefusal("review", { ...a, ...r }, o, FP);
+    expect(reuseRefusal("rereview", a, opts(), FP)).toContain("ran the other mode");
+    expect(reuseRefusal("review", a, opts(), "e".repeat(64))).toContain(
+      "ran case set ffffffffffff, but the set now has fingerprint eeeeeeeeeeee",
+    );
+    expect(refused({}, opts({ baseEffort: "low" }))).toContain("but this run needs effort low");
+    // --candidate-effort changes only the candidate, so the baseline still matches.
+    expect(refused({}, opts({ effort: "low" }))).toBeNull();
+    expect(refused({ profileVersion: PROFILES_VERSION - 1 })).toContain(`but the shipped profile is now version ${PROFILES_VERSION}`);
+    expect(refused({ promptVersion: "1.0" })).toContain("ran prompt version 1.0, but the baseline now has prompt version");
+    expect(refused({ requested: { model: "opus", effort: a.requested?.effort as string } })).toContain("ran with model opus");
+    expect(refused({ profile: { ...a.profile, revision: "0".repeat(64) } })).toContain("ran profile revision 00000000");
+    expect(refused({ repeat: 2 })).toContain("ran with --repeat 2, but this run asks for --repeat 1");
+    // A different commit and CLI version are allowed.
+    expect(refused({ commit: "def", cliVersion: "2.0.0" })).toBeNull();
+  });
+
+  test("the profile warning shows only when the base profiles differ", () => {
+    const warn = "A and B used different profiles";
+    for (const mode of ["review", "rereview"] as const) {
+      const a = header(mode, "baseline");
+      const b = header(mode, "candidate");
+      expect(b.profile.revision).not.toBe(a.profile.revision);
+      expect(modeText(mode, a, b, ["a", "b"])).not.toContain(warn);
+      const other = { ...b.profile, note: "another base profile" };
+      expect(modeText(mode, a, { ...b, profile: { ...other, revision: profileRevision(other as never) } }, ["a", "b"])).toContain(warn);
+    }
+  });
 });
 
 describe("eval:ab arguments", () => {
@@ -176,6 +242,7 @@ describe("eval:ab arguments", () => {
     expect(parseAb(["--repeat", "0"])).toMatchObject({ error: expect.stringContaining("--repeat must be") });
     expect("error" in parseAb(["--set", "v1"])).toBe(true);
     expect(parseAb(["--runner"])).toMatchObject({ error: "--runner needs a command." });
+    expect(parseAb(["--baseline", join(TMP, "no-such-folder")])).toMatchObject({ error: expect.stringContaining("--baseline: no folder") });
   });
 
   test("the candidate of each mode", () => {
@@ -258,13 +325,21 @@ describe("eval:ab arguments", () => {
 });
 
 describe("eval:ab end to end with the fake CLI", () => {
+  const dir = join(TMP, "fake");
+  const scenario = join(dir, "scenario.json");
+  const out = join(TMP, "set", "eval-local");
+  const results = join(TMP, "results");
+  // The fake CLI records each call, the auth check included.
+  const calls = () =>
+    readFileSync(join(dir, "calls.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.includes('"argv"')).length;
+  let firstRun = 0;
   test(
     "builds from the live folder without a write, runs baseline and candidate, and skips the re-review mode",
     async () => {
-      const dir = join(TMP, "fake");
       mkdirSync(dir);
       const text = fileAt(CHANGED).split("\n");
-      const scenario = join(dir, "scenario.json");
       writeFileSync(
         scenario,
         JSON.stringify({
@@ -295,8 +370,6 @@ describe("eval:ab end to end with the fake CLI", () => {
           delayMs: 1,
         }),
       );
-      const out = join(TMP, "set", "eval-local");
-      const results = join(TMP, "results");
       const r = await bun([
         AB,
         "--out",
@@ -345,6 +418,62 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(b.requested?.effort).toBe("low");
       expect(a.fingerprint).toBe(b.fingerprint as string);
       expect(readdirSync(results).sort()).toEqual(["review-baseline", "review-candidate"]);
+      firstRun = calls();
+    },
+    SLOW,
+  );
+
+  const run = (args: string[]) => bun([AB, "--out", out, ...args, "--runner", process.execPath, FAKE, scenario]);
+
+  test(
+    "--baseline reuses the stored baseline and runs only the candidate",
+    async () => {
+      expect(firstRun).toBeGreaterThan(0);
+      const before = calls();
+      const again = join(TMP, "results-reuse");
+      const r = await run(["--results", again, "--baseline", results]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(calls() - before).toBe(firstRun / 2);
+      const [a] = readdirSync(join(results, "review-baseline")).filter((x) => x.endsWith(".json"));
+      const stored = join(results, "review-baseline", a as string);
+      expect(r.stdout).toContain(`--- review baseline: reused ${stored} ---`);
+      expect(r.stdout).toContain(`Result A: ${stored}`);
+      expect(r.stdout).toContain("== Review cases: 1 cases x 1 ==");
+      // Same base profile, same effort: the candidate adds only variants and modules.
+      expect(r.stdout).not.toContain("A and B used different profiles");
+      expect(readdirSync(again)).toEqual(["review-candidate"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "--baseline refuses a stored baseline of another repeat count or effort, before any run",
+    async () => {
+      const before = calls();
+      const repeat = await run(["--results", join(TMP, "results-refused"), "--baseline", results, "--repeat", "2"]);
+      expect(repeat.code).toBe(2);
+      expect(repeat.stderr).toContain("Refused: the stored review baseline ran with --repeat 1, but this run asks for --repeat 2.");
+      const effort = await run(["--results", join(TMP, "results-refused"), "--baseline", results, "--effort", "max"]);
+      expect(effort.code).toBe(2);
+      expect(effort.stderr).toContain("but this run needs effort max.");
+      expect(calls()).toBe(before);
+    },
+    SLOW,
+  );
+
+  test(
+    "--baseline without a review-baseline folder runs the baseline",
+    async () => {
+      const empty = join(TMP, "no-baseline");
+      mkdirSync(empty);
+      const before = calls();
+      const again = join(TMP, "results-fallback");
+      const r = await run(["--results", again, "--baseline", empty]);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`No review baseline in ${empty}, so the review baseline runs.`);
+      expect(calls() - before).toBe(firstRun);
+      expect(readdirSync(again).sort()).toEqual(["review-baseline", "review-candidate"]);
     },
     SLOW,
   );

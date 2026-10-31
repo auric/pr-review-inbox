@@ -128,7 +128,8 @@ export function refusal(a: EvalResult, b: EvalResult): string | null {
   return null;
 }
 
-export function compareText(a: EvalResult, b: EvalResult, name = (id: string) => id): string {
+// revB: the profile revision of B to compare with A. eval:ab passes the candidate revision without its added variants and modules.
+export function compareText(a: EvalResult, b: EvalResult, name = (id: string) => id, revB = b.profile.revision): string {
   const sa = score(a);
   const sb = score(b);
   const ta = truth(a);
@@ -156,9 +157,9 @@ export function compareText(a: EvalResult, b: EvalResult, name = (id: string) =>
   if (known && verifierOf(a) !== verifierOf(b))
     out.push(`A and B used different verify modes: ${verifierOf(a)} and ${verifierOf(b)}. The numbers do not compare.`);
   // The revision hashes each profile field that changes the run, so equal revisions mean equal profiles whatever the versions say.
-  if (a.profile.revision !== b.profile.revision)
+  if (a.profile.revision !== revB)
     out.push(
-      `A and B used different profiles: revision ${a.profile.revision.slice(0, 8)} of profile version ${a.profileVersion ?? "not recorded"}, revision ${b.profile.revision.slice(0, 8)} of profile version ${b.profileVersion ?? "not recorded"}. The numbers do not compare.`,
+      `A and B used different profiles: revision ${a.profile.revision.slice(0, 8)} of profile version ${a.profileVersion ?? "not recorded"}, revision ${revB.slice(0, 8)} of profile version ${b.profileVersion ?? "not recorded"}. The numbers do not compare.`,
     );
   const ids = [...ta.keys()].filter((id) => tb.has(id)).sort();
   for (const m of METRICS) {

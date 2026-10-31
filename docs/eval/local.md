@@ -31,6 +31,21 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `--out <folder>`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/`, which git ignores.
 - `--user <slug>`: your user slug. Default: `userSlug` of `config.json` beside the database file.
 - `--results <folder>`: the folder of the result files. Default: a new folder in `eval-results/`.
+- `--baseline <folder>`: the folder of an earlier eval:ab run. See "Reuse a baseline".
+
+## Reuse a baseline
+
+A new candidate does not need a new baseline run. Give the folder of an earlier run, and only the candidate runs:
+
+```
+bun run eval:ab -- --baseline eval-results/ab-<stamp>-<commit> --candidate-variants order,rules2
+```
+
+- The command reads the baseline results from `review-baseline/` and `rereview-baseline/` of that folder.
+- A mode without its folder runs the baseline as usual. The output says so in one line.
+- The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, model, or repeat count. The check runs before any run.
+- Give the same `--effort` and `--repeat` as the earlier run. A new commit or CLI version is allowed. The A and B header lines show both.
+- The set must not change. A new decision in the app changes the set fingerprint, and the command then refuses the reuse.
 
 ## Bisect when the result is mixed
 
