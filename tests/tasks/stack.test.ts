@@ -450,7 +450,7 @@ describe("the move after the lower part merged (spec.md section 6.20.10)", () =>
       ]);
       const b = s.part(s.pB);
       expect([b.base_commit, b.base_branch, s.t().base_commit]).toEqual([m1, A, s.base]);
-      expect(await s.cacheGit(["log", "-3", "--format=%s", b.head as string])).toBe(
+      expect(await s.cacheGit(["log", "--first-parent", "-3", "--format=%s", b.head as string])).toBe(
         [`ABC-12: merge main into ${B}`, `ABC-12: record the squash merge of ${A}`, `ABC-12: merge main into ${B}`].join("\n"),
       );
       // After the merges, main is in B: the PR diff against main holds only the files of B.
