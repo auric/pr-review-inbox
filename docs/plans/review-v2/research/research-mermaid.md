@@ -1,0 +1,12 @@
+# Research: Mermaid in Explain PR (scout, 2026-10-22)
+
+Today: all Markdown via src/web/pr/Markdown.tsx (react-markdown 10.1.0 + remark-gfm 4.0.1, skipHtml, only http(s) links and local attachment images). No DOMPurify/rehype/mermaid. CSP (src/server/app.ts:53-61): default-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; style-src falls back to 'self' (blocks inline SVG styles if SVG is inserted into the DOM).
+
+Recommendation: mermaid 12.2.0 (MIT; deps dompurify, d3, dagre, cytoscape, katex, lodash-es, khroma: all GPL-compatible), lazy `await import("mermaid")` in its own Vite chunk (~173 KB gzip main chunk + per-diagram lazy chunks). Render to SVG string, show as `<img src="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg)>` -> no CSP change (img-src allows data:), no scripts run in an <img> SVG; its own <style> applies. Not browser-verified.
+- initialize: startOnLoad:false, securityLevel:"strict" (not "sandbox": iframe blocked by CSP), htmlLabels:false (+ flowchart.htmlLabels:false; avoids foreignObject in <img>), theme:"base", themeVariables from CSS tokens via getComputedStyle, maxTextSize:20000, maxEdges:300. Re-render on theme change.
+- parse then render; on error show code block + first error line + Copy; never throw; remove leftover #d<id> scratch node; refuse code > ~20 KB; every diagram has Copy code and Show code.
+- Possible console CSP noise from mermaid's hidden text-measure element with inline style; if layout breaks, fallback style-src 'self' 'unsafe-inline' (styles only).
+- Advisories fixed in 11.15.0/11.16.1 (CSS injection via classDef/config, HTML injection, DoS loops, prototype pollution; older critical XSS in architecture iconText). Pin exact version; strip %%{init directives.
+- Alternatives: beautiful-mermaid 1.1.3 (MIT, zero DOM, elkjs; less syntax coverage, young, one maintainer) as fallback; server-side render with headless browser rejected.
+- Notices: `mermaid 12.2.0 — MIT — Copyright (c) 2014-2025 Knut Sveidqvist`.
+Prompt rules (common practice, unverified): only flowchart TD, sequenceDiagram, classDiagram in ```mermaid fences; alphanumeric node IDs; labels in double quotes, no " inside (use #quot; or '); no ()[]{}<>|;# unless quoted; no bare `end` ID; sequence: `participant A as "Name"`, no ; in messages; <=25 nodes per diagram, <=3 diagrams; no styling/classDef/click/%%{init}%%.
