@@ -181,6 +181,42 @@ describe("eval score (AC-M1)", () => {
   });
 });
 
+describe("opened-file facts (docs/plans/review-v3.md WP-V13)", () => {
+  // Repeat 1 opened a.ts (both bugs of a) but not b.py. Repeat 2 of a opened nothing; repeat 2 of b is an old run with no facts.
+  const OPENED: EvalResult = {
+    ...RESULT,
+    runs: RESULT.runs.map((r) =>
+      r.repeat === 1
+        ? { ...r, agentCalls: r.case === "a" ? 3 : 1, opened: r.case === "a" ? ["a.ts", "z.ts"] : ["c.py"], toolsPerCall: 7 }
+        : r.case === "a"
+          ? { ...r, agentCalls: 0, opened: [], toolsPerCall: 0 }
+          : r,
+    ),
+  };
+
+  test("bugOpened counts the bugs whose file the run opened, per case run and pooled; a run without facts does not count", () => {
+    const s = score(OPENED);
+    // Repeat 1: 2 of 3 bugs. Repeat 2: case a only, 0 of 2.
+    expect(s.suite.bugOpened).toEqual({ mean: 1 / 3, min: 0, max: 2 / 3 });
+    expect(s.cases.a?.bugOpened).toEqual({ mean: 0.5, min: 0, max: 1 });
+    expect(s.cases.b?.bugOpened).toEqual({ mean: 0, min: 0, max: 0 });
+    expect(s.suite.agentCalls).toEqual({ mean: 1, min: 0, max: 2 });
+    expect(s.cases.a?.agentCalls).toEqual({ mean: 1.5, min: 0, max: 3 });
+  });
+
+  test("compare shows bugOpened and agentCalls, and an old result file shows -", () => {
+    expect(score(RESULT).suite.bugOpened).toBeNull();
+    expect(score(RESULT).suite.agentCalls).toBeNull();
+    const text = compareText(RESULT, OPENED);
+    expect(text).toMatch(/bug opened: [^\n]+\ncase\s+A\s+B\s+delta\nall cases\s+-\s+33\.3% \(0\.0% to 66\.7%\)\s+-/);
+    expect(text).toMatch(/rl-reviewer calls per case\ncase\s+A\s+B\s+delta\nall cases\s+-\s+1\.0 \(0\.0 to 2\.0\)\s+-/);
+    expect(summaryText(RESULT)).toMatch(/bug opened\s+rl-reviewer calls\s+minutes\n/);
+    expect(summaryText(RESULT)).toMatch(/\na\s[^\n]*\s-\s+-\s+6\.0 \(4\.0 to 8\.0\)\n/);
+    expect(summaryText(OPENED)).toMatch(/\na\s[^\n]*\s50\.0% \(0\.0% to 100\.0%\)\s+1\.5 \(0\.0 to 3\.0\)\s+6\.0 \(4\.0 to 8\.0\)\n/);
+    expect(summaryText(RESULT)).toContain("reviewer effort not recorded");
+  });
+});
+
 describe("alt places", () => {
   // Bug B1: the declaration at c.h:5 or the definition at c.cpp:40-42. Trap T1: c.cpp:60 or its caller at main.cpp:9.
   const ALT: EvalResult = {

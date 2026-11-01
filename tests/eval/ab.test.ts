@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { type AbOptions, failedRuns, modeText, parseAb, reuseRefusal, runArgs } from "../../scripts/eval/ab";
+import { type AbOptions, failedRuns, largeBaseline, largeCases, modeText, parseAb, reuseRefusal, runArgs } from "../../scripts/eval/ab";
 import { evalProfile, parseOptions } from "../../scripts/eval/run";
 import type { EvalResult } from "../../scripts/eval/score";
 import { dbPath, PROFILES_VERSION } from "../../src/server/config";
@@ -144,6 +144,8 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   modules: ["failures"],
   baseEffort: null,
   effort: null,
+  reviewerEffort: null,
+  large: false,
   build: [],
   results: null,
   baseline: null,
@@ -212,6 +214,105 @@ describe("eval:ab --baseline checks", () => {
       expect(modeText(mode, a, { ...b, profile: { ...other, revision: profileRevision(other as never) } }, ["a", "b"])).toContain(warn);
     }
   });
+});
+
+describe("eval:ab --large (docs/plans/review-v3.md WP-V13)", () => {
+  const baseProfile = () => {
+    const p = parseOptions(runArgs("review", "baseline", opts(), ""));
+    const e = "error" in p ? p : evalProfile(p);
+    if ("error" in e) throw new Error(e.error);
+    return e.profile;
+  };
+
+  test(
+    "picks a case at 1,200 changed lines and a case at 30 files, and skips a case of 29 files",
+    async () => {
+      const root = join(TMP, "large");
+      const src = join(root, "src");
+      mkdirSync(src, { recursive: true });
+      const genv = { ...env };
+      await git(["init", "-q", "--template=", src], { env: genv });
+      writeFileSync(join(src, "README"), "base\n");
+      await git(["-C", src, "add", "."], { env: genv });
+      await git(["-C", src, "commit", "-q", "-m", "base"], { env: genv });
+      const base = (await git(["-C", src, "rev-parse", "HEAD"], { env: genv })).trim();
+      const head = async (branch: string, files: Record<string, string>) => {
+        await git(["-C", src, "checkout", "-q", "-b", branch, base], { env: genv });
+        for (const [p, text] of Object.entries(files)) {
+          mkdirSync(join(src, p, ".."), { recursive: true });
+          writeFileSync(join(src, p), text);
+        }
+        await git(["-C", src, "add", "."], { env: genv });
+        await git(["-C", src, "commit", "-q", "-m", branch], { env: genv });
+        return (await git(["-C", src, "rev-parse", "HEAD"], { env: genv })).trim();
+      };
+      const lines = (n: number) => `${Array.from({ length: n }, (_, k) => `line ${k}`).join("\n")}\n`;
+      const many = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, k) => [`f/${k}.ts`, "x\n"]));
+      const heads = {
+        lines: await head("lines", { "big.ts": lines(1200) }),
+        files: await head("files", many(30)),
+        // 28 new files and one changed file: 29 files, 30 changed lines.
+        small: await head("small", { ...many(28), README: "base\nmore\n" }),
+      };
+      const bundle = join(root, "repo.bundle");
+      await git(["-C", src, "bundle", "create", "-q", bundle, "--all"], { env: genv });
+      const cases = Object.entries(heads).map(([id, h]) => ({ id, local: { bundle, base, head: h, hash: id } }));
+      expect(await largeCases([...cases, { id: "fixture" }], baseProfile(), mkdtempSync(join(root, "tmp-")))).toEqual(["lines", "files"]);
+    },
+    SLOW,
+  );
+
+  const FULL = "f".repeat(64);
+  const SUB = "5".repeat(64);
+  const caseInfo = (id: string) => ({ id, title: id, language: "ts", changedLines: 1, base: "b", head: "h", bugs: [], traps: [] });
+  const caseRun = (id: string, repeat = 1) => ({ case: id, repeat }) as EvalResult["runs"][number];
+  const full = (): EvalResult => ({
+    ...header("review", "baseline"),
+    cases: ["a", "b", "c"].map(caseInfo),
+    runs: [caseRun("a"), caseRun("b"), caseRun("c")],
+  });
+
+  test("a full-set baseline passes the reuse checks, then keeps only the large runs with the subset fingerprint", () => {
+    const cut = largeBaseline(full(), opts(), FULL, SUB, ["a", "c"]);
+    if (typeof cut === "string") throw new Error(cut);
+    expect(cut.fingerprint).toBe(SUB);
+    expect(cut.cases.map((c) => c.id)).toEqual(["a", "c"]);
+    expect(cut.runs.map((r) => r.case)).toEqual(["a", "c"]);
+    // A large baseline from an earlier --large run passes as it is.
+    expect(largeBaseline(cut, opts(), FULL, SUB, ["a", "c"])).toBe(cut);
+  });
+
+  test("a stored baseline with another full fingerprint, another repeat, or no run of a large case is refused", () => {
+    expect(largeBaseline(full(), opts(), "e".repeat(64), SUB, ["a"])).toContain("ran case set ffffffffffff");
+    expect(largeBaseline(full(), opts({ repeat: "2" }), FULL, SUB, ["a"])).toContain("ran with --repeat 1");
+    expect(largeBaseline(full(), opts(), FULL, SUB, ["a", "d"])).toBe("Refused: the stored review baseline has no run of 1 large case.");
+  });
+
+  test("--large and --candidate-reviewer-effort parse, reach the runner arguments, and a bad effort is an error", () => {
+    expect(parseAb(["--large"])).toMatchObject({ large: true, reviewerEffort: null });
+    expect(parseAb([])).toMatchObject({ large: false });
+    const o = parseAb(["--candidate-reviewer-effort", "xhigh"]);
+    if ("error" in o) throw new Error(o.error);
+    expect(o.reviewerEffort).toBe("xhigh");
+    const cand = runArgs("review", "candidate", o, "", ["a", "c"]);
+    expect(cand.slice(0, 6)).toEqual(["--set", "local", "--repeat", "1", "--cases", "a,c"]);
+    expect(cand[cand.indexOf("--reviewer-effort") + 1]).toBe("xhigh");
+    expect(runArgs("review", "baseline", o, "")).not.toContain("--reviewer-effort");
+    expect(runArgs("review", "baseline", o, "")).not.toContain("--cases");
+    expect(parseAb(["--candidate-reviewer-effort", "bogus"])).toMatchObject({
+      error: expect.stringContaining("--candidate-reviewer-effort must be one of"),
+    });
+  });
+
+  test(
+    "the command exits 2 on a bad --candidate-reviewer-effort",
+    async () => {
+      const r = await bun([AB, "--candidate-reviewer-effort", "bogus"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--candidate-reviewer-effort must be one of");
+    },
+    SLOW,
+  );
 });
 
 describe("eval:ab arguments", () => {
@@ -457,6 +558,18 @@ describe("eval:ab end to end with the fake CLI", () => {
       const effort = await run(["--results", join(TMP, "results-refused"), "--baseline", results, "--effort", "max"]);
       expect(effort.code).toBe(2);
       expect(effort.stderr).toContain("but this run needs effort max.");
+      expect(calls()).toBe(before);
+    },
+    SLOW,
+  );
+
+  test(
+    "--large on a set with no large case exits 2 before any run",
+    async () => {
+      const before = calls();
+      const r = await run(["--results", join(TMP, "results-large"), "--large", "--baseline", results]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--large: no review case of the set gives the baseline the rl-reviewer agent.");
       expect(calls()).toBe(before);
     },
     SLOW,

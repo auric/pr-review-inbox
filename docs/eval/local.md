@@ -27,6 +27,8 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `--candidate-modules a,b`: the modules that the candidate adds to the shipped modules. Default: `failures`. An empty value adds none.
 - `--effort low|medium|high|xhigh|max`: the effort of the baseline and candidate runs. Default: none, so both sides run with the effort of the shipped profile. The eval header shows the effort of each run.
 - `--candidate-effort low|medium|high|xhigh|max`: the effort of the candidate runs. Default: none, so the candidate runs with the effort of the baseline. With this flag, the table says that the efforts differ.
+- `--candidate-reviewer-effort low|medium|high|xhigh|max`: the rl-reviewer effort of the candidate runs. Default: none, so the candidate keeps the rl-reviewer effort of the shipped profile. `--effort` does not change the rl-reviewer effort. The eval header shows it as "reviewer effort".
+- `--large`: run only the large review cases. A case is large when the baseline profile gives the review the rl-reviewer agent: 1,200 or more changed lines, or 30 or more changed files. The re-review cases do not run, because a re-review never gets rl-reviewer. The command prints the number of large cases. It exits with code 2 when the set has none.
 - `--db <file>` and `--cache <folder>`: another database file and git folder. Default: those of the data folder.
 - `--out <folder>`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/`, which git ignores.
 - `--user <slug>`: your user slug. Default: `userSlug` of `config.json` beside the database file.
@@ -46,6 +48,23 @@ bun run eval:ab -- --baseline eval-results/ab-<stamp>-<commit> --candidate-varia
 - The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, model, or repeat count. The check runs before any run.
 - Give the same `--effort` and `--repeat` as the earlier run. A new commit or CLI version is allowed. The A and B header lines show both.
 - The set must not change. A new decision in the app changes the set fingerprint, and the command then refuses the reuse.
+- With `--large`, give the folder of a full-set run or of an earlier `--large` run. A full-set baseline must pass the checks above against the full set. Then the command keeps only its large cases and writes that copy to `review-baseline/` of the new result folder. So the new folder serves as the large baseline of later runs.
+
+## Opened files and rl-reviewer calls
+
+Each run records three facts from its run log. The verify phase does not count.
+
+- `agentCalls`: the number of rl-reviewer calls.
+- `opened`: the repository paths that a Read opened under `./repo`, and the path of each git_diff, git_blame, and git_show call. A read of `./context` does not count. A git_diff without a path opens no single file, so `opened` is a lower bound.
+- `toolsPerCall`: the most tool calls under one rl-reviewer call.
+
+The tables show two of them:
+
+- "bug opened": the counted bugs whose file is in `opened`. A low value with low recall means a coverage miss. A high value with low recall means a reasoning miss.
+- "rl-reviewer calls per case": the mean of `agentCalls`.
+- A result file from before these facts shows "-".
+
+The eval runner takes `--reviewer-effort low|medium|high|xhigh|max` for the same rl-reviewer effort as `--candidate-reviewer-effort`.
 
 ## Bisect when the result is mixed
 

@@ -14,10 +14,12 @@ import { parseArgs } from "node:util";
 import { PROFILES_VERSION, writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import {
+  GIT_SERVER,
   type ListTools,
   profileOf,
   profileRevision,
   promptVersion,
+  REVIEWER,
   SHIPPED_PROFILES,
   shippedProfileAt,
 } from "../../src/server/review/catalog";
@@ -43,6 +45,7 @@ import {
   type VerifierSetup,
 } from "../../src/shared/dto";
 import { checkOf, displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION, type ReplyPayload } from "../../src/shared/review";
+import { eventPhase, type RunEvent } from "../../src/shared/run-log";
 import { stubListTools } from "../../tests/support/review-fixture";
 import {
   buildRepo,
@@ -88,7 +91,7 @@ const TASK_KEY = "EVAL-1";
 const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
-  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--runner <command> <args...>]
+  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--reviewer-effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
 --ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.`;
@@ -108,6 +111,8 @@ export type Options = {
   // null: no flag, so the CLI default applies.
   model: string | null;
   effort: Effort | null;
+  // null: no flag, so the rl-reviewer effort of the profile applies (docs/plans/review-v3.md WP-V13).
+  reviewerEffort: Effort | null;
   // null: no flag, so the verify mode of the profile applies.
   verifier: VerifierSetup["mode"] | null;
   // null: no flag, so the variants of the profile apply (docs/plans/review-v3.md WP-V2).
@@ -140,6 +145,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         volume: { type: "string" },
         model: { type: "string" },
         effort: { type: "string" },
+        "reviewer-effort": { type: "string" },
         verifier: { type: "string" },
         variants: { type: "string" },
         rereview: { type: "boolean", default: false },
@@ -171,6 +177,9 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   const effort = v.effort ?? null;
   if (effort !== null && !(EFFORTS as readonly string[]).includes(effort))
     return { error: `--effort must be one of ${EFFORTS.join(", ")}.` };
+  const reviewerEffort = v["reviewer-effort"] ?? null;
+  if (reviewerEffort !== null && !(EFFORTS as readonly string[]).includes(reviewerEffort))
+    return { error: `--reviewer-effort must be one of ${EFFORTS.join(", ")}.` };
   const verifier = v.verifier ?? null;
   if (verifier !== null && !(VERIFIER_MODES as readonly string[]).includes(verifier))
     return { error: `--verifier must be one of ${VERIFIER_MODES.join(", ")}.` };
@@ -196,6 +205,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     volume: volume as Volume | null,
     model: model?.data ?? null,
     effort: effort as Effort | null,
+    reviewerEffort: reviewerEffort as Effort | null,
     verifier: verifier as VerifierSetup["mode"] | null,
     variants: variants as Variant[] | null,
     rereview,
@@ -206,7 +216,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   };
 }
 
-// The profile of the run with the --modules, --volume, --model, --effort, --verifier, and --variants values. A field that this app
+// The profile of the run with the --modules, --volume, --model, --effort, --reviewer-effort, --verifier, and --variants values. A field that this app
 // version does not know is an error, so a result file never names a setup that did not run.
 export function evalProfile(o: Options) {
   const shipped = SHIPPED_PROFILES.some((p) => p.id === o.profile) && shippedProfileAt(o.profile, o.profileVersion ?? PROFILES_VERSION);
@@ -216,6 +226,7 @@ export function evalProfile(o: Options) {
     ...(o.volume && { volume: o.volume }),
     ...(o.model && { model: o.model }),
     ...(o.effort && { effort: o.effort }),
+    ...(o.reviewerEffort && shipped && { reviewer: { ...shipped.reviewer, effort: o.reviewerEffort } }),
     ...(o.verifier && shipped && { verifier: { ...shipped.verifier, mode: o.verifier } }),
     ...(o.variants && { variants: o.variants }),
   };
@@ -255,6 +266,29 @@ export async function checkoutState() {
   } catch {
     return { commit: "unknown", dirty: false };
   }
+}
+
+const GIT_PATH_TOOLS = new Set(["git_diff", "git_blame", "git_show"].map((t) => `mcp__${GIT_SERVER}__${t}`));
+const REPO_DIR = "repo/";
+
+// docs/plans/review-v3.md WP-V13: the rl-reviewer calls and the files that the finder opened. stream.ts targetOf gives a Read target
+// relative to the run folder with "/", and a git tool target as its path argument relative to ./repo, else its JSON input or "".
+// A git_diff without a path opens no single file, so opened is a lower bound. The verify phase does not count.
+export function runFacts(events: RunEvent[]): { agentCalls: number; opened: string[]; toolsPerCall: number } {
+  const find = events.filter((e) => eventPhase(e) === "find");
+  const calls = find.filter((e) => e.tool === "Agent" && e.agent === REVIEWER);
+  const opened = new Set<string>();
+  for (const e of find) {
+    if (e.status !== "ok") continue;
+    const target = e.target.replace(/^(\.\/)+/, "");
+    if (e.tool === "Read" && target.startsWith(REPO_DIR)) opened.add(target.slice(REPO_DIR.length));
+    else if (GIT_PATH_TOOLS.has(e.tool) && target !== "" && !target.startsWith("{")) opened.add(target);
+  }
+  return {
+    agentCalls: calls.length,
+    opened: [...opened].sort(),
+    toolsPerCall: Math.max(0, ...calls.map((c) => find.filter((e) => e.parent === c.id).length)),
+  };
 }
 
 // volume: the volume of the run summary, as the app reads it (stats.ts).
@@ -551,6 +585,7 @@ async function runCase(
             reason: x.reason,
           })),
           questions: d.items.filter((i) => i.kind === "question").length,
+          ...runFacts(d.events),
           ...(rr && { resolves }),
         },
         head,

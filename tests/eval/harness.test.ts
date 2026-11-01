@@ -18,13 +18,15 @@ import {
   SETS,
 } from "../../scripts/eval/cases";
 import { compareText } from "../../scripts/eval/compare";
-import { DEFAULT_MODEL_WARNING, evalProfile, type Options, parseOptions, WARNING } from "../../scripts/eval/run";
+import { DEFAULT_MODEL_WARNING, evalProfile, type Options, parseOptions, runFacts, WARNING } from "../../scripts/eval/run";
 import { type EvalResult, score } from "../../scripts/eval/score";
 import { PROFILES_VERSION } from "../../src/server/config";
 import { profileRevision, SHIPPED_PROFILES, shippedProfileAt } from "../../src/server/review/catalog";
 import { git } from "../../src/server/review/git";
+import { createStreamParser } from "../../src/server/review/stream";
 import { DEFAULT_VERIFIER } from "../../src/shared/dto";
 import { REVIEW_PROMPT_VERSION } from "../../src/shared/review";
+import { CHECK_EVENT, type RunEvent } from "../../src/shared/run-log";
 import { readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 
@@ -120,6 +122,56 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(parseOptions(["--effort", "ultracode"])).toHaveProperty("error");
   });
 
+  test("--reviewer-effort sets only the rl-reviewer effort of the run profile (docs/plans/review-v3.md WP-V13)", () => {
+    expect(parseOptions([])).toMatchObject({ reviewerEffort: null });
+    expect(parseOptions(["--reviewer-effort", "bogus"])).toHaveProperty("error");
+    const p = evalProfile(parseOptions(["--reviewer-effort", "xhigh"]) as Options);
+    if ("error" in p) throw new Error(p.error);
+    expect(p.profile.reviewer).toEqual({ ...(SHIPPED_PROFILES[0]?.reviewer as typeof p.profile.reviewer), effort: "xhigh" });
+    expect(p.profile.effort).toBe(SHIPPED_PROFILES[0]?.effort ?? null);
+  });
+
+  test("runFacts counts rl-reviewer calls and the repository files that the finder opened, never a context file", () => {
+    const cwd = join(TMP, "run");
+    const parser = createStreamParser({ cwd, allowedTools: new Set() });
+    const use = (id: string, name: string, input: Record<string, unknown>) => ({ type: "tool_use", id, name, input });
+    const say = (parent: string | null, ...content: unknown[]) =>
+      parser.line(JSON.stringify({ type: "assistant", parent_tool_use_id: parent, session_id: "s", message: { content } }));
+    const done = (id: string, isError = false) =>
+      parser.line(
+        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "x", is_error: isError }] } }),
+      );
+    const git = (t: string) => `mcp__rl-git__${t}`;
+    say(null, use("m1", "Read", { file_path: join(cwd, "context", "pr.md") }));
+    say(null, use("a1", "Agent", { subagent_type: "rl-reviewer", description: "Part 1" }));
+    say(null, use("a2", "Agent", { subagent_type: "rl-reviewer", description: "Part 2" }));
+    say(
+      "a1",
+      use("r1", "Read", { file_path: join(cwd, "repo", "src", "a.ts") }),
+      use("r2", git("git_diff"), { path: "src/b.ts" }),
+      use("r3", git("git_diff"), { stat_only: true }),
+      use("r4", "Read", { file_path: "./repo/src/c.ts" }),
+      use("r5", "Read", { file_path: join(cwd, "context", "task.md") }),
+    );
+    say(
+      "a2",
+      use("s1", git("git_blame"), { path: "src/d.ts", rev: "HEAD" }),
+      use("s2", git("git_show"), { rev: "HEAD" }),
+      use("s3", git("git_show"), { rev: "abcd", path: "lib/e.ts" }),
+      use("s4", "Read", { file_path: join(cwd, "repo", "src", "f.ts") }),
+    );
+    say(null, use("m2", "Read", { file_path: join(cwd, "repo", "src", "g.ts") }), use("m3", "Agent", { subagent_type: "other" }));
+    for (const id of ["m1", "r1", "r2", "r3", "r4", "r5", "s1", "s2", "s3", "a1", "a2", "m2", "m3"]) done(id);
+    done("s4", true);
+    const events = [...parser.events(), { ...(parser.events()[0] as RunEvent), id: `${CHECK_EVENT}c1`, target: "repo/src/h.ts" }];
+    expect(runFacts(events)).toEqual({
+      agentCalls: 2,
+      opened: ["lib/e.ts", "src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/g.ts"],
+      toolsPerCall: 5,
+    });
+    expect(runFacts([])).toEqual({ agentCalls: 0, opened: [], toolsPerCall: 0 });
+  });
+
   test("--verifier sets the verify mode of the run profile and keeps its verifier model and effort", () => {
     expect(parseOptions([])).toMatchObject({ verifier: null });
     expect(parseOptions(["--verifier", "bad"])).toHaveProperty("error");
@@ -163,6 +215,7 @@ describe("eval harness without --real (AC-M2)", () => {
   test("an invalid --model, --effort, --modules, or --variants exits 2 with the usage text", async () => {
     for (const [flag, value, message] of [
       ["--effort", "huge", "--effort must be one of"],
+      ["--reviewer-effort", "bogus", "--reviewer-effort must be one of"],
       ["--model", "bad name", "--model must be a model alias"],
       ["--variants", "bogus", "--variants must be a comma list of order, rereview-strict, rules2, signal."],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
@@ -348,6 +401,9 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(result.cases.map((x) => [x.id, x.head])).toEqual([[c.id, repo.head]]);
       const [run] = result.runs;
       expect(run).toMatchObject({ case: c.id, repeat: 1, status: "completed", error: null, questions: 0 });
+      expect(run?.agentCalls).toBeNumber();
+      expect(run?.toolsPerCall).toBeNumber();
+      expect(run?.opened).toBeArray();
       // The echo check confirms each candidate.
       expect(run?.items.map((i) => [i.path, i.line, i.anchorState, i.verdict, i.check, i.group])).toEqual(
         findings.map((f) => [f.path, f.line, "exact", "confirmed", "checked", "main"]),

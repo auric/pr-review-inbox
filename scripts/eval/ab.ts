@@ -4,27 +4,34 @@
 // Gate U-V1 in one command (docs/plans/review-v3.md, docs/eval/local.md): build the local set from the data folder of the app, then
 // run the shipped profile (baseline) and the candidate on it, for the review cases and the re-review cases, and print one table each.
 // Usage: bun run eval:ab -- [--repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--db f] [--cache d] [--out d]
-//   [--effort e] [--candidate-effort e] [--user slug] [--results d] [--baseline d] [--runner <command> <args...>]
+//   [--effort e] [--candidate-effort e] [--candidate-reviewer-effort e] [--large] [--user slug] [--results d] [--baseline d]
+//   [--runner <command> <args...>]
 // Without --runner, the runs use the claude CLI on PATH. Exit codes: 0 done, 1 a build error or a failed run, 2 a usage error.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { PROFILES_VERSION } from "../../src/server/config";
-import { type Profile, profileRevision, promptVersion } from "../../src/server/review/catalog";
+import { delegation, type Profile, profileRevision, promptVersion } from "../../src/server/review/catalog";
+import { parseDiff } from "../../src/server/review/diffmap";
+import { git } from "../../src/server/review/git";
+import { diffArgs } from "../../src/server/review/workspace";
 import { EFFORTS, type Variant } from "../../src/shared/dto";
-import { localDir } from "./cases";
+import { bundleRepo, type EvalCase, loadCases, localDir, setDir, setFingerprint } from "./cases";
 import { compareText, readResult, refusal, suiteDelta } from "./compare";
 import { main as buildMain, type Manifest } from "./local";
 import { checkoutState, evalProfile, parseOptions, main as runMain } from "./run";
 import { type EvalResult, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants signal,order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
+export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants signal,order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--large] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
 --baseline: the folder of an earlier eval:ab run. Its review-baseline/ and rereview-baseline/ results replace the baseline runs. A mode without its folder runs the baseline.
 --candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. An empty value adds nothing.
 --effort: the effort of the baseline and candidate runs. Default: the effort of the shipped profile.
 --candidate-effort: the effort of the candidate runs. Default: the effort of the baseline.
+--candidate-reviewer-effort: the rl-reviewer effort of the candidate runs. Default: the rl-reviewer effort of the shipped profile.
+--large: run only the review cases that give the baseline the rl-reviewer agent. The re-review cases do not run.
 --runner runs the given CLI instead of the claude CLI on PATH and must come last.`;
 const DEFAULT_VARIANTS = "signal,order,rules2";
 const DEFAULT_MODULES = "failures";
@@ -40,6 +47,10 @@ export type AbOptions = {
   baseEffort: string | null;
   // null: the candidate runs with the effort of the baseline.
   effort: string | null;
+  // null: the candidate runs with the rl-reviewer effort of the shipped profile.
+  reviewerEffort: string | null;
+  // docs/plans/review-v3.md WP-V13: only the review cases where delegation() of the baseline profile is not null.
+  large: boolean;
   build: string[];
   results: string | null;
   // The folder of an earlier eval:ab run whose baseline results this run reuses.
@@ -53,7 +64,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
   const at = argv.indexOf("--runner");
   const runner = at < 0 ? null : argv.slice(at + 1);
   if (runner?.length === 0) return { error: "--runner needs a command." };
-  let v: Record<string, string | undefined>;
+  let v: Record<string, string | boolean | undefined>;
   try {
     v = parseArgs({
       args: at < 0 ? argv : argv.slice(0, at),
@@ -65,6 +76,8 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
         "candidate-modules": { type: "string", default: DEFAULT_MODULES },
         effort: { type: "string" },
         "candidate-effort": { type: "string" },
+        "candidate-reviewer-effort": { type: "string" },
+        large: { type: "boolean", default: false },
         db: { type: "string" },
         cache: { type: "string" },
         out: { type: "string" },
@@ -76,22 +89,28 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
   } catch (e) {
     return { error: (e as Error).message };
   }
-  const build = (["db", "cache", "out", "user"] as const).flatMap((k) => (v[k] === undefined ? [] : [`--${k}`, v[k] as string]));
+  const str = (k: string) => v[k] as string | undefined;
+  const build = (["db", "cache", "out", "user"] as const).flatMap((k) => (v[k] === undefined ? [] : [`--${k}`, str(k) as string]));
+  const results = str("results");
+  const baseline = str("baseline");
   const o: AbOptions = {
-    repeat: v.repeat ?? "1",
-    variants: list(v["candidate-variants"] ?? DEFAULT_VARIANTS),
-    modules: list(v["candidate-modules"] ?? DEFAULT_MODULES),
-    baseEffort: v.effort ?? null,
-    effort: v["candidate-effort"] ?? null,
+    repeat: str("repeat") ?? "1",
+    variants: list(str("candidate-variants") ?? DEFAULT_VARIANTS),
+    modules: list(str("candidate-modules") ?? DEFAULT_MODULES),
+    baseEffort: str("effort") ?? null,
+    effort: str("candidate-effort") ?? null,
+    reviewerEffort: str("candidate-reviewer-effort") ?? null,
+    large: v.large === true,
     build,
-    results: v.results === undefined ? null : resolve(v.results),
-    baseline: v.baseline === undefined ? null : resolve(v.baseline),
+    results: results === undefined ? null : resolve(results),
+    baseline: baseline === undefined ? null : resolve(baseline),
     runner,
   };
   if (o.baseline !== null && !existsSync(o.baseline)) return { error: `--baseline: no folder ${o.baseline}.` };
   for (const [flag, e] of [
     ["--effort", o.baseEffort],
     ["--candidate-effort", o.effort],
+    ["--candidate-reviewer-effort", o.reviewerEffort],
   ] as const)
     if (e !== null && !(EFFORTS as readonly string[]).includes(e)) return { error: `${flag} must be one of ${EFFORTS.join(", ")}.` };
   // The eval runner checks each name and the repeat count.
@@ -113,9 +132,10 @@ function shipped() {
   return { modules: e.profile.modules, variants: e.profile.variants ?? [] };
 }
 
-// The eval runner arguments of one run. The candidate adds its variants and modules to the shipped profile.
-export function runArgs(mode: Mode, side: "baseline" | "candidate", o: AbOptions, out: string): string[] {
+// The eval runner arguments of one run. The candidate adds its variants and modules to the shipped profile. cases: the --large cases.
+export function runArgs(mode: Mode, side: "baseline" | "candidate", o: AbOptions, out: string, cases: string[] = []): string[] {
   const args = ["--set", "local", "--repeat", o.repeat, ...(mode === "rereview" ? ["--rereview"] : [])];
+  if (cases.length) args.push("--cases", cases.join(","));
   if (side === "candidate") {
     const base = shipped();
     const extra = mode === "rereview" ? [...o.variants, STRICT] : o.variants.filter((x) => x !== STRICT);
@@ -125,6 +145,7 @@ export function runArgs(mode: Mode, side: "baseline" | "candidate", o: AbOptions
   }
   const effort = (side === "candidate" ? o.effort : null) ?? o.baseEffort;
   if (effort !== null) args.push("--effort", effort);
+  if (side === "candidate" && o.reviewerEffort !== null) args.push("--reviewer-effort", o.reviewerEffort);
   args.push("--ordinals");
   if (out) args.push("--out", out);
   args.push(...(o.runner ? ["--runner", ...o.runner] : ["--real"]));
@@ -156,6 +177,32 @@ export function reuseRefusal(mode: Mode, a: EvalResult, o: AbOptions, fingerprin
     return `${it} ran profile revision ${a.profile.revision.slice(0, 8)}, but the shipped profile is now revision ${profileRevision(want).slice(0, 8)}.`;
   if (String(a.repeat) !== o.repeat) return `${it} ran with --repeat ${a.repeat}, but this run asks for --repeat ${o.repeat}.`;
   return null;
+}
+
+// --large: the IDs of the local cases that give the profile the rl-reviewer agent, in case order. jobs.ts gives it only to a review run,
+// by delegation() over parseDiff of the change. tmp: a folder for the bare repositories of the bundles.
+export async function largeCases(cases: Pick<EvalCase, "id" | "local">[], profile: Profile, tmp: string): Promise<string[]> {
+  const bundles = new Map<string, string>();
+  const out: string[] = [];
+  for (const c of cases) {
+    if (!c.local) continue;
+    const repo = await bundleRepo(c.local, tmp, bundles);
+    const files = parseDiff(await git(["--git-dir", repo.url, "diff", ...diffArgs, repo.base, repo.head], { env: repo.env }));
+    if (delegation(profile, files) !== null) out.push(c.id);
+  }
+  return out;
+}
+
+// --large with --baseline: a full-set baseline passes reuseRefusal against the full fingerprint, then keeps only the large cases and
+// gets the subset fingerprint. A baseline that ran the subset already passes against the subset fingerprint. Else the refusal text.
+export function largeBaseline(a: EvalResult, o: AbOptions, full: string, subset: string, ids: string[]): EvalResult | string {
+  if (a.fingerprint === subset) return reuseRefusal("review", a, o, subset) ?? a;
+  const refused = reuseRefusal("review", a, o, full);
+  if (refused) return refused;
+  const missing = ids.filter((id) => !a.cases.some((c) => c.id === id) || !a.runs.some((r) => r.case === id)).length;
+  if (missing) return `Refused: the stored review baseline has no run of ${missing} large case${missing === 1 ? "" : "s"}.`;
+  const keep = new Set(ids);
+  return { ...a, fingerprint: subset, cases: a.cases.filter((c) => keep.has(c.id)), runs: a.runs.filter((r) => keep.has(r.case)) };
 }
 
 type Stored = EvalResult["profile"] & Profile;
@@ -207,7 +254,34 @@ export async function main(argv: string[]): Promise<number> {
   const manifest = JSON.parse(readFileSync(join(set, "MANIFEST.json"), "utf8")) as Manifest;
   const { commit } = await checkoutState();
   const results = o.results ?? join(REPO, "eval-results", `ab-${new Date().toISOString().replace(/[:.]/g, "-")}-${commit}`);
-  const count = (mode: Mode) => (mode === "review" ? manifest.counts.cases : manifest.rereview.counts.cases);
+  // --large: jobs.ts gives no re-review run the rl-reviewer agent, so only review cases qualify.
+  let large: { ids: string[]; fingerprint: string } | null = null;
+  if (o.large) {
+    const tmp = mkdtempSync(join(tmpdir(), "rl-eval-large-"));
+    try {
+      const p = parseOptions(runArgs("review", "baseline", o, ""));
+      const e = "error" in p ? p : evalProfile(p);
+      if ("error" in e) throw new Error(e.error);
+      const all = loadCases("all", setDir("local"));
+      const ids = await largeCases(all, e.profile, tmp);
+      const fingerprint = setFingerprint(all.flatMap((c) => (c.local && ids.includes(c.id) ? [{ id: c.id, hash: c.local.hash }] : [])));
+      large = { ids, fingerprint };
+    } catch (e) {
+      console.error(`--large: ${(e as Error).message}`);
+      return 1;
+    } finally {
+      rmSync(tmp, { recursive: true, force: true, maxRetries: 3 });
+    }
+    if (!large.ids.length) {
+      console.error("--large: no review case of the set gives the baseline the rl-reviewer agent.");
+      return 2;
+    }
+    console.log(`--large: ${large.ids.length} of ${manifest.counts.cases} review cases give the baseline the rl-reviewer agent.`);
+  }
+  const subset = large;
+  const cases = (mode: Mode) => (mode === "review" && subset ? subset.ids : []);
+  const count = (mode: Mode) =>
+    subset ? (mode === "review" ? subset.ids.length : 0) : mode === "review" ? manifest.counts.cases : manifest.rereview.counts.cases;
   // --baseline: check each stored baseline before any run, so a refusal costs no run.
   const stored = new Map<Mode, string>();
   const from = o.baseline;
@@ -219,13 +293,20 @@ export async function main(argv: string[]): Promise<number> {
       continue;
     }
     let refused: string | null;
+    let path = join(dir, file);
     try {
-      refused = reuseRefusal(
-        mode,
-        readResult(join(dir, file)),
-        o,
-        mode === "review" ? manifest.fingerprint : manifest.rereview.fingerprint,
-      );
+      const a = readResult(path);
+      if (subset) {
+        const cut = largeBaseline(a, o, manifest.fingerprint, subset.fingerprint, subset.ids);
+        refused = typeof cut === "string" ? cut : null;
+        if (typeof cut !== "string" && cut !== a) {
+          // The cut copy goes to the new result folder, so a later --large --baseline can reuse that folder as it is.
+          const to = join(results, `${mode}-baseline`);
+          mkdirSync(to, { recursive: true });
+          path = join(to, basename(file));
+          writeFileSync(path, `${JSON.stringify(cut, null, 2)}\n`);
+        }
+      } else refused = reuseRefusal(mode, a, o, mode === "review" ? manifest.fingerprint : manifest.rereview.fingerprint);
     } catch (e) {
       refused = (e as Error).message;
     }
@@ -233,14 +314,15 @@ export async function main(argv: string[]): Promise<number> {
       console.error(refused);
       return 2;
     }
-    stored.set(mode, join(dir, file));
+    stored.set(mode, path);
   }
   const texts: string[] = [];
   let failed = false;
   for (const mode of ["review", "rereview"] as const) {
     const n = count(mode);
     if (n === 0) {
-      texts.push(`== ${mode === "review" ? "Review" : "Re-review"} cases: skipped, the set has none ==`);
+      const why = subset ? "--large runs only review cases" : "the set has none";
+      texts.push(`== ${mode === "review" ? "Review" : "Re-review"} cases: skipped, ${why} ==`);
       continue;
     }
     const files: string[] = [];
@@ -253,7 +335,7 @@ export async function main(argv: string[]): Promise<number> {
       }
       const out = join(results, `${mode}-${side}`);
       console.log(`\n--- ${mode} ${side} ---`);
-      const code = await runMain(runArgs(mode, side, o, out));
+      const code = await runMain(runArgs(mode, side, o, out, cases(mode)));
       const file = existsSync(out) ? readdirSync(out).find((f) => f.endsWith(".json")) : undefined;
       if (code !== 0 || !file) {
         failed = true;

@@ -16,13 +16,15 @@ const LABEL: Record<Metric, string> = {
   extras: "extras matched: shown findings on a known real issue that is no seeded bug, per case",
   severityOk: "severity ok: found bugs at or above their minimum severity",
   candidateRecall: "candidate recall: bugs that any finding matched, hidden ones included",
+  bugOpened: "bug opened: seeded bugs whose file the finder read or diffed by path",
+  agentCalls: "rl-reviewer calls per case",
   reRaises: "re-raises: shown new findings on an earlier finding that you posted or discarded, per case (--rereview)",
   verdictOk: "verdict ok: posted earlier findings whose fixed verdict matches your later resolve (--rereview)",
   minutes: "minutes per case",
   costUsd: "cost per case in USD, as the CLI reports it",
   notCompleted: "runs that did not complete, per repeat",
 };
-const RATE = new Set<Metric>(["recall", "humanRecall", "precision", "trapRate", "severityOk", "candidateRecall", "verdictOk"]);
+const RATE = new Set<Metric>(["recall", "humanRecall", "precision", "trapRate", "severityOk", "candidateRecall", "bugOpened", "verdictOk"]);
 const DIGITS: Record<Metric, number> = {
   reRaises: 2,
   verdictOk: 1,
@@ -35,6 +37,8 @@ const DIGITS: Record<Metric, number> = {
   extras: 2,
   severityOk: 1,
   candidateRecall: 1,
+  bugOpened: 1,
+  agentCalls: 1,
   minutes: 1,
   costUsd: 3,
   notCompleted: 1,
@@ -69,6 +73,12 @@ const initModels = (r: EvalResult) => new Set(r.runs.flatMap((x) => (x.model ? [
 const usedEfforts = (r: EvalResult) =>
   new Set(r.runs.flatMap((x) => (x.effort === null ? [] : [x.effort === "default" ? (x.effortDefault ?? "default") : x.effort])));
 
+// The rl-reviewer effort of the stored profile. Files made before the reviewer field existed: not recorded.
+const reviewerEffortOf = (r: EvalResult) => {
+  const x = r.profile.reviewer as { effort?: string | null } | undefined;
+  return x === undefined ? "not recorded" : (x.effort ?? "default");
+};
+
 // The verify mode that ran: the recorded flag result, else the mode of the stored profile. Prompt version 1 has no verify phase.
 const verifierOf = (r: EvalResult) =>
   r.requested?.verifier ?? (r.profile.verifier as { mode?: string } | undefined)?.mode ?? "not recorded";
@@ -79,7 +89,7 @@ const header = (r: EvalResult) => {
   const runs = `${r.cases.length} case${r.cases.length === 1 ? "" : "s"} x ${r.repeat}`;
   const rescored = r.rescoredAt ? `, re-scored ${r.rescoredAt}` : "";
   const set = `set ${r.set ?? "v1"}${r.fingerprint ? ` (fingerprint ${r.fingerprint.slice(0, 12)})` : ""}, tolerance ${r.tolerance ?? 0} lines`;
-  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), verifier ${verifierOf(r)}, ${r.runner} CLI, ${runs}`;
+  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, verifier ${verifierOf(r)}, ${r.runner} CLI, ${runs}`;
 };
 
 // name: the label of a case in the rows. eval:ab passes ordinals, so its output holds no case ID.
@@ -87,7 +97,7 @@ export function summaryText(r: EvalResult, s: Score = score(r), name = (id: stri
   const rows = [["metric", "all cases"], ...METRICS.map((m) => [LABEL[m], cell(m, s.suite[m])])];
   const ids = Object.keys(s.cases);
   const perCase = [
-    ["case", "recall", "precision", "false positives", "noise", "minutes"],
+    ["case", "recall", "precision", "false positives", "noise", "bug opened", "rl-reviewer calls", "minutes"],
     ...ids.map((id) => {
       const c = s.cases[id] as Score["cases"][string];
       return [
@@ -96,6 +106,8 @@ export function summaryText(r: EvalResult, s: Score = score(r), name = (id: stri
         cell("precision", c.precision),
         cell("falsePositives", c.falsePositives),
         cell("noise", c.noise),
+        cell("bugOpened", c.bugOpened),
+        cell("agentCalls", c.agentCalls),
         cell("minutes", c.minutes),
       ];
     }),

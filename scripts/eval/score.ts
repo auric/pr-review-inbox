@@ -87,6 +87,11 @@ export type CaseRun = {
   questions: number;
   // A re-review only: the IDs of the posted earlier findings whose thread got a resolve proposal (a fixed verdict).
   resolves?: string[];
+  // docs/plans/review-v3.md WP-V13 (run.ts runFacts): the rl-reviewer calls of the find phase, the repository paths that it opened, and
+  // the most tool calls under one rl-reviewer call. Absent in files made before these fields existed.
+  agentCalls?: number;
+  opened?: string[];
+  toolsPerCall?: number;
 };
 
 // An earlier finding of a re-review case (cases.ts evalEarlier). lines: its range at the head of the case, or null when the change from
@@ -169,6 +174,8 @@ export const METRICS = [
   "extras",
   "severityOk",
   "candidateRecall",
+  "bugOpened",
+  "agentCalls",
   "reRaises",
   "verdictOk",
   "minutes",
@@ -199,6 +206,10 @@ type Tally = {
   extraHits: number;
   severityOk: number;
   candidates: number;
+  // The counted bugs of a run that records opened, and those whose file it opened. 0 and 0 for a run without opened.
+  openedOf: number;
+  bugOpened: number;
+  agentCalls: number | null;
   rereview: boolean;
   reRaises: number;
   verdicts: number;
@@ -247,6 +258,10 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): T
     extraHits,
     severityOk,
     candidates: c.bugs.filter((b) => r.items.some((i) => matches(i, b, t))).length,
+    openedOf: r.opened ? bugs.length : 0,
+    // Any place of the bug counts: its main place or an alt place.
+    bugOpened: r.opened ? bugs.filter((b) => [b, ...(b.alt ?? [])].some((p) => r.opened?.includes(p.path))).length : 0,
+    agentCalls: r.agentCalls ?? null,
     rereview: c.earlier !== undefined,
     reRaises: shown.filter(reRaise).length,
     // A fixed verdict on a posted finding is right when you resolved its thread later. open and outdated give no proposal.
@@ -278,6 +293,8 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     extras: ratio(sum(ts, "extraHits"), ts.length),
     severityOk: ratio(sum(ts, "severityOk"), sum(ts, "found")),
     candidateRecall: ratio(sum(ts, "candidates"), sum(ts, "allBugs")),
+    bugOpened: ratio(sum(ts, "bugOpened"), sum(ts, "openedOf")),
+    agentCalls: meanOf(ts.map((t) => t.agentCalls)),
     // null outside a re-review, so plain results show no value.
     reRaises: ts.some((x) => x.rereview) ? ratio(sum(ts, "reRaises"), ts.length) : null,
     verdictOk: ratio(sum(ts, "verdictOk"), sum(ts, "verdicts")),
