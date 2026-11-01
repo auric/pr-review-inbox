@@ -1,6 +1,6 @@
 # Review v3 plan
 
-Status: planned, 2026-10-28. WP-V1, WP-V2, and WP-V3 are code complete. Gate U-V1 is next. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
+Status: planned, 2026-10-28. WP-V1, WP-V2, and WP-V3 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md): the default prompts stay at 2.3. Wave 5 (section 10, recall on large PRs) is next. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
 
 Sources: a comparison of our review pipeline with a similar app (2026-10-28, not in the repository), BRIEF.md sections 3.5 and 3.6, docs/plans/review-v2/design.md (R1 to R17, M1 to M4), docs/plans/review-v2/tasks.md (package format), scripts/eval/, and src/server/review/{catalog.ts, prompt.ts, validate.ts, codegraph.ts, jobs.ts}. Never name the other app, its author, or any company, host, or project in this repository.
 
@@ -322,3 +322,121 @@ The user decided on 2026-10-28: the user's own inline comments count as must-fin
 | Q11 | CI auth: token type, scope, and store name? | Decided 2026-10-28: a read-only token in the OS store under its own name. |
 | Q12 | Which builds: the build status of the PR head, matched by commit? | Decided 2026-10-28: yes. The CI origin comes from Settings, never from the build status URL. |
 | Q13 | Log size cap and retention? | Decided 2026-10-28: 2 MB tail per failed stage, kept only in the run folder. |
+
+## 10. Wave 5: recall on large PRs (planned 2026-11-01)
+
+Status: planned. U-V1 ended on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removes the variant code. WP-V4 must not change PROFILES_VERSION or REVIEW_PROMPT_VERSION, so eval:ab can reuse the 2026-10-31 baseline (ab.ts reuseRefusal). W5 runs before W3.
+
+### 10.1 Decision summary
+
+- The weak spot is coverage, not reasoning. On large PRs, rl-reviewer never opens many changed files.
+- Chosen: the app splits a delegated change into parts. rl-main makes one rl-reviewer call per part. The app checks that each part got a call (variant "parts", option b1).
+- First: the eval records which files each agent opened, and it can run only the large cases (WP-V13).
+- Not chosen now: more turns, CodeGraph as the fix for this gap, and submodule contents. Section 10.3 gives the reasons.
+- A separate CLI process per part (option b2, WP-V15) comes only if the gate shows that rl-main skips parts.
+
+### 10.2 Facts (local set, 2026-10-31 runs, aggregates only)
+
+- Four cases get rl-reviewer by the R8 rule (catalog.ts delegation()): three heads of one PR (56 to 59 files, about 6,300 changed lines) and one PR (24 files, 1,271 lines).
+- These four cases hold 9 of the 26 counted bugs. The baseline found 2 of 9 there, at 15% precision. The 12 other cases gave 35% recall at 60% precision.
+- The four cases took $20.9 of $29.6 and 46 of 71 minutes of the baseline.
+- The turn cap is not the limit. rl-main used 21 to 26 of 100 turns in the find phase. No run reached max_turns.
+- rl-reviewer already runs at effort high (profile reviewer.effort). `--effort medium` sets only rl-main.
+- On the 56-59-file cases, every finding came from rl-reviewer. For 4 of the 7 counted bugs, the bug file is not in coverage.read.
+- Those bug files rank 10th to 52nd by changed lines. The top 5 files hold 60% of the changed lines. The notChecked lines name whole areas that the run only sampled.
+- On the small cases, the run read the bug file for each counted bug. Their misses are reasoning misses.
+- All 7 counted bugs of the 56-59-file cases are in changed files. None needs a caller outside the diff.
+- No large case changes a submodule pointer (0 gitlink entries in the four diffs).
+- All three large runs list an external package outside the repository as unavailable. No option here can supply it.
+- rl-main chooses the split today. The auto lines (catalog.ts DELEGATE) ask for disjoint path lists. Nothing checks that each changed file gets a call (design.md W8).
+- The stdin and ./context hold no diff and no file list. The model reads the diff from git_diff in 60 KB pages. BRIEF.md section 7 "Review runner" still says that the app writes both files.
+- CodeGraph reaches a review run only as an MCP server that the user picks (jobs.ts profileServers). The shipped profile picks none, so the eval runs had none.
+- Unverified: coverage.read is a self-report of rl-main. The eval result does not record the rl-reviewer calls or the files that each agent opened.
+
+### 10.3 Options
+
+| Option | Effect on the large-case misses | Cost and time | Risk | Code | Hard rules |
+|---|---|---|---|---|---|
+| a. CodeGraph on the snapshot by default (WP-V5) | Low. The bugs are in changed files, and an index does not make the agent open them. | Index up to 120 s per run, cached per repository | Index time-out on a big repository (gap line) | WP-V5 as planned | BRIEF 3.5 bullet needs approval (section 6) |
+| b1. App-side parts, one rl-reviewer call per part (chosen) | High. It targets the measured gap: changed files that no agent opened. | The find phase grows with the number of parts: 6 or more on the 56-59-file cases. Unverified, because today's call count is not recorded. | rl-main can still skip a part. The app detects it. | About 250 lines | None |
+| b2. One CLI process per part, then merge and dedupe | High, and enforced | Time multiplies by the number of parts when they run in sequence. Each process reads the context again. | Merge, cancel, and salvage per process | About 400 lines or more | None (same snapshot, same run slot) |
+| c. More effort or turns above a size threshold | Low. No run reached the turn cap. rl-reviewer is already at high. | xhigh adds tokens | Low | Eval flag only; the profile field exists | None |
+| d. Submodule contents when the pointer changes | None on these cases (0 pointer changes) | One more fetch per submodule | A new remote and its credentials | Medium | Changes BRIEF.md section 7 "No submodules" |
+| e. Opened-file facts in the eval (chosen, WP-V13) | Separates coverage misses from reasoning misses | None | None | About 180 lines | None |
+
+### 10.4 Waves, work packages, and file ownership
+
+| Wave | Packages | Needs |
+|---|---|---|
+| W5 | WP-V13, then WP-V14 | WP-V4 merged (shared eval and catalog files) |
+| U-V4 | User gate (10.5) | WP-V14 |
+| W5b | WP-V15 (conditional), WP-V16 | U-V4 |
+
+Shared files: scripts/eval/* WP-V4 → WP-V13 → WP-V14 → WP-V5. catalog.ts, jobs.ts, dto.ts: WP-V4 → WP-V14 → WP-V5. No package of this wave touches e2e files.
+
+#### WP-V13. Opened-file facts and the large-case subset (implementer, W5)
+
+- Files: scripts/eval/run.ts, scripts/eval/score.ts, scripts/eval/compare.ts, scripts/eval/ab.ts, docs/eval/local.md, tests/eval/harness.test.ts, tests/eval/score.test.ts, tests/eval/ab.test.ts.
+- run.ts records three facts per run from d.events: `agentCalls` (rl-reviewer calls), `opened`, and `toolsPerCall` (the highest number of tool calls under one rl-reviewer call).
+- `opened`: the repository paths of Read targets under repo/, plus the path argument of git_diff, git_blame, and git_show. A full git_diff call without a path adds no file, so `opened` is a lower bound.
+- score.ts adds `bugOpened`: counted bugs whose file is in `opened`, per case run and pooled. compare.ts shows it and `agentCalls`. Old result files show "-".
+- ab.ts `--large`: run only the cases where delegation() of the baseline profile is not null. The diff comes from `git diff -M -U3 base head` on the case bundle, read with parseDiff. ab.ts passes the cases with `--cases`.
+- `--large` with `--baseline <full-set folder>`: the stored result must first pass reuseRefusal against the full MANIFEST fingerprint. Then ab.ts cuts it to the large cases and gives it the subset fingerprint (setFingerprint over those case files).
+- run.ts `--reviewer-effort` and ab.ts `--candidate-reviewer-effort` set profile.reviewer.effort. Option c then needs no product code.
+- Tests: a fake stream with two rl-reviewer calls (`opened` holds the repo paths and no context path). `--large` picks a case at 1,200 lines and a case at 30 files, and skips a smaller one. The baseline cut keeps only those runs. A stored baseline with another full fingerprint is refused. `--reviewer-effort bogus` exits 2.
+- Control mutation: count context/ reads in `opened`. The opened test must fail.
+
+#### WP-V14. Variant "parts": app-side split of a delegated review (implementer-xhigh, W5)
+
+- Files: src/server/review/parts.ts (new: splitParts), src/server/review/catalog.ts (auto lines and the rl-reviewer line for parts), src/server/review/jobs.ts (steps(): write the part files; check them after the finder), src/shared/dto.ts (VARIANTS adds "parts"), scripts/eval/run.ts (`parts` and `partsRead` per run), tests/review/delegate.test.ts, tests/review/prompt.test.ts, tests/review/jobs.test.ts, tests/eval/harness.test.ts.
+- Scope: only the variant "parts" with delegation "auto". Mode always, mode off, and runs without delegation do not change.
+- Split size: each file counts its changed rows, the same count as delegation(). A part has fewer than REVIEWER_MIN_LINES lines and fewer than REVIEWER_MIN_FILES files. So each part is a change that R8 gives to one agent alone. A file at or above the line limit is a part alone.
+- Grouping on the path tree, from the top: a folder whose files fit the limits is one part. A larger folder splits into its children in path order. Adjacent children that fit together share a part. A deleted file uses its old path. The same input always gives the same parts.
+- The app writes ./context/parts/part-N.md: "Part N of M", then one line per file with its path, the old path of a rename, the added and removed lines, and a binary mark. Each file starts with the UNTRUSTED banner, because paths are PR data.
+- rl-main lines, in place of the auto lines: "The app split the change into M parts in ./context/parts/. Make one rl-reviewer call per part. Name the part file and the git_diff range in each call. Do not review the files yourself. Copy the findings of each call into findings, and set agent to "rl-reviewer" on each." M is a number. The stdin and the agent text name no path.
+- rl-reviewer line: "Your request names a part file. Read it first, and review each file in it. Read other files only to check callers and callees."
+- After the finder, the app checks the parts. A part counts as reviewed when the run events hold a Read of its file whose parent is an rl-reviewer call (the same target logic as judge.ts unreadAlways).
+- Each part without such a Read gives one notChecked line through noted(): "Part N of M (k files) got no rl-reviewer call."
+- prompt_version gets "+parts". The default prompt bytes do not change, so REVIEW_PROMPT_VERSION stays the same. The task review (taskReviewSteps) keeps today's delegation until WP-V16.
+- Tests for splitParts: a folder under the limits gives 1 part. A 6,000-line tree gives parts under both limits, with each file once, in path order. A 2,000-line file is a part alone. Renames and deletes. The same input gives the same parts.
+- Tests for prompts and runs: the default prompt snapshot does not change. The parts lines show only with the variant and delegation auto. With the fake CLI, the part files have the banner. A part with no rl-reviewer Read gives one notChecked line. A Read by rl-main does not count. Without the variant, the app writes no part file.
+- Control mutations: count a Read by rl-main as reviewed (the parent test fails). Drop the last file of the split (the each-file-once test fails).
+- Hard rules do not change: one CLI process, the sanitized snapshot, read-only tools, Agent(rl-reviewer) only, no --bare, no PR text in stdin.
+
+#### WP-V15. One CLI process per part (implementer-xhigh, W5b, conditional)
+
+- Runs only when U-V4 shows `partsRead` below `parts`. Each part gets one finder process in the run slot, with the same ./context files. Then the app merges, validates, and dedupes the findings (overlapGroups) before the verify phase. The detailed plan comes when the gate triggers it.
+
+#### WP-V16. Ship parts (implementer, W5b, after U-V4 passes)
+
+- The parts lines become the auto delegation text. REVIEW_PROMPT_VERSION goes up. The task review gets the same split.
+- Update the BRIEF.md section 7 bullets: Delegation, and the context-files bullet that names files the app does not write. Update CHANGELOG.md and docs/eval/results.md.
+
+### 10.5 Gate U-V4 (user)
+
+1. Mechanism check (candidate only, about $30 and 50 min): `bun run eval:ab -- --large --baseline eval-results/ab-2026-10-31T09-14-49-235Z-b24ec605c10c --effort medium --candidate-variants parts --candidate-modules ""`. It passes when no run fails and `partsRead` equals `parts` in each run. If the set fingerprint changed, leave out `--baseline`.
+2. Decision (both sides, repeat 2, about $95 and 3.5 h): `bun run eval:ab -- --large --repeat 2 --effort medium --candidate-variants parts --candidate-modules ""`. Keep its folder. It is the large baseline for the later candidates.
+3. Rule: parts becomes the default (WP-V16) only when two conditions hold. Mean large recall of B minus A is more than the spread of A's two repeats. Mean large precision of B is at least the mean of A minus its spread. The user decides on cost and minutes (Q9).
+4. The small cases need no run. The variant does not act without delegation, and the snapshot test proves the bytes are equal.
+5. Next, on the step 2 baseline, test one change at a time: `--candidate-reviewer-effort xhigh` (option c), with and without parts. Then CodeGraph on, after WP-V5 (option a).
+6. If `partsRead` is below `parts`, plan WP-V15.
+7. If `partsRead` equals `parts` and `bugOpened` rises but recall does not, the misses are reasoning misses. Then try option c, then WP-V5.
+
+### 10.6 Variance and must-not-raise
+
+- `--large` spends the eval only on the cases under test. Use `--repeat 2` only there.
+- The large subset is mostly one PR at three heads, so its results go together. The builder adds each new large PR that you review and post on. More large PRs lower the spread more than more repeats do.
+- Existing data cannot give must-not-raise items. MANIFEST.json counts traps 0, extras 0, undecided 0, and notYours 0.
+- The 3 findings that the verify phase refuted stay out, by WP-V1 design. Precision is therefore a lower bound: an unmatched finding counts as noise, also when it is a real bug.
+- New must-not-raise items come only from your discards with the reason "Not a bug" or "Intended" (TRAP_CODES in local.ts). The next build picks them up.
+
+### 10.7 Questions (recommended defaults)
+
+| ID | Question | Recommended default |
+|---|---|---|
+| Q-L1 | Does "WP-V4 to V6 closed" also close WP-V5 (CodeGraph) and WP-V6 (pre-existing)? | No. WP-V4 only removes the variant code, with no version bump. WP-V5 and WP-V6 stay planned, and they get measured with `--large`. |
+| Q-L2 | The size limit of a part? | The R8 limits (1,200 lines, 30 files). No second limit until U-V4 shows a gain. |
+| Q-L3 | Accept a higher cost on large PRs? | You decide after step 2 (Q9). The table shows the cost and minutes of each side. |
+| Q-L4 | Run step 2 when step 1 fails the mechanism check? | No. Fix WP-V14 or plan WP-V15 first. |
+| Q-L5 | A tool to label the eval findings that match no bug? | No. Use the reason codes in the app. |
+| Q-L6 | Should the task review get parts before WP-V16? | No. |
