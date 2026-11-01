@@ -23,7 +23,9 @@ import {
   NO_CONTEXT,
   NOTES_RULES,
   ORDER_RULES,
+  PART_REVIEWER,
   PR_CONTEXT_RULES,
+  partLines,
   profileRevision,
   promptVersion,
   RETIRED_PROFILES,
@@ -741,6 +743,28 @@ describe("review v3 prompt switches", () => {
     }
   });
 
+  test("parts (WP-V14): part files replace the auto lines and add one rl-reviewer line; the variant alone changes no prompt", () => {
+    const main = mainAgent(general, FULL);
+    const parted = withDelegation(main, "auto", 6).prompt;
+    expect(parted).toBe([main.prompt, ...partLines(6)].join("\n"));
+    expect(parted).toContain("\nThe app split the change into 6 parts in ./context/parts/. Make one rl-reviewer call per part.\n");
+    expect(parted).not.toContain("The change is large.");
+    expect(parted.endsWith('set agent to "rl-reviewer" on each.')).toBe(true);
+    expect(withDelegation(main, "auto", 1).prompt).toContain("into 1 part in ./context/parts/.");
+    // Mode always, no delegation, and no part files keep their lines.
+    expect(withDelegation(main, "always", 6)).toEqual(withDelegation(main, "always"));
+    expect(withDelegation(main, null, 6)).toEqual(main);
+    expect(withDelegation(main, "auto", 0).prompt).toContain("\nThe change is large. Give parts of it to the rl-reviewer agent.");
+    expect(reviewerAgent(general, FULL, true).prompt).toBe(`${reviewerAgent(general, FULL).prompt}\n${PART_REVIEWER}`);
+    // jobs.ts passes the part count only for the variant with delegation auto (parts.ts partsOf).
+    const p = withVariants("parts");
+    expect(mainAgent(p, FULL)).toEqual(main);
+    expect(reviewerAgent(p, FULL)).toEqual(reviewerAgent(general, FULL));
+    expect(buildPrompt({ ...full, profile: p })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: p })).toBe(buildRereviewPrompt(rereviewInput));
+    expect(promptVersion(p)).toBe(`${REVIEW_PROMPT_VERSION}+parts`);
+  });
+
   test("order adds its lines to rl-main only, after the check sections", () => {
     const order = withVariants("order");
     const sections = moduleSections(general, FULL).join("\n");
@@ -810,6 +834,8 @@ describe("review v3 prompt switches", () => {
         ...RULES2_RULES,
         RULES2_DO_NOT_FLAG,
         ...RULES2_REFUTE,
+        ...partLines(6),
+        PART_REVIEWER,
       ]),
     ).toEqual([]);
   });
@@ -817,7 +843,7 @@ describe("review v3 prompt switches", () => {
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
     expect(promptVersion(withVariants("signal", "order"))).toBe("2.3+order+signal");
-    expect(VARIANTS).toEqual(["order", "rereview-strict", "rules2", "signal"]);
+    expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2", "signal"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
     expect(parsed.variants).toEqual([]);

@@ -18,7 +18,7 @@ import {
   SETS,
 } from "../../scripts/eval/cases";
 import { compareText } from "../../scripts/eval/compare";
-import { DEFAULT_MODEL_WARNING, evalProfile, type Options, parseOptions, runFacts, WARNING } from "../../scripts/eval/run";
+import { DEFAULT_MODEL_WARNING, evalProfile, type Options, parseOptions, partFacts, runFacts, WARNING } from "../../scripts/eval/run";
 import { type EvalResult, score } from "../../scripts/eval/score";
 import { PROFILES_VERSION } from "../../src/server/config";
 import { profileRevision, SHIPPED_PROFILES, shippedProfileAt } from "../../src/server/review/catalog";
@@ -172,6 +172,32 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(runFacts([])).toEqual({ agentCalls: 0, opened: [], toolsPerCall: 0 });
   });
 
+  test("partFacts counts the part files that an rl-reviewer call of the find phase read (docs/plans/review-v3.md WP-V14)", () => {
+    const cwd = join(TMP, "run");
+    const parser = createStreamParser({ cwd, allowedTools: new Set() });
+    const use = (id: string, name: string, input: Record<string, unknown>) => ({ type: "tool_use", id, name, input });
+    const say = (parent: string | null, ...content: unknown[]) =>
+      parser.line(JSON.stringify({ type: "assistant", parent_tool_use_id: parent, session_id: "s", message: { content } }));
+    const done = (id: string, isError = false) =>
+      parser.line(
+        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "x", is_error: isError }] } }),
+      );
+    const part = (n: number) => join(cwd, "context", "parts", `part-${n}.md`);
+    say(null, use("a1", "Agent", { subagent_type: "rl-reviewer", description: "Part 1" }));
+    say("a1", use("r1", "Read", { file_path: part(1) }), use("r2", "Read", { file_path: part(3) }));
+    say(null, use("m1", "Read", { file_path: part(2) }));
+    for (const id of ["r1", "a1", "m1"]) done(id);
+    done("r2", true);
+    const [call, read] = parser.events();
+    // A verify-phase event does not count.
+    const check = [
+      { ...(call as RunEvent), id: `${CHECK_EVENT}a9` },
+      { ...(read as RunEvent), id: `${CHECK_EVENT}r9`, parent: `${CHECK_EVENT}a9`, target: "context/parts/part-4.md" },
+    ];
+    expect(partFacts([...parser.events(), ...check], 4)).toEqual({ parts: 4, partsRead: 1 });
+    expect(partFacts([], 0)).toEqual({ parts: 0, partsRead: 0 });
+  });
+
   test("--verifier sets the verify mode of the run profile and keeps its verifier model and effort", () => {
     expect(parseOptions([])).toMatchObject({ verifier: null });
     expect(parseOptions(["--verifier", "bad"])).toHaveProperty("error");
@@ -217,7 +243,7 @@ describe("eval harness without --real (AC-M2)", () => {
       ["--effort", "huge", "--effort must be one of"],
       ["--reviewer-effort", "bogus", "--reviewer-effort must be one of"],
       ["--model", "bad name", "--model must be a model alias"],
-      ["--variants", "bogus", "--variants must be a comma list of order, rereview-strict, rules2, signal."],
+      ["--variants", "bogus", "--variants must be a comma list of order, parts, rereview-strict, rules2, signal."],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
       const r = await bun([RUN, flag, value, "--runner", process.execPath, FAKE, "none.json"]);
@@ -404,6 +430,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(run?.agentCalls).toBeNumber();
       expect(run?.toolsPerCall).toBeNumber();
       expect(run?.opened).toBeArray();
+      expect(run).toMatchObject({ parts: 0, partsRead: 0 });
       // The echo check confirms each candidate.
       expect(run?.items.map((i) => [i.path, i.line, i.anchorState, i.verdict, i.check, i.group])).toEqual(
         findings.map((f) => [f.path, f.line, "exact", "confirmed", "checked", "main"]),
@@ -460,6 +487,27 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const again = JSON.parse(readFileSync(rescored, "utf8")) as EvalResult;
       expect(again.rescoredAt).toBeString();
       expect(score(again)).toEqual(score(result));
+
+      // docs/plans/review-v3.md WP-V14: the variant reads the diff of the run. A change under the R8 limits gets no part file.
+      const partsOut = join(dir, "parts");
+      const parted = await bun([
+        RUN,
+        "--cases",
+        c.id,
+        "--variants",
+        "parts",
+        "--out",
+        partsOut,
+        "--runner",
+        process.execPath,
+        FAKE,
+        scenario,
+      ]);
+      expect(parted.code).toBe(0);
+      const partsFile = readdirSync(partsOut).find((f) => f.endsWith(".json")) as string;
+      const partsResult = JSON.parse(readFileSync(join(partsOut, partsFile), "utf8")) as EvalResult;
+      expect(partsResult.promptVersion).toBe(`${REVIEW_PROMPT_VERSION}+parts`);
+      expect(partsResult.runs[0]).toMatchObject({ status: "completed", parts: 0, partsRead: 0 });
     },
     SLOW,
   );

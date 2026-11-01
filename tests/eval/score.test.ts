@@ -183,13 +183,21 @@ describe("eval score (AC-M1)", () => {
 
 describe("opened-file facts (docs/plans/review-v3.md WP-V13)", () => {
   // Repeat 1 opened a.ts (both bugs of a) but not b.py. Repeat 2 of a opened nothing; repeat 2 of b is an old run with no facts.
+  // WP-V14: repeat 1 has 2 part files, and case b read 1 of them. Repeat 2 of a has none.
   const OPENED: EvalResult = {
     ...RESULT,
     runs: RESULT.runs.map((r) =>
       r.repeat === 1
-        ? { ...r, agentCalls: r.case === "a" ? 3 : 1, opened: r.case === "a" ? ["a.ts", "z.ts"] : ["c.py"], toolsPerCall: 7 }
+        ? {
+            ...r,
+            agentCalls: r.case === "a" ? 3 : 1,
+            opened: r.case === "a" ? ["a.ts", "z.ts"] : ["c.py"],
+            toolsPerCall: 7,
+            parts: 2,
+            partsRead: r.case === "a" ? 2 : 1,
+          }
         : r.case === "a"
-          ? { ...r, agentCalls: 0, opened: [], toolsPerCall: 0 }
+          ? { ...r, agentCalls: 0, opened: [], toolsPerCall: 0, parts: 0, partsRead: 0 }
           : r,
     ),
   };
@@ -202,17 +210,25 @@ describe("opened-file facts (docs/plans/review-v3.md WP-V13)", () => {
     expect(s.cases.b?.bugOpened).toEqual({ mean: 0, min: 0, max: 0 });
     expect(s.suite.agentCalls).toEqual({ mean: 1, min: 0, max: 2 });
     expect(s.cases.a?.agentCalls).toEqual({ mean: 1.5, min: 0, max: 3 });
+    expect(s.suite.parts).toEqual({ mean: 1, min: 0, max: 2 });
+    expect(s.suite.partsRead).toEqual({ mean: 0.75, min: 0, max: 1.5 });
+    expect(s.cases.b?.partsRead).toEqual({ mean: 1, min: 1, max: 1 });
   });
 
-  test("compare shows bugOpened and agentCalls, and an old result file shows -", () => {
+  test("compare shows bugOpened, agentCalls, parts, and partsRead, and an old result file shows -", () => {
     expect(score(RESULT).suite.bugOpened).toBeNull();
     expect(score(RESULT).suite.agentCalls).toBeNull();
+    expect(score(RESULT).suite.parts).toBeNull();
     const text = compareText(RESULT, OPENED);
     expect(text).toMatch(/bug opened: [^\n]+\ncase\s+A\s+B\s+delta\nall cases\s+-\s+33\.3% \(0\.0% to 66\.7%\)\s+-/);
     expect(text).toMatch(/rl-reviewer calls per case\ncase\s+A\s+B\s+delta\nall cases\s+-\s+1\.0 \(0\.0 to 2\.0\)\s+-/);
-    expect(summaryText(RESULT)).toMatch(/bug opened\s+rl-reviewer calls\s+minutes\n/);
-    expect(summaryText(RESULT)).toMatch(/\na\s[^\n]*\s-\s+-\s+6\.0 \(4\.0 to 8\.0\)\n/);
-    expect(summaryText(OPENED)).toMatch(/\na\s[^\n]*\s50\.0% \(0\.0% to 100\.0%\)\s+1\.5 \(0\.0 to 3\.0\)\s+6\.0 \(4\.0 to 8\.0\)\n/);
+    expect(text).toMatch(/part files per case \(variant parts\)\ncase\s+A\s+B\s+delta\nall cases\s+-\s+1\.0 \(0\.0 to 2\.0\)\s+-/);
+    expect(text).toMatch(/parts read: [^\n]+\ncase\s+A\s+B\s+delta\nall cases\s+-\s+0\.8 \(0\.0 to 1\.5\)\s+-/);
+    expect(summaryText(RESULT)).toMatch(/bug opened\s+rl-reviewer calls\s+parts\s+parts read\s+minutes\n/);
+    expect(summaryText(RESULT)).toMatch(/\na\s[^\n]*\s-\s+-\s+-\s+-\s+6\.0 \(4\.0 to 8\.0\)\n/);
+    expect(summaryText(OPENED)).toMatch(
+      /\na\s[^\n]*\s50\.0% \(0\.0% to 100\.0%\)\s+1\.5 \(0\.0 to 3\.0\)\s+1\.0 \(0\.0 to 2\.0\)\s+1\.0 \(0\.0 to 2\.0\)\s+6\.0 \(4\.0 to 8\.0\)\n/,
+    );
     expect(summaryText(RESULT)).toContain("reviewer effort not recorded");
   });
 });

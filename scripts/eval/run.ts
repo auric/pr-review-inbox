@@ -28,6 +28,7 @@ import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
 import { createReviewJobs, type ReviewJobs } from "../../src/server/review/jobs";
+import { partsOf, unreadParts } from "../../src/server/review/parts";
 import { diffArgs, type GitRemote, syncCache } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
@@ -289,6 +290,12 @@ export function runFacts(events: RunEvent[]): { agentCalls: number; opened: stri
     opened: [...opened].sort(),
     toolsPerCall: Math.max(0, ...calls.map((c) => find.filter((e) => e.parent === c.id).length)),
   };
+}
+
+// docs/plans/review-v3.md WP-V14: the part files of the run, and those that an rl-reviewer call of the find phase read.
+export function partFacts(events: RunEvent[], parts: number): { parts: number; partsRead: number } {
+  const find = events.filter((e) => eventPhase(e) === "find");
+  return { parts, partsRead: parts - unreadParts(find, parts).length };
 }
 
 // volume: the volume of the run summary, as the app reads it (stats.ts).
@@ -555,6 +562,12 @@ async function runCase(
         const id = p?.origin === "resolve" ? roots.get(p.thread) : undefined;
         return id === undefined ? [] : [id];
       });
+      // jobs.ts splits the diff of its workspace: the merge base to the head.
+      const profile = profileOf(ctx.profiles, ctx.profile);
+      const changed =
+        profile.variants.includes("parts") && r.mergeBase
+          ? parseDiff(await git(["--git-dir", repo.url, "diff", ...diffArgs, r.mergeBase, head], { env: repo.env }))
+          : [];
       return {
         earlier,
         run: {
@@ -586,6 +599,7 @@ async function runCase(
           })),
           questions: d.items.filter((i) => i.kind === "question").length,
           ...runFacts(d.events),
+          ...partFacts(d.events, partsOf(profile, changed).length),
           ...(rr && { resolves }),
         },
         head,

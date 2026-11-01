@@ -66,6 +66,17 @@ The tables show two of them:
 
 The eval runner takes `--reviewer-effort low|medium|high|xhigh|max` for the same rl-reviewer effort as `--candidate-reviewer-effort`.
 
+## Part files (variant parts)
+
+The variant `parts` is opt-in: `--variants parts`, or `--candidate-variants parts` in eval:ab. It acts only when the review gets rl-reviewer in mode auto. The app then splits the changed files into parts in `./context/parts/`. Each part stays under 1,200 changed lines and 30 files, unless it is one file. rl-main makes one rl-reviewer call per part. A part that no rl-reviewer call read gives a "Part N of M" line in coverage.
+
+Each run records two more facts:
+
+- `parts`: the number of part files. A run without the variant, or without delegation in mode auto, records 0.
+- `partsRead`: the part files that an rl-reviewer call read. A read by rl-main does not count.
+
+The tables show "part files per case" and "parts read" next to "rl-reviewer calls per case". A result file from before these facts shows "-".
+
 ## Bisect when the result is mixed
 
 Run the command again with one change at a time: `--candidate-variants signal --candidate-modules ""`, then `--candidate-variants order --candidate-modules ""`, then `--candidate-variants rules2 --candidate-modules ""`, then `--candidate-variants "" --candidate-modules failures`. Each run builds the same set again, so the tables compare.

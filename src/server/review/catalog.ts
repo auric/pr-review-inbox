@@ -733,9 +733,18 @@ const DELEGATE: Record<"auto" | "always", string[]> = {
   ],
 };
 
-// spec.md section 1.5: the delegation lines come after the language, skill, and MCP lines.
-export const withDelegation = (a: AgentSpec, mode: "auto" | "always" | null): AgentSpec =>
-  mode ? { ...a, prompt: [a.prompt, ...DELEGATE[mode]].join("\n") } : a;
+// docs/plans/review-v3.md WP-V14: the variant "parts" with delegation auto. jobs.ts writes ./context/parts/part-N.md. No line names a path.
+export const partLines = (m: number) => [
+  `The app split the change into ${m} part${m === 1 ? "" : "s"} in ./context/parts/. Make one ${REVIEWER} call per part.`,
+  "Name the part file and the git_diff range in each call. In a re-review, also give the merge base. Do not review the files yourself.",
+  `Copy the findings of each call into findings, and set agent to "${REVIEWER}" on each.`,
+];
+export const PART_REVIEWER =
+  "Your request names a part file. Read it first, and review each file in it. Read other files only to check callers and callees.";
+
+// spec.md section 1.5: the delegation lines come after the language, skill, and MCP lines. parts: the number of part files, 0 for none.
+export const withDelegation = (a: AgentSpec, mode: "auto" | "always" | null, parts = 0): AgentSpec =>
+  mode ? { ...a, prompt: [a.prompt, ...(mode === "auto" && parts > 0 ? partLines(parts) : DELEGATE[mode])].join("\n") } : a;
 
 // docs/plans/review-v2/spec.md section 3.4: the Explain agent lines after the lens. judge.ts judgeExplain checks the links, the risk
 // anchors, and the mermaid fences. Parse checks with mermaid 12.1.0: a quoted participant name keeps its quotes, a semicolon in a
@@ -1128,7 +1137,8 @@ export const withMcp = (a: AgentSpec, used: McpUse[]): AgentSpec =>
 // model and effort are agent definition fields (code.claude.com/docs/en/sub-agents). Gate B13 (2.1.301): the CLI accepts both, and
 // it refuses the whole --agents file for an unknown effort. prepare in claude.ts checks each effort first.
 // spec.md section 1.5: the rl-reviewer prompt. The caller adds languages, skills, MCP tools, and the project instructions.
-export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec {
+// parts: the run has part files (withDelegation).
+export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts = false): AgentSpec {
   return {
     ...(p.reviewer.model !== null && { model: p.reviewer.model }),
     ...(p.reviewer.effort !== null && { effort: p.reviewer.effort }),
@@ -1144,6 +1154,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentS
       ...docsRule(p),
       "Report each finding with its place: path, side, line, lineEnd, anchorText, and cause.",
       "Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.",
+      ...(parts ? [PART_REVIEWER] : []),
     ].join("\n"),
   };
 }

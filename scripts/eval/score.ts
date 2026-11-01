@@ -92,6 +92,10 @@ export type CaseRun = {
   agentCalls?: number;
   opened?: string[];
   toolsPerCall?: number;
+  // docs/plans/review-v3.md WP-V14 (run.ts partFacts): the part files of the run, and those that an rl-reviewer call read. Absent in
+  // files made before these fields existed.
+  parts?: number;
+  partsRead?: number;
 };
 
 // An earlier finding of a re-review case (cases.ts evalEarlier). lines: its range at the head of the case, or null when the change from
@@ -176,6 +180,8 @@ export const METRICS = [
   "candidateRecall",
   "bugOpened",
   "agentCalls",
+  "parts",
+  "partsRead",
   "reRaises",
   "verdictOk",
   "minutes",
@@ -210,6 +216,8 @@ type Tally = {
   openedOf: number;
   bugOpened: number;
   agentCalls: number | null;
+  parts: number | null;
+  partsRead: number | null;
   rereview: boolean;
   reRaises: number;
   verdicts: number;
@@ -262,6 +270,8 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): T
     // Any place of the bug counts: its main place or an alt place.
     bugOpened: r.opened ? bugs.filter((b) => [b, ...(b.alt ?? [])].some((p) => r.opened?.includes(p.path))).length : 0,
     agentCalls: r.agentCalls ?? null,
+    parts: r.parts ?? null,
+    partsRead: r.partsRead ?? null,
     rereview: c.earlier !== undefined,
     reRaises: shown.filter(reRaise).length,
     // A fixed verdict on a posted finding is right when you resolved its thread later. open and outdated give no proposal.
@@ -295,6 +305,8 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     candidateRecall: ratio(sum(ts, "candidates"), sum(ts, "allBugs")),
     bugOpened: ratio(sum(ts, "bugOpened"), sum(ts, "openedOf")),
     agentCalls: meanOf(ts.map((t) => t.agentCalls)),
+    parts: meanOf(ts.map((t) => t.parts)),
+    partsRead: meanOf(ts.map((t) => t.partsRead)),
     // null outside a re-review, so plain results show no value.
     reRaises: ts.some((x) => x.rereview) ? ratio(sum(ts, "reRaises"), ts.length) : null,
     verdictOk: ratio(sum(ts, "verdictOk"), sum(ts, "verdicts")),

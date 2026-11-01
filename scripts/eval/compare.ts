@@ -18,6 +18,8 @@ const LABEL: Record<Metric, string> = {
   candidateRecall: "candidate recall: bugs that any finding matched, hidden ones included",
   bugOpened: "bug opened: seeded bugs whose file the finder read or diffed by path",
   agentCalls: "rl-reviewer calls per case",
+  parts: "part files per case (variant parts)",
+  partsRead: "parts read: part files that an rl-reviewer call read, per case",
   reRaises: "re-raises: shown new findings on an earlier finding that you posted or discarded, per case (--rereview)",
   verdictOk: "verdict ok: posted earlier findings whose fixed verdict matches your later resolve (--rereview)",
   minutes: "minutes per case",
@@ -39,6 +41,8 @@ const DIGITS: Record<Metric, number> = {
   candidateRecall: 1,
   bugOpened: 1,
   agentCalls: 1,
+  parts: 1,
+  partsRead: 1,
   minutes: 1,
   costUsd: 3,
   notCompleted: 1,
@@ -97,7 +101,7 @@ export function summaryText(r: EvalResult, s: Score = score(r), name = (id: stri
   const rows = [["metric", "all cases"], ...METRICS.map((m) => [LABEL[m], cell(m, s.suite[m])])];
   const ids = Object.keys(s.cases);
   const perCase = [
-    ["case", "recall", "precision", "false positives", "noise", "bug opened", "rl-reviewer calls", "minutes"],
+    ["case", "recall", "precision", "false positives", "noise", "bug opened", "rl-reviewer calls", "parts", "parts read", "minutes"],
     ...ids.map((id) => {
       const c = s.cases[id] as Score["cases"][string];
       return [
@@ -108,6 +112,8 @@ export function summaryText(r: EvalResult, s: Score = score(r), name = (id: stri
         cell("noise", c.noise),
         cell("bugOpened", c.bugOpened),
         cell("agentCalls", c.agentCalls),
+        cell("parts", c.parts),
+        cell("partsRead", c.partsRead),
         cell("minutes", c.minutes),
       ];
     }),

@@ -6,7 +6,7 @@
 // from the stored brief to stored drafts, edits, answers, or a walkthrough. One run at a time.
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { consultJsonSchema, type SessionAnswerDto, sessionMaxTurns, sessionTokens } from "../../shared/consult";
 import {
@@ -150,6 +150,7 @@ import {
 } from "./judge";
 import { languagesOf, withLanguages } from "./languages";
 import { liveThreads, proposalContext, proposeNotes, storeProposals, suggestionsByItem } from "./notes";
+import { partFile, partNotes, partsOf, partText } from "./parts";
 import { loadPrContext } from "./pr-context";
 import {
   buildAskPrompt,
@@ -847,8 +848,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (langs.length) log(`Review run ${j.id} language checks: ${langs.join(", ")}.`);
     // docs/plans/review-v2/design.md R8: the app gives the Agent tool by the size of the change, not the model.
     const delegate = j.kind === "review" ? delegation(profile, changed) : null;
+    // docs/plans/review-v3.md WP-V14: paths are PR data, so each part file starts with the UNTRUSTED banner.
+    const parts = delegate ? partsOf(profile, changed) : [];
+    if (parts.length) mkdirSync(join(ws.work, "context", "parts"));
+    for (const [i, p] of parts.entries()) writeFileSync(join(ws.work, partFile(i + 1)), UNTRUSTED + partText(p, i + 1, parts.length));
     if (j.kind === "review" && !profile.explain)
-      log(`Review run ${j.id}: ${changed.length} changed files, rl-reviewer ${delegate ? `on (${delegate})` : "off"}.`);
+      log(
+        `Review run ${j.id}: ${changed.length} changed files, rl-reviewer ${delegate ? `on (${delegate}${parts.length ? `, ${parts.length} parts` : ""})` : "off"}.`,
+      );
     const context: ReviewContext = {
       taskFile: files.length > 0,
       attachments: attachments.length > 0,
@@ -930,7 +937,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cwd: ws.work,
         appDir: ws.app,
         ...spec,
-        main: withDelegation(withMcp(withSkills(withLanguages(spec.main, langs), folders, always), used), delegate),
+        main: withDelegation(withMcp(withSkills(withLanguages(spec.main, langs), folders, always), used), delegate, parts.length),
         maxTurns: d
           ? Math.min(profile.maxTurns, DISCUSS_MAX_TURNS)
           : reply || fix
@@ -942,7 +949,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(withSkills(withLanguages(reviewerAgent(profile, context), langs), folders, always), used),
+                withMcp(withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs), folders, always), used),
                 instructions.text,
               ),
             }
@@ -963,8 +970,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       ? [`${questions.left} threads with your posted questions were left out of ./context/questions.md: it reached its size limit.`]
       : [];
     const modules = j.kind === "review" && !profile.explain ? moduleNotes(profile, context) : [];
+    const unparted = partNotes(o.events, parts);
     const noted = (e: Ending): Ending => {
-      e.result?.summary.coverage.notChecked.push(...unread, ...left, ...modules);
+      e.result?.summary.coverage.notChecked.push(...unread, ...left, ...modules, ...unparted);
       if (!unmarked) return e;
       e.result?.summary.coverage.notChecked.push(unmarked);
       return { ...e, raw: `${unmarked}\n\n${e.raw}` };
