@@ -53,6 +53,8 @@ export type ActionKind =
   | "pointer"
   | "pick-base"
   | "close"
+  // spec.md section 6.7: "Run setup again" on the part that the view shows.
+  | "setup"
   // spec.md section 6.20: the actions of a task with sub-tasks. Each one acts on the focused part.
   | "ask-again"
   | "start-now"
@@ -97,6 +99,17 @@ export const SIZE_LINE: Record<TaskSize, string> = {
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const STOP: Action = { kind: "stop", label: "Stop" };
 const CLOSE: Action = { kind: "close", label: "Close the task" };
+// The part states with a worktree (server tasks.ts HAS_WORKTREE).
+const HAS_WORKTREE = new Set<TaskPartDto["state"]>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
+
+// spec.md section 6.7: "Run setup again" for a part with a worktree while nothing runs. It stands before Stop and Close the task.
+export function withSetup(t: Pick<TaskDto, "canSetup">, part: TaskPartDto | null, v: TaskView): TaskView {
+  if (!t.canSetup || v.running || !part || part.adopted || !HAS_WORKTREE.has(part.state)) return v;
+  const at = v.more.findIndex((a) => a.kind === "stop" || a.kind === "close");
+  const more = [...v.more];
+  more.splice(at < 0 ? more.length : at, 0, { kind: "setup", label: "Run setup again" });
+  return { ...v, more };
+}
 
 // The elapsed time of a step in plain words. The app has no estimate of the time left, so it says the time so far.
 export function elapsed(ms: number): string {

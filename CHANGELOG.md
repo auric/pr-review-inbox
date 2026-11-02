@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Build a Jira task now commits only the files that Claude changed or wrote, and the plan files. New files from your setup or check commands, such as `.venv/` or `build/`, stay out of the commit. The commit row in the Log tab names them.
+- The setup commands of a task now run again when you change them, and after the app removed files from the worktree. "Run setup again" in the More menu of a task runs them at once.
+- When a step needs a command that the app does not run, Claude now asks you and names the setup command that it needs.
 - A Jira task with sub-tasks now builds sub-tasks that do not wait for each other at the same time. "Parts that build at once" on the plan screen sets how many, from 1 to 3. The default is 2, and 1 builds one sub-task after the other. With 2 or more, these builds run beside your reviews, so a review never waits for them. Stop stops every build of the task.
 - When Claude does not say why a sub-task needs no other sub-task, the plan now puts it on top of the sub-task before it in Jira order. A line on the plan screen says so, and you can change the start.
 - Build a Jira task steps now get all your skills and the skills in `.claude/skills` of the repository, read from the base branch. A repository skill wins over your skill with the same name. Each step gets a skills index and opens only the skills that apply. Reviews still get only the skills that you tick.

@@ -17,12 +17,15 @@ import {
   headOf,
   inside,
   linksOn,
+  newFiles,
   openWorktree,
   partDir,
   removeWorktree,
   resetWorktree,
   SPARSE,
   savePatch,
+  setupHash,
+  setupMark,
   slug,
   status,
   tasksRoot,
@@ -89,7 +92,7 @@ describe("task worktree", () => {
       for (const h of ["pre-commit", "commit-msg", "post-commit"])
         writeFileSync(join(s.cache, "hooks", h), `#!/bin/sh\necho ${h} >> "${marker.replaceAll("\\", "/")}"\n`, { mode: 0o755 });
       writeFileSync(join(wt.repo, "src", "app.ts"), "changed\n");
-      const commit = await commitStep(wt, "K-1 T1.1: Change the app\n", WHO);
+      const commit = await commitStep(wt, "K-1 T1.1: Change the app\n", WHO, []);
       expect(commit).toBe(await headOf(wt));
       expect(existsSync(marker)).toBe(false);
       const cfg = async (k: string) => (await wtGit(wt, ["config", "--worktree", "--get", k])).trim();
@@ -105,7 +108,7 @@ describe("task worktree", () => {
       expect(hidden(await tree("HEAD"))).toEqual(hidden(await tree(s.base)));
       expect(hidden(await tree("HEAD")).length).toBe(HIDDEN.length);
       // Nothing to commit gives null.
-      expect(await commitStep(wt, "K-1: nothing", WHO)).toBeNull();
+      expect(await commitStep(wt, "K-1: nothing", WHO, [])).toBeNull();
       expect(await cloneState(s.clone, s.r.env)).toBe(before);
     },
     SLOW,
@@ -117,7 +120,7 @@ describe("task worktree", () => {
       const s = await setup();
       const wt = await s.open();
       writeFileSync(join(wt.repo, "README.md"), "v2\n");
-      const head = await commitStep(wt, "K-1 T1.1: v2", WHO);
+      const head = await commitStep(wt, "K-1 T1.1: v2", WHO, []);
       writeFileSync(join(wt.repo, "notes.txt"), "work in progress\n");
       const again = await s.open();
       expect(again.admin).toBe(wt.admin);
@@ -191,6 +194,63 @@ describe("task worktree", () => {
       expect(existsSync(join(wt.repo, "CLAUDE.md"))).toBe(false);
       expect(readFileSync(join(victim, "keep.txt"), "utf8")).toBe("keep\n");
       expect(lstatSync(victim).isDirectory()).toBe(true);
+    },
+    SLOW,
+  );
+});
+
+describe("commit and setup mark (spec.md section 6.7)", () => {
+  test(
+    "commitStep stages tracked edits, deletes, and only the listed new files; newFiles shows a folder that is new as a whole once",
+    async () => {
+      const s = await setup();
+      const wt = await s.open();
+      const put = (p: string) => {
+        mkdirSync(join(wt.repo, p, ".."), { recursive: true });
+        writeFileSync(join(wt.repo, p), "x\n");
+      };
+      writeFileSync(join(wt.repo, "src", "app.ts"), "changed\n");
+      rmSync(join(wt.repo, "README.md"));
+      for (const p of ["src/new.ts", "gen/a.ts", "gen/b.bin", ".venv/bin/python", ".venv/lib/x.py", "build/out.bin", "notes.txt"]) put(p);
+      const f = await newFiles(wt, ["src/new.ts", "gen/a.ts", "missing.ts"]);
+      expect(f).toEqual({
+        add: ["gen/a.ts", "src/new.ts"],
+        left: [".venv/bin/python", ".venv/lib/x.py", "build/out.bin", "gen/b.bin", "notes.txt"],
+        shown: [".venv/", "build/", "gen/b.bin", "notes.txt"],
+      });
+      // Windows file systems ignore case, so a Write target in another case still names the file.
+      if (process.platform === "win32") expect((await newFiles(wt, ["SRC/NEW.TS"])).add).toEqual(["src/new.ts"]);
+      await commitStep(wt, "K-1 T1.1: Add new", WHO, f.add);
+      expect((await wtGit(wt, ["show", "--name-status", "--format=", "HEAD"])).trim().split("\n")).toEqual([
+        "D\tREADME.md",
+        "A\tgen/a.ts",
+        "M\tsrc/app.ts",
+        "A\tsrc/new.ts",
+      ]);
+      expect((await status(wt)).map((e) => `${e.xy} ${e.path}`)).toEqual(f.left.map((p) => `?? ${p}`));
+    },
+    SLOW,
+  );
+
+  test(
+    "a reset that removes a path deletes the setup mark; a reset that removes nothing keeps it",
+    async () => {
+      const s = await setup();
+      const wt = await s.open();
+      const last = await headOf(wt);
+      writeFileSync(setupMark(wt), setupHash([{ argv: ["python", "-m", "venv", ".venv"], timeoutSec: 600 }]));
+      writeFileSync(join(wt.repo, "README.md"), "changed\n");
+      await resetWorktree(wt, last);
+      expect(existsSync(setupMark(wt))).toBe(true);
+      writeFileSync(join(wt.repo, "new.txt"), "x\n");
+      await resetWorktree(wt, last);
+      expect(existsSync(setupMark(wt))).toBe(false);
+      // The hash covers argv, timeout, and order.
+      const a = { argv: ["a"], timeoutSec: 60 };
+      const b = { argv: ["b"], timeoutSec: 60 };
+      expect(setupHash([a, b])).not.toBe(setupHash([b, a]));
+      expect(setupHash([a])).not.toBe(setupHash([{ ...a, timeoutSec: 61 }]));
+      expect(setupHash([a])).toBe(setupHash([{ ...a }]));
     },
     SLOW,
   );

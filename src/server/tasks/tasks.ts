@@ -1132,6 +1132,9 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     // The routes also clear it while the loop works.
     canInstruct: !("error" in instructTarget(db, t)),
     canUndoUpdate: current !== null && !("error" in undoTarget(db, t, current.id)),
+    // The routes also clear it while the loop works.
+    canSetup:
+      (t.state === "implementing" || t.state === "ready") && repoSettings(db, t.project, t.repo).commands.some((c) => c.kind === "setup"),
     subtasks: t.subtasks === 1 ? subtaskDtos(db, t.id, partRows) : null,
     issueStatus: taskIssue(db, t)?.issue.status ?? null,
   };

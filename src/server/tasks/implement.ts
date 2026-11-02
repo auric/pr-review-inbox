@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import type { RunConflict, RunUsage } from "../../shared/dto";
 import {
   type ImplementResult,
@@ -48,7 +48,9 @@ import {
   type IgnoredSnapshot,
   ignoredChanges,
   ignoredSnapshot,
+  inside,
   linksOn,
+  newFiles,
   noneChanges,
   patchFile,
   type RepoTree,
@@ -73,6 +75,8 @@ const CI_DIRS = [[".github", "workflows"], ["bamboo-specs"], [".circleci"]];
 // The names of the context files: task.md, answers.md, step.md, failure.md, and spec/<plan file>.md.
 const CONTEXT_NAME = /^(?:spec\/)?[a-z0-9-]+\.md$/;
 const CLAUDE_STEPS = ["tests", "implement", "fix", "instruct", "resolve"] as const;
+// The tools of an implement run that write files (claude.ts IMPLEMENT_TOOLS). A commit takes the new files that they name.
+const FILE_TOOLS = new Set(["Write", "Edit"]);
 
 export const sparseHidden = (path: string) => {
   const parts = path.split("/").map(fold);
@@ -119,7 +123,9 @@ export function outsideRepo(wt: Worktree, context: ReadonlyMap<string, string | 
 // allow (the Files of the step's task) lists it. context: the files that the app wrote to context/, by path under context/. Absent:
 // no check outside repo/, as before a commit. ignored: the ignored files before the step. A Claude step may change none of them: the
 // allow-list is empty, because a commit never holds an ignored file. The checks write build outputs between the steps, so the
-// listing comes right before the step. Absent: no check, as before a commit.
+// listing comes right before the step. Absent: no check, as before a commit. add: the new files that a commit takes (commitStep). An
+// untracked path then counts only when add lists it. The commit leaves the other new files on disk, so a denied or hidden one among
+// them still fails: it can hold rules for Claude Code or git for the next step. Absent: every path counts, as after a step.
 export async function pathCheck(
   wt: Worktree,
   o: {
@@ -127,12 +133,19 @@ export async function pathCheck(
     context?: ReadonlyMap<string, string | Uint8Array>;
     ignored?: IgnoredSnapshot;
     skip?: readonly string[];
+    add?: readonly string[];
   },
 ): Promise<PathCheck> {
   const problems = new Map<string, string>();
   if (!gitLinkOk(wt)) problems.set(".git", "The step changed the git link of the worktree.");
   const allow = new Set(o.allow.map((f) => (repoPath(f) ?? f).split("/").map(fold).join("/")));
-  const changed = [...new Set((await status(wt)).map((e) => e.path))];
+  const take = o.add && new Set(o.add);
+  const entries = await status(wt);
+  const changed = [...new Set(entries.filter((e) => !take || e.xy !== "??" || take.has(e.path)).map((e) => e.path))];
+  if (take)
+    for (const e of entries)
+      if (e.xy === "??" && !take.has(e.path) && (deniedPath(e.path) || sparseHidden(e.path)))
+        problems.set(e.path, "A step may not change this path.");
   const links = new Set<string>();
   for (const p of changed) {
     // git enters a link to a folder without a .git entry and lists the files behind it. The link is the problem.
@@ -171,10 +184,16 @@ const under = (prefix: string, p: string) => (prefix ? `${prefix}/${p}` : p);
 
 // spec.md section 6.16.6: the path check in every worktree, deepest first. A change in a repository with access read or none fails.
 // In a parent, the gitlink path of a submodule with access edit is allowed. The other rules of section 6.8 apply in each repository.
-// context and ignored: the main worktree only, as in pathCheck.
+// context and ignored: the main worktree only, as in pathCheck. add: a commit, with the new files that it takes in each worktree, by
+// Worktree.repo.
 export async function treeCheck(
   trees: readonly RepoTree[],
-  o: { allow: readonly string[]; context?: ReadonlyMap<string, string | Uint8Array>; ignored?: IgnoredSnapshot },
+  o: {
+    allow: readonly string[];
+    context?: ReadonlyMap<string, string | Uint8Array>;
+    ignored?: IgnoredSnapshot;
+    add?: ReadonlyMap<string, readonly string[]>;
+  },
 ): Promise<TreeCheck> {
   const parts: TreePart[] = [];
   const problems: PathProblem[] = [];
@@ -200,6 +219,7 @@ export async function treeCheck(
     const check = await pathCheck(t.wt, {
       allow,
       ...(isMain && { context: o.context, ignored: o.ignored, skip: addedFolders(trees) }),
+      ...(o.add && { add: o.add.get(t.wt.repo) ?? [] }),
     });
     if (isMain) main = check;
     parts.push({ tree: t, check, none: [] });
@@ -356,6 +376,7 @@ export function implementPrompt(
     ...modeLines,
     "Change only what the step needs. Do not reformat, rename, or move other code. Follow the style of the code around your change.",
     "When you need a decision from the user, set question and stop.",
+    "When you need a command that the app does not run, set question and name the setup command or allowlist entry you need, with a reason.",
     "Never edit .claude folders, .mcp.json, CLAUDE.md, CLAUDE.local.md, AGENTS.md, .gitmodules, or git hook sources.",
     "Never write secrets, tokens, or passwords into a file.",
     "Set done to true only when the step is complete.",
@@ -496,9 +517,29 @@ export type CommitResult =
   | { status: "empty" }
   | { status: "refused"; problems: PathProblem[] };
 
+// The Claude steps of a part after its last commit row.
+const WRITTEN_SQL = `SELECT detail_json FROM task_step WHERE part = $part AND kind IN (${CLAUDE_STEPS.map((k) => `'${k}'`).join(", ")})
+  AND id > COALESCE((SELECT MAX(id) FROM task_step WHERE part = $part AND kind = 'commit'), 0)`;
+
+// spec.md section 6.7, Commit: the new files of the commit. A new file goes in only when a Claude step of the part wrote it after the
+// last commit (StepDetail written), or when the app wrote it (own, by absolute path). Each path goes to the deepest worktree that
+// holds it, so a write in a submodule goes to the commit of that submodule. The result is keyed by Worktree.repo.
+async function claimedFiles(db: Database, part: number, dir: string, wts: readonly Worktree[], own: readonly string[]) {
+  const written = (db.query(WRITTEN_SQL).all({ part }) as { detail_json: string }[]).flatMap(
+    (r) => stepDetail.parse(JSON.parse(r.detail_json)).written,
+  );
+  const claimed = [...written.map((p) => resolve(dir, p)), ...own];
+  const out = new Map<string, Awaited<ReturnType<typeof newFiles>>>();
+  for (const wt of wts) {
+    const mine = claimed.filter((p) => wts.find((w) => inside(w.repo, p)) === wt).map((p) => relative(wt.repo, p).replaceAll("\\", "/"));
+    out.set(wt.repo, await newFiles(wt, mine));
+  }
+  return out;
+}
+
 // spec.md section 6.7, Commit: the path check first (without the folder outside repo/), because a check command can leave a link or a
-// denied file, and `git add -A` would take it. Then commitStep with the user's name and email. The step row holds the diff stat and
-// the commit, and task_part.head moves to the commit.
+// denied file. It checks the tracked changes and the new files that the commit takes. Then commitStep with the user's name and email.
+// The step row holds the diff stat, the commit, and the new files that stay out. task_part.head moves to the commit.
 export async function commitTask(i: {
   db: Database;
   task: number;
@@ -509,14 +550,38 @@ export async function commitTask(i: {
   message: string;
   who: { name: string; email: string };
   allow: readonly string[];
+  // The files that the app wrote for this commit, such as the plan files, by absolute path.
+  own?: readonly string[];
   // Every repository of the part folder, wt among them (spec.md section 6.16.6). Absent or one: the main worktree only.
   trees?: readonly RepoTree[];
   now?: () => number;
 }): Promise<CommitResult> {
   const now = i.now ?? Date.now;
   const trees = i.trees && i.trees.length > 1 ? i.trees : null;
-  const check = trees ? (await treeCheck(trees, { allow: i.allow })).check : await pathCheck(i.wt, { allow: i.allow });
+  const found = await claimedFiles(
+    i.db,
+    i.part,
+    i.wt.dir,
+    trees ? deepestFirst(trees).flatMap((t) => (t.wt ? [t.wt] : [])) : [i.wt],
+    i.own ?? [],
+  );
+  const add = new Map([...found].map(([repo, f]) => [repo, f.add] as const));
+  const check = trees
+    ? (await treeCheck(trees, { allow: i.allow, add })).check
+    : await pathCheck(i.wt, { allow: i.allow, add: add.get(i.wt.repo) ?? [] });
   if (check.problems.length) return { status: "refused", problems: check.problems };
+  // The new files that stay out of the commits of the main worktree and of each repository with access edit, from the main root.
+  let leftN = 0;
+  const shown: string[] = [];
+  for (const t of trees?.filter((x) => x.row.role === "main" || x.row.access === "edit") ?? [{ full: "", wt: i.wt }]) {
+    const f = t.wt ? found.get(t.wt.repo) : undefined;
+    if (!f) continue;
+    leftN += f.left.length;
+    shown.push(...f.shown.map((p) => (t.full ? `${t.full}/${p}` : p)));
+  }
+  const leftNote = leftN
+    ? `Not committed: ${leftN} new ${leftN === 1 ? "file" : "files"} that Claude did not write (${shown.slice(0, 3).join(", ")}${shown.length > 3 ? ` and ${shown.length - 3} more` : ""}).`
+    : null;
   let files = 0;
   let added = 0;
   let removed = 0;
@@ -531,25 +596,29 @@ export async function commitTask(i: {
       removed += Number(r) || 0;
     }
   };
-  // spec.md section 6.16.6, Commit step: deepest repository first, one message. The parent's `git add -A` then takes the new gitlink. An
+  // spec.md section 6.16.6, Commit step: deepest repository first, one message. The parent's `git add -u` then takes the new gitlink. An
   // added repository is no child of the main repository, so a step can change it alone: the main head then stays.
   const subs: { tree: RepoTree; commit: string }[] = [];
   for (const t of trees ? deepestFirst(trees) : []) {
     if (t.row.role === "main" || !t.wt || t.row.access !== "edit") continue;
     const from = await headOf(t.wt);
-    const commit = await commitStep(t.wt, i.message, i.who);
+    const commit = await commitStep(t.wt, i.message, i.who, add.get(t.wt.repo) ?? []);
     if (!commit) continue;
     await count(t.wt, from, commit);
     subs.push({ tree: t, commit });
   }
   const last = await headOf(i.wt);
-  const made = await commitStep(i.wt, i.message, i.who);
+  const made = await commitStep(i.wt, i.message, i.who, add.get(i.wt.repo) ?? []);
   if (!made && !subs.length) return { status: "empty" };
   const commit = made ?? last;
   if (made) await count(i.wt, last, made);
   const step = i.db.transaction(() => {
     const id = insertStep(i.db, { task: i.task, part: i.part, kind: "commit", item: i.item, state: "ok" }, now());
-    const notes = [...(made ? [`Commit ${made}`] : []), ...subs.map((s) => `Commit ${s.commit} in ${s.tree.full}`)];
+    const notes = [
+      ...(made ? [`Commit ${made}`] : []),
+      ...subs.map((s) => `Commit ${s.commit} in ${s.tree.full}`),
+      ...(leftNote ? [leftNote] : []),
+    ];
     endStep(i.db, id, "ok", { diffStat: { files, added, removed, lines: added + removed }, notes }, now());
     i.db.query("UPDATE task_part SET head = $head, updated_at = $now WHERE id = $id").run({ id: i.part, head: commit, now: now() });
     for (const s of subs)
@@ -702,6 +771,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   let check: PathCheck | null = null;
   let locked: PathProblem | null = null;
   let patch: string | null = null;
+  let written: string[] = [];
   // A git error of the check or the reset: the worktree state is unknown, so the task stops. Resume makes the worktree again.
   let broken: string | null = null;
   const row = taskRow(db, i.task);
@@ -725,6 +795,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());
     },
     after: async (o, early, servers, gaps) => {
+      written = [...new Set((o?.events ?? []).filter((x) => FILE_TOOLS.has(x.tool) && x.status === "ok" && x.target).map((x) => x.target))];
       const e =
         early ??
         (o
@@ -762,6 +833,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
           notes: [...(broken ? [broken] : []), ...problems.map((p) => `${p.path}: ${p.reason}`), ...(result?.notes ?? [])],
           summary: result?.summary ?? null,
           needsBase: result?.needsBase ? { reason: result.needsBaseReason } : null,
+          written,
         },
         now(),
       );

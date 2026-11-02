@@ -185,6 +185,8 @@ export type TaskAction =
   | { kind: "prs"; part: number; rows: { taskRepo: number; reviewers: string[] }[] }
   | { kind: "pointer"; taskPr: number; newest?: true }
   | { kind: "fix"; part: number }
+  // spec.md section 6.7: "Run setup again" (202).
+  | { kind: "setup"; part: number }
   // spec.md section 6.18.6: a send of the Tell box, "Update from <base>", and "Undo the update". part: the focused part of a task
   // with sub-tasks (spec.md section 6.20.12); absent takes the part of the current state.
   | { kind: "instruct"; text: string; part?: number }
@@ -252,6 +254,8 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       );
     case "fix":
       return read(await tasks.parts[":part"].fix.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "setup":
+      return read(await tasks.parts[":part"].setup.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "instruct":
       return read(
         await tasks.instructions.$post({ param, json: { version, text: a.text, ...(a.part !== undefined && { part: a.part }) } }),

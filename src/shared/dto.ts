@@ -1709,10 +1709,12 @@ export type TaskDto = TaskRowDto & {
   // spec.md section 6.18.6. bases: each repository of the building part that the update would change, with the commits of its base
   // since the branch point (the newest base check) and a Bitbucket PR that reports conflicts. needsBase: the newest Claude step asked for
   // the newest base, and no update ran after it. canInstruct: the Tell Claude box can send. canUndoUpdate: "Undo the update" can run.
+  // canSetup: the repository has a setup command, so "Run setup again" can run on a part with a worktree (spec.md section 6.7).
   bases: TaskBaseDto[];
   needsBase: { reason: string } | null;
   canInstruct: boolean;
   canUndoUpdate: boolean;
+  canSetup: boolean;
   // spec.md section 6.20: the sub-tasks in Jira order. null: the task builds no sub-tasks.
   subtasks: SubtaskDto[] | null;
   // spec.md section 6.20.9: the Jira status of the task key from the newest read, for the parent row hint. null: not known.

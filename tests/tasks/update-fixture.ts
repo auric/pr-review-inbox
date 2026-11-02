@@ -261,10 +261,10 @@ export async function builtTask(o: Setup = {}) {
   const wt = () => openWorktree({ dataDir, db, project: "PROJ", repo: "repo", task, ord: 1, branch: BRANCH, base });
   const w = await wt();
   await write(w, { [`specs/${KEY}/plan.md`]: plan, "src/feature.ts": "export const feature = 'works';\n" });
-  let head = (await commitStep(w, `${KEY}: Add the plan`, WHO)) as string;
+  let head = (await commitStep(w, `${KEY}: Add the plan`, WHO, [`specs/${KEY}/plan.md`, "src/feature.ts"])) as string;
   for (const files of o.commits ?? []) {
     await write(w, files);
-    head = (await commitStep(w, `${KEY}: more`, WHO)) as string;
+    head = (await commitStep(w, `${KEY}: more`, WHO, Object.keys(files))) as string;
   }
   db.query(
     `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, head, created_at, updated_at)
@@ -317,12 +317,13 @@ export async function multiTask(o: { seq?: FakeScenario["seq"]; appBase?: string
   const tree = async (full: string) => (await trees()).find((x) => x.full === full) as RepoTree;
   const main = await wt();
   await trees();
-  await write(main, {
+  const files = {
     [`specs/${KEY}/plan.md`]: plan,
     "src/feature.ts": "export const feature = 'works';\n",
     "lib/lib.c": "int lib = 2;\n",
     ...(other && { "other/other.c": "int other = 2;\n" }),
-  });
+  };
+  await write(main, files);
   const r = await commitTask({
     db,
     task,
@@ -332,6 +333,8 @@ export async function multiTask(o: { seq?: FakeScenario["seq"]; appBase?: string
     message: `${KEY}: Add the plan`,
     who: WHO,
     allow: [],
+    // The fixture stands in for the steps that wrote these files.
+    own: Object.keys(files).map((p) => join(main.repo, ...p.split("/"))),
     trees: await trees(),
   });
   if (r.status !== "committed") throw new Error(`The fixture commit failed: ${JSON.stringify(r)}`);
@@ -394,6 +397,8 @@ export async function addedTask(o: { seq?: FakeScenario["seq"]; built?: boolean 
       message: `${KEY}: Add the plan`,
       who: WHO,
       allow: [],
+      // The fixture stands in for the steps that wrote these files.
+      own: [`specs/${KEY}/plan.md`, "src/feature.ts"].map((p) => join(main.repo, ...p.split("/"))),
       trees: all,
     });
     if (r.status !== "committed") throw new Error(`The fixture commit failed: ${JSON.stringify(r)}`);

@@ -1390,3 +1390,134 @@ test(
   },
   SLOW,
 );
+
+// spec.md section 6.7, Setup: the setup command of the tests below. Each run appends a line to setups.log in the test folder. Mode
+// venv writes .venv/ and build/, which no ignore rule covers. Mode ignored writes into ignored/. setup-mode.txt "fail" exits with 1.
+const SETUP = `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const dir = import.meta.dir;
+appendFileSync(join(dir, "setups.log"), "run\\n");
+const out = process.argv[2] === "venv" ? [".venv/bin/python", "build/out.bin"] : ["ignored/venv.txt"];
+for (const f of out) {
+  mkdirSync(join(f, ".."), { recursive: true });
+  writeFileSync(f, "made by setup\\n");
+}
+const fail = existsSync(join(dir, "setup-mode.txt")) && readFileSync(join(dir, "setup-mode.txt"), "utf8").trim() === "fail";
+process.exit(fail ? 1 : 0);
+`;
+
+describe("commit only Claude's files and run setup again (spec.md section 6.7)", () => {
+  // The setup command of the repository before the test command. extra: more argv items, so the list changes.
+  const withSetup = (s: Awaited<ReturnType<typeof setup>>, mode: "venv" | "ignored", extra: string[] = []) => {
+    writeFileSync(join(s.root, "setup.ts"), SETUP);
+    const commands = [
+      { id: "s", name: "venv", kind: "setup", argv: [process.execPath, join(s.root, "setup.ts"), mode, ...extra], timeoutSec: 60 },
+      { id: "t", name: "test", kind: "test", argv: [process.execPath, join(s.root, "check.ts")], timeoutSec: 60 },
+    ];
+    s.db.query("UPDATE repo_task_settings SET commands_json = $c").run({ c: JSON.stringify(commands) });
+  };
+  const setups = (s: Awaited<ReturnType<typeof setup>>) =>
+    existsSync(join(s.root, "setups.log")) ? readFileSync(join(s.root, "setups.log"), "utf8").split("\n").filter(Boolean).length : 0;
+
+  test(
+    "setup output stays out of every commit and each later commit row names it; Claude's new files go in; Run setup again runs it",
+    async () => {
+      const s = await setup();
+      withSetup(s, "venv");
+      await s.build();
+      expect(s.part().state).toBe("self_reviewed");
+      expect(setups(s)).toBe(1);
+      const w = await s.wt();
+      const files = (await git([`--git-dir=${w.admin}`, "log", "--name-only", "--format=", `${s.base}..HEAD`], { env: w.env }))
+        .split("\n")
+        .filter(Boolean);
+      expect([...new Set(files)].sort()).toEqual([`specs/${KEY}/plan.md`, "src/feature.ts", "tests/feature.test.ts"]);
+      expect(existsSync(join(w.repo, ".venv", "bin", "python")) && existsSync(join(w.repo, "build", "out.bin"))).toBe(true);
+      const note = "Not committed: 2 new files that Claude did not write (.venv/, build/).";
+      const commits = s.steps().filter((x) => x.kind === "commit");
+      expect(commits.map((x) => [x.item, (JSON.parse(x.detail_json).notes as string[]).includes(note)])).toEqual([
+        ["plan", false],
+        ["P1", true],
+        ["T1.1", true],
+        ["checks", true],
+      ]);
+      // "Run setup again" through the route: 202, 409 while it runs, then a second setup row.
+      const SESSION = "s".repeat(64);
+      const ORIGIN = "http://127.0.0.1:7317";
+      const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
+      const call = async (body: unknown) => {
+        const res = await app.request(`${ORIGIN}/api/tasks/${s.task}/parts/${s.part().id}/setup`, {
+          method: "POST",
+          headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        return { status: res.status, body: (await res.json()) as TaskDto & { error?: string } };
+      };
+      const setupRows = () => s.flow().filter((x) => x.startsWith("check:setup:"));
+      expect(taskDto(s.db, s.t()).canSetup).toBe(true);
+      const first = await call({ version: s.t().version });
+      expect(first.status).toBe(202);
+      expect((await call({ version: first.body.version })).body.error).toBe("Claude or the checks are working.");
+      await until(() => setupRows().length === 2 && !setupRows().includes("check:setup:running"));
+      expect(setupRows()).toEqual(["check:setup:ok", "check:setup:ok"]);
+      expect(setups(s)).toBe(2);
+      // A red setup blocks with its reason. A green run ends that reason. The driver of the route ends with the base check, so a
+      // click right after a run can still get 409.
+      const again = async () => {
+        for (let k = 0; k < 200; k++) {
+          const x = await call({ version: s.t().version });
+          if (x.status !== 409) return x;
+          await Bun.sleep(100);
+        }
+        throw new Error("The setup route stayed busy.");
+      };
+      writeFileSync(join(s.root, "setup-mode.txt"), "fail");
+      expect((await again()).status).toBe(202);
+      await until(() => s.blocked() !== null);
+      expect(s.blocked()?.text).toBe("Needs you: the setup commands of part 1 failed. See why.");
+      expect(setups(s)).toBe(3);
+      writeFileSync(join(s.root, "setup-mode.txt"), "ok");
+      expect((await again()).status).toBe(202);
+      await until(() => setups(s) === 4 && s.blocked() === null && !setupRows().includes("check:setup:running"));
+      expect(s.part().state).toBe("self_reviewed");
+    },
+    SLOW,
+  );
+
+  test(
+    "setup runs again when its list changes and after a reset that removed files; an unchanged list does not run it",
+    async () => {
+      const task = (n: number) => ({
+        id: `T${n}`,
+        title: `Step ${n}`,
+        files: ["src/feature.ts"],
+        run: ["tests/feature.test.ts"],
+        done: "The test passes.",
+      });
+      const spec = specResult.parse({ ...SPEC, parts: [{ ...SPEC.parts[0], tasks: [task(1), task(2), task(3)] }] });
+      const s = await setup({ spec, settings: { pauseAfterTask: true } });
+      withSetup(s, "ignored");
+      const resume = async () => {
+        expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+        await s.loop.idle(s.task);
+      };
+      await s.build();
+      expect(s.blocked()?.text).toBe("Task T1.1 is done. Continue?");
+      expect(setups(s)).toBe(1);
+      await resume();
+      expect(s.blocked()?.text).toBe("Task T1.2 is done. Continue?");
+      expect(setups(s)).toBe(1);
+      withSetup(s, "ignored", ["v2"]);
+      await resume();
+      expect(s.blocked()?.text).toBe("Task T1.3 is done. Continue?");
+      expect(setups(s)).toBe(2);
+      // A file that Resume removes may be setup output, so setup runs again.
+      writeFileSync(join((await s.wt()).repo, "junk.txt"), "left by a stop\n");
+      await resume();
+      expect(setups(s)).toBe(3);
+      expect(s.part().state).toBe("self_reviewed");
+      expect(s.flow().filter((x) => x.startsWith("check:setup:"))).toEqual(["check:setup:ok", "check:setup:ok", "check:setup:ok"]);
+    },
+    SLOW,
+  );
+});

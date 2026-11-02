@@ -6,7 +6,18 @@
 // budget. The fake CLI writes real files. No test starts the real CLI or reaches a forge.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { writeConfig } from "../../src/server/config";
@@ -21,7 +32,9 @@ import { createSettings } from "../../src/server/settings";
 import {
   ciPath,
   commitTask,
+  endStep,
   implementPrompt,
+  insertStep,
   instructionRepos,
   partBudget,
   type StepInput,
@@ -31,7 +44,7 @@ import {
   stepTimeout,
 } from "../../src/server/tasks/implement";
 import { taskRow } from "../../src/server/tasks/tasks";
-import { headOf, openWorktree, resetWorktree, status, type Worktree } from "../../src/server/tasks/worktree";
+import { headOf, openWorktree, resetWorktree, status, type Worktree, wtGit } from "../../src/server/tasks/worktree";
 import { implementJsonSchema, STEP_TIME_MS, type TaskBlocked } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { fakeRunner, stubListTools } from "../support/review-fixture";
@@ -256,6 +269,9 @@ describe("implement run", () => {
       if (!outcome) throw new Error("no outcome");
       const row = s.stepRow(outcome.step);
       expect([row.kind, row.state, row.part, row.item, row.attempt, row.run]).toEqual(["implement", "ok", s.part, "T1.1", 1, outcome.run]);
+      // spec.md section 6.7, Commit: the step row keeps the Write targets from the part folder, so the commit after a restart has them.
+      // The b17 fixture holds a Write call with a path relative to the cwd.
+      expect(JSON.parse(row.detail_json).written).toEqual(["repo/src/new.ts", "./repo/a.txt"]);
       const run = s.db
         .query("SELECT kind, pr, task, status, source_head FROM review_run WHERE id = $id")
         .get({ id: outcome.run }) as Record<string, unknown>;
@@ -691,6 +707,61 @@ describe("implement run", () => {
         "Ada Example <ada@example.invalid>|K-1 T1.1: Change the app",
       );
       expect(await commit()).toEqual({ status: "empty" });
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.7: the commit takes tracked edits and deletes, Claude's new files, and the app's files; other new files stay out",
+    async () => {
+      const s = await setup();
+      const who = { name: "Ada Example", email: "ada@example.invalid" };
+      const commit = (own: string[] = []) =>
+        commitTask({ db: s.db, task: s.task, part: s.part, wt: s.wt, item: "T1.1", message: "K-1 T1.1: Add new\n", who, allow: [], own });
+      const at = (p: string) => join(s.wt.repo, ...p.split("/"));
+      const put = (p: string, text = "x\n") => {
+        mkdirSync(join(at(p), ".."), { recursive: true });
+        writeFileSync(at(p), text);
+      };
+      writeFileSync(at("src/app.ts"), "changed\n");
+      rmSync(at("README.md"));
+      put("src/new.ts");
+      put("specs/K-1/plan.md");
+      // Setup and check output: a venv, a build folder with a link to a folder outside repo/, and a file beside Claude's file.
+      put(".venv/bin/python");
+      put("build/out.bin");
+      const victim = join(s.root, "victim");
+      mkdirSync(victim);
+      writeFileSync(join(victim, "keep.txt"), "keep\n");
+      symlinkSync(victim, at("build/link"), "junction");
+      put("src/gen.ts");
+      const step = insertStep(s.db, { task: s.task, part: s.part, kind: "implement", item: "T1.1" });
+      endStep(s.db, step, "ok", { written: ["repo/src/new.ts"] });
+      const done = await commit([at("specs/K-1/plan.md")]);
+      if (done.status !== "committed") throw new Error(JSON.stringify(done));
+      const names = (await wtGit(s.wt, ["show", "--name-status", "--format=", "HEAD"])).trim().split("\n");
+      expect(names).toEqual(["D\tREADME.md", "A\tspecs/K-1/plan.md", "M\tsrc/app.ts", "A\tsrc/new.ts"]);
+      for (const p of [".venv/bin/python", "build/out.bin", "src/gen.ts"]) expect(existsSync(at(p))).toBe(true);
+      const notes = JSON.parse(s.stepRow(done.step).detail_json).notes as string[];
+      expect(notes).toEqual([
+        `Commit ${done.commit}`,
+        "Not committed: 4 new files that Claude did not write (.venv/, build/, src/gen.ts).",
+      ]);
+      // The Write list counts only the steps after the last commit.
+      expect(await commit()).toEqual({ status: "empty" });
+      // A new file that holds rules for Claude Code stays on disk for the next step, so it still fails the commit.
+      put("docs/AGENTS.md");
+      expect(await commit()).toEqual({
+        status: "refused",
+        problems: [{ path: "docs/AGENTS.md", reason: "A step may not change this path." }],
+      });
+      rmSync(at("docs"), { recursive: true });
+      // A link that Claude names, or a file behind it, is still a problem of the commit. git for Windows lists the files behind a
+      // junction, and git on Linux lists the link itself.
+      symlinkSync(victim, at("src/link"), "junction");
+      const next = insertStep(s.db, { task: s.task, part: s.part, kind: "fix", item: "T1.1" });
+      endStep(s.db, next, "ok", { written: ["repo/src/link", "repo/src/link/keep.txt"] });
+      expect(await commit()).toEqual({ status: "refused", problems: [{ path: "src/link", reason: "A step may not make links." }] });
     },
     SLOW,
   );

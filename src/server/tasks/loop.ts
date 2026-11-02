@@ -139,6 +139,7 @@ import {
   resetTrees,
   resetWorktree,
   savePatch,
+  setupHash,
   setupMark,
   status,
   takenBranches,
@@ -312,11 +313,11 @@ type Ctx = {
   // Every repository of the part folder, main first (spec.md section 6.16.5). One entry for a task with one repository.
   trees: RepoTree[];
   // build: the build of the part, in state implementing. instruct and update (spec.md section 6.18): one step on a built part, also in
-  // state ready.
+  // state ready. setup: "Run setup again" (spec.md section 6.7), also in state ready.
   mode: DriverMode;
 };
 
-type DriverMode = "build" | "instruct" | "update";
+type DriverMode = "build" | "instruct" | "update" | "setup";
 
 const Q = {
   parts: `SELECT id, ord, kind, title, branch, base_branch, state, head, pushed, keys_json, start_mode, after_part, base_commit, spec_dir,
@@ -773,8 +774,9 @@ export function createLoop(opts: LoopOptions) {
       .map((x) => x.path)
       .join(", ")}${p.length > 3 ? ` and ${p.length - 3} more` : ""}, which the app does not commit.`;
 
-  // spec.md section 6.7, Commit: one commit per step with the user's name and email, then the size check.
-  async function commit(c: Ctx, item: string, message: string, allow: string[]) {
+  // spec.md section 6.7, Commit: one commit per step with the user's name and email, then the size check. own: the files that the app
+  // wrote for this commit, by absolute path.
+  async function commit(c: Ctx, item: string, message: string, allow: string[], own: string[] = []) {
     guard(c);
     if (!c.who) block(c, { kind: "error", step: null, text: "Needs you: set user.name and user.email in your git config." });
     // spec.md section 6.16.5, Size: a large build that changes a submodule stops.
@@ -782,7 +784,19 @@ export function createLoop(opts: LoopOptions) {
       for (const s of c.trees)
         if (s.row.role === "submodule" && s.wt && (await status(s.wt)).length)
           block(c, { kind: "size", step: null, text: LARGE_REPOS_TEXT });
-    const r = await commitTask({ db: c.db, task: c.id, part: c.part.id, wt: c.wt, item, message, who: c.who, allow, trees: c.trees, now });
+    const r = await commitTask({
+      db: c.db,
+      task: c.id,
+      part: c.part.id,
+      wt: c.wt,
+      item,
+      message,
+      who: c.who,
+      allow,
+      own,
+      trees: c.trees,
+      now,
+    });
     if (r.status === "refused") block(c, { kind: "denied_path", step: null, text: deniedText(r.problems) });
     changed(c.id);
     await sizeCheck(c);
@@ -863,7 +877,7 @@ export function createLoop(opts: LoopOptions) {
     const ticked = existsSync(p) ? tickTask(readFileSync(p, "utf8"), task.id) : null;
     if (ticked === null) block(c, { kind: "error", step: null, text: `Needs you: ${name}.md has no open task ${task.id}.` });
     writeFileSync(p, ticked);
-    await commit(c, task.id, `${c.label} ${task.id}: ${oneLine(task.title)}`, task.files);
+    await commit(c, task.id, `${c.label} ${task.id}: ${oneLine(task.title)}`, task.files, [p]);
     refreshPlan(c);
     const s = taskSettings.safeParse(JSON.parse(taskRow(c.db, c.id)?.settings_json ?? "{}"));
     if (s.success && s.data.pauseAfterTask) block(c, { kind: "question", step: null, text: `Task ${task.id} is done. Continue?` });
@@ -1179,6 +1193,22 @@ export function createLoop(opts: LoopOptions) {
     };
   }
 
+  // spec.md section 6.7: the setup commands run before the first step in a worktree, and again when the mark of the worktree does not
+  // hold the hash of the current list. A reset that removed files deletes the mark (resetWorktree). force: "Run setup again". A failed
+  // run leaves no mark, so the next build runs setup again.
+  async function setup(c: Ctx, force = false) {
+    const list = repoSettings(c.db, c.t.project, c.t.repo).commands.filter((x) => x.kind === "setup");
+    const hash = setupHash(list);
+    const mark = setupMark(c.wt);
+    if (!force && existsSync(mark) && readFileSync(mark, "utf8") === hash) return;
+    rmSync(mark, { force: true });
+    if (list.length) {
+      const r = await checks(c, "setup", ["setup"]);
+      if (!r.green) block(c, { kind: "red", step: r.step, text: `Needs you: the setup commands of part ${c.part.ord} failed. See why.` });
+    }
+    writeFileSync(mark, hash);
+  }
+
   async function runPart(db: Database, t: TaskRow, part: PartRow) {
     const repo = repoSettings(db, t.project, t.repo);
     if (!repo.commands.some((x) => x.kind === "test")) {
@@ -1194,15 +1224,9 @@ export function createLoop(opts: LoopOptions) {
       mkdirSync(dirname(p), { recursive: true });
       writeFileSync(p, c.docs[n] as string);
     }
-    if (missing.length) await commit(c, "plan", `${c.label}: Add the plan`, []);
-    // spec.md section 6.7: the setup commands once per worktree.
-    if (!existsSync(setupMark(c.wt))) {
-      if (repo.commands.some((x) => x.kind === "setup")) {
-        const r = await checks(c, "setup", ["setup"]);
-        if (!r.green) block(c, { kind: "red", step: r.step, text: `Needs you: the setup commands of part ${part.ord} failed. See why.` });
-      }
-      writeFileSync(setupMark(c.wt), "");
-    }
+    const plan = missing.map((n) => onDisk(c.wt, specPath(c.specDir, n)));
+    if (missing.length) await commit(c, "plan", `${c.label}: Add the plan`, [], plan);
+    await setup(c);
     await sizeCheck(c);
     refreshPlan(c);
     for (const pp of c.plan.parts) {
@@ -1563,6 +1587,25 @@ export function createLoop(opts: LoopOptions) {
       setReason(db, id, info.blockedBefore);
     })();
     changed(id);
+  }
+
+  // "Run setup again" (spec.md section 6.7): the setup commands run now in the worktree of the part. before: the reason at the click,
+  // which the route cleared. Red sets its own reason. Green ends a reason of an earlier setup run. Else, and after a Stop, before comes
+  // back.
+  async function driveSetup(db: Database, id: number, partId: number, before: TaskBlocked | null) {
+    const ofSetup = (b: TaskBlocked) =>
+      b.kind === "red" &&
+      b.step !== null &&
+      (db.query(Q.step).get({ id: b.step, task: id }) as { kind: string; item: string | null } | null)?.item === "setup";
+    try {
+      const t = taskRow(db, id) as TaskRow;
+      const part = parts(db, id).find((p) => p.id === partId) as PartRow;
+      await setup(await context(db, t, part, "setup"), true);
+      if (before && !ofSetup(before)) setReason(db, id, before);
+    } catch (e) {
+      if (!(e instanceof Halt)) return failed(db, id, e);
+      if (before && taskRow(db, id)?.blocked_json === null) setReason(db, id, before);
+    }
   }
 
   // spec.md sections 6.18.3 and 6.18.4: one update of a built part. row: its update step, which the route wrote. Each repository takes
@@ -2131,6 +2174,26 @@ export function createLoop(opts: LoopOptions) {
       return { status: 202, task: dto(db, id) };
     },
 
+    // POST /api/tasks/:id/parts/:part/setup (spec.md section 6.7): "Run setup again" runs the setup commands now in the worktree of the
+    // part. The route clears the reason of the task for the run, so the version moves and a second tab gets 409. driveSetup brings the
+    // reason back. A Stop keeps the task state.
+    setupAgain(db: Database, id: number, partId: number, input: { version: number }): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      if (t.state !== "implementing" && t.state !== "ready") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+      if (drivers.has(id) || closing) return conflict(db, id, WORKING);
+      const part = parts(db, id).find((p) => p.id === partId);
+      if (!part) return { status: 404, error: "Part not found." };
+      if (!WORKTREE.has(part.state) || part.adopted) return conflict(db, id, "This part has no worktree.");
+      if (!repoSettings(db, t.project, t.repo).commands.some((x) => x.kind === "setup"))
+        return conflict(db, id, "This repository has no setup command.");
+      const before = blockedOf(t);
+      setBlocked(db, { task: id, version: t.version }, null, now());
+      start(db, id, () => driveSetup(db, id, partId, before), "setup");
+      changed(id);
+      return { status: 202, task: dto(db, id) };
+    },
+
     // POST /api/tasks/:id/spec-change/:step (AC-B20): accept commits the changed plan files, and the step starts again under the new
     // plan. Reject resets the step. Both save the other changes of the step as its patch.
     async specChange(db: Database, id: number, stepId: number, input: { version: number; accept: boolean }): Promise<TaskResult> {
@@ -2189,6 +2252,7 @@ export function createLoop(opts: LoopOptions) {
           message,
           who: c.who,
           allow: [],
+          own: proposal.flatMap((x) => (x.text === null ? [] : [x.f])),
           trees: c.trees,
           now,
         });

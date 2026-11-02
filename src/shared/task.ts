@@ -410,6 +410,9 @@ export const stepDetail = z.object({
   // A Claude step: its summary, and needsBase with its reason (spec.md section 6.18.2).
   summary: z.string().nullable().default(null),
   needsBase: z.object({ reason: z.string() }).nullable().default(null),
+  // A Claude step: the targets of its Write and Edit calls that ended without an error, from the part folder. The next commit takes the
+  // new files among them (spec.md section 6.7, Commit).
+  written: z.array(z.string()).default([]),
   // spec.md section 6.18.6.
   instruct: instructDetail.nullable().default(null),
   update: updateDetail.nullable().default(null),

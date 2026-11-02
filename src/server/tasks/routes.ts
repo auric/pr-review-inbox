@@ -137,7 +137,7 @@ export function createTaskRoutes(opts: {
   // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works.
   const live = (t: TaskDto): TaskDto => {
     const working = loop.running(t.id);
-    return { ...t, working, canInstruct: t.canInstruct && !working };
+    return { ...t, working, canInstruct: t.canInstruct && !working, canSetup: t.canSetup && !working };
   };
   // spec.md section 6.18.4, Restart: the first open of a database resets the updates that a restart stopped.
   const recovered = new WeakSet<object>();
@@ -467,6 +467,14 @@ export function createTaskRoutes(opts: {
         const { id, part } = c.req.valid("param");
         await loop.settle(id);
         return answer(c, loop.fixPoints(db, id, part, c.req.valid("json")));
+      })
+      // spec.md section 6.7: "Run setup again". The commands come only from the stored settings of the repository.
+      .post("/tasks/:id/parts/:part/setup", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, loop.setupAgain(db, id, part, c.req.valid("json")));
       })
       .get("/tasks/:id/parts/:part/diff", partParam, async (c) => {
         const db = openDb();

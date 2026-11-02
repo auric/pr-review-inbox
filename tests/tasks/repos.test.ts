@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareTaskWorkspace } from "../../src/server/review/workspace";
 import { openDb } from "../../src/server/storage/db";
-import { commitTask, treeCheck, undoTrees } from "../../src/server/tasks/implement";
+import { commitTask, endStep, insertStep, treeCheck, undoTrees } from "../../src/server/tasks/implement";
 import { changedLines } from "../../src/server/tasks/loop";
 import { largeRepoProblem } from "../../src/server/tasks/plan";
 import {
@@ -385,6 +385,45 @@ describe("commits and the line budget (AC-B36, AC-B37)", () => {
     const main = await changedLines(p.main, s.m.app.base, await headOf(p.main), []);
     expect(main.lines).toBe(3);
     expect((await changedLines(lib, s.m.lib.base, libHead, [])).lines).toBe(2);
+  });
+
+  test("spec.md section 6.7: a Write in the submodule goes to the submodule commit; new files that Claude did not write stay out", async () => {
+    const s = await setup();
+    const p = await part(s);
+    s.db.query("UPDATE task SET state = 'implementing', base_commit = $b WHERE id = $id").run({ b: s.m.app.base, id: s.id });
+    const partId = (
+      s.db
+        .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+          VALUES ($t, 1, 'single', 'One', 'feature/K-1-change-both', 'main', 'implementing', 1, 1) RETURNING id`)
+        .get({ t: s.id }) as { id: number }
+    ).id;
+    for (const [f, text] of Object.entries({ "lib/new.c": "int n;\n", "src/new.ts": "1\n", "lib/build/out.o": "o", "tmp.txt": "t" })) {
+      mkdirSync(join(p.at(f), ".."), { recursive: true });
+      writeFileSync(p.at(f), text);
+    }
+    const step = insertStep(s.db, { task: s.id, part: partId, kind: "implement", item: "T1.1" });
+    endStep(s.db, step, "ok", { written: ["repo/lib/new.c", "repo/src/new.ts"] });
+    const r = await commitTask({
+      db: s.db,
+      task: s.id,
+      part: partId,
+      wt: p.main,
+      item: "T1.1",
+      message: "K-1 T1.1: Add both",
+      who: WHO,
+      allow: [],
+      trees: p.trees,
+    });
+    if (r.status !== "committed") throw new Error(r.status);
+    const lib = p.tree("lib").wt as NonNullable<RepoTree["wt"]>;
+    const files = async (wt: typeof lib) => (await wtGit(wt, ["show", "--name-only", "--format=", "HEAD"])).trim().split("\n");
+    expect(await files(lib)).toEqual(["new.c"]);
+    expect(await files(p.main)).toEqual(["lib", "src/new.ts"]);
+    expect(existsSync(p.at("lib/build/out.o")) && existsSync(p.at("tmp.txt"))).toBe(true);
+    const detail = JSON.parse(
+      (s.db.query("SELECT detail_json FROM task_step WHERE id = $id").get({ id: r.step }) as { detail_json: string }).detail_json,
+    );
+    expect(detail.notes.at(-1)).toBe("Not committed: 2 new files that Claude did not write (tmp.txt, lib/build/).");
   });
 
   test("a parent diff with only a gitlink change counts no line", async () => {

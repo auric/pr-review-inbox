@@ -75,6 +75,7 @@ import {
   type TaskView,
   taskView,
   tellBox,
+  withSetup,
 } from "../../src/web/tasks/model";
 
 console.log(`tasks-model.test.ts imported from ${Bun.resolveSync("../../src/web/tasks/model", import.meta.dir)}`);
@@ -188,6 +189,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     needsBase: null,
     canInstruct: false,
     canUndoUpdate: false,
+    canSetup: false,
     subtasks: null,
     issueStatus: null,
     ...o,
@@ -300,6 +302,21 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
       more: ["Show the diff", "Fix the small points too"],
       screen: "ready",
     });
+  });
+
+  test("spec.md section 6.7: Run setup again stands before Stop for a part with a worktree, and never while a step runs", () => {
+    const red = building({
+      blocked: { kind: "red", step: 4, text: "Needs you: the tests of part 1 stay red after 3 tries." },
+      canSetup: true,
+    });
+    const at = (t: TaskDto) => withSetup(t, t.parts[0] ?? null, view(t)).more.map((a) => a.label);
+    expect(at(red)).toEqual(["Resume", "Run setup again", "Stop"]);
+    const ready = building({ parts: [part({ state: "self_reviewed" })], canSetup: true });
+    expect(at(ready)).toEqual(["Show the diff", "Run setup again"]);
+    expect(at({ ...ready, canSetup: false })).toEqual(["Show the diff"]);
+    expect(at({ ...ready, parts: [part({ state: "planned" })] })).not.toContain("Run setup again");
+    const running = building({ steps: [step({ id: 9, kind: "tests", part: 7, state: "running", endedAt: null })], canSetup: true });
+    expect(at(running)).toEqual(["Pause after this step", "Stop"]);
   });
 
   test("implementing, ready while the loop works between steps: no Open the PR", () => {

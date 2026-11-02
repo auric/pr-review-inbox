@@ -390,6 +390,8 @@ async function main() {
     record({ childPid: child.pid });
   }
 
+  // The real CLI streams a Write call and its result for each file that it writes. A junction has no Write call.
+  const writeEvents: string[] = [];
   for (const w of s.writes ?? []) {
     const p = resolve(process.cwd(), w.path);
     const r = relative(process.cwd(), p);
@@ -399,7 +401,22 @@ async function main() {
     }
     mkdirSync(dirname(p), { recursive: true });
     if (w.junction !== undefined) symlinkSync(w.junction, p, "junction");
-    else writeFileSync(p, w.text ?? "");
+    else {
+      writeFileSync(p, w.text ?? "");
+      const id = `toolu_fake_write_${writeEvents.length / 2}`;
+      writeEvents.push(
+        JSON.stringify({
+          type: "assistant",
+          parent_tool_use_id: null,
+          message: { content: [{ type: "tool_use", id, name: "Write", input: { file_path: p, content: w.text ?? "" } }] },
+        }),
+        JSON.stringify({
+          type: "user",
+          parent_tool_use_id: null,
+          message: { content: [{ type: "tool_result", tool_use_id: id, content: `File created at: ${p}` }] },
+        }),
+      );
+    }
   }
 
   const agentTool = (flag("--tools") ?? "").split(",").includes("Agent");
@@ -453,12 +470,18 @@ async function main() {
   const lines = readFileSync(s.fixture, "utf8").split("\n").filter(Boolean).map(rewrite);
   const init = lines.map((l) => JSON.parse(l)).find((e) => e.type === "system" && e.subtype === "init");
   const esc = (p: string) => JSON.stringify(p).slice(1, -1);
-  for (const l of lines) {
+  const initAt = lines.findIndex((l) => {
+    const e = JSON.parse(l);
+    return e.type === "system" && e.subtype === "init";
+  });
+  if (initAt < 0) for (const w of writeEvents) await Bun.write(Bun.stdout, `${w}\n`);
+  for (const [k, l] of lines.entries()) {
     if (s.hang && JSON.parse(l).type === "result") break;
     await Bun.write(
       Bun.stdout,
       `${typeof init?.cwd === "string" ? l.replaceAll(esc(`${init.cwd}\\`), esc(process.cwd() + sep)).replaceAll(esc(init.cwd), esc(process.cwd())) : l}\n`,
     );
+    if (k === initAt) for (const w of writeEvents) await Bun.write(Bun.stdout, `${w}\n`);
     await Bun.sleep(s.delayMs ?? 2);
   }
   if (s.stderr) await Bun.write(Bun.stderr, s.stderr);

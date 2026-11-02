@@ -53,6 +53,7 @@ import {
   subtaskView,
   taskView,
   tellBox,
+  withSetup,
 } from "./model";
 import { OpenPrDialog, OpenPrsDialog, type PrRowInput } from "./OpenPrDialog";
 import { AddApproval, AskAgain, PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
@@ -129,8 +130,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const [focusId, setFocusId] = useState<number | null>(null);
   const focused = subs ? (codeParts(t).find((p) => p.id === focusId) ?? defaultFocus(t)) : null;
   const opts = { runner, forge: meta.forge.name, tracker: trackerName, now, newest };
-  const view = subs ? subtaskView(t, focused, opts) : taskView(t, opts);
   const part = focused ?? currentPart(t);
+  const view = withSetup(t, part, subs ? subtaskView(t, focused, opts) : taskView(t, opts));
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [moving, setMoving] = useState<{ key: string; status: string | null } | null>(null);
   const [asking, setAsking] = useState(false);
@@ -348,6 +349,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return focus("task-tab-diff");
       case "fix-points":
         return part && send({ kind: "fix", part: part.id });
+      case "setup":
+        return target && send({ kind: "setup", part: target.id });
       case "go-pr": {
         if (subs && target?.remotePr) return onPr({ project: t.project, repo: t.repo, id: target.remotePr });
         const p = [...t.parts].reverse().find((x) => x.remotePr !== null);

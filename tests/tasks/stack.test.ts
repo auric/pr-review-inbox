@@ -247,13 +247,13 @@ async function setup(o: { openB?: boolean; seq?: Record<string, unknown[]> } = {
   // Part A adds src/a.txt and src/only-a.txt.
   const wa = await wt(1, A, base);
   await write(wa, { "specs/ABC-11/plan.md": docOf(1) as string, "src/a.txt": lines("a3"), "src/only-a.txt": "a\n" });
-  const aHead = (await commitStep(wa, "ABC-11: Add a", WHO)) as string;
+  const aHead = (await commitStep(wa, "ABC-11: Add a", WHO, ["specs/ABC-11/plan.md", "src/a.txt", "src/only-a.txt"])) as string;
   built(pA, aHead, base);
   await open(pA);
   // Part B starts from the pushed head of A, changes line 3 of src/a.txt, and adds src/b.txt.
   const wb = await wt(2, B, aHead);
   await write(wb, { "specs/ABC-12/plan.md": docOf(2) as string, "src/a.txt": lines("b3"), "src/b.txt": "b\n" });
-  const bHead = (await commitStep(wb, "ABC-12: Add b", WHO)) as string;
+  const bHead = (await commitStep(wb, "ABC-12: Add b", WHO, ["specs/ABC-12/plan.md", "src/a.txt", "src/b.txt"])) as string;
   built(pB, bHead, aHead);
   if (o.openB !== false) await open(pB);
 
@@ -339,7 +339,7 @@ const version = (s: S) => ({ version: s.t().version });
 async function newCommit(s: S, id: number, ord: number, branch: string, files: Record<string, string>) {
   const w = await s.wt(ord, branch, s.part(id).base_commit as string);
   await write(w, files);
-  const head = (await commitStep(w, "more work", WHO)) as string;
+  const head = (await commitStep(w, "more work", WHO, Object.keys(files))) as string;
   s.db.query("UPDATE task_part SET head = $head WHERE id = $id").run({ id, head });
   return head;
 }

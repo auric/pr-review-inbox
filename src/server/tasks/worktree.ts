@@ -5,11 +5,12 @@
 // <dataDir>/tasks/<db stem>/<task ID>/part-<n>/ is the cwd of a Claude step: repo/ is the worktree, context/ holds the step files.
 // The task folder also holds patches/. The worktree comes from the bare cache of the repository, never from the user's clone.
 import type { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { BRANCH_SUFFIX_MAX } from "../../shared/task";
+import { BRANCH_SUFFIX_MAX, type TaskCommand } from "../../shared/task";
 import { dbStem } from "../context/attachments";
 import { GitError, git, gitEnv } from "../review/git";
 import { type BranchRemote, cachePath, gitSetup, locked, longPath, noUrl, WorkspaceError } from "../review/workspace";
@@ -343,8 +344,15 @@ export function ignoredChanges(before: IgnoredSnapshot, after: IgnoredSnapshot):
   return out.sort();
 }
 
-// The setup commands ran in this worktree. The mark lives in the git folder of the worktree, so a new worktree has none.
+// The setup commands ran in this worktree. The mark lives in the git folder of the worktree, so a new worktree has none. It holds the
+// setupHash of the list that ran.
 export const setupMark = (wt: Worktree) => join(wt.admin, "rl-setup-done");
+
+// sha256 of the setup commands in run order, argv and timeout of each (spec.md section 6.7). A changed list runs setup again.
+export const setupHash = (list: readonly Pick<TaskCommand, "argv" | "timeoutSec">[]) =>
+  createHash("sha256")
+    .update(JSON.stringify(list.map((c) => [c.argv, c.timeoutSec])))
+    .digest("hex");
 
 // The paths of p and its parent folders inside repo that are links (symbolic links, and junctions on Windows).
 export function linksOn(repo: string, p: string): string[] {
@@ -385,7 +393,8 @@ export async function savePatch(wt: Worktree, file: string, paths: string[], onl
 }
 
 // Returns the worktree to commit last (spec.md section 6.8): links go first, so no later step follows them out of repo/. Then
-// `git reset --hard` and `git clean -ffd`. git-clean(1): the second -f also removes nested repositories. Ignored files stay.
+// `git reset --hard` and `git clean -ffd`. git-clean(1): the second -f also removes nested repositories, and each removed path prints
+// a "Removing" line. A removed path can be setup output, so the setup mark goes. Ignored files stay.
 // git status clears the skip-worktree bit of a hidden file that is present (git 2.37, sparse.expectFilesOutsideOfPatterns), so
 // `sparse-checkout reapply` hides those paths again.
 export async function resetWorktree(wt: Worktree, last: string, links: string[] = []) {
@@ -396,7 +405,7 @@ export async function resetWorktree(wt: Worktree, last: string, links: string[] 
   }
   if (!gitLinkOk(wt)) await restoreGitLink(wt);
   await wtGit(wt, ["reset", "-q", "--hard", last]);
-  await wtGit(wt, ["clean", "-ffdq"]);
+  if ((await wtGit(wt, ["clean", "-ffd"])).trim()) rmSync(setupMark(wt), { force: true });
   await wtGit(wt, ["sparse-checkout", "reapply"]);
 }
 
@@ -523,11 +532,39 @@ export async function resetTrees(trees: readonly RepoTree[], mainLast: string, l
   if (main?.wt) await resetWorktree(main.wt, mainLast, links.get(main));
 }
 
-// spec.md section 6.7: `git add -A`, then `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name
-// and email. --no-verify also skips the hooks that core.hooksPath would name. null: nothing to commit.
-export async function commitStep(wt: Worktree, message: string, who: { name: string; email: string }): Promise<string | null> {
+// spec.md section 6.7: the untracked files of the worktree that no ignore rule covers, split by claimed: add, the ones that the commit
+// takes, and left, the others. Windows compares the names without case, as its file systems do. shown: left for a note, a folder
+// that git lists whole (`ls-files --directory`) as one "<folder>/" entry.
+export async function newFiles(wt: Worktree, claimed: readonly string[]): Promise<{ add: string[]; left: string[]; shown: string[] }> {
+  const key = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const want = new Set(claimed.map(key));
+  const others = async (extra: string[]) =>
+    (await wtGit(wt, ["ls-files", "-z", "--others", "--exclude-standard", ...extra])).split("\0").filter(Boolean);
+  const all = await others([]);
+  const add = all.filter((p) => want.has(key(p)));
+  const left = all.filter((p) => !want.has(key(p)));
+  if (!left.length) return { add, left, shown: [] };
+  const rest = new Set(left);
+  const shown = (await others(["--directory"])).flatMap((e) => {
+    if (!e.endsWith("/")) return rest.has(e) ? [e] : [];
+    const mine = left.filter((p) => p.startsWith(e));
+    return add.some((p) => p.startsWith(e)) ? mine : mine.length ? [e] : [];
+  });
+  return { add, left, shown };
+}
+
+// spec.md section 6.7: `git add -u` (tracked changes and deletes), `git add` of add (the new files that the commit takes), then
+// `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name and email. --no-verify also skips the
+// hooks that core.hooksPath would name. null: nothing to commit.
+export async function commitStep(
+  wt: Worktree,
+  message: string,
+  who: { name: string; email: string },
+  add: readonly string[],
+): Promise<string | null> {
   if (!message.trim()) throw new WorkspaceError("A commit needs a message.");
-  await wtGit(wt, ["add", "-A"]);
+  await wtGit(wt, ["add", "-u"]);
+  if (add.length) await wtGit(wt, ["add", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: `${add.join("\0")}\0` });
   if (!(await wtGit(wt, ["diff", "--cached", "--name-only", "-z"])).length) return null;
   const ids = { GIT_AUTHOR_NAME: who.name, GIT_AUTHOR_EMAIL: who.email, GIT_COMMITTER_NAME: who.name, GIT_COMMITTER_EMAIL: who.email };
   await wtGit(wt, ["commit", "-q", "--no-verify", "-F", "-"], { stdin: message, extra: ids });
