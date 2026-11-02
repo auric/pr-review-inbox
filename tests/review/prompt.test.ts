@@ -37,7 +37,6 @@ import {
   reviewerAgent,
   rubric,
   SHIPPED_PROFILES,
-  SIGNAL_RULES,
   VERIFY_BATCH,
   VERIFY_DELEGATE,
   VERIFY_SPLIT,
@@ -731,18 +730,6 @@ describe("review v3 prompt switches", () => {
     for (const p of SHIPPED_PROFILES) for (const m of TRIAL_MODULES) expect(p.modules).not.toContain(m);
   });
 
-  test("signal replaces only the first finder rule of rl-main and rl-reviewer, with the verify phase on or off", () => {
-    for (const mode of ["on", "off"] as const) {
-      const plain = { ...general, verifier: { ...general.verifier, mode } };
-      const signal = { ...plain, variants: ["signal" as const] };
-      for (const main of [true, false]) expect(finderRules(signal, main)).toEqual([...SIGNAL_RULES, ...finderRules(plain, main).slice(1)]);
-      const first = finderRules(plain, true)[0] as string;
-      expect(mainAgent(signal, FULL).prompt).toBe(mainAgent(plain, FULL).prompt.replace(first, SIGNAL_RULES.join("\n")));
-      expect(reviewerAgent(signal, FULL).prompt).toBe(reviewerAgent(plain, FULL).prompt.replace(first, SIGNAL_RULES.join("\n")));
-      expect(verifyAgent(signal, FULL).prompt).toBe(verifyAgent(plain, FULL).prompt);
-    }
-  });
-
   test("parts (WP-V14): part files replace the auto lines and add one rl-reviewer line; the variant alone changes no prompt", () => {
     const main = mainAgent(general, FULL);
     const parted = withDelegation(main, "auto", 6).prompt;
@@ -821,13 +808,12 @@ describe("review v3 prompt switches", () => {
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
     expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(withVariants("order", "rules2", "signal"))).toBe("2.3+order+rules2+signal");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.3+order+rules2");
   });
 
   test("ASD-STE100: every switch line has at most 20 words", () => {
     expect(
       longSentences([
-        ...SIGNAL_RULES,
         ...ORDER_RULES,
         ...STRICT_REREVIEW,
         ...MODULES.failures.lines,
@@ -842,14 +828,18 @@ describe("review v3 prompt switches", () => {
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("signal", "order"))).toBe("2.3+order+signal");
-    expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2", "signal"]);
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.3+order+rules2");
+    expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
     expect(parsed.variants).toEqual([]);
     expect(profileRevision(parsed)).toBe(profileRevision(general));
-    expect(profileInput.parse({ ...old, variants: ["signal", "bogus", 7, "order", "signal"] }).variants).toEqual(["order", "signal"]);
-    const revisions = [general, withVariants("signal"), withVariants("order"), withVariants("order", "signal")].map(profileRevision);
+    // The retired "signal" drops like any unknown name.
+    expect(profileInput.parse({ ...old, variants: ["rules2", "signal", "bogus", 7, "order", "rules2"] }).variants).toEqual([
+      "order",
+      "rules2",
+    ]);
+    const revisions = [general, withVariants("rules2"), withVariants("order"), withVariants("order", "rules2")].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
   });
 });

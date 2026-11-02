@@ -24,7 +24,7 @@ import { checkoutState, evalProfile, parseOptions, main as runMain } from "./run
 import { type EvalResult, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants signal,order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--large] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
+export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--large] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
 --baseline: the folder of an earlier eval:ab run. Its review-baseline/ and rereview-baseline/ results replace the baseline runs. A mode without its folder runs the baseline.
 --candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. An empty value adds nothing.
@@ -33,7 +33,7 @@ export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-varian
 --candidate-reviewer-effort: the rl-reviewer effort of the candidate runs. Default: the rl-reviewer effort of the shipped profile.
 --large: run only the review cases that give the baseline the rl-reviewer agent. The re-review cases do not run.
 --runner runs the given CLI instead of the claude CLI on PATH and must come last.`;
-const DEFAULT_VARIANTS = "signal,order,rules2";
+const DEFAULT_VARIANTS = "order,rules2";
 const DEFAULT_MODULES = "failures";
 // docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin. The re-review candidate always adds it.
 const STRICT: Variant = "rereview-strict";

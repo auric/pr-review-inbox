@@ -222,7 +222,7 @@ export const profileRevision = (p: Profile) =>
     .update(sameValue(p.verifier, DEFAULT_VERIFIER) ? "" : `verifier${JSON.stringify(p.verifier, ["mode", "model", "effort"])}`)
     .update(p.variants.length ? `variants${JSON.stringify(p.variants)}` : "")
     .digest("hex");
-// docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.3+order+signal".
+// docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.3+order+rules2".
 export const promptVersion = (p: Pick<Profile, "variants">) => [REVIEW_PROMPT_VERSION, ...[...p.variants].sort()].join("+");
 // docs/plans/review-v2/spec.md section 0 and design.md R8: in mode auto, a smaller change gets no Agent tool.
 export const REVIEWER_MIN_LINES = 1200;
@@ -524,25 +524,12 @@ type FinderProfile = Pick<Profile, "verifier" | "volume"> & Partial<Pick<Profile
 const checked = (p: FinderProfile) => p.verifier.mode === "on";
 const has = (p: Partial<Pick<Profile, "variants">>, v: Variant) => p.variants?.includes(v) === true;
 
-// docs/plans/review-v3.md WP-V2, idea 3: the "signal" variant replaces the first finder rule, with the verify phase on or off.
-export const SIGNAL_RULES = [
-  "Report only problems that the code proves. A review with no finding is a good result.",
-  "Never report a finding without a trigger.",
-  "Give at most 3 nits.",
-  "Set confidence to high only after you read the code that proves the problem.",
-  "Leave out each finding with low confidence.",
-];
-
 // spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for.
 export function finderRules(p: FinderProfile, main: boolean): string[] {
   return [
-    ...(has(p, "signal")
-      ? SIGNAL_RULES
-      : [
-          checked(p)
-            ? "Report every problem that you find. A second step checks each finding, so do not leave out a finding because you are not sure."
-            : "Report every problem that you find, with its severity and its confidence.",
-        ]),
+    checked(p)
+      ? "Report every problem that you find. A second step checks each finding, so do not leave out a finding because you are not sure."
+      : "Report every problem that you find, with its severity and its confidence.",
     "Report only problems that the change adds or makes reachable. BASE..HEAD is the change.",
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
     "Give each path from the repository root, for example src/app.ts, not repo/src/app.ts.",

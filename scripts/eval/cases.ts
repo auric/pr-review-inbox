@@ -46,7 +46,9 @@ const range = z
   .refine(([s, e]) => s <= e, "The first line is after the last line.");
 const spot = { path: z.string().min(1), side: z.enum(["new", "old"]), lines: range };
 // alt: other places of the same bug or trap, such as a declaration and its definition, or a caller and its changed callee.
-const place = { id: z.string().min(1), ...spot, alt: z.array(z.object(spot)).min(1).optional() };
+const commit = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
+// carriedFrom: local set only. The head of the earlier case whose decision this item carries. Absent: a decision at the head of the case.
+const place = { id: z.string().min(1), ...spot, alt: z.array(z.object(spot)).min(1).optional(), carriedFrom: commit.optional() };
 export const evalBug = z.object({ ...place, severityMin: z.enum(severities), module: z.enum(MODULE_IDS), note: z.string().min(1) });
 export const evalTrap = z.object({ ...place, why: z.string().min(1) });
 // A real issue that is no seeded bug. A shown item on it counts for no metric but extras.
@@ -81,7 +83,6 @@ export const caseFile = z.object({
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1) });
-const commit = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
 // A case of the local set (docs/plans/review-v3.md WP-V1). A git bundle in ../../bundles/ holds the repository, so the case has no
 // base/ folder and no head.patch. The limits of the fixture sets do not apply. tasks: the pr_task rows with their task_context JSON.
 export const localCaseFile = caseFile.extend({

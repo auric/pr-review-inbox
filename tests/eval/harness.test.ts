@@ -218,13 +218,13 @@ describe("eval harness without --real (AC-M2)", () => {
       return p.profile;
     };
     expect(parseOptions([])).toMatchObject({ variants: null });
-    expect(parseOptions(["--variants", "signal, order"])).toMatchObject({ variants: ["signal", "order"] });
-    for (const bad of ["bogus", "signal,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
+    expect(parseOptions(["--variants", "rules2, order"])).toMatchObject({ variants: ["rules2", "order"] });
+    for (const bad of ["bogus", "signal", "rules2,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
     expect(profileOf([]).variants).toEqual([]);
-    expect(profileOf(["--variants", "signal,order"]).variants).toEqual(["order", "signal"]);
+    expect(profileOf(["--variants", "rules2,order"]).variants).toEqual(["order", "rules2"]);
     expect(profileOf(["--variants", "rereview-strict", "--rereview", "--profile-version", "4"]).variants).toEqual(["rereview-strict"]);
     // WP-V3: rereview-strict changes only the re-review stdin, so a run without --rereview would measure no change.
-    expect(parseOptions(["--variants", "signal,rereview-strict"])).toEqual({
+    expect(parseOptions(["--variants", "rules2,rereview-strict"])).toEqual({
       error: "--variants rereview-strict changes only the re-review prompt. Add --rereview, or the run measures no change.",
     });
   });
@@ -243,7 +243,7 @@ describe("eval harness without --real (AC-M2)", () => {
       ["--effort", "huge", "--effort must be one of"],
       ["--reviewer-effort", "bogus", "--reviewer-effort must be one of"],
       ["--model", "bad name", "--model must be a model alias"],
-      ["--variants", "bogus", "--variants must be a comma list of order, parts, rereview-strict, rules2, signal."],
+      ["--variants", "bogus", "--variants must be a comma list of order, parts, rereview-strict, rules2."],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
       const r = await bun([RUN, flag, value, "--runner", process.execPath, FAKE, "none.json"]);
@@ -708,15 +708,15 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         "--verifier",
         "off",
         "--variants",
-        "signal,order",
+        "rules2,order",
         "--out",
         out,
       ];
       const r = await bun([RUN, ...args, "--runner", process.execPath, FAKE, scenario]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      const version = `${REVIEW_PROMPT_VERSION}+order+signal`;
-      expect(r.stdout).toContain(`with variants signal, order, model haiku, effort low, verifier off, prompt version ${version}`);
+      const version = `${REVIEW_PROMPT_VERSION}+order+rules2`;
+      expect(r.stdout).toContain(`with variants rules2, order, model haiku, effort low, verifier off, prompt version ${version}`);
       expect(r.stdout).not.toContain(DEFAULT_MODEL_WARNING);
       const argv = readRecords<{ argv: string[] }>(record).find((x) => x.argv.includes("-p"))?.argv ?? [];
       expect(argv[argv.indexOf("--model") + 1]).toBe("haiku");
@@ -725,7 +725,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const files = readdirSync(out).filter((f) => f.endsWith(".json"));
       const a = JSON.parse(readFileSync(join(out, files[0] as string), "utf8")) as EvalResult;
       expect(a.requested).toEqual({ model: "haiku", effort: "low", verifier: "off" });
-      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["order", "signal"] });
+      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["order", "rules2"] });
       expect(a.promptVersion).toBe(version);
       const [run] = a.runs;
       expect(run).toMatchObject({ status: "completed", effort: "low" });

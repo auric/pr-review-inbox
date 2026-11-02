@@ -10,9 +10,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type LocalCaseFile, loadCases, setFingerprint } from "../../scripts/eval/cases";
 import { refusal } from "../../scripts/eval/compare";
-import type { Manifest } from "../../scripts/eval/local";
+import { carry, type Draft, type Manifest } from "../../scripts/eval/local";
 import { rescore } from "../../scripts/eval/rescore";
 import { type CaseRun, type EvalItem, type EvalResult, score } from "../../scripts/eval/score";
+import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { openDb } from "../../src/server/storage/db";
 import { readRecords } from "../support/fake-claude";
@@ -55,9 +56,9 @@ async function bun(args: string[], env: Record<string, string> = {}) {
 
 const line = (i: number, changed: boolean) => `export const v${i} = ${i}${changed ? " + 1" : ""};`;
 const fileAt = (changed: Set<number>) => `${Array.from({ length: 40 }, (_, k) => line(k + 1, changed.has(k + 1))).join("\n")}\n`;
-// Head A changes lines 10 to 14, 22, 27, and 30. Head B also changes line 20.
+// Head A changes lines 10 to 14, 22, 27, and 30. Head B also changes lines 20 and 37.
 const A_LINES = new Set([10, 11, 12, 13, 14, 22, 27, 30]);
-const B_LINES = new Set([...A_LINES, 20]);
+const B_LINES = new Set([...A_LINES, 20, 37]);
 
 // The copy of the git folder: <cache>/PROJ/repo.git with the base, A, and B commits.
 async function makeCache(root: string) {
@@ -177,12 +178,16 @@ function makeDb(dir: string, h: Heads) {
     clashTrap: item(r1, "discarded", [27, 27], { discardReason: { code: "bug" } }),
     clashIntended: item(r2, "discarded", [33, 34], { discardReason: { code: "intended" } }),
     second: item(r2, "posted", [12, 12], { severity: "blocker" }),
+    // Head B changes line 37, so this finding stays at head A.
+    changed: item(r2, "posted", [37, 37]),
     copy: 0,
+    onlyB: 0,
   };
   // A revision of a finding is no finding. A finding of a failed run counts nowhere.
   item(r2, "discarded", [12, 12], { revises: ids.second });
   item(failed, "posted", [1, 1]);
   ids.copy = item(r3, "posted", [35, 35], { severity: "major", carried: { from: ids.carried, verdict: "open", reason: "", since: h.a } });
+  ids.onlyB = item(r3, "posted", [3, 3]);
   // Only extras: no case. A repository without a cache copy: missing commits.
   item(run(2, h.a, h.base), "discarded", [15, 15], { discardReason: { code: "worth" } });
   item(run(3, h.a, h.base), "posted", [10, 10]);
@@ -238,14 +243,18 @@ describe("eval:local selection", () => {
     expect(built.stderr).toBe("");
     expect(built.code).toBe(0);
     expect(built.stdout).toContain("Local eval set: 2 cases from 3 review runs in 1 repositories.");
-    expect(built.stdout).toContain("Must find: 5 posted findings and 1 of your own comments. Must not raise: 2. Neutral: 2.");
+    expect(built.stdout).toContain("Must find: 10 posted findings and 1 of your own comments. Must not raise: 4. Neutral: 2.");
     expect(built.stdout).toContain(
       "Left out: 1 refuted by the check, 1 discarded without your triage, 1 without a decision, 0 without an anchor, 4 in opposite decisions, 1 runs without a merge base, 1 cases with missing commits, 1 cases with nothing to find or avoid, 1 comments without a line, 1 comments at a head with no review.",
+    );
+    expect(built.stdout).toContain(
+      "Carried from earlier heads of the same PR: 5. Not carried: 1 with changed lines, 0 in a deleted file, 1 on an item of the later head.",
     );
     expect(built.stdout).toContain("below the recommended minimum");
     for (const name of [TMP, OUT, "PROJ", "Add the calc helpers", "EVAL-9"]) expect(built.stdout).not.toContain(name);
     const m = JSON.parse(readFileSync(join(OUT, "MANIFEST.json"), "utf8")) as Manifest;
-    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 5, traps: 2, extras: 2, human: 1 });
+    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 10, traps: 4, extras: 2, human: 1 });
+    expect(m.carried).toEqual({ carried: 5, changed: 1, gone: 0, overlap: 1 });
     expect(readdirSync(join(OUT, "bundles"))).toHaveLength(1);
     // run.ts gives the same fingerprint for a run of the whole set.
     const loaded = loadCases("all", join(OUT, "cases"));
@@ -260,9 +269,29 @@ describe("eval:local selection", () => {
       // The decision on a carried finding is on its copy: posted at head B with severity major.
       [ofItem(ids.carried), [35, 35], "major"],
       [ofItem(ids.second), [12, 12], "blocker"],
+      [ofItem(ids.changed), [37, 37], "minor"],
     ]);
-    expect(caseOf(heads.b).bugs.map((b) => [b.id, b.lines])).toEqual([[ofItem(ids.copy), [35, 35]]]);
-    expect(a.bugs.every((b) => b.path === PATH && b.side === "new")).toBe(true);
+    expect(a.bugs.every((b) => b.path === PATH && b.side === "new" && b.carriedFrom === undefined)).toBe(true);
+  });
+
+  test("a later head of the PR gets the bugs and traps whose lines still hold, and never the other way", () => {
+    const b = caseOf(heads.b);
+    expect(b.bugs.map((x) => [x.id, x.lines, x.carriedFrom ?? null])).toEqual([
+      [ofItem(ids.copy), [35, 35], null],
+      [ofItem(ids.onlyB), [3, 3], null],
+      [ofItem(ids.posted), [10, 11], heads.a],
+      [ofItem(ids.restored), [2, 2], heads.a],
+      // ids.carried overlaps its own copy at head B: one item. ids.changed: head B changes line 37.
+      [ofItem(ids.second), [12, 12], heads.a],
+    ]);
+    expect(b.traps.map((x) => [x.id, x.lines, x.carriedFrom ?? null])).toEqual([
+      [ofItem(ids.notBug), [30, 30], heads.a],
+      [ofItem(ids.intended), [5, 5], heads.a],
+    ]);
+    // Neither extras nor your comments move.
+    expect(b.extras).toEqual([]);
+    expect(b.human).toEqual([]);
+    expect(caseOf(heads.a).bugs.map((x) => x.id)).not.toContain(ofItem(ids.onlyB));
   });
 
   test("Not a bug and Intended become traps", () => {
@@ -375,6 +404,82 @@ describe("eval:local refusals", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("holds other files");
     expect(readdirSync(out)).toEqual(["notes.txt"]);
+  });
+});
+
+// ---------- Carry to later heads ----------
+
+describe("eval:local carry", () => {
+  const H1 = "1".repeat(40);
+  const H2 = "2".repeat(40);
+  const BASE = "b".repeat(40);
+  const bug = (id: string, path: string, lines: [number, number]) =>
+    ({ id, path, side: "new", lines, severityMin: "minor", module: "core", note: "n" }) as const;
+  const draft = (head: string, first: number, o: Partial<Draft> = {}): Draft => ({
+    pr: 1,
+    head,
+    base: BASE,
+    runs: 1,
+    first,
+    last: first,
+    bugs: [],
+    traps: [],
+    extras: [],
+    human: [],
+    ...o,
+  });
+  // H1 to H2: x.ts becomes z.ts with one line added after line 1 and line 9 changed. y.ts is deleted.
+  const DIFF = [
+    "diff --git a/x.ts b/z.ts",
+    "similarity index 90%",
+    "rename from x.ts",
+    "rename to z.ts",
+    "--- a/x.ts",
+    "+++ b/z.ts",
+    "@@ -1,0 +2 @@",
+    "+added",
+    "@@ -9 +10 @@",
+    "-old",
+    "+new",
+    "diff --git a/y.ts b/y.ts",
+    "deleted file mode 100644",
+    "--- a/y.ts",
+    "+++ /dev/null",
+    "@@ -1,3 +0,0 @@",
+    "-a",
+    "-b",
+    "-c",
+    "",
+  ].join("\n");
+  const diff = async (from: string, to: string) => (from === H1 && to === H2 ? parseDiff(DIFF) : []);
+
+  test("an item moves through a rename, and stays behind on changed lines or a deleted file", async () => {
+    const from = draft(H1, 1, {
+      bugs: [bug("moved", "x.ts", [5, 6]), bug("changed", "x.ts", [9, 9])],
+      traps: [{ id: "gone", path: "y.ts", side: "new", lines: [2, 2], why: "w" }],
+    });
+    const to = draft(H2, 2);
+    expect(await carry([from, to], diff)).toEqual({ carried: 1, changed: 1, gone: 1, overlap: 0 });
+    expect(to.bugs).toEqual([{ ...bug("moved", "z.ts", [6, 7]), carriedFrom: H1 }]);
+    expect(to.traps).toEqual([]);
+  });
+
+  test("nothing goes to an earlier head or another PR, and the newest decision on a place wins", async () => {
+    const earlier = draft(H1, 1, { bugs: [bug("e", "a.ts", [1, 1])] });
+    // Its run is between the runs of the earlier case: no order.
+    const mixed = draft(H1, 2, { base: "c".repeat(40), last: 2 });
+    earlier.last = 3;
+    const other = draft(H2, 4, { pr: 2 });
+    const later = draft(H2, 5, { traps: [{ id: "own", path: "a.ts", side: "new", lines: [1, 2], why: "w" }] });
+    const last = draft(H2, 6, { base: "d".repeat(40) });
+    // The trap of H2 goes to the last case. The bug of H1 meets that trap there and the own trap of the later case.
+    expect(await carry([last, later, other, mixed, earlier], diff)).toEqual({ carried: 1, changed: 0, gone: 0, overlap: 2 });
+    expect([mixed.bugs, other.bugs, later.bugs, last.bugs]).toEqual([[], [], [], []]);
+    expect(last.traps).toEqual([{ id: "own", path: "a.ts", side: "new", lines: [1, 2], why: "w", carriedFrom: H2 }]);
+    // A carried bug alone in a later case.
+    const solo = draft(H2, 7);
+    expect(await carry([earlier, solo], diff)).toEqual({ carried: 1, changed: 0, gone: 0, overlap: 0 });
+    expect(solo.bugs).toEqual([{ ...bug("e", "a.ts", [1, 1]), carriedFrom: H1 }]);
   });
 });
 
@@ -559,7 +664,7 @@ describe("eval --set local with the fake CLI", () => {
       expect(result.fingerprint).not.toBe(manifest.fingerprint);
       expect(result.runs[0]?.items.map((i) => [i.line, i.anchorState, i.group])).toEqual(findings.map((f) => [f.line, "exact", "main"]));
       const s = score(result).suite;
-      expect(s.recall?.mean).toBe(2 / 4);
+      expect(s.recall?.mean).toBe(2 / 5);
       expect(s.humanRecall?.mean).toBe(1);
       expect(s.trapRate?.mean).toBe(1 / 2);
       expect(s.precision?.mean).toBeCloseTo(2 / 3, 10);

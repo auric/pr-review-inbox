@@ -20,7 +20,6 @@ import {
   profileOf,
   profileRevision,
   SHIPPED_PROFILES,
-  SIGNAL_RULES,
 } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
 import { INSTRUCTIONS_TRUST } from "../../src/server/review/instructions";
@@ -1585,16 +1584,15 @@ describe("language checks", () => {
   );
 
   test(
-    "review v3 WP-V2: the profile variants reach rl-main, rl-reviewer, and the re-review stdin; only review rows record them",
+    "review v3 WP-V2: the profile variants reach rl-main and the re-review stdin; only review rows record them",
     async () => {
       const h = await setup();
-      const variants: ProfileInput["variants"] = ["signal", "order", "rereview-strict"];
+      const variants: ProfileInput["variants"] = ["order", "rereview-strict"];
       expect(
         (await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [{ ...general, variants }] } })).status,
       ).toBe(200);
       await h.brief(NOTE, "general");
       const review = await hungAgents(h, h.start);
-      for (const name of ["rl-main", "rl-reviewer"]) expect(review.agents[name]?.prompt).toContain(`\n${SIGNAL_RULES.join("\n")}\n`);
       expect(review.agents["rl-main"]?.prompt).toContain(`\n${ORDER_RULES.join("\n")}\n`);
       expect(review.agents["rl-reviewer"]?.prompt).not.toContain(ORDER_RULES[0] as string);
       expect(review.stdin).not.toContain(STRICT_REREVIEW[0] as string);
@@ -1605,7 +1603,7 @@ describe("language checks", () => {
       const rereview = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/rereview`, { method: "POST" }));
       expect(rereview.stdin).toContain(`\n${STRICT_REREVIEW.join("\n")}\n`);
       await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
-      const switched = `${REVIEW_PROMPT_VERSION}+order+rereview-strict+signal`;
+      const switched = `${REVIEW_PROMPT_VERSION}+order+rereview-strict`;
       expect(h.db.query("SELECT kind, prompt_version FROM review_run ORDER BY id").all()).toEqual([
         ...[1, 2, 3].map(() => ({ kind: "review", prompt_version: switched })),
         { kind: "ask", prompt_version: REVIEW_PROMPT_VERSION },

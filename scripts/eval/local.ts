@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { dataDir, dbPath } from "../../src/server/config";
+import { type DiffFile, parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { type StatsPayload, userDiscard } from "../../src/server/review/stats";
 import { diffArgs } from "../../src/server/review/workspace";
@@ -31,6 +32,7 @@ import {
   localCaseFile,
   localDir,
   MODULE_IDS,
+  mapSpot,
   setFingerprint,
 } from "./cases";
 import { overlaps } from "./score";
@@ -164,12 +166,14 @@ type PrRow = { id: number; pr_id: number; project: string; repo: string; title: 
 type TaskRow = { pr: number; key: string; source: string; json: string | null };
 type Spot = { path: string; side: "new" | "old"; lines: [number, number] };
 
-// One case before the repository steps: a reviewed (PR, head, merge base) and the decisions of its runs.
+// One case before the repository steps: a reviewed (PR, head, merge base) and the decisions of its runs. first, last: its run IDs.
 export type Draft = {
   pr: number;
   head: string;
   base: string;
   runs: number;
+  first: number;
+  last: number;
   bugs: EvalBug[];
   traps: EvalTrap[];
   extras: EvalExtra[];
@@ -177,7 +181,12 @@ export type Draft = {
 };
 
 // A re-review case (docs/plans/review-v3.md WP-V3): one re-review run, the decisions on its own items, and its earlier run.
-export type RereviewDraft = Omit<Draft, "runs" | "human"> & { run: number; since: string; sinceBase: string; earlier: EvalEarlier[] };
+export type RereviewDraft = Omit<Draft, "runs" | "first" | "last" | "human"> & {
+  run: number;
+  since: string;
+  sinceBase: string;
+  earlier: EvalEarlier[];
+};
 
 // noEarlier: a re-review run whose earlier run is not in the copy, or does not match its earlier head. badPayload: an earlier finding
 // whose stored payload is no finding.
@@ -247,9 +256,21 @@ export function select(
     }
     // One case per reviewed head. The merge base is part of the key, because old-side lines are numbered at it.
     const key = `${r.pr} ${r.head} ${r.base}`;
-    const d = drafts.get(key) ?? { pr: r.pr, head: r.head, base: r.base, runs: 0, bugs: [], traps: [], extras: [], human: [] };
+    const d = drafts.get(key) ?? {
+      pr: r.pr,
+      head: r.head,
+      base: r.base,
+      runs: 0,
+      first: r.id,
+      last: r.id,
+      bugs: [],
+      traps: [],
+      extras: [],
+      human: [],
+    };
     drafts.set(key, d);
     d.runs++;
+    d.last = r.id;
     byRun.set(r.id, d);
   }
 
@@ -373,6 +394,44 @@ export function select(
   return { drafts: [...drafts.values()], skipped, rereviews, rereviewSkipped: rrSkipped };
 }
 
+// ---------- Carry ----------
+
+// changed: a hunk touches the lines. gone: the later commit deletes the file. overlap: the later case has its own item there.
+export type Carry = { carried: number; changed: number; gone: number; overlap: number };
+
+// A posted finding (a bug) or a trap of a case also counts at each later case of the same PR while its lines hold. Run IDs give the
+// order, so an item never goes to an earlier head. New-side lines move with the diff from head to head, old-side lines with the diff
+// from merge base to merge base (run.ts earlierAt). The newest decision on a place wins, so the newest case gives first. A case gives
+// before it gets, so it gives only its own items. Re-review cases get nothing: their earlier findings are in rereview.earlier, and an
+// item there is a re-raise.
+export async function carry(drafts: Draft[], diff: (from: string, to: string) => Promise<DiffFile[]>): Promise<Carry> {
+  const n: Carry = { carried: 0, changed: 0, gone: 0, overlap: 0 };
+  const hit = (a: Spot, b: Spot) => a.path === b.path && a.side === b.side && overlaps(a.lines, b.lines);
+  const sorted = [...drafts].sort((a, b) => b.first - a.first);
+  for (const from of sorted) {
+    for (const to of sorted.toReversed()) {
+      if (to.pr !== from.pr || to.first <= from.last) continue;
+      const files = { new: await diff(from.head, to.head), old: await diff(from.base, to.base) };
+      const move = <T extends EvalBug | EvalTrap>(list: T[], into: T[]) => {
+        for (const x of list) {
+          const m = mapSpot(files[x.side], x);
+          if (!m) {
+            if (files[x.side].some((f) => f.oldPath === x.path && f.path === null)) n.gone++;
+            else n.changed++;
+          } else if ([...to.bugs, ...to.traps, ...to.human, ...to.extras].some((y) => hit({ ...x, ...m }, y))) n.overlap++;
+          else {
+            into.push({ ...x, ...m, carriedFrom: from.head });
+            n.carried++;
+          }
+        }
+      };
+      move(from.bugs, to.bugs);
+      move(from.traps, to.traps);
+    }
+  }
+  return n;
+}
+
 // ---------- Build ----------
 
 export type Manifest = {
@@ -381,6 +440,9 @@ export type Manifest = {
   fingerprint: string;
   counts: { cases: number; runs: number; repositories: number; bugs: number; traps: number; extras: number; human: number };
   skipped: Skipped;
+  // The items that a case got from an earlier head of the same PR, and those that stayed behind (carry). Bugs and traps above include
+  // the carried items.
+  carried: Carry;
   // The re-review cases in rereview/ (docs/plans/review-v3.md WP-V3). bun run eval --rereview runs them.
   rereview: {
     fingerprint: string;
@@ -408,8 +470,10 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       db.close();
     }
     const { skipped } = sel;
-    const drafts = sel.drafts.filter((d) => d.bugs.length || d.traps.length || d.human.length);
-    skipped.emptyCases += sel.drafts.length - drafts.length;
+    // A case can get its first item from an earlier head, so the empty check runs after carry.
+    const drafts = sel.drafts;
+    const truth = (d: Draft) => d.bugs.length > 0 || d.traps.length > 0 || d.human.length > 0;
+    const carried: Carry = { carried: 0, changed: 0, gone: 0, overlap: 0 };
 
     const empty = join(tmp, "empty.gitconfig");
     writeFileSync(empty, "");
@@ -441,8 +505,14 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       const rrs = rrByRepo.get(key) ?? [];
       const [project = "", repo = ""] = key.split("/");
       const cache = join(o.cache, project, `${repo}.git`);
+      // A case with nothing to find or avoid stays empty without its commits.
+      const lost = (l: Draft[]) => {
+        const empty = l.filter((d) => !truth(d)).length;
+        skipped.emptyCases += empty;
+        skipped.missingCommits += l.length - empty;
+      };
       if (!NAME.test(project) || !NAME.test(repo) || !existsSync(cache)) {
-        skipped.missingCommits += list.length;
+        lost(list);
         rrSkipped.missingCommits += rrs.length;
         continue;
       }
@@ -451,10 +521,22 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       const shas = [...new Set([...list, ...rrs].flatMap(need))];
       const types = (await g(["cat-file", "--batch-check=%(objecttype)"], `${shas.join("\n")}\n`)).split("\n");
       const present = new Set(shas.filter((_, k) => types[k] === "commit"));
-      const ok = list.filter((d) => need(d).every((c) => present.has(c)));
+      const all = list.filter((d) => need(d).every((c) => present.has(c)));
       const rrOk = rrs.filter((d) => need(d).every((c) => present.has(c)));
-      skipped.missingCommits += list.length - ok.length;
+      lost(list.filter((d) => !all.includes(d)));
       rrSkipped.missingCommits += rrs.length - rrOk.length;
+      const diffs = new Map<string, DiffFile[]>();
+      const diff = async (from: string, to: string) => {
+        if (from === to) return [];
+        const k = `${from} ${to}`;
+        const f = diffs.get(k) ?? parseDiff(await g(["diff", ...diffArgs, from, to]));
+        diffs.set(k, f);
+        return f;
+      };
+      const got = await carry(all, diff);
+      for (const k of Object.keys(carried) as (keyof Carry)[]) carried[k] += got[k];
+      const ok = all.filter(truth);
+      skipped.emptyCases += all.length - ok.length;
       if (!ok.length && !rrOk.length) continue;
 
       // The bundle name hides the project key and the repository slug.
@@ -536,6 +618,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
         human: total("human"),
       },
       skipped,
+      carried,
       rereview: {
         fingerprint: setFingerprint(rrWritten),
         counts: {
@@ -561,6 +644,7 @@ export function report(m: Manifest): string {
     `Local eval set: ${n.cases} cases from ${n.runs} review runs in ${n.repositories} repositories.`,
     `Must find: ${n.bugs} posted findings and ${n.human} of your own comments. Must not raise: ${n.traps}. Neutral: ${n.extras}.`,
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
+    `Carried from earlier heads of the same PR: ${m.carried.carried}. Not carried: ${m.carried.changed} with changed lines, ${m.carried.gone} in a deleted file, ${m.carried.overlap} on an item of the later head.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
     `Re-review cases: ${r.counts.cases}, with ${r.counts.earlier} earlier findings. Must find: ${r.counts.bugs}. Must not raise: ${r.counts.traps}. Neutral: ${r.counts.extras}.`,
     `Re-reviews left out: ${r.skipped.noEarlier} without their earlier run, ${r.skipped.missingCommits} with missing commits, ${r.skipped.emptyCases} with nothing to measure. Earlier findings left out: ${r.skipped.badPayload} with a payload that is no finding.`,

@@ -140,7 +140,7 @@ beforeAll(async () => {
 
 const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   repeat: "1",
-  variants: ["signal", "order", "rules2"],
+  variants: ["order", "rules2"],
   modules: ["failures"],
   baseEffort: null,
   effort: null,
@@ -321,7 +321,7 @@ describe("eval:ab arguments", () => {
     if ("error" in o) throw new Error(o.error);
     expect(o).toMatchObject({
       repeat: "2",
-      variants: ["signal", "order", "rules2"],
+      variants: ["order", "rules2"],
       modules: ["failures"],
       baseEffort: null,
       effort: null,
@@ -360,12 +360,12 @@ describe("eval:ab arguments", () => {
       "fake",
     ]);
     expect(runArgs("review", "candidate", opts(), "o")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "signal,order,rules2", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "order,rules2", "--modules", `${shippedModules},failures`],
       ...["--ordinals", "--out", "o", "--runner", "fake"],
     ]);
     // --candidate-effort: only the candidate gets --effort.
     expect(runArgs("review", "candidate", opts({ effort: "xhigh" }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "signal,order,rules2", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "order,rules2", "--modules", `${shippedModules},failures`],
       ...["--effort", "xhigh", "--ordinals", "--runner", "fake"],
     ]);
     expect(runArgs("review", "baseline", opts({ effort: "xhigh" }), "")).not.toContain("--effort");
@@ -387,7 +387,7 @@ describe("eval:ab arguments", () => {
       "--real",
     ]);
     expect(runArgs("rereview", "candidate", opts({ runner: null }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "signal,order,rules2,rereview-strict"],
+      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "order,rules2,rereview-strict"],
       ...["--modules", `${shippedModules},failures`, "--ordinals", "--real"],
     ]);
     // Bisect: no variants and no extra module. rereview-strict changes nothing in a review run, so the review candidate drops it.
@@ -513,7 +513,7 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(r.stdout).toContain("[1/1] case 1 #1:");
       expect(a.profile.variants).toEqual([]);
       expect(a.profile.modules).not.toContain("failures");
-      expect(b.profile.variants).toEqual(["order", "rules2", "signal"]);
+      expect(b.profile.variants).toEqual(["order", "rules2"]);
       expect(b.profile.modules).toContain("failures");
       expect(a.requested?.effort).not.toBe("low");
       expect(b.requested?.effort).toBe("low");

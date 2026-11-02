@@ -167,8 +167,8 @@ export const MODULE_IDS = [
 export type ModuleId = (typeof MODULE_IDS)[number];
 // docs/plans/review-v3.md V2 and V3: eval switches. The UI and the Improve prompt do not offer them until WP-V4 ships or deletes them.
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
-// "parts": docs/plans/review-v3.md WP-V14, opt-in only. The shipped profiles do not have it.
-export const VARIANTS = ["order", "parts", "rereview-strict", "rules2", "signal"] as const;
+// "parts": docs/plans/review-v3.md WP-V14, opt-in only. The shipped profiles do not have it. The retired "signal" drops on read.
+export const VARIANTS = ["order", "parts", "rereview-strict", "rules2"] as const;
 export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];
