@@ -54,6 +54,7 @@ describe("improveBody", () => {
         explain: false,
         docs: true,
         languageChecks: true,
+        jiraFamily: false,
         maxTurns: 100,
         skills: [],
         alwaysSkills: [],

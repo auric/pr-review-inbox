@@ -46,6 +46,7 @@ const p = (id: string, name: string, o: Partial<ProfileInput> = {}): ProfileInpu
   explain: false,
   docs: true,
   languageChecks: false,
+  jiraFamily: false,
   maxTurns: 40,
   skills: [],
   alwaysSkills: [],

@@ -291,6 +291,7 @@ describe("settings API", () => {
     explain: false,
     docs: false,
     languageChecks: false,
+    jiraFamily: false,
     maxTurns: 20,
     skills: [],
     alwaysSkills: [],

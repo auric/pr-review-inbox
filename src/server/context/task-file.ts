@@ -22,9 +22,11 @@ import {
   RUN_TEXT_TOTAL,
 } from "../../shared/dto";
 import { type FoundItem, foundItem } from "../../shared/task";
+import { log } from "../log";
 import type { AttachmentFile, ContextFile } from "../review/workspace";
 import { type Raster, resolveFile, sniffFile } from "./attachments";
 import { ATTACHMENT_IMAGE } from "./markdown";
+import { ContextError, type ContextSource, type IssueParent } from "./source";
 
 export const TASK_FILE = "task.md";
 export const SUBTASKS_FILE = "subtasks.md";
@@ -170,9 +172,77 @@ function renderIssue(
   return issueSection(r, i, lines, body, head, extra);
 }
 
+// shortcut: a fixed cap of sub-task lines per issue, raise it when a real issue lists more.
+export const MAX_SUBTASK_LINES = 100;
+
+// The parents of a PR run, by parent key. Absent: the profile option "Include the Jira parent and sub-tasks" is off.
+export type TaskParents = ReadonlyMap<string, IssueParent>;
+
+const parentKeys = (db: Database, pr: number) => {
+  const rows = db.query("SELECT json FROM task_context WHERE pr = $pr ORDER BY key").all({ pr }) as { json: string }[];
+  return [...new Set(rows.flatMap((r) => (JSON.parse(r.json) as IssueContext).parent ?? []))];
+};
+
+// One GET of each parent of the fetched issues of a PR. A failed read leaves that parent out and does not fail the run.
+// jira: the source of the current settings, null without Jira. The call comes only when an issue has a parent.
+export async function taskParents(db: Database, pr: number, jira: () => Promise<ContextSource | null>): Promise<TaskParents> {
+  const out = new Map<string, IssueParent>();
+  const keys = parentKeys(db, pr);
+  if (!keys.length) return out;
+  let source: ContextSource | null;
+  try {
+    source = await jira();
+  } catch {
+    log("Jira parent read for a review: cannot read the Jira CA file.");
+    return out;
+  }
+  if (!source) return out;
+  for (const key of keys)
+    try {
+      out.set(key, await source.fetchParent(key));
+    } catch (e) {
+      // A ContextError message holds no token, header, or response text.
+      log(`Jira parent read for a review failed: ${e instanceof ContextError ? e.message : (e as Error).name}`);
+    }
+  return out;
+}
+
+// The Parent and Sub-tasks sections of one issue. Attachments of the parent never go to runs.
+function familySection(i: IssueContext, parents: TaskParents): string[] {
+  const out: string[] = [];
+  const p = i.parent ? parents.get(i.parent) : undefined;
+  if (p) {
+    const body = (s: string) => (p.format === "markdown" ? s.replace(ATTACHMENT_IMAGE, (_, name: string) => `(image: ${name})`) : s);
+    out.push(
+      `### Parent ${p.key}: ${oneLine(p.summary)}`,
+      "",
+      `- Status: ${oneLine(p.status ?? "(none)")}`,
+      ...(p.truncated ? ["- The app cut this text at its size limits."] : []),
+      "",
+      "#### Parent description",
+      "",
+      body(p.description?.trim() || "(none)"),
+      "",
+    );
+  }
+  const subs = i.subtasks ?? [];
+  if (subs.length) {
+    out.push(`### Sub-tasks (${subs.length})`, "");
+    for (const s of subs.slice(0, MAX_SUBTASK_LINES)) out.push(`- ${s.key}: ${oneLine(s.summary)} (${oneLine(s.status ?? "no status")})`);
+    if (subs.length > MAX_SUBTASK_LINES) out.push(`- The app left out ${subs.length - MAX_SUBTASK_LINES} more sub-tasks.`);
+    out.push("");
+  }
+  return out;
+}
+
 // The task files of a PR run and its attachments for context/attachments/. dataDir: the data folder of the run.
-// Without dataDir, no attachment is included.
-export function taskContext(db: Database, pr: number, dataDir: string | null): { files: ContextFile[]; attachments: AttachmentFile[] } {
+// Without dataDir, no attachment is included. parents: as in TaskParents.
+export function taskContext(
+  db: Database,
+  pr: number,
+  dataDir: string | null,
+  parents?: TaskParents,
+): { files: ContextFile[]; attachments: AttachmentFile[] } {
   const rows = db.query("SELECT key, source, json, fetched_at FROM task_context WHERE pr = $pr ORDER BY key").all({ pr }) as TaskRow[];
   if (!rows.length) return { files: [], attachments: [] };
   const downloaded = db
@@ -180,15 +250,18 @@ export function taskContext(db: Database, pr: number, dataDir: string | null): {
     .all({ pr }) as (FileRow & { key: string })[];
   const inc = includer(dataDir);
   const out: string[] = [];
-  for (const r of rows)
+  for (const r of rows) {
+    const i = JSON.parse(r.json) as IssueContext;
     out.push(
       ...renderIssue(
         r,
-        JSON.parse(r.json) as IssueContext,
+        i,
         downloaded.filter((d) => d.key === r.key),
         inc,
       ),
+      ...(parents ? familySection(i, parents) : []),
     );
+  }
   return { files: [{ name: TASK_FILE, text: out.join("\n") }], attachments: inc.attachments };
 }
 

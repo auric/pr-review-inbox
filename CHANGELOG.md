@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A review profile can now include the Jira parent and sub-tasks. Turn on "Include the Jira parent and sub-tasks" in Settings, Review profiles. The review then reads the parent summary, status, and description, and the key, summary, and status of each sub-task. It is off by default.
 - Jira Cloud now works. In Settings, Jira, enter your Atlassian account email and an API token without scopes. For Jira Server or Data Center, leave the email empty and use a personal access token. A login form that does not fit the Jira type shows a clear message.
 - The app is now named PR Review Inbox. Its old name was Kierto. The repository is now github.com/auric/pr-review-inbox. Your data, settings, and stored tokens stay.
 - An Ask answer now shows Mermaid flowchart, sequence, and class diagrams as pictures, with "Show code" and "Copy code". A diagram that does not render shows its code and the first error line. Other diagram types show as code.

@@ -56,7 +56,7 @@ import { implementJsonSchema, type TaskRunKind } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { PrRef } from "../../shared/types";
 import { dataDir as defaultDataDir } from "../config";
-import { taskContext } from "../context/task-file";
+import { taskContext, taskParents } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { Settings } from "../settings";
@@ -743,7 +743,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
 
     await prune();
     let ws: Workspace;
-    const { files, attachments } = taskContext(j.db, j.pr, dataDir);
+    const parents = j.profile.jiraFamily ? await taskParents(j.db, j.pr, () => settings.jira()) : undefined;
+    if (j.cancelled) return cancelled();
+    const { files, attachments } = taskContext(j.db, j.pr, dataDir, parents);
     const carry = j.carry;
     const earlier = carry?.items.filter((r) => r.kind === "finding") ?? [];
     const posted = new Set(carry?.posted.map((r) => r.id));

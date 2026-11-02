@@ -57,6 +57,7 @@ export type Draft = {
   explain: boolean;
   docs: boolean;
   languageChecks: boolean;
+  jiraFamily: boolean;
   maxTurns: string;
   skills: string[];
   alwaysSkills: string[];
@@ -119,6 +120,7 @@ export function toProfiles(list: Draft[]): ProfileInput[] {
       explain: d.explain,
       docs: d.docs,
       languageChecks: d.languageChecks,
+      jiraFamily: d.jiraFamily,
       maxTurns: turns ? Number(turns) : Number.NaN,
       skills: d.skills,
       alwaysSkills: d.alwaysSkills.filter((id) => d.skills.includes(id)),
@@ -143,6 +145,7 @@ const KEYS = [
   "explain",
   "docs",
   "languageChecks",
+  "jiraFamily",
   "maxTurns",
   "skills",
   "alwaysSkills",
@@ -200,6 +203,7 @@ const newProfile = (id: string): ProfileInput => ({
   explain: false,
   docs: true,
   languageChecks: true,
+  jiraFamily: false,
   maxTurns: NEW_TURNS,
   skills: [],
   alwaysSkills: [],
@@ -242,6 +246,7 @@ export type Edit = Partial<
     | "explain"
     | "docs"
     | "languageChecks"
+    | "jiraFamily"
     | "maxTurns"
     | "skills"
     | "alwaysSkills"
@@ -273,6 +278,7 @@ export const SHIPPED_FIELDS = [
   ["explain", "Explain only"],
   ["docs", "Documentation"],
   ["languageChecks", "Language checks"],
+  ["jiraFamily", "Parent and sub-tasks"],
   ["modules", "Checks"],
   ["volume", "Show"],
   ["model", "Model"],
@@ -301,6 +307,7 @@ export function valueText(field: ShippedField, v: ProfileInput, names: { module:
     case "explain":
     case "docs":
     case "languageChecks":
+    case "jiraFamily":
       return v[field] ? "On" : "Off";
     case "maxTurns":
       return String(v.maxTurns);
@@ -405,6 +412,7 @@ export type Part =
   | "explain"
   | "docs"
   | "lang"
+  | "family"
   | "model"
   | "model-id"
   | "effort"

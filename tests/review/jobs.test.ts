@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
+import { createJiraSource } from "../../src/server/context/jira";
 import { createLive, type LiveEvent } from "../../src/server/live";
 import {
   DEFAULT_PROFILE,
@@ -45,6 +46,7 @@ import type {
 import { REVIEW_PROMPT_VERSION } from "../../src/shared/review";
 import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoExplain, type FakeScenario, readRecords } from "../support/fake-claude";
+import { JIRA_TOKEN, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira";
 
 const SLOW = 120_000;
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
@@ -242,7 +244,15 @@ const stubTools: ListTools = async (url) => DOC_TOOLS[url] ?? [];
 
 // remoteUrl: a git remote URL in place of the temp repository.
 async function setup(
-  o: { forgeRemote?: boolean; listTools?: ListTools; claudeConfigDir?: string; source?: Record<string, Entry>; remoteUrl?: string } = {},
+  o: {
+    forgeRemote?: boolean;
+    listTools?: ListTools;
+    claudeConfigDir?: string;
+    source?: Record<string, Entry>;
+    remoteUrl?: string;
+    // The fake Jira URL. Absent: no Jira.
+    jira?: string;
+  } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), "rl-wp10-"));
   dirs.push(root);
@@ -251,10 +261,18 @@ async function setup(
   cleanup.push(() => fake.stop());
 
   const dir = join(root, "data");
-  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, profiles: [GENERAL, ...SHIPPED_PROFILES.slice(1)] });
+  writeConfig(dir, {
+    baseUrl: fake.url,
+    userSlug: FAKE_USER,
+    notifications: false,
+    profiles: [GENERAL, ...SHIPPED_PROFILES.slice(1)],
+    ...(o.jira && { jira: { baseUrl: o.jira } }),
+  });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
-  const settings = createSettings({ dir, secrets });
+  const jiraSecrets = createSecrets(null, "jira-token");
+  if (o.jira) await jiraSecrets.set(JIRA_TOKEN);
+  const settings = createSettings({ dir, secrets, jiraSecrets });
   const db = settings.db() as Database;
   const { id: pr } = db
     .query(
@@ -1401,6 +1419,7 @@ describe("editable profiles (M4)", () => {
         explain: false,
         docs: false,
         languageChecks: false,
+        jiraFamily: false,
         maxTurns: 9,
         skills: [],
         alwaysSkills: [],
@@ -1830,6 +1849,58 @@ describe("project instructions", () => {
 });
 
 describe("task context (plan r2 WP0)", () => {
+  test(
+    "the Jira parent option adds the parent and the sub-tasks to task.md with one parent GET; off keeps task.md and the prompt",
+    async () => {
+      const jira = startFakeJira();
+      cleanup.push(() => jira.stop());
+      jira.addSubtaskSet();
+      const h = await setup({ jira: jira.url });
+      const source = createJiraSource({ baseUrl: jira.url, token: JIRA_TOKEN });
+      for (const k of [SUBTASK_PARENT, "ABC-12"])
+        h.db
+          .query("INSERT INTO task_context (pr, key, source, json, fetched_at) VALUES ($pr, $k, 'jira', $json, 1000)")
+          .run({ pr: h.pr, k, json: JSON.stringify(await source.fetchIssue(k)) });
+      const parentPath = `/rest/api/2/issue/${SUBTASK_PARENT}`;
+      const reads = (): [number, number] => [jira.count("GET", parentPath), jira.count("GET", `${parentPath}/comment`)];
+      const before = reads();
+      const hung = async () => {
+        h.scenario({ fixture: subagentRun(), hang: true });
+        const n = h.calls().filter((c) => c.argv?.includes("-p")).length;
+        const { body } = await h.start();
+        expect(await waitFor(() => h.calls().filter((c) => c.argv?.includes("-p")).length > n)).toBe(true);
+        const c = h
+          .calls()
+          .filter((c) => c.argv?.includes("-p"))
+          .at(-1) as Call;
+        const task = readFileSync(join(c.cwd, "context", "task.md"), "utf8");
+        await h.call(`/api/runs/${body.id}/cancel`, { method: "POST" });
+        expect((await h.finish(body.id)).run.status).toBe("cancelled");
+        return { task, stdin: c.stdin };
+      };
+
+      const off = await hung();
+      expect(reads()).toEqual(before);
+      expect(off.task).not.toContain("### Parent");
+      expect(off.task).not.toContain("### Sub-tasks");
+
+      const put = await h.json("/api/settings", {
+        method: "PUT",
+        body: { baseUrl: h.fake.url, profiles: [{ ...GENERAL, jiraFamily: true }] },
+      });
+      expect(put.status).toBe(200);
+      const on = await hung();
+      expect(reads()).toEqual([before[0] + 1, before[1]]);
+      expect(on.task).toContain(`### Parent ${SUBTASK_PARENT}: Split the cache work into sub-tasks`);
+      expect(on.task).toContain("#### Parent description");
+      expect(on.task).toContain("### Sub-tasks (4)");
+      expect(on.task).toContain("- ABC-13: Flush before the write lock (To Do)");
+      expect(on.task.startsWith(UNTRUSTED)).toBe(true);
+      expect(on.stdin).toBe(off.stdin);
+    },
+    SLOW,
+  );
+
   test(
     "a task_context row puts task.md with the banner into context/; stdin names the file but holds none of its text",
     async () => {

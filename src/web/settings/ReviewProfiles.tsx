@@ -34,6 +34,7 @@ import { api } from "../api";
 import { dialogKeys } from "../fix/CloneDialog";
 import { useMeta, useSkills } from "../meta";
 import { MODULE_LABEL, VOLUME_LINE, VOLUME_NAME } from "../review/model";
+import { trackerOf } from "../review/tasks";
 import { read, useSettings } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { SaveStatus, TYPING_MS, useSaver } from "./autosave";
@@ -578,6 +579,8 @@ function ProfileRow(props: RowProps) {
   const of = <span className="sr-only"> of profile {i + 1}</span>;
   const edit = (patch: Edit) => onChange({ act: "edit", i, patch });
   const type = (patch: Edit) => onChange({ act: "edit", i, patch }, TYPING_MS);
+  const meta = useMeta().data;
+  const tracker = (meta && trackerOf(meta))?.name ?? "";
   const invalid = (f: Field) => ({
     "aria-invalid": !!found[f],
     "aria-describedby": found[f] ? profileId(i, `${f}-error`) : undefined,
@@ -732,6 +735,17 @@ function ProfileRow(props: RowProps) {
           help="Adds checklists for the languages in the change. Review runs only."
           checked={d.languageChecks}
           onChange={(languageChecks) => edit({ languageChecks })}
+        />
+        <Toggle
+          id={profileId(i, "family")}
+          label={
+            <>
+              Include the {tracker} parent and sub-tasks{of}
+            </>
+          }
+          help="Adds the parent and the sub-tasks of the fetched issue to the task text."
+          checked={d.jiraFamily}
+          onChange={(jiraFamily) => edit({ jiraFamily })}
         />
       </div>
       <ChecksField {...props} />

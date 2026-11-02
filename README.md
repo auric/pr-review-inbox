@@ -89,6 +89,8 @@ When you edit Review or Explain, the app keeps only the fields you changed. The 
 
 The checks add checklists to the review: Security, Threads and races, Performance, Tests, Compatibility, Simplify (what to delete), Docs and comments, Project rules, Matches the task, and the language checklists for C++, C, and Python. The check step reads the code of each finding again and confirms it, refutes it, or marks it unsure. You can turn it off or give it its own model and effort.
 
+"Include the Jira parent and sub-tasks" is off by default. When you turn it on, each run of the profile adds the parent and the sub-tasks of each fetched Jira issue to the task text. The parent shows its key, summary, status, and description. Each sub-task shows its key, summary, and status. The run reads the parent from Jira once when it starts. When that read fails, the run continues without the parent.
+
 ![Settings, Review profiles: the prompt, the checks, and the volume](docs/screenshots/settings-profiles.webp)
 
 The review brief holds the task, your note, the checks, and the volume: "Only what matters", "Balanced", or "Show everything". A change of a check or of the volume saves to the profile at once. The profile picker shows when you have two or more review profiles. Explain has its own page. A review starts only from the brief.

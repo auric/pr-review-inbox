@@ -274,6 +274,7 @@ describe("checks and volume of a profile (spec.md sections 1.1 to 1.4)", () => {
       explain: false,
       docs: true,
       languageChecks: true,
+      jiraFamily: false,
       maxTurns: 100,
       skills: [],
       alwaysSkills: [],

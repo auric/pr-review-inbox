@@ -109,6 +109,7 @@ export const SHIPPED_PROFILES: Profile[] = [
     maxTurns: 100,
     docs: true,
     languageChecks: true,
+    jiraFamily: false,
     skills: [],
     alwaysSkills: [],
     mcp: [],
@@ -127,6 +128,7 @@ export const SHIPPED_PROFILES: Profile[] = [
     explain: true,
     docs: false,
     languageChecks: false,
+    jiraFamily: false,
     skills: [],
     alwaysSkills: [],
     mcp: [],
@@ -159,6 +161,7 @@ const v4Profile = (p: Pick<Profile, "id" | "name" | "note" | "prompt" | "languag
   explain: false,
   maxTurns: 100,
   docs: true,
+  jiraFamily: false,
   skills: [],
   alwaysSkills: [],
   mcp: [],
@@ -221,6 +224,7 @@ export const profileRevision = (p: Profile) =>
     .update(p.volume === "balanced" ? "" : `volume${p.volume}`)
     .update(sameValue(p.verifier, DEFAULT_VERIFIER) ? "" : `verifier${JSON.stringify(p.verifier, ["mode", "model", "effort"])}`)
     .update(p.variants.length ? `variants${JSON.stringify(p.variants)}` : "")
+    .update(p.jiraFamily ? "jirafamily" : "")
     .digest("hex");
 // docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.3+order+rules2".
 export const promptVersion = (p: Pick<Profile, "variants">) => [REVIEW_PROMPT_VERSION, ...[...p.variants].sort()].join("+");

@@ -323,6 +323,14 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
     return parsed.data;
   }
 
+  // The rendered HTML as Markdown. A missing or too large rendered field, or a failed conversion, gives the wiki text.
+  const markdownOf =
+    (converter: ReturnType<typeof createConverter>) =>
+    async (html: string | null | undefined, wiki: string | null | undefined): Promise<string | null> => {
+      const text = html != null && Buffer.byteLength(html) <= MAX_HTML_BYTES ? await converter.convert(html) : null;
+      return text ?? (wiki ? fenced(wiki) : (wiki ?? null));
+    };
+
   // scope: the read is a sub-task of scope.parent. Another parent gives null. links keep only the other sub-tasks of the parent:
   // scope.siblings, or the own sub-tasks without scope.
   async function read(key: string, scope?: { parent: string; siblings: readonly string[] }): Promise<IssueContext | null> {
@@ -358,11 +366,7 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
       return s.slice(0, max);
     };
     const converter = createConverter(base, convertMs.field, convertMs.total);
-    // The rendered HTML as Markdown. A missing or too large rendered field, or a failed conversion, gives the wiki text.
-    const markdown = async (html: string | null | undefined, wiki: string | null | undefined): Promise<string | null> => {
-      const text = html != null && Buffer.byteLength(html) <= MAX_HTML_BYTES ? await converter.convert(html) : null;
-      return text ?? (wiki ? fenced(wiki) : (wiki ?? null));
-    };
+    const markdown = markdownOf(converter);
     let description: string | null;
     const comments: IssueContext["comments"] = [];
     try {
@@ -424,6 +428,30 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
       return (await read(key)) as IssueContext;
     },
     fetchSubtask: (parent, siblings, key) => read(key, { parent, siblings }),
+    // One GET without comments. The description gets the same conversion and cap as read().
+    async fetchParent(key) {
+      if (!JIRA_KEY.test(key)) throw new ContextError("not_found", "/rest/api/2/issue");
+      const { fields, renderedFields } = await get(
+        `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,description,status&expand=renderedFields`,
+        issue,
+      );
+      const converter = createConverter(base, convertMs.field, convertMs.total);
+      let text: string | null;
+      try {
+        text = await markdownOf(converter)(renderedFields?.description, fields.description);
+      } finally {
+        converter.close();
+      }
+      const description = text === null ? null : text.slice(0, CAPS.description);
+      return {
+        key,
+        summary: fields.summary,
+        status: fields.status?.name ?? null,
+        description,
+        truncated: text !== null && text.length > CAPS.description,
+        format: "markdown",
+      };
+    },
     async subtaskStatuses(parent) {
       if (!JIRA_KEY.test(parent)) throw new ContextError("not_found", "/rest/api/2/issue");
       const { fields } = await get(`/rest/api/2/issue/${encodeURIComponent(parent)}?fields=subtasks`, statusRead);

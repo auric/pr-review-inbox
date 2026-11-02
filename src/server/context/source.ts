@@ -22,6 +22,9 @@ export class ContextError extends Error {
   }
 }
 
+// The parent of an issue without comments, attachments, or links. truncated, format: as in IssueContext.
+export type IssueParent = Pick<IssueContext, "key" | "summary" | "status" | "description" | "truncated" | "format">;
+
 export type ContextSource = {
   id: "jira";
   name: string;
@@ -29,6 +32,8 @@ export type ContextSource = {
   check(): Promise<string>;
   // Throws a ContextError.
   fetchIssue(key: string): Promise<IssueContext>;
+  // One GET of the parent of an issue. Throws a ContextError.
+  fetchParent(key: string): Promise<IssueParent>;
   // Reads a sub-task of parent. Another parent gives null. links keep only siblings, the other sub-tasks of the parent. Throws a ContextError.
   fetchSubtask(parent: string, siblings: readonly string[], key: string): Promise<IssueContext | null>;
   // The sub-tasks of parent in Jira order, from one GET of the subtasks field. Throws a ContextError.

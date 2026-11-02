@@ -188,6 +188,7 @@ export const DEFAULT_VERIFIER: VerifierSetup = { mode: "on", model: null, effort
 // model, effort: --model and --effort of every run of the profile. reviewer: the rl-reviewer agent of review runs. Absent in older profiles.
 // alwaysSkills: chosen skills that every run reads first. A run does not start without them. Absent in older profiles.
 // languageChecks: review runs get the checklists for the languages of the change. Absent in older profiles.
+// jiraFamily: runs of the profile add the parent and the sub-tasks of each fetched Jira issue to task.md. Absent in older profiles.
 // modules, volume, verifier: absent in profiles saved before PROFILES_VERSION 5. A module ID that this version does not know drops.
 // variants: absent in older profiles. A variant name that this version does not know drops. The list keeps the VARIANTS order.
 export const profilePrompt = z.string().trim().min(1).max(MAX_NOTE);
@@ -200,6 +201,7 @@ export const profileInput = z
     explain: z.boolean(),
     docs: z.boolean(),
     languageChecks: z.boolean().default(false),
+    jiraFamily: z.boolean().default(false),
     maxTurns: z.number().int().min(2).max(1000),
     skills: z
       .array(skillId)
