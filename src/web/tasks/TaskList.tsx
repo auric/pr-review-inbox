@@ -59,11 +59,12 @@ export function TaskList(props: {
       aria-labelledby="view-name"
       onFocus={props.onFocus}
       className={cn(
-        "rl-pane rl-list grid grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)_auto] border-r bg-pane-2",
+        // The header row may shrink below its content, so a tall Build form scrolls in the header and never runs past the pane.
+        "rl-pane rl-list grid grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,auto)_auto_minmax(0,1fr)_auto] border-r bg-pane-2",
         props.focused && "pane-edge",
       )}
     >
-      <header className="grid grid-cols-[minmax(0,1fr)] gap-2.5 border-b px-4 pt-3.5 pb-3">
+      <header className="grid grid-cols-[minmax(0,1fr)] gap-2.5 overflow-y-auto overscroll-contain border-b px-4 pt-3.5 pb-3">
         <div className="flex items-baseline gap-2">
           <button
             type="button"
@@ -442,7 +443,7 @@ function NewTask(props: {
           {error}
         </p>
       )}
-      <div className="flex gap-2">
+      <div className="sticky -bottom-3 z-[1] -mb-3 flex gap-2 bg-pane-2 pt-1 pb-3">
         <Button type="submit" size="sm" disabled={busy || !chosen}>
           {read ? (busy ? "Starting…" : "Build this task") : busy ? "Reading…" : "Read the task"}
         </Button>

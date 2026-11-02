@@ -370,7 +370,10 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
         </DialogContent>
       </Dialog>
       <Dialog open={copying !== null} onOpenChange={(on) => !on && setCopying(null)}>
-        <DialogContent className="sm:max-w-[480px]" onKeyDown={dialogKeys(() => setCopying(null))}>
+        <DialogContent
+          className="flex max-h-[min(44rem,calc(100dvh-2rem))] flex-col sm:max-w-[480px]"
+          onKeyDown={dialogKeys(() => setCopying(null))}
+        >
           {source && copying !== null && (
             <>
               <DialogHeader>
@@ -382,7 +385,12 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
                 </DialogDescription>
               </DialogHeader>
               {targets.length > 0 && (
-                <ul aria-label="Profiles that change" className="m-0 list-disc pl-5 text-sm">
+                <ul
+                  aria-label="Profiles that change"
+                  // biome-ignore lint/a11y/noNoninteractiveTabindex: a scroll region needs keyboard focus.
+                  tabIndex={0}
+                  className="m-0 min-h-0 flex-1 list-disc overflow-auto rounded-sm pl-5 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                >
                   {targets.map((j) => (
                     <li key={drafts[j]?.key}>{profileLabel(drafts[j] as Draft, j)}</li>
                   ))}

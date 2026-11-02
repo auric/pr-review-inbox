@@ -442,6 +442,11 @@ jira.token = E2E_JIRA_TOKEN;
 jira.addIssue(JIRA_ISSUE);
 // docs/plans/review-v2/spec.md section 6.20: the parent ABC-10 with ABC-11 done, ABC-12 in progress, and ABC-13 and ABC-14 to do.
 jira.addSubtaskSet();
+// The parent BIG-1 with 40 sub-tasks to do, BIG-2 to BIG-41, for the Build form in a short window (task-many-subtasks.e2e.ts).
+jira.addSubtasks(
+  "BIG-1",
+  Array.from({ length: 40 }, (_, i) => ({ key: `BIG-${i + 2}`, summary: `Measure the cache step ${i + 2}`, category: "new" as const })),
+);
 // A Jira Cloud fake on a free port for the email login. It needs JIRA_EMAIL and E2E_JIRA_TOKEN.
 const jiraCloud = startFakeJira({ cloud: true });
 jiraCloud.token = E2E_JIRA_TOKEN;

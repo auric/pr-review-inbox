@@ -42,7 +42,10 @@ export function JiraMoveDialog(props: {
   const moves = list.data?.transitions ?? [];
   return (
     <Dialog open={issue !== null} onOpenChange={close}>
-      <DialogContent className="sm:max-w-[460px]" onKeyDown={dialogKeys(() => close(false))}>
+      <DialogContent
+        className="flex max-h-[min(44rem,calc(100dvh-2rem))] flex-col sm:max-w-[460px]"
+        onKeyDown={dialogKeys(() => close(false))}
+      >
         <DialogHeader>
           <DialogTitle>
             Move <span translate="no">{issue?.key}</span> in {props.tracker}?
@@ -53,7 +56,7 @@ export function JiraMoveDialog(props: {
         </DialogHeader>
         <form
           id="tracker-move"
-          className="grid gap-2 text-sm"
+          className="-mx-1 grid min-h-0 flex-1 gap-2 overflow-auto px-1 text-sm"
           onSubmit={async (e) => {
             e.preventDefault();
             if (!issue || !pick) return setError("Pick a move first.");
