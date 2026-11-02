@@ -325,7 +325,7 @@ The user decided on 2026-10-28: the user's own inline comments count as must-fin
 
 ## 10. Wave 5: recall on large PRs (planned 2026-11-01)
 
-Status: planned. U-V1 ended on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removes the variant code. WP-V4 must not change PROFILES_VERSION or REVIEW_PROMPT_VERSION, so eval:ab can reuse the 2026-10-31 baseline (ab.ts reuseRefusal). W5 runs before W3.
+Status: stopped on 2026-11-01 after U-V4 step 1 (docs/eval/results.md): parts worked but found no more bugs, and the local set cannot measure recall on large PRs. Parts stays an opt-in variant. WP-V15 and WP-V16 are cancelled. U-V1 ended on 2026-10-31 with no winner, so WP-V4 only removes the variant code. WP-V4 must not change PROFILES_VERSION or REVIEW_PROMPT_VERSION, so eval:ab can reuse the 2026-10-31 baseline (ab.ts reuseRefusal). W5 runs before W3.
 
 ### 10.1 Decision summary
 
