@@ -29,6 +29,7 @@ import {
 } from "./review";
 import type { RunErrorKind, RunEvent, RunStatus } from "./run-log";
 import {
+  BUILDS_AT_ONCE_CAP,
   commandId,
   type FoundItem,
   INTERVIEW_QUESTIONS,
@@ -1361,6 +1362,7 @@ export const taskPlanInput = z.object({
     .optional(),
   // spec.md section 6.20.5: the plan of a sub-task task. parts: the start of each plan part n; after names a part number or a tracked
   // sub-task key. existing: the found branch of the part key. track: the PR that the app follows for a sub-task with several open PRs.
+  // buildsAtOnce (section 6.20.6): the parts that build at the same time. Absent: the stored value.
   subtasks: z
     .object({
       parts: z
@@ -1375,6 +1377,7 @@ export const taskPlanInput = z.object({
         .max(SUBTASK_PARTS_MAX),
       track: z.array(z.object({ key: z.string().regex(JIRA_KEY), pr: positiveInt })).max(SUBTASKS_READ),
       maxOpen: z.number().int().min(1).max(MAX_OPEN_CAP),
+      buildsAtOnce: z.number().int().min(1).max(BUILDS_AT_ONCE_CAP).optional(),
     })
     .optional(),
 });

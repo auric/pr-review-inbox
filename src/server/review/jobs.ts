@@ -381,6 +381,8 @@ type TaskJob = {
   candidates?: number;
   abort?: AbortController;
   t: TaskRunStart | ImplementRunStart | TaskReviewStart;
+  // A run beside the run slot (taskRun with extra): its own runner, because one runner runs one process.
+  runner?: ReturnType<typeof createClaudeRunner>;
 };
 
 // done: resolves after the run end and its effect.
@@ -407,6 +409,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   const docServers = createDocServers(opts.listTools);
   const recovered = new WeakSet<Database>();
   let job: Job | TaskJob | null = null;
+  // docs/plans/review-v2/spec.md section 6.20.6: the steps of a task that builds two or more parts at the same time run beside the slot.
+  // The task loop starts at most one step per part, so the parts limit of the task bounds them.
+  const extras = new Set<TaskJob>();
+  const runnerOf = (j: Job | TaskJob) => (j.pr === null ? (j.runner ?? runner) : runner);
   let checked: RunnerCheck | null = null;
   let pruned: Promise<void> | null = null;
 
@@ -1203,7 +1209,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // No await between this check and run(), so a later Cancel reaches the new process.
     if (j.cancelled) return cancelledEnding(o);
     const startedAt = now();
-    const o2 = await runner.run(
+    const o2 = await runnerOf(j).run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1448,7 +1454,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           // No await between the cancel check and run(), so a later Cancel reaches the process.
           if (j.cancelled) early = cancelledEnding();
           else
-            o = await runner.run(
+            o = await runnerOf(j).run(
               {
                 implement: true,
                 cwd,
@@ -1565,7 +1571,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const findStart = now();
     // No await between this check and run(), so a later Cancel reaches the process.
     if (j.cancelled) return cancelledEnding();
-    const o = await runner.run(
+    const o = await runnerOf(j).run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1721,10 +1727,23 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     runner.cancel();
     return true;
   }
+  // The runs beside the slot that pick selects, all when absent.
+  function cancelExtras(pick: (j: TaskJob) => boolean = () => true) {
+    let n = 0;
+    for (const j of extras)
+      if (pick(j)) {
+        j.cancelled = true;
+        j.abort?.abort();
+        j.runner?.cancel();
+        n++;
+      }
+    return n > 0;
+  }
 
   // A settings change closes the database of the run.
   settings.onSettingsChanged(() => {
     cancelActive();
+    cancelExtras();
   });
 
   // docs/plans/review-v2/spec.md AC-B18: a start during a step of a task names the pause action of that task.
@@ -2003,9 +2022,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // Cancels the active run and the running prompt proposal, stops the task loop, and waits for their end.
     async stop() {
       const j = job;
+      const side = [...extras].map((x) => x.done);
       const loops = [...stoppers].map((f) => f());
       cancelActive();
-      await Promise.all([j?.done, improve.stop(), ...loops]);
+      cancelExtras();
+      await Promise.all([j?.done, ...side, improve.stop(), ...loops]);
     },
     // f runs in stop(). The returned function drops it.
     onStop(f: () => Promise<void>): () => void {
@@ -2023,7 +2044,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     },
     improve,
     // Resolves when no run is active.
-    wait: () => job?.done ?? Promise.resolve(),
+    wait: () => Promise.all([job?.done, ...[...extras].map((x) => x.done)]).then(() => undefined),
     runnerCheck: (): RunnerCheckDto | null => (checked ? toCheckDto(checked) : null),
     hasProfile: (id: string) => settings.profiles().some((p) => p.id === id),
 
@@ -2329,9 +2350,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       return job?.id === run && job.db === db && cancelActive() ? "cancelled" : "not_running";
     },
 
-    // The task Stop only. cancel() finds no task run, because runRow joins pull_request and a task run has pr NULL.
+    // The task Stop only. cancel() finds no task run, because runRow joins pull_request and a task run has pr NULL. It cancels every run
+    // of the task: the run in the slot and the runs beside it.
     cancelTask(db: Database, task: number): boolean {
-      return job?.pr === null && job.db === db && job.t.task === task && cancelActive();
+      const side = cancelExtras((j) => j.db === db && j.t.task === task);
+      return (job?.pr === null && job.db === db && job.t.task === task && cancelActive()) || side;
     },
 
     // The run that holds the one slot, or null.
@@ -2340,9 +2363,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     taskRemote,
 
     // docs/plans/review-v2/spec.md sections 6.2 and 6.7: starts an interview, spec, implement, or own review run of a task in the one
-    // slot. The row has pr NULL.
-    taskRun(db: Database, t: TaskRunStart | ImplementRunStart | TaskReviewStart): TaskStartResult {
-      if (job) return { status: 409, conflict: busyConflict(job) };
+    // slot. The row has pr NULL. extra (section 6.20.6): a step of a task that builds two or more parts at the same time. It runs beside
+    // the slot with its own runner, so it never waits for a review and a review never waits for it.
+    taskRun(db: Database, t: TaskRunStart | ImplementRunStart | TaskReviewStart, extra = false): TaskStartResult {
+      if (job && !extra) return { status: 409, conflict: busyConflict(job) };
       const p = t.profile;
       const id = db.transaction(() => {
         const row = db.query(SQL.taskInsert).get({
@@ -2361,8 +2385,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         return row.id;
       })();
       const j: TaskJob = { id, pr: null, kind: t.kind, key: t.key, db, profile: p, cancelled: false, done: Promise.resolve(), t };
-      job = j;
+      if (extra) {
+        j.runner = createClaudeRunner({ command: opts.runnerCommand });
+        extras.add(j);
+      } else job = j;
       j.done = executeTask(j).finally(() => {
+        extras.delete(j);
         if (job === j) job = null;
         wake();
         if (timer) return new Promise<void>((r) => flushed.push(r));

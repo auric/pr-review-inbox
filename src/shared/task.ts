@@ -148,6 +148,10 @@ export const SUBTASKS_READ = 20;
 export const SUBTASK_PARTS_MAX = 12;
 export const MAX_OPEN_CAP = 5;
 export const MAX_OPEN_DEFAULT = 3;
+// spec.md section 6.20.6 (user decision of 2026-11-02): the parts of one task that build at the same time. 1 builds one part after the
+// other. Each part at once is one more Claude process.
+export const BUILDS_AT_ONCE_CAP = 3;
+export const BUILDS_AT_ONCE_DEFAULT = 2;
 export const JIRA_STATUS_AGE_MS = 5 * 60_000;
 export const JIRA_VIEW_AGE_MS = 60_000;
 export const FOUND_CHANGES_MAX = 100;
@@ -325,6 +329,8 @@ export type TaskCommand = z.infer<typeof taskCommand>;
 export const taskSettings = z.object({
   lineBudget: z.number().int().positive().optional(),
   maxOpen: z.number().int().positive().optional(),
+  // spec.md section 6.20.6: a task with sub-tasks only. Absent: BUILDS_AT_ONCE_DEFAULT.
+  buildsAtOnce: z.number().int().min(1).max(BUILDS_AT_ONCE_CAP).optional(),
   approvals: z.number().int().nonnegative().optional(),
   autoOpen: z.boolean().optional(),
   pauseAfterTask: z.boolean().optional(),
@@ -462,9 +468,10 @@ const specPart = z.object({
     )
     .min(1)
     .max(15),
-  // spec.md section 6.20.4: sub-task mode only. after: a part number such as "2", or the key of a tracked sub-task.
+  // spec.md section 6.20.4: sub-task mode only. after: a part number such as "2", or the key of a tracked sub-task. A part without a start
+  // builds on the part before it (user decision of 2026-11-02).
   keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([]),
-  start: z.enum(START_MODES).default("base"),
+  start: z.enum(START_MODES).default("stack"),
   after: z.string().max(40).nullable().default(null),
   startReason: z.string().max(300).default(""),
 });

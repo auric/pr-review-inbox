@@ -166,6 +166,11 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
   );
   await expect(page.locator('[data-plan-row="ABC-13"]')).toContainText("about 100 lines");
   await expect(page.getByText("proposes 2: Two sub-tasks can run side by side.")).toBeVisible();
+  // spec.md section 6.20.6: "Parts that build at once" starts at 2, and its value goes with the approval.
+  const builds = page.getByLabel("Parts that build at once");
+  await expect(builds).toHaveValue("2");
+  await expect(page.getByText("The app builds at most this many parts at the same time. 1 builds one part after the other.")).toBeVisible();
+  await builds.fill("1");
   // ABC-14 starts after ABC-13 merges.
   await page.locator("#plan-start-2").selectOption({ label: "After another sub-task merges" });
   await expect(page.getByLabel("After the merge of")).toHaveValue("1");
@@ -179,6 +184,7 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
 
   // 3. The build of ABC-13. ABC-14 waits for its merge. Nothing went out before the click.
   await expect(status(page)).toHaveText(/^ABC-13 \(\d of 3\) is ready and checked by \S+\.$/, { timeout: 180_000 });
+  expect(((await api(page, "GET", `/api/tasks/${id}`)).json as { settings: { buildsAtOnce?: number } }).settings.buildsAtOnce).toBe(1);
   await expect(primary(page)).toHaveCount(1);
   await expect(primary(page)).toHaveText("Open the PR");
   await expect(row(page, "ABC-11")).toContainText("Done in Jira.");

@@ -3,6 +3,7 @@
 
 // Indexes the run's sanitized repo/ for a picked codegraph MCP server. Never run it in the user's clone.
 // codegraph 1.6.2 CLI: `init --yes <path>`, `sync <path>`, `status --json <path>`, `serve --mcp --path <path> --no-watch`.
+import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { childEnv, killTree, type UserMcpEntry } from "./claude";
@@ -131,7 +132,8 @@ export async function indexCodegraph(input: IndexInput): Promise<string | null> 
   // SQLite WAL mode: a WAL file with data means the db file alone is not complete. Skip the cache then.
   const wal = `${db}-wal`;
   if (!existsSync(wal) || statSync(wal).size === 0) {
-    const tmp = `${cacheDb}.${process.pid}.tmp`;
+    // Two parts of one task can index at the same time (spec.md section 6.20.6), so each copy gets its own temp name.
+    const tmp = `${cacheDb}.${process.pid}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dirname(cacheDb), { recursive: true });
       copyFileSync(db, tmp);

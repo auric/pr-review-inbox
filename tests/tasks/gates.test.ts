@@ -44,13 +44,16 @@ const build = (id: number, counts: Partial<typeof ZERO>, head = HEAD) =>
     .run({ pr: id, head, stats: JSON.stringify({ ...ZERO, ...counts }) });
 
 // A task with sub-tasks in state implementing, and one part per entry. after: the index of the lower part in the list.
-function task(parts: { state: string; pr?: number | null; start?: string; after?: number }[], o: { approvals?: number } = {}) {
+function task(
+  parts: { state: string; pr?: number | null; start?: string; after?: number }[],
+  o: { approvals?: number; buildsAtOnce?: number } = {},
+) {
   const id = (
     db
       .query(`INSERT INTO task (project, repo, key, title, state, size, target_branch, spec_dir, settings_json, subtasks, created_at,
           updated_at)
         VALUES ('PROJ', 'repo', $key, 'T', 'implementing', 'small', 'main', 'specs/K/', $settings, 1, 1, 1) RETURNING id`)
-      .get({ key: `ABC-${1000 + prSeq++}`, settings: JSON.stringify(o.approvals === undefined ? {} : { approvals: o.approvals }) }) as {
+      .get({ key: `ABC-${1000 + prSeq++}`, settings: JSON.stringify(o) }) as {
       id: number;
     }
   ).id;
@@ -260,7 +263,10 @@ describe("startable: the sync kicks the loop only for a task with a startable pa
   });
 
   test("no kick while a part builds, at the limit, for a blocked task, or for a task in another state", () => {
-    expect(startable(db, task([{ state: "implementing" }, { state: "planned" }]).id)).toBe(false);
+    // spec.md section 6.20.6: buildsAtOnce 1 builds one part after the other. The default of 2 starts a second part beside it.
+    expect(startable(db, task([{ state: "implementing" }, { state: "planned" }], { buildsAtOnce: 1 }).id)).toBe(false);
+    expect(startable(db, task([{ state: "implementing" }, { state: "planned" }]).id)).toBe(true);
+    expect(startable(db, task([{ state: "implementing" }, { state: "implementing" }, { state: "planned" }]).id)).toBe(false);
     const open = Array.from({ length: 3 }, () => ({ state: "pr_open", pr: pr("OPEN") }));
     expect(startable(db, task([...open, { state: "planned" }]).id)).toBe(false);
     const blocked = task([{ state: "planned" }]);

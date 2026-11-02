@@ -205,13 +205,13 @@ describe("the app checks of the plan (spec.md section 6.20.4, AC-B75)", () => {
       "Part 5 names ABC-4, which is no open sub-task without a PR. The part leaves it out.",
       "Part 5 builds no open sub-task without a PR. The app leaves it out.",
       "ABC-2 needs ABC-4, which is done. It starts from develop.",
-      // Part 5 gets no row, so no part can build on it.
-      "ABC-5 builds on 5, which is no part of the plan. It starts from develop.",
+      // Part 5 gets no row, so no part can build on it. Part 2 builds on the part before it (user decision of 2026-11-02).
+      "ABC-5 builds on 5, which is no part of the plan. It builds on ABC-2.",
       "ABC-6 cannot build on ABC-7, because ABC-7 builds on ABC-6.",
     ]);
     expect(p.starts.map((s) => [s.n, s.keys, s.start, s.after, s.skip])).toEqual([
       [1, ["ABC-2"], "base", null, false],
-      [2, ["ABC-5"], "base", null, false],
+      [2, ["ABC-5"], "stack", "1", false],
       [3, ["ABC-6"], "stack", "4", false],
       [4, ["ABC-7"], "merge", "3", false],
       [5, [], "base", null, true],
@@ -221,6 +221,62 @@ describe("the app checks of the plan (spec.md section 6.20.4, AC-B75)", () => {
     const q = checkSubtaskPlan(specResult.parse({ ...echoSpec(), parts: [part(1, { keys: ["ABC-2"] })], maxOpen: 2 }), rows, "main");
     expect(q.notes).toEqual(["Claude planned no PR for ABC-5.", "Claude planned no PR for ABC-6.", "Claude planned no PR for ABC-7."]);
     expect(q.maxOpen.value).toBe(2);
+  });
+
+  test("a part that Claude does not mark as independent builds on the part before it in Jira order (user decision of 2026-11-02)", () => {
+    // Jira order: ABC-4, ABC-2, ABC-3, ABC-5. The plan order differs.
+    const rows = [row("ABC-2", { ord: 2 }), row("ABC-3", { ord: 3 }), row("ABC-4", { ord: 1 }), row("ABC-5", { ord: 4 })];
+    const r = specResult.parse({
+      ...echoSpec(),
+      parts: [
+        // No start: the schema gives stack with no after.
+        part(1, { keys: ["ABC-2"] }),
+        // base with a reason: independent.
+        part(2, { keys: ["ABC-3"], start: "base", startReason: "It changes only the docs." }),
+        // base without a reason, and first in Jira order: nothing comes before it.
+        part(3, { keys: ["ABC-4"], start: "base" }),
+        // base without a reason: unsure. The part before it in Jira order (ABC-3) leads to no cycle.
+        part(4, { keys: ["ABC-5"], start: "base" }),
+      ],
+    });
+    const p = checkSubtaskPlan(r, rows, "develop");
+    expect(p.starts.map((s) => [s.n, s.start, s.after])).toEqual([
+      [1, "stack", "3"],
+      [2, "base", null],
+      [3, "base", null],
+      [4, "stack", "2"],
+    ]);
+    expect(p.notes).toEqual([
+      "ABC-2 names no part to build on. It builds on ABC-4.",
+      "ABC-5 has no reason to start from develop. It builds on ABC-3.",
+    ]);
+    // The part before it in Jira order builds on it, so the next earlier part that leads to no cycle takes its place.
+    const q = checkSubtaskPlan(
+      specResult.parse({
+        ...echoSpec(),
+        parts: [
+          part(1, { keys: ["ABC-4"], start: "base", startReason: "Alone." }),
+          part(2, { keys: ["ABC-2"], start: "stack", after: "3" }),
+          part(3, { keys: ["ABC-3"], start: "stack", after: "9" }),
+        ],
+      }),
+      rows,
+      "develop",
+    );
+    expect(q.starts.map((s) => [s.n, s.start, s.after])).toEqual([
+      [1, "base", null],
+      [2, "stack", "3"],
+      [3, "stack", "1"],
+    ]);
+    expect(q.notes).toEqual(["ABC-3 builds on 9, which is no part of the plan. It builds on ABC-4.", "Claude planned no PR for ABC-5."]);
+    // Only one part, with an after that names no part: it starts from the base, as before.
+    const one = checkSubtaskPlan(
+      specResult.parse({ ...echoSpec(), parts: [part(1, { keys: ["ABC-2"], start: "merge", after: "7" })] }),
+      rows,
+      "develop",
+    );
+    expect(one.starts.map((s) => [s.start, s.after])).toEqual([["base", null]]);
+    expect(one.notes[0]).toBe("ABC-2 builds on 7, which is no part of the plan. It starts from develop.");
   });
 
   test("the approval: a pick of several open PRs, a cycle, an unknown after, a split, and the continue rule", () => {
@@ -471,8 +527,11 @@ describe("found work, the plan, and its approval (spec.md sections 6.20.2, 6.20.
       const writes = h.writes();
       expect((await approve()).body.error).toBe("Pick the PR that the app tracks for ABC-14.");
       const track = [{ key: "ABC-14", pr: b }];
-      const plan = (parts: unknown[], maxOpen = 4) => ({ parts, track, maxOpen });
+      const plan = (parts: unknown[], maxOpen = 4) => ({ parts, track, maxOpen, buildsAtOnce: 1 });
       expect((await approve(plan([], 6))).status).toBe(400);
+      // spec.md section 6.20.6: parts at once from 1 to BUILDS_AT_ONCE_CAP.
+      expect((await approve({ ...plan([]), buildsAtOnce: 4 })).status).toBe(400);
+      expect((await approve({ ...plan([]), buildsAtOnce: 0 })).status).toBe(400);
       expect((await approve({ ...plan([]), track: [{ key: "ABC-14", pr: gen }] })).body.error).toBe(`PR #${gen} is no open PR of ABC-14.`);
       expect((await approve(plan([{ n: 2, start: "base", after: null }]))).body.error).toBe("Part 2 is not in the plan.");
       const unknown = await approve(plan([{ n: 1, start: "merge", after: "2" }]));
@@ -484,6 +543,7 @@ describe("found work, the plan, and its approval (spec.md sections 6.20.2, 6.20.
       const done = ok.body;
       expect(done.state).toBe("implementing");
       expect(done.settings.maxOpen).toBe(4);
+      expect(done.settings.buildsAtOnce).toBe(1);
       const byKey = (k: string) => done.parts.find((p) => p.keys[0] === k);
       const tracked = byKey("ABC-12");
       expect(done.parts.map((p) => [p.ord, p.keys, p.branch, p.baseBranch, p.start, p.adopted, p.specDir, p.state, p.remotePr])).toEqual([

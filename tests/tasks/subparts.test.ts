@@ -181,7 +181,8 @@ async function setup(o: { maxOpen: number }) {
         dir: `specs/${PARENT}/`,
         docs: JSON.stringify(docs),
         estimate: JSON.stringify(plan.estimate),
-        settings: JSON.stringify({ branchPrefix: "feature/", existing: "continue", maxOpen: o.maxOpen }),
+        // buildsAtOnce 1: one part after the other, so the steps take the seq entries in order. concurrent.test.ts covers 2.
+        settings: JSON.stringify({ branchPrefix: "feature/", existing: "continue", maxOpen: o.maxOpen, buildsAtOnce: 1 }),
         issue: JSON.stringify(issue(PARENT, "Speed up the cache", "9001")),
       }) as { id: number }
   ).id;

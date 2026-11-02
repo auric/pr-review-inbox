@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A Jira task with sub-tasks now builds sub-tasks that do not wait for each other at the same time. "Parts that build at once" on the plan screen sets how many, from 1 to 3. The default is 2, and 1 builds one sub-task after the other. With 2 or more, these builds run beside your reviews, so a review never waits for them. Stop stops every build of the task.
+- When Claude does not say why a sub-task needs no other sub-task, the plan now puts it on top of the sub-task before it in Jira order. A line on the plan screen says so, and you can change the start.
 - Build a Jira task steps now get all your skills and the skills in `.claude/skills` of the repository, read from the base branch. A repository skill wins over your skill with the same name. Each step gets a skills index and opens only the skills that apply. Reviews still get only the skills that you tick.
 - A review profile can now include the Jira parent and sub-tasks. Turn on "Include the Jira parent and sub-tasks" in Settings, Review profiles. The review then reads the parent summary, status, and description, and the key, summary, and status of each sub-task. It is off by default.
 - Jira Cloud now works. In Settings, Jira, enter your Atlassian account email and an API token without scopes. For Jira Server or Data Center, leave the email empty and use a personal access token. A login form that does not fit the Jira type shows a clear message.

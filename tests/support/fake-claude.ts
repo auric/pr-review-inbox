@@ -59,6 +59,10 @@ export type FakeScenario = {
   taskReview?: unknown;
   // Fields for the Nth run of one call key (callKey), after bySchema. The last entry repeats. The record file counts the earlier runs.
   seq?: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq">>[]>;
+  // Fields for a run whose ./context Markdown files hold the text when, after seq. The first entry that matches wins. Its seq counts only
+  // the earlier runs of the same call key that matched it, so runs that start at the same time (spec.md section 6.20.6) get their own
+  // entries.
+  match?: { when: string; seq: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq" | "match">>[]> }[];
 };
 
 export type SchemaKind = "verify" | "explain" | "discuss" | "interview" | "spec" | "implement" | "review";
@@ -310,17 +314,9 @@ async function main() {
   const stdin = run ? await Bun.stdin.text() : "";
   const key = callKey(args, stdin);
   const list = key ? base.seq?.[key] : undefined;
-  const earlier = list
-    ? readRecords<{ argv?: string[]; stdin?: string }>(base.record).filter(
-        (r) => Array.isArray(r.argv) && callKey(r.argv, r.stdin ?? "") === key,
-      ).length
-    : 0;
-  const s: FakeScenario = {
-    ...base,
-    ...(kind ? base.bySchema?.[kind] : undefined),
-    ...(list?.length ? list[Math.min(earlier, list.length - 1)] : undefined),
-  };
-  const record = (x: Record<string, unknown>) => appendFileSync(s.record, `${JSON.stringify(x)}\n`);
+  type Rec = { argv?: string[]; stdin?: string; context?: Record<string, string> };
+  const same = (r: Rec) => Array.isArray(r.argv) && callKey(r.argv, r.stdin ?? "") === key;
+  const earlier = list ? readRecords<Rec>(base.record).filter(same).length : 0;
   // The Markdown files of ./context at the start, by path under it, and the names in ./context/attachments/. A run folder goes away
   // after its run.
   const context: Record<string, string> = {};
@@ -328,6 +324,17 @@ async function main() {
   if (run && existsSync(ctx))
     for (const f of readdirSync(ctx, { recursive: true, encoding: "utf8" }))
       if (f.endsWith(".md") && statSync(join(ctx, f)).isFile()) context[f.replaceAll("\\", "/")] = readFileSync(join(ctx, f), "utf8");
+  const holds = (c: Record<string, string> | undefined, text: string) => Object.values(c ?? {}).some((t) => t.includes(text));
+  const hit = key ? base.match?.find((m) => holds(context, m.when)) : undefined;
+  const mine = hit && key ? hit.seq[key] : undefined;
+  const before = mine ? readRecords<Rec>(base.record).filter((r) => same(r) && holds(r.context, hit?.when ?? "")).length : 0;
+  const s: FakeScenario = {
+    ...base,
+    ...(kind ? base.bySchema?.[kind] : undefined),
+    ...(list?.length ? list[Math.min(earlier, list.length - 1)] : undefined),
+    ...(mine?.length ? mine[Math.min(before, mine.length - 1)] : undefined),
+  };
+  const record = (x: Record<string, unknown>) => appendFileSync(s.record, `${JSON.stringify(x)}\n`);
   const att = join(ctx, "attachments");
   const attachments = run && existsSync(att) ? readdirSync(att).sort() : [];
   // The files of ./skills, and the servers of --mcp-config. The run folder and the MCP file go away after the run.

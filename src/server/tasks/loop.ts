@@ -67,7 +67,9 @@ import {
   advancePart,
   baseCheckOf,
   budgetOf,
+  buildsAtOnceOf,
   currentPart,
+  holdBlocked,
   instructTarget,
   keysOf,
   type LowerPart,
@@ -76,6 +78,7 @@ import {
   moreTime,
   mustFixPoint,
   openPoints,
+  PAUSED,
   partDocsOf,
   partNames,
   repoSettings,
@@ -84,6 +87,7 @@ import {
   setBlocked,
   setLowerHow,
   setSettings,
+  softReason,
   stepAnswers,
   stopForRun,
   TASK_CHANGED,
@@ -148,7 +152,8 @@ export const TEST_FIX_TRIES = 3;
 export const REVIEW_FIX_TRIES = 2;
 // spec.md section 6.1, Counting: the excluded globs when the repository sets none.
 export const LOCK_GLOBS = ["bun.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock", "*.lock"];
-export const PAUSED = "Building is paused after the step. Continue?";
+export { PAUSED };
+
 // The part states with a worktree (tasks.ts HAS_WORKTREE).
 const WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 // spec.md sections 6.20.6 and 6.20.7: a PR that colleagues review, a started part, and a part that keeps the task in implementing.
@@ -392,13 +397,28 @@ export function createLoop(opts: LoopOptions) {
   const { review, settings, live } = opts;
   const now = opts.now ?? Date.now;
   const dataDir = review.dataDir;
-  // One driver per task. It awaits each step and ends at the first blocked reason.
+  // One driver per task. It awaits each step and ends at the first blocked reason. spec.md section 6.20.6: the driver of a task with
+  // sub-tasks builds up to buildsAtOnce parts at the same time, so the gates and the aborts of one task are sets.
   const drivers = new Map<number, Promise<void>>();
-  // Pause after this step: the next Claude step waits at the gate until Resume.
+  // Pause after this step: the next Claude step of each part waits at the gate until Resume.
   const pauseAsked = new Set<number>();
-  const gates = new Map<number, () => void>();
+  const gates = new Map<number, Set<() => void>>();
   const slotWaits = new Map<number, () => void>();
-  const aborts = new Map<number, AbortController>();
+  const aborts = new Map<number, Set<AbortController>>();
+  // A kick while the driver builds: the driver asks the scheduler again.
+  const pokes = new Map<number, () => void>();
+  const enter = <T>(m: Map<number, Set<T>>, id: number, v: T) => m.set(id, (m.get(id) ?? new Set<T>()).add(v));
+  const leave = <T>(m: Map<number, Set<T>>, id: number, v: T) => {
+    const s = m.get(id);
+    s?.delete(v);
+    if (s?.size === 0) m.delete(id);
+  };
+  const openGates = (id: number) => {
+    for (const g of [...(gates.get(id) ?? [])]) g();
+  };
+  const abortChecks = (id: number) => {
+    for (const a of aborts.get(id) ?? []) a.abort();
+  };
   // spec.md section 6.18: the driver of an instruct step or an update, and its Stop. A Stop of them keeps the task state.
   const modes = new Map<number, Exclude<DriverMode, "build">>();
   const stopping = new Set<number>();
@@ -420,14 +440,19 @@ export function createLoop(opts: LoopOptions) {
     return r.success ? r.data : null;
   };
   const parts = (db: Database, id: number) => db.query(Q.parts).all({ task: id }) as PartRow[];
-  const building = (db: Database, id: number) => parts(db, id).find((p) => p.state === "implementing") ?? null;
+  const buildingAll = (db: Database, id: number) => parts(db, id).filter((p) => p.state === "implementing");
+  const building = (db: Database, id: number) => buildingAll(db, id)[0] ?? null;
+  // spec.md section 6.20.6: a reason holds every part of the task. A pause and a wait for the run slot hold no other part.
+  const blocks = (t: TaskRow) => t.blocked_json !== null && !softReason(blockedOf(t));
 
   // Sets the reason while the task builds, or while an instruct step or an update runs on a built part (spec.md section 6.18). block()
-  // also ends the driver.
+  // also ends the driver. A reason never replaces the reason of another part (tasks.ts holdBlocked).
   function reason(db: Database, id: number, b: TaskBlocked | null) {
     db.transaction(() => {
       const cur = taskRow(db, id);
-      if (cur?.state === "implementing" || cur?.state === "ready") setBlocked(db, { task: id, version: cur.version }, b, now());
+      if (cur?.state !== "implementing" && cur?.state !== "ready") return;
+      if (b === null) setBlocked(db, { task: id, version: cur.version }, null, now());
+      else holdBlocked(db, cur, b, now());
     })();
     changed(id);
   }
@@ -439,8 +464,14 @@ export function createLoop(opts: LoopOptions) {
   const isLive = (c: Pick<Ctx, "db" | "id" | "mode">) => {
     const t = taskRow(c.db, c.id);
     const state = t?.state === "implementing" || (c.mode !== "build" && t?.state === "ready");
-    return !closing && !stopping.has(c.id) && state && t?.blocked_json === null;
+    return !closing && !stopping.has(c.id) && state && !!t && !blocks(t);
   };
+  const held = (c: Pick<Ctx, "db" | "id">) => {
+    const t = taskRow(c.db, c.id);
+    return !t || blocks(t);
+  };
+  // spec.md section 6.20.6: a task that builds two or more parts at the same time runs its Claude steps beside the run slot.
+  const beside = (c: Pick<Ctx, "db" | "id" | "t">) => buildsAtOnceOf(taskRow(c.db, c.id) ?? c.t) > 1;
   function guard(c: Ctx) {
     if (!isLive(c)) throw new Halt();
   }
@@ -554,11 +585,17 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // Pause after this step: the loop holds before it takes the run slot again, with every change of the done step kept.
+  // spec.md section 6.20.6: each part that builds holds at its own gate, and Resume opens them all.
   async function gate(c: Ctx) {
-    if (!pauseAsked.delete(c.id)) return;
+    if (!pauseAsked.has(c.id)) return;
+    guard(c);
     reason(c.db, c.id, { kind: "question", step: null, text: PAUSED });
-    await new Promise<void>((resolve) => gates.set(c.id, resolve));
-    gates.delete(c.id);
+    let open = () => {};
+    await new Promise<void>((resolve) => {
+      open = resolve;
+      enter(gates, c.id, resolve);
+    });
+    leave(gates, c.id, open);
     guard(c);
   }
 
@@ -613,6 +650,7 @@ export function createLoop(opts: LoopOptions) {
         instructions: o.instructions,
         resolveCheck: o.resolveCheck,
         live: () => isLive(c),
+        extra: beside(c),
         now,
       });
       if (s.status === 409 && "conflict" in s) {
@@ -640,6 +678,8 @@ export function createLoop(opts: LoopOptions) {
     if (!r?.result) throw r && !r.problems.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
     const fresh = r.changed.filter((p) => !before.has(p));
     const spec = fresh.filter((p) => under(p, c.specDir));
+    // spec.md section 6.20.6: the reason of another part stays, so this part writes no question or plan change row and halts.
+    if ((spec.length || r.result.question) && held(c)) throw new Halt();
     if (spec.length) {
       const attempt = (c.db.query(Q.rowAttempt).get({ id: r.step }) as { attempt: number }).attempt;
       const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "spec_change", item, attempt, state: "ok" }, now());
@@ -671,7 +711,7 @@ export function createLoop(opts: LoopOptions) {
   async function checks(c: Ctx, item: string, kinds = CHECK_KINDS, scope?: Scope, expectRed = false) {
     guard(c);
     const ac = new AbortController();
-    aborts.set(c.id, ac);
+    enter(aborts, c.id, ac);
     try {
       changed(c.id);
       const r = await checkStep({
@@ -696,7 +736,7 @@ export function createLoop(opts: LoopOptions) {
       guard(c);
       return r;
     } finally {
-      aborts.delete(c.id);
+      leave(aborts, c.id, ac);
     }
   }
 
@@ -891,7 +931,7 @@ export function createLoop(opts: LoopOptions) {
       };
       // headOf() awaited: a Stop can come before the run starts.
       guard(c);
-      const s = review.taskRun(c.db, start);
+      const s = review.taskRun(c.db, start, beside(c));
       if (s.status === 409) {
         waiting = await waitSlot(c, { kind: "review", item: "review", attempt }, s.conflict.running, waiting);
         continue;
@@ -1035,7 +1075,7 @@ export function createLoop(opts: LoopOptions) {
     const t = taskRow(db, id);
     if (t?.state !== "implementing" || t.blocked_json !== null) return null;
     const all = parts(db, id);
-    const pick = scheduleOf(db, t, all)?.start;
+    const pick = scheduleOf(db, t, all)?.starts[0];
     const part = pick ? all.find((p) => p.id === pick.id) : undefined;
     if (!pick || !part) return null;
     const lower = pick.on === null ? null : (all.find((p) => p.id === pick.on) ?? null);
@@ -1072,7 +1112,9 @@ export function createLoop(opts: LoopOptions) {
     }
     const started = db.transaction((): boolean => {
       const cur = taskRow(db, id);
-      if (cur?.state !== "implementing" || cur.blocked_json !== null || building(db, id)) return false;
+      if (cur?.state !== "implementing" || cur.blocked_json !== null) return false;
+      // The awaits above let other parts move: the part starts only when the scheduler still starts it.
+      if (!scheduleOf(db, cur, parts(db, id))?.starts.some((s) => s.id === part.id)) return false;
       const at = now();
       const row = { id: part.id, branch: b.branch, base: baseBranch, commit: b.base, pushed: b.lease, now: at };
       if (db.query(Q.partStart).run(row).changes !== 1) return false;
@@ -1082,7 +1124,7 @@ export function createLoop(opts: LoopOptions) {
       return true;
     })();
     changed(id);
-    return started ? (building(db, id) ?? null) : null;
+    return started ? (buildingAll(db, id).find((p) => p.id === part.id) ?? null) : null;
   }
 
   // The worktrees of every repository of a part (spec.md section 6.16.5). One repository: the main worktree only.
@@ -1177,55 +1219,95 @@ export function createLoop(opts: LoopOptions) {
     await ownReview(c);
     db.transaction(() => {
       const cur = taskRow(db, t.id);
-      if (cur?.state !== "implementing" || cur.blocked_json !== null) return;
+      if (cur?.state !== "implementing" || blocks(cur)) return;
       const p = advancePart(db, { task: t.id, version: cur.version, part: part.id }, { type: "REVIEWED" }, {}, now());
       if (p.status === 200) advance(db, { task: t.id, version: p.version }, { type: "PART_READY" }, {}, now());
     })();
     changed(t.id);
   }
 
-  // The parts that wait for their build, one after another. A task with sub-tasks asks the scheduler for the next part after each part
-  // (spec.md section 6.20.6) and stops when no part can start.
+  // The worktree of a part goes back to its last commit, and the other changes go to a patch (spec.md section 6.7, Resume).
+  async function resetPart(db: Database, t: TaskRow, part: PartRow) {
+    const base = baseOf(t, part);
+    if (!base) return;
+    const wt = await openWorktree({ dataDir, db, project: t.project, repo: t.repo, task: t.id, ord: part.ord, branch: part.branch, base });
+    const last = (db.query(Q.lastStep).get({ part: part.id }) as { id: number | null }).id ?? 0;
+    await undo(await trees(db, t, part, wt), db, t.id, last);
+  }
+
+  // The parts that wait for their build. A task with sub-tasks builds at most buildsAtOnce parts at the same time, each in its own
+  // worktree (spec.md section 6.20.6). It asks the scheduler again after each start, each end of a part, and each kick, and it ends when
+  // no part builds. The first reason holds every part: each one halts at its next step, and the driver ends. A part halts at most once per
+  // driver. A part that another driver left in its build goes back to its last commit first, because a reason of another part can halt it
+  // in the middle of a step.
   async function buildParts(db: Database, id: number) {
-    for (;;) {
-      const t = taskRow(db, id);
-      if (closing || !t || t.state !== "implementing" || t.blocked_json !== null) return;
-      const part = building(db, id) ?? (t.subtasks === 1 ? await startPart(db, id) : null);
-      if (!part) return;
-      await runPart(db, taskRow(db, id) as TaskRow, part);
+    const running = new Map<number, Promise<void>>();
+    const ended = new Set<number>();
+    let again = false;
+    let wake: (() => void) | null = null;
+    pokes.set(id, () => {
+      again = true;
+      wake?.();
+    });
+    const go = (part: PartRow, resumed: boolean) => {
+      const p = (async () => {
+        const t = taskRow(db, id) as TaskRow;
+        if (resumed && t.subtasks === 1) await resetPart(db, t, part);
+        await runPart(db, taskRow(db, id) as TaskRow, part);
+      })()
+        .catch((e) => failed(db, id, e))
+        .finally(() => {
+          running.delete(part.id);
+          ended.add(part.id);
+        });
+      running.set(part.id, p);
+    };
+    try {
+      for (;;) {
+        again = false;
+        const t = taskRow(db, id);
+        if (closing || stopping.has(id) || t?.state !== "implementing" || blocks(t)) {
+          // The parts that wait at a gate or for the run slot see the reason or the stop and halt.
+          pauseAsked.delete(id);
+          openGates(id);
+          slotWaits.get(id)?.();
+        } else {
+          for (const p of buildingAll(db, id)) if (!running.has(p.id) && !ended.has(p.id)) go(p, true);
+          if (t.subtasks === 1)
+            for (let p = await startPart(db, id); p; p = await startPart(db, id)) {
+              go(p, false);
+              if (closing) break;
+            }
+        }
+        if (!running.size) return;
+        if (!again)
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+            void Promise.race(running.values()).then(() => resolve());
+          });
+        wake = null;
+      }
+    } finally {
+      pokes.delete(id);
     }
   }
 
   async function drive(db: Database, id: number, reset: boolean) {
     try {
       await recoverUpdates(db, id);
-      if (reset) {
-        const t = taskRow(db, id);
-        const part = building(db, id);
-        const base = t && part ? baseOf(t, part) : null;
-        if (t && part && base) {
-          const wt = await openWorktree({
-            dataDir,
-            db,
-            project: t.project,
-            repo: t.repo,
-            task: id,
-            ord: part.ord,
-            branch: part.branch,
-            base,
-          });
-          const last = (db.query(Q.lastStep).get({ part: part.id }) as { id: number | null }).id ?? 0;
-          await undo(await trees(db, t, part, wt), db, id, last);
-        }
-      }
+      const t = taskRow(db, id);
+      if (reset && t) for (const part of buildingAll(db, id)) await resetPart(db, t, part);
       // spec.md section 6.16.7: the pre-flight passes before any Claude step of the build. A part of a task with sub-tasks runs it at its
-      // start (startPart).
+      // start (startPart), and again for each part that builds when a driver starts.
       const t0 = taskRow(db, id);
-      if (t0?.state === "implementing" && t0.blocked_json === null && (t0.subtasks !== 1 || building(db, id))) {
-        const b = await preflight(db, preflightDeps, t0, plannedBranch(db, t0), null);
-        if (b) {
-          reason(db, id, b);
-          return;
+      if (t0?.state === "implementing" && t0.blocked_json === null) {
+        const branches = t0.subtasks === 1 ? buildingAll(db, id).map((p) => p.branch) : [plannedBranch(db, t0)];
+        for (const branch of branches) {
+          const b = await preflight(db, preflightDeps, t0, branch, null);
+          if (b) {
+            reason(db, id, b);
+            return;
+          }
         }
       }
       await ensureParts(db, id);
@@ -1277,7 +1359,11 @@ export function createLoop(opts: LoopOptions) {
   // One driver per task. mode: an instruct step or an update, whose Stop keeps the task state. spec.md section 6.18.5: a driver ends at a
   // waiting state, so the base check runs before the driver leaves. The change notice comes after it, so a page reads working false.
   function start(db: Database, id: number, f: () => Promise<void>, mode?: Exclude<DriverMode, "build">) {
-    if (drivers.has(id) || closing) return false;
+    if (drivers.has(id) || closing) {
+      // spec.md section 6.20.6: a driver that builds parts asks the scheduler again, so a part that can start now starts beside them.
+      if (!mode) pokes.get(id)?.();
+      return false;
+    }
     if (mode) modes.set(id, mode);
     const p = f()
       .then(async () => {
@@ -1823,7 +1909,7 @@ export function createLoop(opts: LoopOptions) {
         .filter((p) => p.id === partId || (p.state !== "planned" && p.state !== "implementing"))
         .map((p) => (p.id === partId ? { ...p, override: 1 } : p));
       const s = scheduleOf(db, t, probe);
-      if (s?.start?.id !== partId) return conflict(db, id, s?.waits.get(partId) ?? "This part cannot start.");
+      if (!s?.starts.some((x) => x.id === partId)) return conflict(db, id, s?.waits.get(partId) ?? "This part cannot start.");
       const error = db.transaction((): string | null => {
         if (db.query(Q.override).run({ id: partId, now: now() }).changes !== 1) return "This part started already.";
         setBlocked(db, { task: id, version: t.version }, null, now());
@@ -1891,8 +1977,8 @@ export function createLoop(opts: LoopOptions) {
       if (modes.has(id)) {
         stopping.add(id);
         review.cancelTask(db, id);
-        aborts.get(id)?.abort();
-        gates.get(id)?.();
+        abortChecks(id);
+        openGates(id);
         slotWaits.get(id)?.();
         changed(id);
         return { status: 200, task: dto(db, id) };
@@ -1904,10 +1990,11 @@ export function createLoop(opts: LoopOptions) {
         return null;
       })();
       if (error) return conflict(db, id, error);
+      // spec.md section 6.20.6: Stop ends the runs and the checks of every part that builds.
       pauseAsked.delete(id);
       review.cancelTask(db, id);
-      aborts.get(id)?.abort();
-      gates.get(id)?.();
+      abortChecks(id);
+      openGates(id);
       slotWaits.get(id)?.();
       changed(id);
       return { status: 200, task: dto(db, id) };
@@ -1920,7 +2007,9 @@ export function createLoop(opts: LoopOptions) {
       if ("status" in t) return t;
       if (t.state === "implementing" && blockedOf(t)?.kind === "slot")
         return conflict(db, id, "The build waits for the run slot. It goes on by itself.");
-      if (drivers.has(id) && !gates.has(id)) return conflict(db, id, BUSY);
+      const b = blockedOf(t);
+      const paused = t.state === "implementing" && b?.kind === "question" && b.step === null && b.text === PAUSED && gates.has(id);
+      if (drivers.has(id) && !paused) return conflict(db, id, BUSY);
       if (t.state === "stopped") {
         if (t.stopped_from !== "implementing") return conflict(db, id, TASK_STATE_TEXT.stopped);
         const error = db.transaction((): string | null => {
@@ -1935,22 +2024,27 @@ export function createLoop(opts: LoopOptions) {
         return { status: 200, task: dto(db, id) };
       }
       if (t.state !== "implementing") return conflict(db, id, TASK_STATE_TEXT[t.state]);
-      const b = blockedOf(t);
-      const g = gates.get(id);
-      if (b?.kind === "question" && b.step === null && g) {
+      // spec.md section 6.20.6: Resume of a pause opens the gate of every part.
+      if (paused) {
         setBlocked(db, { task: id, version: t.version }, null, now());
-        g();
+        pauseAsked.delete(id);
+        openGates(id);
         changed(id);
         return { status: 200, task: dto(db, id) };
       }
       if (b?.kind === "spec_change") return conflict(db, id, "Accept or reject the change to the spec first.");
       if (b?.kind === "question" && (db.query(Q.openLoop).all({ task: id }) as unknown[]).length)
         return conflict(db, id, "Answer the question first.");
-      const part = building(db, id);
-      if (!b && (drivers.has(id) || !part)) return conflict(db, id, TASK_STATE_TEXT.implementing);
-      // A used-up time budget gets 60 more minutes. A cost limit stays: the user changes it in the settings.
-      const used = b?.kind === "budget" && part ? partBudget(db, id, part, now()) : null;
-      if (used && used.usedMs >= used.limitMs) moreTime(db, { task: id, version: t.version }, now());
+      const all = buildingAll(db, id);
+      if (!b && (drivers.has(id) || !all.length)) return conflict(db, id, TASK_STATE_TEXT.implementing);
+      // A used-up time budget gets 60 more minutes for each part. A cost limit stays: the user changes it in the settings.
+      const timeUp =
+        b?.kind === "budget" &&
+        all.some((part) => {
+          const used = partBudget(db, id, part, now());
+          return used.usedMs >= used.limitMs;
+        });
+      if (timeUp) moreTime(db, { task: id, version: t.version }, now());
       else if (b) setBlocked(db, { task: id, version: t.version }, null, now());
       kick(db, id, true);
       changed(id);
@@ -2306,8 +2400,8 @@ export function createLoop(opts: LoopOptions) {
     // At app stop (review.stop()): no new step, the checks are killed, and the drivers end.
     async shutdown() {
       closing = true;
-      for (const a of aborts.values()) a.abort();
-      for (const g of gates.values()) g();
+      for (const id of [...aborts.keys()]) abortChecks(id);
+      for (const id of [...gates.keys()]) openGates(id);
       for (const w of slotWaits.values()) w();
       await Promise.all([...drivers.values(), ...checking.values()]);
     },

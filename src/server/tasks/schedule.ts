@@ -20,9 +20,9 @@ export type SchedulePart = {
   done: boolean;
 };
 
-// start: the part to start. on: the lower part that it builds on, null for a start from the task base. waits: the reason of each planned
-// part that does not start.
-export type Schedule = { start: { id: number; on: number | null } | null; waits: Map<number, string> };
+// starts: the parts to start, by ord. on: the lower part that a part builds on, null for a start from the task base. waits: the reason of
+// each planned part that does not start.
+export type Schedule = { starts: { id: number; on: number | null }[]; waits: Map<number, string> };
 
 // The open count: built parts and PRs, tracked PRs included.
 const OPEN = new Set<PartState>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
@@ -40,21 +40,24 @@ function startOf(p: SchedulePart, parts: readonly SchedulePart[]): { on: number 
   return { wait: `Waits for a review of ${lower.label}.` };
 }
 
-// One build at a time (design.md B12). At maxOpen open parts no part starts. The first startable part by ord starts.
-export function nextPart(parts: readonly SchedulePart[], maxOpen: number): Schedule {
+// At most atOnce parts build at the same time (spec.md section 6.20.6, user decision of 2026-11-02). 1 builds one part after the other
+// (design.md B12). A part that builds counts toward maxOpen, because it opens a PR next. At maxOpen open parts no part starts. The
+// startable parts start by ord. A part never starts while the part that it builds on builds: startOf waits for its PR or its merge.
+export function nextPart(parts: readonly SchedulePart[], maxOpen: number, atOnce = 1): Schedule {
   const waits = new Map<number, string>();
-  const building = parts.find((p) => p.state === "implementing");
+  const busy = parts.filter((p) => p.state === "implementing");
   const open = parts.filter((p) => OPEN.has(p.state)).length;
-  let start: Schedule["start"] = null;
+  const starts: Schedule["starts"] = [];
   for (const p of [...parts].sort((a, b) => a.ord - b.ord)) {
     if (p.state !== "planned") continue;
     const s = startOf(p, parts);
+    const first = busy[0]?.label ?? parts.find((x) => x.id === starts[0]?.id)?.label;
     if ("wait" in s) waits.set(p.id, s.wait);
     else if (open >= maxOpen)
       waits.set(p.id, `Waits: ${open} ${open === 1 ? "PR of this task is" : "PRs of this task are"} open, your limit.`);
-    else if (building) waits.set(p.id, `Waits for the build of ${building.label}.`);
-    else if (start) waits.set(p.id, `Waits for the build of ${parts.find((x) => x.id === start?.id)?.label}.`);
-    else start = { id: p.id, on: s.on };
+    else if (busy.length + starts.length >= atOnce || open + busy.length + starts.length >= maxOpen)
+      waits.set(p.id, `Waits for the build of ${first}.`);
+    else starts.push({ id: p.id, on: s.on });
   }
-  return { start, waits };
+  return { starts, waits };
 }

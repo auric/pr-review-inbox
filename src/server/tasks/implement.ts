@@ -38,7 +38,7 @@ import {
   UNTRUSTED,
 } from "../review/workspace";
 import { fullPath, reposFile, taskRepos } from "./repos";
-import { setBlocked, stopForRun, taskRow } from "./tasks";
+import { holdBlocked, stopForRun, taskRow } from "./tasks";
 import {
   addedFolders,
   commitStep,
@@ -608,6 +608,8 @@ export type StepInput = {
   resolveCheck?: (context: ReadonlyMap<string, string | Uint8Array>, ignored: IgnoredSnapshot) => Promise<PathProblem[]>;
   // false: a stop came during the awaits before the run, so no run starts. Absent: the task builds with no reason.
   live?: () => boolean;
+  // spec.md section 6.20.6: the run goes beside the run slot (ReviewJobs.taskRun extra).
+  extra?: boolean;
   now?: () => number;
 };
 
@@ -663,7 +665,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     const b: TaskBlocked = { kind: "budget", step: null, text: budget.over };
     db.transaction(() => {
       const cur = taskRow(db, i.task);
-      if (cur) setBlocked(db, { task: i.task, version: cur.version }, b, now());
+      if (cur) holdBlocked(db, cur, b, now());
     })();
     return { status: 409, blocked: b };
   }
@@ -674,7 +676,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     const b: TaskBlocked = { kind: "error", step: null, text: `Needs you: ${noUrl((e as Error).message)}` };
     db.transaction(() => {
       const cur = taskRow(db, i.task);
-      if (cur) setBlocked(db, { task: i.task, version: cur.version }, b, now());
+      if (cur) holdBlocked(db, cur, b, now());
     })();
     return { status: 409, blocked: b };
   }
@@ -692,7 +694,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     const b: TaskBlocked = { kind: "error", step: null, text: `Needs you: ${noUrl((e as Error).message)}` };
     db.transaction(() => {
       const cur = taskRow(db, i.task);
-      if (cur) setBlocked(db, { task: i.task, version: cur.version }, b, now());
+      if (cur) holdBlocked(db, cur, b, now());
     })();
     return { status: 409, blocked: b };
   }
@@ -775,7 +777,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       const cur = taskRow(d, i.task);
       if (cur && problems.length && !broken && !i.resolveCheck) {
         const text = locked ? lockedText(locked) : deniedText(problems);
-        setBlocked(d, { task: i.task, version: cur.version }, { kind: "denied_path", step, text }, now());
+        holdBlocked(d, cur, { kind: "denied_path", step, text }, now());
       } else if (cur && !ran && !soft)
         stopForRun(d, { task: i.task, version: cur.version }, step, broken ? { status: "failed", text: broken } : e, now());
       const outcome: StepOutcome = {
@@ -802,5 +804,5 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     endStep(db, id, "cancelled", { notes: [note] }, now());
     return { status: 409, stopped: true };
   }
-  return i.review.taskRun(db, start);
+  return i.review.taskRun(db, start, i.extra);
 }

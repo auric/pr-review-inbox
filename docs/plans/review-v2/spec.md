@@ -1943,7 +1943,7 @@ Every Jira call of this section works on Jira Server, Data Center, and Cloud. Bo
 
 Examples use the parent ABC-10, the sub-tasks ABC-11 to ABC-14, the repository PROJ/app, the base develop, and the reviewer Anna.
 
-Constants (src/shared/task.ts): SUBTASKS_READ = 20, SUBTASK_PARTS_MAX = 12 (the specResult parts cap in sub-task mode), MAX_OPEN_CAP = 5, MAX_OPEN_DEFAULT = 3, JIRA_STATUS_AGE_MS = 5 min, JIRA_VIEW_AGE_MS = 60 s, FOUND_CHANGES_MAX = 100 paths per tracked PR, FOUND_COMMITS_MAX = 20 subjects per found branch.
+Constants (src/shared/task.ts): SUBTASKS_READ = 20, SUBTASK_PARTS_MAX = 12 (the specResult parts cap in sub-task mode), MAX_OPEN_CAP = 5, MAX_OPEN_DEFAULT = 3, BUILDS_AT_ONCE_CAP = 3, BUILDS_AT_ONCE_DEFAULT = 2 (section 6.20.6), JIRA_STATUS_AGE_MS = 5 min, JIRA_VIEW_AGE_MS = 60 s, FOUND_CHANGES_MAX = 100 paths per tracked PR, FOUND_COMMITS_MAX = 20 subjects per found branch.
 
 #### 6.20.1 Start
 
@@ -2000,13 +2000,17 @@ The plan is one spec run for the parent. So that run gets the ticked attachments
   - "./context/subtasks.md lists the sub-tasks with their status, text, links, and the branches and PRs that exist."
   - "Plan one part per sub-task that is not done and has no open PR. Name its key in keys."
   - "Split a sub-task into two parts only when it is over <budget> changed lines. Combine sub-tasks only when each one is too small to review alone and they change the same files. Say why in startReason."
-  - "Set start to base when the part needs no other sub-task, to stack when it needs code of a sub-task that is not merged, and to merge when it needs that sub-task merged first. Set after to that part number or key. In startReason, name the code or the Jira link that shows the need."
+  - "Set start to base only when the part touches no code of the earlier parts. In startReason, say why it touches none."
+  - "The app builds parts with start base at the same time, so a wrong base start gives conflicts."
+  - "Set start to stack when the part needs code of a sub-task that is not merged, and to merge when it needs that sub-task merged first. Set after to that part number or key. In startReason, name the code or the Jira link that shows the need."
+  - "When you are not sure, set start to stack and after to the part before it in Jira order."
   - "A Jira link such as is-blocked-by is a fact from the team. Follow it unless the code shows that it is wrong, and then say why."
   - "Propose maxOpen from 1 to 5. In maxOpenReason, say in one line how many parts can run side by side, how big they are, and how long reviews take in ./context/pr-history.md."
 - context/pr-history.md holds the open PR count of the user in the repository (stored rows). It also holds the median open-to-merge time of the user's newest merged PRs. One GET of `.../pull-requests?state=MERGED&order=NEWEST&limit=50` gives them: closedDate minus createdDate, own PRs only. Without closedDate, the line says "No review time data." (design.md Q72).
 - App checks of the result. They use no guess. A failed check gives a coverage line and a plan screen line:
   - keys: open sub-tasks of the parent that have no tracked PR.
   - after: an existing part number other than its own, or an adopted key. No cycle.
+  - Unsure parts (user decision of 2026-11-02): only start base with a startReason marks a part as independent. A base start without a reason, a stack or merge start without after, and an after that names no part make the part build on the part before it: start stack, after that part. "Before it" is the nearest earlier part in Jira order (the order of its first key, then the part number) whose own after links do not lead back to it, so the plan gets no cycle. With no such part, the part starts from the base. The notes: "ABC-13 has no reason to start from develop. It builds on ABC-12.", "ABC-13 names no part to build on. It builds on ABC-12.", and "ABC-13 builds on 9, which is no part of the plan. It builds on ABC-12." The plan screen shows the result prefilled, and the user can change it.
   - stack or merge after a done sub-task: start becomes base, with "ABC-13 needs ABC-12, which is done. It starts from develop."
   - A sub-task without a part: "Claude planned no PR for ABC-14." The user can still approve.
   - maxOpen outside 1 to 5, or absent: MAX_OPEN_DEFAULT.
@@ -2019,22 +2023,33 @@ The plan is one spec run for the parent. So that run gets the ticked attachments
 - Section "Sub-tasks", one row per sub-task in Jira order: "ABC-12 Add the event generator · Jira: Open · about 200 lines". A "Starts:" select offers "From develop" (base), "On top of <part or tracked PR>" (stack), and "After <part or tracked PR> merges" (merge). A second select picks the other row. Claude's line stands under it: "Claude: it calls the handler of ABC-11 (link: is blocked by ABC-11)."
 - Split: "ABC-13 in 2 PRs. Claude: it is about 700 lines." Combine: "ABC-15 and ABC-16 in one PR. Claude: both change config.ts."
 - "Open PRs at once" number field (1 to 5) with "Claude proposes 3: two sub-tasks can run side by side, and your PRs take about 2 days to merge."
+- "Parts that build at once" number field (1 to BUILDS_AT_ONCE_CAP, prefilled with the stored value or BUILDS_AT_ONCE_DEFAULT) with "The app builds at most this many parts at the same time. 1 builds one part after the other." The changed plan of section 6.20.14 shows it too. The value goes to task.settings_json.buildsAtOnce.
 - Errors inline: "ABC-13 cannot build on ABC-14, because ABC-14 builds on ABC-13." and "Pick the PR that the app tracks for ABC-11."
 - The branch type chips stay: one prefix for all parts. The branch name and its existing-branch choice move into each part row.
 - The approval pushes nothing and posts nothing. It sends ADOPT_OPEN or ADOPT_MERGED for each tracked PR.
 
 #### 6.20.6 Build and wait (scheduler)
 
-The pure function `nextPart(parts, maxOpen)` in src/server/tasks/schedule.ts decides. Its inputs per part are the state, start, after, the gate result, and override. It returns the part to start, or for each planned part the reason it waits. The server sends the reasons in the DTO, so the loop and the UI never disagree. nextPart is no XState machine. XState covers only the task and part machines of machine.ts.
+The pure function `nextPart(parts, maxOpen, atOnce)` in src/server/tasks/schedule.ts decides. Its inputs per part are the state, start, after, the gate result, and override. It returns the parts to start, or for each planned part the reason it waits. The server sends the reasons in the DTO, so the loop and the UI never disagree. nextPart is no XState machine. XState covers only the task and part machines of machine.ts.
 
-- One build at a time: no start while a part is implementing (design.md B12, one run slot).
-- Open count: parts in self_reviewed, pr_open, changes_requested, and approved, adopted parts included. At maxOpen, no part starts: "Waits: 3 PRs of this task are open, your limit."
+- Parts at once (user decision of 2026-11-02): at most atOnce parts are implementing at the same time. atOnce is task.settings_json.buildsAtOnce (1 to BUILDS_AT_ONCE_CAP, default BUILDS_AT_ONCE_DEFAULT). 1 builds one part after the other, as before (design.md B12). A further part waits: "Waits for the build of ABC-11."
+- Open count: parts in self_reviewed, pr_open, changes_requested, and approved, adopted parts included. At maxOpen, no part starts: "Waits: 3 PRs of this task are open, your limit." A part that builds counts toward maxOpen too, because it opens a PR next.
 - base: the part starts.
 - stack: the part starts when the lower part passed the part gate (section 6.10). "Start <key> now" with the confirm "Colleagues have not approved ABC-11 yet. Start ABC-12 anyway?" overrides the gate (design.md B11). A lower part that merged before the start makes the part start from the base.
 - merge: the part starts when the lower part merged.
 - A lower sub-task that is done in Jira counts as met (design.md Q70).
-- Order: the first startable part by ord. The loop builds one part (section 6.7, unchanged), then asks the scheduler again. It stops when nothing can start. The sync and the user actions start it again (section 6.20.11).
+- Order: the startable parts by ord. A part never builds with the part that it builds on: a stack part waits for the PR of its lower part, and a merge part for its merge. The loop builds each part with the loop of one part (section 6.7, unchanged), and asks the scheduler again after each start, after each end of a part, and after each kick. It stops when no part builds. The sync and the user actions start it again (section 6.20.11). A kick while the loop builds makes it ask the scheduler again, so a part that can start now starts beside the others.
 - While part 1 waits for its PR click, the loop can build part 2. The primary button stays the user's action (section 6.20.13).
+
+Parts at the same time (user decision of 2026-11-02):
+
+- Worktrees: each part has its own folder `tasks/<db>/<task>/part-<ord>/` and its own branch. The bare cache is shared. Every write to the cache (init, fetch, `worktree add`, `update-ref`, the Continue fetch) runs under the per-cache lock of workspace.ts `locked`. The loop starts the parts one after another, so their branch names and their start fetches never run at the same time. Commits in two worktrees write different branch refs, and git locks each ref.
+- Run slots: with atOnce 2 or more, every Claude step of a part runs beside the review run slot with its own runner (ReviewJobs.taskRun with extra). One part runs at most one step at a time, so a task runs at most atOnce Claude processes. A review, an ask, or another run never waits for them, and they never wait for it. With atOnce 1, the steps take the one run slot as before (design.md B12, AC-B18). The limit is per task.
+- Reasons: a task holds one reason. The first reason of a part stays. Each other part halts at its next step: the step that runs ends, and its run is not cancelled. A part that halts on a reason of its own while the task holds another reason writes no reason, no question, and no plan change. It finds them again after the resume. A pause and a wait for the run slot hold no part: Pause stops every part at the gate before its next Claude step, and Resume opens all gates.
+- Resume, an answer, and every new start of the loop: each part in implementing goes back to its last commit first, with the other changes saved as a patch (section 6.7, Resume). Then the pre-flight runs for each part, and the parts build again.
+- Stop ends the runs of every part (ReviewJobs.cancelTask) and kills their checks. Close still needs Stop first.
+- The task state stays implementing while any part builds. The step strip counts as before. Tell Claude, an update, "Fix these too", and the other user actions get 409 while any part builds, as they did while one part built.
+- Restart: recoverTasks stops the task as before. Resume resets every part in implementing and builds each one again.
 
 Start of a part:
 
@@ -2099,9 +2114,10 @@ ALTER TABLE task_file ADD COLUMN issue TEXT;
 
 - task_file keeps its primary key (task, att_id): a Jira attachment ID is unique on its server.
 - maxOpen goes to task.settings_json.maxOpen. Sub-task mode caps it at MAX_OPEN_CAP. repo_task_settings.max_open stays for large tasks.
+- buildsAtOnce (section 6.20.6) goes to task.settings_json.buildsAtOnce, next to maxOpen: it belongs to one sub-task plan, and the user sets both on the same plan screen. Absent: BUILDS_AT_ONCE_DEFAULT.
 - No new task_event kind and no new step kind. The retarget and push step kinds exist (033).
-- Schemas (src/shared/task.ts): specPart adds `keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([])`, `start: z.enum(["base","stack","merge"]).default("base")`, `after: z.string().max(40).nullable().default(null)`, and `startReason: z.string().max(300).default("")`. specResult adds `maxOpen: z.number().int().min(1).max(5).nullable().default(null)` and `maxOpenReason: z.string().max(300).default("")`.
-- DTO (src/shared/dto.ts): taskCreateInput adds `subtasks?: boolean` and `subtaskFiles?: {key, files: attId[]}[]`. taskPlanInput adds `subtasks?: {parts: [{n, start, after: string | null, existing?: "continue" | "new"}] (max 12), track: [{key, pr: positiveInt}] (max 20), maxOpen: 1..5}`. TaskDto adds `subtasks: SubtaskDto[] | null` ({key, summary, status, category, statusAt, links, found, parts: id[], added, removed}) and `plan.maxOpen: {value, reason}`. TaskPartDto adds keys, start, after, adopted, specDir, bases (per part), lower ({key, how: "merge" | "squash" | "other"} or null, set after the lower part merged), gate ({pass, why}), and wait (the scheduler reason or null). IssueContext adds optional `parent`, `subtasks`, and `links`.
+- Schemas (src/shared/task.ts): specPart adds `keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([])`, `start: z.enum(["base","stack","merge"]).default("stack")` (user decision of 2026-11-02: a part without a start builds on the part before it), `after: z.string().max(40).nullable().default(null)`, and `startReason: z.string().max(300).default("")`. specResult adds `maxOpen: z.number().int().min(1).max(5).nullable().default(null)` and `maxOpenReason: z.string().max(300).default("")`.
+- DTO (src/shared/dto.ts): taskCreateInput adds `subtasks?: boolean` and `subtaskFiles?: {key, files: attId[]}[]`. taskPlanInput adds `subtasks?: {parts: [{n, start, after: string | null, existing?: "continue" | "new"}] (max 12), track: [{key, pr: positiveInt}] (max 20), maxOpen: 1..5, buildsAtOnce?: 1..BUILDS_AT_ONCE_CAP}`. TaskDto adds `subtasks: SubtaskDto[] | null` ({key, summary, status, category, statusAt, links, found, parts: id[], added, removed}) and `plan.maxOpen: {value, reason}`. TaskPartDto adds keys, start, after, adopted, specDir, bases (per part), lower ({key, how: "merge" | "squash" | "other"} or null, set after the lower part merged), gate ({pass, why}), and wait (the scheduler reason or null). IssueContext adds optional `parent`, `subtasks`, and `links`.
 
 #### 6.20.9 Jira reads and writes (src/server/context/jira.ts only)
 
@@ -2236,7 +2252,7 @@ The update and instruct routes take the part in the path or the body, as today. 
 4. AC-B75. The plan approval checks: a cycle, an unknown after, a stack on a done sub-task (it becomes base), maxOpen 6 (refused), and maxOpen absent (3). The approval pushes and posts nothing (fake write counter 0).
 5. AC-B76. An adopted part reaches pr_open by ADOPT_OPEN, and its PR is followed. A push, an update, and Tell Claude on it return 409 before git runs.
 6. AC-B77. The ticked files of the parent and of each open sub-task download before the spec run, into ./attachments/ and ./attachments/<key>/. A part run gets the parent files and only its own sub-task files. Two files with the same name in two issues both stay. The caps count the parent and the sub-tasks together.
-7. AC-B78. The nextPart truth table: one build at a time; the limit counts self_reviewed, open, and adopted parts; stack waits for the gate; override starts it; merge waits for merged; a lower part merged before the start gives a base start; the order is by ord.
+7. AC-B78. The nextPart truth table: at most atOnce builds at the same time, and atOnce 1 builds one part after the other; a part that builds counts toward the limit; the limit counts self_reviewed, open, and adopted parts; stack waits for the gate; override starts it; merge waits for merged; a lower part merged before the start gives a base start; the order is by ord.
 8. AC-B79. B branches from A's pushed head, and its PR targets A's branch. New commits on A show in B's base check. The update merges, and the push is a fast-forward with the lease and no `+`.
 9. AC-B80. A merged with a merge commit gives one PUT and no git merge (argv spy).
 10. AC-B81. A squash-merged gives the three merges (argv spy), and `git diff develop...B` lists only B's files. An edited squash fails the tree check and takes the fallback with a resolve step. B not pushed takes `rebase --onto`.
@@ -2247,6 +2263,8 @@ The update and instruct routes take the part in the path or the body, as today. 
 15. AC-B86. "Move in Jira" lists the transitions, and only the confirm sends one POST with X-Atlassian-Token: no-check. A 400 gives "Jira refused the move (HTTP 400). Move ABC-12 in Jira." The fake Jira runs as Server and as Cloud, and both pass.
 16. AC-B87. A new key in Jira gives the row "ABC-17 is new in Jira." "Add to plan" adds a part only after the user approves the changed plan. No built, open, or merged part changes. A removed key gives "Removed in Jira." with Drop.
 17. AC-B88. The Task view shows one row per sub-task with one sentence and one actor, "ABC-12 (2 of 4)", and one primary button for the focused part. The AC-UX2 word scan covers the new strings (e2e).
+18. AC-B89 (user decision of 2026-11-02). With buildsAtOnce 2, two independent parts run their Claude steps at the same time, and a part on top of one of them waits. The review run slot stays free: a review starts with 202. Stop cancels the runs of both parts. After a restart with two parts in their build, Resume resets both worktrees with a patch and builds both again. Three independent parts with a limit of 2 never build three at once (tests/tasks/concurrent.test.ts).
+19. AC-B90 (user decision of 2026-11-02). A base start without a reason, a start without after, and an unknown after build on the part before it in Jira order, with a note, and never form a cycle. A base start with a reason stays (tests/tasks/subtasks.test.ts).
 
 #### 6.20.17 Unverified (a gate or the smoke confirms)
 

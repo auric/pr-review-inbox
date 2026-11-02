@@ -275,10 +275,13 @@ function labelOf(s: SubtaskStart, live: SubtaskStart[]) {
   return twins.length > 1 ? `${key} (${twins.indexOf(s) + 1} of ${twins.length})` : key;
 }
 
+// The plan part that s builds on or waits for, by its after number.
+const lowerIn = (s: SubtaskStart, starts: SubtaskStart[]) =>
+  s.start !== "base" && s.after !== null && /^\d+$/.test(s.after) ? starts.find((x) => x.n === Number(s.after)) : undefined;
+
 // The first cycle of the after links between parts, as [a, b]: a builds on b, and b builds on a through zero or more parts.
 function cycleOf(starts: SubtaskStart[]): [SubtaskStart, SubtaskStart] | null {
-  const lower = (s: SubtaskStart) =>
-    s.start !== "base" && s.after !== null && /^\d+$/.test(s.after) ? starts.find((x) => x.n === Number(s.after)) : undefined;
+  const lower = (s: SubtaskStart) => lowerIn(s, starts);
   for (const s of starts) {
     const seen = new Set<number>([s.n]);
     for (let x = lower(s); x; x = lower(x)) {
@@ -303,6 +306,21 @@ function afterCheck(s: SubtaskStart, live: SubtaskStart[], rows: SubtaskRow[], t
 const cycleText = ([a, b]: [SubtaskStart, SubtaskStart], live: SubtaskStart[]) =>
   `${labelOf(a, live)} cannot build on ${labelOf(b, live)}, because ${labelOf(b, live)} builds on ${labelOf(a, live)}.`;
 
+// spec.md section 6.20.4 (user decision of 2026-11-02): the part that s builds on when Claude is not sure that s is independent. It is
+// the nearest earlier part in Jira order (the order of the first keys, then n) whose own after links do not lead back to s, so the
+// result has no cycle. null: no such part, so s starts from the base.
+function previousOf(s: SubtaskStart, live: SubtaskStart[], rows: SubtaskRow[]): SubtaskStart | null {
+  const ord = (x: SubtaskStart) => rows.find((r) => r.key === x.keys[0])?.ord ?? Number.MAX_SAFE_INTEGER;
+  const order = [...live].sort((a, b) => ord(a) - ord(b) || a.n - b.n);
+  const reaches = (from: SubtaskStart) => {
+    let x: SubtaskStart | undefined = from;
+    for (let i = 0; x && i <= live.length; i++, x = lowerIn(x, live)) if (x === s) return true;
+    return false;
+  };
+  for (const c of order.slice(0, order.indexOf(s)).reverse()) if (!reaches(c)) return c;
+  return null;
+}
+
 // The app checks of a spec result in sub-task mode (spec.md section 6.20.4). They use no guess. Each failed check gives a note, which
 // is also a coverage line. base: the base branch of the task. outside: the keys of the parts of an approved plan, which a part of
 // "Add to plan" can build on (section 6.20.14).
@@ -321,16 +339,21 @@ export function checkSubtaskPlan(r: SpecResult, rows: SubtaskRow[], base: string
     return { n, keys, start: p.start, after: p.start === "base" ? null : p.after, reason: p.startReason, skip: !keys.length };
   });
   const live = starts.filter((s) => !s.skip);
+  // Only a base start with a reason marks a part as independent. Any other doubt stacks the part on the part before it (user decision
+  // of 2026-11-02). A need of a done sub-task gives a base start, because the base holds that work.
   for (const s of live) {
-    const ok = afterCheck(s, live, rows, tracked);
+    if (s.start === "base" && s.reason.trim()) continue;
+    const ok = s.after === null ? null : afterCheck(s, live, rows, tracked);
     if (ok === "ok") continue;
-    notes.push(
-      ok === "done"
-        ? `${labelOf(s, live)} needs ${s.after}, which is done. It starts from ${base}.`
-        : `${labelOf(s, live)} builds on ${s.after ?? "nothing"}, which is no part of the plan. It starts from ${base}.`,
-    );
-    s.start = "base";
-    s.after = null;
+    const prev = ok === "done" ? null : previousOf(s, live, rows);
+    const name = labelOf(s, live);
+    const then = prev ? `It builds on ${labelOf(prev, live)}.` : `It starts from ${base}.`;
+    if (ok === "done") notes.push(`${name} needs ${s.after}, which is done. ${then}`);
+    else if (s.after !== null) notes.push(`${name} builds on ${s.after}, which is no part of the plan. ${then}`);
+    else if (prev && s.start === "base") notes.push(`${name} has no reason to start from ${base}. ${then}`);
+    else if (prev) notes.push(`${name} names no part to build on. ${then}`);
+    s.start = prev ? "stack" : "base";
+    s.after = prev ? String(prev.n) : null;
   }
   const cycle = cycleOf(live);
   if (cycle) notes.push(cycleText(cycle, live));

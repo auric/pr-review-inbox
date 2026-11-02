@@ -189,7 +189,8 @@ test(
     expect(t.plan?.adding).toBe(true);
     expect(t.plan?.starts.map((s) => [s.n, s.keys, s.start, s.after, s.skip])).toEqual([
       [4, ["ABC-17"], "stack", "ABC-13", false],
-      [5, [], "base", null, true],
+      // A skipped part keeps the start of the schema default (stack): no part follows from it.
+      [5, [], "stack", null, true],
     ]);
     // No part before the approval, and the parts of the approved plan stay as they are.
     expect(h.fixed()).toEqual(before);

@@ -37,6 +37,7 @@ import {
 } from "../../shared/dto";
 import type { FindingPayload } from "../../shared/review";
 import {
+  BUILDS_AT_ONCE_DEFAULT,
   branchName,
   INTERVIEW_QUESTIONS,
   INTERVIEW_TURNS,
@@ -873,7 +874,23 @@ export function scheduleOf(db: Database, t: TaskRow, rows: readonly ScheduleRow[
       done: keys.length > 0 && keys.every((k) => done.has(k)),
     };
   });
-  return nextPart(parts, Math.min(settingsOf(t).maxOpen ?? MAX_OPEN_DEFAULT, MAX_OPEN_CAP));
+  return nextPart(parts, Math.min(settingsOf(t).maxOpen ?? MAX_OPEN_DEFAULT, MAX_OPEN_CAP), buildsAtOnceOf(t));
+}
+
+// spec.md section 6.20.6: the parts of a task with sub-tasks that build at the same time. Every other task builds one part at a time.
+export const buildsAtOnceOf = (t: TaskRow): number => (t.subtasks === 1 ? (settingsOf(t).buildsAtOnce ?? BUILDS_AT_ONCE_DEFAULT) : 1);
+
+// spec.md section 6.20.6: the parts of one task build at the same time, and the task holds one reason. A pause and a wait for the run
+// slot hold no part, so another reason replaces them. Every other reason stays until the user acts on it.
+export const PAUSED = "Building is paused after the step. Continue?";
+export const softReason = (b: TaskBlocked | null) =>
+  b !== null && (b.kind === "slot" || (b.kind === "question" && b.step === null && b.text === PAUSED));
+
+// Sets b unless the task already holds a reason that is not soft. A part that halts without its reason finds it again at the resume.
+export function holdBlocked(db: Database, t: TaskRow, b: TaskBlocked, now = Date.now()): boolean {
+  if (t.blocked_json !== null && !softReason(blockedOf(t))) return false;
+  setBlocked(db, { task: t.id, version: t.version }, b, now);
+  return true;
 }
 
 // spec.md section 6.20.2: the app never pushes to the branch of a PR that it did not create, and never changes it.
@@ -1962,12 +1979,15 @@ export function createTaskService(opts: TaskServiceOptions) {
           const r = rows.find((x) => x.id === b.taskRepo) as (typeof rows)[number];
           if (r.role !== "main") db.query(Q.lastBasePick).run({ project: r.project, repo: r.repo, base: b.branch, now: at });
         }
-        // spec.md section 6.16: the branch prefix and the existing-branch pick go with the approval. Section 6.20.8: maxOpen too.
+        // spec.md section 6.16: the branch prefix and the existing-branch pick go with the approval. Section 6.20.8: maxOpen and
+        // buildsAtOnce too.
+        const builds = input.subtasks?.buildsAtOnce;
         const s: TaskSettings = {
           ...settingsOf(t),
           branchPrefix: prefix,
           existing: input.existing ?? "continue",
           ...(sub && { maxOpen: sub.maxOpen }),
+          ...(sub && builds !== undefined && { buildsAtOnce: builds }),
         };
         const v = patch(db, id, t.version, { ...resized(t, docs, size, true), settings_json: JSON.stringify(s) }, at);
         const r = advance(db, { task: id, version: v }, { type: "APPROVE" }, {}, at);
@@ -2021,7 +2041,8 @@ export function createTaskService(opts: TaskServiceOptions) {
           parsed: { ...docs.parsed, parts: [...docs.parsed.parts, ...adding.parts], map: [...docs.parsed.map, ...adding.map] },
           ...(rest.subtasks && { subtasks: { ...rest.subtasks, starts: [...rest.subtasks.starts, ...adding.starts] } }),
         };
-        const settingsJson = JSON.stringify({ ...s, maxOpen: a.maxOpen });
+        const builds = input.subtasks?.buildsAtOnce;
+        const settingsJson = JSON.stringify({ ...s, maxOpen: a.maxOpen, ...(builds !== undefined && { buildsAtOnce: builds }) });
         const v = patch(db, id, t.version, { docs_json: JSON.stringify(next), settings_json: settingsJson }, at);
         approveParts(db, { ...t, version: v }, a.parts, at, fixed);
         // spec.md section 6.20.7: implementing holds while a part waits for its build.

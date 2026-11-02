@@ -106,7 +106,7 @@ export function syncParts(db: Database, prIds: readonly number[], now = Date.now
 export function startable(db: Database, id: number): boolean {
   const t = taskRow(db, id);
   if (t?.state !== "implementing" || t.blocked_json !== null) return false;
-  return scheduleOf(db, t, db.query(SQL.parts).all({ id }) as PartRow[])?.start != null;
+  return (scheduleOf(db, t, db.query(SQL.parts).all({ id }) as PartRow[])?.starts.length ?? 0) > 0;
 }
 
 // spec.md section 6.20.10: a part whose lower part merged, while no base check told how it merged yet.

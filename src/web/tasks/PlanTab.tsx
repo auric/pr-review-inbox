@@ -15,7 +15,17 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type { TaskDto, TaskPlanInput } from "../../shared/dto";
-import { MAX_OPEN_CAP, PART_STATE_TEXT, type StartMode, sizeRank, TASK_SIZES, type TaskCommand, type TaskSize } from "../../shared/task";
+import {
+  BUILDS_AT_ONCE_CAP,
+  BUILDS_AT_ONCE_DEFAULT,
+  MAX_OPEN_CAP,
+  PART_STATE_TEXT,
+  type StartMode,
+  sizeRank,
+  TASK_SIZES,
+  type TaskCommand,
+  type TaskSize,
+} from "../../shared/task";
 import { useSettings } from "../shell/data";
 import { BaseField, BranchSection } from "./BranchSection";
 import { CommandsEditor } from "./CommandsEditor";
@@ -93,6 +103,7 @@ export function PlanApproval(props: {
   const [starts, setStarts] = useState<StartPick[]>(() => firstStarts(t));
   const [track, setTrack] = useState<Record<string, number>>({});
   const [maxOpen, setMaxOpen] = useState(String(plan?.maxOpen?.value ?? 3));
+  const [builds, setBuilds] = useState(String(t.settings.buildsAtOnce ?? BUILDS_AT_ONCE_DEFAULT));
   const pickless = (t.subtasks ?? []).find((x) => x.category !== "done" && openPrs(x).length > 1 && track[x.key] === undefined);
   const hold = sub ? (pickless ? `Pick the PR that the app tracks for ${pickless.key}.` : startCycle(starts, livePlan(t))) : null;
   const onHold = props.onHold;
@@ -136,7 +147,7 @@ export function PlanApproval(props: {
           setProblem(branch.problem);
           return document.getElementById("task-prefix")?.focus();
         }
-        const p = hold ?? planProblem(t, picks, warned) ?? (sub ? maxOpenProblem(maxOpen) : null);
+        const p = hold ?? planProblem(t, picks, warned) ?? (sub ? (maxOpenProblem(maxOpen) ?? buildsProblem(builds)) : null);
         setProblem(p);
         if (p) return;
         const commands = (draftsToCommands(picks) ?? []).map((c) => {
@@ -154,6 +165,7 @@ export function PlanApproval(props: {
               parts: starts.map((x) => ({ ...x, after: x.start === "base" ? null : x.after })),
               track: Object.entries(track).map(([key, pr]) => ({ key, pr })),
               maxOpen: Number(maxOpen),
+              buildsAtOnce: Number(builds),
             },
           }),
         });
@@ -168,10 +180,12 @@ export function PlanApproval(props: {
           starts={starts}
           track={track}
           maxOpen={maxOpen}
+          builds={builds}
           hold={hold}
           onStarts={setStarts}
           onTrack={(key, pr) => setTrack((x) => ({ ...x, [key]: pr }))}
           onMaxOpen={setMaxOpen}
+          onBuilds={setBuilds}
           onMove={props.onMove}
         />
       )}
@@ -294,6 +308,7 @@ export function AddApproval(props: {
   const [starts, setStarts] = useState<StartPick[]>(() => firstStarts(t));
   const [track, setTrack] = useState<Record<string, number>>({});
   const [maxOpen, setMaxOpen] = useState(String(t.settings.maxOpen ?? t.plan?.maxOpen?.value ?? 3));
+  const [builds, setBuilds] = useState(String(t.settings.buildsAtOnce ?? BUILDS_AT_ONCE_DEFAULT));
   const [problem, setProblem] = useState<string | null>(null);
   const keys = new Set((t.subtasks ?? []).filter((s) => s.added !== null && s.removed === null && !s.parts.length).map((s) => s.key));
   const pickless = (t.subtasks ?? []).find((x) => keys.has(x.key) && openPrs(x).length > 1 && track[x.key] === undefined);
@@ -311,7 +326,7 @@ export function AddApproval(props: {
       className="grid max-w-[72ch] gap-5"
       onSubmit={(e) => {
         e.preventDefault();
-        const p = hold ?? maxOpenProblem(maxOpen);
+        const p = hold ?? maxOpenProblem(maxOpen) ?? buildsProblem(builds);
         setProblem(p);
         if (p) return;
         props.onApprove({
@@ -321,6 +336,7 @@ export function AddApproval(props: {
             parts: starts.map((x) => ({ ...x, after: x.start === "base" ? null : x.after })),
             track: Object.entries(track).map(([key, pr]) => ({ key, pr })),
             maxOpen: Number(maxOpen),
+            buildsAtOnce: Number(builds),
           },
         });
       }}
@@ -334,12 +350,14 @@ export function AddApproval(props: {
         starts={starts}
         track={track}
         maxOpen={maxOpen}
+        builds={builds}
         hold={hold}
         only={keys}
         outside={outside}
         onStarts={setStarts}
         onTrack={(key, pr) => setTrack((x) => ({ ...x, [key]: pr }))}
         onMaxOpen={setMaxOpen}
+        onBuilds={setBuilds}
       />
       {problem && (
         <p role="alert" className="m-0 text-sm text-destructive">
@@ -356,6 +374,14 @@ function maxOpenProblem(text: string): string | null {
   return Number.isInteger(n) && n >= 1 && n <= MAX_OPEN_CAP ? null : `Type a number from 1 to ${MAX_OPEN_CAP} for open PRs at once.`;
 }
 
+// spec.md section 6.20.6: "Parts that build at once" takes a whole number from 1 to BUILDS_AT_ONCE_CAP.
+function buildsProblem(text: string): string | null {
+  const n = Number(text);
+  return Number.isInteger(n) && n >= 1 && n <= BUILDS_AT_ONCE_CAP
+    ? null
+    : `Type a number from 1 to ${BUILDS_AT_ONCE_CAP} for parts that build at once.`;
+}
+
 const rowBox = "grid gap-1 rounded-md border bg-card px-3 py-2.5";
 const select = "h-8 rounded-md border border-input bg-pane px-2 text-sm";
 
@@ -369,10 +395,12 @@ function SubtaskPlan(props: {
   starts: StartPick[];
   track: Record<string, number>;
   maxOpen: string;
+  builds: string;
   hold: string | null;
   onStarts: (s: StartPick[]) => void;
   onTrack: (key: string, pr: number) => void;
   onMaxOpen: (v: string) => void;
+  onBuilds: (v: string) => void;
   onMove?: (issue: { key: string; status: string | null }) => void;
   // spec.md section 6.20.14, the changed plan: only the new sub-tasks, and the parts of the approved plan that a new part can start on.
   only?: ReadonlySet<string>;
@@ -618,6 +646,27 @@ function SubtaskPlan(props: {
         <FieldDescription id="plan-max-open-help">
           {runner} proposes {plan?.maxOpen?.value ?? 3}
           {plan?.maxOpen?.reason ? `: ${plan.maxOpen.reason}` : "."}
+        </FieldDescription>
+      </div>
+      <div className="grid max-w-sm gap-1 text-sm">
+        <label htmlFor="plan-builds" className="font-medium">
+          Parts that build at once
+        </label>
+        <Input
+          id="plan-builds"
+          name="buildsAtOnce"
+          autoComplete="off"
+          type="number"
+          min={1}
+          max={BUILDS_AT_ONCE_CAP}
+          inputMode="numeric"
+          className="h-8 w-24"
+          aria-describedby="plan-builds-help"
+          value={props.builds}
+          onChange={(e) => props.onBuilds(e.target.value)}
+        />
+        <FieldDescription id="plan-builds-help">
+          The app builds at most this many parts at the same time. 1 builds one part after the other.
         </FieldDescription>
       </div>
       {props.hold && (

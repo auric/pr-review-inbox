@@ -20,8 +20,10 @@ const p = (id: number, o: Partial<SchedulePart> = {}): SchedulePart => ({
   done: false,
   ...o,
 });
-const waits = (parts: SchedulePart[], max = 3) => Object.fromEntries(nextPart(parts, max).waits);
-const start = (parts: SchedulePart[], max = 3) => nextPart(parts, max).start;
+const waits = (parts: SchedulePart[], max = 3, atOnce = 1) => Object.fromEntries(nextPart(parts, max, atOnce).waits);
+// The default atOnce of 1 is the build of one part after the other (design.md B12).
+const start = (parts: SchedulePart[], max = 3) => nextPart(parts, max).starts[0] ?? null;
+const starts = (parts: SchedulePart[], max: number, atOnce: number) => nextPart(parts, max, atOnce).starts;
 
 describe("nextPart (spec.md section 6.20.6, AC-B78)", () => {
   test("base: the first planned part by ord starts; the others wait for its build", () => {
@@ -87,5 +89,51 @@ describe("nextPart (spec.md section 6.20.6, AC-B78)", () => {
     const parts = [p(1, { state: "pr_open" }), p(2, { start: "merge", after: 1 }), p(3)];
     expect(waits(parts, 1)).toEqual({ 2: "Waits for ABC-11 to merge.", 3: "Waits: 1 PR of this task is open, your limit." });
     expect(start(parts, 2)).toEqual({ id: 3, on: null });
+  });
+});
+
+describe("nextPart with parts at the same time (spec.md section 6.20.6, user decision of 2026-11-02)", () => {
+  test("two independent parts start at once, never more than atOnce", () => {
+    const parts = [p(1), p(2), p(3)];
+    expect(starts(parts, 5, 2)).toEqual([
+      { id: 1, on: null },
+      { id: 2, on: null },
+    ]);
+    expect(waits(parts, 5, 2)).toEqual({ 3: "Waits for the build of ABC-11." });
+    expect(starts(parts, 5, 3).map((s) => s.id)).toEqual([1, 2, 3]);
+    // A part that builds takes a place.
+    expect(starts([p(1, { state: "implementing" }), p(2), p(3)], 5, 2)).toEqual([{ id: 2, on: null }]);
+    expect(starts([p(1, { state: "implementing" }), p(2, { state: "implementing" }), p(3)], 5, 2)).toEqual([]);
+    expect(waits([p(1, { state: "implementing" }), p(2, { state: "implementing" }), p(3)], 5, 2)).toEqual({
+      3: "Waits for the build of ABC-11.",
+    });
+  });
+
+  test("atOnce 1 keeps the order of one part after the other", () => {
+    const parts = [p(1), p(2), p(3)];
+    expect(starts(parts, 5, 1)).toEqual([{ id: 1, on: null }]);
+    expect(waits(parts, 5, 1)).toEqual({ 2: "Waits for the build of ABC-11.", 3: "Waits for the build of ABC-11." });
+  });
+
+  test("a part that builds counts toward the open PRs limit", () => {
+    // One open PR and one build fill a limit of 2.
+    const parts = [p(1, { state: "pr_open" }), p(2, { state: "implementing" }), p(3)];
+    expect(starts(parts, 2, 3)).toEqual([]);
+    expect(waits(parts, 2, 3)).toEqual({ 3: "Waits for the build of ABC-12." });
+    expect(starts([p(1), p(2), p(3)], 2, 3).map((s) => s.id)).toEqual([1, 2]);
+  });
+
+  test("a part on top of another part never builds with it, and starts beside an independent part once its lower part passed", () => {
+    const upper = p(2, { start: "stack", after: 1 });
+    expect(starts([p(1), upper, p(3)], 5, 3)).toEqual([
+      { id: 1, on: null },
+      { id: 3, on: null },
+    ]);
+    expect(waits([p(1), upper, p(3)], 5, 3)).toEqual({ 2: "Waits for a review of ABC-11." });
+    expect(starts([p(1, { state: "implementing" }), upper], 5, 3)).toEqual([]);
+    expect(starts([p(1, { state: "approved", gate: true }), upper, p(3)], 5, 3)).toEqual([
+      { id: 2, on: 1 },
+      { id: 3, on: null },
+    ]);
   });
 });
