@@ -316,7 +316,7 @@ function NewTask(props: {
           ))}
         </select>
         <p id="new-task-profile-help" className="m-0 text-xs text-muted-foreground">
-          Every step uses its model, skills, and MCP tools.
+          Every step uses its model and MCP tools. Build a {props.tracker} task steps get all your skills and the repository's skills.
         </p>
       </div>
       <p aria-live="polite" className="sr-only">

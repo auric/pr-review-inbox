@@ -56,6 +56,21 @@ export async function taskRemote(root: string) {
   return { remote, base, env, g };
 }
 
+// Commits text files on top of main of a bare remote, so the next task base holds them. Returns the new main commit.
+export async function commitOnMain(remote: string, root: string, files: Record<string, string>) {
+  const empty = join(root, "empty.gitconfig");
+  writeFileSync(empty, "");
+  const env = { ...gitEnv(empty), ...IDENTITY, GIT_INDEX_FILE: join(root, "on-main.index") };
+  const g = async (args: string[], stdin?: string) => (await git(["--git-dir", remote, ...args], { env, stdin })).trim();
+  const main = await g(["rev-parse", "refs/heads/main"]);
+  await g(["read-tree", main]);
+  for (const [path, text] of Object.entries(files))
+    await g(["update-index", "--add", "--cacheinfo", `100644,${await g(["hash-object", "-w", "--stdin"], text)},${path}`]);
+  const next = await g(["commit-tree", await g(["write-tree"]), "-p", main, "-m", "Add files"]);
+  await g(["update-ref", "refs/heads/main", next]);
+  return next;
+}
+
 // The cache of PROJ/repo in dataDir, as a spec run leaves it: the target head at refs/rl/task/<task>/base.
 export async function taskCache(dataDir: string, remote: string, task = 1) {
   const ws = await prepareTaskWorkspace({

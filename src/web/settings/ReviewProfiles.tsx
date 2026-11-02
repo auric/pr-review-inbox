@@ -1171,6 +1171,8 @@ function Chips({ label, items }: { label: string; items: { key: string; text: Re
 function SkillsField(props: RowProps) {
   const { d, i, lists, onChange } = props;
   const [open, setOpen] = useState(false);
+  const meta = useMeta().data;
+  const tracker = (meta && trackerOf(meta))?.name ?? "";
   const skills = lists.skills;
   const items = d.skills.map((id) => {
     const missing = !!skills && !skills.has(id);
@@ -1210,6 +1212,9 @@ function SkillsField(props: RowProps) {
             With more than {INDEX_AFTER} skills, the run lists them in skills/INDEX.md, and the model reads only the skills that apply.
             {d.alwaysSkills.length > 0 && " Skills marked Always are read first."}
           </p>
+        )}
+        {tracker && (
+          <p className="m-0 text-xs text-muted-foreground">Build a {tracker} task steps get all your skills and the repository's skills.</p>
         )}
       </div>
       <SkillsDialog

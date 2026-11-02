@@ -7,7 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { consultJsonSchema, type SessionAnswerDto, sessionMaxTurns, sessionTokens } from "../../shared/consult";
 import {
   type AskDto,
@@ -60,7 +60,8 @@ import { taskContext, taskParents } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { Settings } from "../settings";
-import { recoverTasks } from "../tasks/tasks";
+import { taskRepos } from "../tasks/repos";
+import { recoverTasks, taskRow } from "../tasks/tasks";
 import { inside, tasksRoot } from "../tasks/worktree";
 import {
   askAgent,
@@ -183,7 +184,7 @@ import {
   toPullRequest,
   toRunDto,
 } from "./run-rows";
-import { alwaysProblems, claudeConfigDir, copySkills } from "./skills";
+import { alwaysProblems, type CopiedSkill, claudeConfigDir, copySkills, copyTaskSkills, type SkillRepo } from "./skills";
 import { claudeJsonPath, userServers } from "./user-mcp";
 import type { AskedThread } from "./validate";
 import {
@@ -1020,10 +1021,16 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return noted(settle(found, { volume: profile.volume, find, check: v.check, verify: v.verify, written: v.written, servers }));
   }
 
-  // The skills of the profile in the run folder (review, re-review, and every task step). dest: the skills folder. root: dest from the
-  // run cwd. lost: launch checked the always-use skills, but the disk can change before the copy.
-  function runSkills(j: Job | TaskJob, profile: Profile, dest: string, root = "skills") {
-    const skills = copySkills(profile.skills, dest, opts.claudeConfigDir ?? claudeConfigDir(), root);
+  // The skills in the run folder (review, re-review, and every task step). dest: the skills folder. root: dest from the run cwd.
+  // skills: the copy. Default: the profile skills (copySkills). A task step passes copyTaskSkills. lost: launch checked the always-use
+  // skills, but the disk can change before the copy.
+  function runSkills(
+    j: Job | TaskJob,
+    profile: Profile,
+    dest: string,
+    root = "skills",
+    skills: { copied: CopiedSkill[]; gaps: string[] } = copySkills(profile.skills, dest, opts.claudeConfigDir ?? claudeConfigDir(), root),
+  ) {
     for (const g of skills.gaps) log(`Review run ${j.id}: ${g}.`);
     const isAlways = (id: string) => profile.alwaysSkills.includes(id);
     if (skills.copied.length)
@@ -1052,6 +1059,29 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       folders: skills.copied.map((s) => s.folder),
       always: alwaysCopied.map((s) => s.folder),
     };
+  }
+
+  // spec.md section 6.19: every task step gets all the user's skills and the skills of the task repositories at their base commit.
+  async function taskSkills(j: TaskJob, dest: string, repos: SkillRepo[], root = "skills") {
+    const copy = await copyTaskSkills(repos, j.profile.skills, dest, opts.claudeConfigDir ?? claudeConfigDir(), root);
+    for (const l of copy.left) log(`Task run ${j.id}: skill left out: ${l}.`);
+    return runSkills(j, j.profile, dest, root, copy);
+  }
+
+  // The repositories of a task at their base or pinned commit, the main one first, as implementInstructions reads them. Never the
+  // task branch: the part commits sit on top of the base.
+  function taskSkillRepos(db: Database, task: number): SkillRepo[] {
+    const t = taskRow(db, task);
+    if (!t) return [];
+    const seen = new Set<string>();
+    return taskRepos(db, t).flatMap((r) => {
+      const commit = r.base_commit ?? r.pinned;
+      if (!r.project || !r.repo || !commit) return [];
+      const cache = cachePath(longPath(dataDir), { project: r.project, repo: r.repo, id: 0 });
+      if (seen.has(cache)) return [];
+      seen.add(cache);
+      return [{ cache, commit, slug: r.role === "main" ? null : r.repo }];
+    });
   }
 
   // docs/plans/review-v2/spec.md section 1.6, salvage: one new run after a finder that reached its turn cap, in the same workspace, run
@@ -1141,12 +1171,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       rereview: boolean;
       folders: string[];
       always: string[];
+      // A task review: the skill lines of a task run (skillLines task).
+      task?: boolean;
       used: McpUse[];
       instructions: { text: string };
       mcpServers: Record<string, McpServerSpec>;
     },
   ): Promise<{ check: CheckRun | null; verify: boolean; written: number } | Ending> {
-    const { profile, context, folders, always, used } = r;
+    const { profile, context, folders, always, used, task } = r;
     const verify = profile.verifier.mode === "on";
     const file = verify && found.candidates.length ? candidatesFile(found.candidates) : null;
     const written = file?.written ?? 0;
@@ -1164,7 +1196,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       parent: e.parent === null ? null : CHECK_EVENT + e.parent,
       seq: e.seq + offset,
     });
-    const verifier = withInstructions(withMcp(withSkills(verifierAgent(profile, context), folders, always), used), r.instructions.text);
+    const verifier = withInstructions(
+      withMcp(withSkills(verifierAgent(profile, context), folders, always, task), used),
+      r.instructions.text,
+    );
     // No await between this check and run(), so a later Cancel reaches the new process.
     if (j.cancelled) return cancelledEnding(o);
     const startedAt = now();
@@ -1174,7 +1209,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         appDir: ws.app,
         prompt: buildVerifyPrompt({ ...r.input, count: written, rereview: r.rereview }),
         schema: verifyJsonSchema(),
-        main: withVerifyDelegation(withMcp(withSkills(verifyAgent(profile, context), folders, always), used), split),
+        main: withVerifyDelegation(withMcp(withSkills(verifyAgent(profile, context), folders, always, task), used), split),
         maxTurns: verifyMaxTurns(profile, written),
         model: profile.verifier.model ?? profile.model,
         effort: verifierEffort(profile),
@@ -1292,6 +1327,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (j.cancelled) return cancelledEnding();
     await prune();
     j.abort = new AbortController();
+    let nested: SnapshotRepo[] = [];
     try {
       if (j.cancelled) return cancelledEnding();
       held.ws = await prepareTaskWorkspace({
@@ -1305,7 +1341,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         files: t.files,
         attachments: t.attachments,
         long: { signal: j.abort.signal, timeoutMs: RUN_TIMEOUT_MS },
-        ...(t.repos && { nested: (_cache: string, head: string) => (t.repos as NonNullable<TaskRunStart["repos"]>)(j.db, head) }),
+        ...(t.repos && {
+          nested: async (_cache: string, head: string) => {
+            nested = await (t.repos as NonNullable<TaskRunStart["repos"]>)(j.db, head);
+            return nested;
+          },
+        }),
       });
     } catch (e) {
       if (j.cancelled) return cancelledEnding();
@@ -1323,7 +1364,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const tools = await profileServers(j, j.profile, ws.repo, t);
     if (!tools) return cancelledEnding();
     const mcpServers = { [GIT_SERVER]: gitMcpServer(ws, MAIN_ENTRY), ...tools.servers };
-    const skills = runSkills(j, j.profile, join(ws.work, "skills"));
+    // The snapshot is the newest head of the target branch: the base of the task, with the submodule commits of that head.
+    const repos = [
+      { cache: ws.cache, commit: ws.sourceHead, slug: null },
+      ...nested.map((n) => ({ cache: n.cache, commit: n.commit, slug: basename(n.cache, ".git") })),
+    ].filter((r, i, all) => all.findIndex((x) => x.cache === r.cache) === i);
+    const skills = await taskSkills(j, join(ws.work, "skills"), repos);
     if (skills.lost) return skills.lost;
     log(`Task run ${j.id}: ${t.kind} of task ${t.task} at ${ws.sourceHead.slice(0, 12)}.`);
     // No await between this check and run(), so a later Cancel reaches the process.
@@ -1334,7 +1380,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         appDir: ws.app,
         prompt: t.prompt(ws.sourceHead, instructions.text),
         schema: t.schema,
-        main: withMcp(withSkills(t.agent, skills.folders, skills.always), tools.used),
+        main: withMcp(withSkills(t.agent, skills.folders, skills.always, true), tools.used),
         maxTurns: t.maxTurns,
         model: j.profile.model,
         effort: j.profile.effort,
@@ -1382,13 +1428,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         const instructions = await implementInstructions(j, t.instructions);
         // A picked codegraph server indexes repo/ of the part again, so the index holds the edits of the earlier steps.
         const tools = j.cancelled ? null : await profileServers(j, j.profile, repo, t);
-        const skills = tools && runSkills(j, j.profile, join(cwd, "context", "skills"), IMPLEMENT_SKILLS);
+        const skills = tools && (await taskSkills(j, join(cwd, "context", "skills"), taskSkillRepos(j.db, t.task), IMPLEMENT_SKILLS));
         if (!tools || !skills) early = cancelledEnding();
         else if (skills.lost) early = skills.lost;
         else {
           // The path check compares context/ with these bytes, so a skill file that the step changes fails the check.
           const dest = join(cwd, "context", "skills");
-          if (skills.folders.length)
+          if (existsSync(dest))
             for (const f of readdirSync(dest, { recursive: true, encoding: "utf8" }))
               if (lstatSync(join(dest, f)).isFile()) t.context.set(`skills/${f.replaceAll("\\", "/")}`, readFileSync(join(dest, f)));
           const git = { cache: t.cache, sourceHead: t.head, rangeBase: t.base, targetHead: t.base };
@@ -1396,7 +1442,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           servers = Object.keys(mcpServers);
           gaps = [...tools.gaps, ...skills.gaps];
           const lines = {
-            skills: skillLines(skills.folders, skills.always, IMPLEMENT_SKILLS),
+            skills: skillLines(skills.folders, skills.always, IMPLEMENT_SKILLS, true),
             mcp: [...IMPLEMENT_MCP_LINES, ...(j.profile.docs ? [DOCS_RULE] : []), ...mcpLines(tools.used)],
           };
           // No await between the cancel check and run(), so a later Cancel reaches the process.
@@ -1483,7 +1529,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const tools = await profileServers(j, profile, ws.repo, t);
     if (!tools) return cancelledEnding();
     const mcpServers = { [GIT_SERVER]: gitMcpServer(ws, MAIN_ENTRY), ...tools.servers };
-    const skills = runSkills(j, profile, join(ws.work, "skills"));
+    const skills = await taskSkills(j, join(ws.work, "skills"), taskSkillRepos(j.db, t.task));
     if (skills.lost) return skills.lost;
     const { folders, always } = skills;
     const langs = profile.languageChecks ? languagesOf(changed) : [];
@@ -1525,14 +1571,17 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         appDir: ws.app,
         prompt: buildPrompt(input),
         schema: reviewJsonSchema(false),
-        main: withDelegation(withMcp(withSkills(withLanguages(mainAgent(profile, context), langs), folders, always), tools.used), delegate),
+        main: withDelegation(
+          withMcp(withSkills(withLanguages(mainAgent(profile, context), langs), folders, always, true), tools.used),
+          delegate,
+        ),
         maxTurns: profile.maxTurns,
         model: profile.model,
         effort: profile.effort,
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(withSkills(withLanguages(reviewerAgent(profile, context), langs), folders, always), tools.used),
+                withMcp(withSkills(withLanguages(reviewerAgent(profile, context), langs), folders, always, true), tools.used),
                 instructions.text,
               ),
             }
@@ -1562,6 +1611,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       rereview: false,
       folders,
       always,
+      task: true,
       used: tools.used,
       instructions,
       mcpServers,

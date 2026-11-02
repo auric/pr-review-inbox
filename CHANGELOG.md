@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build a Jira task steps now get all your skills and the skills in `.claude/skills` of the repository, read from the base branch. A repository skill wins over your skill with the same name. Each step gets a skills index and opens only the skills that apply. Reviews still get only the skills that you tick.
 - A review profile can now include the Jira parent and sub-tasks. Turn on "Include the Jira parent and sub-tasks" in Settings, Review profiles. The review then reads the parent summary, status, and description, and the key, summary, and status of each sub-task. It is off by default.
 - Jira Cloud now works. In Settings, Jira, enter your Atlassian account email and an API token without scopes. For Jira Server or Data Center, leave the email empty and use a personal access token. A login form that does not fit the Jira type shows a clear message.
 - The app is now named PR Review Inbox. Its old name was Kierto. The repository is now github.com/auric/pr-review-inbox. Your data, settings, and stored tokens stay.

@@ -39,7 +39,7 @@ import { specResult, type TaskBlocked } from "../../src/shared/task";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { logOf, pngOf } from "../support/fake-jira";
 import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
-import { taskCache, taskRemote } from "./fixture";
+import { commitOnMain, taskCache, taskRemote } from "./fixture";
 import { remoteCommit } from "./update-fixture";
 
 for (const m of ["tasks/loop", "tasks/implement", "tasks/tasks", "tasks/push", "tasks/worktree", "review/jobs", "review/workspace"])
@@ -151,6 +151,8 @@ type Setup = {
   config?: string;
   profiles?: ProfileInput[];
   profile?: string;
+  // Files on main of the remote, so the task base holds them.
+  main?: Record<string, string>;
   // The approved test command. Default: the bun script CHECK.
   argv?: string[];
   // Runs before each remote lookup, so a test can hold one.
@@ -161,6 +163,7 @@ async function setup(o: Setup = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb4-")));
   dirs.push(root);
   const r = await taskRemote(root);
+  if (o.main) await commitOnMain(r.remote, root, o.main);
   const runner = fakeRunner(root);
   const stream = claudeStream(root, "loop", "claude/b6-hostile-repo.jsonl");
   const scenario = (s: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...s });
@@ -387,28 +390,40 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "spec.md section 6.2: every Claude step of the part uses the profile of the task: its model and its skills, also in the own review",
+    "spec.md section 6.2: every Claude step of the part uses the profile of the task and gets all skills, also in the own review",
     async () => {
       const config = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-loop-config-")));
       dirs.push(config);
       mkdirSync(join(config, "skills", "tdd"), { recursive: true });
       writeFileSync(join(config, "skills", "tdd", "SKILL.md"), "---\nname: tdd\ndescription: Test first.\n---\n\nWrite the test first.\n");
+      // spec.md section 6.19: a skill that the profile does not tick, and a skill of the repository at the task base.
+      mkdirSync(join(config, "skills", "other"), { recursive: true });
+      writeFileSync(join(config, "skills", "other", "SKILL.md"), "---\nname: other\n---\nNot ticked.\n");
+      const main = { ".claude/skills/repo-rules/SKILL.md": "---\nname: repo-rules\ndescription: Repo rules.\n---\nREPO-RULES\n" };
       const strict = { ...SHIPPED_PROFILES[0], id: "strict", name: "Strict", model: "sonnet", skills: ["tdd"] } as ProfileInput;
-      const s = await setup({ config, profiles: [...SHIPPED_PROFILES, strict], profile: "strict" });
+      const s = await setup({ config, profiles: [...SHIPPED_PROFILES, strict], profile: "strict", main });
       await s.build();
       expect(s.part().state).toBe("self_reviewed");
       const calls = s.runCalls();
       expect(calls.map(s.modeOf)).toEqual(["tests", "implement", "fix", "review"]);
       for (const c of calls) expect(c.argv[c.argv.indexOf("--model") + 1]).toBe("sonnet");
-      // The implement modes: the skill sits in context/skills, outside repo/, and the stdin names it there.
+      // The implement modes: the skills and the index sit in context/skills, outside repo/, and the stdin names the index.
       for (const c of calls.slice(0, 3)) {
         expect(c.context["skills/tdd/SKILL.md"]).toContain("Write the test first.");
-        expect(c.stdin).toContain("The user chose these skills: ./context/skills/tdd/SKILL.md.");
+        expect(c.context["skills/other/SKILL.md"]).toContain("Not ticked.");
+        expect(c.context["skills/repo-rules/SKILL.md"]).toContain("REPO-RULES");
+        expect(c.context["skills/INDEX.md"]).toContain("- repo-rules (repository): ./context/skills/repo-rules/SKILL.md. Repo rules.");
+        expect(c.stdin).toContain("Read ./context/skills/INDEX.md first.");
       }
-      // The own review: the skill in ./skills of the run folder, named in the rl-main prompt.
+      // The own review: the skills and the index in ./skills of the run folder, named in the rl-main prompt.
       const own = calls[3] as Call;
-      expect(own.skills).toContain("tdd/SKILL.md");
-      expect(own.agents?.["rl-main"]?.prompt).toContain("The user chose these skills: ./skills/tdd/SKILL.md.");
+      expect(own.skills).toEqual(expect.arrayContaining(["INDEX.md", "tdd/SKILL.md", "other/SKILL.md", "repo-rules/SKILL.md"]));
+      expect(own.agents?.["rl-main"]?.prompt).toContain("Read ./skills/INDEX.md first.");
+      // No copied skill reaches a commit of the part branch.
+      const w = await s.wt();
+      const paths = await git([`--git-dir=${w.admin}`, "log", "--name-only", "--format=", `${s.base}..HEAD`], { env: w.env });
+      expect(paths.trim()).not.toBe("");
+      expect(paths).not.toMatch(/skills\/|INDEX\.md|SKILL\.md/);
       const runs = s.db.query("SELECT DISTINCT profile, profile_name FROM review_run WHERE task = $task").all({ task: s.task });
       expect(runs).toEqual([{ profile: "strict", profile_name: "Strict" }]);
     },

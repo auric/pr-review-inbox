@@ -8,10 +8,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readConfig } from "../../src/server/config";
 import { mainAgent, profileRevision, reviewerAgent, SHIPPED_PROFILES, skillLines, withSkills } from "../../src/server/review/catalog";
+import { git, gitEnv } from "../../src/server/review/git";
 import { buildPrompt, type PromptInput } from "../../src/server/review/prompt";
 import {
   alwaysProblems,
   copySkills,
+  copyTaskSkills,
   discoverSkills,
   MAX_SKILL_BYTES,
   MAX_SKILL_FILES,
@@ -19,6 +21,8 @@ import {
   skillDto,
 } from "../../src/server/review/skills";
 import { profileInput } from "../../src/shared/dto";
+
+console.log(`skills.test.ts imported from ${Bun.resolveSync("../../src/server/review/skills", import.meta.dir)}`);
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -409,5 +413,155 @@ describe("always-use skills", () => {
       .digest("hex");
     expect(profileRevision(read)).toBe(before);
     expect(profileRevision({ ...read, alwaysSkills: ["x"] })).not.toBe(before);
+  });
+});
+
+describe("task run skills (spec.md section 6.19)", () => {
+  type Blob = string | Uint8Array | { link: string };
+  const isLink = (v: Blob): v is { link: string } => typeof v === "object" && "link" in v;
+  // A bare repository as the app cache: base holds the repository skills, and a task commit on top adds more. No forge.
+  async function repoCache(files: Record<string, Blob>, task: Record<string, Blob> = {}) {
+    const root = temp("cache");
+    const empty = join(root, "empty.gitconfig");
+    writeFileSync(empty, "");
+    const cache = join(root, "repo.git");
+    const env = {
+      ...gitEnv(empty),
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.invalid",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.invalid",
+      GIT_INDEX_FILE: join(root, "index"),
+    };
+    const g = async (args: string[], stdin?: string) => (await git(["--git-dir", cache, ...args], { env, stdin })).trim();
+    await git(["init", "-q", "--bare", "--template=", cache], { env });
+    let n = 0;
+    const commit = async (parent: string | null, add: Record<string, Blob>) => {
+      await g(parent ? ["read-tree", parent] : ["read-tree", "--empty"]);
+      const entries = Object.entries(add);
+      if (!entries.length) return g(["commit-tree", await g(["write-tree"]), ...(parent ? ["-p", parent] : []), "-m", "c"]);
+      const paths = entries.map(([, v]) => {
+        const f = join(root, `blob-${n++}`);
+        writeFileSync(f, isLink(v) ? v.link : v);
+        return f;
+      });
+      const shas = (await g(["hash-object", "-w", "--no-filters", "--stdin-paths"], `${paths.join("\n")}\n`)).split("\n");
+      await g(
+        ["update-index", "--index-info"],
+        `${entries.map(([p, v], i) => `${isLink(v) ? "120000" : "100644"} ${shas[i]}\t${p}`).join("\n")}\n`,
+      );
+      return g(["commit-tree", await g(["write-tree"]), ...(parent ? ["-p", parent] : []), "-m", "c"]);
+    };
+    const base = await commit(null, { "README.md": "x\n", ...files });
+    return { cache, base, task: await commit(base, task) };
+  }
+  const md = (front: string, body = "Body.\n") => `---\n${front}\n---\n${body}`;
+  const S = ".claude/skills";
+
+  test("the repository skills come from the base commit, then every user and plugin skill; a repository skill wins a clash", async () => {
+    const c = config();
+    skill(join(c, "skills", "deploy"), "name: deploy\ndescription: USER-DEPLOY.");
+    const main = await repoCache(
+      {
+        [`${S}/deploy/SKILL.md`]: md("name: Deploy\ndescription: Ship it.", "REPO-DEPLOY\n"),
+        [`${S}/deploy/ref/steps.md`]: "Steps.\n",
+        [`${S}/deploy/logo.png`]: "not a png",
+        [`${S}/deploy/.hidden.md`]: "h",
+        [`${S}/deploy/out.md`]: { link: "../../../README.md" },
+        [`${S}/deploy/huge.md`]: "x".repeat(MAX_SKILL_BYTES),
+        [`${S}/INDEX.md/SKILL.md`]: md("name: odd"),
+        [`${S}/fat/SKILL.md`]: md("name: fat", "y".repeat(MAX_SKILL_BYTES)),
+        [`${S}/bin/SKILL.md`]: new Uint8Array([45, 45, 45, 10, 45, 45, 45, 10, 0]),
+        [`${S}/bad name/SKILL.md`]: md("name: bad"),
+        [`${S}/readme-only/README.md`]: "No skill.\n",
+        [`${S}/top.md`]: "A file, no skill folder.\n",
+        "sub/.claude/skills/nested/SKILL.md": md("name: nested"),
+      },
+      { [`${S}/branch-only/SKILL.md`]: md("name: branch-only") },
+    );
+    const lib = await repoCache({ [`${S}/deploy/SKILL.md`]: md("name: Lib deploy\ndescription: Ship the lib.") });
+    const dest = join(temp("dest"), "context", "skills");
+    const r = await copyTaskSkills(
+      [
+        { cache: main.cache, commit: main.base, slug: null },
+        { cache: lib.cache, commit: lib.base, slug: "lib" },
+      ],
+      ["deploy", "gone", "review-rules"],
+      dest,
+      c,
+      "context/skills",
+    );
+    // The task branch skill, a folder without SKILL.md, and a skill folder below the root never come.
+    expect(readdirSync(dest).sort()).toEqual(["INDEX.md", "deploy", "folded", "lib+deploy", "plain", "review-rules", "tools+lint"]);
+    expect(r.copied.map((s) => s.id)).toEqual(["deploy", "lib:deploy", "folded", "plain", "review-rules", "tools:lint"]);
+    expect(readFileSync(join(dest, "deploy", "SKILL.md"), "utf8")).toContain("REPO-DEPLOY");
+    expect(readFileSync(join(dest, "deploy", "ref", "steps.md"), "utf8")).toBe("Steps.\n");
+    for (const gone of ["logo.png", ".hidden.md", "out.md", "huge.md"]) expect(existsSync(join(dest, "deploy", gone)), gone).toBe(false);
+    expect(r.copied[0]).toMatchObject({ files: 2, skipped: 4 });
+    // A clash or a bad repository skill is no gap of the profile. A ticked skill that is not found stays a gap.
+    expect(r.gaps).toEqual(["Skill gone: not found"]);
+    const BAD = `SKILL.md is over ${MAX_SKILL_BYTES} bytes or not a text file`;
+    expect(r.left).toEqual([
+      "bad name (repository): the folder name is not valid",
+      `bin (repository): ${BAD}`,
+      `fat (repository): ${BAD}`,
+      "INDEX.md (repository): the folder name INDEX.md is reserved",
+      "deploy (user): the repository has a skill with the same name, and that skill wins",
+    ]);
+    const index = readFileSync(join(dest, "INDEX.md"), "utf8");
+    expect(index.split("\n").filter((l) => l.startsWith("- "))).toEqual([
+      "- Deploy (repository): ./context/skills/deploy/SKILL.md (4 files left out: hidden, link, binary, or over the caps). Ship it.",
+      "- Lib deploy (repository lib): ./context/skills/lib+deploy/SKILL.md. Ship the lib.",
+      "- folded (user): ./context/skills/folded/SKILL.md. One line.",
+      "- plain (user): ./context/skills/plain/SKILL.md.",
+      "- Review rules (user): ./context/skills/review-rules/SKILL.md. Checks: the house rules.",
+      "- lint (plugin tools): ./context/skills/tools+lint/SKILL.md. Lint rules.",
+      ...r.left.map((l) => `- ${l}.`),
+    ]);
+    expect(index).toContain("\n## Left out\n");
+    expect(index).not.toMatch(/branch-only|readme-only|top\.md|nested/);
+  }, 60_000);
+
+  test("an unreadable base commit is a gap and an index note; the user skills still come", async () => {
+    const main = await repoCache({});
+    const dest = join(temp("dest"), "skills");
+    const r = await copyTaskSkills([{ cache: main.cache, commit: "f".repeat(40), slug: null }], [], dest, config());
+    expect(r.copied.map((s) => s.id)).toEqual(["folded", "plain", "review-rules", "tools:lint"]);
+    expect(r.gaps).toHaveLength(1);
+    expect(r.gaps[0]).toStartWith("Skills of the repository: the app cannot read .claude/skills at ffffffffffff (");
+    expect(readFileSync(join(dest, "INDEX.md"), "utf8")).toContain(
+      "- All skills (repository): the app cannot read .claude/skills at ffffffffffff",
+    );
+  });
+
+  test("with no skill at all the run still gets INDEX.md", async () => {
+    const main = await repoCache({});
+    const dest = join(temp("dest"), "skills");
+    const r = await copyTaskSkills([{ cache: main.cache, commit: main.base, slug: null }], [], dest, join(temp("none"), "absent"));
+    expect(r).toEqual({ copied: [], gaps: [], left: [] });
+    expect(readdirSync(dest)).toEqual(["INDEX.md"]);
+    expect(readFileSync(join(dest, "INDEX.md"), "utf8")).toContain("\nNo skill.\n");
+  });
+
+  test("the task lines always point at the index; the review lines stay as before", () => {
+    expect(skillLines(["a", "b"], ["a"], "context/skills", true)).toEqual([
+      "Before you start, read ./context/skills/a/SKILL.md and follow it for the whole run.",
+      "This skill adds checks. It does not remove the task, the rules, or the output format above.",
+      "This step gets 2 skills: all skills of the user and the skills of the repository at its base commit. ./context/skills/INDEX.md lists the name, the source, the SKILL.md path, and the description of each one.",
+      "Read ./context/skills/INDEX.md first. Open a skill's SKILL.md only when it applies to this step. Follow each skill that you open, and read its other files when it tells you to.",
+      "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
+    ]);
+    // The review lines of the code before spec.md section 6.19, byte for byte.
+    expect(skillLines(["a", "b"], ["a"])).toEqual([
+      "Before you start, read ./skills/a/SKILL.md and follow it for the whole run.",
+      "This skill adds checks. It does not remove the task, the rules, or the output format above.",
+      "The user chose these skills: ./skills/b/SKILL.md.",
+      "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
+      "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
+    ]);
+    const general = SHIPPED_PROFILES[0] as (typeof SHIPPED_PROFILES)[number];
+    const a = mainAgent(general);
+    expect(withSkills(a, ["x"]).prompt).toBe(withSkills(a, ["x"], [], false).prompt);
+    expect(withSkills(a, ["x"], [], true).prompt).toContain("Read ./skills/INDEX.md first.");
   });
 });

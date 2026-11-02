@@ -39,6 +39,7 @@ import { FAKE_TOKEN, FAKE_USER, key, repoWrites, startFakeBitbucket } from "../s
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { attachmentPath, ISSUE_KEY, JIRA_TOKEN, pngOf, startFakeJira } from "../support/fake-jira";
 import { claudeStream, fakeRunner, reviewRemote, stubListTools } from "../support/review-fixture";
+import { commitOnMain } from "./fixture";
 
 for (const m of ["tasks/tasks", "tasks/files", "tasks/plan", "tasks/interview", "tasks/routes", "review/jobs", "review/workspace"])
   console.log(`tasks.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -225,14 +226,18 @@ const specWith = (o: Record<string, unknown>) => ({ ...echoSpec(), ...o });
 
 describe("the profile of a task (spec.md section 6.2)", () => {
   test(
-    "the task keeps the picked profile; the interview and the spec run use its model and skills; the next Build form preselects it",
+    "the task keeps the picked profile; the interview and the spec run use its model and get all skills; the next Build form preselects it",
     async () => {
       const config = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-task-config-")));
       dirs.push(config);
       mkdirSync(join(config, "skills", "tdd"), { recursive: true });
       writeFileSync(join(config, "skills", "tdd", "SKILL.md"), "---\nname: tdd\ndescription: Test first.\n---\n\nWrite the test first.\n");
+      // spec.md section 6.19: a skill that the profile does not tick, and a skill of the repository on the target branch.
+      mkdirSync(join(config, "skills", "other"), { recursive: true });
+      writeFileSync(join(config, "skills", "other", "SKILL.md"), "---\nname: other\n---\nNot ticked.\n");
       const strict = { ...SHIPPED_PROFILES[0], id: "strict", name: "Strict", model: "sonnet", skills: ["tdd"] } as ProfileInput;
       const h = await setup({ config, profiles: [...SHIPPED_PROFILES, strict] });
+      await commitOnMain(h.remote.remote, config, { ".claude/skills/repo-rules/SKILL.md": "---\nname: repo-rules\n---\nRepo rules.\n" });
       await h.connectJira();
       const pick = async () => (await h.json<{ profile: string }>("/api/tasks/profile?project=PROJ&repo=repo")).body.profile;
       expect(await pick()).toBe("general");
@@ -251,8 +256,10 @@ describe("the profile of a task (spec.md section 6.2)", () => {
       expect(calls.length).toBe(2);
       for (const call of calls) {
         expect(call.argv[call.argv.indexOf("--model") + 1]).toBe("sonnet");
-        expect(call.skills).toContain("tdd/SKILL.md");
-        expect(call.agents?.["rl-main"]?.prompt).toContain("The user chose these skills: ./skills/tdd/SKILL.md.");
+        expect(call.skills).toEqual(expect.arrayContaining(["INDEX.md", "tdd/SKILL.md", "other/SKILL.md", "repo-rules/SKILL.md"]));
+        const prompt = call.agents?.["rl-main"]?.prompt;
+        expect(prompt).toContain("This step gets 3 skills: all skills of the user and the skills of the repository at its base commit.");
+        expect(prompt).toContain("Read ./skills/INDEX.md first.");
       }
       const rows = h.db.query("SELECT kind, profile, profile_name FROM review_run WHERE task = $task ORDER BY id").all({ task: c.body.id });
       expect(rows).toEqual([

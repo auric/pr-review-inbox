@@ -1070,7 +1070,8 @@ export function replanAgent(p: Profile, budget: number): AgentSpec {
 // user's own Claude Code setup.
 // Above SKILL_INDEX_AFTER skills, copySkills writes the index and the model reads only the skills that apply.
 // always: the folders of the always-use skills. They come first in both modes.
-export function skillLines(folders: string[], always: string[] = [], root = "skills"): string[] {
+// task: a Build a Jira task step. It gets every skill of the user and the repository skills, and copyTaskSkills always writes the index.
+export function skillLines(folders: string[], always: string[] = [], root = "skills", task = false): string[] {
   if (!folders.length) return [];
   const first = folders.filter((f) => always.includes(f));
   const rest = folders.filter((f) => !always.includes(f));
@@ -1080,8 +1081,12 @@ export function skillLines(folders: string[], always: string[] = [], root = "ski
         "This skill adds checks. It does not remove the task, the rules, or the output format above.",
       ]
     : [];
-  const read =
-    folders.length > SKILL_INDEX_AFTER
+  const read = task
+    ? [
+        `This step gets ${folders.length} skills: all skills of the user and the skills of the repository at its base commit. ./${root}/${SKILL_INDEX} lists the name, the source, the SKILL.md path, and the description of each one.`,
+        `Read ./${root}/${SKILL_INDEX} first. Open a skill's SKILL.md only when it applies to this step. Follow each skill that you open, and read its other files when it tells you to.`,
+      ]
+    : folders.length > SKILL_INDEX_AFTER
       ? [
           `The user chose ${folders.length} skills. ./${root}/${SKILL_INDEX} lists the name, the description, and the folder of each one.`,
           `Read ${root}/${SKILL_INDEX}. Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.`,
@@ -1104,8 +1109,8 @@ export const withInstructions = (a: AgentSpec, text: string): AgentSpec =>
   text ? { ...a, prompt: `${a.prompt}\n\n${text.trimEnd()}` } : a;
 
 // Adds the skill pointer to the prompt of an agent.
-export const withSkills = (a: AgentSpec, folders: string[], always: string[] = []): AgentSpec =>
-  folders.length ? { ...a, prompt: [a.prompt, ...skillLines(folders, always)].join("\n") } : a;
+export const withSkills = (a: AgentSpec, folders: string[], always: string[] = [], task = false): AgentSpec =>
+  folders.length ? { ...a, prompt: [a.prompt, ...skillLines(folders, always, "skills", task)].join("\n") } : a;
 
 // A server of the user's Claude config in a run. remote: the server is reached over the network.
 export type McpUse = { server: string; tools: string[]; remote: boolean };

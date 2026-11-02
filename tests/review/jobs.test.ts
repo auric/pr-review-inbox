@@ -4,7 +4,7 @@
 // Plan v3 WP10: review jobs with the fake CLI, temp repositories with a file remote, and the fake Bitbucket. No test starts the real CLI.
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
@@ -947,6 +947,9 @@ describe("editable profiles (M4)", () => {
       mkdirSync(join(config, "skills", "my-skill", "ref"), { recursive: true });
       writeFileSync(join(config, "skills", "my-skill", "SKILL.md"), "---\nname: my-skill\ndescription: Mine.\n---\nSKILL-CANARY\n");
       writeFileSync(join(config, "skills", "my-skill", "ref", "a.md"), "A\n");
+      // spec.md section 6.19 changes task runs only: a review never gets a skill that the profile does not tick.
+      mkdirSync(join(config, "skills", "not-ticked"), { recursive: true });
+      writeFileSync(join(config, "skills", "not-ticked", "SKILL.md"), "---\nname: not-ticked\n---\nNo.\n");
       const h = await setup({ claudeConfigDir: config });
       expect((await putProfiles(h, [{ ...general, skills: ["my-skill", "gone"] }])).status).toBe(200);
       h.scenario({ fixture: subagentRun(), hang: true });
@@ -959,6 +962,15 @@ describe("editable profiles (M4)", () => {
       expect(c.stdin).not.toContain("SKILL.md");
       const agents = JSON.parse(readFileSync(flag(c.argv, "--agents") as string, "utf8"));
       for (const name of ["rl-main", "rl-reviewer"]) expect(agents[name].prompt.split("./skills/my-skill/SKILL.md")).toHaveLength(2);
+      // The copy and the prompt lines of a review stay as before: the ticked skill only, no index.
+      expect(readdirSync(join(c.cwd, "skills"))).toEqual(["my-skill"]);
+      expect(agents["rl-main"].prompt).toContain(
+        [
+          "The user chose these skills: ./skills/my-skill/SKILL.md.",
+          "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
+          "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
+        ].join("\n"),
+      );
       await h.call(`/api/runs/${a.body.id}/cancel`, { method: "POST" });
       await h.finish(a.body.id);
 
