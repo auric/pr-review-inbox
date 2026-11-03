@@ -147,3 +147,10 @@ Yes. `hostname` is in the CLI's built-in safe-command list, which needs no allow
 I did not run anything on Linux, run the real CLI, or test the race between spawn and job assignment. I did not trace the `_ar` and `nkn` parts of the safe-command list (likely git and docker read-only subcommands).
 
 CodeGraph: used 0 times. I used direct reads, because the target was the CLI bundle and two small known functions.
+
+### User answers to the run 2 questions (2026-11-03)
+
+- Q1 yes: a Windows Job Object through bun:ffi, with taskkill as the fallback.
+- Q2 yes: kill the leftovers after every run, not only on Stop.
+- Q3 changed: deny `Bash(xargs *)` in allowlist mode only while no allowlist entry of the repository names xargs. A task that needs xargs gets an entry from the plan or an allow request. Scripts that call xargs inside (for example a test command) are not affected, because the rules check only the command that Claude types.
+- Q4 yes: checks.ts uses the same kill.
