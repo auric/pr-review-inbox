@@ -1,6 +1,6 @@
 # Build a Jira task manual smoke test
 
-This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Part U is Gate UTU: "Tell Claude" and "Update from <base>" on a release base (`tests/e2e/task-tell.e2e.ts` is its automated twin). Part N is a task that changes a repository and its submodule (`tests/e2e/task-repos.e2e.ts` is its automated twin). Part T is Gate UT: a Jira task with sub-tasks, one branch and one PR per sub-task (`tests/e2e/task-subtasks.e2e.ts` is its automated twin). Parts M (medium task) and L (large task) come with the later work packages.
+This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Part U is Gate UTU: "Tell Claude" and "Update from <base>" on a release base (`tests/e2e/task-tell.e2e.ts` is its automated twin). Part N is a task that changes a repository and its submodule (`tests/e2e/task-repos.e2e.ts` is its automated twin). Part T is Gate UT: a Jira task with sub-tasks, one branch and one PR per sub-task (`tests/e2e/task-subtasks.e2e.ts` is its automated twin). Part T2 is a remote build over ssh that a skill describes, with the commands that Claude may run. Parts M (medium task) and L (large task) come with the later work packages.
 
 ## Rules
 
@@ -10,7 +10,7 @@ This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket
 - Use a new, empty data folder. Never use the data folder of your daily instance.
 - Nothing goes to Bitbucket before "Push and open PR". Check Bitbucket after each part.
 - Do not copy tokens, host names, code, task text, or file names into files, issues, or chat. Record counts, times, states, and the shape of the sentences only.
-- Expect about 70 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P, seven in part R, four in part D, ten in part U, seven in part N, and eighteen in part T. A run is one interview, one plan, one tests step, one code step, one fix, one own review, one "Tell Claude" step, or one resolve step.
+- Expect about 76 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P, seven in part R, four in part D, ten in part U, seven in part N, eighteen in part T, and about six in part T2. A run is one interview, one plan, one tests step, one code step, one fix, one own review, one "Tell Claude" step, or one resolve step.
 - In this document, `<BITBUCKET_URL>` is the base URL of the Bitbucket server, `<JIRA_URL>` is the base URL of the Jira server, `<REPO>` is the test repository as `<project>/<repo>`, `<TARGET>` is its default branch, `<BASE2>` is a second branch of `<REPO>`, `<RELEASE>` is a third branch of `<REPO>` that acts as a release branch, and `<KEY1>` to `<KEY6>` are the keys of the six Jira tasks. Part N uses `<MAIN>`, a second personal test repository with a first-level submodule `<SUB>` of the same server at the folder `<PATH>`, and the Jira task `<KEY7>`. You can push to both, and the inbox knows `<MAIN>`.
 
 ## Preparation
@@ -164,6 +164,27 @@ Run this part after part S. Run it once on Jira Server or Data Center, and once 
 38. Click "Drop". Expect the confirm "Drop ABC-14?" with "The app builds no PR for it. An open PR stays open." Click "Drop". Expect the row "Dropped." Check Bitbucket: `<PREFIX>ABC-14-early` still has the recorded head of step 4.
 39. Open "More actions" and click "Close the task". When "Close the task" does not show, record it, click "Stop" first, and then "Close the task".
 
+## T2. A remote build over ssh with a skill
+
+Run this part after part S, when "Commands Claude may run" is code complete (WP-C2b and WP-C2c). It checks that Claude runs the commands of the allowlist during a step: a copy to a build host and a remote build that a skill describes. In this part, `<build-host alias>` is a Host alias of your ssh config for a build host that you may use. `<KEY8>` is a small Jira task for `<REPO>`, and its tests build and run on the build host. `<dir>` is a scratch folder on the build host, for example `~/rl-smoke`. Nothing goes to Bitbucket before "Push and open PR".
+
+1. Open integration-check.md, section "Claude shell". Expect a result in the rows SU1 to SU5 and SU8 to SU10, not "NOT RUN". On Windows, also expect a result in SU6. Stop part T2 when a required row says FAIL.
+2. In your ssh config, give the Host block of `<build-host alias>` these lines: `BatchMode yes`, `ConnectTimeout 15`, `ServerAliveInterval 30`, `IdentitiesOnly yes`, and `IdentityFile ~/.ssh/<key>`. On Windows, Git Bash ssh reads `$HOME/.ssh`, not the Windows ssh agent.
+3. In Git Bash (Windows) or a terminal (Linux), run `ssh <build-host alias> echo ok`. Expect `ok` without a prompt.
+4. Write a user skill in `~/.claude/skills/remote-build/SKILL.md`. It tells Claude to copy the repository with `tar -C repo -czf - . | ssh <build-host alias> "mkdir -p <dir> && tar -C <dir> -xzf -"`, and to build and test with `ssh <build-host alias> "cd <dir> && timeout 600 <test command>"`. It also says: "Pipe long build output through `tail -n 200`." Put a fake key file `id_smoke` next to SKILL.md, with the first line `-----BEGIN OPENSSH PRIVATE KEY-----` and no real key.
+5. Write `<KEY8>`: change one source file of `<REPO>`, and test it on the build host with the skill `remote-build`.
+6. Open Settings, Tasks, and go to `<REPO>`. Expect "Commands Claude may run" with an empty list and the mode "Allowlist". Expect "Claude may run the approved checks" on.
+7. Click "Tasks", then "Build a Jira task". Type `<KEY8>`, pick `<REPO>`, and click "Build this task". Answer the questions as in S3.
+8. When the plan is ready, open the Plan tab. Expect a second list with the commands that Claude proposes, each with a reason, for example `ssh <build-host alias> *` and `tar -C repo -czf - .`. Each part of a pipeline is its own entry. Expect no entry for git, a shell, or the Bitbucket or Jira host. Record each pattern and its reason.
+9. Untick every proposal. Tick only the narrowest ssh pattern and the tar pattern. Click "Approve the plan". Expect the first-use warning that starts "Claude can run each command that matches this list". Tick "I understand", then click "Approve the plan".
+10. Expect the task header "Commands: allowlist, `<n>` patterns". Open Settings, Tasks, `<REPO>` in a second tab. Expect the two patterns with the source "plan".
+11. Expect the build to start. Open the Log tab. Expect each Claude step with its mode and "Commands Claude ran (`<n>`)". Each row shows the command, its state, and the end of its output. Expect the tar copy and the remote build. Record the count of commands and the time of the remote build.
+12. When Claude needs a command that the list does not match, expect the row "Claude asks to allow a command." with the pattern, the command, and the reason. Pick "Allow once" and click "Continue". Expect the step to run again. Record the pattern. When no request comes, record "no request".
+13. While a remote build runs, click "Stop". Expect the step to stop within 5 s. Run `ssh <build-host alias> pgrep -af timeout`. The remote build can still run: Stop does not end a remote process. `timeout 600` ends it later. Record what you see.
+14. Click "Resume". Expect the build to go on and end with "Your change is ready and checked by Claude." Open the Diff tab. Expect only the plan file and the source and test files of the task. Expect no build output and no file from `<dir>`.
+15. In the data folder, open the part folder of the task and go to `context/skills/remote-build/`. Expect SKILL.md and no `id_smoke`. Expect the skills index to name 1 key file left out.
+16. Open "More actions" and click "Close the task". Run `ssh <build-host alias> rm -rf <dir>`.
+
 ## Record
 
 - The commit of preparation step 1, the OS, the Bun version, the `git` version, and the `claude` version.
@@ -176,4 +197,5 @@ Run this part after part S. Run it once on Jira Server or Data Center, and once 
 - From part U: the result line of each "Your instructions" group, the rebase result of step 9, the row of step 10 (conflict row or base row), and the case of step 11 with its reason.
 - From part N: the repository rows with their access and reason, the proposal (name or "none"), the order of the two creates, and whether Bitbucket named the merge commit.
 - From part T: the Jira deployment, the start and the reason of each plan row, the proposed open PR limit with its reason, the time of the status sync or "manual read", the move names of the dialog, the merge line of step 29, the sentence of ABC-17 after the approval, and whether "Close the task" needed "Stop" first.
+- From part T2: the proposed patterns with their reasons, the count of commands Claude ran, the time of the remote build, each allow request or "no request", and what Stop left on the build host.
 - Clean up: delete the `smoke/` branches and the pull requests on Bitbucket, the task branches of `<MAIN>` and `<SUB>`, and the part T branches with `<PREFIX>ABC-14-early`, close the Jira tasks, and delete the data folder.

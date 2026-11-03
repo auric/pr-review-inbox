@@ -57,10 +57,43 @@ describe("claude-checks.ts B17 to B20", () => {
   });
 
   test("an unknown check exits 2 with the usage", () => {
-    const r = run(CLAUDE_CHECKS, ["--dry-run", "B21"], NO_TOOLS);
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B30"], NO_TOOLS);
     expect(r.code).toBe(2);
-    expect(r.err).toContain("unknown check: B21");
+    expect(r.err).toContain("unknown check: B30");
     expect(r.err).toContain("usage:");
+  });
+});
+
+describe("claude-checks.ts B21 to B29", () => {
+  const ids = ["B21", "B22", "B23", "B24", "B25", "B26", "B27", "B28", "B29"];
+
+  test("a dry run plans one shell run per check with the app flags, and skips B28 without an alias", () => {
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "--only", ids.join(",")], NO_TOOLS);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    for (const id of ["B21", "B22", "B24", "B25", "B26", "B27", "B29"]) expect(r.out).toContain(`DRY-RUN  ${id}  calls=1`);
+    expect(r.out).toContain("DRY-RUN  B23  calls=0");
+    expect(r.out).toContain("SKIPPED  B28  calls=0 no --ssh-alias");
+    const lines = r.out.split("\n").filter((l) => /^dry-run b2\d-/.test(l));
+    expect(lines).toHaveLength(7);
+    for (const l of lines) {
+      expect(l).toContain('"--tools","Read,Grep,Glob,Edit,Write,Bash","--allowedTools","Read,Grep,Glob,Edit,Write"');
+      expect(l).toContain('"--permission-mode","dontAsk"');
+      expect(l).toMatch(/"--settings","[^"]*shell\.json"/);
+      expect(l).toContain('"--model","haiku"');
+    }
+    expect(r.out).toContain("V7 (2.1.302 or later)=false");
+    expect(r.out).not.toContain(process.env.USERPROFILE ?? process.env.HOME ?? "<no home>");
+  });
+
+  test("--ssh-alias plans B28 and hides the alias; a bad alias exits 2", () => {
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B28", "--ssh-alias", "test-host.example"], NO_TOOLS);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("DRY-RUN  B28  calls=1");
+    expect(r.out).not.toContain("test-host.example");
+    const bad = run(CLAUDE_CHECKS, ["--dry-run", "B28", "--ssh-alias", "a;b"], NO_TOOLS);
+    expect(bad.code).toBe(2);
+    expect(bad.err).toContain("--ssh-alias takes one ssh config Host alias.");
   });
 });
 

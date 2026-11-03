@@ -4,8 +4,9 @@
 // Gate B: local Claude Code checks B1 to B9 (docs/plans/v3.md section 5), B11 and B12 (docs/plans/r3.md WP-G3),
 // B13 (the model and effort fields of an --agents definition, and the --effort flag), B14 (the default effort of a run without --effort),
 // B15 (work/CLAUDE.md loads under the runner flag set), B16 (a session fork with the flags of docs/plans/session-consult.md part C),
-// B17 to B20 (docs/plans/review-v2/tasks.md WP-G0, docs/gate-v2.md).
-// Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--dry-run]
+// B17 to B20 (docs/plans/review-v2/tasks.md WP-G0, docs/gate-v2.md),
+// B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S).
+// Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
 
@@ -26,7 +27,10 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { z } from "zod";
+import { childEnv as appChildEnv, killTree as appKillTree, implementArgs } from "../../src/server/review/claude";
 import { runnerDefaults } from "../../src/server/review/defaults";
+import { createStreamParser, type StreamState } from "../../src/server/review/stream";
+import { type ShellSpec, shellEnv } from "../../src/server/tasks/shell";
 import { EFFORTS } from "../../src/shared/dto";
 import {
   discussResult,
@@ -37,7 +41,7 @@ import {
   replyResult,
   verifyResult,
 } from "../../src/shared/review";
-import { implementResult, interviewResult, specResult } from "../../src/shared/task";
+import { implementResult, interviewResult, type ShellMode, specResult } from "../../src/shared/task";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const OUT = join(ROOT, ".gate0/v3-local");
@@ -47,7 +51,27 @@ const BUN = process.execPath;
 const MAX_CALLS = 14;
 const MAX_TURNS = 4;
 // B9 and B11 to B20 have their own call caps. They do not count against MAX_CALLS.
-const OWN_MAX_CALLS: Record<string, number> = { b9: 2, b11: 2, b12: 1, b13: 2, b14: 2, b15: 2, b16: 3, b17: 1, b18: 1, b19: 1, b20: 5 };
+const OWN_MAX_CALLS: Record<string, number> = {
+  b9: 2,
+  b11: 2,
+  b12: 1,
+  b13: 2,
+  b14: 2,
+  b15: 2,
+  b16: 3,
+  b17: 1,
+  b18: 1,
+  b19: 1,
+  b20: 5,
+  b21: 1,
+  b22: 1,
+  b24: 1,
+  b25: 1,
+  b26: 1,
+  b27: 1,
+  b28: 1,
+  b29: 1,
+};
 const B9_MAX_TURNS = 8;
 const MAX_COST_USD = 0.6;
 const RUN_TIMEOUT_MS = 180_000;
@@ -74,6 +98,15 @@ const CHECKS = [
   "B18",
   "B19",
   "B20",
+  "B21",
+  "B22",
+  "B23",
+  "B24",
+  "B25",
+  "B26",
+  "B27",
+  "B28",
+  "B29",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
 
@@ -81,9 +114,15 @@ type CheckId = (typeof CHECKS)[number];
 const argv = process.argv.slice(2);
 const DRY = argv.includes("--dry-run");
 const only = new Set<CheckId>();
+// B28: a Host alias of the user's ssh config. GATE_* never reaches a Claude child (childEnv).
+let sshAlias = process.env.GATE_SSH_ALIAS || undefined;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i] ?? "";
   if (a === "--dry-run") continue;
+  if (a === "--ssh-alias" || a.startsWith("--ssh-alias=")) {
+    sshAlias = a === "--ssh-alias" ? (argv[++i] ?? "") : a.slice(12);
+    continue;
+  }
   const v = a === "--only" ? argv[++i] : a.startsWith("--only=") ? a.slice(7) : /^b\d+$/i.test(a) ? a : undefined;
   if (v === undefined) fail(`unknown argument: ${a}`);
   for (const id of v.split(",").map((s) => s.trim().toUpperCase())) {
@@ -92,10 +131,12 @@ for (let i = 0; i < argv.length; i++) {
   }
 }
 const selected = CHECKS.filter((c) => only.size === 0 || only.has(c));
+// The alias goes into allow rules and commands. ( ) end a rule, and the alias must stay one shell word.
+if (sshAlias !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sshAlias)) fail("--ssh-alias takes one ssh config Host alias.");
 
 function fail(msg: string): never {
   console.error(msg);
-  console.error("usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--dry-run]");
+  console.error("usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]");
   process.exit(2);
 }
 
@@ -139,6 +180,7 @@ function redact(s: string) {
   let out = s;
   for (const f of homeForms) out = out.replace(new RegExp(f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "~");
   if (userAgentName) out = out.replaceAll(userAgentName, "<user agent>");
+  if (sshAlias) out = out.replace(new RegExp(`(?<![\\w.-])${sshAlias.replaceAll(".", "\\.")}(?![\\w.-])`, "g"), "<alias>");
   return out;
 }
 
@@ -182,6 +224,9 @@ interface Ev {
   subagent_type?: string;
   is_backgrounded?: boolean;
   status?: string;
+  tool_name?: string;
+  decision_reason_type?: string;
+  decision_reason?: string;
 }
 type Run = { name: string; events: Ev[]; exit: number | null; timedOut: boolean; stderr: string; init?: Ev; results: Ev[]; text: string };
 type ToolUse = { id: string; name: string; input: Record<string, unknown>; parent: string | null };
@@ -305,13 +350,45 @@ const userAgent = (() => {
 userAgentName = userAgent;
 
 // ---------- claude runner ----------
+// Returns the whole stdout text and passes each JSON line to each() when it arrives.
+async function readLines(stream: ReadableStream<Uint8Array>, each: (e: Ev) => void) {
+  const r = stream.getReader();
+  const dec = new TextDecoder();
+  let all = "";
+  let buf = "";
+  const take = (text: string) => {
+    all += text;
+    buf += text;
+    for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      let e: Ev | undefined;
+      try {
+        e = line.startsWith("{") ? JSON.parse(line) : undefined;
+      } catch {}
+      if (e) each(e);
+    }
+  };
+  for (let c = await r.read(); !c.done; c = await r.read()) take(dec.decode(c.value, { stream: true }));
+  take(`${dec.decode()}\n`);
+  return all;
+}
+
 async function runClaude(
   name: string,
   args: string[],
   prompt: string,
   cwd: string,
-  // model null: no --model flag.
-  opts: { env?: Record<string, string>; maxTurns?: number; keepProjects?: boolean; model?: string | null } = {},
+  // model null: no --model flag. raw: args is the full app argv (implementArgs), spawned as the app spawns it. watch: gets each
+  // stream event when it arrives.
+  opts: {
+    env?: Record<string, string>;
+    maxTurns?: number;
+    keepProjects?: boolean;
+    model?: string | null;
+    raw?: boolean;
+    watch?: (e: Ev, pid: number) => void;
+  } = {},
 ): Promise<Run> {
   if (args.includes("--bare")) throw new Error("--bare is forbidden");
   const env = opts.env ?? childEnv;
@@ -320,17 +397,19 @@ async function runClaude(
   const ownCap = OWN_MAX_CALLS[group];
   const turnCap = group === "b9" ? B9_MAX_TURNS : MAX_TURNS;
   const turns = Math.min(opts.maxTurns ?? turnCap, turnCap);
-  const cmd = [
-    CLAUDE ?? "claude",
-    "-p",
-    ...(opts.model === null ? [] : ["--model", opts.model ?? "haiku"]),
-    "--max-turns",
-    String(turns),
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    ...args,
-  ];
+  const cmd = opts.raw
+    ? [CLAUDE ?? "claude", ...args]
+    : [
+        CLAUDE ?? "claude",
+        "-p",
+        ...(opts.model === null ? [] : ["--model", opts.model ?? "haiku"]),
+        "--max-turns",
+        String(turns),
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        ...args,
+      ];
   save(
     `${name}.argv.json`,
     JSON.stringify({ argv: cmd.slice(1), cwd, envSet: Object.keys(env).filter((k) => env[k] !== childEnv[k]) }, null, 2),
@@ -350,13 +429,19 @@ async function runClaude(
     throw new Error(`call limit ${ownCap ?? MAX_CALLS} reached`);
   if (costSum >= MAX_COST_USD) throw new Error(`cost limit ${MAX_COST_USD} USD reached`);
   count();
-  const proc = Bun.spawn(cmd, { cwd, env, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+  // POSIX: the app starts the CLI in a new process group (claude.ts), so its killTree can end the group.
+  const detached = !!opts.raw && process.platform !== "win32";
+  const proc = Bun.spawn(cmd, { cwd, env, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe", detached });
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     killTree(proc.pid);
   }, RUN_TIMEOUT_MS);
-  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  const watch = opts.watch;
+  const [out, err] = await Promise.all([
+    watch ? readLines(proc.stdout, (e) => watch(e, proc.pid)) : new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   const exit = await proc.exited;
   clearTimeout(timer);
   save(`${name}.jsonl`, out);
@@ -1990,6 +2075,430 @@ async function b20() {
   }
 }
 
+// ---------- B21 to B29: the Bash tool of a task step (integration-check.md "Claude shell", SU1 to SU10) ----------
+// Each run uses the app's implementArgs, shell.json (writeShellSettings), and child env (shellEnv over childEnv), in a temp part folder
+// with a temp git repository at repo/. dataDir is a temp folder, never the app data folder. The origins are placeholders.
+const V7_MIN = "2.1.302";
+const SHELL_ORIGINS = ["https://bitbucket.example.invalid", "https://jira.example.invalid"];
+// Over the 180 s run limit, so the CLI never ends a command before the gate does.
+const SHELL_TIMEOUT_SEC = 900;
+const PROBE = "rlgb-probe.cjs";
+const RUNTIME = Bun.which("node") ? "node" : "bun";
+const probe = (arg: string) => `${RUNTIME} ${PROBE} ${arg}`;
+const PROBE_RULE = `${RUNTIME} ${PROBE} *`;
+const NET_DENIED = "curl https://example.invalid";
+// "env K..." prints K=unset or K=set:<hash>. Any other word writes <word>.ran in the cwd. "exit" then exits with code 7.
+// The hash input is the value with / separators, a drive letter for /c/, and lower case, so a Git Bash path form compares equal.
+const PROBE_JS = `const fs = require("fs");
+const crypto = require("crypto");
+const a = process.argv[2] || "";
+const norm = (v) => v.replace(/\\\\/g, "/").replace(/^\\/([a-zA-Z])\\//, "$1:/").toLowerCase();
+const hash = (v) => crypto.createHash("sha256").update(norm(v)).digest("hex").slice(0, 12);
+if (a === "env") {
+  for (const k of process.argv.slice(3)) console.log(k + "=" + (process.env[k] === undefined ? "unset" : "set:" + hash(process.env[k])));
+} else {
+  fs.writeFileSync(a + ".ran", "1");
+  console.log("RLGB-PROBE " + a);
+  if (a === "exit") process.exit(7);
+}
+`;
+const probeHash = (v: string) =>
+  createHash("sha256")
+    .update(
+      v
+        .replace(/\\/g, "/")
+        .replace(/^\/([a-zA-Z])\//, "$1:/")
+        .toLowerCase(),
+    )
+    .digest("hex")
+    .slice(0, 12);
+
+const versionOf = (v: string) => v.match(/\d+\.\d+\.\d+/)?.[0];
+function atLeast(v: string | undefined, min: string) {
+  if (!v) return false;
+  const a = v.split(".").map(Number);
+  const b = min.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  return true;
+}
+const v7Line = () => `claude ${versionOf(cliVersion) ?? cliVersion}; V7 (${V7_MIN} or later)=${atLeast(versionOf(cliVersion), V7_MIN)}`;
+
+const shellPrompt = (cmds: string[]) =>
+  [
+    "This is a Bash tool test. Run each command below with the Bash tool: one Bash call per command, in this order.",
+    "Copy each command exactly as it stands between the ``` lines, also its line breaks. Never change, split, join, or wrap a command.",
+    "Try every command, also when one is refused or fails. Do not retry a command. Run no other command and use no other tool.",
+    ...cmds.flatMap((c, i) => [`Command ${i + 1}:`, "```", c, "```"]),
+    `Then return summary = one line per command with its result, done = true, tests and notes empty lists, question null, specChange "". ${EMPTY_COVERAGE}`,
+  ].join("\n");
+
+type ShellRun = { run: Run; work: string; base: string; state: StreamState; settings: string; arrived: Map<string, number> };
+
+// One implement run with the Bash tool. The app stream parser reads the same events, so the gate also checks its refusal labels.
+async function shellRun(
+  name: string,
+  mode: ShellMode,
+  rules: string[],
+  cmds: string[],
+  maxTurns: number,
+  opts: { env?: (base: Record<string, string>) => Record<string, string>; watch?: (e: Ev, pid: number) => void } = {},
+  check: (s: ShellRun) => unknown = () => {},
+) {
+  const { base, work, app, drop } = runnerFolder(name.split("-")[0] ?? name);
+  try {
+    const dataDir = join(base, "data");
+    mkdirSync(dataDir);
+    writeFileSync(join(work, PROBE), PROBE_JS);
+    if (!DRY) sh(["git", "-c", "init.defaultBranch=main", "init", "-q", join(work, "repo")]);
+    const shell: ShellSpec = { mode, rules, bashTimeoutSec: SHELL_TIMEOUT_SEC, dataDir, origins: SHELL_ORIGINS };
+    const prompt = shellPrompt(cmds);
+    const { args, allowed } = implementArgs({
+      implement: true,
+      cwd: work,
+      appDir: app,
+      prompt,
+      schema: draft07(implementResult),
+      maxTurns,
+      model: "haiku",
+      shell,
+    });
+    const envBase = appChildEnv();
+    const env = shellEnv(opts.env ? opts.env(envBase) : envBase, SHELL_TIMEOUT_SEC);
+    // Arrival times of tool_use and tool_result blocks, by tool_use ID.
+    const arrived = new Map<string, number>();
+    const watch = (e: Ev, pid: number) => {
+      for (const b of blocks(e)) {
+        const id = b.type === "tool_use" ? b.id : b.type === "tool_result" ? b.tool_use_id : undefined;
+        if (id) arrived.set(`${b.type}:${id}`, performance.now());
+      }
+      opts.watch?.(e, pid);
+    };
+    const run = await runClaude(name, args, prompt, work, { env, raw: true, watch });
+    const parser = createStreamParser({ cwd: work, allowedTools: allowed, shell: true });
+    for (const e of run.events) parser.line(JSON.stringify(e));
+    await check({ run, work, base, state: parser.state, settings: readFileSync(join(app, "shell.json"), "utf8"), arrived });
+  } finally {
+    drop();
+  }
+}
+
+type Outcome = { state: "refused" | "ran" | "error" | "no result" | "not tried"; text: string; denied?: Ev; id?: string };
+const bashCalls = (r: Run) => toolUses(r).filter((t) => t.name === "Bash");
+// The first Bash call whose command equals cmd, after line break and space normalization.
+function outcomeOf(r: Run, cmd: string): Outcome {
+  const n = (s: string) => s.replace(/\r\n/g, "\n").trim();
+  const t = bashCalls(r).find((c) => n(String(c.input.command ?? "")) === n(cmd));
+  if (!t) return { state: "not tried", text: "" };
+  const res = toolResult(r, t.id);
+  const denied = r.events.find((e) => e.type === "system" && e.subtype === "permission_denied" && e.tool_use_id === t.id);
+  const text = blockText(res);
+  if (denied) return { state: "refused", text, denied, id: t.id };
+  return { state: !res ? "no result" : res.is_error ? "error" : "ran", text, id: t.id };
+}
+const deniedFields = (d: Ev | undefined) =>
+  d
+    ? JSON.stringify({
+        tool_name: d.tool_name,
+        decision_reason_type: d.decision_reason_type,
+        decision_reason: d.decision_reason,
+        message: (d as { message?: unknown }).message,
+      })
+    : "none";
+const oneLine = (c: string) => c.replace(/\n/g, "\\n");
+const describe = (cmd: string, o: Outcome) =>
+  `[${oneLine(cmd)}] ${o.state}${o.denied ? ` (${o.denied.decision_reason_type ?? "no type"})` : ""}`;
+const ran = (work: string, word: string) => existsSync(join(work, `${word}.ran`));
+const otherCalls = (r: Run, cmds: string[]) => {
+  const n = (s: string) => s.replace(/\r\n/g, "\n").trim();
+  const known = new Set(cmds.map(n));
+  return toolUses(r)
+    .filter((t) => t.name !== "StructuredOutput" && !(t.name === "Bash" && known.has(n(String(t.input.command ?? "")))))
+    .map((t) => (t.name === "Bash" ? `Bash[${short(oneLine(String(t.input.command ?? "")), 80)}]` : t.name));
+};
+
+// B21 (SU1): the CLI takes --restricted, --tools with Bash, --settings, and --permission-mode dontAsk together.
+// PASS: init lists Bash, the app parser finds no bad tool, permissionMode is dontAsk, and the allowed probe runs.
+async function b21() {
+  const cmds = [probe("u1")];
+  await shellRun("b21-flags", "allowlist", [PROBE_RULE], cmds, 4, {}, ({ run, work, state }) => {
+    if (DRY) return dry("B21", v7Line());
+    const tools = run.init?.tools ?? [];
+    const o = outcomeOf(run, cmds[0] ?? "");
+    const mode = run.init?.permissionMode;
+    const pass = tools.includes("Bash") && !state.badTools.length && !state.noBash && mode === "dontAsk" && ran(work, "u1");
+    push(
+      "B21",
+      pass ? "PASS" : "FAIL",
+      `${v7Line()}; exit=${run.exit} init.tools=${tools.join(",") || "none"} badTools=${state.badTools.join(",") || "none"} noBash=${state.noBash} permissionMode=${mode ?? "none"}; ${describe(cmds[0] ?? "", o)} marker=${ran(work, "u1")}; stderr=${short(run.stderr, 200) || "empty"}`,
+      { initTools: tools, permissionMode: mode },
+    );
+  });
+}
+
+// B22 (SU2) and B23 (SU3) read one run. Rules: the exact allowed probe. Command 2 matches no allow rule. Commands 3 and 4 match deny rules.
+const REFUSAL_CMDS = [probe("allowed"), probe("refused"), "git status", NET_DENIED];
+let refusalRun: Promise<{ run: Run; markers: Record<string, boolean>; state: StreamState; settings: string }> | undefined;
+const refusals = () =>
+  (refusalRun ??= new Promise((done, failed) => {
+    shellRun("b22-refusals", "allowlist", [probe("allowed")], REFUSAL_CMDS, 7, {}, ({ run, work, state, settings }) =>
+      done({ run, state, settings, markers: { allowed: ran(work, "allowed"), refused: ran(work, "refused") } }),
+    ).catch(failed);
+  }));
+
+// B22 PASS: the allowed probe ran, the other probe did not, and git status and curl were refused.
+async function b22() {
+  const { run, markers, settings } = await refusals();
+  if (DRY)
+    return dry("B22", `shell.json deny rules=${(JSON.parse(settings) as { permissions: { deny: string[] } }).permissions.deny.length}`);
+  const [allowed, refused, git, net] = REFUSAL_CMDS.map((c) => outcomeOf(run, c));
+  const pass =
+    allowed?.state === "ran" &&
+    markers.allowed === true &&
+    refused?.state === "refused" &&
+    markers.refused === false &&
+    git?.state === "refused" &&
+    net?.state === "refused";
+  push(
+    "B22",
+    pass ? "PASS" : "FAIL",
+    `exit=${run.exit}; ${REFUSAL_CMDS.map((c, i) => describe(c, [allowed, refused, git, net][i] as Outcome)).join("; ")}; markers allowed=${markers.allowed} refused=${markers.refused}; other calls=${otherCalls(run, REFUSAL_CMDS).join(",") || "none"}`,
+  );
+}
+
+// B23 prints the raw refusal facts. PASS: the app parser (stream.ts) labels command 2 "allowlist" and commands 3 and 4 "deny".
+async function b23() {
+  const { run, state } = await refusals();
+  if (DRY) return dry("B23", "reads the B22 run");
+  const facts = REFUSAL_CMDS.slice(1).map((c) => {
+    const o = outcomeOf(run, c);
+    const label = state.refused.find((x) => x.command.trim() === c)?.by ?? "none";
+    return { c, o, label };
+  });
+  const want = ["allowlist", "deny", "deny"];
+  const pass = facts.every((f, i) => f.o.state === "refused" && f.label === want[i]);
+  push(
+    "B23",
+    pass ? "PASS" : "FAIL",
+    `${facts
+      .map(
+        (f, i) =>
+          `[${f.c}] state=${f.o.state} permission_denied=${deniedFields(f.o.denied)} tool_result=${JSON.stringify(short(f.o.text, 400))} app label=${f.label} (want ${want[i]})`,
+      )
+      .join("; ")}; result permission_denials=${short(JSON.stringify(run.results.at(-1)?.permission_denials ?? null), 400)}`,
+  );
+}
+
+// B24 (SU4): compound commands with a denied part. PASS: each is refused and no probe part ran.
+async function b24() {
+  const cmds = [`${probe("c1")} && git status`, `${probe("c2")}; ${NET_DENIED}`, "echo $(git log -1)", `${probe("c4")}\ngit status`];
+  await shellRun("b24-compound", "allowlist", [PROBE_RULE, "echo *"], cmds, 7, {}, ({ run, work }) => {
+    if (DRY) return dry("B24");
+    const got = cmds.map((c) => outcomeOf(run, c));
+    const markers = ["c1", "c2", "c4"].filter((w) => ran(work, w));
+    const pass = got.every((o) => o.state === "refused") && !markers.length;
+    const status = pass ? "PASS" : markers.length || got.some((o) => o.state === "ran") ? "FAIL" : "INFO";
+    push(
+      "B24",
+      status,
+      `exit=${run.exit}; ${cmds.map((c, i) => describe(c, got[i] as Outcome)).join("; ")}; probe parts that ran=${markers.join(",") || "none"}; other calls=${otherCalls(run, cmds).join(",") || "none"}`,
+    );
+  });
+}
+
+// B25 (SU5): Stop. When Claude runs `sleep 600`, the gate waits 3 s, then calls the app's killTree on the CLI.
+// PASS: the CLI and every new sleep process are gone within 5 s. The gate kills a sleep that is left, by PID.
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+function sleepPids() {
+  const r =
+    process.platform === "win32"
+      ? sh([
+          "powershell",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Get-CimInstance Win32_Process | Where-Object Name -eq 'sleep.exe' | ForEach-Object { $_.ProcessId }",
+        ])
+      : sh(["ps", "-eo", "pid=,comm="]);
+  return r.out
+    .split(/\r?\n/)
+    .map((l) => l.trim().match(/^(\d+)(?:\s+(\S+))?$/))
+    .filter((m): m is RegExpMatchArray => !!m && (process.platform === "win32" || m[2]?.split("/").pop() === "sleep"))
+    .map((m) => Number(m[1]));
+}
+const killPid = (pid: number) => {
+  if (process.platform === "win32") return sh(["taskkill", "/F", "/PID", String(pid)]);
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {}
+};
+const STOP_WAIT_MS = 3000;
+const STOP_LIMIT_MS = 5000;
+async function b25() {
+  const cmd = "sleep 600";
+  const before = new Set(DRY ? [] : sleepPids());
+  let stop: Promise<{ sleeps: number[]; cliMs: number | null; sleepMs: number | null; left: number[] }> | undefined;
+  const watch = (e: Ev, pid: number) => {
+    if (stop || !blocks(e).some((b) => b.type === "tool_use" && b.name === "Bash" && String(b.input?.command ?? "").trim() === cmd)) return;
+    stop = (async () => {
+      await Bun.sleep(STOP_WAIT_MS);
+      const sleeps = sleepPids().filter((p) => !before.has(p));
+      const t0 = performance.now();
+      await appKillTree(pid);
+      let cliMs: number | null = null;
+      let sleepMs: number | null = null;
+      while (performance.now() - t0 < STOP_LIMIT_MS && (cliMs === null || sleepMs === null)) {
+        const ms = Math.round(performance.now() - t0);
+        if (cliMs === null && !alive(pid)) cliMs = ms;
+        if (sleepMs === null && sleeps.every((p) => !alive(p))) sleepMs = ms;
+        if (cliMs === null || sleepMs === null) await Bun.sleep(100);
+      }
+      const left = sleeps.filter(alive);
+      for (const p of left) killPid(p);
+      if (alive(pid)) killTree(pid);
+      return { sleeps, cliMs, sleepMs, left };
+    })();
+  };
+  await shellRun("b25-stop", "allowlist", ["sleep *"], [cmd], 3, { watch }, async ({ run }) => {
+    if (DRY) return dry("B25");
+    if (!stop)
+      return push("B25", "FAIL", `Claude did not run ${cmd}; exit=${run.exit}; other calls=${otherCalls(run, [cmd]).join(",") || "none"}`);
+    const s = await stop;
+    const pass = s.sleeps.length > 0 && s.cliMs !== null && s.sleepMs !== null;
+    push(
+      "B25",
+      pass ? "PASS" : "FAIL",
+      `${process.platform}; new sleep processes 3 s after the call=${s.sleeps.length}; after the app killTree: CLI gone in ${s.cliMs ?? `>${STOP_LIMIT_MS}`} ms, sleep gone in ${s.sleepMs ?? `>${STOP_LIMIT_MS}`} ms; left and killed by PID=${s.left.length}; exit=${run.exit}`,
+    );
+  });
+}
+
+// B26 (SU8): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB keeps HOME, PATH, SSH_AUTH_SOCK, and GIT_CONFIG_*; GATE_*, askpass, and API keys stay out.
+// The gate sets GATE_RLGB_PROBE and GIT_ASKPASS for this run, and a placeholder SSH_AUTH_SOCK when none is set.
+const KEEP = ["HOME", "PATH", "SSH_AUTH_SOCK", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_TERMINAL_PROMPT"];
+const DROP = ["GATE_RLGB_PROBE", "GIT_ASKPASS", "SSH_ASKPASS", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+const ENV_INFO = ["GIT_CONFIG_VALUE_0", "USERPROFILE", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"];
+async function b26() {
+  const keys = [...KEEP, ...DROP, ...ENV_INFO];
+  const cmd = `${probe("env")} ${keys.join(" ")}`;
+  const saved = { GATE_RLGB_PROBE: process.env.GATE_RLGB_PROBE, GIT_ASKPASS: process.env.GIT_ASKPASS };
+  let passed: Record<string, string> = {};
+  const envFn = (base: Record<string, string>) => {
+    passed = { ...base, SSH_AUTH_SOCK: base.SSH_AUTH_SOCK ?? "/tmp/rlgb-placeholder-agent.sock" };
+    return passed;
+  };
+  process.env.GATE_RLGB_PROBE = "1";
+  process.env.GIT_ASKPASS = "rlgb-placeholder-askpass";
+  try {
+    await shellRun("b26-env", "allowlist", [PROBE_RULE], [cmd], 3, { env: envFn }, ({ run }) => {
+      if (DRY) return dry("B26");
+      const o = outcomeOf(run, cmd);
+      const seen = Object.fromEntries(
+        [...o.text.matchAll(/^([A-Z0-9_]+)=(unset|set:([0-9a-f]{12}))\s*$/gm)].map((m) => [
+          m[1] ?? "",
+          m[3] ?? (m[2] === "unset" ? null : ""),
+        ]),
+      ) as Record<string, string | null>;
+      const final = shellEnv(passed, SHELL_TIMEOUT_SEC);
+      const given = (k: string) =>
+        Object.entries(final).find(([n]) => (process.platform === "win32" ? n.toUpperCase() === k : n === k))?.[1];
+      const fact = (k: string) => {
+        const v = seen[k];
+        const g = given(k);
+        const gv = g === undefined ? "unset" : "set";
+        return `${k}: given=${gv} seen=${v === undefined ? "no line" : v === null ? "unset" : `set${g !== undefined ? (probeHash(g) === v ? " same" : " other value") : ""}`}`;
+      };
+      const keepOk = KEEP.filter((k) => given(k) !== undefined).every((k) => typeof seen[k] === "string");
+      const dropOk = DROP.every((k) => seen[k] === null);
+      const pass = o.state === "ran" && keepOk && dropOk;
+      push("B26", pass ? "PASS" : "FAIL", `${describe(cmd, o)}; ${keys.map(fact).join("; ")}`);
+    });
+  } finally {
+    for (const [k, v] of Object.entries(saved))
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  }
+}
+
+// B27 (SU9): Any command. PASS: the probe runs, git status and curl are refused, and the redirect outside the cwd writes no file.
+async function b27() {
+  const outside = "rlgb-outside.txt";
+  const cmds = [probe("any"), "git status", `echo RLGB-U9 > ../${outside}`, NET_DENIED];
+  await shellRun("b27-any", "any", [], cmds, 7, {}, ({ run, work, base }) => {
+    if (DRY) return dry("B27");
+    const got = cmds.map((c) => outcomeOf(run, c));
+    const wrote = existsSync(join(base, outside));
+    const pass = got[0]?.state === "ran" && ran(work, "any") && got[1]?.state === "refused" && got[3]?.state === "refused" && !wrote;
+    push(
+      "B27",
+      pass ? "PASS" : "FAIL",
+      `exit=${run.exit}; ${cmds.map((c, i) => describe(c, got[i] as Outcome)).join("; ")}; outside file written=${wrote}; redirect result=${JSON.stringify(short(got[2]?.text ?? "", 200))}; other calls=${otherCalls(run, cmds).join(",") || "none"}`,
+    );
+  });
+}
+
+// B28 (SU6, SU7): optional, with --ssh-alias. Git Bash ssh with the real HOME, an unknown host key, and rsync on the Bash PATH.
+// PASS: the alias answers, and the unknown-key call ends in less than 30 s. rsync is INFO.
+const UNKNOWN_KEY_MS = 30_000;
+function localRsync() {
+  const onPath = Bun.which("rsync");
+  if (process.platform !== "win32") return `rsync on the gate PATH=${!!onPath}`;
+  // Git for Windows: <git>/cmd/git.exe or <git>/bin/bash.exe, and the MSYS tools in <git>/usr/bin.
+  const anchor = process.env.CLAUDE_CODE_GIT_BASH_PATH ?? Bun.which("git") ?? "";
+  const gitRoot = anchor ? dirname(dirname(anchor)) : "";
+  const inGit = !!gitRoot && existsSync(join(gitRoot, "usr", "bin", "rsync.exe"));
+  return `rsync on the gate PATH=${!!onPath}; rsync.exe in Git for Windows usr/bin=${gitRoot ? inGit : "Git not found"}`;
+}
+async function b28() {
+  if (!sshAlias) return push("B28", "SKIPPED", `no --ssh-alias and no GATE_SSH_ALIAS; ${localRsync()}`);
+  const a = sshAlias;
+  const nokey = `ssh -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null ${a} echo RLGB-SSH-NOKEY`;
+  const cmds = [`ssh ${a} echo RLGB-SSH-OK`, nokey, "rsync --version"];
+  const rules = [`ssh ${a} *`, `ssh -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null ${a} *`, "rsync --version"];
+  await shellRun("b28-ssh", "allowlist", rules, cmds, 6, {}, ({ run, arrived }) => {
+    if (DRY) return dry("B28", localRsync());
+    const got = cmds.map((c) => outcomeOf(run, c));
+    const ms = (o: Outcome | undefined) => {
+      const s = arrived.get(`tool_use:${o?.id}`);
+      const e = arrived.get(`tool_result:${o?.id}`);
+      return s !== undefined && e !== undefined ? Math.round(e - s) : null;
+    };
+    const ok = got[0]?.state === "ran" && /RLGB-SSH-OK/.test(got[0]?.text ?? "");
+    const nk = got[1];
+    const nkMs = ms(nk);
+    const nkAnswered = nk?.state === "ran" && /RLGB-SSH-NOKEY/.test(nk.text);
+    const nkFast = nk?.state === "error" && nkMs !== null && nkMs < UNKNOWN_KEY_MS;
+    const status = ok && nkFast ? "PASS" : ok && nkAnswered ? "INFO" : "FAIL";
+    push(
+      "B28",
+      status,
+      `alias call: ${got[0]?.state} in ${ms(got[0]) ?? "?"} ms, output=${JSON.stringify(short(got[0]?.text ?? "", 160))}; unknown key: ${nk?.state} in ${nkMs ?? "?"} ms, output=${JSON.stringify(short(nk?.text ?? "", 240))}${nkAnswered ? " (the ssh config accepts unknown host keys)" : ""}; rsync --version in Claude Bash: ${got[2]?.state}, ${JSON.stringify(short(got[2]?.text ?? "", 80))}; ${localRsync()}`,
+    );
+  });
+}
+
+// B29 (SU10): the exit code of a failed command. PASS: the probe ran, and the tool_result text names exit code 7.
+async function b29() {
+  const cmd = probe("exit");
+  await shellRun("b29-exit", "allowlist", [PROBE_RULE], [cmd], 3, {}, ({ run, work }) => {
+    if (DRY) return dry("B29");
+    const o = outcomeOf(run, cmd);
+    const res = o.id ? toolResult(run, o.id) : undefined;
+    const named = /exit[^\n]{0,20}\b7\b/i.test(o.text);
+    push(
+      "B29",
+      ran(work, "exit") && named ? "PASS" : "FAIL",
+      `${describe(cmd, o)} is_error=${res?.is_error ?? "none"} marker=${ran(work, "exit")}; tool_result=${JSON.stringify(short(o.text, 300))}`,
+    );
+  });
+}
+
 // ---------- main ----------
 const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B1: b1,
@@ -2011,6 +2520,15 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B18: b18,
   B19: b19,
   B20: b20,
+  B21: b21,
+  B22: b22,
+  B23: b23,
+  B24: b24,
+  B25: b25,
+  B26: b26,
+  B27: b27,
+  B28: b28,
+  B29: b29,
 };
 {
   for (const id of selected) await check(id, RUNNERS[id]);
@@ -2018,6 +2536,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   const summary = {
     mode: DRY ? "dry-run" : "run",
     cliVersion,
+    v7: { min: V7_MIN, ok: atLeast(versionOf(cliVersion), V7_MIN) },
     permissionModes,
     restrictedHelp: helpBlock("--restricted"),
     modelHelp: helpBlock("--model"),
@@ -2037,7 +2556,9 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   writeJson(join(OUT, `results${part}${DRY ? ".dry-run" : ""}.json`), summary);
   for (const r of results) console.log(`${r.status.padEnd(8)} ${r.check.padEnd(4)} calls=${r.calls} ${r.evidence}`);
   console.log(
-    `\nclaude ${cliVersion}; claude -p calls: ${claudeCalls - ownTotal()}/${MAX_CALLS}, ${Object.entries(OWN_MAX_CALLS)
+    `\nclaude ${cliVersion}; V7 (${V7_MIN} or later)=${atLeast(versionOf(cliVersion), V7_MIN)}; claude -p calls: ${claudeCalls - ownTotal()}/${MAX_CALLS}, ${Object.entries(
+      OWN_MAX_CALLS,
+    )
       .map(([g, n]) => `${g.toUpperCase()} ${ownCalls[g] ?? 0}/${n}`)
       .join(", ")}; reported cost (sum of result events): $${costSum.toFixed(4)}`,
   );
