@@ -69,3 +69,81 @@ Checks run in commands_json order (checks.ts:404-421). Setup once per worktree, 
 5 WP-C2d (implementer): B21-B29 gate script, U rows in integration-check.md, smoke part T2. The user runs these gates before WP-C2b.
 6 WP-C2b (implementer-xhigh): S6 + D8 with fake-CLI tests (allowRequest blocks with kind allow, three choices re-run the step; bad pattern 400; refused-before pattern only in notes; >5 refusals kill the run and build the request; plan approval saves allow picks and needs the shell warning first time; ignored build output passes, Write into ignored path fails).
 7 WP-C2c (implementer): S7 UI, e2e, screenshots, README, BRIEF/spec wording (D12), CHANGELOG.
+
+
+## Shell gate run 2 (2026-11-03): analysis of B25 and the B24 hostname fact
+
+Written by the investigator against main fe47a6f. Run 2 passed B21 to B24, B26, B27, B27b, and B29. B25 failed.
+
+I found the cause of both problems. Problem 1 is proven on this machine without the real CLI. Problem 2 is proven from the 2.1.316 bundle. I edited no tracked files; my scripts are in the session scratchpad.
+
+### 1. B25: a Claude-started command survives Stop
+
+**Cause on Windows (proven):** Git Bash starts a command by fork then exec. The forked copy starts `sleep.exe` and then exits. So the Windows parent of `sleep.exe` is a process that no longer exists. `taskkill /T` walks the parent links and never reaches it.
+- Local test: node starts `bash -c "sleep 601; echo done"`, then `taskkill /T /F` runs on node. Bash and node end, `sleep.exe` stays. Its parent ID points to a dead process.
+- With `bash -c "sleep 601"` (bash execs directly), bash stays as a stub, so sleep is its child and dies.
+- A Job Object is not the cause. It is the fix.
+
+**Linux is broken too (strong hypothesis, not run on Linux):** the bundle builds the Bash tool's shell with `{type:"bash", ..., detached:!0}` and spawns it with `detached: rn.detached`. So each command gets its own session and process group. Our `process.kill(-pid)` only ends the CLI's own group.
+
+**Fix:**
+- **Windows:** put the CLI in a Job Object through `bun:ffi` on `kernel32.dll`. No native build is needed.
+  - Calls: `CreateJobObjectW`, then `SetInformationJobObject` (class 9, 144 bytes, `LimitFlags`=0x2000 kill-on-close at offset 16), then `OpenProcess(0x101, 0, pid)` and `AssignProcessToJobObject` right after `Bun.spawn`.
+  - On kill: `TerminateJobObject` and `CloseHandle`. Keep `taskkill /T` as the fallback.
+  - Tested (`job.ts`): assign worked even though this test already runs inside a job. Terminate ended node, bash and the orphaned sleep in under 300 ms. When the app exited without a terminate call, kill-on-close also ended the sleep (`crash.ts`).
+- **Linux:** add a marker `REVIEW_LOOP_RUN=<uuid>` to the CLI environment. On kill, run `kill(-pid)`, then scan `/proc/*/environ` for the marker and SIGKILL each match. Repeat the scan up to 3 times. This also catches commands moved to init after `&` or `setsid`.
+
+**Code shape, in `src/server/review/claude.ts`:**
+- Add `const jobs = new Map<number, Pointer>()`.
+- Add `contain(pid, marker)`: on win32 it creates and assigns the job and stores the handle.
+- Change `killTree(pid, marker?)`: on win32 it terminates and closes the job first, then runs taskkill. On Linux it kills the group, then runs the marker scan.
+- Call `contain` right after `Bun.spawn` (about line 425). Put the marker into `env`.
+- In `finally`, always call the kill, even when the CLI ended normally. Today `finally` kills only when `exitCode === null`, so `cmd &` leftovers live on after a normal exit.
+- `src/server/tasks/checks.ts:109` has the same gap for build and test commands that run under Git Bash. It should use the same helper.
+
+**Test:** add `tests/server/review/kill-tree.test.ts`.
+- Windows: a bun parent starts a node child that runs Git Bash `sleep 6543; :`. Wait until that `sleep.exe` shows, call `killTree`, and expect it gone within 2 s. Skip when Git Bash is absent.
+- Linux: the parent runs `sh -c 'setsid sleep 6543 & wait'`. Expect the same.
+- Control: remove the `contain` call and the test must fail. I showed this case locally.
+- Then run B25 again on Windows and on Linux.
+
+### 2. B24: `hostname` ran with no rule
+
+Yes. `hostname` is in the CLI's built-in safe-command list, which needs no allow rule:
+- The entry is `hostname:{safeFlags…, regex:/^hostname(?:\s+(?:-[a-zA-Z]|--[a-zA-Z-]+))*\s*$/}`.
+- The same list holds `cat head tail wc stat strings hexdump od nl id uname free df du locale groups nproc realpath readlink diff which type sleep pwd whoami ls cd find echo printf jq uniq` and others. A second table adds `sed sort file tree date lsof pgrep ps ss netstat fd fdfind sha*sum md5sum`, plus `xargs` everywhere except Windows.
+- `env` and `printenv` are not in the list, and an argument with `$` is never auto-allowed.
+
+**Folder checks:** a second map (`cM`) checks the paths of `cat head tail grep find ls cd diff strings od hexdump base64 sed awk jq sort uniq wc stat file` and others. A path outside the working folders then asks, which is refused under `-p`. Our Read deny rules apply to these commands too.
+
+**Gaps (not path-checked):**
+- `tree`, `fd`, `fdfind` and `du` list file names outside the folder.
+- `ps`, `pgrep` and `lsof` show the command lines of other processes.
+- On Linux, `fd . ~ | xargs head` may read files outside, because the `head` paths come from stdin. This is unverified.
+
+**Recommendation:** add `Bash(xargs *)` to the deny list, in allowlist mode only. Accept the leak of file names and process lists, and record it as a known limit. In Any mode everything is allowed anyway (B27).
+
+### Fact texts
+
+- **SU2:** CONFIRMED. B22: allow and deny rules from --settings apply under --restricted. The CLI refuses a command with no allow rule, git status, and curl. It also refuses a redirect to a file outside the working folder.
+- **SU4:** CONFIRMED. B24: all four compound forms are refused, and no part of them runs. `<allowed> && hostname` runs, because hostname is on the built-in list of read-only commands. That list needs no allow rule.
+- **SU5:** REFUTED. B25: killTree ends the CLI in 299 ms. A `sleep 600` started by Bash stays alive more than 5 s. Git Bash starts a command by fork and exec, so taskkill /T cannot find the command. On Linux, the CLI starts each Bash command in a new process group.
+- **SU9:** REFUTED IN PART. B27 and B27b: with allow Bash or allow `Bash(*)`, deny rules still refuse git status and curl. A redirect to a file outside the working folder runs and writes the file.
+- **V19:** In allowlist mode, the CLI refuses a `>` redirect to a file outside the working folders (B22). With allow Bash or allow `Bash(*)`, the redirect runs (B27, B27b).
+
+### Unverified
+
+- Whether claude.exe starts its children with breakaway from the job. If it does, they escape the job. A B25 rerun shows this.
+- Whether the environment scrub keeps a custom marker variable. Add it to B26.
+- Whether `bun:ffi` works in the compiled binary. `tests/build/compiled.test.ts` would show this.
+
+### Questions for you
+
+1. Use `bun:ffi` (marked experimental) for the Job Object? Recommended: yes, with taskkill as the fallback. The other option, a PowerShell `Add-Type` helper, is slower.
+2. Kill leftovers after every run, not only on Stop? Recommended: yes.
+3. Deny `xargs` in allowlist mode and accept the leak of file names and process lists? Recommended: yes, and document the limit in shell.md.
+4. Apply the same kill to checks.ts? Recommended: yes, in the same package.
+
+I did not run anything on Linux, run the real CLI, or test the race between spawn and job assignment. I did not trace the `_ar` and `nkn` parts of the safe-command list (likely git and docker read-only subcommands).
+
+CodeGraph: used 0 times. I used direct reads, because the target was the CLI bundle and two small known functions.
