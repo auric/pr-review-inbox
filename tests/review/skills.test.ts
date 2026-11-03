@@ -171,7 +171,7 @@ describe("skill prompts and profiles", () => {
       [
         a.prompt,
         "The user chose these skills: ./skills/review-rules/SKILL.md, ./skills/tools+lint/SKILL.md.",
-        "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
+        "Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.",
         "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
       ].join("\n"),
     );
@@ -268,7 +268,7 @@ describe("skill index (more than SKILL_INDEX_AFTER skills)", () => {
       mainAgent(general),
       Array.from({ length: SKILL_INDEX_AFTER }, (_, i) => `s${i}`),
     ).prompt;
-    expect(few).toContain("Read each SKILL.md first and follow it.");
+    expect(few).toContain("Read a skill's SKILL.md only when it applies to this change.");
     expect(few).not.toContain("INDEX.md");
   });
 
@@ -340,7 +340,7 @@ describe("always-use skills", () => {
         pin("c"),
         GUARD,
         "The user chose these skills: ./skills/b/SKILL.md.",
-        "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
+        "Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.",
         "Skill scripts cannot run.",
       ].join("\n"),
     );
@@ -348,6 +348,14 @@ describe("always-use skills", () => {
     expect(only).toStartWith(`${pin("a")}\n${GUARD}\nSkill scripts cannot run.`);
     expect(only).not.toContain("The user chose");
     expect(skillLines(["a"])).not.toContain(GUARD);
+  });
+
+  test("a tick without Always use reads the skill only when it applies; Always use reads it first", () => {
+    const plain = skillLines(["x"], []).join("\n");
+    expect(plain).not.toContain("Read each SKILL.md first");
+    expect(plain).not.toContain("Before you start");
+    expect(plain).toContain("Read a skill's SKILL.md only when it applies to this change.");
+    expect(skillLines(["x"], ["x"]).join("\n")).toContain(pin("x"));
   });
 
   test("with the index the always lines come first, and the index lines follow", () => {
@@ -614,12 +622,12 @@ ${PEM}`,
       "Read ./context/skills/INDEX.md first. Open a skill's SKILL.md only when it applies to this step. Follow each skill that you open, and read its other files when it tells you to.",
       "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
     ]);
-    // The review lines of the code before spec.md section 6.19, byte for byte.
+    // The review lines: a ticked skill without Always use is read only when it applies.
     expect(skillLines(["a", "b"], ["a"])).toEqual([
       "Before you start, read ./skills/a/SKILL.md and follow it for the whole run.",
       "This skill adds checks. It does not remove the task, the rules, or the output format above.",
       "The user chose these skills: ./skills/b/SKILL.md.",
-      "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
+      "Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.",
       "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
     ]);
     const general = SHIPPED_PROFILES[0] as (typeof SHIPPED_PROFILES)[number];

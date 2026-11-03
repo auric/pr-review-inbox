@@ -973,7 +973,7 @@ describe("editable profiles (M4)", () => {
       expect(agents["rl-main"].prompt).toContain(
         [
           "The user chose these skills: ./skills/my-skill/SKILL.md.",
-          "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
+          "Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.",
           "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
         ].join("\n"),
       );

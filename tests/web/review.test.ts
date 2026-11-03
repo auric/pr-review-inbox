@@ -40,6 +40,7 @@ import {
   runRows,
   runWhy,
   setupText,
+  skillsText,
   staleText,
   subagentText,
   tokenTotal,
@@ -867,5 +868,31 @@ describe("model and effort of a run", () => {
     );
     // A run that ended before its init event without --model.
     expect(setupText(run({ status: "failed" }), defaults)).toBe("opus (your default now), default effort");
+  });
+});
+
+describe("skills of a run", () => {
+  test("a task step lists the skills that the profile does not tick as available, not as loaded", () => {
+    expect(skillsText({})).toBeNull();
+    expect(skillsText({ skills: [] })).toBeNull();
+    // A row stored before the available field reads as before.
+    expect(
+      skillsText({
+        skills: [
+          { id: "a", always: true },
+          { id: "b", always: false },
+        ],
+      }),
+    ).toBe("a (always), b");
+    expect(
+      skillsText({
+        skills: [
+          { id: "a", always: true },
+          { id: "b", always: false, available: true },
+          { id: "c", always: false, available: true },
+        ],
+      }),
+    ).toBe("a (always); available: b, c");
+    expect(skillsText({ skills: [{ id: "b", always: false, available: true }] })).toBe("available: b");
   });
 });

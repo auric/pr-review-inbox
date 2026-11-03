@@ -110,6 +110,9 @@ const aliasName = (m: string) => m.charAt(0).toUpperCase() + m.slice(1);
 const MAX_CHIPS = 12;
 // SKILL_INDEX_AFTER of src/server/review/skills.ts.
 const INDEX_AFTER = 5;
+// skillLines of src/server/review/catalog.ts.
+const TICK_HINT = "A ticked skill is read when it applies to the change. Always use reads it first in every run.";
+const TICK_FIRST = "skills-tick-first";
 
 // The skills of the runner setup, by ID. undefined: the list is loading or failed.
 type SkillList = Map<string, SkillDto> | undefined;
@@ -1301,10 +1304,10 @@ function SkillsField(props: RowProps) {
             Choose…<span className="sr-only"> skills of profile {i + 1}</span>
           </Button>
         </div>
-        {d.skills.length > INDEX_AFTER && (
+        {d.skills.length > 0 && (
           <p className="m-0 text-xs text-muted-foreground">
-            With more than {INDEX_AFTER} skills, the run lists them in skills/INDEX.md, and the model reads only the skills that apply.
-            {d.alwaysSkills.length > 0 && " Skills marked Always are read first."}
+            {TICK_HINT}
+            {d.skills.length > INDEX_AFTER && ` With more than ${INDEX_AFTER} skills, the run lists them in skills/INDEX.md.`}
           </p>
         )}
         {tracker && (
@@ -1365,18 +1368,20 @@ function SkillsDialog(props: {
           <span className="text-xs break-words text-muted-foreground">{help}</span>
         </span>
       </label>
-      {picked.includes(id) && (
-        <label className="flex shrink-0 cursor-pointer items-center gap-1.5 px-1.5 py-1 text-xs text-ink-2">
-          <input
-            type="checkbox"
-            className="size-3.5 accent-primary"
-            checked={always.includes(id)}
-            aria-label={`Always use ${id}`}
-            onChange={(e) => props.onAlways(toggleSkill(always, id, e.target.checked))}
-          />
-          Always use
-        </label>
-      )}
+      <label
+        className={`flex shrink-0 items-center gap-1.5 px-1.5 py-1 text-xs ${picked.includes(id) ? "cursor-pointer text-ink-2" : "cursor-not-allowed text-muted-foreground opacity-60"}`}
+      >
+        <input
+          type="checkbox"
+          className="size-3.5 accent-primary disabled:cursor-not-allowed"
+          checked={always.includes(id)}
+          disabled={!picked.includes(id)}
+          aria-label={`Always use ${id}`}
+          aria-describedby={picked.includes(id) ? undefined : TICK_FIRST}
+          onChange={(e) => props.onAlways(toggleSkill(always, id, e.target.checked))}
+        />
+        Always use
+      </label>
     </li>
   );
   return (
@@ -1422,6 +1427,10 @@ function SkillsDialog(props: {
             Clear
           </Button>
         </div>
+        <p className="m-0 text-xs text-muted-foreground">{TICK_HINT}</p>
+        <span id={TICK_FIRST} hidden>
+          Tick the skill first.
+        </span>
         <div className="-mx-1 min-h-0 flex-1 overflow-auto px-1">
           {props.failed && <p className="m-0 text-sm text-destructive">Could not list the skills.</p>}
           {!skills && !props.failed && <p className="m-0 text-sm text-muted-foreground">Loading skills…</p>}

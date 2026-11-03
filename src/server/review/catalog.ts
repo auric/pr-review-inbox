@@ -1079,7 +1079,7 @@ export function replanAgent(p: Profile, budget: number): AgentSpec {
 
 // folders: the skill folders in ./<root> of this run. root: skills, or context/skills for an implement run. The skill text comes from the
 // user's own Claude Code setup.
-// Above SKILL_INDEX_AFTER skills, copySkills writes the index and the model reads only the skills that apply.
+// The model reads a skill without always only when it applies. Above SKILL_INDEX_AFTER skills, copySkills writes the index.
 // always: the folders of the always-use skills. They come first in both modes.
 // task: a Build a Jira task step. It gets every skill of the user and the repository skills, and copyTaskSkills always writes the index.
 export function skillLines(folders: string[], always: string[] = [], root = "skills", task = false): string[] {
@@ -1105,7 +1105,7 @@ export function skillLines(folders: string[], always: string[] = [], root = "ski
       : rest.length
         ? [
             `The user chose these skills: ${rest.map((f) => `./${root}/${f}/SKILL.md`).join(", ")}.`,
-            "Read each SKILL.md first and follow it. Read its other files when it tells you to.",
+            "Read a skill's SKILL.md only when it applies to this change. Follow each skill that you read, and read its other files when it tells you to.",
           ]
         : [];
   return [

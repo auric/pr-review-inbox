@@ -262,6 +262,17 @@ describe("the profile of a task (spec.md section 6.2)", () => {
         expect(prompt).toContain("This step gets 3 skills: all skills of the user and the skills of the repository at its base commit.");
         expect(prompt).toContain("Read ./skills/INDEX.md first.");
       }
+      // A skill that the profile does not tick is stored as available, so the run log does not read it as loaded.
+      for (const r of h.db.query("SELECT skills_json FROM review_run WHERE task = $task").all({ task: c.body.id }) as {
+        skills_json: string;
+      }[])
+        expect(JSON.parse(r.skills_json)).toEqual(
+          expect.arrayContaining([
+            { id: "tdd", always: false },
+            { id: "other", always: false, available: true },
+            { id: "repo-rules", always: false, available: true },
+          ]),
+        );
       const rows = h.db.query("SELECT kind, profile, profile_name FROM review_run WHERE task = $task ORDER BY id").all({ task: c.body.id });
       expect(rows).toEqual([
         { kind: "interview", profile: "strict", profile_name: "Strict" },

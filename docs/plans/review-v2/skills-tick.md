@@ -1,6 +1,6 @@
 # A ticked skill without Always use is read in every run: analysis
 
-Status: analysis of 2026-11-03 against main 6baaf2c, after a user report. Fix not chosen yet.
+Status: analysis of 2026-11-03 against main 6baaf2c, after a user report. The user chose options 1b, 2, and 3 on 2026-11-03. The fix changes the rest branch of `skillLines`, so INDEX.md still starts above 5 skills.
 
 ## Facts
 

@@ -1040,13 +1040,15 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
 
   // The skills in the run folder (review, re-review, and every task step). dest: the skills folder. root: dest from the run cwd.
   // skills: the copy. Default: the profile skills (copySkills). A task step passes copyTaskSkills. lost: launch checked the always-use
-  // skills, but the disk can change before the copy.
+  // skills, but the disk can change before the copy. task: a task step copies every skill. A skill that the profile does not tick is
+  // stored as available, because the step reads it only when it applies.
   function runSkills(
     j: Job | TaskJob,
     profile: Profile,
     dest: string,
     root = "skills",
     skills: { copied: CopiedSkill[]; gaps: string[] } = copySkills(profile.skills, dest, opts.claudeConfigDir ?? claudeConfigDir(), root),
+    task = false,
   ) {
     for (const g of skills.gaps) log(`Review run ${j.id}: ${g}.`);
     const isAlways = (id: string) => profile.alwaysSkills.includes(id);
@@ -1059,7 +1061,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           )
           .join(", ")}.`,
       );
-    j.db.query(SQL.skills).run({ id: j.id, json: JSON.stringify(skills.copied.map((s) => ({ id: s.id, always: isAlways(s.id) }))) });
+    const stored = skills.copied.map((s) => ({
+      id: s.id,
+      always: isAlways(s.id),
+      ...(task && !profile.skills.includes(s.id) && { available: true }),
+    }));
+    j.db.query(SQL.skills).run({ id: j.id, json: JSON.stringify(stored) });
     const missing = profile.alwaysSkills.filter((id) => !skills.copied.some((s) => s.id === id));
     const lost = missing.length
       ? failure(
@@ -1082,7 +1089,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   async function taskSkills(j: TaskJob, dest: string, repos: SkillRepo[], root = "skills") {
     const copy = await copyTaskSkills(repos, j.profile.skills, dest, opts.claudeConfigDir ?? claudeConfigDir(), root);
     for (const l of copy.left) log(`Task run ${j.id}: skill left out: ${l}.`);
-    return runSkills(j, j.profile, dest, root, copy);
+    return runSkills(j, j.profile, dest, root, copy, true);
   }
 
   // The repositories of a task at their base or pinned commit, the main one first, as implementInstructions reads them. Never the

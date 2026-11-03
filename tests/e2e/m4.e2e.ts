@@ -285,7 +285,8 @@ test("skills picked in the dialog save at once and are copied into the run folde
   await expect(dialog.getByText("Plugin 1.2.0 · Checks the naming style.")).toBeVisible();
   // Search narrows the list. Select all then picks only the shown skills.
   await dialog.getByRole("searchbox", { name: "Search skills" }).fill("naming");
-  await expect(dialog.getByRole("checkbox")).toHaveCount(1);
+  // One row: the skill box and its Always use box.
+  await expect(dialog.getByRole("checkbox")).toHaveCount(2);
   await dialog.getByRole("button", { name: "Select all shown" }).click();
   await expect(dialog.getByRole("checkbox", { name: /^style e2e-plugin:style/ })).toBeChecked();
   await dialog.getByRole("searchbox", { name: "Search skills" }).fill("");
@@ -318,11 +319,23 @@ test("an Always use skill shows on its chip, goes first, and blocks the review w
   await openSettings(page);
   await page.getByRole("button", { name: "Choose… skills of profile 1" }).click();
   const dialog = page.getByRole("dialog", { name: "Skills of Review" });
-  // Only a ticked row has the mark. It is its own box, outside the row label.
-  await expect(dialog.getByRole("checkbox", { name: "Always use test-check" })).toHaveCount(0);
+  // Every row has the mark, as its own box outside the row label. It stays disabled until the skill is ticked.
+  const mark = dialog.getByRole("checkbox", { name: "Always use test-check" });
+  await expect(
+    dialog.getByText("A ticked skill is read when it applies to the change. Always use reads it first in every run."),
+  ).toBeVisible();
+  await expect(mark).toBeDisabled();
+  await expect(mark).toHaveAccessibleDescription("Tick the skill first.");
   await dialog.getByRole("checkbox", { name: /^test-check test-check/ }).check();
+  await mark.check();
+  // Ticking off the skill also clears its mark.
+  await dialog.getByRole("checkbox", { name: /^test-check test-check/ }).uncheck();
+  await expect(mark).toBeDisabled();
+  await expect(mark).not.toBeChecked();
+  await dialog.getByRole("checkbox", { name: /^test-check test-check/ }).check();
+  await expect(mark).not.toBeChecked();
   await dialog.getByRole("checkbox", { name: /^style e2e-plugin:style/ }).check();
-  await dialog.getByRole("checkbox", { name: "Always use test-check" }).check();
+  await mark.check();
   await expect(dialog.getByRole("checkbox", { name: /^test-check test-check/ })).toBeChecked();
   await expect(dialog.locator("label label")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Done" }).click();

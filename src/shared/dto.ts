@@ -581,8 +581,9 @@ export type RunDto = {
   tasks?: { key: string; fetchedAt: number }[];
   // The project instruction files that the run got. Absent for runs made before it was stored.
   instructions?: { files: InstructionFileDto[]; bytes: number; notLoaded?: string[] };
-  // The skills that the run got. always: the profile marks the skill Always use. Absent for runs made before it was stored.
-  skills?: { id: string; always: boolean }[];
+  // The skills that the run got. always: the profile marks the skill Always use. available: a task step got the skill, but the profile
+  // does not tick it. Absent for runs made before it was stored.
+  skills?: { id: string; always: boolean; available?: boolean }[];
   // The finding items of the run that a re-review did not find fixed or outdated and the verify phase did not discard. 0 for other kinds.
   findings: number;
   // A running run: indexing builds the codegraph index of the snapshot before the CLI starts. A review run: finding is the first CLI
