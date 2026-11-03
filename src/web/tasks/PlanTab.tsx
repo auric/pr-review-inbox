@@ -14,7 +14,7 @@ import { FieldDescription, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import type { TaskDto, TaskPlanInput } from "../../shared/dto";
+import { MAX_TASK_ANSWER, type TaskDto, type TaskPlanInput } from "../../shared/dto";
 import {
   BUILDS_AT_ONCE_CAP,
   BUILDS_AT_ONCE_DEFAULT,
@@ -697,7 +697,7 @@ export function AskAgain(props: { runner: string; busy: boolean; onSend: (text: 
         id="plan-again"
         name="text"
         rows={3}
-        maxLength={2000}
+        maxLength={MAX_TASK_ANSWER}
         value={text}
         placeholder="For example: build ABC-13 after ABC-12 merges…"
         onChange={(e) => setText(e.target.value)}

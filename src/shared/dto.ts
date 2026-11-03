@@ -1287,7 +1287,7 @@ export const TASK_KEY = /^[A-Z][A-Z0-9_]+-[0-9]+$/;
 export const MAX_TASK_REVIEWERS = 20;
 export const MAX_TASK_COMMANDS = 20;
 export const MAX_TASK_DOC = 120_000;
-export const MAX_TASK_ANSWER = 2000;
+export const MAX_TASK_ANSWER = 100_000;
 
 // git-check-ref-format for a branch name (git-scm.com/docs/git-check-ref-format). git also refuses a branch that starts with "-".
 const refOk = (b: string) =>

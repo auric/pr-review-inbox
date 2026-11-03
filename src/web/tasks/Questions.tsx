@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FieldDescription, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
-import type { TaskAnswersInput, TaskQuestionDto } from "../../shared/dto";
+import { MAX_TASK_ANSWER, type TaskAnswersInput, type TaskQuestionDto } from "../../shared/dto";
 
 type Pick = { choice: number | null; text: string };
 
@@ -102,7 +102,7 @@ export function QuestionsForm(props: {
                   <Textarea
                     id={`tq-${q.id}-note`}
                     rows={2}
-                    maxLength={2000}
+                    maxLength={MAX_TASK_ANSWER}
                     value={p.text}
                     className="min-h-14"
                     onChange={(e) => set(q.id, { text: e.target.value })}
@@ -117,7 +117,7 @@ export function QuestionsForm(props: {
                 <Textarea
                   id={`tq-${q.id}-0`}
                   rows={3}
-                  maxLength={2000}
+                  maxLength={MAX_TASK_ANSWER}
                   value={p.text}
                   aria-describedby={why}
                   onChange={(e) => set(q.id, { text: e.target.value })}

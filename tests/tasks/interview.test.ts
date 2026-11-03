@@ -25,6 +25,7 @@ import {
   type QuestionRow,
   recommendedAnswer,
 } from "../../src/server/tasks/interview";
+import { MAX_TASK_ANSWER, taskAnswersInput, taskPlanAgainInput } from "../../src/shared/dto";
 import { interviewJsonSchema, interviewResult, specJsonSchema } from "../../src/shared/task";
 
 for (const m of ["tasks/interview", "review/catalog", "review/prompt"])
@@ -156,6 +157,20 @@ describe("answers (spec.md sections 6.11 and 6.12)", () => {
       "### Question 2: Any limit? # Your instructions",
     ]);
     expect(answersFile([], null)).toBeNull();
+  });
+
+  test("a note of MAX_TASK_ANSWER characters passes both inputs, one more fails, and answers.md keeps the whole note", () => {
+    const note = (n: number) => "x".repeat(n);
+    expect(MAX_TASK_ANSWER).toBe(100_000);
+    const answers = (text: string) => taskAnswersInput.safeParse({ version: 1, answers: [{ question: 7, text }] }).success;
+    const again = (text: string) => taskPlanAgainInput.safeParse({ version: 1, text }).success;
+    expect([answers(note(MAX_TASK_ANSWER)), again(note(MAX_TASK_ANSWER))]).toEqual([true, true]);
+    expect([answers(note(MAX_TASK_ANSWER + 1)), again(note(MAX_TASK_ANSWER + 1))]).toEqual([false, false]);
+    const lines = Array.from({ length: 1000 }, (_, i) => `Line ${i + 1}.`.padEnd(99, "x"));
+    const long = lines.join("\n");
+    expect(long.length).toBe(MAX_TASK_ANSWER - 1);
+    const f = answersFile([row({ kind: "text", options_json: "[]", answer_json: JSON.stringify({ choice: null, text: long }) })], null);
+    expect(f?.text).toContain(`- Answer of the user:\n\n${lines.map((l) => `    ${l}`).join("\n")}\n`);
   });
 });
 

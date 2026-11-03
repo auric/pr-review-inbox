@@ -1376,7 +1376,7 @@ Section 6.16.10 adds the reads for the base branch, the branch search, the write
 | GET /api/tasks/profile | `?project&repo` | `{profile}`: the preselected profile of the Build form (section 6.19.1) |
 | GET /api/tasks | `?state=open|all` | TaskRowDto[] |
 | GET /api/tasks/:id | | TaskDto (parts, open questions, recent steps, docs, gates, budgets) |
-| POST /api/tasks/:id/answers | `{version, answers: [{question: id, choice?: int, text?: string max 2000}], recommended?: true}` | 202, next run started |
+| POST /api/tasks/:id/answers | `{version, answers: [{question: id, choice?: int, text?: string max 100,000}], recommended?: true}` | 202, next run started |
 | PUT /api/tasks/:id/docs | `{version, doc: "design"|"spec"|"tasks"|"plan", text: max 120,000}` | 200 TaskDto, or 422 with the parse error line |
 | POST /api/tasks/:id/plan | `{version, size, commands: id[], warning?: true}` | 200; 409 "Accept the warning first" on the first plan of the repository |
 | POST /api/tasks/:id/spec-pr | `{version, reviewers: slug[] max 20}` | 202, push and create |
@@ -2206,7 +2206,7 @@ When the diff is not clean, or the update needs Claude:
 |---|---|---|
 | POST /api/tasks | adds `subtasks?: boolean` and `subtaskFiles?` | as today |
 | POST /api/tasks/:id/plan | adds `subtasks` (section 6.20.8) | 409 with the order or pick sentence |
-| POST /api/tasks/:id/plan-again | `{version, text: 1..2000, add?: true}` | 202. The spec run starts again with the text as an answer line. add true runs the short plan run of section 6.20.14. |
+| POST /api/tasks/:id/plan-again | `{version, text: 1..100,000, add?: true}` | 202. The spec run starts again with the text as an answer line. add true runs the short plan run of section 6.20.14. |
 | POST /api/tasks/:id/parts/:part/start | `{version, override: true}` | 202; 409 when the part cannot start for another reason |
 | POST /api/tasks/:id/parts/:part/push | `{version}` | 202; 409 for an adopted part, "needs force", or a lease failure (section 6.11 lists the route) |
 | POST /api/tasks/:id/parts/:part/move | `{version, push?: true}` | 202. push true pushes first. 409 when the lower part did not merge. |
