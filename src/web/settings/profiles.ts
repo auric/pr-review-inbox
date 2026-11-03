@@ -298,6 +298,17 @@ export function editedOf(d: Draft, shipped: ProfileInput): ShippedField[] {
   return SHIPPED_FIELDS.flatMap(([k]) => (sameValue(p[k], shipped[k]) ? [] : [k]));
 }
 
+// The name of a field inside a sentence: "turn cap", but "MCP servers".
+export function fieldWords(f: ShippedField): string {
+  const label: string = SHIPPED_FIELDS.find(([k]) => k === f)?.[1] ?? f;
+  return /^[A-Z][a-z]/.test(label) ? label.charAt(0).toLowerCase() + label.slice(1) : label;
+}
+
+// The longest shipped value that the tooltip of a field reset shows. A longer value, such as a prompt, shows only the action.
+const HINT_VALUE = 60;
+export const resetHint = (value: string) =>
+  value.length <= HINT_VALUE && !value.includes("\n") ? `Reset to the shipped value: ${value}` : "Reset to the shipped value";
+
 // The words for a field value in the shipped value dialog. names: display names of check modules and volumes.
 export function valueText(field: ShippedField, v: ProfileInput, names: { module: (m: string) => string; volume: (m: string) => string }) {
   const flag = (x: string | null, none: string) => x ?? none;

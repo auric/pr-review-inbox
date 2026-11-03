@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Settings, Review profiles: each field of Review or Explain that you changed now shows a small reset button next to its label. Its tooltip shows the shipped value, and a click sets only that field back. Your own profiles have no reset buttons.
 - The app now notifies you when a review, a re-review, or an Explain run ends. The notification names the pull request and the result, such as "review done, 3 findings", or says why the run failed or is incomplete. A run that you cancel gives no notification. The notifications switch in Settings applies.
 - A Jira task now notifies you when it needs you, for example for a question, red tests, or a plan to approve. A click opens the task. Your own Stop gives no notification.
 - "Move up" and "Move down" on each command, on the plan screen and in Settings, Tasks, change the order of the commands. The commands run in list order.

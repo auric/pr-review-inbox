@@ -13,12 +13,14 @@ import {
   type Draft,
   defaultChoice,
   editedOf,
+  fieldWords,
   focusAfter,
   LIMITS,
   modelChoice,
   NEW_PROMPT,
   problems,
   profileId,
+  resetHint,
   SHIPPED_FIELDS,
   sameAsMain,
   sameProfiles,
@@ -442,6 +444,43 @@ describe("shipped profile edits and Duplicate", () => {
     const e = { ...d, prompt: "Mine.", maxTurns: "60", reviewer: { ...d.reviewer, mode: "off" as const } };
     expect(editedOf(e, shipped)).toEqual(["maxTurns", "prompt", "reviewer"]);
     expect(SHIPPED_FIELDS.map(([k]) => k)).not.toContain("variants");
+  });
+
+  test("editedOf compares the saved form of each field, so only a real change shows a reset", () => {
+    const [d] = toDrafts([shipped]) as [Draft];
+    // The server trims text and stores "" as no flag, so these are no edits.
+    expect(editedOf({ ...d, name: " Review ", model: "  ", maxTurns: " 100 " }, shipped)).toEqual([]);
+    // A mark without its skill is not saved (profileInput).
+    expect(editedOf({ ...d, alwaysSkills: ["gone"] }, shipped)).toEqual([]);
+    // An empty name or a bad turn cap differs from the shipped value, so the reset can bring the field back.
+    expect(editedOf({ ...d, name: "", maxTurns: "x" }, shipped)).toEqual(["name", "maxTurns"]);
+    expect(editedOf({ ...d, docs: false, effort: "max", skills: ["a"], alwaysSkills: ["a"] }, shipped)).toEqual([
+      "docs",
+      "effort",
+      "skills",
+      "alwaysSkills",
+    ]);
+    expect(editedOf({ ...d, verifier: { ...d.verifier, effort: "low" }, mcp: [{ server: "s", tools: [] }] }, shipped)).toEqual([
+      "verifier",
+      "mcp",
+    ]);
+  });
+
+  test("the skills reset of one row resets the skills and then the Always use marks", () => {
+    let list = change(toDrafts([shipped]), { act: "edit", i: 0, patch: { skills: ["a", "b"], alwaysSkills: ["b"] } });
+    expect(editedOf(list[0] as Draft, shipped)).toEqual(["skills", "alwaysSkills"]);
+    for (const field of ["skills", "alwaysSkills"] as const) list = change(list, { act: "reset", i: 0, field, shipped });
+    expect(editedOf(list[0] as Draft, shipped)).toEqual([]);
+  });
+
+  test("fieldWords names a field inside a sentence, and resetHint shows a short shipped value", () => {
+    expect(fieldWords("maxTurns")).toBe("turn cap");
+    expect(fieldWords("jiraFamily")).toBe("parent and sub-tasks");
+    expect(fieldWords("mcp")).toBe("MCP servers");
+    expect(resetHint("100")).toBe("Reset to the shipped value: 100");
+    expect(resetHint("x".repeat(60))).toBe(`Reset to the shipped value: ${"x".repeat(60)}`);
+    expect(resetHint("x".repeat(61))).toBe("Reset to the shipped value");
+    expect(resetHint("Line one.\nLine two.")).toBe("Reset to the shipped value");
   });
 
   test("Reset to shipped sets one field back and keeps the other edits", () => {

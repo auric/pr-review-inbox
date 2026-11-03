@@ -985,10 +985,12 @@ writeConfig(dataDir, {
   taskLink: "https://tracker.example.test/browse/{key}",
   jira: { baseUrl: jira.url },
   // General gets skills and an MCP server of the synthetic config, so the brief, the run setup, and Settings show them.
+  // Its edited turn cap shows the field reset in the Settings screenshot.
   profiles: SHIPPED_PROFILES.map((p) =>
     p.id === "general"
       ? {
           ...p,
+          maxTurns: 150,
           skills: ["test-check", "review-kit:naming"],
           alwaysSkills: ["test-check"],
           mcp: [{ server: "team-wiki", tools: ["search", "lookup"] }],

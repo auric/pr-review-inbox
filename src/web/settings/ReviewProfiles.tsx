@@ -52,12 +52,15 @@ import {
   EFFORT_CHOICES,
   editedOf,
   type Field,
+  fieldWords,
   focusAfter,
   LIMITS,
   modelChoice,
+  type Part,
   problems,
   profileId,
   profileLabel,
+  resetHint,
   SHIPPED_FIELDS,
   type ShippedField,
   sameAsMain,
@@ -86,6 +89,11 @@ const iconBtn =
 // One row of the run setup: a label column and the controls. A narrow pane puts the label above.
 const setupRow = "grid min-w-0 grid-cols-[8.5rem_minmax(0,1fr)] items-start gap-x-3 gap-y-1 @max-[559px]:grid-cols-1";
 const setupLabel = "text-sm leading-[30px] text-ink-2 @max-[559px]:leading-normal";
+// A label with the reset of its field after it.
+const labelRow = "flex min-w-0 items-center gap-1";
+// The reset of an edited field, tinted like the Edited badge. It takes no height in a label line. after: a 24 px wide hit area.
+const resetBtn =
+  "relative -my-0.5 inline-grid size-4 shrink-0 cursor-pointer place-items-center rounded-full border-0 bg-sel p-0 text-foreground after:absolute after:-inset-x-1 after:-inset-y-0.5 hover:bg-foreground hover:text-background disabled:cursor-default disabled:opacity-50 disabled:hover:bg-sel disabled:hover:text-foreground";
 
 const RESET_ID = "profiles-reset";
 const STATUS_ID = "profiles-status";
@@ -422,7 +430,7 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
             <>
               <DialogHeader>
                 <DialogTitle>
-                  Shipped {fieldLabel(viewing.field)} of {viewedShipped.name}
+                  Shipped {fieldWords(viewing.field)} of {viewedShipped.name}
                 </DialogTitle>
                 <DialogDescription>
                   A newer shipped version exists. Your edit stays until you reset it. The other fields already get each shipped update.
@@ -476,7 +484,6 @@ function ResetConfirm({ pending, onReset, onCancel }: { pending: boolean; onRese
   );
 }
 
-const fieldLabel = (f: ShippedField) => (SHIPPED_FIELDS.find(([k]) => k === f)?.[1] ?? f).toLowerCase();
 const shownValue = (f: ShippedField, p: ProfileInput) =>
   valueText(f, p, { module: (m) => MODULE_LABEL[m as ModuleId] ?? m, volume: (v) => VOLUME_NAME[v as Volume] ?? v });
 
@@ -515,7 +522,7 @@ function ShippedEdits(props: RowProps & { shipped: ProfileInput }) {
                     View
                     <span className="sr-only">
                       {" "}
-                      the shipped {label.toLowerCase()} of profile {i + 1}
+                      the shipped {fieldWords(f)} of profile {i + 1}
                     </span>
                   </Button>
                 </>
@@ -530,7 +537,7 @@ function ShippedEdits(props: RowProps & { shipped: ProfileInput }) {
                 Reset to shipped
                 <span className="sr-only">
                   {" "}
-                  {label.toLowerCase()} of profile {i + 1}
+                  {fieldWords(f)} of profile {i + 1}
                 </span>
               </Button>
             </li>
@@ -541,21 +548,58 @@ function ShippedEdits(props: RowProps & { shipped: ProfileInput }) {
   );
 }
 
+// The reset of one control of a shipped profile. fields: the shipped fields that the control sets, reset in this order.
+// focus: a selector of the control. It gets the focus after the reset, because the button goes away. A control without an edit
+// keeps an empty slot, so nothing moves when the button shows. A user profile has no reset: it keeps no link to its source.
+function FieldReset({ p, fields, focus }: { p: RowProps; fields: ShippedField[]; focus: string }) {
+  const { i, shipped, edited } = p;
+  if (!shipped || !edited) return null;
+  const on = fields.filter((f) => edited.includes(f));
+  if (!on.length) return <span aria-hidden className="size-4 shrink-0" />;
+  const f = fields[0] as ShippedField;
+  return (
+    <Hint label={resetHint(shownValue(f, shipped))}>
+      <button
+        type="button"
+        data-reset={f}
+        className={resetBtn}
+        aria-label={`Reset ${fieldWords(f)} of profile ${i + 1} to the shipped value`}
+        onClick={() => {
+          for (const field of on) p.onChange({ act: "reset", i, field, shipped });
+          requestAnimationFrame(() => document.querySelector<HTMLElement>(focus)?.focus());
+        }}
+      >
+        <RotateCcw aria-hidden className="size-[11px]" strokeWidth={2.5} />
+      </button>
+    </Hint>
+  );
+}
+
 // A checkbox with its label and one line of help.
-function Toggle(props: { id: string; label: ReactNode; help: string; checked: boolean; onChange: (on: boolean) => void }) {
+function Toggle(props: {
+  id: string;
+  label: ReactNode;
+  help: string;
+  checked: boolean;
+  onChange: (on: boolean) => void;
+  reset?: ReactNode;
+}) {
   return (
     <div className="grid min-w-0 gap-px">
-      <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground">
-        <input
-          type="checkbox"
-          id={props.id}
-          aria-describedby={`${props.id}-help`}
-          className="size-4 shrink-0 accent-primary"
-          checked={props.checked}
-          onChange={(e) => props.onChange(e.target.checked)}
-        />
-        <span>{props.label}</span>
-      </label>
+      <div className={labelRow}>
+        <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground">
+          <input
+            type="checkbox"
+            id={props.id}
+            aria-describedby={`${props.id}-help`}
+            className="size-4 shrink-0 accent-primary"
+            checked={props.checked}
+            onChange={(e) => props.onChange(e.target.checked)}
+          />
+          <span>{props.label}</span>
+        </label>
+        {props.reset}
+      </div>
       <span id={`${props.id}-help`} className="pl-6 text-xs text-muted-foreground">
         {props.help}
       </span>
@@ -578,10 +622,15 @@ type RowProps = {
   // The edited fields whose shipped value changed after the saved edit.
   newer: string[];
   onView: (field: ShippedField) => void;
+  // ProfileRow sets it: the fields that differ from the shipped profile. null: a user profile.
+  edited?: ShippedField[] | null;
 };
 
-function ProfileRow(props: RowProps) {
-  const { d, i, count, onChange, onBlur } = props;
+function ProfileRow(rowProps: RowProps) {
+  const { d, shipped } = rowProps;
+  const props: RowProps = { ...rowProps, edited: shipped ? editedOf(d, shipped) : null };
+  const { i, count, onChange, onBlur } = props;
+  const reset = (f: ShippedField, part: Part) => <FieldReset p={props} fields={[f]} focus={`#${profileId(i, part)}`} />;
   const found = problems(d);
   const label = profileLabel(d, i);
   const of = <span className="sr-only"> of profile {i + 1}</span>;
@@ -599,8 +648,11 @@ function ProfileRow(props: RowProps) {
       id={profileId(i, "row")}
       className="grid scroll-mt-16 grid-cols-[minmax(0,12rem)_minmax(0,1fr)_4.5rem_auto] items-end gap-x-3 gap-y-2.5 border-b py-3.5 @max-[559px]:grid-cols-[minmax(0,1fr)_4.5rem_auto]"
     >
-      <label className={field}>
-        <span>Name{of}</span>
+      <div className={field}>
+        <span className={labelRow}>
+          <label htmlFor={profileId(i, "name")}>Name{of}</label>
+          {reset("name", "name")}
+        </span>
         <input
           id={profileId(i, "name")}
           className={cn(control, "font-semibold")}
@@ -610,9 +662,12 @@ function ProfileRow(props: RowProps) {
           onBlur={onBlur}
           {...invalid("name")}
         />
-      </label>
-      <label className={cn(field, "@max-[559px]:col-span-full @max-[559px]:row-start-2")}>
-        <span>Note{of}</span>
+      </div>
+      <div className={cn(field, "@max-[559px]:col-span-full @max-[559px]:row-start-2")}>
+        <span className={labelRow}>
+          <label htmlFor={profileId(i, "note")}>Note{of}</label>
+          {reset("note", "note")}
+        </span>
         <input
           id={profileId(i, "note")}
           className={control}
@@ -623,9 +678,12 @@ function ProfileRow(props: RowProps) {
           onBlur={onBlur}
           {...invalid("note")}
         />
-      </label>
-      <label className={field}>
-        <span>Turn cap{of}</span>
+      </div>
+      <div className={field}>
+        <span className={labelRow}>
+          <label htmlFor={profileId(i, "turns")}>Turn cap{of}</label>
+          {reset("maxTurns", "turns")}
+        </span>
         <input
           type="number"
           id={profileId(i, "turns")}
@@ -639,7 +697,7 @@ function ProfileRow(props: RowProps) {
           onBlur={onBlur}
           {...invalid("maxTurns")}
         />
-      </label>
+      </div>
       <span className="flex gap-0.5">
         <Hint label="Move up">
           <button
@@ -691,8 +749,11 @@ function ProfileRow(props: RowProps) {
           </button>
         </Hint>
       </span>
-      <label className={cn(field, "col-span-full")}>
-        <span>Prompt{of}</span>
+      <div className={cn(field, "col-span-full")}>
+        <span className={labelRow}>
+          <label htmlFor={profileId(i, "prompt")}>Prompt{of}</label>
+          {reset("prompt", "prompt")}
+        </span>
         <textarea
           id={profileId(i, "prompt")}
           className={cn(control, "h-auto max-h-72 min-h-[4.5rem] resize-y py-1.5 leading-normal field-sizing-content")}
@@ -702,7 +763,7 @@ function ProfileRow(props: RowProps) {
           onBlur={onBlur}
           {...invalid("prompt")}
         />
-      </label>
+      </div>
       <div className="col-span-full -mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <Button
           id={profileId(i, "improve")}
@@ -729,6 +790,7 @@ function ProfileRow(props: RowProps) {
           help="Summary, risks, and questions. No findings."
           checked={d.explain}
           onChange={(explain) => edit({ explain })}
+          reset={reset("explain", "explain")}
         />
         <Toggle
           id={profileId(i, "docs")}
@@ -736,6 +798,7 @@ function ProfileRow(props: RowProps) {
           help="Checks library and API facts in public documentation."
           checked={d.docs}
           onChange={(docs) => edit({ docs })}
+          reset={reset("docs", "docs")}
         />
         <Toggle
           id={profileId(i, "lang")}
@@ -743,6 +806,7 @@ function ProfileRow(props: RowProps) {
           help="Adds checklists for the languages in the change. Review runs only."
           checked={d.languageChecks}
           onChange={(languageChecks) => edit({ languageChecks })}
+          reset={reset("languageChecks", "lang")}
         />
         <Toggle
           id={profileId(i, "family")}
@@ -754,6 +818,7 @@ function ProfileRow(props: RowProps) {
           help="Adds the parent and the sub-tasks of the fetched issue to the task text."
           checked={d.jiraFamily}
           onChange={(jiraFamily) => edit({ jiraFamily })}
+          reset={reset("jiraFamily", "family")}
         />
       </div>
       <ChecksField {...props} />
@@ -785,9 +850,12 @@ function ChecksField(props: RowProps) {
   return (
     <fieldset aria-labelledby={head} disabled={!!off} className="col-span-full grid min-w-0 gap-2">
       <div className="grid gap-px">
-        <p id={head} className="m-0 text-sm font-semibold">
-          Checks{of}
-        </p>
+        <div className={labelRow}>
+          <p id={head} className="m-0 text-sm font-semibold">
+            Checks{of}
+          </p>
+          <FieldReset p={props} fields={["modules"]} focus={`[aria-labelledby="${head}"] input`} />
+        </div>
         <p className="m-0 text-xs text-muted-foreground">{off ?? "Each check adds a checklist to review runs of this profile."}</p>
       </div>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-x-4 gap-y-1">
@@ -808,9 +876,12 @@ function ChecksField(props: RowProps) {
         ))}
       </div>
       <div className={setupRow}>
-        <span id={profileId(i, "volume")} className={setupLabel}>
-          Show{of}
-        </span>
+        <div className={labelRow}>
+          <span id={profileId(i, "volume")} className={setupLabel}>
+            Show{of}
+          </span>
+          <FieldReset p={props} fields={["volume"]} focus={`[aria-labelledby="${profileId(i, "volume")}"] [aria-pressed="true"]`} />
+        </div>
         <div className="grid min-w-0 gap-1">
           <ToggleGroup
             aria-labelledby={profileId(i, "volume")}
@@ -880,9 +951,12 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
         </p>
       </div>
       <div className={setupRow}>
-        <label htmlFor={profileId(i, "model")} className={setupLabel}>
-          Model{of}
-        </label>
+        <div className={labelRow}>
+          <label htmlFor={profileId(i, "model")} className={setupLabel}>
+            Model{of}
+          </label>
+          <FieldReset p={props} fields={["model"]} focus={`#${profileId(i, "model")}`} />
+        </div>
         <ModelPick
           id={profileId(i, "model")}
           textId={profileId(i, "model-id")}
@@ -896,9 +970,12 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
         />
       </div>
       <div className={setupRow}>
-        <label htmlFor={profileId(i, "effort")} className={setupLabel}>
-          Effort{of}
-        </label>
+        <div className={labelRow}>
+          <label htmlFor={profileId(i, "effort")} className={setupLabel}>
+            Effort{of}
+          </label>
+          <FieldReset p={props} fields={["effort"]} focus={`#${profileId(i, "effort")}`} />
+        </div>
         <div className="grid min-w-0 gap-1">
           <EffortPick
             id={profileId(i, "effort")}
@@ -910,9 +987,12 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
         </div>
       </div>
       <div className={setupRow}>
-        <span id={profileId(i, "reviewer")} className={setupLabel}>
-          Reviewer agents{of}
-        </span>
+        <div className={labelRow}>
+          <span id={profileId(i, "reviewer")} className={setupLabel}>
+            Reviewer agents{of}
+          </span>
+          <FieldReset p={props} fields={["reviewer"]} focus={`input[name="reviewer-mode-${d.key}"]:checked`} />
+        </div>
         <div className="grid min-w-0 gap-1.5">
           <div
             role="radiogroup"
@@ -972,9 +1052,12 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
         </div>
       </div>
       <div className={setupRow}>
-        <span id={profileId(i, "verifier")} className={setupLabel}>
-          Check step{of}
-        </span>
+        <div className={labelRow}>
+          <span id={profileId(i, "verifier")} className={setupLabel}>
+            Check step{of}
+          </span>
+          <FieldReset p={props} fields={["verifier"]} focus={`input[name="verifier-mode-${d.key}"]:checked`} />
+        </div>
         <div className="grid min-w-0 gap-1.5">
           <div
             role="radiogroup"
@@ -1198,9 +1281,12 @@ function SkillsField(props: RowProps) {
   });
   return (
     <div className={setupRow}>
-      <span id={profileId(i, "skills-label")} className={setupLabel}>
-        Skills<span className="sr-only"> of profile {i + 1}</span>
-      </span>
+      <div className={labelRow}>
+        <span id={profileId(i, "skills-label")} className={setupLabel}>
+          Skills<span className="sr-only"> of profile {i + 1}</span>
+        </span>
+        <FieldReset p={props} fields={["skills", "alwaysSkills"]} focus={`#${profileId(i, "skills")}`} />
+      </div>
       <div className="grid min-w-0 gap-1">
         <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
           <Chips label={`Skills of profile ${i + 1}`} items={items} />
@@ -1396,9 +1482,12 @@ function McpField(props: RowProps) {
   });
   return (
     <div className={setupRow}>
-      <span id={profileId(i, "mcp-label")} className={setupLabel}>
-        MCP servers<span className="sr-only"> of profile {i + 1}</span>
-      </span>
+      <div className={labelRow}>
+        <span id={profileId(i, "mcp-label")} className={setupLabel}>
+          MCP servers<span className="sr-only"> of profile {i + 1}</span>
+        </span>
+        <FieldReset p={props} fields={["mcp"]} focus={`#${profileId(i, "mcp")}`} />
+      </div>
       <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
         <Chips label={`MCP servers of profile ${i + 1}`} items={items} />
         <Button id={profileId(i, "mcp")} variant="outline" size="sm" className="my-px" aria-haspopup="dialog" onClick={() => setOpen(true)}>

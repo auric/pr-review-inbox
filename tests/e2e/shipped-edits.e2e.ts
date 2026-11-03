@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Edits of shipped profiles: the Edited mark, Reset to shipped, the newer shipped version, Duplicate, and the agent picker labels.
+// Edits of shipped profiles: the field resets, the Edited mark, Reset to shipped, the newer shipped version, Duplicate, and the agent
+// picker labels.
 // Runs against serve.ts only: the fake Bitbucket and a temp data folder.
 import { expect, type Page, test } from "@playwright/test";
 import { APP_PORT, control, E2E_TOKEN, FAKE_URL, openApp } from "./control";
@@ -47,6 +48,24 @@ test("an edited field of the shipped Review profile shows Edited, resets to ship
 }) => {
   const shipped = (await settingsApi(page)).shippedProfiles[0] as Settings["shippedProfiles"][number];
   await expect(edits(page)).toHaveCount(0);
+
+  // The reset next to a field shows only while the field differs from the shipped value.
+  const resetName = page.getByRole("button", { name: "Reset name of profile 1 to the shipped value" });
+  await expect(page.getByRole("button", { name: /^Reset .* to the shipped value$/ })).toHaveCount(0);
+  await field(page, "Name", 1).fill("Mine");
+  await field(page, "Name", 1).blur();
+  await expect.poll(async () => (await settingsApi(page)).profiles[0]?.name).toBe("Mine");
+  await expect(resetName).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Reset .* to the shipped value$/ })).toHaveCount(1);
+  await resetName.click();
+  await expect(field(page, "Name", 1)).toHaveValue("Review");
+  await expect(field(page, "Name", 1)).toBeFocused();
+  await expect(resetName).toHaveCount(0);
+  await expect.poll(async () => (await settingsApi(page)).profiles[0]?.name).toBe("Review");
+  await page.reload();
+  await expect(field(page, "Name", 1)).toHaveValue("Review");
+  await expect(resetName).toHaveCount(0);
+
   await prompt(page).fill(MINE);
   await field(page, "Turn cap", 1).fill("120");
   await field(page, "Turn cap", 1).blur();
@@ -98,8 +117,10 @@ test("Duplicate adds an editable copy after the profile with every field, and th
       ["review-copy", "Review copy", 90],
       ["explain", "Explain", 60],
     ]);
-  // The copy is a user profile, so it shows no shipped edits.
+  // The copy is a user profile, so it shows no shipped edits and no field resets.
   await expect(page.getByRole("group", { name: /^Your edits to the shipped .* \(profile 2\)/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Reset turn cap of profile 1 to the shipped value" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Reset .* of profile 2 to the shipped value$/ })).toHaveCount(0);
   await page.reload();
   await expect(field(page, "Name", 2)).toHaveValue("Review copy");
 
