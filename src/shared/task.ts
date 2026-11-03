@@ -107,6 +107,13 @@ export const PROPOSALS_MAX = 2;
 // spec.md section 6.22.2: a map symbol passes within SYMBOL_NEAR lines of its line. A plan keeps at most APP_CHECKS_MAX app checks.
 export const SYMBOL_NEAR = 5;
 export const APP_CHECKS_MAX = 40;
+// spec.md section 6.22.4: the caps of context/related-work.md. COMMITS, PRS, and BRANCHES count per key, FILES per commit.
+export const RELATED_COMMITS = 20;
+export const RELATED_FILES = 10;
+export const RELATED_PRS = 20;
+export const RELATED_BRANCHES = 10;
+export const RELATED_BYTES = 16 * 1024;
+export const RELATED_LOG_MS = 30_000;
 
 // spec.md section 6.16.5: the repositories of a task (task_repo.role, task_repo.access) and the reasons that the plan screen shows.
 export const REPO_ROLES = ["main", "submodule", "added"] as const;

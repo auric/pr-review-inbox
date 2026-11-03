@@ -236,6 +236,45 @@ test(
 );
 
 test(
+  "spec.md section 6.22.3: Add to plan joins the app checks to the notes and carries only the contracts and risks of a part",
+  async () => {
+    const h = await setup();
+    h.jira.addSubtasks(SUBTASK_PARENT, [...SET, NEW], [["ABC-13", "ABC-12"]]);
+    await h.sync();
+    let t = await h.get(h.id);
+    const contract = { name: "GET /api/probe", change: "change", users: "The UI.", compat: "The shape stays." };
+    const spec = {
+      ...echoSpec(),
+      parts: [part(1, { keys: ["ABC-17"] })],
+      contracts: [
+        { ...contract, path: "src/gone.ts", part: 1 },
+        { ...contract, name: "probe flag", path: "", change: "add", part: null },
+      ],
+      risks: [
+        { text: "The probe slows the lock.", check: "The lock test.", part: 1 },
+        { text: "The task risk.", check: "Review.", part: null },
+      ],
+    };
+    h.runner.write({ fixture: h.fixture, interview: NO_QUESTIONS, spec });
+    expect((await h.json(`/api/tasks/${h.id}/plan-again`, { body: { version: t.version, text: "Add.", add: true } })).status).toBe(202);
+    t = await h.settle(h.id);
+    expect(t.plan?.adding).toBe(true);
+    expect(t.plan?.notes.filter((n) => n.startsWith("Contract "))).toEqual([
+      `Contract GET /api/probe: src/gone.ts is not found at ${t.plan?.base.slice(0, 12)}.`,
+    ]);
+    // The approved plan keeps its contracts and risks until the approval.
+    expect([t.plan?.contracts, t.plan?.risks]).toEqual([[], []]);
+    const ok = await h.json<TaskDto>(`/api/tasks/${h.id}/plan`, {
+      body: { version: t.version, size: "small", commands: [], subtasks: { parts: [], track: [], maxOpen: 3 } },
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.plan?.contracts).toMatchObject([{ ...contract, path: "src/gone.ts", part: 4 }]);
+    expect(ok.body.plan?.risks).toEqual([{ text: "The probe slows the lock.", check: "The lock test.", part: 4 }]);
+  },
+  SLOW,
+);
+
+test(
   "a key that Jira no longer lists gets removed_at; Drop abandons its planned part; a listed key again clears it",
   async () => {
     const h = await setup();

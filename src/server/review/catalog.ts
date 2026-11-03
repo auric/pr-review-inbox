@@ -1028,6 +1028,9 @@ export const specRules = (budget: number, platform: string = process.platform) =
   "In risks, list what can break and the test or check that catches it.",
   "For small, write only change and leave design and spec null. For medium and large, write design and spec and leave change empty.",
   "./context/repo-list.md lists the other repositories that the token can push to. Name one in repos only when the change needs code in it, and say why in reason.",
+  "./context/related-work.md lists the commits, PRs, and branches that name the task key.",
+  "Use it to find the code that earlier work on this task changed.",
+  "Do not plan again what a merged commit already did.",
   `Name at most ${PROPOSALS_MAX} repositories. Never name the main repository, a submodule of it, or a repository that the list shows as skipped.`,
 ];
 

@@ -492,15 +492,17 @@ describe("found work, the plan, and its approval (spec.md sections 6.20.2, 6.20.
         "# Your PRs in PROJ/repo\n\n- Open PRs that you wrote: 0.\n- Median time from open to merge of your 1 newest merged PRs: 2.0 days.",
       );
       for (const line of subtaskSpecRules(400)) expect(specCall?.agents?.["rl-main"]?.prompt).toContain(line);
-      // One branch search per open sub-task, one open-PR list, and the changes of the open PRs.
+      // related-work.md reads the task key, one open-PR list, and one merged-PR list (spec.md section 6.22.4). The found work then reads
+      // one branch search per open sub-task, one open-PR list, and the changes of the open PRs. pr-history.md reads the merged PRs.
       const gets = (p: string) => h.fake.requests.filter((x) => x.startsWith(`GET ${h.w.path}${p}`));
       expect(gets("/branches?").map((x) => new URL(`http://x${x.slice(4)}`).searchParams.get("filterText"))).toEqual([
+        "ABC-10",
         "ABC-12",
         "ABC-13",
         "ABC-14",
       ]);
-      expect(gets("/pull-requests?state=OPEN")).toHaveLength(1);
-      expect(gets("/pull-requests?state=MERGED")).toHaveLength(1);
+      expect(gets("/pull-requests?state=OPEN")).toHaveLength(2);
+      expect(gets("/pull-requests?state=MERGED")).toHaveLength(2);
       const cache = join(h.dataDir, "git", "PROJ", "repo.git");
       expect((await git(["--git-dir", cache, "rev-parse", `refs/rl/task/${t.id}/found/1`], { env: h.r.env })).trim()).toBe(flush);
       // The app checks: a done key leaves the part, and a part with no key left gets no row.

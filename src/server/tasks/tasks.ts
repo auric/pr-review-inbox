@@ -139,6 +139,7 @@ import {
   sizeFloor,
   toPlan,
 } from "./plan";
+import { relatedWorkFile } from "./related";
 import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, taskRepos, updateRepos } from "./repos";
 import { nextPart, type Schedule } from "./schedule";
 import {
@@ -620,8 +621,9 @@ function commandsOf(p: Plan, saved: TaskCommand[]): (TaskCommand & { saved: bool
 
 // docs_json.subtasks: the checked sub-task plan of the spec run (spec.md section 6.20.4). null for a task without sub-tasks.
 // docs_json.adding: the changed plan of "Add to plan" until its approval (section 6.20.14). Its part numbers come after every part
-// of the task, and its parts and map entries join parsed at the approval.
-type Adding = SubtaskPlan & { parts: PlanPart[]; map: Plan["map"] };
+// of the task, and its parts, map entries, contracts, and risks join parsed at the approval. contracts and risks: only those of a part,
+// so the plans of the approved parts stay as they are (section 6.22.3). Absent in a changed plan of an older version.
+type Adding = SubtaskPlan & { parts: PlanPart[]; map: Plan["map"]; contracts?: Plan["contracts"]; risks?: Plan["risks"] };
 type SubDocs = Docs & { subtasks?: SubtaskPlan; adding?: Adding };
 const subPlanOf = (docs: Docs): SubtaskPlan | null => (docs as SubDocs).subtasks ?? null;
 const addingOf = (docs: Docs | null): Adding | null => (docs as SubDocs | null)?.adding ?? null;
@@ -655,6 +657,8 @@ function shiftAdded(plan: Plan, sub: SubtaskPlan, top: number): Adding {
       tasks: p.tasks.map((x) => ({ ...x, id: id(x.id) })),
     })),
     map: plan.map,
+    contracts: (plan.contracts ?? []).flatMap((x) => (x.part === null ? [] : [{ ...x, part: x.part + top }])),
+    risks: (plan.risks ?? []).flatMap((x) => (x.part === null ? [] : [{ ...x, part: x.part + top }])),
   };
 }
 
@@ -1402,7 +1406,8 @@ export function createTaskService(opts: TaskServiceOptions) {
     let proposals: SpecResult["repos"] = [];
     let nested: SnapshotRepo[] = [];
     const subtasks = t.subtasks === 1;
-    // The untrusted files of the snapshot: the task files, then context/repo-list.md, then context/pr-history.md of a sub-task task.
+    // The untrusted files of the snapshot: the task files, context/repo-list.md, context/related-work.md, and context/pr-history.md of a
+    // sub-task task.
     const untrusted = [...files];
     return {
       task: t.id,
@@ -1422,9 +1427,21 @@ export function createTaskService(opts: TaskServiceOptions) {
             "error" in l ? l.error : "",
           ),
         );
+        const p = await settings.provider().catch(() => null);
+        // spec.md section 6.22.4: a task with sub-tasks reads its own key only, because subtasks.md covers the sub-task keys.
+        const parent = subtasks ? null : taskIssue(d, t)?.issue.parent;
+        const keys = parent && parent !== t.key ? [t.key, parent] : [t.key];
+        untrusted.push(
+          await relatedWorkFile(
+            d,
+            { provider: p, dataDir: review.dataDir },
+            { id: t.id, project: t.project, repo: t.repo, branch: t.target_branch },
+            head,
+            keys,
+          ),
+        );
         if (subtasks) {
           // spec.md section 6.20.2: the found work, then subtasks.md again with its result.
-          const p = await settings.provider().catch(() => null);
           const notes = await findWork(
             d,
             { provider: p, dataDir: review.dataDir, remote: () => review.taskRemote(t.project, t.repo) },
@@ -2049,7 +2066,13 @@ export function createTaskService(opts: TaskServiceOptions) {
         const next: SubDocs = {
           ...rest,
           version: docs.version + 1,
-          parsed: { ...docs.parsed, parts: [...docs.parsed.parts, ...adding.parts], map: [...docs.parsed.map, ...adding.map] },
+          parsed: {
+            ...docs.parsed,
+            parts: [...docs.parsed.parts, ...adding.parts],
+            map: [...docs.parsed.map, ...adding.map],
+            contracts: [...(docs.parsed.contracts ?? []), ...(adding.contracts ?? [])],
+            risks: [...(docs.parsed.risks ?? []), ...(adding.risks ?? [])],
+          },
           ...(rest.subtasks && { subtasks: { ...rest.subtasks, starts: [...rest.subtasks.starts, ...adding.starts] } }),
         };
         const builds = input.subtasks?.buildsAtOnce;

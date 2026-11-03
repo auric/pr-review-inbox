@@ -2391,6 +2391,7 @@ What the app does with a failed check:
 - **Rollout.** design.md "## Risks and rollout" becomes "## Rollout". It holds only the flag or the expand, migrate, and contract steps. The field design.risks keeps its name.
 - **Size change.** convertDocs moves the "Contracts and risks" text between plan.md and design.md, so the user's edits stay.
 - **Sub-task parts.** The plan of a part (partDocsOf) holds the contracts and risks with part null or with its own part number.
+- **Add to plan.** The `adding` plan carries the contracts and risks with a part number, and the approval adds them to the plan. Entries with part null stay out, so the plans of the approved parts do not change (user decision of 2026-11-03).
 - **Plan tab.** It shows the section above the parts in all task states.
 
 #### 6.22.4 Related work: context/related-work.md
@@ -2404,12 +2405,13 @@ What the app does with a failed check:
 - **Pull requests:** the app reads three sources.
   - The stored pull_request rows of the repository, in any state.
   - One page of open PRs (`listOpenPullRequests`).
-  - One page of merged PRs (`mergedPullRequests`).
+  - One page of merged PRs (`mergedPullRequests`). Each merged PR gives its target branch (toRef) too.
   - A PR matches when namesKey matches its title or its source branch. Each PR number shows once, and the live state wins. The newest number comes first, at most RELATED_PRS per key.
 - **Branches:** `listBranches(project, repo, <KEY>)`, one GET per key, filtered with namesKey. The list leaves out the branches of a listed PR and shows at most RELATED_BRANCHES.
 - **Failures:** each failed read adds one line, such as "The app could not read the merged PRs: <reason>." The run still starts. Without a Bitbucket setup, the line is "Configure the Bitbucket URL and token first. The app searched only the commits."
+  - The lines of the open and merged PRs and of the setup follow the first paragraph. The lines of the commits and branches of one key follow its heading.
 - **Size:** at most RELATED_BYTES. The app cuts at a line end and adds "The app cut this file at 16 KB."
-- **Nothing found:** "No commit, PR, or branch names ABC-12."
+- **Nothing found:** "No commit, PR, or branch names ABC-12." A key with a failed commit or branch read does not get this line.
 
 ```
 # Earlier work that names ABC-12

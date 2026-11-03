@@ -56,6 +56,7 @@ const mergedPr = z.object({
   createdDate: z.number(),
   closedDate: z.number().optional(),
   fromRef: z.object({ displayId: z.string() }),
+  toRef: z.object({ displayId: z.string() }),
 });
 
 const repoPath = (project: string, repo: string) => `${API}/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}`;
@@ -197,7 +198,16 @@ export type RepoInfo = { project: string; slug: string; name: string; clone: { h
 // complete false: the list stopped at REPO_LIST_MAX or at a bad page cursor.
 export type RepoList = { repos: RepoInfo[]; complete: boolean };
 // A merged PR of a repository (spec.md section 6.20.4). closedDate: null when the server gives none (spec.md section 6.20.17).
-export type MergedPr = { id: number; title: string; author: User; branch: string; createdDate: number; closedDate: number | null };
+// target: the target branch (spec.md section 6.22.4).
+export type MergedPr = {
+  id: number;
+  title: string;
+  author: User;
+  branch: string;
+  target: string;
+  createdDate: number;
+  closedDate: number | null;
+};
 // A branch restriction (Data Center 9.6 REST): type such as read-only, matcher type such as BRANCH, matcher id such as refs/heads/main.
 export type Restriction = { type: string; matcherType: string; matcherId: string };
 
@@ -397,6 +407,7 @@ export function createBitbucketProvider(opts: ClientOptions) {
         title: p.title,
         author: toUser(p.author.user),
         branch: p.fromRef.displayId,
+        target: p.toRef.displayId,
         createdDate: p.createdDate,
         closedDate: p.closedDate ?? null,
       }));
