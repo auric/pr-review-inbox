@@ -156,3 +156,9 @@ Things I did not check:
 Main risk: zod `.min(1)` on reason relies on the CLI `--json-schema` check to make the model comply. A run that ignores it fails the step instead of showing the push-back.
 
 CodeGraph: used 4 times
+## User decisions (2026-11-03)
+
+- The user agreed to the flow: judge each point, push back with a reason and a proof, one question per push-back.
+- "Fix it anyway" is final for that point. The next fix step must fix it and must not push back on it again. When Claude cannot fix it, it sets question.
+- PR runs on a PR that a task created get the plan files and the answers of the user (answers.md), not only the plan.
+- Open questions 1 to 4 of section 4 take the recommended answers, unless the user says otherwise.
