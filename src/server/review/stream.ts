@@ -10,6 +10,7 @@ import type {
   RunEventStatus,
   SDKAssistantMessage,
   SDKAssistantMessageError,
+  SDKPermissionDeniedMessage,
   SDKRateLimitEvent,
   SDKResultMessage,
   SDKSystemMessage,
@@ -20,6 +21,16 @@ import type {
 } from "../../shared/run-log";
 
 const NOTE_MAX = 300;
+// spec.md section 6.21 (D7): the Log tab shows each Bash command and the end of its output.
+const COMMAND_MAX = 4000;
+const OUTPUT_BYTES = 4096;
+// Over this number of refused Bash commands, the runner ends the run.
+export const REFUSED_MAX = 5;
+// V12: on Windows, Claude Code offers Bash only when Git Bash is installed.
+export const NO_BASH_TEXT =
+  process.platform === "win32"
+    ? "Install Git for Windows. Claude Code needs Git Bash to run commands."
+    : "Claude Code did not offer the Bash tool, so the step cannot run commands.";
 // init.tools names the agent tool "Task". tool_use blocks name it "Agent" (Gate B8).
 const AGENT_TOOLS = new Set(["Agent", "Task"]);
 const AUTH_ERRORS = new Set<SDKAssistantMessageError>(["authentication_failed", "oauth_org_not_allowed"]);
@@ -35,6 +46,9 @@ export const NOTES_MAX = 200_000;
 // One note of a run: a text block of rl-main, or the report of a finished Agent call. from: "rl-main", or the Agent call.
 export type RunNote = { from: string; text: string };
 
+// A Bash command that Claude Code refused. command: the event target. by: the rule list that refused it.
+export type Refusal = { command: string; by: "allowlist" | "deny" };
+
 export type StreamState = {
   inits: SDKSystemMessage[];
   results: SDKResultMessage[];
@@ -42,6 +56,9 @@ export type StreamState = {
   rateLimitRejected: boolean;
   // Tools in an init event that are not in the allowlist.
   badTools: string[];
+  // A shell step whose init event lists no Bash tool.
+  noBash: boolean;
+  refused: Refusal[];
   // The notes of the run in stream order, at most NOTES_MAX characters. A salvage run reads them (spec.md section 1.6).
   notes: RunNote[];
 };
@@ -58,6 +75,7 @@ function relPath(cwd: string, p: string) {
 function targetOf(tool: string, input: Record<string, unknown>, cwd: string) {
   const str = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : undefined);
   if (tool === "Agent") return str("description") ?? "";
+  if (tool === "Bash") return (str("command") ?? "").slice(0, COMMAND_MAX);
   const file = str("file_path") ?? str("path");
   const pattern = str("pattern");
   if (pattern !== undefined) return file === undefined ? pattern : `${pattern} in ${relPath(cwd, file)}`;
@@ -74,6 +92,14 @@ function note(text: string) {
   return t ? t.slice(0, NOTE_MAX) : null;
 }
 
+// The last OUTPUT_BYTES bytes of a Bash result, with its line breaks. A cut inside a character leaves replacement characters; they go.
+function outputTail(text: string) {
+  const t = text.replace(/<\/?tool_use_error>/g, "");
+  const bytes = new TextEncoder().encode(t);
+  const tail = bytes.length > OUTPUT_BYTES ? new TextDecoder().decode(bytes.subarray(-OUTPUT_BYTES)).replace(/^\uFFFD+/, "") : t;
+  return tail.trim() ? tail : null;
+}
+
 function resultText(b: ContentBlock, sep = " ") {
   const c = b.content;
   if (typeof c === "string") return c;
@@ -82,13 +108,28 @@ function resultText(b: ContentBlock, sep = " ") {
 
 const blocks = (c: unknown): ContentBlock[] => (Array.isArray(c) ? c.filter((b) => b && typeof b === "object") : []);
 
-// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin.
-export function createStreamParser(opts: { cwd: string; allowedTools: Set<string>; agents?: ReadonlySet<string>; now?: () => number }) {
+// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin. shell: the run must get Bash.
+export function createStreamParser(opts: {
+  cwd: string;
+  allowedTools: Set<string>;
+  agents?: ReadonlySet<string>;
+  shell?: boolean;
+  now?: () => number;
+}) {
   const now = opts.now ?? Date.now;
   const events = new Map<string, RunEvent>();
   // A background Agent call gets its tool_result at launch. Only its task_notification ends it.
   const background = new Set<string>();
-  const state: StreamState = { inits: [], results: [], apiErrors: [], rateLimitRejected: false, badTools: [], notes: [] };
+  const state: StreamState = {
+    inits: [],
+    results: [],
+    apiErrors: [],
+    rateLimitRejected: false,
+    badTools: [],
+    noBash: false,
+    refused: [],
+    notes: [],
+  };
   let seq = 0;
   let noteChars = 0;
 
@@ -168,14 +209,26 @@ export function createStreamParser(opts: { cwd: string; allowedTools: Set<string
         const call = events.get(b.tool_use_id);
         if (call?.tool === "Agent" && call.status === "running" && !b.is_error && !background.has(b.tool_use_id))
           addNote(`${call.agent ?? "Agent"} report: ${call.target}`, resultText(b, "\n"));
-        if (b.is_error) end(changed, b.tool_use_id, "error", note(resultText(b)));
-        else if (!background.has(b.tool_use_id)) end(changed, b.tool_use_id, "ok", null);
+        const bash = call?.tool === "Bash";
+        if (b.is_error) end(changed, b.tool_use_id, "error", bash ? outputTail(resultText(b, "\n")) : note(resultText(b)));
+        else if (!background.has(b.tool_use_id)) end(changed, b.tool_use_id, "ok", bash ? outputTail(resultText(b, "\n")) : null);
       }
     } else if (m.type === "system" && m.subtype === "init") {
       const init = m as SDKSystemMessage;
       state.inits.push(init);
-      for (const t of Array.isArray(init.tools) ? init.tools : [])
-        if (!opts.allowedTools.has(t) && !state.badTools.includes(t)) state.badTools.push(t);
+      const tools = Array.isArray(init.tools) ? init.tools : [];
+      for (const t of tools) if (!opts.allowedTools.has(t) && !state.badTools.includes(t)) state.badTools.push(t);
+      if (opts.shell && !tools.includes("Bash")) state.noBash = true;
+    } else if (m.type === "system" && m.subtype === "permission_denied") {
+      // V7. b17-write-confinement.jsonl: this event comes before the error tool_result of the call, so end() keeps the refusal note.
+      const d = m as SDKPermissionDeniedMessage;
+      if (d.tool_name === "Bash") {
+        // Gate U3 confirms the decision type: "rule" for a matching deny rule; another type for a command that no allow rule matches.
+        const by = d.decision_reason_type === "rule" ? "deny" : "allowlist";
+        const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
+        state.refused.push({ command: events.get(id)?.target ?? "", by });
+        end(changed, id, "error", by === "deny" ? "Refused by the deny list" : "Refused by the allowlist");
+      }
     } else if (m.type === "system" && m.subtype === "task_started") {
       const t = m as SDKTaskStartedMessage;
       if (t.tool_use_id && t.is_backgrounded) background.add(t.tool_use_id);
@@ -228,7 +281,9 @@ export function classify(s: StreamState, end: { exitCode: number | null; cancell
   const done = s.results.findLast((r) => r.structured_output !== undefined && !r.is_error);
   const failed = (kind: RunErrorKind, text: string): Verdict => ({ status: "failed", kind, text, result: last ?? null });
   if (end.cancelled) return { status: "cancelled", kind: null, text: null, result: done ?? last ?? null };
+  if (s.noBash) return failed("tool_check", NO_BASH_TEXT);
   if (s.badTools.length) return failed("tool_check", `init lists tools outside the allowlist: ${s.badTools.join(", ")}.`);
+  if (s.refused.length > REFUSED_MAX) return failed("tool_check", `Claude Code refused more than ${REFUSED_MAX} commands in this run.`);
   if (done) return { status: "completed", kind: null, text: null, result: done };
   if (end.timedOut) return failed("process", "The run passed its time limit.");
   const kind = errorKind(s, last);

@@ -135,6 +135,17 @@ export type SDKTaskProgressMessage = {
   usage?: SDKTaskUsage;
 };
 
+// A refused tool call (fixtures b1, b3, b17). decision_reason_type: for example "other" or "asyncAgent".
+export type SDKPermissionDeniedMessage = {
+  type: "system";
+  subtype: "permission_denied";
+  tool_name: string;
+  tool_use_id?: string;
+  decision_reason_type?: string;
+  decision_reason?: string;
+  message?: string;
+};
+
 export type SDKRateLimitEvent = {
   type: "rate_limit_event";
   rate_limit_info: { status: "allowed" | "allowed_warning" | "rejected"; resetsAt?: number; rateLimitType?: string };

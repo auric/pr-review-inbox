@@ -8,8 +8,9 @@ import { basename, isAbsolute, join } from "node:path";
 import { EFFORTS, type Effort, modelName } from "../../shared/dto";
 import type { RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
 import { log } from "../log";
+import { type ShellSpec, shellEnv, writeShellSettings } from "../tasks/shell";
 import { RUNTIME_ENV } from "./git";
-import { classify, createStreamParser, type RunNote } from "./stream";
+import { classify, createStreamParser, REFUSED_MAX, type RunNote } from "./stream";
 
 // Gate B ran on this version. Older versions have other flags and event shapes.
 export const MIN_CLI_VERSION = "2.1.295";
@@ -68,7 +69,8 @@ export type ResumeSpec = {
 
 // docs/plans/review-v2/spec.md section 6.7: one Claude step of a task (run kind implement). cwd: the part folder with repo/, the task
 // worktree, and context/. The run gets no agent. timeoutMs: lower than the runner limit. appDir and mcpServers: the MCP servers of
-// the profile and the git MCP server, as in RunSpec. appDir must be outside cwd. Absent: no MCP server.
+// the profile and the git MCP server, as in RunSpec. appDir must be outside cwd. Absent: no MCP server. shell: the Bash tool with the
+// rules of spec.md section 6.21; it needs appDir. Absent: no Bash.
 export type ImplementSpec = {
   implement: true;
   cwd: string;
@@ -80,6 +82,7 @@ export type ImplementSpec = {
   model?: string | null;
   effort?: Effort | null;
   timeoutMs?: number;
+  shell?: ShellSpec;
 };
 
 // Gate B17 (integration-check.md U72): with these tools, --restricted keeps Edit and Write inside the cwd. No Bash, no Agent.
@@ -109,7 +112,8 @@ export type RunnerOptions = {
   timeoutMs?: number;
 };
 
-// Gate B: ANTHROPIC_* selects API billing. CLAUDECODE, CLAUDE_PID, and CLAUDE_CODE_* mark a nested session.
+// Gate B: ANTHROPIC_* selects API billing. CLAUDECODE, CLAUDE_PID, and CLAUDE_CODE_* mark a nested session. CLAUDE_CODE_GIT_BASH_PATH
+// is the user's Git Bash for the Bash tool (V12). GATE_* hold the tokens of the gate scripts.
 // The git MCP child gets this env through the CLI. mcp.json sets no env for it.
 export function childEnv(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -117,7 +121,7 @@ export function childEnv(): Record<string, string> {
     // Windows env names ignore case.
     const K = process.platform === "win32" ? k.toUpperCase() : k;
     if (v === undefined || K === "ANTHROPIC_API_KEY" || K === "ANTHROPIC_AUTH_TOKEN" || K === "CLAUDECODE" || K === "CLAUDE_PID") continue;
-    if (K.startsWith("CLAUDE_CODE_") || RUNTIME_ENV.test(K)) continue;
+    if ((K.startsWith("CLAUDE_CODE_") && K !== "CLAUDE_CODE_GIT_BASH_PATH") || K.startsWith("GATE_") || RUNTIME_ENV.test(K)) continue;
     env[k] = v;
   }
   // Gate B3: with this switch, subagents run in the foreground and the run sends one result event.
@@ -315,11 +319,15 @@ export function resumeArgs(spec: ResumeSpec) {
 // The CLI arguments of an implement run: the flags of Gate B17 (scripts/gate/claude-checks.ts b17) and the runner output flags. No
 // --permission-mode: -p denies a call without an allow rule, and --allowedTools pre-approves the five tools and the chosen MCP tools.
 // The MCP flags are those of a review run (prepare). The init check accepts only these tools, the denied MCP tools, and StructuredOutput.
+// A shell step (spec.md section 6.21) adds Bash to --tools, the Bash rules in shell.json, and dontAsk, which refuses each command that
+// no allow rule matches (V8). Gate U1 confirms that the CLI takes these flags together and that init lists Bash.
 export function implementArgs(spec: ImplementSpec) {
-  const tools = IMPLEMENT_TOOLS.join(",");
+  const builtins = [...IMPLEMENT_TOOLS, ...(spec.shell ? ["Bash"] : [])];
   if (spec.model != null && !modelName.safeParse(spec.model).success) throw new Error(`Invalid model name: ${spec.model}`);
   if (spec.effort != null && !EFFORTS.includes(spec.effort)) throw new Error(`Invalid effort: ${spec.effort}`);
+  if (spec.shell && !spec.appDir) throw new Error("A shell step needs an app folder outside the step folder.");
   const mcp = spec.appDir && spec.mcpServers ? writeMcp(spec.appDir, spec.mcpServers) : null;
+  const settings = spec.shell && spec.appDir ? writeShellSettings(spec.appDir, spec.shell) : null;
   const args = [
     "-p",
     "--output-format",
@@ -329,11 +337,12 @@ export function implementArgs(spec: ImplementSpec) {
     "--strict-mcp-config",
     ...(mcp ? ["--mcp-config", mcp.file] : []),
     "--tools",
-    tools,
+    builtins.join(","),
     "--allowedTools",
     [...IMPLEMENT_TOOLS, ...(mcp?.allow ?? [])].join(","),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
     ...(mcp?.denied.length ? ["--disallowedTools", mcp.denied.join(",")] : []),
+    ...(settings ? ["--settings", settings, "--permission-mode", "dontAsk"] : []),
     "--json-schema",
     JSON.stringify(spec.schema),
     "--max-turns",
@@ -344,7 +353,7 @@ export function implementArgs(spec: ImplementSpec) {
   ];
   if (JSON.stringify(args).length > MAX_ARGV)
     throw new Error("The MCP tool lists are too long for the command line. Pick fewer MCP servers.");
-  return { args, allowed: new Set([...IMPLEMENT_TOOLS, ...(mcp?.tools ?? []), ...(mcp?.denied ?? []), "StructuredOutput"]) };
+  return { args, allowed: new Set([...builtins, ...(mcp?.tools ?? []), ...(mcp?.denied ?? []), "StructuredOutput"]) };
 }
 
 export function createClaudeRunner(opts: RunnerOptions = {}) {
@@ -410,10 +419,11 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const own = "implement" in spec || "resume" in spec ? spec.timeoutMs : undefined;
       const limit = Math.min(opts.timeoutMs ?? RUN_TIMEOUT_MS, own ?? RUN_TIMEOUT_MS);
       const agents = new Set("main" in spec ? [MAIN_AGENT, ...Object.keys(spec.agents)] : []);
-      const parser = createStreamParser({ cwd, allowedTools: allowed, agents });
+      const shell = "implement" in spec ? spec.shell : undefined;
+      const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: !!shell });
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
-        env: childEnv(),
+        env: shell ? shellEnv(childEnv(), shell.bashTimeoutSec) : childEnv(),
         stdin: new Blob([spec.prompt]),
         stdout: "pipe",
         stderr: "pipe",
@@ -433,12 +443,17 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const handle = (line: string) => {
         if (stopped || self.cancelled || !line.trim()) return;
         const changed = parser.line(line);
-        if (parser.state.badTools.length) {
+        if (parser.state.badTools.length || parser.state.noBash) {
           stopped = true;
           void killTree(p.pid);
           return;
         }
         if (changed.length) onEvents(changed);
+        // Gate U5 confirms that the tree kill also ends a running Bash command and its children.
+        if (parser.state.refused.length > REFUSED_MAX) {
+          stopped = true;
+          void killTree(p.pid);
+        }
       };
       let buf = "";
       const out = readText(p.stdout, (text) => {

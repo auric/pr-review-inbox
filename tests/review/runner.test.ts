@@ -5,10 +5,22 @@ import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClaudeRunner, type RunnerOptions, type RunSpec } from "../../src/server/review/claude";
-import { classify, createStreamParser, NOTES_MAX } from "../../src/server/review/stream";
+import {
+  createClaudeRunner,
+  IMPLEMENT_TOOLS,
+  type ImplementSpec,
+  implementArgs,
+  type RunnerOptions,
+  type RunSpec,
+} from "../../src/server/review/claude";
+import { classify, createStreamParser, NO_BASH_TEXT, NOTES_MAX } from "../../src/server/review/stream";
+import { type ShellSpec, shellSettings } from "../../src/server/tasks/shell";
 import type { RunEvent } from "../../src/shared/run-log";
+import { implementJsonSchema } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
+
+for (const m of ["review/claude", "review/stream", "tasks/shell"])
+  console.log(`runner.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
 
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
 const REAL = join(import.meta.dir, "../../fixtures/claude");
@@ -322,7 +334,7 @@ describe("safety", () => {
     expect(await runner.check()).toMatchObject({ ok: false, kind: "unavailable", message: "claude.cmd is not the native claude.exe." });
   });
 
-  test("scrubbed env: no API key, no nested-session markers, no Bun or Node runtime flags, background tasks off", async () => {
+  test("scrubbed env: no API key, no nested-session markers, no gate tokens, no Bun or Node runtime flags, background tasks off", async () => {
     const set = {
       ANTHROPIC_API_KEY: "test-key",
       ANTHROPIC_AUTH_TOKEN: "test-token",
@@ -330,6 +342,8 @@ describe("safety", () => {
       CLAUDE_PID: "4242",
       CLAUDE_CODE_ENTRYPOINT: "cli",
       CLAUDE_CODE_SOMETHING: "x",
+      CLAUDE_CODE_GIT_BASH_PATH: "C:\\Git\\bin\\bash.exe",
+      GATE_BITBUCKET_TOKEN: "gate-token",
       BUN_BE_BUN: "1",
       BUN_OPTIONS: "--smol",
       NODE_OPTIONS: "--inspect",
@@ -344,9 +358,13 @@ describe("safety", () => {
       for (const c of calls()) {
         const keys = Object.keys(c.env).map((k) => k.toUpperCase());
         for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDECODE", "CLAUDE_PID"]) expect(keys).not.toContain(k);
-        for (const k of ["BUN_BE_BUN", "BUN_OPTIONS", "NODE_OPTIONS"]) expect(keys).not.toContain(k);
-        expect(keys.filter((k) => k.startsWith("CLAUDE_CODE_"))).toEqual(["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]);
+        for (const k of ["BUN_BE_BUN", "BUN_OPTIONS", "NODE_OPTIONS", "GATE_BITBUCKET_TOKEN"]) expect(keys).not.toContain(k);
+        expect(keys.filter((k) => k.startsWith("CLAUDE_CODE_")).sort()).toEqual([
+          "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+          "CLAUDE_CODE_GIT_BASH_PATH",
+        ]);
         expect(c.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe("1");
+        expect(c.env.CLAUDE_CODE_GIT_BASH_PATH).toBe("C:\\Git\\bin\\bash.exe");
         expect(c.env.RL_KEEP_ME).toBe("kept");
       }
     } finally {
@@ -523,5 +541,290 @@ describe("safety", () => {
     const name = encoded(realpathSync.native(work));
     expect(existsSync(join(projects, name)) || existsSync(join(tmpdir(), "claude", name))).toBe(false);
     expect(runner.cancel()).toBe(false);
+  });
+});
+
+// docs/plans/review-v2/spec.md section 6.21: an implement run with the Bash tool. The fake CLI lists the --tools names in init.
+describe("shell steps", () => {
+  const SCHEMA_I = implementJsonSchema();
+  const S = "00000000-0000-4000-8000-000000000001";
+  const stub = { command: "bun", args: ["stub.ts"], tools: ["get_fact"] };
+  function implement(scenario: Partial<FakeScenario>, shell?: Partial<ShellSpec>) {
+    const s = setup(scenario);
+    const spec: ImplementSpec = {
+      implement: true,
+      cwd: s.work,
+      appDir: s.app,
+      mcpServers: { "rl-stub": stub },
+      prompt: "- Mode: implement\nDo the step.",
+      schema: SCHEMA_I,
+      maxTurns: 80,
+      ...(shell && {
+        shell: {
+          mode: "allowlist",
+          rules: ["ssh build1 *"],
+          bashTimeoutSec: 600,
+          dataDir: s.base,
+          origins: ["https://bitbucket.example.test"],
+          ...shell,
+        },
+      }),
+    };
+    return { ...s, spec };
+  }
+  const head = ["-p", "--output-format", "stream-json", "--verbose", "--restricted", "--strict-mcp-config", "--mcp-config"];
+  const tail = ["--json-schema", JSON.stringify(SCHEMA_I), "--max-turns", "80", "--no-session-persistence"];
+
+  // Stream lines of a run with Bash calls. A refused call: the tool_use, permission_denied (V7), and the error tool_result.
+  const line = {
+    init: {
+      type: "system",
+      subtype: "init",
+      cwd: "C:\\fake-cwd",
+      tools: [],
+      mcp_servers: [],
+      model: "m",
+      permissionMode: "dontAsk",
+      session_id: S,
+    },
+    bash: (id: string, command: string) => ({
+      type: "assistant",
+      parent_tool_use_id: null,
+      session_id: S,
+      message: { content: [{ type: "tool_use", id, name: "Bash", input: { command, description: "Run it" } }] },
+    }),
+    out: (id: string, content: string, is_error = false) => ({
+      type: "user",
+      parent_tool_use_id: null,
+      session_id: S,
+      message: { content: [{ type: "tool_result", tool_use_id: id, content, is_error }] },
+    }),
+    denied: (id: string, type?: string) => ({
+      type: "system",
+      subtype: "permission_denied",
+      tool_name: "Bash",
+      tool_use_id: id,
+      ...(type && { decision_reason_type: type }),
+      decision_reason: "Refused",
+      message: "Permission to use Bash has been denied.",
+    }),
+    result: { type: "result", subtype: "success", is_error: false, result: "", structured_output: {}, num_turns: 3, session_id: S },
+  };
+  const refused = (id: string, command: string, type?: string) => [
+    line.bash(id, command),
+    line.denied(id, type),
+    line.out(id, "Permission to use Bash has been denied.", true),
+  ];
+  const synthetic = (name: string, events: unknown[]) => {
+    const f = join(DERIVED, `${name}.jsonl`);
+    writeFileSync(f, `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
+    return f;
+  };
+
+  test("no shell: the implement argv stays as before, with no settings file", async () => {
+    const { runner, spec, app, calls } = implement({ fixture: flatSuccess() });
+    expect((await runner.run(spec)).status).toBe("completed");
+    expect(calls()[2]?.argv).toEqual([
+      ...head,
+      join(app, "mcp.json"),
+      "--tools",
+      "Read,Grep,Glob,Edit,Write",
+      "--allowedTools",
+      "Read,Grep,Glob,Edit,Write,mcp__rl-stub",
+      ...tail,
+    ]);
+    expect(existsSync(join(app, "shell.json"))).toBe(false);
+    expect(Object.keys(calls()[2]?.env ?? {}).map((k) => k.toUpperCase())).not.toContain("BASH_DEFAULT_TIMEOUT_MS");
+  });
+
+  test("allowlist: Bash in --tools, shell.json, dontAsk; init with Bash passes the check", async () => {
+    const { runner, spec, app, calls } = implement({ fixture: flatSuccess() }, {});
+    const o = await runner.run(spec);
+    expect(o.status).toBe("completed");
+    expect(o.init?.tools).toContain("Bash");
+    expect(calls()[2]?.argv).toEqual([
+      ...head,
+      join(app, "mcp.json"),
+      "--tools",
+      "Read,Grep,Glob,Edit,Write,Bash",
+      "--allowedTools",
+      "Read,Grep,Glob,Edit,Write,mcp__rl-stub",
+      "--settings",
+      join(app, "shell.json"),
+      "--permission-mode",
+      "dontAsk",
+      ...tail,
+    ]);
+    const file = JSON.parse(readFileSync(join(app, "shell.json"), "utf8"));
+    expect(file).toEqual(shellSettings(spec.shell as ShellSpec));
+    expect(file.permissions.allow).toEqual(["Bash(ssh build1 *)"]);
+    expect(file.permissions.deny).toContain("Bash(*bitbucket.example.test*)");
+    expect(file.permissions.deny).not.toContain("Bash(ssh *)");
+  });
+
+  test("Any command: shell.json allows Bash, and the deny list keeps ssh off without an ssh entry", async () => {
+    const { runner, spec, app, calls } = implement({ fixture: flatSuccess() }, { mode: "any", rules: [] });
+    expect((await runner.run(spec)).status).toBe("completed");
+    const argv = calls()[2]?.argv ?? [];
+    expect(argv.slice(argv.indexOf("--settings"), argv.indexOf("--json-schema"))).toEqual([
+      "--settings",
+      join(app, "shell.json"),
+      "--permission-mode",
+      "dontAsk",
+    ]);
+    const file = JSON.parse(readFileSync(join(app, "shell.json"), "utf8"));
+    expect(file.permissions.allow).toEqual(["Bash"]);
+    expect(file.permissions.deny).toContain("Bash(ssh *)");
+  });
+
+  test("a shell step without an app folder or with a bad time limit never starts the CLI", async () => {
+    const { runner, spec, calls } = implement({ fixture: flatSuccess() }, {});
+    await expect(runner.run({ ...spec, appDir: undefined })).rejects.toThrow("app folder");
+    await expect(runner.run({ ...spec, shell: { ...(spec.shell as ShellSpec), bashTimeoutSec: 0 } })).rejects.toThrow("time limit");
+    expect(calls().some((c) => c.argv[0] === "-p")).toBe(false);
+  });
+
+  test("child env (D5): real HOME and ssh agent, no GIT_*, askpass, or gate token, the git and Bash switches set", async () => {
+    const set = {
+      GIT_DIR: "/elsewhere",
+      SSH_ASKPASS: "/bin/askpass",
+      GATE_JIRA_TOKEN: "gate-token",
+      CLAUDE_CODE_GIT_BASH_PATH: "C:\\Git\\bin\\bash.exe",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      RL_KEEP_ME: "kept",
+    };
+    const saved = Object.fromEntries(Object.keys(set).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, set);
+    try {
+      const { runner, spec, calls } = implement({ fixture: flatSuccess() }, { bashTimeoutSec: 900 });
+      expect((await runner.run(spec)).status).toBe("completed");
+      const env = calls()[2]?.env ?? {};
+      const keys = Object.keys(env).map((k) => k.toUpperCase());
+      expect(keys.filter((k) => k.startsWith("GIT_")).sort()).toEqual([
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_TERMINAL_PROMPT",
+      ]);
+      for (const k of ["SSH_ASKPASS", "GATE_JIRA_TOKEN"]) expect(keys).not.toContain(k);
+      expect(keys.filter((k) => k.startsWith("CLAUDE_CODE_")).sort()).toEqual([
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        "CLAUDE_CODE_GIT_BASH_PATH",
+        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+      ]);
+      expect(env).toMatchObject({
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "credential.helper",
+        GIT_CONFIG_VALUE_0: "",
+        GIT_TERMINAL_PROMPT: "0",
+        GCM_INTERACTIVE: "never",
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+        CLAUDE_CODE_GIT_BASH_PATH: "C:\\Git\\bin\\bash.exe",
+        CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "1",
+        BASH_DEFAULT_TIMEOUT_MS: "900000",
+        BASH_MAX_TIMEOUT_MS: "900000",
+        SSH_AUTH_SOCK: "/tmp/agent.sock",
+        RL_KEEP_ME: "kept",
+      });
+      if (process.env.HOME !== undefined) expect(env.HOME).toBe(process.env.HOME);
+      if (process.env.USERPROFILE !== undefined) expect(env.USERPROFILE).toBe(process.env.USERPROFILE);
+      // The version and auth checks get the plain child env.
+      expect(Object.keys(calls()[0]?.env ?? {}).map((k) => k.toUpperCase())).toContain("GIT_DIR");
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  test("an init without Bash fails a shell step with the Git Bash text and kills the run", async () => {
+    const { runner, spec, calls } = implement({ fixture: flatSuccess(), noBash: true, delayMs: 30 }, {});
+    const o = await runner.run(spec);
+    expect(o).toMatchObject({ status: "failed", kind: "tool_check", text: NO_BASH_TEXT, events: [] });
+    if (process.platform === "win32") expect(o.text).toBe("Install Git for Windows. Claude Code needs Git Bash to run commands.");
+    const pid = calls().at(-1)?.pid ?? 0;
+    expect(await waitFor(() => !alive(pid))).toBe(true);
+    // A step without shell needs no Bash.
+    const plain = implement({ fixture: flatSuccess(), noBash: true });
+    expect((await plain.runner.run(plain.spec)).status).toBe("completed");
+  });
+
+  test("the init check accepts Bash only for a shell step", () => {
+    const base = mkdtempSync(join(tmpdir(), "rl-wp8-"));
+    dirs.push(base);
+    const init = JSON.stringify({ ...line.init, tools: [...IMPLEMENT_TOOLS, "Bash", "StructuredOutput"] });
+    const plain = implementArgs({ implement: true, cwd: base, prompt: "p", schema: SCHEMA_I, maxTurns: 80 });
+    const p = createStreamParser({ cwd: base, allowedTools: plain.allowed });
+    p.line(init);
+    expect(classify(p.state, { exitCode: 0, cancelled: false, timedOut: false })).toMatchObject({
+      kind: "tool_check",
+      text: "init lists tools outside the allowlist: Bash.",
+    });
+    const shell = { mode: "any" as const, rules: [], bashTimeoutSec: 600, dataDir: base, origins: [] };
+    const withShell = implementArgs({
+      implement: true,
+      cwd: base,
+      appDir: join(base, "app"),
+      prompt: "p",
+      schema: SCHEMA_I,
+      maxTurns: 80,
+      shell,
+    });
+    const q = createStreamParser({ cwd: base, allowedTools: withShell.allowed, shell: true });
+    q.line(init);
+    expect(q.state.badTools).toEqual([]);
+    expect(q.state.noBash).toBe(false);
+  });
+
+  test("Bash events: the command as target, the output tail as note, and a refusal note per rule list", async () => {
+    const out = `${"ü".repeat(3000)}x`;
+    const long = `echo ${"y".repeat(5000)}`;
+    const fixture = synthetic("bash-events", [
+      line.init,
+      line.bash("b1", "bun test"),
+      line.out("b1", out),
+      line.bash("b2", long),
+      line.out("b2", "Exit code 1\nline one\n<tool_use_error>boom</tool_use_error>", true),
+      ...refused("b3", "git status", "rule"),
+      ...refused("b4", "curl https://x.example.test", "mode"),
+      ...refused("b5", "id"),
+      line.result,
+    ]);
+    const { runner, spec } = implement({ fixture }, {});
+    const o = await runner.run(spec);
+    expect(o.status).toBe("completed");
+    expect(o.events.map((e) => [e.id, e.tool, e.status])).toEqual([
+      ["b1", "Bash", "ok"],
+      ["b2", "Bash", "error"],
+      ["b3", "Bash", "error"],
+      ["b4", "Bash", "error"],
+      ["b5", "Bash", "error"],
+    ]);
+    const [b1, b2, b3, b4, b5] = o.events;
+    expect(b1?.target).toBe("bun test");
+    // 4096 bytes end inside a two-byte character; its half goes.
+    expect(b1?.note).toBe(`${"ü".repeat(2047)}x`);
+    expect(b2?.target).toBe(long.slice(0, 4000));
+    expect(b2?.note).toBe("Exit code 1\nline one\nboom");
+    expect([b3?.target, b3?.note]).toEqual(["git status", "Refused by the deny list"]);
+    expect([b4?.target, b4?.note]).toEqual(["curl https://x.example.test", "Refused by the allowlist"]);
+    expect(b5?.note).toBe("Refused by the allowlist");
+  });
+
+  test("more than 5 refused commands kill the run", async () => {
+    const calls7 = Array.from({ length: 7 }, (_, i) => refused(`r${i}`, `curl https://x${i}.example.test`, "mode")).flat();
+    const fixture = synthetic("bash-refused", [line.init, ...calls7, line.result]);
+    const { runner, spec, calls } = implement({ fixture, delayMs: 30 }, {});
+    const seen: RunEvent[] = [];
+    const o = await runner.run(spec, (ev) => seen.push(...ev));
+    expect(o).toMatchObject({ status: "failed", kind: "tool_check", text: "Claude Code refused more than 5 commands in this run." });
+    expect(o.events.map((e) => [e.id, e.status, e.note])).toEqual(
+      Array.from({ length: 6 }, (_, i) => [`r${i}`, "error", "Refused by the allowlist"]),
+    );
+    expect(seen.filter((e) => e.status === "error")).toHaveLength(6);
+    const pid = calls().at(-1)?.pid ?? 0;
+    expect(await waitFor(() => !alive(pid))).toBe(true);
   });
 });

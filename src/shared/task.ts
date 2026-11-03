@@ -325,6 +325,55 @@ export const taskCommand = z.object({
 });
 export type TaskCommand = z.infer<typeof taskCommand>;
 
+// docs/plans/review-v2/spec.md section 6.21: the commands that Claude may run with the Bash tool. allowlist: the rules Bash(<pattern>).
+// any: every command. The fixed deny list applies in both modes (src/server/tasks/shell.ts).
+export const SHELL_MODES = ["allowlist", "any"] as const;
+export type ShellMode = (typeof SHELL_MODES)[number];
+export const ALLOW_PATTERN_MAX = 200;
+export const BASH_TIMEOUT_MAX_SEC = 3600;
+const SHELLS = ["bash", "sh", "zsh", "dash", "fish", "cmd", "wsl", "env", "eval", "exec", "xargs", "sudo", "su", "doas", "runas"];
+const RUNNERS = ["watch", "setsid", "flock"];
+export const CREDENTIAL_TOOLS = ["secret-tool", "security", "cmdkey", "kwallet-query", "keyring"];
+const INTERPRETERS = ["python", "python3", "node", "bun", "deno", "perl", "ruby", "npx", "uvx", "make"];
+
+// The program of a pattern or a command: its first word without a folder, ".exe", or case. Windows file names ignore case.
+export function programOf(pattern: string) {
+  const first = pattern.trim().split(/\s+/)[0] ?? "";
+  return (first.split(/[\\/]/).at(-1) ?? "").toLowerCase().replace(/\.exe$/, "");
+}
+
+const anyShell = (p: string) => SHELLS.includes(p) || RUNNERS.includes(p) || p.startsWith("powershell") || p.startsWith("pwsh");
+
+// The reason why the app refuses an allowlist pattern, or null. hosts: the Bitbucket and Jira host names.
+export function allowProblem(pattern: string, hosts: readonly string[]): string | null {
+  const p = pattern.trim();
+  const program = programOf(p);
+  if (!p) return "Enter a pattern.";
+  if (p.length > ALLOW_PATTERN_MAX) return `A pattern can have at most ${ALLOW_PATTERN_MAX} characters.`;
+  if (/[\r\n]/.test(p)) return "Write the pattern on one line.";
+  if (/[()`;&|<>]/.test(p)) return "A pattern cannot contain ( ) ` ; & | < or >. Add one pattern for each command.";
+  if ((p.split(/\s+/)[0] ?? "").includes("*")) return "Start the pattern with a program name. The first word cannot contain *.";
+  if (anyShell(program)) return "A shell or a command runner can run any command. Use Any command instead.";
+  if (program === "git") return "Claude cannot run git commands.";
+  if (CREDENTIAL_TOOLS.includes(program)) return "This program reads stored passwords and keys. Claude cannot run it.";
+  const low = p.toLowerCase();
+  if (hosts.some((h) => h && low.includes(h.toLowerCase()))) return "A pattern cannot name the Bitbucket or Jira host.";
+  return null;
+}
+
+// The warning for a pattern that the app accepts, or null.
+export const allowWarning = (pattern: string) =>
+  INTERPRETERS.includes(programOf(pattern)) ? "This pattern lets Claude run any code." : null;
+
+export const allowPattern = (hosts: readonly string[]) =>
+  z
+    .string()
+    .trim()
+    .superRefine((p, ctx) => {
+      const problem = allowProblem(p, hosts);
+      if (problem) ctx.addIssue({ code: "custom", message: problem });
+    });
+
 // task.settings_json: the overrides of one task. Absent keys take the repository settings.
 export const taskSettings = z.object({
   lineBudget: z.number().int().positive().optional(),
@@ -418,6 +467,17 @@ export const stepDetail = z.object({
   update: updateDetail.nullable().default(null),
   resolve: z
     .object({ taskRepo: z.number().int(), paths: z.array(z.string()) })
+    .nullable()
+    .default(null),
+  // spec.md section 6.21: a Claude step with the Bash tool. rules: the allow patterns of the run. commands: at most 50, in run order.
+  // refused: the number of refused commands.
+  shell: z
+    .object({
+      mode: z.enum(SHELL_MODES),
+      rules: z.array(z.string()),
+      commands: z.array(z.object({ command: z.string(), state: z.enum(["ok", "error", "refused", "stopped"]), ms: z.number() })),
+      refused: z.number().int(),
+    })
     .nullable()
     .default(null),
 });

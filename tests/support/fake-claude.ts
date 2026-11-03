@@ -47,6 +47,8 @@ export type FakeScenario = {
   // the record gets { refused: path }. junction: a folder link to that target in place of a file.
   implement?: unknown;
   writes?: { path: string; text?: string; junction?: string }[];
+  // The init of an implement run lists no Bash, as Claude Code on Windows without Git Bash (spec.md section 6.21, V12).
+  noBash?: boolean;
   // docs/plans/review-v2/spec.md section 2.9: the notes of the echo reply result, and the cites of its first reply. Absent: none.
   notes?: unknown;
   cites?: unknown;
@@ -449,7 +451,7 @@ async function main() {
       const servers = kind === "implement" && mcp ? Object.keys(mcp) : [];
       return JSON.stringify({
         ...e,
-        tools: [...(flag("--tools") ?? "").split(",").filter(Boolean), "StructuredOutput"],
+        tools: [...(flag("--tools") ?? "").split(",").filter((t) => t && !(s.noBash && t === "Bash")), "StructuredOutput"],
         mcp_servers: servers.map((name) => ({ name, status: "connected" })),
       });
     }
