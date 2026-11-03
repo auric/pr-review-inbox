@@ -162,3 +162,4 @@ CodeGraph: used 4 times
 - "Fix it anyway" is final for that point. The next fix step must fix it and must not push back on it again. When Claude cannot fix it, it sets question.
 - PR runs on a PR that a task created get the plan files and the answers of the user (answers.md), not only the plan.
 - Open questions 1 to 4 of section 4 take the recommended answers, unless the user says otherwise.
+- Answers of 2026-11-03 to section 4: Q1 yes (a push-back stops the part). Q2: raise STEP_TURNS.fix to 60, and the work of a step that reaches its turn cap must not be lost (design pending). Q3 yes. Q4 one part. Q5 no auto-accept. Q6 yes, and the colleague comment part ships soon.
