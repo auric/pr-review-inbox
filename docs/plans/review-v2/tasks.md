@@ -10,6 +10,8 @@ Update (2026-10-26): the user decided Q52 and Q53 (design.md section 10.6): the 
 
 Update (2026-10-29): the user approved Q64 to Q76 (design.md section 10.8): build a Jira task with sub-tasks, one branch and one PR per sub-task (spec.md section 6.20). They add WP-ST-D, WP-ST-G, WP-ST1 to WP-ST7 (wave W9d), Gates G19 and J1 to J4, and the user smoke UT. WP-B8 shrinks to the large-task wiring of the sub-task engine. The prerequisites exist: WP-CA1 of docs/plans/ci-builds.md (pr_build, 2734de5) and Jira Cloud auth (698b7aa, de32843).
 
+Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It adds WP-PQ-D and WP-PQ1 to WP-PQ5 (wave WPQ) and the user smoke UP. Its open questions and their recommended defaults are in spec.md section 6.22.14.
+
 ## 0. Rules for every work package
 
 - Read CLAUDE.md of the repository first. In a worktree, also read the CLAUDE.md of the main checkout (first path of `git worktree list`). Read the three plan files.
@@ -50,6 +52,8 @@ Update (2026-10-29): the user approved Q64 to Q76 (design.md section 10.8): buil
 | UTU | User smoke docs/smoke-task.md part U (Tell Claude, Update from a release branch before and after the first push, a conflict) | W9c |
 | W9d | WP-ST-D, then WP-ST-G, then WP-ST1, WP-ST2, WP-ST3, WP-ST4, WP-ST5, WP-ST6, WP-ST7 (one branch, one after another) | UTU; the user approved the rule changes (2026-10-29); G19 and J1 to J4 recorded before WP-ST4 and WP-ST5 merge (until then the fakes follow the docs) |
 | UT | User smoke docs/smoke-task.md part T (a parent with 4 sub-tasks, 2 in review outside the app, one squash merge) | W9d |
+| WPQ | WP-PQ-D, then WP-PQ1, WP-PQ2, WP-PQ3, WP-PQ4, WP-PQ5 (one branch, one after another; shared files) | W9d merged (done) |
+| UP | User smoke docs/smoke-task.md part P (plan quality) | WPQ |
 | W10 | WP-B6 ∥ WP-B7 | UN and UTU (the medium code PR uses the several-repository PR flow of WP-MR2) |
 | UM | User smoke part M (medium task) | W10 |
 | W11 | WP-B8, then WP-B9 ∥ WP-B10 | UM |
@@ -85,6 +89,7 @@ What each task size needs:
 | Several repositories (small and medium) | WP-MR1, WP-MR2, WP-MR3 |
 | Tell Claude and Update from the base branch (small and medium) | WP-TU1, WP-TU2 |
 | Sub-tasks (one small PR per Jira sub-task) | Small, Tell Claude, plus WP-ST-D, WP-ST-G, WP-ST1 to WP-ST7 |
+| Plan quality (every size) | WP-PQ-D, WP-PQ1 to WP-PQ5 |
 | Medium | Small, plus WP-B6 (spec PR, gate, Fix on task branches) and WP-B7 (UI) |
 | Large | Medium and the sub-task engine (WP-ST3 to WP-ST5), plus WP-B8 (large-task wiring, replan), WP-B9 (UI), WP-B10 (notifications and inbox rows) |
 
@@ -116,6 +121,12 @@ Shared-file ownership (merge order):
 | src/web/autopilot/* (on hold) | WP-A3 → WP-A6 |
 | src/server/review/jobs.ts, catalog.ts, prompt.ts, src/server/publish/outbox.ts, src/server/sync/engine.ts (part 7 additions, on hold) | WP-A2 → WP-A5 → WP-A7, additive only. The later merger of part 6 and part 7 rebases. |
 | scripts/gate/bitbucket-write.ts | WP-G0 → WP-PG → WP-GB → WP-GA (on hold) (adds only) |
+| src/shared/task.ts, src/server/tasks/plan.ts, tasks.ts, src/server/review/catalog.ts, prompt.ts (plan quality) | WP-ST7 → WP-PQ1 → WP-PQ2 → WP-PQ3 → WP-PQ4 (additive), before WP-B6 |
+| src/server/review/jobs.ts, workspace.ts (`commit` only) | WP-PQ3 |
+| src/server/tasks/related.ts (new) | WP-PQ2 |
+| src/server/tasks/plan-check.ts (new) | WP-PQ3 → WP-PQ4 |
+| tests/support/fake-claude.ts (plan quality) | WP-PQ3 (adds `planCheck` only) |
+| src/web/tasks/*, src/web/settings/BranchPrefixes.tsx (plan quality) | WP-ST7 → WP-PQ5, before WP-B7 |
 
 ## 2. Work packages: parts 1 to 4
 
@@ -446,6 +457,60 @@ Shared-file ownership (merge order):
 
 - docs/smoke-task.md part T on the test repository: a parent with 4 sub-tasks and no links, 2 in review outside the app, 2 open, and one attachment on a sub-task. Approve the plan, build both open sub-tasks, squash-merge one lower PR, run the update and "Push and move", and move one issue with "Move in Jira". Add a new sub-task in Jira and use "Add to plan". Run it on Jira Server or Data Center and on Jira Cloud. Check that nothing goes to Bitbucket or Jira without a click.
 
+### Plan quality (wave WPQ, spec.md section 6.22)
+
+Integration first. They change the spec run (tasks.ts `specRun`), the plan model (plan.ts), and the run machine (jobs.ts `TaskRunStart`, workspace.ts `prepareTaskWorkspace`). They add no table and no route. Thirteen suites start spec runs through `createApp`: api, checks, concurrent, implement, jira-status, loop, proposals, stack, subparts, subtasks-add, subtasks, tasks, and ui-routes. tests/e2e/serve.ts and scripts/demo.ts do too. WP-PQ3 writes `taskPlanCheck: false` in their configs. Only the new tests turn the check on.
+
+### WP-PQ-D. Docs for plan quality (implementer, WPQ)
+
+- Files: docs/plans/review-v2/spec.md (section 6.22 and the edits listed with it: sections 0, 6.4 to 6.7, 6.12, 9, 10); tasks.md (these rows); BRIEF.md (sections 3.6 and 7); CLAUDE.md (status line).
+- Tests: none.
+- Done check: no real names. Every sentence has 20 words or fewer. No hard wraps.
+
+### WP-PQ1. App checks, contracts, and risks (implementer-xhigh, WPQ)
+
+- Files: src/shared/task.ts (contract, risk, problemId, planProblem, PLAN_SEVERITIES, the app-check constants, specResult `contracts` and `risks`); src/server/tasks/plan.ts (`checkPlan` reuses the object lookup of checkMap, and checkMap keeps its signature; `toPlan` applies the line moves and marks and fills `checks`, `contracts`, and `risks`; `mapLine` marks; the contracts and risks render; designDoc gets "## Rollout"; convertDocs carries the section); src/server/tasks/tasks.ts (the specRun judge calls checkPlan, and the major and minor texts go to `skipped`; in add mode the texts join sub.notes; partDocsOf narrows contracts and risks; planDto gets `contracts`, `risks`, and `checks`); src/server/review/catalog.ts (the specRules lines for symbol, line, task files, contracts, risks, and caps); src/shared/dto.ts (the TaskPlanDto fields); tests/tasks/plan.test.ts, subparts.test.ts, tasks.test.ts, interview.test.ts.
+- Behavior: spec.md sections 6.22.2, 6.22.3, 6.22.7 (contracts and risks), and 6.22.8 (spec lines). AC-B91 to AC-B95.
+- Tests: a temp repository covers each row of the 6.22.2 table, the symbol name rule (plain, dotted, prose, folder, binary), the folder entry that covers a task file, the spec folder skip, a nested repository path, the 40 cap line, and the a-ID order; the render puts the section after the map in plan.md and design.md, with "## Rollout"; convertDocs keeps the section from small to medium and back; partDocsOf narrows the section; an end-to-end spec run through the fake CLI gives TaskDto.plan.checks, the moved line in step.md, and the coverage lines, and the approval still works.
+- Control mutation: let the symbol search always find the name. The "not in the file" test must fail.
+- Risk: prose symbols. The "not checked" rule and the new prompt line limit false majors.
+
+### WP-PQ2. Related work for the spec run (implementer, WPQ after WP-PQ1)
+
+- Files: src/server/tasks/related.ts (new: `relatedWorkFile(db, deps, t, head, keys)`); src/server/tasks/tasks.ts (the specRun `repos` hook adds the file; the keys are the task key and IssueContext.parent from `taskIssue`); src/server/review/catalog.ts (three spec lines); src/server/review/prompt.ts (the buildSpecPrompt Tools line); tests/tasks/related.test.ts (new); tests/tasks/tasks.test.ts (one case).
+- Behavior: spec.md section 6.22.4. AC-B96.
+- Tests: a temp repository with commits that name ABC-12, ABC-120, and abc-12, plus a merge commit; the caps (20 commits, and 10 files then "+N more"); a stub provider (Pick of the three calls) gives branches, an open PR, and a merged PR, and the same PR as a stored row shows once with the live state; each read throws once and gives its line; the provider is absent; the parent key section; the 16 KB cut line; the spec run snapshot holds the file (the fake CLI record context).
+- Control mutation: match with `includes` in place of namesKey. The ABC-120 test must fail.
+- Risk: git log time on a long history. RELATED_LOG_MS bounds it, and a timeout gives a line.
+
+### WP-PQ3. The plan check run (implementer-xhigh, WPQ after WP-PQ2)
+
+- Files: src/shared/task.ts (planCheckResult, planCheckJsonSchema, PLAN_CHECK_STATES, PlanCheck, PLAN_CHECK_TURNS); src/server/tasks/plan-check.ts (new: `planCheckFile` in check mode, and `keepProblems`); src/server/tasks/tasks.ts (`planCheckRun`: TaskRunStart kind spec, item check, `commit` plan.base; the specRun finish writes check pending and returns the check effect, and a refused or late start sets failed or stopped; the check finish follows the version guard; `loadPlan` and the base route refuse while the check waits or runs; `insertStep` takes `item`; rowDto sets planReady and `progress.checking`; planDto gets `check`; recoverTasks resets the pending state); src/server/review/jobs.ts (`TaskRunStart.commit` goes to `prepareTaskWorkspace`); src/server/review/workspace.ts (the `commit` input means no fetch and the commit check of `prepareCommitWorkspace`); src/server/review/catalog.ts (`planCheckAgent`); src/server/review/prompt.ts (`buildPlanCheckPrompt`); src/server/config.ts, src/server/settings.ts, src/shared/dto.ts (`taskPlanCheck`, `progress.checking`); src/shared/task-status.ts ("Checking the plan"); tests/support/fake-claude.ts (the `planCheck` scenario, chosen by `properties.problems`); the configs of the 13 suites, tests/e2e/serve.ts, and scripts/demo.ts (`taskPlanCheck: false`); tests/tasks/plan-check.test.ts (new), tests/tasks/notify.test.ts, a workspace test for `commit`.
+- Behavior: spec.md section 6.22.5 and the setting part of 6.22.10. AC-B97, AC-B99, AC-B100, AC-B101, AC-B102 (server part).
+- Tests: the chain (one check run after a spec run; the snapshot is the old head after main moved, and the record shows the old commit); plan-check.md holds the plan and the app checks; the states clean, shown, failed (exit code), and stopped (Stop, then Resume starts no run); a restart during the check gives stopped; the 409s during pending and running; no needs_you event until the end, then one event; problems with a missing path or a part past the plan; setting off: no run; Add to plan: no run; sub-task mode: one run, with subtasks.md in the snapshot; `commit` with a missing commit refuses, and no fetch runs (the remote removed).
+- Control mutation: drop the version guard of the check finish. A test where "Ask Claude again" replaces the plan during the check must fail.
+- Risk: the 13 suites. Any missed config gives a flaky 409. The package report lists each suite as green.
+
+### WP-PQ4. The repair round (implementer-xhigh, WPQ after WP-PQ3)
+
+- Files: src/shared/task.ts (specResult `repairs`); src/server/tasks/plan-check.ts (repair mode of `planCheckFile`, and `repairNeeded`); src/server/tasks/tasks.ts (the check finish moves to repairing and returns the repair effect; specRun takes `repair`: the item, the file, the agent lines, and `commit`; the finish keeps the first plan on a failure and does not stop the task; success writes repaired; a repair run starts no check); src/server/review/catalog.ts (`repairRules` and the specAgent `repair` flag); src/server/review/prompt.ts (the repair Tools line); tests/tasks/plan-check.test.ts.
+- Behavior: spec.md section 6.22.6. AC-B98, and AC-B101 (repair part).
+- Tests: a major problem gives one repair with the problems in the snapshot file, and the repaired plan holds sent and repairs; a minor-only result gives no repair; a major app check alone gives a repair; a repair plan that still has majors gives no further run, so the run count per plan is spec 2 and check 1; a repair schema failure keeps the first plan with the text; Stop during the repair.
+- Control mutation: let the repair finish start a check. The "at most one" test must fail.
+- Risk: the repair rewrites good parts. The keep line in the prompt and the re-run app checks limit it.
+
+### WP-PQ5. Plan quality UI (frontend-implementer, WPQ after WP-PQ4, ports 7687/7688/7689; skills shadcn, vercel-react-best-practices, web-design-guidelines)
+
+- Files: src/web/tasks/PlanTab.tsx (the PlanApproval check line, and the PlanParts blocks "Contracts and risks", "Plan check", and "App checks"); src/web/tasks/model.ts (stepSentence for spec items check and repair, the waiting check state, and DOING "checking the plan"); src/web/tasks/LogTab.tsx (the item labels); src/web/settings/BranchPrefixes.tsx (the switch); tests/web/tasks-model.test.ts, tests/web/ui-words.test.ts; tests/e2e/task-plan-check.e2e.ts (new); tests/e2e/serve.ts (a control that sets the fake planCheck result and turns the setting on); scripts/demo.ts (one task with a shown check and one with a repaired check); docs/smoke-task.md (part P); README.md; CHANGELOG.md; docs/screenshots.
+- Behavior: spec.md section 6.22.9. AC-B103, and AC-B102 (UI part).
+- Tests: model: one test per new status row, and no primary while the check waits; the AC-UX2 word scan of the new strings; e2e: a spec run, then a check with one major, then the repair; the Plan tab shows "Claude: fixed." and the contracts; Approve works; a sub-task task shows a problem under its sub-task label.
+- Gates: e2e green on own ports with the `E2E code:` line; screenshots checked for real names; AC-UX1 primary count; web-design-guidelines; axe.
+- Run: `bun run test:e2e`; `bun run screenshots`; `bun run check`.
+
+### Gate UP: plan quality smoke (user)
+
+- docs/smoke-task.md part P on the test repository. Build one small task with the check on. Record the check state, the problems, any repair, the turns and time per run, and the unchecked symbol count. Check that "Approve the plan" waits during the check. Stop one check and resume. Turn the setting off, build again, and check that no check run starts.
+
 ### WP-B6. Spec PR flow (implementer-xhigh, W10)
 
 - Files: src/server/tasks/{specpr.ts (branch, commit of the plan files, push, create PR, link task_part to the PR row, follow), gates.ts (spec gate from the synced reviewers_json, tasks, and builds)} (new); src/server/sync/* (read build stats for task PR heads during the normal PR sync); src/server/review/fix-routes.ts and clone.ts (Apply mode "task": commit into the part worktree; push stays a click); tests/tasks/specpr.test.ts (new); tests/review/fix-task.test.ts (new).
@@ -510,6 +575,7 @@ Shared-file ownership (merge order):
 | G19 | `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G19` on the test repository (writes: a squash merge of a test PR) | after WP-ST-G, before WP-ST4 merges | The MERGED activity commit has one parent, the tree check holds, and the upper PR changes list only the upper files after the three merges and the PUT. |
 | J1 to J4 | `bun scripts/gate/jira.ts --only J1,J2,J3` (read only), then `--only J4 --authorize-transition` on a test issue; on Server or Data Center and on Cloud | after WP-ST-G, before WP-ST1 merges (J1, J2) and WP-ST5 merges (J3, J4) | The shapes of subtasks with statusCategory and of issuelinks, the transitions list, the comment and Cloud image links, and a 204 for the POST. |
 | Smoke task T (UT) | docs/smoke-task.md part T | after W9d | Every step as written. Nothing goes to Bitbucket or Jira without a click. |
+| Smoke task P (UP) | docs/smoke-task.md part P | after WPQ | Every step of Gate UP. "Approve the plan" waits during the check. With the setting off, no check run starts. |
 | Reply eval (PR context) | `bun run eval -- --replies --real --repeat 2` | after WP-PN | The recommended pass of WP-PN. |
 | G8, G10, G11 (on hold) | `bun scripts/gate/bitbucket-write.ts --only G8,G10,G11` on the test repository | before WP-A2 (G10) and WP-A5 (G8) | spec of WP-GA. |
 | UA1 (on hold) | docs/smoke-autopilot.md part 1 | after WA3 | A draft for each scripted comment, one notification per burst, "Post this reply" posts once, nothing posts by itself. |
