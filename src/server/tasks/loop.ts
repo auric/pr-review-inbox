@@ -59,6 +59,7 @@ import {
 } from "./implement";
 import { type Answer, answerProblem, type QuestionRow } from "./interview";
 import { partMachine } from "./machine";
+import { noteTaskWaits } from "./notify";
 import { type Docs, docNames, type Plan, type PlanPart, type PlanTask, parsePlan, parseTasks, partStepFile, stepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
 import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
@@ -429,7 +430,11 @@ export function createLoop(opts: LoopOptions) {
   const ending = new Set<number>();
   let closing = false;
 
-  const changed = (id: number) => live.broadcast("changed", { tasks: [id] });
+  const changed = (id: number) => {
+    live.broadcast("changed", { tasks: [id] });
+    const db = settings.db();
+    if (db && noteTaskWaits(db, [id], now())) live.broadcast("events", { count: 1 });
+  };
   const dto = (db: Database, id: number) => taskDto(db, taskRow(db, id) as TaskRow);
   const conflict = (db: Database, id: number, error: string): TaskResult => {
     const t = taskRow(db, id);

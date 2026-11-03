@@ -434,6 +434,10 @@ describe("run pipeline", () => {
       const list = await h.json<RunDto[]>(`/api/prs/${h.pr}/runs`);
       expect(list.body.map((r) => r.id)).toEqual([d.run.id]);
       expect((await h.json<RunDto[]>("/api/runs")).body.map((r) => r.id)).toEqual([d.run.id]);
+
+      // The run end gives one notification event, and "events" tells the tabs to claim it.
+      expect(h.db.query("SELECT pr, kind, ref FROM event").all()).toEqual([{ pr: h.pr, kind: "run_finished", ref: String(d.run.id) }]);
+      expect(h.sent.some((s) => s.event === "events")).toBe(true);
     },
     SLOW,
   );
@@ -650,6 +654,8 @@ describe("acceptance", () => {
       const d = await h.finish(body.id);
       expect(d.run).toMatchObject({ status: "cancelled", errorKind: null, hasRaw: true });
       expect(d.items).toEqual([]);
+      // A run that the user cancelled gives no notification.
+      expect(h.db.query("SELECT COUNT(*) AS n FROM event").get()).toEqual({ n: 0 });
       expect(await waitFor(() => !alive(child), 10_000)).toBe(true);
       expect(existsSync(join(h.dir, "runs", String(body.id)))).toBe(false);
       expect((await h.call(`/api/runs/${body.id}/cancel`, { method: "POST" })).status).toBe(409);

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 import { describe, expect, test } from "bun:test";
-import type { ClaimedEvent } from "../../src/shared/dto";
-import { planNotes } from "../../src/web/notify";
+import type { ClaimedEvent, ClaimedRun, ClaimedTaskEvent } from "../../src/shared/dto";
+import { planNotes, runText } from "../../src/web/notify";
 
 let n = 0;
 const ev = (pr: number, o: Partial<ClaimedEvent> = {}): ClaimedEvent => ({
@@ -68,5 +68,56 @@ describe("planNotes", () => {
       title: "PROJ1/repo-3 #30",
       body: "PROJ1/repo-3 #30: review requested",
     });
+  });
+
+  test("a run note names the PR and the result; it joins the other events of its PR", () => {
+    const run = (o: Partial<ClaimedRun>): ClaimedRun => ({
+      kind: "review",
+      rereview: false,
+      status: "completed",
+      findings: 0,
+      error: null,
+      ...o,
+    });
+    const done = ev(1, { kind: "run_finished", run: run({ findings: 3 }) });
+    expect(planNotes([done, ev(1)], false)).toEqual([
+      { title: "Change 1", body: "PROJ1/repo-1 #10: review done, 3 findings, 1 new comment", tag: "PROJ1/repo-1 #10", pr: 1 },
+    ]);
+    const failed = ev(2, { kind: "run_failed", run: run({ status: "failed", error: "The usage limit is reached.\nTry later." }) });
+    expect(planNotes([failed], false)[0]?.body).toBe("PROJ1/repo-2 #20: review failed (The usage limit is reached.)");
+  });
+
+  test("runText gives each run kind and status in plain words", () => {
+    const text = (kind: ClaimedEvent["kind"], o: Partial<ClaimedRun> | null) =>
+      runText(ev(1, { kind, run: o && { kind: "review", rereview: false, status: "completed", findings: 0, error: null, ...o } }));
+    expect(text("run_finished", {})).toBe("review done, no findings");
+    expect(text("run_finished", { rereview: true, findings: 1 })).toBe("re-review done, 1 finding");
+    expect(text("run_finished", { kind: "explain" })).toBe("explanation ready");
+    expect(text("run_failed", { status: "incomplete", findings: 2 })).toBe("review incomplete, 2 findings");
+    expect(text("run_failed", { kind: "explain", status: "incomplete", error: "Turn limit." })).toBe(
+      "explanation incomplete (Turn limit.)",
+    );
+    expect(text("run_failed", { status: "failed", error: "x".repeat(100) })).toBe(`review failed (${"x".repeat(79)}…)`);
+    expect(text("run_failed", null)).toBe("run failed");
+  });
+
+  test("a task event gives its own note that opens the task; a digest counts it", () => {
+    const task: ClaimedTaskEvent = {
+      id: 1,
+      task: 7,
+      kind: "needs_you",
+      createdAt: 1,
+      key: "ABC-1",
+      title: "Add a flag",
+      text: "Needs you: a question",
+    };
+    expect(planNotes([ev(1), task], false)).toEqual([
+      { title: "Change 1", body: "PROJ1/repo-1 #10: 1 new comment", tag: "PROJ1/repo-1 #10", pr: 1 },
+      { title: "ABC-1: Add a flag", body: "Needs you: a question", tag: "task-7", pr: null, task: 7 },
+    ]);
+    expect(planNotes([ev(1), task], true)[0]?.body).toBe("1 update in 1 pull request, 1 task needs you");
+    expect(planNotes([task, { ...task, id: 2, task: 8 }], true)).toEqual([
+      { title: "PR Review Inbox", body: "2 tasks need you", tag: "digest", pr: null },
+    ]);
   });
 });

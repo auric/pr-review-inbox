@@ -260,6 +260,37 @@ test("A14: two pages get one notification; read in one page updates the other; a
   await expect(row(watcher, TITLE.a)).not.toContainText("1 new");
 });
 
+test("a review run end notifies with its result; a failed run says why; a click opens the PR", async ({ page }) => {
+  const KEY = "PROJ1/sample-repo-2 #1001";
+  const runRow = page.locator("#runline [data-run-kind='review']");
+  const runNotes = async () => (await notes(page)).filter((n) => n.body?.startsWith(`${KEY}: review`));
+  const review = async () => {
+    await page.keyboard.press("Shift+R");
+    await expect(page.getByLabel("Your note")).toBeFocused();
+    await page.getByLabel("Your note").fill("Check the flush order.");
+    await page.getByLabel("Your note").press("Control+Enter");
+  };
+  await connect(page);
+  await row(page, TITLE.a).click();
+  await expect(detailTitle(page)).toHaveText(TITLE.a);
+
+  await review();
+  await expect(runRow).toHaveAttribute("data-run-state", "done", { timeout: 60_000 });
+  const found = /(\d+) findings?/.exec((await page.locator("#runline").textContent()) ?? "")?.[1];
+  const word = found === "1" ? "finding" : "findings";
+  await expect.poll(runNotes).toEqual([{ title: TITLE.a, body: `${KEY}: review done, ${found} ${word}`, tag: KEY }]);
+
+  await control("claude", { stream: "limit" });
+  await review();
+  await expect(page.locator("#runline")).toContainText("Usage limit reached", { timeout: 60_000 });
+  await expect.poll(async () => (await runNotes()).length).toBe(2);
+  expect((await runNotes())[1]?.body).toMatch(/^PROJ1\/sample-repo-2 #1001: review failed \(.+\)$/);
+
+  await park(page);
+  await page.evaluate(() => (window as unknown as Win).__notes.at(-1)?.click());
+  await expect(detailTitle(page)).toHaveText(TITLE.a);
+});
+
 test("three pages share one live stream; a change reaches every page; the stream moves when its page closes", async ({ page, context }) => {
   const streams: string[] = [];
   context.on("request", (r) => {

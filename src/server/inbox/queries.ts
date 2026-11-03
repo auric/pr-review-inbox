@@ -9,6 +9,7 @@ import type {
   CheckpointDto,
   CheckpointReason,
   ClaimedEvent,
+  ClaimedRun,
   CommentDto,
   CommitDto,
   ExcerptLine,
@@ -21,6 +22,7 @@ import type {
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { Reviewer, Role, User } from "../../shared/types";
 import { byArchive, byInbox } from "../../shared/views";
+import { OPEN_FINDINGS } from "../review/run-rows";
 import { BUILD_COLUMNS, type RawBuild, toBuild } from "./builds";
 import { openDrafts, staleCount } from "./stale";
 
@@ -77,8 +79,11 @@ const SQL = {
     RETURNING id, pr, kind, ref, created_at, digest,
       (SELECT project FROM pull_request WHERE id = event.pr) AS project, (SELECT repo FROM pull_request WHERE id = event.pr) AS repo,
       (SELECT pr_id FROM pull_request WHERE id = event.pr) AS pr_id, (SELECT title FROM pull_request WHERE id = event.pr) AS title,
-      (SELECT followed = 1 AND archived_at IS NULL FROM pull_request WHERE id = event.pr) AS shown`,
+      (SELECT event.kind IN ('run_finished', 'run_failed') OR (followed = 1 AND archived_at IS NULL) FROM pull_request WHERE id = event.pr) AS shown,
+      IIF(event.kind IN ('run_finished', 'run_failed'), (SELECT json_object('kind', r.kind, 'rereview', r.since_head IS NOT NULL, 'status', r.status,
+        'findings', ${OPEN_FINDINGS}, 'error', r.error_text) FROM review_run r WHERE r.id = CAST(event.ref AS INTEGER)), NULL) AS run_json`,
   cleanup: "DELETE FROM event WHERE claimed_at IS NOT NULL AND claimed_at < $cutoff",
+  cleanupTask: "DELETE FROM task_event WHERE claimed_at IS NOT NULL AND claimed_at < $cutoff",
   description: "SELECT description, source_head FROM pull_request WHERE id = $id",
   // Plan v3 WP13: confirmed outbox rows link a remote comment to its source.
   posted: "SELECT remote_id, run IS NOT NULL AS run, kind FROM post WHERE pr = $pr AND state = 'confirmed' AND remote_id IS NOT NULL",
@@ -362,17 +367,30 @@ export function followKey(db: Database, key: { project: string; repo: string; pr
   return followState(db, id) as FollowState;
 }
 
+const runOf = (r: Omit<ClaimedRun, "rereview"> & { rereview: number }): ClaimedRun => ({ ...r, rereview: r.rereview === 1 });
+
 export function claimEvents(db: Database, now: number): ClaimedEvent[] {
-  type Raw = Omit<ClaimedEvent, "createdAt" | "digest" | "prId"> & { created_at: number; digest: number; pr_id: number; shown: number };
-  // Events of archived or unfollowed PRs stay claimed, so they never notify later.
+  type Raw = Omit<ClaimedEvent, "createdAt" | "digest" | "prId" | "run"> & {
+    created_at: number;
+    digest: number;
+    pr_id: number;
+    shown: number;
+    run_json: string | null;
+  };
+  // Events of archived or unfollowed PRs stay claimed, so they never notify later. A run that the user started always notifies.
   return (db.query(SQL.claim).all({ now }) as Raw[])
     .filter((e) => e.shown === 1)
-    .map(({ created_at, digest, pr_id, shown: _, ...e }) => ({ ...e, createdAt: created_at, digest: digest === 1, prId: pr_id }))
+    .map(({ created_at, digest, pr_id, shown: _, run_json, ...e }) => {
+      const out: ClaimedEvent = { ...e, createdAt: created_at, digest: digest === 1, prId: pr_id };
+      if (e.kind === "run_finished" || e.kind === "run_failed") out.run = run_json === null ? null : runOf(JSON.parse(run_json));
+      return out;
+    })
     .sort((a, b) => a.id - b.id);
 }
 
 export function cleanupEvents(db: Database, now: number) {
   db.query(SQL.cleanup).run({ cutoff: now - CLAIMED_TTL_MS });
+  db.query(SQL.cleanupTask).run({ cutoff: now - CLAIMED_TTL_MS });
 }
 
 export function dashboardCheckpoint(db: Database): CheckpointDto | null {

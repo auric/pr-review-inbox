@@ -445,7 +445,15 @@ export type FollowState = { id: number; followed: boolean; archivedAt: number | 
 export type ClaimedEvent = {
   id: number;
   pr: number;
-  kind: "comment_new" | "commits_pushed" | "reviewer_added" | "draft_stale" | "build_failed" | "build_passed";
+  kind:
+    | "comment_new"
+    | "commits_pushed"
+    | "reviewer_added"
+    | "draft_stale"
+    | "build_failed"
+    | "build_passed"
+    | "run_finished"
+    | "run_failed";
   ref: string;
   createdAt: number;
   // true: the event came after a sync gap of more than 2 check intervals. Show one summary per PR.
@@ -454,7 +462,17 @@ export type ClaimedEvent = {
   repo: string;
   prId: number;
   title: string | null;
+  // run_finished and run_failed only: the run of ref. null: the run row is gone.
+  run?: ClaimedRun | null;
 };
+
+// rereview: the run has a base run. findings: the open findings, as RunDto counts them.
+export type ClaimedRun = { kind: "review" | "explain"; rereview: boolean; status: RunStatus; findings: number; error: string | null };
+
+// A task that waits for the user (task_event kind needs_you). text: the status of the task list at claim time.
+export type ClaimedTaskEvent = { id: number; task: number; kind: "needs_you"; createdAt: number; key: string; title: string; text: string };
+
+export type Claimed = ClaimedEvent | ClaimedTaskEvent;
 
 const positiveInt = z.number().int().positive();
 const version = z.number().int().nonnegative();

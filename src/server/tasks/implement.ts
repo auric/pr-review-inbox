@@ -12,6 +12,7 @@ import {
   type ImplementResult,
   implementResult,
   PART_TIME_MIN,
+  RUN_CANCELLED,
   STEP_TIME_MS,
   STEP_TURNS,
   type StepDetail,
@@ -860,7 +861,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         changed: problems.length || broken ? [] : (check?.changed ?? []),
         problems,
         patch,
-        text: broken ?? (ran ? null : (e.text ?? (e.status === "cancelled" ? "The run was cancelled." : "The run failed."))),
+        text: broken ?? (ran ? null : (e.text ?? (e.status === "cancelled" ? RUN_CANCELLED : "The run failed."))),
       };
       return i.onEnd ? () => i.onEnd?.(outcome) : undefined;
     },

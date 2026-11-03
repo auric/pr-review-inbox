@@ -60,6 +60,7 @@ import { taskContext, taskParents } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { Settings } from "../settings";
+import { noteTaskWaits } from "../tasks/notify";
 import { taskRepos } from "../tasks/repos";
 import { recoverTasks, taskRow } from "../tasks/tasks";
 import { inside, tasksRoot } from "../tasks/worktree";
@@ -219,6 +220,10 @@ const SESSION_TIMEOUT_MS = 20 * 60_000;
 const MAIN_ENTRY = join(import.meta.dir, "..", "main.ts");
 // The skills folder of an implement run, from its cwd. writeContext (src/server/tasks/implement.ts) writes context/ again before each step.
 const IMPLEMENT_SKILLS = "context/skills";
+// The notification of a review, re-review, or explain run end. One tab claims it (src/web/notify.ts). A cancelled run gives none.
+const RUN_NOTE = "INSERT INTO event (pr, kind, ref, created_at) VALUES ($pr, $kind, $ref, $now) ON CONFLICT DO NOTHING";
+const runNoted = (j: { kind: RunKind; cancelled?: boolean }, e: Ending) =>
+  (j.kind === "review" || j.kind === "explain") && e.status !== "cancelled" && !j.cancelled;
 // The stdin lines of an implement run about the git MCP server and the trust of every MCP tool result.
 export const IMPLEMENT_MCP_LINES = [
   `The ${GIT_SERVER} MCP tools read the git history of the main repository. HEAD is the commit before this step. BASE is the base commit of the task. They do not show the changes of this step.`,
@@ -452,6 +457,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     sentAt = Date.now();
     const tasks = [...pending.tasks];
     live.broadcast("changed", { prs: [...pending.prs], runs: [...pending.runs], ...(tasks.length && { tasks }) });
+    const db = tasks.length ? settings.db() : null;
+    if (db && noteTaskWaits(db, tasks, now())) live.broadcast("events", { count: 1 });
     pending.prs.clear();
     pending.runs.clear();
     pending.tasks.clear();
@@ -561,6 +568,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       });
       // Restart recovery can end the row first. Then no item goes in.
       if (!done.changes) return false;
+      if (runNoted(j, e))
+        j.db
+          .query(RUN_NOTE)
+          .run({ pr: j.pr, kind: e.status === "completed" ? "run_finished" : "run_failed", ref: String(j.id), now: now() });
       const edit = j.db.query(SQL.fixEdit);
       for (const x of e.result?.fix?.edits ?? [])
         edit.run({
@@ -1310,7 +1321,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // The slot frees in the same tick as the end write. A client that sees the end can start the next run.
     if (job === j) job = null;
     try {
-      end(j, e);
+      if (end(j, e) && runNoted(j, e)) live.broadcast("events", { count: 1 });
     } catch (e2) {
       // The settings changed and closed this database. The next open marks the run failed.
       log(`Could not end review run ${j.id}: ${(e2 as Error).message}`);

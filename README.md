@@ -22,6 +22,7 @@ The name says what the app does. It is one inbox for the pull requests that you 
 - Shows every open pull request that needs you in one inbox, with unread marks and a reason per row.
 - Tracks each discussion per message: new comments, edits, replies, and deletions. Read state survives restarts.
 - Notifies you once when someone replies to you or pushes new commits.
+- Notifies you when a review, a re-review, or an Explain run ends, so you can work in another window. The notification names the pull request and the result, such as "review done, 3 findings" or "review failed (the reason)". A run that you cancel gives no notification. A Jira task notifies you when it needs you, for example for a question or red tests. A click opens the pull request or the task.
 - Shows the Bitbucket build status of each open pull request. A row says "Build failed" or "Build running". The pull request header names the failed build, links to its build page, and shows the counts. When the build of your own pull request fails or passes, the app notifies you.
 - Runs a Claude Code review on a sanitized snapshot of the pull request. The review reads the whole repository, not only the diff.
 - Turns findings into drafts with a severity. You accept, edit, or discard each one, then post them as inline comments.

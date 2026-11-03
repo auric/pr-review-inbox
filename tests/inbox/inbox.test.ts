@@ -268,6 +268,37 @@ describe("POST /api/notifications/claim (A14)", () => {
     expect(h.db.query("SELECT COUNT(*) AS n FROM event WHERE claimed_at IS NULL").get()).toEqual({ n: 0 });
   });
 
+  test("a run event carries its run, also for an unfollowed PR; a removed run gives run null", async () => {
+    const h = await setup();
+    const p = h.pr({ followed: 0 });
+    const run = (kind: string, status: string, since: string | null, error: string | null) =>
+      (
+        h.db
+          .query(`INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, status, started_at, since_head, error_text)
+            VALUES ($p, $kind, 'general', '', $key, 'a', 'b', $status, 1, $since, $error) RETURNING id`)
+          .get({ p, kind, status, since, error, key: `k${kind}${status}` }) as { id: number }
+      ).id;
+    const done = run("review", "completed", "s", null);
+    const finding = (o: object) =>
+      h.db
+        .query("INSERT INTO review_item (run, kind, payload_json, body, status) VALUES ($run, 'finding', $payload, 'x', 'new')")
+        .run({ run: done, payload: JSON.stringify(o) });
+    finding({});
+    finding({});
+    finding({ discardedBy: "verify" });
+    const failed = run("explain", "failed", null, "Claude stopped.");
+    const ins = h.db.query("INSERT INTO event (pr, kind, ref, created_at) VALUES ($pr, $kind, $ref, 1)");
+    ins.run({ pr: p, kind: "run_finished", ref: String(done) });
+    ins.run({ pr: p, kind: "run_failed", ref: String(failed) });
+    ins.run({ pr: p, kind: "run_failed", ref: "999" });
+    const res = await h.json<ClaimedEvent[]>("/api/notifications/claim", { method: "POST" });
+    expect(res.body.map((e) => e.run)).toEqual([
+      { kind: "review", rereview: true, status: "completed", findings: 2, error: null },
+      { kind: "explain", rereview: false, status: "failed", findings: 0, error: "Claude stopped." },
+      null,
+    ]);
+  });
+
   test("claimed events older than 30 days are deleted when the inbox first opens the database", async () => {
     const h = await setup();
     const p = h.pr();

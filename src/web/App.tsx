@@ -433,8 +433,9 @@ function Shell({ stale }: { stale: boolean }) {
     setAt((a) => ({ key, thread: null, file: to, close: null, scroll: null, n: (a?.n ?? 0) + 1 }));
   };
 
-  // A notification click opens its PR in a view that holds it. A digest opens Needs you.
-  useClaims(claimEvents, !!s?.baseUrl, !!s?.notifications, (id) => {
+  // A notification click opens its PR in a view that holds it, or its task. A digest opens Needs you.
+  useClaims(claimEvents, !!s?.baseUrl, !!s?.notifications, (id, taskId) => {
+    if (taskId !== undefined) return openTask(taskId);
     const pr = id === null ? undefined : all.find((p) => p.id === id);
     const v = pr ? ((Object.keys(VIEWS) as View[]).find((x) => VIEWS[x](pr)) ?? "following") : "needs";
     setView(v);

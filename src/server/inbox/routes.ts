@@ -6,12 +6,13 @@ import type { Database } from "bun:sqlite";
 import { Hono } from "hono";
 import { validator } from "hono/validator";
 import type { z } from "zod";
-import { type ApiError, archiveInput, followInput, followUrlInput, readInput } from "../../shared/dto";
+import { type ApiError, archiveInput, type Claimed, followInput, followUrlInput, readInput } from "../../shared/dto";
 import { parsePrUrl } from "../../shared/pr-url";
 import { ForgeError } from "../bitbucket/client";
 import type { Live } from "../live";
 import type { Settings } from "../settings";
 import type { SyncEngine } from "../sync/engine";
+import { claimTaskEvents } from "../tasks/notify";
 import {
   claimEvents,
   cleanupEvents,
@@ -149,6 +150,7 @@ export function createInboxRoutes(opts: { settings: Settings; sync: SyncEngine; 
       if (!s) return c.json(unconfigured, 409);
       const events = claimEvents(s.db, now());
       if (events.length) live.broadcast("changed", { prs: [...new Set(events.map((e) => e.pr))] });
-      return c.json(events, 200);
+      const claimed: Claimed[] = [...events, ...claimTaskEvents(s.db, now())];
+      return c.json(claimed, 200);
     });
 }

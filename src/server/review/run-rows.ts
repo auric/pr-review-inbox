@@ -142,6 +142,10 @@ export const NO_ANCHOR = { path: null, side: null, line: null, line_end: null, a
 
 // docs/plans/review-v2/spec.md section 2.2: a revision of a finding (payload revises) is no finding of its own. The item is joined as i.
 export const NOT_REVISION = "json_extract(i.payload_json, '$.revises') IS NULL";
+// The open findings of review_run r. RunDto.findings and the run notifications count them.
+export const OPEN_FINDINGS = `(SELECT COUNT(*) FROM review_item i WHERE i.run = r.id AND i.kind = 'finding'
+        AND COALESCE(json_extract(i.payload_json, '$.carried.verdict'), 'open') = 'open'
+        AND COALESCE(json_extract(i.payload_json, '$.discardedBy'), '') <> 'verify' AND ${NOT_REVISION})`;
 
 export const SQL = {
   pr: `SELECT id, project, repo, pr_id, title, description, author_slug, author_name, my_role, state, pr_version, source_head, target_head, source_branch,
@@ -165,9 +169,7 @@ export const SQL = {
       r.session_id, r.cli_version, r.model, r.effort, r.effort_default, r.usage_json, r.summary_json, r.raw_output IS NOT NULL AS has_raw, r.started_at, r.finished_at,
       p.source_head AS pr_source, p.target_head AS pr_target, r.since_head, r.range_base, r.question, r.answer, r.fix_json, r.tasks_json, r.instructions_json, r.skills_json,
       r.consult_json, r.parent_run,
-      (SELECT COUNT(*) FROM review_item i WHERE i.run = r.id AND i.kind = 'finding'
-        AND COALESCE(json_extract(i.payload_json, '$.carried.verdict'), 'open') = 'open'
-        AND COALESCE(json_extract(i.payload_json, '$.discardedBy'), '') <> 'verify' AND ${NOT_REVISION}) AS findings
+      ${OPEN_FINDINGS} AS findings
     FROM review_run r JOIN pull_request p ON p.id = r.pr`,
   workspace: "UPDATE review_run SET merge_base = $base, range_base = $range, fetch_via = $via WHERE id = $id",
   instructions: "UPDATE review_run SET instructions_json = $json WHERE id = $id",

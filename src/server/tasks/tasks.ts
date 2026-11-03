@@ -53,6 +53,7 @@ import {
   PART_STATE_TEXT,
   PART_TIME_MIN,
   type PartState,
+  RUN_CANCELLED,
   type SizeSource,
   SPEC_TURNS,
   type SpecResult,
@@ -507,7 +508,7 @@ function defaultReviewers(db: Database, t: TaskRow, project = t.project, repo = 
 export function stopForRun(db: Database, ref: TaskRef, step: number | null, e: Pick<Ending, "status" | "text">, now = Date.now()) {
   const r = advance(db, ref, { type: "STOP" }, {}, now);
   if (r.status !== 200) return;
-  const text = e.status === "cancelled" ? "The run was cancelled." : (e.text ?? "The run failed.");
+  const text = e.status === "cancelled" ? RUN_CANCELLED : (e.text ?? "The run failed.");
   patch(db, ref.task, r.version, { blocked_json: blocked({ kind: "error", step, text }) }, now);
 }
 
@@ -578,7 +579,7 @@ type FullQuestionRow = QuestionRow & {
   answered_at: number | null;
 };
 
-const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
+export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
   const b = t.blocked_json === null ? null : taskBlocked.safeParse(JSON.parse(t.blocked_json));
   const code = db.query(Q.codeParts).all({ id: t.id }) as { ord: number; state: PartState; pr_state: string | null }[];
   const merged = (p: (typeof code)[number]) => p.state === "merged" || p.pr_state === "MERGED";

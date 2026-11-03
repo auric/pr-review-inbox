@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 42;
+const LATEST = 43;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1442,6 +1442,54 @@ test("migration from a version-41 database keeps the task rows; the sub-task col
     expect(db.query("SELECT after_part FROM task_part WHERE id = 2").get()).toEqual({ after_part: null });
     db.run("DELETE FROM task WHERE id = 1");
     expect(db.query("SELECT COUNT(*) AS n FROM task_subtask").get()).toEqual({ n: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+// 043_run_events.sql rebuilds event as 041_build_status.sql did, with the run kinds.
+test("migration from a version-42 database keeps every event with its ID; the run kinds are new", () => {
+  const path = join(dir, "v42.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+    "041_build_status.sql",
+    "042_task_subtasks.sql",
+  ]);
+  old.exec("PRAGMA user_version = 42");
+  old.exec(`INSERT INTO pull_request (id, project, repo, pr_id) VALUES (1, 'P', 'r', 1);
+    INSERT INTO event (id, pr, kind, ref, created_at, digest, claimed_at)
+      VALUES (3, 1, 'comment_new', '10', 1, 0, NULL), (6, 1, 'build_failed', 'abc', 2, 0, 7);`);
+  const events = old.query("SELECT * FROM event ORDER BY id").all();
+  const eventColumns = columns(old, "event");
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(columns(db, "event")).toEqual(eventColumns);
+    expect(db.query("SELECT * FROM event ORDER BY id").all()).toEqual(events);
+    expect(db.query("SELECT name FROM sqlite_master WHERE tbl_name = 'event' AND type = 'index' AND sql IS NOT NULL").all()).toEqual([
+      { name: "event_unclaimed" },
+    ]);
+    const insert = (kind: string, ref: string) =>
+      db.query("INSERT INTO event (pr, kind, ref, created_at) VALUES (1, $kind, $ref, 4)").run({ kind, ref });
+    insert("run_finished", "12");
+    insert("run_failed", "13");
+    expect(() => insert("run_finished", "12")).toThrow(/UNIQUE/);
+    expect(() => insert("run_cancelled", "14")).toThrow(/CHECK/);
+    expect(db.query("SELECT MAX(id) AS id FROM event").get()).toEqual({ id: 8 });
   } finally {
     db.close();
   }

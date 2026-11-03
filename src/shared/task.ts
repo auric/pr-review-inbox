@@ -67,6 +67,9 @@ export const STEP_KINDS = [
 ] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
+// The stop reason of a cancelled task run. A task that stops with it gives no notification.
+export const RUN_CANCELLED = "The run was cancelled.";
+
 export const TASK_EVENT_KINDS = ["needs_you", "part_ready", "spec_approved"] as const;
 export type TaskEventKind = (typeof TASK_EVENT_KINDS)[number];
 

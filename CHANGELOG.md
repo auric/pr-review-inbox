@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The app now notifies you when a review, a re-review, or an Explain run ends. The notification names the pull request and the result, such as "review done, 3 findings", or says why the run failed or is incomplete. A run that you cancel gives no notification. The notifications switch in Settings applies.
+- A Jira task now notifies you when it needs you, for example for a question, red tests, or a plan to approve. A click opens the task. Your own Stop gives no notification.
 - "Move up" and "Move down" on each command, on the plan screen and in Settings, Tasks, change the order of the commands. The commands run in list order.
 - Reviews and Build a Jira task steps never get key or credential files from a skill folder, such as `id_*`, `*.pem`, `*.ppk`, `.env`, or a file that holds a private key. The skills index counts the files left out. A skill whose SKILL.md holds a private key stays out.
 - Build a Jira task now commits only the files that Claude changed or wrote, and the plan files. New files from your setup or check commands, such as `.venv/` or `build/`, stay out of the commit. The commit row in the Log tab names them.

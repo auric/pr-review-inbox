@@ -5,7 +5,7 @@
 // An invalidation of ['prs'] also refreshes ['prs', 'archive'].
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "@/components/ui/toast";
-import type { CheckpointDto, ClaimedEvent, FollowState, PrDetail, PrRow, SettingsDto, SettingsInput, SyncStatus } from "../../shared/dto";
+import type { CheckpointDto, Claimed, FollowState, PrDetail, PrRow, SettingsDto, SettingsInput, SyncStatus } from "../../shared/dto";
 import { api } from "../api";
 import type { AckItem } from "../pr/ack";
 import { ARCHIVED_TEXT, failText, prKey, restoreWords, unfollowText } from "./model";
@@ -62,7 +62,7 @@ export const usePr = (id: number, enabled = true) =>
 export const sendSeen = async (id: number) =>
   read<{ id: number; seenAt: number }>(await api.api.prs[":id"].seen.$post({ param: { id: String(id) } }));
 
-export const claimEvents = async () => read<ClaimedEvent[]>(await api.api.notifications.claim.$post());
+export const claimEvents = async () => read<Claimed[]>(await api.api.notifications.claim.$post());
 
 // keepalive: the request also completes when the page closes.
 export const sendRead = async (pr: number, items: AckItem[]) =>
