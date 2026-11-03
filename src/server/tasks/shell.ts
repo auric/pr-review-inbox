@@ -35,7 +35,8 @@ export function rulePath(dir: string, platform: NodeJS.Platform = process.platfo
   return `//${p}`;
 }
 
-// The settings file of a shell step. A network program stays allowed only when an allowlist entry names it as its program.
+// The settings file of a shell step. A network program, and xargs in allowlist mode, stays allowed only when an allowlist entry names
+// it as its program.
 export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = process.platform) {
   const t = spec.bashTimeoutSec;
   if (!Number.isInteger(t) || t < 1 || t > BASH_TIMEOUT_MAX_SEC) throw new Error(`Invalid Bash time limit: ${t}`);
@@ -50,6 +51,8 @@ export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = proce
         ...GIT_DENY,
         ...hostsOf(spec.origins).map((h) => `Bash(*${h}*)`),
         ...NETWORK_TOOLS.filter((n) => !named.has(n)).map((n) => `Bash(${n} *)`),
+        // Outside Windows, the CLI runs xargs with no allow rule. Its folder check misses paths from stdin (shell.md, run 2).
+        ...(spec.mode === "allowlist" && !named.has("xargs") ? ["Bash(xargs *)"] : []),
         ...CREDENTIAL_DENY,
         ...DATA_DENY.map((f) => `Read(${data}/${f})`),
         ...HOME_DENY,

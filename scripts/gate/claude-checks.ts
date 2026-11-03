@@ -27,7 +27,14 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { z } from "zod";
-import { childEnv as appChildEnv, killTree as appKillTree, implementArgs } from "../../src/server/review/claude";
+import {
+  childEnv as appChildEnv,
+  killTree as appKillTree,
+  contain,
+  implementArgs,
+  type KillReport,
+  RUN_MARKER,
+} from "../../src/server/review/claude";
 import { runnerDefaults } from "../../src/server/review/defaults";
 import { createStreamParser, type StreamState } from "../../src/server/review/stream";
 import { type ShellSpec, shellEnv } from "../../src/server/tasks/shell";
@@ -383,7 +390,7 @@ async function runClaude(
   prompt: string,
   cwd: string,
   // model null: no --model flag. raw: args is the full app argv (implementArgs), spawned as the app spawns it. watch: gets each
-  // stream event when it arrives.
+  // stream event when it arrives. spawned: gets the CLI pid right after the spawn, as the app calls contain().
   opts: {
     env?: Record<string, string>;
     maxTurns?: number;
@@ -391,6 +398,7 @@ async function runClaude(
     model?: string | null;
     raw?: boolean;
     watch?: (e: Ev, pid: number) => void;
+    spawned?: (pid: number) => void;
   } = {},
 ): Promise<Run> {
   if (args.includes("--bare")) throw new Error("--bare is forbidden");
@@ -435,6 +443,7 @@ async function runClaude(
   // POSIX: the app starts the CLI in a new process group (claude.ts), so its killTree can end the group.
   const detached = !!opts.raw && process.platform !== "win32";
   const proc = Bun.spawn(cmd, { cwd, env, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe", detached });
+  opts.spawned?.(proc.pid);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -2158,7 +2167,11 @@ async function shellRun(
   rules: string[],
   cmds: string[],
   maxTurns: number,
-  opts: { env?: (base: Record<string, string>) => Record<string, string>; watch?: (e: Ev, pid: number) => void } = {},
+  opts: {
+    env?: (base: Record<string, string>) => Record<string, string>;
+    watch?: (e: Ev, pid: number) => void;
+    spawned?: (pid: number) => void;
+  } = {},
   check: (s: ShellRun) => unknown = () => {},
 ) {
   const { base, work, app, drop } = runnerFolder(name.split("-")[0] ?? name);
@@ -2190,7 +2203,7 @@ async function shellRun(
       }
       opts.watch?.(e, pid);
     };
-    const run = await runClaude(name, args, prompt, work, { env, raw: true, watch });
+    const run = await runClaude(name, args, prompt, work, { env, raw: true, watch, spawned: opts.spawned });
     const parser = createStreamParser({ cwd: work, allowedTools: allowed, shell: true });
     for (const e of run.events) parser.line(JSON.stringify(e));
     await check({ run, work, base, state: parser.state, settings: readFileSync(join(app, "shell.json"), "utf8"), arrived });
@@ -2341,8 +2354,9 @@ async function b24() {
   });
 }
 
-// B25 (SU5): Stop. When Claude runs `sleep 600`, the gate polls up to 20 s for the new sleep process, then calls the app's killTree on the CLI.
-// PASS: the CLI and the sleep are gone within 5 s, and no bash or sleep process of the run is left. The gate kills a leftover by PID.
+// B25 (SU5, SU11, SU12): Stop. When Claude runs `sleep 600`, the gate polls up to 20 s for the new sleep process, then calls the app's
+// killTree on the CLI. PASS: the CLI and the sleep are gone within 5 s, and no bash or sleep process of the run is left. The gate kills a
+// leftover by PID. INFO: the mechanism that ended the sleep, whether the sleep was in the Job Object, and whether its env held the marker.
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -2383,10 +2397,41 @@ const killPid = (pid: number) => {
 };
 const SLEEP_FIND_MS = 20_000;
 const STOP_LIMIT_MS = 5000;
+// Whether the env of the process holds the run marker. null: no /proc (Windows, macOS) or not readable.
+const markerIn = (pid: number, marker: string) => {
+  try {
+    return readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(`${RUN_MARKER}=${marker}`);
+  } catch {
+    return null;
+  }
+};
+// The mechanism that ended a sleep process: the marker scan signalled it, or the Job Object held it after the taskkill or group kill.
+// Else the taskkill or the group kill ended it, or nothing did.
+const endedBy = (pid: number, r: KillReport, gone: boolean) =>
+  r.marked.includes(pid)
+    ? "marker scan"
+    : r.job?.includes(pid)
+      ? "job"
+      : gone
+        ? process.platform === "win32"
+          ? "taskkill"
+          : "group"
+        : "none";
+type Stop = {
+  sleeps: number[];
+  findMs: number;
+  cliMs: number | null;
+  sleepMs: number | null;
+  left: Proc[];
+  report: KillReport;
+  inEnv: (boolean | null)[];
+};
 async function b25() {
   const cmd = "sleep 600";
   const since = Date.now();
-  let stop: Promise<{ sleeps: number[]; findMs: number; cliMs: number | null; sleepMs: number | null; left: Proc[] }> | undefined;
+  // The gate starts the CLI as the app does: the run marker in the env, and contain() right after the spawn.
+  const marker = crypto.randomUUID();
+  let stop: Promise<Stop> | undefined;
   const watch = (e: Ev, pid: number) => {
     if (stop || !blocks(e).some((b) => b.type === "tool_use" && b.name === "Bash" && String(b.input?.command ?? "").trim() === cmd)) return;
     stop = (async () => {
@@ -2399,8 +2444,9 @@ async function b25() {
         if (!sleeps.length) await Bun.sleep(500);
       }
       const findMs = Math.round(performance.now() - f0);
+      const inEnv = sleeps.map((p) => markerIn(p, marker));
       const t0 = performance.now();
-      await appKillTree(pid);
+      const report = await appKillTree(pid);
       let cliMs: number | null = null;
       let sleepMs: number | null = null;
       while (performance.now() - t0 < STOP_LIMIT_MS && (cliMs === null || sleepMs === null)) {
@@ -2412,36 +2458,47 @@ async function b25() {
       const left = stopProcs(since).filter((p) => alive(p.pid));
       for (const p of left) killPid(p.pid);
       if (alive(pid)) killTree(pid);
-      return { sleeps, findMs, cliMs, sleepMs, left };
+      await appKillTree(pid, true);
+      return { sleeps, findMs, cliMs, sleepMs, left, report, inEnv };
     })();
   };
-  await shellRun("b25-stop", "allowlist", ["sleep *"], [cmd], 3, { watch }, async ({ run }) => {
+  const opts = {
+    watch,
+    env: (b: Record<string, string>) => ({ ...b, [RUN_MARKER]: marker }),
+    spawned: (pid: number) => contain(pid, marker),
+  };
+  await shellRun("b25-stop", "allowlist", ["sleep *"], [cmd], 3, opts, async ({ run }) => {
     if (DRY) return dry("B25");
     if (!stop)
       return push("B25", "FAIL", `Claude did not run ${cmd}; exit=${run.exit}; other calls=${otherCalls(run, [cmd]).join(",") || "none"}`);
     const s = await stop;
     const pass = s.sleeps.length > 0 && s.cliMs !== null && s.sleepMs !== null && !s.left.length;
+    const gone = s.sleepMs !== null;
+    const job = s.report.job === null ? "none (bun:ffi or the assign failed)" : `held ${s.report.job.length} processes`;
+    const sleepInJob = s.report.job === null ? "n/a" : s.sleeps.map((p) => (s.report.job?.includes(p) ? "yes" : "no")).join(",");
+    const inEnv = s.inEnv.map((v) => (v === null ? "n/a (no /proc; see B26)" : v ? "yes" : "no")).join(",");
     push(
       "B25",
       pass ? "PASS" : "FAIL",
-      `${process.platform}; new sleep processes=${s.sleeps.length} (found in ${s.findMs} ms, limit ${SLEEP_FIND_MS} ms); after the app killTree: CLI gone in ${s.cliMs ?? `>${STOP_LIMIT_MS}`} ms, sleep gone in ${s.sleepMs ?? `>${STOP_LIMIT_MS}`} ms; leftovers killed by PID=${s.left.map((p) => p.name).join(",") || "none"}; exit=${run.exit}`,
+      `${process.platform}; new sleep processes=${s.sleeps.length} (found in ${s.findMs} ms, limit ${SLEEP_FIND_MS} ms); after the app killTree: CLI gone in ${s.cliMs ?? `>${STOP_LIMIT_MS}`} ms, sleep gone in ${s.sleepMs ?? `>${STOP_LIMIT_MS}`} ms; sleep ended by=${s.sleeps.map((p) => endedBy(p, s.report, gone)).join(",") || "none"}; job=${job}; sleep in job=${sleepInJob}; marker scan hits=${s.report.marked.length}; marker in sleep env=${inEnv || "n/a"}; leftovers killed by PID=${s.left.map((p) => p.name).join(",") || "none"}; exit=${run.exit}`,
     );
   });
 }
 
 // B26 (SU8): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB keeps PATH and GIT_CONFIG_*; SSH_AUTH_SOCK, GATE_*, askpass, and API keys stay out.
-// The gate sets GATE_RLGB_PROBE and GIT_ASKPASS for this run, and a placeholder SSH_AUTH_SOCK when none is set. A kept name must be set
+// The gate sets GATE_RLGB_PROBE and GIT_ASKPASS for this run, a placeholder SSH_AUTH_SOCK when none is set, and a run marker. A kept name must be set
 // only when the gate gave it: Git Bash sets HOME from USERPROFILE and changes PATH, so the values are not compared.
 const KEEP = ["HOME", "PATH", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_TERMINAL_PROMPT"];
 const DROP = ["GATE_RLGB_PROBE", "GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-const ENV_INFO = ["GIT_CONFIG_VALUE_0", "USERPROFILE", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"];
+// RUN_MARKER (SU12): the Linux kill finds the leftovers of a run by it, so it must reach a Bash command.
+const ENV_INFO = ["GIT_CONFIG_VALUE_0", "USERPROFILE", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", RUN_MARKER];
 async function b26() {
   const keys = [...KEEP, ...DROP, ...ENV_INFO];
   const cmd = `${probe("env")} ${keys.join(" ")}`;
   const saved = { GATE_RLGB_PROBE: process.env.GATE_RLGB_PROBE, GIT_ASKPASS: process.env.GIT_ASKPASS };
   let passed: Record<string, string> = {};
   const envFn = (base: Record<string, string>) => {
-    passed = { ...base, SSH_AUTH_SOCK: base.SSH_AUTH_SOCK ?? "/tmp/rlgb-placeholder-agent.sock" };
+    passed = { ...base, SSH_AUTH_SOCK: base.SSH_AUTH_SOCK ?? "/tmp/rlgb-placeholder-agent.sock", [RUN_MARKER]: crypto.randomUUID() };
     return passed;
   };
   process.env.GATE_RLGB_PROBE = "1";

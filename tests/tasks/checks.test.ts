@@ -330,6 +330,18 @@ describe("app-run checks", () => {
     expect(stepDetail.parse({ commands: [{ name: "x", argv: ["x"], exit: null, ms: 0, tail: "" }] }).commands[0]?.notRun).toBeNull();
   });
 
+  // The Job Object (Windows) or the marker scan (/proc) ends the leftover. macOS has neither.
+  test.skipIf(process.platform === "darwin")("a process that a green command leaves ends with the command", async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-leftover-")));
+    dirs.push(dir);
+    const code = `const c = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore"], detached: true }); c.unref(); console.log(c.pid);`;
+    const r = await runCommand({ name: "daemon", argv: [BUN, "-e", code], timeoutSec: 30 }, { cwd: dir, env: checkEnv(null) });
+    const left = Number(r.tail.trim());
+    cleanup.push(() => alive(left) && process.kill(left, "SIGKILL"));
+    expect([r.exit, left > 0]).toEqual([0, true]);
+    expect(await until(() => !alive(left), 2000)).toBe(true);
+  });
+
   test("the output tail keeps the last 64 KB", async () => {
     const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb3-tail-")));
     dirs.push(dir);

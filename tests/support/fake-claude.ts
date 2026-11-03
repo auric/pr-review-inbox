@@ -20,6 +20,8 @@ export type FakeScenario = {
   stderr?: string;
   // Start a child that ignores stdin EOF, stop before the first result event, and wait forever.
   hang?: boolean;
+  // Start a detached child that outlives the CLI, as a command that Claude starts with `&`, and record { orphanPid }.
+  orphan?: boolean;
   // The structured_output of the result, by the --json-schema shape. Absent: the echo of the stdin.
   // replies: a reply run (properties.replies). rereview: a re-review (properties.earlier). answer: an ask run (properties.answer).
   // fix: a fix run (properties.edits); its notes can carry why and reply. improve: a prompt proposal (properties.reasons). consult: a session run (properties.answers),
@@ -390,6 +392,16 @@ async function main() {
     const child = Bun.spawn([process.execPath, "-e", CHILD], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
     child.stdin.end();
     record({ childPid: child.pid });
+  }
+  if (s.orphan) {
+    const orphan = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000);"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true,
+    });
+    orphan.unref();
+    record({ orphanPid: orphan.pid });
   }
 
   // The real CLI streams a Write call and its result for each file that it writes. A junction has no Write call.

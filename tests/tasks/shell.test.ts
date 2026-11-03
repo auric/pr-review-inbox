@@ -35,7 +35,7 @@ const spec = (s: Partial<ShellSpec> = {}): ShellSpec => ({
 });
 
 const NETWORK = ["curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "tftp", "sftp", "scp", "ssh", "rsync"];
-const denyFor = (data: string, network: string[]) => [
+const denyFor = (data: string, network: string[], xargs = false) => [
   "Bash(git *)",
   "Bash(*/git *)",
   "Bash(git.exe *)",
@@ -44,6 +44,7 @@ const denyFor = (data: string, network: string[]) => [
   "Bash(*bitbucket.example.test*)",
   "Bash(*jira.example.test*)",
   ...network.map((n) => `Bash(${n} *)`),
+  ...(xargs ? ["Bash(xargs *)"] : []),
   "Bash(secret-tool *)",
   "Bash(security *)",
   "Bash(cmdkey *)",
@@ -70,6 +71,7 @@ describe("shell.json", () => {
         deny: denyFor(
           data,
           NETWORK.filter((n) => n !== "ssh"),
+          true,
         ),
         blockReadsOutsideWorkingDirectories: true,
         disableBypassPermissionsMode: "disable",
@@ -93,6 +95,14 @@ describe("shell.json", () => {
     expect(two).not.toContain("Bash(scp *)");
     expect(two).not.toContain("Bash(rsync *)");
     expect(two).toContain("Bash(ssh *)");
+  });
+
+  test("allowlist mode denies xargs unless an entry has it as its program; Any command does not", () => {
+    const deny = (rules: string[], mode: ShellSpec["mode"] = "allowlist") => shellSettings(spec({ mode, rules }), "win32").permissions.deny;
+    expect(deny(["make test *"])).toContain("Bash(xargs *)");
+    expect(deny(["echo xargs *"])).toContain("Bash(xargs *)");
+    expect(deny(["/usr/bin/XARGS.exe -n1 *"])).not.toContain("Bash(xargs *)");
+    expect(deny([], "any")).not.toContain("Bash(xargs *)");
   });
 
   test("Read deny rules name the data folder in the //c/... form on Windows and the //... form on POSIX", () => {

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Starts, watches, and stops one Claude Code review process. The flags, env, and cwd rules come from integration-check.md, "Gate v3, local".
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { EFFORTS, type Effort, modelName } from "../../shared/dto";
@@ -154,14 +154,173 @@ async function readText(stream: ReadableStream<Uint8Array>, each: (text: string)
   each(dec.decode());
 }
 
-export async function killTree(pid: number) {
-  // Gate 0 g: taskkill /T ends claude.exe and its MCP children.
-  if (process.platform === "win32")
-    await Bun.spawn(["taskkill", "/T", "/F", "/PID", String(pid)], { stdout: "ignore", stderr: "ignore", timeout: EXEC_TIMEOUT_MS }).exited;
-  else
+// The env name of the run marker. Each CLI or check process gets a new value. The kill finds the leftovers of the process by it.
+export const RUN_MARKER = "REVIEW_LOOP_RUN";
+// learn.microsoft.com JOBOBJECT_EXTENDED_LIMIT_INFORMATION on 64-bit Windows: 144 bytes, and BasicLimitInformation.LimitFlags at
+// offset 16, after two LARGE_INTEGER fields. SetInformationJobObject refuses 143 and 145 bytes with ERROR_BAD_LENGTH (24).
+// JOBOBJECT_BASIC_PROCESS_ID_LIST: two DWORD counts, then one ULONG_PTR process ID each from offset 8.
+const EXTENDED_LIMIT_INFO = 9;
+const EXTENDED_LIMIT_SIZE = 144;
+const KILL_ON_JOB_CLOSE = 0x2000;
+const BASIC_PROCESS_ID_LIST = 3;
+// PROCESS_TERMINATE | PROCESS_SET_QUOTA: AssignProcessToJobObject needs both.
+const ASSIGN_ACCESS = 0x0101;
+// WaitForSingleObject needs SYNCHRONIZE. WAIT_OBJECT_0: the process has ended.
+const SYNCHRONIZE = 0x00100000;
+const WAIT_OBJECT_0 = 0;
+const JOB_IDS_MAX = 1024;
+const JOB_WAIT_MS = 2000;
+const MARK_PASSES = 4;
+const MARK_WAIT_MS = 200;
+
+function openKernel32() {
+  // require, not import: a failed load must not stop the app. Then the kill uses taskkill /T only.
+  const { dlopen, FFIType: T } = require("bun:ffi") as typeof import("bun:ffi");
+  return dlopen("kernel32.dll", {
+    CreateJobObjectW: { args: [T.ptr, T.ptr], returns: T.ptr },
+    SetInformationJobObject: { args: [T.ptr, T.i32, T.ptr, T.u32], returns: T.i32 },
+    OpenProcess: { args: [T.u32, T.i32, T.u32], returns: T.ptr },
+    AssignProcessToJobObject: { args: [T.ptr, T.ptr], returns: T.i32 },
+    QueryInformationJobObject: { args: [T.ptr, T.i32, T.ptr, T.u32, T.ptr], returns: T.i32 },
+    TerminateJobObject: { args: [T.ptr, T.u32], returns: T.i32 },
+    CloseHandle: { args: [T.ptr], returns: T.i32 },
+    WaitForSingleObject: { args: [T.ptr, T.u32], returns: T.u32 },
+  }).symbols;
+}
+type Kernel32 = ReturnType<typeof openKernel32>;
+type Handle = NonNullable<ReturnType<Kernel32["CreateJobObjectW"]>>;
+let kernel32: Kernel32 | null | undefined;
+function k32() {
+  if (kernel32 === undefined)
     try {
-      process.kill(-pid, "SIGKILL");
-    } catch {}
+      kernel32 = openKernel32();
+    } catch (e) {
+      kernel32 = null;
+      log(`bun:ffi did not load kernel32.dll, so Stop uses taskkill /T only: ${(e as Error).message}`);
+    }
+  return kernel32;
+}
+
+// A Job Object with kill-on-close that holds the process, or null.
+function newJob(pid: number): Handle | null {
+  const k = k32();
+  if (!k) return null;
+  const job = k.CreateJobObjectW(null, null);
+  if (!job) {
+    log("CreateJobObjectW failed, so Stop uses taskkill /T only for this run.");
+    return null;
+  }
+  const info = new Uint8Array(EXTENDED_LIMIT_SIZE);
+  new DataView(info.buffer).setUint32(16, KILL_ON_JOB_CLOSE, true);
+  const proc = k.OpenProcess(ASSIGN_ACCESS, 0, pid);
+  const failed = !k.SetInformationJobObject(job, EXTENDED_LIMIT_INFO, info, EXTENDED_LIMIT_SIZE)
+    ? "SetInformationJobObject"
+    : !proc
+      ? "OpenProcess"
+      : !k.AssignProcessToJobObject(job, proc)
+        ? "AssignProcessToJobObject"
+        : null;
+  if (proc) k.CloseHandle(proc);
+  if (!failed) return job;
+  k.CloseHandle(job);
+  log(`${failed} failed, so Stop uses taskkill /T only for this run.`);
+  return null;
+}
+
+function jobIds(k: Kernel32, job: Handle) {
+  const list = new BigUint64Array(1 + JOB_IDS_MAX);
+  if (!k.QueryInformationJobObject(job, BASIC_PROCESS_ID_LIST, list, list.byteLength, null)) return [];
+  return [...list.subarray(1, 1 + Number((list[0] ?? 0n) >> 32n))].map(Number);
+}
+
+// The processes whose env holds the marker. /proc/<pid>/environ of another user's process throws, and a zombie has an empty env.
+function markedIds(marker: string) {
+  const want = `${RUN_MARKER}=${marker}`;
+  let ids: string[];
+  try {
+    ids = readdirSync("/proc").filter((d) => /^\d+$/.test(d));
+  } catch {
+    return [];
+  }
+  return ids.flatMap((d) => {
+    try {
+      return readFileSync(`/proc/${d}/environ`, "latin1").split("\0").includes(want) ? [Number(d)] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+// SIGTERM, then SIGKILL to each match that is left after MARK_WAIT_MS. Without a match, nothing waits.
+async function killMarked(marker: string) {
+  const hit = new Set<number>();
+  const send = (signal: NodeJS.Signals) => {
+    const ids = markedIds(marker);
+    for (const id of ids) {
+      hit.add(id);
+      try {
+        process.kill(id, signal);
+      } catch {}
+    }
+    return ids.length > 0;
+  };
+  if (send("SIGTERM")) {
+    const until = Date.now() + MARK_WAIT_MS;
+    while (markedIds(marker).length && Date.now() < until) await Bun.sleep(20);
+    for (let pass = 0; pass < MARK_PASSES && send("SIGKILL"); pass++) await Bun.sleep(20);
+  }
+  return [...hit];
+}
+
+// The processes that contain() registered for killTree. job: the Job Object handle on Windows, null after CloseHandle.
+const contained = new Map<number, { marker: string; job: Handle | null }>();
+
+// Call right after the spawn. The child env must hold RUN_MARKER=marker. On Windows the child goes into a Job Object. A process that the
+// child starts before this call stays outside the job.
+export function contain(pid: number, marker: string) {
+  contained.set(pid, { marker, job: process.platform === "win32" ? newJob(pid) : null });
+}
+
+// What a kill reached, for gate B25 (SU5). job: the processes that the Job Object held when the app ended it, null without a job.
+// marked: the processes that the marker scan signalled.
+export type KillReport = { job: number[] | null; marked: number[] };
+
+// Ends a process and the processes that it started. Gate 0 g: taskkill /T ends claude.exe and its MCP children. SU5: taskkill /T
+// follows parent links, and a command under Git Bash has no live parent after fork and exec. The Linux CLI starts each Bash command in
+// its own process group. So a contained process also gets its Job Object ended (Windows) or its marker scan (where /proc exists).
+// end: the process has ended or the run is over. Its pid can be reused, so only the job and the marker reach the leftovers. The
+// registration ends.
+export async function killTree(pid: number, end = false): Promise<KillReport> {
+  const c = contained.get(pid);
+  if (!end) {
+    if (process.platform === "win32")
+      await Bun.spawn(["taskkill", "/T", "/F", "/PID", String(pid)], { stdout: "ignore", stderr: "ignore", timeout: EXEC_TIMEOUT_MS })
+        .exited;
+    else
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {}
+  }
+  const report: KillReport = { job: null, marked: [] };
+  const k = k32();
+  // Read c.job after the taskkill: an end call can close the handle meanwhile, and Windows reuses handle values.
+  const job = c?.job;
+  if (end && c) {
+    contained.delete(pid);
+    c.job = null;
+  }
+  if (job && k) {
+    report.job = jobIds(k, job);
+    // TerminateJobObject only starts the ends, and an ending process can still hold its folder. Its handle signals when it is gone.
+    const procs = report.job.flatMap((id) => k.OpenProcess(SYNCHRONIZE, 0, id) ?? []);
+    k.TerminateJobObject(job, 1);
+    if (end) k.CloseHandle(job);
+    const until = Date.now() + JOB_WAIT_MS;
+    while (procs.some((h) => k.WaitForSingleObject(h, 0) !== WAIT_OBJECT_0) && Date.now() < until) await Bun.sleep(20);
+    for (const h of procs) k.CloseHandle(h);
+  }
+  if (c && process.platform !== "win32") report.marked = await killMarked(c.marker);
+  return report;
 }
 
 // Gate B4: --no-session-persistence still writes these per-cwd folders. Their name is the cwd with each non-alphanumeric character replaced by "-".
@@ -422,9 +581,10 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const agents = new Set("main" in spec ? [MAIN_AGENT, ...Object.keys(spec.agents)] : []);
       const shell = "implement" in spec ? spec.shell : undefined;
       const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: !!shell });
+      const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
-        env: shell ? shellEnv(childEnv(), shell.bashTimeoutSec) : childEnv(),
+        env: { ...(shell ? shellEnv(childEnv(), shell.bashTimeoutSec) : childEnv()), [RUN_MARKER]: marker },
         stdin: new Blob([spec.prompt]),
         stdout: "pipe",
         stderr: "pipe",
@@ -433,6 +593,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       });
       proc = p;
       self.pid = p.pid;
+      contain(p.pid, marker);
 
       let stopped = false;
       let error: unknown;
@@ -493,9 +654,13 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         stderrTail: stderr,
       };
     } finally {
-      if (proc && proc.exitCode === null && self.pid !== undefined) {
-        await killTree(self.pid);
-        await Promise.race([proc.exited, Bun.sleep(DRAIN_TIMEOUT_MS)]);
+      if (proc && self.pid !== undefined) {
+        if (proc.exitCode === null) {
+          await killTree(self.pid);
+          await Promise.race([proc.exited, Bun.sleep(DRAIN_TIMEOUT_MS)]);
+        }
+        // A command that Claude started can outlive the CLI, for example `cmd &`.
+        await killTree(self.pid, true);
       }
       if (cwd && projectsDir) removeCwdFolders(cwd, projectsDir);
       active = undefined;

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, posix, resolve } from "node:path";
 import { type CommandKind, OUTPUT_TAIL, type StepDetail, type TaskCommand } from "../../shared/task";
 import { log } from "../log";
-import { childEnv, killTree } from "../review/claude";
+import { childEnv, contain, killTree, RUN_MARKER } from "../review/claude";
 import { repoPath } from "../review/validate";
 import { endStep, insertStep } from "./implement";
 import { repoSettings } from "./tasks";
@@ -105,10 +105,11 @@ export async function runCommand(
   const prog = program(cmd.argv[0] as string, o.cwd, o.env);
   if ("error" in prog) return done(null, prog.error, false, false, prog.reason);
   const out = tailBuffer(o.tailBytes ?? OUTPUT_TAIL);
+  const marker = crypto.randomUUID();
   const spawn = () =>
     Bun.spawn([prog.path, ...cmd.argv.slice(1)], {
       cwd: o.cwd,
-      env: o.env,
+      env: { ...o.env, [RUN_MARKER]: marker },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -121,6 +122,7 @@ export async function runCommand(
   } catch (e) {
     return done(null, `The command ${cmd.argv[0]} did not start: ${(e as Error).message}`, false, false, `Did not start: ${cmd.argv[0]}`);
   }
+  contain(p.pid, marker);
   let timedOut = false;
   let stopped = false;
   const kill = () => void killTree(p.pid);
@@ -137,7 +139,9 @@ export async function runCommand(
   const code = await p.exited;
   clearTimeout(timer);
   o.signal?.removeEventListener("abort", onAbort);
-  // A leftover grandchild holds the pipes. The kill of a timeout or Stop already ended the tree.
+  // A process that the command left, such as a build server, ends with the command.
+  await killTree(p.pid, true);
+  // A leftover that the kill missed can hold the pipes.
   await Promise.race([pipes, Bun.sleep(DRAIN_MS)]);
   const note = timedOut
     ? `\n[The app stopped the command after ${cmd.timeoutSec} s.]\n`

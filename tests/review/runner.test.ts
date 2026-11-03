@@ -10,6 +10,7 @@ import {
   IMPLEMENT_TOOLS,
   type ImplementSpec,
   implementArgs,
+  RUN_MARKER,
   type RunnerOptions,
   type RunSpec,
 } from "../../src/server/review/claude";
@@ -66,7 +67,7 @@ async function waitFor(pred: () => boolean, ms = 5000) {
   return pred();
 }
 
-type Call = { argv: string[]; env: Record<string, string>; cwd: string; stdin: string; pid: number; childPid?: number };
+type Call = { argv: string[]; env: Record<string, string>; cwd: string; stdin: string; pid: number; childPid?: number; orphanPid?: number };
 
 function setup(scenario: Partial<FakeScenario> = {}, opts: RunnerOptions = {}) {
   const base = mkdtempSync(join(tmpdir(), "rl-wp8-"));
@@ -541,6 +542,21 @@ describe("safety", () => {
     const name = encoded(realpathSync.native(work));
     expect(existsSync(join(projects, name)) || existsSync(join(tmpdir(), "claude", name))).toBe(false);
     expect(runner.cancel()).toBe(false);
+  });
+
+  // shell.md run 2: the Job Object (Windows) or the marker scan (/proc) ends it. macOS has neither.
+  test.skipIf(process.platform === "darwin")("the end of a completed run ends a process that the CLI left", async () => {
+    const { runner, spec, calls } = setup({ fixture: flatSuccess(), orphan: true });
+    const o = await runner.run(spec);
+    expect(o.status).toBe("completed");
+    const run = calls().find((c) => c.argv.includes("-p"));
+    expect(run?.env[RUN_MARKER]).toMatch(/^[0-9a-f-]{36}$/);
+    const orphan = calls().find((c) => c.orphanPid)?.orphanPid ?? 0;
+    try {
+      expect(await waitFor(() => !alive(orphan), 2000)).toBe(true);
+    } finally {
+      if (alive(orphan)) process.kill(orphan, "SIGKILL");
+    }
   });
 });
 
