@@ -18,6 +18,7 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { pickProblem } from "../../src/server/tasks/files";
+import { type Docs, stepFile } from "../../src/server/tasks/plan";
 import { advance, setBlocked } from "../../src/server/tasks/tasks";
 import {
   type ApiError,
@@ -602,6 +603,9 @@ describe("answers (spec.md sections 6.2 and 6.11, AC-B2 and AC-B3)", () => {
         starts: [],
         notes: [],
         adding: false,
+        contracts: [],
+        risks: [],
+        checks: [],
       });
       expect(t.strip.current).toBe(1);
       // The base commit stays in the cache for later reads.
@@ -743,6 +747,62 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
         `Map line 2: src/gone.ts is not found at ${at}.`,
         `Map line 3: README.md:99 is not found at ${at}.`,
       ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B91 to AC-B93, AC-B95: the app checks give TaskDto.plan.checks, the moved line, the contracts, and the coverage lines; the approval still works",
+    async () => {
+      const h = await setup();
+      const part = echoSpec().parts[0];
+      const files = ["src/cache/flush.ts", "docs/main.md", "src/new/x.ts"];
+      h.scenario({
+        spec: specWith({
+          map: [
+            { path: "src/cache/flush.ts", line: 7, symbol: "flush", kind: "change", what: "The flush." },
+            { path: "README.md", line: 1, symbol: "nothing", kind: "caller", what: "The title." },
+            { path: "src/gone.ts", line: null, symbol: "", kind: "test", what: "Gone." },
+          ],
+          parts: [{ ...part, tasks: [{ ...part?.tasks[0], files }] }],
+          contracts: [{ name: "flush()", path: "src/cache/gone.ts", change: "change", users: "the writer", compat: "The old call stays." }],
+          risks: [{ text: "A reader sees a partial batch.", check: "tests/flush.test.ts" }],
+        }),
+      });
+      const t = await h.toPlan();
+      const at = h.remote.target.slice(0, 12);
+      const texts = [
+        "Map line 2: `nothing` is not in README.md.",
+        `Map line 3: src/gone.ts is not found at ${at}.`,
+        "T1.1 changes docs/main.md, which the map does not list.",
+        `Contract flush(): src/cache/gone.ts is not found at ${at}.`,
+        `T1.1 creates src/new/x.ts in a folder that does not exist at ${at}.`,
+      ];
+      expect(t.plan?.checks.map((c) => [c.id, c.severity, c.text])).toEqual([
+        ...texts.map((text, i) => [`a${i + 1}`, i < 4 ? "major" : "minor", text]),
+        ["a6", "info", "Map line 1: `flush` is at line 1, not 7. The app changed the line."],
+      ]);
+      expect(t.plan?.missing).toBe(1);
+      expect(t.plan?.contracts).toMatchObject([{ name: "flush()", path: "src/cache/gone.ts", change: "change", part: null }]);
+      expect(t.plan?.risks).toEqual([{ text: "A reader sees a partial batch.", check: "tests/flush.test.ts", part: null }]);
+      expect(t.docs?.plan).toContain("- src/cache/flush.ts:1 `flush`: change — The flush.\n");
+      expect(t.docs?.plan).toContain("- README.md:1 `nothing`: caller — The title. (`nothing` is not in this file)\n");
+      expect(t.docs?.plan).toContain(
+        `## Contracts and risks\n\n- Contract \`flush()\` (change) in src/cache/gone.ts (not found at ${at}): users: the writer. Compat: The old call stays.\n- Risk: A reader sees a partial batch. Caught by: tests/flush.test.ts\n\n## Change\n`,
+      );
+      // step.md of a build step reads the stored plan.
+      const row = h.db.query("SELECT docs_json FROM task WHERE id = $id").get({ id: t.id }) as { docs_json: string };
+      const parsed = (JSON.parse(row.docs_json) as Docs).parsed;
+      expect(parsed.map[0]).toMatchObject({ line: 1, from: 7 });
+      expect(stepFile(parsed, "T1.1", 1)?.text).toContain("- src/cache/flush.ts:1 `flush`: change — The flush.\n");
+      // AC-B93: each major and minor check is one coverage line of the spec run.
+      const spec = h.runs(t.id)[1];
+      expect(spec?.status).toBe("incomplete");
+      expect((JSON.parse(spec?.summary_json ?? "{}") as { coverage: { skipped: string[] } }).coverage.skipped).toEqual(texts);
+      // AC-B93: the app checks never block the approval.
+      const body = { version: t.version, size: "small", commands: ["new-1"], warning: true };
+      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body });
+      expect([ok.status, ok.body.state, ok.body.plan?.checks.length]).toEqual([200, "implementing", 6]);
     },
     SLOW,
   );

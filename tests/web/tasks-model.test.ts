@@ -210,6 +210,9 @@ const PLAN: NonNullable<TaskDto["plan"]> = {
   starts: [],
   notes: [],
   adding: false,
+  contracts: [],
+  risks: [],
+  checks: [],
 };
 const ESTIMATE: NonNullable<TaskDto["estimate"]> = { parts: 1, lines: 80, files: 1, modules: [], db: false, api: false, unknowns: [] };
 

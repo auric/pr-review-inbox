@@ -200,7 +200,14 @@ describe("agents and stdin (spec.md section 6.6)", () => {
       "Do not count lock files.",
       "Start with the integration map. Find the code with the codegraph tools when the run has them, else with Grep.",
       'When one exists, write the decision as "the same way as X in Y".',
-      "The line caps are: Change 10, Decision 10, Alternatives 3, and Risks and rollout 6.",
+      // spec.md section 6.22.8: the symbol, line, task-file, contract, and risk lines, and the Rollout cap.
+      "In symbol, give one name as the code spells it, such as specRun. Leave it empty for a file or a folder.",
+      "Give the line where that name is defined or used, as Read numbers it.",
+      "List each file that a task changes as a map entry, unless the task creates the file.",
+      "In contracts, list each route, table, type, event, config key, or flag that the change adds, changes, or removes.",
+      "For each contract, name its users and say in compat how they keep working, or why they break.",
+      "In risks, list what can break and the test or check that catches it.",
+      "The line caps are: Change 10, Decision 10, Alternatives 3, and Rollout 6. Behavior 15, Edge cases 10, and Out of scope 5.",
       "The Project instructions section holds the standing rules of the repository. Follow them, and do not repeat them in the plan.",
       "When the Project instructions name a build, test, or setup command, use that command. They win over the repository files.",
       "Else take the commands from the repository files, such as package.json, a Makefile, or the CI configuration.",
@@ -213,6 +220,7 @@ describe("agents and stdin (spec.md section 6.6)", () => {
     // The Project instructions rule comes before the repository files rule.
     expect(p.indexOf("When the Project instructions name")).toBeLessThan(p.indexOf("Else take the commands from the repository files"));
     expect(p).not.toContain("Take them from the repository files");
+    expect(p).not.toContain("Risks and rollout");
     expect(specAgent(general, 250, "win32").prompt).toContain("The commands run on Windows.");
     expect(specAgent(general, 250, "linux").prompt).toContain("The commands run on Linux.");
     expect(specAgent(general, 250, "aix").prompt).toContain("The commands run on aix.");
@@ -248,6 +256,7 @@ describe("agents and stdin (spec.md section 6.6)", () => {
   test("the schemas: draft-07 with every key; an interview result without unknowns parses with an empty list", () => {
     for (const s of [interviewJsonSchema(), specJsonSchema()] as { $schema: string }[])
       expect(s.$schema).toBe("http://json-schema.org/draft-07/schema#");
+    expect(Object.keys((specJsonSchema() as { properties: object }).properties)).toEqual(expect.arrayContaining(["contracts", "risks"]));
     expect((interviewJsonSchema() as { required: string[] }).required.sort()).toEqual([
       "coverage",
       "done",

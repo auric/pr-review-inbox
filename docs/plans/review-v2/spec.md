@@ -2330,7 +2330,7 @@ Constants (src/shared/task.ts):
 
 The judge of each spec run runs these checks after the schema parse. They read only the task cache at the base commit. A path inside a submodule or an added repository is checked in that repository at its snapshot commit (section 6.4). They make no Claude call.
 
-**Symbol name.** The app takes the name from the symbol by one rule. It removes backticks and spaces.
+**Symbol name.** The app takes the name from the symbol by one rule. It removes backticks and the spaces at both ends. A space inside the symbol makes it prose.
 
 - A plain name, such as `specRun` or `specRun()`, is the name.
 - A dotted name, such as `createTaskService.specRun`, `Foo::bar`, or `Foo#bar`, gives its last segment.
@@ -2350,8 +2350,9 @@ The judge of each spec run runs these checks after the schema parse. They read o
 
 - Each file of each task is read as a path from the repository root. A path under the spec folder of the task is skipped.
 - The file is on the map when a map entry names its path, or a folder entry without a line contains it.
-- A file that is not on the map and exists at the base gives a problem. One problem per path names at most 3 task IDs.
-- A file that does not exist at the base is a new file. A new file whose parent folder does not exist at the base gives a problem.
+- A file that is not on the map and exists at the base gives a problem.
+- A file that does not exist at the base is a new file. A new file whose parent folder does not exist at the base gives a problem. A path that cannot be in the repository, such as ../x.ts, counts as such a new file.
+- Each task-file problem covers one path. It names at most 3 task IDs, then "and N more tasks". It gets the part of its tasks when they are in one part, else part null.
 
 **Contracts.**
 
@@ -2366,7 +2367,7 @@ The judge of each spec run runs these checks after the schema parse. They read o
 | The file does not hold the symbol | major | "Map line 3: `specRun` is not in src/a.ts." | "Name the file that holds `specRun`, or a symbol of src/a.ts." |
 | The symbol is at one other line | info | "Map line 3: `specRun` is at line 188, not 120. The app changed the line." | (none) |
 | No line, one match | info | "Map line 3: `specRun` is at line 188. The app set the line." | (none) |
-| The symbol is at several other lines | minor | "Map line 3: `specRun` is not near line 120 of src/a.ts. It is at lines 40, 188, and 310." | "Give the line that the change needs." |
+| The symbol is at several other lines | minor | "Map line 3: `specRun` is not near line 120 of src/a.ts. It is at lines 40, 188, and 310." It names at most 10 lines, then "and N more lines". | "Give the line that the change needs." |
 | Task file not on the map | major | "T1.2 and T2.1 change src/b.ts, which the map does not list." | "Add a map entry for src/b.ts." |
 | New file in a new folder | minor | "T1.3 creates src/new/c.ts in a folder that does not exist at 1a2b3c4d5e6f." | "Check the path. A new folder is correct only when the plan needs one." |
 | Contract file not found | major | "Contract POST /api/x: src/routes.ts is not found at 1a2b3c4d5e6f." | "Name the file that defines it, or leave the path empty for a new contract." |
@@ -2385,7 +2386,7 @@ What the app does with a failed check:
 - **Contracts.** The spec result lists each route, table, column, type, function signature, event, config key, or CLI flag that the change adds, changes, or removes. Each contract gives its file at the base, its users, and the compatibility of those users.
 - **Risks.** The spec result lists what can break, and the test or check that catches it.
 - **Placement.** The app renders "## Contracts and risks" right after "## Integration map" in plan.md and design.md. It holds one line per contract, then one line per risk, or "None.".
-  - Contract line: "- Contract `<name>` (<add|change|remove>) in <path>: users: <users>. Compat: <compat>". A new contract omits " in <path>". A missing path adds " (not found at <base>)".
+  - Contract line: "- Contract `<name>` (<add|change|remove>) in <path>: users: <users>. Compat: <compat>". A new contract omits " in <path>". A missing path adds " (not found at <base>)" right after the path.
   - Risk line: "- Risk: <text> Caught by: <check>".
 - **Rollout.** design.md "## Risks and rollout" becomes "## Rollout". It holds only the flag or the expand, migrate, and contract steps. The field design.risks keeps its name.
 - **Size change.** convertDocs moves the "Contracts and risks" text between plan.md and design.md, so the user's edits stay.
@@ -2548,6 +2549,9 @@ export const planProblem = z.object({
 });
 export type PlanProblem = z.infer<typeof planProblem>;
 
+// design.risks keeps its name and gets a describe for the Rollout section:
+risks: z.string().max(1500).describe("The Rollout section: only the flag, or the expand, migrate, and contract steps."),
+
 export const planCheckResult = z.object({
   summary: z.string().max(500).describe("One or two lines: does the plan fit the code?"),
   problems: z
@@ -2589,7 +2593,7 @@ DTOs (src/shared/dto.ts):
 
 Plan (plan.ts):
 
-- `Plan` adds `contracts`, `risks`, and `checks: PlanProblem[]`. A plan stored before reads them as `[]`.
+- `Plan` adds `contracts`, `risks`, and `checks: PlanProblem[]`. A plan stored before reads them as `[]`. Each stored contract adds `missing: boolean`, the result of the contract path check.
 - `MapEntry` adds `from?: number` (Claude's line before the app changed it) and `mark?: "absent" | "far"`.
 
 #### 6.22.8 Prompts

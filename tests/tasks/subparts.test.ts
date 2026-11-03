@@ -18,9 +18,9 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { createLoop } from "../../src/server/tasks/loop";
-import { renderDocs, toPlan } from "../../src/server/tasks/plan";
+import { type Docs, renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { createPrOpener, subtaskPrText } from "../../src/server/tasks/pr";
-import { advancePart, type TaskRow, taskDto, taskRow } from "../../src/server/tasks/tasks";
+import { advancePart, partDocsOf, type TaskRow, taskDto, taskRow } from "../../src/server/tasks/tasks";
 import { openWorktree } from "../../src/server/tasks/worktree";
 import type { TaskDto } from "../../src/shared/dto";
 import { branchName, specResult, stepStrip, type TaskBlocked } from "../../src/shared/task";
@@ -486,6 +486,45 @@ describe("several parts with the scheduler (spec.md section 6.20.6)", () => {
         "Build",
         "Done",
       ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B94: the plan file of a part holds its own contracts and risks and those of the whole task",
+    async () => {
+      const s = await setup({ maxOpen: 3 });
+      const c = (name: string, part: number | null) => ({
+        name,
+        path: "",
+        change: "add" as const,
+        users: "U",
+        compat: "C",
+        part,
+        missing: false,
+      });
+      const docs = JSON.parse(s.t().docs_json as string) as Docs;
+      docs.parsed.contracts = [c("whole", null), c("one", 1), c("two", 2)];
+      docs.parsed.risks = [
+        { text: "Whole risk.", check: "W.", part: null },
+        { text: "Two risk.", check: "T.", part: 2 },
+      ];
+      s.db.query("UPDATE task SET docs_json = $docs WHERE id = $id").run({ id: s.task, docs: JSON.stringify(docs) });
+      const two = partDocsOf(s.db, s.t(), { ord: 2, keys_json: JSON.stringify(["ABC-12"]), title: "Part two" });
+      expect(two?.parsed.contracts?.map((x) => x.name)).toEqual(["whole", "two"]);
+      expect(two?.parsed.risks?.map((x) => x.text)).toEqual(["Whole risk.", "Two risk."]);
+      expect(two?.plan).toContain(
+        "## Contracts and risks\n\n- Contract `whole` (add): users: U. Compat: C\n- Contract `two` (add): users: U. Compat: C\n- Risk: Whole risk. Caught by: W.\n- Risk: Two risk. Caught by: T.\n\n## Change",
+      );
+      const one = partDocsOf(s.db, s.t(), { ord: 1, keys_json: JSON.stringify(["ABC-11"]), title: "Part one" });
+      expect(one?.parsed.contracts?.map((x) => x.name)).toEqual(["whole", "one"]);
+      expect(one?.parsed.risks?.map((x) => x.text)).toEqual(["Whole risk."]);
+      // A plan stored before the section reads it as empty.
+      delete docs.parsed.contracts;
+      delete docs.parsed.risks;
+      s.db.query("UPDATE task SET docs_json = $docs WHERE id = $id").run({ id: s.task, docs: JSON.stringify(docs) });
+      const old = partDocsOf(s.db, s.t(), { ord: 1, keys_json: JSON.stringify(["ABC-11"]), title: "Part one" });
+      expect(old?.plan).toContain("## Contracts and risks\n\nNone.\n");
     },
     SLOW,
   );

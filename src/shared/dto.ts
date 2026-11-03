@@ -38,6 +38,7 @@ import {
   MAX_OPEN_CAP,
   type PartKind,
   type PartState,
+  type PlanProblem,
   PREFIX_MAX,
   PREFIXES_MAX,
   type QuestionSource,
@@ -1670,6 +1671,10 @@ export type TaskPlanDto = {
   // spec.md section 6.20.14: a changed plan with parts for sub-tasks that are new in Jira waits for the approval. starts, notes, and
   // maxOpen then hold that changed plan only.
   adding: boolean;
+  // spec.md section 6.22: the contracts and risks of the plan, and the app checks with the IDs a1 and up.
+  contracts: SpecResult["contracts"];
+  risks: SpecResult["risks"];
+  checks: PlanProblem[];
 };
 
 // One Jira sub-task of a task (spec.md section 6.20.8). statusAt: ms of the last status read. found: the branches and PRs that name the

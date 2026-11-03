@@ -104,6 +104,9 @@ export const BRANCH_SUFFIX_MAX = 99;
 export const REPO_PAGE = 100;
 export const REPO_LIST_MAX = 1000;
 export const PROPOSALS_MAX = 2;
+// spec.md section 6.22.2: a map symbol passes within SYMBOL_NEAR lines of its line. A plan keeps at most APP_CHECKS_MAX app checks.
+export const SYMBOL_NEAR = 5;
+export const APP_CHECKS_MAX = 40;
 
 // spec.md section 6.16.5: the repositories of a task (task_repo.role, task_repo.access) and the reasons that the plan screen shows.
 export const REPO_ROLES = ["main", "submodule", "added"] as const;
@@ -542,6 +545,36 @@ const specPart = z.object({
   startReason: z.string().max(300).default(""),
 });
 
+// spec.md section 6.22.7: the contracts and risks of a spec result.
+const contract = z.object({
+  name: z.string().max(200).describe("The route, table, column, type, function signature, event, config key, or CLI flag."),
+  path: z.string().max(400).default("").describe("The file at the base commit that defines it. Empty for a new contract."),
+  change: z.enum(["add", "change", "remove"]),
+  users: z.string().max(300).describe("The callers, clients, or stored data that depend on it."),
+  compat: z.string().max(300).describe("How the current users keep working, or why the change breaks them."),
+  part: z.number().int().min(1).nullable().default(null).describe("The part that makes the change. null: the whole task."),
+});
+const risk = z.object({
+  text: z.string().max(300).describe("What can break."),
+  check: z.string().max(300).describe("The test, check, or review step that catches it."),
+  part: z.number().int().min(1).nullable().default(null),
+});
+const problemId = z.string().regex(/^[ap][0-9]{1,2}$/);
+
+export const PLAN_SEVERITIES = ["blocker", "major", "minor", "info"] as const;
+export type PlanSeverity = (typeof PLAN_SEVERITIES)[number];
+// An app check (a<n>) or a problem of the plan check run (p<n>).
+export const planProblem = z.object({
+  id: problemId,
+  severity: z.enum(PLAN_SEVERITIES),
+  part: z.number().int().min(1).nullable(),
+  path: z.string().max(400),
+  line: z.number().int().min(1).nullable(),
+  text: z.string().max(500),
+  fix: z.string().max(500),
+});
+export type PlanProblem = z.infer<typeof planProblem>;
+
 export const specResult = z.object({
   title: z.string().max(200),
   size: z.enum(TASK_SIZES),
@@ -570,7 +603,11 @@ export const specResult = z.object({
   // Small: change holds the Change section, and design and spec stay null. Medium and large: change stays empty.
   change: z.string().max(2000).default(""),
   design: z
-    .object({ decision: z.string().max(2000), alternatives: z.string().max(1000).default(""), risks: z.string().max(1500) })
+    .object({
+      decision: z.string().max(2000),
+      alternatives: z.string().max(1000).default(""),
+      risks: z.string().max(1500).describe("The Rollout section: only the flag, or the expand, migrate, and contract steps."),
+    })
     .nullable()
     .default(null),
   spec: z
@@ -598,6 +635,8 @@ export const specResult = z.object({
   // spec.md section 6.20.4: the open PRs at once that Claude proposes in sub-task mode.
   maxOpen: z.number().int().min(1).max(MAX_OPEN_CAP).nullable().default(null),
   maxOpenReason: z.string().max(300).default(""),
+  contracts: z.array(contract).max(12).default([]),
+  risks: z.array(risk).max(8).default([]),
   coverage,
 });
 export type SpecResult = z.infer<typeof specResult>;

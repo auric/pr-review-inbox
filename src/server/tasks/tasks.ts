@@ -121,7 +121,8 @@ import {
 import { type PartEvent, partMachine, type TaskEvent, taskMachine } from "./machine";
 import {
   atLeast,
-  checkMap,
+  checkLines,
+  checkPlan,
   checkProposals,
   convertDocs,
   type Docs,
@@ -681,6 +682,9 @@ function planDto(db: Database, t: TaskRow, docs: Docs): TaskPlanDto {
     commands: commandsOf(docs.parsed, repo.commands),
     warning: repo.warnedAt === null,
     approved: docs.approved,
+    contracts: docs.parsed.contracts ?? [],
+    risks: docs.parsed.risks ?? [],
+    checks: docs.parsed.checks ?? [],
   };
 }
 
@@ -829,12 +833,16 @@ export function partDocsOf(db: Database, t: TaskRow, part: { ord: number; keys_j
   if (!pp) return null;
   const files = new Set(pp.tasks.flatMap((x) => x.files).map((f) => repoPath(f) ?? f));
   const e = docs.parsed.estimate;
+  // spec.md section 6.22.3: the contracts and risks of this part and of the whole task.
+  const own = (x: { part: number | null }) => x.part === null || x.part === pp.n;
   const plan: Plan = {
     ...docs.parsed,
     estimate: { ...e, parts: 1, lines: pp.lines ?? e.lines },
     map: docs.parsed.map.filter((m) => files.has(repoPath(m.path) ?? m.path)),
     parts: [pp],
     partCount: docs.parsed.parts.length,
+    contracts: (docs.parsed.contracts ?? []).filter(own),
+    risks: (docs.parsed.risks ?? []).filter(own),
   };
   const key = keysOf(part)[0] ?? t.key;
   const summary = subtaskRows(db, t.id).find((r) => r.key === key)?.summary ?? part.title;
@@ -1460,12 +1468,10 @@ export function createTaskService(opts: TaskServiceOptions) {
       judge: (o, ws, servers, gaps) =>
         judgeTask(o, specResult, "spec", servers, gaps, async (r) => {
           const base = ws.sourceHead;
-          const missing = await checkMap(r.map, base, ws.cache, gitEnv("/dev/null"), nested);
-          const skipped = r.map.flatMap((e, i) =>
-            missing[i]
-              ? [`Map line ${i + 1}: ${oneLine(e.path)}${e.line === null ? "" : `:${e.line}`} is not found at ${base.slice(0, 12)}.`]
-              : [],
-          );
+          const app = await checkPlan(r, t.spec_dir, base, ws.cache, gitEnv("/dev/null"), nested);
+          // spec.md section 6.22.2: in add mode the lines join sub.notes, which go to skipped too.
+          const lines = checkLines(app);
+          const skipped = add ? [] : lines;
           const rows = repoDtos(db, t);
           const inTask = rows.filter((x) => x.proposal === null || x.proposal === "added");
           proposals = checkProposals(
@@ -1482,9 +1488,10 @@ export function createTaskService(opts: TaskServiceOptions) {
               ? (db.query(Q.parts).all({ id: t.id }) as PartRow[]).filter((x) => x.state !== "abandoned").flatMap(keysOf)
               : [];
             sub = checkSubtaskPlan(r, add ? all.filter((x) => add.includes(x.key)) : all, t.target_branch, outside);
+            if (add) sub.notes.push(...lines);
             skipped.push(...sub.notes);
           }
-          plan = toPlan(r, base, missing, skipped);
+          plan = toPlan(r, base, app, skipped);
           return { result: { ...r, repos: proposals }, skipped };
         }),
       started: (d, run) => insertStep(d, t.id, "spec", run),
