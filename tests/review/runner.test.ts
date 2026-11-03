@@ -584,7 +584,7 @@ describe("shell steps", () => {
       tools: [],
       mcp_servers: [],
       model: "m",
-      permissionMode: "dontAsk",
+      permissionMode: "default",
       session_id: S,
     },
     bash: (id: string, command: string) => ({
@@ -637,7 +637,7 @@ describe("shell steps", () => {
     expect(Object.keys(calls()[2]?.env ?? {}).map((k) => k.toUpperCase())).not.toContain("BASH_DEFAULT_TIMEOUT_MS");
   });
 
-  test("allowlist: Bash in --tools, shell.json, dontAsk; init with Bash passes the check", async () => {
+  test("allowlist: Bash in --tools, shell.json, no --permission-mode; init with Bash passes the check", async () => {
     const { runner, spec, app, calls } = implement({ fixture: flatSuccess() }, {});
     const o = await runner.run(spec);
     expect(o.status).toBe("completed");
@@ -651,8 +651,6 @@ describe("shell steps", () => {
       "Read,Grep,Glob,Edit,Write,mcp__rl-stub",
       "--settings",
       join(app, "shell.json"),
-      "--permission-mode",
-      "dontAsk",
       ...tail,
     ]);
     const file = JSON.parse(readFileSync(join(app, "shell.json"), "utf8"));
@@ -666,12 +664,7 @@ describe("shell steps", () => {
     const { runner, spec, app, calls } = implement({ fixture: flatSuccess() }, { mode: "any", rules: [] });
     expect((await runner.run(spec)).status).toBe("completed");
     const argv = calls()[2]?.argv ?? [];
-    expect(argv.slice(argv.indexOf("--settings"), argv.indexOf("--json-schema"))).toEqual([
-      "--settings",
-      join(app, "shell.json"),
-      "--permission-mode",
-      "dontAsk",
-    ]);
+    expect(argv.slice(argv.indexOf("--settings"), argv.indexOf("--json-schema"))).toEqual(["--settings", join(app, "shell.json")]);
     const file = JSON.parse(readFileSync(join(app, "shell.json"), "utf8"));
     expect(file.permissions.allow).toEqual(["Bash"]);
     expect(file.permissions.deny).toContain("Bash(ssh *)");
@@ -811,6 +804,31 @@ describe("shell steps", () => {
     expect([b3?.target, b3?.note]).toEqual(["git status", "Refused by the deny list"]);
     expect([b4?.target, b4?.note]).toEqual(["curl https://x.example.test", "Refused by the allowlist"]);
     expect(b5?.note).toBe("Refused by the allowlist");
+  });
+
+  test("refusal labels (SU3): the B22 permission_denied events of CLI 2.1.316, and a type rule event", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell: true });
+    const deny = (cmd: string) => `Permission to use Bash with command ${cmd} has been denied.`;
+    const seen: [string, string, Record<string, string>][] = [
+      [
+        "d1",
+        "node rlgb-probe.cjs refused",
+        { decision_reason_type: "other", decision_reason: "This command requires approval", message: "This command requires approval" },
+      ],
+      ["d2", "git status", { decision_reason_type: "subcommandResults", message: deny("git status") }],
+      ["d3", "curl https://example.invalid", { decision_reason_type: "subcommandResults", message: deny("curl https://example.invalid") }],
+      ["d4", "id", { decision_reason_type: "rule", decision_reason: "Refused", message: "Refused" }],
+    ];
+    for (const [id, cmd, fields] of seen) {
+      p.line(JSON.stringify(line.bash(id, cmd)));
+      p.line(JSON.stringify({ type: "system", subtype: "permission_denied", tool_name: "Bash", tool_use_id: id, ...fields }));
+    }
+    expect(p.state.refused).toEqual([
+      { command: "node rlgb-probe.cjs refused", by: "allowlist" },
+      { command: "git status", by: "deny" },
+      { command: "curl https://example.invalid", by: "deny" },
+      { command: "id", by: "deny" },
+    ]);
   });
 
   test("more than 5 refused commands kill the run", async () => {

@@ -223,8 +223,10 @@ export function createStreamParser(opts: {
       // V7. b17-write-confinement.jsonl: this event comes before the error tool_result of the call, so end() keeps the refusal note.
       const d = m as SDKPermissionDeniedMessage;
       if (d.tool_name === "Bash") {
-        // Gate U3 confirms the decision type: "rule" for a matching deny rule; another type for a command that no allow rule matches.
-        const by = d.decision_reason_type === "rule" ? "deny" : "allowlist";
+        // SU3: a deny rule arrives as type "rule", or as "subcommandResults" with this message. No allow rule: type "other".
+        const deny =
+          d.decision_reason_type === "rule" || /^Permission to use \w+ with command [\s\S]* has been denied\.$/.test(d.message ?? "");
+        const by = deny ? "deny" : "allowlist";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });
         end(changed, id, "error", by === "deny" ? "Refused by the deny list" : "Refused by the allowlist");

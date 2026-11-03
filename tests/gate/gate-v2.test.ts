@@ -65,20 +65,22 @@ describe("claude-checks.ts B17 to B20", () => {
 });
 
 describe("claude-checks.ts B21 to B29", () => {
-  const ids = ["B21", "B22", "B23", "B24", "B25", "B26", "B27", "B28", "B29"];
+  const ids = ["B21", "B22", "B23", "B24", "B25", "B26", "B27", "B27b", "B28", "B29"];
 
   test("a dry run plans one shell run per check with the app flags, and skips B28 without an alias", () => {
     const r = run(CLAUDE_CHECKS, ["--dry-run", "--only", ids.join(",")], NO_TOOLS);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     for (const id of ["B21", "B22", "B24", "B25", "B26", "B27", "B29"]) expect(r.out).toContain(`DRY-RUN  ${id}  calls=1`);
+    expect(r.out).toContain('DRY-RUN  B27  calls=1 planned claude calls=1; allow=["Bash"]');
+    expect(r.out).toContain('DRY-RUN  B27b calls=1 planned claude calls=1; allow=["Bash(*)"]');
     expect(r.out).toContain("DRY-RUN  B23  calls=0");
     expect(r.out).toContain("SKIPPED  B28  calls=0 no --ssh-alias");
-    const lines = r.out.split("\n").filter((l) => /^dry-run b2\d-/.test(l));
-    expect(lines).toHaveLength(7);
+    const lines = r.out.split("\n").filter((l) => /^dry-run b2\db?-/.test(l));
+    expect(lines).toHaveLength(8);
     for (const l of lines) {
       expect(l).toContain('"--tools","Read,Grep,Glob,Edit,Write,Bash","--allowedTools","Read,Grep,Glob,Edit,Write"');
-      expect(l).toContain('"--permission-mode","dontAsk"');
+      expect(l).not.toContain("--permission-mode");
       expect(l).toMatch(/"--settings","[^"]*shell\.json"/);
       expect(l).toContain('"--model","haiku"');
     }

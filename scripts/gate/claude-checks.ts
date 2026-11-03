@@ -69,6 +69,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b25: 1,
   b26: 1,
   b27: 1,
+  b27b: 1,
   b28: 1,
   b29: 1,
 };
@@ -105,6 +106,7 @@ const CHECKS = [
   "B25",
   "B26",
   "B27",
+  "B27b",
   "B28",
   "B29",
 ] as const;
@@ -123,11 +125,12 @@ for (let i = 0; i < argv.length; i++) {
     sshAlias = a === "--ssh-alias" ? (argv[++i] ?? "") : a.slice(12);
     continue;
   }
-  const v = a === "--only" ? argv[++i] : a.startsWith("--only=") ? a.slice(7) : /^b\d+$/i.test(a) ? a : undefined;
+  const v = a === "--only" ? argv[++i] : a.startsWith("--only=") ? a.slice(7) : /^b\d+b?$/i.test(a) ? a : undefined;
   if (v === undefined) fail(`unknown argument: ${a}`);
   for (const id of v.split(",").map((s) => s.trim().toUpperCase())) {
-    if (!(CHECKS as readonly string[]).includes(id)) fail(`unknown check: ${id}. Use one of ${CHECKS.join(", ")}.`);
-    only.add(id as CheckId);
+    const c = CHECKS.find((x) => x.toUpperCase() === id);
+    if (!c) fail(`unknown check: ${id}. Use one of ${CHECKS.join(", ")}.`);
+    only.add(c);
   }
 }
 const selected = CHECKS.filter((c) => only.size === 0 || only.has(c));
@@ -1380,9 +1383,23 @@ function runnerFolder(tag: string) {
   mkdirSync(app);
   const perCwd = work.replace(/[^a-zA-Z0-9]/g, "-");
   const drop = () => {
-    for (const d of [join(projectsDir, perCwd), join(tmpdir(), "claude", perCwd), base]) rmSync(d, { recursive: true, force: true });
+    for (const d of [join(projectsDir, perCwd), join(tmpdir(), "claude", perCwd), base]) rmRetry(d);
   };
   return { base, work, app, drop };
+}
+
+// Bun 1.x rmSync ignores maxRetries and retryDelay: a handle that a killed process still holds gives EBUSY at once.
+function rmRetry(d: string) {
+  for (let i = 1; ; i++) {
+    try {
+      return rmSync(d, { recursive: true, force: true });
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      if (!["EBUSY", "EPERM", "ENOTEMPTY"].includes(code)) throw e;
+      if (i >= 10) return console.warn(`could not remove ${basename(d)}: ${code}`);
+      Bun.sleepSync(200);
+    }
+  }
 }
 
 // The app runner command (src/server/review/claude.ts prepare()) for a run with no review agents.
@@ -2216,8 +2233,8 @@ const otherCalls = (r: Run, cmds: string[]) => {
     .map((t) => (t.name === "Bash" ? `Bash[${short(oneLine(String(t.input.command ?? "")), 80)}]` : t.name));
 };
 
-// B21 (SU1): the CLI takes --restricted, --tools with Bash, --settings, and --permission-mode dontAsk together.
-// PASS: init lists Bash, the app parser finds no bad tool, permissionMode is dontAsk, and the allowed probe runs.
+// B21 (SU1): the CLI takes --restricted, --tools with Bash, and --settings together. CLAUDE_CODE_SUBPROCESS_ENV_SCRUB forces the default mode.
+// PASS: init lists Bash, the app parser finds no bad tool, permissionMode is default, no forced-mode warning, and the allowed probe runs.
 async function b21() {
   const cmds = [probe("u1")];
   await shellRun("b21-flags", "allowlist", [PROBE_RULE], cmds, 4, {}, ({ run, work, state }) => {
@@ -2225,27 +2242,43 @@ async function b21() {
     const tools = run.init?.tools ?? [];
     const o = outcomeOf(run, cmds[0] ?? "");
     const mode = run.init?.permissionMode;
-    const pass = tools.includes("Bash") && !state.badTools.length && !state.noBash && mode === "dontAsk" && ran(work, "u1");
+    const forced = /Permission mode forced/i.test(run.stderr);
+    const pass = tools.includes("Bash") && !state.badTools.length && !state.noBash && mode === "default" && !forced && ran(work, "u1");
     push(
       "B21",
       pass ? "PASS" : "FAIL",
-      `${v7Line()}; exit=${run.exit} init.tools=${tools.join(",") || "none"} badTools=${state.badTools.join(",") || "none"} noBash=${state.noBash} permissionMode=${mode ?? "none"}; ${describe(cmds[0] ?? "", o)} marker=${ran(work, "u1")}; stderr=${short(run.stderr, 200) || "empty"}`,
+      `${v7Line()}; exit=${run.exit} init.tools=${tools.join(",") || "none"} badTools=${state.badTools.join(",") || "none"} noBash=${state.noBash} permissionMode=${mode ?? "none"} forced-mode warning=${forced}; ${describe(cmds[0] ?? "", o)} marker=${ran(work, "u1")}; stderr=${short(run.stderr, 200) || "empty"}`,
       { initTools: tools, permissionMode: mode },
     );
   });
 }
 
-// B22 (SU2) and B23 (SU3) read one run. Rules: the exact allowed probe. Command 2 matches no allow rule. Commands 3 and 4 match deny rules.
+// B22 (SU2) and B23 (SU3) read one run. Rules: the exact allowed probe and `echo *`. Command 2 matches no allow rule. Commands 3 and 4
+// match deny rules. Command 5 (V19 fact) is an allowed echo with a redirect outside the cwd.
 const REFUSAL_CMDS = [probe("allowed"), probe("refused"), "git status", NET_DENIED];
+const OUTSIDE2 = "rlgb-outside2.txt";
+const OUTSIDE2_CMD = `echo x > ../${OUTSIDE2}`;
 let refusalRun: Promise<{ run: Run; markers: Record<string, boolean>; state: StreamState; settings: string }> | undefined;
 const refusals = () =>
   (refusalRun ??= new Promise((done, failed) => {
-    shellRun("b22-refusals", "allowlist", [probe("allowed")], REFUSAL_CMDS, 7, {}, ({ run, work, state, settings }) =>
-      done({ run, state, settings, markers: { allowed: ran(work, "allowed"), refused: ran(work, "refused") } }),
+    shellRun(
+      "b22-refusals",
+      "allowlist",
+      [probe("allowed"), "echo *"],
+      [...REFUSAL_CMDS, OUTSIDE2_CMD],
+      7,
+      {},
+      ({ run, work, base, state, settings }) =>
+        done({
+          run,
+          state,
+          settings,
+          markers: { allowed: ran(work, "allowed"), refused: ran(work, "refused"), outside2: existsSync(join(base, OUTSIDE2)) },
+        }),
     ).catch(failed);
   }));
 
-// B22 PASS: the allowed probe ran, the other probe did not, and git status and curl were refused.
+// B22 PASS: the allowed probe ran, the other probe did not, and git status and curl were refused. The outside echo is a fact only.
 async function b22() {
   const { run, markers, settings } = await refusals();
   if (DRY)
@@ -2261,7 +2294,7 @@ async function b22() {
   push(
     "B22",
     pass ? "PASS" : "FAIL",
-    `exit=${run.exit}; ${REFUSAL_CMDS.map((c, i) => describe(c, [allowed, refused, git, net][i] as Outcome)).join("; ")}; markers allowed=${markers.allowed} refused=${markers.refused}; other calls=${otherCalls(run, REFUSAL_CMDS).join(",") || "none"}`,
+    `exit=${run.exit}; ${REFUSAL_CMDS.map((c, i) => describe(c, [allowed, refused, git, net][i] as Outcome)).join("; ")}; markers allowed=${markers.allowed} refused=${markers.refused}; ${describe(OUTSIDE2_CMD, outcomeOf(run, OUTSIDE2_CMD))} outside2 written=${markers.outside2}; other calls=${otherCalls(run, [...REFUSAL_CMDS, OUTSIDE2_CMD]).join(",") || "none"}`,
   );
 }
 
@@ -2289,24 +2322,27 @@ async function b23() {
 }
 
 // B24 (SU4): compound commands with a denied part. PASS: each is refused and no probe part ran.
+// Command 5 is a fact: its extra part (hostname) has no allow rule and no deny rule. The line prints its refusal fields.
 async function b24() {
   const cmds = [`${probe("c1")} && git status`, `${probe("c2")}; ${NET_DENIED}`, "echo $(git log -1)", `${probe("c4")}\ngit status`];
-  await shellRun("b24-compound", "allowlist", [PROBE_RULE, "echo *"], cmds, 7, {}, ({ run, work }) => {
+  const extra = `${probe("c5")} && hostname`;
+  await shellRun("b24-compound", "allowlist", [PROBE_RULE, "echo *"], [...cmds, extra], 7, {}, ({ run, work }) => {
     if (DRY) return dry("B24");
     const got = cmds.map((c) => outcomeOf(run, c));
+    const x = outcomeOf(run, extra);
     const markers = ["c1", "c2", "c4"].filter((w) => ran(work, w));
     const pass = got.every((o) => o.state === "refused") && !markers.length;
     const status = pass ? "PASS" : markers.length || got.some((o) => o.state === "ran") ? "FAIL" : "INFO";
     push(
       "B24",
       status,
-      `exit=${run.exit}; ${cmds.map((c, i) => describe(c, got[i] as Outcome)).join("; ")}; probe parts that ran=${markers.join(",") || "none"}; other calls=${otherCalls(run, cmds).join(",") || "none"}`,
+      `exit=${run.exit}; ${cmds.map((c, i) => describe(c, got[i] as Outcome)).join("; ")}; probe parts that ran=${markers.join(",") || "none"}; fact ${describe(extra, x)} c5 ran=${ran(work, "c5")} permission_denied=${deniedFields(x.denied)}; other calls=${otherCalls(run, [...cmds, extra]).join(",") || "none"}`,
     );
   });
 }
 
-// B25 (SU5): Stop. When Claude runs `sleep 600`, the gate waits 3 s, then calls the app's killTree on the CLI.
-// PASS: the CLI and every new sleep process are gone within 5 s. The gate kills a sleep that is left, by PID.
+// B25 (SU5): Stop. When Claude runs `sleep 600`, the gate polls up to 20 s for the new sleep process, then calls the app's killTree on the CLI.
+// PASS: the CLI and the sleep are gone within 5 s, and no bash or sleep process of the run is left. The gate kills a leftover by PID.
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -2315,22 +2351,29 @@ const alive = (pid: number) => {
     return false;
   }
 };
-function sleepPids() {
-  const r =
-    process.platform === "win32"
-      ? sh([
-          "powershell",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "Get-CimInstance Win32_Process | Where-Object Name -eq 'sleep.exe' | ForEach-Object { $_.ProcessId }",
-        ])
-      : sh(["ps", "-eo", "pid=,comm="]);
-  return r.out
-    .split(/\r?\n/)
-    .map((l) => l.trim().match(/^(\d+)(?:\s+(\S+))?$/))
-    .filter((m): m is RegExpMatchArray => !!m && (process.platform === "win32" || m[2]?.split("/").pop() === "sleep"))
-    .map((m) => Number(m[1]));
+type Proc = { pid: number; name: string };
+// The bash and sleep processes that started at or after since (epoch ms) and whose command line holds `sleep 600`.
+function stopProcs(since: number): Proc[] {
+  const win = process.platform === "win32";
+  const r = win
+    ? sh([
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='bash.exe' OR Name='sleep.exe'\" | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.ProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds(), $_.Name, $_.CommandLine }",
+      ])
+    : sh(["ps", "-eo", "pid=,etimes=,comm=,args="]);
+  const now = Date.now();
+  return r.out.split(/\r?\n/).flatMap((l) => {
+    const m = win ? l.match(/^(\d+)\|(\d+)\|([^|]+)\|(.*)$/) : l.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+    if (!m) return [];
+    const name = (m[3] ?? "").toLowerCase().replace(/\.exe$/, "");
+    // ps etimes counts whole seconds.
+    const started = win ? Number(m[2]) : now - Number(m[2]) * 1000 - 1000;
+    const ok = (name === "bash" || name === "sleep") && started >= since && /\bsleep(?:\.exe)?"?\s+600\b/i.test(m[4] ?? "");
+    return ok ? [{ pid: Number(m[1]), name }] : [];
+  });
 }
 const killPid = (pid: number) => {
   if (process.platform === "win32") return sh(["taskkill", "/F", "/PID", String(pid)]);
@@ -2338,17 +2381,24 @@ const killPid = (pid: number) => {
     process.kill(pid, "SIGKILL");
   } catch {}
 };
-const STOP_WAIT_MS = 3000;
+const SLEEP_FIND_MS = 20_000;
 const STOP_LIMIT_MS = 5000;
 async function b25() {
   const cmd = "sleep 600";
-  const before = new Set(DRY ? [] : sleepPids());
-  let stop: Promise<{ sleeps: number[]; cliMs: number | null; sleepMs: number | null; left: number[] }> | undefined;
+  const since = Date.now();
+  let stop: Promise<{ sleeps: number[]; findMs: number; cliMs: number | null; sleepMs: number | null; left: Proc[] }> | undefined;
   const watch = (e: Ev, pid: number) => {
     if (stop || !blocks(e).some((b) => b.type === "tool_use" && b.name === "Bash" && String(b.input?.command ?? "").trim() === cmd)) return;
     stop = (async () => {
-      await Bun.sleep(STOP_WAIT_MS);
-      const sleeps = sleepPids().filter((p) => !before.has(p));
+      const f0 = performance.now();
+      let sleeps: number[] = [];
+      while (!sleeps.length && performance.now() - f0 < SLEEP_FIND_MS) {
+        sleeps = stopProcs(since)
+          .filter((p) => p.name === "sleep")
+          .map((p) => p.pid);
+        if (!sleeps.length) await Bun.sleep(500);
+      }
+      const findMs = Math.round(performance.now() - f0);
       const t0 = performance.now();
       await appKillTree(pid);
       let cliMs: number | null = null;
@@ -2359,10 +2409,10 @@ async function b25() {
         if (sleepMs === null && sleeps.every((p) => !alive(p))) sleepMs = ms;
         if (cliMs === null || sleepMs === null) await Bun.sleep(100);
       }
-      const left = sleeps.filter(alive);
-      for (const p of left) killPid(p);
+      const left = stopProcs(since).filter((p) => alive(p.pid));
+      for (const p of left) killPid(p.pid);
       if (alive(pid)) killTree(pid);
-      return { sleeps, cliMs, sleepMs, left };
+      return { sleeps, findMs, cliMs, sleepMs, left };
     })();
   };
   await shellRun("b25-stop", "allowlist", ["sleep *"], [cmd], 3, { watch }, async ({ run }) => {
@@ -2370,19 +2420,20 @@ async function b25() {
     if (!stop)
       return push("B25", "FAIL", `Claude did not run ${cmd}; exit=${run.exit}; other calls=${otherCalls(run, [cmd]).join(",") || "none"}`);
     const s = await stop;
-    const pass = s.sleeps.length > 0 && s.cliMs !== null && s.sleepMs !== null;
+    const pass = s.sleeps.length > 0 && s.cliMs !== null && s.sleepMs !== null && !s.left.length;
     push(
       "B25",
       pass ? "PASS" : "FAIL",
-      `${process.platform}; new sleep processes 3 s after the call=${s.sleeps.length}; after the app killTree: CLI gone in ${s.cliMs ?? `>${STOP_LIMIT_MS}`} ms, sleep gone in ${s.sleepMs ?? `>${STOP_LIMIT_MS}`} ms; left and killed by PID=${s.left.length}; exit=${run.exit}`,
+      `${process.platform}; new sleep processes=${s.sleeps.length} (found in ${s.findMs} ms, limit ${SLEEP_FIND_MS} ms); after the app killTree: CLI gone in ${s.cliMs ?? `>${STOP_LIMIT_MS}`} ms, sleep gone in ${s.sleepMs ?? `>${STOP_LIMIT_MS}`} ms; leftovers killed by PID=${s.left.map((p) => p.name).join(",") || "none"}; exit=${run.exit}`,
     );
   });
 }
 
-// B26 (SU8): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB keeps HOME, PATH, SSH_AUTH_SOCK, and GIT_CONFIG_*; GATE_*, askpass, and API keys stay out.
-// The gate sets GATE_RLGB_PROBE and GIT_ASKPASS for this run, and a placeholder SSH_AUTH_SOCK when none is set.
-const KEEP = ["HOME", "PATH", "SSH_AUTH_SOCK", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_TERMINAL_PROMPT"];
-const DROP = ["GATE_RLGB_PROBE", "GIT_ASKPASS", "SSH_ASKPASS", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+// B26 (SU8): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB keeps PATH and GIT_CONFIG_*; SSH_AUTH_SOCK, GATE_*, askpass, and API keys stay out.
+// The gate sets GATE_RLGB_PROBE and GIT_ASKPASS for this run, and a placeholder SSH_AUTH_SOCK when none is set. A kept name must be set
+// only when the gate gave it: Git Bash sets HOME from USERPROFILE and changes PATH, so the values are not compared.
+const KEEP = ["HOME", "PATH", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_TERMINAL_PROMPT"];
+const DROP = ["GATE_RLGB_PROBE", "GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 const ENV_INFO = ["GIT_CONFIG_VALUE_0", "USERPROFILE", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"];
 async function b26() {
   const keys = [...KEEP, ...DROP, ...ENV_INFO];
@@ -2426,22 +2477,25 @@ async function b26() {
   }
 }
 
-// B27 (SU9): Any command. PASS: the probe runs, git status and curl are refused, and the redirect outside the cwd writes no file.
-async function b27() {
-  const outside = "rlgb-outside.txt";
-  const cmds = [probe("any"), "git status", `echo RLGB-U9 > ../${outside}`, NET_DENIED];
-  await shellRun("b27-any", "any", [], cmds, 7, {}, ({ run, work, base }) => {
-    if (DRY) return dry("B27");
-    const got = cmds.map((c) => outcomeOf(run, c));
-    const wrote = existsSync(join(base, outside));
-    const pass = got[0]?.state === "ran" && ran(work, "any") && got[1]?.state === "refused" && got[3]?.state === "refused" && !wrote;
+// B27 (SU9): Any command (allow "Bash"). PASS: the probe runs, and the deny rules refuse git status and curl. The redirect outside the cwd
+// is a fact: "outside write" shows whether the CLI ran it. B27b runs the same commands with allow "Bash(*)", a content rule.
+const OUTSIDE = "rlgb-outside.txt";
+const ANY_CMDS = [probe("any"), "git status", `echo RLGB-U9 > ../${OUTSIDE}`, NET_DENIED];
+const anyCheck = (id: "B27" | "B27b", name: string, mode: ShellMode, rules: string[]) =>
+  shellRun(name, mode, rules, ANY_CMDS, 7, {}, ({ run, work, base, settings }) => {
+    if (DRY) return dry(id, `allow=${JSON.stringify((JSON.parse(settings) as { permissions: { allow: string[] } }).permissions.allow)}`);
+    const got = ANY_CMDS.map((c) => outcomeOf(run, c));
+    const wrote = existsSync(join(base, OUTSIDE));
+    const pass = got[0]?.state === "ran" && ran(work, "any") && got[1]?.state === "refused" && got[3]?.state === "refused";
     push(
-      "B27",
+      id,
       pass ? "PASS" : "FAIL",
-      `exit=${run.exit}; ${cmds.map((c, i) => describe(c, got[i] as Outcome)).join("; ")}; outside file written=${wrote}; redirect result=${JSON.stringify(short(got[2]?.text ?? "", 200))}; other calls=${otherCalls(run, cmds).join(",") || "none"}`,
+      `exit=${run.exit}; ${ANY_CMDS.map((c, i) => describe(c, got[i] as Outcome)).join("; ")}; outside write=${wrote}; redirect result=${JSON.stringify(short(got[2]?.text ?? "", 200))}; other calls=${otherCalls(run, ANY_CMDS).join(",") || "none"}`,
     );
   });
-}
+const b27 = () => anyCheck("B27", "b27-any", "any", []);
+// shellSettings maps the allowlist pattern "*" to the allow rule "Bash(*)". The deny list is the same as in B27.
+const b27b = () => anyCheck("B27b", "b27b-content", "allowlist", ["*"]);
 
 // B28 (SU6, SU7): optional, with --ssh-alias. Git Bash ssh with the real HOME, an unknown host key, and rsync on the Bash PATH.
 // PASS: the alias answers, and the unknown-key call ends in less than 30 s. rsync is INFO.
@@ -2527,6 +2581,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B25: b25,
   B26: b26,
   B27: b27,
+  B27b: b27b,
   B28: b28,
   B29: b29,
 };
@@ -2559,7 +2614,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
     `\nclaude ${cliVersion}; V7 (${V7_MIN} or later)=${atLeast(versionOf(cliVersion), V7_MIN)}; claude -p calls: ${claudeCalls - ownTotal()}/${MAX_CALLS}, ${Object.entries(
       OWN_MAX_CALLS,
     )
-      .map(([g, n]) => `${g.toUpperCase()} ${ownCalls[g] ?? 0}/${n}`)
+      .map(([g, n]) => `${g.replace(/^b/, "B")} ${ownCalls[g] ?? 0}/${n}`)
       .join(", ")}; reported cost (sum of result events): $${costSum.toFixed(4)}`,
   );
   if (results.some((r) => r.status === "FAIL")) process.exitCode = 1;

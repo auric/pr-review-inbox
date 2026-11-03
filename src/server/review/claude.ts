@@ -319,8 +319,9 @@ export function resumeArgs(spec: ResumeSpec) {
 // The CLI arguments of an implement run: the flags of Gate B17 (scripts/gate/claude-checks.ts b17) and the runner output flags. No
 // --permission-mode: -p denies a call without an allow rule, and --allowedTools pre-approves the five tools and the chosen MCP tools.
 // The MCP flags are those of a review run (prepare). The init check accepts only these tools, the denied MCP tools, and StructuredOutput.
-// A shell step (spec.md section 6.21) adds Bash to --tools, the Bash rules in shell.json, and dontAsk, which refuses each command that
-// no allow rule matches (V8). Gate U1 confirms that the CLI takes these flags together and that init lists Bash.
+// A shell step (spec.md section 6.21) adds Bash to --tools and the Bash rules in shell.json. No dontAsk: shellEnv sets
+// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, which forces the default mode. In -p, the default mode refuses each command that has no allow
+// rule (SU1).
 export function implementArgs(spec: ImplementSpec) {
   const builtins = [...IMPLEMENT_TOOLS, ...(spec.shell ? ["Bash"] : [])];
   if (spec.model != null && !modelName.safeParse(spec.model).success) throw new Error(`Invalid model name: ${spec.model}`);
@@ -342,7 +343,7 @@ export function implementArgs(spec: ImplementSpec) {
     [...IMPLEMENT_TOOLS, ...(mcp?.allow ?? [])].join(","),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
     ...(mcp?.denied.length ? ["--disallowedTools", mcp.denied.join(",")] : []),
-    ...(settings ? ["--settings", settings, "--permission-mode", "dontAsk"] : []),
+    ...(settings ? ["--settings", settings] : []),
     "--json-schema",
     JSON.stringify(spec.schema),
     "--max-turns",
@@ -449,7 +450,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
           return;
         }
         if (changed.length) onEvents(changed);
-        // Gate U5 confirms that the tree kill also ends a running Bash command and its children.
+        // SU5 checks that the tree kill also ends a running Bash command and its children.
         if (parser.state.refused.length > REFUSED_MAX) {
           stopped = true;
           void killTree(p.pid);

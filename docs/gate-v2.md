@@ -69,12 +69,12 @@ These checks give the facts SU1 to SU10 of the integration-check.md section "Cla
 1. Run `claude auth status`. The script stops when `authMethod` is not `claude.ai`.
 2. On Windows, install Git for Windows. Claude Code needs Git Bash for the Bash tool.
 3. Make sure that `node` or `bun` is on PATH. The probe script runs with `node` when it is on PATH, else with `bun`.
-4. Run the dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B21,B22,B23,B24,B25,B26,B27,B28,B29`. It writes `shell.json` and prints the planned argv. It starts no model call.
+4. Run the dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B21,B22,B23,B24,B25,B26,B27,B27b,B28,B29`. It writes `shell.json` and prints the planned argv. It starts no model call.
 5. Optional, for B28: pick a Host alias of your ssh config for a build host, for example `<build-host alias>`. The host must accept your key without a password. B28 runs only `echo` on it.
 
 ### Run
 
-- All required checks: `bun scripts/gate/claude-checks.ts --only B21,B22,B23,B24,B25,B26,B27,B29`.
+- All required checks: `bun scripts/gate/claude-checks.ts --only B21,B22,B23,B24,B25,B26,B27,B27b,B29`.
 - With B28: add `B28 --ssh-alias <build-host alias>`, or set `GATE_SSH_ALIAS` in your own terminal. Without an alias, B28 is SKIPPED.
 - Run B25 on Windows and on Linux when you can. The result can differ per OS.
 - Then sanitize: `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0`. The console and the results file show the alias as `<alias>`.
@@ -82,24 +82,25 @@ These checks give the facts SU1 to SU10 of the integration-check.md section "Cla
 ### Cost caps
 
 - Every call uses `--model haiku`, the app's implement schema, and at most 7 turns.
-- Own call caps: one call each for B21, B22, B24, B25, B26, B27, B28, and B29. B23 reads the B22 run. They do not count against the cap of 14 calls of B1 to B8.
+- Own call caps: one call each for B21, B22, B24, B25, B26, B27, B27b, B28, and B29. B23 reads the B22 run. They do not count against the cap of 14 calls of B1 to B8.
 - The other caps of part B apply: 0.60 USD in total, and 180 s per call.
 
 ### What PASS means
 
 | Check | Fact | What it runs | PASS |
 |---|---|---|---|
-| B21 | SU1, V7 | One allowed probe command with the full shell flag set. | init lists Bash, the app parser finds no unknown tool, `permissionMode` is dontAsk, and the probe runs. The line also shows the CLI version and whether it is 2.1.302 or later (V7). |
-| B22 | SU2 | Rules: one exact probe command. Commands: that probe, another probe, `git status`, `curl https://example.invalid`. | The first probe runs. The other three are refused, and the second probe writes no marker file. |
-| B23 | SU3 | Reads the B22 run. | INFO for you: copy the `permission_denied` fields, the tool_result text, and `permission_denials` into SU3. PASS: the app parser labels the second probe "allowlist" and the two denied commands "deny". |
-| B24 | SU4 | Four compound commands, each with a denied part: `&&`, `;`, `$( )`, and a line break. | All four are refused, and no allowed part ran. INFO: the model did not try one of them. Run B24 again. |
-| B25 | SU5 | `sleep 600`. 3 s after the call starts, the gate calls the app `killTree` on the CLI. | The CLI and the new sleep process are gone within 5 s. The gate kills a sleep that is left, by PID. |
-| B26 | SU8 | A probe prints set or unset and a hash for each env name. It never prints a value. The gate adds `GATE_RLGB_PROBE`, `GIT_ASKPASS`, and a placeholder `SSH_AUTH_SOCK` for this run. | HOME, PATH, SSH_AUTH_SOCK, GIT_CONFIG_COUNT, GIT_CONFIG_KEY_0, and GIT_TERMINAL_PROMPT are set. GATE_*, the askpass names, and the ANTHROPIC_* keys are unset. |
-| B27 | SU9 | Any command. Commands: a probe, `git status`, `echo RLGB-U9 > ../rlgb-outside.txt`, `curl https://example.invalid`. | The probe runs, `git status` and `curl` are refused, and no file is written outside the run folder. |
+| B21 | SU1, V7 | One allowed probe command with the full shell flag set. The app passes no `--permission-mode`. | init lists Bash, the app parser finds no unknown tool, `permissionMode` is default, stderr has no "Permission mode forced" warning, and the probe runs. The line also shows the CLI version and whether it is 2.1.302 or later (V7). |
+| B22 | SU2, V19 | Rules: one exact probe command and `echo *`. Commands: that probe, another probe, `git status`, `curl https://example.invalid`, `echo x > ../rlgb-outside2.txt`. | The first probe runs. The next three are refused, and the second probe writes no marker file. INFO for V19: the line prints whether the echo wrote the file outside the run folder. |
+| B23 | SU3 | Reads the B22 run. | INFO for you: copy the `permission_denied` fields, the tool_result text, and `permission_denials` into SU3. PASS: the app parser labels the second probe "allowlist" and the two denied commands "deny". A deny rule arrives as type `rule`, or as type `subcommandResults` with the message "Permission to use Bash with command <command> has been denied." |
+| B24 | SU4 | Four compound commands, each with a denied part: `&&`, `;`, `$( )`, and a line break. A fifth command, `<probe> && hostname`, has a part with no allow rule and no deny rule. | All four are refused, and no allowed part ran. INFO: the model did not try one of them. Run B24 again. The fifth command is a fact: the line prints its state, whether its probe ran, and its `permission_denied` fields. |
+| B25 | SU5 | `sleep 600`. After the call starts, the gate polls up to 20 s for the new sleep process. Then it calls the app `killTree` on the CLI. | The gate found the sleep. The CLI and the sleep are gone within 5 s. No bash or sleep process with `sleep 600` in its command line, started since the run began, is left. The gate kills each leftover by PID and reports it as a FAIL. |
+| B26 | SU8 | A probe prints set or unset and a hash for each env name. It never prints a value. The gate adds `GATE_RLGB_PROBE`, `GIT_ASKPASS`, and a placeholder `SSH_AUTH_SOCK` for this run. | GIT_CONFIG_COUNT, GIT_CONFIG_KEY_0, and GIT_TERMINAL_PROMPT are set. HOME and PATH are set when the gate gave them; the values can differ, because Git Bash sets HOME from USERPROFILE and changes PATH. SSH_AUTH_SOCK, GATE_*, the askpass names, and the ANTHROPIC_* keys are unset. |
+| B27 | SU9 | Any command (allow `Bash`). Commands: a probe, `git status`, `echo RLGB-U9 > ../rlgb-outside.txt`, `curl https://example.invalid`. | The probe runs, and the deny rules refuse `git status` and `curl`. INFO: the line prints `outside write=<true or false>` for the redirect. |
+| B27b | SU9 | The B27 commands with the allow rule `Bash(*)` and the same deny list. | The same as B27. The `outside write` fact shows whether a content rule keeps the check of a write outside the working folder. |
 | B28 | SU6, SU7 | Optional. `ssh <alias> echo ...`, the same with an empty known hosts file, and `rsync --version`. | The alias answers, and the unknown host key fails in less than 30 s. INFO: your ssh config accepts unknown host keys. rsync is INFO only. |
 | B29 | SU10 | A probe that exits with code 7. | The tool_result text names exit code 7. |
 
-A FAIL of B21, B22, B24, B25, B26, or B27 blocks WP-C2b. Record the evidence line in the "Claude shell" rows of integration-check.md and report it. A FAIL of B23 or B29 changes how the app reads refusals or exit codes (src/server/review/stream.ts).
+A FAIL of B21, B22, B24, B25, B26, B27, or B27b blocks WP-C2b. Record the evidence line in the "Claude shell" rows of integration-check.md and report it. A FAIL of B23 or B29 changes how the app reads refusals or exit codes (src/server/review/stream.ts).
 
 ## Part G: Bitbucket checks G1 to G7
 
