@@ -416,6 +416,42 @@ test("the Build form lists the attachments with boxes and asks the policy questi
   expect(spec?.task).toContain("- sync-worker.log: 512 bytes, text/plain. Not included.");
   // The untick downloaded nothing again.
   expect((await jiraRequests()).filter((r) => r.includes("/secure/attachment/"))).toHaveLength(2);
+
+  // 5. Move up and Move down: the list order is the run order. Settings > Tasks saves it at once, and the focus stays on the moved
+  // row. After a reload, Settings > Tasks and the plan screen show the saved order.
+  const taskPath = new URL(page.url()).pathname;
+  const path = "/api/repos/PROJ1/sample-repo-2/task-settings";
+  const { project: _p, repo: _r, warnedAt: _w, ...rest } = (await api(page, "GET", path)).json as Record<string, unknown>;
+  const version = { id: "cmd1", name: "version", kind: "lint", argv: ["bun", "--version"], timeoutSec: 600 };
+  const tests = { id: "cmd2", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600 };
+  expect((await api(page, "PUT", path, { ...rest, commands: [version, tests] })).status).toBe(200);
+  const names = () =>
+    page.locator("[data-command-row] input[id$='-name']").evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value));
+  const repoCommands = async () => {
+    await openApp(page, "/settings/tasks");
+    await page.locator("[data-task-commands='PROJ1/sample-repo-2'] summary").click();
+  };
+  await repoCommands();
+  await expect.poll(names).toEqual(["version", "test"]);
+  await expect(page.getByRole("button", { name: "Move version up" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Move test down" })).toBeDisabled();
+  await page.getByRole("button", { name: "Move version down" }).click();
+  await expect.poll(names).toEqual(["test", "version"]);
+  await expect(page.getByRole("button", { name: "Move version up" })).toBeFocused();
+  await expect(page.locator("#task-cmd-PROJ1-sample-repo-2-status")).toHaveText("Saved. The next check uses these commands.");
+  const order = async () => ((await api(page, "GET", path)).json as { commands: { id: string }[] }).commands.map((c) => c.id);
+  expect(await order()).toEqual(["cmd2", "cmd1"]);
+  await page.reload();
+  await page.locator("[data-task-commands='PROJ1/sample-repo-2'] summary").click();
+  await expect.poll(names).toEqual(["test", "version"]);
+  // The plan screen offers the saved commands in the saved order. A move there changes only the plan approval.
+  await openApp(page, taskPath);
+  await expect(primary(page)).toHaveText("Approve the plan");
+  await expect.poll(names).toEqual(["test", "version"]);
+  await page.getByRole("button", { name: "Move version up" }).click();
+  await expect.poll(names).toEqual(["version", "test"]);
+  await expect(page.getByRole("button", { name: "Move version down" })).toBeFocused();
+  expect(await order()).toEqual(["cmd2", "cmd1"]);
 });
 
 test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat", async ({ page }) => {

@@ -543,6 +543,69 @@ describe("task run skills (spec.md section 6.19)", () => {
     expect(readFileSync(join(dest, "INDEX.md"), "utf8")).toContain("\nNo skill.\n");
   });
 
+  // Synthetic key text only. The header is joined at run time, so no key header sits in this file.
+  const PEM = `${["-----BEGIN", "OPENSSH PRIVATE KEY-----"].join(" ")}\nnot-a-key-just-junk-AAAA\n-----END OPENSSH PRIVATE KEY-----\n`;
+  const PUTTY = `${"PuTTY-User-Key-File"}-3: ssh-ed25519\nEncryption: none\njunk\n`;
+  const KEY_FILES: Record<string, string> = {
+    id_ed25519: PEM,
+    "deploy.pem": "junk\n",
+    "notes.md": `Notes.\n${PEM}`,
+    "k.ppk": PUTTY,
+    ".env": "TOKEN=junk\n",
+    _netrc: "machine example.invalid login x password junk\n",
+    "README.md": "Read me.\n",
+  };
+  const KEY_LINE = (folder: string, source: string) =>
+    `- vault (${source}): ./skills/${folder}/SKILL.md (1 files left out: hidden, link, binary, or over the caps) (5 key files left out).`;
+
+  test("key and credential files never leave a user skill or a repository skill; INDEX.md counts them", async () => {
+    const c = temp("keys");
+    skill(join(c, "skills", "vault"), "name: vault");
+    for (const [n, t] of Object.entries(KEY_FILES)) write(join(c, "skills", "vault", n), t);
+    skill(
+      join(c, "skills", "leaky"),
+      "name: leaky",
+      `Use this key:
+${PEM}`,
+    );
+    skill(join(c, "skills", "putty"), "name: putty", PUTTY);
+    const files: Record<string, Blob> = { [`${S}/vault/SKILL.md`]: md("name: vault") };
+    for (const [n, t] of Object.entries(KEY_FILES)) files[`${S}/vault/${n}`] = t;
+    files[`${S}/leaky/SKILL.md`] = md("name: leaky", PEM);
+    const repo = await repoCache(files);
+    const dest = join(temp("dest"), "skills");
+    const r = await copyTaskSkills([{ cache: repo.cache, commit: repo.base, slug: "lib" }], ["leaky"], dest, c);
+    expect(readdirSync(dest).sort()).toEqual(["INDEX.md", "lib+vault", "vault"]);
+    for (const folder of ["vault", "lib+vault"]) expect(readdirSync(join(dest, folder)).sort(), folder).toEqual(["README.md", "SKILL.md"]);
+    expect(r.copied.map((s) => [s.id, s.keys, s.skipped])).toEqual([
+      ["lib:vault", 5, 1],
+      ["vault", 5, 1],
+    ]);
+    const KEY_MD = "SKILL.md holds a private key";
+    expect(r.left).toEqual([`lib:leaky (repository lib): ${KEY_MD}`, `leaky (user): ${KEY_MD}`, `putty (user): ${KEY_MD}`]);
+    expect(r.gaps).toEqual([`Skill leaky: ${KEY_MD}`]);
+    const index = readFileSync(join(dest, "INDEX.md"), "utf8");
+    expect(index).toContain(KEY_LINE("lib+vault", "repository lib"));
+    expect(index).toContain(KEY_LINE("vault", "user"));
+    expect(index).not.toContain("junk");
+  }, 60_000);
+
+  test("a review run leaves out the same key files; an always skill whose SKILL.md holds a key is a start error", () => {
+    const c = temp("review-keys");
+    skill(join(c, "skills", "vault"), "name: vault");
+    for (const [n, t] of Object.entries(KEY_FILES)) write(join(c, "skills", "vault", n), t);
+    skill(join(c, "skills", "leaky"), "name: leaky", PEM);
+    const dest = join(temp("dest"), "skills");
+    const r = copySkills(["vault", "leaky"], dest, c);
+    expect(r.copied).toMatchObject([{ id: "vault", files: 2, keys: 5, skipped: 1 }]);
+    expect(r.gaps).toEqual(["Skill leaky: SKILL.md holds a private key"]);
+    expect(readdirSync(dest)).toEqual(["vault"]);
+    expect(readdirSync(join(dest, "vault")).sort()).toEqual(["README.md", "SKILL.md"]);
+    expect(alwaysProblems(["vault", "leaky"], c)).toEqual([
+      "Skill leaky is marked Always use, but SKILL.md holds a private key. Fix the skill folder, or remove the Always use mark in Settings > Review profiles.",
+    ]);
+  });
+
   test("the task lines always point at the index; the review lines stay as before", () => {
     expect(skillLines(["a", "b"], ["a"], "context/skills", true)).toEqual([
       "Before you start, read ./context/skills/a/SKILL.md and follow it for the whole run.",

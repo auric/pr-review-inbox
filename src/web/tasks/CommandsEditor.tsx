@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The editable list of task commands (docs/plans/review-v2/spec.md section 6.3): name, kind, and the command line of each row, Remove,
-// and "Add a command". The plan screen adds a tick per row; Settings > Tasks has none. A command stays an argv list (commands.ts).
-import { CircleAlert, Plus, X } from "lucide-react";
+// The editable list of task commands (docs/plans/review-v2/spec.md section 6.3): name, kind, and the command line of each row, Move up,
+// Move down, Remove, and "Add a command". The list order is the run order. The plan screen adds a tick per row; Settings > Tasks has none. A command stays an argv list (commands.ts).
+import { ArrowDown, ArrowUp, CircleAlert, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MAX_TASK_COMMANDS } from "../../shared/dto";
 import { CHECK_TIMEOUT_SEC, type CommandKind } from "../../shared/task";
 import { Hint } from "../shell/Hint";
-import { type CommandDraft, draftProblem, freeId, joinArgv, KIND_TEXT, KINDS, splitArgv } from "./commands";
+import { type CommandDraft, draftProblem, freeId, joinArgv, KIND_TEXT, KINDS, moveDraft, splitArgv } from "./commands";
 
 const iconBtn =
-  "inline-grid size-[30px] shrink-0 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-ink-2 hover:bg-hover hover:text-foreground";
+  "inline-grid size-[30px] shrink-0 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-ink-2 hover:bg-hover hover:text-foreground disabled:cursor-default disabled:opacity-35 disabled:hover:bg-transparent";
 
 export function CommandsEditor(props: {
   // The prefix of the DOM IDs, unique on the page.
@@ -40,6 +40,15 @@ export function CommandsEditor(props: {
     props.onChange([...drafts, { id, name: "", kind: "test", line: "", timeoutSec: CHECK_TIMEOUT_SEC }], false);
     props.onPick?.(id, true);
     requestAnimationFrame(() => document.getElementById(`${idPrefix}-${id}-name`)?.focus());
+  };
+  const move = (i: number, d: -1 | 1) => {
+    const row = drafts[i];
+    if (!row) return;
+    const j = i + d;
+    props.onChange(moveDraft(drafts, i, d), false);
+    // The button in the same direction is disabled at the end of the list.
+    const end = d < 0 ? j === 0 : j === drafts.length - 1;
+    requestAnimationFrame(() => document.getElementById(`${idPrefix}-${row.id}-${d < 0 !== end ? "up" : "down"}`)?.focus());
   };
   return (
     <div className="grid gap-2">
@@ -87,10 +96,34 @@ export function CommandsEditor(props: {
                     ))}
                   </select>
                   {props.saved?.has(d.id) && <span className="text-xs text-muted-foreground">approved before</span>}
+                  <Hint label="Move up">
+                    <button
+                      type="button"
+                      id={`${id}-up`}
+                      className={`${iconBtn} ml-auto`}
+                      aria-label={`Move ${label} up`}
+                      disabled={i === 0}
+                      onClick={() => move(i, -1)}
+                    >
+                      <ArrowUp aria-hidden className="size-[15px]" />
+                    </button>
+                  </Hint>
+                  <Hint label="Move down">
+                    <button
+                      type="button"
+                      id={`${id}-down`}
+                      className={iconBtn}
+                      aria-label={`Move ${label} down`}
+                      disabled={i === drafts.length - 1}
+                      onClick={() => move(i, 1)}
+                    >
+                      <ArrowDown aria-hidden className="size-[15px]" />
+                    </button>
+                  </Hint>
                   <Hint label="Remove">
                     <button
                       type="button"
-                      className={`${iconBtn} ml-auto`}
+                      className={iconBtn}
                       aria-label={`Remove ${label}`}
                       onClick={() =>
                         props.onChange(

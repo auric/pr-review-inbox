@@ -74,6 +74,16 @@ export function draftsToCommands(drafts: readonly CommandDraft[]): TaskCommand[]
   return out;
 }
 
+// The rows with row i moved by d. The list order is the run order. Out of range: the same list.
+export function moveDraft<T>(drafts: T[], i: number, d: -1 | 1): T[] {
+  const j = i + d;
+  const row = drafts[i];
+  if (row === undefined || j < 0 || j >= drafts.length) return drafts;
+  const out = drafts.filter((_, k) => k !== i);
+  out.splice(j, 0, row);
+  return out;
+}
+
 // The first free ID with the prefix, such as cmd3 or new-u2. The server gives a "new-" command a stored ID at the plan approval.
 export function freeId(drafts: readonly { id: string }[], prefix: string): string {
   let n = 1;

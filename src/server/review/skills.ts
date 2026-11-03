@@ -12,7 +12,16 @@ import { git, gitEnv } from "./git";
 
 export type Skill = SkillDto & { dir: string };
 
-export type CopiedSkill = { id: string; version: string | null; folder: string; files: number; bytes: number; skipped: number };
+// keys: files that SECRET_NAME or SECRET_TEXT leaves out. skipped does not count them.
+export type CopiedSkill = {
+  id: string;
+  version: string | null;
+  folder: string;
+  files: number;
+  bytes: number;
+  skipped: number;
+  keys: number;
+};
 
 export const MAX_SKILL_BYTES = 1_000_000;
 export const MAX_SKILL_FILES = 200;
@@ -26,6 +35,10 @@ const PART = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 // A null byte in the content also marks a binary file.
 const BINARY =
   /\.(png|jpe?g|gif|webp|bmp|ico|icns|tiff?|psd|pdf|zip|gz|tgz|bz2|xz|zst|7z|rar|tar|jar|war|class|exe|dll|so|dylib|o|a|lib|obj|pdb|bin|wasm|pyc|pyo|woff2?|ttf|otf|eot|mp3|mp4|m4a|wav|ogg|flac|webm|mov|avi|sqlite|db)$/i;
+// Key and credential files never leave the skill folder. Hidden names (.env, .netrc) are already skipped as hidden.
+export const SECRET_NAME = /^(id_.*|.*\.(pem|key|ppk|p12|pfx|jks|keystore|kdbx)|\.env.*|_netrc|\.netrc|credentials|credentials\.json)$/i;
+export const SECRET_TEXT = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|^PuTTY-User-Key-File-\d+:/m;
+const hasKey = (data: Uint8Array) => SECRET_TEXT.test(Buffer.from(data).toString("latin1"));
 
 // The CLI reads the same folder: childEnv passes CLAUDE_CONFIG_DIR through.
 export const claudeConfigDir = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
@@ -111,8 +124,9 @@ export function discoverSkills(config = claudeConfigDir()): Skill[] {
 export const skillDto = ({ dir, ...s }: Skill): SkillDto => s;
 
 // Copies text files only, breadth first, SKILL.md first. lstat shows a link or junction as neither file nor folder, so no copy leaves the skill folder.
-function copyOne(s: Skill, to: string): CopiedSkill {
-  const out: CopiedSkill = { id: s.id, version: s.version ?? null, folder: skillFolder(s.id), files: 0, bytes: 0, skipped: 0 };
+// null: SKILL.md holds a private key. SKILL.md comes first, so the copy has written nothing then.
+function copyOne(s: Skill, to: string): CopiedSkill | null {
+  const out: CopiedSkill = { id: s.id, version: s.version ?? null, folder: skillFolder(s.id), files: 0, bytes: 0, skipped: 0, keys: 0 };
   const queue = [""];
   while (queue.length) {
     const rel = queue.shift() as string;
@@ -135,11 +149,17 @@ function copyOne(s: Skill, to: string): CopiedSkill {
       }
       if (n.startsWith(".")) out.skipped++;
       else if (st.isDirectory()) queue.push(r);
+      else if (SECRET_NAME.test(n)) out.keys++;
       else if (!st.isFile() || BINARY.test(n) || out.files >= MAX_SKILL_FILES || out.bytes + st.size > MAX_SKILL_BYTES) out.skipped++;
       else {
         const data = readFileSync(from);
         if (data.includes(0) || out.bytes + data.length > MAX_SKILL_BYTES) {
           out.skipped++;
+          continue;
+        }
+        if (hasKey(data)) {
+          if (r === "SKILL.md") return null;
+          out.keys++;
           continue;
         }
         mkdirSync(join(to, rel), { recursive: true });
@@ -171,15 +191,18 @@ function indexText(skills: Skill[], root: string): string {
 const reserved = (id: string) => skillFolder(id).toLowerCase() === SKILL_INDEX.toLowerCase();
 const RESERVED = `the folder name ${SKILL_INDEX} is reserved`;
 const BAD_MD = `SKILL.md is over ${MAX_SKILL_BYTES} bytes or not a text file`;
+const KEY_MD = "SKILL.md holds a private key";
 
-// copyOne copies SKILL.md first, so it copies SKILL.md exactly when this check passes.
-function mdCopies(s: Skill): boolean {
+// copyOne copies SKILL.md first, so it copies SKILL.md exactly when this check gives null.
+function mdProblem(s: Skill): string | null {
   const file = join(s.dir, "SKILL.md");
   try {
     const st = lstatSync(file);
-    return st.isFile() && st.size <= MAX_SKILL_BYTES && !readFileSync(file).includes(0);
+    if (!st.isFile() || st.size > MAX_SKILL_BYTES) return BAD_MD;
+    const data = readFileSync(file);
+    return data.includes(0) ? BAD_MD : hasKey(data) ? KEY_MD : null;
   } catch {
-    return false;
+    return BAD_MD;
   }
 }
 
@@ -191,7 +214,8 @@ export function alwaysProblems(ids: string[], config = claudeConfigDir()): strin
     const s = found.get(id);
     if (!s) return [alwaysSkillError(id)];
     if (reserved(id)) return [alwaysSkillError(id, RESERVED)];
-    return mdCopies(s) ? [] : [alwaysSkillError(id, BAD_MD)];
+    const problem = mdProblem(s);
+    return problem ? [alwaysSkillError(id, problem)] : [];
   });
 }
 
@@ -221,7 +245,8 @@ export function copySkills(
     const to = join(dest, skillFolder(id));
     try {
       const c = copyOne(s, to);
-      if (lstatSync(join(to, "SKILL.md"), { throwIfNoEntry: false })?.isFile()) {
+      if (!c) gaps.push(`Skill ${id}: ${KEY_MD}`);
+      else if (lstatSync(join(to, "SKILL.md"), { throwIfNoEntry: false })?.isFile()) {
         copied.push(c);
         listed.push(s);
       } else {
@@ -243,7 +268,7 @@ export function copySkills(
 export type SkillRepo = { cache: string; commit: string; slug: string | null };
 
 type TreeFile = { path: string; mode: string; type: string; object: string; size: number };
-type Listed = { folder: string; name: string; description: string; source: string; skipped: number };
+type Listed = { folder: string; name: string; description: string; source: string; skipped: number; keys: number };
 
 export const REPO_SKILLS = ".claude/skills";
 // A git path can hold characters that Windows reads as a stream, a device, or a folder separator.
@@ -272,8 +297,8 @@ async function repoTree(r: SkillRepo, env: Record<string, string>): Promise<Map<
 }
 
 // copyOne for a skill folder in a commit: the same file rules and caps, breadth first, SKILL.md first in each folder.
-async function copyTree(r: SkillRepo, env: Record<string, string>, id: string, files: TreeFile[], to: string): Promise<CopiedSkill> {
-  const out: CopiedSkill = { id, version: null, folder: skillFolder(id), files: 0, bytes: 0, skipped: 0 };
+async function copyTree(r: SkillRepo, env: Record<string, string>, id: string, files: TreeFile[], to: string): Promise<CopiedSkill | null> {
+  const out: CopiedSkill = { id, version: null, folder: skillFolder(id), files: 0, bytes: 0, skipped: 0, keys: 0 };
   const depth = (p: string) => p.split("/").length;
   const order = (a: TreeFile, b: TreeFile) => {
     const da = posix.dirname(a.path);
@@ -286,6 +311,7 @@ async function copyTree(r: SkillRepo, env: Record<string, string>, id: string, f
   for (const f of [...files].sort(order)) {
     const parts = f.path.split("/");
     if (parts.some((x) => x.startsWith(".") || UNSAFE_NAME.test(x))) out.skipped++;
+    else if (SECRET_NAME.test(parts.at(-1) as string)) out.keys++;
     else if (f.type !== "blob" || f.mode === "120000" || BINARY.test(f.path)) out.skipped++;
     else if (out.files >= MAX_SKILL_FILES || !(f.size >= 0) || out.bytes + f.size > MAX_SKILL_BYTES) out.skipped++;
     else {
@@ -293,6 +319,11 @@ async function copyTree(r: SkillRepo, env: Record<string, string>, id: string, f
       const data = await blobBytes(r.cache, env, f.object);
       if (data.includes(0) || out.bytes + data.length > MAX_SKILL_BYTES) {
         out.skipped++;
+        continue;
+      }
+      if (hasKey(data)) {
+        if (f.path === "SKILL.md") return null;
+        out.keys++;
         continue;
       }
       mkdirSync(join(to, ...parts.slice(0, -1)), { recursive: true });
@@ -315,7 +346,8 @@ function taskIndexText(listed: Listed[], left: string[], root: string): string {
     ...listed.map((s) => {
       const d = one(s.description).slice(0, MAX_INDEX_DESCRIPTION);
       const skipped = s.skipped ? ` (${s.skipped} files left out: hidden, link, binary, or over the caps)` : "";
-      return `- ${one(s.name)} (${s.source}): ./${root}/${s.folder}/SKILL.md${skipped}.${d ? ` ${d}` : ""}`;
+      const keys = s.keys ? ` (${s.keys} key files left out)` : "";
+      return `- ${one(s.name)} (${s.source}): ./${root}/${s.folder}/SKILL.md${skipped}${keys}.${d ? ` ${d}` : ""}`;
     }),
     ...(listed.length ? [] : ["No skill."]),
     ...(left.length ? ["", "## Left out", "", ...left.map((l) => `- ${l}.`)] : []),
@@ -348,7 +380,7 @@ export async function copyTaskSkills(
   const keep = (c: CopiedSkill, source: string, name: string, description: string) => {
     copied.push(c);
     taken.set(key(c.id), source);
-    listed.push({ folder: c.folder, name, description, source, skipped: c.skipped });
+    listed.push({ folder: c.folder, name, description, source, skipped: c.skipped, keys: c.keys });
   };
   const hasMd = (to: string) => !!lstatSync(join(to, "SKILL.md"), { throwIfNoEntry: false })?.isFile();
   mkdirSync(dest, { recursive: true });
@@ -376,8 +408,9 @@ export async function copyTaskSkills(
         const to = join(dest, skillFolder(id));
         try {
           const c = await copyTree(r, env, id, files, to);
-          const meta = frontMatter(join(to, "SKILL.md"));
-          if (meta) keep(c, source, meta.name || n, meta.description);
+          const meta = c && frontMatter(join(to, "SKILL.md"));
+          if (!c) leave(id, source, KEY_MD, false);
+          else if (meta) keep(c, source, meta.name || n, meta.description);
           else {
             rmSync(to, { recursive: true, force: true });
             leave(id, source, BAD_MD, false);
@@ -401,7 +434,8 @@ export async function copyTaskSkills(
       const to = join(dest, skillFolder(s.id));
       try {
         const c = copyOne(s, to);
-        if (hasMd(to)) keep(c, source, s.name, s.description);
+        if (!c) leave(s.id, source, KEY_MD, gap);
+        else if (hasMd(to)) keep(c, source, s.name, s.description);
         else {
           rmSync(to, { recursive: true, force: true });
           leave(s.id, source, BAD_MD, gap);

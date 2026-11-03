@@ -3,7 +3,7 @@
 
 // The command line of an editable task command (src/web/tasks/commands.ts). The line is only the text form of an argv list.
 import { describe, expect, test } from "bun:test";
-import { draftProblem, draftsToCommands, freeId, joinArgv, splitArgv, toDraft } from "../../src/web/tasks/commands";
+import { draftProblem, draftsToCommands, freeId, joinArgv, moveDraft, splitArgv, toDraft } from "../../src/web/tasks/commands";
 
 describe("task command lines", () => {
   test("spaces split; quotes keep spaces and the other quote; backslashes stay", () => {
@@ -30,5 +30,18 @@ describe("task command lines", () => {
     expect(draftProblem({ ...toDraft(c), name: " " })).toBe("Give the command a name.");
     expect(draftsToCommands([toDraft(c), { ...toDraft(c), id: "cmd2", line: "'x" }])).toBeNull();
     expect(freeId([{ id: "cmd1" }, { id: "cmd3" }], "cmd")).toBe("cmd2");
+  });
+
+  test("moveDraft moves one row; the ends keep the list; the saved list keeps the new order", () => {
+    const c = (id: string) => toDraft({ id, name: id, kind: "test", argv: ["bun", id], timeoutSec: 600 });
+    const rows = [c("a"), c("b"), c("c")];
+    expect(moveDraft(rows, 0, 1).map((d) => d.id)).toEqual(["b", "a", "c"]);
+    expect(moveDraft(rows, 2, -1).map((d) => d.id)).toEqual(["a", "c", "b"]);
+    expect(moveDraft(rows, 1, -1).map((d) => d.id)).toEqual(["b", "a", "c"]);
+    expect(moveDraft(rows, 0, -1)).toBe(rows);
+    expect(moveDraft(rows, 2, 1)).toBe(rows);
+    expect(moveDraft(rows, 5, 1)).toBe(rows);
+    expect(rows.map((d) => d.id)).toEqual(["a", "b", "c"]);
+    expect(draftsToCommands(moveDraft(rows, 0, 1))?.map((x) => x.id)).toEqual(["b", "a", "c"]);
   });
 });

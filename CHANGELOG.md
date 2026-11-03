@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- "Move up" and "Move down" on each command, on the plan screen and in Settings, Tasks, change the order of the commands. The commands run in list order.
+- Reviews and Build a Jira task steps never get key or credential files from a skill folder, such as `id_*`, `*.pem`, `*.ppk`, `.env`, or a file that holds a private key. The skills index counts the files left out. A skill whose SKILL.md holds a private key stays out.
 - Build a Jira task now commits only the files that Claude changed or wrote, and the plan files. New files from your setup or check commands, such as `.venv/` or `build/`, stay out of the commit. The commit row in the Log tab names them.
 - The setup commands of a task now run again when you change them, and after the app removed files from the worktree. "Run setup again" in the More menu of a task runs them at once.
 - When a step needs a command that the app does not run, Claude now asks you and names the setup command that it needs.
