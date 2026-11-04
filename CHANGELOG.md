@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- When the setup commands of a Jira task fail during the build and "Run setup again" then passes, the build now goes on by itself. Before, the task stayed at "Claude is building your change." and did nothing.
 - The answers and notes under the questions of a Jira task, and the text of "Ask Claude again", can now be up to 100,000 characters. Before, the text stopped at 2,000 characters.
 - Stop and the end of a run now end all programs that the run started, also programs in the background. This includes the build, test, and lint commands of a task.
 - A skill that you tick in a review profile is now read only when it applies to the change, also with 5 skills or fewer. Only Always use makes Claude read a skill first in every run. The Choose… skills dialog shows the Always use box on every row, disabled until you tick the skill, and says what a tick means. The run log of a Build a Jira task step lists the skills that the profile does not tick as available, not as loaded.

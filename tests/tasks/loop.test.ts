@@ -1485,6 +1485,47 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
   );
 
   test(
+    "a green Run setup again after a red setup in the build lets the build go on to the own review",
+    async () => {
+      const s = await setup();
+      withSetup(s, "venv");
+      writeFileSync(join(s.root, "setup-mode.txt"), "fail");
+      await s.build();
+      expect(s.blocked()?.text).toBe("Needs you: the setup commands of part 1 failed. See why.");
+      expect(s.part().state).toBe("implementing");
+      expect(s.flow()).toEqual(["commit:plan:ok", "check:setup:failed"]);
+      writeFileSync(join(s.root, "setup-mode.txt"), "ok");
+      expect(s.loop.setupAgain(s.db, s.task, s.part().id, { version: s.t().version }).status).toBe(202);
+      await until(() => setups(s) === 2 && s.blocked() === null && !s.loop.running(s.task));
+      expect(s.flow().slice(0, 3)).toEqual(["commit:plan:ok", "check:setup:failed", "check:setup:ok"]);
+      expect(s.flow()).toContain("review:review:ok");
+      expect(s.part().state).toBe("self_reviewed");
+      expect(s.t().state).toBe("implementing");
+    },
+    SLOW,
+  );
+
+  test(
+    "Stop during the build that a green Run setup again started stops the task",
+    async () => {
+      const s = await setup({ seq: { "implement:tests": [{ hang: true }] } });
+      withSetup(s, "venv");
+      writeFileSync(join(s.root, "setup-mode.txt"), "fail");
+      await s.build();
+      expect(s.blocked()?.text).toBe("Needs you: the setup commands of part 1 failed. See why.");
+      writeFileSync(join(s.root, "setup-mode.txt"), "ok");
+      expect(s.loop.setupAgain(s.db, s.task, s.part().id, { version: s.t().version }).status).toBe(202);
+      await until(() => s.flow().includes("tests:P1:running"));
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.t().state).toBe("stopped");
+      expect(s.t().stopped_from).toBe("implementing");
+      expect(s.flow()).toContain("tests:P1:cancelled");
+    },
+    SLOW,
+  );
+
+  test(
     "setup runs again when its list changes and after a reset that removed files; an unchanged list does not run it",
     async () => {
       const task = (n: number) => ({

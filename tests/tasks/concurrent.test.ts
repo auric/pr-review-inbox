@@ -367,4 +367,45 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
     },
     SLOW,
   );
+
+  test(
+    "a green Run setup again after a red setup lets every building part go on, and the third part starts",
+    async () => {
+      const s = await setup({ atOnce: 2, third: "base", scenario: BUILD });
+      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+      // A setup command that exits with 1 while setup-mode.txt holds "fail".
+      writeFileSync(
+        join(s.root, "setup.ts"),
+        `import { existsSync, readFileSync } from "node:fs";\nconst m = ${JSON.stringify(join(s.root, "setup-mode.txt"))};\nprocess.exit(existsSync(m) && readFileSync(m, "utf8").trim() === "fail" ? 1 : 0);\n`,
+      );
+      const commands = [
+        { id: "s", name: "venv", kind: "setup", argv: [process.execPath, join(s.root, "setup.ts")], timeoutSec: 60 },
+        { id: "t", name: "test", kind: "test", argv: [process.execPath, join(s.root, "check.ts")], timeoutSec: 60 },
+      ];
+      s.db.query("UPDATE repo_task_settings SET commands_json = $c").run({ c: JSON.stringify(commands) });
+      writeFileSync(join(s.root, "setup-mode.txt"), "fail");
+      loop.build(s.db, s.task);
+      await loop.idle(s.task);
+      const b = JSON.parse(s.t().blocked_json ?? "null") as { kind: string; step: number; text: string } | null;
+      expect(b?.text).toMatch(/^Needs you: the setup commands of part [12] failed\. See why\.$/);
+      const parts = () => taskDto(s.db, s.t()).parts.map((p) => [p.ord, p.state]);
+      expect(parts()).toEqual([
+        [1, "implementing"],
+        [2, "implementing"],
+        [3, "planned"],
+      ]);
+      const red = (s.db.query("SELECT part FROM task_step WHERE id = $id").get({ id: b?.step ?? 0 }) as { part: number }).part;
+      writeFileSync(join(s.root, "setup-mode.txt"), "ok");
+      expect(loop.setupAgain(s.db, s.task, red, { version: s.t().version }).status).toBe(202);
+      await until(() => !loop.running(s.task) && s.part(s.p3).state !== "planned", 180_000);
+      await loop.idle(s.task);
+      expect(s.t().blocked_json).toBeNull();
+      expect(parts()).toEqual([
+        [1, "self_reviewed"],
+        [2, "self_reviewed"],
+        [3, "self_reviewed"],
+      ]);
+    },
+    SLOW,
+  );
 });

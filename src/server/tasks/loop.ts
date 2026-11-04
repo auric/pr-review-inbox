@@ -1607,6 +1607,13 @@ export function createLoop(opts: LoopOptions) {
       const part = parts(db, id).find((p) => p.id === partId) as PartRow;
       await setup(await context(db, t, part, "setup"), true);
       if (before && !ofSetup(before)) setReason(db, id, before);
+      // A green run of a building part lets the build go on. No reset: a reset that removes files deletes the setup mark.
+      const cur = taskRow(db, id);
+      if (cur?.state === "implementing" && cur.blocked_json === null && buildingAll(db, id).length && !stopping.has(id)) {
+        // The driver becomes a build driver, so Stop sends STOP as for a build.
+        modes.delete(id);
+        await drive(db, id, false);
+      }
     } catch (e) {
       if (!(e instanceof Halt)) return failed(db, id, e);
       if (before && taskRow(db, id)?.blocked_json === null) setReason(db, id, before);
