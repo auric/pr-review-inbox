@@ -457,8 +457,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     sentAt = Date.now();
     const tasks = [...pending.tasks];
     live.broadcast("changed", { prs: [...pending.prs], runs: [...pending.runs], ...(tasks.length && { tasks }) });
-    const db = tasks.length ? settings.db() : null;
-    if (db && noteTaskWaits(db, tasks, now())) live.broadcast("events", { count: 1 });
+    try {
+      const db = tasks.length ? settings.db() : null;
+      if (db && noteTaskWaits(db, tasks, now())) live.broadcast("events", { count: 1 });
+    } catch (e) {
+      // An error in a timer callback ends the process.
+      log(`Could not record the task notifications: ${(e as Error).message}`);
+    }
     pending.prs.clear();
     pending.runs.clear();
     pending.tasks.clear();
@@ -2045,6 +2050,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       cancelActive();
       cancelExtras();
       await Promise.all([j?.done, ...side, improve.stop(), ...loops]);
+      // The caller closes the database after stop(), so the pending flush runs now.
+      if (timer) {
+        clearTimeout(timer);
+        flush();
+      }
     },
     // f runs in stop(). The returned function drops it.
     onStop(f: () => Promise<void>): () => void {

@@ -5,7 +5,7 @@
 // interview run, the answers, the spec run with the map check and the size rules, the plan screen actions, and the routes. The fake
 // CLI, the fake Bitbucket, the fake Jira, and a temp git remote. No test starts the real CLI or reaches a forge or Jira.
 import type { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -216,6 +216,7 @@ async function setup(o: { config?: string; profiles?: ProfileInput[] } = {}) {
     jira,
     events,
     review,
+    settings,
     dir,
     fake,
     branchAt,
@@ -1351,4 +1352,63 @@ describe("the attachments of a task (spec.md section 6.17)", () => {
       error: "The files of this task would pass 500 MB. Untick files first.",
     });
   });
+});
+
+describe("the run-end notification at stop", () => {
+  // The run end frees the slot at once. Its broadcast waits up to NOTIFY_MS (500 ms) after the previous one.
+  const ended = async (h: Awaited<ReturnType<typeof setup>>) => {
+    await h.connectJira();
+    const a = await h.create();
+    expect(a.status).toBe(201);
+    const end = Date.now() + 20_000;
+    while (!(h.runs(a.body.id).length === 1 && !h.review.busy())) {
+      if (Date.now() > end) throw new Error("Timed out.");
+      await Bun.sleep(1);
+    }
+    return a.body.id;
+  };
+  const waits = (db: Database) => (db.query("SELECT COUNT(*) AS n FROM task_event WHERE kind = 'needs_you'").get() as { n: number }).n;
+
+  test(
+    "stop() records the pending task notification before the caller closes the database",
+    async () => {
+      const h = await setup();
+      const spy = spyOn(console, "log");
+      try {
+        await ended(h);
+        await h.review.stop();
+        expect(waits(h.db)).toBe(1);
+        h.db.close();
+        await Bun.sleep(700);
+        expect(spy.mock.calls.flat().filter((l) => String(l).startsWith("Could not record the task notifications"))).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "a notification error is logged and does not end the process",
+    async () => {
+      const h = await setup();
+      const spy = spyOn(console, "log");
+      const db = h.settings.db;
+      try {
+        await ended(h);
+        h.settings.db = () => {
+          throw new RangeError("Cannot use a closed database");
+        };
+        await Bun.sleep(700);
+        expect(spy.mock.calls.flat().filter((l) => String(l).startsWith("Could not record the task notifications"))).toEqual([
+          "Could not record the task notifications: Cannot use a closed database",
+        ]);
+        expect(h.events.some((e) => e.event === "changed" && (e.data as { tasks?: number[] }).tasks !== undefined)).toBe(true);
+      } finally {
+        h.settings.db = db;
+        spy.mockRestore();
+      }
+    },
+    SLOW,
+  );
 });
