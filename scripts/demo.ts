@@ -224,6 +224,7 @@ const TASK_INTERVIEW = {
   unknowns: [],
   coverage: READ_FLUSH,
 };
+const TESTING = { commands: [{ name: "test", kind: "test", argv: ["bun", "test"] }], services: [], notes: "" };
 const TASK_SPEC = {
   title: "Release the write lock after each entry",
   size: "small",
@@ -256,7 +257,14 @@ const TASK_SPEC = {
       ],
     },
   ],
-  testing: { commands: [{ name: "test", kind: "test", argv: ["bun", "test"] }], services: [], notes: "" },
+  testing: {
+    ...TESTING,
+    // spec.md section 6.21.3: the commands that the steps run themselves. The plan screen offers them with ticks.
+    allow: [
+      { pattern: "bun run bench:flush *", reason: "The bench shows that a long flush no longer blocks the readers." },
+      { pattern: "ssh build1 *", reason: "The deploy-build skill runs the load test on the Linux build host." },
+    ],
+  },
   flag: null,
   questions: [],
   coverage: READ_FLUSH,
@@ -283,6 +291,8 @@ const TASK_FLUSH = [
   "",
 ].join("\n");
 
+const BENCH = "hyperfine 'bun run bench:flush'";
+
 // A task of several repositories (docs/plans/review-v2/spec.md section 6.16): ABC-10720 on PROJ1/app, which holds the submodule PROJ1/lib.
 // The plan changes lib/lock.c in the submodule and adds a test in the main repository, and the spec run proposes PROJ1/sample-repo-4.
 // The fake CLI gives the Nth run of a kind the Nth seq entry, so these entries follow the ABC-10688 runs of scripts/screenshots.ts.
@@ -307,6 +317,7 @@ const MULTI_SPEC = {
       ],
     },
   ],
+  testing: TESTING,
   repos: [{ project: "PROJ1", repo: "sample-repo-4", reason: "The flush code that reads the wait count lives there." }],
   coverage: { read: ["lib/lock.c"], skipped: [], unavailable: [], notChecked: [] },
 };
@@ -341,6 +352,7 @@ const SUB_SPEC = {
     subPart(2, "ABC-10733", "Report the lock wait", "merge", "1", "It reads the lock of ABC-10732 (link: is blocked by ABC-10732)."),
     subPart(3, "ABC-10734", "Test the flush order", "stack", "1", "Its tests call the new lock of ABC-10732."),
   ],
+  testing: TESTING,
   maxOpen: 2,
   maxOpenReason: "Two sub-tasks can run side by side, and your PRs take about 2 days to merge.",
 };
@@ -365,7 +377,29 @@ runner.write({
       { writes: [{ path: "repo/tests/flush.test.ts", text: TASK_TEST }] },
     ],
     "implement:implement": [
-      { writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] },
+      // ABC-10688 asks to allow one command (spec.md section 6.21.4). Its next try runs it.
+      {
+        bash: [{ command: BENCH, refused: "allowlist" }],
+        implement: {
+          summary: "Claude Code refused a command.",
+          done: false,
+          tests: [],
+          question: null,
+          specChange: "",
+          allowRequest: [
+            { pattern: "hyperfine *", command: BENCH, reason: "The step compares the flush time before and after the change." },
+          ],
+          notes: [],
+          coverage: READ_FLUSH,
+        },
+      },
+      {
+        bash: [
+          { command: BENCH, output: "Benchmark 1: bun run bench:flush\n  Time (mean ± σ):     41.2 ms ±   1.3 ms" },
+          { command: "bun run bench:flush --entries 5000", output: "flush 5000 entries: 41 ms, longest lock hold: 0.2 ms" },
+        ],
+        writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }],
+      },
       { writes: [{ path: "repo/lib/lock.c", text: MULTI_LOCK }] },
       { writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] },
     ],

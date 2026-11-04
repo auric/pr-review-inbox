@@ -3,9 +3,10 @@
 
 // The plan approval (docs/plans/review-v2/spec.md sections 6.1, 6.4, 6.8, 6.12, and 6.16): the size with its one-line meaning and the
 // rule lines, the branch (BranchSection.tsx), the repositories of a task with several (section 6.16.5), the approved commands with the
-// first-use warning, and the map check line. The header button "Approve the plan" submits this form.
+// first-use warning, the commands that the runner may run with their own first-use warning (section 6.21.3), and the map check line. The
+// header button "Approve the plan" submits this form.
 // PlanParts is the Plan tab: the parts with their state in plain words, the tasks with check marks, and the lines against the limit.
-import { Check, Circle } from "lucide-react";
+import { Check, Circle, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +28,8 @@ import {
   type TaskSize,
 } from "../../shared/task";
 import { useSettings } from "../shell/data";
+import { AllowEditor, type ShellAsk, ShellDialog } from "./AllowEditor";
+import { type AllowDraft, allowDraftProblem, planAllow, toAllowDraft } from "./allow";
 import { BaseField, BranchSection } from "./BranchSection";
 import { CommandsEditor } from "./CommandsEditor";
 import { type CommandDraft, draftProblem, draftsToCommands, toDraft } from "./commands";
@@ -110,6 +113,10 @@ export function PlanApproval(props: {
   useEffect(() => onHold?.(hold), [hold, onHold]);
   const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(plan?.commands.map((c) => c.id) ?? []));
   const [drafts, setDrafts] = useState<CommandDraft[]>(() => plan?.commands.map(toDraft) ?? []);
+  // spec.md section 6.21.3: the proposals start ticked, as the commands do. A saved pattern stays in the list.
+  const [allowPicked, setAllowPicked] = useState<ReadonlySet<string>>(() => new Set(plan?.allow.map((a) => a.id) ?? []));
+  const [allowDrafts, setAllowDrafts] = useState<AllowDraft[]>(() => plan?.allow.map(toAllowDraft) ?? []);
+  const [ask, setAsk] = useState<ShellAsk | null>(null);
   const [warned, setWarned] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const settings = useSettings();
@@ -134,6 +141,14 @@ export function PlanApproval(props: {
     });
   const picks = drafts.filter((c) => picked.has(c.id));
   const saved = new Set(plan.commands.filter((c) => c.saved).map((c) => c.id));
+  const allowSaved = new Set(plan.allow.filter((a) => a.saved).map((a) => a.id));
+  const togglePattern = (id: string, on: boolean) =>
+    setAllowPicked((s) => {
+      const n = new Set(s);
+      if (on) n.add(id);
+      else n.delete(id);
+      return n;
+    });
   return (
     <form
       id={PLAN_FORM}
@@ -147,28 +162,40 @@ export function PlanApproval(props: {
           setProblem(branch.problem);
           return document.getElementById("task-prefix")?.focus();
         }
-        const p = hold ?? planProblem(t, picks, warned) ?? (sub ? (maxOpenProblem(maxOpen) ?? buildsProblem(builds)) : null);
+        const bad = allowDrafts.find((d) => allowPicked.has(d.id) && !allowSaved.has(d.id) && allowDraftProblem(d, allowDrafts));
+        const p =
+          hold ??
+          planProblem(t, picks, warned) ??
+          (bad ? `Fix the pattern ${bad.pattern.trim() || "without text"} first. ${allowDraftProblem(bad, allowDrafts)}` : null) ??
+          (sub ? (maxOpenProblem(maxOpen) ?? buildsProblem(builds)) : null);
         setProblem(p);
         if (p) return;
         const commands = (draftsToCommands(picks) ?? []).map((c) => {
           const offered = plan.commands.find((o) => o.id === c.id);
           return offered && sameCommand(offered, c) ? c.id : c;
         });
-        props.onApprove({
-          size: sub ? "small" : size,
-          commands,
-          ...(plan.warning && { warning: true }),
-          ...branch,
-          ...(several && { bases: basePicks(t) }),
-          ...(sub && {
-            subtasks: {
-              parts: starts.map((x) => ({ ...x, after: x.start === "base" ? null : x.after })),
-              track: Object.entries(track).map(([key, pr]) => ({ key, pr })),
-              maxOpen: Number(maxOpen),
-              buildsAtOnce: Number(builds),
-            },
-          }),
-        });
+        const shell = planAllow(plan, allowDrafts, allowPicked);
+        const approve = (shellWarning: boolean) =>
+          props.onApprove({
+            size: sub ? "small" : size,
+            commands,
+            ...(plan.warning && { warning: true }),
+            allow: shell.allow,
+            ...(shellWarning && { shellWarning: true }),
+            ...branch,
+            ...(several && { bases: basePicks(t) }),
+            ...(sub && {
+              subtasks: {
+                parts: starts.map((x) => ({ ...x, after: x.start === "base" ? null : x.after })),
+                track: Object.entries(track).map(([key, pr]) => ({ key, pr })),
+                maxOpen: Number(maxOpen),
+                buildsAtOnce: Number(builds),
+              },
+            }),
+          });
+        // spec.md section 6.21.3: the first patterns of the repository need the first-use warning.
+        if (shell.warning) setAsk({ kind: "warning", run: () => approve(true) });
+        else approve(false);
       }}
     >
       {sub && (
@@ -262,6 +289,29 @@ export function PlanApproval(props: {
           newPrefix="new-u"
         />
       </FieldSet>
+      <FieldSet data-plan-allow className="gap-1.5">
+        <FieldLegend className="text-sm font-semibold">Commands {runner} may run</FieldLegend>
+        <p className="m-0 text-sm text-ink-2">
+          {plan.allow.some((a) => !a.saved)
+            ? `${runner} proposes these commands for the steps to run themselves. Each ticked pattern joins the list of the repository.`
+            : `${runner} proposes no command for the steps to run themselves. A pattern that you add joins the list of the repository.`}
+        </p>
+        {t.shell.mode === "any" && (
+          <p className="m-0 flex items-start gap-1.5 text-sm font-medium text-warn">
+            <TriangleAlert aria-hidden className="mt-0.5 size-[15px] shrink-0" />
+            Any command is on for this repository. {runner} can run every command, except the fixed deny list.
+          </p>
+        )}
+        <AllowEditor
+          idPrefix="plan-allow"
+          drafts={allowDrafts}
+          onChange={(next) => setAllowDrafts(next)}
+          picked={allowPicked}
+          onPick={togglePattern}
+          saved={allowSaved}
+          newPrefix="new-u"
+        />
+      </FieldSet>
       {plan.warning && (
         <Alert>
           <AlertTitle>Before the first build in this repository</AlertTitle>
@@ -291,6 +341,7 @@ export function PlanApproval(props: {
           {problem}
         </p>
       )}
+      <ShellDialog ask={ask} onClose={() => setAsk(null)} />
     </form>
   );
 }

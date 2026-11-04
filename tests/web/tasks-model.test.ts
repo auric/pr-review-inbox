@@ -338,6 +338,17 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     expect(shape(v)).toEqual({ status: text, primary: "See why", more: ["Resume", "Stop"], screen: "build" });
   });
 
+  test("spec.md section 6.21.4: blocked allow: the server sentence, Continue, and Stop; no Resume and no Tell box", () => {
+    const text = "Needs you: Claude asks to allow a command.";
+    const allowAsk = { step: 4, requests: [{ pattern: "make build", command: "make build", reason: "It builds." }], warning: false };
+    const t = building({ blocked: { kind: "allow", step: 4, text }, allowAsk });
+    expect(shape(view(t))).toEqual({ status: text, primary: "Continue", more: ["Stop"], screen: "build" });
+    expect(view(t).primary?.kind).toBe("allow");
+    expect(tellBox(t)).toBe("none");
+    // Without the request the page cannot send a choice, so no primary button shows.
+    expect(view({ ...t, allowAsk: null }).primary).toBeNull();
+  });
+
   test("blocked blocker: See why", () => {
     const v = view(building({ blocked: { kind: "blocker", step: 4, text: "Needs you: Claude's review of part 1 still finds 1 point." } }));
     expect(v.primary?.label).toBe("See why");

@@ -2,13 +2,16 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The Log tab (docs/plans/review-v2/spec.md sections 6.7 and 6.12): the steps, newest first, with their commands, exit codes, the
-// output tails folded, the saved patch, and a link to the run log of each step with a run (RunLog.tsx). A send of the Tell box is one
+// output tails folded, the saved patch, the commands that the runner ran and the commands that it asked to allow (section 6.21.6), and a
+// link to the run log of each step with a run (RunLog.tsx). A send of the Tell box is one
 // group "Your instructions" with its text, its result, and its steps inside (section 6.18.1).
 import { CircleAlert, CircleCheck, CircleDashed, CircleMinus, LoaderCircle, ScrollText } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { TaskDto, TaskStepDto } from "../../shared/dto";
+import type { StepDetail } from "../../shared/task";
+import { DECIDED_TEXT, shellText } from "./allow";
 import { logRows, type SendGroup, STEP_TEXT, type StepLook, sendResult, stepLook } from "./model";
 
 const KIND: Record<TaskStepDto["kind"], string> = {
@@ -73,7 +76,7 @@ export function LogTab({
             tabIndex={-1}
             className="grid gap-1.5 rounded-md border bg-card px-3 py-2 outline-offset-2 focus-visible:outline-2"
           >
-            <StepBody s={r.step} onRunLog={onRunLog} />
+            <StepBody s={r.step} runner={runner} onRunLog={onRunLog} />
           </li>
         ),
       )}
@@ -125,7 +128,7 @@ function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string
         <ol aria-label="Steps of these instructions, newest first" className="m-0 grid list-none gap-1.5 border-l-2 py-0.5 pl-3">
           {g.steps.map((x) => (
             <li key={x.id} id={stepId(x.id)} tabIndex={-1} className="grid gap-1.5 outline-offset-2 focus-visible:outline-2">
-              <StepBody s={x} onRunLog={onRunLog} onDiff={x.kind === "commit" ? onDiff : undefined} />
+              <StepBody s={x} runner={runner} onRunLog={onRunLog} onDiff={x.kind === "commit" ? onDiff : undefined} />
             </li>
           ))}
         </ol>
@@ -157,7 +160,17 @@ function SendText({ text }: { text: string }) {
   );
 }
 
-function StepBody({ s, onRunLog, onDiff }: { s: TaskStepDto; onRunLog: (run: number) => void; onDiff?: () => void }) {
+function StepBody({
+  s,
+  runner,
+  onRunLog,
+  onDiff,
+}: {
+  s: TaskStepDto;
+  runner: string;
+  onRunLog: (run: number) => void;
+  onDiff?: () => void;
+}) {
   const look = stepLook(s);
   const st = ICON[look];
   const Icon = st.icon;
@@ -215,6 +228,28 @@ function StepBody({ s, onRunLog, onDiff }: { s: TaskStepDto; onRunLog: (run: num
           </pre>
         </details>
       ))}
+      {d.shell && <ShellRows shell={d.shell} runner={runner} />}
+      {d.allowAsk && (
+        <div className="grid gap-0.5 text-xs text-ink-2">
+          <p className="m-0">{runner} asked to allow:</p>
+          <ul aria-label={`Commands that ${runner} asked to allow`} className="m-0 grid list-none gap-0.5 p-0">
+            {d.allowAsk.requests.map((r) => {
+              const c = d.allowAsk?.decisions.find((x) => x.pattern === r.pattern)?.choice;
+              return (
+                <li key={r.pattern} data-allow-decision={c ?? "open"} className="[overflow-wrap:anywhere]">
+                  <code translate="no" className="font-mono text-foreground">
+                    {r.pattern}
+                  </code>
+                  :{" "}
+                  <span className={cn(c === "refuse" && "font-medium text-destructive")}>
+                    {c ? DECIDED_TEXT[c] : "waiting for your choice"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {d.findings.length > 0 && (
         <p className="m-0 text-xs text-ink-2">
           {d.findings.length} {d.findings.length === 1 ? "point" : "points"} in the review
@@ -250,5 +285,38 @@ function StepBody({ s, onRunLog, onDiff }: { s: TaskStepDto; onRunLog: (run: num
         </p>
       ))}
     </>
+  );
+}
+
+// spec.md section 6.21.6: the mode of a runner step with the Bash tool, and the commands that the runner ran, folded. The run log holds the
+// end of the output of each command.
+function ShellRows({ shell, runner }: { shell: NonNullable<StepDetail["shell"]>; runner: string }) {
+  const n = shell.commands.length;
+  return (
+    <div data-step-shell className="grid gap-1">
+      <p className={cn("m-0 text-xs", shell.mode === "any" ? "font-medium text-warn" : "text-ink-2")}>
+        {shellText(shell.mode, shell.rules.length)}
+        {shell.refused > 0 && `. Refused: ${shell.refused}`}
+      </p>
+      {n > 0 && (
+        <details className="rounded-[5px] border bg-pane px-2 py-1 text-xs">
+          <summary className="cursor-pointer font-medium">
+            Commands {runner} ran ({n})
+          </summary>
+          <ol className="m-0 mt-1 grid list-none gap-1 p-0">
+            {shell.commands.map((c, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: the commands keep their run order and never move.
+              <li key={i} data-shell-command={c.state} className="flex flex-wrap items-baseline gap-x-2">
+                <code translate="no" className="min-w-0 font-mono [overflow-wrap:anywhere]">
+                  {c.command}
+                </code>
+                <span className={cn(c.state === "ok" ? "text-ink-2" : "font-semibold text-destructive")}>{c.state}</span>
+                <span className="text-muted-foreground">{seconds(c.ms)}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </div>
   );
 }

@@ -6,7 +6,7 @@
 // current step, then the tabs Questions, Spec, Plan, Log, and Diff. model.ts decides the sentence and the actions. Focus moves to the
 // new primary button after a state change.
 import { useQueryClient } from "@tanstack/react-query";
-import { Ellipsis } from "lucide-react";
+import { Ellipsis, TriangleAlert } from "lucide-react";
 import { forwardRef, type ReactNode, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -22,7 +22,9 @@ import { RunLog } from "../review/RunLog";
 import { trackerOf } from "../review/tasks";
 import { ApiError } from "../shell/data";
 import { Hint } from "../shell/Hint";
+import { ALLOW_FORM, AllowAskForm } from "./AllowAsk";
 import { TaskFiles } from "./Attachments";
+import { shellText } from "./allow";
 import { BaseField } from "./BranchSection";
 import { DiffTab } from "./DiffTab";
 import { checkTracker, type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
@@ -307,6 +309,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return send({ kind: "answers", input: { answers: [], recommended: true } });
       case "approve":
         return (document.getElementById(PLAN_FORM) as HTMLFormElement | null)?.requestSubmit();
+      case "allow":
+        return (document.getElementById(ALLOW_FORM) as HTMLFormElement | null)?.requestSubmit();
       case "edit-plan": {
         const d = docList(t)[0] ?? null;
         setTab("spec");
@@ -445,6 +449,10 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       >
         {a.label}
       </Button>
+    ) : a.kind === "allow" ? (
+      <Button ref={primaryRef} data-primary type="submit" form={ALLOW_FORM} disabled={busy}>
+        {a.label}
+      </Button>
     ) : (
       <Button ref={primaryRef} data-primary disabled={busy} onClick={() => run(a.kind)}>
         {a.kind === "move" && part && retry === part.id ? "Try again" : a.label}
@@ -469,6 +477,16 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             {t.project}/{t.repo} into {t.targetBranch}
           </span>
           {profileName && <span className="text-xs text-muted-foreground">Profile: {profileName}</span>}
+          {t.shell.mode === "any" ? (
+            <span data-task-shell className="inline-flex items-center gap-1 self-center text-xs font-semibold text-warn">
+              <TriangleAlert aria-hidden className="size-3.5 shrink-0" />
+              {shellText("any", 0)}
+            </span>
+          ) : (
+            <span data-task-shell className="text-xs text-muted-foreground">
+              {shellText("allowlist", t.shell.allow.length)}
+            </span>
+          )}
         </div>
         <StepStrip steps={stripSteps(t)} />
         <div className="grid gap-0.5">
@@ -779,7 +797,7 @@ function Content(props: {
     if (!t.plan || t.plan.approved) return null;
     return (
       <PlanApproval
-        key={t.plan.commands.map((c) => c.id).join(",")}
+        key={[...t.plan.commands.map((c) => c.id), ...t.plan.allow.map((a) => `${a.id}=${a.pattern}`)].join(",")}
         t={t}
         runner={runner}
         busy={busy}
@@ -819,6 +837,18 @@ function Content(props: {
       </>,
       "Change to the plan",
       "task-change",
+    );
+
+  if (b?.kind === "allow" && t.allowAsk)
+    return (
+      <AllowAskForm
+        key={t.allowAsk.step}
+        ask={t.allowAsk}
+        runner={runner}
+        onSend={(decisions, shellWarning) =>
+          props.onSend({ kind: "allow", step: t.allowAsk?.step ?? 0, decisions, ...(shellWarning && { shellWarning: true }) })
+        }
+      />
     );
 
   if (screen === "build" || screen === "ready") {

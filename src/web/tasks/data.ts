@@ -12,6 +12,7 @@ import type {
   BranchSearchDto,
   RepoTaskSettingsDto,
   RunDetail,
+  TaskAllowInput,
   TaskAnswersInput,
   TaskContextDto,
   TaskCreateInput,
@@ -187,6 +188,8 @@ export type TaskAction =
   | { kind: "fix"; part: number }
   // spec.md section 6.7: "Run setup again" (202).
   | { kind: "setup"; part: number }
+  // spec.md section 6.21.4: the choice for each command that the step asks to allow (202).
+  | { kind: "allow"; step: number; decisions: TaskAllowInput["decisions"]; shellWarning?: true }
   // spec.md section 6.18.6: a send of the Tell box, "Update from <base>", and "Undo the update". part: the focused part of a task
   // with sub-tasks (spec.md section 6.20.12); absent takes the part of the current state.
   | { kind: "instruct"; text: string; part?: number }
@@ -256,6 +259,13 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       return read(await tasks.parts[":part"].fix.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "setup":
       return read(await tasks.parts[":part"].setup.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "allow":
+      return read(
+        await tasks.allow.$post({
+          param,
+          json: { version, step: a.step, decisions: a.decisions, ...(a.shellWarning && { shellWarning: a.shellWarning }) },
+        }),
+      );
     case "instruct":
       return read(
         await tasks.instructions.$post({ param, json: { version, text: a.text, ...(a.part !== undefined && { part: a.part }) } }),

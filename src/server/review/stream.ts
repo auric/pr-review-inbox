@@ -19,6 +19,7 @@ import type {
   SDKTaskStartedMessage,
   SDKUserMessage,
 } from "../../shared/run-log";
+import { REFUSED_NOTE } from "../../shared/run-log";
 
 const NOTE_MAX = 300;
 // spec.md section 6.21 (D7): the Log tab shows each Bash command and the end of its output.
@@ -48,8 +49,7 @@ export type RunNote = { from: string; text: string };
 
 // A Bash command that Claude Code refused. command: the event target. by: the rule list that refused it.
 export type Refusal = { command: string; by: "allowlist" | "deny" };
-// D7: the event note of a refused Bash command.
-export const REFUSED_NOTE: Record<Refusal["by"], string> = { allowlist: "Refused by the allowlist", deny: "Refused by the deny list" };
+export { REFUSED_NOTE };
 
 export type StreamState = {
   inits: SDKSystemMessage[];

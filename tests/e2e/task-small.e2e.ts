@@ -438,7 +438,7 @@ test("the Build form lists the attachments with boxes and asks the policy questi
   await page.getByRole("button", { name: "Move version down" }).click();
   await expect.poll(names).toEqual(["test", "version"]);
   await expect(page.getByRole("button", { name: "Move version up" })).toBeFocused();
-  await expect(page.locator("#task-cmd-PROJ1-sample-repo-2-status")).toHaveText("Saved. The next check uses these commands.");
+  await expect(page.locator("#task-cmd-PROJ1-sample-repo-2-status")).toHaveText("Saved. The next step uses these commands.");
   const order = async () => ((await api(page, "GET", path)).json as { commands: { id: string }[] }).commands.map((c) => c.id);
   expect(await order()).toEqual(["cmd2", "cmd1"]);
   await page.reload();

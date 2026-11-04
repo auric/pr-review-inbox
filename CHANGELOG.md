@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Build a Jira task: Claude can now run commands in the tests, code, fix, and Tell Claude steps, such as a build on a remote host over ssh. Each repository has a list "Commands Claude may run" in Settings, Tasks. Git, a shell, the Bitbucket and Jira hosts, and the credential-store tools stay refused.
+- The plan screen lists the commands that Claude proposes, each with its reason and a tick. The ticked patterns join the list of the repository when you approve the plan. A saved pattern shows as "approved before".
+- When Claude Code refuses a command that a step needs, the task says "Claude asks to allow a command." Pick "Allow once", "Allow for this repository", or "Refuse" for each command, then "Continue" runs the step again.
+- The first command pattern of a repository shows a warning first: Claude runs each matching command as you, with your files, keys, and network, and a pattern for an interpreter such as python lets Claude run any code. The list only reduces mistakes. It does not stop an attacker.
+- Settings, Tasks: "Any command" lets Claude run every command except the fixed deny list. It asks you to confirm each time you turn it on. "Longest command" sets how long one command can run: 10 minutes by default, 60 at most.
+- The task header now shows "Commands: allowlist, N patterns" or "Commands: any command". The Log tab lists the commands that Claude ran in each step and your choices for each request. The run log shows each command with the end of its output.
+- Claude Code 2.1.302 or later is now required.
 - When the setup commands of a Jira task fail during the build and "Run setup again" then passes, the build now goes on by itself. Before, the task stayed at "Claude is building your change." and did nothing.
 - The answers and notes under the questions of a Jira task, and the text of "Ask Claude again", can now be up to 100,000 characters. Before, the text stopped at 2,000 characters.
 - Stop and the end of a run now end all programs that the run started, also programs in the background. This includes the build, test, and lint commands of a task.

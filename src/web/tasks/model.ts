@@ -54,6 +54,8 @@ export type ActionKind =
   | "close"
   // spec.md section 6.7: "Run setup again" on the part that the view shows.
   | "setup"
+  // spec.md section 6.21.4: "Continue" sends the choice for each command that the step asks to allow.
+  | "allow"
   // spec.md section 6.20: the actions of a task with sub-tasks. Each one acts on the focused part.
   | "ask-again"
   | "start-now"
@@ -521,6 +523,9 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
         return b.base
           ? blocked({ kind: "pick-base", label: "Pick a base branch" }, [{ kind: "resume", label: "Try again" }, STOP])
           : blocked({ kind: "resume", label: "Try again" }, [STOP]);
+      case "allow":
+        // spec.md section 6.21.4: Resume gives 409 until each command has a choice, so "Continue" sends the choices.
+        return blocked(t.allowAsk ? { kind: "allow", label: "Continue" } : null, [STOP]);
       case "update":
         // spec.md section 6.18.4: "The update from <base> stopped: <reason>. The branch is as it was."
         return blocked(

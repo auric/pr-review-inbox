@@ -30,6 +30,13 @@ export type RunEvent = {
   endedAt: number | null;
 };
 
+// docs/plans/review-v2/spec.md section 6.21.6: the note of a Bash call that Claude Code refused, by the rule list that refused it. The run
+// log shows it as text, not as command output.
+export const REFUSED_NOTE: Record<"allowlist" | "deny", string> = {
+  allowlist: "Refused by the allowlist",
+  deny: "Refused by the deny list",
+};
+
 // docs/plans/review-v2/design.md section 5.1: the events of the verify phase share the run with the finder events. Their id and parent
 // carry this prefix, so the tool_use ids of two processes never collide, and their seq follows the last finder event.
 export const CHECK_EVENT = "check:";

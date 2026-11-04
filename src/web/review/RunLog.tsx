@@ -10,7 +10,7 @@ import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import type { MetaDto, RunDetail, RunDto } from "../../shared/dto";
-import type { RunEvent, RunEventStatus } from "../../shared/run-log";
+import { REFUSED_NOTE, type RunEvent, type RunEventStatus } from "../../shared/run-log";
 import { agoLong } from "../pr/threads";
 import { useRaw } from "./data";
 import {
@@ -39,6 +39,7 @@ import {
 } from "./model";
 
 const ST: Record<RunEventStatus, string> = { ok: "ok", error: "error", running: "…", stopped: "stop" };
+const REFUSED = new Set(Object.values(REFUSED_NOTE));
 const AG_WORD: Record<RunEventStatus, string> = { ok: "done", error: "failed", running: "running", stopped: "stopped" };
 // Below this depth, rows keep the indent of the cap level and drop the tree line.
 const LOG_CAP = 3;
@@ -269,6 +270,38 @@ const Row = memo(function Row(props: RowProps) {
   const { n, meta } = props;
   const e = n.e;
   const tool = meta.tools[e.tool] ?? e.tool;
+  // spec.md section 6.21.6: a Bash call shows its command as code and the end of its output folded. A refusal note stays text.
+  if (e.tool === "Bash") {
+    const output = e.note && e.status !== "running" && !REFUSED.has(e.note) ? e.note : null;
+    return (
+      <li className="rl-lr" data-bash>
+        <div className="rl-ll" data-st={e.status}>
+          <span className="rl-ls">{ST[e.status]}</span>
+          <span translate="no" className="rl-lt">
+            {tool}
+          </span>
+          <span className="rl-lg">
+            <code translate="no" className="whitespace-pre-wrap text-foreground">
+              {e.target}
+            </code>
+            {output !== null ? (
+              <details>
+                <summary className="w-fit cursor-pointer rounded text-muted-foreground hover:text-foreground [[data-st=error]_&]:text-destructive">
+                  Output
+                </summary>
+                <pre translate="no" className="m-0 max-h-72 overflow-auto font-[inherit] whitespace-pre-wrap text-ink-2">
+                  {output.trimEnd() || "(no output)"}
+                </pre>
+              </details>
+            ) : (
+              e.note && e.status !== "running" && <span className="rl-lnote">{e.note}</span>
+            )}
+          </span>
+          <span className="rl-ld">{dur(e)}</span>
+        </div>
+      </li>
+    );
+  }
   if (e.tool !== AGENT) {
     return (
       <li className="rl-lr">

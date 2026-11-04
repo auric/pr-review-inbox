@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Settings > Tasks, "Commands": the approved commands of each task repository (docs/plans/review-v2/spec.md section 6.3,
-// repo_task_settings.commands_json), with the editor of the plan screen. Each change saves by itself (autosave.tsx). The first-use
-// warning stays on the plan screen: a saved list here does not accept it.
+// Settings > Tasks, "Commands": per task repository, the approved commands that the app runs (docs/plans/review-v2/spec.md section 6.3,
+// repo_task_settings.commands_json) with the editor of the plan screen, and the commands that the runner may run (section 6.21): the mode,
+// the allowlist, and "Longest command". Each change saves by itself (autosave.tsx). The first-use warning of the app commands stays on
+// the plan screen: a saved list here does not accept it. The first pattern and each switch to Any command show their own dialog here.
 import { useQueryClient } from "@tanstack/react-query";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, TriangleAlert } from "lucide-react";
 import { useRef, useState } from "react";
+import { FieldDescription, FieldLegend, FieldSet } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { RepoTaskSettingsDto, RepoTaskSettingsInput } from "../../shared/dto";
+import type { ShellMode } from "../../shared/task";
 import { api } from "../api";
 import { read } from "../shell/data";
+import { AllowEditor, type ShellAsk, ShellDialog, useShellNames } from "../tasks/AllowEditor";
+import { type AllowDraft, draftsToAllow, TIMEOUT_PROBLEM, timeoutMinutes, timeoutSec, toAllowDraft } from "../tasks/allow";
 import { CommandsEditor } from "../tasks/CommandsEditor";
 import { type CommandDraft, draftsToCommands, toDraft } from "../tasks/commands";
 import { useRepoTaskSettings, useTasks } from "../tasks/data";
@@ -18,6 +25,7 @@ import { SaveStatus, TYPING_MS, useSaver } from "./autosave";
 
 export function TaskCommands() {
   const tasks = useTasks();
+  const runner = useShellNames().runner;
   const repos = [...new Map((tasks.data ?? []).map((t) => [`${t.project}/${t.repo}`, { project: t.project, repo: t.repo }])).values()].sort(
     (a, b) => `${a.project}/${a.repo}`.localeCompare(`${b.project}/${b.repo}`),
   );
@@ -27,7 +35,8 @@ export function TaskCommands() {
         Commands
       </h3>
       <p className="m-0 text-sm text-ink-2">
-        The app runs the approved commands of a repository after each step of a task. The plan screen adds the commands that you approve.
+        The app runs the approved commands of a repository after each step of a task. {runner} runs only the commands that the repository
+        allows. The plan screen adds the commands that you approve.
       </p>
       {tasks.isPending ? (
         <Skeleton className="h-10 w-full" />
@@ -79,49 +88,175 @@ function RepoCommandsBody({ project, repo }: { project: string; repo: string }) 
   return <Editor s={q.data} />;
 }
 
+type Rows = { commands: CommandDraft[]; allow: AllowDraft[]; mode: ShellMode; minutes: string };
+
+const MODE_TEXT: Record<ShellMode, string> = { allowlist: "Allowlist", any: "Any command" };
+const modeLine = (mode: ShellMode, runner: string) =>
+  mode === "any"
+    ? `${runner} runs every command, except the fixed deny list. The list below applies again when you switch back.`
+    : `${runner} runs only the commands that match a pattern of this list.`;
+
 function Editor({ s }: { s: RepoTaskSettingsDto }) {
   const qc = useQueryClient();
+  const names = useShellNames();
   const key = ["task-settings", s.project, s.repo];
-  const [drafts, setDrafts] = useState<CommandDraft[]>(() => s.commands.map(toDraft));
-  const latest = useRef(drafts);
-  const saved = useRef(JSON.stringify(s.commands));
-  const commands = draftsToCommands(drafts);
+  const [rows, setRows] = useState<Rows>(() => ({
+    commands: s.commands.map(toDraft),
+    allow: s.allow.map(toAllowDraft),
+    mode: s.shellMode,
+    minutes: timeoutMinutes(s.bashTimeoutSec),
+  }));
+  // The newest rows. Event handlers set them before the render, so a save in the same handler sends the change.
+  const latest = useRef(rows);
+  // A shell warning that the user accepted on this page. The server keeps the first time.
+  const warned = useRef(s.shellWarnedAt !== null);
+  const [ask, setAsk] = useState<ShellAsk | null>(null);
+  const commands = draftsToCommands(rows.commands);
+  const allow = draftsToAllow(rows.allow);
+  const sec = timeoutSec(rows.minutes);
+  // A part with a problem stays unsaved. The other parts save with the stored value of that part.
   const { state, saver } = useSaver(
     (): RepoTaskSettingsInput | null => {
-      const list = draftsToCommands(latest.current);
-      if (!list || JSON.stringify(list) === saved.current) return null;
-      const { project: _p, repo: _r, warnedAt: _w, ...rest } = qc.getQueryData<RepoTaskSettingsDto>(key) ?? s;
-      return { ...rest, commands: list };
+      const cur = qc.getQueryData<RepoTaskSettingsDto>(key) ?? s;
+      const r = latest.current;
+      const { project: _p, repo: _r, warnedAt: _w, shellWarnedAt: _s, allow: stored, shellMode, bashTimeoutSec, ...rest } = cur;
+      const next = {
+        commands: draftsToCommands(r.commands) ?? cur.commands,
+        shellMode: r.mode,
+        allow: draftsToAllow(r.allow) ?? stored.map(({ pattern, reason }) => ({ pattern, reason })),
+        bashTimeoutSec: timeoutSec(r.minutes) ?? bashTimeoutSec,
+      };
+      const was = { commands: cur.commands, shellMode, allow: stored.map(({ pattern, reason }) => ({ pattern, reason })), bashTimeoutSec };
+      if (JSON.stringify(next) === JSON.stringify(was)) return null;
+      return { ...rest, ...next, ...(warned.current && { shellWarning: true as const }) };
     },
     async (input: RepoTaskSettingsInput) => {
       const dto = await read<RepoTaskSettingsDto>(
         await api.api.repos[":project"][":repo"]["task-settings"].$put({ param: { project: s.project, repo: s.repo }, json: input }),
       );
-      saved.current = JSON.stringify(dto.commands);
       qc.setQueryData(key, dto);
+      // The Task view header shows the mode and the number of patterns.
+      qc.invalidateQueries({ queryKey: ["task"] });
     },
   );
+  const change = (patch: Partial<Rows>, typing: boolean) => {
+    const next = { ...latest.current, ...patch };
+    latest.current = next;
+    setRows(next);
+    saver.request(typing ? TYPING_MS : 0);
+  };
   const id = `task-cmd-${s.project}-${s.repo}`.replace(/[^A-Za-z0-9_-]/g, "_");
+  const accept = (then: () => void) => () => {
+    warned.current = true;
+    then();
+  };
   return (
-    <div className="grid gap-2 px-3 pb-3">
+    <div className="grid gap-4 px-3 pb-3">
       <SaveStatus
         id={`${id}-status`}
         state={state}
-        problem={commands ? null : "A marked command is not saved. Fix it to save the list."}
-        saved="Saved. The next check uses these commands."
+        problem={
+          !commands
+            ? "A marked command is not saved. Fix it to save the list."
+            : !allow
+              ? "A marked pattern is not saved. Fix it to save the list."
+              : sec === null
+                ? `"Longest command" is not saved. ${TIMEOUT_PROBLEM}`
+                : null
+        }
+        saved="Saved. The next step uses these commands."
         onRetry={() => saver.request(0)}
       />
-      <CommandsEditor
-        idPrefix={id}
-        drafts={drafts}
-        newPrefix="cmd"
-        onChange={(next, typing) => {
-          latest.current = next;
-          setDrafts(next);
-          saver.request(typing ? TYPING_MS : 0);
-        }}
-        onBlur={() => void saver.flush()}
-      />
+      <FieldSet className="gap-1.5">
+        <FieldLegend variant="label" className="mb-0 font-semibold">
+          Commands that the app runs
+        </FieldLegend>
+        <CommandsEditor
+          idPrefix={id}
+          drafts={rows.commands}
+          newPrefix="cmd"
+          onChange={(next, typing) => change({ commands: next }, typing)}
+          onBlur={() => void saver.flush()}
+        />
+      </FieldSet>
+      <FieldSet data-shell-settings className="gap-2">
+        <FieldLegend variant="label" className="mb-0 font-semibold">
+          Commands {names.runner} may run
+        </FieldLegend>
+        <FieldDescription className="m-0">
+          The tests, code, fix, and Tell {names.runner} steps can run these commands themselves, such as a remote build. They run as you,
+          with your files, keys, and network.
+        </FieldDescription>
+        <div className="grid gap-1">
+          <ToggleGroup
+            aria-label="Mode"
+            aria-describedby={`${id}-mode-line`}
+            variant="outline"
+            size="sm"
+            spacing={0}
+            className="flex-wrap"
+            value={[rows.mode]}
+            onValueChange={(v) => {
+              const mode = v[0] as ShellMode | undefined;
+              if (!mode || mode === rows.mode) return;
+              if (mode === "allowlist") return change({ mode }, false);
+              setAsk({ kind: "any", run: accept(() => change({ mode: "any" }, false)) });
+            }}
+          >
+            {(["allowlist", "any"] as const).map((m) => (
+              <ToggleGroupItem
+                key={m}
+                value={m}
+                className="aria-pressed:bg-foreground aria-pressed:font-semibold aria-pressed:text-background"
+              >
+                {m === "any" && <TriangleAlert aria-hidden data-icon="inline-start" />}
+                {MODE_TEXT[m]}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+          <p
+            id={`${id}-mode-line`}
+            aria-live="polite"
+            className={rows.mode === "any" ? "m-0 text-xs font-medium text-warn" : "m-0 text-xs text-muted-foreground"}
+          >
+            {modeLine(rows.mode, names.runner)}
+          </p>
+        </div>
+        <AllowEditor
+          idPrefix={`${id}-allow`}
+          drafts={rows.allow}
+          newPrefix="a"
+          onChange={(next, typing) => change({ allow: next }, typing)}
+          onBlur={() => void saver.flush()}
+          onAdd={(add) => (warned.current ? add() : setAsk({ kind: "warning", run: accept(add) }))}
+        />
+        <div className="grid gap-1">
+          <label htmlFor={`${id}-timeout`} className="text-sm font-medium">
+            Longest command
+          </label>
+          <div className="flex items-center gap-2">
+            <Input
+              id={`${id}-timeout`}
+              type="number"
+              inputMode="decimal"
+              min={1}
+              max={60}
+              step="any"
+              className="h-[30px] w-24"
+              aria-invalid={sec === null ? true : undefined}
+              aria-describedby={`${id}-timeout-help`}
+              value={rows.minutes}
+              onChange={(e) => change({ minutes: e.target.value }, true)}
+              onBlur={() => void saver.flush()}
+            />
+            <span className="text-sm text-ink-2">minutes</span>
+          </div>
+          <p id={`${id}-timeout-help`} className="m-0 text-xs text-muted-foreground">
+            {names.cli} stops a command that runs longer. 10 minutes by default, 60 at most.
+          </p>
+        </div>
+      </FieldSet>
+      <ShellDialog ask={ask} onClose={() => setAsk(null)} />
     </div>
   );
 }

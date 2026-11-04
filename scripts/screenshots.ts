@@ -254,9 +254,23 @@ async function shots(browser: Browser) {
   await questions.getByRole("button", { name: "Send answers" }).click();
   await page.locator("#task-plan").waitFor({ timeout: RUN_MS });
   await page.getByRole("checkbox", { name: "I understand" }).check();
+  // The tick scrolls the pane to the warning. The shot shows the top of the plan.
+  await toTop(page.locator("[data-task]"));
   await rest();
   await save(page, "task-plan");
+  // "Commands Claude may run" (spec.md section 6.21.3): the proposals with ticks. The approval shows the first-use warning.
+  await toTop(page.locator("[data-plan-allow]"), 16);
+  await rest();
+  await save(page, "task-plan-commands");
   await page.locator("[data-primary]").click();
+  await page.getByRole("dialog").getByRole("button", { name: "I understand" }).click();
+  // The code step asks to allow a command (spec.md section 6.21.4). Continue takes "Allow once".
+  const allow = page.locator("#task-allow");
+  await allow.waitFor({ timeout: 3 * RUN_MS });
+  await toTop(page.locator("[data-task]"));
+  await rest();
+  await save(page, "task-allow");
+  await page.locator("[data-primary]", { hasText: "Continue" }).click();
   await page.locator("[data-primary]", { hasText: "Open the PR" }).waitFor({ timeout: 3 * RUN_MS });
   await rest();
   await save(page, "task-build");
@@ -272,6 +286,15 @@ async function shots(browser: Browser) {
   }
   await rest();
   await save(page, "task-update");
+
+  // Settings > Tasks: "Commands Claude may run" of the task repository, with the pattern of the plan (spec.md section 6.21.8).
+  await page.goto(`${BASE}/settings/tasks`);
+  const repoCommands = page.locator("[data-task-commands='PROJ1/sample-repo-4']");
+  await repoCommands.locator("summary").click();
+  await repoCommands.locator("[data-shell-settings]").waitFor();
+  await rest();
+  // The clip shows the repository only. The Clones section below it shows a temp path.
+  await save(page, "settings-commands", repoCommands);
 
   await page.goto(`${BASE}/settings/profiles`);
   await page.locator("#h-profiles").waitFor();
