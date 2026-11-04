@@ -1,6 +1,6 @@
 # Add a repository to a task
 
-Status: design of 2026-11-03 against main fe6c111. WP-AR5 (review runs read other repositories) added on 2026-11-04 against main e9a3723. The user answered Q1 to Q8 "Yes" on 2026-11-04. Q9 and Q10 are open.
+Status: design of 2026-11-03 against main fe6c111. WP-AR5 (review runs read other repositories) added on 2026-11-04 against main e9a3723. The user answered Q1 to Q8 "Yes" on 2026-11-04. The user answered Q9 and Q10 "Yes" on 2026-11-04.
 
 It becomes spec.md section 6.24 (AC-B116 to AC-B135) and tasks.md wave WAR. Examples use the task ABC-123, the main repository PROJ/app, and the other repositories PROJ/lib and PROJ/tools.
 
@@ -595,10 +595,10 @@ User answers of 2026-11-04: Q1 to Q8 are "Yes", as recommended. Decisions for PR
 
 ### 6.24.17 Runs and limits
 
-- Runs: review, re-review, explain, discuss, and session runs in both modes (one code path, sessionSteps). Q9 covers the other kinds.
+- Runs: review, re-review, explain, discuss, session runs in both modes, reply, Fix, and follow-up question runs (Q9). All use prepareWorkspace.
 - The list holds at most ADDED_REPOS_MAX = 10 entries.
 - The tools stay Read, Grep, and Glob, without Bash or --add-dir (claude.ts:373-446). The copies are inside the cwd work/.
-- A read copy gets no submodules (Q10), project instructions, git tools, or CodeGraph index.
+- A read copy gets its own submodules (Q10), with the 6.16.5 walk from its head, cache-first. Its gitlink folders are under its own folder. A read copy gets no project instructions, git tools, or CodeGraph index.
 - Findings and edits stay in the PR repository. The validators read only blobs of the PR cache (judge.ts:204-240, 859-885). repoPath refuses ../repos (validate.ts:58-64).
 
 ### 6.24.18 Storage and routes
@@ -689,10 +689,10 @@ A left-out entry also adds the coverage gap "Repository PROJ/old: <reason>" (gap
 21. AC-B136. PUT read-repos saves the list, and GET /api/instructions gives it. Each refusal gives its status and sentence. An instructions PUT keeps read_json.
 22. AC-B137. A run with PROJ/tools listed gets work/repos/PROJ/tools at the fake default-branch head, detached and sanitized. The fake CLI argv has no --add-dir. After the run, no folder and no worktree entry stay.
 23. AC-B138. A head has a same-server, a nested, an other-host, and a no-URL gitlink. The first two hold files at their gitlink commits. repos.md gives the others their REPO_REASON. A 403 submodule GET does not stop the run.
-24. AC-B139. A second run on the same head fetches no submodule (git argv spy).
+24. AC-B139. A second run on the same heads fetches no submodule of the PR repository or of a read copy (git argv spy).
 25. AC-B140. Four entries fail: 404, 403, no default branch, and a failed fetch. Each shows its sentence in repos.md, coverage, and RunDto.repos. The run completes. Cancel in a read fetch ends it cancelled.
 26. AC-B141. An entry that is a mapped submodule gets no read copy.
-27. AC-B142. The stdin of review, re-review, explain, discuss, and both session modes holds the lines of 6.24.21. Without entries and gitlinks, the snapshot and the prompt equal those of today.
+27. AC-B142. The stdin of review, re-review, explain, discuss, both session modes, reply, Fix, and follow-up question runs holds the lines of 6.24.21. Without entries and gitlinks, the snapshot and the prompt equal those of today.
 28. AC-B143. A finding under ../repos drops with reason path, and one in a submodule folder with reason file. A fix or session edit there is skipped.
 29. AC-B144. The Run log shows the lines of 6.24.23. A run without repos_json shows none.
 30. AC-B145. UI e2e (settings-read-repos.e2e.ts) covers Add from the search, Remove, the cap hint, and a 409 sentence. PROJ/app is not a choice. The Run log names the copy.
@@ -723,5 +723,5 @@ A left-out entry also adds the coverage gap "Repository PROJ/old: <reason>" (gap
 
 - Risk: the first fetch of a large repository delays the first run. Later runs fetch only new commits.
 - Unverified: whether codegraph 1.6.2 indexes files of submodule worktrees in ./repo. Implement steps have this layout today (worktree.ts:464-485). If it does, decision 4 needs an exclude.
-- Q9. Should reply, Fix, and follow-up question runs get the copies too? Recommended: yes. They use the same prepareWorkspace, and a fix can need a caller.
-- Q10. Should a read copy get its own submodules, as an added repository does (decision 6)? Recommended: no. Each one adds fetches to every run.
+- Q9 (answered 2026-11-04: yes). Reply, Fix, and follow-up question runs get the copies too.
+- Q10 (answered 2026-11-04: yes). A read copy gets its own submodules, because a submodule can hold the needed code. AC-B146: a read copy with a same-server gitlink holds the submodule files at the gitlink commit, and repos.md lists it as "../repos/PROJ/tools/sub: PROJ/sub · submodule of PROJ/tools · commit <sha>". A failed walk of a read copy leaves only its submodules out.
