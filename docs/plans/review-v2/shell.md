@@ -154,3 +154,74 @@ CodeGraph: used 0 times. I used direct reads, because the target was the CLI bun
 - Q2 yes: kill the leftovers after every run, not only on Stop.
 - Q3 changed: deny `Bash(xargs *)` in allowlist mode only while no allowlist entry of the repository names xargs. A task that needs xargs gets an entry from the plan or an allow request. Scripts that call xargs inside (for example a test command) are not affected, because the rules check only the command that Claude types.
 - Q4 yes: checks.ts uses the same kill.
+
+
+## Refused Bash calls in a tests step (2026-11-04)
+
+Analysis by the investigator against main c8a272b. User report: with all commands allowed, a tests step still shows "Refused by the allowlist" for compound read-only commands (cd, cat, head, grep with a quoted backslash-pipe, wc, echo). Not built. The user decides on the fixes.
+
+The label "Refused by the allowlist" does not prove the allowlist refused these commands. In `src/server/review/stream.ts:228-234`, the app labels every Bash refusal "allowlist" unless it can tell it came from a deny rule. That includes the CLI's own safety checks, and those also refuse in Any command mode. The most likely cause is one of those checks. Two runs are needed to tell the causes apart (see 5): the Log tab line and a gate probe with the real CLI.
+
+**1. How the mode reaches a tests step**
+- There is no per-task or per-plan copy. `shellOf` (`src/server/tasks/loop.ts:711-720`) reads `repoSettings(project, repo)` fresh at each step start (`loop.ts:660`). It merges the repository allowlist with the "Allow once" decisions of the last run of that step.
+- Plan approval only proposes patterns. It does not freeze the mode.
+- If the user switches to Any command during a task, the next step uses it. The step that is running keeps the shell.json it was started with.
+
+**2. What shell.json the step gets**
+- `shellSettings` (`src/server/tasks/shell.ts:121-145`):
+  - Any command: `allow: ["Bash"]`.
+  - Allowlist: `allow: Bash(<pattern>)` for each pattern.
+  - Both modes deny git, the Bitbucket and Jira hosts, the network programs, the credential tools, and powershell/pwsh. Both also deny reads of the data folder and the home secrets. Allowlist mode also denies `Bash(xargs *)`.
+- No mode uses `Bash(*)`.
+- `tests` is in `SHELL_STEPS` (`loop.ts:397`).
+- In allowlist mode with no patterns, the step gets no Bash at all (`loop.ts:718`). So a "Refused" note means the step did have Bash.
+
+**3. How the label is chosen**
+- The B23 label bug for deny rules is fixed. "deny" now covers `decision_reason_type === "rule"` and the message "Permission to use Bash with command … has been denied." (`stream.ts:229-230`). SU3 in `integration-check.md:457` records this as "now labels both deny forms deny".
+- So these two refusals were not deny rules, or the label would read "Refused by the deny list".
+- Everything else falls to "allowlist" (`stream.ts:231`, labels in `src/shared/run-log.ts:35-38`). That includes:
+  - type `other`, "This command requires approval": no allow rule matched.
+  - CLI safety checks with no reason type, for example the B22 event "Output redirection to '…' needs approval" in `fixtures/claude/b22-refusals.jsonl`.
+- In Any mode the allowlist cannot refuse anything. There the label is wrong by construction.
+
+**4. Your two commands under CLI 2.1.316**
+- **Deny rules:** none match. There is no git, no host, no network program, and no xargs. B27 and B27b show that `allow: ["Bash"]` runs a plain probe.
+- **Allowlist mode:** each part of a compound command needs a rule (shell.md V2, SU4).
+  - `cd`, `cat`, `head`, `wc`, and `echo` are on the CLI's built-in read-only list (shell.md:114).
+  - `grep` is not on that list. It only appears in the folder-check map (shell.md:117).
+  - So unless a rule names grep, the grep part fails the whole command with "requires approval".
+- **Any mode:** `allow: Bash` covers every part, so only a CLI safety check can refuse. Both refused commands have `"…\|…"` inside a grep pattern. The second also has `^#`. The bundle holds a family of checks that need approval, such as "Contains backslash-escaped whitespace". I did not find which one fires on `\|` or `#` in quotes. This is a hypothesis, unverified.
+
+**5. Root causes, most likely first**
+- **A (most likely): the step ran in allowlist mode** and grep had no rule. Possible reasons:
+  - the user's "allow all" meant ticking Allow on each request;
+  - the switch to Any command came while that step was already running.
+  - How to tell: the step's Log tab line (`LogTab.tsx:298`, from `StepDetail.shell.mode`) reads "Commands: allowlist, N patterns".
+- **B (if that line reads "Commands: any command"): a CLI safety check** (needs approval, refused under `-p`), labelled "allowlist" by the fallthrough.
+  - How to tell: the exact refusal text, which only the session jsonl or a probe shows. The app does not store the raw stream.
+  - The task header line "Commands: any command" (`TaskView.tsx:483`) shows the current repository setting, not what the step ran with.
+  - The run folder's `shell.json` shows `"allow":["Bash"]` for Any mode.
+- **C: a deny rule.** Ruled out by the label (point 3).
+
+**6. Fixes**
+- **For B (needed either way): fix the label.** Effort: `implementer`.
+  - Make `createStreamParser` aware of the mode. Anything that is neither deny nor `type other` with "requires approval" becomes a new `REFUSED_NOTE.check` = "Refused by a Claude Code safety check". In Any mode, never print "allowlist".
+  - Have `allowAsks` turn only true allowlist refusals into requests.
+  - Spec: amend spec 6.21.6.
+  - Tests: feed the b22 redirect event and an Any-mode `other` event to `tests/review/stream`, and expect the new note. Also a unit test on `allowAsks`.
+- **Prove B with a gate probe** (real CLI, needs your authorization). Effort: `investigator` to design it.
+  - Add B30 to `scripts/gate/claude-checks.ts`: run your two commands, plus versions without `\|` and `#`, under both `allow: Bash` and an allowlist.
+  - Record the reason type and message as SU11 in `integration-check.md`.
+  - If confirmed, add one line to the step prompt: "Use the Grep tool, not grep in Bash. Avoid `\|` in Bash patterns." This fix is unverified until B30 runs.
+- **For A: always allow read-only search in shell steps.** Effort: `implementer`.
+  - In allowlist mode, add a fixed `Bash(grep *)` (also `rg *`). The CLI folder check still guards the paths.
+  - The other commands you listed (`cat`, `head`, `wc`, `echo`, `cd`, `ls`) need nothing: the CLI already allows them.
+  - Spec: add one line to 6.21. Tests: `tests/tasks/shell.test.ts` checks that the allow list holds the grep rule in allowlist mode.
+- **For A, a UI help (optional):** show "Applies to the next step" next to the mode switch in Settings > Tasks. Effort: `implementer`.
+
+**Unproven:**
+- The exact CLI check behind cause B.
+- Whether a quoted `\|` alone triggers it.
+- The user's actual mode for that step.
+
+I did not run the real CLI or any tests. Reading the minified CLI bundle gave no conclusive answer.
