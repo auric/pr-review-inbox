@@ -5,12 +5,27 @@
 // file, because --restricted loads --settings (V9). Rules match the command text only (V4): they reduce mistakes, they stop no attacker.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BASH_TIMEOUT_MAX_SEC, CREDENTIAL_TOOLS, programOf, type ShellMode, type TaskCommand } from "../../shared/task";
+import {
+  ALLOW_MAX,
+  ALLOW_REQUESTS_MAX,
+  type AllowEntry,
+  type AllowProposal,
+  type AllowRequest,
+  allowProblem,
+  BASH_TIMEOUT_MAX_SEC,
+  CREDENTIAL_TOOLS,
+  programOf,
+  type ShellMode,
+  type TaskCommand,
+} from "../../shared/task";
+import type { Refusal } from "../review/stream";
 import { longPath } from "../review/workspace";
 
 // rules: the inner patterns, such as "ssh build1 *". bashTimeoutSec: the time limit of one command. dataDir: the app data folder.
 // origins: the Bitbucket and Jira base URLs of the config.
 export type ShellSpec = { mode: ShellMode; rules: string[]; bashTimeoutSec: number; dataDir: string; origins: string[] };
+// The shell of one task step. The run adds dataDir and origins.
+export type StepShell = Pick<ShellSpec, "mode" | "rules" | "bashTimeoutSec">;
 
 // A deny rule wins over every allow rule, in both modes (V5).
 const GIT_DENY = ["Bash(git *)", "Bash(*/git *)", "Bash(git.exe *)", "Bash(*/git.exe *)", "Bash(*\\git.exe *)"];
@@ -25,6 +40,72 @@ const RULE_UNSAFE = /[()*?[\]\\]/;
 const PLAIN_ARG = /^[A-Za-z0-9_./:=@%+,-]+$/;
 
 export const hostsOf = (origins: readonly string[]) => [...new Set(origins.map((o) => new URL(o).hostname.toLowerCase()))];
+
+// The Bitbucket and Jira base URLs of the config.
+export const originsOf = (c: { baseUrl?: string; jira?: { baseUrl: string } } | null) =>
+  [c?.baseUrl, c?.jira?.baseUrl].filter((u): u is string => !!u && URL.canParse(u));
+
+// D1: adds patterns to the allowlist of a repository. A pattern in the list stays as it is. A new entry gets the first free ID a<n>.
+// Returns the reason for 400 when a pattern fails allowProblem or the list grows over ALLOW_MAX.
+export function mergeAllow(
+  list: readonly AllowEntry[],
+  add: readonly AllowProposal[],
+  source: AllowEntry["source"],
+  hosts: readonly string[],
+  now: number,
+): AllowEntry[] | { error: string } {
+  const out = [...list];
+  const ids = new Set(out.map((e) => e.id));
+  let n = 1;
+  for (const a of add) {
+    const pattern = a.pattern.trim();
+    const problem = allowProblem(pattern, hosts);
+    if (problem) return { error: `${pattern}: ${problem}` };
+    if (out.some((e) => e.pattern === pattern)) continue;
+    while (ids.has(`a${n}`)) n++;
+    ids.add(`a${n}`);
+    out.push({ id: `a${n}`, pattern, reason: a.reason.trim(), source, addedAt: now });
+  }
+  return out.length > ALLOW_MAX ? { error: `The list can hold at most ${ALLOW_MAX} patterns.` } : out;
+}
+
+// D3: the requests that a step gives the user. requests: allowRequest of the result. killed: the runner ended the run over REFUSED_MAX
+// refused commands, so each allowlist refusal becomes a request with its exact command as the pattern. A deny refusal never becomes
+// a request. rules: the patterns of the run. refusedBefore: the patterns that the user refused for this task. notes: why a request
+// does not show.
+export function allowAsks(i: {
+  mode: ShellMode | null;
+  requests: readonly AllowRequest[];
+  refused: readonly Refusal[];
+  killed: boolean;
+  rules: readonly string[];
+  refusedBefore: ReadonlySet<string>;
+  hosts: readonly string[];
+}): { asks: AllowRequest[]; notes: string[] } {
+  if (i.mode === "any")
+    return { asks: [], notes: i.requests.length ? ["Any command is on, so the app ignored the allow requests of the step."] : [] };
+  const denied = new Set(i.refused.filter((r) => r.by === "deny").map((r) => r.command));
+  const asked = i.killed
+    ? i.refused
+        .filter((r) => r.by === "allowlist" && r.command.trim())
+        .map((r) => ({ pattern: r.command.trim(), command: r.command, reason: "Claude Code refused this command in the step." }))
+    : i.requests;
+  const asks: AllowRequest[] = [];
+  const notes: string[] = [];
+  for (const a of asked) {
+    const pattern = a.pattern.trim();
+    const problem = allowProblem(pattern, i.hosts);
+    if (asks.some((x) => x.pattern === pattern)) continue;
+    if (problem) notes.push(`Claude asked to allow ${pattern}. The app refused it: ${problem}`);
+    else if (denied.has(a.command)) notes.push(`Claude asked to allow ${pattern}. The deny list refused ${a.command}.`);
+    else if (i.refusedBefore.has(pattern)) notes.push(`Claude asked again to allow ${pattern}. You refused it for this task.`);
+    else if (i.rules.includes(pattern)) notes.push(`Claude asked to allow ${pattern}, which the step had already.`);
+    else if (asks.length >= ALLOW_REQUESTS_MAX)
+      notes.push(`Claude asked for more than ${ALLOW_REQUESTS_MAX} commands. The app left out ${pattern}.`);
+    else asks.push({ ...a, pattern });
+  }
+  return { asks, notes };
+}
 
 // V20: a rule names the Windows path C:\x as //c/x, and the POSIX path /x as //x.
 export function rulePath(dir: string, platform: NodeJS.Platform = process.platform) {

@@ -51,6 +51,10 @@ export type FakeScenario = {
   writes?: { path: string; text?: string; junction?: string }[];
   // The init of an implement run lists no Bash, as Claude Code on Windows without Git Bash (spec.md section 6.21, V12).
   noBash?: boolean;
+  // spec.md section 6.21: the Bash calls of an implement run, after init. refused: the rule list that refuses the call, with the
+  // permission_denied fields of integration-check.md SU3. files: what the command writes, by path relative to the cwd, with no Write
+  // call, as a build does. output: the tool_result text of a call that runs.
+  bash?: { command: string; refused?: "allowlist" | "deny"; files?: { path: string; text?: string; link?: string }[]; output?: string }[];
   // docs/plans/review-v2/spec.md section 2.9: the notes of the echo reply result, and the cites of its first reply. Absent: none.
   notes?: unknown;
   cites?: unknown;
@@ -356,7 +360,7 @@ async function main() {
   record({ argv: args, env: process.env, cwd: process.cwd(), stdin, pid: process.pid, context, attachments, skills, mcp, agents });
 
   if (args[0] === "--version") {
-    console.log(s.version ?? "2.1.295 (Claude Code)");
+    console.log(s.version ?? "2.1.302 (Claude Code)");
     return;
   }
   if (args[0] === "auth" && args[1] === "status") {
@@ -431,6 +435,47 @@ async function main() {
         }),
       );
     }
+  }
+
+  // The Bash calls: the tool_use, then for a refused call the permission_denied event before the error tool_result (b17 order).
+  for (const [k, b] of (s.bash ?? []).entries()) {
+    const id = `toolu_fake_bash_${k}`;
+    if (!b.refused)
+      for (const f of b.files ?? []) {
+        const p = resolve(process.cwd(), f.path);
+        mkdirSync(dirname(p), { recursive: true });
+        if (f.link !== undefined) symlinkSync(f.link, p, "junction");
+        else writeFileSync(p, f.text ?? "");
+      }
+    const text = b.refused
+      ? b.refused === "deny"
+        ? `Permission to use Bash with command ${b.command} has been denied.`
+        : "This command requires approval"
+      : (b.output ?? "");
+    writeEvents.push(
+      JSON.stringify({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: b.command } }] },
+      }),
+      ...(b.refused
+        ? [
+            JSON.stringify({
+              type: "system",
+              subtype: "permission_denied",
+              tool_name: "Bash",
+              tool_use_id: id,
+              decision_reason_type: b.refused === "deny" ? "rule" : "other",
+              message: text,
+            }),
+          ]
+        : []),
+      JSON.stringify({
+        type: "user",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "tool_result", tool_use_id: id, content: text, ...(b.refused && { is_error: true }) }] },
+      }),
+    );
   }
 
   const agentTool = (flag("--tools") ?? "").split(",").includes("Agent");

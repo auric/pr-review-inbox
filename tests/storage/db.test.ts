@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 43;
+const LATEST = 44;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1113,6 +1113,11 @@ test("migration from a version-32 database keeps every row and child row; task r
       // 034_task_base.sql runs after 033_task.sql in openDb.
       last_base: null,
       updated_at: 1,
+      // 044_task_shell.sql.
+      shell_mode: "allowlist",
+      allow_json: "[]",
+      shell_warned_at: null,
+      bash_timeout_sec: 600,
     });
     expect(() => db.run("INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ('P', 'r', 2)")).toThrow(/UNIQUE/);
 
@@ -1165,9 +1170,10 @@ test("migration from a version-33 database keeps every task setting; last_base i
   const db = openDb(path);
   try {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
-    expect(columns(db, "repo_task_settings")).toEqual([...oldColumns, "last_base"]);
+    const shell = { shell_mode: "allowlist", allow_json: "[]", shell_warned_at: null, bash_timeout_sec: 600 };
+    expect(columns(db, "repo_task_settings")).toEqual([...oldColumns, "last_base", ...Object.keys(shell)]);
     expect(db.query("SELECT * FROM repo_task_settings").all()).toEqual(
-      (before as Record<string, unknown>[]).map((r) => ({ ...r, last_base: null })),
+      (before as Record<string, unknown>[]).map((r) => ({ ...r, last_base: null, ...shell })),
     );
   } finally {
     db.close();
@@ -1490,6 +1496,48 @@ test("migration from a version-42 database keeps every event with its ID; the ru
     expect(() => insert("run_finished", "12")).toThrow(/UNIQUE/);
     expect(() => insert("run_cancelled", "14")).toThrow(/CHECK/);
     expect(db.query("SELECT MAX(id) AS id FROM event").get()).toEqual({ id: 8 });
+  } finally {
+    db.close();
+  }
+});
+
+// 044_task_shell.sql: spec.md section 6.21, the commands that Claude may run with the Bash tool.
+test("migration from a version-43 database keeps the repository settings; the shell columns take their defaults", () => {
+  const path = join(dir, "v43.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+    "041_build_status.sql",
+    "042_task_subtasks.sql",
+    "043_run_events.sql",
+  ]);
+  old.exec("PRAGMA user_version = 43");
+  old.exec(`INSERT INTO repo_task_settings (project, repo, commands_json, warned_at, updated_at) VALUES ('P', 'r', '[]', 5, 6)`);
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("SELECT warned_at, shell_mode, allow_json, shell_warned_at, bash_timeout_sec FROM repo_task_settings").get()).toEqual({
+      warned_at: 5,
+      shell_mode: "allowlist",
+      allow_json: "[]",
+      shell_warned_at: null,
+      bash_timeout_sec: 600,
+    });
+    expect(() => db.run("UPDATE repo_task_settings SET shell_mode = 'all'")).toThrow(/CHECK/);
+    expect(() => db.run("UPDATE repo_task_settings SET bash_timeout_sec = 3601")).toThrow(/CHECK/);
+    db.run("UPDATE repo_task_settings SET shell_mode = 'any', bash_timeout_sec = 3600");
   } finally {
     db.close();
   }

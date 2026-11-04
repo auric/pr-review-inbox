@@ -29,6 +29,15 @@ import {
 } from "./review";
 import type { RunErrorKind, RunEvent, RunStatus } from "./run-log";
 import {
+  ALLOW_CHOICES,
+  ALLOW_MAX,
+  ALLOW_PATTERN_MAX,
+  ALLOW_REQUESTS_MAX,
+  type AllowEntry,
+  type AllowRequest,
+  allowId,
+  allowProposal,
+  BASH_TIMEOUT_MAX_SEC,
   BUILDS_AT_ONCE_CAP,
   commandId,
   type FoundItem,
@@ -44,6 +53,8 @@ import {
   type QuestionSource,
   type RepoAccess,
   type RepoRole,
+  SHELL_MODES,
+  type ShellMode,
   type SizeSource,
   type SpecResult,
   START_MODES,
@@ -1372,6 +1383,13 @@ export const taskPlanInput = z.object({
   // offered ID or starts with "new-".
   commands: z.array(z.union([commandId, taskCommand])).max(MAX_TASK_COMMANDS),
   warning: z.literal(true).optional(),
+  // spec.md section 6.21 (D2): the picked command patterns, by the same ID rules as commands. The approval adds them to the list of the
+  // repository. Absent: the list stays. shellWarning: the first-use warning of the commands that Claude runs is accepted.
+  allow: z
+    .array(z.union([allowId, allowProposal.extend({ id: allowId })]))
+    .max(ALLOW_MAX)
+    .optional(),
+  shellWarning: z.literal(true).optional(),
   // spec.md section 6.16. Absent prefix: the first prefix of Settings > Tasks. Absent existing: continue. bases: the base pick of each
   // repository of the task (section 6.16.3); each one must be the base that the plan was written on. Absent: the stored bases.
   prefix: branchPrefix.optional(),
@@ -1468,6 +1486,18 @@ export const taskInstructionsInput = z.object({
 });
 // POST /api/tasks/:id/limit (spec.md section 6.1, a part over the line limit): keep, "Keep one PR"; lineBudget, "Change the limit" for
 // this task.
+// POST /api/tasks/:id/allow (spec.md section 6.21): one choice for each pattern that the step asks for. shellWarning: the first-use
+// warning of the commands that Claude runs is accepted.
+export const taskAllowInput = z.object({
+  version,
+  step: positiveInt,
+  decisions: z
+    .array(z.object({ pattern: z.string().trim().min(1).max(ALLOW_PATTERN_MAX), choice: z.enum(ALLOW_CHOICES) }))
+    .min(1)
+    .max(ALLOW_REQUESTS_MAX),
+  shellWarning: z.literal(true).optional(),
+});
+export type TaskAllowInput = z.infer<typeof taskAllowInput>;
 export const taskLimitInput = z.union([
   z.object({ version, keep: z.literal(true) }),
   z.object({ version, lineBudget: z.number().int().min(1).max(100_000) }),
@@ -1486,14 +1516,29 @@ export const repoTaskSettingsInput = z.object({
   testGlobs: z.array(z.string().min(1).max(200)).max(50).nullable(),
   excludeGlobs: z.array(z.string().min(1).max(200)).max(50).nullable(),
   isolateHome: z.boolean(),
+  // spec.md section 6.21. Absent: the stored value stays. allow: the whole list; an entry with a stored pattern keeps its ID and source.
+  // shellWarning: the warning of the first list, or of a switch to Any command, is accepted.
+  shellMode: z.enum(SHELL_MODES).optional(),
+  allow: z.array(allowProposal).max(ALLOW_MAX).optional(),
+  bashTimeoutSec: z.number().int().min(1).max(BASH_TIMEOUT_MAX_SEC).optional(),
+  shellWarning: z.literal(true).optional(),
 });
 export type TaskCreateInput = z.infer<typeof taskCreateInput>;
 export type TaskAnswersInput = z.infer<typeof taskAnswersInput>;
 export type TaskPlanInput = z.infer<typeof taskPlanInput>;
 export type TaskPlanAgainInput = z.infer<typeof taskPlanAgainInput>;
 export type RepoTaskSettingsInput = z.infer<typeof repoTaskSettingsInput>;
-// warnedAt: the first-use warning of the repository was accepted then.
-export type RepoTaskSettingsDto = RepoTaskSettingsInput & { project: string; repo: string; warnedAt: number | null };
+// warnedAt: the first-use warning of the repository was accepted then. shellWarnedAt: the same for the commands that Claude runs
+// (spec.md section 6.21).
+export type RepoTaskSettingsDto = Omit<RepoTaskSettingsInput, "shellMode" | "allow" | "bashTimeoutSec" | "shellWarning"> & {
+  project: string;
+  repo: string;
+  warnedAt: number | null;
+  shellMode: ShellMode;
+  allow: AllowEntry[];
+  bashTimeoutSec: number;
+  shellWarnedAt: number | null;
+};
 
 export type TaskQuestionDto = {
   id: number;
@@ -1676,7 +1721,16 @@ export type TaskPlanDto = {
   contracts: SpecResult["contracts"];
   risks: SpecResult["risks"];
   checks: PlanProblem[];
+  // spec.md section 6.21 (D2): the saved command patterns of the repository (saved true, "approved before"), then the proposals of the
+  // plan with the IDs "new-1" and up. warning: the text for an interpreter pattern. shellWarning: picks need the first-use warning.
+  allow: { id: string; pattern: string; reason: string; saved: boolean; warning: string | null }[];
+  shellWarning: boolean;
 };
+
+// spec.md section 6.21: the commands that Claude may run in the repository of the task. warned: the first-use warning was accepted.
+export type TaskShellDto = { mode: ShellMode; allow: AllowEntry[]; bashTimeoutSec: number; warned: boolean };
+// The request of the step that waits on blocked kind allow. warning: "Allow for this repository" needs the first-use warning.
+export type TaskAllowAskDto = { step: number; requests: AllowRequest[]; warning: boolean };
 
 // One Jira sub-task of a task (spec.md section 6.20.8). statusAt: ms of the last status read. found: the branches and PRs that name the
 // key. parts: the task_part IDs that build or follow it. added, removed: ms of the status read that found the key new or gone.
@@ -1743,6 +1797,9 @@ export type TaskDto = TaskRowDto & {
   subtasks: SubtaskDto[] | null;
   // spec.md section 6.20.9: the Jira status of the task key from the newest read, for the parent row hint. null: not known.
   issueStatus: string | null;
+  // spec.md section 6.21. allowAsk: null unless the task waits on blocked kind allow.
+  shell: TaskShellDto;
+  allowAsk: TaskAllowAskDto | null;
 };
 
 // taskRepo: task_repo.id. branch: the base branch that the user picked for the repository. changed: "Pick a base branch" set the branch

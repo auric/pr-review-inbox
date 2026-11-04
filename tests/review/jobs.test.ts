@@ -827,7 +827,7 @@ describe("start and failures", () => {
       const d = (await h.json<RunDetail>(`/api/runs/${id}`)).body;
       expect(d.run).toMatchObject({ status: "failed", errorKind: "restart", hasRaw: true });
       expect(d.run.finishedAt).not.toBeNull();
-      expect((await h.json<MetaDto>("/api/meta")).body.runner.check).toEqual({ ok: true, version: "2.1.295" });
+      expect((await h.json<MetaDto>("/api/meta")).body.runner.check).toEqual({ ok: true, version: "2.1.302" });
     },
     SLOW,
   );

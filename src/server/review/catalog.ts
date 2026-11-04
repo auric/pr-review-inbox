@@ -1009,6 +1009,8 @@ export const specRules = (budget: number, platform: string = process.platform) =
   "On Windows, the Python of a venv is .venv/Scripts/python.exe, not .venv/bin/python.",
   "When the project needs a venv, add a setup command that creates it first, such as python -m venv .venv.",
   "When the tests need a service, such as a database, make its setup the first task.",
+  // spec.md section 6.21 (D2).
+  "List in testing.allow each command that the implement steps must run themselves. Examples are the remote build and the copy to the build host that a skill describes. Make each pattern as narrow as you can. Give a one-line reason. Never list git, a shell, or the Bitbucket or Jira host.",
   "Propose a size. Small: one pull request under the budget, with no schema or API change. Medium: one code pull request after a plan review. Large: more code pull requests.",
   "Estimate the changed lines of each part from the files that you read. Do not count lock files.",
   `Start with the integration map. ${FIND_CODE} Give path and line for each entry.`,

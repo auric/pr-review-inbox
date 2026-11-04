@@ -14,7 +14,7 @@ This test checks reviews, triage, posts, replies, and reply drafts against the r
 ## Preparation
 
 1. Run `bun install` and `bun run build`.
-2. Run `claude --version`. Expect 2.1.295 or later.
+2. Run `claude --version`. Expect 2.1.302 or later.
 3. Run `claude auth status`. Expect `"authMethod": "claude.ai"`. If the value is different, run `claude auth login --claudeai` first.
 4. Remove `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the terminal. PowerShell: `Remove-Item Env:ANTHROPIC_API_KEY, Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue`.
 5. Make a new temp folder. PowerShell: `$env:REVIEW_LOOP_DATA_DIR = Join-Path $env:TEMP "review-loop-smoke-$(Get-Random)"`. Bash: `export REVIEW_LOOP_DATA_DIR="$(mktemp -d)"`.

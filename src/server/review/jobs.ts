@@ -62,6 +62,7 @@ import { log } from "../log";
 import type { Settings } from "../settings";
 import { noteTaskWaits } from "../tasks/notify";
 import { taskRepos } from "../tasks/repos";
+import { originsOf, type StepShell } from "../tasks/shell";
 import { recoverTasks, taskRow } from "../tasks/tasks";
 import { inside, tasksRoot } from "../tasks/worktree";
 import {
@@ -346,6 +347,8 @@ export type ImplementRunStart = {
   prompt: (instructions: string, lines: { skills: string[]; mcp: string[] }) => string;
   maxTurns: number;
   timeoutMs: number;
+  // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
+  shell?: StepShell;
   started: (db: Database, run: number) => void;
   after: (o: RunOutcome | null, early: Ending | null, servers: string[], gaps: string[]) => Promise<Ending>;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
@@ -1489,6 +1492,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                 model: j.profile.model,
                 effort: j.profile.effort,
                 timeoutMs: t.timeoutMs,
+                ...(t.shell && { shell: { ...t.shell, dataDir, origins: originsOf(settings.config()) } }),
               },
               (events) => {
                 j.db.transaction(() => upsertEvents(j.db, j.id, events))();

@@ -10,6 +10,7 @@ import {
   IMPLEMENT_TOOLS,
   type ImplementSpec,
   implementArgs,
+  MIN_CLI_VERSION,
   RUN_MARKER,
   type RunnerOptions,
   type RunSpec,
@@ -322,11 +323,14 @@ describe("safety", () => {
     expect(calls().some((c) => c.argv.includes("-p"))).toBe(false);
   });
 
-  test("a CLI older than the Gate B version is unavailable", async () => {
-    const { runner, spec, calls } = setup({ version: "2.1.294 (Claude Code)" });
-    expect(await runner.check()).toMatchObject({ ok: false, kind: "unavailable" });
+  test("a CLI older than 2.1.302 is unavailable: from 2.1.302, -p refuses each call that needs approval (V7)", async () => {
+    expect(MIN_CLI_VERSION).toBe("2.1.302");
+    const { runner, spec, calls } = setup({ version: "2.1.301 (Claude Code)" });
+    expect(await runner.check()).toEqual({ ok: false, kind: "unavailable", message: "Claude Code 2.1.301 is older than 2.1.302." });
     expect(await runner.run(spec)).toMatchObject({ status: "failed", kind: "process" });
     expect(calls().every((c) => c.argv[0] === "--version")).toBe(true);
+    const ok = setup({ version: "2.1.302 (Claude Code)" });
+    expect(await ok.runner.check()).toMatchObject({ ok: true, version: "2.1.302" });
   });
 
   test.skipIf(process.platform !== "win32")("a .cmd claude is refused", async () => {

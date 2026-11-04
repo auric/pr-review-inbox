@@ -28,6 +28,7 @@ import {
   type TaskProfileDto,
   type TaskRepoListDto,
   type TaskTransitionsDto,
+  taskAllowInput,
   taskAnswersInput,
   taskBaseInput,
   taskCreateInput,
@@ -58,6 +59,7 @@ import type { Settings } from "../settings";
 import { lowerUnread, startable, syncParts } from "./gates";
 import { createLoop } from "./loop";
 import { createPrOpener, partDiff } from "./pr";
+import { hostsOf, originsOf } from "./shell";
 import { createTaskService, preselectProfile, repoSettings, saveRepoSettings, type TaskResult, taskRow } from "./tasks";
 
 const unconfigured = { error: "Configure the Bitbucket URL and token first." } satisfies ApiError;
@@ -247,6 +249,19 @@ export function createTaskRoutes(opts: {
         if (building) await loop.settle(id);
         return answer(c, building ? loop.answer(db, id, c.req.valid("json")) : tasks.answers(db, id, c.req.valid("json")));
       })
+      // spec.md section 6.21: the user's choice for each command that a step asks to allow.
+      .post(
+        "/tasks/:id/allow",
+        idParam,
+        body(taskAllowInput, "Give the task version, the step, and a choice for each pattern."),
+        async (c) => {
+          const db = openDb();
+          if (!db) return c.json(unconfigured, 409);
+          const { id } = c.req.valid("param");
+          await loop.settle(id);
+          return answer(c, loop.allow(db, id, c.req.valid("json")));
+        },
+      )
       .put("/tasks/:id/docs", idParam, body(taskDocInput, "Invalid plan file."), (c) => {
         const db = openDb();
         return db ? answer(c, tasks.docs(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
@@ -568,7 +583,8 @@ export function createTaskRoutes(opts: {
         const s = c.req.valid("json");
         if (new Set(s.commands.map((x) => x.id)).size !== s.commands.length)
           return c.json<ApiError>({ error: "Each command needs its own ID." }, 400);
-        saveRepoSettings(db, project, repo, s);
+        const error = saveRepoSettings(db, project, repo, s, hostsOf(originsOf(opts.settings.config())));
+        if (error) return c.json<ApiError>({ error }, 400);
         return c.json<RepoTaskSettingsDto>(repoSettings(db, project, repo), 200);
       })
   );

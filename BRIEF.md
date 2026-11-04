@@ -144,7 +144,7 @@ Bitbucket webhooks cannot reach a laptop on localhost. The app polls the REST AP
 - Never use `--bare`. It never reads OAuth credentials or the keychain, so the subscription login fails with it.
 - `ANTHROPIC_API_KEY` in the environment wins over the subscription. The app removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the child environment.
 - Before each run, the app calls `claude auth status`. It runs only when `authMethod` is `claude.ai`. Otherwise it stops and explains. Log only `authMethod` from `claude auth status`, because its output also holds the email and organization.
-- `--restricted` ignores the settings files and keeps the file tools inside the cwd (Gate B8). The app refuses a CLI older than 2.1.295.
+- `--restricted` ignores the settings files and keeps the file tools inside the cwd (Gate B8). The app refuses a CLI older than 2.1.302 (V7 of docs/plans/review-v2/shell.md).
 - A separate folder is not an OS sandbox. The review gets read-only tools only, no shell, and no code-host token.
 - Fix runs (Release 3) are read-only, like reviews. They get no Edit, Write, or Agent tool. They return exact text replacements in `structured_output`. The app checks each edit. It applies the edits only after the user clicks Apply.
 - The app never runs `claude` in the user's clone. A fix run uses the same sanitized snapshot as a review.
@@ -418,7 +418,7 @@ Review runner:
 - The app writes context files into `work/context`: the numbered diff, the changed-file list, and the PR text with the existing comments. The review reads history only through the read-only git MCP of the app.
 - Spawn the native claude binary (claude.exe on Windows) with the shell off. cwd = the run folder. Send the prompt on stdin, because Windows limits the command-line length.
 - Refuse a claude.cmd wrapper, because cmd.exe parses the arguments again. The runner check says "claude.cmd is not the native claude.exe." and no run starts.
-- Before spawn: require CLI v2.1.295 or later. Run claude auth status (JSON, exit 0 when logged in). Run only when authMethod is claude.ai. Values such as api_key, oauth_token, or none stop the run with an explanation.
+- Before spawn: require CLI v2.1.302 or later. Run claude auth status (JSON, exit 0 when logged in). Run only when authMethod is claude.ai. Values such as api_key, oauth_token, or none stop the run with an explanation.
 - Child environment: remove ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDECODE, CLAUDE_PID, all CLAUDE_CODE_* variables, BUN_BE_BUN, BUN_OPTIONS, and NODE_OPTIONS. Then set CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (Gate B3). A run started from inside a Claude Code session behaves like a normal run.
 - Flags (the Gate B command, integration-check.md): -p --output-format stream-json --verbose --restricted --strict-mcp-config --mcp-config <app file> --tools Read,Grep,Glob[,Agent] --allowedTools Read,Grep,Glob,mcp__<app server> --agents <file> --agent rl-main --json-schema <schema> --max-turns <cap> --no-session-persistence.
 - No --settings and no --permission-mode. --restricted ignores the settings files, and CLI 2.1.295 has no permission mode "default".

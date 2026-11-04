@@ -310,6 +310,8 @@ export const BLOCKED_KINDS = [
   "preflight",
   "update",
   "error",
+  // spec.md section 6.21: Claude asks to allow a command.
+  "allow",
 ] as const;
 export type BlockedKind = (typeof BLOCKED_KINDS)[number];
 // task.blocked_json: why the loop waits for the user. null while Claude or the app works, and while the app waits for colleagues.
@@ -344,6 +346,35 @@ export const SHELL_MODES = ["allowlist", "any"] as const;
 export type ShellMode = (typeof SHELL_MODES)[number];
 export const ALLOW_PATTERN_MAX = 200;
 export const BASH_TIMEOUT_MAX_SEC = 3600;
+export const BASH_TIMEOUT_DEFAULT_SEC = 600;
+// D1 to D3: the entries of one repository, the proposals of one plan, the requests of one step, and the allow blocks of one part.
+export const ALLOW_MAX = 50;
+export const ALLOW_PROPOSALS_MAX = 15;
+export const ALLOW_REQUESTS_MAX = 3;
+export const ALLOW_BLOCKS_MAX = 10;
+const ALLOW_REASON_MAX = 300;
+export const ALLOW_SOURCES = ["plan", "request", "user"] as const;
+export const ALLOW_CHOICES = ["once", "repo", "refuse"] as const;
+export type AllowChoice = (typeof ALLOW_CHOICES)[number];
+export const allowId = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
+// repo_task_settings.allow_json. pattern: the inner pattern of the rule Bash(<pattern>).
+export const allowEntry = z.object({
+  id: allowId,
+  pattern: z.string().min(1).max(ALLOW_PATTERN_MAX),
+  reason: z.string().max(ALLOW_REASON_MAX),
+  source: z.enum(ALLOW_SOURCES),
+  addedAt: z.number().int(),
+});
+export type AllowEntry = z.infer<typeof allowEntry>;
+export const allowProposal = z.object({ pattern: z.string().max(ALLOW_PATTERN_MAX), reason: z.string().max(ALLOW_REASON_MAX) });
+export type AllowProposal = z.infer<typeof allowProposal>;
+// command: the command that Claude Code refused.
+export const allowRequest = allowProposal.extend({ command: z.string().max(1000) });
+export type AllowRequest = z.infer<typeof allowRequest>;
+export const ASK_TEXT = "Needs you: Claude asks to allow a command.";
+export const TOO_MANY_ASKS = "Needs you: Claude asked for too many commands.";
+export const SHELL_WARNING_FIRST = "Accept the warning for commands that Claude runs first.";
+export const refusedLine = (pattern: string) => `The user refused ${pattern}. Do the step without it, or set question.`;
 const SHELLS = ["bash", "sh", "zsh", "dash", "fish", "cmd", "wsl", "env", "eval", "exec", "xargs", "sudo", "su", "doas", "runas"];
 const RUNNERS = ["watch", "setsid", "flock"];
 export const CREDENTIAL_TOOLS = ["secret-tool", "security", "cmdkey", "kwallet-query", "keyring"];
@@ -493,6 +524,14 @@ export const stepDetail = z.object({
     })
     .nullable()
     .default(null),
+  // spec.md section 6.21: the commands that the step asks to allow, and the user's choice for each pattern.
+  allowAsk: z
+    .object({
+      requests: z.array(allowRequest),
+      decisions: z.array(z.object({ pattern: z.string(), choice: z.enum(ALLOW_CHOICES) })).default([]),
+    })
+    .nullable()
+    .default(null),
 });
 export type StepDetail = z.infer<typeof stepDetail>;
 
@@ -628,6 +667,8 @@ export const specResult = z.object({
       .max(10),
     services: z.array(z.string().max(200)).max(10),
     notes: z.string().max(2000),
+    // spec.md section 6.21 (D2): the command patterns that the implement steps run themselves.
+    allow: z.array(allowProposal).max(ALLOW_PROPOSALS_MAX).default([]),
   }),
   flag: z
     .object({ name: z.string().max(120), removal: z.string().max(300) })
@@ -666,6 +707,12 @@ export const implementResult = z.object({
   // spec.md section 6.18.2.
   needsBase: z.boolean().default(false).describe("true when the change needs the newest base branch."),
   needsBaseReason: z.string().max(300).default(""),
+  // spec.md section 6.21 (D3).
+  allowRequest: z
+    .array(allowRequest)
+    .max(ALLOW_REQUESTS_MAX)
+    .default([])
+    .describe("The commands to allow, when Claude Code refused a command that the step needs."),
   notes: z.array(z.string().max(500)).max(20).default([]),
   coverage,
 });

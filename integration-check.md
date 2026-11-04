@@ -79,7 +79,7 @@ Cost limit: 14 calls for B1 to B8, a separate 2 calls for B9, and 0.60 USD per s
 | B9. WP8 flag set with a long-path cwd (see below) | 2 | PASS | See the B9 notes. |
 | B10. Remote documentation MCP servers (`learn`, `deepwiki`) with the WP8 flag set | 1 | PASS | See the B10 notes. |
 | Permission modes: `--permission-mode` choices in `claude --help`, and `init.permissionMode` per call | 0 | INFO | Choices: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan. `init.permissionMode` is `default` in every call, except `auto` in the B5 auth failure run. |
-| CLI version (runner minimum) | 0 | PASS | 2.1.295. |
+| CLI version (runner minimum) | 0 | PASS | 2.1.295. Raised to 2.1.302 on 2026-11-04: from this version, `-p` refuses each call that needs approval (V7), and the Bash rules of a task step rely on it. |
 
 B9 notes:
 

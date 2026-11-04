@@ -6,15 +6,29 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  allowAsks,
   checkPatterns,
   hostsOf,
+  mergeAllow,
+  originsOf,
   rulePath,
   type ShellSpec,
   shellEnv,
   shellSettings,
   writeShellSettings,
 } from "../../src/server/tasks/shell";
-import { allowPattern, allowProblem, allowWarning, programOf, type TaskCommand } from "../../src/shared/task";
+import {
+  type AllowEntry,
+  allowPattern,
+  allowProblem,
+  allowWarning,
+  implementResult,
+  programOf,
+  specResult,
+  stepDetail,
+  type TaskCommand,
+} from "../../src/shared/task";
+import { echoImplement, echoSpec } from "../support/fake-claude";
 
 console.log(`shell.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/shell", import.meta.dir)}`);
 
@@ -251,5 +265,98 @@ describe("allowPattern", () => {
     expect(programOf("  /usr/bin/SSH.exe build1 *")).toBe("ssh");
     expect(programOf("C:\\tools\\Make.EXE all")).toBe("make");
     expect(programOf("")).toBe("");
+  });
+});
+
+// spec.md section 6.21, D1 to D3: the allowlist of a repository and the requests of a step.
+describe("allow requests and the allowlist", () => {
+  const hosts = hostsOf(ORIGINS);
+  const ask = (pattern: string, command = pattern) => ({ pattern, command, reason: "The step needs it." });
+  const base = { mode: "allowlist" as const, requests: [], refused: [], killed: false, rules: [], refusedBefore: new Set<string>(), hosts };
+
+  test("originsOf: the Bitbucket and the Jira base URL of the config, and no invalid URL", () => {
+    expect(originsOf({ baseUrl: ORIGINS[0], jira: { baseUrl: ORIGINS[1] as string } })).toEqual(ORIGINS);
+    expect(originsOf({ baseUrl: "not a url" })).toEqual([]);
+    expect(originsOf(null)).toEqual([]);
+  });
+
+  test("a killed run: each allowlist refusal becomes a request with its exact command; a deny refusal never does", () => {
+    const r = allowAsks({
+      ...base,
+      killed: true,
+      refused: [
+        { command: "git status", by: "deny" },
+        { command: "make build", by: "allowlist" },
+        { command: "curl https://example.invalid", by: "deny" },
+        { command: "make build", by: "allowlist" },
+        { command: "scp -r repo build1:/tmp", by: "allowlist" },
+      ],
+    });
+    expect(r.asks.map((a) => [a.pattern, a.command])).toEqual([
+      ["make build", "make build"],
+      ["scp -r repo build1:/tmp", "scp -r repo build1:/tmp"],
+    ]);
+    expect(r.notes).toEqual([]);
+  });
+
+  test("a request for a command that the deny list refused, a refused-before pattern, a pattern of the run, and a bad pattern go to the notes", () => {
+    const r = allowAsks({
+      ...base,
+      requests: [ask("curl *", "curl https://example.invalid"), ask("make deploy"), ask("echo *"), ask("git push *"), ask("make lint")],
+      refused: [{ command: "curl https://example.invalid", by: "deny" }],
+      rules: ["echo *"],
+      refusedBefore: new Set(["make deploy"]),
+    });
+    expect(r.asks).toEqual([ask("make lint")]);
+    expect(r.notes).toEqual([
+      "Claude asked to allow curl *. The deny list refused curl https://example.invalid.",
+      "Claude asked again to allow make deploy. You refused it for this task.",
+      "Claude asked to allow echo *, which the step had already.",
+      "Claude asked to allow git push *. The app refused it: Claude cannot run git commands.",
+    ]);
+  });
+
+  test("at most 3 requests; Any command ignores them", () => {
+    const four = ["make a", "make b", "make c", "make d"].map((p) => ask(p));
+    const r = allowAsks({ ...base, requests: four });
+    expect(r.asks.map((a) => a.pattern)).toEqual(["make a", "make b", "make c"]);
+    expect(r.notes).toEqual(["Claude asked for more than 3 commands. The app left out make d."]);
+    expect(allowAsks({ ...base, mode: "any", requests: four })).toEqual({
+      asks: [],
+      notes: ["Any command is on, so the app ignored the allow requests of the step."],
+    });
+  });
+
+  test("mergeAllow keeps the stored entries, adds each new pattern once with the first free ID, and checks every pattern", () => {
+    const kept: AllowEntry = { id: "a1", pattern: "ssh build1 *", reason: "Build.", source: "plan", addedAt: 1 };
+    const stored = [kept];
+    const add = [
+      { pattern: " ssh build1 * ", reason: "Again." },
+      { pattern: "scp -r repo build1:*", reason: "Copy." },
+      { pattern: "scp -r repo build1:*", reason: "Twice." },
+    ];
+    expect(mergeAllow(stored, add, "request", hosts, 9)).toEqual([
+      kept,
+      { id: "a2", pattern: "scp -r repo build1:*", reason: "Copy.", source: "request", addedAt: 9 },
+    ]);
+    expect(mergeAllow(stored, [{ pattern: "bash -c *", reason: "" }], "user", hosts, 9)).toEqual({
+      error: "bash -c *: A shell or a command runner can run any command. Use Any command instead.",
+    });
+    const many = Array.from({ length: 50 }, (_, k) => ({ pattern: `make t${k}`, reason: "" }));
+    expect(mergeAllow(stored, many, "user", hosts, 9)).toEqual({ error: "The list can hold at most 50 patterns." });
+  });
+
+  test("the JSON of a step, a spec result, and an implement result from before section 6.21 still parses with empty defaults", () => {
+    expect(stepDetail.parse({ notes: ["old"] })).toMatchObject({ notes: ["old"], allowAsk: null, shell: null });
+    const oldSpec = echoSpec() as { testing: Record<string, unknown> };
+    expect(oldSpec.testing.allow).toBeUndefined();
+    expect(specResult.parse(oldSpec).testing.allow).toEqual([]);
+    const oldImplement = echoImplement() as Record<string, unknown>;
+    expect(oldImplement.allowRequest).toBeUndefined();
+    expect(implementResult.parse(oldImplement).allowRequest).toEqual([]);
+    expect(stepDetail.parse({ allowAsk: { requests: [ask("make build")] } }).allowAsk).toEqual({
+      requests: [ask("make build")],
+      decisions: [],
+    });
   });
 });

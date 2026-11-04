@@ -10,10 +10,10 @@ import type { RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from 
 import { log } from "../log";
 import { type ShellSpec, shellEnv, writeShellSettings } from "../tasks/shell";
 import { RUNTIME_ENV } from "./git";
-import { classify, createStreamParser, REFUSED_MAX, type RunNote } from "./stream";
+import { classify, createStreamParser, REFUSED_MAX, type Refusal, type RunNote } from "./stream";
 
-// Gate B ran on this version. Older versions have other flags and event shapes.
-export const MIN_CLI_VERSION = "2.1.295";
+// Gate B ran on 2.1.295. From 2.1.302, -p refuses each call that needs approval (V7), and the Bash rules of a shell step rely on it.
+export const MIN_CLI_VERSION = "2.1.302";
 export const MAIN_AGENT = "rl-main";
 const READ_TOOLS = ["Read", "Grep", "Glob"];
 // Names go into comma lists of CLI flags.
@@ -102,6 +102,8 @@ export type RunOutcome = {
   events: RunEvent[];
   // The rl-main text and the subagent reports of the stream (stream.ts StreamState.notes). Absent: the run did not start.
   notes?: RunNote[];
+  // The Bash commands that Claude Code refused (spec.md section 6.21). Absent: the run did not start.
+  refused?: Refusal[];
   exitCode: number | null;
   stderrTail: string;
 };
@@ -650,6 +652,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         init: parser.state.inits[0] ?? null,
         events: parser.events(),
         notes: parser.state.notes,
+        refused: parser.state.refused,
         exitCode,
         stderrTail: stderr,
       };

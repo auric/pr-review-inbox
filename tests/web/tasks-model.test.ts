@@ -192,6 +192,8 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     canSetup: false,
     subtasks: null,
     issueStatus: null,
+    shell: { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false },
+    allowAsk: null,
     ...o,
   };
 }
@@ -213,6 +215,8 @@ const PLAN: NonNullable<TaskDto["plan"]> = {
   contracts: [],
   risks: [],
   checks: [],
+  allow: [],
+  shellWarning: true,
 };
 const ESTIMATE: NonNullable<TaskDto["estimate"]> = { parts: 1, lines: 80, files: 1, modules: [], db: false, api: false, unknowns: [] };
 

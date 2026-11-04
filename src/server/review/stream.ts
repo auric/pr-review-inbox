@@ -48,6 +48,8 @@ export type RunNote = { from: string; text: string };
 
 // A Bash command that Claude Code refused. command: the event target. by: the rule list that refused it.
 export type Refusal = { command: string; by: "allowlist" | "deny" };
+// D7: the event note of a refused Bash command.
+export const REFUSED_NOTE: Record<Refusal["by"], string> = { allowlist: "Refused by the allowlist", deny: "Refused by the deny list" };
 
 export type StreamState = {
   inits: SDKSystemMessage[];
@@ -229,7 +231,7 @@ export function createStreamParser(opts: {
         const by = deny ? "deny" : "allowlist";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });
-        end(changed, id, "error", by === "deny" ? "Refused by the deny list" : "Refused by the allowlist");
+        end(changed, id, "error", REFUSED_NOTE[by]);
       }
     } else if (m.type === "system" && m.subtype === "task_started") {
       const t = m as SDKTaskStartedMessage;

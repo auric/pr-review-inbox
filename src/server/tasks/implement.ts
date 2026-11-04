@@ -8,6 +8,7 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync 
 import { rm } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import type { RunConflict, RunUsage } from "../../shared/dto";
+import type { RunEvent } from "../../shared/run-log";
 import {
   type ImplementResult,
   implementResult,
@@ -28,6 +29,7 @@ import type { Profile } from "../review/catalog";
 import { deniedPath, fold } from "../review/edits";
 import type { ImplementRunStart, InstructionRepo, ReviewJobs } from "../review/jobs";
 import { addUsage, type Ending, failure, judgeTask, usageOf } from "../review/judge";
+import { REFUSED_MAX, REFUSED_NOTE, type Refusal } from "../review/stream";
 import { repoPath } from "../review/validate";
 import {
   type AttachmentFile,
@@ -39,6 +41,7 @@ import {
   UNTRUSTED,
 } from "../review/workspace";
 import { fullPath, reposFile, taskRepos } from "./repos";
+import type { StepShell } from "./shell";
 import { holdBlocked, stopForRun, taskRow } from "./tasks";
 import {
   addedFolders,
@@ -126,7 +129,9 @@ export function outsideRepo(wt: Worktree, context: ReadonlyMap<string, string | 
 // allow-list is empty, because a commit never holds an ignored file. The checks write build outputs between the steps, so the
 // listing comes right before the step. Absent: no check, as before a commit. add: the new files that a commit takes (commitStep). An
 // untracked path then counts only when add lists it. The commit leaves the other new files on disk, so a denied or hidden one among
-// them still fails: it can hold rules for Claude Code or git for the next step. Absent: every path counts, as after a step.
+// them still fails: it can hold rules for Claude Code or git for the next step. Absent: every path counts, as after a step. written: a
+// step with the Bash tool (spec.md section 6.21, D8), with the targets of its Write and Edit calls under repo/. Its commands may change
+// ignored files, such as build output. An ignored Write or Edit target and a link on a changed ignored path still fail.
 export async function pathCheck(
   wt: Worktree,
   o: {
@@ -135,6 +140,7 @@ export async function pathCheck(
     ignored?: IgnoredSnapshot;
     skip?: readonly string[];
     add?: readonly string[];
+    written?: readonly string[];
   },
 ): Promise<PathCheck> {
   const problems = new Map<string, string>();
@@ -169,7 +175,17 @@ export async function pathCheck(
   const outside = o.context ? outsideRepo(wt, o.context, o.skip) : [];
   for (const p of outside) problems.set(`../${p}`, "A step may change files only in repo/.");
   const ignored = o.ignored ? ignoredChanges(o.ignored, await ignoredSnapshot(wt)) : [];
-  for (const p of ignored) if (!problems.has(p)) problems.set(p, "A step may not write a file that git ignores.");
+  const own = o.written && new Set(o.written.map((p) => p.split("/").map(fold).join("/")));
+  for (const p of ignored) {
+    if (problems.has(p)) continue;
+    if (!own || own.has(p.split("/").map(fold).join("/"))) problems.set(p, "A step may not write a file that git ignores.");
+    // git lists the files behind a link to a folder, also a Windows junction.
+    else
+      for (const l of linksOn(wt.repo, p)) {
+        links.add(l);
+        problems.set(l, "A step may not make links.");
+      }
+  }
   return { changed, problems: [...problems].map(([path, reason]) => ({ path, reason })), links: [...links], outside, ignored };
 }
 
@@ -194,6 +210,7 @@ export async function treeCheck(
     context?: ReadonlyMap<string, string | Uint8Array>;
     ignored?: IgnoredSnapshot;
     add?: ReadonlyMap<string, readonly string[]>;
+    written?: readonly string[];
   },
 ): Promise<TreeCheck> {
   const parts: TreePart[] = [];
@@ -219,7 +236,7 @@ export async function treeCheck(
     const allow = isMain ? o.allow : o.allow.filter((f) => f.startsWith(prefix)).map((f) => f.slice(prefix.length));
     const check = await pathCheck(t.wt, {
       allow,
-      ...(isMain && { context: o.context, ignored: o.ignored, skip: addedFolders(trees) }),
+      ...(isMain && { context: o.context, ignored: o.ignored, skip: addedFolders(trees), written: o.written }),
       ...(o.add && { add: o.add.get(t.wt.repo) ?? [] }),
     });
     if (isMain) main = check;
@@ -321,7 +338,8 @@ export async function writeContext(
 // attachments: ./context/attachments/ exists (spec.md section 6.17). instructions: the text of "Tell Claude" (mode instruct, spec.md
 // section 6.18.2). It is the only content of "Your instructions" and the last text of the stdin, so the rules come first. project: the
 // combined project instructions with their "# Project instructions" heading (spec.md section 6.7). They stand after the rules. lines:
-// the skill lines of the profile (skillLines with context/skills) and the MCP lines. They stand after the rules too.
+// the skill lines of the profile (skillLines with context/skills) and the MCP lines. They stand after the rules too. shell: the Bash
+// tool of the step (spec.md section 6.21). null: no Bash.
 export function implementPrompt(
   mode: StepMode,
   specDir: string,
@@ -330,6 +348,7 @@ export function implementPrompt(
   instructions = "",
   project = "",
   lines: { skills: string[]; mcp: string[] } = { skills: [], mcp: [] },
+  shell: StepShell | null = null,
 ): string {
   const user = [...(project ? ['"Project instructions"'] : []), ...(mode === "instruct" ? ['"Your instructions"'] : [])];
   const plan = `When the plan is wrong, change the plan file under ${specDir} in ./repo, stop, and say why in specChange.`;
@@ -358,9 +377,30 @@ export function implementPrompt(
   // spec.md section 6.16.5: an added repository sits at ./repos/<project>/<slug>, beside ./repo.
   const where = repos ? "./repo and in the folders that ./context/repos.md lists with access edit" : "./repo";
   const data = repos ? "./repo, ./repos, and ./context" : "./repo and ./context";
+  // spec.md section 6.21, D3, D6, and D7.
+  const ask =
+    "When Claude Code refuses a command that the step needs, do not try another form of it. End the step: set allowRequest with the narrowest pattern, the refused command, and a reason. Set done to false.";
+  const shellLines = !shell
+    ? []
+    : [
+        ...(shell.mode === "any"
+          ? [
+              "You can run commands with the Bash tool. A fixed deny list refuses git and some other commands. Do not try another form of a refused command.",
+            ]
+          : [
+              `You can run only these commands: ${shell.rules.map((r) => `\`${r}\``).join(", ")}. Read-only commands, such as ls and cat, also run. Claude Code refuses every other command.`,
+              ask,
+              "Never ask to allow a read-only command, git, a shell, or the Bitbucket or Jira host.",
+              ...(mode === "instruct" ? ["When the request asks for allowlist changes, set allowRequest and change no file."] : []),
+            ]),
+        "Your commands start in the part folder. Write `cd repo && <command>`.",
+        "Pipe long build output through `tail -n 200`.",
+        "Wrap each remote command in `timeout <seconds>` on the build host.",
+      ];
   return [
-    `You do one step of an approved plan in ./repo. You can change files only in ${where}. You cannot run commands, and you post nothing.`,
+    `You do one step of an approved plan in ./repo. You can change files only in ${where}. ${shell ? "You post nothing." : "You cannot run commands, and you post nothing."}`,
     "The app runs the build and the tests after your step. The next step gives you the output.",
+    ...shellLines,
     "Read ./context/step.md first. It names the part, the task, and what done means.",
     ...(attachments
       ? [
@@ -377,7 +417,11 @@ export function implementPrompt(
     ...modeLines,
     "Change only what the step needs. Do not reformat, rename, or move other code. Follow the style of the code around your change.",
     "When you need a decision from the user, set question and stop.",
-    "When you need a command that the app does not run, set question and name the setup command or allowlist entry you need, with a reason.",
+    ...(shell
+      ? []
+      : [
+          "When you need a command that the app does not run, set question and name the setup command or allowlist entry you need, with a reason.",
+        ]),
     "Never edit .claude folders, .mcp.json, CLAUDE.md, CLAUDE.local.md, AGENTS.md, .gitmodules, or git hook sources.",
     "Never write secrets, tokens, or passwords into a file.",
     "Set done to true only when the step is complete.",
@@ -680,11 +724,15 @@ export type StepInput = {
   live?: () => boolean;
   // spec.md section 6.20.6: the run goes beside the run slot (ReviewJobs.taskRun extra).
   extra?: boolean;
+  // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
+  shell?: StepShell;
   now?: () => number;
 };
 
 // changed: the paths that the step left in the worktree for the checks and the commit. Empty after a failed path check. text: the
-// sentence of a failed or cancelled run.
+// sentence of a failed or cancelled run. refused: the Bash commands that Claude Code refused. ask: the runner ended an allowlist run
+// over REFUSED_MAX refused commands, some of them refused by the allowlist; the task did not stop, so the loop builds the requests
+// (spec.md section 6.21, D3).
 export type StepOutcome = {
   step: number;
   run: number;
@@ -694,7 +742,30 @@ export type StepOutcome = {
   problems: PathProblem[];
   patch: string | null;
   text: string | null;
+  refused: Refusal[];
+  ask: boolean;
 };
+
+// D7: the Bash commands of a step for its detail, in run order.
+const SHELL_COMMANDS_MAX = 50;
+function shellDetail(shell: StepShell, events: readonly RunEvent[], refused: number): StepDetail["shell"] {
+  const commands = events
+    .filter((e) => e.tool === "Bash")
+    .slice(0, SHELL_COMMANDS_MAX)
+    .map((e) => ({
+      command: e.target,
+      state:
+        e.status === "ok"
+          ? ("ok" as const)
+          : e.status === "error"
+            ? Object.values(REFUSED_NOTE).includes(e.note ?? "")
+              ? ("refused" as const)
+              : ("error" as const)
+            : ("stopped" as const),
+      ms: Math.max(0, (e.endedAt ?? e.startedAt) - e.startedAt),
+    }));
+  return { mode: shell.mode, rules: shell.rules, commands, refused };
+}
 
 // done: resolves after the run end and onEnd.
 export type StepStart =
@@ -773,6 +844,9 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   let locked: PathProblem | null = null;
   let patch: string | null = null;
   let written: string[] = [];
+  let refused: Refusal[] = [];
+  let killed = false;
+  let shellRun: StepDetail["shell"] = null;
   // A git error of the check or the reset: the worktree state is unknown, so the task stops. Resume makes the worktree again.
   let broken: string | null = null;
   const row = taskRow(db, i.task);
@@ -789,9 +863,11 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     base: i.base ?? row?.base_commit ?? last,
     context,
     instructions: instructionRepos(db, i.task, i.allow),
-    prompt: (project, lines) => implementPrompt(i.mode, i.specDir, trees !== null, attachments.length > 0, i.instructions, project, lines),
+    prompt: (project, lines) =>
+      implementPrompt(i.mode, i.specDir, trees !== null, attachments.length > 0, i.instructions, project, lines, i.shell ?? null),
     maxTurns: STEP_TURNS[i.mode],
     timeoutMs: stepTimeout(budget),
+    ...(i.shell && { shell: i.shell }),
     started: (d, run) => {
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());
     },
@@ -802,16 +878,21 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         (o
           ? await judgeTask(o, implementResult, "implement", servers, gaps, async (r) => ({ result: r, skipped: [] }))
           : failure("process", "The CLI did not run."));
+      refused = o?.refused ?? [];
+      killed = e.status === "failed" && refused.length > REFUSED_MAX;
+      if (i.shell) shellRun = shellDetail(i.shell, o?.events ?? [], refused.length);
+      // D8: the Write and Edit targets under repo/, from the main repository root.
+      const own = i.shell ? written.filter((p) => p.startsWith("repo/")).map((p) => p.slice("repo/".length)) : undefined;
       try {
         const file = patchFile(i.review.dataDir, db, i.task, step);
         if (i.resolveCheck) check = { changed: [], problems: await i.resolveCheck(context, ignored), links: [], outside: [], ignored: [] };
         else if (trees) {
-          const tc = await treeCheck(trees, { allow: i.allow, context, ignored });
+          const tc = await treeCheck(trees, { allow: i.allow, context, ignored, written: own });
           check = tc.check;
           locked = tc.locked;
           if (check.problems.length) patch = await undoTrees(trees, tc, last, file);
         } else {
-          check = await pathCheck(wt, { allow: i.allow, context, ignored });
+          check = await pathCheck(wt, { allow: i.allow, context, ignored, written: own });
           if (check.problems.length) patch = await undoStep(wt, last, check, file);
         }
       } catch (err) {
@@ -835,9 +916,11 @@ export async function startStep(i: StepInput): Promise<StepStart> {
           summary: result?.summary ?? null,
           needsBase: result?.needsBase ? { reason: result.needsBaseReason } : null,
           written,
+          shell: shellRun,
         },
         now(),
       );
+      const ask = killed && i.shell?.mode === "allowlist" && refused.some((r) => r.by === "allowlist") && !problems.length && !broken;
       const usage = e.outcome ? usageOf(e.outcome) : null;
       if (usage) {
         const prev = d.query(STEP_SQL.partUsage).get({ id: i.part.id }) as { usage_json: string | null } | null;
@@ -851,7 +934,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       if (cur && problems.length && !broken && !i.resolveCheck) {
         const text = locked ? lockedText(locked) : deniedText(problems);
         holdBlocked(d, cur, { kind: "denied_path", step, text }, now());
-      } else if (cur && !ran && !soft)
+      } else if (cur && !ran && !soft && !ask)
         stopForRun(d, { task: i.task, version: cur.version }, step, broken ? { status: "failed", text: broken } : e, now());
       const outcome: StepOutcome = {
         step,
@@ -862,6 +945,8 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         problems,
         patch,
         text: broken ?? (ran ? null : (e.text ?? (e.status === "cancelled" ? RUN_CANCELLED : "The run failed."))),
+        refused,
+        ask,
       };
       return i.onEnd ? () => i.onEnd?.(outcome) : undefined;
     },

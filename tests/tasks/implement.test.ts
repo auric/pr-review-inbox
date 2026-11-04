@@ -875,3 +875,105 @@ describe("implement run with the profile tools", () => {
     SLOW,
   );
 });
+
+// spec.md section 6.21: a step with the Bash tool. D7 (the commands in the step detail), D8 (the path check), and D3 (the runner ends
+// the run over the refusal cap).
+describe("a step with the Bash tool", () => {
+  const SHELL = { mode: "allowlist" as const, rules: ["echo *"], bashTimeoutSec: 600 };
+
+  test(
+    "D8: build output in ignored files passes; an ignored Write target and a new ignored link fail; without Bash the same output fails",
+    async () => {
+      const s = await setup();
+      const build = { command: "echo build", files: [{ path: "repo/ignored/out.o", text: "obj\n" }], output: "built" };
+      s.scenario({ bash: [build], writes: [{ path: "repo/src/app.ts", text: "changed\n" }] });
+      const ok = await s.step({ shell: SHELL });
+      expect(ok.outcome?.problems).toEqual([]);
+      expect(ok.outcome?.changed).toEqual(["src/app.ts"]);
+      expect(readFileSync(join(s.wt.repo, "ignored", "out.o"), "utf8")).toBe("obj\n");
+      const call = s.runCalls().at(-1) as Call;
+      expect(flag(call.argv, "--tools")).toBe([...IMPLEMENT_TOOLS, "Bash"].join(","));
+      expect(flag(call.argv, "--settings")).toBeDefined();
+      expect(call.stdin).toContain("You can run only these commands: `echo *`.");
+      expect(call.stdin).not.toContain("You cannot run commands");
+      // D7: the step detail lists the commands of the run.
+      expect(JSON.parse(s.stepRow(ok.outcome?.step as number).detail_json).shell).toEqual({
+        mode: "allowlist",
+        rules: ["echo *"],
+        commands: [{ command: "echo build", state: "ok", ms: expect.any(Number) }],
+        refused: 0,
+      });
+      await resetWorktree(s.wt, s.base);
+
+      s.scenario({ writes: [{ path: "repo/ignored/written.txt", text: "by Write\n" }] });
+      const written = await s.step({ shell: SHELL });
+      expect(written.outcome?.problems).toEqual([{ path: "ignored/written.txt", reason: "A step may not write a file that git ignores." }]);
+      expect(existsSync(s.wt.dir)).toBe(false);
+      const wt2 = await openWorktree({
+        dataDir: s.dataDir,
+        db: s.db,
+        project: "PROJ",
+        repo: "repo",
+        task: s.task,
+        ord: 1,
+        branch: "feature/K-1-thing",
+        base: s.base,
+      });
+      s.db.run("UPDATE task SET blocked_json = NULL");
+      mkdirSync(join(s.root, "outside"));
+      writeFileSync(join(s.root, "outside", "x.txt"), "x\n");
+      s.scenario({ bash: [{ command: "echo link", files: [{ path: "repo/ignored/link", link: join(s.root, "outside") }] }] });
+      const linked = await s.step({ shell: SHELL, wt: wt2 });
+      expect(linked.outcome?.problems).toEqual([{ path: "ignored/link", reason: "A step may not make links." }]);
+
+      // Control: a step without Bash gets the old rule for the same output.
+      const wt3 = await openWorktree({
+        dataDir: s.dataDir,
+        db: s.db,
+        project: "PROJ",
+        repo: "repo",
+        task: s.task,
+        ord: 1,
+        branch: "feature/K-1-thing",
+        base: s.base,
+      });
+      s.db.run("UPDATE task SET blocked_json = NULL");
+      s.scenario({ bash: [build] });
+      const plain = await s.step({ wt: wt3 });
+      expect(plain.outcome?.problems).toEqual([{ path: "ignored/out.o", reason: "A step may not write a file that git ignores." }]);
+    },
+    SLOW,
+  );
+
+  test(
+    "D3: over 5 refused commands with allowlist refusals, the run ends and the task keeps building for the loop; deny refusals alone stop it",
+    async () => {
+      const s = await setup();
+      const refused = (by: "allowlist" | "deny", n: number, command: string) =>
+        Array.from({ length: n }, (_, k) => ({ command: `${command} ${k}`, refused: by }));
+      s.scenario({ bash: [...refused("allowlist", 4, "make"), ...refused("deny", 2, "git status")] });
+      const ask = await s.step({ shell: SHELL });
+      expect(ask.outcome).toMatchObject({ status: "failed", result: null, ask: true });
+      expect(ask.outcome?.refused).toEqual([
+        { command: "make 0", by: "allowlist" },
+        { command: "make 1", by: "allowlist" },
+        { command: "make 2", by: "allowlist" },
+        { command: "make 3", by: "allowlist" },
+        { command: "git status 0", by: "deny" },
+        { command: "git status 1", by: "deny" },
+      ]);
+      expect(taskRow(s.db, s.task)?.state).toBe("implementing");
+      expect(s.blockedOf()).toBeNull();
+      const detail = JSON.parse(s.stepRow(ask.outcome?.step as number).detail_json);
+      expect(detail.shell.refused).toBe(6);
+      expect(detail.shell.commands.map((c: { state: string }) => c.state)).toEqual(Array(6).fill("refused"));
+
+      s.scenario({ bash: refused("deny", 6, "curl x") });
+      const deny = await s.step({ shell: SHELL });
+      expect(deny.outcome).toMatchObject({ status: "failed", ask: false });
+      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
+      expect(s.blockedOf()?.text).toBe("Claude Code refused more than 5 commands in this run.");
+    },
+    SLOW,
+  );
+});

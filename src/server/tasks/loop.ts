@@ -11,9 +11,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { basename, dirname, join } from "node:path";
 import { initialTransition } from "xstate";
 import { indentBlock, oneLine } from "../../shared/consult";
-import type { TaskAnswersInput } from "../../shared/dto";
+import type { TaskAllowInput, TaskAnswersInput } from "../../shared/dto";
 import type { FindingPayload } from "../../shared/review";
 import {
+  ALLOW_BLOCKS_MAX,
+  ASK_TEXT,
+  allowProblem,
   BASE_CHECK_AGE_MS,
   FAILURE_TAIL,
   type ImplementResult,
@@ -21,12 +24,15 @@ import {
   LARGE_REPOS_TEXT,
   type PartState,
   RESOLVE_STOPS,
+  refusedLine,
+  SHELL_WARNING_FIRST,
   type StartMode,
   type StepMode,
   stepDetail,
   TASK_STATE_TEXT,
   type TaskBlocked,
   type TaskSize,
+  TOO_MANY_ASKS,
   taskBlocked,
   taskSettings,
   type UpdateDetail,
@@ -63,6 +69,7 @@ import { noteTaskWaits } from "./notify";
 import { type Docs, docNames, type Plan, type PlanPart, type PlanTask, parsePlan, parseTasks, partStepFile, stepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
 import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
+import { allowAsks, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
 import {
   advance,
   advancePart,
@@ -83,6 +90,7 @@ import {
   partDocsOf,
   partNames,
   repoSettings,
+  saveAllow,
   scheduleOf,
   setBaseMoves,
   setBlocked,
@@ -376,7 +384,25 @@ const Q = {
   repoBranch: "UPDATE task_repo SET base_branch = $branch, base_commit = $base WHERE id = $id",
   prBranch: "UPDATE task_pr SET base_branch = $branch WHERE task_repo = $repo",
   baseChanged: "UPDATE task_repo SET base_changed = $changed WHERE task = $task AND (id = $id OR ($main = 1 AND role = 'main'))",
+  // spec.md section 6.21: the last run of one step, the allow blocks of a part, and the steps of a task that asked to allow commands.
+  lastRun: `SELECT detail_json FROM task_step WHERE part = $part AND kind = $kind AND item = $item AND run IS NOT NULL
+    ORDER BY id DESC LIMIT 1`,
+  allowBlocks: "SELECT COUNT(*) AS n FROM task_step WHERE part = $part AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
+  allowAsks: "SELECT detail_json FROM task_step WHERE task = $task AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
+  ensureSettings: `INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ($project, $repo, $now)
+    ON CONFLICT (project, repo) DO NOTHING`,
 };
+
+// spec.md section 6.21: the steps that can get the Bash tool. The resolve step never does.
+const SHELL_STEPS: ReadonlySet<StepMode> = new Set(["tests", "implement", "fix", "instruct"]);
+
+// The patterns that the user refused for this task (D3). They never show again.
+const refusedOf = (db: Database, task: number) =>
+  new Set(
+    (db.query(Q.allowAsks).all({ task }) as { detail_json: string }[]).flatMap((r) =>
+      (stepDetail.parse(JSON.parse(r.detail_json)).allowAsk?.decisions ?? []).filter((d) => d.choice === "refuse").map((d) => d.pattern),
+    ),
+  );
 
 // The changed paths of every worktree, from the main repository root.
 async function dirty(trees: readonly RepoTree[]): Promise<string[]> {
@@ -619,7 +645,7 @@ export function createLoop(opts: LoopOptions) {
       instructions?: string;
       resolveCheck?: StepInput["resolveCheck"];
     },
-  ): Promise<{ r: StepOutcome | null; before: Set<string> }> {
+  ): Promise<{ r: StepOutcome | null; before: Set<string>; shell: StepShell | null }> {
     let waiting: number | null = o.row ?? null;
     for (;;) {
       await gate(c);
@@ -631,6 +657,9 @@ export function createLoop(opts: LoopOptions) {
       // spec.md section 6.17: the task text and the included files as they are at this step. Section 6.20.3: a part gets the files of the
       // task and of its own sub-tasks only.
       const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
+      const shell = shellOf(c, mode, item);
+      const refused = SHELL_STEPS.has(mode) ? [...refusedOf(c.db, c.id)] : [];
+      const stepMd = o.step(attempt);
       let out: StepOutcome | null = null;
       const s = await startStep({
         db: c.db,
@@ -644,7 +673,11 @@ export function createLoop(opts: LoopOptions) {
         profile: c.profile,
         untrusted: [...task.files, ...(o.failure ? [o.failure] : [])],
         attachments: task.attachments,
-        own: [...(answers ? [answers] : []), o.step(attempt), ...planFiles(c)],
+        own: [
+          ...(answers ? [answers] : []),
+          refused.length ? { ...stepMd, text: `${stepMd.text.trimEnd()}\n\n${refused.map(refusedLine).join("\n")}\n` } : stepMd,
+          ...planFiles(c),
+        ],
         allow: o.allow,
         specDir: c.specDir,
         base: c.base,
@@ -657,6 +690,7 @@ export function createLoop(opts: LoopOptions) {
         resolveCheck: o.resolveCheck,
         live: () => isLive(c),
         extra: beside(c),
+        ...(shell && { shell }),
         now,
       });
       if (s.status === 409 && "conflict" in s) {
@@ -667,8 +701,55 @@ export function createLoop(opts: LoopOptions) {
       if (s.status !== 202) throw new Halt();
       await s.done;
       changed(c.id);
-      return { r: out as StepOutcome | null, before };
+      return { r: out as StepOutcome | null, before, shell };
     }
+  }
+
+  // spec.md section 6.21: the Bash tool of a tests, implement, fix, or instruct step. Bash is on in Any command mode, or when the
+  // allowlist of the repository or an "Allow once" of the last run of this step holds a pattern. The rules hold the saved patterns in
+  // both modes, so a network program that an entry names stays allowed (shell.ts).
+  function shellOf(c: Ctx, mode: StepMode, item: string): StepShell | null {
+    if (!SHELL_STEPS.has(mode)) return null;
+    const repo = repoSettings(c.db, c.t.project, c.t.repo);
+    const last = c.db.query(Q.lastRun).get({ part: c.part.id, kind: mode, item }) as { detail_json: string } | null;
+    const ask = last ? stepDetail.parse(JSON.parse(last.detail_json)).allowAsk : null;
+    const once = (ask?.decisions ?? []).filter((d) => d.choice === "once").map((d) => d.pattern);
+    const rules = [...new Set([...repo.allow.map((e) => e.pattern), ...once])];
+    if (repo.shellMode === "allowlist" && !rules.length) return null;
+    return { mode: repo.shellMode, rules, bashTimeoutSec: repo.bashTimeoutSec };
+  }
+
+  // D3: the requests of a step that ends with allowRequest, or that the runner ended over the refusal cap. The step's patch is saved,
+  // the worktree goes back to the last commit, and the task waits with kind allow. A request that the app refuses goes to the notes of
+  // the step. A run that the runner ended with no request left stops the task, as implement.ts does for other failed runs.
+  async function askAllow(c: Ctx, mode: StepMode, r: StepOutcome, shell: StepShell | null) {
+    const { asks, notes } = allowAsks({
+      mode: shell?.mode ?? null,
+      requests: r.result?.allowRequest ?? [],
+      refused: r.refused,
+      killed: r.ask,
+      rules: shell?.rules ?? [],
+      refusedBefore: refusedOf(c.db, c.id),
+      hosts: hostsOf(originsOf(settings.config())),
+    });
+    if (notes.length) patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, ...notes] });
+    if (!asks.length) {
+      if (r.ask && mode !== "instruct") {
+        c.db.transaction(() => {
+          const cur = taskRow(c.db, c.id);
+          if (cur) stopForRun(c.db, { task: c.id, version: cur.version }, r.step, { status: "failed", text: r.text }, now());
+        })();
+        changed(c.id);
+        throw new Halt();
+      }
+      return;
+    }
+    if (held(c)) throw new Halt();
+    await undo(c.trees, c.db, c.id, r.step);
+    const n = (c.db.query(Q.allowBlocks).get({ part: c.part.id }) as { n: number }).n;
+    if (n >= ALLOW_BLOCKS_MAX) block(c, { kind: "error", step: r.step, text: TOO_MANY_ASKS });
+    patchStep(c.db, r.step, { allowAsk: { requests: asks, decisions: [] } });
+    block(c, { kind: "allow", step: r.step, text: ASK_TEXT });
   }
 
   // One Claude step that returns only with a result: a denied path, a failed run, a question, and a plan change set their reason and
@@ -679,7 +760,8 @@ export function createLoop(opts: LoopOptions) {
     item: string,
     o: { allow: string[]; step: (attempt: number) => ContextFile; failure?: ContextFile; row?: number; instructions?: string },
   ): Promise<StepOutcome & { result: ImplementResult; fresh: string[] }> {
-    const { r, before } = await runStep(c, mode, item, o);
+    const { r, before, shell } = await runStep(c, mode, item, o);
+    if (r && (r.ask || r.result?.allowRequest.length)) await askAllow(c, mode, r, shell);
     // No result: implement.ts stopped the task, or it set the denied path. No outcome: restart recovery ended the run first.
     if (!r?.result) throw r && !r.problems.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
     const fresh = r.changed.filter((p) => !before.has(p));
@@ -2088,6 +2170,7 @@ export function createLoop(opts: LoopOptions) {
         return { status: 200, task: dto(db, id) };
       }
       if (b?.kind === "spec_change") return conflict(db, id, "Accept or reject the change to the spec first.");
+      if (b?.kind === "allow") return conflict(db, id, "Pick a choice for each command first.");
       if (b?.kind === "question" && (db.query(Q.openLoop).all({ task: id }) as unknown[]).length)
         return conflict(db, id, "Answer the question first.");
       const all = buildingAll(db, id);
@@ -2141,6 +2224,57 @@ export function createLoop(opts: LoopOptions) {
         }
         setBlocked(db, { task: id, version: t.version }, null, at);
         const info = asked?.kind === "instruct" && open[0]?.step ? stepDetailOf(db, open[0].step).instruct : null;
+        if (!info || !asked?.item) return null;
+        const attempt = (db.query(Q.attempt).get({ part: info.part, kind: "instruct", item: asked.item }) as { n: number }).n;
+        const row = insertStep(db, { task: id, part: info.part, kind: "instruct", item: asked.item, attempt, state: "waiting" }, at);
+        patchStep(db, row, { instruct: { ...info, result: null, committed: false } });
+        return row;
+      })();
+      if (again === null) kick(db, id, true);
+      else start(db, id, () => driveInstruct(db, id, again), "instruct");
+      changed(id);
+      return { status: 202, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/allow (spec.md section 6.21, D3): one choice for each requested pattern. Allow once: only the next run of that
+    // step gets the pattern. Allow for this repository: the pattern joins the list; the first one needs the shell warning. Refuse: the
+    // next steps read "The user refused <pattern>." in step.md, and the pattern never shows again. The step runs again from the last
+    // commit, as after an answer.
+    allow(db: Database, id: number, input: TaskAllowInput): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      const b = blockedOf(t);
+      const ask = b?.kind === "allow" && b.step === input.step ? stepDetailOf(db, input.step).allowAsk : null;
+      if (!ask) return conflict(db, id, "No command waits for your choice.");
+      if (drivers.has(id)) return conflict(db, id, BUSY);
+      const given = new Map(input.decisions.map((d) => [d.pattern, d.choice]));
+      if (given.size !== input.decisions.length) return { status: 400, error: "Each pattern takes one choice." };
+      for (const p of given.keys())
+        if (!ask.requests.some((r) => r.pattern === p)) return { status: 400, error: `Claude did not ask to allow ${p}.` };
+      if (given.size !== ask.requests.length) return { status: 400, error: "Pick a choice for each command." };
+      const hosts = hostsOf(originsOf(settings.config()));
+      for (const [p, choice] of given) {
+        const problem = choice === "refuse" ? null : allowProblem(p, hosts);
+        if (problem) return { status: 400, error: `${p}: ${problem}` };
+      }
+      const repo = repoSettings(db, t.project, t.repo);
+      const keep = ask.requests.filter((r) => given.get(r.pattern) === "repo");
+      const at = now();
+      const merged = keep.length ? mergeAllow(repo.allow, keep, "request", hosts, at) : null;
+      if (merged && "error" in merged) return { status: 400, error: merged.error };
+      if (merged && repo.shellWarnedAt === null && !input.shellWarning) return { status: 400, error: SHELL_WARNING_FIRST };
+      const asked = db.query(Q.step).get({ id: input.step, task: id }) as { kind: string; item: string | null } | null;
+      const again = db.transaction((): number | null => {
+        if (merged) {
+          db.query(Q.ensureSettings).run({ project: t.project, repo: t.repo, now: at });
+          saveAllow(db, t.project, t.repo, merged, input.shellWarning ? at : null);
+        }
+        patchStep(db, input.step, {
+          allowAsk: { ...ask, decisions: ask.requests.map((r) => ({ pattern: r.pattern, choice: given.get(r.pattern) ?? "refuse" })) },
+        });
+        setBlocked(db, { task: id, version: t.version }, null, at);
+        // An instruct step runs again as a new send row, as after an answer (spec.md section 6.18.2).
+        const info = asked?.kind === "instruct" ? stepDetailOf(db, input.step).instruct : null;
         if (!info || !asked?.item) return null;
         const attempt = (db.query(Q.attempt).get({ part: info.part, kind: "instruct", item: asked.item }) as { n: number }).n;
         const row = insertStep(db, { task: id, part: info.part, kind: "instruct", item: asked.item, attempt, state: "waiting" }, at);

@@ -15,7 +15,7 @@ This test checks the Release 2 features against a real Bitbucket Server, a real 
 ## Preparation
 
 1. Run `bun install`, then `bun run compile`. Expect "Built dist/bin/pr-review-inbox-<os>-<arch> (<commit>)." Record the commit.
-2. Run `claude --version`. Expect 2.1.295 or later. Run `claude auth status`. Expect `"authMethod": "claude.ai"`.
+2. Run `claude --version`. Expect 2.1.302 or later. Run `claude auth status`. Expect `"authMethod": "claude.ai"`.
 3. Run `git --version`. Record it. Expect 2.38 or later, because the re-review range needs `git merge-tree --write-tree`.
 4. Remove `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the terminal. PowerShell: `Remove-Item Env:ANTHROPIC_API_KEY, Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue`.
 5. Set a new data folder. PowerShell: `$env:REVIEW_LOOP_DATA_DIR = Join-Path $env:TEMP "review-loop-smoke-$(Get-Random)"`. Bash: `export REVIEW_LOOP_DATA_DIR="$(mktemp -d)"`.

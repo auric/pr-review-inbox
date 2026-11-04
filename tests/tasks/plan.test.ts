@@ -128,13 +128,29 @@ describe("the stored plan", () => {
   test("a command with an empty argument is left out with a coverage line", () => {
     const skipped: string[] = [];
     const p = toPlan(
-      spec({ testing: { commands: [{ name: "x", kind: "test", argv: [""] }], services: [], notes: "" } }),
+      spec({ testing: { commands: [{ name: "x", kind: "test", argv: [""] }], services: [], notes: "", allow: [] } }),
       BASE,
       [],
       skipped,
     );
     expect(p.testing.commands).toEqual([]);
     expect(skipped).toEqual(['The test command "x" is not a valid argument list, so the plan leaves it out.']);
+  });
+
+  test("spec.md section 6.21 (D2): a proposed command pattern that fails allowProblem becomes a coverage line; the others stay once", () => {
+    const skipped: string[] = [];
+    const allow = [
+      { pattern: " ssh build1 * ", reason: "The remote build." },
+      { pattern: "ssh build1 *", reason: "Twice." },
+      { pattern: "git push *", reason: "Push." },
+      { pattern: "curl https://jira.example.test/x", reason: "Tracker." },
+    ];
+    const p = toPlan(spec({ testing: { ...spec().testing, allow } }), BASE, [], skipped, ["jira.example.test"]);
+    expect(p.testing.allow).toEqual([{ pattern: "ssh build1 *", reason: "The remote build." }]);
+    expect(skipped).toEqual([
+      'The plan leaves out the command pattern "git push *". Claude cannot run git commands.',
+      'The plan leaves out the command pattern "curl https://jira.example.test/x". A pattern cannot name the Bitbucket or Jira host.',
+    ]);
   });
 });
 

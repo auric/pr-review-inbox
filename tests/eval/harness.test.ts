@@ -422,7 +422,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(result.requested).toEqual({ model: "default", effort: "high", verifier: "on" });
       expect(result.profileVersion).toBe(PROFILES_VERSION);
       expect(r.stdout).toContain(DEFAULT_MODEL_WARNING);
-      expect(result.cliVersion).toContain("2.1.295");
+      expect(result.cliVersion).toContain("2.1.302");
       expect(result.profile).toMatchObject({ id: "general" });
       expect(result.cases.map((x) => [x.id, x.head])).toEqual([[c.id, repo.head]]);
       const [run] = result.runs;

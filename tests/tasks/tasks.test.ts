@@ -618,6 +618,8 @@ describe("answers (spec.md sections 6.2 and 6.11, AC-B2 and AC-B3)", () => {
         contracts: [],
         risks: [],
         checks: [],
+        allow: [],
+        shellWarning: true,
       });
       expect(t.strip.current).toBe(1);
       // The base commit stays in the cache for later reads.
@@ -975,6 +977,102 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
     ).toBe(400);
     expect((await h.json("/api/repos/PR%20J/repo/task-settings")).status).toBe(400);
   });
+
+  test("spec.md section 6.21: task settings store the shell mode, the allowlist, and the Bash time limit with the shell warning", async () => {
+    const h = await setup();
+    type Shell = { shellMode: string; allow: { id: string; pattern: string; source: string }[]; bashTimeoutSec: number };
+    const get = () => h.json<Shell & { shellWarnedAt: number | null }>("/api/repos/PROJ/repo/task-settings");
+    expect((await get()).body).toMatchObject({ shellMode: "allowlist", allow: [], bashTimeoutSec: 600, shellWarnedAt: null });
+    const body = {
+      specDir: "specs/{key}/",
+      lineBudget: 400,
+      maxOpen: 2,
+      approvals: 1,
+      commands: [],
+      testGlobs: null,
+      excludeGlobs: null,
+      isolateHome: true,
+    };
+    const put = (b: Record<string, unknown>) =>
+      h.json<ApiError>("/api/repos/PROJ/repo/task-settings", { method: "PUT", body: { ...body, ...b } });
+    const ssh = { pattern: "ssh build1 *", reason: "The remote build." };
+    expect((await put({ allow: [ssh] })).body).toEqual({ error: "Accept the warning for commands that Claude runs first." });
+    expect((await put({ allow: [{ pattern: "git pull *", reason: "" }], shellWarning: true })).body).toEqual({
+      error: "git pull *: Claude cannot run git commands.",
+    });
+    expect((await put({ bashTimeoutSec: 3601 })).status).toBe(400);
+    expect((await put({ allow: [ssh], bashTimeoutSec: 900, shellWarning: true })).status).toBe(200);
+    const saved = (await get()).body;
+    expect([saved.allow.map((e) => [e.id, e.pattern, e.source]), saved.bashTimeoutSec, saved.shellWarnedAt !== null]).toEqual([
+      [["a1", "ssh build1 *", "user"]],
+      900,
+      true,
+    ]);
+    // A save without the shell fields keeps them. A later list needs no warning; a stored pattern keeps its ID.
+    expect((await put({})).status).toBe(200);
+    const scp = { pattern: "scp -r repo build1:*", reason: "Copy." };
+    expect((await put({ allow: [scp, ssh] })).status).toBe(200);
+    expect((await get()).body.allow.map((e) => [e.id, e.pattern])).toEqual([
+      ["a1", "ssh build1 *"],
+      ["a2", "scp -r repo build1:*"],
+    ]);
+    // Each switch to Any command needs the warning.
+    expect((await put({ shellMode: "any" })).body).toEqual({ error: "Accept the warning for commands that Claude runs first." });
+    expect((await put({ shellMode: "any", shellWarning: true })).status).toBe(200);
+    expect((await get()).body).toMatchObject({ shellMode: "any", bashTimeoutSec: 900 });
+  });
+
+  test(
+    "spec.md section 6.21 (D2): the plan offers its command patterns; the first picks need the shell warning and join the repository list",
+    async () => {
+      const h = await setup();
+      const allow = [
+        { pattern: "ssh build1 *", reason: "The remote build." },
+        { pattern: "python3 -m pytest *", reason: "The tests on the host." },
+      ];
+      h.scenario({ spec: specWith({ testing: { ...echoSpec().testing, allow } }) });
+      const t = await h.toPlan();
+      expect([t.plan?.allow, t.plan?.shellWarning, t.shell]).toEqual([
+        [
+          { id: "new-1", pattern: "ssh build1 *", reason: "The remote build.", saved: false, warning: null },
+          {
+            id: "new-2",
+            pattern: "python3 -m pytest *",
+            reason: "The tests on the host.",
+            saved: false,
+            warning: "This pattern lets Claude run any code.",
+          },
+        ],
+        true,
+        { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false },
+      ]);
+      const body = { version: t.version, size: "small", commands: ["new-1"], warning: true };
+      const picks = ["new-1", { id: "new-u1", pattern: "scp -r repo build1:*", reason: "Copy." }];
+      const plan = (b: Record<string, unknown>) => h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { ...body, ...b } });
+      expect((await plan({ allow: ["nope"] })).body).toEqual({ error: "Command pattern nope is not in the plan." });
+      expect((await plan({ allow: ["new-1", "new-1"] })).body).toEqual({ error: "Each command pattern is picked once." });
+      expect((await plan({ allow: [{ id: "new-u2", pattern: "bash -c *", reason: "" }], shellWarning: true })).body).toEqual({
+        error: "bash -c *: A shell or a command runner can run any command. Use Any command instead.",
+      });
+      const warn = await plan({ allow: picks });
+      expect([warn.status, warn.body.error]).toEqual([400, "Accept the warning for commands that Claude runs first."]);
+      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body: { ...body, allow: picks, shellWarning: true } });
+      expect(ok.status).toBe(200);
+      expect(ok.body.shell.warned).toBe(true);
+      expect(ok.body.shell.allow.map((e) => [e.id, e.pattern, e.reason, e.source])).toEqual([
+        ["a1", "ssh build1 *", "The remote build.", "plan"],
+        ["a2", "scp -r repo build1:*", "Copy.", "plan"],
+      ]);
+      // The plan now shows the saved entries as approved before, then the proposal that the user did not pick.
+      expect(ok.body.plan?.allow.map((a) => [a.id, a.pattern, a.saved])).toEqual([
+        ["a1", "ssh build1 *", true],
+        ["a2", "scp -r repo build1:*", true],
+        ["new-1", "python3 -m pytest *", false],
+      ]);
+      expect(ok.body.plan?.shellWarning).toBe(false);
+    },
+    SLOW,
+  );
 
   test(
     "a medium plan stays in spec_draft after its approval; the next plan of the repository needs no warning and offers a saved command once",

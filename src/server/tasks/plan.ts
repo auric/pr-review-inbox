@@ -6,7 +6,9 @@
 // and step.md of one task.
 import { oneLine } from "../../shared/consult";
 import {
+  type AllowProposal,
   APP_CHECKS_MAX,
+  allowProblem,
   CHECK_TIMEOUT_SEC,
   LARGE_REPOS_TEXT,
   type PlanProblem,
@@ -127,7 +129,8 @@ export type Plan = {
   design: SpecResult["design"];
   spec: SpecResult["spec"];
   parts: PlanPart[];
-  testing: { commands: TaskCommand[]; services: string[]; notes: string };
+  // allow (spec.md section 6.21, D2): the proposals that pass allowProblem. Absent in a plan stored before: [].
+  testing: { commands: TaskCommand[]; services: string[]; notes: string; allow?: AllowProposal[] };
   flag: SpecResult["flag"];
   questions: string[];
   // The part count of the whole plan, for a plan that holds one part of it (spec.md section 6.20.6). Absent: parts.length.
@@ -144,8 +147,15 @@ export const NEW_COMMAND = "new-";
 
 // The plan of a checked spec result. checked: the map check of each entry, or the app checks (checkPlan), whose line moves, marks,
 // and problems the plan takes. skipped gets a line for each command that fails the taskCommand schema. Task IDs become T<part>.<n>
-// and acceptance IDs A<part>.<n>, as the tasks grammar names them.
-export function toPlan(r: SpecResult, base: string, checked: boolean[] | AppChecks, skipped: string[]): Plan {
+// and acceptance IDs A<part>.<n>, as the tasks grammar names them. hosts: the Bitbucket and Jira host names. A proposed command pattern
+// that fails allowProblem gets a line in skipped too.
+export function toPlan(
+  r: SpecResult,
+  base: string,
+  checked: boolean[] | AppChecks,
+  skipped: string[],
+  hosts: readonly string[] = [],
+): Plan {
   const app = Array.isArray(checked) ? null : checked;
   const missing = app ? app.missing : (checked as boolean[]);
   const parts = r.parts.map((p, pi): PlanPart => {
@@ -168,6 +178,13 @@ export function toPlan(r: SpecResult, base: string, checked: boolean[] | AppChec
     if (ok.success) commands.push(ok.data);
     else skipped.push(`The test command "${oneLine(c.name)}" is not a valid argument list, so the plan leaves it out.`);
   }
+  const allow: AllowProposal[] = [];
+  for (const a of r.testing.allow) {
+    const pattern = a.pattern.trim();
+    const problem = allowProblem(pattern, hosts);
+    if (problem) skipped.push(`The plan leaves out the command pattern "${oneLine(pattern)}". ${problem}`);
+    else if (!allow.some((x) => x.pattern === pattern)) allow.push({ pattern, reason: a.reason });
+  }
   return {
     proposed: r.size,
     estimate: r.estimate,
@@ -177,7 +194,7 @@ export function toPlan(r: SpecResult, base: string, checked: boolean[] | AppChec
     design: r.design,
     spec: r.spec,
     parts,
-    testing: { commands, services: r.testing.services, notes: r.testing.notes },
+    testing: { commands, services: r.testing.services, notes: r.testing.notes, allow },
     flag: r.flag,
     questions: r.questions,
     contracts: r.contracts.map((c, i) => ({ ...c, missing: app?.contracts[i] === true })),

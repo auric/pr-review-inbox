@@ -2300,6 +2300,106 @@ The update and instruct routes take the part in the path or the body, as today. 
 - A reopen of a declined PR with a deleted toRef (section 6.8).
 - git 2.38 or later for `merge-tree --write-tree`. An older git takes the fallback.
 
+### 6.21 Commands that Claude runs: the Bash tool of a task step (user decisions of 2026-11-02 and 2026-11-03)
+
+The design is docs/plans/review-v2/shell.md (D1 to D11). The gate facts are integration-check.md rows SU1 to SU13. Where they differ from shell.md, this section wins. Examples use the build host alias build1.
+
+Constants:
+
+- ALLOW_MAX = 50 patterns per repository, ALLOW_PATTERN_MAX = 200 characters, ALLOW_PROPOSALS_MAX = 15 per plan (src/shared/task.ts)
+- ALLOW_REQUESTS_MAX = 3 requests per step, ALLOW_BLOCKS_MAX = 10 allow blocks per part (src/shared/task.ts)
+- BASH_TIMEOUT_DEFAULT_SEC = 600, BASH_TIMEOUT_MAX_SEC = 3600 (src/shared/task.ts)
+- REFUSED_MAX = 5 refused commands per run (src/server/review/stream.ts)
+- MIN_CLI_VERSION = 2.1.302 (src/server/review/claude.ts). From this version, `-p` refuses each call that needs approval (V7).
+
+#### 6.21.1 Modes and the allowlist (D1)
+
+- repo_task_settings (migration 044) adds shell_mode ('allowlist' or 'any', default 'allowlist'), allow_json (default '[]'), shell_warned_at, and bash_timeout_sec (1 to 3600, default 600).
+- An allow_json entry is {id, pattern, reason, source, addedAt}. source is plan, request, or user. The ID is a1 and up.
+- The user writes the inner pattern, such as `ssh build1 *`. The app writes the rule `Bash(<pattern>)` into shell.json of the run folder.
+- The app refuses a pattern (allowProblem): an empty one, more than 200 characters, a line break, one of ( ) ` ; & | < >, a `*` in the first word, a shell or a command runner as the first word ("Use Any command instead"), git, a credential-store tool, and a Bitbucket or Jira host name. The server checks each pattern on each save.
+- A pattern for an interpreter (python, python3, node, bun, deno, perl, ruby, npx, uvx, make) gets the warning "This pattern lets Claude run any code."
+- A tests, implement, fix, or instruct step gets the Bash tool in Any command mode. In allowlist mode, it gets Bash when the allowlist or an "Allow once" pattern of the step holds a pattern. The interview, spec, resolve, and own review runs never get Bash.
+
+#### 6.21.2 The run and the deny list (D4, D5, D6)
+
+- A shell step adds Bash to `--tools` and passes `--settings <run folder>/app/shell.json`. It passes no `--permission-mode`: CLAUDE_CODE_SUBPROCESS_ENV_SCRUB forces the default mode, and in `-p` the default mode refuses each command that has no allow rule (SU1).
+- shell.json: allow holds `Bash(<pattern>)` for each pattern, or `Bash` for Any command. deny holds the deny list. blockReadsOutsideWorkingDirectories is true, and disableBypassPermissionsMode is "disable".
+- The deny list applies in both modes, and a deny rule wins over each allow rule (V5): every git command, the Bitbucket and Jira hosts, the credential-store tools, powershell and pwsh, and the reads of the app config, the database files, the run folders, ~/.ssh, ~/.git-credentials, ~/.netrc, ~/_netrc, and ~/.claude/.credentials.json. The network programs (curl, wget, nc, ncat, netcat, socat, telnet, ftp, tftp, sftp, scp, ssh, rsync) stay denied unless an allowlist entry names one as its program. In allowlist mode, xargs stays denied unless an entry names it.
+- The rules match the command text only (V4). They reduce mistakes. They do not stop an attacker.
+- The CLI runs its built-in read-only commands with no allow rule, such as ls, cat, hostname, ps, tree, and du (SU4). Known limit: tree, fd, du, ps, pgrep, and lsof can show file names and process lists outside the part folder.
+- The child env keeps the real HOME. The scrub removes SSH_AUTH_SOCK, GIT_ASKPASS, and SSH_ASKPASS (SU8). So ssh uses the key file that the ssh config names, not an agent. The env has no GIT_* variable of the parent, an empty git credential helper, GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never, and BASH_DEFAULT_TIMEOUT_MS and BASH_MAX_TIMEOUT_MS from bash_timeout_sec.
+- The cwd of a command is the part folder. Stop and the end of each run end every command that Claude started: a Job Object on Windows, the run marker scan on Linux (SU5, SU11 to SU13). Stop does not end a remote process.
+- Windows needs Git for Windows. When init lists no Bash, the step fails with "Install Git for Windows. Claude Code needs Git Bash to run commands."
+
+#### 6.21.3 Plan proposals (D2)
+
+- The spec rules add: "List in testing.allow each command that the implement steps must run themselves, such as the remote build and the copy to the build host that a skill describes. Make each pattern as narrow as you can. Give a one-line reason. Never list git, a shell, or the Bitbucket or Jira host." The spec run stays read-only.
+- specResult.testing.allow: an array of {pattern (200), reason (300)}, at most 15, default []. A proposal that fails allowProblem gets the coverage line `The plan leaves out the command pattern "<pattern>". <reason>` and stays out of the plan.
+- TaskDto.plan.allow lists the saved patterns of the repository first, with saved true ("approved before"). Then it lists each proposal that the list does not hold, with the IDs new-1 and up. Each row carries the interpreter warning or null. TaskDto.plan.shellWarning is true while the repository has no accepted shell warning.
+- POST /api/tasks/:id/plan adds allow and shellWarning. allow picks offered rows by ID, or holds {id, pattern, reason} objects with an offered ID or a "new-" ID, as for commands. The picks join allow_json with source plan. A pattern in the list stays once. Absent allow: the list stays as it is.
+- 400: an unknown ID, an ID twice, a pattern that allowProblem refuses, more than 50 patterns, and new patterns while shell_warned_at is null without shellWarning: "Accept the warning for commands that Claude runs first." shellWarning sets shell_warned_at.
+
+#### 6.21.4 Requests during a step (D3)
+
+- The prompt of an allowlist step says: "You can run only these commands: `<pattern>`, ... Read-only commands, such as ls and cat, also run. Claude Code refuses every other command." Then: "When Claude Code refuses a command that the step needs, do not try another form of it. End the step: set allowRequest with the narrowest pattern, the refused command, and a reason. Set done to false." Then: "Never ask to allow a read-only command, git, a shell, or the Bitbucket or Jira host." An instruct step adds: "When the request asks for allowlist changes, set allowRequest and change no file."
+- The prompt of an Any command step says that a fixed deny list refuses git and some other commands. Each shell step reads: "Your commands start in the part folder. Write `cd repo && <command>`.", "Pipe long build output through `tail -n 200`.", and "Wrap each remote command in `timeout <seconds>` on the build host."
+- implementResult.allowRequest: an array of {pattern (200), command (1000), reason (300)}, at most 3, default [].
+- The stream labels each refusal (SU3). A deny rule gives type rule, or type subcommandResults with "Permission to use Bash with command <command> has been denied.": "Refused by the deny list". A command with no allow rule gives type other with "This command requires approval": "Refused by the allowlist".
+- Over REFUSED_MAX refused commands of either kind, the runner ends the run. In allowlist mode, each allowlist refusal of that run becomes a request with its exact command as the pattern. A deny refusal never becomes a request. A run that the runner ended with no request left stops the task with "Claude Code refused more than 5 commands in this run."
+- The app checks each request and drops it with a note of the step: a pattern that allowProblem refuses, a command that the deny list refused in the run, a pattern that the user refused for this task, a pattern that the step had, and each request after the third. In Any command mode, the app ignores allowRequest.
+- With a request left, the app saves the patch of the step as patches/<step>.patch, resets the worktree to the last commit, writes step detail allowAsk {requests, decisions: []}, and sets blocked {kind: allow, step, text: "Needs you: Claude asks to allow a command."}. The Tasks row says "Needs you: Claude asks to allow a command". TaskDto.allowAsk is {step, requests, warning}. warning: "Allow for this repository" needs the shell warning.
+- From the eleventh allow block of a part, the app sets blocked kind error with "Needs you: Claude asked for too many commands." instead.
+- POST /api/tasks/:id/allow {version, step, decisions: [{pattern, choice}], shellWarning?}. choice is once, repo, or refuse. It returns 202 and runs the step again from the last commit with the next attempt number. An instruct step gets a new send row, as after an answer.
+- 409: the task does not wait on allow for that step, or the loop works. 400: a pattern twice, a pattern that the step did not ask for, a request with no choice, a pattern that allowProblem refuses now, more than 50 patterns, and a repo choice while shell_warned_at is null without shellWarning.
+- Allow once: only the next run of that step (the same part, kind, and item) gets the pattern. Allow for this repository: the pattern joins allow_json with source request. Refuse: each later step of the task reads "The user refused <pattern>. Do the step without it, or set question." in context/step.md, and a request for that pattern goes to the notes only.
+- Resume while the task waits on allow gives 409: "Pick a choice for each command first."
+
+#### 6.21.5 Path check (D8)
+
+- A shell step may create, change, and delete files that git ignores, such as build output.
+- It still fails for a Write or Edit target that git ignores, a link on a changed ignored path, a change outside repo/, a denied path, and each other rule of section 6.8.
+- A failed step that changed ignored files removes the worktree. The next step makes it again from the branch, and setup runs again.
+- Known limit: git lists no file behind a link to an empty folder, so the check does not see such a link in an ignored folder.
+
+#### 6.21.6 Log (D7)
+
+- A Bash event shows the command, up to 4000 characters. Its note is the last 4096 bytes of the output, or the refusal note.
+- At the step end, detail.shell is {mode, rules, commands, refused}. commands holds at most 50 commands in run order, each with its state (ok, error, refused, or stopped) and its time in ms.
+
+#### 6.21.7 App-run and Claude-run commands (D9)
+
+- The app runs setup once per worktree before any Claude step. It runs build, test, and lint after the steps and before its own review, so the green result comes from the app.
+- Claude runs allowlist commands only inside a step.
+- A remote build that must count as a check is an app-run argv such as `ssh build1 make test`. It needs "Isolate home" off for that repository.
+
+#### 6.21.8 Settings and dialogs
+
+- GET /api/repos/:project/:repo/task-settings adds shellMode, allow, bashTimeoutSec, and shellWarnedAt. PUT adds shellMode, allow ({pattern, reason} entries, the whole list), bashTimeoutSec, and shellWarning. Absent fields keep the stored values. A stored pattern keeps its ID and source.
+- PUT gives 400 for a pattern that allowProblem refuses, and without shellWarning for the first new patterns and for each switch to Any command.
+- TaskDto.shell is {mode, allow, bashTimeoutSec, warned} of the repository of the task.
+- The Any command dialog ("Turn on Any command", "Cancel"): "Any command lets Claude run every command as you, with your files, your keys, and your network. Any command can write any file that you can write. Text in a Jira task, an attachment, or a comment can tell Claude to run a harmful command. The deny list and the Log tab only reduce mistakes. They do not stop an attacker. Use Any command only for repositories and tasks that you trust."
+- The first-use allowlist warning ("I understand"): "Claude can run each command that matches this list, as you, with your files, your keys, and your network. A pattern can match more than you expect. A pattern for an interpreter, such as python, lets Claude run any code. The deny list and the Log tab only reduce mistakes. They do not stop an attacker."
+
+#### 6.21.9 Acceptance criteria
+
+AC-B104 holds this section. Its items are AC-B104.1 to AC-B104.9, so the numbers of sections 6.23 and 6.24 stay.
+
+1. AC-B104.1. A step with allowRequest blocks the task with kind allow. Its patch is saved, and the worktree is at the last commit. Allow once, Refuse, and Allow for this repository each run the step again with the next attempt. Allow once reaches only the next run. A refused pattern goes to step.md and never shows again (tests/tasks/loop.test.ts).
+2. AC-B104.2. POST /allow gives 400 for an empty pattern, an unknown choice, and a pattern that the step did not ask for. It gives 409 when the task does not wait on allow (loop.test.ts).
+3. AC-B104.3. Over 5 refused commands end the run. Each allowlist refusal becomes a request with its exact command, at most 3. A deny refusal never becomes a request. Deny refusals alone stop the task (loop.test.ts, tests/tasks/implement.test.ts, tests/tasks/shell.test.ts).
+4. AC-B104.4. The eleventh allow block of a part gives "Needs you: Claude asked for too many commands." (loop.test.ts).
+5. AC-B104.5. The plan offers its valid proposals and the saved patterns. A refused proposal is a coverage line. The first picks need the shell warning (400). The picks join the list once, and a later plan shows them as approved before (tests/tasks/tasks.test.ts, tests/tasks/plan.test.ts).
+6. AC-B104.6. Build output in ignored files passes the path check of a shell step. An ignored Write target and a link on a changed ignored path fail. A step without Bash keeps the rule of section 6.8 (implement.test.ts).
+7. AC-B104.7. Task settings store the mode, the list, and the time limit. The first list and each switch to Any command need the shell warning (tasks.test.ts).
+8. AC-B104.8. A step detail, a spec result, and an implement result from before this section still parse with empty defaults. Migration 044 keeps each settings row (shell.test.ts, tests/storage/db.test.ts).
+9. AC-B104.9. A CLI older than 2.1.302 is unavailable (tests/review/runner.test.ts).
+
+#### 6.21.10 Not built yet
+
+- "Claude may run the approved checks" (D1): no setting holds it, and no approved check becomes an allow rule.
+- The UI of this section (shell.md S7, WP-C2c): the settings rows, the Plan tab editor, the allow request row, the task header, the Log tab rows, and the dialogs above.
+
 ### 6.22 Plan quality: app checks, contracts and risks, related work, and the plan check (user decisions of 2026-11-02)
 
 Examples use the task ABC-12 with the parent ABC-10, the repository PROJ/app, and the base develop.
@@ -2735,7 +2835,7 @@ Check agent (`planCheckAgent(p, budget, subtasks)`; description "Read-only check
 1. Default of "Check each plan with a second Claude run": on. Turn it off if smoke UP shows that the cost is too high for small tasks.
 2. Severity of "a task file not on the map": major, so it starts a repair. If smoke UP shows many repairs from this rule alone, make it minor.
 3. SYMBOL_NEAR: 5 lines. Tune it from the smoke counts of moved and minor symbols.
-4. AC numbering and section 6.21: this section takes AC-B91 to AC-B103. Section 6.21 (the Bash tool of task steps) has code but no text yet. When its text lands, give it AC-B104 and up, or renumber the section that merges second.
+4. AC numbering and section 6.21: this section takes AC-B91 to AC-B103. Section 6.21 (the Bash tool of task steps) takes AC-B104, with the items AC-B104.1 to AC-B104.9.
 5. Rename "Risks and rollout" to "Rollout": yes. Medium and large plans do not build yet ("This version builds small tasks only", PlanTab.tsx:224). So no committed spec PR uses the old heading.
 6. Commit search scope: the history of the target branch only. Found branches already appear in subtasks.md.
 7. related-work.md for the interview: not now. Reconsider after smoke UP.

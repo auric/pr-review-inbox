@@ -37,6 +37,10 @@ import {
 } from "../../shared/dto";
 import type { FindingPayload } from "../../shared/review";
 import {
+  type AllowEntry,
+  allowEntry,
+  allowWarning,
+  BASH_TIMEOUT_DEFAULT_SEC,
   BUILDS_AT_ONCE_DEFAULT,
   branchName,
   INTERVIEW_QUESTIONS,
@@ -54,6 +58,8 @@ import {
   PART_TIME_MIN,
   type PartState,
   RUN_CANCELLED,
+  SHELL_WARNING_FIRST,
+  type ShellMode,
   type SizeSource,
   SPEC_TURNS,
   type SpecResult,
@@ -142,6 +148,7 @@ import {
 import { relatedWorkFile } from "./related";
 import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, taskRepos, updateRepos } from "./repos";
 import { nextPart, type Schedule } from "./schedule";
+import { hostsOf, mergeAllow, originsOf } from "./shell";
 import {
   approveSubtasks,
   checkSubtaskPlan,
@@ -355,12 +362,16 @@ const Q = {
     AND state = 'OPEN' ORDER BY id DESC LIMIT 1`,
   // branch_prefix stays in the table. No code reads or writes it (spec.md section 6.16.1).
   saveSettings: `INSERT INTO repo_task_settings (project, repo, spec_dir, line_budget, max_open, approvals, commands_json,
-      test_globs_json, exclude_globs_json, isolate_home, updated_at)
-    VALUES ($project, $repo, $spec_dir, $budget, $max_open, $approvals, $commands, $tests, $excludes, $isolate, $now)
+      test_globs_json, exclude_globs_json, isolate_home, shell_mode, bash_timeout_sec, updated_at)
+    VALUES ($project, $repo, $spec_dir, $budget, $max_open, $approvals, $commands, $tests, $excludes, $isolate, $mode, $timeout, $now)
     ON CONFLICT (project, repo) DO UPDATE SET spec_dir = excluded.spec_dir,
       line_budget = excluded.line_budget, max_open = excluded.max_open, approvals = excluded.approvals, commands_json = excluded.commands_json,
       test_globs_json = excluded.test_globs_json, exclude_globs_json = excluded.exclude_globs_json, isolate_home = excluded.isolate_home,
-      updated_at = excluded.updated_at`,
+      shell_mode = excluded.shell_mode, bash_timeout_sec = excluded.bash_timeout_sec, updated_at = excluded.updated_at`,
+  stepDetail: "SELECT detail_json FROM task_step WHERE id = $id",
+  // spec.md section 6.21: the allowlist of a row that exists. The first warning time stays.
+  saveAllow: `UPDATE repo_task_settings SET allow_json = $allow, shell_warned_at = COALESCE(shell_warned_at, $warned)
+    WHERE project = $project AND repo = $repo`,
 };
 
 type SettingsRow = {
@@ -373,6 +384,10 @@ type SettingsRow = {
   exclude_globs_json: string | null;
   isolate_home: number;
   warned_at: number | null;
+  shell_mode: ShellMode;
+  allow_json: string;
+  shell_warned_at: number | null;
+  bash_timeout_sec: number;
 };
 
 export const taskRow = (db: Database, id: number) => db.query(Q.row).get({ id }) as TaskRow | null;
@@ -402,23 +417,64 @@ export function repoSettings(db: Database, project: string, repo: string): RepoT
     excludeGlobs: json<string[] | null>(r?.exclude_globs_json ?? null, null),
     isolateHome: (r?.isolate_home ?? 1) === 1,
     warnedAt: r?.warned_at ?? null,
+    shellMode: r?.shell_mode ?? "allowlist",
+    allow: allowEntry
+      .array()
+      .catch([])
+      .parse(JSON.parse(r?.allow_json ?? "[]")),
+    bashTimeoutSec: r?.bash_timeout_sec ?? BASH_TIMEOUT_DEFAULT_SEC,
+    shellWarnedAt: r?.shell_warned_at ?? null,
   };
 }
 
-export function saveRepoSettings(db: Database, project: string, repo: string, s: RepoTaskSettingsInput, now = Date.now()) {
-  db.query(Q.saveSettings).run({
-    project,
-    repo,
-    spec_dir: s.specDir,
-    budget: s.lineBudget,
-    max_open: s.maxOpen,
-    approvals: s.approvals,
-    commands: JSON.stringify(s.commands),
-    tests: s.testGlobs === null ? null : JSON.stringify(s.testGlobs),
-    excludes: s.excludeGlobs === null ? null : JSON.stringify(s.excludeGlobs),
-    isolate: s.isolateHome ? 1 : 0,
-    now,
-  });
+// spec.md section 6.21: the allowlist of a repository. warned: the first-use warning was accepted now. The row exists (Q.approve).
+export function saveAllow(db: Database, project: string, repo: string, allow: readonly AllowEntry[], warned: number | null) {
+  db.query(Q.saveAllow).run({ project, repo, allow: JSON.stringify(allow), warned });
+}
+
+// PUT /api/repos/:project/:repo/task-settings. hosts: the Bitbucket and Jira host names for allowProblem. Returns the reason for 400,
+// or null. spec.md section 6.21: the first non-empty allowlist and each switch to Any command need shellWarning.
+export function saveRepoSettings(
+  db: Database,
+  project: string,
+  repo: string,
+  s: RepoTaskSettingsInput,
+  hosts: readonly string[] = [],
+  now = Date.now(),
+): string | null {
+  const cur = repoSettings(db, project, repo);
+  const mode = s.shellMode ?? cur.shellMode;
+  let allow = cur.allow;
+  if (s.allow) {
+    // An entry with a stored pattern keeps its ID, source, and time.
+    const given = new Map(s.allow.map((a) => [a.pattern.trim(), a.reason.trim()]));
+    const keep = cur.allow.flatMap((x) => (given.has(x.pattern) ? [{ ...x, reason: given.get(x.pattern) ?? x.reason }] : []));
+    const merged = mergeAllow(keep, s.allow, "user", hosts, now);
+    if ("error" in merged) return merged.error;
+    allow = merged;
+  }
+  const added = allow.some((e) => !cur.allow.some((x) => x.pattern === e.pattern));
+  const toAny = mode === "any" && cur.shellMode !== "any";
+  if (((added && cur.shellWarnedAt === null) || toAny) && !s.shellWarning) return SHELL_WARNING_FIRST;
+  db.transaction(() => {
+    db.query(Q.saveSettings).run({
+      project,
+      repo,
+      spec_dir: s.specDir,
+      budget: s.lineBudget,
+      max_open: s.maxOpen,
+      approvals: s.approvals,
+      commands: JSON.stringify(s.commands),
+      tests: s.testGlobs === null ? null : JSON.stringify(s.testGlobs),
+      excludes: s.excludeGlobs === null ? null : JSON.stringify(s.excludeGlobs),
+      isolate: s.isolateHome ? 1 : 0,
+      mode,
+      timeout: s.bashTimeoutSec ?? cur.bashTimeoutSec,
+      now,
+    });
+    saveAllow(db, project, repo, allow, s.shellWarning ? now : null);
+  })();
+  return null;
 }
 
 const settingsOf = (t: TaskRow): TaskSettings => {
@@ -619,6 +675,16 @@ function commandsOf(p: Plan, saved: TaskCommand[]): (TaskCommand & { saved: bool
   ];
 }
 
+// spec.md section 6.21 (D2): the saved patterns of the repository, then the proposals of the plan that the list does not hold. A plan
+// stored before has no allow key.
+function allowOf(p: Plan, saved: readonly AllowEntry[]): TaskPlanDto["allow"] {
+  const fresh = (p.testing.allow ?? []).filter((a) => !saved.some((s) => s.pattern === a.pattern));
+  return [
+    ...saved.map((s) => ({ id: s.id, pattern: s.pattern, reason: s.reason, saved: true, warning: allowWarning(s.pattern) })),
+    ...fresh.map((a, i) => ({ id: `${NEW_COMMAND}${i + 1}`, ...a, saved: false, warning: allowWarning(a.pattern) })),
+  ];
+}
+
 // docs_json.subtasks: the checked sub-task plan of the spec run (spec.md section 6.20.4). null for a task without sub-tasks.
 // docs_json.adding: the changed plan of "Add to plan" until its approval (section 6.20.14). Its part numbers come after every part
 // of the task, and its parts, map entries, contracts, and risks join parsed at the approval. contracts and risks: only those of a part,
@@ -689,6 +755,8 @@ function planDto(db: Database, t: TaskRow, docs: Docs): TaskPlanDto {
     contracts: docs.parsed.contracts ?? [],
     risks: docs.parsed.risks ?? [],
     checks: docs.parsed.checks ?? [],
+    allow: allowOf(docs.parsed, repo.allow),
+    shellWarning: repo.shellWarnedAt === null,
   };
 }
 
@@ -1088,6 +1156,10 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     endedAt: s.ended_at,
   }));
   const current = currentPart(db, t);
+  const repo = repoSettings(db, t.project, t.repo);
+  const b = blockedOf(t);
+  const ask = b?.kind === "allow" && b.step ? db.query(Q.stepDetail).get({ id: b.step }) : null;
+  const allowAsk = ask ? stepDetail.parse(JSON.parse((ask as { detail_json: string }).detail_json)).allowAsk : null;
   return {
     ...rowDto(db, t),
     originPr: t.origin_pr,
@@ -1150,6 +1222,8 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       (t.state === "implementing" || t.state === "ready") && repoSettings(db, t.project, t.repo).commands.some((c) => c.kind === "setup"),
     subtasks: t.subtasks === 1 ? subtaskDtos(db, t.id, partRows) : null,
     issueStatus: taskIssue(db, t)?.issue.status ?? null,
+    shell: { mode: repo.shellMode, allow: repo.allow, bashTimeoutSec: repo.bashTimeoutSec, warned: repo.shellWarnedAt !== null },
+    allowAsk: allowAsk && b?.step ? { step: b.step, requests: allowAsk.requests, warning: repo.shellWarnedAt === null } : null,
   };
 }
 
@@ -1508,7 +1582,7 @@ export function createTaskService(opts: TaskServiceOptions) {
             if (add) sub.notes.push(...lines);
             skipped.push(...sub.notes);
           }
-          plan = toPlan(r, base, app, skipped);
+          plan = toPlan(r, base, app, skipped, hostsOf(originsOf(settings.config())));
           return { result: { ...r, repos: proposals }, skipped };
         }),
       started: (d, run) => insertStep(d, t.id, "spec", run),
@@ -1966,6 +2040,23 @@ export function createTaskService(opts: TaskServiceOptions) {
       const { saved: _, ...cmd } = c;
       picked.push(cmd);
     }
+    // spec.md section 6.21 (D2): the picked command patterns join the list of the repository. The first ones need the shell warning.
+    const allowIds = (input.allow ?? []).map((a) => (typeof a === "string" ? a : a.id));
+    if (new Set(allowIds).size !== allowIds.length) return { status: 400, error: "Each command pattern is picked once." };
+    const offeredAllow = allowOf(docs.parsed, repo.allow);
+    const allowPicks: { pattern: string; reason: string }[] = [];
+    for (const a of input.allow ?? []) {
+      const o = offeredAllow.find((x) => x.id === (typeof a === "string" ? a : a.id));
+      if (typeof a === "string" ? !o : !a.id.startsWith(NEW_COMMAND) && !o)
+        return { status: 400, error: `Command pattern ${typeof a === "string" ? a : a.id} is not in the plan.` };
+      if (typeof a !== "string") allowPicks.push({ pattern: a.pattern, reason: a.reason });
+      else if (o && !o.saved) allowPicks.push({ pattern: o.pattern, reason: o.reason });
+    }
+    const allowAt = now();
+    const merged = allowPicks.length ? mergeAllow(repo.allow, allowPicks, "plan", hostsOf(originsOf(settings.config())), allowAt) : null;
+    if (merged && "error" in merged) return { status: 400, error: merged.error };
+    const adds = merged !== null && merged.length > repo.allow.length;
+    if (adds && repo.shellWarnedAt === null && !input.shellWarning) return { status: 400, error: SHELL_WARNING_FIRST };
     if (repo.warnedAt === null && !input.warning) return { status: 409, error: "Accept the warning first", task: taskDto(db, t) };
     const prefix = input.prefix ?? (branchPrefixesOf(settings.config())[0] as string);
     let sub: { parts: PlannedPart[]; maxOpen: number } | null = null;
@@ -2003,6 +2094,7 @@ export function createTaskService(opts: TaskServiceOptions) {
           base: t.target_branch,
           now: at,
         });
+        if (merged && adds) saveAllow(db, t.project, t.repo, merged, input.shellWarning ? at : null);
         for (const b of picks) {
           const r = rows.find((x) => x.id === b.taskRepo) as (typeof rows)[number];
           if (r.role !== "main") db.query(Q.lastBasePick).run({ project: r.project, repo: r.repo, base: b.branch, now: at });

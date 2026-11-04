@@ -14,7 +14,7 @@ This test checks the compiled binary, the check interval, the profile editor, an
 ## Preparation
 
 1. Run `bun install`, then `bun run compile`. Expect "Built dist/bin/pr-review-inbox-<os>-<arch> (<commit>)." Record the commit.
-2. Run `claude --version`. Expect 2.1.295 or later. Run `claude auth status`. Expect `"authMethod": "claude.ai"`.
+2. Run `claude --version`. Expect 2.1.302 or later. Run `claude auth status`. Expect `"authMethod": "claude.ai"`.
 3. Remove `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the terminal. PowerShell: `Remove-Item Env:ANTHROPIC_API_KEY, Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue`.
 4. Make a new, empty folder outside the repository. Copy the binary into it and go to it in the terminal.
 5. Set a new data folder. PowerShell: `$env:REVIEW_LOOP_DATA_DIR = Join-Path $env:TEMP "review-loop-smoke-$(Get-Random)"`. Bash: `export REVIEW_LOOP_DATA_DIR="$(mktemp -d)"`.

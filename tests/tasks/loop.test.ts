@@ -6,7 +6,7 @@
 // remote holds the repository. No test starts the real CLI, reaches a forge, or touches the user's clone or data folder.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
@@ -34,8 +34,9 @@ import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
 import { recoverTasks, taskDto, taskRow } from "../../src/server/tasks/tasks";
 import { openWorktree, status } from "../../src/server/tasks/worktree";
-import type { ProfileInput, RunConflict, TaskDto } from "../../src/shared/dto";
+import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
 import { specResult, type TaskBlocked } from "../../src/shared/task";
+import { rowStatus } from "../../src/shared/task-status";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { logOf, pngOf } from "../support/fake-jira";
 import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
@@ -1558,6 +1559,198 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       expect(setups(s)).toBe(3);
       expect(s.part().state).toBe("self_reviewed");
       expect(s.flow().filter((x) => x.startsWith("check:setup:"))).toEqual(["check:setup:ok", "check:setup:ok", "check:setup:ok"]);
+    },
+    SLOW,
+  );
+});
+
+describe("commands that Claude may run (spec.md section 6.21)", () => {
+  const ask = (pattern: string) => ({ pattern, command: pattern, reason: `The step runs ${pattern}.` });
+  // A step that ends with allowRequest (D3): done false, the patterns, and no other change.
+  const asking = (...patterns: string[]) => ({
+    implement: {
+      summary: "Claude Code refused a command.",
+      done: false,
+      tests: [],
+      question: null,
+      specChange: "",
+      allowRequest: patterns.map(ask),
+      notes: [],
+      coverage: NO_COVERAGE,
+    },
+  });
+  type S = Awaited<ReturnType<typeof setup>>;
+  const allowRow = (s: S) => s.blocked()?.step ?? 0;
+  const detailOf = (s: S, id: number) =>
+    JSON.parse((s.steps().find((x) => x.id === id) as Step).detail_json) as {
+      notes: string[];
+      allowAsk: { requests: unknown[]; decisions: unknown[] } | null;
+    };
+  const implementCalls = (s: S) => s.runCalls().filter((c) => s.modeOf(c) === "implement");
+  const allowOf = (s: S, b: Omit<TaskAllowInput, "version" | "step"> & { step?: number }) =>
+    s.loop.allow(s.db, s.task, { version: s.t().version, step: allowRow(s), ...b });
+
+  test(
+    "D3: allowRequest blocks with kind allow; Allow once, Refuse, and Allow for this repository each run the step again",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:implement": [
+            { ...asking("make build"), writes: [TODO] },
+            asking("make deploy"),
+            asking("make deploy", "make lint"),
+            { writes: [TODO] },
+          ],
+        },
+      });
+      await s.build();
+      // Attempt 1 has no Bash: the repository has no pattern yet. Its change goes to a patch, and the worktree goes back.
+      const first = allowRow(s);
+      expect(s.blocked()).toEqual({ kind: "allow", step: first, text: "Needs you: Claude asks to allow a command." });
+      expect(rowStatus(taskDto(s.db, s.t()))).toEqual({ text: "Needs you: Claude asks to allow a command", needsYou: true });
+      expect(taskDto(s.db, s.t()).allowAsk).toEqual({ step: first, requests: [ask("make build")], warning: true });
+      expect(implementCalls(s)[0]?.argv.join(" ")).not.toContain("Bash");
+      expect(await status(await s.wt())).toEqual([]);
+      const patches = join(s.dataDir, "tasks", readdirSync(join(s.dataDir, "tasks"))[0] as string, String(s.task), "patches");
+      expect(readFileSync(join(patches, `${first}.patch`), "utf8")).toContain("src/feature.ts");
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version })).toMatchObject({
+        status: 409,
+        error: "Pick a choice for each command first.",
+      });
+      // The route: zod refuses an empty pattern and an unknown choice.
+      const SESSION = "s".repeat(64);
+      const ORIGIN = "http://127.0.0.1:7317";
+      const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
+      const post = async (decisions: unknown) => {
+        const res = await app.request(`${ORIGIN}/api/tasks/${s.task}/allow`, {
+          method: "POST",
+          headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
+          body: JSON.stringify({ version: s.t().version, step: first, decisions }),
+        });
+        return { status: res.status, body: (await res.json()) as { error?: string } };
+      };
+      expect((await post([{ pattern: " ", choice: "once" }])).status).toBe(400);
+      expect((await post([{ pattern: "make build", choice: "always" }])).status).toBe(400);
+      expect(await post([{ pattern: "git push *", choice: "repo" }])).toEqual({
+        status: 400,
+        body: { error: "Claude did not ask to allow git push *." },
+      });
+      expect(allowOf(s, { step: first + 100, decisions: [{ pattern: "make build", choice: "once" }] })).toMatchObject({
+        status: 409,
+        error: "No command waits for your choice.",
+      });
+      expect(allowOf(s, { decisions: [{ pattern: "git push *", choice: "once" }] })).toEqual({
+        status: 400,
+        error: "Claude did not ask to allow git push *.",
+      });
+      expect(allowOf(s, { decisions: [{ pattern: "make build", choice: "once" }] }).status).toBe(202);
+      await s.loop.idle(s.task);
+
+      // Attempt 2 gets the "Allow once" pattern and asks for another one, which the user refuses.
+      const second = allowRow(s);
+      expect(second).toBeGreaterThan(first);
+      const call2 = implementCalls(s)[1] as Call;
+      expect(call2.argv[call2.argv.indexOf("--tools") + 1]).toContain("Bash");
+      expect(call2.stdin).toContain("You can run only these commands: `make build`.");
+      expect(allowOf(s, { decisions: [{ pattern: "make deploy", choice: "refuse" }] }).status).toBe(202);
+      await s.loop.idle(s.task);
+
+      // Attempt 3: the once pattern is gone, step.md names the refused pattern, and a request for it goes only to the notes.
+      const third = allowRow(s);
+      const call3 = implementCalls(s)[2] as Call;
+      expect(call3.argv.join(" ")).not.toContain("Bash");
+      expect(call3.context["step.md"]).toContain("The user refused make deploy. Do the step without it, or set question.");
+      expect(taskDto(s.db, s.t()).allowAsk?.requests).toEqual([ask("make lint")]);
+      expect(detailOf(s, third).notes).toContain("Claude asked again to allow make deploy. You refused it for this task.");
+      expect(allowOf(s, { decisions: [{ pattern: "make lint", choice: "repo" }] })).toEqual({
+        status: 400,
+        error: "Accept the warning for commands that Claude runs first.",
+      });
+      expect(allowOf(s, { decisions: [{ pattern: "make lint", choice: "repo" }], shellWarning: true }).status).toBe(202);
+      await s.loop.idle(s.task);
+
+      // Attempt 4 and the later steps get the pattern of the repository. The build goes on to the own review.
+      expect(s.blocked()).toBeNull();
+      expect(s.part().state).toBe("self_reviewed");
+      const call4 = implementCalls(s)[3] as Call;
+      expect(call4.stdin).toContain("You can run only these commands: `make lint`.");
+      expect(call4.context["step.md"]).toContain("The user refused make deploy.");
+      const fix = s.runCalls().find((c) => s.modeOf(c) === "fix") as Call;
+      expect(fix.stdin).toContain("`make lint`");
+      const shell = taskDto(s.db, s.t()).shell;
+      expect([shell.warned, shell.allow.map((e) => [e.pattern, e.source, e.reason])]).toEqual([
+        true,
+        [["make lint", "request", "The step runs make lint."]],
+      ]);
+      expect(detailOf(s, first).allowAsk?.decisions).toEqual([{ pattern: "make build", choice: "once" }]);
+      expect(detailOf(s, second).allowAsk?.decisions).toEqual([{ pattern: "make deploy", choice: "refuse" }]);
+      expect(
+        s
+          .steps()
+          .filter((x) => x.kind === "implement")
+          .map((x) => x.attempt),
+      ).toEqual([1, 2, 3, 4]);
+      expect(allowOf(s, { step: third, decisions: [{ pattern: "make lint", choice: "once" }] }).status).toBe(409);
+    },
+    SLOW,
+  );
+
+  test(
+    "D3: over 5 refused commands end the run; each allowlist refusal becomes a request with its exact command, and a deny refusal never does",
+    async () => {
+      const refused = (by: "allowlist" | "deny", commands: string[]) => commands.map((command) => ({ command, refused: by }));
+      const s = await setup({
+        seq: {
+          "implement:implement": [
+            {
+              bash: [
+                ...refused("allowlist", ["make a", "make b"]),
+                ...refused("deny", ["git status", "curl https://example.invalid"]),
+                ...refused("allowlist", ["make c", "make d"]),
+              ],
+            },
+            { writes: [TODO] },
+          ],
+        },
+      });
+      const entry = { id: "a1", pattern: "echo *", reason: "Print.", source: "user", addedAt: 1 };
+      s.db.query("UPDATE repo_task_settings SET allow_json = $allow, shell_warned_at = 1").run({ allow: JSON.stringify([entry]) });
+      await s.build();
+      const row = allowRow(s);
+      expect(s.blocked()?.kind).toBe("allow");
+      expect(s.t().state).toBe("implementing");
+      const step = s.steps().find((x) => x.id === row) as Step;
+      expect([step.kind, step.state]).toEqual(["implement", "failed"]);
+      expect(taskDto(s.db, s.t()).allowAsk?.requests).toEqual(
+        ["make a", "make b", "make c"].map((p) => ({ pattern: p, command: p, reason: "Claude Code refused this command in the step." })),
+      );
+      expect(detailOf(s, row).notes).toContain("Claude asked for more than 3 commands. The app left out make d.");
+      const decisions = ["make a", "make b", "make c"].map((pattern) => ({ pattern, choice: "refuse" as const }));
+      expect(allowOf(s, { decisions }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect(s.blocked()).toBeNull();
+      expect(s.part().state).toBe("self_reviewed");
+    },
+    SLOW,
+  );
+
+  test(
+    "D3: after 10 allow blocks in a part, the next request is the error that Claude asked for too many commands",
+    async () => {
+      const s = await setup({ seq: { "implement:implement": [asking("make build"), asking("make other")] } });
+      await s.build();
+      const row = allowRow(s);
+      const old = JSON.stringify({ allowAsk: { requests: [ask("make old")], decisions: [] } });
+      for (let k = 0; k < 9; k++)
+        s.db
+          .query(
+            `INSERT INTO task_step (task, part, kind, state, attempt, item, ord, detail_json, started_at, ended_at)
+            VALUES ($task, $part, 'implement', 'ok', 1, 'old', $ord, $detail, 1, 1)`,
+          )
+          .run({ task: s.task, part: s.part().id, ord: 100 + k, detail: old });
+      expect(allowOf(s, { step: row, decisions: [{ pattern: "make build", choice: "once" }] }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect(s.blocked()).toMatchObject({ kind: "error", text: "Needs you: Claude asked for too many commands." });
     },
     SLOW,
   );
