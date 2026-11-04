@@ -92,3 +92,14 @@ Status: inventory of 2026-11-03 against main 7c32f26, after the user said "we ha
 **Summary of the worst ones.** The global single-run lock hurts most. One running review blocks Explain, Ask, Fix, discussion and every task step on every PR. It looks like a cost or CPU choice, not a safety rule, and nothing in Settings can change it. Next come fixed numbers with no reason I could find: 20 discussion messages, 30 notes per PR at 500 characters each, 25 threads per Fix run, 10 branch prefixes, 5 open PRs at once and 12 sub-task parts. All of these refuse in the UI. Several AI-output schema caps are a quieter problem. Explain's 300 files and 30 steps, and the plan's 15 steps, 8 questions and 12 contracts, can make a run on a large PR fail validation instead of trimming its output; I did not confirm whether they trim or fail. Some limits are fixed although they look like they should be settings: the 60-minute run timeout, the 20-minute task step time, 3 test-fix tries, 2 interview rounds and 80 plan turns. Everything marked SAFETY matches the hard rules and should stay.
 
 Not checked: the UI messages for limits I found only in schemas (marked unverified), and the Bitbucket client and sync internals. I gave the values; I did not test in the running app whether each limit triggers.
+
+## User decisions (2026-11-04)
+
+The user agreed with all four recommendations:
+
+1. Several runs at once. A Settings number sets the limit (default 3). One run per PR at a time. A short design comes first, because the run queue is central code.
+2. Raise these fixed numbers: discussion messages 20 to 100; notes per PR 30 to 200, each 500 to 20,000 characters; Fix threads per run 25 to 100; branch prefixes 10 to 50; open PRs per task 5 to 20; sub-task parts 12 to 30; Jira rule matches 10 to 50.
+3. Make these editable in Settings, Tasks: the task step time (20 min), the review run time (60 min), the interview rounds (2), the test-fix tries (3), and the plan turns (80).
+4. An AI result over a schema cap is cut, not failed. First check which caps fail today, then change only those.
+
+The setup package also got the user's agreement: setup default 60 min; checks keep 10 min; maximum 4 h; a "Time limit (min)" field on each command row; Claude proposes a limit for long setup commands; a timeout shows as "time limit", not "stopped", with "Change the time limit"; and the opt-in folder `REVIEW_LOOP_TASK_CACHE`, shared by the parts of one task.
