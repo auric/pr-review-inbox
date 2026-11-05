@@ -26,7 +26,7 @@ import type {
   TaskRowDto,
   TaskTransitionsDto,
 } from "../../shared/dto";
-import type { TaskDoc, TaskSize } from "../../shared/task";
+import type { TaskCommand, TaskDoc, TaskSize } from "../../shared/task";
 import { api } from "../api";
 import { ApiError, read } from "../shell/data";
 
@@ -107,6 +107,14 @@ export const useRepoTaskSettings = (project: string, repo: string) =>
     queryKey: ["task-settings", project, repo],
     queryFn: async () => read<RepoTaskSettingsDto>(await repoSettings$().$get({ param: { project, repo } })),
   });
+
+// PUT task-settings with new commands. The other settings stay: the allowlist and the mode are absent, so the server keeps them.
+export async function saveTaskCommands(qc: QueryClient, s: RepoTaskSettingsDto, commands: TaskCommand[]): Promise<void> {
+  const { project, repo, warnedAt: _w, shellWarnedAt: _s, allow: _a, shellMode: _m, bashTimeoutSec: _b, ...rest } = s;
+  const dto = await read<RepoTaskSettingsDto>(await repoSettings$().$put({ param: { project, repo }, json: { ...rest, commands } }));
+  qc.setQueryData(["task-settings", project, repo], dto);
+  await qc.invalidateQueries({ queryKey: ["task"] });
+}
 
 // GET /api/tasks/profile (spec.md section 6.2): the profile that the Build form preselects for a repository. null: no request.
 export const useTaskProfile = (r: { project: string; repo: string } | null) =>

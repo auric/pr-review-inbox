@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The Log tab (docs/plans/review-v2/spec.md sections 6.7 and 6.12): the steps, newest first, with their commands, exit codes, the
-// output tails folded, the saved patch, the commands that the runner ran and the commands that it asked to allow (section 6.21.6), and a
+// The Log tab (docs/plans/review-v2/spec.md sections 6.7 and 6.12): the steps, newest first, with their commands, exit codes or time
+// limits, the output tails folded (a running command shows its output so far), the saved patch, the commands that the runner ran and the commands that it asked to allow (section 6.21.6), and a
 // link to the run log of each step with a run (RunLog.tsx). A send of the Tell box is one
 // group "Your instructions" with its text, its result, and its steps inside (section 6.18.1).
 import { CircleAlert, CircleCheck, CircleDashed, CircleMinus, LoaderCircle, ScrollText } from "lucide-react";
@@ -10,7 +10,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { TaskDto, TaskStepDto } from "../../shared/dto";
-import type { StepDetail } from "../../shared/task";
+import { limitText, type StepDetail } from "../../shared/task";
 import { DECIDED_TEXT, shellText } from "./allow";
 import { logRows, type SendGroup, STEP_TEXT, type StepLook, sendResult, stepLook } from "./model";
 
@@ -210,24 +210,35 @@ function StepBody({
           {d.diffStat.files} {d.diffStat.files === 1 ? "file" : "files"}, +{d.diffStat.added} −{d.diffStat.removed}
         </p>
       )}
-      {d.commands.map((c, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: commands run in their stored order and never move.
-        <details key={i} className="rounded-[5px] border bg-pane px-2 py-1 text-xs">
-          <summary className="flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-0.5">
-            <span className="font-medium">{c.name}</span>
-            <code translate="no" className="font-mono [overflow-wrap:anywhere] text-ink-2">
-              {c.argv.join(" ")}
-            </code>
-            <span className={cn(c.exit !== 0 && look !== "expected" && "font-semibold text-destructive")}>
-              {c.notRun ?? (c.exit === null ? "stopped" : `exit ${c.exit}`)}
-            </span>
-            <span className="text-muted-foreground">{seconds(c.ms)}</span>
-          </summary>
-          <pre translate="no" className="m-0 mt-1 max-h-72 overflow-auto font-mono text-[11px] whitespace-pre-wrap">
-            {c.tail.trimEnd() || "(no output)"}
-          </pre>
-        </details>
-      ))}
+      {d.commands.map((c, i) => {
+        // A row of a step that ended while the command ran, such as at an app restart, shows "stopped".
+        const live = c.running && look === "running";
+        return (
+          // biome-ignore lint/suspicious/noArrayIndexKey: commands run in their stored order and never move.
+          <details key={i} data-command={live ? "running" : undefined} className="rounded-[5px] border bg-pane px-2 py-1 text-xs">
+            <summary className="flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span className="font-medium">{c.name}</span>
+              <code translate="no" className="font-mono [overflow-wrap:anywhere] text-ink-2">
+                {c.argv.join(" ")}
+              </code>
+              <span className={cn(!live && c.exit !== 0 && look !== "expected" && "font-semibold text-destructive")}>
+                {live
+                  ? "running"
+                  : (c.notRun ??
+                    (c.timedOut && c.timeoutSec !== null
+                      ? `time limit ${limitText(c.timeoutSec)}`
+                      : c.exit === null
+                        ? "stopped"
+                        : `exit ${c.exit}`))}
+              </span>
+              <span className="text-muted-foreground">{seconds(c.ms)}</span>
+            </summary>
+            <pre translate="no" className="m-0 mt-1 max-h-72 overflow-auto font-mono text-[11px] whitespace-pre-wrap">
+              {c.tail.trimEnd() || (live ? "(no output yet)" : "(no output)")}
+            </pre>
+          </details>
+        );
+      })}
       {d.shell && <ShellRows shell={d.shell} runner={runner} />}
       {d.allowAsk && (
         <div className="grid gap-0.5 text-xs text-ink-2">

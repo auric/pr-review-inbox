@@ -1393,7 +1393,8 @@ test(
 );
 
 // spec.md section 6.7, Setup: the setup command of the tests below. Each run appends a line to setups.log in the test folder. Mode
-// venv writes .venv/ and build/, which no ignore rule covers. Mode ignored writes into ignored/. setup-mode.txt "fail" exits with 1.
+// venv writes .venv/ and build/, which no ignore rule covers. Mode ignored writes into ignored/. setup-mode.txt "fail" exits with 1, and
+// "hang" never ends.
 const SETUP = `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const dir = import.meta.dir;
@@ -1403,16 +1404,17 @@ for (const f of out) {
   mkdirSync(join(f, ".."), { recursive: true });
   writeFileSync(f, "made by setup\\n");
 }
-const fail = existsSync(join(dir, "setup-mode.txt")) && readFileSync(join(dir, "setup-mode.txt"), "utf8").trim() === "fail";
-process.exit(fail ? 1 : 0);
+const mode = existsSync(join(dir, "setup-mode.txt")) ? readFileSync(join(dir, "setup-mode.txt"), "utf8").trim() : "ok";
+if (mode === "hang") setInterval(() => {}, 1000);
+else process.exit(mode === "fail" ? 1 : 0);
 `;
 
 describe("commit only Claude's files and run setup again (spec.md section 6.7)", () => {
   // The setup command of the repository before the test command. extra: more argv items, so the list changes.
-  const withSetup = (s: Awaited<ReturnType<typeof setup>>, mode: "venv" | "ignored", extra: string[] = []) => {
+  const withSetup = (s: Awaited<ReturnType<typeof setup>>, mode: "venv" | "ignored", extra: string[] = [], timeoutSec = 60) => {
     writeFileSync(join(s.root, "setup.ts"), SETUP);
     const commands = [
-      { id: "s", name: "venv", kind: "setup", argv: [process.execPath, join(s.root, "setup.ts"), mode, ...extra], timeoutSec: 60 },
+      { id: "s", name: "venv", kind: "setup", argv: [process.execPath, join(s.root, "setup.ts"), mode, ...extra], timeoutSec },
       { id: "t", name: "test", kind: "test", argv: [process.execPath, join(s.root, "check.ts")], timeoutSec: 60 },
     ];
     s.db.query("UPDATE repo_task_settings SET commands_json = $c").run({ c: JSON.stringify(commands) });
@@ -1502,6 +1504,24 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       expect(s.flow()).toContain("review:review:ok");
       expect(s.part().state).toBe("self_reviewed");
       expect(s.t().state).toBe("implementing");
+    },
+    SLOW,
+  );
+
+  test(
+    "a setup command that reaches its time limit blocks red with the limit, and the step row keeps timedOut",
+    async () => {
+      const s = await setup();
+      withSetup(s, "venv", [], 1);
+      writeFileSync(join(s.root, "setup-mode.txt"), "hang");
+      await s.build();
+      expect(s.blocked()).toMatchObject({
+        kind: "red",
+        text: 'Needs you: the setup command "venv" of part 1 reached its time limit of 0.02 min.',
+      });
+      expect(s.flow()).toEqual(["commit:plan:ok", "check:setup:failed"]);
+      const row = s.steps().find((x) => x.kind === "check") as { detail_json: string };
+      expect(JSON.parse(row.detail_json).commands[0]).toMatchObject({ name: "venv", exit: null, timedOut: true, timeoutSec: 1 });
     },
     SLOW,
   );

@@ -14,8 +14,8 @@ import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { CHECK_KINDS, checkEnv, checkStep, runChecks, runCommand, runEntries, scopedCommands } from "../../src/server/tasks/checks";
 import { saveRepoSettings } from "../../src/server/tasks/tasks";
-import { openWorktree, type Worktree } from "../../src/server/tasks/worktree";
-import { stepDetail, type TaskCommand } from "../../src/shared/task";
+import { openWorktree, taskDir, type Worktree } from "../../src/server/tasks/worktree";
+import { stepDetail, TASK_CACHE_ENV, type TaskCommand } from "../../src/shared/task";
 import { taskCache, taskRemote } from "./fixture";
 
 console.log(`checks.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/checks", import.meta.dir)}`);
@@ -63,7 +63,7 @@ async function setup() {
   cleanup.push(() => db.close());
   const { base } = await taskCache(dataDir, r.remote);
   const wt = await openWorktree({ dataDir, db, project: "PROJ", repo: "repo", task: 1, ord: 1, branch: "feature/K-1-x", base });
-  const save = (commands: TaskCommand[], o: { warned?: boolean; isolate?: boolean } = {}) => {
+  const save = (commands: TaskCommand[], o: { warned?: boolean; isolate?: boolean; cache?: boolean } = {}) => {
     saveRepoSettings(db, "PROJ", "repo", {
       specDir: "specs/{key}/",
       lineBudget: 400,
@@ -73,12 +73,38 @@ async function setup() {
       testGlobs: null,
       excludeGlobs: null,
       isolateHome: o.isolate ?? true,
+      taskCache: o.cache ?? false,
     });
     db.query("UPDATE repo_task_settings SET warned_at = $w").run({ w: o.warned === false ? null : 1 });
   };
   const run = (o: { kinds?: typeof CHECK_KINDS; signal?: AbortSignal; wt?: Worktree } = {}) =>
     runChecks({ db, dataDir, project: "PROJ", repo: "repo", wt: o.wt ?? wt, kinds: o.kinds ?? CHECK_KINDS, signal: o.signal });
-  return { root, dataDir, db, wt, save, run };
+  // A task row and its part row for checkStep.
+  const taskPart = () => {
+    const now = Date.now();
+    const task = (
+      db
+        .query(
+          `INSERT INTO task (project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+          VALUES ('PROJ', 'repo', 'K-1', 'Thing', 'implementing', 'main', 'specs/K-1/', $now, $now) RETURNING id`,
+        )
+        .get({ now }) as { id: number }
+    ).id;
+    const part = (
+      db
+        .query(
+          `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+          VALUES ($task, 1, 'single', 'Thing', 'feature/K-1-x', 'main', 'implementing', $now, $now) RETURNING id`,
+        )
+        .get({ task, now }) as { id: number }
+    ).id;
+    return { task, part };
+  };
+  const detail = (step: number) =>
+    stepDetail.parse(
+      JSON.parse((db.query("SELECT detail_json FROM task_step WHERE id = $id").get({ id: step }) as { detail_json: string }).detail_json),
+    );
+  return { root, dataDir, db, wt, save, run, taskPart, detail };
 }
 
 const cmd = (id: string, kind: TaskCommand["kind"], code: string, extra: string[] = [], timeoutSec = 60): TaskCommand => ({
@@ -312,6 +338,88 @@ describe("app-run checks", () => {
       expect((s.db.query("SELECT state FROM task_step WHERE id = $id").get({ id: refused.step }) as { state: string }).state).toBe(
         "failed",
       );
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.7, Log: the output so far reaches the step row while the command runs",
+    async () => {
+      const s = await setup();
+      const { task, part } = s.taskPart();
+      const go = join(s.root, "go.txt");
+      // Prints one line, then waits for the test (20 s at most) before the second line.
+      const wait = `console.log("first line"); const end = Date.now() + 20000; while (!require("fs").existsSync(${JSON.stringify(go)}) && Date.now() < end) await Bun.sleep(50); console.log("second line");`;
+      s.save([cmd("ok", "setup", "console.log('done')"), cmd("slow", "setup", wait)]);
+      let changes = 0;
+      const running = checkStep({
+        db: s.db,
+        dataDir: s.dataDir,
+        project: "PROJ",
+        repo: "repo",
+        wt: s.wt,
+        kinds: ["setup"],
+        task,
+        part,
+        item: "setup",
+        onChange: () => changes++,
+      });
+      const step = (s.db.query("SELECT MAX(id) AS id FROM task_step").get() as { id: number }).id;
+      const live = () => s.detail(step).commands.find((c) => c.name === "slow");
+      expect(await until(() => live()?.tail.includes("first line") === true)).toBe(true);
+      // The command still runs: it waits for go.txt.
+      expect(existsSync(go)).toBe(false);
+      expect(live()).toMatchObject({ running: true, exit: null, timedOut: false, timeoutSec: 60 });
+      expect(s.detail(step).commands[0]).toMatchObject({ name: "ok", running: false, exit: 0 });
+      expect(changes).toBeGreaterThan(0);
+      writeFileSync(go, "x");
+      const r = await running;
+      expect(r.status === "ran" && r.green).toBe(true);
+      const end = s.detail(step).commands;
+      expect(end.map((c) => [c.name, c.running, c.exit])).toEqual([
+        ["ok", false, 0],
+        ["slow", false, 0],
+      ]);
+      expect(end[1]?.tail).toContain("second line");
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.7: a command that reaches its time limit keeps timedOut and the limit in the step row",
+    async () => {
+      const s = await setup();
+      const { task, part } = s.taskPart();
+      s.save([cmd("deps", "setup", "setInterval(() => {}, 1000)", [], 1)]);
+      const r = await checkStep({ db: s.db, dataDir: s.dataDir, project: "PROJ", repo: "repo", wt: s.wt, kinds: ["setup"], task, part });
+      expect(r.status === "ran" && r.green).toBe(false);
+      const [c] = s.detail(r.step).commands;
+      expect(c).toMatchObject({ name: "deps", exit: null, running: false, timedOut: true, timeoutSec: 1 });
+      expect(c?.tail).toContain("[The command reached its time limit of 0.02 min. The app stopped it after 1 s.]");
+      expect((s.db.query("SELECT state FROM task_step WHERE id = $id").get({ id: r.step }) as { state: string }).state).toBe("failed");
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.3: with task_cache on, each command gets REVIEW_LOOP_TASK_CACHE, one folder per task; off, none",
+    async () => {
+      const s = await setup();
+      const { task, part } = s.taskPart();
+      const dump = `const d = process.env.${TASK_CACHE_ENV}; console.log(JSON.stringify({ d: d ?? null, there: !!d && require("fs").existsSync(d) }))`;
+      const step = async () => {
+        const r = await checkStep({ db: s.db, dataDir: s.dataDir, project: "PROJ", repo: "repo", wt: s.wt, kinds: ["setup"], task, part });
+        if (r.status !== "ran") throw new Error(r.reason);
+        return JSON.parse(r.commands[0]?.tail ?? "") as { d: string | null; there: boolean };
+      };
+      s.save([cmd("env", "setup", dump)]);
+      expect(await step()).toEqual({ d: null, there: false });
+      s.save([cmd("env", "setup", dump)], { cache: true });
+      expect(await step()).toEqual({ d: join(taskDir(s.dataDir, s.db, task), "cache"), there: true });
+      // runChecks without a task gets no folder.
+      const plain = await s.run({ kinds: ["setup"] });
+      if (plain.status !== "ran") throw new Error(plain.reason);
+      expect(JSON.parse(plain.commands[0]?.tail ?? "")).toEqual({ d: null, there: false });
     },
     SLOW,
   );

@@ -54,6 +54,8 @@ export type ActionKind =
   | "close"
   // spec.md section 6.7: "Run setup again" on the part that the view shows.
   | "setup"
+  // spec.md section 6.7: "Change the time limit" of a setup command that reached its time limit.
+  | "time-limit"
   // spec.md section 6.21.4: "Continue" sends the choice for each command that the step asks to allow.
   | "allow"
   // spec.md section 6.20: the actions of a task with sub-tasks. Each one acts on the focused part.
@@ -380,6 +382,11 @@ function waitingFor(names: string[]): string {
 }
 
 const stepFor = (t: TaskDto, id: number | null) => (id === null ? null : (t.steps.find((s) => s.id === id) ?? null));
+// The setup command of a red reason that reached its time limit (spec.md section 6.7), or null.
+export const timedOutSetup = (t: TaskDto) => {
+  const s = t.blocked?.kind === "red" ? stepFor(t, t.blocked.step) : null;
+  return (s?.item === "setup" && s.detail.commands.find((c) => c.timedOut)) || null;
+};
 
 // forge: the short name of the code host from meta, for the conflict row (spec.md section 6.18.5). newest: the task_pr ID whose merge
 // commit the forge did not name, after the user saw that 409; the pointer button then points at the newest base commit.
@@ -497,6 +504,12 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
     });
     switch (b.kind) {
       case "red":
+        if (timedOutSetup(t))
+          return blocked({ kind: "time-limit", label: "Change the time limit" }, [
+            { kind: "see-why", label: "See why" },
+            { kind: "resume", label: "Resume" },
+            STOP,
+          ]);
         // spec.md section 6.18.3, Checks: red checks after an update keep it until "Undo the update".
         return blocked(
           { kind: "see-why", label: "See why" },

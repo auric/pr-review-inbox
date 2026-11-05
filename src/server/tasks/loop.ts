@@ -22,6 +22,7 @@ import {
   type ImplementResult,
   type InstructDetail,
   LARGE_REPOS_TEXT,
+  limitText,
   type PartState,
   RESOLVE_STOPS,
   refusedLine,
@@ -817,6 +818,7 @@ export function createLoop(opts: LoopOptions) {
         attempt: nextAttempt(c, "check", item),
         expectRed,
         now,
+        onChange: () => changed(c.id),
       });
       changed(c.id);
       if (r.status === "refused") block(c, { kind: "error", step: r.step, text: `Needs you: ${r.reason}` });
@@ -1291,6 +1293,14 @@ export function createLoop(opts: LoopOptions) {
     rmSync(mark, { force: true });
     if (list.length) {
       const r = await checks(c, "setup", ["setup"]);
+      // The Task view offers "Change the time limit" for a red setup step with a command that reached its time limit.
+      const late = r.status === "ran" ? r.commands.find((x) => x.timedOut) : undefined;
+      if (late)
+        block(c, {
+          kind: "red",
+          step: r.step,
+          text: `Needs you: the setup command "${oneLine(late.name)}" of part ${c.part.ord} reached its time limit of ${limitText(late.timeoutSec ?? 0)}.`,
+        });
       if (!r.green) block(c, { kind: "red", step: r.step, text: `Needs you: the setup commands of part ${c.part.ord} failed. See why.` });
     }
     writeFileSync(mark, hash);

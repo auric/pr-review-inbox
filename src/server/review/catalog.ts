@@ -18,7 +18,7 @@ import {
   type Volume,
 } from "../../shared/dto";
 import { FIX_EDIT_RULES, FIX_WHY_RULES, REVIEW_PROMPT_VERSION } from "../../shared/review";
-import { PROPOSALS_MAX } from "../../shared/task";
+import { CHECK_TIMEOUT_SEC, limitText, PROPOSALS_MAX, SETUP_TIMEOUT_SEC } from "../../shared/task";
 import { type AgentSpec, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
 import { SKILL_INDEX, SKILL_INDEX_AFTER } from "./skills";
@@ -1008,6 +1008,10 @@ export const specRules = (budget: number, platform: string = process.platform) =
   `The commands run on ${OS_NAME[platform] ?? platform}. The app runs each command without a shell, from the repository root of a fresh checkout.`,
   "On Windows, the Python of a venv is .venv/Scripts/python.exe, not .venv/bin/python.",
   "When the project needs a venv, add a setup command that creates it first, such as python -m venv .venv.",
+  // spec.md section 6.3: the commands run one at a time, in list order. Setup runs first, once per worktree.
+  "Give the setup commands in the order in which they must run. The app runs the commands one at a time, top to bottom.",
+  `Each command has a time limit: ${limitText(SETUP_TIMEOUT_SEC)} for setup, ${limitText(CHECK_TIMEOUT_SEC)} for the others. Leave timeoutSec null to keep it.`,
+  "Set timeoutSec only for a command that downloads or builds much, such as a dependency download. Then give the reason in timeoutReason.",
   "When the tests need a service, such as a database, make its setup the first task.",
   // spec.md section 6.21 (D2).
   "List in testing.allow each command that the implement steps must run themselves. Examples are the remote build and the copy to the build host that a skill describes. Make each pattern as narrow as you can. Give a one-line reason. Never list git, a shell, or the Bitbucket or Jira host.",

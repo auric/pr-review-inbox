@@ -287,14 +287,18 @@ async function shots(browser: Browser) {
   await rest();
   await save(page, "task-update");
 
-  // Settings > Tasks: "Commands Claude may run" of the task repository, with the pattern of the plan (spec.md section 6.21.8).
-  await page.goto(`${BASE}/settings/tasks`);
+  // Settings > Commands: "Commands Claude may run" of the task repository, with the pattern of the plan (spec.md section 6.21.8).
+  await page.goto(`${BASE}/settings/commands`);
   const repoCommands = page.locator("[data-task-commands='PROJ1/sample-repo-4']");
   await repoCommands.locator("summary").click();
   await repoCommands.locator("[data-shell-settings]").waitFor();
   await rest();
-  // The clip shows the repository only. The Clones section below it shows a temp path.
-  await save(page, "settings-commands", repoCommands);
+  // The clip shows the Commands section with its heading only. The Clones section below it shows a temp path. The section is taller
+  // than the pane, so a tall viewport holds all of it.
+  await page.setViewportSize({ width: WIDE.width, height: 1800 });
+  await rest();
+  await save(page, "settings-commands", page.locator("section[aria-labelledby='h-commands']"));
+  await page.setViewportSize(WIDE);
 
   await page.goto(`${BASE}/settings/profiles`);
   await page.locator("#h-profiles").waitFor();

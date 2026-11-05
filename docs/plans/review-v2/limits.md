@@ -15,7 +15,7 @@ Status: inventory of 2026-11-03 against main 7c32f26, after the user said "we ha
 | Sub-task parts max 12, sub-tasks read 20 | shared/task.ts:160-161, :589 | Plan schema rejects more than 12 parts | ARBITRARY | fixed | raise |
 | Plan schema caps (8 questions, 15 steps, 20 criteria, 12 contracts, 8 risks…) | shared/task.ts:501-680 | AI output fails validation, so the run fails (unverified) | RESOURCE (prompt shape) | fixed | raise |
 | Task doc 120,000, answer 100,000 chars | shared/dto.ts:1289-1290, web/tasks/Questions.tsx:105 | Textarea stops typing | RESOURCE (low risk) | fixed | keep |
-| Commands 20, args 32, check timeout 1..3600 s (default 600) | dto.ts:1288, task.ts:330-337,133 | Validation error | ARBITRARY | per task (timeout) | keep |
+| Commands 20, args 32, check timeout 1..14400 s (default 600, setup 3600) | dto.ts:1288, task.ts:330-337,133 | Validation error | ARBITRARY | per task (timeout) | keep |
 | Reviewers 20 | dto.ts:1287 | Validation error | ARBITRARY | fixed | keep |
 | Branch name 100, suffix -99 | task.ts:95,102 | Branch name refused | SAFETY-ish (git ref) | fixed | keep |
 | Attachments 200 per task, file 100 MB, PR 500 MB | dto.ts:940-941, context/routes.ts:244 | "The file is larger than 100 MB." | RESOURCE (disk) | fixed | keep |

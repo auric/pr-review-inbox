@@ -9,7 +9,8 @@ import {
   type AllowProposal,
   APP_CHECKS_MAX,
   allowProblem,
-  CHECK_TIMEOUT_SEC,
+  COMMAND_TIMEOUT_MAX_SEC,
+  defaultTimeoutSec,
   LARGE_REPOS_TEXT,
   type PlanProblem,
   type PlanSeverity,
@@ -130,7 +131,7 @@ export type Plan = {
   spec: SpecResult["spec"];
   parts: PlanPart[];
   // allow (spec.md section 6.21, D2): the proposals that pass allowProblem. Absent in a plan stored before: [].
-  testing: { commands: TaskCommand[]; services: string[]; notes: string; allow?: AllowProposal[] };
+  testing: { commands: PlanCommand[]; services: string[]; notes: string; allow?: AllowProposal[] };
   flag: SpecResult["flag"];
   questions: string[];
   // The part count of the whole plan, for a plan that holds one part of it (spec.md section 6.20.6). Absent: parts.length.
@@ -144,6 +145,8 @@ export type Plan = {
 export type Docs = Partial<Record<TaskDoc, string>> & { version: number; parsed: Plan; approved: boolean };
 
 export const NEW_COMMAND = "new-";
+// A proposed command. timeoutReason: why Claude proposes a longer time limit. The plan approval does not store it.
+export type PlanCommand = TaskCommand & { timeoutReason?: string };
 
 // The plan of a checked spec result. checked: the map check of each entry, or the app checks (checkPlan), whose line moves, marks,
 // and problems the plan takes. skipped gets a line for each command that fails the taskCommand schema. Task IDs become T<part>.<n>
@@ -172,10 +175,14 @@ export function toPlan(
       tasks: p.tasks.map((t, i) => ({ id: `T${n}.${i + 1}`, title: t.title, files: t.files, run: t.run, done: t.done, ticked: false })),
     };
   });
-  const commands: TaskCommand[] = [];
-  for (const c of r.testing.commands) {
-    const ok = taskCommand.safeParse({ id: `${NEW_COMMAND}${commands.length + 1}`, ...c, timeoutSec: CHECK_TIMEOUT_SEC });
-    if (ok.success) commands.push(ok.data);
+  const commands: PlanCommand[] = [];
+  for (const { timeoutSec, timeoutReason, ...c } of r.testing.commands) {
+    // spec.md section 6.3: a proposed time limit is capped to 1 s .. COMMAND_TIMEOUT_MAX_SEC. None: the default of the kind.
+    const sec =
+      timeoutSec !== null && Number.isFinite(timeoutSec) ? Math.min(COMMAND_TIMEOUT_MAX_SEC, Math.max(1, Math.round(timeoutSec))) : null;
+    const ok = taskCommand.safeParse({ id: `${NEW_COMMAND}${commands.length + 1}`, ...c, timeoutSec: sec ?? defaultTimeoutSec(c.kind) });
+    const reason = sec === null ? "" : timeoutReason.trim();
+    if (ok.success) commands.push({ ...ok.data, ...(reason && { timeoutReason: reason }) });
     else skipped.push(`The test command "${oneLine(c.name)}" is not a valid argument list, so the plan leaves it out.`);
   }
   const allow: AllowProposal[] = [];

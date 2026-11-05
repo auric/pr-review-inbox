@@ -4,7 +4,15 @@
 // The command line of an approved task command (docs/plans/review-v2/spec.md section 6.3, commands_json). A command stays an argv
 // list: the line is only its text form. No shell parses it, so no backslash escape exists, and a Windows path keeps its backslashes.
 // Spaces split the arguments. Double or single quotes keep spaces and the other quote. Quoted parts next to text join one argument.
-import { COMMAND_KINDS, type CommandKind, MAX_TASK_COMMAND_ARGS, type TaskCommand } from "../../shared/task";
+import {
+  COMMAND_KINDS,
+  COMMAND_TIMEOUT_MAX_SEC,
+  type CommandKind,
+  defaultTimeoutSec,
+  MAX_TASK_COMMAND_ARGS,
+  type TaskCommand,
+} from "../../shared/task";
+import { timeoutMinutes, timeoutSec } from "./allow";
 
 export function splitArgv(line: string): { argv: string[] } | { error: string } {
   const argv: string[] = [];
@@ -45,22 +53,30 @@ export function joinArgv(argv: readonly string[]): string {
     .join(" ");
 }
 
-// One row of a command editor. line: the typed command line.
-export type CommandDraft = { id: string; name: string; kind: CommandKind; line: string; timeoutSec: number };
+// One row of a command editor. line: the typed command line. minutes: the typed time limit (spec.md section 6.3). reason: why the
+// plan proposes a longer time limit.
+export type CommandDraft = { id: string; name: string; kind: CommandKind; line: string; minutes: string; reason?: string };
 
-export const toDraft = (c: TaskCommand): CommandDraft => ({
+export const toDraft = (c: TaskCommand & { timeoutReason?: string }): CommandDraft => ({
   id: c.id,
   name: c.name,
   kind: c.kind,
   line: joinArgv(c.argv),
-  timeoutSec: c.timeoutSec,
+  minutes: timeoutMinutes(c.timeoutSec),
+  ...(c.timeoutReason && { reason: c.timeoutReason }),
 });
+
+// The time limit of a new row, and of a row whose kind changes while it keeps the default of its old kind.
+export const defaultMinutes = (kind: CommandKind) => timeoutMinutes(defaultTimeoutSec(kind));
+export const commandTimeout = (minutes: string) => timeoutSec(minutes, COMMAND_TIMEOUT_MAX_SEC);
+export const LIMIT_PROBLEM = `Enter a time limit from 1 second to ${COMMAND_TIMEOUT_MAX_SEC / 60} minutes.`;
 
 // The problem of a row, or null.
 export function draftProblem(d: CommandDraft): string | null {
   if (!d.name.trim()) return "Give the command a name.";
   const r = splitArgv(d.line);
-  return "error" in r ? r.error : null;
+  if ("error" in r) return r.error;
+  return commandTimeout(d.minutes) === null ? LIMIT_PROBLEM : null;
 }
 
 // The commands of the rows, or null while a row has a problem.
@@ -68,8 +84,9 @@ export function draftsToCommands(drafts: readonly CommandDraft[]): TaskCommand[]
   const out: TaskCommand[] = [];
   for (const d of drafts) {
     const r = splitArgv(d.line);
-    if ("error" in r || !d.name.trim()) return null;
-    out.push({ id: d.id, name: d.name.trim(), kind: d.kind, argv: r.argv, timeoutSec: d.timeoutSec });
+    const sec = commandTimeout(d.minutes);
+    if ("error" in r || !d.name.trim() || sec === null) return null;
+    out.push({ id: d.id, name: d.name.trim(), kind: d.kind, argv: r.argv, timeoutSec: sec });
   }
   return out;
 }

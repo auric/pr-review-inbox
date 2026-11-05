@@ -79,7 +79,7 @@ export function planProblem(t: TaskDto, picks: readonly CommandDraft[], warned: 
 
 // A picked command goes as its ID when the user did not change it, else as the whole edited command.
 const sameCommand = (a: TaskCommand, b: TaskCommand) =>
-  a.name === b.name && a.kind === b.kind && JSON.stringify(a.argv) === JSON.stringify(b.argv);
+  a.name === b.name && a.kind === b.kind && a.timeoutSec === b.timeoutSec && JSON.stringify(a.argv) === JSON.stringify(b.argv);
 
 // The branch picks per task. A base change writes the plan again, and this screen comes back with the picks.
 const branchPicks = new Map<number, BranchPick>();
@@ -287,6 +287,7 @@ export function PlanApproval(props: {
           onPick={toggle}
           saved={saved}
           newPrefix="new-u"
+          runner={runner}
         />
       </FieldSet>
       <FieldSet data-plan-allow className="gap-1.5">

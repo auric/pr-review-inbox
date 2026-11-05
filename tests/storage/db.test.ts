@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 44;
+const LATEST = 45;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1118,6 +1118,8 @@ test("migration from a version-32 database keeps every row and child row; task r
       allow_json: "[]",
       shell_warned_at: null,
       bash_timeout_sec: 600,
+      // 045_task_setup.sql.
+      task_cache: 0,
     });
     expect(() => db.run("INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ('P', 'r', 2)")).toThrow(/UNIQUE/);
 
@@ -1170,7 +1172,8 @@ test("migration from a version-33 database keeps every task setting; last_base i
   const db = openDb(path);
   try {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
-    const shell = { shell_mode: "allowlist", allow_json: "[]", shell_warned_at: null, bash_timeout_sec: 600 };
+    // 044_task_shell.sql and 045_task_setup.sql.
+    const shell = { shell_mode: "allowlist", allow_json: "[]", shell_warned_at: null, bash_timeout_sec: 600, task_cache: 0 };
     expect(columns(db, "repo_task_settings")).toEqual([...oldColumns, "last_base", ...Object.keys(shell)]);
     expect(db.query("SELECT * FROM repo_task_settings").all()).toEqual(
       (before as Record<string, unknown>[]).map((r) => ({ ...r, last_base: null, ...shell })),
@@ -1538,6 +1541,59 @@ test("migration from a version-43 database keeps the repository settings; the sh
     expect(() => db.run("UPDATE repo_task_settings SET shell_mode = 'all'")).toThrow(/CHECK/);
     expect(() => db.run("UPDATE repo_task_settings SET bash_timeout_sec = 3601")).toThrow(/CHECK/);
     db.run("UPDATE repo_task_settings SET shell_mode = 'any', bash_timeout_sec = 3600");
+  } finally {
+    db.close();
+  }
+});
+
+// 045_task_setup.sql: spec.md section 6.3, the shared task folder and the setup time limit of 60 min.
+test("migration from a version-44 database: task_cache is off, and a setup command with the old default gets 60 min", () => {
+  const path = join(dir, "v44.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+    "041_build_status.sql",
+    "042_task_subtasks.sql",
+    "043_run_events.sql",
+    "044_task_shell.sql",
+  ]);
+  old.exec("PRAGMA user_version = 44");
+  const cmd = (id: string, kind: string, timeoutSec: number) => ({ id, name: id, kind, argv: [id], timeoutSec });
+  const list = [cmd("venv", "setup", 600), cmd("test", "test", 600), cmd("deps", "setup", 900)];
+  const insert = old.query(`INSERT INTO repo_task_settings (project, repo, commands_json, updated_at) VALUES ('P', $repo, $commands, 6)`);
+  insert.run({ repo: "a", commands: JSON.stringify(list) });
+  insert.run({ repo: "b", commands: "[]" });
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    const rows = db.query("SELECT repo, commands_json, task_cache FROM repo_task_settings ORDER BY repo").all() as {
+      repo: string;
+      commands_json: string;
+      task_cache: number;
+    }[];
+    expect(rows.map((r) => [r.repo, r.task_cache])).toEqual([
+      ["a", 0],
+      ["b", 0],
+    ]);
+    expect(JSON.parse(rows[0]?.commands_json ?? "")).toEqual([
+      cmd("venv", "setup", 3600),
+      cmd("test", "test", 600),
+      cmd("deps", "setup", 900),
+    ]);
+    expect(rows[1]?.commands_json).toBe("[]");
+    expect(() => db.run("UPDATE repo_task_settings SET task_cache = 2")).toThrow(/CHECK/);
   } finally {
     db.close();
   }

@@ -55,6 +55,7 @@ import {
   subtaskView,
   taskView,
   tellBox,
+  timedOutSetup,
   withSetup,
 } from "./model";
 import { OpenPrDialog, OpenPrsDialog, type PrRowInput } from "./OpenPrDialog";
@@ -64,6 +65,7 @@ import { docList, SpecDocs } from "./SpecDocs";
 import { StepStrip } from "./StepStrip";
 import { type Confirm, ConfirmDialog, SubtaskList } from "./SubtaskList";
 import { TellClaude } from "./TellClaude";
+import { TimeLimitDialog } from "./TimeLimitDialog";
 
 // The shell keys of the Task view (keys.ts): j and k move over the steps and parts, Enter runs the primary action, Esc closes the run log.
 export type TaskApi = { step: (d: 1 | -1) => void; primary: () => void; layer: (target: EventTarget | null) => Layer; close: () => void };
@@ -134,6 +136,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const opts = { runner, forge: meta.forge.name, tracker: trackerName, now, newest };
   const part = focused ?? currentPart(t);
   const view = withSetup(t, part, subs ? subtaskView(t, focused, opts) : taskView(t, opts));
+  const late = timedOutSetup(t);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [moving, setMoving] = useState<{ key: string; status: string | null } | null>(null);
   const [asking, setAsking] = useState(false);
@@ -172,6 +175,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const [prOpen, setPrOpen] = useState(false);
   const [prError, setPrError] = useState<string | null>(null);
   const [limitOpen, setLimitOpen] = useState(false);
+  const [timeOpen, setTimeOpen] = useState(false);
   const [limit, setLimit] = useState("");
   const [runLog, setRunLog] = useState<{ run: number; raw: boolean; n: number } | null>(null);
   const log = useTaskRun(t.id, runLog?.run ?? null);
@@ -334,6 +338,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       case "change-limit":
         setLimitOpen(true);
         return focus("task-limit");
+      case "time-limit":
+        return setTimeOpen(true);
       case "review-change":
         return focus("task-change");
       case "reject-change":
@@ -709,6 +715,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         />
       )}
       <ConfirmDialog confirm={confirm} busy={busy} onClose={() => setConfirm(null)} />
+      {timeOpen && late && <TimeLimitDialog project={t.project} repo={t.repo} late={late} onClose={() => setTimeOpen(false)} />}
       {source && <JiraMoveDialog task={t.id} source={source} tracker={trackerName} issue={moving} onClose={() => setMoving(null)} />}
       {runLog && (
         <RunLog

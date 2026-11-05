@@ -75,6 +75,7 @@ import {
   type TaskView,
   taskView,
   tellBox,
+  timedOutSetup,
   withSetup,
 } from "../../src/web/tasks/model";
 
@@ -330,6 +331,25 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     const v = view(building({ parts: [part({ state: "self_reviewed" })], working: true }));
     expect(v.primary).toBeNull();
     expect(v.status).toBe("The app prepares the next step.");
+  });
+
+  test("spec.md section 6.7: a red setup with a command at its time limit offers Change the time limit first", () => {
+    const text = 'Needs you: the setup command "venv" of part 1 reached its time limit of 10 min.';
+    const late = { name: "venv", argv: ["python"], exit: null, ms: 600_000, tail: "", timedOut: true, timeoutSec: 600 };
+    const setupStep = (timedOut: boolean) =>
+      step({ id: 4, kind: "check", item: "setup", state: "failed", detail: stepDetail.parse({ commands: [{ ...late, timedOut }] }) });
+    const t = building({ blocked: { kind: "red", step: 4, text }, steps: [setupStep(true)], canSetup: true });
+    expect(shape(view(t))).toEqual({
+      status: text,
+      primary: "Change the time limit",
+      more: ["See why", "Resume", "Stop"],
+      screen: "build",
+    });
+    expect(timedOutSetup(t)).toMatchObject({ name: "venv", timeoutSec: 600 });
+    expect(withSetup(t, t.parts[0] ?? null, view(t)).more.map((a) => a.label)).toEqual(["See why", "Resume", "Run setup again", "Stop"]);
+    // A failed setup without a time limit, and a check that is no setup, keep See why.
+    expect(view({ ...t, steps: [setupStep(false)] }).primary?.label).toBe("See why");
+    expect(view({ ...t, steps: [{ ...setupStep(true), item: "T1.1" }] }).primary?.label).toBe("See why");
   });
 
   test("blocked red: the server sentence, See why, Resume and Stop", () => {

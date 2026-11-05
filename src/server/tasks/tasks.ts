@@ -362,12 +362,13 @@ const Q = {
     AND state = 'OPEN' ORDER BY id DESC LIMIT 1`,
   // branch_prefix stays in the table. No code reads or writes it (spec.md section 6.16.1).
   saveSettings: `INSERT INTO repo_task_settings (project, repo, spec_dir, line_budget, max_open, approvals, commands_json,
-      test_globs_json, exclude_globs_json, isolate_home, shell_mode, bash_timeout_sec, updated_at)
-    VALUES ($project, $repo, $spec_dir, $budget, $max_open, $approvals, $commands, $tests, $excludes, $isolate, $mode, $timeout, $now)
+      test_globs_json, exclude_globs_json, isolate_home, shell_mode, bash_timeout_sec, task_cache, updated_at)
+    VALUES ($project, $repo, $spec_dir, $budget, $max_open, $approvals, $commands, $tests, $excludes, $isolate, $mode, $timeout, $cache, $now)
     ON CONFLICT (project, repo) DO UPDATE SET spec_dir = excluded.spec_dir,
       line_budget = excluded.line_budget, max_open = excluded.max_open, approvals = excluded.approvals, commands_json = excluded.commands_json,
       test_globs_json = excluded.test_globs_json, exclude_globs_json = excluded.exclude_globs_json, isolate_home = excluded.isolate_home,
-      shell_mode = excluded.shell_mode, bash_timeout_sec = excluded.bash_timeout_sec, updated_at = excluded.updated_at`,
+      shell_mode = excluded.shell_mode, bash_timeout_sec = excluded.bash_timeout_sec, task_cache = excluded.task_cache,
+      updated_at = excluded.updated_at`,
   stepDetail: "SELECT detail_json FROM task_step WHERE id = $id",
   // spec.md section 6.21: the allowlist of a row that exists. The first warning time stays.
   saveAllow: `UPDATE repo_task_settings SET allow_json = $allow, shell_warned_at = COALESCE(shell_warned_at, $warned)
@@ -388,6 +389,7 @@ type SettingsRow = {
   allow_json: string;
   shell_warned_at: number | null;
   bash_timeout_sec: number;
+  task_cache: number;
 };
 
 export const taskRow = (db: Database, id: number) => db.query(Q.row).get({ id }) as TaskRow | null;
@@ -424,6 +426,7 @@ export function repoSettings(db: Database, project: string, repo: string): RepoT
       .parse(JSON.parse(r?.allow_json ?? "[]")),
     bashTimeoutSec: r?.bash_timeout_sec ?? BASH_TIMEOUT_DEFAULT_SEC,
     shellWarnedAt: r?.shell_warned_at ?? null,
+    taskCache: r?.task_cache === 1,
   };
 }
 
@@ -470,6 +473,7 @@ export function saveRepoSettings(
       isolate: s.isolateHome ? 1 : 0,
       mode,
       timeout: s.bashTimeoutSec ?? cur.bashTimeoutSec,
+      cache: (s.taskCache ?? cur.taskCache) ? 1 : 0,
       now,
     });
     saveAllow(db, project, repo, allow, s.shellWarning ? now : null);
@@ -665,13 +669,13 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
   };
 };
 
-// The commands of the plan screen: the proposed ones, then the saved ones of the repository. A proposal with the argv of a saved
-// command is the same command, so it shows once.
-function commandsOf(p: Plan, saved: TaskCommand[]): (TaskCommand & { saved: boolean })[] {
+// The commands of the plan screen in run order (spec.md section 6.3): the saved ones of the repository, then the new proposals. A
+// proposal with the argv of a saved command is the same command, so it shows once.
+function commandsOf(p: Plan, saved: TaskCommand[]): TaskPlanDto["commands"] {
   const same = (a: TaskCommand, b: TaskCommand) => JSON.stringify(a.argv) === JSON.stringify(b.argv);
   return [
-    ...p.testing.commands.filter((c) => !saved.some((s) => same(s, c))).map((c) => ({ ...c, saved: false })),
     ...saved.map((c) => ({ ...c, saved: true })),
+    ...p.testing.commands.filter((c) => !saved.some((s) => same(s, c))).map((c) => ({ ...c, saved: false })),
   ];
 }
 
@@ -2037,7 +2041,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       }
       const c = offered.find((o) => o.id === x);
       if (!c) return { status: 400, error: `Command ${x} is not in the plan.` };
-      const { saved: _, ...cmd } = c;
+      const { saved: _, timeoutReason: _r, ...cmd } = c;
       picked.push(cmd);
     }
     // spec.md section 6.21 (D2): the picked command patterns join the list of the repository. The first ones need the shell warning.

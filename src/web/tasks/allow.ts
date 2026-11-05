@@ -67,13 +67,13 @@ export const warningTitle = (n: ShellNames) => `Commands that ${n.runner} runs`;
 export const warningText = (n: ShellNames) =>
   `${n.runner} can run each command that matches this list, as you, with your files, your keys, and your network. A pattern can match more than you expect. A pattern for an interpreter, such as python, lets ${n.runner} run any code. The deny list and the Log tab only reduce mistakes. They do not stop an attacker.`;
 
-// "Longest command" in minutes. The server takes 1 s to BASH_TIMEOUT_MAX_SEC.
+// "Longest command" in minutes. The server takes 1 s to max, BASH_TIMEOUT_MAX_SEC by default.
 export const timeoutMinutes = (sec: number) => String(Math.round((sec / 60) * 100) / 100);
-export function timeoutSec(minutes: string): number | null {
+export function timeoutSec(minutes: string, max = BASH_TIMEOUT_MAX_SEC): number | null {
   const m = Number(minutes.trim());
   if (!minutes.trim() || !Number.isFinite(m)) return null;
   const sec = Math.round(m * 60);
-  return sec >= 1 && sec <= BASH_TIMEOUT_MAX_SEC ? sec : null;
+  return sec >= 1 && sec <= max ? sec : null;
 }
 export const TIMEOUT_PROBLEM = `Enter a time from 1 second to ${BASH_TIMEOUT_MAX_SEC / 60} minutes.`;
 

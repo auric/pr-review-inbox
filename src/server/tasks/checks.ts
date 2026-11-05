@@ -5,23 +5,24 @@
 // runs only the argv lists that the user approved for the repository, after the one-time warning, in the task worktree only. No shell
 // runs: Bun.spawn gets the argument array. Each command has its timeout and a process-tree kill. Native Windows has no OS sandbox.
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, posix, resolve } from "node:path";
-import { type CommandKind, OUTPUT_TAIL, type StepDetail, type TaskCommand } from "../../shared/task";
+import { type CommandKind, limitText, OUTPUT_TAIL, type StepDetail, TASK_CACHE_ENV, type TaskCommand } from "../../shared/task";
 import { log } from "../log";
 import { childEnv, contain, killTree, RUN_MARKER } from "../review/claude";
 import { repoPath } from "../review/validate";
-import { endStep, insertStep } from "./implement";
+import { endStep, insertStep, patchStep } from "./implement";
 import { repoSettings } from "./tasks";
-import { inside, tasksRoot, type Worktree } from "./worktree";
+import { inside, taskDir, tasksRoot, type Worktree } from "./worktree";
 
 // A child that a kill leaves can hold the pipes open. It must not block the step.
 const DRAIN_MS = 5_000;
 export const CHECK_KINDS: readonly CommandKind[] = ["build", "test", "lint"];
 
-export type CommandResult = StepDetail["commands"][number] & { timedOut: boolean; stopped: boolean };
+type StepCommand = StepDetail["commands"][number];
+export type CommandResult = StepCommand & { stopped: boolean };
 
 // spec.md section 6.7: the scrubbed child env (BRIEF section 7, "Child environment") plus CI=1. The GIT_* and SSH_ASKPASS variables go
 // too, as for every git child (git.ts baseEnv): they can name another repository, config, or credential prompt. home: the folder for
@@ -73,7 +74,7 @@ function tailBuffer(max: number) {
     },
     text() {
       const all = Buffer.concat(chunks);
-      chunks = [];
+      chunks = [all];
       return new TextDecoder().decode(all.subarray(Math.max(0, all.length - max)));
     },
   };
@@ -84,14 +85,23 @@ async function pump(stream: ReadableStream<Uint8Array>, add: (c: Uint8Array) => 
   for (let c = await r.read(); !c.done; c = await r.read()) add(c.value);
 }
 
+// The least time between two onOutput calls of one command.
+export const OUTPUT_MS = 1_000;
+
 // Runs one command. The output keeps the last tailBytes of stdout and stderr together, in arrival order. exit is null when the
-// timeout or the signal killed the process tree.
+// timeout or the signal killed the process tree. onOutput gets the output so far, at most once per OUTPUT_MS, while new output comes.
 export async function runCommand(
   cmd: Pick<TaskCommand, "name" | "argv" | "timeoutSec">,
-  o: { cwd: string; env: Record<string, string>; signal?: AbortSignal; tailBytes?: number },
+  o: {
+    cwd: string;
+    env: Record<string, string>;
+    signal?: AbortSignal;
+    tailBytes?: number;
+    onOutput?: (tail: string, ms: number) => void;
+  },
 ): Promise<CommandResult> {
   const started = performance.now();
-  const base = { name: cmd.name, argv: cmd.argv };
+  const base = { name: cmd.name, argv: cmd.argv, running: false, timeoutSec: cmd.timeoutSec };
   const done = (exit: number | null, tail: string, timedOut = false, stopped = false, notRun: string | null = null): CommandResult => ({
     ...base,
     exit,
@@ -135,16 +145,34 @@ export async function runCommand(
     kill();
   };
   o.signal?.addEventListener("abort", onAbort, { once: true });
-  const pipes = Promise.all([pump(p.stdout, out.add), pump(p.stderr, out.add)]).catch(() => {});
+  let fresh = false;
+  const add = (c: Uint8Array) => {
+    out.add(c);
+    fresh = true;
+  };
+  const live = o.onOutput
+    ? setInterval(() => {
+        if (!fresh) return;
+        fresh = false;
+        try {
+          o.onOutput?.(out.text(), Math.round(performance.now() - started));
+        } catch (e) {
+          // An error in a timer callback ends the process.
+          log(`Could not show the output of ${cmd.name}: ${(e as Error).message}`);
+        }
+      }, OUTPUT_MS)
+    : undefined;
+  const pipes = Promise.all([pump(p.stdout, add), pump(p.stderr, add)]).catch(() => {});
   const code = await p.exited;
   clearTimeout(timer);
+  clearInterval(live);
   o.signal?.removeEventListener("abort", onAbort);
   // A process that the command left, such as a build server, ends with the command.
   await killTree(p.pid, true);
   // A leftover that the kill missed can hold the pipes.
   await Promise.race([pipes, Bun.sleep(DRAIN_MS)]);
   const note = timedOut
-    ? `\n[The app stopped the command after ${cmd.timeoutSec} s.]\n`
+    ? `\n[The command reached its time limit of ${limitText(cmd.timeoutSec)}. The app stopped it after ${cmd.timeoutSec} s.]\n`
     : stopped
       ? "\n[The app stopped the command.]\n"
       : "";
@@ -399,7 +427,13 @@ export type ChecksInput = {
   // The isolate_home setting of the repository. Absent: the stored setting.
   isolateHome?: boolean;
   signal?: AbortSignal;
+  // The task of the commands. With the task_cache setting, each command gets REVIEW_LOOP_TASK_CACHE=<task folder>/cache.
+  task?: number;
+  // The commands so far: the ended ones, then the running one with its output so far.
+  onProgress?: (commands: StepCommand[]) => void;
 };
+
+const detailOf = ({ stopped: _, ...c }: CommandResult): StepCommand => c;
 
 export type ChecksResult =
   | { status: "ran"; green: boolean; commands: CommandResult[]; notes: string[] }
@@ -412,8 +446,11 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
   if (s.warnedAt === null) return { status: "refused", reason: "Accept the warning about app-run commands first." };
   if (!inside(tasksRoot(i.dataDir), i.wt.repo) || !inside(i.wt.dir, i.wt.repo))
     return { status: "refused", reason: "The app runs commands only in a task folder." };
+  const cache = s.taskCache && i.task !== undefined ? join(taskDir(i.dataDir, i.db, i.task), "cache") : null;
+  if (cache) mkdirSync(cache, { recursive: true });
   const home = (i.isolateHome ?? s.isolateHome) ? mkdtempSync(join(tmpdir(), "rl-home-")) : null;
   const env = checkEnv(home);
+  if (cache) env[TASK_CACHE_ENV] = cache;
   const scoped = i.scope
     ? scopedCommands(
         s.commands.filter((c) => c.kind === "test"),
@@ -426,7 +463,13 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
   const commands: CommandResult[] = [];
   try {
     for (const c of list) {
-      const r = await runCommand(c, { cwd: i.wt.repo, env, signal: i.signal });
+      const show = (tail: string, ms: number) =>
+        i.onProgress?.([
+          ...commands.map(detailOf),
+          { name: c.name, argv: c.argv, exit: null, ms, tail, notRun: null, running: true, timedOut: false, timeoutSec: c.timeoutSec },
+        ]);
+      show("", 0);
+      const r = await runCommand(c, { cwd: i.wt.repo, env, signal: i.signal, onOutput: show });
       log(
         `Task check ${c.name}: ${r.notRun ?? `exit ${r.exit ?? "none"}`} in ${r.ms} ms${r.timedOut ? " (timed out)" : r.stopped ? " (stopped)" : ""}.`,
       );
@@ -446,12 +489,25 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
 
 // The checks with their step row (kind check) for the Log tab: each command with argv, exit code, time, and the output tail.
 // expectRed: the checks of the tests step, which must fail (StepDetail.expectRed).
+// onChange: the step row got the output so far (spec.md section 6.7, Log).
 export async function checkStep(
-  i: ChecksInput & { task: number; part: number; item?: string | null; attempt?: number; expectRed?: boolean; now?: () => number },
+  i: ChecksInput & {
+    task: number;
+    part: number;
+    item?: string | null;
+    attempt?: number;
+    expectRed?: boolean;
+    now?: () => number;
+    onChange?: () => void;
+  },
 ): Promise<ChecksResult & { step: number }> {
   const now = i.now ?? Date.now;
   const step = insertStep(i.db, { task: i.task, part: i.part, kind: "check", item: i.item ?? null, attempt: i.attempt ?? 1 }, now());
-  const r = await runChecks(i).catch((e): ChecksResult => ({ status: "refused", reason: (e as Error).message }));
+  const onProgress = (commands: StepCommand[]) => {
+    patchStep(i.db, step, { commands });
+    i.onChange?.();
+  };
+  const r = await runChecks({ ...i, onProgress }).catch((e): ChecksResult => ({ status: "refused", reason: (e as Error).message }));
   if (r.status === "refused") endStep(i.db, step, "failed", { notes: [r.reason] }, now());
   else
     endStep(
@@ -459,7 +515,7 @@ export async function checkStep(
       step,
       !r.commands.length && i.scope ? "skipped" : r.green ? "ok" : r.commands.some((c) => c.stopped) ? "cancelled" : "failed",
       {
-        commands: r.commands.map(({ name, argv, exit, ms, tail, notRun }) => ({ name, argv, exit, ms, tail, notRun })),
+        commands: r.commands.map(detailOf),
         notes: r.notes,
         expectRed: i.expectRed ?? false,
       },

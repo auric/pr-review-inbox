@@ -3,7 +3,17 @@
 
 // The command line of an editable task command (src/web/tasks/commands.ts). The line is only the text form of an argv list.
 import { describe, expect, test } from "bun:test";
-import { draftProblem, draftsToCommands, freeId, joinArgv, moveDraft, splitArgv, toDraft } from "../../src/web/tasks/commands";
+import {
+  defaultMinutes,
+  draftProblem,
+  draftsToCommands,
+  freeId,
+  joinArgv,
+  LIMIT_PROBLEM,
+  moveDraft,
+  splitArgv,
+  toDraft,
+} from "../../src/web/tasks/commands";
 
 describe("task command lines", () => {
   test("spaces split; quotes keep spaces and the other quote; backslashes stay", () => {
@@ -30,6 +40,23 @@ describe("task command lines", () => {
     expect(draftProblem({ ...toDraft(c), name: " " })).toBe("Give the command a name.");
     expect(draftsToCommands([toDraft(c), { ...toDraft(c), id: "cmd2", line: "'x" }])).toBeNull();
     expect(freeId([{ id: "cmd1" }, { id: "cmd3" }], "cmd")).toBe("cmd2");
+  });
+
+  test("spec.md section 6.3: the time limit in minutes; setup gets 60 by default; 1 s to 4 h; the reason of a proposal stays on the row", () => {
+    const c = { id: "cmd1", name: "venv", kind: "setup" as const, argv: ["python", "-m", "venv", ".venv"], timeoutSec: 90 };
+    expect(toDraft(c).minutes).toBe("1.5");
+    expect(draftsToCommands([{ ...toDraft(c), minutes: "240" }])?.[0]?.timeoutSec).toBe(14_400);
+    expect(draftProblem({ ...toDraft(c), minutes: "241" })).toBe(LIMIT_PROBLEM);
+    expect(draftProblem({ ...toDraft(c), minutes: "" })).toBe(LIMIT_PROBLEM);
+    expect(draftsToCommands([{ ...toDraft(c), minutes: "0" }])).toBeNull();
+    expect([defaultMinutes("setup"), defaultMinutes("test"), defaultMinutes("build"), defaultMinutes("lint")]).toEqual([
+      "60",
+      "10",
+      "10",
+      "10",
+    ]);
+    expect(toDraft({ ...c, timeoutReason: "Downloads the packages." }).reason).toBe("Downloads the packages.");
+    expect(draftsToCommands([toDraft({ ...c, timeoutReason: "x" })])).toEqual([c]);
   });
 
   test("moveDraft moves one row; the ends keep the list; the saved list keeps the new order", () => {

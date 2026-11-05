@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Settings > Tasks, "Commands": per task repository, the approved commands that the app runs (docs/plans/review-v2/spec.md section 6.3,
+// Settings > Commands: per task repository, the approved commands that the app runs (docs/plans/review-v2/spec.md section 6.3,
 // repo_task_settings.commands_json) with the editor of the plan screen, and the commands that the runner may run (section 6.21): the mode,
 // the allowlist, and "Longest command". Each change saves by itself (autosave.tsx). The first-use warning of the app commands stays on
 // the plan screen: a saved list here does not accept it. The first pattern and each switch to Any command show their own dialog here.
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, TriangleAlert } from "lucide-react";
 import { useRef, useState } from "react";
-import { FieldDescription, FieldLegend, FieldSet } from "@/components/ui/field";
+import { Field, FieldContent, FieldDescription, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { RepoTaskSettingsDto, RepoTaskSettingsInput } from "../../shared/dto";
-import type { ShellMode } from "../../shared/task";
+import { type ShellMode, TASK_CACHE_ENV } from "../../shared/task";
 import { api } from "../api";
 import { read } from "../shell/data";
 import { AllowEditor, type ShellAsk, ShellDialog, useShellNames } from "../tasks/AllowEditor";
@@ -30,10 +31,15 @@ export function TaskCommands() {
     (a, b) => `${a.project}/${a.repo}`.localeCompare(`${b.project}/${b.repo}`),
   );
   return (
-    <div className="grid gap-1.5">
-      <h3 id="task-commands-title" className="m-0 text-sm font-semibold">
-        Commands
-      </h3>
+    <section aria-labelledby="h-commands" className="mt-6 grid max-w-[560px] gap-3 border-t pt-4">
+      <div className="grid gap-0.5">
+        <h2 id="h-commands" tabIndex={-1} className="m-0 scroll-mt-4 text-[15px] font-bold outline-none">
+          Commands
+        </h2>
+        <p className="m-0 text-xs text-muted-foreground">
+          Changes save as you make them. Text saves when you leave the field or stop typing.
+        </p>
+      </div>
       <p className="m-0 text-sm text-ink-2">
         The app runs the approved commands of a repository after each step of a task. {runner} runs only the commands that the repository
         allows. The plan screen adds the commands that you approve.
@@ -46,7 +52,7 @@ export function TaskCommands() {
           Cannot read the tasks. {tasks.error.message}
         </p>
       ) : repos.length ? (
-        <ul aria-labelledby="task-commands-title" className="m-0 grid list-none rounded-md border p-0">
+        <ul aria-label="Task repositories" className="m-0 grid list-none rounded-md border p-0">
           {repos.map((r) => (
             <RepoCommands key={`${r.project}/${r.repo}`} project={r.project} repo={r.repo} />
           ))}
@@ -54,7 +60,7 @@ export function TaskCommands() {
       ) : (
         <p className="m-0 text-sm text-muted-foreground">No repository yet. A repository shows here after you start a task in it.</p>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -88,7 +94,7 @@ function RepoCommandsBody({ project, repo }: { project: string; repo: string }) 
   return <Editor s={q.data} />;
 }
 
-type Rows = { commands: CommandDraft[]; allow: AllowDraft[]; mode: ShellMode; minutes: string };
+type Rows = { commands: CommandDraft[]; allow: AllowDraft[]; mode: ShellMode; minutes: string; cache: boolean };
 
 const MODE_TEXT: Record<ShellMode, string> = { allowlist: "Allowlist", any: "Any command" };
 const modeLine = (mode: ShellMode, runner: string) =>
@@ -105,6 +111,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
     allow: s.allow.map(toAllowDraft),
     mode: s.shellMode,
     minutes: timeoutMinutes(s.bashTimeoutSec),
+    cache: s.taskCache,
   }));
   // The newest rows. Event handlers set them before the render, so a save in the same handler sends the change.
   const latest = useRef(rows);
@@ -119,14 +126,21 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
     (): RepoTaskSettingsInput | null => {
       const cur = qc.getQueryData<RepoTaskSettingsDto>(key) ?? s;
       const r = latest.current;
-      const { project: _p, repo: _r, warnedAt: _w, shellWarnedAt: _s, allow: stored, shellMode, bashTimeoutSec, ...rest } = cur;
+      const { project: _p, repo: _r, warnedAt: _w, shellWarnedAt: _s, allow: stored, shellMode, bashTimeoutSec, taskCache, ...rest } = cur;
       const next = {
         commands: draftsToCommands(r.commands) ?? cur.commands,
         shellMode: r.mode,
         allow: draftsToAllow(r.allow) ?? stored.map(({ pattern, reason }) => ({ pattern, reason })),
         bashTimeoutSec: timeoutSec(r.minutes) ?? bashTimeoutSec,
+        taskCache: r.cache,
       };
-      const was = { commands: cur.commands, shellMode, allow: stored.map(({ pattern, reason }) => ({ pattern, reason })), bashTimeoutSec };
+      const was = {
+        commands: cur.commands,
+        shellMode,
+        allow: stored.map(({ pattern, reason }) => ({ pattern, reason })),
+        bashTimeoutSec,
+        taskCache,
+      };
       if (JSON.stringify(next) === JSON.stringify(was)) return null;
       return { ...rest, ...next, ...(warned.current && { shellWarning: true as const }) };
     },
@@ -178,6 +192,32 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
           onChange={(next, typing) => change({ commands: next }, typing)}
           onBlur={() => void saver.flush()}
         />
+        <Field orientation="horizontal" data-task-cache className="mt-1">
+          <Switch
+            id={`${id}-cache`}
+            aria-describedby={`${id}-cache-help`}
+            checked={rows.cache}
+            onCheckedChange={(cache) => change({ cache }, false)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`${id}-cache`}>Shared task folder</FieldLabel>
+            <FieldDescription id={`${id}-cache-help`}>
+              Off by default. When on, each command gets the variable{" "}
+              <code translate="no" className="[overflow-wrap:anywhere]">
+                {TASK_CACHE_ENV}
+              </code>
+              . It names one folder per task, shared by all its parts and worktrees. A setup script can keep its downloads there, so the
+              next part does not download them again. The folder stays in the app data folder after the task closes.
+              {s.isolateHome && (
+                <span className="mt-1 flex items-start gap-1.5 font-medium text-warn">
+                  <TriangleAlert aria-hidden className="mt-0.5 size-[13px] shrink-0" />
+                  Each command gets an empty home folder, so caches in the home folder do not survive. Point the tool caches to this folder
+                  instead.
+                </span>
+              )}
+            </FieldDescription>
+          </FieldContent>
+        </Field>
       </FieldSet>
       <FieldSet data-shell-settings className="gap-2">
         <FieldLegend variant="label" className="mb-0 font-semibold">

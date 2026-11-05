@@ -1,15 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The editable list of task commands (docs/plans/review-v2/spec.md section 6.3): name, kind, and the command line of each row, Move up,
-// Move down, Remove, and "Add a command". The list order is the run order. The plan screen adds a tick per row; Settings > Tasks has none. A command stays an argv list (commands.ts).
+// The editable list of task commands (docs/plans/review-v2/spec.md section 6.3): name, kind, time limit, and the command line of each
+// row, Move up, Move down, Remove, and "Add a command". The list order is the run order. The plan screen adds a tick per row and the
+// reason of a proposed time limit; Settings > Commands has none. A command stays an argv list (commands.ts).
 import { ArrowDown, ArrowUp, CircleAlert, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MAX_TASK_COMMANDS } from "../../shared/dto";
-import { CHECK_TIMEOUT_SEC, type CommandKind } from "../../shared/task";
+import { CHECK_TIMEOUT_SEC, type CommandKind, SETUP_TIMEOUT_SEC } from "../../shared/task";
 import { Hint } from "../shell/Hint";
-import { type CommandDraft, draftProblem, freeId, joinArgv, KIND_TEXT, KINDS, moveDraft, splitArgv } from "./commands";
+import {
+  type CommandDraft,
+  commandTimeout,
+  defaultMinutes,
+  draftProblem,
+  freeId,
+  joinArgv,
+  KIND_TEXT,
+  KINDS,
+  LIMIT_PROBLEM,
+  moveDraft,
+  splitArgv,
+} from "./commands";
+
+const SETUP_MIN = SETUP_TIMEOUT_SEC / 60;
+const CHECK_MIN = CHECK_TIMEOUT_SEC / 60;
 
 const iconBtn =
   "inline-grid size-[30px] shrink-0 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-ink-2 hover:bg-hover hover:text-foreground disabled:cursor-default disabled:opacity-35 disabled:hover:bg-transparent";
@@ -28,6 +44,8 @@ export function CommandsEditor(props: {
   saved?: ReadonlySet<string>;
   // The ID prefix of an added row.
   newPrefix: string;
+  // The runner name for the reason of a proposed time limit.
+  runner?: string;
 }) {
   const { drafts, idPrefix } = props;
   const set = (i: number, patch: Partial<CommandDraft>, typing = true) =>
@@ -37,7 +55,7 @@ export function CommandsEditor(props: {
     );
   const add = () => {
     const id = freeId(drafts, props.newPrefix);
-    props.onChange([...drafts, { id, name: "", kind: "test", line: "", timeoutSec: CHECK_TIMEOUT_SEC }], false);
+    props.onChange([...drafts, { id, name: "", kind: "test", line: "", minutes: defaultMinutes("test") }], false);
     props.onPick?.(id, true);
     requestAnimationFrame(() => document.getElementById(`${idPrefix}-${id}-name`)?.focus());
   };
@@ -57,6 +75,7 @@ export function CommandsEditor(props: {
           {drafts.map((d, i) => {
             const id = `${idPrefix}-${d.id}`;
             const problem = draftProblem(d);
+            const limitBad = commandTimeout(d.minutes) === null;
             const r = splitArgv(d.line);
             const label = d.name.trim() || `command ${i + 1}`;
             return (
@@ -87,7 +106,10 @@ export function CommandsEditor(props: {
                     aria-label={`Kind of ${label}`}
                     className="h-[30px] rounded-md border border-input bg-pane px-1.5 text-sm text-foreground"
                     value={d.kind}
-                    onChange={(e) => set(i, { kind: e.target.value as CommandKind }, false)}
+                    onChange={(e) => {
+                      const kind = e.target.value as CommandKind;
+                      set(i, { kind, ...(d.minutes === defaultMinutes(d.kind) && { minutes: defaultMinutes(kind) }) }, false);
+                    }}
                   >
                     {KINDS.map((k) => (
                       <option key={k} value={k}>
@@ -136,20 +158,48 @@ export function CommandsEditor(props: {
                     </button>
                   </Hint>
                 </div>
-                <Input
-                  id={`${id}-line`}
-                  aria-label={`Command line of ${label}`}
-                  aria-invalid={problem ? true : undefined}
-                  aria-describedby={problem ? `${id}-error` : `${idPrefix}-help`}
-                  className="h-[30px] font-mono text-[12.5px]"
-                  translate="no"
-                  spellCheck={false}
-                  autoComplete="off"
-                  value={d.line}
-                  placeholder="bun test"
-                  onChange={(e) => set(i, { line: e.target.value })}
-                  onBlur={props.onBlur}
-                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    id={`${id}-line`}
+                    aria-label={`Command line of ${label}`}
+                    aria-invalid={problem && problem !== LIMIT_PROBLEM ? true : undefined}
+                    aria-describedby={problem && problem !== LIMIT_PROBLEM ? `${id}-error` : `${idPrefix}-help`}
+                    className="h-[30px] min-w-0 flex-1 basis-60 font-mono text-[12.5px]"
+                    translate="no"
+                    spellCheck={false}
+                    autoComplete="off"
+                    value={d.line}
+                    placeholder="bun test"
+                    onChange={(e) => set(i, { line: e.target.value })}
+                    onBlur={props.onBlur}
+                  />
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    <label htmlFor={`${id}-timeout`} className="text-xs whitespace-nowrap text-ink-2">
+                      Time limit (min)
+                    </label>
+                    <Input
+                      id={`${id}-timeout`}
+                      aria-label={`Time limit (min) of ${label}`}
+                      type="number"
+                      inputMode="decimal"
+                      // No min or max: the browser check would block the plan form without the inline problem text.
+                      step="any"
+                      className="h-[30px] w-20 tabular-nums"
+                      autoComplete="off"
+                      aria-invalid={limitBad ? true : undefined}
+                      aria-describedby={limitBad ? `${id}-error` : undefined}
+                      value={d.minutes}
+                      onChange={(e) => set(i, { minutes: e.target.value })}
+                      onBlur={props.onBlur}
+                    />
+                  </span>
+                </div>
+                {d.reason && (
+                  <p className="m-0 text-xs text-ink-2">
+                    {props.runner ? `${props.runner}: ` : ""}
+                    {d.reason}
+                  </p>
+                )}
                 {problem && (
                   <p id={`${id}-error`} className="m-0 flex items-start gap-[5px] text-xs text-destructive">
                     <CircleAlert aria-hidden className="mt-px size-[13px] shrink-0" />
@@ -162,7 +212,9 @@ export function CommandsEditor(props: {
         </ul>
       )}
       <p id={`${idPrefix}-help`} className="m-0 text-xs text-muted-foreground">
-        The app runs each command without a shell, from the repository root. Spaces split the arguments. Quotes keep spaces in one argument.
+        Commands run one at a time, top to bottom. Setup runs first, once per worktree. The app runs each command without a shell, from the
+        repository root. Spaces split the arguments. Quotes keep spaces in one argument. Setup gets {SETUP_MIN} minutes by default, the
+        other commands {CHECK_MIN}. A command stops at its time limit.
       </p>
       <div>
         <Button type="button" variant="outline" size="sm" disabled={drafts.length >= MAX_TASK_COMMANDS} onClick={add}>

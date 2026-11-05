@@ -125,10 +125,36 @@ describe("the stored plan", () => {
     expect(p.testing.commands).toEqual([{ id: "new-1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600 }]);
   });
 
+  test("spec.md section 6.3: setup gets 60 min by default; a proposed time limit is capped to 4 h and keeps its reason", () => {
+    const testing = specResult.shape.testing.parse({
+      commands: [
+        { name: "venv", kind: "setup", argv: ["python", "-m", "venv", ".venv"] },
+        { name: "deps", kind: "setup", argv: ["conan", "install", "."], timeoutSec: 99_999, timeoutReason: " Downloads the packages. " },
+        { name: "test", kind: "test", argv: ["bun", "test"], timeoutReason: "No limit, so no reason." },
+        { name: "slow", kind: "test", argv: ["ctest"], timeoutSec: 0.2, timeoutReason: "Too short." },
+      ],
+      services: [],
+      notes: "",
+    });
+    expect(planOf({ testing }).testing.commands.map((c) => [c.name, c.timeoutSec, c.timeoutReason])).toEqual([
+      ["venv", 3600, undefined],
+      ["deps", 14_400, "Downloads the packages."],
+      ["test", 600, undefined],
+      ["slow", 1, "Too short."],
+    ]);
+  });
+
   test("a command with an empty argument is left out with a coverage line", () => {
     const skipped: string[] = [];
     const p = toPlan(
-      spec({ testing: { commands: [{ name: "x", kind: "test", argv: [""] }], services: [], notes: "", allow: [] } }),
+      spec({
+        testing: {
+          commands: [{ name: "x", kind: "test", argv: [""], timeoutSec: null, timeoutReason: "" }],
+          services: [],
+          notes: "",
+          allow: [],
+        },
+      }),
       BASE,
       [],
       skipped,

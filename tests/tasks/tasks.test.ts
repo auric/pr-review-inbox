@@ -968,6 +968,22 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
       branch_prefix: "feature/",
     });
     expect((await get()).body).toMatchObject({ specDir: "docs/specs/{key}/", lineBudget: 300, commands: [cmd], warnedAt: 5 });
+    // spec.md section 6.3: taskCache is off by default. A PUT without it keeps the stored value.
+    expect((await get()).body).toMatchObject({ taskCache: false });
+    expect((await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body: { ...body, taskCache: true } })).status).toBe(200);
+    expect((await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body })).status).toBe(200);
+    expect((await get()).body).toMatchObject({ taskCache: true });
+    // A time limit up to 4 h is valid.
+    const long = { ...cmd, timeoutSec: 4 * 3600 };
+    expect((await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body: { ...body, commands: [long] } })).status).toBe(200);
+    expect(
+      (
+        await h.json(`/api/repos/PROJ/repo/task-settings`, {
+          method: "PUT",
+          body: { ...body, commands: [{ ...long, timeoutSec: 4 * 3600 + 1 }] },
+        })
+      ).status,
+    ).toBe(400);
     expect((await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body: { ...body, commands: [cmd, cmd] } })).status).toBe(
       400,
     );
@@ -1096,6 +1112,48 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
       expect(t.plan?.commands).toEqual([{ id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: true }]);
       const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body: { version: t.version, size: "medium", commands: ["cmd1"] } });
       expect([ok.status, ok.body.state, ok.body.plan?.approved]).toEqual([200, "spec_draft", true]);
+    },
+    SLOW,
+  );
+
+  test(
+    "spec.md section 6.3: the plan screen lists the saved commands first, then the new proposals; the approval stores that order without the reason",
+    async () => {
+      const h = await setup();
+      const first = await h.toPlan();
+      const body = { version: first.version, size: "small", commands: ["new-1"], warning: true };
+      expect((await h.json(`/api/tasks/${first.id}/plan`, { body })).status).toBe(200);
+      h.jira.addIssue("ABC-47", "Second task");
+      const venv = { name: "venv", kind: "setup" as const, argv: ["python", "-m", "venv", ".venv"] };
+      const deps = {
+        name: "deps",
+        kind: "setup" as const,
+        argv: ["conan", "install", "."],
+        timeoutSec: 5400,
+        timeoutReason: "Downloads the packages.",
+      };
+      const test = { name: "test", kind: "test", argv: ["bun", "test"] };
+      h.scenario({ spec: specWith({ testing: { ...echoSpec().testing, commands: [venv, deps, test] } }) });
+      const c = await h.create({ project: "PROJ", repo: "repo", key: "ABC-47" });
+      await h.settle();
+      const t = await h.recommend(await h.get(c.body.id));
+      expect(t.plan?.commands).toEqual([
+        { id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: true },
+        { id: "new-1", ...venv, timeoutSec: 3600, saved: false },
+        { id: "new-2", ...deps, saved: false },
+      ]);
+      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, {
+        body: { version: t.version, size: "small", commands: ["cmd1", "new-1", "new-2"] },
+      });
+      expect(ok.status).toBe(200);
+      const row = h.db.query("SELECT commands_json FROM repo_task_settings WHERE project = 'PROJ' AND repo = 'repo'").get() as {
+        commands_json: string;
+      };
+      expect(JSON.parse(row.commands_json)).toEqual([
+        { id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600 },
+        { id: "cmd2", ...venv, timeoutSec: 3600 },
+        { id: "cmd3", name: "deps", kind: "setup", argv: ["conan", "install", "."], timeoutSec: 5400 },
+      ]);
     },
     SLOW,
   );

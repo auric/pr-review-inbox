@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The editable list "Commands <runner> may run" (docs/plans/review-v2/spec.md section 6.21): a pattern and a reason per row, Remove, and
-// "Add a pattern". Settings > Tasks edits every row. The plan screen adds a tick per row and shows a saved row read-only as "approved
+// "Add a pattern". Settings > Commands edits every row. The plan screen adds a tick per row and shows a saved row read-only as "approved
 // before". ShellDialog holds the first-use warning and the Any command confirm (section 6.21.8).
 import { CircleAlert, Plus, TriangleAlert, X } from "lucide-react";
 import { useRef } from "react";

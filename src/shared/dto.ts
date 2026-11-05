@@ -1522,6 +1522,8 @@ export const repoTaskSettingsInput = z.object({
   allow: z.array(allowProposal).max(ALLOW_MAX).optional(),
   bashTimeoutSec: z.number().int().min(1).max(BASH_TIMEOUT_MAX_SEC).optional(),
   shellWarning: z.literal(true).optional(),
+  // spec.md section 6.3: each app-run command gets REVIEW_LOOP_TASK_CACHE, one folder per task. Absent: the stored value stays.
+  taskCache: z.boolean().optional(),
 });
 export type TaskCreateInput = z.infer<typeof taskCreateInput>;
 export type TaskAnswersInput = z.infer<typeof taskAnswersInput>;
@@ -1530,7 +1532,7 @@ export type TaskPlanAgainInput = z.infer<typeof taskPlanAgainInput>;
 export type RepoTaskSettingsInput = z.infer<typeof repoTaskSettingsInput>;
 // warnedAt: the first-use warning of the repository was accepted then. shellWarnedAt: the same for the commands that Claude runs
 // (spec.md section 6.21).
-export type RepoTaskSettingsDto = Omit<RepoTaskSettingsInput, "shellMode" | "allow" | "bashTimeoutSec" | "shellWarning"> & {
+export type RepoTaskSettingsDto = Omit<RepoTaskSettingsInput, "shellMode" | "allow" | "bashTimeoutSec" | "shellWarning" | "taskCache"> & {
   project: string;
   repo: string;
   warnedAt: number | null;
@@ -1538,6 +1540,7 @@ export type RepoTaskSettingsDto = Omit<RepoTaskSettingsInput, "shellMode" | "all
   allow: AllowEntry[];
   bashTimeoutSec: number;
   shellWarnedAt: number | null;
+  taskCache: boolean;
 };
 
 export type TaskQuestionDto = {
@@ -1696,7 +1699,8 @@ export type TaskPlanDto = {
   budget: number;
   missing: number;
   base: string;
-  commands: (TaskCommand & { saved: boolean })[];
+  // timeoutReason: why Claude proposes a longer time limit (spec.md section 6.3).
+  commands: (TaskCommand & { saved: boolean; timeoutReason?: string })[];
   warning: boolean;
   approved: boolean;
   // spec.md section 6.20.4, sub-task mode only (else null and []). maxOpen: the open PRs at once that Claude proposes. starts: the start

@@ -130,7 +130,15 @@ export const REPO_REASON = {
 } as const;
 // spec.md section 6.16.5, Size.
 export const LARGE_REPOS_TEXT = "Needs you: large tasks change one repository for now. Make it medium, or split the task.";
+// spec.md section 6.3: the time limit of one app-run command. Setup gets more time by default, because it downloads and builds.
 export const CHECK_TIMEOUT_SEC = 600;
+export const SETUP_TIMEOUT_SEC = 3600;
+export const COMMAND_TIMEOUT_MAX_SEC = 4 * 3600;
+export const defaultTimeoutSec = (kind: CommandKind) => (kind === "setup" ? SETUP_TIMEOUT_SEC : CHECK_TIMEOUT_SEC);
+// A time limit in minutes for the UI and the status text, such as "10 min" or "0.5 min".
+export const limitText = (sec: number) => `${Math.round((sec / 60) * 100) / 100} min`;
+// spec.md section 6.3: the env variable of the shared task folder (repo_task_settings.task_cache).
+export const TASK_CACHE_ENV = "REVIEW_LOOP_TASK_CACHE";
 // spec.md section 0: the limits of one Claude step of a part (STEP_TIME, STEP_TURNS), the Claude time of one part (PART_TIME, in
 // minutes), and the output of one command (OUTPUT_TAIL: stored bytes; FAILURE_TAIL: bytes in context/failure.md).
 export const STEP_MODES = ["tests", "implement", "fix", "instruct", "resolve"] as const;
@@ -336,7 +344,7 @@ export const taskCommand = z.object({
   name: z.string().trim().min(1).max(60),
   kind: z.enum(COMMAND_KINDS),
   argv: z.array(z.string().min(1).max(1000)).min(1).max(MAX_TASK_COMMAND_ARGS),
-  timeoutSec: z.number().int().min(1).max(3600),
+  timeoutSec: z.number().int().min(1).max(COMMAND_TIMEOUT_MAX_SEC),
 });
 export type TaskCommand = z.infer<typeof taskCommand>;
 
@@ -482,6 +490,10 @@ export const stepDetail = z.object({
         tail: z.string(),
         // The reason when the command never started, such as "Not found: .venv/bin/python". null: it started.
         notRun: z.string().nullable().default(null),
+        // running: the command runs now, and tail is its output so far. timedOut: the command reached its time limit timeoutSec.
+        running: z.boolean().default(false),
+        timedOut: z.boolean().default(false),
+        timeoutSec: z.number().int().nullable().default(null),
       }),
     )
     .default([]),
@@ -663,7 +675,16 @@ export const specResult = z.object({
   parts: z.array(specPart).min(1).max(SUBTASK_PARTS_MAX),
   testing: z.object({
     commands: z
-      .array(z.object({ name: z.string().max(60), kind: z.enum(COMMAND_KINDS), argv: z.array(z.string().max(1000)).min(1).max(32) }))
+      .array(
+        z.object({
+          name: z.string().max(60),
+          kind: z.enum(COMMAND_KINDS),
+          argv: z.array(z.string().max(1000)).min(1).max(32),
+          // spec.md section 6.3: a longer time limit in seconds and its reason. toPlan caps it, so a large value does not fail the plan.
+          timeoutSec: z.number().nullable().default(null),
+          timeoutReason: z.string().max(300).default(""),
+        }),
+      )
       .max(10),
     services: z.array(z.string().max(200)).max(10),
     notes: z.string().max(2000),
