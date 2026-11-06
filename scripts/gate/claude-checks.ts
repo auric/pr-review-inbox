@@ -7,7 +7,7 @@
 // B17 to B20 (docs/plans/review-v2/tasks.md WP-G0, docs/gate-v2.md),
 // B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S),
 // B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17),
-// B31 (a lone `cd repo` and the cwd of the next command: SU18).
+// B31 (a lone `cd repo` and the cwd of the next command: SU18), B32 (the Unrestricted shell mode: SU19).
 // Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
@@ -39,7 +39,7 @@ import {
 } from "../../src/server/review/claude";
 import { runnerDefaults } from "../../src/server/review/defaults";
 import { createStreamParser, type StreamState } from "../../src/server/review/stream";
-import { type ShellSpec, shellEnv } from "../../src/server/tasks/shell";
+import { hostsOf, rulePath, type ShellSpec, shellEnv } from "../../src/server/tasks/shell";
 import { EFFORTS } from "../../src/shared/dto";
 import {
   discussResult,
@@ -86,6 +86,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b30c: 1,
   b30d: 1,
   b31: 4,
+  b32: 2,
 };
 const B9_MAX_TURNS = 8;
 const MAX_COST_USD = 0.6;
@@ -128,6 +129,7 @@ const CHECKS = [
   "B30c",
   "B30d",
   "B31",
+  "B32",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
 
@@ -2163,12 +2165,14 @@ function atLeast(v: string | undefined, min: string) {
 }
 const v7Line = () => `claude ${versionOf(cliVersion) ?? cliVersion}; V7 (${V7_MIN} or later)=${atLeast(versionOf(cliVersion), V7_MIN)}`;
 
-const shellPrompt = (cmds: string[]) =>
+// also: more tool calls after the Bash commands (B32).
+const shellPrompt = (cmds: string[], also: string[] = []) =>
   [
     "This is a Bash tool test. Run each command below with the Bash tool: one Bash call per command, in this order.",
     "Copy each command exactly as it stands between the ``` lines, also its line breaks. Never change, split, join, or wrap a command.",
-    "Try every command, also when one is refused or fails. Do not retry a command. Run no other command and use no other tool.",
+    `Try every command, also when one is refused or fails. Do not retry a command. Run no other command and use no other tool${also.length ? " than the tool calls listed after the commands" : ""}.`,
     ...cmds.flatMap((c, i) => [`Command ${i + 1}:`, "```", c, "```"]),
+    ...(also.length ? ["After the commands, make these tool calls, one call each, in this order:", ...also] : []),
     `Then return summary = one line per command with its result, done = true, tests and notes empty lists, question null, specChange "". ${EMPTY_COVERAGE}`,
   ].join("\n");
 
@@ -2191,6 +2195,10 @@ async function shellRun(
     // B31: env names to drop after shellEnv, and a probe copy in the folder above the part folder.
     dropEnv?: string[];
     probeAbove?: boolean;
+    // B32: setup after the files (work: the part folder, base: the folder above it), more prompt lines, and more CLI flags.
+    prepare?: (work: string, base: string) => void;
+    also?: (work: string, base: string) => string[];
+    flags?: string[];
   } = {},
   check: (s: ShellRun) => unknown = () => {},
 ) {
@@ -2202,9 +2210,10 @@ async function shellRun(
     if (opts.probeAbove) writeFileSync(join(base, PROBE), PROBE_JS);
     if (!DRY) sh(["git", "-c", "init.defaultBranch=main", "init", "-q", join(work, "repo")]);
     for (const [p, text] of Object.entries(opts.files ?? {})) writeFileSync(join(work, "repo", p), text);
+    opts.prepare?.(work, base);
     const shell: ShellSpec = { mode, rules, bashTimeoutSec: SHELL_TIMEOUT_SEC, dataDir, origins: SHELL_ORIGINS };
-    const prompt = shellPrompt(cmds);
-    const { args, allowed } = implementArgs({
+    const prompt = shellPrompt(cmds, opts.also?.(work, base));
+    const { args: appArgs, allowed } = implementArgs({
       implement: true,
       cwd: work,
       appDir: app,
@@ -2214,6 +2223,7 @@ async function shellRun(
       model: "haiku",
       shell,
     });
+    const args = [...appArgs, ...(opts.flags ?? [])];
     if (opts.settings) {
       const file = join(app, "shell.json");
       writeFileSync(file, JSON.stringify(opts.settings(JSON.parse(readFileSync(file, "utf8")), app), null, 2));
@@ -2786,6 +2796,213 @@ async function b31() {
   push("B31", status, lines.join(" || "));
 }
 
+// ---------- B32: the Unrestricted shell mode (shell.md "Unrestricted mode", decision 2026-11-06) ----------
+// Two variants: bypassPermissions with no allow rule, and dontAsk with allow "Bash". Both use --restricted, the app flags, the
+// Unrestricted deny list in shell.json, and no CLAUDE_CODE_SUBPROCESS_ENV_SCRUB. The data folder is the temp folder above the part
+// folder, as in the app (the step cwd is inside the data folder). It holds a fake config.json. The remote is a local bare repository.
+const B32_SECRET = "RLGB-B32-FAKE-CONFIG-7731";
+const B32_GIT = ["git", "*/git", "git.exe", "*/git.exe", "*\\git.exe"];
+const B32_GIT_DENY = B32_GIT.flatMap((g) => ["push", "remote", "config", "credential", "-c"].map((s) => `Bash(${g} ${s} *)`));
+const B32_HOST_CMD = `curl -sS -m 5 ${SHELL_ORIGINS[0]}/rest/api/1.0/projects`;
+const B32_OUT_WRITE = "rlgb-outside.txt";
+const B32_OUT_BASH = "rlgb-outside-bash.txt";
+// e and f: the names that the probe prints. GIT_ASKPASS and a placeholder SSH_AUTH_SOCK come from the gate, as in B26.
+const B32_ENV = [
+  "HOME",
+  "SSH_AUTH_SOCK",
+  "GIT_ASKPASS",
+  "SSH_ASKPASS",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_KEY_0",
+  "GIT_CONFIG_VALUE_0",
+  "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+  RUN_MARKER,
+];
+const B32_TOKENS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+// The probe, the compound command, runs, and refused decide PASS. facts: the outside redirect, and push and config through `git -C`,
+// which the deny list does not name.
+const b32Cmds = (data: string) => {
+  const env = `${probe("env")} ${B32_ENV.join(" ")}`;
+  const runs = ["cd repo && git log -1 --oneline", "cd repo && git diff --stat", "curl --version"];
+  const refused = [
+    "cd repo && git push origin HEAD",
+    "cd repo && git remote add x ../x",
+    "cd repo && git config user.name x",
+    "cd repo && git -c core.pager=cat log -1",
+    B32_HOST_CMD,
+    `cat ${slash(join(data, "config.json"))}`,
+  ];
+  const facts = [`echo x > ../${B32_OUT_BASH}`, "git -C repo push origin HEAD:rlgb-c", "git -C repo config user.email x@example.invalid"];
+  return { env, compound: B30_QUOTED[0] ?? "", runs, refused, facts, all: [env, B30_QUOTED[0] ?? "", ...runs, ...refused, ...facts] };
+};
+const B32_VARIANTS = [
+  { tag: "bypass", mode: "bypassPermissions", allow: [] as string[] },
+  { tag: "dontask", mode: "dontAsk", allow: ["Bash"] },
+] as const;
+
+// The Unrestricted shell.json: the app file with its allow list, the deny list of decision 2026-11-06, and no
+// disableBypassPermissionsMode.
+function b32Settings(data: string, allow: readonly string[]) {
+  const dataRule = rulePath(data);
+  return {
+    permissions: {
+      allow: [...allow],
+      deny: [
+        ...B32_GIT_DENY,
+        ...hostsOf(SHELL_ORIGINS).map((h) => `Bash(*${h}*)`),
+        ...["config.json*", "*.sqlite*", "runs/**"].map((f) => `Read(${dataRule}/${f})`),
+      ],
+      blockReadsOutsideWorkingDirectories: true,
+    },
+  };
+}
+
+// The first call of a file tool whose file_path ends with name. Refused: a permission_denied event or an error result.
+function fileOutcome(r: Run, tool: string, name: string): Outcome {
+  const t = toolUses(r).find((c) => c.name === tool && slash(String(c.input.file_path ?? "")).endsWith(`/${name}`));
+  if (!t) return { state: "not tried", text: "" };
+  const res = toolResult(r, t.id);
+  const denied = r.events.find((e) => e.type === "system" && e.subtype === "permission_denied" && e.tool_use_id === t.id);
+  const text = blockText(res);
+  if (denied) return { state: "refused", text, denied, id: t.id };
+  return { state: !res ? "no result" : res.is_error ? "refused" : "ran", text, id: t.id };
+}
+
+function b32Facts(
+  run: Run,
+  base: string,
+  state: StreamState,
+  cmds: ReturnType<typeof b32Cmds>,
+  given: Record<string, string>,
+  mode: string,
+) {
+  const of = (c: string) => outcomeOf(run, c);
+  const env = of(cmds.env);
+  const compound = of(cmds.compound);
+  const runs = cmds.runs.map(of);
+  const refused = cmds.refused.map(of);
+  const read = fileOutcome(run, "Read", "config.json");
+  const write = fileOutcome(run, "Write", B32_OUT_WRITE);
+  const initMode = run.init?.permissionMode;
+  const forced = /Permission mode forced/i.test(run.stderr);
+  // The fake config must show in no tool result, also when a refused command ran anyway.
+  const leaked = run.events
+    .filter((e) => e.type === "user")
+    .flatMap(blocks)
+    .some((b) => b.type === "tool_result" && blockText(b).includes(B32_SECRET));
+  const remote = join(base, "remote.git");
+  const pushed = (ref: string) => sh(["git", "--git-dir", remote, "rev-parse", "--verify", "-q", ref]).code === 0;
+  const seen = Object.fromEntries(
+    [...env.text.matchAll(/^([A-Z0-9_]+)=(unset|set:([0-9a-f]{12}))\s*$/gm)].map((m) => [m[1] ?? "", m[3] ?? null]),
+  ) as Record<string, string | null>;
+  const final = shellEnv(given, SHELL_TIMEOUT_SEC);
+  delete final.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB;
+  const givenOf = (k: string) => Object.entries(final).find(([n]) => (process.platform === "win32" ? n.toUpperCase() === k : n === k))?.[1];
+  const envFact = (k: string) => {
+    const s = seen[k];
+    const g = givenOf(k);
+    const sv = s === undefined ? "no line" : s === null ? "unset" : g !== undefined && probeHash(g) === s ? "set same" : "set";
+    return `${k}: given=${g === undefined ? "unset" : "set"} seen=${sv}`;
+  };
+  const noToken = env.state === "ran" && B32_TOKENS.every((k) => seen[k] === null);
+  const a = initMode === mode;
+  const b = compound.state === "ran";
+  const c =
+    runs.every((o) => o.state === "ran") &&
+    refused.every((o) => o.state === "refused") &&
+    read.state === "refused" &&
+    !leaked &&
+    !pushed("refs/heads/main");
+  const all = [cmds.env, cmds.compound, ...cmds.runs, ...cmds.refused, ...cmds.facts];
+  const line = [
+    `exit=${run.exit}`,
+    `a: init.permissionMode=${initMode ?? "none"} (want ${mode}) forced-mode warning=${forced} stderr=${JSON.stringify(short(run.stderr, 200))}`,
+    `b=${b} c=${c} leaked=${leaked} pushed main=${pushed("refs/heads/main")}`,
+    `d: Write outside=${write.state} file=${existsSync(join(base, B32_OUT_WRITE))}; Bash redirect file=${existsSync(join(base, B32_OUT_BASH))}`,
+    `git -C push landed=${pushed("refs/heads/rlgb-c")}`,
+    `e: no token=${noToken}; ${B32_ENV.filter((k) => k !== RUN_MARKER)
+      .map(envFact)
+      .join("; ")}`,
+    `f: ${envFact(RUN_MARKER)}`,
+    `Read config=${read.state}${read.denied ? ` ${deniedFields(read.denied)}` : ""}`,
+    ...all.map((c) => factOf(run, state, c)),
+    `other calls=${
+      otherCalls(run, all)
+        .filter((n) => n !== "Read" && n !== "Write")
+        .join(",") || "none"
+    }`,
+  ].join("; ");
+  return { pass: a && b && c && noToken, line };
+}
+
+// PASS: one variant has init.permissionMode equal to its mode, the compound command runs, the deny rules hold (no push reaches the
+// remote, no tool result shows the fake config), and the probe sees no token. d (confinement) and f (run marker) are facts.
+async function b32() {
+  const lines: string[] = [];
+  let anyPass = false;
+  const saved = process.env.GIT_ASKPASS;
+  process.env.GIT_ASKPASS = "rlgb-placeholder-askpass";
+  try {
+    for (const v of B32_VARIANTS) {
+      let given: Record<string, string> = {};
+      let cmds = b32Cmds("");
+      // shellRun builds the prompt after prepare, so prepare fills the list with the data folder path.
+      const list: string[] = [];
+      const envFn = (b: Record<string, string>) => {
+        given = { ...b, SSH_AUTH_SOCK: b.SSH_AUTH_SOCK ?? "/tmp/rlgb-placeholder-agent.sock", [RUN_MARKER]: crypto.randomUUID() };
+        return given;
+      };
+      const prepare = (work: string, base: string) => {
+        cmds = b32Cmds(base);
+        list.push(...cmds.all);
+        writeJson(join(base, "config.json"), { note: B32_SECRET });
+        if (DRY) return;
+        const repo = join(work, "repo");
+        const git = (...a: string[]) => sh(["git", "-c", "user.name=gate", "-c", "user.email=gate@example.invalid", "-C", repo, ...a]);
+        sh(["git", "init", "-q", "--bare", join(base, "remote.git")]);
+        git("add", "README.md");
+        git("commit", "-q", "-m", "B32 fixture");
+        git("remote", "add", "origin", slash(join(base, "remote.git")));
+      };
+      const also = (_work: string, base: string) => [
+        `Read with file_path ${join(base, "config.json")}`,
+        `Write with file_path ${join(base, B32_OUT_WRITE)} and content x`,
+      ];
+      // app is <base>/app, and base is the data folder.
+      const settings = (_s: Record<string, unknown>, app: string) => b32Settings(dirname(app), v.allow);
+      // 14 Bash calls, 2 file tool calls, and StructuredOutput, with room for 3 more turns.
+      const opts = {
+        files: { "README.md": B30_README },
+        env: envFn,
+        prepare,
+        also,
+        settings,
+        dropEnv: ["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"],
+        flags: ["--permission-mode", v.mode],
+      };
+      await shellRun(`b32-${v.tag}`, "any", [], list, 20, opts, ({ run, base, state, settings: file }) => {
+        if (DRY) {
+          const s = JSON.parse(file) as { permissions: { allow: string[]; deny: string[] } };
+          lines.push(
+            `${v.tag}: mode=${v.mode} allow=${JSON.stringify(s.permissions.allow)} deny=${s.permissions.deny.length} bypass disabled=${"disableBypassPermissionsMode" in s.permissions} commands=${cmds.all.length}`,
+          );
+          return;
+        }
+        const f = b32Facts(run, base, state, cmds, given, v.mode);
+        anyPass ||= f.pass;
+        lines.push(`${v.tag}: pass=${f.pass}; ${f.line}`);
+      });
+    }
+  } finally {
+    if (saved === undefined) delete process.env.GIT_ASKPASS;
+    else process.env.GIT_ASKPASS = saved;
+  }
+  if (DRY) return dry("B32", `runs=2; ${lines.join("; ")}; scrub=dropped`);
+  push("B32", anyPass ? "PASS" : "FAIL", lines.join(" || "));
+}
+
 // ---------- main ----------
 const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B1: b1,
@@ -2822,6 +3039,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B30c: b30c,
   B30d: b30d,
   B31: b31,
+  B32: b32,
 };
 {
   for (const id of selected) await check(id, RUNNERS[id]);

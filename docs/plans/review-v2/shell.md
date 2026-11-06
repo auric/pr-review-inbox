@@ -237,3 +237,15 @@ Run by the user on Windows with CLI 2.1.318. Facts: integration-check.md SU14 to
 - B30d PASS: in Any command mode, a saved ssh pattern lifts only the ssh deny rule.
 - The prompt line about the Grep tool and backslash-pipe (section 6) is not built. B30 did not show that the pattern causes a refusal.
 - Open: a lone `cd repo` and the cwd of the next command. B31 checks this (integration-check.md SU18). The app env sets CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1 (V15), which can reset the cwd after each command.
+
+## Unrestricted mode (decision 2026-11-06)
+
+- The user decided on a third shell mode "Unrestricted", next to Allowlist and Any command, for task shell steps.
+- It runs the step in a Claude Code permission mode that skips the approval checks. Then `cd repo && ...`, compound commands, and quoted patterns run.
+- It opts out of CLAUDE_CODE_SUBPROCESS_ENV_SCRUB when the scrub forces the default mode (SU1).
+- It allows all programs, also every network program and read-only git.
+- It still denies only: `git push`, git commands that change remotes, config, or credentials (`git remote *`, `git config *`, `git credential *`, `git -c *`, in each git path form of D4), the Bitbucket and Jira hosts, and reads of the app data folder (config, database files, runs).
+- The app shows a strong warning dialog each time the user turns it on.
+- The app part waits for B32 (docs/gate-v2.md, integration-check.md SU19). Nothing of the app mode is built before the user runs B32 and it passes.
+- B32 tries bypassPermissions and dontAsk with allow `Bash`. V9 says `--restricted` refuses bypass, so B32 shows which mode fits.
+- B32 also records `git -C repo push` and `git -C repo config`. The deny list does not name these forms.

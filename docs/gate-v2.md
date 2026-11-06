@@ -10,6 +10,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B21 to B29 | WP-C2b (the Bash tool of a task step). B28 is optional. | `scripts/gate/claude-checks.ts` |
 | B30a to B30d | Your decision on a PreToolUse hook and on the prompt line about grep (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
 | B31 | The shell step prompt rule "first run `cd repo` as a command of its own" (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
+| B32 | The Unrestricted shell mode (shell.md "Unrestricted mode"). The app part waits for B32. | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
 | G7 | No fixed point. INFO only. | `scripts/gate/bitbucket-write.ts` |
@@ -132,6 +133,18 @@ This check gives the fact SU18. Every command runs locally. The same preparation
 | Check | Fact | What it runs | PASS |
 |---|---|---|---|
 | B31 | SU18 | Four runs: allow `Bash`, and an allowlist of the probe pattern only, each with the app env and with CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR removed. Commands, one Bash call each: `cd repo`, `<probe> cwd`, `cd ..`. The runs without the variable add `cd ..` (out of the part folder) and `<probe> cwd out`. repo/ and the folder above the part folder hold a copy of the probe. The evidence names the folder of each probe (repo, part folder, above), never a path. | Every cd runs, and the probe prints repo in both app env runs. INFO: the probe of an app env run prints the part folder (the variable resets the cwd), or a cd of an app env run is refused. FAIL: the CLI refuses `cd repo` or the first probe. The runs without the variable are facts for you. |
+
+### B32: the Unrestricted shell mode
+
+This check gives the fact SU19 (shell.md "Unrestricted mode (decision 2026-11-06)"). Every command runs locally. The only host is the placeholder `bitbucket.example.invalid`, which never resolves. The same preparation as above applies.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B32`.
+- Run: `bun scripts/gate/claude-checks.ts --only B32`. Then sanitize as above.
+- Own call cap: B32 2 (one run per mode).
+
+| Check | Fact | What it runs | PASS |
+|---|---|---|---|
+| B32 | SU19 | Two runs with the app flags, `--restricted`, and no CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: `--permission-mode bypassPermissions` with no allow rule, and `--permission-mode dontAsk` with allow `Bash`. shell.json holds only the Unrestricted deny list: `git push`, `git remote`, `git config`, `git credential`, and `git -c` in each git path form, the placeholder Bitbucket and Jira hosts, and Read of config.json, the database files, and runs/ in the data folder. The data folder is the temp folder above the part folder and holds a fake config.json. repo/ has one commit and a local bare remote. Commands: the env probe, the first quoted compound command of B30a, `git log`, `git diff --stat`, `curl --version`, `git push origin HEAD`, `git remote add`, `git config`, `git -c ... log`, a curl to the placeholder Bitbucket host, `cat <data>/config.json`, an outside redirect, `git -C repo push`, and `git -C repo config`. Then a Read of config.json and a Write to the folder above the part folder. | For at least one mode: `init.permissionMode` equals the mode, the compound command runs, `git log`, `git diff --stat`, and `curl --version` run, the CLI refuses the six deny commands and the Read, no push reaches the remote, no tool result shows the fake config, and the probe sees no ANTHROPIC_* token. Facts for you: the stderr warning, the outside Write and redirect, the `git -C` forms, the env given and seen, and the run marker. |
 
 ## Part G: Bitbucket checks G1 to G7
 

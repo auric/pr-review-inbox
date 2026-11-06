@@ -131,6 +131,23 @@ describe("claude-checks.ts B31", () => {
   });
 });
 
+describe("claude-checks.ts B32", () => {
+  test("a dry run plans bypassPermissions and dontAsk with the Unrestricted deny list and no bypass lock", () => {
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B32"], NO_TOOLS);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      'DRY-RUN  B32  calls=2 planned claude calls=2; runs=2; bypass: mode=bypassPermissions allow=[] deny=30 bypass disabled=false commands=14; dontask: mode=dontAsk allow=["Bash"] deny=30 bypass disabled=false commands=14; scrub=dropped',
+    );
+    expect(r.out).toContain("B32 2/2");
+    const lines = r.out.split("\n").filter((l) => /^dry-run b32-(bypass|dontask):/.test(l));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toEndWith('"--permission-mode","bypassPermissions"]');
+    expect(lines[1]).toEndWith('"--permission-mode","dontAsk"]');
+    for (const l of lines) expect(l).toContain('"--restricted"');
+  });
+});
+
 describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
   test("a dry run passes all checks against the loopback fake and prints no host", () => {
     const r = run(BITBUCKET_WRITE, ["--dry-run"], GIT_DIR);
