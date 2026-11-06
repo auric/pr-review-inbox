@@ -238,6 +238,17 @@ Run by the user on Windows with CLI 2.1.318. Facts: integration-check.md SU14 to
 - The prompt line about the Grep tool and backslash-pipe (section 6) is not built. B30 did not show that the pattern causes a refusal.
 - Open: a lone `cd repo` and the cwd of the next command. B31 checks this (integration-check.md SU18). The app env sets CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1 (V15), which can reset the cwd after each command.
 
+## Gate B31 (2026-11-06)
+
+Run by the user on Windows with CLI 2.1.319. Fact: integration-check.md SU18.
+
+- B31 FAIL: the read block refuses every cd. In all four runs (Any command and allowlist, with and without V15), the CLI refused each lone `cd repo` and `cd ..`.
+- Each refusal has decision_reason_type "safetyCheck" and the message "cd names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)".
+- The probe always ran in the part folder. init.permissionMode was default in all runs. Sanitize hits: 0.
+- The prompt rule "run `cd repo` as a command of its own" does not work while the read block is on. shellSettings sets the read block for every shell step (src/server/tasks/shell.ts).
+- The app prompt stays as it is until the next gate run. The user decides then.
+- Next: B31 adds two Any command runs with the read block removed from shell.json, with and without V15. They show if the read block alone causes the refusal, where a cd out of the part folder leads, and if `cat ../<file>` reads a file above the part folder.
+
 ## Unrestricted mode (decision 2026-11-06)
 
 - The user decided on a third shell mode "Unrestricted", next to Allowlist and Any command, for task shell steps.

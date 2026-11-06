@@ -119,15 +119,15 @@ describe("claude-checks.ts B30a to B30d", () => {
 });
 
 describe("claude-checks.ts B31", () => {
-  test("a dry run plans a lone cd in Any command mode and in allowlist mode, with the app env and without V15", () => {
+  test("a dry run plans a lone cd in Any command mode and in allowlist mode, with the app env and without V15, and without the read block", () => {
     const r = run(CLAUDE_CHECKS, ["--dry-run", "B31"], NO_TOOLS);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     expect(r.out).toContain(
-      "DRY-RUN  B31  calls=4 planned claude calls=4; runs=4; commands=3,3,5,5; V15=1; dropped=CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR",
+      "DRY-RUN  B31  calls=6 planned claude calls=6; runs=6; commands=3,3,5,5,6,6; V15=1; dropped=CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR; any block=true, list block=true, any-nov15 block=true, list-nov15 block=true, any-noblock block=false, any-noblock-nov15 block=false",
     );
-    expect(r.out).toContain("B31 4/4");
-    expect(r.out.split("\n").filter((l) => /^dry-run b31-(any|list)(-nov15)?:/.test(l))).toHaveLength(4);
+    expect(r.out).toContain("B31 6/6");
+    expect(r.out.split("\n").filter((l) => /^dry-run b31-(any|list)(-noblock)?(-nov15)?:/.test(l))).toHaveLength(6);
   });
 });
 

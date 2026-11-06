@@ -85,7 +85,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b30b: 1,
   b30c: 1,
   b30d: 1,
-  b31: 4,
+  b31: 6,
   b32: 2,
 };
 const B9_MAX_TURNS = 8;
@@ -2760,8 +2760,13 @@ const B31_V15 = "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR";
 const B31_CMDS = ["cd repo", probe("cwd"), "cd .."];
 // Without V15 only: a second `cd ..` leaves the part folder, then the probe shows if the CLI resets the cwd.
 const B31_OUT = [...B31_CMDS, "cd ..", `${probe("cwd")} out`];
+// Gate B31 run 1 (2026-11-06): the read block refused every cd. The noblock runs remove it from shell.json and add a read of a file in
+// the folder above the part folder.
+const B31_ABOVE = "rlgb-above.txt";
+const B31_ABOVE_TEXT = "RLGB-ABOVE-READ";
+const B31_NOBLOCK = [...B31_OUT, `cat ../${B31_ABOVE}`];
 // PASS: every cd runs, and the probe runs in repo/ in both app env runs. INFO: no refusal of `cd repo` or the first probe, and an app env
-// run has a refusal or its probe runs outside repo/. FAIL: the CLI refuses `cd repo` or the first probe.
+// run has a refusal or its probe runs outside repo/. FAIL: the CLI refuses `cd repo` or the first probe. The noblock runs are facts only.
 async function b31() {
   const lines: string[] = [];
   let status: "PASS" | "INFO" | "FAIL" = "PASS";
@@ -2770,11 +2775,26 @@ async function b31() {
     ["list", "allowlist", [PROBE_RULE], B31_CMDS],
     ["any-nov15", "any", [], B31_OUT],
     ["list-nov15", "allowlist", [PROBE_RULE], B31_OUT],
+    ["any-noblock", "any", [], B31_NOBLOCK],
+    ["any-noblock-nov15", "any", [], B31_NOBLOCK],
   ] as const) {
     const noV15 = tag.endsWith("nov15");
-    const opts = { files: { [PROBE]: PROBE_JS }, probeAbove: noV15, dropEnv: noV15 ? [B31_V15] : [] };
-    await shellRun(`b31-${tag}`, mode, [...rules], [...cmds], 7, opts, ({ run, state, work, base }) => {
-      if (DRY) return;
+    const noBlock = tag.includes("noblock");
+    const opts = {
+      files: { [PROBE]: PROBE_JS },
+      probeAbove: noV15 || noBlock,
+      dropEnv: noV15 ? [B31_V15] : [],
+      ...(noBlock && {
+        prepare: (_work: string, base: string) => writeFileSync(join(base, B31_ABOVE), B31_ABOVE_TEXT),
+        settings: (s: Record<string, unknown>) => {
+          const { blockReadsOutsideWorkingDirectories: _, ...permissions } = s.permissions as Record<string, unknown>;
+          return { ...s, permissions };
+        },
+      }),
+    };
+    await shellRun(`b31-${tag}`, mode, [...rules], [...cmds], cmds.length + 2, opts, ({ run, state, work, base, settings }) => {
+      const block = "blockReadsOutsideWorkingDirectories" in (JSON.parse(settings) as { permissions: object }).permissions;
+      if (DRY) return void lines.push(`${tag} block=${block}`);
       const used = new Set<string>();
       const got = cmds.map((c) => outcomeOf(run, c, used));
       const name = (o: Outcome | undefined) => {
@@ -2783,16 +2803,21 @@ async function b31() {
       };
       const probes = got.filter((_, i) => cmds[i]?.startsWith(RUNTIME)).map(name);
       const appBad = !noV15 && (probes[0] !== "repo" || got.some((o) => o.state !== "ran"));
-      if (got[0]?.state !== "ran" || got[1]?.state !== "ran") status = "FAIL";
-      else if (appBad && status === "PASS") status = "INFO";
+      if (!noBlock && (got[0]?.state !== "ran" || got[1]?.state !== "ran")) status = "FAIL";
+      else if (!noBlock && appBad && status === "PASS") status = "INFO";
       const facts = cmds.map((c, i) => {
         const o = got[i] ?? { state: "not tried" as const, text: "" };
         return `[${oneLine(c)}] ${o.state} permission_denied=${deniedFields(o.denied)} app label=${labelOf(state, c)}`;
       });
-      lines.push(`${tag}: exit=${run.exit}; probe cwd=${probes.join(",")}; ${facts.join("; ")}`);
+      const read = noBlock ? `; above file read=${got.at(-1)?.text.includes(B31_ABOVE_TEXT) ?? false}` : "";
+      lines.push(`${tag}: exit=${run.exit}; read block=${block}; probe cwd=${probes.join(",")}${read}; ${facts.join("; ")}`);
     });
   }
-  if (DRY) return dry("B31", `runs=4; commands=3,3,5,5; V15=${shellEnv({}, SHELL_TIMEOUT_SEC)[B31_V15]}; dropped=${B31_V15}`);
+  if (DRY)
+    return dry(
+      "B31",
+      `runs=6; commands=3,3,5,5,6,6; V15=${shellEnv({}, SHELL_TIMEOUT_SEC)[B31_V15]}; dropped=${B31_V15}; ${lines.join(", ")}`,
+    );
   push("B31", status, lines.join(" || "));
 }
 

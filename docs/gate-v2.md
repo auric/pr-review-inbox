@@ -128,11 +128,13 @@ This check gives the fact SU18. Every command runs locally. The same preparation
 
 - Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B31`.
 - Run: `bun scripts/gate/claude-checks.ts --only B31`. Then sanitize as above.
-- Own call cap: B31 4 (Any command and allowlist, each with the app env and without CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).
+- Own call cap: B31 6 (Any command and allowlist, each with the app env and without CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, and two Any command runs without the read block).
+- Run 1 (2026-11-06, CLI 2.1.319, Windows): FAIL. The read block refused every lone cd in all four runs (integration-check.md SU18). The two runs without the read block came after run 1.
 
 | Check | Fact | What it runs | PASS |
 |---|---|---|---|
 | B31 | SU18 | Four runs: allow `Bash`, and an allowlist of the probe pattern only, each with the app env and with CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR removed. Commands, one Bash call each: `cd repo`, `<probe> cwd`, `cd ..`. The runs without the variable add `cd ..` (out of the part folder) and `<probe> cwd out`. repo/ and the folder above the part folder hold a copy of the probe. The evidence names the folder of each probe (repo, part folder, above), never a path. | Every cd runs, and the probe prints repo in both app env runs. INFO: the probe of an app env run prints the part folder (the variable resets the cwd), or a cd of an app env run is refused. FAIL: the CLI refuses `cd repo` or the first probe. The runs without the variable are facts for you. |
+| B31 (no read block) | SU18 | Two more runs in Any command mode with `permissions.blockReadsOutsideWorkingDirectories` removed from shell.json: one with the app env, one with CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR removed. Commands, one Bash call each: `cd repo`, `<probe> cwd`, `cd ..`, `cd ..` (out of the part folder), `<probe> cwd out`, `cat ../rlgb-above.txt`. The folder above the part folder holds rlgb-above.txt with a marker and a copy of the probe. The evidence gives the state of each command, the folder of each probe, and whether the cat output holds the marker. | Facts only. These runs do not change the B31 status. They show if the read block alone causes the cd refusals. |
 
 ### B32: the Unrestricted shell mode
 
