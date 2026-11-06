@@ -37,6 +37,9 @@ export const REFUSED_NOTE: Record<"allowlist" | "deny" | "check", string> = {
   deny: "Refused by the deny list",
   check: "Refused by a Claude Code safety check",
 };
+// integration-check.md SU14 (Gate B30a): the safety check that refuses `cd <dir> && <command>` in every mode. The label stays check.
+export const CD_REFUSED_NOTE = "Claude Code refuses a command that starts with cd. Claude should give paths instead.";
+export const REFUSED_NOTES: readonly string[] = [...Object.values(REFUSED_NOTE), CD_REFUSED_NOTE];
 
 // docs/plans/review-v2/design.md section 5.1: the events of the verify phase share the run with the finder events. Their id and parent
 // carry this prefix, so the tool_use ids of two processes never collide, and their seq follows the last finder event.

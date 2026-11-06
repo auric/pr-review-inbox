@@ -8,7 +8,7 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync 
 import { rm } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import type { RunConflict, RunUsage } from "../../shared/dto";
-import type { RunEvent } from "../../shared/run-log";
+import { REFUSED_NOTES, type RunEvent } from "../../shared/run-log";
 import {
   type ImplementResult,
   implementResult,
@@ -29,7 +29,7 @@ import type { Profile } from "../review/catalog";
 import { deniedPath, fold } from "../review/edits";
 import type { ImplementRunStart, InstructionRepo, ReviewJobs } from "../review/jobs";
 import { addUsage, type Ending, failure, judgeTask, usageOf } from "../review/judge";
-import { REFUSED_MAX, REFUSED_NOTE, type Refusal } from "../review/stream";
+import { REFUSED_MAX, type Refusal } from "../review/stream";
 import { repoPath } from "../review/validate";
 import {
   type AttachmentFile,
@@ -398,7 +398,7 @@ export function implementPrompt(
               "Never ask to allow a read-only command, git, a shell, or the Bitbucket or Jira host.",
               ...(mode === "instruct" ? ["When the request asks for allowlist changes, set allowRequest and change no file."] : []),
             ]),
-        "Your commands start in the part folder. Write `cd repo && <command>`.",
+        "Run each command from the current folder, with paths such as repo/src/file.ts or context/task.md. When a command must run inside the repository, such as a test command, first run `cd repo` as a command of its own. Never join cd with another command.",
         "Pipe long build output through `tail -n 200`.",
         "Wrap each remote command in `timeout <seconds>` on the build host.",
       ];
@@ -769,7 +769,7 @@ function shellDetail(shell: StepShell, events: readonly RunEvent[], refused: num
         e.status === "ok"
           ? ("ok" as const)
           : e.status === "error"
-            ? Object.values(REFUSED_NOTE).includes(e.note ?? "")
+            ? REFUSED_NOTES.includes(e.note ?? "")
               ? ("refused" as const)
               : ("error" as const)
             : ("stopped" as const),

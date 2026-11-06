@@ -10,7 +10,7 @@ import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import type { MetaDto, RunDetail, RunDto } from "../../shared/dto";
-import { REFUSED_NOTE, type RunEvent, type RunEventStatus } from "../../shared/run-log";
+import { REFUSED_NOTES, type RunEvent, type RunEventStatus } from "../../shared/run-log";
 import { agoLong } from "../pr/threads";
 import { useRaw } from "./data";
 import {
@@ -39,7 +39,7 @@ import {
 } from "./model";
 
 const ST: Record<RunEventStatus, string> = { ok: "ok", error: "error", running: "…", stopped: "stop" };
-const REFUSED = new Set(Object.values(REFUSED_NOTE));
+const REFUSED = new Set(REFUSED_NOTES);
 const AG_WORD: Record<RunEventStatus, string> = { ok: "done", error: "failed", running: "running", stopped: "stopped" };
 // Below this depth, rows keep the indent of the cap level and drop the tree line.
 const LOG_CAP = 3;

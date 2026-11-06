@@ -898,6 +898,17 @@ describe("the prompt lines of the shell state", () => {
     expect(l).toContain("Run the failing check first to see the failure. Run it again after your change.");
   });
 
+  test("Gate B30a: every shell step gives paths and never joins cd with another command", () => {
+    const CD =
+      "Run each command from the current folder, with paths such as repo/src/file.ts or context/task.md. When a command must run inside the repository, such as a test command, first run `cd repo` as a command of its own. Never join cd with another command.";
+    for (const mode of ["any", "allowlist"] as const) {
+      const l = lines("implement", { mode, rules: ["echo *"], checks: [], bashTimeoutSec: 600 });
+      expect(l).toContain(CD);
+      expect(l.join("\n")).not.toContain("cd repo &&");
+    }
+    expect(lines("implement", null)).not.toContain(CD);
+  });
+
   test("fix mode: a broken command, a missing tool, or an environment fault changes no file and sets question", () => {
     const l = lines("fix", { mode: "any", rules: [], checks: [], bashTimeoutSec: 600 });
     expect(l[1]).toBe(`${RUNS} When they fail, a fix step gets their output.`);

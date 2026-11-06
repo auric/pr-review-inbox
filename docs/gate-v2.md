@@ -9,6 +9,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B19 | No fixed point. The part budgets of spec.md section 6.7 use it. | `scripts/gate/claude-checks.ts` |
 | B21 to B29 | WP-C2b (the Bash tool of a task step). B28 is optional. | `scripts/gate/claude-checks.ts` |
 | B30a to B30d | Your decision on a PreToolUse hook and on the prompt line about grep (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
+| B31 | The shell step prompt rule "first run `cd repo` as a command of its own" (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
 | G7 | No fixed point. INFO only. | `scripts/gate/bitbucket-write.ts` |
@@ -119,6 +120,18 @@ These checks give the facts SU14 to SU17 (docs/plans/review-v2/check-fix.md and 
 | B30d | SU17 | Any command with the saved pattern `ssh rlgb-b30.invalid *`. Commands: `ssh -V`, `scp -V`, `curl --version`. | shell.json has no ssh deny rule, `ssh -V` runs, and the deny list refuses scp and curl. |
 
 The app has no hook. You decide on the hook after B30c.
+
+### B31: a lone cd and the cwd of the next command
+
+This check gives the fact SU18. Every command runs locally. The same preparation as above applies.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B31`.
+- Run: `bun scripts/gate/claude-checks.ts --only B31`. Then sanitize as above.
+- Own call cap: B31 4 (Any command and allowlist, each with the app env and without CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).
+
+| Check | Fact | What it runs | PASS |
+|---|---|---|---|
+| B31 | SU18 | Four runs: allow `Bash`, and an allowlist of the probe pattern only, each with the app env and with CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR removed. Commands, one Bash call each: `cd repo`, `<probe> cwd`, `cd ..`. The runs without the variable add `cd ..` (out of the part folder) and `<probe> cwd out`. repo/ and the folder above the part folder hold a copy of the probe. The evidence names the folder of each probe (repo, part folder, above), never a path. | Every cd runs, and the probe prints repo in both app env runs. INFO: the probe of an app env run prints the part folder (the variable resets the cwd), or a cd of an app env run is refused. FAIL: the CLI refuses `cd repo` or the first probe. The runs without the variable are facts for you. |
 
 ## Part G: Bitbucket checks G1 to G7
 

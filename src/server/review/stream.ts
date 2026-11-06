@@ -19,7 +19,7 @@ import type {
   SDKTaskStartedMessage,
   SDKUserMessage,
 } from "../../shared/run-log";
-import { REFUSED_NOTE } from "../../shared/run-log";
+import { CD_REFUSED_NOTE, REFUSED_NOTE } from "../../shared/run-log";
 import type { ShellMode } from "../../shared/task";
 
 const NOTE_MAX = 300;
@@ -239,7 +239,8 @@ export function createStreamParser(opts: {
         const by = deny ? "deny" : unlisted ? "allowlist" : "check";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });
-        end(changed, id, "error", REFUSED_NOTE[by]);
+        const cd = by === "check" && /requires approval: cd\s/.test(d.message ?? "");
+        end(changed, id, "error", cd ? CD_REFUSED_NOTE : REFUSED_NOTE[by]);
       }
     } else if (m.type === "system" && m.subtype === "task_started") {
       const t = m as SDKTaskStartedMessage;

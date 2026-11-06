@@ -1,6 +1,6 @@
 # A failing check and the Fix step
 
-Status: analysis of 2026-11-04 by the investigator against main 42b254c. Items 1 to 3 are code complete (user decisions of 2026-11-04 and 2026-11-05; spec.md sections 6.6, 6.7, and 6.21.1, AC-B104.10 to AC-B104.16). Item 4 ("Skip this check for this part") is not built. Gate B30 (integration-check.md SU14 to SU17) is open.
+Status: analysis of 2026-11-04 by the investigator against main 42b254c. Items 1 to 3 are code complete (user decisions of 2026-11-04 and 2026-11-05; spec.md sections 6.6, 6.7, and 6.21.1, AC-B104.10 to AC-B104.16). Item 4 ("Skip this check for this part") is not built. Gate B30 (integration-check.md SU14 to SU17) ran on 2026-11-06.
 
 User report: a check command fails, and Claude tries to fix it in the Fix step. Claude cannot ask for commands there.
 
@@ -54,4 +54,4 @@ None for Fix. Only the tests step runs `expectRed` and blocks when its tests alr
 
 Also fix the misleading prompt line at implement.ts:402 when Bash is on (part of item 2).
 
-Not checked: whether Claude Code's `Bash(<argv> *)` pattern from `checkPatterns` also matches the bare argv with no extra arguments. Check it in the SU gate before item 2 relies on it. Nothing was run; this comes from reading the code only.
+Gate B30b (SU15, CLI 2.1.318, 2026-11-06): Claude Code's `Bash(<argv> *)` pattern from `checkPatterns` also matches the bare argv with no extra arguments. The exact rule `Bash(<argv>)` is not necessary. It stays, because it is harmless.

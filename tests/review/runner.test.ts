@@ -17,7 +17,7 @@ import {
 } from "../../src/server/review/claude";
 import { classify, createStreamParser, NO_BASH_TEXT, NOTES_MAX } from "../../src/server/review/stream";
 import { type ShellSpec, shellSettings } from "../../src/server/tasks/shell";
-import type { RunEvent } from "../../src/shared/run-log";
+import { CD_REFUSED_NOTE, type RunEvent } from "../../src/shared/run-log";
 import { implementJsonSchema } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 
@@ -885,6 +885,25 @@ describe("shell steps", () => {
     });
     expect(labels("any").by).toEqual(["check", "check", "deny", "check"]);
     expect(labels("any").notes).not.toContain("Refused by the allowlist");
+  });
+
+  test("Gate B30a: a refused `cd <dir> && <command>` keeps the label check and gets the cd note in both modes", () => {
+    for (const shell of ["allowlist", "any"] as const) {
+      const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell });
+      p.line(JSON.stringify(line.bash("c1", "cd repo && cat README.md")));
+      p.line(
+        JSON.stringify({
+          type: "system",
+          subtype: "permission_denied",
+          tool_name: "Bash",
+          tool_use_id: "c1",
+          decision_reason_type: "subcommandResults",
+          message: "This Bash command contains multiple operations. The following part requires approval: cd repo && cat README.md",
+        }),
+      );
+      expect(p.state.refused).toEqual([{ command: "cd repo && cat README.md", by: "check" }]);
+      expect(p.events().map((e) => e.note)).toEqual([CD_REFUSED_NOTE]);
+    }
   });
 
   test("more than 5 refused commands kill the run", async () => {

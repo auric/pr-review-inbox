@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build a Jira task: Claude Code refuses each command that starts with `cd`. Claude now gives paths, or runs `cd repo` as a command of its own, and the run log says "Claude Code refuses a command that starts with cd. Claude should give paths instead." for such a refusal.
 - Build a Jira task: before the first step of a part, the app now runs the build, test, and lint commands once on the part base. The Log tab shows this run first, as "Red before this task" when a command fails there.
 - When each failing check also failed before the task, the task now stops at once with "Needs you: the check "lint" of part 1 also failed before this task. See why. Continue lets Claude try to fix it." Claude tries only after you click Continue. The output for Claude marks each failing command "Also red before this task" or "New".
 - A fix step that changes no file now stops the task with "Needs you: the fix step of part 1 changed no file. See why." Before, Claude used up all 3 tries. Claude also stops with a question when the output shows a broken command, a missing tool, or a network fault.

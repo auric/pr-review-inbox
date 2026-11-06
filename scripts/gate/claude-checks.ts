@@ -6,7 +6,8 @@
 // B15 (work/CLAUDE.md loads under the runner flag set), B16 (a session fork with the flags of docs/plans/session-consult.md part C),
 // B17 to B20 (docs/plans/review-v2/tasks.md WP-G0, docs/gate-v2.md),
 // B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S),
-// B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17).
+// B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17),
+// B31 (a lone `cd repo` and the cwd of the next command: SU18).
 // Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
@@ -84,6 +85,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b30b: 1,
   b30c: 1,
   b30d: 1,
+  b31: 4,
 };
 const B9_MAX_TURNS = 8;
 const MAX_COST_USD = 0.6;
@@ -125,6 +127,7 @@ const CHECKS = [
   "B30b",
   "B30c",
   "B30d",
+  "B31",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
 
@@ -2122,7 +2125,7 @@ const RUNTIME = Bun.which("node") ? "node" : "bun";
 const probe = (arg: string) => `${RUNTIME} ${PROBE} ${arg}`;
 const PROBE_RULE = `${RUNTIME} ${PROBE} *`;
 const NET_DENIED = "curl https://example.invalid";
-// "env K..." prints K=unset or K=set:<hash>. Any other word writes <word>.ran in the cwd. "exit" then exits with code 7.
+// "env K..." prints K=unset or K=set:<hash>. "cwd" prints the name of the cwd folder. Any other word writes <word>.ran in the cwd. "exit" then exits with code 7.
 // The hash input is the value with / separators, a drive letter for /c/, and lower case, so a Git Bash path form compares equal.
 const PROBE_JS = `const fs = require("fs");
 const crypto = require("crypto");
@@ -2131,6 +2134,8 @@ const norm = (v) => v.replace(/\\\\/g, "/").replace(/^\\/([a-zA-Z])\\//, "$1:/")
 const hash = (v) => crypto.createHash("sha256").update(norm(v)).digest("hex").slice(0, 12);
 if (a === "env") {
   for (const k of process.argv.slice(3)) console.log(k + "=" + (process.env[k] === undefined ? "unset" : "set:" + hash(process.env[k])));
+} else if (a === "cwd") {
+  console.log("RLGB-CWD " + require("path").basename(process.cwd()));
 } else {
   fs.writeFileSync(a + ".ran", "1");
   console.log("RLGB-PROBE " + a);
@@ -2183,6 +2188,9 @@ async function shellRun(
     // B30: files under repo/ by path, and a change of shell.json after the app wrote it (app: the folder that holds it).
     files?: Record<string, string>;
     settings?: (s: Record<string, unknown>, app: string) => Record<string, unknown>;
+    // B31: env names to drop after shellEnv, and a probe copy in the folder above the part folder.
+    dropEnv?: string[];
+    probeAbove?: boolean;
   } = {},
   check: (s: ShellRun) => unknown = () => {},
 ) {
@@ -2191,6 +2199,7 @@ async function shellRun(
     const dataDir = join(base, "data");
     mkdirSync(dataDir);
     writeFileSync(join(work, PROBE), PROBE_JS);
+    if (opts.probeAbove) writeFileSync(join(base, PROBE), PROBE_JS);
     if (!DRY) sh(["git", "-c", "init.defaultBranch=main", "init", "-q", join(work, "repo")]);
     for (const [p, text] of Object.entries(opts.files ?? {})) writeFileSync(join(work, "repo", p), text);
     const shell: ShellSpec = { mode, rules, bashTimeoutSec: SHELL_TIMEOUT_SEC, dataDir, origins: SHELL_ORIGINS };
@@ -2211,6 +2220,7 @@ async function shellRun(
     }
     const envBase = appChildEnv();
     const env = shellEnv(opts.env ? opts.env(envBase) : envBase, SHELL_TIMEOUT_SEC);
+    for (const k of opts.dropEnv ?? []) delete env[k];
     // Arrival times of tool_use and tool_result blocks, by tool_use ID.
     const arrived = new Map<string, number>();
     const watch = (e: Ev, pid: number) => {
@@ -2231,11 +2241,12 @@ async function shellRun(
 
 type Outcome = { state: "refused" | "ran" | "error" | "no result" | "not tried"; text: string; denied?: Ev; id?: string };
 const bashCalls = (r: Run) => toolUses(r).filter((t) => t.name === "Bash");
-// The first Bash call whose command equals cmd, after line break and space normalization.
-function outcomeOf(r: Run, cmd: string): Outcome {
+// The first Bash call whose command equals cmd, after line break and space normalization. used: skip these call IDs, and add the found one.
+function outcomeOf(r: Run, cmd: string, used?: Set<string>): Outcome {
   const n = (s: string) => s.replace(/\r\n/g, "\n").trim();
-  const t = bashCalls(r).find((c) => n(String(c.input.command ?? "")) === n(cmd));
+  const t = bashCalls(r).find((c) => n(String(c.input.command ?? "")) === n(cmd) && !used?.has(c.id));
   if (!t) return { state: "not tried", text: "" };
+  used?.add(t.id);
   const res = toolResult(r, t.id);
   const denied = r.events.find((e) => e.type === "system" && e.subtype === "permission_denied" && e.tool_use_id === t.id);
   const text = blockText(res);
@@ -2731,6 +2742,50 @@ async function b30d() {
   });
 }
 
+// ---------- B31: a lone cd and the cwd of the next command (SU18) ----------
+// Gate B30a: the CLI refuses `cd repo && <command>`. B31 checks the prompt rule "first run `cd repo` as a command of its own", with the
+// app env (CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1, V15) and without that variable. repo/ and the folder above the part folder also
+// hold the probe, so the probe runs from each folder and names it.
+const B31_V15 = "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR";
+const B31_CMDS = ["cd repo", probe("cwd"), "cd .."];
+// Without V15 only: a second `cd ..` leaves the part folder, then the probe shows if the CLI resets the cwd.
+const B31_OUT = [...B31_CMDS, "cd ..", `${probe("cwd")} out`];
+// PASS: every cd runs, and the probe runs in repo/ in both app env runs. INFO: no refusal of `cd repo` or the first probe, and an app env
+// run has a refusal or its probe runs outside repo/. FAIL: the CLI refuses `cd repo` or the first probe.
+async function b31() {
+  const lines: string[] = [];
+  let status: "PASS" | "INFO" | "FAIL" = "PASS";
+  for (const [tag, mode, rules, cmds] of [
+    ["any", "any", [], B31_CMDS],
+    ["list", "allowlist", [PROBE_RULE], B31_CMDS],
+    ["any-nov15", "any", [], B31_OUT],
+    ["list-nov15", "allowlist", [PROBE_RULE], B31_OUT],
+  ] as const) {
+    const noV15 = tag.endsWith("nov15");
+    const opts = { files: { [PROBE]: PROBE_JS }, probeAbove: noV15, dropEnv: noV15 ? [B31_V15] : [] };
+    await shellRun(`b31-${tag}`, mode, [...rules], [...cmds], 7, opts, ({ run, state, work, base }) => {
+      if (DRY) return;
+      const used = new Set<string>();
+      const got = cmds.map((c) => outcomeOf(run, c, used));
+      const name = (o: Outcome | undefined) => {
+        const n = o?.text.match(/RLGB-CWD (\S+)/)?.[1];
+        return !n ? "none" : n === "repo" ? "repo" : n === basename(work) ? "part folder" : n === basename(base) ? "above" : "other";
+      };
+      const probes = got.filter((_, i) => cmds[i]?.startsWith(RUNTIME)).map(name);
+      const appBad = !noV15 && (probes[0] !== "repo" || got.some((o) => o.state !== "ran"));
+      if (got[0]?.state !== "ran" || got[1]?.state !== "ran") status = "FAIL";
+      else if (appBad && status === "PASS") status = "INFO";
+      const facts = cmds.map((c, i) => {
+        const o = got[i] ?? { state: "not tried" as const, text: "" };
+        return `[${oneLine(c)}] ${o.state} permission_denied=${deniedFields(o.denied)} app label=${labelOf(state, c)}`;
+      });
+      lines.push(`${tag}: exit=${run.exit}; probe cwd=${probes.join(",")}; ${facts.join("; ")}`);
+    });
+  }
+  if (DRY) return dry("B31", `runs=4; commands=3,3,5,5; V15=${shellEnv({}, SHELL_TIMEOUT_SEC)[B31_V15]}; dropped=${B31_V15}`);
+  push("B31", status, lines.join(" || "));
+}
+
 // ---------- main ----------
 const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B1: b1,
@@ -2766,6 +2821,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B30b: b30b,
   B30c: b30c,
   B30d: b30d,
+  B31: b31,
 };
 {
   for (const id of selected) await check(id, RUNNERS[id]);

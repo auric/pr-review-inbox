@@ -57,9 +57,9 @@ describe("claude-checks.ts B17 to B20", () => {
   });
 
   test("an unknown check exits 2 with the usage", () => {
-    const r = run(CLAUDE_CHECKS, ["--dry-run", "B31"], NO_TOOLS);
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B99"], NO_TOOLS);
     expect(r.code).toBe(2);
-    expect(r.err).toContain("unknown check: B31");
+    expect(r.err).toContain("unknown check: B99");
     expect(r.err).toContain("usage:");
   });
 });
@@ -115,6 +115,19 @@ describe("claude-checks.ts B30a to B30d", () => {
     expect(lines).toHaveLength(5);
     for (const l of lines) expect(l).toContain('"--tools","Read,Grep,Glob,Edit,Write,Bash"');
     expect(r.out).not.toContain(process.env.USERPROFILE ?? process.env.HOME ?? "<no home>");
+  });
+});
+
+describe("claude-checks.ts B31", () => {
+  test("a dry run plans a lone cd in Any command mode and in allowlist mode, with the app env and without V15", () => {
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B31"], NO_TOOLS);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "DRY-RUN  B31  calls=4 planned claude calls=4; runs=4; commands=3,3,5,5; V15=1; dropped=CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR",
+    );
+    expect(r.out).toContain("B31 4/4");
+    expect(r.out.split("\n").filter((l) => /^dry-run b31-(any|list)(-nov15)?:/.test(l))).toHaveLength(4);
   });
 });
 

@@ -36,7 +36,7 @@ D4. CLI flags: `-p --output-format stream-json --verbose --restricted --strict-m
 
 D5. Child env of a shell step: from childEnv(), keep real HOME, USERPROFILE, SSH_AUTH_SOCK. isolate_home stays an option of app-run checks only. Remove GATE_* from every child, plus GIT_*, GIT_ASKPASS, SSH_ASKPASS. Set GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=credential.helper, GIT_CONFIG_VALUE_0= (empty); GIT_TERMINAL_PROMPT=0; GCM_INTERACTIVE=never; CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1; CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1; CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1; BASH_DEFAULT_TIMEOUT_MS and BASH_MAX_TIMEOUT_MS = bash_timeout_sec*1000 (1-3600 s). Keep CLAUDE_CODE_GIT_BASH_PATH from the parent (today childEnv removes every CLAUDE_CODE_* var, claude.ts:120).
 
-D6. cwd stays the part folder; Claude writes `cd repo && ...`. Each command has the Bash timeout; the step keeps its own limit and the runner kills the CLI tree. Stop uses killTree (taskkill /T on Windows, process group on POSIX, claude.ts:153-161); U5 gate; if it fails on Linux, killTree also walks child PIDs via /proc. Stop does not end a remote build; prompt: "Wrap each remote command in `timeout <s>` on the build host." Windows needs Git for Windows (V12); app checks init tools for Bash.
+D6. cwd stays the part folder; Claude gives paths from it, such as repo/src/file.ts. A command that must run in the repository follows a lone `cd repo`. Claude never joins cd with another command (Gate B30, B31). Each command has the Bash timeout; the step keeps its own limit and the runner kills the CLI tree. Stop uses killTree (taskkill /T on Windows, process group on POSIX, claude.ts:153-161); U5 gate; if it fails on Linux, killTree also walks child PIDs via /proc. Stop does not end a remote build; prompt: "Wrap each remote command in `timeout <s>` on the build host." Windows needs Git for Windows (V12); app checks init tools for Bash.
 
 D7. Log: Bash event target = input.command up to 4000 chars (today a 300-char JSON slice, stream.ts:58-67); note = last 4096 bytes of the result for success and error; refusal note "Refused by the allowlist" / "Refused by the deny list". No migration (run_event.note TEXT). Step end: detail.shell = {mode, rules, commands:[{command, state, ms}] max 50, refused}. Prompt: "Pipe long build output through `tail -n 200`."
 
@@ -225,3 +225,15 @@ The label "Refused by the allowlist" does not prove the allowlist refused these 
 - The user's actual mode for that step.
 
 I did not run the real CLI or any tests. Reading the minified CLI bundle gave no conclusive answer.
+
+## Gate B30 (2026-11-06)
+
+Run by the user on Windows with CLI 2.1.318. Facts: integration-check.md SU14 to SU17.
+
+- B30a FAIL: the CLI refuses each compound command that starts with `cd <dir> && ...`, in Any command mode and in allowlist mode. The grep pattern is not the cause. The event has decision_reason_type "subcommandResults" and "The following part requires approval: cd ...". No setting lifts this check.
+- Built: the shell step prompt says "Run each command from the current folder, with paths such as repo/src/file.ts or context/task.md. When a command must run inside the repository, such as a test command, first run `cd repo` as a command of its own. Never join cd with another command." The old line "Write `cd repo && <command>`" is gone. The run log note of this refusal reads "Claude Code refuses a command that starts with cd. Claude should give paths instead." The label stays check, and the refusal never becomes an allow request.
+- B30b PASS: `Bash(<argv> *)` also matches the bare argv. The exact rule `Bash(<argv>)` for each approved check is not necessary. It stays, because it is harmless.
+- B30c INFO: a PreToolUse hook that returns "allow" does not get past the cd safety check. In the same run, `git status` ended as an error with no deny refusal, so a hook allow can weaken the deny rules. Decision: no hook. The app never adds a PreToolUse hook.
+- B30d PASS: in Any command mode, a saved ssh pattern lifts only the ssh deny rule.
+- The prompt line about the Grep tool and backslash-pipe (section 6) is not built. B30 did not show that the pattern causes a refusal.
+- Open: a lone `cd repo` and the cwd of the next command. B31 checks this (integration-check.md SU18). The app env sets CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1 (V15), which can reset the cwd after each command.
