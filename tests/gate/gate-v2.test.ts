@@ -57,9 +57,9 @@ describe("claude-checks.ts B17 to B20", () => {
   });
 
   test("an unknown check exits 2 with the usage", () => {
-    const r = run(CLAUDE_CHECKS, ["--dry-run", "B30"], NO_TOOLS);
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B31"], NO_TOOLS);
     expect(r.code).toBe(2);
-    expect(r.err).toContain("unknown check: B30");
+    expect(r.err).toContain("unknown check: B31");
     expect(r.err).toContain("usage:");
   });
 });
@@ -73,7 +73,7 @@ describe("claude-checks.ts B21 to B29", () => {
     expect(r.code).toBe(0);
     for (const id of ["B21", "B22", "B24", "B25", "B26", "B27", "B29"]) expect(r.out).toContain(`DRY-RUN  ${id}  calls=1`);
     expect(r.out).toContain('DRY-RUN  B27  calls=1 planned claude calls=1; allow=["Bash"]');
-    expect(r.out).toContain('DRY-RUN  B27b calls=1 planned claude calls=1; allow=["Bash(*)"]');
+    expect(r.out).toContain('DRY-RUN  B27b calls=1 planned claude calls=1; allow=["Bash(*)","Bash(grep *)","Bash(rg *)"]');
     expect(r.out).toContain("DRY-RUN  B23  calls=0");
     expect(r.out).toContain("SKIPPED  B28  calls=0 no --ssh-alias");
     const lines = r.out.split("\n").filter((l) => /^dry-run b2\db?-/.test(l));
@@ -96,6 +96,25 @@ describe("claude-checks.ts B21 to B29", () => {
     const bad = run(CLAUDE_CHECKS, ["--dry-run", "B28", "--ssh-alias", "a;b"], NO_TOOLS);
     expect(bad.code).toBe(2);
     expect(bad.err).toContain("--ssh-alias takes one ssh config Host alias.");
+  });
+});
+
+describe("claude-checks.ts B30a to B30d", () => {
+  test("a dry run plans the B30 runs with the app shell.json: grep and rg, the bare argv rule, the hook, and ssh lifted in Any mode", () => {
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B30a", "B30b", "b30c", "B30d"], NO_TOOLS);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("DRY-RUN  B30a calls=2 planned claude calls=2; quoted forms=2; plain forms=2");
+    expect(r.out).toMatch(
+      /DRY-RUN {2}B30b calls=1 planned claude calls=1; allow=\["Bash\([^)]*rlgb-probe\.cjs bare \*\)","Bash\(grep \*\)","Bash\(rg \*\)"\]/,
+    );
+    expect(r.out).toContain('DRY-RUN  B30c calls=1 planned claude calls=1; hooks=["PreToolUse"]');
+    expect(r.out).toContain("DRY-RUN  B30d calls=1 planned claude calls=1; deny ssh=false scp=true curl=true");
+    expect(r.out).toContain("B30a 2/2, B30b 1/1, B30c 1/1, B30d 1/1");
+    const lines = r.out.split("\n").filter((l) => /^dry-run b30[a-d]-/.test(l));
+    expect(lines).toHaveLength(5);
+    for (const l of lines) expect(l).toContain('"--tools","Read,Grep,Glob,Edit,Write,Bash"');
+    expect(r.out).not.toContain(process.env.USERPROFILE ?? process.env.HOME ?? "<no home>");
   });
 });
 

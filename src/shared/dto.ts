@@ -1524,6 +1524,9 @@ export const repoTaskSettingsInput = z.object({
   shellWarning: z.literal(true).optional(),
   // spec.md section 6.3: each app-run command gets REVIEW_LOOP_TASK_CACHE, one folder per task. Absent: the stored value stays.
   taskCache: z.boolean().optional(),
+  // spec.md section 6.21.1: "Claude may run the approved checks". Absent: the stored value stays. The switch to on needs shellWarning
+  // while the repository has no accepted shell warning.
+  runChecks: z.boolean().optional(),
 });
 export type TaskCreateInput = z.infer<typeof taskCreateInput>;
 export type TaskAnswersInput = z.infer<typeof taskAnswersInput>;
@@ -1532,7 +1535,10 @@ export type TaskPlanAgainInput = z.infer<typeof taskPlanAgainInput>;
 export type RepoTaskSettingsInput = z.infer<typeof repoTaskSettingsInput>;
 // warnedAt: the first-use warning of the repository was accepted then. shellWarnedAt: the same for the commands that Claude runs
 // (spec.md section 6.21).
-export type RepoTaskSettingsDto = Omit<RepoTaskSettingsInput, "shellMode" | "allow" | "bashTimeoutSec" | "shellWarning" | "taskCache"> & {
+export type RepoTaskSettingsDto = Omit<
+  RepoTaskSettingsInput,
+  "shellMode" | "allow" | "bashTimeoutSec" | "shellWarning" | "taskCache" | "runChecks"
+> & {
   project: string;
   repo: string;
   warnedAt: number | null;
@@ -1541,6 +1547,7 @@ export type RepoTaskSettingsDto = Omit<RepoTaskSettingsInput, "shellMode" | "all
   bashTimeoutSec: number;
   shellWarnedAt: number | null;
   taskCache: boolean;
+  runChecks: boolean;
 };
 
 export type TaskQuestionDto = {
@@ -1732,7 +1739,8 @@ export type TaskPlanDto = {
 };
 
 // spec.md section 6.21: the commands that Claude may run in the repository of the task. warned: the first-use warning was accepted.
-export type TaskShellDto = { mode: ShellMode; allow: AllowEntry[]; bashTimeoutSec: number; warned: boolean };
+// checks: the approved checks that a shell step of the repository may run now (spec.md section 6.21.1), 0 while the switch is off.
+export type TaskShellDto = { mode: ShellMode; allow: AllowEntry[]; bashTimeoutSec: number; warned: boolean; checks: number };
 // The request of the step that waits on blocked kind allow. warning: "Allow for this repository" needs the first-use warning.
 export type TaskAllowAskDto = { step: number; requests: AllowRequest[]; warning: boolean };
 

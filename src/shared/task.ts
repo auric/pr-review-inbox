@@ -386,6 +386,10 @@ export const refusedLine = (pattern: string) => `The user refused ${pattern}. Do
 const SHELLS = ["bash", "sh", "zsh", "dash", "fish", "cmd", "wsl", "env", "eval", "exec", "xargs", "sudo", "su", "doas", "runas"];
 const RUNNERS = ["watch", "setsid", "flock"];
 export const CREDENTIAL_TOOLS = ["secret-tool", "security", "cmdkey", "kwallet-query", "keyring"];
+// The network programs of the deny list. In allowlist mode, a saved pattern lifts the deny rule of its program. In Any command mode,
+// only a saved pattern for ssh lifts its deny rule: deny rules cannot except one host, so that lets every ssh command run.
+export const NETWORK_TOOLS = ["curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "tftp", "sftp", "scp", "ssh", "rsync"];
+export const ANY_LIFTS = ["ssh"];
 const INTERPRETERS = ["python", "python3", "node", "bun", "deno", "perl", "ruby", "npx", "uvx", "make"];
 
 // The program of a pattern or a command: its first word without a folder, ".exe", or case. Windows file names ignore case.
@@ -512,6 +516,10 @@ export const stepDetail = z.object({
   notes: z.array(z.string()).default([]),
   // The checks of the tests step: the new tests must fail before the code exists (spec.md section 6.7, AC-B10).
   expectRed: z.boolean().default(false),
+  // The checks on the part base before the first Claude step of the part. The fix steps compare with them (spec.md section 6.7).
+  baseline: z.boolean().default(false),
+  // The app stopped at these checks, because each failing command failed on the part base too. Continue then lets the fix steps run.
+  redBefore: z.boolean().default(false),
   // A Claude step: its summary, and needsBase with its reason (spec.md section 6.18.2).
   summary: z.string().nullable().default(null),
   needsBase: z.object({ reason: z.string() }).nullable().default(null),
@@ -525,12 +533,13 @@ export const stepDetail = z.object({
     .object({ taskRepo: z.number().int(), paths: z.array(z.string()) })
     .nullable()
     .default(null),
-  // spec.md section 6.21: a Claude step with the Bash tool. rules: the allow patterns of the run. commands: at most 50, in run order.
-  // refused: the number of refused commands.
+  // spec.md section 6.21: a Claude step with the Bash tool. rules: the allow patterns of the run. checks: the approved checks that the
+  // step could run. commands: at most 50, in run order. refused: the number of refused commands.
   shell: z
     .object({
       mode: z.enum(SHELL_MODES),
       rules: z.array(z.string()),
+      checks: z.array(z.string()).default([]),
       commands: z.array(z.object({ command: z.string(), state: z.enum(["ok", "error", "refused", "stopped"]), ms: z.number() })),
       refused: z.number().int(),
     })

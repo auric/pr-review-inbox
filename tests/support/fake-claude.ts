@@ -51,10 +51,15 @@ export type FakeScenario = {
   writes?: { path: string; text?: string; junction?: string }[];
   // The init of an implement run lists no Bash, as Claude Code on Windows without Git Bash (spec.md section 6.21, V12).
   noBash?: boolean;
-  // spec.md section 6.21: the Bash calls of an implement run, after init. refused: the rule list that refuses the call, with the
-  // permission_denied fields of integration-check.md SU3. files: what the command writes, by path relative to the cwd, with no Write
-  // call, as a build does. output: the tool_result text of a call that runs.
-  bash?: { command: string; refused?: "allowlist" | "deny"; files?: { path: string; text?: string; link?: string }[]; output?: string }[];
+  // spec.md section 6.21: the Bash calls of an implement run, after init. refused: what refuses the call, with the permission_denied
+  // fields of integration-check.md SU3; check is a CLI safety check with no type, as the B22 redirect. files: what the command writes, by
+  // path relative to the cwd, with no Write call, as a build does. output: the tool_result text of a call that runs.
+  bash?: {
+    command: string;
+    refused?: "allowlist" | "deny" | "check";
+    files?: { path: string; text?: string; link?: string }[];
+    output?: string;
+  }[];
   // docs/plans/review-v2/spec.md section 2.9: the notes of the echo reply result, and the cites of its first reply. Absent: none.
   notes?: unknown;
   cites?: unknown;
@@ -450,7 +455,9 @@ async function main() {
     const text = b.refused
       ? b.refused === "deny"
         ? `Permission to use Bash with command ${b.command} has been denied.`
-        : "This command requires approval"
+        : b.refused === "check"
+          ? "Output redirection to '../outside.txt' needs approval. The path is outside the working directories for this session."
+          : "This command requires approval"
       : (b.output ?? "");
     writeEvents.push(
       JSON.stringify({
@@ -465,7 +472,7 @@ async function main() {
               subtype: "permission_denied",
               tool_name: "Bash",
               tool_use_id: id,
-              decision_reason_type: b.refused === "deny" ? "rule" : "other",
+              ...(b.refused !== "check" && { decision_reason_type: b.refused === "deny" ? "rule" : "other" }),
               message: text,
             }),
           ]

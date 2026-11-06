@@ -51,8 +51,9 @@ const SLOW = 180_000;
 const KEY = "K-1";
 const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
 
-// The approved test command: a bun script in the test folder. check-mode.txt picks the result. Each run writes an ignored file, as a
-// build does, and the next Claude step must still pass the path check.
+// The approved test command: a bun script in the test folder. check-mode.txt picks the result: red always fails, late-red fails once the
+// test file exists, and sleep-late sleeps once it exists. The part base has no test file, so its checks pass in the other modes. Each run
+// writes an ignored file, as a build does, and the next Claude step must still pass the path check.
 const CHECK = `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const dir = import.meta.dir;
@@ -62,13 +63,15 @@ writeFileSync(join("ignored", "check.log"), String(Date.now()));
 appendFileSync(join(dir, "checks.log"), mode + "\\n");
 if (mode === "green") { console.log("all tests pass"); process.exit(0); }
 if (mode === "red") { console.log("FAIL tests/feature.test.ts"); process.exit(1); }
-if (mode === "sleep") {
+if (mode === "late-red") { console.log(existsSync("tests/feature.test.ts") ? "FAIL tests/feature.test.ts" : "0 tests"); process.exit(existsSync("tests/feature.test.ts") ? 1 : 0); }
+if (mode === "sleep" || (mode === "sleep-late" && existsSync("tests/feature.test.ts"))) {
   const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore"] });
   writeFileSync(join(dir, "check-child.pid"), String(child.pid));
   await Bun.sleep(120000);
   process.exit(0);
 }
-const ok = existsSync("src/feature.ts") && readFileSync("src/feature.ts", "utf8").includes("works");
+// The part base has no test file yet, so its checks pass (spec.md section 6.7, Baseline).
+const ok = !existsSync("tests/feature.test.ts") || (existsSync("src/feature.ts") && readFileSync("src/feature.ts", "utf8").includes("works"));
 console.log(ok ? "1 pass" : "FAIL: src/feature.ts does not work yet");
 process.exit(ok ? 0 : 1);
 `;
@@ -336,6 +339,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       // The bun script is no runner that the app can narrow, so the scoped check of T1.1 skips, and the full checks gate the part.
       expect(s.flow()).toEqual([
         "commit:plan:ok",
+        "check:base:ok",
         "tests:P1:ok",
         "check:P1:failed",
         "commit:P1:ok",
@@ -537,6 +541,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.part().state).toBe("self_reviewed");
       expect(s.flow()).toEqual([
         "commit:plan:ok",
+        "check:base:failed",
         "tests:P1:ok",
         "check:P1:failed",
         "commit:P1:ok",
@@ -568,6 +573,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
         .filter((x) => x.kind === "check")
         .map((x) => [x.item, JSON.parse(x.detail_json).expectRed]);
       expect(expectRed).toEqual([
+        ["base", false],
         ["P1", true],
         ["T1.1", false],
         ["T1.2", false],
@@ -580,7 +586,9 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   test(
     "AC-B11: red three times, then blocked red; every command keeps its exit code and output tail",
     async () => {
-      const s = await setup({ mode: "red" });
+      // late-red passes on the part base, so the fixes run. Each fix changes the file, so no fix step stops for "changed no file".
+      const fix = (n: number) => ({ writes: [{ path: "repo/src/feature.ts", text: `export const feature = 'try ${n}';\n` }] });
+      const s = await setup({ mode: "late-red", seq: { "implement:fix": [fix(1), fix(2), fix(3)] } });
       await s.build();
       const fixes = s.steps().filter((x) => x.kind === "fix");
       expect(fixes.length).toBe(TEST_FIX_TRIES);
@@ -604,12 +612,77 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
+    "AC-B104.11: a fix step that changes no file blocks with a question after one fix run; failure.md marks the failure new",
+    async () => {
+      const s = await setup({ seq: { "implement:fix": [{ writes: [] }] } });
+      await s.build();
+      const fixes = s.steps().filter((x) => x.kind === "fix");
+      expect(fixes.length).toBe(1);
+      expect(s.blocked()).toEqual({
+        kind: "question",
+        step: (fixes[0] as Step).id,
+        text: "Needs you: the fix step of part 1 changed no file. See why.",
+      });
+      // The part base passed, so the failure is new. The prompt tells Claude to stop with a question for a fault that code cannot fix.
+      const call = s.runCalls().find((c) => s.modeOf(c) === "fix") as Call;
+      expect(call.context["failure.md"]).toContain("- Before this task: New. It passed on the part base.");
+      expect(call.stdin).toContain(
+        "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
+      );
+      expect(call.stdin).toContain("You cannot run them. When they fail, a fix step gets their output.");
+      // The checks on the part base ran once, before the tests step, and the Log tab marks them.
+      const base = s.steps().filter((x) => x.kind === "check" && x.item === "base");
+      expect(base.map((x) => [x.state, JSON.parse(x.detail_json).baseline])).toEqual([["ok", true]]);
+      expect(s.steps().findIndex((x) => x.item === "base")).toBeLessThan(s.steps().findIndex((x) => x.kind === "tests"));
+      // Continue runs the checks again and the next fix, which now changes the file.
+      s.scenario({ seq: { "implement:fix": [{ writes: [] }, { writes: [WORKS] }], review: [{ review: CLEAN }] } });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.blocked()).toBeNull();
+      expect(s.part().state).toBe("self_reviewed");
+      expect(s.steps().filter((x) => x.kind === "check" && x.item === "base")).toHaveLength(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B104.12: checks red on the part base stop the fixes once with a question; Continue runs the fix steps, and failure.md marks the command",
+    async () => {
+      const s = await setup({ mode: "red" });
+      await s.build();
+      const base = s.steps().find((x) => x.kind === "check" && x.item === "base") as Step;
+      expect([base.state, JSON.parse(base.detail_json).baseline]).toEqual(["failed", true]);
+      expect(s.steps().some((x) => x.kind === "fix")).toBe(false);
+      const red = s.steps().filter((x) => x.kind === "check" && x.item === "checks");
+      expect(red).toHaveLength(1);
+      expect(s.blocked()).toEqual({
+        kind: "question",
+        step: (red[0] as Step).id,
+        text: 'Needs you: the check "test" of part 1 also failed before this task. See why. Continue lets Claude try to fix it.',
+      });
+      expect(JSON.parse((red[0] as Step).detail_json).redBefore).toBe(true);
+      expect(rowStatus(taskDto(s.db, s.t())).needsYou).toBe(true);
+      // Continue: the same red check does not stop again, so the fix steps run up to TEST_FIX_TRIES.
+      const fix = (n: number) => ({ writes: [{ path: "repo/src/feature.ts", text: `export const feature = 'try ${n}';\n` }] });
+      s.scenario({ seq: { "implement:fix": [fix(1), fix(2), fix(3)] } });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.steps().filter((x) => x.kind === "fix")).toHaveLength(TEST_FIX_TRIES);
+      expect(s.blocked()).toMatchObject({ kind: "red", text: "Needs you: the tests of part 1 stay red after 3 tries." });
+      const call = s.runCalls().find((c) => s.modeOf(c) === "fix") as Call;
+      expect(call.context["failure.md"]).toContain("- Before this task: Also red before this task. It failed on the part base too.");
+      expect(call.stdin).toContain('failure.md marks a command that also failed before this task with "Also red before this task".');
+    },
+    SLOW,
+  );
+
+  test(
     'AC-B10: a green check after the tests step blocks with "Tests pass before the change. See why."',
     async () => {
       const s = await setup({ mode: "green" });
       await s.build();
       expect(s.blocked()).toMatchObject({ kind: "red", text: "Tests pass before the change. See why." });
-      expect(s.flow()).toEqual(["commit:plan:ok", "tests:P1:ok", "check:P1:ok"]);
+      expect(s.flow()).toEqual(["commit:plan:ok", "check:base:ok", "tests:P1:ok", "check:P1:ok"]);
       expect(s.runCalls().map(s.modeOf)).toEqual(["tests"]);
     },
     SLOW,
@@ -620,7 +693,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
     async () => {
       const s = await setup({ seq: { "implement:tests": [{ writes: [TEST_FILE, WORKS] }] } });
       await s.build();
-      expect(s.flow()).toEqual(["commit:plan:ok", "tests:P1:ok", "tests:P1:ok"]);
+      expect(s.flow()).toEqual(["commit:plan:ok", "check:base:ok", "tests:P1:ok", "tests:P1:ok"]);
       expect(s.blocked()).toMatchObject({
         kind: "red",
         text: "Needs you: the tests step of part 1 failed twice. The step changed files that are not tests: src/feature.ts.",
@@ -630,7 +703,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(failure).toStartWith("# UNTRUSTED DATA");
       expect(failure).toContain("The test paths are the tests of the plan: tests/feature.test.ts");
       // The first try left a patch, and the retry started from the last commit.
-      const first = s.steps()[1] as Step;
+      const first = s.steps().find((x) => x.kind === "tests") as Step;
       const patches = readFileSync(join(second.cwd, "..", "patches", `${first.id}.patch`), "utf8");
       expect(patches).toContain("diff --git a/src/feature.ts b/src/feature.ts");
       // A test glob of the repository allows a fixture file next to the test.
@@ -640,7 +713,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
         mode: "red",
       });
       await g.build();
-      expect(g.flow().slice(0, 4)).toEqual(["commit:plan:ok", "tests:P1:ok", "check:P1:failed", "commit:P1:ok"]);
+      expect(g.flow().slice(0, 5)).toEqual(["commit:plan:ok", "check:base:failed", "tests:P1:ok", "check:P1:failed", "commit:P1:ok"]);
     },
     SLOW * 2,
   );
@@ -811,7 +884,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   test(
     "AC-B19: Stop during a check kills the process tree; Resume starts the stopped step again from the last commit with the patch saved",
     async () => {
-      const s = await setup({ mode: "sleep" });
+      const s = await setup({ mode: "sleep-late" });
       s.loop.build(s.db, s.task);
       const pidFile = join(s.root, "check-child.pid");
       await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").length > 0);
@@ -866,7 +939,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(Date.now() - t0).toBeLessThan(3000);
       const runs = s.db.query("SELECT kind, status FROM review_run WHERE task = $t").all({ t: s.task });
       expect(runs).toEqual([{ kind: "implement", status: "cancelled" }]);
-      expect(s.flow()).toEqual(["commit:plan:ok", "tests:P1:cancelled"]);
+      expect(s.flow()).toEqual(["commit:plan:ok", "check:base:ok", "tests:P1:cancelled"]);
       expect(s.t().state).toBe("stopped");
     },
     SLOW,
@@ -893,7 +966,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(fired).toBe(true);
       expect(s.runCalls()).toHaveLength(0);
       expect(s.db.query("SELECT COUNT(*) AS n FROM review_run WHERE task = $t").get({ t: s.task })).toEqual({ n: 0 });
-      expect(s.flow()).toEqual(["commit:plan:ok", "tests:P1:cancelled"]);
+      expect(s.flow()).toEqual(["commit:plan:ok", "check:base:ok", "tests:P1:cancelled"]);
       expect(JSON.parse((s.steps().at(-1) as Step).detail_json).notes).toEqual(["The build stopped before the step started."]);
       expect(s.t().state).toBe("stopped");
     },
@@ -1041,7 +1114,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.blocked()).toEqual({ kind: "question", step: null, text: PAUSED });
       // The slot is free for the user's run. The tests step committed its work before the pause.
       expect(s.jobs.busy()).toBeNull();
-      expect(s.flow()).toEqual(["commit:plan:ok", "tests:P1:ok", "check:P1:failed", "commit:P1:ok"]);
+      expect(s.flow()).toEqual(["commit:plan:ok", "check:base:ok", "tests:P1:ok", "check:P1:failed", "commit:P1:ok"]);
       expect(s.loop.running(s.task)).toBe(true);
       const r = s.loop.resume(s.db, s.task, { version: s.t().version });
       expect(r.status).toBe(200);
@@ -1750,6 +1823,41 @@ describe("commands that Claude may run (spec.md section 6.21)", () => {
       await s.loop.idle(s.task);
       expect(s.blocked()).toBeNull();
       expect(s.part().state).toBe("self_reviewed");
+    },
+    SLOW,
+  );
+
+  test(
+    'AC-B104.10: "Claude may run the approved checks" gives the steps Bash and the check rules with no saved pattern; a check that is not plain words gets a note',
+    async () => {
+      const s = await setup();
+      const slash = (p: string) => p.replaceAll("\\", "/");
+      const argv = [slash(process.execPath), slash(join(s.root, "check.ts"))];
+      const text = argv.join(" ");
+      const commands = [
+        { id: "t", name: "test", kind: "test", argv, timeoutSec: 60 },
+        { id: "l", name: "lint", kind: "lint", argv: [...argv, "two words"], timeoutSec: 60 },
+      ];
+      s.db
+        .query("UPDATE repo_task_settings SET commands_json = $commands, run_checks = 1, shell_warned_at = 1")
+        .run({ commands: JSON.stringify(commands) });
+      expect(taskDto(s.db, s.t()).shell).toMatchObject({ mode: "allowlist", allow: [], checks: 1 });
+      await s.build();
+      expect(s.part().state).toBe("self_reviewed");
+      const fix = s.runCalls().find((c) => s.modeOf(c) === "fix") as Call;
+      expect(fix.argv[fix.argv.indexOf("--tools") + 1]).toContain("Bash");
+      expect(fix.stdin).toContain(`You can run only these commands: \`${text} *\`.`);
+      expect(fix.stdin).toContain(`You can also run them yourself: \`${text}\`.`);
+      expect(fix.stdin).toContain("Run the failing check first to see the failure.");
+      const row = s.steps().find((x) => x.kind === "fix") as Step;
+      const detail = JSON.parse(row.detail_json) as { shell: { rules: string[]; checks: string[] }; notes: string[] };
+      expect([detail.shell.rules, detail.shell.checks]).toEqual([[], [text]]);
+      expect(detail.notes).toContain(
+        'The step cannot run the check "lint". An argument holds a character that is not a letter, a digit, or one of _ . / : = @ % + , -.',
+      );
+      // Control: the switch off gives the steps no Bash again.
+      s.db.query("UPDATE repo_task_settings SET run_checks = 0").run();
+      expect(taskDto(s.db, s.t()).shell.checks).toBe(0);
     },
     SLOW,
   );

@@ -20,6 +20,7 @@ import type {
   SDKUserMessage,
 } from "../../shared/run-log";
 import { REFUSED_NOTE } from "../../shared/run-log";
+import type { ShellMode } from "../../shared/task";
 
 const NOTE_MAX = 300;
 // spec.md section 6.21 (D7): the Log tab shows each Bash command and the end of its output.
@@ -47,8 +48,8 @@ export const NOTES_MAX = 200_000;
 // One note of a run: a text block of rl-main, or the report of a finished Agent call. from: "rl-main", or the Agent call.
 export type RunNote = { from: string; text: string };
 
-// A Bash command that Claude Code refused. command: the event target. by: the rule list that refused it.
-export type Refusal = { command: string; by: "allowlist" | "deny" };
+// A Bash command that Claude Code refused. command: the event target. by: what refused it (REFUSED_NOTE).
+export type Refusal = { command: string; by: keyof typeof REFUSED_NOTE };
 export { REFUSED_NOTE };
 
 export type StreamState = {
@@ -110,12 +111,13 @@ function resultText(b: ContentBlock, sep = " ") {
 
 const blocks = (c: unknown): ContentBlock[] => (Array.isArray(c) ? c.filter((b) => b && typeof b === "object") : []);
 
-// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin. shell: the run must get Bash.
+// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin. shell: the mode of a run that must
+// get Bash.
 export function createStreamParser(opts: {
   cwd: string;
   allowedTools: Set<string>;
   agents?: ReadonlySet<string>;
-  shell?: boolean;
+  shell?: ShellMode;
   now?: () => number;
 }) {
   const now = opts.now ?? Date.now;
@@ -225,10 +227,16 @@ export function createStreamParser(opts: {
       // V7. b17-write-confinement.jsonl: this event comes before the error tool_result of the call, so end() keeps the refusal note.
       const d = m as SDKPermissionDeniedMessage;
       if (d.tool_name === "Bash") {
-        // SU3: a deny rule arrives as type "rule", or as "subcommandResults" with this message. No allow rule: type "other".
+        // SU3: a deny rule arrives as type "rule", or as "subcommandResults" with this message. No allow rule: type "other" with
+        // "This command requires approval", which only allowlist mode can give. Each other refusal is a safety check of the CLI, such as
+        // the B22 redirect outside the working folders, with no type.
         const deny =
           d.decision_reason_type === "rule" || /^Permission to use \w+ with command [\s\S]* has been denied\.$/.test(d.message ?? "");
-        const by = deny ? "deny" : "allowlist";
+        const unlisted =
+          opts.shell === "allowlist" &&
+          d.decision_reason_type === "other" &&
+          /requires approval/.test(d.message ?? d.decision_reason ?? "");
+        const by = deny ? "deny" : unlisted ? "allowlist" : "check";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });
         end(changed, id, "error", REFUSED_NOTE[by]);

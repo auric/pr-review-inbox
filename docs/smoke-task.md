@@ -72,7 +72,7 @@ Run this part after part S. It needs the branch `smoke/<KEY1>-<slug>` and the op
 ## R. Tests that stay red, and the line limit
 
 1. Start `<KEY3>`. Make a test that the code cannot pass. For example, before the approval, click Edit on the Spec tab and add a test to task T1.1 that expects a result that the task forbids. Approve the plan.
-2. Expect "Needs you: the tests of part 1 stay red after 3 tries." with the button "See why" and the row "Needs you: tests stay red". The Log shows three "Fix" steps, each one with a "Checks" step after it with "Failed". Click "See why". Expect the focus on the last red "Checks" step. Check Bitbucket: nothing is new.
+2. Expect "Needs you: the tests of part 1 stay red after 3 tries." with the button "See why" and the row "Needs you: tests stay red". The Log shows the "Checks" step with item `base` first, then three "Fix" steps, each one with a "Checks" step after it with "Failed". Claude can also stop earlier: a question with "Answer the question", or "Needs you: the fix step of part 1 changed no file. See why." with "Continue" and "See why" in "More actions". Record which one you see. Click "See why". Expect the focus on the last red "Checks" step, or on the "Fix" step that changed no file. Check Bitbucket: nothing is new.
 3. The line limit is 400 changed lines by default. When a change goes over it, expect "Needs you: this PR would have `<n>` changed lines, over your 400 limit." with the button "Keep one PR". "More actions" then has "Change the limit", with the field "New line limit for this task" and "Save the limit". A one-file task stays under the limit. Record "not reached" in that case.
 4. Click "Stop", then "Close the task" in "More actions".
 
@@ -164,6 +164,20 @@ Run this part after part S. Run it once on Jira Server or Data Center, and once 
 38. Click "Drop". Expect the confirm "Drop ABC-14?" with "The app builds no PR for it. An open PR stays open." Click "Drop". Expect the row "Dropped." Check Bitbucket: `<PREFIX>ABC-14-early` still has the recorded head of step 4.
 39. Open "More actions" and click "Close the task". When "Close the task" does not show, record it, click "Stop" first, and then "Close the task".
 
+## F. A check that was red before the task, and Claude runs the checks (Gate UF)
+
+Run this part with `<REPO>` and a small Jira task `<KEY9>`. It checks the checks on the part base, the Fix question, and "Claude may run the approved checks".
+
+1. Open Settings, Commands, and expand `<REPO>`. Under "Commands Claude may run", expect the help "Applies to the next step. A running step keeps its mode." under the mode switch. Click "Any command" and then "Cancel" in the dialog. Expect "Allowlist" to stay. Read the line under the switch for each mode. Expect the Any command line to name git, the Bitbucket and Jira hosts, curl, wget, nc, ncat, netcat, socat, telnet, ftp, tftp, sftp, scp, rsync, ssh, powershell, pwsh, and the password and key store tools.
+2. Turn on "Claude may run the approved checks". When the repository has no accepted shell warning, expect the dialog "Commands that Claude runs". Click "I understand". Expect the switch on and "Saved. The next step uses these commands."
+3. Add a lint command that fails on the target branch, for example a lint command for a file that has a known lint error. Start `<KEY9>` and approve the plan.
+4. Open the Log tab. Expect the "Checks" step with item `base` first, before the "Tests" step. Expect "Red before this task" and the line "The approved checks on the part base, before the first step of Claude." Expect the lint command with its exit code.
+5. Expect the task to stop with "Needs you: the check "lint" of part 1 also failed before this task. See why. Continue lets Claude try to fix it." when only the lint command fails after the code step. Expect no "Fix" step for it. Expect "Continue" and "See why" in "More actions". Click "See why". Expect the focus on the red "Checks" step.
+6. Remove the failing lint command in Settings, Commands. Click "Continue". Expect the build to go on. When you keep the command instead, expect "Continue" to start a "Fix" step for it.
+7. Open a "Fix" step in the Log tab when one runs, and click "Run log". Expect a Bash command that runs the approved test command, and the step line "Commands: allowlist, 0 patterns, `<n>` approved checks" when the list is empty. Record whether Claude ran the check. When no fix step runs, record "no fix step".
+8. When a refused command shows in a run log, expect "Refused by the allowlist" only in allowlist mode. Expect "Refused by a Claude Code safety check" for a refusal that no rule explains. Expect "Refused by the deny list" for git and the network programs. Record each refusal note.
+9. Click "Stop", then "Close the task" in "More actions". Turn off "Claude may run the approved checks" again when you do not want it.
+
 ## T2. A remote build over ssh with a skill
 
 Run this part after part S, when "Commands Claude may run" is code complete (WP-C2b and WP-C2c). It checks that Claude runs the commands of the allowlist during a step: a copy to a build host and a remote build that a skill describes. In this part, `<build-host alias>` is a Host alias of your ssh config for a build host that you may use. `<KEY8>` is a small Jira task for `<REPO>`, and its tests build and run on the build host. `<dir>` is a scratch folder on the build host, for example `~/rl-smoke`. Nothing goes to Bitbucket before "Push and open PR".
@@ -173,7 +187,7 @@ Run this part after part S, when "Commands Claude may run" is code complete (WP-
 3. In Git Bash (Windows) or a terminal (Linux), run `ssh <build-host alias> echo ok`. Expect `ok` without a prompt.
 4. Write a user skill in `~/.claude/skills/remote-build/SKILL.md`. It tells Claude to copy the repository with `tar -C repo -czf - . | ssh <build-host alias> "mkdir -p <dir> && tar -C <dir> -xzf -"`, and to build and test with `ssh <build-host alias> "cd <dir> && timeout 600 <test command>"`. It also says: "Pipe long build output through `tail -n 200`." Put a fake key file `id_smoke` next to SKILL.md, with the first line `-----BEGIN OPENSSH PRIVATE KEY-----` and no real key.
 5. Write `<KEY8>`: change one source file of `<REPO>`, and test it on the build host with the skill `remote-build`.
-6. Open Settings, Tasks, and expand `<REPO>` under "Commands". Expect "Commands Claude may run" with an empty list and the mode "Allowlist". "Claude may run the approved checks" is not built (spec.md section 6.21.10). Do not look for it.
+6. Open Settings, Commands, and expand `<REPO>`. Expect "Commands Claude may run" with an empty list, the mode "Allowlist", and "Claude may run the approved checks" off. Leave it off for this part.
 7. Click "Tasks", then "Build a Jira task". Type `<KEY8>`, pick `<REPO>`, and click "Build this task". Answer the questions as in S3.
 8. When the plan is ready, open the Plan tab. Expect a second list with the commands that Claude proposes, each with a reason, for example `ssh <build-host alias> *` and `tar -C repo -czf - .`. Each part of a pipeline is its own entry. Expect no entry for git, a shell, or the Bitbucket or Jira host. Record each pattern and its reason.
 9. Untick every proposal. Tick only the narrowest ssh pattern and the tar pattern. Click "Approve the plan". Expect the dialog "Commands that Claude runs" with the first-use warning that starts "Claude can run each command that matches this list". Click "I understand" in the dialog. The dialog closes, and the app approves the plan at once. Do not click "Approve the plan" again.

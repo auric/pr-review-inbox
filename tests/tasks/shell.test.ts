@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   allowAsks,
-  checkPatterns,
+  checkRules,
   hostsOf,
   mergeAllow,
   originsOf,
@@ -81,7 +81,7 @@ describe("shell.json", () => {
     const data = "//c/Users/someone/AppData/Local/review-loop";
     expect(shellSettings(spec(), "win32")).toEqual({
       permissions: {
-        allow: ["Bash(ssh build1 *)", "Bash(tar -C repo -czf - .)"],
+        allow: ["Bash(ssh build1 *)", "Bash(tar -C repo -czf - .)", "Bash(grep *)", "Bash(rg *)"],
         deny: denyFor(
           data,
           NETWORK.filter((n) => n !== "ssh"),
@@ -97,6 +97,37 @@ describe("shell.json", () => {
     const s = shellSettings(spec({ mode: "any", rules: [] }), "win32");
     expect(s.permissions.allow).toEqual(["Bash"]);
     expect(s.permissions.deny).toEqual(denyFor("//c/Users/someone/AppData/Local/review-loop", NETWORK));
+  });
+
+  test("Any command: a saved ssh pattern lifts only the ssh deny rule; curl, scp, rsync, and the others stay denied", () => {
+    const rules = ["ssh build1 *", "scp -r repo build1:*", "rsync -a repo build1:*", "curl https://build1.example.test/*"];
+    const deny = shellSettings(spec({ mode: "any", rules }), "win32").permissions.deny;
+    expect(deny).not.toContain("Bash(ssh *)");
+    for (const n of NETWORK.filter((x) => x !== "ssh")) expect(deny).toContain(`Bash(${n} *)`);
+    // The same rules in allowlist mode lift each named program.
+    const list = shellSettings(spec({ rules }), "win32").permissions.deny;
+    for (const n of ["ssh", "scp", "rsync", "curl"]) expect(list).not.toContain(`Bash(${n} *)`);
+  });
+
+  test("allowlist: grep and rg always run; each approved check gets its pattern and its exact rule; a check never lifts a deny rule", () => {
+    const s = shellSettings(spec({ rules: [], checks: ["bun test", "ssh build1 make test"] }), "win32").permissions;
+    expect(s.allow).toEqual([
+      "Bash(bun test *)",
+      "Bash(bun test)",
+      "Bash(ssh build1 make test *)",
+      "Bash(ssh build1 make test)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+    ]);
+    expect(s.deny).toContain("Bash(ssh *)");
+    // A saved pattern and a check with the same rule give it once.
+    expect(shellSettings(spec({ rules: ["bun test *"], checks: ["bun test"] }), "win32").permissions.allow).toEqual([
+      "Bash(bun test *)",
+      "Bash(bun test)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+    ]);
+    expect(shellSettings(spec({ mode: "any", rules: [], checks: ["bun test"] }), "win32").permissions.allow).toEqual(["Bash"]);
   });
 
   test("a network program stays denied unless an entry has it as its program", () => {
@@ -141,6 +172,8 @@ describe("shell.json", () => {
   test("bad input is refused before a file is written", () => {
     for (const bashTimeoutSec of [0, 3601, 1.5]) expect(() => shellSettings(spec({ bashTimeoutSec }), "win32")).toThrow("time limit");
     expect(() => shellSettings(spec({ rules: [] }), "win32")).toThrow("at least one pattern");
+    expect(() => shellSettings(spec({ rules: [], checks: ["bun test"] }), "win32")).not.toThrow();
+    expect(() => shellSettings(spec({ rules: [], checks: ["bun test)"] }), "win32")).toThrow("Invalid allowlist pattern");
     for (const r of ["make test)", "a\nb", " "])
       expect(() => shellSettings(spec({ rules: [r] }), "win32")).toThrow("Invalid allowlist pattern");
     expect(() => shellSettings(spec({ origins: ["not a url"] }), "win32")).toThrow();
@@ -160,20 +193,64 @@ describe("shell.json", () => {
   });
 });
 
-describe("approved checks as allow rules", () => {
-  const cmd = (kind: TaskCommand["kind"], argv: string[]): TaskCommand => ({ id: argv.join("-"), name: "x", kind, argv, timeoutSec: 60 });
-  test("each build, test, or lint argv of plain words becomes one pattern; setup and other argv lists do not", () => {
+describe("approved checks as allow rules (spec.md section 6.21.1)", () => {
+  const cmd = (kind: TaskCommand["kind"], argv: string[], name = argv.join(" ")): TaskCommand => ({
+    id: argv
+      .join("-")
+      .replace(/[^A-Za-z0-9_-]/g, "_")
+      .slice(0, 40),
+    name,
+    kind,
+    argv,
+    timeoutSec: 60,
+  });
+  const hosts = hostsOf(ORIGINS);
+  const plain = "An argument holds a character that is not a letter, a digit, or one of _ . / : = @ % + , -.";
+  const shellWord = "A shell or a command runner can run any command. Use Any command instead.";
+  test("each build, test, or lint argv of plain words qualifies once; setup does not; each other one gets a note with its reason", () => {
     expect(
-      checkPatterns([
-        cmd("setup", ["bun", "install"]),
-        cmd("test", ["bun", "test"]),
-        cmd("lint", ["npx", "biome", "check", "--max-diagnostics=50", "src/a_b.ts", "@scope/x", "50%", "a+b,c"]),
-        cmd("build", ["make", "a b"]),
-        cmd("build", ["make", "x;y"]),
-        cmd("build", ["make", "$(id)"]),
-        cmd("test", ["bun", "test"]),
-      ]),
-    ).toEqual(["bun test *", "npx biome check --max-diagnostics=50 src/a_b.ts @scope/x 50% a+b,c *"]);
+      checkRules(
+        [
+          cmd("setup", ["bun", "install"]),
+          cmd("test", ["bun", "test"]),
+          cmd("lint", ["npx", "biome", "check", "--max-diagnostics=50", "src/a_b.ts", "@scope/x", "50%", "a+b,c"]),
+          cmd("build", ["make", "a b"], "spaced"),
+          cmd("build", ["make", "x;y"], "semicolon"),
+          cmd("build", ["make", "$(id)"], "subshell"),
+          cmd("test", ["bun", "test"]),
+          cmd("lint", ["git", "diff", "--check"]),
+          cmd("build", ["bash", "scripts/ci.sh"]),
+          cmd("test", ["ssh", "build1", "make", "test"]),
+          cmd("test", ["curl", "https://bitbucket.example.test/x"]),
+          cmd("build", ["pwsh", "-File", "build.ps1"]),
+        ],
+        { mode: "allowlist", rules: ["echo *"], hosts },
+      ),
+    ).toEqual({
+      checks: ["bun test", "npx biome check --max-diagnostics=50 src/a_b.ts @scope/x 50% a+b,c"],
+      notes: [
+        `The step cannot run the check "spaced". ${plain}`,
+        `The step cannot run the check "semicolon". ${plain}`,
+        `The step cannot run the check "subshell". ${plain}`,
+        'The step cannot run the check "git diff --check". Claude cannot run git commands.',
+        `The step cannot run the check "bash scripts/ci.sh". ${shellWord}`,
+        'The step cannot run the check "ssh build1 make test". The deny list refuses ssh.',
+        'The step cannot run the check "curl https://bitbucket.example.test/x". A pattern cannot name the Bitbucket or Jira host.',
+        `The step cannot run the check "pwsh -File build.ps1". ${shellWord}`,
+      ],
+    });
+  });
+
+  test("a saved pattern for ssh lifts the deny rule for an ssh check; in Any command mode only ssh lifts", () => {
+    const ssh = [cmd("test", ["ssh", "build1", "make", "test"]), cmd("test", ["scp", "-r", "repo", "build1:/tmp"])];
+    expect(checkRules(ssh, { mode: "allowlist", rules: ["ssh build1 *", "scp -r repo build1:*"], hosts })).toEqual({
+      checks: ["ssh build1 make test", "scp -r repo build1:/tmp"],
+      notes: [],
+    });
+    expect(checkRules(ssh, { mode: "any", rules: ["ssh build1 *", "scp -r repo build1:*"], hosts })).toEqual({
+      checks: ["ssh build1 make test"],
+      notes: ['The step cannot run the check "scp -r repo build1:/tmp". The deny list refuses scp.'],
+    });
   });
 });
 

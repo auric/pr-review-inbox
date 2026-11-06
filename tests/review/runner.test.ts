@@ -619,22 +619,25 @@ describe("shell steps", () => {
       session_id: S,
       message: { content: [{ type: "tool_result", tool_use_id: id, content, is_error }] },
     }),
-    denied: (id: string, type?: string) => ({
+    denied: (id: string, type?: string, message = "Permission to use Bash has been denied.") => ({
       type: "system",
       subtype: "permission_denied",
       tool_name: "Bash",
       tool_use_id: id,
       ...(type && { decision_reason_type: type }),
       decision_reason: "Refused",
-      message: "Permission to use Bash has been denied.",
+      message,
     }),
     result: { type: "result", subtype: "success", is_error: false, result: "", structured_output: {}, num_turns: 3, session_id: S },
   };
-  const refused = (id: string, command: string, type?: string) => [
+  const refused = (id: string, command: string, type?: string, message?: string) => [
     line.bash(id, command),
-    line.denied(id, type),
-    line.out(id, "Permission to use Bash has been denied.", true),
+    line.denied(id, type, message),
+    line.out(id, message ?? "Permission to use Bash has been denied.", true),
   ];
+  // The shell gate run B22 (CLI 2.1.316): a CLI safety check with no decision_reason_type.
+  const REDIRECT =
+    "Output redirection to '/tmp/outside.txt' needs approval. The path is outside the working directories for this session ('/tmp/work'). Allowing runs the command as written.";
   const synthetic = (name: string, events: unknown[]) => {
     const f = join(DERIVED, `${name}.jsonl`);
     writeFileSync(f, `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
@@ -675,7 +678,7 @@ describe("shell steps", () => {
     ]);
     const file = JSON.parse(readFileSync(join(app, "shell.json"), "utf8"));
     expect(file).toEqual(shellSettings(spec.shell as ShellSpec));
-    expect(file.permissions.allow).toEqual(["Bash(ssh build1 *)"]);
+    expect(file.permissions.allow).toEqual(["Bash(ssh build1 *)", "Bash(grep *)", "Bash(rg *)"]);
     expect(file.permissions.deny).toContain("Bash(*bitbucket.example.test*)");
     expect(file.permissions.deny).not.toContain("Bash(ssh *)");
   });
@@ -785,7 +788,7 @@ describe("shell steps", () => {
       maxTurns: 80,
       shell,
     });
-    const q = createStreamParser({ cwd: base, allowedTools: withShell.allowed, shell: true });
+    const q = createStreamParser({ cwd: base, allowedTools: withShell.allowed, shell: "any" });
     q.line(init);
     expect(q.state.badTools).toEqual([]);
     expect(q.state.noBash).toBe(false);
@@ -801,8 +804,8 @@ describe("shell steps", () => {
       line.bash("b2", long),
       line.out("b2", "Exit code 1\nline one\n<tool_use_error>boom</tool_use_error>", true),
       ...refused("b3", "git status", "rule"),
-      ...refused("b4", "curl https://x.example.test", "mode"),
-      ...refused("b5", "id"),
+      ...refused("b4", "curl https://x.example.test", "other", "This command requires approval"),
+      ...refused("b5", "echo x > ../outside.txt", undefined, REDIRECT),
       line.result,
     ]);
     const { runner, spec } = implement({ fixture }, {});
@@ -823,11 +826,11 @@ describe("shell steps", () => {
     expect(b2?.note).toBe("Exit code 1\nline one\nboom");
     expect([b3?.target, b3?.note]).toEqual(["git status", "Refused by the deny list"]);
     expect([b4?.target, b4?.note]).toEqual(["curl https://x.example.test", "Refused by the allowlist"]);
-    expect(b5?.note).toBe("Refused by the allowlist");
+    expect(b5?.note).toBe("Refused by a Claude Code safety check");
   });
 
   test("refusal labels (SU3): the B22 permission_denied events of CLI 2.1.316, and a type rule event", () => {
-    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell: true });
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell: "allowlist" });
     const deny = (cmd: string) => `Permission to use Bash with command ${cmd} has been denied.`;
     const seen: [string, string, Record<string, string>][] = [
       [
@@ -851,8 +854,43 @@ describe("shell steps", () => {
     ]);
   });
 
+  test("refusal labels by mode: a safety check is never the allowlist, and Any command never shows the allowlist", () => {
+    const approval = {
+      decision_reason_type: "other",
+      decision_reason: "This command requires approval",
+      message: "This command requires approval",
+    };
+    const labels = (shell: "allowlist" | "any") => {
+      const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell });
+      const seen: [string, Record<string, string>][] = [
+        ["e1", approval],
+        ["e2", { message: REDIRECT }],
+        ["e3", { decision_reason_type: "subcommandResults", message: "Permission to use Bash with command git status has been denied." }],
+        ["e4", { decision_reason_type: "other", message: "Contains backslash-escaped whitespace" }],
+      ];
+      for (const [id, fields] of seen) {
+        p.line(JSON.stringify(line.bash(id, id)));
+        p.line(JSON.stringify({ type: "system", subtype: "permission_denied", tool_name: "Bash", tool_use_id: id, ...fields }));
+      }
+      return { by: p.state.refused.map((r) => r.by), notes: p.events().map((e) => e.note) };
+    };
+    expect(labels("allowlist")).toEqual({
+      by: ["allowlist", "check", "deny", "check"],
+      notes: [
+        "Refused by the allowlist",
+        "Refused by a Claude Code safety check",
+        "Refused by the deny list",
+        "Refused by a Claude Code safety check",
+      ],
+    });
+    expect(labels("any").by).toEqual(["check", "check", "deny", "check"]);
+    expect(labels("any").notes).not.toContain("Refused by the allowlist");
+  });
+
   test("more than 5 refused commands kill the run", async () => {
-    const calls7 = Array.from({ length: 7 }, (_, i) => refused(`r${i}`, `curl https://x${i}.example.test`, "mode")).flat();
+    const calls7 = Array.from({ length: 7 }, (_, i) =>
+      refused(`r${i}`, `curl https://x${i}.example.test`, "other", "This command requires approval"),
+    ).flat();
     const fixture = synthetic("bash-refused", [line.init, ...calls7, line.result]);
     const { runner, spec, calls } = implement({ fixture, delayMs: 30 }, {});
     const seen: RunEvent[] = [];

@@ -1038,6 +1038,37 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
     expect((await get()).body).toMatchObject({ shellMode: "any", bashTimeoutSec: 900 });
   });
 
+  test('spec.md section 6.21.1: "Claude may run the approved checks" is off by default; the first switch to on needs the shell warning', async () => {
+    const h = await setup();
+    const get = () => h.json<{ runChecks: boolean; shellWarnedAt: number | null }>("/api/repos/PROJ/repo/task-settings");
+    expect((await get()).body).toMatchObject({ runChecks: false, shellWarnedAt: null });
+    const cmd = { id: "t", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 60 };
+    const body = {
+      specDir: "specs/{key}/",
+      lineBudget: 400,
+      maxOpen: 2,
+      approvals: 1,
+      commands: [cmd],
+      testGlobs: null,
+      excludeGlobs: null,
+      isolateHome: true,
+    };
+    const put = (b: Record<string, unknown>) =>
+      h.json<ApiError>("/api/repos/PROJ/repo/task-settings", { method: "PUT", body: { ...body, ...b } });
+    expect((await put({ runChecks: true })).body).toEqual({ error: "Accept the warning for commands that Claude runs first." });
+    expect((await get()).body).toMatchObject({ runChecks: false });
+    expect((await put({ runChecks: true, shellWarning: true })).status).toBe(200);
+    expect((await get()).body.shellWarnedAt).not.toBeNull();
+    // A save without the field keeps it. Off and on again need no warning after the first one.
+    expect((await put({})).status).toBe(200);
+    expect((await get()).body).toMatchObject({ runChecks: true });
+    expect((await put({ runChecks: false })).status).toBe(200);
+    expect((await put({ runChecks: true })).status).toBe(200);
+    expect(h.db.query("SELECT run_checks FROM repo_task_settings WHERE project = 'PROJ' AND repo = 'repo'").get()).toEqual({
+      run_checks: 1,
+    });
+  });
+
   test(
     "spec.md section 6.21 (D2): the plan offers its command patterns; the first picks need the shell warning and join the repository list",
     async () => {
@@ -1060,7 +1091,7 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
           },
         ],
         true,
-        { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false },
+        { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false, checks: 0 },
       ]);
       const body = { version: t.version, size: "small", commands: ["new-1"], warning: true };
       const picks = ["new-1", { id: "new-u1", pattern: "scp -r repo build1:*", reason: "Copy." }];

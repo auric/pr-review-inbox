@@ -582,7 +582,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const limit = Math.min(opts.timeoutMs ?? RUN_TIMEOUT_MS, own ?? RUN_TIMEOUT_MS);
       const agents = new Set("main" in spec ? [MAIN_AGENT, ...Object.keys(spec.agents)] : []);
       const shell = "implement" in spec ? spec.shell : undefined;
-      const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: !!shell });
+      const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,

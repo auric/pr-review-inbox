@@ -352,11 +352,16 @@ export function implementPrompt(
 ): string {
   const user = [...(project ? ['"Project instructions"'] : []), ...(mode === "instruct" ? ['"Your instructions"'] : [])];
   const plan = `When the plan is wrong, change the plan file under ${specDir} in ./repo, stop, and say why in specChange.`;
+  const checks = shell?.checks ?? [];
   const modeLines = {
     tests: ["Write tests for the acceptance criteria in step.md. Change no product code. The tests must fail until the feature exists."],
     implement: ["Make the tests of this part pass. Never weaken or delete a test to make it pass."],
+    // check-fix.md items 1 and 3: a failure that code cannot fix ends the step with a question.
     fix: [
       "./context/failure.md holds the failing output or the review findings. Fix the cause. Change a test only when the test is wrong, and say so in notes.",
+      "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
+      'failure.md marks a command that also failed before this task with "Also red before this task". Do not try to fix that command. Fix only the new failures.',
+      ...(checks.length ? ["Run the failing check first to see the failure. Run it again after your change."] : []),
     ],
     // spec.md section 6.18.2, prompt lines of mode instruct.
     instruct: [
@@ -388,7 +393,7 @@ export function implementPrompt(
               "You can run commands with the Bash tool. A fixed deny list refuses git and some other commands. Do not try another form of a refused command.",
             ]
           : [
-              `You can run only these commands: ${shell.rules.map((r) => `\`${r}\``).join(", ")}. Read-only commands, such as ls and cat, also run. Claude Code refuses every other command.`,
+              `You can run only these commands: ${[...shell.rules, ...checks.map((c) => `${c} *`)].map((r) => `\`${r}\``).join(", ")}. Read-only commands, such as ls, cat, grep, and rg, also run. Claude Code refuses every other command.`,
               ask,
               "Never ask to allow a read-only command, git, a shell, or the Bitbucket or Jira host.",
               ...(mode === "instruct" ? ["When the request asks for allowlist changes, set allowRequest and change no file."] : []),
@@ -399,7 +404,13 @@ export function implementPrompt(
       ];
   return [
     `You do one step of an approved plan in ./repo. You can change files only in ${where}. ${shell ? "You post nothing." : "You cannot run commands, and you post nothing."}`,
-    "The app runs the build and the tests after your step. The next step gives you the output.",
+    `The app runs the approved build, test, and lint commands after your step. ${
+      checks.length
+        ? `You can also run them yourself: ${checks.map((c) => `\`${c}\``).join(", ")}.`
+        : shell
+          ? "When they fail, a fix step gets their output."
+          : "You cannot run them. When they fail, a fix step gets their output."
+    }`,
     ...shellLines,
     "Read ./context/step.md first. It names the part, the task, and what done means.",
     ...(attachments
@@ -764,7 +775,7 @@ function shellDetail(shell: StepShell, events: readonly RunEvent[], refused: num
             : ("stopped" as const),
       ms: Math.max(0, (e.endedAt ?? e.startedAt) - e.startedAt),
     }));
-  return { mode: shell.mode, rules: shell.rules, commands, refused };
+  return { mode: shell.mode, rules: shell.rules, checks: shell.checks ?? [], commands, refused };
 }
 
 // done: resolves after the run end and onEnd.
@@ -912,7 +923,12 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         {
           deniedPaths: problems.map((p) => p.path),
           patch: patch ? basename(patch) : null,
-          notes: [...(broken ? [broken] : []), ...problems.map((p) => `${p.path}: ${p.reason}`), ...(result?.notes ?? [])],
+          notes: [
+            ...(i.shell?.notes ?? []),
+            ...(broken ? [broken] : []),
+            ...problems.map((p) => `${p.path}: ${p.reason}`),
+            ...(result?.notes ?? []),
+          ],
           summary: result?.summary ?? null,
           needsBase: result?.needsBase ? { reason: result.needsBaseReason } : null,
           written,

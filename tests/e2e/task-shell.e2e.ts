@@ -142,7 +142,13 @@ async function api(page: Page, method: string, path: string, body?: unknown): Pr
   );
 }
 
-type Shell = { shellMode: string; allow: { pattern: string; source: string }[]; bashTimeoutSec: number; shellWarnedAt: number | null };
+type Shell = {
+  shellMode: string;
+  allow: { pattern: string; source: string }[];
+  bashTimeoutSec: number;
+  shellWarnedAt: number | null;
+  runChecks: boolean;
+};
 const shell = async (page: Page) => (await api(page, "GET", SETTINGS)).json as Shell;
 const status = (page: Page) => page.locator("#task-status");
 const primary = (page: Page) => page.locator("[data-primary]");
@@ -200,7 +206,17 @@ test("Commands Claude may run: the warnings, the plan picks, an allow request wi
   await expect(dialog).toBeHidden();
   await expect(anyToggle).toBeFocused();
   await expect(anyToggle).toHaveAttribute("aria-pressed", "false");
-  expect(await shell(page)).toMatchObject({ shellMode: "allowlist", allow: [], shellWarnedAt: null });
+  // spec.md section 6.21.1: the help next to the mode switch, and the switch of the approved checks with the first-use warning.
+  await expect(box.getByText("Applies to the next step. A running step keeps its mode.")).toBeVisible();
+  const checks = box.getByRole("switch", { name: /may run the approved checks$/ });
+  await expect(checks).not.toBeChecked();
+  await checks.click();
+  await expect(dialog).toContainText(WARNING_START);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(checks).toBeFocused();
+  await expect(checks).not.toBeChecked();
+  expect(await shell(page)).toMatchObject({ shellMode: "allowlist", allow: [], shellWarnedAt: null, runChecks: false });
 
   // 3. The plan offers Claude's proposals ticked, each with its reason. An interpreter pattern shows its warning.
   await openApp(page, taskPath);
@@ -310,4 +326,72 @@ test("Commands Claude may run: the warnings, the plan picks, an allow request wi
   // 7. The header names Any command.
   await openApp(page, taskPath);
   await expect(page.locator("[data-task-shell]")).toHaveText("Commands: any command");
+});
+
+// check-fix.md: a fix step that changes no file stops the task with a question, Continue and See why. The switch of the approved checks
+// gives the next fix step the test command, and the header and the Log tab count it.
+test("a fix step that changes no file asks; the approved checks switch gives the next fix step the test command", async ({ page }) => {
+  test.setTimeout(600_000);
+  const todo = { path: "repo/README.md", text: "# Sample todo\n" };
+  await control("claude", {
+    ...CLAUDE,
+    spec: { ...SPEC, testing: { ...SPEC.testing, allow: [] } },
+    seq: {
+      "implement:tests": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }] }],
+      "implement:implement": [{ writes: [todo] }],
+      // Try 1 changes no file. Try 2 makes the test pass.
+      "implement:fix": [{ writes: [] }, { writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
+    },
+  } satisfies ClaudeScenario);
+  await openApp(page);
+  await page.getByLabel("Bitbucket URL").fill(FAKE_URL);
+  await page.getByLabel("Access token").fill(E2E_TOKEN);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByLabel("Access token")).toBeHidden();
+  await control("state", { task: true });
+  expect((await api(page, "PUT", "/api/settings/jira", { baseUrl: JIRA_URL, token: E2E_JIRA_TOKEN })).status).toBe(200);
+  const prs = (await api(page, "GET", "/api/prs")).json as { id: number; prId: number }[];
+  const prA = prs.find((p) => p.prId === 1001)?.id as number;
+  expect((await api(page, "PUT", `/api/prs/${prA}/clone`, { path: await makeClone(1001) })).status).toBe(200);
+  await page.reload();
+
+  await page.locator("[data-row]", { hasText: PR_TITLE }).first().click();
+  await page.getByRole("button", { name: `Build this task: ${JIRA_ISSUE}` }).click();
+  await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
+  const taskPath = new URL(page.url()).pathname;
+  await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();
+  await expect(status(page)).toHaveText("The plan is ready: small, 1 PR, about 5 changed lines.", { timeout: 60_000 });
+  await page.getByRole("checkbox", { name: "I understand" }).check();
+  await primary(page).click();
+
+  // The fix step changes no file: the task asks at once, with Continue and See why.
+  await expect(status(page)).toHaveText("Needs you: the fix step of part 1 changed no file. See why.", { timeout: 180_000 });
+  await expect(primary(page)).toHaveText("Continue");
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "See why" }).click();
+  await expect(page.getByRole("tab", { name: "Log" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("[data-task-item]:focus")).toContainText("Fix");
+  // The checks on the part base ran once, before the first step of Claude.
+  await expect(page.locator("[data-task-item]", { hasText: "The approved checks on the part base" })).toHaveCount(1);
+
+  // Settings: the switch needs the first-use warning. Then the header counts the test command.
+  await openRepo(page);
+  const box = repoBox(page);
+  await box.getByRole("switch", { name: /may run the approved checks$/ }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "I understand" }).click();
+  await expect(box.getByRole("switch", { name: /may run the approved checks$/ })).toBeChecked();
+  await expect.poll(async () => (await shell(page)).runChecks).toBe(true);
+  await openApp(page, taskPath);
+  await expect(page.locator("[data-task-shell]")).toHaveText("Commands: allowlist, 0 patterns, 1 approved check");
+
+  // Continue: the next fix step can run the test command, and the build ends green.
+  await primary(page).click();
+  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await page.getByRole("tab", { name: "Log" }).click();
+  // Resume runs the code step of the task again, then the fix: both are try 2, and both can run the test command.
+  const second = page.locator("[data-task-item]", { hasText: "try 2" }).filter({ has: page.locator("[data-step-shell]") });
+  await expect(second.locator("[data-step-shell] p")).toHaveText([
+    "Commands: allowlist, 0 patterns, 1 approved check",
+    "Commands: allowlist, 0 patterns, 1 approved check",
+  ]);
 });

@@ -8,6 +8,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B17 | WP-B3 | `scripts/gate/claude-checks.ts` |
 | B19 | No fixed point. The part budgets of spec.md section 6.7 use it. | `scripts/gate/claude-checks.ts` |
 | B21 to B29 | WP-C2b (the Bash tool of a task step). B28 is optional. | `scripts/gate/claude-checks.ts` |
+| B30a to B30d | Your decision on a PreToolUse hook and on the prompt line about grep (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
 | G7 | No fixed point. INFO only. | `scripts/gate/bitbucket-write.ts` |
@@ -101,6 +102,23 @@ These checks give the facts SU1 to SU12 of the integration-check.md section "Cla
 | B29 | SU10 | A probe that exits with code 7. | The tool_result text names exit code 7. |
 
 A FAIL of B21, B22, B24, B25, B26, B27, or B27b blocks WP-C2b. Record the evidence line in the "Claude shell" rows of integration-check.md and report it. A FAIL of B23 or B29 changes how the app reads refusals or exit codes (src/server/review/stream.ts).
+
+### B30a to B30d: refused read-only commands, the bare argv rule, a hook, and ssh in Any command mode
+
+These checks give the facts SU14 to SU17 (docs/plans/review-v2/check-fix.md and shell.md "Refused Bash calls in a tests step"). Every command runs locally. No command reaches a host. The same preparation as above applies.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B30a,B30b,B30c,B30d`.
+- Run: `bun scripts/gate/claude-checks.ts --only B30a,B30b,B30c,B30d`. Then sanitize as above.
+- Own call caps: B30a 2 (Any command and allowlist), B30b 1, B30c 1, B30d 1.
+
+| Check | Fact | What it runs | PASS |
+|---|---|---|---|
+| B30a | SU14 | Two compound read-only commands with a grep pattern that holds a quoted backslash-pipe or `^#`, then the same commands without them. One run with allow `Bash`, one with an allowlist (the app adds `Bash(grep *)` and `Bash(rg *)`). | The plain forms run in both runs, and no refusal of the Any command run gets the app label "allowlist". INFO for you: copy the state, `decision_reason_type`, message, and app label of each quoted form into SU14. |
+| B30b | SU15 | The rule `<probe> bare *` only. Commands: `<probe> bare`, then `<probe> bare more`. | Both run. INFO: only the longer one runs, so the bare argv needs the exact rule that the app adds. |
+| B30c | SU16 | Any command with a PreToolUse hook in shell.json that logs its input and returns permissionDecision "allow". Commands: the two quoted forms of B30a and `git status`. | The hook ran, `git status` stays refused, and both quoted forms run. INFO: the hook ran, and a safety check still refused a quoted form. FAIL: the hook did not run, or `git status` ran. |
+| B30d | SU17 | Any command with the saved pattern `ssh rlgb-b30.invalid *`. Commands: `ssh -V`, `scp -V`, `curl --version`. | shell.json has no ssh deny rule, `ssh -V` runs, and the deny list refuses scp and curl. |
+
+The app has no hook. You decide on the hook after B30c.
 
 ## Part G: Bitbucket checks G1 to G7
 

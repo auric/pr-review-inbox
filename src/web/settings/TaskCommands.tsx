@@ -4,7 +4,8 @@
 // Settings > Commands: per task repository, the approved commands that the app runs (docs/plans/review-v2/spec.md section 6.3,
 // repo_task_settings.commands_json) with the editor of the plan screen, and the commands that the runner may run (section 6.21): the mode,
 // the allowlist, and "Longest command". Each change saves by itself (autosave.tsx). The first-use warning of the app commands stays on
-// the plan screen: a saved list here does not accept it. The first pattern and each switch to Any command show their own dialog here.
+// the plan screen: a saved list here does not accept it. The first pattern, the first switch to "<runner> may run the approved checks",
+// and each switch to Any command show their own dialog here.
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, TriangleAlert } from "lucide-react";
 import { useRef, useState } from "react";
@@ -18,7 +19,7 @@ import { type ShellMode, TASK_CACHE_ENV } from "../../shared/task";
 import { api } from "../api";
 import { read } from "../shell/data";
 import { AllowEditor, type ShellAsk, ShellDialog, useShellNames } from "../tasks/AllowEditor";
-import { type AllowDraft, draftsToAllow, TIMEOUT_PROBLEM, timeoutMinutes, timeoutSec, toAllowDraft } from "../tasks/allow";
+import { type AllowDraft, draftsToAllow, modeLine, TIMEOUT_PROBLEM, timeoutMinutes, timeoutSec, toAllowDraft } from "../tasks/allow";
 import { CommandsEditor } from "../tasks/CommandsEditor";
 import { type CommandDraft, draftsToCommands, toDraft } from "../tasks/commands";
 import { useRepoTaskSettings, useTasks } from "../tasks/data";
@@ -94,13 +95,9 @@ function RepoCommandsBody({ project, repo }: { project: string; repo: string }) 
   return <Editor s={q.data} />;
 }
 
-type Rows = { commands: CommandDraft[]; allow: AllowDraft[]; mode: ShellMode; minutes: string; cache: boolean };
+type Rows = { commands: CommandDraft[]; allow: AllowDraft[]; mode: ShellMode; minutes: string; cache: boolean; checks: boolean };
 
 const MODE_TEXT: Record<ShellMode, string> = { allowlist: "Allowlist", any: "Any command" };
-const modeLine = (mode: ShellMode, runner: string) =>
-  mode === "any"
-    ? `${runner} runs every command, except the fixed deny list. The list below applies again when you switch back.`
-    : `${runner} runs only the commands that match a pattern of this list.`;
 
 function Editor({ s }: { s: RepoTaskSettingsDto }) {
   const qc = useQueryClient();
@@ -112,6 +109,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
     mode: s.shellMode,
     minutes: timeoutMinutes(s.bashTimeoutSec),
     cache: s.taskCache,
+    checks: s.runChecks,
   }));
   // The newest rows. Event handlers set them before the render, so a save in the same handler sends the change.
   const latest = useRef(rows);
@@ -126,13 +124,25 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
     (): RepoTaskSettingsInput | null => {
       const cur = qc.getQueryData<RepoTaskSettingsDto>(key) ?? s;
       const r = latest.current;
-      const { project: _p, repo: _r, warnedAt: _w, shellWarnedAt: _s, allow: stored, shellMode, bashTimeoutSec, taskCache, ...rest } = cur;
+      const {
+        project: _p,
+        repo: _r,
+        warnedAt: _w,
+        shellWarnedAt: _s,
+        allow: stored,
+        shellMode,
+        bashTimeoutSec,
+        taskCache,
+        runChecks,
+        ...rest
+      } = cur;
       const next = {
         commands: draftsToCommands(r.commands) ?? cur.commands,
         shellMode: r.mode,
         allow: draftsToAllow(r.allow) ?? stored.map(({ pattern, reason }) => ({ pattern, reason })),
         bashTimeoutSec: timeoutSec(r.minutes) ?? bashTimeoutSec,
         taskCache: r.cache,
+        runChecks: r.checks,
       };
       const was = {
         commands: cur.commands,
@@ -140,6 +150,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
         allow: stored.map(({ pattern, reason }) => ({ pattern, reason })),
         bashTimeoutSec,
         taskCache,
+        runChecks,
       };
       if (JSON.stringify(next) === JSON.stringify(was)) return null;
       return { ...rest, ...next, ...(warned.current && { shellWarning: true as const }) };
@@ -230,7 +241,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
         <div className="grid gap-1">
           <ToggleGroup
             aria-label="Mode"
-            aria-describedby={`${id}-mode-line`}
+            aria-describedby={`${id}-mode-line ${id}-mode-help`}
             variant="outline"
             size="sm"
             spacing={0}
@@ -259,9 +270,32 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
             aria-live="polite"
             className={rows.mode === "any" ? "m-0 text-xs font-medium text-warn" : "m-0 text-xs text-muted-foreground"}
           >
-            {modeLine(rows.mode, names.runner)}
+            {modeLine(rows.mode, names)}
+          </p>
+          <p id={`${id}-mode-help`} className="m-0 text-xs text-muted-foreground">
+            Applies to the next step. A running step keeps its mode.
           </p>
         </div>
+        <Field orientation="horizontal" data-run-checks>
+          <Switch
+            id={`${id}-checks`}
+            aria-describedby={`${id}-checks-help`}
+            checked={rows.checks}
+            onCheckedChange={(checks) =>
+              !checks || warned.current
+                ? change({ checks }, false)
+                : setAsk({ kind: "warning", run: accept(() => change({ checks: true }, false)) })
+            }
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`${id}-checks`}>{names.runner} may run the approved checks</FieldLabel>
+            <FieldDescription id={`${id}-checks-help`}>
+              Off by default. When on, the tests, code, fix, and Tell {names.runner} steps can run the build, test, and lint commands above,
+              also with no pattern in this list. A command with a character other than letters, digits, and _ . / : = @ % + , - gets no
+              rule, and so does a command that the deny list refuses. The step notes in the Log tab name each one.
+            </FieldDescription>
+          </FieldContent>
+        </Field>
         <AllowEditor
           idPrefix={`${id}-allow`}
           drafts={rows.allow}

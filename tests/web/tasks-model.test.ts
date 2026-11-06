@@ -193,7 +193,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     canSetup: false,
     subtasks: null,
     issueStatus: null,
-    shell: { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false },
+    shell: { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false, checks: 0 },
     allowAsk: null,
     ...o,
   };
@@ -392,6 +392,12 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
   test("blocked question without a question row (pause): Continue", () => {
     const v = view(building({ blocked: { kind: "question", step: null, text: "Building is paused after the step. Continue?" } }));
     expect(shape(v)).toMatchObject({ primary: "Continue", more: ["Stop"] });
+  });
+
+  test("check-fix.md: a question of the app that names a step, such as a fix step that changed no file, adds See why", () => {
+    const text = "Needs you: the fix step of part 1 changed no file. See why.";
+    const v = view(building({ blocked: { kind: "question", step: 7, text } }));
+    expect(shape(v)).toEqual({ status: text, primary: "Continue", more: ["See why", "Stop"], screen: "build" });
   });
 
   test("blocked size: Keep one PR, then Change the limit in More", () => {
@@ -935,6 +941,14 @@ describe("the Log tab state of a step (spec.md section 6.7, AC-B10)", () => {
     expect(look({ state: "failed", detail: stepDetail.parse({}) })).toBe("Failed");
     expect(look({ state: "ok", detail: stepDetail.parse({ expectRed: true }) })).toBe("Done");
     expect(look({ state: "cancelled", detail: stepDetail.parse({ expectRed: true }) })).toBe("Cancelled");
+  });
+
+  test("the red checks on the part base read as red before this task; green ones are done", () => {
+    expect(look({ state: "failed", item: "base", detail: stepDetail.parse({ baseline: true }) })).toBe("Red before this task");
+    expect(look({ state: "ok", item: "base", detail: stepDetail.parse({ baseline: true }) })).toBe("Done");
+    expect(stepLook(step({ id: 4, kind: "check", item: "base", state: "failed", detail: stepDetail.parse({ baseline: true }) }))).toBe(
+      "before",
+    );
   });
 });
 

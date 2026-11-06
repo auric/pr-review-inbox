@@ -8,6 +8,7 @@ import {
   allowDecisions,
   allowDraftProblem,
   draftsToAllow,
+  modeLine,
   planAllow,
   shellText,
   timeoutMinutes,
@@ -93,6 +94,17 @@ describe("commands that Claude may run, in the page", () => {
     expect(shellText("allowlist", 1)).toBe("Commands: allowlist, 1 pattern");
     expect(shellText("allowlist", 5)).toBe("Commands: allowlist, 5 patterns");
     expect(shellText("any", 5)).toBe("Commands: any command");
+    expect(shellText("allowlist", 0, 1)).toBe("Commands: allowlist, 0 patterns, 1 approved check");
+    expect(shellText("allowlist", 2, 3)).toBe("Commands: allowlist, 2 patterns, 3 approved checks");
+    expect(shellText("any", 2, 3)).toBe("Commands: any command");
+    // spec.md section 6.21.2: the line under the mode switch names what Any command still blocks.
+    const n = { runner: "Runner", cli: "runner", forge: "Forge", tracker: "Tracker" };
+    expect(modeLine("any", n)).toBe(
+      "Runner runs every command, except these: git, the Forge and Tracker hosts, curl, wget, nc, ncat, netcat, socat, telnet, ftp, tftp, sftp, scp, rsync, ssh, powershell, pwsh, and the password and key store tools. Runner also cannot read the app data or your ssh keys. A pattern for ssh in this list lets every ssh command run. The list applies again when you switch back.",
+    );
+    expect(modeLine("allowlist", n)).toBe(
+      "Runner runs only the commands that match a pattern of this list. grep, rg, and read-only commands such as ls and cat also run.",
+    );
     expect(timeoutMinutes(600)).toBe("10");
     expect(timeoutMinutes(90)).toBe("1.5");
     expect(timeoutSec("15")).toBe(900);

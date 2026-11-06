@@ -876,6 +876,42 @@ describe("implement run with the profile tools", () => {
   );
 });
 
+// check-fix.md and spec.md section 6.21.4: the prompt says what the step can run, and the fix lines end a failure that code cannot fix.
+describe("the prompt lines of the shell state", () => {
+  const lines = (mode: "fix" | "implement", shell: Parameters<typeof implementPrompt>[7]) =>
+    implementPrompt(mode, "specs/K-1/", false, false, "", "", { skills: [], mcp: [] }, shell).split("\n");
+  const RUNS = "The app runs the approved build, test, and lint commands after your step.";
+
+  test("no shell: no command runs, and the checks are the app's", () => {
+    const l = lines("implement", null);
+    expect(l[0]).toEndWith("You cannot run commands, and you post nothing.");
+    expect(l[1]).toBe(`${RUNS} You cannot run them. When they fail, a fix step gets their output.`);
+  });
+
+  test("allowlist with approved checks: the check patterns join the list, and the step can run the checks itself", () => {
+    const l = lines("fix", { mode: "allowlist", rules: ["echo *"], checks: ["bun test", "bun run lint"], bashTimeoutSec: 600 });
+    expect(l[0]).toEndWith("You post nothing.");
+    expect(l[1]).toBe(`${RUNS} You can also run them yourself: \`bun test\`, \`bun run lint\`.`);
+    expect(l).toContain(
+      "You can run only these commands: `echo *`, `bun test *`, `bun run lint *`. Read-only commands, such as ls, cat, grep, and rg, also run. Claude Code refuses every other command.",
+    );
+    expect(l).toContain("Run the failing check first to see the failure. Run it again after your change.");
+  });
+
+  test("fix mode: a broken command, a missing tool, or an environment fault changes no file and sets question", () => {
+    const l = lines("fix", { mode: "any", rules: [], checks: [], bashTimeoutSec: 600 });
+    expect(l[1]).toBe(`${RUNS} When they fail, a fix step gets their output.`);
+    expect(l).toContain(
+      "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
+    );
+    expect(l).toContain(
+      'failure.md marks a command that also failed before this task with "Also red before this task". Do not try to fix that command. Fix only the new failures.',
+    );
+    expect(l).not.toContain("Run the failing check first to see the failure. Run it again after your change.");
+    expect(lines("implement", null).join("\n")).not.toContain("Set question and give the reason.");
+  });
+});
+
 // spec.md section 6.21: a step with the Bash tool. D7 (the commands in the step detail), D8 (the path check), and D3 (the runner ends
 // the run over the refusal cap).
 describe("a step with the Bash tool", () => {
@@ -900,6 +936,7 @@ describe("a step with the Bash tool", () => {
       expect(JSON.parse(s.stepRow(ok.outcome?.step as number).detail_json).shell).toEqual({
         mode: "allowlist",
         rules: ["echo *"],
+        checks: [],
         commands: [{ command: "echo build", state: "ok", ms: expect.any(Number) }],
         refused: 0,
       });

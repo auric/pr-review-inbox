@@ -40,6 +40,7 @@ const ICON: Record<StepLook, { icon: typeof CircleCheck; className?: string }> =
   ok: { icon: CircleCheck },
   failed: { icon: CircleAlert, className: "text-destructive" },
   expected: { icon: CircleCheck },
+  before: { icon: CircleAlert, className: "text-warn" },
   running: { icon: LoaderCircle, className: "motion-safe:animate-spin" },
   waiting: { icon: CircleDashed },
   cancelled: { icon: CircleMinus },
@@ -205,6 +206,11 @@ function StepBody({
           </span>
         )}
       </div>
+      {d.baseline && (
+        <p className="m-0 text-xs text-ink-2">
+          The approved checks on the part base, before the first step of {runner}. The fix steps compare with this run.
+        </p>
+      )}
       {d.diffStat && (
         <p className="m-0 text-xs text-ink-2">
           {d.diffStat.files} {d.diffStat.files === 1 ? "file" : "files"}, +{d.diffStat.added} −{d.diffStat.removed}
@@ -306,7 +312,7 @@ function ShellRows({ shell, runner }: { shell: NonNullable<StepDetail["shell"]>;
   return (
     <div data-step-shell className="grid gap-1">
       <p className={cn("m-0 text-xs", shell.mode === "any" ? "font-medium text-warn" : "text-ink-2")}>
-        {shellText(shell.mode, shell.rules.length)}
+        {shellText(shell.mode, shell.rules.length, shell.checks.length)}
         {shell.refused > 0 && `. Refused: ${shell.refused}`}
       </p>
       {n > 0 && (

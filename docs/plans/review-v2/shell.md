@@ -158,7 +158,7 @@ CodeGraph: used 0 times. I used direct reads, because the target was the CLI bun
 
 ## Refused Bash calls in a tests step (2026-11-04)
 
-Analysis by the investigator against main c8a272b. User report: with all commands allowed, a tests step still shows "Refused by the allowlist" for compound read-only commands (cd, cat, head, grep with a quoted backslash-pipe, wc, echo). Not built. The user decides on the fixes.
+Analysis by the investigator against main c8a272b. User report: with all commands allowed, a tests step still shows "Refused by the allowlist" for compound read-only commands (cd, cat, head, grep with a quoted backslash-pipe, wc, echo). Built on 2026-11-05: the label by mode, the grep and rg rules, and the help next to the mode switch (spec.md section 6.21). Gate B30 proves cause B (integration-check.md SU14 to SU17). The prompt line about the Grep tool and the PreToolUse hook wait for B30.
 
 The label "Refused by the allowlist" does not prove the allowlist refused these commands. In `src/server/review/stream.ts:228-234`, the app labels every Bash refusal "allowlist" unless it can tell it came from a deny rule. That includes the CLI's own safety checks, and those also refuse in Any command mode. The most likely cause is one of those checks. Two runs are needed to tell the causes apart (see 5): the Log tab line and a gate probe with the real CLI.
 

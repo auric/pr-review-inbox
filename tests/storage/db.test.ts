@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 45;
+const LATEST = 46;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1120,6 +1120,8 @@ test("migration from a version-32 database keeps every row and child row; task r
       bash_timeout_sec: 600,
       // 045_task_setup.sql.
       task_cache: 0,
+      // 046_task_run_checks.sql.
+      run_checks: 0,
     });
     expect(() => db.run("INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ('P', 'r', 2)")).toThrow(/UNIQUE/);
 
@@ -1172,8 +1174,8 @@ test("migration from a version-33 database keeps every task setting; last_base i
   const db = openDb(path);
   try {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
-    // 044_task_shell.sql and 045_task_setup.sql.
-    const shell = { shell_mode: "allowlist", allow_json: "[]", shell_warned_at: null, bash_timeout_sec: 600, task_cache: 0 };
+    // 044_task_shell.sql, 045_task_setup.sql, and 046_task_run_checks.sql.
+    const shell = { shell_mode: "allowlist", allow_json: "[]", shell_warned_at: null, bash_timeout_sec: 600, task_cache: 0, run_checks: 0 };
     expect(columns(db, "repo_task_settings")).toEqual([...oldColumns, "last_base", ...Object.keys(shell)]);
     expect(db.query("SELECT * FROM repo_task_settings").all()).toEqual(
       (before as Record<string, unknown>[]).map((r) => ({ ...r, last_base: null, ...shell })),
@@ -1594,6 +1596,9 @@ test("migration from a version-44 database: task_cache is off, and a setup comma
     ]);
     expect(rows[1]?.commands_json).toBe("[]");
     expect(() => db.run("UPDATE repo_task_settings SET task_cache = 2")).toThrow(/CHECK/);
+    // 046_task_run_checks.sql: "Claude may run the approved checks" is off for each stored row.
+    expect(db.query("SELECT run_checks FROM repo_task_settings ORDER BY repo").all()).toEqual([{ run_checks: 0 }, { run_checks: 0 }]);
+    expect(() => db.run("UPDATE repo_task_settings SET run_checks = 2")).toThrow(/CHECK/);
   } finally {
     db.close();
   }

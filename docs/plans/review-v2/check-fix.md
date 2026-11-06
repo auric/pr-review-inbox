@@ -1,6 +1,6 @@
 # A failing check and the Fix step
 
-Status: analysis of 2026-11-04 by the investigator against main 42b254c. Not built. The user decides on the proposed fix.
+Status: analysis of 2026-11-04 by the investigator against main 42b254c. Items 1 to 3 are code complete (user decisions of 2026-11-04 and 2026-11-05; spec.md sections 6.6, 6.7, and 6.21.1, AC-B104.10 to AC-B104.16). Item 4 ("Skip this check for this part") is not built. Gate B30 (integration-check.md SU14 to SU17) is open.
 
 User report: a check command fails, and Claude tries to fix it in the Fix step. Claude cannot ask for commands there.
 

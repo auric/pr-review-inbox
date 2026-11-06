@@ -488,8 +488,8 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
 }
 
 // The checks with their step row (kind check) for the Log tab: each command with argv, exit code, time, and the output tail.
-// expectRed: the checks of the tests step, which must fail (StepDetail.expectRed).
-// onChange: the step row got the output so far (spec.md section 6.7, Log).
+// expectRed: the checks of the tests step, which must fail (StepDetail.expectRed). baseline: the checks on the part base
+// (StepDetail.baseline). onChange: the step row got the output so far (spec.md section 6.7, Log).
 export async function checkStep(
   i: ChecksInput & {
     task: number;
@@ -497,6 +497,7 @@ export async function checkStep(
     item?: string | null;
     attempt?: number;
     expectRed?: boolean;
+    baseline?: boolean;
     now?: () => number;
     onChange?: () => void;
   },
@@ -518,6 +519,7 @@ export async function checkStep(
         commands: r.commands.map(detailOf),
         notes: r.notes,
         expectRed: i.expectRed ?? false,
+        baseline: i.baseline ?? false,
       },
       now(),
     );

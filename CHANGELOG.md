@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Build a Jira task: before the first step of a part, the app now runs the build, test, and lint commands once on the part base. The Log tab shows this run first, as "Red before this task" when a command fails there.
+- When each failing check also failed before the task, the task now stops at once with "Needs you: the check "lint" of part 1 also failed before this task. See why. Continue lets Claude try to fix it." Claude tries only after you click Continue. The output for Claude marks each failing command "Also red before this task" or "New".
+- A fix step that changes no file now stops the task with "Needs you: the fix step of part 1 changed no file. See why." Before, Claude used up all 3 tries. Claude also stops with a question when the output shows a broken command, a missing tool, or a network fault.
+- Settings, Commands: the new switch "Claude may run the approved checks" lets the tests, code, fix, and Tell Claude steps run the build, test, and lint commands, also with an empty list. It is off by default and shows the warning before the first use. A command that cannot get a rule is named in the step notes.
+- The run log now says "Refused by a Claude Code safety check" when Claude Code refuses a command for its own reasons. "Refused by the allowlist" shows only in allowlist mode. Only such commands become allow requests.
+- In allowlist mode, Claude can now always run grep and rg.
+- With Any command, only a saved pattern for ssh now lifts the block of its program. curl, scp, rsync, and the other network programs stay blocked. Before, a saved pattern for them lifted their block too. The line under the mode switch names everything that Any command still blocks, and the help says that a running step keeps its mode.
+
 - Build a Jira task: the Log tab now shows the output of a setup, build, test, or lint command while it runs, about once per second. Before, the output showed only after the command ended.
 - The plan screen now lists the saved commands of the repository first, then the new commands that Claude proposes. The commands run one at a time, top to bottom, and setup runs first. Claude now gives the setup commands in the order in which they must run.
 - Each command now has a "Time limit (min)" field, on the plan screen and in Settings, Commands. Setup gets 60 minutes by default, build, test, and lint get 10 minutes, and 4 hours is the maximum. Claude can propose a longer limit for a command that downloads or builds much, and the plan screen shows its reason. A saved setup command with the old 10-minute limit now gets 60 minutes, so setup runs once more in each worktree.

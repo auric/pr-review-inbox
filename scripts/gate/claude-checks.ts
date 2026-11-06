@@ -5,7 +5,8 @@
 // B13 (the model and effort fields of an --agents definition, and the --effort flag), B14 (the default effort of a run without --effort),
 // B15 (work/CLAUDE.md loads under the runner flag set), B16 (a session fork with the flags of docs/plans/session-consult.md part C),
 // B17 to B20 (docs/plans/review-v2/tasks.md WP-G0, docs/gate-v2.md),
-// B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S).
+// B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S),
+// B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17).
 // Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
@@ -79,6 +80,10 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b27b: 1,
   b28: 1,
   b29: 1,
+  b30a: 2,
+  b30b: 1,
+  b30c: 1,
+  b30d: 1,
 };
 const B9_MAX_TURNS = 8;
 const MAX_COST_USD = 0.6;
@@ -116,6 +121,10 @@ const CHECKS = [
   "B27b",
   "B28",
   "B29",
+  "B30a",
+  "B30b",
+  "B30c",
+  "B30d",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
 
@@ -132,7 +141,7 @@ for (let i = 0; i < argv.length; i++) {
     sshAlias = a === "--ssh-alias" ? (argv[++i] ?? "") : a.slice(12);
     continue;
   }
-  const v = a === "--only" ? argv[++i] : a.startsWith("--only=") ? a.slice(7) : /^b\d+b?$/i.test(a) ? a : undefined;
+  const v = a === "--only" ? argv[++i] : a.startsWith("--only=") ? a.slice(7) : /^b\d+[a-d]?$/i.test(a) ? a : undefined;
   if (v === undefined) fail(`unknown argument: ${a}`);
   for (const id of v.split(",").map((s) => s.trim().toUpperCase())) {
     const c = CHECKS.find((x) => x.toUpperCase() === id);
@@ -2171,6 +2180,9 @@ async function shellRun(
     env?: (base: Record<string, string>) => Record<string, string>;
     watch?: (e: Ev, pid: number) => void;
     spawned?: (pid: number) => void;
+    // B30: files under repo/ by path, and a change of shell.json after the app wrote it (app: the folder that holds it).
+    files?: Record<string, string>;
+    settings?: (s: Record<string, unknown>, app: string) => Record<string, unknown>;
   } = {},
   check: (s: ShellRun) => unknown = () => {},
 ) {
@@ -2180,6 +2192,7 @@ async function shellRun(
     mkdirSync(dataDir);
     writeFileSync(join(work, PROBE), PROBE_JS);
     if (!DRY) sh(["git", "-c", "init.defaultBranch=main", "init", "-q", join(work, "repo")]);
+    for (const [p, text] of Object.entries(opts.files ?? {})) writeFileSync(join(work, "repo", p), text);
     const shell: ShellSpec = { mode, rules, bashTimeoutSec: SHELL_TIMEOUT_SEC, dataDir, origins: SHELL_ORIGINS };
     const prompt = shellPrompt(cmds);
     const { args, allowed } = implementArgs({
@@ -2192,6 +2205,10 @@ async function shellRun(
       model: "haiku",
       shell,
     });
+    if (opts.settings) {
+      const file = join(app, "shell.json");
+      writeFileSync(file, JSON.stringify(opts.settings(JSON.parse(readFileSync(file, "utf8")), app), null, 2));
+    }
     const envBase = appChildEnv();
     const env = shellEnv(opts.env ? opts.env(envBase) : envBase, SHELL_TIMEOUT_SEC);
     // Arrival times of tool_use and tool_result blocks, by tool_use ID.
@@ -2204,7 +2221,7 @@ async function shellRun(
       opts.watch?.(e, pid);
     };
     const run = await runClaude(name, args, prompt, work, { env, raw: true, watch, spawned: opts.spawned });
-    const parser = createStreamParser({ cwd: work, allowedTools: allowed, shell: true });
+    const parser = createStreamParser({ cwd: work, allowedTools: allowed, shell: mode });
     for (const e of run.events) parser.line(JSON.stringify(e));
     await check({ run, work, base, state: parser.state, settings: readFileSync(join(app, "shell.json"), "utf8"), arrived });
   } finally {
@@ -2610,6 +2627,110 @@ async function b29() {
   });
 }
 
+// ---------- B30: refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode (SU14 to SU17) ----------
+// docs/plans/review-v2/shell.md "Refused Bash calls in a tests step" and check-fix.md. Every command runs locally. No command reaches a host.
+const B30_README = "alpha one\nbeta two\n# a comment\ngamma three\n";
+// A grep pattern with a quoted \| and one with a quoted ^#, then the same commands without them.
+const B30_QUOTED = [
+  'cd repo && cat README.md | head -3 && grep -n "alpha\\|beta" README.md | wc -l',
+  'cd repo && grep -v "^#" README.md | head -3 && echo RLGB-B30',
+];
+const B30_PLAIN = [
+  "cd repo && cat README.md | head -3 && grep -n alpha README.md | wc -l",
+  "cd repo && grep -v comment README.md | head -3 && echo RLGB-B30",
+];
+const labelOf = (state: StreamState, cmd: string) => state.refused.find((x) => x.command.trim() === cmd)?.by ?? "none";
+const factOf = (run: Run, state: StreamState, cmd: string) => {
+  const o = outcomeOf(run, cmd);
+  return `[${oneLine(cmd)}] ${o.state} permission_denied=${deniedFields(o.denied)} app label=${labelOf(state, cmd)}`;
+};
+// The Any command outcomes of B30a, for the B30c line.
+let b30aAny: Outcome[] | undefined;
+
+// B30a (SU14): the four commands under allow "Bash" and under an allowlist (the app adds grep and rg there). PASS: the plain forms run in
+// both modes, and no refusal in Any command mode gets the app label "allowlist". INFO: the fields of each refused quoted form.
+async function b30a() {
+  const cmds = [...B30_QUOTED, ...B30_PLAIN];
+  const lines: string[] = [];
+  let pass = true;
+  for (const [tag, mode, rules] of [
+    ["any", "any", []],
+    ["list", "allowlist", [PROBE_RULE]],
+  ] as const) {
+    await shellRun(`b30a-${tag}`, mode, [...rules], cmds, 7, { files: { "README.md": B30_README } }, ({ run, state }) => {
+      if (DRY) return;
+      const got = cmds.map((c) => outcomeOf(run, c));
+      if (mode === "any") b30aAny = got;
+      pass &&= got.slice(B30_QUOTED.length).every((o) => o.state === "ran");
+      if (mode === "any") pass &&= !cmds.some((c) => labelOf(state, c) === "allowlist");
+      lines.push(`${tag}: exit=${run.exit}; ${cmds.map((c) => factOf(run, state, c)).join("; ")}`);
+    });
+  }
+  if (DRY) return dry("B30a", `quoted forms=${B30_QUOTED.length}; plain forms=${B30_PLAIN.length}`);
+  push("B30a", pass ? "PASS" : "FAIL", lines.join(" || "));
+}
+
+// B30b (SU15): the rule `Bash(<argv> *)` alone, then the bare argv and the argv with one more word. PASS: both run. INFO: only the longer
+// one runs, so the bare argv needs its exact rule (the app adds it for each approved check).
+async function b30b() {
+  const bare = probe("bare");
+  const more = `${probe("bare")} more`;
+  await shellRun("b30b-bare", "allowlist", [`${bare} *`], [bare, more], 4, {}, ({ run, state, settings }) => {
+    if (DRY)
+      return dry("B30b", `allow=${JSON.stringify((JSON.parse(settings) as { permissions: { allow: string[] } }).permissions.allow)}`);
+    const [b, m] = [outcomeOf(run, bare), outcomeOf(run, more)];
+    const status = b.state === "ran" && m.state === "ran" ? "PASS" : m.state === "ran" ? "INFO" : "FAIL";
+    push("B30b", status, `exit=${run.exit}; ${factOf(run, state, bare)}; ${factOf(run, state, more)}`);
+  });
+}
+
+// B30c (SU16): Any command mode with a PreToolUse hook in shell.json that logs its input and returns permissionDecision "allow". The
+// commands: the two quoted forms of B30a and git status. PASS: the hook ran, git status stays refused (deny wins), and both quoted forms
+// run. INFO: the hook ran and a safety check still refused a quoted form. FAIL: the hook did not run, or git status ran.
+const HOOK_JS = `const fs = require("fs");
+let input = "";
+process.stdin.on("data", (d) => (input += d));
+process.stdin.on("end", () => {
+  fs.appendFileSync(__dirname + "/hook.log", input.replace(/\\s+/g, " ") + "\\n");
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "gate B30c" } }));
+});
+`;
+async function b30c() {
+  const cmds = [...B30_QUOTED, "git status"];
+  let hookDir = "";
+  const settings = (s: Record<string, unknown>, app: string) => {
+    hookDir = app;
+    writeFileSync(join(app, "hook.cjs"), HOOK_JS);
+    const command = `${RUNTIME} "${slash(join(app, "hook.cjs"))}"`;
+    return { ...s, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } };
+  };
+  await shellRun("b30c-hook", "any", [], cmds, 5, { files: { "README.md": B30_README }, settings }, ({ run, state, settings: file }) => {
+    if (DRY) return dry("B30c", `hooks=${JSON.stringify(Object.keys((JSON.parse(file) as { hooks?: object }).hooks ?? {}))}`);
+    const log = join(hookDir, "hook.log");
+    const calls = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0;
+    const got = cmds.map((c) => outcomeOf(run, c));
+    const git = got[2]?.state;
+    const quoted = got.slice(0, 2).every((o) => o.state === "ran");
+    const status = !calls || git === "ran" ? "FAIL" : quoted ? "PASS" : "INFO";
+    const before = b30aAny ? `; B30a without the hook: ${B30_QUOTED.map((_, i) => b30aAny?.[i]?.state).join(",")}` : "";
+    push("B30c", status, `exit=${run.exit}; hook calls=${calls}; ${cmds.map((c) => factOf(run, state, c)).join("; ")}${before}`);
+  });
+}
+
+// B30d (SU17): Any command mode with a saved pattern for ssh to a host that does not exist. The app lifts only the ssh deny rule. The
+// commands run locally: `ssh -V`, `scp -V`, `curl --version`. PASS: ssh -V runs, and the deny list refuses scp and curl.
+async function b30d() {
+  const cmds = ["ssh -V", "scp -V", "curl --version"];
+  await shellRun("b30d-ssh", "any", ["ssh rlgb-b30.invalid *"], cmds, 5, {}, ({ run, state, settings }) => {
+    const deny = (JSON.parse(settings) as { permissions: { deny: string[] } }).permissions.deny;
+    const rules = `deny ssh=${deny.includes("Bash(ssh *)")} scp=${deny.includes("Bash(scp *)")} curl=${deny.includes("Bash(curl *)")}`;
+    if (DRY) return dry("B30d", rules);
+    const [ssh, scp, curl] = cmds.map((c) => outcomeOf(run, c));
+    const pass = ssh?.state === "ran" && scp?.state === "refused" && curl?.state === "refused";
+    push("B30d", pass ? "PASS" : "FAIL", `exit=${run.exit}; ${rules}; ${cmds.map((c) => factOf(run, state, c)).join("; ")}`);
+  });
+}
+
 // ---------- main ----------
 const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B1: b1,
@@ -2641,6 +2762,10 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B27b: b27b,
   B28: b28,
   B29: b29,
+  B30a: b30a,
+  B30b: b30b,
+  B30c: b30c,
+  B30d: b30d,
 };
 {
   for (const id of selected) await check(id, RUNNERS[id]);

@@ -148,7 +148,7 @@ import {
 import { relatedWorkFile } from "./related";
 import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, taskRepos, updateRepos } from "./repos";
 import { nextPart, type Schedule } from "./schedule";
-import { hostsOf, mergeAllow, originsOf } from "./shell";
+import { checkRules, hostsOf, mergeAllow, originsOf } from "./shell";
 import {
   approveSubtasks,
   checkSubtaskPlan,
@@ -362,13 +362,14 @@ const Q = {
     AND state = 'OPEN' ORDER BY id DESC LIMIT 1`,
   // branch_prefix stays in the table. No code reads or writes it (spec.md section 6.16.1).
   saveSettings: `INSERT INTO repo_task_settings (project, repo, spec_dir, line_budget, max_open, approvals, commands_json,
-      test_globs_json, exclude_globs_json, isolate_home, shell_mode, bash_timeout_sec, task_cache, updated_at)
-    VALUES ($project, $repo, $spec_dir, $budget, $max_open, $approvals, $commands, $tests, $excludes, $isolate, $mode, $timeout, $cache, $now)
+      test_globs_json, exclude_globs_json, isolate_home, shell_mode, bash_timeout_sec, task_cache, run_checks, updated_at)
+    VALUES ($project, $repo, $spec_dir, $budget, $max_open, $approvals, $commands, $tests, $excludes, $isolate, $mode, $timeout, $cache,
+      $checks, $now)
     ON CONFLICT (project, repo) DO UPDATE SET spec_dir = excluded.spec_dir,
       line_budget = excluded.line_budget, max_open = excluded.max_open, approvals = excluded.approvals, commands_json = excluded.commands_json,
       test_globs_json = excluded.test_globs_json, exclude_globs_json = excluded.exclude_globs_json, isolate_home = excluded.isolate_home,
       shell_mode = excluded.shell_mode, bash_timeout_sec = excluded.bash_timeout_sec, task_cache = excluded.task_cache,
-      updated_at = excluded.updated_at`,
+      run_checks = excluded.run_checks, updated_at = excluded.updated_at`,
   stepDetail: "SELECT detail_json FROM task_step WHERE id = $id",
   // spec.md section 6.21: the allowlist of a row that exists. The first warning time stays.
   saveAllow: `UPDATE repo_task_settings SET allow_json = $allow, shell_warned_at = COALESCE(shell_warned_at, $warned)
@@ -390,6 +391,7 @@ type SettingsRow = {
   shell_warned_at: number | null;
   bash_timeout_sec: number;
   task_cache: number;
+  run_checks: number;
 };
 
 export const taskRow = (db: Database, id: number) => db.query(Q.row).get({ id }) as TaskRow | null;
@@ -427,6 +429,7 @@ export function repoSettings(db: Database, project: string, repo: string): RepoT
     bashTimeoutSec: r?.bash_timeout_sec ?? BASH_TIMEOUT_DEFAULT_SEC,
     shellWarnedAt: r?.shell_warned_at ?? null,
     taskCache: r?.task_cache === 1,
+    runChecks: r?.run_checks === 1,
   };
 }
 
@@ -436,7 +439,8 @@ export function saveAllow(db: Database, project: string, repo: string, allow: re
 }
 
 // PUT /api/repos/:project/:repo/task-settings. hosts: the Bitbucket and Jira host names for allowProblem. Returns the reason for 400,
-// or null. spec.md section 6.21: the first non-empty allowlist and each switch to Any command need shellWarning.
+// or null. spec.md section 6.21: the first non-empty allowlist, the first switch to "Claude may run the approved checks", and each switch to
+// Any command need shellWarning.
 export function saveRepoSettings(
   db: Database,
   project: string,
@@ -458,7 +462,9 @@ export function saveRepoSettings(
   }
   const added = allow.some((e) => !cur.allow.some((x) => x.pattern === e.pattern));
   const toAny = mode === "any" && cur.shellMode !== "any";
-  if (((added && cur.shellWarnedAt === null) || toAny) && !s.shellWarning) return SHELL_WARNING_FIRST;
+  const runChecks = s.runChecks ?? cur.runChecks;
+  const toChecks = runChecks && !cur.runChecks;
+  if ((((added || toChecks) && cur.shellWarnedAt === null) || toAny) && !s.shellWarning) return SHELL_WARNING_FIRST;
   db.transaction(() => {
     db.query(Q.saveSettings).run({
       project,
@@ -474,6 +480,7 @@ export function saveRepoSettings(
       mode,
       timeout: s.bashTimeoutSec ?? cur.bashTimeoutSec,
       cache: (s.taskCache ?? cur.taskCache) ? 1 : 0,
+      checks: runChecks ? 1 : 0,
       now,
     });
     saveAllow(db, project, repo, allow, s.shellWarning ? now : null);
@@ -1226,7 +1233,16 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       (t.state === "implementing" || t.state === "ready") && repoSettings(db, t.project, t.repo).commands.some((c) => c.kind === "setup"),
     subtasks: t.subtasks === 1 ? subtaskDtos(db, t.id, partRows) : null,
     issueStatus: taskIssue(db, t)?.issue.status ?? null,
-    shell: { mode: repo.shellMode, allow: repo.allow, bashTimeoutSec: repo.bashTimeoutSec, warned: repo.shellWarnedAt !== null },
+    shell: {
+      mode: repo.shellMode,
+      allow: repo.allow,
+      bashTimeoutSec: repo.bashTimeoutSec,
+      warned: repo.shellWarnedAt !== null,
+      // The header count leaves out the host names: the config is not at hand here. A step checks them (loop.ts shellOf).
+      checks: repo.runChecks
+        ? checkRules(repo.commands, { mode: repo.shellMode, rules: repo.allow.map((e) => e.pattern), hosts: [] }).checks.length
+        : 0,
+    },
     allowAsk: allowAsk && b?.step ? { step: b.step, requests: allowAsk.requests, warning: repo.shellWarnedAt === null } : null,
   };
 }

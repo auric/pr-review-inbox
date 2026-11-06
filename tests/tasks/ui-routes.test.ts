@@ -38,9 +38,10 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
 const SESSION = "s".repeat(64);
 const HEADERS = { host: `127.0.0.1:${PORT}`, origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" };
 
-// The approved test command: src/feature.ts must hold "works".
+// The approved test command: src/feature.ts must hold "works" once the test file exists. The part base has no test file, so its checks
+// pass (spec.md section 6.7, Baseline).
 const CHECK = `import { existsSync, readFileSync } from "node:fs";
-const ok = existsSync("src/feature.ts") && readFileSync("src/feature.ts", "utf8").includes("works");
+const ok = !existsSync("tests/feature.test.ts") || (existsSync("src/feature.ts") && readFileSync("src/feature.ts", "utf8").includes("works"));
 console.log(ok ? "1 pass" : "FAIL: src/feature.ts does not work yet");
 process.exit(ok ? 0 : 1);
 `;

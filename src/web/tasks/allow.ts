@@ -5,7 +5,15 @@
 // plan screen and of an allow request, the first-use warnings, and the words of the mode. UI code holds no product name
 // (tests/ui/names.test.ts), so each text takes the names from GET /api/meta.
 import type { TaskAllowAskDto, TaskPlanDto, TaskPlanInput } from "../../shared/dto";
-import { type AllowChoice, type AllowEntry, allowProblem, BASH_TIMEOUT_MAX_SEC, type ShellMode } from "../../shared/task";
+import {
+  type AllowChoice,
+  type AllowEntry,
+  ANY_LIFTS,
+  allowProblem,
+  BASH_TIMEOUT_MAX_SEC,
+  NETWORK_TOOLS,
+  type ShellMode,
+} from "../../shared/task";
 
 type AllowSource = AllowEntry["source"];
 
@@ -38,9 +46,19 @@ export function draftsToAllow(drafts: readonly AllowDraft[]): { pattern: string;
   return drafts.map((d) => ({ pattern: d.pattern.trim(), reason: d.reason.trim() }));
 }
 
-// "Commands: allowlist, 2 patterns" or "Commands: any command". n: the patterns of the list or of the run.
-export const shellText = (mode: ShellMode, n: number) =>
-  mode === "any" ? "Commands: any command" : `Commands: allowlist, ${n} ${n === 1 ? "pattern" : "patterns"}`;
+// "Commands: allowlist, 2 patterns, 1 approved check" or "Commands: any command". n: the patterns of the list or of the run. checks:
+// the approved checks that the steps may run (spec.md section 6.21.1).
+export const shellText = (mode: ShellMode, n: number, checks = 0) =>
+  mode === "any"
+    ? "Commands: any command"
+    : `Commands: allowlist, ${n} ${n === 1 ? "pattern" : "patterns"}${checks ? `, ${checks} approved ${checks === 1 ? "check" : "checks"}` : ""}`;
+
+// spec.md section 6.21.2: the line under the mode switch. Any command names its deny list (src/server/tasks/shell.ts shellSettings).
+const ANY_BLOCKS = [...NETWORK_TOOLS.filter((t) => !ANY_LIFTS.includes(t)), ...ANY_LIFTS].join(", ");
+export const modeLine = (mode: ShellMode, n: ShellNames) =>
+  mode === "any"
+    ? `${n.runner} runs every command, except these: git, the ${n.forge} and ${n.tracker} hosts, ${ANY_BLOCKS}, powershell, pwsh, and the password and key store tools. ${n.runner} also cannot read the app data or your ssh keys. A pattern for ssh in this list lets every ssh command run. The list applies again when you switch back.`
+    : `${n.runner} runs only the commands that match a pattern of this list. grep, rg, and read-only commands such as ls and cat also run.`;
 
 export const CHOICE_TEXT: Record<AllowChoice, string> = {
   once: "Allow once",

@@ -7,7 +7,7 @@
 // advancePart() make every state change. A restart or a resume starts again from the last commit of the part branch: the commit rows
 // and the ticks of the plan file tell what is done.
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { initialTransition } from "xstate";
 import { indentBlock, oneLine } from "../../shared/consult";
@@ -70,7 +70,7 @@ import { noteTaskWaits } from "./notify";
 import { type Docs, docNames, type Plan, type PlanPart, type PlanTask, parsePlan, parseTasks, partStepFile, stepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
 import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
-import { allowAsks, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
+import { allowAsks, checkRules, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
 import {
   advance,
   advancePart,
@@ -243,9 +243,48 @@ export function tickTask(text: string, id: string): string | null {
   return re.test(text) ? text.replace(re, `### [x] ${id} `) : null;
 }
 
-// context/failure.md of a fix step after red checks: the failed commands with the end of their output. All tails together stay
-// within FAILURE_TAIL (spec.md section 0, OUTPUT_TAIL: 32 KB sent to Claude).
-export function checkFailure(r: Extract<ChecksResult, { status: "ran" }>): ContextFile {
+// One command of the checks on the part base (StepDetail.baseline). red: it did not exit with 0.
+export type BaseRun = { name: string; argv: string[]; red: boolean };
+
+// A command of a later check against the run on the part base. same: the base ran the same argv. A scoped command "<name>: <label>"
+// (checks.ts scopedCommands) compares with the full command <name>. null: the base run has no such command.
+export function beforeTask(c: { name: string; argv: readonly string[] }, base: readonly BaseRun[] | null) {
+  const b = base?.find((x) => x.name === c.name) ?? base?.find((x) => c.name.startsWith(`${x.name}: `));
+  if (!b) return null;
+  return { red: b.red, same: b.argv.length === c.argv.length && b.argv.every((a, i) => a === c.argv[i]), argv: b.argv };
+}
+
+function beforeLine(c: { name: string; argv: readonly string[] }, base: readonly BaseRun[] | null): string[] {
+  const b = beforeTask(c, base);
+  if (!b) return [];
+  if (b.red && b.same) return ["- Before this task: Also red before this task. It failed on the part base too."];
+  if (b.red) return [`- Before this task: the full command \`${oneLine(b.argv.join(" "))}\` also failed on the part base.`];
+  return [
+    b.same ? "- Before this task: New. It passed on the part base." : "- Before this task: New. The full command passed on the part base.",
+  ];
+}
+
+// The content of each changed path of every worktree. A fix step often edits a file that the implement step changed: its path stays in
+// git status, so only the content shows the change.
+async function snapshot(trees: readonly RepoTree[]): Promise<string> {
+  const out: string[] = [];
+  for (const t of trees) {
+    if (!t.wt) continue;
+    for (const e of await status(t.wt)) {
+      const p = join(t.wt.repo, ...e.path.split("/"));
+      let h = "gone";
+      try {
+        h = lstatSync(p).isFile() ? Bun.hash(readFileSync(p)).toString(36) : "other";
+      } catch {}
+      out.push(`${t.full}/${e.path}\0${e.xy}\0${h}`);
+    }
+  }
+  return out.sort().join("\n");
+}
+
+// context/failure.md of a fix step after red checks: the failed commands with the end of their output, each marked against the checks on
+// the part base. All tails together stay within FAILURE_TAIL (spec.md section 0, OUTPUT_TAIL: 32 KB sent to Claude).
+export function checkFailure(r: Extract<ChecksResult, { status: "ran" }>, base: readonly BaseRun[] | null = null): ContextFile {
   const failed = r.commands.filter((c) => c.exit !== 0);
   const each = Math.floor(FAILURE_TAIL / Math.max(1, failed.length));
   const out = [
@@ -258,7 +297,7 @@ export function checkFailure(r: Extract<ChecksResult, { status: "ran" }>): Conte
     const tail = Buffer.from(c.tail);
     const text = tail.length > each ? tail.subarray(tail.length - each).toString() : c.tail;
     out.push(`## ${oneLine(c.name)}: ${c.exit === null ? "no exit code" : `exit ${c.exit}`} after ${c.ms} ms`, "");
-    out.push(`- Command: ${oneLine(c.argv.join(" "))}`, "", indentBlock(text.trimEnd() || "(no output)"), "");
+    out.push(`- Command: ${oneLine(c.argv.join(" "))}`, ...beforeLine(c, base), "", indentBlock(text.trimEnd() || "(no output)"), "");
   }
   return { name: "failure.md", text: out.join("\n") };
 }
@@ -390,6 +429,13 @@ const Q = {
     ORDER BY id DESC LIMIT 1`,
   allowBlocks: "SELECT COUNT(*) AS n FROM task_step WHERE part = $part AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
   allowAsks: "SELECT detail_json FROM task_step WHERE task = $task AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
+  // spec.md section 6.7, Baseline: the checks on the part base, and whether the part ran them or a Claude step already.
+  baseline: `SELECT detail_json FROM task_step WHERE part = $part AND kind = 'check' AND item = 'base' AND state IN ('ok', 'failed')
+    ORDER BY id DESC LIMIT 1`,
+  started: `SELECT 1 FROM task_step WHERE part = $part AND (kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve')
+    OR (kind = 'check' AND item = 'base' AND state IN ('ok', 'failed'))) LIMIT 1`,
+  redBeforeSeen: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'check' AND item = $item
+    AND json_extract(detail_json, '$.redBefore') = 1 LIMIT 1`,
   ensureSettings: `INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ($project, $repo, $now)
     ON CONFLICT (project, repo) DO NOTHING`,
 };
@@ -646,7 +692,7 @@ export function createLoop(opts: LoopOptions) {
       instructions?: string;
       resolveCheck?: StepInput["resolveCheck"];
     },
-  ): Promise<{ r: StepOutcome | null; before: Set<string>; shell: StepShell | null }> {
+  ): Promise<{ r: StepOutcome | null; before: Set<string>; shell: StepShell | null; unchanged: boolean }> {
     let waiting: number | null = o.row ?? null;
     for (;;) {
       await gate(c);
@@ -654,6 +700,8 @@ export function createLoop(opts: LoopOptions) {
       const attempt =
         o.row === undefined ? nextAttempt(c, mode, item) : (c.db.query(Q.rowAttempt).get({ id: o.row }) as { attempt: number }).attempt;
       const before = new Set(await dirty(c.trees));
+      // check-fix.md item 1: a fix step that changes no file stops the fixes.
+      const snap = mode === "fix" ? await snapshot(c.trees) : null;
       const answers = stepAnswers(c.db, c.id);
       // spec.md section 6.17: the task text and the included files as they are at this step. Section 6.20.3: a part gets the files of the
       // task and of its own sub-tasks only.
@@ -702,13 +750,15 @@ export function createLoop(opts: LoopOptions) {
       if (s.status !== 202) throw new Halt();
       await s.done;
       changed(c.id);
-      return { r: out as StepOutcome | null, before, shell };
+      const unchanged = snap !== null && snap === (await snapshot(c.trees));
+      return { r: out as StepOutcome | null, before, shell, unchanged };
     }
   }
 
   // spec.md section 6.21: the Bash tool of a tests, implement, fix, or instruct step. Bash is on in Any command mode, or when the
-  // allowlist of the repository or an "Allow once" of the last run of this step holds a pattern. The rules hold the saved patterns in
-  // both modes, so a network program that an entry names stays allowed (shell.ts).
+  // allowlist of the repository or an "Allow once" of the last run of this step holds a pattern, or when "Claude may run the approved
+  // checks" gives a check (checkRules). The rules hold the saved patterns in both modes, so a saved pattern can lift the deny rule of a
+  // network program (shell.ts). Any command mode lists the checks for the prompt only and gives no notes: every command can run there.
   function shellOf(c: Ctx, mode: StepMode, item: string): StepShell | null {
     if (!SHELL_STEPS.has(mode)) return null;
     const repo = repoSettings(c.db, c.t.project, c.t.repo);
@@ -716,8 +766,13 @@ export function createLoop(opts: LoopOptions) {
     const ask = last ? stepDetail.parse(JSON.parse(last.detail_json)).allowAsk : null;
     const once = (ask?.decisions ?? []).filter((d) => d.choice === "once").map((d) => d.pattern);
     const rules = [...new Set([...repo.allow.map((e) => e.pattern), ...once])];
-    if (repo.shellMode === "allowlist" && !rules.length) return null;
-    return { mode: repo.shellMode, rules, bashTimeoutSec: repo.bashTimeoutSec };
+    const any = repo.shellMode === "any";
+    const run =
+      any || repo.runChecks
+        ? checkRules(repo.commands, { mode: repo.shellMode, rules, hosts: hostsOf(originsOf(settings.config())) })
+        : { checks: [], notes: [] };
+    if (!any && !rules.length && !run.checks.length) return null;
+    return { mode: repo.shellMode, rules, checks: run.checks, bashTimeoutSec: repo.bashTimeoutSec, notes: any ? [] : run.notes };
   }
 
   // D3: the requests of a step that ends with allowRequest, or that the runner ended over the refusal cap. The step's patch is saved,
@@ -729,7 +784,7 @@ export function createLoop(opts: LoopOptions) {
       requests: r.result?.allowRequest ?? [],
       refused: r.refused,
       killed: r.ask,
-      rules: shell?.rules ?? [],
+      rules: [...(shell?.rules ?? []), ...(shell?.checks ?? []).flatMap((x) => [`${x} *`, x])],
       refusedBefore: refusedOf(c.db, c.id),
       hosts: hostsOf(originsOf(settings.config())),
     });
@@ -760,8 +815,8 @@ export function createLoop(opts: LoopOptions) {
     mode: StepMode,
     item: string,
     o: { allow: string[]; step: (attempt: number) => ContextFile; failure?: ContextFile; row?: number; instructions?: string },
-  ): Promise<StepOutcome & { result: ImplementResult; fresh: string[] }> {
-    const { r, before, shell } = await runStep(c, mode, item, o);
+  ): Promise<StepOutcome & { result: ImplementResult; fresh: string[]; unchanged: boolean }> {
+    const { r, before, shell, unchanged } = await runStep(c, mode, item, o);
     if (r && (r.ask || r.result?.allowRequest.length)) await askAllow(c, mode, r, shell);
     // No result: implement.ts stopped the task, or it set the denied path. No outcome: restart recovery ended the run first.
     if (!r?.result) throw r && !r.problems.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
@@ -793,11 +848,11 @@ export function createLoop(opts: LoopOptions) {
     }
     // spec.md section 6.18.2: needsBase runs the base check at once.
     if (r.result.needsBase) await refreshBases(c.db, c.id);
-    return { ...r, result: r.result, fresh };
+    return { ...r, result: r.result, fresh, unchanged };
   }
 
-  // The approved checks with their step row. A stop kills the commands (AC-B19).
-  async function checks(c: Ctx, item: string, kinds = CHECK_KINDS, scope?: Scope, expectRed = false) {
+  // The approved checks with their step row. A stop kills the commands (AC-B19). baseline: the checks on the part base.
+  async function checks(c: Ctx, item: string, kinds = CHECK_KINDS, scope?: Scope, expectRed = false, baseline = false) {
     guard(c);
     const ac = new AbortController();
     enter(aborts, c.id, ac);
@@ -817,6 +872,7 @@ export function createLoop(opts: LoopOptions) {
         item,
         attempt: nextAttempt(c, "check", item),
         expectRed,
+        baseline,
         now,
         onChange: () => changed(c.id),
       });
@@ -891,18 +947,52 @@ export function createLoop(opts: LoopOptions) {
     await sizeCheck(c);
   }
 
+  // The checks on the part base (spec.md section 6.7, Baseline), or null before they ran.
+  function baselineOf(c: Ctx): BaseRun[] | null {
+    const r = c.db.query(Q.baseline).get({ part: c.part.id }) as { detail_json: string } | null;
+    if (!r) return null;
+    return stepDetail.parse(JSON.parse(r.detail_json)).commands.map((x) => ({ name: x.name, argv: x.argv, red: x.exit !== 0 }));
+  }
+
+  // spec.md section 6.7, Baseline: the approved checks once on the part head before the first Claude step of the part. A red command is
+  // no reason: the fix steps compare with it.
+  async function baseline(c: Ctx) {
+    if (c.db.query(Q.started).get({ part: c.part.id })) return;
+    await checks(c, "base", CHECK_KINDS, undefined, false, true);
+  }
+
   // Red checks start at most TEST_FIX_TRIES fix steps (AC-B11). scope: the scoped check of one task instead of all approved checks.
+  // check-fix.md items 1 and 3: red checks that all failed on the part base too stop once per item, and a fix step that changes no file
+  // stops too. The base run tells only that the same argv failed, not why: a base with no test fails too. So Continue lets the fixes run.
   async function greenOrFix(c: Ctx, item: string, allow: string[], step: (attempt: number) => ContextFile, scope?: Scope) {
     const run = () => checks(c, item, scope ? ["test"] : CHECK_KINDS, scope);
+    const base = baselineOf(c);
     let k = await run();
     for (let tries = 0; !k.green; tries++) {
+      const failed = k.commands.filter((x) => x.exit !== 0);
+      const old = failed.filter((x) => {
+        const b = beforeTask(x, base);
+        return b?.red === true && b.same;
+      });
+      if (failed.length && old.length === failed.length && !c.db.query(Q.redBeforeSeen).get({ part: c.part.id, item })) {
+        const names = old.map((x) => `"${oneLine(x.name)}"`);
+        const list = names.length === 1 ? `the check ${names[0]}` : `the checks ${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+        patchStep(c.db, k.step, { redBefore: true });
+        block(c, {
+          kind: "question",
+          step: k.step,
+          text: `Needs you: ${list} of part ${c.part.ord} also failed before this task. See why. Continue lets Claude try to fix it.`,
+        });
+      }
       if (tries >= TEST_FIX_TRIES)
         block(c, {
           kind: "red",
           step: k.step,
           text: `Needs you: the tests of part ${c.part.ord} stay red after ${TEST_FIX_TRIES} tries.`,
         });
-      await claude(c, "fix", item, { allow, step, failure: checkFailure(k) });
+      const r = await claude(c, "fix", item, { allow, step, failure: checkFailure(k, base) });
+      if (r.unchanged)
+        block(c, { kind: "question", step: r.step, text: `Needs you: the fix step of part ${c.part.ord} changed no file. See why.` });
       k = await run();
     }
   }
@@ -1324,6 +1414,7 @@ export function createLoop(opts: LoopOptions) {
     const plan = missing.map((n) => onDisk(c.wt, specPath(c.specDir, n)));
     if (missing.length) await commit(c, "plan", `${c.label}: Add the plan`, [], plan);
     await setup(c);
+    await baseline(c);
     await sizeCheck(c);
     refreshPlan(c);
     for (const pp of c.plan.parts) {

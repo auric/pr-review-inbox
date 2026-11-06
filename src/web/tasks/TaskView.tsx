@@ -490,7 +490,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             </span>
           ) : (
             <span data-task-shell className="text-xs text-muted-foreground">
-              {shellText("allowlist", t.shell.allow.length)}
+              {shellText("allowlist", t.shell.allow.length, t.shell.checks)}
             </span>
           )}
         </div>

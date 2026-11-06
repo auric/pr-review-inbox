@@ -11,9 +11,11 @@ import {
   type AllowEntry,
   type AllowProposal,
   type AllowRequest,
+  ANY_LIFTS,
   allowProblem,
   BASH_TIMEOUT_MAX_SEC,
   CREDENTIAL_TOOLS,
+  NETWORK_TOOLS,
   programOf,
   type ShellMode,
   type TaskCommand,
@@ -21,15 +23,24 @@ import {
 import type { Refusal } from "../review/stream";
 import { longPath } from "../review/workspace";
 
-// rules: the inner patterns, such as "ssh build1 *". bashTimeoutSec: the time limit of one command. dataDir: the app data folder.
-// origins: the Bitbucket and Jira base URLs of the config.
-export type ShellSpec = { mode: ShellMode; rules: string[]; bashTimeoutSec: number; dataDir: string; origins: string[] };
-// The shell of one task step. The run adds dataDir and origins.
-export type StepShell = Pick<ShellSpec, "mode" | "rules" | "bashTimeoutSec">;
+// rules: the saved inner patterns, such as "ssh build1 *". checks: the approved checks that the step may run, as their argv text
+// (checkRules). bashTimeoutSec: the time limit of one command. dataDir: the app data folder. origins: the Bitbucket and Jira base URLs of
+// the config.
+export type ShellSpec = {
+  mode: ShellMode;
+  rules: string[];
+  checks?: string[];
+  bashTimeoutSec: number;
+  dataDir: string;
+  origins: string[];
+};
+// The shell of one task step. The run adds dataDir and origins. notes: go into the step notes (checkRules).
+export type StepShell = Pick<ShellSpec, "mode" | "rules" | "checks" | "bashTimeoutSec"> & { notes?: string[] };
 
 // A deny rule wins over every allow rule, in both modes (V5).
 const GIT_DENY = ["Bash(git *)", "Bash(*/git *)", "Bash(git.exe *)", "Bash(*/git.exe *)", "Bash(*\\git.exe *)"];
-export const NETWORK_TOOLS = ["curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "tftp", "sftp", "scp", "ssh", "rsync"];
+// Read-only search in allowlist mode. The CLI folder check still guards their paths (shell.md, run 2).
+export const SEARCH_RULES = ["grep *", "rg *"];
 const CREDENTIAL_DENY = [...CREDENTIAL_TOOLS.map((t) => `Bash(${t} *)`), "Bash(powershell*)", "Bash(pwsh*)"];
 // The config, the database files (config.ts dbPath), and the run folders with their MCP files. The step cwd is in <dataDir>/tasks.
 const DATA_DENY = ["config.json*", "*.sqlite*", "runs/**"];
@@ -116,22 +127,34 @@ export function rulePath(dir: string, platform: NodeJS.Platform = process.platfo
   return `//${p}`;
 }
 
-// The settings file of a shell step. A network program, and xargs in allowlist mode, stays allowed only when an allowlist entry names
-// it as its program.
+// The network programs whose deny rule a saved pattern lifts: each one that a pattern names as its program in allowlist mode, and only
+// ssh in Any command mode.
+const lifted = (mode: ShellMode, rules: readonly string[]) => {
+  const named = new Set(rules.map(programOf));
+  return new Set(NETWORK_TOOLS.filter((n) => named.has(n) && (mode === "allowlist" || ANY_LIFTS.includes(n))));
+};
+
+// The settings file of a shell step. A network program stays denied unless a saved pattern lifts it (lifted). xargs stays denied in
+// allowlist mode unless a saved pattern names it. Gate facts do not confirm that `Bash(<argv> *)` matches the bare argv, so each
+// check also gets the exact rule.
 export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = process.platform) {
   const t = spec.bashTimeoutSec;
+  const checks = spec.checks ?? [];
   if (!Number.isInteger(t) || t < 1 || t > BASH_TIMEOUT_MAX_SEC) throw new Error(`Invalid Bash time limit: ${t}`);
-  if (spec.mode === "allowlist" && !spec.rules.length) throw new Error("An allowlist shell step needs at least one pattern.");
-  for (const r of spec.rules) if (!r.trim() || /[()\r\n]/.test(r)) throw new Error(`Invalid allowlist pattern: ${r}`);
+  if (spec.mode === "allowlist" && !spec.rules.length && !checks.length)
+    throw new Error("An allowlist shell step needs at least one pattern.");
+  for (const r of [...spec.rules, ...checks]) if (!r.trim() || /[()\r\n]/.test(r)) throw new Error(`Invalid allowlist pattern: ${r}`);
   const named = new Set(spec.rules.map(programOf));
+  const open = lifted(spec.mode, spec.rules);
   const data = rulePath(longPath(spec.dataDir), platform);
+  const allow = [...new Set([...spec.rules, ...checks.flatMap((c) => [`${c} *`, c]), ...SEARCH_RULES])];
   return {
     permissions: {
-      allow: spec.mode === "any" ? ["Bash"] : spec.rules.map((r) => `Bash(${r})`),
+      allow: spec.mode === "any" ? ["Bash"] : allow.map((r) => `Bash(${r})`),
       deny: [
         ...GIT_DENY,
         ...hostsOf(spec.origins).map((h) => `Bash(*${h}*)`),
-        ...NETWORK_TOOLS.filter((n) => !named.has(n)).map((n) => `Bash(${n} *)`),
+        ...NETWORK_TOOLS.filter((n) => !open.has(n)).map((n) => `Bash(${n} *)`),
         // Outside Windows, the CLI runs xargs with no allow rule. Its folder check misses paths from stdin (shell.md, run 2).
         ...(spec.mode === "allowlist" && !named.has("xargs") ? ["Bash(xargs *)"] : []),
         ...CREDENTIAL_DENY,
@@ -153,10 +176,29 @@ export function writeShellSettings(appDir: string, spec: ShellSpec) {
   return file;
 }
 
-// D1: with "Claude may run the approved checks" on, each approved build, test, or lint argv of plain words becomes one pattern.
-export const checkPatterns = (commands: readonly TaskCommand[]) => [
-  ...new Set(commands.filter((c) => c.kind !== "setup" && c.argv.every((a) => PLAIN_ARG.test(a))).map((c) => `${c.argv.join(" ")} *`)),
-];
+// D1: the approved build, test, and lint commands that a step may run, as their argv text. A command qualifies only when each argument
+// is a plain word, allowProblem accepts it, and the deny list of the step does not refuse its program. rules: the saved patterns of the
+// step. notes: one per command that does not qualify.
+export function checkRules(
+  commands: readonly TaskCommand[],
+  i: { mode: ShellMode; rules: readonly string[]; hosts: readonly string[] },
+): { checks: string[]; notes: string[] } {
+  const open = lifted(i.mode, i.rules);
+  const checks: string[] = [];
+  const notes: string[] = [];
+  for (const c of commands) {
+    if (c.kind === "setup") continue;
+    const text = c.argv.join(" ");
+    const program = programOf(text);
+    const why = !c.argv.every((a) => PLAIN_ARG.test(a))
+      ? "An argument holds a character that is not a letter, a digit, or one of _ . / : = @ % + , -."
+      : (allowProblem(text, i.hosts) ??
+        (NETWORK_TOOLS.includes(program) && !open.has(program) ? `The deny list refuses ${program}.` : null));
+    if (why) notes.push(`The step cannot run the check "${c.name}". ${why}`);
+    else if (!checks.includes(text)) checks.push(text);
+  }
+  return { checks, notes };
+}
 
 // D5: the real HOME stays, so ssh finds its keys and config. No askpass program, no git credential helper, and no prompt. V13: the CLI
 // reads the Bash time limits from the env. Windows env names ignore case, so a set name replaces each spelling of it.

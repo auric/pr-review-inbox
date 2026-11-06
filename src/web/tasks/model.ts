@@ -317,7 +317,11 @@ export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string): string
       if (s.item === "points") return `${runner} is fixing the small points${of}.`;
       return `${runner} is fixing the failing checks${of}.`;
     case "check":
-      return s.item === "setup" ? `Running the setup commands${of}.` : `Running the tests${of}.`;
+      return s.item === "setup"
+        ? `Running the setup commands${of}.`
+        : s.item === "base"
+          ? `Running the checks on the base${of}.`
+          : `Running the tests${of}.`;
     case "review":
       return `${runner} checks its own change${of}.`;
     case "commit":
@@ -518,9 +522,13 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
       case "blocker":
         return blocked({ kind: "see-why", label: "See why" }, [{ kind: "resume", label: "Resume" }, STOP]);
       case "question":
+        // check-fix.md: a question of the app, such as a fix step that changed no file, names its step.
         return openQuestions(t, "loop").length
           ? blocked({ kind: "answer", label: "Answer the question" }, [STOP], "questions")
-          : blocked({ kind: "continue", label: "Continue" }, [STOP]);
+          : blocked({ kind: "continue", label: "Continue" }, [
+              ...(b.step !== null ? [{ kind: "see-why", label: "See why" } as const] : []),
+              STOP,
+            ]);
       case "size":
         // "Split into parts" needs the large flow (WP-B8), so "Keep one PR" leads here.
         return blocked({ kind: "keep-size", label: "Keep one PR" }, [{ kind: "change-limit", label: "Change the limit" }, STOP]);
@@ -767,14 +775,16 @@ export function basePicks(t: Pick<TaskDto, "repos" | "targetBranch">): { taskRep
 
 export { rowStatus } from "../../shared/task-status";
 
-// The state of a step in the Log tab. The checks of the tests step must fail (StepDetail.expectRed), so their red run is no failure.
-export type StepLook = TaskStepDto["state"] | "expected";
+// The state of a step in the Log tab. The checks of the tests step must fail (StepDetail.expectRed), so their red run is no failure. The
+// red checks on the part base (StepDetail.baseline) are no failure of the task either.
+export type StepLook = TaskStepDto["state"] | "expected" | "before";
 export const stepLook = (s: Pick<TaskStepDto, "state" | "detail">): StepLook =>
-  s.state === "failed" && s.detail.expectRed ? "expected" : s.state;
+  s.state === "failed" && s.detail.expectRed ? "expected" : s.state === "failed" && s.detail.baseline ? "before" : s.state;
 export const STEP_TEXT: Record<StepLook, string> = {
   ok: "Done",
   failed: "Failed",
   expected: "Red as expected",
+  before: "Red before this task",
   running: "Running",
   waiting: "Waiting",
   cancelled: "Cancelled",
