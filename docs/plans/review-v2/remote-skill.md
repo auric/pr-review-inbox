@@ -20,7 +20,7 @@ A task adds tests in a macOS-only block. The Windows test commands never run the
 
 ## Open facts (real CLI)
 
-- SU6 (integration-check.md:460): Git Bash ssh with the real HOME finds the alias and its key. Run `bun scripts/gate/claude-checks.ts --only B28 --ssh-alias <alias>`.
+- SU6 (integration-check.md:460): answered on 2026-11-09 by B28 with claude 2.1.319. Claude Bash ran `ssh <alias>` with the real HOME and got the marker in about 12 s. The user's ssh config accepts unknown host keys. rsync is not installed in Git for Windows, so a skill must not use rsync.
 - Does `GIT_DENY` match `git` inside a quoted ssh argument (`ssh host 'cd x && git init'`)?
 - Does the step worktree have LF line endings?
 
