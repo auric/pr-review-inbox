@@ -902,12 +902,13 @@ export function stepFile(p: Plan, taskId: string, attempt: number): ContextFile 
 
 // step.md of a step for whole plan parts (spec.md section 6.7): the tests step, with the acceptance lines and the tests that the plan
 // names, or the fix of the points of the own review, which stay in ./context/failure.md.
-// The instruct and resolve steps of spec.md section 6.18 add a "- Mode:" line.
+// The instruct and resolve steps of spec.md section 6.18 add a "- Mode:" line. testFiles: the paths that the tests step may change.
 export function partStepFile(
   p: Plan,
   parts: PlanPart[],
   what: "tests" | "review" | "checks" | "instruct" | "resolve",
   attempt: number,
+  testFiles = "",
 ): ContextFile {
   const files = new Set(parts.flatMap((x) => x.tasks.flatMap((t) => t.files)).map((f) => repoPath(f) ?? f));
   const map = p.map.filter((e) => files.has(repoPath(e.path) ?? e.path));
@@ -925,6 +926,7 @@ export function partStepFile(
       (x) => `- Part ${x.n} of ${p.partCount ?? p.parts.length}: ${oneLine(x.title)} (kind: ${x.kind}). Goal: ${oneLine(x.goal)}`,
     ),
     task,
+    ...(what === "tests" && testFiles ? [`- Test files: ${testFiles}. Change no other file.`] : []),
     `- Attempt: ${attempt}`,
     "",
   ];

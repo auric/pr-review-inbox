@@ -35,7 +35,7 @@ import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
 import { recoverTasks, taskDto, taskRow } from "../../src/server/tasks/tasks";
 import { openWorktree, status } from "../../src/server/tasks/worktree";
 import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
-import { specResult, type TaskBlocked } from "../../src/shared/task";
+import { DEFAULT_TEST_GLOBS, specResult, type TaskBlocked } from "../../src/shared/task";
 import { rowStatus } from "../../src/shared/task-status";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { logOf, pngOf } from "../support/fake-jira";
@@ -741,7 +741,8 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       const second = s.runCalls()[1] as Call;
       const failure = second.context["failure.md"] ?? "";
       expect(failure).toStartWith("# UNTRUSTED DATA");
-      expect(failure).toContain("The test paths are the tests of the plan: tests/feature.test.ts");
+      expect(failure).toContain("Change only test files. Test files are paths that match test/, tests/, unittest/");
+      expect(failure).toContain(", and the tests of the plan: tests/feature.test.ts");
       // The first try left a patch, and the retry started from the last commit.
       const first = s.steps().find((x) => x.kind === "tests") as Step;
       const patches = readFileSync(join(second.cwd, "..", "patches", `${first.id}.patch`), "utf8");
@@ -754,6 +755,30 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       });
       await g.build();
       expect(g.flow().slice(0, 5)).toEqual(["commit:plan:ok", "check:base:failed", "tests:P1:ok", "check:P1:failed", "commit:P1:ok"]);
+    },
+    SLOW * 2,
+  );
+
+  test(
+    "AC-B161: with no test globs, a file that matches a default glob is a test; a saved list replaces the defaults",
+    async () => {
+      const cpp = { path: "repo/src/unittest/unittest/foo_tests.cpp", text: "TEST(Foo, Works) {}\n" };
+      const s = await setup({ seq: { "implement:tests": [{ writes: [cpp] }] }, mode: "red" });
+      await s.build();
+      expect(s.flow().slice(0, 5)).toEqual(["commit:plan:ok", "check:base:failed", "tests:P1:ok", "check:P1:failed", "commit:P1:ok"]);
+      const step = (s.runCalls()[0] as Call).context["step.md"] ?? "";
+      expect(step).toContain(
+        `- Test files: paths that match ${DEFAULT_TEST_GLOBS.join(", ")}, and the tests of the plan: tests/feature.test.ts.`,
+      );
+      // The saved list "tests/" refuses a name that only a default glob matches.
+      const own = { path: "repo/src/foo_test.cpp", text: "TEST(Foo, Own) {}\n" };
+      const g = await setup({ testGlobs: ["tests/"], seq: { "implement:tests": [{ writes: [TEST_FILE, own] }] } });
+      await g.build();
+      expect(g.blocked()).toMatchObject({
+        kind: "red",
+        text: "Needs you: the tests step of part 1 failed twice. The step changed files that are not tests: src/foo_test.cpp.",
+      });
+      expect((g.runCalls()[1] as Call).context["failure.md"]).toContain("Test files are paths that match tests/.\n");
     },
     SLOW * 2,
   );
@@ -1428,6 +1453,37 @@ describe("restart recovery and the helpers", () => {
     expect(globMatch("tests/**/*.ts", "tests/a/b.ts")).toBe(true);
     expect(globMatch("*.test.ts", "src/x.test.ts")).toBe(true);
     expect(globMatch("*.test.ts", "src/x.ts")).toBe(false);
+    // AC-B161: each default test glob matches its test file and no ordinary source file.
+    const hits: Record<string, string> = {
+      "test/": "a/test/x.c",
+      "tests/": "tests/x.py",
+      "unittest/": "src/unittest/unittest/foo_tests.cpp",
+      "unittests/": "lib/unittests/a.cc",
+      "__tests__/": "web/__tests__/a.tsx",
+      "spec/": "spec/models/user_spec.rb",
+      "testing/": "pkg/testing/helpers.go",
+      "*_test.*": "src/parser_test.go",
+      "*_tests.*": "src/foo_tests.cpp",
+      "test_*.*": "pkg/test_parser.py",
+      "*.test.*": "src/x.test.ts",
+      "*.spec.*": "src/x.spec.js",
+      "*Test.*": "src/main/java/ParserTest.java",
+      "*Tests.*": "Sources/ParserTests.swift",
+      "*_unittest.*": "base/strings_unittest.cc",
+    };
+    expect(Object.keys(hits)).toEqual([...DEFAULT_TEST_GLOBS]);
+    for (const [g, path] of Object.entries(hits)) expect([g, globMatch(g, path)]).toEqual([g, true]);
+    const plain = [
+      "src/feature.ts",
+      "src/latest.go",
+      "src/contest.cpp",
+      "src/Latest.java",
+      "src/attest.rs",
+      "src/test.cpp",
+      "src/testing.go",
+    ];
+    for (const path of [...plain, "src/inspect.ts", "specs/T-1/plan.md", "src/TestUtils.java", "a/test.py", "x/foo.spec"])
+      expect([path, DEFAULT_TEST_GLOBS.filter((g) => globMatch(g, path))]).toEqual([path, []]);
     const text = "### [ ] T1.1 A\nFiles: a\n### [ ] T1.10 B\n";
     expect(tickTask(text, "T1.1")).toBe("### [x] T1.1 A\nFiles: a\n### [ ] T1.10 B\n");
     expect(tickTask("### [x] T1.1 A\n", "T1.1")).toBeNull();

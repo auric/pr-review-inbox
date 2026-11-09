@@ -73,6 +73,8 @@ import {
   type TaskSettings,
   type TaskSize,
   type TaskState,
+  TEST_GLOB_MAX,
+  TEST_GLOBS_MAX,
   taskCommand,
 } from "./task";
 import type { ExcerptLine, IncompleteReason, Reviewer, Role, User } from "./types";
@@ -1513,7 +1515,8 @@ export const repoTaskSettingsInput = z.object({
   maxOpen: z.number().int().min(1).max(20),
   approvals: z.number().int().min(0).max(20),
   commands: z.array(taskCommand).max(MAX_TASK_COMMANDS),
-  testGlobs: z.array(z.string().min(1).max(200)).max(50).nullable(),
+  // NULL: DEFAULT_TEST_GLOBS and the tests that the plan names (spec.md section 6.7, AC-B161).
+  testGlobs: z.array(z.string().trim().min(1).max(TEST_GLOB_MAX)).max(TEST_GLOBS_MAX).nullable(),
   excludeGlobs: z.array(z.string().min(1).max(200)).max(50).nullable(),
   isolateHome: z.boolean(),
   // spec.md section 6.21. Absent: the stored value stays. allow: the whole list; an entry with a stored pattern keeps its ID and source.

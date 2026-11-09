@@ -91,6 +91,28 @@ export const INTERVIEW_TURNS = 30;
 export const SPEC_TURNS = 80;
 // spec.md section 6.3: the defaults of repo_task_settings. CHECK_TIMEOUT in seconds.
 export const TASK_DEFAULTS = { specDir: "specs/{key}/", lineBudget: 400, maxOpen: 2, approvals: 1 } as const;
+// spec.md section 6.7, AC-B161: the test files of a tests step while repo_task_settings.test_globs_json is NULL. gitignore(5) rules.
+// Case matters: *Test.* must not match latest.go.
+export const DEFAULT_TEST_GLOBS = [
+  "test/",
+  "tests/",
+  "unittest/",
+  "unittests/",
+  "__tests__/",
+  "spec/",
+  "testing/",
+  "*_test.*",
+  "*_tests.*",
+  "test_*.*",
+  "*.test.*",
+  "*.spec.*",
+  "*Test.*",
+  "*Tests.*",
+  "*_unittest.*",
+] as const;
+// The limits of repoTaskSettingsInput.testGlobs: globs per list and characters per glob.
+export const TEST_GLOBS_MAX = 50;
+export const TEST_GLOB_MAX = 200;
 // spec.md section 6.16: the whole branch name with its suffix, one prefix, the prefix list, and one page of the branch search.
 export const BRANCH_MAX = 100;
 export const PREFIX_MAX = 40;

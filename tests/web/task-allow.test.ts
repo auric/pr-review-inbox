@@ -10,9 +10,11 @@ import {
   draftsToAllow,
   MODE_TEXT,
   modeLine,
+  parseTestGlobs,
   planAllow,
   planModeText,
   shellText,
+  testGlobsText,
   timeoutMinutes,
   timeoutSec,
   UNRESTRICTED_TITLE,
@@ -135,5 +137,14 @@ describe("commands that Claude may run, in the page", () => {
     expect(timeoutSec("0")).toBeNull();
     expect(timeoutSec("")).toBeNull();
     expect(timeoutSec("ten")).toBeNull();
+  });
+
+  test('AC-B161: "Test files" takes one glob per line; an empty field stores null, which takes the defaults', () => {
+    expect(testGlobsText(null)).toBe("");
+    expect(testGlobsText(["tests/", "*_test.*"])).toBe("tests/\n*_test.*");
+    expect(parseTestGlobs(" tests/ \r\n\n*_test.*\n")).toEqual({ globs: ["tests/", "*_test.*"] });
+    expect(parseTestGlobs(" \n ")).toEqual({ globs: null });
+    expect(parseTestGlobs(Array.from({ length: 51 }, (_, k) => `t${k}/`).join("\n"))).toEqual({ problem: "Enter 50 globs at most." });
+    expect(parseTestGlobs("x".repeat(201))).toEqual({ problem: "Each glob has 200 characters at most." });
   });
 });

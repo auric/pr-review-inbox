@@ -13,6 +13,8 @@ import {
   BASH_TIMEOUT_MAX_SEC,
   NETWORK_TOOLS,
   type ShellMode,
+  TEST_GLOB_MAX,
+  TEST_GLOBS_MAX,
 } from "../../shared/task";
 
 type AllowSource = AllowEntry["source"];
@@ -108,6 +110,18 @@ export function timeoutSec(minutes: string, max = BASH_TIMEOUT_MAX_SEC): number 
   return sec >= 1 && sec <= max ? sec : null;
 }
 export const TIMEOUT_PROBLEM = `Enter a time from 1 second to ${BASH_TIMEOUT_MAX_SEC / 60} minutes.`;
+
+// "Test files" of Settings > Commands (spec.md section 6.7, AC-B161): one glob per line. No glob stores null, which takes the defaults.
+export const testGlobsText = (globs: readonly string[] | null) => (globs ?? []).join("\n");
+export function parseTestGlobs(text: string): { globs: string[] | null } | { problem: string } {
+  const globs = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (globs.length > TEST_GLOBS_MAX) return { problem: `Enter ${TEST_GLOBS_MAX} globs at most.` };
+  if (globs.some((g) => g.length > TEST_GLOB_MAX)) return { problem: `Each glob has ${TEST_GLOB_MAX} characters at most.` };
+  return { globs: globs.length ? globs : null };
+}
 
 // The allow picks of the plan approval (spec.md section 6.21.3): each ticked row that the list does not hold. An unchanged proposal goes
 // as its ID, an edited or added row as the whole entry. warning: the picks need the first-use warning.

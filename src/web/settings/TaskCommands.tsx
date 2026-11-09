@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Settings > Commands: per task repository, the approved commands that the app runs (docs/plans/review-v2/spec.md section 6.3,
-// repo_task_settings.commands_json) with the editor of the plan screen, and the commands that the runner may run (section 6.21): the mode,
-// the allowlist, and "Longest command". Each change saves by itself (autosave.tsx). The first-use warning of the app commands stays on
-// the plan screen: a saved list here does not accept it. The first pattern, the first switch to "<runner> may run the approved checks",
-// and each switch to Most commands or to Unrestricted show their own dialog here.
+// repo_task_settings.commands_json) with the editor of the plan screen, "Test files" (section 6.7), and the commands that the runner may
+// run (section 6.21): the mode, the allowlist, and "Longest command". Each change saves by itself (autosave.tsx). The first-use warning of
+// the app commands stays on the plan screen: a saved list here does not accept it. The first pattern, the first switch to "<runner> may
+// run the approved checks", and each switch to Most commands or to Unrestricted show their own dialog here.
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, TriangleAlert } from "lucide-react";
 import { useRef, useState } from "react";
@@ -13,10 +13,11 @@ import { Field, FieldContent, FieldDescription, FieldLabel, FieldLegend, FieldSe
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 import type { RepoTaskSettingsDto, RepoTaskSettingsInput } from "../../shared/dto";
-import { SHELL_MODES, type ShellMode, TASK_CACHE_ENV } from "../../shared/task";
+import { DEFAULT_TEST_GLOBS, SHELL_MODES, type ShellMode, TASK_CACHE_ENV } from "../../shared/task";
 import { api } from "../api";
 import { read } from "../shell/data";
 import { AllowEditor, type ShellAsk, ShellDialog, useShellNames } from "../tasks/AllowEditor";
@@ -25,7 +26,9 @@ import {
   draftsToAllow,
   MODE_TEXT,
   modeLine,
+  parseTestGlobs,
   TIMEOUT_PROBLEM,
+  testGlobsText,
   timeoutMinutes,
   timeoutSec,
   toAllowDraft,
@@ -105,7 +108,15 @@ function RepoCommandsBody({ project, repo }: { project: string; repo: string }) 
   return <Editor s={q.data} />;
 }
 
-type Rows = { commands: CommandDraft[]; allow: AllowDraft[]; mode: ShellMode; minutes: string; cache: boolean; checks: boolean };
+type Rows = {
+  commands: CommandDraft[];
+  allow: AllowDraft[];
+  mode: ShellMode;
+  minutes: string;
+  cache: boolean;
+  checks: boolean;
+  tests: string;
+};
 
 function Editor({ s }: { s: RepoTaskSettingsDto }) {
   const qc = useQueryClient();
@@ -118,6 +129,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
     minutes: timeoutMinutes(s.bashTimeoutSec),
     cache: s.taskCache,
     checks: s.runChecks,
+    tests: testGlobsText(s.testGlobs),
   }));
   // The newest rows. Event handlers set them before the render, so a save in the same handler sends the change.
   const latest = useRef(rows);
@@ -127,6 +139,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
   const commands = draftsToCommands(rows.commands);
   const allow = draftsToAllow(rows.allow);
   const sec = timeoutSec(rows.minutes);
+  const tests = parseTestGlobs(rows.tests);
   // A part with a problem stays unsaved. The other parts save with the stored value of that part.
   const { state, saver } = useSaver(
     (): RepoTaskSettingsInput | null => {
@@ -142,8 +155,10 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
         bashTimeoutSec,
         taskCache,
         runChecks,
+        testGlobs,
         ...rest
       } = cur;
+      const t = parseTestGlobs(r.tests);
       const next = {
         commands: draftsToCommands(r.commands) ?? cur.commands,
         shellMode: r.mode,
@@ -151,6 +166,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
         bashTimeoutSec: timeoutSec(r.minutes) ?? bashTimeoutSec,
         taskCache: r.cache,
         runChecks: r.checks,
+        testGlobs: "globs" in t ? t.globs : testGlobs,
       };
       const was = {
         commands: cur.commands,
@@ -159,6 +175,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
         bashTimeoutSec,
         taskCache,
         runChecks,
+        testGlobs,
       };
       if (JSON.stringify(next) === JSON.stringify(was)) return null;
       return { ...rest, ...next, ...(warned.current && { shellWarning: true as const }) };
@@ -195,7 +212,9 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
               ? "A marked pattern is not saved. Fix it to save the list."
               : sec === null
                 ? `"Longest command" is not saved. ${TIMEOUT_PROBLEM}`
-                : null
+                : "problem" in tests
+                  ? `"Test files" is not saved. ${tests.problem}`
+                  : null
         }
         saved="Saved. The next step uses these commands."
         onRetry={() => saver.request(0)}
@@ -238,6 +257,30 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
           </FieldContent>
         </Field>
       </FieldSet>
+      <Field data-test-globs data-invalid={"problem" in tests || undefined}>
+        <FieldLabel htmlFor={`${id}-tests`}>Test files</FieldLabel>
+        <Textarea
+          id={`${id}-tests`}
+          rows={3}
+          spellCheck={false}
+          translate="no"
+          className="font-mono text-xs"
+          placeholder="Empty: the defaults"
+          aria-invalid={"problem" in tests || undefined}
+          aria-describedby={`${id}-tests-help`}
+          value={rows.tests}
+          onChange={(e) => change({ tests: e.target.value }, true)}
+          onBlur={() => void saver.flush()}
+        />
+        <FieldDescription id={`${id}-tests-help`}>
+          The tests step may change only these files. One glob per line, with .gitignore rules. Empty means the defaults and the test files
+          that the plan names:{" "}
+          <code translate="no" className="[overflow-wrap:anywhere]">
+            {DEFAULT_TEST_GLOBS.join(" ")}
+          </code>
+          . Your list replaces the defaults.
+        </FieldDescription>
+      </Field>
       <FieldSet data-shell-settings className="gap-2">
         <FieldLegend variant="label" className="mb-0 font-semibold">
           Commands {names.runner} may run

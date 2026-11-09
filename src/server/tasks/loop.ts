@@ -18,6 +18,7 @@ import {
   ASK_TEXT,
   allowProblem,
   BASE_CHECK_AGE_MS,
+  DEFAULT_TEST_GLOBS,
   FAILURE_TAIL,
   type ImplementResult,
   type InstructDetail,
@@ -1068,25 +1069,30 @@ export function createLoop(opts: LoopOptions) {
   }
 
   const testPaths = (pp: PlanPart) => [...pp.tests.map((x) => x.test), ...pp.tasks.flatMap((t) => t.run)];
-  // The tests step may change only test files: the test globs of the repository, else the tests that the plan names.
+  // The tests step may change only test files: the test globs of the repository, else the default globs and the tests that the plan
+  // names (AC-B161).
   const isTest = (c: Ctx, pp: PlanPart, path: string) =>
-    c.testGlobs ? c.testGlobs.some((g) => globMatch(g, path)) : testPaths(pp).some((x) => same(x, path));
+    (c.testGlobs ?? DEFAULT_TEST_GLOBS).some((g) => globMatch(g, path)) || (!c.testGlobs && testPaths(pp).some((x) => same(x, path)));
+  const testFiles = (c: Ctx, pp: PlanPart) => {
+    const named = c.testGlobs ? [] : [...new Set(testPaths(pp))];
+    return `paths that match ${(c.testGlobs ?? DEFAULT_TEST_GLOBS).join(", ")}${named.length ? `, and the tests of the plan: ${named.join(", ")}` : ""}`;
+  };
 
   // spec.md section 6.7: the tests step. Its changes stay in the test paths, and the new tests fail (AC-B10).
   async function testsStep(c: Ctx, pp: PlanPart) {
     const item = `P${pp.n}`;
     const allow = pp.tasks.flatMap((t) => t.files);
-    const where = c.testGlobs ? `the test globs ${c.testGlobs.join(", ")}` : `the tests of the plan: ${testPaths(pp).join(", ")}`;
+    const where = testFiles(c, pp);
     let failure: ContextFile | undefined;
     for (let round = 0; ; round++) {
-      const r = await claude(c, "tests", item, { allow, step: (a) => partStepFile(c.plan, [pp], "tests", a), failure });
+      const r = await claude(c, "tests", item, { allow, step: (a) => partStepFile(c.plan, [pp], "tests", a, where), failure });
       const outside = r.fresh.filter((p) => !isTest(c, pp, p));
       if (!r.fresh.length || outside.length) {
         const why = r.fresh.length ? `The step changed files that are not tests: ${outside.join(", ")}.` : "The step wrote no test.";
         if (round >= 1)
           block(c, { kind: "red", step: r.step, text: `Needs you: the tests step of part ${c.part.ord} failed twice. ${why}` });
         await undo(c.trees, c.db, c.id, r.step);
-        failure = { name: "failure.md", text: `# Tests step\n\n${why} Change only test files. The test paths are ${where}.\n` };
+        failure = { name: "failure.md", text: `# Tests step\n\n${why} Change only test files. Test files are ${where}.\n` };
         continue;
       }
       const k = await checks(c, item, CHECK_KINDS, undefined, true);

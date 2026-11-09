@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Build a Jira task: the tests step now accepts usual test files, such as `src/unittest/foo_tests.cpp`, `parser_test.go`, or `tests/a.py`. Before, it refused every file that the plan did not name by its path, and the task stopped with "The step changed files that are not tests".
+- Settings, Commands has a new field "Test files": one glob per line sets the files that the tests step may change. Empty uses the defaults, which the help lists.
 - Build a Jira task: "Reject" of a plan change now tells Claude that you rejected it. The step runs again with the line "The user rejected your change to <files>." and Claude's reason. So Claude does not propose the same change again. The Log tab shows "Runs again without the plan change."
 - "Accept the change" and "Reject" of a plan change from Tell Claude now run your instructions again with the same text. When they change nothing, the reason that the task had before comes back. Before, the instructions did not run again, and the box closed.
 - "Continue" after "Pause after this step" now keeps every change of the done step, also after an app restart. Before, a restart made Continue put those changes into a patch and drop them.
