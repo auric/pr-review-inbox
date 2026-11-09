@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // docs/plans/review-v2/spec.md section 6.21 (WP-C2c): "Commands Claude may run" in the browser. Settings > Tasks shows the first-use
-// warning before the first pattern and the confirm before Any command; Cancel and Esc change nothing and give the focus back. The plan
+// warning before the first pattern and the confirm before Most commands; Cancel and Esc change nothing and give the focus back. The plan
 // screen offers Claude's proposals with ticks, and the approval shows the first-use warning. A step asks to allow three commands, and
 // the row takes Allow once, Allow for this repository, and Refuse. The header names the mode, and the Log tab and the run log show the
-// commands that Claude ran. Settings then shows the server's reason for a pattern, saves "Longest command", and turns on Any command.
+// commands that Claude ran. Settings then shows the server's reason for a pattern, saves "Longest command", and turns on Most commands, then Unrestricted.
 // Runs against serve.ts only: the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote.
 import { test as base, expect, type Page } from "@playwright/test";
 import {
@@ -26,7 +26,10 @@ const PR_TITLE = "Batch cache writes in the sync worker";
 const REPO = "PROJ1/sample-repo-2";
 const SETTINGS = `/api/repos/${REPO}/task-settings`;
 const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
-const ANY_WRITE = "Any command can write any file that you can write.";
+const ANY_WRITE =
+  "Most commands lets Claude run every command as you, with your files, your keys, and your network, except the fixed deny list. Claude can write any file that you can write.";
+const UNRESTRICTED_START =
+  "Unrestricted lets Claude run every command as you, with your files, your keys, and your network, except git and the Bitbucket and Jira hosts.";
 const WARNING_START = "Claude can run each command that matches this list, as you, with your files, your keys, and your network.";
 const SPEC = {
   title: "Name the app state in the README",
@@ -186,7 +189,7 @@ test("Commands Claude may run: the warnings, the plan picks, an allow request wi
   // 2. Settings: the first pattern shows the first-use warning, and Cancel adds no row and gives the focus back to the button.
   await openRepo(page);
   const box = repoBox(page);
-  const anyToggle = box.getByRole("button", { name: "Any command" });
+  const anyToggle = box.getByRole("button", { name: "Most commands" });
   await expect(box.getByRole("button", { name: "Allowlist" })).toHaveAttribute("aria-pressed", "true");
   const add = box.getByRole("button", { name: "Add a pattern" });
   await add.click();
@@ -197,11 +200,11 @@ test("Commands Claude may run: the warnings, the plan picks, an allow request wi
   await expect(dialog).toBeHidden();
   await expect(add).toBeFocused();
   await expect(box.locator("[data-allow-row]")).toHaveCount(0);
-  // Any command shows its confirm each time. Esc changes nothing and gives the focus back to the toggle.
+  // Most commands shows its confirm each time. Esc changes nothing and gives the focus back to the toggle.
   await anyToggle.click();
-  await expect(dialog.getByRole("heading", { name: "Turn on Any command?" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Turn on Most commands?" })).toBeVisible();
   await expect(dialog).toContainText(ANY_WRITE);
-  await expect(dialog.getByRole("button", { name: "Turn on Any command" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Turn on Most commands" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(anyToggle).toBeFocused();
@@ -316,16 +319,36 @@ test("Commands Claude may run: the warnings, the plan picks, an allow request wi
   await expect(saveLine).toHaveText("Saved. The next step uses these commands.");
   await expect.poll(async () => (await shell(page)).bashTimeoutSec).toBe(900);
   expect((await shell(page)).allow.map((a) => a.pattern)).toEqual(["bun run gen *", "ctest --test-dir *", "ninja -C repo/build"]);
-  // Any command: the confirm turns it on.
+  // Most commands: the confirm turns it on.
   await anyToggle.click();
-  await dialog.getByRole("button", { name: "Turn on Any command" }).click();
+  await dialog.getByRole("button", { name: "Turn on Most commands" }).click();
   await expect(dialog).toBeHidden();
   await expect(anyToggle).toHaveAttribute("aria-pressed", "true");
   await expect.poll(async () => (await shell(page)).shellMode).toBe("any");
 
-  // 7. The header names Any command.
+  // 7. The header names Most commands.
   await openApp(page, taskPath);
-  await expect(page.locator("[data-task-shell]")).toHaveText("Commands: any command");
+  await expect(page.locator("[data-task-shell]")).toHaveText("Commands: most commands");
+
+  // 8. Unrestricted shows its own dialog each time. Cancel changes nothing. The confirm turns it on, and the header names it.
+  await openRepo(page);
+  const unrestricted = box.getByRole("button", { name: "Unrestricted" });
+  await unrestricted.click();
+  await expect(dialog.getByRole("heading", { name: "Turn on Unrestricted?" })).toBeVisible();
+  await expect(dialog).toContainText(UNRESTRICTED_START);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(unrestricted).toBeFocused();
+  await expect(unrestricted).toHaveAttribute("aria-pressed", "false");
+  expect((await shell(page)).shellMode).toBe("any");
+  await unrestricted.click();
+  await dialog.getByRole("button", { name: "Turn on Unrestricted" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(unrestricted).toHaveAttribute("aria-pressed", "true");
+  await expect(box.locator(`#task-cmd-PROJ1-sample-repo-2-mode-line`)).toContainText("except these: git and commands that name the");
+  await expect.poll(async () => (await shell(page)).shellMode).toBe("unrestricted");
+  await openApp(page, taskPath);
+  await expect(page.locator("[data-task-shell]")).toHaveText("Commands: unrestricted");
 });
 
 // check-fix.md: a fix step that changes no file stops the task with a question, Continue and See why. The switch of the approved checks

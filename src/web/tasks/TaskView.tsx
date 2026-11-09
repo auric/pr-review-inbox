@@ -483,10 +483,10 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             {t.project}/{t.repo} into {t.targetBranch}
           </span>
           {profileName && <span className="text-xs text-muted-foreground">Profile: {profileName}</span>}
-          {t.shell.mode === "any" ? (
+          {t.shell.mode !== "allowlist" ? (
             <span data-task-shell className="inline-flex items-center gap-1 self-center text-xs font-semibold text-warn">
               <TriangleAlert aria-hidden className="size-3.5 shrink-0" />
-              {shellText("any", 0)}
+              {shellText(t.shell.mode, 0)}
             </span>
           ) : (
             <span data-task-shell className="text-xs text-muted-foreground">

@@ -10,7 +10,8 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B21 to B29 | WP-C2b (the Bash tool of a task step). B28 is optional. | `scripts/gate/claude-checks.ts` |
 | B30a to B30d | Your decision on a PreToolUse hook and on the prompt line about grep (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
 | B31 | The shell step prompt rule "first run `cd repo` as a command of its own" (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
-| B32 | The Unrestricted shell mode (shell.md "Unrestricted mode"). The app part waits for B32. | `scripts/gate/claude-checks.ts` |
+| B32 | The Unrestricted shell mode (shell.md "Unrestricted mode"). Run on 2026-11-06. | `scripts/gate/claude-checks.ts` |
+| B33 | The built Unrestricted and Most commands settings without the read block (shell.md "Unrestricted mode"). | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
 | G7 | No fixed point. INFO only. | `scripts/gate/bitbucket-write.ts` |
@@ -147,6 +148,18 @@ This check gives the fact SU19 (shell.md "Unrestricted mode (decision 2026-11-06
 | Check | Fact | What it runs | PASS |
 |---|---|---|---|
 | B32 | SU19 | Two runs with the app flags, `--restricted`, and no CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: `--permission-mode bypassPermissions` with no allow rule, and `--permission-mode dontAsk` with allow `Bash`. shell.json holds only the Unrestricted deny list: `git push`, `git remote`, `git config`, `git credential`, and `git -c` in each git path form, the placeholder Bitbucket and Jira hosts, and Read of config.json, the database files, and runs/ in the data folder. The data folder is the temp folder above the part folder and holds a fake config.json. repo/ has one commit and a local bare remote. Commands: the env probe, the first quoted compound command of B30a, `git log`, `git diff --stat`, `curl --version`, `git push origin HEAD`, `git remote add`, `git config`, `git -c ... log`, a curl to the placeholder Bitbucket host, `cat <data>/config.json`, an outside redirect, `git -C repo push`, and `git -C repo config`. Then a Read of config.json and a Write to the folder above the part folder. | For at least one mode: `init.permissionMode` equals the mode, the compound command runs, `git log`, `git diff --stat`, and `curl --version` run, the CLI refuses the six deny commands and the Read, no push reaches the remote, no tool result shows the fake config, and the probe sees no ANTHROPIC_* token. Facts for you: the stderr warning, the outside Write and redirect, the `git -C` forms, the env given and seen, and the run marker. |
+
+### B33: the Unrestricted and Most commands settings without the read block
+
+This check gives the fact SU20. It uses the app shell.json and env of each mode as built on 2026-11-06. Every command runs locally. The only host is the placeholder `bitbucket.example.invalid`, which never resolves. The same preparation as above applies.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B33`.
+- Run: `bun scripts/gate/claude-checks.ts --only B33`. Then sanitize as above.
+- Own call cap: B33 2 (one run per mode).
+
+| Check | Fact | What it runs | PASS |
+|---|---|---|---|
+| B33 | SU20 | Two runs: Unrestricted and Most commands (stored value any), with the app flags, shell.json, and env. Neither has the read block or CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR. repo/ holds README.md, a.cpp, b.cpp, and a copy of the probe. The temp data folder holds a fake config.json. Commands, one Bash call each: `cd repo && cat README.md \| head -3`, `curl --version`, `git -C repo log -1`, a curl to the placeholder Bitbucket host, `cat <data>/config.json`, the user-report cases `for f in a.cpp b.cpp; do tr -d '\r' < repo/$f \| md5sum; done`, the same loop after `md5sum repo/a.cpp repo/b.cpp \| tr -d '\r';`, `timeout 30 <probe>`, and an ssh-shaped stand-in `timeout 30 <probe> b33host 'cd ~/dev/x && md5 -q src/a.cpp; ls tmp 2>/dev/null; ls bin/*/*'` that a saved pattern names (the probe never reaches a host), then `cd repo`, `<probe> cwd`. Then a Read, an Edit, and a Write of repo/README.md. | In both runs: the compound command, the loop, the user shape, timeout, the ssh-shaped stand-in, `cd repo`, and the probe run, the probe prints repo, the Edit and the Write work, and the deny list refuses `git -C repo log -1` and the host with the app label "deny". `curl --version` runs in Unrestricted and is refused in Most commands. INFO: all of that, but Most commands reads the fake config, so its Read deny rules need the read block. FAIL: anything else. Facts for you: the state and the permission_denied fields of each command, and whether Unrestricted reads the fake config. A refused loop goes to the user with its message: the user wants such commands to run in Most commands. |
 
 ## Part G: Bitbucket checks G1 to G7
 

@@ -7,7 +7,8 @@
 // B17 to B20 (docs/plans/review-v2/tasks.md WP-G0, docs/gate-v2.md),
 // B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S),
 // B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17),
-// B31 (a lone `cd repo` and the cwd of the next command: SU18), B32 (the Unrestricted shell mode: SU19).
+// B31 (a lone `cd repo` and the cwd of the next command: SU18), B32 (the Unrestricted shell mode: SU19), B33 (the Unrestricted and Any
+// command settings without the read block: SU20).
 // Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
@@ -87,6 +88,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b30d: 1,
   b31: 6,
   b32: 2,
+  b33: 2,
 };
 const B9_MAX_TURNS = 8;
 const MAX_COST_USD = 0.6;
@@ -130,6 +132,7 @@ const CHECKS = [
   "B30d",
   "B31",
   "B32",
+  "B33",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
 
@@ -2192,7 +2195,8 @@ async function shellRun(
     // B30: files under repo/ by path, and a change of shell.json after the app wrote it (app: the folder that holds it).
     files?: Record<string, string>;
     settings?: (s: Record<string, unknown>, app: string) => Record<string, unknown>;
-    // B31: env names to drop after shellEnv, and a probe copy in the folder above the part folder.
+    // B31: env names to set or drop after shellEnv, and a probe copy in the folder above the part folder.
+    addEnv?: Record<string, string>;
     dropEnv?: string[];
     probeAbove?: boolean;
     // B32: setup after the files (work: the part folder, base: the folder above it), more prompt lines, and more CLI flags.
@@ -2229,7 +2233,7 @@ async function shellRun(
       writeFileSync(file, JSON.stringify(opts.settings(JSON.parse(readFileSync(file, "utf8")), app), null, 2));
     }
     const envBase = appChildEnv();
-    const env = shellEnv(opts.env ? opts.env(envBase) : envBase, SHELL_TIMEOUT_SEC);
+    const env = { ...shellEnv(opts.env ? opts.env(envBase) : envBase, { mode, bashTimeoutSec: SHELL_TIMEOUT_SEC }), ...opts.addEnv };
     for (const k of opts.dropEnv ?? []) delete env[k];
     // Arrival times of tool_use and tool_result blocks, by tool_use ID.
     const arrived = new Map<string, number>();
@@ -2551,7 +2555,7 @@ async function b26() {
           m[3] ?? (m[2] === "unset" ? null : ""),
         ]),
       ) as Record<string, string | null>;
-      const final = shellEnv(passed, SHELL_TIMEOUT_SEC);
+      const final = shellEnv(passed, { mode: "allowlist", bashTimeoutSec: SHELL_TIMEOUT_SEC });
       const given = (k: string) =>
         Object.entries(final).find(([n]) => (process.platform === "win32" ? n.toUpperCase() === k : n === k))?.[1];
       const fact = (k: string) => {
@@ -2767,6 +2771,7 @@ const B31_ABOVE_TEXT = "RLGB-ABOVE-READ";
 const B31_NOBLOCK = [...B31_OUT, `cat ../${B31_ABOVE}`];
 // PASS: every cd runs, and the probe runs in repo/ in both app env runs. INFO: no refusal of `cd repo` or the first probe, and an app env
 // run has a refusal or its probe runs outside repo/. FAIL: the CLI refuses `cd repo` or the first probe. The noblock runs are facts only.
+// The app of 2026-11-06 drops the read block and V15 in Any command mode (B33), so B31 sets both itself to keep its runs as they were.
 async function b31() {
   const lines: string[] = [];
   let status: "PASS" | "INFO" | "FAIL" = "PASS";
@@ -2783,14 +2788,13 @@ async function b31() {
     const opts = {
       files: { [PROBE]: PROBE_JS },
       probeAbove: noV15 || noBlock,
+      addEnv: noV15 ? undefined : { [B31_V15]: "1" },
       dropEnv: noV15 ? [B31_V15] : [],
-      ...(noBlock && {
-        prepare: (_work: string, base: string) => writeFileSync(join(base, B31_ABOVE), B31_ABOVE_TEXT),
-        settings: (s: Record<string, unknown>) => {
-          const { blockReadsOutsideWorkingDirectories: _, ...permissions } = s.permissions as Record<string, unknown>;
-          return { ...s, permissions };
-        },
-      }),
+      ...(noBlock && { prepare: (_work: string, base: string) => writeFileSync(join(base, B31_ABOVE), B31_ABOVE_TEXT) }),
+      settings: (s: Record<string, unknown>) => {
+        const { blockReadsOutsideWorkingDirectories: _, ...permissions } = s.permissions as Record<string, unknown>;
+        return { ...s, permissions: noBlock ? permissions : { ...permissions, blockReadsOutsideWorkingDirectories: true } };
+      },
     };
     await shellRun(`b31-${tag}`, mode, [...rules], [...cmds], cmds.length + 2, opts, ({ run, state, work, base, settings }) => {
       const block = "blockReadsOutsideWorkingDirectories" in (JSON.parse(settings) as { permissions: object }).permissions;
@@ -2816,7 +2820,7 @@ async function b31() {
   if (DRY)
     return dry(
       "B31",
-      `runs=6; commands=3,3,5,5,6,6; V15=${shellEnv({}, SHELL_TIMEOUT_SEC)[B31_V15]}; dropped=${B31_V15}; ${lines.join(", ")}`,
+      `runs=6; commands=3,3,5,5,6,6; V15=${shellEnv({}, { mode: "allowlist", bashTimeoutSec: SHELL_TIMEOUT_SEC })[B31_V15]}; dropped=${B31_V15}; ${lines.join(", ")}`,
     );
   push("B31", status, lines.join(" || "));
 }
@@ -2922,7 +2926,7 @@ function b32Facts(
   const seen = Object.fromEntries(
     [...env.text.matchAll(/^([A-Z0-9_]+)=(unset|set:([0-9a-f]{12}))\s*$/gm)].map((m) => [m[1] ?? "", m[3] ?? null]),
   ) as Record<string, string | null>;
-  const final = shellEnv(given, SHELL_TIMEOUT_SEC);
+  const final = shellEnv(given, { mode: "any", bashTimeoutSec: SHELL_TIMEOUT_SEC });
   delete final.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB;
   const givenOf = (k: string) => Object.entries(final).find(([n]) => (process.platform === "win32" ? n.toUpperCase() === k : n === k))?.[1];
   const envFact = (k: string) => {
@@ -3028,6 +3032,107 @@ async function b32() {
   push("B32", anyPass ? "PASS" : "FAIL", lines.join(" || "));
 }
 
+// ---------- B33: the shell settings of decision 2026-11-06 (SU20) ----------
+// One run with the app shell.json and env of Unrestricted, and one of Most commands. Neither has the read block or V15. repo/ holds
+// README.md, a.cpp, b.cpp, and a probe copy. The data folder holds a fake config.json. The only host is the placeholder Bitbucket host.
+// A user report (2026-11-06) adds a loop with an input redirect from a path with a variable, timeout before a program, and an ssh-shaped
+// command with a quoted remote command. The probe stands in for ssh: it never reaches a host, and a saved pattern names it.
+const B33_SECRET = "RLGB-B33-FAKE-CONFIG-4417";
+const B33_TEXT = "RLGB-B33-WRITE";
+const B33_LOOP = "for f in a.cpp b.cpp; do tr -d '\\r' < repo/$f | md5sum; done";
+const B33_HOST_RULE = `${PROBE_RULE.slice(0, -2)} b33host *`;
+// cd repo comes after the commands that give paths from the part folder, because the cwd carries over without V15.
+const b33Cmds = (data: string) => ({
+  compound: "cd repo && cat README.md | head -3",
+  curl: "curl --version",
+  git: "git -C repo log -1",
+  host: B32_HOST_CMD,
+  config: `cat ${slash(join(data, "config.json"))}`,
+  loop: B33_LOOP,
+  shape: `md5sum repo/a.cpp repo/b.cpp | tr -d '\\r'; ${B33_LOOP}`,
+  timeout: `timeout 30 ${probe("b33t")}`,
+  ssh: `timeout 30 ${probe("b33host")} 'cd ~/dev/x && md5 -q src/a.cpp; ls tmp 2>/dev/null; ls bin/*/*'`,
+  cd: "cd repo",
+  cwd: probe("cwd"),
+});
+const B33_MODES = ["unrestricted", "any"] as const;
+
+// PASS: in both runs, the compound command, the loop, the user shape, timeout, the ssh-shaped command, `cd repo`, and the probe in repo/
+// run, the Edit and the Write of repo/README.md work, and the deny list refuses `git -C repo log -1` and the host. curl runs in
+// Unrestricted and is refused in Most commands. INFO: all of that, but Most commands reads the fake config, so its Read deny rules need
+// the read block. FAIL: anything else.
+async function b33() {
+  const lines: string[] = [];
+  let status: "PASS" | "INFO" | "FAIL" = "PASS";
+  for (const mode of B33_MODES) {
+    let cmds = b33Cmds("");
+    // shellRun builds the prompt after prepare, so prepare fills the list with the data folder path.
+    const list: string[] = [];
+    const readme = (work: string) => join(work, "repo", "README.md");
+    const opts = {
+      files: { "README.md": B30_README, "a.cpp": "int a;\r\n", "b.cpp": "int b;\r\n", [PROBE]: PROBE_JS },
+      prepare: (_work: string, base: string) => {
+        cmds = b33Cmds(join(base, "data"));
+        list.push(...Object.values(cmds));
+        writeJson(join(base, "data", "config.json"), { note: B33_SECRET });
+      },
+      also: (work: string) => [
+        `Read with file_path ${readme(work)}`,
+        `Edit with file_path ${readme(work)}, old_string "beta two", and new_string "beta 2"`,
+        `Write with file_path ${readme(work)} and content ${B33_TEXT}`,
+      ],
+    };
+    // 11 Bash calls, 3 file tool calls, and StructuredOutput, with room for 3 more turns.
+    await shellRun(`b33-${mode}`, mode, [B33_HOST_RULE], list, 18, opts, ({ run, work, state, settings }) => {
+      const s = JSON.parse(settings) as { permissions: { allow: string[]; deny: string[] } & Record<string, unknown> };
+      const block = "blockReadsOutsideWorkingDirectories" in s.permissions;
+      if (DRY)
+        return void lines.push(
+          `${mode}: allow=${JSON.stringify(s.permissions.allow)} deny=${s.permissions.deny.length} block=${block} commands=${list.length}`,
+        );
+      const of = (c: string) => outcomeOf(run, c);
+      const probeDir = of(cmds.cwd).text.match(/RLGB-CWD (\S+)/)?.[1];
+      const edit = fileOutcome(run, "Edit", "README.md");
+      const write = fileOutcome(run, "Write", "README.md");
+      const text = existsSync(readme(work)) ? readFileSync(readme(work), "utf8").trim() : "";
+      const leaked = run.events
+        .filter((e) => e.type === "user")
+        .flatMap(blocks)
+        .some((b) => b.type === "tool_result" && blockText(b).includes(B33_SECRET));
+      const curlOk = mode === "unrestricted" ? of(cmds.curl).state === "ran" : of(cmds.curl).state === "refused";
+      const core =
+        [cmds.compound, cmds.loop, cmds.shape, cmds.timeout, cmds.ssh, cmds.cd, cmds.cwd].every((c) => of(c).state === "ran") &&
+        ran(work, "b33t") &&
+        ran(work, "b33host") &&
+        probeDir === "repo" &&
+        edit.state === "ran" &&
+        write.state === "ran" &&
+        text === B33_TEXT &&
+        curlOk &&
+        [cmds.git, cmds.host].every((c) => of(c).state === "refused" && labelOf(state, c) === "deny");
+      const dataOk = mode === "unrestricted" || (of(cmds.config).state === "refused" && !leaked);
+      if (!core) status = "FAIL";
+      else if (!dataOk && status === "PASS") status = "INFO";
+      lines.push(
+        [
+          `${mode}: exit=${run.exit}; read block=${block}; init.permissionMode=${run.init?.permissionMode ?? "none"}`,
+          `probe cwd=${probeDir === "repo" ? "repo" : probeDir === basename(work) ? "part folder" : probeDir ? "other" : "none"}`,
+          `Edit=${edit.state} Write=${write.state} README written=${text === B33_TEXT}; fake config in a result=${leaked}`,
+          `timeout marker=${ran(work, "b33t")} ssh stand-in marker=${ran(work, "b33host")}`,
+          ...list.map((c) => factOf(run, state, c)),
+          `other calls=${
+            otherCalls(run, list)
+              .filter((n) => n !== "Read" && n !== "Edit" && n !== "Write")
+              .join(",") || "none"
+          }`,
+        ].join("; "),
+      );
+    });
+  }
+  if (DRY) return dry("B33", `runs=2; ${lines.join("; ")}`);
+  push("B33", status, lines.join(" || "));
+}
+
 // ---------- main ----------
 const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B1: b1,
@@ -3065,6 +3170,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B30d: b30d,
   B31: b31,
   B32: b32,
+  B33: b33,
 };
 {
   for (const id of selected) await check(id, RUNNERS[id]);

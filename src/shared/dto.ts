@@ -1517,7 +1517,7 @@ export const repoTaskSettingsInput = z.object({
   excludeGlobs: z.array(z.string().min(1).max(200)).max(50).nullable(),
   isolateHome: z.boolean(),
   // spec.md section 6.21. Absent: the stored value stays. allow: the whole list; an entry with a stored pattern keeps its ID and source.
-  // shellWarning: the warning of the first list, or of a switch to Any command, is accepted.
+  // shellWarning: the warning of the first list, or of a switch to Most commands or to Unrestricted, is accepted.
   shellMode: z.enum(SHELL_MODES).optional(),
   allow: z.array(allowProposal).max(ALLOW_MAX).optional(),
   bashTimeoutSec: z.number().int().min(1).max(BASH_TIMEOUT_MAX_SEC).optional(),

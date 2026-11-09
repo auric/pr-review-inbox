@@ -28,8 +28,8 @@ import {
   type TaskSize,
 } from "../../shared/task";
 import { useSettings } from "../shell/data";
-import { AllowEditor, type ShellAsk, ShellDialog } from "./AllowEditor";
-import { type AllowDraft, allowDraftProblem, planAllow, toAllowDraft } from "./allow";
+import { AllowEditor, type ShellAsk, ShellDialog, useShellNames } from "./AllowEditor";
+import { type AllowDraft, allowDraftProblem, planAllow, planModeText, toAllowDraft } from "./allow";
 import { BaseField, BranchSection } from "./BranchSection";
 import { CommandsEditor } from "./CommandsEditor";
 import { type CommandDraft, draftProblem, draftsToCommands, toDraft } from "./commands";
@@ -100,6 +100,7 @@ export function PlanApproval(props: {
   onHold?: (reason: string | null) => void;
 }) {
   const { t, runner } = props;
+  const names = useShellNames();
   const plan = t.plan;
   const several = showRepos(t);
   const sub = t.subtasks !== null;
@@ -297,10 +298,10 @@ export function PlanApproval(props: {
             ? `${runner} proposes these commands for the steps to run themselves. Each ticked pattern joins the list of the repository.`
             : `${runner} proposes no command for the steps to run themselves. A pattern that you add joins the list of the repository.`}
         </p>
-        {t.shell.mode === "any" && (
+        {t.shell.mode !== "allowlist" && (
           <p className="m-0 flex items-start gap-1.5 text-sm font-medium text-warn">
             <TriangleAlert aria-hidden className="mt-0.5 size-[15px] shrink-0" />
-            Any command is on for this repository. {runner} can run every command, except the fixed deny list.
+            {planModeText(t.shell.mode, names)}
           </p>
         )}
         <AllowEditor

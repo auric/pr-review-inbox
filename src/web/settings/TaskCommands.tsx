@@ -5,7 +5,7 @@
 // repo_task_settings.commands_json) with the editor of the plan screen, and the commands that the runner may run (section 6.21): the mode,
 // the allowlist, and "Longest command". Each change saves by itself (autosave.tsx). The first-use warning of the app commands stays on
 // the plan screen: a saved list here does not accept it. The first pattern, the first switch to "<runner> may run the approved checks",
-// and each switch to Any command show their own dialog here.
+// and each switch to Most commands or to Unrestricted show their own dialog here.
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, TriangleAlert } from "lucide-react";
 import { useRef, useState } from "react";
@@ -14,12 +14,22 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { cn } from "@/lib/utils";
 import type { RepoTaskSettingsDto, RepoTaskSettingsInput } from "../../shared/dto";
-import { type ShellMode, TASK_CACHE_ENV } from "../../shared/task";
+import { SHELL_MODES, type ShellMode, TASK_CACHE_ENV } from "../../shared/task";
 import { api } from "../api";
 import { read } from "../shell/data";
 import { AllowEditor, type ShellAsk, ShellDialog, useShellNames } from "../tasks/AllowEditor";
-import { type AllowDraft, draftsToAllow, modeLine, TIMEOUT_PROBLEM, timeoutMinutes, timeoutSec, toAllowDraft } from "../tasks/allow";
+import {
+  type AllowDraft,
+  draftsToAllow,
+  MODE_TEXT,
+  modeLine,
+  TIMEOUT_PROBLEM,
+  timeoutMinutes,
+  timeoutSec,
+  toAllowDraft,
+} from "../tasks/allow";
 import { CommandsEditor } from "../tasks/CommandsEditor";
 import { type CommandDraft, draftsToCommands, toDraft } from "../tasks/commands";
 import { useRepoTaskSettings, useTasks } from "../tasks/data";
@@ -96,8 +106,6 @@ function RepoCommandsBody({ project, repo }: { project: string; repo: string }) 
 }
 
 type Rows = { commands: CommandDraft[]; allow: AllowDraft[]; mode: ShellMode; minutes: string; cache: boolean; checks: boolean };
-
-const MODE_TEXT: Record<ShellMode, string> = { allowlist: "Allowlist", any: "Any command" };
 
 function Editor({ s }: { s: RepoTaskSettingsDto }) {
   const qc = useQueryClient();
@@ -251,16 +259,16 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
               const mode = v[0] as ShellMode | undefined;
               if (!mode || mode === rows.mode) return;
               if (mode === "allowlist") return change({ mode }, false);
-              setAsk({ kind: "any", run: accept(() => change({ mode: "any" }, false)) });
+              setAsk({ kind: mode, run: accept(() => change({ mode }, false)) });
             }}
           >
-            {(["allowlist", "any"] as const).map((m) => (
+            {SHELL_MODES.map((m) => (
               <ToggleGroupItem
                 key={m}
                 value={m}
                 className="aria-pressed:bg-foreground aria-pressed:font-semibold aria-pressed:text-background"
               >
-                {m === "any" && <TriangleAlert aria-hidden data-icon="inline-start" />}
+                {m !== "allowlist" && <TriangleAlert aria-hidden data-icon="inline-start" />}
                 {MODE_TEXT[m]}
               </ToggleGroupItem>
             ))}
@@ -268,7 +276,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
           <p
             id={`${id}-mode-line`}
             aria-live="polite"
-            className={rows.mode === "any" ? "m-0 text-xs font-medium text-warn" : "m-0 text-xs text-muted-foreground"}
+            className={cn("m-0 text-xs", rows.mode === "allowlist" ? "text-muted-foreground" : "font-medium text-warn")}
           >
             {modeLine(rows.mode, names)}
           </p>

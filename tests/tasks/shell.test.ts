@@ -93,10 +93,31 @@ describe("shell.json", () => {
     });
   });
 
-  test("Any command: Bash allows every command, and the full deny list stays", () => {
+  test("Any command: Bash allows every command, the full deny list stays, and no read block (Gate B31: it refuses every cd)", () => {
     const s = shellSettings(spec({ mode: "any", rules: [] }), "win32");
     expect(s.permissions.allow).toEqual(["Bash"]);
     expect(s.permissions.deny).toEqual(denyFor("//c/Users/someone/AppData/Local/review-loop", NETWORK));
+    expect(s.permissions).not.toHaveProperty("blockReadsOutsideWorkingDirectories");
+    expect(s.permissions.disableBypassPermissionsMode).toBe("disable");
+  });
+
+  test("Unrestricted: Bash allows every command; the deny list holds only every git form and the hosts; no read block", () => {
+    const s = shellSettings(spec({ mode: "unrestricted", rules: ["ssh build1 *"], checks: ["bun test"] }), "win32");
+    expect(s).toEqual({
+      permissions: {
+        allow: ["Bash"],
+        deny: [
+          "Bash(git *)",
+          "Bash(*/git *)",
+          "Bash(git.exe *)",
+          "Bash(*/git.exe *)",
+          "Bash(*\\git.exe *)",
+          "Bash(*bitbucket.example.test*)",
+          "Bash(*jira.example.test*)",
+        ],
+        disableBypassPermissionsMode: "disable",
+      },
+    });
   });
 
   test("Any command: a saved ssh pattern lifts only the ssh deny rule; curl, scp, rsync, and the others stay denied", () => {
@@ -206,7 +227,7 @@ describe("approved checks as allow rules (spec.md section 6.21.1)", () => {
   });
   const hosts = hostsOf(ORIGINS);
   const plain = "An argument holds a character that is not a letter, a digit, or one of _ . / : = @ % + , -.";
-  const shellWord = "A shell or a command runner can run any command. Use Any command instead.";
+  const shellWord = "A shell or a command runner can run any command. Use Most commands instead.";
   test("each build, test, or lint argv of plain words qualifies once; setup does not; each other one gets a note with its reason", () => {
     expect(
       checkRules(
@@ -251,6 +272,11 @@ describe("approved checks as allow rules (spec.md section 6.21.1)", () => {
       checks: ["ssh build1 make test"],
       notes: ['The step cannot run the check "scp -r repo build1:/tmp". The deny list refuses scp.'],
     });
+    // Unrestricted denies no network program, also with no saved pattern.
+    expect(checkRules(ssh, { mode: "unrestricted", rules: [], hosts })).toEqual({
+      checks: ["ssh build1 make test", "scp -r repo build1:/tmp"],
+      notes: [],
+    });
   });
 });
 
@@ -268,7 +294,7 @@ describe("child env of a shell step", () => {
         gcm_interactive: "always",
         BASH_MAX_TIMEOUT_MS: "1",
       },
-      600,
+      { mode: "allowlist", bashTimeoutSec: 600 },
     );
     expect(env).toEqual({
       HOME: "/home/someone",
@@ -286,6 +312,14 @@ describe("child env of a shell step", () => {
       BASH_DEFAULT_TIMEOUT_MS: "600000",
       BASH_MAX_TIMEOUT_MS: "600000",
     });
+  });
+
+  test("Gate B31: Any command and Unrestricted leave out CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, also a copy from the parent env", () => {
+    for (const mode of ["any", "unrestricted"] as const) {
+      const env = shellEnv({ PATH: "/usr/bin", claude_bash_maintain_project_working_dir: "1" }, { mode, bashTimeoutSec: 60 });
+      expect(Object.keys(env).map((k) => k.toUpperCase())).not.toContain("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR");
+      expect(env).toMatchObject({ PATH: "/usr/bin", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", BASH_MAX_TIMEOUT_MS: "60000" });
+    }
   });
 });
 
@@ -328,7 +362,7 @@ describe("allowPattern", () => {
   test("a shell or a command runner asks for Any command", () => {
     const shells = ["bash", "sh", "zsh", "dash", "fish", "cmd", "powershell", "pwsh", "wsl", "env", "eval", "exec", "xargs"];
     for (const s of [...shells, "sudo", "su", "doas", "runas", "watch", "setsid", "flock", "cmd.exe", "pwsh-preview", "/bin/bash"])
-      expect([s, check(`${s} x *`)]).toEqual([s, "A shell or a command runner can run any command. Use Any command instead."]);
+      expect([s, check(`${s} x *`)]).toEqual([s, "A shell or a command runner can run any command. Use Most commands instead."]);
   });
 
   test("an interpreter pattern passes with a warning; other patterns have none", () => {
@@ -400,7 +434,11 @@ describe("allow requests and the allowlist", () => {
     expect(r.notes).toEqual(["Claude asked for more than 3 commands. The app left out make d."]);
     expect(allowAsks({ ...base, mode: "any", requests: four })).toEqual({
       asks: [],
-      notes: ["Any command is on, so the app ignored the allow requests of the step."],
+      notes: ['The mode "Most commands" is on, so the app ignored the allow requests of the step.'],
+    });
+    expect(allowAsks({ ...base, mode: "unrestricted", requests: four, killed: true })).toEqual({
+      asks: [],
+      notes: ['The mode "Unrestricted" is on, so the app ignored the allow requests of the step.'],
     });
   });
 
@@ -417,7 +455,7 @@ describe("allow requests and the allowlist", () => {
       { id: "a2", pattern: "scp -r repo build1:*", reason: "Copy.", source: "request", addedAt: 9 },
     ]);
     expect(mergeAllow(stored, [{ pattern: "bash -c *", reason: "" }], "user", hosts, 9)).toEqual({
-      error: "bash -c *: A shell or a command runner can run any command. Use Any command instead.",
+      error: "bash -c *: A shell or a command runner can run any command. Use Most commands instead.",
     });
     const many = Array.from({ length: 50 }, (_, k) => ({ pattern: `make t${k}`, reason: "" }));
     expect(mergeAllow(stored, many, "user", hosts, 9)).toEqual({ error: "The list can hold at most 50 patterns." });

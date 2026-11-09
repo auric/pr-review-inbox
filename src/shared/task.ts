@@ -349,8 +349,9 @@ export const taskCommand = z.object({
 export type TaskCommand = z.infer<typeof taskCommand>;
 
 // docs/plans/review-v2/spec.md section 6.21: the commands that Claude may run with the Bash tool. allowlist: the rules Bash(<pattern>).
-// any: every command. The fixed deny list applies in both modes (src/server/tasks/shell.ts).
-export const SHELL_MODES = ["allowlist", "any"] as const;
+// any: every command except the fixed deny list. unrestricted: every command except git and the Bitbucket and Jira hosts
+// (src/server/tasks/shell.ts).
+export const SHELL_MODES = ["allowlist", "any", "unrestricted"] as const;
 export type ShellMode = (typeof SHELL_MODES)[number];
 export const ALLOW_PATTERN_MAX = 200;
 export const BASH_TIMEOUT_MAX_SEC = 3600;
@@ -386,7 +387,7 @@ export const refusedLine = (pattern: string) => `The user refused ${pattern}. Do
 const SHELLS = ["bash", "sh", "zsh", "dash", "fish", "cmd", "wsl", "env", "eval", "exec", "xargs", "sudo", "su", "doas", "runas"];
 const RUNNERS = ["watch", "setsid", "flock"];
 export const CREDENTIAL_TOOLS = ["secret-tool", "security", "cmdkey", "kwallet-query", "keyring"];
-// The network programs of the deny list. In allowlist mode, a saved pattern lifts the deny rule of its program. In Any command mode,
+// The network programs of the deny list. In allowlist mode, a saved pattern lifts the deny rule of its program. In Most commands mode,
 // only a saved pattern for ssh lifts its deny rule: deny rules cannot except one host, so that lets every ssh command run.
 export const NETWORK_TOOLS = ["curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "tftp", "sftp", "scp", "ssh", "rsync"];
 export const ANY_LIFTS = ["ssh"];
@@ -409,7 +410,7 @@ export function allowProblem(pattern: string, hosts: readonly string[]): string 
   if (/[\r\n]/.test(p)) return "Write the pattern on one line.";
   if (/[()`;&|<>]/.test(p)) return "A pattern cannot contain ( ) ` ; & | < or >. Add one pattern for each command.";
   if ((p.split(/\s+/)[0] ?? "").includes("*")) return "Start the pattern with a program name. The first word cannot contain *.";
-  if (anyShell(program)) return "A shell or a command runner can run any command. Use Any command instead.";
+  if (anyShell(program)) return "A shell or a command runner can run any command. Use Most commands instead.";
   if (program === "git") return "Claude cannot run git commands.";
   if (CREDENTIAL_TOOLS.includes(program)) return "This program reads stored passwords and keys. Claude cannot run it.";
   const low = p.toLowerCase();
@@ -526,6 +527,9 @@ export const stepDetail = z.object({
   // A Claude step: the targets of its Write and Edit calls that ended without an error, from the part folder. The next commit takes the
   // new files among them (spec.md section 6.7, Commit).
   written: z.array(z.string()).default([]),
+  // A shell step that ended ok: the new files that git does not ignore and that its Bash commands wrote, from the part folder. The commit
+  // leaves them out. The next Claude step reads them in context/failure.md (spec.md section 6.21.5).
+  bashFiles: z.array(z.string()).default([]),
   // spec.md section 6.18.6.
   instruct: instructDetail.nullable().default(null),
   update: updateDetail.nullable().default(null),

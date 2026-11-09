@@ -385,20 +385,26 @@ export function implementPrompt(
   // spec.md section 6.21, D3, D6, and D7.
   const ask =
     "When Claude Code refuses a command that the step needs, do not try another form of it. End the step: set allowRequest with the narrowest pattern, the refused command, and a reason. Set done to false.";
+  // Gate B31: the read block of allowlist mode refuses every cd. The other modes run `cd repo && <command>`.
   const shellLines = !shell
     ? []
     : [
-        ...(shell.mode === "any"
+        ...(shell.mode === "allowlist"
           ? [
-              "You can run commands with the Bash tool. A fixed deny list refuses git and some other commands. Do not try another form of a refused command.",
-            ]
-          : [
               `You can run only these commands: ${[...shell.rules, ...checks.map((c) => `${c} *`)].map((r) => `\`${r}\``).join(", ")}. Read-only commands, such as ls, cat, grep, and rg, also run. Claude Code refuses every other command.`,
               ask,
               "Never ask to allow a read-only command, git, a shell, or the Bitbucket or Jira host.",
               ...(mode === "instruct" ? ["When the request asks for allowlist changes, set allowRequest and change no file."] : []),
+              "Use paths such as repo/src/file.ts. Never run cd. For a tool that must run in the repository, use its folder option, such as make -C repo or npm --prefix repo.",
+            ]
+          : [
+              shell.mode === "any"
+                ? "You can run commands with the Bash tool. A fixed deny list refuses git and some other commands. Do not try another form of a refused command."
+                : "You can run every command with the Bash tool, except git and commands that name the Bitbucket or Jira host. Do not try another form of a refused command.",
+              "You may run `cd repo` before a command that must run in the repository.",
             ]),
-        "Run each command from the current folder, with paths such as repo/src/file.ts or context/task.md. When a command must run inside the repository, such as a test command, first run `cd repo` as a command of its own. Never join cd with another command.",
+        "Change files only with the Edit and Write tools. Read a file before you edit it. Never write files with Bash redirection, tee, or a heredoc.",
+        "When ./context/failure.md lists new files that a Bash command wrote, write each file that the step needs with the Write tool.",
         "Pipe long build output through `tail -n 200`.",
         "Wrap each remote command in `timeout <seconds>` on the build host.",
       ];
@@ -592,6 +598,23 @@ async function claimedFiles(db: Database, part: number, dir: string, wts: readon
   }
   return out;
 }
+
+// spec.md section 6.21.5: the untracked files that git does not ignore, in each worktree of the part, by path from the part folder.
+async function untracked(dir: string, wts: readonly Worktree[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const wt of wts)
+    for (const p of (await wtGit(wt, ["ls-files", "-z", "--others", "--exclude-standard"])).split("\0").filter(Boolean))
+      out.push(relative(dir, join(wt.repo, p)).replaceAll("\\", "/"));
+  return out;
+}
+
+const foldPath = (p: string) => p.split("/").map(fold).join("/");
+
+// The new files of a shell step that StepDetail.bashFiles holds, and that context/failure.md of the next step lists.
+export const BASH_FILES_MAX = 20;
+export const bashLine = (p: string) => `Write ${p} with the Write tool, so it is committed.`;
+const bashNote = (files: readonly string[]) =>
+  `Not committed: ${files.length} new ${files.length === 1 ? "file" : "files"} that a Bash command wrote (${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${files.length - 3} more` : ""}). The next step reads: ${bashLine("<path>")}`;
 
 // spec.md section 6.7, Commit: the path check first (without the folder outside repo/), because a check command can leave a link or a
 // denied file. It checks the tracked changes and the new files that the commit takes. Then commitStep with the user's name and email.
@@ -822,8 +845,12 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     return { status: 409, blocked: b };
   }
   let ignored: IgnoredSnapshot;
+  // spec.md section 6.21.5: the new files before a shell step, so the step can name the new files that its Bash commands wrote.
+  const wts = i.trees && i.trees.length > 1 ? i.trees.flatMap((t) => (t.wt ? [t.wt] : [])) : [wt];
+  let fresh: Set<string> | null = null;
   try {
     ignored = await ignoredSnapshot(wt);
+    if (i.shell) fresh = new Set((await untracked(wt.dir, wts)).map(foldPath));
   } catch (e) {
     const b: TaskBlocked = { kind: "error", step: null, text: `Needs you: ${noUrl((e as Error).message)}` };
     db.transaction(() => {
@@ -855,6 +882,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   let locked: PathProblem | null = null;
   let patch: string | null = null;
   let written: string[] = [];
+  let bashFiles: string[] = [];
   let refused: Refusal[] = [];
   let killed = false;
   let shellRun: StepDetail["shell"] = null;
@@ -895,6 +923,11 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       // D8: the Write and Edit targets under repo/, from the main repository root.
       const own = i.shell ? written.filter((p) => p.startsWith("repo/")).map((p) => p.slice("repo/".length)) : undefined;
       try {
+        if (fresh) {
+          const before = fresh;
+          const mine = new Set(written.map(foldPath));
+          bashFiles = (await untracked(wt.dir, wts)).filter((p) => !before.has(foldPath(p)) && !mine.has(foldPath(p)));
+        }
         const file = patchFile(i.review.dataDir, db, i.task, step);
         if (i.resolveCheck) check = { changed: [], problems: await i.resolveCheck(context, ignored), links: [], outside: [], ignored: [] };
         else if (trees) {
@@ -916,6 +949,8 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       const result = problems.length || broken ? null : ((e.result?.task as ImplementResult | undefined) ?? null);
       const ran = !broken && (e.status === "completed" || e.status === "incomplete");
       const state: StepState = problems.length || broken ? "failed" : ran ? "ok" : e.status === "cancelled" ? "cancelled" : "failed";
+      // A failed or refused step goes back to the last commit, so only a step that ended ok keeps its new files.
+      const kept = state === "ok" ? bashFiles.slice(0, BASH_FILES_MAX) : [];
       endStep(
         d,
         step,
@@ -927,11 +962,13 @@ export async function startStep(i: StepInput): Promise<StepStart> {
             ...(i.shell?.notes ?? []),
             ...(broken ? [broken] : []),
             ...problems.map((p) => `${p.path}: ${p.reason}`),
+            ...(state === "ok" && bashFiles.length ? [bashNote(bashFiles)] : []),
             ...(result?.notes ?? []),
           ],
           summary: result?.summary ?? null,
           needsBase: result?.needsBase ? { reason: result.needsBaseReason } : null,
           written,
+          bashFiles: kept,
           shell: shellRun,
         },
         now(),

@@ -37,7 +37,8 @@ export type ShellSpec = {
 // The shell of one task step. The run adds dataDir and origins. notes: go into the step notes (checkRules).
 export type StepShell = Pick<ShellSpec, "mode" | "rules" | "checks" | "bashTimeoutSec"> & { notes?: string[] };
 
-// A deny rule wins over every allow rule, in both modes (V5).
+// A deny rule wins over every allow rule, in each mode (V5). Gate B32: a deny rule per git subcommand misses `git -C repo push`, so every
+// mode denies all of git.
 const GIT_DENY = ["Bash(git *)", "Bash(*/git *)", "Bash(git.exe *)", "Bash(*/git.exe *)", "Bash(*\\git.exe *)"];
 // Read-only search in allowlist mode. The CLI folder check still guards their paths (shell.md, run 2).
 export const SEARCH_RULES = ["grep *", "rg *"];
@@ -49,6 +50,7 @@ const HOME_DENY = ["Read(~/.ssh/**)", "Read(~/.git-credentials)", "Read(~/.netrc
 // go into a rule.
 const RULE_UNSAFE = /[()*?[\]\\]/;
 const PLAIN_ARG = /^[A-Za-z0-9_./:=@%+,-]+$/;
+const V15 = "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR";
 
 export const hostsOf = (origins: readonly string[]) => [...new Set(origins.map((o) => new URL(o).hostname.toLowerCase()))];
 
@@ -93,8 +95,13 @@ export function allowAsks(i: {
   refusedBefore: ReadonlySet<string>;
   hosts: readonly string[];
 }): { asks: AllowRequest[]; notes: string[] } {
-  if (i.mode === "any")
-    return { asks: [], notes: i.requests.length ? ["Any command is on, so the app ignored the allow requests of the step."] : [] };
+  if (i.mode === "any" || i.mode === "unrestricted")
+    return {
+      asks: [],
+      notes: i.requests.length
+        ? [`The mode "${i.mode === "any" ? "Most commands" : "Unrestricted"}" is on, so the app ignored the allow requests of the step.`]
+        : [],
+    };
   const denied = new Set(i.refused.filter((r) => r.by === "deny").map((r) => r.command));
   const asked = i.killed
     ? i.refused
@@ -128,15 +135,16 @@ export function rulePath(dir: string, platform: NodeJS.Platform = process.platfo
 }
 
 // The network programs whose deny rule a saved pattern lifts: each one that a pattern names as its program in allowlist mode, and only
-// ssh in Any command mode.
+// ssh in Most commands mode. Unrestricted denies none of them.
 const lifted = (mode: ShellMode, rules: readonly string[]) => {
+  if (mode === "unrestricted") return new Set(NETWORK_TOOLS);
   const named = new Set(rules.map(programOf));
   return new Set(NETWORK_TOOLS.filter((n) => named.has(n) && (mode === "allowlist" || ANY_LIFTS.includes(n))));
 };
 
 // The settings file of a shell step. A network program stays denied unless a saved pattern lifts it (lifted). xargs stays denied in
-// allowlist mode unless a saved pattern names it. Gate facts do not confirm that `Bash(<argv> *)` matches the bare argv, so each
-// check also gets the exact rule.
+// allowlist mode unless a saved pattern names it. Each check also gets the exact rule, which SU15 shows is not needed. Gate B31: the read
+// block refuses every cd, so only allowlist mode keeps it. Unrestricted denies only git and the hosts (user decision of 2026-11-06).
 export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = process.platform) {
   const t = spec.bashTimeoutSec;
   const checks = spec.checks ?? [];
@@ -148,20 +156,25 @@ export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = proce
   const open = lifted(spec.mode, spec.rules);
   const data = rulePath(longPath(spec.dataDir), platform);
   const allow = [...new Set([...spec.rules, ...checks.flatMap((c) => [`${c} *`, c]), ...SEARCH_RULES])];
+  const list = spec.mode === "allowlist";
+  const hosts = hostsOf(spec.origins).map((h) => `Bash(*${h}*)`);
   return {
     permissions: {
-      allow: spec.mode === "any" ? ["Bash"] : allow.map((r) => `Bash(${r})`),
-      deny: [
-        ...GIT_DENY,
-        ...hostsOf(spec.origins).map((h) => `Bash(*${h}*)`),
-        ...NETWORK_TOOLS.filter((n) => !open.has(n)).map((n) => `Bash(${n} *)`),
-        // Outside Windows, the CLI runs xargs with no allow rule. Its folder check misses paths from stdin (shell.md, run 2).
-        ...(spec.mode === "allowlist" && !named.has("xargs") ? ["Bash(xargs *)"] : []),
-        ...CREDENTIAL_DENY,
-        ...DATA_DENY.map((f) => `Read(${data}/${f})`),
-        ...HOME_DENY,
-      ],
-      blockReadsOutsideWorkingDirectories: true,
+      allow: list ? allow.map((r) => `Bash(${r})`) : ["Bash"],
+      deny:
+        spec.mode === "unrestricted"
+          ? [...GIT_DENY, ...hosts]
+          : [
+              ...GIT_DENY,
+              ...hosts,
+              ...NETWORK_TOOLS.filter((n) => !open.has(n)).map((n) => `Bash(${n} *)`),
+              // Outside Windows, the CLI runs xargs with no allow rule. Its folder check misses paths from stdin (shell.md, run 2).
+              ...(list && !named.has("xargs") ? ["Bash(xargs *)"] : []),
+              ...CREDENTIAL_DENY,
+              ...DATA_DENY.map((f) => `Read(${data}/${f})`),
+              ...HOME_DENY,
+            ],
+      ...(list && { blockReadsOutsideWorkingDirectories: true }),
       disableBypassPermissionsMode: "disable",
     },
   };
@@ -201,9 +214,10 @@ export function checkRules(
 }
 
 // D5: the real HOME stays, so ssh finds its keys and config. No askpass program, no git credential helper, and no prompt. V13: the CLI
-// reads the Bash time limits from the env. Windows env names ignore case, so a set name replaces each spelling of it.
-export function shellEnv(base: Record<string, string>, bashTimeoutSec: number): Record<string, string> {
-  const ms = String(bashTimeoutSec * 1000);
+// reads the Bash time limits from the env. Windows env names ignore case, so a set name replaces each spelling of it. Gate B31: V15 resets
+// the cwd after each command, so only allowlist mode sets it. The other modes let `cd repo` carry over to the next command.
+export function shellEnv(base: Record<string, string>, shell: Pick<ShellSpec, "mode" | "bashTimeoutSec">): Record<string, string> {
+  const ms = String(shell.bashTimeoutSec * 1000);
   const set: Record<string, string> = {
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "credential.helper",
@@ -212,14 +226,14 @@ export function shellEnv(base: Record<string, string>, bashTimeoutSec: number): 
     GCM_INTERACTIVE: "never",
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
-    CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "1",
+    ...(shell.mode === "allowlist" && { [V15]: "1" }),
     BASH_DEFAULT_TIMEOUT_MS: ms,
     BASH_MAX_TIMEOUT_MS: ms,
   };
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
     const K = k.toUpperCase();
-    if (!K.startsWith("GIT_") && K !== "SSH_ASKPASS" && !(K in set)) env[k] = v;
+    if (!K.startsWith("GIT_") && K !== "SSH_ASKPASS" && K !== V15 && !(K in set)) env[k] = v;
   }
   return { ...env, ...set };
 }

@@ -482,7 +482,7 @@ export function resumeArgs(spec: ResumeSpec) {
 // The MCP flags are those of a review run (prepare). The init check accepts only these tools, the denied MCP tools, and StructuredOutput.
 // A shell step (spec.md section 6.21) adds Bash to --tools and the Bash rules in shell.json. No dontAsk: shellEnv sets
 // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, which forces the default mode. In -p, the default mode refuses each command that has no allow
-// rule (SU1).
+// rule (SU1). Unrestricted uses the same flags: --restricted refuses bypassPermissions, and dontAsk refuses more (Gate B32).
 export function implementArgs(spec: ImplementSpec) {
   const builtins = [...IMPLEMENT_TOOLS, ...(spec.shell ? ["Bash"] : [])];
   if (spec.model != null && !modelName.safeParse(spec.model).success) throw new Error(`Invalid model name: ${spec.model}`);
@@ -586,7 +586,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
-        env: { ...(shell ? shellEnv(childEnv(), shell.bashTimeoutSec) : childEnv()), [RUN_MARKER]: marker },
+        env: { ...(shell ? shellEnv(childEnv(), shell) : childEnv()), [RUN_MARKER]: marker },
         stdin: new Blob([spec.prompt]),
         stdout: "pipe",
         stderr: "pipe",

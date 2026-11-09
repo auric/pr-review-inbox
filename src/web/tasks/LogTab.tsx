@@ -311,7 +311,7 @@ function ShellRows({ shell, runner }: { shell: NonNullable<StepDetail["shell"]>;
   const n = shell.commands.length;
   return (
     <div data-step-shell className="grid gap-1">
-      <p className={cn("m-0 text-xs", shell.mode === "any" ? "font-medium text-warn" : "text-ink-2")}>
+      <p className={cn("m-0 text-xs", shell.mode === "allowlist" ? "text-ink-2" : "font-medium text-warn")}>
         {shellText(shell.mode, shell.rules.length, shell.checks.length)}
         {shell.refused > 0 && `. Refused: ${shell.refused}`}
       </p>

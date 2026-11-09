@@ -52,6 +52,7 @@ import { type BranchRemote, type ContextFile, cachePath, longPath, noUrl } from 
 import { branchPrefixesOf, type Settings } from "../settings";
 import { CHECK_KINDS, type ChecksResult, checkStep, type Scope } from "./checks";
 import {
+  bashLine,
   commitTask,
   endStep,
   insertStep,
@@ -317,6 +318,21 @@ export function reviewFailure(points: Point[]): ContextFile {
   return { name: "failure.md", text: out.join("\n") };
 }
 
+// spec.md section 6.21.5: context/failure.md of the step after a shell step whose Bash commands wrote new files. files: the new files
+// that are still on disk. A failure.md of the step keeps its text, and this section follows it.
+export function bashFailure(failure: ContextFile | undefined, files: readonly string[]): ContextFile | undefined {
+  if (!files.length) return failure;
+  const out = [
+    "# New files that are not committed",
+    "",
+    "A Bash command of the last step wrote these new files. The app commits a new file only when the Write tool wrote it. Leave out a file that the step does not need.",
+    "",
+    ...files.map((p) => `- ${bashLine(p)}`),
+    "",
+  ].join("\n");
+  return { name: "failure.md", text: failure ? `${failure.text.trimEnd()}\n\n${out}` : out };
+}
+
 type PartRow = {
   id: number;
   ord: number;
@@ -427,6 +443,9 @@ const Q = {
   // spec.md section 6.21: the last run of one step, the allow blocks of a part, and the steps of a task that asked to allow commands.
   lastRun: `SELECT detail_json FROM task_step WHERE part = $part AND kind = $kind AND item = $item AND run IS NOT NULL
     ORDER BY id DESC LIMIT 1`,
+  // spec.md section 6.21.5: the last Claude step of a part that ended.
+  lastClaude: `SELECT detail_json FROM task_step WHERE part = $part AND kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve')
+    AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1`,
   allowBlocks: "SELECT COUNT(*) AS n FROM task_step WHERE part = $part AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
   allowAsks: "SELECT detail_json FROM task_step WHERE task = $task AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
   // spec.md section 6.7, Baseline: the checks on the part base, and whether the part ran them or a Claude step already.
@@ -709,6 +728,8 @@ export function createLoop(opts: LoopOptions) {
       const shell = shellOf(c, mode, item);
       const refused = SHELL_STEPS.has(mode) ? [...refusedOf(c.db, c.id)] : [];
       const stepMd = o.step(attempt);
+      // spec.md section 6.21.5: a resolve step may make no new file.
+      const failure = mode === "resolve" ? o.failure : bashFailure(o.failure, bashLeft(c));
       let out: StepOutcome | null = null;
       const s = await startStep({
         db: c.db,
@@ -720,7 +741,7 @@ export function createLoop(opts: LoopOptions) {
         item,
         attempt,
         profile: c.profile,
-        untrusted: [...task.files, ...(o.failure ? [o.failure] : [])],
+        untrusted: [...task.files, ...(failure ? [failure] : [])],
         attachments: task.attachments,
         own: [
           ...(answers ? [answers] : []),
@@ -755,10 +776,17 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
-  // spec.md section 6.21: the Bash tool of a tests, implement, fix, or instruct step. Bash is on in Any command mode, or when the
-  // allowlist of the repository or an "Allow once" of the last run of this step holds a pattern, or when "Claude may run the approved
-  // checks" gives a check (checkRules). The rules hold the saved patterns in both modes, so a saved pattern can lift the deny rule of a
-  // network program (shell.ts). Any command mode lists the checks for the prompt only and gives no notes: every command can run there.
+  // spec.md section 6.21.5: the new files that the Bash commands of the last Claude step of the part wrote, while they are on disk. A
+  // reset to the last commit removes them.
+  function bashLeft(c: Ctx): string[] {
+    const r = c.db.query(Q.lastClaude).get({ part: c.part.id }) as { detail_json: string } | null;
+    return r ? stepDetail.parse(JSON.parse(r.detail_json)).bashFiles.filter((p) => existsSync(join(c.wt.dir, p))) : [];
+  }
+
+  // spec.md section 6.21: the Bash tool of a tests, implement, fix, or instruct step. Bash is on in Most commands and Unrestricted mode, or
+  // when the allowlist of the repository or an "Allow once" of the last run of this step holds a pattern, or when "Claude may run the
+  // approved checks" gives a check (checkRules). The rules hold the saved patterns in each mode, so a saved pattern can lift the deny rule
+  // of a network program (shell.ts). Most commands and Unrestricted list the checks for the prompt only and give no notes.
   function shellOf(c: Ctx, mode: StepMode, item: string): StepShell | null {
     if (!SHELL_STEPS.has(mode)) return null;
     const repo = repoSettings(c.db, c.t.project, c.t.repo);
@@ -766,7 +794,7 @@ export function createLoop(opts: LoopOptions) {
     const ask = last ? stepDetail.parse(JSON.parse(last.detail_json)).allowAsk : null;
     const once = (ask?.decisions ?? []).filter((d) => d.choice === "once").map((d) => d.pattern);
     const rules = [...new Set([...repo.allow.map((e) => e.pattern), ...once])];
-    const any = repo.shellMode === "any";
+    const any = repo.shellMode !== "allowlist";
     const run =
       any || repo.runChecks
         ? checkRules(repo.commands, { mode: repo.shellMode, rules, hosts: hostsOf(originsOf(settings.config())) })

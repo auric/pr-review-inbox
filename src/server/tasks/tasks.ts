@@ -440,7 +440,7 @@ export function saveAllow(db: Database, project: string, repo: string, allow: re
 
 // PUT /api/repos/:project/:repo/task-settings. hosts: the Bitbucket and Jira host names for allowProblem. Returns the reason for 400,
 // or null. spec.md section 6.21: the first non-empty allowlist, the first switch to "Claude may run the approved checks", and each switch to
-// Any command need shellWarning.
+// Most commands or to Unrestricted need shellWarning.
 export function saveRepoSettings(
   db: Database,
   project: string,
@@ -461,7 +461,7 @@ export function saveRepoSettings(
     allow = merged;
   }
   const added = allow.some((e) => !cur.allow.some((x) => x.pattern === e.pattern));
-  const toAny = mode === "any" && cur.shellMode !== "any";
+  const toAny = mode !== "allowlist" && mode !== cur.shellMode;
   const runChecks = s.runChecks ?? cur.runChecks;
   const toChecks = runChecks && !cur.runChecks;
   if ((((added || toChecks) && cur.shellWarnedAt === null) || toAny) && !s.shellWarning) return SHELL_WARNING_FIRST;

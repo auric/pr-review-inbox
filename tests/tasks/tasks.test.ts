@@ -1036,6 +1036,14 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
     expect((await put({ shellMode: "any" })).body).toEqual({ error: "Accept the warning for commands that Claude runs first." });
     expect((await put({ shellMode: "any", shellWarning: true })).status).toBe(200);
     expect((await get()).body).toMatchObject({ shellMode: "any", bashTimeoutSec: 900 });
+    // Each switch to Unrestricted needs the warning too, also from Any command. Staying in a mode and going back to allowlist do not.
+    expect((await put({ shellMode: "unrestricted" })).body).toEqual({ error: "Accept the warning for commands that Claude runs first." });
+    expect((await put({ shellMode: "unrestricted", shellWarning: true })).status).toBe(200);
+    expect((await put({ shellMode: "unrestricted" })).status).toBe(200);
+    expect((await get()).body).toMatchObject({ shellMode: "unrestricted" });
+    expect((await put({ shellMode: "any" })).body).toEqual({ error: "Accept the warning for commands that Claude runs first." });
+    expect((await put({ shellMode: "allowlist" })).status).toBe(200);
+    expect((await put({ shellMode: "bypass" })).status).toBe(400);
   });
 
   test('spec.md section 6.21.1: "Claude may run the approved checks" is off by default; the first switch to on needs the shell warning', async () => {
@@ -1099,7 +1107,7 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
       expect((await plan({ allow: ["nope"] })).body).toEqual({ error: "Command pattern nope is not in the plan." });
       expect((await plan({ allow: ["new-1", "new-1"] })).body).toEqual({ error: "Each command pattern is picked once." });
       expect((await plan({ allow: [{ id: "new-u2", pattern: "bash -c *", reason: "" }], shellWarning: true })).body).toEqual({
-        error: "bash -c *: A shell or a command runner can run any command. Use Any command instead.",
+        error: "bash -c *: A shell or a command runner can run any command. Use Most commands instead.",
       });
       const warn = await plan({ allow: picks });
       expect([warn.status, warn.body.error]).toEqual([400, "Accept the warning for commands that Claude runs first."]);

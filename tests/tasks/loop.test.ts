@@ -134,6 +134,7 @@ type Call = {
   attachments: string[];
   skills?: string[];
   agents?: Record<string, { prompt: string }> | null;
+  env: Record<string, string>;
 };
 type Step = { id: number; kind: string; state: string; item: string | null; attempt: number; run: number | null; detail_json: string };
 
@@ -641,6 +642,45 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.blocked()).toBeNull();
       expect(s.part().state).toBe("self_reviewed");
       expect(s.steps().filter((x) => x.kind === "check" && x.item === "base")).toHaveLength(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "6.21.5: Unrestricted runs with its own shell.json; a new file that a Bash command wrote stays out of the commit and goes to the step notes and failure.md",
+    async () => {
+      const GEN = "repo/src/gen.ts";
+      const s = await setup({
+        seq: {
+          "implement:implement": [
+            { writes: [TODO], bash: [{ command: "bun run gen", files: [{ path: GEN, text: "gen\n" }], output: "ok" }] },
+          ],
+        },
+      });
+      s.db.run("UPDATE repo_task_settings SET shell_mode = 'unrestricted'");
+      await s.build();
+      expect(s.part().state).toBe("self_reviewed");
+      const impl = s.steps().find((x) => x.kind === "implement") as Step;
+      const d = JSON.parse(impl.detail_json);
+      expect(d.bashFiles).toEqual([GEN]);
+      expect(d.notes).toContain(
+        "Not committed: 1 new file that a Bash command wrote (repo/src/gen.ts). The next step reads: Write <path> with the Write tool, so it is committed.",
+      );
+      expect(d.shell.mode).toBe("unrestricted");
+      // The fix step after the red checks gets the check output and then the new file.
+      const fix = s.runCalls().find((c) => s.modeOf(c) === "fix") as Call;
+      const failure = fix.context["failure.md"] ?? "";
+      expect(failure).toContain("# Check output");
+      expect(failure).toContain("# New files that are not committed");
+      expect(failure).toContain(`- Write ${GEN} with the Write tool, so it is committed.`);
+      expect(failure.indexOf("# Check output")).toBeLessThan(failure.indexOf("# New files"));
+      expect(fix.stdin).toContain("You may run `cd repo` before a command that must run in the repository.");
+      expect(Object.keys(fix.env).map((k) => k.toUpperCase())).not.toContain("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR");
+      // The commit leaves the file on disk and out of the branch.
+      const w = await s.wt();
+      expect(existsSync(join(w.dir, GEN))).toBe(true);
+      expect(await git([`--git-dir=${w.admin}`, "ls-tree", "-r", "--name-only", "HEAD"], { env: w.env })).not.toContain("src/gen.ts");
+      expect((await s.log()).length).toBeGreaterThan(0);
     },
     SLOW,
   );

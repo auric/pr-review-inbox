@@ -3,7 +3,7 @@
 
 // The editable list "Commands <runner> may run" (docs/plans/review-v2/spec.md section 6.21): a pattern and a reason per row, Remove, and
 // "Add a pattern". Settings > Commands edits every row. The plan screen adds a tick per row and shows a saved row read-only as "approved
-// before". ShellDialog holds the first-use warning and the Any command confirm (section 6.21.8).
+// before". ShellDialog holds the first-use warning and the Most commands confirm (section 6.21.8).
 import { CircleAlert, Plus, TriangleAlert, X } from "lucide-react";
 import { useRef } from "react";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,18 @@ import { dialogKeys } from "../fix/CloneDialog";
 import { useMeta } from "../meta";
 import { trackerOf } from "../review/tasks";
 import { Hint } from "../shell/Hint";
-import { type AllowDraft, ANY_TITLE, allowDraftProblem, anyText, type ShellNames, SOURCE_TEXT, warningText, warningTitle } from "./allow";
+import {
+  type AllowDraft,
+  ANY_TITLE,
+  allowDraftProblem,
+  anyText,
+  type ShellNames,
+  SOURCE_TEXT,
+  UNRESTRICTED_TITLE,
+  unrestrictedText,
+  warningText,
+  warningTitle,
+} from "./allow";
 import { freeId } from "./commands";
 
 // The product names of the texts, from GET /api/meta. The shell renders its panes only after meta loads.
@@ -186,8 +197,9 @@ export function AllowEditor(props: {
   );
 }
 
-// kind warning: the first-use warning ("I understand"). kind any: the confirm of each switch to Any command. run: the confirmed action.
-export type ShellAsk = { kind: "warning" | "any"; run: () => void };
+// kind warning: the first-use warning ("I understand"). kind any and unrestricted: the confirm of each switch to that mode. run: the
+// confirmed action.
+export type ShellAsk = { kind: "warning" | "any" | "unrestricted"; run: () => void };
 
 // The confirmed action runs after the dialog has closed and the focus is back on the control that opened it. So an action that moves
 // the focus, such as a new row, keeps that focus.
@@ -196,7 +208,12 @@ export function ShellDialog({ ask, onClose }: { ask: ShellAsk | null; onClose: (
   const pending = useRef<(() => void) | null>(null);
   const shown = useRef(ask);
   if (ask) shown.current = ask;
-  const any = shown.current?.kind === "any";
+  const kind = shown.current?.kind ?? "warning";
+  const text = {
+    warning: { title: warningTitle(names), body: warningText(names), action: "I understand" },
+    any: { title: ANY_TITLE, body: anyText(names), action: "Turn on Most commands" },
+    unrestricted: { title: UNRESTRICTED_TITLE, body: unrestrictedText(names), action: "Turn on Unrestricted" },
+  }[kind];
   return (
     <Dialog
       open={ask !== null}
@@ -211,22 +228,22 @@ export function ShellDialog({ ask, onClose }: { ask: ShellAsk | null; onClose: (
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <TriangleAlert aria-hidden className="size-4 shrink-0 text-warn" />
-            {any ? ANY_TITLE : warningTitle(names)}
+            {text.title}
           </DialogTitle>
-          <DialogDescription className="leading-relaxed">{any ? anyText(names) : warningText(names)}</DialogDescription>
+          <DialogDescription className="leading-relaxed">{text.body}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
           <Button
-            variant={any ? "destructive" : "default"}
+            variant={kind === "warning" ? "default" : "destructive"}
             onClick={() => {
               pending.current = ask?.run ?? null;
               onClose();
             }}
           >
-            {any ? "Turn on Any command" : "I understand"}
+            {text.action}
           </Button>
         </DialogFooter>
       </DialogContent>

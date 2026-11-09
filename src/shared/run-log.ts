@@ -31,7 +31,7 @@ export type RunEvent = {
 };
 
 // docs/plans/review-v2/spec.md section 6.21.4: the note of a Bash call that Claude Code refused, by what refused it. check: a Claude Code
-// safety check, which also refuses in Any command mode. The run log shows it as text, not as command output.
+// safety check, which also refuses in Most commands mode. The run log shows it as text, not as command output.
 export const REFUSED_NOTE: Record<"allowlist" | "deny" | "check", string> = {
   allowlist: "Refused by the allowlist",
   deny: "Refused by the deny list",

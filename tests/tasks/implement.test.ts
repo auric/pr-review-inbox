@@ -898,15 +898,58 @@ describe("the prompt lines of the shell state", () => {
     expect(l).toContain("Run the failing check first to see the failure. Run it again after your change.");
   });
 
-  test("Gate B30a: every shell step gives paths and never joins cd with another command", () => {
-    const CD =
-      "Run each command from the current folder, with paths such as repo/src/file.ts or context/task.md. When a command must run inside the repository, such as a test command, first run `cd repo` as a command of its own. Never join cd with another command.";
-    for (const mode of ["any", "allowlist"] as const) {
-      const l = lines("implement", { mode, rules: ["echo *"], checks: [], bashTimeoutSec: 600 });
-      expect(l).toContain(CD);
-      expect(l.join("\n")).not.toContain("cd repo &&");
+  test("Gate B31: allowlist never runs cd; Most commands and Unrestricted may run cd repo; every shell step edits with the file tools", () => {
+    const NO_CD =
+      "Use paths such as repo/src/file.ts. Never run cd. For a tool that must run in the repository, use its folder option, such as make -C repo or npm --prefix repo.";
+    const CD = "You may run `cd repo` before a command that must run in the repository.";
+    const EDIT =
+      "Change files only with the Edit and Write tools. Read a file before you edit it. Never write files with Bash redirection, tee, or a heredoc.";
+    const NEW =
+      "When ./context/failure.md lists new files that a Bash command wrote, write each file that the step needs with the Write tool.";
+    const of = (mode: "allowlist" | "any" | "unrestricted") =>
+      lines("implement", { mode, rules: ["echo *"], checks: [], bashTimeoutSec: 600 });
+    expect(of("allowlist")).toContain(NO_CD);
+    expect(of("allowlist")).not.toContain(CD);
+    for (const mode of ["any", "unrestricted"] as const) {
+      expect(of(mode)).toContain(CD);
+      expect(of(mode)).not.toContain(NO_CD);
     }
-    expect(lines("implement", null)).not.toContain(CD);
+    for (const mode of ["allowlist", "any", "unrestricted"] as const) {
+      expect(of(mode)).toContain(EDIT);
+      expect(of(mode)).toContain(NEW);
+      expect(of(mode).join("\n")).not.toContain("as a command of its own");
+    }
+    expect(of("unrestricted")).toContain(
+      "You can run every command with the Bash tool, except git and commands that name the Bitbucket or Jira host. Do not try another form of a refused command.",
+    );
+    expect(of("unrestricted").join("\n")).not.toContain("allowRequest");
+    for (const line of [NO_CD, CD, EDIT, NEW]) expect(lines("implement", null)).not.toContain(line);
+  });
+
+  test("Most commands and Unrestricted: no prompt line forbids cd or asks for paths instead of cd", () => {
+    for (const mode of ["any", "unrestricted"] as const)
+      for (const step of ["tests", "implement", "fix", "instruct"] as const) {
+        const text = implementPrompt(
+          step,
+          "specs/K-1/",
+          false,
+          false,
+          "x",
+          "",
+          { skills: [], mcp: [] },
+          {
+            mode,
+            rules: [],
+            checks: ["bun test"],
+            bashTimeoutSec: 600,
+          },
+        );
+        for (const l of text.split("\n").filter((x) => /\bcd\b/.test(x))) {
+          expect(l).not.toMatch(/never|not|instead|only from|of its own|join/i);
+          expect(l).toBe("You may run `cd repo` before a command that must run in the repository.");
+        }
+        expect(text).not.toMatch(/paths such as repo\/src\/file\.ts/);
+      }
   });
 
   test("fix mode: a broken command, a missing tool, or an environment fault changes no file and sets question", () => {
@@ -927,6 +970,39 @@ describe("the prompt lines of the shell state", () => {
 // the run over the refusal cap).
 describe("a step with the Bash tool", () => {
   const SHELL = { mode: "allowlist" as const, rules: ["echo *"], bashTimeoutSec: 600 };
+
+  test(
+    "6.21.5: bashFiles holds each new file that a Bash command wrote; a Write target, an older new file, and an ignored file do not count",
+    async () => {
+      const s = await setup();
+      writeFileSync(join(s.wt.repo, "older.txt"), "old\n");
+      const gen = {
+        command: "echo gen",
+        files: [
+          { path: "repo/src/gen.ts", text: "gen\n" },
+          { path: "repo/older.txt", text: "new\n" },
+          { path: "repo/src/new.ts", text: "bash\n" },
+          { path: "repo/ignored/out.o", text: "obj\n" },
+        ],
+        output: "ok",
+      };
+      s.scenario({ bash: [gen], writes: [{ path: "repo/src/new.ts", text: "by Write\n" }] });
+      const ok = await s.step({ shell: SHELL });
+      expect(ok.outcome?.problems).toEqual([]);
+      const d = JSON.parse(s.stepRow(ok.outcome?.step as number).detail_json);
+      expect(d.bashFiles).toEqual(["repo/src/gen.ts"]);
+      expect(d.notes).toContain(
+        "Not committed: 1 new file that a Bash command wrote (repo/src/gen.ts). The next step reads: Write <path> with the Write tool, so it is committed.",
+      );
+      await resetWorktree(s.wt, s.base);
+
+      // Control: a step without Bash keeps no list.
+      s.scenario({ bash: [{ ...gen, files: [{ path: "repo/src/gen2.ts", text: "gen\n" }] }] });
+      const plain = await s.step({});
+      expect(JSON.parse(s.stepRow(plain.outcome?.step as number).detail_json).bashFiles).toEqual([]);
+    },
+    SLOW,
+  );
 
   test(
     "D8: build output in ignored files passes; an ignored Write target and a new ignored link fail; without Bash the same output fails",

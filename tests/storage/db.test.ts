@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 46;
+const LATEST = 47;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1599,6 +1599,51 @@ test("migration from a version-44 database: task_cache is off, and a setup comma
     // 046_task_run_checks.sql: "Claude may run the approved checks" is off for each stored row.
     expect(db.query("SELECT run_checks FROM repo_task_settings ORDER BY repo").all()).toEqual([{ run_checks: 0 }, { run_checks: 0 }]);
     expect(() => db.run("UPDATE repo_task_settings SET run_checks = 2")).toThrow(/CHECK/);
+  } finally {
+    db.close();
+  }
+});
+
+// 047_task_unrestricted.sql: spec.md section 6.21.1, the shell mode unrestricted. The rebuild keeps each row and the column order.
+test("migration from a version-46 database: each settings row stays, and shell_mode takes unrestricted", () => {
+  const path = join(dir, "v46.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+    "041_build_status.sql",
+    "042_task_subtasks.sql",
+    "043_run_events.sql",
+    "044_task_shell.sql",
+    "045_task_setup.sql",
+    "046_task_run_checks.sql",
+  ]);
+  old.exec("PRAGMA user_version = 46");
+  old.exec(`INSERT INTO repo_task_settings (project, repo, commands_json, warned_at, updated_at, last_base, shell_mode, allow_json,
+    shell_warned_at, bash_timeout_sec, task_cache, run_checks) VALUES ('P', 'a', '[]', 5, 6, 'main', 'any', '[{"id":"a1"}]', 7, 900, 1, 1)`);
+  old.exec("INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ('P', 'b', 8)");
+  const before = old.query("SELECT * FROM repo_task_settings ORDER BY repo").all();
+  const oldColumns = columns(old, "repo_task_settings");
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(columns(db, "repo_task_settings")).toEqual(oldColumns);
+    expect(db.query("SELECT * FROM repo_task_settings ORDER BY repo").all()).toEqual(before);
+    db.run("UPDATE repo_task_settings SET shell_mode = 'unrestricted' WHERE repo = 'b'");
+    expect(() => db.run("UPDATE repo_task_settings SET shell_mode = 'all'")).toThrow(/CHECK/);
+    expect(() => db.run("UPDATE repo_task_settings SET bash_timeout_sec = 0")).toThrow(/CHECK/);
+    expect(() => db.run("INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ('P', 'a', 9)")).toThrow(/UNIQUE/);
   } finally {
     db.close();
   }

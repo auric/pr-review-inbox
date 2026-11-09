@@ -2,17 +2,21 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The commands that Claude may run in the page (src/web/tasks/allow.ts, docs/plans/review-v2/spec.md section 6.21): the row checks, the
-// plan picks, the choices of an allow request with the first-use warning, the mode words, and "Longest command" in minutes.
+// plan picks, the choices of an allow request with the first-use warning, the mode words and dialogs, and "Longest command" in minutes.
 import { describe, expect, test } from "bun:test";
 import {
   allowDecisions,
   allowDraftProblem,
   draftsToAllow,
+  MODE_TEXT,
   modeLine,
   planAllow,
+  planModeText,
   shellText,
   timeoutMinutes,
   timeoutSec,
+  UNRESTRICTED_TITLE,
+  unrestrictedText,
 } from "../../src/web/tasks/allow";
 
 console.log(`task-allow.test.ts imported from ${Bun.resolveSync("../../src/web/tasks/allow", import.meta.dir)}`);
@@ -24,7 +28,9 @@ describe("commands that Claude may run, in the page", () => {
     const a = row("a1", " ssh build1 * ", " The remote build. ");
     expect(draftsToAllow([a])).toEqual([{ pattern: "ssh build1 *", reason: "The remote build." }]);
     expect(allowDraftProblem(row("a2", "git status"), [])).toBe("Claude cannot run git commands.");
-    expect(allowDraftProblem(row("a2", "bash -c x"), [])).toBe("A shell or a command runner can run any command. Use Any command instead.");
+    expect(allowDraftProblem(row("a2", "bash -c x"), [])).toBe(
+      "A shell or a command runner can run any command. Use Most commands instead.",
+    );
     expect(allowDraftProblem(row("a2", ""), [])).toBe("Enter a pattern.");
     const b = row("a2", "ssh build1 *");
     expect(allowDraftProblem(b, [a, b])).toBe("This pattern is in the list already. Remove one of the rows.");
@@ -93,17 +99,32 @@ describe("commands that Claude may run, in the page", () => {
     expect(shellText("allowlist", 0)).toBe("Commands: allowlist, 0 patterns");
     expect(shellText("allowlist", 1)).toBe("Commands: allowlist, 1 pattern");
     expect(shellText("allowlist", 5)).toBe("Commands: allowlist, 5 patterns");
-    expect(shellText("any", 5)).toBe("Commands: any command");
+    expect(shellText("any", 5)).toBe("Commands: most commands");
     expect(shellText("allowlist", 0, 1)).toBe("Commands: allowlist, 0 patterns, 1 approved check");
     expect(shellText("allowlist", 2, 3)).toBe("Commands: allowlist, 2 patterns, 3 approved checks");
-    expect(shellText("any", 2, 3)).toBe("Commands: any command");
+    expect(shellText("any", 2, 3)).toBe("Commands: most commands");
+    expect(shellText("unrestricted", 2, 3)).toBe("Commands: unrestricted");
+    expect(MODE_TEXT).toEqual({ allowlist: "Allowlist", any: "Most commands", unrestricted: "Unrestricted" });
     // spec.md section 6.21.2: the line under the mode switch names what Any command still blocks.
     const n = { runner: "Runner", cli: "runner", forge: "Forge", tracker: "Tracker" };
     expect(modeLine("any", n)).toBe(
       "Runner runs every command, except these: git, the Forge and Tracker hosts, curl, wget, nc, ncat, netcat, socat, telnet, ftp, tftp, sftp, scp, rsync, ssh, powershell, pwsh, and the password and key store tools. Runner also cannot read the app data or your ssh keys. A pattern for ssh in this list lets every ssh command run. The list applies again when you switch back.",
     );
     expect(modeLine("allowlist", n)).toBe(
-      "Runner runs only the commands that match a pattern of this list. grep, rg, and read-only commands such as ls and cat also run.",
+      "Runner runs only the commands that match a pattern of this list. grep, rg, and read-only commands such as ls and cat also run. Runner cannot run cd or read files outside the folder of the step.",
+    );
+    expect(modeLine("unrestricted", n)).toBe(
+      "Runner runs every command, except these: git and commands that name the Forge or Tracker host. Runner can read and write any file that you can, also your keys and the app data. The list applies again when you switch back.",
+    );
+    expect(UNRESTRICTED_TITLE).toBe("Turn on Unrestricted?");
+    expect(unrestrictedText(n)).toBe(
+      "Unrestricted lets Runner run every command as you, with your files, your keys, and your network, except git and the Forge and Tracker hosts. Runner can read and write any file that you can. Text in a task, an attachment, or a comment can tell Runner to run a harmful command. Use it only for repositories and tasks that you trust.",
+    );
+    expect(planModeText("any", n)).toBe(
+      'The mode "Most commands" is on for this repository. Runner can run every command, except the fixed deny list.',
+    );
+    expect(planModeText("unrestricted", n)).toBe(
+      'The mode "Unrestricted" is on for this repository. Runner can run every command, except git and the Forge and Tracker hosts.',
     );
     expect(timeoutMinutes(600)).toBe("10");
     expect(timeoutMinutes(90)).toBe("1.5");

@@ -148,6 +148,24 @@ describe("claude-checks.ts B32", () => {
   });
 });
 
+describe("claude-checks.ts B33", () => {
+  test("a dry run plans Unrestricted and Most commands with the app shell.json: no read block, and the deny list of each mode", () => {
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B33"], NO_TOOLS);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      'DRY-RUN  B33  calls=2 planned claude calls=2; runs=2; unrestricted: allow=["Bash"] deny=7 block=false commands=11; any: allow=["Bash"] deny=35 block=false commands=11',
+    );
+    expect(r.out).toContain("B33 2/2");
+    const lines = r.out.split("\n").filter((l) => /^dry-run b33-(unrestricted|any):/.test(l));
+    expect(lines).toHaveLength(2);
+    for (const l of lines) {
+      expect(l).toContain('"--restricted"');
+      expect(l).not.toContain("--permission-mode");
+    }
+  });
+});
+
 describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
   test("a dry run passes all checks against the loopback fake and prints no host", () => {
     const r = run(BITBUCKET_WRITE, ["--dry-run"], GIT_DIR);
