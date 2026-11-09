@@ -52,6 +52,8 @@ export type ActionKind =
   | "pointer"
   | "pick-base"
   | "close"
+  // spec.md section 6.18.2: "Dismiss" of a reason on a built part whose own action runs in state implementing only.
+  | "dismiss"
   // spec.md section 6.7: "Run setup again" on the part that the view shows.
   | "setup"
   // spec.md section 6.7: "Change the time limit" of a setup command that reached its time limit.
@@ -498,14 +500,26 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
     // The server takes Resume, Continue, and the line limit in state implementing only.
     const loopOnly = new Set<ActionKind>(["resume", "continue", "keep-size", "change-limit"]);
     const keep = (a: Action | null) => (a && (t.state === "implementing" || !loopOnly.has(a.kind)) ? a : null);
-    const blocked = (primary: Action | null, more: Action[], screen: Screen = "build"): TaskView => ({
-      ...base,
-      status: b.text,
-      primary: keep(primary),
-      more: more.filter((a) => keep(a) !== null),
-      screen,
-      needsYou: true,
-    });
+    // spec.md section 6.18.2: on a built part, Dismiss gives a way back from a reason whose own action runs in state implementing only.
+    // Red checks after an update keep "Undo the update" as their way back.
+    const dismiss =
+      t.state === "ready" &&
+      !["spec_change", "allow", "update"].includes(b.kind) &&
+      !(b.kind === "question" && openQuestions(t, "loop").length) &&
+      !(b.kind === "red" && t.canUndoUpdate);
+    const blocked = (primary: Action | null, more: Action[], screen: Screen = "build"): TaskView => {
+      const p = keep(primary);
+      const m = more.filter((a) => keep(a) !== null);
+      const d: Action = { kind: "dismiss", label: "Dismiss" };
+      return {
+        ...base,
+        status: b.text,
+        primary: p ?? (dismiss ? d : null),
+        more: dismiss && p ? [d, ...m] : m,
+        screen,
+        needsYou: true,
+      };
+    };
     switch (b.kind) {
       case "red":
         if (timedOutSetup(t))

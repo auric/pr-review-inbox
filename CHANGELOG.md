@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Build a Jira task: "Reject" of a plan change now tells Claude that you rejected it. The step runs again with the line "The user rejected your change to <files>." and Claude's reason. So Claude does not propose the same change again. The Log tab shows "Runs again without the plan change."
+- "Accept the change" and "Reject" of a plan change from Tell Claude now run your instructions again with the same text. When they change nothing, the reason that the task had before comes back. Before, the instructions did not run again, and the box closed.
+- "Continue" after "Pause after this step" now keeps every change of the done step, also after an app restart. Before, a restart made Continue put those changes into a patch and drop them.
+- "Pause after this step" now says "No step is left to pause. The build ends now." when only the base check is left. A pause that no step took no longer pauses the next run, such as "Fix the small points too" or Tell Claude.
+- After the PR opened, a reason from Tell Claude now has "Dismiss". Examples are red tests, a review blocker, a line limit, and a refused path. Dismiss brings back the reason before your instructions, or clears the reason. Before, only Stop was left.
+- In allowlist mode, the run log now shows "Claude Code refuses a command that starts with cd. Claude should give paths instead." for each refused `cd`.
+- A CodeGraph server in a run, and its index, no longer download a program bundle from GitHub or check for updates.
+
 - Build a Jira task: Settings, Commands has a third mode, "Unrestricted". Claude can then run every command as you, except git and commands that name the Bitbucket or Jira host. Claude can read and write any file that you can. A dialog warns you each time you turn it on. The task header then shows "Commands: unrestricted".
 - With Most commands and Unrestricted, Claude can now run `cd repo` before a command that must run in the repository, such as `cd repo && bun test`. In allowlist mode, Claude Code refuses every `cd`, so Claude gives paths and uses a folder option, such as `make -C repo`. The run log of a refused cd says "Claude Code refuses a command that starts with cd. Claude should give paths instead." The line under the mode switch now names what each mode blocks.
 - Claude now changes files only with its Edit and Write tools. A new file that a Bash command writes stays out of the commit, as before. Now the step notes name it, and the next step gets the line "Write <path> with the Write tool, so it is committed."

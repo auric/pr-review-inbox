@@ -1212,7 +1212,13 @@ describe("editable profiles (M4)", () => {
       expect(servers.cg.args.map((x: string) => x.toLowerCase())).toEqual(
         [FAKE_CG, "serve", "--mcp", "--path", repo, "--no-watch"].map((x) => x.toLowerCase()),
       );
-      expect(servers.cg.env).toMatchObject({ CODEGRAPH_NO_DAEMON: "1", DO_NOT_TRACK: "1", CODEGRAPH_DIR: "" });
+      expect(servers.cg.env).toMatchObject({
+        CODEGRAPH_NO_DAEMON: "1",
+        DO_NOT_TRACK: "1",
+        CODEGRAPH_NO_UPDATE_CHECK: "1",
+        CODEGRAPH_NO_DOWNLOAD: "1",
+        CODEGRAPH_DIR: "",
+      });
       expect(flag(c.argv, "--allowedTools")).toContain("mcp__cg__codegraph_explore");
       const calls = readFileSync(log, "utf8")
         .trim()

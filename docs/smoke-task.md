@@ -65,9 +65,10 @@ Run this part after part S. It needs the branch `smoke/<KEY1>-<slug>` and the op
 
 1. Start `<KEY2>` as in S1. Click "Use the recommended answers". Approve the plan with the test command. The warning of the first build does not show again.
 2. While a sentence says "Claude is writing …", open "More actions" and click "Pause after this step". Expect, after the step ends: "Building is paused after the step. Continue?" with the button "Continue" and the row "Needs you: a question". Click "Continue". Expect the build to go on with the changes of the done step.
-3. While Claude writes in a later step, open "More actions" and click "Stop". Expect "Stopped at: task T1.1, writing the code." or the words of that step, the button "Resume", and the row "Stopped". The Log shows the stopped step as "Cancelled".
-4. Click "Resume". Expect the stopped step to start again from the last commit. The changes that the stop left are in `<data folder>/tasks/<database name>/<task ID>/patches/<step ID>.patch`. Record whether that file exists and is not empty.
-5. Click "Stop" again. Open "More actions" and click "Close the task". Check Bitbucket: no branch `smoke/<KEY2>-…` and no pull request exist.
+3. Click "Pause after this step" again in a later step. When "Building is paused after the step. Continue?" shows, stop the app and start it again. Open the task and click "Continue". Expect the build to go on from the paused point. Expect no new file in `<data folder>/tasks/<database name>/<task ID>/patches/`.
+4. While Claude writes in a later step, open "More actions" and click "Stop". Expect "Stopped at: task T1.1, writing the code." or the words of that step, the button "Resume", and the row "Stopped". The Log shows the stopped step as "Cancelled".
+5. Click "Resume". Expect the stopped step to start again from the last commit. The changes that the stop left are in `<data folder>/tasks/<database name>/<task ID>/patches/<step ID>.patch`. Record whether that file exists and is not empty.
+6. Click "Stop" again. Open "More actions" and click "Close the task". Check Bitbucket: no branch `smoke/<KEY2>-…` and no pull request exist.
 
 ## R. Tests that stay red, and the line limit
 
@@ -82,7 +83,8 @@ Run this part after part S. It needs the branch `smoke/<KEY1>-<slug>` and the op
 2. Expect "Needs you: the step changed CLAUDE.md, which Claude may not change. The app undid the step and saved a patch." with the button "Resume" and the row "Needs you: a file the app does not commit".
 3. Expect the box to show "Files that the app does not commit: CLAUDE.md" and "The worktree went back to the last commit. The changes are saved in `<step ID>`.patch. Resume starts the step again." The Log shows the step as "Failed" with "CLAUDE.md: A step may not change this path."
 4. When Claude does not write the file, record "not written" and the reason from the notes of the step in the Log.
-5. Click "Stop", then "Close the task" in "More actions". Check Bitbucket: nothing is new.
+5. While the task waits with the path reason, write in the Tell Claude box: "Also change the plan file: add a task T1.2 that adds the line smoke to README.md." Click "Send to Claude". When Claude changes the plan, expect "Needs you: Claude proposes a change to the spec." with "Review the change". Click "Reject". Expect the instructions to run again. The Log shows the plan change with "The user rejected the change." and "Runs again without the plan change.", and a second step of the same instructions. Expect no second plan change for the same files. When Claude changes nothing for the plan, record "no plan change".
+6. Click "Stop", then "Close the task" in "More actions". Check Bitbucket: nothing is new.
 
 ## U. Tell Claude and Update from the base branch (Gate UTU)
 

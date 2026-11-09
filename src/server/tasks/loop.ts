@@ -174,6 +174,11 @@ const STARTED = new Set<PartState>([...WORKTREE, "declined"]);
 const WAITS_PR = new Set<PartState>(["planned", "implementing", "self_reviewed"]);
 const NO_TEST = "Needs you: approve a test command for this repository first. The build needs it to see red and green tests.";
 const BUSY = "The build still ends its step. Try again when it ends.";
+// spec.md section 6.7, Spec change: the notes that Reject adds to the spec_change row. The other notes hold the reason of Claude.
+const REJECTED = "The user rejected the change.";
+const AGAIN = "Runs again without the plan change.";
+// spec.md section 6.18.2, Dismiss: the reasons on a built part whose own action the server takes in state implementing only.
+const NO_DISMISS = new Set<TaskBlocked["kind"]>(["spec_change", "allow", "update", "slot"]);
 
 // The loop stops here: a reason now blocks the task, or the task stopped. The reason is already stored.
 class Halt extends Error {}
@@ -457,6 +462,12 @@ const Q = {
     AND json_extract(detail_json, '$.redBefore') = 1 LIMIT 1`,
   ensureSettings: `INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ($project, $repo, $now)
     ON CONFLICT (project, repo) DO NOTHING`,
+  // spec.md section 6.7, Spec change: the newest proposal of one step. cancelled: the user rejected it.
+  lastSpecChange: `SELECT state, detail_json FROM task_step WHERE part = $part AND kind = 'spec_change' AND item = $item
+    ORDER BY id DESC LIMIT 1`,
+  // spec.md section 6.18.2: the newest row of one send, and the newest send or update of a task.
+  lastSend: "SELECT id FROM task_step WHERE part = $part AND kind = 'instruct' AND item = $item ORDER BY id DESC LIMIT 1",
+  lastBuilt: "SELECT id, kind FROM task_step WHERE task = $task AND kind IN ('instruct', 'update') ORDER BY id DESC LIMIT 1",
 };
 
 // spec.md section 6.21: the steps that can get the Bash tool. The resolve step never does.
@@ -697,6 +708,18 @@ export function createLoop(opts: LoopOptions) {
     guard(c);
   }
 
+  // spec.md section 6.7, Spec change: after a Reject, step.md tells Claude that the user rejected the change. step.md is the trusted file
+  // of the app; the prompt calls every other context file untrusted data.
+  function rejectedLines(c: Ctx, item: string): string[] {
+    const r = c.db.query(Q.lastSpecChange).get({ part: c.part.id, item }) as { state: string; detail_json: string } | null;
+    if (r?.state !== "cancelled") return [];
+    const d = stepDetail.parse(JSON.parse(r.detail_json));
+    const why = oneLine(d.notes.filter((n) => n !== REJECTED && n !== AGAIN).join(" "));
+    return [
+      `The user rejected your change to ${(d.specChange?.paths ?? []).join(", ")}.${why ? ` Your reason was: ${/[.!?]$/.test(why) ? why : `${why}.`}` : ""} Do not change files under ${c.specDir}. Do the task under the current plan. If you cannot, ask in question.`,
+    ];
+  }
+
   // One Claude step in the run slot (implement.ts), with its outcome. row: the step row that the route wrote (an instruct or a resolve
   // step). A run that did not start (a stop, a reason such as the time budget) halts.
   async function runStep(
@@ -726,7 +749,8 @@ export function createLoop(opts: LoopOptions) {
       // task and of its own sub-tasks only.
       const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
       const shell = shellOf(c, mode, item);
-      const refused = SHELL_STEPS.has(mode) ? [...refusedOf(c.db, c.id)] : [];
+      const refused = SHELL_STEPS.has(mode) ? [...refusedOf(c.db, c.id)].map(refusedLine) : [];
+      const extra = [...refused, ...rejectedLines(c, item)];
       const stepMd = o.step(attempt);
       // spec.md section 6.21.5: a resolve step may make no new file.
       const failure = mode === "resolve" ? o.failure : bashFailure(o.failure, bashLeft(c));
@@ -745,7 +769,7 @@ export function createLoop(opts: LoopOptions) {
         attachments: task.attachments,
         own: [
           ...(answers ? [answers] : []),
-          refused.length ? { ...stepMd, text: `${stepMd.text.trimEnd()}\n\n${refused.map(refusedLine).join("\n")}\n` } : stepMd,
+          extra.length ? { ...stepMd, text: `${stepMd.text.trimEnd()}\n\n${extra.join("\n")}\n` } : stepMd,
           ...planFiles(c),
         ],
         allow: o.allow,
@@ -1479,8 +1503,8 @@ export function createLoop(opts: LoopOptions) {
   // worktree (spec.md section 6.20.6). It asks the scheduler again after each start, each end of a part, and each kick, and it ends when
   // no part builds. The first reason holds every part: each one halts at its next step, and the driver ends. A part halts at most once per
   // driver. A part that another driver left in its build goes back to its last commit first, because a reason of another part can halt it
-  // in the middle of a step.
-  async function buildParts(db: Database, id: number) {
+  // in the middle of a step. keep: every part halted at its pause gate, between two steps, so each part keeps its changes.
+  async function buildParts(db: Database, id: number, keep = false) {
     const running = new Map<number, Promise<void>>();
     const ended = new Set<number>();
     let again = false;
@@ -1512,7 +1536,7 @@ export function createLoop(opts: LoopOptions) {
           openGates(id);
           slotWaits.get(id)?.();
         } else {
-          for (const p of buildingAll(db, id)) if (!running.has(p.id) && !ended.has(p.id)) go(p, true);
+          for (const p of buildingAll(db, id)) if (!running.has(p.id) && !ended.has(p.id)) go(p, !keep);
           if (t.subtasks === 1)
             for (let p = await startPart(db, id); p; p = await startPart(db, id)) {
               go(p, false);
@@ -1532,7 +1556,7 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
-  async function drive(db: Database, id: number, reset: boolean) {
+  async function drive(db: Database, id: number, reset: boolean, keep = false) {
     try {
       await recoverUpdates(db, id);
       const t = taskRow(db, id);
@@ -1551,7 +1575,7 @@ export function createLoop(opts: LoopOptions) {
         }
       }
       await ensureParts(db, id);
-      await buildParts(db, id);
+      await buildParts(db, id, keep);
     } catch (e) {
       failed(db, id, e);
     }
@@ -1618,6 +1642,8 @@ export function createLoop(opts: LoopOptions) {
         drivers.delete(id);
         modes.delete(id);
         stopping.delete(id);
+        // A pause that no gate took must not hold the next driver.
+        pauseAsked.delete(id);
         changed(id);
       });
     drivers.set(id, p);
@@ -1633,6 +1659,14 @@ export function createLoop(opts: LoopOptions) {
 
   const itemOf = (db: Database, row: number) =>
     (db.query("SELECT item FROM task_step WHERE id = $id").get({ id: row }) as { item: string }).item;
+  // spec.md section 6.18.2: a send runs again as a new instruct row with the same text and the same earlier reason. The caller starts
+  // driveInstruct with the row.
+  const resend = (db: Database, id: number, item: string, info: InstructDetail, at: number) => {
+    const attempt = (db.query(Q.attempt).get({ part: info.part, kind: "instruct", item }) as { n: number }).n;
+    const row = insertStep(db, { task: id, part: info.part, kind: "instruct", item, attempt, state: "waiting" }, at);
+    patchStep(db, row, { instruct: { ...info, result: null, committed: false } });
+    return row;
+  };
   const lastBefore = (db: Database, part: number, row: number) =>
     (db.query("SELECT MAX(id) AS id FROM task_step WHERE part = $part AND id < $row").get({ part, row }) as { id: number | null }).id ??
     row;
@@ -2229,6 +2263,8 @@ export function createLoop(opts: LoopOptions) {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
       if (t.state !== "implementing" || !drivers.has(id)) return conflict(db, id, "The build does not run now.");
+      // spec.md section 6.18.5: a driver that runs only the base check at its end reaches no gate.
+      if (ending.has(id)) return conflict(db, id, "No step is left to pause. The build ends now.");
       pauseAsked.add(id);
       changed(id);
       return { status: 200, task: dto(db, id) };
@@ -2274,7 +2310,8 @@ export function createLoop(opts: LoopOptions) {
       if (t.state === "implementing" && blockedOf(t)?.kind === "slot")
         return conflict(db, id, "The build waits for the run slot. It goes on by itself.");
       const b = blockedOf(t);
-      const paused = t.state === "implementing" && b?.kind === "question" && b.step === null && b.text === PAUSED && gates.has(id);
+      const pause = t.state === "implementing" && b?.kind === "question" && b.step === null && b.text === PAUSED;
+      const paused = pause && gates.has(id);
       if (drivers.has(id) && !paused) return conflict(db, id, BUSY);
       if (t.state === "stopped") {
         if (t.stopped_from !== "implementing") return conflict(db, id, TASK_STATE_TEXT.stopped);
@@ -2295,6 +2332,13 @@ export function createLoop(opts: LoopOptions) {
         setBlocked(db, { task: id, version: t.version }, null, now());
         pauseAsked.delete(id);
         openGates(id);
+        changed(id);
+        return { status: 200, task: dto(db, id) };
+      }
+      // A pause that an app restart ended: no gate holds the parts, and each part keeps the changes of its done step.
+      if (pause) {
+        setBlocked(db, { task: id, version: t.version }, null, now());
+        start(db, id, () => drive(db, id, false, true));
         changed(id);
         return { status: 200, task: dto(db, id) };
       }
@@ -2353,11 +2397,7 @@ export function createLoop(opts: LoopOptions) {
         }
         setBlocked(db, { task: id, version: t.version }, null, at);
         const info = asked?.kind === "instruct" && open[0]?.step ? stepDetailOf(db, open[0].step).instruct : null;
-        if (!info || !asked?.item) return null;
-        const attempt = (db.query(Q.attempt).get({ part: info.part, kind: "instruct", item: asked.item }) as { n: number }).n;
-        const row = insertStep(db, { task: id, part: info.part, kind: "instruct", item: asked.item, attempt, state: "waiting" }, at);
-        patchStep(db, row, { instruct: { ...info, result: null, committed: false } });
-        return row;
+        return info && asked?.item ? resend(db, id, asked.item, info, at) : null;
       })();
       if (again === null) kick(db, id, true);
       else start(db, id, () => driveInstruct(db, id, again), "instruct");
@@ -2404,11 +2444,7 @@ export function createLoop(opts: LoopOptions) {
         setBlocked(db, { task: id, version: t.version }, null, at);
         // An instruct step runs again as a new send row, as after an answer (spec.md section 6.18.2).
         const info = asked?.kind === "instruct" ? stepDetailOf(db, input.step).instruct : null;
-        if (!info || !asked?.item) return null;
-        const attempt = (db.query(Q.attempt).get({ part: info.part, kind: "instruct", item: asked.item }) as { n: number }).n;
-        const row = insertStep(db, { task: id, part: info.part, kind: "instruct", item: asked.item, attempt, state: "waiting" }, at);
-        patchStep(db, row, { instruct: { ...info, result: null, committed: false } });
-        return row;
+        return info && asked?.item ? resend(db, id, asked.item, info, at) : null;
       })();
       if (again === null) kick(db, id, true);
       else start(db, id, () => driveInstruct(db, id, again), "instruct");
@@ -2470,7 +2506,8 @@ export function createLoop(opts: LoopOptions) {
     },
 
     // POST /api/tasks/:id/spec-change/:step (AC-B20): accept commits the changed plan files, and the step starts again under the new
-    // plan. Reject resets the step. Both save the other changes of the step as its patch.
+    // plan. Reject resets the step, and the step starts again with the rejection in step.md. Both save the other changes of the step as
+    // its patch. The change of a send starts the send again as a new instruct row (spec.md section 6.18.2).
     async specChange(db: Database, id: number, stepId: number, input: { version: number; accept: boolean }): Promise<TaskResult> {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
@@ -2483,7 +2520,15 @@ export function createLoop(opts: LoopOptions) {
       const part = parts(db, id).find((p) => p.id === row?.part);
       if (!row || !part) return conflict(db, id, "No change to the spec waits for this step.");
       const detail = JSON.parse(row.detail_json) as { specChange?: { paths: string[] } | null; notes?: string[] };
-      const note = (s: string) => ({ specChange: detail.specChange ?? null, notes: [...(detail.notes ?? []), s] });
+      const note = (...s: string[]) => ({ specChange: detail.specChange ?? null, notes: [...(detail.notes ?? []), ...s] });
+      const sent = row.item === null ? null : (db.query(Q.lastSend).get({ part: part.id, item: row.item }) as { id: number } | null);
+      const info = sent ? stepDetailOf(db, sent.id).instruct : null;
+      const again = (send: number | null) => {
+        if (send === null) kick(db, id, !input.accept);
+        else start(db, id, () => driveInstruct(db, id, send), "instruct");
+        changed(id);
+        return { status: 200 as const, task: dto(db, id) };
+      };
       if (!input.accept) {
         // The build resets a part that it builds. A built part goes back to its last commit here.
         if (part.state !== "implementing")
@@ -2493,13 +2538,12 @@ export function createLoop(opts: LoopOptions) {
           } catch (e) {
             return conflict(db, id, `The app could not reset the step: ${noUrl((e as Error).message)}`);
           }
-        db.transaction(() => {
-          endStep(db, stepId, "cancelled", note("The user rejected the change."), now());
+        const send = db.transaction(() => {
+          endStep(db, stepId, "cancelled", note(REJECTED, AGAIN), now());
           setBlocked(db, { task: id, version: t.version }, null, now());
+          return info && row.item ? resend(db, id, row.item, info, now()) : null;
         })();
-        kick(db, id, true);
-        changed(id);
-        return { status: 200, task: dto(db, id) };
+        return again(send);
       }
       try {
         const c = await context(db, t, part);
@@ -2535,12 +2579,30 @@ export function createLoop(opts: LoopOptions) {
       } catch (e) {
         return conflict(db, id, `The app could not commit the change: ${noUrl((e as Error).message)}`);
       }
-      db.transaction(() => {
+      const send = db.transaction(() => {
         endStep(db, stepId, "ok", note("The user accepted the change."), now());
         const cur = taskRow(db, id) as TaskRow;
         setBlocked(db, { task: id, version: cur.version }, null, now());
+        return info && row.item ? resend(db, id, row.item, info, now()) : null;
       })();
-      kick(db, id);
+      return again(send);
+    },
+
+    // POST /api/tasks/:id/dismiss (spec.md section 6.18.2): "Dismiss" of a reason on a built part whose own action runs in state
+    // implementing only. A reason that the newest send left gives back the reason of the task before the send. Else the reason clears.
+    // The next driver saves the changes of the step as a patch first.
+    dismiss(db: Database, id: number, input: { version: number }): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      const b = blockedOf(t);
+      const asks = (db.query(Q.openLoop).all({ task: id }) as unknown[]).length > 0;
+      if (t.state !== "ready" || !b || NO_DISMISS.has(b.kind) || (b.kind === "question" && asks))
+        return conflict(db, id, "No reason waits for Dismiss.");
+      if (drivers.has(id)) return conflict(db, id, BUSY);
+      const last = db.query(Q.lastBuilt).get({ task: id }) as { id: number; kind: string } | null;
+      const info = last?.kind === "instruct" ? stepDetailOf(db, last.id).instruct : null;
+      const before = info?.result === null && JSON.stringify(info.blockedBefore) !== JSON.stringify(b) ? info.blockedBefore : null;
+      setBlocked(db, { task: id, version: t.version }, before, now());
       changed(id);
       return { status: 200, task: dto(db, id) };
     },
@@ -2688,7 +2750,10 @@ export function createLoop(opts: LoopOptions) {
       } catch (e) {
         return conflict(db, id, `The app could not undo the update: ${noUrl((e as Error).message)}`);
       } finally {
-        if (drivers.get(id) === held) drivers.delete(id);
+        if (drivers.get(id) === held) {
+          drivers.delete(id);
+          pauseAsked.delete(id);
+        }
         changed(id);
       }
       return { status: 200, task: dto(db, id) };

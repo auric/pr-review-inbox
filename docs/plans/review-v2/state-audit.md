@@ -1,6 +1,6 @@
 # Task state machine audit (2026-11-06)
 
-Status: audit by the investigator against main bb7de56. Not built. User report: Reject of a plan change does nothing.
+Status: audit by the investigator against main bb7de56. User report: Reject of a plan change does nothing. Ranked fixes 1 to 5 are built (2026-11-09, spec.md sections 6.7, 6.18.2, 6.20.6, AC-B20, AC-B157 to AC-B160). Fix 1 puts the rejection into step.md, not into a separate rejected.md, because the prompt calls every other context file untrusted data. Fix 6 has its own design in queued-reasons.md.
 
 ## Part A: Reject of a plan change
 

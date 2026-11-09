@@ -290,6 +290,87 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
     SLOW,
   );
 
+  // A send that changes the plan file: Accept and Reject start the send again as a new instruct row with the earlier reason. The second
+  // run changes no file, so the earlier reason comes back.
+  const PLAN_CHANGE = { path: `repo/specs/${KEY}/notes.md`, text: "A note on the flag.\n" };
+  const proposes = { writes: [MORE, PLAN_CHANGE], implement: implement({ done: false, specChange: "The plan lacks the flag." }) };
+  for (const where of ["built part, task ready", "building part"] as const)
+    for (const accept of [false, true])
+      test(
+        `spec.md section 6.18.2: ${accept ? "Accept" : "Reject"} of a plan change of a send on a ${where} starts the send again and keeps the earlier reason`,
+        async () => {
+          const s = await builtTask({ seq: { "implement:instruct": [proposes, { implement: implement() }] } });
+          const state = where === "building part" ? "implementing" : "ready";
+          s.db.query("UPDATE task SET state = $state, blocked_json = $b WHERE id = $id").run({ state, b: JSON.stringify(RED), id: s.task });
+          if (where === "building part") s.db.query("UPDATE task_part SET state = 'implementing' WHERE task = $t").run({ t: s.task });
+          expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the flag." }).status).toBe(202);
+          await s.loop.idle(s.task);
+          const b = s.blocked();
+          expect(b).toMatchObject({ kind: "spec_change", text: "Needs you: Claude proposes a change to the spec." });
+          const r = await s.loop.specChange(s.db, s.task, b?.step as number, { version: s.t().version, accept });
+          expect(r.status).toBe(200);
+          await s.loop.idle(s.task);
+          const sends = s.steps().filter((x) => x.kind === "instruct");
+          expect(sends.map((x) => [x.item, x.attempt])).toEqual([
+            ["I1", 1],
+            ["I1", 2],
+          ]);
+          expect(sends[1]?.detail.instruct).toMatchObject({ text: "Add the flag.", blockedBefore: RED, result: "no_change" });
+          const calls = s.runCalls().filter((c) => s.modeOf(c) === "instruct");
+          expect(calls).toHaveLength(2);
+          expect(calls[1]?.stdin.endsWith("# Your instructions\n\nAdd the flag.")).toBe(true);
+          const step = calls[1]?.context["step.md"] ?? "";
+          if (accept) expect(step).not.toContain("rejected");
+          else expect(step).toContain(`The user rejected your change to specs/${KEY}/notes.md. Your reason was: The plan lacks the flag.`);
+          expect((await s.log())[0]?.startsWith(`${KEY} I1: Change the plan|`)).toBe(accept);
+          // The build of a building part does not go on by itself, and the task keeps its state and reason.
+          expect([s.t().state, s.blocked(), s.part().state]).toEqual([
+            state,
+            RED,
+            where === "building part" ? "implementing" : "self_reviewed",
+          ]);
+          expect(await status(await s.wt())).toEqual([]);
+        },
+        SLOW,
+      );
+
+  test(
+    "spec.md section 6.18.2: Dismiss of a reason of a send on a built part restores the earlier reason, then clears it; 409 elsewhere",
+    async () => {
+      const s = await builtTask({ seq: { "implement:instruct": [{ writes: [{ path: "repo/.claude/settings.json", text: "{}" }] }] } });
+      s.db.query("UPDATE task SET state = 'ready', blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Change the settings." }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect(s.blocked()?.kind).toBe("denied_path");
+      const SESSION = "s".repeat(64);
+      const ORIGIN = "http://127.0.0.1:7317";
+      const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
+      const dismiss = async (version: number) => {
+        const res = await app.request(`${ORIGIN}/api/tasks/${s.task}/dismiss`, {
+          method: "POST",
+          headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
+          body: JSON.stringify({ version }),
+        });
+        return { status: res.status, body: (await res.json()) as TaskDto & { error?: string } };
+      };
+      expect((await dismiss(s.t().version - 1)).status).toBe(409);
+      const first = await dismiss(s.t().version);
+      expect([first.status, first.body.blocked]).toEqual([200, RED]);
+      // RED is the earlier reason of the same send, so the next Dismiss clears it.
+      const second = await dismiss(s.t().version);
+      expect([second.status, second.body.blocked]).toEqual([200, null]);
+      expect((await dismiss(s.t().version)).body.error).toBe("No reason waits for Dismiss.");
+      // A plan change has its own actions, and the build has Resume.
+      s.db
+        .query("UPDATE task SET blocked_json = $b WHERE id = $id")
+        .run({ b: JSON.stringify({ ...RED, kind: "spec_change" }), id: s.task });
+      expect((await dismiss(s.t().version)).status).toBe(409);
+      s.db.query("UPDATE task SET state = 'implementing', blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
+      expect((await dismiss(s.t().version)).body.error).toBe("No reason waits for Dismiss.");
+    },
+    SLOW,
+  );
+
   test(
     "routes: 400 for an empty or a long text, 409 with the state sentence in a state without the box, 202 with the task",
     async () => {

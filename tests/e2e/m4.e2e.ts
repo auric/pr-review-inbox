@@ -655,9 +655,12 @@ test("the run setup saves model, effort, and reviewer agents; the run row and th
     "Run setup: claude-opus-5-5, xhigh effort. Reviewer agents: Always. No skills or MCP servers.",
   );
   await page.getByLabel("Your note").press("Control+Enter");
+  // The fake CLI init event names claude-haiku-5-5, the model that ran. Only the new run has xhigh, so a slow start cannot match the
+  // done row of the first run.
+  await expect(runRow(page).locator("[data-run-setup]")).toHaveText("Model and effort: claude-haiku-5-5, xhigh effort", {
+    timeout: RUN_MS,
+  });
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
-  // The fake CLI init event names claude-haiku-5-5, the model that ran.
-  await expect(runRow(page).locator("[data-run-setup]")).toHaveText("Model and effort: claude-haiku-5-5, xhigh effort");
   await page.keyboard.press("3");
   await expect(runLog(page).locator("footer [data-run-setup]")).toHaveText("Model and effort: claude-haiku-5-5, xhigh effort");
 });

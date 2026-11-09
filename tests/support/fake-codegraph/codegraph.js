@@ -12,7 +12,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 const [cmd, ...rest] = process.argv.slice(2);
 const mode = process.env.FAKE_CG ?? "";
-const keys = ["DO_NOT_TRACK", "CODEGRAPH_NO_UPDATE_CHECK", "CODEGRAPH_DIR", "CODEGRAPH_NO_WATCH", "GIT_CONFIG_NOSYSTEM"];
+const keys = [
+  "DO_NOT_TRACK",
+  "CODEGRAPH_NO_UPDATE_CHECK",
+  "CODEGRAPH_NO_DOWNLOAD",
+  "CODEGRAPH_DIR",
+  "CODEGRAPH_NO_WATCH",
+  "GIT_CONFIG_NOSYSTEM",
+];
 const env = Object.fromEntries(keys.map((k) => [k, process.env[k] ?? null]));
 if (process.env.FAKE_CG_LOG) appendFileSync(process.env.FAKE_CG_LOG, `${JSON.stringify({ cmd, args: rest, cwd: process.cwd(), env })}\n`);
 

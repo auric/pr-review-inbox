@@ -297,6 +297,14 @@ export function createTaskRoutes(opts: {
         const before = t?.state === "stopped" && t.stopped_from !== "implementing";
         return answer(c, before ? tasks.resume(db, id, c.req.valid("json")) : loop.resume(db, id, c.req.valid("json")));
       })
+      // spec.md section 6.18.2: "Dismiss" of a reason on a built part.
+      .post("/tasks/:id/dismiss", idParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, loop.dismiss(db, id, c.req.valid("json")));
+      })
       .post("/tasks/:id/close", idParam, body(taskVersionInput, "Give the task version."), (c) => {
         const db = openDb();
         return db ? answer(c, tasks.close(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);

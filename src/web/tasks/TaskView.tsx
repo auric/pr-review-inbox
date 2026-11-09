@@ -327,6 +327,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       case "pause":
       case "resume":
       case "close":
+      case "dismiss":
         return send({ kind });
       case "continue":
         return send({ kind: "resume" });

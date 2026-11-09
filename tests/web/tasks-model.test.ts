@@ -697,6 +697,26 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     });
   });
 
+  test("spec.md section 6.18.2: a reason of a send on a built part has Dismiss as its way back", () => {
+    const of = (kind: NonNullable<TaskDto["blocked"]>["kind"], step: number | null, o: Partial<TaskDto> = {}) =>
+      shape(view({ ...rows.open, blocked: { kind, step, text: `Needs you: ${kind}.` }, ...o }));
+    expect(of("red", 42)).toMatchObject({ primary: "See why", more: ["Dismiss", "Stop"] });
+    expect(of("blocker", 43)).toMatchObject({ primary: "See why", more: ["Dismiss", "Stop"] });
+    expect(of("denied_path", null)).toMatchObject({ primary: "Dismiss", more: ["Stop"] });
+    expect(of("size", 44)).toMatchObject({ primary: "Dismiss", more: ["Stop"] });
+    expect(of("question", 45)).toMatchObject({ primary: "Dismiss", more: ["See why", "Stop"] });
+    // An open question, a plan change, an allow request, and red checks after an update have their own way back.
+    const asked = { questions: [question({ source: "loop", step: 45 })] };
+    expect(of("question", 45, asked)).toMatchObject({ primary: "Answer the question", more: ["Stop"] });
+    expect(of("spec_change", 46).more).not.toContain("Dismiss");
+    expect(of("red", 42, { canUndoUpdate: true }).more).toEqual(["Undo the update", "Stop"]);
+    // The same reason during the build keeps Resume.
+    expect(shape(view(building({ blocked: { kind: "denied_path", step: null, text: "Needs you: x." } })))).toMatchObject({
+      primary: "Resume",
+      more: ["Stop"],
+    });
+  });
+
   test("update stopped: the reason with 'The branch is as it was.', Try again, Go to the PR in More", () => {
     expect(shape(view(rows.updateStopped))).toEqual({
       status: "The update from release/2.1 stopped: conflict markers remain in src/a.ts. The branch is as it was.",
@@ -769,11 +789,11 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     expect(same.status).toBe("release/2.1 has new commits in 2 repositories since the branch point.");
   });
 
-  test("a reason after the PR opened: no Resume, Continue, or line limit, because the server takes them while building only", () => {
+  test("a reason after the PR opened: no Resume, Continue, or line limit, because the server takes them while building only; Dismiss instead", () => {
     const red = view({ ...rows.open, blocked: { kind: "red", step: 4, text: "Needs you: the tests of part 1 stay red after 3 tries." } });
-    expect(shape(red)).toMatchObject({ primary: "See why", more: ["Stop"] });
+    expect(shape(red)).toMatchObject({ primary: "See why", more: ["Dismiss", "Stop"] });
     const denied = view({ ...rows.open, blocked: { kind: "denied_path", step: 4, text: "Needs you: the step changed .env." } });
-    expect(shape(denied)).toMatchObject({ primary: null, more: ["Stop"] });
+    expect(shape(denied)).toMatchObject({ primary: "Dismiss", more: ["Stop"] });
     expect(denied.needsYou).toBe(true);
   });
 

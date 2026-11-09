@@ -906,6 +906,24 @@ describe("shell steps", () => {
     }
   });
 
+  test("Gate B31: the read block of allowlist mode refuses a lone cd, and the call gets the cd note", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell: "allowlist" });
+    p.line(JSON.stringify(line.bash("c1", "cd repo")));
+    p.line(
+      JSON.stringify({
+        type: "system",
+        subtype: "permission_denied",
+        tool_name: "Bash",
+        tool_use_id: "c1",
+        decision_reason_type: "safetyCheck",
+        message:
+          "cd names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)",
+      }),
+    );
+    expect(p.state.refused).toEqual([{ command: "cd repo", by: "check" }]);
+    expect(p.events().map((e) => e.note)).toEqual([CD_REFUSED_NOTE]);
+  });
+
   test("more than 5 refused commands kill the run", async () => {
     const calls7 = Array.from({ length: 7 }, (_, i) =>
       refused(`r${i}`, `curl https://x${i}.example.test`, "other", "This command requires approval"),

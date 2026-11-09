@@ -1053,7 +1053,18 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       const r = await s.loop.specChange(s.db, s.task, b?.step as number, { version: s.t().version, accept: false });
       expect(r.status).toBe(200);
       await s.loop.idle(s.task);
-      expect(JSON.parse((s.steps().find((x) => x.id === b?.step) as Step).detail_json).notes).toContain("The user rejected the change.");
+      expect(JSON.parse((s.steps().find((x) => x.id === b?.step) as Step).detail_json).notes).toEqual([
+        "The plan names the wrong file.",
+        "The user rejected the change.",
+        "Runs again without the plan change.",
+      ]);
+      // The rerun reads the rejection in step.md, the trusted file of the app. The first run did not.
+      const [first, second] = s.runCalls().filter((c) => s.modeOf(c) === "implement") as [Call, Call];
+      expect(first.context["step.md"]).not.toContain("rejected");
+      expect(second.context["step.md"]).toContain(
+        `The user rejected your change to specs/${KEY}/plan.md. Your reason was: The plan names the wrong file. Do not change files under specs/${KEY}/. Do the task under the current plan. If you cannot, ask in question.`,
+      );
+      expect(second.context["step.md"]).toContain("- Attempt: 2");
       expect(s.part().state).toBe("self_reviewed");
       const w = await s.wt();
       expect(readFileSync(join(w.repo, "specs", KEY, "plan.md"), "utf8")).toContain("### [x] T1.1");
@@ -1162,6 +1173,80 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.part().state).toBe("self_reviewed");
       // A pause with no build gets 409.
       expect(s.loop.pause(s.db, s.task, { version: s.t().version }).status).toBe(409);
+    },
+    SLOW,
+  );
+
+  test(
+    "Pause: a pause that no gate takes ends with its driver, so the next driver runs; a driver that only ends its base check refuses Pause",
+    async () => {
+      let hold: Promise<void> | null = null;
+      let release = () => {};
+      let held = false;
+      let built = () => false;
+      const s = await setup({
+        seq: { review: [{ delayMs: 400, review: CLEAN }, { review: CLEAN }], "implement:instruct": [{ writes: [FIXED] }] },
+        remote: async () => {
+          if (hold && built()) {
+            held = true;
+            await hold;
+          }
+        },
+      });
+      built = () => (s.part() as { state: string } | null)?.state === "self_reviewed";
+      s.loop.build(s.db, s.task);
+      // The own review is the last step of the part. A pause in it reaches no gate.
+      await until(() => s.steps().some((x) => x.kind === "review" && x.state === "running"));
+      expect(s.loop.pause(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+      // The base check at the driver end: no step is left, so Pause gets 409.
+      hold = new Promise<void>((r) => {
+        release = r;
+      });
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the check flag." }).status).toBe(202);
+      await until(() => held || s.blocked()?.text === PAUSED);
+      expect(s.blocked()).toBeNull();
+      expect(s.loop.running(s.task)).toBe(true);
+      const r = s.loop.pause(s.db, s.task, { version: s.t().version });
+      expect([r.status, (r as { error?: string }).error]).toEqual([409, "No step is left to pause. The build ends now."]);
+      release();
+      await s.loop.idle(s.task);
+      expect(s.flow().slice(-4)).toEqual(["instruct:I1:ok", "check:I1:ok", "commit:I1:ok", "review:review:ok"]);
+      expect(s.blocked()).toBeNull();
+    },
+    SLOW,
+  );
+
+  test(
+    "Continue after a pause and an app restart goes on with no reset, so the changes of the done step stay",
+    async () => {
+      const s = await setup({
+        mode: "late-red",
+        seq: { "implement:implement": [{ writes: [TODO] }], "implement:fix": [{ delayMs: 300, writes: [WORKS] }] },
+      });
+      s.loop.build(s.db, s.task);
+      // The first fix step writes WORKS. The checks stay red, so the next fix step waits at the gate with WORKS not committed.
+      await until(() => s.steps().some((x) => x.kind === "fix" && x.state === "running"));
+      expect(s.loop.pause(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await until(() => s.blocked()?.text === PAUSED);
+      const w = await s.wt();
+      expect(readFileSync(join(w.repo, "src", "feature.ts"), "utf8")).toContain("works");
+      expect((await status(w)).map((e) => e.path)).toEqual(["src/feature.ts"]);
+      // The app stops and starts again over the same database. No gate holds the part now.
+      await s.loop.shutdown();
+      recoverTasks(s.db);
+      expect([s.t().state, s.blocked()?.text]).toEqual(["implementing", PAUSED]);
+      const loop = createLoop({ review: s.jobs, settings: s.settings, live: s.live });
+      s.jobs.onStop(() => loop.shutdown());
+      s.mode("green");
+      expect(loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      // The kept change went into the checks commit. A reset would have saved it as a patch and dropped it.
+      expect(readFileSync(join(w.repo, "src", "feature.ts"), "utf8")).toContain("works");
+      expect((await s.log()).at(-1)).toBe(`Ada Example <ada@example.invalid>|${KEY}: Fix the checks of part 1`);
+      expect(existsSync(join(w.dir, "..", "patches"))).toBe(false);
     },
     SLOW,
   );

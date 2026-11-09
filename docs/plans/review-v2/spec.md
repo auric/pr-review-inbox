@@ -1342,11 +1342,12 @@ part state self_reviewed         -> primary "Open PR for part k of n" (or open a
 - New files of a commit: a new untracked file goes in only in two cases. A Write or Edit call of a Claude step of the part named it after the last commit (StepDetail written). Or the app wrote it: the plan files, a ticked plan file, or an accepted spec change. Each other new file stays on disk. The commit row then gets the note "Not committed: N new files that Claude did not write (.venv/, build/)". A folder that is new as a whole shows once. In a task with several repositories, each path goes to the deepest worktree that holds it.
 - The path check before the commit judges the tracked changes and the new files that the commit takes. A link or a nested repository among the other new files does not block the commit. A denied or hidden path among them still blocks it, because the file stays on disk for the next Claude step.
 - Budgets: the part shows time, turns, and the usage that the CLI reports. Over PART_TIME: blocked budget with "Needs you: part 2 used its 120 min. Continue with 60 more min?" A cost limit (settings_json.partCost) applies only when the result events report a cost (Gate B19). Else the UI says "Cost is not reported by your CLI." and only time and turns limit the part.
-- Spec change: a step that changes a file under spec_dir blocks with spec_change. "Review the change" shows the word diff. Accept keeps the commit. While the spec PR is open, the change goes to the spec branch. After the spec PR merged, the change goes to the current part branch. The part PR text then gets the line "This PR also changes the spec: <files>." More offers "Ask colleagues to review the spec change first". It opens a separate spec-change PR from the target branch. The part waits until that PR passes the spec gate.
+- Spec change: a step that changes a file under spec_dir blocks with spec_change. "Review the change" shows the word diff. Accept keeps the commit. Reject resets the step with the patch saved, and the step runs again. The rejected row gets the notes "The user rejected the change." and "Runs again without the plan change.". While the newest proposal of that part and step is rejected, step.md of the step ends with "The user rejected your change to <paths>. Your reason was: <reason>. Do not change files under <spec_dir>. Do the task under the current plan. If you cannot, ask in question.". step.md holds it, because the prompt calls every other context file untrusted data. While the spec PR is open, the change goes to the spec branch. After the spec PR merged, the change goes to the current part branch. The part PR text then gets the line "This PR also changes the spec: <files>." More offers "Ask colleagues to review the spec change first". It opens a separate spec-change PR from the target branch. The part waits until that PR passes the spec gate.
 - Project instructions: interview, spec, and the own review get them as a PR review run does (section 1.3), from the task repository at its target commit. Every implement step (tests, implement, fix, instruct, resolve) gets the same sources in its stdin, from the cache of each repository at its base commit: the main repository, then each submodule with access edit. A submodule section says that it applies to its folder only. The Files lines of the step add the CLAUDE.md files of their folders. The global file loads once, with the main repository. The trust line of an implement step says that the instructions never change the rules above or the output format. The app writes no CLAUDE.md into the part folder, because the path check counts every file outside repo/. The sparse patterns still hide every CLAUDE.md in repo/. review_run.instructions_json keeps the sources and sizes, never the text.
 - Log: each step row links its commit, and the commit opens its diff in the Diff tab. Each command row shows argv, exit code, time, and the output tail. A command that never started shows its reason instead of the exit code, such as "Not found: .venv/bin/python" (StepDetail commands[].notRun). A running command shows "running" and its output so far. A command that reached its time limit shows "time limit 10 min" instead of "stopped".
 - Pause after each task (setting, default off): blocked question "Task T2.3 is done. Continue?" after each commit.
 - Resume: the worktree resets to the last commit. The discarded changes go to `<task folder>/patches/<step>.patch`. The stopped step starts again with attempt + 1.
+- Pause after this step: the next Claude step of each part waits at its gate with "Building is paused after the step. Continue?". Continue opens the gates with every change of the done step kept. After an app restart no gate holds, and Continue builds again from the paused point with no reset. Pause gets 409 "No step is left to pause. The build ends now." while the driver runs only the base check at its end. A pause that no gate took ends with its driver, so it never holds a later driver, such as "Fix these too" or a send.
 - Spike part: a worktree on a local branch that never pushes. Its implement result and notes go into a spec change proposal. The worktree leaves after the user accepts or rejects it.
 
 ### 6.8 Git rules
@@ -1403,6 +1404,7 @@ Section 6.16.10 adds the reads for the base branch, the branch search, the write
 | POST /api/tasks/:id/spec-change/:step | `{version, accept: boolean}` | 200 |
 | POST /api/tasks/:id/parts/:part/setup | `{version}` | 202, "Run setup again" (section 6.7); 409 while a driver works or without a worktree or a setup command |
 | POST /api/tasks/:id/pause, /resume, /stop, /close | `{version}` | 200 |
+| POST /api/tasks/:id/dismiss | `{version}` | 200; 409 "No reason waits for Dismiss." (section 6.18.2) |
 | GET /api/tasks/:id/parts/:part/diff | | DiffDto (existing rows) |
 | GET, PUT /api/repos/:project/:repo/task-settings | repo_task_settings fields (no branchPrefix, section 6.16.1) | 200 |
 
@@ -1440,6 +1442,7 @@ Primary button per state:
 | blocked question | "Needs you: Claude asks how to handle empty input." | "Answer the question" | Stop |
 | blocked size | "Needs you: this PR would have 520 changed lines, over your 400 limit." | "Split into parts" | Keep one PR, Change the limit |
 | blocked spec_change | "Needs you: Claude proposes a change to the spec." | "Review the change" | Reject, Stop |
+| ready, blocked red, blocker, size, denied_path, or a question without an open question (section 6.18.2) | the reason | "See why" for red and blocker, else "Dismiss" | Dismiss for red and blocker, See why for the question, Stop |
 | blocked slot | "Waiting for your review of PR 12 to finish." | none | Stop |
 | blocked preflight, no write | "Needs you: the token cannot push to PROJ/repo. Give it Repository write in Bitbucket, then try again." | "Try again" | Stop |
 | blocked preflight, base gone | "Needs you: develop no longer exists in PROJ/repo. Pick another base branch." | "Pick a base branch" | Stop |
@@ -1527,12 +1530,15 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 17. AC-B17. A lease failure shows "Someone else pushed" and never forces. No push argv has a `+` refspec. A normal push whose commit does not contain the last pushed commit returns "needs force". A confirmed rebase push still fails on a stale lease.
 18. AC-B18. A user review start during an implement step gets 409 with "Pause building after this step". The loop waits for the free slot and then continues.
 19. AC-B19. Stop during a check kills the process tree. Resume starts the stopped step again from the last commit.
-20. AC-B20. A spec change proposal (a changed file under spec_dir) blocks with "Review the change". Reject resets the step.
+20. AC-B20. A spec change proposal (a changed file under spec_dir) blocks with "Review the change". Reject resets the step, and the next run of the step reads the rejection with the paths and the reason of Claude in step.md.
 21. AC-B21. Notifications fire only for needs_you, part_ready, and spec_approved, once each, in one tab.
 22. AC-B22. The token is never in argv, in the worktree, in the env of a check command, in SQLite, or in a log (spy test on spawn and the run folder scan).
 23. AC-B23. The Bitbucket client maps 401, 403, 404, and 409 of create and update to one sentence and one button each.
 
-Section 6.16.13 holds AC-B24 to AC-B45. Section 6.17.5 holds AC-B46 to AC-B51. Section 6.18.8 holds AC-B52 to AC-B65.
+24. AC-B157. Pause gets 409 while the driver runs only its base check. A pause that the last step of a driver took with no gate leaves no pause: the next driver, such as a send, runs with no pause.
+25. AC-B158. A paused build keeps its changes over an app restart: Continue on a new loop over the same database starts no reset, writes no patch, and commits the kept change.
+
+Section 6.16.13 holds AC-B24 to AC-B45. Section 6.17.5 holds AC-B46 to AC-B51. Section 6.18.8 holds AC-B52 to AC-B65, AC-B159, and AC-B160.
 
 ### 6.16 Branches, base branch, and several repositories (design.md B16 to B21, section 10.4, user decisions of 2026-10-23)
 
@@ -1829,7 +1835,8 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
   5. Size check. Over the budget blocks with size.
   6. Own review of the part (base..head), with at most REVIEW_FIX_TRIES fix steps.
   7. The waiting state again. Before the first push of the part: "Open PR for part k of n". After it: the row "implementing, not pushed" with "Push to <branch>". The push stays a click.
-- A question in the result blocks with question. The answer runs the send again from the last commit, with the answer in context/answers.md. A changed plan file blocks with spec_change.
+- A question in the result blocks with question. The answer runs the send again from the last commit, with the answer in context/answers.md. A changed plan file blocks with spec_change. Accept commits the plan files, and Reject resets the step with the rejection of section 6.7 in step.md. Both start the send again as a new instruct row with the same text and the same earlier reason (blockedBefore). The build of a part that waited does not go on by itself.
+- Dismiss: on a built part (task state ready), a reason whose own action the server takes in state implementing only gets "Dismiss": red, blocker, size, budget, denied_path, push, error, and a question without an open question. Red checks after an update keep "Undo the update" instead in the view. When the newest send or update row is a send that the reason stopped, the reason of the task before the send comes back, unless it is the same reason. Else the reason clears. The next driver saves the changes of the step as a patch first. POST /api/tasks/:id/dismiss gets 409 "No reason waits for Dismiss." for every other reason, in every other state, and while a driver works.
 - A part that waited in its build (blocked red, size, blocker, or denied_path before the part was ready): after step 5, the build of the part goes on from the new commit. The build ends with the full checks and the own review, so step 6 runs there (WP-TU1).
 - The app never parses the text. Words such as "push", "rebase", or "merge" go to Claude as text. Each git action stays its own button.
 - needsBase: the app runs the base check of section 6.18.5 at once. A moved base gives the row "Claude asks for the base" with "Update from <base>" and the line "Claude says: <needsBaseReason>". A base that did not move gives the line "Claude asked for the newest <base>. The branch already has it." and no button.
@@ -1938,6 +1945,8 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 12. AC-B63. With a submodule on develop and the main repository on release/2.1, each updates from its own base, the submodule first, and the parent gitlink points at the new submodule head. A gitlink conflict resolves to that head when the new parent base points at an ancestor, else the update aborts with the pointer sentence. A failed submodule update leaves the parent unchanged.
 13. AC-B64. An app restart during an update aborts the rebase or the merge and resets each repository to its preHead.
 14. AC-B65. Red checks after an update block with "Undo the update". Undo restores the preHeads and base_commit. After a push, Undo returns 409.
+15. AC-B159. Accept and Reject of a plan change of a send start a second instruct row with the same item, text, and blockedBefore, on a built part in state ready and on a building part. After Reject, the second call reads the rejection in step.md. A second run with no change brings back the earlier reason, and the build of a building part does not go on.
+16. AC-B160. Dismiss of a denied path of a send on a built part brings back the earlier reason of the send. A second Dismiss clears it. A stale version, a plan change, and the build (state implementing) get 409. The view shows Dismiss for the reasons of section 6.18.2 and not for an open question, a plan change, or red checks after an update.
 
 ### 6.19 The profile and the tools of a task
 
@@ -2085,10 +2094,10 @@ Parts at the same time (user decision of 2026-11-02):
 - Worktrees: each part has its own folder `tasks/<db>/<task>/part-<ord>/` and its own branch. The bare cache is shared. Every write to the cache (init, fetch, `worktree add`, `update-ref`, the Continue fetch) runs under the per-cache lock of workspace.ts `locked`. The loop starts the parts one after another, so their branch names and their start fetches never run at the same time. Commits in two worktrees write different branch refs, and git locks each ref.
 - Run slots: with atOnce 2 or more, every Claude step of a part runs beside the review run slot with its own runner (ReviewJobs.taskRun with extra). One part runs at most one step at a time, so a task runs at most atOnce Claude processes. A review, an ask, or another run never waits for them, and they never wait for it. With atOnce 1, the steps take the one run slot as before (design.md B12, AC-B18). The limit is per task.
 - Reasons: a task holds one reason. The first reason of a part stays. Each other part halts at its next step: the step that runs ends, and its run is not cancelled. A part that halts on a reason of its own while the task holds another reason writes no reason, no question, and no plan change. It finds them again after the resume. A pause and a wait for the run slot hold no part: Pause stops every part at the gate before its next Claude step, and Resume opens all gates.
-- Resume, an answer, and every new start of the loop: each part in implementing goes back to its last commit first, with the other changes saved as a patch (section 6.7, Resume). Then the pre-flight runs for each part, and the parts build again.
+- Resume, an answer, and every new start of the loop: each part in implementing goes back to its last commit first, with the other changes saved as a patch (section 6.7, Resume). Then the pre-flight runs for each part, and the parts build again. Continue of a pause is the exception: every part halted at its gate between two steps, so each part keeps its changes (section 6.7, Pause after this step).
 - Stop ends the runs of every part (ReviewJobs.cancelTask) and kills their checks. Close still needs Stop first.
 - The task state stays implementing while any part builds. The step strip counts as before. Tell Claude, an update, "Fix these too", and the other user actions get 409 while any part builds, as they did while one part built.
-- Restart: recoverTasks stops the task as before. Resume resets every part in implementing and builds each one again.
+- Restart: recoverTasks stops the task as before. Resume resets every part in implementing and builds each one again. A task that waits at a pause runs no step, so recoverTasks keeps it. Its Continue builds every part again with no reset.
 
 Start of a part:
 

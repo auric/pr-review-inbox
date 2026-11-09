@@ -185,7 +185,7 @@ export type TaskAction =
   | { kind: "repo"; taskRepo: number; add: boolean }
   | { kind: "docs"; doc: TaskDoc; text: string }
   | { kind: "size"; size: TaskSize }
-  | { kind: "pause" | "stop" | "resume" | "close" }
+  | { kind: "pause" | "stop" | "resume" | "close" | "dismiss" }
   | { kind: "keep" }
   | { kind: "limit"; lineBudget: number }
   | { kind: "change"; step: number; accept: boolean }
@@ -242,6 +242,8 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       return read(await tasks.resume.$post({ param, json: { version } }));
     case "close":
       return read(await tasks.close.$post({ param, json: { version } }));
+    case "dismiss":
+      return read(await tasks.dismiss.$post({ param, json: { version } }));
     case "keep":
       return read(await tasks.limit.$post({ param, json: { version, keep: true } }));
     case "limit":

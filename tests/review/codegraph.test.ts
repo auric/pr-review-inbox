@@ -54,7 +54,14 @@ describe("codegraph detection", () => {
       type: "stdio",
       command: "npx",
       args: ["-y", "@colbymchenry/codegraph", "serve", "--mcp", "--path", "/data/runs/7/work/repo", "--no-watch"],
-      env: { KEEP: "1", CODEGRAPH_DIR: "", CODEGRAPH_NO_DAEMON: "1", DO_NOT_TRACK: "1" },
+      env: {
+        KEEP: "1",
+        CODEGRAPH_DIR: "",
+        CODEGRAPH_NO_DAEMON: "1",
+        DO_NOT_TRACK: "1",
+        CODEGRAPH_NO_UPDATE_CHECK: "1",
+        CODEGRAPH_NO_DOWNLOAD: "1",
+      },
     });
   });
 
@@ -91,6 +98,7 @@ describe("indexCodegraph with a fake codegraph", () => {
       expect(c.env).toEqual({
         DO_NOT_TRACK: "1",
         CODEGRAPH_NO_UPDATE_CHECK: "1",
+        CODEGRAPH_NO_DOWNLOAD: "1",
         CODEGRAPH_DIR: null,
         CODEGRAPH_NO_WATCH: null,
         GIT_CONFIG_NOSYSTEM: "1",

@@ -239,7 +239,8 @@ export function createStreamParser(opts: {
         const by = deny ? "deny" : unlisted ? "allowlist" : "check";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });
-        const cd = by === "check" && /requires approval: cd\s/.test(d.message ?? "");
+        // SU14 (B30a): `cd <dir> && <command>`. SU18 (B31): the read block of allowlist mode refuses a lone cd.
+        const cd = by === "check" && /requires approval: cd\s|^cd names a path that is computed at run time/.test(d.message ?? "");
         end(changed, id, "error", cd ? CD_REFUSED_NOTE : REFUSED_NOTE[by]);
       }
     } else if (m.type === "system" && m.subtype === "task_started") {

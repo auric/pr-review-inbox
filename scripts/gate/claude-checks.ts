@@ -3041,24 +3041,26 @@ const B33_SECRET = "RLGB-B33-FAKE-CONFIG-4417";
 const B33_TEXT = "RLGB-B33-WRITE";
 const B33_LOOP = "for f in a.cpp b.cpp; do tr -d '\\r' < repo/$f | md5sum; done";
 const B33_HOST_RULE = `${PROBE_RULE.slice(0, -2)} b33host *`;
-// cd repo comes after the commands that give paths from the part folder, because the cwd carries over without V15.
+// The cwd carries over without V15 (SU20, B33 run of 2026-11-09). So the commands with paths from the part folder come first, then the
+// compound cd, then the probe calls from repo/, where the probe file is. The lone cd goes back up, because the cwd is repo/ by then.
 const b33Cmds = (data: string) => ({
-  compound: "cd repo && cat README.md | head -3",
   curl: "curl --version",
   git: "git -C repo log -1",
   host: B32_HOST_CMD,
   config: `cat ${slash(join(data, "config.json"))}`,
   loop: B33_LOOP,
   shape: `md5sum repo/a.cpp repo/b.cpp | tr -d '\\r'; ${B33_LOOP}`,
+  compound: "cd repo && cat README.md | head -3",
   timeout: `timeout 30 ${probe("b33t")}`,
   ssh: `timeout 30 ${probe("b33host")} 'cd ~/dev/x && md5 -q src/a.cpp; ls tmp 2>/dev/null; ls bin/*/*'`,
-  cd: "cd repo",
   cwd: probe("cwd"),
+  cd: "cd ..",
 });
 const B33_MODES = ["unrestricted", "any"] as const;
 
-// PASS: in both runs, the compound command, the loop, the user shape, timeout, the ssh-shaped command, `cd repo`, and the probe in repo/
-// run, the Edit and the Write of repo/README.md work, and the deny list refuses `git -C repo log -1` and the host. curl runs in
+// PASS: in both runs, the loop and the user shape read both files, the compound command, timeout, the ssh-shaped command, the probe in
+// repo/, and `cd ..` run, the probe calls write their marker in repo/, the Edit and the Write of repo/README.md work, and the deny list
+// refuses `git -C repo log -1` and the host. curl runs in
 // Unrestricted and is refused in Most commands. INFO: all of that, but Most commands reads the fake config, so its Read deny rules need
 // the read block. FAIL: anything else.
 async function b33() {
@@ -3100,10 +3102,16 @@ async function b33() {
         .flatMap(blocks)
         .some((b) => b.type === "tool_result" && blockText(b).includes(B33_SECRET));
       const curlOk = mode === "unrestricted" ? of(cmds.curl).state === "ran" : of(cmds.curl).state === "refused";
+      // The probe writes its marker in its cwd. Its file is in repo/ only, so a probe call runs from repo/.
+      const marks = { t: ran(join(work, "repo"), "b33t"), host: ran(join(work, "repo"), "b33host") };
+      // A path that is not found gives the md5 of empty input (B33 run of 2026-11-09).
+      const read = (c: string) => of(c).state === "ran" && !of(c).text.includes("No such file");
       const core =
-        [cmds.compound, cmds.loop, cmds.shape, cmds.timeout, cmds.ssh, cmds.cd, cmds.cwd].every((c) => of(c).state === "ran") &&
-        ran(work, "b33t") &&
-        ran(work, "b33host") &&
+        [cmds.compound, cmds.timeout, cmds.ssh, cmds.cd, cmds.cwd].every((c) => of(c).state === "ran") &&
+        read(cmds.loop) &&
+        read(cmds.shape) &&
+        marks.t &&
+        marks.host &&
         probeDir === "repo" &&
         edit.state === "ran" &&
         write.state === "ran" &&
@@ -3118,7 +3126,7 @@ async function b33() {
           `${mode}: exit=${run.exit}; read block=${block}; init.permissionMode=${run.init?.permissionMode ?? "none"}`,
           `probe cwd=${probeDir === "repo" ? "repo" : probeDir === basename(work) ? "part folder" : probeDir ? "other" : "none"}`,
           `Edit=${edit.state} Write=${write.state} README written=${text === B33_TEXT}; fake config in a result=${leaked}`,
-          `timeout marker=${ran(work, "b33t")} ssh stand-in marker=${ran(work, "b33host")}`,
+          `timeout marker=${marks.t} ssh stand-in marker=${marks.host}; loop read=${read(cmds.loop)} shape read=${read(cmds.shape)}`,
           ...list.map((c) => factOf(run, state, c)),
           `other calls=${
             otherCalls(run, list)

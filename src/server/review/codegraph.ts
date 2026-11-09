@@ -26,6 +26,8 @@ export function codegraphIndex(entry: UserMcpEntry): number {
   return i >= 0 && t[i + 1] === "serve" && t.slice(i + 2).includes("--mcp") ? i : -1;
 }
 
+// codegraph 1.6.2 npm-shim.js downloads a missing platform bundle from GitHub unless CODEGRAPH_NO_DOWNLOAD is set.
+// dist/upgrade/update-check: CODEGRAPH_NO_UPDATE_CHECK or DO_NOT_TRACK turns the update check off.
 // The run's entry: the user's command up to `serve`, then a fixed project path. Other serve options of the user drop out.
 export function codegraphEntry(entry: Extract<UserMcpEntry, { type: "stdio" }>, repo: string): UserMcpEntry {
   const i = codegraphIndex(entry);
@@ -33,7 +35,14 @@ export function codegraphEntry(entry: Extract<UserMcpEntry, { type: "stdio" }>, 
     type: "stdio",
     command: entry.command,
     args: [...entry.args.slice(0, i + 1), "--mcp", "--path", repo, "--no-watch"],
-    env: { ...entry.env, CODEGRAPH_NO_DAEMON: "1", DO_NOT_TRACK: "1", CODEGRAPH_DIR: "" },
+    env: {
+      ...entry.env,
+      CODEGRAPH_NO_DAEMON: "1",
+      DO_NOT_TRACK: "1",
+      CODEGRAPH_NO_UPDATE_CHECK: "1",
+      CODEGRAPH_NO_DOWNLOAD: "1",
+      CODEGRAPH_DIR: "",
+    },
   };
 }
 
@@ -60,6 +69,7 @@ export async function indexCodegraph(input: IndexInput): Promise<string | null> 
   for (const [k, v] of Object.entries(gitSetup(input.dataDir).env)) if (/^GIT_/.test(k)) env[k] = v;
   env.DO_NOT_TRACK = "1";
   env.CODEGRAPH_NO_UPDATE_CHECK = "1";
+  env.CODEGRAPH_NO_DOWNLOAD = "1";
   const t = [entry.command, ...entry.args];
   const cmd = t.slice(0, codegraphIndex(entry) + 1).map((x) => expand(x, base));
 
