@@ -416,7 +416,7 @@ design.md D6 to D13 give the decisions (added 2026-10-22). Nothing in this secti
 - The PR view shows a block "Notes" under the PR description and above the threads. With no note and no suggestion, it is one line: "Notes for this PR. Claude reads them before each run." with the button "Add a note".
 - A kept note shows its text, a chip when it links a PR ("PR #45 open", "PR #45 merged", "PR #45 declined", "PR #45 not found"), "Edit", and "Delete". A note that came from a suggestion has the small line "Kept from Claude's suggestion".
 - Suggestions show under "Claude suggests", each with the line "From the thread of Anna on src/build.ts line 40" (a link to the thread), "Keep", "Edit", and "Dismiss". One line explains: "Claude does not use a suggestion until you keep it."
-- "Add a note" opens an inline text box (500 characters, with a counter), an optional field "Waits for PR #", "Save" (primary, Ctrl+Enter), and "Cancel" (Esc). "Edit" opens the same box with the text. "Edit" on a suggestion saves and keeps it in one step.
+- "Add a note" opens an inline text box (no length limit and no counter), an optional field "Waits for PR #", "Save" (primary, Ctrl+Enter), and "Cancel" (Esc). "Edit" opens the same box with the text. "Edit" on a suggestion saves and keeps it in one step.
 - "Delete" asks no confirm. The row becomes "Note deleted." with "Undo" for 10 s.
 - Draft card: a reply draft (and a discuss answer, WP-D3) that proposed a note shows "Claude suggests a note: <text>" with "Keep" and "Dismiss". It is the same note row as in the Notes block. A choice in one place updates the other. A draft with cites shows "Based on the thread of Bob" with one link per cited thread.
 - Keys: no new global key. The block is in the tab order after the description. Esc in the text box closes it and returns the focus to the button that opened it. After "Keep" or "Dismiss", the focus goes to the next suggestion, else to "Add a note". After "Delete", the focus goes to "Undo". A polite live region says "Note kept.", "Note saved.", "Suggestion dismissed.", or "Note deleted.". Every target is at least 24 by 24 px.
@@ -562,19 +562,19 @@ CREATE INDEX pr_note_pr ON pr_note (pr, created_at) WHERE deleted_at IS NULL;
 - A user note: source user, state kept. A suggestion: source claude, state proposed, with thread, run, and item (the draft that the same run made for that thread, else NULL).
 - Keep: state kept (source stays claude). Dismiss: state dismissed. The row stays, so the same text is never proposed again. Delete: deleted_at = now, for any state. Undo: deleted_at = NULL.
 - Every change raises version. A stale version gets 409 with the current note.
-- NOTES_CAP: 30 rows per PR with deleted_at NULL and state kept or proposed.
+- A PR has no cap on its notes (user decision of 2026-11-10). The only size guard is NOTE_TEXT_MAX: 100,000 characters per note, checked by the zod input schema only. The UI shows no counter. Migration 049 rebuilds pr_note without the length CHECK.
 - PR link: the same Bitbucket server, any repository that the token reads. The project and repo default to the PR's own. The link resolves from a stored pull_request row first, else through provider.getPullRequest. ref_state MISSING after a 404. The notes GET and the context build refresh a link older than 10 min, with at most 5 reads per call. A failed read keeps the old state.
 
 Schemas (src/shared/review.ts, draft-07 through z.toJSONSchema; every new key has a default, so stored results and old CLI output still parse):
 
 ```ts
-export const NOTE_TEXT_MAX = 500;
-export const NOTES_CAP = 30;
+export const NOTE_TEXT_MAX = 100_000; // hidden server guard for a note of the user
+export const NOTE_PROPOSAL_MAX = 500; // a suggestion of Claude is one sentence
 export const MAX_NOTE_PROPOSALS = 2;
 export const MAX_CITES = 5;
 
 export const noteProposal = z.object({
-  text: z.string().min(1).max(NOTE_TEXT_MAX).describe("One sentence: the agreement or the wait that the thread shows."),
+  text: z.string().min(1).max(NOTE_PROPOSAL_MAX).describe("One sentence: the agreement or the wait that the thread shows."),
   thread: lineNo.describe("The thread in ./context/pr-context.md that shows it."),
   pr: z.number().int().positive().nullable().default(null)
     .describe("The number of another pull request in ./context/pr-context.md that this pull request waits for. Else null."),
@@ -597,7 +597,6 @@ Validation at the run end (pure, src/server/review/notes.ts proposeNotes and che
 - A proposal for a thread without a live message of the user → drop. With no user slug in Settings, every proposal drops. This check keeps another person from planting a note through a comment.
 - A text equal to the text of any note of the PR (kept, proposed, or dismissed; deleted ones count too), after trim and whitespace collapse, case-sensitive → drop.
 - A pr that is not in the "Other open pull requests" section of this run's pr-context.md and not the PR of a stored link → the note stays, the link drops.
-- Over NOTES_CAP → drop.
 - A cite that is not a thread of this PR with a live message, or that is the draft's own thread → drop the cite.
 - The proposals and the drafts go in one transaction. A run that fails stores no proposal.
 
@@ -606,8 +605,8 @@ Routes (zod inputs in src/shared/dto.ts; every mutation keeps csrf, the session 
 | Route | Body | Result |
 |---|---|---|
 | GET /api/prs/:id/notes | | NoteDto[]: kept and proposed, deleted_at NULL, oldest first |
-| POST /api/prs/:id/notes | `{text: z.string().trim().min(1).max(500), ref?: {prId: positiveInt, project?: string, repo?: string}}` | 201 NoteDto; 409 "This PR has 30 notes. Delete one first."; 404 "No PR #45 in PROJ/repo." |
-| PUT /api/notes/:id | `{version, text?: 1..500, ref?: {...} or null, state?: "kept" or "dismissed", restore?: true}` | 200 NoteDto; 409 version; 400 for state on a user note, for dismissed on a kept note, or for restore on a live note |
+| POST /api/prs/:id/notes | `{text: z.string().trim().min(1).max(100000), ref?: {prId: positiveInt, project?: string, repo?: string}}` | 201 NoteDto; 400 "Write a note." or "The note is too long. Keep it under 100,000 characters."; 404 "No PR #45 in PROJ/repo." |
+| PUT /api/notes/:id | `{version, text?: 1..100000, ref?: {...} or null, state?: "kept" or "dismissed", restore?: true}` | 200 NoteDto; 409 version; 400 for state on a user note, for dismissed on a kept note, or for restore on a live note |
 | DELETE /api/notes/:id | `{version}` | 200 NoteDto with deletedAt |
 
 ### 2.10 Prompt lines (PR context and notes)
@@ -778,7 +777,7 @@ Eval: no eval case. The harness scores findings and reply judgements, and an ans
 - Done: a page at reading width: the head line ("Head abc1234, 5 min ago"), the summary, "Read in this order" (a numbered list of files with one reason each), the walkthrough (Markdown with diagrams), "Risks" (each with a link to its code), "Files" (role chips: core, supporting, tests, config, generated, docs), and "Words used" (the glossary). Questions go to Drafts as today, with "From Explain".
 - Stale: "The PR changed after this walkthrough." with the primary button "Explain again".
 - A diff link opens the Files diff of that file at that line and pushes a history entry.
-- A diagram shows as an image with "Show code" and "Copy code". A broken diagram shows its code, the first error line, and "Copy code".
+- A diagram shows as an image with "Zoom", "Show code", and "Copy code". A click on the image or on "Zoom" opens a large dialog with the same image at the fit scale. The dialog has "Zoom out", the zoom in percent, "Zoom in", "Fit", and "100%", the keys + - 0 (fit) 1 (100%), Ctrl+wheel zoom, and drag or scroll to pan. A broken diagram shows its code, the first error line, and "Copy code".
 - "Copy as Markdown" (under More) copies the walkthrough text.
 
 ### 3.2 Run and storage
@@ -3161,7 +3160,7 @@ Constants (src/shared/autopilot.ts unless named):
 | runsPerDay | 40 autopilot runs for all PRs in a rolling 24 h (1 to 100) | yes |
 | OPEN_PRS_CAP | 50 open PRs in context/open-prs.md, newest update first | no |
 | THREADS_CAP | 60 KB for context/threads.md; older messages of a long thread leave first, and a line counts them | no |
-| NOTES_CAP | replaced by the part 2 value: 30 notes per PR (section 2.9) | no |
+| NOTES_CAP | removed: a PR has no cap on its notes (section 2.9) | no |
 
 ### 11.1 What the user sees
 

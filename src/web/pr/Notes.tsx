@@ -12,7 +12,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type { MetaDto, NoteConflict, NoteDto, NoteUpdateInput } from "../../shared/dto";
-import { NOTE_TEXT_MAX } from "../../shared/review";
 import { api } from "../api";
 import { useMeta } from "../meta";
 import { replyKey } from "../review/data";
@@ -389,7 +388,7 @@ function Deleted(props: { n: NoteDto; busy: boolean; undo: () => void; error: Re
   );
 }
 
-// The inline box of "Add a note" and "Edit": 500 characters with a counter, an optional PR number, Save (Ctrl+Enter), Cancel (Esc).
+// The inline box of "Add a note" and "Edit": the text, an optional PR number, Save (Ctrl+Enter), Cancel (Esc).
 function NoteBox(props: {
   text: string;
   prId: number | null;
@@ -435,16 +434,11 @@ function NoteBox(props: {
         name="note"
         autoComplete="off"
         rows={3}
-        maxLength={NOTE_TEXT_MAX}
         value={text}
-        aria-describedby={`${id}-count`}
         className="field-sizing-fixed min-h-[5em] resize-y bg-pane leading-normal"
         onChange={(e) => setText(e.target.value)}
         onKeyDown={keys}
       />
-      <span id={`${id}-count`} className="text-xs text-muted-foreground">
-        {text.length} of {NOTE_TEXT_MAX} characters
-      </span>
       <div className="flex flex-wrap items-center gap-2">
         <label htmlFor={`${id}-pr`} className="text-sm">
           Waits for PR #

@@ -147,7 +147,7 @@ The post confirm lists the drafts that cannot post now in groups by reason: out 
 
 ### PR notes
 
-The Notes block under the description holds your notes for the pull request, such as "No retry in the client" or "Ship after the scheduler PR". "Add a note" opens a box of up to 500 characters with an optional "Waits for PR #" field. A linked PR shows a chip with its state: open, merged, declined, or not found. Delete asks no confirm and offers Undo for 10 seconds. Claude reads your notes before each review, reply, fix, and Ask run, and follows them. It says so when the code or a newer message contradicts a note.
+The Notes block under the description holds your notes for the pull request, such as "No retry in the client" or "Ship after the scheduler PR". "Add a note" opens a box with an optional "Waits for PR #" field. A note has no length limit, and a pull request can hold any number of notes. A linked PR shows a chip with its state: open, merged, declined, or not found. Delete asks no confirm and offers Undo for 10 seconds. Claude reads your notes before each review, reply, fix, and Ask run, and follows them. It says so when the code or a newer message contradicts a note.
 
 ![The Notes block with a kept note that waits for a merged PR, and a suggestion with Keep, Edit, and Dismiss](docs/screenshots/notes.webp)
 
@@ -179,12 +179,14 @@ After an answer, the box is "Follow up". Claude then sees the last three questio
 
 ### Explain this PR
 
-Press `w`, or click "Explain this PR", to open the walkthrough page of the pull request. The page starts nothing by itself. Its one button starts a run with the Explain profile. While the run runs, the page says what Claude does. The result gives the change in one line and the files in the order to read them. Then it gives a walkthrough by theme with Mermaid diagrams, the risks, the role of each file, and the project terms. A link in the walkthrough or a risk opens the Files diff at that line. Back returns to the page. A link that does not match the change shows as plain text. Questions for the author go to Drafts, marked "From Explain". When the pull request changes, the page says so and offers "Explain again". "Copy as Markdown" under More copies the page. `Esc` or "Back to the pull request" returns to the pull request where you left it.
+Press `w`, or click "Explain this PR", to open the walkthrough page of the pull request. The page starts nothing by itself. Its one button starts a run with the Explain profile. While the run runs, the page says what Claude does. The result gives the change in one line and the files in the order to read them. Then it gives a walkthrough by theme with Mermaid diagrams, the risks, the role of each file, and the project terms. Click a diagram, or "Zoom" under it, to open it in a large view. There, "Zoom in", "Zoom out", "Fit", and "100%", the keys `+` `-` `0` `1`, and Ctrl+wheel change the zoom. Drag or scroll to move the diagram. A link in the walkthrough or a risk opens the Files diff at that line. Back returns to the page. A link that does not match the change shows as plain text. Questions for the author go to Drafts, marked "From Explain". When the pull request changes, the page says so and offers "Explain again". "Copy as Markdown" under More copies the page. `Esc` or "Back to the pull request" returns to the pull request where you left it.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/explain-dark.webp">
   <img alt="The Explain page: the summary, the reading order, and the walkthrough with links into the diff and a flowchart" src="docs/screenshots/explain-light.webp">
 </picture>
+
+![The large view of a diagram with Zoom out, the zoom in percent, Zoom in, Fit, and 100%](docs/screenshots/diagram-zoom.webp)
 
 ### Build a Jira task
 

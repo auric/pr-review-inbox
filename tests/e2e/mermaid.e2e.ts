@@ -158,3 +158,69 @@ test("a page without a diagram does not load the mermaid chunk", async ({ page, 
   await expect(answer(page).locator("figure")).toHaveCount(0);
   expect(mermaidChunk(seen.urls)).toEqual([]);
 });
+
+// The large view: the image and Zoom open a dialog with the same data: URL. It opens at the fit scale.
+test("a diagram opens in a large dialog with zoom buttons, keys, Ctrl+wheel, and Fit", async ({ page }) => {
+  await control("claude", { stream: "tree", answer: { answer: `\`\`\`mermaid\n${FLOW}\n\`\`\``, coverage: COVERAGE } });
+  await ask(page);
+  const flow = figures(page).first();
+  await expect(flow).toHaveAttribute("data-diagram", "image", { timeout: RUN_MS });
+  const src = await flow.locator("img").getAttribute("src");
+  const open = flow.getByRole("button", { name: "Open diagram: flowchart TD" });
+  await open.click();
+  const dialog = page.getByRole("dialog", { name: "Diagram: flowchart TD" });
+  await expect(dialog).toBeVisible();
+  const big = dialog.locator("img");
+  await expect(big).toHaveAttribute("src", src ?? "");
+  await expect.poll(() => big.evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth > 0)).toBe(true);
+  // Near full viewport.
+  const view = page.viewportSize() ?? { width: 0, height: 0 };
+  expect((await dialog.boundingBox())?.width ?? 0).toBeGreaterThan(view.width * 0.9);
+
+  const zoom = dialog.locator("output[data-zoom]");
+  const fit = dialog.getByRole("button", { name: "Fit" });
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  const fitText = (await zoom.textContent()) ?? "";
+  expect(fitText).toMatch(/^\d+%$/);
+  // The small flowchart grows to fill the box.
+  expect(Number.parseInt(fitText, 10)).toBeGreaterThan(100);
+  await test.info().attach("diagram-dialog", { body: await page.screenshot(), contentType: "image/png" });
+
+  await page.keyboard.press("1");
+  await expect(zoom).toHaveText("100%");
+  await expect(fit).toHaveAttribute("aria-pressed", "false");
+  expect(await big.evaluate((i: HTMLImageElement) => Math.round(i.getBoundingClientRect().width) === i.naturalWidth)).toBe(true);
+  await page.keyboard.press("+");
+  await expect(zoom).toHaveText("125%");
+  await page.keyboard.press("-");
+  await page.keyboard.press("-");
+  await expect(zoom).toHaveText("80%");
+  await dialog.getByRole("button", { name: "Zoom in" }).click();
+  await expect(zoom).toHaveText("100%");
+  await dialog.getByRole("button", { name: "Zoom out" }).click();
+  await expect(zoom).toHaveText("80%");
+  await dialog.getByRole("button", { name: "100%" }).click();
+  await expect(zoom).toHaveText("100%");
+
+  // Ctrl+wheel zooms the diagram, not the page.
+  const box = dialog.getByRole("region", { name: "Diagram view: flowchart TD" });
+  const b = (await box.boundingBox()) ?? { x: 0, y: 0, width: 0, height: 0 };
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, -100);
+  await page.keyboard.up("Control");
+  await expect(zoom).toHaveText("125%");
+  expect(await page.evaluate(() => window.visualViewport?.scale ?? 1)).toBe(1);
+
+  await page.keyboard.press("0");
+  await expect(zoom).toHaveText(fitText);
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+
+  // Esc closes the dialog and gives the focus back. Zoom opens it again at the fit scale.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(open).toBeFocused();
+  await flow.getByRole("button", { name: "Zoom", exact: true }).click();
+  await expect(dialog).toBeVisible();
+  await expect(zoom).toHaveText(fitText);
+});

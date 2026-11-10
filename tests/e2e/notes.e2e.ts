@@ -75,7 +75,9 @@ test("AC-P12: add a note, keep a suggestion on the draft card, edit, delete, and
   await expect(add).toBeFocused();
   await add.click();
   await block.getByLabel("Note", { exact: true }).fill("No retry in the client.");
-  await expect(block).toContainText("23 of 500 characters");
+  // No length limit and no counter.
+  await expect(block.getByLabel("Note", { exact: true })).not.toHaveAttribute("maxlength");
+  await expect(block).not.toContainText("characters");
   await page.keyboard.press("Control+Enter");
   await expect(said(page, "Note saved.")).toHaveCount(1);
   await expect(block.locator("li").filter({ hasText: "No retry in the client." })).toHaveCount(1);

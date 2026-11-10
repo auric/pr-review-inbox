@@ -690,7 +690,9 @@ const noteRefInput = z.object({
   project: z.string().trim().min(1).max(200).optional(),
   repo: z.string().trim().min(1).max(200).optional(),
 });
-const noteText = z.string().trim().min(1).max(NOTE_TEXT_MAX);
+const NOTE_EMPTY_TEXT = "Write a note.";
+const NOTE_LONG_TEXT = "The note is too long. Keep it under 100,000 characters.";
+const noteText = z.string().trim().min(1, NOTE_EMPTY_TEXT).max(NOTE_TEXT_MAX, NOTE_LONG_TEXT);
 // POST /api/prs/:id/notes.
 export const noteCreateInput = z.object({ text: noteText, ref: noteRefInput.optional() });
 // PUT /api/notes/:id. ref null drops the link. state: Keep or Dismiss of a suggestion. restore: Undo of a delete.

@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// A ```mermaid block as an image with "Show code" and "Copy code" (plan review-v2 spec 3.1). A block that does not render shows its code.
-import { Braces, CircleAlert, Copy } from "lucide-react";
+// A ```mermaid block as an image with "Zoom", "Show code", and "Copy code" (plan review-v2 spec 3.1). The image and Zoom open the large
+// view. A block that does not render shows its code.
+import { Braces, CircleAlert, Copy, ZoomIn } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { useDark } from "../theme";
+import { DiagramZoom } from "./DiagramZoom";
 import { prepare, type Rendered, renderDiagram, themeVariables } from "./mermaid";
 
 const icon = "size-[15px] shrink-0";
@@ -28,6 +30,7 @@ export function Diagram({ code }: { code: string }) {
   const dark = useDark();
   const [out, setOut] = useState<Rendered | null>(null);
   const [show, setShow] = useState(false);
+  const [zoom, setZoom] = useState(false);
   const pre = useRef<HTMLPreElement>(null);
   const codeId = useId();
 
@@ -74,7 +77,17 @@ export function Diagram({ code }: { code: string }) {
   return (
     <figure data-diagram={src ? "image" : note ? "code" : "drawing"} className="m-0 mb-2 grid justify-items-start gap-1.5">
       {src && prepared.ok && (
-        <img src={src} alt={`Diagram: ${prepared.title}`} className="rl-fade h-auto max-w-full rounded-md border bg-card p-3" />
+        <>
+          <button
+            type="button"
+            aria-label={`Open diagram: ${prepared.title}`}
+            className="rl-fade max-w-full cursor-zoom-in rounded-md border bg-card p-3 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            onClick={() => setZoom(true)}
+          >
+            <img src={src} alt={`Diagram: ${prepared.title}`} className="block h-auto max-w-full" />
+          </button>
+          <DiagramZoom src={src} title={prepared.title} open={zoom} onOpenChange={setZoom} />
+        </>
       )}
       {(!src || show) && (
         <pre id={codeId} ref={pre} className="m-0 justify-self-stretch">
@@ -83,6 +96,12 @@ export function Diagram({ code }: { code: string }) {
       )}
       {note}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {src && (
+          <button type="button" className={action} aria-haspopup="dialog" onClick={() => setZoom(true)}>
+            <ZoomIn aria-hidden className={icon} />
+            Zoom
+          </button>
+        )}
         {src && (
           <button type="button" className={action} aria-expanded={show} aria-controls={codeId} onClick={() => setShow((s) => !s)}>
             <Braces aria-hidden className={icon} />

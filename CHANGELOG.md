@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A diagram in Explain, Ask, and other answers now opens in a large view on a click or with "Zoom". The view has Zoom in, Zoom out, Fit, and 100%, the keys + - 0 1, and Ctrl+wheel. Drag or scroll to move the diagram.
+- PR notes have no length limit and no limit on their number. Before, a note had at most 500 characters, and a PR had at most 30 notes.
 - Build a Jira task: each Claude step can now start rl-explorer, a read-only agent for wide searches over many files. It can only read and search files, and it uses the model of the reviewer agents of the profile. The run log of a step shows the calls of rl-explorer under its call.
 - Build a Jira task: in Most commands and Unrestricted, a command such as `bash -c 'git ...'` could run git past the deny list. The app now saves the git state before each step. It holds HEAD, every branch and ref of its copy of the repository, and its git config files. After the step, the app restores each change and saves the changes of the step as a patch. The task then waits with "Needs you: Claude changed git state during the step: <list>. The app restored it." Resume starts the step again from the last commit. A commit that Claude made in a step never reaches a push.
 - The help of Most commands and Unrestricted, and the Unrestricted dialog, now say that a command such as bash -c can still run git, and that the app checks and restores the git state after each step.

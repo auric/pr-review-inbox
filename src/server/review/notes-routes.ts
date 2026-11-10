@@ -6,6 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { type Context, Hono } from "hono";
 import { validator } from "hono/validator";
+import type { ZodError } from "zod";
 import { type ApiError, noteCreateInput, noteDeleteInput, noteUpdateInput } from "../../shared/dto";
 import type { Live } from "../live";
 import type { Settings } from "../settings";
@@ -23,6 +24,7 @@ const noteParam = positiveId("note");
 const unconfigured = { error: "Configure the Bitbucket URL and token first." } satisfies ApiError;
 const PR_SQL = "SELECT id, project, repo, pr_id FROM pull_request WHERE id = $id";
 const NOTE_PR = "SELECT pr FROM pr_note WHERE id = $id";
+const textError = (e: ZodError) => e.issues.find((i) => i.path[0] === "text")?.message;
 
 // now: the tests pass a clock.
 export function createNotesRoutes(opts: { review: ReviewJobs; settings: Settings; live: Live; now?: () => number }) {
@@ -57,7 +59,7 @@ export function createNotesRoutes(opts: { review: ReviewJobs; settings: Settings
       prParam,
       validator("json", (v, c) => {
         const r = noteCreateInput.safeParse(v);
-        return r.success ? r.data : c.json<ApiError>({ error: "Write a note of 1 to 500 characters." }, 400);
+        return r.success ? r.data : c.json<ApiError>({ error: textError(r.error) ?? "Invalid note." }, 400);
       }),
       async (c) => {
         const db = review.open();
@@ -72,7 +74,7 @@ export function createNotesRoutes(opts: { review: ReviewJobs; settings: Settings
       noteParam,
       validator("json", (v, c) => {
         const r = noteUpdateInput.safeParse(v);
-        return r.success ? r.data : c.json<ApiError>({ error: "Invalid note change." }, 400);
+        return r.success ? r.data : c.json<ApiError>({ error: textError(r.error) ?? "Invalid note change." }, 400);
       }),
       async (c) => {
         const db = review.open();
@@ -85,7 +87,7 @@ export function createNotesRoutes(opts: { review: ReviewJobs; settings: Settings
       noteParam,
       validator("json", (v, c) => {
         const r = noteDeleteInput.safeParse(v);
-        return r.success ? r.data : c.json<ApiError>({ error: "Invalid note change." }, 400);
+        return r.success ? r.data : c.json<ApiError>({ error: textError(r.error) ?? "Invalid note change." }, 400);
       }),
       (c) => {
         const db = review.open();

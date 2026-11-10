@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import type { NoteCreateInput, NoteDto, NoteRef, NoteUpdateInput } from "../../shared/dto";
 import { foldCase, isMe } from "../../shared/me";
-import { NOTES_CAP, type NoteProposal } from "../../shared/review";
+import type { NoteProposal } from "../../shared/review";
 import { byThread, type TurnMsg } from "../../shared/turn";
 import type { PrRef, PullRequest } from "../../shared/types";
 import { ForgeError } from "../bitbucket/client";
@@ -49,7 +49,6 @@ export const NOTE_SQL = {
   byId: "SELECT * FROM pr_note WHERE id = $id",
   list: `SELECT * FROM pr_note WHERE pr = $pr AND ${LIVE} ORDER BY created_at, id`,
   kept: "SELECT * FROM pr_note WHERE pr = $pr AND deleted_at IS NULL AND state = 'kept' ORDER BY created_at, id",
-  count: `SELECT COUNT(*) AS n FROM pr_note WHERE pr = $pr AND ${LIVE}`,
   // Every text counts against a repeat: kept, proposed, dismissed, and deleted notes.
   texts: "SELECT text FROM pr_note WHERE pr = $pr",
   links: `SELECT ref_project, ref_repo, ref_pr, ref_title, ref_state, ref_checked_at FROM pr_note WHERE pr = $pr AND ref_pr IS NOT NULL`,
@@ -120,13 +119,12 @@ const norm = (s: string) => s.trim().replace(/\s+/g, " ");
 // ---------- Proposals and cites at the run end (pure) ----------
 
 // threads: per thread with a live message, true when a live message is the user's. texts: every note text of the PR.
-// count: the notes with deleted_at NULL and state kept or proposed. peers: the other open PRs of this run's pr-context.md.
+// peers: the other open PRs of this run's pr-context.md.
 // links: the stored links of the notes of this PR, by PR number in its own repository. me: the user slug of Settings.
 export type ProposalCtx = {
   me: string | null;
   threads: ReadonlyMap<number, boolean>;
   texts: readonly string[];
-  count: number;
   own: { project: string; repo: string };
   peers: ReadonlyMap<number, { title: string; state: string }>;
   links: ReadonlyMap<number, Link>;
@@ -139,7 +137,6 @@ export function proposeNotes(list: readonly NoteProposal[], c: ProposalCtx, now:
   const add: NewNote[] = [];
   const skipped: string[] = [];
   const seen = new Set(c.texts.map(norm));
-  let count = c.count;
   for (const p of list) {
     const text = norm(p.text);
     const drop = (why: string) => skipped.push(`Note proposal for thread ${p.thread} dropped: ${why}.`);
@@ -149,7 +146,6 @@ export function proposeNotes(list: readonly NoteProposal[], c: ProposalCtx, now:
     else if (!mine) drop("the thread has no message of the user");
     else if (!text) drop("the text is empty");
     else if (seen.has(text)) drop("a note with the same text exists");
-    else if (count >= NOTES_CAP) drop(`the pull request has ${NOTES_CAP} notes`);
     else {
       const peer = p.pr === null ? undefined : c.peers.get(p.pr);
       const stored = p.pr === null ? undefined : c.links.get(p.pr);
@@ -160,7 +156,6 @@ export function proposeNotes(list: readonly NoteProposal[], c: ProposalCtx, now:
         skipped.push(`Link of the note proposal for thread ${p.thread} dropped: PR #${p.pr} is not in ./context/pr-context.md.`);
       add.push({ text, thread: p.thread, ref });
       seen.add(text);
-      count++;
     }
   }
   return { add, skipped };
@@ -221,7 +216,6 @@ export function proposalContext(
     me,
     threads: liveThreads(db, pr.id, me),
     texts: (db.query(NOTE_SQL.texts).all({ pr: pr.id }) as { text: string }[]).map((r) => r.text),
-    count: (db.query(NOTE_SQL.count).get({ pr: pr.id }) as { n: number }).n,
     own: { project: pr.project, repo: pr.repo },
     peers,
     links,
@@ -341,18 +335,13 @@ export type NoteResult =
   | { status: 400 | 404; error: string }
   | { status: 409; error: string; note?: NoteDto };
 
-const CAP_TEXT = `This PR has ${NOTES_CAP} notes. Delete one first.`;
 const STALE_TEXT = "The note changed in another place. The current note is shown.";
-const full = (db: Database, pr: number) => (db.query(NOTE_SQL.count).get({ pr }) as { n: number }).n >= NOTES_CAP;
 const rowOf = (db: Database, id: number) => db.query(NOTE_SQL.byId).get({ id }) as NoteRow | null;
 
 export async function createNote(db: Database, pr: NotePr, input: NoteCreateInput, read: ReadPr, now: number): Promise<NoteResult> {
-  if (full(db, pr.id)) return { status: 409, error: CAP_TEXT };
   const link = input.ref ? await resolveLink(db, pr, input.ref, read, now) : null;
   if (link && "error" in link) return link;
-  // The read can take a while. The cap counts again in the insert transaction.
   return db.transaction((): NoteResult => {
-    if (full(db, pr.id)) return { status: 409, error: CAP_TEXT };
     const r = db.query(NOTE_SQL.insert).get({
       pr: pr.id,
       text: input.text,
@@ -390,8 +379,6 @@ export async function updateNote(
   if (link && "error" in link) return link;
   return db.transaction((): NoteResult => {
     const state = input.state ?? cur.state;
-    // An undo brings a note back into the count, unless it was dismissed.
-    if (input.restore && state !== "dismissed" && full(db, cur.pr)) return { status: 409, error: CAP_TEXT };
     const r = db.query(NOTE_SQL.update).get({
       id,
       version: input.version,

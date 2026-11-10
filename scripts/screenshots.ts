@@ -340,6 +340,14 @@ async function shots(browser: Browser) {
     await p.locator("[data-explain] figure[data-diagram='image'] img").waitFor({ timeout: RUN_MS });
     await p.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await save(p, `explain-${scheme}`);
+    // A click on the diagram opens the large view at the fit scale.
+    if (scheme === "light") {
+      await p.locator("[data-explain] figure[data-diagram='image'] button[aria-label^='Open diagram']").first().click();
+      await p.locator("[data-diagram-zoom] img").waitFor();
+      await p.waitForFunction(() => (document.querySelector("[data-diagram-zoom] img") as HTMLImageElement | null)?.complete === true);
+      await save(p, "diagram-zoom");
+      await p.keyboard.press("Escape");
+    }
     await c.close();
   }
 

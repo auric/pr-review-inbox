@@ -198,13 +198,15 @@ export type DiscussVerdict = (typeof discussVerdicts)[number];
 
 // ---------- PR notes and cites (docs/plans/review-v2/spec.md section 2.9) ----------
 
-export const NOTE_TEXT_MAX = 500;
-export const NOTES_CAP = 30;
+// A note of the user has no visible limit. NOTE_TEXT_MAX only guards the server and the run prompt against a runaway paste.
+export const NOTE_TEXT_MAX = 100_000;
+// A suggestion of Claude is one sentence.
+export const NOTE_PROPOSAL_MAX = 500;
 export const MAX_NOTE_PROPOSALS = 2;
 export const MAX_CITES = 5;
 
 export const noteProposal = z.object({
-  text: z.string().min(1).max(NOTE_TEXT_MAX).describe("One sentence: the agreement or the wait that the thread shows."),
+  text: z.string().min(1).max(NOTE_PROPOSAL_MAX).describe("One sentence: the agreement or the wait that the thread shows."),
   thread: lineNo.describe("The thread in ./context/pr-context.md that shows it."),
   pr: z
     .number()

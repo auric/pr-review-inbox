@@ -18,7 +18,7 @@ import { UNTRUSTED } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import type { ApiError, NoteDto, ReviewItemDto, RunConflict, RunDetail, RunDto } from "../../src/shared/dto";
-import { NOTES_CAP, type NoteProposal, type ReplyPayload } from "../../src/shared/review";
+import type { NoteProposal, ReplyPayload } from "../../src/shared/review";
 import { FAKE_TOKEN, FAKE_USER, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner, reviewRemote, stubListTools } from "../support/review-fixture";
@@ -172,7 +172,6 @@ describe("proposeNotes and checkCites", () => {
       [230, false],
     ]),
     texts: ["Old note."],
-    count: 0,
     own: { project: "PROJ", repo: "repo" },
     peers: new Map([[45, { title: "Mac build", state: "OPEN" }]]),
     links: new Map([[50, link]]),
@@ -180,7 +179,7 @@ describe("proposeNotes and checkCites", () => {
   });
   const p = (text: string, thread = 101, pr: number | null = null): NoteProposal => ({ text, thread, pr });
 
-  test("AC-P9: a thread without a message of the user, a missing thread, no user, a repeat, and the cap drop to skipped", () => {
+  test("AC-P9: a thread without a message of the user, a missing thread, no user, and a repeat drop to skipped", () => {
     console.log(`WP-PN tests import ${Bun.resolveSync("../../src/server/review/notes", import.meta.dir)}`);
     const r = proposeNotes([p("Keep it.", 230), p("Gone.", 300), p("  Old   note. "), p("New note.")], ctx(), 5);
     expect(r.add).toEqual([{ text: "New note.", thread: 101, ref: null }]);
@@ -194,10 +193,9 @@ describe("proposeNotes and checkCites", () => {
     expect(proposeNotes([p("A.")], ctx({ me: null }), 5).skipped).toEqual([
       "Note proposal for thread 101 dropped: no user is set in Settings, so no message counts as the user's.",
     ]);
-    expect(proposeNotes([p("A.")], ctx({ count: NOTES_CAP }), 5).skipped).toEqual([
-      `Note proposal for thread 101 dropped: the pull request has ${NOTES_CAP} notes.`,
-    ]);
-    expect(proposeNotes([p("A."), p("B.")], ctx({ count: NOTES_CAP - 1 }), 5).add.map((n) => n.text)).toEqual(["A."]);
+    // No count cap: a PR with many notes still takes a new suggestion.
+    const many = Array.from({ length: 40 }, (_, i) => `Note ${i}.`);
+    expect(proposeNotes([p("A."), p("B.")], ctx({ texts: many }), 5).add.map((n) => n.text)).toEqual(["A.", "B."]);
   });
 
   test("the PR link: a PR of pr-context.md or of a stored link stays; another PR drops the link and keeps the note", () => {
@@ -228,18 +226,20 @@ describe("proposeNotes and checkCites", () => {
 
 describe("notes routes", () => {
   test(
-    "AC-P10: add, edit, the version check, the cap, the PR link with its 404 sentence, delete and Undo",
+    "AC-P10: add, edit, the version check, no length or count limit, the PR link with its 404 sentence, delete and Undo",
     async () => {
       const h = await setup();
       expect(await h.notes()).toEqual([]);
       const add = (body: unknown) => h.json<NoteDto & ApiError>(`/api/prs/${h.pr}/notes`, { body });
-      for (const bad of [{ text: "" }, { text: "   " }, { text: "x".repeat(501) }, { text: "a", ref: { prId: 0 } }])
-        expect((await add(bad)).status).toBe(400);
+      for (const bad of [{ text: "" }, { text: "   " }, { text: "a", ref: { prId: 0 } }]) expect((await add(bad)).status).toBe(400);
       expect((await h.json(`/api/prs/999/notes`, { body: { text: "a" } })).status).toBe(404);
       const said = async (body: unknown) => {
         const r = await add(body);
         return [r.status, r.body.error];
       };
+      expect(await said({ text: "   " })).toEqual([400, "Write a note."]);
+      // The only size guard: 100,000 characters after trim.
+      expect(await said({ text: "x".repeat(100_001) })).toEqual([400, "The note is too long. Keep it under 100,000 characters."]);
       expect(await said({ text: "Own.", ref: { prId: 2 } })).toEqual([400, "A note cannot wait for its own PR."]);
       expect(await said({ text: "Missing.", ref: { prId: 45 } })).toEqual([404, "No PR #45 in PROJ/repo."]);
 
@@ -280,14 +280,21 @@ describe("notes routes", () => {
       expect(back.body.deletedAt).toBeUndefined();
       expect((await h.notes()).map((n) => n.id)).toEqual([a.body.id, b.body.id]);
 
-      // The cap counts kept and proposed notes that are not deleted.
-      for (let i = 2; i < NOTES_CAP; i++) expect((await add({ text: `Note ${i}.` })).status).toBe(201);
-      expect(await said({ text: "One more." })).toEqual([409, `This PR has ${NOTES_CAP} notes. Delete one first.`]);
+      // No length limit and no count cap: a 2,000-character note and a 31st note save, and an undo past 30 notes works.
+      const long = await add({ text: "y".repeat(2000) });
+      expect(long.status).toBe(201);
+      expect(long.body.text).toHaveLength(2000);
+      expect((await put(long.body.id, { version: 0, text: "z".repeat(100_000) })).status).toBe(200);
+      expect((await put(long.body.id, { version: 1, text: "z".repeat(100_001) })).body.error).toBe(
+        "The note is too long. Keep it under 100,000 characters.",
+      );
+      for (let i = 4; i <= 31; i++) expect((await add({ text: `Note ${i}.` })).status).toBe(201);
+      expect(await h.notes()).toHaveLength(31);
       const last = (await h.notes()).at(-1) as NoteDto;
       expect((await del(last.id, last.version)).status).toBe(200);
       expect((await add({ text: "One more." })).status).toBe(201);
-      // An undo past the cap gets the cap sentence.
-      expect((await put(last.id, { version: last.version + 1, restore: true })).status).toBe(409);
+      expect((await put(last.id, { version: last.version + 1, restore: true })).status).toBe(200);
+      expect(await h.notes()).toHaveLength(32);
       expect(h.fake.requests.filter((r) => !r.startsWith("GET ") && !r.includes("/pull-requests"))).toEqual([]);
     },
     SLOW,
