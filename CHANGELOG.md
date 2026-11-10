@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build a Jira task: a commit now keeps the line endings of each file (LF or CRLF), so a file that Claude wrote with other line endings no longer shows every line as changed. New files follow the repository's `.gitattributes`. The line limit no longer counts a change of line endings only, so a task that stopped at the line limit for this reason gets the right count when it goes on. Its earlier commits keep their line endings.
 - Build a Jira task: when two sub-tasks build at the same time and both need you, the app now keeps both reasons. Before, the reason of the second sub-task was dropped, and Claude ran its step again after Resume. The sub-task list shows each reason with "Who acts: You", and the Tasks row says "Needs you: a question, and 1 more".
 - The Questions form now shows the questions of all sub-tasks with the sub-task name, and one "Send answers" answers them all. When you act on the first reason, the next one shows, and the build goes on only when no reason is left.
 - A sub-task whose reason waits says "Act on ABC-13 (1 of 2) first." A sub-task that only waits says "ABC-14 (2 of 2) waits until you act on ABC-13 (1 of 2)." Tell Claude and "Run setup again" wait until you act on each reason.

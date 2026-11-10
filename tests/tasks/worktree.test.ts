@@ -10,6 +10,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, gitEnv } from "../../src/server/review/git";
+import { changedLines } from "../../src/server/tasks/loop";
+import { continueUpdate, mergeInto } from "../../src/server/tasks/update";
 import {
   branchName,
   commitStep,
@@ -29,9 +31,10 @@ import {
   slug,
   status,
   tasksRoot,
+  type Worktree,
   wtGit,
 } from "../../src/server/tasks/worktree";
-import { HIDDEN, SHOWN, taskCache, taskRemote } from "./fixture";
+import { commitOnMain, HIDDEN, IDENTITY, SHOWN, taskCache, taskRemote } from "./fixture";
 
 console.log(`worktree.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/worktree", import.meta.dir)}`);
 
@@ -44,10 +47,12 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 3 });
 });
 
-async function setup() {
+// files: extra files on main before the cache, byte for byte.
+async function setup(files?: Record<string, string>) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb3-wt-")));
   dirs.push(root);
   const r = await taskRemote(root);
+  if (files) await commitOnMain(r.remote, root, files);
   const dataDir = join(root, "data");
   mkdirSync(dataDir);
   const db = new Database(join(dataDir, "db-test.sqlite"));
@@ -251,6 +256,106 @@ describe("commit and setup mark (spec.md section 6.7)", () => {
       expect(setupHash([a, b])).not.toBe(setupHash([b, a]));
       expect(setupHash([a])).not.toBe(setupHash([{ ...a, timeoutSec: 61 }]));
       expect(setupHash([a])).toBe(setupHash([{ ...a }]));
+    },
+    SLOW,
+  );
+});
+
+describe("line endings (spec.md section 6.7, AC-B170)", () => {
+  const FILES = {
+    "lf.txt": "a\nb\nc\n",
+    "crlf.txt": "a\r\nb\r\nc\r\n",
+    "mixed.txt": "a\r\nb\nc\r\n",
+    "bin.dat": "a\0b\nc\n",
+    ".gitattributes": "*.cpp text=auto eol=crlf\n*.bat -text\n",
+  };
+  const blob = (wt: Worktree, rev: string, p: string) => wtGit(wt, ["cat-file", "blob", `${rev}:${p}`]);
+  const disk = (wt: Worktree, p: string) => readFileSync(join(wt.repo, p), "latin1");
+
+  test(
+    "a file that differs from HEAD only in line ends commits nothing",
+    async () => {
+      const s = await setup(FILES);
+      const wt = await s.open();
+      writeFileSync(join(wt.repo, "lf.txt"), "a\r\nb\r\nc\r\n");
+      writeFileSync(join(wt.repo, "crlf.txt"), "a\nb\nc\n");
+      expect(await commitStep(wt, "K-1 T1.1: Write", WHO, [])).toBeNull();
+      expect(disk(wt, "lf.txt")).toBe(FILES["lf.txt"]);
+      expect(disk(wt, "crlf.txt")).toBe(FILES["crlf.txt"]);
+      expect(await status(wt)).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "a real edit in other line ends changes one line and keeps the line ends of HEAD",
+    async () => {
+      const s = await setup(FILES);
+      const wt = await s.open();
+      writeFileSync(join(wt.repo, "lf.txt"), "a\r\nB\r\nc\r\n");
+      writeFileSync(join(wt.repo, "crlf.txt"), "a\nB\nc\n");
+      expect(await commitStep(wt, "K-1 T1.1: Edit", WHO, [])).toBe(await headOf(wt));
+      expect((await wtGit(wt, ["diff", "--numstat", s.base, "HEAD"])).trim().split("\n")).toEqual(["1\t1\tcrlf.txt", "1\t1\tlf.txt"]);
+      expect(await blob(wt, "HEAD", "lf.txt")).toBe("a\nB\nc\n");
+      expect(await blob(wt, "HEAD", "crlf.txt")).toBe("a\r\nB\r\nc\r\n");
+    },
+    SLOW,
+  );
+
+  test(
+    "a new file follows .gitattributes, and binary files and files with mixed line ends at HEAD stay as written",
+    async () => {
+      const s = await setup(FILES);
+      const wt = await s.open();
+      mkdirSync(join(wt.repo, "src", "eol"), { recursive: true });
+      for (const p of ["src/eol/a.cpp", "run.bat", "notes.md"]) writeFileSync(join(wt.repo, p), "x\r\ny\r\n");
+      writeFileSync(join(wt.repo, "bin.dat"), "a\0b\r\nc\r\n");
+      writeFileSync(join(wt.repo, "mixed.txt"), "a\r\nb\r\nc\r\nd\n");
+      await commitStep(wt, "K-1 T1.1: Add", WHO, ["src/eol/a.cpp", "run.bat", "notes.md"]);
+      // text=auto: git stores a text file with LF. eol=crlf changes only the checkout.
+      expect(await blob(wt, "HEAD", "src/eol/a.cpp")).toBe("x\ny\n");
+      expect(await blob(wt, "HEAD", "run.bat")).toBe("x\r\ny\r\n");
+      expect(await blob(wt, "HEAD", "notes.md")).toBe("x\r\ny\r\n");
+      expect(await blob(wt, "HEAD", "bin.dat")).toBe("a\0b\r\nc\r\n");
+      expect(await blob(wt, "HEAD", "mixed.txt")).toBe("a\r\nb\r\nc\r\nd\n");
+    },
+    SLOW,
+  );
+
+  test(
+    "the size count leaves out a change of line ends only",
+    async () => {
+      const s = await setup(FILES);
+      const wt = await s.open();
+      // A commit from before the line end rule: git commits the files as written.
+      writeFileSync(join(wt.repo, "lf.txt"), "a\r\nb\r\nc\r\n");
+      writeFileSync(join(wt.repo, "crlf.txt"), "a\nB\nc\n");
+      await wtGit(wt, ["add", "-u"]);
+      await wtGit(wt, ["commit", "-q", "-m", "old"], { extra: IDENTITY });
+      expect(await changedLines(wt, s.base, await headOf(wt), [])).toEqual({ files: 1, added: 1, removed: 1, lines: 2 });
+    },
+    SLOW,
+  );
+
+  test(
+    "a resolved conflict keeps the line ends of HEAD",
+    async () => {
+      const s = await setup(FILES);
+      const wt = await s.open();
+      // The other side of the merge: base with line 2 of lf.txt changed.
+      const extra = { ...IDENTITY, GIT_INDEX_FILE: join(s.root, "side.index") };
+      await wtGit(wt, ["read-tree", s.base], { extra });
+      const oid = (await wtGit(wt, ["hash-object", "-w", "--no-filters", "--stdin"], { stdin: "a\nS\nc\n" })).trim();
+      await wtGit(wt, ["update-index", "--cacheinfo", `100644,${oid},lf.txt`], { extra });
+      const tree = (await wtGit(wt, ["write-tree"], { extra })).trim();
+      const side = (await wtGit(wt, ["commit-tree", tree, "-p", s.base, "-m", "side"], { extra })).trim();
+      writeFileSync(join(wt.repo, "lf.txt"), "a\nX\nc\n");
+      await commitStep(wt, "K-1 T1.1: Edit", WHO, []);
+      const stop = await mergeInto(wt, { head: side, message: "K-1: merge", full: "" }, WHO);
+      expect(stop?.files).toEqual(["lf.txt"]);
+      writeFileSync(join(wt.repo, "lf.txt"), "a\r\nY\r\nc\r\n");
+      expect(await continueUpdate(wt, "merge", "", ["lf.txt"], new Map(), WHO)).toBeNull();
+      expect(await blob(wt, "HEAD", "lf.txt")).toBe("a\nY\nc\n");
     },
     SLOW,
   );

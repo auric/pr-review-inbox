@@ -23,6 +23,7 @@ import {
   ignoredChanges,
   ignoredSnapshot,
   linksOn,
+  matchEol,
   noneChanges,
   type RepoTree,
   remoteBranches,
@@ -218,8 +219,9 @@ async function run(wt: Worktree, mode: "rebase" | "merge", full: string, args: s
   }
 }
 
-// spec.md section 6.18.4, Continue: `git add -- <path>` or `git rm -- <path>` for a deleted path, the gitlinks at their commits
-// (`git update-index --cacheinfo`), then `git rebase --continue` or `git commit --no-edit`. Returns the next stop of a rebase, or null.
+// spec.md section 6.18.4, Continue: the line ends of the resolved files (spec.md section 6.7, Line endings), then `git add -- <path>` or
+// `git rm -- <path>` for a deleted path, the gitlinks at their commits (`git update-index --cacheinfo`), then `git rebase --continue` or
+// `git commit --no-edit`. Returns the next stop of a rebase, or null.
 export async function continueUpdate(
   wt: Worktree,
   mode: "rebase" | "merge",
@@ -228,6 +230,7 @@ export async function continueUpdate(
   gitlinks: Map<string, string>,
   who: { name: string; email: string },
 ): Promise<Stop | null> {
+  await matchEol(wt, [], files);
   for (const p of files) {
     if (lstatSync(join(wt.repo, ...p.split("/")), { throwIfNoEntry: false })) await wtGit(wt, ["add", "--", p]);
     else await wtGit(wt, ["rm", "-q", "--", p]);

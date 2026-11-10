@@ -553,9 +553,71 @@ export async function newFiles(wt: Worktree, claimed: readonly string[]): Promis
   return { add, left, shown };
 }
 
-// spec.md section 6.7: `git add -u` (tracked changes and deletes), `git add` of add (the new files that the commit takes), then
-// `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name and email. --no-verify also skips the
-// hooks that core.hooksPath would name. null: nothing to commit.
+// git-ls-files(1) --eol with -z: "i/<eolinfo> w/<eolinfo> attr/<eolattr>" TAB "<path>" NUL. eolinfo is the text check of git
+// (convert.c gather_convert_stats_ascii): -text, none, lf, crlf, or mixed. "" is no regular file.
+const EOL_ROW = /^i\/(\S*)\s+w\/(\S*)\s+attr\/([^\t]*)\t(.+)$/s;
+const eolRows = (out: string) =>
+  out.split("\0").flatMap((r) => {
+    const m = EOL_ROW.exec(r);
+    return m ? [{ i: m[1] as string, w: m[2] as string, attr: (m[3] as string).trim(), path: m[4] as string }] : [];
+  });
+// Windows limits a command line to 32767 characters.
+const PATHS_PER_CALL = 100;
+
+// Writes the text file at path with the line ends to. w: its eolinfo. A file with no line end or a -text file stays.
+function setEol(wt: Worktree, path: string, w: string, to: "lf" | "crlf") {
+  if (w === to || !["lf", "crlf", "mixed"].includes(w)) return;
+  const f = join(wt.repo, ...path.split("/"));
+  // latin1 maps each byte to one char and back, so only the line ends change.
+  const text = readFileSync(f, "latin1");
+  writeFileSync(f, to === "lf" ? text.replaceAll("\r\n", "\n") : text.replace(/\r?\n/g, "\r\n"), "latin1");
+}
+
+// spec.md section 6.7, Line endings: a changed text file takes the line ends of its blob at HEAD, so a file that differs only in line
+// ends equals HEAD again. A file with mixed line ends at HEAD and a binary file stay as written. A new file and a file with no line
+// end at HEAD follow the text, eol, and crlf attributes of the repository: git stores a text file with LF. The "* -text" of the cache
+// (info/attributes) hides those attributes, so an empty git folder reads them from the worktree. only: these paths, for a paused merge.
+export async function matchEol(wt: Worktree, added: readonly string[], only?: readonly string[]) {
+  const keep = only && new Set(only);
+  // git-diff(1) --raw -z: ":<mode> <mode> <oid> <oid> <status>" NUL "<path>" NUL. The old side is the HEAD blob.
+  const raw = (
+    await wtGit(wt, ["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--ignore-submodules=all", "--diff-filter=M", "HEAD"])
+  ).split("\0");
+  let info = "";
+  for (let k = 0; k + 1 < raw.length; k += 2) {
+    const [mode, , oid] = (raw[k] as string).slice(1).split(" ");
+    const path = raw[k + 1] as string;
+    if (mode?.startsWith("100") && (!keep || keep.has(path))) info += `${mode} ${oid}\t${path}\0`;
+  }
+  const loose = [...added];
+  if (!info && !loose.length) return;
+  const tmp = mkdtempSync(join(tmpdir(), "rl-eol-"));
+  try {
+    if (info) {
+      // A temp index of the HEAD blobs: Claude can stage files through a shell command.
+      const extra = { GIT_INDEX_FILE: join(tmp, "index") };
+      await wtGit(wt, ["update-index", "-z", "--index-info"], { stdin: info, extra });
+      for (const e of eolRows(await wtGit(wt, ["ls-files", "--eol", "-z"], { extra })))
+        if (e.i === "lf" || e.i === "crlf") setEol(wt, e.path, e.w, e.i);
+        else if (e.i === "none") loose.push(e.path);
+    }
+    if (!loose.length) return;
+    const bare = join(tmp, "attr.git");
+    await git(["init", "-q", "--bare", "--template=", bare], { env: wt.env });
+    for (let k = 0; k < loose.length; k += PATHS_PER_CALL) {
+      const args = ["ls-files", "--eol", "-z", "--others", "--", ...loose.slice(k, k + PATHS_PER_CALL)];
+      const out = await git([`--git-dir=${bare}`, `--work-tree=${wt.repo}`, "--literal-pathspecs", ...args], { env: wt.env, cwd: wt.repo });
+      // convert.c convert_attrs: "text", "text eol=...", and "text=auto ..." convert CRLF to LF on add; a -text file never converts.
+      for (const e of eolRows(out)) if (e.attr.startsWith("text")) setEol(wt, e.path, e.w, "lf");
+    }
+  } finally {
+    await rm(tmp, RM_TREE);
+  }
+}
+
+// spec.md section 6.7: the line ends first (matchEol), then `git add -u` (tracked changes and deletes), `git add` of add (the new files
+// that the commit takes), then `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name and email.
+// --no-verify also skips the hooks that core.hooksPath would name. null: nothing to commit.
 export async function commitStep(
   wt: Worktree,
   message: string,
@@ -563,6 +625,7 @@ export async function commitStep(
   add: readonly string[],
 ): Promise<string | null> {
   if (!message.trim()) throw new WorkspaceError("A commit needs a message.");
+  await matchEol(wt, add);
   await wtGit(wt, ["add", "-u"]);
   if (add.length) await wtGit(wt, ["add", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: `${add.join("\0")}\0` });
   if (!(await wtGit(wt, ["diff", "--cached", "--name-only", "-z"])).length) return null;

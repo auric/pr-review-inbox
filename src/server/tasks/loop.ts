@@ -213,8 +213,8 @@ export type LineCount = { files: number; added: number; removed: number; lines: 
 // spec.md section 6.1, Counting: the added and removed lines of `git diff --numstat <base>..<head>` without the paths of the excluded
 // globs. A binary file counts 0. git-diff(1), --numstat with -z: a rename has an empty path, then the old and the new path.
 export async function changedLines(wt: Worktree, base: string, head: string, exclude: readonly string[]): Promise<LineCount> {
-  // spec.md section 6.16.6: gitlink entries do not count.
-  const out = (await wtGit(wt, ["diff", "--numstat", "-z", "-M", "--ignore-submodules=all", base, head])).split("\0");
+  // spec.md section 6.16.6: gitlink entries do not count. A change of line ends only does not count (spec.md section 6.7, Line endings).
+  const out = (await wtGit(wt, ["diff", "--numstat", "-z", "-M", "--ignore-cr-at-eol", "--ignore-submodules=all", base, head])).split("\0");
   let files = 0;
   let added = 0;
   let removed = 0;
