@@ -40,11 +40,20 @@ const GIT_KEYS = [
   "core.sparsecheckout",
   "core.sparsecheckoutcone",
 ];
-// docs/plans/review-v2/git-deny.md fix E: the only config keys that a git call with the token may read.
+// docs/plans/review-v2/git-deny.md fix E: the config keys that a git call with the token may read, with SUBMODULE_KEY below.
 export const CONFIG_KEYS: ReadonlySet<string> = new Set([
   ...GIT_KEYS,
   ...[...CACHE_CONFIG, ...worktreeConfig("")].map(([k]) => k.toLowerCase()),
 ]);
+// `git submodule init` in a worktree writes these to the cache config. No call with the token reads them: fetch and push never recurse.
+const SUBMODULE_KEY = /^submodule\..+\.(active|url|update)$/;
+// git-config(1) submodule.<name>.update: a value that starts with "!" runs a command.
+const UPDATE_MODES = new Set(["checkout", "rebase", "merge", "none"]);
+const allowedKey = (key: string, value: string | undefined) => {
+  const k = key.toLowerCase();
+  const m = SUBMODULE_KEY.exec(k);
+  return CONFIG_KEYS.has(k) || (m !== null && (m[1] !== "update" || UPDATE_MODES.has(value ?? "")));
+};
 // provider.ts gitConfig: the token goes in as an http.extraHeader value, scoped to the server origin.
 const TOKEN_KEY = /^http\.(?:.+\.)?extraheader$/i;
 // The files of a cache that git reads besides the refs and the objects. A Claude step may change none of them (tasks/gitstate.ts).
@@ -91,11 +100,13 @@ const underFile = (emptyGlobal: string, name: string) => join(emptyGlobal, name)
 // The env of every git child. Only fetch gets extra config, for example the auth header.
 // emptyGlobal: an empty file. It replaces ~/.gitconfig and the XDG config, so no user filter, hook, or helper runs.
 // The last two keys win over config, so no hook and no fsmonitor of a cache or a worktree runs.
+// fetch.recurseSubmodules=false also wins over .gitmodules, so no fetch enters a submodule repository, whose config fix E does not check.
 export function gitEnv(emptyGlobal: string, config: [string, string][] = []): Record<string, string> {
   const env = baseEnv();
   const all: [string, string][] = [
     ["credential.helper", ""],
     ["http.followRedirects", "false"],
+    ["fetch.recurseSubmodules", "false"],
     ...config,
     ["core.hooksPath", underFile(emptyGlobal, "no-hooks")],
     ["core.fsmonitor", "false"],
@@ -121,13 +132,17 @@ function gitDirOf(args: string[]): string | undefined {
   return args.find((a) => a.startsWith("--git-dir="))?.slice("--git-dir=".length);
 }
 
-// The keys of one config file, from the parser of git. --no-includes reads no other file and lists include.path as a key.
-async function configKeys(file: string, plain: Record<string, string>): Promise<string[]> {
+// The entries of one config file, from the parser of git. --no-includes reads no other file and lists include.path as a key.
+// git-config(1) -z: "key\nvalue\0", or "key\0" for a key with no value.
+async function configEntries(file: string, plain: Record<string, string>): Promise<[string, string | undefined][]> {
   const out = await spawnGit(["config", "--file", file, "--no-includes", "--list", "-z"], { env: plain });
   return out
     .split("\0")
     .filter(Boolean)
-    .map((e) => e.split("\n", 1)[0] as string);
+    .map((e) => {
+      const nl = e.indexOf("\n");
+      return nl < 0 ? [e, undefined] : [e.slice(0, nl), e.slice(nl + 1)];
+    });
 }
 
 // docs/plans/review-v2/git-deny.md fix E: the reason to refuse a git call with the token, or null. The call reads only the empty global
@@ -140,21 +155,25 @@ async function foreignConfig(cmd: string, dir: string | undefined, env: Record<s
     log(`Refused git ${cmd} with the server token: ${logged}.`);
     return why;
   };
-  if (!st?.isFile() || st.size !== 0) return refuse("the empty global git config of the app is not an empty file");
+  if (!st?.isFile() || st.size !== 0) return refuse("the empty global git config of the app is not an empty file. Remove it and try again");
   if (dir === undefined) return null;
-  if (existsSync(join(dir, "commondir"))) return refuse(`${join(dir, "commondir")} exists, and the app never writes it`);
+  if (existsSync(join(dir, "commondir")))
+    return refuse(`${join(dir, "commondir")} exists, and the app never writes it. Remove it and try again`);
   const plain = { ...baseEnv(), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: global, GIT_DIR: underFile(global, "no-repo") };
   for (const f of ["config", "config.worktree"]) {
     const file = join(dir, f);
     if (!existsSync(file)) continue;
-    const key = (await configKeys(file, plain)).find((k) => !CONFIG_KEYS.has(k.toLowerCase()));
+    const key = (await configEntries(file, plain)).find(([k, v]) => !allowedKey(k, v))?.[0];
     if (key === undefined) continue;
     // The error text can reach the UI, where noUrl hides a URL. The subsection of a key can be a URL, so only the log names it.
     const a = key.indexOf(".");
     const b = key.lastIndexOf(".");
     const shown = a === b ? key : `${key.slice(0, a)}.<subsection>.${key.slice(b + 1)}`;
-    const what = (k: string) => `${file} holds the key ${k}, which the app does not write`;
-    return refuse(`${what(shown)}. The app log names the full key`, what(key));
+    const what = (k: string) => `${file} holds the key ${k}, which the app does not allow`;
+    return refuse(
+      `${what(shown)}. Open that file in a text editor, delete the key, and try again. The app log names the full key`,
+      what(key),
+    );
   }
   return null;
 }
@@ -257,7 +276,7 @@ export async function git(
   if (carriesToken(env)) {
     const cmd = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
     const why = await foreignConfig(cmd, dir, env);
-    if (why) throw new GitError(`The app did not run git ${cmd}: ${why}. Remove it and try again.`);
+    if (why) throw new GitError(`The app did not run git ${cmd}: ${why}.`);
     // With no --git-dir, git would read the config of a repository around the cwd.
     if (dir === undefined) env = { ...env, GIT_DIR: underFile(env.GIT_CONFIG_GLOBAL as string, "no-repo") };
   }
