@@ -145,6 +145,7 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   baseEffort: null,
   effort: null,
   reviewerEffort: null,
+  verifier: null,
   large: false,
   build: [],
   results: null,
@@ -302,6 +303,19 @@ describe("eval:ab --large (docs/plans/review-v3.md WP-V13)", () => {
     expect(parseAb(["--candidate-reviewer-effort", "bogus"])).toMatchObject({
       error: expect.stringContaining("--candidate-reviewer-effort must be one of"),
     });
+  });
+
+  test("--candidate-verifier reaches only the candidate runner arguments, and a bad mode is an error", () => {
+    expect(parseAb([])).toMatchObject({ verifier: null });
+    const o = parseAb(["--candidate-verifier", "off"]);
+    if ("error" in o) throw new Error(o.error);
+    for (const mode of ["review", "rereview"] as const) {
+      const cand = runArgs(mode, "candidate", o, "");
+      expect(cand[cand.indexOf("--verifier") + 1]).toBe("off");
+      expect(runArgs(mode, "baseline", o, "")).not.toContain("--verifier");
+    }
+    expect(runArgs("review", "candidate", opts(), "")).not.toContain("--verifier");
+    expect(parseAb(["--candidate-verifier", "bogus"])).toMatchObject({ error: expect.stringContaining("--verifier must be one of") });
   });
 
   test(

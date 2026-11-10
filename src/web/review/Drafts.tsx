@@ -29,6 +29,7 @@ import {
   draftTitle,
   EVIDENCE,
   fixedNote,
+  isDemoted,
   type LedgerPart,
   ledgerText,
   lineText,
@@ -159,6 +160,7 @@ export const Draft = memo(function Draft({
   const carried = carriedNote(it);
   const restored = fixedNote(it) ?? restoredNote(it);
   const chip = f ? checkChip(it, ctx.checked) : null;
+  const demoted = isDemoted(it);
   const explained = !f && it.run === ctx.explainRun;
   const label = !f
     ? closed
@@ -176,6 +178,7 @@ export const Draft = memo(function Draft({
       data-draft={f ? it.id : undefined}
       data-draft-question={f ? undefined : it.id}
       data-item={it.id}
+      data-demoted={demoted || undefined}
       tabIndex={-1}
       aria-label={label}
       className={cn("scroll-mt-3 border-b", !closed && "rl-enter")}
@@ -203,13 +206,17 @@ export const Draft = memo(function Draft({
         <span className="grid min-w-0">
           {explained ? (
             <span className="flex min-w-0 items-center gap-2">
-              <span className={cn("truncate", closed && "text-muted-foreground line-through")}>{snippet(draftTitle(it), 160)}</span>
+              <span className={cn("truncate", demoted && "text-muted-foreground", closed && "text-muted-foreground line-through")}>
+                {snippet(draftTitle(it), 160)}
+              </span>
               <Badge variant="quiet" data-from-explain className="shrink-0">
                 From Explain
               </Badge>
             </span>
           ) : (
-            <span className={cn("truncate", closed && "text-muted-foreground line-through")}>{snippet(draftTitle(it), 160)}</span>
+            <span className={cn("truncate", demoted && "text-muted-foreground", closed && "text-muted-foreground line-through")}>
+              {snippet(draftTitle(it), 160)}
+            </span>
           )}
           {path && (
             <span className="flex min-w-0 items-center gap-2">

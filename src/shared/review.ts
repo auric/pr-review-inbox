@@ -15,7 +15,8 @@ const lineNo = z.number().int().min(1);
 // Raise it with each change of the review agent prompts. A run row with prompt_version NULL reads as "1".
 // "2.0": the finder prompts of review v2 without the verify phase. "2.1": with the verify phase. "2.2": with the PR context rules.
 // "2.3": the Build section of pr-context.md stays out of coverage, and a rule finding out of its scope stays as core.
-export const REVIEW_PROMPT_VERSION = "2.3";
+// "2.4": the category classes that the check never hides, and the skip list of each language checklist.
+export const REVIEW_PROMPT_VERSION = "2.4";
 
 const place = {
   path: z.string().describe("File path relative to the repository root, with / separators."),
@@ -154,10 +155,12 @@ export type WithdrawnMark = { run: number; reason: string; was: "new" | "accepte
 // spec.md section 2.2: a revision of a finding is a discarded finding item with revises (the finding ID) and discussedIn (the discuss
 // run). It waits for Use the new text or Keep mine (items.ts) and never counts as a finding. dropped: Keep mine, Use the new text, or a
 // newer revision ended the wait. revisedBy: on the finding, the revision whose text the user took.
+// demoted: a refuted finding that stays in the list, last in its group (spec.md section 1.8).
 export type FindingPayload = AnchoredFinding & {
   verify?: VerifyMark;
   finderSeverity?: Severity;
   discardedBy?: "verify";
+  demoted?: true;
   withdrawn?: WithdrawnMark;
   revises?: number;
   discussedIn?: number;
@@ -573,7 +576,12 @@ export type StoredFinding = Omit<Finding, V2Keys> & Partial<Pick<Finding, V2Keys
 
 // cause.anchor: set when the anchor holds no changed line and the cause range does (spec.md section 1.7).
 export type Cause = NonNullable<Finding["cause"]>;
-export type AnchoredFinding = Omit<StoredFinding, "cause"> & { cause?: (Cause & { anchor?: Anchor }) | null; anchor: Anchor };
+// movedFrom: the place that the finder gave, when validate.ts moved the finding to the one exact match in another changed file.
+export type AnchoredFinding = Omit<StoredFinding, "cause"> & {
+  cause?: (Cause & { anchor?: Anchor }) | null;
+  anchor: Anchor;
+  movedFrom?: { path: string; line: number };
+};
 
 // path: absolute, "..", or outside the snapshot. file: no such file on that side. match: the quote is not in the file.
 // size: the file or the range is above the scan limits. unchanged: neither the anchor nor the cause holds a changed line.

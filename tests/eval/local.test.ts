@@ -174,6 +174,10 @@ function makeDb(dir: string, h: Heads) {
     carried: item(r1, "discarded", [35, 35]),
     fixed: item(r1, "discarded", [38, 38], { fixed: { id: 1, commit: "c", short: "c", was: "new" } }),
     open: item(r1, "new", [39, 39]),
+    // Head B changes line 20, so this finding stays at head A.
+    session: item(r1, "new", [20, 20], { session: { run: 1, verdict: "accept", reason: "r", replaced: [] } }),
+    sessionDiscarded: item(r1, "discarded", [40, 40], { session: { run: 1, verdict: "accept", reason: "r", replaced: [] } }),
+    withdrawn: item(r1, "posted", [6, 6]),
     clashPosted: item(r1, "posted", [33, 33]),
     clashTrap: item(r1, "discarded", [27, 27], { discardReason: { code: "bug" } }),
     clashIntended: item(r2, "discarded", [33, 34], { discardReason: { code: "intended" } }),
@@ -200,6 +204,29 @@ function makeDb(dir: string, h: Heads) {
     `INSERT INTO post (pr, run, kind, idem_key, body, destination_json, items_json, state, remote_id, created_at, updated_at)
       VALUES (1, $run, 'inline', 'p1', 'b', '{}', $items, 'confirmed', 103, 1, 1)`,
   ).run({ run: r1, items: JSON.stringify([{ id: ids.posted, revision: 0 }]) });
+  // You posted the reply of a discuss run that withdrew the posted finding at line 6.
+  comment(107, { anchor: anchor(6) });
+  db.query(
+    `INSERT INTO post (pr, run, kind, idem_key, body, destination_json, items_json, state, remote_id, created_at, updated_at)
+      VALUES (1, $run, 'inline', 'p2', 'b', '{}', $items, 'confirmed', 107, 1, 1)`,
+  ).run({ run: r1, items: JSON.stringify([{ id: ids.withdrawn, revision: 0 }]) });
+  const talk = (
+    db
+      .query(
+        `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, status, started_at)
+        VALUES (1, 'discuss', 'general', '', 'talk', $head, $base, 'completed', 1) RETURNING id`,
+      )
+      .get({ head: h.a, base: h.base }) as { id: number }
+  ).id;
+  const reply = (judgement: string, thread: number) =>
+    db
+      .query(
+        `INSERT INTO review_item (run, kind, payload_json, body, status, thread) VALUES ($run, 'reply', $payload, 'You are right.', 'posted', $thread)`,
+      )
+      .run({ run: talk, thread, payload: JSON.stringify({ thread, action: "reply", origin: "discuss", judgement }) });
+  reply("settled", 107);
+  // A discuss reply without the withdrawn judgement keeps the posted finding a bug.
+  reply(null as unknown as string, 103);
   comment(104, { parent: 100, anchor: null });
   comment(105, { anchor: anchor(undefined) });
   // Your comment on the Not a bug finding at line 27: opposite decisions.
@@ -243,18 +270,22 @@ describe("eval:local selection", () => {
     expect(built.stderr).toBe("");
     expect(built.code).toBe(0);
     expect(built.stdout).toContain("Local eval set: 2 cases from 3 review runs in 1 repositories.");
-    expect(built.stdout).toContain("Must find: 10 posted findings and 1 of your own comments. Must not raise: 4. Neutral: 2.");
+    expect(built.stdout).toContain("Must find: 13 findings and 1 of your own comments. Must not raise: 6. Neutral: 3.");
     expect(built.stdout).toContain(
-      "Left out: 1 refuted by the check, 1 discarded without your triage, 1 without a decision, 0 without an anchor, 4 in opposite decisions, 1 runs without a merge base, 1 cases with missing commits, 1 cases with nothing to find or avoid, 1 comments without a line, 1 comments at a head with no review.",
+      "Sources before carry: 9 posted, 1 covered by a fix commit, 1 accepted by your session, 1 posted and then withdrawn in the thread (must not raise).",
     );
     expect(built.stdout).toContain(
-      "Carried from earlier heads of the same PR: 5. Not carried: 1 with changed lines, 0 in a deleted file, 1 on an item of the later head.",
+      "Left out: 1 refuted by the check, 0 discarded without your triage, 1 without a decision, 0 without an anchor, 4 in opposite decisions, 1 runs without a merge base, 1 cases with missing commits, 1 cases with nothing to find or avoid, 1 comments without a line, 1 comments at a head with no review.",
+    );
+    expect(built.stdout).toContain(
+      "Carried from earlier heads of the same PR: 7. Not carried: 2 with changed lines, 0 in a deleted file, 1 on an item of the later head.",
     );
     expect(built.stdout).toContain("below the recommended minimum");
     for (const name of [TMP, OUT, "PROJ", "Add the calc helpers", "EVAL-9"]) expect(built.stdout).not.toContain(name);
     const m = JSON.parse(readFileSync(join(OUT, "MANIFEST.json"), "utf8")) as Manifest;
-    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 10, traps: 4, extras: 2, human: 1 });
-    expect(m.carried).toEqual({ carried: 5, changed: 1, gone: 0, overlap: 1 });
+    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 13, traps: 6, extras: 3, human: 1 });
+    expect(m.sources).toEqual({ posted: 9, fixed: 1, session: 1, withdrawn: 1 });
+    expect(m.carried).toEqual({ carried: 7, changed: 2, gone: 0, overlap: 1 });
     expect(readdirSync(join(OUT, "bundles"))).toHaveLength(1);
     // run.ts gives the same fingerprint for a run of the whole set.
     const loaded = loadCases("all", join(OUT, "cases"));
@@ -268,9 +299,15 @@ describe("eval:local selection", () => {
       [ofItem(ids.restored), [2, 2], "minor"],
       // The decision on a carried finding is on its copy: posted at head B with severity major.
       [ofItem(ids.carried), [35, 35], "major"],
+      // A fix commit covered it, and your session accepted the other one.
+      [ofItem(ids.fixed), [38, 38], "minor"],
+      [ofItem(ids.session), [20, 20], "minor"],
       [ofItem(ids.second), [12, 12], "blocker"],
       [ofItem(ids.changed), [37, 37], "minor"],
     ]);
+    const notes = new Map(a.bugs.map((b) => [b.id, b.note]));
+    expect(notes.get(ofItem(ids.fixed))).toBe(`Finding ${ids.fixed} covered by a fix commit.`);
+    expect(notes.get(ofItem(ids.session))).toBe(`Finding ${ids.session} accepted by your session.`);
     expect(a.bugs.every((b) => b.path === PATH && b.side === "new" && b.carriedFrom === undefined)).toBe(true);
   });
 
@@ -282,11 +319,14 @@ describe("eval:local selection", () => {
       [ofItem(ids.posted), [10, 11], heads.a],
       [ofItem(ids.restored), [2, 2], heads.a],
       // ids.carried overlaps its own copy at head B: one item. ids.changed: head B changes line 37.
+      // ids.session: head B changes line 20.
+      [ofItem(ids.fixed), [38, 38], heads.a],
       [ofItem(ids.second), [12, 12], heads.a],
     ]);
     expect(b.traps.map((x) => [x.id, x.lines, x.carriedFrom ?? null])).toEqual([
       [ofItem(ids.notBug), [30, 30], heads.a],
       [ofItem(ids.intended), [5, 5], heads.a],
+      [ofItem(ids.withdrawn), [6, 6], heads.a],
     ]);
     // Neither extras nor your comments move.
     expect(b.extras).toEqual([]);
@@ -294,24 +334,28 @@ describe("eval:local selection", () => {
     expect(caseOf(heads.a).bugs.map((x) => x.id)).not.toContain(ofItem(ids.onlyB));
   });
 
-  test("Not a bug and Intended become traps", () => {
-    expect(caseOf(heads.a).traps.map((t) => [t.id, t.lines])).toEqual([
+  test("Not a bug, Intended, and a posted finding that you withdrew in its thread become traps", () => {
+    const a = caseOf(heads.a);
+    expect(a.traps.map((t) => [t.id, t.lines])).toEqual([
       [ofItem(ids.notBug), [30, 30]],
       [ofItem(ids.intended), [5, 5]],
+      [ofItem(ids.withdrawn), [6, 6]],
     ]);
+    expect(a.bugs.map((b) => b.id)).not.toContain(ofItem(ids.withdrawn));
   });
 
-  test("Not worth fixing and a discard without a reason are neutral extras", () => {
+  test("Not worth fixing and a discard without a reason are neutral extras, also after a session accept", () => {
     expect(caseOf(heads.a).extras.map((x) => x.lines)).toEqual([
       [15, 15],
       [25, 25],
+      [40, 40],
     ]);
   });
 
   test("a refuted finding that you never restored is left out, and a restored one counts", () => {
     const a = caseOf(heads.a);
-    const all = [...a.bugs, ...a.traps, ...a.extras].map((x) => x.lines[0]);
-    expect(all).not.toContain(20);
+    expect([...a.bugs, ...a.traps].map((x) => x.id)).not.toContain(ofItem(ids.refuted));
+    expect(a.extras.some((x) => x.note.includes(`finding ${ids.refuted}.`))).toBe(false);
     expect(a.bugs.map((b) => b.id)).toContain(ofItem(ids.restored));
   });
 
@@ -664,9 +708,10 @@ describe("eval --set local with the fake CLI", () => {
       expect(result.fingerprint).not.toBe(manifest.fingerprint);
       expect(result.runs[0]?.items.map((i) => [i.line, i.anchorState, i.group])).toEqual(findings.map((f) => [f.line, "exact", "main"]));
       const s = score(result).suite;
-      expect(s.recall?.mean).toBe(2 / 5);
+      // 22 is also within 3 lines of the session bug at 20.
+      expect(s.recall?.mean).toBe(3 / 7);
       expect(s.humanRecall?.mean).toBe(1);
-      expect(s.trapRate?.mean).toBe(1 / 2);
+      expect(s.trapRate?.mean).toBe(1 / 3);
       expect(s.precision?.mean).toBeCloseTo(2 / 3, 10);
       // The finder got the task of the case.
       const stdin = readRecords<{ argv: string[]; stdin: string }>(record).find((x) => x.argv.includes("-p"))?.stdin ?? "";

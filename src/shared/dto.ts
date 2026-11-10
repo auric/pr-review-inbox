@@ -188,11 +188,19 @@ export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];
 export const VERIFIER_MODES = ["on", "off"] as const;
-// null model: the profile model. null effort: medium.
+// docs/plans/review-v2/spec.md section 1.8: what the app does with a refuted finding. demote: it stays in the list, last in its group.
+export const VERIFIER_OUTCOMES = ["hide", "demote"] as const;
+export type VerifierOutcome = (typeof VERIFIER_OUTCOMES)[number];
+// null model: the profile model. null effort: medium. outcome: absent means hide. The parse drops hide, so stored profiles and their
+// revisions stay as before.
 export const verifierSetup = z.object({
   mode: z.enum(VERIFIER_MODES).default("on"),
   model: modelName.nullable().default(null),
   effort: z.enum(EFFORTS).nullable().default(null),
+  outcome: z
+    .enum(VERIFIER_OUTCOMES)
+    .transform((v) => (v === "demote" ? v : undefined))
+    .optional(),
 });
 export type VerifierSetup = z.infer<typeof verifierSetup>;
 export const DEFAULT_VERIFIER: VerifierSetup = { mode: "on", model: null, effort: null };

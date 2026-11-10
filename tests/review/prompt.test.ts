@@ -34,9 +34,13 @@ import {
   RULES2_REFUTE,
   RULES2_RULES,
   replyAgent,
+  resolveProfiles,
   reviewerAgent,
   rubric,
   SHIPPED_PROFILES,
+  SPARSE_VERSION,
+  storeProfiles,
+  upgradeProfile,
   VERIFY_BATCH,
   VERIFY_DELEGATE,
   VERIFY_SPLIT,
@@ -511,8 +515,8 @@ describe("review v2 finder prompt", () => {
     // WP-R3: the agents of the verify phase are review agents too.
     const check = [withVerifyDelegation(verifyAgent(known, run), true), verifierAgent(known, run)].map((a) => a.prompt).join("\n---\n");
     expect({ version: REVIEW_PROMPT_VERSION, finder: sha(finder), check: sha(check) }).toEqual({
-      version: "2.3",
-      finder: "94ad3e1c7159338f63bbb3b7d360c77344908912743d5b244efc8e8abf08128c",
+      version: "2.4",
+      finder: "c634b814a6e009758c0436e99f35bced2feb9922b2b2ae151c758aeec4783b04",
       check: "4c91fce5912f9ddce955519e0d876c94da61486d7b79a31d5e08033bf548abda",
     });
   });
@@ -686,7 +690,7 @@ describe("review v3 prompt switches", () => {
   const rereviewInput = { ...full, since: "c".repeat(40), rangeBase: "d".repeat(40), earlier: [1, 2], posted: [2] };
   const withVariants = (...variants: ProfileInput["variants"]) => ({ ...general, variants });
 
-  test("the default prompt of each run kind is byte for byte the same as before WP-V2 (hashes of d76bed0)", () => {
+  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.4)", () => {
     const threads = [{ thread: 1, replyTo: 2 }];
     const kinds: Record<string, string[]> = {
       review: [mainAgent(general, FULL).prompt, reviewerAgent(general, FULL).prompt, buildPrompt(full)],
@@ -716,15 +720,15 @@ describe("review v3 prompt switches", () => {
       ],
     };
     expect(Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, sha(v.join("\n---\n"))]))).toEqual({
-      review: "1d350acf460cb3bfea2c2a2d3e0d8f1bb6b43a02eda41e5fd6f3cfe99a1b63f4",
-      rereview: "a293594e1da4e8830d6f44191c2458bc584102dac3a5e5067d4f78aed95b682d",
+      review: "73caa762a647f92b245f73f3c0bde64b0944189b93161d197d131cd397ffd4ae",
+      rereview: "b2b077681986e1576b41b4d5f2a20bd0b06c4e0dea57e5aa6df1f7af1cb3029a",
       verify: "d80c61cae723da363e2890e94335fd13132bb35d716b6b1f3b1cb5b77b189fd1",
       explain: "0a2d403ba5bfeea12a2f6249229f77ff3a19b646d202100aec744db3c4eb8b53",
       ask: "65e099f1000e6883cf1961cc02b33bef2864530efc61821d835f6667c6cb0f58",
       reply: "cd085ab743e2fe4908fcf1207db6cf3d061fdd5152161fc51ae9a9dfdea08de5",
       fix: "ef25cb6860a0d699bf3385b19d000b1fb9315c829b481c56ded5562e5b0ec0a0",
       discuss: "1f8484da378fa9c68d8c1738e16e719ca970d43657734853de5f879824c8422d",
-      improve: "733af22bec691ea649d4496642e46f5992c8fec16eaa50342dc1cbec52882eb9",
+      improve: "0f1891af35554658c9362298d0d4e0e0fe9237e44c926743fa3081bb451941f3",
     });
     expect(SHIPPED_PROFILES.map((p) => p.variants)).toEqual([[], []]);
     for (const p of SHIPPED_PROFILES) for (const m of TRIAL_MODULES) expect(p.modules).not.toContain(m);
@@ -808,7 +812,7 @@ describe("review v3 prompt switches", () => {
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
     expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.3+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.4+order+rules2");
   });
 
   test("ASD-STE100: every switch line has at most 20 words", () => {
@@ -828,7 +832,7 @@ describe("review v3 prompt switches", () => {
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.3+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.4+order+rules2");
     expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
@@ -841,6 +845,19 @@ describe("review v3 prompt switches", () => {
     ]);
     const revisions = [general, withVariants("rules2"), withVariants("order"), withVariants("order", "rules2")].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
+    // spec.md section 1.8: outcome hide parses to no key and keeps the revision. Demote changes it.
+    const hide = profileInput.parse({ ...general, verifier: { ...general.verifier, outcome: "hide" } });
+    expect(hide.verifier).toEqual(general.verifier);
+    expect(profileRevision(hide)).toBe(profileRevision(general));
+    const demote = profileInput.parse({ ...general, verifier: { ...general.verifier, outcome: "demote" } });
+    expect(demote.verifier.outcome).toBe("demote");
+    expect(profileRevision(demote)).not.toBe(profileRevision(general));
+    // Field by field: demote is an edit of the verifier field of a shipped profile. Hide is no edit.
+    expect(storeProfiles([hide])).toEqual([{ id: general.id }]);
+    const [stored] = storeProfiles([demote]);
+    expect(Object.keys(stored ?? {}).sort()).toEqual(["edited", "id", "verifier"]);
+    expect(resolveProfiles([stored], SPARSE_VERSION)?.profiles[0]?.verifier.outcome).toBe("demote");
+    expect(upgradeProfile(demote, 4).verifier.outcome).toBe("demote");
   });
 });
 

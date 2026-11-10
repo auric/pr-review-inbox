@@ -54,7 +54,7 @@ New fields of profileInput (dto.ts:118-150), each with a parse default:
 |---|---|---|---|
 | modules | string[] of module IDs, unique | [] | Check sections of the finder prompt. |
 | volume | "quiet" or "balanced" or "thorough" | "balanced" | Display rule and nit rule. |
-| verifier | {mode: "on" or "off", model: modelName or null, effort: EFFORTS or null} | {mode "on", model null, effort null} | The verify phase. Model null uses the profile model. Effort null uses "medium". |
+| verifier | {mode: "on" or "off", model: modelName or null, effort: EFFORTS or null, outcome: "hide" or "demote", optional} | {mode "on", model null, effort null} | The verify phase. Model null uses the profile model. Effort null uses "medium". Outcome: what a refuted finding does (section 1.7). The parse drops "hide", so an absent outcome means hide and old revisions stay valid. |
 
 profileRevision (catalog.ts:145) adds each new field only when it differs from its default, as for the older fields.
 
@@ -144,6 +144,7 @@ Each prompt line with its reason:
 | Finder: "Set evidenceStatus to code when you read each line of the trigger path. Else set it to unverified." | Clear meaning for the cap. |
 | Finder: "Set confidence to high when you traced the trigger in the code, medium when you read the code but did not trace each step, and low when you only suspect it." | Calibrated values for the fold. |
 | Finder: "Set module to core, or to the ID of the check section that found it." | Stats per module. |
+| Finder: "Set category to security, concurrency, resource, or behavior for a finding of that class. resource: a leak or a missing release. behavior: a change that users or callers see." | The classes that the check never hides (section 1.7). Prompt version 2.4. |
 | Finder: "Put open points about the intent into questions. Say what you need to know and why it matters." | Questions stay apart. |
 | Do-not-flag: "Do not report the points below. The check step refutes them, so they only cost time:" then "style, naming, formatting, or comment wording" / "what a compiler, type checker, linter, or formatter reports" / "a problem that the code already handles: read the guards and the callers first" / "a rule that the code turns off on purpose, such as a suppression with a reason" / "a risk with no trigger, such as 'this might break'" / "behavior that the pull request text or the task asks for" / "code that only moved or was renamed, with no change of logic" / "a choice between two correct designs" / "a missing test, unless the Tests check is on" | S11, research practice 4. The reason line says why. |
 | Rubric: "Set severity by what the merge must wait for." and the blocker, major, and minor lines (catalog.ts:256-258) | Kept. |
@@ -251,6 +252,8 @@ Dedupe: after validation, two kept findings with the same path, the same side, a
 Caps (judge.ts, per candidate c with verdict v, or no verdict when the phase is off, failed, or skipped c):
 
 ```
+if v is refuted and (outcome is demote or c is protected)
+                                   -> item status new, payload demoted true, severity c.severity, check "unchecked"
 if v is refuted or duplicate       -> item status discarded, payload discardedBy "verify"
 else if v is question              -> question item {text: v.question || c.title || c.body, why: v.reason}
 else if c.trigger is empty and v is not confirmed
@@ -265,6 +268,12 @@ else:
 
 Order of severities: blocker > major > minor > nit. The display group comes from check, severity, and the run volume (section 1.4) at read time.
 
+Protected classes (judge.ts neverHidden): module security, concurrency, or api, or a category (trimmed, lower case) from this list. Security: security, injection, sql, deserialization, unsafe-calls, format. Concurrency: concurrency, races, atomics, locks, threads, async-tasks. Resource handling: resource, ownership, resources, memory, windows. Behavior change: behavior, abi, packaging. The words after the class names are the category words of the language checklists (languages.ts). The finder has no category enum: category is free text, and the finder rule of section 1.5 names the four class words. A duplicate always hides, because the candidate that it repeats stays.
+
+Demoted finding: it shows in its display group, after the other drafts of the group. The card shows the chip "Refuted", the check reason ("Check: <reason> (path:line)"), and "Refuted by the check. It stays last in its group." The user triages it like any other draft. Task self-review points ("Fix these too") leave it out. A re-review verdict on its copy sets or removes the mark.
+
+Wrong file (validate.ts relocate): when the anchor of a finding drops with "file" or "match", the app searches its anchorText (whitespace collapsed) in the new side of each other changed text file of the diff. Exactly one match, on a range that holds a changed line, moves the finding to that file and line, side new, and payload.movedFrom keeps {path, line} of the finder. The card says "Moved from <path>:<line>: the quoted code is only in this file." Zero matches, two or more matches, or a match without a changed line keep the first drop. judge.ts reads the other changed files only when a finding drops with "file" or "match".
+
 ### 1.8 Storage
 
 - Finding payload: verify {verdict, reason, evidence, severity, duplicateOf (item ID), by} when a verdict exists; finderSeverity; title, trigger, cause, rule, module from the finder; discardedBy "verify" for refuted and duplicate items.
@@ -272,6 +281,7 @@ Order of severities: blocker > major > minor > nit. The display group comes from
 - review_run.prompt_version: REVIEW_PROMPT_VERSION at the start (migration 030). NULL reads as "1".
 - history.md (context-files.ts:79) names the state of each finding with its writer: "discarded by the user", "refuted by the check", "withdrawn in a talk", "accepted", "posted", "new". The history rule of section 1.5 covers only "discarded by the user".
 - Restore of a refuted item: status new, discardedBy removed, payload.verify stays, and the card says "You restored it".
+- demoted true: a refuted finding that stays in the list (section 1.7). movedFrom {path, line}: a finding that the wrong-file rule moved.
 
 ### 1.9 States, keys, and edges
 
@@ -300,8 +310,13 @@ Order of severities: blocker > major > minor > nit. The display group comes from
 12. AC-R12. A version 4 general profile with an edited prompt keeps the prompt and gets the new modules, volume, and efforts.
 13. AC-R13. rl-reviewer and rl-verify prompts hold the pr.md line, the history line (when history.md exists), and the do-not-flag list.
 14. AC-R14. The CLI schema of a review run is valid draft-07, lists the new keys as required, and an older stored result without them parses.
-15. AC-R15. Each run row stores prompt_version REVIEW_PROMPT_VERSION (now "2.3"). A row with NULL reads as "1".
+15. AC-R15. Each run row stores prompt_version REVIEW_PROMPT_VERSION (now "2.4"). A row with NULL reads as "1".
 16. AC-R16. history.md shows "refuted by the check" for a refuted item, and the finder history rule names only "discarded by the user".
+17. AC-R17. With verifier outcome hide, a refuted candidate of module security, or with a category of a protected class, becomes a new item with demoted true. Another refuted candidate becomes a discarded item. A duplicate is discarded in both modes.
+18. AC-R18. With verifier outcome demote, each refuted candidate becomes a new item with demoted true. In the Drafts list it is last in its group, with the chip "Refuted" and the check reason.
+19. AC-R19. Outcome hide parses to no key, and profileRevision stays the same. Outcome demote is an edit of the verifier field: storeProfiles keeps it, and upgradeProfile keeps it. Copy to all profiles gives the outcome to the other profiles and keeps their mode, model, and effort.
+20. AC-R20. A finding whose anchorText is not in its file, or whose file does not exist, moves to the one exact match on a changed line of another changed file, with movedFrom. Two matches, a match on an unchanged line, or a match only in an unchanged file keep the drop.
+21. AC-R21. Each language checklist ends with a "Do not report in <language>:" list of one to three items. One common line follows the lists: linter or analyzer warnings, formatting, generated files, and speed-ups without a shown hot path. REVIEW_PROMPT_VERSION is "2.4".
 
 ## 2. Part 2: Discuss a finding
 

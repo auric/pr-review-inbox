@@ -127,6 +127,20 @@ describe("display groups per volume (spec.md section 1.4)", () => {
     expect(restoredNote(finding(10, { verify: mark("refuted") }, { status: "discarded" }))).toBeNull();
     expect(restoredNote(SET[0] as ReviewItemDto)).toBeNull();
   });
+
+  test("a demoted finding stays in its group, last, with the Refuted chip and its note (spec.md section 1.8)", () => {
+    const low = finding(11, { severity: "major", verify: mark("refuted"), demoted: true });
+    const lowNit = finding(12, { severity: "nit", verify: mark("refuted"), demoted: true });
+    const g = draftGroups([low, ...SET, lowNit], summary({ volume: "balanced", verify: VERIFY }));
+    expect([ids(g.main), ids(g.fold), ids(g.hidden)]).toEqual([
+      [1, 2, 3, 11],
+      [4, 5, 12],
+      [6, 7],
+    ]);
+    expect(checkChip(low, g.checked)).toBe("Refuted");
+    expect(restoredNote(low)).toBe("Refuted by the check. It stays last in its group.");
+    expect(checkText(low)).toBe("Check: The guard on line 12 stops it. (src/cache.ts:12)");
+  });
 });
 
 describe("cards: chip, title, trigger, and check reason (spec.md section 1.1)", () => {
@@ -288,14 +302,16 @@ describe("checks and volume of a profile (spec.md sections 1.1 to 1.4)", () => {
       variants: [],
     };
     const [d] = toDrafts([base]);
-    expect(d?.verifier).toEqual({ mode: "on", model: "", effort: "high" });
-    expect(toProfiles([{ ...(d as NonNullable<typeof d>), verifier: { mode: "off", model: " ", effort: "" } }])[0]).toMatchObject({
+    expect(d?.verifier).toEqual({ mode: "on", model: "", effort: "high", outcome: "hide" });
+    expect(
+      toProfiles([{ ...(d as NonNullable<typeof d>), verifier: { mode: "off", model: " ", effort: "", outcome: "hide" } }])[0],
+    ).toMatchObject({
       modules: ["security"],
       volume: "quiet",
       verifier: { mode: "off", model: null, effort: null },
     });
     expect(
-      problems({ ...(d as NonNullable<typeof d>), verifier: { mode: "on", model: "bad name", effort: "" } }).verifierModel,
+      problems({ ...(d as NonNullable<typeof d>), verifier: { mode: "on", model: "bad name", effort: "", outcome: "hide" } }).verifierModel,
     ).toBeTruthy();
   });
 });

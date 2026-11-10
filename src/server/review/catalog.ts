@@ -222,7 +222,7 @@ export const profileRevision = (p: Profile) =>
     .update(p.languageChecks ? "lang" : "")
     .update(p.modules.length ? `modules${JSON.stringify(p.modules)}` : "")
     .update(p.volume === "balanced" ? "" : `volume${p.volume}`)
-    .update(sameValue(p.verifier, DEFAULT_VERIFIER) ? "" : `verifier${JSON.stringify(p.verifier, ["mode", "model", "effort"])}`)
+    .update(sameValue(p.verifier, DEFAULT_VERIFIER) ? "" : `verifier${JSON.stringify(p.verifier, ["mode", "model", "effort", "outcome"])}`)
     .update(p.variants.length ? `variants${JSON.stringify(p.variants)}` : "")
     .update(p.jiraFamily ? "jirafamily" : "")
     .digest("hex");
@@ -546,6 +546,7 @@ export function finderRules(p: FinderProfile, main: boolean): string[] {
     "Set evidenceStatus to code when you read each line of the trigger path. Else set it to unverified.",
     "Set confidence to high when you traced the trigger in the code. Set it to medium when you read the code but did not trace each step. Set it to low when you only suspect the problem.",
     "Set module to core, or to the ID of the check section that found it.",
+    "Set category to security, concurrency, resource, or behavior for a finding of that class. resource: a leak or a missing release. behavior: a change that users or callers see.",
     ...(main ? ["Put open points about the intent into questions. Say what you need to know and why it matters."] : []),
   ];
 }

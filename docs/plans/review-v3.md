@@ -427,8 +427,10 @@ Shared files: scripts/eval/* WP-V4 → WP-V13 → WP-V14 → WP-V5. catalog.ts, 
 - `--large` spends the eval only on the cases under test. Use `--repeat 2` only there.
 - The large subset is mostly one PR at three heads, so its results go together. The builder adds each new large PR that you review and post on. More large PRs lower the spread more than more repeats do.
 - Existing data cannot give must-not-raise items. MANIFEST.json counts traps 0, extras 0, undecided 0, and notYours 0.
+- 2026-11-10, better ground truth: a finding that a Fix commit covered and a finding that your session accepted are now must-find. A posted finding that you withdrew in its thread is now must-not-raise. The thread outcome is computed in the UI and is not stored. No outcome kind means "the answer proved it wrong". The builder uses the stored signal: a posted reply of a discuss run with verdict withdrawn (judgement settled, origin discuss). MANIFEST.json `sources` counts each source. docs/eval/local.md lists the rules.
+- `eval:ab --candidate-verifier on|off` sets the verify mode of the candidate only. No eval ran with it yet.
 - The 3 findings that the verify phase refuted stay out, by WP-V1 design. Precision is therefore a lower bound: an unmatched finding counts as noise, also when it is a real bug.
-- New must-not-raise items come only from your discards with the reason "Not a bug" or "Intended" (TRAP_CODES in local.ts). The next build picks them up.
+- New must-not-raise items come from your discards with the reason "Not a bug" or "Intended" (TRAP_CODES in local.ts), and from posted findings that you withdrew in their thread. The next build picks them up.
 
 ### 10.7 Questions (recommended defaults)
 

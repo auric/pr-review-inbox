@@ -71,7 +71,7 @@ const RAW_MAX = 2 * 1024 * 1024;
 // that a valid duplicate verdict names. jobs.ts end() turns both into item IDs after the insert.
 export type CandidateLink = { n: number; duplicateOf: number | null };
 // What the verify phase gave a carried finding of a re-review. end() applies it to the copy. verify absent: no verdict, so no change.
-export type CarriedMark = CandidateLink & { verify?: VerifyMark; severity: Severity; discard: boolean };
+export type CarriedMark = CandidateLink & { verify?: VerifyMark; severity: Severity; discard: boolean; demoted?: true };
 
 // checked: the earlier findings of a re-review. fix: the notes and edits of a fix run. links, carried: the verify phase of a review run.
 // notes: the note proposals of a reply run, before the checks of notes.ts proposeNotes (docs/plans/review-v2/spec.md section 2.9).
@@ -223,21 +223,29 @@ async function readBlobs(ws: Workspace, findings: Placed[]) {
   };
   const env = gitEnv("/dev/null");
   const g = (args: string[]) => git([`--git-dir=${ws.cache}`, ...args], { env });
-  for (const f of findings) {
-    const b = blobOf(f);
-    if (!b || b.map.has(b.path) || big.has(b.object)) continue;
+  const load = async (b: { path: string; map: Map<string, string>; object: string }) => {
+    if (b.map.has(b.path) || big.has(b.object)) return;
     try {
       if (Number((await g(["cat-file", "-s", b.object])).trim()) > MAX_FILE_CHARS) big.add(b.object);
       else b.map.set(b.path, await g(["cat-file", "blob", b.object]));
     } catch {
       // No such file on that side. The validator drops the finding with reason "file".
     }
+  };
+  for (const f of findings) {
+    const b = blobOf(f);
+    if (b) await load(b);
   }
   const oversized = (f: Placed) => {
     const b = blobOf(f);
     return b !== null && big.has(b.object);
   };
-  return { newFiles, oldFiles, oversized };
+  // validate.ts relocate: the new side of each changed text file, for a finding whose own file failed.
+  const loadChanged = async () => {
+    for (const f of byNew.values())
+      if (!f.binary && f.path !== null) await load({ path: f.path, map: newFiles, object: `${ws.sourceHead}:${f.path}` });
+  };
+  return { newFiles, oldFiles, oversized, loadChanged };
 }
 
 // The finder result of a review run after validation and dedupe, before the verify phase (spec.md sections 1.6 and 1.7).
@@ -275,7 +283,12 @@ export async function judge(
   const agents = o.events.filter((e) => e.tool === "Agent" && e.agent !== null && e.status === "ok").map((e) => e.agent as string);
   const causes = parsed.data.findings.flatMap((f) => (f.cause ? [{ ...f, ...f.cause }] : []));
   const blobs = await readBlobs(ws, [...parsed.data.findings, ...causes, ...earlierCases(earlier, items).cases.map((c) => c.finding)]);
-  const v = validate({ result: parsed.data, diff: ws.diff, ...blobs, agents, explain: profile.explain, rules });
+  const check = () => validate({ result: parsed.data, diff: ws.diff, ...blobs, agents, explain: profile.explain, rules });
+  let v = check();
+  if (v.dropped.some((d) => d.reason === "file" || d.reason === "match")) {
+    await blobs.loadChanged();
+    v = check();
+  }
   const e = rereview ? validateEarlier({ earlier, items, diff: ws.diff, ...blobs }) : null;
   const a = profile.explain ? null : validateAnswered(parsed.data.answered, asked, v.kept);
   const dropped = v.dropped.map((d) => (d.reason === "file" && blobs.oversized(d) ? { ...d, reason: "size" as const } : d));
@@ -364,7 +377,19 @@ const atMostMinor = (s: Severity): Severity => (s === "blocker" || s === "major"
 
 export type Capped =
   | { kind: "question"; question: Question }
-  | { kind: "finding"; status: "new" | "discarded"; severity: Severity; check: Check };
+  | { kind: "finding"; status: "new" | "discarded"; severity: Severity; check: Check; demoted?: true };
+
+// spec.md section 1.8: the classes that the check never hides. The modules are the check sections. The categories are the finder rule
+// of catalog.ts finderRules and the words of the languages.ts items of each class.
+const KEEP_MODULES = new Set(["security", "concurrency", "api"]);
+const KEEP_CATEGORIES = new Set([
+  ...["security", "injection", "sql", "deserialization", "unsafe-calls", "format"],
+  ...["concurrency", "races", "atomics", "locks", "threads", "async-tasks"],
+  ...["resource", "ownership", "resources", "memory", "windows"],
+  ...["behavior", "abi", "packaging"],
+]);
+export const neverHidden = (c: Pick<StoredFinding, "module" | "category">) =>
+  KEEP_MODULES.has(c.module ?? "core") || KEEP_CATEGORIES.has(c.category.trim().toLowerCase());
 
 // spec.md section 1.7, the caps: structured fields only, never the text. v undefined: the phase is off, failed, or skipped the
 // candidate. carried: a carried finding keeps its kind, so a question verdict reads as unsure and an empty trigger makes no question.
@@ -372,7 +397,11 @@ export function capOf(
   c: Pick<StoredFinding, "severity" | "trigger" | "evidenceStatus" | "title" | "body">,
   v: Pick<VerifyVerdict, "verdict" | "severity" | "reason" | "question"> | undefined,
   carried = false,
+  demote = false,
 ): Capped {
+  // demote: a refuted finding stays in the list. A duplicate always hides, because the candidate that it repeats stays.
+  if (demote && v?.verdict === "refuted")
+    return { kind: "finding", status: "new", severity: c.severity, check: "unchecked", demoted: true };
   if (v?.verdict === "refuted" || v?.verdict === "duplicate")
     return { kind: "finding", status: "discarded", severity: c.severity, check: "unchecked" };
   if (!carried && v?.verdict === "question")
@@ -407,6 +436,8 @@ export type SettleInput = {
   verify: boolean;
   written: number;
   servers: string[];
+  // The profile keeps refuted findings in the list (verifier outcome demote).
+  demote?: boolean;
 };
 
 // The run end of a review run: the verdicts and the caps of each candidate, the items, and the summary (spec.md sections 1.7 and 1.8).
@@ -471,14 +502,20 @@ export function settle(f: Found, s: SettleInput): Ending {
     const v = got.get(c.n);
     if (v) verify[COUNT[v.verdict]]++;
     else verify.unchecked++;
-    const out = capOf(c.finding, v, c.from !== null);
+    const out = capOf(c.finding, v, c.from !== null, s.demote === true || neverHidden(c.finding));
     const link = { n: c.n, duplicateOf: v?.verdict === "duplicate" ? v.duplicateOf : null };
     if (out.kind === "question") {
       asked.push(out.question);
       continue;
     }
     if (c.from !== null) {
-      carried.set(c.from, { ...link, ...(v && { verify: mark(v) }), severity: out.severity, discard: out.status === "discarded" });
+      carried.set(c.from, {
+        ...link,
+        ...(v && { verify: mark(v) }),
+        severity: out.severity,
+        discard: out.status === "discarded",
+        ...(out.demoted && { demoted: true }),
+      });
       continue;
     }
     const payload: FindingPayload = {
@@ -487,6 +524,7 @@ export function settle(f: Found, s: SettleInput): Ending {
       ...(v && { verify: mark(v) }),
       ...(out.severity !== c.finding.severity && { finderSeverity: c.finding.severity }),
       ...(out.status === "discarded" && { discardedBy: "verify" as const }),
+      ...(out.demoted && { demoted: true as const }),
     };
     const item = findingItem(payload, out.status);
     links.set(item, link);
@@ -511,9 +549,9 @@ export function settle(f: Found, s: SettleInput): Ending {
 export function markCopy(it: NewItem, m: CarriedMark): NewItem {
   if (!m.verify) return it;
   const p = JSON.parse(it.payload_json) as FindingPayload;
-  const restored = (p.verify?.verdict === "refuted" || p.verify?.verdict === "duplicate") && p.discardedBy === undefined;
+  const restored = (p.verify?.verdict === "refuted" || p.verify?.verdict === "duplicate") && p.discardedBy === undefined && !p.demoted;
   if (it.status !== "new" || it.edited === 1 || restored) return { ...it, payload_json: JSON.stringify({ ...p, verify: m.verify }) };
-  const { finderSeverity, ...rest } = p;
+  const { finderSeverity, demoted: _, ...rest } = p;
   const finder = finderSeverity ?? p.severity;
   const next: FindingPayload = {
     ...rest,
@@ -521,6 +559,7 @@ export function markCopy(it: NewItem, m: CarriedMark): NewItem {
     verify: m.verify,
     ...(m.severity !== finder && { finderSeverity: finder }),
     ...(m.discard && { discardedBy: "verify" as const }),
+    ...(m.demoted && { demoted: true as const }),
   };
   return { ...it, payload_json: JSON.stringify(next), status: m.discard ? "discarded" : "new" };
 }

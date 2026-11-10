@@ -7,6 +7,7 @@ import type { AgentSpec } from "./claude";
 import type { DiffFile } from "./diffmap";
 
 // Item form: "<category>: <sentences> [<usual severity>]". tests/review/languages.test.ts checks the form and the sentence length.
+// skip: the common false positives of the language. docs/eval/results.md: a longer prompt cost recall, so each list stays short.
 export const CHECKLISTS = {
   cpp: {
     title: "C++",
@@ -30,6 +31,11 @@ export const CHECKLISTS = {
       "windows: Check each handle against the correct failure value, INVALID_HANDLE_VALUE or NULL, and CloseHandle on every path. Read GetLastError at once after the failed call. [major]",
       "windows-types: On Windows, long is 32 bits. Check truncation of size_t and pointers to DWORD, LONG, or int. Free memory in the module that allocated it. [major]",
     ],
+    skip: [
+      "a raw pointer or reference that owns nothing, as a request for a smart pointer",
+      "a pass by value of a cheap type, such as string_view, span, or an int",
+      "a missing noexcept, override, or [[nodiscard]] that changes no behavior",
+    ],
   },
   c: {
     title: "C",
@@ -44,6 +50,7 @@ export const CHECKLISTS = {
       "format: Check for outside input that the code passes as the format string of printf or a similar function. [blocker]",
       "macros: Check that a macro puts parentheses around each argument and around its body. Check for an argument with side effects that the macro uses twice. [major]",
     ],
+    skip: ["a goto to a cleanup label on an error path", "a cast of the malloc result, or a missing cast"],
   },
   python: {
     title: "Python",
@@ -65,6 +72,11 @@ export const CHECKLISTS = {
       "sql: Check SQL text that f-strings, format, %, or + build from variables. Outside input in that text is a finding. Use query parameters. [blocker]",
       "unsafe-calls: Check eval and exec on outside input, file paths from user input without a check, tempfile.mktemp, and verify=False. [major]",
       "truth: Check for is used for value equality. Check truth tests where 0, an empty string, or an empty list is valid. [minor]",
+    ],
+    skip: [
+      "an f-string or % format in a log call",
+      "a broad except in a top-level handler that logs the error and stops or retries",
+      "a missing type hint or docstring",
     ],
   },
 } as const;
@@ -100,9 +112,21 @@ export const LANGUAGE_INTRO = [
   "The level in brackets is the usual level. Lower it for a rare trigger or a small impact.",
 ];
 
+export const SKIP_COMMON =
+  "In each language, do not report linter or analyzer warnings, formatting, generated files, or speed-ups without a shown hot path.";
+
 export function languageLines(langs: Language[]): string[] {
   if (!langs.length) return [];
-  return [...LANGUAGE_INTRO, ...langs.flatMap((l) => [`${CHECKLISTS[l].title} list:`, ...CHECKLISTS[l].items.map((i) => `- ${i}`)])];
+  return [
+    ...LANGUAGE_INTRO,
+    ...langs.flatMap((l) => [
+      `${CHECKLISTS[l].title} list:`,
+      ...CHECKLISTS[l].items.map((i) => `- ${i}`),
+      `Do not report in ${CHECKLISTS[l].title}:`,
+      ...CHECKLISTS[l].skip.map((i) => `- ${i}`),
+    ]),
+    SKIP_COMMON,
+  ];
 }
 
 // Adds the checklists to the prompt of an agent.

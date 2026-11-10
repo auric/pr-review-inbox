@@ -27,6 +27,8 @@ import {
   type SettingsDto,
   type SkillDto,
   TRIAL_MODULES,
+  VERIFIER_OUTCOMES,
+  type VerifierOutcome,
   VOLUMES,
   type Volume,
 } from "../../shared/dto";
@@ -56,6 +58,7 @@ import {
   focusAfter,
   LIMITS,
   modelChoice,
+  OUTCOME_NAME,
   type Part,
   problems,
   profileId,
@@ -388,11 +391,11 @@ export function ReviewProfiles({ settings, target }: { settings: SettingsDto; ta
           {source && copying !== null && (
             <>
               <DialogHeader>
-                <DialogTitle>Copy the skills and MCP servers of {profileLabel(source, copying)}?</DialogTitle>
+                <DialogTitle>Copy the skills, MCP servers, and refuted findings choice of {profileLabel(source, copying)}?</DialogTitle>
                 <DialogDescription>
                   {targets.length
-                    ? `${setupSummary(source, profileLabel(source, copying))} Each profile in the list gets the same skills, Always use marks, MCP servers, and tools. This replaces its current skills and MCP servers.`
-                    : "The other profiles have the same skills and MCP servers."}
+                    ? `${setupSummary(source, profileLabel(source, copying))} Each profile in the list gets the same skills, Always use marks, MCP servers, tools, and refuted findings choice. This replaces its current choices.`
+                    : "The other profiles have the same skills, MCP servers, and refuted findings choice."}
                 </DialogDescription>
               </DialogHeader>
               {targets.length > 0 && (
@@ -916,6 +919,11 @@ function ChecksField(props: RowProps) {
   );
 }
 
+const OUTCOME_HELP: Record<VerifierOutcome, string> = {
+  hide: "A refuted finding leaves the list. The run record keeps it.",
+  demote: "A refuted finding stays last in its group, with the reason of the check.",
+};
+
 const VERIFIER_MODES: [Draft["verifier"]["mode"], string, (runner: string) => string][] = [
   ["on", "On", (r) => `${r} checks each finding in a second step. Unsure points go to a fold, and refuted points leave the list.`],
   ["off", "Off", () => "No second step. Each finding shows as Not checked."],
@@ -1117,6 +1125,38 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
             </div>
           </div>
           <p className={help}>Check model and check effort apply to the agent of the check step.</p>
+          <div className="grid min-w-0 gap-1">
+            <span id={profileId(i, "verifier-outcome")} className="text-sm">
+              Refuted findings{of}
+            </span>
+            <div
+              role="radiogroup"
+              aria-labelledby={profileId(i, "verifier-outcome")}
+              aria-describedby={`${profileId(i, "verifier-outcome")}-help`}
+              className="flex w-fit flex-wrap gap-0.5 rounded-lg border bg-pane p-0.5"
+            >
+              {VERIFIER_OUTCOMES.map((o) => (
+                <label
+                  key={o}
+                  className="flex cursor-pointer items-center rounded-md px-2.5 py-0.5 text-sm text-ink-2 hover:text-foreground has-checked:bg-sel has-checked:font-semibold has-checked:text-foreground has-disabled:cursor-default has-disabled:opacity-50 has-focus-visible:outline-2 has-focus-visible:outline-ring"
+                >
+                  <input
+                    type="radio"
+                    name={`verifier-outcome-${d.key}`}
+                    value={o}
+                    className="sr-only"
+                    checked={d.verifier.outcome === o}
+                    disabled={!!noCheck || d.verifier.mode === "off"}
+                    onChange={() => verifier({ outcome: o })}
+                  />
+                  {OUTCOME_NAME[o]}
+                </label>
+              ))}
+            </div>
+            <p id={`${profileId(i, "verifier-outcome")}-help`} className={help}>
+              {OUTCOME_HELP[d.verifier.outcome]} Security, concurrency, resource, and behavior findings always stay in the list.
+            </p>
+          </div>
         </div>
       </div>
       <SkillsField {...props} />
@@ -1136,7 +1176,7 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
             Copy to all profiles<span className="sr-only"> from profile {i + 1}</span>
           </Button>
           <span id={`${profileId(i, "copy")}-help`} className="text-xs text-muted-foreground">
-            Gives the other profiles these skills and MCP servers.
+            Gives the other profiles these skills, MCP servers, and refuted findings choice.
           </span>
         </div>
       </div>

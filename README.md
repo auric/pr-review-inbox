@@ -105,7 +105,7 @@ A review has two steps. The run line says "Finding problems…" and then "Checki
 
 The Drafts header and the review record count the open drafts in plain words, for example "2 must fix · 3 worth fixing · 4 low confidence". The volume of the run decides what waits in a fold. "Balanced" puts unsure points and nits into "Low confidence". "Only what matters" puts everything but must-fix points into "More". "Show everything" has no fold. A run keeps its view after a volume change.
 
-The review record lists the points that the check refuted or found twice, with the reason of the check and Restore. A restored point goes back into the Drafts list and says "You restored it". When the check does not finish, the record says how many findings are not checked. The record also lists what was not checked and why a finding was dropped.
+The review record lists the points that the check refuted or found twice, with the reason of the check and Restore. A restored point goes back into the Drafts list and says "You restored it". A refuted point about security, concurrency, resource handling, or a behavior change never leaves the Drafts list. It stays last in its group, with the chip "Refuted" and the reason of the check. Set "Refuted findings" to Show last in the Check step of a review profile to keep every refuted point that way. A finding that quotes code from another changed file moves to that file when the code is there exactly once. When the check does not finish, the record says how many findings are not checked. The record also lists what was not checked and why a finding was dropped.
 
 ![A review with its plain-word count, the refuted points, and the Not checked list](docs/screenshots/review.webp)
 

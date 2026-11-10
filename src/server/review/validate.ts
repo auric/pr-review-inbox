@@ -211,7 +211,27 @@ export function anchorer(input: Pick<ValidateInput, "diff" | "newFiles" | "oldFi
     for (let k = s; k <= e; k++) if (!lines?.has(k)) state = "outside";
     return { state, path, oldPath, line: s, lineEnd: e, excerpt: excerpt(t, file, f.side, s, e) };
   };
-  return { anchor, changed };
+
+  // The finding at the one exact match of its anchorText in the new side of another changed file, else null. Two or more matches
+  // give null, because the place is not certain. A file absent from newFiles counts as no match.
+  const relocate = <T extends Placed>(f: T): T | null => {
+    const quote = collapse(f.anchorText);
+    if (!quote) return null;
+    const own = repoPath(f.path);
+    let hit: { path: string; s: number; e: number } | null = null;
+    for (const file of files) {
+      if (file.path === null || file.binary || file.path === own || file.oldPath === own) continue;
+      const content = input.newFiles.get(file.path);
+      if (content === undefined || content.length > MAX_FILE_CHARS) continue;
+      const t = text(`new:${file.path}`, content);
+      for (let p = t.flat.indexOf(quote); p !== -1; p = t.flat.indexOf(quote, p + 1)) {
+        if (hit) return null;
+        hit = { path: file.path, s: lineAt(t, p), e: lineAt(t, p + quote.length - 1) };
+      }
+    }
+    return hit && { ...f, path: hit.path, side: "new", line: hit.s, lineEnd: hit.e === hit.s ? null : hit.e };
+  };
+  return { anchor, changed, relocate };
 }
 
 // The file of an anchored line: the new path on side new, the base path on side old.
@@ -233,7 +253,7 @@ function ruleCheck(sources: readonly RuleSource[]) {
 export function validate(input: ValidateInput): ValidatedResult & { kept: (number | null)[] } {
   const { findings, ...rest } = input.result;
   if (input.explain) return { ...rest, findings: [], dropped: [], kept: findings.map(() => null) };
-  const { anchor, changed } = anchorer(input);
+  const { anchor, changed, relocate } = anchorer(input);
   const holds = ruleCheck(input.rules ?? []);
   const agents = new Set(input.agents);
   const out: ValidatedResult & { kept: (number | null)[] } = { ...rest, findings: [], dropped: [], kept: [] };
@@ -242,8 +262,17 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     out.kept.push(null);
   };
   for (const raw of findings) {
-    const f: Finding = { ...raw, agent: raw.agent !== null && agents.has(raw.agent) ? raw.agent : null };
-    const a = anchor(f);
+    let f: Finding = { ...raw, agent: raw.agent !== null && agents.has(raw.agent) ? raw.agent : null };
+    let a = anchor(f);
+    let movedFrom: AnchoredFinding["movedFrom"];
+    // A wrong file: the quote can be in another changed file. The new place must hold a changed line, else the first drop stays.
+    const moved = a === "file" || a === "match" ? relocate(f) : null;
+    const at = moved && anchor(moved);
+    if (moved && at && typeof at !== "string" && changed(at, "new")) {
+      movedFrom = { path: f.path, line: f.line };
+      f = moved;
+      a = at;
+    }
     if (typeof a === "string") {
       drop(f, a);
       continue;
@@ -265,7 +294,7 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     }
     // A rule from another scope does not apply here. The finding stays as a core finding, and the verify phase judges it.
     const kept = rule === "scope" ? { ...f, module: "core", rule: "" } : f;
-    out.kept.push(out.findings.push({ ...kept, cause, anchor: a }) - 1);
+    out.kept.push(out.findings.push({ ...kept, cause, anchor: a, ...(movedFrom && { movedFrom }) }) - 1);
   }
   return out;
 }

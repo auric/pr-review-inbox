@@ -294,6 +294,32 @@ describe("anchor", () => {
     expect(r.dropped).toEqual([{ ...F({ path: "../x", anchorText: "x" }), reason: "path" }]);
   });
 
+  test("a wrong file: one exact match on a changed line of another changed file moves the finding there", () => {
+    const wrong = F({ path: "src/a.ts", line: 3, anchorText: "const r5 = 50;" });
+    const r = run([wrong, F({ path: "src/nope.ts", line: 2, lineEnd: 4, anchorText: "const a10b = 101;" })]);
+    expect(r.dropped).toEqual([]);
+    expect(r.findings.map((f) => [f.path, f.side, f.line, f.lineEnd, f.anchor.state, f.anchor.line, f.movedFrom])).toEqual([
+      ["src/new-name.ts", "new", 5, null, "exact", 5, { path: "src/a.ts", line: 3 }],
+      ["src/a.ts", "new", 11, null, "exact", 11, { path: "src/nope.ts", line: 2 }],
+    ]);
+    // A finding that its own file anchors gets no mark.
+    expect(run([F({ line: 10, anchorText: "const a10 = 100;" })]).findings[0]?.movedFrom).toBeUndefined();
+  });
+
+  test("a wrong file: two matches, a match on an unchanged line, or a match only in an unchanged file keep the first drop", () => {
+    const drops = run([
+      F({ path: "src/a.ts", line: 3, anchorText: "dup();" }),
+      F({ path: "src/a.ts", line: 3, anchorText: "const r1 = 1;" }),
+      F({ path: "src/nope.ts", line: 3, anchorText: "two();" }),
+    ]);
+    expect(drops.findings).toEqual([]);
+    expect(drops.dropped.map((d) => [d.path, d.reason])).toEqual([
+      ["src/a.ts", "match"],
+      ["src/a.ts", "match"],
+      ["src/nope.ts", "file"],
+    ]);
+  });
+
   test("repoPath normalizes separators and dot parts", () => {
     expect(repoPath("src\\a.ts")).toBe("src/a.ts");
     expect(repoPath("./src//a.ts")).toBe("src/a.ts");

@@ -100,8 +100,8 @@ describe("finding v2 (AC-R14)", () => {
     expect(reviewResult.safeParse({ ...V1_RESULT, findings: [{ ...V1_FINDING, cause: { path: "a" } }] }).success).toBe(false);
   });
 
-  test("the review v2 prompts with the PR context rules ship as prompt version 2.2 (2.1: without them, 2.0: no verify phase)", () => {
-    expect(REVIEW_PROMPT_VERSION).toBe("2.3");
+  test("the review prompts ship as prompt version 2.4 (2.3: no protected categories and no language skip lists)", () => {
+    expect(REVIEW_PROMPT_VERSION).toBe("2.4");
   });
 });
 

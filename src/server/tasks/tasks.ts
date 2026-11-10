@@ -580,13 +580,13 @@ const POINTS = {
 };
 
 // The points that "Fix these too" fixes: the newest own review of a part that waits for its PR, without the points that the
-// verify phase discarded. Empty after the commit of their fix.
+// verify phase discarded or demoted. Empty after the commit of their fix.
 export function openPoints(db: Database, id: number): (TaskPointDto & { payload: FindingPayload })[] {
   const r = db.query(POINTS.review).get({ id }) as { id: number; run: number | null } | null;
   if (!r?.run || db.query(POINTS.fixed).get({ id, after: r.id })) return [];
   return (db.query(POINTS.items).all({ run: r.run }) as { id: number; payload_json: string }[]).flatMap((x) => {
     const p = JSON.parse(x.payload_json) as FindingPayload;
-    if (p.discardedBy === "verify" || mustFixPoint(p)) return [];
+    if (p.discardedBy === "verify" || p.demoted || mustFixPoint(p)) return [];
     return [{ id: x.id, severity: p.severity, path: p.path, line: p.line ?? null, text: p.body, payload: p }];
   });
 }

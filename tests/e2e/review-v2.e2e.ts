@@ -200,6 +200,35 @@ test("a two-phase run: the phase line, the ledger, the fold, the check chip, the
   await expect(log.locator("[data-log-phase]")).toHaveText(["Find", "Check"]);
 });
 
+test("a refuted concurrency finding stays in the Drafts list, last in its group, with the Refuted chip and the check reason (AC-R17)", async ({
+  page,
+}) => {
+  const verify = {
+    ...VERIFY,
+    verdicts: [
+      verdict(1, "refuted", "blocker", "One lock guards the whole loop at the head commit.", "src/cache/flush.ts:2"),
+      verdict(2, "confirmed", "minor", "No finally block releases the lock.", "src/cache/flush.ts:6"),
+      verdict(3, "confirmed", "nit", "The README names no order.", "README.md:1"),
+    ],
+  };
+  await control("claude", { stream: "tree", verify });
+  await connect(page);
+  await start(page);
+  await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
+  await expect(drafts(page)).toHaveCount(2);
+  // The refuted blocker of category Concurrency is not hidden. It comes after the confirmed minor.
+  await expect(drafts(page).nth(0)).toContainText("Release the lock in a finally block.");
+  const low = drafts(page).nth(1);
+  await expect(low).toHaveAttribute("data-demoted", "true");
+  await expect(low.locator("[data-check]")).toHaveText("Refuted");
+  await expect(low).toHaveAccessibleName(/Refuted by the check\. It stays last in its group\./);
+  await low.locator("[data-row-head]").click();
+  await expect(low.locator("[data-check-reason]")).toHaveText(
+    "Check: One lock guards the whole loop at the head commit. (src/cache/flush.ts:2)",
+  );
+  await expect(runRow(page).getByRole("button", { name: /refuted by the check/ })).toHaveCount(0);
+});
+
 test("a volume change keeps the view of an earlier run; the next run shows everything with the Low confidence chip", async ({ page }) => {
   await control("claude", { stream: "tree", verify: VERIFY });
   await connect(page);

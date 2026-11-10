@@ -128,6 +128,13 @@ const SQL = {
   threads: `SELECT json_extract(p.items_json, '$[0].id') AS item, c.thread_resolved AS resolved FROM post p
     JOIN comment c ON c.pr = p.pr AND c.comment_id = p.remote_id AND c.parent_id IS NULL AND c.tombstoned_at IS NULL
     WHERE p.kind = 'inline' AND p.state = 'confirmed' AND p.remote_id IS NOT NULL`,
+  // A posted finding that you withdrew in its thread: you posted the reply of a discuss run with verdict withdrawn. discuss.ts gives
+  // only that reply the judgement settled.
+  withdrawn: `SELECT DISTINCT json_extract(p.items_json, '$[0].id') AS item FROM post p
+    JOIN review_item r ON r.kind = 'reply' AND r.thread = p.remote_id AND r.status = 'posted'
+    JOIN review_run rr ON rr.id = r.run AND rr.pr = p.pr
+    WHERE p.kind = 'inline' AND p.state = 'confirmed' AND p.remote_id IS NOT NULL
+      AND json_extract(r.payload_json, '$.origin') = 'discuss' AND json_extract(r.payload_json, '$.judgement') = 'settled'`,
   items: `SELECT i.id, i.run, i.status, i.path, i.side, i.line, i.line_end, i.body, i.payload_json,
       EXISTS (SELECT 1 FROM review_item c WHERE c.kind = 'finding' AND json_extract(c.payload_json, '$.carried.from') = i.id) AS copied
     FROM review_item i JOIN review_run r ON r.id = i.run
@@ -205,6 +212,9 @@ export type Skipped = {
   commentOtherHead: number;
 };
 
+// The selected items by source, before the conflict rule and carry. withdrawn: posted, then withdrawn in the thread (a trap).
+export type Sources = { posted: number; fixed: number; session: number; withdrawn: number };
+
 export const caseId = (d: Pick<Draft, "pr" | "head" | "base">) => `pr${d.pr}-${d.head.slice(0, 12)}-${d.base.slice(0, 8)}`;
 export const rereviewId = (d: Pick<RereviewDraft, "pr" | "run">) => `pr${d.pr}-rr${d.run}`;
 
@@ -212,7 +222,7 @@ export const rereviewId = (d: Pick<RereviewDraft, "pr" | "run">) => `pr${d.pr}-r
 export function select(
   db: Database,
   me: string,
-): { drafts: Draft[]; skipped: Skipped; rereviews: RereviewDraft[]; rereviewSkipped: RereviewSkipped } {
+): { drafts: Draft[]; skipped: Skipped; sources: Sources; rereviews: RereviewDraft[]; rereviewSkipped: RereviewSkipped } {
   const skipped: Skipped = {
     refuted: 0,
     notYours: 0,
@@ -225,6 +235,7 @@ export function select(
     commentNoLine: 0,
     commentOtherHead: 0,
   };
+  const sources: Sources = { posted: 0, fixed: 0, session: 0, withdrawn: 0 };
   const drafts = new Map<string, Draft>();
   const byRun = new Map<number, Draft>();
   const rrSkipped: RereviewSkipped = { noEarlier: 0, badPayload: 0, missingCommits: 0, emptyCases: 0 };
@@ -283,6 +294,7 @@ export function select(
     for (let next = copyOf.get(at.id); next; next = copyOf.get(at.id)) at = next;
     return at;
   };
+  const withdrawn = new Set((db.query(SQL.withdrawn).all() as { item: number }[]).map((t) => t.item));
   for (const i of items) {
     const d = byRun.get(i.run);
     // A revision of a finding (payload revises) is no finding of its own.
@@ -297,21 +309,34 @@ export function select(
     // A re-review case gets the decisions on the items of its own run.
     const rr = rrByRun.get(i.run);
     const to = rr ? [d, rr] : [d];
-    if (end.status === "posted") {
+    const yours = end.status === "discarded" && end.p.discardedBy !== "verify" && userDiscard(end.p, end.copied === 1);
+    // A fix commit or an accept of the session that wrote the code confirms the finding. Your own discard still wins.
+    const confirmed =
+      end.status !== "posted" && !yours ? (end.p.fixed ? "fixed" : end.p.session?.verdict === "accept" ? "session" : null) : null;
+    if (end.status === "posted" && withdrawn.has(end.id)) {
+      sources.withdrawn++;
+      for (const x of to) x.traps.push({ id: `item-${i.id}`, ...spot, why: `Posted, then withdrawn in its thread: finding ${end.id}.` });
+    } else if (end.status === "posted" || confirmed) {
       const module = end.p.module ?? "core";
       const bug: EvalBug = {
         id: `item-${i.id}`,
         ...spot,
         severityMin: end.p.severity,
         module: (MODULE_IDS as readonly string[]).includes(module) ? (module as EvalBug["module"]) : "core",
-        note: `Posted finding ${end.id}.`,
+        note:
+          confirmed === "fixed"
+            ? `Finding ${end.id} covered by a fix commit.`
+            : confirmed === "session"
+              ? `Finding ${end.id} accepted by your session.`
+              : `Posted finding ${end.id}.`,
       };
+      sources[confirmed ?? "posted"]++;
       for (const x of to) x.bugs.push(bug);
     } else if (end.status !== "discarded") skipped.undecided++;
     // The check is under test, so its verdict is no truth. A restore removes discardedBy.
     else if (end.p.discardedBy === "verify") skipped.refuted++;
-    // A fix commit, a closing re-review, or a session reject discarded it, not you.
-    else if (!userDiscard(end.p, end.copied === 1)) skipped.notYours++;
+    // A closing re-review or a session reject discarded it, not you.
+    else if (!yours) skipped.notYours++;
     else if (code && TRAP_CODES.has(code)) {
       for (const x of to) x.traps.push({ id: `item-${i.id}`, ...spot, why: `Discarded as ${code}: finding ${end.id}.` });
     } else
@@ -391,7 +416,7 @@ export function select(
     const apart = <T extends Spot>(list: T[], other: Spot[]) => list.filter((x) => !other.some((y) => hit(x, y)));
     return { ...rr, bugs: apart(rr.bugs, rr.traps), traps: apart(rr.traps, rr.bugs) };
   });
-  return { drafts: [...drafts.values()], skipped, rereviews, rereviewSkipped: rrSkipped };
+  return { drafts: [...drafts.values()], skipped, sources, rereviews, rereviewSkipped: rrSkipped };
 }
 
 // ---------- Carry ----------
@@ -440,6 +465,7 @@ export type Manifest = {
   fingerprint: string;
   counts: { cases: number; runs: number; repositories: number; bugs: number; traps: number; extras: number; human: number };
   skipped: Skipped;
+  sources: Sources;
   // The items that a case got from an earlier head of the same PR, and those that stayed behind (carry). Bugs and traps above include
   // the carried items.
   carried: Carry;
@@ -618,6 +644,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
         human: total("human"),
       },
       skipped,
+      sources: sel.sources,
       carried,
       rereview: {
         fingerprint: setFingerprint(rrWritten),
@@ -639,10 +666,11 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
 }
 
 export function report(m: Manifest): string {
-  const { counts: n, skipped: s, rereview: r } = m;
+  const { counts: n, skipped: s, sources: o, rereview: r } = m;
   const lines = [
     `Local eval set: ${n.cases} cases from ${n.runs} review runs in ${n.repositories} repositories.`,
-    `Must find: ${n.bugs} posted findings and ${n.human} of your own comments. Must not raise: ${n.traps}. Neutral: ${n.extras}.`,
+    `Must find: ${n.bugs} findings and ${n.human} of your own comments. Must not raise: ${n.traps}. Neutral: ${n.extras}.`,
+    `Sources before carry: ${o.posted} posted, ${o.fixed} covered by a fix commit, ${o.session} accepted by your session, ${o.withdrawn} posted and then withdrawn in the thread (must not raise).`,
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
     `Carried from earlier heads of the same PR: ${m.carried.carried}. Not carried: ${m.carried.changed} with changed lines, ${m.carried.gone} in a deleted file, ${m.carried.overlap} on an item of the later head.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
@@ -651,7 +679,7 @@ export function report(m: Manifest): string {
   ];
   if (n.cases < MINIMUM.cases || n.bugs < MINIMUM.bugs || n.traps < MINIMUM.traps)
     lines.push(
-      `The set is below the recommended minimum of ${MINIMUM.cases} cases, ${MINIMUM.bugs} posted findings, and ${MINIMUM.traps} must-not-raise findings.`,
+      `The set is below the recommended minimum of ${MINIMUM.cases} cases, ${MINIMUM.bugs} must-find findings, and ${MINIMUM.traps} must-not-raise findings.`,
     );
   return lines.join("\n");
 }

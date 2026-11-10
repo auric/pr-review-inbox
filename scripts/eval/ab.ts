@@ -4,7 +4,7 @@
 // Gate U-V1 in one command (docs/plans/review-v3.md, docs/eval/local.md): build the local set from the data folder of the app, then
 // run the shipped profile (baseline) and the candidate on it, for the review cases and the re-review cases, and print one table each.
 // Usage: bun run eval:ab -- [--repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--db f] [--cache d] [--out d]
-//   [--effort e] [--candidate-effort e] [--candidate-reviewer-effort e] [--large] [--user slug] [--results d] [--baseline d]
+//   [--effort e] [--candidate-effort e] [--candidate-reviewer-effort e] [--candidate-verifier on|off] [--large] [--user slug] [--results d] [--baseline d]
 //   [--runner <command> <args...>]
 // Without --runner, the runs use the claude CLI on PATH. Exit codes: 0 done, 1 a build error or a failed run, 2 a usage error.
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -16,7 +16,7 @@ import { delegation, type Profile, profileRevision, promptVersion } from "../../
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git } from "../../src/server/review/git";
 import { diffArgs } from "../../src/server/review/workspace";
-import { EFFORTS, type Variant } from "../../src/shared/dto";
+import { EFFORTS, type Variant, VERIFIER_MODES } from "../../src/shared/dto";
 import { bundleRepo, type EvalCase, loadCases, localDir, setDir, setFingerprint } from "./cases";
 import { compareText, readResult, refusal, suiteDelta } from "./compare";
 import { main as buildMain, type Manifest } from "./local";
@@ -24,13 +24,14 @@ import { checkoutState, evalProfile, parseOptions, main as runMain } from "./run
 import { type EvalResult, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--large] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
+export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--large] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
 --baseline: the folder of an earlier eval:ab run. Its review-baseline/ and rereview-baseline/ results replace the baseline runs. A mode without its folder runs the baseline.
 --candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. An empty value adds nothing.
 --effort: the effort of the baseline and candidate runs. Default: the effort of the shipped profile.
 --candidate-effort: the effort of the candidate runs. Default: the effort of the baseline.
 --candidate-reviewer-effort: the rl-reviewer effort of the candidate runs. Default: the rl-reviewer effort of the shipped profile.
+--candidate-verifier: the verify mode of the candidate runs. Default: the verify mode of the shipped profile.
 --large: run only the review cases that give the baseline the rl-reviewer agent. The re-review cases do not run.
 --runner runs the given CLI instead of the claude CLI on PATH and must come last.`;
 const DEFAULT_VARIANTS = "order,rules2";
@@ -49,6 +50,8 @@ export type AbOptions = {
   effort: string | null;
   // null: the candidate runs with the rl-reviewer effort of the shipped profile.
   reviewerEffort: string | null;
+  // null: the candidate keeps the verify mode of the shipped profile. run.ts --verifier checks the value.
+  verifier: string | null;
   // docs/plans/review-v3.md WP-V13: only the review cases where delegation() of the baseline profile is not null.
   large: boolean;
   build: string[];
@@ -77,6 +80,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
         effort: { type: "string" },
         "candidate-effort": { type: "string" },
         "candidate-reviewer-effort": { type: "string" },
+        "candidate-verifier": { type: "string" },
         large: { type: "boolean", default: false },
         db: { type: "string" },
         cache: { type: "string" },
@@ -100,6 +104,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     baseEffort: str("effort") ?? null,
     effort: str("candidate-effort") ?? null,
     reviewerEffort: str("candidate-reviewer-effort") ?? null,
+    verifier: str("candidate-verifier") ?? null,
     large: v.large === true,
     build,
     results: results === undefined ? null : resolve(results),
@@ -146,6 +151,7 @@ export function runArgs(mode: Mode, side: "baseline" | "candidate", o: AbOptions
   const effort = (side === "candidate" ? o.effort : null) ?? o.baseEffort;
   if (effort !== null) args.push("--effort", effort);
   if (side === "candidate" && o.reviewerEffort !== null) args.push("--reviewer-effort", o.reviewerEffort);
+  if (side === "candidate" && o.verifier !== null) args.push("--verifier", o.verifier);
   args.push("--ordinals");
   if (out) args.push("--out", out);
   args.push(...(o.runner ? ["--runner", ...o.runner] : ["--real"]));

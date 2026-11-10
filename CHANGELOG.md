@@ -3,6 +3,11 @@
 ## Unreleased
 
 - Build a Jira task: a commit now keeps the line endings of each file (LF or CRLF), so a file that Claude wrote with other line endings no longer shows every line as changed. New files follow the repository's `.gitattributes`. The line limit no longer counts a change of line endings only, so a task that stopped at the line limit for this reason gets the right count when it goes on. When a part already holds commits that changed only line endings, the app adds one commit "Match the line endings of the base" before the next size check, push, or PR, so the PR shows only real changes. It never rewrites or force-pushes your branch, and it leaves a PR that the app did not create alone.
+- Review profiles have a new choice under Check step: "Refuted findings". Hide keeps today's behavior. Show last keeps a refuted finding in the Drafts list, last in its group, with the chip "Refuted" and the reason of the check.
+- A refuted finding about security, concurrency, resource handling, or a behavior change now always stays in the Drafts list, last in its group. Before, the check could hide it.
+- Copy to all profiles now also copies the refuted findings choice.
+- A finding that quotes code from another changed file now moves to that file when the code is there exactly once. The card says "Moved from <path>:<line>". Before, the app dropped the finding.
+- The C++, C, and Python checklists now name points not to report, such as linter warnings, formatting, generated files, and common false alarms of each language.
 - Build a Jira task: when two sub-tasks build at the same time and both need you, the app now keeps both reasons. Before, the reason of the second sub-task was dropped, and Claude ran its step again after Resume. The sub-task list shows each reason with "Who acts: You", and the Tasks row says "Needs you: a question, and 1 more".
 - The Questions form now shows the questions of all sub-tasks with the sub-task name, and one "Send answers" answers them all. When you act on the first reason, the next one shows, and the build goes on only when no reason is left.
 - A sub-task whose reason waits says "Act on ABC-13 (1 of 2) first." A sub-task that only waits says "ABC-14 (2 of 2) waits until you act on ABC-13 (1 of 2)." Tell Claude and "Run setup again" wait until you act on each reason.

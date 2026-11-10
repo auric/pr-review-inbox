@@ -14,6 +14,7 @@ import {
   type ProfileInput,
   type ReviewerMode,
   type SettingValue,
+  type VerifierOutcome,
 } from "../../shared/dto";
 
 // The inline limits of profileInput in src/shared/dto.ts. tests/ui/profiles.test.ts pins them.
@@ -68,7 +69,8 @@ export type Draft = {
   // docs/plans/review-v2/spec.md section 1.2. verifier "" model: the profile model. "" effort: medium.
   modules: ProfileInput["modules"];
   volume: ProfileInput["volume"];
-  verifier: { mode: ProfileInput["verifier"]["mode"]; model: string; effort: Effort | "" };
+  // outcome: what a refuted finding does (spec.md section 1.8).
+  verifier: { mode: ProfileInput["verifier"]["mode"]; model: string; effort: Effort | ""; outcome: VerifierOutcome };
   // docs/plans/review-v3.md WP-V2: eval switches. The editor has no control for them, and a save keeps them.
   variants: ProfileInput["variants"];
 };
@@ -83,7 +85,12 @@ export const toDrafts = (profiles: ProfileInput[]): Draft[] =>
     model: p.model ?? "",
     effort: p.effort ?? "",
     reviewer: { model: p.reviewer.model ?? "", effort: p.reviewer.effort ?? "", mode: p.reviewer.mode },
-    verifier: { mode: p.verifier.mode, model: p.verifier.model ?? "", effort: p.verifier.effort ?? "" },
+    verifier: {
+      mode: p.verifier.mode,
+      model: p.verifier.model ?? "",
+      effort: p.verifier.effort ?? "",
+      outcome: p.verifier.outcome ?? "hide",
+    },
   }));
 
 // The profileInput ID pattern is [a-z0-9-]{1,40}.
@@ -130,7 +137,13 @@ export function toProfiles(list: Draft[]): ProfileInput[] {
       reviewer: { model: d.reviewer.model.trim() || null, effort: d.reviewer.effort || null, mode: d.reviewer.mode },
       modules: d.modules,
       volume: d.volume,
-      verifier: { mode: d.verifier.mode, model: d.verifier.model.trim() || null, effort: d.verifier.effort || null },
+      verifier: {
+        mode: d.verifier.mode,
+        model: d.verifier.model.trim() || null,
+        effort: d.verifier.effort || null,
+        // The server drops hide, so an unchanged profile stays equal to its saved form.
+        ...(d.verifier.outcome === "demote" && { outcome: "demote" as const }),
+      },
       variants: d.variants,
     };
   });
@@ -159,6 +172,7 @@ const KEYS = [
   "modules",
   "volume",
   "verifier",
+  "outcome",
   "variants",
 ];
 export const sameProfiles = (a: ProfileInput[], b: ProfileInput[]) => JSON.stringify(a, KEYS) === JSON.stringify(b, KEYS);
@@ -332,7 +346,7 @@ export function valueText(field: ShippedField, v: ProfileInput, names: { module:
     case "reviewer":
       return `${mode(v.reviewer.mode)}, model ${flag(v.reviewer.model, "same as the main run")}, effort ${flag(v.reviewer.effort, "same as the main run")}`;
     case "verifier":
-      return `${mode(v.verifier.mode)}, model ${flag(v.verifier.model, "same as the main run")}, effort ${flag(v.verifier.effort, "medium")}`;
+      return `${mode(v.verifier.mode)}, model ${flag(v.verifier.model, "same as the main run")}, effort ${flag(v.verifier.effort, "medium")}, refuted findings ${v.verifier.outcome === "demote" ? "show last" : "hide"}`;
     case "skills":
     case "alwaysSkills":
       return list(v[field]);
@@ -346,16 +360,17 @@ export function valueText(field: ShippedField, v: ProfileInput, names: { module:
 // The text of the "no flag" choice of an agent picker. An agent inherits the model and the effort of the main run.
 export const sameAsMain = (v: string | null | undefined) => (v ? `Same as the main run (${v})` : "Same as the main run");
 
-const SETUP_KEYS = ["skills", "alwaysSkills", "mcp", "server", "tools"];
-// The skills, the Always use marks, and the MCP picks of a profile. A mark needs its skill (profileInput).
-const setupOf = (d: Draft): Pick<Draft, "skills" | "alwaysSkills" | "mcp"> => ({
+const SETUP_KEYS = ["skills", "alwaysSkills", "mcp", "server", "tools", "outcome"];
+// The skills, the Always use marks, the MCP picks, and the refuted findings choice of a profile. A mark needs its skill (profileInput).
+const setupOf = (d: Draft) => ({
   skills: [...d.skills],
   alwaysSkills: d.alwaysSkills.filter((id) => d.skills.includes(id)),
   mcp: d.mcp.map((m) => ({ server: m.server, tools: [...m.tools] })),
+  outcome: d.verifier.outcome,
 });
 const setupText = (d: Draft) => JSON.stringify(setupOf(d), SETUP_KEYS);
 
-// The indexes of the other profiles whose skills or MCP picks differ from those of profile i.
+// The indexes of the other profiles whose skills, MCP picks, or refuted findings choice differ from those of profile i.
 export function copyTargets(list: Draft[], i: number): number[] {
   const from = list[i];
   if (!from) return [];
@@ -389,7 +404,11 @@ export function change(list: Draft[], c: Change): Draft[] {
       const from = list[c.i];
       const targets = copyTargets(list, c.i);
       if (!from || !targets.length) return list;
-      return list.map((d, j) => (targets.includes(j) ? { ...d, ...setupOf(from) } : d));
+      return list.map((d, j) => {
+        if (!targets.includes(j)) return d;
+        const { outcome, ...setup } = setupOf(from);
+        return { ...d, ...setup, verifier: { ...d.verifier, outcome } };
+      });
     }
     case "duplicate": {
       const from = list[c.i];
@@ -437,6 +456,7 @@ export type Part =
   | "verifier-model"
   | "verifier-model-id"
   | "verifier-effort"
+  | "verifier-outcome"
   | "setup"
   | "skills"
   | "skills-label"
@@ -524,8 +544,11 @@ export const profileLabel = (d: Draft, i: number) => d.name.trim() || `profile $
 
 const count = (n: number, word: string) => (n ? `${n} ${word}${n === 1 ? "" : "s"}` : `no ${word}s`);
 export const setupSummary = (d: Draft, label: string) =>
-  `${label} has ${count(d.skills.length, "skill")} and ${count(d.mcp.length, "MCP server")}.`;
-export const copiedText = (label: string, n: number) => `Saved. ${count(n, "profile")} got the skills and MCP servers of ${label}.`;
+  `${label} has ${count(d.skills.length, "skill")} and ${count(d.mcp.length, "MCP server")}. Refuted findings: ${OUTCOME_NAME[d.verifier.outcome]}.`;
+export const copiedText = (label: string, n: number) =>
+  `Saved. ${count(n, "profile")} got the skills, MCP servers, and refuted findings choice of ${label}.`;
+// spec.md section 1.8: the names of the verifier outcomes in the editor.
+export const OUTCOME_NAME: Record<VerifierOutcome, string> = { hide: "Hide", demote: "Show last" };
 
 // The select value of a model text: "" for the default, one of the runner aliases, or "other" for any other ID.
 export const modelChoice = (text: string, aliases: string[]) => {

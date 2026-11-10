@@ -634,11 +634,21 @@ export function draftGroups(ds: ReviewItemDto[], summary: RunSummary | null | un
   const volume = summary?.volume;
   const g: DraftGroups = { main: [], fold: [], hidden: [], foldName: volume ? FOLD_NAME[volume] : null, checked: !!summary?.verify };
   for (const d of ds) g[displayGroup(d.payload as FindingPayload, volume)].push(d);
+  // spec.md section 1.8: a demoted finding goes last in its group.
+  g.main = [...g.main.filter((d) => !isDemoted(d)), ...g.main.filter(isDemoted)];
+  g.fold = [...g.fold.filter((d) => !isDemoted(d)), ...g.fold.filter(isDemoted)];
   return g;
 }
 
+// spec.md section 1.8: a refuted finding that the profile or its class keeps in the list.
+export const isDemoted = (it: ReviewItemDto) => {
+  const p = it.payload as FindingPayload;
+  return it.kind === "finding" && p.demoted === true && p.verify?.verdict === "refuted" && !p.discardedBy;
+};
+
 // The check chip of a finding card. null: a run from before review v2.
-export const checkChip = (it: ReviewItemDto, checked: boolean) => (checked ? CHECK_LABEL[checkOf(it.payload as FindingPayload)] : null);
+export const checkChip = (it: ReviewItemDto, checked: boolean) =>
+  !checked ? null : isDemoted(it) ? "Refuted" : CHECK_LABEL[checkOf(it.payload as FindingPayload)];
 
 // "Check: <reason> (path:line)". null: no verdict.
 export function checkText(it: ReviewItemDto): string | null {
@@ -651,6 +661,7 @@ export function checkText(it: ReviewItemDto): string | null {
 export function restoredNote(it: ReviewItemDto): string | null {
   const p = it.payload as FindingPayload;
   if (it.kind !== "finding" || p.discardedBy || it.status === "discarded") return null;
+  if (isDemoted(it)) return "Refuted by the check. It stays last in its group.";
   const v = p.verify?.verdict;
   return v === "refuted"
     ? "Refuted by the check. You restored it."
@@ -744,6 +755,7 @@ export function anchorNote(it: ReviewItemDto): string | null {
   if (a.state === "outside") return `Outside the diff. Posts as a general comment with a link to ${base(a.path)}:${lineText(a)}.`;
   if (a.line !== p.anchor.line || a.lineEnd !== p.anchor.lineEnd) return `You moved it from line ${lineText(p.anchor)}.`;
   if (a.state === "moved") return `Moved from line ${p.line}: the quoted code is on line ${lineText(a)}.`;
+  if (p.movedFrom) return `Moved from ${p.movedFrom.path}:${p.movedFrom.line}: the quoted code is only in this file.`;
   return null;
 }
 

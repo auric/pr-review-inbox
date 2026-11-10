@@ -93,6 +93,7 @@ type SavedProfile = {
   model?: string | null;
   effort?: string | null;
   reviewer?: unknown;
+  verifier: { outcome?: string };
   languageChecks?: boolean;
 };
 async function settingsApi(request: APIRequestContext) {
@@ -458,7 +459,7 @@ test("an MCP server picked in the dialog gets only its ticked tools in the run",
   await expect(runRow(page)).toHaveAttribute("data-run-state", "cancelled", { timeout: RUN_MS });
 });
 
-test("Copy to all profiles asks first, then gives every profile the skills and MCP servers in one save that a reload keeps", async ({
+test("Copy to all profiles asks first, then gives every profile the skills, MCP servers, and refuted findings choice in one save that a reload keeps", async ({
   page,
   request,
 }) => {
@@ -486,14 +487,21 @@ test("Copy to all profiles asks first, then gives every profile the skills and M
   await servers.getByRole("button", { name: "Done" }).click();
   await saved(page);
   await expect.poll(async () => (await settingsApi(request)).profiles[0]).toMatchObject(SETUP);
+  const outcome = page.getByRole("radiogroup", { name: "Refuted findings of profile 1" });
+  await expect(outcome.getByRole("radio", { name: "Hide" })).toBeChecked();
+  await outcome.getByText("Show last", { exact: true }).click();
+  await expect(outcome.getByRole("radio", { name: "Show last" })).toBeChecked();
+  await expect(page.getByText("A refuted finding stays last in its group, with the reason of the check.", { exact: false })).toBeVisible();
+  await saved(page);
+  await expect.poll(async () => (await settingsApi(request)).profiles[0]?.verifier.outcome).toBe("demote");
 
   // The dialog names each profile that changes. Cancel changes nothing and gives the focus back.
   const copy = page.getByRole("button", { name: "Copy to all profiles from profile 1" });
-  await expect(copy).toHaveAccessibleDescription("Gives the other profiles these skills and MCP servers.");
+  await expect(copy).toHaveAccessibleDescription("Gives the other profiles these skills, MCP servers, and refuted findings choice.");
   await copy.click();
-  const ask = page.getByRole("dialog", { name: "Copy the skills and MCP servers of Review?" });
+  const ask = page.getByRole("dialog", { name: "Copy the skills, MCP servers, and refuted findings choice of Review?" });
   await expect(ask).toContainText(
-    "Review has 2 skills and 1 MCP server. Each profile in the list gets the same skills, Always use marks, MCP servers, and tools. This replaces its current skills and MCP servers.",
+    "Review has 2 skills and 1 MCP server. Refuted findings: Show last. Each profile in the list gets the same skills, Always use marks, MCP servers, tools, and refuted findings choice. This replaces its current choices.",
   );
   await expect(ask.getByRole("list", { name: "Profiles that change" }).getByRole("listitem")).toHaveText([
     "Over-engineering",
@@ -509,8 +517,9 @@ test("Copy to all profiles asks first, then gives every profile the skills and M
   await copy.click();
   await ask.getByRole("button", { name: "Copy to 3 profiles" }).click();
   await expect(ask).toHaveCount(0);
-  await expect(status(page)).toHaveText("Saved. 3 profiles got the skills and MCP servers of Review.");
+  await expect(status(page)).toHaveText("Saved. 3 profiles got the skills, MCP servers, and refuted findings choice of Review.");
   expect(puts.length - before).toBe(1);
+  expect((await settingsApi(request)).profiles.map((p) => p.verifier.outcome)).toEqual(["demote", "demote", "demote", "demote"]);
   expect((await settingsApi(request)).profiles.map((p) => ({ skills: p.skills, alwaysSkills: p.alwaysSkills, mcp: p.mcp }))).toEqual([
     SETUP,
     SETUP,
@@ -531,8 +540,8 @@ test("Copy to all profiles asks first, then gives every profile the skills and M
   }
   // Nothing left to copy: the dialog says so and changes nothing.
   await page.getByRole("button", { name: "Copy to all profiles from profile 2" }).click();
-  const same = page.getByRole("dialog", { name: "Copy the skills and MCP servers of Over-engineering?" });
-  await expect(same).toContainText("The other profiles have the same skills and MCP servers.");
+  const same = page.getByRole("dialog", { name: "Copy the skills, MCP servers, and refuted findings choice of Over-engineering?" });
+  await expect(same).toContainText("The other profiles have the same skills, MCP servers, and refuted findings choice.");
   await same.getByRole("button", { name: "Close", exact: true }).first().click();
   await expect(same).toHaveCount(0);
 });

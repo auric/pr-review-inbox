@@ -4,7 +4,15 @@
 import { describe, expect, test } from "bun:test";
 import { RETIRED_PROFILES, rubric } from "../../src/server/review/catalog";
 import { parseDiff } from "../../src/server/review/diffmap";
-import { CHECKLISTS, LANGUAGE_INTRO, LANGUAGES, languageLines, languagesOf, withLanguages } from "../../src/server/review/languages";
+import {
+  CHECKLISTS,
+  LANGUAGE_INTRO,
+  LANGUAGES,
+  languageLines,
+  languagesOf,
+  SKIP_COMMON,
+  withLanguages,
+} from "../../src/server/review/languages";
 import { DEFAULT_VERIFIER, VOLUMES } from "../../src/shared/dto";
 
 const file = (path: string | null, oldPath: string | null = path, binary = false) => ({
@@ -94,7 +102,8 @@ describe("checklist text", () => {
     // The category before the colon and the level in brackets are tags, not words of the sentence.
     const prose = items.map((i) => i.replace(/^[a-z-]+: /, "").replace(/ \[\w+\]$/, ""));
     const rubrics = VOLUMES.flatMap((volume) => rubric({ volume, verifier: DEFAULT_VERIFIER }));
-    const texts = [...prose, ...LANGUAGE_INTRO, ...rubrics, ...over.split("\n")];
+    const skips = Object.values(CHECKLISTS).flatMap((l) => l.skip as readonly string[]);
+    const texts = [...prose, ...skips, SKIP_COMMON, ...LANGUAGE_INTRO, ...rubrics, ...over.split("\n")];
     expect(texts.flatMap(longSentences)).toEqual([]);
   });
 });
@@ -107,13 +116,23 @@ describe("agent prompt", () => {
     expect(withLanguages(agent, [])).toBe(agent);
   });
 
-  test("the lines are the intro, then one titled list per language", () => {
+  test("each language has a skip list of one to three items", () => {
+    for (const l of Object.values(CHECKLISTS)) {
+      expect(l.skip.length).toBeGreaterThanOrEqual(1);
+      expect(l.skip.length).toBeLessThanOrEqual(3);
+    }
+  });
+
+  test("the lines are the intro, one titled list and its skip list per language, then the common skip line", () => {
     const lines = languageLines(["c", "python"]);
     expect(lines.slice(0, LANGUAGE_INTRO.length)).toEqual(LANGUAGE_INTRO);
     expect(lines).toContain("C list:");
     expect(lines).toContain("Python list:");
+    expect(lines).toContain("Do not report in C:");
     expect(lines).not.toContain("C++ list:");
-    expect(lines.filter((l) => l.startsWith("- "))).toHaveLength(CHECKLISTS.c.items.length + CHECKLISTS.python.items.length);
+    expect(lines.at(-1)).toBe(SKIP_COMMON);
+    const n = (l: { items: readonly string[]; skip: readonly string[] }) => l.items.length + l.skip.length;
+    expect(lines.filter((l) => l.startsWith("- "))).toHaveLength(n(CHECKLISTS.c) + n(CHECKLISTS.python));
     expect(withLanguages(agent, ["c", "python"])).toEqual({ description: "D", prompt: ["P", ...lines].join("\n") });
   });
 });

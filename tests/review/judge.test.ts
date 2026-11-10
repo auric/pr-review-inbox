@@ -13,6 +13,7 @@ import {
   effectiveVerdicts,
   type Found,
   markCopy,
+  neverHidden,
   type SettleInput,
   settle,
   verdictsOf,
@@ -363,6 +364,41 @@ describe("settle", () => {
     expect(off.usage).toEqual(FIND.usage);
   });
 
+  test("verifier outcome demote keeps a refuted finding in the list; a protected class never hides; a duplicate always hides", () => {
+    const check = outcome({
+      verdicts: [V(1, "refuted"), V(2, "refuted"), V(3, "duplicate", { duplicateOf: 1 }), V(4, "refuted")],
+      coverage: NONE,
+    });
+    const cands = [
+      C(1, {}, { group: 1 }),
+      C(2, { module: "security" }),
+      C(3, { category: "races" }, { group: 1 }),
+      C(4, { category: " Resource " }),
+    ];
+    const hide = payloads(settle(found(cands), input({ check: run(check, 4), written: 4 })).result?.items ?? []);
+    expect(hide.map((p) => [p.discardedBy ?? null, p.demoted ?? null])).toEqual([
+      ["verify", null],
+      [null, true],
+      ["verify", null],
+      [null, true],
+    ]);
+    const demote = payloads(settle(found(cands), input({ check: run(check, 4), written: 4, demote: true })).result?.items ?? []);
+    expect(demote.map((p) => [p.discardedBy ?? null, p.demoted ?? null, p.verify?.verdict])).toEqual([
+      [null, true, "refuted"],
+      [null, true, "refuted"],
+      ["verify", null, "duplicate"],
+      [null, true, "refuted"],
+    ]);
+  });
+
+  test("the classes that never hide come from the module or the category, and nothing else", () => {
+    for (const module of ["security", "concurrency", "api"]) expect(neverHidden({ module, category: "x" })).toBe(true);
+    for (const category of ["security", "Concurrency", "resource", "behavior", "races", "sql", "ownership", "abi"])
+      expect(neverHidden({ module: "core", category })).toBe(true);
+    for (const category of ["Correctness", "logic", "performance", "delete"]) expect(neverHidden({ module: "core", category })).toBe(false);
+    expect(neverHidden({ module: "failures", category: "error handling" })).toBe(false);
+  });
+
   test("addUsage sums the number keys of tokens and keeps one side when the other is null", () => {
     const a = { costUsd: 1, turns: 1, durationMs: 1, tokens: { input_tokens: 1, cache: { x: 1 }, service_tier: "standard" } };
     const b = { costUsd: 2, turns: 2, durationMs: 2, tokens: { input_tokens: 2, output_tokens: 3 } };
@@ -425,6 +461,13 @@ describe("carried copies (spec.md section 1.9)", () => {
     }
     const it = copy({});
     expect(markCopy(it, mark({ verify: undefined }))).toBe(it);
+  });
+
+  test("a demoted copy stays new with its mark, and a later confirmed verdict removes the mark", () => {
+    const kept = markCopy(copy({}), mark({ discard: false, demoted: true }));
+    expect([kept.status, read(kept).demoted, read(kept).discardedBy]).toEqual(["new", true, undefined]);
+    const later = markCopy(kept, mark({ discard: false, verify: { ...verify, verdict: "confirmed" } }));
+    expect([later.status, read(later).demoted, read(later).verify?.verdict]).toEqual(["new", undefined, "confirmed"]);
   });
 });
 

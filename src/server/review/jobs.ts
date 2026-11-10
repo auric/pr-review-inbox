@@ -1043,7 +1043,17 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       mcpServers,
     });
     if ("status" in v) return v;
-    return noted(settle(found, { volume: profile.volume, find, check: v.check, verify: v.verify, written: v.written, servers }));
+    return noted(
+      settle(found, {
+        volume: profile.volume,
+        find,
+        check: v.check,
+        verify: v.verify,
+        written: v.written,
+        servers,
+        demote: profile.verifier.outcome === "demote",
+      }),
+    );
   }
 
   // The skills in the run folder (review, re-review, and every task step). dest: the skills folder. root: dest from the run cwd.
@@ -1650,7 +1660,17 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       mcpServers,
     });
     if ("status" in v) return v;
-    return noted(settle(found, { volume: profile.volume, find, check: v.check, verify: v.verify, written: v.written, servers }));
+    return noted(
+      settle(found, {
+        volume: profile.volume,
+        find,
+        check: v.check,
+        verify: v.verify,
+        written: v.written,
+        servers,
+        demote: profile.verifier.outcome === "demote",
+      }),
+    );
   }
 
   // The items of a task review run with the item that each duplicate verdict names (spec.md section 1.8).

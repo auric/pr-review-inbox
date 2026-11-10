@@ -314,10 +314,32 @@ describe("profile editor model", () => {
       change(change(copied, { act: "edit", i: 0, patch: { skills: [], alwaysSkills: [], mcp: [] } }), { act: "copy", i: 0 }),
     );
     for (const t of cleared) expect(t).toMatchObject({ skills: [], alwaysSkills: [], mcp: [] });
-    expect(setupSummary(copied[0] as Draft, "General")).toBe("General has 2 skills and 2 MCP servers.");
-    expect(setupSummary(toDrafts([p("x", "X", { skills: ["a"] })])[0] as Draft, "X")).toBe("X has 1 skill and no MCP servers.");
-    expect(copiedText("General", 1)).toBe("Saved. 1 profile got the skills and MCP servers of General.");
-    expect(copiedText("General", 3)).toBe("Saved. 3 profiles got the skills and MCP servers of General.");
+    expect(setupSummary(copied[0] as Draft, "General")).toBe("General has 2 skills and 2 MCP servers. Refuted findings: Hide.");
+    expect(setupSummary(toDrafts([p("x", "X", { skills: ["a"] })])[0] as Draft, "X")).toBe(
+      "X has 1 skill and no MCP servers. Refuted findings: Hide.",
+    );
+    expect(copiedText("General", 1)).toBe("Saved. 1 profile got the skills, MCP servers, and refuted findings choice of General.");
+    expect(copiedText("General", 3)).toBe("Saved. 3 profiles got the skills, MCP servers, and refuted findings choice of General.");
+  });
+
+  test("the refuted findings choice: hide is the default and saves as no key; copy gives demote to the others", () => {
+    const d = toDrafts([p("general", "General"), p("security", "Security", { verifier: { mode: "off", model: "m", effort: "high" } })]);
+    expect(d[0]?.verifier.outcome).toBe("hide");
+    expect(toProfiles(d)[0]?.verifier).toEqual({ mode: "on", model: null, effort: null });
+    const demote = change(d, { act: "edit", i: 0, patch: { verifier: { ...(d[0] as Draft).verifier, outcome: "demote" } } });
+    expect(toProfiles(demote)[0]?.verifier).toEqual({ mode: "on", model: null, effort: null, outcome: "demote" });
+    expect(copyTargets(demote, 0)).toEqual([1]);
+    const copied = change(demote, { act: "copy", i: 0 });
+    // Only the outcome moves. The mode, model, and effort of the target stay.
+    expect(toProfiles(copied)[1]?.verifier).toEqual({ mode: "off", model: "m", effort: "high", outcome: "demote" });
+    expect(setupSummary(copied[1] as Draft, "Security")).toBe("Security has no skills and no MCP servers. Refuted findings: Show last.");
+    expect(profileList.safeParse(toProfiles(copied)).success).toBe(true);
+    expect(profileList.parse(toProfiles(d))[0]?.verifier.outcome).toBeUndefined();
+    expect(profileList.parse([{ ...toProfiles(d)[0], verifier: { mode: "on", outcome: "hide" } }])[0]?.verifier).toEqual({
+      mode: "on",
+      model: null,
+      effort: null,
+    });
   });
 
   test("the limits match the shared request schema", () => {
@@ -532,7 +554,7 @@ describe("shipped profile edits and Duplicate", () => {
     expect(valueText("modules", shipped, names)).toBe("SECURITY");
     expect(valueText("model", shipped, names)).toBe("Use my default");
     expect(valueText("reviewer", shipped, names)).toBe("Auto, model same as the main run, effort high");
-    expect(valueText("verifier", shipped, names)).toBe("On, model same as the main run, effort medium");
+    expect(valueText("verifier", shipped, names)).toBe("On, model same as the main run, effort medium, refuted findings hide");
     expect(valueText("mcp", { ...shipped, mcp: [{ server: "docs", tools: ["a", "b"] }] }, names)).toBe("docs (a, b)");
     expect(valueText("skills", shipped, names)).toBe("None");
   });
