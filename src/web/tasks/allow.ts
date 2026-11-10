@@ -59,13 +59,15 @@ export const shellText = (mode: ShellMode, n: number, checks = 0) =>
 
 export const MODE_TEXT: Record<ShellMode, string> = { allowlist: "Allowlist", any: "Most commands", unrestricted: "Unrestricted" };
 
-// spec.md section 6.21.8: the line under the mode switch names what the mode blocks (src/server/tasks/shell.ts shellSettings).
+// spec.md section 6.21.8: the line under the mode switch names what the mode blocks (src/server/tasks/shell.ts shellSettings). The deny
+// rules match the command text only (Gate B34), so the git sentence names the check of spec.md section 6.8.
+export const GIT_CHECK = "A command such as bash -c can still run git. After each step, the app checks the git state and restores it.";
 const ANY_BLOCKS = [...NETWORK_TOOLS.filter((t) => !ANY_LIFTS.includes(t)), ...ANY_LIFTS].join(", ");
 export const modeLine = (mode: ShellMode, n: ShellNames) =>
   ({
     allowlist: `${n.runner} runs only the commands that match a pattern of this list. grep, rg, and read-only commands such as ls and cat also run. ${n.runner} cannot run cd or read files outside the folder of the step.`,
-    any: `${n.runner} runs every command, except these: git, the ${n.forge} and ${n.tracker} hosts, ${ANY_BLOCKS}, powershell, pwsh, and the password and key store tools. ${n.runner} also cannot read the app data or your ssh keys. A pattern for ssh in this list lets every ssh command run. The list applies again when you switch back.`,
-    unrestricted: `${n.runner} runs every command, except these: git and commands that name the ${n.forge} or ${n.tracker} host. ${n.runner} can read and write any file that you can, also your keys and the app data. The list applies again when you switch back.`,
+    any: `${n.runner} runs every command, except these: git, the ${n.forge} and ${n.tracker} hosts, ${ANY_BLOCKS}, powershell, pwsh, and the password and key store tools. ${GIT_CHECK} ${n.runner} also cannot read the app data or your ssh keys. A pattern for ssh in this list lets every ssh command run. The list applies again when you switch back.`,
+    unrestricted: `${n.runner} runs every command, except these: git and commands that name the ${n.forge} or ${n.tracker} host. ${GIT_CHECK} ${n.runner} can read and write any file that you can, also your keys and the app data. The list applies again when you switch back.`,
   })[mode];
 
 export const CHOICE_TEXT: Record<AllowChoice, string> = {
@@ -89,12 +91,12 @@ export const DECIDED_TEXT: Record<AllowChoice, string> = {
 export const ANY_TITLE = "Turn on Most commands?";
 export const UNRESTRICTED_TITLE = "Turn on Unrestricted?";
 export const unrestrictedText = (n: ShellNames) =>
-  `Unrestricted lets ${n.runner} run every command as you, with your files, your keys, and your network, except git and the ${n.forge} and ${n.tracker} hosts. ${n.runner} can read and write any file that you can. Text in a task, an attachment, or a comment can tell ${n.runner} to run a harmful command. Use it only for repositories and tasks that you trust.`;
+  `Unrestricted lets ${n.runner} run every command as you, with your files, your keys, and your network, except git and the ${n.forge} and ${n.tracker} hosts. ${GIT_CHECK} ${n.runner} can read and write any file that you can. Text in a task, an attachment, or a comment can tell ${n.runner} to run a harmful command. Use it only for repositories and tasks that you trust.`;
 // The note of the plan screen while the repository is not in allowlist mode.
 export const planModeText = (mode: Exclude<ShellMode, "allowlist">, n: ShellNames) =>
   mode === "any"
     ? `The mode "Most commands" is on for this repository. ${n.runner} can run every command, except the fixed deny list.`
-    : `The mode "Unrestricted" is on for this repository. ${n.runner} can run every command, except git and the ${n.forge} and ${n.tracker} hosts.`;
+    : `The mode "Unrestricted" is on for this repository. ${n.runner} can run every command, except git and the ${n.forge} and ${n.tracker} hosts. ${GIT_CHECK}`;
 export const anyText = (n: ShellNames) =>
   `Most commands lets ${n.runner} run every command as you, with your files, your keys, and your network, except the fixed deny list. ${n.runner} can write any file that you can write. Text in a ${n.tracker} task, an attachment, or a comment can tell ${n.runner} to run a harmful command. The deny list and the Log tab only reduce mistakes. They do not stop an attacker. Use Most commands only for repositories and tasks that you trust.`;
 export const warningTitle = (n: ShellNames) => `Commands that ${n.runner} runs`;

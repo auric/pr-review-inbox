@@ -191,7 +191,7 @@ export type PrUpdate = { version: number; title?: string; description?: string; 
 export type BuildStats = BuildCounts;
 // more: the search has more branches than one page.
 export type BranchPage = { branches: { name: string; isDefault: boolean }[]; more: boolean };
-// config: for git fetch and push only, in the GIT_CONFIG env. It holds the token as an http.extraHeader value.
+// config: for git fetch and push only, in the GIT_CONFIG env. It holds the token as an http.<origin>/.extraHeader value.
 export type RepoRemote = { url: string; config: [string, string][] };
 // A repository with its clone links as Bitbucket gives them (spec.md section 6.16.5, Mapping).
 export type RepoInfo = { project: string; slug: string; name: string; clone: { href: string; name: string }[] };
@@ -210,6 +210,13 @@ export type MergedPr = {
 };
 // A branch restriction (Data Center 9.6 REST): type such as read-only, matcher type such as BRANCH, matcher id such as refs/heads/main.
 export type Restriction = { type: string; matcherType: string; matcherId: string };
+
+// Gate 0 ls-remote: git takes the token as an http.extraHeader value. git-config(1) http.<url>.*: git sends it only to URLs under origin,
+// so a URL that a planted url.<base>.insteadOf rewrites never gets it (git-deny.md fix E).
+export const gitAuth = (origin: string, token: string, caFile?: string): [string, string][] => [
+  [`http.${origin}/.extraHeader`, `Authorization: Bearer ${token}`],
+  ...(caFile ? [["http.sslCAInfo", caFile] as [string, string]] : []),
+];
 
 export function createBitbucketProvider(opts: ClientOptions) {
   const client = createClient(opts);
@@ -270,11 +277,7 @@ export function createBitbucketProvider(opts: ClientOptions) {
     }
   }
 
-  // Gate 0 ls-remote: git takes the token as an http.extraHeader value.
-  const gitConfig = (): [string, string][] => [
-    ["http.extraHeader", `Authorization: Bearer ${opts.token}`],
-    ...(opts.caFile ? [["http.sslCAInfo", opts.caFile] as [string, string]] : []),
-  ];
+  const gitConfig = () => gitAuth(origin, opts.token, opts.caFile);
 
   const toRepo = (r: z.infer<typeof repository>): RepoInfo => ({
     project: r.project.key,

@@ -10,7 +10,7 @@ import { indentBlock, oneLine } from "../../shared/consult";
 import { RUN_TEXT_BYTES } from "../../shared/dto";
 import { type Comment, commentLines, type ExcerptLine, type PrRef, type PullRequest } from "../../shared/types";
 import { log } from "../log";
-import { GitError, git, gitEnv } from "./git";
+import { CACHE_CONFIG, GitError, git, gitEnv } from "./git";
 
 const HEAD = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 // Project keys (also ~USER), repository slugs, and run IDs become folder names.
@@ -19,12 +19,6 @@ const NAME = /^[A-Za-z0-9~_][A-Za-z0-9._~-]*$/;
 const REF = /^refs\/[^\p{Cc}\s:*?[\\^~]+$/u;
 // Highest attribute precedence (gitattributes(5)). Checkout writes each blob unchanged, and no tree attribute hides a diff.
 const ATTRIBUTES = "* -text -ident -filter -working-tree-encoding !diff\n";
-// Lowercase keys: `git config --list` prints them so.
-const CONFIG: [string, string][] = [
-  ["core.symlinks", "false"],
-  ["core.longpaths", "true"],
-  ["core.autocrlf", "false"],
-];
 // .codegraph: an index from the PR is untrusted. The run builds its own (codegraph.ts).
 const REMOVE = new Set([".claude", ".mcp.json", ".codegraph", ".codegraph-wsl"]);
 const RENAME = new Set(["claude.md", "claude.local.md", "agents.md"]);
@@ -325,7 +319,7 @@ async function initCache(cache: string, env: Record<string, string>) {
     await git(["init", "-q", "--bare", "--template=", cache], { env });
   }
   const set = new Set(local?.split("\n"));
-  for (const [k, v] of CONFIG) if (!set.has(`${k}=${v}`)) await g(["config", k, v]);
+  for (const [k, v] of CACHE_CONFIG) if (!set.has(`${k}=${v}`)) await g(["config", k, v]);
   const attributes = join(cache, "info", "attributes");
   if (!existsSync(attributes) || readFileSync(attributes, "utf8") !== ATTRIBUTES) {
     mkdirSync(join(cache, "info"), { recursive: true });

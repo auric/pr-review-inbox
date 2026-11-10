@@ -55,7 +55,7 @@ describe("repoRemote", () => {
     expect(r.url).toBe(repo.repository.links.clone[0]?.href as string);
     expect(r.url).not.toContain(FAKE_TOKEN);
     expect(r.config).toEqual([
-      ["http.extraHeader", `Authorization: Bearer ${FAKE_TOKEN}`],
+      [`http.${new URL(r.url).origin}/.extraHeader`, `Authorization: Bearer ${FAKE_TOKEN}`],
       ["http.sslCAInfo", TEST_CA_FILE],
     ]);
   });

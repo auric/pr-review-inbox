@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { BRANCH_SUFFIX_MAX, type TaskCommand } from "../../shared/task";
 import { dbStem } from "../context/attachments";
-import { GitError, git, gitEnv } from "../review/git";
+import { GitError, git, gitEnv, worktreeConfig } from "../review/git";
 import { type BranchRemote, cachePath, gitSetup, locked, longPath, noUrl, WorkspaceError } from "../review/workspace";
 import { ADDED_ROOT, fullPath, sourceOf, type TaskRepoRow } from "./repos";
 
@@ -253,8 +253,8 @@ export async function openWorktree(i: WorktreeInput): Promise<Worktree> {
     });
   const hooks = join(gitDir, "no-hooks");
   mkdirSync(hooks, { recursive: true });
-  // core.hooksPath: commits and checkouts of the app run no hook (spec.md section 6.7).
-  const env = gitEnv(empty, [["core.hooksPath", hooks]]);
+  // gitEnv sets its own core.hooksPath, so commits and checkouts of the app run no hook (spec.md section 6.7).
+  const env = gitEnv(empty);
   const dir = partDir(dataDir, i.db, i.task, i.ord);
   const repo = i.at ?? join(dir, "repo");
   if (!inside(join(dir, "repo"), repo) && !(repo !== join(dir, ADDED_ROOT) && inside(join(dir, ADDED_ROOT), repo)))
@@ -285,12 +285,7 @@ export async function openWorktree(i: WorktreeInput): Promise<Worktree> {
     const wt: Worktree = { dir, repo, context, admin, cache, branch, env };
     // sparse-checkout enables extensions.worktreeConfig, so the --worktree values stay in the git folder of this worktree.
     await wtGit(wt, ["sparse-checkout", "set", "--no-cone", ...SPARSE]);
-    for (const [k, v] of [
-      ["core.symlinks", "false"],
-      ["core.autocrlf", "false"],
-      ["core.hooksPath", hooks],
-    ] as const)
-      await wtGit(wt, ["config", "--worktree", k, v]);
+    for (const [k, v] of worktreeConfig(hooks)) await wtGit(wt, ["config", "--worktree", k, v]);
     await wtGit(wt, ["checkout", "-q"]);
     return wt;
   });

@@ -53,12 +53,14 @@ export type FakeScenario = {
   noBash?: boolean;
   // spec.md section 6.21: the Bash calls of an implement run, after init. refused: what refuses the call, with the permission_denied
   // fields of integration-check.md SU3; check is a CLI safety check with no type, as the B22 redirect. files: what the command writes, by
-  // path relative to the cwd, with no Write call, as a build does. output: the tool_result text of a call that runs.
+  // path relative to the cwd, with no Write call, as a build does. output: the tool_result text of a call that runs. run: argv lists that
+  // the call runs in the cwd with the env of the CLI, as `bash -c 'git ...'` runs past the git deny (Gate B34). Each record gets { ran }.
   bash?: {
     command: string;
     refused?: "allowlist" | "deny" | "check";
     files?: { path: string; text?: string; link?: string }[];
     output?: string;
+    run?: string[][];
   }[];
   // docs/plans/review-v2/spec.md section 2.9: the notes of the echo reply result, and the cites of its first reply. Absent: none.
   notes?: unknown;
@@ -451,6 +453,11 @@ async function main() {
         mkdirSync(dirname(p), { recursive: true });
         if (f.link !== undefined) symlinkSync(f.link, p, "junction");
         else writeFileSync(p, f.text ?? "");
+      }
+    if (!b.refused)
+      for (const argv of b.run ?? []) {
+        const r = Bun.spawnSync(argv, { cwd: process.cwd(), env: process.env, stdout: "pipe", stderr: "pipe" });
+        record({ ran: argv, exit: r.exitCode, stderr: r.stderr.toString().slice(-500) });
       }
     const text = b.refused
       ? b.refused === "deny"

@@ -43,7 +43,8 @@ import { runnerDefaults } from "../../src/server/review/defaults";
 import { git } from "../../src/server/review/git";
 import { createStreamParser, type StreamState } from "../../src/server/review/stream";
 import { prepareTaskWorkspace } from "../../src/server/review/workspace";
-import { hostsOf, rulePath, type ShellSpec, shellEnv } from "../../src/server/tasks/shell";
+import { hostsOf, rulePath, type ShellSpec, shellEnv, shellGitConfig } from "../../src/server/tasks/shell";
+
 import { openWorktree } from "../../src/server/tasks/worktree";
 import { EFFORTS } from "../../src/shared/dto";
 import {
@@ -56,6 +57,9 @@ import {
   verifyResult,
 } from "../../src/shared/review";
 import { implementResult, interviewResult, type ShellMode, specResult } from "../../src/shared/task";
+
+// The facts that rebuild the env of a run read no GIT_CONFIG_GLOBAL, so any path stands in for the app folder.
+const NO_APP = shellGitConfig("app");
 
 const ROOT = resolve(import.meta.dir, "../..");
 const OUT = join(ROOT, ".gate0/v3-local");
@@ -2239,7 +2243,10 @@ async function shellRun(
       writeFileSync(file, JSON.stringify(opts.settings(JSON.parse(readFileSync(file, "utf8")), app), null, 2));
     }
     const envBase = appChildEnv();
-    const env = { ...shellEnv(opts.env ? opts.env(envBase) : envBase, { mode, bashTimeoutSec: SHELL_TIMEOUT_SEC }), ...opts.addEnv };
+    const env = {
+      ...shellEnv(opts.env ? opts.env(envBase) : envBase, { mode, bashTimeoutSec: SHELL_TIMEOUT_SEC }, shellGitConfig(app)),
+      ...opts.addEnv,
+    };
     for (const k of opts.dropEnv ?? []) delete env[k];
     // Arrival times of tool_use and tool_result blocks, by tool_use ID.
     const arrived = new Map<string, number>();
@@ -2561,7 +2568,7 @@ async function b26() {
           m[3] ?? (m[2] === "unset" ? null : ""),
         ]),
       ) as Record<string, string | null>;
-      const final = shellEnv(passed, { mode: "allowlist", bashTimeoutSec: SHELL_TIMEOUT_SEC });
+      const final = shellEnv(passed, { mode: "allowlist", bashTimeoutSec: SHELL_TIMEOUT_SEC }, NO_APP);
       const given = (k: string) =>
         Object.entries(final).find(([n]) => (process.platform === "win32" ? n.toUpperCase() === k : n === k))?.[1];
       const fact = (k: string) => {
@@ -2826,7 +2833,7 @@ async function b31() {
   if (DRY)
     return dry(
       "B31",
-      `runs=6; commands=3,3,5,5,6,6; V15=${shellEnv({}, { mode: "allowlist", bashTimeoutSec: SHELL_TIMEOUT_SEC })[B31_V15]}; dropped=${B31_V15}; ${lines.join(", ")}`,
+      `runs=6; commands=3,3,5,5,6,6; V15=${shellEnv({}, { mode: "allowlist", bashTimeoutSec: SHELL_TIMEOUT_SEC }, NO_APP)[B31_V15]}; dropped=${B31_V15}; ${lines.join(", ")}`,
     );
   push("B31", status, lines.join(" || "));
 }
@@ -2932,7 +2939,7 @@ function b32Facts(
   const seen = Object.fromEntries(
     [...env.text.matchAll(/^([A-Z0-9_]+)=(unset|set:([0-9a-f]{12}))\s*$/gm)].map((m) => [m[1] ?? "", m[3] ?? null]),
   ) as Record<string, string | null>;
-  const final = shellEnv(given, { mode: "any", bashTimeoutSec: SHELL_TIMEOUT_SEC });
+  const final = shellEnv(given, { mode: "any", bashTimeoutSec: SHELL_TIMEOUT_SEC }, NO_APP);
   delete final.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB;
   const givenOf = (k: string) => Object.entries(final).find(([n]) => (process.platform === "win32" ? n.toUpperCase() === k : n === k))?.[1];
   const envFact = (k: string) => {

@@ -180,12 +180,17 @@ export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = proce
   };
 }
 
-// Writes shell.json into appDir, outside the step cwd, and returns its path.
+// The empty global git config of the shell of a step (shellEnv). It is not the file of gitSetup: `git config --global` in the shell writes
+// to it, and the git of the app must never read that.
+export const shellGitConfig = (appDir: string) => join(appDir, "empty.gitconfig");
+
+// Writes shell.json and the empty git config into appDir, outside the step cwd, and returns the path of shell.json.
 export function writeShellSettings(appDir: string, spec: ShellSpec) {
   const settings = shellSettings(spec);
   mkdirSync(appDir, { recursive: true });
   const file = join(appDir, "shell.json");
   writeFileSync(file, JSON.stringify(settings, null, 2));
+  writeFileSync(shellGitConfig(appDir), "");
   return file;
 }
 
@@ -213,12 +218,19 @@ export function checkRules(
   return { checks, notes };
 }
 
-// D5: the real HOME stays, so ssh finds its keys and config. No askpass program, no git credential helper, and no prompt. V13: the CLI
-// reads the Bash time limits from the env. Windows env names ignore case, so a set name replaces each spelling of it. Gate B31: V15 resets
-// the cwd after each command, so only allowlist mode sets it. The other modes let `cd repo` carry over to the next command.
-export function shellEnv(base: Record<string, string>, shell: Pick<ShellSpec, "mode" | "bashTimeoutSec">): Record<string, string> {
+// D5: the real HOME stays, so ssh finds its keys and config. No askpass program, no git credential helper, and no prompt. git-deny.md fix
+// B: git reads no system config and takes emptyGlobal (shellGitConfig) in place of the user config, so no stored helper of the user runs.
+// V13: the CLI reads the Bash time limits from the env. Windows env names ignore case, so a set name replaces each spelling of it. Gate
+// B31: V15 resets the cwd after each command, so only allowlist mode sets it. The other modes let `cd repo` carry over to the next command.
+export function shellEnv(
+  base: Record<string, string>,
+  shell: Pick<ShellSpec, "mode" | "bashTimeoutSec">,
+  emptyGlobal: string,
+): Record<string, string> {
   const ms = String(shell.bashTimeoutSec * 1000);
   const set: Record<string, string> = {
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: emptyGlobal,
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: "",

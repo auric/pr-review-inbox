@@ -19,7 +19,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
+import { gitAuth } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import { DEFAULT_PROFILE, DOCS_RULE, profileOf } from "../../src/server/review/catalog";
@@ -29,6 +30,7 @@ import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "..
 import { createReviewJobs, IMPLEMENT_MCP_LINES } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
+import { movedText } from "../../src/server/tasks/gitstate";
 import {
   ciPath,
   commitTask,
@@ -43,6 +45,7 @@ import {
   startStep,
   stepTimeout,
 } from "../../src/server/tasks/implement";
+import { pushTaskBranch } from "../../src/server/tasks/push";
 import { taskRow } from "../../src/server/tasks/tasks";
 import { headOf, openWorktree, resetWorktree, status, type Worktree, wtGit } from "../../src/server/tasks/worktree";
 import { implementJsonSchema, STEP_TIME_MS, type TaskBlocked } from "../../src/shared/task";
@@ -436,7 +439,7 @@ describe("implement run", () => {
   );
 
   test(
-    "CLAUDE.md, a file outside repo/, a link, a nested repository, a changed .git link, and CI configuration fail and are undone",
+    "CLAUDE.md, a file outside repo/, a link, a nested repository, a changed .git link, and CI configuration fail and are undone; the .git link counts as git state (fix F)",
     async () => {
       const s = await setup();
       const victim = join(s.root, "victim");
@@ -457,7 +460,6 @@ describe("implement run", () => {
           ],
           path: "vendor/",
         },
-        { writes: [{ path: "repo/.git", text: `gitdir: ${s.clone.replaceAll("\\", "/")}/.git\n` }], path: ".git" },
         { writes: [{ path: "repo/.github/workflows/ci.yml", text: "on: push\n" }], path: ".github/workflows/ci.yml" },
       ];
       const before = await git(["-C", s.clone, "status", "--porcelain=v1", "--ignored"], { env: s.r.env });
@@ -468,6 +470,15 @@ describe("implement run", () => {
         const { outcome } = await s.step();
         await expectUndone(s, s.wt, outcome, c.path);
       }
+      // git-deny.md fix F: the git link is git state. The app writes it back before any git call, and the reason says so.
+      s.db.query("UPDATE task SET blocked_json = NULL").run();
+      s.scenario({ writes: [{ path: "repo/.git", text: `gitdir: ${s.clone.replaceAll("\\", "/")}/.git\n` }] });
+      const link = (await s.step()).outcome;
+      expect(link?.moved).toEqual(["repo/.git"]);
+      expect(link?.changed).toEqual([]);
+      expect(await status(s.wt)).toEqual([]);
+      expect(await headOf(s.wt)).toBe(s.base);
+      expect(s.blockedOf()).toMatchObject({ kind: "denied_path", step: link?.step, text: movedText(["repo/.git"]) });
       expect(readFileSync(join(victim, "keep.txt"), "utf8")).toBe("keep\n");
       expect(existsSync(join(s.wt.repo, "src", "link"))).toBe(false);
       expect(existsSync(join(s.wt.repo, "vendor"))).toBe(false);
@@ -1116,6 +1127,138 @@ describe("a step with the Bash tool", () => {
       expect(deny.outcome).toMatchObject({ status: "failed", ask: false });
       expect(taskRow(s.db, s.task)?.state).toBe("stopped");
       expect(s.blockedOf()?.text).toBe("Claude Code refused more than 5 commands in this run.");
+    },
+    SLOW,
+  );
+});
+
+// docs/plans/review-v2/git-deny.md fix F (spec.md section 6.8, AC-B175 and AC-B176): Gate B34 showed that `bash -c 'git ...'` runs
+// past the git deny. The fake runs real git commands in its Bash calls, as such a command does.
+describe("fix F: the git state around a step", () => {
+  const ANY = { mode: "unrestricted" as const, rules: [], bashTimeoutSec: 600 };
+  const ID = ["-c", "user.name=planted", "-c", "user.email=planted@example.invalid"];
+
+  test(
+    "AC-B175: a commit, a moved branch, a deleted refs/rl ref, and cache and worktree config block the step with the new reason; the app restores each one and saves the patch",
+    async () => {
+      const s = await setup();
+      const cache = s.wt.cache;
+      const cg = (args: string[]) => git([`--git-dir=${cache}`, ...args], { env: s.wt.env });
+      await cg(["branch", "side", s.base]);
+      const refs = await cg(["for-each-ref", "--format=%(objectname) %(refname)"]);
+      expect(refs).toContain("refs/rl/task/1/base");
+      const config = readFileSync(join(cache, "config"));
+      const wtConfig = readFileSync(join(s.wt.admin, "config.worktree"));
+      s.scenario({
+        writes: [{ path: "repo/src/app.ts", text: "planted change\n" }],
+        bash: [
+          {
+            command: "bash -c 'git commit'",
+            run: [
+              ["git", "-C", "repo", "add", "-A"],
+              ["git", "-C", "repo", ...ID, "commit", "-q", "-m", "planted"],
+              ["git", "-C", "repo", "branch", "-f", "side", "HEAD"],
+              ["git", "-C", "repo", "update-ref", "-d", "refs/rl/task/1/base"],
+              ["git", "-C", "repo", "config", "url.http://127.0.0.1:9/.insteadOf", "http://127.0.0.1:1/"],
+              ["git", "-C", "repo", "config", "--worktree", "core.fsmonitor", "planted-monitor"],
+            ],
+          },
+        ],
+      });
+      const { outcome } = await s.step({ shell: ANY });
+      const ran = s.calls().filter((c) => "ran" in c) as unknown as { ran: string[]; exit: number }[];
+      expect(ran.map((r) => r.exit)).toEqual([0, 0, 0, 0, 0, 0]);
+      const admin = `repo.git/worktrees/${basename(s.wt.admin)}`;
+      expect([...(outcome?.moved ?? [])].sort()).toEqual(
+        [
+          `${admin}/config.worktree`,
+          "repo.git/config",
+          "refs/heads/feature/K-1-thing",
+          "refs/heads/side",
+          "refs/rl/task/1/base (deleted)",
+        ].sort(),
+      );
+      // The state is back: refs, config bytes, HEAD, and a clean worktree.
+      expect(await cg(["for-each-ref", "--format=%(objectname) %(refname)"])).toBe(refs);
+      expect(readFileSync(join(cache, "config")).equals(config)).toBe(true);
+      expect(readFileSync(join(s.wt.admin, "config.worktree")).equals(wtConfig)).toBe(true);
+      expect(await headOf(s.wt)).toBe(s.base);
+      expect(await status(s.wt)).toEqual([]);
+      expect(outcome?.changed).toEqual([]);
+      expect(outcome?.result).toBeNull();
+      const b = s.blockedOf();
+      expect(b).toMatchObject({ kind: "denied_path", step: outcome?.step, text: movedText(outcome?.moved ?? []) });
+      expect(b?.text).toStartWith("Needs you: Claude changed git state during the step: ");
+      expect(b?.text).toEndWith(" and 2 more. The app restored it.");
+      const row = s.stepRow(outcome?.step as number);
+      expect(row.state).toBe("failed");
+      const detail = JSON.parse(row.detail_json) as { notes: string[]; patch: string | null };
+      expect(detail.notes).toContain(movedText(outcome?.moved ?? []));
+      expect(detail.patch).toBe(`${outcome?.step}.patch`);
+      expect(readFileSync(join(s.wt.dir, "..", "patches", `${outcome?.step}.patch`), "utf8")).toContain("+planted change");
+      expect(taskRow(s.db, s.task)?.state).toBe("implementing");
+
+      // A later step, its commit, and the push hold no planted commit.
+      s.db.query("UPDATE task SET blocked_json = NULL").run();
+      s.scenario({ writes: [{ path: "repo/src/app.ts", text: "legit change\n" }] });
+      const ok = (await s.step()).outcome;
+      expect(ok?.moved).toEqual([]);
+      expect(ok?.problems).toEqual([]);
+      const who = { name: "User", email: "user@example.invalid" };
+      const made = await commitTask({
+        db: s.db,
+        task: s.task,
+        part: s.part,
+        wt: s.wt,
+        item: "T1.1",
+        message: "K-1 T1.1: legit\n",
+        who,
+        allow: ["src/app.ts"],
+      });
+      if (made.status !== "committed") throw new Error(made.status);
+      expect((await cg(["rev-parse", `${made.commit}^`])).trim()).toBe(s.base);
+      const pushed = await pushTaskBranch({
+        cache,
+        emptyGlobal: s.wt.env.GIT_CONFIG_GLOBAL as string,
+        url: s.r.remote,
+        config: gitAuth("http://127.0.0.1:9", "rl-fix-f-token"),
+        commit: made.commit,
+        branch: "task/ABC-1-legit",
+        lease: null,
+        task: { key: "ABC-1", prefix: "task/", branches: ["task/ABC-1-legit"], target: "main" },
+      });
+      expect(pushed).toEqual({ status: "pushed" });
+      const subjects = await git(["--git-dir", s.r.remote, "log", "--format=%s", "refs/heads/task/ABC-1-legit"], { env: s.r.env });
+      expect(subjects).toContain("K-1 T1.1: legit");
+      expect(subjects).not.toContain("planted");
+    },
+    SLOW * 2,
+  );
+
+  test(
+    "AC-B176: a step that leaves the git state as it was passes, also with Bash git commands that only read; a file that the step staged past the commit goes",
+    async () => {
+      const s = await setup();
+      const blob = (await git(["hash-object", "--stdin"], { env: s.r.env, stdin: "README.md\n" })).trim();
+      s.scenario({
+        writes: [{ path: "repo/src/app.ts", text: "changed\n" }],
+        bash: [
+          {
+            command: "bash -c 'git status'",
+            run: [
+              ["git", "-C", "repo", "status", "--porcelain"],
+              ["git", "-C", "repo", "update-index", "--add", "--cacheinfo", `100644,${blob},src/staged.ts`],
+            ],
+          },
+        ],
+      });
+      const { outcome } = await s.step({ shell: ANY });
+      expect(outcome?.moved).toEqual([]);
+      expect(outcome?.problems).toEqual([]);
+      expect(outcome?.changed).toEqual(["src/app.ts"]);
+      expect(s.blockedOf()).toBeNull();
+      // The index is back, so the staged entry is in no commit.
+      expect(await wtGit(s.wt, ["ls-files", "--", "src/staged.ts"])).toBe("");
     },
     SLOW,
   );

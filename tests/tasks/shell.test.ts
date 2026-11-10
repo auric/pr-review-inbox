@@ -281,7 +281,7 @@ describe("approved checks as allow rules (spec.md section 6.21.1)", () => {
 });
 
 describe("child env of a shell step", () => {
-  test("real HOME and the ssh agent stay; GIT_*, askpass, and the set names go; the fixed values and the time limits are set", () => {
+  test("real HOME and the ssh agent stay; GIT_*, askpass, and the set names go; the fixed values, the time limits, and the git config files of fix B (AC-B178) are set", () => {
     const env = shellEnv(
       {
         HOME: "/home/someone",
@@ -293,14 +293,19 @@ describe("child env of a shell step", () => {
         SSH_ASKPASS: "/bin/askpass",
         gcm_interactive: "always",
         BASH_MAX_TIMEOUT_MS: "1",
+        GIT_CONFIG_NOSYSTEM: "0",
+        git_config_global: "/home/someone/.gitconfig",
       },
       { mode: "allowlist", bashTimeoutSec: 600 },
+      "/data/runs/1/app/empty.gitconfig",
     );
     expect(env).toEqual({
       HOME: "/home/someone",
       USERPROFILE: "C:\\Users\\someone",
       SSH_AUTH_SOCK: "/tmp/agent.sock",
       PATH: "/usr/bin",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/data/runs/1/app/empty.gitconfig",
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "credential.helper",
       GIT_CONFIG_VALUE_0: "",
@@ -316,7 +321,7 @@ describe("child env of a shell step", () => {
 
   test("Gate B31: Any command and Unrestricted leave out CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, also a copy from the parent env", () => {
     for (const mode of ["any", "unrestricted"] as const) {
-      const env = shellEnv({ PATH: "/usr/bin", claude_bash_maintain_project_working_dir: "1" }, { mode, bashTimeoutSec: 60 });
+      const env = shellEnv({ PATH: "/usr/bin", claude_bash_maintain_project_working_dir: "1" }, { mode, bashTimeoutSec: 60 }, "empty");
       expect(Object.keys(env).map((k) => k.toUpperCase())).not.toContain("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR");
       expect(env).toMatchObject({ PATH: "/usr/bin", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", BASH_MAX_TIMEOUT_MS: "60000" });
     }

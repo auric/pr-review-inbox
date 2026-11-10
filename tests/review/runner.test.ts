@@ -718,10 +718,15 @@ describe("shell steps", () => {
       const keys = Object.keys(env).map((k) => k.toUpperCase());
       expect(keys.filter((k) => k.startsWith("GIT_")).sort()).toEqual([
         "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_NOSYSTEM",
         "GIT_CONFIG_VALUE_0",
         "GIT_TERMINAL_PROMPT",
       ]);
+      // git-deny.md fix B: an empty file of the app beside shell.json, never the file of gitSetup.
+      expect(env.GIT_CONFIG_GLOBAL).toBe(join(spec.appDir as string, "empty.gitconfig"));
+      expect(readFileSync(env.GIT_CONFIG_GLOBAL as string, "utf8")).toBe("");
       for (const k of ["SSH_ASKPASS", "GATE_JIRA_TOKEN"]) expect(keys).not.toContain(k);
       expect(keys.filter((k) => k.startsWith("CLAUDE_CODE_")).sort()).toEqual([
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
@@ -729,6 +734,7 @@ describe("shell steps", () => {
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
       ]);
       expect(env).toMatchObject({
+        GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "credential.helper",
         GIT_CONFIG_VALUE_0: "",

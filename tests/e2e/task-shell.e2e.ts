@@ -29,7 +29,7 @@ const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
 const ANY_WRITE =
   "Most commands lets Claude run every command as you, with your files, your keys, and your network, except the fixed deny list. Claude can write any file that you can write.";
 const UNRESTRICTED_START =
-  "Unrestricted lets Claude run every command as you, with your files, your keys, and your network, except git and the Bitbucket and Jira hosts.";
+  "Unrestricted lets Claude run every command as you, with your files, your keys, and your network, except git and the Bitbucket and Jira hosts. A command such as bash -c can still run git. After each step, the app checks the git state and restores it.";
 const WARNING_START = "Claude can run each command that matches this list, as you, with your files, your keys, and your network.";
 const SPEC = {
   title: "Name the app state in the README",

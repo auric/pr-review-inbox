@@ -107,26 +107,27 @@ describe("commands that Claude may run, in the page", () => {
     expect(shellText("any", 2, 3)).toBe("Commands: most commands");
     expect(shellText("unrestricted", 2, 3)).toBe("Commands: unrestricted");
     expect(MODE_TEXT).toEqual({ allowlist: "Allowlist", any: "Most commands", unrestricted: "Unrestricted" });
-    // spec.md section 6.21.2: the line under the mode switch names what Any command still blocks.
+    // spec.md section 6.21.2: the line under the mode switch names what Any command still blocks. Section 6.8: git through bash -c is
+    // checked after the step (AC-B178).
     const n = { runner: "Runner", cli: "runner", forge: "Forge", tracker: "Tracker" };
     expect(modeLine("any", n)).toBe(
-      "Runner runs every command, except these: git, the Forge and Tracker hosts, curl, wget, nc, ncat, netcat, socat, telnet, ftp, tftp, sftp, scp, rsync, ssh, powershell, pwsh, and the password and key store tools. Runner also cannot read the app data or your ssh keys. A pattern for ssh in this list lets every ssh command run. The list applies again when you switch back.",
+      "Runner runs every command, except these: git, the Forge and Tracker hosts, curl, wget, nc, ncat, netcat, socat, telnet, ftp, tftp, sftp, scp, rsync, ssh, powershell, pwsh, and the password and key store tools. A command such as bash -c can still run git. After each step, the app checks the git state and restores it. Runner also cannot read the app data or your ssh keys. A pattern for ssh in this list lets every ssh command run. The list applies again when you switch back.",
     );
     expect(modeLine("allowlist", n)).toBe(
       "Runner runs only the commands that match a pattern of this list. grep, rg, and read-only commands such as ls and cat also run. Runner cannot run cd or read files outside the folder of the step.",
     );
     expect(modeLine("unrestricted", n)).toBe(
-      "Runner runs every command, except these: git and commands that name the Forge or Tracker host. Runner can read and write any file that you can, also your keys and the app data. The list applies again when you switch back.",
+      "Runner runs every command, except these: git and commands that name the Forge or Tracker host. A command such as bash -c can still run git. After each step, the app checks the git state and restores it. Runner can read and write any file that you can, also your keys and the app data. The list applies again when you switch back.",
     );
     expect(UNRESTRICTED_TITLE).toBe("Turn on Unrestricted?");
     expect(unrestrictedText(n)).toBe(
-      "Unrestricted lets Runner run every command as you, with your files, your keys, and your network, except git and the Forge and Tracker hosts. Runner can read and write any file that you can. Text in a task, an attachment, or a comment can tell Runner to run a harmful command. Use it only for repositories and tasks that you trust.",
+      "Unrestricted lets Runner run every command as you, with your files, your keys, and your network, except git and the Forge and Tracker hosts. A command such as bash -c can still run git. After each step, the app checks the git state and restores it. Runner can read and write any file that you can. Text in a task, an attachment, or a comment can tell Runner to run a harmful command. Use it only for repositories and tasks that you trust.",
     );
     expect(planModeText("any", n)).toBe(
       'The mode "Most commands" is on for this repository. Runner can run every command, except the fixed deny list.',
     );
     expect(planModeText("unrestricted", n)).toBe(
-      'The mode "Unrestricted" is on for this repository. Runner can run every command, except git and the Forge and Tracker hosts.',
+      `The mode "Unrestricted" is on for this repository. Runner can run every command, except git and the Forge and Tracker hosts. A command such as bash -c can still run git. After each step, the app checks the git state and restores it.`,
     );
     expect(timeoutMinutes(600)).toBe("10");
     expect(timeoutMinutes(90)).toBe("1.5");

@@ -8,7 +8,7 @@ import { basename, isAbsolute, join } from "node:path";
 import { EFFORTS, type Effort, modelName } from "../../shared/dto";
 import type { RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
 import { log } from "../log";
-import { type ShellSpec, shellEnv, writeShellSettings } from "../tasks/shell";
+import { type ShellSpec, shellEnv, shellGitConfig, writeShellSettings } from "../tasks/shell";
 import { RUNTIME_ENV } from "./git";
 import { classify, createStreamParser, REFUSED_MAX, type Refusal, type RunNote } from "./stream";
 
@@ -582,11 +582,13 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const limit = Math.min(opts.timeoutMs ?? RUN_TIMEOUT_MS, own ?? RUN_TIMEOUT_MS);
       const agents = new Set("main" in spec ? [MAIN_AGENT, ...Object.keys(spec.agents)] : []);
       const shell = "implement" in spec ? spec.shell : undefined;
+      // implementArgs wrote this file beside shell.json.
+      const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";
       const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
-        env: { ...(shell ? shellEnv(childEnv(), shell) : childEnv()), [RUN_MARKER]: marker },
+        env: { ...(shell ? shellEnv(childEnv(), shell, shellGit) : childEnv()), [RUN_MARKER]: marker },
         stdin: new Blob([spec.prompt]),
         stdout: "pipe",
         stderr: "pipe",

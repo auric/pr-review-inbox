@@ -40,6 +40,7 @@ import {
   TASK_ATTACHMENT_NAME,
   UNTRUSTED,
 } from "../review/workspace";
+import { checkGit, type GitSnap, movedText, snapGit, stopGit } from "./gitstate";
 import { fullPath, reposFile, taskRepos } from "./repos";
 import type { StepShell } from "./shell";
 import { holdBlocked, stopForRun, taskRow } from "./tasks";
@@ -766,7 +767,8 @@ export type StepInput = {
   now?: () => number;
 };
 
-// changed: the paths that the step left in the worktree for the checks and the commit. Empty after a failed path check. text: the
+// changed: the paths that the step left in the worktree for the checks and the commit. Empty after a failed path check. moved: what the
+// step changed in the git state, which the app restored (gitstate.ts checkGit). text: the
 // sentence of a failed or cancelled run. refused: the Bash commands that Claude Code refused. ask: the runner ended an allowlist run
 // over REFUSED_MAX refused commands, some of them refused by the allowlist; the task did not stop, so the loop builds the requests
 // (spec.md section 6.21, D3).
@@ -777,6 +779,7 @@ export type StepOutcome = {
   result: ImplementResult | null;
   changed: string[];
   problems: PathProblem[];
+  moved: string[];
   patch: string | null;
   text: string | null;
   refused: Refusal[];
@@ -891,6 +894,9 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   let shellRun: StepDetail["shell"] = null;
   // A git error of the check or the reset: the worktree state is unknown, so the task stops. Resume makes the worktree again.
   let broken: string | null = null;
+  // git-deny.md fix F: the git state before the step, and what the step changed in it.
+  let snap: GitSnap | null = null;
+  let moved: string[] = [];
   const row = taskRow(db, i.task);
   const start: ImplementRunStart = {
     task: i.task,
@@ -914,6 +920,12 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());
     },
     after: async (o, early, servers, gaps) => {
+      // The git state goes back before any other git call of the app reads the cache.
+      try {
+        if (snap) moved = await checkGit(snap);
+      } catch (err) {
+        broken = `The app could not restore the git state after the step: ${noUrl((err as Error).message)}`;
+      }
       written = [...new Set((o?.events ?? []).filter((x) => FILE_TOOLS.has(x.tool) && x.status === "ok" && x.target).map((x) => x.target))];
       const e =
         early ??
@@ -925,33 +937,38 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       if (i.shell) shellRun = shellDetail(i.shell, o?.events ?? [], refused.length);
       // D8: the Write and Edit targets under repo/, from the main repository root.
       const own = i.shell ? written.filter((p) => p.startsWith("repo/")).map((p) => p.slice("repo/".length)) : undefined;
-      try {
-        if (fresh) {
-          const before = fresh;
-          const mine = new Set(written.map(foldPath));
-          bashFiles = (await untracked(wt.dir, wts)).filter((p) => !before.has(foldPath(p)) && !mine.has(foldPath(p)));
+      if (!broken)
+        try {
+          if (fresh) {
+            const before = fresh;
+            const mine = new Set(written.map(foldPath));
+            bashFiles = (await untracked(wt.dir, wts)).filter((p) => !before.has(foldPath(p)) && !mine.has(foldPath(p)));
+          }
+          const file = patchFile(i.review.dataDir, db, i.task, step);
+          if (i.resolveCheck)
+            check = { changed: [], problems: await i.resolveCheck(context, ignored), links: [], outside: [], ignored: [] };
+          else if (trees) {
+            const tc = await treeCheck(trees, { allow: i.allow, context, ignored, written: own });
+            check = tc.check;
+            locked = tc.locked;
+            if (check.problems.length || moved.length) patch = await undoTrees(trees, tc, last, file);
+          } else {
+            check = await pathCheck(wt, { allow: i.allow, context, ignored, written: own });
+            if (check.problems.length || moved.length) patch = await undoStep(wt, last, check, file);
+          }
+        } catch (err) {
+          broken = `The app could not check the changed files: ${noUrl((err as Error).message)}`;
         }
-        const file = patchFile(i.review.dataDir, db, i.task, step);
-        if (i.resolveCheck) check = { changed: [], problems: await i.resolveCheck(context, ignored), links: [], outside: [], ignored: [] };
-        else if (trees) {
-          const tc = await treeCheck(trees, { allow: i.allow, context, ignored, written: own });
-          check = tc.check;
-          locked = tc.locked;
-          if (check.problems.length) patch = await undoTrees(trees, tc, last, file);
-        } else {
-          check = await pathCheck(wt, { allow: i.allow, context, ignored, written: own });
-          if (check.problems.length) patch = await undoStep(wt, last, check, file);
-        }
-      } catch (err) {
-        broken = `The app could not check the changed files: ${noUrl((err as Error).message)}`;
-      }
       return e;
     },
     finish: (d, run, e) => {
+      // A run that ended before after() leaves its watch on.
+      if (snap) stopGit(snap);
       const problems = check?.problems ?? [];
-      const result = problems.length || broken ? null : ((e.result?.task as ImplementResult | undefined) ?? null);
+      const undone = problems.length > 0 || moved.length > 0;
+      const result = undone || broken ? null : ((e.result?.task as ImplementResult | undefined) ?? null);
       const ran = !broken && (e.status === "completed" || e.status === "incomplete");
-      const state: StepState = problems.length || broken ? "failed" : ran ? "ok" : e.status === "cancelled" ? "cancelled" : "failed";
+      const state: StepState = undone || broken ? "failed" : ran ? "ok" : e.status === "cancelled" ? "cancelled" : "failed";
       // A failed or refused step goes back to the last commit, so only a step that ended ok keeps its new files.
       const kept = state === "ok" ? bashFiles.slice(0, BASH_FILES_MAX) : [];
       endStep(
@@ -964,6 +981,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
           notes: [
             ...(i.shell?.notes ?? []),
             ...(broken ? [broken] : []),
+            ...(moved.length ? [movedText(moved)] : []),
             ...problems.map((p) => `${p.path}: ${p.reason}`),
             ...(state === "ok" && bashFiles.length ? [bashNote(bashFiles)] : []),
             ...(result?.notes ?? []),
@@ -976,7 +994,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         },
         now(),
       );
-      const ask = killed && i.shell?.mode === "allowlist" && refused.some((r) => r.by === "allowlist") && !problems.length && !broken;
+      const ask = killed && i.shell?.mode === "allowlist" && refused.some((r) => r.by === "allowlist") && !undone && !broken;
       const usage = e.outcome ? usageOf(e.outcome) : null;
       if (usage) {
         const prev = d.query(STEP_SQL.partUsage).get({ id: i.part.id }) as { usage_json: string | null } | null;
@@ -987,8 +1005,8 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       // earlier reason or aborts the update. The task does not stop.
       const soft = i.mode === "instruct" || i.mode === "resolve";
       const cur = taskRow(d, i.task);
-      if (cur && problems.length && !broken && !i.resolveCheck) {
-        const text = locked ? lockedText(locked) : deniedText(problems);
+      if (cur && undone && !broken && !i.resolveCheck) {
+        const text = moved.length ? movedText(moved) : locked ? lockedText(locked) : deniedText(problems);
         holdBlocked(d, cur, { kind: "denied_path", step, text }, now());
       } else if (cur && !ran && !soft && !ask)
         stopForRun(d, { task: i.task, version: cur.version }, step, broken ? { status: "failed", text: broken } : e, now());
@@ -997,8 +1015,9 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         run: run.id,
         status: broken ? "failed" : e.status,
         result,
-        changed: problems.length || broken ? [] : (check?.changed ?? []),
+        changed: undone || broken ? [] : (check?.changed ?? []),
         problems,
+        moved,
         patch,
         text: broken ?? (ran ? null : (e.text ?? (e.status === "cancelled" ? RUN_CANCELLED : "The run failed."))),
         refused,
@@ -1007,9 +1026,20 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       return i.onEnd ? () => i.onEnd?.(outcome) : undefined;
     },
   };
+  try {
+    snap = await snapGit(wts);
+  } catch (e) {
+    const b: TaskBlocked = { kind: "error", step: null, text: `Needs you: ${noUrl((e as Error).message)}` };
+    db.transaction(() => {
+      const cur = taskRow(db, i.task);
+      if (cur) holdBlocked(db, cur, b, now());
+    })();
+    return { status: 409, blocked: b };
+  }
   // A Stop during the awaits above finds no run to cancel.
   const cur = taskRow(db, i.task);
   if (i.live ? !i.live() : cur?.state !== "implementing" || cur.blocked_json !== null) {
+    stopGit(snap);
     const id =
       i.step ??
       insertStep(db, { task: i.task, part: i.part.id, kind: i.mode, attempt: i.attempt, item: i.item, state: "cancelled" }, now());
@@ -1018,5 +1048,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     endStep(db, id, "cancelled", { notes: [note] }, now());
     return { status: 409, stopped: true };
   }
-  return i.review.taskRun(db, start, i.extra);
+  const started = i.review.taskRun(db, start, i.extra);
+  if (started.status !== 202) stopGit(snap);
+  return started;
 }

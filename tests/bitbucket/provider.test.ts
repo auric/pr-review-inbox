@@ -346,7 +346,8 @@ describe("pull requests", () => {
       sourceUrl: `${fake.url}/scm/~jdoe/fork-1.git`,
       sourceRef: "refs/heads/topic/sample-1",
       targetRef: "refs/heads/topic/sample-2",
-      fetchConfig: [["http.extraHeader", `Authorization: Bearer ${FAKE_TOKEN}`]],
+      // git-deny.md fix E: the header goes only to the configured origin.
+      fetchConfig: [[`http.${new URL(fake.url).origin}/.extraHeader`, `Authorization: Bearer ${FAKE_TOKEN}`]],
     });
   });
 

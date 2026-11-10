@@ -52,6 +52,7 @@ import { repoPath } from "../review/validate";
 import { type BranchRemote, type ContextFile, cachePath, longPath, noUrl } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import { CHECK_KINDS, type ChecksResult, checkStep, type Scope } from "./checks";
+import { movedReason } from "./gitstate";
 import {
   bashLine,
   commitTask,
@@ -897,7 +898,8 @@ export function createLoop(opts: LoopOptions) {
     const { r, before, shell, unchanged } = await runStep(c, mode, item, o);
     if (r && (r.ask || r.result?.allowRequest.length)) await askAllow(c, mode, r, shell);
     // No result: implement.ts stopped the task, or it set the denied path. No outcome: restart recovery ended the run first.
-    if (!r?.result) throw r && !r.problems.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
+    if (!r?.result)
+      throw r && !r.problems.length && !r.moved.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
     const fresh = r.changed.filter((p) => !before.has(p));
     const spec = fresh.filter((p) => under(p, c.specDir));
     // spec.md sections 6.20.6 and 6.25.4: the reason of another part stays. This part writes its question or plan change row and its
@@ -2120,6 +2122,8 @@ export function createLoop(opts: LoopOptions) {
     }
     if (!out) throw new Halt();
     if (!out.result) {
+      // git-deny.md fix F: the app restored the git state. The abort resets every repository.
+      if (out.moved.length) throw new UpdateAbort(movedReason(out.moved));
       const bad = out.problems[0];
       if (bad) throw new UpdateAbort(`Claude changed ${bad.path}, which has no conflict`);
       throw new StepFailed(out.text ?? "The resolve step failed.");

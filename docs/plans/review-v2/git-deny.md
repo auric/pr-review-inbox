@@ -1,6 +1,6 @@
 # Git deny gap in task steps with Bash
 
-Status: analysis of 2026-11-10 against main 2871ce8, after Gate B34 (integration-check.md SU21). Not built.
+Status: analysis of 2026-11-10 against main 2871ce8, after Gate B34 (integration-check.md SU21). Fixes B, E, and F are built (spec.md section 6.8, AC-B172 to AC-B178). A, C, and D stay skipped. G is not built.
 
 ## Problem
 
@@ -32,3 +32,10 @@ In Unrestricted and Most commands, the deny list refuses `git --version`, but `b
 - bun tests prove E and F without the CLI: plant `insteadOf` in a temp cache and push to a fake server, which must get no Authorization header. A planted commit must block the step.
 - A real-CLI gate must prove B, whether `--restricted` refuses `-c credential.helper`, and whether the CLI sandbox exists on Windows.
 - Not proven: what the credential manager holds; that Bash `cat` honors Read deny rules; that a planted `core.fsmonitor` or filter runs when the app runs `git status`.
+
+## Built
+
+- B: shellEnv sets GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL to an empty file beside shell.json (`src/server/tasks/shell.ts`). It is not the empty file of the app, because `git config --global` in a command writes to it.
+- E: the header is `http.<origin>/.extraHeader` (`provider.ts` gitAuth). git.ts refuses a git call with the header when the global file is not empty, when the git folder holds `commondir`, or when `config` or `config.worktree` holds a key outside CONFIG_KEYS. The app git never runs a hook or an fsmonitor: a planted `<cache>/hooks/reference-transaction` ran in an app fetch and saw the token before this change.
+- F: `src/server/tasks/gitstate.ts` saves the refs and the git files of the part before each Claude step and restores them after it, file reads first. A watch in git.ts records the app git calls on the cache during the step, so parallel parts and reviews cause no false block.
+- Limits: a change that Claude makes while an app git call on the same cache runs counts as a change of the app. A planted config can still run a program in an app git call of another part during the step, before the restore; E keeps the token out of it. Code that Claude runs can still read the user login and ssh keys (G). When a ref cannot come back, the task stops and the branch can hold the commit of Claude.
