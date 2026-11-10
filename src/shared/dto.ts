@@ -1602,6 +1602,8 @@ export type TaskPartDto = {
   lower: { key: string; how: "merge" | "squash" | "other" } | null;
   gate: { pass: boolean; why: string } | null;
   wait: string | null;
+  // spec.md section 6.25: the reason that waits in this part row while TaskDto.blocked holds the reason of another part.
+  blocked: TaskBlocked | null;
 };
 
 // A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a
@@ -1689,6 +1691,8 @@ export type TaskRowDto = {
   state: TaskState;
   size: TaskSize | null;
   blocked: TaskBlocked | null;
+  // spec.md section 6.25: the number of part reasons that wait behind blocked.
+  queued: number;
   version: number;
   updatedAt: number;
   closedAt: number | null;

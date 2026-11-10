@@ -27,7 +27,9 @@ export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
   if (r.state === "stopped") return { text: "Stopped", needsYou: true };
   if (r.blocked) {
     if (r.state === "interview") return { text: "Needs you: answer the questions", needsYou: true };
-    return { text: NEEDS[r.blocked.kind], needsYou: r.blocked.kind !== "slot" };
+    // spec.md section 6.25.6: the reasons of other parts that wait behind the first one.
+    const more = r.queued > 0 ? `, and ${r.queued} more` : "";
+    return { text: `${NEEDS[r.blocked.kind]}${more}`, needsYou: r.blocked.kind !== "slot" };
   }
   if (r.state === "interview") return { text: "Reading the task", needsYou: false };
   if (r.state === "spec_draft")

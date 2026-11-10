@@ -47,6 +47,7 @@ import {
   prBuild,
   prName,
   prRowLook,
+  questionPart,
   runningStep,
   type SubRow,
   stoppedSend,
@@ -331,9 +332,12 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return send({ kind });
       case "continue":
         return send({ kind: "resume" });
-      case "see-why":
+      case "see-why": {
         setTab("log");
-        return t.blocked?.step && focus(stepId(t.blocked.step));
+        // spec.md section 6.25.6: a part with a waiting reason shows its own step.
+        const step = (subs && part?.blocked ? part.blocked : t.blocked)?.step;
+        return step && focus(stepId(step));
+      }
       case "keep-size":
         return send({ kind: "keep" });
       case "change-limit":
@@ -782,6 +786,7 @@ function Content(props: {
           <QuestionsForm
             key={open.map((x) => x.id).join(",")}
             questions={open}
+            label={(q) => questionPart(t, q)}
             busy={busy}
             onSend={(answers) => props.onSend({ kind: "answers", input: { answers } })}
             onRecommended={() => props.onSend({ kind: "answers", input: { answers: [], recommended: true } })}

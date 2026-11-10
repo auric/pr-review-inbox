@@ -100,19 +100,8 @@ const jiraStatus = (set?: { key: string; category: "new" | "indeterminate" | "do
 // The text of the Task view without its Details tabs. The tabs show the plan files, which the runner writes.
 const screenText = async (page: Page) => (await page.locator('[data-task] > :not([aria-label="Details"])').allInnerTexts()).join("\n");
 
-test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built, its PR, the rows, and Move in Jira", async ({ page }) => {
-  test.setTimeout(420_000);
-  await control("claude", {
-    stream: "task",
-    interview: { done: true, summary: "Two sub-tasks need code. ABC-12 has a PR.", questions: [], unknowns: [], coverage: NO_COVERAGE },
-    spec: SPEC,
-    review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
-    seq: {
-      "implement:tests": [{ writes: [{ path: "repo/tests/abc-13.test.ts", text: FLUSH_TEST }] }],
-      "implement:implement": [{ writes: [{ path: "repo/FLUSH.md", text: "# ABC-13 flushes first\n" }] }],
-      "implement:fix": [{ writes: [{ path: "repo/FLUSH.md", text: "# ABC-13 flushes first\n" }] }],
-    },
-  });
+// The token, the Jira site, the clone, the task settings, and the sub-task scenario with the tracked PR of ABC-12.
+async function prepare(page: Page): Promise<{ pr: number }> {
   await openApp(page);
   await page.getByLabel("Bitbucket URL").fill(FAKE_URL);
   await page.getByLabel("Access token").fill(E2E_TOKEN);
@@ -136,6 +125,23 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
   const tracked = await ask<{ pr: number }>("subtasks", { openPr: true });
   expect(tracked.pr).toBeGreaterThan(0);
   await page.reload();
+  return tracked;
+}
+
+test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built, its PR, the rows, and Move in Jira", async ({ page }) => {
+  test.setTimeout(420_000);
+  await control("claude", {
+    stream: "task",
+    interview: { done: true, summary: "Two sub-tasks need code. ABC-12 has a PR.", questions: [], unknowns: [], coverage: NO_COVERAGE },
+    spec: SPEC,
+    review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
+    seq: {
+      "implement:tests": [{ writes: [{ path: "repo/tests/abc-13.test.ts", text: FLUSH_TEST }] }],
+      "implement:implement": [{ writes: [{ path: "repo/FLUSH.md", text: "# ABC-13 flushes first\n" }] }],
+      "implement:fix": [{ writes: [{ path: "repo/FLUSH.md", text: "# ABC-13 flushes first\n" }] }],
+    },
+  });
+  const tracked = await prepare(page);
 
   // 1. The Build form (AC-B72): the parent has open sub-tasks, so "Build the sub-tasks, one PR each" starts selected. Each open
   // sub-task lists its files with a box.
@@ -301,4 +307,112 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
   expect(await parts()).toBe(4);
   expect((await taskRemote()).creates).toHaveLength(1);
   expect((await jiraStatus()).transitions).toEqual({ "ABC-13": ["21"] });
+});
+
+const WAIT_TEST = `import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+test("WAIT.md names ABC-14", () => expect(readFileSync("WAIT.md", "utf8")).toContain("ABC-14"));
+`;
+// An implement result that asks one question with two options.
+const asks = (text: string) => ({
+  summary: "s",
+  done: false,
+  tests: [],
+  question: {
+    text,
+    why: "Callers use it.",
+    options: [
+      { label: "Keep", detail: "No change for callers." },
+      { label: "Rename", detail: "Clearer." },
+    ],
+    recommended: 0,
+  },
+  specChange: "",
+  notes: [],
+  coverage: NO_COVERAGE,
+});
+
+test("spec.md section 6.25 (AC-B156): two parts that build at once both ask; both rows show, and one submit answers both", async ({
+  page,
+}) => {
+  test.setTimeout(420_000);
+  // Each part gets its own runs by the files of its plan. Both tests steps run before the first question comes, and ABC-14 asks later.
+  const build = (key: string, file: string, testText: string, delayMs: number, question: string) => ({
+    when: file,
+    seq: {
+      "implement:tests": [
+        { delayMs, implement: asks(question) },
+        { writes: [{ path: `repo/tests/${key.toLowerCase()}.test.ts`, text: testText }] },
+      ],
+      "implement:implement": [{ writes: [{ path: `repo/${file}`, text: `# ${key}\n` }] }],
+      "implement:fix": [{ writes: [{ path: `repo/${file}`, text: `# ${key}\n` }] }],
+    },
+  });
+  await control("claude", {
+    stream: "task",
+    interview: { done: true, summary: "Two sub-tasks need code. ABC-12 has a PR.", questions: [], unknowns: [], coverage: NO_COVERAGE },
+    spec: SPEC,
+    review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
+    match: [
+      build("ABC-13", "FLUSH.md", FLUSH_TEST, 4000, "Flush before the write lock?"),
+      build("ABC-14", "WAIT.md", WAIT_TEST, 5500, "Measure the wait in ms?"),
+    ],
+  });
+  await prepare(page);
+  await page.getByRole("button", { name: /^Tasks: / }).click();
+  await page.getByRole("button", { name: "Build a Jira task" }).click();
+  const form = page.getByRole("form", { name: "Build a Jira task" });
+  await form.getByLabel("Jira key").fill("ABC-10");
+  await pickRepo(form, "PROJ1/sample-repo-2");
+  await form.getByRole("button", { name: "Read the task" }).click();
+  await expect(form.getByRole("radio", { name: "Build the sub-tasks, one PR each" })).toBeChecked();
+  await form.getByRole("button", { name: "Build this task" }).click();
+  await expect(page).toHaveURL(/\/tasks\/\d+$/);
+  const id = Number(new URL(page.url()).pathname.split("/").pop());
+  await expect(status(page)).toHaveText("The plan is ready: 4 sub-tasks, 2 to build, about 300 changed lines.", { timeout: 90_000 });
+  await expect(page.getByLabel("Parts that build at once")).toHaveValue("2");
+  // The tracked PR of ABC-12 is open, so 3 open PRs let ABC-13 and ABC-14 build at the same time.
+  await page.getByLabel("Open PRs at once").fill("3");
+  await page.locator("label", { has: page.getByRole("radio", { name: "Other…", exact: true }) }).click();
+  await page.getByLabel("Prefix", { exact: true }).fill("task/");
+  await page.getByRole("checkbox", { name: "I understand" }).check();
+  await primary(page).click();
+
+  // Both parts ask. The question of ABC-13 holds the task, and the question of ABC-14 waits in its row. Each row names the user.
+  await expect(status(page)).toHaveText("Needs you: Claude asks: Flush before the write lock?", { timeout: 180_000 });
+  await expect(row(page, "ABC-14")).toContainText("Needs you: Claude asks: Measure the wait in ms?", { timeout: 60_000 });
+  for (const key of ["ABC-13", "ABC-14"]) await expect(row(page, key)).toContainText("Who acts: You");
+  await expect(primary(page)).toHaveText("Answer the question");
+  const questions = page.getByRole("form", { name: "Questions" });
+  await expect(questions.getByRole("group")).toHaveCount(2);
+  await expect(questions.getByRole("group").first()).toContainText(/ABC-13 \(\d of 3\)\s*Flush before the write lock\?/);
+  await expect(questions.getByRole("group").last()).toContainText(/ABC-14 \(\d of 3\)\s*Measure the wait in ms\?/);
+  // The view of the waiting part says whom to act on first and has no primary button.
+  await row(page, "ABC-14")
+    .getByRole("button", { name: /^ABC-14/ })
+    .click();
+  await expect(status(page)).toHaveText("Needs you: Claude asks: Measure the wait in ms?");
+  await expect(page.getByText(/^Act on ABC-13 \(\d of 3\) first\.$/)).toBeVisible();
+  await expect(primary(page)).toHaveCount(0);
+  await row(page, "ABC-13")
+    .getByRole("button", { name: /^ABC-13/ })
+    .click();
+  await questions
+    .getByRole("group")
+    .first()
+    .getByRole("radio", { name: /^Rename/ })
+    .check();
+  await questions.getByRole("button", { name: "Send answers" }).click();
+
+  // One submit answers both questions. Each part builds again and waits for its PR click.
+  await expect(row(page, "ABC-13")).toContainText("Ready. Open its PR.", { timeout: 240_000 });
+  await expect(row(page, "ABC-14")).toContainText("Ready. Open its PR.", { timeout: 240_000 });
+  const dto = (await api(page, "GET", `/api/tasks/${id}`)).json as {
+    queued: number;
+    questions: { source: string; answer: { choice: number | null } | null }[];
+  };
+  expect(dto.queued).toBe(0);
+  expect(dto.questions.filter((q) => q.source === "loop").map((q) => q.answer?.choice)).toEqual([1, 0]);
+  expect((await taskRemote()).creates).toEqual([]);
+  expect(UX2.exec(await screenText(page))).toBeNull();
 });

@@ -945,7 +945,7 @@ Task states (task.state):
 | failed | yes | yes | yes | An error that Resume cannot fix, such as a deleted repository. |
 | stopped | yes | yes | yes | The user stopped it, or a restart or usage limit stopped it. Resume continues. |
 
-task.blocked holds the reason when the loop waits for the user: {kind: "question" | "red" | "blocker" | "budget" | "size" | "spec_change" | "denied_path" | "push" | "slot" | "preflight" | "update" | "error", step, text}. preflight comes from section 6.16.7. update comes from section 6.18.4. It is null while Claude or the app works, and while the app waits for colleagues.
+task.blocked holds the reason when the loop waits for the user: {kind: "question" | "red" | "blocker" | "budget" | "size" | "spec_change" | "denied_path" | "push" | "slot" | "preflight" | "update" | "error", step, text}. preflight comes from section 6.16.7. update comes from section 6.18.4. It is null while Claude or the app works, and while the app waits for colleagues. In a task with sub-tasks, it holds the first reason, and the reasons of other parts wait in task_part.blocked_json (section 6.25).
 
 Part states (task_part.state): planned → implementing → self_reviewed → pr_open → changes_requested → approved → merged. Side states: declined, abandoned (a spike, or a part that a replan removed). approved means the PR gate passed: approvals, no "Needs work", no open blocker task, and builds green or none. A new colleague comment or a "Needs work" moves approved back to changes_requested.
 
@@ -1015,6 +1015,7 @@ CREATE TABLE task_part (
   pr INTEGER REFERENCES pull_request (id) ON DELETE SET NULL, remote_pr INTEGER,
   state TEXT NOT NULL CHECK (state IN ('planned','implementing','self_reviewed','pr_open','changes_requested','approved','merged','declined','abandoned')),
   head TEXT, pushed TEXT, lines INTEGER, usage_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  blocked_json TEXT,         -- section 6.25: the reason of this part that waits behind task.blocked_json (048_task_part_blocked.sql)
   UNIQUE (task, ord)
 );
 
@@ -2096,7 +2097,7 @@ Parts at the same time (user decision of 2026-11-02):
 
 - Worktrees: each part has its own folder `tasks/<db>/<task>/part-<ord>/` and its own branch. The bare cache is shared. Every write to the cache (init, fetch, `worktree add`, `update-ref`, the Continue fetch) runs under the per-cache lock of workspace.ts `locked`. The loop starts the parts one after another, so their branch names and their start fetches never run at the same time. Commits in two worktrees write different branch refs, and git locks each ref.
 - Run slots: with atOnce 2 or more, every Claude step of a part runs beside the review run slot with its own runner (ReviewJobs.taskRun with extra). One part runs at most one step at a time, so a task runs at most atOnce Claude processes. A review, an ask, or another run never waits for them, and they never wait for it. With atOnce 1, the steps take the one run slot as before (design.md B12, AC-B18). The limit is per task.
-- Reasons: a task holds one reason. The first reason of a part stays. Each other part halts at its next step: the step that runs ends, and its run is not cancelled. A part that halts on a reason of its own while the task holds another reason writes no reason, no question, and no plan change. It finds them again after the resume. A pause and a wait for the run slot hold no part: Pause stops every part at the gate before its next Claude step, and Resume opens all gates.
+- Reasons: task.blocked_json holds the first reason. The first reason of a part stays. Each other part halts at its next step: the step that runs ends, and its run is not cancelled. A part that gets a reason with a step while the task holds the reason of another part keeps it in its own row, with its question or plan change row (section 6.25). A reason with no step is not kept, and the part finds it again after the resume. A pause and a wait for the run slot hold no part: Pause stops every part at the gate before its next Claude step, and Resume opens all gates.
 - Resume, an answer, and every new start of the loop: each part in implementing goes back to its last commit first, with the other changes saved as a patch (section 6.7, Resume). Then the pre-flight runs for each part, and the parts build again. Continue of a pause is the exception: every part halted at its gate between two steps, so each part keeps its changes (section 6.7, Pause after this step).
 - Stop ends the runs of every part (ReviewJobs.cancelTask) and kills their checks. Close still needs Stop first.
 - The task state stays implementing while any part builds. The step strip counts as before. Tell Claude, an update, "Fix these too", and the other user actions get 409 while any part builds, as they did while one part built.
@@ -2885,6 +2886,71 @@ Check agent (`planCheckAgent(p, budget, subtasks)`; description "Read-only check
 6. Commit search scope: the history of the target branch only. Found branches already appear in subtasks.md.
 7. related-work.md for the interview: not now. Reconsider after smoke UP.
 
+### 6.25 Reasons of parts that build at the same time (docs/plans/review-v2/queued-reasons.md, audit fix 6)
+
+pushback.md reserves section 6.23, and add-repo.md reserves section 6.24 and AC-B105 to AC-B146.
+
+#### 6.25.1 Rule
+
+- A part can get a reason that names a step while the task holds the hard reason of another part. That reason waits in the part row. The part writes its question row, plan change row, or allow request as usual, then halts.
+- A reason with no step is not kept, for example budget, preflight, wait for the merge, or a step-less error. The part finds it again at the resume, and no Claude run is lost.
+- A pause and a wait for the run slot never wait in a part row. A part holds at most one reason.
+- A red check result of a part still gives the part its reason while only the reason of another part holds the task. A green result halts the part as before.
+
+#### 6.25.2 Data
+
+048_task_part_blocked.sql: `ALTER TABLE task_part ADD COLUMN blocked_json TEXT;`. Existing task.blocked_json values stay as the first reason. There is no backfill.
+
+#### 6.25.3 Writes
+
+- The part of a reason is `part`, else the part of `step`, the same rule as currentPart.
+- holdBlocked: with no reason, or a soft one, it sets the reason as before. Else it writes the reason to the part row when the reason names a step, its part is not the part of the first reason, and that row is empty. The write moves the task version.
+- setBlocked(null) moves the first non-empty part row, by ord, into task.blocked_json and clears that row, in one transaction. moreTime and setSettings do the same. keep skips the move, for "Run setup again".
+- Every task state change out of implementing clears every part row: Stop, a failed task, ready, and done.
+
+#### 6.25.4 Actions
+
+- After an action clears its reason, the loop starts only when task.blocked_json is null after the move. Else the action answers as before, and no driver starts. This applies to answer, allow, limit, spec-change accept and reject, resume, wait for the merge, and the base branch change.
+- One answer submit answers every open loop question. It clears each part row question whose step owns an answered question. It clears the first reason only when the step of that reason owns an answered question. Else the first reason stays, and the version moves.
+- Change the limit and Keep one PR also clear every part row of kind size. A part over the new limit stops again at its size check.
+
+#### 6.25.5 Other actions
+
+- Stop removes every reason. Resume after Stop builds each part again from its last commit.
+- A restart keeps every reason, because recovery stops only a task with no reason or with a step that ran.
+- Pause works as before, and a hard reason replaces the pause.
+- Tell Claude answers 409 "Another part waits for you. Act on each reason first." while any part row holds a reason. The send restart of an answer or an allow takes the first open question only.
+- Run setup again answers 409 "This part waits for you. Act on the first reason first." for a part whose row holds a reason. Else it clears the first reason with keep. A green run ends only the setup reason of its own part. The next reason then moves up, and the run builds only when no reason is left.
+- Dismiss acts in state ready only, and a task leaves implementing with no waiting reason. So Dismiss never moves a waiting reason up.
+- Update, Fix these too, Open the PR, and the scheduler already need task.blocked_json to be null.
+
+#### 6.25.6 UI
+
+- TaskPartDto.blocked carries the reason in the part row. TaskRowDto.queued carries the count of waiting reasons.
+- Sub-task list: a building part with a reason, first or waiting, shows the reason text with the actor "You". Rows stay in part order.
+- The view of a part with a waiting reason shows its text as the status, with the detail "Act on <part> first.". It has no primary button. More holds See why (for its own step) and Stop.
+- A held part with no reason shows "<part> waits until you act on <part>." instead of "Claude builds <part>.".
+- The Questions form shows every open loop question. In a task with sub-tasks, each loop question shows its part label.
+- The Tell Claude box shows nothing while a part waits. "Run setup again" is hidden for a part with a waiting reason.
+- Task list row: "<text>, and N more".
+
+#### 6.25.7 Notifications
+
+Each new reason, first or waiting, gives one needs_you event. Moving a reason up gives no event: noteTaskWaits skips a wait whose reasons are fewer than the reasons of the last wait and all among them.
+
+#### 6.25.8 Acceptance criteria
+
+1. AC-B147. Two parts build. Part 1 asks a question, and part 2 asks later. Both question rows exist. task.blocked names part 1, and the part 2 row names part 2. No other implement call runs (concurrent.test.ts).
+2. AC-B148. One answer submit with both answers clears both reasons. Each part runs its step exactly once more. answers.md holds both answers.
+3. AC-B149. Part 3 proposes a plan change while part 1 asks. After the answer, the plan change is the first reason, no driver runs, and the call count does not change. Accept commits the change on the part 3 branch, and every part builds.
+4. AC-B150. A waiting allow request and a waiting denied path each save their patch, and the part worktree is at its last commit. Each one becomes the first reason in turn.
+5. AC-B151. Resume on a first red or denied reason with another reason waiting answers 200, moves the waiting reason up, and starts no driver. Wait for the merge, Change the limit, an allow choice, and Reject start no driver either.
+6. AC-B152. Stop clears task.blocked_json and every part row. Resume builds every part from its last commit. A restart keeps every reason.
+7. AC-B153. Tell Claude and Run setup again on a waiting part answer 409 with their sentences. With two red setups, a green Run setup again on the first part moves the second reason up and builds nothing. A second Run setup again builds every part.
+8. AC-B154. A budget, preflight, or wait-for-merge reason of another part leaves its row empty (tests/tasks/tasks.test.ts).
+9. AC-B155. After the migration, a task with blocked_json keeps it, and part rows read NULL (tests/storage/db.test.ts). Each new reason gives one needs_you event, and moving a reason up gives none (tests/tasks/notify.test.ts).
+10. AC-B156. The UI model rows of section 6.25.6 have tests in tests/web/tasks-model.test.ts. One e2e test in task-subtasks.e2e.ts covers two parts that ask: both rows show, and one submit answers both.
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule
@@ -2988,6 +3054,7 @@ Large task (a feature with an API change, 4 parts):
 | next free number, `0NN_task_subtasks.sql` (WP-ST2) | `ALTER TABLE task ADD COLUMN subtasks`; create task_subtask; task_part adds keys_json, start_mode, after_part, base_commit, spec_dir, adopted, override; task_file adds issue (section 6.20.8). No rebuild. |
 | 039_task_files.sql (WP-MR2) | `ALTER TABLE task_part ADD COLUMN files INTEGER;` and `ALTER TABLE task_pr ADD COLUMN files INTEGER;` (section 6.16.9). No rebuild. |
 | 046_task_run_checks.sql | `ALTER TABLE repo_task_settings ADD COLUMN run_checks INTEGER NOT NULL DEFAULT 0 CHECK (run_checks IN (0, 1));` (section 6.21.1). No rebuild. |
+| 048_task_part_blocked.sql | `ALTER TABLE task_part ADD COLUMN blocked_json TEXT;` (section 6.25.2). No rebuild and no backfill. |
 | next free number, autopilot (on hold) | Rebuild review_run with kind adding 'autopilot' and the column autopilot_json. Rebuild event with kind adding 'autopilot_draft', 'autopilot_posted', 'dependency_merged'. post gains auto, not_before, deleted_at. Create pr_autopilot, autopilot_queue, autopilot_turn, pr_dependency (section 11.11). pr_note comes from 031. It takes the next free number when part 7 resumes. |
 
 db.test.ts per migration: the version number, a database of the version before with runs, events, items, posts, fix rows, and consult rows keeps every child row; foreign_key_check is empty; the CHECK takes the new kinds and refuses a bogus one; a second open changes nothing.

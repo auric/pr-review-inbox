@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 47;
+const LATEST = 48;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1644,6 +1644,50 @@ test("migration from a version-46 database: each settings row stays, and shell_m
     expect(() => db.run("UPDATE repo_task_settings SET shell_mode = 'all'")).toThrow(/CHECK/);
     expect(() => db.run("UPDATE repo_task_settings SET bash_timeout_sec = 0")).toThrow(/CHECK/);
     expect(() => db.run("INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ('P', 'a', 9)")).toThrow(/UNIQUE/);
+  } finally {
+    db.close();
+  }
+});
+
+// 048_task_part_blocked.sql: spec.md section 6.25.2 (AC-B155). A stored reason stays the first reason, and each part row reads NULL.
+test("migration from a version-47 database: task.blocked_json stays, and task_part.blocked_json is NULL", () => {
+  const path = join(dir, "v47.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+    "041_build_status.sql",
+    "042_task_subtasks.sql",
+    "043_run_events.sql",
+    "044_task_shell.sql",
+    "045_task_setup.sql",
+    "046_task_run_checks.sql",
+    "047_task_unrestricted.sql",
+  ]);
+  old.exec("PRAGMA user_version = 47");
+  const reason = JSON.stringify({ kind: "question", step: 3, text: "Needs you: Claude asks: Keep the old name?" });
+  old
+    .query(`INSERT INTO task (id, project, repo, key, title, state, target_branch, spec_dir, blocked_json, subtasks, created_at, updated_at)
+      VALUES (1, 'P', 'a', 'ABC-10', 'Speed up the cache', 'implementing', 'main', 'specs/ABC-10/', $b, 1, 1, 1)`)
+    .run({ b: reason });
+  old.exec(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+    VALUES (1, 1, 'single', 'One', 'feature/ABC-11', 'main', 'implementing', 1, 1), (1, 2, 'single', 'Two', 'feature/ABC-12', 'main', 'implementing', 1, 1)`);
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("SELECT blocked_json FROM task").all()).toEqual([{ blocked_json: reason }]);
+    expect(db.query("SELECT blocked_json FROM task_part ORDER BY ord").all()).toEqual([{ blocked_json: null }, { blocked_json: null }]);
   } finally {
     db.close();
   }

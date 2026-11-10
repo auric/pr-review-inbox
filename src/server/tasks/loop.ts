@@ -92,6 +92,7 @@ import {
   PAUSED,
   partDocsOf,
   partNames,
+  partOf,
   repoSettings,
   saveAllow,
   scheduleOf,
@@ -114,6 +115,7 @@ import {
   updateBase,
   updateTarget,
   WORKING,
+  waitingPart,
 } from "./tasks";
 import {
   type BaseMove,
@@ -180,6 +182,8 @@ const REJECTED = "The user rejected the change.";
 const AGAIN = "Runs again without the plan change.";
 // spec.md section 6.18.2, Dismiss: the reasons on a built part whose own action the server takes in state implementing only.
 const NO_DISMISS = new Set<TaskBlocked["kind"]>(["spec_change", "allow", "update", "slot"]);
+// spec.md section 6.25.5: the 409 of "Run setup again" on a part whose row holds a reason.
+const SETUP_WAITS = "This part waits for you. Act on the first reason first.";
 
 // The loop stops here: a reason now blocks the task, or the task stopped. The reason is already stored.
 class Halt extends Error {}
@@ -356,6 +360,7 @@ type PartRow = {
   spec_dir: string | null;
   adopted: number;
   override: number;
+  blocked_json: string | null;
 };
 
 type Ctx = {
@@ -392,7 +397,7 @@ type DriverMode = "build" | "instruct" | "update" | "setup";
 
 const Q = {
   parts: `SELECT id, ord, kind, title, branch, base_branch, state, head, pushed, keys_json, start_mode, after_part, base_commit, spec_dir,
-    adopted, override FROM task_part WHERE task = $task ORDER BY ord`,
+    adopted, override, blocked_json FROM task_part WHERE task = $task ORDER BY ord`,
   // spec.md section 6.20.6, Start of a part: its branch, its base branch and commit, and the lease of Continue.
   partStart: `UPDATE task_part SET branch = $branch, base_branch = $base, base_commit = $commit, pushed = $pushed, updated_at = $now
     WHERE id = $id AND state = 'planned'`,
@@ -416,6 +421,10 @@ const Q = {
       $recommended, $step, $now)`,
   openLoop: "SELECT * FROM task_question WHERE task = $task AND source = 'loop' AND answer_json IS NULL ORDER BY id",
   answer: "UPDATE task_question SET answer_json = $answer, answered_at = $now WHERE id = $id AND answer_json IS NULL",
+  // spec.md section 6.25.4: the waiting reasons that an answer or a new line limit ends.
+  clearAsked: `UPDATE task_part SET blocked_json = NULL WHERE task = $task AND json_extract(blocked_json, '$.kind') = 'question'
+    AND json_extract(blocked_json, '$.step') = $step`,
+  clearSize: "UPDATE task_part SET blocked_json = NULL WHERE task = $task AND json_extract(blocked_json, '$.kind') = 'size'",
   step: "SELECT id, part, kind, item, state, detail_json FROM task_step WHERE id = $id AND task = $task",
   rowAttempt: "SELECT attempt FROM task_step WHERE id = $id",
   stepState: "SELECT state FROM task_step WHERE id = $id",
@@ -580,6 +589,18 @@ export function createLoop(opts: LoopOptions) {
     const t = taskRow(c.db, c.id);
     return !t || blocks(t);
   };
+  // spec.md section 6.25.4: the row of the part of step can keep a reason while the task holds the reason of another part.
+  const keeps = (c: Pick<Ctx, "db" | "id">, step: number) => {
+    const t = taskRow(c.db, c.id);
+    return !!t && waitingPart(c.db, t, { kind: "question", step, text: "" }) !== null;
+  };
+  // Only the reason of another part halts the build now, so a red result of this part can still wait in its row (spec.md section 6.25.1).
+  const heldByOther = (c: Pick<Ctx, "db" | "id">) => {
+    const t = taskRow(c.db, c.id);
+    return !closing && !stopping.has(c.id) && t?.state === "implementing" && blocks(t);
+  };
+  // spec.md section 6.25.4: after an action clears its reason, the loop starts only when no other reason moved up.
+  const free = (db: Database, id: number) => taskRow(db, id)?.blocked_json === null;
   // spec.md section 6.20.6: a task that builds two or more parts at the same time runs its Claude steps beside the run slot.
   const beside = (c: Pick<Ctx, "db" | "id" | "t">) => buildsAtOnceOf(taskRow(c.db, c.id) ?? c.t) > 1;
   function guard(c: Ctx) {
@@ -853,7 +874,7 @@ export function createLoop(opts: LoopOptions) {
       }
       return;
     }
-    if (held(c)) throw new Halt();
+    if (held(c) && !keeps(c, r.step)) throw new Halt();
     await undo(c.trees, c.db, c.id, r.step);
     const n = (c.db.query(Q.allowBlocks).get({ part: c.part.id }) as { n: number }).n;
     if (n >= ALLOW_BLOCKS_MAX) block(c, { kind: "error", step: r.step, text: TOO_MANY_ASKS });
@@ -875,8 +896,9 @@ export function createLoop(opts: LoopOptions) {
     if (!r?.result) throw r && !r.problems.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
     const fresh = r.changed.filter((p) => !before.has(p));
     const spec = fresh.filter((p) => under(p, c.specDir));
-    // spec.md section 6.20.6: the reason of another part stays, so this part writes no question or plan change row and halts.
-    if ((spec.length || r.result.question) && held(c)) throw new Halt();
+    // spec.md sections 6.20.6 and 6.25.4: the reason of another part stays. This part writes its question or plan change row and its
+    // reason to its part row, or it halts without them when that row cannot keep the reason.
+    if ((spec.length || r.result.question) && held(c) && !keeps(c, r.step)) throw new Halt();
     if (spec.length) {
       const attempt = (c.db.query(Q.rowAttempt).get({ id: r.step }) as { attempt: number }).attempt;
       const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "spec_change", item, attempt, state: "ok" }, now());
@@ -932,7 +954,7 @@ export function createLoop(opts: LoopOptions) {
       changed(c.id);
       if (r.status === "refused") block(c, { kind: "error", step: r.step, text: `Needs you: ${r.reason}` });
       if (r.commands.some((x) => x.stopped)) throw new Halt();
-      guard(c);
+      if (r.green || !heldByOther(c)) guard(c);
       return r;
     } finally {
       leave(aborts, c.id, ac);
@@ -1852,12 +1874,14 @@ export function createLoop(opts: LoopOptions) {
     const ofSetup = (b: TaskBlocked) =>
       b.kind === "red" &&
       b.step !== null &&
-      (db.query(Q.step).get({ id: b.step, task: id }) as { kind: string; item: string | null } | null)?.item === "setup";
+      (db.query(Q.step).get({ id: b.step, task: id }) as { kind: string; item: string | null } | null)?.item === "setup" &&
+      partOf(db, b) === partId;
     try {
       const t = taskRow(db, id) as TaskRow;
       const part = parts(db, id).find((p) => p.id === partId) as PartRow;
       await setup(await context(db, t, part, "setup"), true);
-      if (before && !ofSetup(before)) setReason(db, id, before);
+      // spec.md section 6.25.5: a green run ends only the setup reason of its own part, and the next waiting reason moves up.
+      if (before) setReason(db, id, ofSetup(before) ? null : before);
       // A green run of a building part lets the build go on. No reset: a reset that removes files deletes the setup mark.
       const cur = taskRow(db, id);
       if (cur?.state === "implementing" && cur.blocked_json === null && buildingAll(db, id).length && !stopping.has(id)) {
@@ -2192,7 +2216,7 @@ export function createLoop(opts: LoopOptions) {
         return null;
       })();
       if (error) return conflict(db, id, error);
-      kick(db, id);
+      if (free(db, id)) kick(db, id);
       changed(id);
       return { status: 200, task: dto(db, id) };
     },
@@ -2363,7 +2387,7 @@ export function createLoop(opts: LoopOptions) {
         });
       if (timeUp) moreTime(db, { task: id, version: t.version }, now());
       else if (b) setBlocked(db, { task: id, version: t.version }, null, now());
-      kick(db, id, true);
+      if (free(db, id)) kick(db, id, true);
       changed(id);
       return { status: 200, task: dto(db, id) };
     },
@@ -2373,7 +2397,8 @@ export function createLoop(opts: LoopOptions) {
     answer(db: Database, id: number, input: TaskAnswersInput): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
-      if (blockedOf(t)?.kind !== "question") return conflict(db, id, "No question waits for an answer.");
+      const first = blockedOf(t);
+      if (first?.kind !== "question") return conflict(db, id, "No question waits for an answer.");
       const open = db.query(Q.openLoop).all({ task: id }) as (QuestionRow & { step: number | null })[];
       if (!open.length) return conflict(db, id, "No question waits for an answer.");
       const given = new Map(input.answers.map((a) => [a.question, a]));
@@ -2400,13 +2425,17 @@ export function createLoop(opts: LoopOptions) {
             ? { choice: a.choice ?? null, text: a.text?.trim() ?? "" }
             : { choice: q.kind === "choice" ? q.recommended : null, text: "" };
           db.query(Q.answer).run({ id: q.id, answer: JSON.stringify(answer), now: at });
+          // spec.md section 6.25.4: one submit answers the waiting questions of other parts too.
+          if (q.step !== null) db.query(Q.clearAsked).run({ task: id, step: q.step });
         }
-        setBlocked(db, { task: id, version: t.version }, null, at);
+        // The first reason clears only when its step owns an answered question. Else it stays, and the version moves.
+        const own = first.step !== null && open.some((q) => q.step === first.step);
+        setBlocked(db, { task: id, version: t.version }, own ? null : first, at);
         const info = asked?.kind === "instruct" && open[0]?.step ? stepDetailOf(db, open[0].step).instruct : null;
-        return info && asked?.item ? resend(db, id, asked.item, info, at) : null;
+        return info && asked?.item && free(db, id) ? resend(db, id, asked.item, info, at) : null;
       })();
-      if (again === null) kick(db, id, true);
-      else start(db, id, () => driveInstruct(db, id, again), "instruct");
+      if (again !== null) start(db, id, () => driveInstruct(db, id, again), "instruct");
+      else if (free(db, id)) kick(db, id, true);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -2450,10 +2479,10 @@ export function createLoop(opts: LoopOptions) {
         setBlocked(db, { task: id, version: t.version }, null, at);
         // An instruct step runs again as a new send row, as after an answer (spec.md section 6.18.2).
         const info = asked?.kind === "instruct" ? stepDetailOf(db, input.step).instruct : null;
-        return info && asked?.item ? resend(db, id, asked.item, info, at) : null;
+        return info && asked?.item && free(db, id) ? resend(db, id, asked.item, info, at) : null;
       })();
-      if (again === null) kick(db, id, true);
-      else start(db, id, () => driveInstruct(db, id, again), "instruct");
+      if (again !== null) start(db, id, () => driveInstruct(db, id, again), "instruct");
+      else if (free(db, id)) kick(db, id, true);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -2466,13 +2495,17 @@ export function createLoop(opts: LoopOptions) {
       if (t.state !== "implementing" || blockedOf(t)?.kind !== "size") return conflict(db, id, "No part waits for the line limit.");
       if (drivers.has(id)) return conflict(db, id, BUSY);
       const s = taskSettingsOf(t);
-      setSettings(
-        db,
-        { task: id, version: t.version },
-        input.keep ? { ...s, keepOnePr: true } : { ...s, lineBudget: input.lineBudget },
-        now(),
-      );
-      kick(db, id, true);
+      // spec.md section 6.25.4: the new limit ends the waiting size reasons too. A part over it stops again at its size check.
+      db.transaction(() => {
+        db.query(Q.clearSize).run({ task: id });
+        setSettings(
+          db,
+          { task: id, version: t.version },
+          input.keep ? { ...s, keepOnePr: true } : { ...s, lineBudget: input.lineBudget },
+          now(),
+        );
+      })();
+      if (free(db, id)) kick(db, id, true);
       changed(id);
       return { status: 200, task: dto(db, id) };
     },
@@ -2504,8 +2537,10 @@ export function createLoop(opts: LoopOptions) {
       if (!WORKTREE.has(part.state) || part.adopted) return conflict(db, id, "This part has no worktree.");
       if (!repoSettings(db, t.project, t.repo).commands.some((x) => x.kind === "setup"))
         return conflict(db, id, "This repository has no setup command.");
+      // spec.md section 6.25.5: the setup run of a waiting part would end no reason of its own.
+      if (part.blocked_json !== null) return conflict(db, id, SETUP_WAITS);
       const before = blockedOf(t);
-      setBlocked(db, { task: id, version: t.version }, null, now());
+      setBlocked(db, { task: id, version: t.version }, null, now(), true);
       start(db, id, () => driveSetup(db, id, partId, before), "setup");
       changed(id);
       return { status: 202, task: dto(db, id) };
@@ -2530,8 +2565,8 @@ export function createLoop(opts: LoopOptions) {
       const sent = row.item === null ? null : (db.query(Q.lastSend).get({ part: part.id, item: row.item }) as { id: number } | null);
       const info = sent ? stepDetailOf(db, sent.id).instruct : null;
       const again = (send: number | null) => {
-        if (send === null) kick(db, id, !input.accept);
-        else start(db, id, () => driveInstruct(db, id, send), "instruct");
+        if (send !== null) start(db, id, () => driveInstruct(db, id, send), "instruct");
+        else if (free(db, id)) kick(db, id, !input.accept);
         changed(id);
         return { status: 200 as const, task: dto(db, id) };
       };
@@ -2547,7 +2582,7 @@ export function createLoop(opts: LoopOptions) {
         const send = db.transaction(() => {
           endStep(db, stepId, "cancelled", note(REJECTED, AGAIN), now());
           setBlocked(db, { task: id, version: t.version }, null, now());
-          return info && row.item ? resend(db, id, row.item, info, now()) : null;
+          return info && row.item && free(db, id) ? resend(db, id, row.item, info, now()) : null;
         })();
         return again(send);
       }
@@ -2589,7 +2624,7 @@ export function createLoop(opts: LoopOptions) {
         endStep(db, stepId, "ok", note("The user accepted the change."), now());
         const cur = taskRow(db, id) as TaskRow;
         setBlocked(db, { task: id, version: cur.version }, null, now());
-        return info && row.item ? resend(db, id, row.item, info, now()) : null;
+        return info && row.item && free(db, id) ? resend(db, id, row.item, info, now()) : null;
       })();
       return again(send);
     },
@@ -2684,7 +2719,7 @@ export function createLoop(opts: LoopOptions) {
       })();
       if (error) return conflict(db, id, error);
       log(`Task ${id}: the base branch of ${name} is now ${input.branch}.`);
-      kick(db, id, true);
+      if (free(db, id)) kick(db, id, true);
       changed(id);
       return { status: 200, task: dto(db, id) };
     },

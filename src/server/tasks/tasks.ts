@@ -191,6 +191,8 @@ const SQL = {
       OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id AND p.state = 'implementing'))
     ORDER BY t.id`,
   failSteps: "UPDATE task_step SET state = 'failed', ended_at = $now WHERE state IN ('waiting', 'running')",
+  // spec.md section 6.25.3: part rows hold reasons only while the task builds.
+  clearWaits: "UPDATE task_part SET blocked_json = NULL WHERE task = $id AND blocked_json IS NOT NULL",
   // spec.md section 6.18.4, Restart: an update that ran at the last stop. The loop aborts its rebase or merge and resets every repository
   // to the heads before it (loop.ts recoverUpdates).
   restartUpdates: `UPDATE task_step SET detail_json = json_insert(json_set(detail_json, '$.update.result', 'restart'), '$.notes[#]',
@@ -218,6 +220,7 @@ export function advance(db: Database, ref: TaskRef, event: TaskEvent, facts: Fac
     const [next] = transition(taskMachine, snapshot, event);
     const state = next.value as TaskState;
     write(db, SQL.setTask, { id: ref.task, version: ref.version, state, stopped: state === "stopped" ? row.state : null, now });
+    if (state !== "implementing") db.query(SQL.clearWaits).run({ id: ref.task });
     return { status: 200, state, version: ref.version + 1 };
   })();
 }
@@ -517,20 +520,51 @@ function patch(db: Database, id: number, version: number, p: Patch, now: number)
 
 const blocked = (b: TaskBlocked | null) => (b === null ? null : JSON.stringify(b));
 
-// Sets task.blocked_json (spec.md section 6.2) with the version check. Returns the new version.
-export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, now = Date.now()) =>
-  patch(db, ref.task, ref.version, { blocked_json: blocked(b) }, now);
+// spec.md section 6.25: the reason in the row of a part that waits while the task holds the reason of another part.
+const WAIT = {
+  first: "SELECT id, blocked_json FROM task_part WHERE task = $task AND blocked_json IS NOT NULL ORDER BY ord, id LIMIT 1",
+  clear: "UPDATE task_part SET blocked_json = NULL WHERE id = $id",
+  set: "UPDATE task_part SET blocked_json = $b WHERE id = $id AND task = $task AND blocked_json IS NULL",
+  count: "SELECT COUNT(*) AS n FROM task_part WHERE task = $task AND blocked_json IS NOT NULL",
+  stepPart: "SELECT part FROM task_step WHERE id = $id",
+};
+
+// The first waiting reason by part order leaves its row. Call it only in the transaction that writes it to task.blocked_json.
+function nextReason(db: Database, task: number): string | null {
+  const r = db.query(WAIT.first).get({ task }) as { id: number; blocked_json: string } | null;
+  if (r) db.query(WAIT.clear).run({ id: r.id });
+  return r?.blocked_json ?? null;
+}
+
+// The number of part rows that hold a waiting reason.
+export const waitingOf = (db: Database, task: number) => (db.query(WAIT.count).get({ task }) as { n: number }).n;
+
+// The part of a reason: b.part, else the part of b.step (spec.md section 6.25.3, as currentPart).
+export function partOf(db: Database, b: TaskBlocked | null): number | null {
+  if (!b) return null;
+  if (b.part !== undefined) return b.part;
+  return b.step === null ? null : ((db.query(WAIT.stepPart).get({ id: b.step }) as { part: number | null } | null)?.part ?? null);
+}
+
+// Sets task.blocked_json (spec.md section 6.2) with the version check. Returns the new version. spec.md section 6.25.3: a clear moves the
+// first waiting reason of a part up, unless keep.
+export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, now = Date.now(), keep = false) =>
+  db.transaction(() =>
+    patch(db, ref.task, ref.version, { blocked_json: b === null && !keep ? nextReason(db, ref.task) : blocked(b) }, now),
+  )();
 
 // spec.md section 6.7, Budgets: "Continue with 60 more min?". Each part of the task gets 60 more minutes, and the reason goes.
 export function moreTime(db: Database, ref: TaskRef, now = Date.now()): number {
   const s = settingsOf(taskRow(db, ref.task) as TaskRow);
   const settings = JSON.stringify({ ...s, partTimeMin: (s.partTimeMin ?? PART_TIME_MIN) + MORE_TIME_MIN });
-  return patch(db, ref.task, ref.version, { settings_json: settings, blocked_json: null }, now);
+  return db.transaction(() => patch(db, ref.task, ref.version, { settings_json: settings, blocked_json: nextReason(db, ref.task) }, now))();
 }
 
 // spec.md section 6.1, "Keep one PR" and "Change the limit": new task settings, and the size reason goes. Returns the new version.
 export function setSettings(db: Database, ref: TaskRef, s: TaskSettings, now = Date.now()): number {
-  return patch(db, ref.task, ref.version, { settings_json: JSON.stringify(s), blocked_json: null }, now);
+  return db.transaction(() =>
+    patch(db, ref.task, ref.version, { settings_json: JSON.stringify(s), blocked_json: nextReason(db, ref.task) }, now),
+  )();
 }
 export const taskSettingsOf = settingsOf;
 
@@ -627,6 +661,7 @@ export type PartRow = {
   spec_dir: string | null;
   adopted: number;
   override: number;
+  blocked_json: string | null;
 };
 type StepRow = {
   id: number;
@@ -670,6 +705,7 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
     state: t.state,
     size: t.size,
     blocked: b?.success ? b.data : null,
+    queued: waitingOf(db, t.id),
     version: t.version,
     updatedAt: t.updated_at,
     closedAt: t.closed_at,
@@ -778,10 +814,11 @@ export const WORKING = "Claude or the checks are working.";
 const BOX_REASONS = new Set<TaskBlocked["kind"]>(["red", "size", "blocker", "denied_path", "update"]);
 const HAS_WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 const BUILT = new Set<PartState>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
-const blockedOf = (t: TaskRow): TaskBlocked | null => {
-  const r = t.blocked_json === null ? null : taskBlocked.safeParse(JSON.parse(t.blocked_json));
+const parseBlocked = (json: string | null): TaskBlocked | null => {
+  const r = json === null ? null : taskBlocked.safeParse(JSON.parse(json));
   return r?.success ? r.data : null;
 };
+const blockedOf = (t: TaskRow): TaskBlocked | null => parseBlocked(t.blocked_json);
 
 // spec.md section 6.18.5: the newest base check of each task, by database. The loop writes it, and the Task view reads it. part: the
 // task_part of the check (spec.md section 6.20.10, the base check of each part).
@@ -978,20 +1015,44 @@ export const PAUSED = "Building is paused after the step. Continue?";
 export const softReason = (b: TaskBlocked | null) =>
   b !== null && (b.kind === "slot" || (b.kind === "question" && b.step === null && b.text === PAUSED));
 
-// Sets b unless the task already holds a reason that is not soft. A part that halts without its reason finds it again at the resume.
+// spec.md section 6.25.1: the part whose row keeps b while the task holds the hard reason of another part, else null. A reason with no
+// step, a pause, and a wait for the run slot never wait in a part row. A part holds at most one reason.
+export function waitingPart(db: Database, t: TaskRow, b: TaskBlocked): number | null {
+  if (b.step === null || softReason(b)) return null;
+  const part = partOf(db, b);
+  if (part === null || part === partOf(db, blockedOf(t))) return null;
+  const row = db.query("SELECT blocked_json FROM task_part WHERE id = $id AND task = $task").get({ id: part, task: t.id }) as {
+    blocked_json: string | null;
+  } | null;
+  return row && row.blocked_json === null ? part : null;
+}
+
+// Sets b unless the task already holds a reason that is not soft. Then b waits in the row of its part when that part can keep it
+// (spec.md section 6.25.3), and the task version moves. Else the part halts without its reason and finds it again at the resume.
 export function holdBlocked(db: Database, t: TaskRow, b: TaskBlocked, now = Date.now()): boolean {
-  if (t.blocked_json !== null && !softReason(blockedOf(t))) return false;
-  setBlocked(db, { task: t.id, version: t.version }, b, now);
-  return true;
+  if (t.blocked_json === null || softReason(blockedOf(t))) {
+    setBlocked(db, { task: t.id, version: t.version }, b, now);
+    return true;
+  }
+  return db.transaction((): boolean => {
+    const part = waitingPart(db, t, b);
+    if (part === null || db.query(WAIT.set).run({ id: part, task: t.id, b: JSON.stringify(b) }).changes !== 1) return false;
+    write(db, SQL.bump, { id: t.id, version: t.version, now });
+    return true;
+  })();
 }
 
 // spec.md section 6.20.2: the app never pushes to the branch of a PR that it did not create, and never changes it.
 export const ADOPTED = "This PR is in review outside the app. The app does not change it.";
+// spec.md section 6.25.5: the 409 of Tell Claude while a part row holds a reason.
+export const WAITING = "Another part waits for you. Act on each reason first.";
 
 // The part of a Tell Claude send (spec.md section 6.18.1), or the sentence of the 409 in a state without the box.
 export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string } {
   if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
   if (partId !== undefined && currentPart(db, t, partId)?.adopted) return { error: ADOPTED };
+  // spec.md section 6.25.5: an answer or an allow of a send restarts the send of the first question only.
+  if (waitingOf(db, t.id)) return { error: WAITING };
   const b = blockedOf(t);
   if (b && !BOX_REASONS.has(b.kind)) return { error: b.text };
   if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
@@ -1150,6 +1211,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       lower: lower && how ? { key: lower.name, how } : null,
       gate: partGate(db, p, approvals),
       wait: schedule?.waits.get(p.id) ?? null,
+      blocked: parseBlocked(p.blocked_json),
     };
   });
   const docs = docsOf(t);

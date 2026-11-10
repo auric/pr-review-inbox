@@ -1,6 +1,6 @@
 # Queued reasons per part (design, 2026-11-06)
 
-Status: design for audit fix 6 (docs/plans/review-v2/state-audit.md), written against main cf9973e. Nothing is built yet. It becomes spec.md section 6.25, because pushback.md reserves 6.23 and add-repo.md reserves 6.24. It takes AC-B147 to AC-B156, because add-repo.md uses numbers up to AC-B146. The tasks.md wave is WQR.
+Status: built (2026-11-09) as spec.md section 6.25, AC-B147 to AC-B156, migration 048_task_part_blocked.sql. The code differs in five points, which spec.md 6.25 records: a red check result of a held part still gives its reason; every move out of implementing clears the part rows; the Questions form shows every open loop question; a held part row of the sub-task list names the user only while it builds; and Dismiss needs no change. Design written against main cf9973e.
 
 ## Decision
 

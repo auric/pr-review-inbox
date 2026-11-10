@@ -170,6 +170,7 @@ function setClaude(c: ClaudeScenario) {
     implement: c.implement,
     review: c.review,
     seq: c.seq,
+    match: c.match,
     bySchema: c.bySchema ?? { verify: { fixture: CHECK_STREAM } },
     authMethod: c.login,
   });

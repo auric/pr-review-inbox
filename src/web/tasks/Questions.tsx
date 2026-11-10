@@ -31,6 +31,8 @@ export function answersOf(qs: TaskQuestionDto[], picks: Record<number, Pick>): T
 
 export function QuestionsForm(props: {
   questions: TaskQuestionDto[];
+  // spec.md section 6.25.6: the part of each loop question in a task with sub-tasks.
+  label?: (q: TaskQuestionDto) => string | null;
   busy: boolean;
   onSend: (answers: TaskAnswersInput["answers"]) => void;
   onRecommended: () => void;
@@ -62,10 +64,16 @@ export function QuestionsForm(props: {
       {questions.map((q, i) => {
         const p = picks[q.id] ?? { choice: null, text: "" };
         const why = `tq-${q.id}-why`;
+        const part = props.label?.(q);
         return (
           <FieldSet key={q.id} className="gap-2" data-invalid={missing === q.id || undefined}>
             <FieldLegend className="text-sm font-semibold">
               {questions.length > 1 && <span className="mr-1 text-muted-foreground">{i + 1}.</span>}
+              {part ? (
+                <Badge variant="soft" className="mr-1.5 align-middle">
+                  {part}
+                </Badge>
+              ) : null}
               {q.text}
             </FieldLegend>
             <FieldDescription id={why} className="m-0 text-sm">

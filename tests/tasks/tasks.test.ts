@@ -17,9 +17,22 @@ import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
+import { openDb } from "../../src/server/storage/db";
 import { pickProblem } from "../../src/server/tasks/files";
+import { insertStep } from "../../src/server/tasks/implement";
 import { type Docs, stepFile } from "../../src/server/tasks/plan";
-import { advance, setBlocked } from "../../src/server/tasks/tasks";
+import {
+  advance,
+  holdBlocked,
+  moreTime,
+  recoverTasks,
+  rowDto,
+  setBlocked,
+  setSettings,
+  type TaskRow,
+  taskDto,
+  taskRow,
+} from "../../src/server/tasks/tasks";
 import {
   type ApiError,
   type BranchCheckDto,
@@ -1606,4 +1619,91 @@ describe("the run-end notification at stop", () => {
     },
     SLOW,
   );
+});
+
+// docs/plans/review-v2/spec.md section 6.25 (AC-B154): the reason of a part waits in its row while the task holds the reason of another
+// part. A database only: no loop, no CLI.
+describe("reasons of parts that build at the same time (spec.md section 6.25)", () => {
+  type B = Parameters<typeof holdBlocked>[2];
+  function light() {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-queue-")));
+    dirs.push(dir);
+    const db = openDb(join(dir, "db.sqlite"));
+    cleanup.push(() => db.close());
+    const id = (
+      db
+        .query(`INSERT INTO task (project, repo, key, title, state, target_branch, spec_dir, subtasks, created_at, updated_at)
+          VALUES ('PROJ', 'repo', 'ABC-10', 'Speed up the cache', 'implementing', 'main', 'specs/ABC-10/', 1, 1, 1) RETURNING id`)
+        .get() as { id: number }
+    ).id;
+    const part = (ord: number) =>
+      (
+        db
+          .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+            VALUES ($task, $ord, 'single', 'Part', $branch, 'main', 'implementing', 1, 1) RETURNING id`)
+          .get({ task: id, ord, branch: `feature/ABC-1${ord}` }) as { id: number }
+      ).id;
+    const parts = [part(1), part(2), part(3)] as const;
+    const step = (p: number) => insertStep(db, { task: id, part: p, kind: "implement", state: "ok" }, 1);
+    const t = () => taskRow(db, id) as TaskRow;
+    const first = () => JSON.parse(t().blocked_json ?? "null") as B | null;
+    const rows = () =>
+      (db.query("SELECT blocked_json FROM task_part WHERE task = $id ORDER BY ord").all({ id }) as { blocked_json: string | null }[]).map(
+        (r) => (r.blocked_json === null ? null : (JSON.parse(r.blocked_json) as B)),
+      );
+    const ref = () => ({ task: id, version: t().version });
+    return { db, id, parts, step, t, first, rows, ref };
+  }
+
+  test("a reason with a step waits in its part row; a step-less reason, a slot, a full row, and the part of the first reason do not", () => {
+    const h = light();
+    const [p1, p2, p3] = h.parts;
+    const q1: B = { kind: "question", step: h.step(p1), text: "Needs you: Claude asks: Keep the old name?" };
+    expect(holdBlocked(h.db, h.t(), q1)).toBe(true);
+    expect(h.first()).toEqual(q1);
+    const v = h.t().version;
+    // AC-B154: a budget, a pre-flight, and a wait for the merge of another part name no step. A slot is soft. Part 1 holds the first reason.
+    const never: B[] = [
+      { kind: "budget", step: null, text: "Needs you: part 2 used its 120 min. Continue with 60 more min?" },
+      { kind: "preflight", step: null, text: "Needs you: the token cannot push." },
+      { kind: "error", step: null, part: p2, text: "Needs you: let ABC-12 wait for the merge of ABC-11." },
+      { kind: "slot", step: h.step(p2), text: "Waiting for the other run to finish." },
+      { kind: "red", step: h.step(p1), text: "Needs you: the tests of part 1 stay red." },
+    ];
+    for (const b of never) expect(holdBlocked(h.db, h.t(), b)).toBe(false);
+    expect(h.rows()).toEqual([null, null, null]);
+    expect(h.t().version).toBe(v);
+    const q2: B = { kind: "question", step: h.step(p2), text: "Needs you: Claude asks: Which flag name?" };
+    expect(holdBlocked(h.db, h.t(), q2)).toBe(true);
+    expect(h.t().version).toBe(v + 1);
+    // A part holds at most one reason.
+    expect(holdBlocked(h.db, h.t(), { kind: "red", step: h.step(p2), text: "Needs you: red." })).toBe(false);
+    const c3: B = { kind: "spec_change", step: h.step(p3), text: "Needs you: Claude proposes a change to the spec." };
+    expect(holdBlocked(h.db, h.t(), c3)).toBe(true);
+    expect([h.first(), ...h.rows()]).toEqual([q1, null, q2, c3]);
+    expect(rowDto(h.db, h.t()).queued).toBe(2);
+    expect(taskDto(h.db, h.t()).parts.map((p) => p.blocked)).toEqual([null, q2, c3]);
+
+    // keep clears the first reason and moves nothing ("Run setup again"). A plain clear moves the first waiting reason up, by part order.
+    setBlocked(h.db, h.ref(), null, 2, true);
+    expect([h.first(), ...h.rows()]).toEqual([null, null, q2, c3]);
+    setBlocked(h.db, h.ref(), q1, 3);
+    setBlocked(h.db, h.ref(), null, 4);
+    expect([h.first(), ...h.rows()]).toEqual([q2, null, null, c3]);
+    // A restart keeps every reason: no step ran, so recovery does not stop the task.
+    recoverTasks(h.db, 5);
+    expect([h.t().state, h.first(), ...h.rows()]).toEqual(["implementing", q2, null, null, c3]);
+    // moreTime and setSettings move the next reason up too.
+    moreTime(h.db, h.ref(), 6);
+    expect([h.first(), ...h.rows()]).toEqual([c3, null, null, null]);
+    expect(holdBlocked(h.db, h.t(), q1)).toBe(true);
+    setSettings(h.db, h.ref(), { keepOnePr: true }, 7);
+    expect([h.first(), ...h.rows()]).toEqual([q1, null, null, null]);
+    expect(rowDto(h.db, h.t()).queued).toBe(0);
+
+    // Stop removes every waiting reason. The stopped task keeps its first reason as before.
+    expect(holdBlocked(h.db, h.t(), q2)).toBe(true);
+    expect(advance(h.db, h.ref(), { type: "STOP" }, {}, 8).status).toBe(200);
+    expect([h.t().state, ...h.rows()]).toEqual(["stopped", null, null, null]);
+  });
 });

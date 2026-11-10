@@ -13,6 +13,7 @@ const SQL = {
   insert: "INSERT INTO task_event (task, kind, ref, created_at) VALUES ($task, 'needs_you', $ref, $now) ON CONFLICT DO NOTHING",
   // One statement, so two concurrent claims never return the same event.
   claim: "UPDATE task_event SET claimed_at = $now WHERE claimed_at IS NULL AND kind = 'needs_you' RETURNING id, task, created_at",
+  waits: "SELECT json_extract(blocked_json, '$.step') AS step FROM task_part WHERE task = $task AND blocked_json IS NOT NULL ORDER BY ord",
 };
 
 // The wait of each task at its last check, per database. null: the task did not wait.
@@ -26,7 +27,24 @@ function waitOf(db: Database, id: number): { wait: string; text: string } | null
   const s = rowStatus(row);
   if (!s.needsYou || row.closedAt !== null) return null;
   if (row.state === "stopped" && (row.blocked === null || row.blocked.text === RUN_CANCELLED)) return null;
-  return { wait: `${row.state}|${s.text}|${row.blocked?.step ?? ""}|${row.progress.part}`, text: s.text };
+  // spec.md section 6.25.7: the steps of the reasons that wait in part rows. A wait without them keeps the old form.
+  const queued = (db.query(SQL.waits).all({ task: id }) as { step: number | null }[]).map((r) => r.step ?? "");
+  const wait = `${row.state}|${s.text}|${row.blocked?.step ?? ""}|${row.progress.part}${queued.length ? `|${queued.join(",")}` : ""}`;
+  return { wait, text: s.text };
+}
+
+// The reasons of a wait by step: the first reason, then each waiting one.
+const reasonsOf = (w: string) => {
+  const f = w.split("|");
+  return { state: f[0], steps: [f[2] ?? "", ...(f[4] ? f[4].split(",") : [])] };
+};
+
+// spec.md section 6.25.7: a reason that moved up after the user acted on the first one is no new wait. Its reasons are fewer than the
+// last ones, and the last wait held each of them.
+function movedUp(w: string, last: string): boolean {
+  const a = reasonsOf(w);
+  const b = reasonsOf(last);
+  return a.state === b.state && a.steps.length < b.steps.length && a.steps.every((x) => b.steps.includes(x));
 }
 
 // Adds a needs_you event for each task of ids that starts a new wait. true: an event went in, so the caller broadcasts "events".
@@ -42,8 +60,10 @@ export function noteTaskWaits(db: Database, ids: Iterable<number>, now: number):
       m.set(id, last ? last.ref.slice(0, last.ref.lastIndexOf("@")) : null);
     }
     const w = waitOf(db, id)?.wait ?? null;
-    if (w === m.get(id)) continue;
+    const last = m.get(id) ?? null;
+    if (w === last) continue;
     m.set(id, w);
+    if (w !== null && last !== null && movedUp(w, last)) continue;
     if (w !== null && db.query(SQL.insert).run({ task: id, ref: `${w}@${now}`, now }).changes) added = true;
   }
   return added;

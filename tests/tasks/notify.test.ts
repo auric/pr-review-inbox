@@ -74,6 +74,44 @@ describe("noteTaskWaits", () => {
     expect(noteTaskWaits(again, [h.id], 11)).toBe(false);
     expect(h.count()).toBe(1);
   });
+
+  test("each new reason, first or waiting in a part row, adds one event; a reason that moves up adds none (spec.md section 6.25.7)", () => {
+    const h = setup();
+    const part = (ord: number) =>
+      (
+        h.db
+          .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+            VALUES ($task, $ord, 'single', 'Part', $branch, 'main', 'implementing', 1, 1) RETURNING id`)
+          .get({ task: h.id, ord, branch: `feature/ABC-${ord}` }) as { id: number }
+      ).id;
+    const [p1, p2, p3] = [part(1), part(2), part(3)];
+    const wait = (id: number, b: object | null) =>
+      h.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id, b: b === null ? null : JSON.stringify(b) });
+    const q1 = { kind: "question", step: 4, text: "Needs you: Claude asks: one?" };
+    const q2 = { kind: "question", step: 5, text: "Needs you: Claude asks: two?" };
+    const c3 = { kind: "spec_change", step: 6, text: "Needs you: Claude proposes a change to the spec." };
+    h.set("implementing", q1);
+    expect(noteTaskWaits(h.db, [h.id], 10)).toBe(true);
+    wait(p2, q2);
+    expect(noteTaskWaits(h.db, [h.id], 11)).toBe(true);
+    wait(p3, c3);
+    expect(noteTaskWaits(h.db, [h.id], 12)).toBe(true);
+    expect(noteTaskWaits(h.db, [h.id], 13)).toBe(false);
+    expect(h.count()).toBe(3);
+    // One answer ends q1 and q2. The plan change of part 3 moves up: no event, also after a restart.
+    wait(p2, null);
+    wait(p3, null);
+    h.set("implementing", c3);
+    expect(noteTaskWaits(h.db, [h.id], 14)).toBe(false);
+    const again = openDb(h.path);
+    dbs.push(again);
+    expect(noteTaskWaits(again, [h.id], 15)).toBe(false);
+    expect(h.count()).toBe(3);
+    // A new reason of part 1 behind it adds one event.
+    wait(p1, { kind: "red", step: 7, text: "Needs you: the tests of part 1 stay red." });
+    expect(noteTaskWaits(again, [h.id], 16)).toBe(true);
+    expect(claimTaskEvents(again, 17).at(-1)?.text).toBe("Needs you: a change to the plan, and 1 more");
+  });
 });
 
 describe("claimTaskEvents", () => {

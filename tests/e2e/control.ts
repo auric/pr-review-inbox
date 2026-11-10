@@ -174,6 +174,8 @@ export type ClaudeScenario = {
   implement?: unknown;
   review?: unknown;
   seq?: FakeScenario["seq"];
+  // match: the fields of a run whose context files hold a text, so parts that build at the same time get their own results.
+  match?: FakeScenario["match"];
   bySchema?: FakeScenario["bySchema"];
   login?: string;
 };

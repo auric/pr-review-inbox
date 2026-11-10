@@ -41,6 +41,7 @@ import {
   listText,
   logRows,
   NO_MERGE,
+  openQuestions,
   parentHint,
   partLabel,
   partRows,
@@ -53,6 +54,7 @@ import {
   proposals,
   prRowLook,
   prTitle,
+  questionPart,
   REPOS_SHOWN,
   repoChoices,
   repoMatches,
@@ -124,6 +126,7 @@ const part = (o: Partial<TaskPartDto> = {}): TaskPartDto => ({
   lower: null,
   gate: null,
   wait: null,
+  blocked: null,
   ...o,
 });
 
@@ -157,6 +160,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     state: "interview",
     size: null,
     blocked: null,
+    queued: 0,
     version: 3,
     updatedAt: NOW,
     closedAt: null,
@@ -1767,6 +1771,83 @@ describe("the focused sub-task and its one primary button (spec.md sections 6.20
       expect(v.more.some((a) => a.kind === v.primary?.kind)).toBe(false);
       expect(typeof v.status).toBe("string");
     }
+  });
+});
+
+// docs/plans/review-v2/spec.md section 6.25.6 (AC-B156): parts 13 and 14 build at the same time. Part 13 holds the first reason, and the
+// question of part 14 waits in its row.
+describe("reasons of parts that build at the same time (spec.md section 6.25.6, AC-B156)", () => {
+  const ask13 = step({ id: 5, kind: "implement", part: 13 });
+  const ask14 = step({ id: 6, kind: "implement", part: 14 });
+  const first = { kind: "question" as const, step: 5, text: "Needs you: Claude asks: Keep the old name?" };
+  const waiting = { kind: "question" as const, step: 6, text: "Needs you: Claude asks: Which flag name?" };
+  const questions = [
+    question({ id: 1, source: "loop", round: 1, step: 5, text: "Keep the old name?" }),
+    question({ id: 2, source: "loop", round: 2, step: 6, text: "Which flag name?" }),
+  ];
+  const both = (o: Partial<TaskDto> = {}) =>
+    subTask([p13({ state: "implementing" }), p14({ state: "implementing", head: "d".repeat(40), blocked: waiting })], {
+      blocked: first,
+      queued: 1,
+      steps: [ask14, ask13],
+      questions,
+      canSetup: true,
+      canInstruct: false,
+      ...o,
+    });
+
+  test("the sub-task list shows each reason with the actor You, in part order", () => {
+    const rows = subtaskRows(both(), SUB_OPTS).filter((r) => r.part);
+    expect(rows.map((r) => [r.label, r.text, r.actor])).toEqual([
+      ["ABC-13 (1 of 2)", first.text, "You"],
+      ["ABC-14 (2 of 2)", waiting.text, "You"],
+    ]);
+    // A wait for the run slot names no actor of the user.
+    const slot = both({ blocked: { kind: "slot", step: 5, text: "Waiting for the other run to finish." }, queued: 0 });
+    const noWait = { ...slot, parts: slot.parts.map((p) => ({ ...p, blocked: null })) };
+    expect(subtaskRows(noWait, SUB_OPTS).find((r) => r.part?.id === 13)).toMatchObject({ text: "Claude builds it.", actor: R });
+  });
+
+  test("the part with the first reason answers all questions; the waiting part says whom to act on first and has no primary button", () => {
+    const t = both();
+    const v13 = withSetup(t, t.parts[0] ?? null, subtaskView(t, t.parts[0] ?? null, SUB_OPTS));
+    expect([v13.status, v13.primary?.kind, v13.screen]).toEqual([first.text, "answer", "questions"]);
+    expect(openQuestions(t, "loop").map((q) => q.id)).toEqual([1, 2]);
+    expect(questions.map((q) => questionPart(t, q))).toEqual(["ABC-13 (1 of 2)", "ABC-14 (2 of 2)"]);
+    expect(questionPart(task({ questions }), questions[0] as TaskQuestionDto)).toBeNull();
+    const p = t.parts[1] ?? null;
+    const v14 = withSetup(t, p, subtaskView(t, p, SUB_OPTS));
+    expect(v14).toMatchObject({
+      status: waiting.text,
+      detail: "Act on ABC-13 (1 of 2) first.",
+      primary: null,
+      needsYou: true,
+      screen: "build",
+    });
+    // More holds See why for its own step and Stop. "Run setup again" is hidden.
+    expect(v14.more.map((a) => a.kind)).toEqual(["see-why", "stop"]);
+    // The Tell box shows nothing while a part waits.
+    expect(tellBox({ ...t, blocked: { kind: "red", step: 5, text: "Needs you: red." }, canInstruct: true })).toBe("none");
+    expect(tellBox({ ...t, blocked: { kind: "red", step: 5, text: "Needs you: red." }, canInstruct: true, queued: 0 })).toBe("open");
+  });
+
+  test("a held part with no reason waits until you act on the part of the first reason", () => {
+    const t = both();
+    const held = { ...t, parts: t.parts.map((p) => ({ ...p, blocked: null })), queued: 0 };
+    const v = subtaskView(held, held.parts[1] ?? null, SUB_OPTS);
+    expect([v.status, v.primary, v.running, v.more.map((a) => a.kind)]).toEqual([
+      "ABC-14 (2 of 2) waits until you act on ABC-13 (1 of 2).",
+      null,
+      false,
+      ["stop"],
+    ]);
+    const free = subtaskView({ ...held, blocked: null }, held.parts[1] ?? null, SUB_OPTS);
+    expect(free.status).toBe("Claude builds ABC-14 (2 of 2).");
+  });
+
+  test("the Tasks row names the waiting reasons", () => {
+    const { interview: _i, plan: _p, ...r } = both();
+    expect(rowStatus(r as TaskRowDto)).toEqual({ text: "Needs you: a question, and 1 more", needsYou: true });
   });
 });
 

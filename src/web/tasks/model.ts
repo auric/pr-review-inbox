@@ -108,8 +108,9 @@ const CLOSE: Action = { kind: "close", label: "Close the task" };
 const HAS_WORKTREE = new Set<TaskPartDto["state"]>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 
 // spec.md section 6.7: "Run setup again" for a part with a worktree while nothing runs. It stands before Stop and Close the task.
+// spec.md section 6.25.5: a part with a waiting reason gets no "Run setup again".
 export function withSetup(t: Pick<TaskDto, "canSetup">, part: TaskPartDto | null, v: TaskView): TaskView {
-  if (!t.canSetup || v.running || !part || part.adopted || !HAS_WORKTREE.has(part.state)) return v;
+  if (!t.canSetup || v.running || !part || part.adopted || part.blocked || !HAS_WORKTREE.has(part.state)) return v;
   const at = v.more.findIndex((a) => a.kind === "stop" || a.kind === "close");
   const more = [...v.more];
   more.splice(at < 0 ? more.length : at, 0, { kind: "setup", label: "Run setup again" });
@@ -129,8 +130,10 @@ export const prBuild = (t: Pick<TaskDto, "parts">): BuildDto | null => {
   const p = codeParts(t).at(-1);
   return p?.remotePr != null ? p.build : null;
 };
+// Each loop question has its own round, and one answer submit takes every open loop question (spec.md section 6.25.4).
 export const openQuestions = (t: Pick<TaskDto, "questions">, source: TaskQuestionDto["source"]): TaskQuestionDto[] => {
   const open = t.questions.filter((q) => q.source === source && q.answer === null);
+  if (source === "loop") return open;
   const round = Math.max(0, ...open.map((q) => q.round));
   return open.filter((q) => q.round === round);
 };
@@ -268,7 +271,8 @@ const BOX_REASONS = new Set<NonNullable<TaskDto["blocked"]>["kind"]>(["red", "si
 const WORKTREE = new Set<TaskPartDto["state"]>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 const BUILT = new Set<TaskPartDto["state"]>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
 export function tellBox(t: TaskDto): TellBox {
-  if (t.state !== "implementing" && t.state !== "ready") return "none";
+  // spec.md section 6.25.5: no box while the reason of a part waits behind the first one.
+  if ((t.state !== "implementing" && t.state !== "ready") || t.queued > 0) return "none";
   const b = t.blocked;
   if (b && !BOX_REASONS.has(b.kind)) return "none";
   const part = currentPart(t);
@@ -998,6 +1002,24 @@ export function blockedPart(t: Pick<TaskDto, "blocked" | "steps">): number | nul
   return b.part ?? (b.step === null ? null : (t.steps.find((s) => s.id === b.step)?.part ?? null));
 }
 
+// spec.md section 6.25.6: the reason of a part, first or waiting in its row. A wait for the run slot holds no part.
+const reasonOf = (t: TaskDto, p: TaskPartDto) =>
+  p.blocked ?? (t.blocked && t.blocked.kind !== "slot" && blockedPart(t) === p.id ? t.blocked : null);
+
+// The label of the part that holds the first reason, else the task key.
+const firstLabel = (t: TaskDto) => {
+  const p = codeParts(t).find((x) => x.id === blockedPart(t));
+  return p ? partLabel(t, p) : t.key;
+};
+
+// spec.md section 6.25.6: the part label of a loop question in a task with sub-tasks, by the part of its step.
+export function questionPart(t: Pick<TaskDto, "key" | "parts" | "steps" | "subtasks">, q: TaskQuestionDto): string | null {
+  if (t.subtasks === null || q.source !== "loop") return null;
+  const id = t.steps.find((s) => s.id === q.step)?.part;
+  const p = t.parts.find((x) => x.id === id);
+  return p ? partLabel(t, p) : null;
+}
+
 // spec.md section 6.20.13, the default focus, first match: the part of the reason; a part ready for its PR click; a part whose lower part
 // merged; a part with a moved base, conflicts, or commits not on the server; the part that the runner builds; the first part that waits
 // for a review. Then the first part that is not merged or dropped, then the first part.
@@ -1066,8 +1088,11 @@ function partRow(t: TaskDto, p: TaskPartDto, o: SubOpts): Pick<SubRow, "text" | 
       if (codeParts(t).some((x) => x.state === "implementing")) return { text, actor: R, action: null };
       return { text, actor: p.wait ? "Reviewers" : R, action: null };
     }
-    case "implementing":
+    case "implementing": {
+      const reason = reasonOf(t, p);
+      if (reason) return { text: reason.text, actor: "You", action: null };
       return { text: `${R} builds it.`, actor: R, action: null };
+    }
     case "self_reviewed":
       return { text: "Ready. Open its PR.", actor: "You", action: { kind: "open-pr", label: "Open the PR" } };
     case "pr_open":
@@ -1244,6 +1269,17 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
   const drop: Action = { kind: "drop", label: "Drop this sub-task" };
   const b = t.blocked;
   const bp = blockedPart(t);
+  // spec.md section 6.25.6: the reason that waits in the part row. The user acts on the first reason first.
+  if (p.blocked)
+    return {
+      ...base,
+      status: p.blocked.text,
+      detail: `Act on ${firstLabel(t)} first.`,
+      primary: null,
+      more: [...(p.blocked.step !== null ? [{ kind: "see-why", label: "See why" } as const] : []), STOP],
+      screen: "build",
+      needsYou: true,
+    };
   if (b && (bp === p.id || bp === null)) {
     // design.md Q67: a part on a part that changes another repository waits before its build.
     if (p.state === "planned" && b.kind === "error" && b.step === null)
@@ -1265,6 +1301,9 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
       return { ...base, status: `${name}: ${row.text}`, primary: null, more: [...acts, ...extra], screen: "build" };
     }
     case "implementing":
+      // spec.md section 6.25.6: the reason of another part holds this part too.
+      if (b && b.kind !== "slot")
+        return { ...base, status: `${name} waits until you act on ${firstLabel(t)}.`, primary: null, more: [STOP], screen: "build" };
       return {
         ...base,
         status: `${o.runner} builds ${name}.`,
