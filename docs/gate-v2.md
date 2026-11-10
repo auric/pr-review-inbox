@@ -12,6 +12,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B31 | The shell step prompt rule "first run `cd repo` as a command of its own" (spec.md section 6.21). | `scripts/gate/claude-checks.ts` |
 | B32 | The Unrestricted shell mode (shell.md "Unrestricted mode"). Run on 2026-11-06. | `scripts/gate/claude-checks.ts` |
 | B33 | The built Unrestricted and Most commands settings without the read block (shell.md "Unrestricted mode"). | `scripts/gate/claude-checks.ts` |
+| B34 | git inside a quoted argument, and the line endings of a step worktree (docs/plans/review-v2/remote-skill.md). | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
 | G7 | No fixed point. INFO only. | `scripts/gate/bitbucket-write.ts` |
@@ -160,6 +161,18 @@ This check gives the fact SU20. It uses the app shell.json and env of each mode 
 | Check | Fact | What it runs | PASS |
 |---|---|---|---|
 | B33 | SU20 | Two runs: Unrestricted and Most commands (stored value any), with the app flags, shell.json, and env. Neither has the read block or CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR. repo/ holds README.md, a.cpp, b.cpp, and a copy of the probe. The temp data folder holds a fake config.json. Commands, one Bash call each: `cd repo && cat README.md \| head -3`, `curl --version`, `git -C repo log -1`, a curl to the placeholder Bitbucket host, `cat <data>/config.json`, the user-report cases `for f in a.cpp b.cpp; do tr -d '\r' < repo/$f \| md5sum; done`, the same loop after `md5sum repo/a.cpp repo/b.cpp \| tr -d '\r';`, `timeout 30 <probe>`, and an ssh-shaped stand-in `timeout 30 <probe> b33host 'cd ~/dev/x && md5 -q src/a.cpp; ls tmp 2>/dev/null; ls bin/*/*'` that a saved pattern names (the probe never reaches a host), then `cd repo`, `<probe> cwd`. Then a Read, an Edit, and a Write of repo/README.md. | In both runs: the compound command, the loop, the user shape, timeout, the ssh-shaped stand-in, `cd repo`, and the probe run, the probe prints repo, the Edit and the Write work, and the deny list refuses `git -C repo log -1` and the host with the app label "deny". `curl --version` runs in Unrestricted and is refused in Most commands. INFO: all of that, but Most commands reads the fake config, so its Read deny rules need the read block. FAIL: anything else. Facts for you: the state and the permission_denied fields of each command, and whether Unrestricted reads the fake config. A refused loop goes to the user with its message: the user wants such commands to run in Most commands. |
+
+### B34: git inside a quoted argument, and the line endings of a step worktree
+
+This check gives the fact SU21. It uses the app shell.json and env of Unrestricted and Most commands. Every command runs locally. The same preparation as above applies.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B34`. With git on PATH, the dry run also builds the worktree and reads its bytes.
+- Run: `bun scripts/gate/claude-checks.ts --only B34`. Then sanitize as above.
+- Own call cap: B34 2 (one run per mode).
+
+| Check | Fact | What it runs | PASS |
+|---|---|---|---|
+| B34 | SU21 | Two runs: Unrestricted and Most commands (stored value any), with the app flags, shell.json, and env. Saved patterns name the probe as `<probe> b34host *` and `<probe> b34tar *`. The probe stands in for ssh as in B33 and never reaches a host. Commands, one Bash call each: `git --version` (the control), `bash -c 'git --version'`, `<probe> b34host 'cd x && git init'`, and `tar -cf - -C repo . \| <probe> b34tar 'tar -xf - -C x'`. Then, with no claude, the gate makes a step worktree with the app code (prepareTaskWorkspace, then openWorktree) from a temp bare remote. Its blobs are lf.txt with LF, crlf.txt with CRLF, and a .gitattributes with `* text=auto eol=crlf`. The gate reads the bytes of both files. | In both runs the deny list refuses `git --version` with the app label "deny" and also refuses `bash -c 'git --version'`. The ssh stand-in with `git init` in its quoted argument runs and writes its marker. The tar pipe into the stand-in runs and writes its marker. The worktree keeps each blob unchanged: lf.txt is LF and crlf.txt is CRLF. INFO: the control holds, but another fact differs. FAIL: the deny list lets `git --version` run, or the worktree is not built. Facts for you: the state and the permission_denied fields of each command. |
 
 ## Part G: Bitbucket checks G1 to G7
 

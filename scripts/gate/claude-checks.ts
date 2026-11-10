@@ -8,11 +8,12 @@
 // B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S),
 // B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17),
 // B31 (a lone `cd repo` and the cwd of the next command: SU18), B32 (the Unrestricted shell mode: SU19), B33 (the Unrestricted and Any
-// command settings without the read block: SU20).
+// command settings without the read block: SU20), B34 (git inside a quoted argument, and the line endings of a step worktree: SU21).
 // Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
 
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -39,8 +40,11 @@ import {
   RUN_MARKER,
 } from "../../src/server/review/claude";
 import { runnerDefaults } from "../../src/server/review/defaults";
+import { git } from "../../src/server/review/git";
 import { createStreamParser, type StreamState } from "../../src/server/review/stream";
+import { prepareTaskWorkspace } from "../../src/server/review/workspace";
 import { hostsOf, rulePath, type ShellSpec, shellEnv } from "../../src/server/tasks/shell";
+import { openWorktree } from "../../src/server/tasks/worktree";
 import { EFFORTS } from "../../src/shared/dto";
 import {
   discussResult,
@@ -89,6 +93,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b31: 6,
   b32: 2,
   b33: 2,
+  b34: 2,
 };
 const B9_MAX_TURNS = 8;
 const MAX_COST_USD = 0.6;
@@ -133,6 +138,7 @@ const CHECKS = [
   "B31",
   "B32",
   "B33",
+  "B34",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
 
@@ -3141,6 +3147,124 @@ async function b33() {
   push("B33", status, lines.join(" || "));
 }
 
+// ---------- B34: git inside a quoted argument, and the line endings of a step worktree (SU21) ----------
+// One run with the app shell.json and env of Unrestricted, and one of Most commands. The probe stands in for ssh as in B33: it never
+// reaches a host, and a saved pattern names it. The worktree part makes a step worktree with the app code (prepareTaskWorkspace, then
+// openWorktree) from a temp bare remote, and reads its bytes. It starts no claude.
+const B34_RULES = [`${PROBE_RULE.slice(0, -2)} b34host *`, `${PROBE_RULE.slice(0, -2)} b34tar *`];
+const B34_CMDS = {
+  git: "git --version",
+  bash: "bash -c 'git --version'",
+  ssh: `${probe("b34host")} 'cd x && git init'`,
+  tar: `tar -cf - -C repo . | ${probe("b34tar")} 'tar -xf - -C x'`,
+};
+const B34_MODES = ["unrestricted", "any"] as const;
+// The blobs go into the remote unchanged (hash-object --no-filters). The repository attributes ask for CRLF on checkout.
+const B34_FILES: Record<string, string> = {
+  ".gitattributes": "* text=auto eol=crlf\n",
+  "lf.txt": "one\ntwo\n",
+  "crlf.txt": "one\r\ntwo\r\n",
+};
+const eolOf = (b: Buffer) => {
+  const t = b.toString("latin1");
+  const crlf = t.split("\r\n").length - 1;
+  const lf = t.split("\n").length - 1 - crlf;
+  return crlf && lf ? "mixed" : crlf ? "CRLF" : lf ? "LF" : "none";
+};
+
+// The line endings of lf.txt and crlf.txt in a new step worktree, or the error text.
+async function b34Worktree(): Promise<{ ok: boolean; line: string }> {
+  const root = realpathSync.native(tmp("b34wt"));
+  const db = new Database(join(root, "gate.sqlite"));
+  try {
+    const empty = join(root, "empty.gitconfig");
+    writeFileSync(empty, "");
+    const remote = join(root, "remote.git");
+    const env = {
+      ...gitEnv(empty),
+      GIT_AUTHOR_NAME: "Gate",
+      GIT_AUTHOR_EMAIL: "gate@example.invalid",
+      GIT_COMMITTER_NAME: "Gate",
+      GIT_COMMITTER_EMAIL: "gate@example.invalid",
+      GIT_INDEX_FILE: join(root, "gate.index"),
+    };
+    const g = async (args: string[], stdin?: string) => (await git(["--git-dir", remote, ...args], { env, stdin })).trim();
+    await git(["init", "-q", "--bare", "--template=", remote], { env });
+    await g(["symbolic-ref", "HEAD", "refs/heads/main"]);
+    const names = Object.keys(B34_FILES);
+    const blobs = names.map((n, i) => {
+      const f = join(root, `blob-${i}`);
+      writeFileSync(f, B34_FILES[n] ?? "");
+      return f;
+    });
+    const shas = (await g(["hash-object", "-w", "--no-filters", "--stdin-paths"], `${blobs.join("\n")}\n`)).split("\n");
+    await g(["read-tree", "--empty"]);
+    await g(["update-index", "--index-info"], `${names.map((n, i) => `100644 ${shas[i]}\t${n}`).join("\n")}\n`);
+    const commit = await g(["commit-tree", await g(["write-tree"]), "-m", "base"]);
+    await g(["update-ref", "refs/heads/main", commit]);
+    const dataDir = join(root, "data");
+    const ws = await prepareTaskWorkspace({
+      dataDir,
+      runId: "gate-b34",
+      project: "PROJ",
+      repo: "repo",
+      task: 1,
+      branch: "main",
+      remote: { url: remote, config: [] },
+    });
+    await ws.keep("base");
+    await ws.remove();
+    const wt = await openWorktree({ dataDir, db, project: "PROJ", repo: "repo", task: 1, ord: 1, branch: "rl-gate-b34", base: commit });
+    const lf = eolOf(readFileSync(join(wt.repo, "lf.txt")));
+    const crlf = eolOf(readFileSync(join(wt.repo, "crlf.txt")));
+    return { ok: true, line: `worktree: lf.txt=${lf} crlf.txt=${crlf} (blobs LF and CRLF; .gitattributes "* text=auto eol=crlf")` };
+  } catch (e) {
+    return { ok: false, line: `worktree: not built: ${short(String(e))}` };
+  } finally {
+    db.close();
+    rmRetry(root);
+  }
+}
+
+// PASS: in both runs the deny list refuses `git --version` with the app label "deny" and also `bash -c 'git --version'`, the ssh
+// stand-in with `git init` in its quoted argument runs and writes its marker, and so does the tar pipe into the stand-in. The worktree
+// keeps each blob unchanged: lf.txt is LF and crlf.txt is CRLF. INFO: the control holds, but another fact differs. FAIL: the deny list
+// lets `git --version` run, or the worktree is not built.
+async function b34() {
+  const lines: string[] = [];
+  let status: "PASS" | "INFO" | "FAIL" = "PASS";
+  const cmds = Object.values(B34_CMDS);
+  // 4 Bash calls and StructuredOutput, with room for 3 more turns.
+  for (const mode of B34_MODES)
+    await shellRun(`b34-${mode}`, mode, B34_RULES, cmds, 8, {}, ({ run, work, state, settings }) => {
+      const perm = (JSON.parse(settings) as { permissions: { allow: string[]; deny: string[] } }).permissions;
+      if (DRY) return void lines.push(`${mode}: allow=${JSON.stringify(perm.allow)} deny=${perm.deny.length} commands=${cmds.length}`);
+      const of = (c: string) => outcomeOf(run, c);
+      const runs = (c: string) => of(c).state === "ran" || of(c).state === "error";
+      const control = of(B34_CMDS.git).state === "refused" && labelOf(state, B34_CMDS.git) === "deny";
+      const marks = { host: ran(work, "b34host"), tar: ran(work, "b34tar") };
+      const ideal = of(B34_CMDS.bash).state === "refused" && runs(B34_CMDS.ssh) && marks.host && runs(B34_CMDS.tar) && marks.tar;
+      if (!control) status = "FAIL";
+      else if (!ideal && status === "PASS") status = "INFO";
+      lines.push(
+        [
+          `${mode}: exit=${run.exit}; init.permissionMode=${run.init?.permissionMode ?? "none"}`,
+          `git --version refused by deny=${control}; bash -c git=${of(B34_CMDS.bash).state}`,
+          `ssh stand-in with quoted git=${of(B34_CMDS.ssh).state} marker=${marks.host}; tar pipe=${of(B34_CMDS.tar).state} marker=${marks.tar}`,
+          ...cmds.map((c) => factOf(run, state, c)),
+          `other calls=${otherCalls(run, cmds).join(",") || "none"}`,
+        ].join("; "),
+      );
+    });
+  // The worktree part starts no claude, so a dry run with git on PATH runs it too.
+  const wt = DRY && !Bun.which("git") ? { ok: true, line: `worktree=planned (${Object.keys(B34_FILES).join(", ")})` } : await b34Worktree();
+  lines.push(wt.line);
+  if (DRY) return dry("B34", `runs=2; ${lines.join("; ")}`);
+  if (!wt.ok) status = "FAIL";
+  else if (!wt.line.includes("lf.txt=LF crlf.txt=CRLF") && status === "PASS") status = "INFO";
+  push("B34", status, lines.join(" || "));
+}
+
 // ---------- main ----------
 const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B1: b1,
@@ -3179,6 +3303,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B31: b31,
   B32: b32,
   B33: b33,
+  B34: b34,
 };
 {
   for (const id of selected) await check(id, RUNNERS[id]);

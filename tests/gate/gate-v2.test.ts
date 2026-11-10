@@ -5,7 +5,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 const ROOT = join(import.meta.dir, "../..");
 const CLAUDE_CHECKS = join(ROOT, "scripts/gate/claude-checks.ts");
@@ -164,6 +164,32 @@ describe("claude-checks.ts B33", () => {
       expect(l).not.toContain("--permission-mode");
     }
   });
+});
+
+describe("claude-checks.ts B34", () => {
+  test("a dry run plans Unrestricted and Most commands with the quoted git commands and plans the worktree without git", () => {
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B34"], NO_TOOLS);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      'DRY-RUN  B34  calls=2 planned claude calls=2; runs=2; unrestricted: allow=["Bash"] deny=7 commands=4; any: allow=["Bash"] deny=35 commands=4; worktree=planned (.gitattributes, lf.txt, crlf.txt)',
+    );
+    expect(r.out).toContain("B34 2/2");
+    const lines = r.out.split("\n").filter((l) => /^dry-run b34-(unrestricted|any):/.test(l));
+    expect(lines).toHaveLength(2);
+    for (const l of lines) {
+      expect(l).toContain('"--restricted"');
+      expect(l).toContain('"--tools","Read,Grep,Glob,Edit,Write,Bash"');
+    }
+  });
+
+  test("with git on PATH, the dry run builds a step worktree with the app code, and checkout keeps each blob unchanged", () => {
+    // A local fetch of Git for Windows needs the shell tools of usr/bin.
+    const path = [GIT_DIR, ...(process.platform === "win32" ? [join(GIT_DIR, "..", "..", "usr", "bin")] : [])].join(delimiter);
+    const r = run(CLAUDE_CHECKS, ["--dry-run", "B34"], path);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('worktree: lf.txt=LF crlf.txt=CRLF (blobs LF and CRLF; .gitattributes "* text=auto eol=crlf")');
+  }, 120_000);
 });
 
 describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {

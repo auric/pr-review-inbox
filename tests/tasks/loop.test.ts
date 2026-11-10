@@ -420,6 +420,8 @@ describe("the loop of one part (spec.md section 6.7)", () => {
         expect(c.context["skills/repo-rules/SKILL.md"]).toContain("REPO-RULES");
         expect(c.context["skills/INDEX.md"]).toContain("- repo-rules (repository): ./context/skills/repo-rules/SKILL.md. Repo rules.");
         expect(c.stdin).toContain("Read ./context/skills/INDEX.md first.");
+        // The step has no Bash tool.
+        expect(c.stdin).toContain("Skill scripts cannot run.");
       }
       // The own review: the skills and the index in ./skills of the run folder, named in the rl-main prompt.
       const own = calls[3] as Call;
@@ -651,6 +653,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
     async () => {
       const GEN = "repo/src/gen.ts";
       const s = await setup({
+        main: { ".claude/skills/repo-rules/SKILL.md": "---\nname: repo-rules\ndescription: Repo rules.\n---\nREPO-RULES\n" },
         seq: {
           "implement:implement": [
             { writes: [TODO], bash: [{ command: "bun run gen", files: [{ path: GEN, text: "gen\n" }], output: "ok" }] },
@@ -675,6 +678,8 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(failure).toContain(`- Write ${GEN} with the Write tool, so it is committed.`);
       expect(failure.indexOf("# Check output")).toBeLessThan(failure.indexOf("# New files"));
       expect(fix.stdin).toContain("You may run `cd repo` before a command that must run in the repository.");
+      expect(fix.stdin).toContain("Skill scripts and recipes may run with the Bash tool under the shell rules of this step.");
+      expect(fix.stdin).not.toContain("Skill scripts cannot run.");
       expect(Object.keys(fix.env).map((k) => k.toUpperCase())).not.toContain("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR");
       // The commit leaves the file on disk and out of the branch.
       const w = await s.wt();

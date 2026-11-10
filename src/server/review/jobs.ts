@@ -1474,7 +1474,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           servers = Object.keys(mcpServers);
           gaps = [...tools.gaps, ...skills.gaps];
           const lines = {
-            skills: skillLines(skills.folders, skills.always, IMPLEMENT_SKILLS, true),
+            skills: skillLines(skills.folders, skills.always, IMPLEMENT_SKILLS, true, !!t.shell),
             mcp: [...IMPLEMENT_MCP_LINES, ...(j.profile.docs ? [DOCS_RULE] : []), ...mcpLines(tools.used)],
           };
           // No await between the cancel check and run(), so a later Cancel reaches the process.

@@ -1088,7 +1088,8 @@ export function replanAgent(p: Profile, budget: number): AgentSpec {
 // The model reads a skill without always only when it applies. Above SKILL_INDEX_AFTER skills, copySkills writes the index.
 // always: the folders of the always-use skills. They come first in both modes.
 // task: a Build a Jira task step. It gets every skill of the user and the repository skills, and copyTaskSkills always writes the index.
-export function skillLines(folders: string[], always: string[] = [], root = "skills", task = false): string[] {
+// bash: the run has the Bash tool (a shell step, spec.md section 6.21).
+export function skillLines(folders: string[], always: string[] = [], root = "skills", task = false, bash = false): string[] {
   if (!folders.length) return [];
   const first = folders.filter((f) => always.includes(f));
   const rest = folders.filter((f) => !always.includes(f));
@@ -1117,7 +1118,7 @@ export function skillLines(folders: string[], always: string[] = [], root = "ski
   return [
     ...pinned,
     ...read,
-    "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.",
+    `${bash ? "Skill scripts and recipes may run with the Bash tool under the shell rules of this step." : "Skill scripts cannot run."} The rules above stay in force, and your result must still use the required output format.`,
   ];
 }
 

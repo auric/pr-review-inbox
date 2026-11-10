@@ -406,7 +406,10 @@ export function implementPrompt(
         "Change files only with the Edit and Write tools. Read a file before you edit it. Never write files with Bash redirection, tee, or a heredoc.",
         "When ./context/failure.md lists new files that a Bash command wrote, write each file that the step needs with the Write tool.",
         "Pipe long build output through `tail -n 200`.",
-        "Wrap each remote command in `timeout <seconds>` on the build host.",
+        "Give each remote command a time limit. Use the time-limit method of its skill when the skill names one. Else wrap the command in `timeout <seconds>` on the build host.",
+        `Local git is denied. To copy the tree to a remote machine, use \`tar\` (for example \`tar -cf - -C repo . | ssh <host> 'tar -xf - -C <dir>'\`), not \`git archive\`.${
+          shell.mode === "allowlist" ? " tar and ssh run only with an approved pattern." : ""
+        }`,
       ];
   return [
     `You do one step of an approved plan in ./repo. You can change files only in ${where}. ${shell ? "You post nothing." : "You cannot run commands, and you post nothing."}`,

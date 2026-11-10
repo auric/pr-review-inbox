@@ -614,6 +614,17 @@ ${PEM}`,
     ]);
   });
 
+  test("remote-skill fix 1: only a step with the Bash tool may run skill scripts", () => {
+    const BASH =
+      "Skill scripts and recipes may run with the Bash tool under the shell rules of this step. The rules above stay in force, and your result must still use the required output format.";
+    const NO_BASH = "Skill scripts cannot run. The rules above stay in force, and your result must still use the required output format.";
+    expect(skillLines(["a", "b"], ["a"], "context/skills", true, true).at(-1)).toBe(BASH);
+    expect(skillLines(["a", "b"], ["a"], "context/skills", true, false).at(-1)).toBe(NO_BASH);
+    expect(skillLines(["a", "b"], ["a"], "context/skills", true).at(-1)).toBe(NO_BASH);
+    expect(skillLines(["a", "b"]).at(-1)).toBe(NO_BASH);
+    expect(skillLines([], [], "context/skills", true, true)).toEqual([]);
+  });
+
   test("the task lines always point at the index; the review lines stay as before", () => {
     expect(skillLines(["a", "b"], ["a"], "context/skills", true)).toEqual([
       "Before you start, read ./context/skills/a/SKILL.md and follow it for the whole run.",
@@ -632,6 +643,7 @@ ${PEM}`,
     ]);
     const general = SHIPPED_PROFILES[0] as (typeof SHIPPED_PROFILES)[number];
     const a = mainAgent(general);
+    expect(withSkills(a, ["x"], [], true).prompt).toContain("Skill scripts cannot run.");
     expect(withSkills(a, ["x"]).prompt).toBe(withSkills(a, ["x"], [], false).prompt);
     expect(withSkills(a, ["x"], [], true).prompt).toContain("Read ./skills/INDEX.md first.");
   });

@@ -1,6 +1,6 @@
 # User skills that build on a remote machine
 
-Status: analysis of 2026-11-09 against main 5c9c851. Not built.
+Status: analysis of 2026-11-09 against main 5c9c851. Proposed fix items 1 to 3 are built (2026-11-10). Item 4 is a later design. Gate B34 (integration-check.md SU21) is planned and checks the two open facts below.
 
 ## Problem
 
@@ -21,8 +21,8 @@ A task adds tests in a macOS-only block. The Windows test commands never run the
 ## Open facts (real CLI)
 
 - SU6 (integration-check.md:460): answered on 2026-11-09 by B28 with claude 2.1.319. Claude Bash ran `ssh <alias>` with the real HOME and got the marker in about 12 s. The user's ssh config accepts unknown host keys. rsync is not installed in Git for Windows, so a skill must not use rsync.
-- Does `GIT_DENY` match `git` inside a quoted ssh argument (`ssh host 'cd x && git init'`)?
-- Does the step worktree have LF line endings?
+- Does `GIT_DENY` match `git` inside a quoted ssh argument (`ssh host 'cd x && git init'`)? Gate B34 (SU21) checks it.
+- Does the step worktree have LF line endings? Code: the cache `info/attributes` sets `* -text` (`workspace.ts:21`), and the worktree sets `core.autocrlf false` (`worktree.ts:290`). So checkout writes each blob unchanged. A blob with LF stays LF, also under a `.gitattributes` that asks for CRLF. The B34 dry run with git on PATH confirms it. A blob with CRLF stays CRLF.
 
 ## Proposed fix
 
