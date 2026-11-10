@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { SHIPPED_PROFILES } from "../../src/server/review/catalog";
+import { EXPLORER_RULE, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
@@ -75,7 +75,7 @@ type Call = {
   context: Record<string, string>;
   attachments: string[];
   skills?: string[];
-  agents?: Record<string, { prompt: string }> | null;
+  agents?: Record<string, { prompt: string; tools?: string[]; disallowedTools?: string[]; model?: string }> | null;
 };
 
 const dirs: string[] = [];
@@ -250,7 +250,9 @@ describe("the profile of a task (spec.md section 6.2)", () => {
       // spec.md section 6.19: a skill that the profile does not tick, and a skill of the repository on the target branch.
       mkdirSync(join(config, "skills", "other"), { recursive: true });
       writeFileSync(join(config, "skills", "other", "SKILL.md"), "---\nname: other\n---\nNot ticked.\n");
-      const strict = { ...SHIPPED_PROFILES[0], id: "strict", name: "Strict", model: "sonnet", skills: ["tdd"] } as ProfileInput;
+      const g = SHIPPED_PROFILES[0] as (typeof SHIPPED_PROFILES)[number];
+      const reviewer = { ...g.reviewer, model: "haiku" };
+      const strict = { ...g, id: "strict", name: "Strict", model: "sonnet", reviewer, skills: ["tdd"] } as ProfileInput;
       const h = await setup({ config, profiles: [...SHIPPED_PROFILES, strict] });
       await commitOnMain(h.remote.remote, config, { ".claude/skills/repo-rules/SKILL.md": "---\nname: repo-rules\n---\nRepo rules.\n" });
       await h.connectJira();
@@ -275,6 +277,12 @@ describe("the profile of a task (spec.md section 6.2)", () => {
         const prompt = call.agents?.["rl-main"]?.prompt;
         expect(prompt).toContain("This step gets 3 skills: all skills of the user and the skills of the repository at its base commit.");
         expect(prompt).toContain("Read ./skills/INDEX.md first.");
+        // task-subagents.md decision 1: the interview and the spec run can start rl-explorer, and their prompt says so.
+        expect(prompt).toContain(EXPLORER_RULE);
+        expect(call.agents?.["rl-main"]?.tools?.[0]).toBe("Agent(rl-explorer)");
+        expect(call.agents?.["rl-explorer"]?.tools).toEqual(["Read", "Grep", "Glob"]);
+        // It runs on the model of the review subagents.
+        expect(call.agents?.["rl-explorer"]?.model).toBe("haiku");
       }
       // A skill that the profile does not tick is stored as available, so the run log does not read it as loaded.
       for (const r of h.db.query("SELECT skills_json FROM review_run WHERE task = $task").all({ task: c.body.id }) as {
@@ -325,7 +333,8 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       expect(run).toMatchObject({ pr: null, task: a.body.id, kind: "interview", status: "completed", source_head: h.remote.target });
       const [call] = h.runCalls();
       const flag = (name: string) => call?.argv[call.argv.indexOf(name) + 1];
-      expect(flag("--tools")).toBe("Read,Grep,Glob");
+      expect(flag("--tools")).toBe("Read,Grep,Glob,Agent");
+      expect(Object.keys(call?.agents ?? {})).toEqual(["rl-main", "rl-explorer"]);
       expect(call?.argv).toContain("--restricted");
       expect(call?.cwd).toBe(join(realpathSync.native(h.dir), "runs", String(run?.id), "work"));
       expect(call?.stdin).toContain(`- ./repo holds the branch main at commit ${h.remote.target}.`);

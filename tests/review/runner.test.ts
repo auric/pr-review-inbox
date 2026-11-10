@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { explorerAgent, type Profile, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import {
   createClaudeRunner,
   IMPLEMENT_TOOLS,
@@ -18,10 +19,11 @@ import {
 import { classify, createStreamParser, NO_BASH_TEXT, NOTES_MAX } from "../../src/server/review/stream";
 import { type ShellSpec, shellSettings } from "../../src/server/tasks/shell";
 import { CD_REFUSED_NOTE, type RunEvent } from "../../src/shared/run-log";
-import { implementJsonSchema } from "../../src/shared/task";
+import { implementJsonSchema, SHELL_MODES } from "../../src/shared/task";
+import { logTree } from "../../src/web/review/model";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 
-for (const m of ["review/claude", "review/stream", "tasks/shell"])
+for (const m of ["review/claude", "review/stream", "review/catalog", "tasks/shell"])
   console.log(`runner.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
 
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
@@ -945,5 +947,160 @@ describe("shell steps", () => {
     expect(seen.filter((e) => e.status === "error")).toHaveLength(6);
     const pid = calls().at(-1)?.pid ?? 0;
     expect(await waitFor(() => !alive(pid))).toBe(true);
+  });
+});
+
+// docs/plans/review-v2/task-subagents.md decision 1 and Design: the read-only subagent rl-explorer of a task step.
+describe("rl-explorer in task steps", () => {
+  const SCHEMA_I = implementJsonSchema();
+  const g = SHIPPED_PROFILES[0] as Profile;
+  const EXPLORER = explorerAgent({ ...g, reviewer: { ...g.reviewer, model: "sonnet" } });
+  const stub = { command: "bun", args: ["stub.ts"], tools: ["get_fact"] };
+  const flagOf = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+  const NO_TOOL = ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"];
+  const folder = () => {
+    const base = mkdtempSync(join(tmpdir(), "rl-sa1-"));
+    dirs.push(base);
+    const cwd = join(base, "work");
+    mkdirSync(cwd);
+    return { base, cwd, app: join(base, "app") };
+  };
+  const init = (tools: string[]) =>
+    JSON.stringify({ type: "system", subtype: "init", cwd: "/w", tools, mcp_servers: [], model: "m", permissionMode: "default" });
+  type AgentsRec = { argv: string[]; agents: Record<string, { tools: string[]; disallowedTools?: string[]; omitClaudeMd?: boolean }> };
+
+  test("an implement step in each shell mode is rl-main with Agent(rl-explorer); rl-explorer reads only, on the review subagent model", () => {
+    expect(EXPLORER.model).toBe("sonnet");
+    for (const mode of [undefined, ...SHELL_MODES]) {
+      const { base, cwd, app } = folder();
+      const shell = mode && { mode, rules: mode === "allowlist" ? ["make *"] : [], bashTimeoutSec: 600, dataDir: base, origins: [] };
+      const step = {
+        implement: true as const,
+        cwd,
+        appDir: app,
+        mcpServers: { "rl-stub": stub },
+        prompt: "p",
+        schema: SCHEMA_I,
+        maxTurns: 80,
+      };
+      const { args, allowed, agents } = implementArgs({ ...step, explorer: EXPLORER, ...(shell && { shell }) });
+      const file = join(app, "agents.json");
+      const at = args.indexOf("--agents");
+      expect(args.slice(at, at + 4)).toEqual(["--agents", file, "--agent", "rl-main"]);
+      const builtins = [...IMPLEMENT_TOOLS, ...(mode ? ["Bash"] : [])];
+      expect(flagOf(args, "--tools")).toBe([...builtins, "Agent"].join(","));
+      // Gate B9: the Agent tool needs no allow rule. Gate B8: init names it Task.
+      expect(flagOf(args, "--allowedTools")).toBe("Read,Grep,Glob,Edit,Write,mcp__rl-stub");
+      expect([allowed.has("Agent"), allowed.has("Task")]).toEqual([true, true]);
+      expect([...agents]).toEqual(["rl-main", "rl-explorer"]);
+      expect(args).toContain("--restricted");
+      const defs = JSON.parse(readFileSync(file, "utf8"));
+      expect(defs).toEqual({
+        "rl-main": {
+          description: "Main thread of a task step.",
+          prompt: "",
+          tools: ["Agent(rl-explorer)", ...builtins, "mcp__rl-stub__get_fact", "StructuredOutput"],
+        },
+        "rl-explorer": { ...EXPLORER, tools: ["Read", "Grep", "Glob"], disallowedTools: NO_TOOL, omitClaudeMd: true },
+      });
+      for (const t of NO_TOOL) expect(defs["rl-explorer"].tools).not.toContain(t);
+      // Gate B4 rule: the agents file stays in the run folder, outside the cwd.
+      expect(readdirSync(cwd)).toEqual([]);
+    }
+  });
+
+  test("a step without an app folder never gets rl-explorer, and no review agent takes its name", async () => {
+    const { cwd } = folder();
+    expect(() => implementArgs({ implement: true, cwd, prompt: "p", schema: SCHEMA_I, maxTurns: 80, explorer: EXPLORER })).toThrow(
+      "app folder",
+    );
+    const { runner, spec, calls } = setup({ fixture: flatSuccess() });
+    await expect(runner.run({ ...spec, agents: { "rl-explorer": EXPLORER } })).rejects.toThrow("rl-explorer cannot be a review agent.");
+    await expect(runner.run({ ...spec, agents: {}, mcpServers: {}, noTools: true, explorer: EXPLORER })).rejects.toThrow("without tools");
+    expect(calls().some((c) => c.argv[0] === "-p")).toBe(false);
+  });
+
+  test("an interview or spec run adds Agent(rl-explorer) with no MCP tool; a run without it (the plan check) gets no Agent tool", async () => {
+    const { runner, spec, calls } = setup({ fixture: flatSuccess() });
+    const task = { ...spec, agents: {}, explorer: EXPLORER };
+    expect((await runner.run(task)).status).toBe("completed");
+    const withIt = calls().at(-1) as unknown as AgentsRec;
+    expect(flagOf(withIt.argv, "--tools")).toBe("Read,Grep,Glob,Agent");
+    expect(flagOf(withIt.argv, "--agent")).toBe("rl-main");
+    expect(withIt.agents["rl-main"]?.tools).toEqual([
+      "Agent(rl-explorer)",
+      "Read",
+      "Grep",
+      "Glob",
+      "mcp__rl-stub__get_fact",
+      "StructuredOutput",
+    ]);
+    expect(withIt.agents["rl-explorer"]).toEqual({
+      ...EXPLORER,
+      tools: ["Read", "Grep", "Glob"],
+      disallowedTools: NO_TOOL,
+      omitClaudeMd: true,
+    });
+    // A review run with its own agents keeps them next to rl-explorer.
+    await runner.run({ ...spec, explorer: EXPLORER });
+    const review = calls().at(-1) as unknown as AgentsRec;
+    expect(review.agents["rl-main"]?.tools[0]).toBe("Agent(rl-reviewer, rl-explorer)");
+
+    const { explorer: _, ...check } = task;
+    expect((await runner.run(check)).status).toBe("completed");
+    const without = calls().at(-1) as unknown as AgentsRec;
+    expect(flagOf(without.argv, "--tools")).toBe("Read,Grep,Glob");
+    expect(Object.keys(without.agents)).toEqual(["rl-main"]);
+    expect(without.agents["rl-main"]?.tools).toEqual(["Read", "Grep", "Glob", "mcp__rl-stub__get_fact", "StructuredOutput"]);
+  });
+
+  test("the init check: with rl-explorer Agent and Task pass, and each other extra tool still stops the step; without it Task stops", () => {
+    const { cwd, app } = folder();
+    const step = { implement: true as const, cwd, appDir: app, prompt: "p", schema: SCHEMA_I, maxTurns: 80 };
+    const withIt = implementArgs({ ...step, explorer: EXPLORER });
+    const ok = createStreamParser({ cwd, allowedTools: withIt.allowed, agents: withIt.agents });
+    ok.line(init([...IMPLEMENT_TOOLS, "Task", "Agent", "StructuredOutput"]));
+    expect(ok.state.badTools).toEqual([]);
+    for (const extra of ["Bash", "PowerShell", "WebFetch", "NotebookEdit"]) {
+      const p = createStreamParser({ cwd, allowedTools: withIt.allowed, agents: withIt.agents });
+      p.line(init([...IMPLEMENT_TOOLS, "Task", extra, "StructuredOutput"]));
+      expect(classify(p.state, { exitCode: 0, cancelled: false, timedOut: false })).toMatchObject({
+        status: "failed",
+        kind: "tool_check",
+        text: `init lists tools outside the allowlist: ${extra}.`,
+      });
+    }
+    const plain = implementArgs(step);
+    const p = createStreamParser({ cwd, allowedTools: plain.allowed, agents: plain.agents });
+    p.line(init([...IMPLEMENT_TOOLS, "Task", "StructuredOutput"]));
+    expect(p.state.badTools).toEqual(["Task"]);
+  });
+
+  test("an rl-explorer call of an implement step nests its calls under it in the step log, as an app agent", async () => {
+    const fixture = derive("b9-wp8-flags.jsonl", (e) => JSON.parse(JSON.stringify(e).replaceAll("rl-reviewer", "rl-explorer")));
+    const { runner, work, app, calls } = setup({ fixture });
+    const o = await runner.run({
+      implement: true,
+      cwd: work,
+      appDir: app,
+      mcpServers: { "rl-stub": stub },
+      prompt: "- Mode: implement\nDo the step.",
+      schema: SCHEMA_I,
+      maxTurns: 80,
+      explorer: EXPLORER,
+    });
+    expect(o.status).toBe("completed");
+    expect(o.init?.tools).toContain("Task");
+    expect(flagOf(calls().at(-1)?.argv ?? [], "--agent")).toBe("rl-main");
+    const agent = byId(o.events, "toolu_01LSbcECPmHiTBS4CDvWoCbj");
+    expect(agent).toMatchObject({ parent: null, tool: "Agent", agent: "rl-explorer", builtin: false, status: "ok" });
+    const node = logTree(o.events).find((n) => n.e.id === agent?.id);
+    expect(node?.kids.map((k) => [k.e.tool, k.e.parent])).toEqual([
+      ["Read", agent?.id ?? null],
+      ["Read", agent?.id ?? null],
+      ["mcp__rl-stub__get_fact", agent?.id ?? null],
+    ]);
+    // An agent that the app did not define keeps the built-in mark.
+    expect(o.events.find((e) => e.agent === "general-purpose")?.builtin).toBe(true);
   });
 });

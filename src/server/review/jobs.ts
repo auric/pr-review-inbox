@@ -73,6 +73,7 @@ import {
   delegation,
   discussAgent,
   explainAgent,
+  explorerAgent,
   fixAgent,
   GIT_SERVER,
   type ListTools,
@@ -98,6 +99,7 @@ import {
   verifierEffort,
   verifyAgent,
   withDelegation,
+  withExplorer,
   withInstructions,
   withMcp,
   withSkills,
@@ -317,6 +319,8 @@ export type TaskRunStart = {
   keep?: string;
   // spec.md section 6.16.5: resolves the repositories of the task at the fetched head and gives the submodule folders of the snapshot.
   repos?: (db: Database, head: string) => Promise<SnapshotRepo[]>;
+  // task-subagents.md decision 1: the run can start rl-explorer, and its prompt says so. Absent: no Agent tool, as for the plan check.
+  explorer?: true;
 };
 
 // spec.md section 6.7: one repository of an implement step. commit: the target commit in the cache of the repository. path: the folder
@@ -1362,7 +1366,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return provider.repoRemote(project, repo);
   }
 
-  // A read-only snapshot of the newest target head, the profile servers, and one CLI process with no subagents.
+  // A read-only snapshot of the newest target head, the profile servers, and one CLI process. The only subagent is rl-explorer.
   async function taskSteps(j: TaskJob, t: TaskRunStart, held: { ws?: Workspace }): Promise<Ending> {
     const c = await check();
     if (!c.ok) return failure(c.kind === "auth" ? "auth" : "process", c.message);
@@ -1422,12 +1426,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         appDir: ws.app,
         prompt: t.prompt(ws.sourceHead, instructions.text),
         schema: t.schema,
-        main: withMcp(withSkills(t.agent, skills.folders, skills.always, true), tools.used),
+        main: withMcp(withSkills(t.explorer ? withExplorer(t.agent) : t.agent, skills.folders, skills.always, true), tools.used),
         maxTurns: t.maxTurns,
         model: j.profile.model,
         effort: j.profile.effort,
         agents: {},
         mcpServers,
+        ...(t.explorer && { explorer: explorerAgent(j.profile) }),
       },
       (events) => {
         j.db.transaction(() => upsertEvents(j.db, j.id, events))();
@@ -1442,8 +1447,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return { ...e, raw: `${tools.unmarked}\n\n${e.raw}` };
   }
 
-  // An implement run: the CLI with the Gate B17 flags in the part folder, the MCP servers of the profile, the git MCP server, and no
-  // subagent. The skills go to context/skills, outside repo/. AC-B8: the cwd is a folder under <dataDir>/tasks, never the user's clone.
+  // An implement run: the CLI with the Gate B17 flags in the part folder, the MCP servers of the profile, the git MCP server, and the
+  // read-only subagent rl-explorer only. The skills go to context/skills, outside repo/. AC-B8: the cwd is a folder under
+  // <dataDir>/tasks, never the user's clone.
   async function implementSteps(j: TaskJob, t: ImplementRunStart): Promise<Ending> {
     let o: RunOutcome | null = null;
     let early: Ending | null = null;
@@ -1502,6 +1508,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                 model: j.profile.model,
                 effort: j.profile.effort,
                 timeoutMs: t.timeoutMs,
+                explorer: explorerAgent(j.profile),
                 ...(t.shell && { shell: { ...t.shell, dataDir, origins: originsOf(settings.config()) } }),
               },
               (events) => {

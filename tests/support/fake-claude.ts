@@ -522,7 +522,14 @@ async function main() {
       const servers = kind === "implement" && mcp ? Object.keys(mcp) : [];
       return JSON.stringify({
         ...e,
-        tools: [...(flag("--tools") ?? "").split(",").filter((t) => t && !(s.noBash && t === "Bash")), "StructuredOutput"],
+        // Gate B8: init names the agent tool Task.
+        tools: [
+          ...(flag("--tools") ?? "")
+            .split(",")
+            .filter((t) => t && !(s.noBash && t === "Bash"))
+            .map((t) => (t === "Agent" ? "Task" : t)),
+          "StructuredOutput",
+        ],
         mcp_servers: servers.map((name) => ({ name, status: "connected" })),
       });
     }

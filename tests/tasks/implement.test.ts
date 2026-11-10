@@ -23,7 +23,7 @@ import { basename, join, resolve } from "node:path";
 import { gitAuth } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { DEFAULT_PROFILE, DOCS_RULE, profileOf } from "../../src/server/review/catalog";
+import { DEFAULT_PROFILE, DOCS_RULE, EXPLORER_RULE, profileOf } from "../../src/server/review/catalog";
 import { IMPLEMENT_TOOLS, implementArgs } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
@@ -70,6 +70,7 @@ type Call = {
   refused?: string;
   context?: Record<string, string>;
   mcp?: Record<string, { args?: string[]; env?: Record<string, string> }> | null;
+  agents?: Record<string, { prompt: string; tools?: string[]; disallowedTools?: string[]; model?: string }> | null;
 };
 const flag = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
 
@@ -294,16 +295,27 @@ describe("implement run", () => {
       const spec = { implement: true as const, cwd: s.wt.dir, prompt: "", schema: implementJsonSchema(), maxTurns: 80 };
       const expected = implementArgs({ ...spec, model: p?.model, effort: p?.effort }).args;
       const at = expected.indexOf("--tools");
+      // task-subagents.md: the agents file sits beside the MCP file, and it goes with the run.
+      const agentsFile = flag(call.argv, "--agents") as string;
+      expect(join(agentsFile, "..")).toBe(join(mcpFile as string, ".."));
+      expect(existsSync(agentsFile)).toBe(false);
       expect(call.argv).toEqual([
         ...expected.slice(0, at),
         "--mcp-config",
         mcpFile as string,
         "--tools",
-        "Read,Grep,Glob,Edit,Write",
+        "Read,Grep,Glob,Edit,Write,Agent",
         "--allowedTools",
         "Read,Grep,Glob,Edit,Write,mcp__rl-git,mcp__learn,mcp__deepwiki",
+        "--agents",
+        agentsFile,
+        "--agent",
+        "rl-main",
         ...expected.slice(at + 4),
       ]);
+      expect(Object.keys(call.agents ?? {})).toEqual(["rl-main", "rl-explorer"]);
+      expect(call.agents?.["rl-main"]?.prompt).toBe("");
+      expect(call.agents?.["rl-explorer"]?.tools).toEqual(["Read", "Grep", "Glob"]);
       expect(Object.keys(call.mcp ?? {})).toEqual(["rl-git", "learn", "deepwiki"]);
       // BRIEF.md part 6: the read-only git MCP server reads the task cache. HEAD is the worktree head, BASE the base of the task.
       expect(call.mcp?.["rl-git"]?.args?.slice(-5)).toEqual([
@@ -365,6 +377,12 @@ describe("implement run", () => {
         expect(section).toContain("IMPLEMENT-RULES-CANARY");
         expect(call.stdin).toContain('Only the "Project instructions"');
         if (mode === "instruct") expect(call.stdin.endsWith("# Your instructions\n\nRename the flag.")).toBe(true);
+        // task-subagents.md decision 1: each step mode can start rl-explorer and no other agent, and its prompt says so.
+        expect(flag(call.argv, "--agent")).toBe("rl-main");
+        expect(flag(call.argv, "--tools")).toBe("Read,Grep,Glob,Edit,Write,Agent");
+        expect(call.agents?.["rl-main"]?.tools?.[0]).toBe("Agent(rl-explorer)");
+        expect(call.agents?.["rl-explorer"]?.tools).toEqual(["Read", "Grep", "Glob"]);
+        expect(call.stdin).toContain(EXPLORER_RULE);
       }
       // The sparse rule stays: the CLI sees no CLAUDE.md in ./repo, and the part folder gets none.
       expect(existsSync(join(s.wt.repo, "CLAUDE.md"))).toBe(false);
@@ -847,11 +865,15 @@ describe("implement run with the profile tools", () => {
       expect(existsSync(join(s.dataDir, "cache", "codegraph", "PROJ", "repo", "codegraph.db"))).toBe(true);
       const [call] = s.runCalls();
       if (!call) throw new Error("no run");
-      // Gate B17 stays: --restricted, the five built-in tools, no shell, no Agent, no web tools.
+      // Gate B17 stays: --restricted, the five built-in tools, no shell, no web tools. Agent starts only rl-explorer.
       expect(call.argv).toContain("--restricted");
       expect(call.argv).toContain("--strict-mcp-config");
-      expect(flag(call.argv, "--tools")).toBe("Read,Grep,Glob,Edit,Write");
-      expect(call.argv.join(" ")).not.toMatch(/Bash|PowerShell|Agent|WebFetch|WebSearch/);
+      expect(flag(call.argv, "--tools")).toBe("Read,Grep,Glob,Edit,Write,Agent");
+      expect(call.argv.join(" ")).not.toMatch(/Bash|PowerShell|WebFetch|WebSearch/);
+      // The MCP tools reach the main thread by full name (Gate B9), never rl-explorer.
+      expect(call.agents?.["rl-main"]?.tools).toEqual(expect.arrayContaining(["Agent(rl-explorer)", "mcp__fake__search"]));
+      expect(call.agents?.["rl-main"]?.tools).not.toContain("mcp__fake__lookup");
+      expect(call.agents?.["rl-explorer"]?.tools).toEqual(["Read", "Grep", "Glob"]);
       const allowed = (flag(call.argv, "--allowedTools") ?? "").split(",");
       expect(allowed).toEqual(expect.arrayContaining(["mcp__rl-git", "mcp__fake__search", "mcp__cg__codegraph_explore"]));
       expect(allowed).not.toContain("mcp__fake__lookup");
@@ -1045,7 +1067,7 @@ describe("a step with the Bash tool", () => {
       expect(ok.outcome?.changed).toEqual(["src/app.ts"]);
       expect(readFileSync(join(s.wt.repo, "ignored", "out.o"), "utf8")).toBe("obj\n");
       const call = s.runCalls().at(-1) as Call;
-      expect(flag(call.argv, "--tools")).toBe([...IMPLEMENT_TOOLS, "Bash"].join(","));
+      expect(flag(call.argv, "--tools")).toBe([...IMPLEMENT_TOOLS, "Bash", "Agent"].join(","));
       expect(flag(call.argv, "--settings")).toBeDefined();
       expect(call.stdin).toContain("You can run only these commands: `echo *`.");
       expect(call.stdin).not.toContain("You cannot run commands");

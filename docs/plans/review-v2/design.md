@@ -355,7 +355,8 @@ Large : Questions -> Plan -> Spec PR -> [contract PR] -> part 1 PR -> part 2 PR 
 
 | Layer | Enforced by | Rule |
 |---|---|---|
-| Tools | CLI `--tools Read,Grep,Glob,Edit,Write` and `--allowedTools` with the same names plus the rl-git server | No Bash, PowerShell, WebFetch, WebSearch, or Agent. The init check kills a run that lists another tool (existing rule). |
+| Tools | CLI `--tools Read,Grep,Glob,Edit,Write` and `--allowedTools` with the same names plus the rl-git server | No Bash, PowerShell, WebFetch, or WebSearch. The init check kills a run that lists another tool (existing rule). |
+| Subagent | CLI `--tools ...,Agent`, `--agents` in the run folder, `--agent rl-main` with `Agent(rl-explorer)` (Gates B2, B9) | Agent starts only rl-explorer (task-subagents.md, Design). It has Read, Grep, and Glob, and no write tool, shell, or Agent. Gate B35 is open. |
 | Approvals | CLI `-p` manual mode | A call that needs approval and has no allow rule is denied (S15). |
 | Settings and hooks | CLI `--restricted`, `--strict-mcp-config` | No hooks, no settings files, only app MCP servers (Gate B8, B9). |
 | File tool confinement | CLI `--restricted` | Read stays in the cwd (Gate B8). Edit and Write confinement is unverified: Gate B17. |

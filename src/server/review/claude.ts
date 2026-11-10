@@ -15,7 +15,11 @@ import { classify, createStreamParser, REFUSED_MAX, type Refusal, type RunNote }
 // Gate B ran on 2.1.295. From 2.1.302, -p refuses each call that needs approval (V7), and the Bash rules of a shell step rely on it.
 export const MIN_CLI_VERSION = "2.1.302";
 export const MAIN_AGENT = "rl-main";
+// docs/plans/review-v2/task-subagents.md decision 1: the read-only subagent of a task step.
+export const EXPLORER_AGENT = "rl-explorer";
 const READ_TOOLS = ["Read", "Grep", "Glob"];
+// Gate B1: a subagent with these tools denied has no shell and no write tool.
+const SUBAGENT_DENY = ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"];
 // Names go into comma lists of CLI flags.
 export const NAME = /^[A-Za-z0-9_-]+$/;
 const STDERR_TAIL = 16_384;
@@ -53,6 +57,8 @@ export type RunSpec = {
   mcpServers: Record<string, McpServerSpec>;
   // No built-in tool and no MCP server: the model can only answer. agents and mcpServers must be empty.
   noTools?: boolean;
+  // The subagent rl-explorer with the read tools only (explorerDef). Absent: none.
+  explorer?: AgentSpec;
 };
 
 // docs/plans/session-consult.md part C: a fork of the user's own session. resume: the absolute path of its transcript.
@@ -68,9 +74,9 @@ export type ResumeSpec = {
 };
 
 // docs/plans/review-v2/spec.md section 6.7: one Claude step of a task (run kind implement). cwd: the part folder with repo/, the task
-// worktree, and context/. The run gets no agent. timeoutMs: lower than the runner limit. appDir and mcpServers: the MCP servers of
-// the profile and the git MCP server, as in RunSpec. appDir must be outside cwd. Absent: no MCP server. shell: the Bash tool with the
-// rules of spec.md section 6.21; it needs appDir. Absent: no Bash.
+// worktree, and context/. timeoutMs: lower than the runner limit. appDir and mcpServers: the MCP servers of the profile and the git
+// MCP server, as in RunSpec. appDir must be outside cwd. Absent: no MCP server. shell: the Bash tool with the rules of spec.md section
+// 6.21; it needs appDir. Absent: no Bash. explorer: the only subagent, as in RunSpec; it needs appDir. Absent: no Agent tool.
 export type ImplementSpec = {
   implement: true;
   cwd: string;
@@ -83,6 +89,7 @@ export type ImplementSpec = {
   effort?: Effort | null;
   timeoutMs?: number;
   shell?: ShellSpec;
+  explorer?: AgentSpec;
 };
 
 // Gate B17 (integration-check.md U72): with these tools, --restricted keeps Edit and Write inside the cwd. No Bash, no Agent.
@@ -369,39 +376,40 @@ function writeMcp(appDir: string, mcpServers: Record<string, McpServerSpec>) {
   };
 }
 
-// Writes the MCP and agents files and returns the CLI arguments and the init tool allowlist.
-function prepare(spec: RunSpec) {
-  const reviewers = Object.keys(spec.agents);
-  const servers = Object.keys(spec.mcpServers);
-  for (const n of reviewers) if (!NAME.test(n)) throw new Error(`Invalid agent, server, or tool name: ${n}`);
-  if (reviewers.includes(MAIN_AGENT)) throw new Error(`${MAIN_AGENT} cannot be a review agent.`);
-  if (spec.noTools && (reviewers.length || servers.length)) throw new Error("A run without tools cannot have agents or MCP servers.");
-  for (const a of [spec, spec.main, ...Object.values(spec.agents)]) {
+function checkAgentFields(list: { model?: string | null; effort?: Effort | null }[]) {
+  for (const a of list) {
     if (a.model != null && !modelName.safeParse(a.model).success) throw new Error(`Invalid model name: ${a.model}`);
     if (a.effort != null && !EFFORTS.includes(a.effort)) throw new Error(`Invalid effort: ${a.effort}`);
   }
+}
+
+// task-subagents.md decision 1: no MCP tool, also in a run with MCP servers. The same in each shell mode.
+const explorerDef = (a: AgentSpec) => ({ ...a, tools: READ_TOOLS, disallowedTools: SUBAGENT_DENY, omitClaudeMd: true });
+
+// Writes the MCP and agents files and returns the CLI arguments, the init tool allowlist, and the agent names of the run.
+function prepare(spec: RunSpec) {
+  const reviewers = Object.keys(spec.agents);
+  const subs = [...reviewers, ...(spec.explorer ? [EXPLORER_AGENT] : [])];
+  const servers = Object.keys(spec.mcpServers);
+  for (const n of reviewers) if (!NAME.test(n)) throw new Error(`Invalid agent, server, or tool name: ${n}`);
+  for (const n of [MAIN_AGENT, EXPLORER_AGENT]) if (reviewers.includes(n)) throw new Error(`${n} cannot be a review agent.`);
+  if (spec.noTools && (subs.length || servers.length)) throw new Error("A run without tools cannot have agents or MCP servers.");
+  checkAgentFields([spec, spec.main, ...Object.values(spec.agents), ...(spec.explorer ? [spec.explorer] : [])]);
 
   const mcp = writeMcp(spec.appDir, spec.mcpServers);
   const builtins = spec.noTools ? [] : READ_TOOLS;
   const readTools = [...builtins, ...mcp.tools];
   const denied = mcp.denied;
-  const agentTool = reviewers.length ? [`Agent(${reviewers.join(", ")})`] : [];
+  const agentTool = subs.length ? [`Agent(${subs.join(", ")})`] : [];
   const mcpFile = mcp.file;
   const agentsFile = join(spec.appDir, "agents.json");
   // Gate B9: without StructuredOutput in the rl-main tools, no result carries structured_output.
   const agents = {
     [MAIN_AGENT]: { ...spec.main, tools: [...agentTool, ...readTools, "StructuredOutput"] },
     ...Object.fromEntries(
-      reviewers.map((n) => [
-        n,
-        {
-          ...spec.agents[n],
-          tools: readTools,
-          disallowedTools: ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"],
-          omitClaudeMd: true,
-        },
-      ]),
+      reviewers.map((n) => [n, { ...spec.agents[n], tools: readTools, disallowedTools: SUBAGENT_DENY, omitClaudeMd: true }]),
     ),
+    ...(spec.explorer && { [EXPLORER_AGENT]: explorerDef(spec.explorer) }),
   };
   writeFileSync(agentsFile, JSON.stringify(agents));
 
@@ -417,7 +425,7 @@ function prepare(spec: RunSpec) {
     mcpFile,
     // code.claude.com/docs/en/cli-reference: --tools "" disables all built-in tools. StructuredOutput comes from --json-schema.
     "--tools",
-    [...builtins, ...(reviewers.length ? ["Agent"] : [])].join(","),
+    [...builtins, ...(subs.length ? ["Agent"] : [])].join(","),
     ...(spec.noTools ? [] : ["--allowedTools", [...READ_TOOLS, ...mcp.allow].join(",")]),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
     ...(denied.length ? ["--disallowedTools", denied.join(",")] : []),
@@ -437,8 +445,8 @@ function prepare(spec: RunSpec) {
   if (JSON.stringify(args).length > MAX_ARGV)
     throw new Error("The MCP tool lists are too long for the command line. Pick fewer MCP servers.");
   // Init can list a denied tool. The deny rule keeps it off, so the init check accepts it.
-  const allowed = new Set([...readTools, ...denied, "StructuredOutput", ...(reviewers.length ? ["Agent", "Task"] : [])]);
-  return { args, allowed };
+  const allowed = new Set([...readTools, ...denied, "StructuredOutput", ...(subs.length ? ["Agent", "Task"] : [])]);
+  return { args, allowed, agents: new Set([MAIN_AGENT, ...subs]) };
 }
 
 // The CLI arguments of a session fork. Resume does not restore the launch flags, so each one is passed again (session-consult.md
@@ -474,7 +482,7 @@ export function resumeArgs(spec: ResumeSpec) {
     String(spec.maxTurns),
     "--no-session-persistence",
   ];
-  return { args, allowed: new Set([...READ_TOOLS, "StructuredOutput"]) };
+  return { args, allowed: new Set([...READ_TOOLS, "StructuredOutput"]), agents: new Set<string>() };
 }
 
 // The CLI arguments of an implement run: the flags of Gate B17 (scripts/gate/claude-checks.ts b17) and the runner output flags. No
@@ -483,13 +491,27 @@ export function resumeArgs(spec: ResumeSpec) {
 // A shell step (spec.md section 6.21) adds Bash to --tools and the Bash rules in shell.json. No dontAsk: shellEnv sets
 // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, which forces the default mode. In -p, the default mode refuses each command that has no allow
 // rule (SU1). Unrestricted uses the same flags: --restricted refuses bypassPermissions, and dontAsk refuses more (Gate B32).
+// explorer (task-subagents.md, Design): the run is rl-main with Agent(rl-explorer), as a review run (Gates B2, B9), and the init check
+// also accepts Agent and Task (Gate B8). Gate B35 is open.
 export function implementArgs(spec: ImplementSpec) {
   const builtins = [...IMPLEMENT_TOOLS, ...(spec.shell ? ["Bash"] : [])];
-  if (spec.model != null && !modelName.safeParse(spec.model).success) throw new Error(`Invalid model name: ${spec.model}`);
-  if (spec.effort != null && !EFFORTS.includes(spec.effort)) throw new Error(`Invalid effort: ${spec.effort}`);
+  checkAgentFields([spec, ...(spec.explorer ? [spec.explorer] : [])]);
   if (spec.shell && !spec.appDir) throw new Error("A shell step needs an app folder outside the step folder.");
+  if (spec.explorer && !spec.appDir) throw new Error("A step with rl-explorer needs an app folder outside the step folder.");
   const mcp = spec.appDir && spec.mcpServers ? writeMcp(spec.appDir, spec.mcpServers) : null;
   const settings = spec.shell && spec.appDir ? writeShellSettings(spec.appDir, spec.shell) : null;
+  let agentsFile: string | null = null;
+  if (spec.explorer && spec.appDir) {
+    mkdirSync(spec.appDir, { recursive: true });
+    agentsFile = join(spec.appDir, "agents.json");
+    // code.claude.com/docs/en/sub-agents: an empty prompt with no memory field keeps the default system prompt (CLI 2.1.281).
+    const main = {
+      description: "Main thread of a task step.",
+      prompt: "",
+      tools: [`Agent(${EXPLORER_AGENT})`, ...builtins, ...(mcp?.tools ?? []), "StructuredOutput"],
+    };
+    writeFileSync(agentsFile, JSON.stringify({ [MAIN_AGENT]: main, [EXPLORER_AGENT]: explorerDef(spec.explorer) }));
+  }
   const args = [
     "-p",
     "--output-format",
@@ -499,12 +521,13 @@ export function implementArgs(spec: ImplementSpec) {
     "--strict-mcp-config",
     ...(mcp ? ["--mcp-config", mcp.file] : []),
     "--tools",
-    builtins.join(","),
+    [...builtins, ...(agentsFile ? ["Agent"] : [])].join(","),
     "--allowedTools",
     [...IMPLEMENT_TOOLS, ...(mcp?.allow ?? [])].join(","),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
     ...(mcp?.denied.length ? ["--disallowedTools", mcp.denied.join(",")] : []),
     ...(settings ? ["--settings", settings] : []),
+    ...(agentsFile ? ["--agents", agentsFile, "--agent", MAIN_AGENT] : []),
     "--json-schema",
     JSON.stringify(spec.schema),
     "--max-turns",
@@ -515,7 +538,12 @@ export function implementArgs(spec: ImplementSpec) {
   ];
   if (JSON.stringify(args).length > MAX_ARGV)
     throw new Error("The MCP tool lists are too long for the command line. Pick fewer MCP servers.");
-  return { args, allowed: new Set([...builtins, ...(mcp?.tools ?? []), ...(mcp?.denied ?? []), "StructuredOutput"]) };
+  const agentTools = agentsFile ? ["Agent", "Task"] : [];
+  return {
+    args,
+    allowed: new Set([...builtins, ...(mcp?.tools ?? []), ...(mcp?.denied ?? []), "StructuredOutput", ...agentTools]),
+    agents: new Set(agentsFile ? [MAIN_AGENT, EXPLORER_AGENT] : []),
+  };
 }
 
 export function createClaudeRunner(opts: RunnerOptions = {}) {
@@ -577,10 +605,9 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       // Gate B9: an 8.3 short cwd makes the CLI refuse Reads inside it.
       cwd = realpathSync.native(spec.cwd);
       projectsDir = c.projectsDir;
-      const { args, allowed } = "implement" in spec ? implementArgs(spec) : "resume" in spec ? resumeArgs(spec) : prepare(spec);
+      const { args, allowed, agents } = "implement" in spec ? implementArgs(spec) : "resume" in spec ? resumeArgs(spec) : prepare(spec);
       const own = "implement" in spec || "resume" in spec ? spec.timeoutMs : undefined;
       const limit = Math.min(opts.timeoutMs ?? RUN_TIMEOUT_MS, own ?? RUN_TIMEOUT_MS);
-      const agents = new Set("main" in spec ? [MAIN_AGENT, ...Object.keys(spec.agents)] : []);
       const shell = "implement" in spec ? spec.shell : undefined;
       // implementArgs wrote this file beside shell.json.
       const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";

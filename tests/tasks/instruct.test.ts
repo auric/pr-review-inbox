@@ -39,7 +39,7 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
       expect(call.stdin.endsWith(`# Your instructions\n\n${text}`)).toBe(true);
       expect(call.stdin.indexOf("Never edit .claude folders")).toBeLessThan(call.stdin.indexOf("# Your instructions"));
       expect(call.stdin).toContain("Do not try to merge, rebase, or fetch. You cannot run git.");
-      expect(call.argv[call.argv.indexOf("--tools") + 1]).toBe("Read,Grep,Glob,Edit,Write");
+      expect(call.argv[call.argv.indexOf("--tools") + 1]).toBe("Read,Grep,Glob,Edit,Write,Agent");
       expect(call.context["step.md"]).toContain("- Mode: instruct");
       expect(s.flow()).toEqual(["instruct:I1:ok"]);
       const row = s.steps()[0];

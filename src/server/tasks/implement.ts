@@ -25,7 +25,7 @@ import {
   taskSettings,
 } from "../../shared/task";
 import { attachmentsRoot } from "../context/attachments";
-import type { Profile } from "../review/catalog";
+import { EXPLORER_RULE, type Profile } from "../review/catalog";
 import { deniedPath, fold } from "../review/edits";
 import type { ImplementRunStart, InstructionRepo, ReviewJobs } from "../review/jobs";
 import { addUsage, type Ending, failure, judgeTask, usageOf } from "../review/judge";
@@ -335,7 +335,7 @@ export async function writeContext(
   return files;
 }
 
-// spec.md section 6.6, implement agent. The run has no agent definition (Gate B17 ran without one), so the rules go into the stdin.
+// spec.md section 6.6, implement agent. Its rl-main has an empty prompt to keep the default system prompt, so the rules go into the stdin.
 // attachments: ./context/attachments/ exists (spec.md section 6.17). instructions: the text of "Tell Claude" (mode instruct, spec.md
 // section 6.18.2). It is the only content of "Your instructions" and the last text of the stdin, so the rules come first. project: the
 // combined project instructions with their "# Project instructions" heading (spec.md section 6.7). They stand after the rules. lines:
@@ -458,6 +458,7 @@ export function implementPrompt(
         : []),
     ...lines.mcp,
     ...lines.skills,
+    EXPLORER_RULE,
     "In coverage, list what you read, what you skipped, and what was not available.",
     "",
     `- Mode: ${mode}`,

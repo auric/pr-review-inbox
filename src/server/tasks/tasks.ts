@@ -1477,6 +1477,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       maxTurns: INTERVIEW_TURNS,
       schema: interviewJsonSchema(),
       agent: interviewAgent(p, round, t.subtasks === 1),
+      explorer: true,
       prompt: (head, instructions) =>
         buildInterviewPrompt({
           key: t.key,
@@ -1623,6 +1624,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       maxTurns: SPEC_TURNS,
       schema: specJsonSchema(),
       agent: specAgent(p, budget, process.platform, subtasks),
+      explorer: true,
       prompt: (head, instructions) => {
         const text = buildSpecPrompt({
           key: t.key,
