@@ -240,6 +240,8 @@ export type OpenPrDeps = {
   // A PR of the task opened. The sync cycle after it reads the Jira statuses (spec.md section 6.20.9).
   opened?: (db: Database, id: number) => void;
   live: Pick<Live, "broadcast">;
+  // The line end repair of a part (loop.matchBase, spec.md section 6.7). It can move the part head.
+  matchBase?: (db: Database, id: number, partId: number) => Promise<void>;
   now?: () => number;
 };
 
@@ -255,6 +257,14 @@ export function createPrOpener(deps: OpenPrDeps) {
     return t ? { status: 409, error, task: taskDto(db, t) } : { status: 404, error: "Task not found." };
   };
   const changed = (id: number) => deps.live.broadcast("changed", { tasks: [id] });
+  // A failed repair does not stop the push. The PR then shows the line end changes.
+  const matchBase = async (db: Database, id: number, partId: number) => {
+    try {
+      await deps.matchBase?.(db, id, partId);
+    } catch (e) {
+      log(`Task ${id}: the line end repair failed: ${noUrl((e as Error).message)}`);
+    }
+  };
   const preflightDeps: PreflightDeps = {
     dataDir: deps.review.dataDir,
     provider: () => deps.settings.provider().catch(() => null),
@@ -292,7 +302,9 @@ export function createPrOpener(deps: OpenPrDeps) {
     if (moved) return conflict(db, id, moved);
     opening.add(id);
     try {
-      return await push(db, t, part, docs.parsed, input.reviewers);
+      await matchBase(db, id, partId);
+      const cur = db.query(Q.part).get({ part: partId, task: id }) as PartRow;
+      return await push(db, t, cur, docs.parsed, input.reviewers);
     } finally {
       opening.delete(id);
       changed(id);
@@ -493,6 +505,7 @@ export function createPrOpener(deps: OpenPrDeps) {
     const order = fresh(db, id, partId)
       .rows.filter((r) => want.includes(r.taskRepo))
       .map((r) => r.taskRepo);
+    await matchBase(db, id, partId);
     await pushRows(db, id, partId, want);
     const provider = await deps.settings.provider().catch(() => null);
     const urls = new Map<number, string>();
@@ -741,7 +754,9 @@ export function createPrOpener(deps: OpenPrDeps) {
   }
 
   // The pushes of every row of the part with commits that are not on the server, after the pre-flight.
-  async function pushChanged(db: Database, t: TaskRow, part: PartRow): Promise<TaskResult | null> {
+  async function pushChanged(db: Database, t: TaskRow, before: PartRow): Promise<TaskResult | null> {
+    await matchBase(db, t.id, before.id);
+    const part = db.query(Q.part).get({ part: before.id, task: t.id }) as PartRow;
     const rows = prRows(db, t, part);
     const want = rows.filter((r) => r.head && r.pushed !== r.head).map((r) => r.taskRepo);
     if (!want.length) return null;

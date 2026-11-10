@@ -573,28 +573,31 @@ function setEol(wt: Worktree, path: string, w: string, to: "lf" | "crlf") {
   writeFileSync(f, to === "lf" ? text.replaceAll("\r\n", "\n") : text.replace(/\r?\n/g, "\r\n"), "latin1");
 }
 
-// spec.md section 6.7, Line endings: a changed text file takes the line ends of its blob at HEAD, so a file that differs only in line
-// ends equals HEAD again. A file with mixed line ends at HEAD and a binary file stay as written. A new file and a file with no line
-// end at HEAD follow the text, eol, and crlf attributes of the repository: git stores a text file with LF. The "* -text" of the cache
+// spec.md section 6.7, Line endings: a changed text file takes the line ends of its blob at ref, so a file that differs only in line
+// ends equals ref again. A file with mixed line ends at ref and a binary file stay as written. A new file and a file with no line end
+// at ref follow the text, eol, and crlf attributes of the repository: git stores a text file with LF. The "* -text" of the cache
 // (info/attributes) hides those attributes, so an empty git folder reads them from the worktree. only: these paths, for a paused merge.
-export async function matchEol(wt: Worktree, added: readonly string[], only?: readonly string[]) {
+// ref: HEAD for a commit, the part base for the repair.
+export async function matchEol(wt: Worktree, added: readonly string[], only?: readonly string[], ref = "HEAD") {
   const keep = only && new Set(only);
-  // git-diff(1) --raw -z: ":<mode> <mode> <oid> <oid> <status>" NUL "<path>" NUL. The old side is the HEAD blob.
+  // git-diff(1) --raw -z: ":<mode> <mode> <oid> <oid> <status>" NUL "<path>" NUL. The old side is the blob at ref.
   const raw = (
-    await wtGit(wt, ["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--ignore-submodules=all", "--diff-filter=M", "HEAD"])
+    await wtGit(wt, ["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--ignore-submodules=all", "--diff-filter=AM", ref])
   ).split("\0");
   let info = "";
-  for (let k = 0; k + 1 < raw.length; k += 2) {
-    const [mode, , oid] = (raw[k] as string).slice(1).split(" ");
-    const path = raw[k + 1] as string;
-    if (mode?.startsWith("100") && (!keep || keep.has(path))) info += `${mode} ${oid}\t${path}\0`;
-  }
   const loose = [...added];
+  for (let k = 0; k + 1 < raw.length; k += 2) {
+    const [mode, , oid, , kind] = (raw[k] as string).slice(1).split(" ");
+    const path = raw[k + 1] as string;
+    if (keep && !keep.has(path)) continue;
+    if (kind === "A") loose.push(path);
+    else if (mode?.startsWith("100")) info += `${mode} ${oid}\t${path}\0`;
+  }
   if (!info && !loose.length) return;
   const tmp = mkdtempSync(join(tmpdir(), "rl-eol-"));
   try {
     if (info) {
-      // A temp index of the HEAD blobs: Claude can stage files through a shell command.
+      // A temp index of the blobs at ref: Claude can stage files through a shell command.
       const extra = { GIT_INDEX_FILE: join(tmp, "index") };
       await wtGit(wt, ["update-index", "-z", "--index-info"], { stdin: info, extra });
       for (const e of eolRows(await wtGit(wt, ["ls-files", "--eol", "-z"], { extra })))
@@ -617,15 +620,16 @@ export async function matchEol(wt: Worktree, added: readonly string[], only?: re
 
 // spec.md section 6.7: the line ends first (matchEol), then `git add -u` (tracked changes and deletes), `git add` of add (the new files
 // that the commit takes), then `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name and email.
-// --no-verify also skips the hooks that core.hooksPath would name. null: nothing to commit.
+// --no-verify also skips the hooks that core.hooksPath would name. null: nothing to commit. eol false: the line ends stay, for the repair.
 export async function commitStep(
   wt: Worktree,
   message: string,
   who: { name: string; email: string },
   add: readonly string[],
+  eol = true,
 ): Promise<string | null> {
   if (!message.trim()) throw new WorkspaceError("A commit needs a message.");
-  await matchEol(wt, add);
+  if (eol) await matchEol(wt, add);
   await wtGit(wt, ["add", "-u"]);
   if (add.length) await wtGit(wt, ["add", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: `${add.join("\0")}\0` });
   if (!(await wtGit(wt, ["diff", "--cached", "--name-only", "-z"])).length) return null;

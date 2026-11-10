@@ -585,6 +585,8 @@ export type CommitResult =
 // The Claude steps of a part after its last commit row.
 const WRITTEN_SQL = `SELECT detail_json FROM task_step WHERE part = $part AND kind IN (${CLAUDE_STEPS.map((k) => `'${k}'`).join(", ")})
   AND id > COALESCE((SELECT MAX(id) FROM task_step WHERE part = $part AND kind = 'commit'), 0)`;
+// true: a Claude step of the part ran after its last commit row, so a new commit row would drop the claim of its new files.
+export const stepAfterCommit = (db: Database, part: number) => db.query(WRITTEN_SQL).all({ part }).length > 0;
 
 // spec.md section 6.7, Commit: the new files of the commit. A new file goes in only when a Claude step of the part wrote it after the
 // last commit (StepDetail written), or when the app wrote it (own, by absolute path). Each path goes to the deepest worktree that
@@ -636,17 +638,15 @@ export async function commitTask(i: {
   own?: readonly string[];
   // Every repository of the part folder, wt among them (spec.md section 6.16.6). Absent or one: the main worktree only.
   trees?: readonly RepoTree[];
+  // The line end repair (spec.md section 6.7): the tracked changes as they are, with no new file and no line end match.
+  asIs?: boolean;
   now?: () => number;
 }): Promise<CommitResult> {
   const now = i.now ?? Date.now;
   const trees = i.trees && i.trees.length > 1 ? i.trees : null;
-  const found = await claimedFiles(
-    i.db,
-    i.part,
-    i.wt.dir,
-    trees ? deepestFirst(trees).flatMap((t) => (t.wt ? [t.wt] : [])) : [i.wt],
-    i.own ?? [],
-  );
+  const found = i.asIs
+    ? new Map<string, Awaited<ReturnType<typeof newFiles>>>()
+    : await claimedFiles(i.db, i.part, i.wt.dir, trees ? deepestFirst(trees).flatMap((t) => (t.wt ? [t.wt] : [])) : [i.wt], i.own ?? []);
   const add = new Map([...found].map(([repo, f]) => [repo, f.add] as const));
   const check = trees
     ? (await treeCheck(trees, { allow: i.allow, add })).check
@@ -684,13 +684,13 @@ export async function commitTask(i: {
   for (const t of trees ? deepestFirst(trees) : []) {
     if (t.row.role === "main" || !t.wt || t.row.access !== "edit") continue;
     const from = await headOf(t.wt);
-    const commit = await commitStep(t.wt, i.message, i.who, add.get(t.wt.repo) ?? []);
+    const commit = await commitStep(t.wt, i.message, i.who, add.get(t.wt.repo) ?? [], !i.asIs);
     if (!commit) continue;
     await count(t.wt, from, commit);
     subs.push({ tree: t, commit });
   }
   const last = await headOf(i.wt);
-  const made = await commitStep(i.wt, i.message, i.who, add.get(i.wt.repo) ?? []);
+  const made = await commitStep(i.wt, i.message, i.who, add.get(i.wt.repo) ?? [], !i.asIs);
   if (!made && !subs.length) return { status: "empty" };
   const commit = made ?? last;
   if (made) await count(i.wt, last, made);

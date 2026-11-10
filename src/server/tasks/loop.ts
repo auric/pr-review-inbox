@@ -64,6 +64,7 @@ import {
   type StepInput,
   type StepOutcome,
   startStep,
+  stepAfterCommit,
   stepDetailOf,
 } from "./implement";
 import { type Answer, answerProblem, type QuestionRow } from "./interview";
@@ -143,6 +144,7 @@ import {
   firstFree,
   freeBranch,
   headOf,
+  matchEol,
   mergeBase,
   noneChanges,
   openRepoTrees,
@@ -211,10 +213,12 @@ export function globMatch(pattern: string, path: string): boolean {
 export type LineCount = { files: number; added: number; removed: number; lines: number };
 
 // spec.md section 6.1, Counting: the added and removed lines of `git diff --numstat <base>..<head>` without the paths of the excluded
-// globs. A binary file counts 0. git-diff(1), --numstat with -z: a rename has an empty path, then the old and the new path.
-export async function changedLines(wt: Worktree, base: string, head: string, exclude: readonly string[]): Promise<LineCount> {
-  // spec.md section 6.16.6: gitlink entries do not count. A change of line ends only does not count (spec.md section 6.7, Line endings).
-  const out = (await wtGit(wt, ["diff", "--numstat", "-z", "-M", "--ignore-cr-at-eol", "--ignore-submodules=all", base, head])).split("\0");
+// globs. A binary file counts 0. git-diff(1), --numstat with -z: a rename has an empty path, then the old and the new path. eol: also
+// count a change of line ends only, for the repair check (spec.md section 6.7, Line endings).
+export async function changedLines(wt: Worktree, base: string, head: string, exclude: readonly string[], eol = false): Promise<LineCount> {
+  // spec.md section 6.16.6: gitlink entries do not count.
+  const cr = eol ? [] : ["--ignore-cr-at-eol"];
+  const out = (await wtGit(wt, ["diff", "--numstat", "-z", "-M", ...cr, "--ignore-submodules=all", base, head])).split("\0");
   let files = 0;
   let added = 0;
   let removed = 0;
@@ -961,8 +965,50 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
+  // spec.md section 6.7, Line endings, Repair (AC-B171): a part with line-ending-only changes from before the line end rule gets one
+  // forward commit. Each file that changed since the part base takes the line ends of its base blob. The check runs once per set of
+  // heads, and a repair that changes nothing commits nothing, so it never loops. A part with work that waits for its commit and an
+  // adopted part get none.
+  const baseMatched = new Set<string>();
+  async function matchBase(c: Ctx) {
+    if (c.part.adopted || !c.who || stepAfterCommit(c.db, c.part.id)) return;
+    const trees = [
+      { wt: c.wt, base: c.base, head: await headOf(c.wt) },
+      ...(await changedSubs(c)).map((s) => ({ wt: s.tree.wt as Worktree, base: s.base, head: s.head })),
+    ];
+    const key = `${c.part.id}:${trees.map((x) => x.head).join(",")}`;
+    if (baseMatched.has(key)) return;
+    const off: typeof trees = [];
+    for (const x of trees)
+      if ((await changedLines(x.wt, x.base, x.head, [], true)).lines !== (await changedLines(x.wt, x.base, x.head, [])).lines) off.push(x);
+    // The repair commit takes every tracked change, so each worktree must equal its HEAD first. A later check at these heads tries again.
+    for (const t of off.length ? c.trees : [])
+      if (t.wt && (t.row.role === "main" || t.row.access === "edit")) {
+        if ((await wtGit(t.wt, ["diff", "--name-only", "--ignore-submodules=all", "HEAD"])).trim()) return;
+      }
+    baseMatched.add(key);
+    if (!off.length) return;
+    for (const x of off) await matchEol(x.wt, [], undefined, x.base);
+    const message = `${c.label}: Match the line endings of the base`;
+    await commitTask({
+      db: c.db,
+      task: c.id,
+      part: c.part.id,
+      wt: c.wt,
+      item: "eol",
+      message,
+      who: c.who,
+      allow: [],
+      trees: c.trees,
+      asIs: true,
+      now,
+    });
+    changed(c.id);
+  }
+
   // spec.md section 6.1: the changed lines of the part against the line budget. Over it, the part waits for the user's choice.
   async function sizeCheck(c: Ctx) {
+    await matchBase(c);
     const n = await countLines(c);
     if (n.lines <= c.budget || c.keep) return;
     const text = `Needs you: this PR would have ${n.lines} changed lines, over your ${c.budget} limit.`;
@@ -2836,6 +2882,13 @@ export function createLoop(opts: LoopOptions) {
     },
     // true while a driver works on the task.
     running: (id: number) => drivers.has(id),
+
+    // spec.md section 6.7, Line endings, Repair: pr.ts runs it before each push and PR create of a part.
+    async matchBase(db: Database, id: number, partId: number) {
+      const t = taskRow(db, id);
+      const part = t ? parts(db, id).find((p) => p.id === partId) : undefined;
+      if (t && part && !part.adopted) await matchBase(await context(db, t, part));
+    },
     // The user action routes call it first. The waiting state shows before the driver ends its base check, so the route waits for that
     // check. A driver that still runs a step is not awaited, and the route refuses as before.
     async settle(id: number) {

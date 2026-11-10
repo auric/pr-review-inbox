@@ -132,6 +132,7 @@ export function createTaskRoutes(opts: {
     settings: opts.settings,
     live: opts.live,
     working: loop.running,
+    matchBase: loop.matchBase,
     opened: tasks.statusDue,
     syncNow: () => void opts.sync?.syncNow().catch((e) => log(`The sync after a task PR failed: ${noUrl((e as Error).message)}`)),
   });
