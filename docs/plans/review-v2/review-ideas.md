@@ -50,18 +50,19 @@ Report: research/research-review-practices.md. No source argues against ideas 1 
 - Idea 4: supported (Google eng-practices: no code for imagined needs, no needless complexity).
 - Idea 5: build the Fix part only. Drop the finder trial: AutoCommenter found about 80% of predictions under a strict threshold still correct, the same loss as U-V1.
 
-New candidates from the research (not ranked, not approved):
+New candidates from the research. User decision of 2026-11-11: A, B, and C are approved (build-redesign.md section 7, items 8 to 10). D is not approved.
 
 - A. Addressed rate of posted findings: a later change touched the line, or the thread was resolved. It gives a precision number with no eval run. Stats only.
 - B. Sort findings by category, bug first. Sort only, never hide.
-- C. A "Nit:" prefix on posted minor findings, and a question form for low-confidence findings. Both change posted text and need a user decision. Check first whether catalog.ts already covers them.
+- C. A "Nit:" prefix on posted minor findings, and a question form for low-confidence findings. Both change posted text; the user approved this. Check first whether catalog.ts already covers them.
 - D. A per-profile list of noise-prone categories in judge.ts that caps severity after the finder. It never goes into the finder prompt.
 
 Avoid: hide thresholds, strict "high-signal" finder rules, similarity scores as a quality metric, vendor self-benchmarks, LLM-made ground truth.
 
 ## Do not build
 
-- A separate small-model critic after a task implement step. The task loop already runs the full review and the verifier before the PR (loop.ts:1208-1297).
+- User decision of 2026-11-11: the small-model critic after a task part is now approved (build-redesign.md section 7, item 7). It adds to the full review and the verifier (loop.ts:1208-1297).
+
 - An exact-quote check on changed lines. validate.ts:280-288 already checks the anchor and the cause.
 
 ## Hard rules

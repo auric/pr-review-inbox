@@ -259,3 +259,19 @@ Not verified: whether a CLI child survives an app restart; how often a stop leav
 4. Q4. After an app restart: reset with the patch in continue.md, or persist the git snapshot so the files stay (WP-R6)? Recommended: reset with continue.md now; WP-R6 only if restarts are common.
 5. Q5. Resume the same Claude session for a cut step (WP-R7)? Recommended: not now. Measure continue.md first.
 6. Q6. Keep "Run setup again" as an option that deletes the setup mark, and drop its separate driver? Recommended: yes.
+
+## 7. Queued ideas (user decision of 2026-11-11)
+
+The user approved all eleven ideas below. They go into the part-session design (one Claude session per part), which replaces WP-R2 to WP-R5. Items 8 to 10 are review ideas; review-ideas.md holds them as candidates A to C.
+
+1. Messages to a running step. The user types a note while a step runs, and the CLI gets it at once through stream-json input. Steering needs no Stop and Continue. Gate: the CLI accepts a user message during a `-p` run with the app flags.
+2. A stall and loop guard instead of time limits. The app stops a run with no stream output for 15 minutes. It warns after 3 identical tool calls with identical results and stops after 5. The stop keeps the work, as WP-R1b does.
+3. Work rules in the build prompt: never skip, delete, or loosen a test; report a test that also fails on the base branch and do not fix it; write long command output to a file and read its end; stop each background process that the step started.
+4. Spec size levels. Small: a task card that becomes the PR description. Medium: one short brief. Large: the full spec and a spec PR.
+5. Hold and Skip for each part, and "Start this part again from scratch" with a confirm.
+6. Update from base and conflict help in the part session. The push stays on the user's click.
+7. A cheap code critic after each part. A Haiku pass keeps a point only when its quoted code is on a line that the part adds. The resumed part session applies the kept points. The own review stays as it is.
+8. Addressed rate of posted findings (candidate A): a later commit changed the line, or the thread was resolved. Stats only.
+9. Sort findings by category, bugs first (candidate B). Sort only, never hide.
+10. A "Nit:" prefix on posted minor findings, and a question form for low-confidence findings (candidate C). The user approved this change of posted text.
+11. Usage limit: the run pauses and shows "Resume at <time>" from the CLI reset time. One click resumes. An automatic resume at that time is a setting, off by default. It changes the BRIEF rule "No automatic retry after a usage limit", so the BRIEF wording goes into the design for a user check.
