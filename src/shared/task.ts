@@ -86,13 +86,14 @@ export type TaskDoc = (typeof TASK_DOCS)[number];
 
 // Settings > Tasks (limits.md decision 3): the run limits. config.json keeps only the changed ones. def: the value while unset.
 // reviewMinutes: the time of each Claude run that is not a task step. stepMinutes: the time of one task step. The part time and
-// RUN_TIME_MAX_MS still cap a step.
+// RUN_TIME_MAX_MS still cap a step. runsAtOnce: the slots of the run pool (spec.md section 6.26).
 export const RUN_LIMITS = {
   stepMinutes: { def: 20, min: 5, max: 120 },
   reviewMinutes: { def: 60, min: 10, max: 240 },
   interviewRounds: { def: 2, min: 1, max: 5 },
   testFixTries: { def: 3, min: 1, max: 10 },
   planTurns: { def: 80, min: 20, max: 500 },
+  runsAtOnce: { def: 3, min: 1, max: 10 },
 } as const;
 export type RunLimitKey = keyof typeof RUN_LIMITS;
 export type RunLimits = Record<RunLimitKey, number>;

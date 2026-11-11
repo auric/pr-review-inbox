@@ -86,7 +86,7 @@ describe("settings API", () => {
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
-      runLimits: { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 },
+      runLimits: { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 },
     });
     expect(existsSync(dir)).toBe(false);
   });
@@ -116,7 +116,7 @@ describe("settings API", () => {
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
-      runLimits: { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 },
+      runLimits: { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 },
     };
     expect(await res.json()).toEqual(expected);
     expect(await s.get()).toEqual(expected);
@@ -224,18 +224,20 @@ describe("settings API", () => {
     expect((await res.json()).taskBranchPrefixes).toEqual(list);
   });
 
-  test("limits decision 3: the run limits save key by key, persist, refuse a value out of bounds, and default when unset", async () => {
+  test("limits decision 3, AC-B187: the run limits save key by key, persist, refuse a value out of bounds, and default when unset", async () => {
     const s = setup();
     expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
-    const def = { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 };
+    const def = { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 };
     expect((await s.get()).runLimits).toEqual(def);
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toBeUndefined();
     let res = await s.put({ baseUrl: fake.url, runLimits: { stepMinutes: 120, planTurns: 500 } });
     expect(res.status).toBe(200);
     expect((await res.json()).runLimits).toEqual({ ...def, stepMinutes: 120, planTurns: 500 });
+    // config.json keeps a key only when it changed.
+    expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toEqual({ stepMinutes: 120, planTurns: 500 });
     // A second PUT keeps the other stored keys. A PUT without runLimits keeps all.
-    res = await s.put({ baseUrl: fake.url, runLimits: { reviewMinutes: 10, interviewRounds: 5, testFixTries: 1 } });
-    const all = { stepMinutes: 120, reviewMinutes: 10, interviewRounds: 5, testFixTries: 1, planTurns: 500 };
+    res = await s.put({ baseUrl: fake.url, runLimits: { reviewMinutes: 10, interviewRounds: 5, testFixTries: 1, runsAtOnce: 10 } });
+    const all = { stepMinutes: 120, reviewMinutes: 10, interviewRounds: 5, testFixTries: 1, planTurns: 500, runsAtOnce: 10 };
     expect((await res.json()).runLimits).toEqual(all);
     expect((await s.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toEqual(all);
@@ -248,6 +250,8 @@ describe("settings API", () => {
       [{ testFixTries: 11 }, "Type a whole number from 1 to 10."],
       [{ planTurns: 501 }, "Type a whole number from 20 to 500."],
       [{ planTurns: 80.5 }, "Type a whole number from 20 to 500."],
+      [{ runsAtOnce: 0 }, "Type a whole number from 1 to 10."],
+      [{ runsAtOnce: 11 }, "Type a whole number from 1 to 10."],
     ] as const) {
       const r = await s.put({ baseUrl: fake.url, runLimits: bad });
       expect(r.status).toBe(400);

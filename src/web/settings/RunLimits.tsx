@@ -37,6 +37,12 @@ const FIELDS: Record<RunLimitKey, { label: string; unit: string; help: (runner: 
     help: (r) => `${r} tries to fix red tests this number of times. Then the task waits for you.`,
   },
   planTurns: { label: "Plan turns", unit: "turns", help: () => "The plan run stops after this number of turns." },
+  runsAtOnce: {
+    label: "Runs at once",
+    unit: "runs",
+    help: (r) =>
+      `Reviews, Explain, Ask, Fix, and task steps share this number. Each pull request has one run at a time. Builds of 2 or more sub-tasks at once run beside it. More runs use your ${r} usage faster.`,
+  },
 };
 
 const toDrafts = (l: Limits) => Object.fromEntries(RUN_LIMIT_KEYS.map((k) => [k, String(l[k])])) as Record<RunLimitKey, string>;

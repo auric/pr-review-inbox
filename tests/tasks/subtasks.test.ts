@@ -105,7 +105,7 @@ async function setup(spec: unknown = echoSpec()) {
   const settle = async (id: number) => {
     for (;;) {
       await review.wait();
-      if (!review.busy()) return get(id);
+      if (review.idle()) return get(id);
     }
   };
   const create = (body: Record<string, unknown> = {}) =>

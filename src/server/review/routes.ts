@@ -218,6 +218,10 @@ export function createReviewRoutes(opts: { review: ReviewJobs; live: Live }) {
       const db = review.open();
       return c.json(db ? review.runs(db, null, 50) : [], 200);
     })
+    .get("/runs/slots", (c) => {
+      // It comes before /runs/:id, which refuses a name that is not a number.
+      return c.json(review.slots(review.open()), 200);
+    })
     .get("/runs/:id", runParam, (c) => {
       const db = review.open();
       const run = db && review.run(db, c.req.valid("param").id);

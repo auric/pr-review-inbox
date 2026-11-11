@@ -14,7 +14,7 @@ const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {
   spec_change: "Needs you: a change to the plan",
   denied_path: "Needs you: a file the app does not commit",
   push: "Needs you: the push",
-  slot: "Waiting for the run slot",
+  slot: "Waiting for a free run slot",
   preflight: "Needs you: a check before the build",
   update: "Needs you: the update stopped",
   error: "Needs you: an error",

@@ -44,6 +44,9 @@ import {
   type ProfileInput,
   RUN_IMAGE_BYTES,
   type RunConflict,
+  type RunDetail,
+  type RunDto,
+  type RunSlotsDto,
   type TaskConflict,
   type TaskDto,
   type TaskIssueDto,
@@ -184,7 +187,7 @@ async function setup(o: { config?: string; profiles?: ProfileInput[]; runLimits?
   const settle = async () => {
     for (;;) {
       await review.wait();
-      if (!review.busy()) return;
+      if (review.idle()) return;
     }
   };
   const record = join(root, "calls.jsonl");
@@ -378,7 +381,8 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
   test(
     "the snapshot is sanitized, the task text is untrusted data, and a cancelled run stops the task",
     async () => {
-      const h = await setup();
+      // AC-B18, AC-B197: with the run limit 1, the task run holds the only slot.
+      const h = await setup({ runLimits: { runsAtOnce: 1 } });
       await h.connectJira();
       h.scenario({ hang: true });
       const a = await h.create();
@@ -393,7 +397,7 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       expect(task).toContain(`## Task ${ISSUE_KEY}: ${SUMMARY}`);
       // A PR start during the task run names it.
       const busy = await h.json<RunConflict>(`/api/prs/${h.pr}/review`, { method: "POST" });
-      expect([busy.status, busy.body.running]).toEqual([409, { run, pr: null, kind: "interview", task: a.body.id }]);
+      expect([busy.status, busy.body.running, busy.body.full]).toEqual([409, { run, pr: null, kind: "interview", task: a.body.id }, 1]);
       expect(busy.body.error).toBe(`Claude is building ${ISSUE_KEY}. Pause building after this step to start your run.`);
       await h.review.stop();
       const t = await h.get(a.body.id);
@@ -401,6 +405,37 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       expect(t.blocked).toEqual({ kind: "error", step: t.steps[0]?.id ?? -1, text: "The run was cancelled." });
       expect(t.steps[0]?.state).toBe("cancelled");
       expect(existsSync(join(realpathSync.native(h.dir), "runs", String(run)))).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B190: with free slots, a PR review runs beside the interview run; the task Stop ends only the run of the task",
+    async () => {
+      const h = await setup();
+      await h.connectJira();
+      h.scenario({ hang: true });
+      const a = await h.create();
+      await until(() => h.runCalls().length === 1);
+      const run = h.runs(a.body.id)[0]?.id as number;
+      const review = await h.json<RunDto>(`/api/prs/${h.pr}/review`, { method: "POST" });
+      expect(review.status).toBe(202);
+      await until(() => h.runCalls().length === 2);
+      expect((await h.json<RunSlotsDto>("/api/runs/slots")).body).toEqual({
+        limit: 3,
+        running: [
+          { run, pr: null, kind: "interview", task: a.body.id, taskKey: ISSUE_KEY },
+          { run: review.body.id, pr: h.pr, kind: "review" },
+        ],
+      });
+      const stop = await h.json<TaskDto>(`/api/tasks/${a.body.id}/stop`, { body: { version: (await h.get(a.body.id)).version } });
+      expect([stop.status, stop.body.state]).toEqual([200, "stopped"]);
+      await until(() => h.runs(a.body.id)[0]?.status === "cancelled");
+      expect((await h.json<RunDetail>(`/api/runs/${review.body.id}`)).body.run.status).toBe("running");
+      expect((await h.json<RunSlotsDto>("/api/runs/slots")).body.running).toEqual([{ run: review.body.id, pr: h.pr, kind: "review" }]);
+      expect((await h.json(`/api/runs/${review.body.id}/cancel`, { method: "POST" })).status).toBe(202);
+      await h.settle();
+      expect((await h.json<RunDetail>(`/api/runs/${review.body.id}`)).body.run.status).toBe("cancelled");
     },
     SLOW,
   );
@@ -470,9 +505,10 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
   );
 
   test(
-    "the slot: a task start while a PR run runs gets 409 with that run, and no task is stored",
+    "the slot: with the run limit 1, a task start while a PR run runs gets 409 with that run, and no task is stored",
     async () => {
-      const h = await setup();
+      // AC-B197: the PR run holds the only slot.
+      const h = await setup({ runLimits: { runsAtOnce: 1 } });
       await h.connectJira();
       h.scenario({ hang: true });
       const r = await h.json<{ id: number }>(`/api/prs/${h.pr}/review`, { method: "POST" });
@@ -1639,7 +1675,7 @@ describe("the run-end notification at stop", () => {
     const a = await h.create();
     expect(a.status).toBe(201);
     const end = Date.now() + 20_000;
-    while (!(h.runs(a.body.id).length === 1 && !h.review.busy())) {
+    while (!(h.runs(a.body.id).length === 1 && h.review.idle())) {
       if (Date.now() > end) throw new Error("Timed out.");
       await Bun.sleep(1);
     }

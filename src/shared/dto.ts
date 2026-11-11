@@ -1223,9 +1223,13 @@ export type InstructionPreviewDto = {
 // GET /api/runs/:id. events: the run log in seq order.
 export type RunDetail = { run: RunDto; events: RunEvent[]; items: ReviewItemDto[] };
 
-// POST /api/prs/:id/review gives 409 with this body while another review runs (A14).
-// pr null: a task run holds the slot, and task names its task (POST /api/tasks/:id/pause frees the slot after the step).
-export type RunConflict = ApiError & { running: { run: number; pr: number | null; kind: RunKind; task?: number } };
+// A run start gives 409 with this body while its PR has a running run or the run pool is full (A14, spec.md section 6.26).
+// running: the run of the PR, else the oldest pool run. pr null: a task run, and task names its task (POST /api/tasks/:id/pause frees
+// the slot after the step). full: the run limit, set only for a full pool.
+export type RunConflict = ApiError & { running: { run: number; pr: number | null; kind: RunKind; task?: number }; full?: number };
+
+// GET /api/runs/slots (spec.md section 6.26): the run limit and the pool runs, oldest first. taskKey: the Jira key of a task run.
+export type RunSlotsDto = { limit: number; running: (RunConflict["running"] & { taskKey?: string })[] };
 
 // sure: false when the source has a precedence that the runner docs do not state.
 export type SettingValue = { value: string; sure: boolean };
@@ -1352,6 +1356,7 @@ export const runLimitsInput = z.object({
   interviewRounds: runLimit("interviewRounds"),
   testFixTries: runLimit("testFixTries"),
   planTurns: runLimit("planTurns"),
+  runsAtOnce: runLimit("runsAtOnce"),
 });
 export const branchPrefixList = z
   .array(branchPrefix)

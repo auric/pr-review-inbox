@@ -496,6 +496,8 @@ test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat",
   const limits = async () => ((await api(page, "GET", "/api/settings")).json as { runLimits: Record<string, number> }).runLimits;
   const step = page.getByLabel("Task step time");
   await expect(step).toHaveValue("20");
+  // spec.md section 6.26, AC-B187.
+  await expect(page.getByLabel("Runs at once")).toHaveValue("3");
   await expect(page.getByText("Default 20. From 5 to 120.", { exact: false })).toBeVisible();
   await step.fill("121");
   await step.blur();
@@ -505,7 +507,7 @@ test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat",
   await step.fill("45");
   await step.blur();
   await expect(page.locator("#limits-status")).toHaveText("Saved. New runs use these limits.");
-  expect(await limits()).toEqual({ stepMinutes: 45, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 });
+  expect(await limits()).toEqual({ stepMinutes: 45, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 });
   await step.fill("20");
   await step.blur();
   await expect.poll(async () => (await limits()).stepMinutes).toBe(20);

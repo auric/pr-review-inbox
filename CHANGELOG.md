@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Claude now runs several runs at once: reviews, Explain, Ask, Fix, and task steps on different pull requests no longer wait for each other. Settings, Tasks, Run limits has the new field "Runs at once" (default 3, from 1 to 10). Each pull request still has one run at a time. When every slot is in use, a start says so and names the limit.
 - A Claude result that is longer than an app limit no longer fails the run. The app keeps the first entries or cuts the text, and the run says what it cut, for example "Claude returned 140 findings; the app kept the first 100." Edit texts, commands, paths, and names still must fit.
 - A diagram in Explain, Ask, and other answers now opens in a large view on a click or with "Zoom". The view has Zoom in, Zoom out, Fit, and 100%, the keys + - 0 1, and Ctrl+wheel. Drag or scroll to move the diagram.
 - PR notes have no length limit and no limit on their number. Before, a note had at most 500 characters, and a PR had at most 30 notes.

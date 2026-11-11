@@ -29,8 +29,10 @@ import {
   type RunKind,
   type RunnerCheckDto,
   type RunPhase,
+  type RunSlotsDto,
 } from "../../shared/dto";
 import { isMe } from "../../shared/me";
+import { plural } from "../../shared/outcome";
 import {
   askJsonSchema,
   type Carried,
@@ -260,6 +262,8 @@ export type ReviewJobsOptions = {
   now?: () => number;
 };
 
+type Runner = ReturnType<typeof createClaudeRunner>;
+
 // threads: the threads of a reply or fix run, else null. findings: the review item IDs of a fix run.
 // question: the question of an ask run, else null. profile: the profile as it was at the start.
 type Job = {
@@ -292,6 +296,8 @@ type Job = {
   peers?: ReadonlyMap<number, { title: string; state: string }>;
   // A discuss run only: the finding at the start. threads holds the thread of a posted finding.
   discuss?: DiscussStart;
+  // One runner runs one process, so each run has its own.
+  runner: Runner;
 };
 
 // docs/plans/review-v2/spec.md section 6.2: one interview or spec run of a task. src/server/tasks builds it.
@@ -380,7 +386,7 @@ export type TaskReviewStart = {
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
 };
 
-// A task run in the slot. It has no PR.
+// A task run in a pool slot or beside the pool. It has no PR.
 type TaskJob = {
   id: number;
   pr: null;
@@ -394,8 +400,7 @@ type TaskJob = {
   candidates?: number;
   abort?: AbortController;
   t: TaskRunStart | ImplementRunStart | TaskReviewStart;
-  // A run beside the run slot (taskRun with extra): its own runner, because one runner runs one process.
-  runner?: ReturnType<typeof createClaudeRunner>;
+  runner: Runner;
 };
 
 // done: resolves after the run end and its effect.
@@ -418,16 +423,20 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   const dataDir = opts.dataDir ?? defaultDataDir();
   // Settings > Tasks "Review run time", read at the start of each run. A task step gives its own time.
   const runTimeMs = () => runLimitsOf(settings.config()?.runLimits).reviewMinutes * 60_000;
-  const runner = createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
-  // Its own runner: a proposal uses no run folder, no git ref, and no database, so it runs beside the review run slot.
+  const newRunner = () => createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
+  // Runs only check(). Each run gets its own runner.
+  const checker = newRunner();
+  // Its own runner: a proposal uses no run folder, no git ref, and no database, so it runs beside the run pool.
   const improve = createImprover({ command: opts.runnerCommand, now });
   const docServers = createDocServers(opts.listTools);
   const recovered = new WeakSet<Database>();
-  let job: Job | TaskJob | null = null;
-  // docs/plans/review-v2/spec.md section 6.20.6: the steps of a task that builds two or more parts at the same time run beside the slot.
+  // docs/plans/review-v2/spec.md section 6.26: the run pool. Insertion order: the first run is the oldest.
+  const active = new Set<Job | TaskJob>();
+  // Settings > Tasks "Runs at once", read at each start.
+  const limit = () => runLimitsOf(settings.config()?.runLimits).runsAtOnce;
+  // docs/plans/review-v2/spec.md section 6.20.6: the steps of a task that builds two or more parts at the same time run beside the pool.
   // The task loop starts at most one step per part, so the parts limit of the task bounds them.
   const extras = new Set<TaskJob>();
-  const runnerOf = (j: Job | TaskJob) => (j.pr === null ? (j.runner ?? runner) : runner);
   let checked: RunnerCheck | null = null;
   let pruned: Promise<void> | null = null;
 
@@ -452,7 +461,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     }));
 
   async function check() {
-    checked = await runner.check();
+    checked = await checker.check();
     return checked;
   }
 
@@ -967,7 +976,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       notify(j.id);
     }
     const findStart = now();
-    const o = await runner.run(
+    const o = await j.runner.run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1182,7 +1191,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     notify(j.id);
     // No await between this check and run(), so a later Cancel reaches the new process.
     if (j.cancelled) return cancelledEnding(o);
-    const s = await runner.run(
+    const s = await j.runner.run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1252,7 +1261,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // No await between this check and run(), so a later Cancel reaches the new process.
     if (j.cancelled) return cancelledEnding(o);
     const startedAt = now();
-    const o2 = await runnerOf(j).run(
+    const o2 = await j.runner.run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1305,7 +1314,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (j.cancelled) return cancelledEnding();
     const fix = s.mode === "fix";
     log(`Session run ${j.id}: forks a session of ${s.bytes} bytes with ${s.items} review points${fix ? " and asks for fixes" : ""}.`);
-    const o = await runner.run(
+    const o = await j.runner.run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1351,7 +1360,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     }
     await held.ws?.remove().catch((err) => log(`Could not remove the workspace of review run ${j.id}: ${noUrl((err as Error).message)}`));
     // The slot frees in the same tick as the end write. A client that sees the end can start the next run.
-    if (job === j) job = null;
+    active.delete(j);
     try {
       if (end(j, e) && runNoted(j, e)) live.broadcast("events", { count: 1 });
     } catch (e2) {
@@ -1423,7 +1432,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     log(`Task run ${j.id}: ${t.kind} of task ${t.task} at ${ws.sourceHead.slice(0, 12)}.`);
     // No await between this check and run(), so a later Cancel reaches the process.
     if (j.cancelled) return cancelledEnding();
-    const o = await runner.run(
+    const o = await j.runner.run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1499,7 +1508,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           // No await between the cancel check and run(), so a later Cancel reaches the process.
           if (j.cancelled) early = cancelledEnding();
           else
-            o = await runnerOf(j).run(
+            o = await j.runner.run(
               {
                 implement: true,
                 cwd,
@@ -1618,7 +1627,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const findStart = now();
     // No await between this check and run(), so a later Cancel reaches the process.
     if (j.cancelled) return cancelledEnding();
-    const o = await runnerOf(j).run(
+    const o = await j.runner.run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1758,7 +1767,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const head = held.ws?.sourceHead ?? null;
     await held.ws?.remove().catch((err) => log(`Could not remove the workspace of task run ${j.id}: ${noUrl((err as Error).message)}`));
     // The slot frees before the end write, so the effect can start the next run of the task.
-    if (job === j) job = null;
+    active.delete(j);
     let effect: (() => void) | undefined;
     try {
       effect = endTask(j, e, head);
@@ -1772,52 +1781,60 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     }
   }
 
-  const withPhase = (db: Database, r: RunDto): RunDto =>
-    job?.phase && job.id === r.id && job.db === db && r.status === "running"
-      ? { ...r, phase: job.phase, ...(job.phase === "checking" && job.candidates !== undefined && { candidates: job.candidates }) }
+  const withPhase = (db: Database, r: RunDto): RunDto => {
+    const j = r.status === "running" ? [...active, ...extras].find((x) => x.id === r.id && x.db === db) : undefined;
+    return j?.phase
+      ? { ...r, phase: j.phase, ...(j.phase === "checking" && j.candidates !== undefined && { candidates: j.candidates }) }
       : r;
+  };
 
-  function cancelActive() {
-    if (!job) return false;
-    job.cancelled = true;
-    job.abort?.abort();
-    runner.cancel();
-    return true;
-  }
-  // The runs beside the slot that pick selects, all when absent.
-  function cancelExtras(pick: (j: TaskJob) => boolean = () => true) {
+  // Cancels the pool runs and the runs beside the pool that pick selects. false: pick selects none.
+  function cancelWhere(pick: (j: Job | TaskJob) => boolean) {
     let n = 0;
-    for (const j of extras)
+    for (const j of [...active, ...extras])
       if (pick(j)) {
         j.cancelled = true;
         j.abort?.abort();
-        j.runner?.cancel();
+        j.runner.cancel();
         n++;
       }
     return n > 0;
   }
 
-  // A settings change closes the database of the run.
+  // A settings change closes the database of the runs.
   settings.onSettingsChanged(() => {
-    cancelActive();
-    cancelExtras();
+    cancelWhere(() => true);
   });
 
-  // docs/plans/review-v2/spec.md AC-B18: a start during a step of a task names the pause action of that task.
-  const busyConflict = (j: Job | TaskJob): RunConflict => {
-    if (j.pr !== null) return { error: "Another review is running.", running: { run: j.id, pr: j.pr, kind: j.kind } };
-    const task = j.t.task;
-    const key = (j.db.query("SELECT key FROM task WHERE id = $id").get({ id: task }) as { key: string } | null)?.key ?? `task ${task}`;
-    return {
-      error: `Claude is building ${key}. Pause building after this step to start your run.`,
-      running: { run: j.id, pr: null, kind: j.kind, task },
-    };
-  };
+  // A run as RunConflict and RunSlotsDto name it. taskKey: the Jira key of the task of a task run.
+  function holder(j: Job | TaskJob): RunSlotsDto["running"][number] {
+    if (j.pr !== null) return { run: j.id, pr: j.pr, kind: j.kind };
+    const key = (j.db.query("SELECT key FROM task WHERE id = $id").get({ id: j.t.task }) as { key: string } | null)?.key;
+    return { run: j.id, pr: null, kind: j.kind, task: j.t.task, ...(key !== undefined && { taskKey: key }) };
+  }
 
-  // docs/plans/review-v2/design.md B12: a task step waits for the free slot. A user start never waits: it gets 409.
+  // docs/plans/review-v2/spec.md section 6.26. n: the limit of a full pool, absent for the run of the same PR. AC-B18: a task step names
+  // the pause action of its task.
+  const busyConflict = (j: Job | TaskJob, n?: number): RunConflict => {
+    const { taskKey, ...running } = holder(j);
+    const error =
+      j.pr === null
+        ? `Claude is building ${taskKey ?? `task ${j.t.task}`}. Pause building after this step to start your run.`
+        : n === undefined
+          ? "A run is working on this pull request. Start yours when it ends."
+          : `Claude runs ${plural(n, "run")} at once, your limit. Start yours when one ends.`;
+    return { error, running, ...(n !== undefined && { full: n }) };
+  };
+  // The conflict of a full pool with its oldest run, or null while a slot is free.
+  function poolFull(): RunConflict | null {
+    const n = limit();
+    return active.size >= n ? busyConflict(active.values().next().value as Job | TaskJob, n) : null;
+  }
+
+  // docs/plans/review-v2/design.md B12: a task step waits for a free slot. A user start never waits: it gets 409.
   const waiters = new Set<() => void>();
   function wake() {
-    if (job) return;
+    if (active.size >= limit()) return;
     for (const w of [...waiters]) {
       waiters.delete(w);
       try {
@@ -1830,19 +1847,24 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   // stop() awaits these too: the task loop stops its checks and its steps.
   const stoppers = new Set<() => Promise<void>>();
 
-  // The one run slot (A14). The same key returns the running run. null: the slot is free.
-  function taken(db: Database, key: string): StartResult | null {
-    if (!job) return null;
-    const running = runRow(job.db, job.id);
-    if (job.key === key && job.db === db && running) return { status: 200, run: toRunDto(running) };
-    return { status: 409, conflict: busyConflict(job) };
+  // docs/plans/review-v2/spec.md section 6.26. The order matters: the same key returns the running run (A14), then a run of the same PR
+  // refuses, then a full pool refuses. null: the start takes a slot.
+  function taken(db: Database, key: string, pr: number): StartResult | null {
+    for (const j of active)
+      if (j.db === db && j.key === key) {
+        const running = runRow(db, j.id);
+        if (running) return { status: 200, run: toRunDto(running) };
+      }
+    for (const j of active) if (j.db === db && j.pr === pr) return { status: 409, conflict: busyConflict(j) };
+    const busy = poolFull();
+    return busy ? { status: 409, conflict: busy } : null;
   }
 
-  // Takes the slot and starts the run in the background.
+  // Takes a slot and starts the run in the background.
   function begin(j: Job, pr: Heads, brief: BriefInput): StartResult {
-    job = j;
+    active.add(j);
     j.done = execute(j, pr, brief).finally(() => {
-      if (job === j) job = null;
+      active.delete(j);
       wake();
       // wait() resolves after the final broadcast. The broadcast keeps its NOTIFY_MS spacing.
       if (timer) return new Promise<void>((r) => flushed.push(r));
@@ -1869,7 +1891,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       discuss?: DiscussStart;
     } = {},
   ): StartResult {
-    const busy = taken(db, key);
+    const busy = taken(db, key, pr.id);
     if (busy) return busy;
     // A missing always-use skill refuses the start, so no failed run is stored.
     const missing = alwaysProblems(profile.alwaysSkills, opts.claudeConfigDir ?? claudeConfigDir());
@@ -1918,6 +1940,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cancelled: false,
         done: Promise.resolve(),
         ...(discuss && { discuss }),
+        runner: newRunner(),
       },
       pr,
       brief,
@@ -2081,14 +2104,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       await prune();
       await check().catch((e) => log(`Runner check failed: ${(e as Error).message}`));
     },
-    // Cancels the active run and the running prompt proposal, stops the task loop, and waits for their end.
+    // Cancels every run and the running prompt proposal, stops the task loop, and waits for their end.
     async stop() {
-      const j = job;
-      const side = [...extras].map((x) => x.done);
+      const runs = [...active, ...extras].map((x) => x.done);
       const loops = [...stoppers].map((f) => f());
-      cancelActive();
-      cancelExtras();
-      await Promise.all([j?.done, ...side, improve.stop(), ...loops]);
+      cancelWhere(() => true);
+      await Promise.all([...runs, improve.stop(), ...loops]);
       // The caller closes the database after stop(), so the pending flush runs now.
       if (timer) {
         clearTimeout(timer);
@@ -2100,9 +2121,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       stoppers.add(f);
       return () => stoppers.delete(f);
     },
-    // f runs once when the run slot is free: at once when it is free now. The returned function drops the wait.
+    // f runs once when a pool slot is free: at once when one is free now. The returned function drops the wait.
     onFree(f: () => void): () => void {
-      if (!job) {
+      if (active.size < limit()) {
         queueMicrotask(f);
         return () => {};
       }
@@ -2110,8 +2131,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       return () => waiters.delete(f);
     },
     improve,
-    // Resolves when no run is active.
-    wait: () => Promise.all([job?.done, ...[...extras].map((x) => x.done)]).then(() => undefined),
+    // Resolves when the runs that are active now end.
+    wait: () => Promise.all([...active, ...extras].map((x) => x.done)).then(() => undefined),
     runnerCheck: (): RunnerCheckDto | null => (checked ? toCheckDto(checked) : null),
     hasProfile: (id: string) => settings.profiles().some((p) => p.id === id),
 
@@ -2187,7 +2208,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const profile = profileOf(settings.profiles(), profileId ?? kept ?? brief.profile);
       const key = [id, "ask", source_head, target_head, profile.id, profileRevision(profile), parent ?? "new", sha256(question)].join(":");
       if (prev) {
-        const same = taken(db, key);
+        const same = taken(db, key, id);
         if (same?.status === 200) return same;
         const next = db.query(SQL.followUp).get({ id: prev.id }) as { id: number } | null;
         if (next) return { status: 409, error: MOVED_ON, moved: { run: next.id } };
@@ -2243,7 +2264,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const { source_head, target_head } = pr;
       if (!source_head || !target_head) return { status: 409, error: "Sync the pull request first." };
       const key = [pr.id, "discuss", id, sha256(message), source_head, target_head].join(":");
-      const same = taken(db, key);
+      const same = taken(db, key, pr.id);
       if (same?.status === 200) return same;
       if (turnCount(db, id) >= MAX_DISCUSS_MESSAGES) return { status: 409, error: DISCUSS_FULL };
       if (it.revision !== revision)
@@ -2330,7 +2351,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       if (pr.my_role !== "AUTHOR") return { status: 409, error: "Ask your session works only on your own pull requests." };
       // The tag suffix is new for each start, so the key leaves it out.
       const key = [id, "session", source_head, target_head, s.id, sha256(s.prompt.replaceAll(s.tag, ""))].join(":");
-      const busy = taken(db, key);
+      const busy = taken(db, key, id);
       if (busy) return busy;
       const record: SessionRecord = {
         session: s.id,
@@ -2369,6 +2390,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         session: s,
         cancelled: false,
         done: Promise.resolve(),
+        runner: newRunner(),
       };
       return begin(j, heads, { note: "", profile: profile.id });
     },
@@ -2412,28 +2434,36 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // The Claude config folder of the runs. The instructions preview reads the global file from it.
     configDir: () => opts.claudeConfigDir ?? claudeConfigDir(),
 
+    // Cancels only that run.
     cancel(db: Database, run: number): "cancelled" | "not_running" | null {
       if (!runRow(db, run)) return null;
-      return job?.id === run && job.db === db && cancelActive() ? "cancelled" : "not_running";
+      return cancelWhere((j) => j.db === db && j.id === run) ? "cancelled" : "not_running";
     },
 
     // The task Stop only. cancel() finds no task run, because runRow joins pull_request and a task run has pr NULL. It cancels every run
-    // of the task: the run in the slot and the runs beside it.
+    // of the task: the runs in the pool and the runs beside it.
     cancelTask(db: Database, task: number): boolean {
-      const side = cancelExtras((j) => j.db === db && j.t.task === task);
-      return (job?.pr === null && job.db === db && job.t.task === task && cancelActive()) || side;
+      return cancelWhere((j) => j.pr === null && j.db === db && j.t.task === task);
     },
 
-    // The run that holds the one slot, or null.
-    busy: (): RunConflict | null => (job ? busyConflict(job) : null),
+    // The conflict of a full pool, or null while a slot is free.
+    busy: poolFull,
+    // No run is active, in the pool or beside it (tests).
+    idle: () => active.size === 0 && extras.size === 0,
+    // GET /api/runs/slots: the limit and the pool runs of db, oldest first.
+    slots: (db: Database | null): RunSlotsDto => ({
+      limit: limit(),
+      running: db ? [...active].filter((j) => j.db === db).map(holder) : [],
+    }),
 
     taskRemote,
 
-    // docs/plans/review-v2/spec.md sections 6.2 and 6.7: starts an interview, spec, implement, or own review run of a task in the one
+    // docs/plans/review-v2/spec.md sections 6.2 and 6.7: starts an interview, spec, implement, or own review run of a task in a pool
     // slot. The row has pr NULL. extra (section 6.20.6): a step of a task that builds two or more parts at the same time. It runs beside
-    // the slot with its own runner, so it never waits for a review and a review never waits for it.
+    // the pool, so it never waits for a review and a review never waits for it.
     taskRun(db: Database, t: TaskRunStart | ImplementRunStart | TaskReviewStart, extra = false): TaskStartResult {
-      if (job && !extra) return { status: 409, conflict: busyConflict(job) };
+      const busy = extra ? null : poolFull();
+      if (busy) return { status: 409, conflict: busy };
       const p = t.profile;
       const id = db.transaction(() => {
         const row = db.query(SQL.taskInsert).get({
@@ -2451,14 +2481,23 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         t.started(db, row.id);
         return row.id;
       })();
-      const j: TaskJob = { id, pr: null, kind: t.kind, key: t.key, db, profile: p, cancelled: false, done: Promise.resolve(), t };
-      if (extra) {
-        j.runner = createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
-        extras.add(j);
-      } else job = j;
+      const j: TaskJob = {
+        id,
+        pr: null,
+        kind: t.kind,
+        key: t.key,
+        db,
+        profile: p,
+        cancelled: false,
+        done: Promise.resolve(),
+        t,
+        runner: newRunner(),
+      };
+      if (extra) extras.add(j);
+      else active.add(j);
       j.done = executeTask(j).finally(() => {
         extras.delete(j);
-        if (job === j) job = null;
+        active.delete(j);
         wake();
         if (timer) return new Promise<void>((r) => flushed.push(r));
       });

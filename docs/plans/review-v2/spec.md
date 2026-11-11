@@ -6,7 +6,7 @@ Status: decided, 2026-10-22. design.md gives the reasons, the alternatives, and 
 
 - Every schema is a zod object in src/shared/review.ts (or src/shared/task.ts for part 6). The CLI gets `z.toJSONSchema(schema, { target: "draft-07" })`. A new key of a stored result has a zod default, so older rows still parse.
 - Every route input has a zod schema in src/shared/dto.ts and a zValidator. Mutations keep csrf, the session token, and the Host and Origin checks (BRIEF 3.6).
-- Every new Claude run uses the existing runner rules: auth route check, scrubbed env, `--restricted`, `--strict-mcp-config`, `--no-session-persistence`, the init tool check, the one run slot, and Cancel with a process-tree kill.
+- Every new Claude run uses the existing runner rules: auth route check, scrubbed env, `--restricted`, `--strict-mcp-config`, `--no-session-persistence`, the init tool check, a slot of the run pool (section 6.26), and Cancel with a process-tree kill.
 
 | Constant | Value | Where |
 |---|---|---|
@@ -342,7 +342,7 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 
 ### 2.3 Route
 
-- POST /api/items/:id/discuss, body `{ message: z.string().trim().min(1).max(MAX_QUESTION), revision: version }`. 404 for an unknown item. 409 for a non-finding item, for a revision item, for a finding with 100 messages, and when the run slot is busy (with the running run). 202 with the run.
+- POST /api/items/:id/discuss, body `{ message: z.string().trim().min(1).max(MAX_QUESTION), revision: version }`. 404 for an unknown item. 409 for a non-finding item, for a revision item, for a finding with 100 messages, and when the PR has a running run or the run pool is full (with the running run, section 6.26). 202 with the run.
 - GET /api/items/:id/discuss returns DiscussTurnDto[] {run, status, message, answer, verdict, reason, revision, at, error}.
 - The run key: `pr:discuss:<item>:<hash of message>:<source>:<target>`. A second POST with the same message gets the running run.
 
@@ -1553,7 +1553,7 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 15. AC-B15. After part 1 merges with a merge commit, "Move part 2 to main" sends one PUT with the new toRef. After a squash merge, the update merges the base in three steps (section 6.20.10). It never needs a force push. "Push and move" pushes with a lease and retargets in one click with one confirm.
 16. AC-B16. A push refspec to the target branch or to a branch outside the task is refused before git runs (unit test with a spy git).
 17. AC-B17. A lease failure shows "Someone else pushed" and never forces. No push argv has a `+` refspec. A normal push whose commit does not contain the last pushed commit returns "needs force". A confirmed rebase push still fails on a stale lease.
-18. AC-B18. A user review start during an implement step gets 409 with "Pause building after this step". The loop waits for the free slot and then continues.
+18. AC-B18. With the run limit 1, a user review start during an implement step gets 409 with "Pause building after this step". The loop waits for the free slot and then continues. With a larger limit, the same holds when the pool is full and its oldest run is a task step.
 19. AC-B19. Stop during a check kills the process tree. Resume starts the stopped step again from the last commit.
 20. AC-B20. A spec change proposal (a changed file under spec_dir) blocks with "Review the change". Reject resets the step, and the next run of the step reads the rejection with the paths and the reason of Claude in step.md.
 21. AC-B21. Notifications fire only for needs_you, part_ready, and spec_approved, once each, in one tab.
@@ -2137,7 +2137,7 @@ The pure function `nextPart(parts, maxOpen, atOnce)` in src/server/tasks/schedul
 Parts at the same time (user decision of 2026-11-02):
 
 - Worktrees: each part has its own folder `tasks/<db>/<task>/part-<ord>/` and its own branch. The bare cache is shared. Every write to the cache (init, fetch, `worktree add`, `update-ref`, the Continue fetch) runs under the per-cache lock of workspace.ts `locked`. The loop starts the parts one after another, so their branch names and their start fetches never run at the same time. Commits in two worktrees write different branch refs, and git locks each ref.
-- Run slots: with atOnce 2 or more, every Claude step of a part runs beside the review run slot with its own runner (ReviewJobs.taskRun with extra). One part runs at most one step at a time, so a task runs at most atOnce Claude processes. A review, an ask, or another run never waits for them, and they never wait for it. With atOnce 1, the steps take the one run slot as before (design.md B12, AC-B18). The limit is per task.
+- Run slots: with atOnce 2 or more, every Claude step of a part runs beside the review run slot with its own runner (ReviewJobs.taskRun with extra). One part runs at most one step at a time, so a task runs at most atOnce Claude processes. A review, an ask, or another run never waits for them, and they never wait for it. With atOnce 1, the steps take a slot of the run pool (section 6.26), as before (design.md B12, AC-B18). The limit is per task.
 - Reasons: task.blocked_json holds the first reason. The first reason of a part stays. Each other part halts at its next step: the step that runs ends, and its run is not cancelled. A part that gets a reason with a step while the task holds the reason of another part keeps it in its own row, with its question or plan change row (section 6.25). A reason with no step is not kept, and the part finds it again after the resume. A pause and a wait for the run slot hold no part: Pause stops every part at the gate before its next Claude step, and Resume opens all gates.
 - Resume, an answer, and every new start of the loop: each part in implementing goes back to its last commit first, with the other changes saved as a patch (section 6.7, Resume). Then the pre-flight runs for each part, and the parts build again. Continue of a pause is the exception: every part halted at its gate between two steps, so each part keeps its changes (section 6.7, Pause after this step).
 - Stop ends the runs of every part (ReviewJobs.cancelTask) and kills their checks. Close still needs Stop first.
@@ -2992,6 +2992,30 @@ Each new reason, first or waiting, gives one needs_you event. Moving a reason up
 9. AC-B155. After the migration, a task with blocked_json keeps it, and part rows read NULL (tests/storage/db.test.ts). Each new reason gives one needs_you event, and moving a reason up gives none (tests/tasks/notify.test.ts).
 10. AC-B156. The UI model rows of section 6.25.6 have tests in tests/web/tasks-model.test.ts. One e2e test in task-subtasks.e2e.ts covers two parts that ask: both rows show, and one submit answers both.
 
+### 6.26 Several Claude runs at once (docs/plans/review-v2/parallel-runs.md, limits.md decision 1)
+
+- Run pool: at most `runLimits.runsAtOnce` pool runs at the same time (default 3, 1 to 10). Every PR run and every task run of a task with one part at a time is a pool run. Steps of a task with 2 or more parts at once and Improve prompt run beside the pool.
+- One run per pull request. A user start never waits; a full pool gives 409. Each run has its own CLI runner. `worktree add` and `worktree prune` of each run folder run under the per-cache lock.
+- Start order: the same key first (A14: 200 and the running run), then a running run on the same PR (409, no `full`), then the limit (409 with `full`). Every start path is synchronous from the check to the slot.
+- 409 texts: the PR has a running run: "A run is working on this pull request. Start yours when it ends." Full pool, oldest run on a PR: "Claude runs <N> runs at once, your limit. Start yours when one ends." Full pool, oldest run a task step: the AC-B18 sentence. `RunConflict.full` holds N for a full pool.
+- A waiting task step wakes when any pool slot frees; a step that loses the race waits again. With the limit 1 the step texts stay. With the limit 2 or more: "Waiting for a free run slot. Claude runs <N> runs at once, your limit." The task row status: "Waiting for a free run slot".
+- A new limit applies at the next start. It cancels no run, and waiting steps start at the next run end.
+- `GET /api/runs/slots` gives `RunSlotsDto = { limit, running }`: the pool runs of the database, oldest first, each `{ run, pr, kind, task?, taskKey? }`.
+
+Acceptance criteria:
+
+1. AC-B187. Settings, Tasks, Run limits has "Runs at once" (default 3, 1 to 10). config.json keeps `runLimits.runsAtOnce` only when it changed. Out of bounds gets 400 "Type a whole number from 1 to 10."
+2. AC-B188. With limit N, N runs on N PRs run at the same time, each as its own CLI process. A start on another PR gets 409 with `full: N`, the oldest pool run, and the full-pool text. After one run ends, the same start gets 202.
+3. AC-B189. While a PR has a running run, a start with another key on that PR gets 409 with no `full` and the PR text, also with free slots. The same key gets 200 and the running run (A14).
+4. AC-B190. Cancel of one run ends only that run. Task Stop ends every run of that task only. A connection change and app stop end every run.
+5. AC-B191. A lower limit applies at the next start and cancels no run. A higher limit lets the next start go at once.
+6. AC-B192. A step of a task with one part at a time takes a pool slot. While the pool is full, it waits with the step text above (limit 1 keeps today's texts) and starts when a pool run ends. Steps of a task with 2 or more parts at once never wait for the pool.
+7. AC-B193. `worktree add` and `worktree prune` of prepareWorkspace and taskSnapshot, nested caches included, wait while another call holds `locked(cache)`. Three runs on three PRs of one repository start at once and all end. After them, `git worktree list` shows no run folder.
+8. AC-B194. On restart, every running run row becomes failed "The app stopped during the run.", whatever the number of rows.
+9. AC-B195. `GET /api/runs/slots` gives `{ limit, running }`, oldest first. `GET /api/runs/:id` still works.
+10. AC-B196. A start control shows a note while its PR has a running run and another note while the pool is full, and is disabled in both cases. A 409 shows the note or a toast. Brief, re-review, reply drafts, Fix, Ask, Discuss, Explain, and Consult follow this rule.
+11. AC-B197. With limit 1, AC-B18 and every single-slot test pass unchanged.
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule
@@ -3114,6 +3138,7 @@ db.test.ts per migration: the version number, a database of the version before w
 | POST /api/tasks/issue; PUT /api/tasks/:id/files/:att; POST /api/tasks gains files (section 6.17.4) | 6 |
 | POST /api/tasks/:id/plan-again, /parts/:part/start, /parts/:part/push, /parts/:part/move, /parts/:part/drop, /jira-check, /jira-read; GET, POST /api/tasks/:id/jira/:key/transitions; POST /api/tasks and /plan gain subtasks (section 6.20.12) | 6 |
 | PUT settings gains taskPlanCheck (section 6.22.10) | 6 |
+| GET /api/runs/slots; PUT settings runLimits gains runsAtOnce (section 6.26) | 6 |
 | GET, POST /api/prs/:id/notes; PUT, DELETE /api/notes/:id (section 2.9) | 2 |
 | POST /api/prs/:id/ask gains parent; GET /api/prs/:id/asks gives parent (section 2.15) | 2 |
 | /api/prs/:id/autopilot, /api/autopilot/…, /api/prs/:id/dependencies, /api/dependencies/:id, POST /api/items/:id/post-now (section 11.12) | 7 (on hold) |

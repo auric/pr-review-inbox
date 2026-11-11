@@ -71,7 +71,14 @@ describe("limits decision 2", () => {
 
 describe("limits decision 3", () => {
   test("the defaults and bounds; a field takes a whole number inside the bounds only", () => {
-    expect(runLimitsOf(undefined)).toEqual({ stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 });
+    expect(runLimitsOf(undefined)).toEqual({
+      stepMinutes: 20,
+      reviewMinutes: 60,
+      interviewRounds: 2,
+      testFixTries: 3,
+      planTurns: 80,
+      runsAtOnce: 3,
+    });
     expect(runLimitsOf({ planTurns: 33 }).planTurns).toBe(33);
     for (const k of RUN_LIMIT_KEYS) {
       const { min, max } = RUN_LIMITS[k];

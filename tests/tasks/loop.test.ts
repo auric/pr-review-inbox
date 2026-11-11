@@ -913,12 +913,13 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "AC-B18: a review start during a task step gets 409 with the pause line; a step that finds the slot busy waits and then continues",
+    "AC-B18, AC-B197: with the run limit 1, a review start during a task step gets 409 with the pause line; a step that finds the slot busy waits and then continues",
     async () => {
       const s = await setup({
-        seq: { "implement:implement": [{ delayMs: 400, writes: [] }, { writes: [WORKS] }] },
+        seq: { "implement:implement": [{ hang: true }, { writes: [WORKS] }] },
+        runLimits: { runsAtOnce: 1 },
       });
-      // Task K-2 holds the run slot with a slow step.
+      // Task K-2 holds the run slot with a step that runs until its cancel.
       const other = s.addTask("K-2", "Other");
       const now = Date.now();
       const p2 = (
@@ -977,11 +978,79 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.blocked()?.text).toBe("Waiting for the build of K-2 to free the run slot.");
       const waiting = s.steps().find((x) => x.state === "waiting") as Step;
       expect([waiting.kind, waiting.item, waiting.run]).toEqual(["tests", "P1", null]);
+      // The end of the step of K-2 frees the slot.
+      expect(s.jobs.cancelTask(s.db, other)).toBe(true);
       await s.loop.idle(s.task);
       expect(ended).not.toBeNull();
       expect(s.blocked()).toBeNull();
       expect(s.part().state).toBe("self_reviewed");
       // The waiting row became the running step of the run.
+      const row = s.steps().find((x) => x.id === waiting.id) as Step;
+      expect([row.state, row.run !== null]).toEqual(["ok", true]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B192: with the run limit 2, a step that finds the pool full waits with the limit text and starts when a pool run ends; a step beside the pool never waits",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:implement": [{ hang: true }, { hang: true }, { hang: true }, { writes: [WORKS] }],
+        },
+        runLimits: { runsAtOnce: 2 },
+      });
+      // A step of another task that runs until its cancel. extra: a step of a task that builds two or more parts at once.
+      const other = async (key: string, extra: boolean) => {
+        const task = s.addTask(key, "Other");
+        const now = Date.now();
+        const branch = `feature/${key}-other`;
+        const part = (
+          s.db
+            .query(
+              `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+              VALUES ($task, 1, 'single', 'Other', $branch, 'main', 'implementing', $now, $now) RETURNING id`,
+            )
+            .get({ task, now, branch }) as { id: number }
+        ).id;
+        const wt = await openWorktree({ dataDir: s.dataDir, db: s.db, project: "PROJ", repo: "repo", task, ord: 1, branch, base: s.base });
+        return startStep({
+          db: s.db,
+          review: s.jobs,
+          task,
+          part: { id: part, ord: 1 },
+          wt,
+          mode: "implement",
+          item: "T1.1",
+          attempt: 1,
+          profile: profileOf(s.settings.profiles(), DEFAULT_PROFILE),
+          untrusted: [],
+          own: [{ name: "step.md", text: "# Step\n" }],
+          allow: [],
+          specDir: `specs/${key}/`,
+          onEnd: () => {},
+          extra,
+        });
+      };
+      // K-2 and K-3 take both pool slots. K-4 runs beside the full pool.
+      const held = [await other("K-2", false), await other("K-3", false)];
+      expect(held.map((r) => r.status)).toEqual([202, 202]);
+      expect(s.jobs.busy()).toMatchObject({ full: 2, running: { pr: null, kind: "implement" } });
+      expect((await other("K-4", true)).status).toBe(202);
+      expect(s.jobs.slots(s.db).running.map((r) => r.taskKey)).toEqual(["K-2", "K-3"]);
+      // Each of the three steps runs its own CLI process.
+      await until(() => readRecords<{ childPid?: number }>(join(s.root, "calls.jsonl")).filter((c) => c.childPid).length === 3);
+      s.loop.build(s.db, s.task);
+      await until(() => s.blocked()?.kind === "slot");
+      expect(s.blocked()?.text).toBe("Waiting for a free run slot. Claude runs 2 runs at once, your limit.");
+      expect(rowStatus(taskDto(s.db, s.t()))).toEqual({ text: "Waiting for a free run slot", needsYou: false });
+      const waiting = s.steps().find((x) => x.state === "waiting") as Step;
+      // The end of the step of K-2 frees a slot. K-3 keeps the other one.
+      const k2 = s.db.query("SELECT id FROM task WHERE key = 'K-2'").get() as { id: number };
+      expect(s.jobs.cancelTask(s.db, k2.id)).toBe(true);
+      await s.loop.idle(s.task);
+      expect(s.blocked()).toBeNull();
+      expect(s.part().state).toBe("self_reviewed");
       const row = s.steps().find((x) => x.id === waiting.id) as Step;
       expect([row.state, row.run !== null]).toEqual(["ok", true]);
     },

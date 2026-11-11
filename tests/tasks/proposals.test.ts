@@ -103,7 +103,7 @@ async function setup(specs: unknown[]) {
   const settle = async () => {
     for (;;) {
       await review.wait();
-      if (!review.busy()) return get();
+      if (review.idle()) return get();
     }
   };
   const calls = () => readRecords<Call>(join(root, "calls.jsonl")).filter((c) => Array.isArray(c.argv) && c.argv.includes("-p"));

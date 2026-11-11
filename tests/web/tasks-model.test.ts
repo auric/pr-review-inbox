@@ -1071,7 +1071,7 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     );
     expect(rowStatus(row({ state: "implementing", blocked: { kind: "red", step: 1, text: "x" } })).text).toBe("Needs you: tests stay red");
     expect(rowStatus(row({ state: "implementing", blocked: { kind: "slot", step: 1, text: "x" } }))).toEqual({
-      text: "Waiting for the run slot",
+      text: "Waiting for a free run slot",
       needsYou: false,
     });
     expect(rowStatus(row({ state: "ready" })).text).toBe("Waiting for review");

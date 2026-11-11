@@ -110,7 +110,7 @@ async function setup() {
   const settle = async (id: number) => {
     for (;;) {
       await review.wait();
-      if (!review.busy()) return get(id);
+      if (review.idle()) return get(id);
     }
   };
   for (const k of ["ABC-12", "ABC-13", "ABC-14"]) {

@@ -1,10 +1,10 @@
 # Several Claude runs at once (limits.md decision 1)
 
-Status: design of 2026-11-11 against main a4fc1d7. WP-PR1 (the per-cache lock for worktree add and prune) is built. The other packages are not built. It implements limits.md "User decisions (2026-11-04)", decision 1. Open questions Q1 to Q5 wait for the user.
+Status: design of 2026-11-11 against main a4fc1d7. WP-PR0 (docs), WP-PR1 (the per-cache lock for worktree add and prune), and WP-PR2 (the slot pool) are built. WP-PR3 (web) and Gate G-PAR are open. It implements limits.md "User decisions (2026-11-04)", decision 1. The user answered Q1 to Q5 with the recommendations (section 6).
 
 ## Summary
 
-- A pool of N run slots replaces the one run slot. N is a new run limit, "Claude runs at once", in Settings, Tasks, Run limits. Default 3, range 1 to 10.
+- A pool of N run slots replaces the one run slot. N is a new run limit, "Runs at once", in Settings, Tasks, Run limits. Default 3, range 1 to 10.
 - Each pull request (PR) has at most one run at a time. A start on a PR with a running run gets 409, even when slots are free.
 - A user start never waits. When every slot is in use, the start gets 409, as a busy slot does today. BRIEF.md:500 "There is no queued state" stays.
 - A step of a task that builds one part at a time takes one pool slot, as today. It waits for a free slot (design.md B12).
@@ -125,7 +125,7 @@ Web:
 - W3, toast for a full pool: "<runner> runs <N> runs at once, your limit."
 - W4, refused Discuss start, full pool: "<W3> Ask again when one ends."
 - W5, `fixReason`: "<busy> Propose fixes when a run ends."
-- Setting: label "Claude runs at once", unit "runs", help "Reviews, Explain, Ask, Fix, and task steps share this number. Each pull request has one run at a time. Builds of 2 or more sub-tasks at once run beside it. More runs use your Claude usage faster."
+- Setting: label "Runs at once", unit "runs", help "Reviews, Explain, Ask, Fix, and task steps share this number. Each pull request has one run at a time. Builds of 2 or more sub-tasks at once run beside it. More runs use your Claude usage faster."
 
 ### 3.6 UI
 
@@ -170,7 +170,7 @@ Web:
 
 Acceptance criteria:
 
-1. AC-B187. Settings, Tasks, Run limits has "Claude runs at once" (default 3, 1 to 10). config.json keeps `runLimits.runsAtOnce` only when it changed. Out of bounds gets 400 "Type a whole number from 1 to 10."
+1. AC-B187. Settings, Tasks, Run limits has "Runs at once" (default 3, 1 to 10). config.json keeps `runLimits.runsAtOnce` only when it changed. Out of bounds gets 400 "Type a whole number from 1 to 10."
 2. AC-B188. With limit N, N runs on N PRs run at the same time, each as its own CLI process. A start on another PR gets 409 with `full: N`, the oldest pool run, and S2. After one run ends, the same start gets 202.
 3. AC-B189. While a PR has a running run, a start with another key on that PR gets 409 with no `full` and S1, also with free slots. The same key gets 200 and the running run (A14).
 4. AC-B190. Cancel of one run ends only that run. Task Stop ends every run of that task only. A connection change and app stop end every run.
@@ -218,7 +218,7 @@ BRIEF.md, spec.md (6.26, AC-B18, 6.20.6), design.md (B12 note), limits.md (decis
 
 ### Gate G-PAR (user, real CLI)
 
-1. Set "Claude runs at once" to 3.
+1. Set "Runs at once" to 3.
 2. Start reviews on PRs A and B (one repository) and C (another repository) within 10 s.
 3. PR D shows W2 with the three runs, and its Start is disabled.
 4. Ask on PR A shows W1.
@@ -232,7 +232,7 @@ BRIEF.md, spec.md (6.26, AC-B18, 6.20.6), design.md (B12 note), limits.md (decis
 User answers (2026-11-11): Q1 no, the steps run beside the pool. Q2 yes. Q3 409 with a note. Q4 yes. Q5 yes. All recommendations hold.
 
 1. Q1. Do the steps of a task with "Parts that build at once" 2 or more count toward the new limit? Recommended: no. This keeps the 2026-11-02 decision and README "a review never waits for a build". If they count, one task with 3 parts can block every review.
-2. Q2. Does the setting live in Settings, Tasks, Run limits as "Claude runs at once", 1 to 10, default 3? Recommended: yes.
+2. Q2. Does the setting live in Settings, Tasks, Run limits as "Runs at once", 1 to 10, default 3? Recommended: yes.
 3. Q3. With every slot in use, does a user start get 409 with a note, or wait in a queue? Recommended: 409. BRIEF.md:500 says there is no queued state, and a run that starts later may review stale heads.
 4. Q4. Do waiting task steps get no fixed order and no queue position, with user starts first? Recommended: yes.
 5. Q5. When the limit goes up while task steps wait, do they start at the next run end? Recommended: yes. This needs no hook on the settings save.

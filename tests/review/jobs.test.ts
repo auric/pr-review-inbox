@@ -809,24 +809,32 @@ describe("acceptance", () => {
 
 describe("start and failures", () => {
   test(
-    "restart recovery: running runs fail with kind restart, and leftover run folders go",
+    "restart recovery (AC-B194): every running run fails with kind restart, and leftover run folders go",
     async () => {
       const h = await setup();
-      const { id } = h.db
-        .query(
-          `INSERT INTO review_run (pr, profile, note, idem_key, source_head, target_head, status, started_at)
-          VALUES ($pr, 'general', '', 'k', 'a', 'b', 'running', 1) RETURNING id`,
-        )
-        .get({ pr: h.pr }) as { id: number };
+      // Two running rows, as several runs at once leave them (spec.md section 6.26).
+      const ids = ["k1", "k2"].map(
+        (k) =>
+          (
+            h.db
+              .query(
+                `INSERT INTO review_run (pr, profile, note, idem_key, source_head, target_head, status, started_at)
+                VALUES ($pr, 'general', '', $k, 'a', 'b', 'running', 1) RETURNING id`,
+              )
+              .get({ pr: h.pr, k }) as { id: number }
+          ).id,
+      );
       const left = join(h.dir, "runs", "77", "work");
       mkdirSync(left, { recursive: true });
       writeFileSync(join(left, "x.txt"), "x");
 
       await h.review.start();
       expect(existsSync(join(h.dir, "runs"))).toBe(false);
-      const d = (await h.json<RunDetail>(`/api/runs/${id}`)).body;
-      expect(d.run).toMatchObject({ status: "failed", errorKind: "restart", hasRaw: true });
-      expect(d.run.finishedAt).not.toBeNull();
+      for (const id of ids) {
+        const d = (await h.json<RunDetail>(`/api/runs/${id}`)).body;
+        expect(d.run).toMatchObject({ status: "failed", errorKind: "restart", errorText: "The app stopped during the run.", hasRaw: true });
+        expect(d.run.finishedAt).not.toBeNull();
+      }
       expect((await h.json<MetaDto>("/api/meta")).body.runner.check).toEqual({ ok: true, version: "2.1.302" });
     },
     SLOW,

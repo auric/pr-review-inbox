@@ -674,11 +674,12 @@ export function createLoop(opts: LoopOptions) {
 
   // ---------- Steps ----------
 
-  // Waits for the run slot (design.md B12). The step row waits too, and the reason says whose run holds the slot.
+  // Waits for a slot of the run pool (design.md B12, spec.md section 6.26). The step row waits too. With the limit 1, the reason says whose
+  // run holds the slot. full: the limit of the full pool.
   async function waitSlot(
     c: Ctx,
     s: { kind: StepMode | "review"; item: string; attempt: number },
-    holder: { pr: number | null; kind: string; task?: number },
+    { running: holder, full }: { running: { pr: number | null; kind: string; task?: number }; full?: number },
     waiting: number | null,
   ): Promise<number> {
     const step = waiting ?? insertStep(c.db, { task: c.id, part: c.part.id, ...s, state: "waiting" }, now());
@@ -695,11 +696,14 @@ export function createLoop(opts: LoopOptions) {
       fix: "fix",
       discuss: "talk",
     };
-    const text = pr
-      ? `Waiting for your ${NOUN[holder.kind] ?? "run"} of PR ${pr.pr_id} to finish.`
-      : other
-        ? `Waiting for the build of ${other.key} to free the run slot.`
-        : "Waiting for the other run to finish.";
+    const text =
+      full !== undefined && full > 1
+        ? `Waiting for a free run slot. Claude runs ${full} runs at once, your limit.`
+        : pr
+          ? `Waiting for your ${NOUN[holder.kind] ?? "run"} of PR ${pr.pr_id} to finish.`
+          : other
+            ? `Waiting for the build of ${other.key} to free the run slot.`
+            : "Waiting for the other run to finish.";
     reason(c.db, c.id, { kind: "slot", step, text });
     await new Promise<void>((resolve) => {
       const off = review.onFree(resolve);
@@ -818,7 +822,7 @@ export function createLoop(opts: LoopOptions) {
         now,
       });
       if (s.status === 409 && "conflict" in s) {
-        waiting = await waitSlot(c, { kind: mode, item, attempt }, s.conflict.running, waiting);
+        waiting = await waitSlot(c, { kind: mode, item, attempt }, s.conflict, waiting);
         continue;
       }
       changed(c.id);
@@ -1258,7 +1262,7 @@ export function createLoop(opts: LoopOptions) {
       guard(c);
       const s = review.taskRun(c.db, start, beside(c));
       if (s.status === 409) {
-        waiting = await waitSlot(c, { kind: "review", item: "review", attempt }, s.conflict.running, waiting);
+        waiting = await waitSlot(c, { kind: "review", item: "review", attempt }, s.conflict, waiting);
         continue;
       }
       changed(c.id);
