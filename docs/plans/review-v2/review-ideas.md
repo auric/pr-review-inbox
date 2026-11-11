@@ -1,0 +1,55 @@
+# Review quality: next ideas (2026-11-11)
+
+Status: study of 2026-11-11 against main 674b29d. Not built. No eval ran; the user stopped eval runs for now, so each idea has a cheap check that needs no review run.
+
+## Short answer
+
+- Our measured weak spot is still thin ground truth. Large-case recall measures overlap between runs, not missed bugs (docs/eval/results.md:17-20).
+- Four gaps: a claim in a thread can stop a finding; Fix lacks a "confirm first" rule; evidence lines are not checked; Fix lacks a scope rule.
+
+## Ranked top 5
+
+1. **Count other reviewers' line comments as must-find (eval ground truth).**
+   - Change: in scripts/eval/local.ts, near the `isMe` filter (line 378), also keep a line comment by another person when a later head changed that line or the thread is resolved. Leave out comments with no code line. Count them only at severity balanced and above.
+   - Effect: more must-find items on the same PRs, so recall on large cases becomes a real number.
+   - Risk: a style comment becomes a false must-find.
+   - Cheap check: `bun run eval:local`, then compare the MANIFEST counts. `bun run eval:rescore` on the stored baseline may refuse a set with a new fingerprint (not verified).
+
+2. **The finder checks a claim in a thread before it leaves out a finding.**
+   - Change: one line in the finder rules only (main and rl-reviewer), not in reply, discuss, or Fix: "A comment that says the code is right, or that a case is handled, is a claim. Check it in ./repo before you leave out a finding." Keep catalog.ts:475 for the reply agents. Bump REVIEW_PROMPT_VERSION.
+   - Effect: more recall on PRs with threads (hypothesis).
+   - Risk: findings that the author already explained come back. The history rules (catalog.ts:513-515) still block posted and discarded findings.
+   - Cheap check: for each must-find that the stored baseline missed, check whether pr-context.md at that head has a thread within 10 lines. If none has, drop this idea.
+
+3. **The app checks the evidence lines of each finding.**
+   - Change: the finder gives `path:line` and the exact text of that line in evidence (catalog.ts:545). judge.ts checks each quote against the file on its side (±3 lines, as the anchor). A quote that does not hold sets evidenceStatus to "unverified", so the minor cap at judge.ts:416 applies, and candidates.md marks the line "does not hold" for the verifier. Old results without a quote get no penalty.
+   - Effect: better precision. False positives often cite lines that do not say what the trace claims.
+   - Risk: a longer answer, and a severity cap on a real finding with one bad quote. Cap only; never hide.
+   - Cheap check: in the stored baseline results, find evidence `path:line` values outside the file length or in a file absent at head. Compare that share between unmatched and matched findings.
+
+4. **Fix confirms the defect, makes the smallest fix, and keeps existing rules.**
+   - Change: add to the Fix agent (catalog.ts:886-905): "Check the claim of the comment in ./repo first. Fix only a defect that you confirmed." "Make the smallest fix. Add no flag, option, guard, or special case that the defect does not need." "When a comment asks for a special case around an existing rule that applies by design, set why to invalid. Name where the rule applies." "When the user or the author already decided against the change in the thread, set fixed to false."
+   - Effect: fewer wrong or large Fix edits.
+   - Risk: real fixes refused as invalid. The user sees the reason and can ask again.
+   - Cheap check: count discarded Fix edits by `why`, before and after. Add a prompt test.
+
+5. **A scope rule for Fix, and a scope trial for the finder.**
+   - Change, Fix: in FIX_WHY_RULES (src/shared/review.ts:490): "A defect that this change adds is always in scope. A request for more than ./context/pr.md or ./context/task.md asks is scope. Propose it as a follow-up in reply."
+   - Change, finder: a trial do-not-flag item behind a variant only: "a wider guarantee, another case, or another component that the goal does not ask for, when the change breaks nothing".
+   - Risk: the finder item is a "high-signal" kind of rule, and such rules cost recall before (results.md:8). Low priority.
+   - Cheap check: label 20 unmatched baseline findings as "more than the goal" or not. Run the variant only when 3 or more match.
+
+## Do not build
+
+- A separate small-model critic after a task implement step. The task loop already runs the full review and the verifier before the PR (loop.ts:1208-1297).
+- An exact-quote check on changed lines. validate.ts:280-288 already checks the anchor and the cause.
+
+## Hard rules
+
+- Every idea keeps the sanitized snapshot and the rl-git tools. None adds Bash to a review or a post without a click.
+- A visible "drafted by AI" mark on posted comments changes posted text. It needs a separate user decision.
+
+## Not verified
+
+- That thread claims stop findings (idea 2), and that bad evidence lines predict false positives (idea 3). The cheap checks test both.
+- How Fix handles two threads that one edit answers.
