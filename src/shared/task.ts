@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Build a Jira task (docs/plans/review-v2/spec.md sections 6.2, 6.3, and 6.5): the stored values and the results of the task runs.
-// zod parses the CLI output. The CLI gets z.toJSONSchema(schema, { target: "draft-07" }).
+// zod parses the CLI output. The CLI gets aiJsonSchema(schema).
 import { z } from "zod";
+import { aiJsonSchema, exact } from "./caps";
 import { coverage, MAX_QUESTION } from "./review";
 
 export const TASK_STATES = [
@@ -420,10 +421,11 @@ export const allowEntry = z.object({
   addedAt: z.number().int(),
 });
 export type AllowEntry = z.infer<typeof allowEntry>;
-export const allowProposal = z.object({ pattern: z.string().max(ALLOW_PATTERN_MAX), reason: z.string().max(ALLOW_REASON_MAX) });
+// A cut pattern or command would allow other commands, so the app never cuts them (limits.md decision 4).
+export const allowProposal = z.object({ pattern: exact(z.string().max(ALLOW_PATTERN_MAX)), reason: z.string().max(ALLOW_REASON_MAX) });
 export type AllowProposal = z.infer<typeof allowProposal>;
 // command: the command that Claude Code refused.
-export const allowRequest = allowProposal.extend({ command: z.string().max(1000) });
+export const allowRequest = allowProposal.extend({ command: exact(z.string().max(1000)) });
 export type AllowRequest = z.infer<typeof allowRequest>;
 export const ASK_TEXT = "Needs you: Claude asks to allow a command.";
 export const TOO_MANY_ASKS = "Needs you: Claude asked for too many commands.";
@@ -628,7 +630,7 @@ export const interviewResult = z.object({
   coverage,
 });
 export type InterviewResult = z.infer<typeof interviewResult>;
-export const interviewJsonSchema = (): Record<string, unknown> => z.toJSONSchema(interviewResult, { target: "draft-07" });
+export const interviewJsonSchema = (): Record<string, unknown> => aiJsonSchema(interviewResult);
 
 const specPart = z.object({
   n: z.number().int().min(1),
@@ -640,14 +642,18 @@ const specPart = z.object({
     .array(z.object({ id: z.string(), text: z.string().max(500) }))
     .min(1)
     .max(20),
-  tests: z.array(z.object({ test: z.string().max(300), proves: z.array(z.string()).min(1) })).max(30),
+  // limits.md decision 4: test IDs, paths, symbols, part references, and commands stay exact. The app never cuts them.
+  tests: z.array(z.object({ test: exact(z.string().max(300)), proves: z.array(z.string()).min(1) })).max(30),
   tasks: z
     .array(
       z.object({
         id: z.string(),
         title: z.string().max(200),
         files: z.array(z.string()).max(30),
-        run: z.array(z.string().max(300)).min(1).max(10),
+        run: z
+          .array(exact(z.string().max(300)))
+          .min(1)
+          .max(10),
         done: z.string().max(300),
       }),
     )
@@ -657,14 +663,14 @@ const specPart = z.object({
   // builds on the part before it (user decision of 2026-11-02).
   keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([]),
   start: z.enum(START_MODES).default("stack"),
-  after: z.string().max(40).nullable().default(null),
+  after: exact(z.string().max(40)).nullable().default(null),
   startReason: z.string().max(300).default(""),
 });
 
 // spec.md section 6.22.7: the contracts and risks of a spec result.
 const contract = z.object({
   name: z.string().max(200).describe("The route, table, column, type, function signature, event, config key, or CLI flag."),
-  path: z.string().max(400).default("").describe("The file at the base commit that defines it. Empty for a new contract."),
+  path: exact(z.string().max(400)).default("").describe("The file at the base commit that defines it. Empty for a new contract."),
   change: z.enum(["add", "change", "remove"]),
   users: z.string().max(300).describe("The callers, clients, or stored data that depend on it."),
   compat: z.string().max(300).describe("How the current users keep working, or why the change breaks them."),
@@ -706,9 +712,9 @@ export const specResult = z.object({
   map: z
     .array(
       z.object({
-        path: z.string().max(400),
+        path: exact(z.string().max(400)),
         line: z.number().int().min(1).nullable(),
-        symbol: z.string().max(200).default(""),
+        symbol: exact(z.string().max(200)).default(""),
         kind: z.enum(["change", "pattern", "test", "caller", "migration", "api"]),
         what: z.string().max(300),
       }),
@@ -735,9 +741,14 @@ export const specResult = z.object({
     commands: z
       .array(
         z.object({
-          name: z.string().max(60),
+          name: exact(z.string().max(60)),
           kind: z.enum(COMMAND_KINDS),
-          argv: z.array(z.string().max(1000)).min(1).max(32),
+          argv: exact(
+            z
+              .array(exact(z.string().max(1000)))
+              .min(1)
+              .max(32),
+          ),
           // spec.md section 6.3: a longer time limit in seconds and its reason. toPlan caps it, so a large value does not fail the plan.
           timeoutSec: z.number().nullable().default(null),
           timeoutReason: z.string().max(300).default(""),
@@ -750,13 +761,13 @@ export const specResult = z.object({
     allow: z.array(allowProposal).max(ALLOW_PROPOSALS_MAX).default([]),
   }),
   flag: z
-    .object({ name: z.string().max(120), removal: z.string().max(300) })
+    .object({ name: exact(z.string().max(120)), removal: z.string().max(300) })
     .nullable()
     .default(null),
   questions: z.array(z.string().max(300)).max(10).default([]),
   // spec.md section 6.16.5, Proposals: other repositories from context/repo-list.md that the change needs.
   repos: z
-    .array(z.object({ project: z.string().max(100), repo: z.string().max(100), reason: z.string().max(300) }))
+    .array(z.object({ project: exact(z.string().max(100)), repo: exact(z.string().max(100)), reason: z.string().max(300) }))
     .max(PROPOSALS_MAX)
     .default([]),
   // spec.md section 6.20.4: the open PRs at once that Claude proposes in sub-task mode.
@@ -767,7 +778,7 @@ export const specResult = z.object({
   coverage,
 });
 export type SpecResult = z.infer<typeof specResult>;
-export const specJsonSchema = (): Record<string, unknown> => z.toJSONSchema(specResult, { target: "draft-07" });
+export const specJsonSchema = (): Record<string, unknown> => aiJsonSchema(specResult);
 
 export const implementResult = z.object({
   summary: z.string().max(1000),
@@ -796,7 +807,7 @@ export const implementResult = z.object({
   coverage,
 });
 export type ImplementResult = z.infer<typeof implementResult>;
-export const implementJsonSchema = (): Record<string, unknown> => z.toJSONSchema(implementResult, { target: "draft-07" });
+export const implementJsonSchema = (): Record<string, unknown> => aiJsonSchema(implementResult);
 
 export const replanResult = z.object({
   changed: z.boolean(),

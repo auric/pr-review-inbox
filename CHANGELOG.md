@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A Claude result that is longer than an app limit no longer fails the run. The app keeps the first entries or cuts the text, and the run says what it cut, for example "Claude returned 140 findings; the app kept the first 100." Edit texts, commands, paths, and names still must fit.
 - A diagram in Explain, Ask, and other answers now opens in a large view on a click or with "Zoom". The view has Zoom in, Zoom out, Fit, and 100%, the keys + - 0 1, and Ctrl+wheel. Drag or scroll to move the diagram.
 - PR notes have no length limit and no limit on their number. Before, a note had at most 500 characters, and a PR had at most 30 notes.
 - Higher limits: a talk about a finding takes up to 100 messages (before 20). A Fix run takes up to 100 threads and findings (before 25). Settings, Tasks takes up to 50 branch prefixes (before 10). A sub-task plan takes up to 30 parts (before 12) and up to 20 open PRs at once (before 5). Task ID rules find up to 50 keys per pull request (before 10).

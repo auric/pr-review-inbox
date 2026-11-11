@@ -808,6 +808,32 @@ describe("edits through a full run", () => {
   );
 
   test(
+    "limits.md decision 4: 55 edits keep the first 50 with a note; an edit text over its cap still fails the run",
+    async () => {
+      console.log(`Decision 4 fix test imports ${Bun.resolveSync("../../src/shared/caps", import.meta.dir)}`);
+      const h = await setup();
+      const edits = [
+        edit(101, "src/app.ts", "const a = 1;", "const a = 10;"),
+        ...Array.from({ length: 54 }, () => edit(101, "src/app.ts", "NO-MATCH")),
+      ];
+      h.scenario({ fix: { summary: "S.", threads: [note(101)], edits, coverage: emptyCoverage } });
+      const d = await h.finish((await h.start([101])).body.id);
+      expect(d.run).toMatchObject({ kind: "fix", status: "incomplete" });
+      const skipped = d.run.summary?.coverage.skipped ?? [];
+      expect(skipped[0]).toBe("Claude returned 55 edits; the app kept the first 50.");
+      expect(skipped.filter((x) => x.endsWith("old does not match the file."))).toHaveLength(49);
+      expect(h.editRows(d.run.id)).toMatchObject([{ ord: 0, thread: 101, path: "src/app.ts" }]);
+
+      h.scenario({
+        fix: { summary: "S.", threads: [note(101)], edits: [edit(101, "src/app.ts", "o".repeat(20_001))], coverage: emptyCoverage },
+      });
+      const bad = await h.finish((await h.start([101])).body.id);
+      expect(bad.run).toMatchObject({ kind: "fix", status: "failed", errorKind: "schema" });
+    },
+    SLOW,
+  );
+
+  test(
     "restart recovery: a fix run that recovery ended stores no edit",
     async () => {
       const h = await setup();

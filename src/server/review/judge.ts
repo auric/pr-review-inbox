@@ -7,7 +7,8 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 import type { ZodType } from "zod";
-import { acceptedTargets, consultOutput } from "../../shared/consult";
+import { parseCut } from "../../shared/caps";
+import { acceptedTargets, consultCaps, consultOutput } from "../../shared/consult";
 import { MAX_NOTE, type RunPhase, type RunSummary, type RunUsage, type VerifySummary, type Volume } from "../../shared/dto";
 import {
   type AnchoredFinding,
@@ -27,6 +28,7 @@ import {
   type Question,
   type ReplyPayload,
   type RereviewResult,
+  type ReviewResult,
   replyResult,
   rereviewResult,
   reviewResult,
@@ -275,7 +277,7 @@ export async function judge(
 ): Promise<Ending | Found> {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = rereview ? rereviewResult.safeParse(o.result?.structured_output) : reviewResult.safeParse(o.result?.structured_output);
+  const parsed = parseCut<ReviewResult>(rereview ? rereviewResult : reviewResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, rereview ? "re-review" : "review", raw, o);
   const earlier = rereview ? (parsed.data as RereviewResult).earlier : [];
   const items = rereview?.items ?? [];
@@ -295,7 +297,7 @@ export async function judge(
   const base = rereview?.carry.incomplete ? [`Run ${rereview.carry.base}, the base of this re-review, was incomplete.`] : [];
   const coverage = {
     ...v.coverage,
-    skipped: [...v.coverage.skipped, ...(e?.skipped ?? []), ...(a?.skipped ?? [])],
+    skipped: [...parsed.cuts, ...v.coverage.skipped, ...(e?.skipped ?? []), ...(a?.skipped ?? [])],
     unavailable: [...v.coverage.unavailable, ...unavailable(o, servers, gaps)],
     notChecked: [...v.coverage.notChecked, ...base],
   };
@@ -458,7 +460,7 @@ export function settle(f: Found, s: SettleInput): Ending {
     raw = cap(`${raw}\n# Check phase\n\n${rawOutput(o)}`);
     phases.push({ name: "check", startedAt: s.check.startedAt, endedAt: s.check.endedAt, usage: usageOf(o) });
     usage = addUsage(usage, usageOf(o));
-    const parsed = o.status === "completed" ? verifyResult.safeParse(o.result?.structured_output) : null;
+    const parsed = o.status === "completed" ? parseCut(verifyResult, o.result?.structured_output) : null;
     if (!parsed) failed = { kind: o.kind, text: o.text };
     else if (!parsed.success)
       failed = { kind: "schema", text: `The result does not match the verify schema. ${issuesText(parsed.error.issues)}` };
@@ -466,7 +468,7 @@ export function settle(f: Found, s: SettleInput): Ending {
       const v = verdictsOf(parsed.data.verdicts, s.check.written);
       got = effectiveVerdicts(f.candidates.slice(0, s.check.written), v.verdicts);
       const c = parsed.data.coverage;
-      coverage.skipped.push(...v.skipped);
+      coverage.skipped.push(...parsed.cuts.map((x) => `Check: ${x}`), ...v.skipped);
       coverage.read = union(coverage.read, c.read);
       coverage.notChecked.push(...[...c.skipped, ...c.notChecked, ...c.unavailable].map((x) => `Check: ${x}`));
     }
@@ -669,7 +671,7 @@ const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : 
 export async function judgeExplain(o: RunOutcome, ws: Workspace, servers: string[], gaps: string[]): Promise<Ending> {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = explainResult.safeParse(o.result?.structured_output);
+  const parsed = parseCut(explainResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "explain", raw, o);
   const r = parsed.data;
   const files = parseDiff(ws.diff);
@@ -700,6 +702,7 @@ export async function judgeExplain(o: RunOutcome, ws: Workspace, servers: string
   const coverage = {
     ...r.coverage,
     skipped: [
+      ...parsed.cuts,
       ...r.coverage.skipped,
       ...(walk.badLinks ? [`${count(walk.badLinks, "link", "links")} did not match the change.`] : []),
       ...(r.order.length > order.length
@@ -754,10 +757,14 @@ export function salvaged(f: Found, o: RunOutcome, line: string): Found {
 export function judgeReplies(o: RunOutcome, threads: ReplyThread[], servers: string[], gaps: string[], live: ReadonlySet<number>): Ending {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = replyResult.safeParse(o.result?.structured_output);
+  const parsed = parseCut(replyResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "reply", raw, o);
   const v = validateReplies(parsed.data, threads, live);
-  const coverage = { ...v.coverage, unavailable: [...v.coverage.unavailable, ...unavailable(o, servers, gaps)] };
+  const coverage = {
+    ...v.coverage,
+    skipped: [...parsed.cuts, ...v.coverage.skipped],
+    unavailable: [...v.coverage.unavailable, ...unavailable(o, servers, gaps)],
+  };
   return ended(raw, o, {
     summary: { summary: v.summary, risks: [], coverage, dropped: [] },
     items: v.replies.map(replyItem),
@@ -776,10 +783,14 @@ const firstLine = (s: string) =>
 export function judgeDiscuss(o: RunOutcome, servers: string[], gaps: string[]): Ending {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = discussResult.safeParse(o.result?.structured_output);
+  const parsed = parseCut(discussResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "discuss", raw, o);
   const r = parsed.data;
-  const coverage = { ...r.coverage, unavailable: [...r.coverage.unavailable, ...unavailable(o, servers, gaps)] };
+  const coverage = {
+    ...r.coverage,
+    skipped: [...parsed.cuts, ...r.coverage.skipped],
+    unavailable: [...r.coverage.unavailable, ...unavailable(o, servers, gaps)],
+  };
   return ended(raw, o, {
     summary: { summary: firstLine(r.answer), risks: [], coverage, dropped: [] },
     items: [],
@@ -801,11 +812,15 @@ export async function judgeTask<T extends { summary?: string; title?: string; co
 ): Promise<Ending> {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = schema.safeParse(o.result?.structured_output);
+  const parsed = parseCut(schema, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, what, raw, o);
   const c = await check(parsed.data);
   const cov = c.result.coverage;
-  const coverage = { ...cov, skipped: [...cov.skipped, ...c.skipped], unavailable: [...cov.unavailable, ...unavailable(o, servers, gaps)] };
+  const coverage = {
+    ...cov,
+    skipped: [...parsed.cuts, ...cov.skipped, ...c.skipped],
+    unavailable: [...cov.unavailable, ...unavailable(o, servers, gaps)],
+  };
   return ended(raw, o, {
     summary: { summary: firstLine(c.result.summary ?? c.result.title ?? ""), risks: [], coverage, dropped: [] },
     items: [],
@@ -818,7 +833,7 @@ export async function judgeTask<T extends { summary?: string; title?: string; co
 export function judgeAsk(o: RunOutcome, servers: string[], gaps: string[]): Ending {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = askResult.safeParse(o.result?.structured_output);
+  const parsed = parseCut(askResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "ask", raw, o);
   const { answer, coverage } = parsed.data;
   const summary = firstLine(answer);
@@ -826,7 +841,11 @@ export function judgeAsk(o: RunOutcome, servers: string[], gaps: string[]): Endi
     summary: {
       summary,
       risks: [],
-      coverage: { ...coverage, unavailable: [...coverage.unavailable, ...unavailable(o, servers, gaps)] },
+      coverage: {
+        ...coverage,
+        skipped: [...parsed.cuts, ...coverage.skipped],
+        unavailable: [...coverage.unavailable, ...unavailable(o, servers, gaps)],
+      },
       dropped: [],
     },
     items: [],
@@ -841,11 +860,11 @@ export function judgeAsk(o: RunOutcome, servers: string[], gaps: string[]): Endi
 export async function judgeSession(o: RunOutcome, fix: { ws: Workspace; asked: string[] } | null): Promise<Ending> {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = consultOutput.safeParse(o.result?.structured_output);
+  const parsed = parseCut(consultOutput, o.result?.structured_output, consultCaps);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "session answer", raw, o);
   const n = parsed.data.answers.length;
   const answers = `${n} ${n === 1 ? "answer" : "answers"}`;
-  const none = { read: [], skipped: [], unavailable: [], notChecked: [] };
+  const none = { read: [], skipped: parsed.cuts, unavailable: [], notChecked: [] };
   const result = (summary: string, coverage: RunSummary["coverage"], edits?: { threads: FixNote[]; edits: ValidEdit[] }) =>
     ended(raw, o, {
       summary: { summary, risks: [], coverage, dropped: [] },
@@ -857,7 +876,10 @@ export async function judgeSession(o: RunOutcome, fix: { ws: Workspace; asked: s
   const proposal = fixResult.safeParse(parsed.data.fix);
   if (!proposal.success) {
     const issues = issuesText(proposal.error.issues);
-    return result(answers, { ...none, skipped: [`The fix does not match the fix schema, so the run keeps no edit. ${issues}`] });
+    return result(answers, {
+      ...none,
+      skipped: [...parsed.cuts, `The fix does not match the fix schema, so the run keeps no edit. ${issues}`],
+    });
   }
   const files = await readFixFiles(
     fix.ws,
@@ -865,7 +887,8 @@ export async function judgeSession(o: RunOutcome, fix: { ws: Workspace; asked: s
   );
   const v = validateFix(proposal.data, acceptedTargets(parsed.data.answers, fix.asked), files);
   const m = v.edits.length;
-  return result(`${answers}, ${m} ${m === 1 ? "edit" : "edits"}`, v.coverage, { threads: v.threads, edits: v.edits });
+  const coverage = { ...v.coverage, skipped: [...parsed.cuts, ...v.coverage.skipped] };
+  return result(`${answers}, ${m} ${m === 1 ? "edit" : "edits"}`, coverage, { threads: v.threads, edits: v.edits });
 }
 
 export const cancelledEnding = (o?: RunOutcome): Ending => ({
@@ -954,14 +977,14 @@ export async function judgeFix(
 ): Promise<Ending> {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
-  const parsed = fixResult.safeParse(o.result?.structured_output);
+  const parsed = parseCut(fixResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "fix", raw, o);
   const files = await readFixFiles(
     ws,
     parsed.data.edits.map((e) => e.path),
   );
   const v = validateFix(parsed.data, { threads: threads.map((t) => t.thread), findings }, files);
-  const skipped = [...v.coverage.skipped];
+  const skipped = [...parsed.cuts, ...v.coverage.skipped];
   const items = v.threads.flatMap((n): NewItem[] => {
     const t = threads.find((x) => x.thread === n.thread);
     const body = n.reply.trim();

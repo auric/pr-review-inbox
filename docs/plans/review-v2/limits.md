@@ -1,6 +1,6 @@
 # Limits that a user can hit: inventory
 
-Status: decisions 2 and 3 are built (2026-11-11). Decisions 1 and 4 are open. Inventory of 2026-11-03 against main 7c32f26, after the user said "we have too many unnecessary restrictions in the app". No decision yet. Categories: SAFETY stays; RESOURCE protects prompt size, memory, disk, or cost; ARBITRARY has no clear reason. The last column is a first guess, not a decision. Rows marked unverified were found only in schemas.
+Status: decisions 2, 3, and 4 are built (2026-11-11). Decision 1 is open. Inventory of 2026-11-03 against main 7c32f26, after the user said "we have too many unnecessary restrictions in the app". No decision yet. Categories: SAFETY stays; RESOURCE protects prompt size, memory, disk, or cost; ARBITRARY has no clear reason. The last column is a first guess, not a decision. Rows marked unverified were found only in schemas.
 
 ## Build a Jira task
 | Limit | Where | User sees | Cat. | Changeable | Guess |
@@ -100,6 +100,37 @@ The user agreed with all four recommendations:
 1. Several runs at once. A Settings number sets the limit (default 3). One run per PR at a time. A short design comes first, because the run queue is central code.
 2. Built. Raise these fixed numbers: discussion messages 20 to 100; notes per PR 30 to 200, each 500 to 20,000 characters; Fix threads per run 25 to 100; branch prefixes 10 to 50; open PRs per task 5 to 20; sub-task parts 12 to 30; Jira rule matches 10 to 50.
 3. Built (Settings, Tasks, "Run limits"; bounds: step time 5 to 120 min, review run time 10 to 240 min, interview rounds 1 to 5, test-fix tries 1 to 10, plan turns 20 to 500). Make these editable in Settings, Tasks: the task step time (20 min), the review run time (60 min), the interview rounds (2), the test-fix tries (3), and the plan turns (80).
-4. An AI result over a schema cap is cut, not failed. First check which caps fail today, then change only those.
+4. Built (see "Decision 4 check"). An AI result over a schema cap is cut, not failed. First check which caps fail today, then change only those.
 
 The setup package also got the user's agreement: setup default 60 min; checks keep 10 min; maximum 4 h; a "Time limit (min)" field on each command row; Claude proposes a limit for long setup commands; a timeout shows as "time limit", not "stopped", with "Change the time limit"; and the opt-in folder `REVIEW_LOOP_TASK_CACHE`, shared by the parts of one task.
+
+## Decision 4 check (2026-11-11)
+
+Method: each AI result goes through `X.safeParse(structured_output)` in src/server/review/judge.ts (review, re-review, verify, explain, reply, discuss, task steps, ask, session, fix) or src/server/review/improve.ts. No salvage or repair step cuts a value. A failed parse calls `schemaFailure`, so the run fails with kind `schema`. The verify phase instead marks every candidate unchecked. The CLI gets the same caps: `z.toJSONSchema` writes `maxItems`, `maxLength`, and `maximum` into `--json-schema`. Claude Code 2.1.322 checks the StructuredOutput input with Ajv (`allErrors`) and throws "Output does not match required schema". The model must retry, and the retry cap ends the run with `error_max_structured_output_retries` (kind `schema`, stream.ts). This fact comes from the strings of the CLI binary, not from a run. tests/shared/caps.test.ts proves the "fails" column: with the fix reverted, each test fails.
+
+| Cap | Where | Today | Fix |
+|---|---|---|---|
+| Findings 100, answered 100, finding title 200, trigger 2000 | review.ts reviewResult | Run fails; CLI rejects | Cut. Findings keep the first 100 in finder order: no order rule exists, and answered[].finding counts from 0 in that order. |
+| Finding rule 2000, module 40 | review.ts finding | Run fails; CLI rejects | Keep (exact): validate.ts matches rule verbatim, and module is an ID. |
+| Earlier verdicts 100 | review.ts rereviewResult | Run fails; CLI rejects | Cut |
+| Verdicts 100, reason, evidence, question 1000 | review.ts verifyResult | Check phase fails, all candidates unchecked | Cut. The note starts with "Check:". |
+| Answer 8000, reason 500, revision title 200 and body 4000, reply 4000, notes 2 × 500, cites 5 | review.ts discussResult | Run fails; CLI rejects | Cut |
+| Summary 300, walkthrough 60,000, order 60 (why 300), files 300 (summary 600), risks 30 (text 600), glossary 40 (80, 300), questions 20 | review.ts explainResult | Run fails; CLI rejects | Cut. A long text ends at a line break or a space, with " [cut]". |
+| Diagrams 3 × 20,000 | judge.ts checkWalkthrough | Already cut: extra fences become text | No change |
+| Replies 25, notes 2 × 500, cites 5 | review.ts replyResult | Run fails; CLI rejects | Cut |
+| Fix notes 100, edits 50 | review.ts fixResult | Run fails; CLI rejects | Cut. validateFix already drops single edits, for example over 200,000 bytes. |
+| Edit old and new 20,000 | review.ts fixEdit | Run fails; CLI rejects | Keep (exact): an edit text must stay verbatim. |
+| Edit bytes 200,000 | fix.ts validateFix | Already cut: later edits drop | No change |
+| Ask answer 20,000 | review.ts askResult | Run fails; CLI rejects | Cut |
+| Session answers 500 | consult.ts consultOutput | Run fails; CLI rejects | Cut |
+| Session entry reason 4000, reply 20,000 | consult.ts answerEntry | CLI rejects; the app shows the entry as a bad row | Cut |
+| Session fix notes 100, edits 50 | consult.ts sessionFix | CLI rejects; the run keeps no edit | Cut |
+| Interview summary 1500, questions 8 (300, 300, options 5 × 120 and 300), unknowns 10 × 300 | task.ts interviewResult | Run fails; CLI rejects | Cut |
+| Plan texts and lists: title 200, estimate parts 30 and modules 20 × 60, unknowns 10, map 40 (what 300), change, design, spec texts, parts 30, part title 120 and goal 300, acceptance 20 × 500, tests 30, tasks 15 (title 200, files 30, run 10, done 300), keys 5, commands 10, services 10, notes 2000, allow 15 (reason 300), flag removal 300, questions 10, repos 2 (reason 300), open PRs 20, contracts 12, risks 8 | task.ts specResult | Run fails; CLI rejects | Cut. A number over its maximum takes the maximum. |
+| Plan exact values: map path 400 and symbol 200, contract path 400, test 300, task run entry 300, after 40, command name 60, argv 32 × 1000, allow pattern 200, flag name 120, repos project and repo 100 | task.ts specResult | Run fails; CLI rejects | Keep (exact): paths, IDs, test names, commands, and patterns change meaning when cut. |
+| Implement summary 1000, tests 50, question, specChange 1000, needsBaseReason 300, allow requests 3 (reason 300), notes 20 × 500 | task.ts implementResult | Run fails; CLI rejects | Cut |
+| Allow request pattern 200, command 1000 | task.ts allowRequest | Run fails; CLI rejects | Keep (exact): a cut pattern allows other commands. |
+| Improve prompt 20,000 | improve.ts RESULT | Proposal fails | No change: the proposal has no run note, and the cap is the profile prompt bound. |
+| replanResult, planProblem | task.ts | No run parses them | No change |
+
+The fix: src/shared/caps.ts. `aiJsonSchema` removes each cut cap from `--json-schema` and adds "At most N entries." or "At most N characters." to its description. Exact caps stay in the schema, so the CLI still makes the model retry. `parseCut` cuts the value before the zod parse. Each cut adds one line to coverage.skipped, for example "Claude returned 140 findings; the app kept the first 100."

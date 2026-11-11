@@ -4,6 +4,7 @@
 // Review v2 contracts (docs/plans/review-v2/spec.md sections 1.5, 1.6, 2.4, 3.3). The CLI gets draft-07 with every key required.
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
+import { aiJsonSchema } from "../../src/shared/caps";
 import { MODULE_IDS, profileInput } from "../../src/shared/dto";
 import {
   coverage,
@@ -238,7 +239,6 @@ const B20 = {
   }),
 };
 const shape = (s: Record<string, unknown>) => JSON.stringify(s, (k, v) => (k === "description" ? undefined : v));
-const draft07 = (s: z.ZodType) => z.toJSONSchema(s, { target: "draft-07" }) as Record<string, unknown>;
 
 // WP-PN (spec.md section 2.9) adds notes and cites to the discuss result. Gate B20 ran the shape without them. Run B20 again before
 // WP-D2 ships the discuss run.
@@ -250,10 +250,11 @@ const PN_KEYS = {
   cites: z.array(lineNo).max(5).default([]),
 };
 
-test("the shipped verify, explain, and discuss schemas have the shape that gates B18 and B20 accepted", () => {
-  expect(shape(verifyJsonSchema())).toBe(shape(draft07(B20.verify)));
-  expect(shape(explainJsonSchema())).toBe(shape(draft07(B20.explain)));
-  expect(shape(discussJsonSchema())).toBe(shape(draft07(B20.discuss.extend(PN_KEYS))));
+// limits.md decision 4: the shipped schemas leave out the cut caps that the gate shapes held.
+test("the shipped verify, explain, and discuss schemas have the shape that gates B18 and B20 accepted, without the cut caps", () => {
+  expect(shape(verifyJsonSchema())).toBe(shape(aiJsonSchema(B20.verify)));
+  expect(shape(explainJsonSchema())).toBe(shape(aiJsonSchema(B20.explain)));
+  expect(shape(discussJsonSchema())).toBe(shape(aiJsonSchema(B20.discuss.extend(PN_KEYS))));
 });
 
 describe("profile fields of review v2 (spec.md section 1.2)", () => {

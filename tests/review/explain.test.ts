@@ -486,6 +486,39 @@ describe("explain runs (spec.md section 3.2)", () => {
   );
 
   test(
+    "limits.md decision 4: an explain result over its caps completes with the cut lists, the cut walkthrough, and notes",
+    async () => {
+      console.log(`Decision 4 explain test imports ${Bun.resolveSync("../../src/shared/caps", import.meta.dir)}`);
+      const h = await setup();
+      const file = { path: "src/cache/flush.ts", role: "core", summary: "Flush." };
+      h.scenario({
+        explain: {
+          ...RESULT,
+          walkthrough: `${"Text line.\n".repeat(6000)}Tail.`,
+          order: Array.from({ length: 61 }, () => ({ path: "src/cache/flush.ts", why: "The change." })),
+          files: Array.from({ length: 301 }, () => file),
+          questions: Array.from({ length: 21 }, (_, i) => ({ text: `Question ${i + 1}?`, why: "W." })),
+        },
+      });
+      const d = await h.finish((await h.start()).body.id);
+      expect(d.run).toMatchObject({ kind: "explain", status: "incomplete" });
+      expect(d.run.summary?.coverage.skipped.slice(0, 4)).toEqual([
+        "The app cut walkthrough from 66,005 to 60,000 characters.",
+        "Claude returned 61 order; the app kept the first 60.",
+        "Claude returned 301 files; the app kept the first 300.",
+        "Claude returned 21 questions; the app kept the first 20.",
+      ]);
+      expect(d.items).toHaveLength(20);
+      const r = (await h.get()).body?.result;
+      expect(r?.walkthrough).toEndWith("Text line. [cut]");
+      expect(r?.walkthrough.length).toBeLessThanOrEqual(60_000);
+      expect(r?.order).toHaveLength(60);
+      expect(r?.files).toHaveLength(300);
+    },
+    SLOW,
+  );
+
+  test(
     "AC-X2 and AC-P3: an explain run gets no history.md, questions.md, pr-context.md, or notes.md, and no subagent",
     async () => {
       const h = await setup();

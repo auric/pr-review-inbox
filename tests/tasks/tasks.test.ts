@@ -826,6 +826,29 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
   );
 
   test(
+    "limits.md decision 4: a spec result over its caps makes a plan with the cut lists and notes",
+    async () => {
+      console.log(`Decision 4 spec test imports ${Bun.resolveSync("../../src/shared/caps", import.meta.dir)}`);
+      const h = await setup();
+      const risk = { text: "It can break.", check: "A test.", part: null };
+      h.scenario({
+        spec: specWith({
+          questions: Array.from({ length: 12 }, (_, i) => `Question ${i + 1}?`),
+          risks: Array.from({ length: 9 }, () => risk),
+        }),
+      });
+      const t = await h.toPlan();
+      const spec = h.runs(t.id)[1];
+      expect(spec?.status).toBe("incomplete");
+      expect((JSON.parse(spec?.summary_json ?? "{}") as { coverage: { skipped: string[] } }).coverage.skipped.slice(0, 2)).toEqual([
+        "Claude returned 12 questions; the app kept the first 10.",
+        "Claude returned 9 risks; the app kept the first 8.",
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
     "AC-B96: the spec run snapshot holds context/related-work.md with the stored PR that names the key, and the prompt names the file",
     async () => {
       const h = await setup();

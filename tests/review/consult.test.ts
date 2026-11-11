@@ -274,8 +274,9 @@ describe("part D: judge and propose fixes", () => {
     expect(fix.required).toEqual(["summary", "threads", "edits", "coverage"]);
     const note = fix.properties.threads?.items as Obj;
     const edit = fix.properties.edits?.items as Obj;
-    expect(fix.properties.edits?.maxItems).toBe(50);
-    expect(fix.properties.threads?.maxItems).toBe(100);
+    // limits.md decision 4: the app cuts these lists, so the caps are in the descriptions only.
+    expect(fix.properties.edits?.description).toBe("At most 50 entries.");
+    expect(fix.properties.threads?.description).toBe("One note per accepted item. At most 100 entries.");
     expect(note.required).toEqual(["fixed", "reason", "why", "reply"]);
     expect(edit.required).toEqual(["path", "old", "new"]);
     expect(note.properties.thread?.description).toBe("For item T123: 123. Leave it out for a finding.");

@@ -444,3 +444,28 @@ describe("answered questions in a review run", () => {
     SLOW,
   );
 });
+
+describe("limits.md decision 4", () => {
+  test(
+    "a review result with 140 findings completes with the first 100 and a note; the CLI schema has no findings cap",
+    async () => {
+      console.log(`Decision 4 review test imports ${Bun.resolveSync("../../src/shared/caps", import.meta.dir)}`);
+      const h = await setup();
+      const findings = Array.from({ length: 140 }, (_, i) => finding((i % FLUSH.length) + 1, `CAP-${i + 1} Check it.`));
+      h.runner.write({ fixture: h.stream({ ...BASE_RESULT, findings }) });
+      await h.brief("general");
+      const d = await h.finish(`/api/prs/${h.pr}/review`);
+      expect(d.run.status).toBe("incomplete");
+      expect(d.run.summary?.coverage.skipped).toContain("Claude returned 140 findings; the app kept the first 100.");
+      const bodies = d.items.filter((i) => i.kind === "finding").map((i) => i.body);
+      expect(bodies.some((b) => b.startsWith("CAP-100 "))).toBe(true);
+      expect(bodies.some((b) => b.startsWith("CAP-101 "))).toBe(false);
+      const schema = JSON.parse(flag(h.runCalls().at(-1)?.argv ?? [], "--json-schema")) as {
+        properties: { findings: { maxItems?: number; description?: string } };
+      };
+      expect(schema.properties.findings).toMatchObject({ description: "At most 100 entries." });
+      expect(schema.properties.findings.maxItems).toBeUndefined();
+    },
+    SLOW,
+  );
+});

@@ -3,6 +3,7 @@
 
 // Review and reply results (plan v3 WP9, replies.md WP17). zod parses the CLI output. reviewJsonSchema() and replyJsonSchema() feed --json-schema.
 import { z } from "zod";
+import { aiJsonSchema, exact } from "./caps";
 import type { Volume } from "./dto";
 
 export const severities = ["blocker", "major", "minor", "nit"] as const;
@@ -47,8 +48,9 @@ export const finding = z.object({
     .nullable()
     .default(null)
     .describe("The changed line that adds the problem, when the anchor is on unchanged code. null when the anchor is on a changed line."),
-  rule: z.string().max(2000).default("").describe("The exact sentence of the project rule, for a rule finding. Else empty."),
-  module: z.string().max(40).default("core").describe("core, or the ID of the check section that found it."),
+  // validate.ts matches rule verbatim against the loaded instruction files, and module is an ID, so a cut would change them.
+  rule: exact(z.string().max(2000)).default("").describe("The exact sentence of the project rule, for a rule finding. Else empty."),
+  module: exact(z.string().max(40)).default("core").describe("core, or the ID of the check section that found it."),
 });
 
 export const question = z.object({ text: z.string(), why: z.string() });
@@ -116,7 +118,7 @@ export type ReviewResult = z.infer<typeof reviewResult>;
 // The CLI checks the schema with a default Ajv instance, which knows draft-07 only. A 2020-12 $schema fails every run.
 // An Explain run gets no answered key: it judges no answer (docs/plans/thread-outcome.md section 9).
 export const reviewJsonSchema = (explain = false): Record<string, unknown> =>
-  z.toJSONSchema(explain ? reviewResult.omit({ answered: true }) : reviewResult, { target: "draft-07" });
+  aiJsonSchema(explain ? reviewResult.omit({ answered: true }) : reviewResult);
 
 // ---------- Verify phase (docs/plans/review-v2/spec.md sections 1.6 to 1.8) ----------
 
@@ -140,7 +142,7 @@ export const verifyResult = z.object({ verdicts: z.array(verifyVerdict).max(MAX_
 export type VerifyVerdict = z.infer<typeof verifyVerdict>;
 export type VerifyResult = z.infer<typeof verifyResult>;
 
-export const verifyJsonSchema = (): Record<string, unknown> => z.toJSONSchema(verifyResult, { target: "draft-07" });
+export const verifyJsonSchema = (): Record<string, unknown> => aiJsonSchema(verifyResult);
 
 export type Severity = (typeof severities)[number];
 // The check state of a finding item. It comes from the verdict at read time (spec.md section 1.7).
@@ -255,7 +257,7 @@ export type DiscussRecord = Pick<DiscussResult, "verdict" | "reason" | "revision
   changed?: true;
 };
 
-export const discussJsonSchema = (): Record<string, unknown> => z.toJSONSchema(discussResult, { target: "draft-07" });
+export const discussJsonSchema = (): Record<string, unknown> => aiJsonSchema(discussResult);
 
 // ---------- Explain this PR (docs/plans/review-v2/spec.md section 3) ----------
 
@@ -296,7 +298,7 @@ export const explainResult = z.object({
 
 export type ExplainResult = z.infer<typeof explainResult>;
 
-export const explainJsonSchema = (): Record<string, unknown> => z.toJSONSchema(explainResult, { target: "draft-07" });
+export const explainJsonSchema = (): Record<string, unknown> => aiJsonSchema(explainResult);
 
 // ---------- Reply drafts (plan replies.md WP17) ----------
 
@@ -384,7 +386,7 @@ export type ReplyPayload = Omit<ReplyDraft, "judgement" | "resolve" | "resolveEv
   revisionOf?: number;
 };
 
-export const replyJsonSchema = (): Record<string, unknown> => z.toJSONSchema(replyResult, { target: "draft-07" });
+export const replyJsonSchema = (): Record<string, unknown> => aiJsonSchema(replyResult);
 
 // ---------- Fix runs (plan r3) ----------
 
@@ -402,11 +404,14 @@ const fixTarget = {
 export const fixEdit = z.object({
   ...fixTarget,
   path: z.string().describe("File path relative to the repository root, with / separators."),
-  old: z
-    .string()
-    .max(MAX_EDIT_TEXT)
-    .describe("Text copied verbatim from the file at the head commit. It must match exactly one place. Empty only for a new file."),
-  new: z.string().max(MAX_EDIT_TEXT).describe("The text that replaces old."),
+  // An edit text must stay verbatim, so the app never cuts it.
+  old: exact(
+    z
+      .string()
+      .max(MAX_EDIT_TEXT)
+      .describe("Text copied verbatim from the file at the head commit. It must match exactly one place. Empty only for a new file."),
+  ),
+  new: exact(z.string().max(MAX_EDIT_TEXT).describe("The text that replaces old.")),
 });
 
 // docs/plans/thread-outcome.md: why a note gives no fix. The app adds "dropped" when validateFix drops every edit of a note.
@@ -449,7 +454,7 @@ export type FixDecline = { reason: string; draft?: number; replaced?: number[] }
 export type FixNote = Omit<FixThread, "why"> & { why: FixWhy | null; drops?: string[]; declined?: FixDecline };
 export type FixResult = z.infer<typeof fixResult>;
 
-export const fixJsonSchema = (): Record<string, unknown> => z.toJSONSchema(fixResult, { target: "draft-07" });
+export const fixJsonSchema = (): Record<string, unknown> => aiJsonSchema(fixResult);
 
 const fixNotes = z.array(
   fixThread.extend({
@@ -510,7 +515,7 @@ export const rereviewResult = reviewResult.extend({ earlier: z.array(earlierVerd
 export type EarlierVerdict = z.infer<typeof earlierVerdict>;
 export type RereviewResult = z.infer<typeof rereviewResult>;
 
-export const rereviewJsonSchema = (): Record<string, unknown> => z.toJSONSchema(rereviewResult, { target: "draft-07" });
+export const rereviewJsonSchema = (): Record<string, unknown> => aiJsonSchema(rereviewResult);
 
 // A finding or question that a re-review copied from its base run. from: the source item ID. since: the head that the base run reviewed.
 export type Carried = { from: number; verdict: Verdict; reason: string; since: string };
@@ -542,7 +547,7 @@ export const askResult = z.object({
 
 export type AskResult = z.infer<typeof askResult>;
 
-export const askJsonSchema = (): Record<string, unknown> => z.toJSONSchema(askResult, { target: "draft-07" });
+export const askJsonSchema = (): Record<string, unknown> => aiJsonSchema(askResult);
 
 // ---------- Improve prompt ----------
 

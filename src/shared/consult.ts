@@ -4,6 +4,7 @@
 // Session consult (docs/plans/session-consult.md parts A, C, and D): the groups, the tagged text with its size cap, the import plan,
 // and the answer schema and fix rules of a direct run. Pure, so the server, the UI, and bun test share it.
 import { z } from "zod";
+import { aiJsonSchema } from "./caps";
 import {
   FIX_EDIT_RULES,
   FIX_WHY_RULES,
@@ -390,7 +391,9 @@ const sessionFix = fixResult.extend({
 });
 // --json-schema needs an object at the top. planAnswer checks each entry again, so the parse below keeps bad entries as rows.
 export const consultJsonSchema = (mode: SessionMode = "judge"): Record<string, unknown> =>
-  z.toJSONSchema(mode === "fix" ? z.object({ answers, fix: sessionFix }) : z.object({ answers }), { target: "draft-07" });
+  aiJsonSchema(mode === "fix" ? z.object({ answers, fix: sessionFix }) : z.object({ answers }));
+// The caps that judgeSession cuts before the parse (limits.md decision 4).
+export const consultCaps = z.object({ answers, fix: sessionFix.optional() });
 // fix: checked by fixResult and validateFix on the server. A bad fix keeps the answers.
 export const consultOutput = z.object({ answers: z.array(z.unknown()).max(MAX_CONSULT_ENTRIES), fix: z.unknown().optional() });
 
