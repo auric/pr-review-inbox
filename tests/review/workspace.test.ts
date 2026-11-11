@@ -24,6 +24,8 @@ import {
   type ContextFile,
   cachePath,
   type GitRemote,
+  locked,
+  prepareCommitWorkspace,
   prepareWorkspace,
   pruneWorkspaces,
   sanitize,
@@ -812,6 +814,93 @@ describe("workspace", () => {
       await expect(ws.keep("fix:7")).rejects.toThrow(/Invalid ref/);
       await expect(ws.keep("../../heads/main")).rejects.toThrow();
       await ws.remove();
+    },
+    SLOW,
+  );
+
+  // docs/plans/review-v2/parallel-runs.md section 3.8: worktree add and prune of run folders run under locked(cache).
+  const gate = () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    return { held, release };
+  };
+  const stillWaiting = (p: Promise<unknown>) => Promise.race([p.then(() => "done"), Bun.sleep(1000).then(() => "waiting")]);
+
+  test(
+    "remove deletes the run folder at once, and prunes the worktree entry only after the cache lock is free",
+    async () => {
+      const s = await scenario("lock-prune", { "src/new.ts": "new\n" });
+      const ws = await prepare(s);
+      const g = gate();
+      const holding = locked(ws.cache, () => g.held);
+      const removing = ws.remove();
+      expect(await stillWaiting(removing)).toBe("waiting");
+      expect(existsSync(ws.run)).toBe(false);
+      expect(await worktrees(s, ws.cache)).toHaveLength(2);
+      g.release();
+      await holding;
+      await removing;
+      expect(await worktrees(s, ws.cache)).toHaveLength(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "prepareCommitWorkspace adds no worktree while the cache lock is held",
+    async () => {
+      const s = await scenario("lock-add", { "src/new.ts": "new\n" });
+      const first = await prepare(s);
+      await first.remove();
+      const g = gate();
+      const holding = locked(first.cache, () => g.held);
+      const input = { dataDir: s.dataDir, runId: "9", project: "PROJ", repo: "repo", task: 1, base: s.base, head: s.source };
+      const preparing = prepareCommitWorkspace(input);
+      expect(await stillWaiting(preparing)).toBe("waiting");
+      const repo = join(realpathSync.native(s.dataDir), "runs", "9", "work", "repo");
+      expect(existsSync(repo)).toBe(false);
+      g.release();
+      await holding;
+      const ws = await preparing;
+      expect(ws.repo).toBe(repo);
+      expect(readFileSync(join(repo, "src", "new.ts"), "utf8")).toBe("new\n");
+      expect(ws.diff).toContain("+++ b/src/new.ts");
+      await ws.remove();
+      expect(await worktrees(s, ws.cache)).toHaveLength(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "three runs for three PRs of one repository prepare at once, and remove leaves only the bare entry",
+    async () => {
+      const s = await scenario("lock-three", { "src/new.ts": "new\n" });
+      const sources = [s.source];
+      for (const id of [3, 4]) {
+        const c = await s.commit(s.base, { [`src/pr-${id}.ts`]: `pr ${id}\n` }, `pr ${id}`);
+        await s.ref(`refs/pull-requests/${id}/from`, c);
+        sources.push(c);
+      }
+      const all = await Promise.all(
+        [2, 3, 4].map((id, i) =>
+          prepareWorkspace({
+            dataDir: s.dataDir,
+            runId: String(id),
+            pr: { ...prOf(sources[i] as string, s.target), ref: { project: "PROJ", repo: "repo", id } },
+            comments: COMMENTS,
+            remote: remoteOf(s.remote),
+          }),
+        ),
+      );
+      const cache = all[0]?.cache as string;
+      for (const ws of all) expect(ws.cache).toBe(cache);
+      expect(readFileSync(join(all[0]?.repo as string, "src", "new.ts"), "utf8")).toBe("new\n");
+      expect(readFileSync(join(all[1]?.repo as string, "src", "pr-3.ts"), "utf8")).toBe("pr 3\n");
+      expect(readFileSync(join(all[2]?.repo as string, "src", "pr-4.ts"), "utf8")).toBe("pr 4\n");
+      expect(await worktrees(s, cache)).toHaveLength(4);
+      await Promise.all(all.map((ws) => ws.remove()));
+      expect(await worktrees(s, cache)).toHaveLength(1);
     },
     SLOW,
   );

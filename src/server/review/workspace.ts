@@ -444,7 +444,7 @@ export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace
   const remove = async () => {
     try {
       await rm(run, RM_TREE);
-      await g(["worktree", "prune"]);
+      await locked(cache, () => g(["worktree", "prune"]));
     } catch (e) {
       log(`Could not remove the run folder ${run}: ${(e as Error).message}`);
     }
@@ -454,7 +454,7 @@ export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace
   try {
     mkdirSync(context, { recursive: true });
     mkdirSync(app, { recursive: true });
-    await git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, pr.sourceHead], { env, ...input.long });
+    await locked(cache, () => git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, pr.sourceHead], { env, ...input.long }));
     const links = (await g(["ls-tree", "-r", "-z", "--full-tree", pr.sourceHead]))
       .split("\0")
       .filter((r) => r.startsWith("120000 "))
@@ -636,7 +636,8 @@ async function taskSnapshot(
   const remove = async () => {
     try {
       await rm(run, RM_TREE);
-      for (const c of new Set([cache, ...nested.map((n) => n.cache)])) await git([`--git-dir=${c}`, "worktree", "prune"], { env });
+      for (const c of new Set([cache, ...nested.map((n) => n.cache)]))
+        await locked(c, () => git([`--git-dir=${c}`, "worktree", "prune"], { env }));
     } catch (e) {
       log(`Could not remove the run folder ${run}: ${(e as Error).message}`);
     }
@@ -645,7 +646,7 @@ async function taskSnapshot(
   try {
     mkdirSync(context, { recursive: true });
     mkdirSync(app, { recursive: true });
-    await git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, head], { env, ...i.long });
+    await locked(cache, () => git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, head], { env, ...i.long }));
     const links = await linksAt(cache, env, head);
     // spec.md section 6.16.5, Snapshots: each submodule with access edit or read at its gitlink path, detached at its pinned commit. An
     // added repository goes to work/repos/<project>/<slug>, the same path as in the part folder, and gets its own sanitize.
@@ -657,7 +658,7 @@ async function taskSnapshot(
       const outside = !r || r.startsWith("..") || isAbsolute(r);
       if ((outside && (!added || added.startsWith("..") || isAbsolute(added))) || !HEAD.test(n.commit))
         throw new WorkspaceError(`A submodule path is outside the worktree: ${n.path}`);
-      await git([`--git-dir=${n.cache}`, "worktree", "add", "--detach", at, n.commit], { env, ...i.long });
+      await locked(n.cache, () => git([`--git-dir=${n.cache}`, "worktree", "add", "--detach", at, n.commit], { env, ...i.long }));
       const own = await linksAt(n.cache, env, n.commit);
       if (outside) beside.push({ at, links: own });
       else links.push(...own.map((l) => `${n.path}/${l}`));

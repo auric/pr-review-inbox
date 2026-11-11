@@ -1,6 +1,6 @@
 # Several Claude runs at once (limits.md decision 1)
 
-Status: design of 2026-11-11 against main a4fc1d7. Not built. It implements limits.md "User decisions (2026-11-04)", decision 1. Open questions Q1 to Q5 wait for the user.
+Status: design of 2026-11-11 against main a4fc1d7. WP-PR1 (the per-cache lock for worktree add and prune) is built. The other packages are not built. It implements limits.md "User decisions (2026-11-04)", decision 1. Open questions Q1 to Q5 wait for the user.
 
 ## Summary
 
@@ -228,6 +228,8 @@ BRIEF.md, spec.md (6.26, AC-B18, 6.20.6), design.md (B12 note), limits.md (decis
 8. Record the peak memory of the three CLI trees and the wait of B for the fetch of A. Write sanitized facts into integration-check.md.
 
 ## 6. Open questions
+
+User answers (2026-11-11): Q1 no, the steps run beside the pool. Q2 yes. Q3 409 with a note. Q4 yes. Q5 yes. All recommendations hold.
 
 1. Q1. Do the steps of a task with "Parts that build at once" 2 or more count toward the new limit? Recommended: no. This keeps the 2026-11-02 decision and README "a review never waits for a build". If they count, one task with 3 parts can block every review.
 2. Q2. Does the setting live in Settings, Tasks, Run limits as "Claude runs at once", 1 to 10, default 3? Recommended: yes.
