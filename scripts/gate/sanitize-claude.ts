@@ -34,7 +34,7 @@ const CHECKS: Record<string, string> = {
     "B11, reply run. The runner flag set without review agents and the reply JSON schema. Expect `structured_output` with one `judgement` set to JSON null.",
   "b11-fix":
     "B11, fix run. The runner flag set without review agents and the fix JSON schema. Expect `structured_output` with one edit whose `new` text has 2 KB or more.",
-  gadv: "Gate G-ADV. The runner flag set with `--advisor`: an advisor call, no `--advisor` (`none`), `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (`envoff`), `--disallowedTools advisor` (`disallowed`), and `--tools` with the advisor (`tools`).",
+  gadv: "Gate G-ADV. The app flag set with `--advisor`: an advisor call, no `--advisor` (`none`), `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (`envoff`), `--disallowedTools advisor` (`disallowed`), and `--tools` with the advisor (`tools`).",
   b12: "B12. The runner flag set without review agents. The agent reads a PNG attachment with Read and names its color in `structured_output`.",
 };
 // Public built-in agent and product names. They are not private data, and a replacement would break the event shapes.

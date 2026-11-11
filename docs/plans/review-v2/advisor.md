@@ -1,6 +1,6 @@
 # Advisor in app runs
 
-Status: design of 2026-11-11. Not built. Facts come from the Claude Code docs, not from a run. Gate G-ADV must confirm them before code depends on them.
+Status: design of 2026-11-11. Not built. Gate G-ADV run 1 (2026-11-11, CLI 2.1.322) confirmed ADV1, ADV3, ADV5, and in effect ADV2. ADV4 stays open (integration-check.md, section Advisor).
 
 ## Facts (docs)
 
@@ -22,13 +22,21 @@ Status: design of 2026-11-11. Not built. Facts come from the Claude Code docs, n
 5. Which stream-json events show an advisor call, and do `total_cost_usd` and `modelUsage` count the advisor tokens?
 6. The minimum CLI version.
 
+## Gate G-ADV run 1 results
+
+- `--advisor` works with the app flags (`-p`, `--restricted`, `--agents`, `--agent`, `--json-schema`).
+- App runs without `--advisor` get no advisor today, also with a user `advisorModel` set (one sample).
+- init.tools never lists the advisor. Only `slash_commands` lists the /advisor command.
+- A call shows as a `server_tool_use` block named `advisor` and an `advisor_tool_result` block. The result usage has an `advisor_message` iteration. modelUsage lists the advisor model, and total_cost_usd counts it.
+- Not known: whether `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`, `--disallowedTools advisor`, or `--tools` turn it off.
+
 ## Design
 
 - Profile field "Advisor": Off (default) or a model (`opus`, `fable`, or a full model ID). The task profile has the same field for task steps.
-- Off: the child env gets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`, so a user setting can never turn it on in an app run.
+- Off: the run gets no `--advisor` (ADV2: then it has no advisor). The child env also gets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` as a second guard; its effect is not verified (ADV4).
 - On: the run gets `--advisor <model>`. The app refuses a profile save when the advisor ranks below the main model or is Haiku.
-- The init allowlist accepts `advisor` only when the profile turns it on (per G-ADV fact 3).
-- The stream parser shows each advisor call in the run log as "Advisor: reviewed" or "declined", and adds advisor tokens to the run usage (per G-ADV fact 5). An advisor call never counts as a refused tool.
+- The init check needs no change: init.tools never lists the advisor (ADV3).
+- The stream parser shows each advisor call in the run log as "Advisor: reviewed" or "declined", and shows the advisor model from modelUsage in the run usage (ADV5). An advisor call never counts as a refused tool.
 - The child env scrub keeps the three feature-flag variables out when the advisor is on.
 - Help text: "A stronger model gives Claude advice at hard points. It uses more of your plan."
 
