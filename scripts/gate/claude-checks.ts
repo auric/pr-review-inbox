@@ -8,8 +8,9 @@
 // B21 to B29 (the Bash tool of a task step: facts SU1 to SU10 of integration-check.md "Claude shell", docs/gate-v2.md part S),
 // B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17),
 // B31 (a lone `cd repo` and the cwd of the next command: SU18), B32 (the Unrestricted shell mode: SU19), B33 (the Unrestricted and Any
-// command settings without the read block: SU20), B34 (git inside a quoted argument, and the line endings of a step worktree: SU21).
-// Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]
+// command settings without the read block: SU20), B34 (git inside a quoted argument, and the line endings of a step worktree: SU21),
+// GADV (Gate G-ADV: the advisor, docs/plans/review-v2/advisor.md).
+// Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
 
@@ -44,7 +45,6 @@ import { git } from "../../src/server/review/git";
 import { createStreamParser, type StreamState } from "../../src/server/review/stream";
 import { prepareTaskWorkspace } from "../../src/server/review/workspace";
 import { hostsOf, rulePath, type ShellSpec, shellEnv, shellGitConfig } from "../../src/server/tasks/shell";
-
 import { openWorktree } from "../../src/server/tasks/worktree";
 import { EFFORTS } from "../../src/shared/dto";
 import {
@@ -57,6 +57,7 @@ import {
   verifyResult,
 } from "../../src/shared/review";
 import { implementResult, interviewResult, type ShellMode, specResult } from "../../src/shared/task";
+import { advisorInInit, advisorStream, advisorTools, counts, namesModel } from "./advisor";
 
 // The facts that rebuild the env of a run read no GIT_CONFIG_GLOBAL, so any path stands in for the app folder.
 const NO_APP = shellGitConfig("app");
@@ -98,6 +99,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b32: 2,
   b33: 2,
   b34: 2,
+  gadv: 5,
 };
 const B9_MAX_TURNS = 8;
 const MAX_COST_USD = 0.6;
@@ -143,6 +145,7 @@ const CHECKS = [
   "B32",
   "B33",
   "B34",
+  "GADV",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
 
@@ -152,6 +155,9 @@ const DRY = argv.includes("--dry-run");
 const only = new Set<CheckId>();
 // B28: a Host alias of the user's ssh config. GATE_* never reaches a Claude child (childEnv).
 let sshAlias = process.env.GATE_SSH_ALIAS || undefined;
+// GADV: the advisor must rank at or above the main model, and Haiku cannot be an advisor.
+let advisorModel = "opus";
+let mainModel = "sonnet";
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i] ?? "";
   if (a === "--dry-run") continue;
@@ -159,9 +165,16 @@ for (let i = 0; i < argv.length; i++) {
     sshAlias = a === "--ssh-alias" ? (argv[++i] ?? "") : a.slice(12);
     continue;
   }
-  const v = a === "--only" ? argv[++i] : a.startsWith("--only=") ? a.slice(7) : /^b\d+[a-d]?$/i.test(a) ? a : undefined;
+  if (a === "--advisor" || a === "--main-model") {
+    const m = argv[++i] ?? "";
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(m)) fail(`${a} takes one model name.`);
+    if (a === "--advisor") advisorModel = m;
+    else mainModel = m;
+    continue;
+  }
+  const v = a === "--only" ? argv[++i] : a.startsWith("--only=") ? a.slice(7) : /^(b\d+[a-d]?|g-?adv)$/i.test(a) ? a : undefined;
   if (v === undefined) fail(`unknown argument: ${a}`);
-  for (const id of v.split(",").map((s) => s.trim().toUpperCase())) {
+  for (const id of v.split(",").map((s) => s.trim().toUpperCase().replaceAll("-", ""))) {
     const c = CHECKS.find((x) => x.toUpperCase() === id);
     if (!c) fail(`unknown check: ${id}. Use one of ${CHECKS.join(", ")}.`);
     only.add(c);
@@ -173,7 +186,9 @@ if (sshAlias !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sshAlias
 
 function fail(msg: string): never {
   console.error(msg);
-  console.error("usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--dry-run]");
+  console.error(
+    "usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--dry-run]",
+  );
   process.exit(2);
 }
 
@@ -299,7 +314,7 @@ const outputFiles = (r: Run | undefined) =>
 const short = (s: string, n = 160) => redact(s).replace(/\s+/g, " ").slice(0, n);
 
 // ---------- results ----------
-type Status = "PASS" | "FAIL" | "INFO" | "SKIPPED" | "DRY-RUN";
+type Status = "PASS" | "FAIL" | "INFO" | "UNKNOWN" | "SKIPPED" | "DRY-RUN";
 type Result = { check: string; status: Status; calls: number; evidence: string; data?: unknown };
 const results: Result[] = [];
 let claudeCalls = 0;
@@ -1439,13 +1454,13 @@ function rmRetry(d: string) {
 }
 
 // The app runner command (src/server/review/claude.ts prepare()) for a run with no review agents.
-function runnerArgs(app: string, schema: Record<string, unknown>) {
+function runnerArgs(app: string, schema: Record<string, unknown>, model = "haiku") {
   const agents = agentsFile(app, {
     "rl-main": {
       description: "Gate B11 and B12 main thread.",
       prompt: "You do the user task exactly. You change no files.",
       tools: ["Read", "Grep", "Glob", STUB_TOOL, "StructuredOutput"],
-      model: "haiku",
+      model,
     },
   });
   return [
@@ -3272,6 +3287,112 @@ async function b34() {
   push("B34", status, lines.join(" || "));
 }
 
+// ---------- GADV: the advisor (docs/plans/review-v2/advisor.md, Gate G-ADV) ----------
+// All runs use the app child env and the runner flag set. Its --tools and --allowedTools lists omit the advisor.
+// Docs: these variables remove the advisor, because it needs feature-flag fetching.
+const FLAG_BLOCKERS = ["DISABLE_TELEMETRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_DISABLE_FEATURE_FLAGS"];
+const GADV_SCHEMA = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false };
+const GADV_PLAIN = 'This is a format test. Read no files. Return answer = "gate gadv".';
+const GADV_HARD = [
+  "Read no files. Before you answer, consult the advisor tool once if it is available to you.",
+  "Question: a local web app runs one CLI child process per task. Each child can hang. Name the best way to stop a hung child and all of its own children on Windows and on Linux, in two sentences.",
+  "Return answer = your two sentences.",
+].join("\n");
+
+// Only the advisorModel key of the user settings file. The file can hold secrets.
+function userAdvisorSetting(): { line: string; model?: string } {
+  const p = join(configDir, "settings.json");
+  if (!existsSync(p)) return { line: "no user settings.json" };
+  try {
+    const v = (JSON.parse(readFileSync(p, "utf8")) as { advisorModel?: unknown }).advisorModel;
+    if (v === undefined) return { line: "advisorModel unset" };
+    return typeof v === "string" ? { line: `advisorModel=${short(v, 64)}`, model: v } : { line: `advisorModel=${typeof v}` };
+  } catch {
+    return { line: "settings.json not JSON" };
+  }
+}
+
+async function gadv() {
+  const { work, app, drop } = runnerFolder("gadv");
+  try {
+    const env = appChildEnv();
+    const base = runnerArgs(app, GADV_SCHEMA, mainModel);
+    const adv = ["--advisor", advisorModel];
+    const withTools = (args: string[]) =>
+      args.map((a, i) => (args[i - 1] === "--tools" || args[i - 1] === "--allowedTools" ? `${a},advisor` : a));
+    const run = (tag: string, args: string[], prompt: string, e = env) =>
+      runClaude(`gadv-${tag}`, args, prompt, work, { env: e, model: mainModel });
+    const a = await run("advisor", [...base, ...adv], GADV_HARD);
+    const none = await run("none", base, GADV_HARD);
+    const off = await run("envoff", [...base, ...adv], GADV_PLAIN, { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
+    const denied = await run("disallowed", [...base, ...adv, "--disallowedTools", "advisor"], GADV_PLAIN);
+    // Only when the init of run "advisor" lacks the advisor: then this run shows whether --tools can add it.
+    const listedA = advisorTools(a.init).length > 0;
+    const tools = listedA ? undefined : await run("tools", withTools([...base, ...adv]), GADV_PLAIN);
+    if (DRY) return dry("GADV", `advisor=${advisorModel} main=${mainModel}; ${userAdvisorSetting().line}`);
+
+    const blockers = FLAG_BLOCKERS.filter((k) => env[k] !== undefined);
+    const desc = (r: Run) =>
+      `exit=${r.exit}${r.timedOut ? " timed out" : ""} results=${r.results.map((e) => `${e.subtype}${e.is_error ? "!" : ""}`).join(",") || "none"}${
+        r.exit !== 0 && r.stderr ? ` stderr=${short(r.stderr, 200)}` : ""
+      }`;
+    const finished = (r: Run) => r.exit === 0 && r.results.some((e) => e.subtype === "success" && !e.is_error);
+    // PASS: the advisor is gone. FAIL: init still lists it. UNKNOWN: no init, or run "advisor" did not list it either.
+    const gone = (r: Run | undefined): Status => (!r?.init || !listedA ? "UNKNOWN" : advisorTools(r.init).length ? "FAIL" : "PASS");
+    const toolsOf = (r: Run | undefined) => advisorTools(r?.init).join(",") || "none";
+
+    push(
+      "GADV.1",
+      finished(a) ? "PASS" : "FAIL",
+      `--advisor ${advisorModel} with -p, --restricted, --agents/--agent rl-main (model ${mainModel}), --json-schema: ${desc(a)}; feature-flag blockers in the child env=${blockers.join(",") || "none"}`,
+    );
+    // A leaked advisor is the user's advisorModel, so modelUsage is checked for both names.
+    const user = userAdvisorSetting();
+    const names = [...new Set([advisorModel, user.model ?? ""])].filter((m) => m && m !== mainModel);
+    const streamFacts = (r: Run) => {
+      const s = advisorStream(r.events);
+      const billed = s.results.flatMap((x) => x.models).filter((k) => names.some((m) => namesModel(k, m)));
+      const used = s.advisorCalls + s.advisorResults + s.advisorIterations + s.resultAdvisorIterations + billed.length > 0;
+      const res = s.results.map((x) => `${x.subtype} cost=${x.costUsd ?? "none"} modelUsage=${x.models.join(",") || "none"}`).join("; ");
+      const line = `server_tool_use advisor=${s.advisorCalls} advisor_tool_result=${s.advisorResults} usage.iterations advisor_message: assistant=${s.advisorIterations} result=${s.resultAdvisorIterations}; advisor denials=${s.advisorDenials}; modelUsage names ${names.join("/")}=${billed.join(",") || "none"}; results: ${res || "none"}`;
+      return { s, used, line };
+    };
+    const fa = streamFacts(a);
+    const fn = streamFacts(none);
+    const leak = advisorInInit(none.init);
+    // FAIL: the run without --advisor shows the advisor. PASS needs an advisor call in run "advisor" as the control.
+    push(
+      "GADV.2",
+      leak.length || fn.used ? "FAIL" : none.init && fa.s.advisorCalls ? "PASS" : "UNKNOWN",
+      `no --advisor, app child env, advisor prompt: ${desc(none)}; init advisor keys=${leak.join("; ") || "none"}; ${fn.line}; control run advisor calls=${fa.s.advisorCalls}; user ${user.line}`,
+    );
+    push(
+      "GADV.3",
+      !a.init ? "UNKNOWN" : listedA ? "PASS" : "FAIL",
+      `--advisor: init advisor tools=${toolsOf(a)}; init advisor keys=${advisorInInit(a.init).join("; ") || "none"}; init.tools=${(a.init?.tools ?? []).join(",")}`,
+    );
+    push("GADV.4", gone(off), `--advisor and CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1: ${desc(off)}; init advisor tools=${toolsOf(off)}`);
+    push("GADV.5a", gone(denied), `--advisor and --disallowedTools advisor: ${desc(denied)}; init advisor tools=${toolsOf(denied)}`);
+    // PASS: --tools controls the advisor. FAIL: a --tools list without it still shows it.
+    const toolsListed = advisorTools(tools?.init).length > 0;
+    push(
+      "GADV.5b",
+      listedA ? "FAIL" : toolsListed ? "PASS" : "UNKNOWN",
+      listedA
+        ? "--tools and --allowedTools without advisor: init still lists it"
+        : `--tools without advisor: not listed; --tools and --allowedTools with advisor: ${tools ? desc(tools) : "not run"}; init advisor tools=${toolsOf(tools)}`,
+    );
+    push(
+      "GADV.6",
+      fa.s.advisorCalls ? "PASS" : "UNKNOWN",
+      `${fa.line}; events=${counts(fa.s.eventTypes)}; blocks=${counts(fa.s.blockTypes)}`,
+    );
+    push("GADV.7", "INFO", `claude --version=${cliVersion}`);
+  } finally {
+    drop();
+  }
+}
+
 // ---------- main ----------
 const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B1: b1,
@@ -3311,6 +3432,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B32: b32,
   B33: b33,
   B34: b34,
+  GADV: gadv,
 };
 {
   for (const id of selected) await check(id, RUNNERS[id]);

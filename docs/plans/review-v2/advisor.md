@@ -34,5 +34,5 @@ Status: design of 2026-11-11. Not built. Facts come from the Claude Code docs, n
 
 ## Packages
 
-1. WP-ADV0: a gate script in scripts/gate/claude-checks.ts that runs the six checks with the real CLI and prints sanitized facts. The user runs it. Facts go to integration-check.md.
+1. WP-ADV0: built. Gate GADV in scripts/gate/claude-checks.ts runs the six checks with the real CLI and prints sanitized facts. The user runs `bun scripts/gate/claude-checks.ts --only GADV`, then `bun scripts/gate/sanitize-claude.ts`. Options: `--advisor <model>` (default `opus`) and `--main-model <model>` (default `sonnet`). Facts go to integration-check.md, section "Advisor (Gate G-ADV, not run)".
 2. WP-ADV1: the profile field, the flag and env, the init allowlist, the parser, the help text, tests with the fake claude, screenshots.
