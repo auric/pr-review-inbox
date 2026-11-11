@@ -491,4 +491,22 @@ test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat",
   await fourth.blur();
   await expect(page.locator("#tasks-status")).toHaveText("Saved. New plans offer these prefixes.");
   expect(await saved()).toEqual(["bugfix/", "feature/", "hotfix/", "task/"]);
+
+  // limits.md decision 3: Run limits. A value out of bounds shows its sentence and saves nothing. A valid value saves by itself.
+  const limits = async () => ((await api(page, "GET", "/api/settings")).json as { runLimits: Record<string, number> }).runLimits;
+  const step = page.getByLabel("Task step time");
+  await expect(step).toHaveValue("20");
+  await expect(page.getByText("Default 20. From 5 to 120.", { exact: false })).toBeVisible();
+  await step.fill("121");
+  await step.blur();
+  await expect(page.getByText("Type a whole number from 5 to 120.")).toBeVisible();
+  await expect(page.locator("#limits-status")).toHaveText("A marked limit is not saved. Fix it to save it.");
+  expect((await limits()).stepMinutes).toBe(20);
+  await step.fill("45");
+  await step.blur();
+  await expect(page.locator("#limits-status")).toHaveText("Saved. New runs use these limits.");
+  expect(await limits()).toEqual({ stepMinutes: 45, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 });
+  await step.fill("20");
+  await step.blur();
+  await expect.poll(async () => (await limits()).stepMinutes).toBe(20);
 });

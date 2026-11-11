@@ -25,8 +25,13 @@ export type QuestionRow = {
 
 // The questions that the round may ask, with each recommended index inside its options. A choice with fewer than 2 options cannot be
 // a choice, so it becomes a text question. skipped: the coverage lines of what the app left out.
-export function checkQuestions(list: Question[], round: number): { questions: Question[]; skipped: string[] } {
-  const cap = INTERVIEW_QUESTIONS[Math.min(round, INTERVIEW_ROUNDS) - 1] ?? 0;
+// rounds: Settings > Tasks "Interview rounds". A round after the last asks nothing.
+export function checkQuestions(
+  list: Question[],
+  round: number,
+  rounds: number = INTERVIEW_ROUNDS,
+): { questions: Question[]; skipped: string[] } {
+  const cap = round > rounds ? 0 : (INTERVIEW_QUESTIONS[Math.min(round, INTERVIEW_QUESTIONS.length) - 1] ?? 0);
   const skipped =
     list.length > cap ? [`Round ${round} may ask ${cap} questions. The app left out ${list.length - cap} more questions.`] : [];
   const questions = list.slice(0, cap).map((q): Question => {
@@ -40,12 +45,13 @@ export function checkQuestions(list: Question[], round: number): { questions: Qu
 
 // spec.md section 6.2: the step after an interview result of round. "ask": the questions wait for the user. "spec": the spec run
 // starts. AC-B3: a result after the last round is stored, and the spec run starts anyway.
-export const afterInterview = (round: number, questions: number): "ask" | "spec" =>
-  questions > 0 && round <= INTERVIEW_ROUNDS ? "ask" : "spec";
+export const afterInterview = (round: number, questions: number, rounds: number = INTERVIEW_ROUNDS): "ask" | "spec" =>
+  questions > 0 && round <= rounds ? "ask" : "spec";
 
-// The run after the answers of round. done false: Claude said that the answers can raise new questions, so round 2 runs first.
-export const afterAnswers = (round: number, done: boolean): "interview" | "spec" =>
-  !done && round < INTERVIEW_ROUNDS ? "interview" : "spec";
+// The run after the answers of round. done false: Claude said that the answers can raise new questions, so the next round runs first
+// while rounds allows one.
+export const afterAnswers = (round: number, done: boolean, rounds: number = INTERVIEW_ROUNDS): "interview" | "spec" =>
+  !done && round < rounds ? "interview" : "spec";
 
 // "Use the recommended answers": the recommended option of a choice, else no answer, and Claude decides.
 export const recommendedAnswer = (q: Pick<QuestionRow, "kind" | "recommended">): Answer => ({

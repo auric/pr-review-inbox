@@ -54,10 +54,10 @@ describe("task-ID rules", () => {
     expect(r.tasks).toEqual([{ key: "ABC-10145", source: "title" }]);
   });
 
-  test("the result holds at most 10 IDs", async () => {
-    const text = Array.from({ length: 30 }, (_, i) => `ABC-${i + 1}`).join(" ");
+  test("the result holds at most 50 IDs", async () => {
+    const text = Array.from({ length: 51 }, (_, i) => `ABC-${i + 1}`).join(" ");
     const r = await runner.extract(DEFAULT_TASK_RULES, input(text, text, text));
-    expect(r.tasks.map((t) => t.key)).toEqual(Array.from({ length: 10 }, (_, i) => `ABC-${i + 1}`));
+    expect(r.tasks.map((t) => t.key)).toEqual(Array.from({ length: 50 }, (_, i) => `ABC-${i + 1}`));
   });
 
   test("inputs are capped", () => {

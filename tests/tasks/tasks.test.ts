@@ -49,6 +49,7 @@ import {
   type TaskIssueDto,
   type TaskRowDto,
 } from "../../src/shared/dto";
+import type { RunLimits } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, key, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { attachmentPath, ISSUE_KEY, JIRA_TOKEN, pngOf, startFakeJira } from "../support/fake-jira";
@@ -93,7 +94,7 @@ const until = async (f: () => boolean, ms = 20_000) => {
   }
 };
 
-async function setup(o: { config?: string; profiles?: ProfileInput[] } = {}) {
+async function setup(o: { config?: string; profiles?: ProfileInput[]; runLimits?: Partial<RunLimits> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rl-wpb2-"));
   dirs.push(root);
   const remote = await reviewRemote(root, { 2: "source" });
@@ -110,7 +111,13 @@ async function setup(o: { config?: string; profiles?: ProfileInput[] } = {}) {
     () => jira.stop(),
   );
   const dir = join(root, "data");
-  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, ...(o.profiles && { profiles: o.profiles }) });
+  writeConfig(dir, {
+    baseUrl: fake.url,
+    userSlug: FAKE_USER,
+    notifications: false,
+    ...(o.profiles && { profiles: o.profiles }),
+    ...(o.runLimits && { runLimits: o.runLimits }),
+  });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir, secrets, jiraSecrets: createSecrets(null, "jira-token") });
@@ -715,6 +722,37 @@ describe("answers (spec.md sections 6.2 and 6.11, AC-B2 and AC-B3)", () => {
       t = await h.recommend(t);
       expect(t.state).toBe("spec_draft");
       expect(h.runs(t.id).map((x) => x.kind)).toEqual(["interview", "interview", "spec"]);
+      // limits decision 3: without run limits in the settings, the spec run gets the default plan turns.
+      const spec = h.runCalls()[2]?.argv ?? [];
+      expect(spec[spec.indexOf("--max-turns") + 1]).toBe("80");
+    },
+    SLOW,
+  );
+
+  test(
+    "limits decision 3: Interview rounds 1 starts the spec run after the first answers, and Plan turns reaches its --max-turns",
+    async () => {
+      const h = await setup({ runLimits: { interviewRounds: 1, planTurns: 33 } });
+      await h.connectJira();
+      const question = {
+        id: "q1",
+        text: "One?",
+        why: "It changes the tests.",
+        kind: "choice",
+        options: [
+          { label: "Yes", detail: "Do it." },
+          { label: "No", detail: "Skip it." },
+        ],
+        recommended: 1,
+      };
+      h.scenario({ interview: { done: false, summary: "S.", questions: [question], unknowns: [], coverage: NO_COVERAGE } });
+      const c = await h.create();
+      await h.settle();
+      const t = await h.recommend(await h.get(c.body.id));
+      expect(t.state).toBe("spec_draft");
+      expect(h.runs(t.id).map((x) => x.kind)).toEqual(["interview", "spec"]);
+      const spec = h.runCalls()[1]?.argv ?? [];
+      expect(spec[spec.indexOf("--max-turns") + 1]).toBe("33");
     },
     SLOW,
   );

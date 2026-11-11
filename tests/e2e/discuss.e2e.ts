@@ -34,7 +34,7 @@ const WITHDRAWN = {
   reply: "",
   coverage: NO_COVERAGE,
 };
-const FULL = "This talk has reached 20 messages. Start a new review for a fresh look.";
+const FULL = "This talk has reached 100 messages. Start a new review for a fresh look.";
 
 const test = base.extend<{ seen: { urls: string[]; logs: string[] } }>({
   seen: [
@@ -128,7 +128,7 @@ test("t opens the talk with the focus in its box; Esc gives the focus back to th
   await expect(turns.first()).toContainText("Echo: the code still shows the problem.");
   await expect(box).toHaveValue("");
   await expect(box).toBeFocused();
-  await expect(talk.locator(`#talk-${id}-help`)).toHaveText("Ctrl+Enter asks. Esc closes the talk. 19 messages left.");
+  await expect(talk.locator(`#talk-${id}-help`)).toHaveText("Ctrl+Enter asks. Esc closes the talk. 99 messages left.");
   await expect(blocker(page).locator("[data-revision]")).toHaveCount(0);
   await expect(blocker(page)).toHaveAccessibleName(/^Draft from Claude\. Blocker\. flush\.ts:3\./);
 
@@ -306,12 +306,12 @@ test("a posted finding: More opens the talk under its thread; the answer makes a
   await expect(more).toBeFocused();
 });
 
-test("the cap: after 20 messages the box gives way to one sentence, and the server refuses the 21st", async ({ page }) => {
-  test.setTimeout(300_000);
+test("the cap: after 100 messages the box gives way to one sentence, and the server refuses the 101st", async ({ page }) => {
+  test.setTimeout(1_200_000);
   await control("claude", { stream: "tree" });
   await connect(page);
   const id = await reviewed(page);
-  // 20 turns through the app API, one run at a time. Each wait is bounded.
+  // 100 turns through the app API, one run at a time. Each wait is bounded.
   const last = await page.evaluate(async (item) => {
     const session = document.querySelector<HTMLMetaElement>('meta[name="rl-session"]')?.content ?? "";
     const headers = { "X-RL-Session": session, "Content-Type": "application/json" };
@@ -323,7 +323,7 @@ test("the cap: after 20 messages the box gives way to one sentence, and the serv
     const pause = () => new Promise((r) => setTimeout(r, 100));
     const post = (message: string) =>
       fetch(`/api/items/${item}/discuss`, { method: "POST", headers, body: JSON.stringify({ message, revision }) });
-    for (let i = 1; i <= 20; i++) {
+    for (let i = 1; i <= 100; i++) {
       let res = await post(`Message ${i}`);
       // The slot frees a moment after the run ends.
       for (let k = 0; res.status === 409 && k < 100; k++) {
@@ -337,20 +337,20 @@ test("the cap: after 20 messages the box gives way to one sentence, and the serv
         await pause();
       }
     }
-    let res = await post("Message 21");
+    let res = await post("Message 101");
     for (let k = 0; res.status === 409 && (await res.clone().text()).includes('"running"') && k < 100; k++) {
       await pause();
-      res = await post("Message 21");
+      res = await post("Message 101");
     }
-    return { status: res.status, body: await res.text(), at: 21 };
+    return { status: res.status, body: await res.text(), at: 101 };
   }, id);
-  expect(last).toEqual({ status: 409, body: JSON.stringify({ error: FULL }), at: 21 });
+  expect(last).toEqual({ status: 409, body: JSON.stringify({ error: FULL }), at: 101 });
 
   // The talk opens with the cap line instead of the box. Its first control takes the focus.
   const { talk, turns } = talkOf(page, id);
   await page.keyboard.press("2");
   await page.keyboard.press("t");
-  await expect(turns).toHaveCount(20);
+  await expect(turns).toHaveCount(100);
   await expect(talk.locator("[data-talk-full]")).toContainText(FULL);
   await expect(talk.getByRole("textbox")).toHaveCount(0);
   await expect(talk.locator("[data-primary]")).toHaveCount(0);

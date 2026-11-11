@@ -85,6 +85,17 @@ describe("round rules (spec.md section 6.2, AC-B3)", () => {
     expect(afterAnswers(1, true)).toBe("spec");
     expect(afterAnswers(2, false)).toBe("spec");
   });
+
+  test("limits decision 3: Interview rounds sets the last round; each round after round 1 asks at most 4", () => {
+    expect(afterAnswers(1, false, 1)).toBe("spec");
+    expect(afterAnswers(4, false, 5)).toBe("interview");
+    expect(afterAnswers(5, false, 5)).toBe("spec");
+    expect(afterInterview(5, 1, 5)).toBe("ask");
+    expect(afterInterview(2, 1, 1)).toBe("spec");
+    const list = Array.from({ length: 6 }, (_, i) => q({ id: `q${i}` }));
+    expect(checkQuestions(list, 4, 5).questions).toHaveLength(4);
+    expect(checkQuestions(list, 2, 1).questions).toHaveLength(0);
+  });
 });
 
 const row = (o: Partial<QuestionRow> = {}): QuestionRow => ({
@@ -188,7 +199,7 @@ describe("agents and stdin (spec.md section 6.6)", () => {
       "Find the code with the codegraph tools when the run has them, else with Grep.",
       "Ask only questions whose answer changes the design, the scope, or the tests.",
       "For a choice, give 2 to 5 options. Set recommended to the option that you advise, and say why in why.",
-      "Ask at most 8 questions. In round 2, ask at most 4, only about what the answers leave open.",
+      "Ask at most 8 questions. In each later round, ask at most 4, only about what the answers leave open.",
       "Set done to true when no question would change the plan.",
       "In summary, say in plain words what the task asks for and what you plan to build.",
       "In unknowns, list facts that only a small experiment can find out.",

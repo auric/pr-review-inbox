@@ -528,6 +528,16 @@ describe("safety", () => {
     }
   });
 
+  test("limits decision 3: a timeoutMs function gives the time limit of each run at its start", async () => {
+    let ms = 60 * 60_000;
+    const { runner, spec } = setup({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 }, { timeoutMs: () => ms });
+    ms = 300;
+    const started = Date.now();
+    const o = await runner.run(spec);
+    expect([o.status, o.text]).toEqual(["failed", "The run passed its time limit."]);
+    expect(Date.now() - started).toBeLessThan(4_000);
+  });
+
   test("cancel ends the CLI and its child, stops running events, and cleans up", async () => {
     const { runner, spec, work, projects, calls } = setup({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 });
     const seen: RunEvent[] = [];

@@ -663,6 +663,9 @@ describe("implement run", () => {
       expect(b.over).toBeNull();
       expect(stepTimeout(b)).toBe(5 * 60_000);
       expect(stepTimeout({ ...b, usedMs: 0 })).toBe(STEP_TIME_MS);
+      // limits decision 3: the step time of the settings, still capped by the time that the part has left.
+      expect(stepTimeout({ ...b, usedMs: 0 }, 45 * 60_000)).toBe(45 * 60_000);
+      expect(stepTimeout(b, 45 * 60_000)).toBe(5 * 60_000);
       add(6 * 60_000);
       const { started } = await s.step();
       expect(started).toEqual({

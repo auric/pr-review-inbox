@@ -505,7 +505,7 @@ describe("discuss runs", () => {
   );
 
   test(
-    "AC-D6 and the route checks: 404, 400, 409 for a question, a revision, a stale revision, 20 messages, and a busy slot; 200 for the same message",
+    "AC-D6 and the route checks: 404, 400, 409 for a question, a revision, a stale revision, 100 messages, and a busy slot; 200 for the same message",
     async () => {
       const h = await setup();
       const id = h.finding();
@@ -526,9 +526,14 @@ describe("discuss runs", () => {
       expect(stale.body.item.id).toBe(id);
       expect(h.runCalls()).toHaveLength(0);
 
-      for (let n = 0; n < 20; n++) h.stored(id);
-      expect(await h.discuss(id, "Message 21?")).toMatchObject({ status: 409, body: { error: DISCUSS_FULL } });
-      expect(DISCUSS_FULL).toBe("This talk has reached 20 messages. Start a new review for a fresh look.");
+      // limits.md decision 2: the 100th message starts a run, the 101st gets 409.
+      const edge = h.finding();
+      for (let n = 0; n < 99; n++) h.stored(edge);
+      const { run: hundredth } = await h.hang(edge, "Message 100?");
+      await h.cancel(hundredth);
+      for (let n = 0; n < 100; n++) h.stored(id);
+      expect(await h.discuss(id, "Message 101?")).toMatchObject({ status: 409, body: { error: DISCUSS_FULL } });
+      expect(DISCUSS_FULL).toBe("This talk has reached 100 messages. Start a new review for a fresh look.");
 
       const next = h.finding();
       const { run } = await h.hang(next, "Why?");

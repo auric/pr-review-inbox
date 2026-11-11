@@ -279,10 +279,10 @@ describe("Fix list", () => {
       text: "Claude is reviewing PROJ/repo #7. One review runs at a time. Propose fixes when it ends.",
     });
     expect(fixReason({ ...base, ticked: 0 })).toEqual({ kind: "none", text: "Tick at least one thread or finding." });
-    expect(fixReason({ ...base, rows: 30, ticked: 25 }).kind).toBe("ok");
-    expect(fixReason({ ...base, rows: 30, ticked: 26 })).toEqual({
+    expect(fixReason({ ...base, rows: 120, ticked: 100 }).kind).toBe("ok");
+    expect(fixReason({ ...base, rows: 120, ticked: 101 })).toEqual({
       kind: "many",
-      text: "Tick at most 25 threads and findings for one run. Now 26 are ticked.",
+      text: "Tick at most 100 threads and findings for one run. Now 101 are ticked.",
     });
     expect(fixReason(base)).toEqual({
       kind: "ok",
@@ -341,11 +341,11 @@ describe("Fix list", () => {
     expect(cardKey(found(12))).toBe("f12");
   });
 
-  test("reasons count threads and findings together: one run takes at most 25", () => {
-    expect(fixReason({ ...base, rows: 20 + 10, ticked: 20 + 5 }).kind).toBe("ok");
-    expect(fixReason({ ...base, rows: 20 + 10, ticked: 20 + 6 })).toEqual({
+  test("reasons count threads and findings together: one run takes at most 100", () => {
+    expect(fixReason({ ...base, rows: 95 + 10, ticked: 95 + 5 }).kind).toBe("ok");
+    expect(fixReason({ ...base, rows: 95 + 10, ticked: 95 + 6 })).toEqual({
       kind: "many",
-      text: "Tick at most 25 threads and findings for one run. Now 26 are ticked.",
+      text: "Tick at most 100 threads and findings for one run. Now 101 are ticked.",
     });
   });
 

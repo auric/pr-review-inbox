@@ -7,6 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { EFFORTS, type Effort, modelName } from "../../shared/dto";
 import type { RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
+import { RUN_LIMITS, RUN_TIME_MAX_MS } from "../../shared/task";
 import { log } from "../log";
 import { type ShellSpec, shellEnv, shellGitConfig, writeShellSettings } from "../tasks/shell";
 import { RUNTIME_ENV } from "./git";
@@ -25,7 +26,7 @@ export const NAME = /^[A-Za-z0-9_-]+$/;
 const STDERR_TAIL = 16_384;
 const EXEC_TIMEOUT_MS = 30_000;
 const DRAIN_TIMEOUT_MS = 5_000;
-export const RUN_TIMEOUT_MS = 60 * 60_000;
+export const RUN_TIMEOUT_MS = RUN_LIMITS.reviewMinutes.def * 60_000;
 // CreateProcess limits the Windows command line to 32,767 characters.
 const MAX_ARGV = 32_000;
 
@@ -118,7 +119,8 @@ export type RunOutcome = {
 export type RunnerOptions = {
   // The CLI argv prefix. Default: `claude` on PATH. Tests pass the fake CLI.
   command?: string[];
-  timeoutMs?: number;
+  // The time of a run without its own timeoutMs. A function is read at the start of each run. Default: RUN_TIMEOUT_MS.
+  timeoutMs?: number | (() => number);
 };
 
 // Gate B: ANTHROPIC_* selects API billing. CLAUDECODE, CLAUDE_PID, and CLAUDE_CODE_* mark a nested session. CLAUDE_CODE_GIT_BASH_PATH
@@ -607,7 +609,8 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       projectsDir = c.projectsDir;
       const { args, allowed, agents } = "implement" in spec ? implementArgs(spec) : "resume" in spec ? resumeArgs(spec) : prepare(spec);
       const own = "implement" in spec || "resume" in spec ? spec.timeoutMs : undefined;
-      const limit = Math.min(opts.timeoutMs ?? RUN_TIMEOUT_MS, own ?? RUN_TIMEOUT_MS);
+      const base = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
+      const limit = Math.min(own ?? base ?? RUN_TIMEOUT_MS, RUN_TIME_MAX_MS);
       const shell = "implement" in spec ? spec.shell : undefined;
       // implementArgs wrote this file beside shell.json.
       const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";

@@ -13,7 +13,7 @@ import {
   MAX_EDIT_TEXT,
   MAX_FIX_BYTES,
   MAX_FIX_EDITS,
-  MAX_REPLY_THREADS,
+  MAX_FIX_ITEMS,
 } from "./review";
 
 export const consultGroups = ["reviewers", "findings", "own", "resolved"] as const;
@@ -366,7 +366,7 @@ export const SESSION_FIX_RULES = [
   "- Give each path from the repository root, for example src/app.ts, not repo/src/app.ts.",
   "- Read the file in ./repo before you write old. Your memory of the code can be older than the head commit.",
   ...FIX_EDIT_RULES.map((r) => `- ${r}`),
-  `- Give notes for at most ${MAX_REPLY_THREADS} items and at most ${MAX_FIX_EDITS} edits. Each old and each new text holds at most ${MAX_EDIT_TEXT.toLocaleString("en-US")} characters. All old and new texts together hold at most ${MAX_FIX_BYTES.toLocaleString("en-US")} bytes.`,
+  `- Give notes for at most ${MAX_FIX_ITEMS} items and at most ${MAX_FIX_EDITS} edits. Each old and each new text holds at most ${MAX_EDIT_TEXT.toLocaleString("en-US")} characters. All old and new texts together hold at most ${MAX_FIX_BYTES.toLocaleString("en-US")} bytes.`,
   "- Answer only with the json block in the schema: put the JSON array of the answer into answers, and the notes and edits into fix.",
 ].join("\n");
 export const sessionPrompt = (text: string, mode: SessionMode = "judge") =>
@@ -385,7 +385,7 @@ const sessionTarget = {
   finding: z.number().int().min(1).optional().describe("For item F45: 45. Leave it out for a thread."),
 };
 const sessionFix = fixResult.extend({
-  threads: z.array(fixThread.extend(sessionTarget)).max(MAX_REPLY_THREADS).describe("One note per accepted item."),
+  threads: z.array(fixThread.extend(sessionTarget)).max(MAX_FIX_ITEMS).describe("One note per accepted item."),
   edits: z.array(fixEdit.extend(sessionTarget)).max(MAX_FIX_EDITS),
 });
 // --json-schema needs an object at the top. planAnswer checks each entry again, so the parse below keeps bad entries as rows.

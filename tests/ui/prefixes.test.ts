@@ -58,15 +58,16 @@ describe("Settings > Tasks branch prefixes", () => {
     expect(prefixProblems(changePrefixes(start(), { act: "edit", i: 0, text: "x".repeat(41) }))[0]).toBe("Invalid branch prefix.");
   });
 
-  test("the list keeps at least one prefix and at most 10", () => {
+  test("the list keeps at least one prefix and at most 50", () => {
     let l = start();
     for (let i = 0; i < 3; i++) l = changePrefixes(l, { act: "remove", i: 0 });
     expect(l).toEqual([]);
     expect(listProblem(l)).toBe("Keep at least one prefix.");
     expect(prefixesToSave(l)).toBeNull();
     let full = start();
-    for (let i = 0; i < 20; i++) full = changePrefixes(full, { act: "add" });
+    for (let i = 0; i < 60; i++) full = changePrefixes(full, { act: "add" });
     expect(full).toHaveLength(PREFIXES_MAX);
+    expect(PREFIXES_MAX).toBe(50);
     expect(listProblem(full)).toBeNull();
   });
 

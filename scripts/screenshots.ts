@@ -298,6 +298,11 @@ async function shots(browser: Browser) {
   await page.setViewportSize({ width: WIDE.width, height: 1800 });
   await rest();
   await save(page, "settings-commands", page.locator("section[aria-labelledby='h-commands']"));
+  // Settings > Tasks: the branch prefixes and the run limits (docs/plans/review-v2/limits.md decision 3).
+  await page.goto(`${BASE}/settings/tasks`);
+  await page.locator("#limit-stepMinutes").waitFor();
+  await rest();
+  await save(page, "settings-tasks", page.locator("section[aria-labelledby='h-tasks']"));
   await page.setViewportSize(WIDE);
 
   await page.goto(`${BASE}/settings/profiles`);

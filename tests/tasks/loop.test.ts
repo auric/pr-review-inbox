@@ -5,7 +5,7 @@
 // part. The fake CLI writes real files in the task worktree, a bun script stands in for the approved test command, and a temp bare
 // remote holds the repository. No test starts the real CLI, reaches a forge, or touches the user's clone or data folder.
 import type { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
 import { recoverTasks, taskDto, taskRow } from "../../src/server/tasks/tasks";
 import { openWorktree, status } from "../../src/server/tasks/worktree";
 import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
-import { DEFAULT_TEST_GLOBS, specResult, type TaskBlocked } from "../../src/shared/task";
+import { DEFAULT_TEST_GLOBS, type RunLimits, STEP_TIME_MS, specResult, type TaskBlocked } from "../../src/shared/task";
 import { rowStatus } from "../../src/shared/task-status";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { logOf, pngOf } from "../support/fake-jira";
@@ -162,6 +162,8 @@ type Setup = {
   argv?: string[];
   // Runs before each remote lookup, so a test can hold one.
   remote?: () => Promise<void>;
+  // Settings > Tasks run limits in config.json.
+  runLimits?: Partial<RunLimits>;
 };
 
 async function setup(o: Setup = {}) {
@@ -182,7 +184,13 @@ async function setup(o: Setup = {}) {
     },
   });
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: "http://127.0.0.1:9", userSlug: "u", notifications: false, ...(o.profiles && { profiles: o.profiles }) });
+  writeConfig(dataDir, {
+    baseUrl: "http://127.0.0.1:9",
+    userSlug: "u",
+    notifications: false,
+    ...(o.profiles && { profiles: o.profiles }),
+    ...(o.runLimits && { runLimits: o.runLimits }),
+  });
   const settings = createSettings({ dir: dataDir, secrets: createSecrets(null), jiraSecrets: createSecrets(null, "jira-token") });
   const live = createLive();
   const events: { event: string; data: unknown }[] = [];
@@ -610,6 +618,35 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.t().state).toBe("implementing");
       expect(s.part().state).toBe("implementing");
       expect(s.steps().some((x) => x.kind === "review")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "limits decision 3: Test-fix tries 1 blocks red after one fix step, and Task step time reaches each step run",
+    async () => {
+      const fix = { writes: [{ path: "repo/src/feature.ts", text: "export const feature = 'try 1';\n" }] };
+      const s = await setup({ mode: "late-red", seq: { "implement:fix": [fix] }, runLimits: { testFixTries: 1, stepMinutes: 7 } });
+      const runs = spyOn(s.jobs, "taskRun");
+      await s.build();
+      expect(s.steps().filter((x) => x.kind === "fix")).toHaveLength(1);
+      expect(s.blocked()?.text).toBe("Needs you: the tests of part 1 stay red after 1 try.");
+      const limits = runs.mock.calls.flatMap(([, start]) => (start.kind === "implement" && "timeoutMs" in start ? [start.timeoutMs] : []));
+      expect(limits.length).toBeGreaterThan(0);
+      expect(limits.every((ms) => ms === 7 * 60_000)).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "limits decision 3: without run limits in the settings, each step run gets the default step time",
+    async () => {
+      const s = await setup();
+      const runs = spyOn(s.jobs, "taskRun");
+      await s.build();
+      const limits = runs.mock.calls.flatMap(([, start]) => (start.kind === "implement" && "timeoutMs" in start ? [start.timeoutMs] : []));
+      expect(limits.length).toBeGreaterThan(0);
+      expect(limits.every((ms) => ms === STEP_TIME_MS)).toBe(true);
     },
     SLOW,
   );

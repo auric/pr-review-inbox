@@ -86,6 +86,7 @@ describe("settings API", () => {
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
+      runLimits: { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 },
     });
     expect(existsSync(dir)).toBe(false);
   });
@@ -115,6 +116,7 @@ describe("settings API", () => {
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
+      runLimits: { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 },
     };
     expect(await res.json()).toEqual(expected);
     expect(await s.get()).toEqual(expected);
@@ -200,7 +202,7 @@ describe("settings API", () => {
     for (const [bad, error] of [
       [[], "Keep at least one prefix."],
       [["a/", "a/"], "This prefix is already in the list."],
-      [Array.from({ length: 11 }, (_, i) => `p${i}/`), "At most 10 prefixes."],
+      [Array.from({ length: 51 }, (_, i) => `p${i}/`), "At most 50 prefixes."],
       [["bad.."], "Invalid branch prefix."],
       [[""], "Invalid branch prefix."],
       [[`${"x".repeat(40)}/`], "Invalid branch prefix."],
@@ -211,6 +213,54 @@ describe("settings API", () => {
     }
     s.settings.close();
     expect((await setup().get()).taskBranchPrefixes).toEqual(list);
+  });
+
+  test("limits decision 2: the branch prefix list takes 50 prefixes", async () => {
+    const s = setup();
+    expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
+    const list = Array.from({ length: 50 }, (_, i) => `p${i}/`);
+    const res = await s.put({ baseUrl: fake.url, taskBranchPrefixes: list });
+    expect(res.status).toBe(200);
+    expect((await res.json()).taskBranchPrefixes).toEqual(list);
+  });
+
+  test("limits decision 3: the run limits save key by key, persist, refuse a value out of bounds, and default when unset", async () => {
+    const s = setup();
+    expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
+    const def = { stepMinutes: 20, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80 };
+    expect((await s.get()).runLimits).toEqual(def);
+    expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toBeUndefined();
+    let res = await s.put({ baseUrl: fake.url, runLimits: { stepMinutes: 120, planTurns: 500 } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).runLimits).toEqual({ ...def, stepMinutes: 120, planTurns: 500 });
+    // A second PUT keeps the other stored keys. A PUT without runLimits keeps all.
+    res = await s.put({ baseUrl: fake.url, runLimits: { reviewMinutes: 10, interviewRounds: 5, testFixTries: 1 } });
+    const all = { stepMinutes: 120, reviewMinutes: 10, interviewRounds: 5, testFixTries: 1, planTurns: 500 };
+    expect((await res.json()).runLimits).toEqual(all);
+    expect((await s.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
+    expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toEqual(all);
+    for (const [bad, error] of [
+      [{ stepMinutes: 4 }, "Type a whole number from 5 to 120."],
+      [{ stepMinutes: 121 }, "Type a whole number from 5 to 120."],
+      [{ reviewMinutes: 241 }, "Type a whole number from 10 to 240."],
+      [{ interviewRounds: 0 }, "Type a whole number from 1 to 5."],
+      [{ interviewRounds: 6 }, "Type a whole number from 1 to 5."],
+      [{ testFixTries: 11 }, "Type a whole number from 1 to 10."],
+      [{ planTurns: 501 }, "Type a whole number from 20 to 500."],
+      [{ planTurns: 80.5 }, "Type a whole number from 20 to 500."],
+    ] as const) {
+      const r = await s.put({ baseUrl: fake.url, runLimits: bad });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toEqual({ error });
+    }
+    s.settings.close();
+    const again = setup();
+    expect((await again.get()).runLimits).toEqual(all);
+    again.settings.close();
+    // A broken stored value reads as unset, so the defaults apply.
+    const file = join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), runLimits: { stepMinutes: 9999 } }));
+    expect((await setup().get()).runLimits).toEqual(def);
   });
 
   test("markSeverity saves without a Bitbucket request and persists across a restart", async () => {

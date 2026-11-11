@@ -70,12 +70,13 @@ describe("the prefix list (spec.md section 6.16.1)", () => {
       expect(branchPrefix.safeParse(bad).error?.issues[0]?.message).toBe("Invalid branch prefix.");
   });
 
-  test("the list holds 1 to 10 unique prefixes", () => {
+  test("the list holds 1 to 50 unique prefixes", () => {
     expect(branchPrefixList.safeParse(["feature/", "bugfix/", "hotfix/"]).success).toBe(true);
     const msg = (l: string[]) => branchPrefixList.safeParse(l).error?.issues[0]?.message;
     expect(msg([])).toBe("Keep at least one prefix.");
     expect(msg(["a/", "a/"])).toBe("This prefix is already in the list.");
-    expect(msg(Array.from({ length: 11 }, (_, i) => `p${i}/`))).toBe("At most 10 prefixes.");
+    expect(branchPrefixList.safeParse(Array.from({ length: 50 }, (_, i) => `p${i}/`)).success).toBe(true);
+    expect(msg(Array.from({ length: 51 }, (_, i) => `p${i}/`))).toBe("At most 50 prefixes.");
     expect(msg(["ok/", "bad.."])).toBe("Invalid branch prefix.");
   });
 });

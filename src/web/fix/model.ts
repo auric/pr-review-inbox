@@ -4,7 +4,7 @@
 // Pure Fix it rules (plan r3 UI-FIX, docs/plans/fix-ux.md). No DOM access, so bun test runs them directly.
 import type { FixCommitDto, FixDto, FixEditDto, ReviewItemDto } from "../../shared/dto";
 import { type FixNote, type FixTarget, fixState, names, plural, shortHash, snippet, WHY } from "../../shared/outcome";
-import { type AnchoredFinding, type FixWhy, type Judgement, MAX_REPLY_THREADS, type ReplyPayload } from "../../shared/review";
+import { type AnchoredFinding, type FixWhy, type Judgement, MAX_FIX_ITEMS, type ReplyPayload } from "../../shared/review";
 import { ordered, type ThreadModel } from "../pr/threads";
 import { lineText } from "../review/model";
 
@@ -191,8 +191,8 @@ export function fixReason(o: {
     };
   if (o.busy) return { kind: "busy", text: `${o.busy} Propose fixes when it ends.` };
   if (!o.ticked) return { kind: "none", text: "Tick at least one thread or finding." };
-  if (o.ticked > MAX_REPLY_THREADS)
-    return { kind: "many", text: `Tick at most ${MAX_REPLY_THREADS} threads and findings for one run. Now ${o.ticked} are ticked.` };
+  if (o.ticked > MAX_FIX_ITEMS)
+    return { kind: "many", text: `Tick at most ${MAX_FIX_ITEMS} threads and findings for one run. Now ${o.ticked} are ticked.` };
   return {
     kind: "ok",
     text: `A read-only run checks each point first, then proposes exact edits. You review each edit before Apply. Nothing posts. Profile: ${o.profile.name}.`,

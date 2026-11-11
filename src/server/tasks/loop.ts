@@ -26,7 +26,9 @@ import {
   limitText,
   type PartState,
   RESOLVE_STOPS,
+  RUN_LIMITS,
   refusedLine,
+  runLimitsOf,
   SHELL_WARNING_FIRST,
   type StartMode,
   type StepMode,
@@ -165,8 +167,8 @@ import {
   wtGit,
 } from "./worktree";
 
-// spec.md section 0.
-export const TEST_FIX_TRIES = 3;
+// spec.md section 0. The default of Settings > Tasks "Test-fix tries".
+export const TEST_FIX_TRIES = RUN_LIMITS.testFixTries.def;
 export const REVIEW_FIX_TRIES = 2;
 // spec.md section 6.1, Counting: the excluded globs when the repository sets none.
 export const LOCK_GLOBS = ["bun.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock", "*.lock"];
@@ -812,6 +814,7 @@ export function createLoop(opts: LoopOptions) {
         live: () => isLive(c),
         extra: beside(c),
         ...(shell && { shell }),
+        stepMs: runLimitsOf(settings.config()?.runLimits).stepMinutes * 60_000,
         now,
       });
       if (s.status === 409 && "conflict" in s) {
@@ -1084,13 +1087,14 @@ export function createLoop(opts: LoopOptions) {
     await checks(c, "base", CHECK_KINDS, undefined, false, true);
   }
 
-  // Red checks start at most TEST_FIX_TRIES fix steps (AC-B11). scope: the scoped check of one task instead of all approved checks.
+  // Red checks start at most "Test-fix tries" fix steps (AC-B11). The value is read when the checks first go red. scope: the scoped check of one task instead of all approved checks.
   // check-fix.md items 1 and 3: red checks that all failed on the part base too stop once per item, and a fix step that changes no file
   // stops too. The base run tells only that the same argv failed, not why: a base with no test fails too. So Continue lets the fixes run.
   async function greenOrFix(c: Ctx, item: string, allow: string[], step: (attempt: number) => ContextFile, scope?: Scope) {
     const run = () => checks(c, item, scope ? ["test"] : CHECK_KINDS, scope);
     const base = baselineOf(c);
     let k = await run();
+    const fixTries = runLimitsOf(settings.config()?.runLimits).testFixTries;
     for (let tries = 0; !k.green; tries++) {
       const failed = k.commands.filter((x) => x.exit !== 0);
       const old = failed.filter((x) => {
@@ -1107,11 +1111,11 @@ export function createLoop(opts: LoopOptions) {
           text: `Needs you: ${list} of part ${c.part.ord} also failed before this task. See why. Continue lets Claude try to fix it.`,
         });
       }
-      if (tries >= TEST_FIX_TRIES)
+      if (tries >= fixTries)
         block(c, {
           kind: "red",
           step: k.step,
-          text: `Needs you: the tests of part ${c.part.ord} stay red after ${TEST_FIX_TRIES} tries.`,
+          text: `Needs you: the tests of part ${c.part.ord} stay red after ${fixTries} ${fixTries === 1 ? "try" : "tries"}.`,
         });
       const r = await claude(c, "fix", item, { allow, step, failure: checkFailure(k, base) });
       if (r.unchanged)

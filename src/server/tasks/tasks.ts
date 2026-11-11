@@ -58,10 +58,10 @@ import {
   PART_TIME_MIN,
   type PartState,
   RUN_CANCELLED,
+  runLimitsOf,
   SHELL_WARNING_FIRST,
   type ShellMode,
   type SizeSource,
-  SPEC_TURNS,
   type SpecResult,
   type StartMode,
   type StepDetail,
@@ -1462,6 +1462,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     const { files, attachments } = taskFiles(db, t);
     const answers = round > 1 ? answersFile(interviewRows(db, t.id), interviewOf(db, t.id)) : null;
     const max = INTERVIEW_QUESTIONS[Math.min(round, INTERVIEW_QUESTIONS.length) - 1] ?? 0;
+    const rounds = runLimitsOf(settings.config()?.runLimits).interviewRounds;
     return {
       task: t.id,
       kind: "interview",
@@ -1494,7 +1495,7 @@ export function createTaskService(opts: TaskServiceOptions) {
         }),
       judge: (o, _ws, servers, gaps) =>
         judgeTask(o, interviewResult, "interview", servers, gaps, async (r) => {
-          const c = checkQuestions(r.questions, round);
+          const c = checkQuestions(r.questions, round, rounds);
           const answer: TaskInterviewDto = { round, summary: r.summary, unknowns: r.unknowns, done: r.done };
           return { result: { ...r, questions: c.questions }, skipped: c.skipped, answer: JSON.stringify(answer) };
         }),
@@ -1522,7 +1523,7 @@ export function createTaskService(opts: TaskServiceOptions) {
             step,
             now: now(),
           });
-        if (afterInterview(round, r.questions.length) === "ask") {
+        if (afterInterview(round, r.questions.length, rounds) === "ask") {
           const a = advance(d, { task: t.id, version: cur.version }, { type: "ASKED" }, {}, now());
           if (a.status !== 200) return undefined;
           const n = r.questions.length;
@@ -1621,7 +1622,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       files: untrusted,
       attachments,
       own: answers ? [answers] : [],
-      maxTurns: SPEC_TURNS,
+      maxTurns: runLimitsOf(settings.config()?.runLimits).planTurns,
       schema: specJsonSchema(),
       agent: specAgent(p, budget, process.platform, subtasks),
       explorer: true,
@@ -1997,7 +1998,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     if (busy) return busyResult(busy);
     const round = (open[0] as QuestionRow).round;
     const last = interviewOf(db, id);
-    const next = afterAnswers(round, last?.round === round ? last.done : true);
+    const next = afterAnswers(round, last?.round === round ? last.done : true, runLimitsOf(settings.config()?.runLimits).interviewRounds);
     try {
       db.transaction(() => {
         const at = now();

@@ -13,8 +13,8 @@ export const DEFAULT_TASK_RULES: TaskRule[] = (["branch", "title", "description"
   pattern: String.raw`[A-Z][A-Z0-9]+-\d+`,
 }));
 
-// D9: the union of all rules, in rule order, deduped, at most 10.
-export const MAX_TASKS = 10;
+// D9: the union of all rules, in rule order, deduped, at most MAX_TASKS (limits.md decision 2).
+export const MAX_TASKS = 50;
 export const BUDGET_MS = 100;
 // A timed-out PR runs once more on a fresh worker with this budget. Only a second timeout marks the rule.
 export const RETRY_BUDGET_MS = 500;

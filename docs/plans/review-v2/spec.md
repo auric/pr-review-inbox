@@ -14,7 +14,7 @@ Status: decided, 2026-10-22. design.md gives the reasons, the alternatives, and 
 | REVIEWER_MIN_LINES, REVIEWER_MIN_FILES | 1,200 changed lines, 30 files | src/server/review/catalog.ts |
 | VERIFY_SPLIT, VERIFY_BATCH | 12 candidates, 6 per rl-verifier call | catalog.ts |
 | VERIFY_MAX_TURNS | min(profile.maxTurns, 10 + 3 × candidates), at least 12 | jobs.ts |
-| MAX_DISCUSS_MESSAGES | 20 user messages per finding | src/shared/review.ts |
+| MAX_DISCUSS_MESSAGES | 100 user messages per finding (limits.md decision 2) | src/shared/review.ts |
 | MAX_QUESTION (reused) | 4,000 characters per message | review.ts:324 |
 | MAX_DISCUSS_ANSWER | 8,000 characters | review.ts |
 | DISCUSS_MAX_TURNS | 40 | jobs.ts |
@@ -26,13 +26,13 @@ Status: decided, 2026-10-22. design.md gives the reasons, the alternatives, and 
 | LINE_BUDGET | 400 changed lines per PR, lock files excluded | repo_task_settings default |
 | MAX_OPEN_CODE_PRS | 2 | repo_task_settings default |
 | APPROVALS_NEEDED | 1 | repo_task_settings default |
-| TEST_FIX_TRIES, REVIEW_FIX_TRIES | 3, 2 | src/server/tasks/loop.ts |
-| STEP_TIME | 20 min per Claude step | loop.ts |
-| STEP_TURNS | interview 30, spec 80, tests 60, implement 80, fix 40, replan 30, plan check 40 (section 6.22) | loop.ts |
+| TEST_FIX_TRIES, REVIEW_FIX_TRIES | 3 (default of Settings > Tasks "Test-fix tries", 1 to 10), 2 | src/server/tasks/loop.ts |
+| STEP_TIME | 20 min per Claude step (default of Settings > Tasks "Task step time", 5 to 120 min) | src/shared/task.ts RUN_LIMITS |
+| STEP_TURNS | interview 30, spec 80 (default of Settings > Tasks "Plan turns", 20 to 500), tests 60, implement 80, fix 40, replan 30, plan check 40 (section 6.22) | loop.ts |
 | PART_TIME | 120 min of Claude steps per part | task settings default |
 | CHECK_TIMEOUT | 10 min per command | repo_task_settings default |
 | OUTPUT_TAIL | 64 KB stored per command, 32 KB sent to Claude | loop.ts |
-| INTERVIEW_ROUNDS | 2; at most 8 questions, then at most 4 | src/shared/task.ts |
+| INTERVIEW_ROUNDS | 2 (default of Settings > Tasks "Interview rounds", 1 to 5); at most 8 questions, then at most 4 in each later round | src/shared/task.ts |
 
 ## 1. Part 1: Review quality
 
@@ -342,7 +342,7 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 
 ### 2.3 Route
 
-- POST /api/items/:id/discuss, body `{ message: z.string().trim().min(1).max(MAX_QUESTION), revision: version }`. 404 for an unknown item. 409 for a non-finding item, for a revision item, for a finding with 20 messages, and when the run slot is busy (with the running run). 202 with the run.
+- POST /api/items/:id/discuss, body `{ message: z.string().trim().min(1).max(MAX_QUESTION), revision: version }`. 404 for an unknown item. 409 for a non-finding item, for a revision item, for a finding with 100 messages, and when the run slot is busy (with the running run). 202 with the run.
 - GET /api/items/:id/discuss returns DiscussTurnDto[] {run, status, message, answer, verdict, reason, revision, at, error}.
 - The run key: `pr:discuss:<item>:<hash of message>:<source>:<target>`. A second POST with the same message gets the running run.
 
@@ -404,7 +404,7 @@ discuss agent prompt:
 3. AC-D3. Verdict revised on an edited, accepted finding stores a revision. The finding text stays byte for byte. Use the new text makes the revision the finding (status new). Keep mine drops it.
 4. AC-D4. Verdict withdrawn discards the finding with the mark. Restore returns the earlier status and keeps the mark.
 5. AC-D5. A finding edited during the run gets no change. The turn shows the "changed while Claude worked" note.
-6. AC-D6. The 21st message gets 409 with "This talk has reached 20 messages. Start a new review for a fresh look."
+6. AC-D6. The 101st message gets 409 with "This talk has reached 100 messages. Start a new review for a fresh look."
 7. AC-D7. A posted finding with verdict withdrawn and a reply makes one unaccepted reply draft with origin discuss and a resolve tick on a thread the user started. Nothing posts.
 8. AC-D8. A finding revision never appears in Ready to post, the post plan, history.md, or the Drafts counts.
 9. AC-D9. E2E: t on a focused draft opens the chat with focus in the box. Esc closes it and the focus returns to the link.
@@ -1255,7 +1255,7 @@ Interview agent:
 | "Read the code that the task touches before you ask. Do not ask what the code or the task already answers." | Fewer, better questions. |
 | "Ask only questions whose answer changes the design, the scope, or the tests." | Focus. |
 | "For a choice, give 2 to 5 options. Set recommended to the option that you advise, and say why in why." | UX rule 5. |
-| "Ask at most 8 questions. In round 2, ask at most 4, only about what the answers leave open." | Short interview. |
+| "Ask at most 8 questions. In each later round, ask at most 4, only about what the answers leave open." | Short interview. |
 | "Set done to true when no question would change the plan." | Stop rule. |
 | "In summary, say in plain words what the task asks for and what you plan to build." | The user checks the understanding. |
 | "In unknowns, list facts that only a small experiment can find out." | Spike input. |
@@ -1575,6 +1575,9 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 36. AC-B179. Each implement-kind step (tests, implement, fix, instruct, resolve) in each shell mode gets `--agents <run folder>/app/agents.json --agent rl-main` and Agent in `--tools`. Its rl-main has an empty prompt and the tools `Agent(rl-explorer)`, the step tools, the picked MCP tools, and StructuredOutput. The interview and the spec run add `Agent(rl-explorer)` to their rl-main tools. Each of these prompts holds the rl-explorer line (tests/review/runner.test.ts, tests/tasks/implement.test.ts, tests/tasks/tasks.test.ts).
 37. AC-B180. In each shell mode, the rl-explorer definition has the tools Read, Grep, and Glob only. It disallows Bash, PowerShell, Write, Edit, NotebookEdit, and Agent. It has the reviewer model of the task profile. The agents file is outside the cwd. A run without rl-explorer, as the plan check, gets no Agent tool (tests/review/runner.test.ts, tests/tasks/tasks.test.ts).
 38. AC-B181. The init check of a step with rl-explorer accepts Agent and Task. It still stops the step for each other tool outside its list. A step without rl-explorer stops on Task. The run log shows the calls of an rl-explorer call nested under it, with no built-in mark (tests/review/runner.test.ts).
+39. AC-B182. limits.md decision 2: a finding talk takes 100 messages and refuses the 101st. A Fix run takes 100 threads and findings together and refuses 101. A reply draft run keeps 25. Settings > Tasks takes 50 branch prefixes. A plan takes 30 parts, and its estimate and a changed plan take 30 too. A sub-task plan takes 20 open PRs at once. Task ID rules find 50 keys per PR (tests/shared/limits.test.ts, tests/review/discuss.test.ts, tests/review/fix.test.ts, tests/tasks/rules.test.ts, tests/settings.test.ts).
+40. AC-B183. limits.md decision 3: Settings > Tasks "Run limits" has Task step time (default 20 min, 5 to 120), Review run time (default 60 min, 10 to 240), Interview rounds (default 2, 1 to 5), Test-fix tries (default 3, 1 to 10), and Plan turns (default 80, 20 to 500). config.json keeps only the changed keys under runLimits. An unset or broken key gives the default. A value out of bounds gets 400 with "Type a whole number from <min> to <max>." (tests/settings.test.ts).
+41. AC-B184. The server reads each run limit when a run starts. A task step gets the step time, capped by the time that the part has left. Each other Claude run gets the review run time. RUN_TIME_MAX_MS (240 min) caps every Claude process. The interview stops after the set rounds; each round after round 1 asks at most 4 questions. The spec run gets the plan turns as --max-turns. Red checks start at most the set test-fix tries (tests/review/runner.test.ts, tests/tasks/loop.test.ts, tests/tasks/tasks.test.ts, tests/tasks/interview.test.ts, tests/tasks/implement.test.ts).
 
 Section 6.16.13 holds AC-B24 to AC-B45. Section 6.17.5 holds AC-B46 to AC-B51. Section 6.18.8 holds AC-B52 to AC-B65, AC-B159, and AC-B160.
 
@@ -1585,7 +1588,7 @@ Constants: BRANCH_MAX = 100 (characters of the whole branch name, with a suffix)
 #### 6.16.1 Branch prefix
 
 - Settings > Tasks holds one global list "Branch prefixes" in config.json (settingsInput key `taskBranchPrefixes`): 1 to PREFIXES_MAX entries, each 1 to PREFIX_MAX characters, unique, and valid when `<prefix>x` passes refOk (src/shared/dto.ts, git-check-ref-format). Default: `["feature/", "bugfix/", "hotfix/"]`.
-- Settings UI: one row per prefix with "Move up", "Move down", and "Remove", then "Add a prefix". The hint says "The first prefix starts selected on the plan screen." Errors: "Invalid branch prefix.", "This prefix is already in the list.", "Keep at least one prefix.", "At most 10 prefixes."
+- Settings UI: one row per prefix with "Move up", "Move down", and "Remove", then "Add a prefix". The hint says "The first prefix starts selected on the plan screen." Errors: "Invalid branch prefix.", "This prefix is already in the list.", "Keep at least one prefix.", "At most 50 prefixes."
 - Plan screen: the group "Branch type" shows each prefix as a chip (radio semantics, arrow keys move) plus "Other…". The first chip starts selected. "Other…" shows the text field "Prefix" with the same rule and the error "Invalid branch prefix.". The pick goes into task.settings_json.branchPrefix with the plan approval. A task without a pick (created before this change) uses its stored part branches unchanged.
 - Migration: the per-repository prefix is dropped. repo_task_settings.branch_prefix stays in the table, and no code reads or writes it. PUT /api/repos/:project/:repo/task-settings no longer takes branchPrefix (zod strips it). "Change the prefix" and useSaveBranchPrefix go away.
 
@@ -1749,7 +1752,7 @@ POST /api/tasks/:id/parts/:part/pr stays for a task with one repository. Every m
 
 #### 6.16.13 Acceptance criteria
 
-1. AC-B24. Settings > Tasks keeps a list of 1 to 10 prefixes with the default `feature/`, `bugfix/`, `hotfix/`; Move up and Move down change the order; an invalid or duplicate prefix shows its sentence and saves nothing.
+1. AC-B24. Settings > Tasks keeps a list of 1 to 50 prefixes with the default `feature/`, `bugfix/`, `hotfix/`; Move up and Move down change the order; an invalid or duplicate prefix shows its sentence and saves nothing.
 2. AC-B25. The plan screen shows the prefixes as chips with the first one selected, plus "Other…" with the prefix check. The planned name changes as the user picks.
 3. AC-B26. "[server][linux] M3: Crash capture and dump generation on Linux" with ABC-123 and `feature/` gives `feature/ABC-123-server-linux-m3-crash-capture-and-dump-generation-on-linux`. A summary that gives a name over 100 characters is cut at a hyphen, and the name with `-99` stays within 100 characters (unit test).
 4. AC-B27. A stored per-repository prefix changes nothing: a new task starts with the first chip.
@@ -2083,7 +2086,7 @@ The plan is one spec run for the parent. So that run gets the ticked attachments
 
 #### 6.20.4 The plan (spec run)
 
-- One spec run for the parent. The spec result adds per part: `keys` (sub-task keys), `start` ("base" | "stack" | "merge"), `after` (a part number such as "2", or the key of an adopted sub-task), and `startReason` (one line). It adds `maxOpen` (1 to 5) and `maxOpenReason` (one line).
+- One spec run for the parent. The spec result adds per part: `keys` (sub-task keys), `start` ("base" | "stack" | "merge"), `after` (a part number such as "2", or the key of an adopted sub-task), and `startReason` (one line). It adds `maxOpen` (1 to MAX_OPEN_CAP = 20) and `maxOpenReason` (one line).
 - Prompt lines (catalog.ts, spec agent, only with subtasks.md):
   - "./context/subtasks.md lists the sub-tasks with their status, text, links, and the branches and PRs that exist."
   - "Plan one part per sub-task that is not done and has no open PR. Name its key in keys."
@@ -2093,7 +2096,7 @@ The plan is one spec run for the parent. So that run gets the ticked attachments
   - "Set start to stack when the part needs code of a sub-task that is not merged, and to merge when it needs that sub-task merged first. Set after to that part number or key. In startReason, name the code or the Jira link that shows the need."
   - "When you are not sure, set start to stack and after to the part before it in Jira order."
   - "A Jira link such as is-blocked-by is a fact from the team. Follow it unless the code shows that it is wrong, and then say why."
-  - "Propose maxOpen from 1 to 5. In maxOpenReason, say in one line how many parts can run side by side, how big they are, and how long reviews take in ./context/pr-history.md."
+  - "Propose maxOpen from 1 to 20. In maxOpenReason, say in one line how many parts can run side by side, how big they are, and how long reviews take in ./context/pr-history.md."
 - context/pr-history.md holds the open PR count of the user in the repository (stored rows). It also holds the median open-to-merge time of the user's newest merged PRs. One GET of `.../pull-requests?state=MERGED&order=NEWEST&limit=50` gives them: closedDate minus createdDate, own PRs only. Without closedDate, the line says "No review time data." (design.md Q72).
 - App checks of the result. They use no guess. A failed check gives a coverage line and a plan screen line:
   - keys: open sub-tasks of the parent that have no tracked PR.
@@ -2101,7 +2104,7 @@ The plan is one spec run for the parent. So that run gets the ticked attachments
   - Unsure parts (user decision of 2026-11-02): only start base with a startReason marks a part as independent. A base start without a reason, a stack or merge start without after, and an after that names no part make the part build on the part before it: start stack, after that part. "Before it" is the nearest earlier part in Jira order (the order of its first key, then the part number) whose own after links do not lead back to it, so the plan gets no cycle. With no such part, the part starts from the base. The notes: "ABC-13 has no reason to start from develop. It builds on ABC-12.", "ABC-13 names no part to build on. It builds on ABC-12.", and "ABC-13 builds on 9, which is no part of the plan. It builds on ABC-12." The plan screen shows the result prefilled, and the user can change it.
   - stack or merge after a done sub-task: start becomes base, with "ABC-13 needs ABC-12, which is done. It starts from develop."
   - A sub-task without a part: "Claude planned no PR for ABC-14." The user can still approve.
-  - maxOpen outside 1 to 5, or absent: MAX_OPEN_DEFAULT.
+  - maxOpen outside 1 to 20, or absent: MAX_OPEN_DEFAULT.
 - task.size is small. Each part is one PR with its own plan.md and its code, as a small task (design.md Q65). There is no spec PR. The size rules of section 6.1 do not apply to the task. The line budget applies to each part (sizeCheck). task.subtasks = 1 tells the UI and the loop.
 - "Ask Claude again" (POST plan-again) starts the spec run again with the user's text as an answer line (section 6.12).
 
@@ -2110,7 +2113,7 @@ The plan is one spec run for the parent. So that run gets the ticked attachments
 - Status: "The plan is ready: 4 sub-tasks, 2 to build, about 600 changed lines." Primary "Approve the plan". More: Edit, Ask Claude again, Stop. No size control.
 - Section "Sub-tasks", one row per sub-task in Jira order: "ABC-12 Add the event generator · Jira: Open · about 200 lines". A "Starts:" select offers "From develop" (base), "On top of <part or tracked PR>" (stack), and "After <part or tracked PR> merges" (merge). A second select picks the other row. Claude's line stands under it: "Claude: it calls the handler of ABC-11 (link: is blocked by ABC-11)."
 - Split: "ABC-13 in 2 PRs. Claude: it is about 700 lines." Combine: "ABC-15 and ABC-16 in one PR. Claude: both change config.ts."
-- "Open PRs at once" number field (1 to 5) with "Claude proposes 3: two sub-tasks can run side by side, and your PRs take about 2 days to merge."
+- "Open PRs at once" number field (1 to 20) with "Claude proposes 3: two sub-tasks can run side by side, and your PRs take about 2 days to merge."
 - "Parts that build at once" number field (1 to BUILDS_AT_ONCE_CAP, prefilled with the stored value or BUILDS_AT_ONCE_DEFAULT) with "The app builds at most this many parts at the same time. 1 builds one part after the other." The changed plan of section 6.20.14 shows it too. The value goes to task.settings_json.buildsAtOnce.
 - Errors inline: "ABC-13 cannot build on ABC-14, because ABC-14 builds on ABC-13." and "Pick the PR that the app tracks for ABC-11."
 - The branch type chips stay: one prefix for all parts. The branch name and its existing-branch choice move into each part row.
@@ -2204,8 +2207,8 @@ ALTER TABLE task_file ADD COLUMN issue TEXT;
 - maxOpen goes to task.settings_json.maxOpen. Sub-task mode caps it at MAX_OPEN_CAP. repo_task_settings.max_open stays for large tasks.
 - buildsAtOnce (section 6.20.6) goes to task.settings_json.buildsAtOnce, next to maxOpen: it belongs to one sub-task plan, and the user sets both on the same plan screen. Absent: BUILDS_AT_ONCE_DEFAULT.
 - No new task_event kind and no new step kind. The retarget and push step kinds exist (033).
-- Schemas (src/shared/task.ts): specPart adds `keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([])`, `start: z.enum(["base","stack","merge"]).default("stack")` (user decision of 2026-11-02: a part without a start builds on the part before it), `after: z.string().max(40).nullable().default(null)`, and `startReason: z.string().max(300).default("")`. specResult adds `maxOpen: z.number().int().min(1).max(5).nullable().default(null)` and `maxOpenReason: z.string().max(300).default("")`.
-- DTO (src/shared/dto.ts): taskCreateInput adds `subtasks?: boolean` and `subtaskFiles?: {key, files: attId[]}[]`. taskPlanInput adds `subtasks?: {parts: [{n, start, after: string | null, existing?: "continue" | "new"}] (max 12), track: [{key, pr: positiveInt}] (max 20), maxOpen: 1..5, buildsAtOnce?: 1..BUILDS_AT_ONCE_CAP}`. TaskDto adds `subtasks: SubtaskDto[] | null` ({key, summary, status, category, statusAt, links, found, parts: id[], added, removed}) and `plan.maxOpen: {value, reason}`. TaskPartDto adds keys, start, after, adopted, specDir, bases (per part), lower ({key, how: "merge" | "squash" | "other"} or null, set after the lower part merged), gate ({pass, why}), and wait (the scheduler reason or null). IssueContext adds optional `parent`, `subtasks`, and `links`.
+- Schemas (src/shared/task.ts): specPart adds `keys: z.array(z.string().regex(JIRA_KEY)).max(5).default([])`, `start: z.enum(["base","stack","merge"]).default("stack")` (user decision of 2026-11-02: a part without a start builds on the part before it), `after: z.string().max(40).nullable().default(null)`, and `startReason: z.string().max(300).default("")`. specResult adds `maxOpen: z.number().int().min(1).max(MAX_OPEN_CAP).nullable().default(null)` and `maxOpenReason: z.string().max(300).default("")`.
+- DTO (src/shared/dto.ts): taskCreateInput adds `subtasks?: boolean` and `subtaskFiles?: {key, files: attId[]}[]`. taskPlanInput adds `subtasks?: {parts: [{n, start, after: string | null, existing?: "continue" | "new"}] (max SUBTASK_PARTS_MAX = 30), track: [{key, pr: positiveInt}] (max 20), maxOpen: 1..MAX_OPEN_CAP (20), buildsAtOnce?: 1..BUILDS_AT_ONCE_CAP}`. TaskDto adds `subtasks: SubtaskDto[] | null` ({key, summary, status, category, statusAt, links, found, parts: id[], added, removed}) and `plan.maxOpen: {value, reason}`. TaskPartDto adds keys, start, after, adopted, specDir, bases (per part), lower ({key, how: "merge" | "squash" | "other"} or null, set after the lower part merged), gate ({pass, why}), and wait (the scheduler reason or null). IssueContext adds optional `parent`, `subtasks`, and `links`.
 
 #### 6.20.9 Jira reads and writes (src/server/context/jira.ts only)
 
@@ -2337,7 +2340,7 @@ The update and instruct routes take the part in the path or the body, as today. 
 1. AC-B72. A parent with an open sub-task preselects "Build the sub-tasks, one PR each" on the form and on the chip. A parent with no sub-tasks shows no choice.
 2. AC-B73. The create in sub-task mode reads each open sub-task once and no done one (fake Jira counter). No request goes to a `/subtask` path. A sub-task whose parent field names another key is dropped.
 3. AC-B74. The key token match finds feature/ABC-12-x and "ABC-12: x", and ABC-1 does not match ABC-12. Two open PRs for one key need a pick (409 sentence).
-4. AC-B75. The plan approval checks: a cycle, an unknown after, a stack on a done sub-task (it becomes base), maxOpen 6 (refused), and maxOpen absent (3). The approval pushes and posts nothing (fake write counter 0).
+4. AC-B75. The plan approval checks: a cycle, an unknown after, a stack on a done sub-task (it becomes base), maxOpen 21 (refused), and maxOpen absent (3). The approval pushes and posts nothing (fake write counter 0).
 5. AC-B76. An adopted part reaches pr_open by ADOPT_OPEN, and its PR is followed. A push, an update, and Tell Claude on it return 409 before git runs.
 6. AC-B77. The ticked files of the parent and of each open sub-task download before the spec run, into ./attachments/ and ./attachments/<key>/. A part run gets the parent files and only its own sub-task files. Two files with the same name in two issues both stay. The caps count the parent and the sub-tasks together.
 7. AC-B78. The nextPart truth table: at most atOnce builds at the same time, and atOnce 1 builds one part after the other; a part that builds counts toward the limit; the limit counts self_reviewed, open, and adopted parts; stack waits for the gate; override starts it; merge waits for merged; a lower part merged before the start gives a base start; the order is by ord.

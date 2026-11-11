@@ -18,7 +18,7 @@ import {
   type Volume,
 } from "../../shared/dto";
 import { FIX_EDIT_RULES, FIX_WHY_RULES, REVIEW_PROMPT_VERSION } from "../../shared/review";
-import { CHECK_TIMEOUT_SEC, limitText, PROPOSALS_MAX, SETUP_TIMEOUT_SEC } from "../../shared/task";
+import { CHECK_TIMEOUT_SEC, limitText, MAX_OPEN_CAP, PROPOSALS_MAX, SETUP_TIMEOUT_SEC } from "../../shared/task";
 import { type AgentSpec, EXPLORER_AGENT, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
 import { SKILL_INDEX, SKILL_INDEX_AFTER } from "./skills";
@@ -961,14 +961,15 @@ export const INTERVIEW_RULES = [
   "Ask only questions whose answer changes the design, the scope, or the tests.",
   "For a choice, give 2 to 5 options. Set recommended to the option that you advise, and say why in why.",
   "Count the options from 0. For a text question, give no options and set recommended to null.",
-  "Ask at most 8 questions. In round 2, ask at most 4, only about what the answers leave open.",
+  "Ask at most 8 questions. In each later round, ask at most 4, only about what the answers leave open.",
   "Set done to true when no question would change the plan.",
   "With questions, set done to true when their answers settle the plan. Set it to false when the answers can raise new questions.",
   "In summary, say in plain words what the task asks for and what you plan to build.",
   "In unknowns, list facts that only a small experiment can find out.",
 ];
-// Round 2 only.
-export const INTERVIEW_ANSWERS_RULE = "./context/answers.md holds the user's answers to round 1. Do not ask again what they settle.";
+// Rounds after round 1 only.
+export const INTERVIEW_ANSWERS_RULE =
+  "./context/answers.md holds the user's answers to the earlier rounds. Do not ask again what they settle.";
 
 // spec.md section 6.20: the interview and the spec run of a task that builds its Jira sub-tasks get context/subtasks.md.
 export const SUBTASKS_RULE =
@@ -1074,7 +1075,7 @@ export const subtaskSpecRules = (budget: number) => [
   "Set after to that part number or key. In startReason, name the code or the Jira link that shows the need.",
   "When you are not sure, set start to stack and after to the part before it in Jira order.",
   "A Jira link such as is-blocked-by is a fact from the team. Follow it unless the code shows that it is wrong, and then say why.",
-  "Propose maxOpen from 1 to 5. In maxOpenReason, say in one line how many parts can run side by side.",
+  `Propose maxOpen from 1 to ${MAX_OPEN_CAP}. In maxOpenReason, say in one line how many parts can run side by side.`,
   "Also say how big they are, and how long reviews take in ./context/pr-history.md.",
 ];
 

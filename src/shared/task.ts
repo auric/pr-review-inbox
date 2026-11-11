@@ -83,12 +83,35 @@ export type TaskRunKind = (typeof TASK_RUN_KINDS)[number];
 export const TASK_DOCS = ["design", "spec", "tasks", "plan"] as const;
 export type TaskDoc = (typeof TASK_DOCS)[number];
 
-// Round 1 asks at most 8 questions, round 2 at most 4.
-export const INTERVIEW_ROUNDS = 2;
+// Settings > Tasks (limits.md decision 3): the run limits. config.json keeps only the changed ones. def: the value while unset.
+// reviewMinutes: the time of each Claude run that is not a task step. stepMinutes: the time of one task step. The part time and
+// RUN_TIME_MAX_MS still cap a step.
+export const RUN_LIMITS = {
+  stepMinutes: { def: 20, min: 5, max: 120 },
+  reviewMinutes: { def: 60, min: 10, max: 240 },
+  interviewRounds: { def: 2, min: 1, max: 5 },
+  testFixTries: { def: 3, min: 1, max: 10 },
+  planTurns: { def: 80, min: 20, max: 500 },
+} as const;
+export type RunLimitKey = keyof typeof RUN_LIMITS;
+export type RunLimits = Record<RunLimitKey, number>;
+export const RUN_LIMIT_KEYS = Object.keys(RUN_LIMITS) as RunLimitKey[];
+// The values of a stored partial object, with the default for each missing key.
+export const runLimitsOf = (stored: Partial<RunLimits> | undefined): RunLimits =>
+  Object.fromEntries(RUN_LIMIT_KEYS.map((k) => [k, stored?.[k] ?? RUN_LIMITS[k].def])) as RunLimits;
+// The value of a run limit field: a whole number inside the bounds of the key, else null.
+export function runLimitValue(k: RunLimitKey, text: string): number | null {
+  const n = Number(text.trim());
+  return text.trim() !== "" && Number.isInteger(n) && n >= RUN_LIMITS[k].min && n <= RUN_LIMITS[k].max ? n : null;
+}
+// The hard limit of one Claude process: the largest time that a setting can give.
+export const RUN_TIME_MAX_MS = Math.max(RUN_LIMITS.stepMinutes.max, RUN_LIMITS.reviewMinutes.max) * 60_000;
+// Round 1 asks at most 8 questions, each later round at most 4.
+export const INTERVIEW_ROUNDS = RUN_LIMITS.interviewRounds.def;
 export const INTERVIEW_QUESTIONS = [8, 4] as const;
 // spec.md section 0, STEP_TURNS: the turn caps of the interview and spec runs.
 export const INTERVIEW_TURNS = 30;
-export const SPEC_TURNS = 80;
+export const SPEC_TURNS = RUN_LIMITS.planTurns.def;
 // spec.md section 6.3: the defaults of repo_task_settings. CHECK_TIMEOUT in seconds.
 export const TASK_DEFAULTS = { specDir: "specs/{key}/", lineBudget: 400, maxOpen: 2, approvals: 1 } as const;
 // spec.md section 6.7, AC-B161: the test files of a tests step while repo_task_settings.test_globs_json is NULL. gitignore(5) rules.
@@ -116,7 +139,7 @@ export const TEST_GLOB_MAX = 200;
 // spec.md section 6.16: the whole branch name with its suffix, one prefix, the prefix list, and one page of the branch search.
 export const BRANCH_MAX = 100;
 export const PREFIX_MAX = 40;
-export const PREFIXES_MAX = 10;
+export const PREFIXES_MAX = 50;
 export const BRANCH_PAGE = 25;
 // spec.md section 6.16.1: Settings > Tasks "Branch prefixes". The first one starts selected on the plan screen.
 export const DEFAULT_BRANCH_PREFIXES = ["feature/", "bugfix/", "hotfix/"] as const;
@@ -165,7 +188,7 @@ export const TASK_CACHE_ENV = "REVIEW_LOOP_TASK_CACHE";
 // minutes), and the output of one command (OUTPUT_TAIL: stored bytes; FAILURE_TAIL: bytes in context/failure.md).
 export const STEP_MODES = ["tests", "implement", "fix", "instruct", "resolve"] as const;
 export type StepMode = (typeof STEP_MODES)[number];
-export const STEP_TIME_MS = 20 * 60_000;
+export const STEP_TIME_MS = RUN_LIMITS.stepMinutes.def * 60_000;
 export const STEP_TURNS: Record<StepMode, number> = { tests: 60, implement: 80, fix: 40, instruct: 80, resolve: 40 };
 // spec.md section 6.18: the text of "Tell Claude" (MAX_QUESTION of spec.md section 0), the conflict stops of one repository in one
 // update, and the least time between two base checks of one task.
@@ -188,8 +211,8 @@ export const JIRA_KEY = /^[A-Z][A-Z0-9_]*-[1-9][0-9]*$/;
 // two Jira status reads of one task by the sync and by the Task view. FOUND_*: the changed paths of a tracked PR and the commit
 // subjects of a found branch in context/subtasks.md.
 export const SUBTASKS_READ = 20;
-export const SUBTASK_PARTS_MAX = 12;
-export const MAX_OPEN_CAP = 5;
+export const SUBTASK_PARTS_MAX = 30;
+export const MAX_OPEN_CAP = 20;
 export const MAX_OPEN_DEFAULT = 3;
 // spec.md section 6.20.6 (user decision of 2026-11-02): the parts of one task that build at the same time. 1 builds one part after the
 // other. Each part at once is one more Claude process.
@@ -672,7 +695,7 @@ export const specResult = z.object({
   title: z.string().max(200),
   size: z.enum(TASK_SIZES),
   estimate: z.object({
-    parts: z.number().int().min(1).max(12),
+    parts: z.number().int().min(1).max(SUBTASK_PARTS_MAX),
     lines: z.number().int().min(1),
     files: z.number().int().min(1),
     modules: z.array(z.string().max(60)).max(20),
@@ -779,7 +802,7 @@ export const replanResult = z.object({
   changed: z.boolean(),
   reason: z.string().max(1000),
   // spec.md section 6.5 reuses specResult.shape.parts, but its min(1) would refuse the empty list of changed false.
-  parts: z.array(specPart).max(12).describe("The remaining parts. Empty when changed is false."),
+  parts: z.array(specPart).max(SUBTASK_PARTS_MAX).describe("The remaining parts. Empty when changed is false."),
   questions: z.array(z.string().max(300)).max(10).default([]),
   coverage,
 });

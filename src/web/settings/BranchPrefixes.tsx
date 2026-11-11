@@ -25,6 +25,7 @@ import {
   prefixProblems,
   toPrefixDrafts,
 } from "./prefixes";
+import { RunLimits } from "./RunLimits";
 
 const iconBtn =
   "inline-grid size-[30px] shrink-0 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-ink-2 hover:bg-hover hover:text-foreground disabled:cursor-default disabled:opacity-35 disabled:hover:bg-transparent";
@@ -197,6 +198,7 @@ export function BranchPrefixes({ settings }: { settings: SettingsDto }) {
           </span>
         )}
       </div>
+      <RunLimits settings={settings} />
     </section>
   );
 }

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { branchPrefixList, MAX_TASK_RULES, settingsInput, taskRuleInput } from "../shared/dto";
+import { branchPrefixList, MAX_TASK_RULES, runLimitsInput, settingsInput, taskRuleInput } from "../shared/dto";
 import { log } from "./log";
 import { type Profile, type ProfileEdits, resolveProfiles, SPARSE_VERSION, storeProfiles } from "./review/catalog";
 
@@ -45,6 +45,8 @@ const config = z.object({
   askAttachments: z.boolean().optional().catch(undefined),
   // Absent: DEFAULT_BRANCH_PREFIXES (src/shared/task.ts).
   taskBranchPrefixes: branchPrefixList.optional().catch(undefined),
+  // Absent: RUN_LIMITS defaults (src/shared/task.ts runLimitsOf). Only the changed keys are present.
+  runLimits: runLimitsInput.optional().catch(undefined),
 });
 
 // profiles: full profiles. profileEdits: the shipped hash of each edited field of a shipped profile (catalog.ts ProfileEdits).

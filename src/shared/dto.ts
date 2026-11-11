@@ -17,6 +17,7 @@ import {
   type FixNote,
   MAX_DISCUSS_MESSAGES,
   MAX_FIX_EDITS,
+  MAX_FIX_ITEMS,
   MAX_QUESTION,
   MAX_REPLY_THREADS,
   NOTE_TEXT_MAX,
@@ -53,6 +54,8 @@ import {
   type QuestionSource,
   type RepoAccess,
   type RepoRole,
+  RUN_LIMITS,
+  type RunLimits,
   SHELL_MODES,
   type ShellMode,
   type SizeSource,
@@ -297,6 +300,8 @@ export const settingsInput = z.object({
   askAttachments: z.boolean().optional(),
   // Absent keeps the stored list (docs/plans/review-v2/spec.md section 6.16.1).
   taskBranchPrefixes: z.lazy(() => branchPrefixList).optional(),
+  // Absent keeps the stored limits. A given key replaces its stored value.
+  runLimits: z.lazy(() => runLimitsInput).optional(),
 });
 
 export type SettingsInput = z.infer<typeof settingsInput>;
@@ -331,6 +336,8 @@ export type SettingsDto = {
   askAttachments: boolean;
   // spec.md section 6.16.1: Settings > Tasks "Branch prefixes".
   taskBranchPrefixes: string[];
+  // Settings > Tasks run limits, with the default for each unset key.
+  runLimits: RunLimits;
 };
 
 export type ApiError = { error: string };
@@ -1042,13 +1049,13 @@ export type DiffFetchNeeded = ApiError & { fetch: true };
 // ---------- Fix it (plan r3) ----------
 
 // POST /api/prs/:id/fix-run. findings: review item IDs. Absent threads and findings: the newest valid or partly reply draft of each thread.
-// docs/plans/fix-ux.md WP3: one run takes at most MAX_REPLY_THREADS threads and findings together. The route shows the refine message.
+// docs/plans/fix-ux.md WP3: one run takes at most MAX_FIX_ITEMS threads and findings together. The route shows the refine message.
 // anyway: "Fix anyway" (docs/plans/thread-outcome.md). The user wants edits despite a decision or risk note. Exactly one target.
-const fixTargets = z.array(positiveInt).min(1).max(MAX_REPLY_THREADS).optional();
+const fixTargets = z.array(positiveInt).min(1).max(MAX_FIX_ITEMS).optional();
 export const fixRunInput = z
   .object({ threads: fixTargets, findings: fixTargets, profile: runProfile, anyway: z.boolean().optional() })
-  .refine((v) => (v.threads?.length ?? 0) + (v.findings?.length ?? 0) <= MAX_REPLY_THREADS, {
-    message: `Pick at most ${MAX_REPLY_THREADS} threads and findings for one run.`,
+  .refine((v) => (v.threads?.length ?? 0) + (v.findings?.length ?? 0) <= MAX_FIX_ITEMS, {
+    message: `Pick at most ${MAX_FIX_ITEMS} threads and findings for one run.`,
   })
   .refine((v) => !v.anyway || (v.threads?.length ?? 0) + (v.findings?.length ?? 0) === 1, {
     message: "Fix anyway takes exactly one thread or finding.",
@@ -1331,6 +1338,21 @@ export const branchPrefix = z
   .min(1, "Invalid branch prefix.")
   .max(PREFIX_MAX, "Invalid branch prefix.")
   .refine((p) => refOk(`${p}x`), "Invalid branch prefix.");
+// Settings > Tasks run limits (limits.md decision 3). Each key is optional.
+const runLimit = (k: keyof typeof RUN_LIMITS) =>
+  z
+    .number()
+    .int(`Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
+    .min(RUN_LIMITS[k].min, `Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
+    .max(RUN_LIMITS[k].max, `Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
+    .optional();
+export const runLimitsInput = z.object({
+  stepMinutes: runLimit("stepMinutes"),
+  reviewMinutes: runLimit("reviewMinutes"),
+  interviewRounds: runLimit("interviewRounds"),
+  testFixTries: runLimit("testFixTries"),
+  planTurns: runLimit("planTurns"),
+});
 export const branchPrefixList = z
   .array(branchPrefix)
   .min(1, "Keep at least one prefix.")

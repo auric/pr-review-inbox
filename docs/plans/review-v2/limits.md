@@ -1,6 +1,6 @@
 # Limits that a user can hit: inventory
 
-Status: inventory of 2026-11-03 against main 7c32f26, after the user said "we have too many unnecessary restrictions in the app". No decision yet. Categories: SAFETY stays; RESOURCE protects prompt size, memory, disk, or cost; ARBITRARY has no clear reason. The last column is a first guess, not a decision. Rows marked unverified were found only in schemas.
+Status: decisions 2 and 3 are built (2026-11-11). Decisions 1 and 4 are open. Inventory of 2026-11-03 against main 7c32f26, after the user said "we have too many unnecessary restrictions in the app". No decision yet. Categories: SAFETY stays; RESOURCE protects prompt size, memory, disk, or cost; ARBITRARY has no clear reason. The last column is a first guess, not a decision. Rows marked unverified were found only in schemas.
 
 ## Build a Jira task
 | Limit | Where | User sees | Cat. | Changeable | Guess |
@@ -98,8 +98,8 @@ Not checked: the UI messages for limits I found only in schemas (marked unverifi
 The user agreed with all four recommendations:
 
 1. Several runs at once. A Settings number sets the limit (default 3). One run per PR at a time. A short design comes first, because the run queue is central code.
-2. Raise these fixed numbers: discussion messages 20 to 100; notes per PR 30 to 200, each 500 to 20,000 characters; Fix threads per run 25 to 100; branch prefixes 10 to 50; open PRs per task 5 to 20; sub-task parts 12 to 30; Jira rule matches 10 to 50.
-3. Make these editable in Settings, Tasks: the task step time (20 min), the review run time (60 min), the interview rounds (2), the test-fix tries (3), and the plan turns (80).
+2. Built. Raise these fixed numbers: discussion messages 20 to 100; notes per PR 30 to 200, each 500 to 20,000 characters; Fix threads per run 25 to 100; branch prefixes 10 to 50; open PRs per task 5 to 20; sub-task parts 12 to 30; Jira rule matches 10 to 50.
+3. Built (Settings, Tasks, "Run limits"; bounds: step time 5 to 120 min, review run time 10 to 240 min, interview rounds 1 to 5, test-fix tries 1 to 10, plan turns 20 to 500). Make these editable in Settings, Tasks: the task step time (20 min), the review run time (60 min), the interview rounds (2), the test-fix tries (3), and the plan turns (80).
 4. An AI result over a schema cap is cut, not failed. First check which caps fail today, then change only those.
 
 The setup package also got the user's agreement: setup default 60 min; checks keep 10 min; maximum 4 h; a "Time limit (min)" field on each command row; Claude proposes a limit for long setup commands; a timeout shows as "time limit", not "stopped", with "Change the time limit"; and the opt-in folder `REVIEW_LOOP_TASK_CACHE`, shared by the parts of one task.

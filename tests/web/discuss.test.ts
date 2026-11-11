@@ -124,18 +124,18 @@ describe("the box and the cap", () => {
 
   test("the line under the box names the keys, then the messages left; another run holding the slot wins", () => {
     expect(talkHint([], null)).toBe("Ctrl+Enter asks. Esc closes the talk.");
-    expect(talkHint(many(3), null)).toBe("Ctrl+Enter asks. Esc closes the talk. 17 messages left.");
-    expect(talkHint(many(19), null)).toBe("Ctrl+Enter asks. Esc closes the talk. 1 message left.");
+    expect(talkHint(many(3), null)).toBe("Ctrl+Enter asks. Esc closes the talk. 97 messages left.");
+    expect(talkHint(many(99), null)).toBe("Ctrl+Enter asks. Esc closes the talk. 1 message left.");
     expect(talkHint(many(3), "Claude is reviewing PROJ/repo #12. One review runs at a time.")).toBe(
       "Claude is reviewing PROJ/repo #12. One review runs at a time.",
     );
   });
 
-  test("every turn counts toward the 20 messages, a failed one too", () => {
-    expect(talkLeft([])).toBe(20);
-    expect(talkLeft([...many(18), turn({ run: 30, status: "failed" })])).toBe(1);
-    expect(talkLeft(many(20))).toBe(0);
-    expect(talkLeft(many(21))).toBe(0);
+  test("every turn counts toward the 100 messages, a failed one too", () => {
+    expect(talkLeft([])).toBe(100);
+    expect(talkLeft([...many(98), turn({ run: 300, status: "failed" })])).toBe(1);
+    expect(talkLeft(many(100))).toBe(0);
+    expect(talkLeft(many(101))).toBe(0);
   });
 
   test("a refused start names the run that holds the only slot", () => {

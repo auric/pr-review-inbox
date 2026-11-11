@@ -434,7 +434,7 @@ describe("thread selection and refusals", () => {
   );
 
   test(
-    "404, unsynced, non-author, Explain, no valid draft, and more than 25 threads give errors; a list passes the reply checks",
+    "404, unsynced, non-author, Explain, no valid draft, and more than 100 threads give errors; a list of 100 passes the reply checks",
     async () => {
       const h = await setup();
       expect((await h.start(undefined, 999)).status).toBe(404);
@@ -469,7 +469,7 @@ describe("thread selection and refusals", () => {
       expect((await h.start([101])).body.error).toBe("Sync the pull request first.");
       h.db.query("UPDATE pull_request SET source_head = $s WHERE id = $pr").run({ pr: h.pr, s: h.remote.source });
 
-      for (let i = 0; i < 26; i++) {
+      for (let i = 0; i < 101; i++) {
         const id = 2000 + i;
         h.db
           .query(
@@ -481,8 +481,15 @@ describe("thread selection and refusals", () => {
       }
       const many = await h.start();
       expect(many.status).toBe(409);
-      expect(many.body.error).toBe("26 threads have a valid reply draft. Fix at most 25 at a time, per thread.");
+      expect(many.body.error).toBe("101 threads have a valid reply draft. Fix at most 100 at a time, per thread.");
       expect(h.runCalls()).toEqual([]);
+      // limits.md decision 2: a list of 100 threads passes the checks and starts the run.
+      h.scenario({ hang: true });
+      const hundred = await h.start(Array.from({ length: 100 }, (_, i) => 2000 + i));
+      expect(hundred.status).toBe(202);
+      expect((await h.json(`/api/runs/${hundred.body.id}/cancel`, { method: "POST" })).status).toBe(202);
+      await h.finish(hundred.body.id);
+      h.scenario({});
     },
     SLOW,
   );
@@ -1056,7 +1063,7 @@ describe("review findings (docs/plans/fix-ux.md phase 2)", () => {
   );
 
   test(
-    "a finding that is not open gives 400 with the reason and starts no run; more than 25 threads and findings give 400",
+    "a finding that is not open gives 400 with the reason and starts no run; more than 100 threads and findings give 400",
     async () => {
       const h = await setup();
       const open = h.finding();
@@ -1091,9 +1098,9 @@ describe("review findings (docs/plans/fix-ux.md phase 2)", () => {
         expect([r.status, r.body.error]).toEqual([400, `Finding ${id} ${why}`]);
       }
 
-      const threads = Array.from({ length: 20 }, (_, i) => 2000 + i);
+      const threads = Array.from({ length: 95 }, (_, i) => 2000 + i);
       const many = await h.startFix({ threads, findings: [1, 2, 3, 4, 5, 6] });
-      expect([many.status, many.body.error]).toEqual([400, "Pick at most 25 threads and findings for one run."]);
+      expect([many.status, many.body.error]).toEqual([400, "Pick at most 100 threads and findings for one run."]);
       expect((await h.startFix({ findings: [] })).body.error).toBe("Invalid thread or finding list.");
       expect(h.runCalls()).toEqual([]);
     },

@@ -191,7 +191,7 @@ export function displayGroup(p: Pick<FindingPayload, "severity" | "verify" | "di
 
 // ---------- Discuss a finding (docs/plans/review-v2/spec.md section 2) ----------
 
-export const MAX_DISCUSS_MESSAGES = 20;
+export const MAX_DISCUSS_MESSAGES = 100;
 export const MAX_DISCUSS_ANSWER = 8000;
 export const discussVerdicts = ["upheld", "revised", "withdrawn"] as const;
 export type DiscussVerdict = (typeof discussVerdicts)[number];
@@ -302,6 +302,8 @@ export const explainJsonSchema = (): Record<string, unknown> => z.toJSONSchema(e
 
 export const replyActions = ["reply", "none"] as const;
 export const MAX_REPLY_THREADS = 25;
+// docs/plans/fix-ux.md WP3: the threads and findings of one Fix run together (limits.md decision 2).
+export const MAX_FIX_ITEMS = 100;
 // docs/plans/fix-ux.md: valid and partly tick a thread in the Fix list at the start.
 // valid to question: the user answers a point of another person. settled to followup: the user made the point or asked the question.
 export const judgements = ["valid", "partly", "invalid", "question", "settled", "unsettled", "followup"] as const;
@@ -433,7 +435,7 @@ export const fixThread = z.object({
 
 export const fixResult = z.object({
   summary: z.string().describe("One line."),
-  threads: z.array(fixThread).max(MAX_REPLY_THREADS).describe("One entry per thread and per finding."),
+  threads: z.array(fixThread).max(MAX_FIX_ITEMS).describe("One entry per thread and per finding."),
   edits: z.array(fixEdit).max(MAX_FIX_EDITS),
   coverage,
 });

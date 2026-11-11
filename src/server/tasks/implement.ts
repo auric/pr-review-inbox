@@ -508,8 +508,9 @@ export function partBudget(db: Database, task: number, part: { id: number; ord: 
   return { usedMs, limitMs, turns, costUsd: cost, costLimit, over };
 }
 
-// STEP_TIME, or the Claude time that the part has left when that is less.
-export const stepTimeout = (b: Pick<PartBudget, "usedMs" | "limitMs">) => Math.max(1, Math.min(STEP_TIME_MS, b.limitMs - b.usedMs));
+// The step time (STEP_TIME by default), or the Claude time that the part has left when that is less.
+export const stepTimeout = (b: Pick<PartBudget, "usedMs" | "limitMs">, stepMs = STEP_TIME_MS) =>
+  Math.max(1, Math.min(stepMs, b.limitMs - b.usedMs));
 
 // ---------- Step rows ----------
 
@@ -765,6 +766,8 @@ export type StepInput = {
   extra?: boolean;
   // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
   shell?: StepShell;
+  // Settings > Tasks "Task step time" in ms. Absent: STEP_TIME_MS.
+  stepMs?: number;
   now?: () => number;
 };
 
@@ -915,7 +918,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     prompt: (project, lines) =>
       implementPrompt(i.mode, i.specDir, trees !== null, attachments.length > 0, i.instructions, project, lines, i.shell ?? null),
     maxTurns: STEP_TURNS[i.mode],
-    timeoutMs: stepTimeout(budget),
+    timeoutMs: stepTimeout(budget, i.stepMs),
     ...(i.shell && { shell: i.shell }),
     started: (d, run) => {
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());

@@ -258,7 +258,7 @@ describe("part D: judge and propose fixes", () => {
     expect(fix).toContain("For item T123, set thread to 123 and leave out finding. For item F45, set finding to 45 and leave out thread.");
     expect(fix).toContain("not repo/src/app.ts");
     expect(fix).toContain(
-      "Give notes for at most 25 items and at most 50 edits. Each old and each new text holds at most 20,000 characters. All old and new texts together hold at most 200,000 bytes.",
+      "Give notes for at most 100 items and at most 50 edits. Each old and each new text holds at most 20,000 characters. All old and new texts together hold at most 200,000 bytes.",
     );
     expect(fix.trimEnd().endsWith("and the notes and edits into fix.")).toBe(true);
   });
@@ -275,7 +275,7 @@ describe("part D: judge and propose fixes", () => {
     const note = fix.properties.threads?.items as Obj;
     const edit = fix.properties.edits?.items as Obj;
     expect(fix.properties.edits?.maxItems).toBe(50);
-    expect(fix.properties.threads?.maxItems).toBe(25);
+    expect(fix.properties.threads?.maxItems).toBe(100);
     expect(note.required).toEqual(["fixed", "reason", "why", "reply"]);
     expect(edit.required).toEqual(["path", "old", "new"]);
     expect(note.properties.thread?.description).toBe("For item T123: 123. Leave it out for a finding.");

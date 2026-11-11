@@ -27,12 +27,12 @@ describe.each(inputs)("%s run input", (_, schema, base) => {
   });
 });
 
-// docs/plans/fix-ux.md WP3: a fix run takes threads, findings, or both, at most 25 in total.
-test("the fix run input takes findings and caps threads and findings together at 25", () => {
+// docs/plans/fix-ux.md WP3: a fix run takes threads, findings, or both, at most 100 in total.
+test("the fix run input takes findings and caps threads and findings together at 100", () => {
   const ids = (n: number, from: number) => Array.from({ length: n }, (_, i) => from + i);
   expect(fixRunInput.safeParse({ findings: [7] }).data).toEqual({ findings: [7] });
-  expect(fixRunInput.safeParse({ threads: ids(20, 1), findings: ids(5, 100) }).success).toBe(true);
-  const over = fixRunInput.safeParse({ threads: ids(20, 1), findings: ids(6, 100) });
-  expect(over.error?.issues.map((i) => i.message)).toEqual(["Pick at most 25 threads and findings for one run."]);
-  for (const findings of [[], [0], [1.5], ids(26, 1)]) expect(fixRunInput.safeParse({ findings }).success).toBe(false);
+  expect(fixRunInput.safeParse({ threads: ids(95, 1), findings: ids(5, 1000) }).success).toBe(true);
+  const over = fixRunInput.safeParse({ threads: ids(95, 1), findings: ids(6, 1000) });
+  expect(over.error?.issues.map((i) => i.message)).toEqual(["Pick at most 100 threads and findings for one run."]);
+  for (const findings of [[], [0], [1.5], ids(101, 1)]) expect(fixRunInput.safeParse({ findings }).success).toBe(false);
 });

@@ -16,7 +16,7 @@ import {
   type TaskRule,
   taskPreviewInput,
 } from "../shared/dto";
-import { DEFAULT_BRANCH_PREFIXES } from "../shared/task";
+import { DEFAULT_BRANCH_PREFIXES, runLimitsOf } from "../shared/task";
 import type { PullRequest } from "../shared/types";
 import { ForgeError } from "./bitbucket/client";
 import { createBitbucketProvider, type ForgeProvider } from "./bitbucket/provider";
@@ -162,6 +162,7 @@ export function createSettings(
       sessions: c?.sessions === true,
       askAttachments: c?.askAttachments !== false,
       taskBranchPrefixes: branchPrefixesOf(c),
+      runLimits: runLimitsOf(c?.runLimits),
     };
   }
 
@@ -316,8 +317,8 @@ export function createSettings(
         const r = settingsInput.safeParse(v);
         if (r.success) return r.data;
         // The prefix list has its own sentences (spec.md section 6.16.1).
-        const prefix = r.error.issues.find((i) => i.path[0] === "taskBranchPrefixes");
-        return c.json<ApiError>({ error: prefix?.message ?? "Invalid settings." }, 400);
+        const own = r.error.issues.find((i) => i.path[0] === "taskBranchPrefixes" || i.path[0] === "runLimits");
+        return c.json<ApiError>({ error: own?.message ?? "Invalid settings." }, 400);
       }),
       (c) =>
         serial(async () => {
@@ -355,6 +356,7 @@ export function createSettings(
             sessions: input.sessions === undefined ? prev?.sessions : input.sessions || undefined,
             askAttachments: input.askAttachments === undefined ? prev?.askAttachments : input.askAttachments ? undefined : false,
             taskBranchPrefixes: input.taskBranchPrefixes ?? prev?.taskBranchPrefixes,
+            runLimits: input.runLimits ? { ...prev?.runLimits, ...input.runLimits } : prev?.runLimits,
           };
           const caFile = input.caFile || undefined;
           const notifications = input.notifications ?? prev?.notifications ?? false;

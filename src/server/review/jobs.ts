@@ -42,6 +42,7 @@ import {
   fixJsonSchema,
   MAX_DISCUSS_MESSAGES,
   MAX_EARLIER,
+  MAX_FIX_ITEMS,
   MAX_REPLY_THREADS,
   type NoteProposal,
   REVIEW_PROMPT_VERSION,
@@ -52,7 +53,7 @@ import {
   verifyJsonSchema,
 } from "../../shared/review";
 import { CHECK_EVENT, type RunEvent, SALVAGE_EVENT } from "../../shared/run-log";
-import { implementJsonSchema, type TaskRunKind } from "../../shared/task";
+import { implementJsonSchema, runLimitsOf, type TaskRunKind } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { PrRef } from "../../shared/types";
 import { dataDir as defaultDataDir } from "../config";
@@ -415,7 +416,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   const { settings, live } = opts;
   const now = opts.now ?? Date.now;
   const dataDir = opts.dataDir ?? defaultDataDir();
-  const runner = createClaudeRunner({ command: opts.runnerCommand });
+  // Settings > Tasks "Review run time", read at the start of each run. A task step gives its own time.
+  const runTimeMs = () => runLimitsOf(settings.config()?.runLimits).reviewMinutes * 60_000;
+  const runner = createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
   // Its own runner: a proposal uses no run folder, no git ref, and no database, so it runs beside the review run slot.
   const improve = createImprover({ command: opts.runnerCommand, now });
   const docServers = createDocServers(opts.listTools);
@@ -1928,8 +1931,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return byThread(rows.map((m) => ({ ...m, deleted: m.deleted === 1, threadResolved: m.threadResolved === 1 })));
   }
 
-  // The threads of a reply run, by thread ID. Absent list: every thread where it is my turn (D12, D13).
-  function replyThreads(db: Database, pr: PrRow, list?: number[]): ReplyThread[] | { status: 400 | 409; error: string } {
+  // The threads of a reply run, by thread ID. Absent list: every thread where it is my turn (D12, D13). cap: MAX_FIX_ITEMS for a fix run.
+  function replyThreads(
+    db: Database,
+    pr: PrRow,
+    list?: number[],
+    cap = MAX_REPLY_THREADS,
+  ): ReplyThread[] | { status: 400 | 409; error: string } {
     const threads = turnThreads(db, pr);
     const me = settings.config()?.userSlug ?? null;
     const prAuthor = pr.my_role === "AUTHOR";
@@ -1945,8 +1953,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       out.push({ thread, replyTo: last.id, mine, joined });
     }
     if (!out.length) return { status: 409, error: "No thread waits for your reply." };
-    if (out.length > MAX_REPLY_THREADS)
-      return { status: 409, error: `${out.length} threads wait for your reply. Draft at most ${MAX_REPLY_THREADS} at a time, per thread.` };
+    if (out.length > cap)
+      return { status: 409, error: `${out.length} threads wait for your reply. Draft at most ${cap} at a time, per thread.` };
     return out.sort((a, b) => a.thread - b.thread);
   }
 
@@ -1958,7 +1966,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const threads = turnThreads(db, pr);
       const resolved = list.find((id) => threads.get(id)?.some((m) => m.threadResolved));
       if (resolved !== undefined) return { status: 400, error: `Thread ${resolved} is resolved. Fix works only on open threads.` };
-      return replyThreads(db, pr, list);
+      return replyThreads(db, pr, list, MAX_FIX_ITEMS);
     }
     const newest = currentDrafts(db, pr.id);
     const threads = turnThreads(db, pr);
@@ -1969,13 +1977,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       if ((judgement === "valid" || judgement === "partly") && last) out.push(thread);
     }
     if (!out.length) return { status: 409, error: "No reply draft finds a comment valid or partly valid. Draft replies first." };
-    if (out.length > MAX_REPLY_THREADS)
+    if (out.length > MAX_FIX_ITEMS)
       return {
         status: 409,
-        error: `${out.length} threads have a valid reply draft. Fix at most ${MAX_REPLY_THREADS} at a time, per thread.`,
+        error: `${out.length} threads have a valid reply draft. Fix at most ${MAX_FIX_ITEMS} at a time, per thread.`,
       };
     // replyThreads adds mine: the resolve tick of a nofix draft needs it.
-    return replyThreads(db, pr, out);
+    return replyThreads(db, pr, out, MAX_FIX_ITEMS);
   }
 
   // The findings of a fix run (docs/plans/fix-ux.md WP3): open findings of this PR that are not posted and have a place in the code.
@@ -2445,7 +2453,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       })();
       const j: TaskJob = { id, pr: null, kind: t.kind, key: t.key, db, profile: p, cancelled: false, done: Promise.resolve(), t };
       if (extra) {
-        j.runner = createClaudeRunner({ command: opts.runnerCommand });
+        j.runner = createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
         extras.add(j);
       } else job = j;
       j.done = executeTask(j).finally(() => {

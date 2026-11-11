@@ -530,7 +530,7 @@ describe("found work, the plan, and its approval (spec.md sections 6.20.2, 6.20.
       expect((await approve()).body.error).toBe("Pick the PR that the app tracks for ABC-14.");
       const track = [{ key: "ABC-14", pr: b }];
       const plan = (parts: unknown[], maxOpen = 4) => ({ parts, track, maxOpen, buildsAtOnce: 1 });
-      expect((await approve(plan([], 6))).status).toBe(400);
+      expect((await approve(plan([], 21))).status).toBe(400);
       // spec.md section 6.20.6: parts at once from 1 to BUILDS_AT_ONCE_CAP.
       expect((await approve({ ...plan([]), buildsAtOnce: 4 })).status).toBe(400);
       expect((await approve({ ...plan([]), buildsAtOnce: 0 })).status).toBe(400);
