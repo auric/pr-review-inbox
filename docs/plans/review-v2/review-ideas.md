@@ -39,6 +39,26 @@ Status: study of 2026-11-11 against main 674b29d. Not built. No eval ran; the us
    - Risk: the finder item is a "high-signal" kind of rule, and such rules cost recall before (results.md:8). Low priority.
    - Cheap check: label 20 unmatched baseline findings as "more than the goal" or not. Run the variant only when 3 or more match.
 
+## Research check (2026-11-11)
+
+Report: research/research-review-practices.md. No source argues against ideas 1 to 4.
+
+- User decision: build in the order 4, 2, 3, 1, 5.
+- Idea 1: ReviewBench, the Martian benchmark, and RovoDev use "a later change addressed the comment" as ground truth. Recall stays a lower bound. Design comments are undercounted.
+- Idea 2: indirect support only (Anthropic security-review action: PR text can talk the reviewer out of a finding). The cheap check stays the gate.
+- Idea 3: supported (Anthropic: Claude tries to prove or disprove its own findings; ReviewBench "grounded precision"). Keep "cap, never hide".
+- Idea 4: supported (Google eng-practices: no code for imagined needs, no needless complexity).
+- Idea 5: build the Fix part only. Drop the finder trial: AutoCommenter found about 80% of predictions under a strict threshold still correct, the same loss as U-V1.
+
+New candidates from the research (not ranked, not approved):
+
+- A. Addressed rate of posted findings: a later change touched the line, or the thread was resolved. It gives a precision number with no eval run. Stats only.
+- B. Sort findings by category, bug first. Sort only, never hide.
+- C. A "Nit:" prefix on posted minor findings, and a question form for low-confidence findings. Both change posted text and need a user decision. Check first whether catalog.ts already covers them.
+- D. A per-profile list of noise-prone categories in judge.ts that caps severity after the finder. It never goes into the finder prompt.
+
+Avoid: hide thresholds, strict "high-signal" finder rules, similarity scores as a quality metric, vendor self-benchmarks, LLM-made ground truth.
+
 ## Do not build
 
 - A separate small-model critic after a task implement step. The task loop already runs the full review and the verifier before the PR (loop.ts:1208-1297).
