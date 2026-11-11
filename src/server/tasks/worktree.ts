@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSyn
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { z } from "zod";
 import { BRANCH_SUFFIX_MAX, type TaskCommand } from "../../shared/task";
 import { dbStem } from "../context/attachments";
 import { GitError, git, gitEnv, worktreeConfig } from "../review/git";
@@ -340,8 +341,28 @@ export function ignoredChanges(before: IgnoredSnapshot, after: IgnoredSnapshot):
 }
 
 // The setup commands ran in this worktree. The mark lives in the git folder of the worktree, so a new worktree has none. It holds the
-// setupHash of the list that ran.
+// setupHash of the list that ran and files: the new paths that git does not ignore, which the green setup made. A mark from before
+// WP-R1a holds the plain hash; its files are null.
 export const setupMark = (wt: Worktree) => join(wt.admin, "rl-setup-done");
+export type SetupMark = { hash: string; files: string[] | null };
+const setupMarkJson = z.object({ hash: z.string(), files: z.array(z.string()) });
+
+export function readSetupMark(wt: Worktree): SetupMark | null {
+  let text: string;
+  try {
+    text = readFileSync(setupMark(wt), "utf8");
+  } catch {
+    return null;
+  }
+  if (/^[0-9a-f]{64}$/.test(text)) return { hash: text, files: null };
+  try {
+    return setupMarkJson.parse(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
+export const writeSetupMark = (wt: Worktree, mark: { hash: string; files: string[] }) => writeFileSync(setupMark(wt), JSON.stringify(mark));
 
 // sha256 of the setup commands in run order, argv and timeout of each (spec.md section 6.7). A changed list runs setup again.
 export const setupHash = (list: readonly Pick<TaskCommand, "argv" | "timeoutSec">[]) =>
@@ -389,7 +410,8 @@ export async function savePatch(wt: Worktree, file: string, paths: string[], onl
 
 // Returns the worktree to commit last (spec.md section 6.8): links go first, so no later step follows them out of repo/. Then
 // `git reset --hard` and `git clean -ffd`. git-clean(1): the second -f also removes nested repositories, and each removed path prints
-// a "Removing" line. A removed path can be setup output, so the setup mark goes. Ignored files stay.
+// a "Removing" line. Ignored files stay. The setup mark goes when a path that setup made is gone. An old mark without files goes when
+// the clean removed any path.
 // git status clears the skip-worktree bit of a hidden file that is present (git 2.37, sparse.expectFilesOutsideOfPatterns), so
 // `sparse-checkout reapply` hides those paths again.
 export async function resetWorktree(wt: Worktree, last: string, links: string[] = []) {
@@ -400,7 +422,10 @@ export async function resetWorktree(wt: Worktree, last: string, links: string[] 
   }
   if (!gitLinkOk(wt)) await restoreGitLink(wt);
   await wtGit(wt, ["reset", "-q", "--hard", last]);
-  if ((await wtGit(wt, ["clean", "-ffd"])).trim()) rmSync(setupMark(wt), { force: true });
+  const removed = (await wtGit(wt, ["clean", "-ffd"])).trim() !== "";
+  const mark = readSetupMark(wt);
+  const lost = mark?.files ? mark.files.some((f) => !lstatSync(join(wt.repo, f), { throwIfNoEntry: false })) : removed;
+  if (lost) rmSync(setupMark(wt), { force: true });
   await wtGit(wt, ["sparse-checkout", "reapply"]);
 }
 

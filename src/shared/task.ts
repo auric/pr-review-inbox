@@ -569,6 +569,10 @@ export const stepDetail = z.object({
   baseline: z.boolean().default(false),
   // The app stopped at these checks, because each failing command failed on the part base too. Continue then lets the fix steps run.
   redBefore: z.boolean().default(false),
+  // A check step that started on a clean worktree: its HEAD, and the setupHash of its command list. The final checks skip on a green
+  // record with both equal (spec.md section 6.7). null: the worktree had changes, or the row is older.
+  head: z.string().nullable().default(null),
+  commandsHash: z.string().nullable().default(null),
   // A Claude step: its summary, and needsBase with its reason (spec.md section 6.18.2).
   summary: z.string().nullable().default(null),
   needsBase: z.object({ reason: z.string() }).nullable().default(null),

@@ -18,6 +18,7 @@ import {
   ASK_TEXT,
   allowProblem,
   BASE_CHECK_AGE_MS,
+  type CommandKind,
   DEFAULT_TEST_GLOBS,
   FAILURE_TAIL,
   type ImplementResult,
@@ -154,6 +155,7 @@ import {
   openWorktree,
   patchFile,
   type RepoTree,
+  readSetupMark,
   remoteBranches,
   resetTrees,
   resetWorktree,
@@ -164,6 +166,7 @@ import {
   takenBranches,
   takeRemoteBranch,
   type Worktree,
+  writeSetupMark,
   wtGit,
 } from "./worktree";
 
@@ -475,6 +478,11 @@ const Q = {
     ORDER BY id DESC LIMIT 1`,
   started: `SELECT 1 FROM task_step WHERE part = $part AND (kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve')
     OR (kind = 'check' AND item = 'base' AND state IN ('ok', 'failed'))) LIMIT 1`,
+  // spec.md section 6.7: the last final checks of a part, and the last own review of one repository at one head that ended ok.
+  lastChecks: `SELECT state, detail_json FROM task_step WHERE part = $part AND kind = 'check' AND item = 'checks'
+    ORDER BY id DESC LIMIT 1`,
+  reviewAt: `SELECT s.id, s.run FROM task_step s JOIN review_run r ON r.id = s.run WHERE s.part = $part AND s.kind = 'review'
+    AND s.state = 'ok' AND r.idem_key LIKE $key ORDER BY s.id DESC LIMIT 1`,
   redBeforeSeen: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'check' AND item = $item
     AND json_extract(detail_json, '$.redBefore') = 1 LIMIT 1`,
   ensureSettings: `INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ($project, $repo, $now)
@@ -946,6 +954,7 @@ export function createLoop(opts: LoopOptions) {
     enter(aborts, c.id, ac);
     try {
       changed(c.id);
+      const head = !scope && (await clean(c)) ? await headOf(c.wt) : null;
       const r = await checkStep({
         db: c.db,
         dataDir,
@@ -964,6 +973,7 @@ export function createLoop(opts: LoopOptions) {
         now,
         onChange: () => changed(c.id),
       });
+      if (head && r.status === "ran") patchStep(c.db, r.step, { head, commandsHash: checksHash(c, kinds) });
       changed(c.id);
       if (r.status === "refused") block(c, { kind: "error", step: r.step, text: `Needs you: ${r.reason}` });
       if (r.commands.some((x) => x.stopped)) throw new Halt();
@@ -972,6 +982,23 @@ export function createLoop(opts: LoopOptions) {
     } finally {
       leave(aborts, c.id, ac);
     }
+  }
+
+  // The worktree has no change but the files of the last green setup.
+  async function clean(c: Ctx) {
+    const own = new Set(readSetupMark(c.wt)?.files ?? []);
+    return (await status(c.wt)).every((e) => e.xy === "??" && own.has(e.path));
+  }
+
+  const checksHash = (c: Ctx, kinds: readonly CommandKind[]) =>
+    setupHash(repoSettings(c.db, c.t.project, c.t.repo).commands.filter((x) => kinds.includes(x.kind)));
+
+  // spec.md section 6.7, Final checks: the last final checks were green at this head with this command list, and nothing changed since.
+  async function checksDone(c: Ctx) {
+    const r = c.db.query(Q.lastChecks).get({ part: c.part.id }) as { state: string; detail_json: string } | null;
+    if (r?.state !== "ok") return false;
+    const d = stepDetail.parse(JSON.parse(r.detail_json));
+    return d.head === (await headOf(c.wt)) && d.commandsHash === checksHash(c, CHECK_KINDS) && (await clean(c));
   }
 
   // spec.md section 6.7, Line endings, Repair (AC-B171): a part with line-ending-only changes from before the line end rule gets one
@@ -1209,6 +1236,10 @@ export function createLoop(opts: LoopOptions) {
       const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
       const issue = task.files.map((f) => f.text).join("\n\n");
       const head = sub ? sub.head : await headOf(c.wt);
+      const prefix = `task:${c.id}:part:${c.part.id}:review:${sub ? `${sub.tree.row.id}:` : ""}${head}:`;
+      // spec.md section 6.7, own review: a review of this repository at this head that ended ok gives its points again.
+      const done = c.db.query(Q.reviewAt).get({ part: c.part.id, key: `${prefix}%` }) as { id: number; run: number } | null;
+      if (done) return { step: done.id, points: pointsOf(c, done.run) };
       const attempt = nextAttempt(c, "review", "review");
       const src = sub
         ? sourceOf(
@@ -1223,7 +1254,7 @@ export function createLoop(opts: LoopOptions) {
       const start: TaskReviewStart = {
         task: c.id,
         kind: "review",
-        key: `task:${c.id}:part:${c.part.id}:review:${sub ? `${sub.tree.row.id}:` : ""}${head}:${attempt}`,
+        key: `${prefix}${attempt}`,
         profile: c.profile,
         project: src?.project ?? c.t.project,
         repo: src?.repo ?? c.t.repo,
@@ -1271,13 +1302,15 @@ export function createLoop(opts: LoopOptions) {
       const r = ended as { step: number; run: number; ok: boolean; text: string | null } | null;
       if (r && !r.ok && c.mode !== "build") throw new StepFailed(r.text ?? "The review failed.");
       if (!r?.ok) throw new Halt();
-      const points = (c.db.query(Q.points).all({ run: r.run }) as { id: number; payload_json: string }[]).map((x) => ({
-        id: x.id,
-        payload: JSON.parse(x.payload_json) as FindingPayload,
-      }));
-      return { step: r.step, points };
+      return { step: r.step, points: pointsOf(c, r.run) };
     }
   }
+
+  const pointsOf = (c: Ctx, run: number): Point[] =>
+    (c.db.query(Q.points).all({ run }) as { id: number; payload_json: string }[]).map((x) => ({
+      id: x.id,
+      payload: JSON.parse(x.payload_json) as FindingPayload,
+    }));
 
   // spec.md section 6.7, own review: confirmed blocker and major points start a fix step, the checks, and a new review, at most
   // REVIEW_FIX_TRIES times (AC-B12). The other points stay listed in the review run.
@@ -1509,14 +1542,15 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // spec.md section 6.7: the setup commands run before the first step in a worktree, and again when the mark of the worktree does not
-  // hold the hash of the current list. A reset that removed files deletes the mark (resetWorktree). force: "Run setup again". A failed
-  // run leaves no mark, so the next build runs setup again.
+  // hold the hash of the current list. A reset that removed a file of the green setup deletes the mark (resetWorktree). force: "Run
+  // setup again". A failed run leaves no mark, so the next build runs setup again.
   async function setup(c: Ctx, force = false) {
     const list = repoSettings(c.db, c.t.project, c.t.repo).commands.filter((x) => x.kind === "setup");
     const hash = setupHash(list);
-    const mark = setupMark(c.wt);
-    if (!force && existsSync(mark) && readFileSync(mark, "utf8") === hash) return;
-    rmSync(mark, { force: true });
+    if (!force && readSetupMark(c.wt)?.hash === hash) return;
+    rmSync(setupMark(c.wt), { force: true });
+    const untracked = async () => (await status(c.wt)).filter((e) => e.xy === "??").map((e) => e.path);
+    const before = new Set(await untracked());
     if (list.length) {
       const r = await checks(c, "setup", ["setup"]);
       // The Task view offers "Change the time limit" for a red setup step with a command that reached its time limit.
@@ -1529,7 +1563,7 @@ export function createLoop(opts: LoopOptions) {
         });
       if (!r.green) block(c, { kind: "red", step: r.step, text: `Needs you: the setup commands of part ${c.part.ord} failed. See why.` });
     }
-    writeFileSync(mark, hash);
+    writeSetupMark(c.wt, { hash, files: (await untracked()).filter((p) => !before.has(p)) });
   }
 
   async function runPart(db: Database, t: TaskRow, part: PartRow) {
@@ -1562,8 +1596,10 @@ export function createLoop(opts: LoopOptions) {
     }
     // All approved checks once before the own review: the scoped checks of the tasks did not run build, lint, or the other tests.
     const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((t) => t.files));
-    await greenOrFix(c, "checks", allow, (a) => partStepFile(c.plan, c.plan.parts, "checks", a));
-    await commit(c, "checks", `${c.label}: Fix the checks of part ${part.ord}`, allow);
+    if (!(await checksDone(c))) {
+      await greenOrFix(c, "checks", allow, (a) => partStepFile(c.plan, c.plan.parts, "checks", a));
+      await commit(c, "checks", `${c.label}: Fix the checks of part ${part.ord}`, allow);
+    }
     await ownReview(c);
     db.transaction(() => {
       const cur = taskRow(db, t.id);

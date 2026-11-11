@@ -22,6 +22,7 @@ import {
   newFiles,
   openWorktree,
   partDir,
+  readSetupMark,
   removeWorktree,
   resetWorktree,
   SPARSE,
@@ -32,6 +33,7 @@ import {
   status,
   tasksRoot,
   type Worktree,
+  writeSetupMark,
   wtGit,
 } from "../../src/server/tasks/worktree";
 import { commitOnMain, HIDDEN, IDENTITY, SHOWN, taskCache, taskRemote } from "./fixture";
@@ -238,18 +240,36 @@ describe("commit and setup mark (spec.md section 6.7)", () => {
   );
 
   test(
-    "a reset that removes a path deletes the setup mark; a reset that removes nothing keeps it",
+    "AC-B200: an old setup mark goes when a reset removes any path; a new mark goes only when a path that setup made is gone",
     async () => {
       const s = await setup();
       const wt = await s.open();
       const last = await headOf(wt);
-      writeFileSync(setupMark(wt), setupHash([{ argv: ["python", "-m", "venv", ".venv"], timeoutSec: 600 }]));
+      const hash = setupHash([{ argv: ["python", "-m", "venv", ".venv"], timeoutSec: 600 }]);
+      // The plain hash from before WP-R1a.
+      writeFileSync(setupMark(wt), hash);
+      expect(readSetupMark(wt)).toEqual({ hash, files: null });
       writeFileSync(join(wt.repo, "README.md"), "changed\n");
       await resetWorktree(wt, last);
       expect(existsSync(setupMark(wt))).toBe(true);
       writeFileSync(join(wt.repo, "new.txt"), "x\n");
       await resetWorktree(wt, last);
       expect(existsSync(setupMark(wt))).toBe(false);
+      // The form {hash, files}: a removed file that setup did not make keeps the mark.
+      writeSetupMark(wt, { hash, files: [] });
+      writeFileSync(join(wt.repo, "claude.txt"), "x\n");
+      await resetWorktree(wt, last);
+      expect(readSetupMark(wt)).toEqual({ hash, files: [] });
+      expect(existsSync(join(wt.repo, "claude.txt"))).toBe(false);
+      // A removed file that setup made deletes the mark.
+      mkdirSync(join(wt.repo, "gen"), { recursive: true });
+      writeFileSync(join(wt.repo, "gen", "out.txt"), "made by setup\n");
+      writeSetupMark(wt, { hash, files: ["gen/out.txt"] });
+      await resetWorktree(wt, last);
+      expect(existsSync(setupMark(wt))).toBe(false);
+      // A mark that does not parse counts as absent.
+      writeFileSync(setupMark(wt), "{");
+      expect(readSetupMark(wt)).toBeNull();
       // The hash covers argv, timeout, and order.
       const a = { argv: ["a"], timeoutSec: 60 };
       const b = { argv: ["b"], timeoutSec: 60 };

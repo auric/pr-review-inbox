@@ -33,7 +33,7 @@ import {
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
 import { recoverTasks, taskDto, taskRow } from "../../src/server/tasks/tasks";
-import { openWorktree, status } from "../../src/server/tasks/worktree";
+import { openWorktree, readSetupMark, status } from "../../src/server/tasks/worktree";
 import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
 import { DEFAULT_TEST_GLOBS, type RunLimits, STEP_TIME_MS, specResult, type TaskBlocked } from "../../src/shared/task";
 import { rowStatus } from "../../src/shared/task-status";
@@ -871,7 +871,8 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       const s = await setup({
         seq: {
           "implement:implement": [{ writes: [WORKS] }],
-          "implement:fix": [{ writes: [FIXED] }],
+          // Each fix makes a new commit, so each review sees a new head. A review of the same head runs once.
+          "implement:fix": [{ writes: [FIXED] }, { writes: [WORKS] }],
           review: [{ review: review([point("blocker")]) }],
         },
       });
@@ -1765,6 +1766,7 @@ import { join } from "node:path";
 const dir = import.meta.dir;
 appendFileSync(join(dir, "setups.log"), "run\\n");
 const out = process.argv[2] === "venv" ? [".venv/bin/python", "build/out.bin"] : ["ignored/venv.txt"];
+if (existsSync(join(dir, "setup-extra.txt"))) out.push("gen/made.txt");
 for (const f of out) {
   mkdirSync(join(f, ".."), { recursive: true });
   writeFileSync(f, "made by setup\\n");
@@ -1912,7 +1914,7 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
   );
 
   test(
-    "setup runs again when its list changes and after a reset that removed files; an unchanged list does not run it",
+    "AC-B200: setup runs again when its list changes and after a reset that removed a setup file; a reset of Claude's files only does not run it",
     async () => {
       const task = (n: number) => ({
         id: `T${n}`,
@@ -1931,19 +1933,109 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       await s.build();
       expect(s.blocked()?.text).toBe("Task T1.1 is done. Continue?");
       expect(setups(s)).toBe(1);
+      // The reset of Resume removes a file that setup did not make: setup does not run.
+      const junk = join((await s.wt()).repo, "junk.txt");
+      writeFileSync(junk, "left by a stop\n");
       await resume();
+      expect(existsSync(junk)).toBe(false);
       expect(s.blocked()?.text).toBe("Task T1.2 is done. Continue?");
       expect(setups(s)).toBe(1);
+      // The new list runs setup, and it makes gen/made.txt, which git does not ignore.
+      writeFileSync(join(s.root, "setup-extra.txt"), "1\n");
       withSetup(s, "ignored", ["v2"]);
       await resume();
       expect(s.blocked()?.text).toBe("Task T1.3 is done. Continue?");
       expect(setups(s)).toBe(2);
-      // A file that Resume removes may be setup output, so setup runs again.
-      writeFileSync(join((await s.wt()).repo, "junk.txt"), "left by a stop\n");
+      expect(readSetupMark(await s.wt())?.files).toEqual(["gen/made.txt"]);
+      // The reset of Resume removes gen/made.txt, so setup runs again.
       await resume();
       expect(setups(s)).toBe(3);
       expect(s.part().state).toBe("self_reviewed");
       expect(s.flow().filter((x) => x.startsWith("check:setup:"))).toEqual(["check:setup:ok", "check:setup:ok", "check:setup:ok"]);
+    },
+    SLOW,
+  );
+
+  // The fix step of the own review runs until its cancel the first `hangs` times.
+  const stopInReview = async (hangs: number, withSetupList = false) => {
+    const s = await setup({
+      seq: {
+        "implement:implement": [{ writes: [WORKS] }],
+        "implement:fix": [...Array.from({ length: hangs }, () => ({ hang: true })), { writes: [FIXED] }],
+        review: [{ review: review([point("major")]) }, { review: CLEAN }],
+      },
+    });
+    if (withSetupList) withSetup(s, "ignored");
+    const stop = async () => {
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.t().state).toBe("stopped");
+    };
+    s.loop.build(s.db, s.task);
+    await until(() => fixes(s) === 1);
+    await stop();
+    return { s, stop };
+  };
+  const count = (s: Awaited<ReturnType<typeof setup>>, row: string) => s.flow().filter((x) => x.startsWith(row)).length;
+  // The fix runs that reached the CLI. A seq entry counts only those.
+  const fixes = (s: Awaited<ReturnType<typeof setup>>) => s.runCalls().filter((c) => s.modeOf(c) === "fix").length;
+
+  test(
+    "AC-B198, AC-B199: Continue after a stop in the own review runs no final checks and no review run; a changed command list runs the checks",
+    async () => {
+      const { s, stop } = await stopInReview(2);
+      expect([count(s, "check:checks:"), count(s, "review:review:")]).toEqual([1, 1]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await until(() => fixes(s) === 2);
+      await stop();
+      expect([count(s, "check:checks:"), count(s, "review:review:")]).toEqual([1, 1]);
+      expect(s.runCalls().filter((c) => s.modeOf(c) === "review").length).toBe(1);
+      const step = s.steps().find((x) => x.kind === "check" && x.item === "checks") as Step;
+      expect(JSON.parse(step.detail_json)).toMatchObject({
+        head: expect.stringMatching(/^[0-9a-f]{40}$/),
+        commandsHash: expect.any(String),
+      });
+      // A new time limit of the test command changes the list, so the final checks run again. The review of this head stays.
+      const commands = JSON.parse(
+        (s.db.query("SELECT commands_json FROM repo_task_settings").get() as { commands_json: string }).commands_json,
+      ) as { timeoutSec: number }[];
+      s.db
+        .query("UPDATE repo_task_settings SET commands_json = $c")
+        .run({ c: JSON.stringify(commands.map((c) => ({ ...c, timeoutSec: 61 }))) });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      expect(count(s, "check:checks:")).toBe(2);
+      expect(s.flow().slice(-6)).toEqual([
+        "fix:review:cancelled",
+        "check:checks:ok",
+        "fix:review:ok",
+        "check:review:ok",
+        "commit:review:ok",
+        "review:review:ok",
+      ]);
+      expect(s.runCalls().filter((c) => s.modeOf(c) === "review").length).toBe(2);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B199: a change in the worktree makes the final checks run again",
+    async () => {
+      const { s } = await stopInReview(1, true);
+      expect(setups(s)).toBe(1);
+      // The new setup list fails on Continue, so the build waits. Run setup again then goes on without a reset.
+      writeFileSync(join(s.root, "setup-mode.txt"), "fail");
+      withSetup(s, "ignored", ["v2"]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.blocked()?.text).toBe("Needs you: the setup commands of part 1 failed. See why.");
+      writeFileSync(join((await s.wt()).repo, "left.txt"), "a change\n");
+      writeFileSync(join(s.root, "setup-mode.txt"), "ok");
+      expect(s.loop.setupAgain(s.db, s.task, s.part().id, { version: s.t().version }).status).toBe(202);
+      await until(() => !s.loop.running(s.task));
+      expect(s.part().state).toBe("self_reviewed");
+      expect(count(s, "check:checks:")).toBe(2);
     },
     SLOW,
   );
