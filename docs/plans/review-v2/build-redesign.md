@@ -1,6 +1,6 @@
 # Build a Jira task: redesign of stop and Continue
 
-Status: design of 2026-11-11 against main 2dd8bd5, after the user said the build feature is "too weird and too complicated" and asked why the checks run again after every stop. Not built. Open questions Q1 to Q6 wait for the user. User decision of 2026-11-11: the task step time and the part time are off by default (Settings can set them; Stop always works).
+Status: design of 2026-11-11 against main 2dd8bd5, after the user said the build feature is "too weird and too complicated" and asked why the checks run again after every stop. Not built. User answers of 2026-11-11: Q1 note at the end, Q2 yes once, Q3 yes, Q4 reset with continue.md, Q5 not now, Q6 yes (default). User decision of 2026-11-11: the task step time and the part time are off by default (Settings can set them; Stop always works).
 
 ## Summary
 
