@@ -1,6 +1,6 @@
 # Agent workflows in Build a Jira task
 
-Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. Gate B35 and the new Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. Open questions Q1 to Q15 wait for the user (section 10).
+Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. Gate B35 and the new Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. User answers of 2026-11-11: option C (one lead per Claude step); project agents in release 2; the preset lead may edit files (Q5 differs from the recommendation); all other recommendations accepted (Q1 to Q4, Q6 to Q15).
 
 ## Summary
 
@@ -211,7 +211,7 @@ Workflow save checks:
 
 ### 3.10 The shipped preset "Lead and agents"
 
-- Lead: App lead, opus, effort high, lead edits off.
+- Lead: App lead, opus, effort high, lead edits on (user answer Q5).
 - Agents (app text, generic):
   - rl-implementer: writes files and runs commands (cap), opus, medium. "Makes the change that the lead describes."
   - rl-implementer-strong: the same tools, opus, xhigh. "Use only after rl-implementer failed in this step."
@@ -328,7 +328,7 @@ Smallest first release: AW0, the gate run, AW1, AW2, and AW3. With them, the use
 2. Q2. Can an agent file be the lead? Recommended: yes for user files. Project files only after approval, in release 2.
 3. Q3. Pin the agent definitions at Build start, or read them at each step? Recommended: pin at Build start. A later option "Use the current agent files" on Continue can follow.
 4. Q4. Which steps use the workflow? Recommended: tests, implement, fix, and instruct. Resolve, interview, spec, the plan check, and the own review stay as today.
-5. Q5. Can the lead edit files? Recommended: off in the preset. It is a switch per workflow.
+5. Q5. Can the lead edit files? Recommended: off in the preset. It is a switch per workflow. User answer: on in the preset.
 6. Q6. What happens on a per-call model override or two parallel writers? Recommended: a step note and a Log mark. No stop.
 7. Q7. Does the preset include the planner, or rely on the advisor? Recommended: the planner is listed but unticked, and the advisor stays off. The spec run and the plan check already plan.
 8. Q8. Which retry tiers go into the preset? Recommended: rl-implementer (medium) and rl-implementer-strong (xhigh). No max tier.
