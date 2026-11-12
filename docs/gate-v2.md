@@ -13,6 +13,8 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B32 | The Unrestricted shell mode (shell.md "Unrestricted mode"). Run on 2026-11-06. | `scripts/gate/claude-checks.ts` |
 | B33 | The built Unrestricted and Most commands settings without the read block (shell.md "Unrestricted mode"). | `scripts/gate/claude-checks.ts` |
 | B34 | git inside a quoted argument, and the line endings of a step worktree (docs/plans/review-v2/remote-skill.md). | `scripts/gate/claude-checks.ts` |
+| B35 | Implement-kind steps as `--agent rl-main` with rl-explorer (docs/plans/review-v2/task-subagents.md). Until B35 passes, these steps rely on the docs and older gates. | `scripts/gate/claude-checks.ts` |
+| B36 | AW2 of docs/plans/review-v2/agent-workflow.md: workflow agents that write files or run commands. Until B36 passes, workflows use read-only agents only. | `scripts/gate/claude-checks.ts` |
 | B37 | PS2 of docs/plans/review-v2/part-session.md (one Claude session per task part). Until B37 passes, each follow-up starts a fresh session. | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
@@ -174,6 +176,43 @@ This check gives the fact SU21. It uses the app shell.json and env of Unrestrict
 | Check | Fact | What it runs | PASS |
 |---|---|---|---|
 | B34 | SU21 | Two runs: Unrestricted and Most commands (stored value any), with the app flags, shell.json, and env. Saved patterns name the probe as `<probe> b34host *` and `<probe> b34tar *`. The probe stands in for ssh as in B33 and never reaches a host. Commands, one Bash call each: `git --version` (the control), `bash -c 'git --version'`, `<probe> b34host 'cd x && git init'`, and `tar -cf - -C repo . \| <probe> b34tar 'tar -xf - -C x'`. Then, with no claude, the gate makes a step worktree with the app code (prepareTaskWorkspace, then openWorktree) from a temp bare remote. Its blobs are lf.txt with LF, crlf.txt with CRLF, and a .gitattributes with `* text=auto eol=crlf`. The gate reads the bytes of both files. | In both runs the deny list refuses `git --version` with the app label "deny" and also refuses `bash -c 'git --version'`. The ssh stand-in with `git init` in its quoted argument runs and writes its marker. The tar pipe into the stand-in runs and writes its marker. The worktree keeps each blob unchanged: lf.txt is LF and crlf.txt is CRLF. INFO: the control holds, but another fact differs. FAIL: the deny list lets `git --version` run, or the worktree is not built. Facts for you: the state and the permission_denied fields of each command. |
+
+### B35: a write run as --agent rl-main
+
+This check gives the fact U82 (integration-check.md "Task subagents"), lines B35.U82a to B35.U82i. Every run uses haiku, the app child env, and the app flags from implementArgs with rl-explorer and a shell allowlist (the probe pattern and `sleep *`) in one temp part folder. The same preparation as above applies.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B35`.
+- Run: `bun scripts/gate/claude-checks.ts --only B35`. Then sanitize as above. It must print `hits=0`. Output: `.gate0/v3-local/results.b35.json`.
+- Own call cap: B35 3.
+
+| Run | Facts | What it runs |
+|---|---|---|
+| agent | (a) to (d), (f), (g), (i) | `--agent rl-main`: the main thread reads and edits repo/e.txt, writes repo/w.txt, `../rlgb-out-rel.txt`, and an absolute path outside the part folder, and runs the probe, `git status`, `touch` (no allow rule), and `<probe> && git status`. Then Agent calls for general-purpose, your user agent (when `<config>/agents` has one), and rl-explorer. rl-explorer reads a file and tries a Write and a Bash call. |
+| plain | (e), control | The same step calls without `--agent` and without Agent calls. B35.control prints its outcomes. |
+| stop | (h) | One rl-explorer call. The gate calls the app killTree at the first event of that call. |
+
+(e) is INFO: compare the edit of e.txt and the platform line of both runs. A different edit or a missing platform line means that `--agent rl-main` lost a part of the default system prompt.
+
+### B36: workflow agents
+
+This check gives the facts U83 to U96 (integration-check.md "Workflow agents"). Every run uses haiku for the lead and the agents, the app flags from implementArgs, and the env with `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`. The gate writes its own agents.json with the section 3.6 limits of docs/plans/review-v2/agent-workflow.md. The lead rl-main has no Edit, Write, or Bash. The gate reads `<config>/agents` for U88 and never writes there.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B36`.
+- Run: `bun scripts/gate/claude-checks.ts --only B36`. Add `--opus` for the Opus run of U87 and a fable agent in the U95 run. Then sanitize as above. It must print `hits=0`. Output: `.gate0/v3-local/results.b36.json`.
+- Own call cap: B36 8 (7 planned, 8 with `--opus`).
+
+| Run | Facts | What it runs |
+|---|---|---|
+| writer | U83, U85, U86, U89, U91, U94, U96 | The lead tries an Edit and a Write itself, then calls rl-gb-writer. The writer writes two paths outside the part folder and repo/w.txt, runs the probe, `touch`, `git status`, and `<probe> && git status`, tries WebFetch, and tries an Agent call. |
+| any | U84, U85 | Most commands mode, and `--allowedTools` without Edit. The writer tries an Edit of a.txt, the probe, `touch`, `git status`, `<probe> && git status`, and a curl to the placeholder host. |
+| stop | U93 | An agent runs `sleep 600`. The app killTree ends the run in the sleep, as in B25. |
+| turns | U92 | The lead has `--max-turns 4`. rl-gb-long makes 6 Reads. rl-gb-short has `maxTurns: 2`. |
+| models | U88, U89, U90, U91, parallel | Explore and Plan on sonnet in one message, an agent with your user agent name, an agent pinned to sonnet that the lead calls with `model: haiku`, and rl-gb-nester with Agent. |
+| badmodel | U87 | Agents with model `inherit` and `nomodel-9`. |
+| advisor | U95 | `--advisor opus` and an agent that consults the advisor. With `--opus`, also an agent on fable. |
+| opus | U87 | With `--opus` only: Opus agents at effort xhigh and max. |
+
+PASS rules: integration-check.md "Workflow agents". Writers need U83, U84, U85, U86, U89, and U93 (agent-workflow.md section 6). If U83, U84, or U85 fails, workflows keep read-only agents only (R1). A lost INFO run prints INFO "not run".
 
 ### B37: one Claude session per task part
 

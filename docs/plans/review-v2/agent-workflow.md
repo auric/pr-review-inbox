@@ -1,6 +1,6 @@
 # Agent workflows in Build a Jira task
 
-Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. Gate B35 and the new Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. User answers of 2026-11-11: option C (one lead per Claude step); project agents in release 2; the preset lead may edit files (Q5 differs from the recommendation); all other recommendations accepted (Q1 to Q4, Q6 to Q15).
+Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. AW0 (the Gate B35 and B36 script) is code complete. Gate B35 and Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. User answers of 2026-11-11: option C (one lead per Claude step); project agents in release 2; the preset lead may edit files (Q5 differs from the recommendation); all other recommendations accepted (Q1 to Q4, Q6 to Q15).
 
 ## Summary
 
@@ -262,9 +262,9 @@ Workflow save checks:
 
 ## 6. Gate B36
 
-- Number: gate numbers B1 to B35 are taken (B35 is planned and has no script). AC-B36 is an acceptance criterion ID in another list. The new facts are U83 to U96 in integration-check.md, section "Workflow agents (Gate B36, not run)".
-- Run: `bun scripts/gate/claude-checks.ts --only B35,B36`, then `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0`.
-- Setup: haiku for the lead and the agents, except one opt-in Opus call (`--opus`). At most 8 calls. A temp part folder with repo/, a temp git repository, the app's implementArgs, shell.json, shellEnv, and the agents.json of the new transform.
+- Number: gate numbers B1 to B35 are taken. AC-B36 is an acceptance criterion ID in another list. The new facts are U83 to U96 in integration-check.md, section "Workflow agents (Gate B36, not run)".
+- Run: `bun scripts/gate/claude-checks.ts --only B35`, then `bun scripts/gate/claude-checks.ts --only B36`, then `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0`. The results go to `.gate0/v3-local/results.b35.json` and `results.b36.json`. docs/gate-v2.md has the run table.
+- Setup: haiku for the lead and the agents, except one opt-in Opus call (`--opus`). At most 8 calls (7 without `--opus`). A temp part folder with repo/, a temp git repository, the app's implementArgs, shell.json, shellEnv, and the agents.json of the new transform. AW1 is not built, so the gate uses its own copy of section 3.6 (scripts/gate/workflow.ts). U88 reads `<config>/agents` only and never writes a file there.
 - Writers are allowed only when U83, U84, U85, U86, U89 (first part), and U93 pass. The other checks are INFO and feed the design.
 
 | Fact | Check | PASS |
@@ -291,7 +291,7 @@ One implementer at a time, in this order. Release 1 is AW0 to AW3. Release 2 is 
 
 | WP | Tier | Scope (files) | Depends on |
 |---|---|---|---|
-| AW0 Gate B35 and B36 script | implementer-xhigh | `scripts/gate/claude-checks.ts`, `scripts/gate/sanitize-claude.ts`, `integration-check.md` (U83 to U96 rows), `docs/gate-v2.md` | none |
+| AW0 Gate B35 and B36 script (code complete) | implementer-xhigh | `scripts/gate/claude-checks.ts`, `scripts/gate/sanitize-claude.ts`, `integration-check.md` (U83 to U96 rows), `docs/gate-v2.md` | none |
 | (user) Run B35 and B36 | user | real CLI | AW0 |
 | AW1 Agent file library | implementer | new `src/server/tasks/agents.ts` (discover, parse with Bun.YAML, validate, cap, drop fields, app rules, SHA-256, preset definitions), new `src/shared/agents.ts` (AgentInfo, AgentDef, Workflow zod schemas), `tests/tasks/agents.test.ts` | none (may run before the gate) |
 | AW2 Lead steps | implementer-xhigh | `src/server/review/claude.ts` (ImplementSpec, implementArgs, childEnv), `src/server/review/stream.ts`, `src/shared/run-log.ts`, `src/server/tasks/implement.ts` (implementPrompt, notes), `src/server/review/jobs.ts`, `src/server/tasks/loop.ts`, `src/server/tasks/tasks.ts` (pin at Build), migration `0NN_task_workflow.sql`, `tests/support/fake-claude.ts`, tests | AW1, gate results |

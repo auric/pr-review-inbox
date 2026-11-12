@@ -9,9 +9,11 @@
 // B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17),
 // B31 (a lone `cd repo` and the cwd of the next command: SU18), B32 (the Unrestricted shell mode: SU19), B33 (the Unrestricted and Any
 // command settings without the read block: SU20), B34 (git inside a quoted argument, and the line endings of a step worktree: SU21),
+// B35 (a write run as --agent rl-main: U82, docs/plans/review-v2/task-subagents.md), B36 (workflow agents that write files and run
+// commands: U83 to U96, docs/plans/review-v2/agent-workflow.md section 6),
 // B37 (one Claude session per task part: U97 to U110, docs/plans/review-v2/part-session.md section 4),
 // GADV (Gate G-ADV: the advisor, docs/plans/review-v2/advisor.md).
-// Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--dry-run]
+// Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--opus] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
 // Raw output goes to .gate0/v3-local/raw/ (gitignored). Raw files hold local paths and account data.
 
@@ -41,6 +43,7 @@ import {
   contain,
   implementArgs,
   type KillReport,
+  MAIN_AGENT,
   RUN_MARKER,
 } from "../../src/server/review/claude";
 import { runnerDefaults } from "../../src/server/review/defaults";
@@ -86,6 +89,42 @@ import {
   usageOf,
   userLine,
 } from "./session";
+import {
+  type AgentDef,
+  agentCall,
+  agentDef,
+  agentFront,
+  agentStats,
+  bashIs,
+  type Cmd,
+  callOutcome,
+  cwdFilesFact,
+  info,
+  leadDef,
+  lift,
+  modelOfAgent,
+  outsideFolders,
+  overlap,
+  pathEnds,
+  u82a,
+  u82b,
+  u82c,
+  u82d,
+  u82e,
+  u82f,
+  u82g,
+  u82h,
+  u83,
+  u84,
+  u85,
+  u86,
+  u89,
+  u91,
+  u93,
+  u96,
+  type Outcome as WfOutcome,
+  withFlag,
+} from "./workflow";
 
 // The facts that rebuild the env of a run read no GIT_CONFIG_GLOBAL, so any path stands in for the app folder.
 const NO_APP = shellGitConfig("app");
@@ -127,6 +166,8 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b32: 2,
   b33: 2,
   b34: 2,
+  b35: 3,
+  b36: 8,
   b37: 9,
   gadv: 5,
 };
@@ -174,6 +215,8 @@ const CHECKS = [
   "B32",
   "B33",
   "B34",
+  "B35",
+  "B36",
   "B37",
   "GADV",
 ] as const;
@@ -188,9 +231,11 @@ let sshAlias = process.env.GATE_SSH_ALIAS || undefined;
 // GADV: the advisor must rank at or above the main model, and Haiku cannot be an advisor.
 let advisorModel = "opus";
 let mainModel = "sonnet";
+// B36: one opt-in Opus run (U87) and a fable agent in the advisor run (U95).
+const OPUS = argv.includes("--opus");
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i] ?? "";
-  if (a === "--dry-run") continue;
+  if (a === "--dry-run" || a === "--opus") continue;
   if (a === "--ssh-alias" || a.startsWith("--ssh-alias=")) {
     sshAlias = a === "--ssh-alias" ? (argv[++i] ?? "") : a.slice(12);
     continue;
@@ -217,7 +262,7 @@ if (sshAlias !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sshAlias
 function fail(msg: string): never {
   console.error(msg);
   console.error(
-    "usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--dry-run]",
+    "usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--opus] [--dry-run]",
   );
   process.exit(2);
 }
@@ -417,18 +462,16 @@ const leftover = tagged();
 if (leftover.length) console.log(`note: ${leftover.length} leftover ${TAG}* folders in the projects folder. Cleanup removes them.`);
 
 // One user agent from <config>/agents for B2. An agent with model haiku is preferred, because a run that is not blocked costs less.
-const userAgent = (() => {
+// B36 (U88) also reads its model. The gate only reads <config>/agents and never writes there.
+const userAgentFile = (() => {
   const dir = join(configDir, "agents");
   if (!existsSync(dir)) return undefined;
   const agents = readdirSync(dir)
     .filter((f) => f.endsWith(".md"))
-    .map((f) => {
-      const body = readFileSync(join(dir, f), "utf8");
-      const fm = body.startsWith("---") ? body.slice(3, body.indexOf("\n---", 3)) : "";
-      return { name: fm.match(/^name:\s*(.+)$/m)?.[1]?.trim() ?? basename(f, ".md"), model: fm.match(/^model:\s*(.+)$/m)?.[1]?.trim() };
-    });
-  return (agents.find((a) => a.model === "haiku") ?? agents[0])?.name;
+    .map((f) => agentFront(readFileSync(join(dir, f), "utf8"), f));
+  return agents.find((a) => a.model === "haiku") ?? agents[0];
 })();
+const userAgent = userAgentFile?.name;
 userAgentName = userAgent;
 
 // ---------- claude runner ----------
@@ -2558,10 +2601,11 @@ type Stop = {
 };
 // The app Stop of a CLI that waits in `sleep 600` (B25, B37): polls up to 20 s for the new sleep process, calls the app killTree on the
 // CLI, and kills each leftover bash or sleep process of the run by PID. since: the run start (epoch ms).
-async function stopRun(pid: number, since: number, marker: string): Promise<Stop> {
+// searchMs 0: no sleep search (B35, a kill during a subagent call without Bash).
+async function stopRun(pid: number, since: number, marker: string, searchMs = SLEEP_FIND_MS): Promise<Stop> {
   const f0 = performance.now();
   let sleeps: number[] = [];
-  while (!sleeps.length && performance.now() - f0 < SLEEP_FIND_MS) {
+  while (!sleeps.length && performance.now() - f0 < searchMs) {
     sleeps = stopProcs(since)
       .filter((p) => p.name === "sleep")
       .map((p) => p.pid);
@@ -3822,6 +3866,678 @@ async function b37() {
   }
 }
 
+// ---------- B35 and B36: write runs as --agent rl-main, and workflow agents ----------
+// One temp part folder per check: repo/ (a git repository with a.txt and e.txt), context/, the probe, and app/. shell.json is an
+// allowlist with the probe pattern and `sleep *` unless a run says otherwise. The PASS rules are in integration-check.md, sections
+// "Task subagents" (U82) and "Workflow agents" (U83 to U96).
+const WF_A0 = "RLGB-A0";
+const WF_E = "function add(a, b) {\n  return a + b;\n}\nconsole.log(add(1, 2));\n";
+const WF_OK = "Reply with the word OK. Use no tools.";
+// U88: each agents.json definition replies with its own word, so the reply shows which definition ran.
+const B36_MARK = {
+  Explore: "Reply with the word RLGB-DEF-EXPLORE. Use no tools.",
+  Plan: "Reply with the word RLGB-DEF-PLAN. Use no tools.",
+  user: "Reply with the word RLGB-DEF-USER. Use no tools.",
+};
+const B36_ASK = "Reply as your instructions say.";
+const WF_STEP_TURNS = 20;
+const WF_HOST_CMD = `curl -sS -m 5 ${SHELL_ORIGINS[0]}/rest/api/1.0/projects`;
+const agentSteps = (steps: string[]) =>
+  [
+    "This is a permission test of a gate. Make these tool calls, one call each, in this order. Try every call, also when a tool is missing, refused, or fails: note the result and go on. Do not retry a call. Make no other call.",
+    ...steps.map((s, i) => `${i + 1}. ${s}`),
+    "End with one line per call and its result.",
+  ].join("\n");
+const agentStep = (type: string, prompt: string, more = "") =>
+  `Agent with subagent_type "${type}"${more} and the prompt "${prompt}". Wait for its result.`;
+
+function partFolder(tag: string) {
+  const f = runnerFolder(tag);
+  const repo = join(f.work, "repo");
+  mkdirSync(join(f.base, "data"));
+  writeFileSync(join(f.work, PROBE), PROBE_JS);
+  writeFileSync(join(repo, "a.txt"), `${WF_A0}\n`);
+  writeFileSync(join(repo, "e.txt"), WF_E);
+  if (!DRY) sh(["git", "-c", "init.defaultBranch=main", "init", "-q", repo]);
+  const shell = (mode: ShellMode): ShellSpec => ({
+    mode,
+    rules: [PROBE_RULE, "sleep *"],
+    bashTimeoutSec: SHELL_TIMEOUT_SEC,
+    dataDir: join(f.base, "data"),
+    origins: SHELL_ORIGINS,
+  });
+  const folders = [join(projectsDir, encodeCwd(f.work)), join(tmpdir(), "claude", encodeCwd(f.work))];
+  const read = (p: string) => (existsSync(join(repo, p)) ? readFileSync(join(repo, p), "utf8") : "");
+  return { ...f, repo, shell, folders, read };
+}
+type Part = ReturnType<typeof partFolder>;
+
+// B35 (i) and B36 U94: the files of the per-cwd folders after a run with keepProjects. The gate deletes the folders, as the run end does.
+function cwdFiles(id: string, p: Part, r: Run) {
+  const names = labelIds(
+    p.folders.flatMap((d) => (existsSync(d) ? listFiles(d) : [])),
+    {},
+  );
+  const others = tagged().filter((d) => d.includes(basename(p.base)) && d !== encodeCwd(p.work));
+  const outside = [...outsideFolders(outputFiles(r), p.folders).map((f) => short(f, 120)), ...others.map((d) => `projects/${d}`)];
+  const inCwd = existsSync(join(p.work, ".claude")) ? listFiles(join(p.work, ".claude")) : [];
+  for (const d of p.folders) rmRetry(d);
+  return cwdFilesFact(id, {
+    names,
+    agentFiles: names.filter((n) => /agent-|subagents\//.test(n)).length,
+    outside,
+    inCwd,
+    left: p.folders.filter((d) => existsSync(d)).length,
+  });
+}
+
+// One run that keeps going when another run fails. errors: the reason per tag.
+function runner(group: string, work: string, errors: Record<string, string>) {
+  return async (tag: string, args: string[], prompt: string, opts: Parameters<typeof runClaude>[4]) => {
+    try {
+      return await runClaude(`${group}-${tag}`, args, prompt, work, { raw: true, ...opts });
+    } catch (e) {
+      errors[tag] = (e as Error).message;
+      return undefined;
+    }
+  };
+}
+const parse = (r: Run, work: string, allowed: Set<string>, agents: Set<string>, shell: ShellMode) => {
+  const p = createStreamParser({ cwd: work, allowedTools: allowed, agents, shell });
+  for (const e of r.events) p.line(JSON.stringify(e));
+  return p.state;
+};
+const putFact = (check: string) => (f: { id: string; status: Status; evidence: string }) => push(`${check}.${f.id}`, f.status, f.evidence);
+
+// ---------- B35 (integration-check.md U82): the WP-SA1 write run as --agent rl-main ----------
+// Run 1: implementArgs with rl-explorer (--agent rl-main) and the shell allowlist: the main thread makes the step calls, then Agent calls
+// for general-purpose, a user agent, and rl-explorer. Run 2: the same step calls without --agent, as the control and for (e). Run 3:
+// the app killTree during an rl-explorer call (h).
+async function b35() {
+  const p = partFolder("b35");
+  const errors: Record<string, string> = {};
+  const go = runner("b35", p.work, errors);
+  try {
+    const shell = p.shell("allowlist");
+    const explorer = {
+      description: "Read-only search of the code for one question.",
+      prompt: "You search the code read-only and answer the question of the request. You cannot change files or run commands.",
+      model: "haiku",
+    };
+    const schema = draft07(implementResult);
+    const env = shellEnv(appChildEnv(), shell, shellGitConfig(p.app));
+    const abs = join(p.base, "rlgb-out-abs.txt");
+    const cmds = {
+      probe: probe("b35p"),
+      git: "git status",
+      unlisted: "touch b35-unlisted.ran",
+      compound: `${probe("b35c")} && git status`,
+    };
+    const step = [
+      `Read with file_path ${join(p.repo, "e.txt")}`,
+      `Edit ${join(p.repo, "e.txt")}: rename the function add to sum at every place`,
+      `Write with file_path ${join(p.repo, "w.txt")} and content RLGB-W35`,
+      "Write with file_path ../rlgb-out-rel.txt and content RLGB-OUT",
+      `Write with file_path ${abs} and content RLGB-OUT`,
+      ...Object.values(cmds).map(bashStep),
+    ];
+    const agents = [
+      agentStep("general-purpose", WF_OK),
+      ...(userAgent ? [agentStep(userAgent, WF_OK)] : []),
+      agentStep(
+        "rl-explorer",
+        `Read ./repo/a.txt and reply with its first line. Then try to create ./repo/explorer.txt with the Write tool, and try to run the command ${probe("b35x")} with the Bash tool.`,
+      ),
+    ];
+    const tail = `Then return summary = first the line "platform=<the Platform value of your environment information>" (use no tool for it), then one line per call with its result. Set done = true, tests and notes empty lists, question null, specChange "". ${EMPTY_COVERAGE}`;
+    const a = implementArgs({
+      implement: true,
+      cwd: p.work,
+      appDir: p.app,
+      prompt: "",
+      schema,
+      maxTurns: 30,
+      model: "haiku",
+      shell,
+      explorer,
+    });
+    const r1 = await go("agent", a.args, b37Prompt([...step, ...agents], tail), { env, keepProjects: true });
+    const files = r1 && !DRY ? cwdFiles("U82i", p, r1) : undefined;
+    const e1 = p.read("e.txt");
+    const out1 = { rel: existsSync(join(p.base, "rlgb-out-rel.txt")), abs: existsSync(abs), w: existsSync(join(p.repo, "w.txt")) };
+    for (const f of ["rlgb-out-rel.txt", "rlgb-out-abs.txt"]) rmSync(join(p.base, f), { force: true });
+    rmSync(join(p.repo, "w.txt"), { force: true });
+    writeFileSync(join(p.repo, "e.txt"), WF_E);
+    // The plain run makes the same Bash calls, so the markers of run 1 go before it.
+    const mark = (f: string) => existsSync(join(p.work, f));
+    const marks1 = { p: mark("b35p.ran"), c: mark("b35c.ran"), u: mark("b35-unlisted.ran"), x: mark("b35x.ran") };
+    for (const f of ["b35p.ran", "b35c.ran", "b35-unlisted.ran", "b35x.ran"]) rmSync(join(p.work, f), { force: true });
+
+    const b = implementArgs({ implement: true, cwd: p.work, appDir: p.app, prompt: "", schema, maxTurns: 24, model: "haiku", shell });
+    const r2 = await go("plain", b.args, b37Prompt(step, tail), { env });
+    const e2 = p.read("e.txt");
+
+    const since = Date.now();
+    const marker = crypto.randomUUID();
+    const kill = { id: undefined as string | undefined, stop: undefined as Promise<Stop> | undefined, pid: 0 };
+    const c = implementArgs({
+      implement: true,
+      cwd: p.work,
+      appDir: p.app,
+      prompt: "",
+      schema,
+      maxTurns: 6,
+      model: "haiku",
+      shell,
+      explorer,
+    });
+    const r3 = await go(
+      "stop",
+      c.args,
+      b37Prompt([
+        agentStep(
+          "rl-explorer",
+          "Read each file in ./repo with one Read call per file. Then read each file again. Reply with all first lines.",
+        ),
+      ]),
+      {
+        env: { ...env, [RUN_MARKER]: marker },
+        spawned: (pid) => {
+          kill.pid = pid;
+          contain(pid, marker);
+        },
+        watch: (e, pid) => {
+          for (const bl of blocks(e))
+            if (
+              !kill.id &&
+              !e.parent_tool_use_id &&
+              bl.type === "tool_use" &&
+              isAgentTool(bl.name ?? "") &&
+              bl.input?.subagent_type === "rl-explorer"
+            )
+              kill.id = bl.id;
+          if (!kill.stop && kill.id && (e.parent_tool_use_id === kill.id || (e.subtype === "task_started" && e.tool_use_id === kill.id)))
+            kill.stop = stopRun(pid, since, marker, 0);
+        },
+      },
+    );
+    const stop = kill.stop ? await kill.stop : undefined;
+    if (kill.pid && !stop) await appKillTree(kill.pid, true);
+    if (DRY) return dry("B35", `user agent=${userAgent ? "yes" : "none"}`);
+
+    // ---------- facts ----------
+    const put = putFact("B35");
+    const lost = (id: string, tag: string) => push(`B35.${id}`, "FAIL", `${tag} did not run: ${short(errors[tag] ?? "no output", 200)}`);
+    const platformOf = (r: Run | undefined) => {
+      const s = (r ? structured(r) : undefined) as { summary?: unknown } | undefined;
+      return short(
+        String(s?.summary ?? "")
+          .match(/platform=([^\n;]*)/)?.[1]
+          ?.trim() ?? "none",
+        60,
+      );
+    };
+    if (r1) {
+      const st = parse(r1, p.work, a.allowed, a.agents, "allowlist");
+      const seen = (cmd: string) => ({ state: outcomeOf(r1, cmd).state, label: labelOf(st, cmd) });
+      const w = (name: string, file: boolean) => ({ ...fileOutcome(r1, "Write", name), file });
+      put(u82a({ rel: w("rlgb-out-rel.txt", out1.rel), abs: w("rlgb-out-abs.txt", out1.abs), repo: w("w.txt", out1.w) }));
+      put(
+        u82b({
+          git: seen(cmds.git),
+          compound: { ...seen(cmds.compound), marker: marks1.c },
+          probe: { ...seen(cmds.probe), marker: marks1.p },
+        }),
+      );
+      put(u82c({ unlisted: { ...seen(cmds.unlisted), marker: marks1.u } }));
+      put(u82d({ tools: r1.init?.tools ?? null, step: ["Read", "Grep", "Glob", "Edit", "Write", "Bash"], mode: r1.init?.permissionMode }));
+      const ex = agentOutcome(r1.events, "rl-explorer");
+      const exCall = agentCall(r1.events, "rl-explorer");
+      put(
+        u82f({
+          gp: agentOutcome(r1.events, "general-purpose"),
+          user: userAgent ? agentOutcome(r1.events, userAgent) : null,
+          ex,
+          exModel: exCall ? modelOfAgent(agentStats(r1.events, exCall.id)) : "none",
+          want: explorer.model,
+        }),
+      );
+      put(u82g({ ex, file: existsSync(join(p.repo, "explorer.txt")), marker: marks1.x }));
+    } else for (const id of ["U82a", "U82b", "U82c", "U82d", "U82f", "U82g"]) lost(id, "agent");
+    put(u82e({ agent: { file: e1, platform: platformOf(r1) }, plain: { file: e2, platform: platformOf(r2) }, want: process.platform }));
+    if (r2) {
+      const st = parse(r2, p.work, b.allowed, b.agents, "allowlist");
+      const desc = (cmd: string) => `${outcomeOf(r2, cmd).state} (${labelOf(st, cmd)})`;
+      push(
+        "B35.control",
+        "INFO",
+        `without --agent: init.tools=${(r2.init?.tools ?? []).join(",")} Write ../=${fileOutcome(r2, "Write", "rlgb-out-rel.txt").state} Write absolute=${fileOutcome(r2, "Write", "rlgb-out-abs.txt").state} ${Object.entries(
+          cmds,
+        )
+          .map(([k, v]) => `${k}=${desc(v)}`)
+          .join(" ")}`,
+      );
+    } else lost("control", "plain");
+    put(u82h({ started: !!stop, cliMs: stop?.cliMs ?? null, limitMs: STOP_LIMIT_MS }));
+    if (!r3) push("B35.U82h.error", "INFO", `stop did not run: ${short(errors.stop ?? "no output", 200)}`);
+    if (files) put(files);
+    else lost("U82i", "agent");
+  } finally {
+    p.drop();
+  }
+}
+
+// ---------- B36 (agent-workflow.md section 6, U83 to U96): workflow agents ----------
+// The agents.json of section 3.6 (scripts/gate/workflow.ts), written over the implementArgs file. The lead is rl-main without Bash,
+// Edit, and Write. Every run sets CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1, as section 3.8 plans for childEnv. At most 8 runs.
+async function b36() {
+  const p = partFolder("b36");
+  const errors: Record<string, string> = {};
+  const go = runner("b36", p.work, errors);
+  const schema = draft07(implementResult);
+  const def = (prompt: string, o: { tools?: string[]; model?: string; effort?: string; maxTurns?: number; readOnly?: boolean } = {}) =>
+    agentDef(
+      { description: "Gate B36 agent.", prompt, model: o.model ?? "haiku", ...o },
+      { shell: true, readOnly: o.readOnly, stepTurns: WF_STEP_TURNS },
+    );
+  const wf = (mode: ShellMode, agents: Record<string, AgentDef>, maxTurns: number, noEdit = false) => {
+    const shell = p.shell(mode);
+    const x = implementArgs({
+      implement: true,
+      cwd: p.work,
+      appDir: p.app,
+      prompt: "",
+      schema,
+      maxTurns,
+      model: "haiku",
+      shell,
+      explorer: { description: "unused", prompt: "unused", model: "haiku" },
+    });
+    writeJson(join(p.app, "agents.json"), { [MAIN_AGENT]: leadDef(Object.keys(agents), false), ...agents });
+    const args = noEdit ? withFlag(x.args, "--allowedTools", "Read,Grep,Glob,Write") : x.args;
+    const env = { ...shellEnv(appChildEnv(), shell, shellGitConfig(p.app)), CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" };
+    const names = new Set([MAIN_AGENT, ...Object.keys(agents)]);
+    return { args, env, allowed: x.allowed, names, mode, union: (args[args.indexOf("--tools") + 1] ?? "").split(",") };
+  };
+  const lead = (steps: string[]) => b37Prompt(steps);
+  try {
+    // Run 1: U83, U85 (allowlist), U86, U89, U91, U94, U96.
+    const relOut = "rlgb-out-rel.txt";
+    const absOut = join(p.base, "rlgb-out-abs.txt");
+    const c1 = { unlisted: "touch b36-unlisted.ran", git: "git status", compound: `${probe("b36c")} && git status` };
+    const writer = lift(
+      def(
+        agentSteps([
+          `Write with file_path ../${relOut} and content RLGB-OUT`,
+          `Write with file_path ${absOut} and content RLGB-OUT`,
+          `Write with file_path ${join(p.repo, "w.txt")} and content RLGB-W36`,
+          bashStep(probe("b36ok")),
+          ...Object.values(c1).map(bashStep),
+          'WebFetch with url https://example.invalid/ and prompt "Say OK."',
+          'Agent with subagent_type "general-purpose" and the prompt "Reply with the word OK."',
+        ]),
+        { tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch"] },
+      ),
+      "WebFetch",
+    );
+    const w1 = wf("allowlist", { "rl-gb-writer": writer }, 24);
+    const r1 = await go(
+      "writer",
+      w1.args,
+      lead([
+        `Edit with file_path ${join(p.repo, "a.txt")}, old_string "${WF_A0}", and new_string "RLGB-LEAD". Make this call yourself, not through an agent.`,
+        `Write with file_path ${join(p.repo, "lead.txt")} and content RLGB-LEAD. Make this call yourself.`,
+        agentStep("rl-gb-writer", "Make the tool calls of your instructions."),
+      ]),
+      { env: w1.env, keepProjects: true },
+    );
+    const files = r1 && !DRY ? cwdFiles("U94", p, r1) : undefined;
+    const a1 = p.read("a.txt");
+    const leadFile = existsSync(join(p.repo, "lead.txt"));
+    const out1 = { rel: existsSync(join(p.base, relOut)), abs: existsSync(absOut), w: existsSync(join(p.repo, "w.txt")) };
+
+    // Run 2: U84 (no Edit in --allowedTools) and U85 in Most commands mode (stored value any).
+    const c2 = { git: "git status", compound: `${probe("b36anyc")} && git status`, host: WF_HOST_CMD };
+    const w2 = wf(
+      "any",
+      {
+        "rl-gb-writer": def(
+          agentSteps([
+            `Read with file_path ${join(p.repo, "a.txt")}`,
+            `Edit with file_path ${join(p.repo, "a.txt")}, old_string "${WF_A0}", and new_string "RLGB-A84"`,
+            bashStep(probe("b36anyok")),
+            bashStep("touch b36-any.ran"),
+            ...Object.values(c2).map(bashStep),
+          ]),
+        ),
+      },
+      16,
+      true,
+    );
+    const before2 = p.read("a.txt");
+    const r2 = await go("any", w2.args, lead([agentStep("rl-gb-writer", "Make the tool calls of your instructions.")]), { env: w2.env });
+    const changed2 = p.read("a.txt") !== before2;
+
+    // Run 3: U93, the app killTree during an agent Bash `sleep 600`.
+    const w3 = wf("allowlist", { "rl-gb-sleeper": def(agentSteps([bashStep(B37_SLEEP)])) }, 6);
+    const since = Date.now();
+    const marker = crypto.randomUUID();
+    const kill = { stop: undefined as Promise<Stop> | undefined, pid: 0 };
+    await go("stop", w3.args, lead([agentStep("rl-gb-sleeper", "Make the tool calls of your instructions.")]), {
+      env: { ...w3.env, [RUN_MARKER]: marker },
+      spawned: (pid) => {
+        kill.pid = pid;
+        contain(pid, marker);
+      },
+      watch: (e, pid) => {
+        if (kill.stop || !e.parent_tool_use_id) return;
+        if (blocks(e).some((bl) => bl.type === "tool_use" && bl.name === "Bash" && String(bl.input?.command ?? "").trim() === B37_SLEEP))
+          kill.stop = stopRun(pid, since, marker);
+      },
+    });
+    const stop = kill.stop ? await kill.stop : undefined;
+    if (kill.pid && !stop) await appKillTree(kill.pid, true);
+
+    // Run 4: U92. The lead has --max-turns 4. rl-gb-long needs 7 turns, rl-gb-short has maxTurns 2.
+    const reads = agentSteps(Array.from({ length: 6 }, () => `Read with file_path ${join(p.repo, "a.txt")}. Wait for its result.`));
+    const w4 = wf(
+      "allowlist",
+      { "rl-gb-long": def(reads, { readOnly: true }), "rl-gb-short": def(reads, { readOnly: true, maxTurns: 2 }) },
+      4,
+    );
+    const r4 = await go(
+      "turns",
+      w4.args,
+      lead([
+        agentStep("rl-gb-long", "Make the tool calls of your instructions."),
+        agentStep("rl-gb-short", "Make the tool calls of your instructions."),
+      ]),
+      { env: w4.env },
+    );
+
+    // Run 5: U88, U89 INFO (Agent allowed, depth 1), U90, and two agents in one message.
+    const userModel = userAgentFile?.model?.toLowerCase().includes("sonnet") ? "haiku" : "sonnet";
+    const named = userAgent && !["Explore", "Plan"].includes(userAgent) ? userAgent : undefined;
+    const w5 = wf(
+      "allowlist",
+      {
+        Explore: def(B36_MARK.Explore, { readOnly: true, model: "sonnet" }),
+        Plan: def(B36_MARK.Plan, { readOnly: true, model: "sonnet" }),
+        ...(named ? { [named]: def(B36_MARK.user, { readOnly: true, model: userModel }) } : {}),
+        "rl-gb-pinned": def(WF_OK, { readOnly: true, model: "sonnet" }),
+        "rl-gb-nester": lift(
+          def(agentSteps(['Agent with subagent_type "general-purpose" and the prompt "Reply with the word OK."']), { readOnly: true }),
+          "Agent",
+        ),
+      },
+      16,
+    );
+    const r5 = await go(
+      "models",
+      w5.args,
+      lead([
+        `Two Agent calls in one message, at the same time: subagent_type "Explore" and subagent_type "Plan", each with the prompt "${B36_ASK}".`,
+        ...(named ? [agentStep(named, B36_ASK)] : []),
+        agentStep("rl-gb-pinned", WF_OK, ', model "haiku",'),
+        agentStep("rl-gb-nester", "Make the tool calls of your instructions."),
+      ]),
+      { env: w5.env },
+    );
+
+    // Run 6: U87, model inherit and an unknown alias that passes the app model regex.
+    const w6 = wf(
+      "allowlist",
+      {
+        "rl-gb-inherit": def(WF_OK, { readOnly: true, model: "inherit" }),
+        "rl-gb-unknown": def(WF_OK, { readOnly: true, model: "nomodel-9" }),
+      },
+      12,
+    );
+    const r6 = await go("badmodel", w6.args, lead([agentStep("rl-gb-inherit", WF_OK), agentStep("rl-gb-unknown", WF_OK)]), { env: w6.env });
+
+    // Run 7: U95, --advisor opus. --opus adds an agent on fable.
+    const ask =
+      "Consult the advisor tool once with the question: which is larger, 2 to the power 10 or 10 to the power 3? Then reply with the answer.";
+    const w7 = wf(
+      "allowlist",
+      { "rl-gb-adv": def(ask, { readOnly: true }), ...(OPUS ? { "rl-gb-fable": def(ask, { readOnly: true, model: "fable" }) } : {}) },
+      12,
+    );
+    const r7 = await go(
+      "advisor",
+      [...w7.args, "--advisor", "opus"],
+      lead([
+        agentStep("rl-gb-adv", "Do what your instructions say."),
+        ...(OPUS ? [agentStep("rl-gb-fable", "Do what your instructions say.")] : []),
+      ]),
+      { env: w7.env },
+    );
+
+    // Run 8 (--opus only): U87, effort xhigh and max on Opus agents.
+    const w8 = OPUS
+      ? wf(
+          "allowlist",
+          {
+            "rl-gb-xhigh": def(WF_OK, { readOnly: true, model: "opus", effort: "xhigh" }),
+            "rl-gb-max": def(WF_OK, { readOnly: true, model: "opus", effort: "max" }),
+          },
+          12,
+        )
+      : undefined;
+    const r8 = w8
+      ? await go("opus", w8.args, lead([agentStep("rl-gb-xhigh", WF_OK), agentStep("rl-gb-max", WF_OK)]), { env: w8.env })
+      : undefined;
+    if (DRY) return dry("B36", `opus=${OPUS}; user agent=${named ? "yes" : "none"}`);
+
+    // ---------- facts ----------
+    const put = putFact("B36");
+    const lost = (id: string, tag: string) => push(`B36.${id}`, "FAIL", `${tag} did not run: ${short(errors[tag] ?? "no output", 200)}`);
+    // An INFO fact gates nothing, so a lost run stays INFO.
+    const lostInfo = (id: string, tag: string) => push(`B36.${id}`, "INFO", `not run: ${tag}: ${short(errors[tag] ?? "no output", 200)}`);
+    const defRan = (r: Run, name: string, word: string) => {
+      const c = agentCall(r.events, name);
+      return c ? agentStats(r.events, c.id).text.includes(word) : "not called";
+    };
+    const nestedAgent = (r: Run, parent: string): WfOutcome => {
+      const a = callOutcome(r.events, parent, "Agent");
+      return a.state === "not tried" ? callOutcome(r.events, parent, "Task") : a;
+    };
+    const agentLine = (r: Run, name: string) => {
+      const c = agentCall(r.events, name);
+      if (!c) return `${name}=not called`;
+      const s = agentStats(r.events, c.id);
+      return `${name}=${agentOutcome(r.events, name).state} model=${modelOfAgent(s)} asked model=${String(c.input.model ?? "none")} text=${JSON.stringify(short(s.text, 120))}`;
+    };
+    const desc = (r: Run) =>
+      `exit=${r.exit}${r.timedOut ? " timed out" : ""} init=${!!r.init} results=${r.results.map((e) => `${e.subtype}${e.is_error ? "!" : ""}`).join(",") || "none"}${r.exit !== 0 && r.stderr ? ` stderr=${short(r.stderr, 200)}` : ""}`;
+    const cmd = (r: Run, st: StreamState, parent: string, c: string, want: string, marker: boolean): Cmd => ({
+      ...callOutcome(r.events, parent, "Bash", bashIs(c)),
+      label: labelOf(st, c),
+      want,
+      marker,
+    });
+
+    const call1 = r1 ? agentCall(r1.events, "rl-gb-writer") : undefined;
+    if (r1 && call1) {
+      const st = parse(r1, p.work, w1.allowed, w1.names, "allowlist");
+      const w = (name: string, file: boolean) => ({ ...callOutcome(r1.events, call1.id, "Write", pathEnds(name)), file });
+      put(u83({ called: true, rel: w(relOut, out1.rel), abs: w("rlgb-out-abs.txt", out1.abs), repo: w("w.txt", out1.w) }));
+      put(
+        u85("allowlist", {
+          called: true,
+          agent: call1.id,
+          cmds: {
+            unlisted: cmd(r1, st, call1.id, c1.unlisted, "allowlist", existsSync(join(p.work, "b36-unlisted.ran"))),
+            git: cmd(r1, st, call1.id, c1.git, "deny", false),
+            compound: cmd(r1, st, call1.id, c1.compound, "deny", ran(p.work, "b36c")),
+          },
+          control: { ...callOutcome(r1.events, call1.id, "Bash", bashIs(probe("b36ok"))), marker: ran(p.work, "b36ok") },
+        }),
+      );
+      put(u86({ tools: r1.init?.tools ?? null, union: w1.union, fetch: callOutcome(r1.events, call1.id, "WebFetch") }));
+      put(
+        u96({
+          leadEdit: callOutcome(r1.events, null, "Edit"),
+          leadWrite: callOutcome(r1.events, null, "Write"),
+          leadFile: leadFile || a1.trim() !== WF_A0,
+          agentFile: out1.w,
+        }),
+      );
+    } else
+      for (const id of ["U83", "U85.allowlist", "U86", "U96"])
+        r1 ? push(`B36.${id}`, "FAIL", `the lead did not call rl-gb-writer: ${desc(r1)}`) : lost(id, "writer");
+
+    const call2 = r2 ? agentCall(r2.events, "rl-gb-writer") : undefined;
+    if (r2 && call2) {
+      const st = parse(r2, p.work, w2.allowed, w2.names, "any");
+      put(u84({ edit: callOutcome(r2.events, call2.id, "Edit"), changed: changed2 }));
+      put(
+        u85("any", {
+          called: true,
+          agent: call2.id,
+          cmds: {
+            git: cmd(r2, st, call2.id, c2.git, "deny", false),
+            compound: cmd(r2, st, call2.id, c2.compound, "deny", ran(p.work, "b36anyc")),
+            host: cmd(r2, st, call2.id, c2.host, "deny", false),
+          },
+          control: { ...callOutcome(r2.events, call2.id, "Bash", bashIs(probe("b36anyok"))), marker: ran(p.work, "b36anyok") },
+        }),
+      );
+      const t = callOutcome(r2.events, call2.id, "Bash", bashIs("touch b36-any.ran"));
+      push(
+        "B36.U85.any-unlisted",
+        "INFO",
+        `Most commands, a command with no saved pattern: touch=${t.state} marker=${existsSync(join(p.work, "b36-any.ran"))}`,
+      );
+    } else
+      for (const id of ["U84", "U85.any"])
+        r2 ? push(`B36.${id}`, "FAIL", `the lead did not call rl-gb-writer: ${desc(r2)}`) : lost(id, "any");
+
+    const opusLine = r8
+      ? `--opus: ${desc(r8)}; ${["rl-gb-xhigh", "rl-gb-max"].map((n) => agentLine(r8, n)).join("; ")}`
+      : OPUS
+        ? `opus did not run: ${short(errors.opus ?? "no output", 160)}`
+        : "effort xhigh and max on Opus: not run, add --opus";
+    put(
+      info(
+        "U87",
+        `${r6 ? `${desc(r6)}; ${agentLine(r6, "rl-gb-inherit")}; ${agentLine(r6, "rl-gb-unknown")}` : `badmodel did not run: ${short(errors.badmodel ?? "no output", 160)}`}; ${opusLine}`,
+      ),
+    );
+
+    if (r5) {
+      const userPart = named
+        ? `; user agent: file model=${short(userAgentFile?.model ?? "none", 40)} agents.json model=${userModel} ${agentLine(r5, named)} agents.json definition=${defRan(r5, named, "RLGB-DEF-USER")}`
+        : "; no user agent file";
+      put(
+        info(
+          "U88",
+          `agents.json Explore and Plan on sonnet: ${agentLine(r5, "Explore")} agents.json definition=${defRan(r5, "Explore", "RLGB-DEF-EXPLORE")}; ${agentLine(r5, "Plan")} agents.json definition=${defRan(r5, "Plan", "RLGB-DEF-PLAN")}${userPart}`,
+        ),
+      );
+      put(info("U90", `agent pinned to sonnet, lead passes model haiku: ${agentLine(r5, "rl-gb-pinned")}`));
+      const ex = agentCall(r5.events, "Explore");
+      const pl = agentCall(r5.events, "Plan");
+      const o = ex && pl ? overlap(r5.events, ex.id, pl.id) : undefined;
+      put(
+        info(
+          "parallel",
+          o
+            ? `Explore and Plan: both started=${o.started} one message=${o.oneMessage} run times overlap=${o.overlap}`
+            : "the lead did not call both Explore and Plan",
+        ),
+      );
+    } else for (const id of ["U88", "U90", "parallel"]) lostInfo(id, "models");
+
+    const nester = r5 ? agentCall(r5.events, "rl-gb-nester") : undefined;
+    const nestedInfo =
+      nester && r5
+        ? (() => {
+            const n = nestedAgent(r5, nester.id);
+            return `Agent allowed and depth 1: nested Agent=${n.state} events under it=${n.id ? agentStats(r5.events, n.id).childEvents : 0} text=${JSON.stringify(short(n.text, 120))}`;
+          })()
+        : "Agent allowed and depth 1: rl-gb-nester not called";
+    if (r1 && call1) {
+      const n = nestedAgent(r1, call1.id);
+      const report = JSON.stringify(short(agentStats(r1.events, call1.id).text, 200));
+      put(u89({ call: n, grandchild: n.id ? agentStats(r1.events, n.id).childEvents : 0 }, `${nestedInfo}; writer report=${report}`));
+    } else lost("U89", "writer");
+
+    if (r1 && call1) {
+      const nested = toolUses(r1).filter((t) => t.parent === call1.id);
+      const write = nested.find((t) => t.name === "Write");
+      const runs = [r1, r5].filter((r): r is Run => !!r);
+      const childModels = [
+        ...new Set(
+          runs.flatMap((r) =>
+            toolUses(r)
+              .filter((t) => t.parent === null && isAgentTool(t.name))
+              .flatMap((t) => agentStats(r.events, t.id).childModels),
+          ),
+        ),
+      ].filter((m) => m !== "none" && !m.startsWith("<"));
+      const usage = usageOf(r1.events);
+      put(
+        u91({
+          write: { parent: !!write, filePath: typeof write?.input.file_path === "string" },
+          bash: { parent: nested.some((t) => t.name === "Bash") },
+          totalTokens: agentStats(r1.events, call1.id).totalTokens,
+          childModels,
+          usageModels: runs.flatMap((r) => usageOf(r.events)?.models ?? []),
+          cost: usage?.cost ?? null,
+        }),
+      );
+    } else lost("U91", "writer");
+
+    if (r4) {
+      const reads = (n: string) => {
+        const c = agentCall(r4.events, n);
+        return c
+          ? `${n}=${agentOutcome(r4.events, n).state} Reads=${toolUses(r4).filter((t) => t.parent === c.id && t.name === "Read").length} text=${JSON.stringify(short(agentStats(r4.events, c.id).text, 100))}`
+          : `${n}=not called`;
+      };
+      put(
+        info(
+          "U92",
+          `--max-turns 4: ${desc(r4)} num_turns=${r4.results.map((e) => e.num_turns ?? "none").join(",") || "none"}; ${reads("rl-gb-long")} (needs 7 turns); ${reads("rl-gb-short")} (maxTurns 2)`,
+        ),
+      );
+    } else lostInfo("U92", "turns");
+
+    put(
+      u93({
+        started: !!stop,
+        sleeps: stop?.sleeps ?? [],
+        cliMs: stop?.cliMs ?? null,
+        sleepMs: stop?.sleepMs ?? null,
+        job: stop?.report.job ?? null,
+        win: process.platform === "win32",
+        left: stop?.left.map((x) => x.name) ?? [],
+      }),
+    );
+    if (files) put(files);
+    else lost("U94", "writer");
+
+    if (r7) {
+      const per = (n: string) => {
+        const c = agentCall(r7.events, n);
+        if (!c) return `${n}=not called`;
+        const s = advisorStream(r7.events.filter((e) => e.parent_tool_use_id === c.id));
+        return `${agentLine(r7, n)} advisor calls=${s.advisorCalls} advisor results=${s.advisorResults} advisor iterations=${s.advisorIterations}`;
+      };
+      const main = advisorStream(r7.events.filter((e) => !e.parent_tool_use_id));
+      put(
+        info(
+          "U95",
+          `--advisor opus: ${desc(r7)}; ${per("rl-gb-adv")}${OPUS ? `; ${per("rl-gb-fable")}` : "; fable agent: add --opus"}; main thread advisor calls=${main.advisorCalls}; result advisor iterations=${main.resultAdvisorIterations}; modelUsage=${(usageOf(r7.events)?.models ?? []).join(",") || "none"}`,
+        ),
+      );
+    } else lostInfo("U95", "advisor");
+  } finally {
+    p.drop();
+  }
+}
+
 // ---------- GADV: the advisor (docs/plans/review-v2/advisor.md, Gate G-ADV) ----------
 // All runs use the app child env and the runner flag set. Its --tools and --allowedTools lists omit the advisor.
 // Runs envoff, disallowed, and tools add the advisor to both lists, so --tools cannot hide the effect of a switch (GADV.5b).
@@ -3975,6 +4691,8 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B32: b32,
   B33: b33,
   B34: b34,
+  B35: b35,
+  B36: b36,
   B37: b37,
   GADV: gadv,
 };
