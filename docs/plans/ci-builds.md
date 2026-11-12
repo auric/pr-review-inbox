@@ -2,6 +2,8 @@
 
 Status (2026-10-29): Layer A is code complete. Layer B and Layer C are ON HOLD. The CI probe ran on 2026-10-29 (integration-check.md, section "CI builds").
 
+Update (2026-11-12): docs/plans/review-v2/part-session.md section 2.15 replaces Layer C. Package PS7a gives "Let Claude fix the build" with a pasted log. Package PS7b reads the failed log from Jenkins and adds the red-build fixes, a tick per part that allows up to N fix pushes (user approval of 2026-11-12). The CI server card and the log client of PS7b are built. Probe fact CI12 (the log read) is not run. Layer B stays on hold.
+
 - Layer A reads the build status that the CI server already posts to Bitbucket. It uses the existing Bitbucket token and sends GET only.
 - Layer B starts a Jenkins build. The probe showed that the plan's multibranch design does not fit the user's Jenkins. Layer B needs a new design before it resumes.
 - Layer C explains why a build failed. It builds on Layer B.
@@ -135,7 +137,7 @@ Layer B must be redesigned for one job with a branch parameter per repository be
 - BRIEF section 7: add `src/server/ci/`, with all Jenkins calls in `src/server/ci/jenkins.ts`.
 - review-v3 Q10: Jenkins 2.555.3. Q11 says "read-only token", but Layer B needs Job/Build, so Q11 must be reopened.
 
-## Layer C: why did the build fail (ON HOLD)
+## Layer C: why did the build fail (replaced by part-session.md section 2.15)
 
 - Get the build number from `ci_trigger`, or from a status URL with the Jenkins origin. The URL path shape must be checked again for this (see the probe facts).
 - Read a log tail of at most 2 MB with `<build>/logText/progressiveText?start=<X-Text-Size − cap>`. Keep it only in the run folder.
