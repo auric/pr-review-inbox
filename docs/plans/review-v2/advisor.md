@@ -1,6 +1,6 @@
 # Advisor in app runs
 
-Status: design of 2026-11-11. Not built. Gate G-ADV run 1 (2026-11-11, CLI 2.1.322) confirmed ADV1, ADV3, ADV5, and in effect ADV2. ADV4 stays open (integration-check.md, section Advisor).
+Status: built (WP-ADV1, spec.md section 6.27, AC-B205 to AC-B211). Design of 2026-11-11. Gate G-ADV run 1 (2026-11-11, CLI 2.1.322) confirmed ADV1, ADV3, ADV5, and in effect ADV2. ADV4 stays open (integration-check.md, section Advisor).
 
 ## Facts (docs)
 
@@ -43,4 +43,5 @@ Status: design of 2026-11-11. Not built. Gate G-ADV run 1 (2026-11-11, CLI 2.1.3
 ## Packages
 
 1. WP-ADV0: built. Gate GADV in scripts/gate/claude-checks.ts runs the six checks with the real CLI and prints sanitized facts. The user runs `bun scripts/gate/claude-checks.ts --only GADV`, then `bun scripts/gate/sanitize-claude.ts`. Options: `--advisor <model>` (default `opus`) and `--main-model <model>` (default `sonnet`). Facts go to integration-check.md, section "Advisor (Gate G-ADV, not run)".
-2. WP-ADV1: the profile field, the flag and env, the init allowlist, the parser, the help text, tests with the fake claude, screenshots.
+2. WP-ADV1: built. The profile field, the flag and env, the parser, the help text, tests with the fake claude. No README image shows the Run setup part, so the screenshots stay as they are. The init allowlist needed no change. Gate fixes: GADV.2 ignores `slash_commands`, and GADV.2, GADV.4, GADV.5a, and GADV.5b judge by the advisor calls. GADV.4 and GADV.5a now send the advisor prompt.
+3. Open: the profile save compares model families only. The docs accept some lower-family advisors of a newer version, for example Sonnet 5.5 for Opus 4.7, and Haiku 5.5 for some main models. The app refuses them. The wire form of "declined" is not documented: the parser reads `stop_reason` "refusal" as declined. No gate run has shown it.

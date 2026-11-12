@@ -295,6 +295,7 @@ describe("checks and volume of a profile (spec.md sections 1.1 to 1.4)", () => {
       mcp: [],
       model: null,
       effort: null,
+      advisor: null,
       reviewer: { model: null, effort: null, mode: "auto" as const },
       modules: ["security" as const],
       volume: "quiet" as const,

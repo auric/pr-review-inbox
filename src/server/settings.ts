@@ -317,7 +317,9 @@ export function createSettings(
         const r = settingsInput.safeParse(v);
         if (r.success) return r.data;
         // The prefix list has its own sentences (spec.md section 6.16.1).
-        const own = r.error.issues.find((i) => i.path[0] === "taskBranchPrefixes" || i.path[0] === "runLimits");
+        const own = r.error.issues.find(
+          (i) => i.path[0] === "taskBranchPrefixes" || i.path[0] === "runLimits" || (i.path[0] === "profiles" && i.path[2] === "advisor"),
+        );
         return c.json<ApiError>({ error: own?.message ?? "Invalid settings." }, 400);
       }),
       (c) =>

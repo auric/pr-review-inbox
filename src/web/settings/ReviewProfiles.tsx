@@ -100,7 +100,7 @@ const resetBtn =
 
 const RESET_ID = "profiles-reset";
 const STATUS_ID = "profiles-status";
-const FIELD_ORDER: Field[] = ["name", "note", "prompt", "maxTurns", "model", "reviewerModel", "verifierModel"];
+const FIELD_ORDER: Field[] = ["name", "note", "prompt", "maxTurns", "model", "advisor", "reviewerModel", "verifierModel"];
 const EFFORT_NAME: Record<Effort, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
 const MODES: [ReviewerMode, string, (runner: string) => string][] = [
   ["auto", "Auto", (r) => `${r} uses reviewer agents only for a change of 1,200+ changed lines or 30+ files.`],
@@ -999,6 +999,29 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
       </div>
       <div className={setupRow}>
         <div className={labelRow}>
+          <label htmlFor={profileId(i, "advisor")} className={setupLabel}>
+            Advisor{of}
+          </label>
+          <FieldReset p={props} fields={["advisor"]} focus={`#${profileId(i, "advisor")}`} />
+        </div>
+        <div className="grid min-w-0 gap-1">
+          <ModelPick
+            id={profileId(i, "advisor")}
+            textId={profileId(i, "advisor-id")}
+            label={`Advisor model ID of profile ${i + 1}`}
+            value={d.advisor}
+            fallback="Off"
+            aliases={meta?.advisors}
+            error={found.advisor ? profileId(i, "advisor-error") : undefined}
+            onPick={(advisor) => edit({ advisor })}
+            onText={(advisor) => type({ advisor })}
+            onBlur={onBlur}
+          />
+          <p className={help}>A stronger model gives {meta?.short} advice at hard points. It uses more of your plan.</p>
+        </div>
+      </div>
+      <div className={setupRow}>
+        <div className={labelRow}>
           <span id={profileId(i, "reviewer")} className={setupLabel}>
             Reviewer agents{of}
           </span>
@@ -1192,6 +1215,8 @@ function ModelPick(props: {
   value: string;
   // The text of the "no flag" choice. Agent pickers keep the plain text: an agent inherits the model and effort of the main run.
   fallback?: string;
+  // The menu aliases. Absent: the runner model aliases.
+  aliases?: string[];
   disabled?: boolean;
   error?: string;
   onPick: (model: string) => void;
@@ -1199,7 +1224,7 @@ function ModelPick(props: {
   onBlur: () => void;
 }) {
   const runner = useMeta().data?.runner;
-  const aliases = runner?.models ?? [];
+  const aliases = props.aliases ?? runner?.models ?? [];
   // chose: the user picked "Other model ID…", so the text field stays while it holds an alias or nothing.
   const [chose, setChose] = useState(false);
   const text = useRef<HTMLInputElement>(null);

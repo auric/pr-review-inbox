@@ -352,6 +352,7 @@ describe("settings API", () => {
     mcp: [],
     model: null,
     effort: null,
+    advisor: null,
     reviewer: { model: null, effort: null, mode: "auto" },
     modules: [],
     volume: "balanced",
@@ -396,6 +397,54 @@ describe("settings API", () => {
     }
     expect(readConfig(dir)).not.toHaveProperty("profiles");
     expect(readConfig(dir)).not.toHaveProperty("checkSeconds");
+  });
+
+  // AC-B205, AC-B206: the advisor field and its save rule (docs/plans/review-v2/advisor.md).
+  test("the advisor saves when it ranks at or above the main models, and a profile without it reads as off", async () => {
+    const s = setup();
+    expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
+    const sonnet = { ...custom, model: "sonnet" };
+    for (const [p, error] of [
+      [{ ...custom, advisor: "haiku" }, "Performance: A Haiku model cannot be an advisor."],
+      [{ ...custom, advisor: "claude-haiku-5-5" }, "Performance: A Haiku model cannot be an advisor."],
+      [
+        { ...custom, model: "opus", advisor: "sonnet" },
+        "Performance: The advisor ranks below the model opus. Pick an advisor at or above it.",
+      ],
+      [
+        { ...sonnet, advisor: "opus", verifier: { ...custom.verifier, model: "claude-fable-5-2" } },
+        "Performance: The advisor ranks below the model claude-fable-5-2. Pick an advisor at or above it.",
+      ],
+      [{ ...custom, advisor: "-x" }, null],
+    ] as const) {
+      const res = await s.put({ baseUrl: fake.url, profiles: [p] });
+      expect(res.status).toBe(400);
+      if (error) expect(((await res.json()) as { error: string }).error).toBe(error);
+    }
+    expect(readConfig(dir)).not.toHaveProperty("profiles");
+    for (const p of [
+      { ...sonnet, advisor: "opus" },
+      { ...sonnet, advisor: "sonnet" },
+      { ...custom, model: "claude-opus-5-5", advisor: "fable" },
+      // The app does not know the default model of the user.
+      { ...custom, advisor: "opus" },
+      { ...custom, model: "opus", advisor: "claude-opus-5-5" },
+    ]) {
+      const res = await s.put({ baseUrl: fake.url, profiles: [p] });
+      expect(res.status).toBe(200);
+      expect(s.settings.profiles()[0]?.advisor).toBe(p.advisor);
+    }
+    // A shipped profile stores the advisor as an edited field. A stored profile from before the field reads as off.
+    const general = SHIPPED_PROFILES[0] as Profile;
+    expect((await s.put({ baseUrl: fake.url, profiles: [{ ...general, advisor: "fable" }] })).status).toBe(200);
+    expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).profiles).toEqual([
+      { id: "general", advisor: "fable", edited: { advisor: expect.any(String) } },
+    ]);
+    s.settings.close();
+    const file = join(dir, "config.json");
+    const { advisor: _, ...old } = custom;
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), profiles: [old] }));
+    expect((await setup().get()).profiles).toEqual([custom]);
   });
 
   test("profiles null restores the shipped profiles", async () => {

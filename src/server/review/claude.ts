@@ -52,6 +52,8 @@ export type RunSpec = {
   // --model and --effort. Absent or null: no flag.
   model?: string | null;
   effort?: Effort | null;
+  // --advisor. Absent or null: no flag, and advisorEnv turns the advisor off.
+  advisor?: string | null;
   main: AgentSpec;
   // Review subagents, by name. rl-main can call only these.
   agents: Record<string, AgentSpec>;
@@ -88,6 +90,7 @@ export type ImplementSpec = {
   maxTurns: number;
   model?: string | null;
   effort?: Effort | null;
+  advisor?: string | null;
   timeoutMs?: number;
   shell?: ShellSpec;
   explorer?: AgentSpec;
@@ -112,6 +115,8 @@ export type RunOutcome = {
   notes?: RunNote[];
   // The Bash commands that Claude Code refused (spec.md section 6.21). Absent: the run did not start.
   refused?: Refusal[];
+  // The --advisor value of the run. null: off. Absent: the run did not start.
+  advisor?: string | null;
   exitCode: number | null;
   stderrTail: string;
 };
@@ -138,6 +143,13 @@ export function childEnv(): Record<string, string> {
   // Gate B3: with this switch, subagents run in the foreground and the run sends one result event.
   env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
   return env;
+}
+
+// docs/plans/review-v2/advisor.md. Off: the advisor switch is a second guard; its effect is not verified (ADV4). On: the advisor needs
+// feature-flag fetching, which DISABLE_TELEMETRY turns off. childEnv already drops the CLAUDE_CODE_* switches that turn it off.
+export function advisorEnv(env: Record<string, string>, advisor: string | null | undefined): Record<string, string> {
+  if (!advisor) return { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" };
+  return Object.fromEntries(Object.entries(env).filter(([k]) => k.toUpperCase() !== "DISABLE_TELEMETRY"));
 }
 
 function older(v: string, min: string) {
@@ -378,9 +390,10 @@ function writeMcp(appDir: string, mcpServers: Record<string, McpServerSpec>) {
   };
 }
 
-function checkAgentFields(list: { model?: string | null; effort?: Effort | null }[]) {
+function checkAgentFields(list: { model?: string | null; effort?: Effort | null; advisor?: string | null }[]) {
   for (const a of list) {
     if (a.model != null && !modelName.safeParse(a.model).success) throw new Error(`Invalid model name: ${a.model}`);
+    if (a.advisor != null && !modelName.safeParse(a.advisor).success) throw new Error(`Invalid model name: ${a.advisor}`);
     if (a.effort != null && !EFFORTS.includes(a.effort)) throw new Error(`Invalid effort: ${a.effort}`);
   }
 }
@@ -441,6 +454,7 @@ function prepare(spec: RunSpec) {
     String(spec.maxTurns),
     ...(spec.model ? ["--model", spec.model] : []),
     ...(spec.effort ? ["--effort", spec.effort] : []),
+    ...(spec.advisor ? ["--advisor", spec.advisor] : []),
     "--no-session-persistence",
   ];
   // JSON quoting is close to the Windows argument quoting.
@@ -536,6 +550,7 @@ export function implementArgs(spec: ImplementSpec) {
     String(spec.maxTurns),
     ...(spec.model ? ["--model", spec.model] : []),
     ...(spec.effort ? ["--effort", spec.effort] : []),
+    ...(spec.advisor ? ["--advisor", spec.advisor] : []),
     "--no-session-persistence",
   ];
   if (JSON.stringify(args).length > MAX_ARGV)
@@ -612,13 +627,14 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const base = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
       const limit = Math.min(own ?? base ?? RUN_TIMEOUT_MS, RUN_TIME_MAX_MS);
       const shell = "implement" in spec ? spec.shell : undefined;
+      const advisor = "resume" in spec ? null : spec.advisor;
       // implementArgs wrote this file beside shell.json.
       const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";
       const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
-        env: { ...(shell ? shellEnv(childEnv(), shell, shellGit) : childEnv()), [RUN_MARKER]: marker },
+        env: { ...advisorEnv(shell ? shellEnv(childEnv(), shell, shellGit) : childEnv(), advisor), [RUN_MARKER]: marker },
         stdin: new Blob([spec.prompt]),
         stdout: "pipe",
         stderr: "pipe",
@@ -685,6 +701,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         events: parser.events(),
         notes: parser.state.notes,
         refused: parser.state.refused,
+        advisor: advisor ?? null,
         exitCode,
         stderrTail: stderr,
       };

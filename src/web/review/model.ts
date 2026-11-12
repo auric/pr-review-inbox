@@ -488,10 +488,11 @@ export const skillsText = (run: Pick<RunDto, "skills">) => {
 };
 
 // The model and the effort of a run. A run without an init event and without --model names the default model of the settings.
+// usage.advisor: the advisor models of a run with advisor calls.
 // effortNow: the run stored no default effort, so the text names the effort of the current settings.
 // defaults null: the settings file is absent or unreadable, so the text stays plain.
 export const setupText = (
-  run: Pick<RunDto, "model" | "effort" | "effortDefault" | "effortNow" | "status">,
+  run: Pick<RunDto, "model" | "effort" | "effortDefault" | "effortNow" | "status"> & Partial<Pick<RunDto, "usage">>,
   defaults: RunnerDefaults | null,
 ) => {
   const mine = run.status === "running" ? "your default" : "your default now";
@@ -502,7 +503,8 @@ export const setupText = (
       : run.effortDefault
         ? `${run.effortDefault} effort (${run.effortNow ? "your default now" : "your default"})`
         : "default effort";
-  return `${model}, ${effort}`;
+  const advisor = run.usage?.advisor?.length ? `, ${run.usage.advisor.join(", ")} advisor` : "";
+  return `${model}, ${effort}${advisor}`;
 };
 
 // ---------- Brief ----------

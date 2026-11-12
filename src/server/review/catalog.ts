@@ -24,13 +24,15 @@ import type { DiffFile } from "./diffmap";
 import { SKILL_INDEX, SKILL_INDEX_AFTER } from "./skills";
 
 // login: `claude auth login --help` (CLI 2.1.295) names --claudeai for the subscription.
-// models: the --model aliases that code.claude.com/docs/en/model-config lists for every account. modelExample: a full model ID.
+// models: the --model aliases that code.claude.com/docs/en/model-config lists for every account. advisors: the --advisor aliases of
+// code.claude.com/docs/en/advisor.md. modelExample: a full model ID.
 export const RUNNER = {
   name: "Claude Code",
   short: "Claude",
   initials: "AI",
   login: "claude auth login --claudeai",
   models: ["opus", "sonnet", "haiku"],
+  advisors: ["fable", "opus"],
   modelExample: "claude-opus-5-5",
 };
 export const GIT_SERVER = "rl-git";
@@ -48,6 +50,7 @@ export const TOOL_LABELS: Record<string, string> = {
   Grep: "Grep",
   Glob: "Glob",
   Agent: "Agent",
+  Advisor: "Advisor",
   [`mcp__${GIT_SERVER}__git_log`]: "Git log",
   [`mcp__${GIT_SERVER}__git_blame`]: "Git blame",
   [`mcp__${GIT_SERVER}__git_show`]: "Git show",
@@ -115,6 +118,7 @@ export const SHIPPED_PROFILES: Profile[] = [
     mcp: [],
     model: null,
     effort: "high",
+    advisor: null,
     reviewer: { model: null, effort: "high", mode: "auto" },
     modules: ["security", "concurrency", "api", "rules", "intent"],
     volume: "balanced",
@@ -133,6 +137,7 @@ export const SHIPPED_PROFILES: Profile[] = [
     alwaysSkills: [],
     mcp: [],
     model: null,
+    advisor: null,
     reviewer: { ...DEFAULT_REVIEWER },
     modules: [],
     volume: "balanced",
@@ -167,6 +172,7 @@ const v4Profile = (p: Pick<Profile, "id" | "name" | "note" | "prompt" | "languag
   mcp: [],
   model: null,
   effort: null,
+  advisor: null,
   reviewer: { ...DEFAULT_REVIEWER },
   modules: [],
   volume: "balanced",

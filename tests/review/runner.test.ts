@@ -16,6 +16,7 @@ import {
   type RunnerOptions,
   type RunSpec,
 } from "../../src/server/review/claude";
+import { addUsage, usageOf } from "../../src/server/review/judge";
 import { classify, createStreamParser, NO_BASH_TEXT, NOTES_MAX } from "../../src/server/review/stream";
 import { type ShellSpec, shellSettings } from "../../src/server/tasks/shell";
 import { CD_REFUSED_NOTE, type RunEvent } from "../../src/shared/run-log";
@@ -362,11 +363,13 @@ describe("safety", () => {
       const { runner, spec, calls } = setup({ fixture: flatSuccess() });
       expect((await runner.run(spec)).status).toBe("completed");
       expect(calls()).toHaveLength(3);
-      for (const c of calls()) {
+      for (const [i, c] of calls().entries()) {
         const keys = Object.keys(c.env).map((k) => k.toUpperCase());
         for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDECODE", "CLAUDE_PID"]) expect(keys).not.toContain(k);
         for (const k of ["BUN_BE_BUN", "BUN_OPTIONS", "NODE_OPTIONS", "GATE_BITBUCKET_TOKEN"]) expect(keys).not.toContain(k);
+        // The run call only: an advisor that is off adds its switch (advisor.md).
         expect(keys.filter((k) => k.startsWith("CLAUDE_CODE_")).sort()).toEqual([
+          ...(i === 2 ? ["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] : []),
           "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
           "CLAUDE_CODE_GIT_BASH_PATH",
         ]);
@@ -741,6 +744,7 @@ describe("shell steps", () => {
       expect(readFileSync(env.GIT_CONFIG_GLOBAL as string, "utf8")).toBe("");
       for (const k of ["SSH_ASKPASS", "GATE_JIRA_TOKEN"]) expect(keys).not.toContain(k);
       expect(keys.filter((k) => k.startsWith("CLAUDE_CODE_")).sort()).toEqual([
+        "CLAUDE_CODE_DISABLE_ADVISOR_TOOL",
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
         "CLAUDE_CODE_GIT_BASH_PATH",
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
@@ -1112,5 +1116,76 @@ describe("rl-explorer in task steps", () => {
     ]);
     // An agent that the app did not define keeps the built-in mark.
     expect(o.events.find((e) => e.agent === "general-purpose")?.builtin).toBe(true);
+  });
+});
+
+// docs/plans/review-v2/advisor.md. The fixture is synthetic: fixtures/claude-synthetic/README.md.
+describe("advisor", () => {
+  const ADVISOR = join(SYNTHETIC, "advisor.jsonl");
+  const flagOf = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+  const envOf = (env: Record<string, string> | undefined, name: string) =>
+    Object.entries(env ?? {}).find(([k]) => k.toUpperCase() === name)?.[1];
+  let saved: string | undefined;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.DISABLE_TELEMETRY;
+    else process.env.DISABLE_TELEMETRY = saved;
+  });
+  const telemetryOff = () => {
+    saved = process.env.DISABLE_TELEMETRY;
+    process.env.DISABLE_TELEMETRY = "1";
+  };
+
+  // AC-B207, AC-B208, AC-B209, AC-B210.
+  test("on: --advisor, no DISABLE_TELEMETRY, an Advisor event per call, no refused tool, and the advisor model in the usage", async () => {
+    telemetryOff();
+    const { runner, spec, calls } = setup({ fixture: ADVISOR });
+    const o = await runner.run({ ...spec, model: "sonnet", advisor: "opus" });
+    const call = calls().at(-1);
+    expect(flagOf(call?.argv ?? [], "--advisor")).toBe("opus");
+    expect(envOf(call?.env, "DISABLE_TELEMETRY")).toBeUndefined();
+    expect(envOf(call?.env, "CLAUDE_CODE_DISABLE_ADVISOR_TOOL")).toBeUndefined();
+    expect(o.status).toBe("completed");
+    expect(o.refused).toEqual([]);
+    expect(o.events.filter((e) => e.tool === "Advisor").map((e) => [e.target, e.status, e.parent])).toEqual([
+      ["reviewed", "ok", null],
+      ["unavailable (overloaded)", "error", null],
+    ]);
+    expect(usageOf(o)?.advisor).toEqual(["claude-opus-5-5"]);
+    expect(addUsage(usageOf(o), usageOf({ ...o, advisor: null }))?.advisor).toEqual(["claude-opus-5-5"]);
+    // A result usage without the advisor iteration gives the --advisor value.
+    const bare = o.result ? { ...o.result, usage: { ...o.result.usage, iterations: [] } } : null;
+    expect(usageOf({ ...o, result: bare })?.advisor).toEqual(["opus"]);
+  });
+
+  test("off: no --advisor, the advisor switch in the env, and no advisor model in the usage", async () => {
+    telemetryOff();
+    const { runner, spec, calls } = setup({ fixture: flatSuccess() });
+    const o = await runner.run(spec);
+    const call = calls().at(-1);
+    expect(call?.argv).not.toContain("--advisor");
+    expect(envOf(call?.env, "CLAUDE_CODE_DISABLE_ADVISOR_TOOL")).toBe("1");
+    expect(envOf(call?.env, "DISABLE_TELEMETRY")).toBe("1");
+    expect(usageOf(o)?.advisor).toBeUndefined();
+  });
+
+  test("implement steps pass --advisor, and a bad advisor name stops the run before the CLI", async () => {
+    const base = mkdtempSync(join(tmpdir(), "rl-adv-"));
+    dirs.push(base);
+    const step = { implement: true as const, cwd: base, prompt: "p", schema: SCHEMA, maxTurns: 80 };
+    expect(flagOf(implementArgs({ ...step, advisor: "fable" }).args, "--advisor")).toBe("fable");
+    expect(implementArgs(step).args).not.toContain("--advisor");
+    expect(() => implementArgs({ ...step, advisor: "-x" })).toThrow("Invalid model name: -x");
+  });
+
+  test("an advisor result with stop_reason refusal shows as declined", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(["Read"]) });
+    const msg = (content: unknown[]) => JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { content } });
+    p.line(msg([{ type: "server_tool_use", id: "s1", name: "advisor", input: {} }]));
+    expect(p.events()[0]).toMatchObject({ tool: "Advisor", status: "running" });
+    p.line(
+      msg([{ type: "advisor_tool_result", tool_use_id: "s1", content: { type: "advisor_result", text: "", stop_reason: "refusal" } }]),
+    );
+    expect(p.events()[0]).toMatchObject({ tool: "Advisor", target: "declined", status: "ok" });
+    expect(p.state.badTools).toEqual([]);
   });
 });

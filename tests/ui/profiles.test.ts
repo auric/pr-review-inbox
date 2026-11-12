@@ -55,6 +55,7 @@ const p = (id: string, name: string, o: Partial<ProfileInput> = {}): ProfileInpu
   mcp: [],
   model: null,
   effort: null,
+  advisor: null,
   reviewer: { model: null, effort: null, mode: "auto" },
   modules: [],
   volume: "balanced",
@@ -557,5 +558,52 @@ describe("shipped profile edits and Duplicate", () => {
     expect(valueText("verifier", shipped, names)).toBe("On, model same as the main run, effort medium, refuted findings hide");
     expect(valueText("mcp", { ...shipped, mcp: [{ server: "docs", tools: ["a", "b"] }] }, names)).toBe("docs (a, b)");
     expect(valueText("skills", shipped, names)).toBe("None");
+  });
+});
+
+// AC-B205, AC-B206: the Advisor field of the profile editor (docs/plans/review-v2/advisor.md).
+describe("advisor", () => {
+  const [d] = toDrafts([p("perf", "Perf")]) as [Draft];
+
+  test("Off is the empty field, and a saved profile without the field reads as off", () => {
+    expect(d.advisor).toBe("");
+    expect(toProfiles([{ ...d, advisor: " opus " }])[0]?.advisor).toBe("opus");
+    expect(toProfiles([{ ...d, advisor: "  " }])[0]?.advisor).toBeNull();
+    const { advisor: _, ...old } = p("old", "Old");
+    expect(profileInput.parse(old).advisor).toBeNull();
+    expect(valueText("advisor", p("perf", "Perf"), { module: String, volume: String })).toBe("Off");
+    expect(valueText("advisor", p("perf", "Perf", { advisor: "fable" }), { module: String, volume: String })).toBe("fable");
+  });
+
+  test("Haiku and an advisor below the main or check model are problems, and the payload keeps the saved advisor", () => {
+    expect(problems({ ...d, advisor: "haiku" }).advisor).toBe("A Haiku model cannot be an advisor.");
+    expect(problems({ ...d, model: "opus", advisor: "sonnet" }).advisor).toBe(
+      "The advisor ranks below the model opus. Pick an advisor at or above it.",
+    );
+    expect(problems({ ...d, verifier: { ...d.verifier, model: "fable" }, advisor: "claude-opus-5-5" }).advisor).toBeTruthy();
+    expect(problems({ ...d, advisor: "bad name" }).advisor).toBeTruthy();
+    for (const ok of [
+      { advisor: "opus" },
+      { model: "sonnet", advisor: "opus" },
+      { model: "opus", advisor: "opus" },
+      { model: "claude-sonnet-5-5", advisor: "fable" },
+      { advisor: "some-model" },
+    ])
+      expect(problems({ ...d, ...ok }).advisor).toBeUndefined();
+    const saved = [p("perf", "Perf", { advisor: "opus" })];
+    expect(toPayload([{ ...d, advisor: "haiku" }], saved)[0]?.advisor).toBe("opus");
+    expect(toPayload([{ ...d, advisor: "fable" }], saved)[0]?.advisor).toBe("fable");
+    // A model change can cause the problem: the model, the check model, and the advisor keep their saved values together.
+    const pair = [p("perf", "Perf", { model: "sonnet", advisor: "sonnet" })];
+    const [s] = toDrafts(pair) as [Draft];
+    expect(toPayload([{ ...s, model: "opus" }], pair)[0]).toMatchObject({ model: "sonnet", advisor: "sonnet" });
+    expect(toPayload([{ ...s, verifier: { ...s.verifier, model: "opus" } }], pair)[0]?.verifier.model).toBeNull();
+    expect(toPayload([{ ...s, model: "opus", advisor: "opus" }], pair)[0]).toMatchObject({ model: "opus", advisor: "opus" });
+  });
+
+  test("the advisor is a shipped field with its own reset", () => {
+    expect(SHIPPED_FIELDS.map(([k]) => k)).toContain("advisor");
+    expect(editedOf({ ...d, advisor: "opus" }, p("perf", "Perf"))).toEqual(["advisor"]);
+    expect(change([d], { act: "reset", i: 0, field: "advisor", shipped: p("perf", "Perf") })[0]?.advisor).toBe("");
   });
 });

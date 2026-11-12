@@ -841,6 +841,15 @@ describe("model and effort of a run", () => {
     expect(setupText(run({ model: "claude-haiku-5-5", effort: null }), null)).toBe("claude-haiku-5-5, default effort");
   });
 
+  // AC-B210: the advisor model of the run usage.
+  test("a run with advisor calls names the advisor model", () => {
+    const usage = { costUsd: 0, turns: 1, durationMs: 1, tokens: {} };
+    expect(
+      setupText({ ...run({ model: "claude-sonnet-5-5", effort: "high" }), usage: { ...usage, advisor: ["claude-opus-5-5"] } }, null),
+    ).toBe("claude-sonnet-5-5, high effort, claude-opus-5-5 advisor");
+    expect(setupText({ ...run({ model: "claude-sonnet-5-5", effort: "high" }), usage }, null)).toBe("claude-sonnet-5-5, high effort");
+  });
+
   test("a run without --effort names the effort from the user settings", () => {
     expect(setupText(run({ model: "claude-opus-5-5", effortDefault: "xhigh" }), defaults)).toBe(
       "claude-opus-5-5, xhigh effort (your default)",

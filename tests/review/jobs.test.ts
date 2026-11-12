@@ -935,6 +935,7 @@ describe("brief and meta", () => {
       initials: "AI",
       login: "claude auth login --claudeai",
       models: ["opus", "sonnet", "haiku"],
+      advisors: ["fable", "opus"],
       modelExample: "claude-opus-5-5",
       check: null,
       defaults: null,
@@ -1308,6 +1309,7 @@ describe("editable profiles (M4)", () => {
         ...general,
         model: "opus",
         effort: "high",
+        advisor: "opus",
         reviewer: { model: "haiku", effort: "low", mode: "always" },
       };
       expect((await putProfiles(h, [tuned, ...SHIPPED_PROFILES.slice(1)])).status).toBe(200);
@@ -1321,6 +1323,8 @@ describe("editable profiles (M4)", () => {
       const c = h.runCall() as Call;
       expect(flag(c.argv, "--model")).toBe("opus");
       expect(flag(c.argv, "--effort")).toBe("high");
+      // AC-B207: the advisor of the profile.
+      expect(flag(c.argv, "--advisor")).toBe("opus");
       const agents = JSON.parse(readFileSync(flag(c.argv, "--agents") as string, "utf8"));
       expect(agents["rl-reviewer"]).toMatchObject({ model: "haiku", effort: "low" });
       expect(agents["rl-main"]).not.toHaveProperty("model");
@@ -1336,7 +1340,7 @@ describe("editable profiles (M4)", () => {
       expect(["opus", "claude-haiku-5-5"]).toContain(cancelled.model as string);
 
       // Off: no rl-reviewer and no Agent tool. The init event names the model that ran.
-      const off = { ...tuned, model: null, reviewer: { ...tuned.reviewer, mode: "off" as const } };
+      const off = { ...tuned, model: null, advisor: null, reviewer: { ...tuned.reviewer, mode: "off" as const } };
       expect((await putProfiles(h, [off, ...SHIPPED_PROFILES.slice(1)])).status).toBe(200);
       h.scenario({ fixture: derive(join(REAL, "b6-hostile-repo.jsonl"), { tools: EXPLAIN_TOOLS, structured: RESULT }) });
       const d = await h.finish((await h.start()).body.id);
@@ -1345,6 +1349,7 @@ describe("editable profiles (M4)", () => {
       const argv = last?.argv ?? [];
       expect(flag(argv, "--tools")).toBe("Read,Grep,Glob");
       expect(argv).not.toContain("--model");
+      expect(argv).not.toContain("--advisor");
       expect(flag(argv, "--effort")).toBe("high");
       expect(last?.stdin).not.toContain("rl-reviewer");
       expect(d.run.effort).toBe("high");
@@ -1458,6 +1463,7 @@ describe("editable profiles (M4)", () => {
         mcp: [],
         model: null,
         effort: null,
+        advisor: null,
         reviewer: { model: null, effort: null, mode: "auto" as const },
         modules: [],
         volume: "balanced" as const,

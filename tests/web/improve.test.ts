@@ -61,6 +61,7 @@ describe("improveBody", () => {
         mcp: [],
         model: "opus",
         effort: "high",
+        advisor: null,
         reviewer: { model: null, effort: null, mode: "auto" },
         modules: [],
         volume: "balanced",

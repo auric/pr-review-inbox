@@ -156,6 +156,21 @@ export const modelName = z
   .string()
   .trim()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,199}$/);
+// code.claude.com/docs/en/advisor.md, "Choose an advisor model": the model families from the lowest rank to the highest. An alias names
+// its family, and a full model ID holds the family name.
+const FAMILIES = ["haiku", "sonnet", "opus", "fable"] as const;
+const familyRank = (model: string) => FAMILIES.findIndex((f) => new RegExp(`(^|[^a-z])${f}([^a-z]|$)`, "i").test(model));
+// The problem of an advisor choice, or null. mains: the --model values of the profile runs. null is the user's default, which the app
+// does not know. docs/plans/review-v2/advisor.md: Haiku cannot be an advisor, and the advisor must rank at or above the main model.
+// shortcut: the check compares families only. The docs accept a few lower-family advisors of a newer version, such as Sonnet 5.5 for
+// an Opus 4.7 main model. Compare versions when users ask for such a pair.
+export function advisorProblem(advisor: string | null, mains: (string | null)[]): string | null {
+  if (!advisor) return null;
+  const a = familyRank(advisor);
+  if (FAMILIES[a] === "haiku") return "A Haiku model cannot be an advisor.";
+  const above = a < 0 ? undefined : mains.find((m) => m && familyRank(m) > a);
+  return above ? `The advisor ranks below the model ${above}. Pick an advisor at or above it.` : null;
+}
 // auto: a review run gets rl-reviewer only for a large change (catalog.ts delegation). always: the main agent splits the changed files
 // across rl-reviewer calls. off: no rl-reviewer.
 export const REVIEWER_MODES = ["auto", "always", "off"] as const;
@@ -212,6 +227,7 @@ export const DEFAULT_VERIFIER: VerifierSetup = { mode: "on", model: null, effort
 // skills: the run gets a copy of each skill in ./skills. Absent in profiles saved before skills existed.
 // mcp: servers of the user's Claude config with the chosen tools. Absent in profiles saved before this field existed.
 // model, effort: --model and --effort of every run of the profile. reviewer: the rl-reviewer agent of review runs. Absent in older profiles.
+// advisor: --advisor of every run of the profile. null: off. Absent in older profiles.
 // alwaysSkills: chosen skills that every run reads first. A run does not start without them. Absent in older profiles.
 // languageChecks: review runs get the checklists for the languages of the change. Absent in older profiles.
 // jiraFamily: runs of the profile add the parent and the sub-tasks of each fetched Jira issue to task.md. Absent in older profiles.
@@ -246,6 +262,7 @@ export const profileInput = z
       .refine((l) => new Set(l.map((m) => m.server)).size === l.length, "Each MCP server can occur only once."),
     model: modelName.nullable().default(null),
     effort: z.enum(EFFORTS).nullable().default(null),
+    advisor: modelName.nullable().default(null),
     reviewer: reviewerSetup.default(() => ({ ...DEFAULT_REVIEWER })),
     modules: z
       .array(z.enum(MODULE_IDS).nullable().catch(null))
@@ -292,8 +309,17 @@ export const settingsInput = z.object({
     .number()
     .refine((n) => (CHECK_CHOICES as readonly number[]).includes(n))
     .optional(),
-  // Absent keeps the stored profiles. null restores the shipped profiles.
-  profiles: profileList.nullable().optional(),
+  // Absent keeps the stored profiles. null restores the shipped profiles. The advisor rule applies to a save only, so a stored list
+  // always reads back.
+  profiles: profileList
+    .superRefine((l, ctx) => {
+      for (const [i, p] of l.entries()) {
+        const message = advisorProblem(p.advisor, [p.model, p.verifier.model]);
+        if (message) ctx.addIssue({ code: "custom", message: `${p.name}: ${message}`, path: [i, "advisor"] });
+      }
+    })
+    .nullable()
+    .optional(),
   // Absent keeps the stored value. docs/plans/session-consult.md part C: while it is off, the app reads no transcript.
   sessions: z.boolean().optional(),
   // Absent keeps the stored value. Off records the company AI policy acknowledgement for task attachments.
@@ -546,7 +572,8 @@ export type ProfileDto = {
   mcpCount: number;
 };
 
-export type RunUsage = { costUsd: number; turns: number; durationMs: number; tokens: Record<string, unknown> };
+// advisor: the advisor models from modelUsage. Absent: the run made no advisor call.
+export type RunUsage = { costUsd: number; turns: number; durationMs: number; tokens: Record<string, unknown>; advisor?: string[] };
 // docs/plans/review-v2/spec.md section 1.8: the verdict counts of a review run. unchecked: the candidates without a verdict, because
 // the verify phase is off, failed, or gave none. failed: the verify phase ended without a result. A run with no candidates has zeros.
 export type VerifySummary = Record<"candidates" | "confirmed" | "refuted" | "unsure" | "questions" | "duplicates" | "unchecked", number> & {
@@ -1245,13 +1272,14 @@ export type MetaDto = {
   forge: { name: string };
   // check: the cached runner check. null before the first check. Each run refreshes it.
   // login: the command that signs the runner in with the subscription. models: the model aliases that the settings offer.
-  // modelExample: a full model ID for the placeholder of the model ID field.
+  // modelExample: a full model ID for the placeholder of the model ID field. advisors: the advisor aliases.
   runner: {
     name: string;
     short: string;
     initials: string;
     login: string;
     models: string[];
+    advisors: string[];
     modelExample: string;
     check: RunnerCheckDto | null;
     // defaults: from the user settings file of the runner. null: the file is absent or unreadable.

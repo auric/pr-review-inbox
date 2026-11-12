@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { advisorInInit, advisorStream, advisorTools, counts, namesModel } from "../../scripts/gate/advisor";
+import { advisorInInit, advisorOff, advisorStream, advisorTools, counts, namesModel } from "../../scripts/gate/advisor";
 
 const JSONL = [
   { type: "system", subtype: "init", tools: ["Read", "advisor"], model: "claude-sonnet-4-6", advisorModel: "opus", plugins: [] },
@@ -61,6 +61,18 @@ describe("Gate G-ADV helpers", () => {
     expect(s.results).toEqual([{ subtype: "success", isError: false, costUsd: 0.05, models: ["claude-sonnet-4-6", "claude-opus-4-6"] }]);
     expect(s.results[0]?.models.some((m) => namesModel(m, "opus"))).toBe(true);
     expect(counts({})).toBe("none");
+  });
+
+  // Run 1: slash_commands listed the /advisor command in the run without --advisor, and the gate said FAIL.
+  test("advisorOff ignores slash_commands and judges by init.tools and the advisor use", () => {
+    const init = { type: "system", subtype: "init", tools: ["Read"], slash_commands: ["advisor", "compact"] };
+    expect(advisorOff({ init, used: false }, 1)).toBe("PASS");
+    expect(advisorOff({ init, used: true }, 1)).toBe("FAIL");
+    expect(advisorOff({ init: { ...init, tools: ["Read", "advisor"] }, used: false }, 1)).toBe("FAIL");
+    // No control call: no advisor call proves nothing.
+    expect(advisorOff({ init, used: false }, 0)).toBe("UNKNOWN");
+    expect(advisorOff({ init: undefined, used: false }, 1)).toBe("UNKNOWN");
+    expect(advisorOff(undefined, 1)).toBe("UNKNOWN");
   });
 });
 

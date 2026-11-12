@@ -3,6 +3,7 @@
 
 // Pure model of the review profile editor (M4). No DOM access, so bun test runs it.
 import {
+  advisorProblem,
   type Effort,
   MAX_MCP_TOOLS,
   MAX_NOTE,
@@ -65,6 +66,8 @@ export type Draft = {
   mcp: McpPick[];
   model: string;
   effort: Effort | "";
+  // "" : off.
+  advisor: string;
   reviewer: { model: string; effort: Effort | ""; mode: ReviewerMode };
   // docs/plans/review-v2/spec.md section 1.2. verifier "" model: the profile model. "" effort: medium.
   modules: ProfileInput["modules"];
@@ -84,6 +87,7 @@ export const toDrafts = (profiles: ProfileInput[]): Draft[] =>
     maxTurns: String(p.maxTurns),
     model: p.model ?? "",
     effort: p.effort ?? "",
+    advisor: p.advisor ?? "",
     reviewer: { model: p.reviewer.model ?? "", effort: p.reviewer.effort ?? "", mode: p.reviewer.mode },
     verifier: {
       mode: p.verifier.mode,
@@ -134,6 +138,7 @@ export function toProfiles(list: Draft[]): ProfileInput[] {
       mcp: d.mcp,
       model: d.model.trim() || null,
       effort: d.effort || null,
+      advisor: d.advisor.trim() || null,
       reviewer: { model: d.reviewer.model.trim() || null, effort: d.reviewer.effort || null, mode: d.reviewer.mode },
       modules: d.modules,
       volume: d.volume,
@@ -167,6 +172,7 @@ const KEYS = [
   "tools",
   "model",
   "effort",
+  "advisor",
   "reviewer",
   "mode",
   "modules",
@@ -177,7 +183,7 @@ const KEYS = [
 ];
 export const sameProfiles = (a: ProfileInput[], b: ProfileInput[]) => JSON.stringify(a, KEYS) === JSON.stringify(b, KEYS);
 
-export type Field = "name" | "note" | "prompt" | "maxTurns" | "model" | "reviewerModel" | "verifierModel";
+export type Field = "name" | "note" | "prompt" | "maxTurns" | "model" | "advisor" | "reviewerModel" | "verifierModel";
 export type Problems = Partial<Record<Field, string>>;
 
 const modelProblem = (text: string) =>
@@ -202,6 +208,9 @@ export function problems(d: Draft): Problems {
   if (reviewer) out.reviewerModel = reviewer;
   const verifier = modelProblem(d.verifier.model);
   if (verifier) out.verifierModel = verifier;
+  const advisor =
+    modelProblem(d.advisor) ?? advisorProblem(d.advisor.trim() || null, [d.model.trim() || null, d.verifier.model.trim() || null]);
+  if (advisor) out.advisor = advisor;
   return out;
 }
 
@@ -224,6 +233,7 @@ const newProfile = (id: string): ProfileInput => ({
   mcp: [],
   model: null,
   effort: null,
+  advisor: null,
   reviewer: { model: null, effort: null, mode: "auto" },
   modules: [],
   volume: "balanced",
@@ -244,9 +254,11 @@ export function toPayload(list: Draft[], saved: ProfileInput[]): ProfileInput[] 
       note: found.note ? base.note : p.note,
       prompt: found.prompt ? base.prompt : p.prompt,
       maxTurns: found.maxTurns ? base.maxTurns : p.maxTurns,
-      model: found.model ? base.model : p.model,
+      // An advisor problem can come from a model change, so the three fields go back together.
+      model: found.model || found.advisor ? base.model : p.model,
+      advisor: found.advisor ? base.advisor : p.advisor,
       reviewer: { ...p.reviewer, model: found.reviewerModel ? base.reviewer.model : p.reviewer.model },
-      verifier: { ...p.verifier, model: found.verifierModel ? base.verifier.model : p.verifier.model },
+      verifier: { ...p.verifier, model: found.verifierModel || found.advisor ? base.verifier.model : p.verifier.model },
     };
   });
 }
@@ -267,6 +279,7 @@ export type Edit = Partial<
     | "mcp"
     | "model"
     | "effort"
+    | "advisor"
     | "reviewer"
     | "modules"
     | "volume"
@@ -297,6 +310,7 @@ export const SHIPPED_FIELDS = [
   ["volume", "Show"],
   ["model", "Model"],
   ["effort", "Effort"],
+  ["advisor", "Advisor"],
   ["reviewer", "Reviewer agents"],
   ["verifier", "Check step"],
   ["skills", "Skills"],
@@ -343,6 +357,8 @@ export function valueText(field: ShippedField, v: ProfileInput, names: { module:
     case "model":
     case "effort":
       return flag(v[field], "Use my default");
+    case "advisor":
+      return flag(v.advisor, "Off");
     case "reviewer":
       return `${mode(v.reviewer.mode)}, model ${flag(v.reviewer.model, "same as the main run")}, effort ${flag(v.reviewer.effort, "same as the main run")}`;
     case "verifier":
@@ -446,6 +462,8 @@ export type Part =
   | "model"
   | "model-id"
   | "effort"
+  | "advisor"
+  | "advisor-id"
   | "reviewer"
   | "reviewer-model"
   | "reviewer-model-id"

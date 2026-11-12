@@ -3023,6 +3023,24 @@ Acceptance criteria:
 10. AC-B196. A start control shows a note while its PR has a running run and another note while the pool is full, and is disabled in both cases. A 409 shows the note or a toast. Brief, re-review, reply drafts, Fix, Ask, Discuss, Explain, and Consult follow this rule.
 11. AC-B197. With limit 1, AC-B18 and every single-slot test pass unchanged.
 
+### 6.27 Advisor (docs/plans/review-v2/advisor.md)
+
+- Profile field `advisor`: null (Off, the default) or a model name. The menu offers `fable` and `opus`. "Other model ID…" takes any other name, such as `sonnet` or a full model ID. A profile from before the field reads as Off. Each profile has the field, so task steps use the field of the task profile.
+- A save refuses a Haiku advisor, and an advisor whose model family (haiku, sonnet, opus, fable) ranks below the profile model or the check model. A null model is the user's default, and the app does not check it. A stored list always reads back.
+- On: each run of the profile gets `--advisor <model>`: review, salvage, check, Explain, Ask, Fix, reply, discuss, task steps, and the own review of a task part. The child env has no `DISABLE_TELEMETRY`. childEnv already drops `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` with all `CLAUDE_CODE_*` names.
+- Off: no `--advisor`, and the child env gets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`. Session consult and Improve prompt are not profile runs, so they run Off.
+- The run log shows each advisor call as "Advisor" with "reviewed", "declined" (result `stop_reason` "refusal"), or "unavailable (<error_code>)" (`advisor_tool_result_error`). The init check and the refusal count never see an advisor call.
+- `RunUsage.advisor`: for a run with at least one advisor call, the modelUsage keys that an `advisor_message` iteration of the result usage names. When none does, the `--advisor` value. The run setup line adds "<model> advisor".
+
+Acceptance criteria:
+1. AC-B205. The profile editor has "Advisor" under Effort, with Off, the advisor aliases, and "Other model ID…". Its help says "A stronger model gives <runner> advice at hard points. It uses more of your plan." A reset sets it back to the shipped value.
+2. AC-B206. PUT /api/settings refuses a Haiku advisor and an advisor that ranks below the profile model or the check model with 400 and a sentence that names the profile. A stored profile without the field reads as Off.
+3. AC-B207. A profile with an advisor passes `--advisor <model>` to each of its runs. A profile without one passes no `--advisor`.
+4. AC-B208. With an advisor, the child env holds no `DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS`, or `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`. Without one, it holds `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`.
+5. AC-B209. A stream with advisor calls completes: no tool_check failure and no refused command. Each call is one "Advisor" event with its outcome.
+6. AC-B210. The run usage of a run with advisor calls names the advisor model from modelUsage, and the run setup line shows it.
+7. AC-B211. Gate GADV.2 ignores `slash_commands`. GADV.2, GADV.4, and GADV.5a judge by init.tools and the advisor calls, with the run with `--advisor` as the control. GADV.5b judges by the advisor calls of that run.
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule

@@ -989,6 +989,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
             : profile.maxTurns,
         model: profile.model,
         effort: profile.effort,
+        advisor: profile.advisor,
         // Only a delegating review gets subagents. With agents {}, the CLI gets no Agent tool.
         agents: delegate
           ? {
@@ -1201,6 +1202,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         maxTurns: SALVAGE_MAX_TURNS,
         model: r.profile.model,
         effort: r.profile.effort,
+        advisor: r.profile.advisor,
         // With agents {}, the CLI gets no Agent tool.
         agents: {},
         mcpServers: r.mcpServers,
@@ -1271,6 +1273,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         maxTurns: verifyMaxTurns(profile, written),
         model: profile.verifier.model ?? profile.model,
         effort: verifierEffort(profile),
+        advisor: profile.advisor,
         agents: split ? { [VERIFIER]: verifier } : {},
         mcpServers: r.mcpServers,
       },
@@ -1442,6 +1445,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         maxTurns: t.maxTurns,
         model: j.profile.model,
         effort: j.profile.effort,
+        advisor: j.profile.advisor,
         agents: {},
         mcpServers,
         ...(t.explorer && { explorer: explorerAgent(j.profile) }),
@@ -1519,6 +1523,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                 maxTurns: t.maxTurns,
                 model: j.profile.model,
                 effort: j.profile.effort,
+                advisor: j.profile.advisor,
                 timeoutMs: t.timeoutMs,
                 explorer: explorerAgent(j.profile),
                 ...(t.shell && { shell: { ...t.shell, dataDir, origins: originsOf(settings.config()) } }),
@@ -1640,6 +1645,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         maxTurns: profile.maxTurns,
         model: profile.model,
         effort: profile.effort,
+        advisor: profile.advisor,
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(

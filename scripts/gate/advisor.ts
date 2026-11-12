@@ -85,6 +85,16 @@ export function advisorStream(events: unknown[]): AdvisorStream {
   return s;
 }
 
+// The verdict of a run that must have no advisor (GADV.2, GADV.4, GADV.5a). Run 1: init.tools never lists the advisor, and
+// slash_commands lists the /advisor command whether the advisor is on or off. So only init.tools and the advisor use count.
+// used: the run shows an advisor call or advisor usage. controlCalls: the advisor calls of the run with --advisor and no switch.
+// PASS needs a control call: without one, no advisor call proves nothing.
+export function advisorOff(r: { init: unknown; used: boolean } | undefined, controlCalls: number): "PASS" | "FAIL" | "UNKNOWN" {
+  if (!r?.init) return "UNKNOWN";
+  if (advisorTools(r.init).length || r.used) return "FAIL";
+  return controlCalls > 0 ? "PASS" : "UNKNOWN";
+}
+
 // A full model ID holds the family alias: "opus" matches "claude-opus-4-6".
 export const namesModel = (key: string, model: string) => key.toLowerCase().includes(model.toLowerCase());
 

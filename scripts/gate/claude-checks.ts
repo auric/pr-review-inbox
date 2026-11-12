@@ -62,7 +62,7 @@ import {
   verifyResult,
 } from "../../src/shared/review";
 import { implementResult, interviewResult, type ShellMode, specResult } from "../../src/shared/task";
-import { advisorInInit, advisorStream, advisorTools, counts, namesModel } from "./advisor";
+import { advisorInInit, advisorOff, advisorStream, advisorTools, counts, namesModel } from "./advisor";
 import {
   agentOutcome,
   encodeCwd,
@@ -3859,10 +3859,11 @@ async function gadv() {
       runClaude(`gadv-${tag}`, args, prompt, work, { env: e, model: mainModel });
     const a = await run("advisor", [...base, ...adv], GADV_HARD);
     const none = await run("none", base, GADV_HARD);
-    const off = await run("envoff", [...base, ...adv], GADV_PLAIN, { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
-    const denied = await run("disallowed", [...base, ...adv, "--disallowedTools", "advisor"], GADV_PLAIN);
-    // Only when the init of run "advisor" lacks the advisor: then this run shows whether --tools can add it.
+    // The switch runs get the advisor prompt: GADV.4 and GADV.5a judge them by their advisor calls (run 1: init never lists it).
+    const off = await run("envoff", [...base, ...adv], GADV_HARD, { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
+    const denied = await run("disallowed", [...base, ...adv, "--disallowedTools", "advisor"], GADV_HARD);
     const listedA = advisorTools(a.init).length > 0;
+    // Only when the init of run "advisor" lacks the advisor: then this run shows whether --tools can add it.
     const tools = listedA ? undefined : await run("tools", withTools([...base, ...adv]), GADV_PLAIN);
     if (DRY) return dry("GADV", `advisor=${advisorModel} main=${mainModel}; ${userAdvisorSetting().line}`);
 
@@ -3872,8 +3873,6 @@ async function gadv() {
         r.exit !== 0 && r.stderr ? ` stderr=${short(r.stderr, 200)}` : ""
       }`;
     const finished = (r: Run) => r.exit === 0 && r.results.some((e) => e.subtype === "success" && !e.is_error);
-    // PASS: the advisor is gone. FAIL: init still lists it. UNKNOWN: no init, or run "advisor" did not list it either.
-    const gone = (r: Run | undefined): Status => (!r?.init || !listedA ? "UNKNOWN" : advisorTools(r.init).length ? "FAIL" : "PASS");
     const toolsOf = (r: Run | undefined) => advisorTools(r?.init).join(",") || "none";
 
     push(
@@ -3894,28 +3893,35 @@ async function gadv() {
     };
     const fa = streamFacts(a);
     const fn = streamFacts(none);
-    const leak = advisorInInit(none.init);
-    // FAIL: the run without --advisor shows the advisor. PASS needs an advisor call in run "advisor" as the control.
+    // FAIL: the run without --advisor lists the advisor in init.tools or uses it. The init keys are facts only: slash_commands lists the
+    // /advisor command also when the advisor is off (run 1).
     push(
       "GADV.2",
-      leak.length || fn.used ? "FAIL" : none.init && fa.s.advisorCalls ? "PASS" : "UNKNOWN",
-      `no --advisor, app child env, advisor prompt: ${desc(none)}; init advisor keys=${leak.join("; ") || "none"}; ${fn.line}; control run advisor calls=${fa.s.advisorCalls}; user ${user.line}`,
+      advisorOff({ init: none.init, used: fn.used }, fa.s.advisorCalls),
+      `no --advisor, app child env, advisor prompt: ${desc(none)}; init advisor keys=${advisorInInit(none.init).join("; ") || "none"}; ${fn.line}; control run advisor calls=${fa.s.advisorCalls}; user ${user.line}`,
     );
     push(
       "GADV.3",
       !a.init ? "UNKNOWN" : listedA ? "PASS" : "FAIL",
       `--advisor: init advisor tools=${toolsOf(a)}; init advisor keys=${advisorInInit(a.init).join("; ") || "none"}; init.tools=${(a.init?.tools ?? []).join(",")}`,
     );
-    push("GADV.4", gone(off), `--advisor and CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1: ${desc(off)}; init advisor tools=${toolsOf(off)}`);
-    push("GADV.5a", gone(denied), `--advisor and --disallowedTools advisor: ${desc(denied)}; init advisor tools=${toolsOf(denied)}`);
-    // PASS: --tools controls the advisor. FAIL: a --tools list without it still shows it.
-    const toolsListed = advisorTools(tools?.init).length > 0;
+    // PASS: the switch removes the advisor: no advisor call while the control run made one.
+    const calls = (r: Run) => advisorStream(r.events).advisorCalls;
+    push(
+      "GADV.4",
+      advisorOff({ init: off.init, used: calls(off) > 0 }, fa.s.advisorCalls),
+      `--advisor and CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1, advisor prompt: ${desc(off)}; advisor calls=${calls(off)}; control run advisor calls=${fa.s.advisorCalls}; init advisor tools=${toolsOf(off)}`,
+    );
+    push(
+      "GADV.5a",
+      advisorOff({ init: denied.init, used: calls(denied) > 0 }, fa.s.advisorCalls),
+      `--advisor and --disallowedTools advisor, advisor prompt: ${desc(denied)}; advisor calls=${calls(denied)}; control run advisor calls=${fa.s.advisorCalls}; init advisor tools=${toolsOf(denied)}`,
+    );
+    // PASS: --tools controls the advisor. FAIL: the --tools list of run "advisor" omits it, and that run still calls it or init lists it.
     push(
       "GADV.5b",
-      listedA ? "FAIL" : toolsListed ? "PASS" : "UNKNOWN",
-      listedA
-        ? "--tools and --allowedTools without advisor: init still lists it"
-        : `--tools without advisor: not listed; --tools and --allowedTools with advisor: ${tools ? desc(tools) : "not run"}; init advisor tools=${toolsOf(tools)}`,
+      listedA || fa.s.advisorCalls > 0 ? "FAIL" : "UNKNOWN",
+      `--tools and --allowedTools without advisor: advisor calls=${fa.s.advisorCalls}, init advisor tools=${toolsOf(a)}; with advisor: ${tools ? `${desc(tools)}; init advisor tools=${toolsOf(tools)}` : "not run"}`,
     );
     push(
       "GADV.6",

@@ -37,6 +37,18 @@ export const NO_BASH_TEXT =
 const AGENT_TOOLS = new Set(["Agent", "Task"]);
 const AUTH_ERRORS = new Set<SDKAssistantMessageError>(["authentication_failed", "oauth_org_not_allowed"]);
 const TASK_END: Record<SDKTaskNotificationMessage["status"], RunEventStatus> = { completed: "ok", failed: "error", stopped: "stopped" };
+// RunEvent.tool of an advisor call. Gate G-ADV (gadv-advisor.jsonl): a server_tool_use block named advisor, then an
+// advisor_tool_result block in a later assistant event. platform.claude.com advisor-tool docs: the result content is advisor_result,
+// advisor_redacted_result, or advisor_tool_result_error with an error_code. A server tool is not a CLI tool, so the init check and
+// the refusal count never see it.
+export const ADVISOR_TOOL = "Advisor";
+function advisorOutcome(content: unknown): { status: RunEventStatus; target: string } {
+  const c = content && typeof content === "object" ? (content as Record<string, unknown>) : {};
+  if (c.type === "advisor_tool_result_error")
+    return { status: "error", target: `unavailable (${typeof c.error_code === "string" ? c.error_code : "unknown"})` };
+  // Messages API: stop_reason "refusal" means that the model declined the request.
+  return { status: "ok", target: c.stop_reason === "refusal" ? "declined" : "reviewed" };
+}
 // Gate B5 (b5-auth.jsonl): the CLI writes its own error messages with this model name.
 const SYNTHETIC = "<synthetic>";
 const count = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
@@ -182,6 +194,33 @@ export function createStreamParser(opts: {
         agentStats(changed, a.parent_tool_use_id, modelOf(a.message?.model), null);
       for (const b of blocks(a.message?.content)) {
         if (b.type === "text" && !a.parent_tool_use_id && typeof b.text === "string") addNote("rl-main", b.text);
+        if (b.type === "advisor_tool_result" && b.tool_use_id) {
+          const e = events.get(b.tool_use_id);
+          if (e?.tool === ADVISOR_TOOL && e.status === "running") {
+            const next = { ...e, ...advisorOutcome((b as { content?: unknown }).content), endedAt: now() };
+            events.set(e.id, next);
+            changed.set(e.id, next);
+          }
+        }
+        if (b.type === "server_tool_use" && b.name === "advisor" && b.id && !events.has(b.id)) {
+          const e: RunEvent = {
+            id: b.id,
+            seq: seq++,
+            parent: a.parent_tool_use_id ?? null,
+            tool: ADVISOR_TOOL,
+            target: "",
+            status: "running",
+            note: null,
+            agent: null,
+            model: null,
+            tokens: null,
+            builtin: false,
+            startedAt: now(),
+            endedAt: null,
+          };
+          events.set(e.id, e);
+          changed.set(e.id, e);
+        }
         if (b.type !== "tool_use" || !b.id || !b.name || b.name === "StructuredOutput" || events.has(b.id)) continue;
         const tool = AGENT_TOOLS.has(b.name) ? "Agent" : b.name;
         const input = b.input && typeof b.input === "object" ? b.input : {};

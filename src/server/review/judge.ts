@@ -49,6 +49,7 @@ import { git, gitEnv } from "./git";
 import type { ReplyThread } from "./prompt";
 import type { Carry } from "./rereview";
 import { type NewItem, NO_ANCHOR } from "./run-rows";
+import { ADVISOR_TOOL } from "./stream";
 import {
   type AskedThread,
   anchorer,
@@ -322,9 +323,23 @@ export async function judge(
   };
 }
 
+// Gate G-ADV (ADV5, gadv-advisor.jsonl): the result usage has an iteration of type advisor_message with the advisor model, and
+// modelUsage lists that model. A run whose result usage names no advisor model gives the --advisor value.
+function advisorModels(o: RunOutcome): string[] | undefined {
+  if (!o.advisor || !o.events.some((e) => e.tool === ADVISOR_TOOL)) return undefined;
+  const iterations = (o.result?.usage as { iterations?: unknown } | undefined)?.iterations;
+  const named = (Array.isArray(iterations) ? iterations : []).flatMap((i) =>
+    i && typeof i === "object" && i.type === "advisor_message" && typeof i.model === "string" ? [i.model as string] : [],
+  );
+  const keys = Object.keys(o.result?.modelUsage ?? {}).filter((k) => named.includes(k));
+  return keys.length ? keys : [o.advisor];
+}
+
 export const usageOf = (o: RunOutcome): RunUsage | null => {
   const r = o.result;
-  return r ? { costUsd: r.total_cost_usd, turns: r.num_turns, durationMs: r.duration_ms, tokens: r.usage } : null;
+  if (!r) return null;
+  const advisor = advisorModels(o);
+  return { costUsd: r.total_cost_usd, turns: r.num_turns, durationMs: r.duration_ms, tokens: r.usage, ...(advisor && { advisor }) };
 };
 
 // The usage of both phases. tokens: the sum of each number key. The token count of the UI reads only those keys.
@@ -336,7 +351,14 @@ export function addUsage(a: RunUsage | null, b: RunUsage | null): RunUsage | nul
     const y = b.tokens?.[k];
     if (typeof x === "number" || typeof y === "number") tokens[k] = (typeof x === "number" ? x : 0) + (typeof y === "number" ? y : 0);
   }
-  return { costUsd: a.costUsd + b.costUsd, turns: a.turns + b.turns, durationMs: a.durationMs + b.durationMs, tokens };
+  const advisor = [...new Set([...(a.advisor ?? []), ...(b.advisor ?? [])])];
+  return {
+    costUsd: a.costUsd + b.costUsd,
+    turns: a.turns + b.turns,
+    durationMs: a.durationMs + b.durationMs,
+    tokens,
+    ...(advisor.length > 0 && { advisor }),
+  };
 }
 
 // The verify process of a review run (spec.md section 1.6). written: the candidates in candidates.md, from candidate 1.
