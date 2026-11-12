@@ -36,7 +36,7 @@ Tests:   bun test for logic and integration. Playwright for browser acceptance.
 Ship:    bun build --compile, one executable per OS with the UI embedded.
 ```
 
-Layout: `src/web/` (with `ask/`, `diff/`, and `fix/`), `src/server/{bitbucket,sync,inbox,storage,tasks,review,publish,context}/`, `src/shared/`, `fixtures/`, `tests/`, `scripts/` exist. BRIEF section 7 defines each folder. All Bitbucket calls stay in `src/server/bitbucket/`.
+Layout: `src/web/` (with `ask/`, `diff/`, and `fix/`), `src/server/{bitbucket,ci,sync,inbox,storage,tasks,review,publish,context}/`, `src/shared/`, `fixtures/`, `tests/`, `scripts/` exist. BRIEF section 7 defines each folder. All Bitbucket calls stay in `src/server/bitbucket/`, and all Jenkins calls stay in `src/server/ci/jenkins.ts`.
 
 Commands:
 - `bun install`: install the pinned dependencies.
@@ -97,7 +97,7 @@ Add or update a project skill:
 - Before each run, check `claude auth status`. Run only when `authMethod` is `claude.ai`. Remove `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the child environment.
 - Follow the local server safety rules: 127.0.0.1 only, Host and Origin checks, session token, no wildcard CORS, no disabled TLS (BRIEF 3.6).
 - Tests never touch the live Bitbucket server. Use sanitized fixtures and a fake `claude` executable. Real-server tests need separate authorization.
-- The Bitbucket token never goes into SQLite, localStorage, logs, URLs, or prompts.
+- The Bitbucket, Jira, and Jenkins tokens never go into SQLite, localStorage, logs, URLs, or prompts.
 - Nothing goes to Bitbucket or Jira without an explicit user action. The app posts, not the AI.
 - The app never runs claude in the user's clone and pushes nothing, with one exception for Build a Jira task (BRIEF 3.5, 3.6). Its implement runs edit files only in an app-owned worktree of the cache, never in the user's clone. A push and a PR create or update go to Bitbucket only on the user's click. A push goes only to a branch that the task created, or to a branch with the Jira key of its part that the user picked with "Continue on <branch>". The app never pushes to the branch of a PR that it tracks but did not create, and never to the target branch. Each push has an explicit `--force-with-lease` and no `+` refspec. After a squash merge, the update merges the base in three steps instead of a rebase and a force push. The app never force-pushes after the first push.
 - No company names, hosts, or secrets in code, docs, or fixtures. The project may become open source.

@@ -160,6 +160,7 @@ Bitbucket webhooks cannot reach a laptop on localhost. The app polls the REST AP
 - A fixed deny list applies in allowlist and Most commands mode: every git command, the Bitbucket and Jira hosts, network programs that no entry names, the credential-store tools, and reads of the app data files and ~/.ssh. Unrestricted (user decision of 2026-11-06) denies only every git command and the Bitbucket and Jira hosts. These rules match the command text only. They reduce mistakes. They do not stop an attacker. `bash -c 'git ...'` runs git past the deny rule (Gate B34), so the git state check above guards the cache.
 - Bash commands use the real HOME, so ssh keys and ssh config work. The child environment has no app token, no GATE_* variable, no askpass program, and an empty git credential helper. Git in it reads no system config and an empty file of the app in place of the user's global config. Each command and the end of its output show in the Log tab.
 - Not enforceable: a test or build command runs code that Claude wrote, and a command that Claude runs acts as the user. It can read the user's files and reach the network. Native Windows has no OS sandbox. Safeguards: the plan approval, the own review, the user's look at each PR before the push, and the first-use warning. A WSL2 or sandbox runner comes later.
+- A run never gets the CI token or calls the CI server.
 
 ### 3.6 Local server safety
 
@@ -168,6 +169,7 @@ Bitbucket webhooks cannot reach a laptop on localhost. The app polls the REST AP
 - Every mutation needs a per-start session token. The server puts it into the page it serves.
 - Outbound calls go only to the configured Bitbucket instance. Check redirects against it. Two exceptions: a review with a Docs profile lets the CLI call the documentation MCP servers (Microsoft Learn, DeepWiki). A profile with user MCP servers lets the CLI start or call those servers. The app also calls them for tools/list in Settings and at run start. A remote user server needs https, except on localhost.
 - Outbound calls can also go to the configured Jira origin. They occur on a Settings save, a Fetch, the start of a run whose profile includes the Jira parent (one GET of each parent), Read the task, Build this task, Read Jira again, Add to plan, and Move in Jira. For a task that builds sub-tasks, the sync reads the status of its sub-tasks with one GET of the parent at most every 5 minutes. The Task view reads it at most once per minute. The Jira client sends GET only, except one POST of a transition after the user confirms "Move in Jira". It follows no redirect and calls no other origin.
+- Outbound calls can also go to the configured Jenkins origin. They occur on a Settings save or Test, and on a log read of a failed build of a task PR. The read follows 'Let Claude fix the build', or comes within the red-build fixes. The client sends GET only and uses https, except on localhost. It follows no redirect and calls no other origin. The Jenkins token uses the OS store under its own name.
 - For a task that builds sub-tasks, the spec run also reads the branches that name each sub-task key, the open PRs of the repository, the changed paths of each tracked PR, and the newest merged PRs of the repository. These calls are GET only.
 - Every spec run of a task also reads the branch search for the task key and its parent key. It also reads one page of open PRs and one page of merged PRs (spec section 6.22.4). These calls are GET only.
 - Release 3: a Download click also calls Jira. The attachment download follows same-origin redirects only, at most 3 hops. It checks the origin and the base path on each hop. A cross-origin redirect is an error, so the token never leaves the Jira origin.
@@ -352,6 +354,7 @@ Layout:
 - src/server/inbox/ (attention rules, read state, notifications)
 - src/server/review/ (jobs, snapshot, auth check, CLI, context, validator, diff viewer data; Release 3: edits.ts, fix.ts, clone.ts, fix-routes.ts)
 - src/server/context/ (Release 2: ContextSource, Jira REST client, task.md; Release 3: markdown.ts, attachments.ts)
+- src/server/ci/ (part-session.md section 2.15: all Jenkins calls in jenkins.ts)
 - src/server/publish/ (approvals, durable outbox, reconcile)
 - src/server/storage/ (SQLite, migrations)
 - src/server/tasks/ (Review v2 part 6: machine, tasks, interview, plan, worktree, checks, implement, loop, push, update; sub-tasks: schedule.ts for nextPart, gates.ts for the part gate)

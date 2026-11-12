@@ -359,6 +359,8 @@ export type SettingsDto = {
   // baseUrl: null when Jira is not connected.
   // email: the Atlassian account email of Jira Cloud. null for Server/Data Center.
   jira: { baseUrl: string | null; caFile: string | null; email: string | null; tokenStored: boolean };
+  // The CI server (part-session.md section 2.15). baseUrl: null when it is not connected.
+  jenkins: { baseUrl: string | null; user: string | null; caFile: string | null; tokenStored: boolean };
   // The opt-in of "Ask your session" (docs/plans/session-consult.md part C). Default off.
   sessions: boolean;
   // Ask the company AI policy question before a task attachment is included in runs. Default on.
@@ -1061,6 +1063,18 @@ export const jiraSettingsInput = z.object({
     .optional(),
 });
 export type JiraSettingsInput = z.infer<typeof jiraSettingsInput>;
+
+// PUT /api/settings/jenkins and POST /api/settings/jenkins/test. Empty baseUrl on PUT disconnects and clears the token.
+// Absent or empty token keeps the stored token of the same origin.
+export const jenkinsSettingsInput = z.object({
+  baseUrl: z.string().trim().max(2048),
+  user: z.string().trim().max(256).optional(),
+  token: z.string().trim().optional(),
+  caFile: z.string().trim().optional(),
+});
+export type JenkinsSettingsInput = z.infer<typeof jenkinsSettingsInput>;
+// POST /api/settings/jenkins/test: the user name that the CI server reports.
+export type JenkinsTestDto = { user: string };
 
 // ---------- Diff (plan r2 S-DIFF) ----------
 

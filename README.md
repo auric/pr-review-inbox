@@ -39,6 +39,7 @@ The name says what the app does. It is one inbox for the pull requests that you 
 - Claude never runs in your clone. Reviews run on a sanitized snapshot with read-only tools. PR Review Inbox never pushes your branches.
 - Build a Jira task is the only part that changes code or pushes. Claude edits files only in a worktree that the app owns, the app runs only the commands that you approved, Claude runs only the commands that you allowed for the repository, and the app pushes only the branch of the task when you click "Push and open PR". It never pushes to the target branch.
 - Your Bitbucket token goes into the OS secret store. It never goes into the database, logs, URLs, or prompts.
+- Your Jenkins token also goes into the OS secret store, under its own name. PR Review Inbox sends only GET requests to the Jenkins URL in Settings, follows no redirect, and never gives the token to Claude.
 
 ## Requirements
 
@@ -75,11 +76,12 @@ To try PR Review Inbox without a Bitbucket server, run `bun run demo` from sourc
 1. Open http://127.0.0.1:7317.
 2. Enter your Bitbucket URL and access token, then click Save. PR Review Inbox tests the connection first.
 3. Optional: in Settings, Jira, connect Jira. The review brief can then fetch the task text. For Jira Server or Data Center, enter a personal access token and leave the email empty. For Jira Cloud, enter your Atlassian account email and an API token without scopes. The email stays in `config.json`, and the token goes into the OS secret store. The first "Include in runs" on a task attachment, or the first attachment box of a Build task, asks you to confirm your company AI policy. "Ask before Claude reads a Jira attachment" in the same section asks again.
-4. The inbox lists the pull requests on your Bitbucket dashboard. To follow another one, paste its URL into the filter.
-5. Open a pull request and press `r` to open the review brief. Add a note. With two or more review profiles, pick one.
-6. Click Start review, or press `Ctrl+Enter`.
-7. Triage each draft: `a` accepts, `e` edits, `d` discards.
-8. Press `p` to post the accepted drafts. PR Review Inbox shows a confirm first.
+4. Optional: in Settings, CI server, connect Jenkins. Enter the Jenkins URL that the browser shows after login, your user name, and an API token from your Jenkins user page. Save and Test check the login first. A token works only on the Jenkins server that made it. Use https; plain http works only on localhost. The URL, the user name, and the CA file stay in `config.json`, and the token goes into the OS secret store. No feature reads build logs yet.
+5. The inbox lists the pull requests on your Bitbucket dashboard. To follow another one, paste its URL into the filter.
+6. Open a pull request and press `r` to open the review brief. Add a note. With two or more review profiles, pick one.
+7. Click Start review, or press `Ctrl+Enter`.
+8. Triage each draft: `a` accepts, `e` edits, `d` discards.
+9. Press `p` to post the accepted drafts. PR Review Inbox shows a confirm first.
 
 ## Features
 

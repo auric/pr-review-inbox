@@ -18,6 +18,7 @@ import { Hint } from "../shell/Hint";
 import { setTheme, type Theme, useTheme } from "../theme";
 import { About } from "./About";
 import { BranchPrefixes } from "./BranchPrefixes";
+import { CiSettings } from "./CiSettings";
 import { Clones } from "./Clones";
 import { JiraSettings } from "./JiraSettings";
 import { ProjectInstructions } from "./ProjectInstructions";
@@ -56,6 +57,7 @@ const HEADINGS: Record<SettingsSection, string> = {
   quality: "h-quality",
   "task-ids": "h-taskids",
   tracker: "h-tracker",
+  ci: "h-ci",
   tasks: "h-tasks",
   commands: "h-commands",
   clones: "h-clones",
@@ -186,6 +188,7 @@ export function Settings({
           ["quality", "Review quality"],
           ["task-ids", "Task IDs"],
           ...(tracker ? ([["tracker", tracker.name]] as [SettingsSection, string][]) : []),
+          ["ci", "CI server"],
           ["tasks", "Tasks"],
           ["commands", "Commands"],
           ["clones", "Clones"],
@@ -380,6 +383,7 @@ export function Settings({
         {settings.baseUrl !== null && <ReviewQuality />}
         {settings.baseUrl !== null && <TaskRules settings={settings} prs={prs} selected={selected} />}
         {settings.baseUrl !== null && <JiraSettings settings={settings} />}
+        {settings.baseUrl !== null && <CiSettings settings={settings} />}
         {settings.baseUrl !== null && <BranchPrefixes settings={settings} />}
         {settings.baseUrl !== null && <TaskCommands />}
         {settings.baseUrl !== null && <Clones settings={settings} />}

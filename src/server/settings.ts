@@ -6,7 +6,10 @@ import { Hono } from "hono";
 import { validator } from "hono/validator";
 import {
   type ApiError,
+  type JenkinsSettingsInput,
+  type JenkinsTestDto,
   type JiraSettingsInput,
+  jenkinsSettingsInput,
   MAX_TASK_RULES,
   type PrTask,
   type SettingsDto,
@@ -20,6 +23,7 @@ import { DEFAULT_BRANCH_PREFIXES, runLimitsOf } from "../shared/task";
 import type { PullRequest } from "../shared/types";
 import { ForgeError } from "./bitbucket/client";
 import { createBitbucketProvider, type ForgeProvider } from "./bitbucket/provider";
+import { createJenkinsClient, type JenkinsClient, JenkinsError } from "./ci/jenkins";
 import { type Config, ConfigWriteError, dataDir, dbPath, PROFILES_VERSION, readConfig, writeConfig } from "./config";
 import { createJiraSource, JiraDeploymentError } from "./context/jira";
 import { ContextError, type ContextSource } from "./context/source";
@@ -104,11 +108,18 @@ function normalize(raw: string): string | null {
 
 // Construction does no disk or secret-store access. The first request loads the state.
 export function createSettings(
-  opts: { dir?: string; secrets?: Secrets; jiraSecrets?: Secrets; taskBudget?: Parameters<typeof createTaskRunner>[0] } = {},
+  opts: {
+    dir?: string;
+    secrets?: Secrets;
+    jiraSecrets?: Secrets;
+    jenkinsSecrets?: Secrets;
+    taskBudget?: Parameters<typeof createTaskRunner>[0];
+  } = {},
 ) {
   const dir = opts.dir ?? dataDir();
   const secrets = opts.secrets ?? createSecrets();
   const jiraSecrets = opts.jiraSecrets ?? createSecrets(undefined, "jira-token");
+  const jenkinsSecrets = opts.jenkinsSecrets ?? createSecrets(undefined, "jenkins-token");
   const listeners: ((s: SettingsState) => void)[] = [];
   const taskListeners: ((prs: number[]) => void)[] = [];
   let loaded = false;
@@ -158,6 +169,12 @@ export function createSettings(
         caFile: c?.jira?.caFile ?? null,
         email: c?.jira?.email ?? null,
         tokenStored: c?.jira !== undefined && (await jiraSecrets.get()) !== null,
+      },
+      jenkins: {
+        baseUrl: c?.jenkins?.baseUrl ?? null,
+        user: c?.jenkins?.user ?? null,
+        caFile: c?.jenkins?.caFile ?? null,
+        tokenStored: c?.jenkins !== undefined && (await jenkinsSecrets.get()) !== null,
       },
       sessions: c?.sessions === true,
       askAttachments: c?.askAttachments !== false,
@@ -309,6 +326,68 @@ export function createSettings(
       throw e;
     });
 
+  type JenkinsSaveError = { status: 400 | 409; error: string };
+  type JenkinsChecked = { baseUrl: string; user: string; caFile: string | undefined; token: string; name: string };
+
+  // Checks the form values with whoAmI. A same-origin form without a token uses the stored token.
+  async function checkJenkins(input: JenkinsSettingsInput, prev: Config): Promise<JenkinsChecked | JenkinsSaveError> {
+    const bad = (error: string): JenkinsSaveError => ({ status: 400, error });
+    const baseUrl = normalize(input.baseUrl);
+    if (!baseUrl) return bad("Give the CI server base URL only, for example https://host or https://host/context.");
+    const user = input.user;
+    if (!user) return bad("Enter the CI server user name.");
+    const caFile = input.caFile || undefined;
+    const sameOrigin = prev.jenkins !== undefined && originOf(prev.jenkins.baseUrl) === originOf(baseUrl);
+    const token = input.token || (sameOrigin ? await jenkinsSecrets.get() : null);
+    if (!token) return bad("Enter the API token. A new CI server URL needs a new token.");
+    let client: JenkinsClient;
+    try {
+      client = createJenkinsClient({ baseUrl, user, token, caFile });
+    } catch (e) {
+      return bad((e as { code?: unknown }).code ? "Cannot read the CA file." : (e as Error).message);
+    }
+    try {
+      const { name } = await client.whoAmI();
+      return { baseUrl, user, caFile, token, name };
+    } catch (e) {
+      if (!(e instanceof JenkinsError)) throw e;
+      // The message names the user. The log line keeps only the kind and the status.
+      log(`CI server check failed: ${e.kind}${e.status ? ` ${e.status}` : ""}.`);
+      return bad(e.message);
+    }
+  }
+
+  // PUT /api/settings/jenkins. Save checks the token with whoAmI first (part-session.md section 2.15).
+  const saveJenkins = (input: JenkinsSettingsInput): Promise<SettingsDto | JenkinsSaveError> =>
+    serial<SettingsDto | JenkinsSaveError>(async () => {
+      const prev = current();
+      if (!prev) return { status: 409, error: "Configure the Bitbucket URL and token first." };
+      if (!input.baseUrl) {
+        const next: Config = { ...prev, jenkins: undefined };
+        writeConfig(dir, next);
+        config = next;
+        await jenkinsSecrets.clear();
+        log("CI server disconnected.");
+        return dto();
+      }
+      const r = await checkJenkins(input, prev);
+      if ("status" in r) return r;
+      if (input.token) await jenkinsSecrets.set(r.token);
+      const next: Config = { ...prev, jenkins: { baseUrl: r.baseUrl, user: r.user, caFile: r.caFile } };
+      writeConfig(dir, next);
+      config = next;
+      log(`CI server settings saved for ${originOf(r.baseUrl)}.`);
+      return dto();
+    }).catch((e): JenkinsSaveError => {
+      if (e instanceof ConfigWriteError) return { status: 409, error: e.message };
+      throw e;
+    });
+
+  const jenkinsBody = validator("json", (v, c) => {
+    const r = jenkinsSettingsInput.safeParse(v);
+    return r.success ? r.data : c.json<ApiError>({ error: "Invalid CI server settings." }, 400);
+  });
+
   const routes = new Hono()
     .get("/", async (c) => c.json(await dto()))
     .put(
@@ -354,6 +433,7 @@ export function createSettings(
                   ? nextEdits(input.profiles, prev?.profiles, prev?.profileEdits)
                   : undefined,
             jira: prev?.jira,
+            jenkins: prev?.jenkins,
             globalInstructions: prev?.globalInstructions,
             sessions: input.sessions === undefined ? prev?.sessions : input.sessions || undefined,
             askAttachments: input.askAttachments === undefined ? prev?.askAttachments : input.askAttachments ? undefined : false,
@@ -407,6 +487,17 @@ export function createSettings(
           throw e;
         }),
     )
+    .put("/jenkins", jenkinsBody, async (c) => {
+      const r = await saveJenkins(c.req.valid("json"));
+      return "status" in r ? c.json<ApiError>({ error: r.error }, r.status) : c.json(r, 200);
+    })
+    // The Test button: the same check as the save, without a write.
+    .post("/jenkins/test", jenkinsBody, async (c) => {
+      const prev = current();
+      if (!prev) return c.json<ApiError>({ error: "Configure the Bitbucket URL and token first." }, 409);
+      const r = await checkJenkins(c.req.valid("json"), prev);
+      return "status" in r ? c.json<ApiError>({ error: r.error }, r.status) : c.json<JenkinsTestDto>({ user: r.name }, 200);
+    })
     .post(
       "/task-rules/preview",
       validator("json", (v, c) => {
@@ -494,6 +585,13 @@ export function createSettings(
       const j = current()?.jira;
       const token = j && (await jiraSecrets.get());
       return j && token ? createJiraSource({ baseUrl: j.baseUrl, token, caFile: j.caFile, email: j.email }) : null;
+    },
+    // A client for the CI server settings, or null without them or a token. Throws for an unreadable CA file.
+    // Only app code calls it. A run never gets the token (BRIEF 3.5).
+    async jenkins(): Promise<JenkinsClient | null> {
+      const j = current()?.jenkins;
+      const token = j && (await jenkinsSecrets.get());
+      return j && token ? createJenkinsClient({ baseUrl: j.baseUrl, user: j.user, token, caFile: j.caFile }) : null;
     },
     // Runs after a successful PUT that changes baseUrl, token, or caFile, after the new config is written and its database is open.
     onSettingsChanged(fn: (s: SettingsState) => void) {

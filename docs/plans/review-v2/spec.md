@@ -3087,6 +3087,30 @@ Acceptance criteria:
 6. AC-B246. The list of edits of a shipped profile has no reset button. The reset next to the field sets it back, and the other edits stay (tests/e2e/shipped-edits.e2e.ts).
 7. AC-B247. INDEX.md says "(1 file left out: ...)" and "(1 key file left out)" for one file (tests/review/skills.test.ts).
 
+### 6.31 CI server connection (part-session.md section 2.15, package C2)
+
+- src/server/ci/jenkins.ts holds every call to Jenkins. It sends GET only, with Basic auth of the user and the API token, and `redirect: "manual"`. A 3xx is an error. The base URL must use https, except on 127.0.0.1, localhost, and [::1].
+- Config: `jenkins: {baseUrl, user, caFile}` in config.json. The token goes only into the OS store under `jenkins-token`. A Bitbucket settings PUT keeps the block.
+- PUT /api/settings/jenkins saves after a whoAmI check (GET `<base>/whoAmI/api/json`: 200, `authenticated` true, `anonymous` false). An empty baseUrl disconnects and deletes the token. An absent token reuses the stored token of the same origin. A new origin needs a new token.
+- POST /api/settings/jenkins/test runs the same check with the form values and writes nothing. It returns `{user}`.
+- Error texts: 401 "Jenkins rejected the user name or API token. Make a new token in Jenkins and save it again." 403 "Jenkins accepted the login, but user <u> may not read <path>. Ask a Jenkins admin for Overall/Read and Job/Read." 404 "Jenkins has no page at <path>. Check the Jenkins URL." 3xx "Jenkins answered with a redirect. Use the Jenkins URL that the browser shows after login." Other: "Jenkins failed to answer (HTTP <n>)." A failed check logs only the kind and the status.
+- Log read `readLog(buildUrl)`: the build URL must have the configured origin, lie below the base path, and hold no user info. Otherwise the client sends nothing. The first GET is `<build URL>logText/progressiveText?start=0`. Its X-Text-Size gives the log size. A log within the cap (2 MB) is that answer. A larger log takes a second GET with start = X-Text-Size - 2 MB, and the first body is dropped. A body over the cap, or an answer without X-Text-Size, is an error. The read is not verified on a real server (integration-check.md CI12).
+- The read has no caller yet. "Let Claude fix the build" and the red-build fixes add the callers.
+- Settings has the card "CI server" (section `ci`) with the URL, the user name, the API token, the CA file, Save, Test, and Disconnect. Its visible text names no product. The code keeps the key `jenkins` of the DTO and the route.
+
+Acceptance criteria:
+
+1. AC-B283. Save sends one whoAmI GET and stores the token only in the secret store. config.json has the URL and the user, and no file of the data folder holds the token (tests/ci/settings.test.ts).
+2. AC-B284. A Bitbucket settings PUT keeps the jenkins block (tests/ci/settings.test.ts).
+3. AC-B285. Test returns the user name and writes nothing (tests/ci/settings.test.ts).
+4. AC-B286. 401 and 403 give their own texts, store nothing, and log only the kind and the status. No log line holds the token (tests/ci/settings.test.ts, tests/ci/jenkins.test.ts).
+5. AC-B287. http to a host other than loopback, a bad URL, a missing user or token, and an unreadable CA file give 400 and send no request (tests/ci/settings.test.ts, tests/ci/jenkins.test.ts).
+6. AC-B288. The same origin reuses the stored token. A new origin needs a new token and gets no request. An empty URL deletes the token (tests/ci/settings.test.ts).
+7. AC-B289. readLog refuses a build URL of another origin, outside the base path, or with user info, and sends no request (tests/ci/jenkins.test.ts).
+8. AC-B290. readLog follows no redirect. The redirect target gets no request (tests/ci/jenkins.test.ts).
+9. AC-B291. A log within the cap takes one GET from start 0. A larger log takes a second GET from X-Text-Size - cap and gives the tail. A body over the cap is an error (tests/ci/jenkins.test.ts).
+10. AC-B292. readLog gives its own error for 401, 404, and an answer without X-Text-Size (tests/ci/jenkins.test.ts).
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule
@@ -3210,6 +3234,7 @@ db.test.ts per migration: the version number, a database of the version before w
 | POST /api/tasks/:id/plan-again, /parts/:part/start, /parts/:part/push, /parts/:part/move, /parts/:part/drop, /jira-check, /jira-read; GET, POST /api/tasks/:id/jira/:key/transitions; POST /api/tasks and /plan gain subtasks (section 6.20.12) | 6 |
 | PUT settings gains taskPlanCheck (section 6.22.10) | 6 |
 | GET /api/runs/slots; PUT settings runLimits gains runsAtOnce (section 6.26) | 6 |
+| PUT /api/settings/jenkins; POST /api/settings/jenkins/test (section 6.31) | 6 |
 | GET, POST /api/prs/:id/notes; PUT, DELETE /api/notes/:id (section 2.9) | 2 |
 | POST /api/prs/:id/ask gains parent; GET /api/prs/:id/asks gives parent (section 2.15) | 2 |
 | /api/prs/:id/autopilot, /api/autopilot/…, /api/prs/:id/dependencies, /api/dependencies/:id, POST /api/items/:id/post-now (section 11.12) | 7 (on hold) |
