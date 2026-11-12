@@ -20,6 +20,7 @@ Status: study of 2026-11-11 against main 674b29d. Not built. No eval ran; the us
    - Effect: more recall on PRs with threads (hypothesis).
    - Risk: findings that the author already explained come back. The history rules (catalog.ts:513-515) still block posted and discarded findings.
    - Cheap check: for each must-find that the stored baseline missed, check whether pr-context.md at that head has a thread within 10 lines. If none has, drop this idea.
+   - Result of 2026-11-12: unclear. The baseline cases had no PR threads, so threads caused none of the 18 misses. All 18 misses were never raised. A real test needs thread comments seeded into the eval runner. Idea 2 waits for that.
 
 3. **The app checks the evidence lines of each finding.**
    - Change: the finder gives `path:line` and the exact text of that line in evidence (catalog.ts:545). judge.ts checks each quote against the file on its side (±3 lines, as the anchor). A quote that does not hold sets evidenceStatus to "unverified", so the minor cap at judge.ts:416 applies, and candidates.md marks the line "does not hold" for the verifier. Old results without a quote get no penalty.

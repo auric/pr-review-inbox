@@ -1,6 +1,6 @@
 # Build a Jira task: one Claude session per part
 
-Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. Not built. Gate B37 is not run. All user requirements of 2026-11-12 are decided. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
+Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. Not built. Gate B37 is not run. All user requirements of 2026-11-12 are decided. User answers of 2026-11-12: Q1 to Q9 take the recommended answers. Section 3 is approved, items 1 to 15, with the red-build fixes as a tick per part. RUN_TIME_MAX_MS (240 min) stays. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
 
 Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, and shared/task.ts are those of the WP-R1b tree. The other files are equal on main.
 
