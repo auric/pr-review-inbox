@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix now checks the claim of a comment in the code first. It fixes only a confirmed defect. It makes the smallest fix and adds no extra flag, option, or special case. A comment can ask for a special case around a rule that applies by design. Fix then gives "Won't fix" and names the place of the rule. A thread where you or the author already decided against the change gets no fix. A request for more than the pull request or its task asks gets "Won't fix" as out of scope. The reply then proposes it as a follow-up. A defect that the change adds is always in scope.
 - The Drafts list now shows bugs first: security, concurrency, resource handling, and behavior changes, in that order. The other findings follow in the order of the run. No finding is hidden.
 - A posted nit now starts with "Nit:" also when the severity mark is off. A posted low-confidence finding starts with "Can you check this?". A draft that you edited posts as you wrote it.
 - Review profiles have a new field "Advisor": Off (the default), Fable, Opus, or another model ID. With an advisor, a stronger model gives Claude advice at hard points in every run of the profile, also in task steps. It uses more of your plan. The app refuses a Haiku advisor and an advisor below the model of the profile or of the check step. The run log shows each advisor call as "Advisor reviewed", "declined", or "unavailable", and the run details name the advisor model.

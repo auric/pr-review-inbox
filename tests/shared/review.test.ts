@@ -101,8 +101,8 @@ describe("finding v2 (AC-R14)", () => {
     expect(reviewResult.safeParse({ ...V1_RESULT, findings: [{ ...V1_FINDING, cause: { path: "a" } }] }).success).toBe(false);
   });
 
-  test("the review prompts ship as prompt version 2.4 (2.3: no protected categories and no language skip lists)", () => {
-    expect(REVIEW_PROMPT_VERSION).toBe("2.4");
+  test("the review prompts ship as prompt version 2.5 (2.4: no Fix confirm and scope rules)", () => {
+    expect(REVIEW_PROMPT_VERSION).toBe("2.5");
   });
 });
 

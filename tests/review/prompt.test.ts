@@ -11,6 +11,7 @@ import {
   DO_NOT_FLAG,
   discussAgent,
   explainAgent,
+  FIX_CONFIRM_RULES,
   FIX_REPLY_RULES,
   FOLLOW_UP_RULE,
   finderRules,
@@ -222,6 +223,28 @@ describe("run prompts", () => {
     expect(schema.properties.threads.items.properties.reply.description).toBe(
       "For a thread: short Markdown in the user's voice. For fixed false: the answer to the commenter. For fixed true: what the edits change. Empty for a finding.",
     );
+  });
+
+  test("AC-R22 to AC-R24: the fix agent confirms the defect, makes the smallest fix, keeps rules by design, and defines scope", () => {
+    const edited = { ...general, prompt: "My own review rules." };
+    for (const prompt of [fixAgent(general).prompt, fixAgent(edited, { prContext: true, notes: true }).prompt]) {
+      for (const rule of FIX_CONFIRM_RULES) expect(prompt).toContain(`\n${rule}\n`);
+      expect(prompt).toContain(
+        '\nA defect that this change adds is always in scope.\nA request for more than the goal in ./context/pr.md or ./context/task.md is "scope".\n',
+      );
+      expect(prompt).toContain('\nFor "scope", propose the change as a follow-up.\n');
+      expect(prompt).not.toContain("My own review rules.");
+    }
+    expect(FIX_CONFIRM_RULES).toEqual([
+      "Check the claim of the comment in ./repo first. Fix only a defect that you confirmed.",
+      "Make the smallest fix. Add no flag, option, guard, or special case that the defect does not need.",
+      'When a comment asks for a special case around an existing rule that applies by design, set why to "invalid". Name where the rule applies.',
+      "When the user or the author already decided against the change in the thread, set fixed to false.",
+    ]);
+    expect(longSentences([...FIX_CONFIRM_RULES, ...FIX_WHY_RULES, ...FIX_REPLY_RULES])).toEqual([]);
+    // A session fix run gets the scope lines but no reply for a fix it does not make.
+    expect(SESSION_FIX_RULES).toContain("\n- A defect that this change adds is always in scope.\n");
+    expect(SESSION_FIX_RULES).not.toContain("propose the change as a follow-up");
   });
 
   test("a fix run with findings lists their IDs only and names findings.md; a findings-only run has no thread lines (fix-ux.md WP3)", () => {
@@ -484,7 +507,7 @@ describe("review v2 finder prompt", () => {
     expect(p.startsWith("You are a read-only code reviewer. You cannot change files, and you post nothing.\n")).toBe(true);
   });
 
-  test("S2: no review agent tells the finder to report less; the ask, reply, and fix agents keep their text (hash of 67b3b84)", () => {
+  test("S2: no review agent tells the finder to report less; the ask and reply agents keep their text (hash of 67b3b84); the fix agent text is of prompt version 2.5", () => {
     const gone = [
       "Give no finding to fill the list",
       "An empty findings list is a valid result.",
@@ -498,7 +521,7 @@ describe("review v2 finder prompt", () => {
         }
     expect(sha(askAgent(general).prompt)).toBe("a34e7fff56681df0ad4cfdf704b2a4195f6a8c80e78915847a6767e008235047");
     expect(sha(replyAgent(general).prompt)).toBe("3b35024920c4b0a414cf8fd7d08240aeacaac9d7404a9bd66572caddb8e3b08f");
-    expect(sha(fixAgent(general).prompt)).toBe("8a8d4c7a458d0cb084caf11409b488f16868a2818544926374baf47ede50ad7a");
+    expect(sha(fixAgent(general).prompt)).toBe("c1960a70d998f535bcda1f2742d0f9bde6ce0b5febded7d2fe79b84268999b02");
     // WP-X1: an Explain profile gets the agent of its own run kind (tests/review/explain.test.ts).
     expect(mainAgent(explain, FULL)).toEqual(explainAgent(explain));
   });
@@ -515,7 +538,7 @@ describe("review v2 finder prompt", () => {
     // WP-R3: the agents of the verify phase are review agents too.
     const check = [withVerifyDelegation(verifyAgent(known, run), true), verifierAgent(known, run)].map((a) => a.prompt).join("\n---\n");
     expect({ version: REVIEW_PROMPT_VERSION, finder: sha(finder), check: sha(check) }).toEqual({
-      version: "2.4",
+      version: "2.5",
       finder: "c634b814a6e009758c0436e99f35bced2feb9922b2b2ae151c758aeec4783b04",
       check: "4c91fce5912f9ddce955519e0d876c94da61486d7b79a31d5e08033bf548abda",
     });
@@ -690,7 +713,7 @@ describe("review v3 prompt switches", () => {
   const rereviewInput = { ...full, since: "c".repeat(40), rangeBase: "d".repeat(40), earlier: [1, 2], posted: [2] };
   const withVariants = (...variants: ProfileInput["variants"]) => ({ ...general, variants });
 
-  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.4)", () => {
+  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.5)", () => {
     const threads = [{ thread: 1, replyTo: 2 }];
     const kinds: Record<string, string[]> = {
       review: [mainAgent(general, FULL).prompt, reviewerAgent(general, FULL).prompt, buildPrompt(full)],
@@ -726,7 +749,7 @@ describe("review v3 prompt switches", () => {
       explain: "0a2d403ba5bfeea12a2f6249229f77ff3a19b646d202100aec744db3c4eb8b53",
       ask: "65e099f1000e6883cf1961cc02b33bef2864530efc61821d835f6667c6cb0f58",
       reply: "cd085ab743e2fe4908fcf1207db6cf3d061fdd5152161fc51ae9a9dfdea08de5",
-      fix: "ef25cb6860a0d699bf3385b19d000b1fb9315c829b481c56ded5562e5b0ec0a0",
+      fix: "e3431b38c46d6e2c1d231c7604adca4463033a570580485c47f2d0f94ab4a799",
       discuss: "1f8484da378fa9c68d8c1738e16e719ca970d43657734853de5f879824c8422d",
       improve: "0f1891af35554658c9362298d0d4e0e0fe9237e44c926743fa3081bb451941f3",
     });
@@ -812,7 +835,7 @@ describe("review v3 prompt switches", () => {
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
     expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.4+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.5+order+rules2");
   });
 
   test("ASD-STE100: every switch line has at most 20 words", () => {
@@ -832,7 +855,7 @@ describe("review v3 prompt switches", () => {
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.4+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.5+order+rules2");
     expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);

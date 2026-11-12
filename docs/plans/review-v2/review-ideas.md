@@ -1,6 +1,6 @@
 # Review quality: next ideas (2026-11-11)
 
-Status: study of 2026-11-11 against main 674b29d. Idea 1 and the eval item fields of idea 3 are built (2026-11-12), not run. No eval ran; the user stopped eval runs for now, so each idea has a cheap check that needs no review run.
+Status: study of 2026-11-11 against main 674b29d. Idea 4 and the Fix part of idea 5 are built. Idea 1 and the eval item fields of idea 3 are built (2026-11-12), not run. Candidates B and C are built. The other ideas are not built. No eval ran; the user stopped eval runs for now, so each idea has a cheap check that needs no review run.
 
 ## Short answer
 
@@ -31,12 +31,14 @@ Status: study of 2026-11-11 against main 674b29d. Idea 1 and the eval item field
    - Result of 2026-11-12: unclear. The eval results do not store evidence or anchorText (scripts/eval/run.ts items()). A stand-in check of refs in the visible text found 0 bad refs of 26. Moved anchors were more common on true positives (4 of 21) than on unmatched findings (1 of 116), so the penalty must only cap severity. Next: store evidence and anchorText in the eval items with idea 1, then check again on the next baseline. Built 2026-11-12: run.ts items() stores evidence, anchorText, and cause. Old result files still score.
 
 4. **Fix confirms the defect, makes the smallest fix, and keeps existing rules.**
+   - Status: built (spec.md AC-R22, AC-R24). REVIEW_PROMPT_VERSION is "2.5".
    - Change: add to the Fix agent (catalog.ts:886-905): "Check the claim of the comment in ./repo first. Fix only a defect that you confirmed." "Make the smallest fix. Add no flag, option, guard, or special case that the defect does not need." "When a comment asks for a special case around an existing rule that applies by design, set why to invalid. Name where the rule applies." "When the user or the author already decided against the change in the thread, set fixed to false."
    - Effect: fewer wrong or large Fix edits.
    - Risk: real fixes refused as invalid. The user sees the reason and can ask again.
    - Cheap check: count discarded Fix edits by `why`, before and after. Add a prompt test.
 
 5. **A scope rule for Fix, and a scope trial for the finder.**
+   - Status: the Fix part is built (spec.md AC-R23). The follow-up line went to FIX_REPLY_RULES, because a session fix run leaves reply empty when it gives no fix. The finder trial is not built.
    - Change, Fix: in FIX_WHY_RULES (src/shared/review.ts:490): "A defect that this change adds is always in scope. A request for more than ./context/pr.md or ./context/task.md asks is scope. Propose it as a follow-up in reply."
    - Change, finder: a trial do-not-flag item behind a variant only: "a wider guarantee, another case, or another component that the goal does not ask for, when the change breaks nothing".
    - Risk: the finder item is a "high-signal" kind of rule, and such rules cost recall before (results.md:8). Low priority.

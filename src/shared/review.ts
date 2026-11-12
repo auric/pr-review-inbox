@@ -17,7 +17,8 @@ const lineNo = z.number().int().min(1);
 // "2.0": the finder prompts of review v2 without the verify phase. "2.1": with the verify phase. "2.2": with the PR context rules.
 // "2.3": the Build section of pr-context.md stays out of coverage, and a rule finding out of its scope stays as core.
 // "2.4": the category classes that the check never hides, and the skip list of each language checklist.
-export const REVIEW_PROMPT_VERSION = "2.4";
+// "2.5": the Fix rules that confirm the defect, keep the fix small, keep rules by design, and define scope.
+export const REVIEW_PROMPT_VERSION = "2.5";
 
 const place = {
   path: z.string().describe("File path relative to the repository root, with / separators."),
@@ -507,6 +508,8 @@ export const FIX_WHY_RULES = [
   '"already": the code already does what the comment asks.',
   '"invalid": the review point is wrong.',
   '"scope": the change belongs outside this pull request.',
+  "A defect that this change adds is always in scope.",
+  'A request for more than the goal in ./context/pr.md or ./context/task.md is "scope".',
   '"decision": the user must choose between options.',
   '"risk": the fix can break other code.',
   '"unclear": the comment does not say what to change.',
