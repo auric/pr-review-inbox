@@ -325,6 +325,11 @@ function items(d: RunDetail, volume: Volume | undefined): EvalItem[] {
         confidence: p.confidence,
         evidenceStatus: p.evidenceStatus,
         agent: p.agent,
+        evidence: p.evidence,
+        anchorText: p.anchorText,
+        ...(p.cause && {
+          cause: { path: p.cause.path, side: p.cause.side, line: p.cause.line, lineEnd: p.cause.lineEnd, anchorText: p.cause.anchorText },
+        }),
         ...((p as { carried?: unknown }).carried !== undefined && { carried: true }),
       },
     ];

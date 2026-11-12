@@ -2,13 +2,15 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Re-scores an eval result file with the bugs, traps, and extras of the current case fixtures, offline (docs/plans/review-v2/spec.md section 4.3).
-// --tolerance N scores with another near-line tolerance (docs/plans/review-v3.md WP-V1). A local case keeps its stored truth.
-// Usage: bun run eval:rescore <result.json> [--tolerance N] [--out <file>]. Exit codes: 0 done, 2 a usage error or an unreadable file.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+// --tolerance N scores with another near-line tolerance (docs/plans/review-v3.md WP-V1). A local case keeps its stored truth, so a
+// local result needs the build of the set that it ran (localRefusal).
+// Usage: bun run eval:rescore <result.json> [--tolerance N] [--out <file>]. Exit codes: 0 done, 2 a usage error, an unreadable file, or a local result of another build of the set.
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { buildRepo, type EvalBug, type EvalExtra, type EvalTrap, findCase } from "./cases";
+import { buildRepo, type EvalBug, type EvalExtra, type EvalTrap, findCase, rereviewDir, setDir, setFingerprint } from "./cases";
 import { readResult, suiteDelta, summaryText } from "./compare";
 import { type EvalResult, score } from "./score";
 
@@ -42,6 +44,29 @@ export function rescore(
   if (tolerance !== undefined && tolerance !== (r.tolerance ?? 0))
     notes.push(`The tolerance goes from ${r.tolerance ?? 0} to ${tolerance} lines.`);
   return { result: { ...r, cases, rescoredAt: at, ...(tolerance !== undefined && { tolerance }) }, notes };
+}
+
+// null, or why a local result does not fit the cases in dir. dir: the cases folder of the set. run.ts hashes all selected cases, so a
+// stopped run also fails here.
+export function localRefusal(r: EvalResult, dir: string): string | null {
+  if (r.set !== "local") return null;
+  const short = (f: string) => f.slice(0, 12);
+  if (!r.fingerprint) return "The local result has no set fingerprint. Run the eval again on the current build of the set.";
+  const ids = [...new Set(r.runs.map((x) => x.case))];
+  const missing = ids.filter((id) => !existsSync(join(dir, id, "case.json")));
+  if (missing.length)
+    return `The local set has no case ${missing.join(", ")} now. The result ran set ${short(r.fingerprint)}. Run the eval again on the current build.`;
+  const now = setFingerprint(
+    ids.map((id) => ({
+      id,
+      hash: createHash("sha256")
+        .update(readFileSync(join(dir, id, "case.json"), "utf8"))
+        .digest("hex"),
+    })),
+  );
+  return now === r.fingerprint
+    ? null
+    : `The result ran local set ${short(r.fingerprint)}, but its cases now have fingerprint ${short(now)}. A new build changed the cases, or the run stopped before its last case. Rescore keeps the stored truth, so it would mix two sets. Run the eval again on the current build.`;
 }
 
 // The head commit of each fixture comes from the same deterministic build as an eval run.
@@ -87,6 +112,11 @@ export async function main(argv: string[]): Promise<number> {
     before = readResult(file);
   } catch (e) {
     console.error((e as Error).message);
+    return 2;
+  }
+  const refused = localRefusal(before, before.rereview ? rereviewDir() : setDir("local"));
+  if (refused) {
+    console.error(refused);
     return 2;
   }
   const { result, notes } = rescore(before, await currentTruth(before), new Date().toISOString(), tolerance);

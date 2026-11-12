@@ -28,6 +28,7 @@ import {
   type EvalExtra,
   type EvalHuman,
   type EvalTrap,
+  LOCAL_RULES,
   type LocalCaseFile,
   localCaseFile,
   localDir,
@@ -139,8 +140,9 @@ const SQL = {
       EXISTS (SELECT 1 FROM review_item c WHERE c.kind = 'finding' AND json_extract(c.payload_json, '$.carried.from') = i.id) AS copied
     FROM review_item i JOIN review_run r ON r.id = i.run
     WHERE i.kind = 'finding' AND r.pr IS NOT NULL AND r.kind = 'review' AND r.status IN ('completed', 'incomplete') ORDER BY i.id`,
-  // The outbox posts findings and reply drafts. Only a root comment that it did not post is your own comment.
-  comments: `SELECT c.pr, c.comment_id, c.author_slug, c.author_login, c.anchor_json, c.excerpt_json FROM comment c
+  // The outbox posts findings and reply drafts. Only a root comment that it did not post is a human comment: yours or of another person.
+  comments: `SELECT c.pr, c.comment_id, c.author_slug, c.author_login, c.anchor_json, c.excerpt_json, c.thread_resolved AS resolved,
+      pr.author_slug AS pr_author FROM comment c JOIN pull_request pr ON pr.id = c.pr
     WHERE c.parent_id IS NULL AND c.tombstoned_at IS NULL AND c.anchor_json IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM post p WHERE p.pr = c.pr AND p.remote_id = c.comment_id) ORDER BY c.pr, c.comment_id`,
   prs: "SELECT id, pr_id, project, repo, title, description FROM pull_request",
@@ -168,6 +170,8 @@ type CommentRow = {
   author_login: string | null;
   anchor_json: string;
   excerpt_json: string | null;
+  resolved: number;
+  pr_author: string | null;
 };
 type PrRow = { id: number; pr_id: number; project: string; repo: string; title: string | null; description: string | null };
 type TaskRow = { pr: number; key: string; source: string; json: string | null };
@@ -210,10 +214,16 @@ export type Skipped = {
   emptyCases: number;
   commentNoLine: number;
   commentOtherHead: number;
+  // Root line comments of other reviewers. open: neither resolved nor orphaned. author: by the PR author.
+  otherOpen: number;
+  otherNoLine: number;
+  otherOtherHead: number;
+  otherAuthor: number;
 };
 
 // The selected items by source, before the conflict rule and carry. withdrawn: posted, then withdrawn in the thread (a trap).
-export type Sources = { posted: number; fixed: number; session: number; withdrawn: number };
+// other: line comments of other reviewers that a later head changed or that are resolved.
+export type Sources = { posted: number; fixed: number; session: number; withdrawn: number; other: number };
 
 export const caseId = (d: Pick<Draft, "pr" | "head" | "base">) => `pr${d.pr}-${d.head.slice(0, 12)}-${d.base.slice(0, 8)}`;
 export const rereviewId = (d: Pick<RereviewDraft, "pr" | "run">) => `pr${d.pr}-rr${d.run}`;
@@ -234,8 +244,12 @@ export function select(
     emptyCases: 0,
     commentNoLine: 0,
     commentOtherHead: 0,
+    otherOpen: 0,
+    otherNoLine: 0,
+    otherOtherHead: 0,
+    otherAuthor: 0,
   };
-  const sources: Sources = { posted: 0, fixed: 0, session: 0, withdrawn: 0 };
+  const sources: Sources = { posted: 0, fixed: 0, session: 0, withdrawn: 0, other: 0 };
   const drafts = new Map<string, Draft>();
   const byRun = new Map<number, Draft>();
   const rrSkipped: RereviewSkipped = { noEarlier: 0, badPayload: 0, missingCommits: 0, emptyCases: 0 };
@@ -375,26 +389,43 @@ export function select(
   const byPr = Map.groupBy(drafts.values(), (d) => d.pr);
   for (const c of db.query(SQL.comments).all() as CommentRow[]) {
     const list = byPr.get(c.pr);
-    if (!list || !isMe({ slug: c.author_slug, login: c.author_login }, me)) continue;
+    if (!list) continue;
+    const mine = isMe({ slug: c.author_slug, login: c.author_login }, me);
+    // The comments of the PR author explain the change. They are no review.
+    if (!mine && c.author_slug === c.pr_author) {
+      skipped.otherAuthor++;
+      continue;
+    }
     const anchor = JSON.parse(c.anchor_json) as { fromHash?: unknown; toHash?: unknown };
     const excerpt = c.excerpt_json === null ? undefined : (JSON.parse(c.excerpt_json) as ExcerptLine[]);
     const spot = threadSpot({ anchor, excerpt });
     if (!spot || spot.line === null) {
-      skipped.commentNoLine++;
+      skipped[mine ? "commentNoLine" : "otherNoLine"]++;
+      continue;
+    }
+    // integration-check.md U12: a push that changes the commented line makes the anchor orphaned. A force push can also orphan it.
+    if (!mine && !spot.orphaned && c.resolved !== 1) {
+      skipped.otherOpen++;
       continue;
     }
     // A comment anchor names its diff with fromHash and toHash (BRIEF section 3.3). New-side lines are numbered at toHash, old-side
     // lines at fromHash.
     const at = list.filter((d) => d.head === anchor.toHash && (spot.side === "new" || d.base === anchor.fromHash));
-    if (!at.length) skipped.commentOtherHead++;
+    if (!at.length) skipped[mine ? "commentOtherHead" : "otherOtherHead"]++;
+    else if (!mine) sources.other++;
+    const place = { path: spot.path, side: spot.side, lines: [spot.line, spot.lineEnd] as [number, number] };
     for (const d of at)
-      d.human.push({
-        id: `comment-${c.comment_id}`,
-        path: spot.path,
-        side: spot.side,
-        lines: [spot.line, spot.lineEnd],
-        note: `Your comment ${c.comment_id}.`,
-      });
+      if (mine) d.human.push({ id: `comment-${c.comment_id}`, ...place, note: `Your comment ${c.comment_id}.` });
+      // A comment has no severity. minor counts at the volumes balanced and thorough (score.ts mustFind).
+      else
+        d.bugs.push({
+          id: `comment-${c.comment_id}`,
+          ...place,
+          severityMin: "minor",
+          module: "core",
+          source: "other",
+          note: `Comment ${c.comment_id} of another reviewer, ${c.resolved === 1 ? "resolved" : "on a line that a later head changed"}.`,
+        });
   }
 
   // Must find and must not raise on overlapping lines of one case: both go.
@@ -593,6 +624,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
           tasks: tasks.filter((t) => t.pr === d.pr).map(({ key, source, json }) => ({ key, source, json })),
           bundle: { file: bundle, base: d.base, head: d.head },
           changedLines: changedLines(await g(["diff", ...diffArgs, d.base, d.head])),
+          rules: LOCAL_RULES,
         });
         const text = `${JSON.stringify(c, null, 2)}\n`;
         mkdirSync(join(o.out, "cases", c.id));
@@ -670,8 +702,9 @@ export function report(m: Manifest): string {
   const lines = [
     `Local eval set: ${n.cases} cases from ${n.runs} review runs in ${n.repositories} repositories.`,
     `Must find: ${n.bugs} findings and ${n.human} of your own comments. Must not raise: ${n.traps}. Neutral: ${n.extras}.`,
-    `Sources before carry: ${o.posted} posted, ${o.fixed} covered by a fix commit, ${o.session} accepted by your session, ${o.withdrawn} posted and then withdrawn in the thread (must not raise).`,
+    `Sources before carry: ${o.posted} posted, ${o.fixed} covered by a fix commit, ${o.session} accepted by your session, ${o.withdrawn} posted and then withdrawn in the thread (must not raise), ${o.other} line comments of other reviewers that are resolved or on a changed line.`,
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
+    `Comments of other reviewers left out: ${s.otherOpen} open on an unchanged line, ${s.otherNoLine} without a line, ${s.otherOtherHead} at a head with no review, ${s.otherAuthor} by the PR author.`,
     `Carried from earlier heads of the same PR: ${m.carried.carried}. Not carried: ${m.carried.changed} with changed lines, ${m.carried.gone} in a deleted file, ${m.carried.overlap} on an item of the later head.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
     `Re-review cases: ${r.counts.cases}, with ${r.counts.earlier} earlier findings. Must find: ${r.counts.bugs}. Must not raise: ${r.counts.traps}. Neutral: ${r.counts.extras}.`,

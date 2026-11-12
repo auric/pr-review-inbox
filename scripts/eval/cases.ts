@@ -49,7 +49,14 @@ const spot = { path: z.string().min(1), side: z.enum(["new", "old"]), lines: ran
 const commit = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
 // carriedFrom: local set only. The head of the earlier case whose decision this item carries. Absent: a decision at the head of the case.
 const place = { id: z.string().min(1), ...spot, alt: z.array(z.object(spot)).min(1).optional(), carriedFrom: commit.optional() };
-export const evalBug = z.object({ ...place, severityMin: z.enum(severities), module: z.enum(MODULE_IDS), note: z.string().min(1) });
+// source: local set only. other: a line comment of another reviewer (local.ts). Absent: your own decision, or a fixture bug.
+export const evalBug = z.object({
+  ...place,
+  severityMin: z.enum(severities),
+  module: z.enum(MODULE_IDS),
+  note: z.string().min(1),
+  source: z.literal("other").optional(),
+});
 export const evalTrap = z.object({ ...place, why: z.string().min(1) });
 // A real issue that is no seeded bug. A shown item on it counts for no metric but extras.
 export const evalExtra = z.object({ ...spot, note: z.string().min(1) });
@@ -83,6 +90,7 @@ export const caseFile = z.object({
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1) });
+export const LOCAL_RULES = 2;
 // A case of the local set (docs/plans/review-v3.md WP-V1). A git bundle in ../../bundles/ holds the repository, so the case has no
 // base/ folder and no head.patch. The limits of the fixture sets do not apply. tasks: the pr_task rows with their task_context JSON.
 export const localCaseFile = caseFile.extend({
@@ -94,6 +102,9 @@ export const localCaseFile = caseFile.extend({
   tasks: z.array(z.object({ key: z.string().min(1), source: z.string().min(1), json: z.string().nullable() })),
   bundle: z.object({ file: z.string().regex(/^[0-9a-f]{16}\.bundle$/), base: commit, head: commit }),
   changedLines: z.number().int().min(0),
+  // The version of the must-find rules of local.ts. It is in the case.json text, so a new rule gives a new set fingerprint. 2: the
+  // comments of other reviewers count. Absent: 1.
+  rules: z.literal(LOCAL_RULES).optional(),
   // since: the head of the earlier run. sinceBase: its merge base. The bundle holds both.
   rereview: rereviewBlock.extend({ since: commit, sinceBase: commit }).optional(),
 });

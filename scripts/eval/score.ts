@@ -55,6 +55,10 @@ export type EvalItem = {
   agent: string | null;
   // A re-review only: the copy of an earlier finding (payload carried). Absent in files made before this field existed: false.
   carried?: boolean;
+  // The finder text of the finding (review-ideas.md idea 3). No metric reads them. Absent in files made before these fields existed.
+  evidence?: string;
+  anchorText?: string;
+  cause?: { path: string; side: Side; line: number; lineEnd: number | null; anchorText: string };
 };
 
 export type EvalDropped = { path: string; side: Side; line: number; lineEnd: number | null; severity: Severity; reason: string };

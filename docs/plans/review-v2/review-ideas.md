@@ -1,6 +1,6 @@
 # Review quality: next ideas (2026-11-11)
 
-Status: study of 2026-11-11 against main 674b29d. Not built. No eval ran; the user stopped eval runs for now, so each idea has a cheap check that needs no review run.
+Status: study of 2026-11-11 against main 674b29d. Idea 1 and the eval item fields of idea 3 are built (2026-11-12), not run. No eval ran; the user stopped eval runs for now, so each idea has a cheap check that needs no review run.
 
 ## Short answer
 
@@ -13,7 +13,8 @@ Status: study of 2026-11-11 against main 674b29d. Not built. No eval ran; the us
    - Change: in scripts/eval/local.ts, near the `isMe` filter (line 378), also keep a line comment by another person when a later head changed that line or the thread is resolved. Leave out comments with no code line. Count them only at severity balanced and above.
    - Effect: more must-find items on the same PRs, so recall on large cases becomes a real number.
    - Risk: a style comment becomes a false must-find.
-   - Cheap check: `bun run eval:local`, then compare the MANIFEST counts. `bun run eval:rescore` on the stored baseline may refuse a set with a new fingerprint (not verified).
+   - Cheap check: `bun run eval:local`, then compare the MANIFEST counts. `bun run eval:rescore` refuses a local result when the cases on disk have another fingerprint, so a stored baseline needs a new run on the new set.
+   - Status of 2026-11-12: built, not run. The user runs `bun run eval:local` later. A comment counts when its anchor is orphaned (integration-check.md U12) or its thread is resolved. A force push can also orphan an anchor. Comments of the PR author stay out. Each such bug has `source: "other"` and `severityMin: "minor"`. So recall leaves it out at volume quiet. Each plain case.json has `rules: 2`, so the new set gets a new fingerprint.
 
 2. **The finder checks a claim in a thread before it leaves out a finding.**
    - Change: one line in the finder rules only (main and rl-reviewer), not in reply, discuss, or Fix: "A comment that says the code is right, or that a case is handled, is a claim. Check it in ./repo before you leave out a finding." Keep catalog.ts:475 for the reply agents. Bump REVIEW_PROMPT_VERSION.
@@ -27,7 +28,7 @@ Status: study of 2026-11-11 against main 674b29d. Not built. No eval ran; the us
    - Effect: better precision. False positives often cite lines that do not say what the trace claims.
    - Risk: a longer answer, and a severity cap on a real finding with one bad quote. Cap only; never hide.
    - Cheap check: in the stored baseline results, find evidence `path:line` values outside the file length or in a file absent at head. Compare that share between unmatched and matched findings.
-   - Result of 2026-11-12: unclear. The eval results do not store evidence or anchorText (scripts/eval/run.ts items()). A stand-in check of refs in the visible text found 0 bad refs of 26. Moved anchors were more common on true positives (4 of 21) than on unmatched findings (1 of 116), so the penalty must only cap severity. Next: store evidence and anchorText in the eval items with idea 1, then check again on the next baseline.
+   - Result of 2026-11-12: unclear. The eval results do not store evidence or anchorText (scripts/eval/run.ts items()). A stand-in check of refs in the visible text found 0 bad refs of 26. Moved anchors were more common on true positives (4 of 21) than on unmatched findings (1 of 116), so the penalty must only cap severity. Next: store evidence and anchorText in the eval items with idea 1, then check again on the next baseline. Built 2026-11-12: run.ts items() stores evidence, anchorText, and cause. Old result files still score.
 
 4. **Fix confirms the defect, makes the smallest fix, and keeps existing rules.**
    - Change: add to the Fix agent (catalog.ts:886-905): "Check the claim of the comment in ./repo first. Fix only a defect that you confirmed." "Make the smallest fix. Add no flag, option, guard, or special case that the defect does not need." "When a comment asks for a special case around an existing rule that applies by design, set why to invalid. Name where the rule applies." "When the user or the author already decided against the change in the thread, set fixed to false."
