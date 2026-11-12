@@ -400,8 +400,15 @@ function seedEarlier(
 
 // The PR threads of a local case (local.ts caseThreads), as sync stores them. loadPrContext then lists them in pr-context.md.
 // offset: the comment IDs before the first thread ID, so no ID meets a root of seedEarlier. An anchor numbers a new-side range with
-// multilineSpan (shared/types.ts anchorSpan) and an old-side comment with its first line.
-function seedThreads(db: Database, pr: number, at: { head: string; base: string }, threads: EvalThreadComment[], offset: number) {
+// multilineSpan (shared/types.ts anchorSpan) and an old-side comment with its first line. roots: the seedEarlier roots by earlier ID.
+function seedThreads(
+  db: Database,
+  pr: number,
+  at: { head: string; base: string },
+  threads: EvalThreadComment[],
+  offset: number,
+  roots: Map<string, number>,
+) {
   for (const c of threads) {
     const anchor =
       c.id !== c.root || c.path === undefined
@@ -410,7 +417,7 @@ function seedThreads(db: Database, pr: number, at: { head: string; base: string 
             path: c.path,
             ...(c.lines &&
               (c.side === "old"
-                ? { line: c.lines[0], lineType: "REMOVED", fileType: "FROM" }
+                ? { line: c.lines[0], lineType: c.lineType ?? "REMOVED", fileType: "FROM" }
                 : {
                     line: c.lines[1],
                     lineType: "ADDED",
@@ -421,19 +428,32 @@ function seedThreads(db: Database, pr: number, at: { head: string; base: string 
             fromHash: at.base,
             toHash: at.head,
           };
+    const earlier = c.earlier === undefined ? undefined : roots.get(c.earlier);
+    if (c.earlier !== undefined && earlier === undefined) continue;
+    const root = earlier ?? offset + c.root;
+    // seedEarlier dates its roots now. A reply must come after its root, or the thread turn is wrong.
+    if (earlier !== undefined)
+      db.query(
+        "UPDATE comment SET created_at = MIN(created_at, $at - 1), updated_at = MIN(updated_at, $at - 1) WHERE pr = $pr AND comment_id = $root",
+      ).run({
+        pr,
+        root,
+        at: c.at,
+      });
     db.query(
       `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at,
-        updated_at) VALUES ($pr, $id, 0, $parent, $root, $author, $text, $anchor, $resolved, $at, $at)`,
+        updated_at, tombstoned_at) VALUES ($pr, $id, 0, $parent, $root, $author, $text, $anchor, $resolved, $at, $at, $deleted)`,
     ).run({
       pr,
       id: offset + c.id,
-      parent: c.id === c.root ? null : offset + c.root,
-      root: offset + c.root,
+      parent: c.id === c.root && earlier === undefined ? null : root,
+      root,
       author: c.author,
       text: c.text,
       anchor: anchor && JSON.stringify(anchor),
       resolved: c.resolved ? 1 : 0,
       at: c.at,
+      deleted: c.deleted ? c.at : null,
     });
   }
 }
@@ -596,7 +616,8 @@ async function runCase(
         saveInstructionSettings(db, { project: PROJECT, repo: c.id }, { target: true, local: [], extra: c.instructions });
       jobs.saveBrief(db, pr, { note: "", profile: ctx.profile });
       const roots = rr ? seedEarlier(db, pr, ctx.profile, rr, rr.earlier, USER) : new Map<number, string>();
-      seedThreads(db, pr, { head, base }, c.threads ?? [], rr ? rr.earlier.length : 0);
+      const earlierRoots = new Map([...roots].map(([root, id]) => [id, root]));
+      seedThreads(db, pr, { head, base }, c.threads ?? [], rr ? rr.earlier.length : 0, earlierRoots);
       const started = rr ? jobs.rereview(db, pr) : jobs.review(db, pr);
       if (started.status !== 202) {
         const why = "error" in started ? started.error : "conflict" in started ? started.conflict.error : `status ${started.status}`;

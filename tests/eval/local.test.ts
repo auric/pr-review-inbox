@@ -13,6 +13,7 @@ import { refusal } from "../../scripts/eval/compare";
 import { carry, caseThreads, type Draft, type Manifest, noThreads, THREAD_COMMENTS_MAX, type ThreadRow } from "../../scripts/eval/local";
 import { localRefusal, rescore } from "../../scripts/eval/rescore";
 import { type CaseRun, type EvalItem, type EvalResult, score } from "../../scripts/eval/score";
+import { threadCheck } from "../../scripts/eval/threads";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { openDb } from "../../src/server/storage/db";
@@ -30,7 +31,11 @@ const FAKE = join(ROOT, "tests/support/fake-claude.ts");
 const PATH = "src/calc.ts";
 const THREAD_TEXT = "Handled in v23. Ask @zelda-quux or Zelda Quux. Moe Mine agrees, zquux too.";
 const CLEAN_TEXT = "Handled in v23. Ask @reviewer-2 or reviewer-2. eval-reviewer agrees, reviewer-2 too.";
-const REAL = ["zelda", "Zelda", "zquux", "Moe Mine", "yuri", "xena"];
+const NOTE_TEXT = "Olga Far wrote to olga.far@corp.example.invalid, see https://git.corp.example.invalid/x and @nobody-here.";
+const NOTE_CLEAN = "someone wrote to <email>, see https://<host>/x and @someone.";
+const REAL = ["zelda", "Zelda", "zquux", "Moe Mine", "yuri", "xena", "Olga", "olga", "corp", "nobody", "wanda"];
+// The review runs start after the head commit time (2026-01-01).
+const RUN_START = Date.UTC(2027, 0, 1);
 
 const TMP = mkdtempSync(join(tmpdir(), "rl-eval-local-test-"));
 afterAll(() => rmSync(TMP, { recursive: true, force: true, maxRetries: 3 }));
@@ -121,9 +126,9 @@ function makeDb(dir: string, h: Heads) {
       db
         .query(
           `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, status, started_at)
-          VALUES ($pr, 'review', 'general', '', $key, $head, $base, $mb, $status, 1) RETURNING id`,
+          VALUES ($pr, 'review', 'general', '', $key, $head, $base, $mb, $status, $started) RETURNING id`,
         )
-        .get({ pr, key: `k${keys++}`, head, base: h.base, mb: base, status }) as { id: number }
+        .get({ pr, key: `k${keys++}`, head, base: h.base, mb: base, status, started: RUN_START }) as { id: number }
     ).id;
   const item = (r: number, status: string, lines: [number, number], p: Record<string, unknown> = {}) =>
     (
@@ -153,14 +158,16 @@ function makeDb(dir: string, h: Heads) {
       resolvedAt?: number;
       text?: string;
       at?: number;
+      updated?: number;
       deleted?: boolean;
+      pr?: number;
     },
   ) =>
     db
       .query(
         `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, author_name, author_login, text, anchor_json,
           thread_resolved, thread_resolved_at, created_at, updated_at, tombstoned_at)
-        VALUES (1, $id, 0, $parent, $root, $author, $name, $login, $text, $anchor, $resolved, $resolvedAt, $at, $at, $deleted)`,
+        VALUES ($pr, $id, 0, $parent, $root, $author, $name, $login, $text, $anchor, $resolved, $resolvedAt, $at, $updated, $deleted)`,
       )
       .run({
         id,
@@ -174,7 +181,9 @@ function makeDb(dir: string, h: Heads) {
         resolved: o.resolved ? 1 : 0,
         resolvedAt: o.resolvedAt ?? null,
         at: o.at ?? 1,
+        updated: o.updated ?? o.at ?? 1,
         deleted: o.deleted ? 1 : null,
+        pr: o.pr ?? 1,
       });
   const anchor = (lineNo: number | undefined, toHash = h.a, orphaned = false) => ({
     path: PATH,
@@ -225,7 +234,7 @@ function makeDb(dir: string, h: Heads) {
 
   comment(100, { anchor: anchor(22) });
   // Another reviewer: open on an unchanged line, so no must-find.
-  comment(101, { author: "other", anchor: anchor(22) });
+  comment(101, { author: "other", anchor: anchor(24) });
   // Another reviewer: a resolved thread on the lines of the session bug, so no second must-find. An orphaned anchor. Head B changes
   // lines 18 and 20, so neither carries.
   comment(108, { author: "other", anchor: anchor(20), resolved: true });
@@ -277,6 +286,16 @@ function makeDb(dir: string, h: Heads) {
   comment(134, { author: "zelda-quux", anchor: null, text: "Deleted.", deleted: true });
   comment(135, { author: "author", parent: 101, anchor: null, text: "The PR owner says it is fine." });
   comment(136, { author: "zelda-quux", parent: 100, anchor: null, text: "A reply in your thread." });
+  // After the head commit time and before the run start: in the case. The names come from a comment of another PR.
+  comment(137, { author: "other", anchor: null, text: NOTE_TEXT, at: RUN_START - 1 });
+  comment(150, { author: "olga-far", name: "Olga Far", pr: 2, anchor: null, text: "On another PR." });
+  // A reply edited at the run start: out.
+  comment(138, { author: "other", parent: 101, anchor: null, text: "Edited later.", updated: RUN_START });
+  // A deleted root with a live reply: in the case, without the root text.
+  comment(139, { author: "wanda-gone", anchor: null, text: "Deleted root.", deleted: true });
+  comment(140, { author: "other", parent: 139, anchor: null, text: "Still open." });
+  // An open comment on an unchanged line, numbered on the old side (Gate v3 U4).
+  comment(141, { author: "other", anchor: { ...anchor(undefined), line: 36, lineType: "CONTEXT", fileType: "FROM" } });
   db.close();
   return { file, ids };
 }
@@ -321,7 +340,7 @@ describe("eval:local selection", () => {
       "Sources before carry: 9 posted, 1 covered by a fix commit, 1 accepted by your session, 1 posted and then withdrawn in the thread (must not raise), 2 line comments of other reviewers that are resolved or on a changed line.",
     );
     expect(built.stdout).toContain(
-      "Comments of other reviewers left out: 1 open on an unchanged line, 1 without a line, 1 at a head with no review, 1 by the PR author, 1 on the lines of a must find of the same case.",
+      "Comments of other reviewers left out: 2 open on an unchanged line, 1 without a line, 1 at a head with no review, 1 by the PR author, 1 on the lines of a must find of the same case.",
     );
     expect(built.stdout).toContain(
       "Left out: 1 refuted by the check, 0 discarded without your triage, 1 without a decision, 0 without an anchor, 4 in opposite decisions, 1 runs without a merge base, 1 cases with missing commits, 1 cases with nothing to find or avoid, 1 comments without a line, 1 comments at a head with no review.",
@@ -440,35 +459,44 @@ describe("eval:local selection", () => {
   });
 
   test("each plain case states the must-find rules, so a new rule gives a new set fingerprint", () => {
-    expect([caseOf(heads.a).rules, caseOf(heads.b).rules]).toEqual([3, 3]);
+    expect([caseOf(heads.a).rules, caseOf(heads.b).rules]).toEqual([4, 4]);
   });
 
-  test("a case holds the threads of other people at the reviewed head, with placeholders for the names of the PR's people", () => {
+  test("a case holds the threads of other people when its run started, with placeholders for the names of the database's people", () => {
     const a = caseOf(heads.a);
     const t = a.threads ?? [];
-    // Roots 101, 108, 110, 111, 112, 113, 133 with replies 130 and 135. Comment 109 is a must-find of the case. Your comments, the
-    // reply after the head time, the deleted comment, and the reply in your thread stay out.
+    // Roots 101, 110, 111, 112, 113, 133, 139, 141, and 137 with replies 130, 135, and 140. Comment 109 is a must-find of the case.
+    // Comment 108 is on the lines of the session bug. Your comments, the reply after the run start, the reply edited at the run start,
+    // the deleted comment without replies, and the reply in your thread stay out.
     expect(t.map((c) => [c.id, c.root, c.author, c.path ?? null, c.side ?? null, c.lines ?? null, c.resolved ?? false])).toEqual([
-      [1, 1, "reviewer-1", PATH, "new", [22, 22], false],
-      [2, 2, "reviewer-1", PATH, "new", [20, 20], false],
-      // The thread is resolved, and its resolved time is before the head time.
-      [3, 3, "eval-author", PATH, "new", [13, 13], true],
-      [4, 4, "reviewer-1", PATH, null, null, false],
+      [1, 1, "reviewer-1", PATH, "new", [24, 24], false],
+      // The thread is resolved, and its resolved time is before the run start.
+      [2, 2, "eval-author", PATH, "new", [13, 13], true],
+      [3, 3, "reviewer-1", PATH, null, null, false],
       // Its anchor head is not in the cache, so its lines do not map.
-      [5, 5, "reviewer-1", PATH, null, null, false],
-      [6, 6, "reviewer-1", null, null, null, false],
-      [7, 1, "reviewer-2", null, null, null, false],
-      [8, 8, "reviewer-3", null, null, null, false],
-      [9, 1, "eval-author", null, null, null, false],
+      [4, 4, "reviewer-1", PATH, null, null, false],
+      [5, 5, "reviewer-1", null, null, null, false],
+      [6, 1, "reviewer-2", null, null, null, false],
+      [7, 7, "reviewer-3", null, null, null, false],
+      [8, 1, "eval-author", null, null, null, false],
+      [9, 9, "reviewer-4", null, null, null, false],
+      [10, 9, "reviewer-1", null, null, null, false],
+      [11, 11, "reviewer-1", PATH, "old", [36, 36], false],
+      // After the head commit time and before the run start.
+      [12, 12, "reviewer-1", null, null, null, false],
     ]);
-    expect(t[6]?.text).toBe(CLEAN_TEXT);
-    expect(t[7]?.text).toBe(`${"x".repeat(2000)}\n[The eval builder cut this comment.]`);
+    expect(t[5]?.text).toBe(CLEAN_TEXT);
+    expect(t[6]?.text).toBe(`${"x".repeat(2000)}\n[The eval builder cut this comment.]`);
+    expect([t[8]?.deleted, t[8]?.text, t[9]?.text]).toEqual([true, "", "Still open."]);
+    expect([t[10]?.lineType, t[10]?.newPlace]).toEqual(["CONTEXT", { path: PATH, lines: [36, 36] }]);
+    expect(t[11]?.text).toBe(NOTE_CLEAN);
     const text = JSON.stringify(a.threads);
     for (const name of REAL) expect(text).not.toContain(name);
-    // Head B: comment 109 is no must-find there. Head B changes lines 18 and 20, so threads 108 and 109 lose their lines.
+    // Head B: comment 109 is no must-find there, and comment 108 is on no must-find. Head B changes lines 18 and 20, so threads 108 and
+    // 109 lose their lines.
     const b = caseOf(heads.b).threads ?? [];
     expect(b.filter((c) => c.id === c.root).map((c) => [c.path ?? null, c.lines ?? null])).toEqual([
-      [PATH, [22, 22]],
+      [PATH, [24, 24]],
       [PATH, null],
       [PATH, null],
       [PATH, [13, 13]],
@@ -476,13 +504,66 @@ describe("eval:local selection", () => {
       [PATH, null],
       [null, null],
       [null, null],
+      [null, null],
+      [PATH, [36, 36]],
+      [null, null],
     ]);
     const m = JSON.parse(readFileSync(join(OUT, "MANIFEST.json"), "utf8")) as Manifest;
-    expect(m.threads).toEqual({ cases: 2, threads: 15, comments: 19, capped: 0, unplaced: 4, mineRoot: 2 });
+    expect(m.threads).toEqual({
+      cases: 2,
+      threads: 20,
+      comments: 26,
+      capped: 0,
+      unplaced: 4,
+      mineRoot: 2,
+      overlap: 1,
+      edited: 2,
+      earlier: 0,
+    });
     expect(built.stdout).toContain(
-      "PR threads of other people at the reviewed heads: 15 threads with 19 comments in 2 cases. Left out: 0 comments over the cap of 60 per case, 2 replies in threads that you started. Without lines: 4 inline threads whose lines do not map to the reviewed head.",
+      "PR threads of other people at the reviewed heads: 20 threads with 26 comments in 2 cases. Left out: 0 comments over the cap of 60 per case, 2 replies in threads that you started, 1 threads on the lines of a must find, 2 comments edited from the run start on. Without lines: 4 inline threads whose lines do not map to the reviewed head. Re-review cases: 0 replies of the PR author to posted earlier findings.",
     );
     for (const name of REAL) expect(built.stdout).not.toContain(name);
+  });
+
+  test("the thread text loses every name, mention, email address, and URL host", async () => {
+    const row = (id: number, slug: string, name: string | null, text = "ok", login: string | null = null): ThreadRow => ({
+      pr: 1,
+      id,
+      root: 1,
+      slug,
+      login,
+      name,
+      text,
+      anchor: null,
+      excerpt: null,
+      resolved: 0,
+      resolvedAt: null,
+      at: id,
+      updated: id,
+      deleted: 0,
+      prAuthor: "author",
+      prAuthorName: null,
+    });
+    const text = [
+      "Zelda and Quux agree. @ghost-user, @{Olga Far}, and [~al] know. Olga too. Moe agrees.",
+      "Mail zq@corp.example.invalid or see http://user@git.corp.example.invalid:7990/p.",
+      // NFD accents, upper case, and a long s that the regex folds to s.
+      "José Núñez and JOSÉ. Koſtas too. al is a word here, but @al is a mention.",
+    ].join(" ");
+    const rows = [row(1, "zelda-quux", "Zelda Quux", text, "zquux"), row(2, "al", "José Núñez"), row(3, "kostas", null)];
+    const people = [
+      { slug: "olga-far", login: null, name: "Olga Far" },
+      { slug: "me", login: null, name: "Moe Mine" },
+    ];
+    const out = await caseThreads(rows, { me: "me", before: 10, skip: new Set(), must: [], people, place: async () => null }, noThreads());
+    expect(out[0]?.text).toBe(
+      [
+        "reviewer-1 and reviewer-1 agree. @someone, @someone, and @reviewer-2 know. someone too. eval-reviewer agrees.",
+        "Mail <email> or see http://<host>/p.",
+        "reviewer-2 and reviewer-2. reviewer-3 too. al is a word here, but @reviewer-2 is a mention.",
+      ].join(" "),
+    );
   });
 
   test("the thread cap keeps the newest threads", async () => {
@@ -499,16 +580,18 @@ describe("eval:local selection", () => {
       resolved: 0,
       resolvedAt: null,
       at,
+      updated: at,
+      deleted: 0,
       prAuthor: "author",
       prAuthorName: null,
     });
     const rows = Array.from({ length: THREAD_COMMENTS_MAX + 2 }, (_, k) => row(k + 1, k + 1));
     const n = noThreads();
     const place = async () => null;
-    const out = await caseThreads(rows, { me: "me", before: 1_000, skip: new Set(), place }, n);
+    const out = await caseThreads(rows, { me: "me", before: 1_000, skip: new Set(), must: [], people: [], place }, n);
     expect(out).toHaveLength(THREAD_COMMENTS_MAX);
     expect(out[0]?.text).toBe("Comment 3.");
-    expect(n).toEqual({ cases: 1, threads: THREAD_COMMENTS_MAX, comments: THREAD_COMMENTS_MAX, capped: 2, unplaced: 0, mineRoot: 0 });
+    expect(n).toEqual({ ...noThreads(), cases: 1, threads: THREAD_COMMENTS_MAX, comments: THREAD_COMMENTS_MAX, capped: 2 });
     expect(new Set(out.map((c) => c.author))).toEqual(new Set(["reviewer-1", "reviewer-2", "reviewer-3"]));
   });
 
@@ -586,6 +669,56 @@ describe("eval:local refusals", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("holds other files");
     expect(readdirSync(out)).toEqual(["notes.txt"]);
+  });
+});
+
+describe("eval:threads check", () => {
+  test("only completed runs count, and only a case with a thread that has lines counts as a case with threads", () => {
+    const bug = { id: "b", path: PATH, side: "new", lines: [30, 30], severityMin: "major", module: "core", note: "n" } as const;
+    const r = {
+      volume: null,
+      tolerance: 0,
+      cases: [
+        { id: "lines", bugs: [bug] },
+        { id: "file", bugs: [bug] },
+      ],
+      runs: [
+        { case: "lines", status: "completed", items: [] },
+        { case: "lines", status: "failed", items: [] },
+        { case: "file", status: "cancelled", items: [] },
+      ],
+    } as unknown as EvalResult;
+    const threads = new Map([
+      [
+        "lines",
+        [
+          {
+            id: 1,
+            root: 1,
+            author: "reviewer-1",
+            at: 1,
+            text: "t",
+            path: PATH,
+            side: "old" as const,
+            lines: [5, 5] as [number, number],
+            lineType: "CONTEXT" as const,
+            newPlace: { path: PATH, lines: [25, 25] as [number, number] },
+          },
+        ],
+      ],
+      ["file", [{ id: 1, root: 1, author: "reviewer-1", at: 1, text: "t", path: PATH }]],
+    ]);
+    // The CONTEXT root is near the new-side bug through its new-side lines only.
+    expect(threadCheck(r, threads)).toEqual({
+      runs: 1,
+      notCompleted: 2,
+      cases: 2,
+      withThreads: 1,
+      missed: 1,
+      missedNear: 1,
+      found: 0,
+      foundNear: 0,
+    });
   });
 });
 
@@ -914,7 +1047,12 @@ describe("eval --set local with the fake CLI", () => {
       // review-ideas.md idea 2: the seeded threads reach pr-context.md as the app writes it.
       const calls = readRecords<{ argv: string[]; context?: Record<string, string> }>(record).filter((x) => x.argv.includes("-p"));
       const prContext = calls[0]?.context?.["pr-context.md"] ?? "";
-      expect(prContext).toContain(`inline comment on ${PATH} line 22`);
+      expect(prContext).toContain(`inline comment on ${PATH} line 24`);
+      expect(prContext).toContain(`inline comment on ${PATH} line 36`);
+      expect(prContext).toContain(NOTE_CLEAN);
+      expect(prContext).toContain("Still open.");
+      for (const gone of ["Deleted root.", "Edited later.", "After the head.", "Moe Mine", "Your own reply."])
+        expect(prContext).not.toContain(gone);
       expect(prContext).toContain(`inline comment on ${PATH} line 13`);
       expect(prContext).toContain("Messages: 3, by reviewer-1, reviewer-2, and eval-author");
       expect(prContext).toContain("The PR owner says it is fine.");
@@ -949,15 +1087,15 @@ describe("eval --set local with the fake CLI", () => {
       const oldCalls = readRecords<{ argv: string[]; context?: Record<string, string> }>(record).filter((x) => x.argv.includes("-p"));
       expect(oldCalls.at(-1)?.context?.["pr-context.md"]).not.toContain("The PR owner says it is fine.");
 
-      // The idea 2 check on the result: counts only. Threads have lines 13, 20, and 22. Found: 10-11, 12, and 20, all near.
-      // Missed: 2, 18, 35, 37, and 38. Only 18 is within 10 lines of a thread.
+      // The idea 2 check on the result: counts only. Threads have new-side lines 13 and 24, and old-side line 36 on an unchanged line,
+      // which is new-side line 36. Found: 10-11, 12, and 20, all near. Missed: 2, 18, 35, 37, and 38. All but 2 are near a thread.
       const check = await bun([THREADS, join(out, file as string)], { REVIEW_LOOP_EVAL_LOCAL: OUT });
       expect(check.stderr).toBe("");
       expect(check.code).toBe(0);
       expect(check.stdout).toBe(
         [
-          "Idea 2 check: 1 runs of 1 cases. 1 cases have PR threads.",
-          "Missed must-finds: 5. With a thread comment within 10 lines in the same file: 1.",
+          "Idea 2 check: 1 completed runs of 1 cases. Left out: 0 runs that did not complete. 1 cases have PR threads with lines.",
+          "Missed must-finds: 5. With a thread comment within 10 lines in the same file: 4.",
           "Found must-finds: 3. With a thread comment within 10 lines in the same file: 3.",
           "",
         ].join("\n"),

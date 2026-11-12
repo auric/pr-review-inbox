@@ -17,6 +17,8 @@ export const NEAR_LINES = 10;
 
 export type ThreadCheck = {
   runs: number;
+  // Runs that did not complete. The check leaves them out.
+  notCompleted: number;
   cases: number;
   withThreads: number;
   missed: number;
@@ -25,20 +27,29 @@ export type ThreadCheck = {
   foundNear: number;
 };
 
-// threads: the thread comments of each case by case ID. Only a root has a place, and its replies share it. The must-finds and the
-// match rule are those of recall (score.ts): the volume of the result, the main group, and the tolerance of the result.
+// threads: the thread comments of each case by case ID. Only a root has a place, and its replies share it. A root on an unchanged
+// line (CONTEXT) also has its new-side lines. The must-finds and the match rule are those of recall (score.ts): the volume of the
+// result, the main group, and the tolerance of the result. withThreads: the cases with at least one thread that has lines.
 export function threadCheck(r: EvalResult, threads: Map<string, EvalThreadComment[]>): ThreadCheck {
   const byId = new Map(r.cases.map((c) => [c.id, c]));
-  const n: ThreadCheck = { runs: 0, cases: byId.size, withThreads: 0, missed: 0, missedNear: 0, found: 0, foundNear: 0 };
-  for (const id of byId.keys()) if (threads.get(id)?.length) n.withThreads++;
+  const n: ThreadCheck = { runs: 0, notCompleted: 0, cases: byId.size, withThreads: 0, missed: 0, missedNear: 0, found: 0, foundNear: 0 };
+  const spotsOf = (id: string) =>
+    (threads.get(id) ?? []).flatMap((t) =>
+      t.path !== undefined && t.side !== undefined && t.lines
+        ? [{ path: t.path, side: t.side, lines: t.lines }, ...(t.newPlace ? [{ ...t.newPlace, side: "new" as const }] : [])]
+        : [],
+    );
+  for (const id of byId.keys()) if (spotsOf(id).length) n.withThreads++;
   for (const run of r.runs) {
     const c = byId.get(run.case);
     if (!c) continue;
+    if (run.status !== "completed") {
+      n.notCompleted++;
+      continue;
+    }
     n.runs++;
     const shown = run.items.filter((i) => i.group === "main");
-    const spots = (threads.get(c.id) ?? []).flatMap((t) =>
-      t.path !== undefined && t.side !== undefined && t.lines ? [{ path: t.path, side: t.side, lines: t.lines }] : [],
-    );
+    const spots = spotsOf(c.id);
     for (const b of mustFind(c, r.volume ?? null)) {
       const near = spots.some((p) =>
         [b, ...(b.alt ?? [])].some(
@@ -55,7 +66,7 @@ export function threadCheck(r: EvalResult, threads: Map<string, EvalThreadCommen
 
 export const checkText = (n: ThreadCheck) =>
   [
-    `Idea 2 check: ${n.runs} runs of ${n.cases} cases. ${n.withThreads} cases have PR threads.`,
+    `Idea 2 check: ${n.runs} completed runs of ${n.cases} cases. Left out: ${n.notCompleted} runs that did not complete. ${n.withThreads} cases have PR threads with lines.`,
     `Missed must-finds: ${n.missed}. With a thread comment within ${NEAR_LINES} lines in the same file: ${n.missedNear}.`,
     `Found must-finds: ${n.found}. With a thread comment within ${NEAR_LINES} lines in the same file: ${n.foundNear}.`,
   ].join("\n");

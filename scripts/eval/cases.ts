@@ -90,14 +90,17 @@ export const caseFile = z.object({
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1) });
-export const LOCAL_RULES = 3;
+export const LOCAL_RULES = 4;
 // The user and the PR author of the PR row that run.ts seeds. local.ts gives the people of a thread placeholders that differ from both.
 export const EVAL_USER = "eval-reviewer";
 export const EVAL_AUTHOR = "eval-author";
 // A comment of a PR thread at the reviewed head (local.ts caseThreads, docs/plans/review-v2/review-ideas.md idea 2). id: a case-local
 // number. root: the id of the root comment, equal to id for a root. author: EVAL_AUTHOR or reviewer-<n>, never a real name.
 // at: created time in ms. path, side, lines: the place of an inline root at the reviewed head. A file comment has a path only.
-// resolved: a root only, resolved before the reviewed head's time.
+// resolved: a root only, resolved before the review run started. deleted: a root that is deleted, with live replies; its text is empty.
+// lineType CONTEXT: an unchanged line, numbered on the old side. newPlace: the same lines on the new side at the reviewed head.
+// earlier: a reply of the PR author in the thread of the posted earlier finding with this ID (re-review cases). Its root is not in
+// the list: run.ts seeds that root from rereview.earlier.
 export const evalThreadComment = z.object({
   id: z.number().int().min(1),
   root: z.number().int().min(1),
@@ -107,7 +110,11 @@ export const evalThreadComment = z.object({
   path: z.string().min(1).optional(),
   side: z.enum(["new", "old"]).optional(),
   lines: range.optional(),
+  lineType: z.literal("CONTEXT").optional(),
+  newPlace: z.object({ path: z.string().min(1), lines: range }).optional(),
   resolved: z.boolean().optional(),
+  deleted: z.literal(true).optional(),
+  earlier: z.string().min(1).optional(),
 });
 // A case of the local set (docs/plans/review-v3.md WP-V1). A git bundle in ../../bundles/ holds the repository, so the case has no
 // base/ folder and no head.patch. The limits of the fixture sets do not apply. tasks: the pr_task rows with their task_context JSON.
@@ -121,7 +128,8 @@ export const localCaseFile = caseFile.extend({
   bundle: z.object({ file: z.string().regex(/^[0-9a-f]{16}\.bundle$/), base: commit, head: commit }),
   changedLines: z.number().int().min(0),
   // The version of the must-find rules of local.ts. It is in the case.json text, so a new rule gives a new set fingerprint. 2: the
-  // comments of other reviewers count. 3: the case holds its PR threads. Absent: 1.
+  // comments of other reviewers count. 3: the case holds its PR threads. 4: the thread cutoff is the run start, and a thread on the
+  // lines of a must-find stays out. Absent: 1.
   rules: z.number().int().min(2).max(LOCAL_RULES).optional(),
   // Absent in cases built before rules 3, and in a case without threads: run.ts seeds no thread.
   threads: z.array(evalThreadComment).optional(),

@@ -148,11 +148,19 @@ const SQL = {
       pr.author_slug AS pr_author FROM comment c JOIN pull_request pr ON pr.id = c.pr
     WHERE c.parent_id IS NULL AND c.tombstoned_at IS NULL AND c.anchor_json IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM post p WHERE p.pr = c.pr AND p.remote_id = c.comment_id) ORDER BY c.pr, c.comment_id`,
-  // Every live comment of a PR for its threads at a reviewed head (caseThreads). author_name is read only to remove it from the text.
+  // Every comment of a PR for its threads at a reviewed head (caseThreads). author_name is read only to remove it from the text.
   threadRows: `SELECT c.pr, c.comment_id AS id, c.root_id AS root, c.author_slug AS slug, c.author_login AS login, c.author_name AS name,
       c.text, c.anchor_json AS anchor, c.excerpt_json AS excerpt, c.thread_resolved AS resolved, c.thread_resolved_at AS resolvedAt,
-      c.created_at AS at, pr.author_slug AS prAuthor, pr.author_name AS prAuthorName
-    FROM comment c JOIN pull_request pr ON pr.id = c.pr WHERE c.tombstoned_at IS NULL ORDER BY c.pr, c.created_at, c.comment_id`,
+      c.created_at AS at, c.updated_at AS updated, c.tombstoned_at IS NOT NULL AS deleted, pr.author_slug AS prAuthor,
+      pr.author_name AS prAuthorName
+    FROM comment c JOIN pull_request pr ON pr.id = c.pr ORDER BY c.pr, c.created_at, c.comment_id`,
+  // The people of the whole database, read only to remove their names from the thread text.
+  people: `SELECT author_slug AS slug, author_login AS login, author_name AS name FROM comment
+    UNION SELECT author_slug, NULL, author_name FROM pull_request`,
+  starts: "SELECT id, started_at AS at FROM review_run",
+  // The thread root of each posted finding (run-rows.ts posted).
+  postedRoots: `SELECT json_extract(items_json, '$[0].id') AS item, remote_id AS root FROM post
+    WHERE kind = 'inline' AND state = 'confirmed' AND remote_id IS NOT NULL`,
   prs: "SELECT id, pr_id, project, repo, title, description FROM pull_request",
   tasks: `SELECT t.pr, t.key, t.source, x.json FROM pr_task t LEFT JOIN task_context x ON x.pr = t.pr AND x.key = t.key
     ORDER BY t.pr, t.ord`,
@@ -194,9 +202,12 @@ export type ThreadRow = {
   resolved: number;
   resolvedAt: number | null;
   at: number;
+  updated: number;
+  deleted: number;
   prAuthor: string | null;
   prAuthorName: string | null;
 };
+export type Person = { slug: string | null; login: string | null; name: string | null };
 type PrRow = { id: number; pr_id: number; project: string; repo: string; title: string | null; description: string | null };
 type TaskRow = { pr: number; key: string; source: string; json: string | null };
 type Spot = { path: string; side: "new" | "old"; lines: [number, number] };
@@ -523,11 +534,46 @@ export async function carry(drafts: Draft[], diff: (from: string, to: string) =>
 export const THREAD_COMMENTS_MAX = 60;
 export const THREAD_TEXT_MAX = 2000;
 // Counts per case. capped: comments that the cap left out. unplaced: inline threads whose lines do not map to the reviewed head; they
-// stay as file comments. mineRoot: replies of other people in threads that you started, left out with those threads.
-export type ThreadTally = { cases: number; threads: number; comments: number; capped: number; unplaced: number; mineRoot: number };
-export const noThreads = (): ThreadTally => ({ cases: 0, threads: 0, comments: 0, capped: 0, unplaced: 0, mineRoot: 0 });
+// stay as file comments. mineRoot: replies of other people in threads that you started, left out with those threads. overlap: threads
+// on the lines of a must-find of the case, left out. edited: comments edited from the cutoff on, left out; an edited root takes its
+// thread. earlier: replies of the PR author in the threads of posted earlier findings (re-review cases).
+export type ThreadTally = {
+  cases: number;
+  threads: number;
+  comments: number;
+  capped: number;
+  unplaced: number;
+  mineRoot: number;
+  overlap: number;
+  edited: number;
+  earlier: number;
+};
+export const noThreads = (): ThreadTally => ({
+  cases: 0,
+  threads: 0,
+  comments: 0,
+  capped: 0,
+  unplaced: 0,
+  mineRoot: 0,
+  overlap: 0,
+  edited: 0,
+  earlier: 0,
+});
 const CUT_NOTE = "\n[The eval builder cut this comment.]";
 const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+// The placeholder of a person who has no role in the PR, and of an @mention of an unknown name.
+export const SOMEONE = "someone";
+// Slugs and logins that are common words. They change only in an @mention, not as bare words. Display-name words too.
+const COMMON = new Set(
+  "admin author bot build ci deploy dev develop email guest host main master none null owner release review reviewer root service someone support system team test tester unknown user".split(
+    " ",
+  ),
+);
+// URL schemes with a host part, email addresses, and the @mention forms: @{name}, [~name] (Jira), @"name", and @word.
+const URL_HOST = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#<>"'()[\]]+/giu;
+const EMAIL = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/gu;
+const MENTION = /@\{([^}]*)\}|\[~([^\]]*)\]|@"([^"]*)"|(?<![\p{L}\p{N}_])@([\p{L}\p{N}_](?:[\p{L}\p{N}_.-]*[\p{L}\p{N}_])?)/gu;
+const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const parsed = <T>(s: string | null): T | undefined => {
   try {
@@ -537,100 +583,175 @@ const parsed = <T>(s: string | null): T | undefined => {
   }
 };
 
-// The threads of other people at a reviewed head, for pr-context.md of the run (docs/plans/review-v2/review-ideas.md idea 2).
-// rows: the live comments of the PR in created order. before: the commit time of the reviewed head in ms. A comment from that time on
-// did not exist at the review. skip: the item IDs of the case. A thread that is a must find of the case stays out, so the run never
-// reads its own truth. place: the place of an inline root at the reviewed head, or null when its lines do not map.
-// People become EVAL_AUTHOR, EVAL_USER, or reviewer-<n> in first-comment order over the PR, in the author field and in the text.
+type Anchor = { fromHash?: unknown; toHash?: unknown; lineType?: unknown };
+type Where = Pick<EvalThreadComment, "path" | "side" | "lines" | "lineType" | "newPlace">;
+
+// The threads of other people when a review run started, for pr-context.md of the run (docs/plans/review-v2/review-ideas.md idea 2).
+// rows: the comments of the PR in created order, deleted ones too. before: the start time of the review run in ms. A comment from
+// that time on, or edited from that time on, did not exist at the review in this form. skip: the item IDs of the case. must: the
+// places of the must-finds of the case. A thread that is a must-find, or on the lines of one, stays out, so the run never reads its
+// own truth. people: every person of the database. earlier: the posted earlier findings by thread root (re-review cases).
+// place: the lines at the reviewed head on the given side, mapped from the given commit, or null when they do not map.
+// People of the PR become EVAL_AUTHOR, EVAL_USER, or reviewer-<n> in first-comment order over the PR, in the author field and in the
+// text. Other people become SOMEONE in the text. A root that is deleted but has live replies stays, as pr-context.ts shows it.
 export async function caseThreads(
   rows: ThreadRow[],
   o: {
     me: string;
     before: number;
     skip: Set<string>;
-    place: (s: Spot, anchor: { fromHash?: unknown; toHash?: unknown }) => Promise<{ path: string; lines: [number, number] } | null>;
+    must: Spot[];
+    people: Person[];
+    earlier?: Map<number, string>;
+    place: (
+      s: { path: string; lines: [number, number] },
+      from: unknown,
+      side: "new" | "old",
+    ) => Promise<{ path: string; lines: [number, number] } | null>;
   },
   n: ThreadTally,
 ): Promise<EvalThreadComment[]> {
-  const mine = (r: ThreadRow) => isMe({ slug: r.slug, login: r.login }, o.me);
-  const key = (s: string) => s.toLowerCase();
+  const mine = (r: { slug: string | null; login: string | null }) => isMe({ slug: r.slug ?? "", login: r.login }, o.me);
+  const key = (s: string) => s.normalize("NFC").toLowerCase();
   const prAuthor = rows[0]?.prAuthor ?? null;
+  const isAuthor = (slug: string) => prAuthor !== null && key(slug) === key(prAuthor);
   const bySlug = new Map<string, string>();
   const placeholder = (r: ThreadRow) => {
-    if (prAuthor !== null && key(r.slug) === key(prAuthor)) return EVAL_AUTHOR;
+    if (isAuthor(r.slug)) return EVAL_AUTHOR;
     const p = bySlug.get(key(r.slug)) ?? `reviewer-${bySlug.size + 1}`;
     bySlug.set(key(r.slug), p);
     return p;
   };
-  const names = new Map<string, string>();
-  const add = (s: string | null, p: string) => {
-    if (s?.trim() && !names.has(key(s))) names.set(key(s), p);
+  // bare: names that change as whole words. tag: names that change in an @mention.
+  const bare = new Map<string, string>();
+  const tag = new Map<string, string>();
+  const set = (m: Map<string, string>, s: string | null, p: string) => {
+    if (s?.trim() && !m.has(key(s))) m.set(key(s), p);
   };
-  add(prAuthor, EVAL_AUTHOR);
-  add(rows[0]?.prAuthorName ?? null, EVAL_AUTHOR);
-  for (const r of rows) {
-    const p = mine(r) ? EVAL_USER : placeholder(r);
-    for (const s of [r.slug, r.login, r.name]) add(s, p);
-  }
-  // A whole-word match of each slug, login, and display name. The longest name goes first. A dot or a hyphen joins a word only when a
-  // letter or digit follows it, so "name." at a sentence end matches and "name.other" does not.
-  const words = [...names.keys()].sort((a, b) => b.length - a.length).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const person = (u: Person, p: string) => {
+    for (const s of [u.slug, u.login]) {
+      set(tag, s, p);
+      if (s && s.length >= 4 && !COMMON.has(key(s))) set(bare, s, p);
+    }
+    if (!u.name?.trim()) return;
+    set(tag, u.name, p);
+    const words = u.name.split(/[^\p{L}\p{N}]+/u).filter((w) => (w.match(/\p{L}/gu)?.length ?? 0) >= 3);
+    for (const s of [u.name, ...words]) if (!COMMON.has(key(s))) set(bare, s, p);
+  };
+  person({ slug: prAuthor, login: null, name: rows[0]?.prAuthorName ?? null }, EVAL_AUTHOR);
+  for (const r of rows) person(r, mine(r) ? EVAL_USER : placeholder(r));
+  for (const u of o.people) person(u, mine(u) ? EVAL_USER : SOMEONE);
+  // The regex folds case by Unicode rules, which can differ from toLowerCase. A miss then repeats the match of the regex per name.
+  const find = (m: Map<string, string>, s: string) =>
+    m.get(key(s)) ?? [...m].find(([k]) => new RegExp(`^${reEscape(k)}$`, "iu").test(s.normalize("NFC")))?.[1];
+  // A whole-word match of each name. The longest name goes first. A dot or a hyphen joins a word only when a letter or digit follows
+  // it, so "name." at a sentence end matches and "name.other" does not.
+  const words = [...bare.keys()].sort((a, b) => b.length - a.length).map(reEscape);
   const pattern = words.length
     ? new RegExp(`(?<![\\p{L}\\p{N}_]|[\\p{L}\\p{N}_][.-])(?:${words.join("|")})(?![\\p{L}\\p{N}_]|[.-][\\p{L}\\p{N}_])`, "giu")
     : null;
   const clean = (text: string) => {
-    const t = pattern ? text.replace(pattern, (m) => names.get(key(m)) ?? m) : text;
+    let t = text
+      .normalize("NFC")
+      .replace(URL_HOST, "$1<host>")
+      .replace(EMAIL, "<email>")
+      .replace(MENTION, (_, ...g: (string | undefined)[]) => `@${find(tag, g.slice(0, 4).find((x) => x !== undefined) ?? "") ?? SOMEONE}`);
+    if (pattern) t = t.replace(pattern, (m) => find(bare, m) ?? SOMEONE);
     return t.length > THREAD_TEXT_MAX ? `${t.slice(0, THREAD_TEXT_MAX)}${CUT_NOTE}` : t;
   };
 
-  const live = rows.filter((r) => r.at < o.before);
-  const threads: ThreadRow[][] = [];
-  for (const root of live.filter((r) => r.id === r.root)) {
-    const replies = live.filter((r) => r.root === root.id && r.id !== root.id && !mine(r));
-    if (mine(root)) n.mineRoot += replies.length;
-    else if (!o.skip.has(`comment-${root.id}`)) threads.push([root, ...replies]);
+  const known = (r: ThreadRow) => r.at < o.before;
+  const fresh = (r: ThreadRow) => r.updated < o.before;
+  type Thread = { rows: ThreadRow[]; where: Where; earlier?: string; unplaced?: boolean };
+  const candidates: Thread[] = [];
+  for (const root of rows.filter((r) => r.id === r.root && known(r))) {
+    const all = rows.filter((r) => r.root === root.id && r.id !== root.id && known(r) && r.deleted === 0 && !mine(r));
+    const replies = all.filter(fresh);
+    if (mine(root)) {
+      const e = o.earlier?.get(root.id);
+      const by = e ? all.filter((r) => isAuthor(r.slug)) : [];
+      n.mineRoot += all.length - by.length;
+      n.edited += by.filter((r) => !fresh(r)).length;
+      if (by.some(fresh)) candidates.push({ rows: [root, ...by.filter(fresh)], where: {}, earlier: e });
+    } else if (o.skip.has(`comment-${root.id}`) || (root.deleted === 1 && !replies.length)) continue;
+    else if (root.deleted === 0 && !fresh(root)) n.edited++;
+    else {
+      n.edited += all.length - replies.length;
+      candidates.push({ rows: [root, ...replies], where: {} });
+    }
   }
+
+  // The place of each inline root at the reviewed head. A thread on the lines of a must-find goes.
+  const onMust = (s: Spot) => o.must.some((b) => b.path === s.path && b.side === s.side && overlaps(b.lines, s.lines));
+  const threads: Thread[] = [];
+  for (const t of candidates) {
+    const r = t.rows[0] as ThreadRow;
+    const anchor = t.earlier ? undefined : parsed<Anchor>(r.anchor);
+    const excerpt = parsed<ExcerptLine[]>(r.excerpt);
+    const spot = anchor ? threadSpot({ anchor, excerpt }) : null;
+    if (spot && spot.line === null) t.where.path = spot.path;
+    else if (spot && anchor) {
+      const s = { path: spot.path, lines: [spot.line as number, spot.lineEnd] as [number, number] };
+      const m = await o.place(s, spot.side === "new" ? anchor.toHash : anchor.fromHash, spot.side);
+      if (!m) Object.assign(t, { where: { path: spot.path }, unplaced: true });
+      else {
+        Object.assign(t.where, { path: m.path, side: spot.side, lines: m.lines });
+        const hit = excerpt?.find((l) => l.hit);
+        let head: { path: string; lines: [number, number] } | null = null;
+        if (spot.side === "old" && (hit ? hit.kind === "ctx" : anchor.lineType === "CONTEXT")) {
+          t.where.lineType = "CONTEXT";
+          head = await o.place(s, anchor.fromHash, "new");
+          if (head) t.where.newPlace = head;
+        }
+        if (onMust({ path: m.path, side: spot.side, lines: m.lines }) || (head && onMust({ ...head, side: "new" }))) {
+          n.overlap++;
+          continue;
+        }
+      }
+    }
+    threads.push(t);
+  }
+
   // The newest threads stay, as pr-context.md orders them.
-  const newest = (t: ThreadRow[]) => Math.max(...t.map((r) => r.at));
-  threads.sort((a, b) => newest(b) - newest(a) || (b[0] as ThreadRow).id - (a[0] as ThreadRow).id);
-  const kept: ThreadRow[][] = [];
+  const newest = (t: Thread) => Math.max(...t.rows.map((r) => r.at));
+  threads.sort((a, b) => newest(b) - newest(a) || (b.rows[0] as ThreadRow).id - (a.rows[0] as ThreadRow).id);
+  const kept: Thread[] = [];
   let count = 0;
   for (const t of threads)
-    if (count + t.length > THREAD_COMMENTS_MAX) n.capped += t.length;
+    if (count + t.rows.length > THREAD_COMMENTS_MAX) n.capped += t.rows.length;
     else {
       kept.push(t);
-      count += t.length;
+      count += t.rows.length;
     }
-  const all = kept.flat().sort((a, b) => a.at - b.at || a.id - b.id);
+  const of = new Map(kept.map((t) => [(t.rows[0] as ThreadRow).id, t]));
+  const all = kept.flatMap((t) => t.rows).sort((a, b) => a.at - b.at || a.id - b.id);
   const local = new Map(all.map((r, k) => [r.id, k + 1]));
   const out: EvalThreadComment[] = [];
   for (const r of all) {
+    const t = of.get(r.root) as Thread;
+    // run.ts seeds the root of an earlier finding from rereview.earlier.
+    if (t.earlier && r.id === r.root) continue;
     const c: EvalThreadComment = {
       id: local.get(r.id) as number,
       root: local.get(r.root) as number,
       author: placeholder(r),
       at: r.at,
-      text: clean(r.text),
+      text: r.deleted === 1 ? "" : clean(r.text),
     };
-    if (r.id === r.root) {
-      const anchor = parsed<{ fromHash?: unknown; toHash?: unknown }>(r.anchor);
-      const spot = anchor ? threadSpot({ anchor, excerpt: parsed<ExcerptLine[]>(r.excerpt) }) : null;
-      if (spot && spot.line === null) c.path = spot.path;
-      else if (spot && anchor) {
-        const m = await o.place({ path: spot.path, side: spot.side, lines: [spot.line as number, spot.lineEnd] }, anchor);
-        if (m) Object.assign(c, { path: m.path, side: spot.side, lines: m.lines });
-        else {
-          c.path = spot.path;
-          n.unplaced++;
-        }
-      }
+    if (t.earlier) {
+      c.earlier = t.earlier;
+      n.earlier++;
+    } else if (r.id === r.root) {
+      Object.assign(c, t.where);
+      if (t.unplaced) n.unplaced++;
+      if (r.deleted === 1) c.deleted = true;
       if (r.resolved === 1 && r.resolvedAt !== null && r.resolvedAt < o.before) c.resolved = true;
     }
     out.push(c);
   }
   if (kept.length) n.cases++;
   n.threads += kept.length;
-  n.comments += count;
+  n.comments += out.length;
   return out;
 }
 
@@ -646,7 +767,7 @@ export type Manifest = {
   // The items that a case got from an earlier head of the same PR, and those that stayed behind (carry). Bugs and traps above include
   // the carried items.
   carried: Carry;
-  // The PR threads in the written cases (caseThreads). Absent in a manifest of rules 2.
+  // The PR threads in the written cases (caseThreads). Absent in a manifest of rules 2. overlap, edited, and earlier: rules 4.
   threads: ThreadTally;
   // The re-review cases in rereview/ (docs/plans/review-v3.md WP-V3). bun run eval --rereview runs them.
   rereview: {
@@ -668,11 +789,17 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
     let prs: Map<number, PrRow>;
     let tasks: TaskRow[];
     let threadRows: Map<number, ThreadRow[]>;
+    let people: Person[];
+    let starts: Map<number, number>;
+    let postedRoots: Map<number, number>;
     try {
       sel = select(db, o.me);
       prs = new Map((db.query(SQL.prs).all() as PrRow[]).map((p) => [p.id, p]));
       tasks = db.query(SQL.tasks).all() as TaskRow[];
       threadRows = Map.groupBy(db.query(SQL.threadRows).all() as ThreadRow[], (r) => r.pr);
+      people = db.query(SQL.people).all() as Person[];
+      starts = new Map((db.query(SQL.starts).all() as { id: number; at: number }[]).map((r) => [r.id, r.at]));
+      postedRoots = new Map((db.query(SQL.postedRoots).all() as { item: number; root: number }[]).map((r) => [r.item, r.root]));
     } finally {
       db.close();
     }
@@ -759,21 +886,29 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       await git(["--git-dir", temp, "update-ref", "--stdin"], { env, stdin: commits.map((c) => `create refs/eval/${c} ${c}\n`).join("") });
       await git(["--git-dir", temp, "bundle", "create", "-q", join(o.out, "bundles", bundle), "--all"], { env });
       repositories++;
-      // New-side lines move from the anchor head to the reviewed head, old-side lines from the anchor merge base to the case merge base.
-      // A commit that is not in the cache makes the git diff fail, so the thread stays without lines.
+      // New-side lines move to the reviewed head, old-side lines to the case merge base. A commit that is not in the cache makes the git
+      // diff fail, so the thread stays without lines.
       const threadsOf = async (d: Draft | RereviewDraft) => {
-        const before = Number((await g(["log", "-1", "--format=%ct", d.head])).trim()) * 1000;
-        const skip = new Set([...d.bugs, ...d.traps, ...("human" in d ? d.human : [])].map((x) => x.id));
-        const place = async (s: Spot, a: { fromHash?: unknown; toHash?: unknown }) => {
-          const from = s.side === "new" ? a.toHash : a.fromHash;
+        const rr = "since" in d;
+        // The review run of the case started at this time. A re-review case reviews its own run, a plain case its first run.
+        const before = starts.get(rr ? d.run : d.first) as number;
+        const must = [...d.bugs, ...("human" in d ? d.human : [])];
+        const skip = new Set([...must, ...d.traps].map((x) => x.id));
+        const earlier = new Map<number, string>();
+        if (rr)
+          for (const e of d.earlier) {
+            const root = e.status === "posted" ? postedRoots.get(Number(e.id.slice("item-".length))) : undefined;
+            if (root !== undefined) earlier.set(root, e.id);
+          }
+        const place = async (s: { path: string; lines: [number, number] }, from: unknown, side: "new" | "old") => {
           if (typeof from !== "string" || !COMMIT.test(from)) return null;
           try {
-            return mapSpot(await diff(from, s.side === "new" ? d.head : d.base), s);
+            return mapSpot(await diff(from, side === "new" ? d.head : d.base), s);
           } catch {
             return null;
           }
         };
-        const list = await caseThreads(threadRows.get(d.pr) ?? [], { me: o.me, before, skip, place }, threadTally);
+        const list = await caseThreads(threadRows.get(d.pr) ?? [], { me: o.me, before, skip, must, people, earlier, place }, threadTally);
         return list.length ? { threads: list } : {};
       };
 
@@ -877,7 +1012,7 @@ export function report(m: Manifest): string {
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
     `Comments of other reviewers left out: ${s.otherOpen} open on an unchanged line, ${s.otherNoLine} without a line, ${s.otherOtherHead} at a head with no review, ${s.otherAuthor} by the PR author, ${s.otherOverlap} on the lines of a must find of the same case.`,
     `Carried from earlier heads of the same PR: ${m.carried.carried}. Not carried: ${m.carried.changed} with changed lines, ${m.carried.gone} in a deleted file, ${m.carried.overlap} on an item of the later head.`,
-    `PR threads of other people at the reviewed heads: ${m.threads.threads} threads with ${m.threads.comments} comments in ${m.threads.cases} cases. Left out: ${m.threads.capped} comments over the cap of ${THREAD_COMMENTS_MAX} per case, ${m.threads.mineRoot} replies in threads that you started. Without lines: ${m.threads.unplaced} inline threads whose lines do not map to the reviewed head.`,
+    `PR threads of other people at the reviewed heads: ${m.threads.threads} threads with ${m.threads.comments} comments in ${m.threads.cases} cases. Left out: ${m.threads.capped} comments over the cap of ${THREAD_COMMENTS_MAX} per case, ${m.threads.mineRoot} replies in threads that you started, ${m.threads.overlap} threads on the lines of a must find, ${m.threads.edited} comments edited from the run start on. Without lines: ${m.threads.unplaced} inline threads whose lines do not map to the reviewed head. Re-review cases: ${m.threads.earlier} replies of the PR author to posted earlier findings.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
     `Re-review cases: ${r.counts.cases}, with ${r.counts.earlier} earlier findings. Must find: ${r.counts.bugs}. Must not raise: ${r.counts.traps}. Neutral: ${r.counts.extras}.`,
     `Re-reviews left out: ${r.skipped.noEarlier} without their earlier run, ${r.skipped.missingCommits} with missing commits, ${r.skipped.emptyCases} with nothing to measure. Earlier findings left out: ${r.skipped.badPayload} with a payload that is no finding.`,
