@@ -49,6 +49,8 @@ export type FakeScenario = {
   // the record gets { refused: path }. junction: a folder link to that target in place of a file.
   implement?: unknown;
   writes?: { path: string; text?: string; junction?: string }[];
+  // part-session.md section 2.3: after writes, an Edit of the plan file at path that ticks each task heading `### [ ] <id> `.
+  ticks?: { path: string; ids: string[] };
   // The init of an implement run lists no Bash, as Claude Code on Windows without Git Bash (spec.md section 6.21, V12).
   noBash?: boolean;
   // spec.md section 6.21: the Bash calls of an implement run, after init. refused: what refuses the call, with the permission_denied
@@ -508,6 +510,38 @@ async function main() {
         }),
       );
     }
+  }
+
+  if (s.ticks) {
+    // path "*": the tasks file that the prompt names ("Tick tasks only in <file>."), as Claude reads it, else the first plan.md or
+    // tasks.md under repo/specs/<folder>/. ids ["*"]: every open task heading.
+    const named = /Tick tasks only in (\.\/repo\/\S+?\.md)/.exec(stdin)?.[1];
+    const plans = () => {
+      if (named) return resolve(process.cwd(), named);
+      const root = join(process.cwd(), "repo", "specs");
+      const dirs = existsSync(root) ? readdirSync(root) : [];
+      return dirs.flatMap((d) => ["tasks.md", "plan.md"].map((n) => join(root, d, n))).find((f) => existsSync(f)) ?? join(root, "none.md");
+    };
+    const p = s.ticks.path === "*" ? plans() : resolve(process.cwd(), s.ticks.path);
+    let text = readFileSync(p, "utf8");
+    if (s.ticks.ids.includes("*")) text = text.replace(/^### \[ \] /gm, "### [x] ");
+    for (const id of s.ticks.ids) text = text.replace(`### [ ] ${id} `, `### [x] ${id} `);
+    writeFileSync(p, text);
+    const id = "toolu_fake_tick";
+    writeEvents.push(
+      JSON.stringify({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: "tool_use", id, name: "Edit", input: { file_path: p, old_string: "### [ ]", new_string: "### [x]" } }],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "tool_result", tool_use_id: id, content: `The file ${p} has been updated.` }] },
+      }),
+    );
   }
 
   // The Bash calls: the tool_use, then for a refused call the permission_denied event before the error tool_result (b17 order).

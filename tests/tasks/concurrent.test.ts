@@ -69,14 +69,21 @@ const SPEC = specResult.parse({
   parts: NAMES.map((name, i) => planPart(i + 1, name)),
 });
 
-const file = (path: string, text: string) => ({ writes: [{ path: `repo/${path}`, text }] });
+const file = (path: string, text: string) => ({ writes: [{ path: `repo/${path}`, text }] as [{ path: string; text: string }] });
 // Each part gets its own writes by the text of its plan file, because the steps of two parts run in no fixed order.
 const BUILD = {
   match: NAMES.map((n) => ({
     when: `src/${n}.ts`,
     seq: {
-      "implement:tests": [file(`tests/${n}.test.ts`, `test("${n}", () => {});\n`)],
-      "implement:implement": [file(`src/${n}.ts`, `export const ${n} = "todo";\n`)],
+      "implement:build": [
+        {
+          writes: [
+            file(`tests/${n}.test.ts`, `test("${n}", () => {});\n`).writes[0],
+            file(`src/${n}.ts`, `export const ${n} = "todo";\n`).writes[0],
+          ],
+          ticks: { path: "*", ids: ["*"] },
+        },
+      ],
       "implement:fix": [file(`src/${n}.ts`, `export const ${n} = "works";\n`)],
     },
   })),
@@ -276,7 +283,7 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
       await Promise.race([jobs.wait(), Bun.sleep(30_000).then(() => Promise.reject(new Error("The runs did not end.")))]);
       expect(s.t().state).toBe("stopped");
       const steps = s.db
-        .query("SELECT part, state FROM task_step WHERE task = $task AND kind = 'tests' ORDER BY part")
+        .query("SELECT part, state FROM task_step WHERE task = $task AND kind = 'implement' ORDER BY part")
         .all({ task: s.task }) as { part: number; state: string }[];
       expect(steps).toEqual([
         { part: s.p1, state: "cancelled" },
@@ -302,21 +309,29 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
       // checked (AC-B203).
       s.db.query("UPDATE task SET state = 'implementing', stopped_from = NULL, blocked_json = NULL WHERE id = $id").run({ id: s.task });
       s.db
-        .query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE task = $task AND kind = 'tests'")
+        .query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE task = $task AND kind = 'implement'")
         .run({ task: s.task });
       s.db.query("UPDATE review_run SET status = 'running' WHERE task = $task").run({ task: s.task });
-      const steps = s.db.query("SELECT id, part FROM task_step WHERE task = $task AND kind = 'tests'").all({ task: s.task }) as {
+      const steps = s.db.query("SELECT id, part FROM task_step WHERE task = $task AND kind = 'implement'").all({ task: s.task }) as {
         id: number;
         part: number;
       }[];
 
-      // The next start of the app: restart recovery stops the task.
+      // The next start of the app: restart recovery gives each cut part error/restart (part-session.md section 9.5, Q-SM2). The task
+      // keeps building, and the reason of the other part waits in its part row.
       const next = s.app();
       s.apps.push(next);
       next.jobs.open();
-      expect([s.t().state, s.t().stopped_from]).toEqual(["stopped", "implementing"]);
+      expect([s.t().state, s.t().stopped_from]).toEqual(["implementing", null]);
       expect([s.part(s.p1).state, s.part(s.p2).state, s.part(s.p3).state]).toEqual(["implementing", "implementing", "planned"]);
-
+      const cut = taskDto(s.db, s.t());
+      expect([cut.blocked, ...cut.parts.map((p) => p.blocked)].filter(Boolean).map((b) => [b?.kind, b?.cause])).toEqual([
+        ["error", "restart"],
+        ["error", "restart"],
+      ]);
+      // The first Continue moves the waiting reason up; the second one builds.
+      expect(next.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      expect(next.loop.running(s.task)).toBe(false);
       expect(next.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await until(() => s.implementRuns().length === 4);
       expect(s.implementRuns().slice(2).sort()).toEqual(["part-1", "part-2"]);
@@ -352,12 +367,8 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
           .trim()
           .split("\n");
         const key = SUBS[i]?.key;
-        expect(log).toEqual([
-          `${key}: Add the plan`,
-          `${key} P${i + 1}: Add the failing tests of part ${i + 1}`,
-          `${key} T${i + 1}.1: Write ${NAMES[i]}`,
-          `${key}: Fix the checks of part ${i + 1}`,
-        ]);
+        // part-session.md section 2.6: one commit per green gate, named after the part.
+        expect(log).toEqual([`${key}: Add the plan`, `${key}: Part ${NAMES[i]}`]);
       }
       // The time of each part from its first step to its last one. At no time do more than two parts build.
       const spans = (
@@ -436,7 +447,7 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
       await until(() => !loop.running(s.task));
       // The green run ends the reason of its own part only. The waiting reason moves up, and nothing builds.
       expect(green(red)).toBe(1);
-      expect(s.t().blocked_json).toBe(JSON.stringify(waiting));
+      expect(JSON.parse(s.t().blocked_json as string)).toEqual(waiting);
       expect(taskDto(s.db, s.t()).parts.map((p) => p.blocked)).toEqual([null, null, null]);
       expect(parts()).toEqual([
         [1, "implementing"],
@@ -499,13 +510,13 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
     },
   });
   const testFile = (n: string) => file(`tests/${n}.test.ts`, `test("${n}", () => {});\n`).writes[0] as { path: string; text: string };
-  // BUILD with a first tests run of each part. Every part starts its tests step before the first one ends, so the delays order the
+  // BUILD with a first build run of each part. Every part starts its build run before the first one ends, so the delays order the
   // reasons: part 1, then part 2, then part 3.
   const firstTests = (first: Record<string, object>): Scenario => ({
     match: BUILD.match.map((m, i) => {
       const n = NAMES[i] as string;
       const delayMs = 4000 + 1500 * i;
-      return { ...m, seq: { ...m.seq, "implement:tests": [{ delayMs, ...first[n] }, ...m.seq["implement:tests"]] } };
+      return { ...m, seq: { ...m.seq, "implement:build": [{ delayMs, ...first[n] }, ...m.seq["implement:build"]] } };
     }),
     taskReview: CLEAN,
   });
@@ -573,9 +584,9 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(taskDto(s.db, s.t()).parts.map((p) => p.state)).toEqual(["self_reviewed", "self_reviewed", "self_reviewed"]);
       const w = await s.wt(s.p3);
       const log = await git([`--git-dir=${w.admin}`, "log", "--format=%s", `${s.base}..HEAD`], { env: w.env });
-      expect(log).toContain("ABC-13 P3: Change the plan");
-      // Each part ran its tests step exactly once more. The next tests steps of parts 1 and 2 read both answers.
-      const tests = s.implementCalls().filter((c) => c.stdin.includes("- Mode: tests"));
+      expect(log).toContain("ABC-13: Change the plan");
+      // Each part ran its build run exactly once more. The next build runs of parts 1 and 2 read both answers.
+      const tests = s.implementCalls().filter((c) => c.stdin.includes("- Mode: build"));
       for (const name of ["part-1", "part-2", "part-3"]) expect(tests.filter((c) => basename(c.cwd) === name)).toHaveLength(2);
       for (const name of ["part-1", "part-2"]) {
         const answers = tests.filter((c) => basename(c.cwd) === name)[1]?.context["answers.md"] ?? "";
@@ -630,7 +641,7 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       await loop.idle(s.task);
       expect(s.t().blocked_json).toBeNull();
       expect(taskDto(s.db, s.t()).parts.map((p) => p.state)).toEqual(["self_reviewed", "self_reviewed", "self_reviewed"]);
-      expect(s.implementCalls().filter((c) => c.stdin.includes("- Mode: tests"))).toHaveLength(6);
+      expect(s.implementCalls().filter((c) => c.stdin.includes("- Mode: build"))).toHaveLength(6);
     },
     SLOW,
   );

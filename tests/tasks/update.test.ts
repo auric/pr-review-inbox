@@ -10,7 +10,7 @@ import { createApp } from "../../src/server/app";
 import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
 import { pushTaskBranch } from "../../src/server/tasks/push";
-import { recoverTasks, taskDto } from "../../src/server/tasks/tasks";
+import { recoverTasks, taskDto, UPDATE_RESTART } from "../../src/server/tasks/tasks";
 import { gitlinkAt, inMerge, inRebase, markerLeft } from "../../src/server/tasks/update";
 import { status, type Worktree, wtGit } from "../../src/server/tasks/worktree";
 import { MERGE_CONFLICTED, RESOLVE_STOPS } from "../../src/shared/task";
@@ -265,8 +265,10 @@ describe("Update from the base branch (spec.md section 6.18.3)", () => {
             VALUES ($t, $p, 'update', 'running', 1, 'U1', $d, 1) RETURNING id`)
           .get({ t: s.task, p: s.part().id, d: JSON.stringify(detail) }) as { id: number }
       ).id;
+      const state = s.t().state;
       recoverTasks(s.db, Date.now());
-      expect(s.t().state).toBe("stopped");
+      // part-session.md section 9.5: the reason update, not a stop.
+      expect([s.t().state, s.blocked()]).toEqual([state, { kind: "update", step, text: UPDATE_RESTART }]);
       s.loop.recover(s.db);
       await s.loop.idle(s.task);
       const after = await s.wt();

@@ -48,7 +48,6 @@ import {
   saveCut,
   sparseHidden,
   startStep,
-  stepTimeout,
   undoStep,
 } from "../../src/server/tasks/implement";
 import { pushTaskBranch } from "../../src/server/tasks/push";
@@ -312,7 +311,8 @@ describe("implement run", () => {
       const mcpFile = flag(call.argv, "--mcp-config");
       expect(mcpFile && !mcpFile.toLowerCase().startsWith(s.wt.dir.toLowerCase())).toBe(true);
       expect(existsSync(mcpFile as string)).toBe(false);
-      const spec = { implement: true as const, cwd: s.wt.dir, prompt: "", schema: implementJsonSchema(), maxTurns: 80 };
+      // part-session.md section 2.18: a build run takes Settings > Tasks "Session run turns", 500 by default.
+      const spec = { implement: true as const, cwd: s.wt.dir, prompt: "", schema: implementJsonSchema(), maxTurns: 500 };
       const expected = implementArgs({ ...spec, model: p?.model, effort: p?.effort }).args;
       const at = expected.indexOf("--tools");
       // task-subagents.md: the agents file sits beside the MCP file, and it goes with the run.
@@ -384,7 +384,7 @@ describe("implement run", () => {
     async () => {
       const s = await setup();
       saveInstructionSettings(s.db, { project: "PROJ", repo: "repo" }, { target: true, local: [], extra: "IMPLEMENT-RULES-CANARY" });
-      for (const mode of ["tests", "implement", "fix", "instruct", "resolve"] as const) {
+      for (const mode of ["implement", "fix", "instruct", "resolve"] as const) {
         s.scenario({ writes: [] });
         await s.step({ mode, attempt: 1, item: `T1.${mode}`, ...(mode === "instruct" && { instructions: "Rename the flag." }) });
         const call = s.runCalls().at(-1) as Call;
@@ -657,7 +657,7 @@ describe("implement run", () => {
   );
 
   test(
-    "a failed run stops the task with the reason, and the path check still runs",
+    "AC-B295: a failed run leaves the reason to the loop, and the path check still runs",
     async () => {
       const s = await setup();
       s.scenario({ fixture: MAX_TURNS_FIXTURE, writes: [{ path: "repo/CLAUDE.local.md", text: "x\n" }] });
@@ -670,9 +670,9 @@ describe("implement run", () => {
       expect(second.outcome?.status).toBe("failed");
       expect(s.stepRow(second.outcome?.step as number).state).toBe("failed");
       const t = taskRow(s.db, s.task);
-      expect(t?.state).toBe("stopped");
-      expect(t?.stopped_from).toBe("implementing");
-      expect(s.blockedOf()?.kind).toBe("error");
+      expect(t?.state).toBe("implementing");
+      expect(s.blockedOf()).toBeNull();
+      expect(second.outcome?.cut).toBe("turns");
       // AC-B201: the half step stays. Its path check passed, so Continue keeps it. The denied step is checked too: its second check passed.
       expect(existsSync(join(s.wt.repo, "src", "half.ts"))).toBe(true);
       const checked = (id: number | undefined) => JSON.parse(s.stepRow(id as number).detail_json).checked;
@@ -682,22 +682,33 @@ describe("implement run", () => {
   );
 
   test(
-    "a step that passes its time limit is killed, and the task stops",
+    "AC-B295: a run at its turn cap ends its step failed with the cut; implement.ts stops no task, and the loop gives the reason",
     async () => {
       const s = await setup();
-      // 1.5 s of Claude time left in the part of 120 min: the step gets that much (stepTimeout).
-      s.db.query("UPDATE task SET settings_json = $s").run({ s: JSON.stringify({ partTimeMin: 120 }) });
-      const now = Date.now();
-      s.db
-        .query("INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($t, $p, 'implement', 'ok', 99, $a, $b)")
-        .run({ t: s.task, p: s.part, a: now - (120 * 60_000 - 1_500), b: now });
+      s.scenario({ fixture: MAX_TURNS_FIXTURE });
+      const { outcome } = await s.step();
+      expect([outcome?.status, outcome?.cut, outcome?.kind]).toEqual(["failed", "turns", "max_turns"]);
+      expect(s.stepRow(outcome?.step as number).state).toBe("failed");
+      expect(taskRow(s.db, s.task)?.state).toBe("implementing");
+      expect(s.blockedOf()).toBeNull();
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B295: a Stop kills a hanging run and its process tree; the step ends cancelled",
+    async () => {
+      const s = await setup();
       s.scenario({ hang: true });
       const t0 = Date.now();
-      const { outcome } = await s.step();
+      const run = s.step();
+      const end = Date.now() + 15_000;
+      while (!s.calls().some((c) => (c as { childPid?: number }).childPid !== undefined) && Date.now() < end) await Bun.sleep(100);
+      expect(s.review.cancelTask(s.db, s.task)).toBe(true);
+      const { outcome } = await run;
       expect(Date.now() - t0).toBeLessThan(30_000);
-      expect(outcome?.status).toBe("failed");
-      expect(s.blockedOf()?.text).toBe("The run passed its time limit.");
-      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
+      expect(outcome?.status).toBe("cancelled");
+      expect(s.blockedOf()).toBeNull();
       const child = s.calls().find((c) => (c as { childPid?: number }).childPid !== undefined) as { childPid?: number } | undefined;
       if (child?.childPid) {
         const alive = () => {
@@ -737,39 +748,17 @@ describe("implement run", () => {
   );
 
   test(
-    "the part budget: a used-up part blocks before a run, and a step gets at most the time left",
+    "AC-B301: the part budget has no time limit; the cost limit applies only when a run reported a cost, and then blocks before a run",
     async () => {
       const s = await setup();
       const now = Date.now();
-      const add = (ms: number) =>
-        s.db
-          .query(
-            "INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($task, $part, 'implement', 'ok', 99, $a, $b)",
-          )
-          .run({ task: s.task, part: s.part, a: now - ms, b: now });
-      add(115 * 60_000);
-      // AC-B204: no part time by default, so nothing blocks and the step has no time limit.
-      const free = partBudget(s.db, s.task, { id: s.part, ord: 1 }, now);
-      expect([free.over, free.limitMs, stepTimeout(free)]).toEqual([null, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY]);
-      // The part time of the settings applies.
-      const b = partBudget(s.db, s.task, { id: s.part, ord: 1 }, now, 120);
-      expect(b.over).toBeNull();
-      expect(stepTimeout(b)).toBe(5 * 60_000);
-      expect(stepTimeout({ ...b, usedMs: 0 })).toBe(120 * 60_000);
-      // limits decision 3: the step time of the settings, still capped by the time that the part has left.
-      expect(stepTimeout({ ...b, usedMs: 0 }, 45 * 60_000)).toBe(45 * 60_000);
-      expect(stepTimeout(b, 45 * 60_000)).toBe(5 * 60_000);
-      add(6 * 60_000);
-      const { started } = await s.step({ partMinutes: 120 });
-      expect(started).toEqual({
-        status: 409,
-        blocked: { kind: "budget", step: null, text: "Needs you: part 1 used its 120 min. Continue with 60 more min?" },
-      });
-      expect(s.runCalls().length).toBe(0);
-      expect(s.blockedOf()?.kind).toBe("budget");
-      // A task setting raises the limit. A cost limit applies only when a run reported a cost.
-      s.db.query("UPDATE task SET settings_json = $s").run({ s: JSON.stringify({ partTimeMin: 180, partCost: 1 }) });
-      const raised = partBudget(s.db, s.task, { id: s.part, ord: 1 }, now);
+      // Ten hours of Claude time in the part block nothing.
+      s.db
+        .query("INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($t, $p, 'implement', 'ok', 99, $a, $b)")
+        .run({ t: s.task, p: s.part, a: now - 600 * 60_000, b: now });
+      expect(partBudget(s.db, s.task, { id: s.part, ord: 1 }).over).toBeNull();
+      s.db.query("UPDATE task SET settings_json = $s").run({ s: JSON.stringify({ partCost: 1 }) });
+      const raised = partBudget(s.db, s.task, { id: s.part, ord: 1 });
       expect(raised.over).toBeNull();
       expect(raised.costUsd).toBeNull();
       const run = s.db
@@ -783,10 +772,16 @@ describe("implement run", () => {
           "INSERT INTO task_step (task, part, kind, run, state, ord, started_at, ended_at) VALUES ($t, $p, 'fix', $r, 'ok', 100, $n, $n)",
         )
         .run({ t: s.task, p: s.part, r: run.id, n: now });
-      const cost = partBudget(s.db, s.task, { id: s.part, ord: 1 }, now);
+      const cost = partBudget(s.db, s.task, { id: s.part, ord: 1 });
       expect(cost.costUsd).toBe(1.5);
       expect(cost.turns).toBe(3);
       expect(cost.over).toBe("Needs you: part 1 used its cost limit of 1 USD.");
+      const { started } = await s.step();
+      expect(started).toEqual({
+        status: 409,
+        blocked: { kind: "budget", cause: "cost", step: null, text: "Needs you: part 1 used its cost limit of 1 USD." },
+      });
+      expect(s.runCalls().length).toBe(0);
     },
     SLOW,
   );
@@ -1076,7 +1071,7 @@ describe("the prompt lines of the shell state", () => {
 
   test("Most commands and Unrestricted: no prompt line forbids cd or asks for paths instead of cd", () => {
     for (const mode of ["any", "unrestricted"] as const)
-      for (const step of ["tests", "implement", "fix", "instruct"] as const) {
+      for (const step of ["implement", "fix", "instruct"] as const) {
         const text = implementPrompt(
           step,
           "specs/K-1/",
@@ -1107,7 +1102,7 @@ describe("the prompt lines of the shell state", () => {
       "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
     );
     expect(l).toContain(
-      'failure.md marks a command that also failed before this task with "Also red before this task". Do not try to fix that command. Fix only the new failures.',
+      'failure.md marks a command that also failed on the part base with "Also red on the part base". Do not try to fix that command. Fix only the new failures.',
     );
     expect(l).not.toContain("Run the failing check first to see the failure. Run it again after your change.");
     expect(lines("implement", null).join("\n")).not.toContain("Set question and give the reason.");
@@ -1248,23 +1243,22 @@ describe("a step with the Bash tool", () => {
 
       s.scenario({ bash: refused("deny", 6, "curl x") });
       const deny = await s.step({ shell: SHELL });
-      expect(deny.outcome).toMatchObject({ status: "failed", ask: false });
-      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
-      expect(s.blockedOf()?.text).toBe("Claude Code refused more than 5 commands in this run.");
+      expect(deny.outcome).toMatchObject({ status: "failed", ask: false, text: "Claude Code refused more than 5 commands in this run." });
+      expect(taskRow(s.db, s.task)?.state).toBe("implementing");
+      expect(s.blockedOf()).toBeNull();
     },
     SLOW,
   );
 
   test(
-    "AC-B276: the loop guard ends a step at 5 equal calls; the task stops with the loop text, and the checked work stays",
+    "AC-B276: the loop guard ends a step at 5 equal calls with the cut loop and its text, and the checked work stays",
     async () => {
       const s = await setup();
       const same = { command: "echo test", output: "1 test failed" };
       s.scenario({ writes: [{ path: "repo/src/app.ts", text: "changed\n" }], bash: Array.from({ length: 6 }, () => same) });
       const { outcome } = await s.step({ shell: SHELL });
-      expect(outcome).toMatchObject({ status: "failed", result: null, problems: [], ask: false });
-      expect(s.blockedOf()?.text).toBe(LOOP_TEXT);
-      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
+      expect(outcome).toMatchObject({ status: "failed", result: null, problems: [], ask: false, cut: "loop", text: LOOP_TEXT });
+      expect(taskRow(s.db, s.task)?.state).toBe("implementing");
       const d = JSON.parse(s.stepRow(outcome?.step as number).detail_json);
       expect([s.stepRow(outcome?.step as number).state, d.checked, d.shell.commands.length]).toEqual(["failed", true, 5]);
       expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("changed\n");
@@ -1455,10 +1449,95 @@ describe("AC-B266 to AC-B268: a run that an app restart cut", () => {
       await status(s.wt);
       recover(s);
       expect(s.stepRow(step).state).toBe("failed");
-      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
+      // part-session.md section 9.5 (Q-SM2): the task keeps building and waits with error/restart.
+      expect(taskRow(s.db, s.task)?.state).toBe("implementing");
+      expect(s.blockedOf()).toMatchObject({ kind: "error", cause: "restart", step });
       expect(detailOf(s, step)).toMatchObject({ checked: true, written: ["repo/src/app.ts", "repo/src/new.ts"], notes: [KEEP] });
       expect(readFileSync(join(s.wt.repo, "src", "new.ts"), "utf8")).toBe("new\n");
       expect(existsSync(cutFile(s.wt))).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B266: a real run writes the snapshot file with the key of its step row; the run start leaves the git state equal; the run end deletes the file",
+    async () => {
+      const s = await setup();
+      s.scenario({ hang: true });
+      const done = s.step();
+      const end = Date.now() + 15_000;
+      while (!s.calls().some((c) => (c as { childPid?: number }).childPid !== undefined) && Date.now() < end) await Bun.sleep(100);
+      expect(s.runCalls()).toHaveLength(1);
+      const bytes = readFileSync(cutFile(s.wt), "utf8");
+      const file = JSON.parse(bytes) as { key: string; git: Parameters<typeof diskDiff>[0] };
+      const row = s.db.query("SELECT kind, item, attempt FROM task_step WHERE state = 'running'").get() as Record<string, unknown>;
+      expect(file.key).toBe(`task:${s.task}:part:${s.part}:${row.kind}:${row.item}:${row.attempt}`);
+      // The recovery would see this if the app stopped now: the app's own work at the run start changed no ref and no file.
+      expect(diskDiff(file.git, [s.wt])).toEqual([]);
+      expect(s.review.cancelTask(s.db, s.task)).toBe(true);
+      const outcome = (await done).outcome as StepOutcome;
+      expect(outcome.status).toBe("cancelled");
+      expect(existsSync(cutFile(s.wt))).toBe(false);
+      // The same file after a restart in the run keeps the work.
+      writeFileSync(cutFile(s.wt), bytes);
+      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: outcome.step });
+      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: outcome.run });
+      recover(s);
+      expect(detailOf(s, outcome.step)).toMatchObject({ checked: true, notes: [KEEP] });
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B267: a ref that changed after the snapshot blocks the keep; the app restores nothing, and the task waits with error/restart",
+    async () => {
+      const s = await setup();
+      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }]);
+      // A Bash command of the run, past the app's git.
+      const p = Bun.spawnSync(["git", `--git-dir=${s.wt.cache}`, "update-ref", "refs/heads/planted", s.base], { env: s.wt.env });
+      expect(p.exitCode).toBe(0);
+      recover(s);
+      const d = detailOf(s, step);
+      expect(d.checked).toBe(false);
+      expect(d.notes).toEqual([
+        "The app stopped during the run. The git state differs from the run start: refs/heads/planted (new). Continue resets the work and keeps a patch.",
+      ]);
+      expect(taskRow(s.db, s.task)?.state).toBe("implementing");
+      expect(s.blockedOf()).toMatchObject({ kind: "error", cause: "restart", step });
+      expect((await git([`--git-dir=${s.wt.cache}`, "rev-parse", "refs/heads/planted"], { env: s.wt.env })).trim()).toBe(s.base);
+      expect(existsSync(cutFile(s.wt))).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B268: with a clean git state, a file outside repo/, a changed ignored file, a denied path, or a staged entry blocks the keep",
+    async () => {
+      const blocked: [string, { path: string; text: string }[], string][] = [
+        ["outside", [{ path: "CLAUDE.md", text: "planted\n" }], "The path check failed for ../CLAUDE.md."],
+        ["ignored", [{ path: "repo/ignored/evil.js", text: "planted\n" }], "The path check failed for ignored/evil.js."],
+        ["denied", [{ path: "repo/docs/AGENTS.md", text: "planted\n" }], "The path check failed for docs/AGENTS.md."],
+      ];
+      for (const [name, writes, why] of blocked) {
+        const s = await setup();
+        const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }, ...writes]);
+        recover(s);
+        const d = detailOf(s, step);
+        expect([name, d.checked]).toEqual([name, false]);
+        expect(d.notes).toEqual([`The app stopped during the run. ${why} Continue resets the work and keeps a patch.`]);
+      }
+      // A staged entry would go into the next commit, which commits the whole index.
+      const s = await setup();
+      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }]);
+      await wtGit(s.wt, ["add", "src/app.ts"]);
+      recover(s);
+      expect(detailOf(s, step).checked).toBe(false);
+      expect(detailOf(s, step).notes[0]).toContain("the index of repo");
+    },
+    SLOW * 2,
+  );
+});
+
 // docs/plans/review-v2/part-session.md section 2.2 (package PS2): the session fields of an implement run in the jobs. PS3 builds the
 // start in startStep, so these tests build it by hand.
 describe("part sessions in the jobs", () => {
@@ -1530,86 +1609,6 @@ describe("part sessions in the jobs", () => {
   );
 
   test(
-    "AC-B266: a real run writes the snapshot file with the key of its step row; the run start leaves the git state equal; the run end deletes the file",
-    async () => {
-      const s = await setup();
-      // 20 s of Claude time left in the part, so the hanging run ends at its time limit.
-      s.db.query("UPDATE task SET settings_json = $s").run({ s: JSON.stringify({ partTimeMin: 120 }) });
-      const now = Date.now();
-      s.db
-        .query("INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($t, $p, 'implement', 'ok', 99, $a, $b)")
-        .run({ t: s.task, p: s.part, a: now - (120 * 60_000 - 20_000), b: now });
-      s.scenario({ hang: true });
-      const done = s.step();
-      const end = Date.now() + 15_000;
-      while (!s.calls().some((c) => (c as { childPid?: number }).childPid !== undefined) && Date.now() < end) await Bun.sleep(100);
-      expect(s.runCalls()).toHaveLength(1);
-      const bytes = readFileSync(cutFile(s.wt), "utf8");
-      const file = JSON.parse(bytes) as { key: string; git: Parameters<typeof diskDiff>[0] };
-      const row = s.db.query("SELECT kind, item, attempt FROM task_step WHERE state = 'running'").get() as Record<string, unknown>;
-      expect(file.key).toBe(`task:${s.task}:part:${s.part}:${row.kind}:${row.item}:${row.attempt}`);
-      // The recovery would see this if the app stopped now: the app's own work at the run start changed no ref and no file.
-      expect(diskDiff(file.git, [s.wt])).toEqual([]);
-      const outcome = (await done).outcome as StepOutcome;
-      expect(outcome.status).toBe("failed");
-      expect(existsSync(cutFile(s.wt))).toBe(false);
-      // The same file after a restart in the run keeps the work.
-      writeFileSync(cutFile(s.wt), bytes);
-      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: outcome.step });
-      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: outcome.run });
-      recover(s);
-      expect(detailOf(s, outcome.step)).toMatchObject({ checked: true, notes: [KEEP] });
-    },
-    SLOW,
-  );
-
-  test(
-    "AC-B267: a ref that changed after the snapshot blocks the keep; the app restores nothing, and the task stays stopped",
-    async () => {
-      const s = await setup();
-      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }]);
-      // A Bash command of the run, past the app's git.
-      const p = Bun.spawnSync(["git", `--git-dir=${s.wt.cache}`, "update-ref", "refs/heads/planted", s.base], { env: s.wt.env });
-      expect(p.exitCode).toBe(0);
-      recover(s);
-      const d = detailOf(s, step);
-      expect(d.checked).toBe(false);
-      expect(d.notes).toEqual([
-        "The app stopped during the run. The git state differs from the run start: refs/heads/planted (new). Continue resets the work and keeps a patch.",
-      ]);
-      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
-      expect((await git([`--git-dir=${s.wt.cache}`, "rev-parse", "refs/heads/planted"], { env: s.wt.env })).trim()).toBe(s.base);
-      expect(existsSync(cutFile(s.wt))).toBe(false);
-    },
-    SLOW,
-  );
-
-  test(
-    "AC-B268: with a clean git state, a file outside repo/, a changed ignored file, a denied path, or a staged entry blocks the keep",
-    async () => {
-      const blocked: [string, { path: string; text: string }[], string][] = [
-        ["outside", [{ path: "CLAUDE.md", text: "planted\n" }], "The path check failed for ../CLAUDE.md."],
-        ["ignored", [{ path: "repo/ignored/evil.js", text: "planted\n" }], "The path check failed for ignored/evil.js."],
-        ["denied", [{ path: "repo/docs/AGENTS.md", text: "planted\n" }], "The path check failed for docs/AGENTS.md."],
-      ];
-      for (const [name, writes, why] of blocked) {
-        const s = await setup();
-        const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }, ...writes]);
-        recover(s);
-        const d = detailOf(s, step);
-        expect([name, d.checked]).toEqual([name, false]);
-        expect(d.notes).toEqual([`The app stopped during the run. ${why} Continue resets the work and keeps a patch.`]);
-      }
-      // A staged entry would go into the next commit, which commits the whole index.
-      const s = await setup();
-      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }]);
-      await wtGit(s.wt, ["add", "src/app.ts"]);
-      recover(s);
-      expect(detailOf(s, step).checked).toBe(false);
-      expect(detailOf(s, step).notes[0]).toContain("the index of repo");
-    },
-    SLOW * 2,
-  );
     "AC-B278: with the gates on, the run forks the resume file with live input",
     async () => {
       const s = await setup({ sessionGates: { resume: true, live: true } });

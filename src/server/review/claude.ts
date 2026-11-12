@@ -398,6 +398,27 @@ function removeCwdFolders(cwd: string, projectsDir: string) {
     }
 }
 
+// part-session.md section 2.2, End and deletion: a crash leaves the per-cwd folders of task runs. root: the task root of the app. A
+// folder of a run in root has the encoded root and then "-" as its name start, so no folder of another project matches.
+export function sweepCwdFolders(projectsDir: string, root: string) {
+  const start = `${cwdName(root)}-`;
+  for (const dir of [projectsDir, join(tmpdir(), "claude")]) {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const n of names)
+      if (n.startsWith(start))
+        try {
+          rmSync(join(dir, n), { recursive: true, force: true, maxRetries: 3 });
+        } catch (e) {
+          log(`Could not delete a Claude Code session folder: ${(e as Error).message}`);
+        }
+  }
+}
+
 // The session ID comes from the stream and goes into a path (scripts/gate/claude-checks.ts B37_SID).
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KEEP_TRIES = 10;

@@ -19,7 +19,7 @@ import {
   type ReplyPayload,
   severities,
 } from "../../shared/review";
-import { FAILURE_TAIL } from "../../shared/task";
+import { CONTINUE_DIFF_MAX } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg } from "../../shared/turn";
 import type { BuildStats } from "../bitbucket/provider";
 import { currentDrafts, touched } from "./drafts";
@@ -135,29 +135,56 @@ export function salvageNotesFile(notes: readonly RunNote[]): ContextFile {
   return { name: "salvage-notes.md", text: out.join("\n") };
 }
 
-// build-redesign.md section 2.4: context/continue.md of the attempt after a cut task step. kept: the changes are still in the
-// worktree; else the app reset them, and diff is their patch. paths: the changed paths, when kept, at most CONTINUE_PATHS_MAX. diff:
-// the changes since the last commit, cut to FAILURE_TAIL bytes. notes: the summary and the notes of the cut step.
+// part-session.md section 2.2, Fresh session: context/continue.md of a new session of a part with earlier runs. commits: the subject
+// lines of the part commits (base..head). stat: the diff stat of the part. ticked and open: "<id> <title>" of the tasks. summary and
+// notes: the last run. paths: the changed paths in the worktree, at most CONTINUE_PATHS_MAX each list.
 export const CONTINUE_PATHS_MAX = 200;
-export function continueFile(o: { kept: boolean; paths: string[]; diff: string; notes: string[] }): ContextFile {
-  const all = Buffer.from(o.diff);
-  const diff = all.length > FAILURE_TAIL ? `${all.subarray(0, FAILURE_TAIL).toString()}\n[The app cut the diff here.]` : o.diff;
+export function continueFile(o: {
+  commits: string[];
+  stat: string;
+  ticked: string[];
+  open: string[];
+  summary: string | null;
+  notes: string[];
+  paths: string[];
+}): ContextFile {
+  const list = (items: string[]) => {
+    const more = items.length - CONTINUE_PATHS_MAX;
+    const shown = items.slice(0, CONTINUE_PATHS_MAX).map((p) => `- ${oneLine(p)}`);
+    return [...(shown.length ? shown : ["(none)"]), ...(more > 0 ? [`- and ${more} more`] : []), ""];
+  };
   const out = [
-    "# The earlier attempt",
+    "# The earlier work on this part",
     "",
-    o.kept
-      ? "The earlier attempt of this step left these changes in the worktree. They are not committed."
-      : "The app reset the changes of the earlier attempt. The patch below holds them.",
+    "## Commits of the part",
     "",
+    ...list(o.commits),
+    "## Diff stat of the part",
+    "",
+    o.stat ? oneLine(o.stat) : "(no change)",
+    "",
+    "## Ticked tasks",
+    "",
+    ...list(o.ticked),
+    "## Open tasks",
+    "",
+    ...list(o.open),
+    "## Changed paths that are not committed",
+    "",
+    ...list(o.paths),
   ];
-  if (o.kept) {
-    const more = o.paths.length - CONTINUE_PATHS_MAX;
-    const list = o.paths.slice(0, CONTINUE_PATHS_MAX).map((p) => `- ${oneLine(p)}`);
-    out.push("## Changed paths", "", ...(list.length ? list : ["(none)"]), ...(more > 0 ? [`- and ${more} more`] : []), "");
-  }
-  out.push(o.kept ? "## Diff since the last commit" : "## Patch", "", indentBlock(diff.trimEnd() || "(no diff)"), "");
-  if (o.notes.length) out.push("## Notes of the earlier attempt", "", ...o.notes.map((n) => indentBlock(n)), "");
+  if (o.summary || o.notes.length)
+    out.push("## Summary and notes of the last run", "", ...[...(o.summary ? [o.summary] : []), ...o.notes].map((n) => indentBlock(n)), "");
   return { name: "continue.md", text: out.join("\n") };
+}
+
+// part-session.md section 2.2: context/continue-diff.md, the full diff since the last commit, cut at CONTINUE_DIFF_MAX. kept: the work is
+// in the worktree; else diff is the patch of the newest reset. Claude reads it in parts. FAILURE_TAIL stays the cut of failure.md.
+export function continueDiffFile(diff: string, kept: boolean): ContextFile {
+  const all = Buffer.from(diff);
+  const text = all.length > CONTINUE_DIFF_MAX ? `${all.subarray(0, CONTINUE_DIFF_MAX).toString()}\n[The app cut the diff here.]` : diff;
+  const head = kept ? "# Diff since the last commit" : "# Patch of the work that the app reset";
+  return { name: "continue-diff.md", text: [head, "", indentBlock(text.trimEnd() || "(no diff)"), ""].join("\n") };
 }
 
 // Byte caps of the context/history.md sections. The cut drops the blocks after the first block that does not fit.

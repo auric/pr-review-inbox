@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 49;
+const LATEST = 50;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1761,6 +1761,68 @@ test("migration from a version-48 database keeps every note, its index, and its 
     expect(db.query("SELECT item FROM pr_note WHERE id = 2").get()).toEqual({ item: null });
     db.run("DELETE FROM pull_request WHERE id = 1");
     expect(db.query("SELECT COUNT(*) AS n FROM pr_note").get()).toEqual({ n: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+// ---------- Part sessions (052_part_session.sql) ----------
+
+// part-session.md section 5.3 (AC-B303): a side table. The rows of task and task_part stay, a part has no session row, and the delete
+// of a part deletes its session row.
+test("AC-B303: migration from a version-49 database keeps the task and part rows and adds task_part_session", () => {
+  const path = join(dir, "v49.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  migrate(old, [
+    ...V30,
+    "031_pr_notes.sql",
+    "032_ask_parent.sql",
+    "033_task.sql",
+    "034_task_base.sql",
+    "035_task_repos.sql",
+    "036_task_file.sql",
+    "037_task_update.sql",
+    "038_task_profile.sql",
+    "039_task_files.sql",
+    "040_task_base_changed.sql",
+    "041_build_status.sql",
+    "042_task_subtasks.sql",
+    "043_run_events.sql",
+    "044_task_shell.sql",
+    "045_task_setup.sql",
+    "046_task_run_checks.sql",
+    "047_task_unrestricted.sql",
+    "048_task_part_blocked.sql",
+    "049_note_text.sql",
+  ]);
+  old.exec("PRAGMA user_version = 49");
+  old.exec(`INSERT INTO task (id, project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+      VALUES (1, 'P', 'a', 'ABC-10', 'Speed up the cache', 'implementing', 'main', 'specs/ABC-10/', 1, 1);
+    INSERT INTO task_part (id, task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+      VALUES (7, 1, 1, 'single', 'One', 'feature/ABC-10', 'main', 'implementing', 1, 1);
+    INSERT INTO task_step (task, part, ord, kind, state, item, started_at) VALUES (1, 7, 1, 'implement', 'ok', 'T1.1', 1);`);
+  const before = ["task", "task_part", "task_step"].map((n) => old.query(`SELECT * FROM ${n} ORDER BY id`).all());
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(["task", "task_part", "task_step"].map((n) => db.query(`SELECT * FROM ${n} ORDER BY id`).all())).toEqual(before);
+    expect(db.query("SELECT COUNT(*) AS n FROM task_part_session").get()).toEqual({ n: 0 });
+    db.run(
+      "INSERT INTO task_part_session (part, session_id, file, file_sha256, context_tokens, runs, updated_at) VALUES (7, 's', 'f', 'h', 10, 1, 1)",
+    );
+    expect(db.query("SELECT heads_json, totals_json, ci_fix_left, ci_fix_max FROM task_part_session").get()).toEqual({
+      heads_json: "[]",
+      totals_json: null,
+      ci_fix_left: null,
+      ci_fix_max: null,
+    });
+    expect(() => db.run("INSERT INTO task_part_session (part, updated_at) VALUES (99, 1)")).toThrow(/FOREIGN KEY/);
+    expect(() => db.run("INSERT INTO task_part_session (part, updated_at) VALUES (7, 2)")).toThrow(/UNIQUE|PRIMARY KEY/);
+    db.run("DELETE FROM task_part WHERE id = 7");
+    expect(db.query("SELECT COUNT(*) AS n FROM task_part_session").get()).toEqual({ n: 0 });
   } finally {
     db.close();
   }

@@ -116,6 +116,7 @@ import {
   type RunnerCheck,
   type RunOutcome,
   SESSION_GATES,
+  sweepCwdFolders,
 } from "./claude";
 import { codegraphEntry, codegraphIndex, indexCodegraph } from "./codegraph";
 import {
@@ -452,6 +453,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   // The task loop starts at most one step per part, so the parts limit of the task bounds them.
   const extras = new Set<TaskJob>();
   let checked: RunnerCheck | null = null;
+  let swept = false;
   let pruned: Promise<void> | null = null;
 
   // The database of the configured origin. Its first use ends the runs of the last process (restart recovery).
@@ -476,6 +478,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
 
   async function check() {
     checked = await checker.check();
+    // part-session.md section 2.2: the first check of the process sweeps the folders that the CLI left for task runs before a crash. It
+    // runs before any task run of this process starts, because each run awaits a check first.
+    if (checked.ok && !swept) {
+      swept = true;
+      sweepCwdFolders(checked.projectsDir, tasksRoot(dataDir));
+    }
     return checked;
   }
 
@@ -2458,6 +2466,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
 
     // The Claude config folder of the runs. The instructions preview reads the global file from it.
     configDir: () => opts.claudeConfigDir ?? claudeConfigDir(),
+    // part-session.md section 2.2, guard rule 5: the loop reads the same gates that implementSteps applies.
+    sessionGates: gates,
 
     // Cancels only that run.
     cancel(db: Database, run: number): "cancelled" | "not_running" | null {

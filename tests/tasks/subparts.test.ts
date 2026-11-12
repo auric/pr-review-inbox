@@ -108,8 +108,13 @@ async function setup(o: { maxOpen: number }) {
   runner.write({
     fixture: claudeStream(root, "st3", "claude/b6-hostile-repo.jsonl"),
     seq: {
-      "implement:tests": NAMES.map((n) => file(`tests/${n}.test.ts`, `test("${n}", () => {});\n`)),
-      "implement:implement": NAMES.map((n) => file(`src/${n}.ts`, `export const ${n} = "todo";\n`)),
+      "implement:build": NAMES.map((n) => ({
+        writes: [
+          ...file(`tests/${n}.test.ts`, `test("${n}", () => {});\n`).writes,
+          ...file(`src/${n}.ts`, `export const ${n} = "todo";\n`).writes,
+        ],
+        ticks: { path: "*", ids: ["*"] },
+      })),
       "implement:fix": NAMES.map((n) => file(`src/${n}.ts`, `export const ${n} = "works";\n`)),
       review: [{ review: CLEAN }],
     },
@@ -312,22 +317,13 @@ describe("several parts with the scheduler (spec.md section 6.20.6)", () => {
       // Part 1: the first free suffix of its planned name, from the fetched head of the base.
       const one = s.part(s.p1);
       expect([one.branch, one.base_branch, one.base_commit, one.pushed]).toEqual([`${s.p1Name}-2`, "main", s.base, null]);
-      expect(await s.log(s.p1)).toEqual([
-        "ABC-11: Add the plan",
-        "ABC-11 P1: Add the failing tests of part 1",
-        "ABC-11 T1.1: Write one",
-        "ABC-11: Fix the checks of part 1",
-      ]);
+      // part-session.md section 2.6: one commit per green gate, named after the part.
+      expect(await s.log(s.p1)).toEqual(["ABC-11: Add the plan", "ABC-11: Part one"]);
       // Part 2: Continue on the found branch, with its remote head as the lease.
       const two = s.part(s.p2);
       expect([two.branch, two.base_commit, two.pushed]).toEqual([OLD, s.base, s.old]);
       expect((await s.log(s.p2))[0]).toBe("Old work");
-      expect((await s.log(s.p2)).slice(1)).toEqual([
-        "ABC-12: Add the plan",
-        "ABC-12 P2: Add the failing tests of part 2",
-        "ABC-12 T2.1: Write two",
-        "ABC-12: Fix the checks of part 2",
-      ]);
+      expect((await s.log(s.p2)).slice(1)).toEqual(["ABC-12: Add the plan", "ABC-12: Part two"]);
       // Each part holds only its own plan part and map entries, in its own folder.
       const w1 = await s.wt(s.p1);
       const plan1 = readFileSync(join(w1.repo, "specs", "ABC-11", "plan.md"), "utf8");
@@ -348,7 +344,8 @@ describe("several parts with the scheduler (spec.md section 6.20.6)", () => {
         ["Part two", "ABC-12", "9012", "9011"],
       ] as const) {
         const runs = byPart(title);
-        expect(runs.length).toBe(4);
+        // The build run, one fix run, and the own review.
+        expect(runs.length).toBe(3);
         for (const c of runs) {
           expect(c.attachments).toEqual(["9001.txt", key]);
           // The own review gets the sub-tasks in its task.md.
@@ -394,12 +391,7 @@ describe("several parts with the scheduler (spec.md section 6.20.6)", () => {
       const w3 = await s.wt(s.p3);
       const mb = (await git([`--git-dir=${w3.admin}`, "merge-base", "HEAD", pr1.pushed as string], { env: w3.env })).trim();
       expect(mb).toBe(pr1.pushed as string);
-      expect((await s.log(s.p3)).slice(-4)).toEqual([
-        "ABC-13: Add the plan",
-        "ABC-13 P3: Add the failing tests of part 3",
-        "ABC-13 T3.1: Write three",
-        "ABC-13: Fix the checks of part 3",
-      ]);
+      expect((await s.log(s.p3)).slice(-2)).toEqual(["ABC-13: Add the plan", "ABC-13: Part three"]);
 
       // The PR of part 3 targets the branch of part 1. Its text names the parent and the PR of each part.
       const opened3 = await op.open(s.db, s.task, s.p3, { version: s.dto().version, reviewers: [] });

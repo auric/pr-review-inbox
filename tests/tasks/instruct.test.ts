@@ -322,7 +322,7 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
           const step = calls[1]?.context["step.md"] ?? "";
           if (accept) expect(step).not.toContain("rejected");
           else expect(step).toContain(`The user rejected your change to specs/${KEY}/notes.md. Your reason was: The plan lacks the flag.`);
-          expect((await s.log())[0]?.startsWith(`${KEY} I1: Change the plan|`)).toBe(accept);
+          expect((await s.log())[0]?.startsWith(`${KEY}: Change the plan|`)).toBe(accept);
           // The build of a building part does not go on by itself, and the task keeps its state and reason.
           expect([s.t().state, s.blocked(), s.part().state]).toEqual([
             state,

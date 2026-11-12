@@ -90,7 +90,7 @@ describe("an added repository (spec.md section 6.16.5)", () => {
     "AC-B44: the build changes both repositories, commits in both, counts and reviews both; the PR route pushes and creates both with links",
     async () => {
       const s = await addedTask({
-        seq: { "implement:tests": [{ writes: [TEST_FILE] }], "implement:implement": [{ writes: [FEATURE, LIB] }] },
+        seq: { "implement:build": [{ writes: [TEST_FILE, FEATURE, LIB], ticks: { path: "*", ids: ["*"] } }] },
       });
       s.loop.build(s.db, s.task);
       await s.loop.idle(s.task);
@@ -101,14 +101,14 @@ describe("an added repository (spec.md section 6.16.5)", () => {
         "self_reviewed",
         BRANCH,
       ]);
-      // The implement step got the real folder in context/repos.md and the rule for it.
-      const step = s.runCalls().find((c: Call) => c.stdin.includes("- Mode: implement")) as Call;
+      // The build run got the real folder in context/repos.md and the rule for it.
+      const step = s.runCalls().find((c: Call) => c.stdin.includes("- Mode: build")) as Call;
       expect(step.context["repos.md"]).toContain("- ../repos/PROJ/lib: PROJ/lib · access edit · base main");
       expect(step.stdin).toContain(
         "You can change files only in ./repo and in the folders that ./context/repos.md lists with access edit.",
       );
       // One commit in each repository with the same message, and the task_pr row of lib.
-      const commit = s.steps().find((x) => x.kind === "commit" && x.item === "T1.1");
+      const commit = s.steps().find((x) => x.kind === "commit" && x.item === "build");
       expect(commit?.detail.notes[1]).toStartWith("Commit ");
       expect(commit?.detail.notes[1]).toEndWith(" in ../repos/PROJ/lib");
       const lib = rowOf(built, "lib");
@@ -119,7 +119,7 @@ describe("an added repository (spec.md section 6.16.5)", () => {
           env: s.lib.env,
         })
       ).trim();
-      expect(libLog).toBe(`${KEY} T1.1: Write the feature`);
+      expect(libLog).toBe(`${KEY}: ${built.title}`);
       // spec.md section 6.16.8: the dialog row names the files and the lines of each repository.
       expect([lib.files, lib.lines]).toEqual([1, 3]);
       expect([app.files, (app.lines ?? 0) > 0]).toEqual([3, true]);

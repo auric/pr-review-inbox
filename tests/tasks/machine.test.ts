@@ -98,7 +98,7 @@ const PHASE_TABLE: Record<Phase, Partial<Record<PhaseEventType, Row[]>>> = {
     UPDATE: [[null, "updating"]],
   },
   setup: { CLEAN: [[null, "idle"]], ...ENDED },
-  baseline: { CLEAN: [[null, "idle"]], STOPPED: [[null, "idle"]] },
+  baseline: { CLEAN: [[null, "idle"]], ...ENDED },
   building: { RUN_DONE: [[null, "checking"]], RUN_CUT: RUN_CUT("building"), ...ENDED },
   checking: {
     CHECKS_GREEN: [[null, "idle"]],
@@ -513,6 +513,7 @@ describe("machineMermaid", () => {
   setup --> idle: WAIT
   setup --> idle: STOPPED
   baseline --> idle: CLEAN
+  baseline --> idle: WAIT
   baseline --> idle: STOPPED
   building --> checking: RUN_DONE
   building --> building: RUN_CUT if firstCut
@@ -676,7 +677,7 @@ describe("advance", () => {
     expect(row(id).version).toBe(1);
   });
 
-  test("recoverTasks fails the running step of a running task run and stops its task", () => {
+  test("AC-B297: recoverTasks fails the running step of a running task run; the task keeps its state with the reason error/restart", () => {
     const id = newTask("implementing", "small");
     const done = newTask("done", "small");
     const run = (task: number) =>
@@ -694,7 +695,9 @@ describe("advance", () => {
     });
     db.query("INSERT INTO task_step (task, ord, kind, state, started_at) VALUES ($id, 2, 'check', 'ok', 1)").run({ id });
     recoverTasks(db, 50);
-    expect(row(id)).toMatchObject({ state: "stopped", stopped_from: "implementing", version: 1 });
+    expect(row(id)).toMatchObject({ state: "implementing", stopped_from: null, version: 1 });
+    const b = db.query("SELECT blocked_json FROM task WHERE id = $id").get({ id }) as { blocked_json: string };
+    expect(JSON.parse(b.blocked_json)).toMatchObject({ kind: "error", cause: "restart", step: 1 });
     expect(row(done)).toMatchObject({ state: "done", version: 0 });
     expect(db.query("SELECT ord, state, ended_at FROM task_step WHERE task = $id ORDER BY ord").all({ id })).toEqual([
       { ord: 1, state: "failed", ended_at: 50 },

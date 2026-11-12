@@ -51,6 +51,7 @@ import m046_task_run_checks from "./migrations/046_task_run_checks.sql" with { t
 import m047_task_unrestricted from "./migrations/047_task_unrestricted.sql" with { type: "text" };
 import m048_task_part_blocked from "./migrations/048_task_part_blocked.sql" with { type: "text" };
 import m049_note_text from "./migrations/049_note_text.sql" with { type: "text" };
+import m052_part_session from "./migrations/052_part_session.sql" with { type: "text" };
 
 // Index i holds the SQL that raises user_version from i to i + 1. The list order, not the file number, sets the version.
 const MIGRATIONS = [
@@ -103,6 +104,9 @@ const MIGRATIONS = [
   m047_task_unrestricted,
   m048_task_part_blocked,
   m049_note_text,
+  // part-session.md section 5.3 reserves 050 and 051 for other packages. A later package that adds them goes before this entry only
+  // while no database has user_version 50.
+  m052_part_session,
 ];
 
 const tables = (db: Database) =>

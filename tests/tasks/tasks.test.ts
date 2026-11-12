@@ -24,7 +24,6 @@ import { type Docs, stepFile } from "../../src/server/tasks/plan";
 import {
   advance,
   holdBlocked,
-  moreTime,
   recoverTasks,
   rowDto,
   setBlocked,
@@ -1799,12 +1798,9 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
     // A restart keeps every reason: no step ran, so recovery does not stop the task.
     recoverTasks(h.db, 5);
     expect([h.t().state, h.first(), ...h.rows()]).toEqual(["implementing", q2, null, null, c3]);
-    // moreTime and setSettings move the next reason up too.
-    moreTime(h.db, h.ref(), 6);
+    // setSettings moves the next reason up too.
+    setSettings(h.db, h.ref(), { keepOnePr: true }, 6);
     expect([h.first(), ...h.rows()]).toEqual([c3, null, null, null]);
-    expect(holdBlocked(h.db, h.t(), q1)).toBe(true);
-    setSettings(h.db, h.ref(), { keepOnePr: true }, 7);
-    expect([h.first(), ...h.rows()]).toEqual([q1, null, null, null]);
     expect(rowDto(h.db, h.t()).queued).toBe(0);
 
     // Stop removes every waiting reason. The stopped task keeps its first reason as before.

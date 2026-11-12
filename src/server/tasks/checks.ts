@@ -8,11 +8,10 @@ import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, isAbsolute, join, posix, resolve } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
 import { type CommandKind, limitText, OUTPUT_TAIL, type StepDetail, TASK_CACHE_ENV, type TaskCommand } from "../../shared/task";
 import { log } from "../log";
 import { childEnv, contain, killTree, RUN_MARKER } from "../review/claude";
-import { repoPath } from "../review/validate";
 import { endStep, insertStep, patchStep } from "./implement";
 import { repoSettings } from "./tasks";
 import { inside, taskDir, tasksRoot, type Worktree } from "./worktree";
@@ -179,241 +178,6 @@ export async function runCommand(
   return done(timedOut || stopped ? null : code, out.text() + note, timedOut, stopped);
 }
 
-// The scoped check of one task (spec.md section 6.4, Run line). run: the Run entries of the task. later: the Run entries of the later
-// tasks of its plan part, whose tests the tests step wrote too and which stay red until their task.
-export type Scope = { run: readonly string[]; later: readonly string[] };
-
-const GLOB_CHARS = /[*?[\]{}!]/;
-// ECMAScript and RE2 (Go regexp.QuoteMeta) share this set of special characters.
-const regexQuote = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-// CMake regex (https://cmake.org/cmake/help/latest/manual/cmake-language.7.html#regex-specification): "\<char>" matches <char>.
-const cmakeQuote = (s: string) => s.replace(/[\^$.\\[\]*+?|()]/g, "\\$&");
-const alt = (names: readonly string[], quote = regexQuote) => names.map(quote).join("|");
-
-type Entries = { files: string[]; names: string[] };
-type Narrowed = { label: string; argv: string[] }[] | { error: string };
-// One test runner. args: the arguments after the program words of an approved argv that the app may narrow, else null. A Run line
-// adds only test-file and test-name filters. narrow: the commands for the Run entries. skip: the approved argv without the test
-// files of the later tasks, or null when the runner has no option for it.
-type Runner = {
-  args: (argv: readonly string[]) => readonly string[] | null;
-  narrow: (argv: readonly string[], e: Entries, o: { cwd: string; later: Entries }) => Narrowed;
-  skip: (argv: readonly string[], files: readonly string[]) => string[] | null;
-};
-
-const progName = (a: string | undefined) =>
-  basename(a ?? "")
-    .toLowerCase()
-    .replace(/\.exe$/, "");
-// The arguments after the first program shape that argv starts with. Only argv[0] can be a path.
-function after(argv: readonly string[], shapes: readonly (readonly string[])[]): readonly string[] | null {
-  for (const s of shapes) if (progName(argv[0]) === s[0] && s.slice(1).every((w, i) => argv[i + 1] === w)) return argv.slice(s.length);
-  return null;
-}
-// Flags only: a positional argument can be a path filter that adds tests back, or the value of a flag that the app cannot tell from
-// one. "--" ends the options, so a filter after it is no option. filter: a flag that already selects tests.
-const flagsOnly = (args: readonly string[] | null, filter: RegExp) =>
-  args?.every((a) => a.startsWith("-") && a !== "--" && !filter.test(a)) ? args : null;
-const nameCmd = (argv: readonly string[], ...extra: string[]) => [{ label: "tests of the task", argv: [...argv, ...extra] }];
-const fileCmd = (argv: readonly string[], files: readonly string[]) =>
-  files.length ? [{ label: "test files of the task", argv: [...argv, ...files] }] : [];
-const both = (argv: readonly string[], e: Entries, files: readonly string[], names: () => string[]) => [
-  ...fileCmd(argv, files),
-  ...(e.names.length ? nameCmd(argv, ...names()) : []),
-];
-const noFiles = (e: Entries, runner: string): { error: string } | null =>
-  e.files.length ? { error: `"${e.files[0]}" is a file, and ${runner} selects tests by name only.` } : null;
-// pytest -k grammar (src/_pytest/mark/expression.py): ident is (\w|:|\+|-|\.|\[|\]|\\|/)+, and "or", "and", "not" are keywords.
-const PYTEST_IDENT = /^[\w:+\-.[\]\\/]+$/;
-
-const RUNNERS: Record<string, Runner> = {
-  // https://bun.sh/docs/cli/test: a filter that starts with "./" names one file, -t takes a regex of test names, and
-  // --path-ignore-patterns takes a glob of test files to skip.
-  "bun test": {
-    args: (argv) => flagsOnly(after(argv, [["bun", "test"]]), /^(-t|--test-name-pattern)(=|$)/),
-    narrow: (argv, e) =>
-      both(
-        argv,
-        e,
-        e.files.map((f) => `./${f}`),
-        () => ["-t", alt(e.names)],
-      ),
-    skip: (argv, files) => (files.some((f) => GLOB_CHARS.test(f)) ? null : [...argv, ...files.map((f) => `--path-ignore-patterns=${f}`)]),
-  },
-  // https://docs.pytest.org/en/stable/how-to/usage.html: a file path as a positional argument, -k takes a keyword expression of
-  // test names (case-insensitive substrings). Reference: --ignore=PATH skips a path during collection. A short flag group with k
-  // is a -k of the approved command.
-  pytest: {
-    args: (argv) =>
-      flagsOnly(
-        after(argv, [["pytest"], ["python", "-m", "pytest"], ["python3", "-m", "pytest"], ["py", "-m", "pytest"], ["uv", "run", "pytest"]]),
-        /^-[A-Za-z]*k/,
-      ),
-    narrow: (argv, e) => {
-      const bad = e.names.find((n) => !PYTEST_IDENT.test(n) || ["or", "and", "not"].includes(n));
-      if (bad !== undefined) return { error: `"${bad}" is not a pytest -k name: use letters, digits, and _ : + - . [ ] only.` };
-      return both(argv, e, e.files, () => ["-k", e.names.join(" or ")]);
-    },
-    skip: (argv, files) => [...argv, ...files.map((f) => `--ignore=${f}`)],
-  },
-  // https://jestjs.io/docs/cli: a positional argument is a regex of test paths, -t takes a regex of full test names.
-  // --testPathIgnorePatterns replaces the configured list (jest-config setFromArgv.ts), so it would run the tests that the config
-  // skips. The app does not use it.
-  jest: {
-    args: (argv) =>
-      flagsOnly(
-        after(argv, [["jest"], ["npx", "jest"]]),
-        /^(-t|--testNamePattern|--testPathPatterns?|--runTestsByPath|--findRelatedTests)(=|$)/,
-      ),
-    narrow: (argv, e) => both(argv, e, e.files.map(regexQuote), () => ["-t", alt(e.names)]),
-    skip: () => null,
-  },
-  // https://vitest.dev/guide/filtering: a positional filter selects the files whose path contains it (no regex, no glob), and
-  // "<file>:<line>" selects a line. -t takes a regex of full test names. --exclude adds a glob to the configured exclude list
-  // (https://vitest.dev/guide/cli, resolveConfig.ts cliExclude).
-  vitest: {
-    args: (argv) =>
-      flagsOnly(
-        after(argv, [
-          ["vitest", "run"],
-          ["npx", "vitest", "run"],
-        ]),
-        /^(-t|--testNamePattern)(=|$)/,
-      ),
-    narrow: (argv, e) => {
-      const bad = e.files.find((f) => /:\d+$/.test(f));
-      if (bad) return { error: `"${bad}" reads as a file and a line for vitest.` };
-      return both(argv, e, e.files, () => ["-t", alt(e.names)]);
-    },
-    skip: (argv, files) => (files.some((f) => GLOB_CHARS.test(f)) ? null : [...argv, ...files.flatMap((f) => ["--exclude", f])]),
-  },
-  // https://pkg.go.dev/cmd/go#hdr-Testing_flags: -run takes a regex of test names, split at unbracketed "/" (a Run name has no "/").
-  // Flags may follow the packages ("go test [build/test flags] [packages] [build/test flags & test binary flags]"). A file maps to
-  // its package folder when the approved argv runs "./..." and that folder is in it: "./..." skips folders that start with "." or
-  // "_", testdata, vendor, and nested modules (https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns). The whole package runs,
-  // so the later tasks must name no test in it: no later name, and no later file in the same folder.
-  "go test": {
-    args: (argv) => {
-      const a = after(argv, [["go", "test"]]);
-      return a?.every((x) => (x.startsWith("-") ? x !== "--" && !/^--?(test\.)?run(=|$)/.test(x) : x === "./...")) ? a : null;
-    },
-    narrow: (argv, e, o) => {
-      if (!e.files.length) return nameCmd(argv, "-run", `^(${alt(e.names)})$`);
-      if (!argv.includes("./...")) return { error: `"${e.files[0]}" needs an approved go test command with ./... to name its package.` };
-      const dirs = new Set<string>();
-      for (const f of e.files) {
-        const dir = posix.dirname(f);
-        const parts = dir === "." ? [] : dir.split("/");
-        const nested = parts.some((_, i) => statSync(join(o.cwd, ...parts.slice(0, i + 1), "go.mod"), { throwIfNoEntry: false }));
-        if (!f.endsWith(".go") || nested || parts.some((s) => /^[._]/.test(s) || s === "testdata" || s === "vendor"))
-          return { error: `"${f}" is not a Go file of a package in ./... .` };
-        if (o.later.names.length || o.later.files.some((l) => posix.dirname(l) === dir))
-          return { error: `"${f}": its package can hold the tests of a later task.` };
-        dirs.add(dir === "." ? "." : `./${dir}`);
-      }
-      const pkgs = argv.flatMap((x) => (x === "./..." ? [...dirs] : [x]));
-      return [{ label: "test files of the task", argv: pkgs }, ...(e.names.length ? nameCmd(argv, "-run", `^(${alt(e.names)})$`) : [])];
-    },
-    skip: () => null,
-  },
-  // https://doc.rust-lang.org/cargo/commands/cargo-test.html: "cargo test [options] [testname] [-- test-options]". TESTNAME is one
-  // substring filter, so each name runs as its own command. A positional argument before or after "--" is a filter already.
-  "cargo test": {
-    args: (argv) => {
-      const a = after(argv, [["cargo", "test"]]);
-      const sep = a?.indexOf("--") ?? -1;
-      return a?.every((x, i) => x.startsWith("-") && (x !== "--" || i === sep)) ? a : null;
-    },
-    narrow: (argv, e) => {
-      const err = noFiles(e, "cargo test");
-      if (err) return err;
-      const sep = argv.indexOf("--");
-      const at = sep < 0 ? argv.length : sep;
-      return e.names.map((n) => ({ label: `tests of the task: ${n}`, argv: [...argv.slice(0, at), n, ...argv.slice(at)] }));
-    },
-    skip: () => null,
-  },
-  // https://cmake.org/cmake/help/latest/manual/ctest.1.html: -R takes a CMake regex of test names. ctest takes no positional
-  // filter, so a non-flag argument is the value of a flag. -R, -E, -L, -LE, -I, -U and the long forms select tests already. Arguments
-  // after "--" go to the test programs (CMake 4.4).
-  ctest: {
-    args: (argv) => {
-      const a = after(argv, [["ctest"]]);
-      const filter =
-        /^(-[RELIU]|--(tests-regex|exclude-regex|label-regex|label-exclude|tests-information|tests-from-file|exclude-from-file|rerun-failed|union)(=|$))/;
-      return a?.every((x) => x !== "--" && !filter.test(x)) ? a : null;
-    },
-    narrow: (argv, e) => noFiles(e, "ctest") ?? nameCmd(argv, "-R", `^(${alt(e.names, cmakeQuote)})$`),
-    skip: () => null,
-  },
-};
-
-// Splits Run entries into test files and test names. A Run entry is a value for a filter of the runner, never a program or a flag.
-// A file: a repository path of a file in cwd. A name: no path separator, no leading "-", no control character, and its first word is
-// not a program on PATH. Any other entry refuses the whole Run line.
-export function runEntries(
-  run: readonly string[],
-  cwd: string,
-  env: Record<string, string>,
-): { files: string[]; names: string[] } | { error: string } {
-  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
-  const files: string[] = [];
-  const names: string[] = [];
-  for (const raw of run) {
-    const x = raw.trim();
-    const p = repoPath(x);
-    // A file path that starts with "-" reads as a flag for most runners.
-    if (x.startsWith("-") || p?.startsWith("-")) return { error: `"${x}" is not a test file or a test name.` };
-    if (p && statSync(join(cwd, p), { throwIfNoEntry: false })?.isFile()) files.push(p);
-    else if (/[\\/]/.test(x)) return { error: `"${x}" names no file in the repository.` };
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: the rule refuses control characters.
-    else if (!x || /[\u0000-\u001f\u007f]/.test(x)) return { error: `"${x}" is not a test file or a test name.` };
-    else {
-      const word = x.split(/\s+/)[0] as string;
-      if (Bun.which(word, { PATH: env[pathKey] ?? "", cwd }))
-        return { error: `"${x}" starts with the program ${word}. A Run line names tests, never a command.` };
-      names.push(x);
-    }
-  }
-  return { files, names };
-}
-
-// The commands of a scoped check: the approved test command narrowed to the tests of the task (RUNNERS). A refused Run line runs
-// the approved command without the test files of the later tasks. No command: the app cannot narrow, and the full checks at the end
-// of the part gate the tests. Each note says why.
-export function scopedCommands(
-  tests: readonly TaskCommand[],
-  scope: Scope,
-  cwd: string,
-  env: Record<string, string>,
-): { commands: TaskCommand[]; notes: string[] } {
-  const cmd = tests[0];
-  const end = "The full checks run at the end of the part.";
-  const runner = cmd && tests.length === 1 ? Object.values(RUNNERS).find((x) => x.args(cmd.argv)) : undefined;
-  if (!cmd || !runner)
-    return {
-      commands: [],
-      notes: [
-        `The app narrows only one approved test command of ${Object.keys(RUNNERS)
-          .map((k) => `"${k}"`)
-          .join(", ")}, with no test filter of its own, so it cannot run only the tests of this task. ${end}`,
-      ],
-    };
-  const later = runEntries(scope.later, cwd, env);
-  const r = runEntries(scope.run, cwd, env);
-  const n = "error" in r ? r : runner.narrow(cmd.argv, r, { cwd, later: "error" in later ? { files: [], names: [] } : later });
-  if (!("error" in n)) return { commands: n.map((c) => ({ ...cmd, name: `${cmd.name}: ${c.label}`, argv: c.argv })), notes: [] };
-  const refused = `The app refused the Run line of the task: ${n.error}`;
-  if ("error" in later || later.names.length)
-    return { commands: [], notes: [`${refused} The later tasks name tests that the app cannot skip. ${end}`] };
-  const argv = later.files.length ? runner.skip(cmd.argv, later.files) : [...cmd.argv];
-  if (!argv) return { commands: [], notes: [`${refused} The app cannot skip the test files of the later tasks with this runner. ${end}`] };
-  return {
-    commands: [{ ...cmd, argv }],
-    notes: [`${refused} The check runs ${cmd.name} without the test files of the later tasks.`],
-  };
-}
-
 export type ChecksInput = {
   db: Database;
   dataDir: string;
@@ -422,8 +186,6 @@ export type ChecksInput = {
   wt: Worktree;
   // setup runs once per worktree. build, test, and lint are the checks after a step.
   kinds: readonly CommandKind[];
-  // Set: only the test commands run, narrowed to the tests of one task (scopedCommands).
-  scope?: Scope;
   // The isolate_home setting of the repository. Absent: the stored setting.
   isolateHome?: boolean;
   signal?: AbortSignal;
@@ -451,15 +213,7 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
   const home = (i.isolateHome ?? s.isolateHome) ? mkdtempSync(join(tmpdir(), "rl-home-")) : null;
   const env = checkEnv(home);
   if (cache) env[TASK_CACHE_ENV] = cache;
-  const scoped = i.scope
-    ? scopedCommands(
-        s.commands.filter((c) => c.kind === "test"),
-        i.scope,
-        i.wt.repo,
-        env,
-      )
-    : null;
-  const list = scoped?.commands ?? s.commands.filter((c) => i.kinds.includes(c.kind));
+  const list = s.commands.filter((c) => i.kinds.includes(c.kind));
   const commands: CommandResult[] = [];
   try {
     for (const c of list) {
@@ -483,20 +237,18 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
     status: "ran",
     green: commands.length === list.length && commands.every((c) => c.exit === 0),
     commands,
-    notes: scoped?.notes ?? [],
+    notes: [],
   };
 }
 
 // The checks with their step row (kind check) for the Log tab: each command with argv, exit code, time, and the output tail.
-// expectRed: the checks of the tests step, which must fail (StepDetail.expectRed). baseline: the checks on the part base
-// (StepDetail.baseline). onChange: the step row got the output so far (spec.md section 6.7, Log).
+// baseline: the checks on the part base (StepDetail.baseline). onChange: the step row got the output so far (spec.md section 6.7, Log).
 export async function checkStep(
   i: ChecksInput & {
     task: number;
     part: number;
     item?: string | null;
     attempt?: number;
-    expectRed?: boolean;
     baseline?: boolean;
     now?: () => number;
     onChange?: () => void;
@@ -514,11 +266,10 @@ export async function checkStep(
     endStep(
       i.db,
       step,
-      !r.commands.length && i.scope ? "skipped" : r.green ? "ok" : r.commands.some((c) => c.stopped) ? "cancelled" : "failed",
+      r.green ? "ok" : r.commands.some((c) => c.stopped) ? "cancelled" : "failed",
       {
         commands: r.commands.map(detailOf),
         notes: r.notes,
-        expectRed: i.expectRed ?? false,
         baseline: i.baseline ?? false,
       },
       now(),

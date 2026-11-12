@@ -5,7 +5,7 @@
 // zod parses the CLI output. The CLI gets aiJsonSchema(schema).
 import { z } from "zod";
 import { aiJsonSchema, exact } from "./caps";
-import { coverage, MAX_QUESTION } from "./review";
+import { coverage, MAX_FINDINGS, MAX_QUESTION } from "./review";
 
 export const TASK_STATES = [
   "interview",
@@ -84,18 +84,18 @@ export type TaskRunKind = (typeof TASK_RUN_KINDS)[number];
 export const TASK_DOCS = ["design", "spec", "tasks", "plan"] as const;
 export type TaskDoc = (typeof TASK_DOCS)[number];
 
-// Settings > Tasks (limits.md decision 3): the run limits. config.json keeps only the changed ones. def: the value while unset.
-// reviewMinutes: the time of each Claude run that is not a task step. stepMinutes: the time of one task step. partMinutes: the Claude
-// time of one part; task.settings_json partTimeMin overrides it. off: NO_LIMIT is a valid value (user decision of 2026-11-11). The part
-// time and RUN_TIME_MAX_MS still cap a step. runsAtOnce: the slots of the run pool (spec.md section 6.26).
+// Settings > Tasks (limits.md decision 3): the run limits. config.json keeps only the changed ones, and the app ignores a key that is
+// not here. def: the value while unset. reviewMinutes: the time of each Claude run that is not a task step. runsAtOnce: the slots of the
+// run pool (spec.md section 6.26). part-session.md section 2.18: sessionContextCap in tokens and sessionTurns (--max-turns of one session
+// run); 1000 turns is the profile bound (BRIEF.md). off: NO_LIMIT is a valid value. No limit has it now.
 export const RUN_LIMITS = {
-  stepMinutes: { def: 0, min: 5, max: 120, off: true },
-  partMinutes: { def: 0, min: 10, max: 1440, off: true },
   reviewMinutes: { def: 60, min: 10, max: 240 },
   interviewRounds: { def: 2, min: 1, max: 5 },
   testFixTries: { def: 3, min: 1, max: 10 },
   planTurns: { def: 80, min: 20, max: 500 },
   runsAtOnce: { def: 3, min: 1, max: 10 },
+  sessionContextCap: { def: 100_000, min: 20_000, max: 500_000 },
+  sessionTurns: { def: 500, min: 50, max: 1000 },
 } as const;
 export type RunLimitKey = keyof typeof RUN_LIMITS;
 export type RunLimits = Record<RunLimitKey, number>;
@@ -104,7 +104,7 @@ export const RUN_LIMIT_KEYS = Object.keys(RUN_LIMITS) as RunLimitKey[];
 export const runLimitsOf = (stored: Partial<RunLimits> | undefined): RunLimits =>
   Object.fromEntries(RUN_LIMIT_KEYS.map((k) => [k, stored?.[k] ?? RUN_LIMITS[k].def])) as RunLimits;
 export const NO_LIMIT = 0;
-export const canTurnOff = (k: RunLimitKey) => "off" in RUN_LIMITS[k];
+export const canTurnOff = (k: RunLimitKey) => "off" in (RUN_LIMITS[k] as object);
 // A time limit in ms. NO_LIMIT gives Infinity, which RUN_TIME_MAX_MS caps for one Claude process.
 export const minutesMs = (minutes: number) => (minutes === NO_LIMIT ? Number.POSITIVE_INFINITY : minutes * 60_000);
 // true: a whole number inside the bounds of the key, or NO_LIMIT for a key that can be off.
@@ -120,8 +120,9 @@ export function typedLimit(k: RunLimitKey, text: string): number | null {
   const n = runLimitValue(k, text);
   return n === NO_LIMIT ? null : n;
 }
-// The hard limit of one Claude process: the largest time that a setting can give.
-export const RUN_TIME_MAX_MS = Math.max(RUN_LIMITS.stepMinutes.max, RUN_LIMITS.reviewMinutes.max) * 60_000;
+// The hard limit of one Claude process (240 min): the largest time that a setting can give. part-session.md section 2.10: it also caps
+// each session run of a task, which has no other time limit.
+export const RUN_TIME_MAX_MS = RUN_LIMITS.reviewMinutes.max * 60_000;
 // Round 1 asks at most 8 questions, each later round at most 4.
 export const INTERVIEW_ROUNDS = RUN_LIMITS.interviewRounds.def;
 export const INTERVIEW_QUESTIONS = [8, 4] as const;
@@ -200,12 +201,17 @@ export const defaultTimeoutSec = (kind: CommandKind) => (kind === "setup" ? SETU
 export const limitText = (sec: number) => `${Math.round((sec / 60) * 100) / 100} min`;
 // spec.md section 6.3: the env variable of the shared task folder (repo_task_settings.task_cache).
 export const TASK_CACHE_ENV = "REVIEW_LOOP_TASK_CACHE";
-// spec.md section 0: the limits of one Claude step of a part (STEP_TIME, STEP_TURNS), and the output of one command (OUTPUT_TAIL:
-// stored bytes; FAILURE_TAIL: bytes in context/failure.md and the diff in context/continue.md).
-export const STEP_MODES = ["tests", "implement", "fix", "instruct", "resolve"] as const;
+// spec.md section 0: the turn caps of the Claude steps of a part (STEP_TURNS), and the output of one command (OUTPUT_TAIL: stored
+// bytes; FAILURE_TAIL: bytes in context/failure.md). A build run of a part session takes RUN_LIMITS.sessionTurns. Old step rows can
+// have the kind tests.
+export const STEP_MODES = ["implement", "fix", "instruct", "resolve"] as const;
 export type StepMode = (typeof STEP_MODES)[number];
-export const STEP_TIME_MS = minutesMs(RUN_LIMITS.stepMinutes.def);
-export const STEP_TURNS: Record<StepMode, number> = { tests: 60, implement: 80, fix: 40, instruct: 80, resolve: 40 };
+export const STEP_TURNS: Record<Exclude<StepMode, "implement">, number> = { fix: 40, instruct: 80, resolve: 40 };
+// part-session.md sections 2.2 and 9.3.3: why a session run runs. The phase of an open step row follows from its kind and purpose.
+export const SESSION_PURPOSES = ["build", "continue", "checks", "critic", "review", "message", "points", "comments", "ci"] as const;
+export type SessionPurpose = (typeof SESSION_PURPOSES)[number];
+// part-session.md section 2.2: context/continue-diff.md of a fresh session holds at most this many bytes of the diff.
+export const CONTINUE_DIFF_MAX = 2 * 1024 * 1024;
 // spec.md section 6.18: the text of "Tell Claude" (MAX_QUESTION of spec.md section 0), the conflict stops of one repository in one
 // update, and the least time between two base checks of one task.
 export const MAX_INSTRUCTION = MAX_QUESTION;
@@ -213,8 +219,6 @@ export const RESOLVE_STOPS = 10;
 export const BASE_CHECK_AGE_MS = 60_000;
 // spec.md section 6.18.5: properties.mergeResult.outcome of a PR with conflicts. Gate G18 has not verified this value.
 export const MERGE_CONFLICTED = "CONFLICTED";
-// spec.md section 6.7, Budgets: "Continue with 60 more min?".
-export const MORE_TIME_MIN = 60;
 export const OUTPUT_TAIL = 64 * 1024;
 export const FAILURE_TAIL = 32 * 1024;
 
@@ -622,9 +626,7 @@ export const taskSettings = z.object({
   buildsAtOnce: z.number().int().min(1).max(BUILDS_AT_ONCE_CAP).optional(),
   approvals: z.number().int().nonnegative().optional(),
   autoOpen: z.boolean().optional(),
-  pauseAfterTask: z.boolean().optional(),
   reviewers: z.array(z.string().min(1).max(255)).max(20).optional(),
-  partTimeMin: z.number().int().positive().optional(),
   // USD. It applies only when the CLI reports a cost (spec.md section 6.7).
   partCost: z.number().positive().optional(),
   // spec.md section 6.1, "Keep one PR": the line limit stops the task no more.
@@ -698,7 +700,7 @@ export const stepDetail = z.object({
   deniedPaths: z.array(z.string()).default([]),
   patch: z.string().nullable().default(null),
   notes: z.array(z.string()).default([]),
-  // The checks of the tests step: the new tests must fail before the code exists (spec.md section 6.7, AC-B10).
+  // The checks of the old tests step, whose new tests had to fail (AC-B10). Only old rows set it.
   expectRed: z.boolean().default(false),
   // The checks on the part base before the first Claude step of the part. The fix steps compare with them (spec.md section 6.7).
   baseline: z.boolean().default(false),
@@ -713,8 +715,19 @@ export const stepDetail = z.object({
   // the step, without the files of the setup mark, so a continuation counts the kept changes as its own.
   checked: z.boolean().default(false),
   dirtyBefore: z.array(z.string()).default([]),
-  // A tests step whose refused changes the loop reset (AC-B10). The next tests attempt starts fresh, also after a Continue.
+  // An old tests step whose refused changes the loop reset (AC-B10). Only old rows set it.
   redo: z.boolean().default(false),
+  // part-session.md section 2.2: a session run. id: the session ID of its init, null when the run sent none. resumed: the run forked the
+  // kept transcript. why: the reason for a fresh session, null for a resume. purpose: why the run ran (section 9.3.3).
+  session: z
+    .object({
+      id: z.string().nullable(),
+      resumed: z.boolean(),
+      why: z.string().nullable(),
+      purpose: z.enum(SESSION_PURPOSES),
+    })
+    .nullable()
+    .default(null),
   // A Claude step: its summary, and needsBase with its reason (spec.md section 6.18.2).
   summary: z.string().nullable().default(null),
   needsBase: z.object({ reason: z.string() }).nullable().default(null),
@@ -927,6 +940,9 @@ export const specResult = z.object({
 export type SpecResult = z.infer<typeof specResult>;
 export const specJsonSchema = (): Record<string, unknown> => aiJsonSchema(specResult);
 
+// pushback.md section 6.23.2: why Claude pushes back on a review point.
+export const PUSHBACK_WHYS = ["already", "invalid", "plan", "scope"] as const;
+
 export const implementResult = z.object({
   summary: z.string().max(1000),
   done: z.boolean().describe("true only when the step is complete."),
@@ -951,6 +967,25 @@ export const implementResult = z.object({
     .default([])
     .describe("The commands to allow, when Claude Code refused a command that the step needs."),
   notes: z.array(z.string().max(500)).max(20).default([]),
+  // part-session.md section 2.3: the task IDs that the run ticked in the tasks file, the verdict on each review point (pushback.md
+  // section 6.23.2), and the cause of a red CI build (section 2.15).
+  ticked: z.array(z.string().max(40)).max(30).default([]).describe("The task IDs that you ticked in this run."),
+  points: z
+    .array(
+      z.object({
+        id: z.number().int().describe("The point number from ./context/failure.md."),
+        verdict: z.enum(["fixed", "pushback"]),
+        why: z.enum(PUSHBACK_WHYS).nullable(),
+        reason: z.string().min(1).max(500),
+        cite: z.string().max(300).default(""),
+      }),
+    )
+    .max(MAX_FINDINGS)
+    .default([]),
+  ci: z
+    .object({ cause: z.enum(["code", "test", "infra", "unknown"]), quote: z.string().max(500) })
+    .nullable()
+    .default(null),
   coverage,
 });
 export type ImplementResult = z.infer<typeof implementResult>;

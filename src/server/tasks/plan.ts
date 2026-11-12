@@ -900,20 +900,20 @@ export function stepFile(p: Plan, taskId: string, attempt: number): ContextFile 
   return { name: "step.md", text };
 }
 
-// step.md of a step for whole plan parts (spec.md section 6.7): the tests step, with the acceptance lines and the tests that the plan
-// names, or the fix of the points of the own review, which stay in ./context/failure.md.
-// The instruct and resolve steps of spec.md section 6.18 add a "- Mode:" line. testFiles: the paths that the tests step may change.
+// step.md of a run for whole plan parts (spec.md section 6.7): the build run of a part session (part-session.md section 2.3), with the
+// acceptance lines, the tests that the plan names, and the open tasks with their Done-when lines, or the fix of the failed checks or of
+// the points of the own review, which stay in ./context/failure.md. The instruct and resolve steps of spec.md section 6.18 add a
+// "- Mode:" line.
 export function partStepFile(
   p: Plan,
   parts: PlanPart[],
-  what: "tests" | "review" | "checks" | "instruct" | "resolve",
+  what: "build" | "review" | "checks" | "instruct" | "resolve",
   attempt: number,
-  testFiles = "",
 ): ContextFile {
   const files = new Set(parts.flatMap((x) => x.tasks.flatMap((t) => t.files)).map((f) => repoPath(f) ?? f));
   const map = p.map.filter((e) => files.has(repoPath(e.path) ?? e.path));
   const task = {
-    tests: "- Task: write the tests of the acceptance lines below. They must fail until the feature exists.",
+    build: "- Task: do the open tasks below in plan order. Tick each one when its Done-when lines hold.",
     checks: "- Task: fix the failed checks of the whole part in ./context/failure.md.",
     review: "- Task: fix the points of the review in ./context/failure.md.",
     instruct: '- Mode: instruct\n- Task: do the request of "Your instructions" in the message.',
@@ -926,18 +926,31 @@ export function partStepFile(
       (x) => `- Part ${x.n} of ${p.partCount ?? p.parts.length}: ${oneLine(x.title)} (kind: ${x.kind}). Goal: ${oneLine(x.goal)}`,
     ),
     task,
-    ...(what === "tests" && testFiles ? [`- Test files: ${testFiles}. Change no other file.`] : []),
     `- Attempt: ${attempt}`,
     "",
   ];
   for (const x of parts) {
     out.push(`## Acceptance of part ${x.n}`, "", ...x.acceptance.map((a) => `- ${a.id} ${oneLine(a.text)}`), "");
-    if (what === "tests" && x.tests.length)
+    if (what === "build" && x.tests.length)
       out.push(`## Tests of part ${x.n}`, "", ...x.tests.map((t) => `- ${item(t.test, ": proves ")}: proves ${list(t.proves)}`), "");
+  }
+  if (what === "build") {
+    out.push("## Open tasks", "");
+    for (const x of parts)
+      for (const t of x.tasks.filter((k) => !k.ticked))
+        out.push(
+          `### ${t.id} ${oneLine(t.title)}`,
+          "",
+          `Files: ${list(t.files) || "none"}`,
+          `Run: ${list(t.run)}`,
+          `Done when: ${oneLine(t.done)}`,
+          "",
+        );
   }
   out.push("## Tasks", "");
   for (const x of parts)
-    for (const t of x.tasks) out.push(`- ${t.id} ${oneLine(t.title)}. Files: ${list(t.files) || "none"}. Run: ${list(t.run)}.`);
+    for (const t of x.tasks)
+      out.push(`- ${t.ticked ? "[x]" : "[ ]"} ${t.id} ${oneLine(t.title)}. Files: ${list(t.files) || "none"}. Run: ${list(t.run)}.`);
   out.push("", "## Map entries of these files", "", ...(map.length ? map.map((e) => mapLine(e, p.base)) : ["(none)"]), "");
   return { name: "step.md", text: out.join("\n") };
 }

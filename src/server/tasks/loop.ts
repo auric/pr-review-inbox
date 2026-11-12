@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The build loop of a task part (docs/plans/review-v2/spec.md sections 6.2, 6.7, and 6.14; design.md section 5.5 "Loop of one part"):
-// the part rows, the plan commit, the setup commands, the tests step, the implement and fix steps, the checks, the commits with ticks,
-// the size check, the own review, the blocked reasons, pause, resume, stop, and the waits for the run slot. advance() and
-// advancePart() make every state change. A restart or a resume starts again from the last commit of the part branch: the commit rows
-// and the ticks of the plan file tell what is done.
+// The build loop of a task part (docs/plans/review-v2/spec.md sections 6.2, 6.7, and 6.14; part-session.md sections 2 and 9.3.3): the
+// part rows, the plan commit, the setup commands, the baseline, one Claude session per part with its runs, the tick check, the final
+// checks gate with its fix runs, one commit per green gate, the size note, the own review, the blocked reasons, pause, resume, stop,
+// and the waits for the run slot. advance() and advancePart() make every state change. The phase send helper orders the work of a part.
+// A restart or a resume starts again from the last commit of the part branch: the commit rows and the ticks of the plan file tell what
+// is done.
 import type { Database } from "bun:sqlite";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { initialTransition } from "xstate";
+import { initialTransition, transition } from "xstate";
 import { indentBlock, oneLine } from "../../shared/consult";
 import type { TaskAllowInput, TaskAnswersInput, TaskResumeInput } from "../../shared/dto";
 import type { FindingPayload } from "../../shared/review";
+import type { RunCut } from "../../shared/run-log";
 import {
   ALLOW_BLOCKS_MAX,
   ASK_TEXT,
@@ -26,12 +28,12 @@ import {
   type InstructDetail,
   LARGE_REPOS_TEXT,
   limitText,
-  minutesMs,
   type PartState,
   RESOLVE_STOPS,
   RUN_LIMITS,
   refusedLine,
   runLimitsOf,
+  type SessionPurpose,
   SHELL_WARNING_FIRST,
   type StartMode,
   type StepDetail,
@@ -42,7 +44,6 @@ import {
   type TaskSize,
   TOO_MANY_ASKS,
   taskBlocked,
-  taskSettings,
   type UpdateDetail,
   updateDetail,
 } from "../../shared/task";
@@ -51,7 +52,7 @@ import type { Live } from "../live";
 import { log } from "../log";
 import type { Profile } from "../review/catalog";
 import { identity } from "../review/clone";
-import { continueFile } from "../review/context-files";
+import { continueDiffFile, continueFile } from "../review/context-files";
 import { fold } from "../review/edits";
 import type { ReviewJobs, TaskReviewStart } from "../review/jobs";
 import type { Ending } from "../review/judge";
@@ -59,7 +60,7 @@ import { TIME_LIMIT_TEXT } from "../review/stream";
 import { repoPath } from "../review/validate";
 import { type BranchRemote, type ContextFile, cachePath, longPath, noUrl } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
-import { CHECK_KINDS, type ChecksResult, checkStep, type Scope } from "./checks";
+import { CHECK_KINDS, type ChecksResult, checkStep } from "./checks";
 import { movedReason } from "./gitstate";
 import {
   bashLine,
@@ -68,7 +69,6 @@ import {
   insertStep,
   PATCH_LOST,
   type PathProblem,
-  partBudget,
   patchStep,
   runningStep,
   type StepInput,
@@ -78,9 +78,9 @@ import {
   stepDetailOf,
 } from "./implement";
 import { type Answer, answerProblem, type QuestionRow } from "./interview";
-import { partMachine } from "./machine";
+import { PHASE_GUARDS, type Phase, type PhaseContext, type PhaseEvent, partMachine, phaseMachine } from "./machine";
 import { noteTaskWaits } from "./notify";
-import { type Docs, docNames, type Plan, type PlanPart, type PlanTask, parsePlan, parseTasks, partStepFile, stepFile } from "./plan";
+import { type Docs, docNames, type Plan, parsePlan, parseTasks, partStepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
 import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
 import { allowAsks, checkRules, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
@@ -97,20 +97,24 @@ import {
   type LowerPart,
   lowerHowOf,
   lowerOf,
-  moreTime,
+  moveHeads,
   mustFixPoint,
   openPoints,
   PAUSED,
+  type PartSession,
   partDocsOf,
   partNames,
   partOf,
+  partSession,
   repoSettings,
+  type SessionHeads,
   saveAllow,
   scheduleOf,
   setBaseMoves,
   setBlocked,
   setLowerHow,
   setSettings,
+  sha256File,
   softReason,
   stepAnswers,
   stopForRun,
@@ -173,6 +177,7 @@ import {
   status,
   takenBranches,
   takeRemoteBranch,
+  taskDir,
   type Worktree,
   writeSetupMark,
   wtGit,
@@ -198,6 +203,14 @@ const REJECTED = "The user rejected the change.";
 const AGAIN = "Runs again without the plan change.";
 // spec.md section 6.18.2, Dismiss: the reasons on a built part whose own action the server takes in state implementing only.
 const NO_DISMISS = new Set<TaskBlocked["kind"]>(["spec_change", "allow", "update", "slot"]);
+// part-session.md section 9.4: the reason kinds of a run that ended before its result.
+const RUN_ENDS = new Set<TaskBlocked["kind"]>(["stuck", "usage", "unfinished"]);
+// part-session.md section 2.2: the Log note of a resume that failed before any tool call, the line of a run after an app restart, and
+// the line of the run that continues a cut run. Section 2.6 item 10: the note of a part with no changed test file.
+const RESUME_FAILED = "The app could not resume the session. It started a new one with the earlier work.";
+const RESTART_LINE = "The last run stopped when the app stopped. Its changes are in the worktree. context/continue.md lists them.";
+const cutLine = (cut: RunCut) => `The last run reached its ${cut === "turns" ? "turn cap" : "time limit"}. Continue where you stopped.`;
+const NO_TEST_FILE = "Claude added or changed no test file.";
 // spec.md section 6.25.5: the 409 of "Run setup again" on a part whose row holds a reason.
 const SETUP_WAITS = "This part waits for you. Act on the first reason first.";
 
@@ -272,25 +285,55 @@ export function tickTask(text: string, id: string): string | null {
   return re.test(text) ? text.replace(re, `### [x] ${id} `) : null;
 }
 
+// part-session.md section 2.4: the IDs that disk ticks against head, when disk equals head with only these ticks (`### [ ] <id> ` to
+// `### [x] <id> `). null: disk holds another change, such as a tick of a heading that head does not hold open. Line ends do not count.
+export function tickDiff(head: string, disk: string): string[] | null {
+  const h = head.replaceAll("\r\n", "\n");
+  const d = disk.replaceAll("\r\n", "\n");
+  const ids = [...d.matchAll(/^### \[x\] (\S+) /gm)].map((m) => m[1] as string).filter((id) => tickTask(h, id) !== null);
+  let text = h;
+  for (const id of ids) text = tickTask(text, id) as string;
+  return text === d ? ids : null;
+}
+
 // One command of the checks on the part base (StepDetail.baseline). red: it did not exit with 0.
 export type BaseRun = { name: string; argv: string[]; red: boolean };
 
-// A command of a later check against the run on the part base. same: the base ran the same argv. A scoped command "<name>: <label>"
-// (checks.ts scopedCommands) compares with the full command <name>. null: the base run has no such command.
-export function beforeTask(c: { name: string; argv: readonly string[] }, base: readonly BaseRun[] | null) {
-  const b = base?.find((x) => x.name === c.name) ?? base?.find((x) => c.name.startsWith(`${x.name}: `));
+// A command of a later check against the run on the part base. same: the base ran the same argv. null: the base run has no such
+// command.
+export function onBase(c: { name: string; argv: readonly string[] }, base: readonly BaseRun[] | null) {
+  const b = base?.find((x) => x.name === c.name);
   if (!b) return null;
   return { red: b.red, same: b.argv.length === c.argv.length && b.argv.every((a, i) => a === c.argv[i]), argv: b.argv };
 }
 
 function beforeLine(c: { name: string; argv: readonly string[] }, base: readonly BaseRun[] | null): string[] {
-  const b = beforeTask(c, base);
+  const b = onBase(c, base);
   if (!b) return [];
-  if (b.red && b.same) return ["- Before this task: Also red before this task. It failed on the part base too."];
-  if (b.red) return [`- Before this task: the full command \`${oneLine(b.argv.join(" "))}\` also failed on the part base.`];
+  if (b.red && b.same) return ["- On the part base: Also red on the part base."];
+  if (b.red) return [`- On the part base: the command \`${oneLine(b.argv.join(" "))}\` also failed on the part base.`];
   return [
-    b.same ? "- Before this task: New. It passed on the part base." : "- Before this task: New. The full command passed on the part base.",
+    b.same ? "- On the part base: New. It passed on the part base." : "- On the part base: New. The command passed on the part base.",
   ];
+}
+
+// part-session.md section 2.2, Guard: the reason why a run starts a new session, or null when it can resume the kept transcript. gates:
+// the facts of Gate B37 (claude.ts SESSION_GATES). heads: the HEAD of each worktree now. cap: Settings > Tasks "Session context cap".
+// Rule 4 (a denied path or a git state change) drops the kept transcript at the run end (implement.ts), so rule 1 covers it.
+export function resumeProblem(
+  s: Pick<PartSession, "file" | "sha256" | "heads" | "context"> | null,
+  heads: SessionHeads,
+  cap: number,
+  gates: { resume: boolean },
+): string | null {
+  if (!gates.resume) return "Gate B37 has not passed.";
+  if (!s?.file || !existsSync(s.file)) return "No transcript is kept.";
+  if (sha256File(s.file) !== s.sha256) return "The kept transcript changed.";
+  const at = new Map(s.heads.map((h) => [h.taskRepo, h.head]));
+  if (heads.length !== at.size || heads.some((h) => at.get(h.taskRepo) !== h.head)) return "The branch moved after the last run.";
+  if (s.context === null) return "The context size of the last run is unknown.";
+  if (s.context > cap) return `The context of the last run is over ${cap} tokens.`;
+  return null;
 }
 
 // The content of each changed path of every worktree. A fix step often edits a file that the implement step changed: its path stays in
@@ -319,7 +362,7 @@ export function checkFailure(r: Extract<ChecksResult, { status: "ran" }>, base: 
   const out = [
     "# Check output",
     "",
-    "The app ran the approved commands after your step. After a task, the test command runs only the tests of the task. These commands failed. Each shows the end of its output.",
+    "The app ran the approved commands after your run. These commands failed. Each shows the end of its output.",
     "",
   ];
   for (const c of failed) {
@@ -409,6 +452,11 @@ type Ctx = {
   // build: the build of the part, in state implementing. instruct and update (spec.md section 6.18): one step on a built part, also in
   // state ready. setup: "Run setup again" (spec.md section 6.7), also in state ready.
   mode: DriverMode;
+  // part-session.md section 9.3.3: the phase of the part. Only the build driver tracks it; null in the other drivers. rounds: the
+  // review rounds of this driver. waited: a run or a step of this part set its own reason.
+  phase: Phase | null;
+  rounds: number;
+  waited: boolean;
 };
 
 type DriverMode = "build" | "instruct" | "update" | "setup";
@@ -488,8 +536,6 @@ const Q = {
       r.status AS run_status, r.error_kind, r.error_text
     FROM task_step s LEFT JOIN review_run r ON r.id = s.run
     WHERE s.part = $part AND s.id > COALESCE((SELECT MAX(id) FROM task_step WHERE part = $part AND kind = 'commit'), 0) ORDER BY s.id`,
-  askedBy: "SELECT 1 FROM task_question WHERE step = $id LIMIT 1",
-  planAfter: "SELECT 1 FROM task_step WHERE part = $part AND kind = 'spec_change' AND id > $id LIMIT 1",
   allowBlocks: "SELECT COUNT(*) AS n FROM task_step WHERE part = $part AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
   allowAsks: "SELECT detail_json FROM task_step WHERE task = $task AND json_extract(detail_json, '$.allowAsk') IS NOT NULL",
   // spec.md section 6.7, Baseline: the checks on the part base, and whether the part ran them or a Claude step already.
@@ -497,9 +543,19 @@ const Q = {
     ORDER BY id DESC LIMIT 1`,
   started: `SELECT 1 FROM task_step WHERE part = $part AND (kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve')
     OR (kind = 'check' AND item = 'base' AND state IN ('ok', 'failed'))) LIMIT 1`,
-  // spec.md section 6.7: the last final checks of a part, and the last own review of one repository at one head that ended ok.
-  lastChecks: `SELECT state, detail_json FROM task_step WHERE part = $part AND kind = 'check' AND item = 'checks'
+  // part-session.md section 2.6: the last gate checks of a part (every check but setup and the baseline), and a Claude step after them.
+  lastGate: `SELECT id, state, detail_json FROM task_step WHERE part = $part AND kind = 'check' AND item NOT IN ('setup', 'base')
     ORDER BY id DESC LIMIT 1`,
+  claudeAfter: `SELECT 1 FROM task_step WHERE part = $part AND id > $id AND kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve')
+    LIMIT 1`,
+  claudeRan: `SELECT 1 FROM task_step WHERE part = $part AND run IS NOT NULL
+    AND kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve') LIMIT 1`,
+  // part-session.md section 9.3.3, guard review: the newest commit of Claude's work (no plan commit, line-end repair, or plan change), and
+  // the own reviews after it. The last own review of one repository at one head that ended ok (spec.md section 6.7).
+  buildCommit: "SELECT 1 FROM task_step WHERE part = $part AND kind = 'commit' AND item = 'build' AND state = 'ok' LIMIT 1",
+  workCommit: `SELECT MAX(id) AS id FROM task_step WHERE part = $part AND kind = 'commit' AND state = 'ok'
+    AND item NOT IN ('plan', 'eol', 'spec')`,
+  reviewsAfter: "SELECT run FROM task_step WHERE part = $part AND kind = 'review' AND state = 'ok' AND run IS NOT NULL AND id > $after",
   reviewAt: `SELECT s.id, s.run FROM task_step s JOIN review_run r ON r.id = s.run WHERE s.part = $part AND s.kind = 'review'
     AND s.state = 'ok' AND r.idem_key LIKE $key ORDER BY s.id DESC LIMIT 1`,
   redBeforeSeen: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'check' AND item = $item
@@ -511,11 +567,17 @@ const Q = {
     ORDER BY id DESC LIMIT 1`,
   // spec.md section 6.18.2: the newest row of one send, and the newest send or update of a task.
   lastSend: "SELECT id FROM task_step WHERE part = $part AND kind = 'instruct' AND item = $item ORDER BY id DESC LIMIT 1",
+  newestSend: "SELECT id, item FROM task_step WHERE part = $part AND kind = 'instruct' ORDER BY id DESC LIMIT 1",
   lastBuilt: "SELECT id, kind FROM task_step WHERE task = $task AND kind IN ('instruct', 'update') ORDER BY id DESC LIMIT 1",
 };
 
 // spec.md section 6.21: the steps that can get the Bash tool. The resolve step never does.
-const SHELL_STEPS: ReadonlySet<StepMode> = new Set(["tests", "implement", "fix", "instruct"]);
+const SHELL_STEPS: ReadonlySet<StepMode> = new Set(["implement", "fix", "instruct"]);
+// part-session.md section 2.1: the runs of a part session. Instruct and resolve runs join it in PS4.
+const SESSION_MODES: ReadonlySet<StepMode> = new Set(["implement", "fix"]);
+const NO_FACTS = Object.fromEntries(PHASE_GUARDS.map((k) => [k, false])) as PhaseContext;
+// part-session.md section 2.6 item 5: the subject of the commit of each kind of gate.
+type Round = "build" | "checks" | "review";
 
 // The patterns that the user refused for this task (D3). They never show again.
 const refusedOf = (db: Database, task: number) =>
@@ -565,22 +627,6 @@ function workOf(db: Database, part: number) {
   return { marks, reset, all, kept: all.filter((w) => !reset || w.id > reset.id) };
 }
 
-// build-redesign.md section 2.4: how a Claude step ended when the loop did not take its result, for step.md of the next attempt. why:
-// null when the cause has no text. null: the loop took the result, so the next step of the item is no continuation. A run that the
-// runner ended over the refusal cap failed, and it asks to run a command too.
-function cutBy(db: Database, part: number, w: Work): { why: string | null } | null {
-  if (w.detail.allowAsk) return { why: "asked to run a command" };
-  if (w.state === "ok") {
-    if (db.query(Q.askedBy).get({ id: w.id })) return { why: "asked a question" };
-    if (db.query(Q.planAfter).get({ part, id: w.id })) return { why: "changed the plan" };
-    return w.detail.checked && w.detail.patch === null ? null : { why: null };
-  }
-  if (w.run_status === "cancelled" || w.error_kind === "restart") return { why: "was stopped" };
-  if (w.error_kind === "max_turns") return { why: "reached its turn cap" };
-  if (w.error_text === TIME_LIMIT_TEXT) return { why: "ended at its time limit" };
-  return { why: "failed" };
-}
-
 // true: the folder of a repository with access none holds something.
 const noneDirty = (trees: readonly RepoTree[], t: RepoTree) =>
   t.row.access === "none" && !!trees.find((x) => x.row.id === t.row.parent)?.wt && noneChanges(trees, t).length > 0;
@@ -589,7 +635,9 @@ const noneDirty = (trees: readonly RepoTree[], t: RepoTree) =>
 // (spec.md section 6.16.6, Changed repositories).
 type ChangedSub = { tree: RepoTree; base: string; head: string };
 
-export type LoopOptions = { review: ReviewJobs; settings: Settings; live: Live; now?: () => number };
+// onPhase: each phase event of a build driver (part-session.md section 9.7, loop order). The tests read it.
+export type PhaseStep = { task: number; part: number; from: Phase; event: PhaseEvent["type"]; to: Phase };
+export type LoopOptions = { review: ReviewJobs; settings: Settings; live: Live; now?: () => number; onPhase?: (s: PhaseStep) => void };
 
 export function createLoop(opts: LoopOptions) {
   const { review, settings, live } = opts;
@@ -659,8 +707,20 @@ export function createLoop(opts: LoopOptions) {
     changed(id);
   }
   function block(c: Ctx, b: TaskBlocked): never {
+    c.waited = true;
     reason(c.db, c.id, b);
     throw new Halt();
+  }
+
+  // part-session.md section 9.3.3: the phase send helper. A refused event is a bug of the loop, so failed() stops the task. A driver with
+  // no phase (null) sends nothing.
+  function send(c: Ctx, event: PhaseEvent, facts: Partial<PhaseContext> = {}): void {
+    if (c.phase === null) return;
+    const from = c.phase;
+    const snap = phaseMachine.resolveState({ value: from, context: { ...NO_FACTS, ...facts } });
+    if (!snap.can(event)) throw new Error(`The phase ${from} of part ${c.part.ord} refuses ${event.type}.`);
+    c.phase = transition(phaseMachine, snap, event)[0].value as Phase;
+    opts.onPhase?.({ task: c.id, part: c.part.id, from, event: event.type, to: c.phase });
   }
   // The loop goes on only while the task builds with no reason. An instruct step or an update also runs in state ready.
   const isLive = (c: Pick<Ctx, "db" | "id" | "mode">) => {
@@ -832,63 +892,111 @@ export function createLoop(opts: LoopOptions) {
   // The files of the last green setup stay out of StepDetail.dirtyBefore: the setup mark holds them, and they can be many.
   const setupFiles = (c: Ctx) => new Set(readSetupMark(c.wt)?.files ?? []);
 
-  // build-redesign.md section 2.3: the worktree holds a step of this kind and item whose result the loop took, so it does not run again.
-  const accepted = (c: Ctx, kind: StepMode, item: string) =>
-    workOf(c.db, c.part.id).kept.some((w) => w.kind === kind && w.item === item && cutBy(c.db, c.part.id, w) === null);
+  // The plan file that Claude ticks (spec.md section 6.4), as a path in the main repository.
+  const tasksPath = (c: Pick<Ctx, "specDir" | "size">) => specPath(c.specDir, c.size === "small" ? "plan" : "tasks");
+  const openTasks = (c: Ctx) => c.plan.parts.flatMap((p) => p.tasks.filter((t) => !t.ticked));
+  const allFiles = (c: Ctx) => c.plan.parts.flatMap((x) => x.tasks.flatMap((t) => t.files));
+  async function headsNow(c: Ctx): Promise<SessionHeads> {
+    const out: SessionHeads = [];
+    for (const t of c.trees) if (t.wt) out.push({ taskRepo: t.row.id, head: await headOf(t.wt) });
+    return out;
+  }
 
-  // build-redesign.md section 2.4: the next attempt of a step of this item that the loop did not take. It gets context/continue.md and
-  // one line in step.md. before: the dirty paths that the step counts as not its own, from dirtyBefore of the cut step. null: no
-  // continuation.
-  async function continuation(c: Ctx, mode: StepMode, item: string, attempt: number, dirtyNow: string[]) {
-    const { marks, reset, all } = workOf(c.db, c.part.id);
-    // A Tell Claude send is no step of the build. Its reset mark stays, so a build step after a stopped send reads the patch of the send.
-    const prev = mode === "instruct" ? all.at(-1) : all.findLast((w) => w.kind !== "instruct");
-    if (!prev || prev.detail.redo || mode === "resolve" || prev.item !== item) return null;
-    const kept = !reset || prev.id > reset.id;
-    // A reset after prev cuts it too. The tests step has no skip: its own rules judge its kept changes again.
-    const cut = cutBy(c.db, c.part.id, prev) ?? (!kept || (prev.kind === "tests" && mode === "tests") ? { why: null } : null);
-    if (!cut) return null;
+  // part-session.md section 2.2: the session of the next run of a part. again: a resume that failed before any tool call, so this run
+  // starts a new session at once.
+  async function sessionOf(c: Ctx, purpose: SessionPurpose, again: boolean): Promise<NonNullable<StepInput["session"]>> {
+    const s = partSession(c.db, c.part.id);
+    const heads = await headsNow(c);
+    const limits = runLimitsOf(settings.config()?.runLimits);
+    const why = again ? RESUME_FAILED : resumeProblem(s, heads, limits.sessionContextCap, review.sessionGates);
+    return {
+      keep: join(taskDir(dataDir, c.db, c.id), "sessions", `part-${c.part.ord}`),
+      resume: why === null ? (s?.file ?? null) : null,
+      why,
+      purpose,
+      heads,
+      tasksFile: `./repo/${tasksPath(c)}`,
+      run: (s?.runs ?? 0) + 1,
+      turns: limits.sessionTurns,
+    };
+  }
+
+  // part-session.md section 2.2, Fresh session: context/continue.md and context/continue-diff.md for a new session of a part with
+  // earlier runs, and the line of step.md. The diff is the uncommitted work in the worktree, else the patch of the first reset at or after
+  // the last Claude run: a later reset saved only what came after it (build-redesign.md section 2.2). null: no earlier run.
+  async function freshFiles(c: Ctx): Promise<{ files: ContextFile[]; line: string } | null> {
+    if (!c.db.query(Q.claudeRan).get({ part: c.part.id })) return null;
+    const { marks, reset: newest, all } = workOf(c.db, c.part.id);
+    const prev = all.at(-1);
+    const reset = prev ? (marks.find((r) => r.id >= prev.id) ?? null) : newest;
     const own = setupFiles(c);
+    const paths = (await dirty(c.trees)).filter((p) => !own.has(p));
     const parts: string[] = [];
-    if (kept) {
+    if (paths.length) {
       // savePatch takes the new files too, which `git diff HEAD` leaves out.
       const tmp = mkdtempSync(join(tmpdir(), "rl-continue-"));
       try {
         for (const t of c.trees) {
-          const paths = t.wt ? (await status(t.wt)).map((e) => e.path).filter((p) => !own.has(t.full ? `${t.full}/${p}` : p)) : [];
-          const f = t.wt && paths.length ? await savePatch(t.wt, join(tmp, `${t.row.id}.patch`), paths).catch(() => null) : null;
+          const ps = t.wt ? (await status(t.wt)).map((e) => e.path).filter((p) => !own.has(t.full ? `${t.full}/${p}` : p)) : [];
+          const f = t.wt && ps.length ? await savePatch(t.wt, join(tmp, `${t.row.id}.patch`), ps).catch(() => null) : null;
           if (f) parts.push(t.full ? `(repository ${t.full})\n${readFileSync(f, "utf8")}` : readFileSync(f, "utf8"));
         }
       } finally {
         rmSync(tmp, { recursive: true, force: true, maxRetries: 3 });
       }
-    } else {
-      // The first reset at or after prev saved the work of prev. A later reset saved only what came after it.
-      const mark = marks.find((r) => r.id >= prev.id) ?? (reset as (typeof marks)[number]);
-      const file = join(dirname(patchFile(dataDir, c.db, c.id, mark.id)), basename(mark.patch).replace(/-\d+\.patch$/, ".patch"));
+    } else if (reset) {
+      const file = join(dirname(patchFile(dataDir, c.db, c.id, reset.id)), basename(reset.patch).replace(/-\d+\.patch$/, ".patch"));
       for (const t of c.trees) {
         const f = treePatch(file, t);
         if (existsSync(f)) parts.push(t.full ? `(repository ${t.full})\n${readFileSync(f, "utf8")}` : readFileSync(f, "utf8"));
       }
     }
-    const what = `Attempt ${attempt} continues ${prev.kind === mode ? "" : `${prev.kind} `}attempt ${prev.attempt}${cut.why ? `, which ${cut.why}` : ""}.`;
-    const earlier = new Set(prev.detail.dirtyBefore);
-    return {
-      file: continueFile({
-        kept,
-        paths: dirtyNow.filter((p) => !own.has(p)),
-        diff: parts.join("\n"),
-        notes: [...(prev.detail.summary ? [prev.detail.summary] : []), ...prev.detail.notes],
+    const last = c.db.query(Q.lastClaude).get({ part: c.part.id }) as { detail_json: string } | null;
+    const d = last ? stepDetail.parse(JSON.parse(last.detail_json)) : null;
+    const log = await wtGit(c.wt, ["log", "--format=%s", `${c.base}..HEAD`]).catch(() => "");
+    const stat = await wtGit(c.wt, ["diff", "--shortstat", "--ignore-submodules=all", c.base, "HEAD"]).catch(() => "");
+    const tasks = c.plan.parts.flatMap((p) => p.tasks);
+    const files = [
+      continueFile({
+        commits: log.split("\n").filter(Boolean),
+        stat: stat.trim(),
+        ticked: tasks.filter((t) => t.ticked).map((t) => `${t.id} ${t.title}`),
+        open: tasks.filter((t) => !t.ticked).map((t) => `${t.id} ${t.title}`),
+        summary: d?.summary ?? null,
+        notes: d?.notes ?? [],
+        paths,
       }),
-      line: kept
-        ? `${what} Your earlier changes are in the worktree. context/continue.md lists them. Check them and finish the step. Do not start again.`
-        : `${what} The app reset its changes to the last commit. context/continue.md holds them as a patch. Reuse what is right, and finish the step.`,
-      before: dirtyNow.filter((p) => own.has(p) || earlier.has(p)),
-    };
+      continueDiffFile(parts.join("\n"), paths.length > 0),
+    ];
+    // part-session.md section 2.2, End and deletion: the run that an app restart cut.
+    const restart = all.at(-1)?.error_kind === "restart" && paths.length ? [RESTART_LINE] : [];
+    const work = paths.length
+      ? "The work that is not committed is in the worktree. ./context/continue-diff.md holds its diff. Check it and go on. Do not start again."
+      : parts.length
+        ? "The app reset the work of the last run. ./context/continue-diff.md holds it as a patch. Reuse what is right."
+        : reset
+          ? "The app reset the work of the last run to the last commit."
+          : "";
+    const line = [...restart, `This run starts a new session. ./context/continue.md lists the earlier work on this part. ${work}`.trim()];
+    return { files, line: line.join(" ") };
   }
 
-  // One Claude step in the run slot (implement.ts), with its outcome. row: the step row that the route wrote (an instruct or a resolve
-  // step). A run that did not start (a stop, a reason such as the time budget) halts.
+  // part-session.md section 2.3 item 5: context/baseline.md, the checks that failed on the part base.
+  function baselineFile(c: Ctx): ContextFile {
+    const base = baselineOf(c);
+    const red = (base ?? []).filter((b) => b.red);
+    const lines = !base
+      ? ["The app did not run the checks on the part base."]
+      : red.length
+        ? red.map((b) => `- ${oneLine(b.name)}: \`${oneLine(b.argv.join(" "))}\``)
+        : ["No check failed on the part base."];
+    return { name: "baseline.md", text: ["# Checks that fail on the part base", "", ...lines, ""].join("\n") };
+  }
+
+  // One Claude run in the run slot (implement.ts), with its outcome. row: the step row that the route wrote (an instruct or a resolve
+  // step). A run that did not start (a stop, a reason such as the cost limit) halts. A run of a part session (implement or fix) picks
+  // its session by the guard of part-session.md section 2.2. A new session with earlier runs gets context/continue.md. extra: more lines
+  // of step.md. again: a new session at once.
   async function runStep(
     c: Ctx,
     mode: StepMode,
@@ -900,32 +1008,34 @@ export function createLoop(opts: LoopOptions) {
       row?: number;
       instructions?: string;
       resolveCheck?: StepInput["resolveCheck"];
+      purpose?: SessionPurpose;
+      extra?: string[];
+      again?: boolean;
     },
-  ): Promise<{ r: StepOutcome | null; before: Set<string>; shell: StepShell | null; unchanged: boolean }> {
+  ): Promise<{ r: StepOutcome | null; shell: StepShell | null; unchanged: boolean }> {
     let waiting: number | null = o.row ?? null;
     for (;;) {
       await gate(c);
       guard(c);
       const attempt =
         o.row === undefined ? nextAttempt(c, mode, item) : (c.db.query(Q.rowAttempt).get({ id: o.row }) as { attempt: number }).attempt;
-      const now0 = await dirty(c.trees);
-      const cont = await continuation(c, mode, item, attempt, now0);
-      const before = new Set(cont?.before ?? now0);
-      // check-fix.md item 1: a fix step that changes no file stops the fixes. spec.md section 6.18.2: a send that changes no file commits
-      // nothing; kept work of the build makes the git status not empty. A continuation finishes kept changes, so it may change none.
-      const snap = (mode === "fix" || mode === "instruct") && !cont ? await snapshot(c.trees) : null;
+      const own = setupFiles(c);
+      const before = (await dirty(c.trees)).filter((p) => !own.has(p));
+      const session = SESSION_MODES.has(mode) ? await sessionOf(c, o.purpose ?? "build", o.again === true) : null;
+      const cont = (session ? session.resume === null : mode === "instruct") ? await freshFiles(c) : null;
+      // check-fix.md item 1: a fix run that changes no file stops the fixes. spec.md section 6.18.2: a send that changes no file commits
+      // nothing. A run that continues a cut run finishes kept changes, so it may change none.
+      const snap = (mode === "fix" || mode === "instruct") && !o.extra?.length ? await snapshot(c.trees) : null;
       const answers = stepAnswers(c.db, c.id);
       // spec.md section 6.17: the task text and the included files as they are at this step. Section 6.20.3: a part gets the files of the
       // task and of its own sub-tasks only.
       const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
       const shell = shellOf(c, mode, item);
       const refused = SHELL_STEPS.has(mode) ? [...refusedOf(c.db, c.id)].map(refusedLine) : [];
-      const extra = [...refused, ...rejectedLines(c, item), ...(cont ? [cont.line] : [])];
+      const extra = [...refused, ...rejectedLines(c, item), ...(cont ? [cont.line] : []), ...(o.extra ?? [])];
       const stepMd = o.step(attempt);
       // spec.md section 6.21.5: a resolve step may make no new file.
       const failure = mode === "resolve" ? o.failure : bashFailure(o.failure, bashLeft(c));
-      const limits = runLimitsOf(settings.config()?.runLimits);
-      const own = setupFiles(c);
       let out: StepOutcome | null = null;
       const s = await startStep({
         db: c.db,
@@ -937,7 +1047,7 @@ export function createLoop(opts: LoopOptions) {
         item,
         attempt,
         profile: c.profile,
-        untrusted: [...task.files, ...(failure ? [failure] : []), ...(cont ? [cont.file] : [])],
+        untrusted: [...task.files, ...(failure ? [failure] : []), ...(cont?.files ?? []), ...(session ? [baselineFile(c)] : [])],
         attachments: task.attachments,
         own: [
           ...(answers ? [answers] : []),
@@ -957,9 +1067,8 @@ export function createLoop(opts: LoopOptions) {
         live: () => isLive(c),
         extra: beside(c),
         ...(shell && { shell }),
-        stepMs: minutesMs(limits.stepMinutes),
-        partMinutes: limits.partMinutes,
-        dirtyBefore: [...before].filter((p) => !own.has(p)),
+        ...(session && { session }),
+        dirtyBefore: before,
         now,
       });
       if (s.status === 409 && "conflict" in s) {
@@ -967,11 +1076,14 @@ export function createLoop(opts: LoopOptions) {
         continue;
       }
       changed(c.id);
-      if (s.status !== 202) throw new Halt();
+      if (s.status !== 202) {
+        if ("blocked" in s) c.waited = true;
+        throw new Halt();
+      }
       await s.done;
       changed(c.id);
       const unchanged = snap !== null && snap === (await snapshot(c.trees));
-      return { r: out as StepOutcome | null, before, shell, unchanged };
+      return { r: out as StepOutcome | null, shell, unchanged };
     }
   }
 
@@ -982,7 +1094,7 @@ export function createLoop(opts: LoopOptions) {
     return r ? stepDetail.parse(JSON.parse(r.detail_json)).bashFiles.filter((p) => existsSync(join(c.wt.dir, p))) : [];
   }
 
-  // spec.md section 6.21: the Bash tool of a tests, implement, fix, or instruct step. Bash is on in Most commands and Unrestricted mode, or
+  // spec.md section 6.21: the Bash tool of an implement, fix, or instruct step. Bash is on in Most commands and Unrestricted mode, or
   // when the allowlist of the repository or an "Allow once" of the last run of this step holds a pattern, or when "Claude may run the
   // approved checks" gives a check (checkRules). The rules hold the saved patterns in each mode, so a saved pattern can lift the deny rule
   // of a network program (shell.ts). Most commands and Unrestricted list the checks for the prompt only and give no notes.
@@ -1011,7 +1123,7 @@ export function createLoop(opts: LoopOptions) {
 
   // D3: the requests of a step that ends with allowRequest, or that the runner ended over the refusal cap. The worktree keeps the changes
   // of the step (build-redesign.md section 2.2), and the task waits with kind allow. A request that the app refuses goes to the notes of
-  // the step. A run that the runner ended with no request left stops the task, as implement.ts does for other failed runs.
+  // the step. A run that the runner ended with no request left gives the reason error/run (part-session.md section 9.3.4, Q-SM1).
   async function askAllow(c: Ctx, mode: StepMode, r: StepOutcome, shell: StepShell | null) {
     const { asks, notes } = allowAsks({
       mode: shell?.mode ?? null,
@@ -1024,14 +1136,7 @@ export function createLoop(opts: LoopOptions) {
     });
     if (notes.length) patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, ...notes] });
     if (!asks.length) {
-      if (r.ask && mode !== "instruct") {
-        c.db.transaction(() => {
-          const cur = taskRow(c.db, c.id);
-          if (cur) stopForRun(c.db, { task: c.id, version: cur.version }, r.step, { status: "failed", text: r.text }, now());
-        })();
-        changed(c.id);
-        throw new Halt();
-      }
+      if (r.ask && mode !== "instruct") block(c, runReason(c, r));
       return;
     }
     if (held(c) && !keeps(c, r.step)) halt(c, r.step);
@@ -1041,8 +1146,45 @@ export function createLoop(opts: LoopOptions) {
     block(c, { kind: "allow", step: r.step, text: ASK_TEXT });
   }
 
-  // One Claude step that returns only with a result: a denied path, a failed run, a question, and a plan change set their reason and
-  // halt. A failed instruct step throws StepFailed: its driver restores the earlier reason (spec.md section 6.18.7).
+  // part-session.md section 9.4: the reason of a run that ended with no result, no denied path, and no stop (Q-SM1).
+  function runReason(c: Ctx, r: StepOutcome): TaskBlocked {
+    const text = oneLine(r.text ?? "The run failed.");
+    if (r.cut === "stall" || r.cut === "loop")
+      return { kind: "stuck", cause: r.cut, step: r.step, text: `Needs you: ${text} Continue goes on with the kept work.` };
+    if (r.kind === "usage_limit")
+      return { kind: "usage", step: r.step, text: "Needs you: your Claude usage limit is reached. Continue runs the step again." };
+    return { kind: "error", cause: "run", step: r.step, text: `Needs you: the run of part ${c.part.ord} failed. ${text}` };
+  }
+
+  // part-session.md section 9.3.3, guard firstCut: no earlier run of this kind and item after the last commit reached its turn cap or its
+  // process cap.
+  const firstCut = (c: Ctx, mode: StepMode, item: string, step: number) =>
+    !workOf(c.db, c.part.id).all.some(
+      (w) => w.id < step && w.kind === mode && w.item === item && (w.error_kind === "max_turns" || w.error_text === TIME_LIMIT_TEXT),
+    );
+
+  // part-session.md section 2.4, the tick check: the ticks of the tasks file on disk against HEAD, or null for any other change.
+  async function ticksOf(c: Ctx): Promise<string[] | null> {
+    const file = tasksPath(c);
+    const p = onDisk(c.wt, file);
+    if (!existsSync(p)) return null;
+    const head = await wtGit(c.wt, ["show", `HEAD:${file}`]).catch(() => null);
+    return head === null ? null : tickDiff(head, readFileSync(p, "utf8"));
+  }
+
+  // Each changed plan file must equal its HEAD text, except the ticks of the tasks file. spec: the plan files with another change.
+  async function planChanges(c: Ctx, changed: string[]): Promise<{ spec: string[]; ticks: string[] }> {
+    const file = tasksPath(c);
+    const spec = changed.filter((p) => under(p, c.specDir) && !same(p, file));
+    if (!changed.some((p) => same(p, file))) return { spec, ticks: [] };
+    const ticks = await ticksOf(c);
+    return ticks === null ? { spec: [...spec, file], ticks: [] } : { spec, ticks };
+  }
+
+  // One Claude run that returns only with a result: a denied path, a failed or cut run, a question, and a plan change set their reason
+  // and halt. A failed instruct step throws StepFailed: its driver restores the earlier reason (spec.md section 6.18.7). part-session.md
+  // sections 2.2 and 9.3.3: the turn cap and the process cap continue once by themselves (RUN_CUT), and a resume that failed before any
+  // tool call starts one new session.
   async function claude(
     c: Ctx,
     mode: StepMode,
@@ -1053,53 +1195,99 @@ export function createLoop(opts: LoopOptions) {
       failure?: ContextFile;
       row?: number;
       instructions?: string;
+      purpose?: SessionPurpose;
     },
-  ): Promise<StepOutcome & { result: ImplementResult; fresh: string[]; unchanged: boolean }> {
-    const { r, before, shell, unchanged } = await runStep(c, mode, item, o);
-    if (r && (r.ask || r.result?.allowRequest.length)) await askAllow(c, mode, r, shell);
-    // No result: implement.ts stopped the task, or it set the denied path. No outcome: restart recovery ended the run first.
-    if (!r?.result)
-      throw r && !r.problems.length && !r.moved.length && mode === "instruct" ? new StepFailed(r.text ?? "The run failed.") : new Halt();
-    const fresh = r.changed.filter((p) => !before.has(p));
-    const spec = fresh.filter((p) => under(p, c.specDir));
-    // spec.md sections 6.20.6 and 6.25.4: the reason of another part stays. This part writes its question or plan change row and its
-    // reason to its part row, or it halts without them when that row cannot keep the reason.
-    if ((spec.length || r.result.question) && held(c) && !keeps(c, r.step)) halt(c, r.step);
-    if (spec.length) {
-      const attempt = (c.db.query(Q.rowAttempt).get({ id: r.step }) as { attempt: number }).attempt;
-      const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "spec_change", item, attempt, state: "ok" }, now());
-      endStep(c.db, step, "ok", { specChange: { paths: spec }, notes: r.result.specChange ? [r.result.specChange] : [] }, now());
-      block(c, { kind: "spec_change", step, text: "Needs you: Claude proposes a change to the spec." });
-    }
-    const q = r.result.question;
-    if (q) {
-      c.db.transaction(() => {
-        c.db.query(Q.question).run({
-          task: c.id,
-          text: q.text,
-          why: q.why,
-          kind: q.options.length >= 2 ? "choice" : "text",
-          options: JSON.stringify(q.options.length >= 2 ? q.options : []),
-          recommended: q.options.length >= 2 && q.recommended !== null && q.recommended < q.options.length ? q.recommended : null,
-          step: r.step,
-          now: now(),
+  ): Promise<StepOutcome & { result: ImplementResult; unchanged: boolean; ticks: string[] }> {
+    let extra: string[] = [];
+    let again = false;
+    for (;;) {
+      const before = (await ticksOf(c)) ?? [];
+      const purpose = mode === "implement" && extra.length ? "continue" : o.purpose;
+      const { r, shell, unchanged } = await runStep(c, mode, item, { ...o, purpose, extra, again });
+      if (r && (r.ask || r.result?.allowRequest.length)) await askAllow(c, mode, r, shell);
+      // No outcome: restart recovery ended the run first.
+      if (!r) throw new Halt();
+      if (!r.result) {
+        // implement.ts set the denied path, or it stopped the task for a worktree that it could not check.
+        if (r.problems.length || r.moved.length) {
+          c.waited = true;
+          throw new Halt();
+        }
+        if (r.broken) throw new Halt();
+        if (mode === "instruct") throw new StepFailed(r.text ?? "The run failed.");
+        if (r.status === "cancelled") throw new Halt();
+        if (r.resumed && r.events === 0 && !again) {
+          patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, RESUME_FAILED] });
+          again = true;
+          continue;
+        }
+        if (r.cut === "turns" || r.cut === "time") {
+          const first = firstCut(c, mode, item, r.step);
+          send(c, { type: "RUN_CUT" }, { firstCut: first });
+          if (first) {
+            extra = [cutLine(r.cut)];
+            again = false;
+            continue;
+          }
+          block(c, {
+            kind: "stuck",
+            cause: r.cut,
+            step: r.step,
+            text: `Needs you: the runs of part ${c.part.ord} reached their ${r.cut === "turns" ? "turn cap" : "time limit"} twice. Continue gives one more run.`,
+          });
+        }
+        block(c, runReason(c, r));
+      }
+      const plan = await planChanges(c, r.changed);
+      // spec.md sections 6.20.6 and 6.25.4: the reason of another part stays. This part writes its question or plan change row and its
+      // reason to its part row, or it halts without them when that row cannot keep the reason.
+      if ((plan.spec.length || r.result.question) && held(c) && !keeps(c, r.step)) halt(c, r.step);
+      if (plan.spec.length) {
+        const attempt = (c.db.query(Q.rowAttempt).get({ id: r.step }) as { attempt: number }).attempt;
+        const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "spec_change", item, attempt, state: "ok" }, now());
+        endStep(c.db, step, "ok", { specChange: { paths: plan.spec }, notes: r.result.specChange ? [r.result.specChange] : [] }, now());
+        block(c, { kind: "spec_change", step, text: "Needs you: Claude proposes a change to the spec." });
+      }
+      // part-session.md section 2.4: result.ticked should name the new ticks. A difference gives a Log note only.
+      const ticked = plan.ticks.filter((id) => !before.includes(id));
+      const listed = [...new Set(r.result.ticked)];
+      if (mode === "implement" && (listed.length !== ticked.length || listed.some((id) => !ticked.includes(id))))
+        patchStep(c.db, r.step, {
+          notes: [
+            ...stepDetailOf(c.db, r.step).notes,
+            `Claude listed the ticks ${listed.join(", ") || "none"}, and the plan file holds the new ticks ${ticked.join(", ") || "none"}.`,
+          ],
         });
-      })();
-      block(c, { kind: "question", step: r.step, text: `Needs you: Claude asks: ${oneLine(q.text)}` });
+      const q = r.result.question;
+      if (q) {
+        c.db.transaction(() => {
+          c.db.query(Q.question).run({
+            task: c.id,
+            text: q.text,
+            why: q.why,
+            kind: q.options.length >= 2 ? "choice" : "text",
+            options: JSON.stringify(q.options.length >= 2 ? q.options : []),
+            recommended: q.options.length >= 2 && q.recommended !== null && q.recommended < q.options.length ? q.recommended : null,
+            step: r.step,
+            now: now(),
+          });
+        })();
+        block(c, { kind: "question", step: r.step, text: `Needs you: Claude asks: ${oneLine(q.text)}` });
+      }
+      // spec.md section 6.18.2: needsBase runs the base check at once.
+      if (r.result.needsBase) await refreshBases(c.db, c.id);
+      return { ...r, result: r.result, unchanged, ticks: plan.ticks };
     }
-    // spec.md section 6.18.2: needsBase runs the base check at once.
-    if (r.result.needsBase) await refreshBases(c.db, c.id);
-    return { ...r, result: r.result, fresh, unchanged };
   }
 
   // The approved checks with their step row. A stop kills the commands (AC-B19). baseline: the checks on the part base.
-  async function checks(c: Ctx, item: string, kinds = CHECK_KINDS, scope?: Scope, expectRed = false, baseline = false) {
+  async function checks(c: Ctx, item: string, kinds = CHECK_KINDS, baseline = false) {
     guard(c);
     const ac = new AbortController();
     enter(aborts, c.id, ac);
     try {
       changed(c.id);
-      const head = !scope && (await clean(c)) ? await headOf(c.wt) : null;
+      const head = (await clean(c)) ? await headOf(c.wt) : null;
       const r = await checkStep({
         db: c.db,
         dataDir,
@@ -1107,20 +1295,18 @@ export function createLoop(opts: LoopOptions) {
         repo: c.t.repo,
         wt: c.wt,
         kinds,
-        scope,
         signal: ac.signal,
         task: c.id,
         part: c.part.id,
         item,
         attempt: nextAttempt(c, "check", item),
-        expectRed,
         baseline,
         now,
         onChange: () => changed(c.id),
       });
-      if (head && r.status === "ran") patchStep(c.db, r.step, { head, commandsHash: checksHash(c, kinds) });
+      if (r.status === "ran") patchStep(c.db, r.step, { head, commandsHash: checksHash(c, kinds) });
       changed(c.id);
-      if (r.status === "refused") block(c, { kind: "error", step: r.step, text: `Needs you: ${r.reason}` });
+      if (r.status === "refused") block(c, { kind: "error", cause: "app", step: r.step, text: `Needs you: ${r.reason}` });
       if (r.commands.some((x) => x.stopped)) throw new Halt();
       if (r.green || !heldByOther(c)) guard(c);
       return r;
@@ -1138,12 +1324,26 @@ export function createLoop(opts: LoopOptions) {
   const checksHash = (c: Ctx, kinds: readonly CommandKind[]) =>
     setupHash(repoSettings(c.db, c.t.project, c.t.repo).commands.filter((x) => kinds.includes(x.kind)));
 
-  // spec.md section 6.7, Final checks: the last final checks were green at this head with this command list, and nothing changed since.
-  async function checksDone(c: Ctx) {
-    const r = c.db.query(Q.lastChecks).get({ part: c.part.id }) as { state: string; detail_json: string } | null;
+  // part-session.md section 9.3.3, guard checks (spec.md section 6.7, Final checks): the newest gate checks ended green at this head with
+  // this command list, and the worktree holds no work of a Claude run after them. Files that a run left after its commit, such as new
+  // files of Bash, count only with a later run, so the guard ends.
+  async function gateDone(c: Ctx) {
+    const r = c.db.query(Q.lastGate).get({ part: c.part.id }) as { id: number; state: string; detail_json: string } | null;
     if (r?.state !== "ok") return false;
     const d = stepDetail.parse(JSON.parse(r.detail_json));
-    return d.head === (await headOf(c.wt)) && d.commandsHash === checksHash(c, CHECK_KINDS) && (await clean(c));
+    if (d.head !== (await headOf(c.wt)) || d.commandsHash !== checksHash(c, CHECK_KINDS)) return false;
+    if (!c.db.query(Q.claudeAfter).get({ part: c.part.id, id: r.id })) return true;
+    const own = setupFiles(c);
+    return !(await dirty(c.trees)).some((p) => !own.has(p));
+  }
+
+  // part-session.md section 9.3.3, guard review: a commit of Claude's work has no own review yet, or an own review after it holds a
+  // confirmed blocker or major point.
+  function reviewDue(c: Ctx) {
+    const after = (c.db.query(Q.workCommit).get({ part: c.part.id }) as { id: number | null }).id;
+    if (after === null) return false;
+    const runs = (c.db.query(Q.reviewsAfter).all({ part: c.part.id, after }) as { run: number }[]).map((r) => r.run);
+    return !runs.length || runs.some((run) => mustFix(pointsOf(c, run)).length > 0);
   }
 
   // spec.md section 6.7, Line endings, Repair (AC-B171): a part with line-ending-only changes from before the line end rule gets one
@@ -1187,15 +1387,14 @@ export function createLoop(opts: LoopOptions) {
     changed(c.id);
   }
 
-  // spec.md section 6.1: the changed lines of the part against the line budget. Over it, the part waits for the user's choice.
-  async function sizeCheck(c: Ctx) {
+  // part-session.md section 2.6 item 7 (build-redesign.md Q1): the line-end repair, then the changed lines of the part against the line
+  // budget. Over it, the commit row gets a note. The part never stops for it. step: the commit row; null counts only.
+  async function sizeNote(c: Ctx, step: number | null) {
     await matchBase(c);
     const n = await countLines(c);
-    if (n.lines <= c.budget || c.keep) return;
-    const text = `Needs you: this PR would have ${n.lines} changed lines, over your ${c.budget} limit.`;
-    const step = insertStep(c.db, { task: c.id, part: c.part.id, kind: "size", item: null, state: "failed" }, now());
-    endStep(c.db, step, "failed", { diffStat: n, notes: [text] }, now());
-    block(c, { kind: "size", step, text });
+    if (n.lines <= c.budget || c.keep || step === null) return;
+    const note = `This PR has ${n.lines} changed lines, over your ${c.budget} limit.`;
+    patchStep(c.db, step, { notes: [...stepDetailOf(c.db, step).notes, note] });
   }
 
   // The changed lines and files of the part and of each changed repository, stored in task_part and task_pr (spec.md section 6.16.8:
@@ -1221,32 +1420,37 @@ export function createLoop(opts: LoopOptions) {
       .map((x) => x.path)
       .join(", ")}${p.length > 3 ? ` and ${p.length - 3} more` : ""}, which the app does not commit.`;
 
-  // spec.md section 6.7, Commit: one commit per step with the user's name and email, then the size check. own: the files that the app
-  // wrote for this commit, by absolute path.
-  async function commit(c: Ctx, item: string, message: string, allow: string[], own: string[] = []) {
+  // spec.md section 6.7, Commit, and part-session.md section 2.6 item 5: one commit per green gate with the user's name and email. The
+  // body names the tasks that the commit ticks. Then the size note, and the session heads move (section 2.2). own: the files that the
+  // app wrote for this commit, by absolute path. Returns the commit row, or null when nothing was to commit.
+  async function commit(c: Ctx, item: string, message: string, allow: string[], own: string[] = []): Promise<number | null> {
     guard(c);
-    if (!c.who) block(c, { kind: "error", step: null, text: "Needs you: set user.name and user.email in your git config." });
+    if (!c.who) block(c, { kind: "error", cause: "app", step: null, text: "Needs you: set user.name and user.email in your git config." });
     // spec.md section 6.16.5, Size: a large build that changes a submodule stops.
     if (c.size === "large")
       for (const s of c.trees)
         if (s.row.role === "submodule" && s.wt && (await status(s.wt)).length)
-          block(c, { kind: "size", step: null, text: LARGE_REPOS_TEXT });
+          block(c, { kind: "size", cause: "large_repos", step: null, text: LARGE_REPOS_TEXT });
+    const ticks = await ticksOf(c);
     const r = await commitTask({
       db: c.db,
       task: c.id,
       part: c.part.id,
       wt: c.wt,
       item,
-      message,
+      message: ticks?.length ? `${message}\n\nTasks done: ${ticks.join(", ")}` : message,
       who: c.who,
       allow,
       own,
       trees: c.trees,
       now,
     });
-    if (r.status === "refused") block(c, { kind: "denied_path", step: null, text: deniedText(r.problems) });
+    if (r.status === "refused") block(c, { kind: "denied_path", cause: "commit", step: null, text: deniedText(r.problems) });
     changed(c.id);
-    await sizeCheck(c);
+    const step = r.status === "committed" ? r.step : null;
+    await sizeNote(c, step);
+    if (step !== null) moveHeads(c.db, c.part.id, await headsNow(c), now());
+    return step;
   }
 
   // The checks on the part base (spec.md section 6.7, Baseline), or null before they ran.
@@ -1256,48 +1460,77 @@ export function createLoop(opts: LoopOptions) {
     return stepDetail.parse(JSON.parse(r.detail_json)).commands.map((x) => ({ name: x.name, argv: x.argv, red: x.exit !== 0 }));
   }
 
-  // spec.md section 6.7, Baseline: the approved checks once on the part head before the first Claude step of the part. A red command is
-  // no reason: the fix steps compare with it.
-  async function baseline(c: Ctx) {
-    if (c.db.query(Q.started).get({ part: c.part.id })) return;
-    await checks(c, "base", CHECK_KINDS, undefined, false, true);
-  }
-
-  // Red checks start at most "Test-fix tries" fix steps (AC-B11). The value is read when the checks first go red. scope: the scoped check of one task instead of all approved checks.
-  // check-fix.md items 1 and 3: red checks that all failed on the part base too stop once per item, and a fix step that changes no file
-  // stops too. The base run tells only that the same argv failed, not why: a base with no test fails too. So Continue lets the fixes run.
-  async function greenOrFix(c: Ctx, item: string, allow: string[], step: (attempt: number) => ContextFile, scope?: Scope) {
-    const run = () => checks(c, item, scope ? ["test"] : CHECK_KINDS, scope);
+  // part-session.md section 2.6 items 3 and 4: the gate. Red checks start at most "Test-fix tries" fix runs (AC-B11). The value is read
+  // when the checks first go red. check-fix.md items 1 and 3: red checks that all failed on the part base too stop once per item, and a
+  // fix run that changes no file stops too. The base run tells only that the same argv failed, not why: a base with no test fails too.
+  // So Continue lets the fixes run. The phase is checking at the start and at the end. Returns the green check row.
+  async function greenOrFix(
+    c: Ctx,
+    item: string,
+    allow: string[],
+    step: (attempt: number) => ContextFile,
+    purpose: SessionPurpose = "checks",
+  ) {
     const base = baselineOf(c);
-    let k = await run();
+    let k = await checks(c, item);
     const fixTries = runLimitsOf(settings.config()?.runLimits).testFixTries;
     for (let tries = 0; !k.green; tries++) {
       const failed = k.commands.filter((x) => x.exit !== 0);
       const old = failed.filter((x) => {
-        const b = beforeTask(x, base);
+        const b = onBase(x, base);
         return b?.red === true && b.same;
       });
       if (failed.length && old.length === failed.length && !c.db.query(Q.redBeforeSeen).get({ part: c.part.id, item })) {
         const names = old.map((x) => `"${oneLine(x.name)}"`);
         const list = names.length === 1 ? `the check ${names[0]}` : `the checks ${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
         patchStep(c.db, k.step, { redBefore: true });
+        send(c, { type: "CHECKS_RED" }, { redBefore: true });
         block(c, {
           kind: "question",
+          cause: "red_before",
           step: k.step,
-          text: `Needs you: ${list} of part ${c.part.ord} also failed before this task. See why. Continue lets Claude try to fix it.`,
+          text: `Needs you: ${list} of part ${c.part.ord} also failed on the part base. See why. Continue lets Claude try to fix it.`,
         });
       }
-      if (tries >= fixTries)
+      if (tries >= fixTries) {
+        send(c, { type: "CHECKS_RED" });
         block(c, {
           kind: "red",
+          cause: "checks",
           step: k.step,
-          text: `Needs you: the tests of part ${c.part.ord} stay red after ${fixTries} ${fixTries === 1 ? "try" : "tries"}.`,
+          text: `Needs you: the checks of part ${c.part.ord} stay red after ${fixTries} ${fixTries === 1 ? "try" : "tries"}.`,
         });
-      const r = await claude(c, "fix", item, { allow, step, failure: checkFailure(k, base) });
-      if (r.unchanged)
-        block(c, { kind: "question", step: r.step, text: `Needs you: the fix step of part ${c.part.ord} changed no file. See why.` });
-      k = await run();
+      }
+      send(c, { type: "CHECKS_RED" }, { triesLeft: true });
+      const r = await claude(c, "fix", item, { allow, step, failure: checkFailure(k, base), purpose });
+      if (r.unchanged) {
+        send(c, { type: "RUN_DONE" }, { unchanged: true });
+        block(c, {
+          kind: "question",
+          cause: "no_change",
+          step: r.step,
+          text: `Needs you: the fix run of part ${c.part.ord} changed no file. See why.`,
+        });
+      }
+      send(c, { type: "RUN_DONE" });
+      k = await checks(c, item);
     }
+    return k;
+  }
+
+  // part-session.md section 2.6 items 5 and 6: the gate of one round, then one commit. The gate stays green at the new HEAD, so GO goes
+  // on to the review. The phase is checking at the start and idle at the end.
+  async function checkGate(c: Ctx, round: Round) {
+    const allow = allFiles(c);
+    const k = await greenOrFix(c, "checks", allow, (a) => partStepFile(c.plan, c.plan.parts, "checks", a));
+    const subject = {
+      build: `${c.label}: ${oneLine(c.title)}`,
+      checks: `${c.label}: Fix the checks of part ${c.part.ord}`,
+      review: `${c.label}: Fix the review points of part ${c.part.ord}`,
+    }[round];
+    await commit(c, round, subject, allow);
+    patchStep(c.db, k.step, { head: await headOf(c.wt) });
+    send(c, { type: "CHECKS_GREEN" });
   }
 
   // Saves the uncommitted changes as a patch, then returns the worktree to its last commit (spec.md section 6.7, Continue). Several
@@ -1328,62 +1561,6 @@ export function createLoop(opts: LoopOptions) {
     if (had === null || had === PATCH_LOST) patchStep(db, step, { patch: saved ? basename(saved) : PATCH_LOST });
   }
 
-  const testPaths = (pp: PlanPart) => [...pp.tests.map((x) => x.test), ...pp.tasks.flatMap((t) => t.run)];
-  // The tests step may change only test files: the test globs of the repository, else the default globs and the tests that the plan
-  // names (AC-B161).
-  const isTest = (c: Ctx, pp: PlanPart, path: string) =>
-    (c.testGlobs ?? DEFAULT_TEST_GLOBS).some((g) => globMatch(g, path)) || (!c.testGlobs && testPaths(pp).some((x) => same(x, path)));
-  const testFiles = (c: Ctx, pp: PlanPart) => {
-    const named = c.testGlobs ? [] : [...new Set(testPaths(pp))];
-    return `paths that match ${(c.testGlobs ?? DEFAULT_TEST_GLOBS).join(", ")}${named.length ? `, and the tests of the plan: ${named.join(", ")}` : ""}`;
-  };
-
-  // spec.md section 6.7: the tests step. Its changes stay in the test paths, and the new tests fail (AC-B10). A bad round goes back to
-  // the last commit with redo, so the next try is no continuation, also after a Continue. Kept changes of an earlier attempt always go
-  // through a continuation (build-redesign.md section 2.3).
-  async function testsStep(c: Ctx, pp: PlanPart) {
-    const item = `P${pp.n}`;
-    const allow = pp.tasks.flatMap((t) => t.files);
-    const where = testFiles(c, pp);
-    let failure: ContextFile | undefined;
-    for (let round = 0; ; round++) {
-      const r = await claude(c, "tests", item, { allow, step: (a) => partStepFile(c.plan, [pp], "tests", a, where), failure });
-      const outside = r.fresh.filter((p) => !isTest(c, pp, p));
-      if (!r.fresh.length || outside.length) {
-        const why = r.fresh.length ? `The step changed files that are not tests: ${outside.join(", ")}.` : "The step wrote no test.";
-        patchStep(c.db, r.step, { redo: true });
-        await undo(c.trees, c.db, c.id, r.step);
-        if (round >= 1)
-          block(c, { kind: "red", step: r.step, text: `Needs you: the tests step of part ${c.part.ord} failed twice. ${why}` });
-        failure = { name: "failure.md", text: `# Tests step\n\n${why} Change only test files. Test files are ${where}.\n` };
-        continue;
-      }
-      const k = await checks(c, item, CHECK_KINDS, undefined, true);
-      if (k.green) block(c, { kind: "red", step: k.step, text: "Tests pass before the change. See why." });
-      await commit(c, item, `${c.label} ${item}: Add the failing tests of part ${pp.n}`, allow);
-      return;
-    }
-  }
-
-  // One task: the implement step, the scoped check of its Run line with the fixes, the tick, and the commit. The tests of the later
-  // tasks of the part stay red until their own task, so they never gate this one. A kept implement step whose result the loop took runs
-  // no Claude step again (build-redesign.md section 2.3).
-  async function taskStep(c: Ctx, pp: PlanPart, task: PlanTask) {
-    const step = (a: number) => stepFile(c.plan, task.id, a) as ContextFile;
-    const later = pp.tasks.slice(pp.tasks.findIndex((t) => t.id === task.id) + 1).flatMap((t) => t.run);
-    if (!accepted(c, "implement", task.id)) await claude(c, "implement", task.id, { allow: task.files, step });
-    await greenOrFix(c, task.id, task.files, step, { run: task.run, later });
-    const name = c.size === "small" ? "plan" : "tasks";
-    const p = onDisk(c.wt, specPath(c.specDir, name));
-    const ticked = existsSync(p) ? tickTask(readFileSync(p, "utf8"), task.id) : null;
-    if (ticked === null) block(c, { kind: "error", step: null, text: `Needs you: ${name}.md has no open task ${task.id}.` });
-    writeFileSync(p, ticked);
-    await commit(c, task.id, `${c.label} ${task.id}: ${oneLine(task.title)}`, task.files, [p]);
-    refreshPlan(c);
-    const s = taskSettings.safeParse(JSON.parse(taskRow(c.db, c.id)?.settings_json ?? "{}"));
-    if (s.success && s.data.pauseAfterTask) block(c, { kind: "question", step: null, text: `Task ${task.id} is done. Continue?` });
-  }
-
   // The own review run (kind review, task set, pr NULL) on a snapshot of the part head. sub: a changed submodule instead of the main
   // repository; its run reads that repository's base..head (spec.md section 6.16.5, Snapshots).
   async function reviewRun(c: Ctx, sub?: ChangedSub): Promise<{ step: number; points: Point[] }> {
@@ -1408,7 +1585,7 @@ export function createLoop(opts: LoopOptions) {
         : null;
       const plans = planFiles(c).map((f) => `## ${f.name.slice("spec/".length)}\n\n${f.text}`);
       const goals = c.plan.parts.map((x) => `- Part ${x.n}: ${oneLine(x.title)}. ${oneLine(x.goal)}`);
-      let ended: { step: number; run: number; ok: boolean; text: string | null } | null = null;
+      let ended: { step: number; run: number; ok: boolean; cancelled: boolean; text: string | null } | null = null;
       let step = 0;
       const start: TaskReviewStart = {
         task: c.id,
@@ -1441,10 +1618,7 @@ export function createLoop(opts: LoopOptions) {
             { findings: ids, notes: ok ? [] : [e.text ?? "The review failed."] },
             now(),
           );
-          const cur = taskRow(d, c.id);
-          // An instruct step or an update restores its own reason (spec.md section 6.18).
-          if (!ok && cur && c.mode === "build") stopForRun(d, { task: c.id, version: cur.version }, step, e, now());
-          ended = { step, run: run.id, ok, text: e.text ?? null };
+          ended = { step, run: run.id, ok, cancelled: e.status === "cancelled", text: e.text ?? null };
           return undefined;
         },
       };
@@ -1458,9 +1632,18 @@ export function createLoop(opts: LoopOptions) {
       changed(c.id);
       await s.done;
       changed(c.id);
-      const r = ended as { step: number; run: number; ok: boolean; text: string | null } | null;
+      const r = ended as { step: number; run: number; ok: boolean; cancelled: boolean; text: string | null } | null;
+      // An instruct step or an update restores its own reason (spec.md section 6.18). part-session.md section 9.3.4 (Q-SM1): a failed
+      // review of the build gives the reason error/run.
       if (r && !r.ok && c.mode !== "build") throw new StepFailed(r.text ?? "The review failed.");
-      if (!r?.ok) throw new Halt();
+      if (!r || r.cancelled) throw new Halt();
+      if (!r.ok)
+        block(c, {
+          kind: "error",
+          cause: "run",
+          step: r.step,
+          text: `Needs you: the own review of part ${c.part.ord} failed. ${oneLine(r.text ?? "The review failed.")}`,
+        });
       return { step: r.step, points: pointsOf(c, r.run) };
     }
   }
@@ -1471,31 +1654,44 @@ export function createLoop(opts: LoopOptions) {
       payload: JSON.parse(x.payload_json) as FindingPayload,
     }));
 
-  // spec.md section 6.7, own review: confirmed blocker and major points start a fix step, the checks, and a new review, at most
-  // REVIEW_FIX_TRIES times (AC-B12). The other points stay listed in the review run.
-  async function ownReview(c: Ctx) {
-    const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((t) => t.files));
+  // part-session.md sections 2.8 and 9.3.3: one round of the own review. Confirmed blocker and major points start a judging run, the
+  // gate, and a commit, at most REVIEW_FIX_TRIES rounds (AC-B12). The other points stay listed in the review run. The phase is reviewing
+  // at the start and idle at the end. Returns true after a judging round.
+  async function reviewRound(c: Ctx): Promise<boolean> {
+    const rv = await reviewRun(c);
+    const must = mustFix(rv.points);
+    // spec.md section 6.16.5: the own review runs once per changed repository. A submodule point names its path from the main root.
+    for (const s of await changedSubs(c)) {
+      const sr = await reviewRun(c, s);
+      for (const x of mustFix(sr.points)) must.push({ ...x, payload: { ...x.payload, path: `${s.tree.full}/${x.payload.path}` } });
+    }
+    if (!must.length) {
+      send(c, { type: "CLEAN" });
+      return false;
+    }
+    const left = c.rounds < REVIEW_FIX_TRIES;
+    send(c, { type: "POINTS" }, { roundsLeft: left });
+    if (!left) {
+      const n = must.length;
+      block(c, {
+        kind: "blocker",
+        step: rv.step,
+        text: `Needs you: Claude's review of part ${c.part.ord} still finds ${n} ${n === 1 ? "point" : "points"} to fix after ${REVIEW_FIX_TRIES} fixes.`,
+      });
+    }
+    c.rounds++;
     const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
-    for (let tries = 0; ; tries++) {
-      const rv = await reviewRun(c);
-      const must = mustFix(rv.points);
-      // spec.md section 6.16.5: the own review runs once per changed repository. A submodule point names its path from the main root.
-      for (const s of await changedSubs(c)) {
-        const sr = await reviewRun(c, s);
-        for (const x of mustFix(sr.points)) must.push({ ...x, payload: { ...x.payload, path: `${s.tree.full}/${x.payload.path}` } });
-      }
-      if (!must.length) return;
-      if (tries >= REVIEW_FIX_TRIES) {
-        const n = must.length;
-        block(c, {
-          kind: "blocker",
-          step: rv.step,
-          text: `Needs you: Claude's review of part ${c.part.ord} still finds ${n} ${n === 1 ? "point" : "points"} to fix after ${REVIEW_FIX_TRIES} fixes.`,
-        });
-      }
-      await claude(c, "fix", "review", { allow, step, failure: reviewFailure(must) });
-      await greenOrFix(c, "review", allow, step);
-      await commit(c, "review", `${c.label}: Fix the review points of part ${c.part.ord}`, allow);
+    await claude(c, "fix", "review", { allow: allFiles(c), step, failure: reviewFailure(must), purpose: "review" });
+    send(c, { type: "RUN_DONE" });
+    await checkGate(c, "review");
+    return true;
+  }
+
+  // The own review of a driver other than the build (spec.md section 6.18): rounds until no point waits.
+  async function ownReview(c: Ctx) {
+    for (;;) {
+      send(c, { type: "GO" }, { review: true });
+      if (!(await reviewRound(c))) return;
     }
   }
 
@@ -1697,6 +1893,9 @@ export function createLoop(opts: LoopOptions) {
       // AC-B12: the own review runs the finder and the verify phase.
       profile: { ...p, verifier: { ...p.verifier, mode: "on" } },
       mode,
+      phase: null,
+      rounds: 0,
+      waited: false,
     };
   }
 
@@ -1717,21 +1916,57 @@ export function createLoop(opts: LoopOptions) {
       if (late)
         block(c, {
           kind: "red",
+          cause: "setup_time",
           step: r.step,
           text: `Needs you: the setup command "${oneLine(late.name)}" of part ${c.part.ord} reached its time limit of ${limitText(late.timeoutSec ?? 0)}.`,
         });
-      if (!r.green) block(c, { kind: "red", step: r.step, text: `Needs you: the setup commands of part ${c.part.ord} failed. See why.` });
+      if (!r.green)
+        block(c, {
+          kind: "red",
+          cause: "setup",
+          step: r.step,
+          text: `Needs you: the setup commands of part ${c.part.ord} failed. See why.`,
+        });
     }
     writeSetupMark(c.wt, { hash, files: (await untracked()).filter((p) => !before.has(p)) });
   }
 
+  // part-session.md sections 2.3 and 2.6: the build run of the open tasks. Done true with every open task ticked goes to the gate. Else
+  // the part waits with the reason unfinished. The phase is building at the start and idle at the end.
+  async function buildRun(c: Ctx) {
+    const step = (a: number) => partStepFile(c.plan, c.plan.parts, "build", a);
+    const r = await claude(c, "implement", "build", { allow: allFiles(c), step, purpose: "build" });
+    refreshPlan(c);
+    if (!r.result.done || openTasks(c).length)
+      block(c, {
+        kind: "unfinished",
+        step: r.step,
+        text: `Needs you: Claude ended the run before part ${c.part.ord} was done: ${oneLine(r.result.summary)} Continue goes on with the open tasks.`,
+      });
+    send(c, { type: "RUN_DONE" });
+    await checkGate(c, "build");
+  }
+
+  // part-session.md section 2.6 item 10: a part that changed no path of the test globs gets a note on its last commit row.
+  async function testNote(c: Ctx) {
+    const last = (c.db.query(Q.workCommit).get({ part: c.part.id }) as { id: number | null }).id;
+    if (last === null) return;
+    const globs = c.testGlobs ?? DEFAULT_TEST_GLOBS;
+    const paths = (await wtGit(c.wt, ["diff", "--name-only", "-z", "--ignore-submodules=all", c.base, "HEAD"])).split("\0");
+    if (paths.some((p) => p && globs.some((g) => globMatch(g, p)))) return;
+    patchStep(c.db, last, { notes: [...stepDetailOf(c.db, last).notes, NO_TEST_FILE] });
+  }
+
+  // part-session.md section 9.3.3: the build of one part. GO picks the next phase from the facts of the rows and the worktree. When no
+  // guard holds, the part has no work: REVIEWED and PART_READY. The critic and the follow-ups come in PS4.
   async function runPart(db: Database, t: TaskRow, part: PartRow) {
     const repo = repoSettings(db, t.project, t.repo);
     if (!repo.commands.some((x) => x.kind === "test")) {
-      reason(db, t.id, { kind: "error", step: null, text: NO_TEST });
+      reason(db, t.id, { kind: "error", cause: "app", step: null, text: NO_TEST });
       throw new Halt();
     }
     const c = await context(db, t, part);
+    c.phase = "idle";
     guard(c);
     // spec.md section 6.4: the plan files go into the part branch first.
     const missing = docNames(c.size).filter((n) => !existsSync(onDisk(c.wt, specPath(c.specDir, n))) && c.docs[n] !== undefined);
@@ -1742,24 +1977,40 @@ export function createLoop(opts: LoopOptions) {
     }
     const plan = missing.map((n) => onDisk(c.wt, specPath(c.specDir, n)));
     if (missing.length) await commit(c, "plan", `${c.label}: Add the plan`, [], plan);
-    await setup(c);
-    await baseline(c);
-    await sizeCheck(c);
-    refreshPlan(c);
-    for (const pp of c.plan.parts) {
-      const open = pp.tasks.filter((x) => !x.ticked);
-      if (!open.length) continue;
-      const done = open.length < pp.tasks.length || c.db.query(Q.committed).get({ part: part.id, item: `P${pp.n}` }) !== null;
-      if (!done) await testsStep(c, pp);
-      for (const task of open) await taskStep(c, pp, task);
+    try {
+      await sizeNote(c, null);
+      for (;;) {
+        guard(c);
+        refreshPlan(c);
+        const setups = repoSettings(db, t.project, t.repo).commands.filter((x) => x.kind === "setup");
+        const facts: PhaseContext = {
+          ...NO_FACTS,
+          setup: readSetupMark(c.wt)?.hash !== setupHash(setups),
+          baseline: !db.query(Q.started).get({ part: part.id }),
+          run: openTasks(c).length > 0,
+          checks: !(await gateDone(c)),
+          review: reviewDue(c),
+        };
+        if (!phaseMachine.resolveState({ value: "idle", context: facts }).can({ type: "GO" })) break;
+        send(c, { type: "GO" }, facts);
+        const at = c.phase as Phase;
+        if (at === "setup") {
+          await setup(c);
+          send(c, { type: "CLEAN" });
+        } else if (at === "baseline") {
+          await checks(c, "base", CHECK_KINDS, true);
+          send(c, { type: "CLEAN" });
+        } else if (at === "building") await buildRun(c);
+        else if (at === "checking") await checkGate(c, db.query(Q.buildCommit).get({ part: part.id }) ? "checks" : "build");
+        else if (at === "reviewing") await reviewRound(c);
+        else throw new Error(`GO picked the phase ${at}, which the build does not run.`);
+      }
+    } catch (e) {
+      // WAIT: the step ended with a reason of this part. STOPPED: a Stop, the app stop, or the reason of another part ended it.
+      if (e instanceof Halt && c.phase !== "idle") send(c, { type: c.waited ? "WAIT" : "STOPPED" });
+      throw e;
     }
-    // All approved checks once before the own review: the scoped checks of the tasks did not run build, lint, or the other tests.
-    const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((t) => t.files));
-    if (!(await checksDone(c))) {
-      await greenOrFix(c, "checks", allow, (a) => partStepFile(c.plan, c.plan.parts, "checks", a));
-      await commit(c, "checks", `${c.label}: Fix the checks of part ${part.ord}`, allow);
-    }
-    await ownReview(c);
+    await testNote(c);
     db.transaction(() => {
       const cur = taskRow(db, t.id);
       if (cur?.state !== "implementing" || blocks(cur)) return;
@@ -1901,7 +2152,7 @@ export function createLoop(opts: LoopOptions) {
       if (!points.length) return;
       const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((k) => k.files));
       const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
-      await claude(c, "fix", "points", { allow, step, failure: reviewFailure(points) });
+      await claude(c, "fix", "points", { allow, step, failure: reviewFailure(points), purpose: "points" });
       await greenOrFix(c, "points", allow, step);
       await commit(c, "points", `${c.label}: Fix the small review points of part ${part.ord}`, allow);
     } catch (e) {
@@ -2623,6 +2874,21 @@ export function createLoop(opts: LoopOptions) {
         changed(id);
         return { status: 200, task: dto(db, id) };
       }
+      // part-session.md section 9.4 rule 9, for the reasons of a cut or failed run (Q-SM1, Q-SM2): Continue in ready runs the newest send
+      // of the part again, as an answer does. PS4 adds the other reasons and the option leave.
+      if (t.state === "ready" && b && (RUN_ENDS.has(b.kind) || (b.kind === "error" && (b.cause === "run" || b.cause === "restart")))) {
+        const part = partOf(db, b);
+        const sent = part === null ? null : (db.query(Q.newestSend).get({ part }) as { id: number; item: string } | null);
+        const info = sent ? stepDetailOf(db, sent.id).instruct : null;
+        if (!sent || !info) return conflict(db, id, TASK_STATE_TEXT.ready);
+        const row = db.transaction(() => {
+          setBlocked(db, { task: id, version: t.version }, null, now());
+          return free(db, id) ? resend(db, id, sent.item, info, now()) : null;
+        })();
+        if (row !== null) start(db, id, () => driveInstruct(db, id, row), "instruct");
+        changed(id);
+        return { status: 200, task: dto(db, id) };
+      }
       if (t.state !== "implementing") return conflict(db, id, TASK_STATE_TEXT[t.state]);
       if (pause && input.option) return conflict(db, id, "A paused build keeps its changes. Continue it, or stop it first.");
       // spec.md section 6.20.6: Resume of a pause opens the gate of every part.
@@ -2648,16 +2914,8 @@ export function createLoop(opts: LoopOptions) {
       if (!b && (drivers.has(id) || !all.length)) return conflict(db, id, TASK_STATE_TEXT.implementing);
       // spec.md section 6.25.4: the clear moves the next reason up and starts no driver, so the option would be lost.
       if (input.option && waitingOf(db, id)) return conflict(db, id, WAITING);
-      // A used-up time budget gets 60 more minutes for each part. A cost limit stays: the user changes it in the settings.
-      const partMinutes = runLimitsOf(settings.config()?.runLimits).partMinutes;
-      const timeUp =
-        b?.kind === "budget" &&
-        all.some((part) => {
-          const used = partBudget(db, id, part, now(), partMinutes);
-          return used.usedMs >= used.limitMs;
-        });
-      if (timeUp) moreTime(db, { task: id, version: t.version }, now(), partMinutes);
-      else if (b) setBlocked(db, { task: id, version: t.version }, null, now());
+      // part-session.md section 5.4: Continue clears a reason of a kind that the app sets no more (budget/time, size/budget, push).
+      if (b) setBlocked(db, { task: id, version: t.version }, null, now());
       if (free(db, id)) kick(db, id, reset);
       changed(id);
       return { status: 200, task: dto(db, id) };
@@ -2873,7 +3131,7 @@ export function createLoop(opts: LoopOptions) {
             writeFileSync(f, text);
           }
         }
-        const message = row.item ? `${c.label} ${row.item}: Change the plan` : `${c.label}: Change the plan`;
+        const message = `${c.label}: Change the plan`;
         const r = await commitTask({
           db,
           task: id,
@@ -2888,6 +3146,8 @@ export function createLoop(opts: LoopOptions) {
           now,
         });
         if (r.status === "refused") return conflict(db, id, deniedText(r.problems));
+        // part-session.md section 2.2: the accept of a plan change that the session wrote moves the session heads.
+        if (r.status === "committed") moveHeads(db, part.id, await headsNow(c), now());
       } catch (e) {
         return conflict(db, id, `The app could not commit the change: ${noUrl((e as Error).message)}`);
       }

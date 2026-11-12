@@ -5,6 +5,8 @@
 // Each write runs in a transaction, and a caller transaction makes it a savepoint: the caller writes its step row in the same commit.
 // The caller runs every effect (a run start, a push, a notification) after the commit, from the new state.
 import type { Database } from "bun:sqlite";
+import { existsSync, readFileSync, rmdirSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import { initialTransition, transition } from "xstate";
 import type { z } from "zod";
 import { oneLine } from "../../shared/consult";
@@ -53,8 +55,6 @@ import {
   MAX_OPEN_CAP,
   MAX_OPEN_DEFAULT,
   MERGE_CONFLICTED,
-  MORE_TIME_MIN,
-  NO_LIMIT,
   PART_STATE_TEXT,
   type PartState,
   RUN_CANCELLED,
@@ -174,7 +174,8 @@ export type Advanced<S> =
 // version: task.version as the caller saw it. A part change raises the version of its task too.
 export type TaskRef = { task: number; version: number };
 // gate: the PR of the event passed its review rules (spec.md section 6.10). The machine reads it only for the gate events.
-export type Facts = { gate?: boolean };
+// unpushed: task_part.pushed is NULL (part-session.md section 9.3.2, guard of RESTART).
+export type Facts = { gate?: boolean; unpushed?: boolean };
 
 export const TASK_CHANGED = "The task changed on another page. Check it again.";
 
@@ -199,6 +200,10 @@ const SQL = {
   clearWaits: "UPDATE task_part SET blocked_json = NULL WHERE task = $id AND blocked_json IS NOT NULL",
   // spec.md section 6.18.4, Restart: an update that ran at the last stop. The loop aborts its rebase or merge and resets every repository
   // to the heads before it (loop.ts recoverUpdates).
+  // part-session.md section 9.5: the open step rows of the parts, oldest first, before failSteps ends them.
+  open: `SELECT s.id, s.task, s.part, s.kind, p.ord FROM task_step s LEFT JOIN task_part p ON p.id = s.part
+    WHERE s.state IN ('waiting', 'running') ORDER BY s.id`,
+  building: "SELECT id, ord FROM task_part WHERE task = $task AND state = 'implementing' ORDER BY ord",
   restartUpdates: `UPDATE task_step SET detail_json = json_insert(json_set(detail_json, '$.update.result', 'restart'), '$.notes[#]',
       'The app stopped during the update.')
     WHERE kind = 'update' AND state IN ('waiting', 'running') AND json_type(detail_json, '$.update') = 'object'`,
@@ -225,6 +230,8 @@ export function advance(db: Database, ref: TaskRef, event: TaskEvent, facts: Fac
     const state = next.value as TaskState;
     write(db, SQL.setTask, { id: ref.task, version: ref.version, state, stopped: state === "stopped" ? row.state : null, now });
     if (state !== "implementing") db.query(SQL.clearWaits).run({ id: ref.task });
+    // part-session.md section 9.3.1: ALL_MERGED and CLOSE delete the transcripts of the task.
+    if (state === "done") dropSessions(db, { task: ref.task });
     return { status: 200, state, version: ref.version + 1 };
   })();
 }
@@ -240,30 +247,161 @@ export function advancePart(
     const row = db.query(SQL.part).get({ part: ref.part, task: ref.task }) as { state: PartState; version: number } | null;
     if (!row) return { status: 404, error: "Part not found." };
     if (row.version !== ref.version) return { status: 409, error: TASK_CHANGED, state: row.state, version: row.version };
-    const snapshot = partMachine.resolveState({ value: row.state, context: { gate: facts.gate === true } });
+    const snapshot = partMachine.resolveState({
+      value: row.state,
+      context: { gate: facts.gate === true, unpushed: facts.unpushed === true },
+    });
     if (!snapshot.can(event))
       return { status: 409, error: `This part is ${PART_STATE_TEXT[row.state].toLowerCase()}.`, state: row.state, version: row.version };
     const [next] = transition(partMachine, snapshot, event);
     const state = next.value as PartState;
     write(db, SQL.bump, { id: ref.task, version: ref.version, now });
     db.query(SQL.setPart).run({ id: ref.part, state, now });
+    // part-session.md section 9.3.2: the transcript of a part goes when its PR merges or declines, the part is skipped, or it starts
+    // again.
+    if (SESSION_ENDS.has(state) || event.type === "RESTART") dropSessions(db, { part: ref.part });
     return { status: 200, state, version: ref.version + 1 };
   })();
 }
 
-// spec.md section 6.14: a Claude step that ran at the last stop has no process now. Its step ends failed, and its task stops, so
-// Resume continues. Call it before the run recovery (run-rows.ts SQL.recover), which ends the runs themselves with kind restart.
-// dataDir: the data folder. With it, a cut run whose snapshot file passes the checks keeps its work (implement.ts keepCut).
+// spec.md section 6.14 and part-session.md sections 9.3.4 and 9.5 (Q-SM2): a step that ran at the last stop has no process now, so it
+// ends failed. An interview or spec task stops, so Resume runs its run again. A task that builds or follows up keeps its state: each
+// part with an open step row gets the reason error/restart, or the reason update for an update. A part that built between two steps
+// gets error/restart with no step. Held and waiting part rows stay. Call it before the run recovery (run-rows.ts SQL.recover), which
+// ends the runs themselves with kind restart. dataDir: the data folder. With it, a cut run whose snapshot file passes the checks keeps
+// its work (implement.ts keepCut).
+export const RESTART_TEXT = (ord: number | null) =>
+  `Needs you: the app stopped during the work on ${ord === null ? "the task" : `part ${ord}`}. Continue goes on from there.`;
+export const UPDATE_RESTART = "The update stopped: the app stopped during the update. The branch is as it was.";
 export function recoverTasks(db: Database, now = Date.now(), dataDir?: string) {
   db.transaction(() => {
     const tasks = db.query(SQL.running).all() as { id: number; version: number }[];
     const cut = dataDir === undefined ? [] : (db.query(SQL.cut).all() as CutStep[]);
+    const open = db.query(SQL.open).all() as { id: number; task: number; part: number | null; kind: string; ord: number | null }[];
     db.query(SQL.restartUpdates).run();
     db.query(SQL.failSteps).run({ now });
-    // A done or failed task refuses STOP and keeps its state.
-    for (const t of tasks) advance(db, { task: t.id, version: t.version }, { type: "STOP" }, {}, now);
     for (const s of cut) keepCut(db, dataDir as string, s);
+    for (const { id } of tasks) {
+      const t = taskRow(db, id);
+      // A done or failed task refuses STOP and keeps its state.
+      if (t?.state !== "implementing" && t?.state !== "ready") {
+        if (t) advance(db, { task: id, version: t.version }, { type: "STOP" }, {}, now);
+        continue;
+      }
+      const mine = open.filter((o) => o.task === id);
+      const cutParts = new Set(mine.map((o) => o.part));
+      for (const part of cutParts) {
+        const rows = mine.filter((o) => o.part === part);
+        const update = rows.find((o) => o.kind === "update");
+        const last = rows.at(-1) as (typeof rows)[number];
+        const b: TaskBlocked = update
+          ? { kind: "update", step: update.id, text: UPDATE_RESTART }
+          : { kind: "error", cause: "restart", step: last.id, text: RESTART_TEXT(last.ord) };
+        holdBlocked(db, taskRow(db, id) as TaskRow, b, now);
+      }
+      if (t.state !== "implementing") continue;
+      for (const p of db.query(SQL.building).all({ task: id }) as { id: number; ord: number }[])
+        if (!cutParts.has(p.id)) {
+          const b: TaskBlocked = { kind: "error", cause: "restart", step: null, part: p.id, text: RESTART_TEXT(p.ord) };
+          holdBlocked(db, taskRow(db, id) as TaskRow, b, now);
+        }
+    }
   })();
+}
+
+// ---------- Part sessions (part-session.md sections 2.2 and 5.3) ----------
+
+// The part states that end the transcript of a part.
+const SESSION_ENDS = new Set<PartState>(["merged", "declined", "abandoned"]);
+export type SessionHeads = { taskRepo: number; head: string }[];
+export type PartSession = {
+  part: number;
+  sessionId: string | null;
+  file: string | null;
+  sha256: string | null;
+  heads: SessionHeads;
+  context: number | null;
+  runs: number;
+};
+
+const SESSION_SQL = {
+  get: "SELECT part, session_id, file, file_sha256, heads_json, context_tokens, runs FROM task_part_session WHERE part = $part",
+  save: `INSERT INTO task_part_session (part, session_id, file, file_sha256, heads_json, context_tokens, runs, updated_at)
+    VALUES ($part, $id, $file, $sha, $heads, $context, 1, $now)
+    ON CONFLICT (part) DO UPDATE SET session_id = excluded.session_id, file = excluded.file, file_sha256 = excluded.file_sha256,
+      heads_json = excluded.heads_json, context_tokens = excluded.context_tokens, runs = runs + 1, updated_at = excluded.updated_at`,
+  heads: "UPDATE task_part_session SET heads_json = $heads, updated_at = $now WHERE part = $part",
+  files: `SELECT s.part, s.file FROM task_part_session s JOIN task_part p ON p.id = s.part
+    WHERE ($task IS NULL OR p.task = $task) AND ($part IS NULL OR s.part = $part)`,
+  drop: "DELETE FROM task_part_session WHERE part = $part",
+};
+
+export const sha256File = (file: string) => new Bun.CryptoHasher("sha256").update(readFileSync(file)).digest("hex");
+
+export function partSession(db: Database, part: number): PartSession | null {
+  const r = db.query(SESSION_SQL.get).get({ part }) as {
+    part: number;
+    session_id: string | null;
+    file: string | null;
+    file_sha256: string | null;
+    heads_json: string;
+    context_tokens: number | null;
+    runs: number;
+  } | null;
+  if (!r) return null;
+  return {
+    part: r.part,
+    sessionId: r.session_id,
+    file: r.file,
+    sha256: r.file_sha256,
+    heads: JSON.parse(r.heads_json) as SessionHeads,
+    context: r.context_tokens,
+    runs: r.runs,
+  };
+}
+
+// A kept transcript leaves the disk. Its folder goes too when nothing else is in it.
+function removeTranscript(file: string) {
+  try {
+    rmSync(file, { force: true });
+    rmdirSync(dirname(file));
+  } catch {}
+}
+
+// Stores the transcript of a session run that ended ok, and deletes the older file, so a part keeps one transcript.
+export function saveSession(
+  db: Database,
+  part: number,
+  s: { id: string | null; file: string; heads: SessionHeads; context: number | null },
+  now = Date.now(),
+) {
+  const old = partSession(db, part)?.file;
+  db.query(SESSION_SQL.save).run({
+    part,
+    id: s.id,
+    file: s.file,
+    sha: sha256File(s.file),
+    heads: JSON.stringify(s.heads),
+    context: s.context,
+    now,
+  });
+  if (old && old !== s.file && existsSync(old)) rmSync(old, { force: true });
+}
+
+// part-session.md section 2.2, What moves the session heads: an app commit of the work of the session.
+export const moveHeads = (db: Database, part: number, heads: SessionHeads, now = Date.now()) =>
+  db.query(SESSION_SQL.heads).run({ part, heads: JSON.stringify(heads), now });
+
+// Deletes the kept transcripts and the session rows of one part or of every part of a task.
+export function dropSessions(db: Database, of: { part: number } | { task: number }) {
+  const rows = db.query(SESSION_SQL.files).all({
+    task: "task" in of ? of.task : null,
+    part: "part" in of ? of.part : null,
+  }) as { part: number; file: string | null }[];
+  for (const r of rows) {
+    if (r.file) removeTranscript(r.file);
+    db.query(SESSION_SQL.drop).run({ part: r.part });
+  }
 }
 
 // ---------- The task service (spec.md sections 6.1 to 6.5 and 6.11) ----------
@@ -559,14 +697,6 @@ export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, no
   db.transaction(() =>
     patch(db, ref.task, ref.version, { blocked_json: b === null && !keep ? nextReason(db, ref.task) : blocked(b) }, now),
   )();
-
-// spec.md section 6.7, Budgets: "Continue with 60 more min?". Each part of the task gets 60 more minutes, and the reason goes. part: the
-// "Part time" of Settings > Tasks, for a task with no partTimeMin.
-export function moreTime(db: Database, ref: TaskRef, now = Date.now(), part = NO_LIMIT): number {
-  const s = settingsOf(taskRow(db, ref.task) as TaskRow);
-  const settings = JSON.stringify({ ...s, partTimeMin: (s.partTimeMin ?? part) + MORE_TIME_MIN });
-  return db.transaction(() => patch(db, ref.task, ref.version, { settings_json: settings, blocked_json: nextReason(db, ref.task) }, now))();
-}
 
 // spec.md section 6.1, "Keep one PR" and "Change the limit": new task settings, and the size reason goes. Returns the new version.
 export function setSettings(db: Database, ref: TaskRef, s: TaskSettings, now = Date.now()): number {

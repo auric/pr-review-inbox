@@ -762,7 +762,7 @@ describe("start now, drop, and the routes (spec.md sections 6.20.6, 6.20.7, and 
       const docs = partDocsOf(s.db, s.t(), { ord: 2, keys_json: '["ABC-12"]', title: "" });
       const parsed = docs?.parsed as NonNullable<typeof docs>["parsed"];
       expect(parsed.parts.map((p) => p.n)).toEqual([2]);
-      expect(partStepFile(parsed, parsed.parts, "tests", 1).text).toContain("- Part 2 of 3: Part two");
+      expect(partStepFile(parsed, parsed.parts, "build", 1).text).toContain("- Part 2 of 3: Part two");
     },
     SLOW,
   );

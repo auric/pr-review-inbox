@@ -117,8 +117,7 @@ async function setup(o: { seq?: FakeScenario["seq"]; budget?: number } = {}) {
   runner.write({
     fixture: stream,
     seq: {
-      "implement:tests": [{ writes: [TEST_FILE] }],
-      "implement:implement": [{ writes: [TODO] }],
+      "implement:build": [{ writes: [TEST_FILE, TODO], ticks: { path: "*", ids: ["*"] } }],
       "implement:fix": [{ writes: [WORKS] }],
       review: [{ review: reviewOf([]) }],
       ...o.seq,
@@ -324,33 +323,11 @@ describe("close (spec.md section 6.12)", () => {
 
 describe("the line limit (spec.md section 6.1)", () => {
   test(
-    "Keep one PR: the build goes on past the limit and the part gets ready",
+    "AC-B302: a part over the line limit gets a note and no stop; the limit route refuses without a size reason",
     async () => {
       const s = await setup({ budget: 5 });
-      const blocked = await s.build();
-      expect(blocked.blocked?.kind).toBe("size");
-      expect(blocked.blocked?.text).toMatch(/^Needs you: this PR would have \d+ changed lines, over your 5 limit\.$/);
-      const r = await s.post("/limit", { keep: true });
-      expect(r.status).toBe(200);
-      expect(r.body.settings.keepOnePr).toBe(true);
-      const done = await s.settle();
+      const done = await s.build();
       expect([done.blocked, done.parts[0]?.state]).toEqual([null, "self_reviewed"]);
-    },
-    SLOW,
-  );
-
-  test(
-    "Change the limit: a new limit under the changed lines stops again; a higher one lets the build go on",
-    async () => {
-      const s = await setup({ budget: 5 });
-      await s.build();
-      expect((await s.post("/limit", { lineBudget: 6 })).body.settings.lineBudget).toBe(6);
-      const again = await s.settle();
-      expect(again.blocked?.text).toMatch(/over your 6 limit\.$/);
-      await s.post("/limit", { lineBudget: 100_000 });
-      const done = await s.settle();
-      expect([done.blocked, done.parts[0]?.state]).toEqual([null, "self_reviewed"]);
-      // A limit without a size stop is refused.
       expect((await s.post<TaskConflict>("/limit", { keep: true })).body.error).toBe("No part waits for the line limit.");
     },
     SLOW,

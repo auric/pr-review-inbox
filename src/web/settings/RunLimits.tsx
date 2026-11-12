@@ -25,18 +25,6 @@ import { SaveStatus, TYPING_MS, useSaver } from "./autosave";
 
 // runner: the short runner name of the meta, such as the name of the CLI. off: the label of the "No limit" box.
 const FIELDS: Record<RunLimitKey, { label: string; unit: string; help: (runner: string) => string; off?: string }> = {
-  stepMinutes: {
-    label: "Task step time",
-    unit: "minutes",
-    help: (r) => `${r} stops one step of a task after this time. The part time can stop it earlier.`,
-    off: "No step time limit",
-  },
-  partMinutes: {
-    label: "Part time",
-    unit: "minutes",
-    help: (r) => `${r} can work this long on one part of a task. Then the task waits for you, and Continue gives 60 more minutes.`,
-    off: "No part time limit",
-  },
   reviewMinutes: {
     label: "Review run time",
     unit: "minutes",
@@ -58,6 +46,16 @@ const FIELDS: Record<RunLimitKey, { label: string; unit: string; help: (runner: 
     unit: "runs",
     help: (r) =>
       `Reviews, Explain, Ask, Fix, and task steps share this number. Each pull request has one run at a time. Builds of 2 or more sub-tasks at once run beside it. More runs use your ${r} usage faster.`,
+  },
+  sessionContextCap: {
+    label: "Session context cap",
+    unit: "tokens",
+    help: (r) => `When the ${r} session of a task part has a larger context, its next run starts a new session.`,
+  },
+  sessionTurns: {
+    label: "Session run turns",
+    unit: "turns",
+    help: (r) => `One ${r} run of a task part stops after this number of turns. The app continues it once by itself.`,
   },
 };
 
@@ -157,7 +155,7 @@ export function RunLimits({ settings }: { settings: SettingsDto }) {
                 )}
               </div>
               <FieldDescription id={`${id}-help`}>
-                {f.help(runner)} Default {def === NO_LIMIT && canTurnOff(k) ? "no limit" : def}. From {min} to {max}.
+                {f.help(runner)} Default {canTurnOff(k) && (def as number) === NO_LIMIT ? "no limit" : def}. From {min} to {max}.
               </FieldDescription>
               {invalid && (
                 <FieldError id={`${id}-error`}>

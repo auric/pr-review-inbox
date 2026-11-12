@@ -1382,13 +1382,13 @@ const runLimit = (k: keyof typeof RUN_LIMITS) =>
     .refine((n) => runLimitOk(k, n), `Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
     .optional();
 export const runLimitsInput = z.object({
-  stepMinutes: runLimit("stepMinutes"),
-  partMinutes: runLimit("partMinutes"),
   reviewMinutes: runLimit("reviewMinutes"),
   interviewRounds: runLimit("interviewRounds"),
   testFixTries: runLimit("testFixTries"),
   planTurns: runLimit("planTurns"),
   runsAtOnce: runLimit("runsAtOnce"),
+  sessionContextCap: runLimit("sessionContextCap"),
+  sessionTurns: runLimit("sessionTurns"),
 });
 export const branchPrefixList = z
   .array(branchPrefix)

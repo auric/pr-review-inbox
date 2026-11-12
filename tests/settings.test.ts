@@ -86,7 +86,15 @@ describe("settings API", () => {
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
-      runLimits: { stepMinutes: 0, partMinutes: 0, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 },
+      runLimits: {
+        reviewMinutes: 60,
+        interviewRounds: 2,
+        testFixTries: 3,
+        planTurns: 80,
+        runsAtOnce: 3,
+        sessionContextCap: 100_000,
+        sessionTurns: 500,
+      },
     });
     expect(existsSync(dir)).toBe(false);
   });
@@ -116,7 +124,15 @@ describe("settings API", () => {
       sessions: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
-      runLimits: { stepMinutes: 0, partMinutes: 0, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 },
+      runLimits: {
+        reviewMinutes: 60,
+        interviewRounds: 2,
+        testFixTries: 3,
+        planTurns: 80,
+        runsAtOnce: 3,
+        sessionContextCap: 100_000,
+        sessionTurns: 500,
+      },
     };
     expect(await res.json()).toEqual(expected);
     expect(await s.get()).toEqual(expected);
@@ -227,35 +243,43 @@ describe("settings API", () => {
   test("limits decision 3, AC-B187: the run limits save key by key, persist, refuse a value out of bounds, and default when unset", async () => {
     const s = setup();
     expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
-    const def = { stepMinutes: 0, partMinutes: 0, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 };
+    const def = {
+      reviewMinutes: 60,
+      interviewRounds: 2,
+      testFixTries: 3,
+      planTurns: 80,
+      runsAtOnce: 3,
+      sessionContextCap: 100_000,
+      sessionTurns: 500,
+    };
     expect((await s.get()).runLimits).toEqual(def);
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toBeUndefined();
-    let res = await s.put({ baseUrl: fake.url, runLimits: { stepMinutes: 120, planTurns: 500 } });
+    let res = await s.put({ baseUrl: fake.url, runLimits: { sessionTurns: 1000, planTurns: 500 } });
     expect(res.status).toBe(200);
-    expect((await res.json()).runLimits).toEqual({ ...def, stepMinutes: 120, planTurns: 500 });
+    expect((await res.json()).runLimits).toEqual({ ...def, sessionTurns: 1000, planTurns: 500 });
     // config.json keeps a key only when it changed.
-    expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toEqual({ stepMinutes: 120, planTurns: 500 });
+    expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toEqual({ sessionTurns: 1000, planTurns: 500 });
     // A second PUT keeps the other stored keys. A PUT without runLimits keeps all.
     res = await s.put({ baseUrl: fake.url, runLimits: { reviewMinutes: 10, interviewRounds: 5, testFixTries: 1, runsAtOnce: 10 } });
     const all = {
-      stepMinutes: 120,
-      partMinutes: 0,
       reviewMinutes: 10,
       interviewRounds: 5,
       testFixTries: 1,
       planTurns: 500,
       runsAtOnce: 10,
+      sessionContextCap: 100_000,
+      sessionTurns: 1000,
     };
     expect((await res.json()).runLimits).toEqual(all);
     expect((await s.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
-    const { partMinutes: _, ...stored } = all;
+    const { sessionContextCap: _, ...stored } = all;
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).runLimits).toEqual(stored);
     for (const [bad, error] of [
-      [{ stepMinutes: 4 }, "Type a whole number from 5 to 120."],
-      [{ stepMinutes: 121 }, "Type a whole number from 5 to 120."],
-      [{ stepMinutes: -1 }, "Type a whole number from 5 to 120."],
-      [{ partMinutes: 9 }, "Type a whole number from 10 to 1440."],
-      [{ partMinutes: 1441 }, "Type a whole number from 10 to 1440."],
+      [{ sessionTurns: 49 }, "Type a whole number from 50 to 1000."],
+      [{ sessionTurns: 1001 }, "Type a whole number from 50 to 1000."],
+      [{ sessionTurns: 0 }, "Type a whole number from 50 to 1000."],
+      [{ sessionContextCap: 19_999 }, "Type a whole number from 20000 to 500000."],
+      [{ sessionContextCap: 500_001 }, "Type a whole number from 20000 to 500000."],
       [{ reviewMinutes: 0 }, "Type a whole number from 10 to 240."],
       [{ reviewMinutes: 241 }, "Type a whole number from 10 to 240."],
       [{ interviewRounds: 0 }, "Type a whole number from 1 to 5."],
@@ -270,10 +294,10 @@ describe("settings API", () => {
       expect(r.status).toBe(400);
       expect(await r.json()).toEqual({ error });
     }
-    // AC-B204: the step time and the part time take 0, no limit. A stored number keeps its limit.
-    res = await s.put({ baseUrl: fake.url, runLimits: { partMinutes: 180 } });
-    expect((await res.json()).runLimits).toEqual({ ...all, partMinutes: 180 });
-    res = await s.put({ baseUrl: fake.url, runLimits: { partMinutes: 0 } });
+    // AC-B301: the step time and the part time are gone, so their old keys are no input.
+    res = await s.put({ baseUrl: fake.url, runLimits: { sessionContextCap: 200_000 } });
+    expect((await res.json()).runLimits).toEqual({ ...all, sessionContextCap: 200_000 });
+    res = await s.put({ baseUrl: fake.url, runLimits: { sessionContextCap: 100_000 } });
     expect((await res.json()).runLimits).toEqual(all);
     s.settings.close();
     const again = setup();
@@ -281,7 +305,10 @@ describe("settings API", () => {
     again.settings.close();
     // A broken stored value reads as unset, so the defaults apply.
     const file = join(dir, "config.json");
-    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), runLimits: { stepMinutes: 9999 } }));
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), runLimits: { sessionTurns: 9999 } }));
+    expect((await setup().get()).runLimits).toEqual(def);
+    // AC-B301: the app ignores an old step time or part time in config.json.
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), runLimits: { stepMinutes: 30, partMinutes: 60 } }));
     expect((await setup().get()).runLimits).toEqual(def);
   });
 

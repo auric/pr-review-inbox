@@ -215,7 +215,8 @@ export const phaseMachine = setup({
       },
     },
     setup: { on: { CLEAN: "idle", ...ended } },
-    baseline: { on: { CLEAN: "idle", STOPPED: "idle" } },
+    // A check that the app refuses (checks.ts runChecks, such as an unaccepted warning) waits with error/app in the baseline too.
+    baseline: { on: { CLEAN: "idle", ...ended } },
     building: { on: { RUN_DONE: "checking", ...cut("building"), ...ended } },
     checking: {
       on: {
@@ -246,16 +247,8 @@ export const RESERVED: Partial<Record<TaskEvent["type"] | PartEvent["type"] | Ph
   OVERRIDE: "WP-B8",
   FAIL: "none: part-session.md section 9.3.1 names no package",
   RESTART: "PS4",
-  GO: "PS3",
-  UPDATE: "PS3",
-  CLEAN: "PS3",
-  WAIT: "PS3",
-  STOPPED: "PS3",
-  RUN_DONE: "PS3",
-  RUN_CUT: "PS3",
-  CHECKS_GREEN: "PS3",
-  CHECKS_RED: "PS3",
-  POINTS: "PS3",
+  // The update driver (loop.ts driveUpdate) tracks no phase yet. PS4 moves the update and its resolve runs into the phase machine.
+  UPDATE: "PS4",
   CONFLICT: "PS4",
 };
 
