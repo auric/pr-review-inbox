@@ -51,9 +51,16 @@ const lowConfidence = (p: FindingPayload) => (p.verify ? checkOf(p) === "unsure"
 function findingText(it: ReviewItemDto, mark: string | undefined): string {
   if (it.edited) return withSeverity(it.body, mark);
   const p = it.payload as FindingPayload;
-  const lead = lowConfidence(p) && !it.body.startsWith(QUESTION_LEAD) ? QUESTION_LEAD : "";
-  const nit = !mark && p.severity === "nit" && !/^\**nit\**:/i.test(it.body) ? NIT : "";
-  return withSeverity(nit + lead + it.body, mark);
+  // The prefixes go after an AI mark and after a Nit prefix that the body already has.
+  const robot = AI_MARK.trimEnd();
+  const own = it.body.startsWith(robot);
+  const text = own ? it.body.slice(robot.length).trimStart() : it.body;
+  const head = text.match(/^\**nit\**:\**\s*/i)?.[0] ?? "";
+  const rest = text.slice(head.length);
+  const lead = lowConfidence(p) && !rest.startsWith(QUESTION_LEAD) ? QUESTION_LEAD : "";
+  const nit = !mark && p.severity === "nit" && !head ? NIT : "";
+  if (!nit && !lead) return withSeverity(it.body, mark);
+  return withSeverity((own ? AI_MARK : "") + nit + head + lead + rest, mark);
 }
 
 // plan v3 WP12: `[path:line](fileUrl)`. Without the browse link or the commit, the plain "path:line" stays. src/shared/links.ts holds the URL form.

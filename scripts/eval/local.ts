@@ -219,6 +219,8 @@ export type Skipped = {
   otherNoLine: number;
   otherOtherHead: number;
   otherAuthor: number;
+  // Comments of other reviewers on the lines of a must find of the same case.
+  otherOverlap: number;
 };
 
 // The selected items by source, before the conflict rule and carry. withdrawn: posted, then withdrawn in the thread (a trap).
@@ -248,6 +250,7 @@ export function select(
     otherNoLine: 0,
     otherOtherHead: 0,
     otherAuthor: 0,
+    otherOverlap: 0,
   };
   const sources: Sources = { posted: 0, fixed: 0, session: 0, withdrawn: 0, other: 0 };
   const drafts = new Map<string, Draft>();
@@ -392,7 +395,7 @@ export function select(
     if (!list) continue;
     const mine = isMe({ slug: c.author_slug, login: c.author_login }, me);
     // The comments of the PR author explain the change. They are no review.
-    if (!mine && c.author_slug === c.pr_author) {
+    if (!mine && c.author_slug && c.author_slug === c.pr_author) {
       skipped.otherAuthor++;
       continue;
     }
@@ -417,6 +420,8 @@ export function select(
     for (const d of at)
       if (mine) d.human.push({ id: `comment-${c.comment_id}`, ...place, note: `Your comment ${c.comment_id}.` });
       // A comment has no severity. minor counts at the volumes balanced and thorough (score.ts mustFind).
+      // One defect is one must find. A comment on the lines of a must find of the case adds none.
+      else if (d.bugs.some((b) => b.path === place.path && b.side === place.side && overlaps(b.lines, place.lines))) skipped.otherOverlap++;
       else
         d.bugs.push({
           id: `comment-${c.comment_id}`,
@@ -704,7 +709,7 @@ export function report(m: Manifest): string {
     `Must find: ${n.bugs} findings and ${n.human} of your own comments. Must not raise: ${n.traps}. Neutral: ${n.extras}.`,
     `Sources before carry: ${o.posted} posted, ${o.fixed} covered by a fix commit, ${o.session} accepted by your session, ${o.withdrawn} posted and then withdrawn in the thread (must not raise), ${o.other} line comments of other reviewers that are resolved or on a changed line.`,
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
-    `Comments of other reviewers left out: ${s.otherOpen} open on an unchanged line, ${s.otherNoLine} without a line, ${s.otherOtherHead} at a head with no review, ${s.otherAuthor} by the PR author.`,
+    `Comments of other reviewers left out: ${s.otherOpen} open on an unchanged line, ${s.otherNoLine} without a line, ${s.otherOtherHead} at a head with no review, ${s.otherAuthor} by the PR author, ${s.otherOverlap} on the lines of a must find of the same case.`,
     `Carried from earlier heads of the same PR: ${m.carried.carried}. Not carried: ${m.carried.changed} with changed lines, ${m.carried.gone} in a deleted file, ${m.carried.overlap} on an item of the later head.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
     `Re-review cases: ${r.counts.cases}, with ${r.counts.earlier} earlier findings. Must find: ${r.counts.bugs}. Must not raise: ${r.counts.traps}. Neutral: ${r.counts.extras}.`,

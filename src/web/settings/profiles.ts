@@ -248,17 +248,21 @@ export function toPayload(list: Draft[], saved: ProfileInput[]): ProfileInput[] 
   return toProfiles(list).map((p, i) => {
     const found = problems(list[i] as Draft);
     const base = byId.get(p.id) ?? newProfile(p.id);
+    // An advisor problem can come from a model change, so the three fields go back together.
+    const model = found.model || found.advisor ? base.model : p.model;
+    const verifierModel = found.verifierModel || found.advisor ? base.verifier.model : p.verifier.model;
+    // A saved model or check model can rank above the new advisor. The saved advisor ranks at or above every value here.
+    const advisor = found.advisor || advisorProblem(p.advisor, [model, verifierModel]) ? base.advisor : p.advisor;
     return {
       ...p,
       name: found.name ? base.name : p.name,
       note: found.note ? base.note : p.note,
       prompt: found.prompt ? base.prompt : p.prompt,
       maxTurns: found.maxTurns ? base.maxTurns : p.maxTurns,
-      // An advisor problem can come from a model change, so the three fields go back together.
-      model: found.model || found.advisor ? base.model : p.model,
-      advisor: found.advisor ? base.advisor : p.advisor,
+      model,
+      advisor,
       reviewer: { ...p.reviewer, model: found.reviewerModel ? base.reviewer.model : p.reviewer.model },
-      verifier: { ...p.verifier, model: found.verifierModel || found.advisor ? base.verifier.model : p.verifier.model },
+      verifier: { ...p.verifier, model: verifierModel },
     };
   });
 }

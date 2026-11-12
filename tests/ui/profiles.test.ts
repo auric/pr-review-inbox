@@ -601,6 +601,20 @@ describe("advisor", () => {
     expect(toPayload([{ ...s, model: "opus", advisor: "opus" }], pair)[0]).toMatchObject({ model: "opus", advisor: "opus" });
   });
 
+  test("a model with a syntax error keeps the saved advisor when the saved model ranks above the new advisor", () => {
+    const saved = [p("perf", "Perf", { model: "opus" })];
+    const [s] = toDrafts(saved) as [Draft];
+    const out = toPayload([{ ...s, model: "bad name", advisor: "sonnet" }], saved);
+    expect(out[0]).toMatchObject({ model: "opus", advisor: null });
+    expect(profileList.safeParse(out).success).toBe(true);
+    const check = [p("perf", "Perf", { verifier: { mode: "on", model: "opus", effort: null } })];
+    const [c] = toDrafts(check) as [Draft];
+    const out2 = toPayload([{ ...c, verifier: { ...c.verifier, model: "bad name" }, advisor: "sonnet" }], check);
+    expect(out2[0]).toMatchObject({ advisor: null, verifier: { model: "opus" } });
+    expect(profileList.safeParse(out2).success).toBe(true);
+    expect(toPayload([{ ...s, model: "bad name", advisor: "fable" }], saved)[0]?.advisor).toBe("fable");
+  });
+
   test("the advisor is a shipped field with its own reset", () => {
     expect(SHIPPED_FIELDS.map(([k]) => k)).toContain("advisor");
     expect(editedOf({ ...d, advisor: "opus" }, p("perf", "Perf"))).toEqual(["advisor"]);

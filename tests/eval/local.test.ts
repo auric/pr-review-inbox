@@ -56,9 +56,9 @@ async function bun(args: string[], env: Record<string, string> = {}) {
 
 const line = (i: number, changed: boolean) => `export const v${i} = ${i}${changed ? " + 1" : ""};`;
 const fileAt = (changed: Set<number>) => `${Array.from({ length: 40 }, (_, k) => line(k + 1, changed.has(k + 1))).join("\n")}\n`;
-// Head A changes lines 10 to 14, 22, 27, and 30. Head B also changes lines 20 and 37.
+// Head A changes lines 10 to 14, 22, 27, and 30. Head B also changes lines 18, 20, and 37.
 const A_LINES = new Set([10, 11, 12, 13, 14, 22, 27, 30]);
-const B_LINES = new Set([...A_LINES, 20, 37]);
+const B_LINES = new Set([...A_LINES, 18, 20, 37]);
 
 // The copy of the git folder: <cache>/PROJ/repo.git with the base, A, and B commits.
 async function makeCache(root: string) {
@@ -201,9 +201,10 @@ function makeDb(dir: string, h: Heads) {
   comment(100, { anchor: anchor(22) });
   // Another reviewer: open on an unchanged line, so no must-find.
   comment(101, { author: "other", anchor: anchor(22) });
-  // Another reviewer: a resolved thread, and an orphaned anchor. Head B changes lines 20 and 37, so neither carries.
+  // Another reviewer: a resolved thread on the lines of the session bug, so no second must-find. An orphaned anchor. Head B changes
+  // lines 18 and 20, so neither carries.
   comment(108, { author: "other", anchor: anchor(20), resolved: true });
-  comment(109, { author: "other", anchor: anchor(37, h.a, true) });
+  comment(109, { author: "other", anchor: anchor(18, h.a, true) });
   // Left out: the PR author, a file comment without a line, and a head with no review.
   comment(110, { author: "author", anchor: anchor(13), resolved: true });
   comment(111, { author: "other", anchor: anchor(undefined), resolved: true });
@@ -282,25 +283,25 @@ describe("eval:local selection", () => {
     expect(built.stderr).toBe("");
     expect(built.code).toBe(0);
     expect(built.stdout).toContain("Local eval set: 2 cases from 3 review runs in 1 repositories.");
-    expect(built.stdout).toContain("Must find: 15 findings and 1 of your own comments. Must not raise: 6. Neutral: 3.");
+    expect(built.stdout).toContain("Must find: 14 findings and 1 of your own comments. Must not raise: 6. Neutral: 3.");
     expect(built.stdout).toContain(
       "Sources before carry: 9 posted, 1 covered by a fix commit, 1 accepted by your session, 1 posted and then withdrawn in the thread (must not raise), 2 line comments of other reviewers that are resolved or on a changed line.",
     );
     expect(built.stdout).toContain(
-      "Comments of other reviewers left out: 1 open on an unchanged line, 1 without a line, 1 at a head with no review, 1 by the PR author.",
+      "Comments of other reviewers left out: 1 open on an unchanged line, 1 without a line, 1 at a head with no review, 1 by the PR author, 1 on the lines of a must find of the same case.",
     );
     expect(built.stdout).toContain(
       "Left out: 1 refuted by the check, 0 discarded without your triage, 1 without a decision, 0 without an anchor, 4 in opposite decisions, 1 runs without a merge base, 1 cases with missing commits, 1 cases with nothing to find or avoid, 1 comments without a line, 1 comments at a head with no review.",
     );
     expect(built.stdout).toContain(
-      "Carried from earlier heads of the same PR: 7. Not carried: 4 with changed lines, 0 in a deleted file, 1 on an item of the later head.",
+      "Carried from earlier heads of the same PR: 7. Not carried: 3 with changed lines, 0 in a deleted file, 1 on an item of the later head.",
     );
     expect(built.stdout).toContain("below the recommended minimum");
     for (const name of [TMP, OUT, "PROJ", "Add the calc helpers", "EVAL-9"]) expect(built.stdout).not.toContain(name);
     const m = JSON.parse(readFileSync(join(OUT, "MANIFEST.json"), "utf8")) as Manifest;
-    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 15, traps: 6, extras: 3, human: 1 });
+    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 14, traps: 6, extras: 3, human: 1 });
     expect(m.sources).toEqual({ posted: 9, fixed: 1, session: 1, withdrawn: 1, other: 2 });
-    expect(m.carried).toEqual({ carried: 7, changed: 4, gone: 0, overlap: 1 });
+    expect(m.carried).toEqual({ carried: 7, changed: 3, gone: 0, overlap: 1 });
     expect(readdirSync(join(OUT, "bundles"))).toHaveLength(1);
     // run.ts gives the same fingerprint for a run of the whole set.
     const loaded = loadCases("all", join(OUT, "cases"));
@@ -319,8 +320,7 @@ describe("eval:local selection", () => {
       [ofItem(ids.session), [20, 20], "minor"],
       [ofItem(ids.second), [12, 12], "blocker"],
       [ofItem(ids.changed), [37, 37], "minor"],
-      ["comment-108", [20, 20], "minor"],
-      ["comment-109", [37, 37], "minor"],
+      ["comment-109", [18, 18], "minor"],
     ]);
     const notes = new Map(a.bugs.map((b) => [b.id, b.note]));
     expect(notes.get(ofItem(ids.fixed))).toBe(`Finding ${ids.fixed} covered by a fix commit.`);
@@ -395,9 +395,10 @@ describe("eval:local selection", () => {
     const a = caseOf(heads.a);
     const spot = { path: PATH, side: "new", severityMin: "minor", module: "core", source: "other" } as const;
     expect(a.bugs.filter((b) => b.source === "other")).toEqual([
-      { id: "comment-108", ...spot, lines: [20, 20], note: "Comment 108 of another reviewer, resolved." },
-      { id: "comment-109", ...spot, lines: [37, 37], note: "Comment 109 of another reviewer, on a line that a later head changed." },
+      { id: "comment-109", ...spot, lines: [18, 18], note: "Comment 109 of another reviewer, on a line that a later head changed." },
     ]);
+    // One defect is one must-find: comment 108 is on the lines of the session bug.
+    expect(a.bugs.map((b) => b.id)).not.toContain("comment-108");
     // Your own decisions carry no source. The open comment 101, the PR author, and the file comment stay out.
     expect(a.bugs.filter((b) => b.source !== "other").every((b) => b.source === undefined)).toBe(true);
     for (const id of ["comment-101", "comment-110", "comment-111", "comment-112", "comment-113"])
@@ -797,8 +798,7 @@ describe("eval --set local with the fake CLI", () => {
       expect(result.runs[0]?.items.map((i) => [i.line, i.anchorState, i.group])).toEqual(findings.map((f) => [f.line, "exact", "main"]));
       const s = score(result).suite;
       // 22 is also within 3 lines of the session bug at 20.
-      // 22 also hits the resolved comment of another reviewer at 20.
-      expect(s.recall?.mean).toBe(4 / 9);
+      expect(s.recall?.mean).toBe(3 / 8);
       // The items keep the finder text for review-ideas.md idea 3.
       expect(result.runs[0]?.items.map((i) => [i.evidence, i.anchorText, i.cause])).toEqual(
         findings.map((f) => [f.evidence, f.anchorText, undefined]),

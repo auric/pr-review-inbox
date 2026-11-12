@@ -625,4 +625,28 @@ describe("posted text (AC-R26, AC-R27)", () => {
     ]);
     expect(bodies(items.slice(0, 1), true)).toEqual([`**Minor:** ${QUESTION_LEAD}Body.`]);
   });
+
+  test("the Nit prefix and the question lead go after an AI mark and after a Nit prefix of the body", () => {
+    const items = [
+      item(1, { severity: "nit", confidence: "low" }, `${AI_MARK}Body.`),
+      item(2, { severity: "nit", confidence: "low" }, "Nit: Already there."),
+      item(3, { severity: "nit", confidence: "low" }, `${AI_MARK}**Nit:** Bold already.`),
+      item(4, { confidence: "low" }, `${AI_MARK}${QUESTION_LEAD}Body.`),
+    ];
+    expect(bodies(items, false)).toEqual([
+      `${AI_MARK}${NIT}${QUESTION_LEAD}Body.`,
+      `Nit: ${QUESTION_LEAD}Already there.`,
+      `${AI_MARK}**Nit:** ${QUESTION_LEAD}Bold already.`,
+      `${AI_MARK}${QUESTION_LEAD}Body.`,
+    ]);
+    const marked = buildPlan({
+      me: FAKE_USER,
+      mark: true,
+      severity: false,
+      runs: [{ id: 1, sourceHead: SOURCE, targetHead: TARGET, mergeBase: BASE }],
+      items: items.slice(0, 1),
+      comments: [],
+    }).map((p) => p.body);
+    expect(marked).toEqual([`${AI_MARK}${NIT}${QUESTION_LEAD}Body.`]);
+  });
 });

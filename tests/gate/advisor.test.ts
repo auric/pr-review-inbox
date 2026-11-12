@@ -74,6 +74,15 @@ describe("Gate G-ADV helpers", () => {
     expect(advisorOff({ init: undefined, used: false }, 1)).toBe("UNKNOWN");
     expect(advisorOff(undefined, 1)).toBe("UNKNOWN");
   });
+
+  // GADV.5b: run "advisor" omits the advisor from --tools. The control is run "tools", which lists it in --tools.
+  test("GADV.5b passes when the run without the advisor in --tools makes no call and the control run calls it", () => {
+    const init = { type: "system", subtype: "init", tools: ["Read"] };
+    expect(advisorOff({ init, used: false }, 1)).toBe("PASS");
+    expect(advisorOff({ init, used: true }, 1)).toBe("FAIL");
+    expect(advisorOff({ init, used: true }, 0)).toBe("FAIL");
+    expect(advisorOff({ init, used: false }, 0)).toBe("UNKNOWN");
+  });
 });
 
 // An empty PATH folder: the dry run then finds no claude and runs no CLI at all.
