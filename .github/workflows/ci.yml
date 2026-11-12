@@ -24,7 +24,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # The Windows runner runs the tests about 3 times slower than Linux.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 90 || 45 }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
