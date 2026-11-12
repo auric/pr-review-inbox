@@ -55,13 +55,19 @@ export type FakeScenario = {
   // fields of integration-check.md SU3; check is a CLI safety check with no type, as the B22 redirect. files: what the command writes, by
   // path relative to the cwd, with no Write call, as a build does. output: the tool_result text of a call that runs. run: argv lists that
   // the call runs in the cwd with the env of the CLI, as `bash -c 'git ...'` runs past the git deny (Gate B34). Each record gets { ran }.
+  // waitMs: the time between the tool_use and the tool_result, as a long command (part-session.md section 2.10).
   bash?: {
     command: string;
     refused?: "allowlist" | "deny" | "check";
     files?: { path: string; text?: string; link?: string }[];
     output?: string;
     run?: string[][];
+    waitMs?: number;
   }[];
+  // part-session.md section 2.10: start and send no stream line, and wait forever.
+  silent?: boolean;
+  // Tools that the init of a resume or an implement run lists beyond --tools (the init check).
+  initExtra?: string[];
   // docs/plans/review-v2/spec.md section 2.9: the notes of the echo reply result, and the cites of its first reply. Absent: none.
   notes?: unknown;
   cites?: unknown;
@@ -318,6 +324,29 @@ export function echoConsult(stdin: string, fix = false) {
   return fix ? { answers, fix: { summary: "Echo: no fix.", threads: [], edits: [], coverage: NO_COVERAGE } } : { answers };
 }
 
+// The lines of stdin as they come.
+async function* stdinLines() {
+  const r = Bun.stdin.stream().getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (let c = await r.read(); !c.done; c = await r.read()) {
+    buf += dec.decode(c.value, { stream: true });
+    for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+      yield buf.slice(0, i);
+      buf = buf.slice(i + 1);
+    }
+  }
+  if (buf.trim()) yield buf;
+}
+
+// The text of one stream-json user message (scripts/gate/session.ts userLine).
+function messageText(line: string) {
+  const c = (JSON.parse(line) as { message?: { content?: unknown } }).message?.content;
+  return typeof c === "string" ? c : JSON.stringify(c);
+}
+
+const LIVE_WAIT_MS = 30_000;
+
 async function main() {
   const [scenarioPath = "", ...args] = process.argv.slice(2);
   const base: FakeScenario = JSON.parse(readFileSync(scenarioPath, "utf8"));
@@ -326,7 +355,11 @@ async function main() {
   const props = JSON.parse(flag("--json-schema") ?? "null")?.properties ?? {};
   const kind = schemaKind(props);
   const run = args.includes("-p");
-  const stdin = run ? await Bun.stdin.text() : "";
+  // part-session.md section 2.9: with stream-json input, the first message is the prompt, and later messages come during the run.
+  const live = run && flag("--input-format") === "stream-json";
+  const input = live ? stdinLines() : null;
+  const first = input ? await input.next() : null;
+  const stdin = first ? (first.done ? "" : messageText(first.value)) : run ? await Bun.stdin.text() : "";
   const key = callKey(args, stdin);
   const list = key ? base.seq?.[key] : undefined;
   type Rec = { argv?: string[]; stdin?: string; context?: Record<string, string> };
@@ -399,6 +432,39 @@ async function main() {
     writeFileSync(f, "{}");
   }
 
+  // Integration-check.md line 190 and U59: without --no-session-persistence the run writes <projects>/<encoded cwd>/<session id>.jsonl.
+  // A fork gets a new ID and starts with the lines of the resumed file, which stays unchanged (U47). Its init names the new ID.
+  const persist = !args.includes("--no-session-persistence") && typeof s.auth.projectsDirectory === "string";
+  const sid = persist && resume !== undefined ? crypto.randomUUID() : session;
+  const transcript = persist ? join(s.auth.projectsDirectory as string, name, `${sid}.jsonl`) : null;
+  const keepLine = (l: string) => {
+    if (transcript) appendFileSync(transcript, `${l}\n`);
+  };
+  if (transcript) {
+    mkdirSync(dirname(transcript), { recursive: true });
+    writeFileSync(transcript, resume !== undefined ? readFileSync(resume, "utf8") : "");
+    keepLine(JSON.stringify({ type: "user", message: { role: "user", content: stdin } }));
+  }
+
+  // Each later stream-json message gets a record { input } and one more result event.
+  const inbox: string[] = [];
+  let eof = !input;
+  if (input)
+    void (async () => {
+      for await (const l of input) {
+        if (!l.trim()) continue;
+        const text = messageText(l);
+        record({ input: text });
+        keepLine(JSON.stringify({ type: "user", message: { role: "user", content: text } }));
+        inbox.push(text);
+      }
+      eof = true;
+    })();
+
+  if (s.silent) {
+    setInterval(() => {}, 1000);
+    return;
+  }
   if (s.hang) {
     const child = Bun.spawn([process.execPath, "-e", CHILD], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
     child.stdin.end();
@@ -415,8 +481,8 @@ async function main() {
     record({ orphanPid: orphan.pid });
   }
 
-  // The real CLI streams a Write call and its result for each file that it writes. A junction has no Write call.
-  const writeEvents: string[] = [];
+  // The real CLI streams a Write call and its result for each file that it writes. A junction has no Write call. A number is a pause.
+  const writeEvents: (string | number)[] = [];
   for (const w of s.writes ?? []) {
     const p = resolve(process.cwd(), w.path);
     const r = relative(process.cwd(), p);
@@ -472,6 +538,7 @@ async function main() {
         parent_tool_use_id: null,
         message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: b.command } }] },
       }),
+      ...(b.waitMs ? [b.waitMs] : []),
       ...(b.refused
         ? [
             JSON.stringify({
@@ -529,8 +596,10 @@ async function main() {
             .filter((t) => t && !(s.noBash && t === "Bash"))
             .map((t) => (t === "Agent" ? "Task" : t)),
           "StructuredOutput",
+          ...(s.initExtra ?? []),
         ],
         mcp_servers: servers.map((name) => ({ name, status: "connected" })),
+        ...(persist && { session_id: sid }),
       });
     }
     // Gate B8: init lists the agent tool as Task. The real CLI lists it only when --tools names Agent.
@@ -554,14 +623,22 @@ async function main() {
     const e = JSON.parse(l);
     return e.type === "system" && e.subtype === "init";
   });
-  if (initAt < 0) for (const w of writeEvents) await Bun.write(Bun.stdout, `${w}\n`);
+  const out = async (l: string) => {
+    keepLine(l);
+    await Bun.write(Bun.stdout, `${l}\n`);
+  };
+  const emit = async () => {
+    for (const w of writeEvents) await (typeof w === "number" ? Bun.sleep(w) : out(w));
+  };
+  const placed = (l: string) =>
+    typeof init?.cwd === "string"
+      ? l.replaceAll(esc(`${init.cwd}\\`), esc(process.cwd() + sep)).replaceAll(esc(init.cwd), esc(process.cwd()))
+      : l;
+  if (initAt < 0) await emit();
   for (const [k, l] of lines.entries()) {
     if (s.hang && JSON.parse(l).type === "result") break;
-    await Bun.write(
-      Bun.stdout,
-      `${typeof init?.cwd === "string" ? l.replaceAll(esc(`${init.cwd}\\`), esc(process.cwd() + sep)).replaceAll(esc(init.cwd), esc(process.cwd())) : l}\n`,
-    );
-    if (k === initAt) for (const w of writeEvents) await Bun.write(Bun.stdout, `${w}\n`);
+    await out(placed(l));
+    if (k === initAt) await emit();
     await Bun.sleep(s.delayMs ?? 2);
   }
   if (s.stderr) await Bun.write(Bun.stderr, s.stderr);
@@ -569,6 +646,16 @@ async function main() {
     setInterval(() => {}, 1000);
     return;
   }
+  // Live input: one more result for each later message, until stdin closes.
+  const last = lines.findLast((l) => JSON.parse(l).type === "result");
+  const until = Date.now() + LIVE_WAIT_MS;
+  while ((!eof || inbox.length) && Date.now() < until) {
+    const text = inbox.shift();
+    if (text !== undefined && last) await out(placed(last));
+    else await Bun.sleep(10);
+  }
+  // An open stdin read keeps the process alive.
+  if (live) process.exit(s.exitCode ?? 0);
   process.exitCode = s.exitCode ?? 0;
 }
 

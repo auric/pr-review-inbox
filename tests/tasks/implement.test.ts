@@ -24,10 +24,11 @@ import { gitAuth } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import { DEFAULT_PROFILE, DOCS_RULE, EXPLORER_RULE, profileOf } from "../../src/server/review/catalog";
-import { IMPLEMENT_TOOLS, implementArgs } from "../../src/server/review/claude";
+import { IMPLEMENT_TOOLS, implementArgs, type RunOutcome } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
-import { createReviewJobs, IMPLEMENT_MCP_LINES } from "../../src/server/review/jobs";
+import { createReviewJobs, IMPLEMENT_MCP_LINES, type ImplementRunStart } from "../../src/server/review/jobs";
+import { LOOP_TEXT } from "../../src/server/review/stream";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { movedText } from "../../src/server/tasks/gitstate";
@@ -81,7 +82,7 @@ afterEach(async () => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 3 });
 });
 
-async function setup(o: { claudeConfigDir?: string } = {}) {
+async function setup(o: { claudeConfigDir?: string; sessionGates?: { resume: boolean; live: boolean } } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb3-impl-")));
   dirs.push(root);
   const r = await taskRemote(root);
@@ -100,6 +101,7 @@ async function setup(o: { claudeConfigDir?: string } = {}) {
     runnerCommand: runner.command,
     listTools: stubListTools,
     claudeConfigDir: o.claudeConfigDir ?? join(root, "no-claude-config"),
+    ...(o.sessionGates && { sessionGates: o.sessionGates }),
     // The fetch config carries the token. It must never reach the worktree, a context file, or the CLI env.
     repoRemote: async () => ({ url: r.remote, config: [["http.extraHeader", `Authorization: ${SECRET}`]] }),
   });
@@ -1162,6 +1164,23 @@ describe("a step with the Bash tool", () => {
     },
     SLOW,
   );
+
+  test(
+    "AC-B276: the loop guard ends a step at 5 equal calls; the task stops with the loop text, and the checked work stays",
+    async () => {
+      const s = await setup();
+      const same = { command: "echo test", output: "1 test failed" };
+      s.scenario({ writes: [{ path: "repo/src/app.ts", text: "changed\n" }], bash: Array.from({ length: 6 }, () => same) });
+      const { outcome } = await s.step({ shell: SHELL });
+      expect(outcome).toMatchObject({ status: "failed", result: null, problems: [], ask: false });
+      expect(s.blockedOf()?.text).toBe(LOOP_TEXT);
+      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
+      const d = JSON.parse(s.stepRow(outcome?.step as number).detail_json);
+      expect([s.stepRow(outcome?.step as number).state, d.checked, d.shell.commands.length]).toEqual(["failed", true, 5]);
+      expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("changed\n");
+    },
+    SLOW,
+  );
 });
 
 // docs/plans/review-v2/git-deny.md fix F (spec.md section 6.8, AC-B175 and AC-B176): Gate B34 showed that `bash -c 'git ...'` runs
@@ -1291,6 +1310,120 @@ describe("fix F: the git state around a step", () => {
       expect(s.blockedOf()).toBeNull();
       // The index is back, so the staged entry is in no commit.
       expect(await wtGit(s.wt, ["ls-files", "--", "src/staged.ts"])).toBe("");
+    },
+    SLOW,
+  );
+});
+
+// docs/plans/review-v2/part-session.md section 2.2 (package PS2): the session fields of an implement run in the jobs. PS3 builds the
+// start in startStep, so these tests build it by hand.
+describe("part sessions in the jobs", () => {
+  type S = Awaited<ReturnType<typeof setup>>;
+  // One implement run of part. after() gets the outcome of the runner.
+  function sessionRun(s: S, session: ImplementRunStart["session"], part = s.part) {
+    let seen: RunOutcome | null = null;
+    const start: ImplementRunStart = {
+      task: s.task,
+      kind: "implement",
+      key: `task:${s.task}:part:${part}:implement:T1.1:1`,
+      profile: profileOf(s.settings.profiles(), DEFAULT_PROFILE),
+      project: "PROJ",
+      repo: "repo",
+      cwd: s.wt.dir,
+      cache: s.wt.cache,
+      head: s.base,
+      base: s.base,
+      context: new Map(),
+      instructions: [],
+      prompt: () => "- Mode: implement\nDo the step.",
+      maxTurns: 10,
+      timeoutMs: 60_000,
+      ...(session && { session }),
+      started: () => {},
+      after: async (o, early) => {
+        seen = o;
+        return early ?? { status: o?.status ?? "failed", kind: o?.kind ?? null, text: o?.text ?? null, raw: "", ...(o && { outcome: o }) };
+      },
+      finish: () => undefined,
+    };
+    const r = s.review.taskRun(s.db, start, true);
+    if (r.status !== 202) throw new Error("The run did not start.");
+    return { done: r.done.then(() => seen as RunOutcome | null) };
+  }
+  const waitUntil = async (f: () => boolean, ms = 30_000) => {
+    const end = Date.now() + ms;
+    while (!f() && Date.now() < end) await Bun.sleep(20);
+    return f();
+  };
+  // A kept transcript of an earlier run, outside the step folder.
+  const oldFile = (s: S) => {
+    mkdirSync(join(s.root, "sessions"), { recursive: true });
+    const f = join(s.root, "sessions", "old.jsonl");
+    writeFileSync(f, `${JSON.stringify({ type: "user", message: { role: "user", content: "first" } })}\n`);
+    return f;
+  };
+
+  test(
+    "AC-B278: implementSteps passes keep and gives after() the kept file; with the gates off, a resume file and live input start a fresh run",
+    async () => {
+      const s = await setup();
+      const keep = join(s.root, "sessions");
+      const o = await sessionRun(s, { keep, resume: oldFile(s), live: true }).done;
+      const argv = s.runCalls().at(-1)?.argv ?? [];
+      expect(argv).not.toContain("--resume");
+      expect(argv).not.toContain("--input-format");
+      expect(argv).not.toContain("--no-session-persistence");
+      expect(s.runCalls().at(-1)?.stdin).toBe("- Mode: implement\nDo the step.");
+      expect(o?.status).toBe("completed");
+      expect(o?.kept).toBe(join(keep, `${o?.init?.session_id}.jsonl`));
+      expect(existsSync(o?.kept as string)).toBe(true);
+      // No session: the run passes the flag and keeps nothing.
+      const plain = await sessionRun(s, undefined).done;
+      expect(s.runCalls().at(-1)?.argv.at(-1)).toBe("--no-session-persistence");
+      expect(plain?.kept).toBeUndefined();
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B278: with the gates on, the run forks the resume file with live input",
+    async () => {
+      const s = await setup({ sessionGates: { resume: true, live: true } });
+      const keep = join(s.root, "sessions");
+      const old = oldFile(s);
+      const o = await sessionRun(s, { keep, resume: old, live: true }).done;
+      const argv = s.runCalls().at(-1)?.argv ?? [];
+      expect(argv.slice(0, 6)).toEqual(["-p", "--resume", old, "--fork-session", "--input-format", "stream-json"]);
+      expect(s.runCalls().at(-1)?.stdin).toBe("- Mode: implement\nDo the step.");
+      expect(o?.status).toBe("completed");
+      expect(o?.kept).not.toBe(old);
+      expect(readFileSync(o?.kept as string, "utf8").startsWith(readFileSync(old, "utf8"))).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B279: cancelPart ends only the runs of its part, by the key prefix task:<id>:part:<part>:",
+    async () => {
+      const s = await setup();
+      s.scenario({ hang: true });
+      let ended2 = false;
+      const one = sessionRun(s, undefined, s.part);
+      const two = sessionRun(s, undefined, s.part + 10);
+      void two.done.then(() => {
+        ended2 = true;
+      });
+      expect(
+        await waitUntil(() => readRecords<{ childPid?: number }>(join(s.root, "calls.jsonl")).filter((c) => c.childPid).length === 2),
+      ).toBe(true);
+      // A part with no run gives false. The key of part 1 is no prefix of the key of part 11.
+      expect(s.review.cancelPart(s.db, s.task, s.part + 1)).toBe(false);
+      expect(s.review.cancelPart(s.db, s.task, s.part)).toBe(true);
+      expect((await one.done)?.status).toBe("cancelled");
+      await Bun.sleep(300);
+      expect(ended2).toBe(false);
+      expect(s.review.cancelTask(s.db, s.task)).toBe(true);
+      expect((await two.done)?.status).toBe("cancelled");
     },
     SLOW,
   );

@@ -2,16 +2,31 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Starts, watches, and stops one Claude Code review process. The flags, env, and cwd rules come from integration-check.md, "Gate v3, local".
-import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { FileSink } from "bun";
 import { EFFORTS, type Effort, modelName } from "../../shared/dto";
-import type { RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
+import type { RunCut, RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
 import { RUN_LIMITS, RUN_TIME_MAX_MS } from "../../shared/task";
 import { log } from "../log";
 import { type ShellSpec, shellEnv, shellGitConfig, writeShellSettings } from "../tasks/shell";
 import { RUNTIME_ENV } from "./git";
-import { classify, createStreamParser, REFUSED_MAX, type Refusal, type RunNote } from "./stream";
+import {
+  ADVISOR_TOOL,
+  BASH_STALL_EXTRA_MS,
+  classify,
+  createStreamParser,
+  LOOP_MAX,
+  LOOP_TEXT,
+  LOOP_WARN,
+  REFUSED_MAX,
+  type Refusal,
+  type Repeat,
+  type RunNote,
+  STALL_MS,
+  stallText,
+} from "./stream";
 
 // Gate B ran on 2.1.295. From 2.1.302, -p refuses each call that needs approval (V7), and the Bash rules of a shell step rely on it.
 export const MIN_CLI_VERSION = "2.1.302";
@@ -94,7 +109,17 @@ export type ImplementSpec = {
   timeoutMs?: number;
   shell?: ShellSpec;
   explorer?: AgentSpec;
+  // docs/plans/review-v2/part-session.md section 2.2. keep: an absolute folder outside cwd. The run keeps its session, with no
+  // --no-session-persistence, and the run end moves its transcript into keep (RunOutcome.kept), also after a cancel. resume: an
+  // absolute kept .jsonl file outside cwd; the run forks it. live (section 2.9): stream-json input, so send() reaches the run.
+  keep?: string;
+  resume?: string;
+  live?: boolean;
 };
+
+// Gate B37 (part-session.md section 4) has not run. resume needs U97, U98, and U103. live needs U104. While a value is false, jobs.ts
+// passes no resume file or no live input, so each run starts a fresh session.
+export const SESSION_GATES: Readonly<{ resume: boolean; live: boolean }> = { resume: false, live: false };
 
 // Gate B17 (integration-check.md U72): with these tools, --restricted keeps Edit and Write inside the cwd. No Bash, no Agent.
 export const IMPLEMENT_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"];
@@ -117,6 +142,13 @@ export type RunOutcome = {
   refused?: Refusal[];
   // The --advisor value of the run. null: off. Absent: the run did not start.
   advisor?: string | null;
+  // Verdict.cut, and StreamState.context, resetsAt, and loop. Absent: the run did not start.
+  cut?: RunCut | null;
+  context?: number | null;
+  resetsAt?: number | null;
+  loop?: Repeat | null;
+  // An ImplementSpec with keep: the kept transcript, or null when no file was there to keep. Absent: no keep, or the run did not start.
+  kept?: string | null;
   exitCode: number | null;
   stderrTail: string;
 };
@@ -126,7 +158,15 @@ export type RunnerOptions = {
   command?: string[];
   // The time of a run without its own timeoutMs. A function is read at the start of each run. Default: RUN_TIMEOUT_MS.
   timeoutMs?: number | (() => number);
+  // The stall guard of implement runs (stream.ts STALL_MS and BASH_STALL_EXTRA_MS). Tests pass short times.
+  stall?: { idleMs: number; bashExtraMs: number };
 };
+
+// The message of the loop guard to a live run (part-session.md section 2.10).
+export const LOOP_MESSAGE = `You made the same call ${LOOP_WARN} times with the same result. Change the approach, or set question and stop.`;
+// One stream-json input line (code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode), as scripts/gate/session.ts userLine sends it.
+const userLine = (text: string) =>
+  `${JSON.stringify({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null })}\n`;
 
 // Gate B: ANTHROPIC_* selects API billing. CLAUDECODE, CLAUDE_PID, and CLAUDE_CODE_* mark a nested session. CLAUDE_CODE_GIT_BASH_PATH
 // is the user's Git Bash for the Bash tool (V12). GATE_* hold the tokens of the gate scripts.
@@ -347,14 +387,46 @@ export async function killTree(pid: number, end = false): Promise<KillReport> {
 }
 
 // Gate B4: --no-session-persistence still writes these per-cwd folders. Their name is the cwd with each non-alphanumeric character replaced by "-".
+const cwdName = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
 function removeCwdFolders(cwd: string, projectsDir: string) {
-  const name = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+  const name = cwdName(cwd);
   for (const dir of [join(projectsDir, name), join(tmpdir(), "claude", name)])
     try {
       rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
     } catch (e) {
       log(`Could not delete a Claude Code session folder: ${(e as Error).message}`);
     }
+}
+
+// The session ID comes from the stream and goes into a path (scripts/gate/claude-checks.ts B37_SID).
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const KEEP_TRIES = 10;
+const KEEP_WAIT_MS = 200;
+
+// part-session.md section 2.2: copies <projectsDir>/<encoded cwd>/<id>.jsonl into dir before removeCwdFolders deletes the folder. A copy
+// works across volumes. A killed CLI can hold the file for a moment on Windows (EBUSY, EPERM). Returns the kept file, or null.
+async function keepTranscript(projectsDir: string, cwd: string, id: string, dir: string): Promise<string | null> {
+  if (!SESSION_ID.test(id)) return null;
+  const to = join(dir, `${id}.jsonl`);
+  for (let i = 1; ; i++)
+    try {
+      mkdirSync(dir, { recursive: true });
+      copyFileSync(join(projectsDir, cwdName(cwd), `${id}.jsonl`), to);
+      return to;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      if (!["EBUSY", "EPERM"].includes(code) || i >= KEEP_TRIES) {
+        log(`Could not keep the Claude Code session ${id}: ${(e as Error).message}`);
+        return null;
+      }
+      await Bun.sleep(KEEP_WAIT_MS);
+    }
+}
+
+// path is outside dir: not dir itself and not under it.
+function outside(dir: string, path: string) {
+  const r = relative(resolve(dir), resolve(path));
+  return r === ".." || r.startsWith(`..${sep}`) || isAbsolute(r);
 }
 
 // Checks the servers and writes mcp.json into appDir. tools: the full names of the chosen tools. allow: the --allowedTools entries.
@@ -509,11 +581,17 @@ export function resumeArgs(spec: ResumeSpec) {
 // rule (SU1). Unrestricted uses the same flags: --restricted refuses bypassPermissions, and dontAsk refuses more (Gate B32).
 // explorer (task-subagents.md, Design): the run is rl-main with Agent(rl-explorer), as a review run (Gates B2, B9), and the init check
 // also accepts Agent and Task (Gate B8). Gate B35 is open.
+// keep, resume, and live (part-session.md sections 2.2 and 2.9) give the argv of scripts/gate/session.ts sessionArgs, which Gate B37
+// checks. A transcript replays as trusted history, so keep and resume stay outside the files that the step can change.
 export function implementArgs(spec: ImplementSpec) {
   const builtins = [...IMPLEMENT_TOOLS, ...(spec.shell ? ["Bash"] : [])];
   checkAgentFields([spec, ...(spec.explorer ? [spec.explorer] : [])]);
   if (spec.shell && !spec.appDir) throw new Error("A shell step needs an app folder outside the step folder.");
   if (spec.explorer && !spec.appDir) throw new Error("A step with rl-explorer needs an app folder outside the step folder.");
+  if (spec.resume !== undefined && (!isAbsolute(spec.resume) || !spec.resume.endsWith(".jsonl") || !outside(spec.cwd, spec.resume)))
+    throw new Error("The session path must be an absolute .jsonl path outside the step folder.");
+  if (spec.keep !== undefined && (!isAbsolute(spec.keep) || !outside(spec.cwd, spec.keep)))
+    throw new Error("The session folder must be an absolute path outside the step folder.");
   const mcp = spec.appDir && spec.mcpServers ? writeMcp(spec.appDir, spec.mcpServers) : null;
   const settings = spec.shell && spec.appDir ? writeShellSettings(spec.appDir, spec.shell) : null;
   let agentsFile: string | null = null;
@@ -530,6 +608,8 @@ export function implementArgs(spec: ImplementSpec) {
   }
   const args = [
     "-p",
+    ...(spec.resume ? ["--resume", spec.resume, "--fork-session"] : []),
+    ...(spec.live ? ["--input-format", "stream-json"] : []),
     "--output-format",
     "stream-json",
     "--verbose",
@@ -551,7 +631,7 @@ export function implementArgs(spec: ImplementSpec) {
     ...(spec.model ? ["--model", spec.model] : []),
     ...(spec.effort ? ["--effort", spec.effort] : []),
     ...(spec.advisor ? ["--advisor", spec.advisor] : []),
-    "--no-session-persistence",
+    ...(spec.keep ? [] : ["--no-session-persistence"]),
   ];
   if (JSON.stringify(args).length > MAX_ARGV)
     throw new Error("The MCP tool lists are too long for the command line. Pick fewer MCP servers.");
@@ -563,8 +643,10 @@ export function implementArgs(spec: ImplementSpec) {
   };
 }
 
+type Active = { cancelled: boolean; pid?: number; send?: (text: string) => boolean };
+
 export function createClaudeRunner(opts: RunnerOptions = {}) {
-  let active: { cancelled: boolean; pid?: number } | undefined;
+  let active: Active | undefined;
 
   // Finds the CLI, checks its version, and runs `claude auth status`. It starts no model call.
   async function check(): Promise<RunnerCheck> {
@@ -600,7 +682,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
   // Runs one review. onEvents gets each new or changed run_event. Only one run is active at a time.
   async function run(spec: RunSpec | ResumeSpec | ImplementSpec, onEvents: (events: RunEvent[]) => void = () => {}): Promise<RunOutcome> {
     if (active) throw new Error("A review run is active.");
-    const self: { cancelled: boolean; pid?: number } = { cancelled: false };
+    const self: Active = { cancelled: false };
     active = self;
     const empty = (status: RunOutcome["status"], kind: RunErrorKind | null, text: string | null): RunOutcome => ({
       status,
@@ -615,6 +697,10 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
     let cwd: string | undefined;
     let projectsDir: string | undefined;
     let proc: { exitCode: number | null; exited: Promise<number> } | undefined;
+    // The finally block keeps the transcript of the parser's init and sets outcome.kept.
+    let parser: ReturnType<typeof createStreamParser> | undefined;
+    let outcome: RunOutcome | undefined;
+    const keep = "implement" in spec ? spec.keep : undefined;
     try {
       const c = await check();
       if (!c.ok) return empty("failed", c.kind === "auth" ? "auth" : "process", c.message);
@@ -630,12 +716,16 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const advisor = "resume" in spec ? null : spec.advisor;
       // implementArgs wrote this file beside shell.json.
       const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";
-      const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
+      const ps = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
+      parser = ps;
+      const live = "implement" in spec && !!spec.live;
+      // part-session.md section 2.10: the stall and loop guards end implement runs only.
+      const guard = "implement" in spec ? (opts.stall ?? { idleMs: STALL_MS, bashExtraMs: BASH_STALL_EXTRA_MS }) : null;
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
         env: { ...advisorEnv(shell ? shellEnv(childEnv(), shell, shellGit) : childEnv(), advisor), [RUN_MARKER]: marker },
-        stdin: new Blob([spec.prompt]),
+        stdin: live ? "pipe" : new Blob([spec.prompt]),
         stdout: "pipe",
         stderr: "pipe",
         // POSIX: a new process group, so one kill ends the CLI and its MCP children.
@@ -645,27 +735,85 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       self.pid = p.pid;
       contain(p.pid, marker);
 
+      // Live input (section 2.9): the prompt is the first message. stdin closes when each message has its result event.
+      const sink = live ? (p.stdin as FileSink) : undefined;
+      let sent = 0;
+      let closed = false;
+      // A write to a pipe that the CLI has closed can throw or reject.
+      const quiet = (f: () => unknown) => {
+        try {
+          const v = f();
+          if (v instanceof Promise) v.catch(() => {});
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const write = (text: string) => {
+        if (!sink || closed || !quiet(() => sink.write(userLine(text)))) return false;
+        quiet(() => sink.flush());
+        sent++;
+        return true;
+      };
+      const close = () => {
+        if (sink && !closed) quiet(() => sink.end());
+        closed = true;
+      };
+      write(spec.prompt);
+      if (sink) self.send = write;
+
       let stopped = false;
+      let exited = false;
       let error: unknown;
       let timedOut = false;
+      let cut: { cut: "stall" | "loop"; text: string } | null = null;
+      let warned = 0;
       const timer = setTimeout(() => {
         timedOut = true;
         void killTree(p.pid);
       }, limit);
+      const end = (why: { cut: "stall" | "loop"; text: string }) => {
+        cut ??= why;
+        stopped = true;
+        void killTree(p.pid);
+      };
+      // The stall deadline counts from the last stream line. An open Agent or Advisor call keeps the normal deadline. Any other open call
+      // stops the stall guard, and only the run time limit applies.
+      let stall: ReturnType<typeof setTimeout> | undefined;
+      const arm = () => {
+        clearTimeout(stall);
+        if (!guard || stopped || exited) return;
+        const open = ps.open();
+        const ms = open.some((e) => e.tool === "Bash")
+          ? (shell?.bashTimeoutSec ?? 0) * 1000 + guard.bashExtraMs
+          : open.some((e) => e.tool !== "Agent" && e.tool !== ADVISOR_TOOL)
+            ? null
+            : guard.idleMs;
+        if (ms !== null) stall = setTimeout(() => end({ cut: "stall", text: stallText(ms) }), ms);
+      };
+      arm();
       const handle = (line: string) => {
         if (stopped || self.cancelled || !line.trim()) return;
-        const changed = parser.line(line);
-        if (parser.state.badTools.length || parser.state.noBash) {
+        const changed = ps.line(line);
+        if (ps.state.badTools.length || ps.state.noBash) {
           stopped = true;
           void killTree(p.pid);
           return;
         }
         if (changed.length) onEvents(changed);
         // SU5 checks that the tree kill also ends a running Bash command and its children.
-        if (parser.state.refused.length > REFUSED_MAX) {
+        if (ps.state.refused.length > REFUSED_MAX) {
           stopped = true;
           void killTree(p.pid);
+          return;
         }
+        if (guard && (ps.state.loop?.count ?? 0) >= LOOP_MAX) return end({ cut: "loop", text: LOOP_TEXT });
+        if (ps.state.loopWarns > warned) {
+          warned = ps.state.loopWarns;
+          write(LOOP_MESSAGE);
+        }
+        if (ps.state.results.length >= sent) close();
+        arm();
       };
       let buf = "";
       const out = readText(p.stdout, (text) => {
@@ -687,25 +835,34 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       }).catch(() => {});
 
       const exitCode = await p.exited;
+      exited = true;
       clearTimeout(timer);
+      clearTimeout(stall);
+      self.send = undefined;
+      close();
       // A leftover child can hold the pipes open. It must not block the run.
       await Promise.race([Promise.all([out, err]), Bun.sleep(DRAIN_TIMEOUT_MS)]);
       stopped = true;
       if (error) throw error;
-      const tail = parser.stop();
+      const tail = ps.stop();
       if (tail.length) onEvents(tail);
-      const verdict = classify(parser.state, { exitCode, cancelled: self.cancelled, timedOut });
-      return {
+      const verdict = classify(ps.state, { exitCode, cancelled: self.cancelled, timedOut, guard: cut });
+      outcome = {
         ...verdict,
-        init: parser.state.inits[0] ?? null,
-        events: parser.events(),
-        notes: parser.state.notes,
-        refused: parser.state.refused,
+        init: ps.state.inits[0] ?? null,
+        events: ps.events(),
+        notes: ps.state.notes,
+        refused: ps.state.refused,
         advisor: advisor ?? null,
+        context: ps.state.context,
+        resetsAt: ps.state.resetsAt,
+        loop: ps.state.loop,
         exitCode,
         stderrTail: stderr,
       };
+      return outcome;
     } finally {
+      self.send = undefined;
       if (proc && self.pid !== undefined) {
         if (proc.exitCode === null) {
           await killTree(self.pid);
@@ -713,6 +870,12 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         }
         // A command that Claude started can outlive the CLI, for example `cmd &`.
         await killTree(self.pid, true);
+      }
+      // part-session.md section 2.2: the keep step runs before the folder delete, for every run end. The returned outcome gets the file.
+      const id = parser?.state.inits[0]?.session_id;
+      if (keep && cwd && projectsDir) {
+        const kept = id ? await keepTranscript(projectsDir, cwd, id, keep) : null;
+        if (outcome) outcome.kept = kept;
       }
       if (cwd && projectsDir) removeCwdFolders(cwd, projectsDir);
       active = undefined;
@@ -727,7 +890,12 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
     return true;
   }
 
-  return { check, run, cancel };
+  // Writes a user message to the stdin of the active run (ImplementSpec live). false: no live run, or its stdin is closed.
+  function send(text: string): boolean {
+    return active?.send?.(text) ?? false;
+  }
+
+  return { check, run, cancel, send };
 }
 
 export type ReviewRunner = ReturnType<typeof createClaudeRunner>;

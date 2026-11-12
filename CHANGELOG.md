@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build a Jira task: a Claude step now stops when Claude sends nothing for 15 minutes and no command runs. A running command gets its time limit plus 5 minutes first. A step also stops when Claude makes the same call 5 times with the same result. Before, such a step ran until its time limit. Resume keeps the work of the step.
 - Build a Jira task: when a reviewer withdraws "Needs work" and the PR gate still fails, the part now shows "PR open" again, not "Changes asked".
 - Build a Jira task: Resume now keeps the work. A step that Claude finished is not run again, and a step that stopped early (Stop, its time limit, its turn cap, or a failed run) continues with its earlier changes. The next try reads the list and the diff of those changes. Tests that stay red after the fix tries get new fix tries with the earlier fixes kept. Before, Resume dropped every change since the last commit into a patch file and ran the step again from the start.
 - Build a Jira task: the app still resets to the last commit, with the dropped changes in a patch file, after an app restart in a step, after a step changed a path that Claude may not change, and after Reject of a plan change. The next try reads that patch. When Claude asks to run a command, its changes now stay for the next try.

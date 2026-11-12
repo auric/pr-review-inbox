@@ -108,7 +108,15 @@ import {
   withSkills,
   withVerifyDelegation,
 } from "./catalog";
-import { type AgentSpec, createClaudeRunner, type McpServerSpec, RUN_TIMEOUT_MS, type RunnerCheck, type RunOutcome } from "./claude";
+import {
+  type AgentSpec,
+  createClaudeRunner,
+  type McpServerSpec,
+  RUN_TIMEOUT_MS,
+  type RunnerCheck,
+  type RunOutcome,
+  SESSION_GATES,
+} from "./claude";
 import { codegraphEntry, codegraphIndex, indexCodegraph } from "./codegraph";
 import {
   askConversation,
@@ -260,6 +268,8 @@ export type ReviewJobsOptions = {
   // The Claude Code config folder for profile skills and MCP servers. Absent: CLAUDE_CONFIG_DIR or the default, read at each run.
   claudeConfigDir?: string;
   now?: () => number;
+  // Absent: SESSION_GATES (claude.ts). The tests turn a gate on.
+  sessionGates?: typeof SESSION_GATES;
 };
 
 type Runner = ReturnType<typeof createClaudeRunner>;
@@ -360,6 +370,9 @@ export type ImplementRunStart = {
   timeoutMs: number;
   // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
   shell?: StepShell;
+  // part-session.md section 2.2: ImplementSpec keep, resume, and live. Each gate of SESSION_GATES that is off drops its field. after()
+  // gets the kept transcript in o.kept.
+  session?: { keep: string; resume?: string; live?: boolean };
   started: (db: Database, run: number) => void;
   after: (o: RunOutcome | null, early: Ending | null, servers: string[], gaps: string[]) => Promise<Ending>;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
@@ -424,6 +437,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   // Settings > Tasks "Review run time", read at the start of each run. A task step gives its own time.
   const runTimeMs = () => runLimitsOf(settings.config()?.runLimits).reviewMinutes * 60_000;
   const newRunner = () => createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
+  const gates = opts.sessionGates ?? SESSION_GATES;
   // Runs only check(). Each run gets its own runner.
   const checker = newRunner();
   // Its own runner: a proposal uses no run folder, no git ref, and no database, so it runs beside the run pool.
@@ -1527,6 +1541,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                 timeoutMs: t.timeoutMs,
                 explorer: explorerAgent(j.profile),
                 ...(t.shell && { shell: { ...t.shell, dataDir, origins: originsOf(settings.config()) } }),
+                ...(t.session && {
+                  keep: t.session.keep,
+                  ...(gates.resume && t.session.resume && { resume: t.session.resume }),
+                  ...(gates.live && t.session.live && { live: true }),
+                }),
               },
               (events) => {
                 j.db.transaction(() => upsertEvents(j.db, j.id, events))();
@@ -2450,6 +2469,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // of the task: the runs in the pool and the runs beside it.
     cancelTask(db: Database, task: number): boolean {
       return cancelWhere((j) => j.pr === null && j.db === db && j.t.task === task);
+    },
+
+    // part-session.md section 2.12, Hold: cancels only the runs of one part, by the key prefix task:<id>:part:<part>: of its steps and
+    // own reviews (implement.ts startStep, loop.ts reviewRun).
+    cancelPart(db: Database, task: number, part: number): boolean {
+      return cancelWhere((j) => j.pr === null && j.db === db && j.t.task === task && j.key.startsWith(`task:${task}:part:${part}:`));
     },
 
     // The conflict of a full pool, or null while a slot is free.

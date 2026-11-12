@@ -5,19 +5,29 @@ import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mainUsage, resumeShape, sessionArgs } from "../../scripts/gate/session";
 import { explorerAgent, type Profile, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import {
   createClaudeRunner,
   IMPLEMENT_TOOLS,
   type ImplementSpec,
   implementArgs,
+  LOOP_MESSAGE,
   MIN_CLI_VERSION,
   RUN_MARKER,
   type RunnerOptions,
   type RunSpec,
 } from "../../src/server/review/claude";
 import { addUsage, usageOf } from "../../src/server/review/judge";
-import { classify, createStreamParser, NO_BASH_TEXT, NOTES_MAX } from "../../src/server/review/stream";
+import {
+  classify,
+  createStreamParser,
+  LOOP_TEXT,
+  NO_BASH_TEXT,
+  NOTES_MAX,
+  stallText,
+  TIME_LIMIT_TEXT,
+} from "../../src/server/review/stream";
 import { type ShellSpec, shellSettings } from "../../src/server/tasks/shell";
 import { CD_REFUSED_NOTE, type RunEvent } from "../../src/shared/run-log";
 import { implementJsonSchema, SHELL_MODES } from "../../src/shared/task";
@@ -192,10 +202,16 @@ describe("outcomes", () => {
     expect(agent).toMatchObject({ model: "claude-haiku-5-5", tokens: 4601 });
   });
 
-  test("max turns", async () => {
+  test("max turns (AC-B281: cut turns)", async () => {
     const { runner, spec } = setup({ fixture: real("b5-max-turns.jsonl"), exitCode: 1 });
     const o = await runner.run(spec);
-    expect(o).toMatchObject({ status: "failed", kind: "max_turns", text: "Reached maximum number of turns (1)", exitCode: 1 });
+    expect(o).toMatchObject({
+      status: "failed",
+      kind: "max_turns",
+      text: "Reached maximum number of turns (1)",
+      exitCode: 1,
+      cut: "turns",
+    });
     expect(o.events.map((e) => [e.tool, e.target, e.status])).toEqual([["Read", "a.txt", "error"]]);
   });
 
@@ -209,6 +225,8 @@ describe("outcomes", () => {
     const { runner, spec } = setup({ fixture: join(SYNTHETIC, "usage-limit.jsonl"), exitCode: 1 });
     const o = await runner.run(spec);
     expect(o).toMatchObject({ status: "failed", kind: "usage_limit", text: "Usage limit reached. Your limit resets at 6pm." });
+    // AC-B280: the raw resetsAt of the rejected rate_limit_event. U106 has not verified its unit.
+    expect([o.resetsAt, o.cut]).toEqual([1791678600, null]);
   });
 
   test("schema failure: a success without structured_output (Gate B9 first try)", async () => {
@@ -1187,5 +1205,330 @@ describe("advisor", () => {
     );
     expect(p.events()[0]).toMatchObject({ tool: "Advisor", target: "declined", status: "ok" });
     expect(p.state.badTools).toEqual([]);
+  });
+});
+
+// docs/plans/review-v2/part-session.md sections 2.2, 2.4, 2.9, 2.10, and 2.11 (package PS2). The fake CLI writes a transcript only for
+// a run without --no-session-persistence, and a fork gets a new session ID.
+describe("part sessions", () => {
+  const SCHEMA_I = implementJsonSchema();
+  const SHELL: Omit<ShellSpec, "dataDir"> = {
+    mode: "allowlist",
+    rules: ["make *"],
+    bashTimeoutSec: 1,
+    origins: ["https://bitbucket.example.test"],
+  };
+  // The fake CLI starts in well under idleMs. An open Bash call of bashTimeoutSec 1 gets 1 s + 5 s.
+  const STALL = { idleMs: 2500, bashExtraMs: 5000 };
+  const BASH_LIMIT_MS = SHELL.bashTimeoutSec * 1000 + STALL.bashExtraMs;
+  const SLOW = 30_000;
+  function session(scenario: Partial<FakeScenario>, opts: RunnerOptions = {}, shell = false) {
+    const s = setup(scenario, opts);
+    const keep = join(s.base, "sessions");
+    const spec: ImplementSpec = {
+      implement: true,
+      cwd: s.work,
+      appDir: s.app,
+      prompt: "- Mode: implement\nDo the step.",
+      schema: SCHEMA_I,
+      maxTurns: 80,
+      ...(shell && { shell: { ...SHELL, dataDir: s.base } }),
+    };
+    const run = () => s.calls().find((c) => c.argv.includes("-p")) as Call;
+    const inputs = () => readRecords<{ input?: string }>(join(s.base, "record.jsonl")).flatMap((r) => r.input ?? []);
+    return { ...s, spec, keep, run, inputs };
+  }
+  const lines = (file: string) =>
+    readFileSync(file, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  const same = { command: "make test", output: "1 test failed" };
+  const repeat = (n: number) => Array.from({ length: n }, () => same);
+
+  test("AC-B271: a session run has no --no-session-persistence, a resume adds --resume and --fork-session, and the argv is the Gate B37 argv", () => {
+    const { work, app, base, keep } = session({});
+    const spec: ImplementSpec = {
+      implement: true,
+      cwd: work,
+      appDir: app,
+      prompt: "",
+      schema: SCHEMA_I,
+      maxTurns: 80,
+      shell: { ...SHELL, dataDir: base },
+      explorer: { description: "Read-only search.", prompt: "You search." },
+    };
+    const plain = implementArgs(spec).args;
+    const resume = join(keep, "old.jsonl");
+    const kept = implementArgs({ ...spec, keep }).args;
+    expect(plain.at(-1)).toBe("--no-session-persistence");
+    expect(kept).not.toContain("--no-session-persistence");
+    expect(kept).toEqual(sessionArgs(plain));
+    const fork = implementArgs({ ...spec, keep, resume, live: true }).args;
+    expect(fork.slice(0, 6)).toEqual(["-p", "--resume", resume, "--fork-session", "--input-format", "stream-json"]);
+    expect(fork).toEqual(sessionArgs(plain, { resume, live: true }));
+    expect(resumeShape(fork)).toBe(true);
+    // A resume without keep forks with no new transcript (Gate B16 d).
+    expect(implementArgs({ ...spec, resume }).args.at(-1)).toBe("--no-session-persistence");
+    // A transcript in the step folder could be changed by the step, and it replays as trusted history.
+    expect(() => implementArgs({ ...spec, keep: join(work, "sessions") })).toThrow("outside the step folder");
+    expect(() => implementArgs({ ...spec, keep: "sessions" })).toThrow("outside the step folder");
+    for (const bad of ["old.jsonl", join(keep, "old.json"), join(work, "context", "old.jsonl")])
+      expect(() => implementArgs({ ...spec, keep, resume: bad })).toThrow("absolute .jsonl path outside the step folder");
+  });
+
+  test("AC-B272: the keep step moves the transcript into keep before the per-cwd folders go", async () => {
+    const { runner, spec, keep, projects, work, run } = session({ fixture: flatSuccess() });
+    const o = await runner.run({ ...spec, keep });
+    expect(o.status).toBe("completed");
+    expect(run().argv).not.toContain("--no-session-persistence");
+    const sid = o.init?.session_id as string;
+    expect(sid).toMatch(/^[0-9a-f-]{36}$/);
+    expect(o.kept).toBe(join(keep, `${sid}.jsonl`));
+    const kept = lines(o.kept as string);
+    expect(kept[0]).toEqual({ type: "user", message: { role: "user", content: spec.prompt } });
+    expect(kept.some((e) => e.type === "result")).toBe(true);
+    expect(existsSync(join(projects, encoded(realpathSync.native(work))))).toBe(false);
+    // A run without keep keeps nothing and passes the flag.
+    const plain = await runner.run(spec);
+    expect(plain.kept).toBeUndefined();
+    expect(readdirSync(keep)).toEqual([`${sid}.jsonl`]);
+  });
+
+  test("AC-B272: a cancel still keeps the partial transcript", async () => {
+    const { runner, spec, keep, calls } = session({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 });
+    const o = await runner.run({ ...spec, keep }, (ev) => {
+      if (ev.length) runner.cancel();
+    });
+    expect(o.status).toBe("cancelled");
+    const sid = o.init?.session_id as string;
+    expect(o.kept).toBe(join(keep, `${sid}.jsonl`));
+    expect(lines(o.kept as string).some((e) => e.type === "system" && e.subtype === "init" && e.session_id === sid)).toBe(true);
+    const pid = calls().find((c) => c.argv.includes("-p"))?.pid ?? 0;
+    expect(await waitFor(() => !alive(pid))).toBe(true);
+  });
+
+  test("AC-B273: a resume forks the kept file: a new session ID, the old file unchanged, and the history in the new file", async () => {
+    const { runner, spec, keep, calls } = session({ fixture: flatSuccess() });
+    const first = await runner.run({ ...spec, keep });
+    const old = first.kept as string;
+    const before = readFileSync(old, "utf8");
+    const second = await runner.run({ ...spec, keep, resume: old });
+    expect(second.status).toBe("completed");
+    const argv = calls().filter((c) => c.argv.includes("-p"))[1]?.argv ?? [];
+    expect(argv.slice(1, 4)).toEqual(["--resume", old, "--fork-session"]);
+    expect(second.init?.session_id).not.toBe(first.init?.session_id);
+    expect(second.kept).toBe(join(keep, `${second.init?.session_id}.jsonl`));
+    expect(readFileSync(old, "utf8")).toBe(before);
+    expect(readFileSync(second.kept as string, "utf8").startsWith(before)).toBe(true);
+  });
+
+  test("AC-B274: the init check still kills a resumed run whose init lists an extra tool", async () => {
+    const { runner, spec, keep, calls } = session({ fixture: real("b9-wp8-flags.jsonl"), initExtra: ["WebFetch"], delayMs: 20 });
+    mkdirSync(keep, { recursive: true });
+    const old = join(keep, "old.jsonl");
+    writeFileSync(old, `${JSON.stringify({ type: "user", message: { role: "user", content: "first" } })}\n`);
+    const seen: RunEvent[] = [];
+    const o = await runner.run({ ...spec, keep, resume: old }, (ev) => seen.push(...ev));
+    expect(o).toMatchObject({ status: "failed", kind: "tool_check", text: "init lists tools outside the allowlist: WebFetch.", cut: null });
+    expect(seen).toEqual([]);
+    expect(existsSync(o.kept as string)).toBe(true);
+    const pid = calls().find((c) => c.argv.includes("-p"))?.pid ?? 0;
+    expect(await waitFor(() => !alive(pid))).toBe(true);
+  });
+
+  test(
+    "AC-B275: the stall guard ends a silent implement run",
+    async () => {
+      const { runner, spec, run } = session({ fixture: flatSuccess(), silent: true }, { stall: STALL });
+      const started = Date.now();
+      const o = await runner.run(spec);
+      expect(o).toMatchObject({ status: "failed", kind: "process", text: stallText(STALL.idleMs), cut: "stall" });
+      expect(Date.now() - started).toBeLessThan(STALL.idleMs + 10_000);
+      expect(await waitFor(() => !alive(run().pid))).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B275: an open Bash call keeps the run past the idle time until bash_timeout_sec plus 5 min",
+    async () => {
+      const { runner, spec } = session(
+        { fixture: flatSuccess(), bash: [{ ...same, waitMs: STALL.idleMs + 1500 }] },
+        { stall: STALL },
+        true,
+      );
+      const o = await runner.run(spec);
+      expect([o.status, o.cut]).toEqual(["completed", null]);
+      expect(o.events.find((e) => e.tool === "Bash")).toMatchObject({ status: "ok", note: same.output });
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B275: a Bash call that stays open past its limit ends the run",
+    async () => {
+      const { runner, spec, run } = session({ fixture: flatSuccess(), bash: [{ ...same, waitMs: 60_000 }] }, { stall: STALL }, true);
+      const started = Date.now();
+      const o = await runner.run(spec);
+      const ms = Date.now() - started;
+      expect(o).toMatchObject({ status: "failed", kind: "process", text: stallText(BASH_LIMIT_MS), cut: "stall" });
+      expect(o.events.find((e) => e.tool === "Bash")?.status).toBe("stopped");
+      expect(ms).toBeGreaterThanOrEqual(BASH_LIMIT_MS);
+      expect(ms).toBeLessThan(BASH_LIMIT_MS + 10_000);
+      expect(await waitFor(() => !alive(run().pid))).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B275, AC-B281: a review run has no stall guard; its time limit ends it with cut time",
+    async () => {
+      const { runner, spec } = setup(
+        { fixture: flatSuccess(), silent: true },
+        { stall: { idleMs: 300, bashExtraMs: 300 }, timeoutMs: 3000 },
+      );
+      const started = Date.now();
+      const o = await runner.run(spec);
+      expect(o).toMatchObject({ status: "failed", text: TIME_LIMIT_TEXT, cut: "time" });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(2900);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B276: the loop guard: RunOutcome.loop records 4 equal calls, and the 5th ends the run",
+    async () => {
+      const four = session({ fixture: flatSuccess(), bash: repeat(4) }, {}, true);
+      const o4 = await four.runner.run(four.spec);
+      expect([o4.status, o4.cut]).toEqual(["completed", null]);
+      expect(o4.loop).toEqual({ tool: "Bash", target: same.command, count: 4 });
+      const six = session({ fixture: flatSuccess(), bash: repeat(6) }, {}, true);
+      const o6 = await six.runner.run(six.spec);
+      expect(o6).toMatchObject({ status: "failed", kind: "process", text: LOOP_TEXT, cut: "loop" });
+      expect(o6.loop?.count).toBe(5);
+      expect(o6.events.filter((e) => e.tool === "Bash").map((e) => e.status)).toEqual(["ok", "ok", "ok", "ok", "ok"]);
+      expect(await waitFor(() => !alive(six.run().pid))).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B276: another result breaks the count, and refused calls do not count",
+    async () => {
+      const other = { ...same, output: "0 tests failed" };
+      const mixed = session({ fixture: flatSuccess(), bash: [same, same, other, same, same] }, {}, true);
+      const o = await mixed.runner.run(mixed.spec);
+      expect([o.status, o.loop]).toEqual(["completed", null]);
+      const curl = Array.from({ length: 5 }, () => ({ command: "curl x", refused: "allowlist" as const }));
+      const no = session({ fixture: flatSuccess(), bash: curl }, {}, true);
+      const r = await no.runner.run(no.spec);
+      expect([r.status, r.loop, r.refused?.length]).toEqual(["completed", null, 5]);
+    },
+    SLOW,
+  );
+
+  test("AC-B276: each thread counts its own calls; a call of another thread does not break the count", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(["Read", "Agent"]) });
+    const use = (id: string, parent: string | null, path: string) =>
+      p.line(
+        JSON.stringify({
+          type: "assistant",
+          parent_tool_use_id: parent,
+          message: { content: [{ type: "tool_use", id, name: "Read", input: { file_path: path } }] },
+        }),
+      );
+    const res = (id: string, parent: string | null, text: string) =>
+      p.line(
+        JSON.stringify({
+          type: "user",
+          parent_tool_use_id: parent,
+          message: { content: [{ type: "tool_result", tool_use_id: id, content: text }] },
+        }),
+      );
+    p.line(
+      JSON.stringify({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: "tool_use", id: "ag", name: "Agent", input: { description: "Search", subagent_type: "rl-explorer" } }],
+        },
+      }),
+    );
+    for (let i = 0; i < 3; i++) {
+      use(`m${i}`, null, "/w/a.txt");
+      res(`m${i}`, null, "same");
+      use(`c${i}`, "ag", "/w/a.txt");
+      res(`c${i}`, "ag", i === 1 ? "other" : "same");
+    }
+    expect(p.state.loop).toEqual({ tool: "Read", target: "a.txt", count: 3 });
+    expect(p.state.loopWarns).toBe(1);
+    use("m3", null, "/w/b.txt");
+    res("m3", null, "same");
+    expect(p.state.loop?.count).toBe(3);
+  });
+
+  test("AC-B277: stream input: the prompt is the first message, a second message reaches the run, and stdin closes after its result", async () => {
+    const { runner, spec, run, inputs } = session({ fixture: flatSuccess(), delayMs: 20 });
+    let sent: boolean | undefined;
+    const o = await runner.run({ ...spec, live: true }, () => {
+      sent ??= runner.send("Also run the lint.");
+    });
+    expect(sent).toBe(true);
+    expect(o.status).toBe("completed");
+    expect(run().argv.slice(0, 3)).toEqual(["-p", "--input-format", "stream-json"]);
+    expect(run().stdin).toBe(spec.prompt);
+    expect(inputs()).toEqual(["Also run the lint."]);
+    expect(o.events.filter((e) => e.status === "running")).toEqual([]);
+    expect(runner.send("Too late.")).toBe(false);
+  });
+
+  test("AC-B277: a run without live input takes no message, and a live run gets the loop note at 3 equal calls", async () => {
+    const plain = session({ fixture: flatSuccess(), delayMs: 20 });
+    let sent: boolean | undefined;
+    await plain.runner.run(plain.spec, () => {
+      sent ??= plain.runner.send("Ignored.");
+    });
+    expect(sent).toBe(false);
+    expect(plain.run().argv).not.toContain("--input-format");
+    const live = session({ fixture: flatSuccess(), bash: repeat(3) }, {}, true);
+    const o = await live.runner.run({ ...live.spec, live: true });
+    expect([o.status, o.loop?.count]).toEqual(["completed", 3]);
+    expect(live.inputs()).toEqual([LOOP_MESSAGE]);
+  });
+
+  test("AC-B280: the context size of the last main-thread call and resetsAt of the last rejected rate limit event", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set() });
+    const msg = (usage: Record<string, unknown>, parent: string | null = null, model = "claude-haiku-4-5") =>
+      p.line(JSON.stringify({ type: "assistant", parent_tool_use_id: parent, message: { model, content: [], usage } }));
+    const limit = (info: Record<string, unknown>) => p.line(JSON.stringify({ type: "rate_limit_event", rate_limit_info: info }));
+    msg({ input_tokens: 2, cache_read_input_tokens: 100, cache_creation_input_tokens: 5000, output_tokens: 7 });
+    expect(p.state.context).toBe(5102);
+    // A subagent call, a message of the CLI itself (Gate B5), and a call without all three counts change nothing.
+    msg({ input_tokens: 9, cache_read_input_tokens: 9, cache_creation_input_tokens: 9 }, "toolu_ag");
+    msg({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, null, "<synthetic>");
+    msg({ input_tokens: 1, cache_read_input_tokens: 2 });
+    expect(p.state.context).toBe(5102);
+    limit({ status: "allowed", resetsAt: 1791678600 });
+    expect(p.state.resetsAt).toBeNull();
+    limit({ status: "rejected", resetsAt: 1791678600, rateLimitType: "five_hour" });
+    limit({ status: "allowed_warning", resetsAt: 1 });
+    expect(p.state.resetsAt).toBe(1791678600);
+    limit({ status: "rejected" });
+    expect(p.state.resetsAt).toBeNull();
+    // A real stream: the gate reader of U105 gives the same size.
+    const events = lines(real("b9-wp8-flags.jsonl"));
+    const q = createStreamParser({ cwd: "/w", allowedTools: new Set() });
+    for (const e of events) q.line(JSON.stringify(e));
+    expect(q.state.context).toBe(mainUsage(events).context);
+    expect(q.state.context).toBeGreaterThan(0);
+  });
+
+  test("AC-B281: a result with structured_output wins over a guard and a time limit", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set() });
+    p.line(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: {}, num_turns: 1 }));
+    const end = { exitCode: null, cancelled: false, timedOut: true, guard: { cut: "loop" as const, text: LOOP_TEXT } };
+    expect(classify(p.state, end)).toMatchObject({ status: "completed", kind: null, cut: null });
+    expect(classify(p.state, { ...end, cancelled: true })).toMatchObject({ status: "cancelled", cut: null });
   });
 });

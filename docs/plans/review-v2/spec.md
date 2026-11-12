@@ -1011,6 +1011,20 @@ Acceptance (part-session.md section 9, package PS-M; no wiring yet):
 4. AC-B252. Every state of the three machines is reachable, only the terminals have no edge to another state, every event has a sender under src/server or is in RESERVED with its owner, and the machines have no actions, no invoke, and import only xstate and types.
 5. AC-B253. Each reason kind and cause of part-session.md section 9.4 has a primary exit in REASON_EXITS. Each exit names a route of routes.ts, a new route of section 9.3.6 with its package, or the driver that takes it. A blocked_json row without cause, resumeAt, and armed still parses.
 
+Acceptance (part-session.md sections 2.2, 2.4, 2.9 to 2.12, package PS2; the resume and the live input stay off until Gate B37 passes):
+
+1. AC-B271. An implement run with keep has no `--no-session-persistence`. A resume adds `--resume <abs .jsonl> --fork-session`, and live input adds `--input-format stream-json`. The argv equals sessionArgs of scripts/gate/session.ts for the plain argv. The runner refuses a keep folder or a resume file in the step folder.
+2. AC-B272. The keep step copies `<projectsDir>/<encoded cwd>/<session id>.jsonl` into keep before the per-cwd folders go. It runs at each run end, also after a cancel. RunOutcome.kept names the file.
+3. AC-B273. A resume forks the kept file. The fork gets a new session ID and a new kept file. The resumed file stays unchanged.
+4. AC-B274. The init check kills a resumed run whose init lists a tool outside the allowlist, as for a fresh run.
+5. AC-B275. An implement run with no stream line for STALL_MS (15 min) and no open call ends with cut stall. An open Bash call gets bash_timeout_sec plus 5 min. An open Agent or Advisor call keeps the normal limit. Review runs have no stall guard.
+6. AC-B276. Equal calls in a row in one thread count: the same tool, input JSON, and result text. At 3, RunOutcome.loop records them. At 5, the implement run ends with cut loop. A call of another thread does not break the count. A refused Bash call does not count, because REFUSED_MAX caps it.
+7. AC-B277. With live input, the prompt is the first stream-json message, and send() writes each later message to stdin. stdin closes when each message has its result event. At 3 equal calls, the runner sends the loop message. Without live input, send() returns false.
+8. AC-B278. implementSteps passes keep of ImplementRunStart.session and gives after() the kept file in o.kept. While SESSION_GATES.resume or SESSION_GATES.live is false, it drops the resume file or the live input, so the run starts a fresh session.
+9. AC-B279. cancelPart cancels only the runs whose key starts with `task:<id>:part:<part>:`.
+10. AC-B280. The context size is the sum of the input, cache-read, and cache-creation tokens of the last main-thread call that has all three. A subagent call and a message of the CLI itself change nothing. resetsAt comes raw from the last rate_limit_event with status rejected.
+11. AC-B281. Verdict.cut is turns for a turn cap and time for a time limit. A result with structured_output wins over each cut.
+
 ### 6.3 Data model (the next free migration number, 033 unless WP-D2 takes it)
 
 ```sql

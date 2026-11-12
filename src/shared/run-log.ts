@@ -6,6 +6,9 @@
 
 export type RunStatus = "running" | "completed" | "incomplete" | "failed" | "cancelled";
 export type RunErrorKind = "usage_limit" | "auth" | "max_turns" | "schema" | "tool_check" | "workspace" | "process" | "restart";
+// docs/plans/review-v2/part-session.md sections 2.2 and 2.10: why a run ended before its result. stall and loop: the guards of the
+// runner. turns: the turn cap. time: the run time limit or RUN_TIME_MAX_MS.
+export type RunCut = "stall" | "loop" | "turns" | "time";
 
 // One tool call in the run log. id is the tool_use id. parent is the id of the Agent call that made it.
 export type RunEventStatus = "running" | "ok" | "error" | "stopped";
@@ -78,9 +81,12 @@ export type SDKAssistantMessageError =
   | "max_output_tokens"
   | "cloud_credential_error";
 
+// The token counts of one API call (fixture b9-wp8-flags.jsonl). The CLI sends more fields.
+export type SDKMessageUsage = { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
+
 export type SDKAssistantMessage = {
   type: "assistant";
-  message: { content: ContentBlock[]; model?: string };
+  message: { content: ContentBlock[]; model?: string; usage?: SDKMessageUsage };
   parent_tool_use_id: string | null;
   error?: SDKAssistantMessageError;
   session_id: string;

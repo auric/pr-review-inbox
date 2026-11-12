@@ -5,6 +5,7 @@
 import { isAbsolute, relative, sep } from "node:path";
 import type {
   ContentBlock,
+  RunCut,
   RunErrorKind,
   RunEvent,
   RunEventStatus,
@@ -29,6 +30,18 @@ const OUTPUT_BYTES = 4096;
 // Over this number of refused Bash commands, the runner ends the run.
 export const REFUSED_MAX = 5;
 export const TIME_LIMIT_TEXT = "The run passed its time limit.";
+// docs/plans/review-v2/part-session.md section 2.10. The runner ends an implement run after STALL_MS with no stream line and no open
+// call. An open Bash call gets the bash_timeout_sec of the step plus BASH_STALL_EXTRA_MS, so the CLI ends a long command first.
+export const STALL_MS = 15 * 60_000;
+export const BASH_STALL_EXTRA_MS = 5 * 60_000;
+// Equal calls in one thread: a note at LOOP_WARN, the end of an implement run at LOOP_MAX.
+export const LOOP_WARN = 3;
+export const LOOP_MAX = 5;
+export function stallText(ms: number) {
+  const min = Math.max(1, Math.round(ms / 60_000));
+  return `Claude sent nothing for ${min} ${min === 1 ? "minute" : "minutes"}, so the app stopped the run.`;
+}
+export const LOOP_TEXT = `Claude made the same call ${LOOP_MAX} times with the same result, so the app stopped the run.`;
 // V12: on Windows, Claude Code offers Bash only when Git Bash is installed.
 export const NO_BASH_TEXT =
   process.platform === "win32"
@@ -65,11 +78,23 @@ export type RunNote = { from: string; text: string };
 export type Refusal = { command: string; by: keyof typeof REFUSED_NOTE };
 export { REFUSED_NOTE };
 
+// Equal calls in a row in one thread: the same tool, input JSON, and result text. target: the target of the last call.
+export type Repeat = { tool: string; target: string; count: number };
+
 export type StreamState = {
   inits: SDKSystemMessage[];
   results: SDKResultMessage[];
   apiErrors: SDKAssistantMessageError[];
   rateLimitRejected: boolean;
+  // resetsAt of the last rate_limit_event with status rejected, as the CLI sends it. U106 has not verified the unit. null: none.
+  resetsAt: number | null;
+  // The input, cache-read, and cache-creation tokens of the last main-thread API call (part-session.md section 2.4, U105). null: no call
+  // had all three.
+  context: number | null;
+  // The longest repeat of the run with at least LOOP_WARN calls. A Bash call that Claude Code refused does not count: REFUSED_MAX caps it.
+  loop: Repeat | null;
+  // The repeats that reached LOOP_WARN.
+  loopWarns: number;
   // Tools in an init event that are not in the allowlist.
   badTools: string[];
   // A shell step whose init event lists no Bash tool.
@@ -135,6 +160,12 @@ export function createStreamParser(opts: {
 }) {
   const now = opts.now ?? Date.now;
   const events = new Map<string, RunEvent>();
+  // The IDs of the running events.
+  const open = new Set<string>();
+  // The input JSON of each tool_use until its result, the refused Bash calls, and the current repeat of each thread (by parent).
+  const inputs = new Map<string, string>();
+  const refusedIds = new Set<string>();
+  const streaks = new Map<string | null, { sig: string; n: number }>();
   // A background Agent call gets its tool_result at launch. Only its task_notification ends it.
   const background = new Set<string>();
   const state: StreamState = {
@@ -142,6 +173,10 @@ export function createStreamParser(opts: {
     results: [],
     apiErrors: [],
     rateLimitRejected: false,
+    resetsAt: null,
+    context: null,
+    loop: null,
+    loopWarns: 0,
     badTools: [],
     noBash: false,
     refused: [],
@@ -164,6 +199,26 @@ export function createStreamParser(opts: {
     const next = { ...e, status, note: text, endedAt: now() };
     events.set(id, next);
     changed.set(id, next);
+    open.delete(id);
+  }
+
+  function add(changed: Map<string, RunEvent>, e: RunEvent) {
+    events.set(e.id, e);
+    changed.set(e.id, e);
+    open.add(e.id);
+  }
+
+  // A tool_result of a call: the repeat of its thread grows when the tool, the input, and the result text equal the last call.
+  function repeat(call: RunEvent, result: string) {
+    const input = inputs.get(call.id);
+    inputs.delete(call.id);
+    if (input === undefined || refusedIds.has(call.id)) return;
+    const sig = JSON.stringify([call.tool, input, result]);
+    const last = streaks.get(call.parent);
+    const n = last?.sig === sig ? last.n + 1 : 1;
+    streaks.set(call.parent, { sig, n });
+    if (n === LOOP_WARN) state.loopWarns++;
+    if (n >= LOOP_WARN && n > (state.loop?.count ?? 0)) state.loop = { tool: call.tool, target: call.target, count: n };
   }
 
   // Sets the model or the token total of an Agent call. A null value keeps the old one.
@@ -190,6 +245,12 @@ export function createStreamParser(opts: {
     if (m.type === "assistant") {
       const a = m as SDKAssistantMessage;
       if (a.error) state.apiErrors.push(a.error);
+      // Gate B5 (b5-auth.jsonl): a message of the CLI itself has zero usage.
+      const u = a.message?.usage;
+      if (!a.parent_tool_use_id && a.message?.model !== SYNTHETIC && u) {
+        const [i, r, c] = [count(u.input_tokens), count(u.cache_read_input_tokens), count(u.cache_creation_input_tokens)];
+        if (i !== null && r !== null && c !== null) state.context = i + r + c;
+      }
       // The first message of a subagent names its model before the Agent call ends.
       if (a.parent_tool_use_id && events.get(a.parent_tool_use_id)?.model === null)
         agentStats(changed, a.parent_tool_use_id, modelOf(a.message?.model), null);
@@ -201,10 +262,11 @@ export function createStreamParser(opts: {
             const next = { ...e, ...advisorOutcome((b as { content?: unknown }).content), endedAt: now() };
             events.set(e.id, next);
             changed.set(e.id, next);
+            open.delete(e.id);
           }
         }
-        if (b.type === "server_tool_use" && b.name === "advisor" && b.id && !events.has(b.id)) {
-          const e: RunEvent = {
+        if (b.type === "server_tool_use" && b.name === "advisor" && b.id && !events.has(b.id))
+          add(changed, {
             id: b.id,
             seq: seq++,
             parent: a.parent_tool_use_id ?? null,
@@ -218,15 +280,13 @@ export function createStreamParser(opts: {
             builtin: false,
             startedAt: now(),
             endedAt: null,
-          };
-          events.set(e.id, e);
-          changed.set(e.id, e);
-        }
+          });
         if (b.type !== "tool_use" || !b.id || !b.name || b.name === "StructuredOutput" || events.has(b.id)) continue;
         const tool = AGENT_TOOLS.has(b.name) ? "Agent" : b.name;
         const input = b.input && typeof b.input === "object" ? b.input : {};
         const agent = tool === "Agent" && typeof input.subagent_type === "string" ? input.subagent_type : null;
-        const e: RunEvent = {
+        inputs.set(b.id, JSON.stringify(input));
+        add(changed, {
           id: b.id,
           seq: seq++,
           parent: a.parent_tool_use_id ?? null,
@@ -240,9 +300,7 @@ export function createStreamParser(opts: {
           builtin: agent !== null && !opts.agents?.has(agent),
           startedAt: now(),
           endedAt: null,
-        };
-        events.set(e.id, e);
-        changed.set(e.id, e);
+        });
       }
     } else if (m.type === "user") {
       const u = m as SDKUserMessage;
@@ -251,6 +309,7 @@ export function createStreamParser(opts: {
         if (b.type !== "tool_result" || !b.tool_use_id) continue;
         if (r) agentStats(changed, b.tool_use_id, modelOf(r.resolvedModel), count(r.totalTokens));
         const call = events.get(b.tool_use_id);
+        if (call) repeat(call, resultText(b, "\n"));
         if (call?.tool === "Agent" && call.status === "running" && !b.is_error && !background.has(b.tool_use_id))
           addNote(`${call.agent ?? "Agent"} report: ${call.target}`, resultText(b, "\n"));
         const bash = call?.tool === "Bash";
@@ -279,6 +338,7 @@ export function createStreamParser(opts: {
         const by = deny ? "deny" : unlisted ? "allowlist" : "check";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });
+        refusedIds.add(id);
         // SU14 (B30a): `cd <dir> && <command>`. SU18 (B31): the read block of allowlist mode refuses a lone cd.
         const cd = by === "check" && /requires approval: cd\s|^cd names a path that is computed at run time/.test(d.message ?? "");
         end(changed, id, "error", cd ? CD_REFUSED_NOTE : REFUSED_NOTE[by]);
@@ -294,7 +354,11 @@ export function createStreamParser(opts: {
       agentStats(changed, t.tool_use_id, null, count(t.usage?.total_tokens));
       if (t.tool_use_id) end(changed, t.tool_use_id, TASK_END[t.status] ?? "error", note(t.summary ?? ""));
     } else if (m.type === "rate_limit_event") {
-      if ((m as SDKRateLimitEvent).rate_limit_info?.status === "rejected") state.rateLimitRejected = true;
+      const info = (m as SDKRateLimitEvent).rate_limit_info;
+      if (info?.status === "rejected") {
+        state.rateLimitRejected = true;
+        state.resetsAt = count(info.resetsAt);
+      }
     } else if (m.type === "result") {
       state.results.push(m as SDKResultMessage);
     }
@@ -308,7 +372,8 @@ export function createStreamParser(opts: {
     return [...changed.values()];
   }
 
-  return { state, line, stop, events: () => [...events.values()] };
+  // open: the events that still run.
+  return { state, line, stop, events: () => [...events.values()], open: () => [...open].flatMap((id) => events.get(id) ?? []) };
 }
 
 export type Verdict = {
@@ -317,6 +382,8 @@ export type Verdict = {
   text: string | null;
   // completed: the result that carries structured_output. Otherwise the last result.
   result: SDKResultMessage | null;
+  // A failed run that a limit or a guard of the runner ended before its result. Else null.
+  cut: RunCut | null;
 };
 
 function errorKind(s: StreamState, last: SDKResultMessage | undefined): RunErrorKind {
@@ -329,17 +396,28 @@ function errorKind(s: StreamState, last: SDKResultMessage | undefined): RunError
   return "process";
 }
 
-export function classify(s: StreamState, end: { exitCode: number | null; cancelled: boolean; timedOut: boolean }): Verdict {
+// guard: the stall or loop guard of the runner ended the run, with the text of the run end.
+export function classify(
+  s: StreamState,
+  end: { exitCode: number | null; cancelled: boolean; timedOut: boolean; guard?: { cut: "stall" | "loop"; text: string } | null },
+): Verdict {
   const last = s.results.at(-1);
   // Gate B3: a background task adds a second result event. The final one with structured_output wins.
   const done = s.results.findLast((r) => r.structured_output !== undefined && !r.is_error);
-  const failed = (kind: RunErrorKind, text: string): Verdict => ({ status: "failed", kind, text, result: last ?? null });
-  if (end.cancelled) return { status: "cancelled", kind: null, text: null, result: done ?? last ?? null };
+  const failed = (kind: RunErrorKind, text: string, cut: RunCut | null = null): Verdict => ({
+    status: "failed",
+    kind,
+    text,
+    result: last ?? null,
+    cut,
+  });
+  if (end.cancelled) return { status: "cancelled", kind: null, text: null, result: done ?? last ?? null, cut: null };
   if (s.noBash) return failed("tool_check", NO_BASH_TEXT);
   if (s.badTools.length) return failed("tool_check", `init lists tools outside the allowlist: ${s.badTools.join(", ")}.`);
   if (s.refused.length > REFUSED_MAX) return failed("tool_check", `Claude Code refused more than ${REFUSED_MAX} commands in this run.`);
-  if (done) return { status: "completed", kind: null, text: null, result: done };
-  if (end.timedOut) return failed("process", TIME_LIMIT_TEXT);
+  if (done) return { status: "completed", kind: null, text: null, result: done, cut: null };
+  if (end.timedOut) return failed("process", TIME_LIMIT_TEXT, "time");
+  if (end.guard) return failed("process", end.guard.text, end.guard.cut);
   const kind = errorKind(s, last);
   const fallback =
     kind === "schema"
@@ -347,5 +425,9 @@ export function classify(s: StreamState, end: { exitCode: number | null; cancell
       : last
         ? `The run ended with ${last.terminal_reason ?? last.subtype}.`
         : `claude exited with code ${end.exitCode} and sent no result.`;
-  return failed(kind, (last?.is_error ? last.result : undefined) || last?.errors?.join("\n") || fallback);
+  return failed(
+    kind,
+    (last?.is_error ? last.result : undefined) || last?.errors?.join("\n") || fallback,
+    kind === "max_turns" ? "turns" : null,
+  );
 }
