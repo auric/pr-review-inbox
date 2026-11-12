@@ -3,10 +3,23 @@
 
 name: CI
 
+# A change only to these files skips the workflow. Tests read README.md, NOTICE.md, THIRD_PARTY_NOTICES.md, and LICENSE, so they are not here.
 on:
   push:
     branches: [main]
+    paths-ignore: &docs
+      - "docs/**"
+      - "prototype/**"
+      - "BRIEF.md"
+      - "CHANGELOG.md"
+      - "CLAUDE.md"
+      - "CONTRIBUTING.md"
+      - "IMPLEMENTATION_PROMPTS_GPT_ASTRA_6.md"
+      - "PROJECT_BRIEF_GPT_ASTRA_6.md"
+      - "SECURITY.md"
+      - "integration-check.md"
   pull_request:
+    paths-ignore: *docs
   workflow_dispatch:
 
 permissions:
@@ -18,14 +31,9 @@ concurrency:
 
 jobs:
   check:
-    name: check (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    # The Windows runner runs the tests about 3 times slower than Linux.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 90 || 45 }}
+    name: check (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -42,9 +50,49 @@ jobs:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
+      # The incremental build info of both tsc versions. The run SHA in the key saves a new entry after each run.
+      - uses: actions/cache@v6.1.0
+        with:
+          path: node_modules/.cache/tsc
+          key: tsc-${{ runner.os }}-${{ hashFiles('bun.lock', 'tsconfig.json') }}-${{ github.sha }}
+          restore-keys: tsc-${{ runner.os }}-${{ hashFiles('bun.lock', 'tsconfig.json') }}-
       # The compiled-binary test skips, because dist/bin does not exist on a fresh checkout.
       - run: bun run check
       - run: bun run notices --check
+
+  # Windows runs only the tests that depend on the OS (scripts/ci-tests.ts). Typecheck, lint, and notices do not depend on the OS.
+  windows:
+    name: windows tests (${{ matrix.shard }}/3)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.4.4
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - run: bun install --frozen-lockfile
+      - run: bun scripts/ci-tests.ts --shard=${{ matrix.shard }}/3
+
+  # The required check of the branch rule. A skipped job counts as passed, so this job always runs and checks the shard results.
+  check-windows:
+    name: check (windows-latest)
+    needs: windows
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: ${{ needs.windows.result != 'success' }}
+        run: echo "Windows tests result is ${{ needs.windows.result }}." && exit 1
 
   e2e:
     runs-on: ubuntu-latest

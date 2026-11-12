@@ -23,6 +23,7 @@
     "scripts/dev.ts",
     "scripts/demo.ts",
     "scripts/compile.ts",
+    "scripts/ci-tests.ts",
     "scripts/release.ts",
     "scripts/notices.ts",
     "scripts/screenshots.ts",
