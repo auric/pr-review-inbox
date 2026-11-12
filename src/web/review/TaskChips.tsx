@@ -18,6 +18,7 @@ import { ApiError, read } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { taskHint } from "../shell/model";
 import { fetchedText, mergeTask, offerSetup, removeText, taskChips, trackerOf } from "./tasks";
+import { focusFirst, useFocusAfter } from "./useFocusAfter";
 
 const icon = "size-[15px] shrink-0";
 const SOURCE: Record<PrTask["source"], string> = { branch: "branch", title: "title", description: "description" };
@@ -89,6 +90,7 @@ export function TaskChips(props: {
   if (asking) last.current = asking;
   const shown = last.current;
   const now = Date.now();
+  const focus = useFocusAfter(chips);
 
   const setUp = () => {
     onSettings?.();
@@ -96,12 +98,7 @@ export function TaskChips(props: {
     requestAnimationFrame(() => document.getElementById("tracker-url")?.focus());
   };
   // The Clear text button while the request runs, then the Fetch button, then focusTo when the chip is gone.
-  const refocus = (key: string) =>
-    (
-      document.getElementById(`${id}-remove-${key}`) ??
-      document.getElementById(`${id}-fetch-${key}`) ??
-      document.getElementById(props.focusTo)
-    )?.focus();
+  const targets = (key: string) => [`${id}-remove-${key}`, `${id}-fetch-${key}`, props.focusTo];
   const run = async (key: string, act: "fetch" | "remove") => {
     if (busy.has(key)) return;
     setBusy((b) => new Set(b).add(key));
@@ -111,7 +108,7 @@ export function TaskChips(props: {
       else await removeTask(qc, pr, key);
       announce(act === "fetch" ? `Fetched ${key} from ${source}.` : `Cleared the ${key} text.`);
       // Clear text takes its own button away, and the chip too when the PR no longer names the task.
-      if (act === "remove") requestAnimationFrame(() => refocus(key));
+      if (act === "remove") focus(targets(key), (cs) => !cs.some((c) => c.key === key && c.fetched));
     } catch (e) {
       const message = (e as Error).message;
       const setup = !!onSettings && e instanceof ApiError && e.status === 409;
@@ -253,7 +250,7 @@ export function TaskChips(props: {
       <Dialog
         open={asking !== null}
         onOpenChange={(on) => !on && setAsking(null)}
-        onOpenChangeComplete={(on) => !on && shown && refocus(shown.key)}
+        onOpenChangeComplete={(on) => !on && shown && focusFirst(targets(shown.key))}
       >
         <DialogContent className="sm:max-w-[440px]" finalFocus={false} onKeyDown={dialogKeys(() => setAsking(null))}>
           {shown && (

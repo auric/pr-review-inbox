@@ -29,7 +29,6 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
-  useReducer,
   useRef,
   useState,
 } from "react";
@@ -100,6 +99,7 @@ import {
   sourceTime,
   typeText,
 } from "./tasks";
+import { useFocusAfter } from "./useFocusAfter";
 
 // The Markdown renderer loads on first use, as in Thread.tsx. Plain text shows until then.
 const Markdown = lazy(() => import("../pr/Markdown").then((m) => ({ default: m.Markdown })));
@@ -260,25 +260,10 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
   if (asking) asked.current = asking;
   const settings = useSettings().data;
   const base = `att-${t.key}`;
-  // Focus goes to the first ID that exists after the render that shows the target. A file change shows only when the parent renders
-  // the new t. So ready holds the focus until t shows the new file state.
-  const want = useRef<{ ids: string[]; ready: (rs: AttachmentRow[]) => boolean } | null>(null);
-  const [, rerender] = useReducer((n: number) => n + 1, 0);
-  useLayoutEffect(() => {
-    const w = want.current;
-    if (!w?.ready(rows)) return;
-    want.current = null;
-    for (const id of w.ids) {
-      const el = document.getElementById(id);
-      if (el) return el.focus();
-    }
-  });
+  // A file change shows only when the parent renders the new t. So ready holds the focus until t shows the new file state.
+  const focus = useFocusAfter(rows);
   if (!rows.length) return null;
 
-  const focus = (ids: string[], ready: (rs: AttachmentRow[]) => boolean = () => true) => {
-    want.current = { ids, ready };
-    rerender();
-  };
   const hasFile = (att: string, has: boolean) => (rs: AttachmentRow[]) => !!rs.find((r) => r.id === att)?.file === has;
   const act = async (r: AttachmentRow, what: FileAct, quiet = false) => {
     setBusy((b) => new Set(b).add(r.id));
