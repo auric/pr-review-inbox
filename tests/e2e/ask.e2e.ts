@@ -197,6 +197,81 @@ test("a busy pull request keeps the typed question, also after a reload, and a r
   await expect(strip(page).getByRole("button", { name: "Answering…" })).toHaveCount(0);
 });
 
+// The live stream holds its messages while window.rlHold is set. release() sends them in their order.
+type Held = Window & { rlHold?: (() => void)[] };
+async function holdableLive(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as Held;
+    const add = EventSource.prototype.addEventListener;
+    EventSource.prototype.addEventListener = function (
+      this: EventSource,
+      type: string,
+      fn: EventListenerOrEventListenerObject | null,
+      o?: boolean | AddEventListenerOptions,
+    ) {
+      const call = (e: Event) => (typeof fn === "function" ? fn.call(this, e) : fn?.handleEvent(e));
+      add.call(this, type, (e: Event) => (w.rlHold ? w.rlHold.push(() => call(e)) : call(e)), o);
+    } as typeof add;
+  });
+}
+const hold = (page: Page) =>
+  page.evaluate(() => {
+    (window as Held).rlHold = [];
+  });
+const release = (page: Page) =>
+  page.evaluate(() => {
+    const w = window as Held;
+    const held = w.rlHold ?? [];
+    w.rlHold = undefined;
+    for (const f of held) f();
+  });
+// The server state, not the page cache.
+const slotsFree = (page: Page) =>
+  page.evaluate(async () => {
+    const token = document.querySelector<HTMLMetaElement>('meta[name="rl-session"]')?.content ?? "";
+    const res = await fetch("/api/runs/slots", { headers: { "X-RL-Session": token } });
+    return ((await res.json()) as { running: unknown[] }).running.length === 0;
+  });
+
+test("after Cancel, Ask is ready in the render where the run row shows the end, also before the live update", async ({ page }) => {
+  await holdableLive(page);
+  await control("claude", { stream: "tree", hang: true });
+  await connect(page);
+  await page.keyboard.press("Shift+R");
+  await page.getByLabel("Your note").fill("Check the lock scope.");
+  await page.getByLabel("Your note").press("Control+Enter");
+  await expect(runLine(page)).toContainText("Finding problems…", { timeout: RUN_MS });
+  await page.keyboard.press("q");
+  const send = page.getByRole("button", { name: "Ask", exact: true });
+  await expect(send).toHaveAttribute("aria-disabled", "true");
+  await box(page).fill(QUESTION);
+
+  // The live stream holds the run end. The run detail read after Cancel goes out only after the server freed the slot. So the run
+  // row shows the end, and the slots in the page are still from before it.
+  await hold(page);
+  await page.route(
+    /\/api\/runs\/\d+$/,
+    async (route) => {
+      await expect.poll(() => slotsFree(page), { timeout: RUN_MS }).toBe(true);
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  await runLine(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(runRow(page)).toContainText(/Cancelled after \d+ tool calls?/, { timeout: RUN_MS });
+  // No wait: the render that shows the end also frees Ask.
+  expect(await send.getAttribute("aria-disabled")).not.toBe("true");
+  const sent = asked(page);
+  await box(page).press("Control+Enter");
+  expect((await sent).postDataJSON()).toEqual({ question: QUESTION });
+  await expect(runLine(page)).toContainText("Answering…", { timeout: RUN_MS });
+
+  await release(page);
+  const a = answers(page).first();
+  await a.getByRole("button", { name: "Cancel" }).click();
+  await expect(a.getByRole("status")).toContainText("You cancelled the question.", { timeout: RUN_MS });
+});
+
 test("a failed answer shows the reason and its raw output", async ({ page }) => {
   await control("claude", { stream: "tree", answer: { answer: 42, coverage: COVERAGE } });
   await connect(page);
