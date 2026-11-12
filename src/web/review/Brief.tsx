@@ -29,6 +29,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -259,15 +260,26 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
   if (asking) asked.current = asking;
   const settings = useSettings().data;
   const base = `att-${t.key}`;
+  // Focus goes to the first ID that exists after the render that shows the target. A file change shows only when the parent renders
+  // the new t. So ready holds the focus until t shows the new file state.
+  const want = useRef<{ ids: string[]; ready: (rs: AttachmentRow[]) => boolean } | null>(null);
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  useLayoutEffect(() => {
+    const w = want.current;
+    if (!w?.ready(rows)) return;
+    want.current = null;
+    for (const id of w.ids) {
+      const el = document.getElementById(id);
+      if (el) return el.focus();
+    }
+  });
   if (!rows.length) return null;
 
-  const focus = (...ids: string[]) =>
-    requestAnimationFrame(() => {
-      for (const id of ids) {
-        const el = document.getElementById(id);
-        if (el) return el.focus();
-      }
-    });
+  const focus = (ids: string[], ready: (rs: AttachmentRow[]) => boolean = () => true) => {
+    want.current = { ids, ready };
+    rerender();
+  };
+  const hasFile = (att: string, has: boolean) => (rs: AttachmentRow[]) => !!rs.find((r) => r.id === att)?.file === has;
   const act = async (r: AttachmentRow, what: FileAct, quiet = false) => {
     setBusy((b) => new Set(b).add(r.id));
     setErrors((m) => {
@@ -296,18 +308,22 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
   };
   // Download and Delete take their own button away.
   const download = async (r: AttachmentRow) => {
-    if (await act(r, "download")) focus(`${base}-${r.id}-save`);
+    if (await act(r, "download")) focus([`${base}-${r.id}-save`], hasFile(r.id, true));
   };
   const remove = async (r: AttachmentRow) => {
-    if (await act(r, "delete")) focus(`${base}-${r.id}-dl`, `${base}-h`);
+    if (await act(r, "delete")) focus([`${base}-${r.id}-dl`, `${base}-h`], hasFile(r.id, false));
   };
   // One request after the other, so the tracker never gets parallel downloads from the app.
   const downloadAll = async () => {
     const todo = rows.filter(canDownload);
     let ok = 0;
+    let last: AttachmentRow | undefined;
     for (const [i, r] of todo.entries()) {
       setAll(`Downloading ${i + 1} of ${todo.length}…`);
-      if (await act(r, "download", true)) ok++;
+      if (await act(r, "download", true)) {
+        ok++;
+        last = r;
+      }
     }
     setAll(null);
     announce(
@@ -315,7 +331,7 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
         ? `Downloaded ${todo.length} files.`
         : `Downloaded ${ok} of ${todo.length} files. Each failed file shows its error.`,
     );
-    focus(`${base}-open`, `${base}-h`);
+    focus([`${base}-open`, `${base}-h`], last && hasFile(last.id, true));
   };
   const open = async () => {
     setFolder(null);
@@ -324,7 +340,7 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
       if (!r) return announce(`Opened the folder of ${t.key}.`);
       setFolder(r);
       announce(r.error);
-      focus(`${base}-copy`);
+      focus([`${base}-copy`]);
     } catch (e) {
       const error = (e as Error).message;
       setFolder({ error, path: null });
