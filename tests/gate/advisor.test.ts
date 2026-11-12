@@ -109,7 +109,12 @@ describe("claude-checks.ts GADV", () => {
     expect(line("advisor")).toContain('"--model","sonnet"');
     expect(line("none")).not.toContain("--advisor");
     expect(line("disallowed")).toContain('"--disallowedTools","advisor"');
-    expect(line("tools")).toContain('"--tools","Read,Grep,Glob,advisor"');
+    // Run "tools" is the control of GADV.4, 5a, 5b, and 6. The switch runs keep the advisor in --tools, so only the switch can remove it.
+    for (const tag of ["tools", "envoff", "disallowed"]) {
+      expect(line(tag)).toContain('"--tools","Read,Grep,Glob,advisor"');
+      expect(line(tag)).toMatch(/"--allowedTools","[^"]*,advisor"/);
+    }
+    expect(line("advisor")).toContain('"--tools","Read,Grep,Glob"');
   });
 
   test("a bad model name exits 2", () => {

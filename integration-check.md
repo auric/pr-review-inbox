@@ -485,7 +485,7 @@ Run: `bun scripts/gate/claude-checks.ts --only B21,B22,B23,B24,B25,B26,B27,B27b,
 
 ## Advisor (Gate G-ADV, run 1)
 
-Status: run 1 by the user on 2026-11-11, CLI 2.1.322, Windows, 5 calls, reported cost $0.0876. Gate GADV checks the questions of docs/plans/review-v2/advisor.md. WP-ADV1 waits for these facts. All runs use the app child env and the runner flag set: `-p`, `--restricted`, `--strict-mcp-config`, `--tools Read,Grep,Glob`, `--allowedTools`, `--agents`, `--agent rl-main`, `--json-schema`, and `--no-session-persistence`. The main model is `sonnet`, the advisor is `opus`. The gate makes at most 5 `claude -p` calls.
+Status: run 1 by the user on 2026-11-11, CLI 2.1.322, Windows, 5 calls, reported cost $0.0876. Gate GADV checks the questions of docs/plans/review-v2/advisor.md. WP-ADV1 waits for these facts. All runs use the app child env and the runner flag set: `-p`, `--restricted`, `--strict-mcp-config`, `--tools Read,Grep,Glob`, `--allowedTools`, `--agents`, `--agent rl-main`, `--json-schema`, and `--no-session-persistence`. Runs `tools`, `envoff`, and `disallowed` add `advisor` to `--tools` and `--allowedTools`. Run `tools` is the control of GADV.4, GADV.5a, GADV.5b, and GADV.6. The main model is `sonnet`, the advisor is `opus`. The gate makes at most 5 `claude -p` calls.
 
 Run: `bun scripts/gate/claude-checks.ts --only GADV`. Options: `--advisor <model>` (default `opus`) and `--main-model <model>` (default `sonnet`). Dry run: add `--dry-run`. Then run `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0` and writes `fixtures/claude/gadv-*.jsonl`. Record the console lines GADV.1 to GADV.7.
 

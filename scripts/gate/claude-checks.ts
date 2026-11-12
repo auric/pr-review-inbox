@@ -3824,6 +3824,7 @@ async function b37() {
 
 // ---------- GADV: the advisor (docs/plans/review-v2/advisor.md, Gate G-ADV) ----------
 // All runs use the app child env and the runner flag set. Its --tools and --allowedTools lists omit the advisor.
+// Runs envoff, disallowed, and tools add the advisor to both lists, so --tools cannot hide the effect of a switch (GADV.5b).
 // Docs: these variables remove the advisor, because it needs feature-flag fetching.
 const FLAG_BLOCKERS = ["DISABLE_TELEMETRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_DISABLE_FEATURE_FLAGS"];
 const GADV_SCHEMA = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false };
@@ -3858,12 +3859,11 @@ async function gadv() {
       runClaude(`gadv-${tag}`, args, prompt, work, { env: e, model: mainModel });
     const a = await run("advisor", [...base, ...adv], GADV_HARD);
     const none = await run("none", base, GADV_HARD);
-    // The switch runs get the advisor prompt: GADV.4 and GADV.5a judge them by their advisor calls (run 1: init never lists it).
-    const off = await run("envoff", [...base, ...adv], GADV_HARD, { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
-    const denied = await run("disallowed", [...base, ...adv, "--disallowedTools", "advisor"], GADV_HARD);
+    // Run "tools" is the control of GADV.4, GADV.5a, GADV.5b, and GADV.6. Run 1: init never lists the advisor, so the gate judges by calls.
+    const tools = await run("tools", withTools([...base, ...adv]), GADV_HARD);
+    const off = await run("envoff", withTools([...base, ...adv]), GADV_HARD, { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
+    const denied = await run("disallowed", withTools([...base, ...adv, "--disallowedTools", "advisor"]), GADV_HARD);
     const listedA = advisorTools(a.init).length > 0;
-    // Only when the init of run "advisor" lacks the advisor. GADV.5b uses this run as the control with the advisor in --tools.
-    const tools = listedA ? undefined : await run("tools", withTools([...base, ...adv]), GADV_HARD);
     if (DRY) return dry("GADV", `advisor=${advisorModel} main=${mainModel}; ${userAdvisorSetting().line}`);
 
     const blockers = FLAG_BLOCKERS.filter((k) => env[k] !== undefined);
@@ -3892,6 +3892,7 @@ async function gadv() {
     };
     const fa = streamFacts(a);
     const fn = streamFacts(none);
+    const ft = streamFacts(tools);
     // FAIL: the run without --advisor lists the advisor in init.tools or uses it. The init keys are facts only: slash_commands lists the
     // /advisor command also when the advisor is off (run 1).
     push(
@@ -3904,30 +3905,30 @@ async function gadv() {
       !a.init ? "UNKNOWN" : listedA ? "PASS" : "FAIL",
       `--advisor: init advisor tools=${toolsOf(a)}; init advisor keys=${advisorInInit(a.init).join("; ") || "none"}; init.tools=${(a.init?.tools ?? []).join(",")}`,
     );
-    // PASS: the switch removes the advisor: no advisor call while the control run made one.
+    // PASS: the switch removes the advisor: no advisor call while the control run "tools" made one.
     const calls = (r: Run) => advisorStream(r.events).advisorCalls;
+    const toolsCalls = ft.s.advisorCalls;
     push(
       "GADV.4",
-      advisorOff({ init: off.init, used: calls(off) > 0 }, fa.s.advisorCalls),
-      `--advisor and CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1, advisor prompt: ${desc(off)}; advisor calls=${calls(off)}; control run advisor calls=${fa.s.advisorCalls}; init advisor tools=${toolsOf(off)}`,
+      advisorOff({ init: off.init, used: calls(off) > 0 }, toolsCalls),
+      `--advisor, advisor in --tools, and CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1, advisor prompt: ${desc(off)}; advisor calls=${calls(off)}; control run tools advisor calls=${toolsCalls}; init advisor tools=${toolsOf(off)}`,
     );
     push(
       "GADV.5a",
-      advisorOff({ init: denied.init, used: calls(denied) > 0 }, fa.s.advisorCalls),
-      `--advisor and --disallowedTools advisor, advisor prompt: ${desc(denied)}; advisor calls=${calls(denied)}; control run advisor calls=${fa.s.advisorCalls}; init advisor tools=${toolsOf(denied)}`,
+      advisorOff({ init: denied.init, used: calls(denied) > 0 }, toolsCalls),
+      `--advisor, advisor in --tools, and --disallowedTools advisor, advisor prompt: ${desc(denied)}; advisor calls=${calls(denied)}; control run tools advisor calls=${toolsCalls}; init advisor tools=${toolsOf(denied)}`,
     );
     // PASS: run "advisor" omits it from --tools and makes no call, and run "tools" lists it and calls it. FAIL: run "advisor" still
     // calls it or init lists it. UNKNOWN: the control run made no call.
-    const toolsCalls = tools ? calls(tools) : 0;
     push(
       "GADV.5b",
       advisorOff({ init: a.init, used: fa.s.advisorCalls > 0 }, toolsCalls),
-      `--tools and --allowedTools without advisor: advisor calls=${fa.s.advisorCalls}, init advisor tools=${toolsOf(a)}; with advisor, advisor prompt: ${tools ? `${desc(tools)}; advisor calls=${toolsCalls}; init advisor tools=${toolsOf(tools)}` : "not run"}`,
+      `--tools and --allowedTools without advisor: advisor calls=${fa.s.advisorCalls}, init advisor tools=${toolsOf(a)}; with advisor, advisor prompt: ${desc(tools)}; advisor calls=${toolsCalls}; init advisor tools=${toolsOf(tools)}`,
     );
     push(
       "GADV.6",
-      fa.s.advisorCalls ? "PASS" : "UNKNOWN",
-      `${fa.line}; events=${counts(fa.s.eventTypes)}; blocks=${counts(fa.s.blockTypes)}`,
+      toolsCalls ? "PASS" : "UNKNOWN",
+      `run tools: ${ft.line}; events=${counts(ft.s.eventTypes)}; blocks=${counts(ft.s.blockTypes)}`,
     );
     push("GADV.7", "INFO", `claude --version=${cliVersion}`);
   } finally {
