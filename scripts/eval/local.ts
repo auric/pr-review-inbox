@@ -593,7 +593,8 @@ type Where = Pick<EvalThreadComment, "path" | "side" | "lines" | "lineType" | "n
 // own truth. people: every person of the database. earlier: the posted earlier findings by thread root (re-review cases).
 // place: the lines at the reviewed head on the given side, mapped from the given commit, or null when they do not map.
 // People of the PR become EVAL_AUTHOR, EVAL_USER, or reviewer-<n> in first-comment order over the PR, in the author field and in the
-// text. Other people become SOMEONE in the text. A root that is deleted but has live replies stays, as pr-context.ts shows it.
+// text. Other people become SOMEONE in the text. Display names change only as stored or capitalized. A first or last name alone
+// changes only for the people of the PR and the user. The first name alone of a person of another PR stays. A root that is deleted but has live replies stays, as pr-context.ts shows it.
 export async function caseThreads(
   rows: ThreadRow[],
   o: {
@@ -622,40 +623,57 @@ export async function caseThreads(
     bySlug.set(key(r.slug), p);
     return p;
   };
-  // bare: names that change as whole words. tag: names that change in an @mention.
+  // bare: slugs and logins that change as whole words in any case. tag: names that change in an @mention.
+  // cap: display names as stored and capitalized, and the capitalized name words of the people of this PR.
+  // They change only in that case, so "will mark" stays for "Will Mark".
   const bare = new Map<string, string>();
   const tag = new Map<string, string>();
+  const cap = new Map<string, string>();
   const set = (m: Map<string, string>, s: string | null, p: string) => {
     if (s?.trim() && !m.has(key(s))) m.set(key(s), p);
   };
-  const person = (u: Person, p: string) => {
+  const setCap = (s: string, p: string) => {
+    if (!cap.has(s)) cap.set(s, p);
+  };
+  const upper = (s: string) => s.replace(/(?<![\p{L}\p{N}])\p{L}/gu, (c) => c.toUpperCase());
+  const person = (u: Person, p: string, ofPr: boolean) => {
     for (const s of [u.slug, u.login]) {
       set(tag, s, p);
       if (s && s.length >= 4 && !COMMON.has(key(s))) set(bare, s, p);
     }
     if (!u.name?.trim()) return;
     set(tag, u.name, p);
-    const words = u.name.split(/[^\p{L}\p{N}]+/u).filter((w) => (w.match(/\p{L}/gu)?.length ?? 0) >= 3);
-    for (const s of [u.name, ...words]) if (!COMMON.has(key(s))) set(bare, s, p);
+    const name = u.name.normalize("NFC").trim();
+    const words = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    // A one-word display name follows the single-word rule.
+    if (words.length > 1 && !COMMON.has(key(name))) for (const s of [name, upper(name)]) setCap(s, p);
+    if (!ofPr) return;
+    for (const w of words) if ((w.match(/\p{L}/gu)?.length ?? 0) >= 3 && !COMMON.has(key(w))) setCap(upper(w), p);
   };
-  person({ slug: prAuthor, login: null, name: rows[0]?.prAuthorName ?? null }, EVAL_AUTHOR);
-  for (const r of rows) person(r, mine(r) ? EVAL_USER : placeholder(r));
-  for (const u of o.people) person(u, mine(u) ? EVAL_USER : SOMEONE);
+  person({ slug: prAuthor, login: null, name: rows[0]?.prAuthorName ?? null }, EVAL_AUTHOR, true);
+  for (const r of rows) person(r, mine(r) ? EVAL_USER : placeholder(r), true);
+  for (const u of o.people) person(u, mine(u) ? EVAL_USER : SOMEONE, mine(u));
   // The regex folds case by Unicode rules, which can differ from toLowerCase. A miss then repeats the match of the regex per name.
   const find = (m: Map<string, string>, s: string) =>
     m.get(key(s)) ?? [...m].find(([k]) => new RegExp(`^${reEscape(k)}$`, "iu").test(s.normalize("NFC")))?.[1];
   // A whole-word match of each name. The longest name goes first. A dot or a hyphen joins a word only when a letter or digit follows
   // it, so "name." at a sentence end matches and "name.other" does not.
-  const words = [...bare.keys()].sort((a, b) => b.length - a.length).map(reEscape);
-  const pattern = words.length
-    ? new RegExp(`(?<![\\p{L}\\p{N}_]|[\\p{L}\\p{N}_][.-])(?:${words.join("|")})(?![\\p{L}\\p{N}_]|[.-][\\p{L}\\p{N}_])`, "giu")
-    : null;
+  const whole = (m: Map<string, string>, flags: string) => {
+    const words = [...m.keys()].sort((a, b) => b.length - a.length).map(reEscape);
+    return words.length
+      ? new RegExp(`(?<![\\p{L}\\p{N}_]|[\\p{L}\\p{N}_][.-])(?:${words.join("|")})(?![\\p{L}\\p{N}_]|[.-][\\p{L}\\p{N}_])`, flags)
+      : null;
+  };
+  const pattern = whole(bare, "giu");
+  const capPattern = whole(cap, "gu");
   const clean = (text: string) => {
     let t = text
       .normalize("NFC")
       .replace(URL_HOST, "$1<host>")
       .replace(EMAIL, "<email>")
       .replace(MENTION, (_, ...g: (string | undefined)[]) => `@${find(tag, g.slice(0, 4).find((x) => x !== undefined) ?? "") ?? SOMEONE}`);
+    // Display names go first, so a slug that is also a name word does not split a full name.
+    if (capPattern) t = t.replace(capPattern, (m) => cap.get(m) ?? SOMEONE);
     if (pattern) t = t.replace(pattern, (m) => find(bare, m) ?? SOMEONE);
     return t.length > THREAD_TEXT_MAX ? `${t.slice(0, THREAD_TEXT_MAX)}${CUT_NOTE}` : t;
   };

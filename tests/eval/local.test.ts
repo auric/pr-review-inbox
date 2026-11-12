@@ -549,7 +549,7 @@ describe("eval:local selection", () => {
       "Zelda and Quux agree. @ghost-user, @{Olga Far}, and [~al] know. Olga too. Moe agrees.",
       "Mail zq@corp.example.invalid or see http://user@git.corp.example.invalid:7990/p.",
       // NFD accents, upper case, and a long s that the regex folds to s.
-      "José Núñez and JOSÉ. Koſtas too. al is a word here, but @al is a mention.",
+      "José Núñez and JOSÉ. José too. Koſtas too. al is a word here, but @al is a mention.",
     ].join(" ");
     const rows = [row(1, "zelda-quux", "Zelda Quux", text, "zquux"), row(2, "al", "José Núñez"), row(3, "kostas", null)];
     const people = [
@@ -559,10 +559,44 @@ describe("eval:local selection", () => {
     const out = await caseThreads(rows, { me: "me", before: 10, skip: new Set(), must: [], people, place: async () => null }, noThreads());
     expect(out[0]?.text).toBe(
       [
-        "reviewer-1 and reviewer-1 agree. @someone, @someone, and @reviewer-2 know. someone too. eval-reviewer agrees.",
+        // A first name alone of a person of another PR stays. This is a known limit.
+        "reviewer-1 and reviewer-1 agree. @someone, @someone, and @reviewer-2 know. Olga too. eval-reviewer agrees.",
         "Mail <email> or see http://<host>/p.",
-        "reviewer-2 and reviewer-2. reviewer-3 too. al is a word here, but @reviewer-2 is a mention.",
+        // A name in all capitals is not the capitalized form, so it stays. This is a known limit.
+        "reviewer-2 and JOSÉ. reviewer-2 too. reviewer-3 too. al is a word here, but @reviewer-2 is a mention.",
       ].join(" "),
+    );
+  });
+
+  test("a single name word changes only for the people of the PR and only when capitalized", async () => {
+    const row = (id: number, slug: string, name: string, text = "ok"): ThreadRow => ({
+      pr: 1,
+      id,
+      root: 1,
+      slug,
+      login: null,
+      name,
+      text,
+      anchor: null,
+      excerpt: null,
+      resolved: 0,
+      resolvedAt: null,
+      at: id,
+      updated: id,
+      deleted: 0,
+      prAuthor: "author",
+      prAuthorName: null,
+    });
+    const text = "Will, can you check? Mark agrees. This will mark the row. Ask Grant Chase or grant chase. Grant may help.";
+    const rows = [row(1, "wmark", "Will Mark", text)];
+    // A one-word display name of another PR does not change the word "mark". A lowercase full name stays too.
+    const people = [
+      { slug: "gchase", login: null, name: "Grant Chase" },
+      { slug: "mk1", login: null, name: "Mark" },
+    ];
+    const out = await caseThreads(rows, { me: "me", before: 10, skip: new Set(), must: [], people, place: async () => null }, noThreads());
+    expect(out[0]?.text).toBe(
+      "reviewer-1, can you check? reviewer-1 agrees. This will mark the row. Ask someone or grant chase. Grant may help.",
     );
   });
 
