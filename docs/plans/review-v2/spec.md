@@ -3070,6 +3070,22 @@ Acceptance criteria:
 6. AC-B210. The run usage of a run with advisor calls names the advisor model from modelUsage, and the run setup line shows it.
 7. AC-B211. Gate GADV.2 ignores `slash_commands`. GADV.2, GADV.4, and GADV.5a judge by init.tools and the advisor calls, with the run with `--advisor` as the control. GADV.5b judges by the advisor calls of that run.
 
+### 6.29 Agent file library (docs/plans/review-v2/agent-workflow.md sections 3.4 to 3.6, 3.10; AW1)
+
+- `src/server/tasks/agents.ts` reads the preset agents and `<config>/agents/*.md` (top level only). `<config>` is CLAUDE_CONFIG_DIR or ~/.claude. It parses the front matter with Bun.YAML and writes the app definition of each agent. Nothing in a task step uses it yet (AW2).
+- Release 1 has two agent sources: preset and user. Repository agents come in release 2 (section 3.7 of the design).
+
+Acceptance criteria:
+
+1. AC-B231. Each refusal of agent-workflow.md section 3.5 gives its exact text: no readable front matter, a bad name, an `rl-` name, no description, a bad model, a bad effort, a file over 64 KB, a private key, and an empty body. A refused file still has a row. Its definition cannot be built.
+2. AC-B232. A maxTurns that is not a positive integer, an unknown tool name, a tool rule such as `Bash(npm *)`, and a dropped key give notes, not refusals.
+3. AC-B233. A definition holds only description, prompt, tools, disallowedTools, model, effort, maxTurns, and omitClaudeMd. permissionMode, mcpServers, hooks, memory, skills, isolation, background, initialPrompt, autoCompactWindow, and every other key never reach it.
+4. AC-B234. The tools are the cap intersected with the file tools: Read, Grep, Glob, Edit, and Write, plus Bash in a shell step. Read-only sets the cap to Read, Grep, and Glob. A file with no tools field gets the full cap. A tool rule gives no tool. An agent with no tool left gets no definition and a note.
+5. AC-B235. disallowedTools always holds Agent, NotebookEdit, PowerShell, WebFetch, and WebSearch, the file list, and each SUBAGENT_DENY entry outside the tools. omitClaudeMd is always true. maxTurns is the smaller of the file value and STEP_TURNS of the step.
+6. AC-B236. The model and the effort come from the workflow override, else the file, else none. The app never adds a model or an effort that the user did not set. `inherit` passes as it is.
+7. AC-B237. The prompt is the app rules, then "Instructions from the agent file <source>:<name>:", then the file body. The description is cut at 1,024 characters. The SHA-256 is of the exact file bytes.
+8. AC-B238. The preset "Lead and agents" has the six agents of section 3.10. Each passes the model and effort checks. rl-explorer has the profile reviewer model. rl-planner is not picked. The lead is the App lead on opus, high, with "The lead may edit files" on.
+9. AC-B239. The workflow save checks refuse a name clash ("Two agents are named <name>. Pick one."), a workflow with no agent, an agent that is not available or refused, and an implement workflow with no writer and the lead edit switch off.
 ### 6.30 UI cleanup (user decision of 2026-11-03)
 
 - Tasks row: `TaskRowDto.progress.building` lists the ordinals of the code parts in state implementing. The meta line says "Building part 3 of 4", or "Building parts 2 and 3 of 4" while parts build at the same time. Without a part in its build, it names the first open part as before.

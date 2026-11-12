@@ -13,7 +13,7 @@ const list = (v: string[]) => v.join(",") || "none";
 const shown = (s: Seen) => `${s.state}${s.label && s.label !== "none" ? ` (${s.label})` : ""}`;
 
 // ---------- agents.json (agent-workflow.md section 3.6) ----------
-// AW1 is not built. This is the gate copy of the transform: the tool cap, the forced disallowedTools, maxTurns, and omitClaudeMd. The
+// AW1 is built. This is the gate copy of the transform: the tool cap, the forced disallowedTools, maxTurns, and omitClaudeMd. The
 // prompt is the test text, without the app rules.
 export const READ_TOOLS = ["Read", "Grep", "Glob"];
 const WRITE_TOOLS = [...READ_TOOLS, "Edit", "Write"];

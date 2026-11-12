@@ -1,6 +1,6 @@
 # Agent workflows in Build a Jira task
 
-Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. AW0 (the Gate B35 and B36 script) is code complete. Gate B35 and Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. User answers of 2026-11-11: option C (one lead per Claude step); project agents in release 2; the preset lead may edit files (Q5 differs from the recommendation); all other recommendations accepted (Q1 to Q4, Q6 to Q15).
+Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. AW0 (the Gate B35 and B36 script) and AW1 (the agent file library, spec.md section 6.29, AC-B231 to AC-B239) are code complete. Gate B35 and Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. User answers of 2026-11-11: option C (one lead per Claude step); project agents in release 2; the preset lead may edit files (Q5 differs from the recommendation); all other recommendations accepted (Q1 to Q4, Q6 to Q15).
 
 ## Summary
 
@@ -264,7 +264,7 @@ Workflow save checks:
 
 - Number: gate numbers B1 to B35 are taken. AC-B36 is an acceptance criterion ID in another list. The new facts are U83 to U96 in integration-check.md, section "Workflow agents (Gate B36, not run)".
 - Run: `bun scripts/gate/claude-checks.ts --only B35`, then `bun scripts/gate/claude-checks.ts --only B36`, then `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0`. The results go to `.gate0/v3-local/results.b35.json` and `results.b36.json`. docs/gate-v2.md has the run table.
-- Setup: haiku for the lead and the agents, except one opt-in Opus call (`--opus`). At most 8 calls (7 without `--opus`). A temp part folder with repo/, a temp git repository, the app's implementArgs, shell.json, shellEnv, and the agents.json of the new transform. AW1 is not built, so the gate uses its own copy of section 3.6 (scripts/gate/workflow.ts). U88 reads `<config>/agents` only and never writes a file there.
+- Setup: haiku for the lead and the agents, except one opt-in Opus call (`--opus`). At most 8 calls (7 without `--opus`). A temp part folder with repo/, a temp git repository, the app's implementArgs, shell.json, shellEnv, and the agents.json of the new transform. The gate uses its own copy of section 3.6 (scripts/gate/workflow.ts). tests/tasks/agents.test.ts checks that AW1 writes the same kept keys. U88 reads `<config>/agents` only and never writes a file there.
 - Writers are allowed only when U83, U84, U85, U86, U89 (first part), and U93 pass. The other checks are INFO and feed the design.
 
 | Fact | Check | PASS |
@@ -293,11 +293,11 @@ One implementer at a time, in this order. Release 1 is AW0 to AW3. Release 2 is 
 |---|---|---|---|
 | AW0 Gate B35 and B36 script (code complete) | implementer-xhigh | `scripts/gate/claude-checks.ts`, `scripts/gate/sanitize-claude.ts`, `integration-check.md` (U83 to U96 rows), `docs/gate-v2.md` | none |
 | (user) Run B35 and B36 | user | real CLI | AW0 |
-| AW1 Agent file library | implementer | new `src/server/tasks/agents.ts` (discover, parse with Bun.YAML, validate, cap, drop fields, app rules, SHA-256, preset definitions), new `src/shared/agents.ts` (AgentInfo, AgentDef, Workflow zod schemas), `tests/tasks/agents.test.ts` | none (may run before the gate) |
+| AW1 Agent file library (code complete) | implementer | new `src/server/tasks/agents.ts` (discover, parse with Bun.YAML, validate, cap, drop fields, app rules, SHA-256, preset definitions), new `src/shared/agents.ts` (AgentInfo, AgentDef, Workflow zod schemas), `tests/tasks/agents.test.ts` | none (may run before the gate) |
 | AW2 Lead steps | implementer-xhigh | `src/server/review/claude.ts` (ImplementSpec, implementArgs, childEnv), `src/server/review/stream.ts`, `src/shared/run-log.ts`, `src/server/tasks/implement.ts` (implementPrompt, notes), `src/server/review/jobs.ts`, `src/server/tasks/loop.ts`, `src/server/tasks/tasks.ts` (pin at Build), migration `0NN_task_workflow.sql`, `tests/support/fake-claude.ts`, tests | AW1, gate results |
 | AW3 Workflows UI and Build select | implementer | settings routes and config schema (`workflows`), `GET /api/tasks/agents`, `src/web` Settings > Tasks > Workflows, Build form select, Task header, `tests/web`, `tests/e2e/task-workflow.e2e.ts`, screenshots, README | AW2 |
 | AW4 Project agents and trust | implementer-xhigh | `src/server/tasks/agents.ts` (read at the base commit), migration `0NN_repo_agents.sql`, repository settings routes and UI, Build check, tests, screenshots | AW3 |
-| AW5 Docs | implementer | `BRIEF.md` 3.5 (implement bullet) and the Task runs bullet, `spec.md` 6.19.2 and a new section 6.27, `docs/plans/review-v2/task-subagents.md` point 2, `docs/smoke-task.md` part W, `CHANGELOG.md` | AW3 (then AW4) |
+| AW5 Docs | implementer | `BRIEF.md` 3.5 (implement bullet) and the Task runs bullet, `spec.md` 6.19.2 and a new section 6.29, `docs/plans/review-v2/task-subagents.md` point 2, `docs/smoke-task.md` part W, `CHANGELOG.md` | AW3 (then AW4) |
 
 Smallest first release: AW0, the gate run, AW1, AW2, and AW3. With them, the user gets the preset, or a workflow built from the user's own agent files, with a lead model and effort per workflow. If B36 fails the writer checks, AW2 ships with read-only agents only, and "The lead may edit files" turns on.
 

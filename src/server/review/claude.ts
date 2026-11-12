@@ -18,9 +18,9 @@ export const MIN_CLI_VERSION = "2.1.302";
 export const MAIN_AGENT = "rl-main";
 // docs/plans/review-v2/task-subagents.md decision 1: the read-only subagent of a task step.
 export const EXPLORER_AGENT = "rl-explorer";
-const READ_TOOLS = ["Read", "Grep", "Glob"];
+export const READ_TOOLS = ["Read", "Grep", "Glob"];
 // Gate B1: a subagent with these tools denied has no shell and no write tool.
-const SUBAGENT_DENY = ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"];
+export const SUBAGENT_DENY = ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"];
 // Names go into comma lists of CLI flags.
 export const NAME = /^[A-Za-z0-9_-]+$/;
 const STDERR_TAIL = 16_384;
