@@ -163,6 +163,9 @@ export function useSaveSettings() {
       qc.setQueryData(["settings"], dto);
       qc.invalidateQueries({ queryKey: ["prs"] });
       qc.invalidateQueries({ queryKey: ["status"] });
+      // A new URL, token, or CA file cancels the runs (jobs.ts). A new origin closes their database before their end write, so no live
+      // update names them.
+      qc.invalidateQueries({ queryKey: ["runs"] });
     },
   });
 }

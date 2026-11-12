@@ -76,6 +76,96 @@ describe("live event keys", () => {
   });
 });
 
+const SLOTS = '["runs","slots"]';
+const ASKS = '["pr",1,"asks"]';
+
+// Observers of the run slots and of the Ask answers of PR 1. Each request waits until the test answers it.
+function views() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } } });
+  const calls: string[] = [];
+  const out: { ok: () => void; fail: () => void }[] = [];
+  const stops = [
+    ["runs", "slots"],
+    ["pr", 1, "asks"],
+  ].map((queryKey) =>
+    new QueryObserver(qc, {
+      queryKey,
+      initialData: "before",
+      queryFn: () =>
+        new Promise<string>((resolve, reject) => {
+          calls.push(JSON.stringify(queryKey));
+          out.push({ ok: () => resolve("after"), fail: () => reject(new Error("down")) });
+        }),
+    }).subscribe(() => {}),
+  );
+  return {
+    qc,
+    calls,
+    out,
+    stop: () => {
+      for (const s of stops) s();
+    },
+  };
+}
+
+describe("live event order", () => {
+  test("a run start or end refetches the views of its PR only after the run slots", async () => {
+    const v = views();
+    try {
+      applyLive(v.qc, { type: "changed", data: { prs: [1], runs: [9] } });
+      await settle();
+      expect(v.calls).toEqual([SLOTS]);
+      v.out[0]?.ok();
+      await settle();
+      expect(v.calls).toEqual([SLOTS, ASKS]);
+    } finally {
+      v.stop();
+    }
+  });
+
+  test("a log update during the wait sends a new slots request, and the views wait for its answer", async () => {
+    const v = views();
+    try {
+      applyLive(v.qc, { type: "changed", data: { prs: [1], runs: [9] } });
+      applyLive(v.qc, { type: "changed", data: { runs: [9] } });
+      await settle();
+      expect(v.calls).toEqual([SLOTS, SLOTS]);
+      // The answer of the cancelled request.
+      v.out[0]?.ok();
+      await settle();
+      expect(v.calls).toEqual([SLOTS, SLOTS]);
+      v.out[1]?.ok();
+      await settle();
+      expect(v.calls).toEqual([SLOTS, SLOTS, ASKS]);
+    } finally {
+      v.stop();
+    }
+  });
+
+  test("a failed slots request still refetches the views", async () => {
+    const v = views();
+    try {
+      applyLive(v.qc, { type: "changed", data: { prs: [1], runs: [9] } });
+      await settle();
+      v.out[0]?.fail();
+      await settle();
+      expect(v.calls).toEqual([SLOTS, ASKS]);
+    } finally {
+      v.stop();
+    }
+  });
+
+  test("a PR event without runs refetches its views at once", async () => {
+    const v = views();
+    try {
+      applyLive(v.qc, { type: "changed", data: { prs: [1] } });
+      expect(v.calls).toEqual([ASKS]);
+    } finally {
+      v.stop();
+    }
+  });
+});
+
 // One exclusive lock with the ifAvailable and signal options of the Web Locks API.
 function fakeLocks() {
   let held = false;

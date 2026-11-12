@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A new Bitbucket URL saved during a run no longer leaves that run shown as running. Ask, Fix, Explain, and Consult no longer show the end of a run before the start buttons are free.
 - Ask and the other start buttons are ready as soon as the run row shows that a run ended. Before, Ctrl+Enter could say "The question was not sent" for a moment after Cancel.
 - Settings has a CI server card for Jenkins: the URL, your user name, an API token, and an optional CA file. Save and Test check the login with Jenkins first. The token goes only into the OS secret store, and Claude never gets it. No feature reads build logs yet.
 - Build a Jira task: the app now notifies you when a part is ready for its pull request, such as "Part 2 of 4 is ready for its PR.", and when the next app start stops a task that the app left in the middle of a step, for example after a crash. Each part notifies on its own, also when two parts build at the same time. The old note "Needs you: open the PR" is gone.

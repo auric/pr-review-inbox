@@ -56,15 +56,26 @@ type Qc = Pick<QueryClient, "invalidateQueries" | "cancelQueries">;
 
 // TanStack Query gives an invalidated query in its first load the request that is out. That request can be older than the change.
 // So the change cancels it, and the invalidate sends a new one. The filter keeps to the queries that the invalidate refetches.
-function refetch(qc: Qc, f?: InvalidateQueryFilters) {
+async function refetch(qc: Qc, f?: InvalidateQueryFilters) {
   const first = (q: Query) => q.state.data === undefined && !q.isDisabled() && !q.isStatic() && (f?.predicate?.(q) ?? true);
   void qc.cancelQueries({ queryKey: f?.queryKey, type: "active", fetchStatus: "fetching", predicate: first }, { silent: true });
-  void qc.invalidateQueries(f);
+  await qc.invalidateQueries(f);
 }
 
+const runKey = (f: InvalidateQueryFilters) => f.queryKey?.[0] === "runs";
+
 export function applyLive(qc: Qc, m: LiveMessage) {
-  if (m.type === "changed") for (const f of changedFilters(m.data)) refetch(qc, f);
-  if (m.type === "resync") refetch(qc);
+  if (m.type === "changed") {
+    const filters = changedFilters(m.data);
+    // A run start or end names its PR. The PR views (Ask, Fix, Explain, Consult) show the end from their own queries. They refetch
+    // after the run slots, so the start controls never refuse a start while a view shows the end.
+    if (m.data.runs?.length && m.data.prs?.length)
+      void refetch(qc, { queryKey: ["runs"] }).then(() => {
+        for (const f of filters) if (!runKey(f)) void refetch(qc, f);
+      });
+    else for (const f of filters) void refetch(qc, f);
+  }
+  if (m.type === "resync") void refetch(qc);
   // Each tab claims the new events. The server gives each event to one tab only.
   if (m.type !== "changed") liveEvents.dispatchEvent(new Event("events"));
 }
