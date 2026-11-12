@@ -1003,6 +1003,14 @@ The machine (src/server/tasks/machine.ts, XState v5 as a pure function; design.m
 - API names (XState docs "Pure transitions", stately.ai/docs/pure-transitions, and the core changelog 5.19.0): `transition(logic, snapshot, event)` returns `[nextSnapshot, actions]` and executes no action; `initialTransition(logic, input?)` returns `[initialSnapshot, actions]`. `machine.resolveState({ value, context? })` builds a snapshot from a stored value (stately.ai/docs/persistence). `snapshot.can(event)` returns true when the event changes the state and runs the guards (stately.ai/docs/states).
 - Diagram: machineMermaid(machine) (pure) prints a Mermaid stateDiagram-v2 from machine.config. A snapshot test keeps the diagram of the README section "Build a Jira task" equal to the machine.
 
+Acceptance (part-session.md section 9, package PS-M; no wiring yet):
+
+1. AC-B249. A sync of a changes_requested part whose "Needs work" is withdrawn and whose gate fails sends GATE_FAILED, and the part goes to pr_open (G3).
+2. AC-B250. RESTART moves implementing and self_reviewed to implementing only when unpushed holds (task_part.pushed is NULL). An absent unpushed refuses it.
+3. AC-B251. The phase machine matches the transition table of part-session.md section 9.3.3 under every combination of the guards that each pair reads. GO takes the first guard that holds and refuses when none holds. machineMermaid of the part and phase machines equals section 9.3.7.
+4. AC-B252. Every state of the three machines is reachable, only the terminals have no edge to another state, every event has a sender under src/server or is in RESERVED with its owner, and the machines have no actions, no invoke, and import only xstate and types.
+5. AC-B253. Each reason kind and cause of part-session.md section 9.4 has a primary exit in REASON_EXITS. Each exit names a route of routes.ts, a new route of section 9.3.6 with its package, or the driver that takes it. A blocked_json row without cause, resumeAt, and armed still parses.
+
 ### 6.3 Data model (the next free migration number, 033 unless WP-D2 takes it)
 
 ```sql

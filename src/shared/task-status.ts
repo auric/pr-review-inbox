@@ -19,6 +19,10 @@ const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {
   update: "Needs you: the update stopped",
   error: "Needs you: an error",
   allow: "Needs you: Claude asks to allow a command",
+  usage: "Needs you: the usage limit",
+  held: "Needs you: a held part",
+  stuck: "Needs you: Claude is stuck",
+  unfinished: "Needs you: open tasks are left",
 };
 export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
   const p = r.progress;

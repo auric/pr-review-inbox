@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// The task and part machines (docs/plans/review-v2/spec.md section 6.2) and advance(): every (state, event) pair, the guards, the
-// purity rules, the Mermaid diagram, and the writes with the version check.
+// The task and part machines (docs/plans/review-v2/spec.md section 6.2), the phase machine (part-session.md section 9.3.3), and
+// advance(): every (state, event) pair, the guards, reachability, the senders, the purity rules, the Mermaid diagrams, and the writes
+// with the version check (AC-B250 to AC-B252).
 import type { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initialTransition, transition } from "xstate";
+import { type AnyStateMachine, initialTransition, transition } from "xstate";
 import { openDb } from "../../src/server/storage/db";
 import {
   machineMermaid,
   PART_EVENTS,
   type PartContext,
+  PHASE_EVENTS,
+  PHASE_GUARDS,
+  PHASES,
+  type Phase,
+  type PhaseContext,
   partMachine,
+  phaseMachine,
+  RESERVED,
   TASK_EVENTS,
   type TaskContext,
   taskMachine,
@@ -27,6 +35,8 @@ for (const m of ["tasks/machine", "tasks/tasks"])
 
 type TaskEventType = (typeof TASK_EVENTS)[number];
 type PartEventType = (typeof PART_EVENTS)[number];
+type PhaseEventType = (typeof PHASE_EVENTS)[number];
+type PhaseGuard = (typeof PHASE_GUARDS)[number];
 
 // The context of the table: every guard that the table rows need passes. The guard cases below vary one fact at a time.
 const BASE: TaskContext = { size: "medium", gate: true, stoppedFrom: "implementing" };
@@ -48,15 +58,90 @@ const TASK_TABLE: Record<TaskState, Partial<Record<TaskEventType, TaskState>>> =
 // the side states declined and abandoned. spec.md section 6.20.7: the plan approval follows a PR that the app did not create.
 const PART_TABLE: Record<PartState, Partial<Record<PartEventType, PartState>>> = {
   planned: { START: "implementing", ABANDON: "abandoned", ADOPT_OPEN: "pr_open", ADOPT_MERGED: "merged" },
-  implementing: { REVIEWED: "self_reviewed", ABANDON: "abandoned" },
-  self_reviewed: { PR_OPENED: "pr_open", ABANDON: "abandoned" },
+  implementing: { REVIEWED: "self_reviewed", RESTART: "implementing", ABANDON: "abandoned" },
+  self_reviewed: { PR_OPENED: "pr_open", RESTART: "implementing", ABANDON: "abandoned" },
   pr_open: { CHANGES_REQUESTED: "changes_requested", GATE_PASSED: "approved", MERGED: "merged", DECLINED: "declined" },
-  changes_requested: { GATE_PASSED: "approved", MERGED: "merged", DECLINED: "declined" },
+  // part-session.md G3: a withdrawn "Needs work" with a failing gate.
+  changes_requested: { GATE_PASSED: "approved", GATE_FAILED: "pr_open", MERGED: "merged", DECLINED: "declined" },
   approved: { CHANGES_REQUESTED: "changes_requested", GATE_FAILED: "pr_open", MERGED: "merged", DECLINED: "declined" },
   merged: {},
   declined: { REOPENED: "pr_open", ABANDON: "abandoned" },
   abandoned: {},
 };
+
+// The one guard of each guarded part event (part-session.md section 9.3.2). The other part events have no guard.
+const PART_GUARDS: Partial<Record<PartEventType, "gate" | "unpushed">> = { GATE_PASSED: "gate", RESTART: "unpushed" };
+
+// part-session.md section 9.3.3, Transitions: the rows of each (phase, event) in their order. The first row whose guard holds wins; a
+// null guard always holds. A pair that the table leaves out, or a pair with no row that holds, is refused.
+type Row = [PhaseGuard | null, Phase];
+const RUN_CUT = (state: Phase): Row[] => [
+  ["firstCut", state],
+  [null, "idle"],
+];
+const RUN_DONE: Row[] = [
+  ["unchanged", "idle"],
+  [null, "checking"],
+];
+const ENDED: Partial<Record<PhaseEventType, Row[]>> = { WAIT: [[null, "idle"]], STOPPED: [[null, "idle"]] };
+const PHASE_TABLE: Record<Phase, Partial<Record<PhaseEventType, Row[]>>> = {
+  idle: {
+    GO: [
+      ["setup", "setup"],
+      ["baseline", "baseline"],
+      ["follow", "following"],
+      ["run", "building"],
+      ["checks", "checking"],
+      ["critic", "critic"],
+      ["review", "reviewing"],
+    ],
+    UPDATE: [[null, "updating"]],
+  },
+  setup: { CLEAN: [[null, "idle"]], ...ENDED },
+  baseline: { CLEAN: [[null, "idle"]], STOPPED: [[null, "idle"]] },
+  building: { RUN_DONE: [[null, "checking"]], RUN_CUT: RUN_CUT("building"), ...ENDED },
+  checking: {
+    CHECKS_GREEN: [[null, "idle"]],
+    CHECKS_RED: [
+      ["afterUpdate", "idle"],
+      ["redBefore", "idle"],
+      ["triesLeft", "fixing"],
+      [null, "idle"],
+    ],
+    ...ENDED,
+  },
+  fixing: { RUN_DONE, RUN_CUT: RUN_CUT("fixing"), ...ENDED },
+  critic: { POINTS: [[null, "judging"]], CLEAN: [[null, "idle"]], STOPPED: [[null, "idle"]] },
+  judging: { RUN_DONE: [[null, "checking"]], RUN_CUT: RUN_CUT("judging"), ...ENDED },
+  reviewing: {
+    POINTS: [
+      ["roundsLeft", "judging"],
+      [null, "idle"],
+    ],
+    CLEAN: [[null, "idle"]],
+    ...ENDED,
+  },
+  following: { RUN_DONE, RUN_CUT: RUN_CUT("following"), ...ENDED },
+  updating: { CLEAN: [[null, "checking"]], CONFLICT: [[null, "resolving"]], ...ENDED },
+  resolving: { RUN_DONE: [[null, "updating"]], ...ENDED },
+};
+const NO_FACTS = Object.fromEntries(PHASE_GUARDS.map((g) => [g, false])) as PhaseContext;
+const expectedPhase = (state: Phase, type: PhaseEventType, context: PhaseContext): Phase | null =>
+  (PHASE_TABLE[state][type] ?? []).find(([g]) => g === null || context[g])?.[1] ?? null;
+// Every true/false combination of the given facts, with the other facts false.
+function combos<K extends string>(keys: readonly K[], base: Record<K, boolean>): Record<K, boolean>[] {
+  return Array.from({ length: 2 ** keys.length }, (_, n) => ({
+    ...base,
+    ...Object.fromEntries(keys.map((k, i) => [k, ((n >> i) & 1) === 1])),
+  }));
+}
+const phaseGuardsOf = (state: Phase) => [
+  ...new Set(
+    Object.values(PHASE_TABLE[state])
+      .flat()
+      .flatMap(([g]) => (g ? [g] : [])),
+  ),
+];
 
 // can() and transition() of one pair. null: refused.
 function taskStep(state: TaskState, type: TaskEventType, context: TaskContext = BASE) {
@@ -68,13 +153,51 @@ function taskStep(state: TaskState, type: TaskEventType, context: TaskContext = 
   return { can, to: next.value as TaskState };
 }
 
-function partStep(state: PartState, type: PartEventType, context: PartContext = { gate: true }) {
+function partStep(state: PartState, type: PartEventType, context: PartContext = { gate: true, unpushed: true }) {
   const snapshot = partMachine.resolveState({ value: state, context });
   const can = snapshot.can({ type });
   const [next, actions] = transition(partMachine, snapshot, { type });
   expect(actions).toEqual([]);
   return { can, to: next.value as PartState };
 }
+
+function phaseStep(state: Phase, type: PhaseEventType, context: PhaseContext = NO_FACTS) {
+  const snapshot = phaseMachine.resolveState({ value: state, context });
+  const can = snapshot.can({ type });
+  const [next, actions] = transition(phaseMachine, snapshot, { type });
+  expect(actions).toEqual([]);
+  return { can, to: next.value as Phase };
+}
+
+// A BFS with transition() from the initial state. contexts: the contexts to try in a state. Returns the reached states and the edges to
+// another state.
+function explore(machine: AnyStateMachine, events: readonly string[], contexts: (state: string) => object[]) {
+  const start = String(initialTransition(machine)[0].value);
+  const seen = new Set([start]);
+  const leaves = new Map<string, Set<string>>();
+  for (const queue = [start]; queue.length; ) {
+    const state = queue.shift() as string;
+    const out = new Set<string>();
+    for (const context of contexts(state))
+      for (const type of events) {
+        const snapshot = machine.resolveState({ value: state, context });
+        if (!snapshot.can({ type })) continue;
+        const to = String(transition(machine, snapshot, { type })[0].value);
+        if (to !== state) out.add(to);
+        if (!seen.has(to)) {
+          seen.add(to);
+          queue.push(to);
+        }
+      }
+    leaves.set(state, out);
+  }
+  return { seen, leaves };
+}
+
+const TASK_CONTEXTS: TaskContext[] = [null, "small", "medium", "large"].flatMap((size) =>
+  [false, true].flatMap((gate) => [null, ...TASK_STATES].map((stoppedFrom) => ({ size, gate, stoppedFrom }) as TaskContext)),
+);
+const PART_CONTEXTS = combos(["gate", "unpushed"] as const, { gate: false, unpushed: false });
 
 const expectTask = (state: TaskState, type: TaskEventType, to: TaskState | null, context: TaskContext = BASE) =>
   expect({ state, type, ...taskStep(state, type, context) }).toEqual({ state, type, can: to !== null, to: to ?? state });
@@ -142,6 +265,132 @@ describe("part machine", () => {
       expect(partStep(state, "GATE_PASSED", { gate: true })).toEqual({ can: true, to: "approved" });
     }
   });
+
+  test("guard grid: each state and event under each gate and unpushed value; RESTART needs unpushed", () => {
+    for (const context of PART_CONTEXTS)
+      for (const state of PART_STATES)
+        for (const type of PART_EVENTS) {
+          const guard = PART_GUARDS[type];
+          const to = PART_TABLE[state][type] && (!guard || context[guard]) ? (PART_TABLE[state][type] as PartState) : null;
+          expect({ state, type, context, ...partStep(state, type, context) }).toEqual({
+            state,
+            type,
+            context,
+            can: to !== null,
+            to: to ?? state,
+          });
+        }
+    // An absent unpushed counts as false.
+    expect(partStep("implementing", "RESTART", { gate: true })).toEqual({ can: false, to: "implementing" });
+  });
+});
+
+describe("phase machine (part-session.md section 9.3.3)", () => {
+  test("its states, events, and guards", () => {
+    expect(Object.keys(phaseMachine.config.states ?? {})).toEqual([...PHASES]);
+    expect([...new Set(Object.values(PHASE_TABLE).flatMap((row) => Object.keys(row)))].sort()).toEqual([...PHASE_EVENTS].sort());
+    expect(Object.keys(phaseMachine.implementations.guards).sort()).toEqual([...PHASE_GUARDS].sort());
+    const [first, actions] = initialTransition(phaseMachine);
+    expect(first.value).toBe("idle");
+    expect(actions).toEqual([]);
+  });
+
+  for (const state of PHASES)
+    test(`${state}: every event with no fact true, allowed and refused`, () => {
+      for (const type of PHASE_EVENTS) {
+        const to = expectedPhase(state, type, NO_FACTS);
+        expect({ state, type, ...phaseStep(state, type) }).toEqual({ state, type, can: to !== null, to: to ?? state });
+      }
+    });
+
+  test("guard grid: each state and event under every combination of the guards that its rows read", () => {
+    let pairs = 0;
+    for (const state of PHASES)
+      for (const type of PHASE_EVENTS) {
+        const guards = [...new Set((PHASE_TABLE[state][type] ?? []).flatMap(([g]) => (g ? [g] : [])))];
+        for (const context of combos(guards, NO_FACTS)) {
+          const to = expectedPhase(state, type, context);
+          expect({ state, type, context, ...phaseStep(state, type, context) }).toEqual({
+            state,
+            type,
+            context,
+            can: to !== null,
+            to: to ?? state,
+          });
+          pairs++;
+        }
+      }
+    // idle GO alone has 2^7 combinations.
+    expect(pairs).toBeGreaterThan(128);
+  });
+
+  test("GO with every fact true picks setup; with no fact true it is refused", () => {
+    const all = Object.fromEntries(PHASE_GUARDS.map((g) => [g, true])) as PhaseContext;
+    expect(phaseStep("idle", "GO", all)).toEqual({ can: true, to: "setup" });
+    expect(phaseStep("idle", "GO")).toEqual({ can: false, to: "idle" });
+  });
+});
+
+describe("reachability and dead ends (part-session.md section 9.7, invariants 1 and 2)", () => {
+  const cases = [
+    {
+      name: "task",
+      machine: taskMachine,
+      states: TASK_STATES,
+      events: TASK_EVENTS,
+      contexts: () => TASK_CONTEXTS,
+      terminals: ["done", "failed"],
+    },
+    {
+      name: "part",
+      machine: partMachine,
+      states: PART_STATES,
+      events: PART_EVENTS,
+      contexts: () => PART_CONTEXTS,
+      terminals: ["merged", "abandoned"],
+    },
+    {
+      name: "phase",
+      machine: phaseMachine,
+      states: PHASES,
+      events: PHASE_EVENTS,
+      contexts: (s: string) => combos(phaseGuardsOf(s as Phase), NO_FACTS),
+      terminals: [],
+    },
+  ];
+  for (const c of cases)
+    test(`${c.name}: every state is reachable, and only the terminals have no edge to another state`, () => {
+      const { seen, leaves } = explore(c.machine, c.events, c.contexts);
+      expect([...seen].sort()).toEqual([...c.states].sort());
+      expect(
+        [...leaves]
+          .filter(([, out]) => out.size === 0)
+          .map(([s]) => s)
+          .sort(),
+      ).toEqual([...c.terminals].sort());
+    });
+});
+
+describe("senders (part-session.md section 9.7, invariant 7)", () => {
+  // A sender passes the event to advance(), advancePart(), or the phase send helper as `type: "E"`, or returns it from an event helper
+  // (gates.ts eventOf: `return "E"`; tasks.ts adoption: `? "E" : "F"`). BUILD has no sender: the create route uses initialTransition.
+  const root = join(import.meta.dir, "../../src/server");
+  const sources = (readdirSync(root, { recursive: true }) as string[])
+    .filter((f) => /\.ts$/.test(f) && !f.replaceAll("\\", "/").endsWith("tasks/machine.ts"))
+    .map((f) => readFileSync(join(root, f), "utf8"))
+    .join("\n");
+  const sent = (e: string) => new RegExp(`(?:type: |return |\\? |" : )"${e}"`).test(sources);
+  const events = [...new Set([...TASK_EVENTS, ...PART_EVENTS, ...PHASE_EVENTS])].filter((e) => e !== "BUILD");
+
+  test("each event has a sender or is in RESERVED with its owner package", () => {
+    expect(events.filter((e) => !sent(e) && !RESERVED[e])).toEqual([]);
+    for (const owner of Object.values(RESERVED)) expect(owner?.length).toBeGreaterThan(0);
+  });
+
+  test("no RESERVED event has a sender", () => {
+    expect(Object.keys(RESERVED).filter(sent)).toEqual([]);
+    expect(Object.keys(RESERVED).filter((e) => !(events as string[]).includes(e))).toEqual([]);
+  });
 });
 
 describe("purity", () => {
@@ -153,12 +402,19 @@ describe("purity", () => {
       : Object.entries(v).flatMap(([k, x]) => [...(EFFECTS.includes(k) ? [`${path}.${k}`] : []), ...effectKeys(x, `${path}.${k}`)]);
 
   test("the machine configs have no entry, exit, or transition actions and no invoke", () => {
-    for (const m of [taskMachine, partMachine]) {
+    for (const m of [taskMachine, partMachine, phaseMachine]) {
       expect(effectKeys(m.config, m.id)).toEqual([]);
       expect(Object.keys(m.implementations.actions)).toEqual([]);
       expect(Object.keys(m.implementations.actors)).toEqual([]);
       expect(Object.keys(m.implementations.delays)).toEqual([]);
     }
+  });
+
+  test("machine.ts imports only xstate and types", () => {
+    const text = readFileSync(join(import.meta.dir, "../../src/server/tasks/machine.ts"), "utf8");
+    const imports = text.match(/^import[^;]*;/gm) ?? [];
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.filter((i) => !i.startsWith("import type ") && !/ from "xstate";$/.test(i))).toEqual([]);
   });
 
   test("no source file under src/ uses createActor", () => {
@@ -219,14 +475,17 @@ describe("machineMermaid", () => {
   planned --> pr_open: ADOPT_OPEN
   planned --> merged: ADOPT_MERGED
   implementing --> self_reviewed: REVIEWED
+  implementing --> implementing: RESTART if unpushed
   implementing --> abandoned: ABANDON
   self_reviewed --> pr_open: PR_OPENED
+  self_reviewed --> implementing: RESTART if unpushed
   self_reviewed --> abandoned: ABANDON
   pr_open --> changes_requested: CHANGES_REQUESTED
   pr_open --> approved: GATE_PASSED if gate
   pr_open --> merged: MERGED
   pr_open --> declined: DECLINED
   changes_requested --> approved: GATE_PASSED if gate
+  changes_requested --> pr_open: GATE_FAILED
   changes_requested --> merged: MERGED
   changes_requested --> declined: DECLINED
   approved --> changes_requested: CHANGES_REQUESTED
@@ -237,6 +496,68 @@ describe("machineMermaid", () => {
   declined --> pr_open: REOPENED
   declined --> abandoned: ABANDON
   abandoned --> [*]`);
+  });
+
+  test("the phase machine diagram (part-session.md section 9.3.7)", () => {
+    expect(machineMermaid(phaseMachine)).toBe(`stateDiagram-v2
+  [*] --> idle
+  idle --> setup: GO if setup
+  idle --> baseline: GO if baseline
+  idle --> following: GO if follow
+  idle --> building: GO if run
+  idle --> checking: GO if checks
+  idle --> critic: GO if critic
+  idle --> reviewing: GO if review
+  idle --> updating: UPDATE
+  setup --> idle: CLEAN
+  setup --> idle: WAIT
+  setup --> idle: STOPPED
+  baseline --> idle: CLEAN
+  baseline --> idle: STOPPED
+  building --> checking: RUN_DONE
+  building --> building: RUN_CUT if firstCut
+  building --> idle: RUN_CUT
+  building --> idle: WAIT
+  building --> idle: STOPPED
+  checking --> idle: CHECKS_GREEN
+  checking --> idle: CHECKS_RED if afterUpdate
+  checking --> idle: CHECKS_RED if redBefore
+  checking --> fixing: CHECKS_RED if triesLeft
+  checking --> idle: CHECKS_RED
+  checking --> idle: WAIT
+  checking --> idle: STOPPED
+  fixing --> idle: RUN_DONE if unchanged
+  fixing --> checking: RUN_DONE
+  fixing --> fixing: RUN_CUT if firstCut
+  fixing --> idle: RUN_CUT
+  fixing --> idle: WAIT
+  fixing --> idle: STOPPED
+  critic --> judging: POINTS
+  critic --> idle: CLEAN
+  critic --> idle: STOPPED
+  judging --> checking: RUN_DONE
+  judging --> judging: RUN_CUT if firstCut
+  judging --> idle: RUN_CUT
+  judging --> idle: WAIT
+  judging --> idle: STOPPED
+  reviewing --> judging: POINTS if roundsLeft
+  reviewing --> idle: POINTS
+  reviewing --> idle: CLEAN
+  reviewing --> idle: WAIT
+  reviewing --> idle: STOPPED
+  following --> idle: RUN_DONE if unchanged
+  following --> checking: RUN_DONE
+  following --> following: RUN_CUT if firstCut
+  following --> idle: RUN_CUT
+  following --> idle: WAIT
+  following --> idle: STOPPED
+  updating --> checking: CLEAN
+  updating --> resolving: CONFLICT
+  updating --> idle: WAIT
+  updating --> idle: STOPPED
+  resolving --> updating: RUN_DONE
+  resolving --> idle: WAIT
+  resolving --> idle: STOPPED`);
   });
 });
 

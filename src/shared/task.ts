@@ -380,8 +380,40 @@ export const BLOCKED_KINDS = [
   "error",
   // spec.md section 6.21: Claude asks to allow a command.
   "allow",
+  // part-session.md section 9.4. budget, size, and push stay for old rows: safeParse hides a reason of an unknown kind.
+  "usage",
+  "held",
+  "stuck",
+  "unfinished",
 ] as const;
 export type BlockedKind = (typeof BLOCKED_KINDS)[number];
+// part-session.md section 9.4: Continue decides by kind and cause, never by text. Old rows have no cause.
+export const BLOCKED_CAUSES = [
+  "claude",
+  "red_before",
+  "no_change",
+  "task_done",
+  "paused",
+  "checks",
+  "setup",
+  "setup_time",
+  "update",
+  "path",
+  "git_state",
+  "commit",
+  "run",
+  "app",
+  "lower_repo",
+  "restart",
+  "time",
+  "cost",
+  "budget",
+  "large_repos",
+  "stall",
+  "loop",
+  "turns",
+] as const;
+export type BlockedCause = (typeof BLOCKED_CAUSES)[number];
 // task.blocked_json: why the loop waits for the user. null while Claude or the app works, and while the app waits for colleagues.
 // base: the pre-flight found no base branch of this task_repo (spec.md section 6.16.7), so "Pick a base branch" can change it. part: the
 // task_part that the reason is about when no step names it (spec.md section 6.20.6, a part that waits before its build).
@@ -391,8 +423,97 @@ export const taskBlocked = z.object({
   text: z.string(),
   base: z.object({ taskRepo: z.number().int().nonnegative(), branch: z.string() }).optional(),
   part: z.number().int().positive().optional(),
+  cause: z.enum(BLOCKED_CAUSES).optional(),
+  // usage only (part-session.md section 9.4, Q-SM4): the limit reset in epoch ms, and the user's click that arms the resume.
+  resumeAt: z.number().int().nonnegative().optional(),
+  armed: z.boolean().optional(),
 });
 export type TaskBlocked = z.infer<typeof taskBlocked>;
+
+// An exit of a reason (part-session.md section 9.4). route: "<METHOD> <path>" of src/server/tasks/routes.ts, or a new route of section
+// 9.3.6. option: the resume option or input field of the exit. planned: the package that adds the route or the option. app: the driver
+// that takes the exit with no click.
+export type ReasonExit = { label: string; route: string; option?: string; planned?: string } | { label: string; app: "loop" | "timer" };
+const exit = (label: string, route: string, more: { option?: string; planned?: string } = {}): ReasonExit => ({ label, route, ...more });
+const CONTINUE = exit("Continue", "POST /tasks/:id/resume");
+const STOP = exit("Stop", "POST /tasks/:id/stop");
+// The log tab and the PR link come from the task DTO.
+const SEE_WHY = exit("See why", "GET /tasks/:id");
+const LEAVE = exit("Leave it (ready only)", "POST /tasks/:id/resume", { option: "leave", planned: "PS4" });
+const AGAIN = exit("Start this part again", "POST /tasks/:id/parts/:part/restart", { planned: "PS4" });
+const RUN_ENDS = { primary: CONTINUE, other: [AGAIN, SEE_WHY, STOP, LEAVE] };
+const KEPT = { primary: CONTINUE, other: [AGAIN, STOP, LEAVE] };
+const PATH = { primary: CONTINUE, other: [SEE_WHY, STOP, LEAVE] };
+const PLAIN = { primary: CONTINUE, other: [STOP] };
+
+// Key: "<kind>/<cause>", or "<kind>" for a kind without a cause. "usage/armed" is the usage reason with armed true.
+export const REASON_EXITS = {
+  "question/claude": {
+    primary: exit("Answer", "POST /tasks/:id/answers"),
+    other: [exit("Use the recommended answers", "POST /tasks/:id/answers"), STOP],
+  },
+  "question/red_before": PATH,
+  "question/no_change": RUN_ENDS,
+  "question/task_done": PLAIN,
+  "question/paused": PLAIN,
+  "red/checks": RUN_ENDS,
+  "red/setup": { primary: CONTINUE, other: [SEE_WHY, STOP] },
+  "red/setup_time": { primary: exit("Change the time limit", "PUT /repos/:project/:repo/task-settings"), other: [CONTINUE, SEE_WHY, STOP] },
+  "red/update": {
+    primary: CONTINUE,
+    other: [
+      exit("Undo the update", "POST /tasks/:id/parts/:part/update/undo"),
+      SEE_WHY,
+      exit("Tell Claude", "POST /tasks/:id/instructions"),
+      LEAVE,
+    ],
+  },
+  blocker: {
+    primary: CONTINUE,
+    other: [exit("Go on without these fixes", "POST /tasks/:id/resume", { option: "without", planned: "PS4" }), SEE_WHY, STOP, LEAVE],
+  },
+  spec_change: {
+    primary: exit("Accept the change", "POST /tasks/:id/spec-change/:step"),
+    other: [exit("Reject the change", "POST /tasks/:id/spec-change/:step"), STOP],
+  },
+  allow: { primary: exit("Allow", "POST /tasks/:id/allow"), other: [STOP] },
+  "denied_path/path": PATH,
+  "denied_path/git_state": PATH,
+  "denied_path/commit": { primary: CONTINUE, other: [SEE_WHY, STOP] },
+  preflight: { primary: exit("Try again", "POST /tasks/:id/resume"), other: [exit("Pick a base branch", "PUT /tasks/:id/base"), STOP] },
+  // No Stop: ready offers leave.
+  update: {
+    primary: CONTINUE,
+    other: [exit("Go to the PR", "GET /tasks/:id"), exit("Show the diff", "GET /tasks/:id/parts/:part/diff"), LEAVE],
+  },
+  "error/run": RUN_ENDS,
+  "error/app": PLAIN,
+  "error/lower_repo": { primary: exit("Wait for the merge", "POST /tasks/:id/parts/:part/wait-merge"), other: [STOP] },
+  "error/restart": KEPT,
+  "budget/time": PLAIN,
+  // Continue answers 409 while the cost is over the limit (Q-SM5). No route changes the cost limit yet.
+  "budget/cost": PLAIN,
+  "size/budget": PLAIN,
+  // No code sets this reason (G13). Stop is the only exit until WP-B8.
+  "size/large_repos": { primary: STOP, other: [] },
+  push: PLAIN,
+  slot: { primary: { label: "The run slot frees", app: "loop" }, other: [STOP] },
+  usage: { primary: exit("Resume at the reset time", "POST /tasks/:id/resume"), other: [STOP] },
+  "usage/armed": {
+    primary: { label: "The reset time comes", app: "timer" },
+    other: [exit("Cancel the resume", "POST /tasks/:id/resume", { option: "disarm", planned: "PS4" }), STOP],
+  },
+  held: {
+    primary: exit("Continue", "POST /tasks/:id/resume", { option: "part", planned: "PS4" }),
+    other: [exit("Skip this part", "POST /tasks/:id/parts/:part/skip", { planned: "PS4" }), AGAIN],
+  },
+  "stuck/stall": KEPT,
+  "stuck/loop": KEPT,
+  "stuck/turns": KEPT,
+  "stuck/time": KEPT,
+  unfinished: KEPT,
+} satisfies Record<string, { primary: ReasonExit; other: ReasonExit[] }>;
+export type ReasonKey = keyof typeof REASON_EXITS;
 
 export const COMMAND_KINDS = ["setup", "build", "test", "lint"] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];

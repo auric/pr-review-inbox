@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build a Jira task: when a reviewer withdraws "Needs work" and the PR gate still fails, the part now shows "PR open" again, not "Changes asked".
 - Build a Jira task: Resume now keeps the work. A step that Claude finished is not run again, and a step that stopped early (Stop, its time limit, its turn cap, or a failed run) continues with its earlier changes. The next try reads the list and the diff of those changes. Tests that stay red after the fix tries get new fix tries with the earlier fixes kept. Before, Resume dropped every change since the last commit into a patch file and ran the step again from the start.
 - Build a Jira task: the app still resets to the last commit, with the dropped changes in a patch file, after an app restart in a step, after a step changed a path that Claude may not change, and after Reject of a plan change. The next try reads that patch. When Claude asks to run a command, its changes now stay for the next try.
 - Settings, Tasks, Run limits: the task step time and the new part time now have no limit by default. Each has a box "No step time limit" or "No part time limit", and you can still set a number. A step time that you saved before keeps its limit, and so do the 60 more minutes of a task. Stop works as before.

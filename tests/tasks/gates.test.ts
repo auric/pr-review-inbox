@@ -155,6 +155,21 @@ describe("syncParts (spec.md sections 6.20.7 and 6.20.11)", () => {
     expect(stateOf(t.parts[0] as number)).toBe("approved");
   });
 
+  test("a withdrawn Needs work with a failing gate moves changes_requested to pr_open (part-session.md G3, AC-B249)", () => {
+    const anna = (status: string) => JSON.stringify([{ slug: "anna", name: "Anna", login: null, status }]);
+    const p = pr("OPEN", [["Anna", "NEEDS_WORK"]]);
+    build(p, {});
+    const t = task([{ state: "pr_open", pr: p }]);
+    const part = t.parts[0] as number;
+    expect(syncParts(db, [p], 5)).toEqual([t.id]);
+    expect(stateOf(part)).toBe("changes_requested");
+    // The reviewer withdraws "Needs work" and gives no approval: the gate waits for 1 approval.
+    db.query("UPDATE pull_request SET reviewers_json = $json WHERE id = $id").run({ id: p, json: anna("UNAPPROVED") });
+    expect(syncParts(db, [p], 6)).toEqual([t.id]);
+    expect(stateOf(part)).toBe("pr_open");
+    expect(syncParts(db, [p], 7)).toEqual([]);
+  });
+
   test("an approved part whose gate fails later goes back to pr_open, and the part on top of it waits again", () => {
     const anna = (status: string) => JSON.stringify([{ slug: "anna", name: "Anna", login: null, status }]);
     const p = pr("OPEN", [["Anna", "APPROVED"]]);
