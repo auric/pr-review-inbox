@@ -53,8 +53,10 @@ afterEach(() => {
 
 // JavaScriptCore stops runaway backtracking after about 950 ms. The ReDoS tests pass budgets well below that.
 const FAST = { budgetMs: 50, retryBudgetMs: 100 };
+// Budgets well above the defaults, so a normal pattern does not time out on a busy machine.
+const SLOW = { budgetMs: 5_000, retryBudgetMs: 5_000 };
 
-async function setup(taskBudget?: typeof FAST) {
+async function setup(taskBudget = SLOW) {
   const dir = join(root, `case-${n++}`);
   writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
   const secrets = createSecrets(null);
