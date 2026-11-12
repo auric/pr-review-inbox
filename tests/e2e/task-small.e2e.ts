@@ -495,20 +495,44 @@ test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat",
   // limits.md decision 3: Run limits. A value out of bounds shows its sentence and saves nothing. A valid value saves by itself.
   const limits = async () => ((await api(page, "GET", "/api/settings")).json as { runLimits: Record<string, number> }).runLimits;
   const step = page.getByLabel("Task step time");
-  await expect(step).toHaveValue("20");
+  const noStep = page.getByLabel("No step time limit");
+  // AC-B204: the step time and the part time have no limit by default.
+  await expect(step).toHaveValue("");
+  await expect(step).toBeDisabled();
+  await expect(noStep).toBeChecked();
+  await expect(page.getByLabel("No part time limit")).toBeChecked();
   // spec.md section 6.26, AC-B187.
   await expect(page.getByLabel("Runs at once")).toHaveValue("3");
-  await expect(page.getByText("Default 20. From 5 to 120.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Default no limit. From 5 to 120.", { exact: false })).toBeVisible();
+  // Clearing the box from the default gives the least value with no error, and saves it.
+  await noStep.uncheck();
+  await expect(step).toBeEnabled();
+  await expect(step).toHaveValue("5");
+  await expect(page.getByText("Type a whole number from 5 to 120.")).toHaveCount(0);
+  await expect.poll(async () => (await limits()).stepMinutes).toBe(5);
+  // A typed 0 is no limit only through the box.
+  await step.fill("0");
+  await step.blur();
+  await expect(page.getByText("Type a whole number from 5 to 120.")).toBeVisible();
+  await expect(noStep).not.toBeChecked();
   await step.fill("121");
   await step.blur();
   await expect(page.getByText("Type a whole number from 5 to 120.")).toBeVisible();
   await expect(page.locator("#limits-status")).toHaveText("A marked limit is not saved. Fix it to save it.");
-  expect((await limits()).stepMinutes).toBe(20);
+  expect((await limits()).stepMinutes).toBe(5);
   await step.fill("45");
   await step.blur();
   await expect(page.locator("#limits-status")).toHaveText("Saved. New runs use these limits.");
-  expect(await limits()).toEqual({ stepMinutes: 45, reviewMinutes: 60, interviewRounds: 2, testFixTries: 3, planTurns: 80, runsAtOnce: 3 });
-  await step.fill("20");
-  await step.blur();
-  await expect.poll(async () => (await limits()).stepMinutes).toBe(20);
+  expect(await limits()).toEqual({
+    stepMinutes: 45,
+    partMinutes: 0,
+    reviewMinutes: 60,
+    interviewRounds: 2,
+    testFixTries: 3,
+    planTurns: 80,
+    runsAtOnce: 3,
+  });
+  await noStep.check();
+  await expect.poll(async () => (await limits()).stepMinutes).toBe(0);
+  await expect(step).toBeDisabled();
 });

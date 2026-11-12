@@ -12,7 +12,8 @@ import { REFUSED_NOTES, type RunEvent } from "../../shared/run-log";
 import {
   type ImplementResult,
   implementResult,
-  PART_TIME_MIN,
+  minutesMs,
+  NO_LIMIT,
   RUN_CANCELLED,
   STEP_TIME_MS,
   STEP_TURNS,
@@ -25,6 +26,7 @@ import {
   taskSettings,
 } from "../../shared/task";
 import { attachmentsRoot } from "../context/attachments";
+import { log } from "../log";
 import { EXPLORER_RULE, type Profile } from "../review/catalog";
 import { deniedPath, fold } from "../review/edits";
 import type { ImplementRunStart, InstructionRepo, ReviewJobs } from "../review/jobs";
@@ -269,6 +271,13 @@ export async function treeCheck(
   };
 }
 
+// StepDetail.patch of a reset that saved no patch file. It still marks the reset for the Continue rule (build-redesign.md section 2.2).
+export const PATCH_LOST = "no file: the app could not save them";
+const patchLost = (file: string, e: unknown) => {
+  log(`Could not save the patch ${basename(file)}: ${noUrl((e as Error).message)}`);
+  return null;
+};
+
 // Fails a step in every repository: saves a patch per changed worktree first (<step>.patch for main, <step>-<task_repo id>.patch for
 // the others), removes the files outside repo/, then resets deepest first. Returns the first saved patch.
 export async function undoTrees(trees: readonly RepoTree[], tc: TreeCheck, last: string, patch: string): Promise<string | null> {
@@ -276,7 +285,7 @@ export async function undoTrees(trees: readonly RepoTree[], tc: TreeCheck, last:
   for (const p of tc.parts) {
     if (!p.tree.wt || !p.check?.changed.length) continue;
     const file = p.tree.row.role === "main" ? patch : patch.replace(/\.patch$/, `-${p.tree.row.id}.patch`);
-    const s = await savePatch(p.tree.wt, file, p.check.changed).catch(() => null);
+    const s = await savePatch(p.tree.wt, file, p.check.changed).catch((e) => patchLost(file, e));
     saved ??= s;
   }
   const main = trees.find((x) => x.row.role === "main")?.wt as Worktree;
@@ -296,7 +305,7 @@ const lockedText = (p: PathProblem) =>
 // Fails a step: saves the patch first, removes the files outside repo/ and the links, then resets to last (spec.md section 6.8).
 // A changed ignored file has no copy to restore, so the worktree goes. The next step makes it again from the branch, with its setup.
 export async function undoStep(wt: Worktree, last: string, check: PathCheck, patch: string): Promise<string | null> {
-  const saved = await savePatch(wt, patch, check.changed).catch(() => null);
+  const saved = await savePatch(wt, patch, check.changed).catch((e) => patchLost(patch, e));
   for (const p of check.outside) await rm(join(wt.dir, p), { force: true });
   if (check.ignored.length) {
     await removeWorktree(wt);
@@ -469,8 +478,8 @@ export function implementPrompt(
 
 // ---------- Budgets (spec.md section 6.7) ----------
 
-// usedMs: the Claude time of the part's steps. costUsd: null when no run of the part reported a cost (Gate B19). over: the
-// blocked text when a limit is used up.
+// usedMs: the Claude time of the part's steps. limitMs: Infinity with no part time. costUsd: null when no run of the part reported a
+// cost (Gate B19). over: the blocked text when a limit is used up.
 export type PartBudget = {
   usedMs: number;
   limitMs: number;
@@ -483,10 +492,17 @@ export type PartBudget = {
 const BUDGET_SQL = `SELECT s.started_at, s.ended_at, r.usage_json FROM task_step s LEFT JOIN review_run r ON r.id = s.run
   WHERE s.part = $part AND s.kind IN (${CLAUDE_STEPS.map((k) => `'${k}'`).join(", ")})`;
 
-export function partBudget(db: Database, task: number, part: { id: number; ord: number }, now = Date.now()): PartBudget {
+// partMinutes: Settings > Tasks "Part time". A partTimeMin of the task wins over it.
+export function partBudget(
+  db: Database,
+  task: number,
+  part: { id: number; ord: number },
+  now = Date.now(),
+  partMinutes = NO_LIMIT,
+): PartBudget {
   const t = taskRow(db, task);
   const s = t ? taskSettings.safeParse(JSON.parse(t.settings_json)) : null;
-  const minutes = (s?.success && s.data.partTimeMin) || PART_TIME_MIN;
+  const minutes = (s?.success && s.data.partTimeMin) || partMinutes;
   const costLimit = (s?.success && s.data.partCost) || null;
   const rows = db.query(BUDGET_SQL).all({ part: part.id }) as { started_at: number; ended_at: number | null; usage_json: string | null }[];
   let usedMs = 0;
@@ -498,7 +514,7 @@ export function partBudget(db: Database, task: number, part: { id: number; ord: 
     turns += u?.turns ?? 0;
     if (typeof u?.costUsd === "number") cost = (cost ?? 0) + u.costUsd;
   }
-  const limitMs = minutes * 60_000;
+  const limitMs = minutesMs(minutes);
   const over =
     usedMs >= limitMs
       ? `Needs you: part ${part.ord} used its ${minutes} min. Continue with 60 more min?`
@@ -508,7 +524,7 @@ export function partBudget(db: Database, task: number, part: { id: number; ord: 
   return { usedMs, limitMs, turns, costUsd: cost, costLimit, over };
 }
 
-// The step time (STEP_TIME by default), or the Claude time that the part has left when that is less.
+// The step time (STEP_TIME by default, no limit), or the Claude time that the part has left when that is less.
 export const stepTimeout = (b: Pick<PartBudget, "usedMs" | "limitMs">, stepMs = STEP_TIME_MS) =>
   Math.max(1, Math.min(stepMs, b.limitMs - b.usedMs));
 
@@ -571,10 +587,11 @@ export function patchStep(db: Database, id: number, detail: Partial<StepDetail>)
   });
 }
 
-// The instruct, update, and resolve keys that the loop wrote at the start of the step stay (spec.md section 6.18.6).
+// The instruct, update, and resolve keys that the loop wrote at the start of the step stay (spec.md section 6.18.6). A saved patch stays
+// too: it marks a reset for the Continue rule.
 export function endStep(db: Database, id: number, state: StepState, detail: Partial<StepDetail>, now = Date.now()) {
   const prev = stepDetailOf(db, id);
-  const keep = { instruct: prev.instruct, update: prev.update, resolve: prev.resolve };
+  const keep = { instruct: prev.instruct, update: prev.update, resolve: prev.resolve, patch: prev.patch };
   db.query(STEP_SQL.end).run({ id, state, detail: JSON.stringify(stepDetail.parse({ ...keep, ...detail })), now });
 }
 
@@ -766,8 +783,11 @@ export type StepInput = {
   extra?: boolean;
   // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
   shell?: StepShell;
-  // Settings > Tasks "Task step time" in ms. Absent: STEP_TIME_MS.
+  // Settings > Tasks "Task step time" in ms, and "Part time" in minutes. Absent: STEP_TIME_MS and NO_LIMIT.
   stepMs?: number;
+  partMinutes?: number;
+  // StepDetail.dirtyBefore of the step row (build-redesign.md section 2.3).
+  dirtyBefore?: string[];
   now?: () => number;
 };
 
@@ -845,7 +865,7 @@ export function instructionRepos(db: Database, task: number, allow: readonly str
 export async function startStep(i: StepInput): Promise<StepStart> {
   const now = i.now ?? Date.now;
   const { db, wt } = i;
-  const budget = partBudget(db, i.task, i.part, now());
+  const budget = partBudget(db, i.task, i.part, now(), i.partMinutes);
   if (budget.over) {
     const b: TaskBlocked = { kind: "budget", step: null, text: budget.over };
     db.transaction(() => {
@@ -973,21 +993,25 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       const result = undone || broken ? null : ((e.result?.task as ImplementResult | undefined) ?? null);
       const ran = !broken && (e.status === "completed" || e.status === "incomplete");
       const state: StepState = undone || broken ? "failed" : ran ? "ok" : e.status === "cancelled" ? "cancelled" : "failed";
-      // A failed or refused step goes back to the last commit, so only a step that ended ok keeps its new files.
-      const kept = state === "ok" ? bashFiles.slice(0, BASH_FILES_MAX) : [];
+      // build-redesign.md section 2.2: any run end, also a time limit, a turn cap, and a Stop. Continue keeps the files of a checked step,
+      // so it keeps the list of its Bash files too. A refused step went back to the last commit.
+      const checked = check !== null && !undone && !broken;
+      const keep = state === "ok" || checked;
+      const kept = keep ? bashFiles.slice(0, BASH_FILES_MAX) : [];
       endStep(
         d,
         step,
         state,
         {
           deniedPaths: problems.map((p) => p.path),
-          patch: patch ? basename(patch) : null,
+          // A reset needs its mark, also without a saved file. The resolve check undoes nothing.
+          patch: patch ? basename(patch) : undone && !broken && !i.resolveCheck ? PATCH_LOST : null,
           notes: [
             ...(i.shell?.notes ?? []),
             ...(broken ? [broken] : []),
             ...(moved.length ? [movedText(moved)] : []),
             ...problems.map((p) => `${p.path}: ${p.reason}`),
-            ...(state === "ok" && bashFiles.length ? [bashNote(bashFiles)] : []),
+            ...(keep && bashFiles.length ? [bashNote(bashFiles)] : []),
             ...(result?.notes ?? []),
           ],
           summary: result?.summary ?? null,
@@ -995,6 +1019,8 @@ export async function startStep(i: StepInput): Promise<StepStart> {
           written,
           bashFiles: kept,
           shell: shellRun,
+          checked,
+          dirtyBefore: i.dirtyBefore ?? [],
         },
         now(),
       );

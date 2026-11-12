@@ -298,9 +298,12 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
       // Each part has changes that no commit holds.
       for (const id of [s.p1, s.p2]) writeFileSync(join((await s.wt(id)).repo, "half-done.txt"), "half\n");
       await first.jobs.stop();
-      // The state that a crash leaves: the task builds, and the steps and runs still run.
+      // The state that a crash leaves: the task builds, and the steps and runs still run. A running step has no detail yet, so no
+      // checked (AC-B203).
       s.db.query("UPDATE task SET state = 'implementing', stopped_from = NULL, blocked_json = NULL WHERE id = $id").run({ id: s.task });
-      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL WHERE task = $task AND kind = 'tests'").run({ task: s.task });
+      s.db
+        .query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE task = $task AND kind = 'tests'")
+        .run({ task: s.task });
       s.db.query("UPDATE review_run SET status = 'running' WHERE task = $task").run({ task: s.task });
       const steps = s.db.query("SELECT id, part FROM task_step WHERE task = $task AND kind = 'tests'").all({ task: s.task }) as {
         id: number;
@@ -604,15 +607,13 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(w2).toEqual({ kind: "allow", step: expect.any(Number), text: "Needs you: Claude asks to allow a command." });
       expect(partOfStep(s, w2?.step)).toBe(s.p2);
       expect(w3).toMatchObject({ kind: "question", text: "Needs you: Claude asks: Keep the name three?" });
-      // AC-B150: the denied path and the allow request each saved their patch, and their worktrees are at the last commit.
+      // AC-B150: the denied path saved its patch, and its worktree is at the last commit. The allow request keeps its changes for the
+      // next attempt (build-redesign.md section 2.2).
       const data = join(s.root, "data");
-      for (const [id, step] of [
-        [s.p1, b?.step],
-        [s.p2, w2?.step],
-      ] as const) {
-        expect(existsSync(patchFile(data, s.db, s.task, step as number))).toBe(true);
-        expect(await status(await s.wt(id))).toEqual([]);
-      }
+      expect(existsSync(patchFile(data, s.db, s.task, b?.step as number))).toBe(true);
+      expect(await status(await s.wt(s.p1))).toEqual([]);
+      expect(existsSync(patchFile(data, s.db, s.task, w2?.step as number))).toBe(false);
+      expect((await status(await s.wt(s.p2))).length).toBeGreaterThan(0);
       expect(s.implementRuns()).toHaveLength(3);
 
       // AC-B151: Resume on the denied path answers 200. The allow request moves up, and no driver starts.
@@ -621,7 +622,7 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(loop.running(s.task)).toBe(false);
       expect(taskDto(s.db, s.t()).allowAsk?.step).toBe(w2?.step as number);
 
-      // AC-B152: Stop clears the first reason and every part row. Resume builds each part again from its last commit.
+      // AC-B152: Stop clears the first reason and every part row. Resume builds each part again, with the work that each part kept.
       expect(loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
       expect(s.t().state).toBe("stopped");
       expect(reasons(s)).toEqual([null, null, null, null]);
@@ -630,6 +631,32 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(s.t().blocked_json).toBeNull();
       expect(taskDto(s.db, s.t()).parts.map((p) => p.state)).toEqual(["self_reviewed", "self_reviewed", "self_reviewed"]);
       expect(s.implementCalls().filter((c) => c.stdin.includes("- Mode: tests"))).toHaveLength(6);
+    },
+    SLOW,
+  );
+
+  test(
+    'AC-B215: "Start the step again" gets 409 while another reason waits, so the option is never lost; a plain Continue moves it up',
+    async () => {
+      const s = await setup({ atOnce: 3, third: "base", scenario: HANG });
+      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+      s.db.query("UPDATE task_part SET state = 'implementing' WHERE id IN ($a, $b)").run({ a: s.p1, b: s.p2 });
+      const red = (part: number): TaskBlocked => {
+        const step = insertStep(s.db, { task: s.task, part, kind: "check", state: "ok" });
+        return { kind: "red", step, text: `Needs you: red ${part}.` };
+      };
+      const first = red(s.p1);
+      const next = red(s.p2);
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(first) });
+      s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: s.p2, b: JSON.stringify(next) });
+      expect(loop.resume(s.db, s.task, { version: s.t().version, option: "start-step-again" })).toMatchObject({
+        status: 409,
+        error: WAITING,
+      });
+      expect(reasons(s)).toEqual([first, null, next, null]);
+      expect(loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      expect(reasons(s)).toEqual([next, null, null, null]);
+      expect(loop.running(s.task)).toBe(false);
     },
     SLOW,
   );

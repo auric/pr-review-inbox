@@ -48,7 +48,7 @@ import {
 import { pushTaskBranch } from "../../src/server/tasks/push";
 import { taskRow } from "../../src/server/tasks/tasks";
 import { headOf, openWorktree, resetWorktree, status, type Worktree, wtGit } from "../../src/server/tasks/worktree";
-import { implementJsonSchema, STEP_TIME_MS, type TaskBlocked } from "../../src/shared/task";
+import { implementJsonSchema, type TaskBlocked } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { fakeRunner, stubListTools } from "../support/review-fixture";
 import { taskCache, taskRemote } from "./fixture";
@@ -587,8 +587,10 @@ describe("implement run", () => {
       expect(t?.state).toBe("stopped");
       expect(t?.stopped_from).toBe("implementing");
       expect(s.blockedOf()?.kind).toBe("error");
-      // Resume (WP-B4) resets to the last commit. The half step stays for its patch.
+      // AC-B201: the half step stays. Its path check passed, so Continue keeps it. The denied step is not checked.
       expect(existsSync(join(s.wt.repo, "src", "half.ts"))).toBe(true);
+      const checked = (id: number | undefined) => JSON.parse(s.stepRow(id as number).detail_json).checked;
+      expect([checked(second.outcome?.step), checked(outcome?.step)]).toEqual([true, false]);
     },
     SLOW,
   );
@@ -597,7 +599,8 @@ describe("implement run", () => {
     "a step that passes its time limit is killed, and the task stops",
     async () => {
       const s = await setup();
-      // 1.5 s of Claude time left in the part: the step gets that much (stepTimeout).
+      // 1.5 s of Claude time left in the part of 120 min: the step gets that much (stepTimeout).
+      s.db.query("UPDATE task SET settings_json = $s").run({ s: JSON.stringify({ partTimeMin: 120 }) });
       const now = Date.now();
       s.db
         .query("INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($t, $p, 'implement', 'ok', 99, $a, $b)")
@@ -659,15 +662,19 @@ describe("implement run", () => {
           )
           .run({ task: s.task, part: s.part, a: now - ms, b: now });
       add(115 * 60_000);
-      const b = partBudget(s.db, s.task, { id: s.part, ord: 1 }, now);
+      // AC-B204: no part time by default, so nothing blocks and the step has no time limit.
+      const free = partBudget(s.db, s.task, { id: s.part, ord: 1 }, now);
+      expect([free.over, free.limitMs, stepTimeout(free)]).toEqual([null, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY]);
+      // The part time of the settings applies.
+      const b = partBudget(s.db, s.task, { id: s.part, ord: 1 }, now, 120);
       expect(b.over).toBeNull();
       expect(stepTimeout(b)).toBe(5 * 60_000);
-      expect(stepTimeout({ ...b, usedMs: 0 })).toBe(STEP_TIME_MS);
+      expect(stepTimeout({ ...b, usedMs: 0 })).toBe(120 * 60_000);
       // limits decision 3: the step time of the settings, still capped by the time that the part has left.
       expect(stepTimeout({ ...b, usedMs: 0 }, 45 * 60_000)).toBe(45 * 60_000);
       expect(stepTimeout(b, 45 * 60_000)).toBe(5 * 60_000);
       add(6 * 60_000);
-      const { started } = await s.step();
+      const { started } = await s.step({ partMinutes: 120 });
       expect(started).toEqual({
         status: 409,
         blocked: { kind: "budget", step: null, text: "Needs you: part 1 used its 120 min. Continue with 60 more min?" },

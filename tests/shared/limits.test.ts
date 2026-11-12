@@ -7,6 +7,8 @@ import { DISCUSS_FULL, fixRunInput, taskPlanInput } from "../../src/shared/dto";
 import { fixResult, MAX_DISCUSS_MESSAGES, MAX_FIX_ITEMS, MAX_REPLY_THREADS } from "../../src/shared/review";
 import {
   MAX_OPEN_CAP,
+  minutesMs,
+  NO_LIMIT,
   PREFIXES_MAX,
   RUN_LIMIT_KEYS,
   RUN_LIMITS,
@@ -14,8 +16,10 @@ import {
   replanResult,
   runLimitsOf,
   runLimitValue,
+  STEP_TIME_MS,
   SUBTASK_PARTS_MAX,
   specResult,
+  typedLimit,
 } from "../../src/shared/task";
 import { echoSpec } from "../support/fake-claude";
 
@@ -71,8 +75,10 @@ describe("limits decision 2", () => {
 
 describe("limits decision 3", () => {
   test("the defaults and bounds; a field takes a whole number inside the bounds only", () => {
+    // AC-B204: the step time and the part time have no limit by default (user decision of 2026-11-11). A stored number keeps its limit.
     expect(runLimitsOf(undefined)).toEqual({
-      stepMinutes: 20,
+      stepMinutes: NO_LIMIT,
+      partMinutes: NO_LIMIT,
       reviewMinutes: 60,
       interviewRounds: 2,
       testFixTries: 3,
@@ -80,10 +86,18 @@ describe("limits decision 3", () => {
       runsAtOnce: 3,
     });
     expect(runLimitsOf({ planTurns: 33 }).planTurns).toBe(33);
+    expect(runLimitsOf({ stepMinutes: 20, partMinutes: 120 })).toMatchObject({ stepMinutes: 20, partMinutes: 120 });
+    expect([STEP_TIME_MS, minutesMs(NO_LIMIT), minutesMs(20)]).toEqual([Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 20 * 60_000]);
     for (const k of RUN_LIMIT_KEYS) {
       const { min, max } = RUN_LIMITS[k];
       expect([runLimitValue(k, String(min)), runLimitValue(k, ` ${max} `)]).toEqual([min, max]);
-      for (const bad of [String(min - 1), String(max + 1), "", "2.5", "x"]) expect(runLimitValue(k, bad)).toBeNull();
+      for (const bad of [String(max + 1), "", "2.5", "x", "-1"]) expect(runLimitValue(k, bad)).toBeNull();
+      // Only the two times can be off. min - 1 is 0 for some keys.
+      expect(runLimitValue(k, String(NO_LIMIT))).toBe(k === "stepMinutes" || k === "partMinutes" ? NO_LIMIT : null);
+      if (min - 1 !== NO_LIMIT) expect(runLimitValue(k, String(min - 1))).toBeNull();
+      // AC-B218: a typed 0 is no valid number in the field. Only the "No limit" box gives NO_LIMIT.
+      for (const zero of ["0", " 0", "00", "-0"]) expect(typedLimit(k, zero)).toBeNull();
+      expect([typedLimit(k, String(min)), typedLimit(k, String(max))]).toEqual([min, max]);
     }
     // A step and a review run stay inside the hard limit of one Claude process.
     expect(RUN_TIME_MAX_MS).toBe(240 * 60_000);

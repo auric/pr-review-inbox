@@ -44,6 +44,7 @@ import {
   taskProfileInput,
   taskPrsInput,
   taskRepoChoiceInput,
+  taskResumeInput,
   taskReviewersInput,
   taskSizeInput,
   taskStartInput,
@@ -289,14 +290,16 @@ export function createTaskRoutes(opts: {
         const db = openDb();
         return db ? answer(c, loop.stop(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
-      .post("/tasks/:id/resume", idParam, body(taskVersionInput, "Give the task version."), async (c) => {
+      .post("/tasks/:id/resume", idParam, body(taskResumeInput, "Give the task version and a valid option."), async (c) => {
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id } = c.req.valid("param");
         await loop.settle(id);
         const t = taskRow(db, id);
-        const before = t?.state === "stopped" && t.stopped_from !== "implementing";
-        return answer(c, before ? tasks.resume(db, id, c.req.valid("json")) : loop.resume(db, id, c.req.valid("json")));
+        const input = c.req.valid("json");
+        // loop.resume refuses an option for a task that did not stop in its build.
+        const before = t?.state === "stopped" && t.stopped_from !== "implementing" && !input.option;
+        return answer(c, before ? tasks.resume(db, id, input) : loop.resume(db, id, input));
       })
       // spec.md section 6.18.2: "Dismiss" of a reason on a built part.
       .post("/tasks/:id/dismiss", idParam, body(taskVersionInput, "Give the task version."), async (c) => {

@@ -14,12 +14,13 @@ import { writeConfig } from "../../src/server/config";
 import { store, taskFileDir } from "../../src/server/context/attachments";
 import { createLive } from "../../src/server/live";
 import { DEFAULT_PROFILE, profileOf, SHIPPED_PROFILES } from "../../src/server/review/catalog";
+import { CONTINUE_PATHS_MAX, continueFile } from "../../src/server/review/context-files";
 import { git } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
-import { type StepOutcome, startStep } from "../../src/server/tasks/implement";
+import { PATCH_LOST, type StepOutcome, startStep } from "../../src/server/tasks/implement";
 import {
   changedLines,
   createLoop,
@@ -101,6 +102,24 @@ const TODO = { path: "repo/src/feature.ts", text: "export const feature = 'todo'
 const WORKS = { path: "repo/src/feature.ts", text: "export const feature = 'works';\n" };
 // The fix after a review point keeps line 1, so the point still anchors there.
 const FIXED = { path: "repo/src/feature.ts", text: "export const feature = 'works';\nexport const checked = true;\n" };
+// An implement result that asks a question with two options.
+const QUESTION = {
+  summary: "s",
+  done: false,
+  tests: [],
+  question: {
+    text: "Keep the old name?",
+    why: "Callers use it.",
+    options: [
+      { label: "Keep", detail: "No change for callers." },
+      { label: "Rename", detail: "Clearer." },
+    ],
+    recommended: 0,
+  },
+  specChange: "",
+  notes: [],
+  coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
+};
 
 const review = (findings: unknown[]) => ({
   summary: "The feature is small.",
@@ -327,6 +346,44 @@ async function setup(o: Setup = {}) {
     clone,
   };
 }
+
+// The test file of a build whose approved command is `bun test`, which the app narrows to the Run line of a task (scoped check).
+// check-mode.txt "sleep" makes the test sleep once src/feature.ts exists, so a Stop comes during the scoped check after implement.
+const sleepyTest = (root: string) => ({
+  path: "repo/tests/feature.test.ts",
+  text: `import { expect, test } from "bun:test";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+test("feature works", async () => {
+  if (readFileSync(${JSON.stringify(join(root, "check-mode.txt"))}, "utf8").trim() === "sleep" && existsSync("src/feature.ts")) {
+    const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore"] });
+    writeFileSync(${JSON.stringify(join(root, "check-child.pid"))}, String(child.pid));
+    await Bun.sleep(120000);
+  }
+  expect(existsSync("src/feature.ts") && readFileSync("src/feature.ts", "utf8").includes("works")).toBe(true);
+}, 200000);
+`,
+});
+// A build with sleepyTest that stops in the scoped check of T1.1, with the change of the implement step not committed.
+const stopInScopedCheck = async () => {
+  const s = await setup({ argv: [process.execPath, "test"], mode: "sleep" });
+  s.scenario({
+    seq: {
+      "implement:tests": [{ writes: [sleepyTest(s.root)] }],
+      "implement:implement": [{ writes: [TODO] }],
+      "implement:fix": [{ writes: [WORKS] }],
+      review: [{ review: CLEAN }],
+    },
+  });
+  s.loop.build(s.db, s.task);
+  const pidFile = join(s.root, "check-child.pid");
+  await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").length > 0, 120_000);
+  const child = Number(readFileSync(pidFile, "utf8"));
+  const t0 = Date.now();
+  expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+  await s.loop.idle(s.task);
+  expect(Date.now() - t0).toBeLessThan(30_000);
+  return { s, child };
+};
 
 const until = async (f: () => boolean, ms = 60_000) => {
   const end = Date.now() + ms;
@@ -618,6 +675,42 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.t().state).toBe("implementing");
       expect(s.part().state).toBe("implementing");
       expect(s.steps().some((x) => x.kind === "review")).toBe(false);
+      // AC-B201: Continue keeps the changes of the fix steps, runs no implement step, and gives TEST_FIX_TRIES new fix steps.
+      const w = await s.wt();
+      expect(readFileSync(join(w.repo, "src", "feature.ts"), "utf8")).toContain("try 3");
+      // A seq entry counts the earlier calls of its kind, so fix 4 to 6 come after the first three.
+      s.scenario({ seq: { "implement:fix": [1, 2, 3, 4, 5, 6].map(fix) } });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.steps().filter((x) => x.kind === "implement")).toHaveLength(1);
+      expect(
+        s
+          .steps()
+          .filter((x) => x.kind === "fix")
+          .map((x) => x.attempt),
+      ).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(s.blocked()?.text).toBe("Needs you: the tests of part 1 stay red after 3 tries.");
+      expect(existsSync(join(w.dir, "..", "patches"))).toBe(false);
+      // The first new fix step after the red checks is no continuation: the loop took the result of the last one.
+      const fourth = s.runCalls().filter((c) => s.modeOf(c) === "fix")[3] as Call;
+      expect(fourth.context["continue.md"]).toBeUndefined();
+      // AC-B203: a row without checked, as from before the rule, resets with the patch. The next fix step continues from it.
+      const last = s
+        .steps()
+        .filter((x) => x.kind === "fix")
+        .at(-1) as Step;
+      s.db.query("UPDATE task_step SET detail_json = json_remove(detail_json, '$.checked') WHERE id = $id").run({ id: last.id });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(readFileSync(join(w.dir, "..", "patches", `${last.id}.patch`), "utf8")).toContain("try 6");
+      expect(JSON.parse((s.steps().find((x) => x.id === last.id) as Step).detail_json).patch).toBe(`${last.id}.patch`);
+      const again = s.runCalls().filter((c) => s.modeOf(c) === "fix")[6] as Call;
+      expect(again.context["step.md"]).toContain(
+        "Attempt 7 continues attempt 6. The app reset its changes to the last commit. context/continue.md holds them as a patch.",
+      );
+      expect(again.context["continue.md"]).toStartWith("# UNTRUSTED DATA");
+      expect(again.context["continue.md"]).toContain("The app reset the changes of the earlier attempt. The patch below holds them.");
+      expect(again.context["continue.md"]).toContain("try 6");
     },
     SLOW,
   );
@@ -639,14 +732,14 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "limits decision 3: without run limits in the settings, each step run gets the default step time",
+    "limits decision 3, AC-B204: without run limits in the settings, no step run gets a step time or a part time",
     async () => {
       const s = await setup();
       const runs = spyOn(s.jobs, "taskRun");
       await s.build();
       const limits = runs.mock.calls.flatMap(([, start]) => (start.kind === "implement" && "timeoutMs" in start ? [start.timeoutMs] : []));
       expect(limits.length).toBeGreaterThan(0);
-      expect(limits.every((ms) => ms === STEP_TIME_MS)).toBe(true);
+      expect(limits.every((ms) => ms === STEP_TIME_MS && ms === Number.POSITIVE_INFINITY)).toBe(true);
     },
     SLOW,
   );
@@ -728,6 +821,33 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
+    "6.21.5, AC-B216: a stopped step that is checked keeps the list of its Bash files and the note; the next attempt reads them",
+    async () => {
+      const GEN = "repo/src/gen.ts";
+      const bash = [{ command: "bun run gen", files: [{ path: GEN, text: "gen\n" }], output: "ok" }];
+      const s = await setup({ seq: { "implement:implement": [{ writes: [TODO], bash, hang: true }, { writes: [WORKS] }] } });
+      s.db.run("UPDATE repo_task_settings SET shell_mode = 'unrestricted'");
+      s.loop.build(s.db, s.task);
+      // The Stop comes after the app read the Bash call, so the Write call before it is known too.
+      const bashSeen = "SELECT 1 FROM run_event e JOIN review_run r ON r.id = e.run WHERE r.task = $t AND e.tool = 'Bash'";
+      await until(() => s.db.query(bashSeen).get({ t: s.task }) !== null);
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      const d = JSON.parse((s.steps().find((x) => x.kind === "implement") as Step).detail_json);
+      expect([d.checked, d.bashFiles]).toEqual([true, [GEN]]);
+      expect(d.notes).toContain(
+        "Not committed: 1 new file that a Bash command wrote (repo/src/gen.ts). The next step reads: Write <path> with the Write tool, so it is committed.",
+      );
+      expect(existsSync(join((await s.wt()).dir, GEN))).toBe(true);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      const second = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
+      expect(second.context["failure.md"]).toContain(`- Write ${GEN} with the Write tool, so it is committed.`);
+    },
+    SLOW,
+  );
+
+  test(
     "AC-B104.12: checks red on the part base stop the fixes once with a question; Continue runs the fix steps, and failure.md marks the command",
     async () => {
       const s = await setup({ mode: "red" });
@@ -789,6 +909,14 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       const first = s.steps().find((x) => x.kind === "tests") as Step;
       const patches = readFileSync(join(second.cwd, "..", "patches", `${first.id}.patch`), "utf8");
       expect(patches).toContain("diff --git a/src/feature.ts b/src/feature.ts");
+      // AC-B215: the second bad try also goes back to the last commit, and the next try after Continue starts fresh.
+      expect(await status(await s.wt())).toEqual([]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      const third = s.runCalls()[2] as Call;
+      expect(s.modeOf(third)).toBe("tests");
+      expect(third.context["continue.md"]).toBeUndefined();
+      expect(third.context["step.md"]).not.toContain("continues attempt");
       // A test glob of the repository allows a fixture file next to the test.
       const g = await setup({
         testGlobs: ["tests/"],
@@ -1059,18 +1187,9 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "AC-B19: Stop during a check kills the process tree; Resume starts the stopped step again from the last commit with the patch saved",
+    "AC-B19, AC-B201: Stop during a check kills the process tree; Continue keeps the implement changes and runs no implement step",
     async () => {
-      const s = await setup({ mode: "sleep-late" });
-      s.loop.build(s.db, s.task);
-      const pidFile = join(s.root, "check-child.pid");
-      await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").length > 0);
-      const child = Number(readFileSync(pidFile, "utf8"));
-      const t0 = Date.now();
-      const stopped = s.loop.stop(s.db, s.task, { version: s.t().version });
-      expect(stopped.status).toBe(200);
-      await s.loop.idle(s.task);
-      expect(Date.now() - t0).toBeLessThan(30_000);
+      const { s, child } = await stopInScopedCheck();
       const alive = () => {
         try {
           process.kill(child, 0);
@@ -1085,20 +1204,324 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect([s.t().state, s.t().stopped_from, s.blocked()]).toEqual(["stopped", "implementing", null]);
       const check = s.steps().at(-1) as Step;
       expect([check.kind, check.state]).toEqual(["check", "cancelled"]);
-      const cmd = (JSON.parse(check.detail_json) as { commands: { exit: number | null; tail: string }[] }).commands[0];
+      const cmd = (JSON.parse(check.detail_json) as { commands: { exit: number | null; tail: string; argv: string[] }[] }).commands[0];
       expect(cmd?.exit).toBeNull();
       expect(cmd?.tail).toContain("[The app stopped the command.]");
-      // The tests of the stopped step are not committed yet.
-      expect((await status(await s.wt())).map((e) => e.path)).toEqual(["tests/feature.test.ts"]);
-      s.mode("feature");
+      expect(cmd?.argv).toEqual([process.execPath, "test", "./tests/feature.test.ts"]);
+      expect([check.item, s.flow().filter((x) => x.startsWith("implement:"))]).toEqual(["T1.1", ["implement:T1.1:ok"]]);
+      const impl = s.steps().find((x) => x.kind === "implement") as Step;
+      expect(JSON.parse(impl.detail_json).checked).toBe(true);
+      // The change of the implement step is not committed yet.
+      const w = await s.wt();
+      expect((await status(w)).map((e) => e.path)).toEqual(["src/feature.ts"]);
+      s.mode("green");
       const resumed = s.loop.resume(s.db, s.task, { version: s.t().version });
       expect([resumed.status, (resumed as { task: TaskDto }).task.state]).toEqual([200, "implementing"]);
       await s.loop.idle(s.task);
-      const patch = join((await s.wt()).dir, "..", "patches", `${check.id}.patch`);
-      expect(readFileSync(patch, "utf8")).toContain("diff --git a/tests/feature.test.ts b/tests/feature.test.ts");
-      const tests = s.steps().filter((x) => x.kind === "tests");
-      expect(tests.map((x) => x.attempt)).toEqual([1, 2]);
       expect(s.part().state).toBe("self_reviewed");
+      // The kept change went to the checks, the red check to a fix step, and the fix to the commit. No reset, so no patch.
+      expect(s.steps().filter((x) => x.kind === "implement")).toHaveLength(1);
+      expect(s.flow().slice(s.flow().indexOf("check:T1.1:cancelled") + 1, s.flow().indexOf("commit:T1.1:ok") + 1)).toEqual([
+        "check:T1.1:failed",
+        "fix:T1.1:ok",
+        "check:T1.1:ok",
+        "commit:T1.1:ok",
+      ]);
+      expect(existsSync(join(w.dir, "..", "patches"))).toBe(false);
+      const fix = s.runCalls().find((c) => s.modeOf(c) === "fix") as Call;
+      expect(fix.context["continue.md"]).toBeUndefined();
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B202: Stop during the checks of the tests step; Continue runs the tests step again as a continuation, and its kept test counts",
+    async () => {
+      const s = await setup({ mode: "sleep-late" });
+      s.loop.build(s.db, s.task);
+      await until(() => existsSync(join(s.root, "check-child.pid")) && readFileSync(join(s.root, "check-child.pid"), "utf8").length > 0);
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect((await status(await s.wt())).map((e) => e.path)).toEqual(["tests/feature.test.ts"]);
+      s.mode("feature");
+      // The second tests run changes nothing. It is not refused as "wrote no test": the kept test is its own.
+      s.scenario({
+        seq: {
+          "implement:tests": [{ writes: [TEST_FILE] }, { writes: [] }],
+          "implement:implement": [{ writes: [TODO] }],
+          "implement:fix": [{ writes: [WORKS] }],
+          review: [{ review: CLEAN }],
+        },
+      });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(
+        s
+          .steps()
+          .filter((x) => x.kind === "tests")
+          .map((x) => x.attempt),
+      ).toEqual([1, 2]);
+      expect(s.part().state).toBe("self_reviewed");
+      expect((await s.log()).at(1)).toBe(`Ada Example <ada@example.invalid>|${KEY} P1: Add the failing tests of part 1`);
+      const second = s.runCalls().filter((c) => s.modeOf(c) === "tests")[1] as Call;
+      expect(second.context["step.md"]).toContain(
+        "Attempt 2 continues attempt 1. Your earlier changes are in the worktree. context/continue.md lists them. Check them and finish the step. Do not start again.",
+      );
+      const cont = second.context["continue.md"] ?? "";
+      expect(cont).toStartWith("# UNTRUSTED DATA");
+      expect(cont).toContain("- tests/feature.test.ts");
+      // The diff holds the new file too.
+      expect(cont).toContain("The earlier attempt of this step left these changes in the worktree.");
+      expect(cont).toContain("+test('feature works', () => {});");
+      const rows = s.steps().filter((x) => x.kind === "tests");
+      expect(rows.map((x) => JSON.parse(x.detail_json).dirtyBefore)).toEqual([[], []]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B202: a step that passes its time limit keeps its file; attempt 2 reads continue.md, and the commit holds the file",
+    async () => {
+      const HELPER = { path: "repo/src/helper.ts", text: "export const helper = 1;\n" };
+      const s = await setup({
+        settings: { partTimeMin: 120 },
+        seq: { "implement:implement": [{ writes: [HELPER], hang: true }, { writes: [WORKS] }] },
+      });
+      // The part used all but 15 s of its 120 min, so the implement step gets the rest as its time limit.
+      const now = Date.now();
+      const p = (
+        s.db
+          .query(
+            `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+            VALUES ($t, 1, 'single', 'Add the feature', 'feature/K-1-add-the-feature', 'main', 'implementing', $now, $now) RETURNING id`,
+          )
+          .get({ t: s.task, now }) as { id: number }
+      ).id;
+      const used = s.db
+        .query(
+          "INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($t, $p, 'implement', 'ok', 99, $a, $b) RETURNING id",
+        )
+        .get({ t: s.task, p, a: now - (120 * 60_000 - 15_000), b: now }) as { id: number };
+      await s.build();
+      expect([s.t().state, s.blocked()?.text]).toEqual(["stopped", "The run passed its time limit."]);
+      const first = s.steps().find((x) => x.kind === "implement" && x.run !== null) as Step;
+      expect([first.state, JSON.parse(first.detail_json).checked]).toEqual(["failed", true]);
+      const w = await s.wt();
+      expect(readFileSync(join(w.repo, "src", "helper.ts"), "utf8")).toBe(HELPER.text);
+      // The time goes back to the part, so the continuation can run.
+      s.db.query("DELETE FROM task_step WHERE id = $id").run({ id: used.id });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      const second = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
+      expect(second.context["step.md"]).toContain(
+        "Attempt 2 continues attempt 1, which ended at its time limit. Your earlier changes are in the worktree.",
+      );
+      expect(second.context["continue.md"]).toContain("- src/helper.ts");
+      expect(existsSync(join(w.dir, "..", "patches"))).toBe(false);
+      const files = await git([`--git-dir=${w.admin}`, "show", "--name-only", "--format=", "HEAD"], { env: w.env });
+      expect((await s.log()).at(-1)).toBe(`Ada Example <ada@example.invalid>|${KEY} T1.1: Write the feature`);
+      expect(files.trim().split("\n").sort()).toEqual(["specs/K-1/plan.md", "src/feature.ts", "src/helper.ts"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B203: a step that an app restart cut resets on Continue; the patch goes to continue.md of the next attempt",
+    async () => {
+      const { s } = await stopInScopedCheck();
+      // The app stopped while the implement step ran: its row and its run were still open, so its git snapshot is gone.
+      const impl = s.steps().find((x) => x.kind === "implement") as Step;
+      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: impl.id });
+      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: impl.run });
+      recoverTasks(s.db);
+      s.db
+        .query(
+          "UPDATE review_run SET status = 'failed', error_kind = 'restart', error_text = 'The app stopped during the run.' WHERE id = $id",
+        )
+        .run({ id: impl.run });
+      expect([s.t().state, (s.steps().find((x) => x.id === impl.id) as Step).state]).toEqual(["stopped", "failed"]);
+      s.mode("feature");
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      const w = await s.wt();
+      expect(readFileSync(join(w.dir, "..", "patches", `${impl.id}.patch`), "utf8")).toContain(
+        "diff --git a/src/feature.ts b/src/feature.ts",
+      );
+      const second = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
+      expect(second.context["step.md"]).toContain(
+        "Attempt 2 continues attempt 1, which was stopped. The app reset its changes to the last commit. context/continue.md holds them as a patch. Reuse what is right, and finish the step.",
+      );
+      expect(second.context["continue.md"]).toContain("+export const feature = 'todo';");
+    },
+    SLOW,
+  );
+
+  test(
+    'AC-B203: "start-step-again" resets to the last commit with the patch saved; the route takes only that option',
+    async () => {
+      const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
+      await s.build();
+      expect(s.blocked()?.text).toBe("Needs you: the tests of part 1 stay red after 1 try.");
+      const fix = s.steps().find((x) => x.kind === "fix") as Step;
+      // The route: zod refuses an unknown option.
+      const SESSION = "s".repeat(64);
+      const ORIGIN = "http://127.0.0.1:7317";
+      const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
+      const post = async (body: unknown) =>
+        (
+          await app.request(`${ORIGIN}/api/tasks/${s.task}/resume`, {
+            method: "POST",
+            headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          })
+        ).status;
+      expect(await post({ version: s.t().version, option: "keep-one-pr" })).toBe(400);
+      // A stale version passes zod and gets 409, so the route takes the option. The app has its own loop, so the test acts on s.loop.
+      expect(await post({ version: s.t().version - 1, option: "start-step-again" })).toBe(409);
+      const w = await s.wt();
+      expect((await status(w)).map((e) => e.path)).toEqual(["src/feature.ts"]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "start-step-again" }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(readFileSync(join(w.dir, "..", "patches", `${fix.id}.patch`), "utf8")).toContain("src/feature.ts");
+      expect(JSON.parse((s.steps().find((x) => x.id === fix.id) as Step).detail_json).patch).toBe(`${fix.id}.patch`);
+      // The final checks run again on the last commit, and the next fix step reads the patch.
+      const again = s.runCalls().filter((c) => s.modeOf(c) === "fix")[1] as Call;
+      expect(again.context["step.md"]).toContain(
+        "Attempt 2 continues attempt 1. The app reset its changes to the last commit. context/continue.md holds them as a patch.",
+      );
+      expect(again.context["continue.md"]).toContain("+export const feature = 'works';");
+      expect(s.steps().filter((x) => x.kind === "implement")).toHaveLength(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B215: a second reset before a new Claude step keeps the first patch; Start the step again picks a new file and never replaces one",
+    async () => {
+      const { s } = await stopInScopedCheck();
+      // The app restart cut the implement step, as in the AC-B203 test.
+      const impl = s.steps().find((x) => x.kind === "implement") as Step;
+      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: impl.id });
+      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: impl.run });
+      recoverTasks(s.db);
+      s.db
+        .query(
+          "UPDATE review_run SET status = 'failed', error_kind = 'restart', error_text = 'The app stopped during the run.' WHERE id = $id",
+        )
+        .run({ id: impl.run });
+      // The part used more Claude time than it has, so each Continue makes its reset and then waits before the next Claude step.
+      const now = Date.now();
+      s.db.query("UPDATE task SET settings_json = $s WHERE id = $id").run({ s: JSON.stringify({ partTimeMin: 10 }), id: s.task });
+      const used = (
+        s.db
+          .query(
+            "INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($t, $p, 'implement', 'ok', 99, $a, $b) RETURNING id",
+          )
+          .get({ t: s.task, p: s.part().id, a: now - 600 * 60_000, b: now }) as { id: number }
+      ).id;
+      const w = await s.wt();
+      const patches = join(w.dir, "..", "patches");
+      const resume = async (option?: "start-step-again") => {
+        expect(s.loop.resume(s.db, s.task, { version: s.t().version, option }).status).toBe(200);
+        await s.loop.idle(s.task);
+        expect(s.blocked()?.kind).toBe("budget");
+      };
+      await resume();
+      const first = readFileSync(join(patches, `${impl.id}.patch`), "utf8");
+      expect(first).toContain("+export const feature = 'todo';");
+      // An untracked file comes before any new Claude step, as setup makes one. Continue keeps it and the patch of the cut step.
+      writeFileSync(join(w.repo, "junk1.txt"), "one\n");
+      await resume();
+      expect(readFileSync(join(patches, `${impl.id}.patch`), "utf8")).toBe(first);
+      expect(existsSync(join(w.repo, "junk1.txt"))).toBe(true);
+      // Start the step again resets under the newest row of the part. A second one with the same row picks a new file name.
+      await resume("start-step-again");
+      expect(readFileSync(join(patches, `${used}.patch`), "utf8")).toContain("junk1.txt");
+      writeFileSync(join(w.repo, "junk2.txt"), "two\n");
+      await resume("start-step-again");
+      expect(readFileSync(join(patches, `${used}.patch`), "utf8")).toContain("junk1.txt");
+      expect(readFileSync(join(patches, `${used}.1.patch`), "utf8")).toContain("junk2.txt");
+      expect(readFileSync(join(patches, `${impl.id}.patch`), "utf8")).toBe(first);
+      // The row keeps the mark that names its first patch.
+      expect(JSON.parse((s.steps().find((x) => x.id === used) as Step).detail_json).patch).toBe(`${used}.patch`);
+      // With the time back, attempt 2 reads the patch of the cut step, not a later one.
+      s.db.query("DELETE FROM task_step WHERE id = $id").run({ id: used });
+      s.db.query("UPDATE task SET settings_json = '{}' WHERE id = $id").run({ id: s.task });
+      s.mode("feature");
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      const second = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
+      expect(second.context["continue.md"]).toContain("+export const feature = 'todo';");
+      expect(second.context["continue.md"]).not.toContain("junk");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B215: a reset whose patch cannot be saved still marks the step, so the next attempt reads that the app reset its changes",
+    async () => {
+      const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
+      await s.build();
+      const fix = s.steps().find((x) => x.kind === "fix") as Step;
+      // A file in place of the patches folder makes each patch save fail.
+      writeFileSync(join((await s.wt()).dir, "..", "patches"), "not a folder\n");
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "start-step-again" }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(JSON.parse((s.steps().find((x) => x.id === fix.id) as Step).detail_json).patch).toBe(PATCH_LOST);
+      const again = s.runCalls().filter((c) => s.modeOf(c) === "fix")[1] as Call;
+      expect(again.context["step.md"]).toContain("Attempt 2 continues attempt 1. The app reset its changes to the last commit.");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B217: a Tell Claude send that changes nothing on a part with kept build work commits nothing, and the work stays",
+    async () => {
+      const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
+      await s.build();
+      const red = s.blocked();
+      expect(red?.text).toBe("Needs you: the tests of part 1 stay red after 1 try.");
+      const w = await s.wt();
+      expect((await status(w)).map((e) => e.path)).toEqual(["src/feature.ts"]);
+      s.scenario({ seq: { "implement:instruct": [{ writes: [] }] } });
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Why is the test red?" }).status).toBe(202);
+      await s.loop.idle(s.task);
+      const row = s.steps().find((x) => x.kind === "instruct") as Step;
+      expect(JSON.parse(row.detail_json).instruct).toMatchObject({ result: "no_change", committed: false });
+      expect(s.flow().at(-1)).toBe("instruct:I1:ok");
+      expect((await status(w)).map((e) => e.path)).toEqual(["src/feature.ts"]);
+      expect(s.blocked()).toEqual(red);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B217: a stopped Tell Claude send saves the kept build work in its patch; the next build step continues from that patch",
+    async () => {
+      const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
+      await s.build();
+      const FLAG = { path: "repo/src/feature.ts", text: "export const feature = 'works';\nexport const useNewParser = true;\n" };
+      s.scenario({ seq: { "implement:instruct": [{ hang: true, writes: [FLAG] }] } });
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the flag." }).status).toBe(202);
+      // The Stop comes after the app read the Write call of the send.
+      const written = `SELECT 1 FROM run_event e JOIN task_step s ON s.run = e.run WHERE s.task = $t AND s.kind = 'instruct'
+        AND e.tool = 'Write'`;
+      await until(() => s.db.query(written).get({ t: s.task }) !== null);
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      const row = s.steps().find((x) => x.kind === "instruct") as Step;
+      const w = await s.wt();
+      expect(await status(w)).toEqual([]);
+      expect(readFileSync(join(w.dir, "..", "patches", `${row.id}.patch`), "utf8")).toContain("useNewParser");
+      // Continue: the checks run on the last commit, and the next fix step reads the patch of the send.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      const fix = s.runCalls().filter((c) => s.modeOf(c) === "fix")[1] as Call;
+      expect(fix.context["step.md"]).toContain("Attempt 2 continues attempt 1. The app reset its changes to the last commit.");
+      expect(fix.context["continue.md"]).toContain("+export const useNewParser = true;");
     },
     SLOW,
   );
@@ -1247,7 +1670,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "a question of Claude blocks with the question; the answer starts the step again from the last commit with answers.md",
+    "a question of Claude blocks with the question; the answer runs the step again with answers.md and the kept changes",
     async () => {
       const ask = {
         summary: "s",
@@ -1285,6 +1708,35 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(answers).toContain("Keep the old name?");
       expect(answers).toContain("- Answer: Rename. Clearer.");
       expect(again.context["step.md"] ?? "").toContain("- Attempt: 2");
+      expect(again.context["step.md"] ?? "").toContain(
+        "Attempt 2 continues attempt 1, which asked a question. Your earlier changes are in the worktree.",
+      );
+      expect(again.context["continue.md"] ?? "").toContain("+export const feature = 'todo';");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B216: a step that halts before its question row exists is no done step; Continue resets it with the patch and runs it again",
+    async () => {
+      const s = await setup({
+        seq: { "implement:implement": [{ writes: [TODO], implement: QUESTION, delayMs: 400 }, { writes: [WORKS] }] },
+      });
+      s.loop.build(s.db, s.task);
+      // A reason of the same part comes while the step runs, so no part row can keep the question.
+      await until(() => s.runCalls().some((c) => s.modeOf(c) === "implement"));
+      const held = { kind: "red", step: null, part: s.part().id, text: "Needs you: held." };
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(held) });
+      await s.loop.idle(s.task);
+      expect(s.db.query("SELECT id FROM task_question WHERE task = $t").all({ t: s.task })).toEqual([]);
+      const impl = s.steps().find((x) => x.kind === "implement") as Step;
+      expect([impl.state, JSON.parse(impl.detail_json).checked]).toEqual(["ok", false]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      expect(readFileSync(join((await s.wt()).dir, "..", "patches", `${impl.id}.patch`), "utf8")).toContain("src/feature.ts");
+      const again = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
+      expect(again.context["step.md"]).toContain("Attempt 2 continues attempt 1. The app reset its changes to the last commit.");
     },
     SLOW,
   );
@@ -1402,9 +1854,9 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "a used-up part time blocks with budget; Resume continues with 60 more minutes",
+    "AC-B204: a used-up part time of the settings blocks with budget; Resume continues with 60 more minutes",
     async () => {
-      const s = await setup({ seq: { "implement:implement": [{ writes: [WORKS] }] } });
+      const s = await setup({ seq: { "implement:implement": [{ writes: [WORKS] }] }, runLimits: { partMinutes: 120 } });
       // The part exists and used 121 minutes of Claude time in earlier steps.
       const now = Date.now();
       const p = (
@@ -1429,16 +1881,24 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "a denied path of a step blocks with denied_path; Resume starts the step again from the last commit",
+    "AC-B203: a denied path of a step blocks with denied_path; Resume starts the step again from the last commit with the patch",
     async () => {
       const s = await setup({
         seq: { "implement:implement": [{ writes: [WORKS, { path: "repo/CLAUDE.md", text: "planted\n" }] }, { writes: [WORKS] }] },
       });
       await s.build();
       expect(s.blocked()?.kind).toBe("denied_path");
+      const denied = s.steps().find((x) => x.kind === "implement") as Step;
+      expect(JSON.parse(denied.detail_json)).toMatchObject({ checked: false, patch: `${denied.id}.patch` });
+      expect(await status(await s.wt())).toEqual([]);
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
       expect(s.part().state).toBe("self_reviewed");
+      const again = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
+      expect(again.context["step.md"]).toContain(
+        "Attempt 2 continues attempt 1, which failed. The app reset its changes to the last commit.",
+      );
+      expect(again.context["continue.md"]).toContain("src/feature.ts");
     },
     SLOW,
   );
@@ -1790,6 +2250,28 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
     existsSync(join(s.root, "setups.log")) ? readFileSync(join(s.root, "setups.log"), "utf8").split("\n").filter(Boolean).length : 0;
 
   test(
+    "AC-B216: continue.md leaves out the files of the setup mark and lists at most CONTINUE_PATHS_MAX paths",
+    async () => {
+      const s = await setup({ seq: { "implement:implement": [{ writes: [TODO], implement: QUESTION }, { writes: [WORKS] }] } });
+      withSetup(s, "venv");
+      await s.build();
+      expect([...(readSetupMark(await s.wt())?.files ?? [])].sort()).toEqual([".venv/bin/python", "build/out.bin"]);
+      const q = s.db.query("SELECT id FROM task_question WHERE task = $t").get({ t: s.task }) as { id: number };
+      expect(s.loop.answer(s.db, s.task, { version: s.t().version, answers: [{ question: q.id, choice: 0 }] }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      const cont = (s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call).context["continue.md"] ?? "";
+      expect(cont).toContain("- src/feature.ts");
+      for (const p of [".venv", "build/out.bin", "made by setup"]) expect(cont).not.toContain(p);
+      const paths = Array.from({ length: CONTINUE_PATHS_MAX + 5 }, (_, i) => `f${i}.ts`);
+      const many = continueFile({ kept: true, paths, diff: "", notes: [] }).text;
+      expect(many).toContain(`- f${CONTINUE_PATHS_MAX - 1}.ts\n- and 5 more\n`);
+      expect(many).not.toContain(`- f${CONTINUE_PATHS_MAX}.ts`);
+    },
+    SLOW,
+  );
+
+  test(
     "setup output stays out of every commit and each later commit row names it; Claude's new files go in; Run setup again runs it",
     async () => {
       const s = await setup();
@@ -1926,17 +2408,18 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       const spec = specResult.parse({ ...SPEC, parts: [{ ...SPEC.parts[0], tasks: [task(1), task(2), task(3)] }] });
       const s = await setup({ spec, settings: { pauseAfterTask: true } });
       withSetup(s, "ignored");
-      const resume = async () => {
-        expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      // A Continue keeps the work, so "Start the step again" makes the reset here.
+      const resume = async (option?: "start-step-again") => {
+        expect(s.loop.resume(s.db, s.task, { version: s.t().version, option }).status).toBe(200);
         await s.loop.idle(s.task);
       };
       await s.build();
       expect(s.blocked()?.text).toBe("Task T1.1 is done. Continue?");
       expect(setups(s)).toBe(1);
-      // The reset of Resume removes a file that setup did not make: setup does not run.
+      // The reset removes a file that setup did not make: setup does not run.
       const junk = join((await s.wt()).repo, "junk.txt");
       writeFileSync(junk, "left by a stop\n");
-      await resume();
+      await resume("start-step-again");
       expect(existsSync(junk)).toBe(false);
       expect(s.blocked()?.text).toBe("Task T1.2 is done. Continue?");
       expect(setups(s)).toBe(1);
@@ -1947,8 +2430,8 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       expect(s.blocked()?.text).toBe("Task T1.3 is done. Continue?");
       expect(setups(s)).toBe(2);
       expect(readSetupMark(await s.wt())?.files).toEqual(["gen/made.txt"]);
-      // The reset of Resume removes gen/made.txt, so setup runs again.
-      await resume();
+      // The reset removes gen/made.txt, so setup runs again.
+      await resume("start-step-again");
       expect(setups(s)).toBe(3);
       expect(s.part().state).toBe("self_reviewed");
       expect(s.flow().filter((x) => x.startsWith("check:setup:"))).toEqual(["check:setup:ok", "check:setup:ok", "check:setup:ok"]);
@@ -2081,15 +2564,15 @@ describe("commands that Claude may run (spec.md section 6.21)", () => {
         },
       });
       await s.build();
-      // Attempt 1 has no Bash: the repository has no pattern yet. Its change goes to a patch, and the worktree goes back.
+      // Attempt 1 has no Bash: the repository has no pattern yet. Its change stays in the worktree for the next attempt.
       const first = allowRow(s);
       expect(s.blocked()).toEqual({ kind: "allow", step: first, text: "Needs you: Claude asks to allow a command." });
       expect(rowStatus(taskDto(s.db, s.t()))).toEqual({ text: "Needs you: Claude asks to allow a command", needsYou: true });
       expect(taskDto(s.db, s.t()).allowAsk).toEqual({ step: first, requests: [ask("make build")], warning: true });
       expect(implementCalls(s)[0]?.argv.join(" ")).not.toContain("Bash");
-      expect(await status(await s.wt())).toEqual([]);
+      expect((await status(await s.wt())).map((e) => e.path)).toEqual(["src/feature.ts"]);
       const patches = join(s.dataDir, "tasks", readdirSync(join(s.dataDir, "tasks"))[0] as string, String(s.task), "patches");
-      expect(readFileSync(join(patches, `${first}.patch`), "utf8")).toContain("src/feature.ts");
+      expect(existsSync(patches)).toBe(false);
       expect(s.loop.resume(s.db, s.task, { version: s.t().version })).toMatchObject({
         status: 409,
         error: "Pick a choice for each command first.",
@@ -2129,6 +2612,10 @@ describe("commands that Claude may run (spec.md section 6.21)", () => {
       const call2 = implementCalls(s)[1] as Call;
       expect(call2.argv[call2.argv.indexOf("--tools") + 1]).toContain("Bash");
       expect(call2.stdin).toContain("You can run only these commands: `make build`.");
+      expect(call2.context["step.md"]).toContain(
+        "Attempt 2 continues attempt 1, which asked to run a command. Your earlier changes are in the worktree.",
+      );
+      expect(call2.context["continue.md"]).toContain("- src/feature.ts");
       expect(allowOf(s, { decisions: [{ pattern: "make deploy", choice: "refuse" }] }).status).toBe(202);
       await s.loop.idle(s.task);
 
@@ -2207,6 +2694,8 @@ describe("commands that Claude may run (spec.md section 6.21)", () => {
       await s.loop.idle(s.task);
       expect(s.blocked()).toBeNull();
       expect(s.part().state).toBe("self_reviewed");
+      // AC-B216: the run failed, and the next attempt reads that it asked to run a command.
+      expect((implementCalls(s)[1] as Call).context["step.md"]).toContain("Attempt 2 continues attempt 1, which asked to run a command.");
     },
     SLOW,
   );

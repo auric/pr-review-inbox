@@ -54,8 +54,8 @@ import {
   MAX_OPEN_DEFAULT,
   MERGE_CONFLICTED,
   MORE_TIME_MIN,
+  NO_LIMIT,
   PART_STATE_TEXT,
-  PART_TIME_MIN,
   type PartState,
   RUN_CANCELLED,
   runLimitsOf,
@@ -553,10 +553,11 @@ export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, no
     patch(db, ref.task, ref.version, { blocked_json: b === null && !keep ? nextReason(db, ref.task) : blocked(b) }, now),
   )();
 
-// spec.md section 6.7, Budgets: "Continue with 60 more min?". Each part of the task gets 60 more minutes, and the reason goes.
-export function moreTime(db: Database, ref: TaskRef, now = Date.now()): number {
+// spec.md section 6.7, Budgets: "Continue with 60 more min?". Each part of the task gets 60 more minutes, and the reason goes. part: the
+// "Part time" of Settings > Tasks, for a task with no partTimeMin.
+export function moreTime(db: Database, ref: TaskRef, now = Date.now(), part = NO_LIMIT): number {
   const s = settingsOf(taskRow(db, ref.task) as TaskRow);
-  const settings = JSON.stringify({ ...s, partTimeMin: (s.partTimeMin ?? PART_TIME_MIN) + MORE_TIME_MIN });
+  const settings = JSON.stringify({ ...s, partTimeMin: (s.partTimeMin ?? part) + MORE_TIME_MIN });
   return db.transaction(() => patch(db, ref.task, ref.version, { settings_json: settings, blocked_json: nextReason(db, ref.task) }, now))();
 }
 

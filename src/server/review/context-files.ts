@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The context files that a run reads from ./context (jobs.ts): findings.md, history.md, fix-state.md, questions.md, candidates.md,
-// salvage-notes.md, pr-context.md, notes.md, finding.md, and discussion.md.
+// salvage-notes.md, pr-context.md, notes.md, finding.md, and discussion.md. A task step also reads continue.md (loop.ts).
 import type { Database } from "bun:sqlite";
 import { indentBlock, oneLine } from "../../shared/consult";
 import type { RunSummary } from "../../shared/dto";
@@ -19,6 +19,7 @@ import {
   type ReplyPayload,
   severities,
 } from "../../shared/review";
+import { FAILURE_TAIL } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg } from "../../shared/turn";
 import type { BuildStats } from "../bitbucket/provider";
 import { currentDrafts, touched } from "./drafts";
@@ -132,6 +133,31 @@ export function salvageNotesFile(notes: readonly RunNote[]): ContextFile {
   ];
   for (const [i, n] of notes.entries()) out.push(`## Note ${i + 1}: ${oneLine(n.from)}`, "", indentBlock(n.text), "");
   return { name: "salvage-notes.md", text: out.join("\n") };
+}
+
+// build-redesign.md section 2.4: context/continue.md of the attempt after a cut task step. kept: the changes are still in the
+// worktree; else the app reset them, and diff is their patch. paths: the changed paths, when kept, at most CONTINUE_PATHS_MAX. diff:
+// the changes since the last commit, cut to FAILURE_TAIL bytes. notes: the summary and the notes of the cut step.
+export const CONTINUE_PATHS_MAX = 200;
+export function continueFile(o: { kept: boolean; paths: string[]; diff: string; notes: string[] }): ContextFile {
+  const all = Buffer.from(o.diff);
+  const diff = all.length > FAILURE_TAIL ? `${all.subarray(0, FAILURE_TAIL).toString()}\n[The app cut the diff here.]` : o.diff;
+  const out = [
+    "# The earlier attempt",
+    "",
+    o.kept
+      ? "The earlier attempt of this step left these changes in the worktree. They are not committed."
+      : "The app reset the changes of the earlier attempt. The patch below holds them.",
+    "",
+  ];
+  if (o.kept) {
+    const more = o.paths.length - CONTINUE_PATHS_MAX;
+    const list = o.paths.slice(0, CONTINUE_PATHS_MAX).map((p) => `- ${oneLine(p)}`);
+    out.push("## Changed paths", "", ...(list.length ? list : ["(none)"]), ...(more > 0 ? [`- and ${more} more`] : []), "");
+  }
+  out.push(o.kept ? "## Diff since the last commit" : "## Patch", "", indentBlock(diff.trimEnd() || "(no diff)"), "");
+  if (o.notes.length) out.push("## Notes of the earlier attempt", "", ...o.notes.map((n) => indentBlock(n)), "");
+  return { name: "continue.md", text: out.join("\n") };
 }
 
 // Byte caps of the context/history.md sections. The cut drops the blocks after the first block that does not fit.

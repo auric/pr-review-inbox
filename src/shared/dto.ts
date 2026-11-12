@@ -57,6 +57,7 @@ import {
   type RepoRole,
   RUN_LIMITS,
   type RunLimits,
+  runLimitOk,
   SHELL_MODES,
   type ShellMode,
   type SizeSource,
@@ -1374,16 +1375,15 @@ export const branchPrefix = z
   .min(1, "Invalid branch prefix.")
   .max(PREFIX_MAX, "Invalid branch prefix.")
   .refine((p) => refOk(`${p}x`), "Invalid branch prefix.");
-// Settings > Tasks run limits (limits.md decision 3). Each key is optional.
+// Settings > Tasks run limits (limits.md decision 3). Each key is optional. A key with off also takes NO_LIMIT.
 const runLimit = (k: keyof typeof RUN_LIMITS) =>
   z
     .number()
-    .int(`Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
-    .min(RUN_LIMITS[k].min, `Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
-    .max(RUN_LIMITS[k].max, `Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
+    .refine((n) => runLimitOk(k, n), `Type a whole number from ${RUN_LIMITS[k].min} to ${RUN_LIMITS[k].max}.`)
     .optional();
 export const runLimitsInput = z.object({
   stepMinutes: runLimit("stepMinutes"),
+  partMinutes: runLimit("partMinutes"),
   reviewMinutes: runLimit("reviewMinutes"),
   interviewRounds: runLimit("interviewRounds"),
   testFixTries: runLimit("testFixTries"),
@@ -1540,6 +1540,10 @@ export const specChangeInput = z.object({ version, accept: z.boolean() });
 // POST /api/tasks/:id/pause, /resume, /stop, /close, /parts/:part/retarget, /parts/:part/fix ("Fix these too"), /parts/:part/update,
 // and /parts/:part/update/undo (spec.md section 6.18.6).
 export const taskVersionInput = z.object({ version });
+// POST /api/tasks/:id/resume (build-redesign.md section 2.2). option "start-step-again": the build resets to the last commit with the
+// patch saved, and the step starts again. Absent: Continue keeps the work.
+export const taskResumeInput = z.object({ version, option: z.literal("start-step-again").optional() });
+export type TaskResumeInput = z.infer<typeof taskResumeInput>;
 // spec.md section 6.20.12: "Start <key> now" overrides the review of the lower part. "Move" with push pushes first.
 export const taskStartInput = z.object({ version, override: z.literal(true) });
 export const taskMoveInput = z.object({ version, push: z.literal(true).optional() });

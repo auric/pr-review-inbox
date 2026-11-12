@@ -28,6 +28,7 @@ const COMMAND_MAX = 4000;
 const OUTPUT_BYTES = 4096;
 // Over this number of refused Bash commands, the runner ends the run.
 export const REFUSED_MAX = 5;
+export const TIME_LIMIT_TEXT = "The run passed its time limit.";
 // V12: on Windows, Claude Code offers Bash only when Git Bash is installed.
 export const NO_BASH_TEXT =
   process.platform === "win32"
@@ -338,7 +339,7 @@ export function classify(s: StreamState, end: { exitCode: number | null; cancell
   if (s.badTools.length) return failed("tool_check", `init lists tools outside the allowlist: ${s.badTools.join(", ")}.`);
   if (s.refused.length > REFUSED_MAX) return failed("tool_check", `Claude Code refused more than ${REFUSED_MAX} commands in this run.`);
   if (done) return { status: "completed", kind: null, text: null, result: done };
-  if (end.timedOut) return failed("process", "The run passed its time limit.");
+  if (end.timedOut) return failed("process", TIME_LIMIT_TEXT);
   const kind = errorKind(s, last);
   const fallback =
     kind === "schema"

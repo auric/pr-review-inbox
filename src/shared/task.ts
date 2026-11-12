@@ -85,10 +85,12 @@ export const TASK_DOCS = ["design", "spec", "tasks", "plan"] as const;
 export type TaskDoc = (typeof TASK_DOCS)[number];
 
 // Settings > Tasks (limits.md decision 3): the run limits. config.json keeps only the changed ones. def: the value while unset.
-// reviewMinutes: the time of each Claude run that is not a task step. stepMinutes: the time of one task step. The part time and
-// RUN_TIME_MAX_MS still cap a step. runsAtOnce: the slots of the run pool (spec.md section 6.26).
+// reviewMinutes: the time of each Claude run that is not a task step. stepMinutes: the time of one task step. partMinutes: the Claude
+// time of one part; task.settings_json partTimeMin overrides it. off: NO_LIMIT is a valid value (user decision of 2026-11-11). The part
+// time and RUN_TIME_MAX_MS still cap a step. runsAtOnce: the slots of the run pool (spec.md section 6.26).
 export const RUN_LIMITS = {
-  stepMinutes: { def: 20, min: 5, max: 120 },
+  stepMinutes: { def: 0, min: 5, max: 120, off: true },
+  partMinutes: { def: 0, min: 10, max: 1440, off: true },
   reviewMinutes: { def: 60, min: 10, max: 240 },
   interviewRounds: { def: 2, min: 1, max: 5 },
   testFixTries: { def: 3, min: 1, max: 10 },
@@ -101,10 +103,22 @@ export const RUN_LIMIT_KEYS = Object.keys(RUN_LIMITS) as RunLimitKey[];
 // The values of a stored partial object, with the default for each missing key.
 export const runLimitsOf = (stored: Partial<RunLimits> | undefined): RunLimits =>
   Object.fromEntries(RUN_LIMIT_KEYS.map((k) => [k, stored?.[k] ?? RUN_LIMITS[k].def])) as RunLimits;
-// The value of a run limit field: a whole number inside the bounds of the key, else null.
+export const NO_LIMIT = 0;
+export const canTurnOff = (k: RunLimitKey) => "off" in RUN_LIMITS[k];
+// A time limit in ms. NO_LIMIT gives Infinity, which RUN_TIME_MAX_MS caps for one Claude process.
+export const minutesMs = (minutes: number) => (minutes === NO_LIMIT ? Number.POSITIVE_INFINITY : minutes * 60_000);
+// true: a whole number inside the bounds of the key, or NO_LIMIT for a key that can be off.
+export const runLimitOk = (k: RunLimitKey, n: number) =>
+  Number.isInteger(n) && ((n === NO_LIMIT && canTurnOff(k)) || (n >= RUN_LIMITS[k].min && n <= RUN_LIMITS[k].max));
+// The value of a run limit field, else null.
 export function runLimitValue(k: RunLimitKey, text: string): number | null {
   const n = Number(text.trim());
-  return text.trim() !== "" && Number.isInteger(n) && n >= RUN_LIMITS[k].min && n <= RUN_LIMITS[k].max ? n : null;
+  return text.trim() !== "" && runLimitOk(k, n) ? n : null;
+}
+// The value of a typed run limit, else null. NO_LIMIT comes only from the "No limit" box of the field.
+export function typedLimit(k: RunLimitKey, text: string): number | null {
+  const n = runLimitValue(k, text);
+  return n === NO_LIMIT ? null : n;
 }
 // The hard limit of one Claude process: the largest time that a setting can give.
 export const RUN_TIME_MAX_MS = Math.max(RUN_LIMITS.stepMinutes.max, RUN_LIMITS.reviewMinutes.max) * 60_000;
@@ -186,11 +200,11 @@ export const defaultTimeoutSec = (kind: CommandKind) => (kind === "setup" ? SETU
 export const limitText = (sec: number) => `${Math.round((sec / 60) * 100) / 100} min`;
 // spec.md section 6.3: the env variable of the shared task folder (repo_task_settings.task_cache).
 export const TASK_CACHE_ENV = "REVIEW_LOOP_TASK_CACHE";
-// spec.md section 0: the limits of one Claude step of a part (STEP_TIME, STEP_TURNS), the Claude time of one part (PART_TIME, in
-// minutes), and the output of one command (OUTPUT_TAIL: stored bytes; FAILURE_TAIL: bytes in context/failure.md).
+// spec.md section 0: the limits of one Claude step of a part (STEP_TIME, STEP_TURNS), and the output of one command (OUTPUT_TAIL:
+// stored bytes; FAILURE_TAIL: bytes in context/failure.md and the diff in context/continue.md).
 export const STEP_MODES = ["tests", "implement", "fix", "instruct", "resolve"] as const;
 export type StepMode = (typeof STEP_MODES)[number];
-export const STEP_TIME_MS = RUN_LIMITS.stepMinutes.def * 60_000;
+export const STEP_TIME_MS = minutesMs(RUN_LIMITS.stepMinutes.def);
 export const STEP_TURNS: Record<StepMode, number> = { tests: 60, implement: 80, fix: 40, instruct: 80, resolve: 40 };
 // spec.md section 6.18: the text of "Tell Claude" (MAX_QUESTION of spec.md section 0), the conflict stops of one repository in one
 // update, and the least time between two base checks of one task.
@@ -199,7 +213,6 @@ export const RESOLVE_STOPS = 10;
 export const BASE_CHECK_AGE_MS = 60_000;
 // spec.md section 6.18.5: properties.mergeResult.outcome of a PR with conflicts. Gate G18 has not verified this value.
 export const MERGE_CONFLICTED = "CONFLICTED";
-export const PART_TIME_MIN = 120;
 // spec.md section 6.7, Budgets: "Continue with 60 more min?".
 export const MORE_TIME_MIN = 60;
 export const OUTPUT_TAIL = 64 * 1024;
@@ -573,6 +586,13 @@ export const stepDetail = z.object({
   // record with both equal (spec.md section 6.7). null: the worktree had changes, or the row is older.
   head: z.string().nullable().default(null),
   commandsHash: z.string().nullable().default(null),
+  // A Claude step (build-redesign.md section 2.3). checked: after the run, the git state check and the path check found no problem, so
+  // Continue keeps its changes. false in a row from before the rule. dirtyBefore: the changed paths at the start of the first attempt of
+  // the step, without the files of the setup mark, so a continuation counts the kept changes as its own.
+  checked: z.boolean().default(false),
+  dirtyBefore: z.array(z.string()).default([]),
+  // A tests step whose refused changes the loop reset (AC-B10). The next tests attempt starts fresh, also after a Continue.
+  redo: z.boolean().default(false),
   // A Claude step: its summary, and needsBase with its reason (spec.md section 6.18.2).
   summary: z.string().nullable().default(null),
   needsBase: z.object({ reason: z.string() }).nullable().default(null),
