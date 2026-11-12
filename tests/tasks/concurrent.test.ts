@@ -607,11 +607,11 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(w2).toEqual({ kind: "allow", step: expect.any(Number), text: "Needs you: Claude asks to allow a command." });
       expect(partOfStep(s, w2?.step)).toBe(s.p2);
       expect(w3).toMatchObject({ kind: "question", text: "Needs you: Claude asks: Keep the name three?" });
-      // AC-B150: the denied path saved its patch, and its worktree is at the last commit. The allow request keeps its changes for the
+      // AC-B150, AC-B261: the denied path saved its patch, and only that file went back. The allow request keeps its changes for the
       // next attempt (build-redesign.md section 2.2).
       const data = join(s.root, "data");
       expect(existsSync(patchFile(data, s.db, s.task, b?.step as number))).toBe(true);
-      expect(await status(await s.wt(s.p1))).toEqual([]);
+      expect((await status(await s.wt(s.p1))).map((e) => e.path)).toEqual([testFile("one").path.slice("repo/".length)]);
       expect(existsSync(patchFile(data, s.db, s.task, w2?.step as number))).toBe(false);
       expect((await status(await s.wt(s.p2))).length).toBeGreaterThan(0);
       expect(s.implementRuns()).toHaveLength(3);

@@ -114,6 +114,7 @@ import {
   usedBytes,
 } from "./files";
 import { approvalsOf, partGate } from "./gates";
+import { type CutStep, keepCut } from "./implement";
 import {
   type Answer,
   afterAnswers,
@@ -191,6 +192,9 @@ const SQL = {
       OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id AND p.state = 'implementing'))
     ORDER BY t.id`,
   failSteps: "UPDATE task_step SET state = 'failed', ended_at = $now WHERE state IN ('waiting', 'running')",
+  // docs/plans/review-v2/part-session.md section 2.5: the Claude steps whose run the restart cut. A resolve step writes no snapshot file.
+  cut: `SELECT id, task, part, kind, item, attempt, run FROM task_step WHERE state = 'running' AND run IS NOT NULL AND part IS NOT NULL
+    AND kind IN ('tests', 'implement', 'fix', 'instruct')`,
   // spec.md section 6.25.3: part rows hold reasons only while the task builds.
   clearWaits: "UPDATE task_part SET blocked_json = NULL WHERE task = $id AND blocked_json IS NOT NULL",
   // spec.md section 6.18.4, Restart: an update that ran at the last stop. The loop aborts its rebase or merge and resets every repository
@@ -249,13 +253,16 @@ export function advancePart(
 
 // spec.md section 6.14: a Claude step that ran at the last stop has no process now. Its step ends failed, and its task stops, so
 // Resume continues. Call it before the run recovery (run-rows.ts SQL.recover), which ends the runs themselves with kind restart.
-export function recoverTasks(db: Database, now = Date.now()) {
+// dataDir: the data folder. With it, a cut run whose snapshot file passes the checks keeps its work (implement.ts keepCut).
+export function recoverTasks(db: Database, now = Date.now(), dataDir?: string) {
   db.transaction(() => {
     const tasks = db.query(SQL.running).all() as { id: number; version: number }[];
+    const cut = dataDir === undefined ? [] : (db.query(SQL.cut).all() as CutStep[]);
     db.query(SQL.restartUpdates).run();
     db.query(SQL.failSteps).run({ now });
     // A done or failed task refuses STOP and keeps its state.
     for (const t of tasks) advance(db, { task: t.id, version: t.version }, { type: "STOP" }, {}, now);
+    for (const s of cut) keepCut(db, dataDir as string, s);
   })();
 }
 

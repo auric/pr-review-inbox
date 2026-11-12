@@ -4,9 +4,10 @@
 // One Claude step of a task part (docs/plans/review-v2/spec.md sections 6.6 to 6.8): the context files, the stdin, the run in the
 // task worktree, the path check after the step, the reset with the saved patch, the step row, and the time and cost budget of the part.
 import type { Database } from "bun:sqlite";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
+import { z } from "zod";
 import type { RunConflict, RunUsage } from "../../shared/dto";
 import { REFUSED_NOTES, type RunEvent } from "../../shared/run-log";
 import {
@@ -29,6 +30,7 @@ import { attachmentsRoot } from "../context/attachments";
 import { log } from "../log";
 import { EXPLORER_RULE, type Profile } from "../review/catalog";
 import { deniedPath, fold } from "../review/edits";
+import { gitEnv } from "../review/git";
 import type { ImplementRunStart, InstructionRepo, ReviewJobs } from "../review/jobs";
 import { addUsage, type Ending, failure, judgeTask, usageOf } from "../review/judge";
 import { REFUSED_MAX, type Refusal } from "../review/stream";
@@ -37,17 +39,21 @@ import {
   type AttachmentFile,
   attachmentBytes,
   type ContextFile,
+  cachePath,
   longData,
+  longPath,
   noUrl,
   TASK_ATTACHMENT_NAME,
   UNTRUSTED,
 } from "../review/workspace";
-import { checkGit, type GitSnap, movedText, snapGit, stopGit } from "./gitstate";
+import { checkGit, diskDiff, diskSnap, diskSnapOf, type GitSnap, movedText, snapGit, stopGit } from "./gitstate";
 import { fullPath, reposFile, taskRepos } from "./repos";
 import type { StepShell } from "./shell";
 import { holdBlocked, stopForRun, taskRow } from "./tasks";
 import {
   addedFolders,
+  adminOf,
+  clearNone,
   commitStep,
   deepestFirst,
   gitLinkOk,
@@ -55,18 +61,25 @@ import {
   type IgnoredSnapshot,
   ignoredChanges,
   ignoredSnapshot,
+  ignoredSnapshotSync,
   inside,
   linksOn,
   newFiles,
   noneChanges,
+  partDir,
   patchFile,
   type RepoTree,
+  removeUnder,
   removeWorktree,
   resetTrees,
   resetWorktree,
   restoreGitLink,
+  restorePaths,
+  type StatusEntry,
   savePatch,
+  setupMark,
   status,
+  statusSync,
   type Worktree,
   wtGit,
 } from "./worktree";
@@ -135,22 +148,26 @@ export function outsideRepo(wt: Worktree, context: ReadonlyMap<string, string | 
 // them still fails: it can hold rules for Claude Code or git for the next step. Absent: every path counts, as after a step. written: a
 // step with the Bash tool (spec.md section 6.21, D8), with the targets of its Write and Edit calls under repo/. Its commands may change
 // ignored files, such as build output. An ignored Write or Edit target and a link on a changed ignored path still fail.
-export async function pathCheck(
-  wt: Worktree,
-  o: {
-    allow: readonly string[];
-    context?: ReadonlyMap<string, string | Uint8Array>;
-    ignored?: IgnoredSnapshot;
-    skip?: readonly string[];
-    add?: readonly string[];
-    written?: readonly string[];
-  },
-): Promise<PathCheck> {
+export type CheckOptions = {
+  allow: readonly string[];
+  context?: ReadonlyMap<string, string | Uint8Array>;
+  ignored?: IgnoredSnapshot;
+  skip?: readonly string[];
+  add?: readonly string[];
+  written?: readonly string[];
+};
+
+export async function pathCheck(wt: Worktree, o: CheckOptions): Promise<PathCheck> {
+  return pathRules(wt, o, await status(wt), o.ignored ? await ignoredSnapshot(wt) : undefined);
+}
+
+// The rules of pathCheck on its listings: entries, the git status of repo/, and ignoredNow, the ignored files after the step. The
+// restart recovery reads them with blocking git calls (keepCut).
+export function pathRules(wt: Worktree, o: CheckOptions, entries: StatusEntry[], ignoredNow?: IgnoredSnapshot): PathCheck {
   const problems = new Map<string, string>();
   if (!gitLinkOk(wt)) problems.set(".git", "The step changed the git link of the worktree.");
   const allow = new Set(o.allow.map((f) => (repoPath(f) ?? f).split("/").map(fold).join("/")));
   const take = o.add && new Set(o.add);
-  const entries = await status(wt);
   const changed = [...new Set(entries.filter((e) => !take || e.xy !== "??" || take.has(e.path)).map((e) => e.path))];
   if (take)
     for (const e of entries)
@@ -177,7 +194,7 @@ export async function pathCheck(
   }
   const outside = o.context ? outsideRepo(wt, o.context, o.skip) : [];
   for (const p of outside) problems.set(`../${p}`, "A step may change files only in repo/.");
-  const ignored = o.ignored ? ignoredChanges(o.ignored, await ignoredSnapshot(wt)) : [];
+  const ignored = o.ignored && ignoredNow ? ignoredChanges(o.ignored, ignoredNow) : [];
   const own = o.written && new Set(o.written.map((p) => p.split("/").map(fold).join("/")));
   for (const p of ignored) {
     if (problems.has(p)) continue;
@@ -194,8 +211,10 @@ export async function pathCheck(
 
 // ---------- Several repositories (spec.md section 6.16.6) ----------
 
-// The path check of one repository of the part folder. none: the paths in the folder of a repository with access none.
-export type TreePart = { tree: RepoTree; check: PathCheck | null; none: string[] };
+// The path check of one repository of the part folder. none: the paths in the folder of a repository with access none. own: the
+// problems of check from the root of this repository, without the allowed gitlink paths of its submodules.
+export type TreePart = { tree: RepoTree; check: PathCheck | null; none: string[]; own: PathProblem[] };
+export type TreeOptions = Omit<CheckOptions, "add" | "skip"> & { add?: ReadonlyMap<string, readonly string[]> };
 // check: the merged result, with paths from the main repository root. locked: the first change in a repository with access read or
 // none, with its reason.
 export type TreeCheck = { check: PathCheck; locked: PathProblem | null; parts: TreePart[] };
@@ -206,16 +225,7 @@ const under = (prefix: string, p: string) => (prefix ? `${prefix}/${p}` : p);
 // In a parent, the gitlink path of a submodule with access edit is allowed. The other rules of section 6.8 apply in each repository.
 // context and ignored: the main worktree only, as in pathCheck. add: a commit, with the new files that it takes in each worktree, by
 // Worktree.repo.
-export async function treeCheck(
-  trees: readonly RepoTree[],
-  o: {
-    allow: readonly string[];
-    context?: ReadonlyMap<string, string | Uint8Array>;
-    ignored?: IgnoredSnapshot;
-    add?: ReadonlyMap<string, readonly string[]>;
-    written?: readonly string[];
-  },
-): Promise<TreeCheck> {
+export async function treeCheck(trees: readonly RepoTree[], o: TreeOptions): Promise<TreeCheck> {
   const parts: TreePart[] = [];
   const problems: PathProblem[] = [];
   const changed: string[] = [];
@@ -231,7 +241,7 @@ export async function treeCheck(
       const parentOk = trees.find((x) => x.row.id === t.row.parent)?.wt;
       const none = t.row.access === "none" && parentOk ? noneChanges(trees, t) : [];
       for (const p of none) lock(p, t.row.reason);
-      parts.push({ tree: t, check: null, none });
+      parts.push({ tree: t, check: null, none, own: [] });
       continue;
     }
     const isMain = t.row.role === "main";
@@ -243,7 +253,6 @@ export async function treeCheck(
       ...(o.add && { add: o.add.get(t.wt.repo) ?? [] }),
     });
     if (isMain) main = check;
-    parts.push({ tree: t, check, none: [] });
     const kids = new Map(trees.filter((x) => x.row.parent === t.row.id && x.row.role === "submodule").map((x) => [x.row.path, x]));
     const own = new Map(check.problems.map((p) => [p.path, p.reason]));
     for (const p of check.changed) {
@@ -256,6 +265,7 @@ export async function treeCheck(
       changed.push(under(t.full, p));
       if (!isMain && t.row.access !== "edit") lock(under(t.full, p), t.row.reason);
     }
+    parts.push({ tree: t, check, none: [], own: [...own].map(([path, reason]) => ({ path, reason })) });
     for (const [p, reason] of own) {
       if (!isMain && t.row.access !== "edit") lock(under(t.full, p), t.row.reason);
       else if (!p.startsWith("../")) problems.push({ path: under(t.full, p), reason });
@@ -278,13 +288,56 @@ const patchLost = (file: string, e: unknown) => {
   return null;
 };
 
-// Fails a step in every repository: saves a patch per changed worktree first (<step>.patch for main, <step>-<task_repo id>.patch for
-// the others), removes the files outside repo/, then resets deepest first. Returns the first saved patch.
-export async function undoTrees(trees: readonly RepoTree[], tc: TreeCheck, last: string, patch: string): Promise<string | null> {
+// The undo of a failed path check (docs/plans/review-v2/part-session.md section 2.5). saved: the patch of the problem paths. full: a
+// problem stayed after the undo of those paths, so the worktree went back to the last commit. reset: the patch of the rest of the work
+// before that reset. left: the problems of the second check.
+export type Undo = { saved: string | null; full: boolean; reset: string | null; left: PathProblem[] };
+
+const treeFile = (t: RepoTree, file: string) => (t.row.role === "main" ? file : file.replace(/\.patch$/, `-${t.row.id}.patch`));
+const lockedTree = (t: RepoTree) => t.row.role !== "main" && t.row.access !== "edit";
+// git add fails on an ignored path, so the patch takes only the problem paths that git status lists.
+const patchPaths = (check: PathCheck, problems: readonly PathProblem[]) => {
+  const listed = new Set(check.changed);
+  return problems.map((p) => p.path).filter((p) => listed.has(p));
+};
+
+// The first free name of the patch of a full reset, as loop.ts undo picks it: <step>.patch, then <step>.1.patch, and so on. A
+// worktree other than main adds -<task_repo id>.
+function freePatch(first: string, trees: readonly RepoTree[] = []) {
+  const taken = (f: string) => existsSync(f) || trees.some((t) => existsSync(treeFile(t, f)));
+  let file = first;
+  for (let n = 1; taken(file); n++) file = first.replace(/\.patch$/, `.${n}.patch`);
+  return file;
+}
+
+// The ignored files before the step without the problem paths, which the undo deleted. The second check compares with it.
+function withoutUndone(ignored: IgnoredSnapshot | undefined, check: PathCheck | null | undefined) {
+  if (!ignored || !check) return ignored;
+  const out = new Map(ignored);
+  for (const p of check.problems) out.delete(p.path);
+  return out;
+}
+
+// Undoes only the problem paths of one worktree, by path from its root. A changed ignored file has no copy to restore, so it goes, and
+// the setup mark goes too: setup makes the ignored files again before the next step. ignored: the ignored changes of the check.
+async function undoPaths(wt: Worktree, problems: readonly PathProblem[], ignored: readonly string[]) {
+  const paths = problems.map((p) => p.path);
+  for (const p of paths) if (p.startsWith("../")) await removeUnder(wt.dir, p.slice(3));
+  await restorePaths(
+    wt,
+    paths.filter((p) => !p.startsWith("../")),
+  );
+  const gone = new Set(ignored);
+  if (paths.some((p) => gone.has(p))) rmSync(setupMark(wt), { force: true });
+}
+
+// The full reset in every repository: saves a patch per changed worktree first, removes the files outside repo/, then resets deepest
+// first. Returns the first saved patch.
+async function resetAll(trees: readonly RepoTree[], tc: TreeCheck, last: string, patch: string): Promise<string | null> {
   let saved: string | null = null;
   for (const p of tc.parts) {
     if (!p.tree.wt || !p.check?.changed.length) continue;
-    const file = p.tree.row.role === "main" ? patch : patch.replace(/\.patch$/, `-${p.tree.row.id}.patch`);
+    const file = treeFile(p.tree, patch);
     const s = await savePatch(p.tree.wt, file, p.check.changed).catch((e) => patchLost(file, e));
     saved ??= s;
   }
@@ -299,12 +352,45 @@ export async function undoTrees(trees: readonly RepoTree[], tc: TreeCheck, last:
   return saved;
 }
 
+// Fails a step in every repository (part-session.md section 2.5). Each worktree saves a patch of its problem paths first (<step>.patch
+// for main, <step>-<task_repo id>.patch for the others). Then only those paths go back. A repository with access read or none goes back
+// as a whole. o: the options of the first check, for the second check. A problem that stays takes the full reset with a new patch.
+export async function undoTrees(trees: readonly RepoTree[], tc: TreeCheck, last: string, patch: string, o: TreeOptions): Promise<Undo> {
+  let saved: string | null = null;
+  for (const p of tc.parts) {
+    if (!p.tree.wt || !p.check) continue;
+    const file = treeFile(p.tree, patch);
+    const s = await savePatch(p.tree.wt, file, lockedTree(p.tree) ? p.check.changed : patchPaths(p.check, p.own), true).catch((e) =>
+      patchLost(file, e),
+    );
+    saved ??= s;
+  }
+  let again: TreeCheck | null = null;
+  try {
+    for (const p of tc.parts) {
+      const t = p.tree;
+      if (!t.wt) {
+        if (p.none.length) await clearNone(trees, t);
+      } else if (lockedTree(t)) {
+        if (p.check?.changed.length || p.own.length) await resetWorktree(t.wt, t.row.pinned as string, p.check?.links);
+      } else await undoPaths(t.wt, p.own, t.row.role === "main" ? (p.check?.ignored ?? []) : []);
+    }
+    const main = tc.parts.find((p) => p.tree.row.role === "main")?.check;
+    again = await treeCheck(trees, { ...o, ignored: withoutUndone(o.ignored, main) });
+    if (!again.check.problems.length) return { saved, full: false, reset: null, left: [] };
+  } catch (e) {
+    log(`Could not undo only the problem paths: ${noUrl((e as Error).message)}`);
+  }
+  const reset = await resetAll(trees, again ?? tc, last, saved ? freePatch(patch, trees) : patch);
+  return { saved, full: true, reset, left: again?.check.problems ?? [] };
+}
+
 const lockedText = (p: PathProblem) =>
   `Needs you: Claude changed ${p.path}, which the task cannot change.${p.reason ? ` ${p.reason}` : ""}`;
 
-// Fails a step: saves the patch first, removes the files outside repo/ and the links, then resets to last (spec.md section 6.8).
+// The full reset: saves the patch first, removes the files outside repo/ and the links, then resets to last (spec.md section 6.8).
 // A changed ignored file has no copy to restore, so the worktree goes. The next step makes it again from the branch, with its setup.
-export async function undoStep(wt: Worktree, last: string, check: PathCheck, patch: string): Promise<string | null> {
+async function resetStep(wt: Worktree, last: string, check: PathCheck, patch: string): Promise<string | null> {
   const saved = await savePatch(wt, patch, check.changed).catch((e) => patchLost(patch, e));
   for (const p of check.outside) await rm(join(wt.dir, p), { force: true });
   if (check.ignored.length) {
@@ -314,6 +400,104 @@ export async function undoStep(wt: Worktree, last: string, check: PathCheck, pat
   if (!gitLinkOk(wt)) await restoreGitLink(wt);
   await resetWorktree(wt, last, check.links);
   return saved;
+}
+
+// Fails a step (part-session.md section 2.5): saves a patch of the problem paths, undoes only them, and runs the path check again with
+// o, the options of the first check. A problem that stays takes the full reset with a new patch of the rest of the work.
+export async function undoStep(wt: Worktree, last: string, check: PathCheck, patch: string, o: CheckOptions): Promise<Undo> {
+  const saved = await savePatch(wt, patch, patchPaths(check, check.problems), true).catch((e) => patchLost(patch, e));
+  let again: PathCheck | null = null;
+  try {
+    await undoPaths(wt, check.problems, check.ignored);
+    again = await pathCheck(wt, { ...o, ignored: withoutUndone(o.ignored, check) });
+    if (!again.problems.length) return { saved, full: false, reset: null, left: [] };
+  } catch (e) {
+    log(`Could not undo only the problem paths: ${noUrl((e as Error).message)}`);
+  }
+  const reset = await resetStep(wt, last, again ?? check, saved ? freePatch(patch) : patch);
+  return { saved, full: true, reset, left: again?.problems ?? [] };
+}
+
+// ---------- The snapshot on disk (part-session.md sections 2.5 and 9.5) ----------
+
+// <taskDir>/part-<ord>.gitsnap.json: the git state at the start of a run, and the inputs of its path check. An app restart keeps it, so
+// the recovery can check the cut run (keepCut). key: the run key of the step. graph: repo/.codegraph was there before the run.
+export const cutFile = (wt: Pick<Worktree, "dir">) => `${wt.dir}.gitsnap.json`;
+const cutSnap = z.object({
+  key: z.string(),
+  git: diskSnap,
+  allow: z.array(z.string()),
+  ignored: z.array(z.tuple([z.string(), z.string()])),
+  shell: z.boolean(),
+  graph: z.boolean(),
+  dirtyBefore: z.array(z.string()),
+});
+type CutSnap = z.infer<typeof cutSnap>;
+
+export async function saveCut(wt: Worktree, snap: GitSnap, c: Omit<CutSnap, "git" | "graph">) {
+  const data: CutSnap = { ...c, git: await diskSnapOf(snap), graph: existsSync(join(wt.repo, ".codegraph")) };
+  writeFileSync(cutFile(wt), JSON.stringify(data));
+}
+
+// A Claude step that ran at the last stop, as recoverTasks finds it before it ends the step.
+export type CutStep = { id: number; task: number; part: number; kind: string; item: string | null; attempt: number; run: number };
+
+const KEEP_NOTE = "The app stopped during the run. The git state and the changed files passed the checks, so Continue keeps the work.";
+const cutNote = (why: string) => `The app stopped during the run. ${why} Continue resets the work and keeps a patch.`;
+// finish() takes the same targets: the Write and Edit calls that ended without an error.
+const WRITES_SQL = `SELECT target FROM run_event WHERE run = $run AND tool IN (${[...FILE_TOOLS].map((t) => `'${t}'`).join(", ")})
+  AND status = 'ok' AND target <> '' ORDER BY seq`;
+
+// part-session.md section 2.5: after a restart, the run that the restart cut keeps its work when its snapshot file is on disk, the git
+// state equals that snapshot, and the path check of the run passes. Then its step gets checked, so Continue keeps the work. Else
+// Continue resets the work with the patch, as before. It blocks, because recoverTasks runs in a database transaction. It never throws.
+// Only a part with one repository writes the snapshot file.
+export function keepCut(db: Database, dataDir: string, s: CutStep) {
+  try {
+    const t = taskRow(db, s.task);
+    const part = db.query("SELECT ord, branch FROM task_part WHERE id = $id").get({ id: s.part }) as { ord: number; branch: string } | null;
+    if (!t || !part) return;
+    const data = longPath(dataDir);
+    const dir = partDir(data, db, s.task, part.ord);
+    const file = cutFile({ dir });
+    if (!existsSync(file)) return;
+    let why: string | null = null;
+    let written: string[] = [];
+    let dirtyBefore: string[] = [];
+    try {
+      const cut = cutSnap.parse(JSON.parse(readFileSync(file, "utf8")));
+      dirtyBefore = cut.dirtyBefore;
+      const repo = join(dir, "repo");
+      const cache = cachePath(data, { project: t.project, repo: t.repo, id: s.task });
+      const admin = adminOf(cache, repo);
+      if (cut.key !== `task:${s.task}:part:${s.part}:${s.kind}:${s.item}:${s.attempt}`) why = "The snapshot file belongs to another run.";
+      else if (!admin) why = "The worktree of the part is gone.";
+      else {
+        const env = gitEnv(join(data, "git", "empty.gitconfig"));
+        const wt: Worktree = { dir, repo, context: join(dir, "context"), admin, cache, branch: part.branch, env };
+        const moved = diskDiff(cut.git, [wt]);
+        if (moved.length) why = `The git state differs from the run start: ${listOf(moved)}.`;
+        else {
+          // jobs.ts implementSteps deletes an index that the run made before its path check.
+          if (!cut.graph) rmSync(join(repo, ".codegraph"), { recursive: true, force: true, maxRetries: 3 });
+          written = [...new Set((db.query(WRITES_SQL).all({ run: s.run }) as { target: string }[]).map((r) => r.target))];
+          const own = cut.shell ? written.filter((p) => p.startsWith("repo/")).map((p) => p.slice("repo/".length)) : undefined;
+          // writeContext deletes context/ before each step, so the next step reads none of it.
+          const o = { allow: cut.allow, context: new Map(), skip: ["context"], ignored: new Map(cut.ignored), written: own };
+          const check = pathRules(wt, o, statusSync(wt), ignoredSnapshotSync(wt));
+          if (check.problems.length) why = `The path check failed for ${namesOf(check.problems)}.`;
+        }
+      }
+    } catch (e) {
+      why = `The app could not check the run: ${noUrl((e as Error).message)}`;
+    }
+    rmSync(file, { force: true });
+    const notes = stepDetailOf(db, s.id).notes;
+    if (why === null) patchStep(db, s.id, { checked: true, written, dirtyBefore, notes: [...notes, KEEP_NOTE] });
+    else patchStep(db, s.id, { checked: false, notes: [...notes, cutNote(why)] });
+  } catch (e) {
+    log(`Task ${s.task}: could not check the run of step ${s.id} after the restart: ${noUrl((e as Error).message)}`);
+  }
 }
 
 // Writes context/ again with only these files. untrusted: the task text and the command output, with the UNTRUSTED banner. own: the
@@ -792,7 +976,8 @@ export type StepInput = {
 };
 
 // changed: the paths that the step left in the worktree for the checks and the commit. Empty after a failed path check. moved: what the
-// step changed in the git state, which the app restored (gitstate.ts checkGit). text: the
+// step changed in the git state, which the app restored (gitstate.ts checkGit). patch: the saved patch of the problem paths, or of the
+// work before a full reset. text: the
 // sentence of a failed or cancelled run. refused: the Bash commands that Claude Code refused. ask: the runner ended an allowlist run
 // over REFUSED_MAX refused commands, some of them refused by the allowlist; the task did not stop, so the loop builds the requests
 // (spec.md section 6.21, D3).
@@ -838,11 +1023,21 @@ export type StepStart =
   | { status: 409; blocked: TaskBlocked }
   | { status: 409; stopped: true };
 
-const deniedText = (p: PathProblem[]) => {
-  const names = p.slice(0, 3).map((x) => x.path);
-  const more = p.length > 3 ? ` and ${p.length - 3} more` : "";
-  return `Needs you: the step changed ${names.join(", ")}${more}, which Claude may not change. The app undid the step and saved a patch.`;
-};
+const listOf = (names: readonly string[]) => `${names.slice(0, 3).join(", ")}${names.length > 3 ? ` and ${names.length - 3} more` : ""}`;
+const namesOf = (p: readonly PathProblem[]) => listOf(p.map((x) => x.path));
+const deniedText = (p: PathProblem[]) =>
+  `Needs you: the step changed ${namesOf(p)}, which Claude may not change. The app undid the step and saved a patch.`;
+// part-session.md section 2.5 and section 3 items 3 and 4: the reasons of a partial undo.
+const keptText = (p: PathProblem[]) =>
+  `Needs you: Claude changed ${namesOf(p)}, which a task may not change. The app undid ${p.length === 1 ? "that file" : "those files"} and kept the other work.`;
+export const GIT_KEPT_TEXT = "Needs you: Claude changed git state during the run. The app restored it.";
+const undoNotes = (u: Undo, problems: readonly PathProblem[]) => [
+  u.full
+    ? "A problem stayed after the undo of these paths, so the app reset the step to the last commit."
+    : "The app undid only these paths and kept the other work.",
+  ...(u.saved ? [`${basename(u.saved)} holds the undone paths.`] : []),
+  ...u.left.filter((l) => !problems.some((p) => p.path === l.path)).map((p) => `${p.path}: ${p.reason}`),
+];
 
 // spec.md section 6.7: the repositories whose project instructions a step gets. The main repository at its base commit, then each
 // submodule or added repository with access edit at its base or pinned commit. allow: the Files lines of the step, from the main root.
@@ -910,7 +1105,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   let step = 0;
   let check: PathCheck | null = null;
   let locked: PathProblem | null = null;
-  let patch: string | null = null;
+  let undo: Undo | null = null;
   let written: string[] = [];
   let bashFiles: string[] = [];
   let refused: Refusal[] = [];
@@ -921,6 +1116,14 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   // git-deny.md fix F: the git state before the step, and what the step changed in it.
   let snap: GitSnap | null = null;
   let moved: string[] = [];
+  // The snapshot file is for a restart only. finish() and each start that runs nothing delete it. A file that stays fails the key check.
+  const dropCut = () => {
+    try {
+      rmSync(cutFile(wt), { force: true });
+    } catch (e) {
+      log(`Could not delete ${basename(cutFile(wt))}: ${noUrl((e as Error).message)}`);
+    }
+  };
   const row = taskRow(db, i.task);
   const start: ImplementRunStart = {
     task: i.task,
@@ -969,16 +1172,17 @@ export async function startStep(i: StepInput): Promise<StepStart> {
             bashFiles = (await untracked(wt.dir, wts)).filter((p) => !before.has(foldPath(p)) && !mine.has(foldPath(p)));
           }
           const file = patchFile(i.review.dataDir, db, i.task, step);
+          const o = { allow: i.allow, context, ignored, written: own };
           if (i.resolveCheck)
             check = { changed: [], problems: await i.resolveCheck(context, ignored), links: [], outside: [], ignored: [] };
           else if (trees) {
-            const tc = await treeCheck(trees, { allow: i.allow, context, ignored, written: own });
+            const tc = await treeCheck(trees, o);
             check = tc.check;
             locked = tc.locked;
-            if (check.problems.length || moved.length) patch = await undoTrees(trees, tc, last, file);
+            if (check.problems.length) undo = await undoTrees(trees, tc, last, file, o);
           } else {
-            check = await pathCheck(wt, { allow: i.allow, context, ignored, written: own });
-            if (check.problems.length || moved.length) patch = await undoStep(wt, last, check, file);
+            check = await pathCheck(wt, o);
+            if (check.problems.length) undo = await undoStep(wt, last, check, file, o);
           }
         } catch (err) {
           broken = `The app could not check the changed files: ${noUrl((err as Error).message)}`;
@@ -988,14 +1192,17 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     finish: (d, run, e) => {
       // A run that ended before after() leaves its watch on.
       if (snap) stopGit(snap);
+      dropCut();
       const problems = check?.problems ?? [];
       const undone = problems.length > 0 || moved.length > 0;
+      const full = undo?.full === true;
       const result = undone || broken ? null : ((e.result?.task as ImplementResult | undefined) ?? null);
       const ran = !broken && (e.status === "completed" || e.status === "incomplete");
       const state: StepState = undone || broken ? "failed" : ran ? "ok" : e.status === "cancelled" ? "cancelled" : "failed";
       // build-redesign.md section 2.2: any run end, also a time limit, a turn cap, and a Stop. Continue keeps the files of a checked step,
-      // so it keeps the list of its Bash files too. A refused step went back to the last commit.
-      const checked = check !== null && !undone && !broken;
+      // so it keeps the list of its Bash files too. part-session.md section 2.5: the undo of only the problem paths and a git state
+      // change keep the other files. A step after a full reset went back to the last commit.
+      const checked = check !== null && !broken && (i.resolveCheck ? !undone : !full);
       const keep = state === "ok" || checked;
       const kept = keep ? bashFiles.slice(0, BASH_FILES_MAX) : [];
       endStep(
@@ -1004,13 +1211,14 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         state,
         {
           deniedPaths: problems.map((p) => p.path),
-          // A reset needs its mark, also without a saved file. The resolve check undoes nothing.
-          patch: patch ? basename(patch) : undone && !broken && !i.resolveCheck ? PATCH_LOST : null,
+          // A full reset needs its mark, also without a saved file. The undo of only the problem paths is no reset.
+          patch: full && !broken ? (undo?.reset ? basename(undo.reset) : PATCH_LOST) : null,
           notes: [
             ...(i.shell?.notes ?? []),
             ...(broken ? [broken] : []),
             ...(moved.length ? [movedText(moved)] : []),
             ...problems.map((p) => `${p.path}: ${p.reason}`),
+            ...(undo ? undoNotes(undo, problems) : []),
             ...(keep && bashFiles.length ? [bashNote(bashFiles)] : []),
             ...(result?.notes ?? []),
           ],
@@ -1036,7 +1244,15 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       const soft = i.mode === "instruct" || i.mode === "resolve";
       const cur = taskRow(d, i.task);
       if (cur && undone && !broken && !i.resolveCheck) {
-        const text = moved.length ? movedText(moved) : locked ? lockedText(locked) : deniedText(problems);
+        const text = moved.length
+          ? full
+            ? movedText(moved)
+            : GIT_KEPT_TEXT
+          : locked
+            ? lockedText(locked)
+            : full
+              ? deniedText(problems)
+              : keptText(problems);
         holdBlocked(d, cur, { kind: "denied_path", step, text }, now());
       } else if (cur && !ran && !soft && !ask)
         stopForRun(d, { task: i.task, version: cur.version }, step, broken ? { status: "failed", text: broken } : e, now());
@@ -1048,7 +1264,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         changed: undone || broken ? [] : (check?.changed ?? []),
         problems,
         moved,
-        patch,
+        patch: undo ? (full ? undo.reset : undo.saved) : null,
         text: broken ?? (ran ? null : (e.text ?? (e.status === "cancelled" ? RUN_CANCELLED : "The run failed."))),
         refused,
         ask,
@@ -1066,10 +1282,23 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     })();
     return { status: 409, blocked: b };
   }
+  // Without the file, a restart only costs the keep of the work.
+  if (!trees && !i.resolveCheck)
+    await saveCut(wt, snap, {
+      key: start.key,
+      allow: [...i.allow],
+      ignored: [...ignored],
+      shell: !!i.shell,
+      dirtyBefore: i.dirtyBefore ?? [],
+    }).catch((e) => {
+      log(`Could not save ${basename(cutFile(wt))}: ${noUrl((e as Error).message)}`);
+      dropCut();
+    });
   // A Stop during the awaits above finds no run to cancel.
   const cur = taskRow(db, i.task);
   if (i.live ? !i.live() : cur?.state !== "implementing" || cur.blocked_json !== null) {
     stopGit(snap);
+    dropCut();
     const id =
       i.step ??
       insertStep(db, { task: i.task, part: i.part.id, kind: i.mode, attempt: i.attempt, item: i.item, state: "cancelled" }, now());
@@ -1079,6 +1308,9 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     return { status: 409, stopped: true };
   }
   const started = i.review.taskRun(db, start, i.extra);
-  if (started.status !== 202) stopGit(snap);
+  if (started.status !== 202) {
+    stopGit(snap);
+    dropCut();
+  }
   return started;
 }

@@ -461,7 +461,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       recovered.add(db);
       db.transaction(() => {
         // recoverTasks finds the tasks by their running runs, so it runs first.
-        recoverTasks(db, now());
+        recoverTasks(db, now(), dataDir);
         db.query(SQL.recover).run({ text: "The app stopped during the run.", now: now() });
       })();
     }

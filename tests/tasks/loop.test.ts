@@ -20,7 +20,8 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
-import { PATCH_LOST, type StepOutcome, startStep } from "../../src/server/tasks/implement";
+import { snapGit, stopGit } from "../../src/server/tasks/gitstate";
+import { cutFile, PATCH_LOST, type StepOutcome, saveCut, startStep } from "../../src/server/tasks/implement";
 import {
   changedLines,
   createLoop,
@@ -34,7 +35,7 @@ import {
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
 import { recoverTasks, taskDto, taskRow } from "../../src/server/tasks/tasks";
-import { openWorktree, readSetupMark, status } from "../../src/server/tasks/worktree";
+import { ignoredSnapshot, openWorktree, readSetupMark, status } from "../../src/server/tasks/worktree";
 import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
 import { DEFAULT_TEST_GLOBS, type RunLimits, STEP_TIME_MS, specResult, type TaskBlocked } from "../../src/shared/task";
 import { rowStatus } from "../../src/shared/task-status";
@@ -1359,6 +1360,42 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
+    "AC-B266: a step that an app restart cut keeps its work when its snapshot file passes; checked stays, and Continue goes on in the worktree",
+    async () => {
+      const { s } = await stopInScopedCheck();
+      const impl = s.steps().find((x) => x.kind === "implement") as Step;
+      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: impl.id });
+      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: impl.run });
+      // The snapshot file of the step start: the git state, and the inputs of the path check.
+      const w = await s.wt();
+      const snap = await snapGit([w]);
+      const key = `task:${s.task}:part:${s.part().id}:implement:${impl.item}:${impl.attempt}`;
+      await saveCut(w, snap, { key, allow: [], ignored: [...(await ignoredSnapshot(w))], shell: false, dirtyBefore: [] });
+      stopGit(snap);
+      recoverTasks(s.db, Date.now(), s.dataDir);
+      s.db
+        .query(
+          "UPDATE review_run SET status = 'failed', error_kind = 'restart', error_text = 'The app stopped during the run.' WHERE id = $id",
+        )
+        .run({ id: impl.run });
+      const cut = s.steps().find((x) => x.id === impl.id) as Step;
+      expect([s.t().state, cut.state]).toEqual(["stopped", "failed"]);
+      expect(JSON.parse(cut.detail_json)).toMatchObject({ checked: true, patch: null, written: ["repo/src/feature.ts"] });
+      expect(existsSync(cutFile(w))).toBe(false);
+      s.mode("feature");
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      expect(existsSync(join(w.dir, "..", "patches", `${impl.id}.patch`))).toBe(false);
+      const second = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
+      expect(second.context["step.md"]).toContain(
+        "Attempt 2 continues attempt 1, which was stopped. Your earlier changes are in the worktree.",
+      );
+    },
+    SLOW,
+  );
+
+  test(
     'AC-B203: "start-step-again" resets to the last commit with the patch saved; the route takes only that option',
     async () => {
       const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
@@ -1881,7 +1918,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "AC-B203: a denied path of a step blocks with denied_path; Resume starts the step again from the last commit with the patch",
+    "AC-B261: a denied path of a step blocks with denied_path; only that file goes back; Resume keeps the other work in the worktree",
     async () => {
       const s = await setup({
         seq: { "implement:implement": [{ writes: [WORKS, { path: "repo/CLAUDE.md", text: "planted\n" }] }, { writes: [WORKS] }] },
@@ -1889,16 +1926,19 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       await s.build();
       expect(s.blocked()?.kind).toBe("denied_path");
       const denied = s.steps().find((x) => x.kind === "implement") as Step;
-      expect(JSON.parse(denied.detail_json)).toMatchObject({ checked: false, patch: `${denied.id}.patch` });
-      expect(await status(await s.wt())).toEqual([]);
+      expect(JSON.parse(denied.detail_json)).toMatchObject({ checked: true, patch: null });
+      const w = await s.wt();
+      expect((await status(w)).map((e) => e.path)).toEqual(["src/feature.ts"]);
+      expect(readFileSync(join(w.dir, "..", "patches", `${denied.id}.patch`), "utf8")).not.toContain("src/feature.ts");
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
       expect(s.part().state).toBe("self_reviewed");
       const again = s.runCalls().filter((c) => s.modeOf(c) === "implement")[1] as Call;
-      expect(again.context["step.md"]).toContain(
-        "Attempt 2 continues attempt 1, which failed. The app reset its changes to the last commit.",
-      );
+      expect(again.context["step.md"]).toContain("Attempt 2 continues attempt 1, which failed. Your earlier changes are in the worktree.");
       expect(again.context["continue.md"]).toContain("src/feature.ts");
+      // The patch of the step holds the undone file. The diff of the kept work does not, and the notes name the path for Claude.
+      expect(again.context["continue.md"]).not.toContain("diff --git a/CLAUDE.md");
+      expect(again.context["continue.md"]).toContain("CLAUDE.md: A step may not change this path.");
     },
     SLOW,
   );

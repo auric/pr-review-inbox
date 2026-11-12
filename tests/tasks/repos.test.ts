@@ -307,7 +307,7 @@ describe("nested worktrees (spec.md section 6.16.5, Worktrees; section 6.16.6, R
 });
 
 describe("the path check per repository (AC-B35)", () => {
-  test("an edit in a read-only nested submodule fails with its reason, and the undo resets every repository with a patch", async () => {
+  test("AC-B265: an edit in a read-only nested submodule fails with its reason; the undo resets only that repository, with its patch", async () => {
     const s = await setup();
     const p = await part(s);
     writeFileSync(p.at("src/app.ts"), "export const app = 2;\n");
@@ -316,21 +316,28 @@ describe("the path check per repository (AC-B35)", () => {
     const tc = await treeCheck(p.trees, { allow: [] });
     expect(tc.locked).toEqual({ path: "lib/deep/deep.txt", reason: REPO_REASON.nested });
     const patch = join(s.root, "patches", "7.patch");
-    expect(await undoTrees(p.trees, tc, await headOf(p.main), patch)).not.toBeNull();
-    expect(readFileSync(p.at("src/app.ts"), "utf8")).toBe("export const app = 1;\n");
-    expect(readFileSync(p.at("lib/lib.c"), "utf8")).toBe("int lib;\n");
+    const deep = patch.replace(/\.patch$/, `-${p.tree("lib/deep").row.id}.patch`);
+    const u = await undoTrees(p.trees, tc, await headOf(p.main), patch, { allow: [] });
+    expect(u).toEqual({ saved: deep, full: false, reset: null, left: [] });
+    expect(readFileSync(p.at("src/app.ts"), "utf8")).toBe("export const app = 2;\n");
+    expect(readFileSync(p.at("lib/lib.c"), "utf8")).toBe("int lib = 2;\n");
     expect(readFileSync(p.at("lib/deep/deep.txt"), "utf8")).toBe("deep\n");
-    expect(readFileSync(patch, "utf8")).toContain("src/app.ts");
+    expect(readFileSync(deep, "utf8")).toContain("deep.txt");
+    expect(existsSync(patch)).toBe(false);
+    expect((await treeCheck(p.trees, { allow: [] })).check.problems).toEqual([]);
   });
 
-  test("a file in the empty folder of another server fails with its reason", async () => {
+  test("AC-B265: a file in the empty folder of another server fails with its reason; the undo empties only that folder", async () => {
     const s = await setup();
     const p = await part(s);
     writeFileSync(p.at("vendor/new.txt"), "x");
+    writeFileSync(p.at("src/app.ts"), "export const app = 2;\n");
     const tc = await treeCheck(p.trees, { allow: [] });
     expect(tc.locked).toEqual({ path: "vendor/new.txt", reason: REPO_REASON.otherServer });
-    await undoTrees(p.trees, tc, await headOf(p.main), join(s.root, "patches", "8.patch"));
+    const u = await undoTrees(p.trees, tc, await headOf(p.main), join(s.root, "patches", "8.patch"), { allow: [] });
+    expect(u.full).toBe(false);
     expect(readdirSync(p.at("vendor"))).toEqual([]);
+    expect(readFileSync(p.at("src/app.ts"), "utf8")).toBe("export const app = 2;\n");
   });
 
   test("edits in main and the editable submodule pass; the gitlink path of lib is allowed in the parent", async () => {

@@ -185,8 +185,22 @@ export function wtGit(wt: Worktree, args: string[], o: { stdin?: string; extra?:
   });
 }
 
+// git that blocks, for the restart recovery inside a database transaction (tasks.ts recoverTasks). It only reads.
+const SYNC_MS = 60_000;
+export function gitSync(args: string[], env: Record<string, string>, cwd?: string): string {
+  const p = Bun.spawnSync(["git", ...args], { env, cwd, stdout: "pipe", stderr: "pipe", timeout: SYNC_MS, killSignal: "SIGKILL" });
+  if (p.exitCode !== 0) {
+    const cmd = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
+    throw new GitError(`git ${cmd} failed (exit ${p.exitCode}): ${p.stderr.toString().trim().slice(-2_000)}`);
+  }
+  return p.stdout.toString();
+}
+
+export const wtGitSync = (wt: Worktree, args: string[]) =>
+  gitSync([`--git-dir=${wt.admin}`, `--work-tree=${wt.repo}`, "--literal-pathspecs", ...args], wt.env, wt.repo);
+
 // The git folder of the worktree at repo: the entry of <cache>/worktrees whose gitdir file names repo/.git. The app wrote both files.
-function adminOf(cache: string, repo: string): string | null {
+export function adminOf(cache: string, repo: string): string | null {
   const root = join(cache, "worktrees");
   if (!existsSync(root)) return null;
   const want = norm(join(longPath(repo), ".git"));
@@ -299,9 +313,14 @@ export const headOf = async (wt: Worktree) => (await wtGit(wt, ["rev-parse", "--
 // link to a folder.
 export type StatusEntry = { xy: string; path: string };
 
-export async function status(wt: Worktree): Promise<StatusEntry[]> {
-  // spec.md section 6.16.6: --ignore-submodules=none lists a gitlink path when its worktree has changes or a new HEAD.
-  const parts = (await wtGit(wt, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"])).split("\0");
+// spec.md section 6.16.6: --ignore-submodules=none lists a gitlink path when its worktree has changes or a new HEAD.
+const STATUS = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"];
+
+export const status = async (wt: Worktree) => statusOf(await wtGit(wt, STATUS));
+export const statusSync = (wt: Worktree) => statusOf(wtGitSync(wt, STATUS));
+
+function statusOf(text: string): StatusEntry[] {
+  const parts = text.split("\0");
   const out: StatusEntry[] = [];
   for (let k = 0; k < parts.length; k++) {
     const p = parts[k] as string;
@@ -321,8 +340,13 @@ export const MAX_IGNORED = 200_000;
 export type IgnoredSnapshot = Map<string, string>;
 
 // git-ls-files(1): --others --ignored --exclude-standard lists each ignored file, also inside an ignored folder.
-export async function ignoredSnapshot(wt: Worktree): Promise<IgnoredSnapshot> {
-  const list = (await wtGit(wt, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"])).split("\0").filter(Boolean);
+const IGNORED = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"];
+
+export const ignoredSnapshot = async (wt: Worktree) => ignoredOf(wt, await wtGit(wt, IGNORED));
+export const ignoredSnapshotSync = (wt: Worktree) => ignoredOf(wt, wtGitSync(wt, IGNORED));
+
+function ignoredOf(wt: Worktree, text: string): IgnoredSnapshot {
+  const list = text.split("\0").filter(Boolean);
   if (list.length > MAX_IGNORED)
     throw new WorkspaceError(`The worktree has more than ${MAX_IGNORED} files that git ignores, so the app cannot check them.`);
   const out: IgnoredSnapshot = new Map();
@@ -426,6 +450,29 @@ export async function resetWorktree(wt: Worktree, last: string, links: string[] 
   const mark = readSetupMark(wt);
   const lost = mark?.files ? mark.files.some((f) => !lstatSync(join(wt.repo, f), { throwIfNoEntry: false })) : removed;
   if (lost) rmSync(setupMark(wt), { force: true });
+  await wtGit(wt, ["sparse-checkout", "reapply"]);
+}
+
+// Deletes path under root. A link on the way goes instead, so the delete never follows it out of root.
+export async function removeUnder(root: string, path: string) {
+  const link = linksOn(root, path)[0];
+  const p = join(root, ...(link ?? path.replace(/\/+$/, "")).split("/"));
+  if (inside(root, p) && p !== root) await rm(p, link ? { force: true } : RM_TREE);
+}
+
+// docs/plans/review-v2/part-session.md section 2.5: these paths of repo/ go back to HEAD, and no other path changes. The git link is
+// written again. A path that the index holds gets `git checkout HEAD`. A new file, a new folder, a nested repository, and a link go.
+// `sparse-checkout reapply` then hides a restored hidden file again, as in resetWorktree.
+export async function restorePaths(wt: Worktree, paths: readonly string[]) {
+  const tracked = new Set((await status(wt)).filter((e) => e.xy !== "??").map((e) => e.path));
+  const back: string[] = [];
+  for (const p of paths) {
+    if (p === ".git") await restoreGitLink(wt);
+    else if (tracked.has(p) && !linksOn(wt.repo, p).length) back.push(p);
+    else await removeUnder(wt.repo, p);
+  }
+  if (!back.length) return;
+  await wtGit(wt, ["checkout", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: `${back.join("\0")}\0` });
   await wtGit(wt, ["sparse-checkout", "reapply"]);
 }
 

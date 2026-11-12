@@ -31,24 +31,39 @@ import { createReviewJobs, IMPLEMENT_MCP_LINES, type ImplementRunStart } from ".
 import { LOOP_TEXT } from "../../src/server/review/stream";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
-import { movedText } from "../../src/server/tasks/gitstate";
+import { diskDiff, movedText, snapGit, stopGit } from "../../src/server/tasks/gitstate";
 import {
   ciPath,
   commitTask,
+  cutFile,
   endStep,
+  GIT_KEPT_TEXT,
   implementPrompt,
   insertStep,
   instructionRepos,
   partBudget,
+  pathCheck,
   type StepInput,
   type StepOutcome,
+  saveCut,
   sparseHidden,
   startStep,
   stepTimeout,
+  undoStep,
 } from "../../src/server/tasks/implement";
 import { pushTaskBranch } from "../../src/server/tasks/push";
-import { taskRow } from "../../src/server/tasks/tasks";
-import { headOf, openWorktree, resetWorktree, status, type Worktree, wtGit } from "../../src/server/tasks/worktree";
+import { recoverTasks, taskRow } from "../../src/server/tasks/tasks";
+import {
+  headOf,
+  ignoredSnapshot,
+  openWorktree,
+  readSetupMark,
+  resetWorktree,
+  status,
+  type Worktree,
+  writeSetupMark,
+  wtGit,
+} from "../../src/server/tasks/worktree";
 import { implementJsonSchema, type TaskBlocked } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { fakeRunner, stubListTools } from "../support/review-fixture";
@@ -188,15 +203,18 @@ function files(dir: string): string[] {
   });
 }
 
-async function expectUndone(s: Awaited<ReturnType<typeof setup>>, wt: Worktree, o: StepOutcome | null, path: string) {
+// kept: the paths that the undo of only the problem paths leaves in git status.
+async function expectUndone(s: Awaited<ReturnType<typeof setup>>, wt: Worktree, o: StepOutcome | null, path: string, kept: string[] = []) {
   expect(o?.problems.map((p) => p.path)).toContain(path);
   expect(o?.changed).toEqual([]);
-  expect(await status(wt)).toEqual([]);
+  expect((await status(wt)).map((e) => e.path)).toEqual(kept);
   expect(await headOf(wt)).toBe(s.base);
   const row = s.stepRow(o?.step as number);
   expect(row.state).toBe("failed");
-  const detail = JSON.parse(row.detail_json) as { deniedPaths: string[]; patch: string | null };
+  const detail = JSON.parse(row.detail_json) as { deniedPaths: string[]; patch: string | null; checked: boolean; notes: string[] };
   expect(detail.deniedPaths).toContain(path);
+  // part-session.md section 2.5: the second check passed, so the step is no reset, and Continue keeps the other work.
+  expect([detail.checked, detail.patch]).toEqual([true, null]);
   const b = s.blockedOf();
   expect(b?.kind).toBe("denied_path");
   expect(b?.step).toBe(o?.step as number);
@@ -436,7 +454,7 @@ describe("implement run", () => {
   );
 
   test(
-    "AC-B9: a step that writes .claude/settings.json fails, the worktree returns to the last commit, and the patch exists",
+    "AC-B9, AC-B261: a step that writes .claude/settings.json fails; only that hidden file goes back, the other edit stays, and the patch holds only the hidden file",
     async () => {
       const s = await setup();
       s.scenario({
@@ -446,20 +464,88 @@ describe("implement run", () => {
         ],
       });
       const { outcome } = await s.step();
-      const detail = await expectUndone(s, s.wt, outcome, ".claude/settings.json");
+      const detail = await expectUndone(s, s.wt, outcome, ".claude/settings.json", ["src/app.ts"]);
+      // The sparse patterns hide the restored file again.
       expect(existsSync(join(s.wt.repo, ".claude"))).toBe(false);
-      expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("src/app.ts\n");
-      expect(detail.patch).toBe(`${outcome?.step}.patch`);
+      expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("changed\n");
+      expect(s.blockedOf()?.text).toBe(
+        "Needs you: Claude changed .claude/settings.json, which a task may not change. The app undid that file and kept the other work.",
+      );
+      expect(detail.notes).toContain("The app undid only these paths and kept the other work.");
+      expect(detail.notes).toContain(`${outcome?.step}.patch holds the undone paths.`);
       const patch = readFileSync(join(s.wt.dir, "..", "patches", `${outcome?.step}.patch`), "utf8");
       expect(patch).toContain("diff --git a/.claude/settings.json b/.claude/settings.json");
-      expect(patch).toContain("diff --git a/src/app.ts b/src/app.ts");
+      expect(patch).not.toContain("src/app.ts");
       expect(outcome?.patch).toBe(join(s.wt.dir, "..", "patches", `${outcome?.step}.patch`));
     },
     SLOW,
   );
 
   test(
-    "CLAUDE.md, a file outside repo/, a link, a nested repository, a changed .git link, and CI configuration fail and are undone; the .git link counts as git state (fix F)",
+    "AC-B261: a denied tracked file goes back to HEAD alone, and a new denied file goes alone; the other edits stay",
+    async () => {
+      const s = await setup();
+      s.scenario({
+        writes: [
+          { path: "repo/.github/workflows/ci.yml", text: "on: planted\n" },
+          { path: "repo/docs/AGENTS.md", text: "planted\n" },
+          { path: "repo/src/app.ts", text: "changed\n" },
+          { path: "repo/src/new.ts", text: "new\n" },
+        ],
+      });
+      const { outcome } = await s.step();
+      expect(outcome?.problems.map((p) => p.path).sort()).toEqual([".github/workflows/ci.yml", "docs/AGENTS.md"]);
+      await expectUndone(s, s.wt, outcome, "docs/AGENTS.md", ["src/app.ts", "src/new.ts"]);
+      expect(readFileSync(join(s.wt.repo, ".github", "workflows", "ci.yml"), "utf8")).toBe(".github/workflows/ci.yml\n");
+      expect(existsSync(join(s.wt.repo, "docs", "AGENTS.md"))).toBe(false);
+      expect(readFileSync(join(s.wt.repo, "src", "new.ts"), "utf8")).toBe("new\n");
+      expect(s.blockedOf()?.text).toBe(
+        "Needs you: Claude changed .github/workflows/ci.yml, docs/AGENTS.md, which a task may not change. The app undid those files and kept the other work.",
+      );
+      const patch = readFileSync(outcome?.patch as string, "utf8");
+      expect(patch).toContain("diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml");
+      expect(patch).toContain("diff --git a/docs/AGENTS.md b/docs/AGENTS.md");
+      expect(patch).not.toContain("src/");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B263: a problem that stays after the undo of the problem paths takes the full reset, with a second patch of the rest of the work",
+    async () => {
+      const s = await setup();
+      writeFileSync(join(s.wt.repo, "src", "app.ts"), "changed\n");
+      writeFileSync(join(s.wt.repo, "AGENTS.md"), "planted\n");
+      const o = { allow: [], ignored: await ignoredSnapshot(s.wt) };
+      const check = await pathCheck(s.wt, o);
+      expect(check.problems.map((p) => p.path)).toEqual(["AGENTS.md"]);
+      // A denied file that the first check did not list: the second check finds it after the undo.
+      mkdirSync(join(s.wt.repo, "docs"));
+      writeFileSync(join(s.wt.repo, "docs", "CLAUDE.md"), "planted\n");
+      const file = join(s.root, "patches", "5.patch");
+      const u = await undoStep(s.wt, s.base, check, file, o);
+      expect(u).toEqual({
+        saved: file,
+        full: true,
+        reset: join(s.root, "patches", "5.1.patch"),
+        left: [{ path: "docs/CLAUDE.md", reason: "A step may not change this path." }],
+      });
+      expect(await status(s.wt)).toEqual([]);
+      expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("src/app.ts\n");
+      expect(existsSync(join(s.wt.repo, "docs"))).toBe(false);
+      // The first patch holds the problem path only, the second one the rest.
+      expect(readFileSync(file, "utf8")).toContain("diff --git a/AGENTS.md b/AGENTS.md");
+      expect(readFileSync(file, "utf8")).not.toContain("src/app.ts");
+      const rest = readFileSync(u.reset as string, "utf8");
+      expect(rest).toContain("diff --git a/src/app.ts b/src/app.ts");
+      expect(rest).toContain("diff --git a/docs/CLAUDE.md b/docs/CLAUDE.md");
+      expect(rest).not.toContain("a/AGENTS.md");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B261: CLAUDE.md, a file outside repo/, a link, a nested repository, a changed .git link, and CI configuration fail, and only they are undone; the .git link counts as git state (fix F)",
     async () => {
       const s = await setup();
       const victim = join(s.root, "victim");
@@ -484,21 +570,30 @@ describe("implement run", () => {
       ];
       const before = await git(["-C", s.clone, "status", "--porcelain=v1", "--ignored"], { env: s.r.env });
       const cloneHead = await git(["-C", s.clone, "rev-parse", "HEAD"], { env: s.r.env });
+      // The edit of an allowed file in each step stays.
+      const kept = { path: "repo/src/app.ts", text: "kept\n" };
       for (const c of cases) {
         s.db.query("UPDATE task SET blocked_json = NULL").run();
-        s.scenario({ writes: c.writes });
+        s.scenario({ writes: [...c.writes, kept] });
         const { outcome } = await s.step();
-        await expectUndone(s, s.wt, outcome, c.path);
+        await expectUndone(s, s.wt, outcome, c.path, ["src/app.ts"]);
+        expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("kept\n");
       }
-      // git-deny.md fix F: the git link is git state. The app writes it back before any git call, and the reason says so.
+      // git-deny.md fix F: the git link is git state. The app writes it back before any git call, and the reason says so. The files that
+      // pass the path check stay (part-session.md section 3 item 3).
       s.db.query("UPDATE task SET blocked_json = NULL").run();
       s.scenario({ writes: [{ path: "repo/.git", text: `gitdir: ${s.clone.replaceAll("\\", "/")}/.git\n` }] });
       const link = (await s.step()).outcome;
       expect(link?.moved).toEqual(["repo/.git"]);
       expect(link?.changed).toEqual([]);
-      expect(await status(s.wt)).toEqual([]);
+      expect((await status(s.wt)).map((e) => e.path)).toEqual(["src/app.ts"]);
       expect(await headOf(s.wt)).toBe(s.base);
-      expect(s.blockedOf()).toMatchObject({ kind: "denied_path", step: link?.step, text: movedText(["repo/.git"]) });
+      expect(s.blockedOf()).toMatchObject({ kind: "denied_path", step: link?.step, text: GIT_KEPT_TEXT });
+      expect(JSON.parse(s.stepRow(link?.step as number).detail_json)).toMatchObject({
+        checked: true,
+        patch: null,
+        notes: [movedText(["repo/.git"])],
+      });
       expect(readFileSync(join(victim, "keep.txt"), "utf8")).toBe("keep\n");
       expect(existsSync(join(s.wt.repo, "src", "link"))).toBe(false);
       expect(existsSync(join(s.wt.repo, "vendor"))).toBe(false);
@@ -508,6 +603,7 @@ describe("implement run", () => {
       expect(await git(["-C", s.clone, "status", "--porcelain=v1", "--ignored"], { env: s.r.env })).toBe(before);
       expect(await git(["-C", s.clone, "rev-parse", "HEAD"], { env: s.r.env })).toBe(cloneHead);
       // A CI configuration path that the task lists passes.
+      await resetWorktree(s.wt, s.base);
       s.db.query("UPDATE task SET blocked_json = NULL").run();
       s.scenario({ writes: [{ path: "repo/.github/workflows/ci.yml", text: "on: push\n" }] });
       const { outcome } = await s.step({ allow: [".github/workflows/ci.yml"] });
@@ -518,7 +614,7 @@ describe("implement run", () => {
   );
 
   test(
-    "an ignored file that the step writes or changes fails the step, and the worktree goes; ignored files from before the step pass",
+    "AC-B262: an ignored file that the step writes or changes fails the step; only those files and the setup mark go; ignored files from before the step pass",
     async () => {
       const s = await setup();
       // A check command wrote this before the step, as a build does. The listing before the step holds it.
@@ -529,6 +625,8 @@ describe("implement run", () => {
       expect(ok.outcome?.problems).toEqual([]);
       expect(ok.outcome?.changed).toEqual(["src/app.ts"]);
       await resetWorktree(s.wt, s.base);
+      writeSetupMark(s.wt, { hash: "a".repeat(64), files: [] });
+      writeFileSync(join(s.wt.repo, "ignored", "keep.log"), "older output\n");
       // git status shows none of these paths: .gitignore of the fixture ignores ignored/ and *.log.
       s.scenario({
         writes: [
@@ -543,31 +641,17 @@ describe("implement run", () => {
         { path: "ignored/build.log", reason },
         { path: "ignored/evil.js", reason },
       ]);
-      expect(outcome?.changed).toEqual([]);
-      const row = s.stepRow(outcome?.step as number);
-      expect(row.state).toBe("failed");
-      expect(JSON.parse(row.detail_json).deniedPaths).toEqual(["ignored/build.log", "ignored/evil.js"]);
-      const b = s.blockedOf();
-      expect(b?.kind).toBe("denied_path");
-      expect(b?.text).toContain("ignored/build.log");
-      // The patch keeps the tracked change. A changed ignored file has no copy to restore, so the worktree is gone.
-      expect(readFileSync(join(s.wt.dir, "..", "patches", `${outcome?.step}.patch`), "utf8")).toContain(
-        "diff --git a/src/app.ts b/src/app.ts",
-      );
-      expect(existsSync(s.wt.dir)).toBe(false);
-      const again = await openWorktree({
-        dataDir: s.dataDir,
-        db: s.db,
-        project: "PROJ",
-        repo: "repo",
-        task: s.task,
-        ord: 1,
-        branch: "feature/K-1-thing",
-        base: s.base,
-      });
-      expect(existsSync(join(again.repo, "ignored"))).toBe(false);
-      expect(await status(again)).toEqual([]);
-      expect(await headOf(again)).toBe(s.base);
+      await expectUndone(s, s.wt, outcome, "ignored/build.log", ["src/app.ts"]);
+      expect(JSON.parse(s.stepRow(outcome?.step as number).detail_json).deniedPaths).toEqual(["ignored/build.log", "ignored/evil.js"]);
+      // A changed ignored file has no copy to restore, so both files go, and setup runs before the next step. The tracked edit and the
+      // ignored file that the step did not touch stay. git status lists no problem path, so no patch is saved.
+      expect(existsSync(join(s.wt.repo, "ignored", "evil.js"))).toBe(false);
+      expect(existsSync(join(s.wt.repo, "ignored", "build.log"))).toBe(false);
+      expect(readFileSync(join(s.wt.repo, "ignored", "keep.log"), "utf8")).toBe("older output\n");
+      expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("changed\n");
+      expect(readSetupMark(s.wt)).toBeNull();
+      expect(outcome?.patch).toBeNull();
+      expect(existsSync(join(s.wt.dir, "..", "patches", `${outcome?.step}.patch`))).toBe(false);
     },
     SLOW,
   );
@@ -589,10 +673,10 @@ describe("implement run", () => {
       expect(t?.state).toBe("stopped");
       expect(t?.stopped_from).toBe("implementing");
       expect(s.blockedOf()?.kind).toBe("error");
-      // AC-B201: the half step stays. Its path check passed, so Continue keeps it. The denied step is not checked.
+      // AC-B201: the half step stays. Its path check passed, so Continue keeps it. The denied step is checked too: its second check passed.
       expect(existsSync(join(s.wt.repo, "src", "half.ts"))).toBe(true);
       const checked = (id: number | undefined) => JSON.parse(s.stepRow(id as number).detail_json).checked;
-      expect([checked(second.outcome?.step), checked(outcome?.step)]).toEqual([true, false]);
+      expect([checked(second.outcome?.step), checked(outcome?.step)]).toEqual([true, true]);
     },
     SLOW,
   );
@@ -1096,7 +1180,9 @@ describe("a step with the Bash tool", () => {
       s.scenario({ writes: [{ path: "repo/ignored/written.txt", text: "by Write\n" }] });
       const written = await s.step({ shell: SHELL });
       expect(written.outcome?.problems).toEqual([{ path: "ignored/written.txt", reason: "A step may not write a file that git ignores." }]);
-      expect(existsSync(s.wt.dir)).toBe(false);
+      // Only the ignored Write target goes. The build output of the earlier step stays.
+      expect(existsSync(join(s.wt.repo, "ignored", "written.txt"))).toBe(false);
+      expect(readFileSync(join(s.wt.repo, "ignored", "out.o"), "utf8")).toBe("obj\n");
       const wt2 = await openWorktree({
         dataDir: s.dataDir,
         db: s.db,
@@ -1113,6 +1199,10 @@ describe("a step with the Bash tool", () => {
       s.scenario({ bash: [{ command: "echo link", files: [{ path: "repo/ignored/link", link: join(s.root, "outside") }] }] });
       const linked = await s.step({ shell: SHELL, wt: wt2 });
       expect(linked.outcome?.problems).toEqual([{ path: "ignored/link", reason: "A step may not make links." }]);
+      // The undo removes the link itself, never the files behind it.
+      expect(lstatSync(join(wt2.repo, "ignored", "link"), { throwIfNoEntry: false })).toBeUndefined();
+      expect(readFileSync(join(s.root, "outside", "x.txt"), "utf8")).toBe("x\n");
+      expect(JSON.parse(s.stepRow(linked.outcome?.step as number).detail_json).checked).toBe(true);
 
       // Control: a step without Bash gets the old rule for the same output.
       const wt3 = await openWorktree({
@@ -1190,7 +1280,7 @@ describe("fix F: the git state around a step", () => {
   const ID = ["-c", "user.name=planted", "-c", "user.email=planted@example.invalid"];
 
   test(
-    "AC-B175: a commit, a moved branch, a deleted refs/rl ref, and cache and worktree config block the step with the new reason; the app restores each one and saves the patch",
+    "AC-B175, AC-B264: a commit, a moved branch, a deleted refs/rl ref, and cache and worktree config block the step with the new reason; the app restores each one and keeps the files",
     async () => {
       const s = await setup();
       const cache = s.wt.cache;
@@ -1229,24 +1319,24 @@ describe("fix F: the git state around a step", () => {
           "refs/rl/task/1/base (deleted)",
         ].sort(),
       );
-      // The state is back: refs, config bytes, HEAD, and a clean worktree.
+      // The state is back: refs, config bytes, and HEAD. part-session.md section 3 item 3: the file that passes the path check stays, so
+      // the change of the planted commit is an uncommitted edit now.
       expect(await cg(["for-each-ref", "--format=%(objectname) %(refname)"])).toBe(refs);
       expect(readFileSync(join(cache, "config")).equals(config)).toBe(true);
       expect(readFileSync(join(s.wt.admin, "config.worktree")).equals(wtConfig)).toBe(true);
       expect(await headOf(s.wt)).toBe(s.base);
-      expect(await status(s.wt)).toEqual([]);
+      expect(await status(s.wt)).toEqual([{ xy: " M", path: "src/app.ts" }]);
+      expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("planted change\n");
       expect(outcome?.changed).toEqual([]);
       expect(outcome?.result).toBeNull();
       const b = s.blockedOf();
-      expect(b).toMatchObject({ kind: "denied_path", step: outcome?.step, text: movedText(outcome?.moved ?? []) });
-      expect(b?.text).toStartWith("Needs you: Claude changed git state during the step: ");
-      expect(b?.text).toEndWith(" and 2 more. The app restored it.");
+      expect(b).toMatchObject({ kind: "denied_path", step: outcome?.step, text: GIT_KEPT_TEXT });
       const row = s.stepRow(outcome?.step as number);
       expect(row.state).toBe("failed");
-      const detail = JSON.parse(row.detail_json) as { notes: string[]; patch: string | null };
+      const detail = JSON.parse(row.detail_json) as { notes: string[]; patch: string | null; checked: boolean };
       expect(detail.notes).toContain(movedText(outcome?.moved ?? []));
-      expect(detail.patch).toBe(`${outcome?.step}.patch`);
-      expect(readFileSync(join(s.wt.dir, "..", "patches", `${outcome?.step}.patch`), "utf8")).toContain("+planted change");
+      expect(movedText(outcome?.moved ?? [])).toEndWith(" and 2 more. The app restored it.");
+      expect([detail.patch, detail.checked]).toEqual([null, true]);
       expect(taskRow(s.db, s.task)?.state).toBe("implementing");
 
       // A later step, its commit, and the push hold no planted commit.
@@ -1315,6 +1405,60 @@ describe("fix F: the git state around a step", () => {
   );
 });
 
+// docs/plans/review-v2/part-session.md sections 2.5 and 9.5: the snapshot file of a run that an app restart cut. recoverTasks keeps the
+// work only when the git state equals the snapshot and the path check of the run passes.
+describe("AC-B266 to AC-B268: a run that an app restart cut", () => {
+  const KEEP = "The app stopped during the run. The git state and the changed files passed the checks, so Continue keeps the work.";
+
+  // The state that startStep leaves before its run: an open step row, a running run, and the snapshot file. Then Claude writes files,
+  // the run log holds each Write call, and the app stops.
+  async function cut(s: Awaited<ReturnType<typeof setup>>, writes: { path: string; text: string }[]) {
+    const now = Date.now();
+    const run = (
+      s.db
+        .query(
+          `INSERT INTO review_run (task, kind, profile, note, idem_key, source_head, target_head, status, started_at)
+          VALUES ($task, 'implement', 'general', '', 'cut', '', '', 'running', $now) RETURNING id`,
+        )
+        .get({ task: s.task, now }) as { id: number }
+    ).id;
+    const step = insertStep(s.db, { task: s.task, part: s.part, kind: "implement", run, item: "T1.1", attempt: 1 });
+    const snap = await snapGit([s.wt]);
+    const key = `task:${s.task}:part:${s.part}:implement:T1.1:1`;
+    await saveCut(s.wt, snap, { key, allow: ["src/app.ts"], ignored: [...(await ignoredSnapshot(s.wt))], shell: false, dirtyBefore: [] });
+    stopGit(snap);
+    expect(existsSync(cutFile(s.wt))).toBe(true);
+    for (const [k, w] of writes.entries()) {
+      mkdirSync(join(s.wt.dir, w.path, ".."), { recursive: true });
+      writeFileSync(join(s.wt.dir, w.path), w.text);
+      s.db
+        .query(
+          "INSERT INTO run_event (run, id, seq, tool, target, status, started_at) VALUES ($run, $id, $k, 'Write', $target, 'ok', $now)",
+        )
+        .run({ run, id: `w${k}`, k, target: w.path, now });
+    }
+    return step;
+  }
+  const recover = (s: Awaited<ReturnType<typeof setup>>) => recoverTasks(s.db, Date.now(), s.dataDir);
+  const detailOf = (s: Awaited<ReturnType<typeof setup>>, id: number) =>
+    JSON.parse(s.stepRow(id).detail_json) as { checked: boolean; written: string[]; notes: string[] };
+
+  test(
+    "AC-B266: a clean snapshot keeps the work: checked is set, the Write targets are back, and the file goes; a git status in between changes nothing",
+    async () => {
+      const s = await setup();
+      const step = await cut(s, [
+        { path: "repo/src/app.ts", text: "changed\n" },
+        { path: "repo/src/new.ts", text: "new\n" },
+      ]);
+      // A git status rewrites the stat data of the index, not its entries.
+      await status(s.wt);
+      recover(s);
+      expect(s.stepRow(step).state).toBe("failed");
+      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
+      expect(detailOf(s, step)).toMatchObject({ checked: true, written: ["repo/src/app.ts", "repo/src/new.ts"], notes: [KEEP] });
+      expect(readFileSync(join(s.wt.repo, "src", "new.ts"), "utf8")).toBe("new\n");
+      expect(existsSync(cutFile(s.wt))).toBe(false);
 // docs/plans/review-v2/part-session.md section 2.2 (package PS2): the session fields of an implement run in the jobs. PS3 builds the
 // start in startStep, so these tests build it by hand.
 describe("part sessions in the jobs", () => {
@@ -1386,6 +1530,86 @@ describe("part sessions in the jobs", () => {
   );
 
   test(
+    "AC-B266: a real run writes the snapshot file with the key of its step row; the run start leaves the git state equal; the run end deletes the file",
+    async () => {
+      const s = await setup();
+      // 20 s of Claude time left in the part, so the hanging run ends at its time limit.
+      s.db.query("UPDATE task SET settings_json = $s").run({ s: JSON.stringify({ partTimeMin: 120 }) });
+      const now = Date.now();
+      s.db
+        .query("INSERT INTO task_step (task, part, kind, state, ord, started_at, ended_at) VALUES ($t, $p, 'implement', 'ok', 99, $a, $b)")
+        .run({ t: s.task, p: s.part, a: now - (120 * 60_000 - 20_000), b: now });
+      s.scenario({ hang: true });
+      const done = s.step();
+      const end = Date.now() + 15_000;
+      while (!s.calls().some((c) => (c as { childPid?: number }).childPid !== undefined) && Date.now() < end) await Bun.sleep(100);
+      expect(s.runCalls()).toHaveLength(1);
+      const bytes = readFileSync(cutFile(s.wt), "utf8");
+      const file = JSON.parse(bytes) as { key: string; git: Parameters<typeof diskDiff>[0] };
+      const row = s.db.query("SELECT kind, item, attempt FROM task_step WHERE state = 'running'").get() as Record<string, unknown>;
+      expect(file.key).toBe(`task:${s.task}:part:${s.part}:${row.kind}:${row.item}:${row.attempt}`);
+      // The recovery would see this if the app stopped now: the app's own work at the run start changed no ref and no file.
+      expect(diskDiff(file.git, [s.wt])).toEqual([]);
+      const outcome = (await done).outcome as StepOutcome;
+      expect(outcome.status).toBe("failed");
+      expect(existsSync(cutFile(s.wt))).toBe(false);
+      // The same file after a restart in the run keeps the work.
+      writeFileSync(cutFile(s.wt), bytes);
+      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: outcome.step });
+      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: outcome.run });
+      recover(s);
+      expect(detailOf(s, outcome.step)).toMatchObject({ checked: true, notes: [KEEP] });
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B267: a ref that changed after the snapshot blocks the keep; the app restores nothing, and the task stays stopped",
+    async () => {
+      const s = await setup();
+      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }]);
+      // A Bash command of the run, past the app's git.
+      const p = Bun.spawnSync(["git", `--git-dir=${s.wt.cache}`, "update-ref", "refs/heads/planted", s.base], { env: s.wt.env });
+      expect(p.exitCode).toBe(0);
+      recover(s);
+      const d = detailOf(s, step);
+      expect(d.checked).toBe(false);
+      expect(d.notes).toEqual([
+        "The app stopped during the run. The git state differs from the run start: refs/heads/planted (new). Continue resets the work and keeps a patch.",
+      ]);
+      expect(taskRow(s.db, s.task)?.state).toBe("stopped");
+      expect((await git([`--git-dir=${s.wt.cache}`, "rev-parse", "refs/heads/planted"], { env: s.wt.env })).trim()).toBe(s.base);
+      expect(existsSync(cutFile(s.wt))).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B268: with a clean git state, a file outside repo/, a changed ignored file, a denied path, or a staged entry blocks the keep",
+    async () => {
+      const blocked: [string, { path: string; text: string }[], string][] = [
+        ["outside", [{ path: "CLAUDE.md", text: "planted\n" }], "The path check failed for ../CLAUDE.md."],
+        ["ignored", [{ path: "repo/ignored/evil.js", text: "planted\n" }], "The path check failed for ignored/evil.js."],
+        ["denied", [{ path: "repo/docs/AGENTS.md", text: "planted\n" }], "The path check failed for docs/AGENTS.md."],
+      ];
+      for (const [name, writes, why] of blocked) {
+        const s = await setup();
+        const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }, ...writes]);
+        recover(s);
+        const d = detailOf(s, step);
+        expect([name, d.checked]).toEqual([name, false]);
+        expect(d.notes).toEqual([`The app stopped during the run. ${why} Continue resets the work and keeps a patch.`]);
+      }
+      // A staged entry would go into the next commit, which commits the whole index.
+      const s = await setup();
+      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }]);
+      await wtGit(s.wt, ["add", "src/app.ts"]);
+      recover(s);
+      expect(detailOf(s, step).checked).toBe(false);
+      expect(detailOf(s, step).notes[0]).toContain("the index of repo");
+    },
+    SLOW * 2,
+  );
     "AC-B278: with the gates on, the run forks the resume file with live input",
     async () => {
       const s = await setup({ sessionGates: { resume: true, live: true } });

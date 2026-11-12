@@ -4,10 +4,12 @@
 // docs/plans/review-v2/git-deny.md fix F (spec.md section 6.8): the git state of a part around one Claude step. A Bash command can run
 // git through `bash -c` (Gate B34), so the app saves the state before the step and puts it back after the step. The files go back before
 // any other git call of the app reads them.
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
+import { z } from "zod";
 import { CACHE_FILES, cacheState, exclusive, gitRaw, otherWatches, record, watchCache } from "../review/git";
-import { headOf, type Worktree } from "./worktree";
+import { gitSync, headOf, type Worktree, wtGit, wtGitSync } from "./worktree";
 
 // The files of the git folder of a worktree that git reads, besides the index.
 const ADMIN_FILES = ["HEAD", "commondir", "gitdir", "config.worktree", "info/sparse-checkout"];
@@ -47,6 +49,20 @@ export const stopGit = (s: Pick<GitSnap, "caches">) => {
   for (const c of s.caches) c.watch.stop();
 };
 
+// The files of the snapshot: the empty global config of the app, then the git link and the git folder files of each worktree.
+function gitFiles(wts: readonly Worktree[]): Omit<FileSnap, "bytes">[] {
+  const out: Omit<FileSnap, "bytes">[] = [];
+  const global = wts[0]?.env.GIT_CONFIG_GLOBAL;
+  if (global) out.push({ path: global, label: `git/${basename(global)}` });
+  for (const wt of wts) {
+    const link = join(wt.repo, ".git");
+    out.push({ path: link, label: rel(wt, link) });
+    for (const f of ADMIN_FILES) out.push({ path: join(wt.admin, f), label: `${basename(wt.cache)}/worktrees/${basename(wt.admin)}/${f}` });
+    out.push({ path: join(wt.admin, "index"), label: "index", quiet: true });
+  }
+  return out;
+}
+
 // The state before a step: the refs and CACHE_FILES of each cache, the git link and the git folder files of each worktree, the empty
 // global config of the app, and each HEAD commit. Each cache watch starts before its snapshot, so no app git call falls between them.
 export async function snapGit(wts: readonly Worktree[]): Promise<GitSnap> {
@@ -66,18 +82,7 @@ export async function snapGit(wts: readonly Worktree[]): Promise<GitSnap> {
         }),
       );
     }
-    const files: FileSnap[] = [];
-    const global = wts[0]?.env.GIT_CONFIG_GLOBAL;
-    if (global) files.push({ path: global, label: `git/${basename(global)}`, bytes: read(global) });
-    for (const wt of wts) {
-      const link = join(wt.repo, ".git");
-      files.push({ path: link, label: rel(wt, link), bytes: read(link) });
-      for (const f of ADMIN_FILES) {
-        const p = join(wt.admin, f);
-        files.push({ path: p, label: `${basename(wt.cache)}/worktrees/${basename(wt.admin)}/${f}`, bytes: read(p) });
-      }
-      files.push({ path: join(wt.admin, "index"), label: "index", bytes: read(join(wt.admin, "index")), quiet: true });
-    }
+    const files: FileSnap[] = gitFiles(wts).map((f) => ({ ...f, bytes: read(f.path) }));
     const heads: GitSnap["heads"] = [];
     for (const wt of wts) heads.push({ wt, head: await headOf(wt) });
     return { files, caches, heads };
@@ -167,3 +172,74 @@ export function movedReason(moved: readonly string[]) {
 
 // spec.md section 6.8: the reason of a task whose step changed the git state.
 export const movedText = (moved: readonly string[]) => `Needs you: ${movedReason(moved)}.`;
+
+// ---------- The snapshot on disk (docs/plans/review-v2/part-session.md sections 2.5 and 9.5) ----------
+
+// The git state at the start of a run, for the check after an app restart. The check only compares: the app git calls during the run
+// left no record, so a restore could undo them. It holds hashes, the refs, and the HEAD commits, in the order of gitFiles and of the
+// worktrees. It holds no bytes, no env, and no path. index: the index entries with their flags (`git ls-files -s -v`), without the
+// stat data that a git status rewrites.
+export const diskSnap = z.object({
+  files: z.array(z.string().nullable()),
+  caches: z.array(z.record(z.string(), z.string())),
+  heads: z.array(z.string()),
+  index: z.array(z.string()),
+});
+export type DiskSnap = z.infer<typeof diskSnap>;
+
+const INDEX = ["ls-files", "-z", "-s", "-v"];
+const sha = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
+const fileHash = (b: Buffer | null) => (b === null ? null : sha(b));
+// cacheState holds the bytes of CACHE_FILES in base64.
+const hashFiles = (state: ReadonlyMap<string, string>) =>
+  Object.fromEntries([...state].map(([k, v]) => [k, k.startsWith("file ") ? sha(v) : v]));
+const cachesOf = (wts: readonly Worktree[]) => wts.filter((wt, k) => wts.findIndex((x) => x.cache === wt.cache) === k);
+
+export async function diskSnapOf(s: GitSnap): Promise<DiskSnap> {
+  const index: string[] = [];
+  for (const h of s.heads) index.push(sha(await wtGit(h.wt, INDEX)));
+  return {
+    files: s.files.filter((f) => !f.quiet).map((f) => fileHash(f.bytes)),
+    caches: s.caches.map((c) => hashFiles(c.state)),
+    heads: s.heads.map((h) => h.head),
+    index,
+  };
+}
+
+// What differs from d now, as labels. It blocks, for the restart recovery. The files come first with no git call, so git reads no
+// planted config. Throws when git fails.
+export function diskDiff(d: DiskSnap, wts: readonly Worktree[]): string[] {
+  const files = gitFiles(wts).filter((f) => !f.quiet);
+  const caches = cachesOf(wts);
+  if (
+    files.length !== d.files.length ||
+    caches.length !== d.caches.length ||
+    d.heads.length !== wts.length ||
+    d.index.length !== wts.length
+  )
+    return ["the snapshot file"];
+  const out = files.flatMap((f, k) => (fileHash(read(f.path)) === d.files[k] ? [] : [f.label]));
+  for (const [k, wt] of caches.entries())
+    for (const f of CACHE_FILES) {
+      const b = read(join(wt.cache, f));
+      if ((b === null ? undefined : sha(b.toString("base64"))) !== d.caches[k]?.[`file ${f}`]) out.push(`${basename(wt.cache)}/${f}`);
+    }
+  if (out.length) return out;
+  for (const [k, wt] of caches.entries()) {
+    const want = new Map(Object.entries(d.caches[k] ?? {}).filter(([key]) => key.startsWith("ref ")));
+    const now = new Map<string, string>();
+    for (const l of gitSync([`--git-dir=${wt.cache}`, "for-each-ref", "--format=%(objectname) %(refname)"], wt.env).split("\n")) {
+      const at = l.indexOf(" ");
+      if (at > 0) now.set(`ref ${l.slice(at + 1)}`, l.slice(0, at));
+    }
+    for (const key of new Set([...want.keys(), ...now.keys()])) {
+      const ref = key.slice("ref ".length);
+      if (want.get(key) !== now.get(key)) out.push(!want.has(key) ? `${ref} (new)` : !now.has(key) ? `${ref} (deleted)` : ref);
+    }
+  }
+  for (const [k, wt] of wts.entries()) {
+    if (wtGitSync(wt, ["rev-parse", "--verify", "HEAD^{commit}"]).trim() !== d.heads[k]) out.push(`HEAD of ${rel(wt, wt.repo)}`);
+    if (sha(wtGitSync(wt, INDEX)) !== d.index[k]) out.push(`the index of ${rel(wt, wt.repo)}`);
+  }
+  return out;
+}
