@@ -4,7 +4,6 @@
 // The Explain page in the detail pane (docs/plans/review-v2/spec.md sections 3.1 and 3.5): one status sentence with one primary
 // button, then the walkthrough at reading width: the summary, the reading order, the walkthrough with its diagrams and diff links,
 // the risks on their code, the files with their roles, and the words used. Opening the page starts no run (AC-X7).
-import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Braces,
@@ -28,16 +27,16 @@ import { toast } from "@/components/ui/toast";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
-import type { MetaDto, PrRow, RunDto, RunKind } from "../../shared/dto";
+import type { MetaDto, PrRow, RunDto } from "../../shared/dto";
 import { plural } from "../../shared/outcome";
 import type { ExplainResult } from "../../shared/review";
-import { busyText } from "../ask/model";
 import type { FileRef } from "../lib/route";
 import { Markdown } from "../pr/Markdown";
 import { agoLong } from "../pr/threads";
 import { Inline } from "../review/Drafts";
 import { useBrief, useCancelRun } from "../review/data";
 import { notChecked } from "../review/model";
+import { useSlots } from "../review/useSlots";
 import { Hint } from "../shell/Hint";
 import { failText, prKey } from "../shell/model";
 import { useNow } from "../shell/Sidebar";
@@ -98,8 +97,9 @@ export function ExplainPage(props: {
 }) {
   const { pr, meta, announce, onDiff } = props;
   const runner = meta.runner.short;
-  const qc = useQueryClient();
   const q = useExplain(pr.id);
+  // The start button waits while busy is set.
+  const { note: busy, refused } = useSlots(pr.id, runner);
   const brief = useBrief(pr.id).data;
   const start = useStartExplain(pr.id);
   const cancel = useCancelRun();
@@ -126,19 +126,13 @@ export function ExplainPage(props: {
     if (first || lost) (primary.current ?? head.current)?.focus({ preventScroll: true });
   }, [kind]);
 
-  const where = (id: number | null) => {
-    if (id === null) return "a task";
-    if (id === pr.id) return "this pull request";
-    const other = qc.getQueryData<PrRow[]>(["prs"])?.find((p) => p.id === id);
-    return other ? prKey(other) : "another pull request";
-  };
   const begin = () => {
     if (start.isPending) return;
+    if (busy) return void toast.add({ title: "The walkthrough did not start", description: busy });
     start.mutate(picker ? pick : null, {
       onSuccess: (r) => {
         if ("conflict" in r) {
-          const k: RunKind = r.conflict.running.kind;
-          toast.add({ title: "The walkthrough did not start", description: busyText(runner, k, where(r.conflict.running.pr)) });
+          toast.add({ title: "The walkthrough did not start", description: refused(r.conflict) });
           return;
         }
         if (r.run.status === "running") announce(`${runner} is reading the change.`);
@@ -242,6 +236,7 @@ export function ExplainPage(props: {
                 boxRef={box}
                 primaryRef={primary}
                 starting={start.isPending}
+                busy={busy}
                 cancelling={cancel.isPending}
                 onStart={begin}
                 onCancel={(id) => cancel.mutate(id, { onError: (e) => toast.add({ title: "Cancel failed", description: failText(e) }) })}
@@ -305,6 +300,8 @@ function Status(props: {
   boxRef: RefObject<HTMLDivElement | null>;
   primaryRef: RefObject<HTMLButtonElement | null>;
   starting: boolean;
+  // The run-slot note (W1 or W2) of useSlots, or null.
+  busy: string | null;
   cancelling: boolean;
   picker: ReactNode;
   onStart: () => void;
@@ -337,7 +334,17 @@ function Status(props: {
       {(v.primary !== null || props.picker || run) && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           {v.primary !== null && (
-            <Button ref={props.primaryRef} id="explain-start" size="sm" data-primary disabled={props.starting} onClick={props.onStart}>
+            <Button
+              ref={props.primaryRef}
+              id="explain-start"
+              size="sm"
+              data-primary
+              disabled={props.starting || !!props.busy}
+              focusableWhenDisabled
+              className="aria-disabled:cursor-default aria-disabled:opacity-50"
+              aria-describedby={props.busy ? "explain-busy" : undefined}
+              onClick={props.onStart}
+            >
               {props.starting && <LoaderCircle aria-hidden data-icon="inline-start" className="animate-spin motion-reduce:animate-none" />}
               {v.primary}
             </Button>
@@ -361,6 +368,11 @@ function Status(props: {
             </button>
           )}
         </div>
+      )}
+      {v.primary !== null && props.busy && (
+        <p id="explain-busy" className="m-0 text-xs text-muted-foreground">
+          {props.busy}
+        </p>
       )}
     </div>
   );

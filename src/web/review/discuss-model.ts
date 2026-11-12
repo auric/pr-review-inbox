@@ -2,8 +2,17 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Pure rules of a talk about a finding (docs/plans/review-v2/spec.md section 2.1). No DOM access, so bun test runs them directly.
-import { DISCUSS_CHANGED, type DiscussTurnDto, type PostDto, type ReviewItemDto, type RunDto, type RunKind } from "../../shared/dto";
+import {
+  DISCUSS_CHANGED,
+  type DiscussTurnDto,
+  type PostDto,
+  type ReviewItemDto,
+  type RunConflict,
+  type RunDto,
+  type RunKind,
+} from "../../shared/dto";
 import { type DiscussVerdict, type FindingPayload, MAX_DISCUSS_MESSAGES } from "../../shared/review";
+import { fullText } from "../ask/model";
 import { type DiffLine, wordDiff } from "../lib/textdiff";
 import { KIND_LABEL, plural, RUN_TEXT, SEVERITY } from "./model";
 
@@ -42,16 +51,20 @@ export function startedText(startedAt: number, now: number): string {
 // The messages that the talk still takes. Every turn counts, also a failed one (jobs.ts discuss counts each run).
 export const talkLeft = (turns: readonly DiscussTurnDto[]) => Math.max(0, MAX_DISCUSS_MESSAGES - turns.length);
 
-// The line under the box. busy: the run that holds the only slot, as words.
+// The line under the box. busy: the run-slot note (W1 or W2) of useSlots.
 export function talkHint(turns: readonly DiscussTurnDto[], busy: string | null): string {
   if (busy) return busy;
   const left = talkLeft(turns);
   return `Ctrl+Enter asks. Esc closes the talk.${turns.length ? ` ${plural(left, "message")} left.` : ""}`;
 }
 
-// A refused start: another run holds the only slot. where: "this pull request" or the PR key.
+// A refused start: a run works on this PR. where: "this pull request" or the PR key.
 export const busyLine = (kind: RunKind, where: string) =>
   `Another run is working: ${KIND_LABEL[kind]} of ${where}. Ask again when it ends.`;
+
+// docs/plans/review-v2/parallel-runs.md section 3.5, W4: the line of a 409. A full pool names the limit.
+export const refusedLine = (runner: string, c: RunConflict, where: (pr: number | null) => string) =>
+  c.full ? `${fullText(runner, c.full)} Ask again when one ends.` : busyLine(c.running.kind, where(c.running.pr));
 
 export const askedText = (runner: string) => `Asked. ${runner} is reading the code.`;
 

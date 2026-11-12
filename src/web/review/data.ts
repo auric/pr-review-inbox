@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Review server state through TanStack Query. Keys: ['brief', pr], ['runs'], ['runs', 'pr', pr], ['run', id], ['raw', id],
-// ['pr', pr, 'reply-drafts']. live.ts invalidates ['runs'] and ['run', id] when SSE `changed` names the run, and ['pr', pr] and
-// ['runs', 'pr', pr] when it names the PR.
+// Review server state through TanStack Query. Keys: ['brief', pr], ['runs'], ['runs', 'pr', pr], ['runs', 'slots'], ['run', id],
+// ['raw', id], ['pr', pr, 'reply-drafts']. live.ts invalidates ['runs'] with its sub-keys and ['run', id] when SSE `changed` names
+// the run, and ['pr', pr] and ['runs', 'pr', pr] when it names the PR.
 import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef } from "react";
 import type {
@@ -16,6 +16,7 @@ import type {
   RunConflict,
   RunDetail,
   RunDto,
+  RunSlotsDto,
   SettingsDto,
 } from "../../shared/dto";
 import { api } from "../api";
@@ -87,6 +88,10 @@ export const usePrRuns = (pr: number) =>
 // GET /api/runs: the 50 newest runs of all PRs, newest first.
 export const useRuns = () => useQuery({ queryKey: ["runs"], queryFn: async () => read<RunDto[]>(await api.api.runs.$get()) });
 
+// GET /api/runs/slots (spec.md section 6.26): the run limit and the pool runs, oldest first.
+export const useRunSlots = () =>
+  useQuery({ queryKey: ["runs", "slots"], queryFn: async () => read<RunSlotsDto>(await api.api.runs.slots.$get()) });
+
 export const getRun = async (id: number) => read<RunDetail>(await api.api.runs[":id"].$get(param(id)));
 
 export const useRun = (id: number | null) => useQuery({ queryKey: ["run", id], enabled: id !== null, queryFn: () => getRun(id ?? 0) });
@@ -115,7 +120,7 @@ export const useReplyDrafts = (pr: number) =>
 
 export type StartResult = { run: RunDto } | { conflict: RunConflict };
 
-// 409 with `running` names the run that holds the only slot (A14). Any other 409 is an error.
+// 409 with `running` names the run of the PR, or the oldest run of a full pool (A14, spec.md section 6.26). Any other 409 is an error.
 export async function started(res: {
   status: number;
   ok: boolean;
@@ -137,7 +142,8 @@ export function useStart<A>(pr: number, post: (a: A) => Promise<StartResult>) {
   return useMutation({
     mutationFn: post,
     onSuccess: (r) => {
-      if (!("run" in r)) return;
+      // A refused start shows that the slots data is old.
+      if (!("run" in r)) return void qc.invalidateQueries({ queryKey: ["runs", "slots"] });
       qc.setQueryData<RunDto[]>(["runs", "pr", pr], (old) => [r.run, ...(old ?? []).filter((x) => x.id !== r.run.id)]);
       qc.invalidateQueries({ queryKey: ["runs"] });
     },

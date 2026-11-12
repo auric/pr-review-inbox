@@ -63,7 +63,7 @@ export const useSessionAnswer = (pr: number, run: number | null) =>
       read<SessionAnswerDto>(await api.api.prs[":id"].consult.session[":run"].$get({ param: { id: String(pr), run: String(run ?? 0) } })),
   });
 
-// POST /api/prs/:id/consult/session. 202 starts a run. 409 with `running` names the run that holds the slot.
+// POST /api/prs/:id/consult/session. 202 starts a run. 409 with `running` names the run of the PR or of a full run pool.
 export const useStartSession = (pr: number) =>
   useStart(pr, async (json: SessionStartInput) => started(await api.api.prs[":id"].consult.session.$post({ ...param(pr), json })));
 

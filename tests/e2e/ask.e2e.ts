@@ -147,7 +147,7 @@ test("q opens Ask in the slot, Ctrl+Enter asks, the answer is safe Markdown, and
   await expect(slot(page)).toHaveCount(0);
 });
 
-test("a 409 keeps the typed question, also after a reload, and a running answer can be cancelled", async ({ page }) => {
+test("a busy pull request keeps the typed question, also after a reload, and a running answer can be cancelled", async ({ page }) => {
   await control("claude", { stream: "tree", hang: true });
   await connect(page);
   await page.keyboard.press("Shift+R");
@@ -156,9 +156,11 @@ test("a 409 keeps the typed question, also after a reload, and a running answer 
   await expect(runLine(page)).toContainText("Finding problems…", { timeout: RUN_MS });
 
   await page.keyboard.press("q");
-  await expect(slot(page)).toContainText("Claude is reviewing this pull request. One review runs at a time.");
+  // AC-B196: Ask waits while a run works on this pull request, and Ctrl+Enter only says why.
+  await expect(slot(page)).toContainText("Claude is reviewing this pull request. One run per pull request.");
+  await expect(page.getByRole("button", { name: "Ask", exact: true })).toHaveAttribute("aria-disabled", "true");
   await box(page).fill(QUESTION);
-  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await box(page).press("Control+Enter");
   await expect(page.getByText("The question was not sent")).toBeVisible();
   await expect(box(page)).toHaveValue(QUESTION);
   await expect(answers(page)).toHaveCount(0);

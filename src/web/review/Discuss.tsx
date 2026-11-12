@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Discuss a finding (docs/plans/review-v2/spec.md section 2.1): the talk under a finding card or under the thread of a posted finding,
-// and the new text of a changed finding. Each message is one run in the only run slot. Nothing posts.
+// and the new text of a changed finding. Each message is one run in a slot of the run pool. Nothing posts.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
@@ -25,27 +25,29 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
-import {
-  DISCUSS_FULL,
-  type DiscussTurnDto,
-  type ItemConflict,
-  type MetaDto,
-  type PrRow,
-  type ReviewItemDto,
-  type RunKind,
-} from "../../shared/dto";
+import { DISCUSS_FULL, type DiscussTurnDto, type ItemConflict, type MetaDto, type ReviewItemDto } from "../../shared/dto";
 import { type DiscussVerdict, MAX_QUESTION } from "../../shared/review";
 import { api } from "../api";
-import { busyText } from "../ask/model";
 import { Text } from "../pr/Thread";
 import { ApiError, read } from "../shell/data";
-import { failText, prKey } from "../shell/model";
+import { failText } from "../shell/model";
 import { useNow } from "../shell/Sidebar";
 import { AiAvatar, Inline } from "./Drafts";
-import { started, useCancelRun, useRun, useRuns, useStart } from "./data";
-import { askedText, busyLine, outcomeLines, pendingTurn, revisionParts, startedText, talkHint, talkLeft, turnView } from "./discuss-model";
+import { started, useCancelRun, useRun, useStart } from "./data";
+import {
+  askedText,
+  outcomeLines,
+  pendingTurn,
+  refusedLine,
+  revisionParts,
+  startedText,
+  talkHint,
+  talkLeft,
+  turnView,
+} from "./discuss-model";
 import { Cites, DiffText, type ReplyCtx, Suggestions } from "./ReplyDraft";
 import { RunStatus } from "./RunLine";
+import { useSlots } from "./useSlots";
 
 const icon = "size-[15px] shrink-0";
 // A text button in a line of text. rl-hit gives it a 24 px target (WCAG 2.5.8).
@@ -157,9 +159,8 @@ export function Talk({ it, onClose, ctx }: { it: ReviewItemDto; onClose: () => v
   const list = turns.data ?? [];
   const start = useStartTalk(ctx.pr, it.id);
   const cancel = useCancelRun();
-  const runs = useRuns().data;
   const [text, setText] = useState(() => unsent.get(it.id) ?? "");
-  // A start that the server refused. run: the run that holds the only slot.
+  // A start that the server refused. run: the run of the PR, or the oldest run of a full pool.
   const [refused, setRefused] = useState<{ text: string; run: number | null } | null>(null);
   const id = `talk-${it.id}`;
   const box = `${id}-box`;
@@ -172,15 +173,8 @@ export function Talk({ it, onClose, ctx }: { it: ReviewItemDto; onClose: () => v
     if (full && (!a || a === document.body)) fullRef.current?.focus({ preventScroll: true });
   }, [full]);
 
-  const where = (pr: number | null) => {
-    if (pr === null) return "a task";
-    if (pr === ctx.pr) return "this pull request";
-    const other = qc.getQueryData<PrRow[]>(["prs"])?.find((p) => p.id === pr);
-    return other ? prKey(other) : "another pull request";
-  };
   // The turn of this talk shows its own state, so only another run gives the busy line.
-  const active = runs?.find((r) => r.status === "running") ?? null;
-  const busy = active && !list.some((t) => t.run === active.id) ? busyText(runner, active.kind, where(active.pr)) : null;
+  const { note: busy, where } = useSlots(ctx.pr, runner, (run) => list.some((t) => t.run === run));
 
   const change = (v: string) => {
     setText(v);
@@ -195,14 +189,17 @@ export function Talk({ it, onClose, ctx }: { it: ReviewItemDto; onClose: () => v
       return;
     }
     if (start.isPending) return;
+    if (busy) {
+      toast.add({ title: busy });
+      return;
+    }
     setRefused(null);
     start.mutate(
       { message: m, revision: it.revision },
       {
         onSuccess: (r) => {
           if ("conflict" in r) {
-            const kind: RunKind = r.conflict.running.kind;
-            setRefused({ text: busyLine(kind, where(r.conflict.running.pr)), run: r.conflict.running.run });
+            setRefused({ text: refusedLine(runner, r.conflict, where), run: r.conflict.running.run });
             return;
           }
           // Text typed while the request was out stays in the box.
@@ -310,7 +307,10 @@ export function Talk({ it, onClose, ctx }: { it: ReviewItemDto; onClose: () => v
               type="submit"
               size="sm"
               data-primary
-              disabled={start.isPending}
+              disabled={start.isPending || !!busy}
+              focusableWhenDisabled
+              className="aria-disabled:cursor-default aria-disabled:opacity-50"
+              aria-describedby={`${id}-help`}
               aria-keyshortcuts="Control+Enter"
               title="Key: Ctrl+Enter"
             >

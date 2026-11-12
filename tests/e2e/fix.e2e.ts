@@ -636,7 +636,7 @@ test("the Fix list: three rows, my own comment unticked; F opens it, the reasons
   await expect(list).not.toHaveAttribute("data-instant");
   expect((await motion(list)).name).toBe("enter");
   expect((await motion(page.locator("[data-slot='dialog-overlay']"))).name).toBe("enter");
-  await expect(list.locator("#fix-why")).toContainText("Propose fixes when it ends.");
+  await expect(list.locator("#fix-why")).toContainText("Propose fixes when a run ends.");
   await expect(list.getByRole("button", { name: /^Propose fixes for/ })).toHaveAttribute("aria-disabled", "true");
   await page.keyboard.press("Escape");
   await expect(list).toBeHidden();

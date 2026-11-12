@@ -18,6 +18,7 @@ import type {
   RunDto,
   RunKind,
   RunnerDefaults,
+  RunSlotsDto,
   RunSummary,
   RunUsage,
   Volume,
@@ -311,7 +312,7 @@ export function questionJump(items: ReviewItemDto[]): { n: number; first: number
 }
 
 // The words of each run kind (R14). running: the state of a running run in the run list.
-// doing: "<runner> is <doing> <PR>" while the run holds the only slot. now: "<profile>: <now> now." in the Review runs view.
+// doing: "<runner> is <doing> <PR>" while the run works on that PR. now: "<profile>: <now> now." in the Review runs view.
 export const RUN_TEXT: Record<RunKind, { running: string; failed: string; cancelled: string; doing: string; now: string }> = {
   review: { running: "Reviewing…", failed: "Review failed.", cancelled: "the review", doing: "reviewing", now: "reviewing" },
   reply: {
@@ -387,11 +388,17 @@ export const latestReview = (runs: RunDto[] | undefined) =>
   runs?.find((r) => r.kind === "review") ??
   null;
 
-// The run that holds the only slot, from GET /api/runs. The PR runs refetch apart from it, and the run line shows them.
-// SQL.end leaves the running status only once, so an end in the PR runs is newer than "running" in all runs.
-export function activeRun(all: RunDto[] | undefined, pr: RunDto[] | undefined): RunDto | null {
-  const r = all?.find((x) => x.status === "running");
-  return r && !pr?.some((x) => x.id === r.id && x.status !== "running") ? r : null;
+// docs/plans/review-v2/parallel-runs.md section 3.6: what keeps a start on PR pr out of the run pool. The server still decides.
+// pr: a run works on this PR (one run per PR). full: every slot is in use. The PR runs refetch apart from the slots, and SQL.end
+// leaves the running status only once, so a run that the PR runs show as ended holds no slot.
+export type SlotRun = RunSlotsDto["running"][number];
+export type SlotBusy = { kind: "pr"; run: SlotRun } | { kind: "full"; limit: number; running: SlotRun[] };
+export function slotBusy(slots: RunSlotsDto | undefined, prRuns: RunDto[] | undefined, pr: number): SlotBusy | null {
+  if (!slots) return null;
+  const running = slots.running.filter((s) => !prRuns?.some((r) => r.id === s.run && r.status !== "running"));
+  const mine = running.find((s) => s.pr === pr);
+  if (mine) return { kind: "pr", run: mine };
+  return running.length >= slots.limit ? { kind: "full", limit: slots.limit, running } : null;
 }
 
 // docs/plans/review-v2/spec.md section 3.2: the newest explain run with a result, as the Explain page shows it. Its questions join
@@ -518,19 +525,16 @@ export const profileOf = (profiles: ProfileDto[], id: string) =>
 export type BriefState = {
   profile: string;
   name: string;
-  // A running review on any PR. One review runs at a time (A14).
-  busy: { pr: number; same: boolean } | null;
   hint: string;
 };
 
 // Every review start opens the brief first. The review starts only from its Start button. The brief holds the profile pick.
-export function briefState(brief: BriefDto | undefined, active: RunDto | null, pr: number, profiles: ProfileDto[]): BriefState {
+export function briefState(brief: BriefDto | undefined, profiles: ProfileDto[]): BriefState {
   const p = profileOf(profiles, brief?.profile ?? "general");
   const note = brief?.note.trim() ? " with your note" : "";
   return {
     profile: p?.id ?? "general",
     name: p?.name ?? "",
-    busy: active ? { pr: active.pr, same: active.pr === pr } : null,
     hint: `Open the review brief${note}. Pick the profile and start the review there. Key: r.`,
   };
 }

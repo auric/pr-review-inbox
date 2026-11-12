@@ -211,6 +211,9 @@ Settings, Tasks has "Run limits". Each value applies to runs that start after th
 - "Interview rounds": Claude can ask questions in this number of rounds before it writes the plan. Default 2, from 1 to 5. Round 1 asks at most 8 questions, each later round at most 4.
 - "Test-fix tries": Claude tries to fix red tests this number of times. Then the task waits for you. Default 3, from 1 to 10.
 - "Plan turns": the plan run stops after this number of turns. Default 80, from 20 to 500.
+- "Runs at once": Claude runs at most this number of runs at the same time. Reviews, Explain, Ask, Fix, and task steps share it. Default 3, from 1 to 10. Builds of 2 or more sub-tasks at once run beside it. More runs use your Claude usage faster.
+
+Each pull request has one run at a time. While a run works on a pull request, these buttons of that pull request are off and say why: Start review, Ask, the Explain button, "Propose fixes for <n>" in the Fix list, Ask in the talk of a finding, and "Ask the session". An example: "Claude is reviewing this pull request. One run per pull request." When every slot is in use, the same buttons of the other pull requests are off too. Their note names the limit and up to 3 running runs, for example "Claude runs 3 runs at once, your limit. Running: Review of PROJ/repo #12, Ask of PROJ/repo #14, and Build step of ABC-7." The buttons come back when a run ends. Another start, such as Draft replies, that finds no free slot says so in a message. A task step that finds every slot in use waits with "Waiting for a free run slot" and starts when a run ends.
 
 ![Settings, Tasks: the branch prefixes and the run limits with their defaults and bounds](docs/screenshots/settings-tasks.webp)
 

@@ -173,7 +173,7 @@ export const NOTHING_TO_FIX = { title: "Nothing to fix.", text: "No open thread 
 
 // The text under the buttons of the Fix list. Only "ok" lets Propose start a run.
 // rows: the thread and finding rows. ticked: the ticked rows. fixRunInput caps threads and findings together.
-// synced: the server has both heads (jobs.ts fix). busy: busyText of the active run.
+// synced: the server has both heads (jobs.ts fix). busy: the run-slot note (W1 or W2) of useSlots.
 export type FixReason = { kind: "nothing" | "sync" | "explain" | "busy" | "none" | "many" | "ok"; text: string };
 export function fixReason(o: {
   rows: number;
@@ -189,7 +189,7 @@ export function fixReason(o: {
       kind: "explain",
       text: `The brief uses the ${o.profile.name} profile, which proposes no fixes. Press r and pick a review profile.`,
     };
-  if (o.busy) return { kind: "busy", text: `${o.busy} Propose fixes when it ends.` };
+  if (o.busy) return { kind: "busy", text: `${o.busy} Propose fixes when a run ends.` };
   if (!o.ticked) return { kind: "none", text: "Tick at least one thread or finding." };
   if (o.ticked > MAX_FIX_ITEMS)
     return { kind: "many", text: `Tick at most ${MAX_FIX_ITEMS} threads and findings for one run. Now ${o.ticked} are ticked.` };

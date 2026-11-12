@@ -13,20 +13,21 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
-import { type AskDto, type MetaDto, MOVED_ON, type PrRow, type RunKind } from "../../shared/dto";
+import { type AskDto, type MetaDto, MOVED_ON, type PrRow } from "../../shared/dto";
 import { MAX_QUESTION } from "../../shared/review";
 import { fullTime, Text, useSettled } from "../pr/Thread";
 import { agoLong } from "../pr/threads";
 import { AiAvatar } from "../review/Drafts";
-import { useBrief, useCancelRun, useRuns } from "../review/data";
+import { useBrief, useCancelRun } from "../review/data";
 import { clockDur, profileOf, shortHash, tokenText } from "../review/model";
 import { RunStatus } from "../review/RunLine";
 import { TaskChips } from "../review/TaskChips";
+import { useSlots } from "../review/useSlots";
 import { Hint } from "../shell/Hint";
-import { failText, prKey } from "../shell/model";
+import { failText } from "../shell/model";
 import { useNow } from "../shell/Sidebar";
 import { askKey, loadDraft, MovedOn, saveDraft, useAsks, useStartAsk } from "./data";
-import { askBox, askConversations, askView, type BoxMode, busyText } from "./model";
+import { askBox, askConversations, askView, type BoxMode } from "./model";
 
 const icon = "size-[15px] shrink-0";
 const linkish =
@@ -80,7 +81,6 @@ export function AskPanel(props: {
   const runner = meta.runner.short;
   const qc = useQueryClient();
   const asks = useAsks(pr.id);
-  const runs = useRuns().data;
   const brief = useBrief(pr.id).data;
   const start = useStartAsk(pr.id);
   const cancel = useCancelRun();
@@ -110,14 +110,8 @@ export function AskPanel(props: {
     forge: meta.forge.name,
   });
 
-  const where = (id: number | null) => {
-    if (id === null) return "a task";
-    if (id === pr.id) return "this pull request";
-    const other = qc.getQueryData<PrRow[]>(["prs"])?.find((p) => p.id === id);
-    return other ? prKey(other) : "another pull request";
-  };
-  const active = runs?.find((r) => r.status === "running") ?? null;
-  const busy = active ? busyText(runner, active.kind, where(active.pr)) : null;
+  // Ask cannot start while busy is set.
+  const { note: busy, refused } = useSlots(pr.id, runner);
 
   const change = (v: string) => {
     setText(v);
@@ -131,14 +125,17 @@ export function AskPanel(props: {
       return;
     }
     if (start.isPending) return;
+    if (busy) {
+      toast.add({ title: "The question was not sent", description: busy });
+      return;
+    }
     const parent = mode === "follow" ? newest?.run.id : undefined;
     start.mutate(
       { question, parent },
       {
         onSuccess: (r) => {
           if ("conflict" in r) {
-            const kind: RunKind = r.conflict.running.kind;
-            toast.add({ title: "The question was not sent", description: busyText(runner, kind, where(r.conflict.running.pr)) });
+            toast.add({ title: "The question was not sent", description: refused(r.conflict) });
             return;
           }
           // Text typed while the request was out stays in the box.
@@ -229,7 +226,17 @@ export function AskPanel(props: {
           </FieldDescription>
         </Field>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-          <Button type="submit" size="sm" data-primary disabled={start.isPending} aria-keyshortcuts="Control+Enter" title="Key: Ctrl+Enter">
+          <Button
+            type="submit"
+            size="sm"
+            data-primary
+            disabled={start.isPending || !!busy}
+            focusableWhenDisabled
+            className="aria-disabled:cursor-default aria-disabled:opacity-50"
+            aria-describedby="ask-foot"
+            aria-keyshortcuts="Control+Enter"
+            title="Key: Ctrl+Enter"
+          >
             {start.isPending && <LoaderCircle aria-hidden data-icon="inline-start" className="animate-spin" />}
             Ask
           </Button>
@@ -241,7 +248,9 @@ export function AskPanel(props: {
           <Button type="button" size="sm" variant="outline" title="Key: Esc" onClick={props.onClose}>
             Close
           </Button>
-          <span className="ml-1.5 text-xs text-muted-foreground">{busy ?? "Ctrl+Enter asks. Esc closes Ask."}</span>
+          <span id="ask-foot" className="ml-1.5 text-xs text-muted-foreground">
+            {busy ?? "Ctrl+Enter asks. Esc closes Ask."}
+          </span>
         </div>
       </form>
       {asks.error && (

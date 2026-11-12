@@ -120,7 +120,7 @@ export function TaskChips(props: {
       if (act === "remove") requestAnimationFrame(() => refocus(key));
     } catch (e) {
       const message = (e as Error).message;
-      // A build also gets 409 while a run holds the slot. Only a missing tracker setup offers the settings.
+      // A build also gets 409 while the run pool is full. Only a missing tracker setup offers the settings.
       const setup = !!onSettings && e instanceof ApiError && e.status === 409 && (act !== "build" || !on);
       setErrors((es) => [...es.filter((x) => x.key !== key), { key, message, setup }]);
       announce(`${key}: ${message}`);

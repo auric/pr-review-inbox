@@ -64,6 +64,8 @@ export function RunLimits({ settings }: { settings: SettingsDto }) {
     },
     async (input: SettingsInput) => {
       qc.setQueryData(["settings"], await read<SettingsDto>(await api.api.settings.$put({ json: input })));
+      // A new "Runs at once" frees or fills the run pool at once (spec.md section 6.26, AC-B191).
+      void qc.invalidateQueries({ queryKey: ["runs", "slots"] });
     },
   );
   const bad = RUN_LIMIT_KEYS.some((k) => runLimitValue(k, drafts[k]) === null);

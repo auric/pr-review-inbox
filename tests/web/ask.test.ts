@@ -4,7 +4,8 @@
 // Plan r2 UI-ASK: the pure Ask rules. The state of each answer, the busy note, the conversations, and the box texts.
 import { describe, expect, test } from "bun:test";
 import type { AskDto, RunDto } from "../../src/shared/dto";
-import { askBox, askConversations, askView, busyText } from "../../src/web/ask/model";
+import { askBox, askConversations, askView, busyText, fullText, refusedText, slotNote } from "../../src/web/ask/model";
+import type { SlotRun } from "../../src/web/review/model";
 
 const run = (o: Partial<RunDto> = {}): RunDto => ({
   id: 1,
@@ -104,12 +105,62 @@ describe("ask", () => {
     expect(askView(ask({ status: "cancelled" }, null), "Claude Code")).toEqual({ kind: "cancelled" });
   });
 
-  test("the busy note names what holds the slot, never a review for an ask", () => {
+  test("the busy note names the run of the pull request, never a review for an ask", () => {
     expect(busyText("Claude", "ask", "this pull request")).toBe(
-      "Claude is answering a question on this pull request. One review runs at a time.",
+      "Claude is answering a question on this pull request. One run per pull request.",
     );
-    expect(busyText("Claude", "review", "PROJ/repo #12")).toBe("Claude is reviewing PROJ/repo #12. One review runs at a time.");
-    expect(busyText("Claude", "reply", "PROJ/repo #12")).toBe("Claude is drafting replies for PROJ/repo #12. One review runs at a time.");
+    expect(busyText("Claude", "review", "this pull request")).toBe("Claude is reviewing this pull request. One run per pull request.");
+    expect(busyText("Claude", "reply", "this pull request")).toBe(
+      "Claude is drafting replies for this pull request. One run per pull request.",
+    );
+  });
+});
+
+// docs/plans/review-v2/parallel-runs.md section 3.5, W1 to W3 (AC-B220).
+describe("run slot notes", () => {
+  const where = (pr: number | null, task?: string) =>
+    pr === null ? (task ?? "a task") : pr === 7 ? "this pull request" : `PROJ/repo #${pr}`;
+  const slot = (run: number, pr: number | null, o: Partial<SlotRun> = {}): SlotRun => ({ run, pr, kind: "review", ...o });
+
+  test("a full pool names the limit", () => {
+    expect(fullText("Claude", 3)).toBe("Claude runs 3 runs at once, your limit.");
+    expect(fullText("Claude", 1)).toBe("Claude runs 1 run at once, your limit.");
+  });
+
+  test("the note names the run of this pull request, else the runs of a full pool", () => {
+    expect(slotNote("Claude", { kind: "pr", run: slot(5, 7, { kind: "fix" }) }, where)).toBe(
+      "Claude is proposing fixes for this pull request. One run per pull request.",
+    );
+    expect(slotNote("Claude", { kind: "full", limit: 1, running: [slot(5, 12)] }, where)).toBe(
+      "Claude runs 1 run at once, your limit. Running: Review of PROJ/repo #12.",
+    );
+    const task = slot(6, null, { kind: "implement", task: 3, taskKey: "ABC-1" });
+    expect(slotNote("Claude", { kind: "full", limit: 2, running: [slot(5, 12, { kind: "ask" }), task] }, where)).toBe(
+      "Claude runs 2 runs at once, your limit. Running: Ask of PROJ/repo #12 and Build step of ABC-1.",
+    );
+    // A task run without its key, as the server sends it when the task row is gone.
+    expect(slotNote("Claude", { kind: "full", limit: 1, running: [slot(6, null, { kind: "spec", task: 3 })] }, where)).toBe(
+      "Claude runs 1 run at once, your limit. Running: Plan of a task.",
+    );
+  });
+
+  test("the note names at most 3 runs", () => {
+    const three = [slot(1, 11), slot(2, 12, { kind: "explain" }), slot(3, 13, { kind: "reply" })];
+    expect(slotNote("Claude", { kind: "full", limit: 3, running: three }, where)).toBe(
+      "Claude runs 3 runs at once, your limit. Running: Review of PROJ/repo #11, Explain of PROJ/repo #12, and Reply drafts of PROJ/repo #13.",
+    );
+    // A lower limit leaves more runs than slots until they end.
+    expect(slotNote("Claude", { kind: "full", limit: 2, running: [...three, slot(4, 14), slot(5, 15)] }, where)).toBe(
+      "Claude runs 2 runs at once, your limit. Running: Review of PROJ/repo #11, Explain of PROJ/repo #12, Reply drafts of PROJ/repo #13, and 2 more.",
+    );
+  });
+
+  test("a refused start names the run of the pull request, or the limit and the next step", () => {
+    const running = { run: 5, pr: 7, kind: "review" as const };
+    expect(refusedText("Claude", { error: "x", running }, where)).toBe("Claude is reviewing this pull request. One run per pull request.");
+    expect(refusedText("Claude", { error: "x", running: { ...running, pr: 12 }, full: 3 }, where)).toBe(
+      "Claude runs 3 runs at once, your limit. Try again when one ends.",
+    );
   });
 });
 

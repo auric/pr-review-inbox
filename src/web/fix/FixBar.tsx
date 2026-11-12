@@ -115,7 +115,7 @@ export function useFix(
     findings: ReviewItemDto[];
     // The brief profile. Each fix run uses it.
     profile: { name: string; explain: boolean };
-    // busyText of the run that holds the only slot, or null.
+    // The run-slot note (W1 or W2) of useSlots, or null.
     busy: string | null;
     // The server has the source and target head of the PR.
     synced: boolean;

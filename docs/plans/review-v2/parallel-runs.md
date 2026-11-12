@@ -1,6 +1,6 @@
 # Several Claude runs at once (limits.md decision 1)
 
-Status: design of 2026-11-11 against main a4fc1d7. WP-PR0 (docs), WP-PR1 (the per-cache lock for worktree add and prune), and WP-PR2 (the slot pool) are built. WP-PR3 (web) and Gate G-PAR are open. It implements limits.md "User decisions (2026-11-04)", decision 1. The user answered Q1 to Q5 with the recommendations (section 6).
+Status: design of 2026-11-11 against main a4fc1d7. WP-PR0 (docs), WP-PR1 (the per-cache lock for worktree add and prune), WP-PR2 (the slot pool), and WP-PR3 (web, AC-B219 to AC-B222) are built. Gate G-PAR is open (docs/smoke-r3.md part O). It implements limits.md "User decisions (2026-11-04)", decision 1. The user answered Q1 to Q5 with the recommendations (section 6).
 
 ## Summary
 
@@ -215,6 +215,7 @@ BRIEF.md, spec.md (6.26, AC-B18, 6.20.6), design.md (B12 note), limits.md (decis
 - review/model.ts `slotBusy` (`activeRun` goes); review/data.ts `useRunSlots`; ask/model.ts, discuss-model.ts texts; fix/model.ts W5; useStart, AskPanel, Discuss, ExplainPage, Consult; comments in FixBar and TaskChips; shared/task-status.ts; web tests and new `slotBusy` cases; m2.e2e.ts, ask.e2e.ts; README Run limits, CHANGELOG, screenshots; G-PAR steps in docs/smoke-r3.md.
 - Tests: AC-B196. Optional e2e with limit 2 and two hanging runs.
 - Risk: stale slots data disables Start by mistake. The guard and the server cover it.
+- Built (2026-11-12): one hook `useSlots` (review/useSlots.ts) gives the note and the 409 text to every start control. A 409 refreshes the slots. The W3 toast adds "Try again when one ends." Ask, Discuss, Explain, and Consult are now disabled while the note shows. Fix again on a card already checks the note before a request. Draft replies, Draft reply, and Draft again keep the 409 toast only (AC-B221). `BriefState.busy` had no reader and went with `activeRun`. A save of the run limits refreshes the slots (AC-B191).
 
 ### Gate G-PAR (user, real CLI)
 

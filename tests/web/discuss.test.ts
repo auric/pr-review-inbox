@@ -11,6 +11,7 @@ import {
   busyLine,
   outcomeLines,
   pendingTurn,
+  refusedLine,
   revisionParts,
   startedText,
   talkHint,
@@ -122,12 +123,12 @@ describe("turns", () => {
 describe("the box and the cap", () => {
   const many = (n: number) => Array.from({ length: n }, (_, i) => turn({ run: i + 1 }));
 
-  test("the line under the box names the keys, then the messages left; another run holding the slot wins", () => {
+  test("the line under the box names the keys, then the messages left; a run-slot note wins", () => {
     expect(talkHint([], null)).toBe("Ctrl+Enter asks. Esc closes the talk.");
     expect(talkHint(many(3), null)).toBe("Ctrl+Enter asks. Esc closes the talk. 97 messages left.");
     expect(talkHint(many(99), null)).toBe("Ctrl+Enter asks. Esc closes the talk. 1 message left.");
-    expect(talkHint(many(3), "Claude is reviewing PROJ/repo #12. One review runs at a time.")).toBe(
-      "Claude is reviewing PROJ/repo #12. One review runs at a time.",
+    expect(talkHint(many(3), "Claude is reviewing this pull request. One run per pull request.")).toBe(
+      "Claude is reviewing this pull request. One run per pull request.",
     );
   });
 
@@ -138,10 +139,18 @@ describe("the box and the cap", () => {
     expect(talkLeft(many(101))).toBe(0);
   });
 
-  test("a refused start names the run that holds the only slot", () => {
+  test("a refused start names the run of the pull request, or the limit of a full pool (W4)", () => {
     expect(busyLine("review", "PROJ/repo #12")).toBe("Another run is working: Review of PROJ/repo #12. Ask again when it ends.");
     expect(busyLine("discuss", "this pull request")).toBe(
       "Another run is working: Ask about a finding of this pull request. Ask again when it ends.",
+    );
+    const where = (pr: number | null) => (pr === 7 ? "this pull request" : "PROJ/repo #12");
+    const running = { run: 5, pr: 7, kind: "explain" as const };
+    expect(refusedLine("Claude", { error: "x", running }, where)).toBe(
+      "Another run is working: Explain of this pull request. Ask again when it ends.",
+    );
+    expect(refusedLine("Claude", { error: "x", running: { ...running, pr: 12 }, full: 2 }, where)).toBe(
+      "Claude runs 2 runs at once, your limit. Ask again when one ends.",
     );
   });
 });

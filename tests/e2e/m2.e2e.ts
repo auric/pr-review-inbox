@@ -8,6 +8,8 @@ import { APP_PORT, addOwnProfiles, control, E2E_TOKEN, FAKE_URL, openApp } from 
 
 const APP = `http://127.0.0.1:${APP_PORT}`;
 const TITLE = "Batch cache writes in the sync worker";
+// A pull request of another repository (tests/e2e/serve.ts).
+const OTHER = "Drop the legacy export endpoint";
 const NOTE = "ABC-1: the flush must stay atomic for readers. Check the lock scope first.";
 // A run passes the git workspace, the fake CLI, and the validator.
 const RUN_MS = 60_000;
@@ -286,11 +288,11 @@ test("two pages share one run: the brief of the second page cannot start while i
   await row(other).click();
   await expect(runLine(other)).toContainText("Finding problems…");
   await expect(other.locator("#nav-runs")).toHaveAccessibleName("Review runs: 1, 1 running");
-  // r opens the brief. Start stays disabled while the run holds the only slot (A14), and Ctrl+Enter only says why.
+  // r opens the brief. Start stays disabled while a run works on this pull request (A14, AC-B196), and Ctrl+Enter only says why.
   await other.keyboard.press("r");
   const start = other.locator("#brief").getByRole("button", { name: "Start review" });
   await expect(start).toHaveAttribute("aria-disabled", "true");
-  await expect(start).toHaveAccessibleDescription("Claude is reviewing this pull request. One review runs at a time.");
+  await expect(start).toHaveAccessibleDescription("Claude is reviewing this pull request. One run per pull request.");
   await other.getByLabel("Your note").press("Control+Enter");
   await expect(other.locator("[data-slot=toast-title]", { hasText: "Claude is reviewing this pull request." })).toBeVisible();
   expect((await runs(request)).length).toBe(1);
@@ -301,4 +303,59 @@ test("two pages share one run: the brief of the second page cannot start while i
   await expect(runRow(page)).toHaveAttribute("data-run-state", "cancelled", { timeout: RUN_MS });
   await expect(runRow(other)).toHaveAttribute("data-run-state", "cancelled");
   await expect(page.locator("#nav-runs")).toHaveAccessibleName("Review runs: 1");
+});
+
+// docs/plans/review-v2/parallel-runs.md section 3.6 (AC-B196, AC-B221): a run on another pull request leaves a free slot. With the limit
+// 1, the brief of another pull request names the limit and the running run, and Start waits until the run ends.
+test("a full run pool names the limit and the running run, and a run end frees Start", async ({ page }) => {
+  await control("claude", { stream: "tree", hang: true });
+  await connect(page);
+  await startWithBrief(page);
+  await expect(runLine(page)).toContainText("Finding problems…", { timeout: RUN_MS });
+
+  // The other pull request is in the Reviewing view only.
+  const openOther = async () => {
+    await page
+      .locator("nav[aria-label='Views']")
+      .getByRole("button", { name: /^Reviewing/ })
+      .click();
+    await page.locator("[data-row]", { hasText: OTHER }).first().click();
+    await expect(page.locator("section[aria-label='Details'] h1")).toHaveText(OTHER);
+    await page.keyboard.press("r");
+  };
+  const start = page.locator("#brief").getByRole("button", { name: "Start review" });
+  await openOther();
+  await expect(start).toBeVisible();
+  await expect(start).not.toHaveAttribute("aria-disabled", "true");
+  await expect(start).toHaveAccessibleDescription("Ctrl+Enter starts the review. Esc closes the brief.");
+
+  const call = (method: string, path: string, body?: unknown) =>
+    page.evaluate(
+      async ({ method, path, body }) => {
+        const headers = {
+          "X-RL-Session": document.querySelector<HTMLMetaElement>('meta[name="rl-session"]')?.content ?? "",
+          "Content-Type": "application/json",
+        };
+        const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+        return { status: res.status, json: (await res.json().catch(() => null)) as unknown };
+      },
+      { method, path, body },
+    );
+  const s = (await call("GET", "/api/settings")).json as { baseUrl: string };
+  expect((await call("PUT", "/api/settings", { baseUrl: s.baseUrl, runLimits: { runsAtOnce: 1 } })).status).toBe(200);
+  await page.reload();
+  await openOther();
+  const full = /^Claude runs 1 run at once, your limit\. Running: Review of \S+ #1001\.$/;
+  await expect(start).toHaveAttribute("aria-disabled", "true");
+  await expect(start).toHaveAccessibleDescription(full);
+  await page.getByLabel("Your note").press("Control+Enter");
+  await expect(page.locator("[data-slot=toast-title]", { hasText: "Claude runs 1 run at once, your limit." })).toBeVisible();
+  const slots = (await call("GET", "/api/runs/slots")).json as { limit: number; running: { run: number; pr: number }[] };
+  expect(slots.limit).toBe(1);
+  expect(slots.running).toHaveLength(1);
+
+  // The run end comes through the live update: Start frees without a reload.
+  expect((await call("POST", `/api/runs/${slots.running[0]?.run}/cancel`)).status).toBeLessThan(300);
+  await expect(start).not.toHaveAttribute("aria-disabled", "true", { timeout: RUN_MS });
+  await expect(start).toHaveAccessibleDescription("Ctrl+Enter starts the review. Esc closes the brief.");
 });

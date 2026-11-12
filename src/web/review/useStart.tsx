@@ -2,19 +2,18 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The start of review, re-review, and reply-draft runs, and the brief that a review starts from (plan v3 WP11, r2 UI-RR, replies.md step 6).
-import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import type { CommitDto, MetaDto, PrRow, RunConflict, RunDto } from "../../shared/dto";
-import { busyText } from "../ask/model";
 import type { ThreadModel } from "../pr/threads";
 import { Hint } from "../shell/Hint";
-import { failText, prKey } from "../shell/model";
+import { failText } from "../shell/model";
 import type { BriefMode } from "./Brief";
-import { saveLastProfile, useBrief, usePrRuns, useRuns, useStartReplies, useStartRereview, useStartReview } from "./data";
-import { activeRun, briefState, newCommits, plural, rereviewState, shortHash } from "./model";
+import { saveLastProfile, useBrief, useStartReplies, useStartRereview, useStartReview } from "./data";
+import { briefState, newCommits, plural, rereviewState, shortHash } from "./model";
 import type { Focus } from "./useReview";
+import { useSlots } from "./useSlots";
 
 // The open brief and the review that its Start begins.
 type Composer = { kind: "review" } | { kind: "rereview" } | null;
@@ -46,9 +45,9 @@ export function useStart(
   },
 ) {
   const { meta, latest, newest, focusAfter } = o;
-  const qc = useQueryClient();
   const brief = useBrief(pr.id);
-  const active = activeRun(useRuns().data, usePrRuns(pr.id).data);
+  // The brief cannot start while busy is set.
+  const { note: busy, refused } = useSlots(pr.id, meta.runner.short);
   const start = useStartReview(pr.id);
   const startReplies = useStartReplies(pr.id);
   const startRereview = useStartRereview(pr.id);
@@ -56,18 +55,9 @@ export function useStart(
   // The threads of the reply run that this page started. They show a pending card while it runs.
   const [asked, setAsked] = useState<{ run: number; threads: number[] } | null>(null);
 
-  const state = briefState(brief.data, active, pr.id, meta.profiles);
+  const state = briefState(brief.data, meta.profiles);
 
-  const where = (id: number | null) => {
-    if (id === null) return "a task";
-    if (id === pr.id) return "this pull request";
-    const other = qc.getQueryData<PrRow[]>(["prs"])?.find((p) => p.id === id);
-    return other ? prKey(other) : "another pull request";
-  };
-  // The run that holds the only slot, as words. The brief cannot start until it ends.
-  const busy = active ? busyText(meta.runner.short, active.kind, where(active.pr)) : null;
-
-  const slotTaken = (c: RunConflict) => toast.add({ title: busyText(meta.runner.short, c.running.kind, where(c.running.pr)) });
+  const slotTaken = (c: RunConflict) => toast.add({ title: refused(c) });
 
   // A review runs the stored brief. Its profile becomes the last used one (decision D2).
   const runNow = () =>

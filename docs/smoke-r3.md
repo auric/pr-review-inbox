@@ -11,7 +11,7 @@ This test checks the Release 3 features against a real Bitbucket Server, a real 
 - Use a new, empty data folder. Never use the data folder of your daily instance.
 - The app never pushes. Each push in this test is your own `git push`.
 - Do not copy tokens, host names, code, comment text, issue text, or file names into files, issues, or chat. Record payload shapes (key names and types), counts, and tag names only.
-- Expect about twenty-nine runs on your Claude subscription quota: eight in the gate, two in part A, one in part B, one interactive session in part D, one in part E, one in part F, one in part I, two in part J, in part K one interactive session and two session runs, two in part L, and ten in part M. A session run loads the full history of the session, so it can cost more than a review.
+- Expect about twenty-nine runs on your Claude subscription quota: eight in the gate, two in part A, one in part B, one interactive session in part D, one in part E, one in part F, one in part I, two in part J, in part K one interactive session and two session runs, two in part L, ten in part M, and six in part O. A session run loads the full history of the session, so it can cost more than a review.
 - Part I sends your project instructions to Claude. Turn on the global CLAUDE.md only when it holds nothing that the approval does not cover.
 - In this document, `<BITBUCKET_URL>` is the base URL of the Bitbucket server, `<JIRA_URL>` is the base URL of the Jira server, `<TEST_PR_URL>` is the URL of the test pull request, `<KEY>` is a Jira issue key that the test pull request names, and `<CLONE>` is the absolute path of your test clone.
 
@@ -269,6 +269,19 @@ Run this part only with a Jira Cloud test site and an issue with an attached ima
 4. In the Jira browser tab, open `<CLOUD_URL>/rest/api/2/issue/<KEY>?fields=attachment&expand=renderedFields`. Find the `img` tag of the attached image in `renderedFields.description`. Record the path form of its `src` with the ids replaced by `<id>`, for example `/rest/api/2/attachment/content/<id>` (U79). [ ] pass [ ] fail
 5. Download the image with Download on its row. Expect "Downloaded." If step 4 shows a `/secure/attachment/` or `/secure/thumbnail/` path, expect the image inline in the description. Else expect its alt text. A failure shows a fixed text. Record it, and the kind and status of "Jira download failed: …" in the terminal (U78). [ ] pass [ ] fail
 6. Click Disconnect, then "Disconnect Jira". Expect the URL and the email fields empty. [ ] pass [ ] fail
+
+## O. Several runs at once (Gate G-PAR)
+
+Part O checks docs/plans/review-v2/parallel-runs.md, Gate G-PAR. It needs four pull requests that the approval covers: A and B in one repository, C in another repository, and D in any repository. The reviews of this part post nothing. Do not post on these pull requests. "(real CLI)" marks a step that runs `claude`. Open Task Manager (Windows) or `top` (Linux) before step 2.
+
+1. Open Settings, Tasks, Run limits. Set "Runs at once" to 3. Expect "Saved. New runs use these limits." [ ] pass [ ] fail
+2. Start a review on A, B, and C within 10 s: open each one, press Shift+R, and click "Start review". Expect each run line to show a running review. (real CLI) [ ] pass [ ] fail
+3. Open D and press Shift+R. Expect "Start review" off with the note "Claude runs 3 runs at once, your limit. Running: Review of <A>, Review of <B>, and Review of <C>." Press Esc. [ ] pass [ ] fail
+4. Open A and press q. Expect Ask off with the note "Claude is reviewing this pull request. One run per pull request." Press Esc. [ ] pass [ ] fail
+5. Wait until the three runs end. Expect no `auth` and no `process` error on the run lines. [ ] pass [ ] fail
+6. Run `claude auth status`. Expect `"authMethod": "claude.ai"`. Start `claude` in a terminal, then exit it. Expect a normal start. [ ] pass [ ] fail
+7. Start a review on A, B, and C again. Cancel the review of C while A and B run. Expect only C to end as cancelled, and A and B to end as done. (real CLI) [ ] pass [ ] fail
+8. Record the peak memory of the three CLI process trees in step 2. Record how long B waited for the fetch of A: the time from its start to its first tool call in its run log. Write the sanitized facts into integration-check.md. [ ] pass [ ] fail
 
 ## H. Record
 

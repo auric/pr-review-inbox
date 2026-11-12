@@ -274,9 +274,10 @@ describe("Fix list", () => {
       kind: "explain",
       text: "The brief uses the Explain profile, which proposes no fixes. Press r and pick a review profile.",
     });
-    expect(fixReason({ ...base, busy: "Claude is reviewing PROJ/repo #7. One review runs at a time." })).toEqual({
+    // W5 (docs/plans/review-v2/parallel-runs.md section 3.5).
+    expect(fixReason({ ...base, busy: "Claude is reviewing this pull request. One run per pull request." })).toEqual({
       kind: "busy",
-      text: "Claude is reviewing PROJ/repo #7. One review runs at a time. Propose fixes when it ends.",
+      text: "Claude is reviewing this pull request. One run per pull request. Propose fixes when a run ends.",
     });
     expect(fixReason({ ...base, ticked: 0 })).toEqual({ kind: "none", text: "Tick at least one thread or finding." });
     expect(fixReason({ ...base, rows: 120, ticked: 100 }).kind).toBe("ok");

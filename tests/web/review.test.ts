@@ -4,12 +4,21 @@
 // Plan v3 WP11, replies.md WP18, and r2 UI-RR: the pure review UI rules. The log tree, the run line, the brief state,
 // the Review runs view, the reply drafts, and the re-review.
 import { describe, expect, test } from "bun:test";
-import type { BriefDto, CommitDto, ProfileDto, PrRow, ReviewItemDto, RunDetail, RunDto, RunnerDefaults } from "../../src/shared/dto";
+import type {
+  BriefDto,
+  CommitDto,
+  ProfileDto,
+  PrRow,
+  ReviewItemDto,
+  RunDetail,
+  RunDto,
+  RunnerDefaults,
+  RunSlotsDto,
+} from "../../src/shared/dto";
 import type { AnchoredFinding, Carried, Question, ReplyPayload } from "../../src/shared/review";
 import type { RunEvent } from "../../src/shared/run-log";
 import type { Turn } from "../../src/shared/turn";
 import {
-  activeRun,
   agentDetails,
   agentInfo,
   agentPath,
@@ -39,8 +48,10 @@ import {
   runLine,
   runRows,
   runWhy,
+  type SlotRun,
   setupText,
   skillsText,
+  slotBusy,
   staleText,
   subagentText,
   tokenTotal,
@@ -327,15 +338,15 @@ describe("brief state", () => {
   const brief = (o: Partial<BriefDto> = {}): BriefDto => ({ note: "", profile: "general", updatedAt: null, ...o });
 
   test("the state names the stored profile; the hint names no profile, because the brief holds the pick", () => {
-    const s = briefState(brief({ profile: "security", note: "Check X", updatedAt: 5 }), null, 7, PROFILES);
+    const s = briefState(brief({ profile: "security", note: "Check X", updatedAt: 5 }), PROFILES);
     expect(s.name).toBe("Security");
     expect(s.hint).toBe("Open the review brief with your note. Pick the profile and start the review there. Key: r.");
-    expect(briefState(brief(), null, 7, PROFILES).hint).toBe("Open the review brief. Pick the profile and start the review there. Key: r.");
-    expect(briefState(brief({ profile: "over" }), null, 7, PROFILES).name).toBe("General");
+    expect(briefState(brief(), PROFILES).hint).toBe("Open the review brief. Pick the profile and start the review there. Key: r.");
+    expect(briefState(brief({ profile: "over" }), PROFILES).name).toBe("General");
     // An unknown profile never falls back to an Explain profile while a review profile exists (the server rule).
     const explainFirst = [...PROFILES].sort((a, b) => Number(b.explain) - Number(a.explain));
     expect(explainFirst[0]?.explain).toBe(true);
-    expect(briefState(brief({ profile: "over" }), null, 7, explainFirst).name).toBe(explainFirst.find((p) => !p.explain)?.name as string);
+    expect(briefState(brief({ profile: "over" }), explainFirst).name).toBe(explainFirst.find((p) => !p.explain)?.name as string);
   });
 
   // Decision D2 (plan pr-view-v4): the stored brief of the PR wins, else the last profile used on any PR.
@@ -347,12 +358,6 @@ describe("brief state", () => {
     // Nothing used yet, or a last profile that the settings no longer list: the server default, without the mark.
     expect(briefProfile(brief(), null, PROFILES)).toEqual({ profile: "general", tag: null });
     expect(briefProfile(brief(), "removed", PROFILES)).toEqual({ profile: "general", tag: null });
-  });
-
-  test("busy names the PR of a running review", () => {
-    expect(briefState(brief(), run({ pr: 9, status: "running" }), 7, PROFILES).busy).toEqual({ pr: 9, same: false });
-    expect(briefState(brief(), run({ pr: 7, status: "running" }), 7, PROFILES).busy).toEqual({ pr: 7, same: true });
-    expect(briefState(brief(), null, 7, PROFILES).busy).toBeNull();
   });
 });
 
@@ -531,16 +536,6 @@ describe("reply drafts", () => {
     expect(latestReview(runs)?.id).toBe(7);
     expect(latestReview([run({ id: 9, kind: "reply" })])).toBeNull();
     expect(latestReview(undefined)).toBeNull();
-  });
-
-  test("the slot is free when the PR runs show the end of the run that all runs still show as running", () => {
-    const running = run({ id: 5, status: "running" });
-    expect(activeRun([running], undefined)?.id).toBe(5);
-    expect(activeRun([running], [running])?.id).toBe(5);
-    expect(activeRun([running], [run({ id: 5, status: "completed" })])).toBeNull();
-    // A run of another PR is not in the PR runs, so it holds the slot.
-    expect(activeRun([running], [run({ id: 4, status: "completed" })])?.id).toBe(5);
-    expect(activeRun([run({ id: 5, status: "completed" })], [running])).toBeNull();
   });
 
   test("a cancelled or failed review run keeps the drafts and the re-review base of the review before it", () => {
@@ -903,5 +898,39 @@ describe("skills of a run", () => {
       }),
     ).toBe("a (always); available: b, c");
     expect(skillsText({ skills: [{ id: "b", always: false, available: true }] })).toBe("available: b");
+  });
+});
+
+// docs/plans/review-v2/parallel-runs.md section 3.6, AC-B219.
+describe("slotBusy", () => {
+  const slot = (id: number, pr: number | null, o: Partial<SlotRun> = {}): SlotRun => ({ run: id, pr, kind: "review", ...o });
+  const slots = (limit: number, ...running: SlotRun[]): RunSlotsDto => ({ limit, running });
+
+  test("no slots data yet, an empty pool, or a free slot: no wait", () => {
+    expect(slotBusy(undefined, undefined, 7)).toBeNull();
+    expect(slotBusy(slots(3), undefined, 7)).toBeNull();
+    expect(slotBusy(slots(3, slot(5, 9), slot(6, 10)), undefined, 7)).toBeNull();
+  });
+
+  test("a run on this PR waits the start also with free slots, and it wins over a full pool", () => {
+    expect(slotBusy(slots(3, slot(5, 7, { kind: "ask" })), undefined, 7)).toEqual({ kind: "pr", run: slot(5, 7, { kind: "ask" }) });
+    expect(slotBusy(slots(2, slot(4, 9), slot(5, 7)), undefined, 7)).toEqual({ kind: "pr", run: slot(5, 7) });
+  });
+
+  test("the pool is full at the limit, and a lower limit keeps it full", () => {
+    const task = slot(6, null, { kind: "implement", task: 3, taskKey: "ABC-1" });
+    expect(slotBusy(slots(2, slot(5, 9), task), undefined, 7)).toEqual({ kind: "full", limit: 2, running: [slot(5, 9), task] });
+    expect(slotBusy(slots(1, slot(5, 9), slot(6, 10)), undefined, 7)).toMatchObject({ kind: "full", limit: 1 });
+    expect(slotBusy(slots(1, slot(5, 9)), undefined, 7)).toMatchObject({ kind: "full", limit: 1 });
+  });
+
+  test("a run that the PR runs show as ended holds no slot", () => {
+    const ended = [run({ id: 5, pr: 7, status: "completed" })];
+    expect(slotBusy(slots(3, slot(5, 7)), ended, 7)).toBeNull();
+    expect(slotBusy(slots(3, slot(5, 7)), [run({ id: 5, pr: 7, status: "running" })], 7)).toMatchObject({ kind: "pr" });
+    // The guard frees a slot of a full pool too.
+    expect(slotBusy(slots(2, slot(5, 7), slot(6, 9)), ended, 7)).toBeNull();
+    // An ended run of this PR does not hide the run of another PR.
+    expect(slotBusy(slots(1, slot(6, 9)), ended, 7)).toMatchObject({ kind: "full" });
   });
 });

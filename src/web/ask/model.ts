@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Pure Ask rules (plan r2 UI-ASK). No DOM access, so bun test runs them directly.
-import type { AskDto, RunKind } from "../../shared/dto";
-import { coverageRows, limitText, RUN_TEXT, tokenTotal } from "../review/model";
+import type { AskDto, RunConflict, RunKind } from "../../shared/dto";
+import { plural } from "../../shared/outcome";
+import { coverageRows, KIND_LABEL, limitText, RUN_TEXT, type SlotBusy, tokenTotal } from "../review/model";
+import { listText } from "../tasks/model";
 
 export type AskView =
   | { kind: "running"; startedAt: number }
@@ -35,9 +37,25 @@ export function askView(a: AskDto, runner: string): AskView {
   }
 }
 
-// The note under the box while a run holds the only slot. where: "this pull request" or the PR key. The server still decides.
+// docs/plans/review-v2/parallel-runs.md section 3.5, W1 to W3. where: "this pull request", the PR key, or the task key.
+// W1: a run works on the PR of the start control.
 export const busyText = (runner: string, kind: RunKind, where: string) =>
-  `${runner} is ${RUN_TEXT[kind].doing} ${where}. One review runs at a time.`;
+  `${runner} is ${RUN_TEXT[kind].doing} ${where}. One run per pull request.`;
+
+// W3: every run slot is in use.
+export const fullText = (runner: string, limit: number) => `${runner} runs ${plural(limit, "run")} at once, your limit.`;
+
+// The note under a start control. W2 names at most 3 runs that hold the slots.
+export function slotNote(runner: string, b: SlotBusy, where: (pr: number | null, task?: string) => string): string {
+  if (b.kind === "pr") return busyText(runner, b.run.kind, where(b.run.pr, b.run.taskKey));
+  const names = b.running.slice(0, 3).map((s) => `${KIND_LABEL[s.kind]} of ${where(s.pr, s.taskKey)}`);
+  if (b.running.length > 3) names.push(`${b.running.length - 3} more`);
+  return `${fullText(runner, b.limit)} Running: ${listText(names)}.`;
+}
+
+// A refused start (409): W1, or W3 with the next step.
+export const refusedText = (runner: string, c: RunConflict, where: (pr: number | null) => string) =>
+  c.full ? `${fullText(runner, c.full)} Try again when one ends.` : busyText(runner, c.running.kind, where(c.running.pr));
 
 // docs/plans/review-v2/spec.md section 2.15: the conversations of the listed asks, from their parent links inside the list. Each one is
 // oldest first. The conversations sort by their newest run, newest first. A parent outside the list starts its group.

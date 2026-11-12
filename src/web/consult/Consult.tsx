@@ -35,7 +35,6 @@ import {
   sessionModes,
 } from "../../shared/consult";
 import type { PrRow } from "../../shared/dto";
-import { busyText } from "../ask/model";
 import { dialogKeys } from "../fix/CloneDialog";
 import { fixesKey } from "../fix/data";
 import type { FixTarget } from "../fix/model";
@@ -45,6 +44,7 @@ import { planKey } from "../publish/data";
 import { replyKey, useCancelRun, usePrRuns, useRun } from "../review/data";
 import { plural } from "../review/model";
 import { sizeText } from "../review/tasks";
+import { useSlots } from "../review/useSlots";
 import { useSettings } from "../shell/data";
 import { failText, prKey } from "../shell/model";
 import { useNow } from "../shell/Sidebar";
@@ -613,12 +613,13 @@ function SessionPicker({
   const [choice, setChoice] = useState<string | null>(null);
   const [mode, setMode] = useState(loadMode);
   const start = useStartSession(pr.id);
+  const { note: busy, refused } = useSlots(pr.id, runner);
   const t = useMemo(() => q.data && consultText(q.data, groups, "session"), [q.data, groups]);
   const sessions = list.data?.sessions ?? [];
   // The first session is the best match: in the clone, else the newest.
   const pick: SessionDto | null = sessions.find((s) => s.id === choice) ?? sessions[0] ?? null;
   const now = Date.now();
-  const ready = !!pick && !!t?.ids.length && !start.isPending;
+  const ready = !!pick && !!t?.ids.length && !start.isPending && !busy;
   const pickMode = (m: SessionMode) => {
     setMode(m);
     saveMode(m);
@@ -630,9 +631,7 @@ function SessionPicker({
       {
         onSuccess: (r) => {
           if ("conflict" in r) {
-            const { kind, pr: other } = r.conflict.running;
-            const where = other === null ? "a task" : "a pull request";
-            toast.add({ title: "The session was not asked", description: busyText(runner, kind, where) });
+            toast.add({ title: "The session was not asked", description: refused(r.conflict) });
             return;
           }
           announce(`Asked ${titleOf(pick.title)}. Your session is answering${mode === "fix" ? " and proposing fixes" : ""}.`);
@@ -703,11 +702,13 @@ function SessionPicker({
         ))}
       </FieldSet>
       <p id="session-cost" className="m-0 text-sm text-ink-2">
-        {!pick
-          ? "Pick a session first."
-          : t && !t.ids.length
-            ? "Nothing to ask. Tick a group with items."
-            : `The resume loads the whole history of this session: ${sizeText(pick.bytes)}, up to about ${pick.tokens.toLocaleString()} tokens of your plan quota. The review points add ${t ? kb(t.bytes) : "some text"}.${mode === "fix" ? ` Judge and propose fixes allows up to ${SESSION_FIX_MAX_TURNS} turns instead of ${SESSION_MAX_TURNS}. Each turn sends the history again, so this mode uses more quota.` : ""}`}
+        {busy
+          ? busy
+          : !pick
+            ? "Pick a session first."
+            : t && !t.ids.length
+              ? "Nothing to ask. Tick a group with items."
+              : `The resume loads the whole history of this session: ${sizeText(pick.bytes)}, up to about ${pick.tokens.toLocaleString()} tokens of your plan quota. The review points add ${t ? kb(t.bytes) : "some text"}.${mode === "fix" ? ` Judge and propose fixes allows up to ${SESSION_FIX_MAX_TURNS} turns instead of ${SESSION_MAX_TURNS}. Each turn sends the history again, so this mode uses more quota.` : ""}`}
       </p>
       <p className="m-0 text-xs text-muted-foreground">
         The app reads only the folder, branch, time, and title lines of your transcripts. It never shows or stores their message text.
