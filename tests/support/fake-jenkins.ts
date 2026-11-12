@@ -6,6 +6,8 @@
 export const JENKINS_USER = "jdoe";
 export const JENKINS_TOKEN = "fake-jenkins-token-0123456789";
 export const JENKINS_VERSION = "2.479.3";
+// The console log of every build. No output may show it.
+export const JENKINS_LOG = `Started by user ${JENKINS_USER}\nFAKE-LOG-BODY-0123456789\nFinished: FAILURE\n`;
 const CTX = "/jenkins";
 const CRUMB = "fake-crumb-0123456789abcdef";
 const COOKIE = "JSESSIONID.fake=node0fakesession";
@@ -128,6 +130,14 @@ export function startFakeJenkins(o: FakeJenkinsOptions = {}) {
       const name = names[2] ?? "";
       const job = names.length === 3 ? jobs.get(name) : undefined;
       if (!job) return reply(404);
+      // The log of a done build from byte start. X-Text-Size is the end offset. Jenkins sends X-More-Data only while a build runs.
+      if (/^\d+\/logText\/progressiveText$/.test(rest) && req.method === "GET") {
+        const bytes = new TextEncoder().encode(JENKINS_LOG);
+        const start = Math.min(Number(url.searchParams.get("start")) || 0, bytes.length);
+        return new Response(bytes.slice(start), {
+          headers: { "X-Jenkins": JENKINS_VERSION, "Content-Type": "text/plain;charset=UTF-8", "X-Text-Size": String(bytes.length) },
+        });
+      }
       if (rest === "api/json" && req.method === "GET")
         return reply(200, {
           _class: "org.jenkinsci.plugins.workflow.job.WorkflowJob",

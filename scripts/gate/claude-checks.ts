@@ -9,6 +9,7 @@
 // B30a to B30d (refused read-only commands, the bare argv rule, a PreToolUse hook, and ssh in Any command mode: SU14 to SU17),
 // B31 (a lone `cd repo` and the cwd of the next command: SU18), B32 (the Unrestricted shell mode: SU19), B33 (the Unrestricted and Any
 // command settings without the read block: SU20), B34 (git inside a quoted argument, and the line endings of a step worktree: SU21),
+// B37 (one Claude session per task part: U97 to U110, docs/plans/review-v2/part-session.md section 4),
 // GADV (Gate G-ADV: the advisor, docs/plans/review-v2/advisor.md).
 // Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
@@ -17,6 +18,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -31,6 +33,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
+import type { FileSink } from "bun";
 import { z } from "zod";
 import {
   childEnv as appChildEnv,
@@ -54,10 +57,35 @@ import {
   fixResult,
   replyJsonSchema,
   replyResult,
+  reviewJsonSchema,
+  reviewResult,
   verifyResult,
 } from "../../src/shared/review";
 import { implementResult, interviewResult, type ShellMode, specResult } from "../../src/shared/task";
 import { advisorInInit, advisorStream, advisorTools, counts, namesModel } from "./advisor";
+import {
+  agentOutcome,
+  encodeCwd,
+  type Fact,
+  labelIds,
+  mainUsage,
+  perProcess,
+  rateLimits,
+  sessionArgs,
+  transcriptFacts,
+  type Usage,
+  u97,
+  u98,
+  u99,
+  u100,
+  u101,
+  u103,
+  u104,
+  u105,
+  u108,
+  usageOf,
+  userLine,
+} from "./session";
 
 // The facts that rebuild the env of a run read no GIT_CONFIG_GLOBAL, so any path stands in for the app folder.
 const NO_APP = shellGitConfig("app");
@@ -99,6 +127,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b32: 2,
   b33: 2,
   b34: 2,
+  b37: 9,
   gadv: 5,
 };
 const B9_MAX_TURNS = 8;
@@ -145,6 +174,7 @@ const CHECKS = [
   "B32",
   "B33",
   "B34",
+  "B37",
   "GADV",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
@@ -426,20 +456,25 @@ async function readLines(stream: ReadableStream<Uint8Array>, each: (e: Ev) => vo
   return all;
 }
 
+// The stdin of a live run (B37 U104). Both calls do nothing after the close.
+type LiveInput = { send: (text: string) => void; close: () => void };
+
 async function runClaude(
   name: string,
   args: string[],
   prompt: string,
   cwd: string,
   // model null: no --model flag. raw: args is the full app argv (implementArgs), spawned as the app spawns it. watch: gets each
-  // stream event when it arrives. spawned: gets the CLI pid right after the spawn, as the app calls contain().
+  // stream event when it arrives. spawned: gets the CLI pid right after the spawn, as the app calls contain(). live: stdin is a pipe,
+  // the prompt goes as the first stream-json user message, and watch gets the input. The run end closes stdin.
   opts: {
     env?: Record<string, string>;
     maxTurns?: number;
     keepProjects?: boolean;
     model?: string | null;
     raw?: boolean;
-    watch?: (e: Ev, pid: number) => void;
+    live?: boolean;
+    watch?: (e: Ev, pid: number, input?: LiveInput) => void;
     spawned?: (pid: number) => void;
   } = {},
 ): Promise<Run> {
@@ -484,8 +519,32 @@ async function runClaude(
   count();
   // POSIX: the app starts the CLI in a new process group (claude.ts), so its killTree can end the group.
   const detached = !!opts.raw && process.platform !== "win32";
-  const proc = Bun.spawn(cmd, { cwd, env, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe", detached });
+  const proc = Bun.spawn(cmd, { cwd, env, stdin: opts.live ? "pipe" : new Blob([prompt]), stdout: "pipe", stderr: "pipe", detached });
   opts.spawned?.(proc.pid);
+  let input: LiveInput | undefined;
+  if (opts.live) {
+    const sink = proc.stdin as FileSink;
+    let open = true;
+    // A write to a pipe that the CLI has closed can throw or reject. The run end shows the effect.
+    const quiet = (f: () => unknown) => {
+      try {
+        const v = f();
+        if (v instanceof Promise) v.catch(() => {});
+      } catch {}
+    };
+    input = {
+      send: (text) => {
+        if (!open) return;
+        quiet(() => sink.write(userLine(text)));
+        quiet(() => sink.flush());
+      },
+      close: () => {
+        if (open) quiet(() => sink.end());
+        open = false;
+      },
+    };
+    input.send(prompt);
+  }
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -493,10 +552,11 @@ async function runClaude(
   }, RUN_TIMEOUT_MS);
   const watch = opts.watch;
   const [out, err] = await Promise.all([
-    watch ? readLines(proc.stdout, (e) => watch(e, proc.pid)) : new Response(proc.stdout).text(),
+    watch ? readLines(proc.stdout, (e) => watch(e, proc.pid, input)) : new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]);
   const exit = await proc.exited;
+  input?.close();
   clearTimeout(timer);
   save(`${name}.jsonl`, out);
   if (err) save(`${name}.stderr.txt`, err);
@@ -2496,6 +2556,36 @@ type Stop = {
   report: KillReport;
   inEnv: (boolean | null)[];
 };
+// The app Stop of a CLI that waits in `sleep 600` (B25, B37): polls up to 20 s for the new sleep process, calls the app killTree on the
+// CLI, and kills each leftover bash or sleep process of the run by PID. since: the run start (epoch ms).
+async function stopRun(pid: number, since: number, marker: string): Promise<Stop> {
+  const f0 = performance.now();
+  let sleeps: number[] = [];
+  while (!sleeps.length && performance.now() - f0 < SLEEP_FIND_MS) {
+    sleeps = stopProcs(since)
+      .filter((p) => p.name === "sleep")
+      .map((p) => p.pid);
+    if (!sleeps.length) await Bun.sleep(500);
+  }
+  const findMs = Math.round(performance.now() - f0);
+  const inEnv = sleeps.map((p) => markerIn(p, marker));
+  const t0 = performance.now();
+  const report = await appKillTree(pid);
+  let cliMs: number | null = null;
+  let sleepMs: number | null = null;
+  while (performance.now() - t0 < STOP_LIMIT_MS && (cliMs === null || sleepMs === null)) {
+    const ms = Math.round(performance.now() - t0);
+    if (cliMs === null && !alive(pid)) cliMs = ms;
+    if (sleepMs === null && sleeps.every((p) => !alive(p))) sleepMs = ms;
+    if (cliMs === null || sleepMs === null) await Bun.sleep(100);
+  }
+  const left = stopProcs(since).filter((p) => alive(p.pid));
+  for (const p of left) killPid(p.pid);
+  if (alive(pid)) killTree(pid);
+  await appKillTree(pid, true);
+  return { sleeps, findMs, cliMs, sleepMs, left, report, inEnv };
+}
+
 async function b25() {
   const cmd = "sleep 600";
   const since = Date.now();
@@ -2504,33 +2594,7 @@ async function b25() {
   let stop: Promise<Stop> | undefined;
   const watch = (e: Ev, pid: number) => {
     if (stop || !blocks(e).some((b) => b.type === "tool_use" && b.name === "Bash" && String(b.input?.command ?? "").trim() === cmd)) return;
-    stop = (async () => {
-      const f0 = performance.now();
-      let sleeps: number[] = [];
-      while (!sleeps.length && performance.now() - f0 < SLEEP_FIND_MS) {
-        sleeps = stopProcs(since)
-          .filter((p) => p.name === "sleep")
-          .map((p) => p.pid);
-        if (!sleeps.length) await Bun.sleep(500);
-      }
-      const findMs = Math.round(performance.now() - f0);
-      const inEnv = sleeps.map((p) => markerIn(p, marker));
-      const t0 = performance.now();
-      const report = await appKillTree(pid);
-      let cliMs: number | null = null;
-      let sleepMs: number | null = null;
-      while (performance.now() - t0 < STOP_LIMIT_MS && (cliMs === null || sleepMs === null)) {
-        const ms = Math.round(performance.now() - t0);
-        if (cliMs === null && !alive(pid)) cliMs = ms;
-        if (sleepMs === null && sleeps.every((p) => !alive(p))) sleepMs = ms;
-        if (cliMs === null || sleepMs === null) await Bun.sleep(100);
-      }
-      const left = stopProcs(since).filter((p) => alive(p.pid));
-      for (const p of left) killPid(p.pid);
-      if (alive(pid)) killTree(pid);
-      await appKillTree(pid, true);
-      return { sleeps, findMs, cliMs, sleepMs, left, report, inEnv };
-    })();
+    stop = stopRun(pid, since, marker);
   };
   const opts = {
     watch,
@@ -3287,6 +3351,477 @@ async function b34() {
   push("B34", status, lines.join(" || "));
 }
 
+// ---------- B37: one Claude session per task part (docs/plans/review-v2/part-session.md section 4, U97 to U110) ----------
+// One temp part folder for all runs: repo/ (a temp git repository with a.txt and b.txt), context/, the probe, and an app folder with the
+// implementArgs files (shell.json with the probe pattern and `sleep *`, agents.json with rl-main and rl-explorer). No session run passes
+// --no-session-persistence. After each run the gate moves <projectsDir>/<encoded cwd>/<session id>.jsonl into <tmp>/sessions/ and
+// deletes the per-cwd folders, as the planned keep step and removeCwdFolders do. Runs 2 to 4 resume the moved run 1 file, so one failed
+// run costs only its own facts. A kept transcript never goes into raw/: the sanitizer turns each raw .jsonl into a fixture.
+const B37 = {
+  a0: "RLGB-A0",
+  a1: "RLGB-A1",
+  a2: "RLGB-A2",
+  a3: "RLGB-A3",
+  a4: "RLGB-A4",
+  b0: "RLGB-B0",
+  b2: "RLGB-B2",
+  kill: "RLGB-K5",
+  out: "RLGB-OUT",
+};
+// U109: the model and effort of the other resume. Run 1 uses haiku without --effort.
+const B37_OTHER = { model: "sonnet", effort: "low" } as const;
+// stopProcs finds this command.
+const B37_SLEEP = "sleep 600";
+const B37_LIVE_SLEEP = "sleep 20";
+// U104: the quiet time after the first result before stdin closes, and the limit for the exit after the close.
+const B37_RESULT_WAIT_MS = 5000;
+const B37_CLOSE_EXIT_MS = 10_000;
+// A session ID goes into a file path.
+const B37_SID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const B37_RESULT = `Then return summary = one line per call with its result, done = true, tests and notes empty lists, question null, specChange "". ${EMPTY_COVERAGE}`;
+const b37Prompt = (steps: string[], tail = B37_RESULT) =>
+  [
+    "This is a session test. Make these tool calls, one call each, in this order. Try every call, also when one is refused or fails. Do not retry a call. Make no other call.",
+    ...steps.map((s, i) => `${i + 1}. ${s}`),
+    tail,
+  ].join("\n");
+const bashStep = (c: string) => `Bash with this exact command:\n\`\`\`\n${c}\n\`\`\``;
+const sha256 = (p: string) => createHash("sha256").update(readFileSync(p)).digest("hex");
+// A rename fails across volumes (EXDEV), for example with CLAUDE_CONFIG_DIR on another drive. A killed CLI can hold the file for a
+// moment on Windows (EBUSY, EPERM), as in rmRetry.
+function moveFile(from: string, to: string) {
+  for (let i = 1; ; i++) {
+    try {
+      return renameSync(from, to);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      if (code === "EXDEV") {
+        copyFileSync(from, to);
+        return rmSync(from);
+      }
+      if (!["EBUSY", "EPERM"].includes(code) || i >= 10) throw e;
+      Bun.sleepSync(200);
+    }
+  }
+}
+
+async function b37() {
+  const base = realpathSync.native(tmp("b37"));
+  const work = join(base, "work");
+  const repo = join(work, "repo");
+  const app = join(base, "app");
+  const sessions = join(base, "sessions");
+  for (const d of [repo, join(work, "context"), app, join(base, "data"), sessions, join(base, "critic")]) mkdirSync(d, { recursive: true });
+  const perCwd = encodeCwd(work);
+  const cwdDirs = [join(projectsDir, perCwd), join(tmpdir(), "claude", perCwd)];
+  // Values that the watch callbacks set.
+  const kill = { writes: new Set<string>(), wrote: false, wroteAtKill: false, stop: undefined as Promise<Stop> | undefined, pid: 0 };
+  const live = {
+    sent: false,
+    result: false,
+    waited: null as boolean | null,
+    closedAt: null as number | null,
+    closer: undefined as ReturnType<typeof setTimeout> | undefined,
+  };
+  try {
+    writeFileSync(join(work, PROBE), PROBE_JS);
+    const a = join(repo, "a.txt");
+    const b = join(repo, "b.txt");
+    writeFileSync(a, `${B37.a0}\n`);
+    writeFileSync(b, `${B37.b0}\n`);
+    const gitCfg = join(base, "gate.gitconfig");
+    writeFileSync(gitCfg, "");
+    // A placeholder author and an empty global config: the commits hold no real name, and no user setting such as signing applies.
+    const g = (...args: string[]) => {
+      if (DRY) return;
+      const r = sh(["git", "-c", "user.name=rl-gate", "-c", "user.email=gate@example.invalid", "-c", "init.defaultBranch=main", ...args], {
+        cwd: repo,
+        env: gitEnv(gitCfg),
+      });
+      if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${short(r.err, 160)}`);
+    };
+    g("init", "-q");
+    g("add", "-A");
+    g("commit", "-q", "-m", "base");
+
+    const shell: ShellSpec = {
+      mode: "allowlist",
+      rules: [PROBE_RULE, "sleep *"],
+      bashTimeoutSec: SHELL_TIMEOUT_SEC,
+      dataDir: join(base, "data"),
+      origins: SHELL_ORIGINS,
+    };
+    const explorer = {
+      description: "Read-only search of the code for one question.",
+      prompt: "You search the code read-only and answer the question of the request. You cannot change files or run commands.",
+      model: "haiku",
+    };
+    const schema = draft07(implementResult);
+    // Each call writes the same shell.json, agents.json, and empty git config into app/.
+    const full = (maxTurns: number) =>
+      implementArgs({ implement: true, cwd: work, appDir: app, prompt: "", schema, maxTurns, model: "haiku", shell, explorer });
+    const f2 = full(20);
+    const env = shellEnv(appChildEnv(), shell, shellGitConfig(app));
+    const errors: Record<string, string> = {};
+    const go = async (tag: string, args: string[] | undefined, prompt: string, more: Parameters<typeof runClaude>[4] = {}) => {
+      if (!args) {
+        errors[tag] = "no kept transcript to resume";
+        return undefined;
+      }
+      try {
+        return await runClaude(`b37-${tag}`, args, prompt, work, { env, raw: true, keepProjects: true, ...more });
+      } catch (e) {
+        errors[tag] = (e as Error).message;
+        return undefined;
+      }
+    };
+    type Kept = { sid?: string; placed: boolean; file?: string; names: string[] };
+    const keep = (r: Run | undefined): Kept => {
+      const sid = r?.init?.session_id;
+      const dir = cwdDirs[0] as string;
+      const names = existsSync(dir) ? listFiles(dir) : [];
+      const src = sid && B37_SID.test(sid) ? join(dir, `${sid}.jsonl`) : undefined;
+      const placed = !!src && existsSync(src);
+      let file = src && placed ? join(sessions, basename(src)) : undefined;
+      try {
+        if (src && file) moveFile(src, file);
+      } catch (e) {
+        errors[`keep ${r?.name ?? "run"}`] = (e as Error).message;
+        file = undefined;
+      }
+      for (const d of cwdDirs) rmRetry(d);
+      return { sid, placed, file, names };
+    };
+    const resumeOf = (k: Kept) => k.file ?? (DRY ? join(sessions, "dry-run.jsonl") : undefined);
+
+    // Run 1: a fresh session. It reads a.txt and b.txt and writes a.txt, so run 2 can try an Edit of a.txt with no new Read (U100). The
+    // Write tool refuses an existing file that the session has not read, so the Read of a.txt comes first.
+    const r1 = await go(
+      "run1-create",
+      sessionArgs(full(8).args),
+      b37Prompt([
+        `Read with file_path ${a}`,
+        `Read with file_path ${b}`,
+        `Write with file_path ${a} and content ${B37.a1}`,
+        bashStep(probe("b37r1")),
+      ]),
+    );
+    const k1 = keep(r1);
+    const hash1 = k1.file ? sha256(k1.file) : undefined;
+    const res1 = resumeOf(k1);
+    // Between the runs: a commit moves the head, and an edit on disk stays uncommitted (U100).
+    writeFileSync(a, `${B37.a2}\n`);
+    g("add", "a.txt");
+    g("commit", "-q", "-m", "change a");
+    writeFileSync(b, `${B37.b2}\n`);
+
+    // Run 2: a resume with all flags. U97, U98, U100, U103, and U108.
+    const outside = join(base, "outside.txt");
+    const c98 = { git: "git status", unlisted: "touch b37-unlisted.ran", compound: `${probe("c98")} && git status`, probe: probe("u98") };
+    const args2 = res1 ? sessionArgs(f2.args, { resume: res1 }) : undefined;
+    const r2 = await go(
+      "run2-resume",
+      args2,
+      b37Prompt([
+        `Edit with file_path ${a}, old_string "${B37.a2}", and new_string "${B37.a3}". Do not Read the file before this call.`,
+        `Read with file_path ${a}`,
+        `Read with file_path ${b}`,
+        `Edit with file_path ${a}: replace the text that call 2 showed with ${B37.a4}`,
+        `Write with file_path ${outside} and content ${B37.out}`,
+        ...Object.values(c98).map(bashStep),
+        'Agent with subagent_type "general-purpose" and the prompt "Reply with the word OK. Use no tools."',
+        'Agent with subagent_type "rl-explorer" and the prompt "Read ./repo/b.txt and reply with its first line. Then try to create ./repo/explorer.txt with the Write tool."',
+      ]),
+    );
+    const k2 = keep(r2);
+
+    // Run 3: a resume without Bash and Agent, as a resolve run (U99). The app child env has no shell variables.
+    const f3 = implementArgs({ implement: true, cwd: work, prompt: "", schema, maxTurns: 4, model: "haiku" });
+    const r3 = await go(
+      "run3-nobash",
+      res1 ? sessionArgs(f3.args, { resume: res1 }) : undefined,
+      `This is a session test. Run this command with the Bash tool:\n\`\`\`\n${probe("u99")}\n\`\`\`\nIf you have no Bash tool, make no tool call. ${B37_RESULT}`,
+      { env: appChildEnv() },
+    );
+    keep(r3);
+
+    // Run 4: a resume with another model and effort (U109).
+    const r4 = await go(
+      "run4-model",
+      res1 ? sessionArgs(full(4).args, { resume: res1, ...B37_OTHER }) : undefined,
+      `This is a format test. Make no tool call. ${B37_RESULT}`,
+    );
+    keep(r4);
+    const kept1 = !!k1.file && existsSync(k1.file) && sha256(k1.file) === hash1;
+
+    // Run 5: a fresh session that writes a file, then waits in `sleep 600`. The app kill (U101, U102) comes in the sleep, as B25 does it.
+    const since = Date.now();
+    const marker = crypto.randomUUID();
+    const r5 = await go(
+      "run5-kill",
+      sessionArgs(full(6).args),
+      b37Prompt([`Write with file_path ${join(repo, "k.txt")} and content ${B37.kill}`, bashStep(B37_SLEEP)]),
+      {
+        env: { ...env, [RUN_MARKER]: marker },
+        spawned: (pid) => {
+          kill.pid = pid;
+          contain(pid, marker);
+        },
+        watch: (e, pid) => {
+          for (const bl of blocks(e)) {
+            if (bl.type === "tool_use" && bl.name === "Write" && bl.id) kill.writes.add(bl.id);
+            if (bl.type === "tool_result" && bl.tool_use_id && kill.writes.has(bl.tool_use_id) && !bl.is_error) kill.wrote = true;
+            if (!kill.stop && bl.type === "tool_use" && bl.name === "Bash" && String(bl.input?.command ?? "").trim() === B37_SLEEP) {
+              kill.wroteAtKill = kill.wrote;
+              kill.stop = stopRun(pid, since, marker);
+            }
+          }
+        },
+      },
+    );
+    const stop = kill.stop ? await kill.stop : undefined;
+    // stopRun ends the registration. Without a stop, the run end does, as the app does after each run.
+    if (kill.pid && !stop) await appKillTree(kill.pid, true);
+    const k5 = keep(r5);
+    const t5 = k5.file ? transcriptFacts(readFileSync(k5.file, "utf8"), B37.kill) : undefined;
+
+    // Run 6: the resume of the cut transcript (U101).
+    const r6 = await go(
+      "run6-after-kill",
+      (stop && k5.file) || DRY ? sessionArgs(full(4).args, { resume: k5.file ?? join(sessions, "dry-run.jsonl") }) : undefined,
+      `This is a session test. Make no tool call and read no file. Set summary to the file path and the exact text that you wrote with the Write tool earlier in this session, or to "none". Set done = true, tests and notes empty lists, question null, specChange "". ${EMPTY_COVERAGE}`,
+    );
+    keep(r6);
+
+    // Run 7: stream-json input (U104). The second message goes in while Claude waits in `sleep 20`. After the first result, stdin closes
+    // when no stream event came for B37_RESULT_WAIT_MS. A CLI that is alive then waits idle for more input.
+    const r7 = await go(
+      "run7-live",
+      sessionArgs(full(10).args, { live: true }),
+      b37Prompt(
+        [bashStep(B37_LIVE_SLEEP), bashStep(probe("b37first"))],
+        `A user message can come while you work. Do what it asks before you return the result. ${B37_RESULT}`,
+      ),
+      {
+        live: true,
+        watch: (e, pid, input) => {
+          if (!input) return;
+          const sleeping = blocks(e).some(
+            (bl) => bl.type === "tool_use" && bl.name === "Bash" && String(bl.input?.command ?? "").trim() === B37_LIVE_SLEEP,
+          );
+          if (!live.sent && sleeping) {
+            live.sent = true;
+            input.send(`Also run this command with the Bash tool before you return the result:\n\`\`\`\n${probe("b37live")}\n\`\`\``);
+          }
+          live.result ||= e.type === "result";
+          if (!live.result || live.closedAt !== null) return;
+          clearTimeout(live.closer);
+          live.closer = setTimeout(() => {
+            live.waited = alive(pid);
+            live.closedAt = performance.now();
+            input.close();
+          }, B37_RESULT_WAIT_MS);
+        },
+      },
+    );
+    const endAt = performance.now();
+    clearTimeout(live.closer);
+    keep(r7);
+
+    // Run 8: the critic. The review flags without review agents (runnerArgs), haiku, and the review schema, with no verify phase (U110).
+    const r8 = await go(
+      "run8-critic",
+      runnerArgs(join(base, "critic"), reviewJsonSchema(false)),
+      'This is a format test. Read ./repo/a.txt. Return summary "gate b37 critic", risks, questions, findings, and answered empty lists, and coverage with read = ["repo/a.txt"] and skipped, unavailable, and notChecked empty lists.',
+      { raw: false, env: runnerEnv() },
+    );
+    keep(r8);
+    if (DRY) return dry("B37", `shell rules=${shell.rules.length}; other model=${B37_OTHER.model} effort=${B37_OTHER.effort}`);
+
+    // ---------- facts ----------
+    const put = (f: Fact) => push(`B37.${f.id}`, f.status, f.evidence);
+    const lost = (id: string, tag: string) => push(`B37.${id}`, "FAIL", `${tag} did not run: ${short(errors[tag] ?? "no output", 200)}`);
+    const zod = (r: Run, s: z.ZodType) => short(zodIssues(s.safeParse(structured(r))), 200);
+    const seen = (r: Run, state: StreamState, cmd: string) => ({ state: outcomeOf(r, cmd).state, label: labelOf(state, cmd) });
+
+    if (r2) {
+      const parser = createStreamParser({ cwd: work, allowedTools: f2.allowed, agents: f2.agents, shell: "allowlist" });
+      for (const e of r2.events) parser.line(JSON.stringify(e));
+      const st = parser.state;
+      const want = (f2.args[f2.args.indexOf("--tools") + 1] ?? "").split(",");
+      put(
+        u97({
+          argv: args2 ?? [],
+          exit: r2.exit,
+          tools: r2.init?.tools ?? null,
+          want,
+          allowed: [...f2.allowed],
+          mode: r2.init?.permissionMode,
+          zod: zod(r2, implementResult),
+        }),
+      );
+      put(
+        u98({
+          write: { state: fileOutcome(r2, "Write", "outside.txt").state, file: existsSync(outside) },
+          git: seen(r2, st, c98.git),
+          unlisted: { ...seen(r2, st, c98.unlisted), marker: existsSync(join(work, "b37-unlisted.ran")) },
+          compound: { ...seen(r2, st, c98.compound), marker: ran(work, "c98") },
+          probe: { ...seen(r2, st, c98.probe), marker: ran(work, "u98") },
+        }),
+      );
+    } else for (const id of ["U97", "U98"]) lost(id, "run2-resume");
+
+    if (r3) {
+      const calls = bashCalls(r3);
+      const ok = (id: string) => {
+        const res = toolResult(r3, id);
+        return !!res && !res.is_error;
+      };
+      const bash = !calls.length ? "not tried" : calls.some((c) => ok(c.id)) ? "ran" : "refused";
+      put(u99({ exit: r3.exit, tools: r3.init?.tools ?? null, bash: { state: bash }, marker: ran(work, "u99") }));
+    } else lost("U99", "run3-nobash");
+
+    if (r2) {
+      const stale = fileOutcome(r2, "Edit", "a.txt");
+      put(
+        u100({
+          setup: r1 ? fileOutcome(r1, "Write", "a.txt").state : "run 1 did not run",
+          stale: { state: stale.state, text: short(stale.text, 160) },
+          readA: fileOutcome(r2, "Read", "a.txt").text,
+          readB: fileOutcome(r2, "Read", "b.txt").text,
+          final: existsSync(a) ? readFileSync(a, "utf8").trim() : "",
+          marks: { old: B37.a1, newA: [B37.a2, B37.a3], newB: B37.b2, edited: B37.a4 },
+        }),
+      );
+    } else lost("U100", "run2-resume");
+
+    if (r6 || !stop) {
+      const s6 = (r6 ? structured(r6) : undefined) as { summary?: unknown } | undefined;
+      put(
+        u101({
+          killed: !!stop,
+          wroteFirst: kill.wroteAtKill,
+          kept: !!k5.file,
+          exit: r6?.exit ?? null,
+          summary: String(s6?.summary ?? ""),
+          marker: B37.kill,
+          calls: r6 ? toolUses(r6).flatMap((t) => (t.name === "StructuredOutput" ? [] : [t.name])) : [],
+        }),
+      );
+    } else lost("U101", "run6-after-kill");
+
+    const transcript = t5
+      ? `partial transcript: lines=${t5.lines} last line whole JSON=${t5.lastWhole} ends with a newline=${t5.endsWithNewline} holds the Write=${t5.holds}`
+      : "no partial transcript";
+    push(
+      "B37.U102",
+      "INFO",
+      stop
+        ? `the kill path of the process cap (claude.ts:635-638): the app killTree; ${process.platform}; sleep found=${stop.sleeps.length} in ${stop.findMs} ms; CLI gone in ${stop.cliMs ?? `>${STOP_LIMIT_MS}`} ms; sleep gone in ${stop.sleepMs ?? `>${STOP_LIMIT_MS}`} ms; sleep ended by=${stop.sleeps.map((p) => endedBy(p, stop.report, stop.sleepMs !== null)).join(",") || "none"}; leftovers killed by PID=${stop.left.map((p) => p.name).join(",") || "none"}; run 5 exit=${r5?.exit ?? "none"}; ${transcript}`
+        : `no kill: Claude did not run ${B37_SLEEP}; ${r5 ? `run 5 exit=${r5.exit}` : `run5-kill did not run: ${short(errors["run5-kill"] ?? "no output", 200)}`}; ${transcript}`,
+    );
+
+    const ids = { [k1.sid ?? ""]: "<run1>", [k2.sid ?? ""]: "<run2>" };
+    put(
+      u103({
+        placed: [k1.placed, k2.placed],
+        newId: !!k2.sid && k2.sid !== k1.sid,
+        files: [labelIds(k1.names, ids), labelIds(k2.names, ids)],
+        resumed: r2?.exit === 0 && !!r2.init,
+        kept: kept1,
+      }),
+    );
+
+    if (r7) {
+      const results = r7.results.length > 0 && !r7.timedOut;
+      const closed = live.closedAt;
+      put(
+        u104({
+          sent: live.sent,
+          marker: ran(work, "b37live"),
+          structured: r7.results.some((e) => e.structured_output !== undefined),
+          results: r7.results.length,
+          queued: r7.results.map((e) => (e as { queued_turn_count?: unknown }).queued_turn_count ?? "none"),
+          waited: live.waited,
+          exitedBeforeClose: closed === null && results,
+          exitAfterCloseMs: closed !== null && endAt - closed <= B37_CLOSE_EXIT_MS ? Math.round(endAt - closed) : null,
+          exit: r7.exit,
+        }),
+      );
+    } else lost("U104", "run7-live");
+
+    const runs = [r1, r2, r3, r4, r5, r6, r7, r8];
+    put(u105(runs.slice(0, 7).flatMap((r, i) => (r ? [{ name: `run${i + 1}`, events: r.events }] : []))));
+
+    const now = Date.now();
+    const limits = runs.flatMap((r) => (r ? rateLimits(r.events, now) : []));
+    push(
+      "B37.U106",
+      "INFO",
+      limits.length
+        ? `rate_limit_event count=${limits.length}; ${limits.map((x) => `status=${x.status} rateLimitType=${x.type} resetsAt=${x.resetsAt ?? "none"} unit=${x.unit}${x.inMin === null ? "" : ` (in ${x.inMin} min)`} keys=${x.keys.join(",")}`).join("; ")}`
+        : "no rate_limit_event",
+    );
+
+    const u1 = r1 ? usageOf(r1.events) : null;
+    const resumed = (
+      [
+        ["run2", r2],
+        ["run3", r3],
+        ["run4", r4],
+      ] as const
+    ).map(([n, r]) => [n, r ? usageOf(r.events) : null] as const);
+    const fmt = (u: Usage | null) =>
+      u
+        ? `cost=${u.cost ?? "none"} input=${u.input ?? "none"} output=${u.output ?? "none"} cacheRead=${u.cacheRead ?? "none"} cacheCreation=${u.cacheCreation ?? "none"} modelUsage=${u.models.join(",") || "none"}`
+        : "none";
+    const rest = resumed.map(([, u]) => u);
+    push(
+      "B37.U107",
+      "INFO",
+      `run1: ${fmt(u1)}; ${resumed.map(([n, u]) => `${n}: ${fmt(u)}`).join("; ")}; run2 first call cacheRead=${r2 ? (mainUsage(r2.events).firstCacheRead ?? "none") : "none"}; output tokens=${perProcess(u1, rest, "output")}; total_cost_usd=${perProcess(u1, rest, "cost")}`,
+    );
+
+    if (r2)
+      put(
+        u108({
+          gp: agentOutcome(r2.events, "general-purpose"),
+          ex: agentOutcome(r2.events, "rl-explorer"),
+          explorerFile: existsSync(join(repo, "explorer.txt")),
+        }),
+      );
+    else lost("U108", "run2-resume");
+
+    if (r4) {
+      const model = String((r4.init as { model?: unknown } | undefined)?.model ?? "none");
+      const used = [
+        ...new Set(r4.events.filter((e) => e.type === "assistant" && !e.parent_tool_use_id).map((e) => e.message?.model ?? "none")),
+      ];
+      push(
+        "B37.U109",
+        r4.exit === 0 && namesModel(model, B37_OTHER.model) ? "PASS" : "FAIL",
+        `--model ${B37_OTHER.model} --effort ${B37_OTHER.effort} on the run 1 (haiku) transcript: exit=${r4.exit} init.model=${model} main-thread models=${used.join(",") || "none"} implementResult=${zod(r4, implementResult)}`,
+      );
+    } else lost("U109", "run4-model");
+
+    if (r8) {
+      const z8 = zod(r8, reviewResult);
+      push(
+        "B37.U110",
+        z8 === "ok" ? "PASS" : "FAIL",
+        `--model haiku with the review flags (runnerArgs), no verify phase, reviewJsonSchema: exit=${r8.exit} reviewResult=${z8}`,
+      );
+    } else lost("U110", "run8-critic");
+    const moves = Object.entries(errors).filter(([k]) => k.startsWith("keep "));
+    if (moves.length)
+      push("B37.keep", "FAIL", `transcript moves that failed: ${moves.map(([k, v]) => `${k}: ${short(v, 160)}`).join("; ")}`);
+  } finally {
+    clearTimeout(live.closer);
+    for (const d of cwdDirs) rmRetry(d);
+    rmRetry(base);
+  }
+}
+
 // ---------- GADV: the advisor (docs/plans/review-v2/advisor.md, Gate G-ADV) ----------
 // All runs use the app child env and the runner flag set. Its --tools and --allowedTools lists omit the advisor.
 // Docs: these variables remove the advisor, because it needs feature-flag fetching.
@@ -3432,6 +3967,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B32: b32,
   B33: b33,
   B34: b34,
+  B37: b37,
   GADV: gadv,
 };
 {

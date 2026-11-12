@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { countHits, formPairs, isObj, type Json, sanitizer, scanPatterns, UUID } from "./sanitize-core";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const args = process.argv.slice(2);
@@ -36,15 +37,10 @@ const CHECKS: Record<string, string> = {
     "B11, fix run. The runner flag set without review agents and the fix JSON schema. Expect `structured_output` with one edit whose `new` text has 2 KB or more.",
   gadv: "Gate G-ADV. The app flag set with `--advisor`: an advisor call, no `--advisor` (`none`), `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (`envoff`), `--disallowedTools advisor` (`disallowed`), and `--tools` with the advisor (`tools`).",
   b12: "B12. The runner flag set without review agents. The agent reads a PNG attachment with Read and names its color in `structured_output`.",
+  b37: "B37. One Claude session per task part: a create run with the implement flags and no `--no-session-persistence`, resumes with `--resume <kept file> --fork-session` (all flags, no Bash and Agent, another model), a run cut by the app kill and its resume, stream-json input, and a critic review run.",
 };
 // Public built-in agent and product names. They are not private data, and a replacement would break the event shapes.
 const RESERVED = new Set(["claude", "general-purpose", "explore", "plan", "statusline-setup", "claude-code-guide", "builtin"]);
-
-type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
-const isObj = (v: Json): v is { [k: string]: Json } => !!v && typeof v === "object" && !Array.isArray(v);
-const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const word = (t: string) => `(?<![a-z0-9])${esc(t)}(?![a-z0-9])`;
-const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 // ---------- read raw ----------
 if (!existsSync(RAW)) {
@@ -115,12 +111,8 @@ add(userInfo().username, "user", () => "user");
 const FAKE_HOME = "C:\\Users\\user";
 const configDir =
   typeof auth.configDirectory === "string" ? auth.configDirectory : (process.env.CLAUDE_CONFIG_DIR ?? join(HOME, ".claude"));
-// Claude Code names per-cwd folders with every non-alphanumeric character replaced by "-".
-const pathForms = (p: string) => [p, p.replaceAll("\\", "/"), p.replaceAll("\\", "\\\\"), p.replace(/[^a-zA-Z0-9]/g, "-")];
-const formPairs = (real: string, fake: string) => pathForms(real).map((r, i) => [r, pathForms(fake)[i] as string] as [string, string]);
 // A custom config folder name can hold a personal name.
 const homeForms = [...[...homes].flatMap((h) => formPairs(h, FAKE_HOME)), ...formPairs(configDir, `${FAKE_HOME}\\.claude`)];
-homeForms.sort((a, b) => b[0].length - a[0].length);
 add(basename(configDir), "config", () => ".claude");
 const list = (d: string) => (existsSync(d) ? readdirSync(d) : []);
 for (const f of list(join(configDir, "agents")).filter((x) => x.endsWith(".md"))) {
@@ -151,26 +143,7 @@ for (const evs of raw.values())
 const uuidMap = new Map([...realUuids].map((u, i) => [u, `00000000-0000-4000-8000-${(i + 1).toString(16).padStart(12, "0")}`]));
 
 // ---------- sanitize ----------
-const tokens = [...tokenMap.keys()].sort((a, b) => b.length - a.length);
-const tokenRe = tokens.length ? new RegExp(tokens.map(word).join("|"), "gi") : null;
-function fix(s: string): string {
-  let out = s;
-  for (const [real, fake] of homeForms) out = out.replace(new RegExp(esc(real), "gi"), fake);
-  out = out.replace(UUID, (u) => uuidMap.get(u.toLowerCase()) ?? u);
-  return tokenRe ? out.replace(tokenRe, (m) => tokenMap.get(m.toLowerCase()) ?? m) : out;
-}
-const HOOK_FIELDS = new Set(["output", "stdout", "stderr"]);
-function sanitize(v: Json): Json {
-  if (Array.isArray(v)) return v.map((x) => sanitize(x));
-  if (isObj(v)) {
-    // User hooks print their own text. It is not part of the event shape.
-    const isHook = typeof v.subtype === "string" && v.subtype.startsWith("hook_");
-    return Object.fromEntries(
-      Object.entries(v).map(([k, x]) => [fix(k), isHook && HOOK_FIELDS.has(k) && typeof x === "string" ? "<hook output>" : sanitize(x)]),
-    );
-  }
-  return typeof v === "string" ? fix(v) : v;
-}
+const { sanitize } = sanitizer(tokenMap, homeForms, uuidMap);
 
 mkdirSync(OUT, { recursive: true });
 for (const f of list(OUT)) if (f.endsWith(".jsonl")) rmSync(join(OUT, f));
@@ -200,18 +173,12 @@ writeFileSync(
 );
 
 // ---------- scan ----------
-const scanTokens = tokens.filter((t) => tokenMap.get(t)?.toLowerCase() !== t);
-const res = [
-  ...scanTokens.map((t) => new RegExp(word(t))),
-  ...[...homes, configDir].flatMap(pathForms).map((h) => new RegExp(esc(h.toLowerCase()))),
-  ...[...realUuids].map((u) => new RegExp(esc(u))),
-];
-let hits = 0;
-for (const f of list(OUT)) {
-  const s = readFileSync(join(OUT, f), "utf8").toLowerCase();
-  for (const re of res) if (re.test(s)) hits++;
-}
+const { res, names } = scanPatterns(tokenMap, [...homes, configDir], realUuids);
+const hits = countHits(
+  list(OUT).map((f) => readFileSync(join(OUT, f), "utf8")),
+  res,
+);
 console.log(
-  `files written=${files.length} values checked=${res.length} (names=${scanTokens.length} homes=${homes.size} uuids=${realUuids.size}) hits=${hits}`,
+  `files written=${files.length} values checked=${res.length} (names=${names} homes=${homes.size} uuids=${realUuids.size}) hits=${hits}`,
 );
 if (hits) process.exit(1);

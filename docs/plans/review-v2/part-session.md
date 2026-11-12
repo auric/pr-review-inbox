@@ -1,6 +1,6 @@
 # Build a Jira task: one Claude session per part
 
-Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. Not built. Gate B37 is not run. All user requirements of 2026-11-12 are decided. User answers of 2026-11-12: Q1 to Q9 take the recommended answers. Section 3 is approved, items 1 to 15, with the red-build fixes as a tick per part. RUN_TIME_MAX_MS (240 min) stays. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
+Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. PS0 is code complete: the Gate B37 script (`scripts/gate/claude-checks.ts`, `scripts/gate/session.ts`) and CI12 (`scripts/gate/ci.ts`). Gate B37 and CI12 are not run. The other packages are not built. All user requirements of 2026-11-12 are decided. User answers of 2026-11-12: Q1 to Q9 take the recommended answers. Section 3 is approved, items 1 to 15, with the red-build fixes as a tick per part. RUN_TIME_MAX_MS (240 min) stays. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
 
 Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, and shared/task.ts are those of the WP-R1b tree. The other files are equal on main.
 
@@ -464,7 +464,7 @@ Settings > Tasks > Run limits:
 
 Each item gives the line now and the new wording.
 
-1. **BRIEF.md:237, principle 1.** Now: "Human gate: nothing goes to the code host without an explicit user action." Add: "One tick in the push confirm of a task part allows up to N pushes of red-build fixes for that part only (spec.md section 6.27)."
+1. **BRIEF.md:237, principle 1.** Now: "Human gate: nothing goes to the code host without an explicit user action." Add: "One tick in the push confirm of a task part allows up to N pushes of red-build fixes for that part only (spec.md section 6.28)."
 2. **BRIEF.md:241, principle 5.** Now: "No automatic retry after a usage limit. A task loop takes a run slot for each Claude step and frees it between steps." New: "No automatic retry after a usage limit, except the setting 'Resume by itself after a usage limit', which is off by default. With it, a part session of a task resumes once at the reset time that the CLI reports. A task loop takes a run slot for each run of a part session and frees it between runs."
 3. **BRIEF.md:156, git state.** Now: "On a change, it restores them, saves the patch, resets the worktree to the step start, and waits". New: "On a change, it restores them, saves the patch, keeps the files that pass the path check, and waits with 'Needs you: Claude changed git state during the run. The app restored it.' The next run starts a new session." (Recommended; question Q4.)
 4. **BRIEF.md:155.** Now: "After each Claude step, the app runs git status. A denied path (Denied paths, section 7), a link, or a path outside repo/ fails the step. The app saves the changes as a patch, then resets the worktree to the last commit." New: "After each run of a part session, the app runs git status. A denied path, a link, or a path outside repo/ fails the run. The app saves a patch of those paths and undoes only them. The other work stays. A problem that the undo cannot clear resets the worktree to the last commit."
@@ -476,7 +476,7 @@ Each item gives the line now and the new wording.
 9. **BRIEF.md:288-289, US10.** Now: "The tool then writes tests and code step by step, runs my approved build and test commands, and reviews its own work." and "A pull request that grows past the line budget stops and proposes a split. A stopped task resumes from its last good step."
    - New: "The tool then writes tests and code in one Claude session per part, runs my approved build and test commands before each commit, and reviews its own work. Small: one pull request whose description is the task card. Medium: one pull request with a short brief and the code."
    - New: "A pull request over the line budget shows a note with the count. A stopped task goes on from where it stopped and keeps its work."
-10. **BRIEF.md:429, flags.** Add: "From its second run on, a part session run of a task drops --no-session-persistence and adds --resume <transcript> --fork-session (spec.md section 6.27)."
+10. **BRIEF.md:429, flags.** Add: "From its second run on, a part session run of a task drops --no-session-persistence and adds --resume <transcript> --fork-session (spec.md section 6.28)."
 11. **BRIEF.md:444-445.** Now: "App runs never resume a session. ... Only 'Ask your session' ... resumes a session". New:
     - "PR runs never resume a session. Two features resume one."
     - "'Ask your session' forks the user's own session with --fork-session and --no-session-persistence."
@@ -494,7 +494,7 @@ Each item gives the line now and the new wording.
     - "Each stop says why and offers one button. Continue goes on from where the build stopped and keeps the work."
     - "'Start this part again' resets the part before its first push. It keeps the old work as a patch and a backup branch."
 14. **CLAUDE.md, Hard rules.**
-    - "Nothing goes to Bitbucket or Jira without an explicit user action. The app posts, not the AI." becomes "Nothing goes to Bitbucket, Jira, or Jenkins without an explicit user action. The app posts, not the AI. The red-build fixes of a task part are one explicit action for at most N pushes (spec.md section 6.27)."
+    - "Nothing goes to Bitbucket or Jira without an explicit user action. The app posts, not the AI." becomes "Nothing goes to Bitbucket, Jira, or Jenkins without an explicit user action. The app posts, not the AI. The red-build fixes of a task part are one explicit action for at most N pushes (spec.md section 6.28)."
     - "The Bitbucket token never goes into SQLite, localStorage, logs, URLs, or prompts." becomes "The Bitbucket, Jira, and Jenkins tokens never go into SQLite, localStorage, logs, URLs, or prompts."
     - In the Build a Jira task exception, "A push and a PR create or update go to Bitbucket only on the user's click." becomes "... only on the user's click, or within the red-build fixes that the user ticked for that part."
 15. **BRIEF section 7, layout.** Add `src/server/ci/`, with all Jenkins calls in `src/server/ci/jenkins.ts` (ci-builds.md:135).
@@ -506,8 +506,10 @@ Numbers: B36 and U96 are the last numbers in use (agent-workflow.md section 6). 
 How to run it:
 
 - Run `bun scripts/gate/claude-checks.ts --only B37`, then `bun scripts/gate/sanitize-claude.ts`. The sanitizer must print `hits=0`.
-- The gate uses haiku and makes at most 9 calls.
-- It uses a temp part folder with repo/ (a temp git repository), context/, and an app folder. The app folder holds the app's implementArgs, shell.json (an allowlist with one probe pattern), shellEnv, and agents.json (rl-main and rl-explorer).
+- The gate uses haiku and makes at most 9 calls (8 planned). Only U109 uses sonnet.
+- It uses a temp part folder with repo/ (a temp git repository), context/, and an app folder. The app folder holds the app's implementArgs, shell.json (an allowlist with the probe pattern and `sleep *`, because U101 and U104 wait in a sleep), shellEnv, and agents.json (rl-main and rl-explorer).
+- Runs 2 to 4 resume the moved run 1 file, so one failed run costs only its own facts.
+- CI12: `bun run gate:ci -- <PR URL> --jenkins <Jenkins URL> --jenkins-user <user> --build <build URL>`. The build URL comes from `--build`, because the CI3 status URL shape (`/<s>/<s>/job/<s>/<s>`) is not verified as a build URL (integration-check.md CI3). So CI12 does not show how the app gets from a status URL to a build URL. PS7b needs that fact.
 
 | Fact | Check | PASS | If it fails |
 |---|---|---|---|
@@ -641,7 +643,7 @@ Run one implementer at a time per worktree.
 
 | WP | Tier | Scope | Depends on |
 |---|---|---|---|
-| PS0 Gate B37 and CI12 | implementer-xhigh | scripts/gate/claude-checks.ts (B37), scripts/gate/ci.ts (CI12), tests/gate/ci.test.ts, integration-check.md rows U97 to U111 and CI12, docs/gate-v2.md | none |
+| PS0 Gate B37 and CI12 (code complete) | implementer-xhigh | scripts/gate/claude-checks.ts (B37), scripts/gate/ci.ts (CI12), tests/gate/ci.test.ts, integration-check.md rows U97 to U111 and CI12, docs/gate-v2.md | none |
 | (user) Run B37 and CI12 | user | real CLI, real Jenkins | PS0 |
 | PS1 Partial undo and the git snapshot on disk | implementer-xhigh | implement.ts (undoStep, undoTrees, after, finish), worktree.ts (a path restore helper), gitstate.ts (write and read the snapshot file), tasks.ts (recoverTasks), tests | none |
 | PS2 Runner sessions | implementer-xhigh | claude.ts (ImplementSpec resume and keep, the keep step before removeCwdFolders, the stall and loop guard, stream-json input behind a flag), stream.ts (usage per message, resetsAt, the loop count), run-log.ts, jobs.ts (implementSteps passes the session and returns the kept file; cancel by part), tests/support/fake-claude.ts (transcripts, resume, stream input), tests | PS0. The resume path stays off until its facts pass. |
@@ -652,7 +654,7 @@ Run one implementer at a time per worktree.
 | PS7a Red build, paste | implementer | loop.ts (the CI run), shared/task.ts (the ci field), the web build row and its box, tests | PS6 |
 | PS7b Jenkins log read and red-build fixes | implementer-xhigh | config.ts, settings.ts, src/server/ci/jenkins.ts, tests/support/fake-jenkins.ts, loop.ts (the mode), the push confirm, notify.ts, tests, e2e | PS7a, CI12, and approval of section 3 items 1, 6, 7, 8, and 14 |
 | PS9 Spec size levels | implementer-xhigh | plan.ts (docNames, card and brief grammar), tasks.ts (the spec run prompt), machine.ts (medium path), pr.ts (prText), loop.ts (the card path), the plan screen, tests | PS5 |
-| PS8 Docs | implementer | BRIEF.md (the approved wording), spec.md 6.1, 6.7, 6.12, 6.18, 6.21.7, 6.26, and a new 6.27, CLAUDE.md status line, docs/smoke-task.md part P, CHANGELOG.md | PS5; again after PS6, PS7b, and PS9 |
+| PS8 Docs | implementer | BRIEF.md (the approved wording), spec.md 6.1, 6.7, 6.12, 6.18, 6.21.7, 6.26, and a new 6.28, CLAUDE.md status line, docs/smoke-task.md part P, CHANGELOG.md | PS5; again after PS6, PS7b, and PS9 |
 
 Parallel work: PS0 and PS1 touch different files, so they can run in two worktrees at once. Every package from PS2 on touches loop.ts, jobs.ts, or the task views, so those run in one worktree, in order.
 

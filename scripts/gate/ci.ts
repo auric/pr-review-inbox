@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Gate CI1 to CI11 (WP-CI0, the CI builds plan): the Bitbucket build status facts and the Jenkins multibranch facts.
+// Gate CI1 to CI12 (WP-CI0, the CI builds plan, and part-session.md section 2.15): the Bitbucket build status facts and the Jenkins facts.
 // CI1 to CI8 send GET requests only. CI9 sends POST api/json?tree=_class, which starts nothing.
 // CI10 starts one build, only with --authorize-build. CI11 scans the multibranch project, only with --authorize-scan.
 // A scan can start builds of other changed branches. Run CI11 only on a project where that is allowed.
-// Usage: bun run gate:ci -- <PR URL> [--jenkins <base URL>] [--jenkins-user <user>] [--job <folder/project>] [--authorize-build] [--authorize-scan]
+// CI12 reads the log of the --build build with one GET and prints only its status, headers, and byte count, never the log text.
+// Usage: bun run gate:ci -- <PR URL> [--jenkins <base URL>] [--jenkins-user <user>] [--job <folder/project>] [--build <build URL>]
+//          [--authorize-build] [--authorize-scan]
 //        bun run gate:ci -- --dry-run
 // --dry-run: all checks, CI10 and CI11 included, against a loopback fake Bitbucket and a fake Jenkins. It reads no secret.
 // Tokens: Bitbucket uses GATE_BITBUCKET_TOKEN, else the token of scripts/gate0/set-token.ts, only for the stored URL origin.
@@ -27,10 +29,10 @@ const AUTO_BUILD_WAIT_MS = 30_000;
 // The page size of the status list that Layer A reads.
 const STATUS_LIMIT = 25;
 // The plan has no CI4.
-const CHECKS = ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI9", "CI10", "CI11"] as const;
+const CHECKS = ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI9", "CI10", "CI11", "CI12"] as const;
 const USAGE = [
   "usage: bun run gate:ci -- <PR URL> [--jenkins <base URL>] [--jenkins-user <user>] [--job <folder/project>]",
-  "         [--authorize-build] [--authorize-scan]",
+  "         [--build <build URL>] [--authorize-build] [--authorize-scan]",
   "       bun run gate:ci -- --dry-run",
   "Tokens: GATE_BITBUCKET_TOKEN (else the stored token), GATE_JENKINS_TOKEN (needed with --jenkins).",
 ].join("\n");
@@ -43,13 +45,16 @@ function usage(msg: string): never {
 
 type Status = "PASS" | "FAIL" | "INFO" | "SKIPPED";
 export type Result = { check: string; status: Status; evidence: string };
-type Call = { status: number; body: unknown; headers: Headers };
+// size: the byte count of the body.
+type Call = { status: number; body: unknown; headers: Headers; size: number };
 export type Ctx = {
   bitbucket: { base: string; project: string; repo: string; id: number; token: string };
-  // Absent: CI5 to CI11 are skipped.
+  // Absent: CI5 to CI12 are skipped.
   jenkins?: { base: string; user: string; token: string };
   // The multibranch project path from --job, as job names.
   job?: string[];
+  // The --build URL as a path below the --jenkins base, with a trailing slash. Absent: CI12 is skipped.
+  buildPath?: string;
   build: boolean;
   scan: boolean;
   pollMs: number;
@@ -143,6 +148,7 @@ function needlesOf(c: Ctx, st: State): Needle[] {
   add("branch", st.branch);
   add("commit", st.head);
   for (const s of [...(c.job ?? []), ...(st.jobPath ?? [])]) add("job segment", s);
+  for (const s of (c.buildPath ?? "").split("/")) if (s && s !== "job" && !/^\d+$/.test(s)) add("job segment", decode(decode(s) ?? s) ?? s);
   if (st.target && !/^PR-\d+$/.test(st.target)) add("job segment", st.target);
   add("user", c.jenkins?.user);
   for (const u of st.users) add("user", u);
@@ -163,21 +169,22 @@ async function request(url: string, method: "GET" | "POST", headers: Record<stri
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
       headers: { Accept: "application/json", ...headers },
     });
-    const text = await res.text();
+    const bytes = await res.arrayBuffer();
+    const text = new TextDecoder().decode(bytes);
     let body: unknown = null;
     try {
       body = text ? JSON.parse(text) : null;
     } catch {}
-    return { status: res.status, body, headers: res.headers };
+    return { status: res.status, body, headers: res.headers, size: bytes.byteLength };
   } catch (e) {
-    return { status: 0, body: { network: (e as Error).name }, headers: new Headers() };
+    return { status: 0, body: { network: (e as Error).name }, headers: new Headers(), size: 0 };
   }
 }
 const bb = (c: Ctx, path: string) => request(c.bitbucket.base + path, "GET", { Authorization: `Bearer ${c.bitbucket.token}` });
-function jk(c: Ctx, st: State, path: string, method: "GET" | "POST" = "GET", crumb = true) {
+function jk(c: Ctx, st: State, path: string, method: "GET" | "POST" = "GET", crumb = true, extra: Record<string, string> = {}) {
   const j = c.jenkins;
   if (!j) throw new Error("no Jenkins");
-  const headers: Record<string, string> = { Authorization: `Basic ${btoa(`${j.user}:${j.token}`)}` };
+  const headers: Record<string, string> = { ...extra, Authorization: `Basic ${btoa(`${j.user}:${j.token}`)}` };
   if (method === "POST" && crumb && st.crumb) {
     headers[st.crumb.field] = st.crumb.value;
     if (st.crumb.cookie) headers.Cookie = st.crumb.cookie;
@@ -512,6 +519,22 @@ async function ci11(c: Ctx, st: State): Promise<Result> {
   };
 }
 
+// CI12 (part-session.md section 2.15, package C2): the log read of one build. Jenkins sends X-Text-Size, and X-More-Data: true while the
+// build runs. Only the status, these headers, the media type, and the byte count go out. The log text can hold names and secrets.
+async function ci12(c: Ctx, st: State): Promise<Result> {
+  if (!c.jenkins || !c.buildPath) return skip("CI12", "needs --jenkins and --build <build URL>");
+  const r = await jk(c, st, `${c.buildPath}logText/progressiveText?start=0`, "GET", true, { Accept: "text/plain" });
+  const size = r.headers.get("x-text-size");
+  const more = r.headers.get("x-more-data");
+  const type = r.headers.get("content-type");
+  const show = (v: string | null, ok: RegExp) => (v === null ? "absent" : ok.test(v) ? v : "<value>");
+  return {
+    check: "CI12",
+    status: r.status === 200 && size !== null ? "PASS" : "FAIL",
+    evidence: `progressiveText GET: HTTP ${r.status} (${words(r.status)}) X-Text-Size=${show(size, /^\d{1,15}$/)} X-More-Data=${show(more, /^(true|false)$/i)} content type=${show(type, /^[\w.+-]+\/[\w.+-]+(;\s*charset=[\w-]+)?$/i)} size=${r.size} B`,
+  };
+}
+
 const RUNNERS: Record<(typeof CHECKS)[number], (c: Ctx, st: State) => Promise<Result>> = {
   CI1: ci1,
   CI2: ci2,
@@ -523,6 +546,7 @@ const RUNNERS: Record<(typeof CHECKS)[number], (c: Ctx, st: State) => Promise<Re
   CI9: ci9,
   CI10: ci10,
   CI11: ci11,
+  CI12: ci12,
 };
 
 // Runs the checks. The results are already masked. needles: the sensitive values for the self-check.
@@ -592,6 +616,7 @@ export async function dryRun(opts: { build: boolean; scan: boolean }) {
   const ctx: Ctx = {
     bitbucket: { base: `${bitbucket.url}/bb`, project: "PROJ", repo: "sample-repo", id: 7, token: FAKE_TOKEN },
     jenkins: { base: jenkins.url, user: JENKINS_USER, token: JENKINS_TOKEN },
+    buildPath: `/job/${jenkins.folder}/job/${jenkins.project}/job/feature%252FABC-1-fix/3/`,
     build: opts.build,
     scan: opts.scan,
     pollMs: 20,
@@ -611,7 +636,7 @@ export async function dryRun(opts: { build: boolean; scan: boolean }) {
 // ---------- main ----------
 function parseArgs(argv: string[]) {
   const FLAGS = new Set(["--dry-run", "--authorize-build", "--authorize-scan"]);
-  const VALUES = new Set(["--jenkins", "--jenkins-user", "--job"]);
+  const VALUES = new Set(["--jenkins", "--jenkins-user", "--job", "--build"]);
   const flags = new Set<string>();
   const opt: Record<string, string> = {};
   let url: string | undefined;
@@ -640,6 +665,21 @@ function jenkinsBase(v: string) {
   if (!(u.protocol === "https:" || (u.protocol === "http:" && loopback))) usage("--jenkins needs https, or http on a loopback host.");
   if (u.username || u.password || u.search || u.hash) usage("--jenkins needs a URL without user info, query, or fragment.");
   return u.origin + u.pathname.replace(/\/+$/, "");
+}
+
+// The token goes only to the --jenkins origin, so the build URL must lie below the --jenkins base. Returns its path below the base.
+function buildArg(base: string, v: string) {
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    usage("--build is not a URL.");
+  }
+  const b = new URL(base);
+  const ctxPath = b.pathname.replace(/\/+$/, "");
+  if (u.origin !== b.origin || !u.pathname.startsWith(`${ctxPath}/`) || u.username || u.password || u.search || u.hash)
+    usage("--build needs a build URL below the --jenkins URL, without user info, query, or fragment.");
+  return u.pathname.slice(ctxPath.length).replace(/\/*$/, "/");
 }
 
 function jobArg(v: string) {
@@ -691,12 +731,13 @@ async function main() {
       if (!jt) usage("--jenkins needs the API token in GATE_JENKINS_TOKEN.");
       if (!opt["--jenkins-user"]) usage("--jenkins needs --jenkins-user <user>.");
       jenkins = { base: jenkinsBase(opt["--jenkins"]), user: opt["--jenkins-user"], token: jt };
-    } else if (build || scan || opt["--job"] || opt["--jenkins-user"])
-      usage("--jenkins-user, --job, --authorize-build, and --authorize-scan need --jenkins.");
+    } else if (build || scan || opt["--job"] || opt["--jenkins-user"] || opt["--build"])
+      usage("--jenkins-user, --job, --build, --authorize-build, and --authorize-scan need --jenkins.");
     ctx = {
       bitbucket: { base, project: pr.project, repo: pr.repo, id: pr.id, token },
       jenkins,
       job: opt["--job"] ? jobArg(opt["--job"]) : undefined,
+      buildPath: jenkins && opt["--build"] ? buildArg(jenkins.base, opt["--build"]) : undefined,
       build,
       scan,
       pollMs: POLL_MS,

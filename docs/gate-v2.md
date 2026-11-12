@@ -13,6 +13,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B32 | The Unrestricted shell mode (shell.md "Unrestricted mode"). Run on 2026-11-06. | `scripts/gate/claude-checks.ts` |
 | B33 | The built Unrestricted and Most commands settings without the read block (shell.md "Unrestricted mode"). | `scripts/gate/claude-checks.ts` |
 | B34 | git inside a quoted argument, and the line endings of a step worktree (docs/plans/review-v2/remote-skill.md). | `scripts/gate/claude-checks.ts` |
+| B37 | PS2 of docs/plans/review-v2/part-session.md (one Claude session per task part). Until B37 passes, each follow-up starts a fresh session. | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
 | G7 | No fixed point. INFO only. | `scripts/gate/bitbucket-write.ts` |
@@ -173,6 +174,26 @@ This check gives the fact SU21. It uses the app shell.json and env of Unrestrict
 | Check | Fact | What it runs | PASS |
 |---|---|---|---|
 | B34 | SU21 | Two runs: Unrestricted and Most commands (stored value any), with the app flags, shell.json, and env. Saved patterns name the probe as `<probe> b34host *` and `<probe> b34tar *`. The probe stands in for ssh as in B33 and never reaches a host. Commands, one Bash call each: `git --version` (the control), `bash -c 'git --version'`, `<probe> b34host 'cd x && git init'`, and `tar -cf - -C repo . \| <probe> b34tar 'tar -xf - -C x'`. Then, with no claude, the gate makes a step worktree with the app code (prepareTaskWorkspace, then openWorktree) from a temp bare remote. Its blobs are lf.txt with LF, crlf.txt with CRLF, and a .gitattributes with `* text=auto eol=crlf`. The gate reads the bytes of both files. | In both runs the deny list refuses `git --version` with the app label "deny" and also refuses `bash -c 'git --version'`. The ssh stand-in with `git init` in its quoted argument runs and writes its marker. The tar pipe into the stand-in runs and writes its marker. The worktree keeps each blob unchanged: lf.txt is LF and crlf.txt is CRLF. INFO: the control holds, but another fact differs. FAIL: the deny list lets `git --version` run, or the worktree is not built. Facts for you: the state and the permission_denied fields of each command. |
+
+### B37: one Claude session per task part
+
+This check gives the facts U97 to U110 (integration-check.md "Part sessions"). U111 is manual (docs/smoke-task.md part P). Every run uses haiku, the app child env, and the app flags from implementArgs in one temp part folder. shell.json is an allowlist with the probe pattern and `sleep *`. No session run passes `--no-session-persistence`. After each run the gate moves the new transcript into `<tmp>/sessions/` and deletes the per-cwd folders, as the planned keep step does. The kept transcripts never go into `raw/`. The same preparation as above applies.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B37`.
+- Run: `bun scripts/gate/claude-checks.ts --only B37`. Then sanitize as above. It must print `hits=0`.
+- Own call cap: B37 9 (8 planned).
+
+| Run | Facts | What it runs |
+|---|---|---|
+| 1 | U103, U105, U107 | A fresh session: Reads of a.txt and b.txt, a Write of a.txt, and the probe. Then the gate commits a change of a.txt and edits b.txt on disk. |
+| 2 | U97, U98, U100, U103, U108 | A resume of the moved run 1 file with all flags: an Edit of a.txt with no new Read, Reads of a.txt and b.txt, an Edit of a.txt, a Write outside the cwd, `git status`, `touch` (no allow rule), `<probe> && git status`, the probe, and Agent calls for general-purpose and rl-explorer. |
+| 3 | U99 | A resume of the run 1 file without Bash and Agent. It asks for one probe call. |
+| 4 | U109 | A resume of the run 1 file with `--model sonnet --effort low`. |
+| 5, 6 | U101, U102 | A fresh session writes k.txt and runs `sleep 600`. The app killTree ends it in the sleep, as B25 does. Run 6 resumes the moved partial transcript and must name the written text with no tool call. |
+| 7 | U104 | `--input-format stream-json`. While Claude waits in `sleep 20`, the gate writes a second message that asks for a probe marker. After the first result, stdin closes when no stream event came for 5 s. |
+| 8 | U110 | The critic: the review flags (runnerArgs), haiku, and reviewJsonSchema, with no verify phase. |
+
+U106 (rate limit fields) and U107 (usage of a resumed run) are INFO lines from the same runs. PASS rules: integration-check.md "Part sessions". Facts for you: the INFO part of U100 (an Edit with no new Read), U102, U104 (does the CLI wait for stdin after a result), U106, and U107.
 
 ## Part G: Bitbucket checks G1 to G7
 

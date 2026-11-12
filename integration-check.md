@@ -415,7 +415,7 @@ Run: `bun scripts/gate/claude-checks.ts --only B17,B18,B19,B20`. Bitbucket: `bun
 
 Status: the probe ran on 2026-10-29 with masked output. CI1 to CI9 only read. CI9 sends one POST to `api/json?tree=_class`, which starts nothing. CI10 starts one build and CI11 scans the multibranch project, only behind their flags. The plan has no CI4. Layer A of docs/plans/ci-builds.md uses CI1 to CI3. Layer B is on hold, so CI10 and CI11 did not run.
 
-Run: `bun run gate:ci -- <PR URL> --jenkins <Jenkins URL> --jenkins-user <user> [--job <folder/project>] [--authorize-build] [--authorize-scan]`. Tokens: `GATE_BITBUCKET_TOKEN` (else the stored token), `GATE_JENKINS_TOKEN`. Output: `.gate0/ci/result.json`. Dry run: `bun run gate:ci -- --dry-run`.
+Run: `bun run gate:ci -- <PR URL> --jenkins <Jenkins URL> --jenkins-user <user> [--job <folder/project>] [--build <build URL>] [--authorize-build] [--authorize-scan]`. Tokens: `GATE_BITBUCKET_TOKEN` (else the stored token), `GATE_JENKINS_TOKEN`. Output: `.gate0/ci/result.json`. Dry run: `bun run gate:ci -- --dry-run`.
 
 | Fact | Result | Evidence |
 |---|---|---|
@@ -429,6 +429,7 @@ Run: `bun run gate:ci -- <PR URL> --jenkins <Jenkins URL> --jenkins-user <user> 
 | CI9. POST `api/json?tree=_class` without and with the crumb: token exempt, crumb needed, or denied | INFO (2026-10-29) | POST with the token only: HTTP 200. Verdict: an API token is exempt from the crumb. |
 | CI10. Build POST (`--authorize-build`): Location shape, queue classes, build number | NOT RUN | Layer B is on hold. |
 | CI11. Scan POST (`--authorize-scan`): HTTP status, jobs before and after, new job, auto-built without a POST, indexing status | NOT RUN | Layer B is on hold. The job is not a multibranch project, so no scan applies. |
+| CI12. GET `<build URL>logText/progressiveText?start=0` with the Jenkins token (`--build <build URL>`, part-session.md section 2.15): HTTP status, X-Text-Size, X-More-Data, content type, byte count. PASS: HTTP 200 with X-Text-Size | NOT RUN | Run: `GATE_JENKINS_TOKEN=<token> bun run gate:ci -- <PR URL> --jenkins <Jenkins URL> --jenkins-user <user> --build <build URL>`. Use the URL of a build page, for example a red build of your test job. The build URL must lie below the `--jenkins` URL. The probe sends one GET and follows no redirect. It prints no log text and no token. If CI12 fails, package C2 reads consoleText and cuts the tail in the app, or the feature stays paste-only. |
 
 ## Jira Cloud (not run)
 
@@ -496,3 +497,27 @@ Run: `bun scripts/gate/claude-checks.ts --only GADV`. Options: `--advisor <model
 | ADV4. Do `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (GADV.4), `--disallowedTools advisor` (GADV.5a), and `--tools` (GADV.5b) control it? | UNKNOWN (run 1) | GADV.4, 5a, 5b: init never lists the advisor, so the gate cannot judge these from init. Gate fix: judge them by the advisor call counts of each run. |
 | ADV5. Which stream-json events show an advisor call? Do `total_cost_usd` and `modelUsage` count the advisor? (GADV.6: counts of `server_tool_use` advisor, `advisor_tool_result`, and `advisor_message` iterations, the result cost and modelUsage keys, the event and block types) | PASS (run 1) | GADV.6: one `server_tool_use` named advisor, one `advisor_tool_result`, one `advisor_message` iteration in the result usage (none in the assistant events). modelUsage listed the main model and the advisor model. total_cost_usd was about 10 times the run without the advisor, so it counts the advisor. |
 | ADV6. The minimum CLI version (GADV.7: `claude --version`) | 2.1.322 works (run 1) | GADV.7: 2.1.322. Older versions are not tested. |
+
+## Part sessions (Gate B37, not run)
+
+Status: NOT RUN. Gate B37 checks the resume facts of docs/plans/review-v2/part-session.md section 4. PS2 keeps the resume path off until these facts pass. Every run uses the real CLI with haiku, the app child env, and the app flags from implementArgs and writeShellSettings in a temp part folder. shell.json is an allowlist with the probe pattern and `sleep *`. agents.json holds rl-main and rl-explorer. No session run passes `--no-session-persistence`. After each run the gate moves the new transcript into `<tmp>/sessions/` and deletes the per-cwd folders. The gate makes at most 9 `claude -p` calls (8 planned).
+
+Run: `bun scripts/gate/claude-checks.ts --only B37`. Then run `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0` and writes `fixtures/claude/b37-*.jsonl`. Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B37`. Output: `.gate0/v3-local/results.b37.json`. Record the console lines B37.U97 to B37.U110 and the CLI version.
+
+| Fact | Result | Evidence |
+|---|---|---|
+| U97. Resume with the implement flags: `--resume <abs> --fork-session` with `--restricted`, `--tools Read,Grep,Glob,Edit,Write,Bash,Agent`, `--settings`, `--agents`, `--agent rl-main`, `--json-schema`, `--max-turns`, and no `--no-session-persistence`. PASS: exit 0, init.tools equals the flags, permissionMode default, structured_output parses as implementResult | NOT RUN | Run 2 resumes the moved run 1 transcript. |
+| U98. Limits after a resume: Write to ../outside.txt, `git status`, an unlisted command (`touch`), and `<probe> && git status`. PASS: each is refused, the Bash refusals with the app labels deny, allowlist, and deny, and the probe pattern runs | NOT RUN | Run 2. |
+| U99. Fewer tools on a resume: no Bash and no Agent, as a resolve run. PASS: exit 0, init lists no Bash, Agent, or Task, and no Bash call runs | NOT RUN | Run 3. |
+| U100. New head: between the runs the gate commits a change of a.txt and edits b.txt on disk. PASS: the resumed run reads the new text of both and edits a.txt. INFO: the outcome of an Edit of a.txt with no new Read ("modified since read") | NOT RUN | Run 1 reads a.txt and b.txt and writes a.txt. Run 2 tries the Edit first. The INFO part needs the run 1 Write, so the line prints its state. |
+| U101. Resume after a kill: the app killTree ends a run in `sleep 600` after its Write. PASS: the resume of the moved partial transcript exits 0 and names the written text with no tool call | NOT RUN | Runs 5 and 6. Docs (code.claude.com/docs/en/headless, not verified): a resume leaves an interrupted turn as it is; `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` continues it. |
+| U102. Process cap: the kill path of the run limit (claude.ts:635-638), the app killTree. INFO: kill times, leftovers, and the shape of the partial transcript | NOT RUN | Run 5. |
+| U103. Transcript place: without `--no-session-persistence` the new file is `<projectsDir>/<encoded cwd>/<id>.jsonl`, and a fork gets a new ID. The files of the per-cwd folder (subagent and memory files). PASS: both files in place, the resume from the moved file works, and the moved file keeps its name and hash | NOT RUN | Runs 1 and 2. |
+| U104. stream-json input with the implement flags: a second message during `sleep 20` asks for a marker file. PASS: the marker exists, a result has structured_output, and the CLI exits after stdin closes. INFO: does the CLI wait for stdin after a result? | NOT RUN | Run 7. After the first result, stdin closes when no stream event came for 5 s. |
+| U105. Context size: each main-thread assistant event carries message.usage with input, cache-read, and cache-creation tokens | NOT RUN | Runs 1 to 7. |
+| U106. Rate limit fields: status, resetsAt and its unit, rateLimitType of each rate_limit_event. INFO | NOT RUN | All runs. The recorded fixtures show resetsAt in seconds (b1-review-agent.jsonl). |
+| U107. Usage of a resumed run: total_cost_usd, usage, and modelUsage of run 1 and the resumed runs 2 to 4, and the cache-read tokens of the first call of run 2. INFO: per process, or the whole session | NOT RUN | Docs (code.claude.com/docs/en/headless, not verified): a run with `--resume` reports the whole total of the conversation, earlier runs included. |
+| U108. Agents on a resume: the resumed run asks for general-purpose and for rl-explorer. PASS: general-purpose is refused, rl-explorer runs, and it writes no file | NOT RUN | Run 2. |
+| U109. Other model on a resume: `--model sonnet --effort low` on the haiku transcript. PASS: exit 0 and init.model is the new model | NOT RUN | Run 4. |
+| U110. Critic run: haiku with the review flags (runnerArgs), no verify phase, and reviewJsonSchema. PASS: structured_output parses as reviewResult | NOT RUN | Run 8. |
+| U111. Days later: resume a kept transcript after at least one day and one CLI update. INFO | NOT RUN | Manual: docs/smoke-task.md part P, "Days later: resume a kept transcript (U111)". If the resume fails, a part starts a fresh session (part-session.md section 2.2). |

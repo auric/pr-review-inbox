@@ -14,7 +14,14 @@ const TMP = mkdtempSync(join(tmpdir(), "rl-gate-ci-test-"));
 afterAll(() => rmSync(TMP, { recursive: true, force: true }));
 // Every synthetic name of the dry run. None may show in the output, in any URL form.
 const NAMES = ["PROJ", "sample-repo", "feature/ABC-1-fix", "team", "sample-ci", "jdoe", "127.0.0.1", "lint.example.invalid"];
-const TOKENS = ["fake-token-0123456789abcdef", "fake-jenkins-token-0123456789", "fake-crumb-0123456789abcdef", "node0fakesession"];
+// FAKE-LOG-BODY stands for the build log text (CI12), which no output may show.
+const TOKENS = [
+  "fake-token-0123456789abcdef",
+  "fake-jenkins-token-0123456789",
+  "fake-crumb-0123456789abcdef",
+  "node0fakesession",
+  "FAKE-LOG-BODY-0123456789",
+];
 
 function run(script: string, args: string[], env: Record<string, string> = {}) {
   const base: Record<string, string> = {};
@@ -43,7 +50,7 @@ describe("gate:ci dry run", () => {
     const r = run(SCRIPT, ["--dry-run"]);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
-    for (const id of ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI10", "CI11"]) expect(r.out).toContain(`PASS    ${id} `);
+    for (const id of ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI10", "CI11", "CI12"]) expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("INFO    CI9 ");
     const line = (id: string) => r.out.split("\n").find((l) => l.includes(` ${id} `)) ?? "";
     expect(line("CI1")).toContain("state=OPEN head present=true branch present=true");
@@ -67,6 +74,10 @@ describe("gate:ci dry run", () => {
     expect(line("CI11")).toContain("scan POST: HTTP 302 (redirect)");
     expect(line("CI11")).toContain("PR job before=false after=true");
     expect(line("CI11")).toContain("auto-built without a POST=true");
+    expect(line("CI12")).toBe(
+      "PASS    CI12 progressiveText GET: HTTP 200 (ok) X-Text-Size=64 X-More-Data=absent content type=text/plain;charset=UTF-8 size=64 B",
+    );
+    expect(r.out).not.toContain("Finished: FAILURE");
     expect(r.out).toContain("dry run: PASS");
     expectNoNames(r.out);
     expectNoNames(readFileSync(join(ROOT, ".gate0/ci/result.dry-run.json"), "utf8"));
@@ -85,6 +96,10 @@ describe("gate:ci dry run", () => {
       ]);
       expect(d.jenkins.builds).toEqual([]);
       expect(d.jenkins.scans).toBe(0);
+      // CI12 reads the log once, from byte 0, below the --jenkins base.
+      expect(d.jenkins.requests.filter((q) => q.includes("logText"))).toEqual([
+        "GET /jenkins/job/team/job/sample-ci/job/feature%252FABC-1-fix/3/logText/progressiveText?start=0",
+      ]);
     } finally {
       d.stop();
     }
@@ -143,6 +158,22 @@ describe("gate:ci arguments", () => {
     const http = run(SCRIPT, [url, "--jenkins", "http://ci.example.invalid", "--jenkins-user", "jdoe"], { GATE_JENKINS_TOKEN: "x" });
     expect(http.code).toBe(2);
     expect(http.err).toContain("--jenkins needs https");
+  });
+  test("--build needs --jenkins and a URL below the --jenkins base", () => {
+    const url = "https://example.invalid/projects/PROJ/repos/sample-repo/pull-requests/7";
+    const alone = run(SCRIPT, [url, "--build", "https://ci.example.invalid/job/x/3/"]);
+    expect(alone.code).toBe(2);
+    expect(alone.err).toContain("need --jenkins");
+    const jenkins = ["--jenkins", "https://ci.example.invalid/jenkins", "--jenkins-user", "jdoe"];
+    for (const build of [
+      "https://other.example.invalid/jenkins/job/x/3/",
+      "https://ci.example.invalid/other/job/x/3/",
+      "https://ci.example.invalid/jenkins/job/x/3/?a=1",
+    ]) {
+      const r = run(SCRIPT, [url, ...jenkins, "--build", build], { GATE_JENKINS_TOKEN: "x" });
+      expect(r.code).toBe(2);
+      expect(r.err).toContain("--build needs a build URL below the --jenkins URL");
+    }
   });
   test("a bad --job path exits 2", () => {
     const r = run(

@@ -10,7 +10,7 @@ This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket
 - Use a new, empty data folder. Never use the data folder of your daily instance.
 - Nothing goes to Bitbucket before "Push and open PR". Check Bitbucket after each part.
 - Do not copy tokens, host names, code, task text, or file names into files, issues, or chat. Record counts, times, states, and the shape of the sentences only.
-- Expect about 76 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P, seven in part R, four in part D, ten in part U, seven in part N, eighteen in part T, and about six in part T2. A run is one interview, one plan, one tests step, one code step, one fix, one own review, one "Tell Claude" step, or one resolve step.
+- Expect about 76 runs on your Claude subscription quota: about six in part S, fourteen in part B, five in part P (plus two CLI calls for U111), seven in part R, four in part D, ten in part U, seven in part N, eighteen in part T, and about six in part T2. A run is one interview, one plan, one tests step, one code step, one fix, one own review, one "Tell Claude" step, or one resolve step.
 - In this document, `<BITBUCKET_URL>` is the base URL of the Bitbucket server, `<JIRA_URL>` is the base URL of the Jira server, `<REPO>` is the test repository as `<project>/<repo>`, `<TARGET>` is its default branch, `<BASE2>` is a second branch of `<REPO>`, `<RELEASE>` is a third branch of `<REPO>` that acts as a release branch, and `<KEY1>` to `<KEY6>` are the keys of the six Jira tasks. Part N uses `<MAIN>`, a second personal test repository with a first-level submodule `<SUB>` of the same server at the folder `<PATH>`, and the Jira task `<KEY7>`. You can push to both, and the inbox knows `<MAIN>`.
 
 ## Preparation
@@ -69,6 +69,18 @@ Run this part after part S. It needs the branch `smoke/<KEY1>-<slug>` and the op
 4. While Claude writes in a later step, open "More actions" and click "Stop". Expect "Stopped at: task T1.1, writing the code." or the words of that step, the button "Resume", and the row "Stopped". The Log shows the stopped step as "Cancelled".
 5. Click "Resume". Expect the stopped step to start again from the last commit. The changes that the stop left are in `<data folder>/tasks/<database name>/<task ID>/patches/<step ID>.patch`. Record whether that file exists and is not empty.
 6. Click "Stop" again. Open "More actions" and click "Close the task". Check Bitbucket: no branch `smoke/<KEY2>-…` and no pull request exist.
+
+### P, days later: resume a kept transcript (U111)
+
+This block checks the fact U111 of integration-check.md ("Part sessions") with the CLI only. It needs no app, no task, and no source code. It spans at least one day and one CLI update.
+
+1. Make an empty scratch folder outside every repository and go into it. PowerShell: `Set-Location (New-Item -ItemType Directory (Join-Path $env:TEMP "rl-u111-$(Get-Random)"))`.
+2. Run `claude -p --model haiku --output-format json "Reply with exactly this word and nothing else: U111-ORIGIN"`. Record the `session_id` of the output and the output of `claude --version`.
+3. Find `<session_id>.jsonl` in `<Claude config folder>/projects/<folder>/`. `<folder>` is the full path of the scratch folder with each character that is not a letter or digit replaced by `-`. Copy the file into a folder outside `projects/`, for example `$env:TEMP\rl-u111-kept\`.
+4. Wait at least one day. Run `claude update`, or wait for an automatic update, until `claude --version` shows a newer version. Record it.
+5. In the scratch folder, run `claude -p --model haiku --output-format json --resume <absolute path of the copy> --fork-session "Which word did you reply with in the first message of this session? Reply with that word only."`.
+6. Expect exit code 0 and the result `U111-ORIGIN`. Record the exit code, the result, the two versions, and the days between steps 2 and 5. A failed resume is a fact too: then a part starts a fresh session after a CLI update.
+7. Delete the scratch folder, the copy, and the per-cwd folder of the scratch folder in `projects/`.
 
 ## R. Tests that stay red, and the line limit
 
@@ -210,6 +222,7 @@ Run this part after part S, when "Commands Claude may run" is code complete (WP-
 - Every stop for a file that the app does not commit, with the path type only (for example "a CLAUDE.md file").
 - From part B: the length of the long branch name, whether the plan came back on `<BASE2>` with the answers, the pull request number after "Continue on", and the part branch after "Start a new branch".
 - From parts P, R, and D: each expected stop as seen, not seen, or not reached.
+- From part P, U111: the two `claude` versions, the days between the runs, the exit code, and the result of the resume. Copy them into the U111 row of integration-check.md.
 - From part U: the result line of each "Your instructions" group, the rebase result of step 9, the row of step 10 (conflict row or base row), and the case of step 11 with its reason.
 - From part N: the repository rows with their access and reason, the proposal (name or "none"), the order of the two creates, and whether Bitbucket named the merge commit.
 - From part T: the Jira deployment, the start and the reason of each plan row, the proposed open PR limit with its reason, the time of the status sync or "manual read", the move names of the dialog, the merge line of step 29, the sentence of ABC-17 after the approval, and whether "Close the task" needed "Stop" first.
