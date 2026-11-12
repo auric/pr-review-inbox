@@ -296,7 +296,9 @@ test("a small task: the Build form, questions, plan with the branch and the warn
   // AC-B242: the part that waits for its PR gives one note of its own, and no "open the PR" wait note.
   await expect
     .poll(async () => (await notes(page)).filter((n) => n.body === "Part 1 of 1 is ready for its PR."), { timeout: 30_000 })
-    .toEqual([{ title: `${JIRA_ISSUE}: ${TITLE}`, body: "Part 1 of 1 is ready for its PR.", tag: expect.stringMatching(/^task-\d+$/) }]);
+    .toEqual([
+      { title: `${JIRA_ISSUE}: ${TITLE}`, body: "Part 1 of 1 is ready for its PR.", tag: expect.stringMatching(/^task-\d+-\d+$/) },
+    ]);
   expect((await notes(page)).filter((n) => n.body === "Needs you: open the PR")).toEqual([]);
   const before = await taskRemote();
   expect(Object.keys(before.heads).filter((b) => b.startsWith("task/"))).toEqual([]);

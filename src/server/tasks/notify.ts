@@ -15,8 +15,9 @@ const SQL = {
   // One statement, so two concurrent claims never return the same event.
   claim: "UPDATE task_event SET claimed_at = $now WHERE claimed_at IS NULL RETURNING id, task, kind, ref, created_at",
   waits: "SELECT json_extract(blocked_json, '$.step') AS step FROM task_part WHERE task = $task AND blocked_json IS NOT NULL ORDER BY ord",
-  // A part waits for its PR only while no step of it waits or runs, such as "Fix these too" or an update.
-  ready: `SELECT p.id, p.ord, p.head FROM task_part p WHERE p.task = $task AND p.kind <> 'spec' AND p.state = 'self_reviewed'
+  // A part waits for its PR only while its task builds and no step of it waits or runs, such as "Fix these too" or an update.
+  ready: `SELECT p.id, p.ord, p.head FROM task_part p JOIN task t ON t.id = p.task AND t.state = 'implementing'
+    WHERE p.task = $task AND p.kind <> 'spec' AND p.state = 'self_reviewed'
     AND NOT EXISTS (SELECT 1 FROM task_step s WHERE s.part = p.id AND s.state IN ('waiting', 'running')) ORDER BY p.ord`,
   spec: "SELECT head FROM task_part WHERE task = $task AND kind = 'spec' ORDER BY ord LIMIT 1",
 };
@@ -90,6 +91,8 @@ export function noteTaskWaits(db: Database, ids: Iterable<number>, now: number):
     if (w === last) continue;
     m.set(id, w);
     if (w !== null && last !== null && movedUp(w, last)) continue;
+    // The restart note of recoverTasks already tells of this stop.
+    if (last === RESTART_REF && w?.startsWith("stopped|")) continue;
     if (w !== null && insert(db, id, "needs_you", `${w}@${now}`, now)) added = true;
   }
   return added;

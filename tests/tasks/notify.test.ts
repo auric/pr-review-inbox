@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cleanupEvents } from "../../src/server/inbox/queries";
 import { openDb } from "../../src/server/storage/db";
 import { claimTaskEvents, noteTaskWaits, RESTART_TEXT, SPEC_APPROVED_TEXT } from "../../src/server/tasks/notify";
 import { recoverTasks } from "../../src/server/tasks/tasks";
@@ -139,6 +140,18 @@ describe("noteTaskWaits", () => {
     expect(h.count()).toBe(0);
   });
 
+  test("a part of a task that does not build adds no part_ready event", () => {
+    const h = setup();
+    h.part(1, "self_reviewed", "aaa");
+    h.set("stopped", null);
+    expect(noteTaskWaits(h.db, [h.id], 10)).toBe(false);
+    expect(h.count("part_ready")).toBe(0);
+    h.set("implementing", null);
+    noteTaskWaits(h.db, [h.id], 11);
+    h.set("stopped", null);
+    expect(claimTaskEvents(h.db, 12)).toEqual([]);
+  });
+
   test("AC-B243: a task in spec_approved adds one spec_approved event", () => {
     const h = setup();
     h.set("spec_approved", null);
@@ -163,6 +176,21 @@ describe("the restart recovery (AC-B244)", () => {
     expect(claimTaskEvents(again, 53)).toEqual([
       { id: expect.any(Number), task: h.id, kind: "needs_you", createdAt: 50, key: "ABC-1", title: "Add a flag", text: RESTART_TEXT },
     ]);
+  });
+
+  test("a task reason that the stop keeps adds no second needs_you event", () => {
+    const h = setup();
+    h.set("implementing", { kind: "slot", step: 2, text: "Waiting for the run slot." });
+    h.db
+      .query("INSERT INTO task_step (task, ord, kind, state, started_at) VALUES ($task, 1, 'implement', 'waiting', 1)")
+      .run({ task: h.id });
+    h.db
+      .query("INSERT INTO task_step (task, ord, kind, state, started_at) VALUES ($task, 2, 'implement', 'running', 1)")
+      .run({ task: h.id });
+    recoverTasks(h.db, 50);
+    expect(noteTaskWaits(h.db, [h.id], 51)).toBe(false);
+    expect(noteTaskWaits(h.db, [h.id], 52)).toBe(false);
+    expect(h.count()).toBe(1);
   });
 
   test("a task that the user resumed before the claim gives no notification", () => {
@@ -220,5 +248,25 @@ describe("claimTaskEvents", () => {
     noteTaskWaits(h.db, [h.id], 12);
     h.db.query("UPDATE task_part SET state = 'pr_open' WHERE id = $id").run({ id: p1 });
     expect(claimTaskEvents(h.db, 13)).toEqual([]);
+  });
+});
+
+describe("cleanupEvents", () => {
+  test("old claimed part_ready and spec_approved rows stay until the task closes; a part that still waits notifies no second time", () => {
+    const h = setup();
+    const day = 86_400_000;
+    h.part(1, "self_reviewed", "aaa");
+    h.set("implementing", { kind: "red", step: 4, text: "The tests stay red." });
+    noteTaskWaits(h.db, [h.id], 10);
+    h.set("spec_approved", null);
+    noteTaskWaits(h.db, [h.id], 11);
+    h.set("implementing", null);
+    claimTaskEvents(h.db, 12);
+    cleanupEvents(h.db, 12 + 31 * day);
+    expect([h.count(), h.count("part_ready"), h.count("spec_approved")]).toEqual([0, 1, 1]);
+    expect(noteTaskWaits(h.db, [h.id], 13 + 31 * day)).toBe(false);
+    h.db.query("UPDATE task SET closed_at = 14 WHERE id = $id").run({ id: h.id });
+    cleanupEvents(h.db, 14 + 31 * day);
+    expect(h.db.query("SELECT COUNT(*) AS n FROM task_event").get()).toEqual({ n: 0 });
   });
 });

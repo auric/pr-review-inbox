@@ -113,7 +113,7 @@ describe("planNotes", () => {
     };
     expect(planNotes([ev(1), task], false)).toEqual([
       { title: "Change 1", body: "PROJ1/repo-1 #10: 1 new comment", tag: "PROJ1/repo-1 #10", pr: 1 },
-      { title: "ABC-1: Add a flag", body: "Needs you: a question", tag: "task-7", pr: null, task: 7 },
+      { title: "ABC-1: Add a flag", body: "Needs you: a question", tag: "task-7-1", pr: null, task: 7 },
     ]);
     expect(planNotes([ev(1), task], true)[0]?.body).toBe("1 update in 1 pull request, 1 task needs you");
     expect(planNotes([task, { ...task, id: 2, task: 8 }], true)).toEqual([
@@ -133,7 +133,13 @@ describe("planNotes", () => {
     };
     expect(planNotes([ready, { ...ready, id: 4, text: "Part 3 of 4 is ready for its PR." }], true)[0]?.body).toBe("1 task needs you");
     expect(planNotes([ready], false)).toEqual([
-      { title: "ABC-1: Add a flag", body: "Part 2 of 4 is ready for its PR.", tag: "task-7", pr: null, task: 7 },
+      { title: "ABC-1: Add a flag", body: "Part 2 of 4 is ready for its PR.", tag: "task-7-3", pr: null, task: 7 },
+    ]);
+    // Two events of one task in one claim keep two notes: equal tags would replace the first.
+    const two = planNotes([ready, { ...ready, id: 4, text: "Part 3 of 4 is ready for its PR." }], false);
+    expect(two.map((x) => [x.body, x.tag])).toEqual([
+      ["Part 2 of 4 is ready for its PR.", "task-7-3"],
+      ["Part 3 of 4 is ready for its PR.", "task-7-4"],
     ]);
   });
 });

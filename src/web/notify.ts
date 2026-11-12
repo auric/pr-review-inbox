@@ -46,7 +46,8 @@ export function runText(e: ClaimedEvent): string {
 const taskNote = (e: ClaimedTaskEvent): Note => ({
   title: `${e.key}: ${e.title}`,
   body: e.text,
-  tag: `task-${e.task}`,
+  // One tag per event: a tag of the task would let two events of one claim replace each other.
+  tag: `task-${e.task}-${e.id}`,
   pr: null,
   task: e.task,
 });
