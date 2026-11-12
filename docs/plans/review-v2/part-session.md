@@ -765,7 +765,7 @@ Risks:
 
 ## 9. State machines
 
-Status: design of 2026-11-12. Line numbers of loop.ts, implement.ts, tasks.ts, routes.ts, and shared/task.ts are those of the WP-R1b worktree on 2026-11-12. They are up to 25 lines higher than the citations of sections 1 to 6. machine.ts, gates.ts, pr.ts, model.ts, and the migrations are equal on main.
+Status: design of 2026-11-12. User answers of 2026-11-12: Q-SM1 and Q-SM2 yes; Q-SM3 to Q-SM8 take the recommended answers. Line numbers of loop.ts, implement.ts, tasks.ts, routes.ts, and shared/task.ts are those of the WP-R1b worktree on 2026-11-12. They are up to 25 lines higher than the citations of sections 1 to 6. machine.ts, gates.ts, pr.ts, model.ts, and the migrations are equal on main.
 
 This section has three machines, plus reasons, derived waits, and one mode:
 
