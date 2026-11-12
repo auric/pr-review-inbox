@@ -762,3 +762,780 @@ Risks:
 7. **Q7.** Should a critic push-back give a question or a Log line? Recommended: a Log line. The critic is cheap and is not the reviewer.
 8. **Q8.** Should Hold replace "Pause after this step" and "Pause after each task"? Recommended: yes. One long run has no step boundary.
 9. **Q9.** Does medium lose its spec PR? Recommended: yes. Section 7 item 4 gives the spec PR to large only. Colleagues read the brief in the code PR.
+
+## 9. State machines
+
+Status: design of 2026-11-12. Line numbers of loop.ts, implement.ts, tasks.ts, routes.ts, and shared/task.ts are those of the WP-R1b worktree on 2026-11-12. They are up to 25 lines higher than the citations of sections 1 to 6. machine.ts, gates.ts, pr.ts, model.ts, and the migrations are equal on main.
+
+This section has three machines, plus reasons, derived waits, and one mode:
+
+- The task machine and the part machine stay the stored machines (task.state, task_part.state).
+- A new phase machine orders the work of one part. Its state is the open task_step row, never a column.
+- Reasons (blocked_json) are waits for one user decision inside a state.
+- Derived waits come from the sync and from git. A mode (red-build fixes) is a bounded grant.
+
+### 9.1 Today's machines
+
+#### 9.1.1 How the app uses the machines
+
+- machine.ts is a pure transition function: no actions, no invoke, no actor (machine.ts:4-6). tests/tasks/machine.test.ts:147-170 checks this.
+- advance (tasks.ts:210-226) reads the row, checks the version, and refuses an event that can() refuses. The 409 text is TASK_STATE_TEXT of the state (tasks.ts:219; shared/task.ts:341).
+- advance writes stopped_from on STOP (tasks.ts:222). Each move out of implementing clears every waiting part row (tasks.ts:195, :223).
+- advancePart (tasks.ts:228-248) refuses with "This part is <chip>." (tasks.ts:240-241). It moves the task version (tasks.ts:244).
+- task.state and task_part.state have SQL CHECK lists (033_task.sql:13, :107). task_part has child tables (033_task.sql:114; 035_task_repos.sql:18; 037_task_update.sql:6). So a new stored state value needs a table rebuild.
+
+#### 9.1.2 Task machine (machine.ts:56-98)
+
+| State | Event | Guard | Target | Sender today |
+|---|---|---|---|---|
+| (none) | BUILD | none | interview | initialTransition at task create (machine.ts:55) |
+| interview | ASKED | none | interview | interview run end (tasks.ts:1528) |
+| interview | ANSWERED | none | spec_draft | tasks.ts:1535, :2013 |
+| spec_draft | APPROVE | small | implementing | plan approval (tasks.ts:2199) |
+| spec_draft | APPROVE | planReview | spec_draft | tasks.ts:2199 |
+| spec_draft | OPEN_SPEC_PR | planReview | spec_pr_open | none |
+| spec_pr_open | SPEC_GATE_PASSED | gate | spec_approved | none |
+| spec_pr_open | OVERRIDE | none | spec_approved | none |
+| spec_pr_open | CLOSE | none | done | close (tasks.ts:2564) |
+| spec_approved | START_BUILDING | none | implementing | none for this state |
+| implementing | PART_READY | none | implementing | loop.ts:1767 |
+| implementing | LAST_PR_OPEN | none | ready | pr.ts:391; gates.ts:97; loop.ts:2543; tasks.ts:1400 |
+| ready | ALL_MERGED | none | done | gates.ts:100; loop.ts:2547 |
+| ready | CLOSE | none | done | tasks.ts:2564 |
+| ready | START_BUILDING | none | implementing | a sub-task added to the plan (tasks.ts:2263) |
+| interview to ready | STOP | none | stopped | user Stop (loop.ts:2584); stopForRun (tasks.ts:612-617) from implement.ts:1042, loop.ts:1030, :1446, :1881, and tasks.ts:1443; recoverTasks (tasks.ts:258) |
+| interview to ready, stopped | FAIL | none | failed | none |
+| stopped | RESUME | stoppedFrom X | X | loop.ts:2616 for implementing; tasks.ts:2534 for the others (routes.ts:301-302) |
+| stopped | CLOSE | none | done | tasks.ts:2564 |
+| done | CLOSE | none | done | tasks.ts:2564; it sets closed_at only (tasks.ts:2567) |
+| failed | none | none | final | none |
+
+#### 9.1.3 Part machine (machine.ts:100-126)
+
+| State | Event | Guard | Target | Sender today |
+|---|---|---|---|---|
+| planned | START | none | implementing | ensureParts (loop.ts:1585); startPart (loop.ts:1643) |
+| planned | ABANDON | none | abandoned | drop (loop.ts:2538) |
+| planned | ADOPT_OPEN, ADOPT_MERGED | none | pr_open, merged | plan approval (tasks.ts:1395) |
+| implementing | REVIEWED | none | self_reviewed | runPart end (loop.ts:1766) |
+| implementing | ABANDON | none | abandoned | none: drop refuses this state (loop.ts:2529-2530) |
+| self_reviewed | PR_OPENED | none | pr_open | linkMain (pr.ts:388) |
+| self_reviewed | ABANDON | none | abandoned | none |
+| pr_open | CHANGES_REQUESTED | none | changes_requested | syncParts (gates.ts:66, :87) |
+| pr_open | GATE_PASSED | gate | approved | gates.ts:68 |
+| pr_open, changes_requested, approved | MERGED, DECLINED | none | merged, declined | gates.ts:63-64 |
+| changes_requested | GATE_PASSED | gate | approved | gates.ts:68 |
+| approved | CHANGES_REQUESTED | none | changes_requested | gates.ts:66 |
+| approved | GATE_FAILED | none | pr_open | gates.ts:68 |
+| declined | REOPENED | none | pr_open | retarget (pr.ts:862) |
+| declined | ABANDON | none | abandoned | drop (loop.ts:2538) |
+| merged, abandoned | none | none | final | none |
+
+syncParts sends one event per changed PR and ignores a refusal (gates.ts:86-88). So these events are refused and write nothing: GATE_FAILED in pr_open, CHANGES_REQUESTED in changes_requested, and GATE_PASSED in approved.
+
+#### 9.1.4 Conditions outside the machines
+
+| Condition | Storage | Code | Effect |
+|---|---|---|---|
+| First reason | task.blocked_json (033_task.sql:21) | setBlocked tasks.ts:551-554; holdBlocked :1033-1044 | It halts every part (loop.ts:648, :666-670) |
+| Soft reasons | the same column | softReason tasks.ts:1015-1017 | Pause and slot halt no other part. Another reason replaces them. |
+| Waiting reason of a part | task_part.blocked_json (048_task_part_blocked.sql:3) | waitingPart tasks.ts:1021-1029; nextReason :533-537 | It moves up on a clear. Each move out of implementing clears it (tasks.ts:223). |
+| Pause | question with step null and the text PAUSED, plus pauseAsked and gates in memory | loop.ts:602-603, :807-818, :2609 | text match |
+| Pause after each task | question with step null | loop.ts:1384 | Continue clears it |
+| Slot wait | soft reason slot, a waiting step row, slotWaits in memory | loop.ts:604, :755-803 | It goes on by itself |
+| Setup mark | file in the worktree | loop.ts:1706-1726 | Setup runs when the mark is absent or stale |
+| Baseline | a check row with baseline | loop.ts:1261-1264 | Once per part |
+| Green gate at HEAD | check row head and commandsHash | checksDone loop.ts:1142-1151 | Skips the final checks |
+| Continue rule | StepDetail.checked and patch marks | workOf loop.ts:554-566; settle :1776-1787 | Keeps or resets the work |
+| Cut cause | step state, error kind, error text | cutBy loop.ts:571-582 | The time limit is a text match (:580) |
+| Fix tries, review rounds | local loop counters | loop.ts:1273-1274, :1479 | Lost at a restart |
+| Driver | drivers map | loop.ts:600 | The lock: action routes answer BUSY or WORKING (loop.ts:2477, :2611, :2685, :2724, :2767, :2789, :2805, :2830, :2913, :2926, :3002, :3035) |
+| Driver mode | modes map | loop.ts:621 | Stop of a send or an update keeps the task state (loop.ts:2574-2582) |
+| End of a driver | ending, stopping, checking, closing | loop.ts:622-627 | settle(id) waits for ending (loop.ts:3119-3121) |
+| Part budget | settings and run rows | partBudget implement.ts:496-525 | Sets reason budget (implement.ts:868-876) |
+| Send | StepDetail.instruct with blockedBefore and result | shared/task.ts:518-524 | A stop or a failure restores blockedBefore (loop.ts:2104-2131) |
+| Update | StepDetail.update, restart mark | shared/task.ts:531-544; tasks.ts:198-200 | recoverUpdates resets the repositories (loop.ts:2034-2056) |
+| Git snapshot | memory only | snapGit gitstate.ts:52; implement.ts:1060 | A restart cannot check git state |
+
+#### 9.1.5 Fixes of state-audit.md that are built
+
+- Fix 1, the rejection in step.md: rejectedLines (loop.ts:820-830).
+- Fix 2, a send starts again after Accept or Reject: specChange (loop.ts:2836-2858, :2894-2900).
+- Fix 3, Pause refuses while the driver ends, and the flag clears at the driver end: loop.ts:2561-2562, :1934-1935.
+- Fix 4, Continue after a restart during a pause: loop.ts:2636-2642.
+- Fix 5, Dismiss in state ready: loop.ts:2903-2920.
+- Fix 6, queued reasons: tasks.ts:1019-1044 (spec.md section 6.25).
+
+#### 9.1.6 Known gaps
+
+| ID | Gap | Evidence |
+|---|---|---|
+| G1 | OPEN_SPEC_PR, SPEC_GATE_PASSED, and OVERRIDE have no sender. spec_pr_open and spec_approved are unreachable in the app. An approved medium or large plan waits with no primary. | search of src/server, 2026-11-12; model.ts:457-464, :475-482 |
+| G2 | FAIL has no sender. failed is unreachable in the app. | search of src/server, 2026-11-12 |
+| G3 | changes_requested refuses GATE_FAILED. syncParts sends it when no reviewer asks for changes and the gate fails. So a withdrawn "Needs work" keeps the chip "Changes asked". Not verified by a test. | machine.ts:120; gates.ts:66-68 |
+| G4 | PR_OPENED can be refused after the PR exists on the server. linkMain then only logs. The REOPENED result is not read. | pr.ts:387-393, :857-862 |
+| G5 | One STOP covers many causes: user Stop, a failed or cut run, the usage limit, a failed review, an allow cut, and a restart. Each STOP clears every waiting part row. So one failed run of one part drops the waiting reasons of other parts. | implement.ts:1041-1042; loop.ts:1026-1034, :1446; tasks.ts:223, :258 |
+| G6 | A task can hold a first reason while another part runs. A restart then stops it and clears the waiting rows. Resume then clears the first reason too. The question rows stay open. Not verified by a test. This breaks spec.md 6.25.5 "A restart keeps every reason". | tasks.ts:189-192, :223, :258; loop.ts:2618; tasks.ts:551-554 |
+| G7 | Some reasons use text or other rows as the discriminator: pause, "Task T is done", red before, no change, and the time limit cut. | tasks.ts:1015-1017; loop.ts:580, :1280-1288, :1297-1298, :1384, :2609 |
+| G8 | Continue refuses state ready. In ready, Dismiss is the only exit for red, blocker, denied_path, error, and an app question. Dismiss starts nothing. | loop.ts:2626, :2906-2920; model.ts:505-513 |
+| G9 | The reason kind push has no setter. | search of 2026-11-12; build-redesign.md section 1.2 |
+| G10 | A restart during a send on a built part stops the task from ready. Resume goes to tasks.resume and clears the reason. blockedBefore of the send is not restored. Not verified by a test. | tasks.ts:189-192, :2539; routes.ts:301-302 |
+| G11 | The cost limit has no working exit. Continue clears the budget reason, and the next run start sets it again. | loop.ts:2659-2661; implement.ts:517-523, :868-875 |
+| G12 | done is not type final. It has a CLOSE self-loop only. | machine.ts:95 |
+| G13 | The size reason of a large task with a changed submodule is unreachable, because large tasks do not build. | loop.ts:1230-1233, :1561 |
+| G14 | The driver map is a lock that the machine does not see. Every action gets 409 while any part builds. | loop.ts:600, :2611; state-audit.md Part B, last row |
+
+### 9.2 Rules: state, phase, reason, derived wait, or mode
+
+- R1, machine state: a fact that decides the legal events for a long time. It survives any restart and changes only on a business event. There is no new stored state value, because the CHECK lists of 9.1.1 need a table rebuild. spec.md 6.18.6 and section 5.3 avoid an ALTER of task_part for the same reason.
+- R2, phase: what a process does now. Its record is the open task_step row. A restart ends each process, and recoverTasks fails each open step (tasks.ts:256). So the phase is derived, never stored (build-redesign.md section 2.1: "No new cursor column").
+- R3, reason: a wait for one user decision. After it, the part goes on in the same machine state. It lives in blocked_json and has one primary exit.
+- R4, derived wait: a fact that the sync or git gives. It changes with no user action in the app. The view computes it from rows, and it never halts another part.
+- R5, mode: a bounded grant that lets the app act with no click. It lives in a side table and has explicit end rules.
+
+| Item | Bin | Key |
+|---|---|---|
+| Building (session run) | R2 | phase building |
+| Checking | R2 | phase checking |
+| Fixing | R2 | phase fixing |
+| Critic, review | R2 | phases critic, reviewing, judging |
+| Ready | R1 | part self_reviewed |
+| PR open | R1 | part pr_open, changes_requested, approved |
+| PR comments, comments sorted | R4 | your-turn threads; reply drafts with groups not sent |
+| Fixed, not pushed | R4 | task_part.head differs from task_part.pushed (model.ts:693) |
+| Build failed | R4 | pr_build failed for the PR head (model.ts:704-708) |
+| Red-build fixes on | R5 | task_part_session.ci_fix_left |
+| Held | R3 | reason held, in the part row only |
+| Usage limit, resume armed | R3 | reason usage with resumeAt and armed |
+| Stopped | R1 | task stopped |
+| Skipped | R1 | part abandoned through ABANDON |
+| Start again | R1 | new part event RESTART, no new state |
+| Merged, declined, closed | R1 | part merged, declined; task done with closed_at |
+| Update, conflict resolve | R2 and R3 | phases updating, resolving; reasons update and red/update |
+| Plan change | R3 | spec_change |
+| Question | R3 | question/claude |
+| Allow request | R3 | allow |
+
+A full view key is (task state, part state, reason key, phase, derived wait). The UI rows need one (state, reason) pair each. But the working rows share the pair (implementing, none), so the key needs the phase too (section 9.6).
+
+### 9.3 Target machines
+
+Owners: route (routes.ts handler), loop (loop.ts driver), tasks (tasks.ts service), sync (gates.ts syncParts), pr (pr.ts), runner (claude.ts, jobs.ts), timer (a loop timer), recover (recoverTasks and loop.recover). The app runs each side effect after the commit of the transition (spec.md section 6.2).
+
+#### 9.3.1 Task machine
+
+| State | Event | Guard | Target | Sender | Side effects (owner) | Change |
+|---|---|---|---|---|---|---|
+| (none) | BUILD | none | interview | route POST /tasks | interview run (tasks) | none |
+| interview | ASKED | none | interview | tasks | question reason (tasks) | none |
+| interview | ANSWERED | none | spec_draft | route answers; tasks | spec run (tasks) | none |
+| spec_draft | APPROVE | noSpecPr (small or medium) | implementing | route plan | loop.build, then part START (route, loop) | PS9: medium joins |
+| spec_draft | APPROVE | specPr (large) | spec_draft | route plan | none | PS9 |
+| spec_draft | OPEN_SPEC_PR | specPr | spec_pr_open | reserved, WP-B8 | push and PR create (pr) | no sender |
+| spec_pr_open | SPEC_GATE_PASSED | gate | spec_approved | reserved, WP-B8 | notification | no sender |
+| spec_pr_open | OVERRIDE | none | spec_approved | reserved, WP-B8 | none | no sender |
+| spec_pr_open | CLOSE | none | done | route close | closed_at (tasks) | none |
+| spec_approved | START_BUILDING | none | implementing | reserved, WP-B8 | loop.build | none |
+| implementing | PART_READY | none | implementing | loop, after REVIEWED | base check at the driver end (loop) | none |
+| implementing | LAST_PR_OPEN | none | ready | pr, sync, route drop, tasks | clear the waiting part rows (tasks) | none |
+| ready | ALL_MERGED | none | done | sync, route drop | delete transcripts; end the CI mode (loop) | PS3 side effect |
+| ready | CLOSE | none | done | route close | closed_at; delete transcripts (tasks) | PS3 side effect |
+| ready | START_BUILDING | none | implementing | tasks, sub-task added | loop.build | none |
+| interview to ready | STOP | none | stopped | route stop; loop failed() for an error that no reason covers; tasks for a failed or cut interview or spec run | cancel runs and abort checks (route); clear the first reason and every part row except held (route, tasks) | fewer senders (9.3.4) |
+| non-final | FAIL | none | failed | reserved | clear the part rows (tasks) | no sender |
+| stopped | RESUME | stoppedFrom X | X | route resume | Continue rule, then GO for each building part (loop) | none |
+| stopped | CLOSE | none | done | route close | closed_at; delete transcripts | PS3 side effect |
+| done | CLOSE | none | done | route close | closed_at only | none |
+
+- Guard renames (PS9): small becomes noSpecPr, and planReview becomes specPr. The README diagram changes in the same package (tests/tasks/readme.test.ts:10-14).
+- machine.ts:51 changes. "Stop, a restart, or a usage limit stops a task" becomes "The user's Stop, or an error that no reason covers, stops a task."
+- Section 5.4 keeps the old flow for "an old medium task that already has a spec PR". G1 shows that no such task can exist. An old approved medium plan waits in spec_draft. PS9 lets "Approve the plan" show again for it. Not verified: the plan route accepts an approved plan again.
+
+#### 9.3.2 Part machine
+
+PartContext gains `unpushed`: task_part.pushed is NULL. It is NULL for a new branch before its first push. For a branch that the task continues on the server, it holds the remote head (loop.ts:1640; push.ts:30). So RESTART never needs a force push.
+
+| State | Event | Guard | Target | Sender | Side effects (owner) | Change |
+|---|---|---|---|---|---|---|
+| planned | START | none | implementing | loop (ensureParts, startPart) | worktree, then phase GO (loop) | none |
+| planned | ABANDON | none | abandoned | route drop | LAST_PR_OPEN or ALL_MERGED check (route) | none |
+| planned | ADOPT_OPEN | none | pr_open | tasks (approval) | follow the PR | none |
+| planned | ADOPT_MERGED | none | merged | tasks (approval) | none | none |
+| implementing | REVIEWED | none | self_reviewed | loop, when GO finds no work | PART_READY; base check (loop) | none |
+| implementing | RESTART | unpushed | implementing | route restart | save the patch; write refs/rl/<task>/backup/part-<ord>-<n>; reset the branch to its plan commit; delete the transcript; clear every reason of the part; clear the ci_fix fields; keep the baseline and the setup mark (route) | new |
+| implementing | ABANDON | none | abandoned | route skip (task with sub-tasks) | save the patch; remove the worktree; delete the transcript; clear every reason of the part; LAST_PR_OPEN or ALL_MERGED check (route) | new sender |
+| self_reviewed | PR_OPENED | none | pr_open | pr (linkMain) | LAST_PR_OPEN when no part waits (pr) | none |
+| self_reviewed | RESTART | unpushed | implementing | route restart | as above | new |
+| self_reviewed | ABANDON | none | abandoned | route skip | as above | new sender |
+| pr_open | CHANGES_REQUESTED | none | changes_requested | sync | none | none |
+| pr_open | GATE_PASSED | gate | approved | sync | a stacked part may start (scheduler) | none |
+| pr_open, changes_requested, approved | MERGED | none | merged | sync | delete the transcript; end the CI mode; ALL_MERGED check (loop, sync) | side effects new |
+| pr_open, changes_requested, approved | DECLINED | none | declined | sync | delete the transcript; end the CI mode | side effects new |
+| changes_requested | GATE_PASSED | gate | approved | sync | as pr_open | none |
+| changes_requested | GATE_FAILED | none | pr_open | sync | none | new edge, fixes G3 |
+| approved | CHANGES_REQUESTED | none | changes_requested | sync | none | none |
+| approved | GATE_FAILED | none | pr_open | sync | an upper stacked part waits again | none |
+| declined | REOPENED | none | pr_open | pr (retarget) | follow the PR | none |
+| declined | ABANDON | none | abandoned | route drop | as planned ABANDON | none |
+| merged, abandoned | none | none | final | none | none | none |
+
+- RESTART and Skip need the phase idle, so no step of the part may be open. The route refuses a running part with "Hold part 2 first."
+- RESTART from self_reviewed keeps the task in implementing. A self_reviewed part already keeps it there (WAITS_PR, loop.ts:193).
+- Refused by design (no write, no version move): GATE_FAILED in pr_open, CHANGES_REQUESTED in changes_requested, and GATE_PASSED in approved.
+
+#### 9.3.3 Phase machine (new, machine.ts)
+
+The phase machine orders the work of one part. It is flat, so machineMermaid prints it (machine.ts:135-147). Like the other two machines, it has no actions. Each part has its own phase.
+
+**Where the phase lives.** The phase is the open task_step row of the part. A part has at most one open step row (spec.md section 6.20.6). After a restart, failSteps leaves no open row, so every phase is idle.
+
+| Open step row (kind, purpose or item) | Phase |
+|---|---|
+| none | idle |
+| check, item setup | setup |
+| check, item base | baseline |
+| implement, purpose build or continue | building |
+| check, any other item; commit | checking |
+| fix, purpose checks | fixing |
+| review, item critic | critic |
+| fix, purpose critic or review | judging |
+| review, any other item | reviewing |
+| instruct, purpose message, points, comments, or ci | following |
+| update | updating |
+| resolve | resolving |
+
+purpose is a new field of StepDetail.session, which section 5.3 already adds. Old rows map by kind and item.
+
+**Context.** PhaseContext holds booleans only. The loop computes them from SQLite rows and the worktree before each send.
+
+| Guard | True when | Today's source |
+|---|---|---|
+| setup | the setup mark is absent or stale | loop.ts:1706-1709 |
+| baseline | no baseline row exists, and no Claude run ran yet | loop.ts:1261-1264 |
+| follow | a follow-up row of this part waits | the instruct row of a send (loop.ts:2930-2933) |
+| run | the part is implementing, and it has open tasks or a cut build run | cutBy loop.ts:571-582 |
+| checks | the worktree holds work, or no green gate exists at HEAD | checksDone loop.ts:1142-1151 |
+| critic | the part is implementing, a build commit exists, and no critic row exists | new (2.7) |
+| review | a commit after the last ok own review holds work of a Claude run | loop.ts:2297-2298 (Q57); spec.md 6.7, Own review |
+| firstCut | the run reached its turn cap or process cap, and no earlier cut of this purpose follows the last commit | new (2.2, Cut runs) |
+| afterUpdate | the gate runs after an update | loop.ts:2289-2294 |
+| redBefore | each failing command failed on the base with the same argv, and this item has no red-before row | loop.ts:1276-1280 |
+| triesLeft | the fix runs of this gate are fewer than "Test-fix tries" | loop.ts:1273-1274, :1290 |
+| unchanged | the run changed no file | loop.ts:1297, :2077 |
+| roundsLeft | the review rounds are fewer than REVIEW_FIX_TRIES | loop.ts:183, :1488 |
+
+App-only commits need no review: the plan commit, the line-end repair, a clean merge of an update, and a pointer commit.
+
+**Transitions.** WAIT means that the step ended with a reason, and the event carries that reason. STOPPED means that a Stop or a Hold ended the step.
+
+| State | Event | Guard | Target | Side effects (owner) |
+|---|---|---|---|---|
+| idle | GO | setup | setup | run the setup commands (loop) |
+| idle | GO | baseline | baseline | run the checks on the base (loop) |
+| idle | GO | follow | following | session run; the guard of 2.2 picks resume or fresh (loop, runner) |
+| idle | GO | run | building | session run (loop, runner) |
+| idle | GO | checks | checking | run the checks (loop) |
+| idle | GO | critic | critic | critic run (loop) |
+| idle | GO | review | reviewing | own review run (loop) |
+| idle | GO | no guard holds | refused | the part has no work: REVIEWED when implementing, else the driver ends (loop) |
+| idle | UPDATE | none | updating | route update writes the update row (route, loop) |
+| setup | CLEAN | none | idle | write the setup mark (loop) |
+| setup | WAIT | none | idle | reason red/setup or red/setup_time (loop) |
+| setup, baseline | STOPPED | none | idle | none |
+| baseline | CLEAN | none | idle | store the baseline; red is no reason (loop) |
+| building, judging | RUN_DONE | none | checking | tick check; the path check already ran (loop) |
+| fixing, following | RUN_DONE | unchanged | idle | fixing: reason question/no_change. following: result no_change, and the earlier reason comes back (loop) |
+| fixing, following | RUN_DONE | none | checking | as building |
+| building, fixing, judging, following | RUN_CUT | firstCut | the same state | one run with "Continue where you stopped." (loop) |
+| building, fixing, judging, following | RUN_CUT | none | idle | reason stuck/turns or stuck/time (loop) |
+| building, fixing, judging, following | WAIT | none | idle | the reason of the run end (9.4) (loop, runner) |
+| building, fixing, judging, following | STOPPED | none | idle | Stop: the route sent STOP. Hold: the route wrote held (route) |
+| checking | CHECKS_GREEN | none | idle | commit when the worktree holds work; the size note (loop) |
+| checking | CHECKS_RED | afterUpdate | idle | reason red/update (loop) |
+| checking | CHECKS_RED | redBefore | idle | reason question/red_before (loop) |
+| checking | CHECKS_RED | triesLeft | fixing | failure.md (loop) |
+| checking | CHECKS_RED | none | idle | reason red/checks (loop) |
+| checking | WAIT | none | idle | commit refused: denied_path/commit; no git identity: error/app (loop) |
+| checking | STOPPED | none | idle | after an update: abort (spec.md 6.18.3) (loop) |
+| critic | POINTS | none | judging | the kept points go to failure.md (loop) |
+| critic | CLEAN | none | idle | no kept point, or a failed critic with a Log note. The critic row stays, so the critic runs once (loop) |
+| critic, reviewing | STOPPED | none | idle | none |
+| reviewing | POINTS | roundsLeft | judging | the must-fix points (loop) |
+| reviewing | POINTS | none | idle | reason blocker (loop) |
+| reviewing | CLEAN | none | idle | minor points stay listed (loop) |
+| reviewing | WAIT | none | idle | a failed review run: reason error/run (loop) |
+| updating | CLEAN | none | checking | base_commit moves; the lines count again (loop) |
+| updating | CONFLICT | none | resolving | conflicts.md; the session resumes when the guard held at the update start (loop) |
+| updating, resolving | WAIT | none | idle | abort; reason update with its cause (loop) |
+| updating, resolving | STOPPED | none | idle | abort; reason update "you stopped it" (loop) |
+| resolving | RUN_DONE | none | updating | git add, then rebase --continue or commit (loop) |
+
+After an update, CHECKS_GREEN goes to idle. GO then reviews only when a resolve run wrote code (guard review). This keeps Q57.
+
+**Phases per part state.**
+
+| Part state | Phases |
+|---|---|
+| planned, merged, declined, abandoned | idle |
+| implementing | idle, setup, baseline, building, checking, fixing, critic, judging, reviewing, following |
+| self_reviewed, pr_open, changes_requested, approved | idle, setup, following, checking, fixing, judging, reviewing, updating, resolving |
+
+updateTarget already needs a built part (tasks.ts:1069-1078).
+
+#### 9.3.4 STOP senders
+
+| Sender | Today | Target |
+|---|---|---|
+| User Stop | loop.ts:2583-2588 | stays |
+| Unexpected error in a driver | failed() loop.ts:1874-1887 | stays |
+| Failed or cut interview or spec run | tasks.ts:1442-1443 | stays |
+| Restart of an interview or spec run | tasks.ts:258 | stays |
+| Failed, cut, or usage-limited build run | implement.ts:1041-1042 | reason error/run, stuck, or usage (Q-SM1) |
+| Allow cut with no request | loop.ts:1026-1034 | reason error/run (Q-SM1) |
+| Failed own review | loop.ts:1446 | reason error/run (Q-SM1) |
+| Restart of a building or follow-up task | tasks.ts:189-192, :258 | reason error/restart on each cut part (Q-SM2) |
+
+So stopped means a user Stop or an error that no reason covers. This matches spec.md 6.2, which lists no failed run as a cause of stopped.
+
+#### 9.3.5 Red-build fix mode
+
+The mode is no XState machine. Its state is two numbers in task_part_session (section 5.3). In the same way, nextPart is no XState machine (spec.md 6.20.6).
+
+| Mode | Event | Next | Owner |
+|---|---|---|---|
+| off | push confirm with the tick | on, ci_fix_left = N | route push |
+| on | the sync finds a failed build on the pushed head | on; log read, then GO with follow (purpose ci) | sync, loop |
+| on | reviewing CLEAN after a ci follow-up | push with the lease and the fast-forward check; left − 1; one notification | loop, push.ts |
+| on | ci_fix_left is 0 after a push | off | loop |
+| on | a build passes on the pushed head | off | sync |
+| on | ci.cause is infra or unknown | off | loop |
+| on | any reason is written for the part | off | loop |
+| on | a push fails | off | loop |
+| on | "Stop red-build fixes" | off | route |
+| on | MERGED or DECLINED | off | sync side effect |
+| on | no build status for the pushed head within BUILD_WAIT | off | timer |
+| any | RESTART | off, fields cleared | route |
+
+#### 9.3.6 Routes and events
+
+One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPEN, ALL_MERGED) come from the new state. They come in the same transaction or from the driver.
+
+| Route | Event or reason exit | Refusal |
+|---|---|---|
+| POST /tasks | BUILD | 200 with the open task of the same key (spec.md 6.11) |
+| POST /tasks/:id/answers | ANSWERED (interview) or ANSWER | "No question waits for an answer." (loop.ts:2672) |
+| POST /tasks/:id/allow | ALLOW | "No command waits for your choice." (loop.ts:2723) |
+| POST /tasks/:id/plan | APPROVE | TASK_STATE_TEXT (tasks.ts:219) |
+| POST /tasks/:id/stop | STOP, or STOPPED of a follow-up | TASK_STATE_TEXT |
+| POST /tasks/:id/resume | RESUME, or CONTINUE of a reason | the reason texts (loop.ts:2606-2650) |
+| POST /tasks/:id/close | CLOSE | "Stop the build first, then close the task." (tasks.ts:2565) |
+| POST /tasks/:id/spec-change/:step | ACCEPT or REJECT | "No change to the spec waits for this step." (loop.ts:2829) |
+| POST /tasks/:id/parts/:part/pr, /prs | PR_OPENED | the part state sentence (tasks.ts:240-241) |
+| POST /tasks/:id/parts/:part/push | none (pushed moves) | push.ts texts |
+| POST /tasks/:id/parts/:part/move | REOPENED for a declined part | pr.ts texts |
+| POST /tasks/:id/parts/:part/start | none (START comes from the scheduler) | loop.ts:2495, :2501 |
+| POST /tasks/:id/parts/:part/wait-merge | WAIT_MERGE | "This part does not wait for you." (loop.ts:2476) |
+| POST /tasks/:id/parts/:part/drop | ABANDON | loop.ts:2530, :2536 |
+| POST /tasks/:id/instructions | GO with follow, or a live message to a running session run (no event) | WORKING, WAITING (tasks.ts:1052-1066) |
+| POST /tasks/:id/parts/:part/update | UPDATE | updateTarget texts (tasks.ts:1069-1078) |
+| POST /tasks/:id/parts/:part/update/undo | UNDO_UPDATE | undoTarget texts (tasks.ts:1082-1119) |
+| POST /tasks/:id/parts/:part/fix | GO with follow (purpose points) | "No point waits for a fix." (loop.ts:2792) |
+| PUT /tasks/:id/base | PICK_BASE | "The base branch changes only before the build." (loop.ts:2953) |
+| New: POST /tasks/:id/parts/:part/hold | reason held, then cancel the run of the part | "Hold works while Claude builds or fixes part 2." |
+| New: POST /tasks/:id/parts/:part/skip | ABANDON | "Only a part of a task with sub-tasks can be skipped." |
+| New: POST /tasks/:id/parts/:part/restart | RESTART | "Part 2 is on the server. It cannot start again." |
+| New (PS6): POST /tasks/:id/parts/:part/comments, /comments/send | none (reply run); GO with follow (purpose comments) | the sentence of the state |
+| New (PS7a): POST /tasks/:id/parts/:part/ci | GO with follow (purpose ci) | the sentence of the state |
+| New (PS7b): POST /tasks/:id/parts/:part/ci-mode | mode off | "Red-build fixes are off." |
+| Goes: /pause, /dismiss, /limit, /parts/:part/setup | resume options (section 5.2): leave, more-time, setup | none |
+
+#### 9.3.7 Diagrams
+
+These diagrams are the output of machineMermaid for the target configs. The tests keep them equal (9.7).
+
+Task machine. Changes: the APPROVE and OPEN_SPEC_PR guards.
+
+```mermaid
+stateDiagram-v2
+  [*] --> interview
+  interview --> interview: ASKED
+  interview --> spec_draft: ANSWERED
+  interview --> stopped: STOP
+  interview --> failed: FAIL
+  spec_draft --> implementing: APPROVE if noSpecPr
+  spec_draft --> spec_draft: APPROVE if specPr
+  spec_draft --> spec_pr_open: OPEN_SPEC_PR if specPr
+  spec_draft --> stopped: STOP
+  spec_draft --> failed: FAIL
+  spec_pr_open --> spec_approved: SPEC_GATE_PASSED if gate
+  spec_pr_open --> spec_approved: OVERRIDE
+  spec_pr_open --> done: CLOSE
+  spec_pr_open --> stopped: STOP
+  spec_pr_open --> failed: FAIL
+  spec_approved --> implementing: START_BUILDING
+  spec_approved --> stopped: STOP
+  spec_approved --> failed: FAIL
+  implementing --> implementing: PART_READY
+  implementing --> ready: LAST_PR_OPEN
+  implementing --> stopped: STOP
+  implementing --> failed: FAIL
+  ready --> done: ALL_MERGED
+  ready --> done: CLOSE
+  ready --> implementing: START_BUILDING
+  ready --> stopped: STOP
+  ready --> failed: FAIL
+  stopped --> interview: RESUME if stoppedFrom interview
+  stopped --> spec_draft: RESUME if stoppedFrom spec_draft
+  stopped --> spec_pr_open: RESUME if stoppedFrom spec_pr_open
+  stopped --> spec_approved: RESUME if stoppedFrom spec_approved
+  stopped --> implementing: RESUME if stoppedFrom implementing
+  stopped --> ready: RESUME if stoppedFrom ready
+  stopped --> done: CLOSE
+  stopped --> failed: FAIL
+  done --> done: CLOSE
+  failed --> [*]
+```
+
+Part machine. Changes: RESTART, and GATE_FAILED in changes_requested.
+
+```mermaid
+stateDiagram-v2
+  [*] --> planned
+  planned --> implementing: START
+  planned --> abandoned: ABANDON
+  planned --> pr_open: ADOPT_OPEN
+  planned --> merged: ADOPT_MERGED
+  implementing --> self_reviewed: REVIEWED
+  implementing --> implementing: RESTART if unpushed
+  implementing --> abandoned: ABANDON
+  self_reviewed --> pr_open: PR_OPENED
+  self_reviewed --> implementing: RESTART if unpushed
+  self_reviewed --> abandoned: ABANDON
+  pr_open --> changes_requested: CHANGES_REQUESTED
+  pr_open --> approved: GATE_PASSED if gate
+  pr_open --> merged: MERGED
+  pr_open --> declined: DECLINED
+  changes_requested --> approved: GATE_PASSED if gate
+  changes_requested --> pr_open: GATE_FAILED
+  changes_requested --> merged: MERGED
+  changes_requested --> declined: DECLINED
+  approved --> changes_requested: CHANGES_REQUESTED
+  approved --> pr_open: GATE_FAILED
+  approved --> merged: MERGED
+  approved --> declined: DECLINED
+  merged --> [*]
+  declined --> pr_open: REOPENED
+  declined --> abandoned: ABANDON
+  abandoned --> [*]
+```
+
+Phase machine (new).
+
+```mermaid
+stateDiagram-v2
+  [*] --> idle
+  idle --> setup: GO if setup
+  idle --> baseline: GO if baseline
+  idle --> following: GO if follow
+  idle --> building: GO if run
+  idle --> checking: GO if checks
+  idle --> critic: GO if critic
+  idle --> reviewing: GO if review
+  idle --> updating: UPDATE
+  setup --> idle: CLEAN
+  setup --> idle: WAIT
+  setup --> idle: STOPPED
+  baseline --> idle: CLEAN
+  baseline --> idle: STOPPED
+  building --> checking: RUN_DONE
+  building --> building: RUN_CUT if firstCut
+  building --> idle: RUN_CUT
+  building --> idle: WAIT
+  building --> idle: STOPPED
+  checking --> idle: CHECKS_GREEN
+  checking --> idle: CHECKS_RED if afterUpdate
+  checking --> idle: CHECKS_RED if redBefore
+  checking --> fixing: CHECKS_RED if triesLeft
+  checking --> idle: CHECKS_RED
+  checking --> idle: WAIT
+  checking --> idle: STOPPED
+  fixing --> idle: RUN_DONE if unchanged
+  fixing --> checking: RUN_DONE
+  fixing --> fixing: RUN_CUT if firstCut
+  fixing --> idle: RUN_CUT
+  fixing --> idle: WAIT
+  fixing --> idle: STOPPED
+  critic --> judging: POINTS
+  critic --> idle: CLEAN
+  critic --> idle: STOPPED
+  judging --> checking: RUN_DONE
+  judging --> judging: RUN_CUT if firstCut
+  judging --> idle: RUN_CUT
+  judging --> idle: WAIT
+  judging --> idle: STOPPED
+  reviewing --> judging: POINTS if roundsLeft
+  reviewing --> idle: POINTS
+  reviewing --> idle: CLEAN
+  reviewing --> idle: WAIT
+  reviewing --> idle: STOPPED
+  following --> idle: RUN_DONE if unchanged
+  following --> checking: RUN_DONE
+  following --> following: RUN_CUT if firstCut
+  following --> idle: RUN_CUT
+  following --> idle: WAIT
+  following --> idle: STOPPED
+  updating --> checking: CLEAN
+  updating --> resolving: CONFLICT
+  updating --> idle: WAIT
+  updating --> idle: STOPPED
+  resolving --> updating: RUN_DONE
+  resolving --> idle: WAIT
+  resolving --> idle: STOPPED
+```
+
+### 9.4 Reasons
+
+**Storage rules.**
+
+1. task.blocked_json holds the first reason. task_part.blocked_json holds a waiting reason (spec.md 6.25), or held.
+2. taskBlocked gains the optional fields `cause`, `resumeAt`, and `armed`. These are zod defaults. blocked_json has no SQL check (033_task.sql:21; 048_task_part_blocked.sql:3).
+3. Continue decides by kind and cause only, never by text. This fixes G7.
+4. Old rows have no cause. taskDto derives it once from today's facts: the step item, timedOut, redBefore, the open question rows, and the text PAUSED. Only this derivation reads text.
+5. The legacy kinds budget, size, and push stay in BLOCKED_KINDS. taskBlocked.safeParse returns null for an unknown kind (loop.ts:639-643), so a removed kind would hide its reason. Continue clears a legacy reason (section 5.4).
+6. held lives only in the row of its part. nextReason never moves it up, and STOP and a restart keep it. Continue on the part, Skip, RESTART, and ABANDON clear it. SQL.clearWaits and SQL.running skip held rows (tasks.ts:189-195).
+7. A held part halts alone, because buildParts skips a part whose row holds held. Continue of a held part pokes a running driver (loop.ts:1915-1918). buildParts then removes the part from `ended` (loop.ts:1796, :1826).
+8. usage keeps resumeAt and armed in the reason itself. One click arms every usage reason of the task. This replaces resume_at and resume_armed of section 5.3 (Q-SM4).
+9. Continue works in ready for a reason of a built part. Today loop.ts:2626 refuses it. The option leave replaces Dismiss: it restores blockedBefore, or it clears the reason (loop.ts:2914-2917).
+10. The resume input gains `part`, which names a held part. Without it, Continue acts on the first reason, as today.
+
+**Reason table.** In the states column, I is implementing and R is ready. "Queues" means that the reason can wait in a part row (spec.md 6.25.3), because it names a step.
+
+| Kind / cause | Set at | Task states | Queues | Primary exit | Other exits | Continue does |
+|---|---|---|---|---|---|---|
+| question/claude | loop.ts:1074-1088 | I, R | yes | ANSWER | recommended answers; Stop | 409 "Answer the question first." (loop.ts:2645-2646) |
+| question/red_before | loop.ts:1280-1289 | I, R | yes | CONTINUE | See why; Stop; R: leave | the fix runs start, tries from 0 |
+| question/no_change | loop.ts:1297-1298 | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | the gate runs again, tries from 0 |
+| question/task_done (legacy) | loop.ts:1384 | I | no | CONTINUE | Stop | clears; taskStep goes in PS3 |
+| question/paused (legacy) | loop.ts:810 | I | no (soft) | CONTINUE | Stop | builds with no reset (loop.ts:2629-2642); Hold replaces it in PS4 |
+| red/checks | loop.ts:1290-1295 | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | "Test-fix tries" more fix runs; the work stays |
+| red/setup | loop.ts:1723 | I, R | yes | CONTINUE | See why; Stop | setup runs again (option setup deletes the mark) |
+| red/setup_time | loop.ts:1717-1722 | I, R | yes | "Change the time limit" (editor), then CONTINUE | See why; Stop | setup runs with the new limit |
+| red/update | loop.ts:2294 | I, R | no | CONTINUE (Q-SM6) | Undo the update; See why; the message box; R: leave | the fix runs start on the update result |
+| blocker | loop.ts:1488-1495 | I, R | yes | CONTINUE | "Go on without these fixes" (Not verified: answer to build-redesign.md Q3); See why; Stop; R: leave | one more judging round with the stored points |
+| spec_change | loop.ts:1068-1073 | I, R | yes | ACCEPT | REJECT; Stop | 409 "Accept or reject the change to the spec first." (loop.ts:2643) |
+| allow | loop.ts:1038-1041 | I, R | yes | ALLOW | Stop | 409 "Pick a choice for each command first." (loop.ts:2644) |
+| denied_path/path | implement.ts:1038-1040 | I, R | yes | CONTINUE | See why; Stop; R: leave | a fresh session run (guard rule 4); the undone paths stay undone (PS1) |
+| denied_path/git_state | implement.ts:1039 | I, R | yes | CONTINUE | See why; Stop; R: leave | a fresh session run; files that pass the path check stay (section 3 item 3) |
+| denied_path/commit | loop.ts:1247 | I, R | no | CONTINUE | See why; Stop | the gate runs again. Not verified: a check that writes the files again gives the same reason |
+| preflight | preflight.ts:41; loop.ts:1629-1632, :1859-1862; pr.ts:453, :673 | I, R | no | CONTINUE ("Try again") | PICK_BASE when base is set; Stop | the pre-flight runs again |
+| update | loop.ts:2447 | I, R | no | CONTINUE | Go to the PR or Show the diff; R: leave | the update runs again |
+| error/run | today STOP (implement.ts:1041-1042; loop.ts:1026-1034, :1446) | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | the cut run runs again: resume when the guard holds, else fresh (2.2) |
+| error/app | loop.ts:747, :1228, :1379, :1730-1733; implement.ts:884-890, :902-908, :1059-1067 | I, R | no | CONTINUE | Stop | the loop runs again after the user fixed the cause |
+| error/lower_repo | loop.ts:1605-1612 | I | no | WAIT_MERGE | Stop | the scheduler runs again; the reason comes back while the lower PR is open |
+| error/restart (new) | recover (Q-SM2) | I, R | yes, when it names a step | CONTINUE | Start this part again; Stop; R: leave | the cut phase runs again with the kept work (PS1 snapshot) |
+| budget/time (legacy) | implement.ts:517-520 | I | no | CONTINUE | Stop | clears (section 5.4); time limits go in PS3 |
+| budget/cost | implement.ts:521-522 | I, R | no | change the cost limit, then CONTINUE | Stop | 409 "Raise the cost limit first." while the cost is over (Q-SM5; fixes G11) |
+| size/budget (legacy) | loop.ts:1191-1199 | I | no | CONTINUE | Stop | clears; the size check gives a note in PS3 |
+| size/large_repos | loop.ts:1230-1233 | I | no | none reachable | Stop | unreachable (G13); WP-B8 |
+| push (legacy) | no setter | I, R | no | CONTINUE | Stop | clears |
+| slot (soft) | loop.ts:755-803 | I, R | never | SLOT_FREE (app, loop.ts:785-789) | Stop | 409 "The build waits for the run slot. It goes on by itself." (loop.ts:2606-2607) |
+| usage, armed false (new) | PS4, from the run end | I, R | yes | CONTINUE ("Resume at 14:30") | Stop | Before resumeAt, it arms every usage reason of the task. After that time, or when there is no time, the cut run runs again. |
+| usage, armed true (new) | PS4 | I, R | yes | RESUME_DUE (timer) | "Cancel the resume" (option disarm); Stop | After resumeAt, the cut run runs again. Before it, 200 with no change. |
+| held (new) | PS4, route hold | I, stopped | part row only | CONTINUE with part | Skip this part; Start this part again | clears the row; the part builds with the kept work |
+| stuck/stall (new) | PS2 detects, PS3 writes | I, R | yes | CONTINUE | Start this part again; Stop; R: leave | resumes the session; the work stays |
+| stuck/loop (new) | same | I, R | yes | CONTINUE | same | same |
+| stuck/turns, stuck/time (new) | PS3, second cut | I, R | yes | CONTINUE | same | one more continuation run |
+| unfinished (new) | PS3, done false | I, R | yes | CONTINUE | same | resumes the session with "Go on with the open tasks." |
+
+Every reason has a primary exit. Stop is also an exit for every reason except update, which has leave in ready.
+
+**Usage rules.**
+
+- The timer fires RESUME_DUE once per reason. It acts only when that reason is the first reason.
+- rearm(task) runs in loop changed() (loop.ts:629-633) and in loop.recover (loop.ts:3093-3102). It arms a timer for the first reason when that reason is usage with armed true. A past resumeAt fires at once. Not verified: every reason write passes changed().
+- With "Resume by itself after a usage limit" on, a new usage reason starts armed. A run that a usage timer started marks StepDetail.session.why with "usage". If that run hits the limit again, its reason starts with armed false (2.11, "A second limit needs a click"). Not verified: this reading of 2.11.
+
+**Queued reasons (spec.md 6.25) for parts that build at the same time.**
+
+- The rules of 6.25.1 to 6.25.4 stay.
+- The new kinds usage, stuck, unfinished, error/run, and error/restart queue, because they name a step.
+- held never queues. A part row holds one reason, so a held part gets no waiting reason. Its cancelled run writes no reason.
+- Arm, disarm, and RESUME_DUE act on every usage reason of the task, first and waiting.
+
+### 9.5 Drivers and persistence
+
+**In memory today and target.**
+
+| Item | Code | After a restart today | Target |
+|---|---|---|---|
+| drivers (lock) | loop.ts:600 | gone; recoverTasks stops tasks that worked | stays a lock, never a state |
+| pauseAsked, gates | loop.ts:602-603 | gone; loop.ts:2636-2642 covers it | removed by Hold (PS4) |
+| slotWaits | loop.ts:604 | the waiting step fails (tasks.ts:193) | stays; recovery gives error/restart |
+| aborts | loop.ts:605 | gone with the processes | stays; also keyed by part, for Hold (PS4) |
+| pokes, modes, stopping, checking, ending, closing | loop.ts:607, :621-627 | transient | stay |
+| baseMatched | loop.ts:1153 | lost; the check runs again | stays |
+| Runs in the pool and beside it | jobs.ts; recovery jobs.ts:444-455 | runs end with kind restart | stays |
+| Git snapshot | gitstate.ts:52; implement.ts:1060 | lost; Continue resets with the patch | file part-<ord>.gitsnap.json (PS1) |
+| Session run handle (Hold, live stdin) | new, key task:<id>:part:<part>: | none | gone; the last stored transcript is the resume point (2.2) |
+| Live message | new | none | The app writes it into the open step row before the stdin write. After a restart, the next run gets it as "Your instructions". |
+| Stall and loop guard | new, per process | none | gone with the process |
+| Usage timer | new, per task | none | loop.recover rebuilds it from usage reasons with armed true |
+| BUILD_WAIT timer | new, per part | none | rebuilt from ci_fix_left > 0 and ended_at of the newest ok push step; a past deadline ends the mode at once |
+
+**Recovery transition of each state.**
+
+| At the crash | Today | Target |
+|---|---|---|
+| interview or spec_draft with a run | step failed; STOP; Resume runs it again (tasks.ts:2523-2554) | same |
+| implementing, phase not idle | step failed; STOP; part rows cleared (G6) | step failed; reason error/restart on that part (first or queued); the task stays implementing; held and waiting rows stay |
+| implementing, a part builds between steps | STOP (tasks.ts:191) | reason error/restart with step null on that part (it does not queue) |
+| implementing, phase in a slot wait | waiting step failed; STOP | as "phase not idle"; Continue waits for the slot again |
+| implementing, a reason, no open step | kept | kept; usage timers armed again |
+| implementing, only held parts | not possible | kept; SQL.running skips held rows |
+| updating or resolving | restartUpdates and recoverUpdates reset the repositories; STOP (tasks.ts:198-200, :255; loop.ts:2034-2056, :3093-3102) | same reset; reason update "The app stopped during the update." instead of STOP |
+| ready, following | step failed; STOP from ready; Resume clears blockedBefore (G10) | reason error/restart in ready; Continue runs the follow-up again; leave restores blockedBefore |
+| ready or PR states, CI mode on, no step | nothing | BUILD_WAIT timer rebuilt |
+| PR states, idle | nothing; the sync goes on | same |
+| stopped | kept | kept, with held rows |
+| done, failed | kept | kept |
+
+After a restart, each Continue runs GO. GO picks the next phase by the guard order of 9.3.3.
+
+### 9.6 UI mapping
+
+**View key and priority.** The view takes the first rule that holds:
+
+1. The task state is not implementing or ready: the row of that state (model.ts:419-482).
+2. The part has its own reason (first, waiting, or held), or it halted for the reason of another part.
+3. The phase is not idle: a working row. A slot reason shows its text on that row.
+4. A derived wait holds (order below).
+5. The default row of the part state.
+
+**Rows of section 2.17.** I is implementing, and R is ready.
+
+| Row | Task state | Part state | Reason key | Phase | Derived wait | Primary |
+|---|---|---|---|---|---|---|
+| Building | I | implementing | none | building | none | none (message box) |
+| Checking | I, R | worktree state | none | checking | none | none |
+| Fixing | I, R | worktree state | none | fixing | none | none (message box) |
+| Critic or review | I, R | worktree state | none | critic, reviewing | none | none |
+| Ready | I | self_reviewed | none | idle | none | "Open PR for part 2" |
+| Claude asks | I, R | worktree state | question/claude | idle | none | "Answer" |
+| Claude asks to run a command | I, R | worktree state | allow | idle | none | "Continue" |
+| Plan change | I, R | worktree state | spec_change | idle | none | "Review the change" |
+| Needs you | I, R | worktree state | every other kind of 9.4 except slot, usage, and held | idle | none | "Continue" |
+| Usage limit | I, R | worktree state | usage, armed false | idle | none | "Resume at 14:30" |
+| Resume armed | I, R | worktree state | usage, armed true | idle | none | none |
+| On hold | I | implementing | held | idle | none | "Continue" |
+| PR comments | I, R | pr_open, changes_requested, approved | none | idle | comments | "Sort the comments" |
+| Comments sorted | I, R | same | none | idle | sorted | "Send 2 groups to Claude" |
+| Fixed, not pushed | I, R | same | none | idle | unpushed | "Push and post 3 replies" |
+| Build failed | I, R | same | none | idle | build failed, mode off | "Let Claude fix the build" |
+| Red-build fixes on | I, R | same | none | idle | mode on | none |
+| Stopped | stopped | any | the kept reason as detail | idle | none | "Continue" |
+
+**Rows without a machine state.** PR comments, Comments sorted, Fixed not pushed, Build failed, and Red-build fixes on have no state of their own. Fix: model.ts computes one derived wait by a fixed order and tests each row. No new machine state is needed.
+
+**Derived wait order.** This is model.ts:590-713 today, with the new rows inserted:
+
+1. A PR row failed (several repositories, model.ts:591-606).
+2. A pointer row (model.ts:607-622).
+3. The base branch changed (model.ts:680).
+4. PR conflicts (model.ts:681-690).
+5. Claude asks for the base (model.ts:691).
+6. Unpushed commits, with or without replies (model.ts:693-702).
+7. Comments sorted (PS6).
+8. PR comments (PS6).
+9. CI outside the code (PS7a).
+10. Build failed (model.ts:704-708).
+11. Red-build fixes on (PS7b).
+12. The base moved while the PR is open (model.ts:712).
+13. In review (model.ts:713).
+
+**Rows that 2.17 lacks.** Add them in PS5, or in the named package.
+
+| Row | Key | Status | Primary | More |
+|---|---|---|---|---|
+| Waiting for a run slot | reason slot, phase not idle | "Waiting for a free run slot. Claude runs 3 runs at once, your limit." (loop.ts:775-782) | none | Stop |
+| Setup, baseline | phase setup or baseline | "The app runs the setup commands of part 2." | none | Stop |
+| Judging | phase judging | "Claude works on the review points of part 2 (round 1 of 2)." | none (message box) | Hold, Stop |
+| Following | phase following | message: "Claude works on your instructions for part 2." points: "Claude fixes the small points of part 2." comments (PS6): "Claude works on 2 groups of PR comments of part 2." ci (PS7a): "Claude fixes the build of part 2." | none (message box) | Stop |
+| Updating, resolving | phase updating or resolving | spec.md 6.18.5 rows | none | Stop |
+| Waiting reason (6.25.6) | reason in the part row | "<text>", detail "Act on part 1 first." | none | See why, Stop |
+| Halted by another part (6.25.6) | first reason of another part, phase idle | "Part 2 waits until you act on part 1." | none | Stop |
+| In review | PR states, no derived wait | "Waiting for <names> of part 2.", with the chip of PART_STATE_TEXT | "Go to the PR" | Close the task |
+| Base waits | derived waits 3 to 5 and 12 | spec.md 6.18.5 rows | "Update from <base>" | per row |
+| CI outside the code (PS7a) | the newest ci run: cause infra or unknown, no change | "Claude says the build failed outside the code: <quote>." | "Go to the build" | Go to the PR |
+| Declined | part declined | "The PR was declined on the server." (model.ts:495-496) | "Close the task" | Open the PR again, Drop |
+| Done, closed, failed | task done or failed | model.ts:419-429, :488-494 | per row | none |
+| Unpushed, no replies | derived wait 6 | "Part 2 has 1 new commit that is not on the server yet." | "Push to <branch>" | Show the diff |
+
+The last row has no primary today. Its comment says that no route exists (model.ts:692), but routes.ts:361 serves POST /parts/:part/push. Not verified: that route fits this row.
+
+### 9.7 Invariants and test plan
+
+**Invariants.**
+
+1. Every state of each machine is reachable from its initial state.
+2. Every non-terminal state has a way to another state. The terminals are task done (CLOSE self-loop only) and failed, and part merged and abandoned. The phase machine has no terminal.
+3. Every reason (kind, cause) has a primary exit, and each exit route exists.
+4. The table handles each event in each state, or the app refuses it. A refused user event gives 409 with a sentence. A refused sync event writes nothing. A refused phase event is a loop bug and goes to failed() (loop.ts:1874-1887).
+5. The machines are pure: no actions, no invoke, and no createActor. machine.ts imports only xstate and types.
+6. Each mutating route sends one user event or one reason exit (9.3.6).
+7. Every event has a sender, or it is in RESERVED with its owner package.
+8. A part has at most one open step row. Its phase is the phase of that row.
+9. After a restart, each state takes the recovery transition of 9.5. No waiting part row is lost.
+10. Only the user's Stop and an error that no reason covers send STOP from implementing or ready.
+
+**Tests.**
+
+| Test | File | Package | Control mutation |
+|---|---|---|---|
+| Expected tables TASK_TABLE, PART_TABLE, and PHASE_TABLE: can() and target for each state and event; actions are [] | tests/tasks/machine.test.ts (extend :35-58, :82-145) | PS-M | delete the new GATE_FAILED edge: red |
+| Guard grid: each state and event under every combination of the guards that its transitions read. A full product of the 13 phase guards is too large. | same | PS-M | swap follow and run in GO: red |
+| Reachability: a BFS with transition() over every guard combination, with no new dependency. xstate/graph (getAdjacencyMap) ships in xstate 5.33.2, but a fixed context does not vary the guards. | same | PS-M | remove the CONFLICT edge, so resolving is unreachable: red |
+| No dead end: each non-terminal state has an edge to another state | same | PS-M | make a state only loop to itself: red |
+| Sender scan: each event of TASK_EVENTS, PART_EVENTS, and PHASE_EVENTS appears as `type: "<EVENT>"` or in the phase send helper under src/server, or is in RESERVED. Each RESERVED event has no sender. | same | PS-M; PS3, PS4, and PS9 shrink RESERVED | rename the REVIEWED sender in loop.ts: red |
+| Purity: extend :147-170 to phaseMachine and to the import list of machine.ts | same | PS-M | add an entry action: red |
+| machineMermaid snapshots of the three machines (9.3.7) | same (:172-241) | PS-M; PS9 for the task diagram | none needed |
+| README diagram equals machineMermaid(taskMachine) | tests/tasks/readme.test.ts:10-14 | PS9 | none needed |
+| G3: a withdrawn "Needs work" with a failing gate moves changes_requested to pr_open | tests/tasks/gates.test.ts | PS-M | drop the edge: red |
+| REASON_EXITS: each kind and cause has a primary exit, and each exit names a route of routes.ts | new tests/shared/reasons.test.ts | PS-M | delete one entry: red |
+| Reason exits: seed each reason in I and in R. The primary exit answers 2xx and clears the reason or starts the right driver. Continue on a form reason answers 409 with its text. | new tests/tasks/reasons.test.ts (fake CLI) | PS3, PS4 | make Continue refuse ready again: red |
+| Route grid: each mutating route over fixture states (task state, part state, reason, phase) answers 2xx, 400, 404, or 409 with a sentence. It never answers 500, and no driver starts on 409. | new tests/tasks/routes-grid.test.ts | PS5 | remove one 409 check: red |
+| Loop order: the phase send helper asserts can(). A full fake-CLI build gives GO setup, CLEAN, GO baseline, CLEAN, GO run, RUN_DONE, CHECKS_GREEN, GO critic, CLEAN, GO review, CLEAN, then REVIEWED. | tests/tasks/session.test.ts | PS3 | skip the critic: red |
+| One open step per part: an after-each check over every loop test | tests/tasks/fixture.ts helper | PS3 | open two rows in a test: red |
+| Restart per state: seed each row of 9.5, then run recoverTasks and loop.recover. Check the target column. Then Continue reaches the phase that GO picks. | new tests/tasks/recover.test.ts | PS1 (snapshot), PS3 (phases), PS4 (held, usage), PS7b (BUILD_WAIT) | clear held rows in clearWaits: red |
+| Queued reasons: two parts with usage arm together; held survives Stop and a restart; Continue of a held part pokes a running driver | tests/tasks/concurrent.test.ts | PS4 | remove the held skip in nextReason: red |
+| UI rows: each row of 9.6 has one test with at most one primary | tests/web/tasks-model.test.ts | PS5, PS6, PS7a, PS7b | swap derived waits 6 and 8: red |
+
+### 9.8 Work packages
+
+The new package PS-M runs before PS3. It touches no file of PS1 or PS2, so it can run beside them in its own worktree. It starts after WP-R1b is committed, because that work changes shared/task.ts.
+
+| WP | Tier | Machine scope | Depends on |
+|---|---|---|---|
+| PS-M Machines and reason kinds | implementer | machine.ts: PartContext.unpushed, RESTART, GATE_FAILED in changes_requested, phaseMachine with PhaseContext and PHASE_EVENTS, RESERVED with owners, and the comment of machine.ts:51. shared/task.ts: BLOCKED_KINDS adds usage, held, stuck, and unfinished; taskBlocked adds cause, resumeAt, and armed; legacy kinds stay; REASON_EXITS. Tests: machine.test.ts, gates.test.ts (G3), and the new tests/shared/reasons.test.ts. No wiring. | WP-R1b committed |
+| PS1 | implementer-xhigh | the git snapshot on disk for the recovery of 9.5 | none |
+| PS2 | implementer-xhigh | the runner signals behind RUN_CUT, WAIT stuck, and WAIT usage: stall, loop count, resetsAt, cut kind | PS0 |
+| PS3 | implementer-xhigh | the phase send helper and GO in runPart; building, checking, fixing, reviewing; RUN_CUT with firstCut; the reasons unfinished, stuck, and error/run (Q-SM1); error/restart in recoverTasks and loop.recover (Q-SM2); StepDetail.session.purpose; transcript deletion at MERGED, DECLINED, ALL_MERGED, and CLOSE; tests session, reasons, recover | PS-M, PS1, PS2 |
+| PS4 | implementer-xhigh | Hold with the held rules in tasks.ts (holdBlocked, nextReason, clearWaits, SQL.running) and loop.ts (buildParts ended, aborts by part); the Skip (ABANDON) and RESTART routes; usage (arm, disarm, rearm, recover); critic and judging; following for message and points; resolving in the session; Continue in ready, option leave, resume input part. Add tasks.ts to the scope in section 6. | PS3 |
+| PS5 | implementer | view key and priority, the rows of 9.6, removal of the Pause and Dismiss actions, the route grid test | PS4 |
+| PS6 | implementer-xhigh | the derived waits comments and sorted; following with purpose comments | PS5 |
+| PS7a | implementer | following with purpose ci; the row CI outside the code | PS6 |
+| PS7b | implementer-xhigh | the mode table of 9.3.5; the BUILD_WAIT timer and its recovery | PS7a, CI12, approval |
+| PS9 | implementer-xhigh | taskMachine guards noSpecPr and specPr; README diagram; Approve again for an old approved medium plan | PS5 |
+| PS8 | implementer | spec.md 6.2 (the three tables, the phase machine, the diagrams), 6.14 (restart and failed runs), 6.25 (held, usage, new kinds) | PS5; again after PS6, PS7b, and PS9 |
+
+Not owned yet: G4, a PR that opened while PR_OPENED was refused. It needs a pr.ts fix and a sync repair. Recommended: a small package after PS6.
+
+### 9.9 Open questions
+
+1. **Q-SM1.** A failed, cut, or usage-limited session run gives a reason, and the task does not stop. Recommended: yes. Today STOP clears the waiting reasons of other parts (G5). spec.md 6.2 lists no failed run as a cause of stopped.
+2. **Q-SM2.** A restart gives the reason error/restart to each cut part of a building or follow-up task, instead of STOP. Recommended: yes. It keeps every reason, as spec.md 6.25.5 promises (G6, G10).
+3. **Q-SM3.** Hold halts its own part only, and its reason survives Stop and a restart. Recommended: yes. Else Hold of part 2 also halts part 1 (spec.md 6.20.6).
+4. **Q-SM4.** usage keeps resumeAt and armed in the reason, not in task_part_session (section 5.3). One click arms every usage reason of the task. Recommended: yes. One place for the reason removes a class of stale-flag bugs (state-audit.md Part B, Pause).
+5. **Q-SM5.** Keep the kind budget for the cost limit only. Section 5.1 drops budget, but the cost limit still blocks (implement.ts:521-522). Recommended: keep it, with a 409 until the limit changes. Not verified: a UI field for partCost.
+6. **Q-SM6.** Continue on red/update starts the fix runs. Today the user gets only See why, Undo, and the message box (spec.md 6.18.3, Q56). Recommended: yes. The click is still the user's choice.
+7. **Q-SM7.** The derived wait order of 9.6. Recommended: as listed. Work that changes or publishes the branch comes before server feedback.
+8. **Q-SM8.** "Go on without these fixes" for blocker. build-redesign.md Q3 recommended it. Not verified: the user's answer.
