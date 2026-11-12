@@ -5,7 +5,7 @@
 // preset and <config>/agents, checks each file, and writes the app definitions. The app never passes an agent file to the CLI as it is.
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   type AgentDef,
   type AgentInfo,
@@ -103,12 +103,14 @@ export function parseAgentFile(source: AgentSource, file: string, data: Uint8Arr
 
   const problems: string[] = [];
   const notes: string[] = [];
-  const str = (v: unknown) => (typeof v === "string" ? v.trim() : v == null ? "" : String(v));
+  // Only a YAML string is a value. Another type shows as its kind: String() of a mapping or of an alias tree can be huge.
+  const kind = (v: unknown) => (Array.isArray(v) ? "<a list>" : record(v) ? "<a mapping>" : `<a ${typeof v}>`);
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : v == null ? "" : kind(v));
   const name = str(meta.name);
   if (!NAME.test(name) || name.length > MAX_NAME)
     problems.push(`${file}: the name "${name}" is not valid. Use letters, digits, - and _ only, at most 64 characters.`);
   else if (/^rl-/i.test(name)) problems.push(`${file}: names that start with rl- belong to the app.`);
-  const description = str(meta.description);
+  const description = typeof meta.description === "string" ? meta.description.trim() : "";
   if (!description) problems.push(`${file}: add a description. The lead picks agents by it.`);
 
   let model: string | null = null;
@@ -123,7 +125,7 @@ export function parseAgentFile(source: AgentSource, file: string, data: Uint8Arr
   let effort: Effort | null = null;
   if (meta.effort != null) {
     const e = str(meta.effort);
-    if ((EFFORTS as readonly string[]).includes(e)) effort = e as Effort;
+    if (typeof meta.effort === "string" && (EFFORTS as readonly string[]).includes(e)) effort = e as Effort;
     // U58: the CLI refuses the whole agents file for a bad effort.
     else problems.push(`${file}: the effort "${e}" is not valid. Use low, medium, high, xhigh, or max.`);
   }
@@ -141,7 +143,10 @@ export function parseAgentFile(source: AgentSource, file: string, data: Uint8Arr
   const unknown = (tools ?? []).filter((t) => !KNOWN_TOOLS.has(base(t)) && !t.startsWith("mcp__"));
   if (unknown.length) notes.push(`Unknown tools: ${unknown.join(", ")}.`);
   const rules = (tools ?? []).filter((t) => t !== base(t) && KNOWN_TOOLS.has(base(t)));
-  if (rules.length) notes.push(`The app ignores tool rules: ${rules.join(", ")}. The step rules apply.`);
+  if (rules.length)
+    notes.push(
+      `A tool rule such as Bash(npm *) gives no tool: ${rules.join(", ")}. Use the bare name, such as Bash. The step rules apply.`,
+    );
 
   return {
     source,
@@ -161,8 +166,20 @@ export function parseAgentFile(source: AgentSource, file: string, data: Uint8Arr
   };
 }
 
-// <config>/agents/*.md, top level only. A missing folder gives no agents.
+// <config>/agents/*.md, top level only. A missing folder gives no agents. A relative config folder resolves against the app cwd.
+// Two files with the same name both get a problem, because the lead cannot tell them apart.
 export function userAgents(config = claudeConfigDir()): AgentFile[] {
+  const files = readUserAgents(resolve(config));
+  const count = new Map<string, number>();
+  for (const f of files) count.set(f.name, (count.get(f.name) ?? 0) + 1);
+  return files.map((f) =>
+    (count.get(f.name) ?? 0) > 1
+      ? { ...f, problems: [...f.problems, `${f.file}: another agent file has the name "${f.name}". Give each file its own name.`] }
+      : f,
+  );
+}
+
+function readUserAgents(config: string): AgentFile[] {
   const dir = join(config, "agents");
   let names: string[];
   try {

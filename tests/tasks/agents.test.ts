@@ -5,7 +5,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { KEPT_KEYS } from "../../scripts/gate/workflow";
 import { SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import {
@@ -70,9 +70,56 @@ describe("parseAgentFile refusals (section 3.5)", () => {
     expect(f.notes).toEqual([
       "maxTurns is not a whole number. The step limit applies.",
       "Unknown tools: Frobnicate.",
-      "The app ignores tool rules: Bash(npm *). The step rules apply.",
+      "A tool rule such as Bash(npm *) gives no tool: Bash(npm *). Use the bare name, such as Bash. The step rules apply.",
     ]);
     expect(f.ignored).toEqual(["permissionMode", "color"]);
+  });
+
+  test("a field of another YAML type is a problem, never a throw or its String() text", () => {
+    const name = (v: string) => `a.md: the name "${v}" is not valid. Use letters, digits, - and _ only, at most 64 characters.`;
+    const noDescription = "a.md: add a description. The lead picks agents by it.";
+    const front = (...lines: string[]) => parse(lines.join("\n"));
+    expect(front("name: { a: 1 }", "description: Helps.").problems).toEqual([name("<a mapping>")]);
+    expect(front("name: [helper]", "description: Helps.").problems).toEqual([name("<a list>")]);
+    expect(front("name: 123", "description: Helps.").problems).toEqual([name("<a number>")]);
+    expect(front("name: helper", "description: [a, b]").problems).toEqual([noDescription]);
+    expect(front("name: helper", "description: { a: 1 }").problems).toEqual([noDescription]);
+    expect(ok("effort: [high]").problems).toEqual(['a.md: the effort "<a list>" is not valid. Use low, medium, high, xhigh, or max.']);
+    expect(ok("effort: { high: 1 }").problems).toEqual([
+      'a.md: the effort "<a mapping>" is not valid. Use low, medium, high, xhigh, or max.',
+    ]);
+    expect(ok("model: { a: 1 }").problems).toEqual([
+      'a.md: the model "<a mapping>" is not a model name. Use opus, sonnet, haiku, fable, inherit, or a full model ID.',
+    ]);
+  });
+
+  test("a YAML alias tree as description and a __proto__ key", () => {
+    const prev = (i: number) => (i ? `*a${i - 1}` : "*a");
+    const tree = [
+      "x: &a [aaaaaaaaaa, aaaaaaaaaa, aaaaaaaaaa]",
+      ...Array.from({ length: 9 }, (_, i) => `x${i}: &a${i} [${prev(i)}, ${prev(i)}, ${prev(i)}]`),
+    ];
+    const f = parse(["name: helper", ...tree, "description: *a8"].join("\n"));
+    expect(f.problems).toEqual(["a.md: add a description. The lead picks agents by it."]);
+    expect(f.description).toBe("");
+    const proto = parse(["__proto__:", "  name: evil", "  description: Evil.", "description: Helps."].join("\n"));
+    expect(proto.name).toBe("a");
+    expect(proto.problems[0]).toContain('the name "" is not valid');
+    expect(proto.ignored).toContain("__proto__");
+  });
+
+  test("tool names: *, Bash(*), and lower case give no tool", () => {
+    const star = ok('tools: "*"');
+    expect(star.notes).toEqual(["Unknown tools: *."]);
+    expect(buildAgentDef(star, { mode: "implement", shell: true }).def).toBeNull();
+    const rule = ok("tools: Bash(*)");
+    expect(rule.notes).toEqual([
+      "A tool rule such as Bash(npm *) gives no tool: Bash(*). Use the bare name, such as Bash. The step rules apply.",
+    ]);
+    expect(buildAgentDef(rule, { mode: "implement", shell: true }).def).toBeNull();
+    const lower = ok("tools: read, bash, edit");
+    expect(lower.notes).toEqual(["Unknown tools: read, bash, edit."]);
+    expect(buildAgentDef(lower, { mode: "implement", shell: true }).def).toBeNull();
   });
 
   test("inherit, a YAML tool list, a BOM, CRLF, and the SHA-256 of the bytes", () => {
@@ -200,6 +247,35 @@ describe("preset and discovery", () => {
     try {
       expect(userAgents().map((f) => f.name)).toEqual(["alpha", "beta", "big"]);
     } finally {
+      if (before === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = before;
+    }
+  });
+
+  test("userAgents: two files with one name both get a problem; a relative CLAUDE_CONFIG_DIR resolves against the cwd", () => {
+    const config = join(tmp, "dupes");
+    mkdirSync(join(config, "agents"), { recursive: true });
+    writeFileSync(join(config, "agents", "one.md"), md("name: same\ndescription: A."));
+    writeFileSync(join(config, "agents", "two.md"), md("name: same\ndescription: B."));
+    writeFileSync(join(config, "agents", "three.md"), md("name: other\ndescription: C."));
+    const dup = (file: string) => `${file}: another agent file has the name "same". Give each file its own name.`;
+    expect(userAgents(config).map((f) => [f.file, f.problems])).toEqual([
+      ["one.md", [dup("one.md")]],
+      ["three.md", []],
+      ["two.md", [dup("two.md")]],
+    ]);
+    const rel = relative(process.cwd(), config);
+    const before = process.env.CLAUDE_CONFIG_DIR;
+    const cwd = process.cwd();
+    // On another drive relative() gives an absolute path. The test then runs from the temp folder.
+    const from = isAbsolute(rel) ? tmp : cwd;
+    process.chdir(from);
+    process.env.CLAUDE_CONFIG_DIR = relative(from, config);
+    try {
+      expect(isAbsolute(process.env.CLAUDE_CONFIG_DIR)).toBe(false);
+      expect(userAgents().map((f) => f.name)).toEqual(["same", "other", "same"]);
+    } finally {
+      process.chdir(cwd);
       if (before === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = before;
     }

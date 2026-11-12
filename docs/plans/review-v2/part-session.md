@@ -780,7 +780,7 @@ This section has three machines, plus reasons, derived waits, and one mode:
 
 - machine.ts is a pure transition function: no actions, no invoke, no actor (machine.ts:4-6). tests/tasks/machine.test.ts:147-170 checks this.
 - advance (tasks.ts:210-226) reads the row, checks the version, and refuses an event that can() refuses. The 409 text is TASK_STATE_TEXT of the state (tasks.ts:219; shared/task.ts:341).
-- advance writes stopped_from on STOP (tasks.ts:222). Each move out of implementing clears every waiting part row (tasks.ts:195, :223).
+- advance writes stopped_from on STOP (tasks.ts:222). Each successful move whose target is not implementing clears every waiting part row (tasks.ts:195, :223). This includes self-loops such as interview ASKED and done CLOSE.
 - advancePart (tasks.ts:228-248) refuses with "This part is <chip>." (tasks.ts:240-241). It moves the task version (tasks.ts:244).
 - task.state and task_part.state have SQL CHECK lists (033_task.sql:13, :107). task_part has child tables (033_task.sql:114; 035_task_repos.sql:18; 037_task_update.sql:6). So a new stored state value needs a table rebuild.
 
@@ -807,7 +807,7 @@ This section has three machines, plus reasons, derived waits, and one mode:
 | interview to ready, stopped | FAIL | none | failed | none |
 | stopped | RESUME | stoppedFrom X | X | loop.ts:2616 for implementing; tasks.ts:2534 for the others (routes.ts:301-302) |
 | stopped | CLOSE | none | done | tasks.ts:2564 |
-| done | CLOSE | none | done | tasks.ts:2564; it sets closed_at only (tasks.ts:2567) |
+| done | CLOSE | none | done | tasks.ts:2564. It clears task.blocked_json and the waiting part rows, and adds 2 to the version (advance tasks.ts:2564, patch :2566). closed_at keeps its first value (COALESCE, :2567). |
 | failed | none | none | final | none |
 
 #### 9.1.3 Part machine (machine.ts:100-126)
@@ -839,7 +839,7 @@ syncParts sends one event per changed PR and ignores a refusal (gates.ts:86-88).
 |---|---|---|---|
 | First reason | task.blocked_json (033_task.sql:21) | setBlocked tasks.ts:551-554; holdBlocked :1033-1044 | It halts every part (loop.ts:648, :666-670) |
 | Soft reasons | the same column | softReason tasks.ts:1015-1017 | Pause and slot halt no other part. Another reason replaces them. |
-| Waiting reason of a part | task_part.blocked_json (048_task_part_blocked.sql:3) | waitingPart tasks.ts:1021-1029; nextReason :533-537 | It moves up on a clear. Each move out of implementing clears it (tasks.ts:223). |
+| Waiting reason of a part | task_part.blocked_json (048_task_part_blocked.sql:3) | waitingPart tasks.ts:1021-1029; nextReason :533-537 | It moves up on a clear. Each successful move whose target is not implementing clears it (tasks.ts:223). |
 | Pause | question with step null and the text PAUSED, plus pauseAsked and gates in memory | loop.ts:602-603, :807-818, :2609 | text match |
 | Pause after each task | question with step null | loop.ts:1384 | Continue clears it |
 | Slot wait | soft reason slot, a waiting step row, slotWaits in memory | loop.ts:604, :755-803 | It goes on by itself |
@@ -945,7 +945,7 @@ Owners: route (routes.ts handler), loop (loop.ts driver), tasks (tasks.ts servic
 | non-final | FAIL | none | failed | reserved | clear the part rows (tasks) | no sender |
 | stopped | RESUME | stoppedFrom X | X | route resume | Continue rule, then GO for each building part (loop) | none |
 | stopped | CLOSE | none | done | route close | closed_at; delete transcripts | PS3 side effect |
-| done | CLOSE | none | done | route close | closed_at only | none |
+| done | CLOSE | none | done | route close | clear task.blocked_json and the waiting part rows; version + 2; closed_at keeps its first value | none |
 
 - Guard renames (PS9): small becomes noSpecPr, and planReview becomes specPr. The README diagram changes in the same package (tests/tasks/readme.test.ts:10-14).
 - machine.ts:51 changes. "Stop, a restart, or a usage limit stops a task" becomes "The user's Stop, or an error that no reason covers, stops a task."

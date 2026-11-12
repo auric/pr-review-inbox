@@ -6,11 +6,13 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AGENT_OUTPUT, hideAgentOutput, type Json, pathForms } from "../../scripts/gate/sanitize-core";
 import {
   agentCall,
   agentDef,
   agentFront,
   agentStats,
+  bashHas,
   bashIs,
   callOutcome,
   cwdFilesFact,
@@ -21,6 +23,7 @@ import {
   outsideFolders,
   overlap,
   pathEnds,
+  redactPaths,
   u82a,
   u82b,
   u82c,
@@ -126,6 +129,26 @@ describe("agents.json transform", () => {
   test("agentFront reads name and model of the front matter", () => {
     expect(agentFront("---\nname: helper\nmodel: haiku\n---\nbody", "f.md")).toEqual({ name: "helper", model: "haiku" });
     expect(agentFront("no front matter", "f.md")).toEqual({ name: "f", model: undefined });
+    expect(agentFront("---\nname: \"helper\"\nmodel: 'haiku'\n---\nbody", "f.md")).toEqual({ name: "helper", model: "haiku" });
+    expect(agentFront('---\nname: "it\'s"\n---\n', "f.md").name).toBe("it's");
+  });
+
+  test("redactPaths covers every path form, the dash form of the per-cwd folder names too", () => {
+    const forms = pathForms("C:\\Users\\Bob");
+    expect(redactPaths("a C:\\Users\\bob\\x b", forms)).toBe("a ~\\x b");
+    expect(redactPaths("c:/users/bob/x", forms)).toBe("~/x");
+    expect(redactPaths(JSON.stringify("C:\\Users\\Bob\\x"), forms)).toBe('"~\\\\x"');
+    expect(redactPaths("projects/C--Users-Bob-AppData-Local-Temp-rl-gb-b36-x-work", forms)).toBe(
+      "projects/~-AppData-Local-Temp-rl-gb-b36-x-work",
+    );
+    expect(redactPaths("same", ["", ...forms])).toBe("same");
+  });
+
+  test("bashHas finds a wrapped command", () => {
+    expect(bashHas("sleep 600")({ command: "cd repo && sleep 600" })).toBe(true);
+    expect(bashHas("sleep 600")({ command: "timeout 700 sleep 600\n" })).toBe(true);
+    expect(bashHas("sleep 600")({ command: "sleep 60" })).toBe(false);
+    expect(bashHas("sleep 600")({})).toBe(false);
   });
 });
 
@@ -176,8 +199,18 @@ const o = (state: "refused" | "ran" | "error" | "no result" | "not tried", extra
 
 describe("B35 judges", () => {
   test("U82a to U82d", () => {
-    const ok = { rel: { ...o("refused"), file: false }, abs: { ...o("error"), file: false }, repo: { ...o("ran"), file: true } };
+    const cwdText = "C:\\t\\out.txt is outside C:\\t\\work; --restricted confines the file tools to the working directory.";
+    const ok = {
+      rel: { ...o("refused"), file: false },
+      abs: { ...o("error", { text: cwdText }), file: false },
+      repo: { ...o("ran"), file: true },
+    };
     expect(u82a(ok).status).toBe("PASS");
+    expect(u82a(ok).evidence).toContain("--restricted confines");
+    expect(u82a({ ...ok, abs: { ...o("error", { text: "ENOENT: no such file or directory" }), file: false } }).status).toBe("FAIL");
+    expect(u82a({ ...ok, abs: { ...o("no result"), file: false } }).status).toBe("FAIL");
+    const perm = "Claude requested permissions to write to x, but you haven't granted it yet.";
+    expect(u82a({ ...ok, abs: { ...o("error", { text: perm }), file: false } }).status).toBe("PASS");
     expect(u82a({ ...ok, abs: { ...o("not tried"), file: false } }).status).toBe("FAIL");
     expect(u82a({ ...ok, rel: { ...o("refused"), file: true } }).status).toBe("FAIL");
     const b = {
@@ -220,15 +253,36 @@ describe("B36 judges", () => {
     expect(u83({ called: true, ...w }).status).toBe("PASS");
     expect(u83({ called: false, ...w }).status).toBe("FAIL");
     expect(u83({ called: true, ...w, repo: { ...o("not tried"), file: false } }).evidence).toContain("run B36 again");
+    expect(u83({ called: true, ...w, abs: { ...o("error", { text: "Invalid path" }), file: false } }).status).toBe("FAIL");
+    expect(u83({ called: true, ...w, abs: { ...o("not tried"), file: false } }).status).toBe("FAIL");
     expect(u84({ edit: o("refused"), changed: false }).status).toBe("PASS");
     expect(u84({ edit: o("error"), changed: false }).status).toBe("FAIL");
     expect(u84({ edit: o("refused"), changed: true }).status).toBe("FAIL");
     const union = ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "Agent"];
-    expect(u86({ tools: ["Read", "Bash", "Task", "StructuredOutput"], union, fetch: o("not tried") }).status).toBe("PASS");
-    expect(u86({ tools: ["Read", "WebFetch"], union, fetch: o("not tried") }).status).toBe("FAIL");
+    const init = ["Read", "Bash", "Task", "StructuredOutput"];
+    const missing = o("error", { text: "<tool_use_error>Error: No such tool available: WebFetch</tool_use_error>" });
+    expect(u86({ tools: init, union, fetch: missing }).status).toBe("PASS");
+    expect(u86({ tools: init, union, fetch: o("refused") }).status).toBe("PASS");
+    expect(u86({ tools: init, union, fetch: o("not tried") }).status).toBe("FAIL");
+    expect(u86({ tools: init, union, fetch: o("not tried") }).evidence).toContain("run B36 again");
+    expect(u86({ tools: init, union, fetch: o("error", { text: "getaddrinfo ENOTFOUND example.invalid" }) }).status).toBe("FAIL");
+    expect(u86({ tools: init, union, fetch: o("error", { text: "not available: fetch failed" }) }).status).toBe("FAIL");
+    expect(u86({ tools: init, union, fetch: o("no result") }).status).toBe("FAIL");
+    expect(u86({ tools: ["Read", "WebFetch"], union, fetch: missing }).status).toBe("FAIL");
     expect(u86({ tools: ["Read"], union, fetch: o("ran") }).status).toBe("FAIL");
-    expect(u89({ call: o("error"), grandchild: 0 }, "x").status).toBe("PASS");
-    expect(u89({ call: o("error"), grandchild: 3 }, "x").status).toBe("FAIL");
+    const run = { call: o("error", { text: "No such tool available: Agent" }), grandchild: 0, end: true };
+    const both = { depth: { ...run, depthSet: true }, noDepth: { ...run, depthSet: false } };
+    expect(u89(both, "x").status).toBe("PASS");
+    expect(u89({ ...both, noDepth: { ...both.noDepth, call: o("refused") } }, "x").status).toBe("PASS");
+    expect(u89({ ...both, depth: { ...both.depth, grandchild: 3 } }, "x").status).toBe("FAIL");
+    expect(u89({ ...both, depth: { ...both.depth, call: o("not tried") } }, "x").status).toBe("FAIL");
+    expect(u89({ ...both, noDepth: { ...both.noDepth, call: o("no result") } }, "x").status).toBe("FAIL");
+    expect(u89({ ...both, noDepth: { ...both.noDepth, end: false } }, "x").status).toBe("FAIL");
+    expect(u89({ ...both, noDepth: { ...both.noDepth, depthSet: true } }, "x").status).toBe("FAIL");
+    expect(u89({ ...both, noDepth: null }, "x").status).toBe("FAIL");
+    expect(u89({ ...both, noDepth: null }, "x").evidence).toContain("run lost");
+    const typeRefused = o("error", { text: "Agent type 'general-purpose' is not allowed in this session." });
+    expect(u89({ ...both, noDepth: { ...both.noDepth, call: typeRefused } }, "x").status).toBe("FAIL");
     expect(u96({ leadEdit: o("not tried"), leadWrite: o("refused"), leadFile: false, agentFile: true }).status).toBe("PASS");
     expect(u96({ leadEdit: o("ran"), leadWrite: o("not tried"), leadFile: true, agentFile: true }).status).toBe("FAIL");
     expect(u96({ leadEdit: o("not tried"), leadWrite: o("not tried"), leadFile: false, agentFile: false }).status).toBe("FAIL");
@@ -245,6 +299,9 @@ describe("B36 judges", () => {
     expect(u85("any", { ...base, cmds: { ...cmds, git: cmd("check", "deny") } }).status).toBe("FAIL");
     expect(u85("any", { ...base, cmds: { ...cmds, git: cmd("deny", "deny", true) } }).status).toBe("FAIL");
     expect(u85("any", { ...base, cmds, control: { ...o("refused"), marker: false } }).status).toBe("FAIL");
+    const lead = { ...cmd("deny", "deny"), deniedParent: undefined };
+    expect(u85("any", { ...base, cmds: { ...cmds, git: lead } }).status).toBe("FAIL");
+    expect(u85("any", { ...base, cmds: { ...cmds, git: { ...lead, deniedParent: "other" } } }).status).toBe("FAIL");
   });
 
   test("U91 and U93", () => {
@@ -264,6 +321,41 @@ describe("B36 judges", () => {
     expect(u93({ ...s, job: [8] }).status).toBe("FAIL");
     expect(u93({ ...s, job: null, win: false }).status).toBe("PASS");
     expect(u93({ ...s, sleepMs: null }).status).toBe("FAIL");
+  });
+});
+
+describe("user agent output in fixtures (U88)", () => {
+  test("hideAgentOutput replaces the reply of a user agent call only", () => {
+    const ev = (e: unknown) => e as Json;
+    const evs = [
+      ev(use("u1", "Agent", { subagent_type: "Mine", prompt: "go" })),
+      ev({
+        type: "assistant",
+        parent_tool_use_id: "u1",
+        message: {
+          content: [
+            { type: "text", text: "secret reply" },
+            { type: "thinking", thinking: "t" },
+          ],
+        },
+      }),
+      ev({ type: "system", subtype: "task_notification", tool_use_id: "u1", summary: "secret summary" }),
+      ev(result("u1", "secret reply", false, { tool_use_result: { content: [{ type: "text", text: "secret reply" }], totalTokens: 5 } })),
+      ev(use("e1", "Agent", { subagent_type: "Explore", prompt: "go" })),
+      ev({ type: "assistant", parent_tool_use_id: "e1", message: { content: [{ type: "text", text: "RLGB-DEF-EXPLORE" }] } }),
+      ev(result("e1", "RLGB-DEF-EXPLORE")),
+    ];
+    const out = JSON.stringify(hideAgentOutput(evs, new Set(["mine"])));
+    expect(out).not.toContain("secret");
+    expect(out).toContain(AGENT_OUTPUT);
+    expect(out).toContain("RLGB-DEF-EXPLORE");
+    expect(out).toContain('"totalTokens":5');
+    expect(hideAgentOutput(evs, new Set(["other"]))).toBe(evs);
+    const refused = [
+      ev(use("r1", "Agent", { subagent_type: "Mine", prompt: "go" })),
+      ev(result("r1", "Agent type 'Mine' is not allowed", true)),
+    ];
+    expect(hideAgentOutput(refused, new Set(["mine"]))).toBe(refused);
   });
 });
 
@@ -297,17 +389,17 @@ describe("claude-checks.ts B35 and B36", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).ownCalls).toEqual({ b35: 3 });
   });
 
-  test("B36 plans seven runs, and eight with --opus", () => {
+  test("B36 plans eight runs, and nine with --opus", () => {
     const line = dryRun("--only", "B36", "--opus");
-    for (const t of ["writer", "any", "stop", "turns", "models", "badmodel", "advisor", "opus"])
+    for (const t of ["writer", "nodepth", "any", "stop", "turns", "models", "badmodel", "advisor", "opus"])
       expect(line(`b36-${t}`)).toContain('"--agent","rl-main"');
     expect(line("b36-any")).toContain('"--allowedTools","Read,Grep,Glob,Write"');
     expect(line("b36-writer")).toContain('"--allowedTools","Read,Grep,Glob,Edit,Write"');
     expect(line("b36-turns")).toContain('"--max-turns","4"');
     expect(line("b36-advisor")).toContain('"--advisor","opus"');
     const file = join(ROOT, ".gate0/v3-local/results.b36.dry-run.json");
-    expect(JSON.parse(readFileSync(file, "utf8")).ownCalls).toEqual({ b36: 8 });
+    expect(JSON.parse(readFileSync(file, "utf8")).ownCalls).toEqual({ b36: 9 });
     dryRun("--only", "B36");
-    expect(JSON.parse(readFileSync(file, "utf8")).ownCalls).toEqual({ b36: 7 });
+    expect(JSON.parse(readFileSync(file, "utf8")).ownCalls).toEqual({ b36: 8 });
   });
 });

@@ -66,6 +66,7 @@ import {
 } from "../../src/shared/review";
 import { implementResult, interviewResult, type ShellMode, specResult } from "../../src/shared/task";
 import { advisorInInit, advisorOff, advisorStream, advisorTools, counts, namesModel } from "./advisor";
+import { pathForms } from "./sanitize-core";
 import {
   agentOutcome,
   encodeCwd,
@@ -95,6 +96,7 @@ import {
   agentDef,
   agentFront,
   agentStats,
+  bashHas,
   bashIs,
   type Cmd,
   callOutcome,
@@ -106,6 +108,8 @@ import {
   outsideFolders,
   overlap,
   pathEnds,
+  redactPaths,
+  type U89Run,
   u82a,
   u82b,
   u82c,
@@ -167,7 +171,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b33: 2,
   b34: 2,
   b35: 3,
-  b36: 8,
+  b36: 9,
   b37: 9,
   gadv: 5,
 };
@@ -300,12 +304,12 @@ const homeForms = (() => {
   const suffix = long.slice(HOME.length).toLowerCase();
   if (long.toLowerCase().startsWith(HOME.toLowerCase()) && t.toLowerCase().endsWith(suffix) && t.length > suffix.length)
     forms.add(t.slice(0, t.length - (long.length - HOME.length)));
-  return [...forms].flatMap((f) => [f, slash(f)]);
+  return [...forms].flatMap(pathForms);
 })();
 let userAgentName: string | undefined;
 function redact(s: string) {
   let out = s;
-  for (const f of homeForms) out = out.replace(new RegExp(f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "~");
+  out = redactPaths(out, homeForms);
   if (userAgentName) out = out.replaceAll(userAgentName, "<user agent>");
   if (sshAlias) out = out.replace(new RegExp(`(?<![\\w.-])${sshAlias.replaceAll(".", "\\.")}(?![\\w.-])`, "g"), "<alias>");
   return out;
@@ -3888,6 +3892,7 @@ const agentSteps = (steps: string[]) =>
     ...steps.map((s, i) => `${i + 1}. ${s}`),
     "End with one line per call and its result.",
   ].join("\n");
+const NESTED_AGENT = 'Agent with subagent_type "general-purpose" and the prompt "Reply with the word OK."';
 const agentStep = (type: string, prompt: string, more = "") =>
   `Agent with subagent_type "${type}"${more} and the prompt "${prompt}". Wait for its result.`;
 
@@ -3919,7 +3924,11 @@ function cwdFiles(id: string, p: Part, r: Run) {
     {},
   );
   const others = tagged().filter((d) => d.includes(basename(p.base)) && d !== encodeCwd(p.work));
-  const outside = [...outsideFolders(outputFiles(r), p.folders).map((f) => short(f, 120)), ...others.map((d) => `projects/${d}`)];
+  // Labels only: an encoded folder name holds the home path.
+  const outside = [
+    ...outsideFolders(outputFiles(r), p.folders).map((f) => `output file ${labelIds([basename(f)], {})[0]}`),
+    ...others.map(() => "another per-cwd folder of this check"),
+  ];
   const inCwd = existsSync(join(p.work, ".claude")) ? listFiles(join(p.work, ".claude")) : [];
   for (const d of p.folders) rmRetry(d);
   return cwdFilesFact(id, {
@@ -3947,6 +3956,8 @@ const parse = (r: Run, work: string, allowed: Set<string>, agents: Set<string>, 
   for (const e of r.events) p.line(JSON.stringify(e));
   return p.state;
 };
+// The judges cut the text. The cut can split a home path, so the text is redacted first.
+const redacted = <T extends { text: string }>(o: T): T => ({ ...o, text: redact(o.text) });
 const putFact = (check: string) => (f: { id: string; status: Status; evidence: string }) => push(`${check}.${f.id}`, f.status, f.evidence);
 
 // ---------- B35 (integration-check.md U82): the WP-SA1 write run as --agent rl-main ----------
@@ -4080,7 +4091,7 @@ async function b35() {
     if (r1) {
       const st = parse(r1, p.work, a.allowed, a.agents, "allowlist");
       const seen = (cmd: string) => ({ state: outcomeOf(r1, cmd).state, label: labelOf(st, cmd) });
-      const w = (name: string, file: boolean) => ({ ...fileOutcome(r1, "Write", name), file });
+      const w = (name: string, file: boolean) => ({ ...redacted(callOutcome(r1.events, null, "Write", pathEnds(name))), file });
       put(u82a({ rel: w("rlgb-out-rel.txt", out1.rel), abs: w("rlgb-out-abs.txt", out1.abs), repo: w("w.txt", out1.w) }));
       put(
         u82b({
@@ -4129,7 +4140,8 @@ async function b35() {
 
 // ---------- B36 (agent-workflow.md section 6, U83 to U96): workflow agents ----------
 // The agents.json of section 3.6 (scripts/gate/workflow.ts), written over the implementArgs file. The lead is rl-main without Bash,
-// Edit, and Write. Every run sets CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1, as section 3.8 plans for childEnv. At most 8 runs.
+// Edit, and Write. Every run except nodepth sets CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1, as section 3.8 plans for childEnv. nodepth
+// leaves it out, so U89 shows that disallowedTools alone holds. At most 9 runs.
 async function b36() {
   const p = partFolder("b36");
   const errors: Record<string, string> = {};
@@ -4140,7 +4152,7 @@ async function b36() {
       { description: "Gate B36 agent.", prompt, model: o.model ?? "haiku", ...o },
       { shell: true, readOnly: o.readOnly, stepTurns: WF_STEP_TURNS },
     );
-  const wf = (mode: ShellMode, agents: Record<string, AgentDef>, maxTurns: number, noEdit = false) => {
+  const wf = (mode: ShellMode, agents: Record<string, AgentDef>, maxTurns: number, noEdit = false, depth = true) => {
     const shell = p.shell(mode);
     const x = implementArgs({
       implement: true,
@@ -4155,7 +4167,11 @@ async function b36() {
     });
     writeJson(join(p.app, "agents.json"), { [MAIN_AGENT]: leadDef(Object.keys(agents), false), ...agents });
     const args = noEdit ? withFlag(x.args, "--allowedTools", "Read,Grep,Glob,Write") : x.args;
-    const env = { ...shellEnv(appChildEnv(), shell, shellGitConfig(p.app)), CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" };
+    const env: Record<string, string> = {
+      ...shellEnv(appChildEnv(), shell, shellGitConfig(p.app)),
+      CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
+    };
+    if (!depth) delete env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH;
     const names = new Set([MAIN_AGENT, ...Object.keys(agents)]);
     return { args, env, allowed: x.allowed, names, mode, union: (args[args.indexOf("--tools") + 1] ?? "").split(",") };
   };
@@ -4174,7 +4190,8 @@ async function b36() {
           bashStep(probe("b36ok")),
           ...Object.values(c1).map(bashStep),
           'WebFetch with url https://example.invalid/ and prompt "Say OK."',
-          'Agent with subagent_type "general-purpose" and the prompt "Reply with the word OK."',
+          NESTED_AGENT,
+          bashStep(probe("b36end")),
         ]),
         { tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch"] },
       ),
@@ -4195,6 +4212,18 @@ async function b36() {
     const a1 = p.read("a.txt");
     const leadFile = existsSync(join(p.repo, "lead.txt"));
     const out1 = { rel: existsSync(join(p.base, relOut)), abs: existsSync(absOut), w: existsSync(join(p.repo, "w.txt")) };
+
+    // Run 1b: U89 without the spawn depth variable. The agent has Agent in disallowedTools only.
+    const w1b = wf(
+      "allowlist",
+      { "rl-gb-writer": def(agentSteps([NESTED_AGENT, bashStep(probe("b36ndend"))]), { tools: ["Read", "Bash"] }) },
+      8,
+      false,
+      false,
+    );
+    const r1b = await go("nodepth", w1b.args, lead([agentStep("rl-gb-writer", "Make the tool calls of your instructions.")]), {
+      env: w1b.env,
+    });
 
     // Run 2: U84 (no Edit in --allowedTools) and U85 in Most commands mode (stored value any).
     const c2 = { git: "git status", compound: `${probe("b36anyc")} && git status`, host: WF_HOST_CMD };
@@ -4231,7 +4260,7 @@ async function b36() {
       },
       watch: (e, pid) => {
         if (kill.stop || !e.parent_tool_use_id) return;
-        if (blocks(e).some((bl) => bl.type === "tool_use" && bl.name === "Bash" && String(bl.input?.command ?? "").trim() === B37_SLEEP))
+        if (blocks(e).some((bl) => bl.type === "tool_use" && bl.name === "Bash" && bashHas(B37_SLEEP)(bl.input ?? {})))
           kill.stop = stopRun(pid, since, marker);
       },
     });
@@ -4342,14 +4371,16 @@ async function b36() {
       const a = callOutcome(r.events, parent, "Agent");
       return a.state === "not tried" ? callOutcome(r.events, parent, "Task") : a;
     };
-    const agentLine = (r: Run, name: string) => {
+    // mark: for the user's own agent, only whether its reply holds the mark. The reply is the user's text.
+    const agentLine = (r: Run, name: string, mark?: string) => {
       const c = agentCall(r.events, name);
       if (!c) return `${name}=not called`;
       const s = agentStats(r.events, c.id);
-      return `${name}=${agentOutcome(r.events, name).state} model=${modelOfAgent(s)} asked model=${String(c.input.model ?? "none")} text=${JSON.stringify(short(s.text, 120))}`;
+      const text = mark === undefined ? `text=${JSON.stringify(short(s.text, 120))}` : `reply holds ${mark}=${s.text.includes(mark)}`;
+      return `${name}=${agentOutcome(r.events, name).state} model=${modelOfAgent(s)} asked model=${String(c.input.model ?? "none")} ${text}`;
     };
     const desc = (r: Run) =>
-      `exit=${r.exit}${r.timedOut ? " timed out" : ""} init=${!!r.init} results=${r.results.map((e) => `${e.subtype}${e.is_error ? "!" : ""}`).join(",") || "none"}${r.exit !== 0 && r.stderr ? ` stderr=${short(r.stderr, 200)}` : ""}`;
+      `exit=${r.exit}${r.timedOut ? " timed out" : ""} init=${!!r.init} results=${r.results.map((e) => `${e.subtype}${e.is_error ? "!" : ""}`).join(",") || "none"}${r.exit !== 0 && r.stderr ? ` stderr first line=${short(r.stderr.split(/\r?\n/).find((l) => l.trim()) ?? "", 120)}` : ""}`;
     const cmd = (r: Run, st: StreamState, parent: string, c: string, want: string, marker: boolean): Cmd => ({
       ...callOutcome(r.events, parent, "Bash", bashIs(c)),
       label: labelOf(st, c),
@@ -4360,7 +4391,7 @@ async function b36() {
     const call1 = r1 ? agentCall(r1.events, "rl-gb-writer") : undefined;
     if (r1 && call1) {
       const st = parse(r1, p.work, w1.allowed, w1.names, "allowlist");
-      const w = (name: string, file: boolean) => ({ ...callOutcome(r1.events, call1.id, "Write", pathEnds(name)), file });
+      const w = (name: string, file: boolean) => ({ ...redacted(callOutcome(r1.events, call1.id, "Write", pathEnds(name))), file });
       put(u83({ called: true, rel: w(relOut, out1.rel), abs: w("rlgb-out-abs.txt", out1.abs), repo: w("w.txt", out1.w) }));
       put(
         u85("allowlist", {
@@ -4374,7 +4405,7 @@ async function b36() {
           control: { ...callOutcome(r1.events, call1.id, "Bash", bashIs(probe("b36ok"))), marker: ran(p.work, "b36ok") },
         }),
       );
-      put(u86({ tools: r1.init?.tools ?? null, union: w1.union, fetch: callOutcome(r1.events, call1.id, "WebFetch") }));
+      put(u86({ tools: r1.init?.tools ?? null, union: w1.union, fetch: redacted(callOutcome(r1.events, call1.id, "WebFetch")) }));
       put(
         u96({
           leadEdit: callOutcome(r1.events, null, "Edit"),
@@ -4390,7 +4421,7 @@ async function b36() {
     const call2 = r2 ? agentCall(r2.events, "rl-gb-writer") : undefined;
     if (r2 && call2) {
       const st = parse(r2, p.work, w2.allowed, w2.names, "any");
-      put(u84({ edit: callOutcome(r2.events, call2.id, "Edit"), changed: changed2 }));
+      put(u84({ edit: redacted(callOutcome(r2.events, call2.id, "Edit")), changed: changed2 }));
       put(
         u85("any", {
           called: true,
@@ -4427,7 +4458,7 @@ async function b36() {
 
     if (r5) {
       const userPart = named
-        ? `; user agent: file model=${short(userAgentFile?.model ?? "none", 40)} agents.json model=${userModel} ${agentLine(r5, named)} agents.json definition=${defRan(r5, named, "RLGB-DEF-USER")}`
+        ? `; user agent: file model=${short(userAgentFile?.model ?? "none", 40)} agents.json model=${userModel} ${agentLine(r5, named, "RLGB-DEF-USER")}`
         : "; no user agent file";
       put(
         info(
@@ -4457,11 +4488,24 @@ async function b36() {
             return `Agent allowed and depth 1: nested Agent=${n.state} events under it=${n.id ? agentStats(r5.events, n.id).childEvents : 0} text=${JSON.stringify(short(n.text, 120))}`;
           })()
         : "Agent allowed and depth 1: rl-gb-nester not called";
-    if (r1 && call1) {
-      const n = nestedAgent(r1, call1.id);
-      const report = JSON.stringify(short(agentStats(r1.events, call1.id).text, 200));
-      put(u89({ call: n, grandchild: n.id ? agentStats(r1.events, n.id).childEvents : 0 }, `${nestedInfo}; writer report=${report}`));
-    } else lost("U89", "writer");
+    const u89Run = (r: Run | undefined, env: Record<string, string>, end: string): U89Run | null => {
+      const c = r ? agentCall(r.events, "rl-gb-writer") : undefined;
+      if (!r || !c) return null;
+      const n = redacted(nestedAgent(r, c.id));
+      return {
+        call: n,
+        grandchild: n.id ? agentStats(r.events, n.id).childEvents : 0,
+        end: callOutcome(r.events, c.id, "Bash", bashIs(probe(end))).state === "ran" && ran(p.work, end),
+        depthSet: "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH" in env,
+      };
+    };
+    const runState = (r: Run | undefined, tag: string) => (r ? desc(r) : `did not run: ${short(errors[tag] ?? "no output", 160)}`);
+    put(
+      u89(
+        { depth: u89Run(r1, w1.env, "b36end"), noDepth: u89Run(r1b, w1b.env, "b36ndend") },
+        `${nestedInfo}; writer run: ${runState(r1, "writer")}; nodepth run: ${runState(r1b, "nodepth")}`,
+      ),
+    );
 
     if (r1 && call1) {
       const nested = toolUses(r1).filter((t) => t.parent === call1.id);

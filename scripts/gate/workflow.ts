@@ -81,10 +81,23 @@ export function withFlag(args: readonly string[], flag: string, value: string) {
   return args.map((a, j) => (j === i + 1 ? value : a));
 }
 
-// name and model of a user agent file (front matter only).
+// name and model of a user agent file (front matter only). YAML quotes are not part of the value.
 export function agentFront(text: string, file: string) {
   const fm = text.startsWith("---") ? text.slice(3, text.indexOf("\n---", 3)) : "";
-  return { name: fm.match(/^name:\s*(.+)$/m)?.[1]?.trim() ?? file.replace(/\.md$/, ""), model: fm.match(/^model:\s*(.+)$/m)?.[1]?.trim() };
+  const key = (k: string) =>
+    fm
+      .match(new RegExp(`^${k}:\\s*(.+)$`, "m"))?.[1]
+      ?.trim()
+      .replace(/^(["'])(.*)\1$/, "$2");
+  return { name: key("name") ?? file.replace(/\.md$/, ""), model: key("model") };
+}
+
+// Replaces each path form (sanitize-core.ts pathForms) with ~. Case does not matter on Windows.
+export function redactPaths(s: string, forms: string[]) {
+  let out = s;
+  for (const f of forms.filter(Boolean).sort((a, b) => b.length - a.length))
+    out = out.replace(new RegExp(f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "~");
+  return out;
 }
 
 // ---------- event readers ----------
@@ -121,6 +134,8 @@ export function callOutcome(events: unknown[], parent: string | null, tool: stri
 }
 const norm = (s: string) => s.replace(/\r\n/g, "\n").trim();
 export const bashIs = (cmd: string) => (i: Obj) => norm(String(i.command ?? "")) === norm(cmd);
+// The model can wrap the command, for example with a cd or a timeout. The watch must still find it.
+export const bashHas = (part: string) => (i: Obj) => String(i.command ?? "").includes(part);
 export const pathEnds = (name: string) => (i: Obj) =>
   String(i.file_path ?? "")
     .replaceAll("\\", "/")
@@ -183,15 +198,20 @@ export function outsideFolders(files: string[], folders: string[]) {
 
 // ---------- B35 judges (integration-check.md U82) ----------
 export type Write = Outcome & { file: boolean };
-const triedOutside = (w: Write) => w.state !== "not tried" && w.state !== "ran" && !w.file;
+const clip = (s: string) => JSON.stringify(s.replace(/\s+/g, " ").slice(0, 120));
+// A real refusal: a permission_denied event, or an error that names a permission or the working directory (the texts of Gate B17 and
+// B7). Another error, such as a bad path, proves nothing.
+const refusedWrite = (w: Write) =>
+  !w.file && (w.state === "refused" || (w.state === "error" && /permission|working director/i.test(w.text)));
+const writeLine = (name: string, w: Write) => `${name}=${w.state} file=${w.file} text=${clip(w.text)}`;
 
 // (a) Writes outside the cwd are refused, and the repo/ write runs.
 export function u82a(o: { rel: Write; abs: Write; repo: Write }): Fact {
-  const pass = triedOutside(o.rel) && triedOutside(o.abs) && o.repo.state === "ran" && o.repo.file;
+  const pass = refusedWrite(o.rel) && refusedWrite(o.abs) && o.repo.state === "ran" && o.repo.file;
   return {
     id: "U82a",
     status: pass ? "PASS" : "FAIL",
-    evidence: `Write ../outside=${o.rel.state} file=${o.rel.file}; Write absolute outside=${o.abs.state} file=${o.abs.file}; Write ./repo=${o.repo.state} file=${o.repo.file}`,
+    evidence: `${writeLine("Write ../outside", o.rel)}; ${writeLine("Write absolute outside", o.abs)}; ${writeLine("Write ./repo", o.repo)}`,
   };
 }
 
@@ -295,14 +315,19 @@ export function cwdFilesFact(
 
 // ---------- B36 judges (agent-workflow.md section 6) ----------
 const tried = (s: Outcome) => s.state !== "not tried";
+// The CLI text for a tool outside the session: "No such tool available: Edit. Edit is disabled for this session" (fixtures/claude). A
+// network error means that the tool ran.
+const notAvailable = (s: Outcome) =>
+  s.state === "refused" ||
+  (s.state === "error" && /No such tool|not available/i.test(s.text) && !/ENOTFOUND|getaddrinfo|fetch failed/i.test(s.text));
 
 // U83: the agent's writes outside the part folder are refused, and its repo/ write runs.
 export function u83(o: { called: boolean; rel: Write; abs: Write; repo: Write }): Fact {
-  const pass = o.called && triedOutside(o.rel) && triedOutside(o.abs) && o.repo.state === "ran" && o.repo.file;
+  const pass = o.called && refusedWrite(o.rel) && refusedWrite(o.abs) && o.repo.state === "ran" && o.repo.file;
   return {
     id: "U83",
     status: pass ? "PASS" : "FAIL",
-    evidence: `agent called=${o.called}; agent Write ../outside=${o.rel.state} file=${o.rel.file}; absolute outside=${o.abs.state} file=${o.abs.file}; ./repo=${o.repo.state} file=${o.repo.file}${[o.rel, o.abs, o.repo].some((w) => !tried(w)) ? "; a call was not tried: run B36 again" : ""}`,
+    evidence: `agent called=${o.called}; agent ${writeLine("Write ../outside", o.rel)}; ${writeLine("absolute outside", o.abs)}; ${writeLine("./repo", o.repo)}${[o.rel, o.abs, o.repo].some((w) => !tried(w)) ? "; a call was not tried: run B36 again" : ""}`,
   };
 }
 
@@ -316,13 +341,15 @@ export function u84(o: { edit: Outcome; changed: boolean }): Fact {
   };
 }
 
-// U85 for one shell mode. Each listed command is refused with its label, and permission_denied names a call under the agent call.
+// U85 for one shell mode. Each listed command is refused with its label, and its permission_denied event names the agent call.
 export type Cmd = Outcome & { label: string; want: string; marker: boolean };
 export function u85(
   mode: string,
   o: { called: boolean; cmds: Record<string, Cmd>; control: Outcome & { marker: boolean }; agent: string },
 ): Fact {
-  const bad = Object.entries(o.cmds).filter(([, c]) => !(c.state === "refused" && c.label === c.want && !c.marker));
+  const bad = Object.entries(o.cmds).filter(
+    ([, c]) => !(c.state === "refused" && c.label === c.want && !c.marker && c.deniedParent === o.agent),
+  );
   const pass = o.called && !bad.length && o.control.state === "ran" && o.control.marker;
   const each = Object.entries(o.cmds)
     .map(
@@ -337,25 +364,37 @@ export function u85(
   };
 }
 
-// U86: init lists only the --tools union, and the agent's WebFetch does not run.
+// U86: init lists only the --tools union, and the CLI refuses the agent's WebFetch as a missing tool. A network error means that the
+// tool ran. A call that was not tried proves nothing.
 export function u86(o: { tools: string[] | null; union: string[]; fetch: Outcome }): Fact {
   const init = o.tools ?? [];
   const extra = init.filter((t) => !o.union.includes(t) && t !== "Task" && t !== "StructuredOutput");
-  const pass = o.tools !== null && !extra.length && !init.includes("WebFetch") && o.fetch.state !== "ran";
+  const f = o.fetch;
+  const missing = notAvailable(f);
+  const pass = o.tools !== null && !extra.length && !init.includes("WebFetch") && missing;
   return {
     id: "U86",
     status: pass ? "PASS" : "FAIL",
-    evidence: `init.tools=${o.tools ? list(init) : "no init"} outside the --tools union=${list(extra)}; agent WebFetch=${o.fetch.state}`,
+    evidence: `init.tools=${o.tools ? list(init) : "no init"} outside the --tools union=${list(extra)}; agent WebFetch=${f.state} not available=${missing} text=${clip(f.text)}${tried(f) ? "" : "; not tried: run B36 again"}`,
   };
 }
 
-// U89: an agent with Agent disallowed starts no agent: no event runs under its nested Agent call.
-export function u89(o: { call: Outcome; grandchild: number }, info: string): Fact {
-  const pass = o.call.state !== "ran" && o.grandchild === 0;
+// U89: an agent with Agent disallowed starts no agent. The agent makes its Agent call, the call is refused or fails, no event runs
+// under it, and the agent then runs its end probe. depth: the run with CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1. noDepth: the run
+// without the variable. It proves that disallowedTools alone holds. depthSet: the variable is in the env of that run.
+export type U89Run = { call: Outcome; grandchild: number; end: boolean; depthSet: boolean };
+export function u89(o: { depth: U89Run | null; noDepth: U89Run | null }, info: string): Fact {
+  // An error for another cause, such as a refused agent type, does not prove disallowedTools.
+  const ok = (r: U89Run | null) => !!r && notAvailable(r.call) && r.grandchild === 0 && r.end;
+  const line = (label: string, r: U89Run | null) =>
+    r
+      ? `${label} (depth variable set=${r.depthSet}): Agent call=${r.call.state} events under it=${r.grandchild} end probe=${r.end} text=${clip(r.call.text)}${tried(r.call) ? "" : " (not tried: run B36 again)"}`
+      : `${label}: run lost`;
+  const pass = ok(o.depth) && ok(o.noDepth) && o.depth?.depthSet === true && o.noDepth?.depthSet === false;
   return {
     id: "U89",
     status: pass ? "PASS" : "FAIL",
-    evidence: `agent with Agent disallowed: Agent call=${o.call.state} events under it=${o.grandchild} text=${JSON.stringify(o.call.text.slice(0, 160))}; INFO: ${info}`,
+    evidence: `agent with Agent disallowed: ${line("with depth 1", o.depth)}; ${line("without the depth variable", o.noDepth)}; INFO: ${info}`,
   };
 }
 

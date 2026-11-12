@@ -8,7 +8,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { countHits, formPairs, isObj, type Json, sanitizer, scanPatterns, UUID } from "./sanitize-core";
+import { countHits, formPairs, hideAgentOutput, isObj, type Json, sanitizer, scanPatterns, UUID } from "./sanitize-core";
+import { agentFront } from "./workflow";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const args = process.argv.slice(2);
@@ -38,7 +39,7 @@ const CHECKS: Record<string, string> = {
   gadv: "Gate G-ADV. The app flag set with `--advisor`: an advisor call, no `--advisor` (`none`), `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (`envoff`), `--disallowedTools advisor` (`disallowed`), and `--tools` with the advisor (`tools`).",
   b12: "B12. The runner flag set without review agents. The agent reads a PNG attachment with Read and names its color in `structured_output`.",
   b35: "B35. A write run as `--agent rl-main` with `Agent(rl-explorer)` and the shell allowlist (`agent`), the same step without `--agent` (`plain`), and a Stop during an rl-explorer call (`stop`).",
-  b36: "B36. Workflow agents under an rl-main lead: agent writes and Bash in allowlist mode (`writer`) and Most commands mode (`any`), Stop in an agent `sleep 600` (`stop`), turn caps (`turns`), model priority and two agents at once (`models`), model inherit and an unknown alias (`badmodel`), `--advisor` (`advisor`), and Opus efforts (`opus`, with `--opus` only).",
+  b36: "B36. Workflow agents under an rl-main lead: agent writes and Bash in allowlist mode (`writer`) and Most commands mode (`any`), Stop in an agent `sleep 600` (`stop`), turn caps (`turns`), a writer with Agent disallowed and no spawn depth variable (`nodepth`), model priority and two agents at once (`models`), model inherit and an unknown alias (`badmodel`), `--advisor` (`advisor`), and Opus efforts (`opus`, with `--opus` only).",
   b37: "B37. One Claude session per task part: a create run with the implement flags and no `--no-session-persistence`, resumes with `--resume <kept file> --fork-session` (all flags, no Bash and Agent, another model), a run cut by the app kill and its resume, stream-json input, and a critic review run.",
 };
 // Public built-in agent and product names. They are not private data, and a replacement would break the event shapes.
@@ -117,10 +118,14 @@ const configDir =
 const homeForms = [...[...homes].flatMap((h) => formPairs(h, FAKE_HOME)), ...formPairs(configDir, `${FAKE_HOME}\\.claude`)];
 add(basename(configDir), "config", () => ".claude");
 const list = (d: string) => (existsSync(d) ? readdirSync(d) : []);
+// U88: the gate calls one user agent by its front-matter name. Its reply is the user's text.
+const agentNames = new Set<string>();
 for (const f of list(join(configDir, "agents")).filter((x) => x.endsWith(".md"))) {
-  const body = readFileSync(join(configDir, "agents", f), "utf8");
-  add(body.match(/^name:\s*(.+)$/m)?.[1] ?? basename(f, ".md"), "agent", (n) => `user-agent-${n}`);
-  add(basename(f, ".md"), "agent", (n) => `user-agent-${n}`);
+  const { name } = agentFront(readFileSync(join(configDir, "agents", f), "utf8"), f);
+  for (const n of [name, basename(f, ".md")]) {
+    add(n, "agent", (k) => `user-agent-${k}`);
+    if (!RESERVED.has(n.trim().toLowerCase())) agentNames.add(n.trim().toLowerCase());
+  }
 }
 for (const d of list(join(configDir, "skills"))) add(d, "skill", (n) => `user-skill-${n}`);
 
@@ -151,7 +156,7 @@ mkdirSync(OUT, { recursive: true });
 for (const f of list(OUT)) if (f.endsWith(".jsonl")) rmSync(join(OUT, f));
 let version = "";
 for (const [f, evs] of raw) {
-  const out = evs.map((e) => sanitize(e));
+  const out = hideAgentOutput(evs, agentNames).map((e) => sanitize(e));
   for (const e of out) if (isObj(e) && e.subtype === "init" && typeof e.claude_code_version === "string") version ||= e.claude_code_version;
   writeFileSync(join(OUT, f), `${out.map((e) => JSON.stringify(e)).join("\n")}\n`);
 }
@@ -165,7 +170,7 @@ writeFileSync(
     "",
     `Recorded with Claude Code ${version || "unknown"}. WP8 requires this CLI version or later.`,
     "",
-    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, and user hook output. Do not edit the files by hand.",
+    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, user hook output, and the reply text of a user agent. Do not edit the files by hand.",
     "",
     "| File | Check |",
     "|---|---|",
