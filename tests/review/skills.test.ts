@@ -564,7 +564,7 @@ describe("task run skills (spec.md section 6.19)", () => {
     "README.md": "Read me.\n",
   };
   const KEY_LINE = (folder: string, source: string) =>
-    `- vault (${source}): ./skills/${folder}/SKILL.md (1 files left out: hidden, link, binary, or over the caps) (5 key files left out).`;
+    `- vault (${source}): ./skills/${folder}/SKILL.md (1 file left out: hidden, link, binary, or over the caps) (5 key files left out).`;
 
   test("key and credential files never leave a user skill or a repository skill; INDEX.md counts them", async () => {
     const c = temp("keys");
@@ -577,16 +577,19 @@ describe("task run skills (spec.md section 6.19)", () => {
 ${PEM}`,
     );
     skill(join(c, "skills", "putty"), "name: putty", PUTTY);
+    skill(join(c, "skills", "single"), "name: single");
+    write(join(c, "skills", "single", "id_ed25519"), PEM);
     const files: Record<string, Blob> = { [`${S}/vault/SKILL.md`]: md("name: vault") };
     for (const [n, t] of Object.entries(KEY_FILES)) files[`${S}/vault/${n}`] = t;
     files[`${S}/leaky/SKILL.md`] = md("name: leaky", PEM);
     const repo = await repoCache(files);
     const dest = join(temp("dest"), "skills");
     const r = await copyTaskSkills([{ cache: repo.cache, commit: repo.base, slug: "lib" }], ["leaky"], dest, c);
-    expect(readdirSync(dest).sort()).toEqual(["INDEX.md", "lib+vault", "vault"]);
+    expect(readdirSync(dest).sort()).toEqual(["INDEX.md", "lib+vault", "single", "vault"]);
     for (const folder of ["vault", "lib+vault"]) expect(readdirSync(join(dest, folder)).sort(), folder).toEqual(["README.md", "SKILL.md"]);
     expect(r.copied.map((s) => [s.id, s.keys, s.skipped])).toEqual([
       ["lib:vault", 5, 1],
+      ["single", 1, 0],
       ["vault", 5, 1],
     ]);
     const KEY_MD = "SKILL.md holds a private key";
@@ -595,6 +598,7 @@ ${PEM}`,
     const index = readFileSync(join(dest, "INDEX.md"), "utf8");
     expect(index).toContain(KEY_LINE("lib+vault", "repository lib"));
     expect(index).toContain(KEY_LINE("vault", "user"));
+    expect(index).toContain("- single (user): ./skills/single/SKILL.md (1 key file left out).");
     expect(index).not.toContain("junk");
   }, 60_000);
 

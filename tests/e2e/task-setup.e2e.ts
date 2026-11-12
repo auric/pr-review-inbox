@@ -10,19 +10,18 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import {
   APP_PORT,
+  buildTask,
   type ClaudeScenario,
   control,
   E2E_JIRA_TOKEN,
   E2E_TOKEN,
   FAKE_URL,
-  JIRA_ISSUE,
   JIRA_URL,
   makeClone,
   openApp,
 } from "./control";
 
 const APP = `http://127.0.0.1:${APP_PORT}`;
-const PR_TITLE = "Batch cache writes in the sync worker";
 const REPO = "PROJ1/sample-repo-2";
 const SETTINGS = `/api/repos/${REPO}/task-settings`;
 const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
@@ -157,8 +156,7 @@ test("setup: saved commands first, the time limit with its reason, the live outp
   await page.reload();
 
   // 1. The plan screen: the saved command first, then the proposals. Setup gets the proposed limit with Claude's reason.
-  await page.locator("[data-row]", { hasText: PR_TITLE }).first().click();
-  await page.getByRole("button", { name: `Build this task: ${JIRA_ISSUE}` }).click();
+  await buildTask(page, REPO);
   await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
   await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();
   await expect(status(page)).toHaveText("The plan is ready: small, 1 PR, about 5 changed lines.", { timeout: 60_000 });

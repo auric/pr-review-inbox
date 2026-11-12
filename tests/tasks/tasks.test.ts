@@ -1812,4 +1812,11 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
     expect(advance(h.db, h.ref(), { type: "STOP" }, {}, 8).status).toBe(200);
     expect([h.t().state, ...h.rows()]).toEqual(["stopped", null, null, null]);
   });
+
+  test("AC-B241: the task row lists every code part in its build", () => {
+    const h = light();
+    expect(rowDto(h.db, h.t()).progress).toMatchObject({ part: 1, parts: 3, building: [1, 2, 3] });
+    h.db.query("UPDATE task_part SET state = 'pr_open' WHERE id = $id").run({ id: h.parts[0] });
+    expect(rowDto(h.db, h.t()).progress).toMatchObject({ part: 1, parts: 3, building: [2, 3] });
+  });
 });

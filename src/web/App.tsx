@@ -821,10 +821,7 @@ function Shell({ stale }: { stale: boolean }) {
                     {meta.data.runner.short} can build a task from your issue tracker: it asks a few questions, writes a short plan, and
                     builds the code in its own copy of the repository. Nothing goes to {forge} before you click.
                   </p>
-                  <p className="m-0">
-                    Start with “Build a {trackerOf(meta.data)?.name ?? "issue"} task” in the list, or with Build on a task chip of a pull
-                    request.
-                  </p>
+                  <p className="m-0">Start with “Build a {trackerOf(meta.data)?.name ?? "issue"} task” in the list.</p>
                 </div>
               )}
             </>
@@ -857,7 +854,6 @@ function Shell({ stale }: { stale: boolean }) {
                   onDiff={explainDiff}
                   onSettings={() => openSettings()}
                   onTaskIds={() => openSettings("task-ids")}
-                  onTask={openTask}
                   onProfile={(id) => openSettings("profiles", id)}
                   onLeave={() => {
                     const i = ids.indexOf(current.id);

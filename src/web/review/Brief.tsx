@@ -651,8 +651,6 @@ export function BriefComposer(props: {
   onSettings: () => void;
   // Opens Settings, Task IDs, through the URL: "Set up task IDs" when the PR names no task.
   onTaskIds: () => void;
-  // "Build this task" on a task chip (docs/plans/review-v2/spec.md section 6.12).
-  onBuild: (key: string) => Promise<void>;
   // Opens the settings at one profile, through the URL (plan pr-view-v4 section 5).
   onEditProfile: (id: ProfileId) => void;
   announce: (text: string) => void;
@@ -785,7 +783,6 @@ export function BriefComposer(props: {
           announce={props.announce}
           onSettings={props.onSettings}
           onTaskIds={props.onTaskIds}
-          onBuild={props.onBuild}
         />
         {chips.map(
           (c) =>

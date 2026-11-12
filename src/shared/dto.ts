@@ -74,6 +74,7 @@ import {
   type TaskBlocked,
   type TaskCommand,
   type TaskDoc,
+  type TaskEventKind,
   type TaskRunKind,
   type TaskSettings,
   type TaskSize,
@@ -526,8 +527,16 @@ export type ClaimedEvent = {
 // rereview: the run has a base run. findings: the open findings, as RunDto counts them.
 export type ClaimedRun = { kind: "review" | "explain"; rereview: boolean; status: RunStatus; findings: number; error: string | null };
 
-// A task that waits for the user (task_event kind needs_you). text: the status of the task list at claim time.
-export type ClaimedTaskEvent = { id: number; task: number; kind: "needs_you"; createdAt: number; key: string; title: string; text: string };
+// A task event (spec.md section 6.13). text: the status of the task list at claim time for a wait, else the sentence of the event.
+export type ClaimedTaskEvent = {
+  id: number;
+  task: number;
+  kind: TaskEventKind;
+  createdAt: number;
+  key: string;
+  title: string;
+  text: string;
+};
 
 export type Claimed = ClaimedEvent | ClaimedTaskEvent;
 
@@ -1755,6 +1764,7 @@ export type TaskStepDto = {
 
 // GET /api/tasks. A row of the Tasks view. progress: the facts of the status line (spec.md section 6.12, Inbox). part: the ordinal of
 // the first code part that did not merge, 0 before the build. ready: that part waits for its PR. merged: every PR of the task merged.
+// building: the ordinals of the code parts in their build, in order. Several parts can build at the same time (spec.md section 6.20.6).
 export type TaskRowDto = {
   id: number;
   project: string;
@@ -1769,7 +1779,7 @@ export type TaskRowDto = {
   version: number;
   updatedAt: number;
   closedAt: number | null;
-  progress: { planReady: boolean; part: number; parts: number; ready: boolean; merged: boolean };
+  progress: { planReady: boolean; part: number; parts: number; ready: boolean; merged: boolean; building: number[] };
 };
 
 // The newest interview result (spec.md section 6.5) of round round. done false: the answers start round 2 when it is left.

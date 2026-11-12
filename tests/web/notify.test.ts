@@ -120,4 +120,20 @@ describe("planNotes", () => {
       { title: "PR Review Inbox", body: "2 tasks need you", tag: "digest", pr: null },
     ]);
   });
+
+  test("AC-B242: the digest counts each task once; a part_ready event gives its own note", () => {
+    const ready: ClaimedTaskEvent = {
+      id: 3,
+      task: 7,
+      kind: "part_ready",
+      createdAt: 1,
+      key: "ABC-1",
+      title: "Add a flag",
+      text: "Part 2 of 4 is ready for its PR.",
+    };
+    expect(planNotes([ready, { ...ready, id: 4, text: "Part 3 of 4 is ready for its PR." }], true)[0]?.body).toBe("1 task needs you");
+    expect(planNotes([ready], false)).toEqual([
+      { title: "ABC-1: Add a flag", body: "Part 2 of 4 is ready for its PR.", tag: "task-7", pr: null, task: 7 },
+    ]);
+  });
 });

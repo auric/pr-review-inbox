@@ -164,7 +164,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     version: 3,
     updatedAt: NOW,
     closedAt: null,
-    progress: { planReady: false, part: 0, parts: 0, ready: false, merged: false },
+    progress: { planReady: false, part: 0, parts: 0, ready: false, merged: false, building: [] },
     interview: null,
     plan: null,
     strip: { steps: ["Questions", "Plan", "Build", "Done"], current: 0 },
@@ -1054,7 +1054,15 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     const { interview: _i, plan: _p, ...r } = task();
     return { ...r, ...o } as TaskRowDto;
   };
-  const progress = (o: Partial<TaskRowDto["progress"]>) => ({ planReady: false, part: 0, parts: 0, ready: false, merged: false, ...o });
+  const progress = (o: Partial<TaskRowDto["progress"]>) => ({
+    planReady: false,
+    part: 0,
+    parts: 0,
+    ready: false,
+    merged: false,
+    building: [],
+    ...o,
+  });
 
   test("one meta line per state", () => {
     expect(rowStatus(row({ state: "interview" }))).toEqual({ text: "Reading the task", needsYou: false });
@@ -1066,6 +1074,10 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
       needsYou: true,
     });
     expect(rowStatus(row({ state: "implementing", progress: progress({ part: 1, parts: 1 }) })).text).toBe("Building part 1 of 1");
+    expect(rowStatus(row({ state: "implementing", progress: progress({ part: 1, parts: 4, building: [1] }) })).text).toBe(
+      "Building part 1 of 4",
+    );
+    expect(rowStatus(row({ state: "implementing" })).text).toBe("Building");
     expect(rowStatus(row({ state: "implementing", progress: progress({ part: 1, parts: 1, ready: true }) })).text).toBe(
       "Needs you: open the PR",
     );
@@ -1077,6 +1089,15 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     expect(rowStatus(row({ state: "ready" })).text).toBe("Waiting for review");
     expect(rowStatus(row({ state: "stopped" })).text).toBe("Stopped");
     expect(rowStatus(row({ state: "done", closedAt: NOW })).text).toBe("Closed");
+  });
+
+  test("AC-B241: the row names every part in its build, not only the first open part", () => {
+    const building = (part: number, ns: number[]) =>
+      rowStatus(row({ state: "implementing", progress: progress({ part, parts: 4, building: ns }) }));
+    expect(building(2, [2, 3])).toEqual({ text: "Building parts 2 and 3 of 4", needsYou: false });
+    expect(building(2, [2, 3, 4]).text).toBe("Building parts 2, 3, and 4 of 4");
+    // Part 2 is in review and part 3 builds.
+    expect(building(2, [3]).text).toBe("Building part 3 of 4");
   });
 });
 

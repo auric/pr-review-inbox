@@ -117,9 +117,7 @@ export function TaskList(props: {
             </section>
           ))
         ) : (
-          <p className="m-0 px-4 py-8 text-ink-2">
-            No task yet. Type a {props.tracker} key above, or use Build on a task chip of a pull request.
-          </p>
+          <p className="m-0 px-4 py-8 text-ink-2">No task yet. Type a {props.tracker} key above.</p>
         )}
       </div>
       <footer className="rl-wide-only flex flex-wrap gap-x-3 gap-y-1 border-t px-4 py-2 text-xs text-muted-foreground">

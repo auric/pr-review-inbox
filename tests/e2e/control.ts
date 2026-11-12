@@ -49,6 +49,19 @@ export async function pickRepo(form: Locator, repo: string): Promise<void> {
   await form.getByRole("listbox", { name: "Repositories" }).getByRole("option", { name: repo, exact: true }).click();
 }
 
+// Builds JIRA_ISSUE in repo with the Build form of the Tasks view (spec.md section 6.12). It ticks no attachment and waits for the
+// Task view.
+export async function buildTask(page: Page, repo: string): Promise<void> {
+  await page.getByRole("button", { name: /^Tasks: / }).click();
+  await page.getByRole("button", { name: "Build a Jira task" }).click();
+  const form = page.getByRole("form", { name: "Build a Jira task" });
+  await form.getByLabel("Jira key").fill(JIRA_ISSUE);
+  await pickRepo(form, repo);
+  await form.getByRole("button", { name: "Read the task" }).click();
+  await form.getByRole("button", { name: "Build this task" }).click();
+  await page.waitForURL(/\/tasks\/\d+$/);
+}
+
 // Two review profiles of the user after the shipped Review profile: the edited Over-engineering and Security profiles that the
 // version 5 upgrade keeps (docs/plans/review-v2/spec.md section 1.2). Tests of the profile editor and the brief need several profiles.
 const OWN_PROFILES = [

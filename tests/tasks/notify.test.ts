@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Task notifications: one needs_you event per new wait, claimed once (docs/plans/review-v2/spec.md section 6.11).
+// Task notifications: one needs_you event per new wait, part_ready, spec_approved, and the restart stop, each claimed once
+// (docs/plans/review-v2/spec.md sections 6.11 and 6.13).
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/server/storage/db";
-import { claimTaskEvents, noteTaskWaits } from "../../src/server/tasks/notify";
+import { claimTaskEvents, noteTaskWaits, RESTART_TEXT, SPEC_APPROVED_TEXT } from "../../src/server/tasks/notify";
+import { recoverTasks } from "../../src/server/tasks/tasks";
 import { RUN_CANCELLED } from "../../src/shared/task";
 
 console.log(`notify.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/notify", import.meta.dir)}`);
@@ -34,8 +36,16 @@ function setup() {
     db
       .query("UPDATE task SET state = $state, blocked_json = $b WHERE id = $id")
       .run({ id, state, b: blocked === null ? null : JSON.stringify(blocked) });
-  const count = () => (db.query("SELECT COUNT(*) AS n FROM task_event WHERE kind = 'needs_you'").get() as { n: number }).n;
-  return { db, path, id, set, count };
+  const count = (kind = "needs_you") =>
+    (db.query("SELECT COUNT(*) AS n FROM task_event WHERE kind = $kind").get({ kind }) as { n: number }).n;
+  const part = (ord: number, state = "implementing", head: string | null = null) =>
+    (
+      db
+        .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, head, created_at, updated_at)
+          VALUES ($task, $ord, 'single', 'Part', $branch, 'main', $state, $head, 1, 1) RETURNING id`)
+        .get({ task: id, ord, branch: `feature/ABC-${ord}`, state, head }) as { id: number }
+    ).id;
+  return { db, path, id, set, count, part };
 }
 
 describe("noteTaskWaits", () => {
@@ -77,14 +87,7 @@ describe("noteTaskWaits", () => {
 
   test("each new reason, first or waiting in a part row, adds one event; a reason that moves up adds none (spec.md section 6.25.7)", () => {
     const h = setup();
-    const part = (ord: number) =>
-      (
-        h.db
-          .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
-            VALUES ($task, $ord, 'single', 'Part', $branch, 'main', 'implementing', 1, 1) RETURNING id`)
-          .get({ task: h.id, ord, branch: `feature/ABC-${ord}` }) as { id: number }
-      ).id;
-    const [p1, p2, p3] = [part(1), part(2), part(3)];
+    const [p1, p2, p3] = [h.part(1), h.part(2), h.part(3)];
     const wait = (id: number, b: object | null) =>
       h.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id, b: b === null ? null : JSON.stringify(b) });
     const q1 = { kind: "question", step: 4, text: "Needs you: Claude asks: one?" };
@@ -112,6 +115,65 @@ describe("noteTaskWaits", () => {
     expect(noteTaskWaits(again, [h.id], 16)).toBe(true);
     expect(claimTaskEvents(again, 17).at(-1)?.text).toBe("Needs you: a change to the plan, and 1 more");
   });
+
+  test("AC-B242: each part that waits for its PR adds one part_ready event per head, and no needs_you event", () => {
+    const h = setup();
+    const p1 = h.part(1, "self_reviewed", "aaa");
+    h.part(2);
+    expect(noteTaskWaits(h.db, [h.id], 10)).toBe(true);
+    expect(noteTaskWaits(h.db, [h.id], 11)).toBe(false);
+    expect([h.count("part_ready"), h.count()]).toEqual([1, 0]);
+    // "Fix these too" runs a step of the part: no event until it ends. The new head adds one.
+    const step = h.db
+      .query("INSERT INTO task_step (task, part, ord, kind, state, started_at) VALUES ($task, $part, 1, 'fix', 'running', 12) RETURNING id")
+      .get({ task: h.id, part: p1 }) as { id: number };
+    h.db.query("UPDATE task_part SET head = 'bbb' WHERE id = $id").run({ id: p1 });
+    expect(noteTaskWaits(h.db, [h.id], 13)).toBe(false);
+    h.db.query("UPDATE task_step SET state = 'ok' WHERE id = $id").run({ id: step.id });
+    expect(noteTaskWaits(h.db, [h.id], 14)).toBe(true);
+    expect(h.count("part_ready")).toBe(2);
+    // Part 2 builds at the same time and gets ready later. It adds its own event.
+    h.db.query("UPDATE task_part SET state = 'self_reviewed', head = 'ccc' WHERE task = $task AND ord = 2").run({ task: h.id });
+    expect(noteTaskWaits(h.db, [h.id], 15)).toBe(true);
+    expect(h.count("part_ready")).toBe(3);
+    expect(h.count()).toBe(0);
+  });
+
+  test("AC-B243: a task in spec_approved adds one spec_approved event", () => {
+    const h = setup();
+    h.set("spec_approved", null);
+    expect(noteTaskWaits(h.db, [h.id], 10)).toBe(true);
+    expect(noteTaskWaits(h.db, [h.id], 11)).toBe(false);
+    expect(claimTaskEvents(h.db, 12).map((e) => [e.kind, e.text])).toEqual([["spec_approved", SPEC_APPROVED_TEXT]]);
+  });
+});
+
+describe("the restart recovery (AC-B244)", () => {
+  test("a task that the recovery stops gets one needs_you event; the wait check adds no second one", () => {
+    const h = setup();
+    h.db
+      .query("INSERT INTO task_step (task, ord, kind, state, started_at) VALUES ($task, 1, 'implement', 'running', 1)")
+      .run({ task: h.id });
+    recoverTasks(h.db, 50);
+    recoverTasks(h.db, 51);
+    expect(h.count()).toBe(1);
+    const again = openDb(h.path);
+    dbs.push(again);
+    expect(noteTaskWaits(again, [h.id], 52)).toBe(false);
+    expect(claimTaskEvents(again, 53)).toEqual([
+      { id: expect.any(Number), task: h.id, kind: "needs_you", createdAt: 50, key: "ABC-1", title: "Add a flag", text: RESTART_TEXT },
+    ]);
+  });
+
+  test("a task that the user resumed before the claim gives no notification", () => {
+    const h = setup();
+    h.db
+      .query("INSERT INTO task_step (task, ord, kind, state, started_at) VALUES ($task, 1, 'implement', 'running', 1)")
+      .run({ task: h.id });
+    recoverTasks(h.db, 50);
+    h.set("implementing", null);
+    expect(claimTaskEvents(h.db, 51)).toEqual([]);
+  });
 });
 
 describe("claimTaskEvents", () => {
@@ -136,5 +198,27 @@ describe("claimTaskEvents", () => {
     h.set("implementing", null);
     expect(claimTaskEvents(h.db, 23)).toEqual([]);
     expect(h.db.query("SELECT COUNT(*) AS n FROM task_event WHERE claimed_at IS NULL").get()).toEqual({ n: 0 });
+  });
+
+  test("AC-B242: a part_ready event gives its part and the part count; a part that opened its PR gives none", () => {
+    const h = setup();
+    const p1 = h.part(1, "self_reviewed", "aaa");
+    h.part(2);
+    noteTaskWaits(h.db, [h.id], 10);
+    expect(claimTaskEvents(h.db, 11)).toEqual([
+      {
+        id: expect.any(Number),
+        task: h.id,
+        kind: "part_ready",
+        createdAt: 10,
+        key: "ABC-1",
+        title: "Add a flag",
+        text: "Part 1 of 2 is ready for its PR.",
+      },
+    ]);
+    h.db.query("UPDATE task_part SET head = 'bbb' WHERE id = $id").run({ id: p1 });
+    noteTaskWaits(h.db, [h.id], 12);
+    h.db.query("UPDATE task_part SET state = 'pr_open' WHERE id = $id").run({ id: p1 });
+    expect(claimTaskEvents(h.db, 13)).toEqual([]);
   });
 });

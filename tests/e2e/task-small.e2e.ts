@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// docs/plans/review-v2/spec.md sections 6.12, 6.16, and 7.2 (WP-B5, WP-BR2): the small task walkthrough in the browser. Build on the
-// task chip of a PR, the questions with the recommended answers, the plan approval with the "Branch type" chips, "Other…", the base
+// docs/plans/review-v2/spec.md sections 6.12, 6.16, and 7.2 (WP-B5, WP-BR2): the small task walkthrough in the browser. Build with
+// the form of the Tasks view, the questions with the recommended answers, the plan approval with the "Branch type" chips, "Other…", the base
 // picker with its confirm, and the first-use warning, the build with a stop at the line limit and "Keep one PR", "Open the PR" with its
 // confirm, Close, and a second task of the same key that continues on the existing branch. The Build form with its attachment boxes
 // and the policy question, and the Attachments tab (spec.md section 6.17). Then Settings > Tasks. Runs against serve.ts
@@ -11,6 +11,7 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import {
   APP_PORT,
+  buildTask,
   control,
   E2E_JIRA_TOKEN,
   E2E_TOKEN,
@@ -26,7 +27,6 @@ import {
 } from "./control";
 
 const APP = `http://127.0.0.1:${APP_PORT}`;
-const PR_TITLE = "Batch cache writes in the sync worker";
 // fixtures/jira/issue.json: the summary of ABC-42 is the task title.
 const TITLE = "Flush the cache before the write lock";
 const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
@@ -92,9 +92,28 @@ const MINOR = {
   trigger: "A reader of the README cannot tell what works.",
 };
 
+type Note = { title: string; body?: string; tag?: string };
+type Win = { __notes: Note[] };
+
 const test = base.extend<{ seen: { urls: string[]; logs: string[] } }>({
   seen: [
     async ({ context }, use) => {
+      // Headless Chromium denies notifications. A recorder replaces the Notification API.
+      await context.grantPermissions(["notifications"]);
+      await context.addInitScript(() => {
+        const w = window as unknown as Win;
+        w.__notes = [];
+        class Recorder {
+          static permission = "granted";
+          static requestPermission = async () => "granted";
+          onclick: (() => void) | null = null;
+          constructor(title: string, opts: NotificationOptions = {}) {
+            w.__notes.push({ title, body: opts.body, tag: opts.tag });
+          }
+          close() {}
+        }
+        Object.defineProperty(window, "Notification", { value: Recorder, configurable: true, writable: true });
+      });
       const seen = { urls: [] as string[], logs: [] as string[] };
       context.on("request", (r) => seen.urls.push(r.url()));
       context.on("console", (m) => seen.logs.push(m.text()));
@@ -124,12 +143,13 @@ async function api(page: Page, method: string, path: string, body?: unknown): Pr
   );
 }
 
+const notes = (page: Page) => page.evaluate(() => [...(window as unknown as Win).__notes]);
 const status = (page: Page) => page.locator("#task-status");
 const primary = (page: Page) => page.locator("[data-primary]");
 // A "Branch type" chip of the plan screen: a native radio with the prefix as its name.
 const chip = (page: Page, name: string) => page.getByRole("radio", { name, exact: true });
 
-test("a small task: chip, questions, plan with the branch and the warning, a stop at the line limit, Open the PR, Close, and Continue", async ({
+test("a small task: the Build form, questions, plan with the branch and the warning, a stop at the line limit, Open the PR, Close, and Continue", async ({
   page,
 }) => {
   test.setTimeout(420_000);
@@ -167,11 +187,12 @@ test("a small task: chip, questions, plan with the branch and the warning, a sto
     isolateHome: true,
   });
   expect(limit.status).toBe(200);
+  const baseUrl = ((await api(page, "GET", "/api/settings")).json as { baseUrl: string }).baseUrl;
+  expect((await api(page, "PUT", "/api/settings", { baseUrl, notifications: true })).status).toBe(200);
   await page.reload();
 
-  // 1. Build on the task chip of the PR: one click, then the Task view.
-  await page.locator("[data-row]", { hasText: PR_TITLE }).first().click();
-  await page.getByRole("button", { name: `Build this task: ${JIRA_ISSUE}` }).click();
+  // 1. Build with the form of the Tasks view, then the Task view.
+  await buildTask(page, "PROJ1/sample-repo-2");
   await expect(page).toHaveURL(/\/tasks\/\d+$/);
   await expect(page.getByRole("heading", { level: 2, name: TITLE })).toBeVisible();
   await expect(page.locator('[aria-current="step"]')).toHaveText("Questions");
@@ -272,6 +293,11 @@ test("a small task: chip, questions, plan with the branch and the warning, a sto
   await expect(primary(page)).toBeFocused();
   await expect(page.getByText("Say what works in the title.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Fix the small points too" })).toBeVisible();
+  // AC-B242: the part that waits for its PR gives one note of its own, and no "open the PR" wait note.
+  await expect
+    .poll(async () => (await notes(page)).filter((n) => n.body === "Part 1 of 1 is ready for its PR."), { timeout: 30_000 })
+    .toEqual([{ title: `${JIRA_ISSUE}: ${TITLE}`, body: "Part 1 of 1 is ready for its PR.", tag: expect.stringMatching(/^task-\d+$/) }]);
+  expect((await notes(page)).filter((n) => n.body === "Needs you: open the PR")).toEqual([]);
   const before = await taskRemote();
   expect(Object.keys(before.heads).filter((b) => b.startsWith("task/"))).toEqual([]);
   expect(before.creates).toEqual([]);

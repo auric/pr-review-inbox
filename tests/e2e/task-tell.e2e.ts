@@ -10,12 +10,12 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import {
   APP_PORT,
+  buildTask,
   type ClaudeScenario,
   control,
   E2E_JIRA_TOKEN,
   E2E_TOKEN,
   FAKE_URL,
-  JIRA_ISSUE,
   JIRA_URL,
   makeClone,
   openApp,
@@ -25,7 +25,6 @@ import {
 } from "./control";
 
 const APP = `http://127.0.0.1:${APP_PORT}`;
-const PR_TITLE = "Batch cache writes in the sync worker";
 const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
 const SPEC = {
   title: "Name the app state in the README",
@@ -136,9 +135,8 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   expect((await api(page, "PUT", `/api/prs/${prA}/clone`, { path: await makeClone(1001) })).status).toBe(200);
   await page.reload();
 
-  // 1. Build on the task chip, the recommended answers, and the plan on the release base with the "task/" prefix.
-  await page.locator("[data-row]", { hasText: PR_TITLE }).first().click();
-  await page.getByRole("button", { name: `Build this task: ${JIRA_ISSUE}` }).click();
+  // 1. Build with the form of the Tasks view, the recommended answers, and the plan on the release base with the "task/" prefix.
+  await buildTask(page, "PROJ1/sample-repo-2");
   await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
   await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();
   await expect(status(page)).toHaveText("The plan is ready: small, 1 PR, about 5 changed lines.", { timeout: 60_000 });

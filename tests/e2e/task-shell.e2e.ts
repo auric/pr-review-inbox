@@ -10,19 +10,18 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import {
   APP_PORT,
+  buildTask,
   type ClaudeScenario,
   control,
   E2E_JIRA_TOKEN,
   E2E_TOKEN,
   FAKE_URL,
-  JIRA_ISSUE,
   JIRA_URL,
   makeClone,
   openApp,
 } from "./control";
 
 const APP = `http://127.0.0.1:${APP_PORT}`;
-const PR_TITLE = "Batch cache writes in the sync worker";
 const REPO = "PROJ1/sample-repo-2";
 const SETTINGS = `/api/repos/${REPO}/task-settings`;
 const NO_COVERAGE = { read: [], skipped: [], unavailable: [], notChecked: [] };
@@ -179,9 +178,8 @@ test("Commands Claude may run: the warnings, the plan picks, an allow request wi
   expect((await api(page, "PUT", `/api/prs/${prA}/clone`, { path: await makeClone(1001) })).status).toBe(200);
   await page.reload();
 
-  // 1. Build on the task chip. The questions wait, so the repository shows in Settings > Tasks.
-  await page.locator("[data-row]", { hasText: PR_TITLE }).first().click();
-  await page.getByRole("button", { name: `Build this task: ${JIRA_ISSUE}` }).click();
+  // 1. Build with the form of the Tasks view. The questions wait, so the repository shows in Settings > Tasks.
+  await buildTask(page, REPO);
   await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
   const taskPath = new URL(page.url()).pathname;
   await expect(page.locator("[data-task-shell]")).toHaveText("Commands: allowlist, 0 patterns");
@@ -378,8 +376,7 @@ test("a fix step that changes no file asks; the approved checks switch gives the
   expect((await api(page, "PUT", `/api/prs/${prA}/clone`, { path: await makeClone(1001) })).status).toBe(200);
   await page.reload();
 
-  await page.locator("[data-row]", { hasText: PR_TITLE }).first().click();
-  await page.getByRole("button", { name: `Build this task: ${JIRA_ISSUE}` }).click();
+  await buildTask(page, REPO);
   await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
   const taskPath = new URL(page.url()).pathname;
   await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();

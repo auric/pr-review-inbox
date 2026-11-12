@@ -190,7 +190,7 @@ const DISCUSS = {
   reply: "",
   coverage: { read: ["src/cache/flush.ts"], skipped: [], unavailable: [], notChecked: [] },
 };
-// Build a Jira task (docs/plans/review-v2/spec.md sections 6.5 and 7.2) from the task chip of my PR 1004: the questions, a small plan
+// Build a Jira task (docs/plans/review-v2/spec.md sections 6.5 and 7.2) for ABC-10688 of my PR 1004: the questions, a small plan
 // for src/cache/flush.ts of main, the files of each build step, and an own review with no point. The approved command is "bun test".
 const READ_FLUSH = { read: ["src/cache/flush.ts"], skipped: [], unavailable: [], notChecked: [] };
 const TASK_INTERVIEW = {

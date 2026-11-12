@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Build a Jira task: the app now notifies you when a part is ready for its pull request, such as "Part 2 of 4 is ready for its PR.", and when the next app start stops a task that the app left in the middle of a step, for example after a crash. Each part notifies on its own, also when two parts build at the same time. The old note "Needs you: open the PR" is gone.
+- The Tasks list now names each part that builds, such as "Building parts 2 and 3 of 4". Before, it named only the first open part.
+- The Jira task chips of a pull request no longer have a "Build" button. Open Tasks in the sidebar and use "Build a Jira task".
+- A Jira task chip with fetched text now has a "Clear text" button instead of an X. It still asks before it deletes the stored text.
+- Settings, Review profiles: "Your edits to the shipped profile" no longer has a "Reset to shipped" button for each field. The small reset button next to each field does the same.
+- The skills index of a task step now says "1 file left out" and "1 key file left out". Before, it said "1 files" and "1 key files".
 - Build a Jira task: Resume now keeps the work. A step that Claude finished is not run again, and a step that stopped early (Stop, its time limit, its turn cap, or a failed run) continues with its earlier changes. The next try reads the list and the diff of those changes. Tests that stay red after the fix tries get new fix tries with the earlier fixes kept. Before, Resume dropped every change since the last commit into a patch file and ran the step again from the start.
 - Build a Jira task: the app still resets to the last commit, with the dropped changes in a patch file, after an app restart in a step, after a step changed a path that Claude may not change, and after Reject of a plan change. The next try reads that patch. When Claude asks to run a command, its changes now stay for the next try.
 - Settings, Tasks, Run limits: the task step time and the new part time now have no limit by default. Each has a box "No step time limit" or "No part time limit", and you can still set a number. A step time that you saved before keeps its limit, and so do the 60 more minutes of a task. Stop works as before.

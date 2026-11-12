@@ -237,7 +237,7 @@ async function shots(browser: Browser) {
   await toTop(page.locator("#t-1000003"), 64);
   await save(page, "reply-note");
 
-  // Build a Jira task (docs/plans/review-v2/spec.md section 7.2): Build on the task chip of my PR, the questions with the recommended
+  // Build a Jira task (docs/plans/review-v2/spec.md section 7.2): the Build form of the Tasks view, the questions with the recommended
   // answers preselected, the plan with the first-use warning, then the change that waits for its PR (scripts/demo.ts TASK_*).
   // The pointer moves away after each click, so no button shows its hover color. The button color has a short transition.
   const rest = async () => {
@@ -245,8 +245,15 @@ async function shots(browser: Browser) {
     await page.waitForTimeout(400);
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   };
-  await openPr(page, "Release the write lock after each entry");
-  await page.getByRole("button", { name: "Build this task: ABC-10688" }).click();
+  await page.getByRole("button", { name: /^Tasks: / }).click();
+  await page.getByRole("button", { name: "Build a Jira task" }).click();
+  const build = page.getByRole("form", { name: "Build a Jira task" });
+  await build.getByLabel("Jira key").fill("ABC-10688");
+  await build.getByLabel("Main repository").click();
+  await build.getByLabel("Main repository").fill("PROJ1/sample-repo-4");
+  await build.getByRole("listbox", { name: "Repositories" }).getByRole("option", { name: "PROJ1/sample-repo-4", exact: true }).click();
+  await build.getByRole("button", { name: "Read the task" }).click();
+  await build.getByRole("button", { name: "Build this task" }).click();
   const questions = page.locator("#task-questions");
   await questions.waitFor({ timeout: RUN_MS });
   await rest();

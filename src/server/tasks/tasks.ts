@@ -176,6 +176,8 @@ export type TaskRef = { task: number; version: number };
 export type Facts = { gate?: boolean };
 
 export const TASK_CHANGED = "The task changed on another page. Check it again.";
+// The ref of the needs_you event of a task that the restart recovery stopped, before "@" and the time (notify.ts).
+export const RESTART_REF = "restart";
 
 const SQL = {
   task: "SELECT state, stopped_from, size, version FROM task WHERE id = $id",
@@ -198,6 +200,7 @@ const SQL = {
   restartUpdates: `UPDATE task_step SET detail_json = json_insert(json_set(detail_json, '$.update.result', 'restart'), '$.notes[#]',
       'The app stopped during the update.')
     WHERE kind = 'update' AND state IN ('waiting', 'running') AND json_type(detail_json, '$.update') = 'object'`,
+  noteRestart: "INSERT INTO task_event (task, kind, ref, created_at) VALUES ($task, 'needs_you', $ref, $now) ON CONFLICT DO NOTHING",
 };
 
 type StateRow = { state: TaskState; stopped_from: TaskState | null; size: TaskSize | null; version: number };
@@ -248,14 +251,17 @@ export function advancePart(
 }
 
 // spec.md section 6.14: a Claude step that ran at the last stop has no process now. Its step ends failed, and its task stops, so
-// Resume continues. Call it before the run recovery (run-rows.ts SQL.recover), which ends the runs themselves with kind restart.
+// Resume continues. Each task that it stops gets one needs_you event (spec.md section 6.13). Call it before the run recovery
+// (run-rows.ts SQL.recover), which ends the runs themselves with kind restart.
 export function recoverTasks(db: Database, now = Date.now()) {
   db.transaction(() => {
     const tasks = db.query(SQL.running).all() as { id: number; version: number }[];
     db.query(SQL.restartUpdates).run();
     db.query(SQL.failSteps).run({ now });
     // A done or failed task refuses STOP and keeps its state.
-    for (const t of tasks) advance(db, { task: t.id, version: t.version }, { type: "STOP" }, {}, now);
+    for (const t of tasks)
+      if (advance(db, { task: t.id, version: t.version }, { type: "STOP" }, {}, now).status === 200)
+        db.query(SQL.noteRestart).run({ task: t.id, ref: `${RESTART_REF}@${now}`, now });
   })();
 }
 
@@ -697,6 +703,7 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
       parts: code.length,
       ready: open?.state === "self_reviewed",
       merged: code.length > 0 && code.every((p) => merged(p) || p.state === "abandoned"),
+      building: code.filter((p) => p.state === "implementing").map((p) => p.ord),
     },
     id: t.id,
     project: t.project,

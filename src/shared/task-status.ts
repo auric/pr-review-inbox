@@ -20,6 +20,15 @@ const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {
   error: "Needs you: an error",
   allow: "Needs you: Claude asks to allow a command",
 };
+// "Building part 2 of 4", or "Building parts 2 and 3 of 4" while parts build at the same time. Without a part in its build, the first
+// open part.
+function buildingText(p: TaskRowDto["progress"]): string {
+  const ns = p.building.length ? p.building : p.part ? [p.part] : [];
+  if (ns.length < 2) return ns.length ? `Building part ${ns[0]} of ${p.parts}` : "Building";
+  const list = ns.length < 3 ? ns.join(" and ") : `${ns.slice(0, -1).join(", ")}, and ${ns.at(-1)}`;
+  return `Building parts ${list} of ${p.parts}`;
+}
+
 export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
   const p = r.progress;
   if (r.state === "done") return { text: r.closedAt === null ? "Done" : "Closed", needsYou: false };
@@ -36,7 +45,7 @@ export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
     return p.planReady ? { text: "Needs you: approve the plan", needsYou: true } : { text: "Writing the plan", needsYou: false };
   if (r.state === "implementing") {
     if (p.ready) return { text: "Needs you: open the PR", needsYou: true };
-    return { text: p.part ? `Building part ${p.part} of ${p.parts}` : "Building", needsYou: false };
+    return { text: buildingText(p), needsYou: false };
   }
   if (r.state === "ready") return { text: p.merged ? "Merged" : "Waiting for review", needsYou: false };
   return { text: "Waiting for colleagues", needsYou: false };

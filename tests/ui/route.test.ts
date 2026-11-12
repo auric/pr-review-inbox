@@ -135,7 +135,7 @@ describe("push or replace (plan pr-view-v4 section 5)", () => {
     expect(navMode(listRoute(), { ...listRoute(), repo: "PROJ1/sample-repo-2" }, false)).toBe("push");
   });
 
-  test("Build this task from a PR pushes. A task open by click pushes. j, k, and the default task replace.", () => {
+  test("A task that opens from a PR pushes. A task open by click pushes. j, k, and the default task replace.", () => {
     const t = (task: number | null) => ({ ...listRoute("tasks"), task });
     expect(navMode(a, t(12), true)).toBe("push");
     expect(navMode(t(12), t(13), true)).toBe("push");

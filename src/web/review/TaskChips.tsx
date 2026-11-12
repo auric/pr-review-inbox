@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Task chips (plan r2 task context UI, plan r3 Feature C): the task IDs of the PR with Fetch, Fetch again, and Remove.
+// Task chips (plan r2 task context UI, plan r3 Feature C): the task IDs of the PR with Fetch, Fetch again, and Clear text.
 // Every run kind reads the fetched task text. So the brief, the run buttons, and Ask in the panel slot show the chips.
 // All places share one query, so a fetch in one place shows in all.
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, LoaderCircle, Settings2, X } from "lucide-react";
+import { CircleAlert, LoaderCircle, Settings2 } from "lucide-react";
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -56,17 +56,16 @@ async function removeTask(qc: QueryClient, pr: number, key: string) {
 // setup: the server has no tracker source (409), so the error offers the settings.
 type TaskError = { key: string; message: string; setup: boolean };
 
-const chipBtn =
-  "inline-grid w-6 cursor-pointer place-items-center border-l text-ink-2 last:rounded-r-[4px] hover:bg-hover hover:text-foreground aria-busy:cursor-progress";
-// WCAG 2.5.3: both names of the fetch button start with its visible word "Fetch".
+// WCAG 2.5.3: the names of the fetch and clear buttons start with their visible words.
 const fetchBtn =
   "inline-flex cursor-pointer items-center gap-1 border-l px-2 text-xs font-medium text-pen last:rounded-r-[4px] hover:bg-hover hover:underline aria-busy:cursor-progress";
+const clearBtn =
+  "inline-flex cursor-pointer items-center border-l px-2 text-xs text-ink-2 last:rounded-r-[4px] hover:bg-hover hover:text-foreground aria-busy:cursor-progress";
 
-// id: the prefix of the element IDs, one per place. focusTo: the element that takes the focus when Remove takes the chip away.
+// id: the prefix of the element IDs, one per place. focusTo: the element that takes the focus when Clear text takes the chip away.
 // compact: a place outside the brief. It shows only the chips that can fetch or hold fetched text, with the fetch state
 // instead of the source. It shows nothing when no chip is left. onSettings absent: an error offers no settings link.
-// onTaskIds: "Set up task IDs" opens Settings, Task IDs. onBuild: "Build this task" (docs/plans/review-v2/spec.md section 6.12) on each
-// chip whose text the app has or can fetch. One click creates the task, or opens its open task.
+// onTaskIds: "Set up task IDs" opens Settings, Task IDs.
 export function TaskChips(props: {
   pr: number;
   tasks: PrTask[];
@@ -77,7 +76,6 @@ export function TaskChips(props: {
   announce: (text: string) => void;
   onSettings?: () => void;
   onTaskIds?: () => void;
-  onBuild?: (key: string) => Promise<void>;
 }) {
   const { pr, tasks, meta, id, compact, announce, onSettings } = props;
   const qc = useQueryClient();
@@ -85,7 +83,7 @@ export function TaskChips(props: {
   const chips = compact ? all.filter((c) => c.fetchable || c.fetched) : all;
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [errors, setErrors] = useState<TaskError[]>([]);
-  // The task that the Remove confirm asks about. The last one stays while the dialog plays its close transition.
+  // The task that the Clear text confirm asks about. The last one stays while the dialog plays its close transition.
   const [asking, setAsking] = useState<{ key: string; files: number } | null>(null);
   const last = useRef(asking);
   if (asking) last.current = asking;
@@ -97,31 +95,26 @@ export function TaskChips(props: {
     // The settings render in the same click. Focus then lands on the tracker URL field.
     requestAnimationFrame(() => document.getElementById("tracker-url")?.focus());
   };
-  // The Remove button while the request runs, then the Fetch button, then focusTo when the chip is gone.
+  // The Clear text button while the request runs, then the Fetch button, then focusTo when the chip is gone.
   const refocus = (key: string) =>
     (
       document.getElementById(`${id}-remove-${key}`) ??
       document.getElementById(`${id}-fetch-${key}`) ??
       document.getElementById(props.focusTo)
     )?.focus();
-  const run = async (key: string, act: "fetch" | "remove" | "build") => {
+  const run = async (key: string, act: "fetch" | "remove") => {
     if (busy.has(key)) return;
     setBusy((b) => new Set(b).add(key));
     setErrors((es) => es.filter((e) => e.key !== key));
     try {
-      if (act === "build") {
-        await props.onBuild?.(key);
-        return;
-      }
       if (act === "fetch") await fetchTask(qc, pr, key);
       else await removeTask(qc, pr, key);
-      announce(act === "fetch" ? `Fetched ${key} from ${source}.` : `Removed the ${key} text.`);
-      // Remove takes its own button away, and the chip too when the PR no longer names the task.
+      announce(act === "fetch" ? `Fetched ${key} from ${source}.` : `Cleared the ${key} text.`);
+      // Clear text takes its own button away, and the chip too when the PR no longer names the task.
       if (act === "remove") requestAnimationFrame(() => refocus(key));
     } catch (e) {
       const message = (e as Error).message;
-      // A build also gets 409 while the run pool is full. Only a missing tracker setup offers the settings.
-      const setup = !!onSettings && e instanceof ApiError && e.status === 409 && (act !== "build" || !on);
+      const setup = !!onSettings && e instanceof ApiError && e.status === 409;
       setErrors((es) => [...es.filter((x) => x.key !== key), { key, message, setup }]);
       announce(`${key}: ${message}`);
     } finally {
@@ -209,33 +202,18 @@ export function TaskChips(props: {
                   </button>
                 </Hint>
               )}
-              {props.onBuild && (t.fetchable || t.fetched) && (
-                <Hint label={`Build this task: ${t.key}`}>
-                  <button
-                    id={`${id}-build-${t.key}`}
-                    type="button"
-                    className={fetchBtn}
-                    aria-label={`Build this task: ${t.key}`}
-                    aria-busy={wait || undefined}
-                    onClick={() => void run(t.key, "build")}
-                  >
-                    {wait && <LoaderCircle aria-hidden className={cn(icon, "animate-spin")} />}
-                    Build
-                  </button>
-                </Hint>
-              )}
               {t.fetched && (
-                <Hint label={`Remove the ${t.key} text`}>
+                <Hint label={`Clear text of ${t.key}`}>
                   <button
                     id={`${id}-remove-${t.key}`}
                     type="button"
-                    className={chipBtn}
-                    aria-label={`Remove the ${t.key} text`}
+                    className={clearBtn}
+                    aria-label={`Clear text of ${t.key}`}
                     aria-haspopup="dialog"
                     aria-busy={wait || undefined}
                     onClick={() => !wait && setAsking({ key: t.key, files: t.fetched?.files.length ?? 0 })}
                   >
-                    <X aria-hidden className={icon} />
+                    Clear text
                   </button>
                 </Hint>
               )}
@@ -281,7 +259,7 @@ export function TaskChips(props: {
           {shown && (
             <>
               <DialogHeader>
-                <DialogTitle>Remove the {shown.key} text?</DialogTitle>
+                <DialogTitle>Clear the {shown.key} text?</DialogTitle>
                 <DialogDescription>{removeText(shown.key, shown.files)}</DialogDescription>
               </DialogHeader>
               <DialogFooter>
@@ -295,7 +273,7 @@ export function TaskChips(props: {
                     void run(shown.key, "remove");
                   }}
                 >
-                  Remove
+                  Clear text
                 </Button>
               </DialogFooter>
             </>

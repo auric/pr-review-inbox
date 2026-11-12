@@ -1460,7 +1460,7 @@ Section 6.17.4 adds POST /api/tasks/issue and PUT /api/tasks/:id/files/:att. Sec
 
 ### 6.12 UI: the Task view
 
-- Start: the Jira chip menu item "Build this task" (one click: POST /api/tasks, then the Task view). The sidebar view "Tasks" with "Build a Jira task" (key, "Main repository", and "Profile" (section 6.19.1), then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16).
+- Start: the sidebar view "Tasks" with "Build a Jira task" (key, "Main repository", and "Profile" (section 6.19.1), then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16). The Jira chips of a PR have no Build button (section 6.30).
 - Route `/tasks/:id`. Layout: a header (key, title, size line, repository line, profile name), the step strip, one status sentence, one primary button, a More menu, then the content of the current step. Tabs under the content, all secondary: Questions, Attachments (section 6.17.1), Spec, Spec PR (medium, large), Plan, Log, Diff.
 - Step strip per size: small "Questions › Plan › Build › Done"; medium "Questions › Plan › Spec review › Build › Done"; large "Questions › Plan › Spec review › Build parts (2 of 4) › Done". The current step is bold with aria-current="step".
 
@@ -1531,6 +1531,7 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 - task_event kinds: needs_you (ref: step ID), part_ready (ref: part ID and head), spec_approved (ref: spec PR head). One tab claims each event (as draft_stale). The notifications setting applies.
 - Texts: "<KEY> needs you: the tests stay red." / "<KEY>: part 2 of 4 is ready for its PR." / "<KEY>: the spec is approved. You can start building."
 - No notification for a running step, a green check of the app, a commit, or a wait.
+- Section 6.30 (user decision of 2026-11-03): part_ready fires when a code part is self_reviewed and no step of it waits or runs. It replaces the needs_you wait "Needs you: open the PR". The restart recovery adds one needs_you event (ref `restart@<time>`) for each task that it stops, with the text "The app restarted and stopped this task. Resume continues it.".
 - Build status (docs/plans/ci-builds.md, Layer A): the PR events build_failed and build_passed (ref: the source head) notify only for the user's own PRs, task PRs included. Texts: "build failed" and "build passed". They never fire on the first build read of a PR or while a build runs. Each kind fires at most once per head.
 
 ### 6.14 Edge cases
@@ -1556,7 +1557,7 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 
 ### 6.15 Acceptance criteria (part 6)
 
-1. AC-B1. "Build this task" on a chip creates one task, starts an interview run (kind interview, read-only tools, sanitized snapshot of the target head), and a second click opens the same task.
+1. AC-B1. POST /api/tasks ("Build this task") creates one task, starts an interview run (kind interview, read-only tools, sanitized snapshot of the target head), and a second click opens the same task.
 2. AC-B2. Questions show as a form with the recommended option preselected. "Use the recommended answers" sends them and starts the spec run.
 3. AC-B3. Claude asks a second round at most once. A third interview result with questions is stored, and the spec run starts anyway.
 4. AC-B4. A spec result with db true and size small is shown as medium with the rule line. An estimate of 900 lines with a 400 budget shows large. The user cannot pick a size under a rule's minimum.
@@ -1820,7 +1821,7 @@ The attachments of the Jira key belong to the task, with or without an origin PR
 - "Include all" ticks every box. It asks the policy question once when the setting asks.
 - Empty state: "No attachments" with "<runner> reads the task text only.". Error state: the fixed sentence of the Jira error under the form (routes.ts FAILED).
 - Task view: the secondary tab "Attachments" (when the issue lists a file) with the same boxes and "Include all". The line "<runner> reads the ticked files in each step. A change applies from the next step." stands above the list. Each row says "<runner> gets it in each step.", "Downloaded. <runner> does not get it.", or "Not downloaded. A tick downloads it.". A tick waits for its download, and a failed download shows its error under the row. The tab adds no primary button.
-- A chip start ("Build this task" on a PR) has no form. It follows the setting: off gives every file with a box, on gives none.
+- POST /api/tasks without `files` follows the setting: off gives every file with a box, on gives none. The UI always sends the ticked files (section 6.30).
 
 #### 6.17.2 Data and files
 
@@ -2072,7 +2073,7 @@ Constants (src/shared/task.ts): SUBTASKS_READ = 20, SUBTASK_PARTS_MAX = 12 (the 
 #### 6.20.1 Start
 
 - "Read the task" reads the parent once. When the parent has sub-tasks, the form shows "ABC-10 has 4 sub-tasks: 2 open, 2 in review." and two radio buttons: "Build the sub-tasks, one PR each" and "Build ABC-10 as one task". The first one starts selected when at least one sub-task is not done (design.md Q64).
-- "Build this task" on the Jira chip uses the same rule, so one click still works.
+- POST /api/tasks without `subtasks` uses the same rule.
 - The parent has no sub-tasks: the normal flow, and the form shows no choice.
 - The create click reads each sub-task that is not done: summary, text, status, parent, links, attachment list, and comments. It reads at most SUBTASKS_READ sub-tasks, in Jira order. A read sub-task whose `fields.parent.key` is not the parent key is dropped. Done sub-tasks keep only key, summary, and status from the parent read (design.md Q70).
 - The interview and the spec run get context/subtasks.md. The app writes it as untrusted data. Per sub-task, it holds the key, the status, the summary, the text, the attachments (section 6.20.3), the links to other sub-tasks of the parent, and the branches and PRs that name its key. A link line uses the link text of the server, for example "ABC-13 is blocked by ABC-12".
@@ -3069,6 +3070,23 @@ Acceptance criteria:
 6. AC-B210. The run usage of a run with advisor calls names the advisor model from modelUsage, and the run setup line shows it.
 7. AC-B211. Gate GADV.2 ignores `slash_commands`. GADV.2, GADV.4, and GADV.5a judge by init.tools and the advisor calls, with the run with `--advisor` as the control. GADV.5b judges by the advisor calls of that run.
 
+### 6.30 UI cleanup (user decision of 2026-11-03)
+
+- Tasks row: `TaskRowDto.progress.building` lists the ordinals of the code parts in state implementing. The meta line says "Building part 3 of 4", or "Building parts 2 and 3 of 4" while parts build at the same time. Without a part in its build, it names the first open part as before.
+- Task notifications (section 6.13): part_ready (ref: part ID and head) fires for each code part in state self_reviewed while no step of it waits or runs. The text is "Part 2 of 4 is ready for its PR.". The needs_you wait of "Needs you: open the PR" gives no event. spec_approved fires once per spec PR head while the task is in spec_approved, with "The spec is approved. You can start building.". No flow reaches spec_approved before the spec PR packages (WP-B6 to WP-B10). recoverTasks adds one needs_you event (ref `restart@<time>`) for each task that it stops. Its text is "The app restarted and stopped this task. Resume continues it.". Known limit: a clean stop (SIGINT, SIGTERM, or SIGHUP, src/server/main.ts stopOnSignals) cancels the runs first. A task that its cancelled run stops gets "The run was cancelled." and no event. A build that the clean stop leaves in implementing gets the event at the next start. A claim drops an event whose fact no longer holds: the part opened its PR or got a new head, the task left spec_approved, or the task left stopped. The digest counts each task once. This amends AC-B21 and AC-UX8: the kinds stay the three of section 6.13.
+- Jira chips of a PR: no "Build" button. POST /api/tasks keeps `originPr` for API callers. A chip with fetched text has the text button "Clear text" (accessible name "Clear text of <KEY>"). Its confirm is "Clear the <KEY> text?" with "Clear text", and the live region says "Cleared the <KEY> text.".
+- Settings, Review profiles: "Your edits to the shipped <name> profile" lists each edited field with "Edited" and, for a newer shipped value, View. It has no reset button. The small reset next to each control and "Reset to shipped" in the View dialog stay.
+- The skills index (INDEX.md) uses the shared plural: "1 file left out" and "1 key file left out".
+
+Acceptance criteria:
+1. AC-B241. With parts 2 and 3 in their build, the Tasks row says "Building parts 2 and 3 of 4". With part 2 in review and part 3 in its build, it says "Building part 3 of 4" (tests/web/tasks-model.test.ts, tests/tasks/tasks.test.ts).
+2. AC-B242. Each code part that waits for its PR gives one part_ready event per head, also when two parts build at the same time, and no needs_you event. A step of the part that runs holds the event until it ends. The browser shows "Part 1 of 1 is ready for its PR." once and no "Needs you: open the PR" (tests/tasks/notify.test.ts, tests/web/notify.test.ts, tests/e2e/task-small.e2e.ts).
+3. AC-B243. A task in spec_approved gives one spec_approved event with its text (tests/tasks/notify.test.ts).
+4. AC-B244. A task that the restart recovery stops gets one needs_you event with the restart text. A second recovery and the next wait check add none. A task that left stopped before the claim gives no notification (tests/tasks/notify.test.ts).
+5. AC-B245. The Jira chips of a PR have no Build button. "Clear text" asks first, Cancel and Escape keep the text, and the confirm deletes it (tests/e2e/jira.e2e.ts).
+6. AC-B246. The list of edits of a shipped profile has no reset button. The reset next to the field sets it back, and the other edits stay (tests/e2e/shipped-edits.e2e.ts).
+7. AC-B247. INDEX.md says "(1 file left out: ...)" and "(1 key file left out)" for one file (tests/review/skills.test.ts).
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule
@@ -3101,7 +3119,7 @@ Screens checked against the rules:
 
 Small task (a one-file fix, about 80 lines):
 
-1. The user opens a PR, clicks the Jira chip "ABC-12", and picks "Build this task". Primary: none. Status: "Claude is reading the task and the code. About 2 min left."
+1. The user opens Tasks, clicks "Build a Jira task", enters "ABC-12" and the repository, clicks "Read the task", then "Build this task". Primary: none. Status: "Claude is reading the task and the code. About 2 min left."
 2. Status: "Claude has 2 questions before it writes the plan." Primary: "Answer 2 questions". The user keeps the recommended options and clicks "Send answers".
 3. Status: "The plan is ready: small, 1 PR, about 80 changed lines." Primary: "Approve the plan". On the first task in this repository, the approval shows the command list and the warning.
 4. Status: "Claude is writing tests. About 3 min left." then "Running the tests." then "Claude checks its own change."
