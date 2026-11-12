@@ -83,5 +83,5 @@ test("AC-M5: a reason chip after a discard stores the reason, and Review quality
   await expect(cells.nth(3)).toHaveText("2 of 2 (100%)");
   await expect(cells.nth(4)).toHaveText("1Not a bug 1");
   expect(await cells.nth(5).evaluate((e) => e.firstChild?.textContent)).toBe("2");
-  await expect(cells.nth(5).locator("span")).toHaveText(["0 addressed (0%)", "0 outdated (0%)"]);
+  await expect(cells.nth(5).locator("span")).toHaveText(["0 resolved or fixed (0%)", "0 outdated (0%)"]);
 });

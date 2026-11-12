@@ -4,8 +4,8 @@
 // Review quality (docs/plans/review-v2/spec.md section 4.2, design.md M3): outcome counts per profile name and prompt version,
 // from the existing rows. No table of its own.
 import type { Database } from "bun:sqlite";
-import { DISCARD_REASONS, type ReviewStatsDto, type RunSummary, type RunUsage, type Volume } from "../../shared/dto";
-import { type Carried, displayGroup, type FindingPayload, type SessionMark } from "../../shared/review";
+import { DISCARD_REASONS, type PostOutcomes, type ReviewStatsDto, type RunSummary, type RunUsage, type Volume } from "../../shared/dto";
+import { type Carried, displayGroup, type FindingPayload, type SessionMark, severities } from "../../shared/review";
 
 const DAY_MS = 86_400_000;
 
@@ -25,6 +25,15 @@ const SQL = {
       EXISTS (SELECT 1 FROM post p, json_each(p.items_json) j
           JOIN comment c ON c.pr = p.pr AND c.comment_id = p.remote_id
         WHERE p.state = 'confirmed' AND json_extract(j.value, '$.id') = i.id AND c.orphaned_at > p.created_at) AS outdated,
+      EXISTS (SELECT 1 FROM post p, json_each(p.items_json) j
+          JOIN comment c ON c.pr = p.pr AND c.comment_id = p.remote_id
+        WHERE p.state = 'confirmed' AND json_extract(j.value, '$.id') = i.id AND c.thread_resolved = 1) AS resolved,
+      -- The outbox posts only while the PR head is the run head, so another head now is a head after the post.
+      EXISTS (SELECT 1 FROM post p, json_each(p.items_json) j
+          JOIN comment c ON c.pr = p.pr AND c.comment_id = p.remote_id
+          JOIN pull_request pr ON pr.id = p.pr JOIN review_run pr_run ON pr_run.id = p.run
+        WHERE p.state = 'confirmed' AND json_extract(j.value, '$.id') = i.id
+          AND (pr.source_head <> pr_run.source_head OR pr.state IN ('MERGED', 'DECLINED'))) AS moved,
       EXISTS (SELECT 1 FROM review_item c WHERE c.kind = 'finding' AND json_extract(c.payload_json, '$.carried.from') = i.id) AS copied
     FROM review_item i JOIN review_run r ON r.id = i.run
     WHERE i.kind = 'finding' AND r.pr IS NOT NULL AND r.kind = 'review' AND r.status IN ('completed', 'incomplete') AND r.started_at >= $since
@@ -48,6 +57,8 @@ type ItemRow = {
   payload_json: string;
   addressed: number;
   outdated: number;
+  resolved: number;
+  moved: number;
   copied: number;
 };
 export type StatsPayload = FindingPayload & {
@@ -69,6 +80,13 @@ export function userDiscard(p: StatsPayload, hasCopy: boolean): boolean {
     p.session?.verdict === "reject" ||
     (p.carried && p.carried.verdict !== "open")
   );
+}
+
+// Candidate A (review-ideas.md): changed = the anchor turned orphaned after the post. moved = the PR got a new head or closed.
+// A posted finding stays pending until it is resolved, its line changed, or moved is true.
+export function postOutcome(o: { resolved: boolean; changed: boolean; moved: boolean }): keyof PostOutcomes {
+  if (o.resolved || o.changed) return "addressed";
+  return o.moved ? "open" : "pending";
 }
 
 function median(xs: number[]): number | null {
@@ -115,6 +133,7 @@ export function reviewStats(db: Database, days: number, now = Date.now()): Revie
           posted: 0,
           addressed: 0,
           outdated: 0,
+          outcomes: Object.fromEntries(severities.map((v) => [v, { addressed: 0, open: 0, pending: 0 }])) as ReviewStatsDto["outcomes"],
           medianMinutes: null,
           usage: { costUsd: 0, turns: 0 },
         },
@@ -158,6 +177,8 @@ export function reviewStats(db: Database, days: number, now = Date.now()): Revie
       d.posted++;
       if (end.addressed) d.addressed++;
       if (end.outdated) d.outdated++;
+      const sev = d.outcomes[end.p.severity];
+      if (sev) sev[postOutcome({ resolved: end.resolved === 1, changed: end.outdated === 1, moved: end.moved === 1 })]++;
     }
     if (end.status === "discarded" && userDiscard(end.p, end.copied === 1)) {
       d.discarded.total++;

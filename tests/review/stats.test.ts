@@ -8,13 +8,15 @@ import { createLive } from "../../src/server/live";
 import { triage } from "../../src/server/review/items";
 import type { ReviewJobs } from "../../src/server/review/jobs";
 import { createReviewRoutes } from "../../src/server/review/routes";
-import { reviewStats } from "../../src/server/review/stats";
+import { postOutcome, reviewStats } from "../../src/server/review/stats";
 import { openDb } from "../../src/server/storage/db";
 import type { ReviewStatsDto } from "../../src/shared/dto";
 
 const NOW = 1_800_000_000_000;
 const DAY = 86_400_000;
 const MIN = 60_000;
+const ZERO = { addressed: 0, open: 0, pending: 0 };
+const NONE = { blocker: ZERO, major: ZERO, minor: ZERO, nit: ZERO };
 
 function setup() {
   const db = openDb(":memory:");
@@ -209,6 +211,8 @@ describe("reviewStats (AC-M4)", () => {
       addressed: 2,
       // Comment 600 turned orphaned after its post. Comment 800 before it.
       outdated: 1,
+      // AC-R29: 500 resolved, 600 changed after the post. 700 and 800 wait for a new head: a "Fixed in" draft is no signal.
+      outcomes: { ...NONE, major: { addressed: 2, open: 0, pending: 2 } },
       medianMinutes: 7,
       usage: { costUsd: 0.75, turns: 6 },
     });
@@ -258,6 +262,53 @@ describe("reviewStats (AC-M4)", () => {
 
   test("an empty database gives no rows", () => {
     expect(setup().stats()).toEqual([]);
+  });
+});
+
+describe("addressed rate of posted findings (AC-R29)", () => {
+  test("postOutcome: resolved or changed is addressed; else a new head or a closed PR counts it; else pending", () => {
+    const o = (resolved: boolean, changed: boolean, moved: boolean) => postOutcome({ resolved, changed, moved });
+    expect(o(true, false, false)).toBe("addressed");
+    expect(o(false, true, true)).toBe("addressed");
+    expect(o(false, false, true)).toBe("open");
+    expect(o(false, false, false)).toBe("pending");
+  });
+
+  test("counts per severity from the stored comment, PR head, and PR state", () => {
+    const s = setup();
+    const r = s.run({ version: "2.5", started: NOW - 2 * DAY });
+    const changed = s.finding(r, "posted", { severity: "blocker" });
+    const untouched = s.finding(r, "posted", { severity: "major" });
+    const resolved = s.finding(r, "posted", { severity: "minor" });
+    const outside = s.finding(r, "posted", { severity: "nit" });
+    s.finding(r, "accepted", { severity: "major" });
+    s.comment(1, { orphanedAt: NOW - DAY + 1 });
+    s.comment(2);
+    s.comment(3, { resolved: true });
+    s.comment(4);
+    s.post(r, [changed], 1);
+    s.post(r, [untouched], 2);
+    s.post(r, [resolved], 3);
+    s.post(r, [outside], 4);
+    // The PR head is still the run head: only the changed line and the resolved thread count.
+    s.db.run("UPDATE pull_request SET source_head = 'h', state = 'OPEN'");
+    expect(s.row("2.5").outcomes).toEqual({
+      blocker: { addressed: 1, open: 0, pending: 0 },
+      major: { addressed: 0, open: 0, pending: 1 },
+      minor: { addressed: 1, open: 0, pending: 0 },
+      nit: { addressed: 0, open: 0, pending: 1 },
+    });
+    // A new head that left the anchors of 2 and 4 alone (not orphaned): counted, not addressed.
+    s.db.run("UPDATE pull_request SET source_head = 'h2'");
+    expect(s.row("2.5").outcomes.major).toEqual({ addressed: 0, open: 1, pending: 0 });
+    expect(s.row("2.5").outcomes.nit).toEqual({ addressed: 0, open: 1, pending: 0 });
+    // A merged or declined PR counts the rest too.
+    s.db.run("UPDATE pull_request SET source_head = 'h', state = 'DECLINED'");
+    expect(s.row("2.5").outcomes.major).toEqual({ addressed: 0, open: 1, pending: 0 });
+    // An orphaned anchor from before the post is no change after it.
+    s.db.run("UPDATE pull_request SET state = 'OPEN'");
+    s.db.run(`UPDATE comment SET orphaned_at = ${NOW - DAY - 1} WHERE comment_id = 2`);
+    expect(s.row("2.5").outcomes.major).toEqual({ addressed: 0, open: 0, pending: 1 });
   });
 });
 

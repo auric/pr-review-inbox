@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Settings, Review quality has a new table "Addressed by a later change". It shows, per prompt version and severity, how many of your posted findings a later commit addressed: "Addressed: 3 of 5 posted findings (60%)". A finding counts when a later commit changed its line or its thread is resolved. A finding waits as pending until the pull request gets new commits, is merged, or is declined. In the main table, the old "addressed" count of the Posted column is now called "resolved or fixed".
 - Fix now checks the claim of a comment in the code first. It fixes only a confirmed defect. It makes the smallest fix and adds no extra flag, option, or special case. A comment can ask for a special case around a rule that applies by design. Fix then gives "Won't fix" and names the place of the rule. A thread where you or the author already decided against the change gets no fix. A request for more than the pull request or its task asks gets "Won't fix" as out of scope. The reply then proposes it as a follow-up. A defect that the change adds is always in scope.
 - The Drafts list now shows bugs first: security, concurrency, resource handling, and behavior changes, in that order. The other findings follow in the order of the run. No finding is hidden.
 - A posted nit now starts with "Nit:" also when the severity mark is off. A posted low-confidence finding starts with "Can you check this?". A draft that you edited posts as you wrote it.

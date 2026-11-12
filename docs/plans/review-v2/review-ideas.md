@@ -57,7 +57,7 @@ Report: research/research-review-practices.md. No source argues against ideas 1 
 
 New candidates from the research. User decision of 2026-11-11: A, B, and C are approved (build-redesign.md section 7, items 8 to 10). D is not approved.
 
-- A. Addressed rate of posted findings: a later change touched the line, or the thread was resolved. It gives a precision number with no eval run. Stats only.
+- A. Addressed rate of posted findings: a later change touched the line, or the thread was resolved. It gives a precision number with no eval run. Stats only. Built (spec.md AC-R28 to AC-R30): the orphaned anchor after the post is the "line changed" signal. A finding stays pending until a new head, a merge or decline, or a resolve.
 - B. Sort findings by category, bug first. Sort only, never hide. Built 2026-11-12 (spec.md AC-R25): draftGroups in src/web/review/model.ts.
 - C. A "Nit:" prefix on posted minor findings, and a question form for low-confidence findings. Both change posted text; the user approved this. Check first whether catalog.ts already covers them. Built 2026-11-12 (spec.md AC-R26, AC-R27): findingText in src/server/publish/plan.ts. catalog.ts had no nit prefix and no question form. The bold severity mark already gave "**Nit:**".
 - D. A per-profile list of noise-prone categories in judge.ts that caps severity after the finder. It never goes into the finder prompt.

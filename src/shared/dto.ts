@@ -24,6 +24,7 @@ import {
   type Question,
   type ReplyPayload,
   type SessionMark,
+  type Severity,
   type Side,
   type ValidatedResult,
   type WithdrawnMark,
@@ -1338,9 +1339,12 @@ export type ReviewStatsDto = {
   posted: number;
   addressed: number;
   outdated: number;
+  // Posted findings per severity (review-ideas.md candidate A). open: counted, not addressed.
+  outcomes: Record<Severity, PostOutcomes>;
   medianMinutes: number | null;
   usage: { costUsd: number; turns: number };
 };
+export type PostOutcomes = { addressed: number; open: number; pending: number };
 
 // ---------- Build a Jira task (docs/plans/review-v2/spec.md sections 6.3 and 6.11) ----------
 

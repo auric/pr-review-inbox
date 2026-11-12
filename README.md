@@ -115,7 +115,7 @@ After you discard a finding, its card offers optional reasons: Not a bug, Not wo
 
 ![A discarded finding with the reason chips](docs/screenshots/discard-reason.webp)
 
-Settings, Review quality, counts your triage of the last 30 days per profile and prompt version: shown findings per run, the accepted share of the shown findings, discarded by reason, posted, addressed, and outdated. Accepts from a fold count apart. Addressed means that the thread of a posted finding is resolved or has a "Fixed in" draft. Outdated means that the commented code changed after the post.
+Settings, Review quality, counts your triage of the last 30 days per profile and prompt version: shown findings per run, the accepted share of the shown findings, discarded by reason, posted, resolved or fixed, and outdated. Accepts from a fold count apart. Resolved or fixed means that the thread of a posted finding is resolved or has a "Fixed in" draft. Outdated means that the commented code changed after the post. The table "Addressed by a later change" shows, per prompt version and severity, "Addressed: X of Y posted findings (Z%)". A posted finding is addressed when a later commit changed its line or its thread is resolved. It stays pending, and out of Y, until the pull request gets new commits, is merged, or is declined. These counts never hide or change a finding.
 
 ![Settings, Review quality](docs/screenshots/settings-quality.webp)
 

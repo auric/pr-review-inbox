@@ -323,6 +323,9 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 25. AC-R25. The Drafts list puts the bug classes first: security, concurrency, resource, and behavior, in that order. A category of a class (shared/review.ts bugClass) or its module (security, concurrency, api) sets the class. Each class, and the rest, keeps the item order of the run. A demoted finding stays last in its group. The sort never hides or drops a finding.
 26. AC-R26. A posted nit that the user did not edit starts with "Nit: " when the severity mark is off. With the severity mark on, "**Nit:** " is that prefix. A body that already starts with "Nit:" gets no second prefix. An edited draft posts the text of the user.
 27. AC-R27. A posted finding of low confidence that the user did not edit starts with "Can you check this? ". With a check verdict, low confidence is the verdict unsure. Without one, it is finder confidence low. A confirmed finding never gets the question form. No prompt changes, so REVIEW_PROMPT_VERSION stays.
+28. AC-R28. Addressed rate of posted findings (review-ideas.md candidate A). A posted finding is addressed when its root thread is resolved, or its root comment got orphaned_at after the post. Else it is open when the PR source head is not the head of the post run, or the PR is merged or declined. Else it is pending. A "Fixed in" draft is no signal. The rule reads local SQLite only and never changes a finding or a post.
+29. AC-R29. On a seeded database, ReviewStatsDto.outcomes counts addressed, open, and pending per severity of the last copy. A changed line counts as addressed. A resolved thread counts as addressed. An untouched line with no new head is pending. A new head that leaves the anchor not orphaned counts as open. A merged or declined PR counts the rest as open. An anchor orphaned before the post is no change.
+30. AC-R30. Settings, Review quality has the table "Addressed by a later change": one row per prompt version over all profiles, newest first, with "Addressed: X of Y posted findings (Z%)" and "N pending" apart. Y is addressed plus open. One column per severity shows "X of Y (Z%)". The Posted cell of the main table says "N resolved or fixed" for the AC-M4 addressed count.
 
 ## 2. Part 2: Discuss a finding
 
@@ -874,8 +877,9 @@ stdin: "# Task", "Explain the change BASE..HEAD in ./repo for a reviewer. Give t
 
 ### 4.2 Stats
 
-- GET /api/stats/review?days=30 (z.number().int().min(1).max(365), default 30) returns ReviewStatsDto[] per profile name and prompt version: {profile, promptVersion, runs, candidates, refuted, unsure, shown, accepted, edited, discarded: {total, byReason}, posted, addressed, outdated, medianMinutes, usage}.
-- Definitions: shown = items of the main list of their run volume. addressed = a posted finding whose root thread is resolved, or that has a "Fixed in" draft. outdated = a posted finding whose root comment got orphaned_at after the post.
+- GET /api/stats/review?days=30 (z.number().int().min(1).max(365), default 30) returns ReviewStatsDto[] per profile name and prompt version: {profile, promptVersion, runs, candidates, refuted, unsure, shown, accepted, edited, discarded: {total, byReason}, posted, addressed, outdated, outcomes, medianMinutes, usage}.
+- Definitions: shown = items of the main list of their run volume. addressed = a posted finding whose root thread is resolved, or that has a "Fixed in" draft. outdated = a posted finding whose root comment got orphaned_at after the post. outcomes = {addressed, open, pending} per severity (AC-R28).
+- Not verified: that Bitbucket orphans an anchor only when a line in its range changes. integration-check.md U12 confirms only a push that changed the anchored line.
 - Settings, "Review quality": one table with these rows per profile and prompt version, and one line "Counts come from your own triage in this app."
 
 ### 4.3 Eval harness
