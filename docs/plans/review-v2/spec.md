@@ -39,7 +39,7 @@ Status: decided, 2026-10-22. design.md gives the reasons, the alternatives, and 
 ### 1.1 What the user sees
 
 - The brief (r) shows "Review" with a few checkboxes, a three-step volume, and one primary button "Start review". The profile picker shows only when the user has 2 or more review profiles. A checkbox or volume change saves to the profile at once, and a line says "Applies to every review with this setup."
-- Shown checkboxes: "Security", "Threads and races", "Performance", "Tests", "Compatibility", "Simplify (what to delete)". Under "More checks": "Docs and comments", "Project rules", "Matches the task", "Language checklists (C++, C, Python)".
+- Shown checkboxes: "Security", "Threads and races", "Performance", "Tests", "Compatibility", "Simplify (what to delete)". Under "More checks": "Docs and comments", "Project rules", "Matches the task", "Language checklists (C++, C, Python, C#)".
 - Volume: "Only what matters", "Balanced", "Show everything". One line under it says what it does (section 1.4).
 - While the run works, the run line says "Finding problems…" and then "Checking 9 findings…". The log groups the checking events under "Check".
 - After the run, the Drafts header says the ledger in plain words, for example "2 must fix · 3 worth fixing". Must fix counts blocker and major. Worth fixing counts minor. Then the main list. Then a fold "Low confidence (4)". The run record has one line "3 refuted by the check · 1 duplicate". It opens a list with the reason of each point and Restore.
@@ -87,7 +87,7 @@ Stored form (PROFILES_VERSION 7, catalog.ts storeProfiles and resolveProfiles): 
 | rules | Project rules | on | "Check the changed files against the project instructions. Each instruction file names the paths that it applies to." / "Use a rule only for files in its scope." / "In rule, copy the exact sentence of the rule. The app checks the quote against the loaded instructions." / "Report a rule finding only when the change breaks the rule, not when old code breaks it." |
 | intent | Matches the task | on | "Compare the change with the goal in ./context/pr.md and ./context/task.md." / "Report a stated requirement that the change does not meet. Quote the requirement in evidence." / "Report a change that the goal does not explain only when it changes behavior for users." |
 
-- languageChecks stays its own boolean field and shows as "Language checklists (C++, C, Python)" among the checkboxes. withLanguages (languages.ts) stays.
+- languageChecks stays its own boolean field and shows as "Language checklists (C++, C, Python, C#)" among the checkboxes. withLanguages (languages.ts) stays.
 - rules adds nothing when the run has no project instructions. intent adds nothing when pr.md has no description and task.md does not exist. The coverage then says "Project rules: no instructions loaded." or "Matches the task: no description or task."
 - A module ID that the app does not know is dropped on parse (zod catch on each entry).
 
@@ -326,6 +326,7 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 28. AC-R28. Addressed rate of posted findings (review-ideas.md candidate A). A posted finding is addressed when its root thread is resolved, or its root comment got orphaned_at after the post. Else it is open when the PR source head is not the head of the post run, or the PR is merged or declined. Else it is pending. A "Fixed in" draft is no signal. The rule reads local SQLite only and never changes a finding or a post.
 29. AC-R29. On a seeded database, ReviewStatsDto.outcomes counts addressed, open, and pending per severity of the last copy. A changed line counts as addressed. A resolved thread counts as addressed. An untouched line with no new head is pending. A new head that leaves the anchor not orphaned counts as open. A merged or declined PR counts the rest as open. An anchor orphaned before the post is no change.
 30. AC-R30. Settings, Review quality has the table "Addressed by a later change": one row per prompt version over all profiles, newest first, with "Addressed: X of Y posted findings (Z%)" and "N pending" apart. Y is addressed plus open. One column per severity shows "X of Y (Z%)". The Posted cell of the main table says "N resolved or fixed" for the AC-M4 addressed count.
+31. AC-R31. A change with a .cs or .csx file gets the C# list. A change without one does not. .razor and .cshtml files get no list. The C# list ends with "Do not report in C#:" and one to three items. Each item sentence has at most 20 words. The "Language checklists" checkbox names C#. A profile with language checks on gets the list with no profile upgrade. REVIEW_PROMPT_VERSION is "2.6".
 
 ## 2. Part 2: Discuss a finding
 

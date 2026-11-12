@@ -18,7 +18,8 @@ const lineNo = z.number().int().min(1);
 // "2.3": the Build section of pr-context.md stays out of coverage, and a rule finding out of its scope stays as core.
 // "2.4": the category classes that the check never hides, and the skip list of each language checklist.
 // "2.5": the Fix rules that confirm the defect, keep the fix small, keep rules by design, and define scope.
-export const REVIEW_PROMPT_VERSION = "2.5";
+// "2.6": the C# language checklist.
+export const REVIEW_PROMPT_VERSION = "2.6";
 
 const place = {
   path: z.string().describe("File path relative to the repository root, with / separators."),

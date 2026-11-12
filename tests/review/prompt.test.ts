@@ -538,7 +538,7 @@ describe("review v2 finder prompt", () => {
     // WP-R3: the agents of the verify phase are review agents too.
     const check = [withVerifyDelegation(verifyAgent(known, run), true), verifierAgent(known, run)].map((a) => a.prompt).join("\n---\n");
     expect({ version: REVIEW_PROMPT_VERSION, finder: sha(finder), check: sha(check) }).toEqual({
-      version: "2.5",
+      version: "2.6",
       finder: "c634b814a6e009758c0436e99f35bced2feb9922b2b2ae151c758aeec4783b04",
       check: "4c91fce5912f9ddce955519e0d876c94da61486d7b79a31d5e08033bf548abda",
     });
@@ -713,7 +713,7 @@ describe("review v3 prompt switches", () => {
   const rereviewInput = { ...full, since: "c".repeat(40), rangeBase: "d".repeat(40), earlier: [1, 2], posted: [2] };
   const withVariants = (...variants: ProfileInput["variants"]) => ({ ...general, variants });
 
-  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.5)", () => {
+  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.6)", () => {
     const threads = [{ thread: 1, replyTo: 2 }];
     const kinds: Record<string, string[]> = {
       review: [mainAgent(general, FULL).prompt, reviewerAgent(general, FULL).prompt, buildPrompt(full)],
@@ -751,7 +751,7 @@ describe("review v3 prompt switches", () => {
       reply: "cd085ab743e2fe4908fcf1207db6cf3d061fdd5152161fc51ae9a9dfdea08de5",
       fix: "e3431b38c46d6e2c1d231c7604adca4463033a570580485c47f2d0f94ab4a799",
       discuss: "1f8484da378fa9c68d8c1738e16e719ca970d43657734853de5f879824c8422d",
-      improve: "0f1891af35554658c9362298d0d4e0e0fe9237e44c926743fa3081bb451941f3",
+      improve: "537c09d5997d8b66230faf9b2a20e0d6bf78c52c26ecf7f2d75f23d17f1d9a1d",
     });
     expect(SHIPPED_PROFILES.map((p) => p.variants)).toEqual([[], []]);
     for (const p of SHIPPED_PROFILES) for (const m of TRIAL_MODULES) expect(p.modules).not.toContain(m);
@@ -835,7 +835,7 @@ describe("review v3 prompt switches", () => {
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
     expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.5+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.6+order+rules2");
   });
 
   test("ASD-STE100: every switch line has at most 20 words", () => {
@@ -855,7 +855,7 @@ describe("review v3 prompt switches", () => {
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.5+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.6+order+rules2");
     expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);

@@ -92,13 +92,13 @@ test("the brief: checks and the volume save to the profile at once, and Start re
   await expect(checks.getByLabel("Project rules")).toBeHidden();
   await checks.getByText("More checks (3 on)").click();
   await expect(checks.getByLabel("Project rules")).toBeChecked();
-  await expect(checks.getByLabel("Language checklists (C++, C, Python)")).toBeChecked();
+  await expect(checks.getByLabel("Language checklists (C++, C, Python, C#)")).toBeChecked();
 
   await checks.getByLabel("Performance").check();
   await expect
     .poll(async () => (await review(page))?.modules)
     .toEqual(["security", "concurrency", "performance", "api", "rules", "intent"]);
-  await checks.getByLabel("Language checklists (C++, C, Python)").uncheck();
+  await checks.getByLabel("Language checklists (C++, C, Python, C#)").uncheck();
   await expect.poll(async () => (await review(page))?.languageChecks).toBe(false);
 
   // The volume: three steps, Balanced first. The line under it says what each one does.

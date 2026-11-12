@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Language checks now cover C#. A review of .cs and .csx files gets a C# checklist. It covers async misuse, disposal, nulls, LINQ, exceptions, and thread safety. It also covers equality, string culture, time zones, EF Core queries, event leaks, and Unity objects.
 - A new Bitbucket URL saved during a run no longer leaves that run shown as running. Ask, Fix, Explain, and Consult no longer show the end of a run before the start buttons are free.
 - Ask and the other start buttons are ready as soon as the run row shows that a run ended. Before, Ctrl+Enter could say "The question was not sent" for a moment after Cancel.
 - Settings has a CI server card for Jenkins: the URL, your user name, an API token, and an optional CA file. Save and Test check the login with Jenkins first. The token goes only into the OS secret store, and Claude never gets it. No feature reads build logs yet.

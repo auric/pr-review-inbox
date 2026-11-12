@@ -611,7 +611,7 @@ export const MODULE_LABEL: Record<ModuleId, string> = {
 // languageChecks, the last one under "More checks". TRIAL_MODULES are in neither list.
 export const SHOWN_CHECKS: readonly ModuleId[] = ["security", "concurrency", "performance", "tests", "api", "simplify"];
 export const MORE_CHECKS: readonly ModuleId[] = ["docs", "rules", "intent"];
-export const LANGUAGE_LABEL = "Language checklists (C++, C, Python)";
+export const LANGUAGE_LABEL = "Language checklists (C++, C, Python, C#)";
 
 // spec.md section 1.4.
 export const VOLUME_NAME: Record<Volume, string> = { quiet: "Only what matters", balanced: "Balanced", thorough: "Show everything" };

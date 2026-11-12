@@ -79,6 +79,33 @@ export const CHECKLISTS = {
       "a missing type hint or docstring",
     ],
   },
+  csharp: {
+    title: "C#",
+    items: [
+      "async-void: Check for async void outside event handlers. No caller can await it, and its exception ends the process. [major]",
+      "blocking: Check for .Result, .Wait(), or GetAwaiter().GetResult() on a task. With a synchronization context, the call can deadlock. [major]",
+      "tasks: Check for a task that nobody awaits or observes. Its exception gets lost, and its work can outlive the caller. [major]",
+      "cancellation: Check that each received CancellationToken goes to the async calls below it. A dropped token stops cancel and timeout. [minor]",
+      "configure-await: Where library code uses ConfigureAwait(false), check that each new await in it does the same. [minor]",
+      "dispose: Check that each IDisposable that the code creates and owns gets a using or a Dispose call on every path. [major]",
+      "nulls: Check for a possible null at a dereference, also after the null-forgiving operator. The ! hides the warning, not the null. [major]",
+      "linq: Check for an IEnumerable that code enumerates twice. Check for a deferred query that runs after its source or captured state changes. [major]",
+      "exceptions: Check for a catch that hides an error and goes on with a wrong result. Check for throw ex, which drops the stack trace. [major]",
+      "races: Check that each shared mutable field, also a static one, has one lock or atomic rule. Every access must follow it. [major]",
+      "equality: Check that a type that overrides Equals also overrides GetHashCode on the same fields. Check for a mutable hash key. [major]",
+      "strings: Check compare, sort, ToUpper, and ToLower for culture. Keys, identifiers, and protocol text need StringComparison.Ordinal or the invariant culture. [major]",
+      "time: Check for DateTime.Now in stored, sent, or compared times. Use DateTime.UtcNow or DateTimeOffset, and check DateTimeKind on parse. [major]",
+      "structs: Check for a change to a copy of a mutable struct: a property, a readonly field, or a foreach variable. [major]",
+      "queries: Check IQueryable and EF Core code for a query in a loop (N+1). Check for client evaluation over a large table. [major]",
+      "events: Check that each += on a long-lived publisher has a -= when the subscriber ends. Else the handler keeps the subscriber alive. [major]",
+      "unity: In Unity code, check for ?., ??, or is null on a UnityEngine.Object. They skip the destroyed-object check of ==. [major]",
+    ],
+    skip: [
+      "var or an explicit type, and an expression body or a block body",
+      "a missing ConfigureAwait(false) in application code, or in a library that does not use it",
+      "a missing sealed, readonly, or static modifier that changes no behavior",
+    ],
+  },
 } as const;
 
 export type Language = keyof typeof CHECKLISTS;
@@ -86,6 +113,7 @@ export const LANGUAGES = Object.keys(CHECKLISTS) as Language[];
 
 // GCC "Options Controlling the Kind of Output" names .c, .h, and the C++ suffixes. .ipp, .inl, .tpp: included template code.
 // .ixx: MSVC module units. .cppm: Clang module units. A .h file gets the C++ list. A change with .c files also gets the C list.
+// .csx: C# scripts. Razor and cshtml markup files get no list.
 const EXT: Record<string, Language> = {
   ".c": "c",
   ...Object.fromEntries(
@@ -96,6 +124,8 @@ const EXT: Record<string, Language> = {
   ".py": "python",
   ".pyi": "python",
   ".pyw": "python",
+  ".cs": "csharp",
+  ".csx": "csharp",
 };
 
 // The languages of the text files in the diff, in LANGUAGES order. A deleted file counts by its old path.
