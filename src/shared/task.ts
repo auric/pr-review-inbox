@@ -423,7 +423,8 @@ export const taskBlocked = z.object({
   text: z.string(),
   base: z.object({ taskRepo: z.number().int().nonnegative(), branch: z.string() }).optional(),
   part: z.number().int().positive().optional(),
-  cause: z.enum(BLOCKED_CAUSES).optional(),
+  // An unknown cause parses as no cause: a bad cause must not hide the reason.
+  cause: z.enum(BLOCKED_CAUSES).optional().catch(undefined),
   // usage only (part-session.md section 9.4, Q-SM4): the limit reset in epoch ms, and the user's click that arms the resume.
   resumeAt: z.number().int().nonnegative().optional(),
   armed: z.boolean().optional(),

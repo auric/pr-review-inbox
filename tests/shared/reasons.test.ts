@@ -62,7 +62,11 @@ describe("REASON_EXITS (part-session.md section 9.4)", () => {
         if (ROUTES.has(e.route)) {
           // An exit on a route that exists is planned only for its new option.
           if (e.planned) expect({ key, label: e.label, option: typeof e.option }).toEqual({ key, label: e.label, option: "string" });
-        } else expect({ key, route: e.route, planned: e.planned }).toEqual({ key, route: e.route, planned: NEW_ROUTES[e.route] });
+        } else {
+          // A route that routes.ts does not have must be a new route of section 9.3.6, with the package that adds it.
+          expect({ key, route: e.route, known: e.route in NEW_ROUTES }).toEqual({ key, route: e.route, known: true });
+          expect({ key, route: e.route, planned: e.planned }).toEqual({ key, route: e.route, planned: NEW_ROUTES[e.route] });
+        }
       }
     }
   });
@@ -90,7 +94,8 @@ describe("taskBlocked (part-session.md section 9.4, storage rules 2 and 5)", () 
     });
     for (const kind of ["held", "stuck", "unfinished"]) expect(taskBlocked.safeParse({ kind, step: null, text: "x" }).success).toBe(true);
     expect(taskBlocked.safeParse({ kind: "stuck", step: 1, text: "x", cause: "stall" }).success).toBe(true);
-    expect(taskBlocked.safeParse({ kind: "stuck", step: 1, text: "x", cause: "nap" }).success).toBe(false);
+    // An unknown cause drops to the no-cause path, so the reason text stays visible.
+    expect(taskBlocked.parse({ kind: "stuck", step: 1, text: "x", cause: "nap" })).toEqual({ kind: "stuck", step: 1, text: "x" });
     expect(taskBlocked.safeParse({ kind: "pause", step: 1, text: "x" }).success).toBe(false);
   });
 });
