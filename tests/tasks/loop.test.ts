@@ -771,6 +771,16 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       s.scenario({ seq: { "implement:fix": [{ writes: [] }, { writes: [WORKS] }], review: [{ review: CLEAN }] } });
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
+      expect(
+        s
+          .steps()
+          .filter((x) => ["implement", "fix"].includes(x.kind))
+          .map((x) => [x.kind, x.attempt]),
+      ).toEqual([
+        ["implement", 1],
+        ["fix", 1],
+        ["fix", 2],
+      ]);
       expect(s.blocked()).toBeNull();
       expect(s.part().state).toBe("self_reviewed");
       expect(s.steps().filter((x) => x.kind === "check" && x.item === "base")).toHaveLength(1);

@@ -411,10 +411,9 @@ test("a fix step that changes no file asks; the approved checks switch gives the
   await primary(page).click();
   await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
   await page.getByRole("tab", { name: "Log" }).click();
-  // Resume runs the code step of the task again, then the fix: both are try 2, and both can run the test command.
+  // Continue keeps the work of the implement step: only the fix runs again as try 2, and it can run the test command.
   const second = page.locator("[data-task-item]", { hasText: "try 2" }).filter({ has: page.locator("[data-step-shell]") });
-  await expect(second.locator("[data-step-shell] p")).toHaveText([
-    "Commands: allowlist, 0 patterns, 1 approved check",
-    "Commands: allowlist, 0 patterns, 1 approved check",
-  ]);
+  await expect(second).toHaveCount(1);
+  await expect(second).toContainText("Fix");
+  await expect(second.locator("[data-step-shell] p")).toHaveText(["Commands: allowlist, 0 patterns, 1 approved check"]);
 });
