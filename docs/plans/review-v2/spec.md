@@ -317,6 +317,9 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 19. AC-R19. Outcome hide parses to no key, and profileRevision stays the same. Outcome demote is an edit of the verifier field: storeProfiles keeps it, and upgradeProfile keeps it. Copy to all profiles gives the outcome to the other profiles and keeps their mode, model, and effort.
 20. AC-R20. A finding whose anchorText is not in its file, or whose file does not exist, moves to the one exact match on a changed line of another changed file, with movedFrom. Two matches, a match on an unchanged line, or a match only in an unchanged file keep the drop.
 21. AC-R21. Each language checklist ends with a "Do not report in <language>:" list of one to three items. One common line follows the lists: linter or analyzer warnings, formatting, generated files, and speed-ups without a shown hot path. REVIEW_PROMPT_VERSION is "2.4".
+22. AC-R25. The Drafts list puts the bug classes first: security, concurrency, resource, and behavior, in that order. A category of a class (shared/review.ts bugClass) or its module (security, concurrency, api) sets the class. Each class, and the rest, keeps the item order of the run. A demoted finding stays last in its group. The sort never hides or drops a finding.
+23. AC-R26. A posted nit that the user did not edit starts with "Nit: " when the severity mark is off. With the severity mark on, "**Nit:** " is that prefix. A body that already starts with "Nit:" gets no second prefix. An edited draft posts the text of the user.
+24. AC-R27. A posted finding of low confidence that the user did not edit starts with "Can you check this? ". With a check verdict, low confidence is the verdict unsure. Without one, it is finder confidence low. A confirmed finding never gets the question form. No prompt changes, so REVIEW_PROMPT_VERSION stays.
 
 ## 2. Part 2: Discuss a finding
 

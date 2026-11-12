@@ -5,7 +5,7 @@
 import type { BlockedDraft, PlannedPost, ReviewItemDto } from "../../shared/dto";
 import { fileUrl } from "../../shared/links";
 import { isMe } from "../../shared/me";
-import type { AnchoredFinding, Finding, Question, ReplyPayload } from "../../shared/review";
+import { type AnchoredFinding, checkOf, type Finding, type FindingPayload, type Question, type ReplyPayload } from "../../shared/review";
 import { anchorSpan } from "../../shared/types";
 
 // repoUrl: the repository browse link of the PR (plan v3 WP4). Absent or null: file references stay plain text.
@@ -41,6 +41,19 @@ function withSeverity(body: string, prefix: string | undefined) {
   if (!prefix) return body;
   const robot = AI_MARK.trimEnd();
   return body.startsWith(robot) ? AI_MARK + prefix + body.slice(robot.length).trimStart() : prefix + body;
+}
+
+// docs/plans/review-v2/review-ideas.md candidate C (spec.md AC-R26, AC-R27). Only a draft that the user did not edit gets them.
+export const NIT = "Nit: ";
+export const QUESTION_LEAD = "Can you check this? ";
+// The check verdict wins over the finder confidence, as on the Low confidence chip of the Drafts list.
+const lowConfidence = (p: FindingPayload) => (p.verify ? checkOf(p) === "unsure" : p.confidence === "low");
+function findingText(it: ReviewItemDto, mark: string | undefined): string {
+  if (it.edited) return withSeverity(it.body, mark);
+  const p = it.payload as FindingPayload;
+  const lead = lowConfidence(p) && !it.body.startsWith(QUESTION_LEAD) ? QUESTION_LEAD : "";
+  const nit = !mark && p.severity === "nit" && !/^\**nit\**:/i.test(it.body) ? NIT : "";
+  return withSeverity(nit + lead + it.body, mark);
 }
 
 // plan v3 WP12: `[path:line](fileUrl)`. Without the browse link or the commit, the plain "path:line" stays. src/shared/links.ts holds the URL form.
@@ -143,7 +156,7 @@ export function buildPlan(input: PlanInput): PlannedPost[] {
             lineType: hit.kind === "ctx" ? "ctx" : "add",
             ...srcLine,
           },
-          body: text(withSeverity(it.body, sev(it))),
+          body: text(findingText(it, sev(it))),
           items: [ref],
           duplicate: duplicate(input.comments, input.me, { path: a.path, line: a.line, ...srcLine }),
         });
@@ -153,7 +166,7 @@ export function buildPlan(input: PlanInput): PlannedPost[] {
       const old = a.side === "old";
       general.push({
         ref: fileRef(run, old ? (a.oldPath ?? a.path) : a.path, old ? run.mergeBase : run.sourceHead, a.line),
-        body: withSeverity(it.body, sev(it)),
+        body: findingText(it, sev(it)),
       });
       generalItems.push(ref);
     }

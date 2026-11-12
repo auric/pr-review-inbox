@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { AI_MARK, buildPlan, generalText } from "../../src/server/publish/plan";
+import { AI_MARK, buildPlan, generalText, NIT, QUESTION_LEAD } from "../../src/server/publish/plan";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import type { ItemConflict, PostPlanDto, ReviewItemDto } from "../../src/shared/dto";
-import type { AnchoredFinding, ExcerptLine } from "../../src/shared/review";
+import type { AnchoredFinding, ExcerptLine, FindingPayload, VerifyMark } from "../../src/shared/review";
 import { FAKE_TOKEN, FAKE_USER } from "../support/fake-bitbucket";
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
@@ -540,7 +540,12 @@ describe("severity", () => {
       `${AI_MARK}src/app.ts:3: **Nit:** Body.\n\nQ1? W1.`,
     ]);
     await s.markSeverity(false);
-    expect(await bodies()).toEqual([`${AI_MARK}Body.`, `${AI_MARK}Body.`, `${AI_MARK}Body.`, `${AI_MARK}src/app.ts:3: Body.\n\nQ1? W1.`]);
+    expect(await bodies()).toEqual([
+      `${AI_MARK}Body.`,
+      `${AI_MARK}Body.`,
+      `${AI_MARK}Body.`,
+      `${AI_MARK}src/app.ts:3: ${NIT}Body.\n\nQ1? W1.`,
+    ]);
   });
 
   test("a body that already starts with the AI mark gets the severity after it, with the mark on or off", async () => {
@@ -551,5 +556,73 @@ describe("severity", () => {
     expect(await bodies()).toEqual([`${AI_MARK}**Major:** Already marked.`, `${AI_MARK}**Nit:** Bare emoji.`]);
     await s.markAi(true);
     expect(await bodies()).toEqual([`${AI_MARK}**Major:** Already marked.`, `${AI_MARK}**Nit:** Bare emoji.`]);
+  });
+});
+
+// docs/plans/review-v2/review-ideas.md candidate C: the Nit prefix and the question form of the posted text.
+describe("posted text (AC-R26, AC-R27)", () => {
+  const verify = (verdict: VerifyMark["verdict"]): VerifyMark => ({
+    verdict,
+    severity: "minor",
+    reason: "R.",
+    evidence: "",
+    duplicateOf: null,
+    by: "rl-verify",
+  });
+  const item = (id: number, f: Partial<FindingPayload>, body = "Body.", edited = false): ReviewItemDto => ({
+    id,
+    run: 1,
+    kind: "finding",
+    body,
+    payload: { ...findingPayload({}), ...f },
+    anchor: { ...findingPayload({}).anchor, side: "new" },
+    status: "accepted",
+    revision: 1,
+    edited,
+  });
+  const bodies = (items: ReviewItemDto[], severity: boolean) =>
+    buildPlan({
+      me: FAKE_USER,
+      mark: false,
+      severity,
+      runs: [{ id: 1, sourceHead: SOURCE, targetHead: TARGET, mergeBase: BASE }],
+      items,
+      comments: [],
+    }).map((p) => p.body);
+
+  test("AC-R26: a nit gets one Nit prefix; the bold severity mark is that prefix; an edited draft keeps the text of the user", () => {
+    const items = [
+      item(1, { severity: "nit" }),
+      item(2, { severity: "nit" }, "Nit: Already there."),
+      item(3, { severity: "nit" }, "**Nit:** Bold already."),
+      item(4, { severity: "nit" }, "My own words.", true),
+      item(5, { severity: "minor" }),
+    ];
+    expect(bodies(items, false)).toEqual([`${NIT}Body.`, "Nit: Already there.", "**Nit:** Bold already.", "My own words.", "Body."]);
+    expect(bodies(items.slice(0, 1).concat(items.slice(3)), true)).toEqual([
+      "**Nit:** Body.",
+      "**Nit:** My own words.",
+      "**Minor:** Body.",
+    ]);
+  });
+
+  test("AC-R27: a low confidence finding posts as a question; the check verdict wins over the finder confidence; an edit wins", () => {
+    const items = [
+      item(1, { confidence: "low" }),
+      item(2, { confidence: "low", verify: verify("confirmed") }),
+      item(3, { confidence: "high", verify: verify("unsure") }),
+      item(4, { confidence: "low" }, "My own words.", true),
+      item(5, { confidence: "medium" }),
+      item(6, { severity: "nit", confidence: "low" }, `${QUESTION_LEAD}Body.`),
+    ];
+    expect(bodies(items, false)).toEqual([
+      `${QUESTION_LEAD}Body.`,
+      "Body.",
+      `${QUESTION_LEAD}Body.`,
+      "My own words.",
+      "Body.",
+      `${NIT}${QUESTION_LEAD}Body.`,
+    ]);
+    expect(bodies(items.slice(0, 1), true)).toEqual([`**Minor:** ${QUESTION_LEAD}Body.`]);
   });
 });

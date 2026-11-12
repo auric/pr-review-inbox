@@ -26,6 +26,7 @@ import { plural, shortHash, touchedDraft } from "../../shared/outcome";
 import {
   type Anchor,
   type AnchoredFinding,
+  bugClass,
   type Check,
   type Coverage,
   checkOf,
@@ -635,7 +636,9 @@ export type DraftGroups = {
 export function draftGroups(ds: ReviewItemDto[], summary: RunSummary | null | undefined): DraftGroups {
   const volume = summary?.volume;
   const g: DraftGroups = { main: [], fold: [], hidden: [], foldName: volume ? FOLD_NAME[volume] : null, checked: !!summary?.verify };
-  for (const d of ds) g[displayGroup(d.payload as FindingPayload, volume)].push(d);
+  // spec.md AC-R25: the bug classes first, in class order. The sort is stable, so each class keeps the run order.
+  const byClass = [...ds].sort((a, b) => bugClass(a.payload as FindingPayload) - bugClass(b.payload as FindingPayload));
+  for (const d of byClass) g[displayGroup(d.payload as FindingPayload, volume)].push(d);
   // spec.md section 1.8: a demoted finding goes last in its group.
   g.main = [...g.main.filter((d) => !isDemoted(d)), ...g.main.filter(isDemoted)];
   g.fold = [...g.fold.filter((d) => !isDemoted(d)), ...g.fold.filter(isDemoted)];

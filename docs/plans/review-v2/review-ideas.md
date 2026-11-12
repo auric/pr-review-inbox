@@ -27,6 +27,7 @@ Status: study of 2026-11-11 against main 674b29d. Not built. No eval ran; the us
    - Effect: better precision. False positives often cite lines that do not say what the trace claims.
    - Risk: a longer answer, and a severity cap on a real finding with one bad quote. Cap only; never hide.
    - Cheap check: in the stored baseline results, find evidence `path:line` values outside the file length or in a file absent at head. Compare that share between unmatched and matched findings.
+   - Result of 2026-11-12: unclear. The eval results do not store evidence or anchorText (scripts/eval/run.ts items()). A stand-in check of refs in the visible text found 0 bad refs of 26. Moved anchors were more common on true positives (4 of 21) than on unmatched findings (1 of 116), so the penalty must only cap severity. Next: store evidence and anchorText in the eval items with idea 1, then check again on the next baseline.
 
 4. **Fix confirms the defect, makes the smallest fix, and keeps existing rules.**
    - Change: add to the Fix agent (catalog.ts:886-905): "Check the claim of the comment in ./repo first. Fix only a defect that you confirmed." "Make the smallest fix. Add no flag, option, guard, or special case that the defect does not need." "When a comment asks for a special case around an existing rule that applies by design, set why to invalid. Name where the rule applies." "When the user or the author already decided against the change in the thread, set fixed to false."
@@ -54,8 +55,8 @@ Report: research/research-review-practices.md. No source argues against ideas 1 
 New candidates from the research. User decision of 2026-11-11: A, B, and C are approved (build-redesign.md section 7, items 8 to 10). D is not approved.
 
 - A. Addressed rate of posted findings: a later change touched the line, or the thread was resolved. It gives a precision number with no eval run. Stats only.
-- B. Sort findings by category, bug first. Sort only, never hide.
-- C. A "Nit:" prefix on posted minor findings, and a question form for low-confidence findings. Both change posted text; the user approved this. Check first whether catalog.ts already covers them.
+- B. Sort findings by category, bug first. Sort only, never hide. Built 2026-11-12 (spec.md AC-R25): draftGroups in src/web/review/model.ts.
+- C. A "Nit:" prefix on posted minor findings, and a question form for low-confidence findings. Both change posted text; the user approved this. Check first whether catalog.ts already covers them. Built 2026-11-12 (spec.md AC-R26, AC-R27): findingText in src/server/publish/plan.ts. catalog.ts had no nit prefix and no question form. The bold severity mark already gave "**Nit:**".
 - D. A per-profile list of noise-prone categories in judge.ts that caps severity after the finder. It never goes into the finder prompt.
 
 Avoid: hide thresholds, strict "high-signal" finder rules, similarity scores as a quality metric, vendor self-benchmarks, LLM-made ground truth.

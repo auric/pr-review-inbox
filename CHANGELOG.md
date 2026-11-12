@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The Drafts list now shows bugs first: security, concurrency, resource handling, and behavior changes, in that order. The other findings follow in the order of the run. No finding is hidden.
+- A posted nit now starts with "Nit:" also when the severity mark is off. A posted low-confidence finding starts with "Can you check this?". A draft that you edited posts as you wrote it.
 - Review profiles have a new field "Advisor": Off (the default), Fable, Opus, or another model ID. With an advisor, a stronger model gives Claude advice at hard points in every run of the profile, also in task steps. It uses more of your plan. The app refuses a Haiku advisor and an advisor below the model of the profile or of the check step. The run log shows each advisor call as "Advisor reviewed", "declined", or "unavailable", and the run details name the advisor model.
 
 - Build a Jira task: Resume after a stop no longer runs setup, the final checks, or Claude's own review again when nothing changed. Setup runs again only when a reset removed a file that setup made. The final checks run again when the commit, the worktree, or the command list changed.

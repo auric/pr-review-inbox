@@ -25,6 +25,7 @@ import {
   MAX_DIAGRAM_CHARS,
   MAX_DIAGRAMS,
   type NoteProposal,
+  neverHidden,
   type Question,
   type ReplyPayload,
   type RereviewResult,
@@ -403,17 +404,7 @@ export type Capped =
   | { kind: "question"; question: Question }
   | { kind: "finding"; status: "new" | "discarded"; severity: Severity; check: Check; demoted?: true };
 
-// spec.md section 1.8: the classes that the check never hides. The modules are the check sections. The categories are the finder rule
-// of catalog.ts finderRules and the words of the languages.ts items of each class.
-const KEEP_MODULES = new Set(["security", "concurrency", "api"]);
-const KEEP_CATEGORIES = new Set([
-  ...["security", "injection", "sql", "deserialization", "unsafe-calls", "format"],
-  ...["concurrency", "races", "atomics", "locks", "threads", "async-tasks"],
-  ...["resource", "ownership", "resources", "memory", "windows"],
-  ...["behavior", "abi", "packaging"],
-]);
-export const neverHidden = (c: Pick<StoredFinding, "module" | "category">) =>
-  KEEP_MODULES.has(c.module ?? "core") || KEEP_CATEGORIES.has(c.category.trim().toLowerCase());
+export { neverHidden };
 
 // spec.md section 1.7, the caps: structured fields only, never the text. v undefined: the phase is off, failed, or skipped the
 // candidate. carried: a carried finding keeps its kind, so a question verdict reads as unsure and an empty trigger makes no question.

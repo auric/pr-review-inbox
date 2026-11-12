@@ -101,7 +101,7 @@ The review brief holds the task, your note, the checks, and the volume: "Only wh
 
 ### Drafts and posting
 
-A review has two steps. The run line says "Finding problems…" and then "Checking 9 findings…". A finished review shows the time of each step. Each finding becomes a draft with its title, its code, its severity, a check chip ("Checked", "Low confidence", or "Not checked"), the case that triggers it ("When:"), the reason of the check, and its evidence. Only you see drafts until you post them.
+A review has two steps. The run line says "Finding problems…" and then "Checking 9 findings…". A finished review shows the time of each step. Each finding becomes a draft with its title, its code, its severity, a check chip ("Checked", "Low confidence", or "Not checked"), the case that triggers it ("When:"), the reason of the check, and its evidence. Only you see drafts until you post them. The Drafts list shows bugs first: security, concurrency, resource handling, and behavior changes, in that order. The other findings follow in the order of the run. The order never hides a finding. A posted nit starts with "Nit:". A posted low-confidence finding starts with "Can you check this?". The post confirm shows the exact text. A draft that you edited posts as you wrote it.
 
 The Drafts header and the review record count the open drafts in plain words, for example "2 must fix · 3 worth fixing · 4 low confidence". The volume of the run decides what waits in a fold. "Balanced" puts unsure points and nits into "Low confidence". "Only what matters" puts everything but must-fix points into "More". "Show everything" has no fold. A run keeps its view after a volume change.
 

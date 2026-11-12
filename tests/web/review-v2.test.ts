@@ -141,6 +141,24 @@ describe("display groups per volume (spec.md section 1.4)", () => {
     expect(restoredNote(low)).toBe("Refuted by the check. It stays last in its group.");
     expect(checkText(low)).toBe("Check: The guard on line 12 stops it. (src/cache.ts:12)");
   });
+
+  test("AC-R25: bug classes come first in class order; each class keeps the run order; no finding drops", () => {
+    const list = [
+      finding(1, { category: "delete" }),
+      finding(2, { category: "Behavior", severity: "nit" }),
+      finding(3, { category: "naming", module: "api" }),
+      finding(4, { category: "Security" }),
+      finding(5, { category: "locks", severity: "minor" }),
+      finding(6, { category: "races", verify: mark("refuted"), demoted: true }),
+      finding(7, { category: "Correctness" }),
+      finding(8, { category: "memory" }),
+    ];
+    const g = draftGroups(list, summary());
+    // security, concurrency, resource, behavior (category behavior or module api), then the rest. A demoted finding stays last.
+    expect(ids(g.main)).toEqual([4, 5, 8, 2, 3, 1, 7, 6]);
+    const balanced = draftGroups(list, summary({ volume: "balanced", verify: VERIFY }));
+    expect([ids(balanced.main), ids(balanced.fold)]).toEqual([[4, 5, 8, 3, 1, 7, 6], [2]]);
+  });
 });
 
 describe("cards: chip, title, trigger, and check reason (spec.md section 1.1)", () => {

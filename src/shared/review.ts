@@ -191,6 +191,25 @@ export function displayGroup(p: Pick<FindingPayload, "severity" | "verify" | "di
   return "main";
 }
 
+// spec.md section 1.8: the bug classes in the order of the finder rule (catalog.ts finderRules). The categories are the finder rule
+// and the words of the languages.ts items of each class. The modules are the check sections of a class.
+const BUG_CLASSES: readonly { modules: readonly string[]; categories: readonly string[] }[] = [
+  { modules: ["security"], categories: ["security", "injection", "sql", "deserialization", "unsafe-calls", "format"] },
+  { modules: ["concurrency"], categories: ["concurrency", "races", "atomics", "locks", "threads", "async-tasks"] },
+  { modules: [], categories: ["resource", "ownership", "resources", "memory", "windows"] },
+  { modules: ["api"], categories: ["behavior", "abi", "packaging"] },
+];
+// The index of the bug class of a finding. A finding of no class gets BUG_CLASSES.length, so it sorts after each bug.
+export function bugClass(c: { module?: string | null; category?: string }): number {
+  const category = (c.category ?? "").trim().toLowerCase();
+  const byCategory = BUG_CLASSES.findIndex((k) => k.categories.includes(category));
+  if (byCategory >= 0) return byCategory;
+  const byModule = BUG_CLASSES.findIndex((k) => k.modules.includes(c.module ?? "core"));
+  return byModule >= 0 ? byModule : BUG_CLASSES.length;
+}
+// spec.md section 1.8: the classes that the check never hides.
+export const neverHidden = (c: { module?: string | null; category?: string }) => bugClass(c) < BUG_CLASSES.length;
+
 // ---------- Discuss a finding (docs/plans/review-v2/spec.md section 2) ----------
 
 export const MAX_DISCUSS_MESSAGES = 100;
