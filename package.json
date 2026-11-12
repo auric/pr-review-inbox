@@ -34,6 +34,7 @@
     "eval:rescore": "bun scripts/eval/rescore.ts",
     "eval:local": "bun scripts/eval/local.ts",
     "eval:ab": "bun scripts/eval/ab.ts",
+    "eval:threads": "bun scripts/eval/threads.ts",
     "gate:ci": "bun scripts/gate/ci.ts",
     "gate:jira": "bun scripts/gate/jira.ts",
     "screenshots": "bun run build && node scripts/screenshots.ts"

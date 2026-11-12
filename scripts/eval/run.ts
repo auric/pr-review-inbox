@@ -51,9 +51,12 @@ import { stubListTools } from "../../tests/support/review-fixture";
 import {
   buildRepo,
   bundleRepo,
+  EVAL_AUTHOR,
+  EVAL_USER,
   type EvalCase,
   type EvalEarlier,
   type EvalSet,
+  type EvalThreadComment,
   loadCases,
   localDir,
   mapSpot,
@@ -395,6 +398,46 @@ function seedEarlier(
   return roots;
 }
 
+// The PR threads of a local case (local.ts caseThreads), as sync stores them. loadPrContext then lists them in pr-context.md.
+// offset: the comment IDs before the first thread ID, so no ID meets a root of seedEarlier. An anchor numbers a new-side range with
+// multilineSpan (shared/types.ts anchorSpan) and an old-side comment with its first line.
+function seedThreads(db: Database, pr: number, at: { head: string; base: string }, threads: EvalThreadComment[], offset: number) {
+  for (const c of threads) {
+    const anchor =
+      c.id !== c.root || c.path === undefined
+        ? null
+        : {
+            path: c.path,
+            ...(c.lines &&
+              (c.side === "old"
+                ? { line: c.lines[0], lineType: "REMOVED", fileType: "FROM" }
+                : {
+                    line: c.lines[1],
+                    lineType: "ADDED",
+                    fileType: "TO",
+                    ...(c.lines[1] > c.lines[0] && { multilineSpan: { dstSpanStart: c.lines[0], dstSpanEnd: c.lines[1] } }),
+                  })),
+            diffType: "EFFECTIVE",
+            fromHash: at.base,
+            toHash: at.head,
+          };
+    db.query(
+      `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at,
+        updated_at) VALUES ($pr, $id, 0, $parent, $root, $author, $text, $anchor, $resolved, $at, $at)`,
+    ).run({
+      pr,
+      id: offset + c.id,
+      parent: c.id === c.root ? null : offset + c.root,
+      root: offset + c.root,
+      author: c.author,
+      text: c.text,
+      anchor: anchor && JSON.stringify(anchor),
+      resolved: c.resolved ? 1 : 0,
+      at: c.at,
+    });
+  }
+}
+
 // The earlier findings at the head of the case. New-side lines move with the diff from the earlier head to the head, old-side lines
 // with the diff from the earlier merge base to the merge base.
 async function earlierAt(
@@ -446,7 +489,7 @@ type Context = {
   rereview: boolean;
 };
 
-const USER = "eval-reviewer";
+const USER = EVAL_USER;
 
 async function runCase(
   c: EvalCase,
@@ -501,7 +544,7 @@ async function runCase(
         .query(
           `INSERT INTO pull_request (project, repo, pr_id, title, description, author_slug, author_name, my_role, state, source_head,
             target_head, source_branch, target_branch, web_url, updated_date, on_dashboard, followed)
-          VALUES ($project, $repo, 1, $title, $description, 'eval-author', 'Eval Author', 'REVIEWER', 'OPEN', $head, $base, 'feature/eval',
+          VALUES ($project, $repo, 1, $title, $description, $author, 'Eval Author', 'REVIEWER', 'OPEN', $head, $base, 'feature/eval',
             'main', $web, $now, 1, 1) RETURNING id`,
         )
         .get({
@@ -509,6 +552,7 @@ async function runCase(
           repo: c.id,
           title: c.pr.title,
           description: c.pr.description,
+          author: EVAL_AUTHOR,
           head,
           base,
           web: `${BASE_URL}/projects/${PROJECT}/repos/${c.id}/pull-requests/1`,
@@ -552,6 +596,7 @@ async function runCase(
         saveInstructionSettings(db, { project: PROJECT, repo: c.id }, { target: true, local: [], extra: c.instructions });
       jobs.saveBrief(db, pr, { note: "", profile: ctx.profile });
       const roots = rr ? seedEarlier(db, pr, ctx.profile, rr, rr.earlier, USER) : new Map<number, string>();
+      seedThreads(db, pr, { head, base }, c.threads ?? [], rr ? rr.earlier.length : 0);
       const started = rr ? jobs.rereview(db, pr) : jobs.review(db, pr);
       if (started.status !== 202) {
         const why = "error" in started ? started.error : "conflict" in started ? started.conflict.error : `status ${started.status}`;

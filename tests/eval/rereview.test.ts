@@ -383,6 +383,11 @@ function makeDb(dir: string, h: Heads) {
     `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at, updated_at)
       VALUES (1, 200, 0, NULL, 200, 'me', 'b', '{}', 1, 1, 1)`,
   );
+  // A general comment of another person before the head time: the re-review case gets it as thread 1.
+  db.run(
+    `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at, updated_at)
+      VALUES (1, 201, 0, NULL, 201, 'quinn-other', 'A claim in a thread.', NULL, 0, 1, 1)`,
+  );
   db.close();
   return { file, ids };
 }
@@ -482,6 +487,11 @@ describe("eval:local re-review cases", () => {
       expect(stdin).toContain(`An earlier run reviewed this change at ${heads.a}.`);
       expect(stdin).toContain("Earlier findings: 4, 1");
       expect(stdin).toContain("Posted findings: 1.");
+      // The thread IDs follow the seeded earlier roots, so thread 1 of the case is comment 6 of the run.
+      expect(rrCase().threads).toEqual([{ id: 1, root: 1, author: "reviewer-1", at: 1, text: "A claim in a thread." }]);
+      const context = readRecords<{ argv: string[]; context?: Record<string, string> }>(record).find((x) => x.argv.includes("-p"))?.context;
+      expect(context?.["pr-context.md"]).toContain("### Thread 6 · general comment · started by reviewer-1 (another person)");
+      expect(context?.["pr-context.md"]).not.toContain("quinn");
       const [file] = readdirSync(out).filter((f) => f.endsWith(".json"));
       const result = JSON.parse(readFileSync(join(out, file as string), "utf8")) as EvalResult;
       expect(result.rereview).toBe(true);

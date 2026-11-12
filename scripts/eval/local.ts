@@ -23,10 +23,13 @@ import { finding } from "../../src/shared/review";
 import { type ExcerptLine, threadSpot } from "../../src/shared/types";
 import {
   changedLines,
+  EVAL_AUTHOR,
+  EVAL_USER,
   type EvalBug,
   type EvalEarlier,
   type EvalExtra,
   type EvalHuman,
+  type EvalThreadComment,
   type EvalTrap,
   LOCAL_RULES,
   type LocalCaseFile,
@@ -145,6 +148,11 @@ const SQL = {
       pr.author_slug AS pr_author FROM comment c JOIN pull_request pr ON pr.id = c.pr
     WHERE c.parent_id IS NULL AND c.tombstoned_at IS NULL AND c.anchor_json IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM post p WHERE p.pr = c.pr AND p.remote_id = c.comment_id) ORDER BY c.pr, c.comment_id`,
+  // Every live comment of a PR for its threads at a reviewed head (caseThreads). author_name is read only to remove it from the text.
+  threadRows: `SELECT c.pr, c.comment_id AS id, c.root_id AS root, c.author_slug AS slug, c.author_login AS login, c.author_name AS name,
+      c.text, c.anchor_json AS anchor, c.excerpt_json AS excerpt, c.thread_resolved AS resolved, c.thread_resolved_at AS resolvedAt,
+      c.created_at AS at, pr.author_slug AS prAuthor, pr.author_name AS prAuthorName
+    FROM comment c JOIN pull_request pr ON pr.id = c.pr WHERE c.tombstoned_at IS NULL ORDER BY c.pr, c.created_at, c.comment_id`,
   prs: "SELECT id, pr_id, project, repo, title, description FROM pull_request",
   tasks: `SELECT t.pr, t.key, t.source, x.json FROM pr_task t LEFT JOIN task_context x ON x.pr = t.pr AND x.key = t.key
     ORDER BY t.pr, t.ord`,
@@ -172,6 +180,22 @@ type CommentRow = {
   excerpt_json: string | null;
   resolved: number;
   pr_author: string | null;
+};
+export type ThreadRow = {
+  pr: number;
+  id: number;
+  root: number;
+  slug: string;
+  login: string | null;
+  name: string | null;
+  text: string;
+  anchor: string | null;
+  excerpt: string | null;
+  resolved: number;
+  resolvedAt: number | null;
+  at: number;
+  prAuthor: string | null;
+  prAuthorName: string | null;
 };
 type PrRow = { id: number; pr_id: number; project: string; repo: string; title: string | null; description: string | null };
 type TaskRow = { pr: number; key: string; source: string; json: string | null };
@@ -493,6 +517,123 @@ export async function carry(drafts: Draft[], diff: (from: string, to: string) =>
   return n;
 }
 
+// ---------- Threads ----------
+
+// Caps per case. pr-context.md shows at most PR_CONTEXT_BYTES (context-files.ts), so more text gives the run nothing.
+export const THREAD_COMMENTS_MAX = 60;
+export const THREAD_TEXT_MAX = 2000;
+// Counts per case. capped: comments that the cap left out. unplaced: inline threads whose lines do not map to the reviewed head; they
+// stay as file comments. mineRoot: replies of other people in threads that you started, left out with those threads.
+export type ThreadTally = { cases: number; threads: number; comments: number; capped: number; unplaced: number; mineRoot: number };
+export const noThreads = (): ThreadTally => ({ cases: 0, threads: 0, comments: 0, capped: 0, unplaced: 0, mineRoot: 0 });
+const CUT_NOTE = "\n[The eval builder cut this comment.]";
+const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+const parsed = <T>(s: string | null): T | undefined => {
+  try {
+    return s ? (JSON.parse(s) as T) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// The threads of other people at a reviewed head, for pr-context.md of the run (docs/plans/review-v2/review-ideas.md idea 2).
+// rows: the live comments of the PR in created order. before: the commit time of the reviewed head in ms. A comment from that time on
+// did not exist at the review. skip: the item IDs of the case. A thread that is a must find of the case stays out, so the run never
+// reads its own truth. place: the place of an inline root at the reviewed head, or null when its lines do not map.
+// People become EVAL_AUTHOR, EVAL_USER, or reviewer-<n> in first-comment order over the PR, in the author field and in the text.
+export async function caseThreads(
+  rows: ThreadRow[],
+  o: {
+    me: string;
+    before: number;
+    skip: Set<string>;
+    place: (s: Spot, anchor: { fromHash?: unknown; toHash?: unknown }) => Promise<{ path: string; lines: [number, number] } | null>;
+  },
+  n: ThreadTally,
+): Promise<EvalThreadComment[]> {
+  const mine = (r: ThreadRow) => isMe({ slug: r.slug, login: r.login }, o.me);
+  const key = (s: string) => s.toLowerCase();
+  const prAuthor = rows[0]?.prAuthor ?? null;
+  const bySlug = new Map<string, string>();
+  const placeholder = (r: ThreadRow) => {
+    if (prAuthor !== null && key(r.slug) === key(prAuthor)) return EVAL_AUTHOR;
+    const p = bySlug.get(key(r.slug)) ?? `reviewer-${bySlug.size + 1}`;
+    bySlug.set(key(r.slug), p);
+    return p;
+  };
+  const names = new Map<string, string>();
+  const add = (s: string | null, p: string) => {
+    if (s?.trim() && !names.has(key(s))) names.set(key(s), p);
+  };
+  add(prAuthor, EVAL_AUTHOR);
+  add(rows[0]?.prAuthorName ?? null, EVAL_AUTHOR);
+  for (const r of rows) {
+    const p = mine(r) ? EVAL_USER : placeholder(r);
+    for (const s of [r.slug, r.login, r.name]) add(s, p);
+  }
+  // A whole-word match of each slug, login, and display name. The longest name goes first. A dot or a hyphen joins a word only when a
+  // letter or digit follows it, so "name." at a sentence end matches and "name.other" does not.
+  const words = [...names.keys()].sort((a, b) => b.length - a.length).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const pattern = words.length
+    ? new RegExp(`(?<![\\p{L}\\p{N}_]|[\\p{L}\\p{N}_][.-])(?:${words.join("|")})(?![\\p{L}\\p{N}_]|[.-][\\p{L}\\p{N}_])`, "giu")
+    : null;
+  const clean = (text: string) => {
+    const t = pattern ? text.replace(pattern, (m) => names.get(key(m)) ?? m) : text;
+    return t.length > THREAD_TEXT_MAX ? `${t.slice(0, THREAD_TEXT_MAX)}${CUT_NOTE}` : t;
+  };
+
+  const live = rows.filter((r) => r.at < o.before);
+  const threads: ThreadRow[][] = [];
+  for (const root of live.filter((r) => r.id === r.root)) {
+    const replies = live.filter((r) => r.root === root.id && r.id !== root.id && !mine(r));
+    if (mine(root)) n.mineRoot += replies.length;
+    else if (!o.skip.has(`comment-${root.id}`)) threads.push([root, ...replies]);
+  }
+  // The newest threads stay, as pr-context.md orders them.
+  const newest = (t: ThreadRow[]) => Math.max(...t.map((r) => r.at));
+  threads.sort((a, b) => newest(b) - newest(a) || (b[0] as ThreadRow).id - (a[0] as ThreadRow).id);
+  const kept: ThreadRow[][] = [];
+  let count = 0;
+  for (const t of threads)
+    if (count + t.length > THREAD_COMMENTS_MAX) n.capped += t.length;
+    else {
+      kept.push(t);
+      count += t.length;
+    }
+  const all = kept.flat().sort((a, b) => a.at - b.at || a.id - b.id);
+  const local = new Map(all.map((r, k) => [r.id, k + 1]));
+  const out: EvalThreadComment[] = [];
+  for (const r of all) {
+    const c: EvalThreadComment = {
+      id: local.get(r.id) as number,
+      root: local.get(r.root) as number,
+      author: placeholder(r),
+      at: r.at,
+      text: clean(r.text),
+    };
+    if (r.id === r.root) {
+      const anchor = parsed<{ fromHash?: unknown; toHash?: unknown }>(r.anchor);
+      const spot = anchor ? threadSpot({ anchor, excerpt: parsed<ExcerptLine[]>(r.excerpt) }) : null;
+      if (spot && spot.line === null) c.path = spot.path;
+      else if (spot && anchor) {
+        const m = await o.place({ path: spot.path, side: spot.side, lines: [spot.line as number, spot.lineEnd] }, anchor);
+        if (m) Object.assign(c, { path: m.path, side: spot.side, lines: m.lines });
+        else {
+          c.path = spot.path;
+          n.unplaced++;
+        }
+      }
+      if (r.resolved === 1 && r.resolvedAt !== null && r.resolvedAt < o.before) c.resolved = true;
+    }
+    out.push(c);
+  }
+  if (kept.length) n.cases++;
+  n.threads += kept.length;
+  n.comments += count;
+  return out;
+}
+
 // ---------- Build ----------
 
 export type Manifest = {
@@ -505,6 +646,8 @@ export type Manifest = {
   // The items that a case got from an earlier head of the same PR, and those that stayed behind (carry). Bugs and traps above include
   // the carried items.
   carried: Carry;
+  // The PR threads in the written cases (caseThreads). Absent in a manifest of rules 2.
+  threads: ThreadTally;
   // The re-review cases in rereview/ (docs/plans/review-v3.md WP-V3). bun run eval --rereview runs them.
   rereview: {
     fingerprint: string;
@@ -524,10 +667,12 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
     let sel: ReturnType<typeof select>;
     let prs: Map<number, PrRow>;
     let tasks: TaskRow[];
+    let threadRows: Map<number, ThreadRow[]>;
     try {
       sel = select(db, o.me);
       prs = new Map((db.query(SQL.prs).all() as PrRow[]).map((p) => [p.id, p]));
       tasks = db.query(SQL.tasks).all() as TaskRow[];
+      threadRows = Map.groupBy(db.query(SQL.threadRows).all() as ThreadRow[], (r) => r.pr);
     } finally {
       db.close();
     }
@@ -536,6 +681,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
     const drafts = sel.drafts;
     const truth = (d: Draft) => d.bugs.length > 0 || d.traps.length > 0 || d.human.length > 0;
     const carried: Carry = { carried: 0, changed: 0, gone: 0, overlap: 0 };
+    const threadTally = noThreads();
 
     const empty = join(tmp, "empty.gitconfig");
     writeFileSync(empty, "");
@@ -607,12 +753,29 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       await git(["init", "-q", "--bare", "--template=", temp], { env });
       mkdirSync(join(temp, "objects", "info"), { recursive: true });
       // The temp repository borrows the objects of the cache, so the cache gets no write. Against the cache itself, the builder runs
-      // only cat-file and diff, which read.
+      // only cat-file, diff, and log, which read.
       writeFileSync(join(temp, "objects", "info", "alternates"), `${join(cache, "objects").replaceAll("\\", "/")}\n`);
       const commits = [...new Set([...ok, ...rrOk].flatMap(need))];
       await git(["--git-dir", temp, "update-ref", "--stdin"], { env, stdin: commits.map((c) => `create refs/eval/${c} ${c}\n`).join("") });
       await git(["--git-dir", temp, "bundle", "create", "-q", join(o.out, "bundles", bundle), "--all"], { env });
       repositories++;
+      // New-side lines move from the anchor head to the reviewed head, old-side lines from the anchor merge base to the case merge base.
+      // A commit that is not in the cache makes the git diff fail, so the thread stays without lines.
+      const threadsOf = async (d: Draft | RereviewDraft) => {
+        const before = Number((await g(["log", "-1", "--format=%ct", d.head])).trim()) * 1000;
+        const skip = new Set([...d.bugs, ...d.traps, ...("human" in d ? d.human : [])].map((x) => x.id));
+        const place = async (s: Spot, a: { fromHash?: unknown; toHash?: unknown }) => {
+          const from = s.side === "new" ? a.toHash : a.fromHash;
+          if (typeof from !== "string" || !COMMIT.test(from)) return null;
+          try {
+            return mapSpot(await diff(from, s.side === "new" ? d.head : d.base), s);
+          } catch {
+            return null;
+          }
+        };
+        const list = await caseThreads(threadRows.get(d.pr) ?? [], { me: o.me, before, skip, place }, threadTally);
+        return list.length ? { threads: list } : {};
+      };
 
       for (const d of ok) {
         const p = prs.get(d.pr) as PrRow;
@@ -630,6 +793,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
           bundle: { file: bundle, base: d.base, head: d.head },
           changedLines: changedLines(await g(["diff", ...diffArgs, d.base, d.head])),
           rules: LOCAL_RULES,
+          ...(await threadsOf(d)),
         });
         const text = `${JSON.stringify(c, null, 2)}\n`;
         mkdirSync(join(o.out, "cases", c.id));
@@ -653,6 +817,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
           bundle: { file: bundle, base: d.base, head: d.head },
           changedLines: changedLines(await g(["diff", ...diffArgs, d.base, d.head])),
           rereview: { since: d.since, sinceBase: d.sinceBase, earlier: d.earlier },
+          ...(await threadsOf(d)),
         });
         const text = `${JSON.stringify(c, null, 2)}\n`;
         mkdirSync(join(o.out, "rereview", c.id));
@@ -683,6 +848,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       skipped,
       sources: sel.sources,
       carried,
+      threads: threadTally,
       rereview: {
         fingerprint: setFingerprint(rrWritten),
         counts: {
@@ -711,6 +877,7 @@ export function report(m: Manifest): string {
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
     `Comments of other reviewers left out: ${s.otherOpen} open on an unchanged line, ${s.otherNoLine} without a line, ${s.otherOtherHead} at a head with no review, ${s.otherAuthor} by the PR author, ${s.otherOverlap} on the lines of a must find of the same case.`,
     `Carried from earlier heads of the same PR: ${m.carried.carried}. Not carried: ${m.carried.changed} with changed lines, ${m.carried.gone} in a deleted file, ${m.carried.overlap} on an item of the later head.`,
+    `PR threads of other people at the reviewed heads: ${m.threads.threads} threads with ${m.threads.comments} comments in ${m.threads.cases} cases. Left out: ${m.threads.capped} comments over the cap of ${THREAD_COMMENTS_MAX} per case, ${m.threads.mineRoot} replies in threads that you started. Without lines: ${m.threads.unplaced} inline threads whose lines do not map to the reviewed head.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
     `Re-review cases: ${r.counts.cases}, with ${r.counts.earlier} earlier findings. Must find: ${r.counts.bugs}. Must not raise: ${r.counts.traps}. Neutral: ${r.counts.extras}.`,
     `Re-reviews left out: ${r.skipped.noEarlier} without their earlier run, ${r.skipped.missingCommits} with missing commits, ${r.skipped.emptyCases} with nothing to measure. Earlier findings left out: ${r.skipped.badPayload} with a payload that is no finding.`,

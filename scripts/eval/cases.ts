@@ -90,7 +90,25 @@ export const caseFile = z.object({
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1) });
-export const LOCAL_RULES = 2;
+export const LOCAL_RULES = 3;
+// The user and the PR author of the PR row that run.ts seeds. local.ts gives the people of a thread placeholders that differ from both.
+export const EVAL_USER = "eval-reviewer";
+export const EVAL_AUTHOR = "eval-author";
+// A comment of a PR thread at the reviewed head (local.ts caseThreads, docs/plans/review-v2/review-ideas.md idea 2). id: a case-local
+// number. root: the id of the root comment, equal to id for a root. author: EVAL_AUTHOR or reviewer-<n>, never a real name.
+// at: created time in ms. path, side, lines: the place of an inline root at the reviewed head. A file comment has a path only.
+// resolved: a root only, resolved before the reviewed head's time.
+export const evalThreadComment = z.object({
+  id: z.number().int().min(1),
+  root: z.number().int().min(1),
+  author: z.string().regex(/^(eval-author|reviewer-[1-9][0-9]*)$/),
+  at: z.number().int(),
+  text: z.string(),
+  path: z.string().min(1).optional(),
+  side: z.enum(["new", "old"]).optional(),
+  lines: range.optional(),
+  resolved: z.boolean().optional(),
+});
 // A case of the local set (docs/plans/review-v3.md WP-V1). A git bundle in ../../bundles/ holds the repository, so the case has no
 // base/ folder and no head.patch. The limits of the fixture sets do not apply. tasks: the pr_task rows with their task_context JSON.
 export const localCaseFile = caseFile.extend({
@@ -103,8 +121,10 @@ export const localCaseFile = caseFile.extend({
   bundle: z.object({ file: z.string().regex(/^[0-9a-f]{16}\.bundle$/), base: commit, head: commit }),
   changedLines: z.number().int().min(0),
   // The version of the must-find rules of local.ts. It is in the case.json text, so a new rule gives a new set fingerprint. 2: the
-  // comments of other reviewers count. Absent: 1.
-  rules: z.literal(LOCAL_RULES).optional(),
+  // comments of other reviewers count. 3: the case holds its PR threads. Absent: 1.
+  rules: z.number().int().min(2).max(LOCAL_RULES).optional(),
+  // Absent in cases built before rules 3, and in a case without threads: run.ts seeds no thread.
+  threads: z.array(evalThreadComment).optional(),
   // since: the head of the earlier run. sinceBase: its merge base. The bundle holds both.
   rereview: rereviewBlock.extend({ since: commit, sinceBase: commit }).optional(),
 });
@@ -115,6 +135,7 @@ export type EvalExtra = z.infer<typeof evalExtra>;
 export type EvalHuman = z.infer<typeof evalHuman>;
 export type CaseFile = z.infer<typeof caseFile>;
 export type LocalCaseFile = z.infer<typeof localCaseFile>;
+export type EvalThreadComment = z.infer<typeof evalThreadComment>;
 // The repository of a local case. bundle: the absolute path of the bundle file. hash: the SHA-256 of case.json, for the set fingerprint.
 // since, sinceBase: the earlier head and its merge base of a re-review case.
 export type LocalRepo = { bundle: string; base: string; head: string; hash: string; since?: string; sinceBase?: string };
@@ -128,6 +149,7 @@ export type EvalCase = Omit<CaseFile, "language"> & {
   changedLines: number;
   human?: EvalHuman[];
   tasks?: LocalCaseFile["tasks"];
+  threads?: EvalThreadComment[];
   local?: LocalRepo;
 };
 

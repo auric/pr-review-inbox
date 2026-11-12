@@ -167,7 +167,7 @@ export const LOCAL_TOLERANCE = 3;
 export const overlaps = (a: [number, number], b: [number, number]) => a[0] <= b[1] && b[0] <= a[1];
 type Spot = { path: string; side: Side; lines: [number, number] };
 // An item on the main place or on any alt place of a bug or trap matches it. t widens each place by t lines on both ends.
-const matches = (i: EvalItem, r: Spot & { alt?: Spot[] }, t = 0) =>
+export const matches = (i: EvalItem, r: Spot & { alt?: Spot[] }, t = 0) =>
   [r, ...(r.alt ?? [])].some(
     (p) => i.path === p.path && i.side === p.side && overlaps([i.line, i.lineEnd], [p.lines[0] - t, p.lines[1] + t]),
   );
