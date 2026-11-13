@@ -330,7 +330,7 @@ const MULTI_LOCK = "static int waits;\n\nint lock_waits(void) { return waits; }\
 
 // A task with sub-tasks (docs/plans/review-v2/spec.md section 6.20): the parent ABC-10730 on PROJ1/sample-repo-4. ABC-10731 is done,
 // ABC-10732 builds first, ABC-10733 starts after it merges, and ABC-10734 builds on top of it. The task comes after ABC-10720, so the
-// fake CLI gives it the third spec run and the third implement runs. Only the first part builds in the demo.
+// fake CLI gives it the third spec run and the fourth build run. Only the first part builds in the demo.
 const SUB_KEY = "ABC-10730";
 const subPart = (n: number, key: string, title: string, start: string, after: string | null, reason: string) => ({
   ...TASK_SPEC.parts[0],
@@ -371,12 +371,7 @@ runner.write({
   taskReview: { summary: "The lock moves into the loop.", risks: [], questions: [], findings: [], coverage: READ_FLUSH },
   seq: {
     spec: [{ spec: TASK_SPEC }, { spec: MULTI_SPEC }, { spec: SUB_SPEC }],
-    "implement:tests": [
-      { writes: [{ path: "repo/tests/flush.test.ts", text: TASK_TEST }] },
-      { writes: [{ path: "repo/tests/lock.test.ts", text: MULTI_TEST }] },
-      { writes: [{ path: "repo/tests/flush.test.ts", text: TASK_TEST }] },
-    ],
-    "implement:implement": [
+    "implement:build": [
       // ABC-10688 asks to allow one command (spec.md section 6.21.4). Its next try runs it.
       {
         bash: [{ command: BENCH, refused: "allowlist" }],
@@ -398,10 +393,26 @@ runner.write({
           { command: BENCH, output: "Benchmark 1: bun run bench:flush\n  Time (mean ± σ):     41.2 ms ±   1.3 ms" },
           { command: "bun run bench:flush --entries 5000", output: "flush 5000 entries: 41 ms, longest lock hold: 0.2 ms" },
         ],
-        writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }],
+        writes: [
+          { path: "repo/tests/flush.test.ts", text: TASK_TEST },
+          { path: "repo/src/cache/flush.ts", text: TASK_FLUSH },
+        ],
+        ticks: { path: "*", ids: ["*"] },
       },
-      { writes: [{ path: "repo/lib/lock.c", text: MULTI_LOCK }] },
-      { writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] },
+      {
+        writes: [
+          { path: "repo/tests/lock.test.ts", text: MULTI_TEST },
+          { path: "repo/lib/lock.c", text: MULTI_LOCK },
+        ],
+        ticks: { path: "*", ids: ["*"] },
+      },
+      {
+        writes: [
+          { path: "repo/tests/flush.test.ts", text: TASK_TEST },
+          { path: "repo/src/cache/flush.ts", text: TASK_FLUSH },
+        ],
+        ticks: { path: "*", ids: ["*"] },
+      },
     ],
     "implement:fix": [{ writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] }],
   },

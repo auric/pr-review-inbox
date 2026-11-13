@@ -94,8 +94,15 @@ test("several repositories: the plan with access and a proposal, two PR rows, a 
     spec: SPEC,
     review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
     seq: {
-      "implement:tests": [{ writes: [{ path: "repo/tests/lib.test.ts", text: LIB_TEST }] }],
-      "implement:implement": [{ writes: [{ path: "repo/lib/lib.c", text: "int lib = 2;\n" }] }],
+      "implement:build": [
+        {
+          writes: [
+            { path: "repo/tests/lib.test.ts", text: LIB_TEST },
+            { path: "repo/lib/lib.c", text: "int lib = 2;\n" },
+          ],
+          ticks: { path: "*", ids: ["*"] },
+        },
+      ],
     },
   });
   await openApp(page);

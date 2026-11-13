@@ -86,8 +86,7 @@ const CLAUDE = {
   spec: SPEC,
   review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
   seq: {
-    "implement:tests": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }] }],
-    "implement:implement": [
+    "implement:build": [
       // Attempt 1: Claude Code refuses the build, and the step asks to allow three commands.
       {
         bash: [{ command: "cmake --build repo/build", refused: "allowlist" }],
@@ -102,13 +101,17 @@ const CLAUDE = {
           coverage: NO_COVERAGE,
         },
       },
-      // Attempt 2 runs both commands and changes the README.
+      // Attempt 2 runs both commands, writes the test, and changes the README.
       {
         bash: [
           { command: "cmake --build repo/build", output: "[100%] Built target flush" },
           { command: "ctest --test-dir repo/build", output: "100% tests passed, 0 tests failed out of 4" },
         ],
-        writes: [{ path: "repo/README.md", text: "# Sample works\n" }],
+        writes: [
+          { path: "repo/tests/readme.test.ts", text: README_TEST },
+          { path: "repo/README.md", text: "# Sample works\n" },
+        ],
+        ticks: { path: "*", ids: ["*"] },
       },
     ],
     "implement:fix": [{ writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
@@ -360,8 +363,7 @@ test("a fix step that changes no file asks; the approved checks switch gives the
     ...CLAUDE,
     spec: { ...SPEC, testing: { ...SPEC.testing, allow: [] } },
     seq: {
-      "implement:tests": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }] }],
-      "implement:implement": [{ writes: [todo] }],
+      "implement:build": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }, todo], ticks: { path: "*", ids: ["*"] } }],
       // Try 1 changes no file. Try 2 makes the test pass.
       "implement:fix": [{ writes: [] }, { writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
     },
@@ -387,8 +389,15 @@ test("a fix step that changes no file asks; the approved checks switch gives the
   await page.getByRole("checkbox", { name: "I understand" }).check();
   await primary(page).click();
 
-  // The fix step changes no file: the task asks at once, with Continue and See why.
-  await expect(status(page)).toHaveText("Needs you: the fix step of part 1 changed no file. See why.", { timeout: 180_000 });
+  // The part base has no test, so the test command failed there too (check-fix.md item 1). Continue lets the fix runs start.
+  await expect(status(page)).toHaveText(
+    'Needs you: the check "test" of part 1 also failed on the part base. See why. Continue lets Claude try to fix it.',
+    { timeout: 180_000 },
+  );
+  await primary(page).click();
+
+  // The fix run changes no file: the task asks at once, with Continue and See why.
+  await expect(status(page)).toHaveText("Needs you: the fix run of part 1 changed no file. See why.", { timeout: 180_000 });
   await expect(primary(page)).toHaveText("Continue");
   await page.getByRole("button", { name: "More actions" }).click();
   await page.getByRole("menuitem", { name: "See why" }).click();
@@ -411,10 +420,11 @@ test("a fix step that changes no file asks; the approved checks switch gives the
   await primary(page).click();
   await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
   await page.getByRole("tab", { name: "Log" }).click();
-  // Resume runs the code step of the task again, then the fix: both are try 2, and both can run the test command.
-  const second = page.locator("[data-task-item]", { hasText: "try 2" }).filter({ has: page.locator("[data-step-shell]") });
-  await expect(second.locator("[data-step-shell] p")).toHaveText([
-    "Commands: allowlist, 0 patterns, 1 approved check",
-    "Commands: allowlist, 0 patterns, 1 approved check",
-  ]);
+  // part-session.md section 2.6: Continue goes on in the session at the checks gate. The code run does not run again, and fix try 2
+  // can run the test command.
+  const items = page.locator("[data-task-item]");
+  await expect(items.filter({ hasText: /^Code/ })).toHaveCount(1);
+  const second = items.filter({ hasText: /^Fix/ }).filter({ hasText: "try 2" });
+  await expect(second).toHaveCount(1);
+  await expect(second.locator("[data-step-shell] p")).toHaveText(["Commands: allowlist, 0 patterns, 1 approved check"]);
 });

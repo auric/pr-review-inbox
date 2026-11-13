@@ -72,8 +72,15 @@ const CLAUDE = {
   spec: SPEC,
   review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
   seq: {
-    "implement:tests": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }] }],
-    "implement:implement": [{ writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
+    "implement:build": [
+      {
+        writes: [
+          { path: "repo/tests/readme.test.ts", text: README_TEST },
+          { path: "repo/README.md", text: "# Sample works\n" },
+        ],
+        ticks: { path: "*", ids: ["*"] },
+      },
+    ],
     "implement:fix": [{ writes: [{ path: "repo/README.md", text: "# Sample works\n" }] }],
     // The first send runs until Stop, if its CLI starts at all.
     "implement:instruct": [{ hang: true }],

@@ -3,7 +3,7 @@
 
 // docs/plans/review-v2/spec.md sections 6.12, 6.16, and 7.2 (WP-B5, WP-BR2): the small task walkthrough in the browser. Build on the
 // task chip of a PR, the questions with the recommended answers, the plan approval with the "Branch type" chips, "Other…", the base
-// picker with its confirm, and the first-use warning, the build with a stop at the line limit and "Keep one PR", "Open the PR" with its
+// picker with its confirm, and the first-use warning, the build with a size note over the line limit, "Open the PR" with its
 // confirm, Close, and a second task of the same key that continues on the existing branch. The Build form with its attachment boxes
 // and the policy question, and the Attachments tab (spec.md section 6.17). Then Settings > Tasks. Runs against serve.ts
 // only: the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote. The approved test command is "bun test" in the task
@@ -129,7 +129,7 @@ const primary = (page: Page) => page.locator("[data-primary]");
 // A "Branch type" chip of the plan screen: a native radio with the prefix as its name.
 const chip = (page: Page, name: string) => page.getByRole("radio", { name, exact: true });
 
-test("a small task: chip, questions, plan with the branch and the warning, a stop at the line limit, Open the PR, Close, and Continue", async ({
+test("a small task: chip, questions, plan with the branch and the warning, a size note over the line limit, Open the PR, Close, and Continue", async ({
   page,
 }) => {
   test.setTimeout(420_000);
@@ -138,8 +138,15 @@ test("a small task: chip, questions, plan with the branch and the warning, a sto
     spec: SPEC,
     review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [MINOR] },
     seq: {
-      "implement:tests": [{ writes: [{ path: "repo/tests/readme.test.ts", text: README_TEST }] }],
-      "implement:implement": [{ writes: [{ path: "repo/README.md", text: README }] }],
+      "implement:build": [
+        {
+          writes: [
+            { path: "repo/tests/readme.test.ts", text: README_TEST },
+            { path: "repo/README.md", text: README },
+          ],
+          ticks: { path: "*", ids: ["*"] },
+        },
+      ],
       "implement:fix": [{ writes: [{ path: "repo/README.md", text: README }] }],
     },
   });
@@ -258,13 +265,8 @@ test("a small task: chip, questions, plan with the branch and the warning, a sto
   await page.getByRole("checkbox", { name: "I understand" }).check();
   await primary(page).click();
 
-  // 4. The build stops at the line limit. "Keep one PR" lets it go on.
+  // 4. The build goes over the line limit and does not stop. The Log commit row gets the size note (part-session.md section 2.6 item 7).
   await expect(page.locator('[aria-current="step"]')).toHaveText("Build", { timeout: 60_000 });
-  await expect(status(page)).toHaveText(new RegExp(`^Needs you: this PR would have \\d+ changed lines, over your ${LIMIT} limit\\.$`), {
-    timeout: 120_000,
-  });
-  await expect(primary(page)).toHaveText("Keep one PR");
-  await primary(page).click();
 
   // 5. The change is ready and checked. The small point of the own review is listed. Nothing went out before the click.
   await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
@@ -279,8 +281,12 @@ test("a small task: chip, questions, plan with the branch and the warning, a sto
   // The Log tab holds the checks with their output, and the Diff tab the change.
   await page.getByRole("tab", { name: "Log" }).click();
   await expect(page.getByRole("tabpanel").getByText("bun test").first()).toBeVisible();
-  // The red checks of the tests step are no failure.
-  await expect(page.getByRole("tabpanel").getByText("Red as expected").first()).toBeVisible();
+  await expect(
+    page
+      .getByRole("tabpanel")
+      .getByText(new RegExp(`This PR has \\d+ changed lines, over your ${LIMIT} limit\\.`))
+      .first(),
+  ).toBeVisible();
   await page.getByRole("tab", { name: "Diff" }).click();
   await expect(page.getByRole("tabpanel").getByText("README.md", { exact: true })).toBeVisible();
 
@@ -494,45 +500,33 @@ test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat",
 
   // limits.md decision 3: Run limits. A value out of bounds shows its sentence and saves nothing. A valid value saves by itself.
   const limits = async () => ((await api(page, "GET", "/api/settings")).json as { runLimits: Record<string, number> }).runLimits;
-  const step = page.getByLabel("Task step time");
-  const noStep = page.getByLabel("No step time limit");
-  // AC-B204: the step time and the part time have no limit by default.
-  await expect(step).toHaveValue("");
-  await expect(step).toBeDisabled();
-  await expect(noStep).toBeChecked();
-  await expect(page.getByLabel("No part time limit")).toBeChecked();
+  const turns = page.getByLabel("Session run turns");
   // spec.md section 6.26, AC-B187.
   await expect(page.getByLabel("Runs at once")).toHaveValue("3");
-  await expect(page.getByText("Default no limit. From 5 to 120.", { exact: false })).toBeVisible();
-  // Clearing the box from the default gives the least value with no error, and saves it.
-  await noStep.uncheck();
-  await expect(step).toBeEnabled();
-  await expect(step).toHaveValue("5");
-  await expect(page.getByText("Type a whole number from 5 to 120.")).toHaveCount(0);
-  await expect.poll(async () => (await limits()).stepMinutes).toBe(5);
-  // A typed 0 is no limit only through the box.
-  await step.fill("0");
-  await step.blur();
-  await expect(page.getByText("Type a whole number from 5 to 120.")).toBeVisible();
-  await expect(noStep).not.toBeChecked();
-  await step.fill("121");
-  await step.blur();
-  await expect(page.getByText("Type a whole number from 5 to 120.")).toBeVisible();
+  // part-session.md section 2.10: the turns of one session run. No run limit can be off.
+  await expect(turns).toHaveValue("500");
+  await expect(page.getByText("Default 500. From 50 to 1000.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /^No .* limit$/ })).toHaveCount(0);
+  // A typed 0 is no valid number.
+  await turns.fill("0");
+  await turns.blur();
+  await expect(page.getByText("Type a whole number from 50 to 1000.")).toBeVisible();
+  await turns.fill("1001");
+  await turns.blur();
+  await expect(page.getByText("Type a whole number from 50 to 1000.")).toBeVisible();
   await expect(page.locator("#limits-status")).toHaveText("A marked limit is not saved. Fix it to save it.");
-  expect((await limits()).stepMinutes).toBe(5);
-  await step.fill("45");
-  await step.blur();
+  expect((await limits()).sessionTurns).toBe(500);
+  await turns.fill("120");
+  await turns.blur();
   await expect(page.locator("#limits-status")).toHaveText("Saved. New runs use these limits.");
+  await expect(page.getByText("Type a whole number from 50 to 1000.")).toHaveCount(0);
   expect(await limits()).toEqual({
-    stepMinutes: 45,
-    partMinutes: 0,
     reviewMinutes: 60,
     interviewRounds: 2,
     testFixTries: 3,
     planTurns: 80,
     runsAtOnce: 3,
+    sessionContextCap: 100_000,
+    sessionTurns: 120,
   });
-  await noStep.check();
-  await expect.poll(async () => (await limits()).stepMinutes).toBe(0);
-  await expect(step).toBeDisabled();
 });

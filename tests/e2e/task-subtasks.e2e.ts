@@ -136,8 +136,15 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
     spec: SPEC,
     review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
     seq: {
-      "implement:tests": [{ writes: [{ path: "repo/tests/abc-13.test.ts", text: FLUSH_TEST }] }],
-      "implement:implement": [{ writes: [{ path: "repo/FLUSH.md", text: "# ABC-13 flushes first\n" }] }],
+      "implement:build": [
+        {
+          writes: [
+            { path: "repo/tests/abc-13.test.ts", text: FLUSH_TEST },
+            { path: "repo/FLUSH.md", text: "# ABC-13 flushes first\n" },
+          ],
+          ticks: { path: "*", ids: ["*"] },
+        },
+      ],
       "implement:fix": [{ writes: [{ path: "repo/FLUSH.md", text: "# ABC-13 flushes first\n" }] }],
     },
   });
@@ -336,15 +343,20 @@ test("spec.md section 6.25 (AC-B156): two parts that build at once both ask; bot
   page,
 }) => {
   test.setTimeout(420_000);
-  // Each part gets its own runs by the files of its plan. Both tests steps run before the first question comes, and ABC-14 asks later.
+  // Each part gets its own runs by the files of its plan. Both build runs start before the first question comes, and ABC-14 asks later.
   const build = (key: string, file: string, testText: string, delayMs: number, question: string) => ({
     when: file,
     seq: {
-      "implement:tests": [
+      "implement:build": [
         { delayMs, implement: asks(question) },
-        { writes: [{ path: `repo/tests/${key.toLowerCase()}.test.ts`, text: testText }] },
+        {
+          writes: [
+            { path: `repo/tests/${key.toLowerCase()}.test.ts`, text: testText },
+            { path: `repo/${file}`, text: `# ${key}\n` },
+          ],
+          ticks: { path: "*", ids: ["*"] },
+        },
       ],
-      "implement:implement": [{ writes: [{ path: `repo/${file}`, text: `# ${key}\n` }] }],
       "implement:fix": [{ writes: [{ path: `repo/${file}`, text: `# ${key}\n` }] }],
     },
   });
