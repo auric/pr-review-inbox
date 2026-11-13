@@ -909,6 +909,32 @@ describe("shell steps", () => {
     expect(labels("any").notes).not.toContain("Refused by the allowlist");
   });
 
+  test("Gate B36 touch-rule: the file-change ask with no type is the allowlist in allowlist mode only", () => {
+    // Synthetic text in the form of the CLI 2.1.323 event. An allow rule such as "touch *" satisfies this ask.
+    const ASK =
+      "touch in '/w/out.txt' needs approval. The path is inside the working directories for this session ('/w') and Claude Code asks before a shell command creates, changes or removes files there.";
+    const labels = (shell: "allowlist" | "any") => {
+      const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell });
+      const seen: [string, string, Record<string, string>][] = [
+        ["f1", "touch out.txt", { message: ASK }],
+        ["f2", "rm OUT.txt", { message: ASK.replace("Claude Code asks", "CLAUDE CODE ASKS").toUpperCase() }],
+        ["f3", "echo x > /tmp/outside.txt", { message: REDIRECT }],
+        [
+          "f4",
+          "git status",
+          { decision_reason_type: "subcommandResults", message: "Permission to use Bash with command git status has been denied." },
+        ],
+      ];
+      for (const [id, cmd, fields] of seen) {
+        p.line(JSON.stringify(line.bash(id, cmd)));
+        p.line(JSON.stringify({ type: "system", subtype: "permission_denied", tool_name: "Bash", tool_use_id: id, ...fields }));
+      }
+      return p.state.refused.map((r) => r.by);
+    };
+    expect(labels("allowlist")).toEqual(["allowlist", "allowlist", "check", "deny"]);
+    expect(labels("any")).toEqual(["check", "check", "check", "deny"]);
+  });
+
   test("Gate B30a: a refused `cd <dir> && <command>` keeps the label check and gets the cd note in both modes", () => {
     for (const shell of ["allowlist", "any"] as const) {
       const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell });

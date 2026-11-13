@@ -268,14 +268,15 @@ export function createStreamParser(opts: {
       const d = m as SDKPermissionDeniedMessage;
       if (d.tool_name === "Bash") {
         // SU3: a deny rule arrives as type "rule", or as "subcommandResults" with this message. No allow rule: type "other" with
-        // "This command requires approval", which only allowlist mode can give. Each other refusal is a safety check of the CLI, such as
-        // the B22 redirect outside the working folders, with no type.
+        // "This command requires approval", which only allowlist mode can give. Gate B36 (2.1.323): a command that changes files in the
+        // working folders gets the file-change ask with no type, and an allow rule such as "touch *" satisfies it. Each other refusal is
+        // a safety check of the CLI, such as the B22 redirect outside the working folders, with no type.
         const deny =
           d.decision_reason_type === "rule" || /^Permission to use \w+ with command [\s\S]* has been denied\.$/.test(d.message ?? "");
         const unlisted =
           opts.shell === "allowlist" &&
-          d.decision_reason_type === "other" &&
-          /requires approval/.test(d.message ?? d.decision_reason ?? "");
+          ((d.decision_reason_type === "other" && /requires approval/.test(d.message ?? d.decision_reason ?? "")) ||
+            /asks before a shell command creates, changes or removes files/i.test(d.message ?? ""));
         const by = deny ? "deny" : unlisted ? "allowlist" : "check";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });

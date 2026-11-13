@@ -5,6 +5,7 @@
 - Build a Jira task: a task that still waits for you no longer notifies again after 30 days and an app restart.
 - After a new Bitbucket URL is saved, the other open tabs of the app refresh too. Before, they could show the runs and run slots of the old server.
 - The app now deletes the temporary output files of Claude Code subagents after each run, also after Stop. Claude Code 2.1.322 and later write them to a temp folder per session.
+- Build a Jira task, allowlist mode: Claude Code asks before a command such as `touch` changes files. The app now shows that refusal as "Refused by the allowlist", and it can become an allow request. Before, the run log called it a Claude Code safety check.
 - Language checks now cover C#. A review of .cs and .csx files gets a C# checklist. It covers async misuse, disposal, nulls, LINQ, exceptions, and thread safety. It also covers equality, string culture, time zones, EF Core queries, event leaks, and Unity objects.
 - A new Bitbucket URL saved during a run no longer leaves that run shown as running. Ask, Fix, Explain, and Consult no longer show the end of a run before the start buttons are free.
 - Ask and the other start buttons are ready as soon as the run row shows that a run ended. Before, Ctrl+Enter could say "The question was not sent" for a moment after Cancel.
