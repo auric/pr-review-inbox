@@ -155,19 +155,20 @@ export class McpListError extends Error {
   override name = "McpListError";
 }
 
-function safeError(e: unknown): McpListError {
+function safeError(e: unknown, timeoutMs: number): McpListError {
   const err = e as { code?: unknown; name?: unknown };
   // McpError RequestTimeout is -32001. AbortSignal.timeout gives a TimeoutError. The SDK HTTP errors carry the HTTP status as code.
-  if (err?.code === -32001 || err?.name === "TimeoutError") return new McpListError(`no answer in ${LIST_TIMEOUT_MS / 1000} s`);
+  if (err?.code === -32001 || err?.name === "TimeoutError") return new McpListError(`no answer in ${timeoutMs / 1000} s`);
   if (err?.code === "ENOENT") return new McpListError("the command was not found");
   if (typeof err?.code === "number" && err.code >= 400 && err.code < 600) return new McpListError(`HTTP ${err.code}`);
   return new McpListError("the server did not start or did not answer");
 }
 
-export type ListUserTools = (entry: UserMcpEntry) => Promise<McpToolDto[]>;
+// timeoutMs covers the server start and every tools/list page.
+export type ListUserTools = (entry: UserMcpEntry, timeoutMs?: number) => Promise<McpToolDto[]>;
 
 // Starts or calls one server and runs tools/list. Tool names that the CLI flags cannot hold are dropped.
-export const listUserTools: ListUserTools = async (entry) => {
+export const listUserTools: ListUserTools = async (entry, timeoutMs = LIST_TIMEOUT_MS) => {
   const env = childEnv();
   let transport: Transport;
   let stdio: StdioClientTransport | null = null;
@@ -190,13 +191,13 @@ export const listUserTools: ListUserTools = async (entry) => {
       entry.type === "http" ? new StreamableHTTPClientTransport(url, { requestInit }) : new SSEClientTransport(url, { requestInit });
   }
   const client = new Client({ name: "review-loop", version: "1" });
-  const timer = AbortSignal.timeout(LIST_TIMEOUT_MS);
+  const timer = AbortSignal.timeout(timeoutMs);
   try {
-    await client.connect(transport, { timeout: LIST_TIMEOUT_MS, signal: timer });
+    await client.connect(transport, { timeout: timeoutMs, signal: timer });
     const out: McpToolDto[] = [];
     let cursor: string | undefined;
     for (let i = 0; i < MAX_PAGES; i++) {
-      const r = await client.listTools(cursor ? { cursor } : undefined, { timeout: LIST_TIMEOUT_MS, signal: timer });
+      const r = await client.listTools(cursor ? { cursor } : undefined, { timeout: timeoutMs, signal: timer });
       for (const t of r.tools)
         if (NAME.test(t.name))
           out.push({
@@ -210,7 +211,7 @@ export const listUserTools: ListUserTools = async (entry) => {
     }
     return out;
   } catch (e) {
-    throw safeError(e);
+    throw safeError(e, timeoutMs);
   } finally {
     // A command such as npx starts child processes. On Windows only taskkill /T ends the tree. It runs first, so the PID is not reused yet.
     const pid = stdio?.pid;
