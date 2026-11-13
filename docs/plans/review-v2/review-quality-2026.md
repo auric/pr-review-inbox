@@ -231,6 +231,19 @@ In keep, name the point of the group with the most concrete trigger and the most
 - Risks: a wrong merge joins two different bugs; rate limits come faster.
 - Experiment: C3 `--candidate-variants runs3 --candidate-repeat 2` (`--large` first if the union gain is only on large cases).
 - Ship rule: better. It ships as an option, never as the default.
+- Mixed-model form (user decision of 2026-11-13: models mix by role, fixed in the definitions, never by the lead): variant "runs3-mixed" runs the three finders on opus, sonnet, opus. [R] SWR-Bench: with different models, n=3 already reaches the top F1 (about 21.2 against 19.4 for one model). [V] Copilot: a multi-model mix gave recall +13.6% and addressed rate +8% at lower cost. Experiment: C3b next to C3, the same ship rule. A winner ships as a fixed profile setting.
+
+### 6b. Verifier model (opus against sonnet)
+
+- Hypothesis: a stronger verifier loses fewer true findings. [A] Anthropic's /code-review validates bug findings with Opus and rule findings with Sonnet. Our verifier runs on the profile model at medium.
+- Experiment: `--candidate-replay` with the verifier model set to each value, on the recorded baseline, next to the replays of improvement 4. Ship rule: as improvement 4. A winner ships as the profile's verifier model.
+
+### 9. Subagent model and effort come from the definition only
+
+- User decision of 2026-11-13: Opus 5.5 is the main reviewer. Models may mix by role, but the definition decides (the profile for app agents, the agent file for the user's own agents, "same as the main run" when unset). The lead never picks a model or an effort per call.
+- [O] Gate B36 U90: a model that the lead passes beats a pinned model. [A] The permissions docs: deny rules match a top-level input parameter of a built-in tool, and an omitted parameter never matches.
+- Change: `--disallowedTools` gets `Agent(model:*)` and `Agent(effort:*)` in every run that offers the Agent tool (claude.ts `prepare` and `implementArgs`, later the workflow builder); one prompt line "Never pass model or effort on an Agent call. Each agent has its own model."; stream.ts records `input.model` and `input.effort` on Agent events and writes a Log note for a refused Agent call, and a different note if an asked model ever runs.
+- Gate B38 first: the run starts with the rules; a call without model runs on the pinned model; a call with model or effort is refused; the rule does not clash with the `Agent(<names>)` allow list; a subagent's real effort level with and without a per-call model.
 
 ### 7. Aim the lens at the bug kinds that authors fix (variant "classes")
 
