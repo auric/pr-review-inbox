@@ -13,7 +13,9 @@ const SQL = {
   insert: "INSERT INTO task_event (task, kind, ref, created_at) VALUES ($task, 'needs_you', $ref, $now) ON CONFLICT DO NOTHING",
   // One statement, so two concurrent claims never return the same event.
   claim: "UPDATE task_event SET claimed_at = $now WHERE claimed_at IS NULL AND kind = 'needs_you' RETURNING id, task, created_at",
-  waits: "SELECT json_extract(blocked_json, '$.step') AS step FROM task_part WHERE task = $task AND blocked_json IS NOT NULL ORDER BY ord",
+  // part-session.md section 9.4 rule 6: held is no waiting reason.
+  waits: `SELECT json_extract(blocked_json, '$.step') AS step FROM task_part WHERE task = $task AND blocked_json IS NOT NULL
+    AND json_extract(blocked_json, '$.kind') IS NOT 'held' ORDER BY ord`,
 };
 
 // The wait of each task at its last check, per database. null: the task did not wait.

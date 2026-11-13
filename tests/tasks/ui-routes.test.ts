@@ -18,6 +18,7 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { createSyncEngine } from "../../src/server/sync/engine";
+import { insertStep } from "../../src/server/tasks/implement";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import type { ApiError, RunDetail, TaskConflict, TaskDiffDto, TaskDto } from "../../src/shared/dto";
 import { specResult } from "../../src/shared/task";
@@ -349,6 +350,20 @@ describe("the small points, the diff, and the run log", () => {
       expect(ready.points.map((p) => [p.severity, p.path, p.line, p.text])).toEqual([
         ["minor", "src/feature.ts", 1, "Name the value after what it holds."],
       ]);
+      // AC-B340: a point that the user discarded is no open point.
+      const item = ready.points[0]?.id as number;
+      s.db.query("UPDATE review_item SET status = 'discarded' WHERE id = $id").run({ id: item });
+      expect((await s.get()).points).toEqual([]);
+      s.db.query("UPDATE review_item SET status = 'new' WHERE id = $id").run({ id: item });
+      // A newer critic row with no finding is no own review, so the points of the own review stay.
+      const critic = s.db
+        .query(`INSERT INTO review_run (task, kind, profile, note, idem_key, source_head, target_head, status, started_at)
+          VALUES ($task, 'review', 'general', '', 'critic', '', '', 'completed', 1) RETURNING id`)
+        .get({ task: s.task }) as { id: number };
+      const row = insertStep(s.db, { task: s.task, part: part.id, kind: "review", item: "critic", run: critic.id, state: "ok" });
+      expect((await s.get()).points.map((p) => p.id)).toEqual([item]);
+      s.db.query("DELETE FROM task_step WHERE id = $id").run({ id: row });
+      s.db.query("DELETE FROM review_run WHERE id = $id").run({ id: critic.id });
       const r = await s.post(`/parts/${part.id}/fix`);
       expect(r.status).toBe(202);
       const done = await s.settle();

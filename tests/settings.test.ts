@@ -84,6 +84,7 @@ describe("settings API", () => {
       profileEdits: UNEDITED,
       jira: { baseUrl: null, caFile: null, email: null, tokenStored: false },
       sessions: false,
+      usageResume: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
       runLimits: {
@@ -122,6 +123,7 @@ describe("settings API", () => {
       profileEdits: UNEDITED,
       jira: { baseUrl: null, caFile: null, email: null, tokenStored: false },
       sessions: false,
+      usageResume: false,
       askAttachments: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
       runLimits: {
@@ -346,6 +348,24 @@ describe("settings API", () => {
     // Off removes the key, as for the other default-off switches.
     expect(await (await s.put({ baseUrl: fake.url, sessions: false })).json()).toMatchObject({ sessions: false });
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).sessions).toBeUndefined();
+  });
+
+  test("ps4-plan.md section 0: the usage resume starts off, saves without a Bitbucket request, and a PUT without it keeps it", async () => {
+    const s = setup();
+    expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
+    const file = join(dir, "config.json");
+    expect([(await s.get()).usageResume, s.settings.usageResume()]).toEqual([false, false]);
+    const before = fake.requests.length;
+    expect(await (await s.put({ baseUrl: fake.url, usageResume: true })).json()).toMatchObject({ usageResume: true });
+    expect([fake.requests.length, s.settings.usageResume()]).toEqual([before, true]);
+    expect((await s.put({ baseUrl: fake.url, markAi: false })).status).toBe(200);
+    expect(JSON.parse(readFileSync(file, "utf8")).usageResume).toBe(true);
+    expect((await s.put({ baseUrl: fake.url, usageResume: "yes" })).status).toBe(400);
+    s.settings.close();
+    const again = setup();
+    expect([(await again.get()).usageResume, again.settings.usageResume()]).toEqual([true, true]);
+    expect(await (await again.put({ baseUrl: fake.url, usageResume: false })).json()).toMatchObject({ usageResume: false });
+    expect(JSON.parse(readFileSync(file, "utf8")).usageResume).toBeUndefined();
   });
 
   test("the attachment policy question starts on, an old config asks, and off is stored until the user turns it on", async () => {

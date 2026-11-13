@@ -160,6 +160,7 @@ export function createSettings(
         tokenStored: c?.jira !== undefined && (await jiraSecrets.get()) !== null,
       },
       sessions: c?.sessions === true,
+      usageResume: c?.usageResume === true,
       askAttachments: c?.askAttachments !== false,
       taskBranchPrefixes: branchPrefixesOf(c),
       runLimits: runLimitsOf(c?.runLimits),
@@ -356,6 +357,7 @@ export function createSettings(
             jira: prev?.jira,
             globalInstructions: prev?.globalInstructions,
             sessions: input.sessions === undefined ? prev?.sessions : input.sessions || undefined,
+            usageResume: input.usageResume === undefined ? prev?.usageResume : input.usageResume || undefined,
             askAttachments: input.askAttachments === undefined ? prev?.askAttachments : input.askAttachments ? undefined : false,
             taskBranchPrefixes: input.taskBranchPrefixes ?? prev?.taskBranchPrefixes,
             runLimits: input.runLimits ? { ...prev?.runLimits, ...input.runLimits } : prev?.runLimits,
@@ -480,6 +482,8 @@ export function createSettings(
     globalInstructions: () => current()?.globalInstructions === true,
     // The opt-in of "Ask your session" (docs/plans/session-consult.md part C). Off without a config.
     sessions: () => current()?.sessions === true,
+    // "Resume by itself after a usage limit". Off without a config.
+    usageResume: () => current()?.usageResume === true,
     // false: no config yet.
     saveGlobalInstructions: (on: boolean) =>
       serial(async () => {

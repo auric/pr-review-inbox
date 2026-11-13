@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 51;
+const LATEST = 52;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1856,6 +1856,44 @@ test("AC-B321: migration from a version-50 database keeps the step rows and adds
     expect(db.query("SELECT * FROM task_step").all()).toEqual(before.map((r) => ({ ...r, cut_json: null })));
     db.run("UPDATE task_step SET cut_json = '{}' WHERE id = 3");
     expect(db.query("SELECT cut_json FROM task_step WHERE id = 3").get()).toEqual({ cut_json: "{}" });
+  } finally {
+    db.close();
+  }
+});
+
+// ---------- The point of a push-back question (054_task_question_point.sql) ----------
+
+// ps4-plan.md section 5 (AC-B338): the questions stay, point starts NULL, and the delete of its review item sets it NULL again.
+test("AC-B338: migration from a version-51 database keeps the question rows and adds task_question.point with NULL", () => {
+  const path = join(dir, "v51.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  const files = readdirSync(join(import.meta.dir, "../../src/server/storage/migrations")).filter((f) => f >= "031" && f < "054");
+  migrate(old, [...V30, ...files.sort()]);
+  old.exec("PRAGMA user_version = 51");
+  old.exec(`INSERT INTO task (id, project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+      VALUES (1, 'P', 'a', 'ABC-10', 'Speed up the cache', 'implementing', 'main', 'specs/ABC-10/', 1, 1);
+    INSERT INTO task_question (id, task, source, round, ord, text, why, kind, step, asked_at)
+      VALUES (4, 1, 'loop', 1, 0, 'Which name?', 'Callers use it.', 'text', 9, 1);
+    INSERT INTO task_question (id, task, source, round, ord, text, why, kind, answer_json, asked_at, answered_at)
+      VALUES (5, 1, 'interview', 1, 1, 'Keep it?', 'Old callers.', 'choice', '{"choice":0,"text":""}', 1, 2);`);
+  const before = old.query("SELECT * FROM task_question ORDER BY id").all() as object[];
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(db.query("SELECT * FROM task_question ORDER BY id").all()).toEqual(before.map((r) => ({ ...r, point: null })));
+    db.run(`INSERT INTO review_run (id, task, kind, profile, note, idem_key, source_head, target_head, status, started_at)
+      VALUES (3, 1, 'review', 'general', '', 'k', '', '', 'completed', 1)`);
+    db.run("INSERT INTO review_item (id, run, kind, payload_json, body) VALUES (8, 3, 'finding', '{}', 'f')");
+    db.run("UPDATE task_question SET point = 8 WHERE id = 4");
+    expect(() => db.run("UPDATE task_question SET point = 99 WHERE id = 5")).toThrow(/FOREIGN KEY/);
+    db.run("DELETE FROM review_item WHERE id = 8");
+    expect(db.query("SELECT id, point FROM task_question ORDER BY id").all()).toEqual([
+      { id: 4, point: null },
+      { id: 5, point: null },
+    ]);
   } finally {
     db.close();
   }

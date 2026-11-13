@@ -10,8 +10,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/server/storage/db";
-import { RESTART_TEXT, recoverTasks, taskRow, UPDATE_RESTART } from "../../src/server/tasks/tasks";
-import type { TaskBlocked } from "../../src/shared/task";
+import { RESTART_TEXT, recoverTasks, setUsageArmed, TASK_CHANGED, taskRow, UPDATE_RESTART } from "../../src/server/tasks/tasks";
+import { type TaskBlocked, taskBlocked } from "../../src/shared/task";
 import { cleanupAll, SLOW, stopInGate } from "./loop-fixture";
 
 for (const m of ["tasks/tasks", "tasks/loop", "storage/db"])
@@ -138,6 +138,53 @@ describe("restart per state (part-session.md section 9.5)", () => {
     recoverTasks(db, 60);
     expect(blockedOf(two)).toMatchObject({ kind: "error", cause: "restart", step: sa });
     expect(rowOf(b)).toMatchObject({ kind: "error", cause: "restart", step: sb, text: RESTART_TEXT(2) });
+  });
+
+  test("AC-B337: a held part row stays; a task with only held parts keeps its version; a held part gets no restart reason", () => {
+    const held: TaskBlocked = { kind: "held", step: null, text: "Needs you: part 1 is on hold." };
+    const only = task("implementing");
+    const h = part(only, 1, "implementing", held);
+    // The held part comes first by ord, so a restart reason for it would take the first place.
+    const mixed = task("implementing");
+    const m1 = part(mixed, 1, "implementing", held);
+    const m2 = part(mixed, 2, "implementing");
+    const v = taskRow(db, only)?.version;
+
+    recoverTasks(db, 70);
+
+    expect([taskRow(db, only)?.version, blockedOf(only), rowOf(h)]).toEqual([v, null, held]);
+    expect([blockedOf(mixed), rowOf(m1), rowOf(m2)]).toEqual([
+      { kind: "error", cause: "restart", step: null, part: m2, text: RESTART_TEXT(2) },
+      held,
+      null,
+    ]);
+  });
+
+  test("AC-B339: one arm or disarm sets armed on every usage reason with one version move; a restart keeps it", () => {
+    const usage = (step: number): TaskBlocked => ({ kind: "usage", step, text: "Needs you: the usage limit.", resumeAt: 9_000 });
+    const red: TaskBlocked = { kind: "red", cause: "checks", step: 3, text: "Needs you: red." };
+    const t = task("implementing", usage(1));
+    const [p1, p2, p3] = [part(t, 1, "implementing"), part(t, 2, "implementing", usage(2)), part(t, 3, "implementing", red)];
+    const v = taskRow(db, t)?.version as number;
+    expect(setUsageArmed(db, { task: t, version: v }, true, 80)).toBe(v + 1);
+    expect([taskRow(db, t)?.version, blockedOf(t), rowOf(p1), rowOf(p2), rowOf(p3)]).toEqual([
+      v + 1,
+      { ...usage(1), armed: true },
+      null,
+      { ...usage(2), armed: true },
+      red,
+    ]);
+    // The stored JSON keeps a boolean, so the reason still parses.
+    expect(taskBlocked.parse(blockedOf(t)).armed).toBe(true);
+    recoverTasks(db, 90);
+    const armed = { ...usage(2), armed: true };
+    expect([taskRow(db, t)?.version, blockedOf(t)?.armed, rowOf(p2)]).toEqual([v + 1, true, armed]);
+    // A stale version changes nothing. Disarm needs no usage reason first: a red first reason stays as it is.
+    expect(() => setUsageArmed(db, { task: t, version: v }, false, 95)).toThrow(TASK_CHANGED);
+    expect(rowOf(p2)).toEqual(armed);
+    db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: t, b: JSON.stringify(red) });
+    expect(setUsageArmed(db, { task: t, version: v + 1 }, false, 100)).toBe(v + 2);
+    expect([blockedOf(t), rowOf(p2)]).toEqual([red, { ...usage(2), armed: false }]);
   });
 });
 

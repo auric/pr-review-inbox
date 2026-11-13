@@ -41,6 +41,8 @@ const config = z.object({
   globalInstructions: z.boolean().optional().catch(undefined),
   // Absent: off. On: "Ask your session" lists the transcripts of the Claude config folder (src/server/review/sessions.ts).
   sessions: z.boolean().optional().catch(undefined),
+  // Absent: off. On: a new usage reason of a task starts armed, so the build resumes at the reset time (part-session.md section 9.4).
+  usageResume: z.boolean().optional().catch(undefined),
   // Absent: on. Off: the user acknowledged the company AI policy for task attachments, so "Include in runs" does not ask.
   askAttachments: z.boolean().optional().catch(undefined),
   // Absent: DEFAULT_BRANCH_PREFIXES (src/shared/task.ts).

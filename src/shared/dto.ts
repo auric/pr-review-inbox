@@ -324,6 +324,8 @@ export const settingsInput = z.object({
     .optional(),
   // Absent keeps the stored value. docs/plans/session-consult.md part C: while it is off, the app reads no transcript.
   sessions: z.boolean().optional(),
+  // Absent keeps the stored value. part-session.md section 9.4: on, a new usage reason starts armed.
+  usageResume: z.boolean().optional(),
   // Absent keeps the stored value. Off records the company AI policy acknowledgement for task attachments.
   askAttachments: z.boolean().optional(),
   // Absent keeps the stored list (docs/plans/review-v2/spec.md section 6.16.1).
@@ -360,6 +362,8 @@ export type SettingsDto = {
   jira: { baseUrl: string | null; caFile: string | null; email: string | null; tokenStored: boolean };
   // The opt-in of "Ask your session" (docs/plans/session-consult.md part C). Default off.
   sessions: boolean;
+  // "Resume by itself after a usage limit" (ps4-plan.md section 0). Default off.
+  usageResume: boolean;
   // Ask the company AI policy question before a task attachment is included in runs. Default on.
   askAttachments: boolean;
   // spec.md section 6.16.1: Settings > Tasks "Branch prefixes".
@@ -1541,8 +1545,15 @@ export const specChangeInput = z.object({ version, accept: z.boolean() });
 // and /parts/:part/update/undo (spec.md section 6.18.6).
 export const taskVersionInput = z.object({ version });
 // POST /api/tasks/:id/resume (build-redesign.md section 2.2). option "start-step-again": the build resets to the last commit with the
-// patch saved, and the step starts again. Absent: Continue keeps the work.
-export const taskResumeInput = z.object({ version, option: z.literal("start-step-again").optional() });
+// patch saved, and the step starts again. Absent: Continue keeps the work. ps4-plan.md section 4: "leave" restores the reason before a
+// follow-up in ready, "disarm" cancels an armed usage resume, and part names a held part.
+export const taskResumeInput = z
+  .object({
+    version,
+    option: z.enum(["start-step-again", "leave", "disarm"]).optional(),
+    part: z.number().int().positive().optional(),
+  })
+  .refine((v) => v.option === undefined || v.part === undefined, { message: "Give a part or an option, not both." });
 export type TaskResumeInput = z.infer<typeof taskResumeInput>;
 // spec.md section 6.20.12: "Start <key> now" overrides the review of the lower part. "Move" with push pushes first.
 export const taskStartInput = z.object({ version, override: z.literal(true) });
@@ -1638,6 +1649,8 @@ export type TaskQuestionDto = {
   recommended: number | null;
   answer: { choice: number | null; text: string } | null;
   step: number | null;
+  // The review_item of a push-back question (ps4-plan.md section 5). null for other questions and after the item is gone.
+  point: number | null;
   askedAt: number;
   answeredAt: number | null;
 };

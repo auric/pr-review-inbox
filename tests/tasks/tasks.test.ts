@@ -50,6 +50,7 @@ import {
   type TaskDto,
   type TaskIssueDto,
   type TaskRowDto,
+  taskResumeInput,
 } from "../../src/shared/dto";
 import type { RunLimits } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, key, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
@@ -626,6 +627,14 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       expect(h.runCalls().at(-1)?.stdin).toContain("- Round: 1");
       const asked = await h.get(c.body.id);
       expect(asked.blocked?.kind).toBe("question");
+      // ps4-plan.md section 5: a question gives the review item that it is about, and loses it with the item.
+      const item = h.db
+        .query("INSERT INTO review_item (run, kind, payload_json, body) VALUES ($run, 'finding', '{}', 'f') RETURNING id")
+        .get({ run: h.runs(c.body.id)[0]?.id as number }) as { id: number };
+      h.db.query("UPDATE task_question SET point = $item WHERE id = $id").run({ item: item.id, id: asked.questions[0]?.id as number });
+      expect((await h.get(c.body.id)).questions.map((q) => q.point)).toEqual([item.id, null]);
+      h.db.query("DELETE FROM review_item WHERE id = $id").run({ id: item.id });
+      expect((await h.get(c.body.id)).questions.map((q) => q.point)).toEqual([null, null]);
       const stop = await h.json<TaskDto>(`/api/tasks/${c.body.id}/stop`, { body: { version: asked.version } });
       expect([stop.status, stop.body.state, stop.body.stoppedFrom, stop.body.blocked]).toEqual([200, "stopped", "interview", null]);
       const back = await h.json<TaskDto>(`/api/tasks/${c.body.id}/resume`, { body: { version: stop.body.version } });
@@ -635,6 +644,12 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
         "Claude has 2 questions before it writes the plan.",
       ]);
       expect(h.runs(c.body.id).length).toBe(2);
+      // ps4-plan.md section 4: Continue takes a part or an option, not both.
+      const both = { version: back.body.version, option: "leave", part: 1 };
+      expect((await h.json(`/api/tasks/${c.body.id}/resume`, { body: both })).status).toBe(400);
+      expect(taskResumeInput.safeParse(both).error?.issues.map((i) => i.message)).toEqual(["Give a part or an option, not both."]);
+      for (const one of [{ option: "start-step-again" }, { option: "leave" }, { option: "disarm" }, { part: 1 }])
+        expect(taskResumeInput.safeParse({ version: 1, ...one }).success).toBe(true);
       // A version mismatch gives 409 with the task.
       const old = await h.json<TaskConflict>(`/api/tasks/${c.body.id}/stop`, { body: { version: stop.body.version } });
       expect([old.status, old.body.task.state]).toEqual([409, "interview"]);

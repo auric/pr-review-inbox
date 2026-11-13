@@ -145,6 +145,7 @@ const question = (o: Partial<TaskQuestionDto> = {}): TaskQuestionDto => ({
   recommended: 0,
   answer: null,
   step: 1,
+  point: null,
   askedAt: NOW,
   answeredAt: null,
   ...o,

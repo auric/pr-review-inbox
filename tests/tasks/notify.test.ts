@@ -111,6 +111,12 @@ describe("noteTaskWaits", () => {
     wait(p1, { kind: "red", step: 7, text: "Needs you: the tests of part 1 stay red." });
     expect(noteTaskWaits(again, [h.id], 16)).toBe(true);
     expect(claimTaskEvents(again, 17).at(-1)?.text).toBe("Needs you: a change to the plan, and 1 more");
+    // AC-B337: a held part row is no waiting reason. It adds no event and no "more".
+    wait(p2, { kind: "held", step: null, text: "Needs you: part 2 is on hold." });
+    expect(noteTaskWaits(again, [h.id], 18)).toBe(false);
+    wait(p3, { kind: "red", step: 8, text: "Needs you: the tests of part 3 stay red." });
+    expect(noteTaskWaits(again, [h.id], 19)).toBe(true);
+    expect(claimTaskEvents(again, 20).at(-1)?.text).toBe("Needs you: a change to the plan, and 2 more");
   });
 });
 

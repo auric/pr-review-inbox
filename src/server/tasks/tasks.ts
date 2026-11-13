@@ -187,24 +187,28 @@ const SQL = {
   setPart: "UPDATE task_part SET state = $state, updated_at = $now WHERE id = $id",
   bump: "UPDATE task SET version = version + 1, updated_at = $now WHERE id = $id AND version = $version",
   // The tasks that worked at the last stop: a running Claude step, a step that ran or waited for the run slot (checks and commits have
-  // no run), or a part that the loop built while no reason blocked it.
+  // no run), or a part that the loop built while no reason blocked it. A held part does not build.
   running: `SELECT t.id, t.version FROM task t WHERE EXISTS (SELECT 1 FROM review_run r WHERE r.task = t.id AND r.status = 'running')
       OR EXISTS (SELECT 1 FROM task_step s WHERE s.task = t.id AND s.state IN ('waiting', 'running'))
-      OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id AND p.state = 'implementing'))
+      OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id
+        AND p.state = 'implementing' AND json_extract(p.blocked_json, '$.kind') IS NOT 'held'))
     ORDER BY t.id`,
   // The cut query reads cut_json first.
   failSteps: "UPDATE task_step SET state = 'failed', ended_at = $now, cut_json = NULL WHERE state IN ('waiting', 'running')",
   // docs/plans/review-v2/part-session.md section 2.5: the Claude steps whose run the restart cut. A resolve step has no snapshot.
   cut: `SELECT id, task, part, run, cut_json AS cut FROM task_step WHERE state = 'running' AND run IS NOT NULL AND part IS NOT NULL
     AND kind IN ('tests', 'implement', 'fix', 'instruct')`,
-  // spec.md section 6.25.3: part rows hold reasons only while the task builds.
-  clearWaits: "UPDATE task_part SET blocked_json = NULL WHERE task = $id AND blocked_json IS NOT NULL",
+  // spec.md section 6.25.3: part rows hold reasons only while the task builds. part-session.md section 9.4 rule 6: held stays, unless
+  // $all.
+  clearWaits: `UPDATE task_part SET blocked_json = NULL WHERE task = $id AND blocked_json IS NOT NULL
+    AND ($all OR json_extract(blocked_json, '$.kind') IS NOT 'held')`,
   // spec.md section 6.18.4, Restart: an update that ran at the last stop. The loop aborts its rebase or merge and resets every repository
   // to the heads before it (loop.ts recoverUpdates).
   // part-session.md section 9.5: the open step rows of the parts, oldest first, before failSteps ends them.
   open: `SELECT s.id, s.task, s.part, s.kind, p.ord FROM task_step s LEFT JOIN task_part p ON p.id = s.part
     WHERE s.state IN ('waiting', 'running') ORDER BY s.id`,
-  building: "SELECT id, ord FROM task_part WHERE task = $task AND state = 'implementing' ORDER BY ord",
+  building: `SELECT id, ord FROM task_part WHERE task = $task AND state = 'implementing'
+    AND json_extract(blocked_json, '$.kind') IS NOT 'held' ORDER BY ord`,
   restartUpdates: `UPDATE task_step SET detail_json = json_insert(json_set(detail_json, '$.update.result', 'restart'), '$.notes[#]',
       'The app stopped during the update.')
     WHERE kind = 'update' AND state IN ('waiting', 'running') AND json_type(detail_json, '$.update') = 'object'`,
@@ -230,7 +234,8 @@ export function advance(db: Database, ref: TaskRef, event: TaskEvent, facts: Fac
     const [next] = transition(taskMachine, snapshot, event);
     const state = next.value as TaskState;
     write(db, SQL.setTask, { id: ref.task, version: ref.version, state, stopped: state === "stopped" ? row.state : null, now });
-    if (state !== "implementing") db.query(SQL.clearWaits).run({ id: ref.task });
+    // ps4-plan.md section 2.6: Stop and ready keep a held part row. CLOSE and FAIL clear it.
+    if (state !== "implementing") db.query(SQL.clearWaits).run({ id: ref.task, all: state === "stopped" || state === "ready" ? 0 : 1 });
     // part-session.md section 9.3.1: ALL_MERGED and CLOSE delete the transcripts of the task.
     if (state === "done") dropSessions(db, { task: ref.task });
     return { status: 200, state, version: ref.version + 1 };
@@ -668,13 +673,21 @@ function patch(db: Database, id: number, version: number, p: Patch, now: number)
 
 const blocked = (b: TaskBlocked | null) => (b === null ? null : JSON.stringify(b));
 
-// spec.md section 6.25: the reason in the row of a part that waits while the task holds the reason of another part.
+// spec.md section 6.25: the reason in the row of a part that waits while the task holds the reason of another part. part-session.md
+// section 9.4 rule 6: held is no waiting reason. It never moves up and does not count.
 const WAIT = {
-  first: "SELECT id, blocked_json FROM task_part WHERE task = $task AND blocked_json IS NOT NULL ORDER BY ord, id LIMIT 1",
+  first: `SELECT id, blocked_json FROM task_part WHERE task = $task AND blocked_json IS NOT NULL
+    AND json_extract(blocked_json, '$.kind') IS NOT 'held' ORDER BY ord, id LIMIT 1`,
   clear: "UPDATE task_part SET blocked_json = NULL WHERE id = $id",
   set: "UPDATE task_part SET blocked_json = $b WHERE id = $id AND task = $task AND blocked_json IS NULL",
-  count: "SELECT COUNT(*) AS n FROM task_part WHERE task = $task AND blocked_json IS NOT NULL",
+  count: `SELECT COUNT(*) AS n FROM task_part WHERE task = $task AND blocked_json IS NOT NULL
+    AND json_extract(blocked_json, '$.kind') IS NOT 'held'`,
   stepPart: "SELECT part FROM task_step WHERE id = $id",
+  // ps4-plan.md section 2.7: arm or disarm the first reason and each waiting row of kind usage.
+  armTask: `UPDATE task SET blocked_json = iif(json_extract(blocked_json, '$.kind') = 'usage', json_set(blocked_json, '$.armed',
+      json($armed)), blocked_json), version = version + 1, updated_at = $now WHERE id = $id AND version = $version`,
+  armParts: `UPDATE task_part SET blocked_json = json_set(blocked_json, '$.armed', json($armed))
+    WHERE task = $task AND json_extract(blocked_json, '$.kind') = 'usage'`,
 };
 
 // The first waiting reason by part order leaves its row. Call it only in the transaction that writes it to task.blocked_json.
@@ -701,6 +714,16 @@ export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, no
     patch(db, ref.task, ref.version, { blocked_json: b === null && !keep ? nextReason(db, ref.task) : blocked(b) }, now),
   )();
 
+// part-session.md section 9.4, usage rules: one arm or disarm sets armed on every usage reason of the task, first and waiting, with one
+// version move. Returns the new version.
+export const setUsageArmed = (db: Database, ref: TaskRef, armed: boolean, now = Date.now()) =>
+  db.transaction(() => {
+    const json = armed ? "true" : "false";
+    write(db, WAIT.armTask, { id: ref.task, version: ref.version, armed: json, now });
+    db.query(WAIT.armParts).run({ task: ref.task, armed: json });
+    return ref.version + 1;
+  })();
+
 // spec.md section 6.1, "Keep one PR" and "Change the limit": new task settings, and the size reason goes. Returns the new version.
 export function setSettings(db: Database, ref: TaskRef, s: TaskSettings, now = Date.now()): number {
   return db.transaction(() =>
@@ -713,15 +736,17 @@ export const taskSettingsOf = settingsOf;
 export const mustFixPoint = (p: Pick<FindingPayload, "verify" | "severity">) =>
   p.verify?.verdict === "confirmed" && (p.severity === "blocker" || p.severity === "major");
 
+// ps4-plan.md section 1 item 4: a critic row is a review row with item critic. It is no own review.
 const POINTS = {
   review: `SELECT s.id, s.run FROM task_step s JOIN task_part p ON p.id = s.part
-    WHERE s.task = $id AND s.kind = 'review' AND s.state = 'ok' AND p.state = 'self_reviewed' ORDER BY s.id DESC LIMIT 1`,
+    WHERE s.task = $id AND s.kind = 'review' AND s.item = 'review' AND s.state = 'ok' AND p.state = 'self_reviewed'
+    ORDER BY s.id DESC LIMIT 1`,
   fixed: "SELECT 1 FROM task_step WHERE task = $id AND kind = 'commit' AND item = 'points' AND state = 'ok' AND id > $after",
-  items: "SELECT id, payload_json FROM review_item WHERE run = $run AND kind = 'finding' ORDER BY id",
+  items: "SELECT id, payload_json FROM review_item WHERE run = $run AND kind = 'finding' AND status <> 'discarded' ORDER BY id",
 };
 
 // The points that "Fix these too" fixes: the newest own review of a part that waits for its PR, without the points that the
-// verify phase discarded or demoted. Empty after the commit of their fix.
+// verify phase discarded or demoted, or that the user discarded. Empty after the commit of their fix.
 export function openPoints(db: Database, id: number): (TaskPointDto & { payload: FindingPayload })[] {
   const r = db.query(POINTS.review).get({ id }) as { id: number; run: number | null } | null;
   if (!r?.run || db.query(POINTS.fixed).get({ id, after: r.id })) return [];
@@ -820,6 +845,7 @@ type StepRow = {
 type FullQuestionRow = QuestionRow & {
   source: TaskQuestionDto["source"];
   step: number | null;
+  point: number | null;
   asked_at: number;
   answered_at: number | null;
 };
@@ -1412,6 +1438,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       recommended: q.recommended,
       answer: q.answer_json === null ? null : (JSON.parse(q.answer_json) as Answer),
       step: q.step,
+      point: q.point,
       askedAt: q.asked_at,
       answeredAt: q.answered_at,
     })),

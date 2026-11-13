@@ -18,7 +18,7 @@ import { createSettings } from "../../src/server/settings";
 import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import { createLoop, type TaskLoop } from "../../src/server/tasks/loop";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
-import { advance, type TaskRow, taskDto, taskRow, WAITING } from "../../src/server/tasks/tasks";
+import { advance, setBlocked, type TaskRow, taskDto, taskRow, WAITING, waitingOf } from "../../src/server/tasks/tasks";
 import { openWorktree, patchFile, status } from "../../src/server/tasks/worktree";
 import { branchName, specResult, type TaskBlocked } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
@@ -668,6 +668,41 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       expect(reasons(s)).toEqual([next, null, null, null]);
       expect(loop.running(s.task)).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B337: a held part row never moves up and does not count; ready and Stop keep it; CLOSE clears it",
+    async () => {
+      const s = await setup({ atOnce: 3, third: "base", scenario: HANG });
+      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+      s.db.query("UPDATE task_part SET state = 'implementing' WHERE task = $task").run({ task: s.task });
+      const red = (part: number): TaskBlocked => {
+        const step = insertStep(s.db, { task: s.task, part, kind: "check", state: "ok" });
+        return { kind: "red", step, text: `Needs you: red ${part}.` };
+      };
+      const wait = (id: number, b: TaskBlocked) =>
+        s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id, b: JSON.stringify(b) });
+      const v = () => ({ task: s.task, version: s.t().version });
+      const held: TaskBlocked = { kind: "held", step: null, text: "Needs you: part 1 is on hold." };
+      const third = red(s.p3);
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(red(s.p2)) });
+      wait(s.p1, held);
+      wait(s.p3, third);
+      expect(waitingOf(s.db, s.task)).toBe(1);
+      // The clear of the first reason moves up the red checks of part 3, not the held row of part 1.
+      setBlocked(s.db, v(), null);
+      expect([waitingOf(s.db, s.task), ...reasons(s)]).toEqual([0, third, held, null, null]);
+      // ready clears a waiting row and keeps the held row.
+      wait(s.p2, red(s.p2));
+      expect(advance(s.db, v(), { type: "LAST_PR_OPEN" }).status).toBe(200);
+      expect([s.t().state, ...reasons(s)]).toEqual(["ready", third, held, null, null]);
+      // Stop clears the first reason, and the held row does not move up.
+      expect(loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      expect([s.t().state, ...reasons(s)]).toEqual(["stopped", null, held, null, null]);
+      expect(advance(s.db, v(), { type: "CLOSE" }).status).toBe(200);
+      expect([s.t().state, ...reasons(s)]).toEqual(["done", null, null, null, null]);
     },
     SLOW,
   );
