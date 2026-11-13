@@ -79,6 +79,7 @@ const V = (candidate: number, verdict: VerifyVerdict["verdict"], o: Partial<Veri
   evidence: `src/a.ts:${candidate}`,
   duplicateOf: null,
   question: "",
+  finding: null,
   ...o,
 });
 const outcome = (structured: unknown, o: Partial<RunOutcome> = {}): RunOutcome => ({
@@ -117,7 +118,7 @@ const FIND: RunPhase = {
   endedAt: 2,
   usage: { costUsd: 0.5, turns: 2, durationMs: 1000, tokens: { input_tokens: 10 } },
 };
-const run = (o: RunOutcome, written: number): CheckRun => ({ o, startedAt: 3, endedAt: 4, written });
+const run = (o: RunOutcome, written: number, asked = 0): CheckRun => ({ o, startedAt: 3, endedAt: 4, written, asked });
 const input = (o: Partial<SettleInput> = {}): SettleInput => ({
   volume: "balanced",
   find: FIND,

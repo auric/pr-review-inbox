@@ -9,7 +9,15 @@ import { unified } from "unified";
 import type { ZodType } from "zod";
 import { parseCut } from "../../shared/caps";
 import { acceptedTargets, consultCaps, consultOutput } from "../../shared/consult";
-import { MAX_NOTE, type RunPhase, type RunSummary, type RunUsage, type VerifySummary, type Volume } from "../../shared/dto";
+import {
+  type FinderQuestions,
+  MAX_NOTE,
+  type RunPhase,
+  type RunSummary,
+  type RunUsage,
+  type VerifySummary,
+  type Volume,
+} from "../../shared/dto";
 import {
   type AnchoredFinding,
   askResult,
@@ -18,6 +26,7 @@ import {
   discussResult,
   type ExplainResult,
   explainResult,
+  type Finding,
   type FindingPayload,
   type FixNote,
   type FixWhy,
@@ -362,16 +371,19 @@ export function addUsage(a: RunUsage | null, b: RunUsage | null): RunUsage | nul
   };
 }
 
-// The verify process of a review run (spec.md section 1.6). written: the candidates in candidates.md, from candidate 1.
-export type CheckRun = { o: RunOutcome; startedAt: number; endedAt: number; written: number };
+// The verify process of a review run (spec.md section 1.6). written: the candidates in candidates.md, from candidate 1. asked: the
+// finder questions after them, numbered from written + 1 (context-files.ts candidatesFile).
+export type CheckRun = { o: RunOutcome; startedAt: number; endedAt: number; written: number; asked: number };
 
-// One verdict per candidate in candidates.md. An unknown or a second verdict goes to skipped. A candidate without a verdict stays
-// unchecked, and its line in skipped makes the run incomplete (spec.md section 1.9).
-export function verdictsOf(list: readonly VerifyVerdict[], written: number) {
+// One verdict per candidate and per finder question in candidates.md. An unknown or a second verdict goes to skipped. A candidate
+// without a verdict stays unchecked, and its line in skipped makes the run incomplete (spec.md section 1.9). A question without a
+// verdict stays as the finder asked it and adds no line, as before prompt version 2.7 (docs/plans/review-v2/review-questions.md).
+export function verdictsOf(list: readonly VerifyVerdict[], written: number, asked = 0) {
   const verdicts = new Map<number, VerifyVerdict>();
   const skipped: string[] = [];
   for (const v of list) {
-    if (v.candidate > written) skipped.push(`Verdict for candidate ${v.candidate} dropped: ./context/candidates.md has no such candidate.`);
+    if (v.candidate > written + asked)
+      skipped.push(`Verdict for candidate ${v.candidate} dropped: ./context/candidates.md has no such candidate.`);
     else if (verdicts.has(v.candidate)) skipped.push(`Verdict for candidate ${v.candidate} dropped: a second verdict for the candidate.`);
     else verdicts.set(v.candidate, v);
   }
@@ -453,7 +465,60 @@ export type SettleInput = {
   servers: string[];
   // The profile keeps refuted findings in the list (verifier outcome demote).
   demote?: boolean;
+  // placeAnswers: the anchored finding of each confirmed finder question, by its number in candidates.md.
+  placed?: ReadonlyMap<number, AnchoredFinding>;
 };
+
+// The first verdict of each finder question of a finished check. Empty: the check failed or had no question.
+function questionVerdicts(check: CheckRun | null): Map<number, VerifyVerdict> {
+  if (!check?.asked || check.o.status !== "completed") return new Map();
+  const parsed = parseCut(verifyResult, check.o.result?.structured_output);
+  if (!parsed.success) return new Map();
+  return new Map([...verdictsOf(parsed.data.verdicts, check.written, check.asked).verdicts].filter(([n]) => n > check.written));
+}
+
+// docs/plans/review-v2/review-questions.md: the finding that a confirmed finder question becomes. The check reads the code, so the
+// evidence status is code and the confidence high. The trigger stays empty: the check reason holds it, and the card shows that once.
+const answerFinding = (v: VerifyVerdict, at: NonNullable<VerifyVerdict["finding"]>): Finding => ({
+  ...at,
+  severity: v.severity,
+  category: "question",
+  body: at.body.trim() || v.reason,
+  evidence: v.evidence,
+  evidenceStatus: "code",
+  confidence: "high",
+  agent: null,
+  trigger: "",
+  cause: null,
+  rule: "",
+  module: "core",
+});
+
+// The anchored finding of each confirmed finder question with a place, by its number in candidates.md. The finder validator anchors
+// it. A place that it drops gives no entry, so the question stays.
+export async function placeAnswers(ws: Workspace, check: CheckRun | null): Promise<Map<number, AnchoredFinding>> {
+  const made = [...questionVerdicts(check)].flatMap(([n, v]) =>
+    v.verdict === "confirmed" && v.finding ? [{ n, finding: answerFinding(v, v.finding) }] : [],
+  );
+  const out = new Map<number, AnchoredFinding>();
+  if (!made.length) return out;
+  const findings = made.map((m) => m.finding);
+  const blobs = await readBlobs(ws, findings);
+  const coverage = { read: [], skipped: [], unavailable: [], notChecked: [] };
+  const result: ReviewResult = { summary: "", risks: [], questions: [], coverage, findings, answered: [] };
+  const anchor = () => validate({ result, diff: ws.diff, ...blobs, agents: [] });
+  let v = anchor();
+  if (v.dropped.some((d) => d.reason === "file" || d.reason === "match")) {
+    await blobs.loadChanged();
+    v = anchor();
+  }
+  v.kept.forEach((k, i) => {
+    const m = made[i];
+    const f = k === null ? undefined : v.findings[k];
+    if (m && f) out.set(m.n, f);
+  });
+  return out;
+}
 
 // The run end of a review run: the verdicts and the caps of each candidate, the items, and the summary (spec.md sections 1.7 and 1.8).
 export function settle(f: Found, s: SettleInput): Ending {
@@ -478,7 +543,7 @@ export function settle(f: Found, s: SettleInput): Ending {
     else if (!parsed.success)
       failed = { kind: "schema", text: `The result does not match the verify schema. ${issuesText(parsed.error.issues)}` };
     else {
-      const v = verdictsOf(parsed.data.verdicts, s.check.written);
+      const v = verdictsOf(parsed.data.verdicts, s.check.written, s.check.asked);
       got = effectiveVerdicts(f.candidates.slice(0, s.check.written), v.verdicts);
       const c = parsed.data.coverage;
       coverage.skipped.push(...parsed.cuts.map((x) => `Check: ${x}`), ...v.skipped);
@@ -545,13 +610,37 @@ export function settle(f: Found, s: SettleInput): Ending {
     links.set(item, link);
     items.push(item);
   }
+  // docs/plans/review-v2/review-questions.md: the verdict of each finder question. Question k has number written + k + 1.
+  const finderQuestions: FinderQuestions = { asked: f.questions.length, answered: 0, findings: 0, kept: 0, answers: [] };
+  const kept: Question[] = [];
+  for (const [k, q] of f.questions.entries()) {
+    const n = (s.check?.written ?? 0) + k + 1;
+    const v = s.check && k < s.check.asked ? got.get(n) : undefined;
+    const at = v?.verdict === "confirmed" ? s.placed?.get(n) : undefined;
+    if (v?.verdict === "refuted") {
+      finderQuestions.answered++;
+      finderQuestions.answers.push({ text: q.text, answer: v.reason });
+    } else if (v && at) {
+      finderQuestions.findings++;
+      const payload: FindingPayload = { ...at, verify: mark(v) };
+      items.push(findingItem(payload));
+    } else {
+      finderQuestions.kept++;
+      // A confirmed question without a place keeps the defect text of the check in why.
+      kept.push(
+        v?.verdict === "question" || v?.verdict === "confirmed"
+          ? { text: (v.verdict === "question" && v.question.trim()) || q.text, why: v.reason.trim() || q.why }
+          : q,
+      );
+    }
+  }
   if (failed) {
     verify.failed = failed;
     coverage.skipped.push(`The check did not finish: ${findings(verify.unchecked)} not checked.${failed.text ? ` ${failed.text}` : ""}`);
   }
   const ending = ended(raw, f.outcome, {
-    summary: { ...f.summary, coverage, volume: s.volume, verify, phases },
-    items: [...items, ...f.questions.map(questionItem), ...asked.map(questionItem), ...f.replies.map(replyItem)],
+    summary: { ...f.summary, coverage, volume: s.volume, verify, phases, finderQuestions },
+    items: [...items, ...kept.map(questionItem), ...asked.map(questionItem), ...f.replies.map(replyItem)],
     ...(f.checked && { checked: f.checked }),
     links,
     carried,

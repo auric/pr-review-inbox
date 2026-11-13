@@ -23,7 +23,7 @@ import { basename, join, resolve } from "node:path";
 import { gitAuth } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { DEFAULT_PROFILE, DOCS_RULE, EXPLORER_RULE, profileOf } from "../../src/server/review/catalog";
+import { DEFAULT_PROFILE, DOCS_RULE, EXPLORER_RULE, ISSUE_LINES, ISSUE_REMOTE_RULE, profileOf } from "../../src/server/review/catalog";
 import { IMPLEMENT_TOOLS, implementArgs } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
@@ -899,6 +899,8 @@ describe("implement run with the profile tools", () => {
       expect(call.stdin).toContain("except the skills in ./context/skills/");
       expect(call.stdin).toContain("The user added these MCP tools: mcp__fake__search, mcp__cg__codegraph_explore.");
       expect(call.stdin).toContain(IMPLEMENT_MCP_LINES[0] as string);
+      // review-questions.md (AC-R36): an implement step gets no issue tool lines.
+      for (const l of [...ISSUE_LINES, ISSUE_REMOTE_RULE]) expect(call.stdin).not.toContain(l);
 
       const second = await s.step({ profile, attempt: 2 });
       expect(second.outcome?.problems).toEqual([]);

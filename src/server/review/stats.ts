@@ -136,6 +136,7 @@ export function reviewStats(db: Database, days: number, now = Date.now()): Revie
           outcomes: Object.fromEntries(severities.map((v) => [v, { addressed: 0, open: 0, pending: 0 }])) as ReviewStatsDto["outcomes"],
           medianMinutes: null,
           usage: { costUsd: 0, turns: 0 },
+          questions: { runs: 0, asked: 0, answered: 0, findings: 0, kept: 0 },
         },
         minutes: [],
       };
@@ -148,6 +149,15 @@ export function reviewStats(db: Database, days: number, now = Date.now()): Revie
       d.candidates += summary.verify.candidates;
       d.refuted += summary.verify.refuted;
       d.unsure += summary.verify.unsure;
+    }
+    // docs/plans/review-v2/review-questions.md: runs before prompt version 2.7 have no question counts.
+    const q = summary.finderQuestions;
+    if (q) {
+      d.questions.runs++;
+      d.questions.asked += q.asked;
+      d.questions.answered += q.answered;
+      d.questions.findings += q.findings;
+      d.questions.kept += q.kept;
     }
     if (r.usage_json) {
       const u = JSON.parse(r.usage_json) as RunUsage;

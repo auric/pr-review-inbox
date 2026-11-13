@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reviews ask fewer questions. Claude now looks for the answer in the code, the tests, and the task text first. The check step also checks each question of the review: an answered question drops, a question whose answer shows a defect becomes a finding, and only a question that the author must answer stays.
+- When a review profile has an MCP tool that reads your issue tracker, the review now reads the acceptance criteria of the linked tasks with it, read only. Settings, Review quality now shows per profile how many questions the reviews asked, answered, turned into findings, and kept.
 - Build a Jira task: a task that still waits for you no longer notifies again after 30 days and an app restart.
 - After a new Bitbucket URL is saved, the other open tabs of the app refresh too. Before, they could show the runs and run slots of the old server.
 - The app now deletes the temporary output files of Claude Code subagents after each run, also after Stop. Claude Code 2.1.322 and later write them to a temp folder per session.

@@ -101,8 +101,8 @@ describe("finding v2 (AC-R14)", () => {
     expect(reviewResult.safeParse({ ...V1_RESULT, findings: [{ ...V1_FINDING, cause: { path: "a" } }] }).success).toBe(false);
   });
 
-  test("the review prompts ship as prompt version 2.6 (2.5: no C# checklist)", () => {
-    expect(REVIEW_PROMPT_VERSION).toBe("2.6");
+  test("the review prompts ship as prompt version 2.7 (2.6: finder questions skip the check)", () => {
+    expect(REVIEW_PROMPT_VERSION).toBe("2.7");
   });
 });
 
@@ -127,7 +127,7 @@ describe("verify, discuss, and explain schemas", () => {
       evidence: "src/a.ts:9",
     };
     expect(verifyResult.parse({ verdicts: [v], coverage: NO_COVERAGE }).verdicts).toEqual([
-      { ...v, duplicateOf: null, question: "" },
+      { ...v, duplicateOf: null, question: "", finding: null },
     ] as never);
     for (const bad of [{ candidate: 0 }, { verdict: "maybe" }, { severity: "info" }, { reason: "x".repeat(1001) }, { duplicateOf: 0 }])
       expect(verifyResult.safeParse({ verdicts: [{ ...v, ...bad }], coverage: NO_COVERAGE }).success).toBe(false);
@@ -250,9 +250,28 @@ const PN_KEYS = {
   cites: z.array(lineNo).max(5).default([]),
 };
 
+// docs/plans/review-v2/review-questions.md adds finding to the verdict. Gate B20 ran the shape without it. Run B20 again before the
+// release with prompt version 2.7. The key has the nullable object form of finding.cause, which the review schema gates accepted.
+const QUESTION_KEYS = {
+  finding: z
+    .object({
+      path: z.string(),
+      side: z.enum(["new", "old"]),
+      line: lineNo,
+      lineEnd: lineNo.nullable(),
+      anchorText: z.string(),
+      title: z.string().max(200),
+      body: z.string().max(2000),
+    })
+    .nullable()
+    .default(null),
+};
+
 // limits.md decision 4: the shipped schemas leave out the cut caps that the gate shapes held.
 test("the shipped verify, explain, and discuss schemas have the shape that gates B18 and B20 accepted, without the cut caps", () => {
-  expect(shape(verifyJsonSchema())).toBe(shape(aiJsonSchema(B20.verify)));
+  expect(shape(verifyJsonSchema())).toBe(
+    shape(aiJsonSchema(B20.verify.extend({ verdicts: B20.verify.shape.verdicts.element.extend(QUESTION_KEYS).array().max(MAX_FINDINGS) }))),
+  );
   expect(shape(explainJsonSchema())).toBe(shape(aiJsonSchema(B20.explain)));
   expect(shape(discussJsonSchema())).toBe(shape(aiJsonSchema(B20.discuss.extend(PN_KEYS))));
 });

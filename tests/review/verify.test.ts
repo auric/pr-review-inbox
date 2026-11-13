@@ -672,6 +672,98 @@ describe("verify phase in a review run", () => {
 });
 
 // docs/plans/review-v2/spec.md section 1.6, salvage: a finder that reaches its turn cap gets one new short run on its own notes.
+// docs/plans/review-v2/review-questions.md (AC-R33, AC-R34): the check judges the finder questions.
+describe("finder questions in the verify phase", () => {
+  const QS = [
+    { text: "Is b0 meant to be exported?", why: "Q1 why." },
+    { text: "Must b1 be 2?", why: "Q2 why." },
+    { text: "Who reads b2?", why: "Q3 why." },
+    { text: "Must b3 be 4?", why: "Q4 why." },
+  ];
+  const place = (k: number, anchorText = `export const b${k} = ${k};`) => ({
+    path: "src/server/app.ts",
+    side: "new",
+    line: 21 + k,
+    lineEnd: null,
+    anchorText,
+    title: `b${k} has the wrong value`,
+    body: `Set b${k} to ${k + 1}.`,
+  });
+
+  test(
+    "a result with questions only starts the check; answered drops, a defect with a place becomes a finding, the rest stay",
+    async () => {
+      const h = await setup();
+      h.runner.write({
+        fixture: h.stream({ ...RESULT([]), questions: QS }),
+        bySchema: {
+          verify: {
+            verify: VERIFY([
+              V(1, "refuted", { reason: "src/server/app.ts:21 exports it for the web module." }),
+              V(2, "confirmed", { severity: "minor", reason: "The task asks for b1 = 2.", finding: place(1) }),
+              V(3, "question", { question: "Who reads b2 after the change?", reason: "No caller in ./repo reads b2." }),
+              // A place whose anchorText is not in the file: the question stays.
+              V(4, "confirmed", { reason: "The task asks for b3 = 4.", finding: place(3, "export const nope = 0;") }),
+            ]),
+          },
+        },
+      });
+      const d = await h.done(h.start());
+      expect(d.run.status).toBe("completed");
+      const c = h.verifyCalls()[0] as Call & { context: Record<string, string>; agents: Record<string, { prompt: string }> };
+      expect(h.verifyCalls()).toHaveLength(1);
+      expect(c.stdin).toContain("# Task\n\nCheck the 4 questions in ./context/candidates.md against the change ");
+      expect(c.stdin).toContain("Give one verdict for each question.");
+      expect(c.context["candidates.md"]?.match(/^## \w+ \d+$/gm)).toEqual([
+        "## Question 1",
+        "## Question 2",
+        "## Question 3",
+        "## Question 4",
+      ]);
+      expect(c.agents["rl-main"]?.prompt).toContain('The heading "## Question N" holds a question that the finder asked the author.');
+      expect(flag(c.argv, "--max-turns")).toBe(String(verifyMaxTurns(general, 4)));
+      const made = h.findings(d);
+      expect(
+        made.map((i) => [
+          h.payload(i).category,
+          h.payload(i).severity,
+          h.payload(i).verify?.verdict,
+          h.payload(i).anchor.line,
+          h.payload(i).title,
+        ]),
+      ).toEqual([["question", "minor", "confirmed", 22, "b1 has the wrong value"]]);
+      expect(h.payload(made[0] as ReviewItemDto)).toMatchObject({ anchor: { state: "exact" }, body: "Set b1 to 2.", trigger: "" });
+      expect(h.payload(made[0] as ReviewItemDto).verify?.reason).toBe("The task asks for b1 = 2.");
+      expect(d.items.filter((i) => i.kind === "question").map((i) => i.payload as Question)).toEqual([
+        { text: "Who reads b2 after the change?", why: "No caller in ./repo reads b2." },
+        { text: "Must b3 be 4?", why: "The task asks for b3 = 4." },
+      ]);
+      expect(d.run.summary?.finderQuestions).toEqual({
+        asked: 4,
+        answered: 1,
+        findings: 1,
+        kept: 2,
+        answers: [{ text: "Is b0 meant to be exported?", answer: "src/server/app.ts:21 exports it for the web module." }],
+      });
+      expect(d.run.summary?.verify).toMatchObject({ candidates: 0, confirmed: 0, refuted: 0, questions: 0, unchecked: 0 });
+    },
+    SLOW,
+  );
+
+  test(
+    "with the check off, the finder questions stay and no check process starts",
+    async () => {
+      const h = await setup();
+      h.runner.write({ fixture: h.stream({ ...RESULT([]), questions: QS.slice(0, 1) }) });
+      const d = await h.done(h.start("off"));
+      expect(h.verifyCalls()).toHaveLength(0);
+      expect(d.items.map((i) => i.payload)).toEqual(QS.slice(0, 1));
+      expect(d.run.summary?.finderQuestions).toMatchObject({ asked: 1, kept: 1 });
+    },
+    SLOW,
+  );
+});
+
 describe("salvage after the finder turn cap", () => {
   type Rec = Call & { context: Record<string, string> };
   type H = Awaited<ReturnType<typeof setup>>;

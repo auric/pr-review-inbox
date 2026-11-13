@@ -215,6 +215,8 @@ describe("reviewStats (AC-M4)", () => {
       outcomes: { ...NONE, major: { addressed: 2, open: 0, pending: 2 } },
       medianMinutes: 7,
       usage: { costUsd: 0.75, turns: 6 },
+      // Runs before prompt version 2.7 have no question counts.
+      questions: { runs: 0, asked: 0, answered: 0, findings: 0, kept: 0 },
     });
     expect(s.row("2")).toMatchObject({
       runs: 1,
@@ -249,6 +251,19 @@ describe("reviewStats (AC-M4)", () => {
     const row = s.row("2");
     expect([row.shown, row.accepted, row.acceptedShown]).toEqual([1, 3, 1]);
     expect(row.acceptedShown).toBeLessThanOrEqual(row.shown);
+  });
+
+  test("AC-R38: the question counts of summary.finderQuestions sum per group; a run without them counts no run", () => {
+    const s = setup();
+    const q = (asked: number, answered: number, findings: number, kept: number) => ({
+      finderQuestions: { asked, answered, findings, kept, answers: [] },
+    });
+    s.run({ version: "2.7", started: NOW - DAY, summary: q(3, 1, 1, 1) });
+    s.run({ version: "2.7", started: NOW - DAY, summary: q(2, 0, 0, 2) });
+    s.run({ version: "2.7", started: NOW - DAY });
+    s.run({ version: "2.6", started: NOW - DAY });
+    expect(s.row("2.7")).toMatchObject({ runs: 3, questions: { runs: 2, asked: 5, answered: 1, findings: 1, kept: 3 } });
+    expect(s.row("2.6").questions).toEqual({ runs: 0, asked: 0, answered: 0, findings: 0, kept: 0 });
   });
 
   test("the window leaves out older runs", () => {

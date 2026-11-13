@@ -538,9 +538,9 @@ describe("review v2 finder prompt", () => {
     // WP-R3: the agents of the verify phase are review agents too.
     const check = [withVerifyDelegation(verifyAgent(known, run), true), verifierAgent(known, run)].map((a) => a.prompt).join("\n---\n");
     expect({ version: REVIEW_PROMPT_VERSION, finder: sha(finder), check: sha(check) }).toEqual({
-      version: "2.6",
-      finder: "c634b814a6e009758c0436e99f35bced2feb9922b2b2ae151c758aeec4783b04",
-      check: "4c91fce5912f9ddce955519e0d876c94da61486d7b79a31d5e08033bf548abda",
+      version: "2.7",
+      finder: "b37807e6686ddc269401f00eddb0bb9ec7b8f95fa3fb0e6848b985e5ea271470",
+      check: "600fd6f0076ba7732c3a81b67b9546abb7d6b6ebfd55f40532fd778ec6b808de",
     });
   });
 
@@ -713,7 +713,7 @@ describe("review v3 prompt switches", () => {
   const rereviewInput = { ...full, since: "c".repeat(40), rangeBase: "d".repeat(40), earlier: [1, 2], posted: [2] };
   const withVariants = (...variants: ProfileInput["variants"]) => ({ ...general, variants });
 
-  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.6)", () => {
+  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.7)", () => {
     const threads = [{ thread: 1, replyTo: 2 }];
     const kinds: Record<string, string[]> = {
       review: [mainAgent(general, FULL).prompt, reviewerAgent(general, FULL).prompt, buildPrompt(full)],
@@ -743,15 +743,15 @@ describe("review v3 prompt switches", () => {
       ],
     };
     expect(Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, sha(v.join("\n---\n"))]))).toEqual({
-      review: "73caa762a647f92b245f73f3c0bde64b0944189b93161d197d131cd397ffd4ae",
-      rereview: "b2b077681986e1576b41b4d5f2a20bd0b06c4e0dea57e5aa6df1f7af1cb3029a",
-      verify: "d80c61cae723da363e2890e94335fd13132bb35d716b6b1f3b1cb5b77b189fd1",
+      review: "e49ee371bfc1f4b6eb787af3c05d99880469d0a63465b6e06ccc9981ed400301",
+      rereview: "2e65b5786381304ae4020f7cc796336857082703d1ce92dca0387f1be2f35506",
+      verify: "060475175194948ea9090dd147d225acf66d89386dc1a10576fff6916e7b4765",
       explain: "0a2d403ba5bfeea12a2f6249229f77ff3a19b646d202100aec744db3c4eb8b53",
       ask: "65e099f1000e6883cf1961cc02b33bef2864530efc61821d835f6667c6cb0f58",
       reply: "cd085ab743e2fe4908fcf1207db6cf3d061fdd5152161fc51ae9a9dfdea08de5",
       fix: "e3431b38c46d6e2c1d231c7604adca4463033a570580485c47f2d0f94ab4a799",
       discuss: "1f8484da378fa9c68d8c1738e16e719ca970d43657734853de5f879824c8422d",
-      improve: "537c09d5997d8b66230faf9b2a20e0d6bf78c52c26ecf7f2d75f23d17f1d9a1d",
+      improve: "06f5e3cba8d6a5f8baff029e2e67d493dbe61836bd915079ef04223d7d903a49",
     });
     expect(SHIPPED_PROFILES.map((p) => p.variants)).toEqual([[], []]);
     for (const p of SHIPPED_PROFILES) for (const m of TRIAL_MODULES) expect(p.modules).not.toContain(m);
@@ -835,7 +835,7 @@ describe("review v3 prompt switches", () => {
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
     expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.6+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.7+order+rules2");
   });
 
   test("ASD-STE100: every switch line has at most 20 words", () => {
@@ -855,7 +855,7 @@ describe("review v3 prompt switches", () => {
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.6+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.7+order+rules2");
     expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
@@ -907,7 +907,7 @@ describe("verify prompts", () => {
       "confirmed: the code shows the trigger and the wrong result.",
       "refuted: the code prevents the trigger, the problem is not in the change, or it is on the do-not-flag list.",
       "unsure: the code that you can read neither confirms nor refutes it.",
-      "question: the candidate depends on what the author intends.",
+      "question: only the author can answer the point, and no file or tool of this run answers it.",
       "duplicate: another candidate of the same group describes the same problem at the same place.",
       'A candidate with the state "discarded by the user" in ./context/history.md is refuted',
       "Set severity by the rubric below.",

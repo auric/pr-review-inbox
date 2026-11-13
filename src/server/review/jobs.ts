@@ -34,6 +34,7 @@ import {
 import { isMe } from "../../shared/me";
 import { plural } from "../../shared/outcome";
 import {
+  type AnchoredFinding,
   askJsonSchema,
   type Carried,
   discussJsonSchema,
@@ -150,6 +151,7 @@ import {
   judgeReplies,
   judgeSession,
   markCopy,
+  placeAnswers,
   salvaged,
   salvageFailed,
   settle,
@@ -287,9 +289,10 @@ type Job = {
   session: SessionStart | null;
   cancelled: boolean;
   done: Promise<void>;
-  // The step of the run. RunDto.phase shows it. candidates: the candidates of phase checking.
+  // The step of the run. RunDto.phase shows it. candidates, checkQuestions: the candidates and finder questions of phase checking.
   phase?: RunDto["phase"];
   candidates?: number;
+  checkQuestions?: number;
   // Stops the step before the CLI starts.
   abort?: AbortController;
   // The other open PRs of the run's pr-context.md, for the link rule of note proposals (docs/plans/review-v2/spec.md section 2.9).
@@ -398,6 +401,7 @@ type TaskJob = {
   done: Promise<void>;
   phase?: RunDto["phase"];
   candidates?: number;
+  checkQuestions?: number;
   abort?: AbortController;
   t: TaskRunStart | ImplementRunStart | TaskReviewStart;
   runner: Runner;
@@ -981,7 +985,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cwd: ws.work,
         appDir: ws.app,
         ...spec,
-        main: withDelegation(withMcp(withSkills(withLanguages(spec.main, langs), folders, always), used), delegate, parts.length),
+        main: withDelegation(withMcp(withSkills(withLanguages(spec.main, langs), folders, always), used, finder), delegate, parts.length),
         maxTurns: d
           ? Math.min(profile.maxTurns, DISCUSS_MAX_TURNS)
           : reply || fix
@@ -994,7 +998,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs), folders, always), used),
+                withMcp(withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs), folders, always), used, finder),
                 instructions.text,
               ),
             }
@@ -1069,6 +1073,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         written: v.written,
         servers,
         demote: profile.verifier.outcome === "demote",
+        placed: v.placed,
       }),
     );
   }
@@ -1198,7 +1203,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         appDir: ws.app,
         prompt: buildSalvagePrompt(r.input, r.rereview),
         schema: r.schema,
-        main: withMcp(salvageAgent(r.profile), r.used),
+        main: withMcp(salvageAgent(r.profile), r.used, true),
         maxTurns: SALVAGE_MAX_TURNS,
         model: r.profile.model,
         effort: r.profile.effort,
@@ -1237,17 +1242,22 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       instructions: { text: string };
       mcpServers: Record<string, McpServerSpec>;
     },
-  ): Promise<{ check: CheckRun | null; verify: boolean; written: number } | Ending> {
+  ): Promise<{ check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding> } | Ending> {
     const { profile, context, folders, always, used, task } = r;
     const verify = profile.verifier.mode === "on";
-    const file = verify && found.candidates.length ? candidatesFile(found.candidates) : null;
+    // docs/plans/review-v2/review-questions.md: the finder questions get a check too, also in a run with no finding.
+    const file = verify && (found.candidates.length || found.questions.length) ? candidatesFile(found.candidates, found.questions) : null;
     const written = file?.written ?? 0;
-    if (!file || written === 0) return { check: null, verify, written };
+    const asked = file?.asked ?? 0;
+    if (!file || written + asked === 0) return { check: null, verify, written };
     writeFileSync(join(ws.context, file.file.name), file.file.text);
-    const split = written > VERIFY_SPLIT;
-    log(`Review run ${j.id}: checks ${written} of ${found.candidates.length} candidates, ${VERIFIER} ${split ? "on" : "off"}.`);
+    const split = written + asked > VERIFY_SPLIT;
+    log(
+      `Review run ${j.id}: checks ${written} of ${found.candidates.length} candidates and ${asked} of ${found.questions.length} questions, ${VERIFIER} ${split ? "on" : "off"}.`,
+    );
     j.phase = "checking";
     j.candidates = written;
+    j.checkQuestions = asked;
     notify(j.id);
     const offset = o.events.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
     const tag = (e: RunEvent): RunEvent => ({
@@ -1257,7 +1267,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       seq: e.seq + offset,
     });
     const verifier = withInstructions(
-      withMcp(withSkills(verifierAgent(profile, context), folders, always, task), used),
+      withMcp(withSkills(verifierAgent(profile, context, asked > 0), folders, always, task), used, true),
       r.instructions.text,
     );
     // No await between this check and run(), so a later Cancel reaches the new process.
@@ -1267,10 +1277,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       {
         cwd: ws.work,
         appDir: ws.app,
-        prompt: buildVerifyPrompt({ ...r.input, count: written, rereview: r.rereview }),
+        prompt: buildVerifyPrompt({ ...r.input, count: written, asked, rereview: r.rereview }),
         schema: verifyJsonSchema(),
-        main: withVerifyDelegation(withMcp(withSkills(verifyAgent(profile, context), folders, always, task), used), split),
-        maxTurns: verifyMaxTurns(profile, written),
+        main: withVerifyDelegation(
+          withMcp(withSkills(verifyAgent(profile, context, asked > 0), folders, always, task), used, true),
+          split,
+          asked > 0,
+        ),
+        maxTurns: verifyMaxTurns(profile, written + asked),
         model: profile.verifier.model ?? profile.model,
         effort: verifierEffort(profile),
         advisor: profile.advisor,
@@ -1284,7 +1298,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     );
     j.db.transaction(() => upsertEvents(j.db, j.id, o2.events.map(tag)))();
     if (j.cancelled) return cancelledCheck(o, o2);
-    return { check: { o: o2, startedAt, endedAt: now(), written }, verify, written };
+    const check: CheckRun = { o: o2, startedAt, endedAt: now(), written, asked };
+    return { check, verify, written, placed: await placeAnswers(ws, check) };
   }
 
   // docs/plans/session-consult.md part C: a fork of the user's session in a fresh sanitized snapshot of the PR head, never in the
@@ -1639,7 +1654,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         prompt: buildPrompt(input),
         schema: reviewJsonSchema(false),
         main: withDelegation(
-          withMcp(withSkills(withLanguages(mainAgent(profile, context), langs), folders, always, true), tools.used),
+          withMcp(withSkills(withLanguages(mainAgent(profile, context), langs), folders, always, true), tools.used, true),
           delegate,
         ),
         maxTurns: profile.maxTurns,
@@ -1649,7 +1664,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(withSkills(withLanguages(reviewerAgent(profile, context), langs), folders, always, true), tools.used),
+                withMcp(withSkills(withLanguages(reviewerAgent(profile, context), langs), folders, always, true), tools.used, true),
                 instructions.text,
               ),
             }
@@ -1694,6 +1709,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         written: v.written,
         servers,
         demote: profile.verifier.outcome === "demote",
+        placed: v.placed,
       }),
     );
   }
@@ -1790,7 +1806,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   const withPhase = (db: Database, r: RunDto): RunDto => {
     const j = r.status === "running" ? [...active, ...extras].find((x) => x.id === r.id && x.db === db) : undefined;
     return j?.phase
-      ? { ...r, phase: j.phase, ...(j.phase === "checking" && j.candidates !== undefined && { candidates: j.candidates }) }
+      ? {
+          ...r,
+          phase: j.phase,
+          ...(j.phase === "checking" && j.candidates !== undefined && { candidates: j.candidates }),
+          ...(j.phase === "checking" && j.checkQuestions && { checkQuestions: j.checkQuestions }),
+        }
       : r;
   };
 

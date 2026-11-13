@@ -599,6 +599,16 @@ export type RunSummary = Pick<ValidatedResult, "summary" | "risks" | "coverage" 
   volume?: Volume;
   verify?: VerifySummary;
   phases?: RunPhase[];
+  finderQuestions?: FinderQuestions;
+};
+// docs/plans/review-v2/review-questions.md: the finder questions of a review run. asked = answered + findings + kept. answered: the
+// check found the answer, which answers holds. findings: the answer showed a defect. Absent in runs before prompt version 2.7.
+export type FinderQuestions = {
+  asked: number;
+  answered: number;
+  findings: number;
+  kept: number;
+  answers: { text: string; answer: string }[];
 };
 
 // session: a direct consult of the user's own session (docs/plans/session-consult.md part C).
@@ -659,6 +669,8 @@ export type RunDto = {
   phase?: "indexing" | "finding" | "checking";
   // Phase checking only: the number of candidates that the verify phase checks.
   candidates?: number;
+  // Phase checking only: the number of finder questions that it checks (docs/plans/review-v2/review-questions.md).
+  checkQuestions?: number;
   // A session run only: the transcript that it forked and the text that it got, with no transcript text. tokens: sessionTokens(bytes).
   // mode: consult.ts sessionModes, absent for runs made before part D. run: on a fix run that an import made from the proposal of a
   // session run (session-consult.md part D), that session run.
@@ -1367,6 +1379,8 @@ export type ReviewStatsDto = {
   outcomes: Record<Severity, PostOutcomes>;
   medianMinutes: number | null;
   usage: { costUsd: number; turns: number };
+  // The sums of summary.finderQuestions. runs: the runs with that key.
+  questions: Omit<FinderQuestions, "answers"> & { runs: number };
 };
 export type PostOutcomes = { addressed: number; open: number; pending: number };
 

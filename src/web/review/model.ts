@@ -726,7 +726,11 @@ export function hiddenParts(hidden: ReviewItemDto[]): string[] {
 export function runningText(r: RunDto): string {
   if (r.phase === "indexing") return "Indexing for codegraph…";
   if (r.kind !== "review" || r.explain) return RUN_TEXT[r.kind].running;
-  if (r.phase === "checking") return `Checking ${plural(r.candidates ?? 0, "finding")}…`;
+  // docs/plans/review-v2/review-questions.md: a check of finder questions only names the questions.
+  if (r.phase === "checking")
+    return !r.candidates && r.checkQuestions
+      ? `Checking ${plural(r.checkQuestions, "question")}…`
+      : `Checking ${plural(r.candidates ?? 0, "finding")}…`;
   return r.since ? `Finding problems in the changes since ${shortHash(r.since.head)}…` : "Finding problems…";
 }
 

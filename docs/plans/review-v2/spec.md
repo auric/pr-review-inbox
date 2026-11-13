@@ -85,7 +85,7 @@ Stored form (PROFILES_VERSION 7, catalog.ts storeProfiles and resolveProfiles): 
 | docs | Docs and comments | off | "Check that docs, comments, and the changelog that describe changed behavior still match the code." / "Report a wrong doc only when a reader would act wrongly on it." |
 | simplify | Simplify (what to delete) | off | The lines of the Over-engineering prompt (catalog.ts:94-101) without "Put a defect into risks" and "In summary, give the number of lines", plus "Use module simplify." |
 | rules | Project rules | on | "Check the changed files against the project instructions. Each instruction file names the paths that it applies to." / "Use a rule only for files in its scope." / "In rule, copy the exact sentence of the rule. The app checks the quote against the loaded instructions." / "Report a rule finding only when the change breaks the rule, not when old code breaks it." |
-| intent | Matches the task | on | "Compare the change with the goal in ./context/pr.md and ./context/task.md." / "Report a stated requirement that the change does not meet. Quote the requirement in evidence." / "Report a change that the goal does not explain only when it changes behavior for users." |
+| intent | Matches the task | on | "Compare the change with the goal in ./context/pr.md and ./context/task.md." / "List each acceptance criterion of the tasks. When task.md does not hold them, read them with an issue tool, if the MCP list has one." / "Report a stated requirement or acceptance criterion that the change does not meet. Quote it in evidence." / "Put a criterion that the code cannot show into coverage notChecked, with the reason." / "Report a change that the goal does not explain only when it changes behavior for users." (prompt version 2.7, review-questions.md) |
 
 - languageChecks stays its own boolean field and shows as "Language checklists (C++, C, Python, C#)" among the checkboxes. withLanguages (languages.ts) stays.
 - rules adds nothing when the run has no project instructions. intent adds nothing when pr.md has no description and task.md does not exist. The coverage then says "Project rules: no instructions loaded." or "Matches the task: no description or task."
@@ -138,14 +138,14 @@ Each prompt line with its reason:
 | Finder: "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there, and set cause to the changed line that makes it reachable or worse." | R6: the app checks it. |
 | Finder: the path line, the side line, and "Copy anchorText exactly from the lines line to lineEnd on that side. The app compares it with the file." | S4. The model knows why the quote matters. |
 | Finder: "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result." | S9: concrete scenario. |
-| Finder: "When you cannot name a trigger, write a question for the author instead of a finding." | S9: "please verify" points become questions. |
+| Finder: "When you cannot name a trigger, search the code for one. When you still cannot name one, write a question for the author." | S9, review-questions.md: the finder looks for a trigger before it asks. Prompt version 2.7. |
 | Finder: "In title, name the problem in one line of 12 words or fewer. In body, give the consequence and a fix direction in 3 sentences or fewer." | Short rows and short comments. |
 | Finder: "In evidence, give path:line for each line that shows the problem." | Grounding. |
 | Finder: "Set evidenceStatus to code when you read each line of the trigger path. Else set it to unverified." | Clear meaning for the cap. |
 | Finder: "Set confidence to high when you traced the trigger in the code, medium when you read the code but did not trace each step, and low when you only suspect it." | Calibrated values for the fold. |
 | Finder: "Set module to core, or to the ID of the check section that found it." | Stats per module. |
 | Finder: "Set category to security, concurrency, resource, or behavior for a finding of that class. resource: a leak or a missing release. behavior: a change that users or callers see." | The classes that the check never hides (section 1.7). Prompt version 2.4. |
-| Finder: "Put open points about the intent into questions. Say what you need to know and why it matters." | Questions stay apart. |
+| Finder: "Before you ask a question, look for the answer yourself. Read the changed code, its callers, its tests, its config, and the files in ./context." / "When you find the answer, ask nothing. When the answer shows a defect, report a finding with that evidence." / "Put a point into questions only when no file and no tool of this run gives the answer. In why, name what you checked and why it did not answer the point." | review-questions.md: fewer questions. rl-main and the salvage run only. Prompt version 2.7. |
 | Do-not-flag: "Do not report the points below. The check step refutes them, so they only cost time:" then "style, naming, formatting, or comment wording" / "what a compiler, type checker, linter, or formatter reports" / "a problem that the code already handles: read the guards and the callers first" / "a rule that the code turns off on purpose, such as a suppression with a reason" / "a risk with no trigger, such as 'this might break'" / "behavior that the pull request text or the task asks for" / "code that only moved or was renamed, with no change of logic" / "a choice between two correct designs" / "a missing test, unless the Tests check is on" | S11, research practice 4. The reason line says why. |
 | Rubric: "Set severity by what the merge must wait for." and the blocker, major, and minor lines (catalog.ts:256-258) | Kept. |
 | Rubric: the nit line of the volume (section 1.4) | R10. |
@@ -201,6 +201,8 @@ export const verdict = z.object({
   evidence: z.string().max(1000).describe("path:line of the line that confirms or refutes it."),
   duplicateOf: z.number().int().min(1).nullable().default(null).describe("For duplicate: the candidate that it repeats. Else null."),
   question: z.string().max(1000).default("").describe("For question: the question for the author. Else empty."),
+  // Prompt version 2.7 (review-questions.md): the defect that answers a finder question. Gate B20 must run again on this shape.
+  finding: z.object({ ...place, title: z.string().max(200), body: z.string().max(2000) }).nullable().default(null),
 });
 export const verifyResult = z.object({ verdicts: z.array(verdict).max(MAX_FINDINGS), coverage });
 ```
@@ -217,16 +219,19 @@ rl-verify agent prompt, line by line:
 | "confirmed: the code shows the trigger and the wrong result." | Verdict meaning. |
 | "refuted: the code prevents the trigger, the problem is not in the change, or the candidate is on the do-not-flag list. In reason, name the guard or the list item with path:line." | Verdict meaning with proof. |
 | "unsure: the code that you can read neither confirms nor refutes it. In reason, name what is missing." | Honest middle state. |
-| "question: the candidate depends on what the author intends. Write the question for the author in question." | S9: "please verify" points become questions. |
+| "question: only the author can answer the point, and no file or tool of this run answers it. Write the question in question. In reason, name what you checked." | S9, review-questions.md. Prompt version 2.7. |
+| "When the code or the task text answers the point, give confirmed or refuted, not question." | review-questions.md: fewer questions. |
+| "For a candidate without a trigger, look for one. When you find it, give confirmed, and put the trigger into reason." | review-questions.md: a found trigger keeps the finding. |
 | "duplicate: another candidate of the same group describes the same problem at the same place. Set duplicateOf to the clearer candidate." | R4. |
 | "A candidate that ./context/history.md lists as discarded by the user is refuted, unless the code at that place changed." | No re-raise. |
 | "Set severity by the rubric below. Lower it for a rare trigger or a small impact. Raise it only when the code shows a worse result than the candidate says." | S9 reflect pass. |
 | The rubric lines and the do-not-flag list of section 1.5 | One rubric for both phases. |
 | "Look for no new problems. A finder already ran." | Scope and time. |
+| Only when candidates.md holds finder questions: the "## Question N" lines of review-questions.md (QUESTION_BLOCK_RULES) | AC-R33 to AC-R35. |
 | TRUST lines, the coverage line, and the docs rule | Kept. |
-| Delegation (above VERIFY_SPLIT): "Give the candidates to the rl-verifier agent in calls of at most 6 candidates. Give each candidate to one call. Copy each verdict into verdicts." | R3. |
+| Delegation (above VERIFY_SPLIT): "Give the candidates to the rl-verifier agent in calls of at most 6 candidates. Give each candidate to one call. Copy each verdict into verdicts." With finder questions, also "Give the questions to the rl-verifier agent too. Each question counts as one candidate of its call." The split counts candidates and questions together. | R3, review-questions.md. |
 
-rl-verifier prompt: the same lines, with "You check the candidates that the request names." instead of the delegation line, and "Report each verdict with candidate, verdict, severity, reason, evidence, duplicateOf, and question." Its definition sets model and effort from profile.verifier and the read-only tools of rl-reviewer.
+rl-verifier prompt: the same lines, with "You check the candidates that the request names." instead of the delegation line, and "Report each verdict with candidate, verdict, severity, reason, evidence, duplicateOf, and question." With finder questions in candidates.md, that line ends with "duplicateOf, question, and finding." Its definition sets model and effort from profile.verifier and the read-only tools of rl-reviewer.
 
 Salvage run (a finder that reaches its turn cap):
 
@@ -327,6 +332,13 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 29. AC-R29. On a seeded database, ReviewStatsDto.outcomes counts addressed, open, and pending per severity of the last copy. A changed line counts as addressed. A resolved thread counts as addressed. An untouched line with no new head is pending. A new head that leaves the anchor not orphaned counts as open. A merged or declined PR counts the rest as open. An anchor orphaned before the post is no change.
 30. AC-R30. Settings, Review quality has the table "Addressed by a later change": one row per prompt version over all profiles, newest first, with "Addressed: X of Y posted findings (Z%)" and "N pending" apart. Y is addressed plus open. One column per severity shows "X of Y (Z%)". The Posted cell of the main table says "N resolved or fixed" for the AC-M4 addressed count.
 31. AC-R31. A change with a .cs or .csx file gets the C# list. A change without one does not. .razor and .cshtml files get no list. The C# list ends with "Do not report in C#:" and one to three items. Each item sentence has at most 20 words. The "Language checklists" checkbox names C#. A profile with language checks on gets the list with no profile upgrade. REVIEW_PROMPT_VERSION is "2.6".
+32. AC-R32. rl-main and the salvage run hold the finder question rules of review-questions.md. rl-reviewer holds none of them. REVIEW_PROMPT_VERSION is "2.7".
+33. AC-R33. candidates.md holds a "## Question N" block for each finder question after the finding candidates. N continues after the last candidate number. A question gets a block only when every candidate has one. The byte cap and MAX_FINDINGS cover both kinds. A finder result with questions and no finding starts the verify phase. A check of questions only shows "Checking N questions…".
+34. AC-R34. A refuted finder question drops, and summary.finderQuestions.answers keeps its text and the answer. A confirmed one with a place that the finder validator anchors becomes a finding with category "question" and the verdict severity. A confirmed one without such a place keeps the question with the verdict reason in why. A question verdict keeps the question with the verdict text and reason. Unsure, duplicate, and no verdict keep the finder question. A question without a verdict never makes the run incomplete. Question verdicts do not change summary.verify.
+35. AC-R35. rl-verify and rl-verifier hold the question line, the answer line, and the trigger line of review-questions.md. The "## Question N" lines are only in a prompt whose candidates.md holds questions. Above VERIFY_SPLIT blocks, the delegation of rl-verify also names the questions.
+36. AC-R36. With picked MCP tools, the issue lines and the remote exception of review-questions.md are in the review finder (rl-main and rl-reviewer), the verify phase, the salvage run, and the own review of a task. Explain, Ask, Fix, Discuss, reply runs, and task steps do not get them. Without picked tools, no run has them. No line names a server.
+37. AC-R37. The intent module lists the acceptance criteria, reads them with an issue tool when the MCP list has one, reports an unmet criterion with a quote, and puts a criterion that the code cannot show into coverage notChecked.
+38. AC-R38. summary.finderQuestions of a review run holds asked, answered, findings, kept, and answers. Settings, Review quality sums the counts per profile and prompt version and shows "Questions: N asked, A answered, F to findings, K kept" in the Check cell. A group without such a run shows no question line. The own review of a task stays out.
 
 ## 2. Part 2: Discuss a finding
 

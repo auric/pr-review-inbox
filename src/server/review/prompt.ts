@@ -184,11 +184,17 @@ export function buildRereviewPrompt(i: RereviewInput): string {
 
 // docs/plans/review-v2/spec.md section 1.6: the verify phase. The candidate text stays in ./context/candidates.md.
 // rereview: BASE of the git tools is the base of the reviewed range, and the change to check runs from the merge base.
-export function buildVerifyPrompt(i: PromptInput & { count: number; rereview: boolean }): string {
+// asked: the finder questions in candidates.md (docs/plans/review-v2/review-questions.md).
+export function buildVerifyPrompt(i: PromptInput & { count: number; asked?: number; rereview: boolean }): string {
+  const asked = i.asked ?? 0;
+  const kinds = [
+    ...(i.count || !asked ? [[`${i.count} ${i.count === 1 ? "candidate" : "candidates"}`, "each candidate"]] : []),
+    ...(asked ? [[`${asked} ${asked === 1 ? "question" : "questions"}`, "each question"]] : []),
+  ];
   return [
     "# Task",
     "",
-    `Check the ${i.count} ${i.count === 1 ? "candidate" : "candidates"} in ./context/candidates.md against the change ${i.mergeBase}..${i.head} in ./repo. Give one verdict for each candidate.`,
+    `Check the ${kinds.map((k) => k[0]).join(" and ")} in ./context/candidates.md against the change ${i.mergeBase}..${i.head} in ./repo. Give one verdict for ${kinds.map((k) => k[1]).join(" and ")}.`,
     "",
     ...common({ ...i, candidates: true }, i.rereview ? { earlier: [] } : undefined),
   ].join("\n");
