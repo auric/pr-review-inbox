@@ -63,7 +63,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 - The build takes the N candidates with the oldest first run. A newer merged PR adds a candidate, but it does not change this choice.
 - A clean case has `clean: true` and no bugs. It keeps its threads, its task rows, and its extras.
 - MANIFEST.json `clean` holds `asked` (N), `candidates`, and `cases`. `counts.cases` includes the clean cases. The build prints them on the "Clean cases" line.
-- `bun run eval:ab` builds the set again before each run, without `--clean`. Its set then has no clean cases.
+- `bun run eval:ab` builds the set again before each run and passes its `--clean N` to the build. Without `--clean`, its set has no clean cases.
 
 ## Probe set
 
@@ -80,9 +80,12 @@ A fixture case can have `threads` and `clean`, as a local case can. The run seed
 
 ## Optional flags
 
-- `--repeat N`: run each side N times (1 to 10). Default: 1.
-- `--candidate-variants a,b`: the variants that the candidate adds. Default: `order,rules2`. An empty value adds none.
-- `--candidate-modules a,b`: the modules that the candidate adds to the shipped modules. Default: `failures`. An empty value adds none.
+- `--repeat N`: run the baseline N times (1 to 10). Default: 1.
+- `--candidate-repeat N`: run the candidate N times. N must not be more than the repeats of the baseline. Default: `--repeat`.
+- `--candidate-variants a,b`: the variants that the candidate adds. Default: none, so the candidate is the shipped profile.
+- `--candidate-modules a,b`: the modules that the candidate adds to the shipped modules. Default: none.
+- `--candidate-replay`: the candidate replays the recorded finder and salvage calls of the baseline and runs only the verify calls. The command refuses a candidate flag that changes the finder.
+- `--clean N`: the clean cases of the set build (see "Clean cases"). Give the same N to every command of one set. A different N gives a different set fingerprint, and the command then refuses the stored baseline.
 - `--effort low|medium|high|xhigh|max`: the effort of the baseline and candidate runs. Default: none, so both sides run with the effort of the shipped profile. The eval header shows the effort of each run.
 - `--candidate-effort low|medium|high|xhigh|max`: the effort of the candidate runs. Default: none, so the candidate runs with the effort of the baseline. With this flag, the table says that the efforts differ.
 - `--candidate-verifier on|off`: the verify mode of the candidate runs. Default: none, so the candidate keeps the verify mode of the shipped profile. The baseline always keeps it. The eval header shows the verifier of each run.
@@ -104,8 +107,9 @@ bun run eval:ab -- --baseline eval-results/ab-<stamp>-<commit> --candidate-varia
 
 - The command reads the baseline results from `review-baseline/` and `rereview-baseline/` of that folder.
 - A mode without its folder runs the baseline as usual. The output says so in one line.
-- The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, model, or repeat count. The check runs before any run.
-- Give the same `--effort` and `--repeat` as the earlier run. A new commit or CLI version is allowed. The A and B header lines show both.
+- The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, or model, or fewer repeats than the candidate runs. The check runs before any run.
+- Give the same `--effort` and `--clean` as the earlier run. The candidate can run fewer repeats than the stored baseline.
+- Each run records its CLI calls automatically in `<result>.calls/` beside its result file. `--candidate-replay` uses the recording of the baseline result. A new commit or CLI version is allowed. The A and B header lines show both.
 - The set must not change. A new decision in the app changes the set fingerprint, and the command then refuses the reuse.
 - With `--large`, give the folder of a full-set run or of an earlier `--large` run. A full-set baseline must pass the checks above against the full set. Then the command keeps only its large cases and writes that copy to `review-baseline/` of the new result folder. So the new folder serves as the large baseline of later runs.
 

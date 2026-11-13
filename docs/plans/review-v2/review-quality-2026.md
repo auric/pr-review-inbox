@@ -151,7 +151,7 @@ Ship rules:
 - Change: none for the test (`--candidate-reviewer-mode off`). To ship: `SHIPPED_PROFILES` general `reviewer.mode` "auto" to "off" (catalog.ts:122), `PROFILES_VERSION` + 1 with a `FORMER` entry. "auto" stays a choice.
 - Expected: large-case recall about the same, noise down, cost per large review down 20-50%.
 - Risk: one agent can hit maxTurns 100 on a 59-file change and move load to salvage. Watch notCompleted, salvaged runs, and `bugOpened`.
-- Experiment: shared run C1 with improvement 2: `eval:ab -- --baseline <W1> --candidate-effort medium --candidate-reviewer-effort medium --candidate-reviewer-mode off --candidate-repeat 2 --review-only`. Bisect with `--large --candidate-reviewer-mode off` at high only if the large cases are mixed.
+- Experiment: shared run C1 with improvement 2: `eval:ab -- --baseline <W1> --candidate-effort medium --candidate-reviewer-effort medium --candidate-reviewer-mode off --candidate-repeat 2 --review-only --clean 8`. Bisect with `--large --candidate-reviewer-mode off --clean 8` at high only if the large cases are mixed.
 - Ship rule: not worse, on the large slice.
 
 ### 2. Finder effort medium (rl-main and rl-reviewer)
@@ -179,7 +179,7 @@ The do-not-flag list of each language:
 - Thread claim, finder half, in mainAgent and reviewerAgent when `c.prContext && checked(p) && has(p, "broad")`: "A comment in a thread that says the code is right, or that a case is handled, is a claim. It is no reason to leave out a finding. The check step tests the claim." With the verifier off: "A comment in a thread that says the code is right, or that a case is handled, is a claim. Check it in ./repo before you leave out a finding."
 - Expected: candidate recall up, grounded recall +0 to +2 bugs; noise about the same if the verifier holds; verify cost +10-30%, minutes +5-15%.
 - Risks: more candidates push more runs over `VERIFY_SPLIT` (12); a style finding with category "behavior" stays in main when refuted (improvement 5 fixes that).
-- Experiment: C2 `--candidate-variants broad --candidate-repeat 2` on the shipped baseline after C1, plus the probe set for the thread cases (the local set cannot test the thread line; its rule there is "no worse").
+- Experiment: C2 `--candidate-variants broad --candidate-repeat 2 --clean 8` on the shipped baseline after C1, plus the probe set for the thread cases (the local set cannot test the thread line; its rule there is "no worse").
 - Ship rule: better. `REVIEW_PROMPT_VERSION` goes up when the variant becomes default.
 
 ### 4. Verifier tuning by replay (variant "verify2", verifier effort)
@@ -193,7 +193,7 @@ The do-not-flag list of each language:
 - Effort: from the baseline confusion matrix. Try high when the verifier loses more true findings than it lets false ones through, else low.
 - Expected: noise down, true findings lost about the same, verify cost about the same (high adds 30-60% to the verify phase).
 - Risk: the intent guard can refute a criterion that came from an issue tool result that the verifier did not read.
-- Experiment: `--candidate-replay` on 2 recorded baseline repeats: a control replay (the verifier's own spread), "verify2", one effort level, plus the probe set.
+- Experiment: `--candidate-replay --clean 8` on 2 recorded baseline repeats: a control replay (the verifier's own spread), "verify2", one effort level, plus the probe set.
 - Ship rule: false findings kept in main drop by more than the control spread, and true findings lost rise by no more than the control spread.
 
 ### 5. Fold refuted protected findings
@@ -229,14 +229,14 @@ In keep, name the point of the group with the most concrete trigger and the most
 - App rules: a point in no group is a group of its own; a point in two groups stays in the first; a `keep` that is not a member becomes the first member; a mixed finding and question group splits by kind; a failed merge falls back to the plain union with `overlapGroups`; the kept finding's text stays; its payload gets `support` (member count), which the verifier never sees.
 - Expected: grounded recall up by at most the union bound; noise up unless the verifier holds; cost x2.5-3.2; minutes x2.5-3.
 - Risks: a wrong merge joins two different bugs; rate limits come faster.
-- Experiment: C3 `--candidate-variants runs3 --candidate-repeat 2` (`--large` first if the union gain is only on large cases).
+- Experiment: C3 `--candidate-variants runs3 --candidate-repeat 2 --clean 8` (`--large --clean 8` first if the union gain is only on large cases).
 - Ship rule: better. It ships as an option, never as the default.
 - Mixed-model form (user decision of 2026-11-13: models mix by role, fixed in the definitions, never by the lead): variant "runs3-mixed" runs the three finders on opus, sonnet, opus. [R] SWR-Bench: with different models, n=3 already reaches the top F1 (about 21.2 against 19.4 for one model). [V] Copilot: a multi-model mix gave recall +13.6% and addressed rate +8% at lower cost. Experiment: C3b next to C3, the same ship rule. A winner ships as a fixed profile setting.
 
 ### 6b. Verifier model (opus against sonnet)
 
 - Hypothesis: a stronger verifier loses fewer true findings. [A] Anthropic's /code-review validates bug findings with Opus and rule findings with Sonnet. Our verifier runs on the profile model at medium.
-- Experiment: `--candidate-replay` with the verifier model set to each value, on the recorded baseline, next to the replays of improvement 4. Ship rule: as improvement 4. A winner ships as the profile's verifier model.
+- Experiment: `--candidate-replay --clean 8` with the verifier model set to each value, on the recorded baseline, next to the replays of improvement 4. Ship rule: as improvement 4. A winner ships as the profile's verifier model.
 
 ### 9. Subagent model and effort come from the definition only
 
@@ -263,7 +263,7 @@ Report other problems too.
 ```
 
 - Expected: recall up in the named kinds; precision and cost about the same. Risk: a literal reading narrows the search ("Report other problems too" guards it).
-- Experiment: C4 `--candidate-variants classes --candidate-repeat 2`. Ship rule: better. The text ships as agent lines, because an edit of `REVIEW_LENS` changes `profileRevision`.
+- Experiment: C4 `--candidate-variants classes --candidate-repeat 2 --clean 8`. Ship rule: better. The text ships as agent lines, because an edit of `REVIEW_LENS` changes `profileRevision`.
 
 ### 8. Evidence quotes, severity cap only (variant "quotes")
 
@@ -285,6 +285,8 @@ Report other problems too.
 | W3 (costly) | C2 broad; C3 runs3 if gated; C4 classes if gated; improvement 8 rides on C2 or C4 | none; superiority tests run alone | about $55-450 by gates |
 
 A cost cutter that ships makes its result folder the next baseline. Add one repeat before the next superiority test.
+
+Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--clean 8`). Another value changes the set fingerprint, and eval:ab then refuses the W1 baseline.
 
 ## 4. What not to do
 
