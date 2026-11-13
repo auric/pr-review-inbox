@@ -88,6 +88,7 @@ Add or update a project skill:
 - A parallel worktree runs e2e on its own ports, for example `E2E_FAKE_PORT=7458 E2E_APP_PORT=7459 E2E_JIRA_PORT=7457`. The `E2E code:` line of `serve.ts` shows which checkout the run serves.
 - The e2e control routes (`/__control/*`) live on the fake Bitbucket in `tests/e2e/serve.ts`, never in the app.
 - The detail pane shows the first row and acknowledges its visible messages after about 1 s. A test that needs a message to stay unread selects another PR first.
+- Gate transcripts are never committed. `scripts/gate/sanitize-claude.ts` writes to `.gate0/claude/` and refuses an output folder in `fixtures/`. A new file in `fixtures/claude/` is a deliberate, reviewed copy: synthetic, or sanitized and read line by line.
 - Headless Chromium denies notifications. The e2e tests grant the permission and replace `window.Notification` with a recorder.
 
 ## Hard rules

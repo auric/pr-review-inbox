@@ -3,6 +3,7 @@
 
 // The pure core of sanitize-claude.ts: it replaces real values in parsed stream-json and counts the real values that a text still holds.
 // It reads no file and starts no process.
+import { isAbsolute, relative, resolve } from "node:path";
 
 export type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 export const isObj = (v: Json): v is { [k: string]: Json } => !!v && typeof v === "object" && !Array.isArray(v);
@@ -14,6 +15,14 @@ export const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export const pathForms = (p: string) => [p, p.replaceAll("\\", "/"), p.replaceAll("\\", "\\\\"), p.replace(/[^a-zA-Z0-9]/g, "-")];
 export const formPairs = (real: string, fake: string) =>
   pathForms(real).map((r, i) => [r, pathForms(fake)[i] as string] as [string, string]);
+
+// Gate transcripts are never committed. A test fixture is a reviewed copy, and the sanitizer deletes every .jsonl in its output folder.
+export const claudeOutDir = (root: string, out?: string) => {
+  const dir = resolve(root, out ?? ".gate0/claude");
+  const rel = relative(resolve(root, "fixtures"), dir);
+  if (!rel || (!rel.startsWith("..") && !isAbsolute(rel))) throw new Error(`the output folder must be outside fixtures/: ${dir}`);
+  return dir;
+};
 
 const HOOK_FIELDS = new Set(["output", "stdout", "stderr"]);
 

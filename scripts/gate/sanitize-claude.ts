@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Writes fixtures/claude/*.jsonl from the Gate B raw stream-json in .gate0/v3-local/raw/.
+// Writes .gate0/claude/*.jsonl (git-ignored) from the Gate B raw stream-json in .gate0/v3-local/raw/.
 // Usage: bun scripts/gate/sanitize-claude.ts [--raw <dir>] [--out <dir>]
 // Real values come from the raw files, `claude auth status`, and the local Claude config at run time. This file holds no real values.
 // Output is counts only. Exit code 1 when the scan finds a real value in the output.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { countHits, formPairs, hideAgentOutput, isObj, type Json, sanitizer, scanPatterns, UUID } from "./sanitize-core";
+import { claudeOutDir, countHits, formPairs, hideAgentOutput, isObj, type Json, sanitizer, scanPatterns, UUID } from "./sanitize-core";
 import { agentFront } from "./workflow";
 
 const ROOT = resolve(import.meta.dir, "../..");
@@ -18,7 +18,13 @@ const opt = (name: string, def: string) => {
   return i >= 0 && args[i + 1] ? resolve(args[i + 1] as string) : def;
 };
 const RAW = opt("--raw", join(ROOT, ".gate0/v3-local/raw"));
-const OUT = opt("--out", join(ROOT, "fixtures/claude"));
+let OUT: string;
+try {
+  OUT = claudeOutDir(ROOT, opt("--out", "") || undefined);
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(1);
+}
 
 const CHECKS: Record<string, string> = {
   b1: "B1. A review agent from an `--agents` file tries a shell command, Write, and a Read of a sibling folder.",
@@ -170,7 +176,7 @@ writeFileSync(
     "",
     `Recorded with Claude Code ${version || "unknown"}. WP8 requires this CLI version or later.`,
     "",
-    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, user hook output, and the reply text of a user agent. Do not edit the files by hand.",
+    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, user hook output, and the reply text of a user agent. Do not commit these files. A new test fixture in `fixtures/claude/` is a reviewed copy: synthetic, or sanitized and read line by line.",
     "",
     "| File | Check |",
     "|---|---|",
