@@ -1807,9 +1807,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return n > 0;
   }
 
-  // A settings change closes the database of the runs.
+  // A settings change closes the database of the runs. A new origin opens another database, so no "changed" covers what each tab shows.
   settings.onSettingsChanged(() => {
     cancelWhere(() => true);
+    live.broadcast("reset", {});
   });
 
   // A run as RunConflict and RunSlotsDto name it. taskKey: the Jira key of the task of a task run.

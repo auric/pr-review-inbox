@@ -282,6 +282,17 @@ describe("live stream shared by tabs", () => {
     expect(t.sources.every((s) => s.closed)).toBe(true);
   });
 
+  test("a reset of the server makes every tab refetch everything, the runs and run slots too", async () => {
+    const t = tabs();
+    const all = [t.open(), t.open()];
+    await settle();
+    t.sources[0]?.emit("open");
+    t.sources[0]?.emit("reset", "{}");
+    await settle();
+    for (const tab of all) expect(tab.calls).toEqual(["all"]);
+    for (const tab of all) tab.close();
+  });
+
   test("without the Web Locks API each tab opens its own stream", async () => {
     const t = tabs();
     const all = [t.open(false), t.open(false)];

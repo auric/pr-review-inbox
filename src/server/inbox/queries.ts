@@ -83,9 +83,11 @@ const SQL = {
       IIF(event.kind IN ('run_finished', 'run_failed'), (SELECT json_object('kind', r.kind, 'rereview', r.since_head IS NOT NULL, 'status', r.status,
         'findings', ${OPEN_FINDINGS}, 'error', r.error_text) FROM review_run r WHERE r.id = CAST(event.ref AS INTEGER)), NULL) AS run_json`,
   cleanup: "DELETE FROM event WHERE claimed_at IS NOT NULL AND claimed_at < $cutoff",
-  // part_ready and spec_approved dedupe by their row, so their claimed rows stay until the task closes.
+  // part_ready and spec_approved dedupe by their row, so their claimed rows stay until the task closes. After a restart, the newest
+  // needs_you row gives the last wait (tasks/notify.ts), so it also stays until the task closes.
   cleanupTask: `DELETE FROM task_event WHERE claimed_at IS NOT NULL AND claimed_at < $cutoff
-    AND (kind = 'needs_you' OR (SELECT closed_at FROM task WHERE id = task_event.task) IS NOT NULL)`,
+    AND ((SELECT closed_at FROM task WHERE id = task_event.task) IS NOT NULL
+      OR (kind = 'needs_you' AND id < (SELECT MAX(e.id) FROM task_event e WHERE e.task = task_event.task AND e.kind = 'needs_you')))`,
   description: "SELECT description, source_head FROM pull_request WHERE id = $id",
   // Plan v3 WP13: confirmed outbox rows link a remote comment to its source.
   posted: "SELECT remote_id, run IS NOT NULL AS run, kind FROM post WHERE pr = $pr AND state = 'confirmed' AND remote_id IS NOT NULL",

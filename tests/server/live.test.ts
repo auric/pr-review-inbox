@@ -2,8 +2,12 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 import { afterAll, expect, test } from "bun:test";
-import { createLive } from "../../src/server/live";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createLive, type LiveEvent } from "../../src/server/live";
 import { idleOnlyForLive, startServer } from "../../src/server/main";
+import { createReviewJobs } from "../../src/server/review/jobs";
 
 const TOKEN = "c".repeat(64);
 const live = createLive(20);
@@ -71,3 +75,19 @@ test("a slow API request outlives the idle timeout; the live stream keeps it", a
     s.stop(true);
   }
 }, 20_000);
+
+test("a settings change that closes the database of the runs sends reset, so each tab refetches the runs and run slots", async () => {
+  const listeners: (() => void)[] = [];
+  const settings = { config: () => null, onSettingsChanged: (fn: () => void) => void listeners.push(fn) } as never;
+  const sent: LiveEvent[] = [];
+  const dataDir = mkdtempSync(join(tmpdir(), "rl-live-reset-"));
+  const review = createReviewJobs({ settings, dataDir, live: { ...createLive(), broadcast: (e: LiveEvent) => void sent.push(e) } });
+  try {
+    expect(sent).toEqual([]);
+    for (const fn of listeners) fn();
+    expect(sent).toEqual(["reset"]);
+  } finally {
+    await review.stop();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

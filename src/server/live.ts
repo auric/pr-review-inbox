@@ -4,7 +4,8 @@
 import type { Context } from "hono";
 import { type SSEStreamingApi, streamSSE } from "hono/streaming";
 
-export type LiveEvent = "changed" | "events";
+// reset: the database changed, so each tab refetches every query.
+export type LiveEvent = "changed" | "events" | "reset";
 export type Live = ReturnType<typeof createLive>;
 
 // The heartbeat must stay below the Bun.serve idleTimeout (30 s), or Bun closes the stream.

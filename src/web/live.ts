@@ -111,6 +111,8 @@ export function connectLive(qc: Qc, env: LiveEnv): () => void {
         send({ type: "changed", data });
       });
       es.addEventListener("events", () => send({ type: "events" }));
+      // A new server connection can swap the database. Every query of every tab is then stale, the runs and run slots too.
+      es.addEventListener("reset", () => send({ type: "resync" }));
       es.addEventListener("open", () => {
         if (opened || takeover) send({ type: "resync" });
         opened = true;

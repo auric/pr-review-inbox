@@ -252,7 +252,7 @@ describe("claimTaskEvents", () => {
 });
 
 describe("cleanupEvents", () => {
-  test("old claimed part_ready and spec_approved rows stay until the task closes; a part that still waits notifies no second time", () => {
+  test("old claimed part_ready, spec_approved, and newest needs_you rows stay until the task closes; nothing notifies a second time", () => {
     const h = setup();
     const day = 86_400_000;
     h.part(1, "self_reviewed", "aaa");
@@ -263,10 +263,26 @@ describe("cleanupEvents", () => {
     h.set("implementing", null);
     claimTaskEvents(h.db, 12);
     cleanupEvents(h.db, 12 + 31 * day);
-    expect([h.count(), h.count("part_ready"), h.count("spec_approved")]).toEqual([0, 1, 1]);
+    expect([h.count(), h.count("part_ready"), h.count("spec_approved")]).toEqual([1, 1, 1]);
     expect(noteTaskWaits(h.db, [h.id], 13 + 31 * day)).toBe(false);
     h.db.query("UPDATE task SET closed_at = 14 WHERE id = $id").run({ id: h.id });
     cleanupEvents(h.db, 14 + 31 * day);
     expect(h.db.query("SELECT COUNT(*) AS n FROM task_event").get()).toEqual({ n: 0 });
+  });
+
+  test("an open task that still waits after 30 days notifies no second time after a restart; older needs_you rows go", () => {
+    const h = setup();
+    const day = 86_400_000;
+    h.set("implementing", { kind: "red", step: 4, text: "The tests stay red." });
+    noteTaskWaits(h.db, [h.id], 10);
+    h.set("implementing", { kind: "question", step: 7, text: "Which flag name?" });
+    noteTaskWaits(h.db, [h.id], 11);
+    claimTaskEvents(h.db, 12);
+    cleanupEvents(h.db, 12 + 31 * day);
+    expect(h.count()).toBe(1);
+    const again = openDb(h.path);
+    dbs.push(again);
+    expect(noteTaskWaits(again, [h.id], 13 + 31 * day)).toBe(false);
+    expect(h.count()).toBe(1);
   });
 });
