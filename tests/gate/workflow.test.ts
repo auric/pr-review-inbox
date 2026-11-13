@@ -5,7 +5,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { AGENT_OUTPUT, hideAgentOutput, type Json, pathForms } from "../../scripts/gate/sanitize-core";
 import {
   agentCall,
@@ -212,11 +212,26 @@ describe("event readers", () => {
     expect(overlap(serial, "x", "z").started).toBe(false);
   });
 
-  test("outsideFolders", () => {
+  test("outsideFolders with Windows paths", () => {
     const dirs = ["C:\\p\\proj\\-w", "C:\\t\\claude\\-w"];
     expect(
-      outsideFolders(["C:\\p\\proj\\-w\\a\\agent-1.jsonl", "c:\\T\\claude\\-w\\x.out", "C:\\t\\other\\y.out", "C:\\p\\proj\\-w"], dirs),
-    ).toEqual(["C:\\t\\other\\y.out", "C:\\p\\proj\\-w"]);
+      outsideFolders(
+        ["C:\\p\\proj\\-w\\a\\agent-1.jsonl", "c:\\T\\claude\\-w\\x.out", "C:\\t\\other\\y.out", "C:\\p\\proj\\-w", "D:\\p\\proj\\-w\\z"],
+        dirs,
+        win32,
+      ),
+    ).toEqual(["C:\\t\\other\\y.out", "C:\\p\\proj\\-w", "D:\\p\\proj\\-w\\z"]);
+  });
+
+  test("outsideFolders with POSIX paths", () => {
+    const dirs = ["/p/proj/-w", "/t/claude/-w"];
+    expect(
+      outsideFolders(
+        ["/p/proj/-w/a/agent-1.jsonl", "/T/claude/-w/x.out", "/t/claude/-w/x.out", "/t/other/y.out", "/p/proj/-w"],
+        dirs,
+        posix,
+      ),
+    ).toEqual(["/T/claude/-w/x.out", "/t/other/y.out", "/p/proj/-w"]);
   });
 });
 

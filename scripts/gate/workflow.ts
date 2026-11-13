@@ -3,7 +3,7 @@
 
 // Pure helpers of Gate B35 (task-subagents.md, Design; integration-check.md U82) and Gate B36 (agent-workflow.md section 6, U83 to
 // U96). They build the agents.json definitions, read stream-json events, and judge the facts. They start no process.
-import { isAbsolute, relative } from "node:path";
+import path from "node:path";
 import { type AgentSeen, type Fact, resultOf, type Seen, type Status, type ToolCall, toolCalls } from "./session";
 
 type Obj = Record<string, unknown>;
@@ -190,11 +190,12 @@ export function overlap(events: unknown[], a: string, b: string) {
 }
 
 // Files under the per-cwd folders, and output files of task_notification events that lie outside them.
-export function outsideFolders(files: string[], folders: string[]) {
+// The paths come from the host, so the host path module applies. path.win32 compares without case, path.posix with case.
+export function outsideFolders(files: string[], folders: string[], p: typeof path = path) {
   const inside = (f: string) =>
     folders.some((d) => {
-      const r = relative(d.toLowerCase(), f.toLowerCase());
-      return r !== "" && !r.startsWith("..") && !isAbsolute(r);
+      const r = p.relative(d, f);
+      return r !== "" && !r.startsWith("..") && !p.isAbsolute(r);
     });
   return files.filter((f) => !inside(f));
 }
