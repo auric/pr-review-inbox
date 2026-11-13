@@ -18,7 +18,7 @@ import {
   readUserServers,
   userServers,
 } from "../../src/server/review/user-mcp";
-import { mcpToolSafety, profileInput } from "../../src/shared/dto";
+import { type McpToolDto, mcpToolSafety, profileInput } from "../../src/shared/dto";
 
 const FAKE_MCP = resolve(import.meta.dir, "../support/fake-mcp.ts");
 const SLOW = 30_000;
@@ -181,25 +181,29 @@ describe("plugin MCP discovery", () => {
     for (const id of ["off:gone", "alpha:esc", "alpha:cfg", "beta:bad.name", "beta:dup"]) expect(servers.has(id)).toBe(false);
   });
 
-  test(
-    "run setup copies a picked plugin server under its key",
-    async () => {
-      const { config, file } = pluginConfig();
-      const r = await userServers(
-        [
-          { server: "beta:srv", tools: ["search", "note_tool"] },
-          { server: "off:gone", tools: ["x"] },
-        ],
-        file,
-        config,
-      );
-      expect(Object.keys(r.servers)).toEqual(["plugin_beta_srv"]);
-      expect(r.servers.plugin_beta_srv).toMatchObject({ tools: ["search", "note_tool"], deny: ["lookup", "delete_item"] });
-      expect(r.unmarked).toEqual(["note_tool (plugin beta:srv)"]);
-      expect(r.gaps).toEqual(["MCP server off:gone: not found in the Claude config"]);
-    },
-    SLOW,
-  );
+  test("run setup copies a picked plugin server under its key", async () => {
+    const { config, file } = pluginConfig();
+    // The tools of fake-mcp.ts with --extra=note_tool, without a process.
+    const list = async (): Promise<McpToolDto[]> => [
+      { name: "search", description: "", readOnlyHint: true, destructiveHint: null },
+      { name: "lookup", description: "", readOnlyHint: true, destructiveHint: null },
+      { name: "delete_item", description: "", readOnlyHint: false, destructiveHint: null },
+      { name: "note_tool", description: "", readOnlyHint: null, destructiveHint: null },
+    ];
+    const r = await userServers(
+      [
+        { server: "beta:srv", tools: ["search", "note_tool"] },
+        { server: "off:gone", tools: ["x"] },
+      ],
+      file,
+      config,
+      list,
+    );
+    expect(Object.keys(r.servers)).toEqual(["plugin_beta_srv"]);
+    expect(r.servers.plugin_beta_srv).toMatchObject({ tools: ["search", "note_tool"], deny: ["lookup", "delete_item"] });
+    expect(r.unmarked).toEqual(["note_tool (plugin beta:srv)"]);
+    expect(r.gaps).toEqual(["MCP server off:gone: not found in the Claude config"]);
+  });
 });
 
 describe("user MCP tools", () => {
