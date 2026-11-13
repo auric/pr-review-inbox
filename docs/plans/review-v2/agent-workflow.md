@@ -240,7 +240,7 @@ Workflow save checks:
 
 ### 4.2 New risks and limits
 
-- R1. Subagents may not inherit the run limits: cwd confinement, allow rules, and shell rules. Gate B36 (U83 to U86) checks this. If U83, U84, or U85 fails, the app refuses agents that write files or run commands ("Agents that write files wait for a Claude Code check."), and only read-only agents run.
+- R1. Subagents may not inherit the run limits: cwd confinement, allow rules, and shell rules. Gate B36 (U83 to U86) checks this. If U83, U84, or U85 fails, the app refuses agents that write files or run commands ("Agents that write files wait for a Claude Code check."), and only read-only agents run. Run 1 (CLI 2.1.322): U85 failed only on gate bugs (the `touch` command and the event parent), and every refusal held. A re-run is due. Writer agents also need the cleanup of the subagent output folders; the app now does it at the run end.
 - R2. A file field could lift a limit: permissionMode, hooks, inline mcpServers, isolation, or memory. The app writes only the kept keys (section 3.6).
 - R3. A subagent with the Agent tool can start any type (D3). Every agent gets Agent in disallowedTools, and the run sets depth 1 (U89).
 - R4. The lead can set a model on an Agent call (D4). The app cannot block this without a hook, and the app never adds a hook (SU16 decision). The lead line forbids it, and a note records it.
@@ -262,7 +262,7 @@ Workflow save checks:
 
 ## 6. Gate B36
 
-- Number: gate numbers B1 to B35 are taken. AC-B36 is an acceptance criterion ID in another list. The new facts are U83 to U96 in integration-check.md, section "Workflow agents (Gate B36, not run)".
+- Number: gate numbers B1 to B35 are taken. AC-B36 is an acceptance criterion ID in another list. The new facts are U83 to U96 in integration-check.md, section "Workflow agents (Gate B36, run 1)".
 - Run: `bun scripts/gate/claude-checks.ts --only B35`, then `bun scripts/gate/claude-checks.ts --only B36`, then `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0`. The results go to `.gate0/v3-local/results.b35.json` and `results.b36.json`. docs/gate-v2.md has the run table.
 - Setup: haiku for the lead and the agents, except one opt-in Opus call (`--opus`). At most 8 calls (7 without `--opus`). A temp part folder with repo/, a temp git repository, the app's implementArgs, shell.json, shellEnv, and the agents.json of the new transform. The gate uses its own copy of section 3.6 (scripts/gate/workflow.ts). tests/tasks/agents.test.ts checks that AW1 writes the same kept keys. U88 reads `<config>/agents` only and never writes a file there.
 - Writers are allowed only when U83, U84, U85, U86, U89 (first part), and U93 pass. The other checks are INFO and feed the design.

@@ -116,20 +116,23 @@ const textOf = (b: Obj | undefined) =>
         : "";
 
 // The first call of tool under parent (null: the main thread) whose input matches. A permission_denied event of the call makes it
-// refused. deniedParent: the parent_tool_use_id of that event.
+// refused. deniedParent: the parent_tool_use_id of that event. CLI 2.1.322 gives a subagent event agent_id instead: then it is the
+// tool_use_id of the task_started event whose task_id equals agent_id (fixtures/claude/b36-writer.jsonl).
 export function callOutcome(events: unknown[], parent: string | null, tool: string, match: (input: Obj) => boolean = () => true): Outcome {
   const t = toolCalls(events).find((c) => c.parent === parent && c.name === tool && match(c.input));
   if (!t) return { state: "not tried", text: "" };
   const res = resultOf(events, t.id);
   const text = textOf(res);
-  const denied = objs(events).find((e) => e.type === "system" && e.subtype === "permission_denied" && e.tool_use_id === t.id);
-  if (denied)
-    return {
-      state: "refused",
-      text,
-      id: t.id,
-      deniedParent: typeof denied.parent_tool_use_id === "string" ? denied.parent_tool_use_id : undefined,
-    };
+  const all = objs(events);
+  const denied = all.find((e) => e.type === "system" && e.subtype === "permission_denied" && e.tool_use_id === t.id);
+  if (denied) {
+    const task =
+      typeof denied.agent_id === "string"
+        ? all.find((e) => e.type === "system" && e.subtype === "task_started" && e.task_id === denied.agent_id)
+        : undefined;
+    const by = typeof denied.parent_tool_use_id === "string" ? denied.parent_tool_use_id : task?.tool_use_id;
+    return { state: "refused", text, id: t.id, deniedParent: typeof by === "string" ? by : undefined };
+  }
   return { state: !res ? "no result" : res.is_error === true ? "error" : "ran", text, id: t.id };
 }
 const norm = (s: string) => s.replace(/\r\n/g, "\n").trim();
@@ -241,6 +244,9 @@ export function u82c(o: { unlisted: Seen & { marker: boolean } }): Fact {
     evidence: `command with no allow rule=${shown(o.unlisted)} marker=${o.unlisted.marker} (want allowlist)`,
   };
 }
+
+// INFO for U82c, U85, and U98: touch in the cwd. CLI 2.1.322 refuses it through a file-change ask with no decision_reason_type.
+export const touchLine = (s: Seen, marker: boolean, rule = "no allow rule") => `touch in the cwd with ${rule}=${shown(s)} marker=${marker}`;
 
 // (d) init lists the step tools, Task, and StructuredOutput, and nothing else. permissionMode is default.
 export function u82d(o: { tools: string[] | null; step: string[]; mode?: string }): Fact {

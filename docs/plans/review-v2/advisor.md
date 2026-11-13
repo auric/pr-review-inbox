@@ -1,6 +1,6 @@
 # Advisor in app runs
 
-Status: built (WP-ADV1, spec.md section 6.27, AC-B205 to AC-B211). Design of 2026-11-11. Gate G-ADV run 1 (2026-11-11, CLI 2.1.322) confirmed ADV1, ADV3, ADV5, and in effect ADV2. ADV4 stays open (integration-check.md, section Advisor).
+Status: built (WP-ADV1, spec.md section 6.27, AC-B205 to AC-B211). Design of 2026-11-11. Gate G-ADV run 1 (2026-11-11, CLI 2.1.322) confirmed ADV1, ADV3, ADV5, and in effect ADV2. Gate G-ADV run 2 closed ADV4 (integration-check.md, section Advisor).
 
 ## Facts (docs)
 
@@ -28,12 +28,12 @@ Status: built (WP-ADV1, spec.md section 6.27, AC-B205 to AC-B211). Design of 202
 - App runs without `--advisor` get no advisor today, also with a user `advisorModel` set (one sample).
 - init.tools never lists the advisor. Only `slash_commands` lists the /advisor command.
 - A call shows as a `server_tool_use` block named `advisor` and an `advisor_tool_result` block. The result usage has an `advisor_message` iteration. modelUsage lists the advisor model, and total_cost_usd counts it.
-- Not known: whether `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`, `--disallowedTools advisor`, or `--tools` turn it off.
+- `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` turns it off, verified by GADV.4. `--tools`, `--allowedTools`, and `--disallowedTools advisor` do not turn it off (GADV.5a, 5b). The app never relies on the tool flags for the advisor.
 
 ## Design
 
 - Profile field "Advisor": Off (default) or a model (`opus`, `fable`, or a full model ID). The task profile has the same field for task steps.
-- Off: the run gets no `--advisor` (ADV2: then it has no advisor). The child env also gets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` as a second guard; its effect is not verified (ADV4).
+- Off: the run gets no `--advisor` (ADV2: then it has no advisor). The child env also gets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` as a second guard, verified by GADV.4. The app never relies on the tool flags for the advisor.
 - On: the run gets `--advisor <model>`. The app refuses a profile save when the advisor ranks below the main model or is Haiku.
 - The init check needs no change: init.tools never lists the advisor (ADV3).
 - The stream parser shows each advisor call in the run log as "Advisor: reviewed" or "declined", and shows the advisor model from modelUsage in the run usage (ADV5). An advisor call never counts as a refused tool.

@@ -85,7 +85,7 @@ export function advisorStream(events: unknown[]): AdvisorStream {
   return s;
 }
 
-// The verdict of a run that must have no advisor (GADV.2, GADV.4, GADV.5a). Run 1: init.tools never lists the advisor, and
+// The verdict of a run that must have no advisor (GADV.2, GADV.4). CLI 2.1.322: init.tools never lists the advisor, and
 // slash_commands lists the /advisor command whether the advisor is on or off. So only init.tools and the advisor use count.
 // used: the run shows an advisor call or advisor usage. controlCalls: the advisor calls of the run with --advisor and no switch.
 // PASS needs a control call: without one, no advisor call proves nothing.
@@ -94,6 +94,13 @@ export function advisorOff(r: { init: unknown; used: boolean } | undefined, cont
   if (advisorTools(r.init).length || r.used) return "FAIL";
   return controlCalls > 0 ? "PASS" : "UNKNOWN";
 }
+
+// GADV.3: the advisor is a server tool, and init.tools never lists it (CLI 2.1.322). Only a call proves it.
+export const advisorOn = (calls: number): "PASS" | "FAIL" => (calls > 0 ? "PASS" : "FAIL");
+
+// GADV.5a and GADV.5b: the effect of a tool flag on the advisor, as an INFO text.
+export const flagEffect = (calls: number) =>
+  calls > 0 ? `the flag does not remove the advisor: calls=${calls}` : `no advisor call: calls=${calls}`;
 
 // A full model ID holds the family alias: "opus" matches "claude-opus-4-6".
 export const namesModel = (key: string, model: string) => key.toLowerCase().includes(model.toLowerCase());

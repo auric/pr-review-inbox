@@ -45,6 +45,8 @@ import {
   type KillReport,
   MAIN_AGENT,
   RUN_MARKER,
+  removeSessionFolders,
+  sessionFolders,
 } from "../../src/server/review/claude";
 import { runnerDefaults } from "../../src/server/review/defaults";
 import { git } from "../../src/server/review/git";
@@ -65,7 +67,7 @@ import {
   verifyResult,
 } from "../../src/shared/review";
 import { implementResult, interviewResult, type ShellMode, specResult } from "../../src/shared/task";
-import { advisorInInit, advisorOff, advisorStream, advisorTools, counts, namesModel } from "./advisor";
+import { advisorInInit, advisorOff, advisorOn, advisorStream, advisorTools, counts, flagEffect, namesModel } from "./advisor";
 import { pathForms } from "./sanitize-core";
 import {
   agentOutcome,
@@ -109,6 +111,7 @@ import {
   overlap,
   pathEnds,
   redactPaths,
+  touchLine,
   type U89Run,
   u82a,
   u82b,
@@ -2261,6 +2264,10 @@ const PROBE = "rlgb-probe.cjs";
 const RUNTIME = Bun.which("node") ? "node" : "bun";
 const probe = (arg: string) => `${RUNTIME} ${PROBE} ${arg}`;
 const PROBE_RULE = `${RUNTIME} ${PROBE} *`;
+// The unlisted command of U82c, U85, and U98: a copy of the probe that PROBE_RULE does not match. CLI 2.1.322 refuses a shell file
+// command such as touch in the cwd through a separate file-change ask, so touch cannot test the allowlist (B22: "requires approval").
+const UNLISTED = "rlgb-unlisted.cjs";
+const unlistedCmd = (arg: string) => `${RUNTIME} ${UNLISTED} ${arg}`;
 const NET_DENIED = "curl https://example.invalid";
 // "env K..." prints K=unset or K=set:<hash>. "cwd" prints the name of the cwd folder. Any other word writes <word>.ran in the cwd. "exit" then exits with code 7.
 // The hash input is the value with / separators, a drive letter for /c/, and lower case, so a Git Bash path form compares equal.
@@ -3473,6 +3480,7 @@ async function b37() {
   };
   try {
     writeFileSync(join(work, PROBE), PROBE_JS);
+    writeFileSync(join(work, UNLISTED), PROBE_JS);
     const a = join(repo, "a.txt");
     const b = join(repo, "b.txt");
     writeFileSync(a, `${B37.a0}\n`);
@@ -3565,7 +3573,13 @@ async function b37() {
 
     // Run 2: a resume with all flags. U97, U98, U100, U103, and U108.
     const outside = join(base, "outside.txt");
-    const c98 = { git: "git status", unlisted: "touch b37-unlisted.ran", compound: `${probe("c98")} && git status`, probe: probe("u98") };
+    const c98 = {
+      git: "git status",
+      unlisted: unlistedCmd("b37u"),
+      compound: `${probe("c98")} && git status`,
+      probe: probe("u98"),
+      touch: "touch b37-touch.ran",
+    };
     const args2 = res1 ? sessionArgs(f2.args, { resume: res1 }) : undefined;
     const r2 = await go(
       "run2-resume",
@@ -3712,11 +3726,12 @@ async function b37() {
         u98({
           write: { state: fileOutcome(r2, "Write", "outside.txt").state, file: existsSync(outside) },
           git: seen(r2, st, c98.git),
-          unlisted: { ...seen(r2, st, c98.unlisted), marker: existsSync(join(work, "b37-unlisted.ran")) },
+          unlisted: { ...seen(r2, st, c98.unlisted), marker: ran(work, "b37u") },
           compound: { ...seen(r2, st, c98.compound), marker: ran(work, "c98") },
           probe: { ...seen(r2, st, c98.probe), marker: ran(work, "u98") },
         }),
       );
+      push("B37.U98.touch", "INFO", touchLine(seen(r2, st, c98.touch), existsSync(join(work, "b37-touch.ran"))));
     } else for (const id of ["U97", "U98"]) lost(id, "run2-resume");
 
     if (r3) {
@@ -3884,6 +3899,7 @@ const B36_MARK = {
   user: "Reply with the word RLGB-DEF-USER. Use no tools.",
 };
 const B36_ASK = "Reply as your instructions say.";
+const B36_RULE_TOUCH = "touch b36-rule.ran";
 const WF_STEP_TURNS = 20;
 const WF_HOST_CMD = `curl -sS -m 5 ${SHELL_ORIGINS[0]}/rest/api/1.0/projects`;
 const agentSteps = (steps: string[]) =>
@@ -3901,12 +3917,13 @@ function partFolder(tag: string) {
   const repo = join(f.work, "repo");
   mkdirSync(join(f.base, "data"));
   writeFileSync(join(f.work, PROBE), PROBE_JS);
+  writeFileSync(join(f.work, UNLISTED), PROBE_JS);
   writeFileSync(join(repo, "a.txt"), `${WF_A0}\n`);
   writeFileSync(join(repo, "e.txt"), WF_E);
   if (!DRY) sh(["git", "-c", "init.defaultBranch=main", "init", "-q", repo]);
-  const shell = (mode: ShellMode): ShellSpec => ({
+  const shell = (mode: ShellMode, extra: string[] = []): ShellSpec => ({
     mode,
-    rules: [PROBE_RULE, "sleep *"],
+    rules: [PROBE_RULE, "sleep *", ...extra],
     bashTimeoutSec: SHELL_TIMEOUT_SEC,
     dataDir: join(f.base, "data"),
     origins: SHELL_ORIGINS,
@@ -3917,26 +3934,30 @@ function partFolder(tag: string) {
 }
 type Part = ReturnType<typeof partFolder>;
 
-// B35 (i) and B36 U94: the files of the per-cwd folders after a run with keepProjects. The gate deletes the folders, as the run end does.
+// B35 (i) and B36 U94: the files of the per-cwd folders and of the session folders (CLI 2.1.322: <tmpdir>/claude/<16 hex>/<session
+// id>/tasks) after a run with keepProjects. The gate deletes them, as the run end does.
 function cwdFiles(id: string, p: Part, r: Run) {
+  const sids = r.events.flatMap((e) => (e.subtype === "init" && typeof e.session_id === "string" ? [e.session_id] : []));
+  const folders = [...p.folders, ...sessionFolders(sids)];
   const names = labelIds(
-    p.folders.flatMap((d) => (existsSync(d) ? listFiles(d) : [])),
+    folders.flatMap((d) => (existsSync(d) ? listFiles(d) : [])),
     {},
   );
   const others = tagged().filter((d) => d.includes(basename(p.base)) && d !== encodeCwd(p.work));
   // Labels only: an encoded folder name holds the home path.
   const outside = [
-    ...outsideFolders(outputFiles(r), p.folders).map((f) => `output file ${labelIds([basename(f)], {})[0]}`),
+    ...outsideFolders(outputFiles(r), folders).map((f) => `output file ${labelIds([basename(f)], {})[0]}`),
     ...others.map(() => "another per-cwd folder of this check"),
   ];
   const inCwd = existsSync(join(p.work, ".claude")) ? listFiles(join(p.work, ".claude")) : [];
   for (const d of p.folders) rmRetry(d);
+  removeSessionFolders(sids);
   return cwdFilesFact(id, {
     names,
-    agentFiles: names.filter((n) => /agent-|subagents\//.test(n)).length,
+    agentFiles: names.filter((n) => /agent-|subagents\/|tasks\//.test(n)).length,
     outside,
     inCwd,
-    left: p.folders.filter((d) => existsSync(d)).length,
+    left: folders.filter((d) => existsSync(d)).length,
   });
 }
 
@@ -3981,8 +4002,9 @@ async function b35() {
     const cmds = {
       probe: probe("b35p"),
       git: "git status",
-      unlisted: "touch b35-unlisted.ran",
+      unlisted: unlistedCmd("b35u"),
       compound: `${probe("b35c")} && git status`,
+      touch: "touch b35-touch.ran",
     };
     const step = [
       `Read with file_path ${join(p.repo, "e.txt")}`,
@@ -4021,8 +4043,8 @@ async function b35() {
     writeFileSync(join(p.repo, "e.txt"), WF_E);
     // The plain run makes the same Bash calls, so the markers of run 1 go before it.
     const mark = (f: string) => existsSync(join(p.work, f));
-    const marks1 = { p: mark("b35p.ran"), c: mark("b35c.ran"), u: mark("b35-unlisted.ran"), x: mark("b35x.ran") };
-    for (const f of ["b35p.ran", "b35c.ran", "b35-unlisted.ran", "b35x.ran"]) rmSync(join(p.work, f), { force: true });
+    const marks1 = { p: mark("b35p.ran"), c: mark("b35c.ran"), u: mark("b35u.ran"), x: mark("b35x.ran"), t: mark("b35-touch.ran") };
+    for (const f of ["b35p.ran", "b35c.ran", "b35u.ran", "b35x.ran", "b35-touch.ran"]) rmSync(join(p.work, f), { force: true });
 
     const b = implementArgs({ implement: true, cwd: p.work, appDir: p.app, prompt: "", schema, maxTurns: 24, model: "haiku", shell });
     const r2 = await go("plain", b.args, b37Prompt(step, tail), { env });
@@ -4101,6 +4123,7 @@ async function b35() {
         }),
       );
       put(u82c({ unlisted: { ...seen(cmds.unlisted), marker: marks1.u } }));
+      push("B35.U82c.touch", "INFO", touchLine(seen(cmds.touch), marks1.t));
       put(u82d({ tools: r1.init?.tools ?? null, step: ["Read", "Grep", "Glob", "Edit", "Write", "Bash"], mode: r1.init?.permissionMode }));
       const ex = agentOutcome(r1.events, "rl-explorer");
       const exCall = agentCall(r1.events, "rl-explorer");
@@ -4152,8 +4175,8 @@ async function b36() {
       { description: "Gate B36 agent.", prompt, model: o.model ?? "haiku", ...o },
       { shell: true, readOnly: o.readOnly, stepTurns: WF_STEP_TURNS },
     );
-  const wf = (mode: ShellMode, agents: Record<string, AgentDef>, maxTurns: number, noEdit = false, depth = true) => {
-    const shell = p.shell(mode);
+  const wf = (mode: ShellMode, agents: Record<string, AgentDef>, maxTurns: number, noEdit = false, depth = true, rules: string[] = []) => {
+    const shell = p.shell(mode, rules);
     const x = implementArgs({
       implement: true,
       cwd: p.work,
@@ -4180,7 +4203,12 @@ async function b36() {
     // Run 1: U83, U85 (allowlist), U86, U89, U91, U94, U96.
     const relOut = "rlgb-out-rel.txt";
     const absOut = join(p.base, "rlgb-out-abs.txt");
-    const c1 = { unlisted: "touch b36-unlisted.ran", git: "git status", compound: `${probe("b36c")} && git status` };
+    const c1 = {
+      unlisted: unlistedCmd("b36u"),
+      git: "git status",
+      compound: `${probe("b36c")} && git status`,
+      touch: "touch b36-touch.ran",
+    };
     const writer = lift(
       def(
         agentSteps([
@@ -4213,13 +4241,19 @@ async function b36() {
     const leadFile = existsSync(join(p.repo, "lead.txt"));
     const out1 = { rel: existsSync(join(p.base, relOut)), abs: existsSync(absOut), w: existsSync(join(p.repo, "w.txt")) };
 
-    // Run 1b: U89 without the spawn depth variable. The agent has Agent in disallowedTools only.
+    // Run 1b: U89 without the spawn depth variable. The agent has Agent in disallowedTools only. The allow rule "touch *" shows whether
+    // a pattern rule satisfies the file-change ask of touch in the cwd (INFO touch-rule).
     const w1b = wf(
       "allowlist",
-      { "rl-gb-writer": def(agentSteps([NESTED_AGENT, bashStep(probe("b36ndend"))]), { tools: ["Read", "Bash"] }) },
+      {
+        "rl-gb-writer": def(agentSteps([NESTED_AGENT, bashStep(B36_RULE_TOUCH), bashStep(probe("b36ndend"))]), {
+          tools: ["Read", "Bash"],
+        }),
+      },
       8,
       false,
       false,
+      ["touch *"],
     );
     const r1b = await go("nodepth", w1b.args, lead([agentStep("rl-gb-writer", "Make the tool calls of your instructions.")]), {
       env: w1b.env,
@@ -4398,12 +4432,17 @@ async function b36() {
           called: true,
           agent: call1.id,
           cmds: {
-            unlisted: cmd(r1, st, call1.id, c1.unlisted, "allowlist", existsSync(join(p.work, "b36-unlisted.ran"))),
+            unlisted: cmd(r1, st, call1.id, c1.unlisted, "allowlist", ran(p.work, "b36u")),
             git: cmd(r1, st, call1.id, c1.git, "deny", false),
             compound: cmd(r1, st, call1.id, c1.compound, "deny", ran(p.work, "b36c")),
           },
           control: { ...callOutcome(r1.events, call1.id, "Bash", bashIs(probe("b36ok"))), marker: ran(p.work, "b36ok") },
         }),
+      );
+      push(
+        "B36.U85.allowlist-touch",
+        "INFO",
+        touchLine(cmd(r1, st, call1.id, c1.touch, "", false), existsSync(join(p.work, "b36-touch.ran"))),
       );
       put(u86({ tools: r1.init?.tools ?? null, union: w1.union, fetch: redacted(callOutcome(r1.events, call1.id, "WebFetch")) }));
       put(
@@ -4506,6 +4545,12 @@ async function b36() {
         `${nestedInfo}; writer run: ${runState(r1, "writer")}; nodepth run: ${runState(r1b, "nodepth")}`,
       ),
     );
+    const call1b = r1b ? agentCall(r1b.events, "rl-gb-writer") : undefined;
+    if (r1b && call1b) {
+      const st = parse(r1b, p.work, w1b.allowed, w1b.names, "allowlist");
+      const t = cmd(r1b, st, call1b.id, B36_RULE_TOUCH, "", false);
+      push("B36.touch-rule", "INFO", touchLine(t, existsSync(join(p.work, "b36-rule.ran")), 'allow rule "touch *"'));
+    } else lostInfo("touch-rule", "nodepth");
 
     if (r1 && call1) {
       const nested = toolUses(r1).filter((t) => t.parent === call1.id);
@@ -4619,11 +4664,11 @@ async function gadv() {
       runClaude(`gadv-${tag}`, args, prompt, work, { env: e, model: mainModel });
     const a = await run("advisor", [...base, ...adv], GADV_HARD);
     const none = await run("none", base, GADV_HARD);
-    // Run "tools" is the control of GADV.4, GADV.5a, GADV.5b, and GADV.6. Run 1: init never lists the advisor, so the gate judges by calls.
+    // Run "tools" is the control of GADV.4, GADV.5a, GADV.5b, and GADV.6. The advisor is a server tool: init.tools never lists it
+    // (CLI 2.1.322, GADV.3), so the gate judges by calls.
     const tools = await run("tools", withTools([...base, ...adv]), GADV_HARD);
     const off = await run("envoff", withTools([...base, ...adv]), GADV_HARD, { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
     const denied = await run("disallowed", withTools([...base, ...adv, "--disallowedTools", "advisor"]), GADV_HARD);
-    const listedA = advisorTools(a.init).length > 0;
     if (DRY) return dry("GADV", `advisor=${advisorModel} main=${mainModel}; ${userAdvisorSetting().line}`);
 
     const blockers = FLAG_BLOCKERS.filter((k) => env[k] !== undefined);
@@ -4662,8 +4707,8 @@ async function gadv() {
     );
     push(
       "GADV.3",
-      !a.init ? "UNKNOWN" : listedA ? "PASS" : "FAIL",
-      `--advisor: init advisor tools=${toolsOf(a)}; init advisor keys=${advisorInInit(a.init).join("; ") || "none"}; init.tools=${(a.init?.tools ?? []).join(",")}`,
+      advisorOn(fa.s.advisorCalls),
+      `--advisor: advisor calls=${fa.s.advisorCalls}; INFO: init advisor tools=${toolsOf(a)}; init advisor keys=${advisorInInit(a.init).join("; ") || "none"}; init.tools=${(a.init?.tools ?? []).join(",")}`,
     );
     // PASS: the switch removes the advisor: no advisor call while the control run "tools" made one.
     const calls = (r: Run) => advisorStream(r.events).advisorCalls;
@@ -4673,17 +4718,16 @@ async function gadv() {
       advisorOff({ init: off.init, used: calls(off) > 0 }, toolsCalls),
       `--advisor, advisor in --tools, and CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1, advisor prompt: ${desc(off)}; advisor calls=${calls(off)}; control run tools advisor calls=${toolsCalls}; init advisor tools=${toolsOf(off)}`,
     );
+    // GADV.5a and GADV.5b are INFO: they describe the CLI. The app never relies on the tool flags for the advisor.
     push(
       "GADV.5a",
-      advisorOff({ init: denied.init, used: calls(denied) > 0 }, toolsCalls),
-      `--advisor, advisor in --tools, and --disallowedTools advisor, advisor prompt: ${desc(denied)}; advisor calls=${calls(denied)}; control run tools advisor calls=${toolsCalls}; init advisor tools=${toolsOf(denied)}`,
+      "INFO",
+      `--advisor, advisor in --tools, and --disallowedTools advisor: ${flagEffect(calls(denied))}; ${desc(denied)}; control run tools advisor calls=${toolsCalls}; init advisor tools=${toolsOf(denied)}`,
     );
-    // PASS: run "advisor" omits it from --tools and makes no call, and run "tools" lists it and calls it. FAIL: run "advisor" still
-    // calls it or init lists it. UNKNOWN: the control run made no call.
     push(
       "GADV.5b",
-      advisorOff({ init: a.init, used: fa.s.advisorCalls > 0 }, toolsCalls),
-      `--tools and --allowedTools without advisor: advisor calls=${fa.s.advisorCalls}, init advisor tools=${toolsOf(a)}; with advisor, advisor prompt: ${desc(tools)}; advisor calls=${toolsCalls}; init advisor tools=${toolsOf(tools)}`,
+      "INFO",
+      `--tools and --allowedTools without advisor: ${flagEffect(fa.s.advisorCalls)}; init advisor tools=${toolsOf(a)}; with advisor, advisor prompt: ${desc(tools)}; advisor calls=${toolsCalls}; init advisor tools=${toolsOf(tools)}`,
     );
     push(
       "GADV.6",

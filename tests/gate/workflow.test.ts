@@ -24,6 +24,7 @@ import {
   overlap,
   pathEnds,
   redactPaths,
+  touchLine,
   u82a,
   u82b,
   u82c,
@@ -161,6 +162,34 @@ describe("event readers", () => {
     expect(callOutcome(events, "a1", "Write", pathEnds("w.txt")).state).toBe("ran");
     expect(callOutcome(events, "a1", "Agent").state).toBe("error");
     expect(callOutcome(events, "a1", "Edit").state).toBe("not tried");
+  });
+
+  // CLI 2.1.322: a subagent permission_denied event has agent_id and no parent_tool_use_id. Its agent_id is the task_id of task_started.
+  test("a subagent refusal names the agent call through task_started", () => {
+    const sub = [
+      use("a9", "Agent", { subagent_type: "rl-gb-writer", prompt: "go" }),
+      { type: "system", subtype: "task_started", task_id: "a0f0f0f0f0f0f0f0f", tool_use_id: "a9" },
+      use("b9", "Bash", { command: "git status" }, "a9"),
+      { type: "system", subtype: "permission_denied", tool_name: "Bash", tool_use_id: "b9", agent_id: "a0f0f0f0f0f0f0f0f" },
+      result("b9", "Permission to use Bash with command git status has been denied.", true, {}, "a9"),
+      use("b8", "Bash", { command: "touch x.ran" }, "a9"),
+      { type: "system", subtype: "permission_denied", tool_name: "Bash", tool_use_id: "b8", agent_id: "a1111111111111111" },
+    ];
+    const b = callOutcome(sub, "a9", "Bash", bashIs("git status"));
+    expect(b.state).toBe("refused");
+    expect(b.deniedParent).toBe("a9");
+    expect(callOutcome(sub, "a9", "Bash", bashIs("touch x.ran")).deniedParent).toBeUndefined();
+    const cmds = { git: { ...b, label: "deny", want: "deny", marker: false } };
+    const f = u85("allowlist", { called: true, agent: "a9", cmds, control: { state: "ran", text: "", marker: true } });
+    expect(f.status).toBe("PASS");
+    expect(f.evidence).toContain("event parent=agent call");
+  });
+
+  test("touchLine", () => {
+    expect(touchLine({ state: "refused", label: "check" }, false)).toBe("touch in the cwd with no allow rule=refused (check) marker=false");
+    expect(touchLine({ state: "ran", label: "none" }, true, 'allow rule "touch *"')).toBe(
+      'touch in the cwd with allow rule "touch *"=ran marker=true',
+    );
   });
 
   test("agent stats and the agent call", () => {

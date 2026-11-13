@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Starts, watches, and stops one Claude Code review process. The flags, env, and cwd rules come from integration-check.md, "Gate v3, local".
-import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { EFFORTS, type Effort, modelName } from "../../shared/dto";
 import type { RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
 import { RUN_LIMITS, RUN_TIME_MAX_MS } from "../../shared/task";
@@ -145,8 +145,9 @@ export function childEnv(): Record<string, string> {
   return env;
 }
 
-// docs/plans/review-v2/advisor.md. Off: the advisor switch is a second guard; its effect is not verified (ADV4). On: the advisor needs
-// feature-flag fetching, which DISABLE_TELEMETRY turns off. childEnv already drops the CLAUDE_CODE_* switches that turn it off.
+// docs/plans/review-v2/advisor.md. Off: the advisor switch is a second guard; GADV.4 verified that it turns the advisor off. The app never
+// relies on --tools, --allowedTools, or --disallowedTools for the advisor (GADV.5a, 5b). On: the advisor needs feature-flag fetching, which
+// DISABLE_TELEMETRY turns off. childEnv already drops the CLAUDE_CODE_* switches that turn it off.
 export function advisorEnv(env: Record<string, string>, advisor: string | null | undefined): Record<string, string> {
   if (!advisor) return { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" };
   return Object.fromEntries(Object.entries(env).filter(([k]) => k.toUpperCase() !== "DISABLE_TELEMETRY"));
@@ -352,6 +353,41 @@ function removeCwdFolders(cwd: string, projectsDir: string) {
   for (const dir of [join(projectsDir, name), join(tmpdir(), "claude", name)])
     try {
       rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    } catch (e) {
+      log(`Could not delete a Claude Code session folder: ${(e as Error).message}`);
+    }
+}
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const realDir = (p: string) => {
+  try {
+    const s = lstatSync(p);
+    return s.isDirectory() && !s.isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
+// CLI 2.1.322 writes subagent output to <root>/<16 hex>/<session id>/tasks/<agent id>.output (Gate B35, B36). root: <tmpdir>/claude.
+// Only real folders count: a link is never followed.
+export function sessionFolders(sessionIds: string[], root = join(tmpdir(), "claude")): string[] {
+  const ids = [...new Set(sessionIds.filter((s) => SESSION_ID.test(s)))];
+  if (!ids.length || !realDir(root)) return [];
+  return readdirSync(root)
+    .filter((h) => realDir(join(root, h)))
+    .flatMap((h) => ids.map((id) => join(root, h, id)).filter(realDir));
+}
+
+// Deletes the session folders, then each parent folder that is empty. Other sessions can share a parent folder.
+export function removeSessionFolders(sessionIds: string[], root = join(tmpdir(), "claude")) {
+  for (const dir of sessionFolders(sessionIds, root))
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+      try {
+        rmdirSync(dirname(dir));
+      } catch (e) {
+        if (!["ENOTEMPTY", "EEXIST", "ENOENT"].includes((e as NodeJS.ErrnoException).code ?? "")) throw e;
+      }
     } catch (e) {
       log(`Could not delete a Claude Code session folder: ${(e as Error).message}`);
     }
@@ -615,6 +651,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
     let cwd: string | undefined;
     let projectsDir: string | undefined;
     let proc: { exitCode: number | null; exited: Promise<number> } | undefined;
+    let inits: SDKSystemMessage[] = [];
     try {
       const c = await check();
       if (!c.ok) return empty("failed", c.kind === "auth" ? "auth" : "process", c.message);
@@ -631,6 +668,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       // implementArgs wrote this file beside shell.json.
       const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";
       const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
+      inits = parser.state.inits;
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
@@ -715,6 +753,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         await killTree(self.pid, true);
       }
       if (cwd && projectsDir) removeCwdFolders(cwd, projectsDir);
+      removeSessionFolders(inits.map((i) => i.session_id));
       active = undefined;
     }
   }
