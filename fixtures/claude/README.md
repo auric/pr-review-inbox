@@ -2,7 +2,7 @@
 
 Recorded with Claude Code 2.1.295. WP8 requires this CLI version or later.
 
-`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, and user hook output. Do not edit the files by hand.
+These files are committed test fixtures. `scripts/gate/sanitize-claude.ts` once wrote them from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, and user hook output. Gate runs now write to `.gate0/claude/` and never change these files. Gate transcripts are never committed. A new file here is a deliberate, reviewed copy: synthetic, or sanitized and read line by line. Do not edit the files by hand.
 
 | File | Check |
 |---|---|
