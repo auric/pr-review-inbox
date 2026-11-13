@@ -51,6 +51,7 @@ import {
   openPrs,
   partLabel,
   pickedPrefix,
+  plannedTasks,
   prefixProblem,
   proposals,
   repoName,
@@ -857,19 +858,6 @@ function RepoSection(props: {
       })}
     </FieldSet>
   );
-}
-
-// "### [ ] T1.1 Title" lines of the tasks grammar (spec.md section 6.4) in the plan files of the task.
-const TASK_LINE = /^### \[( |x)\] (T\d+\.\d+) (.+)$/gm;
-
-export function plannedTasks(t: Pick<TaskDto, "docs" | "steps">) {
-  const text = [t.docs?.plan, t.docs?.tasks].filter(Boolean).join("\n");
-  const committed = new Set(t.steps.filter((s) => s.kind === "commit" && s.state === "ok" && s.item).map((s) => s.item as string));
-  return [...text.matchAll(TASK_LINE)].map((m) => ({
-    id: m[2] as string,
-    title: (m[3] as string).trim(),
-    done: m[1] === "x" || committed.has(m[2] as string),
-  }));
 }
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));

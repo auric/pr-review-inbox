@@ -176,7 +176,12 @@ function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string
         <ol aria-label="Steps of these instructions, newest first" className="m-0 grid list-none gap-1.5 border-l-2 py-0.5 pl-3">
           {g.steps.map((x) => (
             <li key={x.id} id={stepId(x.id)} tabIndex={-1} className="grid gap-1.5 outline-offset-2 focus-visible:outline-2">
-              <StepBody s={x} runner={runner} onRunLog={onRunLog} onDiff={x.kind === "commit" ? onDiff : undefined} />
+              <StepBody
+                s={x}
+                runner={runner}
+                onRunLog={onRunLog}
+                onDiff={x.kind === "commit" && x.item !== "restart" ? onDiff : undefined}
+              />
             </li>
           ))}
         </ol>

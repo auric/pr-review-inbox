@@ -42,14 +42,15 @@ import {
   parentHint,
   partLabel,
   partName,
+  partRef,
   partRows,
+  plannedTasks,
   pointerRow,
   prBuild,
   prName,
   prRowLook,
   questionPart,
   questionSource,
-  runningStep,
   type SubRow,
   stoppedSend,
   stripSteps,
@@ -57,11 +58,12 @@ import {
   subtaskView,
   taskView,
   tellBox,
+  ticks,
   timedOutSetup,
   withSetup,
 } from "./model";
 import { OpenPrDialog, OpenPrsDialog, type PrRowInput } from "./OpenPrDialog";
-import { AddApproval, AskAgain, PLAN_FORM, PlanApproval, PlanParts, plannedTasks } from "./PlanTab";
+import { AddApproval, AskAgain, PLAN_FORM, PlanApproval, PlanParts } from "./PlanTab";
 import { AnsweredList, QuestionsForm } from "./Questions";
 import { docList, SpecDocs } from "./SpecDocs";
 import { StepStrip } from "./StepStrip";
@@ -85,7 +87,7 @@ const TAB_LABEL: Record<Tab, string> = {
   diff: "Diff",
 };
 
-// The time of a running step changes every 15 s.
+// The time of a running step and the label of a usage reason change every 15 s.
 function useTick(on: boolean) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -127,7 +129,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const [errorText, setErrorText] = useState<string | null>(null);
   // spec.md section 6.16.8: the task_pr ID whose merge commit the forge did not name. The pointer button then sends newest.
   const [newest, setNewest] = useState<number | null>(null);
-  const now = useTick(runningStep(t) !== null);
+  const now = useTick(ticks(t));
   // spec.md section 6.20.13: a task with sub-tasks shows the status and the primary button of the focused part. A click on a row
   // moves the focus. A part that is gone gives the default focus back.
   const tracker = trackerOf(meta);
@@ -333,6 +335,35 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return send({ kind });
       case "continue":
         return send({ kind: "resume" });
+      // ps5-plan.md section 4.2: the part comes from the action. Skip and Start again wait for one confirm, and Cancel sends nothing.
+      case "hold":
+        return target && send({ kind: "hold", part: target.id });
+      case "continue-part":
+        return target && send({ kind: "resume", part: target.id });
+      case "cancel-resume":
+        return send({ kind: "resume", option: "disarm" });
+      case "skip": {
+        if (!target) return;
+        const { id } = target;
+        const name = partName(t, target);
+        return setConfirm({
+          title: `Skip ${name}?`,
+          text: `The app saves the work of ${name} as a patch and removes its worktree. It opens no PR for it. Nothing goes to ${meta.forge.name}.`,
+          confirm: "Skip this part",
+          run: () => send({ kind: "skip", part: id }),
+        });
+      }
+      case "restart": {
+        if (!target) return;
+        const { id } = target;
+        const ref = partRef(t, target);
+        return setConfirm({
+          title: `Start ${ref} again?`,
+          text: `${runner} starts ${ref} again from the plan. The app keeps the old work as a patch and as a backup branch in the app cache. Nothing goes to ${meta.forge.name}.`,
+          confirm: "Start again",
+          run: () => send({ kind: "restart", part: id }),
+        });
+      }
       case "see-why": {
         setTab("log");
         // spec.md section 6.25.6: a part with a waiting reason shows its own step.
@@ -421,7 +452,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
 
   // spec.md section 7.1, AC-UX10: after a state change, focus moves to the new primary button. Focus elsewhere in the app stays.
   // A click on a sub-task row changes the shown part, not the state, so the keyboard focus stays on the row.
-  const mark = `${t.state}:${t.blocked?.kind ?? ""}:${view.primary?.kind ?? ""}:${focused?.id ?? ""}`;
+  const mark = `${t.state}:${t.blocked?.kind ?? ""}:${part?.blocked?.kind ?? ""}:${view.primary?.kind ?? ""}:${focused?.id ?? ""}`;
   const userPick = useRef(focusId);
   useEffect(() => {
     const moved = userPick.current !== focusId;
@@ -449,6 +480,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const busy = act.isPending;
   const primary = view.primary;
   const gone = goneBase(t);
+  // An action with a part acts on that part, else on the part that the view shows.
+  const partFor = (a: Action) => (a.part === undefined ? part : (t.parts.find((x) => x.id === a.part) ?? null));
   const button = (a: Action) =>
     a.kind === "approve" ? (
       <Button
@@ -466,7 +499,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         {a.label}
       </Button>
     ) : (
-      <Button ref={primaryRef} data-primary disabled={busy} onClick={() => run(a.kind)}>
+      <Button ref={primaryRef} data-primary disabled={busy} onClick={() => run(a.kind, partFor(a))}>
         {a.kind === "move" && part && retry === part.id ? "Try again" : a.label}
       </Button>
     );
@@ -558,7 +591,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
                 <DropdownMenuContent align="start" className="w-64">
                   <DropdownMenuGroup>
                     {view.more.map((a) => (
-                      <DropdownMenuItem key={a.kind} onClick={() => run(a.kind)}>
+                      <DropdownMenuItem key={a.kind} onClick={() => run(a.kind, partFor(a))}>
                         {a.label}
                       </DropdownMenuItem>
                     ))}

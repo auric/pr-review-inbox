@@ -273,8 +273,8 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
           onBlur={() => void saver.flush()}
         />
         <FieldDescription id={`${id}-tests-help`}>
-          The tests step may change only these files. One glob per line, with .gitignore rules. Empty means the defaults and the test files
-          that the plan names:{" "}
+          These globs find the test files of a part. When a part changes no test file, its last commit in the Log tab gets a note. One glob
+          per line, with .gitignore rules. Empty means the defaults:{" "}
           <code translate="no" className="[overflow-wrap:anywhere]">
             {DEFAULT_TEST_GLOBS.join(" ")}
           </code>
@@ -286,7 +286,7 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
           Commands {names.runner} may run
         </FieldLegend>
         <FieldDescription className="m-0">
-          The tests, code, fix, and Tell {names.runner} steps can run these commands themselves, such as a remote build. They run as you,
+          The build, fix, and Tell {names.runner} runs of a part can run these commands themselves, such as a remote build. They run as you,
           with your files, keys, and network.
         </FieldDescription>
         <div className="grid gap-1">
@@ -341,9 +341,9 @@ function Editor({ s }: { s: RepoTaskSettingsDto }) {
           <FieldContent>
             <FieldLabel htmlFor={`${id}-checks`}>{names.runner} may run the approved checks</FieldLabel>
             <FieldDescription id={`${id}-checks-help`}>
-              Off by default. When on, the tests, code, fix, and Tell {names.runner} steps can run the build, test, and lint commands above,
-              also with no pattern in this list. A command with a character other than letters, digits, and _ . / : = @ % + , - gets no
-              rule, and so does a command that the deny list refuses. The step notes in the Log tab name each one.
+              Off by default. When on, the build, fix, and Tell {names.runner} runs of a part can run the build, test, and lint commands
+              above, also with no pattern in this list. A command with a character other than letters, digits, and _ . / : = @ % + , - gets
+              no rule, and so does a command that the deny list refuses. The step notes in the Log tab name each one.
             </FieldDescription>
           </FieldContent>
         </Field>

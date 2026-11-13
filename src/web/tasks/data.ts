@@ -185,7 +185,12 @@ export type TaskAction =
   | { kind: "repo"; taskRepo: number; add: boolean }
   | { kind: "docs"; doc: TaskDoc; text: string }
   | { kind: "size"; size: TaskSize }
-  | { kind: "pause" | "stop" | "resume" | "close" | "dismiss" }
+  | { kind: "pause" | "stop" | "close" | "dismiss" }
+  // ps4-plan.md section 4: leave gives back the reason before a follow-up in ready, disarm cancels an armed usage resume, and part ends
+  // the hold of that part. The server refuses part together with an option (400).
+  | { kind: "resume"; option?: "leave" | "disarm"; part?: number }
+  // ps4-plan.md section 4: Hold, Skip, and Start again of one part.
+  | { kind: "hold" | "skip" | "restart"; part: number }
   | { kind: "keep" }
   | { kind: "limit"; lineBudget: number }
   | { kind: "change"; step: number; accept: boolean }
@@ -239,7 +244,18 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
     case "stop":
       return read(await tasks.stop.$post({ param, json: { version } }));
     case "resume":
-      return read(await tasks.resume.$post({ param, json: { version } }));
+      return read(
+        await tasks.resume.$post({
+          param,
+          json: { version, ...(a.option && { option: a.option }), ...(a.part !== undefined && { part: a.part }) },
+        }),
+      );
+    case "hold":
+      return read(await tasks.parts[":part"].hold.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "skip":
+      return read(await tasks.parts[":part"].skip.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
+    case "restart":
+      return read(await tasks.parts[":part"].restart.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "close":
       return read(await tasks.close.$post({ param, json: { version } }));
     case "dismiss":

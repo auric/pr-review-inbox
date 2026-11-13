@@ -27,9 +27,11 @@ import {
   branchName,
   type FoundItem,
   PART_STATE_TEXT,
+  REASON_EXITS,
   type RepoAccess,
   START_MODES,
   type StartMode,
+  type TaskBlocked,
   type TaskSize,
 } from "../../shared/task";
 import { type RowPhase, rowPhase } from "../../shared/task-status";
@@ -81,8 +83,16 @@ export type ActionKind =
   | "tracker-move"
   | "tracker-read"
   // spec.md section 6.20.14: plan a sub-task that is new in the tracker.
-  | "add-plan";
-export type Action = { kind: ActionKind; label: string };
+  | "add-plan"
+  // ps5-plan.md section 4.2: Hold, Continue with part, Skip, and Start again act on the part of the action.
+  | "hold"
+  | "continue-part"
+  | "skip"
+  | "restart"
+  // ps5-plan.md section 4.3: resume option disarm.
+  | "cancel-resume";
+// part: the task_part ID of an action that acts on one part. Absent: the part that the view shows.
+export type Action = { kind: ActionKind; label: string; part?: number };
 
 // screen: the content under the header. questions: the Questions form. plan: the plan approval. change: the spec change review.
 // build: the progress of the build. ready: the part that waits for its PR. pr: the open PR. end: done, failed, or closed.
@@ -165,6 +175,85 @@ export function currentPart(t: Pick<TaskDto, "parts">): TaskPartDto | null {
 function partWords(t: TaskDto, part: number | null) {
   return part !== null && codeParts(t).length > 1 ? ` for part ${part}` : "";
 }
+
+// ---------- Hold, Start again, and the usage limit (ps5-plan.md sections 3, 4.2, and 4.3) ----------
+
+// <ref> of a part: the part label with sub-tasks, "part k" with several parts, else "your change".
+export function partRef(t: Pick<TaskDto, "key" | "parts" | "subtasks">, p: Pick<TaskPartDto, "id" | "ord" | "keys">): string {
+  if (t.subtasks !== null) return partLabel(t, p);
+  return codeParts(t).length > 1 ? `part ${p.ord}` : "your change";
+}
+const upper = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// The server restarts only an unpushed part in these part states, in a task that implements or stopped (loop.ts restart).
+const RESTARTS = new Set<TaskPartDto["state"]>(["implementing", "self_reviewed"]);
+export const unpushed = (t: Pick<TaskDto, "prs">, p: Pick<TaskPartDto, "id" | "pushed">) =>
+  p.pushed === null && !t.prs.some((r) => r.part === p.id && r.pushed !== null);
+const restartable = (t: TaskDto, p: TaskPartDto) =>
+  (t.state === "implementing" || t.state === "stopped") && RESTARTS.has(p.state) && unpushed(t, p);
+// The REASON_EXITS keys whose More holds "Start this part again". A reason with no cause has no key there.
+const AGAIN_ROUTE = "POST /tasks/:id/parts/:part/restart";
+const AGAIN_KEYS = new Set(
+  Object.entries(REASON_EXITS)
+    .filter(([, e]) => e.other.some((x) => "route" in x && x.route === AGAIN_ROUTE))
+    .map(([key]) => key),
+);
+const reasonKey = (b: Pick<TaskBlocked, "kind" | "cause">) => (b.cause ? `${b.kind}/${b.cause}` : b.kind);
+const holdOf = (part: number | null): Action[] => (part === null ? [] : [{ kind: "hold", label: "Hold", part }]);
+const againOf = (t: TaskDto, p: TaskPartDto): Action[] =>
+  restartable(t, p) ? [{ kind: "restart", label: "Start this part again", part: p.id }] : [];
+
+// The On hold row. A stopped task offers Close the task, because the server refuses Stop there.
+function heldView(t: TaskDto, p: TaskPartDto): TaskView {
+  return {
+    status: `${upper(partRef(t, p))} is on hold. Its work is kept.`,
+    detail: null,
+    lines: [],
+    primary: { kind: "continue-part", label: "Continue", part: p.id },
+    more: [
+      ...(t.subtasks !== null ? [{ kind: "skip" as const, label: "Skip this part", part: p.id }] : []),
+      ...againOf(t, p),
+      t.state === "stopped" ? CLOSE : STOP,
+    ],
+    screen: "build",
+    needsYou: t.state === "stopped",
+    running: false,
+  };
+}
+
+// The reset time of a usage limit: the time only on the same day, else the date and the time.
+export function resetText(ms: number, now: number): string {
+  const d = new Date(ms);
+  return d.toDateString() === new Date(now).toDateString()
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+// The status of a usage reason, from resumeAt and armed only (ps5-plan.md D9).
+export function usageStatus(b: Pick<TaskBlocked, "resumeAt" | "armed">, runner: string, now: number): string {
+  const at = b.resumeAt;
+  if (b.armed) return at !== undefined && now < at ? `${runner} resumes at ${resetText(at, now)}.` : `${runner} resumes now.`;
+  return `Your ${runner} usage limit is reached.${at === undefined ? "" : ` It resets at ${resetText(at, now)}.`}`;
+}
+
+function usageView(b: TaskBlocked, runner: string, now: number): TaskView {
+  const at = b.resumeAt;
+  const primary: Action = { kind: "resume", label: at !== undefined && now < at ? `Resume at ${resetText(at, now)}` : "Resume" };
+  return {
+    status: usageStatus(b, runner, now),
+    detail: null,
+    lines: [],
+    primary: b.armed ? null : primary,
+    more: b.armed ? [{ kind: "cancel-resume", label: "Cancel the resume" }, STOP] : [STOP],
+    screen: "build",
+    needsYou: !b.armed,
+    running: false,
+  };
+}
+
+// The clock of the Task view runs while a step runs, and while a usage reason waits, so the label changes at the reset time.
+export const ticks = (t: Pick<TaskDto, "steps" | "blocked" | "parts">) =>
+  runningStep(t) !== null || [t.blocked, ...t.parts.map((p) => p.blocked)].some((b) => b?.kind === "usage");
 
 // ---------- The Tell box and Update from the base branch (spec.md section 6.18) ----------
 
@@ -388,8 +477,8 @@ function workText(s: TaskStepDto, runner: string, ref?: string): string | null {
       return null;
   }
 }
-// The stages whose row keeps "Pause after this step". ps5-plan.md section 3 puts Hold on the same rows.
-const PAUSE_AT = new Set<RowPhase | null>(["building", "fixing", "judging"]);
+// ps5-plan.md section 3: the stages whose working row offers Hold. The server holds only an open implement or fix row.
+const HOLD_AT = new Set<RowPhase | null>(["building", "fixing", "judging"]);
 // The stages where the app works and the runner waits.
 const APP_AT = new Set<RowPhase | null>(["checking", "setup", "baseline"]);
 
@@ -413,6 +502,27 @@ export function stageBadge(t: Pick<TaskDto, "steps">, p: Pick<TaskPartDto, "id" 
   const stage = s && rowPhase(s);
   const text = stage ? STAGE_TEXT[stage] : null;
   return text === PART_STATE_TEXT[p.state] ? null : text;
+}
+
+// "### [ ] T1.1 Title" lines of the tasks grammar (spec.md section 6.4) in the plan files of the task.
+const TASK_LINE = /^### \[( |x)\] (T\d+\.\d+) (.+)$/gm;
+
+// The tasks of the Plan tab. A restart mark (commit item "restart") resets its part, so the commits of that part before its newest mark
+// do not count.
+export function plannedTasks(t: Pick<TaskDto, "docs" | "steps">) {
+  const text = [t.docs?.plan, t.docs?.tasks].filter(Boolean).join("\n");
+  const mark = new Map<number | null, number>();
+  for (const s of t.steps) if (s.kind === "commit" && s.item === "restart") mark.set(s.part, Math.max(mark.get(s.part) ?? 0, s.id));
+  const committed = new Set(
+    t.steps
+      .filter((s) => s.kind === "commit" && s.state === "ok" && s.item && s.item !== "restart" && s.id > (mark.get(s.part) ?? 0))
+      .map((s) => s.item as string),
+  );
+  return [...text.matchAll(TASK_LINE)].map((m) => ({
+    id: m[2] as string,
+    title: (m[3] as string).trim(),
+    done: m[1] === "x" || committed.has(m[2] as string),
+  }));
 }
 
 // One sentence for a running step: who works, and on what. name: the part label of a sub-task.
@@ -527,6 +637,10 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
       screen: "end",
     };
   }
+  // ps4-plan.md section 2.6: held stays in the part row, never in t.blocked, and comes before a slot wait or an open row. With sub-tasks,
+  // subtaskView shows the hold of the focused part only.
+  const held = t.subtasks === null ? codeParts(t).find((p) => p.blocked?.kind === "held") : undefined;
+  if (held && (t.state === "implementing" || t.state === "stopped")) return heldView(t, held);
   if (t.state === "stopped")
     return {
       ...base,
@@ -600,10 +714,14 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   const goPr: Action = { kind: "go-pr", label: "Go to the PR" };
   const hasPr = part?.remotePr != null;
   if (b) {
+    if (b.kind === "usage") return usageView(b, R, o.now);
     const step = stepFor(t, b.step);
     // The server takes Resume, Continue, and the line limit in state implementing only.
     const loopOnly = new Set<ActionKind>(["resume", "continue", "keep-size", "change-limit"]);
     const keep = (a: Action | null) => (a && (t.state === "implementing" || !loopOnly.has(a.kind)) ? a : null);
+    // REASON_EXITS RUN_ENDS and KEPT: "Start this part again" stands before See why and Stop.
+    const owner = t.parts.find((x) => x.id === blockedPart(t)) ?? part;
+    const again = owner && AGAIN_KEYS.has(reasonKey(b)) ? againOf(t, owner) : [];
     // spec.md section 6.18.2: on a built part, Dismiss gives a way back from a reason whose own action runs in state implementing only.
     // Red checks after an update keep "Undo the update" as their way back.
     const dismiss =
@@ -614,6 +732,8 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
     const blocked = (primary: Action | null, more: Action[], screen: Screen = "build"): TaskView => {
       const p = keep(primary);
       const m = more.filter((a) => keep(a) !== null);
+      const at = m.findIndex((a) => a.kind === "see-why" || a.kind === "stop");
+      m.splice(at < 0 ? m.length : at, 0, ...again);
       const d: Action = { kind: "dismiss", label: "Dismiss" };
       return {
         ...base,
@@ -679,9 +799,9 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   }
   const send = activeSend(t);
   const pause: Action = { kind: "pause", label: "Pause after this step" };
-  // A send or an update ends by itself, and Pause applies to the build only.
+  // A send or an update ends by itself, and Pause and Hold apply to the build only.
   const stopOnly = !!send || t.state === "ready";
-  if (run) return working(stepSentence(t, run, R, o.name), stopOnly || !PAUSE_AT.has(rowPhase(run)) ? [STOP] : [pause, STOP]);
+  if (run) return working(stepSentence(t, run, R, o.name), stopOnly || !HOLD_AT.has(rowPhase(run)) ? [STOP] : [...holdOf(run.part), STOP]);
   if (t.working || (t.state === "implementing" && part?.state !== "self_reviewed"))
     return working(t.working ? "The app prepares the next step." : `${R} is building your change.`, stopOnly ? [STOP] : [pause, STOP]);
 
@@ -1191,6 +1311,7 @@ function partRow(t: TaskDto, p: TaskPartDto, o: SubOpts): Pick<SubRow, "text" | 
     case "implementing": {
       const reason = reasonOf(t, p);
       if (reason?.kind === "held") return { text: "On hold. Its work is kept.", actor: "You", action: null };
+      if (reason?.kind === "usage") return { text: usageStatus(reason, R, o.now), actor: reason.armed ? "The app" : "You", action: null };
       if (reason) return { text: reason.text, actor: "You", action: null };
       const s = partStep(t, p.id);
       const work = s && workText(s, R);
@@ -1339,6 +1460,9 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
       more: [{ kind: "edit-plan", label: "Edit" }, { kind: "ask-again", label: `Ask ${o.runner} again` }, read, STOP],
     };
   }
+  // ps4-plan.md section 2.6: a held part keeps its On hold row in a stopped task too.
+  const shown = focus ?? defaultFocus(t);
+  if (t.state === "stopped" && shown?.blocked?.kind === "held") return heldView(t, shown);
   if (t.state !== "implementing" && t.state !== "ready") return taskView(t, o);
   // spec.md section 6.20.14: the changed plan of "Add to plan" waits for the approval before a new part starts.
   if (t.plan?.adding)
@@ -1352,7 +1476,7 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
       more: [read],
       screen: "plan",
     };
-  const p = focus ?? defaultFocus(t);
+  const p = shown;
   if (!p) return taskView(t, o);
   const name = partLabel(t, p);
   const extra = [trackerMove(o.tracker), read];
@@ -1374,11 +1498,12 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
   const drop: Action = { kind: "drop", label: "Drop this sub-task" };
   const b = t.blocked;
   const bp = blockedPart(t);
+  if (p.blocked?.kind === "held") return withExtra(heldView(t, p));
   // spec.md section 6.25.6: the reason that waits in the part row. The user acts on the first reason first.
   if (p.blocked)
     return {
       ...base,
-      status: p.blocked.text,
+      status: p.blocked.kind === "usage" ? usageStatus(p.blocked, o.runner, o.now) : p.blocked.text,
       detail: `Act on ${firstLabel(t)} first.`,
       primary: null,
       more: [...(p.blocked.step !== null ? [{ kind: "see-why", label: "See why" } as const] : []), STOP],
@@ -1409,14 +1534,18 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
       // spec.md section 6.25.6: the reason of another part holds this part too.
       if (b && b.kind !== "slot")
         return { ...base, status: `${name} waits until you act on ${firstLabel(t)}.`, primary: null, more: [STOP], screen: "build" };
-      // Another part can hold the first open row of the task, so this part reads its own row.
+      // Another part can hold the first open row of the task, so this part reads its own row. Hold needs an open row.
       const own = partStep(t, p.id);
-      const pause = !own || PAUSE_AT.has(rowPhase(own));
+      const more: Action[] = !own
+        ? [{ kind: "pause", label: "Pause after this step" }, STOP]
+        : HOLD_AT.has(rowPhase(own))
+          ? [...holdOf(p.id), STOP]
+          : [STOP];
       return {
         ...base,
         status: own ? stepSentence(narrow, own, o.runner, name) : `${o.runner} builds ${name}.`,
         primary: null,
-        more: pause ? [{ kind: "pause", label: "Pause after this step" }, STOP] : [STOP],
+        more,
         screen: "build",
         running: true,
       };
