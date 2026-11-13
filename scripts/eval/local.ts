@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Builds the local eval set from your own decisions (docs/plans/review-v3.md WP-V1). docs/eval/local.md gives the steps.
-// Usage: bun run eval:local -- [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>]
+// Usage: bun run eval:local -- [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--clean N]
 // Default --db and --cache: the database and the git folder of the data folder of the app. Close the app first.
 // The builder only reads --db and --cache: it reads a temp copy of the database, and its git commands only read the cache.
 // It refuses an --out folder in the live data folder. stdout gets counts only: no path, host, or name.
@@ -14,15 +14,15 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { dataDir, dbPath } from "../../src/server/config";
+import { REVIEWER_MIN_FILES, REVIEWER_MIN_LINES } from "../../src/server/review/catalog";
 import { type DiffFile, parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { type StatsPayload, userDiscard } from "../../src/server/review/stats";
 import { diffArgs } from "../../src/server/review/workspace";
 import { isMe } from "../../src/shared/me";
-import { finding } from "../../src/shared/review";
+import { bugClass, finding } from "../../src/shared/review";
 import { type ExcerptLine, threadSpot } from "../../src/shared/types";
 import {
-  changedLines,
   EVAL_AUTHOR,
   EVAL_USER,
   type EvalBug,
@@ -42,7 +42,8 @@ import {
 import { overlaps } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE = "Usage: bun run eval:local -- [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>]";
+export const USAGE =
+  "Usage: bun run eval:local -- [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--clean N]";
 // cachePath of src/server/review/workspace.ts: a project key or a repository slug that is a safe folder name.
 const NAME = /^[A-Za-z0-9~_][A-Za-z0-9._~-]*$/;
 // docs/plans/review-v3.md WP-V1: Not a bug and Intended must not come back. The other codes and no code are neutral.
@@ -144,8 +145,8 @@ const SQL = {
     FROM review_item i JOIN review_run r ON r.id = i.run
     WHERE i.kind = 'finding' AND r.pr IS NOT NULL AND r.kind = 'review' AND r.status IN ('completed', 'incomplete') ORDER BY i.id`,
   // The outbox posts findings and reply drafts. Only a root comment that it did not post is a human comment: yours or of another person.
-  comments: `SELECT c.pr, c.comment_id, c.author_slug, c.author_login, c.anchor_json, c.excerpt_json, c.thread_resolved AS resolved,
-      pr.author_slug AS pr_author FROM comment c JOIN pull_request pr ON pr.id = c.pr
+  comments: `SELECT c.pr, c.comment_id, c.author_slug, c.author_login, c.text, c.anchor_json, c.excerpt_json,
+      c.thread_resolved AS resolved, pr.author_slug AS pr_author FROM comment c JOIN pull_request pr ON pr.id = c.pr
     WHERE c.parent_id IS NULL AND c.tombstoned_at IS NULL AND c.anchor_json IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM post p WHERE p.pr = c.pr AND p.remote_id = c.comment_id) ORDER BY c.pr, c.comment_id`,
   // Every comment of a PR for its threads at a reviewed head (caseThreads). author_name is read only to remove it from the text.
@@ -161,7 +162,8 @@ const SQL = {
   // The thread root of each posted finding (run-rows.ts posted).
   postedRoots: `SELECT json_extract(items_json, '$[0].id') AS item, remote_id AS root FROM post
     WHERE kind = 'inline' AND state = 'confirmed' AND remote_id IS NOT NULL`,
-  prs: "SELECT id, pr_id, project, repo, title, description FROM pull_request",
+  // state and source_head: the last head of the PR that the app synced (clean cases).
+  prs: "SELECT id, pr_id, project, repo, title, description, state, source_head AS sourceHead FROM pull_request",
   tasks: `SELECT t.pr, t.key, t.source, x.json FROM pr_task t LEFT JOIN task_context x ON x.pr = t.pr AND x.key = t.key
     ORDER BY t.pr, t.ord`,
 };
@@ -184,6 +186,7 @@ type CommentRow = {
   comment_id: number;
   author_slug: string;
   author_login: string | null;
+  text: string;
   anchor_json: string;
   excerpt_json: string | null;
   resolved: number;
@@ -208,11 +211,22 @@ export type ThreadRow = {
   prAuthorName: string | null;
 };
 export type Person = { slug: string | null; login: string | null; name: string | null };
-type PrRow = { id: number; pr_id: number; project: string; repo: string; title: string | null; description: string | null };
+type PrRow = {
+  id: number;
+  pr_id: number;
+  project: string;
+  repo: string;
+  title: string | null;
+  description: string | null;
+  state: string | null;
+  sourceHead: string | null;
+};
 type TaskRow = { pr: number; key: string; source: string; json: string | null };
 type Spot = { path: string; side: "new" | "old"; lines: [number, number] };
 
 // One case before the repository steps: a reviewed (PR, head, merge base) and the decisions of its runs. first, last: its run IDs.
+// touched: the head had a must-find or a trap before the conflict rule, or a comment of you or a reviewer is on its code. So it is no
+// clean case.
 export type Draft = {
   pr: number;
   head: string;
@@ -224,6 +238,7 @@ export type Draft = {
   traps: EvalTrap[];
   extras: EvalExtra[];
   human: EvalHuman[];
+  touched?: true;
 };
 
 // A re-review case (docs/plans/review-v3.md WP-V3): one re-review run, the decisions on its own items, and its earlier run.
@@ -262,14 +277,40 @@ export type Skipped = {
 // other: line comments of other reviewers that a later head changed or that are resolved.
 export type Sources = { posted: number; fixed: number; session: number; withdrawn: number; other: number };
 
+// The findings by decision, before the conflict rule and carry (docs/plans/review-v2/review-quality-2026.md E1). notBugOrIntended:
+// your discard as Not a bug or Intended. otherDiscard: your other discards. refuted: discarded by the check.
+export type Decisions = {
+  posted: number;
+  fixed: number;
+  session: number;
+  withdrawn: number;
+  notBugOrIntended: number;
+  otherDiscard: number;
+  refuted: number;
+};
+const noDecisions = (): Decisions => ({ posted: 0, fixed: 0, session: 0, withdrawn: 0, notBugOrIntended: 0, otherDiscard: 0, refuted: 0 });
+// The decision counts per bug class, per category in lower case, and per module. No text. byClass uses BUG_CLASS_NAMES.
+export type Categories = { byClass: Record<string, Decisions>; byCategory: Record<string, Decisions>; byModule: Record<string, Decisions> };
+// The classes of shared/review.ts bugClass, in its order. A finding of no class is "other".
+export const BUG_CLASS_NAMES = ["security", "concurrency", "resource", "behavior", "other"] as const;
+
 export const caseId = (d: Pick<Draft, "pr" | "head" | "base">) => `pr${d.pr}-${d.head.slice(0, 12)}-${d.base.slice(0, 8)}`;
 export const rereviewId = (d: Pick<RereviewDraft, "pr" | "run">) => `pr${d.pr}-rr${d.run}`;
 
-// Pure: the database rows to drafts. me: the user slug, as isMe reads it.
+// Pure: the database rows to drafts. me: the user slug, as isMe reads it. textOf: the text of a comment of the PR as caseThreads
+// writes it, with the names replaced and the cap.
 export function select(
   db: Database,
   me: string,
-): { drafts: Draft[]; skipped: Skipped; sources: Sources; rereviews: RereviewDraft[]; rereviewSkipped: RereviewSkipped } {
+  textOf: (pr: number, text: string) => string,
+): {
+  drafts: Draft[];
+  skipped: Skipped;
+  sources: Sources;
+  categories: Categories;
+  rereviews: RereviewDraft[];
+  rereviewSkipped: RereviewSkipped;
+} {
   const skipped: Skipped = {
     refuted: 0,
     notYours: 0,
@@ -288,6 +329,20 @@ export function select(
     otherOverlap: 0,
   };
   const sources: Sources = { posted: 0, fixed: 0, session: 0, withdrawn: 0, other: 0 };
+  const categories: Categories = { byClass: {}, byCategory: {}, byModule: {} };
+  const count = (p: StatsPayload, module: string, k: keyof Decisions) => {
+    const category = (p.category ?? "").trim().toLowerCase() || "none";
+    const by = [
+      [categories.byClass, BUG_CLASS_NAMES[bugClass({ module, category })] as string],
+      [categories.byCategory, category],
+      [categories.byModule, module],
+    ] as const;
+    for (const [m, key] of by) {
+      const d = m[key] ?? noDecisions();
+      d[k]++;
+      m[key] = d;
+    }
+  };
   const drafts = new Map<string, Draft>();
   const byRun = new Map<number, Draft>();
   const rrSkipped: RereviewSkipped = { noEarlier: 0, badPayload: 0, missingCommits: 0, emptyCases: 0 };
@@ -365,34 +420,57 @@ export function select(
     // A fix commit or an accept of the session that wrote the code confirms the finding. Your own discard still wins.
     const confirmed =
       end.status !== "posted" && !yours ? (end.p.fixed ? "fixed" : end.p.session?.verdict === "accept" ? "session" : null) : null;
+    const raw = end.p.module ?? "core";
+    const module = (MODULE_IDS as readonly string[]).includes(raw) ? (raw as EvalBug["module"]) : "core";
+    // The body column holds your edit of the body (items.ts edit). Without an edit it equals the body of the payload. Your own text
+    // gets the names replaced, as a comment does.
+    const body = end.body === end.p.body ? end.body : textOf(d.pr, end.body);
+    const text = [end.p.title, end.p.trigger, body]
+      .map((t) => t?.trim() ?? "")
+      .filter(Boolean)
+      .join("\n\n");
+    const gold = { text, category: end.p.category };
     if (end.status === "posted" && withdrawn.has(end.id)) {
       sources.withdrawn++;
-      for (const x of to) x.traps.push({ id: `item-${i.id}`, ...spot, why: `Posted, then withdrawn in its thread: finding ${end.id}.` });
+      count(end.p, module, "withdrawn");
+      const why = `Posted, then withdrawn in its thread: finding ${end.id}.`;
+      for (const x of to) x.traps.push({ id: `item-${i.id}`, ...spot, why, ...gold, source: "own" });
     } else if (end.status === "posted" || confirmed) {
-      const module = end.p.module ?? "core";
+      const source = confirmed ?? "posted";
       const bug: EvalBug = {
         id: `item-${i.id}`,
         ...spot,
         severityMin: end.p.severity,
-        module: (MODULE_IDS as readonly string[]).includes(module) ? (module as EvalBug["module"]) : "core",
+        module,
         note:
           confirmed === "fixed"
             ? `Finding ${end.id} covered by a fix commit.`
             : confirmed === "session"
               ? `Finding ${end.id} accepted by your session.`
               : `Posted finding ${end.id}.`,
+        ...gold,
+        source,
       };
-      sources[confirmed ?? "posted"]++;
+      sources[source]++;
+      count(end.p, module, source);
       for (const x of to) x.bugs.push(bug);
     } else if (end.status !== "discarded") skipped.undecided++;
     // The check is under test, so its verdict is no truth. A restore removes discardedBy.
-    else if (end.p.discardedBy === "verify") skipped.refuted++;
+    else if (end.p.discardedBy === "verify") {
+      skipped.refuted++;
+      count(end.p, module, "refuted");
+    }
     // A closing re-review or a session reject discarded it, not you.
     else if (!yours) skipped.notYours++;
     else if (code && TRAP_CODES.has(code)) {
-      for (const x of to) x.traps.push({ id: `item-${i.id}`, ...spot, why: `Discarded as ${code}: finding ${end.id}.` });
-    } else
-      for (const x of to) x.extras.push({ ...spot, note: `Discarded ${code ? `as ${code}` : "without a reason"}: finding ${end.id}.` });
+      count(end.p, module, "notBugOrIntended");
+      const why = `Discarded as ${code}: finding ${end.id}.`;
+      for (const x of to) x.traps.push({ id: `item-${i.id}`, ...spot, why, ...gold, source: "own" });
+    } else {
+      count(end.p, module, "otherDiscard");
+      const note = `Discarded ${code ? `as ${code}` : "without a reason"}: finding ${end.id}.`;
+      for (const x of to) x.extras.push({ ...spot, note, ...gold, source: "own" });
+    }
   }
 
   // The earlier findings of each re-review case, with their state when the re-review started. A copy in the re-review shows that the
@@ -429,14 +507,18 @@ export function select(
     const list = byPr.get(c.pr);
     if (!list) continue;
     const mine = isMe({ slug: c.author_slug, login: c.author_login }, me);
-    // The comments of the PR author explain the change. They are no review.
-    if (!mine && c.author_slug && c.author_slug === c.pr_author) {
-      skipped.otherAuthor++;
-      continue;
-    }
     const anchor = JSON.parse(c.anchor_json) as { fromHash?: unknown; toHash?: unknown };
     const excerpt = c.excerpt_json === null ? undefined : (JSON.parse(c.excerpt_json) as ExcerptLine[]);
     const spot = threadSpot({ anchor, excerpt });
+    const byAuthor = !mine && !!c.author_slug && c.author_slug === c.pr_author;
+    // A clean case has no comment of you or of a reviewer on its code: none at its head, and none at an earlier head that a push did not
+    // orphan (integration-check.md U12), because the PR still shows such a comment on its lines.
+    if (spot && !byAuthor) for (const d of list) if (anchor.toHash === d.head || !spot.orphaned) d.touched = true;
+    // The comments of the PR author explain the change. They are no review.
+    if (byAuthor) {
+      skipped.otherAuthor++;
+      continue;
+    }
     if (!spot || spot.line === null) {
       skipped[mine ? "commentNoLine" : "otherNoLine"]++;
       continue;
@@ -452,8 +534,9 @@ export function select(
     if (!at.length) skipped[mine ? "commentOtherHead" : "otherOtherHead"]++;
     else if (!mine) sources.other++;
     const place = { path: spot.path, side: spot.side, lines: [spot.line, spot.lineEnd] as [number, number] };
+    const text = textOf(c.pr, c.text);
     for (const d of at)
-      if (mine) d.human.push({ id: `comment-${c.comment_id}`, ...place, note: `Your comment ${c.comment_id}.` });
+      if (mine) d.human.push({ id: `comment-${c.comment_id}`, ...place, note: `Your comment ${c.comment_id}.`, text, source: "own" });
       // A comment has no severity. minor counts at the volumes balanced and thorough (score.ts mustFind).
       // One defect is one must find. A comment on the lines of a must find of the case adds none.
       else if (d.bugs.some((b) => b.path === place.path && b.side === place.side && overlaps(b.lines, place.lines))) skipped.otherOverlap++;
@@ -465,12 +548,14 @@ export function select(
           module: "core",
           source: "other",
           note: `Comment ${c.comment_id} of another reviewer, ${c.resolved === 1 ? "resolved" : "on a line that a later head changed"}.`,
+          text,
         });
   }
 
   // Must find and must not raise on overlapping lines of one case: both go.
   const hit = (a: Spot, b: Spot) => a.path === b.path && a.side === b.side && overlaps(a.lines, b.lines);
   for (const d of drafts.values()) {
+    if (d.bugs.length || d.traps.length || d.human.length) d.touched = true;
     const found = [...d.bugs, ...d.human];
     const keep = <T extends Spot>(list: T[], other: Spot[]) => {
       const left = list.filter((x) => !other.some((y) => hit(x, y)));
@@ -487,7 +572,7 @@ export function select(
     const apart = <T extends Spot>(list: T[], other: Spot[]) => list.filter((x) => !other.some((y) => hit(x, y)));
     return { ...rr, bugs: apart(rr.bugs, rr.traps), traps: apart(rr.traps, rr.bugs) };
   });
-  return { drafts: [...drafts.values()], skipped, sources, rereviews, rereviewSkipped: rrSkipped };
+  return { drafts: [...drafts.values()], skipped, sources, categories, rereviews, rereviewSkipped: rrSkipped };
 }
 
 // ---------- Carry ----------
@@ -586,33 +671,10 @@ const parsed = <T>(s: string | null): T | undefined => {
 type Anchor = { fromHash?: unknown; toHash?: unknown; lineType?: unknown };
 type Where = Pick<EvalThreadComment, "path" | "side" | "lines" | "lineType" | "newPlace">;
 
-// The threads of other people when a review run started, for pr-context.md of the run (docs/plans/review-v2/review-ideas.md idea 2).
-// rows: the comments of the PR in created order, deleted ones too. before: the start time of the review run in ms. A comment from
-// that time on, or edited from that time on, did not exist at the review in this form. skip: the item IDs of the case. must: the
-// places of the must-finds of the case. A thread that is a must-find, or on the lines of one, stays out, so the run never reads its
-// own truth. people: every person of the database. earlier: the posted earlier findings by thread root (re-review cases).
-// place: the lines at the reviewed head on the given side, mapped from the given commit, or null when they do not map.
-// People of the PR become EVAL_AUTHOR, EVAL_USER, or reviewer-<n> in first-comment order over the PR, in the author field and in the
-// text. Other people become SOMEONE in the text. Display names change only as stored or capitalized. A first or last name alone
-// changes only for the people of the PR and the user. The first name alone of a person of another PR stays. A root that is deleted but has live replies stays, as pr-context.ts shows it.
-export async function caseThreads(
-  rows: ThreadRow[],
-  o: {
-    me: string;
-    before: number;
-    skip: Set<string>;
-    must: Spot[];
-    people: Person[];
-    earlier?: Map<number, string>;
-    place: (
-      s: { path: string; lines: [number, number] },
-      from: unknown,
-      side: "new" | "old",
-    ) => Promise<{ path: string; lines: [number, number] } | null>;
-  },
-  n: ThreadTally,
-): Promise<EvalThreadComment[]> {
-  const mine = (r: { slug: string | null; login: string | null }) => isMe({ slug: r.slug ?? "", login: r.login }, o.me);
+// The name mapper of the threads of one PR. rows: the comments of the PR in created order. It gives the placeholder of each person
+// and cleans a text. caseThreads and the must-find comments of select use it, so both give a person the same placeholder.
+export function namer(rows: ThreadRow[], me: string, people: Person[]) {
+  const mine = (r: { slug: string | null; login: string | null }) => isMe({ slug: r.slug ?? "", login: r.login }, me);
   const key = (s: string) => s.normalize("NFC").toLowerCase();
   const prAuthor = rows[0]?.prAuthor ?? null;
   const isAuthor = (slug: string) => prAuthor !== null && key(slug) === key(prAuthor);
@@ -652,7 +714,7 @@ export async function caseThreads(
   };
   person({ slug: prAuthor, login: null, name: rows[0]?.prAuthorName ?? null }, EVAL_AUTHOR, true);
   for (const r of rows) person(r, mine(r) ? EVAL_USER : placeholder(r), true);
-  for (const u of o.people) person(u, mine(u) ? EVAL_USER : SOMEONE, mine(u));
+  for (const u of people) person(u, mine(u) ? EVAL_USER : SOMEONE, mine(u));
   // The regex folds case by Unicode rules, which can differ from toLowerCase. A miss then repeats the match of the regex per name.
   const find = (m: Map<string, string>, s: string) =>
     m.get(key(s)) ?? [...m].find(([k]) => new RegExp(`^${reEscape(k)}$`, "iu").test(s.normalize("NFC")))?.[1];
@@ -677,6 +739,36 @@ export async function caseThreads(
     if (pattern) t = t.replace(pattern, (m) => find(bare, m) ?? SOMEONE);
     return t.length > THREAD_TEXT_MAX ? `${t.slice(0, THREAD_TEXT_MAX)}${CUT_NOTE}` : t;
   };
+  return { mine, isAuthor, placeholder, clean };
+}
+
+// The threads of other people when a review run started, for pr-context.md of the run (docs/plans/review-v2/review-ideas.md idea 2).
+// rows: the comments of the PR in created order, deleted ones too. before: the start time of the review run in ms. A comment from
+// that time on, or edited from that time on, did not exist at the review in this form. skip: the item IDs of the case. must: the
+// places of the must-finds of the case. A thread that is a must-find, or on the lines of one, stays out, so the run never reads its
+// own truth. people: every person of the database. earlier: the posted earlier findings by thread root (re-review cases).
+// place: the lines at the reviewed head on the given side, mapped from the given commit, or null when they do not map.
+// People of the PR become EVAL_AUTHOR, EVAL_USER, or reviewer-<n> in first-comment order over the PR, in the author field and in the
+// text. Other people become SOMEONE in the text. Display names change only as stored or capitalized. A first or last name alone
+// changes only for the people of the PR and the user. The first name alone of a person of another PR stays. A root that is deleted but has live replies stays, as pr-context.ts shows it.
+export async function caseThreads(
+  rows: ThreadRow[],
+  o: {
+    me: string;
+    before: number;
+    skip: Set<string>;
+    must: Spot[];
+    people: Person[];
+    earlier?: Map<number, string>;
+    place: (
+      s: { path: string; lines: [number, number] },
+      from: unknown,
+      side: "new" | "old",
+    ) => Promise<{ path: string; lines: [number, number] } | null>;
+  },
+  n: ThreadTally,
+): Promise<EvalThreadComment[]> {
+  const { mine, isAuthor, placeholder, clean } = namer(rows, o.me, o.people);
 
   const known = (r: ThreadRow) => r.at < o.before;
   const fresh = (r: ThreadRow) => r.updated < o.before;
@@ -782,11 +874,16 @@ export type Manifest = {
   counts: { cases: number; runs: number; repositories: number; bugs: number; traps: number; extras: number; human: number };
   skipped: Skipped;
   sources: Sources;
+  // The findings by decision per bug class, category, and module (rules 5). Absent in an older manifest.
+  categories: Categories;
   // The items that a case got from an earlier head of the same PR, and those that stayed behind (carry). Bugs and traps above include
   // the carried items.
   carried: Carry;
   // The PR threads in the written cases (caseThreads). Absent in a manifest of rules 2. overlap, edited, and earlier: rules 4.
   threads: ThreadTally;
+  // --clean (rules 5): asked, the N of the flag. candidates: the heads that pass the clean rule. cases: the clean cases in cases/, also
+  // in counts.cases. Absent in an older manifest.
+  clean: { asked: number; candidates: number; cases: number };
   // The re-review cases in rereview/ (docs/plans/review-v3.md WP-V3). bun run eval --rereview runs them.
   rereview: {
     fingerprint: string;
@@ -795,7 +892,17 @@ export type Manifest = {
   };
 };
 
-async function build(o: { db: string; cache: string; out: string; me: string }): Promise<Manifest> {
+// The cases of one repository between carry and the write.
+type RepoWork = {
+  key: string;
+  cache: string;
+  diff: (from: string, to: string) => Promise<DiffFile[]>;
+  ok: Draft[];
+  rrOk: RereviewDraft[];
+  candidates: Draft[];
+};
+
+async function build(o: { db: string; cache: string; out: string; me: string; clean: number }): Promise<Manifest> {
   const tmp = mkdtempSync(join(tmpdir(), "rl-eval-local-"));
   try {
     // A read-only open of a WAL database still makes -shm and -wal files beside it. The temp copy keeps them out of the data folder.
@@ -811,11 +918,17 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
     let starts: Map<number, number>;
     let postedRoots: Map<number, number>;
     try {
-      sel = select(db, o.me);
-      prs = new Map((db.query(SQL.prs).all() as PrRow[]).map((p) => [p.id, p]));
-      tasks = db.query(SQL.tasks).all() as TaskRow[];
       threadRows = Map.groupBy(db.query(SQL.threadRows).all() as ThreadRow[], (r) => r.pr);
       people = db.query(SQL.people).all() as Person[];
+      const namers = new Map<number, ReturnType<typeof namer>>();
+      const textOf = (pr: number, text: string) => {
+        const n = namers.get(pr) ?? namer(threadRows.get(pr) ?? [], o.me, people);
+        namers.set(pr, n);
+        return n.clean(text);
+      };
+      sel = select(db, o.me, textOf);
+      prs = new Map((db.query(SQL.prs).all() as PrRow[]).map((p) => [p.id, p]));
+      tasks = db.query(SQL.tasks).all() as TaskRow[];
       starts = new Map((db.query(SQL.starts).all() as { id: number; at: number }[]).map((r) => [r.id, r.at]));
       postedRoots = new Map((db.query(SQL.postedRoots).all() as { item: number; root: number }[]).map((r) => [r.item, r.root]));
     } finally {
@@ -825,6 +938,12 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
     // A case can get its first item from an earlier head, so the empty check runs after carry.
     const drafts = sel.drafts;
     const truth = (d: Draft) => d.bugs.length > 0 || d.traps.length > 0 || d.human.length > 0;
+    // review-quality-2026.md E1, SWR-Bench clean PRs: the PR merged with this head as its last source head, and nothing to find or
+    // avoid ever touched the head. The sync stores the last head and the state of each PR.
+    const cleanHead = (d: Draft) => {
+      const p = prs.get(d.pr) as PrRow;
+      return !truth(d) && !d.touched && p.state === "MERGED" && p.sourceHead === d.head;
+    };
     const carried: Carry = { carried: 0, changed: 0, gone: 0, overlap: 0 };
     const threadTally = noThreads();
 
@@ -853,6 +972,8 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
     };
     const byRepo = Map.groupBy(drafts, (d) => repoOf(d.pr));
     const rrByRepo = Map.groupBy(rereviews, (d) => repoOf(d.pr));
+    const need = (d: Draft | RereviewDraft) => ("since" in d ? [d.base, d.head, d.since, d.sinceBase] : [d.base, d.head]);
+    const work: RepoWork[] = [];
     for (const key of [...new Set([...byRepo.keys(), ...rrByRepo.keys()])].sort()) {
       const list = byRepo.get(key) ?? [];
       const rrs = rrByRepo.get(key) ?? [];
@@ -870,7 +991,6 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
         continue;
       }
       const g = (args: string[], stdin?: string) => git(["--git-dir", cache, ...args], { env, stdin });
-      const need = (d: Draft | RereviewDraft) => ("since" in d ? [d.base, d.head, d.since, d.sinceBase] : [d.base, d.head]);
       const shas = [...new Set([...list, ...rrs].flatMap(need))];
       const types = (await g(["cat-file", "--batch-check=%(objecttype)"], `${shas.join("\n")}\n`)).split("\n");
       const present = new Set(shas.filter((_, k) => types[k] === "commit"));
@@ -890,8 +1010,21 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       for (const k of Object.keys(carried) as (keyof Carry)[]) carried[k] += got[k];
       const ok = all.filter(truth);
       skipped.emptyCases += all.length - ok.length;
-      if (!ok.length && !rrOk.length) continue;
+      // One clean case per PR: the head can have runs with more than one merge base. The newest run wins.
+      const candidates = [...Map.groupBy(all.filter(cleanHead), (d) => d.pr).values()].map((l) =>
+        l.reduce((a, b) => (b.last > a.last ? b : a)),
+      );
+      work.push({ key, cache, diff, ok, rrOk, candidates });
+    }
+    // --clean N: the N candidates with the oldest first run. A newer merged PR adds a candidate, but it does not change this choice.
+    const candidates = work.flatMap((w) => w.candidates);
+    const chosen = new Set(candidates.toSorted((a, b) => a.first - b.first).slice(0, o.clean));
+    skipped.emptyCases -= chosen.size;
 
+    for (const { key, cache, diff, ok, rrOk, candidates } of work) {
+      const clean = candidates.filter((d) => chosen.has(d));
+      const cases = [...ok, ...clean];
+      if (!cases.length && !rrOk.length) continue;
       // The bundle name hides the project key and the repository slug.
       const bundle = `${createHash("sha256").update(key).digest("hex").slice(0, 16)}.bundle`;
       const temp = join(tmp, `bundle-${repositories}.git`);
@@ -900,7 +1033,7 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       // The temp repository borrows the objects of the cache, so the cache gets no write. Against the cache itself, the builder runs
       // only cat-file, diff, and log, which read.
       writeFileSync(join(temp, "objects", "info", "alternates"), `${join(cache, "objects").replaceAll("\\", "/")}\n`);
-      const commits = [...new Set([...ok, ...rrOk].flatMap(need))];
+      const commits = [...new Set([...cases, ...rrOk].flatMap(need))];
       await git(["--git-dir", temp, "update-ref", "--stdin"], { env, stdin: commits.map((c) => `create refs/eval/${c} ${c}\n`).join("") });
       await git(["--git-dir", temp, "bundle", "create", "-q", join(o.out, "bundles", bundle), "--all"], { env });
       repositories++;
@@ -929,23 +1062,37 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
         const list = await caseThreads(threadRows.get(d.pr) ?? [], { me: o.me, before, skip, must, people, earlier, place }, threadTally);
         return list.length ? { threads: list } : {};
       };
-
-      for (const d of ok) {
+      // The fields of each case: the PR text, the task rows, the commits, the size, and the rules 5 fields.
+      const fields = async (d: Draft | RereviewDraft) => {
         const p = prs.get(d.pr) as PrRow;
         const title = p.title?.trim() || `PR ${p.pr_id}`;
-        const c: LocalCaseFile = localCaseFile.parse({
-          id: caseId(d),
+        const rows = tasks.filter((t) => t.pr === d.pr).map(({ key, source, json }) => ({ key, source, json }));
+        const files = await diff(d.base, d.head);
+        const changedLines = files.reduce((n, f) => n + f.rows.filter((r) => r.kind !== "ctx").length, 0);
+        return {
           title,
           language: "unknown",
           pr: { title, description: p.description ?? "" },
+          tasks: rows,
+          bundle: { file: bundle, base: d.base, head: d.head },
+          changedLines,
+          // run.ts seeds a task_context row only for a task with its text, and jobs.ts writes task.md from those rows.
+          group: `pr${d.pr}`,
+          hasTask: rows.some((t) => t.json !== null),
+          large: changedLines >= REVIEWER_MIN_LINES || files.length >= REVIEWER_MIN_FILES,
+        };
+      };
+
+      for (const d of cases) {
+        const c: LocalCaseFile = localCaseFile.parse({
+          id: caseId(d),
+          ...(await fields(d)),
           bugs: d.bugs,
           traps: d.traps,
           extras: d.extras,
           human: d.human,
-          tasks: tasks.filter((t) => t.pr === d.pr).map(({ key, source, json }) => ({ key, source, json })),
-          bundle: { file: bundle, base: d.base, head: d.head },
-          changedLines: changedLines(await g(["diff", ...diffArgs, d.base, d.head])),
           rules: LOCAL_RULES,
+          ...(chosen.has(d) && { clean: true }),
           ...(await threadsOf(d)),
         });
         const text = `${JSON.stringify(c, null, 2)}\n`;
@@ -955,20 +1102,13 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
         runs += d.runs;
       }
       for (const d of rrOk) {
-        const p = prs.get(d.pr) as PrRow;
-        const title = p.title?.trim() || `PR ${p.pr_id}`;
         const c: LocalCaseFile = localCaseFile.parse({
           id: rereviewId(d),
-          title,
-          language: "unknown",
-          pr: { title, description: p.description ?? "" },
+          ...(await fields(d)),
           bugs: d.bugs,
           traps: d.traps,
           extras: d.extras,
           human: [],
-          tasks: tasks.filter((t) => t.pr === d.pr).map(({ key, source, json }) => ({ key, source, json })),
-          bundle: { file: bundle, base: d.base, head: d.head },
-          changedLines: changedLines(await g(["diff", ...diffArgs, d.base, d.head])),
           rereview: { since: d.since, sinceBase: d.sinceBase, earlier: d.earlier },
           ...(await threadsOf(d)),
         });
@@ -1000,8 +1140,10 @@ async function build(o: { db: string; cache: string; out: string; me: string }):
       },
       skipped,
       sources: sel.sources,
+      categories: sel.categories,
       carried,
       threads: threadTally,
+      clean: { asked: o.clean, candidates: candidates.length, cases: chosen.size },
       rereview: {
         fingerprint: setFingerprint(rrWritten),
         counts: {
@@ -1029,6 +1171,7 @@ export function report(m: Manifest): string {
     `Sources before carry: ${o.posted} posted, ${o.fixed} covered by a fix commit, ${o.session} accepted by your session, ${o.withdrawn} posted and then withdrawn in the thread (must not raise), ${o.other} line comments of other reviewers that are resolved or on a changed line.`,
     `Left out: ${s.refuted} refuted by the check, ${s.notYours} discarded without your triage, ${s.undecided} without a decision, ${s.noAnchor} without an anchor, ${s.conflicts} in opposite decisions, ${s.noMergeBase} runs without a merge base, ${s.missingCommits} cases with missing commits, ${s.emptyCases} cases with nothing to find or avoid, ${s.commentNoLine} comments without a line, ${s.commentOtherHead} comments at a head with no review.`,
     `Comments of other reviewers left out: ${s.otherOpen} open on an unchanged line, ${s.otherNoLine} without a line, ${s.otherOtherHead} at a head with no review, ${s.otherAuthor} by the PR author, ${s.otherOverlap} on the lines of a must find of the same case.`,
+    `Clean cases: ${m.clean.cases} of ${m.clean.candidates} heads of merged PRs with nothing to find, no comment, and no later push (--clean ${m.clean.asked}).`,
     `Carried from earlier heads of the same PR: ${m.carried.carried}. Not carried: ${m.carried.changed} with changed lines, ${m.carried.gone} in a deleted file, ${m.carried.overlap} on an item of the later head.`,
     `PR threads of other people at the reviewed heads: ${m.threads.threads} threads with ${m.threads.comments} comments in ${m.threads.cases} cases. Left out: ${m.threads.capped} comments over the cap of ${THREAD_COMMENTS_MAX} per case, ${m.threads.mineRoot} replies in threads that you started, ${m.threads.overlap} threads on the lines of a must find, ${m.threads.edited} comments edited from the run start on. Without lines: ${m.threads.unplaced} inline threads whose lines do not map to the reviewed head. Re-review cases: ${m.threads.earlier} replies of the PR author to posted earlier findings.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
@@ -1043,16 +1186,27 @@ export function report(m: Manifest): string {
 }
 
 export async function main(argv: string[]): Promise<number> {
-  let v: { db?: string; cache?: string; out?: string; user?: string };
+  let v: { db?: string; cache?: string; out?: string; user?: string; clean?: string };
   try {
     v = parseArgs({
       args: argv,
       strict: true,
       allowPositionals: false,
-      options: { db: { type: "string" }, cache: { type: "string" }, out: { type: "string" }, user: { type: "string" } },
+      options: {
+        db: { type: "string" },
+        cache: { type: "string" },
+        out: { type: "string" },
+        user: { type: "string" },
+        clean: { type: "string" },
+      },
     }).values;
   } catch (e) {
     console.error(`${(e as Error).message}\n${USAGE}`);
+    return 2;
+  }
+  const clean = Number(v.clean ?? "0");
+  if (!/^\d+$/.test(v.clean ?? "0") || !Number.isSafeInteger(clean)) {
+    console.error(`--clean must be a whole number of 0 or more.\n${USAGE}`);
     return 2;
   }
   // The data folder of the app, as config.ts dataDir gives it.
@@ -1089,7 +1243,7 @@ export async function main(argv: string[]): Promise<number> {
     return 2;
   }
   try {
-    console.log(report(await build({ db, cache, out, me })));
+    console.log(report(await build({ db, cache, out, me, clean })));
     return 0;
   } catch (e) {
     console.error(`The build failed: ${(e as Error).message}`);

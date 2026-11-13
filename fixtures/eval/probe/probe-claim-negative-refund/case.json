@@ -1,0 +1,60 @@
+{
+  "id": "probe-claim-negative-refund",
+  "title": "Partial refunds, with a wrong claim in a thread",
+  "language": "python",
+  "pr": {
+    "title": "Partial refunds to the customer wallet",
+    "description": "Support can refund a part of an order line. `refund()` parses the quantity from the support form, checks it against the ordered quantity, and credits the wallet of the customer."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "shop/refunds.py",
+      "side": "new",
+      "lines": [13, 14],
+      "alt": [
+        {
+          "path": "shop/refunds.py",
+          "side": "new",
+          "lines": [18, 18]
+        },
+        {
+          "path": "shop/quantity.py",
+          "side": "new",
+          "lines": [14, 14]
+        }
+      ],
+      "severityMin": "major",
+      "module": "core",
+      "note": "refund() accepts a negative quantity. parse_quantity() checks only the upper limit (quantity.py), so \"-3\" takes 750 cents from the wallet of the customer and lowers line.refunded, which then allows a refund of more than the ordered quantity. The thread claim that parse_quantity() rejects negative and zero values is wrong."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "shop/refunds.py",
+      "side": "new",
+      "lines": [16, 16],
+      "why": "Money is in whole cents: price_cents is an int (orders.py), so the product is exact. A finding that asks for Decimal or warns about float rounding is wrong here."
+    }
+  ],
+  "threads": [
+    {
+      "id": 1,
+      "root": 1,
+      "author": "reviewer-1",
+      "at": 1767344400000,
+      "text": "Can quantity be negative here? A negative refund would take money from the customer.",
+      "path": "shop/refunds.py",
+      "side": "new",
+      "lines": [13, 13]
+    },
+    {
+      "id": 2,
+      "root": 1,
+      "author": "eval-author",
+      "at": 1767348000000,
+      "text": "This case is handled: parse_quantity() rejects negative and zero values, so refund() only gets a positive quantity."
+    }
+  ]
+}

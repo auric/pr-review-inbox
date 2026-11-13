@@ -1,0 +1,30 @@
+{
+  "id": "probe-task-csv-quoting",
+  "title": "CSV export of the orders, with one unmet criterion",
+  "language": "typescript",
+  "pr": {
+    "title": "Export the orders of a day as CSV",
+    "description": "Adds the CSV export of the orders of one day for the finance team."
+  },
+  "task": "Export the order list as CSV for the finance team.\n\nAcceptance criteria:\n1. The first row holds the column names: id, customer, total.\n2. A value with a comma, a double quote, or a line break is quoted as RFC 4180 says: in double quotes, with each double quote doubled.\n3. The total has two decimals, such as 12.50.\n4. An empty order list gives only the header row.\n5. Each line ends with CRLF.",
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/export/csv.ts",
+      "side": "new",
+      "lines": [9, 9],
+      "severityMin": "major",
+      "module": "intent",
+      "note": "Acceptance criterion 2 is not met: ordersCsv() joins the values with commas and quotes none of them. A customer name with a comma, a double quote, or a line break (free text, types.ts) breaks the columns of its row."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/export/csv.ts",
+      "side": "new",
+      "lines": [8, 8],
+      "why": "totalCents is a whole number. n / 100 is the nearest double to the exact value, and toFixed(2) rounds it back to that value, so the total always has the right two decimals (criterion 3). A float rounding finding is wrong here."
+    }
+  ]
+}

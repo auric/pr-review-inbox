@@ -34,10 +34,49 @@ The command builds the local set from the data folder of the app into `eval-loca
 - In the text, each whole-word slug and login of any person of the database becomes its placeholder, in any case. The full display name of any person of the database changes as stored or with each word capitalized. A single display-name word of 3 or more letters is a first or last name alone, or a one-word display name. It changes only for the PR author, you, and the reviewers with a comment on the PR. It changes only in its capitalized form: "Will, can you check" changes, "this will mark the row" stays. Limits: a single name word of a person of another PR stays. A name in lowercase or in all capitals stays. A slug or login shorter than 4 characters, or a common word like `admin` or `test`, changes only in an @mention. Every @mention of an unknown name (`@name`, `@"name"`, `@{name}`, `[~name]`) becomes `@someone`. Email addresses become `<email>`, and the host part of each URL becomes `<host>`. The text is in Unicode NFC form. Other text stays as stored, like the PR title and description.
 - An inline thread keeps its lines when they map to the reviewed head through the diff, as for carry. Otherwise it stays as a file comment without lines. A root on an unchanged line (CONTEXT) is numbered on the old side, as the app does. It also gets `lineType: "CONTEXT"` and `newPlace`, the same lines on the new side at the reviewed head. A thread is resolved only when its resolve time is before the run start. The orphaned state is not stored.
 - Caps per case: 60 comments, the newest threads first, and 2,000 characters per comment. MANIFEST.json `threads` and the "PR threads" line of the build give the counts. They count the threads, the comments, and those over the cap. They also count the replies in your threads, the threads on must-find lines, and the edited comments. They also count the threads without lines and the PR author replies of re-review cases.
-- `rules` is 3 since the threads, and 4 since the run start cutoff and the must-find line rule. Old case files with `rules: 2` and no threads still run, without threads.
+- `rules` is 3 since the threads, 4 since the run start cutoff and the must-find line rule, and 5 since the gold text, the case fields, and the clean cases. Old case files with `rules: 2` and no threads still run, without threads.
 - `bun run eval:threads <result.json>` runs the idea 2 check on a local result. For each must-find that recall counts, it checks for a thread within 10 lines in the same file and side. A CONTEXT root also counts on the new side, with its `newPlace`. It prints the counts for missed and for found must-finds. It counts only completed runs and prints how many runs it left out. It counts a case with threads only when one of its threads has lines. It reads only the result file and the case files, and it refuses a result of another build of the set.
 - The result items store `evidence`, `anchorText`, and `cause` of each finding. No metric reads them. Old result files without them still score.
 - The builder only reads the data folder: a temp copy of the database, and read-only git commands on the cache. It refuses an `--out` folder in the data folder.
+
+## Gold text and case fields (rules 5)
+
+The matcher and the judge of docs/plans/review-v2/review-quality-2026.md (E3, E4) need the text of each item. Rules 5 adds these fields to case.json:
+
+- `text` on each bug, trap, extra, and own comment. A finding gives its title, trigger, and body, with an empty line between them. The body is the text after your edit, else the text of the finder. Your edit gets the names replaced, as a comment does. A carried finding gives the text of its newest copy. A finding of prompt version 1 gives its body only. A comment gives its text with the names replaced and the 2,000-character cap, as the thread text has them. The same person gets the same placeholder in the text and in the threads.
+- `category` on each finding: the category that the finder gave. A comment has none.
+- `source` on each item: `posted` (you posted the finding), `fixed` (a Fix commit covered it), `session` (your session accepted it), `other` (a line comment of another reviewer), or `own` (your discard, your withdrawal, or your own comment). So each trap and each extra has `own`.
+- `group` on each case: an opaque key of the PR, such as `pr12`. All cases of one PR have the same group, so a bootstrap can resample by PR.
+- `hasTask` on each case: true when a task row has its text. The run then gets `task.md`. The name differs from `task`, which holds the task text of a fixture case.
+- `large` on each case: true for 1,200 or more changed lines or 30 or more files (catalog.ts `REVIEWER_MIN_LINES`, `REVIEWER_MIN_FILES`). The diff goes from the merge base to the head. The reviewer mode of the profile does not change it.
+- MANIFEST.json `categories` counts the findings by decision before the conflict rule and carry, as `sources` does. The decisions are `posted`, `fixed`, `session`, `withdrawn`, `notBugOrIntended`, `otherDiscard`, and `refuted`. `byClass` counts per bug class of shared/review.ts `bugClass`: `security`, `concurrency`, `resource`, `behavior`, and `other`. `byCategory` counts per category in lower case, with `none` for a finding without one. `byModule` counts per module. MANIFEST.json holds no text.
+- case.json now holds company text in each item. Keep `eval-local/` out of git. The result files of eval runs copy the items, so `eval-results/` also holds the text.
+
+## Clean cases
+
+A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). `bun run eval:local -- --clean N` adds up to N clean cases. The default is 0.
+
+- A reviewed head is a candidate when its PR merged with that head as its last source head. The sync stores the state and the last head of each PR.
+- The head has no must-find and no trap, also after carry. No decision touched it, so a must-find and a trap that cancel each other do not make a candidate. Extras can stay. They count for no metric but extras.
+- No root comment of you or of a reviewer is on the code of the head. A comment at the head counts. A comment at an earlier head also counts, unless a push orphaned it. A file comment counts too. A comment of the PR author and a general comment do not count.
+- A head with more than one merge base gives one candidate: the newest run.
+- The build takes the N candidates with the oldest first run. A newer merged PR adds a candidate, but it does not change this choice.
+- A clean case has `clean: true` and no bugs. It keeps its threads, its task rows, and its extras.
+- MANIFEST.json `clean` holds `asked` (N), `candidates`, and `cases`. `counts.cases` includes the clean cases. The build prints them on the "Clean cases" line.
+- `bun run eval:ab` builds the set again before each run, without `--clean`. Its set then has no clean cases.
+
+## Probe set
+
+`fixtures/eval/probe/` holds 8 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
+
+- 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
+- 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
+- 2 cases have task text with acceptance criteria. The change does not meet one criterion. That bug has module `intent`.
+- 1 case has task text, and unchanged code meets the criterion. The line that seems to miss it is a trap.
+- 1 case has PR text that states no requirement. Its traps are where a reviewer invents one.
+- 1 case is clean (`clean: true`). It has no bug and one trap on a line that looks wrong but is correct.
+
+A fixture case can have `threads` and `clean`, as a local case can. The run seeds the threads into the comment table, so `pr-context.md` lists them. A fixture case has no `text` on its items: `note` and `why` describe them.
 
 ## Optional flags
 

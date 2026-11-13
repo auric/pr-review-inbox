@@ -1,0 +1,67 @@
+diff --git a/jobs/main.py b/jobs/main.py
+index 4d656c1..5ec6f26 100644
+--- a/jobs/main.py
++++ b/jobs/main.py
+@@ -1,4 +1,5 @@
+ from jobs.dispatcher import Dispatcher
++from jobs.stats import EventStats
+ 
+ 
+ def log_event(event):
+@@ -6,4 +7,5 @@ def log_event(event):
+ 
+ 
+ def build():
+-    return Dispatcher([log_event])
++    stats = EventStats()
++    return Dispatcher([log_event, stats.record])
+diff --git a/jobs/stats.py b/jobs/stats.py
+new file mode 100644
+index 0000000..381056c
+--- /dev/null
++++ b/jobs/stats.py
+@@ -0,0 +1,23 @@
++"""Counts the events by kind and logs the counts on each tick event."""
++
++import logging
++
++log = logging.getLogger(__name__)
++
++
++class EventStats:
++    """A handler for Dispatcher."""
++
++    def __init__(self):
++        self._counts = {}
++
++    def record(self, event):
++        if event.kind == "tick":
++            self._report()
++            return
++        self._counts[event.kind] = self._counts.get(event.kind, 0) + 1
++
++    def _report(self):
++        for kind, n in sorted(self._counts.items()):
++            log.info("events %s: %d", kind, n)
++        self._counts.clear()
+diff --git a/tests/test_stats.py b/tests/test_stats.py
+new file mode 100644
+index 0000000..ecba62c
+--- /dev/null
++++ b/tests/test_stats.py
+@@ -0,0 +1,15 @@
++import logging
++
++from jobs.events import Event
++from jobs.stats import EventStats
++
++
++def test_logs_and_clears_the_counts_on_tick(caplog):
++    caplog.set_level(logging.INFO)
++    stats = EventStats()
++    for kind in ["a", "b", "a"]:
++        stats.record(Event(kind=kind, payload={}))
++    stats.record(Event(kind="tick", payload={}))
++    assert [r.getMessage() for r in caplog.records] == ["events a: 2", "events b: 1"]
++    stats.record(Event(kind="tick", payload={}))
++    assert len(caplog.records) == 2

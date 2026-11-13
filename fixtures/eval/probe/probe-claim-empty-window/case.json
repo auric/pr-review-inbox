@@ -1,0 +1,56 @@
+{
+  "id": "probe-claim-empty-window",
+  "title": "Latency rows per endpoint, with a wrong claim in a thread",
+  "language": "typescript",
+  "pr": {
+    "title": "Add latency rows for the on-call dashboard",
+    "description": "Adds `latencyRows()`, which gives the average response time of each endpoint over the last five minutes and marks an endpoint over 800 ms as slow. `pages()` pages on-call for each slow row."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/metrics/latency.ts",
+      "side": "new",
+      "lines": [15, 15],
+      "alt": [
+        {
+          "path": "src/metrics/latency.ts",
+          "side": "new",
+          "lines": [21, 21]
+        }
+      ],
+      "severityMin": "major",
+      "module": "core",
+      "note": "averageMs() divides by zero when the window has no sample with a response time. collect() returns an empty list for an endpoint without traffic (collect.ts), so the average is NaN, the status is slow, and pages() pages on-call for an idle endpoint. The thread claim that collect() never returns an empty list is wrong."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/metrics/latency.ts",
+      "side": "new",
+      "lines": [11, 11],
+      "why": "== null is on purpose and correct: it skips a sample whose ms is null. A finding that asks for === is no defect."
+    }
+  ],
+  "threads": [
+    {
+      "id": 1,
+      "root": 1,
+      "author": "reviewer-1",
+      "at": 1767344400000,
+      "text": "What does averageMs() return for an endpoint with no samples in the window? count is 0 then.",
+      "path": "src/metrics/latency.ts",
+      "side": "new",
+      "lines": [15, 15],
+      "resolved": true
+    },
+    {
+      "id": 2,
+      "root": 1,
+      "author": "eval-author",
+      "at": 1767348000000,
+      "text": "This case is handled: collect() never returns an empty list. For an idle endpoint it returns the last sample before the window, so count is at least 1."
+    }
+  ]
+}

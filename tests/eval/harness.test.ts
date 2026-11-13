@@ -264,6 +264,7 @@ describe("eval harness without --real (AC-M2)", () => {
 const LIMITS: Record<FixtureSet, { bugs: [number, number]; traps: [number, number]; lines: [number, number] }> = {
   v1: { bugs: [1, 3], traps: [1, 2], lines: [150, 500] },
   hard: { bugs: [0, 3], traps: [3, 4], lines: [150, 1500] },
+  probe: { bugs: [0, 1], traps: [1, 2], lines: [10, 200] },
 };
 const within = (n: number, [lo, hi]: [number, number]) => n >= lo && n <= hi;
 

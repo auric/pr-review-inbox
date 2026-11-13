@@ -1,0 +1,83 @@
+diff --git a/auth/lockout.py b/auth/lockout.py
+new file mode 100644
+index 0000000..6fa7604
+--- /dev/null
++++ b/auth/lockout.py
+@@ -0,0 +1,24 @@
++"""Locks an account after too many failed logins."""
++
++FAILS_MAX = 5
++WINDOW_S = 15 * 60
++LOCK_S = 15 * 60
++
++
++class Lockout:
++    def __init__(self, clock):
++        self._clock = clock
++        self._fails = {}
++        self._locked_until = {}
++
++    def locked(self, account):
++        return self._clock() < self._locked_until.get(account, 0)
++
++    def failed(self, account):
++        now = self._clock()
++        recent = [t for t in self._fails.get(account, []) if now - t < WINDOW_S]
++        recent.append(now)
++        if len(recent) >= FAILS_MAX:
++            self._locked_until[account] = now + LOCK_S
++            recent = []
++        self._fails[account] = recent
+diff --git a/auth/login.py b/auth/login.py
+index b798632..ef8f646 100644
+--- a/auth/login.py
++++ b/auth/login.py
+@@ -9,8 +9,11 @@ def start_session(user):
+     return {"user": user.name}
+ 
+ 
+-def login(account, password, users):
++def login(account, password, users, lockout):
++    if lockout.locked(account):
++        raise LoginError("locked")
+     user = users.get(account)
+     if user is None or not check_password(user, password):
++        lockout.failed(account)
+         raise LoginError("bad credentials")
+     return start_session(user)
+diff --git a/tests/test_lockout.py b/tests/test_lockout.py
+new file mode 100644
+index 0000000..b6a88d4
+--- /dev/null
++++ b/tests/test_lockout.py
+@@ -0,0 +1,30 @@
++import pytest
++
++from auth.lockout import FAILS_MAX, LOCK_S, Lockout
++from auth.login import LoginError, login
++
++
++class Clock:
++    def __init__(self):
++        self.now = 1000.0
++
++    def __call__(self):
++        return self.now
++
++
++def test_locks_after_five_failures():
++    clock = Clock()
++    lockout = Lockout(clock)
++    for _ in range(FAILS_MAX):
++        lockout.failed("ada")
++    assert lockout.locked("ada")
++    clock.now += LOCK_S
++    assert not lockout.locked("ada")
++
++
++def test_a_locked_account_gets_the_locked_error():
++    lockout = Lockout(Clock())
++    for _ in range(FAILS_MAX):
++        lockout.failed("ada")
++    with pytest.raises(LoginError, match="locked"):
++        login("ada", "right", {}, lockout)

@@ -8,15 +8,26 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { type EvalBug, type LocalCaseFile, loadCases, setFingerprint } from "../../scripts/eval/cases";
+import { type EvalBug, ITEM_SOURCES, type LocalCaseFile, loadCases, setFingerprint } from "../../scripts/eval/cases";
 import { refusal } from "../../scripts/eval/compare";
-import { carry, caseThreads, type Draft, type Manifest, noThreads, THREAD_COMMENTS_MAX, type ThreadRow } from "../../scripts/eval/local";
+import {
+  BUG_CLASS_NAMES,
+  carry,
+  caseThreads,
+  type Draft,
+  type Manifest,
+  noThreads,
+  THREAD_COMMENTS_MAX,
+  THREAD_TEXT_MAX,
+  type ThreadRow,
+} from "../../scripts/eval/local";
 import { localRefusal, rescore } from "../../scripts/eval/rescore";
 import { type CaseRun, type EvalItem, type EvalResult, score } from "../../scripts/eval/score";
 import { threadCheck } from "../../scripts/eval/threads";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { openDb } from "../../src/server/storage/db";
+import { bugClass } from "../../src/shared/review";
 import { readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 
@@ -34,6 +45,13 @@ const CLEAN_TEXT = "Handled in v23. Ask @reviewer-2 or reviewer-2. eval-reviewer
 const NOTE_TEXT = "Olga Far wrote to olga.far@corp.example.invalid, see https://git.corp.example.invalid/x and @nobody-here.";
 const NOTE_CLEAN = "someone wrote to <email>, see https://<host>/x and @someone.";
 const REAL = ["zelda", "Zelda", "zquux", "Moe Mine", "yuri", "xena", "Olga", "olga", "corp", "nobody", "wanda"];
+// Your comment 100 and comment 109 of another reviewer: their gold text gets the placeholders of the threads and the cap.
+const MINE_TEXT = "Ask Zelda Quux or @zquux. Mail olga.far@corp.example.invalid.";
+const MINE_CLEAN = "Ask reviewer-2 or @reviewer-2. Mail <email>.";
+const OTHER_TEXT = `Moe Mine says ${"z".repeat(2500)}`;
+// Your edit of a finding body. It gets the names replaced, as your comments do.
+const EDITED = "Your edit of the body. Zelda Quux agrees.";
+const EDITED_CLEAN = "Your edit of the body. reviewer-2 agrees.";
 // The review runs start after the head commit time (2026-01-01).
 const RUN_START = Date.UTC(2027, 0, 1);
 
@@ -69,7 +87,8 @@ const fileAt = (changed: Set<number>) => `${Array.from({ length: 40 }, (_, k) =>
 const A_LINES = new Set([10, 11, 12, 13, 14, 22, 27, 30]);
 const B_LINES = new Set([...A_LINES, 18, 20, 37]);
 
-// The copy of the git folder: <cache>/PROJ/repo.git with the base, A, and B commits.
+// The copy of the git folder: <cache>/PROJ/repo.git with the base, A, B, and C commits. Head C adds 30 files to head B, so a case at C
+// is large (catalog.ts REVIEWER_MIN_FILES).
 async function makeCache(root: string) {
   const empty = join(root, "empty.gitconfig");
   writeFileSync(empty, "");
@@ -94,12 +113,19 @@ async function makeCache(root: string) {
   const base = await commit(fileAt(new Set()), "base");
   const a = await commit(fileAt(A_LINES), "head A");
   const b = await commit(fileAt(B_LINES), "head B");
+  for (let k = 1; k <= 30; k++)
+    writeFileSync(
+      join(src, "src", `gen${k}.ts`),
+      `export const g${k} = ${k};
+`,
+    );
+  const c = await commit(fileAt(B_LINES), "head C");
   const cache = join(root, "git");
   await git(["clone", "-q", "--bare", src, join(cache, "PROJ", "repo.git")], { env });
-  return { cache, base, a, b };
+  return { cache, base, a, b, c };
 }
 
-type Heads = { base: string; a: string; b: string };
+type Heads = { base: string; a: string; b: string; c: string };
 
 // The copy of the data folder: config.json and the database file. Each scenario names the case and the expected class.
 function makeDb(dir: string, h: Heads) {
@@ -130,22 +156,34 @@ function makeDb(dir: string, h: Heads) {
         )
         .get({ pr, key: `k${keys++}`, head, base: h.base, mb: base, status, started: RUN_START }) as { id: number }
     ).id;
-  const item = (r: number, status: string, lines: [number, number], p: Record<string, unknown> = {}) =>
-    (
+  // A finding as judge.ts stores it: the body column starts as the body of the payload. edited: the body column after your edit.
+  const item = (r: number, status: string, lines: [number, number], p: Record<string, unknown> = {}, edited?: string) => {
+    const payload = {
+      severity: "minor",
+      module: "core",
+      category: "logic",
+      title: `Title ${lines[0]}`,
+      trigger: `Trigger ${lines[0]}`,
+      body: `Body ${lines[0]}`,
+      ...p,
+    };
+    return (
       db
         .query(
           `INSERT INTO review_item (run, kind, payload_json, body, path, side, line, line_end, status)
-          VALUES ($run, 'finding', $payload, 'b', $path, 'new', $line, $end, $status) RETURNING id`,
+          VALUES ($run, 'finding', $payload, $body, $path, 'new', $line, $end, $status) RETURNING id`,
         )
         .get({
           run: r,
-          payload: JSON.stringify({ severity: "minor", module: "core", ...p }),
+          payload: JSON.stringify(payload),
+          body: edited ?? payload.body,
           path: PATH,
           line: lines[0],
           end: lines[1],
           status,
         }) as { id: number }
     ).id;
+  };
   const comment = (
     id: number,
     o: {
@@ -200,7 +238,7 @@ function makeDb(dir: string, h: Heads) {
   const failed = run(1, h.a, h.base, "failed");
   run(1, h.a, null);
   const ids = {
-    posted: item(r1, "posted", [10, 11], { severity: "major" }),
+    posted: item(r1, "posted", [10, 11], { severity: "major", category: "Security" }, EDITED),
     notBug: item(r1, "discarded", [30, 30], { discardReason: { code: "bug" } }),
     intended: item(r1, "discarded", [5, 5], { discardReason: { code: "intended" } }),
     worth: item(r1, "discarded", [15, 15], { discardReason: { code: "worth" } }),
@@ -217,7 +255,8 @@ function makeDb(dir: string, h: Heads) {
     clashPosted: item(r1, "posted", [33, 33]),
     clashTrap: item(r1, "discarded", [27, 27], { discardReason: { code: "bug" } }),
     clashIntended: item(r2, "discarded", [33, 34], { discardReason: { code: "intended" } }),
-    second: item(r2, "posted", [12, 12], { severity: "blocker" }),
+    // A finding of prompt version 1 has no title, trigger, or category.
+    second: item(r2, "posted", [12, 12], { severity: "blocker", title: undefined, trigger: undefined, category: undefined }),
     // Head B changes line 37, so this finding stays at head A.
     changed: item(r2, "posted", [37, 37]),
     copy: 0,
@@ -226,19 +265,23 @@ function makeDb(dir: string, h: Heads) {
   // A revision of a finding is no finding. A finding of a failed run counts nowhere.
   item(r2, "discarded", [12, 12], { revises: ids.second });
   item(failed, "posted", [1, 1]);
-  ids.copy = item(r3, "posted", [35, 35], { severity: "major", carried: { from: ids.carried, verdict: "open", reason: "", since: h.a } });
+  ids.copy = item(r3, "posted", [35, 35], {
+    severity: "major",
+    title: "Title of the copy",
+    carried: { from: ids.carried, verdict: "open", reason: "", since: h.a },
+  });
   ids.onlyB = item(r3, "posted", [3, 3]);
   // Only extras: no case. A repository without a cache copy: missing commits.
   item(run(2, h.a, h.base), "discarded", [15, 15], { discardReason: { code: "worth" } });
   item(run(3, h.a, h.base), "posted", [10, 10]);
 
-  comment(100, { anchor: anchor(22) });
+  comment(100, { anchor: anchor(22), text: MINE_TEXT });
   // Another reviewer: open on an unchanged line, so no must-find.
   comment(101, { author: "other", anchor: anchor(24) });
   // Another reviewer: a resolved thread on the lines of the session bug, so no second must-find. An orphaned anchor. Head B changes
   // lines 18 and 20, so neither carries.
   comment(108, { author: "other", anchor: anchor(20), resolved: true });
-  comment(109, { author: "other", anchor: anchor(18, h.a, true) });
+  comment(109, { author: "other", anchor: anchor(18, h.a, true), text: OTHER_TEXT });
   // Left out: the PR author, a file comment without a line, and a head with no review.
   comment(110, { author: "author", anchor: anchor(13), resolved: true, resolvedAt: 1 });
   comment(111, { author: "other", anchor: anchor(undefined), resolved: true });
@@ -447,19 +490,25 @@ describe("eval:local selection", () => {
     const a = caseOf(heads.a);
     const spot = { path: PATH, side: "new", severityMin: "minor", module: "core", source: "other" } as const;
     expect(a.bugs.filter((b) => b.source === "other")).toEqual([
-      { id: "comment-109", ...spot, lines: [18, 18], note: "Comment 109 of another reviewer, on a line that a later head changed." },
+      {
+        id: "comment-109",
+        ...spot,
+        lines: [18, 18],
+        note: "Comment 109 of another reviewer, on a line that a later head changed.",
+        text: `${`eval-reviewer says ${"z".repeat(2500)}`.slice(0, THREAD_TEXT_MAX)}
+[The eval builder cut this comment.]`,
+      },
     ]);
     // One defect is one must-find: comment 108 is on the lines of the session bug.
     expect(a.bugs.map((b) => b.id)).not.toContain("comment-108");
-    // Your own decisions carry no source. The open comment 101, the PR author, and the file comment stay out.
-    expect(a.bugs.filter((b) => b.source !== "other").every((b) => b.source === undefined)).toBe(true);
+    // The open comment 101, the PR author, and the file comment stay out.
     for (const id of ["comment-101", "comment-110", "comment-111", "comment-112", "comment-113"])
       expect([...a.bugs, ...a.human].map((x) => x.id)).not.toContain(id);
     expect(caseOf(heads.b).bugs.filter((b) => b.source === "other")).toEqual([]);
   });
 
   test("each plain case states the must-find rules, so a new rule gives a new set fingerprint", () => {
-    expect([caseOf(heads.a).rules, caseOf(heads.b).rules]).toEqual([4, 4]);
+    expect([caseOf(heads.a).rules, caseOf(heads.b).rules]).toEqual([5, 5]);
   });
 
   test("a case holds the threads of other people when its run started, with placeholders for the names of the database's people", () => {
@@ -630,12 +679,80 @@ describe("eval:local selection", () => {
   });
 
   test("your own root comment at a reviewed head is a must-find item", () => {
-    expect(caseOf(heads.a).human).toEqual([{ id: "comment-100", path: PATH, side: "new", lines: [22, 22], note: "Your comment 100." }]);
+    expect(caseOf(heads.a).human).toEqual([
+      { id: "comment-100", path: PATH, side: "new", lines: [22, 22], note: "Your comment 100.", text: MINE_CLEAN, source: "own" },
+    ]);
     expect(caseOf(heads.b).human).toEqual([]);
+  });
+
+  test("each item has its gold text, category, and source, and no case holds a name", () => {
+    const a = caseOf(heads.a);
+    const b = caseOf(heads.b);
+    const of = new Map([...a.bugs, ...a.traps].map((x) => [x.id, x]));
+    // The title, trigger, and body. Your edit of the body wins over the text of the finder.
+    expect(of.get(ofItem(ids.posted))).toMatchObject({
+      text: `Title 10\n\nTrigger 10\n\n${EDITED_CLEAN}`,
+      category: "Security",
+      source: "posted",
+    });
+    // A finding of prompt version 1: the body only, and no category.
+    expect([of.get(ofItem(ids.second))?.text, of.get(ofItem(ids.second))?.category]).toEqual(["Body 12", undefined]);
+    // The decision on a carried finding is on its copy, so the text is of the copy too.
+    expect(of.get(ofItem(ids.carried))?.text).toBe("Title of the copy\n\nTrigger 35\n\nBody 35");
+    expect(a.bugs.map((x) => [x.id, x.source, x.category])).toEqual([
+      [ofItem(ids.posted), "posted", "Security"],
+      [ofItem(ids.restored), "posted", "logic"],
+      [ofItem(ids.carried), "posted", "logic"],
+      [ofItem(ids.fixed), "fixed", "logic"],
+      [ofItem(ids.session), "session", "logic"],
+      [ofItem(ids.second), "posted", undefined],
+      [ofItem(ids.changed), "posted", "logic"],
+      ["comment-109", "other", undefined],
+    ]);
+    // Your discards, your withdrawal, and your comment.
+    expect([...a.traps, ...a.extras, ...a.human].map((x) => x.source)).toEqual(Array(7).fill("own"));
+    expect(a.traps.map((x) => x.text)).toEqual([
+      "Title 30\n\nTrigger 30\n\nBody 30",
+      "Title 5\n\nTrigger 5\n\nBody 5",
+      "Title 6\n\nTrigger 6\n\nBody 6",
+    ]);
+    expect(a.extras.map((x) => [x.text, x.category])).toEqual([
+      ["Title 15\n\nTrigger 15\n\nBody 15", "logic"],
+      ["Title 25\n\nTrigger 25\n\nBody 25", "logic"],
+      ["Title 40\n\nTrigger 40\n\nBody 40", "logic"],
+    ]);
+    // Carried items keep their text and source.
+    expect(b.bugs.find((x) => x.id === ofItem(ids.posted))).toMatchObject({
+      text: `Title 10\n\nTrigger 10\n\n${EDITED_CLEAN}`,
+      source: "posted",
+    });
+    for (const c of [a, b]) {
+      const all = [...c.bugs, ...c.traps, ...c.extras, ...c.human];
+      expect(all.filter((x) => !x.text || !(ITEM_SOURCES as readonly (string | undefined)[]).includes(x.source))).toEqual([]);
+      for (const name of REAL) expect(JSON.stringify(c)).not.toContain(name);
+    }
+  });
+
+  test("MANIFEST.json counts the findings by decision per bug class, category, and module, with no text", () => {
+    const m = JSON.parse(readFileSync(join(OUT, "MANIFEST.json"), "utf8")) as Manifest;
+    const zero = { posted: 0, fixed: 0, session: 0, withdrawn: 0, notBugOrIntended: 0, otherDiscard: 0, refuted: 0 };
+    // All runs of the copy count, also those of a case that no build writes. A carried finding counts at each head, as in sources.
+    const rest = { fixed: 1, session: 1, withdrawn: 1, notBugOrIntended: 4, otherDiscard: 4, refuted: 1 };
+    expect(m.categories).toEqual({
+      byClass: { security: { ...zero, posted: 1 }, other: { ...zero, ...rest, posted: 8 } },
+      byCategory: { security: { ...zero, posted: 1 }, logic: { ...zero, ...rest, posted: 7 }, none: { ...zero, posted: 1 } },
+      byModule: { core: { ...zero, ...rest, posted: 9 } },
+    });
+    expect(m.categories.byModule.core?.posted).toBe(m.sources.posted);
+    // The class names follow shared/review.ts bugClass. A category of no class is "other".
+    expect(BUG_CLASS_NAMES.map((name) => bugClass({ category: name }))).toEqual([0, 1, 2, 3, 4]);
+    expect(readFileSync(join(OUT, "MANIFEST.json"), "utf8")).not.toContain("Title");
   });
 
   test("a case holds the PR text, the task rows, the commits, and the changed lines", () => {
     const a = caseOf(heads.a);
+    // group: the key of the PR. hasTask: the task row has its text. 16 changed lines in one file are no large case.
+    expect([a.group, a.hasTask, a.large, a.clean, caseOf(heads.b).group]).toEqual(["pr1", true, false, undefined, "pr1"]);
     expect(a.pr).toEqual({ title: "Add the calc helpers", description: "Synthetic PR." });
     expect(a.tasks.map((t) => [t.key, t.source, JSON.parse(t.json ?? "{}").description])).toEqual([["EVAL-9", "branch", "Add v1 to v40."]]);
     expect(a.bundle).toMatchObject({ base: heads.base, head: heads.a });
@@ -703,6 +820,138 @@ describe("eval:local refusals", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("holds other files");
     expect(readdirSync(out)).toEqual(["notes.txt"]);
+  });
+
+  test("--clean takes a whole number only", async () => {
+    for (const bad of ["x", "1.5", ""]) {
+      const r = await bun([LOCAL, "--db", dbFile, "--cache", cache, "--out", temp("bad-clean"), "--clean", bad]);
+      expect([bad, r.code]).toEqual([bad, 2]);
+      expect(r.stderr).toContain("--clean must be a whole number");
+    }
+  });
+});
+
+// ---------- Clean cases ----------
+
+// The PRs of the clean rule (docs/plans/review-v2/review-quality-2026.md E1). Each comment names the expected result.
+function makeCleanDb(dir: string, h: Heads) {
+  writeFileSync(
+    join(dir, "config.json"),
+    JSON.stringify({ baseUrl: "https://bitbucket.example.invalid", userSlug: "me", notifications: false }),
+  );
+  const file = join(dir, "db-clean.sqlite");
+  const db = openDb(file);
+  const pr = (id: number, state: string, head: string) =>
+    db
+      .query(
+        `INSERT INTO pull_request (id, project, repo, pr_id, title, description, author_slug, state, source_head, target_head)
+        VALUES ($id, 'PROJ', 'repo', $id, $title, '', 'author', $state, $head, $base)`,
+      )
+      .run({ id, title: `PR ${id}`, state, head, base: h.base });
+  let keys = 0;
+  const run = (p: number, head: string, base = h.base) =>
+    (
+      db
+        .query(
+          `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, status, started_at)
+          VALUES ($pr, 'review', 'general', '', $key, $head, $base, $base, 'completed', $started) RETURNING id`,
+        )
+        .get({ pr: p, key: `c${keys++}`, head, base, started: RUN_START }) as { id: number }
+    ).id;
+  const item = (r: number, status: string, line: number, p: Record<string, unknown> = {}) =>
+    db
+      .query(
+        `INSERT INTO review_item (run, kind, payload_json, body, path, side, line, line_end, status)
+        VALUES ($run, 'finding', $payload, 'b', $path, 'new', $line, $line, $status)`,
+      )
+      .run({ run: r, payload: JSON.stringify({ severity: "minor", module: "core", body: "b", ...p }), path: PATH, line, status });
+  const comment = (id: number, p: number, author: string, toHash: string, orphaned = false) =>
+    db
+      .query(
+        `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at,
+          updated_at) VALUES ($pr, $id, 0, NULL, $id, $author, 't', $anchor, 0, 1, 1)`,
+      )
+      .run({
+        pr: p,
+        id,
+        author,
+        anchor: JSON.stringify({ path: PATH, line: 24, lineType: "ADDED", fileType: "TO", fromHash: h.base, toHash, orphaned }),
+      });
+  // 1: merged at head B. Head A had a later push, so it is no clean case. Head B: a clean case with its neutral extra. Its task row
+  // has no text.
+  pr(1, "MERGED", h.b);
+  run(1, h.a);
+  item(run(1, h.b), "discarded", 15, { discardReason: { code: "worth" } });
+  db.run("INSERT INTO pr_task (pr, key, source, url, ord) VALUES (1, 'EVAL-1', 'branch', NULL, 0)");
+  // 2: open, so no clean case.
+  pr(2, "OPEN", h.a);
+  run(2, h.a);
+  // 3: an open line comment of another reviewer at the head.
+  pr(3, "MERGED", h.a);
+  run(3, h.a);
+  comment(300, 3, "other", h.a);
+  // 4: a posted finding at head A carries to head B. Both are plain cases.
+  pr(4, "MERGED", h.b);
+  item(run(4, h.a), "posted", 2);
+  run(4, h.b);
+  // 5: opposite decisions on one line drop both, but the head had a decision.
+  pr(5, "MERGED", h.a);
+  item(run(5, h.a), "posted", 10);
+  item(run(5, h.a), "discarded", 10, { discardReason: { code: "bug" } });
+  // 6: a comment of another reviewer at head A that the push to head B did not orphan, so it is on the code of head B.
+  pr(6, "MERGED", h.b);
+  run(6, h.a);
+  run(6, h.b);
+  comment(600, 6, "other", h.a);
+  // 7: merged at head C, which adds 30 files. A comment of the PR author does not count. A clean and large case.
+  pr(7, "MERGED", h.c);
+  run(7, h.c);
+  comment(700, 7, "author", h.c);
+  // 8: two merge bases at the last head: one candidate, from the newest run. --clean 2 leaves it out: its runs are the newest.
+  pr(8, "MERGED", h.b);
+  run(8, h.b);
+  run(8, h.b, h.a);
+  // 9: merged at head B, but the only review is at head A, which had a later push.
+  pr(9, "MERGED", h.b);
+  run(9, h.a);
+  db.close();
+  return file;
+}
+
+describe("eval:local clean cases", () => {
+  let out: string;
+  let built: { code: number; stdout: string; stderr: string };
+  const at = (p: number, head: string, base: string) => `pr${p}-${head.slice(0, 12)}-${base.slice(0, 8)}`;
+  beforeAll(async () => {
+    out = join(temp("clean"), "eval-local");
+    built = await bun([LOCAL, "--db", makeCleanDb(temp("clean-copy"), heads), "--cache", cache, "--out", out, "--clean", "2"]);
+  }, SLOW);
+
+  test("a clean case comes only from a merged PR at its last head, with nothing to find and no comment on its code", () => {
+    expect(built.stderr).toBe("");
+    expect(built.code).toBe(0);
+    expect(built.stdout).toContain(
+      "Clean cases: 2 of 3 heads of merged PRs with nothing to find, no comment, and no later push (--clean 2).",
+    );
+    const m = JSON.parse(readFileSync(join(out, "MANIFEST.json"), "utf8")) as Manifest;
+    expect(m.clean).toEqual({ asked: 2, candidates: 3, cases: 2 });
+    expect(m.counts.cases).toBe(4);
+    // Heads with nothing to find that the build leaves out: 1 A, 2, 3, 5, 6 A and B, both merge bases of 8, and 9.
+    expect(m.skipped.emptyCases).toBe(9);
+    const cases = loadCases("all", join(out, "cases"));
+    expect(cases.map((c) => [c.id, c.clean ?? false]).sort()).toEqual(
+      [
+        [at(1, heads.b, heads.base), true],
+        [at(4, heads.a, heads.base), false],
+        [at(4, heads.b, heads.base), false],
+        [at(7, heads.c, heads.base), true],
+      ].sort(),
+    );
+    const one = cases.find((c) => c.id === at(1, heads.b, heads.base));
+    expect(one).toMatchObject({ bugs: [], traps: [], human: [], group: "pr1", hasTask: false, large: false, rules: 5 });
+    expect(one?.extras?.map((x) => [x.lines, x.source])).toEqual([[[15, 15], "own"]]);
+    expect(one?.tasks?.map((t) => t.json)).toEqual([null]);
+    expect(cases.find((c) => c.id === at(7, heads.c, heads.base))).toMatchObject({ bugs: [], group: "pr7", large: true });
   });
 });
 

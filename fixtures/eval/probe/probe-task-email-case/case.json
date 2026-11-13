@@ -1,0 +1,27 @@
+{
+  "id": "probe-task-email-case",
+  "title": "Sign-up by e-mail address, with a criterion met in unchanged code",
+  "language": "typescript",
+  "pr": {
+    "title": "Sign-up and sign-in by e-mail address",
+    "description": "Adds the sign-up and the account lookup of the sign-in link for the new account page."
+  },
+  "task": "Store e-mail addresses in lower case.\n\nAcceptance criteria:\n1. Sign-up stores the e-mail address in lower case.\n2. Sign-in finds the account for any case of the address.",
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/auth/signup.ts",
+      "side": "new",
+      "lines": [10, 10],
+      "alt": [
+        {
+          "path": "src/auth/signin.ts",
+          "side": "new",
+          "lines": [5, 5]
+        }
+      ],
+      "why": "Both criteria are met in unchanged code: UserRepo.insert() stores canonicalEmail(u.email), which is in lower case, and findByEmail() also calls canonicalEmail() (repo.ts, email.ts). A finding that the change stores the address as typed, or that sign-in is case-sensitive, is wrong."
+    }
+  ]
+}

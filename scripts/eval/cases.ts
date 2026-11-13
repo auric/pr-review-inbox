@@ -13,7 +13,8 @@ import { finding, severities } from "../../src/shared/review";
 const REPO = resolve(import.meta.dir, "../..");
 const EVAL_DIR = join(REPO, "fixtures/eval");
 // v1: the 12 cases of the first baseline. hard: bugs that need unchanged code, bigger diffs, more traps, and cases with no bug.
-export const SETS = { v1: join(EVAL_DIR, "cases"), hard: join(EVAL_DIR, "hard") } as const;
+// probe: small cases for thread claims, task criteria, invented requirements, and a clean PR (review-quality-2026.md E1).
+export const SETS = { v1: join(EVAL_DIR, "cases"), hard: join(EVAL_DIR, "hard"), probe: join(EVAL_DIR, "probe") } as const;
 export type FixtureSet = keyof typeof SETS;
 // local: the set from your own decisions (docs/eval/local.md). It holds company code, so it never enters git.
 export type EvalSet = FixtureSet | "local";
@@ -49,17 +50,22 @@ const spot = { path: z.string().min(1), side: z.enum(["new", "old"]), lines: ran
 const commit = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
 // carriedFrom: local set only. The head of the earlier case whose decision this item carries. Absent: a decision at the head of the case.
 const place = { id: z.string().min(1), ...spot, alt: z.array(z.object(spot)).min(1).optional(), carriedFrom: commit.optional() };
-// source: local set only. other: a line comment of another reviewer (local.ts). Absent: your own decision, or a fixture bug.
+// Who confirmed an item of the local set. posted: you posted the finding. fixed: a fix commit covered it. session: your session
+// accepted it. other: a line comment of another reviewer. own: your own discard, withdrawal, or comment.
+export const ITEM_SOURCES = ["posted", "fixed", "session", "other", "own"] as const;
+// Local set only, rules 5. text: the title, trigger, and body of the finding, or the comment text with names replaced. category: the
+// category of the finding. A fixture set has no text: note and why describe its items.
+const gold = { text: z.string().optional(), category: z.string().optional(), source: z.enum(ITEM_SOURCES).optional() };
 export const evalBug = z.object({
   ...place,
   severityMin: z.enum(severities),
   module: z.enum(MODULE_IDS),
   note: z.string().min(1),
-  source: z.literal("other").optional(),
+  ...gold,
 });
-export const evalTrap = z.object({ ...place, why: z.string().min(1) });
+export const evalTrap = z.object({ ...place, why: z.string().min(1), ...gold });
 // A real issue that is no seeded bug. A shown item on it counts for no metric but extras.
-export const evalExtra = z.object({ ...spot, note: z.string().min(1) });
+export const evalExtra = z.object({ ...spot, note: z.string().min(1), ...gold });
 // A finding of the earlier run of a re-review case (docs/plans/review-v3.md WP-V3). The spot is its item anchor at the earlier head.
 // status: its state when the re-review started. open: new or accepted, so the re-review carries it. dropped: discarded, but not by
 // you (the check refuted it, or a fix commit closed it). resolved: posted only, the later state of its thread, or null when no thread
@@ -74,23 +80,6 @@ export const evalEarlier = z.object({
   payload: finding.loose(),
 });
 const rereviewBlock = z.object({ earlier: z.array(evalEarlier).min(1) });
-// tests/eval/harness.test.ts checks the bug, trap, and line counts of each set.
-export const caseFile = z.object({
-  id: z.string().regex(CASE_ID),
-  title: z.string().min(1),
-  language: z.enum(LANGUAGES),
-  pr: z.object({ title: z.string().min(1), description: z.string() }),
-  task: z.string().optional(),
-  instructions: z.string().optional(),
-  bugs: z.array(evalBug).max(3),
-  traps: z.array(evalTrap).min(1).max(4),
-  extras: z.array(evalExtra).optional(),
-  // A re-review case: earlier.patch beside head.patch makes the earlier head. bugs, traps, and extras are at the head.
-  rereview: rereviewBlock.optional(),
-});
-// Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
-export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1) });
-export const LOCAL_RULES = 4;
 // The user and the PR author of the PR row that run.ts seeds. local.ts gives the people of a thread placeholders that differ from both.
 export const EVAL_USER = "eval-reviewer";
 export const EVAL_AUTHOR = "eval-author";
@@ -116,6 +105,27 @@ export const evalThreadComment = z.object({
   deleted: z.literal(true).optional(),
   earlier: z.string().min(1).optional(),
 });
+// tests/eval/harness.test.ts checks the bug, trap, and line counts of each set.
+export const caseFile = z.object({
+  id: z.string().regex(CASE_ID),
+  title: z.string().min(1),
+  language: z.enum(LANGUAGES),
+  pr: z.object({ title: z.string().min(1), description: z.string() }),
+  task: z.string().optional(),
+  instructions: z.string().optional(),
+  bugs: z.array(evalBug).max(3),
+  traps: z.array(evalTrap).min(1).max(4),
+  extras: z.array(evalExtra).optional(),
+  // A re-review case: earlier.patch beside head.patch makes the earlier head. bugs, traps, and extras are at the head.
+  rereview: rereviewBlock.optional(),
+  // The PR threads at the head. run.ts seeds them, so pr-context.md lists them. Absent: no thread.
+  threads: z.array(evalThreadComment).optional(),
+  // A PR with no known defect: a probe case, or a clean case of the local set (local.ts --clean). It has no bugs.
+  clean: z.literal(true).optional(),
+});
+// Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
+export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1), ...gold });
+export const LOCAL_RULES = 5;
 // A case of the local set (docs/plans/review-v3.md WP-V1). A git bundle in ../../bundles/ holds the repository, so the case has no
 // base/ folder and no head.patch. The limits of the fixture sets do not apply. tasks: the pr_task rows with their task_context JSON.
 export const localCaseFile = caseFile.extend({
@@ -129,10 +139,14 @@ export const localCaseFile = caseFile.extend({
   changedLines: z.number().int().min(0),
   // The version of the must-find rules of local.ts. It is in the case.json text, so a new rule gives a new set fingerprint. 2: the
   // comments of other reviewers count. 3: the case holds its PR threads. 4: the thread cutoff is the run start, and a thread on the
-  // lines of a must-find stays out. Absent: 1.
+  // lines of a must-find stays out. 5: each item has text and source, the case has group, hasTask, and large, and clean cases exist.
+  // Absent: 1. A case without threads, or a case built before rules 3, has no threads, and run.ts seeds none.
   rules: z.number().int().min(2).max(LOCAL_RULES).optional(),
-  // Absent in cases built before rules 3, and in a case without threads: run.ts seeds no thread.
-  threads: z.array(evalThreadComment).optional(),
+  // Rules 5. group: an opaque key of the PR, the same for each case of one PR. hasTask: run.ts seeds task text, so the run gets
+  // task.md. large: the diff has REVIEWER_MIN_LINES changed lines or REVIEWER_MIN_FILES files (catalog.ts), whatever the reviewer mode.
+  group: z.string().min(1).optional(),
+  hasTask: z.boolean().optional(),
+  large: z.boolean().optional(),
   // since: the head of the earlier run. sinceBase: its merge base. The bundle holds both.
   rereview: rereviewBlock.extend({ since: commit, sinceBase: commit }).optional(),
 });
@@ -157,7 +171,9 @@ export type EvalCase = Omit<CaseFile, "language"> & {
   changedLines: number;
   human?: EvalHuman[];
   tasks?: LocalCaseFile["tasks"];
-  threads?: EvalThreadComment[];
+  group?: string;
+  hasTask?: boolean;
+  large?: boolean;
   local?: LocalRepo;
 };
 

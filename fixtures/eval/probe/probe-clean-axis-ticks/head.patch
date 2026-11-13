@@ -1,0 +1,46 @@
+diff --git a/src/chart/render.ts b/src/chart/render.ts
+index 293c0db..d665103 100644
+--- a/src/chart/render.ts
++++ b/src/chart/render.ts
+@@ -1,5 +1,12 @@
++import { tickPositions } from "./ticks";
++
+ export type Svg = string[];
+ 
+ export function axisLine(width: number, y: number): Svg {
+   return [`<line x1="0" y1="${y}" x2="${width}" y2="${y}" />`];
+ }
++
++export function axisWithTicks(width: number, y: number, segments: number): Svg {
++  const ticks = tickPositions(width, segments).map((x) => `<line x1="${x}" y1="${y}" x2="${x}" y2="${y + 4}" />`);
++  return [...axisLine(width, y), ...ticks];
++}
+diff --git a/src/chart/ticks.ts b/src/chart/ticks.ts
+new file mode 100644
+index 0000000..257f1bb
+--- /dev/null
++++ b/src/chart/ticks.ts
+@@ -0,0 +1,7 @@
++export function tickPositions(width: number, segments: number): number[] {
++  if (!Number.isInteger(segments) || segments < 1) return [];
++  const step = width / segments;
++  const xs: number[] = [];
++  for (let i = 0; i <= segments; i++) xs.push(Math.round(i * step));
++  return xs;
++}
+diff --git a/tests/chart/ticks.test.ts b/tests/chart/ticks.test.ts
+new file mode 100644
+index 0000000..28a55c4
+--- /dev/null
++++ b/tests/chart/ticks.test.ts
+@@ -0,0 +1,10 @@
++import { expect, test } from "vitest";
++import { tickPositions } from "../../src/chart/ticks";
++
++test("gives the tick positions", () => {
++  expect(tickPositions(100, 4)).toEqual([0, 25, 50, 75, 100]);
++});
++
++test("no segment gives no tick", () => {
++  expect(tickPositions(100, 0)).toEqual([]);
++});

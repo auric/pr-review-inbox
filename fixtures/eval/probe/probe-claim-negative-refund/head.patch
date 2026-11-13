@@ -1,0 +1,56 @@
+diff --git a/shop/refunds.py b/shop/refunds.py
+new file mode 100644
+index 0000000..018cf9d
+--- /dev/null
++++ b/shop/refunds.py
+@@ -0,0 +1,19 @@
++"""Partial refunds of an order line to the wallet of the customer."""
++
++from shop.orders import Order
++from shop.quantity import QuantityError, parse_quantity
++from shop.wallet import Wallet
++
++
++def refund(order: Order, sku: str, quantity_text: str, wallet: Wallet) -> int:
++    """Refunds part of an order line. Returns the refunded amount in cents."""
++    line = order.lines.get(sku)
++    if line is None:
++        raise KeyError(sku)
++    quantity = parse_quantity(quantity_text)
++    if line.refunded + quantity > line.quantity:
++        raise QuantityError("more than the ordered quantity")
++    cents = quantity * line.price_cents
++    line.refunded += quantity
++    wallet.credit(order.customer, cents)
++    return cents
+diff --git a/tests/test_refunds.py b/tests/test_refunds.py
+new file mode 100644
+index 0000000..b1c6173
+--- /dev/null
++++ b/tests/test_refunds.py
+@@ -0,0 +1,25 @@
++import pytest
++
++from shop.orders import Line, Order
++from shop.quantity import QuantityError
++from shop.refunds import refund
++from shop.wallet import Wallet
++
++
++def make_order():
++    order = Order(id="o-1", customer="c-1")
++    order.lines["sku-1"] = Line(sku="sku-1", price_cents=250, quantity=4)
++    return order
++
++
++def test_refunds_part_of_a_line():
++    order, wallet = make_order(), Wallet()
++    assert refund(order, "sku-1", "3", wallet) == 750
++    assert wallet.balance("c-1") == 750
++
++
++def test_rejects_more_than_ordered():
++    order, wallet = make_order(), Wallet()
++    refund(order, "sku-1", "3", wallet)
++    with pytest.raises(QuantityError):
++        refund(order, "sku-1", "2", wallet)

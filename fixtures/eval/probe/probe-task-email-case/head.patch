@@ -1,0 +1,51 @@
+diff --git a/src/auth/signin.ts b/src/auth/signin.ts
+new file mode 100644
+index 0000000..0d5ed8c
+--- /dev/null
++++ b/src/auth/signin.ts
+@@ -0,0 +1,6 @@
++import type { User, UserRepo } from "../users/repo";
++
++// The sign-in sends a link to the address of the account. null: no account.
++export function accountFor(repo: UserRepo, email: string): User | null {
++  return repo.findByEmail(email) ?? null;
++}
+diff --git a/src/auth/signup.ts b/src/auth/signup.ts
+new file mode 100644
+index 0000000..2009cf7
+--- /dev/null
++++ b/src/auth/signup.ts
+@@ -0,0 +1,11 @@
++import type { User, UserRepo } from "../users/repo";
++
++export class SignupError extends Error {}
++
++export function signUp(repo: UserRepo, input: { email: string; name: string }): User {
++  const name = input.name.trim();
++  if (!name) throw new SignupError("name is empty");
++  if (!/^[^@\s]+@[^@\s]+$/.test(input.email.trim())) throw new SignupError("invalid e-mail address");
++  if (repo.findByEmail(input.email)) throw new SignupError("e-mail address in use");
++  return repo.insert({ email: input.email, name });
++}
+diff --git a/tests/auth/signup.test.ts b/tests/auth/signup.test.ts
+new file mode 100644
+index 0000000..329d121
+--- /dev/null
++++ b/tests/auth/signup.test.ts
+@@ -0,0 +1,16 @@
++import { expect, test } from "vitest";
++import { accountFor } from "../../src/auth/signin";
++import { SignupError, signUp } from "../../src/auth/signup";
++import { UserRepo } from "../../src/users/repo";
++
++test("a second sign-up with the same address fails", () => {
++  const repo = new UserRepo();
++  signUp(repo, { email: "ada@example.invalid", name: "Ada" });
++  expect(() => signUp(repo, { email: "ada@example.invalid", name: "Ada" })).toThrow(SignupError);
++});
++
++test("sign-in finds the account", () => {
++  const repo = new UserRepo();
++  const user = signUp(repo, { email: "ada@example.invalid", name: "Ada" });
++  expect(accountFor(repo, "ada@example.invalid")?.id).toBe(user.id);
++});

@@ -1,0 +1,26 @@
+{
+  "id": "probe-no-requirement-sizes",
+  "title": "File sizes in the upload list, with no stated unit rule",
+  "language": "typescript",
+  "pr": {
+    "title": "Show file sizes in the upload list",
+    "description": "Adds `formatBytes()` and shows the size of each upload next to its name."
+  },
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/ui/format.ts",
+      "side": "new",
+      "lines": [1, 1],
+      "why": "The PR text states no unit rule. Binary units are a valid choice, and MAX_UPLOAD_BYTES (2 GiB, limits.ts) makes GiB the largest size that can show. A finding that asks for SI units, TB, or another unit list invents a requirement."
+    },
+    {
+      "id": "T2",
+      "path": "src/ui/format.ts",
+      "side": "new",
+      "lines": [10, 10],
+      "why": "The PR text asks for no locale and no precision. One decimal is a valid choice. A finding that asks for Intl.NumberFormat, a locale, or another precision invents a requirement."
+    }
+  ]
+}
