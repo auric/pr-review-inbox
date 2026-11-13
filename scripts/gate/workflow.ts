@@ -462,3 +462,183 @@ export function u96(o: { leadEdit: Outcome; leadWrite: Outcome; leadFile: boolea
 }
 
 export const info = (id: string, evidence: string, status: Status = "INFO"): Fact => ({ id, status, evidence });
+
+// ---------- B38 judges: deny rules on Agent input parameters (integration-check.md "Agent parameter deny rules") ----------
+// code.claude.com/docs/en/permissions, "Match by input parameter": a `Tool(param:value)` deny rule matches a top-level input field,
+// `*` matches any value, and a field that the call omits never matches.
+export const B38_DENY = ["Agent(model:*)", "Agent(effort:*)"];
+
+// Adds deny rules to the --disallowedTools value of argv, or appends the flag when argv has none.
+export function withDeny(args: readonly string[], rules: string[]) {
+  const i = args.indexOf("--disallowedTools");
+  if (i < 0) return [...args, "--disallowedTools", rules.join(",")];
+  if (i + 1 >= args.length) throw new Error("argv has no --disallowedTools value");
+  return args.map((a, j) => (j === i + 1 ? [a, ...rules].join(",") : a));
+}
+
+// The main-thread Agent calls of one type whose prompt holds mark, in stream order. A retry of a step repeats its mark.
+export const markedCalls = (events: unknown[], type: string, mark: string): ToolCall[] =>
+  toolCalls(events).filter(
+    (t) =>
+      t.parent === null &&
+      (t.name === "Agent" || t.name === "Task") &&
+      t.input.subagent_type === type &&
+      String(t.input.prompt ?? "").includes(mark),
+  );
+
+export type PinSeen = {
+  id: string;
+  model: string | null;
+  effort: string | null;
+  state: Outcome["state"];
+  text: string;
+  denied: Obj | null;
+  under: number;
+  resolved: string | null;
+  childModels: string[];
+  agentId: string | null;
+};
+const strOf = (v: unknown) => (v === undefined || v === null ? null : String(v));
+const holdsResult = (e: Obj, id: string) =>
+  e.type === "user" &&
+  isObj(e.message) &&
+  Array.isArray(e.message.content) &&
+  e.message.content.some((b) => isObj(b) && b.type === "tool_result" && b.tool_use_id === id);
+
+// One Agent call: its outcome, its permission_denied event, the events under it (task_started included), and its models.
+export function pinSeen(events: unknown[], c: ToolCall): PinSeen {
+  const all = objs(events);
+  const o = callOutcome(events, null, c.name, (i) => i === c.input);
+  const s = agentStats(events, c.id);
+  const started = all.filter((e) => e.subtype === "task_started" && e.tool_use_id === c.id);
+  const user = all.find((e) => holdsResult(e, c.id));
+  const fromResult = user && isObj(user.tool_use_result) ? strOf(user.tool_use_result.agentId) : null;
+  return {
+    id: c.id,
+    model: strOf(c.input.model),
+    effort: strOf(c.input.effort),
+    state: o.state,
+    text: o.text,
+    denied: all.find((e) => e.type === "system" && e.subtype === "permission_denied" && e.tool_use_id === c.id) ?? null,
+    under: s.childEvents + started.length,
+    resolved: s.resolvedModel,
+    childModels: s.childModels,
+    agentId: fromResult ?? strOf(started[0]?.task_id),
+  };
+}
+const pinModel = (p: PinSeen) => p.resolved ?? p.childModels[0] ?? "none";
+const ranOn = (p: PinSeen) => p.state === "ran" && p.under > 0;
+const pinLine = (p: PinSeen) =>
+  `state=${p.state} asked model=${p.model ?? "none"} asked effort=${p.effort ?? "none"} events under it=${p.under} model=${pinModel(p)}`;
+// INFO: one call, or "not called".
+export const pinFact = (id: string, label: string, p: PinSeen | undefined): Fact =>
+  info(id, `${label}: ${p ? `${pinLine(p)} result text=${clip(p.text)}` : "not called"}`);
+
+// Start: the run exits 0, stderr has no "Invalid" line (the CLI text of Gate B13 for a bad --agents file), and init still lists the
+// Agent tool.
+export function b38Start(id: string, o: { exit: number | null; stderr: string; tools: string[] | null; agents: string[] | null }): Fact {
+  const tools = o.tools ?? [];
+  const agent = tools.includes("Agent") || tools.includes("Task");
+  const lines = o.stderr.split(/\r?\n/).filter((l) => l.trim());
+  const invalid = lines.some((l) => /invalid/i.test(l));
+  const pass = o.exit === 0 && o.tools !== null && agent && !invalid;
+  return {
+    id,
+    status: pass ? "PASS" : "FAIL",
+    evidence: `exit=${o.exit} init=${o.tools !== null} init.tools has Agent or Task=${agent} init.agents=${list(o.agents ?? [])} "Invalid" in stderr=${invalid} stderr first line=${lines[0] ? clip(lines.find((l) => /invalid/i.test(l)) ?? lines[0]) : "none"}`,
+  };
+}
+
+// Control: the first marked call without model and effort runs on the pinned model.
+export function b38Control(id: string, calls: PinSeen[], want: string): Fact {
+  const c = calls.find((p) => p.model === null && p.effort === null);
+  const pass = !!c && ranOn(c) && pinModel(c).toLowerCase().includes(want.toLowerCase());
+  return {
+    id,
+    status: pass ? "PASS" : "FAIL",
+    evidence: c
+      ? `pinned agent without a per-call model: ${pinLine(c)} (want ${want})`
+      : `no call without model and effort among ${calls.length} marked calls: run again`,
+  };
+}
+export const controlRan = (calls: PinSeen[]) => calls.some((p) => p.model === null && p.effort === null && ranOn(p));
+
+// A per-call parameter is refused: a permission_denied event, or an error result that names a permission. Nothing runs under the
+// call, and no model answers it. control: the control call of the same run ran, so the deny rules do not block the agent name.
+export function b38Refused(id: string, param: "model" | "effort", calls: PinSeen[], control: boolean): Fact {
+  const c = calls.find((p) => p[param] !== null);
+  if (!c) return { id, status: "FAIL", evidence: `not tried: the lead left out ${param} in all ${calls.length} marked calls: run again` };
+  const refused = c.state === "refused" || (c.state === "error" && /permission|denied|deny/i.test(c.text));
+  const pass = refused && c.under === 0 && c.resolved === null && c.childModels.length === 0 && control;
+  const d = c.denied;
+  const shape = d
+    ? `tool_name=${strOf(d.tool_name) ?? "none"} decision_reason_type=${strOf(d.decision_reason_type) ?? "none"} decision_reason=${clip(strOf(d.decision_reason) ?? "")} message=${clip(strOf(d.message) ?? "")}`
+    : "no permission_denied event";
+  return {
+    id,
+    status: pass ? "PASS" : "FAIL",
+    evidence: `per-call ${param}=${c[param]}: ${pinLine(c)} result text=${clip(c.text)}; control ran=${control}; INFO event: ${shape}`,
+  };
+}
+
+// INFO: the calls of the same step after the first call with param. A retry without param shows on which model it ran.
+export function b38Retry(id: string, param: "model" | "effort", calls: PinSeen[]): Fact {
+  const i = calls.findIndex((p) => p[param] !== null);
+  const later = i < 0 ? [] : calls.slice(i + 1);
+  const each = later.map((p, k) => `retry ${k + 1} ${p[param] === null ? `without ${param}` : `with ${param}=${p[param]}`}: ${pinLine(p)}`);
+  return {
+    id,
+    status: "INFO",
+    evidence: i < 0 ? `no call with ${param}` : later.length ? each.join("; ") : `no retry after the call with ${param}`,
+  };
+}
+
+// The allow list holds: Agent(<name>) in the lead tools, and the deny rules do not block that name. The per-call model is refused, so
+// the CLI reads Agent(model:*) as a parameter rule and not as an agent named "model:*".
+export function b38Allow(o: {
+  name: string;
+  runs: { label: string; agents: string[] | null; control: boolean }[];
+  modelRefused: boolean;
+}): Fact {
+  const listed = (r: { agents: string[] | null }) => (r.agents ?? []).includes(o.name);
+  const pass = o.runs.length > 0 && o.runs.every((r) => r.control && listed(r)) && o.modelRefused;
+  return {
+    id: "allow",
+    status: pass ? "PASS" : "FAIL",
+    evidence: `${o.runs.map((r) => `${r.label}: init.agents lists ${o.name}=${listed(r)} control ran=${r.control}`).join("; ") || "no run"}; per-call model refused=${o.modelRefused}`,
+  };
+}
+
+// Every scalar field whose key names effort, as path=value.
+export function effortFields(v: unknown, path = ""): string[] {
+  if (Array.isArray(v)) return v.flatMap((x, i) => effortFields(x, `${path}[${i}]`));
+  if (!isObj(v)) return [];
+  return Object.entries(v).flatMap(([k, x]) => {
+    const p = path ? `${path}.${k}` : k;
+    return /effort/i.test(k) && (x === null || typeof x !== "object") ? [`${p}=${String(x)}`] : effortFields(x, p);
+  });
+}
+
+// The effort fields of the stream sources of one call: its tool_use_result, its task_* events, and the events under it.
+export function streamEffort(events: unknown[], id: string) {
+  return objs(events).flatMap((e) => {
+    if (e.parent_tool_use_id === id || (String(e.subtype ?? "").startsWith("task_") && e.tool_use_id === id)) return effortFields(e);
+    return holdsResult(e, id) ? effortFields({ tool_use_result: e.tool_use_result }) : [];
+  });
+}
+
+// INFO: the effort level of each pinned call. meta: the keys and effort fields of subagents/agent-<id>.meta.json, null when the gate
+// found no file. stream: streamEffort.
+export type EffortSeen = { label: string; seen: PinSeen | null; meta: { keys: string[]; effort: string[] } | null; stream: string[] };
+export function b38Effort(rows: EffortSeen[]): Fact {
+  const found = rows.some((r) => (r.meta?.effort.length ?? 0) + r.stream.length > 0);
+  const each = rows.map((r) =>
+    r.seen
+      ? `${r.label}: ${pinLine(r.seen)} meta.json=${r.meta ? `keys ${list(r.meta.keys)} effort ${list(r.meta.effort)}` : "not found"} stream effort=${list(r.stream)}`
+      : `${r.label}: not called`,
+  );
+  const why = found
+    ? ""
+    : "not observable: no field named effort in the agent meta.json, the Agent tool_use_result, the task events, or the events under each call; ";
+  return { id: "effort-level", status: "INFO", evidence: `${why}${each.join("; ")}` };
+}

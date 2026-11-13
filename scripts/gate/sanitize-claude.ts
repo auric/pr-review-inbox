@@ -47,6 +47,7 @@ const CHECKS: Record<string, string> = {
   b35: "B35. A write run as `--agent rl-main` with `Agent(rl-explorer)` and the shell allowlist (`agent`), the same step without `--agent` (`plain`), and a Stop during an rl-explorer call (`stop`).",
   b36: "B36. Workflow agents under an rl-main lead: agent writes and Bash in allowlist mode (`writer`) and Most commands mode (`any`), Stop in an agent `sleep 600` (`stop`), turn caps (`turns`), a writer with Agent disallowed and no spawn depth variable (`nodepth`), model priority and two agents at once (`models`), model inherit and an unknown alias (`badmodel`), `--advisor` (`advisor`), and Opus efforts (`opus`, with `--opus` only).",
   b37: "B37. One Claude session per task part: a create run with the implement flags and no `--no-session-persistence`, resumes with `--resume <kept file> --fork-session` (all flags, no Bash and Agent, another model), a run cut by the app kill and its resume, stream-json input, and a critic review run.",
+  b38: "B38. Deny rules `Agent(model:*)` and `Agent(effort:*)` with the review flags (`review`) and the implement flags (`implement`): a pinned agent without and with a per-call model or effort. The implement flags without the rules (`effort`).",
 };
 // Public built-in agent and product names. They are not private data, and a replacement would break the event shapes.
 const RESERVED = new Set(["claude", "general-purpose", "explore", "plan", "statusline-setup", "claude-code-guide", "builtin"]);

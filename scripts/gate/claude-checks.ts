@@ -12,6 +12,7 @@
 // B35 (a write run as --agent rl-main: U82, docs/plans/review-v2/task-subagents.md), B36 (workflow agents that write files and run
 // commands: U83 to U96, docs/plans/review-v2/agent-workflow.md section 6),
 // B37 (one Claude session per task part: U97 to U110, docs/plans/review-v2/part-session.md section 4),
+// B38 (deny rules on Agent input parameters pin a subagent model and effort: integration-check.md "Agent parameter deny rules"),
 // GADV (Gate G-ADV: the advisor, docs/plans/review-v2/advisor.md).
 // Usage: bun scripts/gate/claude-checks.ts [--only B1,B3] [B17 B18 ...] [--ssh-alias <alias>] [--advisor <model>] [--main-model <model>] [--opus] [--dry-run]
 // --dry-run builds every fixture and prints the planned argv. It starts no `claude -p` process and needs no `claude` on PATH.
@@ -98,19 +99,33 @@ import {
   agentDef,
   agentFront,
   agentStats,
+  B38_DENY,
+  b38Allow,
+  b38Control,
+  b38Effort,
+  b38Refused,
+  b38Retry,
+  b38Start,
   bashHas,
   bashIs,
   type Cmd,
   callOutcome,
+  controlRan,
   cwdFilesFact,
+  type EffortSeen,
+  effortFields,
   info,
   leadDef,
   lift,
+  markedCalls,
   modelOfAgent,
   outsideFolders,
   overlap,
   pathEnds,
+  pinFact,
+  pinSeen,
   redactPaths,
+  streamEffort,
   touchLine,
   type U89Run,
   u82a,
@@ -130,6 +145,7 @@ import {
   u93,
   u96,
   type Outcome as WfOutcome,
+  withDeny,
   withFlag,
 } from "./workflow";
 
@@ -176,6 +192,7 @@ const OWN_MAX_CALLS: Record<string, number> = {
   b35: 3,
   b36: 9,
   b37: 9,
+  b38: 3,
   gadv: 5,
 };
 const B9_MAX_TURNS = 8;
@@ -225,6 +242,7 @@ const CHECKS = [
   "B35",
   "B36",
   "B37",
+  "B38",
   "GADV",
 ] as const;
 type CheckId = (typeof CHECKS)[number];
@@ -4627,6 +4645,196 @@ async function b36() {
   }
 }
 
+// ---------- B38: deny rules on Agent input parameters (integration-check.md "Agent parameter deny rules") ----------
+// Run review: the review flags (runnerArgs, the gate copy of prepare in claude.ts) with Agent in --tools, Agent(rl-gb-pinned) in the
+// rl-main tools, and the B38 deny rules. One control call. Run implement: implementArgs with the B36 lead and the deny rules: the
+// control, a per-call model, and a per-call effort. Run effort: the same flags without the deny rules and without
+// --no-session-persistence, with keepProjects, so the agent files stay until the gate reads them.
+const B38_PIN = "rl-gb-pinned";
+const B38_MARK = {
+  control: "RLGB-PIN-CTL",
+  model: "RLGB-PIN-MODEL",
+  effort: "RLGB-PIN-EFFORT",
+  sonnet: "RLGB-PIN-SONNET",
+  haiku: "RLGB-PIN-HAIKU",
+  high: "RLGB-PIN-HIGH",
+} as const;
+// No retry rule: B38.model.retry and B38.effort.retry show what the lead does after a refusal.
+const b38Prompt = (steps: string[], tail: string) =>
+  [
+    "This is a permission test of a gate. Make these Agent calls in this order. Wait for each result before the next call. Make every numbered call at least once, also when an earlier call is refused or fails.",
+    ...steps.map((s, i) => `${i + 1}. ${s}`),
+    tail,
+  ].join("\n");
+
+// The subagents/agent-<id>.meta.json and agent-<id>.jsonl files of a keepProjects run, by agent id. Then the gate deletes the folders.
+function agentFilesById(p: Part, r: Run) {
+  const sids = r.events.flatMap((e) => (e.subtype === "init" && typeof e.session_id === "string" ? [e.session_id] : []));
+  const out: Record<string, { meta: unknown; lines: unknown[] }> = {};
+  for (const d of [...p.folders, ...sessionFolders(sids)])
+    if (existsSync(d))
+      for (const f of readdirSync(d, { recursive: true }) as string[]) {
+        const m = basename(f).match(/^agent-(.+?)\.(meta\.json|jsonl)$/);
+        if (!m?.[1]) continue;
+        const text = readFileSync(join(d, f), "utf8");
+        const o = out[m[1]] ?? { meta: null, lines: [] };
+        out[m[1]] = o;
+        if (m[2] === "meta.json")
+          try {
+            o.meta = JSON.parse(text);
+          } catch {
+            o.meta = "not JSON";
+          }
+        else
+          for (const l of text.split("\n"))
+            try {
+              if (l.trim().startsWith("{")) o.lines.push(JSON.parse(l));
+            } catch {}
+      }
+  for (const d of p.folders) rmRetry(d);
+  removeSessionFolders(sids);
+  return out;
+}
+
+async function b38() {
+  const p = partFolder("b38");
+  const errors: Record<string, string> = {};
+  const go = runner("b38", p.work, errors);
+  const pinned = agentDef(
+    {
+      description: "Gate B38 pinned agent.",
+      prompt: "Reply with the word that the request names. Use no tools.",
+      model: "sonnet",
+      effort: "low",
+    },
+    { shell: false, readOnly: true, stepTurns: WF_STEP_TURNS },
+  );
+  const step = (mark: string, more = "") => agentStep(B38_PIN, `Reply with the word ${mark}.`, more);
+  const env = { ...appChildEnv(), CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" };
+  try {
+    // Run 1: the review flags. runClaude adds -p, --model haiku, --max-turns 4, and the stream flags.
+    const rapp = join(p.base, "review-app");
+    mkdirSync(rapp);
+    const answer = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false };
+    const ra = withDeny(withFlag(runnerArgs(rapp, answer), "--tools", "Read,Grep,Glob,Agent"), B38_DENY);
+    writeJson(join(rapp, "agents.json"), {
+      [MAIN_AGENT]: {
+        description: "Gate B38 main thread.",
+        prompt: "You do the user task exactly. You change no files.",
+        tools: [`Agent(${B38_PIN})`, "Read", "Grep", "Glob", STUB_TOOL, "StructuredOutput"],
+        model: "haiku",
+      },
+      [B38_PIN]: pinned,
+    });
+    const r1 = await go("review", ra, b38Prompt([step(B38_MARK.control)], "Then return answer = one line per call with its result."), {
+      raw: false,
+      env,
+    });
+
+    // Runs 2 and 3: the implement flags with the B36 lead.
+    const impl = () => {
+      const x = implementArgs({
+        implement: true,
+        cwd: p.work,
+        appDir: p.app,
+        prompt: "",
+        schema: draft07(implementResult),
+        maxTurns: 10,
+        model: "haiku",
+        explorer: { description: "unused", prompt: "unused", model: "haiku" },
+      });
+      writeJson(join(p.app, "agents.json"), { [MAIN_AGENT]: leadDef([B38_PIN], false), [B38_PIN]: pinned });
+      return x.args;
+    };
+    const r2 = await go(
+      "implement",
+      withDeny(impl(), B38_DENY),
+      b38Prompt([step(B38_MARK.control), step(B38_MARK.model, ', model "haiku",'), step(B38_MARK.effort, ', effort "high",')], B37_RESULT),
+      { env },
+    );
+    const r3 = await go(
+      "effort",
+      sessionArgs(impl()),
+      b38Prompt(
+        [
+          step(B38_MARK.control),
+          step(B38_MARK.sonnet, ', model "sonnet",'),
+          step(B38_MARK.haiku, ', model "haiku",'),
+          step(B38_MARK.high, ', effort "high",'),
+        ],
+        B37_RESULT,
+      ),
+      { env, keepProjects: true },
+    );
+    const files = r3 && !DRY ? agentFilesById(p, r3) : {};
+    if (DRY) return dry("B38", `deny=${B38_DENY.join(",")}; ${B38_PIN} model=${pinned.model} effort=${pinned.effort}`);
+
+    // ---------- facts ----------
+    const put = putFact("B38");
+    const lost = (id: string, tag: string) => push(`B38.${id}`, "FAIL", `${tag} did not run: ${short(errors[tag] ?? "no output", 200)}`);
+    const seen = (r: Run, mark: string) => markedCalls(r.events, B38_PIN, mark).map((c) => pinSeen(r.events, c));
+    const start = (r: Run) => ({ exit: r.exit, stderr: redact(r.stderr), tools: r.init?.tools ?? null, agents: r.init?.agents ?? null });
+    if (r1) {
+      put(b38Start("start.review", start(r1)));
+      put(b38Control("control.review", seen(r1, B38_MARK.control), "sonnet"));
+    } else for (const id of ["start.review", "control.review"]) lost(id, "review");
+    let modelRefused = false;
+    if (r2) {
+      const ctl = controlRan(seen(r2, B38_MARK.control));
+      put(b38Start("start.implement", start(r2)));
+      put(b38Control("control.implement", seen(r2, B38_MARK.control), "sonnet"));
+      const m = b38Refused("model", "model", seen(r2, B38_MARK.model), ctl);
+      modelRefused = m.status === "PASS";
+      put(m);
+      put(b38Retry("model.retry", "model", seen(r2, B38_MARK.model)));
+      put(b38Refused("effort", "effort", seen(r2, B38_MARK.effort), ctl));
+      put(b38Retry("effort.retry", "effort", seen(r2, B38_MARK.effort)));
+    } else for (const id of ["start.implement", "control.implement", "model", "effort"]) lost(id, "implement");
+    const allowRun = (label: string, r: Run | undefined) => ({
+      label,
+      agents: r?.init?.agents ?? null,
+      control: !!r && controlRan(seen(r, B38_MARK.control)),
+    });
+    put(b38Allow({ name: B38_PIN, runs: [allowRun("review", r1), allowRun("implement", r2)], modelRefused }));
+    if (r3) {
+      const label = {
+        control: "no per-call model",
+        sonnet: "per-call model sonnet",
+        haiku: "per-call model haiku",
+        high: "per-call effort high",
+      };
+      const rows: EffortSeen[] = (["control", "sonnet", "haiku", "high"] as const).map((k) => {
+        const s = seen(r3, B38_MARK[k])[0] ?? null;
+        const f = s?.agentId ? files[s.agentId] : undefined;
+        const meta = f
+          ? {
+              keys: f.meta && typeof f.meta === "object" ? Object.keys(f.meta) : [String(f.meta)],
+              effort: [...effortFields(f.meta, "meta"), ...effortFields(f.lines, "transcript")],
+            }
+          : null;
+        return {
+          label: label[k],
+          seen: s,
+          meta,
+          stream: s ? streamEffort(r3.events, s.id) : [],
+        };
+      });
+      put(b38Effort(rows));
+      // The no-rule controls of B38.model and B38.effort: without the rules, the same parameters reach the CLI.
+      put(pinFact("nodeny.model", "no deny rules, per-call model haiku", seen(r3, B38_MARK.haiku)[0]));
+      put(pinFact("nodeny.effort", "no deny rules, per-call effort high", seen(r3, B38_MARK.high)[0]));
+      push(
+        "B38.effort-files",
+        "INFO",
+        `agent files found for ${Object.keys(files).length} agent ids; run without deny rules: exit=${r3.exit}`,
+      );
+    } else push("B38.effort-level", "INFO", `not run: effort: ${short(errors.effort ?? "no output", 200)}`);
+    push("B38.version", "INFO", `claude --version=${cliVersion}`);
+  } finally {
+    p.drop();
+  }
+}
+
 // ---------- GADV: the advisor (docs/plans/review-v2/advisor.md, Gate G-ADV) ----------
 // All runs use the app child env and the runner flag set. Its --tools and --allowedTools lists omit the advisor.
 // Runs envoff, disallowed, and tools add the advisor to both lists, so --tools cannot hide the effect of a switch (GADV.5b).
@@ -4782,6 +4990,7 @@ const RUNNERS: Record<CheckId, () => Promise<unknown>> = {
   B35: b35,
   B36: b36,
   B37: b37,
+  B38: b38,
   GADV: gadv,
 };
 {

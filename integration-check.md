@@ -548,3 +548,32 @@ Run: `bun scripts/gate/claude-checks.ts --only B37`. Then run `bun scripts/gate/
 | U109. Other model on a resume: `--model sonnet --effort low` on the haiku transcript. PASS: exit 0 and init.model is the new model | PASS (run 1, run 2) | Run 4. |
 | U110. Critic run: haiku with the review flags (runnerArgs), no verify phase, and reviewJsonSchema. PASS: structured_output parses as reviewResult | PASS (run 1, run 2) | Run 8. |
 | U111. Days later: resume a kept transcript after at least one day and one CLI update. INFO | NOT RUN | Manual: docs/smoke-task.md part P, "Days later: resume a kept transcript (U111)". If the resume fails, a part starts a fresh session (part-session.md section 2.2). |
+
+## Agent parameter deny rules (Gate B38)
+
+Status: NOT RUN. Question: do the deny rules `Agent(model:*)` and `Agent(effort:*)` pin a subagent to the model and effort of its definition? Source: code.claude.com/docs/en/permissions, "Match by input parameter". A deny rule matches a top-level input field, `*` matches any value, and an omitted field never matches. Gate B36 U90 showed that a per-call model beats a pinned model.
+
+Run: `bun scripts/gate/claude-checks.ts --only B38`. Then run `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0` and writes `.gate0/claude/b38-*.jsonl`. Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B38`. Output: `.gate0/v3-local/results.b38.json`. Own call cap: B38 3.
+
+The lead is haiku. rl-gb-pinned has model sonnet, effort low, and read-only tools. Each Agent call carries its own word, so a retry is found by its word.
+
+| Fact | Result | Evidence |
+|---|---|---|
+| B38.start.review. Run `review`: the review flags (runnerArgs, the gate copy of `prepare`) with Agent in `--tools`, `Agent(rl-gb-pinned)` in the rl-main tools, and `--disallowedTools Agent(model:*),Agent(effort:*)`. PASS: exit 0, no invalid-rule text in stderr, and init.tools lists Agent or Task | NOT RUN | |
+| B38.start.implement. Run `implement`: the `implementArgs` flags with the B36 lead and the same deny rules. PASS: as B38.start.review | NOT RUN | |
+| B38.control.review, B38.control.implement. The lead calls rl-gb-pinned without model and effort. PASS: the call runs, and its model is sonnet | NOT RUN | |
+| B38.model. Run `implement`: the lead calls rl-gb-pinned with model "haiku". PASS: a permission_denied event or an error result that names a permission, no event under the call, no model for the call, and the control of the run ran. INFO: tool_name, decision_reason_type, decision_reason, and message of the event | NOT RUN | |
+| B38.model.retry. INFO: the calls with the same word after the refused call, and the model of each | NOT RUN | |
+| B38.effort, B38.effort.retry. The same with effort "high" | NOT RUN | |
+| B38.allow. PASS: both runs list rl-gb-pinned in init.agents, both controls ran, and B38.model passed. Then the deny rules do not block the allowed name, and the CLI does not read `Agent(model:*)` as an agent named "model:*" | NOT RUN | |
+| B38.effort-level. Run `effort`: the implement flags without the deny rules and without `--no-session-persistence`. The lead calls rl-gb-pinned without model, with model "sonnet", with model "haiku", and with effort "high". INFO: the effort fields of `subagents/agent-<id>.meta.json`, the agent transcript `agent-<id>.jsonl`, the Agent tool_use_result, and the events under each call. "not observable" means that no source has a field named effort | NOT RUN | |
+| B38.nodeny.model, B38.nodeny.effort. Run `effort`. INFO: the per-call model "haiku" and the per-call effort "high" without the deny rules, with state and model. They show that the B38.model and B38.effort refusals come from the rules | NOT RUN | |
+| B38.version. INFO: `claude --version` | NOT RUN | |
+
+Decision:
+- B38.model, B38.effort, and B38.allow PASS: the CLI refuses the whole Agent call with a per-call model or effort. It does not remove the parameter. The app can add both deny rules to runs with agents.
+- Read B38.model.retry with that PASS. "no retry" means that the agent step is lost. Then the app also needs a prompt line that forbids the per-call model and effort.
+- No PASS shows that a pinned effort holds. Only B38.effort-level can show it. "not observable" leaves that question open.
+- B38.model FAIL with B38.start PASS: the CLI ignores the rule. Only the agent prompt or a hook can pin the model.
+- B38.start FAIL: the CLI refuses the rule. The app must not add it.
+- B38.allow FAIL: the rule blocks the allowed agent. The app must not add it.

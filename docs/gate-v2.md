@@ -16,6 +16,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | B35 | Implement-kind steps as `--agent rl-main` with rl-explorer (docs/plans/review-v2/task-subagents.md). Until B35 passes, these steps rely on the docs and older gates. | `scripts/gate/claude-checks.ts` |
 | B36 | AW2 of docs/plans/review-v2/agent-workflow.md: workflow agents that write files or run commands. Until B36 passes, workflows use read-only agents only. | `scripts/gate/claude-checks.ts` |
 | B37 | PS2 of docs/plans/review-v2/part-session.md (one Claude session per task part). Until B37 passes, each follow-up starts a fresh session. | `scripts/gate/claude-checks.ts` |
+| B38 | Your decision to add the deny rules `Agent(model:*)` and `Agent(effort:*)` to runs with agents. | `scripts/gate/claude-checks.ts` |
 | G1 to G3 | WP-B1 | `scripts/gate/bitbucket-write.ts` |
 | G4 to G6 | WP-B8 | `scripts/gate/bitbucket-write.ts` |
 | G7 | No fixed point. INFO only. | `scripts/gate/bitbucket-write.ts` |
@@ -234,6 +235,22 @@ This check gives the facts U97 to U110 (integration-check.md "Part sessions"). U
 | 8 | U110 | The critic: the review flags (runnerArgs), haiku, and reviewJsonSchema, with no verify phase. |
 
 U106 (rate limit fields) and U107 (usage of a resumed run) are INFO lines from the same runs. PASS rules: integration-check.md "Part sessions". Facts for you: the INFO part of U100 (an Edit with no new Read), U102, U104 (does the CLI wait for stdin after a result), U106, and U107.
+
+### B38: deny rules on Agent input parameters
+
+This check tests whether the deny rules `Agent(model:*)` and `Agent(effort:*)` pin a subagent to the model and effort of its definition (integration-check.md "Agent parameter deny rules"). The lead is haiku. rl-gb-pinned has model sonnet and effort low. Every run uses the app child env with `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`.
+
+- Dry run: `bun scripts/gate/claude-checks.ts --dry-run --only B38`.
+- Run: `bun scripts/gate/claude-checks.ts --only B38`. Then sanitize as above. It must print `hits=0`. Output: `.gate0/v3-local/results.b38.json`.
+- Own call cap: B38 3.
+
+| Run | Facts | What it runs |
+|---|---|---|
+| review | start.review, control.review, allow | The review flags (runnerArgs) with Agent in `--tools`, `Agent(rl-gb-pinned)` in the rl-main tools, and both deny rules in `--disallowedTools`. One call without model. |
+| implement | start.implement, control.implement, model, effort, allow | The implementArgs flags with the B36 lead and both deny rules. Calls: without model, with model "haiku", and with effort "high". |
+| effort | effort-level, nodeny.model, nodeny.effort | The implementArgs flags without the deny rules and without `--no-session-persistence`. Calls: without model, with model "sonnet", with model "haiku", and with effort "high". The gate reads the agent meta.json and transcript files, then deletes the per-cwd folders. |
+
+The lead prompt gives no retry rule. B38.model.retry and B38.effort.retry show what the lead does after a refusal. PASS rules: integration-check.md "Agent parameter deny rules".
 
 ## Part G: Bitbucket checks G1 to G7
 
