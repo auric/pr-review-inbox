@@ -757,9 +757,15 @@ export const partLines = (m: number) => [
 export const PART_REVIEWER =
   "Your request names a part file. Read it first, and review each file in it. Read other files only to check callers and callees.";
 
+// Gate B38: the CLI refuses an Agent call with model or effort (AGENT_PARAM_DENY), and the lead does not retry it. Each lead with the
+// Agent tool gets this line.
+export const AGENT_PARAMS_RULE = "Never pass model or effort on an Agent call. Each agent has its own model and effort.";
+
 // spec.md section 1.5: the delegation lines come after the language, skill, and MCP lines. parts: the number of part files, 0 for none.
 export const withDelegation = (a: AgentSpec, mode: "auto" | "always" | null, parts = 0): AgentSpec =>
-  mode ? { ...a, prompt: [a.prompt, ...(mode === "auto" && parts > 0 ? partLines(parts) : DELEGATE[mode])].join("\n") } : a;
+  mode
+    ? { ...a, prompt: [a.prompt, AGENT_PARAMS_RULE, ...(mode === "auto" && parts > 0 ? partLines(parts) : DELEGATE[mode])].join("\n") }
+    : a;
 
 // docs/plans/review-v2/spec.md section 3.4: the Explain agent lines after the lens. judge.ts judgeExplain checks the links, the risk
 // anchors, and the mermaid fences. Parse checks with mermaid 12.1.0: a quoted participant name keeps its quotes, a semicolon in a
@@ -1026,7 +1032,7 @@ export function explorerAgent(p: Profile): AgentSpec {
 // The prompt line of each task step with rl-explorer.
 export const EXPLORER_RULE = `For a wide read-only search over many files, you can start the ${EXPLORER_AGENT} agent.`;
 
-export const withExplorer = (a: AgentSpec): AgentSpec => ({ ...a, prompt: `${a.prompt}\n${EXPLORER_RULE}` });
+export const withExplorer = (a: AgentSpec): AgentSpec => ({ ...a, prompt: `${a.prompt}\n${EXPLORER_RULE}\n${AGENT_PARAMS_RULE}` });
 
 // subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.1).
 export function interviewAgent(p: Profile, round: number, subtasks = false): AgentSpec {
@@ -1345,7 +1351,9 @@ export function salvageAgent(p: Profile): AgentSpec {
 
 // The delegation lines come last, as for the finder. questions: candidates.md holds finder questions.
 export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = false): AgentSpec =>
-  on ? { ...a, prompt: [a.prompt, ...VERIFY_DELEGATE, ...(questions ? [VERIFY_DELEGATE_QUESTIONS] : [])].join("\n") } : a;
+  on
+    ? { ...a, prompt: [a.prompt, AGENT_PARAMS_RULE, ...VERIFY_DELEGATE, ...(questions ? [VERIFY_DELEGATE_QUESTIONS] : [])].join("\n") }
+    : a;
 
 // spec.md sections 1.2 and 1.6: the verifier effort null means medium. A null model leaves the agent field out.
 export const verifierEffort = (p: Pick<Profile, "verifier">) => p.verifier.effort ?? "medium";

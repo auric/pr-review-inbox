@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { explorerAgent, type Profile, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import {
+  AGENT_PARAM_DENY,
   createClaudeRunner,
   IMPLEMENT_TOOLS,
   type ImplementSpec,
@@ -402,6 +403,8 @@ describe("safety", () => {
       "Read,Grep,Glob,Agent",
       "--allowedTools",
       "Read,Grep,Glob,mcp__rl-stub",
+      "--disallowedTools",
+      "Agent(model:*),Agent(effort:*)",
       "--agents",
       join(app, "agents.json"),
       "--agent",
@@ -1092,6 +1095,34 @@ describe("rl-explorer in task steps", () => {
     expect(without.agents["rl-main"]?.tools).toEqual(["Read", "Grep", "Glob", "mcp__rl-stub__get_fact", "StructuredOutput"]);
   });
 
+  test("Gate B38: a run with the Agent tool denies the Agent model and effort parameters; a run without it keeps its flags", async () => {
+    const rules = AGENT_PARAM_DENY.join(",");
+    const { runner, spec, calls } = setup({ fixture: flatSuccess() });
+    const last = () => (calls().at(-1) as unknown as AgentsRec).argv;
+    await runner.run(spec);
+    expect(flagOf(last(), "--disallowedTools")).toBe(rules);
+    await runner.run({ ...spec, agents: {}, explorer: EXPLORER });
+    expect(flagOf(last(), "--disallowedTools")).toBe(rules);
+    await runner.run({ ...spec, agents: {} });
+    expect(last()).not.toContain("--disallowedTools");
+    expect(last().join(" ")).not.toContain("Agent(model");
+
+    const { cwd, app } = folder();
+    const step = { implement: true as const, cwd, appDir: app, prompt: "p", schema: SCHEMA_I, maxTurns: 80 };
+    const withIt = implementArgs({ ...step, explorer: EXPLORER });
+    expect(flagOf(withIt.args, "--disallowedTools")).toBe(rules);
+    expect([...withIt.models]).toEqual([["rl-explorer", "sonnet"]]);
+    const plain = implementArgs(step);
+    expect(plain.args).not.toContain("--disallowedTools");
+    expect(plain.models.size).toBe(0);
+    // The denied tools of a user server come first, in one flag.
+    const entry = { type: "stdio" as const, command: "node", args: [], env: {} };
+    const user = { "u-docs": { user: entry, tools: ["search"], deny: ["drop"] } };
+    const both = implementArgs({ ...step, mcpServers: user, explorer: EXPLORER });
+    expect(flagOf(both.args, "--disallowedTools")).toBe(`mcp__u-docs__drop,${rules}`);
+    expect(both.args.filter((a) => a === "--disallowedTools")).toHaveLength(1);
+  });
+
   test("the init check: with rl-explorer Agent and Task pass, and each other extra tool still stops the step; without it Task stops", () => {
     const { cwd, app } = folder();
     const step = { implement: true as const, cwd, appDir: app, prompt: "p", schema: SCHEMA_I, maxTurns: 80 };
@@ -1112,6 +1143,99 @@ describe("rl-explorer in task steps", () => {
     const p = createStreamParser({ cwd, allowedTools: plain.allowed, agents: plain.agents });
     p.line(init([...IMPLEMENT_TOOLS, "Task", "StructuredOutput"]));
     expect(p.state.badTools).toEqual(["Task"]);
+  });
+
+  // Gate B38 shapes (2.1.323): the CLI refuses a per-call model or effort with permission_denied, then an error tool_result.
+  describe("the Log notes of an Agent call with model or effort", () => {
+    const callLine = (id: string, extra: Record<string, unknown>) =>
+      JSON.stringify({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          model: "m",
+          content: [{ type: "tool_use", id, name: "Agent", input: { subagent_type: "rl-explorer", description: "d", ...extra } }],
+        },
+      });
+    const denied = (id: string, param: string) =>
+      JSON.stringify({
+        type: "system",
+        subtype: "permission_denied",
+        tool_name: "Agent",
+        tool_use_id: id,
+        decision_reason_type: "rule",
+        decision_reason: "",
+        message: `Permission to use Agent with ${param}:* has been denied.`,
+      });
+    const errorResult = (id: string) =>
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: id, is_error: true, content: "Permission to use Agent has been denied." }],
+        },
+      });
+    const okResult = (id: string, model: string) =>
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: id, content: "report" }] },
+        tool_use_result: { resolvedModel: model, totalTokens: 10 },
+      });
+    const parser = () =>
+      createStreamParser({
+        cwd: "/w",
+        allowedTools: new Set(["Agent"]),
+        agents: new Set(["rl-main", "rl-explorer"]),
+        models: new Map([["rl-explorer", "sonnet"]]),
+      });
+    const ev = (p: ReturnType<typeof parser>, id: string) => p.events().find((e) => e.id === id);
+
+    test("a refused model or effort ends the call with a note, before or after its error result", () => {
+      const p = parser();
+      p.line(callLine("t1", { model: "haiku" }));
+      p.line(denied("t1", "model"));
+      p.line(errorResult("t1"));
+      expect(ev(p, "t1")).toMatchObject({
+        status: "error",
+        note: "The lead asked for model haiku for rl-explorer. The app refused it, so that agent step did not run.",
+      });
+      p.line(callLine("t2", { effort: "high" }));
+      p.line(errorResult("t2"));
+      p.line(denied("t2", "effort"));
+      expect(ev(p, "t2")).toMatchObject({
+        status: "error",
+        note: "The lead asked for effort high for rl-explorer. The app refused it, so that agent step did not run.",
+      });
+      // An Agent refusal is not a refused command.
+      expect(p.state.refused).toEqual([]);
+    });
+
+    test("a permission_denied event of another rule keeps the error text of the result", () => {
+      const p = parser();
+      p.line(callLine("t1", {}));
+      p.line(JSON.stringify({ ...JSON.parse(denied("t1", "model")), message: "Permission to use Agent has been denied." }));
+      p.line(errorResult("t1"));
+      expect(ev(p, "t1")).toMatchObject({ status: "error", note: "Permission to use Agent has been denied." });
+    });
+
+    test("a call that runs on the asked model instead of its definition model gets a note; other calls get none", () => {
+      const p = parser();
+      p.line(callLine("t1", { model: "haiku" }));
+      p.line(okResult("t1", "claude-haiku-x"));
+      expect(ev(p, "t1")).toMatchObject({
+        status: "ok",
+        model: "claude-haiku-x",
+        note: "The lead changed the model of rl-explorer to haiku. The app rule did not stop it.",
+      });
+      // The asked model is the definition model, no model was asked, or the call ran on the definition model.
+      for (const [id, extra, model] of [
+        ["t2", { model: "sonnet" }, "claude-sonnet-x"],
+        ["t3", {}, "claude-haiku-x"],
+        ["t4", { model: "haiku" }, "claude-sonnet-x"],
+      ] as const) {
+        p.line(callLine(id, extra));
+        p.line(okResult(id, model));
+        expect(ev(p, id)).toMatchObject({ status: "ok", note: null });
+      }
+    });
   });
 
   test("an rl-explorer call of an implement step nests its calls under it in the step log, as an app agent", async () => {

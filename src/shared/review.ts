@@ -21,7 +21,8 @@ const lineNo = z.number().int().min(1);
 // "2.6": the C# language checklist.
 // "2.7": the finder looks for answers before it asks, the check judges each finder question, the issue tool lines, and the
 // acceptance criteria of the intent module (docs/plans/review-v2/review-questions.md).
-export const REVIEW_PROMPT_VERSION = "2.7";
+// "2.8": each lead with the Agent tool passes no model and no effort on an Agent call (Gate B38).
+export const REVIEW_PROMPT_VERSION = "2.8";
 
 const place = {
   path: z.string().describe("File path relative to the repository root, with / separators."),

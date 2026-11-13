@@ -124,17 +124,31 @@ function resultText(b: ContentBlock, sep = " ") {
 
 const blocks = (c: unknown): ContentBlock[] => (Array.isArray(c) ? c.filter((b) => b && typeof b === "object") : []);
 
-// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin. shell: the mode of a run that must
-// get Bash.
+// Gate B38 (2.1.323): the message of a permission_denied event for a deny rule on an Agent parameter.
+const PARAM_DENIED = /^Permission to use Agent with (model|effort):\* has been denied\.$/;
+const askedOf = (input: Record<string, unknown>) => ({
+  model: typeof input.model === "string" ? input.model : null,
+  effort: typeof input.effort === "string" ? input.effort : null,
+});
+// A model alias such as "sonnet" is part of the resolved model ID, as in Gate B38.
+const sameModel = (resolved: string, alias: string) => resolved.toLowerCase().includes(alias.toLowerCase());
+
+// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin. models: the definition model of
+// each subagent that has one. shell: the mode of a run that must get Bash.
 export function createStreamParser(opts: {
   cwd: string;
   allowedTools: Set<string>;
   agents?: ReadonlySet<string>;
+  models?: ReadonlyMap<string, string>;
   shell?: ShellMode;
   now?: () => number;
 }) {
   const now = opts.now ?? Date.now;
   const events = new Map<string, RunEvent>();
+  // The model and effort that the lead put on each Agent call, by tool_use id.
+  const asked = new Map<string, { model: string | null; effort: string | null }>();
+  // Notes of Agent calls that the end of the call must keep.
+  const kept = new Map<string, string>();
   // A background Agent call gets its tool_result at launch. Only its task_notification ends it.
   const background = new Set<string>();
   const state: StreamState = {
@@ -161,9 +175,17 @@ export function createStreamParser(opts: {
   function end(changed: Map<string, RunEvent>, id: string, status: RunEventStatus, text: string | null) {
     const e = events.get(id);
     if (e?.status !== "running") return;
-    const next = { ...e, status, note: text, endedAt: now() };
+    const next = { ...e, status, note: kept.get(id) ?? text, endedAt: now() };
     events.set(id, next);
     changed.set(id, next);
+  }
+
+  // Sets a note of an Agent call that stays after the call ends.
+  function keepNote(changed: Map<string, RunEvent>, e: RunEvent, text: string) {
+    kept.set(e.id, text);
+    const next = { ...e, note: text };
+    events.set(e.id, next);
+    changed.set(e.id, next);
   }
 
   // Sets the model or the token total of an Agent call. A null value keeps the old one.
@@ -174,6 +196,11 @@ export function createStreamParser(opts: {
     if (next.model === e.model && next.tokens === e.tokens) return;
     events.set(e.id, next);
     changed.set(e.id, next);
+    // A deny rule refuses a per-call model (Gate B38). This note shows a CLI that runs the call on it anyway.
+    const want = asked.get(e.id)?.model;
+    const def = e.agent ? opts.models?.get(e.agent) : undefined;
+    if (model && want && def && !kept.has(e.id) && sameModel(model, want) && !sameModel(model, def))
+      keepNote(changed, next, `The lead changed the model of ${e.agent} to ${want}. The app rule did not stop it.`);
   }
 
   // Returns the events that this line created or changed.
@@ -243,6 +270,7 @@ export function createStreamParser(opts: {
         };
         events.set(e.id, e);
         changed.set(e.id, e);
+        if (tool === "Agent") asked.set(e.id, askedOf(input));
       }
     } else if (m.type === "user") {
       const u = m as SDKUserMessage;
@@ -283,6 +311,15 @@ export function createStreamParser(opts: {
         // SU14 (B30a): `cd <dir> && <command>`. SU18 (B31): the read block of allowlist mode refuses a lone cd.
         const cd = by === "check" && /requires approval: cd\s|^cd names a path that is computed at run time/.test(d.message ?? "");
         end(changed, id, "error", cd ? CD_REFUSED_NOTE : REFUSED_NOTE[by]);
+      } else if (AGENT_TOOLS.has(d.tool_name)) {
+        const e = typeof d.tool_use_id === "string" ? events.get(d.tool_use_id) : undefined;
+        const param = PARAM_DENIED.exec(d.message ?? "")?.[1] as "model" | "effort" | undefined;
+        const value = e && param ? asked.get(e.id)?.[param] : null;
+        if (e && param && value) {
+          const text = `The lead asked for ${param} ${value} for ${e.agent ?? "an agent"}. The app refused it, so that agent step did not run.`;
+          keepNote(changed, e, text.slice(0, NOTE_MAX));
+          end(changed, e.id, "error", null);
+        }
       }
     } else if (m.type === "system" && m.subtype === "task_started") {
       const t = m as SDKTaskStartedMessage;

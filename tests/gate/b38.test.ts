@@ -22,7 +22,9 @@ import {
   pinSeen,
   streamEffort,
   withDeny,
+  withoutDeny,
 } from "../../scripts/gate/workflow";
+import { AGENT_PARAM_DENY } from "../../src/server/review/claude";
 
 const ROOT = join(import.meta.dir, "../..");
 const NO_TOOLS = mkdtempSync(join(tmpdir(), "rl-gate-test-path-"));
@@ -89,6 +91,16 @@ describe("B38 argv", () => {
     const ext = withDeny(["--disallowedTools", "mcp__x__y", "--agent", "rl-main"], B38_DENY);
     expect(ext).toEqual(["--disallowedTools", "mcp__x__y,Agent(model:*),Agent(effort:*)", "--agent", "rl-main"]);
     expect(() => withDeny(["--disallowedTools"], B38_DENY)).toThrow();
+  });
+
+  test("withoutDeny takes the rules out, and drops the flag when no rule is left", () => {
+    const only = ["-p", "--disallowedTools", "Agent(model:*),Agent(effort:*)", "--agent", "rl-main"];
+    expect(withoutDeny(only, B38_DENY)).toEqual(["-p", "--agent", "rl-main"]);
+    const mixed = ["--disallowedTools", "mcp__x__y,Agent(model:*),Agent(effort:*)", "--agent", "rl-main"];
+    expect(withoutDeny(mixed, B38_DENY)).toEqual(["--disallowedTools", "mcp__x__y", "--agent", "rl-main"]);
+    expect(withoutDeny(["-p"], B38_DENY)).toEqual(["-p"]);
+    // The app rules are the rules that Gate B38 checked.
+    expect(AGENT_PARAM_DENY).toEqual(B38_DENY);
   });
 });
 

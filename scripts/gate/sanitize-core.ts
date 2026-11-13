@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The pure core of sanitize-claude.ts: it replaces real values in parsed stream-json and counts the real values that a text still holds.
-// It reads no file and starts no process.
+// It reads no file content and starts no process. filesIn only lists a folder.
+import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 export type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
@@ -23,6 +24,14 @@ export const claudeOutDir = (root: string, out?: string) => {
   if (!rel || (!rel.startsWith("..") && !isAbsolute(rel))) throw new Error(`the output folder must be outside fixtures/: ${dir}`);
   return dir;
 };
+
+// The names of the regular files in dir. The output folder can hold sub-folders, such as a copy of an older run.
+export const filesIn = (dir: string) =>
+  existsSync(dir)
+    ? readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => e.name)
+    : [];
 
 const HOOK_FIELDS = new Set(["output", "stdout", "stderr"]);
 

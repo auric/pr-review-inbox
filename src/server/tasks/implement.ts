@@ -27,7 +27,7 @@ import {
 } from "../../shared/task";
 import { attachmentsRoot } from "../context/attachments";
 import { log } from "../log";
-import { EXPLORER_RULE, type Profile } from "../review/catalog";
+import { AGENT_PARAMS_RULE, EXPLORER_RULE, type Profile } from "../review/catalog";
 import { deniedPath, fold } from "../review/edits";
 import type { ImplementRunStart, InstructionRepo, ReviewJobs } from "../review/jobs";
 import { addUsage, type Ending, failure, judgeTask, usageOf } from "../review/judge";
@@ -468,6 +468,7 @@ export function implementPrompt(
     ...lines.mcp,
     ...lines.skills,
     EXPLORER_RULE,
+    AGENT_PARAMS_RULE,
     "In coverage, list what you read, what you skipped, and what was not available.",
     "",
     `- Mode: ${mode}`,

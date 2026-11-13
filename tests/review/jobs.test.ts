@@ -1124,7 +1124,8 @@ describe("editable profiles (M4)", () => {
       expect(flag(c.argv, "--allowedTools")).toBe(
         "Read,Grep,Glob,mcp__rl-git,mcp__learn,mcp__deepwiki,mcp__fake__search,mcp__fake__note_tool",
       );
-      expect(flag(c.argv, "--disallowedTools")).toBe("mcp__fake__lookup,mcp__fake__delete_item");
+      // The run has rl-reviewer, so it also denies the Agent model and effort parameters (Gate B38).
+      expect(flag(c.argv, "--disallowedTools")).toBe("mcp__fake__lookup,mcp__fake__delete_item,Agent(model:*),Agent(effort:*)");
       const mcpFile = flag(c.argv, "--mcp-config") as string;
       const servers = JSON.parse(readFileSync(mcpFile, "utf8")).mcpServers;
       expect(servers.fake).toEqual({ type: "stdio", ...fakeEntry });

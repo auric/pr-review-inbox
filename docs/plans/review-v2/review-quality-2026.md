@@ -1,6 +1,6 @@
 # Review quality 2026: eval fixes and ranked reviewer improvements
 
-Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Nothing is built. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
+Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Nothing else is built. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
 
 Short answer: fix the eval before any reviewer change, because today it cannot measure precision or large-PR recall. Then run cheap tests that cut cost, then verifier tests replayed on fixed finder output, and last the recall bets, each behind a gate that costs nothing to check.
 
@@ -240,6 +240,7 @@ In keep, name the point of the group with the most concrete trigger and the most
 
 ### 9. Subagent model and effort come from the definition only
 
+- Status: built (prompt 2.8). Gate B38 PASS on 2.1.323 (integration-check.md). The workflow builder does not exist yet; it must add the rules too.
 - User decision of 2026-11-13: Opus 5.5 is the main reviewer. Models may mix by role, but the definition decides (the profile for app agents, the agent file for the user's own agents, "same as the main run" when unset). The lead never picks a model or an effort per call.
 - [O] Gate B36 U90: a model that the lead passes beats a pinned model. [A] The permissions docs: deny rules match a top-level input parameter of a built-in tool, and an omitted parameter never matches.
 - Change: `--disallowedTools` gets `Agent(model:*)` and `Agent(effort:*)` in every run that offers the Agent tool (claude.ts `prepare` and `implementArgs`, later the workflow builder); one prompt line "Never pass model or effort on an Agent call. Each agent has its own model."; stream.ts records `input.model` and `input.effort` on Agent events and writes a Log note for a refused Agent call, and a different note if an asked model ever runs.

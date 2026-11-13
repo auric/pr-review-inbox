@@ -3,8 +3,10 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { claudeOutDir } from "../../scripts/gate/sanitize-core";
+import { claudeOutDir, filesIn } from "../../scripts/gate/sanitize-core";
 
 const ROOT = resolve(import.meta.dir, "../..");
 
@@ -18,6 +20,20 @@ describe("sanitize-claude output folder", () => {
   test("accepts a folder outside fixtures/", () => {
     expect(claudeOutDir(ROOT, join(ROOT, ".gate0", "other"))).toBe(join(ROOT, ".gate0", "other"));
     expect(claudeOutDir(ROOT, join(ROOT, "fixtures-copy"))).toBe(join(ROOT, "fixtures-copy"));
+  });
+
+  test("lists only the regular files of the output folder", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rl-sanitize-"));
+    try {
+      writeFileSync(join(dir, "b1.jsonl"), "{}\n");
+      writeFileSync(join(dir, "README.md"), "x");
+      mkdirSync(join(dir, "older"));
+      mkdirSync(join(dir, "folder.jsonl"));
+      expect(filesIn(dir).sort()).toEqual(["README.md", "b1.jsonl"]);
+      expect(filesIn(join(dir, "missing"))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("refuses fixtures/ and every folder in it", () => {

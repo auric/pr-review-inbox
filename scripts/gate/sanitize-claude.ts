@@ -8,7 +8,18 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { claudeOutDir, countHits, formPairs, hideAgentOutput, isObj, type Json, sanitizer, scanPatterns, UUID } from "./sanitize-core";
+import {
+  claudeOutDir,
+  countHits,
+  filesIn,
+  formPairs,
+  hideAgentOutput,
+  isObj,
+  type Json,
+  sanitizer,
+  scanPatterns,
+  UUID,
+} from "./sanitize-core";
 import { agentFront } from "./workflow";
 
 const ROOT = resolve(import.meta.dir, "../..");
@@ -57,7 +68,7 @@ if (!existsSync(RAW)) {
   console.error(`no raw folder: ${RAW}`);
   process.exit(1);
 }
-const files = readdirSync(RAW)
+const files = filesIn(RAW)
   .filter((f) => f.endsWith(".jsonl"))
   .sort();
 if (!files.length) {
@@ -160,7 +171,7 @@ const uuidMap = new Map([...realUuids].map((u, i) => [u, `00000000-0000-4000-800
 const { sanitize } = sanitizer(tokenMap, homeForms, uuidMap);
 
 mkdirSync(OUT, { recursive: true });
-for (const f of list(OUT)) if (f.endsWith(".jsonl")) rmSync(join(OUT, f));
+for (const f of filesIn(OUT)) if (f.endsWith(".jsonl")) rmSync(join(OUT, f));
 let version = "";
 for (const [f, evs] of raw) {
   const out = hideAgentOutput(evs, agentNames).map((e) => sanitize(e));
@@ -189,7 +200,7 @@ writeFileSync(
 // ---------- scan ----------
 const { res, names } = scanPatterns(tokenMap, [...homes, configDir], realUuids);
 const hits = countHits(
-  list(OUT).map((f) => readFileSync(join(OUT, f), "utf8")),
+  filesIn(OUT).map((f) => readFileSync(join(OUT, f), "utf8")),
   res,
 );
 console.log(

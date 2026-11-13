@@ -476,6 +476,14 @@ export function withDeny(args: readonly string[], rules: string[]) {
   return args.map((a, j) => (j === i + 1 ? [a, ...rules].join(",") : a));
 }
 
+// Takes deny rules out of the --disallowedTools value of argv, and drops the flag when no rule is left.
+export function withoutDeny(args: readonly string[], rules: string[]) {
+  const i = args.indexOf("--disallowedTools");
+  if (i < 0) return [...args];
+  const left = (args[i + 1] ?? "").split(",").filter((r) => r && !rules.includes(r));
+  return left.length ? args.map((a, j) => (j === i + 1 ? left.join(",") : a)) : args.filter((_, j) => j !== i && j !== i + 1);
+}
+
 // The main-thread Agent calls of one type whose prompt holds mark, in stream order. A retry of a step repeats its mark.
 export const markedCalls = (events: unknown[], type: string, mark: string): ToolCall[] =>
   toolCalls(events).filter(

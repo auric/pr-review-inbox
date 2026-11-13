@@ -53,7 +53,7 @@ Source: code.claude.com/docs/en/sub-agents, read 2026-11-11.
 - D1. An `--agents` definition takes description, prompt, tools, disallowedTools, model, permissionMode, mcpServers, hooks, maxTurns, autoCompactWindow, skills, initialPrompt, memory, effort, background, omitClaudeMd, and isolation. The CLI ignores color and experimental.
 - D2. `--strict-mcp-config` does not filter inline MCP servers of an `--agents` definition.
 - D3. The `Agent(<types>)` list works only for the main thread. A subagent with the Agent tool can start any type, up to the depth limit. `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` turns nesting off.
-- D4. Model order: first the `model` parameter of the Agent call (aliases only), then the definition `model` (`inherit` means the main model), then `CLAUDE_CODE_SUBAGENT_MODEL`, then the main model.
+- D4. Model order: first the `model` parameter of the Agent call (aliases only), then the definition `model` (`inherit` means the main model), then `CLAUDE_CODE_SUBAGENT_MODEL`, then the main model. Gate B38 (2.1.323): the app denies `Agent(model:*)` and `Agent(effort:*)` in each run with the Agent tool. The CLI refuses the whole call, so the definition model and effort always apply.
 - D5. Name priority: managed, then `--agents`, then `.claude/agents/`, then `~/.claude/agents/`, then plugins.
 - D6. Only name and description are required. The CLI ignores an unknown field and gives no error. A name has at most 256 characters and no `:`.
 - D7. Front matter hooks run while the subagent runs. An unset permissionMode inherits the parent mode (that part of the docs was read only in part).
@@ -243,7 +243,7 @@ Workflow save checks:
 - R1. Subagents may not inherit the run limits: cwd confinement, allow rules, and shell rules. Gate B36 (U83 to U86) checks this. If U83, U84, or U85 fails, the app refuses agents that write files or run commands ("Agents that write files wait for a Claude Code check."), and only read-only agents run. Run 1 (CLI 2.1.322): U85 failed only on gate bugs (the `touch` command and the event parent), and every refusal held. A re-run is due. Writer agents also need the cleanup of the subagent output folders; the app now does it at the run end.
 - R2. A file field could lift a limit: permissionMode, hooks, inline mcpServers, isolation, or memory. The app writes only the kept keys (section 3.6).
 - R3. A subagent with the Agent tool can start any type (D3). Every agent gets Agent in disallowedTools, and the run sets depth 1 (U89).
-- R4. The lead can set a model on an Agent call (D4). The app cannot block this without a hook, and the app never adds a hook (SU16 decision). The lead line forbids it, and a note records it.
+- R4. The lead can try to set a model or effort on an Agent call (D4). The deny rules of Gate B38 block it without a hook. The lead does not retry a refused call, so that agent step is lost. The lead line forbids the parameters, and a Log note records each refusal.
 - R5. Two writing agents can run at the same time. The lead line forbids it, and a note records it. The path and git checks still run at the step end.
 - R6. A project agent can carry a prompt injection. Limits: the approval pinned to a hash, the app rules first in the prompt, and the forced limits.
 - R7. The refusal cap counts the lead and its agents together (stream.ts:300), so a noisy command agent can end the step sooner. The cap stays. The note names the agent through the permission_denied tool_use_id (U85).

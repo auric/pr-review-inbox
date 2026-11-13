@@ -147,6 +147,7 @@ import {
   type Outcome as WfOutcome,
   withDeny,
   withFlag,
+  withoutDeny,
 } from "./workflow";
 
 // The facts that rebuild the env of a run read no GIT_CONFIG_GLOBAL, so any path stands in for the app folder.
@@ -4207,7 +4208,9 @@ async function b36() {
       explorer: { description: "unused", prompt: "unused", model: "haiku" },
     });
     writeJson(join(p.app, "agents.json"), { [MAIN_AGENT]: leadDef(Object.keys(agents), false), ...agents });
-    const args = noEdit ? withFlag(x.args, "--allowedTools", "Read,Grep,Glob,Write") : x.args;
+    // B36 ran before the B38 rules. Run 5 (U90) passes a per-call model, so the rules stay out.
+    const base = withoutDeny(x.args, B38_DENY);
+    const args = noEdit ? withFlag(base, "--allowedTools", "Read,Grep,Glob,Write") : base;
     const env: Record<string, string> = {
       ...shellEnv(appChildEnv(), shell, shellGitConfig(p.app)),
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
@@ -4744,7 +4747,8 @@ async function b38() {
         explorer: { description: "unused", prompt: "unused", model: "haiku" },
       });
       writeJson(join(p.app, "agents.json"), { [MAIN_AGENT]: leadDef([B38_PIN], false), [B38_PIN]: pinned });
-      return x.args;
+      // implementArgs adds the rules now. Run 3 is the no-rule control, and run 2 adds them again.
+      return withoutDeny(x.args, B38_DENY);
     };
     const r2 = await go(
       "implement",

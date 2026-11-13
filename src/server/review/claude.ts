@@ -21,6 +21,8 @@ export const EXPLORER_AGENT = "rl-explorer";
 export const READ_TOOLS = ["Read", "Grep", "Glob"];
 // Gate B1: a subagent with these tools denied has no shell and no write tool.
 export const SUBAGENT_DENY = ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"];
+// Gate B38 (2.1.323): these rules refuse an Agent call that passes model or effort. A subagent keeps its definition model and effort.
+export const AGENT_PARAM_DENY = ["Agent(model:*)", "Agent(effort:*)"];
 // Names go into comma lists of CLI flags.
 export const NAME = /^[A-Za-z0-9_-]+$/;
 const STDERR_TAIL = 16_384;
@@ -452,6 +454,7 @@ function prepare(spec: RunSpec) {
   const readTools = [...builtins, ...mcp.tools];
   const denied = mcp.denied;
   const agentTool = subs.length ? [`Agent(${subs.join(", ")})`] : [];
+  const deny = [...denied, ...(subs.length ? AGENT_PARAM_DENY : [])];
   const mcpFile = mcp.file;
   const agentsFile = join(spec.appDir, "agents.json");
   // Gate B9: without StructuredOutput in the rl-main tools, no result carries structured_output.
@@ -479,7 +482,7 @@ function prepare(spec: RunSpec) {
     [...builtins, ...(subs.length ? ["Agent"] : [])].join(","),
     ...(spec.noTools ? [] : ["--allowedTools", [...READ_TOOLS, ...mcp.allow].join(",")]),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
-    ...(denied.length ? ["--disallowedTools", denied.join(",")] : []),
+    ...(deny.length ? ["--disallowedTools", deny.join(",")] : []),
     "--agents",
     agentsFile,
     "--agent",
@@ -498,8 +501,12 @@ function prepare(spec: RunSpec) {
     throw new Error("The MCP tool lists are too long for the command line. Pick fewer MCP servers.");
   // Init can list a denied tool. The deny rule keeps it off, so the init check accepts it.
   const allowed = new Set([...readTools, ...denied, "StructuredOutput", ...(subs.length ? ["Agent", "Task"] : [])]);
-  return { args, allowed, agents: new Set([MAIN_AGENT, ...subs]) };
+  return { args, allowed, agents: new Set([MAIN_AGENT, ...subs]), models: defModels(agents) };
 }
+
+// The definition model of each subagent that has one. rl-main runs on the run model.
+const defModels = (defs: Record<string, { model?: string | null }>) =>
+  new Map(Object.entries(defs).flatMap(([n, d]) => (n !== MAIN_AGENT && d.model ? [[n, d.model] as const] : [])));
 
 // The CLI arguments of a session fork. Resume does not restore the launch flags, so each one is passed again (session-consult.md
 // section 1). --fork-session is always present: without it, a running background session attaches, or the CLI exits with code 1.
@@ -534,7 +541,7 @@ export function resumeArgs(spec: ResumeSpec) {
     String(spec.maxTurns),
     "--no-session-persistence",
   ];
-  return { args, allowed: new Set([...READ_TOOLS, "StructuredOutput"]), agents: new Set<string>() };
+  return { args, allowed: new Set([...READ_TOOLS, "StructuredOutput"]), agents: new Set<string>(), models: new Map<string, string>() };
 }
 
 // The CLI arguments of an implement run: the flags of Gate B17 (scripts/gate/claude-checks.ts b17) and the runner output flags. No
@@ -564,6 +571,7 @@ export function implementArgs(spec: ImplementSpec) {
     };
     writeFileSync(agentsFile, JSON.stringify({ [MAIN_AGENT]: main, [EXPLORER_AGENT]: explorerDef(spec.explorer) }));
   }
+  const deny = [...(mcp?.denied ?? []), ...(agentsFile ? AGENT_PARAM_DENY : [])];
   const args = [
     "-p",
     "--output-format",
@@ -577,7 +585,7 @@ export function implementArgs(spec: ImplementSpec) {
     "--allowedTools",
     [...IMPLEMENT_TOOLS, ...(mcp?.allow ?? [])].join(","),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
-    ...(mcp?.denied.length ? ["--disallowedTools", mcp.denied.join(",")] : []),
+    ...(deny.length ? ["--disallowedTools", deny.join(",")] : []),
     ...(settings ? ["--settings", settings] : []),
     ...(agentsFile ? ["--agents", agentsFile, "--agent", MAIN_AGENT] : []),
     "--json-schema",
@@ -596,6 +604,7 @@ export function implementArgs(spec: ImplementSpec) {
     args,
     allowed: new Set([...builtins, ...(mcp?.tools ?? []), ...(mcp?.denied ?? []), "StructuredOutput", ...agentTools]),
     agents: new Set(agentsFile ? [MAIN_AGENT, EXPLORER_AGENT] : []),
+    models: defModels(agentsFile && spec.explorer ? { [EXPLORER_AGENT]: spec.explorer } : {}),
   };
 }
 
@@ -659,7 +668,8 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       // Gate B9: an 8.3 short cwd makes the CLI refuse Reads inside it.
       cwd = realpathSync.native(spec.cwd);
       projectsDir = c.projectsDir;
-      const { args, allowed, agents } = "implement" in spec ? implementArgs(spec) : "resume" in spec ? resumeArgs(spec) : prepare(spec);
+      const { args, allowed, agents, models } =
+        "implement" in spec ? implementArgs(spec) : "resume" in spec ? resumeArgs(spec) : prepare(spec);
       const own = "implement" in spec || "resume" in spec ? spec.timeoutMs : undefined;
       const base = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
       const limit = Math.min(own ?? base ?? RUN_TIMEOUT_MS, RUN_TIME_MAX_MS);
@@ -667,7 +677,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const advisor = "resume" in spec ? null : spec.advisor;
       // implementArgs wrote this file beside shell.json.
       const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";
-      const parser = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
+      const parser = createStreamParser({ cwd, allowedTools: allowed, agents, models, shell: shell?.mode });
       inits = parser.state.inits;
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {

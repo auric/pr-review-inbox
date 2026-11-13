@@ -4,6 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  AGENT_PARAMS_RULE,
   ANSWERED_RULES,
   askAgent,
   contextBlock,
@@ -50,6 +51,7 @@ import {
   verifyAgent,
   verifyRules,
   withDelegation,
+  withExplorer,
   withInstructions,
   withVerifyDelegation,
 } from "../../src/server/review/catalog";
@@ -538,9 +540,9 @@ describe("review v2 finder prompt", () => {
     // WP-R3: the agents of the verify phase are review agents too.
     const check = [withVerifyDelegation(verifyAgent(known, run), true), verifierAgent(known, run)].map((a) => a.prompt).join("\n---\n");
     expect({ version: REVIEW_PROMPT_VERSION, finder: sha(finder), check: sha(check) }).toEqual({
-      version: "2.7",
-      finder: "b37807e6686ddc269401f00eddb0bb9ec7b8f95fa3fb0e6848b985e5ea271470",
-      check: "600fd6f0076ba7732c3a81b67b9546abb7d6b6ebfd55f40532fd778ec6b808de",
+      version: "2.8",
+      finder: "e1566979be24eb5a1f646031985ed1fcef7daff21284becd0d98d88c074d1d5a",
+      check: "e59857b7382e53bd7f7bf8894f6c49f03ebf81e023f59a08dc3c394943687d5f",
     });
   });
 
@@ -760,7 +762,7 @@ describe("review v3 prompt switches", () => {
   test("parts (WP-V14): part files replace the auto lines and add one rl-reviewer line; the variant alone changes no prompt", () => {
     const main = mainAgent(general, FULL);
     const parted = withDelegation(main, "auto", 6).prompt;
-    expect(parted).toBe([main.prompt, ...partLines(6)].join("\n"));
+    expect(parted).toBe([main.prompt, AGENT_PARAMS_RULE, ...partLines(6)].join("\n"));
     expect(parted).toContain("\nThe app split the change into 6 parts in ./context/parts/. Make one rl-reviewer call per part.\n");
     expect(parted).not.toContain("The change is large.");
     expect(parted.endsWith('set agent to "rl-reviewer" on each.')).toBe(true);
@@ -835,7 +837,7 @@ describe("review v3 prompt switches", () => {
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
     expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.7+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.8+order+rules2");
   });
 
   test("ASD-STE100: every switch line has at most 20 words", () => {
@@ -855,7 +857,7 @@ describe("review v3 prompt switches", () => {
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.7+order+rules2");
+    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.8+order+rules2");
     expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
@@ -881,6 +883,25 @@ describe("review v3 prompt switches", () => {
     expect(Object.keys(stored ?? {}).sort()).toEqual(["edited", "id", "verifier"]);
     expect(resolveProfiles([stored], SPARSE_VERSION)?.profiles[0]?.verifier.outcome).toBe("demote");
     expect(upgradeProfile(demote, 4).verifier.outcome).toBe("demote");
+  });
+});
+
+// Gate B38: the CLI refuses an Agent call with model or effort, and the lead does not retry it.
+describe("the Agent parameter rule", () => {
+  test("each lead with the Agent tool gets the rule once; a lead without it gets none", () => {
+    const main = mainAgent(general);
+    const once = (p: string) => p.split(AGENT_PARAMS_RULE).length - 1;
+    for (const p of [
+      withDelegation(main, "always").prompt,
+      withDelegation(main, "auto").prompt,
+      withDelegation(main, "auto", 3).prompt,
+      withVerifyDelegation(verifyAgent(general), true, true).prompt,
+      withExplorer(main).prompt,
+    ])
+      expect(once(p)).toBe(1);
+    expect(AGENT_PARAMS_RULE).toBe("Never pass model or effort on an Agent call. Each agent has its own model and effort.");
+    for (const p of [withDelegation(main, null).prompt, withVerifyDelegation(verifyAgent(general), false).prompt, main.prompt])
+      expect(once(p)).toBe(0);
   });
 });
 

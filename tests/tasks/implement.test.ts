@@ -23,7 +23,15 @@ import { basename, join, resolve } from "node:path";
 import { gitAuth } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { DEFAULT_PROFILE, DOCS_RULE, EXPLORER_RULE, ISSUE_LINES, ISSUE_REMOTE_RULE, profileOf } from "../../src/server/review/catalog";
+import {
+  AGENT_PARAMS_RULE,
+  DEFAULT_PROFILE,
+  DOCS_RULE,
+  EXPLORER_RULE,
+  ISSUE_LINES,
+  ISSUE_REMOTE_RULE,
+  profileOf,
+} from "../../src/server/review/catalog";
 import { IMPLEMENT_TOOLS, implementArgs } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
@@ -307,6 +315,8 @@ describe("implement run", () => {
         "Read,Grep,Glob,Edit,Write,Agent",
         "--allowedTools",
         "Read,Grep,Glob,Edit,Write,mcp__rl-git,mcp__learn,mcp__deepwiki",
+        "--disallowedTools",
+        "Agent(model:*),Agent(effort:*)",
         "--agents",
         agentsFile,
         "--agent",
@@ -383,6 +393,7 @@ describe("implement run", () => {
         expect(call.agents?.["rl-main"]?.tools?.[0]).toBe("Agent(rl-explorer)");
         expect(call.agents?.["rl-explorer"]?.tools).toEqual(["Read", "Grep", "Glob"]);
         expect(call.stdin).toContain(EXPLORER_RULE);
+        expect(call.stdin).toContain(AGENT_PARAMS_RULE);
       }
       // The sparse rule stays: the CLI sees no CLAUDE.md in ./repo, and the part folder gets none.
       expect(existsSync(join(s.wt.repo, "CLAUDE.md"))).toBe(false);
