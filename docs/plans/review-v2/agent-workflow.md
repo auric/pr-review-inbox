@@ -41,7 +41,7 @@ Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not bui
 | `--agent rl-main` with `Agent(<names>)` refuses general-purpose and user agents | B2, B9; task-subagents.md |
 | `--restricted` keeps Edit and Write of the main thread inside the cwd | U72 (B17) |
 | The shell.json allow and deny rules and the compound check apply to the main thread | SU2, SU4 |
-| Nested subagent tool calls show in stream-json with parent_tool_use_id | fixtures/claude/b9-first-try.jsonl, b1-review-agent.jsonl |
+| Nested subagent tool calls show in stream-json with parent_tool_use_id | Gates B1 and B9 (integration-check.md U91); fixtures/claude-synthetic/review-agent-tree.jsonl |
 | With CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, subagents run in the foreground | B3 (claude.ts:138-139) |
 | Subagent files go to the per-cwd folders, which the run end deletes | B4 (claude.ts:337-346) |
 | `--advisor` works with the app flags. The run usage counts the advisor | ADV1, ADV5 |
@@ -315,7 +315,7 @@ Smallest first release: AW0, the gate run, AW1, AW2, and AW3. With them, the use
 
 - `after()` runs for every run end, a cancel too (jobs.ts:1546).
 - The path check and the git snapshot read files and git state, not the stream (implement.ts:136-170; gitstate.ts:50-88).
-- The parser records nested tool calls with their parent (stream.ts:183-206; fixtures b9-first-try.jsonl).
+- The parser records nested tool calls with their parent (stream.ts:183-206; fixtures/claude-synthetic/review-agent-tree.jsonl).
 - `written` takes ok Edit and Write events of any depth (implement.ts:933).
 - A deny rule wins over every allow rule (V5; claude.ts:529-530).
 - `--agents` outranks the `.claude/agents` and `~/.claude/agents` files (D5). The app definition wins a name clash with a file on disk (U88 confirms).

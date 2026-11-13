@@ -51,7 +51,7 @@ async function setup(runLimits?: Partial<RunLimits>) {
   dirs.push(root);
   const remote = await reviewRemote(root, { 2: "source", 3: "source", 4: "source", 5: "source" });
   const runner = fakeRunner(root);
-  runner.write({ fixture: claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl"), hang: true });
+  runner.write({ fixture: claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl"), hang: true });
   // The settings check reads the token owner from the dashboard.
   const fake = startFakeBitbucket({ routes: { [key("GET", DASHBOARD_PATH)]: { status: 200, body: { values: [], isLastPage: true } } } });
   cleanup.push(() => fake.stop());

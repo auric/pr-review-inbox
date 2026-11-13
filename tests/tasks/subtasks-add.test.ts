@@ -63,7 +63,7 @@ async function setup() {
   dirs.push(root);
   const r = await taskRemote(root);
   const runner = fakeRunner(root);
-  const fixture = claudeStream(root, "st7", "claude/b6-hostile-repo.jsonl");
+  const fixture = claudeStream(root, "st7", "claude-synthetic/review-flat.jsonl");
   runner.write({ fixture, interview: NO_QUESTIONS, spec: echoSpec() });
   const fake = startFakeBitbucket();
   const w = repoWrites(fake, "PROJ", "repo");

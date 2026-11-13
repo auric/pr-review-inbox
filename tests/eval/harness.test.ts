@@ -404,7 +404,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         JSON.stringify({
           record,
           auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-          fixture: claudeStream(dir, "eval", "claude/b9-wp8-flags.jsonl", structured),
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", structured),
           delayMs: 1,
         }),
       );
@@ -551,7 +551,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         JSON.stringify({
           record: join(dir, "calls.jsonl"),
           auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-          fixture: claudeStream(dir, "eval", "claude/b9-wp8-flags.jsonl", {
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", {
             summary: "Fake review.",
             risks: [],
             questions: [],
@@ -610,7 +610,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         JSON.stringify({
           record,
           auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-          fixture: claudeStream(dir, "eval", "claude/b9-wp8-flags.jsonl", {
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", {
             summary: "Partial.",
             risks: [],
             questions: [],
@@ -660,7 +660,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         JSON.stringify({
           record,
           auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-          fixture: claudeStream(dir, "eval", "claude/b9-wp8-flags.jsonl", empty),
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", empty),
           delayMs: 1,
         }),
       );
@@ -693,7 +693,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         JSON.stringify({
           record,
           auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-          fixture: claudeStream(dir, "eval", "claude/b9-wp8-flags.jsonl", empty),
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", empty),
           delayMs: 1,
         }),
       );

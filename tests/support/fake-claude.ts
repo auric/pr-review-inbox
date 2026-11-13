@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Fake `claude` CLI for tests. It replays a recorded stream-json fixture and never calls a model.
+// Fake `claude` CLI for tests. It replays a stream-json fixture and never calls a model.
 // Usage: bun tests/support/fake-claude.ts <scenario.json> <claude arguments>
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -444,7 +444,7 @@ async function main() {
     }
   }
 
-  // The Bash calls: the tool_use, then for a refused call the permission_denied event before the error tool_result (b17 order).
+  // The Bash calls: the tool_use, then for a refused call the permission_denied event before the error tool_result (Gate B17 order).
   for (const [k, b] of (s.bash ?? []).entries()) {
     const id = `toolu_fake_bash_${k}`;
     if (!b.refused)
@@ -546,7 +546,7 @@ async function main() {
     return r === undefined ? l : JSON.stringify({ ...e, structured_output: r });
   };
 
-  // The fixture paths name the recorded Windows cwd. Replace it and its separator with the real cwd and separator.
+  // The fixture paths name the Windows cwd of init. Replace it and its separator with the real cwd and separator.
   const lines = readFileSync(s.fixture, "utf8").split("\n").filter(Boolean).map(rewrite);
   const init = lines.map((l) => JSON.parse(l)).find((e) => e.type === "system" && e.subtype === "init");
   const esc = (p: string) => JSON.stringify(p).slice(1, -1);

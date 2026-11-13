@@ -119,7 +119,7 @@ describe("reply eval", () => {
         JSON.stringify({
           record,
           auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-          fixture: claudeStream(dir, "eval", "claude/b6-hostile-repo.jsonl"),
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-flat.jsonl"),
           replies: {
             summary: "S.",
             replies: [

@@ -58,8 +58,8 @@ for (const m of ["tasks/implement", "tasks/worktree", "review/claude", "review/j
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
 const SLOW = 90_000;
-const FIXTURE = resolve(import.meta.dir, "../../fixtures/claude/b17-write-confinement.jsonl");
-const MAX_TURNS_FIXTURE = resolve(import.meta.dir, "../../fixtures/claude/b5-max-turns.jsonl");
+const FIXTURE = resolve(import.meta.dir, "../../fixtures/claude-synthetic/implement-ok.jsonl");
+const MAX_TURNS_FIXTURE = resolve(import.meta.dir, "../../fixtures/claude-synthetic/max-turns.jsonl");
 const SECRET = "Bearer secret-token-4411";
 
 type Call = {
@@ -274,7 +274,7 @@ describe("implement run", () => {
       const row = s.stepRow(outcome.step);
       expect([row.kind, row.state, row.part, row.item, row.attempt, row.run]).toEqual(["implement", "ok", s.part, "T1.1", 1, outcome.run]);
       // spec.md section 6.7, Commit: the step row keeps the Write targets from the part folder, so the commit after a restart has them.
-      // The b17 fixture holds a Write call with a path relative to the cwd.
+      // implement-ok.jsonl holds a Write call with a path relative to the cwd.
       expect(JSON.parse(row.detail_json).written).toEqual(["repo/src/new.ts", "./repo/a.txt"]);
       const run = s.db
         .query("SELECT kind, pr, task, status, source_head FROM review_run WHERE id = $id")

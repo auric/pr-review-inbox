@@ -146,7 +146,7 @@ export type SDKTaskProgressMessage = {
   usage?: SDKTaskUsage;
 };
 
-// A refused tool call (fixtures b1, b3, b17). decision_reason_type: for example "other" or "asyncAgent".
+// A refused tool call (Gates B1, B3, B17). decision_reason_type: for example "other" or "asyncAgent".
 export type SDKPermissionDeniedMessage = {
   type: "system";
   subtype: "permission_denied";

@@ -54,7 +54,7 @@ Record each result in the "Review v2 (not run)" rows of integration-check.md. Re
 
 - The console shows one line per check. `.gate0/v3-local/results.<checks>.json` holds the same lines.
 - `.gate0/v3-local/raw/` holds the raw stream of each call. Raw files hold local paths and account data. Do not commit them. The console and the results file show the home folder as `~`.
-- `bun scripts/gate/sanitize-claude.ts` writes the sanitized streams to `.gate0/claude/` (git-ignored). Gate transcripts are never committed. Tests read only the committed files in `fixtures/claude/`. A new test fixture there is a deliberate, reviewed copy: synthetic, or sanitized and read line by line.
+- `bun scripts/gate/sanitize-claude.ts` writes the sanitized streams to `.gate0/claude/` (git-ignored). Gate transcripts are never committed. Tests read only the hand-written streams in `fixtures/claude-synthetic/`. A new test fixture there is synthetic and reviewed line by line.
 
 ### What PASS means
 

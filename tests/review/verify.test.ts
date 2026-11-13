@@ -178,7 +178,7 @@ async function setup() {
   mkdirSync(claude);
   const runner = fakeRunner(claude);
   let n = 0;
-  const stream = (structured: unknown) => claudeStream(claude, `s${n++}`, "claude/b9-wp8-flags.jsonl", structured);
+  const stream = (structured: unknown) => claudeStream(claude, `s${n++}`, "claude-synthetic/review-agent-tree.jsonl", structured);
   const limit = claudeStream(claude, "limit", "claude-synthetic/usage-limit.jsonl");
   const review = createReviewJobs({
     settings,

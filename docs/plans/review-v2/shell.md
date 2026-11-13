@@ -181,7 +181,7 @@ The label "Refused by the allowlist" does not prove the allowlist refused these 
 - So these two refusals were not deny rules, or the label would read "Refused by the deny list".
 - Everything else falls to "allowlist" (`stream.ts:231`, labels in `src/shared/run-log.ts:35-38`). That includes:
   - type `other`, "This command requires approval": no allow rule matched.
-  - CLI safety checks with no reason type, for example the B22 event "Output redirection to '…' needs approval" in `fixtures/claude/b22-refusals.jsonl`.
+  - CLI safety checks with no reason type, for example the B22 event "Output redirection to '…' needs approval" in Gate B22 (integration-check.md SU9).
 - In Any mode the allowlist cannot refuse anything. There the label is wrong by construction.
 
 **4. Your two commands under CLI 2.1.316**

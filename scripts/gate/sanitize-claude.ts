@@ -176,7 +176,7 @@ writeFileSync(
     "",
     `Recorded with Claude Code ${version || "unknown"}. WP8 requires this CLI version or later.`,
     "",
-    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, user hook output, and the reply text of a user agent. Do not commit these files. A new test fixture in `fixtures/claude/` is a reviewed copy: synthetic, or sanitized and read line by line.",
+    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, user hook output, and the reply text of a user agent. Do not commit these files. Tests read only the hand-written streams in `fixtures/claude-synthetic/`.",
     "",
     "| File | Check |",
     "|---|---|",

@@ -377,7 +377,7 @@ async function setup(o: { profiles?: Profile[] } = {}) {
     db.query("UPDATE pull_request SET source_head = $next WHERE id = $id").run({ next: remote.next, id: pr });
   };
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl");
   const scenario = (s: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...s });
   scenario({ explain: RESULT });
   const fake = startFakeBitbucket();

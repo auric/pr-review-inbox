@@ -64,7 +64,7 @@ async function setup(spec: unknown = echoSpec()) {
   dirs.push(root);
   const r = await taskRemote(root);
   const runner = fakeRunner(root);
-  runner.write({ fixture: claudeStream(root, "st2", "claude/b6-hostile-repo.jsonl"), interview: NO_QUESTIONS, spec });
+  runner.write({ fixture: claudeStream(root, "st2", "claude-synthetic/review-flat.jsonl"), interview: NO_QUESTIONS, spec });
   const fake = startFakeBitbucket();
   const w = repoWrites(fake, "PROJ", "repo");
   const jira = startFakeJira();

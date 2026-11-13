@@ -104,7 +104,7 @@ async function setup(o: { config?: string; profiles?: ProfileInput[]; runLimits?
   // Bitbucket names the default branch in HEAD of the repository.
   await git(["--git-dir", remote.remote, "symbolic-ref", "HEAD", "refs/heads/main"], { env: gitEnv(join(root, "empty.gitconfig")) });
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl");
   const scenario = (s: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...s });
   scenario();
   const fake = startFakeBitbucket();

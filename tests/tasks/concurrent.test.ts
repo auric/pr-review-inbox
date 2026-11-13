@@ -111,7 +111,7 @@ async function setup(o: { atOnce: number; third: "base" | "stack"; scenario: Sce
   dirs.push(root);
   const r = await taskRemote(root);
   const runner = fakeRunner(root);
-  const fixture = claudeStream(root, "par", "claude/b6-hostile-repo.jsonl");
+  const fixture = claudeStream(root, "par", "claude-synthetic/review-flat.jsonl");
   runner.write({ fixture, ...o.scenario });
   const fake = startFakeBitbucket();
   repoWrites(fake, "PROJ", "repo");

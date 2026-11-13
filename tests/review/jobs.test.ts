@@ -51,7 +51,6 @@ import { JIRA_TOKEN, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira"
 const SLOW = 120_000;
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
 const FAKE_MCP = join(import.meta.dir, "../support/fake-mcp.ts");
-const REAL = join(import.meta.dir, "../../fixtures/claude");
 const SYNTHETIC = join(import.meta.dir, "../../fixtures/claude-synthetic");
 const PORT = 7317;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -132,7 +131,7 @@ const RESULT = {
 };
 
 let derived = 0;
-// A real fixture with the init tools and MCP servers of a WP10 run, and the given structured_output.
+// A synthetic fixture with the init tools and MCP servers of a WP10 run, and the given structured_output.
 function derive(file: string, o: { tools?: string[]; mcp?: string; structured?: unknown } = {}) {
   const out = readFileSync(file, "utf8")
     .split("\n")
@@ -155,7 +154,7 @@ function derive(file: string, o: { tools?: string[]; mcp?: string; structured?: 
   writeFileSync(f, `${out.map((e) => JSON.stringify(e)).join("\n")}\n`);
   return f;
 }
-const subagentRun = (structured: unknown = RESULT, mcp?: string) => derive(join(REAL, "b9-wp8-flags.jsonl"), { structured, mcp });
+const subagentRun = (structured: unknown = RESULT, mcp?: string) => derive(join(SYNTHETIC, "review-agent-tree.jsonl"), { structured, mcp });
 
 type Entry = string | { link: string };
 
@@ -411,7 +410,7 @@ describe("run pipeline", () => {
         ["src/app.ts", "new", 3, "exact", "new"],
         ["src/app.ts", "new", 3, "exact", "new"],
       ]);
-      // Only an Agent call that ended ok names an agent. b9 refuses general-purpose.
+      // Only an Agent call that ended ok names an agent. review-agent-tree.jsonl refuses general-purpose.
       expect(findings.map((i) => (i.payload as { agent: string | null }).agent)).toEqual(["rl-reviewer", null]);
       expect(findings[0]?.anchor?.excerpt.some((l) => l.kind === "add" && l.text === "line 3 changed")).toBe(true);
       expect(d.items.filter((i) => i.kind === "question").map((i) => i.body)).toEqual(["Why does line 3 change?"]);
@@ -494,7 +493,7 @@ describe("run pipeline", () => {
     async () => {
       const h = await setup();
       const explain = { ...echoExplain(), questions: RESULT.questions };
-      h.scenario({ fixture: derive(join(REAL, "b6-hostile-repo.jsonl"), { tools: EXPLAIN_TOOLS, structured: RESULT }), explain });
+      h.scenario({ fixture: derive(join(SYNTHETIC, "review-flat.jsonl"), { tools: EXPLAIN_TOOLS, structured: RESULT }), explain });
       await h.brief("", "explain");
       const { body } = await h.start();
       expect(body.kind).toBe("explain");
@@ -1342,7 +1341,7 @@ describe("editable profiles (M4)", () => {
       // Off: no rl-reviewer and no Agent tool. The init event names the model that ran.
       const off = { ...tuned, model: null, advisor: null, reviewer: { ...tuned.reviewer, mode: "off" as const } };
       expect((await putProfiles(h, [off, ...SHIPPED_PROFILES.slice(1)])).status).toBe(200);
-      h.scenario({ fixture: derive(join(REAL, "b6-hostile-repo.jsonl"), { tools: EXPLAIN_TOOLS, structured: RESULT }) });
+      h.scenario({ fixture: derive(join(SYNTHETIC, "review-flat.jsonl"), { tools: EXPLAIN_TOOLS, structured: RESULT }) });
       const d = await h.finish((await h.start()).body.id);
       // A hang run also records a line without argv.
       const last = h.calls().filter(finderCall).at(-1);

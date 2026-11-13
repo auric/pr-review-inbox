@@ -29,7 +29,7 @@ import { claudeStream, REVIEW_RESULT } from "../support/review-fixture";
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
 const dir = mkdtempSync(join(tmpdir(), "rl-fake-cli-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
-const fixture = claudeStream(dir, "tree", "claude/b9-wp8-flags.jsonl", REVIEW_RESULT);
+const fixture = claudeStream(dir, "tree", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT);
 
 const STDIN = [
   "# Task",

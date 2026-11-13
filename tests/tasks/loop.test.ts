@@ -191,7 +191,7 @@ async function setup(o: Setup = {}) {
   const r = await taskRemote(root);
   if (o.main) await commitOnMain(r.remote, root, o.main);
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "loop", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "loop", "claude-synthetic/review-flat.jsonl");
   const scenario = (s: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...s });
   scenario({
     seq: {

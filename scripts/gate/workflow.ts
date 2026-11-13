@@ -117,7 +117,7 @@ const textOf = (b: Obj | undefined) =>
 
 // The first call of tool under parent (null: the main thread) whose input matches. A permission_denied event of the call makes it
 // refused. deniedParent: the parent_tool_use_id of that event. CLI 2.1.322 gives a subagent event agent_id instead: then it is the
-// tool_use_id of the task_started event whose task_id equals agent_id (fixtures/claude/b36-writer.jsonl).
+// tool_use_id of the task_started event whose task_id equals agent_id (Gate B36, integration-check.md U85).
 export function callOutcome(events: unknown[], parent: string | null, tool: string, match: (input: Obj) => boolean = () => true): Outcome {
   const t = toolCalls(events).find((c) => c.parent === parent && c.name === tool && match(c.input));
   if (!t) return { state: "not tried", text: "" };
@@ -321,7 +321,7 @@ export function cwdFilesFact(
 
 // ---------- B36 judges (agent-workflow.md section 6) ----------
 const tried = (s: Outcome) => s.state !== "not tried";
-// The CLI text for a tool outside the session: "No such tool available: Edit. Edit is disabled for this session" (fixtures/claude). A
+// The CLI text for a tool outside the session: "No such tool available: Edit. Edit is disabled for this session" (integration-check.md U86). A
 // network error means that the tool ran.
 const notAvailable = (s: Outcome) =>
   s.state === "refused" ||

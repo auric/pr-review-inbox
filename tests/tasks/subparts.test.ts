@@ -106,7 +106,7 @@ async function setup(o: { maxOpen: number }) {
   const runner = fakeRunner(root);
   const file = (path: string, text: string) => ({ writes: [{ path: `repo/${path}`, text }] });
   runner.write({
-    fixture: claudeStream(root, "st3", "claude/b6-hostile-repo.jsonl"),
+    fixture: claudeStream(root, "st3", "claude-synthetic/review-flat.jsonl"),
     seq: {
       "implement:tests": NAMES.map((n) => file(`tests/${n}.test.ts`, `test("${n}", () => {});\n`)),
       "implement:implement": NAMES.map((n) => file(`src/${n}.ts`, `export const ${n} = "todo";\n`)),

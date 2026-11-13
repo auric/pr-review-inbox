@@ -113,7 +113,7 @@ async function setup(o: { seq?: FakeScenario["seq"]; budget?: number } = {}) {
   dirs.push(root);
   const r = await taskRemote(root);
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "ui", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "ui", "claude-synthetic/review-flat.jsonl");
   runner.write({
     fixture: stream,
     seq: {

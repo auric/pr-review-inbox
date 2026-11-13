@@ -259,7 +259,7 @@ async function setup() {
   const claude = join(root, "claude");
   mkdirSync(claude);
   const runner = fakeRunner(claude);
-  const fixture = claudeStream(claude, "tree", "claude/b9-wp8-flags.jsonl", REVIEW_RESULT);
+  const fixture = claudeStream(claude, "tree", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT);
   const review = createReviewJobs({
     settings,
     live: createLive(),

@@ -53,7 +53,7 @@ async function setup(specs: unknown[]) {
   const r = await taskRemote(root);
   await git(["--git-dir", r.remote, "update-ref", "refs/heads/develop", r.base], { env: r.env });
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "mr2", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "mr2", "claude-synthetic/review-flat.jsonl");
   runner.write({ fixture: stream, seq: { spec: specs.map((spec) => ({ spec })) } });
   const fake = startFakeBitbucket();
   repoWrites(fake, "PROJ", "repo");

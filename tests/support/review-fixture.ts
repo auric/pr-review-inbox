@@ -148,7 +148,7 @@ export const REVIEW_RESULT = {
   ],
 };
 
-// A real Gate B stream with the init tools and MCP servers of a review run, and the given structured output. Writes <dir>/<name>.jsonl.
+// A synthetic stream of fixtures/claude-synthetic/ with the init tools and MCP servers of a review run, and the given structured output. Writes <dir>/<name>.jsonl.
 // failed: MCP servers that init lists with the status "failed".
 const GIT_TOOLS = ["git_log", "git_blame", "git_show", "git_diff"].map((t) => `mcp__rl-git__${t}`);
 const REVIEW_TOOLS = ["Task", "Read", "Grep", "Glob", ...GIT_TOOLS, "StructuredOutput"];

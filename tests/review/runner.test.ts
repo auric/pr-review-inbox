@@ -28,7 +28,6 @@ for (const m of ["review/claude", "review/stream", "review/catalog", "tasks/shel
   console.log(`runner.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
 
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
-const REAL = join(import.meta.dir, "../../fixtures/claude");
 const SYNTHETIC = join(import.meta.dir, "../../fixtures/claude-synthetic");
 const SCHEMA = { type: "object", properties: { summary: { type: "string" } }, required: ["summary"], additionalProperties: false };
 const DERIVED = mkdtempSync(join(tmpdir(), "rl-wp8-fixtures-"));
@@ -39,12 +38,12 @@ afterEach(() => {
 });
 afterAll(() => rmSync(DERIVED, { recursive: true, force: true }));
 
-const real = (name: string) => join(REAL, name);
+const sample = (name: string) => join(SYNTHETIC, name);
 const encoded = (p: string) => p.replace(/[^a-zA-Z0-9]/g, "-");
 
-// A real fixture with one patch per event. The file says which fixture it came from.
+// A synthetic fixture with one patch per event. The file name says which fixture it came from.
 function derive(name: string, patch: (e: Record<string, unknown>) => Record<string, unknown>) {
-  const out = readFileSync(real(name), "utf8")
+  const out = readFileSync(sample(name), "utf8")
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.stringify(patch(JSON.parse(l))));
@@ -52,9 +51,8 @@ function derive(name: string, patch: (e: Record<string, unknown>) => Record<stri
   writeFileSync(f, `${out.join("\n")}\n`);
   return f;
 }
-// b6 is a flat run without --json-schema. The patch adds the structured_output that a schema run sends.
-const flatSuccess = () =>
-  derive("b6-hostile-repo.jsonl", (e) => (e.type === "result" ? { ...e, structured_output: { summary: "ok" } } : e));
+// review-flat.jsonl is a flat run without --json-schema. The patch adds the structured_output that a schema run sends.
+const flatSuccess = () => derive("review-flat.jsonl", (e) => (e.type === "result" ? { ...e, structured_output: { summary: "ok" } } : e));
 
 function alive(pid: number) {
   try {
@@ -125,16 +123,16 @@ describe("outcomes", () => {
   });
 
   test("subagent tree: parent from parent_tool_use_id, task events end the agent", async () => {
-    const { runner, spec } = setup({ fixture: real("b9-wp8-flags.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("review-agent-tree.jsonl") });
     const seen: RunEvent[] = [];
     const o = await runner.run(spec, (ev) => seen.push(...ev));
     expect(o.status).toBe("completed");
     expect(o.result?.structured_output).toEqual({ mainWord: "MAGNOLIA", reviewerWord: "JUNIPER", fact: "STUBFACT-5150" });
 
-    const agent = byId(o.events, "toolu_01LSbcECPmHiTBS4CDvWoCbj");
+    const agent = byId(o.events, "toolu_synthetic_tree_agent");
     expect(agent).toMatchObject({ parent: null, tool: "Agent", agent: "rl-reviewer", target: "Run rl-reviewer step list", status: "ok" });
     expect(agent?.note).toStartWith("1. Read note-reviewer.txt: succeeded.");
-    const secret = "C:/Users/user/AppData/Local/Temp/rl-gb-b9-ByCyyZ/app/secret.txt";
+    const secret = "C:/rl-synthetic/app/secret.txt";
     expect(o.events.filter((e) => e.parent === agent?.id).map((e) => [e.tool, e.target, e.status])).toEqual([
       ["Read", "note-reviewer.txt", "ok"],
       ["Read", secret, "error"],
@@ -157,10 +155,10 @@ describe("outcomes", () => {
   });
 
   test("subagent stats: model, tokens, and the built-in mark come from the stream", async () => {
-    const { runner, spec } = setup({ fixture: real("b9-wp8-flags.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("review-agent-tree.jsonl") });
     const seen: RunEvent[] = [];
     const o = await runner.run(spec, (ev) => seen.push(...ev));
-    const id = "toolu_01LSbcECPmHiTBS4CDvWoCbj";
+    const id = "toolu_synthetic_tree_agent";
     // The first subagent message names the model. task_progress raises the tokens. The tool result gives totalTokens.
     expect(byId(o.events, id)).toMatchObject({ agent: "rl-reviewer", model: "claude-haiku-5-5", tokens: 5382, builtin: false });
     const live = seen.filter((e) => e.id === id).map((e) => [e.status, e.model, e.tokens]);
@@ -177,12 +175,12 @@ describe("outcomes", () => {
   });
 
   test("two result events: the final one with structured_output wins; a background agent ends at its notification", async () => {
-    const { runner, spec } = setup({ fixture: real("b3-default.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("background-agent.jsonl") });
     const o = await runner.run(spec);
     expect(o.status).toBe("completed");
     expect((o.result?.structured_output as { answer?: string } | undefined)?.answer).toStartWith("No word available.");
     expect(o.result?.origin?.kind).toBe("task-notification");
-    const agent = byId(o.events, "toolu_012D82eht13YtSvEVwCqV89Z");
+    const agent = byId(o.events, "toolu_synthetic_bg_agent");
     expect(agent?.status).toBe("ok");
     expect(agent?.note).toStartWith("Read of `");
     expect(o.events.filter((e) => e.parent === agent?.id).map((e) => [e.tool, e.target, e.status])).toEqual([
@@ -193,14 +191,14 @@ describe("outcomes", () => {
   });
 
   test("max turns", async () => {
-    const { runner, spec } = setup({ fixture: real("b5-max-turns.jsonl"), exitCode: 1 });
+    const { runner, spec } = setup({ fixture: sample("max-turns.jsonl"), exitCode: 1 });
     const o = await runner.run(spec);
     expect(o).toMatchObject({ status: "failed", kind: "max_turns", text: "Reached maximum number of turns (1)", exitCode: 1 });
     expect(o.events.map((e) => [e.tool, e.target, e.status])).toEqual([["Read", "a.txt", "error"]]);
   });
 
   test("auth failure in the stream (Gate B5)", async () => {
-    const { runner, spec } = setup({ fixture: real("b5-auth.jsonl"), exitCode: 1 });
+    const { runner, spec } = setup({ fixture: sample("auth-failed.jsonl"), exitCode: 1 });
     const o = await runner.run(spec);
     expect(o).toMatchObject({ status: "failed", kind: "auth", text: "Not logged in · Please run /login" });
   });
@@ -212,7 +210,7 @@ describe("outcomes", () => {
   });
 
   test("schema failure: a success without structured_output (Gate B9 first try)", async () => {
-    const { runner, spec } = setup({ fixture: real("b9-first-try.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("no-structured-output.jsonl") });
     const o = await runner.run(spec);
     expect(o).toMatchObject({ status: "failed", kind: "schema", text: "The result has no structured output." });
     expect(o.result?.subtype).toBe("success");
@@ -277,7 +275,7 @@ describe("outcomes", () => {
   });
 
   test("no result event: process error with the stderr tail", async () => {
-    const fixture = derive("b6-hostile-repo.jsonl", (e) => (e.type === "result" ? { type: "noise" } : e));
+    const fixture = derive("review-flat.jsonl", (e) => (e.type === "result" ? { type: "noise" } : e));
     const { runner, spec } = setup({ fixture, exitCode: 3, stderr: "boom\n" });
     const o = await runner.run(spec);
     expect(o).toMatchObject({
@@ -291,7 +289,7 @@ describe("outcomes", () => {
 
 describe("safety", () => {
   test("init tool check kills the run before any tool use", async () => {
-    const { runner, spec, calls } = setup({ fixture: real("b8-plain.jsonl"), delayMs: 30 });
+    const { runner, spec, calls } = setup({ fixture: sample("plain.jsonl"), delayMs: 30 });
     const seen: RunEvent[] = [];
     const o = await runner.run(spec, (ev) => seen.push(...ev));
     expect(o.status).toBe("failed");
@@ -533,7 +531,7 @@ describe("safety", () => {
 
   test("limits decision 3: a timeoutMs function gives the time limit of each run at its start", async () => {
     let ms = 60 * 60_000;
-    const { runner, spec } = setup({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 }, { timeoutMs: () => ms });
+    const { runner, spec } = setup({ fixture: sample("review-agent-tree.jsonl"), hang: true, delayMs: 20 }, { timeoutMs: () => ms });
     ms = 300;
     const started = Date.now();
     const o = await runner.run(spec);
@@ -542,7 +540,7 @@ describe("safety", () => {
   });
 
   test("cancel ends the CLI and its child, stops running events, and cleans up", async () => {
-    const { runner, spec, work, projects, calls } = setup({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 });
+    const { runner, spec, work, projects, calls } = setup({ fixture: sample("review-agent-tree.jsonl"), hang: true, delayMs: 20 });
     const seen: RunEvent[] = [];
     const run = runner.run(spec, (ev) => {
       seen.push(...ev);
@@ -1117,7 +1115,7 @@ describe("rl-explorer in task steps", () => {
   });
 
   test("an rl-explorer call of an implement step nests its calls under it in the step log, as an app agent", async () => {
-    const fixture = derive("b9-wp8-flags.jsonl", (e) => JSON.parse(JSON.stringify(e).replaceAll("rl-reviewer", "rl-explorer")));
+    const fixture = derive("review-agent-tree.jsonl", (e) => JSON.parse(JSON.stringify(e).replaceAll("rl-reviewer", "rl-explorer")));
     const { runner, work, app, calls } = setup({ fixture });
     const o = await runner.run({
       implement: true,
@@ -1132,7 +1130,7 @@ describe("rl-explorer in task steps", () => {
     expect(o.status).toBe("completed");
     expect(o.init?.tools).toContain("Task");
     expect(flagOf(calls().at(-1)?.argv ?? [], "--agent")).toBe("rl-main");
-    const agent = byId(o.events, "toolu_01LSbcECPmHiTBS4CDvWoCbj");
+    const agent = byId(o.events, "toolu_synthetic_tree_agent");
     expect(agent).toMatchObject({ parent: null, tool: "Agent", agent: "rl-explorer", builtin: false, status: "ok" });
     const node = logTree(o.events).find((n) => n.e.id === agent?.id);
     expect(node?.kids.map((k) => [k.e.tool, k.e.parent])).toEqual([

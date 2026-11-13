@@ -29,7 +29,7 @@ const MAX_DESCRIPTION = 1024;
 const FORCED_DENY = ["Agent", "NotebookEdit", "PowerShell", "WebFetch", "WebSearch"];
 // The front matter keys that the app reads. Every other key is dropped and listed under "The app ignores".
 const READ_KEYS = ["name", "description", "tools", "disallowedTools", "model", "effort", "maxTurns"];
-// init.tools of CLI 2.1.296 (fixtures/claude/b14-default.jsonl), with Agent, the newer name of Task, and StructuredOutput.
+// init.tools of CLI 2.1.296 (Gate B14 run), with Agent, the newer name of Task, and StructuredOutput.
 const KNOWN_TOOLS = new Set([
   ...["Agent", "Task", "Bash", "CronCreate", "CronDelete", "CronList", "DesignSync", "Edit", "EnterWorktree", "ExitWorktree", "Glob"],
   ...["Grep", "ListAgents", "LSP", "Monitor", "NotebookEdit", "PowerShell", "PushNotification", "Read", "RemoteTrigger"],

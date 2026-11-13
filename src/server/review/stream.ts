@@ -50,7 +50,7 @@ function advisorOutcome(content: unknown): { status: RunEventStatus; target: str
   // Messages API: stop_reason "refusal" means that the model declined the request.
   return { status: "ok", target: c.stop_reason === "refusal" ? "declined" : "reviewed" };
 }
-// Gate B5 (b5-auth.jsonl): the CLI writes its own error messages with this model name.
+// Gate B5 (integration-check.md, fixtures/claude-synthetic/auth-failed.jsonl): the CLI writes its own error messages with this model name.
 const SYNTHETIC = "<synthetic>";
 const count = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
 const modelOf = (v: unknown) => (typeof v === "string" && v && v !== SYNTHETIC ? v : null);
@@ -264,7 +264,7 @@ export function createStreamParser(opts: {
       for (const t of tools) if (!opts.allowedTools.has(t) && !state.badTools.includes(t)) state.badTools.push(t);
       if (opts.shell && !tools.includes("Bash")) state.noBash = true;
     } else if (m.type === "system" && m.subtype === "permission_denied") {
-      // V7. b17-write-confinement.jsonl: this event comes before the error tool_result of the call, so end() keeps the refusal note.
+      // V7. Gate B17 order (fixtures/claude-synthetic/implement-ok.jsonl): this event comes before the error tool_result of the call, so end() keeps the refusal note.
       const d = m as SDKPermissionDeniedMessage;
       if (d.tool_name === "Bash") {
         // SU3: a deny rule arrives as type "rule", or as "subcommandResults" with this message. No allow rule: type "other" with
