@@ -644,12 +644,25 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
         "Claude has 2 questions before it writes the plan.",
       ]);
       expect(h.runs(c.body.id).length).toBe(2);
-      // ps4-plan.md section 4: Continue takes a part or an option, not both.
+      // ps4-plan.md section 4: Continue takes a part or an option, not both. The 400 names the rule.
       const both = { version: back.body.version, option: "leave", part: 1 };
-      expect((await h.json(`/api/tasks/${c.body.id}/resume`, { body: both })).status).toBe(400);
+      const twice = await h.json<{ error: string }>(`/api/tasks/${c.body.id}/resume`, { body: both });
+      expect([twice.status, twice.body.error]).toEqual([400, "Give a part or an option, not both."]);
       expect(taskResumeInput.safeParse(both).error?.issues.map((i) => i.message)).toEqual(["Give a part or an option, not both."]);
+      expect((await h.json<{ error: string }>(`/api/tasks/${c.body.id}/resume`, { body: { option: "nap" } })).body.error).toBe(
+        "Give the task version and a valid option.",
+      );
       for (const one of [{ option: "start-step-again" }, { option: "leave" }, { option: "disarm" }, { part: 1 }])
         expect(taskResumeInput.safeParse({ version: 1, ...one }).success).toBe(true);
+      // WP-4 builds Hold and the usage arm: until then part and disarm do nothing else, also on a task that stopped before its build.
+      const stop2 = await h.json<TaskDto>(`/api/tasks/${c.body.id}/stop`, { body: { version: back.body.version } });
+      expect([stop2.status, stop2.body.state]).toEqual([200, "stopped"]);
+      for (const later of [{ part: 1 }, { option: "disarm" }]) {
+        const r = await h.json<TaskConflict>(`/api/tasks/${c.body.id}/resume`, { body: { version: stop2.body.version, ...later } });
+        expect([r.status, r.body.error, r.body.task.state]).toEqual([409, "This option comes in a later version.", "stopped"]);
+      }
+      const back2 = await h.json<TaskDto>(`/api/tasks/${c.body.id}/resume`, { body: { version: stop2.body.version } });
+      expect([back2.status, back2.body.state]).toEqual([200, "interview"]);
       // A version mismatch gives 409 with the task.
       const old = await h.json<TaskConflict>(`/api/tasks/${c.body.id}/stop`, { body: { version: stop.body.version } });
       expect([old.status, old.body.task.state]).toEqual([409, "interview"]);

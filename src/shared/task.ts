@@ -455,7 +455,7 @@ const CONTINUE = exit("Continue", "POST /tasks/:id/resume");
 const STOP = exit("Stop", "POST /tasks/:id/stop");
 // The log tab and the PR link come from the task DTO.
 const SEE_WHY = exit("See why", "GET /tasks/:id");
-const LEAVE = exit("Leave it (ready only)", "POST /tasks/:id/resume", { option: "leave", planned: "PS4" });
+const LEAVE = exit("Leave it (ready only)", "POST /tasks/:id/resume", { option: "leave" });
 const AGAIN = exit("Start this part again", "POST /tasks/:id/parts/:part/restart", { planned: "PS4" });
 const RUN_ENDS = { primary: CONTINUE, other: [AGAIN, SEE_WHY, STOP, LEAVE] };
 const KEPT = { primary: CONTINUE, other: [AGAIN, STOP, LEAVE] };

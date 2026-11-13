@@ -673,6 +673,48 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
   );
 
   test(
+    "AC-B345: Continue on the reason of a built part runs that part in implementing, then the build of the other parts",
+    async () => {
+      const [one, two, three] = BUILD.match as [(typeof BUILD.match)[number], (typeof BUILD.match)[number], (typeof BUILD.match)[number]];
+      const flag = file("src/one.ts", 'export const one = "works";\nexport const flag = true;\n');
+      const s = await setup({
+        atOnce: 1,
+        third: "base",
+        scenario: {
+          match: [
+            { ...one, seq: { ...one.seq, "implement:instruct": [flag] } },
+            { ...two, seq: { ...two.seq, "implement:build": [ask("Keep the name two?"), ...two.seq["implement:build"]] } },
+            three,
+          ],
+          taskReview: CLEAN,
+        },
+      });
+      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+      loop.build(s.db, s.task);
+      await loop.idle(s.task);
+      // Part 1 is built. Part 2 asks, and part 3 waits for the build slot.
+      expect([s.part(s.p1).state, s.part(s.p2).state, s.part(s.p3).state]).toEqual(["self_reviewed", "implementing", "planned"]);
+      expect(reasons(s)[0]?.kind).toBe("question");
+      // The answer of part 2 is in, and a failed send of part 1 is the first reason.
+      s.db.query(`UPDATE task_question SET answer_json = '{"choice":0,"text":""}', answered_at = 1 WHERE task = $t`).run({ t: s.task });
+      const sent = insertStep(s.db, { task: s.task, part: s.p1, kind: "instruct", item: "I1", state: "failed" });
+      patchStep(s.db, sent, { instruct: { text: "Add the flag.", part: s.p1, blockedBefore: null, result: null, committed: false } });
+      const failed: TaskBlocked = { kind: "error", cause: "run", step: sent, text: "Needs you: the run of part 1 failed." };
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(failed) });
+      expect(loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await loop.idle(s.task);
+      expect([s.t().state, s.t().blocked_json]).toEqual(["implementing", null]);
+      expect(taskDto(s.db, s.t()).parts.map((p) => p.state)).toEqual(["self_reviewed", "self_reviewed", "self_reviewed"]);
+      // The send of part 1 runs first, then the builds of parts 2 and 3.
+      const calls = s.implementCalls().map((c) => `${basename(c.cwd)}:${/^- Mode: (\w+)$/m.exec(c.stdin)?.[1]}`);
+      const at = calls.indexOf("part-1:instruct");
+      expect(at).toBeGreaterThan(-1);
+      expect(calls.slice(at + 1).filter((x) => x.endsWith(":build"))).toEqual(["part-2:build", "part-3:build"]);
+    },
+    SLOW,
+  );
+
+  test(
     "AC-B337: a held part row never moves up and does not count; ready and Stop keep it; CLOSE clears it",
     async () => {
       const s = await setup({ atOnce: 3, third: "base", scenario: HANG });

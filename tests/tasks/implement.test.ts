@@ -1891,7 +1891,7 @@ describe("PS4 session runs in startStep", () => {
   const sessionOf = (root: string, purpose: SessionPurpose): NonNullable<StepInput["session"]> => ({
     keep: join(root, "sessions", "part-1"),
     resume: null,
-    why: "No transcript is kept.",
+    why: "No session of an earlier run is saved.",
     purpose,
     heads: [],
     tasksFile: "./repo/specs/K-1/plan.md",

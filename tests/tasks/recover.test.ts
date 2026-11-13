@@ -10,9 +10,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/server/storage/db";
+import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import { RESTART_TEXT, recoverTasks, setUsageArmed, TASK_CHANGED, taskRow, UPDATE_RESTART } from "../../src/server/tasks/tasks";
 import { type TaskBlocked, taskBlocked } from "../../src/shared/task";
-import { cleanupAll, SLOW, stopInGate } from "./loop-fixture";
+import { cleanupAll, FIXED, SLOW, setup, stopInGate, TEST_FILE, TICK, WORKS } from "./loop-fixture";
 
 for (const m of ["tasks/tasks", "tasks/loop", "storage/db"])
   console.log(`recover.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -211,6 +212,46 @@ describe("Continue after a restart (part-session.md section 9.5)", () => {
       expect(s.phases.slice(before).map((p) => `${p.event}>${p.to}`)[0]).toBe("GO>checking");
       // No build run starts again: the kept work holds every tick.
       expect(s.steps().filter((x) => x.kind === "implement")).toHaveLength(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B346: a follow-up row that a restart failed runs again on Continue, in implementing and in ready",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          "implement:instruct": [{ writes: [FIXED] }, { writes: [WORKS] }],
+        },
+      });
+      await s.build();
+      const part = s.part().id;
+      for (const [k, state] of (["implementing", "ready"] as const).entries()) {
+        if (state === "ready") {
+          s.db.query("UPDATE task_part SET state = 'pr_open' WHERE id = $id").run({ id: part });
+          s.db.query("UPDATE task SET state = 'ready' WHERE id = $id").run({ id: s.task });
+        }
+        // A send waited for its run when the app stopped.
+        const item = `I${k + 1}`;
+        const row = insertStep(s.db, { task: s.task, part, kind: "instruct", item, state: "waiting" });
+        patchStep(s.db, row, { instruct: { text: `Send ${k + 1}.`, part, blockedBefore: null, result: null, committed: false } });
+        recoverTasks(s.db, Date.now(), s.dataDir);
+        expect([s.t().state, s.blocked()]).toEqual([state, { kind: "error", cause: "restart", step: row, text: RESTART_TEXT(1) }]);
+        expect(s.flow().at(-1)).toBe(`instruct:${item}:failed`);
+        expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+        await s.loop.idle(s.task);
+        expect(s.flow().slice(-5)).toEqual([
+          `instruct:${item}:failed`,
+          `instruct:${item}:ok`,
+          `check:${item}:ok`,
+          `commit:${item}:ok`,
+          "review:review:ok",
+        ]);
+        const sent = s.runCalls().filter((c) => s.modeOf(c) === "instruct");
+        expect([sent.length, sent.at(-1)?.stdin.endsWith(`# Your instructions\n\nSend ${k + 1}.`)]).toEqual([k + 1, true]);
+        expect([s.t().state, s.blocked()]).toEqual([state, null]);
+      }
     },
     SLOW,
   );

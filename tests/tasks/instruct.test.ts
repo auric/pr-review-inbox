@@ -4,7 +4,7 @@
 // docs/plans/review-v2/spec.md sections 6.18.1 and 6.18.2 (WP-TU1, AC-B53 to AC-B57): "Tell Claude" on a built small task part. The
 // fake CLI writes real files in the part worktree, a bun script is the test command, and a temp bare remote holds the repository.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { taskDto } from "../../src/server/tasks/tasks";
@@ -184,6 +184,51 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
       },
       SLOW,
     );
+
+  test(
+    "AC-B343: a failed send waits with error/run and keeps the task state; leave gives back the earlier reason; Continue runs it again",
+    async () => {
+      const s = await builtTask();
+      const empty = join(s.root, "empty.jsonl");
+      writeFileSync(empty, "");
+      const failing = { fixture: empty, exitCode: 1 };
+      s.scenario({ "implement:instruct": [failing, failing, { writes: [MORE] }] });
+      s.db.query("UPDATE task_part SET state = 'pr_open' WHERE task = $t").run({ t: s.task });
+      s.db.query("UPDATE task SET state = 'ready', blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
+      const send = async () => {
+        expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the flag." }).status).toBe(202);
+        await s.loop.idle(s.task);
+        const row = s.steps().at(-1);
+        expect([row?.kind, row?.state, row?.detail.instruct?.result]).toEqual(["instruct", "failed", null]);
+        expect([s.t().state, s.blocked()]).toEqual([
+          "ready",
+          { kind: "error", cause: "run", step: row?.id ?? 0, text: expect.stringMatching(/^Needs you: the run of part 1 failed\./) },
+        ]);
+      };
+      await send();
+      // leave gives back the reason before the send, once. A later reason then clears.
+      const leave = (version: number) => s.loop.resume(s.db, s.task, { version, option: "leave" });
+      expect(leave(s.t().version).status).toBe(200);
+      expect(s.blocked()).toEqual(RED);
+      const later = { kind: "red", step: null, text: "Needs you: a later reason." };
+      s.db.query("UPDATE task SET blocked_json = $b, version = version + 1 WHERE id = $id").run({ b: JSON.stringify(later), id: s.task });
+      expect(leave(s.t().version).status).toBe(200);
+      expect(s.blocked()).toBeNull();
+      expect(leave(s.t().version)).toMatchObject({ status: 409, error: "All PRs of the task are open." });
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
+      await send();
+      // Continue runs the failed send again as a new row with the same text, and its commit ends the earlier reason.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.flow().slice(-5)).toEqual(["instruct:I2:failed", "instruct:I2:ok", "check:I2:ok", "commit:I2:ok", "review:review:ok"]);
+      expect(s.runCalls().at(-2)?.stdin.endsWith("# Your instructions\n\nAdd the flag.")).toBe(true);
+      expect([s.t().state, s.blocked()]).toEqual(["ready", null]);
+      // leave works only in ready.
+      s.db.query("UPDATE task SET state = 'implementing', blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
+      expect(leave(s.t().version)).toMatchObject({ status: 409, error: "Leave works only in ready." });
+    },
+    SLOW,
+  );
 
   test(
     "AC-B53: a denied path resets the step and blocks with denied_path",

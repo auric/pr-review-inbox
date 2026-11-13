@@ -25,7 +25,6 @@ import {
   DEFAULT_TEST_GLOBS,
   FAILURE_TAIL,
   type ImplementResult,
-  type InstructDetail,
   LARGE_REPOS_TEXT,
   limitText,
   type PartState,
@@ -194,6 +193,7 @@ export { PAUSED };
 const WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 // spec.md sections 6.20.6 and 6.20.7: a PR that colleagues review, a started part, and a part that keeps the task in implementing.
 const HAS_PR = new Set<PartState>(["pr_open", "changes_requested", "approved"]);
+const BUILT = new Set<PartState>(["self_reviewed", ...HAS_PR]);
 const STARTED = new Set<PartState>([...WORKTREE, "declined"]);
 const WAITS_PR = new Set<PartState>(["planned", "implementing", "self_reviewed"]);
 const NO_TEST = "Needs you: approve a test command for this repository first. The build needs it to see red and green tests.";
@@ -203,8 +203,6 @@ const REJECTED = "The user rejected the change.";
 const AGAIN = "Runs again without the plan change.";
 // spec.md section 6.18.2, Dismiss: the reasons on a built part whose own action the server takes in state implementing only.
 const NO_DISMISS = new Set<TaskBlocked["kind"]>(["spec_change", "allow", "update", "slot"]);
-// part-session.md section 9.4: the reason kinds of a run that ended before its result.
-const RUN_ENDS = new Set<TaskBlocked["kind"]>(["stuck", "usage", "unfinished"]);
 // part-session.md section 2.2: the Log note of a resume that failed before any tool call, the line of a run after an app restart, and
 // the line of the run that continues a cut run. Section 2.6 item 10: the note of a part with no changed test file.
 const RESUME_FAILED = "The app could not resume the session. It started a new one with the earlier work.";
@@ -213,6 +211,9 @@ const cutLine = (cut: RunCut) => `The last run reached its ${cut === "turns" ? "
 const NO_TEST_FILE = "Claude added or changed no test file.";
 // spec.md section 6.25.5: the 409 of "Run setup again" on a part whose row holds a reason.
 const SETUP_WAITS = "This part waits for you. Act on the first reason first.";
+// The 409 of a resume input that a later work package of ps4-plan.md builds, and the note of "Fix these too" with no open point.
+const LATER = "This option comes in a later version.";
+const NO_POINTS = "No point waits for a fix.";
 
 // The loop stops here: a reason now blocks the task, or the task stopped. The reason is already stored.
 class Halt extends Error {}
@@ -319,20 +320,21 @@ function beforeLine(c: { name: string; argv: readonly string[] }, base: readonly
 
 // part-session.md section 2.2, Guard: the reason why a run starts a new session, or null when it can resume the kept transcript. gates:
 // the facts of Gate B37 (claude.ts SESSION_GATES). heads: the HEAD of each worktree now. cap: Settings > Tasks "Session context cap".
-// Rule 4 (a denied path or a git state change) drops the kept transcript at the run end (implement.ts), so rule 1 covers it.
+// Rule 4 (a denied path or a git state change) drops the kept transcript at the run end (implement.ts), so rule 1 covers it. The task
+// Log shows the reason as "New session: <reason>", so each reason is a sentence for the user.
 export function resumeProblem(
   s: Pick<PartSession, "file" | "sha256" | "heads" | "context"> | null,
   heads: SessionHeads,
   cap: number,
   gates: { resume: boolean },
 ): string | null {
-  if (!gates.resume) return "Gate B37 has not passed.";
-  if (!s?.file || !existsSync(s.file)) return "No transcript is kept.";
-  if (sha256File(s.file) !== s.sha256) return "The kept transcript changed.";
+  if (!gates.resume) return "This app version starts a new session for each run.";
+  if (!s?.file || !existsSync(s.file)) return "No session of an earlier run is saved.";
+  if (sha256File(s.file) !== s.sha256) return "The saved session changed on disk.";
   const at = new Map(s.heads.map((h) => [h.taskRepo, h.head]));
   if (heads.length !== at.size || heads.some((h) => at.get(h.taskRepo) !== h.head)) return "The branch moved after the last run.";
-  if (s.context === null) return "The context size of the last run is unknown.";
-  if (s.context > cap) return `The context of the last run is over ${cap} tokens.`;
+  if (s.context === null) return "The size of the last session is not known.";
+  if (s.context > cap) return `The last session is larger than your limit of ${cap} tokens.`;
   return null;
 }
 
@@ -457,9 +459,15 @@ type Ctx = {
   phase: Phase | null;
   rounds: number;
   waited: boolean;
+  // The first follow-up row that this driver ran, or null. Each later run of that follow-up has a higher row ID.
+  follow: number | null;
 };
 
 type DriverMode = "build" | "instruct" | "update" | "setup";
+// ps4-plan.md section 2.5: the rows of a follow-up run, which map to the phase following.
+const FOLLOW = "(kind = 'instruct' OR (kind = 'fix' AND item IN ('points', 'pushback')))";
+const isFollow = (r: { kind: string; item: string | null }) =>
+  r.kind === "instruct" || (r.kind === "fix" && (r.item === "points" || r.item === "pushback"));
 // What a driver does first with the uncommitted work of each part that builds (build-redesign.md section 2.2). false: nothing. true:
 // the Continue rule. again: "Start the step again" for the part with this ID, or for each part (null).
 type Reset = boolean | { again: number | null };
@@ -565,19 +573,23 @@ const Q = {
   // spec.md section 6.7, Spec change: the newest proposal of one step. cancelled: the user rejected it.
   lastSpecChange: `SELECT state, detail_json FROM task_step WHERE part = $part AND kind = 'spec_change' AND item = $item
     ORDER BY id DESC LIMIT 1`,
-  // spec.md section 6.18.2: the newest row of one send, and the newest send or update of a task.
-  lastSend: "SELECT id FROM task_step WHERE part = $part AND kind = 'instruct' AND item = $item ORDER BY id DESC LIMIT 1",
-  newestSend: "SELECT id, item FROM task_step WHERE part = $part AND kind = 'instruct' ORDER BY id DESC LIMIT 1",
+  // spec.md section 6.18.2: the newest send or update of a task. ps4-plan.md section 2.2, guard follow: the oldest waiting follow-up row
+  // of a part, the newest follow-up row of a part, and the newest follow-up row of one item.
   lastBuilt: "SELECT id, kind FROM task_step WHERE task = $task AND kind IN ('instruct', 'update') ORDER BY id DESC LIMIT 1",
+  follow: `SELECT id, kind, item FROM task_step WHERE part = $part AND state = 'waiting' AND ${FOLLOW} ORDER BY id LIMIT 1`,
+  newestFollow: `SELECT id, item FROM task_step WHERE part = $part AND ${FOLLOW} ORDER BY id DESC LIMIT 1`,
+  lastFollow: `SELECT id FROM task_step WHERE part = $part AND item = $item AND ${FOLLOW} ORDER BY id DESC LIMIT 1`,
 };
 
 // spec.md section 6.21: the steps that can get the Bash tool. The resolve step never does.
 const SHELL_STEPS: ReadonlySet<StepMode> = new Set(["implement", "fix", "instruct"]);
-// part-session.md section 2.1: the runs of a part session. Instruct and resolve runs join it in PS4.
-const SESSION_MODES: ReadonlySet<StepMode> = new Set(["implement", "fix"]);
+// part-session.md section 2.1: the runs of a part session. Resolve runs join it with the resolve gate (WP-5).
+const SESSION_MODES: ReadonlySet<StepMode> = new Set(["implement", "fix", "instruct"]);
 const NO_FACTS = Object.fromEntries(PHASE_GUARDS.map((k) => [k, false])) as PhaseContext;
 // part-session.md section 2.6 item 5: the subject of the commit of each kind of gate.
 type Round = "build" | "checks" | "review";
+// The item of the check and fix rows, the item and subject of the commit, and the step.md of the fix runs of one gate.
+type Gate = { check: string; commit: string; subject: string; step: (attempt: number) => ContextFile };
 
 // The patterns that the user refused for this task (D3). They never show again.
 const refusedOf = (db: Database, task: number) =>
@@ -596,6 +608,8 @@ async function dirty(trees: readonly RepoTree[]): Promise<string[]> {
 
 // The patch file of one repository: file for main, <name>-<task_repo id>.patch for the others (spec.md section 6.16.6).
 const treePatch = (file: string, t: RepoTree) => (t.row.role === "main" ? file : file.replace(/\.patch$/, `-${t.row.id}.patch`));
+
+type StepRow = { id: number; part: number | null; kind: string; item: string | null; state: string; detail_json: string };
 
 // A Claude step of a part that ran a process, with the end of its run.
 type Work = {
@@ -923,12 +937,16 @@ export function createLoop(opts: LoopOptions) {
 
   // part-session.md section 2.2, Fresh session: context/continue.md and context/continue-diff.md for a new session of a part with
   // earlier runs, and the line of step.md. The diff is the uncommitted work in the worktree, else the patch of the first reset at or after
-  // the last Claude run: a later reset saved only what came after it (build-redesign.md section 2.2). null: no earlier run.
-  async function freshFiles(c: Ctx): Promise<{ files: ContextFile[]; line: string } | null> {
+  // the last Claude run: a later reset saved only what came after it (build-redesign.md section 2.2). null: no earlier run. resumed: the
+  // run forks the kept transcript. It gets the files only when that transcript lacks the newest run after the last commit (an app restart
+  // cut it, or the app did not keep it), or when a reset came after that run (build-redesign.md section 2.2: the next attempt gets the
+  // patch).
+  async function freshFiles(c: Ctx, resumed = false): Promise<{ files: ContextFile[]; line: string } | null> {
     if (!c.db.query(Q.claudeRan).get({ part: c.part.id })) return null;
     const { marks, reset: newest, all } = workOf(c.db, c.part.id);
     const prev = all.at(-1);
     const reset = prev ? (marks.find((r) => r.id >= prev.id) ?? null) : newest;
+    if (resumed && !reset && (!prev || prev.detail.session?.id === partSession(c.db, c.part.id)?.sessionId)) return null;
     const own = setupFiles(c);
     const paths = (await dirty(c.trees)).filter((p) => !own.has(p));
     const parts: string[] = [];
@@ -977,8 +995,11 @@ export function createLoop(opts: LoopOptions) {
         : reset
           ? "The app reset the work of the last run to the last commit."
           : "";
-    const line = [...restart, `This run starts a new session. ./context/continue.md lists the earlier work on this part. ${work}`.trim()];
-    return { files, line: line.join(" ") };
+    const start = resumed
+      ? work
+      : `This run starts a new session. ./context/continue.md lists the earlier work on this part. ${work}`.trim();
+    const line = [...restart, start].filter(Boolean).join(" ");
+    return line ? { files, line } : null;
   }
 
   // part-session.md section 2.3 item 5: context/baseline.md, the checks that failed on the part base.
@@ -1022,7 +1043,7 @@ export function createLoop(opts: LoopOptions) {
       const own = setupFiles(c);
       const before = (await dirty(c.trees)).filter((p) => !own.has(p));
       const session = SESSION_MODES.has(mode) ? await sessionOf(c, o.purpose ?? "build", o.again === true) : null;
-      const cont = (session ? session.resume === null : mode === "instruct") ? await freshFiles(c) : null;
+      const cont = session ? await freshFiles(c, session.resume !== null) : null;
       // check-fix.md item 1: a fix run that changes no file stops the fixes. spec.md section 6.18.2: a send that changes no file commits
       // nothing. A run that continues a cut run finishes kept changes, so it may change none.
       const snap = (mode === "fix" || mode === "instruct") && !o.extra?.length ? await snapshot(c.trees) : null;
@@ -1124,7 +1145,7 @@ export function createLoop(opts: LoopOptions) {
   // D3: the requests of a step that ends with allowRequest, or that the runner ended over the refusal cap. The worktree keeps the changes
   // of the step (build-redesign.md section 2.2), and the task waits with kind allow. A request that the app refuses goes to the notes of
   // the step. A run that the runner ended with no request left gives the reason error/run (part-session.md section 9.3.4, Q-SM1).
-  async function askAllow(c: Ctx, mode: StepMode, r: StepOutcome, shell: StepShell | null) {
+  async function askAllow(c: Ctx, r: StepOutcome, shell: StepShell | null) {
     const { asks, notes } = allowAsks({
       mode: shell?.mode ?? null,
       requests: r.result?.allowRequest ?? [],
@@ -1136,7 +1157,7 @@ export function createLoop(opts: LoopOptions) {
     });
     if (notes.length) patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, ...notes] });
     if (!asks.length) {
-      if (r.ask && mode !== "instruct") block(c, runReason(c, r));
+      if (r.ask) block(c, runReason(c, r));
       return;
     }
     if (held(c) && !keeps(c, r.step)) halt(c, r.step);
@@ -1182,9 +1203,9 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // One Claude run that returns only with a result: a denied path, a failed or cut run, a question, and a plan change set their reason
-  // and halt. A failed instruct step throws StepFailed: its driver restores the earlier reason (spec.md section 6.18.7). part-session.md
-  // sections 2.2 and 9.3.3: the turn cap and the process cap continue once by themselves (RUN_CUT), and a resume that failed before any
-  // tool call starts one new session.
+  // and halt (part-session.md section 9.3.3, ps4-plan.md section 1 gap 13: a follow-up too). Sections 2.2 and 9.3.3: the turn cap and
+  // the process cap continue once by themselves (RUN_CUT), and a resume that failed before any tool call starts one new session. Each
+  // more run of a follow-up gets a new row with the same follow-up detail.
   async function claude(
     c: Ctx,
     mode: StepMode,
@@ -1200,11 +1221,12 @@ export function createLoop(opts: LoopOptions) {
   ): Promise<StepOutcome & { result: ImplementResult; unchanged: boolean; ticks: string[] }> {
     let extra: string[] = [];
     let again = false;
+    let row = o.row;
     for (;;) {
       const before = (await ticksOf(c)) ?? [];
       const purpose = mode === "implement" && extra.length ? "continue" : o.purpose;
-      const { r, shell, unchanged } = await runStep(c, mode, item, { ...o, purpose, extra, again });
-      if (r && (r.ask || r.result?.allowRequest.length)) await askAllow(c, mode, r, shell);
+      const { r, shell, unchanged } = await runStep(c, mode, item, { ...o, row, purpose, extra, again });
+      if (r && (r.ask || r.result?.allowRequest.length)) await askAllow(c, r, shell);
       // No outcome: restart recovery ended the run first.
       if (!r) throw new Halt();
       if (!r.result) {
@@ -1214,11 +1236,13 @@ export function createLoop(opts: LoopOptions) {
           throw new Halt();
         }
         if (r.broken) throw new Halt();
-        if (mode === "instruct") throw new StepFailed(r.text ?? "The run failed.");
         if (r.status === "cancelled") throw new Halt();
-        if (r.resumed && r.events === 0 && !again) {
+        // part-session.md section 2.2: no init, "No conversation found", or a process error. A usage limit also ends a run before any
+        // tool call, and a new session hits it too.
+        if (r.resumed && r.events === 0 && !again && r.kind !== "usage_limit") {
           patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, RESUME_FAILED] });
           again = true;
+          if (row !== undefined) row = requeue(c.db, c.id, r.step);
           continue;
         }
         if (r.cut === "turns" || r.cut === "time") {
@@ -1227,6 +1251,7 @@ export function createLoop(opts: LoopOptions) {
           if (first) {
             extra = [cutLine(r.cut)];
             again = false;
+            if (row !== undefined) row = requeue(c.db, c.id, r.step);
             continue;
           }
           block(c, {
@@ -1518,17 +1543,28 @@ export function createLoop(opts: LoopOptions) {
     return k;
   }
 
-  // part-session.md section 2.6 items 5 and 6: the gate of one round, then one commit. The gate stays green at the new HEAD, so GO goes
-  // on to the review. The phase is checking at the start and idle at the end.
-  async function checkGate(c: Ctx, round: Round) {
-    const allow = allFiles(c);
-    const k = await greenOrFix(c, "checks", allow, (a) => partStepFile(c.plan, c.plan.parts, "checks", a));
-    const subject = {
+  const roundGate = (c: Ctx, round: Round): Gate => ({
+    check: "checks",
+    commit: round,
+    subject: {
       build: `${c.label}: ${oneLine(c.title)}`,
       checks: `${c.label}: Fix the checks of part ${c.part.ord}`,
       review: `${c.label}: Fix the review points of part ${c.part.ord}`,
-    }[round];
-    await commit(c, round, subject, allow);
+    }[round],
+    step: (a) => partStepFile(c.plan, c.plan.parts, "checks", a),
+  });
+
+  // part-session.md section 2.6 items 5 and 6: the gate, then one commit. The gate stays green at the new HEAD, so GO goes on to the
+  // review. ps4-plan.md section 1 gap 16 (AC-B347): a green gate at an unchanged HEAD runs no command. The phase is checking at the start
+  // and idle at the end.
+  async function checkGate(c: Ctx, g: Gate) {
+    if (await gateDone(c)) {
+      send(c, { type: "CHECKS_GREEN" });
+      return;
+    }
+    const allow = allFiles(c);
+    const k = await greenOrFix(c, g.check, allow, g.step);
+    await commit(c, g.commit, g.subject, allow);
     patchStep(c.db, k.step, { head: await headOf(c.wt) });
     send(c, { type: "CHECKS_GREEN" });
   }
@@ -1633,9 +1669,9 @@ export function createLoop(opts: LoopOptions) {
       await s.done;
       changed(c.id);
       const r = ended as { step: number; run: number; ok: boolean; cancelled: boolean; text: string | null } | null;
-      // An instruct step or an update restores its own reason (spec.md section 6.18). part-session.md section 9.3.4 (Q-SM1): a failed
-      // review of the build gives the reason error/run.
-      if (r && !r.ok && c.mode !== "build") throw new StepFailed(r.text ?? "The review failed.");
+      // An update restores its own reason (spec.md section 6.18.4). part-session.md section 9.3.4 (Q-SM1): a failed review of the build
+      // or of a follow-up gives the reason error/run.
+      if (r && !r.ok && c.mode === "update") throw new StepFailed(r.text ?? "The review failed.");
       if (!r || r.cancelled) throw new Halt();
       if (!r.ok)
         block(c, {
@@ -1683,7 +1719,7 @@ export function createLoop(opts: LoopOptions) {
     const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
     await claude(c, "fix", "review", { allow: allFiles(c), step, failure: reviewFailure(must), purpose: "review" });
     send(c, { type: "RUN_DONE" });
-    await checkGate(c, "review");
+    await checkGate(c, roundGate(c, "review"));
     return true;
   }
 
@@ -1896,6 +1932,7 @@ export function createLoop(opts: LoopOptions) {
       phase: null,
       rounds: 0,
       waited: false,
+      follow: null,
     };
   }
 
@@ -1944,7 +1981,7 @@ export function createLoop(opts: LoopOptions) {
         text: `Needs you: Claude ended the run before part ${c.part.ord} was done: ${oneLine(r.result.summary)} Continue goes on with the open tasks.`,
       });
     send(c, { type: "RUN_DONE" });
-    await checkGate(c, "build");
+    await checkGate(c, roundGate(c, "build"));
   }
 
   // part-session.md section 2.6 item 10: a part that changed no path of the test globs gets a note on its last commit row.
@@ -1957,8 +1994,98 @@ export function createLoop(opts: LoopOptions) {
     patchStep(c.db, last, { notes: [...stepDetailOf(c.db, last).notes, NO_TEST_FILE] });
   }
 
-  // part-session.md section 9.3.3: the build of one part. GO picks the next phase from the facts of the rows and the worktree. When no
-  // guard holds, the part has no work: REVIEWED and PART_READY. The critic and the follow-ups come in PS4.
+  // part-session.md section 9.3.3, Context: the facts of GO from the rows and the worktree. ps4-plan.md section 2.2: follow is a waiting
+  // follow-up row. run needs an implementing part.
+  async function factsOf(c: Ctx): Promise<PhaseContext> {
+    const setups = repoSettings(c.db, c.t.project, c.t.repo).commands.filter((x) => x.kind === "setup");
+    return {
+      ...NO_FACTS,
+      setup: readSetupMark(c.wt)?.hash !== setupHash(setups),
+      baseline: !c.db.query(Q.started).get({ part: c.part.id }),
+      follow: c.db.query(Q.follow).get({ part: c.part.id }) !== null,
+      run: c.part.state === "implementing" && openTasks(c).length > 0,
+      checks: !(await gateDone(c)),
+      review: reviewDue(c),
+    };
+  }
+
+  // part-session.md section 9.3.3: the GO loop of one part. GO picks the next phase from the facts until no guard holds. once: the loop
+  // ends after the first follow-up, so buildParts builds the part on. A follow-up driver also ends after a follow-up that changed no file
+  // (spec.md section 6.18.2, step 2). The phase is idle at the start and at the end.
+  async function phases(c: Ctx, once = false) {
+    try {
+      for (;;) {
+        guard(c);
+        refreshPlan(c);
+        const facts = await factsOf(c);
+        if (!phaseMachine.resolveState({ value: "idle", context: facts }).can({ type: "GO" })) return;
+        send(c, { type: "GO" }, facts);
+        const at = c.phase as Phase;
+        if (at === "setup") {
+          await setup(c);
+          send(c, { type: "CLEAN" });
+        } else if (at === "baseline") {
+          await checks(c, "base", CHECK_KINDS, true);
+          send(c, { type: "CLEAN" });
+        } else if (at === "following") {
+          if (!(await followRun(c)) && c.mode !== "build") return;
+          if (once) return;
+        } else if (at === "building") await buildRun(c);
+        else if (at === "checking")
+          await checkGate(c, roundGate(c, c.db.query(Q.buildCommit).get({ part: c.part.id }) ? "checks" : "build"));
+        else if (at === "reviewing") await reviewRound(c);
+        else throw new Error(`GO picked the phase ${at}, which the loop does not run.`);
+      }
+    } catch (e) {
+      // WAIT: the step ended with a reason of this part. STOPPED: a Stop, the app stop, or the reason of another part ended it.
+      if (e instanceof Halt && c.phase !== "idle") send(c, { type: c.waited ? "WAIT" : "STOPPED" });
+      throw e;
+    }
+  }
+
+  // ps4-plan.md WP-3, phase following: one follow-up run of the part session on the oldest waiting follow-up row. An instruct row runs
+  // "Your instructions" (spec.md section 6.18.2). A fix row with item points runs "Fix these too" with the open points. A run that
+  // changes no file gives back the reason before the follow-up and returns false. Else the gate and one commit follow. The phase is
+  // following at the start and idle at the end.
+  async function followRun(c: Ctx): Promise<boolean> {
+    const f = c.db.query(Q.follow).get({ part: c.part.id }) as { id: number; kind: StepMode; item: string };
+    c.follow ??= f.id;
+    const info = stepDetailOf(c.db, f.id).instruct;
+    const allow = allFiles(c);
+    const step = (a: number) => partStepFile(c.plan, c.plan.parts, info ? "instruct" : "review", a);
+    const points = info ? [] : openPoints(c.db, c.id);
+    if (!info && !points.length) {
+      endStep(c.db, f.id, "cancelled", { notes: [NO_POINTS] }, now());
+      send(c, { type: "RUN_DONE" }, { unchanged: true });
+      return false;
+    }
+    const r = await claude(
+      c,
+      f.kind,
+      f.item,
+      info
+        ? { allow, step, row: f.id, instructions: info.text, purpose: "message" }
+        : { allow, step, row: f.id, failure: reviewFailure(points), purpose: "points" },
+    );
+    if (!r.changed.length || r.unchanged) {
+      // spec.md section 6.18.2, step 2: no check, commit, or review runs, and the task waits as before the follow-up.
+      send(c, { type: "RUN_DONE" }, { unchanged: true });
+      if (info) {
+        patchStep(c.db, r.step, { instruct: { ...info, result: "no_change" } });
+        reason(c.db, c.id, info.blockedBefore);
+      }
+      return false;
+    }
+    send(c, { type: "RUN_DONE" });
+    const subject = info ? firstLine(info.text) : `Fix the small review points of part ${c.part.ord}`;
+    // ps4-plan.md section 2.5: a fix row of the gate maps to fixing, so its item is no follow-up item.
+    await checkGate(c, { check: info ? f.item : "checks", commit: f.item, subject: `${c.label}: ${subject}`, step });
+    if (info) patchStep(c.db, r.step, { instruct: { ...info, result: "done", committed: true } });
+    return true;
+  }
+
+  // part-session.md section 9.3.3: the build of one part. When no guard of GO holds, the part has no work: REVIEWED and PART_READY. The
+  // critic comes in WP-6.
   async function runPart(db: Database, t: TaskRow, part: PartRow) {
     const repo = repoSettings(db, t.project, t.repo);
     if (!repo.commands.some((x) => x.kind === "test")) {
@@ -1977,39 +2104,8 @@ export function createLoop(opts: LoopOptions) {
     }
     const plan = missing.map((n) => onDisk(c.wt, specPath(c.specDir, n)));
     if (missing.length) await commit(c, "plan", `${c.label}: Add the plan`, [], plan);
-    try {
-      await sizeNote(c, null);
-      for (;;) {
-        guard(c);
-        refreshPlan(c);
-        const setups = repoSettings(db, t.project, t.repo).commands.filter((x) => x.kind === "setup");
-        const facts: PhaseContext = {
-          ...NO_FACTS,
-          setup: readSetupMark(c.wt)?.hash !== setupHash(setups),
-          baseline: !db.query(Q.started).get({ part: part.id }),
-          run: openTasks(c).length > 0,
-          checks: !(await gateDone(c)),
-          review: reviewDue(c),
-        };
-        if (!phaseMachine.resolveState({ value: "idle", context: facts }).can({ type: "GO" })) break;
-        send(c, { type: "GO" }, facts);
-        const at = c.phase as Phase;
-        if (at === "setup") {
-          await setup(c);
-          send(c, { type: "CLEAN" });
-        } else if (at === "baseline") {
-          await checks(c, "base", CHECK_KINDS, true);
-          send(c, { type: "CLEAN" });
-        } else if (at === "building") await buildRun(c);
-        else if (at === "checking") await checkGate(c, db.query(Q.buildCommit).get({ part: part.id }) ? "checks" : "build");
-        else if (at === "reviewing") await reviewRound(c);
-        else throw new Error(`GO picked the phase ${at}, which the build does not run.`);
-      }
-    } catch (e) {
-      // WAIT: the step ended with a reason of this part. STOPPED: a Stop, the app stop, or the reason of another part ended it.
-      if (e instanceof Halt && c.phase !== "idle") send(c, { type: c.waited ? "WAIT" : "STOPPED" });
-      throw e;
-    }
+    await sizeNote(c, null);
+    await phases(c);
     await testNote(c);
     db.transaction(() => {
       const cur = taskRow(db, t.id);
@@ -2137,29 +2233,6 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
-  // spec.md section 6.7, own review: "Fix these too" starts one fix step with the listed points of a part that waits for its PR, then
-  // the checks with their fixes and one commit. The part keeps its state. Changes that an earlier stop left get the Continue rule first.
-  async function drivePoints(db: Database, id: number, partId: number) {
-    try {
-      const t = taskRow(db, id);
-      const part = parts(db, id).find((p) => p.id === partId);
-      if (!t || part?.state !== "self_reviewed") return;
-      const c = await context(db, t, part);
-      guard(c);
-      await settle(db, t, part, false, c.trees);
-      refreshPlan(c);
-      const points = openPoints(db, id);
-      if (!points.length) return;
-      const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((k) => k.files));
-      const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
-      await claude(c, "fix", "points", { allow, step, failure: reviewFailure(points), purpose: "points" });
-      await greenOrFix(c, "points", allow, step);
-      await commit(c, "points", `${c.label}: Fix the small review points of part ${part.ord}`, allow);
-    } catch (e) {
-      failed(db, id, e);
-    }
-  }
-
   // One driver per task. mode: an instruct step or an update, whose Stop keeps the task state. spec.md section 6.18.5: a driver ends at a
   // waiting state, so the base check runs before the driver leaves. The change notice comes after it, so a page reads working false.
   function start(db: Database, id: number, f: () => Promise<void>, mode?: Exclude<DriverMode, "build">) {
@@ -2190,22 +2263,35 @@ export function createLoop(opts: LoopOptions) {
     return true;
   }
 
-  // points: the part whose listed points the driver fixes. Absent: the build of the next part.
-  function kick(db: Database, id: number, reset: Reset = false, points?: number) {
-    start(db, id, () => (points === undefined ? drive(db, id, reset) : drivePoints(db, id, points)));
+  function kick(db: Database, id: number, reset: Reset = false) {
+    start(db, id, () => drive(db, id, reset));
+  }
+  // ps4-plan.md WP-3: the follow-up driver of one part. Its Stop keeps the task state (spec.md section 6.18.1). again: "Start the step
+  // again" for this part. before: the reason that Continue cleared, which a Stop gives back when no follow-up row ran.
+  const goPart = (db: Database, id: number, partId: number, again = false, before: TaskBlocked | null = null) =>
+    start(db, id, () => driveFollow(db, id, partId, again, before), "instruct");
+  // ps4-plan.md section 1 gap 15: after Continue or the form exit of a reason, a part with a waiting follow-up row or a built part runs on
+  // in its follow-up driver. Else the build goes on with reset.
+  function goOn(db: Database, id: number, partId: number | null, reset: Reset, before: TaskBlocked | null = null) {
+    const part = partId === null ? undefined : parts(db, id).find((p) => p.id === partId);
+    const queued = !!part && db.query(Q.follow).get({ part: part.id }) !== null;
+    if (part && (queued || (BUILT.has(part.state) && !part.adopted))) goPart(db, id, part.id, typeof reset === "object", before);
+    else if (taskRow(db, id)?.state === "implementing") kick(db, id, reset);
   }
 
   // ---------- Tell Claude and Update from the base branch (spec.md section 6.18) ----------
 
   const itemOf = (db: Database, row: number) =>
     (db.query("SELECT item FROM task_step WHERE id = $id").get({ id: row }) as { item: string }).item;
-  // spec.md section 6.18.2: a send runs again as a new instruct row with the same text and the same earlier reason. The caller starts
-  // driveInstruct with the row.
-  const resend = (db: Database, id: number, item: string, info: InstructDetail, at: number) => {
-    const attempt = (db.query(Q.attempt).get({ part: info.part, kind: "instruct", item }) as { n: number }).n;
-    const row = insertStep(db, { task: id, part: info.part, kind: "instruct", item, attempt, state: "waiting" }, at);
-    patchStep(db, row, { instruct: { ...info, result: null, committed: false } });
-    return row;
+  // spec.md section 6.18.2 and ps4-plan.md section 1 gap 14: a follow-up runs again as a new waiting row of the same kind and item, with
+  // the same text and the same earlier reason. The caller starts the driver of its part.
+  const requeue = (db: Database, id: number, row: number, at = now()) => {
+    const r = db.query(Q.step).get({ id: row, task: id }) as { part: number; kind: StepMode; item: string };
+    const attempt = (db.query(Q.attempt).get({ part: r.part, kind: r.kind, item: r.item }) as { n: number }).n;
+    const next = insertStep(db, { task: id, part: r.part, kind: r.kind, item: r.item, attempt, state: "waiting" }, at);
+    const info = stepDetailOf(db, row).instruct;
+    if (info) patchStep(db, next, { instruct: { ...info, result: null, committed: false } });
+    return next;
   };
   const lastBefore = (db: Database, part: number, row: number) =>
     (db.query("SELECT MAX(id) AS id FROM task_step WHERE part = $part AND id < $row").get({ part, row }) as { id: number | null }).id ??
@@ -2306,77 +2392,70 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
-  // spec.md sections 6.18.1 and 6.18.2: one Tell Claude send. row: its instruct step, which the route wrote. The step gets the path
-  // check, the checks with their fixes, one commit, the size check, and the own review, as any implement step. The app never reads the
-  // text: it goes to Claude as "Your instructions" only.
-  async function driveInstruct(db: Database, id: number, row: number) {
-    const info = stepDetailOf(db, row).instruct as InstructDetail;
+  // ps4-plan.md WP-3 (spec.md sections 6.18.1 and 6.18.2): the follow-up driver of one part. The route wrote the waiting follow-up row,
+  // or the part of a reason runs on. The phase loop runs the follow-up with its gate and commit, and on a built part the own review too.
+  // The app never reads the text of a send: it goes to Claude as "Your instructions" only. On an implementing part the loop ends after
+  // the follow-up. In implementing, the build of the parts goes on after it (AC-B345).
+  async function driveFollow(db: Database, id: number, partId: number, again: boolean, before: TaskBlocked | null) {
     let c: Ctx | null = null;
     try {
       await recoverUpdates(db, id);
       const t = taskRow(db, id) as TaskRow;
-      const part = parts(db, id).find((p) => p.id === info.part) as PartRow;
+      const part = parts(db, id).find((p) => p.id === partId) as PartRow;
       c = await context(db, t, part, "instruct");
-      const ctx = c;
+      c.phase = "idle";
       // Changes that an earlier stop or the red checks of the build left get the Continue rule first.
-      await settle(db, t, part, false, c.trees);
-      refreshPlan(c);
-      const item = itemOf(db, row);
-      const allow = c.plan.parts.flatMap((x) => x.tasks.flatMap((k) => k.files));
-      const step = (a: number) => partStepFile(ctx.plan, ctx.plan.parts, "instruct", a);
-      const r = await claude(c, "instruct", item, { allow, step, row, instructions: info.text });
-      if (!r.changed.length || r.unchanged) {
-        // Step 2: Claude changed no file. No check, commit, or review runs, and the task waits as before the send. Kept work of the
-        // build stays uncommitted.
-        patchStep(db, row, { instruct: { ...info, result: "no_change" } });
-        reason(db, id, info.blockedBefore);
-        return;
-      }
-      await greenOrFix(c, item, allow, step);
-      await commit(c, item, `${c.label}: ${firstLine(info.text)}`, allow);
-      if (part.state === "implementing") {
-        // The part of a build that waited: the build goes on from the new commit and ends with the checks and the own review.
-        patchStep(db, row, { instruct: { ...info, result: "done", committed: true } });
+      await settle(db, t, part, again, c.trees);
+      await phases(c, part.state === "implementing");
+      if (taskRow(db, id)?.state === "implementing" && free(db, id) && !stopping.has(id)) {
+        // The driver becomes a build driver, so Stop sends STOP as for a build.
+        modes.delete(id);
         await buildParts(db, id);
-        return;
       }
-      await ownReview(c);
-      patchStep(db, row, { instruct: { ...info, result: "done", committed: true } });
       changed(id);
     } catch (e) {
-      await endInstruct(db, id, row, info, c, e);
+      await endFollow(db, id, c, e, before);
     }
   }
 
-  // The end of a send that did not finish. A Stop or a failed run (spec.md sections 6.18.1 and 6.18.7) resets every repository to its
-  // last commit with the patch saved, and restores the reason that the task had before the send. The patch holds kept work of the build
-  // too: the next build step of the part reads it in context/continue.md (continuation). A new reason of the step (a question, red
-  // checks, a plan change, the line limit, a review blocker, a denied path) stays.
-  async function endInstruct(db: Database, id: number, row: number, info: InstructDetail, c: Ctx | null, e: unknown) {
-    const stopped = stopping.has(id);
-    if (!stopped && !(e instanceof StepFailed)) {
-      if (isOpen(db, row)) endStep(db, row, "cancelled", { notes: ["The step did not start."] }, now());
+  // The end of a follow-up driver that did not finish (ps4-plan.md section 1 gap 13). A reason of the run stays: the run end sent WAIT.
+  // A Stop (spec.md section 6.18.1) resets every repository to its last commit with the patch saved and restores the reason that the
+  // task had before the follow-up. The patch holds kept work of the build too: the next run of the part reads it in
+  // context/continue-diff.md. A Stop of a driver that ran no follow-up row gives back before and keeps the work. At the app stop an open
+  // row stays for the restart recovery.
+  async function endFollow(db: Database, id: number, c: Ctx | null, e: unknown, before: TaskBlocked | null) {
+    // The follow-up of this driver: a row that waits or runs, or a row of the follow-up that this driver ran.
+    const newest = c ? (db.query(Q.newestFollow).get({ part: c.part.id }) as { id: number; item: string } | null) : null;
+    const f = newest && (isOpen(db, newest.id) || (c?.follow != null && newest.id >= c.follow)) ? newest : null;
+    if (!stopping.has(id)) {
+      if (f && !closing && isOpen(db, f.id)) endStep(db, f.id, "cancelled", { notes: ["The step did not start."] }, now());
       failed(db, id, e);
       changed(id);
       return;
     }
     try {
-      if (c) await undo(c.trees, db, id, row);
+      if (c && f) await undo(c.trees, db, id, f.id);
     } catch (err) {
       failed(db, id, err);
       return;
     }
-    const committed = db.query(Q.committed).get({ part: info.part, item: itemOf(db, row) }) !== null;
-    const text = stopped
-      ? committed
-        ? "Stopped after the commit. The own review did not run."
-        : "Stopped. Your instructions changed nothing. The text is back in the box."
-      : `Failed: ${(e as StepFailed).text}`;
+    if (!c || !f) {
+      if (before) setReason(db, id, before);
+      changed(id);
+      return;
+    }
+    const info = stepDetailOf(db, f.id).instruct;
+    const committed = db.query(Q.committed).get({ part: c.part.id, item: f.item }) !== null;
+    const text = committed
+      ? "Stopped after the commit. The own review did not run."
+      : info
+        ? "Stopped. Your instructions changed nothing. The text is back in the box."
+        : "Stopped. The fix changed nothing.";
     db.transaction(() => {
-      if (isOpen(db, row)) endStep(db, row, "cancelled", {}, now());
-      const d = stepDetailOf(db, row);
-      patchStep(db, row, { instruct: { ...info, result: stopped ? "stopped" : "failed", committed }, notes: [...d.notes, text] });
-      setReason(db, id, info.blockedBefore);
+      if (isOpen(db, f.id)) endStep(db, f.id, "cancelled", {}, now());
+      const d = stepDetailOf(db, f.id);
+      patchStep(db, f.id, { ...(info && { instruct: { ...info, result: "stopped", committed } }), notes: [...d.notes, text] });
+      setReason(db, id, info?.blockedBefore ?? null);
     })();
     changed(id);
   }
@@ -2703,6 +2782,38 @@ export function createLoop(opts: LoopOptions) {
     changed(id);
   }
 
+  // part-session.md section 9.4: the 409 of Continue on a reason whose own form comes first.
+  const formOf = (db: Database, id: number, b: TaskBlocked | null) =>
+    b?.kind === "spec_change"
+      ? "Accept or reject the change to the spec first."
+      : b?.kind === "allow"
+        ? "Pick a choice for each command first."
+        : b?.kind === "question" && (db.query(Q.openLoop).all({ task: id }) as unknown[]).length
+          ? "Answer the question first."
+          : null;
+
+  // spec.md section 6.18.2: a reason that the newest send left gives back the reason of the task before the send, once. Else the reason
+  // clears. The next driver applies the Continue rule to the changes of the step first (settle).
+  function restore(db: Database, t: TaskRow, b: TaskBlocked): TaskResult {
+    const last = db.query(Q.lastBuilt).get({ task: t.id }) as { id: number; kind: string } | null;
+    const info = last?.kind === "instruct" ? stepDetailOf(db, last.id).instruct : null;
+    const before = info?.result === null && JSON.stringify(info.blockedBefore) !== JSON.stringify(b) ? info.blockedBefore : null;
+    db.transaction(() => {
+      setBlocked(db, { task: t.id, version: t.version }, before, now());
+      if (last && info && before) patchStep(db, last.id, { instruct: { ...info, blockedBefore: null } });
+    })();
+    changed(t.id);
+    return { status: 200, task: dto(db, t.id) };
+  }
+
+  // ps4-plan.md section 4, option leave (part-session.md section 9.4 rule 9): it replaces Dismiss in ready, also for the reason update.
+  function leaveReason(db: Database, t: TaskRow, b: TaskBlocked | null): TaskResult {
+    if (t.state !== "ready") return conflict(db, t.id, "Leave works only in ready.");
+    const form = formOf(db, t.id, b);
+    if (form) return conflict(db, t.id, form);
+    return b ? restore(db, t, b) : conflict(db, t.id, TASK_STATE_TEXT.ready);
+  }
+
   // The checks of a mutation: the task and its version.
   function load(db: Database, id: number, version: number): TaskRow | TaskResult {
     const t = taskRow(db, id);
@@ -2848,18 +2959,23 @@ export function createLoop(opts: LoopOptions) {
       return { status: 200, task: dto(db, id) };
     },
 
-    // POST /api/tasks/:id/resume of a build: a paused build goes on with its changes. Else the Continue rule keeps or resets the work of
-    // each part that builds, and the build goes on (build-redesign.md section 2.2). "start-step-again" resets the part of the reason, or
-    // each part that builds, to its last commit with the patch saved (spec.md section 6.7, Continue).
+    // POST /api/tasks/:id/resume: a paused build goes on with its changes. Else the Continue rule keeps or resets the work, and GO picks
+    // the phase from the rows (build-redesign.md section 2.2, part-session.md section 9.5). ps4-plan.md section 1 gaps 14 and 15: a
+    // follow-up row that did not finish goes in the queue again, and the reason of a built part runs that part, in implementing and in
+    // ready. "start-step-again" resets the part of the reason, or each part that builds, to its last commit with the patch saved (spec.md
+    // section 6.7, Continue). leave gives back the reason before the follow-up in ready.
     resume(db: Database, id: number, input: TaskResumeInput): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
-      if (t.state === "implementing" && blockedOf(t)?.kind === "slot")
-        return conflict(db, id, "The build waits for the run slot. It goes on by itself.");
+      // ps4-plan.md WP-4 builds the input part (Hold) and the option disarm (the usage arm).
+      if (input.part !== undefined || input.option === "disarm") return conflict(db, id, LATER);
       const b = blockedOf(t);
+      if ((t.state === "implementing" || t.state === "ready") && b?.kind === "slot")
+        return conflict(db, id, "The build waits for the run slot. It goes on by itself.");
       const pause = t.state === "implementing" && b?.kind === "question" && b.step === null && b.text === PAUSED;
       const paused = pause && gates.has(id);
       if (drivers.has(id) && !paused) return conflict(db, id, BUSY);
+      if (input.option === "leave") return leaveReason(db, t, b);
       const reset: Reset = input.option === "start-step-again" ? { again: partOf(db, b) } : true;
       if (t.state === "stopped") {
         if (t.stopped_from !== "implementing") return conflict(db, id, TASK_STATE_TEXT.stopped);
@@ -2874,22 +2990,7 @@ export function createLoop(opts: LoopOptions) {
         changed(id);
         return { status: 200, task: dto(db, id) };
       }
-      // part-session.md section 9.4 rule 9, for the reasons of a cut or failed run (Q-SM1, Q-SM2): Continue in ready runs the newest send
-      // of the part again, as an answer does. PS4 adds the other reasons and the option leave.
-      if (t.state === "ready" && b && (RUN_ENDS.has(b.kind) || (b.kind === "error" && (b.cause === "run" || b.cause === "restart")))) {
-        const part = partOf(db, b);
-        const sent = part === null ? null : (db.query(Q.newestSend).get({ part }) as { id: number; item: string } | null);
-        const info = sent ? stepDetailOf(db, sent.id).instruct : null;
-        if (!sent || !info) return conflict(db, id, TASK_STATE_TEXT.ready);
-        const row = db.transaction(() => {
-          setBlocked(db, { task: id, version: t.version }, null, now());
-          return free(db, id) ? resend(db, id, sent.item, info, now()) : null;
-        })();
-        if (row !== null) start(db, id, () => driveInstruct(db, id, row), "instruct");
-        changed(id);
-        return { status: 200, task: dto(db, id) };
-      }
-      if (t.state !== "implementing") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+      if (t.state !== "implementing" && t.state !== "ready") return conflict(db, id, TASK_STATE_TEXT[t.state]);
       if (pause && input.option) return conflict(db, id, "A paused build keeps its changes. Continue it, or stop it first.");
       // spec.md section 6.20.6: Resume of a pause opens the gate of every part.
       if (paused) {
@@ -2906,17 +3007,23 @@ export function createLoop(opts: LoopOptions) {
         changed(id);
         return { status: 200, task: dto(db, id) };
       }
-      if (b?.kind === "spec_change") return conflict(db, id, "Accept or reject the change to the spec first.");
-      if (b?.kind === "allow") return conflict(db, id, "Pick a choice for each command first.");
-      if (b?.kind === "question" && (db.query(Q.openLoop).all({ task: id }) as unknown[]).length)
-        return conflict(db, id, "Answer the question first.");
-      const all = buildingAll(db, id);
-      if (!b && (drivers.has(id) || !all.length)) return conflict(db, id, TASK_STATE_TEXT.implementing);
+      const form = formOf(db, id, b);
+      if (form) return conflict(db, id, form);
+      // The update runs again through its own route until WP-5 moves it into the phase machine.
+      if (t.state === "ready" && (!b || b.kind === "update")) return conflict(db, id, TASK_STATE_TEXT.ready);
+      if (t.state === "implementing" && !b && (drivers.has(id) || !buildingAll(db, id).length))
+        return conflict(db, id, TASK_STATE_TEXT.implementing);
       // spec.md section 6.25.4: the clear moves the next reason up and starts no driver, so the option would be lost.
       if (input.option && waitingOf(db, id)) return conflict(db, id, WAITING);
+      const step = b?.step == null ? null : (db.query(Q.step).get({ id: b.step, task: id }) as StepRow | null);
       // part-session.md section 5.4: Continue clears a reason of a kind that the app sets no more (budget/time, size/budget, push).
-      if (b) setBlocked(db, { task: id, version: t.version }, null, now());
-      if (free(db, id)) kick(db, id, reset);
+      const go = db.transaction(() => {
+        if (b) setBlocked(db, { task: id, version: t.version }, null, now());
+        if (!free(db, id)) return false;
+        if (step && isFollow(step) && step.state !== "ok") requeue(db, id, step.id);
+        return true;
+      })();
+      if (go) goOn(db, id, partOf(db, b), reset, b);
       changed(id);
       return { status: 200, task: dto(db, id) };
     },
@@ -2941,12 +3048,9 @@ export function createLoop(opts: LoopOptions) {
         if (problem) return { status: 400, error: problem };
       }
       if (drivers.has(id)) return conflict(db, id, BUSY);
-      // The question of an instruct step: the send runs again from the last commit with the answer in context/answers.md (spec.md
-      // section 6.18.2).
-      const asked = open[0]?.step
-        ? (db.query(Q.step).get({ id: open[0].step, task: id }) as { kind: string; item: string | null } | null)
-        : null;
-      const again = db.transaction((): number | null => {
+      // The question of a follow-up: it runs again with the answer in context/answers.md (spec.md section 6.18.2).
+      const asked = open[0]?.step ? (db.query(Q.step).get({ id: open[0].step, task: id }) as StepRow | null) : null;
+      const go = db.transaction((): boolean => {
         const at = now();
         for (const q of open) {
           const a = given.get(q.id);
@@ -2960,11 +3064,11 @@ export function createLoop(opts: LoopOptions) {
         // The first reason clears only when its step owns an answered question. Else it stays, and the version moves.
         const own = first.step !== null && open.some((q) => q.step === first.step);
         setBlocked(db, { task: id, version: t.version }, own ? null : first, at);
-        const info = asked?.kind === "instruct" && open[0]?.step ? stepDetailOf(db, open[0].step).instruct : null;
-        return info && asked?.item && free(db, id) ? resend(db, id, asked.item, info, at) : null;
+        if (!free(db, id)) return false;
+        if (asked && isFollow(asked)) requeue(db, id, asked.id, at);
+        return true;
       })();
-      if (again !== null) start(db, id, () => driveInstruct(db, id, again), "instruct");
-      else if (free(db, id)) kick(db, id, true);
+      if (go) goOn(db, id, asked?.part ?? null, true);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -2996,8 +3100,8 @@ export function createLoop(opts: LoopOptions) {
       const merged = keep.length ? mergeAllow(repo.allow, keep, "request", hosts, at) : null;
       if (merged && "error" in merged) return { status: 400, error: merged.error };
       if (merged && repo.shellWarnedAt === null && !input.shellWarning) return { status: 400, error: SHELL_WARNING_FIRST };
-      const asked = db.query(Q.step).get({ id: input.step, task: id }) as { kind: string; item: string | null } | null;
-      const again = db.transaction((): number | null => {
+      const asked = db.query(Q.step).get({ id: input.step, task: id }) as StepRow | null;
+      const go = db.transaction((): boolean => {
         if (merged) {
           db.query(Q.ensureSettings).run({ project: t.project, repo: t.repo, now: at });
           saveAllow(db, t.project, t.repo, merged, input.shellWarning ? at : null);
@@ -3006,12 +3110,12 @@ export function createLoop(opts: LoopOptions) {
           allowAsk: { ...ask, decisions: ask.requests.map((r) => ({ pattern: r.pattern, choice: given.get(r.pattern) ?? "refuse" })) },
         });
         setBlocked(db, { task: id, version: t.version }, null, at);
-        // An instruct step runs again as a new send row, as after an answer (spec.md section 6.18.2).
-        const info = asked?.kind === "instruct" ? stepDetailOf(db, input.step).instruct : null;
-        return info && asked?.item && free(db, id) ? resend(db, id, asked.item, info, at) : null;
+        // A follow-up runs again as a new row, as after an answer (spec.md section 6.18.2).
+        if (!free(db, id)) return false;
+        if (asked && isFollow(asked)) requeue(db, id, asked.id, at);
+        return true;
       })();
-      if (again !== null) start(db, id, () => driveInstruct(db, id, again), "instruct");
-      else if (free(db, id)) kick(db, id, true);
+      if (go) goOn(db, id, asked?.part ?? null, true);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -3039,7 +3143,8 @@ export function createLoop(opts: LoopOptions) {
       return { status: 200, task: dto(db, id) };
     },
 
-    // POST /api/tasks/:id/parts/:part/fix: "Fix these too" for the listed points of a part that waits for its PR.
+    // POST /api/tasks/:id/parts/:part/fix: "Fix these too" for the listed points of a part that waits for its PR. ps4-plan.md section
+    // 2.2: a waiting fix row with item points is the follow-up of the part.
     fixPoints(db: Database, id: number, partId: number, input: { version: number }): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
@@ -3047,8 +3152,10 @@ export function createLoop(opts: LoopOptions) {
       if (drivers.has(id)) return conflict(db, id, BUSY);
       if (parts(db, id).find((p) => p.id === partId)?.state !== "self_reviewed")
         return conflict(db, id, "This part does not wait for its PR.");
-      if (!openPoints(db, id).length) return conflict(db, id, "No point waits for a fix.");
-      kick(db, id, false, partId);
+      if (!openPoints(db, id).length) return conflict(db, id, NO_POINTS);
+      const attempt = (db.query(Q.attempt).get({ part: partId, kind: "fix", item: "points" }) as { n: number }).n;
+      insertStep(db, { task: id, part: partId, kind: "fix", item: "points", attempt, state: "waiting" }, now());
+      goPart(db, id, partId);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
@@ -3091,13 +3198,17 @@ export function createLoop(opts: LoopOptions) {
       if (!row || !part) return conflict(db, id, "No change to the spec waits for this step.");
       const detail = JSON.parse(row.detail_json) as { specChange?: { paths: string[] } | null; notes?: string[] };
       const note = (...s: string[]) => ({ specChange: detail.specChange ?? null, notes: [...(detail.notes ?? []), ...s] });
-      const sent = row.item === null ? null : (db.query(Q.lastSend).get({ part: part.id, item: row.item }) as { id: number } | null);
-      const info = sent ? stepDetailOf(db, sent.id).instruct : null;
-      const again = (send: number | null) => {
-        if (send !== null) start(db, id, () => driveInstruct(db, id, send), "instruct");
-        else if (free(db, id)) kick(db, id, !input.accept);
+      const sent = row.item === null ? null : (db.query(Q.lastFollow).get({ part: part.id, item: row.item }) as { id: number } | null);
+      const again = (go: boolean) => {
+        if (go) goOn(db, id, part.id, !input.accept);
         changed(id);
         return { status: 200 as const, task: dto(db, id) };
+      };
+      // A follow-up runs again as a new row (spec.md section 6.18.2).
+      const queue = () => {
+        if (!free(db, id)) return false;
+        if (sent) requeue(db, id, sent.id);
+        return true;
       };
       if (!input.accept) {
         // build-redesign.md section 2.2: a rejected plan change is one of the four resets. The Continue rule of the next driver would
@@ -3108,12 +3219,12 @@ export function createLoop(opts: LoopOptions) {
         } catch (e) {
           return conflict(db, id, `The app could not reset the step: ${noUrl((e as Error).message)}`);
         }
-        const send = db.transaction(() => {
+        const go = db.transaction(() => {
           endStep(db, stepId, "cancelled", note(REJECTED, AGAIN), now());
           setBlocked(db, { task: id, version: t.version }, null, now());
-          return info && row.item && free(db, id) ? resend(db, id, row.item, info, now()) : null;
+          return queue();
         })();
-        return again(send);
+        return again(go);
       }
       try {
         const c = await context(db, t, part);
@@ -3151,13 +3262,13 @@ export function createLoop(opts: LoopOptions) {
       } catch (e) {
         return conflict(db, id, `The app could not commit the change: ${noUrl((e as Error).message)}`);
       }
-      const send = db.transaction(() => {
+      const go = db.transaction(() => {
         endStep(db, stepId, "ok", note("The user accepted the change."), now());
         const cur = taskRow(db, id) as TaskRow;
         setBlocked(db, { task: id, version: cur.version }, null, now());
-        return info && row.item && free(db, id) ? resend(db, id, row.item, info, now()) : null;
+        return queue();
       })();
-      return again(send);
+      return again(go);
     },
 
     // POST /api/tasks/:id/dismiss (spec.md section 6.18.2): "Dismiss" of a reason on a built part whose own action runs in state
@@ -3171,12 +3282,7 @@ export function createLoop(opts: LoopOptions) {
       if (t.state !== "ready" || !b || NO_DISMISS.has(b.kind) || (b.kind === "question" && asks))
         return conflict(db, id, "No reason waits for Dismiss.");
       if (drivers.has(id)) return conflict(db, id, BUSY);
-      const last = db.query(Q.lastBuilt).get({ task: id }) as { id: number; kind: string } | null;
-      const info = last?.kind === "instruct" ? stepDetailOf(db, last.id).instruct : null;
-      const before = info?.result === null && JSON.stringify(info.blockedBefore) !== JSON.stringify(b) ? info.blockedBefore : null;
-      setBlocked(db, { task: id, version: t.version }, before, now());
-      changed(id);
-      return { status: 200, task: dto(db, id) };
+      return restore(db, t, b);
     },
 
     // POST /api/tasks/:id/instructions (spec.md section 6.18.2): one send starts exactly one instruct step. The text goes to Claude only.
@@ -3187,15 +3293,14 @@ export function createLoop(opts: LoopOptions) {
       const target = instructTarget(db, t, input.part);
       if ("error" in target) return conflict(db, id, target.error);
       const part = target.part;
-      const row = db.transaction(() => {
+      db.transaction(() => {
         const n = (db.query(Q.sends).get({ task: id, kind: "instruct" }) as { n: number }).n + 1;
         const r = insertStep(db, { task: id, part: part.id, kind: "instruct", item: `I${n}`, state: "waiting" }, now());
         patchStep(db, r, { instruct: { text: input.text, part: part.id, blockedBefore: blockedOf(t), result: null, committed: false } });
         // The version moves, so a second tab gets 409 with the current task (spec.md section 6.18.7).
         setBlocked(db, { task: id, version: t.version }, null, now());
-        return r;
       })();
-      start(db, id, () => driveInstruct(db, id, row), "instruct");
+      goPart(db, id, part.id);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },

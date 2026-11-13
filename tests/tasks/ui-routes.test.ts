@@ -337,12 +337,12 @@ describe("the line limit (spec.md section 6.1)", () => {
 
 describe("the small points, the diff, and the run log", () => {
   test(
-    "Fix the small points too: one fix step with the listed points, the checks, and one commit; the part stays ready",
+    "Fix the small points too: one fix step with the listed points, the checks, one commit, and the own review; the part stays ready",
     async () => {
       const s = await setup({
         seq: {
           "implement:fix": [{ writes: [WORKS] }, { writes: [POINTS_FIXED] }],
-          review: [{ review: reviewOf([MINOR]) }],
+          review: [{ review: reviewOf([MINOR]) }, { review: reviewOf([]) }],
         },
       });
       const ready = await s.build();
@@ -367,7 +367,8 @@ describe("the small points, the diff, and the run log", () => {
       const r = await s.post(`/parts/${part.id}/fix`);
       expect(r.status).toBe(202);
       const done = await s.settle();
-      expect(s.flow(done).filter((x) => x.includes(":points:"))).toEqual(["fix:points:ok", "check:points:ok", "commit:points:ok"]);
+      // ps4-plan.md AC-B341: the commit of the fix gets the own review, which finds no point now.
+      expect(s.flow(done).slice(-4)).toEqual(["fix:points:ok", "check:checks:ok", "commit:points:ok", "review:review:ok"]);
       expect([done.parts[0]?.state, done.points, done.blocked]).toEqual(["self_reviewed", [], null]);
       expect(done.parts[0]?.head).not.toBe(part.head);
       // The part diff of the Diff tab shows the fix.

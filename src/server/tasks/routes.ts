@@ -115,7 +115,9 @@ const repoParam = validator("param", (v: Record<string, string>, c) =>
 const body = <T extends z.ZodType>(schema: T, error: string) =>
   validator("json", (v, c) => {
     const r = schema.safeParse(v);
-    return r.success ? (r.data as z.infer<T>) : c.json<ApiError>({ error }, 400);
+    if (r.success) return r.data as z.infer<T>;
+    const refined = r.error.issues.every((i) => i.code === "custom") ? r.error.issues[0]?.message : undefined;
+    return c.json<ApiError>({ error: refined ?? error }, 400);
   });
 
 export function createTaskRoutes(opts: {
@@ -297,8 +299,8 @@ export function createTaskRoutes(opts: {
         await loop.settle(id);
         const t = taskRow(db, id);
         const input = c.req.valid("json");
-        // loop.resume refuses an option for a task that did not stop in its build.
-        const before = t?.state === "stopped" && t.stopped_from !== "implementing" && !input.option;
+        // loop.resume refuses an option or a part for a task that did not stop in its build.
+        const before = t?.state === "stopped" && t.stopped_from !== "implementing" && !input.option && input.part === undefined;
         return answer(c, before ? tasks.resume(db, id, input) : loop.resume(db, id, input));
       })
       // spec.md section 6.18.2: "Dismiss" of a reason on a built part.

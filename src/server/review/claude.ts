@@ -119,11 +119,10 @@ export type ImplementSpec = {
   live?: boolean;
 };
 
-// Gate B37 (part-session.md section 4) passed with CLI 2.1.323, so live (U104) is on. resume (U97, U98, U103) stays off. After a cut,
-// a reset, or a restart, a resumed run would fork a transcript without the last run. No continue.md covers that run (section 2.2, Cut
-// runs). resolve needs the resolve runs of U99. While a value is false, jobs.ts passes no resume file or no live input.
+// Gate B37 (part-session.md section 4) passed in full with CLI 2.1.323: resume (U97, U98, U101, U103) and live (U104) are on. resolve
+// needs the resolve runs of U99. While a value is false, jobs.ts passes no resume file or no live input.
 export const SESSION_GATES: Readonly<{ resume: boolean; live: boolean; resolve: boolean }> = {
-  resume: false,
+  resume: true,
   live: true,
   resolve: false,
 };

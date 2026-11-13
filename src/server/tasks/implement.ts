@@ -652,23 +652,6 @@ export function implementPrompt(
     mode === "implement"
       ? "End the run when every open task is ticked and its tests pass, or when you need the user. Set done to true only then. List the IDs that you ticked in ticked."
       : "Set done to true only when the step is complete.";
-  // part-session.md section 2.2: the rules digest of a resumed run, then the purpose of this run.
-  if (session?.resume != null)
-    return [
-      role,
-      `./context/spec/ holds a read-only copy of the plan. Tick tasks only in ${session.tasksFile}: ${tick}`,
-      "Read ./context/step.md first. It says what this run does.",
-      result,
-      untrusted,
-      ...userLines,
-      "",
-      `# Run ${session.resume}: ${PURPOSE_TITLE[session.purpose]}`,
-      "",
-      ...(mode === "implement" ? ["Go on with the open tasks of ./context/step.md."] : modeLines),
-      "",
-      modeLine,
-      ...tail,
-    ].join("\n");
   // spec.md section 6.21, D3, D6, and D7.
   const ask =
     "When Claude Code refuses a command that the step needs, do not try another form of it. End the step: set allowRequest with the narrowest pattern, the refused command, and a reason. Set done to false.";
@@ -699,6 +682,33 @@ export function implementPrompt(
           shell.mode === "allowlist" ? " tar and ssh run only with an approved pattern." : ""
         }`,
       ];
+  const commands = `The app runs the approved build, test, and lint commands after your ${session ? "run" : "step"}. ${
+    checks.length
+      ? `You can also run them yourself: ${checks.map((c) => `\`${c}\``).join(", ")}.`
+      : shell
+        ? "When they fail, a fix step gets their output."
+        : "You cannot run them. When they fail, a fix step gets their output."
+  }`;
+  // part-session.md section 2.2: the rules digest of a resumed run, then the purpose of this run. The command lines of each run come
+  // again, because an Allow once, a new saved pattern, or the checks switch changes them between runs (spec.md section 6.21, D3).
+  if (session?.resume != null)
+    return [
+      role,
+      `./context/spec/ holds a read-only copy of the plan. Tick tasks only in ${session.tasksFile}: ${tick}`,
+      "Read ./context/step.md first. It says what this run does.",
+      result,
+      commands,
+      ...shellLines,
+      untrusted,
+      ...userLines,
+      "",
+      `# Run ${session.resume}: ${PURPOSE_TITLE[session.purpose]}`,
+      "",
+      ...(mode === "implement" ? ["Go on with the open tasks of ./context/step.md."] : modeLines),
+      "",
+      modeLine,
+      ...tail,
+    ].join("\n");
   // part-session.md section 2.3 item 5 (build-redesign.md section 7, item 3).
   const workRules = session
     ? [
@@ -710,13 +720,7 @@ export function implementPrompt(
     : [];
   return [
     role,
-    `The app runs the approved build, test, and lint commands after your ${session ? "run" : "step"}. ${
-      checks.length
-        ? `You can also run them yourself: ${checks.map((c) => `\`${c}\``).join(", ")}.`
-        : shell
-          ? "When they fail, a fix step gets their output."
-          : "You cannot run them. When they fail, a fix step gets their output."
-    }`,
+    commands,
     ...shellLines,
     "Read ./context/step.md first. It names the part, the task, and what done means.",
     ...(attachments
@@ -1356,14 +1360,16 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         },
         now(),
       );
-      // part-session.md section 2.2: a part keeps the transcript of its last run that ended ok. Guard rule 4: after a denied path or a
-      // git state change, the next run starts a new session. A cut transcript stays out until Gate B37 verifies U101.
+      // part-session.md section 2.2: a part keeps the transcript of its last run that ended ok, or that a Stop, a guard, or a cap cut
+      // (Gate B37 U101). A failed run keeps the older file, so a resume that failed before any tool call loses nothing (U47). Guard rule
+      // 4: after a denied path or a git state change, the next run starts a new session.
       const transcript = runOut?.kept ?? null;
+      const cutRun = e.status === "cancelled" || runOut?.cut != null;
       // An instruct run with no session changes the work outside the kept transcript.
       if ((session && undone) || (i.mode === "instruct" && !session)) dropSessions(d, { part: i.part.id });
       // A locked file on Windows must not break the run end. The next run then starts a new session.
       try {
-        if (session && transcript && ran && !undone && !broken) {
+        if (session && transcript && (ran || cutRun) && !undone && !broken) {
           const s = { id: runOut?.init?.session_id ?? null, file: transcript, heads: session.heads, context: runOut?.context ?? null };
           saveSession(d, i.part.id, s, now());
         } else if (transcript) rmSync(transcript, { force: true });

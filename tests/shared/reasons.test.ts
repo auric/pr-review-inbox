@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { taskResumeInput } from "../../src/shared/dto";
 import { BLOCKED_CAUSES, BLOCKED_KINDS, REASON_EXITS, type ReasonExit, taskBlocked } from "../../src/shared/task";
 
 console.log(`reasons.test.ts imported from ${Bun.resolveSync("../../src/shared/task", import.meta.dir)}`);
@@ -69,6 +70,13 @@ describe("REASON_EXITS (part-session.md section 9.4)", () => {
         }
       }
     }
+  });
+
+  test("AC-B354: leave is built, and each option of an exit that is not planned parses in taskResumeInput", () => {
+    const exits = entries.flatMap(([, x]) => [x.primary, ...x.other]);
+    const options = new Set(exits.flatMap((e) => ("option" in e && e.option && !e.planned ? [e.option] : [])));
+    expect([...options]).toEqual(["leave"]);
+    for (const option of options) expect(taskResumeInput.safeParse({ version: 1, option }).success).toBe(true);
   });
 
   test("Stop is an exit of every reason but the update reasons and held; a driver takes the primary exit only of slot and armed usage", () => {
