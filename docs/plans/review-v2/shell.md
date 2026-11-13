@@ -183,6 +183,7 @@ The label "Refused by the allowlist" does not prove the allowlist refused these 
   - type `other`, "This command requires approval": no allow rule matched.
   - CLI safety checks with no reason type, for example the B22 event "Output redirection to '…' needs approval" in Gate B22 (integration-check.md SU9).
 - In Any mode the allowlist cannot refuse anything. There the label is wrong by construction.
+- Update: the label by mode (built 2026-11-05) removed this fallthrough. A refusal with no reason type gets the label check, for example the B22 redirect. Gate run 2 (2026-11-13, CLI 2.1.323, `integration-check.md` SU22) added one case. A command such as `touch` changes files in the working folders. With no allow rule, the CLI refuses it through a file-change ask with no reason type. In allowlist mode the app now labels this ask allowlist. Other modes never show the label allowlist. An allow rule such as `Bash(touch *)` satisfies the ask, and the command runs.
 
 **4. Your two commands under CLI 2.1.316**
 - **Deny rules:** none match. There is no git, no host, no network program, and no xargs. B27 and B27b show that `allow: ["Bash"]` runs a plain probe.

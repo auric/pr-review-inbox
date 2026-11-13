@@ -2264,8 +2264,8 @@ const PROBE = "rlgb-probe.cjs";
 const RUNTIME = Bun.which("node") ? "node" : "bun";
 const probe = (arg: string) => `${RUNTIME} ${PROBE} ${arg}`;
 const PROBE_RULE = `${RUNTIME} ${PROBE} *`;
-// The unlisted command of U82c, U85, and U98: a copy of the probe that PROBE_RULE does not match. CLI 2.1.322 refuses a shell file
-// command such as touch in the cwd through a separate file-change ask, so touch cannot test the allowlist (B22: "requires approval").
+// The unlisted command of U82c, U85, and U98: a copy of the probe that PROBE_RULE does not match. The CLI refuses it with "requires
+// approval" and type other (SU22). A shell file command such as touch in the cwd gets the file-change ask instead.
 const UNLISTED = "rlgb-unlisted.cjs";
 const unlistedCmd = (arg: string) => `${RUNTIME} ${UNLISTED} ${arg}`;
 const NET_DENIED = "curl https://example.invalid";

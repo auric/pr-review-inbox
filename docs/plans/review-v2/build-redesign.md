@@ -122,6 +122,7 @@ Records:
 
 - The setup mark becomes `{hash, files}`. `files` lists the untracked paths that git does not ignore, taken right after a green setup.
 - StepDetail gets `head` (check and review steps), `commands` (a hash of the build, test, and lint list with argv and timeouts), `checked`, and `dirtyBefore` (the dirty paths at the start of the first attempt of a step).
+- StepDetail also gets `redo` (tests steps). It marks a step that wrote no test or changed files that are not tests. The loop reset the changes of that step. The next tests attempt then starts fresh and is no continuation, also after a Continue.
 
 ### 2.4 A step that ends early
 

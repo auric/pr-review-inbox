@@ -45,8 +45,9 @@ function jump(e: MouseEvent<HTMLAnchorElement>, id: string) {
 // A modified click opens the section URL in a new tab or window.
 const plainClick = (e: MouseEvent) => e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
 
-// The section that the URL names, and the heading of each section.
-export type SettingsAt = { section: SettingsSection | null; profile: string | null; n: number };
+// The section that the URL names, and the heading of each section. focus: the ID of a field that takes the focus after this open.
+// It never goes into the URL.
+export type SettingsAt = { section: SettingsSection | null; profile: string | null; n: number; focus?: string };
 const HEADINGS: Record<SettingsSection, string> = {
   connection: "h-connection",
   checks: "checks-title",
@@ -198,9 +199,11 @@ export function Settings({
   const { hold, pane } = spy;
   // ReviewProfiles scrolls to the profile on each new target, so the target changes only with at.
   const target = useMemo(() => (at.profile ? { id: at.profile, n: at.n } : null), [at.profile, at.n]);
-  // The URL names a section: its heading takes the focus. No section: the pane starts at the top.
+  // A focus field takes the focus first. The URL names a section: its heading takes the focus. No section: the pane starts at the top.
   useEffect(() => {
     if (at.profile) return;
+    const field = at.focus ? document.getElementById(at.focus) : null;
+    if (field) return field.focus();
     const id = at.section ? HEADINGS[at.section] : null;
     const el = id ? document.getElementById(id) : null;
     if (!id || !el) {

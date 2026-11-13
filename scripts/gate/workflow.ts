@@ -245,7 +245,8 @@ export function u82c(o: { unlisted: Seen & { marker: boolean } }): Fact {
   };
 }
 
-// INFO for U82c, U85, and U98: touch in the cwd. CLI 2.1.322 refuses it through a file-change ask with no decision_reason_type.
+// INFO for U82c, U85, U98, and touch-rule: touch in the cwd. With no allow rule, the CLI refuses it through a file-change ask with no
+// decision_reason_type. In allowlist mode the app label is allowlist. The allow rule "touch *" satisfies the ask (SU22, CLI 2.1.323).
 export const touchLine = (s: Seen, marker: boolean, rule = "no allow rule") => `touch in the cwd with ${rule}=${shown(s)} marker=${marker}`;
 
 // (d) init lists the step tools, Task, and StructuredOutput, and nothing else. permissionMode is default.

@@ -234,6 +234,10 @@ function Shell({ stale }: { stale: boolean }) {
   const s = settings.data;
   const locked = s ? s.baseUrl === null || (s.tokenStorage === "memory" && !s.tokenStored) : false;
   const showSettings = locked || ks.settings;
+  // A focus field serves one open. A later mount without openSettings, such as a lock, must not focus it again.
+  useEffect(() => {
+    if (!showSettings) setSettingsAt((a) => (a.focus ? { ...a, focus: undefined } : a));
+  }, [showSettings]);
   const all = prs.data ?? [];
   const forge = meta.data?.forge.name ?? "";
   const runs = useRuns().data;
@@ -613,9 +617,10 @@ function Shell({ stale }: { stale: boolean }) {
   );
 
   // Settings open at the top, at a section, or at one profile. Each open pushes a history entry (navMode).
-  const openSettings = (section: SettingsSection | null = null, profile: string | null = null) => {
+  // focus: the ID of a field that takes the focus after Settings mounts. The opener can unmount in this render.
+  const openSettings = (section: SettingsSection | null = null, profile: string | null = null, focus?: string) => {
     setSettingsRoute({ section, profile });
-    setSettingsAt((a) => ({ section, profile, n: a.n + 1 }));
+    setSettingsAt((a) => ({ section, profile, n: a.n + 1, focus }));
     go({ settings: true, mobile: "detail", focus: "detail" });
   };
 
@@ -852,7 +857,7 @@ function Shell({ stale }: { stale: boolean }) {
                   onRoute={(patch) => shownKey && onDetailRoute(shownKey, patch)}
                   onExplain={explainTo}
                   onDiff={explainDiff}
-                  onSettings={() => openSettings()}
+                  onSettings={() => openSettings(null, null, "tracker-url")}
                   onTaskIds={() => openSettings("task-ids")}
                   onProfile={(id) => openSettings("profiles", id)}
                   onLeave={() => {

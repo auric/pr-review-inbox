@@ -65,7 +65,8 @@ const clearBtn =
 
 // id: the prefix of the element IDs, one per place. focusTo: the element that takes the focus when Clear text takes the chip away.
 // compact: a place outside the brief. It shows only the chips that can fetch or hold fetched text, with the fetch state
-// instead of the source. It shows nothing when no chip is left. onSettings absent: an error offers no settings link.
+// instead of the source. It shows nothing when no chip is left. onSettings: opens Settings with the focus on the tracker URL field.
+// onSettings absent: an error offers no settings link.
 // onTaskIds: "Set up task IDs" opens Settings, Task IDs.
 export function TaskChips(props: {
   pr: number;
@@ -92,11 +93,6 @@ export function TaskChips(props: {
   const now = Date.now();
   const focus = useFocusAfter(chips);
 
-  const setUp = () => {
-    onSettings?.();
-    // The settings render in the same click. Focus then lands on the tracker URL field.
-    requestAnimationFrame(() => document.getElementById("tracker-url")?.focus());
-  };
   // The Clear text button while the request runs, then the Fetch button, then focusTo when the chip is gone.
   const targets = (key: string) => [`${id}-remove-${key}`, `${id}-fetch-${key}`, props.focusTo];
   const run = async (key: string, act: "fetch" | "remove") => {
@@ -221,7 +217,7 @@ export function TaskChips(props: {
           <button
             type="button"
             className="inline-flex h-6 cursor-pointer items-center gap-1.5 rounded-[5px] px-1.5 text-xs text-ink-2 hover:bg-hover hover:text-foreground"
-            onClick={setUp}
+            onClick={onSettings}
           >
             <Settings2 aria-hidden className={icon} />
             Set up {source}
@@ -239,7 +235,7 @@ export function TaskChips(props: {
             {e.setup && (
               <>
                 {" "}
-                <button type="button" className="cursor-pointer rounded font-medium text-pen hover:underline" onClick={setUp}>
+                <button type="button" className="cursor-pointer rounded font-medium text-pen hover:underline" onClick={onSettings}>
                   Set up {source}
                 </button>
               </>

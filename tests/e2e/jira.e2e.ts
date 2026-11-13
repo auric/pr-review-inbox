@@ -82,6 +82,7 @@ test("without Jira settings, the brief offers Set up Jira and no Fetch", async (
   await expect(brief(page).getByRole("button", { name: /^Fetch / })).toHaveCount(0);
   await brief(page).getByRole("button", { name: "Set up Jira" }).click();
   await expect(page.getByLabel("Jira URL")).toBeFocused();
+  await expect(page.getByLabel("Jira URL")).toBeInViewport();
   await expect(page.getByLabel("Personal access token or API token")).toHaveAttribute("placeholder", "Token…");
 });
 
