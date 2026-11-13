@@ -6,7 +6,7 @@
 // fake Bitbucket, and the fake CLI. No test starts the real CLI or reaches a forge or Jira.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { writeConfig } from "../../src/server/config";
@@ -836,6 +836,159 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(loop.dismiss(s.db, s.task, v()).status).toBe(200);
       expect(reasons(s)).toEqual([null, null, null, null]);
       expect(loop.running(s.task)).toBe(false);
+    },
+    SLOW,
+  );
+
+  // ps4-plan.md section 1 item 17: Skip and Start again write git state in the cache that part 1 shares while its step runs. The check of
+  // fix F at the end of that step must count each write as a change of the app, so the task stays live.
+  test(
+    "gap 17, AC-B348 to AC-B351: Hold, Continue with part, Start again, and Skip of part 2 while part 1 runs a step keep the task live",
+    async () => {
+      // Each run writes a file that no commit holds, then hangs.
+      const s = await setup({
+        atOnce: 2,
+        third: "stack",
+        scenario: { bySchema: { implement: { hang: true, ...file("notes.txt", "kept\n") } } },
+      });
+      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+      loop.build(s.db, s.task);
+      await until(() => s.implementRuns().length === 2);
+      const v = () => ({ version: s.t().version });
+      const runsOf = (ord: number) => s.implementRuns().filter((x) => x === `part-${ord}`).length;
+      const notes2 = join((await s.wt(s.p2)).repo, "notes.txt");
+      const open = (part: number) =>
+        s.db.query("SELECT 1 FROM task_step WHERE part = $part AND state IN ('waiting', 'running')").get({ part }) !== null;
+      // A route that refuses a part that its driver still ends answers "Hold part 2 first." until the driver lets it go.
+      const once = async (f: () => Promise<{ status: number; error?: string }>) => {
+        for (const end = Date.now() + 60_000; ; await Bun.sleep(50)) {
+          const r = await f();
+          if (r.error !== "Hold part 2 first.") return r;
+          if (Date.now() > end) throw new Error("Part 2 did not become idle.");
+        }
+      };
+      // Hold ends only the run of part 2. Continue with part 2 pokes the driver, and part 2 runs again beside part 1.
+      expect(loop.hold(s.db, s.task, s.p2, v()).status).toBe(200);
+      await until(() => !open(s.p2));
+      expect([open(s.p1), reasons(s)[2]?.kind, s.t().blocked_json]).toEqual([true, "held", null]);
+      expect(loop.resume(s.db, s.task, { ...v(), part: s.p2 }).status).toBe(200);
+      await until(() => runsOf(2) === 2);
+      // Hold, then Start again: the backup ref, the reset, and the plan commit of part 2 go through the app git helper.
+      expect(loop.hold(s.db, s.task, s.p2, v()).status).toBe(200);
+      expect((await once(() => loop.restart(s.db, s.task, s.p2, v()))).status).toBe(200);
+      await until(() => runsOf(2) === 3);
+      await until(() => existsSync(notes2));
+      // Hold, then Skip: the patch keeps the work, and the worktree entry of part 2 goes from the cache.
+      expect(loop.hold(s.db, s.task, s.p2, v()).status).toBe(200);
+      expect((await once(() => loop.skip(s.db, s.task, s.p2, v()))).status).toBe(200);
+      expect([s.part(s.p2).state, existsSync(join(dirname((await s.wt(s.p1)).dir), "part-2"))]).toEqual(["abandoned", false]);
+      const last = s.db.query("SELECT id, detail_json FROM task_step WHERE part = $part ORDER BY id DESC LIMIT 1").get({ part: s.p2 }) as {
+        id: number;
+        detail_json: string;
+      };
+      const patch = JSON.parse(last.detail_json).patch as string;
+      expect(patch).toBe(`${last.id}.patch`);
+      expect(readFileSync(join(dirname(patchFile(join(s.root, "data"), s.db, s.task, last.id)), patch), "utf8")).toContain("kept");
+      // Part 1 ran one step the whole time. Its Hold ends it, and its check of fix F finds no change of Claude.
+      expect(runsOf(1)).toBe(1);
+      expect(loop.hold(s.db, s.task, s.p1, v()).status).toBe(200);
+      await loop.idle(s.task);
+      const one = s.db.query("SELECT state, detail_json FROM task_step WHERE part = $part AND kind = 'implement'").all({ part: s.p1 }) as {
+        state: string;
+        detail_json: string;
+      }[];
+      expect(one.map((x) => [x.state, (JSON.parse(x.detail_json).notes as string[]).filter((n) => /git state/.test(n))])).toEqual([
+        ["cancelled", []],
+      ]);
+      expect([s.t().state, s.t().blocked_json, reasons(s)[1]?.kind]).toEqual(["implementing", null, "held"]);
+      const w = await s.wt(s.p1);
+      const backup = await git([`--git-dir=${w.cache}`, "for-each-ref", "--format=%(refname)", `refs/rl/task/${s.task}/backup`], {
+        env: w.env,
+      });
+      expect(backup.trim()).toBe(`refs/rl/task/${s.task}/backup/part-2-1`);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B339, AC-B353: Continue before the reset time arms the usage reasons of both parts with one version move; disarm clears both",
+    async () => {
+      const s = await setup({ atOnce: 3, third: "base", scenario: HANG });
+      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+      s.db.query("UPDATE task_part SET state = 'implementing' WHERE id IN ($a, $b)").run({ a: s.p1, b: s.p2 });
+      const at = Date.now() + 600_000;
+      const usage = (part: number): TaskBlocked => {
+        const step = insertStep(s.db, { task: s.task, part, kind: "implement", item: "build", state: "failed" });
+        return { kind: "usage", step, text: "Needs you: your Claude usage limit is reached.", resumeAt: at, armed: false };
+      };
+      const first = usage(s.p1);
+      const second = usage(s.p2);
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(first) });
+      s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: s.p2, b: JSON.stringify(second) });
+      const before = s.t().version;
+      expect(loop.resume(s.db, s.task, { version: before }).status).toBe(200);
+      expect(s.t().version).toBe(before + 1);
+      expect(reasons(s).slice(0, 3)).toEqual([{ ...first, armed: true }, null, { ...second, armed: true }]);
+      expect(loop.running(s.task)).toBe(false);
+      // A second Continue before the time changes nothing.
+      expect(loop.resume(s.db, s.task, { version: before + 1 }).status).toBe(200);
+      expect(s.t().version).toBe(before + 1);
+      expect(loop.resume(s.db, s.task, { version: before + 1, option: "disarm" }).status).toBe(200);
+      expect(reasons(s).slice(0, 3)).toEqual([{ ...first, armed: false }, null, { ...second, armed: false }]);
+      expect(loop.running(s.task)).toBe(false);
+      // After the reset time, Continue clears the reason. The usage reason of part 2 moves up, so no driver starts.
+      s.db.query("UPDATE task SET blocked_json = json_set(blocked_json, '$.resumeAt', $at) WHERE id = $id").run({ id: s.task, at: 1 });
+      expect(loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      expect(reasons(s).slice(0, 3)).toEqual([{ ...second, armed: false }, null, null]);
+      expect(loop.running(s.task)).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "ps4-plan.md section 2.7: Continue before the reset time arms the usage reason while a driver still runs the steps of other parts",
+    async () => {
+      const s = await setup({ atOnce: 2, third: "base", scenario: HANG });
+      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+      loop.build(s.db, s.task);
+      await until(() => s.implementRuns().length === 2);
+      const step = insertStep(s.db, { task: s.task, part: s.p1, kind: "implement", item: "build", state: "failed" });
+      const usage: TaskBlocked = {
+        kind: "usage",
+        step,
+        text: "Needs you: your Claude usage limit is reached.",
+        resumeAt: Date.now() + 600_000,
+        armed: false,
+      };
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(usage) });
+      const before = s.t().version;
+      expect(loop.running(s.task)).toBe(true);
+      expect(loop.resume(s.db, s.task, { version: before }).status).toBe(200);
+      expect([s.t().version, reasons(s)[0], loop.running(s.task)]).toEqual([before + 1, { ...usage, armed: true }, true]);
+    },
+    SLOW,
+  );
+
+  test(
+    "gap 18, AC-B350: a Skip in stopped sends no task event; RESUME then sends LAST_PR_OPEN, and ALL_MERGED when the other parts merged",
+    async () => {
+      for (const other of ["pr_open", "merged"] as const) {
+        const s = await setup({ atOnce: 3, third: "base", scenario: HANG });
+        const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
+        const held: TaskBlocked = { kind: "held", step: null, part: s.p2, text: "Part 2 is on hold. Its work is kept." };
+        s.db.query("UPDATE task_part SET state = $state WHERE id IN ($a, $b)").run({ state: other, a: s.p1, b: s.p3 });
+        s.db
+          .query("UPDATE task_part SET state = 'implementing', blocked_json = $b WHERE id = $id")
+          .run({ id: s.p2, b: JSON.stringify(held) });
+        s.db.query("UPDATE task SET state = 'stopped', stopped_from = 'implementing' WHERE id = $id").run({ id: s.task });
+        const skip = await loop.skip(s.db, s.task, s.p2, { version: s.t().version });
+        expect([other, skip.status]).toEqual([other, 200]);
+        expect([other, s.t().state, s.part(s.p2).state, reasons(s)[2] ?? null]).toEqual([other, "stopped", "abandoned", null]);
+        expect(loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+        expect([other, s.t().state]).toEqual([other, other === "pr_open" ? "ready" : "done"]);
+        await loop.idle(s.task);
+        expect(loop.running(s.task)).toBe(false);
+      }
     },
     SLOW,
   );

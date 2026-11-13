@@ -175,6 +175,8 @@ export type Setup = {
   remote?: () => Promise<void>;
   // Settings > Tasks run limits in config.json.
   runLimits?: Partial<RunLimits>;
+  // Settings > Tasks "Resume by itself after a usage limit" in config.json.
+  usageResume?: boolean;
   // part-session.md section 2.2: the gates of Gate B37 for the runner and the loop. Absent: SESSION_GATES.
   sessionGates?: typeof SESSION_GATES;
 };
@@ -210,6 +212,7 @@ export async function setup(o: Setup = {}) {
     notifications: false,
     ...(o.profiles && { profiles: o.profiles }),
     ...(o.runLimits && { runLimits: o.runLimits }),
+    ...(o.usageResume && { usageResume: true }),
   });
   const settings = createSettings({ dir: dataDir, secrets: createSecrets(null), jiraSecrets: createSecrets(null, "jira-token") });
   const live = createLive();

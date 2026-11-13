@@ -18,12 +18,8 @@ const ROUTES = new Set(
     ([, m, path]) => `${(m as string).toUpperCase()} ${path}`,
   ),
 );
-// part-session.md section 9.3.6: the new routes, and the package that adds each.
-const NEW_ROUTES: Record<string, string> = {
-  "POST /tasks/:id/parts/:part/hold": "PS4",
-  "POST /tasks/:id/parts/:part/skip": "PS4",
-  "POST /tasks/:id/parts/:part/restart": "PS4",
-};
+// part-session.md section 9.3.6: the new routes, and the package that adds each. ps4-plan.md WP-4 built hold, skip, and restart.
+const NEW_ROUTES: Record<string, string> = {};
 // The kinds that have a cause in the table of section 9.4.
 const CAUSED = ["question", "red", "denied_path", "error", "budget", "size", "stuck"];
 
@@ -72,11 +68,15 @@ describe("REASON_EXITS (part-session.md section 9.4)", () => {
     }
   });
 
-  test("AC-B354: leave is built, and each option of an exit that is not planned parses in taskResumeInput", () => {
+  test("AC-B354: no exit is planned for PS4; each option of an exit that is not planned parses in taskResumeInput", () => {
     const exits = entries.flatMap(([, x]) => [x.primary, ...x.other]);
+    expect(exits.filter((e) => "planned" in e && e.planned === "PS4")).toEqual([]);
     const options = new Set(exits.flatMap((e) => ("option" in e && e.option && !e.planned ? [e.option] : [])));
-    expect([...options]).toEqual(["leave"]);
-    for (const option of options) expect(taskResumeInput.safeParse({ version: 1, option }).success).toBe(true);
+    expect([...options].sort()).toEqual(["disarm", "leave", "part"]);
+    // part is the input field part, which names a task_part ID.
+    for (const option of options)
+      expect(taskResumeInput.safeParse({ version: 1, ...(option === "part" ? { part: 1 } : { option }) }).success).toBe(true);
+    expect(exits.filter((e) => "planned" in e && e.planned).map((e) => ("option" in e ? e.option : null))).toEqual(["without"]);
   });
 
   test("Stop is an exit of every reason but the update reasons and held; a driver takes the primary exit only of slot and armed usage", () => {

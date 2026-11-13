@@ -456,7 +456,7 @@ const STOP = exit("Stop", "POST /tasks/:id/stop");
 // The log tab and the PR link come from the task DTO.
 const SEE_WHY = exit("See why", "GET /tasks/:id");
 const LEAVE = exit("Leave it (ready only)", "POST /tasks/:id/resume", { option: "leave" });
-const AGAIN = exit("Start this part again", "POST /tasks/:id/parts/:part/restart", { planned: "PS4" });
+const AGAIN = exit("Start this part again", "POST /tasks/:id/parts/:part/restart");
 const RUN_ENDS = { primary: CONTINUE, other: [AGAIN, SEE_WHY, STOP, LEAVE] };
 const KEPT = { primary: CONTINUE, other: [AGAIN, STOP, LEAVE] };
 const PATH = { primary: CONTINUE, other: [SEE_WHY, STOP, LEAVE] };
@@ -486,7 +486,7 @@ export const REASON_EXITS = {
   },
   blocker: {
     primary: CONTINUE,
-    other: [exit("Go on without these fixes", "POST /tasks/:id/resume", { option: "without", planned: "PS4" }), SEE_WHY, STOP, LEAVE],
+    other: [exit("Go on without these fixes", "POST /tasks/:id/resume", { option: "without", planned: "PS5" }), SEE_WHY, STOP, LEAVE],
   },
   spec_change: {
     primary: exit("Accept the change", "POST /tasks/:id/spec-change/:step"),
@@ -517,11 +517,12 @@ export const REASON_EXITS = {
   usage: { primary: exit("Resume at the reset time", "POST /tasks/:id/resume"), other: [STOP] },
   "usage/armed": {
     primary: { label: "The reset time comes", app: "timer" },
-    other: [exit("Cancel the resume", "POST /tasks/:id/resume", { option: "disarm", planned: "PS4" }), STOP],
+    other: [exit("Cancel the resume", "POST /tasks/:id/resume", { option: "disarm" }), STOP],
   },
+  // option part: the input field part of the resume input, not an option value.
   held: {
-    primary: exit("Continue", "POST /tasks/:id/resume", { option: "part", planned: "PS4" }),
-    other: [exit("Skip this part", "POST /tasks/:id/parts/:part/skip", { planned: "PS4" }), AGAIN],
+    primary: exit("Continue", "POST /tasks/:id/resume", { option: "part" }),
+    other: [exit("Skip this part", "POST /tasks/:id/parts/:part/skip"), AGAIN],
   },
   "stuck/stall": KEPT,
   "stuck/loop": KEPT,

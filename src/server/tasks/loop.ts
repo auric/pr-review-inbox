@@ -27,6 +27,7 @@ import {
   type ImplementResult,
   LARGE_REPOS_TEXT,
   limitText,
+  PART_STATE_TEXT,
   type PartState,
   RESOLVE_STOPS,
   RUN_LIMITS,
@@ -53,11 +54,12 @@ import type { Profile } from "../review/catalog";
 import { identity } from "../review/clone";
 import { continueDiffFile, continueFile } from "../review/context-files";
 import { fold } from "../review/edits";
+import { git } from "../review/git";
 import type { ReviewJobs, TaskReviewStart } from "../review/jobs";
 import type { Ending } from "../review/judge";
 import { TIME_LIMIT_TEXT } from "../review/stream";
 import { repoPath } from "../review/validate";
-import { type BranchRemote, type ContextFile, cachePath, longPath, noUrl } from "../review/workspace";
+import { type BranchRemote, type ContextFile, cachePath, locked, longPath, noUrl } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import { CHECK_KINDS, type ChecksResult, checkStep } from "./checks";
 import { movedReason } from "./gitstate";
@@ -113,6 +115,7 @@ import {
   setBlocked,
   setLowerHow,
   setSettings,
+  setUsageArmed,
   sha256File,
   softReason,
   stepAnswers,
@@ -156,6 +159,7 @@ import {
 } from "./update";
 import {
   branchName,
+  deepestFirst,
   firstFree,
   freeBranch,
   headOf,
@@ -168,6 +172,7 @@ import {
   type RepoTree,
   readSetupMark,
   remoteBranches,
+  removeWorktree,
   resetTrees,
   resetWorktree,
   savePatch,
@@ -211,9 +216,15 @@ const cutLine = (cut: RunCut) => `The last run reached its ${cut === "turns" ? "
 const NO_TEST_FILE = "Claude added or changed no test file.";
 // spec.md section 6.25.5: the 409 of "Run setup again" on a part whose row holds a reason.
 const SETUP_WAITS = "This part waits for you. Act on the first reason first.";
-// The 409 of a resume input that a later work package of ps4-plan.md builds, and the note of "Fix these too" with no open point.
-const LATER = "This option comes in a later version.";
+// The note of "Fix these too" with no open point.
 const NO_POINTS = "No point waits for a fix.";
+// ps4-plan.md section 4: the texts of Hold, Skip, Start again, and the usage arm.
+const HOLD_WHEN = (ord: number) => `Hold works while Claude builds or fixes part ${ord}.`;
+const HOLD_FIRST = (ord: number) => `Hold part ${ord} first.`;
+const HELD_TEXT = (ord: number) => `Part ${ord} is on hold. Its work is kept.`;
+const NO_ARM = "No resume is armed.";
+// setTimeout takes at most 2^31 - 1 ms.
+const TIMER_MAX_MS = 2 ** 31 - 1;
 
 // The loop stops here: a reason now blocks the task, or the task stopped. The reason is already stored.
 class Halt extends Error {}
@@ -466,6 +477,8 @@ type Ctx = {
 type DriverMode = "build" | "instruct" | "update" | "setup";
 // ps4-plan.md section 2.5: the rows of a follow-up run, which map to the phase following.
 const FOLLOW = "(kind = 'instruct' OR (kind = 'fix' AND item IN ('points', 'pushback')))";
+// ps4-plan.md section 1 item 5: the restart mark of a part. The guards of GO read only the rows after it. The baseline is exempt.
+const MARK = "COALESCE((SELECT MAX(id) FROM task_step WHERE part = $part AND kind = 'commit' AND item = 'restart'), 0)";
 const isFollow = (r: { kind: string; item: string | null }) =>
   r.kind === "instruct" || (r.kind === "fix" && (r.item === "points" || r.item === "pushback"));
 // What a driver does first with the uncommitted work of each part that builds (build-redesign.md section 2.2). false: nothing. true:
@@ -557,17 +570,18 @@ const Q = {
   claudeAfter: `SELECT 1 FROM task_step WHERE part = $part AND id > $id AND kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve')
     LIMIT 1`,
   claudeRan: `SELECT 1 FROM task_step WHERE part = $part AND run IS NOT NULL
-    AND kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve') LIMIT 1`,
-  // part-session.md section 9.3.3, guard review: the newest commit of Claude's work (no plan commit, line-end repair, or plan change), and
-  // the own reviews after it. The last own review of one repository at one head that ended ok (spec.md section 6.7).
-  buildCommit: "SELECT 1 FROM task_step WHERE part = $part AND kind = 'commit' AND item = 'build' AND state = 'ok' LIMIT 1",
+    AND kind IN ('tests', 'implement', 'fix', 'instruct', 'resolve') AND id > ${MARK} LIMIT 1`,
+  // part-session.md section 9.3.3, guard review: the newest commit of Claude's work (no plan commit, line-end repair, plan change, or
+  // restart mark), and the own reviews after it. The last own review of one repository at one head that ended ok (spec.md section 6.7).
+  buildCommit: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'commit' AND item = 'build' AND state = 'ok' AND id > ${MARK}
+    LIMIT 1`,
   workCommit: `SELECT MAX(id) AS id FROM task_step WHERE part = $part AND kind = 'commit' AND state = 'ok'
-    AND item NOT IN ('plan', 'eol', 'spec')`,
+    AND item NOT IN ('plan', 'eol', 'spec', 'restart') AND id > ${MARK}`,
   reviewsAfter: "SELECT run FROM task_step WHERE part = $part AND kind = 'review' AND state = 'ok' AND run IS NOT NULL AND id > $after",
   reviewAt: `SELECT s.id, s.run FROM task_step s JOIN review_run r ON r.id = s.run WHERE s.part = $part AND s.kind = 'review'
     AND s.state = 'ok' AND r.idem_key LIKE $key ORDER BY s.id DESC LIMIT 1`,
   redBeforeSeen: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'check' AND item = $item
-    AND json_extract(detail_json, '$.redBefore') = 1 LIMIT 1`,
+    AND json_extract(detail_json, '$.redBefore') = 1 AND id > ${MARK} LIMIT 1`,
   ensureSettings: `INSERT INTO repo_task_settings (project, repo, updated_at) VALUES ($project, $repo, $now)
     ON CONFLICT (project, repo) DO NOTHING`,
   // spec.md section 6.7, Spec change: the newest proposal of one step. cancelled: the user rejected it.
@@ -579,6 +593,27 @@ const Q = {
   follow: `SELECT id, kind, item FROM task_step WHERE part = $part AND state = 'waiting' AND ${FOLLOW} ORDER BY id LIMIT 1`,
   newestFollow: `SELECT id, item FROM task_step WHERE part = $part AND ${FOLLOW} ORDER BY id DESC LIMIT 1`,
   lastFollow: `SELECT id FROM task_step WHERE part = $part AND item = $item AND ${FOLLOW} ORDER BY id DESC LIMIT 1`,
+  // part-session.md section 9.4 rule 6 and ps4-plan.md section 2.6: held lives in the row of its part only.
+  held: "SELECT 1 FROM task_part WHERE id = $id AND json_extract(blocked_json, '$.kind') = 'held'",
+  hold: "UPDATE task_part SET blocked_json = $b, updated_at = $now WHERE id = $id AND task = $task AND blocked_json IS NULL",
+  unhold: `UPDATE task_part SET blocked_json = NULL, updated_at = $now WHERE id = $id AND task = $task
+    AND json_extract(blocked_json, '$.kind') = 'held'`,
+  bump: "UPDATE task SET version = version + 1, updated_at = $now WHERE id = $id AND version = $version",
+  open: "SELECT id, kind FROM task_step WHERE part = $part AND state IN ('waiting', 'running') ORDER BY id",
+  // ps4-plan.md section 2.3: unpushed is task_part.pushed NULL with no pushed task_pr row of the part.
+  pushedPr: "SELECT 1 FROM task_pr WHERE part = $part AND pushed IS NOT NULL LIMIT 1",
+  // Skip and Start again: the reasons and the open loop questions of the part go. Start again also drops the old heads.
+  clearPart: "UPDATE task_part SET blocked_json = NULL, updated_at = $now WHERE id = $id",
+  dropAsks: `DELETE FROM task_question WHERE task = $task AND source = 'loop' AND answer_json IS NULL
+    AND step IN (SELECT id FROM task_step WHERE part = $part)`,
+  restartPart: "UPDATE task_part SET head = NULL, lines = NULL, files = NULL, updated_at = $now WHERE id = $id",
+  dropPrs: "DELETE FROM task_pr WHERE part = $part AND pushed IS NULL AND pr IS NULL AND remote_pr IS NULL",
+  // ps4-plan.md section 1 item 8: the previous Claude run of a part, for the arm of a new usage reason.
+  prevRun: `SELECT r.error_kind FROM task_step s JOIN review_run r ON r.id = s.run WHERE s.part = $part AND s.id < $step
+    ORDER BY s.id DESC LIMIT 1`,
+  // The tasks whose first reason is an armed usage reason, for the timers after an app restart.
+  armed: `SELECT id FROM task WHERE state IN ('implementing', 'ready') AND json_extract(blocked_json, '$.kind') = 'usage'
+    AND json_extract(blocked_json, '$.armed') = 1`,
 };
 
 // spec.md section 6.21: the steps that can get the Bash tool. The resolve step never does.
@@ -608,6 +643,42 @@ async function dirty(trees: readonly RepoTree[]): Promise<string[]> {
 
 // The patch file of one repository: file for main, <name>-<task_repo id>.patch for the others (spec.md section 6.16.6).
 const treePatch = (file: string, t: RepoTree) => (t.row.role === "main" ? file : file.replace(/\.patch$/, `-${t.row.id}.patch`));
+
+// The repositories of a part that the task changes.
+const editTrees = (trees: readonly RepoTree[]) =>
+  trees.filter((t): t is RepoTree & { wt: Worktree } => !!t.wt && (t.row.role === "main" || t.row.access === "edit"));
+
+// ps4-plan.md section 1 item 7 (part-session.md section 2.12): Start again writes refs/rl/task/<task>/backup/part-<ord>-<n> at the head
+// of each edit repository, with the first n that no cache of the part holds. The app git helper records the writes for the check of a
+// step of another part on the same cache (gap 17). Returns the ref.
+export async function backupPart(trees: readonly RepoTree[], task: number, ord: number): Promise<string> {
+  const ns = `refs/rl/task/${task}/backup`;
+  const edits = editTrees(trees).filter((t, k, all) => all.findIndex((x) => x.wt.cache === t.wt.cache) === k);
+  let n = 1;
+  for (const t of edits)
+    for (const ref of (await git([`--git-dir=${t.wt.cache}`, "for-each-ref", "--format=%(refname)", ns], { env: t.wt.env })).split("\n")) {
+      const m = /^refs\/rl\/task\/\d+\/backup\/part-(\d+)-(\d+)$/.exec(ref.trim());
+      if (m && Number(m[1]) === ord) n = Math.max(n, Number(m[2]) + 1);
+    }
+  const ref = `${ns}/part-${ord}-${n}`;
+  for (const t of edits) {
+    const head = await headOf(t.wt);
+    // git-update-ref(1): an empty old value refuses a ref that exists.
+    await locked(t.wt.cache, () => git([`--git-dir=${t.wt.cache}`, "update-ref", ref, head, ""], { env: t.wt.env }));
+  }
+  return ref;
+}
+
+// ps4-plan.md section 1 item 6: Start again resets each edit repository to its start, as openRepoTrees made its worktree: the part base
+// for main, the base commit for an added repository, and the pinned commit for a submodule. runPart then writes the plan commit again.
+export async function resetToStart(trees: readonly RepoTree[], base: string) {
+  const heads = editTrees(trees).map((t) => {
+    const head = t.row.role === "main" ? base : t.row.role === "added" ? t.row.base_commit : t.row.pinned;
+    if (!head) throw new Error(`The repository ${t.full || "main"} has no start commit.`);
+    return { taskRepo: t.row.id, head, baseCommit: null, pinned: null, baseChanged: false };
+  });
+  await resetToPre(trees, heads);
+}
 
 type StepRow = { id: number; part: number | null; kind: string; item: string | null; state: string; detail_json: string };
 
@@ -665,8 +736,13 @@ export function createLoop(opts: LoopOptions) {
   const gates = new Map<number, Set<() => void>>();
   const slotWaits = new Map<number, () => void>();
   const aborts = new Map<number, Set<AbortController>>();
-  // A kick while the driver builds: the driver asks the scheduler again.
-  const pokes = new Map<number, () => void>();
+  // A kick while the driver builds: the driver asks the scheduler again. part: a part that halted in this driver builds again.
+  const pokes = new Map<number, (part?: number) => void>();
+  // ps4-plan.md WP-4: the parts that a driver or a Skip or Start again works on now, per task. A part is idle when it is in no set and
+  // has no open step row.
+  const active = new Map<number, Set<number>>();
+  // part-session.md section 9.4, usage rules: the timer of the armed usage reason of a task, with its resumeAt.
+  const usageTimers = new Map<number, { at: number; timer: ReturnType<typeof setTimeout> }>();
   const enter = <T>(m: Map<number, Set<T>>, id: number, v: T) => m.set(id, (m.get(id) ?? new Set<T>()).add(v));
   const leave = <T>(m: Map<number, Set<T>>, id: number, v: T) => {
     const s = m.get(id);
@@ -692,6 +768,7 @@ export function createLoop(opts: LoopOptions) {
     live.broadcast("changed", { tasks: [id] });
     const db = settings.db();
     if (db && noteTaskWaits(db, [id], now())) live.broadcast("events", { count: 1 });
+    if (db) rearm(db, id);
   };
   const dto = (db: Database, id: number) => taskDto(db, taskRow(db, id) as TaskRow);
   const conflict = (db: Database, id: number, error: string): TaskResult => {
@@ -721,6 +798,8 @@ export function createLoop(opts: LoopOptions) {
     changed(id);
   }
   function block(c: Ctx, b: TaskBlocked): never {
+    // part-session.md section 9.4, queued reasons: a held part gets no reason. Its step ends as after a Stop.
+    if (onHold(c.db, c.part.id)) throw new Halt();
     c.waited = true;
     reason(c.db, c.id, b);
     throw new Halt();
@@ -760,9 +839,24 @@ export function createLoop(opts: LoopOptions) {
   const free = (db: Database, id: number) => taskRow(db, id)?.blocked_json === null;
   // spec.md section 6.20.6: a task that builds two or more parts at the same time runs its Claude steps beside the run slot.
   const beside = (c: Pick<Ctx, "db" | "id" | "t">) => buildsAtOnceOf(taskRow(c.db, c.id) ?? c.t) > 1;
+  // ps4-plan.md section 2.6: a held part halts alone, at its next step.
+  const onHold = (db: Database, part: number) => db.query(Q.held).get({ id: part }) !== null;
+  const goes = (c: Ctx) => isLive(c) && !onHold(c.db, c.part.id);
   function guard(c: Ctx) {
-    if (!isLive(c)) throw new Halt();
+    if (!goes(c)) throw new Halt();
   }
+  // The claim of a part by a driver or a route. false: another one works on it.
+  const claim = (id: number, part: number) => {
+    if (active.get(id)?.has(part)) return false;
+    enter(active, id, part);
+    return true;
+  };
+  const partIdle = (db: Database, id: number, part: number) =>
+    !active.get(id)?.has(part) && (db.query(Q.open).all({ part }) as unknown[]).length === 0;
+  // The version move of a change of a part row only.
+  const bump = (db: Database, id: number, version: number) => {
+    if (db.query(Q.bump).run({ id, version, now: now() }).changes !== 1) throw new Error(TASK_CHANGED);
+  };
 
   const preflightDeps: PreflightDeps = {
     dataDir,
@@ -868,7 +962,7 @@ export function createLoop(opts: LoopOptions) {
       if ((cur?.state === "implementing" || cur?.state === "ready") && blockedOf(cur)?.kind === "slot")
         setBlocked(c.db, { task: c.id, version: cur.version }, null, now());
     })();
-    if (!isLive(c)) {
+    if (!goes(c)) {
       endStep(c.db, step, "cancelled", { notes: ["The build stopped while the step waited for the run slot."] }, now());
       changed(c.id);
       throw new Halt();
@@ -1085,7 +1179,7 @@ export function createLoop(opts: LoopOptions) {
         trees: c.trees,
         instructions: o.instructions,
         resolveCheck: o.resolveCheck,
-        live: () => isLive(c),
+        live: () => goes(c),
         extra: beside(c),
         ...(shell && { shell }),
         ...(session && { session }),
@@ -1172,9 +1266,23 @@ export function createLoop(opts: LoopOptions) {
     const text = oneLine(r.text ?? "The run failed.");
     if (r.cut === "stall" || r.cut === "loop")
       return { kind: "stuck", cause: r.cut, step: r.step, text: `Needs you: ${text} Continue goes on with the kept work.` };
-    if (r.kind === "usage_limit")
-      return { kind: "usage", step: r.step, text: "Needs you: your Claude usage limit is reached. Continue runs the step again." };
+    if (r.kind === "usage_limit") return usageReason(c, r.step, r.resetsAt);
     return { kind: "error", cause: "run", step: r.step, text: `Needs you: the run of part ${c.part.ord} failed. ${text}` };
+  }
+
+  // part-session.md sections 2.11 and 9.4, ps4-plan.md section 1 items 8 and 9: the reason of a run that hit the usage limit. resetsAt is in
+  // seconds (Gate B37 U106 not verified). The reason starts armed when the setting is on and the previous Claude run of the part did not
+  // end with the usage limit, so the app resumes once per limit.
+  function usageReason(c: Ctx, step: number, resetsAt: number | null): TaskBlocked {
+    const prev = c.db.query(Q.prevRun).get({ part: c.part.id, step }) as { error_kind: string | null } | null;
+    const resumeAt = resetsAt !== null && Number.isSafeInteger(resetsAt * 1000) ? resetsAt * 1000 : undefined;
+    return {
+      kind: "usage",
+      step,
+      text: `Needs you: your Claude usage limit is reached. ${resumeAt === undefined ? "Continue runs the step again." : "Continue resumes the step after the limit resets."}`,
+      ...(resumeAt !== undefined && { resumeAt }),
+      armed: settings.usageResume() && prev?.error_kind !== "usage_limit",
+    };
   }
 
   // part-session.md section 9.3.3, guard firstCut: no earlier run of this kind and item after the last commit reached its turn cap or its
@@ -1573,9 +1681,9 @@ export function createLoop(opts: LoopOptions) {
   // repositories: a patch per changed worktree, then the reset deepest first (section 6.16.6). The row of step names the first saved
   // patch, or PATCH_LOST: it marks the reset for the Continue rule (workOf). A second reset with the same step never replaces a patch, and
   // it keeps a mark that names a saved patch, because continue.md reads the work of the step from it.
-  async function undo(trees: RepoTree[], db: Database, id: number, step: number) {
+  async function undo(trees: RepoTree[], db: Database, id: number, step: number): Promise<string | null> {
     const main = trees[0]?.wt as Worktree;
-    if (!(await dirty(trees)).length && trees.every((t) => t.wt || !noneDirty(trees, t))) return;
+    if (!(await dirty(trees)).length && trees.every((t) => t.wt || !noneDirty(trees, t))) return null;
     const first = patchFile(dataDir, db, id, step);
     let file = first;
     for (let n = 1; trees.some((t) => existsSync(treePatch(file, t))); n++) file = first.replace(/\.patch$/, `.${n}.patch`);
@@ -1595,6 +1703,7 @@ export function createLoop(opts: LoopOptions) {
     else await resetTrees(trees, await headOf(main));
     const had = stepDetailOf(db, step).patch;
     if (had === null || had === PATCH_LOST) patchStep(db, step, { patch: saved ? basename(saved) : PATCH_LOST });
+    return saved && basename(saved);
   }
 
   // The own review run (kind review, task set, pr NULL) on a snapshot of the part head. sub: a changed submodule instead of the main
@@ -1621,7 +1730,16 @@ export function createLoop(opts: LoopOptions) {
         : null;
       const plans = planFiles(c).map((f) => `## ${f.name.slice("spec/".length)}\n\n${f.text}`);
       const goals = c.plan.parts.map((x) => `- Part ${x.n}: ${oneLine(x.title)}. ${oneLine(x.goal)}`);
-      let ended: { step: number; run: number; ok: boolean; cancelled: boolean; text: string | null } | null = null;
+      type Ended = {
+        step: number;
+        run: number;
+        ok: boolean;
+        cancelled: boolean;
+        text: string | null;
+        usage: boolean;
+        resetsAt: number | null;
+      };
+      let ended: Ended | null = null;
       let step = 0;
       const start: TaskReviewStart = {
         task: c.id,
@@ -1654,7 +1772,15 @@ export function createLoop(opts: LoopOptions) {
             { findings: ids, notes: ok ? [] : [e.text ?? "The review failed."] },
             now(),
           );
-          ended = { step, run: run.id, ok, cancelled: e.status === "cancelled", text: e.text ?? null };
+          ended = {
+            step,
+            run: run.id,
+            ok,
+            cancelled: e.status === "cancelled",
+            text: e.text ?? null,
+            usage: e.kind === "usage_limit",
+            resetsAt: e.outcome?.resetsAt ?? null,
+          };
           return undefined;
         },
       };
@@ -1668,11 +1794,12 @@ export function createLoop(opts: LoopOptions) {
       changed(c.id);
       await s.done;
       changed(c.id);
-      const r = ended as { step: number; run: number; ok: boolean; cancelled: boolean; text: string | null } | null;
+      const r = ended as Ended | null;
       // An update restores its own reason (spec.md section 6.18.4). part-session.md section 9.3.4 (Q-SM1): a failed review of the build
-      // or of a follow-up gives the reason error/run.
+      // or of a follow-up gives the reason error/run. ps4-plan.md section 1 item 20: a review that hit the usage limit gives usage.
       if (r && !r.ok && c.mode === "update") throw new StepFailed(r.text ?? "The review failed.");
       if (!r || r.cancelled) throw new Halt();
+      if (!r.ok && r.usage) block(c, usageReason(c, r.step, r.resetsAt));
       if (!r.ok)
         block(c, {
           kind: "error",
@@ -2143,11 +2270,19 @@ export function createLoop(opts: LoopOptions) {
     const ended = new Set<number>();
     let again = false;
     let wake: (() => void) | null = null;
-    pokes.set(id, () => {
+    // A part that a poke names while its run still ends builds again after that end.
+    const rerun = new Set<number>();
+    pokes.set(id, (part) => {
+      if (part !== undefined) {
+        ended.delete(part);
+        rerun.add(part);
+      }
       again = true;
       wake?.();
     });
+    // The part stays claimed until its run end and path check are done, so Skip and Start again wait for it (ps4-plan.md WP-4).
     const go = (part: PartRow, resumed: boolean) => {
+      rerun.delete(part.id);
       const p = (async () => {
         const t = taskRow(db, id) as TaskRow;
         if (resumed && t.subtasks === 1) await settle(db, t, part);
@@ -2155,8 +2290,9 @@ export function createLoop(opts: LoopOptions) {
       })()
         .catch((e) => failed(db, id, e))
         .finally(() => {
+          leave(active, id, part.id);
           running.delete(part.id);
-          ended.add(part.id);
+          if (!rerun.delete(part.id)) ended.add(part.id);
         });
       running.set(part.id, p);
     };
@@ -2170,14 +2306,17 @@ export function createLoop(opts: LoopOptions) {
           openGates(id);
           slotWaits.get(id)?.();
         } else {
-          for (const p of buildingAll(db, id)) if (!running.has(p.id) && !ended.has(p.id)) go(p, !keep);
+          // ps4-plan.md section 2.6: a held part does not build.
+          for (const p of buildingAll(db, id))
+            if (!running.has(p.id) && !ended.has(p.id) && !onHold(db, p.id) && claim(id, p.id)) go(p, !keep);
           if (t.subtasks === 1)
             for (let p = await startPart(db, id); p; p = await startPart(db, id)) {
-              go(p, false);
+              if (claim(id, p.id)) go(p, false);
               if (closing) break;
             }
         }
-        if (!running.size) return;
+        // A poke during the await of startPart sets again with no part running.
+        if (!running.size && !again) return;
         if (!again)
           await new Promise<void>((resolve) => {
             wake = resolve;
@@ -2196,7 +2335,15 @@ export function createLoop(opts: LoopOptions) {
       await recoverUpdates(db, id);
       const t = taskRow(db, id);
       const again = (p: PartRow) => typeof reset === "object" && (reset.again === null || reset.again === p.id);
-      if (reset && t) for (const part of buildingAll(db, id)) await settle(db, t, part, again(part));
+      // A held part keeps its work until Continue with its part. A part that a route works on is not this driver's.
+      if (reset && t)
+        for (const part of buildingAll(db, id))
+          if (!onHold(db, part.id) && claim(id, part.id))
+            try {
+              await settle(db, t, part, again(part));
+            } finally {
+              leave(active, id, part.id);
+            }
       // spec.md section 6.16.7: the pre-flight passes before any Claude step of the build. A part of a task with sub-tasks runs it at its
       // start (startPart), and again for each part that builds when a driver starts.
       const t0 = taskRow(db, id);
@@ -2397,7 +2544,14 @@ export function createLoop(opts: LoopOptions) {
   // The app never reads the text of a send: it goes to Claude as "Your instructions" only. On an implementing part the loop ends after
   // the follow-up. In implementing, the build of the parts goes on after it (AC-B345).
   async function driveFollow(db: Database, id: number, partId: number, again: boolean, before: TaskBlocked | null) {
+    // A Skip or Start again of the part runs now: the follow-up row waits for the next GO.
+    if (!claim(id, partId)) {
+      if (before && free(db, id)) setReason(db, id, before);
+      changed(id);
+      return;
+    }
     let c: Ctx | null = null;
+    let mine = true;
     try {
       await recoverUpdates(db, id);
       const t = taskRow(db, id) as TaskRow;
@@ -2406,7 +2560,14 @@ export function createLoop(opts: LoopOptions) {
       c.phase = "idle";
       // Changes that an earlier stop or the red checks of the build left get the Continue rule first.
       await settle(db, t, part, again, c.trees);
-      await phases(c, part.state === "implementing");
+      try {
+        await phases(c, part.state === "implementing");
+      } catch (e) {
+        // ps4-plan.md section 2.6: a Hold ends the follow-up of its part only. The build of the other parts goes on.
+        if (!(e instanceof Halt) || !onHold(db, partId) || stopping.has(id)) throw e;
+      }
+      leave(active, id, partId);
+      mine = false;
       if (taskRow(db, id)?.state === "implementing" && free(db, id) && !stopping.has(id)) {
         // The driver becomes a build driver, so Stop sends STOP as for a build.
         modes.delete(id);
@@ -2415,6 +2576,8 @@ export function createLoop(opts: LoopOptions) {
       changed(id);
     } catch (e) {
       await endFollow(db, id, c, e, before);
+    } finally {
+      if (mine) leave(active, id, partId);
     }
   }
 
@@ -2469,10 +2632,18 @@ export function createLoop(opts: LoopOptions) {
       b.step !== null &&
       (db.query(Q.step).get({ id: b.step, task: id }) as { kind: string; item: string | null } | null)?.item === "setup" &&
       partOf(db, b) === partId;
+    if (!claim(id, partId)) {
+      if (before && free(db, id)) setReason(db, id, before);
+      return;
+    }
     try {
       const t = taskRow(db, id) as TaskRow;
       const part = parts(db, id).find((p) => p.id === partId) as PartRow;
-      await setup(await context(db, t, part, "setup"), true);
+      try {
+        await setup(await context(db, t, part, "setup"), true);
+      } finally {
+        leave(active, id, partId);
+      }
       // spec.md section 6.25.5: a green run ends only the setup reason of its own part, and the next waiting reason moves up.
       if (before) setReason(db, id, ofSetup(before) ? null : before);
       // A green run of a building part lets the build go on. No reset: a reset that removes files deletes the setup mark.
@@ -2822,6 +2993,141 @@ export function createLoop(opts: LoopOptions) {
     return t;
   }
 
+  // part-session.md section 9.4 column "Continue does": the reason clears, a follow-up row that did not finish goes in the queue again
+  // (ps4-plan.md section 1 gap 14), and the part of the reason runs on (gap 15). The usage timer takes the same path.
+  function goOnReason(db: Database, t: TaskRow, b: TaskBlocked | null, reset: Reset) {
+    const id = t.id;
+    const step = b?.step == null ? null : (db.query(Q.step).get({ id: b.step, task: id }) as StepRow | null);
+    // part-session.md section 5.4: Continue clears a reason of a kind that the app sets no more (budget/time, size/budget, push).
+    const go = db.transaction(() => {
+      if (b) setBlocked(db, { task: id, version: t.version }, null, now());
+      if (!free(db, id)) return false;
+      if (step && isFollow(step) && step.state !== "ok") requeue(db, id, step.id);
+      return true;
+    })();
+    if (go) goOn(db, id, partOf(db, b), reset, b);
+    changed(id);
+  }
+
+  // part-session.md section 9.4, usage rules: one timer per task for its first reason when that reason is usage with armed true. A past
+  // resumeAt, or none, fires at once. changed() and recover() call it, so a reason that moves up gets its timer.
+  function rearm(db: Database, id: number) {
+    const t = taskRow(db, id);
+    const b = t && (t.state === "implementing" || t.state === "ready") ? blockedOf(t) : null;
+    const at = !closing && b?.kind === "usage" && b.armed ? (b.resumeAt ?? 0) : null;
+    const cur = usageTimers.get(id);
+    if (cur?.at === at) return;
+    if (cur) clearTimeout(cur.timer);
+    usageTimers.delete(id);
+    if (at === null) return;
+    const timer = setTimeout(
+      () => {
+        usageTimers.delete(id);
+        due(id);
+      },
+      Math.min(Math.max(0, at - now()), TIMER_MAX_MS),
+    );
+    usageTimers.set(id, { at, timer });
+  }
+
+  // ps4-plan.md section 2.7, RESUME_DUE: the first reason is usage with armed true, its time came, no driver works, and the app does not
+  // stop. A driver that still ends calls changed() at its end, which arms the timer again. A capped delay arms it again too.
+  function due(id: number) {
+    const db = settings.db();
+    const t = db && !closing ? taskRow(db, id) : null;
+    if (!db || !t || (t.state !== "implementing" && t.state !== "ready")) return;
+    const b = blockedOf(t);
+    if (b?.kind !== "usage" || !b.armed) return;
+    if (b.resumeAt !== undefined && now() < b.resumeAt) return rearm(db, id);
+    if (drivers.has(id)) return;
+    goOnReason(db, t, b, true);
+  }
+
+  // part-session.md section 9.3.2 (ps4-plan.md section 2.3): after an ABANDON, LAST_PR_OPEN when no part waits for its PR, then
+  // ALL_MERGED when each part merged or was dropped. In stopped neither event fires, so RESUME runs this check again (gap 18). Call it in
+  // the transaction of the event. Returns the new version.
+  function partsDone(db: Database, id: number, version: number): number {
+    const rest = parts(db, id);
+    if (!rest.length) return version;
+    if (taskRow(db, id)?.state === "implementing" && !rest.some((p) => WAITS_PR.has(p.state))) {
+      const a = advance(db, { task: id, version }, { type: "LAST_PR_OPEN" }, {}, now());
+      if (a.status === 200) version = a.version;
+    }
+    if (taskRow(db, id)?.state === "ready" && rest.every((p) => p.state === "merged" || p.state === "abandoned")) {
+      const a = advance(db, { task: id, version }, { type: "ALL_MERGED" }, {}, now());
+      if (a.status === 200) version = a.version;
+    }
+    return version;
+  }
+
+  // A started part on top of part, which drop and Skip refuse (spec.md section 6.20.7).
+  function upperOf(db: Database, t: TaskRow, part: PartRow): string | null {
+    const all = parts(db, t.id);
+    const names = partNames(t.key, all);
+    const name = (p: PartRow) => names.get(p.id)?.text ?? t.key;
+    const upper = all.find(
+      (p) => p.after_part === part.id && p.base_commit !== null && p.base_branch === part.branch && STARTED.has(p.state),
+    );
+    return upper ? `${name(upper)} builds on ${name(part)}. Move or drop ${name(upper)} first.` : null;
+  }
+
+  // Skip and Start again (part-session.md section 9.3.2): the reasons of the part go, from its row and from the task when the first reason
+  // is the part's, and its open loop questions go. In the transaction of the part event. Returns the new version.
+  function dropReasons(db: Database, id: number, partId: number, version: number): number {
+    const first = partOf(db, blockedOf(taskRow(db, id) as TaskRow));
+    db.query(Q.clearPart).run({ id: partId, now: now() });
+    db.query(Q.dropAsks).run({ task: id, part: partId });
+    return first === partId ? setBlocked(db, { task: id, version }, null, now()) : version;
+  }
+
+  // Skip and Start again: the part is claimed for the git work. A task with no driver gets a placeholder driver, so the routes that start a
+  // driver answer 409 until the work ends (as undoUpdate). A driver that builds other parts goes on (ps4-plan.md section 1 gap 17).
+  async function partWork<T>(id: number, partId: number, f: () => Promise<T>): Promise<T> {
+    enter(active, id, partId);
+    const own = !drivers.has(id);
+    const work = f();
+    const placeholder = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    if (own) drivers.set(id, placeholder);
+    try {
+      return await work;
+    } finally {
+      leave(active, id, partId);
+      if (own && drivers.get(id) === placeholder) drivers.delete(id);
+    }
+  }
+
+  // ps4-plan.md section 2.6, held CONTINUE with part: the hold goes. A build driver takes the part again at once, else a new driver starts
+  // with the Continue rule. In stopped, the task also takes RESUME (section 8 item 5) and the check of gap 18.
+  function resumePart(db: Database, t: TaskRow, partId: number): TaskResult {
+    const id = t.id;
+    const part = parts(db, id).find((p) => p.id === partId);
+    if (!part) return { status: 404, error: "Part not found." };
+    if (!onHold(db, partId)) return conflict(db, id, `Part ${part.ord} is not on hold.`);
+    if (t.state === "stopped" ? t.stopped_from !== "implementing" : t.state !== "implementing")
+      return conflict(db, id, TASK_STATE_TEXT[t.state]);
+    // Only a build driver in its part loop takes the part. A driver of a follow-up, a setup, or an update, a driver that ends, and a driver
+    // of a stopped task do not.
+    if (drivers.has(id) && (t.state === "stopped" || modes.has(id) || !pokes.has(id))) return conflict(db, id, BUSY);
+    const error = db.transaction((): string | null => {
+      if (t.state === "stopped") {
+        const r = advance(db, { task: id, version: t.version }, { type: "RESUME" }, {}, now());
+        if (r.status !== 200) return r.error;
+        partsDone(db, id, setBlocked(db, { task: id, version: r.version }, null, now()));
+      } else bump(db, id, t.version);
+      db.query(Q.unhold).run({ id: partId, task: id, now: now() });
+      return null;
+    })();
+    if (error) return conflict(db, id, error);
+    const poke = pokes.get(id);
+    if (poke) poke(partId);
+    else if (!drivers.has(id) && taskRow(db, id)?.state === "implementing" && free(db, id)) kick(db, id, true);
+    changed(id);
+    return { status: 200, task: dto(db, id) };
+  }
+
   return {
     // spec.md section 6.2: a small plan approval starts part 1.
     build(db: Database, id: number) {
@@ -2890,27 +3196,146 @@ export function createLoop(opts: LoopOptions) {
       if (!part) return { status: 404, error: "Part not found." };
       if (part.state !== "planned" && part.state !== "declined")
         return conflict(db, id, "Only a part that waits for its build or a declined PR can be dropped.");
-      const names = partNames(t.key, all);
-      const name = (p: PartRow) => names.get(p.id)?.text ?? t.key;
-      const upper = all.find(
-        (p) => p.after_part === partId && p.base_commit !== null && p.base_branch === part.branch && STARTED.has(p.state),
-      );
-      if (upper) return conflict(db, id, `${name(upper)} builds on ${name(part)}. Move or drop ${name(upper)} first.`);
+      const upper = upperOf(db, t, part);
+      if (upper) return conflict(db, id, upper);
       const error = db.transaction((): string | null => {
         const r = advancePart(db, { task: id, version: t.version, part: partId }, { type: "ABANDON" }, {}, now());
         if (r.status !== 200) return r.error;
-        let version = r.version;
-        const rest = parts(db, id);
-        if (t.state === "implementing" && !rest.some((p) => WAITS_PR.has(p.state))) {
-          const a = advance(db, { task: id, version }, { type: "LAST_PR_OPEN" }, {}, now());
-          if (a.status === 200) version = a.version;
-        }
-        if (rest.every((p) => p.state === "merged" || p.state === "abandoned"))
-          advance(db, { task: id, version }, { type: "ALL_MERGED" }, {}, now());
+        partsDone(db, id, r.version);
         return null;
       })();
       if (error) return conflict(db, id, error);
       kick(db, id);
+      changed(id);
+      return { status: 200, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/hold (ps4-plan.md sections 2.6 and 4): held goes into the row of the part, then only the runs of
+    // that part end cancelled. Its phase takes STOPPED, and its work stays. The other parts go on.
+    hold(db: Database, id: number, partId: number, input: { version: number }): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      const part = parts(db, id).find((p) => p.id === partId);
+      if (!part) return { status: 404, error: "Part not found." };
+      if (onHold(db, partId)) return conflict(db, id, `Part ${part.ord} is on hold already.`);
+      const open = (db.query(Q.open).all({ part: partId }) as { id: number; kind: string }[])[0];
+      if (
+        t.state !== "implementing" ||
+        part.state !== "implementing" ||
+        part.blocked_json !== null ||
+        !open ||
+        (open.kind !== "implement" && open.kind !== "fix")
+      )
+        return conflict(db, id, HOLD_WHEN(part.ord));
+      const b: TaskBlocked = { kind: "held", step: open.id, part: partId, text: HELD_TEXT(part.ord) };
+      db.transaction(() => {
+        db.query(Q.hold).run({ id: partId, task: id, b: JSON.stringify(b), now: now() });
+        bump(db, id, t.version);
+      })();
+      review.cancelPart(db, id, partId);
+      // A step that waits for the run slot sees the hold when it wakes.
+      slotWaits.get(id)?.();
+      changed(id);
+      return { status: 200, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/skip (part-session.md sections 2.12 and 9.3.2): "Skip this part" of a task with sub-tasks, before
+    // the PR of the part. The patch of the work is saved, the part takes ABANDON, its reasons and its transcript go, and then its
+    // worktree. A Skip while another part runs a step keeps the task live (ps4-plan.md section 1 gap 17). In stopped, RESUME runs the
+    // check of the task state (gap 18).
+    async skip(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      if (t.state !== "implementing" && t.state !== "stopped") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+      if (t.subtasks !== 1) return conflict(db, id, "Only a part of a task with sub-tasks can be skipped.");
+      const part = parts(db, id).find((p) => p.id === partId);
+      if (!part) return { status: 404, error: "Part not found." };
+      if (HAS_PR.has(part.state) || part.state === "declined" || part.state === "merged") return conflict(db, id, "This part has a PR.");
+      if (!partMachine.resolveState({ value: part.state, context: { gate: false } }).can({ type: "ABANDON" }))
+        return conflict(db, id, `This part is ${PART_STATE_TEXT[part.state].toLowerCase()}.`);
+      if (!partIdle(db, id, partId)) return conflict(db, id, HOLD_FIRST(part.ord));
+      const upper = upperOf(db, t, part);
+      if (upper) return conflict(db, id, upper);
+      let error: string | null;
+      try {
+        error = await partWork(id, partId, async () => {
+          const c = WORKTREE.has(part.state) ? await context(db, t, part) : null;
+          const last = (db.query(Q.lastStep).get({ part: partId }) as { id: number | null }).id ?? 0;
+          if (c) await undo(c.trees, db, id, last);
+          const refused = db.transaction((): string | null => {
+            const cur = taskRow(db, id) as TaskRow;
+            if (cur.state !== "implementing" && cur.state !== "stopped") return TASK_STATE_TEXT[cur.state];
+            const r = advancePart(db, { task: id, version: cur.version, part: partId }, { type: "ABANDON" }, {}, now());
+            if (r.status !== 200) return r.error;
+            partsDone(db, id, dropReasons(db, id, partId, r.version));
+            return null;
+          })();
+          if (refused || !c) return refused;
+          // The part is abandoned, so a folder that does not go only stays on disk.
+          for (const x of deepestFirst(c.trees))
+            if (x.wt)
+              await removeWorktree(x.wt).catch((e) =>
+                log(`Task ${id}: could not remove the worktree of part ${part.ord}: ${noUrl((e as Error).message)}`),
+              );
+          return null;
+        });
+      } catch (e) {
+        return conflict(db, id, `The app could not save the work of part ${part.ord}: ${noUrl((e as Error).message)}`);
+      }
+      if (error) return conflict(db, id, error);
+      if (taskRow(db, id)?.state === "implementing") kick(db, id);
+      changed(id);
+      return { status: 200, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/restart (part-session.md sections 2.12 and 9.3.2): "Start this part again" before the first push.
+    // The patch of the work is saved, refs/rl/task/<id>/backup/part-<ord>-<n> keeps the old head, and each edit repository goes back to its
+    // start. Then the restart mark, RESTART, and the reasons of the part go. The baseline and the setup mark stay. The next run is a new
+    // session (ps4-plan.md section 1 items 5 to 7).
+    async restart(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      if (t.state !== "implementing" && t.state !== "stopped") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+      const part = parts(db, id).find((p) => p.id === partId);
+      if (!part) return { status: 404, error: "Part not found." };
+      if (part.pushed !== null || db.query(Q.pushedPr).get({ part: partId }))
+        return conflict(db, id, `Part ${part.ord} is on the server. It cannot start again.`);
+      if (!partMachine.resolveState({ value: part.state, context: { gate: false, unpushed: true } }).can({ type: "RESTART" }))
+        return conflict(db, id, `This part is ${PART_STATE_TEXT[part.state].toLowerCase()}.`);
+      if (!partIdle(db, id, partId)) return conflict(db, id, HOLD_FIRST(part.ord));
+      let error: string | null;
+      try {
+        error = await partWork(id, partId, async () => {
+          const c = await context(db, t, part);
+          const last = (db.query(Q.lastStep).get({ part: partId }) as { id: number | null }).id ?? 0;
+          const patch = await undo(c.trees, db, id, last);
+          const ref = await backupPart(c.trees, id, part.ord);
+          await resetToStart(c.trees, c.base);
+          return db.transaction((): string | null => {
+            const cur = taskRow(db, id) as TaskRow;
+            if (cur.state !== "implementing" && cur.state !== "stopped") return TASK_STATE_TEXT[cur.state];
+            const unpushed = parts(db, id).find((p) => p.id === partId)?.pushed === null && !db.query(Q.pushedPr).get({ part: partId });
+            const r = advancePart(db, { task: id, version: cur.version, part: partId }, { type: "RESTART" }, { unpushed }, now());
+            if (r.status !== 200) return r.error;
+            const mark = insertStep(db, { task: id, part: partId, kind: "commit", item: "restart", state: "ok" }, now());
+            const notes = [`Started again from the part base. The old head is at ${ref}.`];
+            if (patch) notes.push(`The work that was not committed is in the patch ${patch}.`);
+            endStep(db, mark, "ok", { notes }, now());
+            db.query(Q.restartPart).run({ id: partId, now: now() });
+            db.query(Q.dropPrs).run({ part: partId });
+            dropReasons(db, id, partId, r.version);
+            return null;
+          })();
+        });
+      } catch (e) {
+        return conflict(db, id, `The app could not start part ${part.ord} again: ${noUrl((e as Error).message)}`);
+      }
+      if (error) return conflict(db, id, error);
+      if (taskRow(db, id)?.state === "implementing" && free(db, id)) {
+        const poke = pokes.get(id);
+        if (poke) poke(partId);
+        else kick(db, id);
+      }
       changed(id);
       return { status: 200, task: dto(db, id) };
     },
@@ -2963,13 +3388,27 @@ export function createLoop(opts: LoopOptions) {
     // the phase from the rows (build-redesign.md section 2.2, part-session.md section 9.5). ps4-plan.md section 1 gaps 14 and 15: a
     // follow-up row that did not finish goes in the queue again, and the reason of a built part runs that part, in implementing and in
     // ready. "start-step-again" resets the part of the reason, or each part that builds, to its last commit with the patch saved (spec.md
-    // section 6.7, Continue). leave gives back the reason before the follow-up in ready.
+    // section 6.7, Continue). leave gives back the reason before the follow-up in ready. part ends the hold of that part (ps4-plan.md section
+    // 2.6). disarm and Continue before the reset time act on the usage arm (section 2.7).
     resume(db: Database, id: number, input: TaskResumeInput): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
-      // ps4-plan.md WP-4 builds the input part (Hold) and the option disarm (the usage arm).
-      if (input.part !== undefined || input.option === "disarm") return conflict(db, id, LATER);
+      if (input.part !== undefined) return resumePart(db, t, input.part);
       const b = blockedOf(t);
+      const usage = (t.state === "implementing" || t.state === "ready") && b?.kind === "usage" ? b : null;
+      if (input.option === "disarm") {
+        if (!usage?.armed) return conflict(db, id, NO_ARM);
+        setUsageArmed(db, { task: id, version: t.version }, false, now());
+        changed(id);
+        return { status: 200, task: dto(db, id) };
+      }
+      // Continue before the reset time arms every usage reason with one version move. An armed reason stays as it is. The arm starts no
+      // driver, so a driver of other parts does not refuse it.
+      if (usage && !input.option && usage.resumeAt !== undefined && now() < usage.resumeAt) {
+        if (!usage.armed) setUsageArmed(db, { task: id, version: t.version }, true, now());
+        changed(id);
+        return { status: 200, task: dto(db, id) };
+      }
       if ((t.state === "implementing" || t.state === "ready") && b?.kind === "slot")
         return conflict(db, id, "The build waits for the run slot. It goes on by itself.");
       const pause = t.state === "implementing" && b?.kind === "question" && b.step === null && b.text === PAUSED;
@@ -2982,11 +3421,11 @@ export function createLoop(opts: LoopOptions) {
         const error = db.transaction((): string | null => {
           const r = advance(db, { task: id, version: t.version }, { type: "RESUME" }, {}, now());
           if (r.status !== 200) return r.error;
-          setBlocked(db, { task: id, version: r.version }, null, now());
+          partsDone(db, id, setBlocked(db, { task: id, version: r.version }, null, now()));
           return null;
         })();
         if (error) return conflict(db, id, error);
-        kick(db, id, reset);
+        if (taskRow(db, id)?.state === "implementing") kick(db, id, reset);
         changed(id);
         return { status: 200, task: dto(db, id) };
       }
@@ -3015,16 +3454,7 @@ export function createLoop(opts: LoopOptions) {
         return conflict(db, id, TASK_STATE_TEXT.implementing);
       // spec.md section 6.25.4: the clear moves the next reason up and starts no driver, so the option would be lost.
       if (input.option && waitingOf(db, id)) return conflict(db, id, WAITING);
-      const step = b?.step == null ? null : (db.query(Q.step).get({ id: b.step, task: id }) as StepRow | null);
-      // part-session.md section 5.4: Continue clears a reason of a kind that the app sets no more (budget/time, size/budget, push).
-      const go = db.transaction(() => {
-        if (b) setBlocked(db, { task: id, version: t.version }, null, now());
-        if (!free(db, id)) return false;
-        if (step && isFollow(step) && step.state !== "ok") requeue(db, id, step.id);
-        return true;
-      })();
-      if (go) goOn(db, id, partOf(db, b), reset, b);
-      changed(id);
+      goOnReason(db, t, b, reset);
       return { status: 200, task: dto(db, id) };
     },
 
@@ -3400,6 +3830,8 @@ export function createLoop(opts: LoopOptions) {
       if (drivers.has(id)) return conflict(db, id, WORKING);
       const u = undoTarget(db, t, partId);
       if ("error" in u) return conflict(db, id, u.error);
+      // The undo writes no step row, so Skip and Start again see the part busy only through the claim.
+      enter(active, id, u.part.id);
       const work = (async (): Promise<string | null> => {
         const part = parts(db, id).find((p) => p.id === u.part.id) as PartRow;
         const c = await context(db, t, part, "update");
@@ -3427,6 +3859,7 @@ export function createLoop(opts: LoopOptions) {
       } catch (e) {
         return conflict(db, id, `The app could not undo the update: ${noUrl((e as Error).message)}`);
       } finally {
+        leave(active, id, u.part.id);
         if (drivers.get(id) === held) {
           drivers.delete(id);
           pauseAsked.delete(id);
@@ -3454,7 +3887,8 @@ export function createLoop(opts: LoopOptions) {
       return { status: 200, task: dto(db, id) };
     },
 
-    // The first open of the database: the updates that a restart stopped (spec.md section 6.18.4, Restart).
+    // The first open of the database: the updates that a restart stopped (spec.md section 6.18.4, Restart), and the timers of the armed
+    // usage reasons (part-session.md section 9.5). A past resumeAt fires at once.
     recover(db: Database) {
       for (const { task } of db.query(Q.restartTasks).all() as { task: number }[])
         start(db, task, async () => {
@@ -3464,6 +3898,7 @@ export function createLoop(opts: LoopOptions) {
             log(`Task ${task}: could not reset the update that a restart stopped: ${noUrl((e as Error).message)}`);
           }
         });
+      for (const { id } of db.query(Q.armed).all() as { id: number }[]) rearm(db, id);
     },
 
     // Resolves when the build of the task waits or ends.
@@ -3488,6 +3923,8 @@ export function createLoop(opts: LoopOptions) {
     // At app stop (review.stop()): no new step, the checks are killed, and the drivers end.
     async shutdown() {
       closing = true;
+      for (const u of usageTimers.values()) clearTimeout(u.timer);
+      usageTimers.clear();
       for (const id of [...aborts.keys()]) abortChecks(id);
       for (const id of [...gates.keys()]) openGates(id);
       for (const w of slotWaits.values()) w();

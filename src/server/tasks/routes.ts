@@ -402,6 +402,27 @@ export function createTaskRoutes(opts: {
         await loop.settle(id);
         return answer(c, loop.drop(db, id, part, c.req.valid("json")));
       })
+      // ps4-plan.md section 4: Hold, Skip, and Start again of one part.
+      .post("/tasks/:id/parts/:part/hold", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        return answer(c, loop.hold(db, id, part, c.req.valid("json")));
+      })
+      .post("/tasks/:id/parts/:part/skip", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, await loop.skip(db, id, part, c.req.valid("json")));
+      })
+      .post("/tasks/:id/parts/:part/restart", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, part } = c.req.valid("param");
+        await loop.settle(id);
+        return answer(c, await loop.restart(db, id, part, c.req.valid("json")));
+      })
       // spec.md section 6.20.12: the status read of the Task view, at most once per JIRA_VIEW_AGE_MS.
       .post("/tasks/:id/jira-check", idParam, async (c) => {
         const db = openDb();

@@ -18,6 +18,7 @@ import { REVIEW_FIX_TRIES, resumeProblem, tickDiff, tickTask } from "../../src/s
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { advance, advancePart, dropSessions, partSession, saveSession, sha256File, taskRow } from "../../src/server/tasks/tasks";
 import { specResult, type TaskBlocked } from "../../src/shared/task";
+import { claudeStream } from "../support/review-fixture";
 import {
   type Call,
   CLEAN,
@@ -528,7 +529,65 @@ describe("follow-ups in the phase loop (ps4-plan.md WP-3)", () => {
         "failed",
         true,
       ]);
-      expect([s.t().state, s.blocked()]).toEqual(["implementing", expect.objectContaining({ kind: "usage", step: limited.id })]);
+      // AC-B352: resumeAt is resetsAt times 1000. The setting is off, so the reason is not armed.
+      expect([s.t().state, s.blocked()]).toEqual([
+        "implementing",
+        expect.objectContaining({ kind: "usage", step: limited.id, resumeAt: 1_791_678_600_000, armed: false }),
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B352, AC-B353: with the setting on, a usage limit arms the resume; the timer runs the step again once, and a second limit waits unarmed",
+    async () => {
+      const usage = resolve(import.meta.dir, "../../fixtures/claude-synthetic/usage-limit.jsonl");
+      const s = await setup({ usageResume: true, seq: { "implement:build": [{ fixture: usage, exitCode: 1 }] } });
+      await s.build();
+      // The fixture reset time is in the past, so the timer fires at once and a second driver runs the build again.
+      const builds = () => s.runCalls().filter((c) => s.modeOf(c) === "build").length;
+      await until(() => builds() === 2, 120_000);
+      await until(() => s.steps().filter((x) => x.kind === "implement" && x.state === "failed").length === 2, 120_000);
+      await s.loop.idle(s.task);
+      expect(order(s, 0).filter((p) => p.startsWith("GO>building") || p.startsWith("WAIT"))).toEqual([
+        "GO>building",
+        "WAIT>idle",
+        "GO>building",
+        "WAIT>idle",
+      ]);
+      const second = s
+        .steps()
+        .filter((x) => x.kind === "implement")
+        .at(-1) as Step;
+      // The previous Claude run of the part ended with the usage limit, so the second reason needs a click.
+      expect([s.t().state, s.blocked()]).toEqual([
+        "implementing",
+        expect.objectContaining({ kind: "usage", step: second.id, resumeAt: 1_791_678_600_000, armed: false }),
+      ]);
+      await Bun.sleep(300);
+      expect([builds(), s.loop.running(s.task)]).toEqual([2, false]);
+    },
+    SLOW,
+  );
+
+  test(
+    "ps4-plan.md section 1 item 20: an own review that hits the usage limit gives usage, not error/run",
+    async () => {
+      const s = await setup();
+      // A review run checks the init tools, so the stream gets the init of a review run.
+      const usage = claudeStream(s.root, "limit", "claude-synthetic/usage-limit.jsonl");
+      s.scenario({ seq: { "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }], review: [{ fixture: usage, exitCode: 1 }] } });
+      await s.build();
+      const own = s
+        .steps()
+        .filter((x) => x.kind === "review")
+        .at(-1) as Step;
+      expect([own.state, s.t().state, s.blocked()]).toEqual([
+        "failed",
+        "implementing",
+        expect.objectContaining({ kind: "usage", step: own.id, resumeAt: 1_791_678_600_000, armed: false }),
+      ]);
+      expect(order(s, 0).slice(-2)).toEqual(["GO>reviewing", "WAIT>idle"]);
     },
     SLOW,
   );
@@ -706,7 +765,7 @@ describe("the transcript at the end of a part (part-session.md section 2.2, End 
     const skip = seed("implementing", "implementing");
     expect(advancePart(db, { task: skip.task, version: skip.version(), part: skip.part }, { type: "ABANDON" }).status).toBe(200);
     gone(skip);
-    // RESTART has no route yet (PS4). The machine refuses it after the first push.
+    // The machine refuses RESTART after the first push.
     const again = seed("implementing", "self_reviewed");
     expect(
       advancePart(db, { task: again.task, version: again.version(), part: again.part }, { type: "RESTART" }, { unpushed: true }).status,

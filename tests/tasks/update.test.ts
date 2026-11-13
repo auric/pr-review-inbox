@@ -242,6 +242,21 @@ describe("Update from the base branch (spec.md section 6.18.3)", () => {
   );
 
   test(
+    "ps4-plan.md WP-4: Start again refuses a part while Undo of its update works on it",
+    async () => {
+      const s = await builtTask();
+      await remoteCommit(s.r, "main", { "README.md": "new readme\n" });
+      s.mode("red");
+      expect((await update(s)).status).toBe(202);
+      const undo = s.loop.undoUpdate(s.db, s.task, s.part().id, { version: s.t().version });
+      const again = await s.loop.restart(s.db, s.task, s.part().id, { version: s.t().version });
+      expect([again.status, (again as { error?: string }).error]).toEqual([409, "Hold part 1 first."]);
+      expect((await undo).status).toBe(200);
+    },
+    SLOW,
+  );
+
+  test(
     "AC-B64: a restart during an update aborts the merge and resets each repository to its preHead",
     async () => {
       const s = await builtTask();

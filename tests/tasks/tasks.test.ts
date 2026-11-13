@@ -654,12 +654,25 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       );
       for (const one of [{ option: "start-step-again" }, { option: "leave" }, { option: "disarm" }, { part: 1 }])
         expect(taskResumeInput.safeParse({ version: 1, ...one }).success).toBe(true);
-      // WP-4 builds Hold and the usage arm: until then part and disarm do nothing else, also on a task that stopped before its build.
+      // ps4-plan.md section 4: a task that stopped before its build has no part to hold and no armed usage reason.
       const stop2 = await h.json<TaskDto>(`/api/tasks/${c.body.id}/stop`, { body: { version: back.body.version } });
       expect([stop2.status, stop2.body.state]).toEqual([200, "stopped"]);
-      for (const later of [{ part: 1 }, { option: "disarm" }]) {
-        const r = await h.json<TaskConflict>(`/api/tasks/${c.body.id}/resume`, { body: { version: stop2.body.version, ...later } });
-        expect([r.status, r.body.error, r.body.task.state]).toEqual([409, "This option comes in a later version.", "stopped"]);
+      const part = await h.json<{ error: string }>(`/api/tasks/${c.body.id}/resume`, { body: { version: stop2.body.version, part: 1 } });
+      expect([part.status, part.body.error]).toEqual([404, "Part not found."]);
+      const disarm = await h.json<TaskConflict>(`/api/tasks/${c.body.id}/resume`, {
+        body: { version: stop2.body.version, option: "disarm" },
+      });
+      expect([disarm.status, disarm.body.error, disarm.body.task.state]).toEqual([409, "No resume is armed.", "stopped"]);
+      // The routes of Hold, Skip, and Start again validate the input and answer through the loop.
+      for (const [route, status, error] of [
+        ["hold", 404, "Part not found."],
+        ["skip", 409, "Only a part of a task with sub-tasks can be skipped."],
+        ["restart", 404, "Part not found."],
+      ] as const) {
+        const bad = await h.json<{ error: string }>(`/api/tasks/${c.body.id}/parts/1/${route}`, { body: {} });
+        expect([route, bad.status, bad.body.error]).toEqual([route, 400, "Give the task version."]);
+        const r = await h.json<{ error: string }>(`/api/tasks/${c.body.id}/parts/1/${route}`, { body: { version: stop2.body.version } });
+        expect([route, r.status, r.body.error]).toEqual([route, status, error]);
       }
       const back2 = await h.json<TaskDto>(`/api/tasks/${c.body.id}/resume`, { body: { version: stop2.body.version } });
       expect([back2.status, back2.body.state]).toEqual([200, "interview"]);

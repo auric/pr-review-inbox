@@ -246,7 +246,6 @@ export const RESERVED: Partial<Record<TaskEvent["type"] | PartEvent["type"] | Ph
   SPEC_GATE_PASSED: "WP-B8",
   OVERRIDE: "WP-B8",
   FAIL: "none: part-session.md section 9.3.1 names no package",
-  RESTART: "PS4",
   // The update driver (loop.ts driveUpdate) tracks no phase yet. PS4 moves the update and its resolve runs into the phase machine.
   UPDATE: "PS4",
   CONFLICT: "PS4",

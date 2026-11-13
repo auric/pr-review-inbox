@@ -8,12 +8,12 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { openDb } from "../../src/server/storage/db";
 import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import { RESTART_TEXT, recoverTasks, setUsageArmed, TASK_CHANGED, taskRow, UPDATE_RESTART } from "../../src/server/tasks/tasks";
 import { type TaskBlocked, taskBlocked } from "../../src/shared/task";
-import { cleanupAll, FIXED, SLOW, setup, stopInGate, TEST_FILE, TICK, WORKS } from "./loop-fixture";
+import { cleanupAll, FIXED, SLOW, setup, stopInGate, TEST_FILE, TICK, until, WORKS } from "./loop-fixture";
 
 for (const m of ["tasks/tasks", "tasks/loop", "storage/db"])
   console.log(`recover.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -252,6 +252,34 @@ describe("Continue after a restart (part-session.md section 9.5)", () => {
         expect([sent.length, sent.at(-1)?.stdin.endsWith(`# Your instructions\n\nSend ${k + 1}.`)]).toEqual([k + 1, true]);
         expect([s.t().state, s.blocked()]).toEqual([state, null]);
       }
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B353: a restart keeps an armed usage reason; recovery arms its timer, and a past resumeAt runs the step at once",
+    async () => {
+      const usage = resolve(import.meta.dir, "../../fixtures/claude-synthetic/usage-limit.jsonl");
+      const s = await setup({
+        seq: {
+          "implement:build": [
+            { fixture: usage, exitCode: 1 },
+            { writes: [TEST_FILE, WORKS], ticks: TICK },
+          ],
+        },
+      });
+      await s.build();
+      expect(s.blocked()).toMatchObject({ kind: "usage", resumeAt: 1_791_678_600_000, armed: false });
+      // The user armed the resume before the app stopped. No timer runs until the recovery.
+      s.db.query("UPDATE task SET blocked_json = json_set(blocked_json, '$.armed', json('true')) WHERE id = $id").run({ id: s.task });
+      recoverTasks(s.db, Date.now(), s.dataDir);
+      await Bun.sleep(300);
+      expect([s.t().state, s.blocked()?.armed, s.loop.running(s.task)]).toEqual(["implementing", true, false]);
+      s.loop.recover(s.db);
+      await until(() => s.part().state === "self_reviewed", 120_000);
+      await s.loop.idle(s.task);
+      expect([s.t().state, s.blocked(), s.part().state]).toEqual(["implementing", null, "self_reviewed"]);
+      expect(s.runCalls().filter((c) => s.modeOf(c) === "build").length).toBe(2);
     },
     SLOW,
   );

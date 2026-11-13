@@ -371,6 +371,33 @@ describe("reachability and dead ends (part-session.md section 9.7, invariants 1 
     });
 });
 
+// ps4-plan.md sections 2.1 and 2.3: the edges that Hold, Skip, Start again, and Continue with part send in their order.
+describe("Hold, Skip, and Start again (ps4-plan.md WP-4)", () => {
+  test("Hold: building, fixing, judging, and following take STOPPED to idle; idle refuses STOPPED", () => {
+    for (const from of ["building", "fixing", "judging", "following"] as const)
+      expect([from, phaseStep(from, "STOPPED")]).toEqual([from, { can: true, to: "idle" }]);
+    expect(phaseStep("idle", "STOPPED").can).toBe(false);
+  });
+
+  test("Skip and Start again: implementing and self_reviewed take ABANDON and RESTART; RESTART needs unpushed; a part with a PR takes neither", () => {
+    for (const from of ["implementing", "self_reviewed"] as const) {
+      expect([from, partStep(from, "ABANDON")]).toEqual([from, { can: true, to: "abandoned" }]);
+      expect([from, partStep(from, "RESTART")]).toEqual([from, { can: true, to: "implementing" }]);
+      expect([from, partStep(from, "RESTART", { gate: true, unpushed: false }).can]).toEqual([from, false]);
+    }
+    for (const from of ["pr_open", "changes_requested", "approved", "merged", "abandoned"] as const)
+      expect([from, partStep(from, "ABANDON").can, partStep(from, "RESTART").can]).toEqual([from, false, false]);
+  });
+
+  test("gap 18: a Skip in stopped, then RESUME to implementing, LAST_PR_OPEN to ready, and ALL_MERGED to done", () => {
+    expect(taskStep("stopped", "RESUME")).toEqual({ can: true, to: "implementing" });
+    expect(taskStep("stopped", "LAST_PR_OPEN").can).toBe(false);
+    expect(taskStep("stopped", "ALL_MERGED").can).toBe(false);
+    expect(taskStep("implementing", "LAST_PR_OPEN")).toEqual({ can: true, to: "ready" });
+    expect(taskStep("ready", "ALL_MERGED")).toEqual({ can: true, to: "done" });
+  });
+});
+
 describe("senders (part-session.md section 9.7, invariant 7)", () => {
   // A sender passes the event to advance(), advancePart(), or the phase send helper as `type: "E"`, or returns it from an event helper
   // (gates.ts eventOf: `return "E"`; tasks.ts adoption: `? "E" : "F"`). BUILD has no sender: the create route uses initialTransition.
