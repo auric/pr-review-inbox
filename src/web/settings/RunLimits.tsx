@@ -2,29 +2,22 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Settings > Tasks, "Run limits" (docs/plans/review-v2/limits.md decision 3). Each valid change saves by itself (autosave.tsx). A field
-// with a problem holds only its own value back. The server reads each value when a run starts. A time that can be off has a "No limit"
-// box, which saves NO_LIMIT (build-redesign.md, user decision of 2026-11-11). A typed 0 is no valid number.
+// with a problem holds only its own value back. The server reads each value when a run starts. No limit can be off. A typed 0 is no
+// valid number.
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import type { SettingsDto, SettingsInput } from "../../shared/dto";
-import {
-  canTurnOff,
-  type RunLimits as Limits,
-  NO_LIMIT,
-  RUN_LIMIT_KEYS,
-  RUN_LIMITS,
-  type RunLimitKey,
-  typedLimit,
-} from "../../shared/task";
+import { type RunLimits as Limits, RUN_LIMIT_KEYS, RUN_LIMITS, type RunLimitKey, typedLimit } from "../../shared/task";
 import { api } from "../api";
 import { useMeta } from "../meta";
-import { read } from "../shell/data";
+import { read, useSaveSettings } from "../shell/data";
 import { SaveStatus, TYPING_MS, useSaver } from "./autosave";
 
-// runner: the short runner name of the meta, such as the name of the CLI. off: the label of the "No limit" box.
-const FIELDS: Record<RunLimitKey, { label: string; unit: string; help: (runner: string) => string; off?: string }> = {
+// runner: the short runner name of the meta, such as the name of the CLI.
+const FIELDS: Record<RunLimitKey, { label: string; unit: string; help: (runner: string) => string }> = {
   reviewMinutes: {
     label: "Review run time",
     unit: "minutes",
@@ -59,18 +52,13 @@ const FIELDS: Record<RunLimitKey, { label: string; unit: string; help: (runner: 
   },
 };
 
-// A field that is off keeps a number for its box: the least value, so clearing the box gives a valid number.
-const isOff = (l: Limits, k: RunLimitKey) => canTurnOff(k) && l[k] === NO_LIMIT;
-const toDrafts = (l: Limits) =>
-  Object.fromEntries(RUN_LIMIT_KEYS.map((k) => [k, String(isOff(l, k) ? RUN_LIMITS[k].min : l[k])])) as Record<RunLimitKey, string>;
+const toDrafts = (l: Limits) => Object.fromEntries(RUN_LIMIT_KEYS.map((k) => [k, String(l[k])])) as Record<RunLimitKey, string>;
 
 export function RunLimits({ settings }: { settings: SettingsDto }) {
   const qc = useQueryClient();
   const runner = useMeta().data?.runner.short ?? "";
   const [drafts, setDrafts] = useState(() => toDrafts(settings.runLimits));
-  // The fields whose "No limit" box is on. The box is the only way to NO_LIMIT; the draft keeps the last number.
-  const [offs, setOffs] = useState(() => new Set(RUN_LIMIT_KEYS.filter((k) => isOff(settings.runLimits, k))));
-  const limitOf = (k: RunLimitKey) => (offs.has(k) ? NO_LIMIT : typedLimit(k, drafts[k]));
+  const limitOf = (k: RunLimitKey) => typedLimit(k, drafts[k]);
   const current = () => qc.getQueryData<SettingsDto>(["settings"]) ?? settings;
   const { state, saver } = useSaver(
     (): SettingsInput | null => {
@@ -89,6 +77,8 @@ export function RunLimits({ settings }: { settings: SettingsDto }) {
     },
   );
   const bad = RUN_LIMIT_KEYS.some((k) => limitOf(k) === null);
+  // ps5-plan.md section 4.3, AC-B372: the usage resume saves at once, apart from the limits above.
+  const usage = useSaveSettings();
 
   return (
     <div className="grid gap-3 border-t pt-4">
@@ -110,52 +100,32 @@ export function RunLimits({ settings }: { settings: SettingsDto }) {
           const { def, min, max } = RUN_LIMITS[k];
           const invalid = limitOf(k) === null;
           const id = `limit-${k}`;
-          const off = offs.has(k);
           return (
             <Field key={k} data-invalid={invalid || undefined}>
               <FieldLabel htmlFor={id}>{f.label}</FieldLabel>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                <div className="flex items-center gap-2">
-                  <Input
-                    id={id}
-                    name={k}
-                    type="number"
-                    inputMode="numeric"
-                    min={min}
-                    max={max}
-                    step={1}
-                    className="h-[30px] w-24"
-                    disabled={off}
-                    aria-invalid={invalid || undefined}
-                    aria-describedby={`${id}-help${invalid ? ` ${id}-error` : ""}`}
-                    value={off ? "" : drafts[k]}
-                    onChange={(e) => {
-                      setDrafts((d) => ({ ...d, [k]: e.target.value }));
-                      saver.request(TYPING_MS);
-                    }}
-                    onBlur={() => void saver.flush()}
-                  />
-                  <span className="text-sm text-ink-2">{f.unit}</span>
-                </div>
-                {f.off && (
-                  <label className="flex cursor-pointer items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-primary"
-                      checked={off}
-                      onChange={(e) => {
-                        const on = e.target.checked;
-                        setOffs((o) => new Set(on ? [...o, k] : [...o].filter((x) => x !== k)));
-                        // The save reads the state of the next render, so it waits for one timer tick.
-                        saver.request(1);
-                      }}
-                    />
-                    {f.off}
-                  </label>
-                )}
+              <div className="flex items-center gap-2">
+                <Input
+                  id={id}
+                  name={k}
+                  type="number"
+                  inputMode="numeric"
+                  min={min}
+                  max={max}
+                  step={1}
+                  className="h-[30px] w-24"
+                  aria-invalid={invalid || undefined}
+                  aria-describedby={`${id}-help${invalid ? ` ${id}-error` : ""}`}
+                  value={drafts[k]}
+                  onChange={(e) => {
+                    setDrafts((d) => ({ ...d, [k]: e.target.value }));
+                    saver.request(TYPING_MS);
+                  }}
+                  onBlur={() => void saver.flush()}
+                />
+                <span className="text-sm text-ink-2">{f.unit}</span>
               </div>
               <FieldDescription id={`${id}-help`}>
-                {f.help(runner)} Default {canTurnOff(k) && (def as number) === NO_LIMIT ? "no limit" : def}. From {min} to {max}.
+                {f.help(runner)} Default {def}. From {min} to {max}.
               </FieldDescription>
               {invalid && (
                 <FieldError id={`${id}-error`}>
@@ -165,6 +135,23 @@ export function RunLimits({ settings }: { settings: SettingsDto }) {
             </Field>
           );
         })}
+        <Field orientation="horizontal">
+          <Switch
+            id="usage-resume"
+            aria-describedby="usage-resume-help"
+            checked={settings.usageResume}
+            disabled={usage.isPending}
+            onCheckedChange={(usageResume) => usage.mutate({ baseUrl: settings.baseUrl ?? "", caFile: settings.caFile ?? "", usageResume })}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor="usage-resume">Resume by itself after a usage limit</FieldLabel>
+            <FieldDescription id="usage-resume-help">
+              Off by default. When on, a part waits for the reset time that {runner} reports, then goes on once. A second limit waits for
+              your click.
+            </FieldDescription>
+            {usage.error && !(usage.error instanceof TypeError) && <FieldError>{usage.error.message}</FieldError>}
+          </FieldContent>
+        </Field>
       </FieldGroup>
     </div>
   );

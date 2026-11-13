@@ -529,4 +529,27 @@ test("Settings > Tasks keeps the branch prefixes in order and refuses a repeat",
     sessionContextCap: 100_000,
     sessionTurns: 120,
   });
+
+  // ps5-plan.md section 4.3, AC-B372: the usage resume switch. Off by default, and a change saves at once. The check shows the saved
+  // state, because the switch has no state of its own.
+  const usageResume = async () => ((await api(page, "GET", "/api/settings")).json as { usageResume: boolean }).usageResume;
+  const usage = page.getByRole("switch", { name: "Resume by itself after a usage limit" });
+  await expect(usage).not.toBeChecked();
+  await expect(usage).toHaveAttribute("aria-describedby", "usage-resume-help");
+  await expect(page.locator("#usage-resume-help")).toHaveText(
+    /^Off by default\. When on, a part waits for the reset time that \S+ reports, then goes on once\. A second limit waits for your click\.$/,
+  );
+  expect(await usageResume()).toBe(false);
+  await usage.click();
+  await expect(usage).toBeChecked();
+  expect(await usageResume()).toBe(true);
+  await page.reload();
+  await expect(usage).toBeChecked();
+  // The keyboard turns it off again, so the later tests run with the default.
+  await usage.focus();
+  await page.keyboard.press("Space");
+  await expect(usage).not.toBeChecked();
+  await expect(usage).toBeFocused();
+  expect(await usageResume()).toBe(false);
+  expect((await limits()).sessionTurns).toBe(120);
 });
