@@ -3,7 +3,7 @@
 
 import { Database } from "bun:sqlite";
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/server/storage/db";
@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 50;
+const LATEST = 51;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1270,8 +1270,9 @@ test("migration from a version-36 database keeps every task step with its ID; in
   const db = openDb(path);
   try {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
-    expect(columns(db, "task_step")).toEqual(columnsBefore);
-    expect(db.query("SELECT * FROM task_step ORDER BY id").all()).toEqual(before);
+    // Migration 053 adds task_step.cut_json.
+    expect(columns(db, "task_step")).toEqual([...columnsBefore, "cut_json"]);
+    expect(db.query("SELECT * FROM task_step ORDER BY id").all()).toEqual(before.map((r) => ({ ...(r as object), cut_json: null })));
     for (const kind of ["instruct", "update", "resolve"])
       db.query("INSERT INTO task_step (task, part, ord, kind, state, started_at) VALUES (1, 1, 3, $kind, 'running', 1)").run({ kind });
     expect(() => db.run("INSERT INTO task_step (task, ord, kind, state, started_at) VALUES (1, 4, 'other', 'ok', 1)")).toThrow(/CHECK/);
@@ -1808,7 +1809,10 @@ test("AC-B303: migration from a version-49 database keeps the task and part rows
   try {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(["task", "task_part", "task_step"].map((n) => db.query(`SELECT * FROM ${n} ORDER BY id`).all())).toEqual(before);
+    // Migration 053 adds task_step.cut_json.
+    const after = ["task", "task_part", "task_step"].map((n) => db.query(`SELECT * FROM ${n} ORDER BY id`).all());
+    const [task, part, steps] = before as [unknown[], unknown[], object[]];
+    expect(after).toEqual([task, part, steps.map((r) => ({ ...r, cut_json: null }))]);
     expect(db.query("SELECT COUNT(*) AS n FROM task_part_session").get()).toEqual({ n: 0 });
     db.run(
       "INSERT INTO task_part_session (part, session_id, file, file_sha256, context_tokens, runs, updated_at) VALUES (7, 's', 'f', 'h', 10, 1, 1)",
@@ -1823,6 +1827,35 @@ test("AC-B303: migration from a version-49 database keeps the task and part rows
     expect(() => db.run("INSERT INTO task_part_session (part, updated_at) VALUES (7, 2)")).toThrow(/UNIQUE|PRIMARY KEY/);
     db.run("DELETE FROM task_part WHERE id = 7");
     expect(db.query("SELECT COUNT(*) AS n FROM task_part_session").get()).toEqual({ n: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+// ---------- The snapshot of a cut run (053_step_cut.sql) ----------
+
+// part-session.md section 2.5 (AC-B321): the start transaction of a Claude run writes its snapshot to the step row, not to a file.
+test("AC-B321: migration from a version-50 database keeps the step rows and adds task_step.cut_json with NULL", () => {
+  const path = join(dir, "v50.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  const files = readdirSync(join(import.meta.dir, "../../src/server/storage/migrations")).filter((f) => f >= "031" && f < "053");
+  migrate(old, [...V30, ...files.sort()]);
+  old.exec("PRAGMA user_version = 50");
+  old.exec(`INSERT INTO task (id, project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+      VALUES (1, 'P', 'a', 'ABC-10', 'Speed up the cache', 'implementing', 'main', 'specs/ABC-10/', 1, 1);
+    INSERT INTO task_part (id, task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+      VALUES (7, 1, 1, 'single', 'One', 'feature/ABC-10', 'main', 'implementing', 1, 1);
+    INSERT INTO task_step (id, task, part, ord, kind, state, item, started_at) VALUES (3, 1, 7, 1, 'implement', 'running', 'T1.1', 1);`);
+  const before = old.query("SELECT * FROM task_step").all() as object[];
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(db.query("SELECT * FROM task_step").all()).toEqual(before.map((r) => ({ ...r, cut_json: null })));
+    db.run("UPDATE task_step SET cut_json = '{}' WHERE id = 3");
+    expect(db.query("SELECT cut_json FROM task_step WHERE id = 3").get()).toEqual({ cut_json: "{}" });
   } finally {
     db.close();
   }

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mainUsage, resumeShape, sessionArgs } from "../../scripts/gate/session";
@@ -22,6 +22,8 @@ import { addUsage, usageOf } from "../../src/server/review/judge";
 import {
   classify,
   createStreamParser,
+  LOOP_NOTE,
+  LOOP_SLOW_MS,
   LOOP_TEXT,
   NO_BASH_TEXT,
   NOTES_MAX,
@@ -1219,7 +1221,7 @@ describe("part sessions", () => {
     origins: ["https://bitbucket.example.test"],
   };
   // The fake CLI starts in well under idleMs. An open Bash call of bashTimeoutSec 1 gets 1 s + 5 s.
-  const STALL = { idleMs: 2500, bashExtraMs: 5000 };
+  const STALL = { idleMs: 2500, bashExtraMs: 5000, openMs: 4000 };
   const BASH_LIMIT_MS = SHELL.bashTimeoutSec * 1000 + STALL.bashExtraMs;
   const SLOW = 30_000;
   function session(scenario: Partial<FakeScenario>, opts: RunnerOptions = {}, shell = false) {
@@ -1386,7 +1388,7 @@ describe("part sessions", () => {
     async () => {
       const { runner, spec } = setup(
         { fixture: flatSuccess(), silent: true },
-        { stall: { idleMs: 300, bashExtraMs: 300 }, timeoutMs: 3000 },
+        { stall: { idleMs: 300, bashExtraMs: 300, openMs: 300 }, timeoutMs: 3000 },
       );
       const started = Date.now();
       const o = await runner.run(spec);
@@ -1495,6 +1497,169 @@ describe("part sessions", () => {
     const o = await live.runner.run({ ...live.spec, live: true });
     expect([o.status, o.loop?.count]).toEqual(["completed", 3]);
     expect(live.inputs()).toEqual([LOOP_MESSAGE]);
+  });
+
+  test("AC-B326: without live input, the runner gives the loop note at 3 equal calls once per repeat", async () => {
+    const { runner, spec } = session({ fixture: flatSuccess(), bash: repeat(4) }, {}, true);
+    const notes: string[] = [];
+    const o = await runner.run(spec, undefined, (t) => notes.push(t));
+    expect([o.status, o.loop?.count]).toEqual(["completed", 4]);
+    expect(notes).toEqual([LOOP_NOTE]);
+  });
+
+  // part-session.md section 2.10: a run that polls with a wait in each Bash call.
+  const bashCall = (p: ReturnType<typeof createStreamParser>, id: string, command: string, output: string, wait: () => void) => {
+    const msg = (type: string, block: Record<string, unknown>) =>
+      p.line(JSON.stringify({ type, parent_tool_use_id: null, message: { content: [block] } }));
+    msg("assistant", { type: "tool_use", id, name: "Bash", input: { command } });
+    wait();
+    msg("user", { type: "tool_result", tool_use_id: id, content: output });
+  };
+
+  test("AC-B326: a call that takes more than LOOP_SLOW_MS starts the count again, so a polling run goes on", () => {
+    let t = 0;
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(["Bash"]), now: () => t });
+    const poll = (id: string, ms: number) =>
+      bashCall(p, id, "sleep 30; test -f done || echo waiting", "waiting", () => {
+        t += ms;
+      });
+    for (let i = 0; i < 8; i++) poll(`slow${i}`, 30_000);
+    expect([p.state.loop, p.state.loopWarns]).toEqual([null, 0]);
+    for (let i = 0; i < 3; i++) poll(`fast${i}`, 50);
+    expect([p.state.loop?.count, p.state.loopWarns]).toEqual([3, 1]);
+    // One slow call between equal fast calls breaks the repeat.
+    poll("slow8", LOOP_SLOW_MS + 1);
+    poll("fast3", 50);
+    poll("fast4", 50);
+    expect([p.state.loop?.count, p.state.loopWarns]).toEqual([3, 1]);
+    poll("fast5", LOOP_SLOW_MS);
+    expect([p.state.loop?.count, p.state.loopWarns]).toEqual([3, 2]);
+  });
+
+  test("AC-B327: a call of a subagent with no result ends with its Agent call; a background Agent keeps its calls open until its notification", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(["Read", "Agent"]) });
+    const use = (id: string, parent: string | null, name: string, input: Record<string, unknown>) =>
+      p.line(
+        JSON.stringify({ type: "assistant", parent_tool_use_id: parent, message: { content: [{ type: "tool_use", id, name, input }] } }),
+      );
+    const res = (id: string) =>
+      p.line(
+        JSON.stringify({
+          type: "user",
+          parent_tool_use_id: null,
+          message: { content: [{ type: "tool_result", tool_use_id: id, content: "done" }] },
+        }),
+      );
+    use("ag", null, "Agent", { description: "Search", subagent_type: "rl-explorer" });
+    use("c1", "ag", "Read", { file_path: "/w/a.txt" });
+    expect(res("ag").map((e) => [e.id, e.status])).toEqual([
+      ["ag", "ok"],
+      ["c1", "stopped"],
+    ]);
+    expect(p.open()).toEqual([]);
+    use("bg", null, "Agent", { description: "Watch", subagent_type: "rl-explorer" });
+    p.line(JSON.stringify({ type: "system", subtype: "task_started", tool_use_id: "bg", is_backgrounded: true }));
+    use("c2", "bg", "Read", { file_path: "/w/b.txt" });
+    res("bg");
+    expect(p.open().map((e) => e.id)).toEqual(["bg", "c2"]);
+    p.line(JSON.stringify({ type: "system", subtype: "task_notification", tool_use_id: "bg", status: "completed", summary: "ok" }));
+    expect(p.open()).toEqual([]);
+  });
+
+  test(
+    "AC-B327: an open call of another tool than Bash, Agent, and Advisor ends the run after openMs",
+    async () => {
+      const { runner, spec, base, run } = session({ hang: true }, { stall: STALL });
+      // b6 has one Glob call. Its result goes, so the call stays open.
+      const fixture = join(base, "open-glob.jsonl");
+      const out = readFileSync(flatSuccess(), "utf8")
+        .split("\n")
+        .filter((l) => l && JSON.parse(l).type !== "user");
+      expect(out.some((l) => l.includes('"name":"Glob"'))).toBe(true);
+      writeFileSync(fixture, `${out.join("\n")}\n`);
+      const file = join(base, "scenario.json");
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), fixture }));
+      const started = Date.now();
+      const o = await runner.run({ ...spec, timeoutMs: 20_000 });
+      const ms = Date.now() - started;
+      expect(o).toMatchObject({ status: "failed", kind: "process", text: stallText(STALL.openMs), cut: "stall" });
+      expect(o.events.find((e) => e.tool === "Glob")?.status).toBe("stopped");
+      expect(ms).toBeGreaterThanOrEqual(STALL.openMs);
+      expect(ms).toBeLessThan(STALL.openMs + 10_000);
+      expect(await waitFor(() => !alive(run().pid))).toBe(true);
+    },
+    SLOW,
+  );
+
+  test("AC-B328: the keep step refuses a transcript that a Bash command of the run made a link", async () => {
+    const probe = mkdtempSync(join(tmpdir(), "rl-link-"));
+    dirs.push(probe);
+    try {
+      writeFileSync(join(probe, "t"), "");
+      symlinkSync(join(probe, "t"), join(probe, "l"), "file");
+    } catch {
+      console.log("AC-B328 skipped: this account cannot make a file link.");
+      return;
+    }
+    const secret = join(probe, "secret.txt");
+    writeFileSync(secret, "user secret\n");
+    const s = session({}, {}, true);
+    const transcript = join(
+      s.base,
+      "config",
+      "projects",
+      encoded(realpathSync.native(s.work)),
+      "00000000-0000-4000-8000-000000000001.jsonl",
+    );
+    const plant = `const fs = require("fs"); fs.rmSync(${JSON.stringify(transcript)}); fs.symlinkSync(${JSON.stringify(secret)}, ${JSON.stringify(transcript)}, "file");`;
+    const file = join(s.base, "scenario.json");
+    const scenario = {
+      ...JSON.parse(readFileSync(file, "utf8")),
+      fixture: flatSuccess(),
+      bash: [{ command: "make test", run: [[process.execPath, "-e", plant]] }],
+    };
+    writeFileSync(file, JSON.stringify(scenario));
+    const o = await s.runner.run({ ...s.spec, keep: s.keep });
+    expect(o.status).toBe("completed");
+    expect(s.calls().find((c) => (c as { ran?: unknown }).ran !== undefined)).toMatchObject({ exit: 0 });
+    expect(o.kept).toBeNull();
+    expect(existsSync(s.keep) ? readdirSync(s.keep) : []).toEqual([]);
+    expect(readFileSync(secret, "utf8").startsWith("user secret")).toBe(true);
+  });
+
+  // A junction needs no privilege on Windows. Elsewhere, symlinkSync makes a link to a folder.
+  test("AC-B328: the keep step refuses a session folder or a keep folder that is a junction, and a plain run keeps", async () => {
+    const s = session({}, {}, true);
+    const folder = join(s.base, "config", "projects", encoded(realpathSync.native(s.work)));
+    const moved = `${folder}-moved`;
+    const plant = `const fs = require("fs"); fs.renameSync(${JSON.stringify(folder)}, ${JSON.stringify(moved)}); fs.symlinkSync(${JSON.stringify(moved)}, ${JSON.stringify(folder)}, "junction");`;
+    const file = join(s.base, "scenario.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...JSON.parse(readFileSync(file, "utf8")),
+        fixture: flatSuccess(),
+        bash: [{ command: "make test", run: [[process.execPath, "-e", plant]] }],
+      }),
+    );
+    const o = await s.runner.run({ ...s.spec, keep: s.keep });
+    expect(s.calls().find((c) => (c as { ran?: unknown }).ran !== undefined)).toMatchObject({ exit: 0 });
+    expect(readdirSync(moved)).toContain("00000000-0000-4000-8000-000000000001.jsonl");
+    expect(o.kept).toBeNull();
+    expect(existsSync(s.keep) ? readdirSync(s.keep) : []).toEqual([]);
+
+    // A junction as the keep folder, and one as its parent folder: nothing reaches the target.
+    for (const keep of ["sessions", join("link", "part-1")]) {
+      const t = session({ fixture: flatSuccess() });
+      const target = join(t.base, "elsewhere");
+      mkdirSync(target);
+      symlinkSync(target, join(t.base, keep.split(/[\\/]/)[0] as string), "junction");
+      expect((await t.runner.run({ ...t.spec, keep: join(t.base, keep) })).kept).toBeNull();
+      expect([keep, readdirSync(target)]).toEqual([keep, []]);
+    }
+
+    const u = session({ fixture: flatSuccess() });
+    expect((await u.runner.run({ ...u.spec, keep: u.keep })).kept).toBe(join(u.keep, "00000000-0000-4000-8000-000000000001.jsonl"));
   });
 
   test("AC-B280: the context size of the last main-thread call and resetsAt of the last rejected rate limit event", () => {

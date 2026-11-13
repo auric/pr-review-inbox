@@ -18,6 +18,7 @@ import {
   RUN_LIMITS,
   RUN_TIME_MAX_MS,
   type SessionPurpose,
+  SHELL_MODES,
   STEP_TURNS,
   type StepDetail,
   type StepKind,
@@ -206,12 +207,15 @@ export function pathRules(wt: Worktree, o: CheckOptions, entries: StatusEntry[],
   for (const p of ignored) {
     if (problems.has(p)) continue;
     if (!own || own.has(p.split("/").map(fold).join("/"))) problems.set(p, "A step may not write a file that git ignores.");
-    // git lists the files behind a link to a folder, also a Windows junction.
-    else
+    else {
+      // An ignored CLAUDE.local.md or .claude/settings.local.json holds rules for Claude Code.
+      if (deniedPath(p) || sparseHidden(p)) problems.set(p, "A step may not change this path.");
+      // git lists the files behind a link to a folder, also a Windows junction.
       for (const l of linksOn(wt.repo, p)) {
         links.add(l);
         problems.set(l, "A step may not make links.");
       }
+    }
   }
   return { changed, problems: [...problems].map(([path, reason]) => ({ path, reason })), links: [...links], outside, ignored };
 }
@@ -425,29 +429,29 @@ export async function undoStep(wt: Worktree, last: string, check: PathCheck, pat
   return { saved, full: true, reset, left: again?.problems ?? [] };
 }
 
-// ---------- The snapshot on disk (part-session.md sections 2.5 and 9.5) ----------
+// ---------- The snapshot of a run (part-session.md sections 2.5 and 9.5) ----------
 
-// <taskDir>/part-<ord>.gitsnap.json: the git state at the start of a run, and the inputs of its path check. An app restart keeps it, so
-// the recovery can check the cut run (keepCut). key: the run key of the step. graph: repo/.codegraph was there before the run.
-export const cutFile = (wt: Pick<Worktree, "dir">) => `${wt.dir}.gitsnap.json`;
+// task_step.cut_json (migration 053): the git state at the start of a run, and the inputs of its path check. The start transaction of
+// the run writes it, so no Bash command of the run can change it as it could a file in the task folder. The run end clears it. An app
+// restart keeps it, so the recovery can check the cut run (keepCut). shell: the mode of the Bash tool, null for none. graph:
+// repo/.codegraph was there before the run.
 const cutSnap = z.object({
-  key: z.string(),
   git: diskSnap,
   allow: z.array(z.string()),
   ignored: z.array(z.tuple([z.string(), z.string()])),
-  shell: z.boolean(),
+  shell: z.enum(SHELL_MODES).nullable(),
   graph: z.boolean(),
   dirtyBefore: z.array(z.string()),
 });
 type CutSnap = z.infer<typeof cutSnap>;
 
-export async function saveCut(wt: Worktree, snap: GitSnap, c: Omit<CutSnap, "git" | "graph">) {
+export async function cutJson(wt: Worktree, snap: GitSnap, c: Omit<CutSnap, "git" | "graph">): Promise<string> {
   const data: CutSnap = { ...c, git: await diskSnapOf(snap), graph: existsSync(join(wt.repo, ".codegraph")) };
-  writeFileSync(cutFile(wt), JSON.stringify(data));
+  return JSON.stringify(data);
 }
 
-// A Claude step that ran at the last stop, as recoverTasks finds it before it ends the step.
-export type CutStep = { id: number; task: number; part: number; kind: string; item: string | null; attempt: number; run: number };
+// A Claude step that ran at the last stop, as recoverTasks finds it before it ends the step. cut: its task_step.cut_json.
+export type CutStep = { id: number; task: number; part: number; run: number; cut: string | null };
 
 const KEEP_NOTE = "The app stopped during the run. The git state and the changed files passed the checks, so Continue keeps the work.";
 const cutNote = (why: string) => `The app stopped during the run. ${why} Continue resets the work and keeps a patch.`;
@@ -455,29 +459,29 @@ const cutNote = (why: string) => `The app stopped during the run. ${why} Continu
 const WRITES_SQL = `SELECT target FROM run_event WHERE run = $run AND tool IN (${[...FILE_TOOLS].map((t) => `'${t}'`).join(", ")})
   AND status = 'ok' AND target <> '' ORDER BY seq`;
 
-// part-session.md section 2.5: after a restart, the run that the restart cut keeps its work when its snapshot file is on disk, the git
-// state equals that snapshot, and the path check of the run passes. Then its step gets checked, so Continue keeps the work. Else
-// Continue resets the work with the patch, as before. It blocks, because recoverTasks runs in a database transaction. It never throws.
-// Only a part with one repository writes the snapshot file.
+// part-session.md section 2.5: after a restart, the run that the restart cut keeps its work when its step row has a snapshot, its Bash
+// tool could not run any command, the git state equals that snapshot, and the path check of the run passes. Then its step gets
+// checked, so Continue keeps the work. Else Continue resets the work with the patch, as before. It blocks, because recoverTasks runs in
+// a database transaction. It never throws. Only a part with one repository has the snapshot.
 export function keepCut(db: Database, dataDir: string, s: CutStep) {
   try {
+    if (s.cut === null) return;
     const t = taskRow(db, s.task);
     const part = db.query("SELECT ord, branch FROM task_part WHERE id = $id").get({ id: s.part }) as { ord: number; branch: string } | null;
     if (!t || !part) return;
     const data = longPath(dataDir);
     const dir = partDir(data, db, s.task, part.ord);
-    const file = cutFile({ dir });
-    if (!existsSync(file)) return;
     let why: string | null = null;
     let written: string[] = [];
     let dirtyBefore: string[] = [];
     try {
-      const cut = cutSnap.parse(JSON.parse(readFileSync(file, "utf8")));
+      const cut = cutSnap.parse(JSON.parse(s.cut));
       dirtyBefore = cut.dirtyBefore;
       const repo = join(dir, "repo");
       const cache = cachePath(data, { project: t.project, repo: t.repo, id: s.task });
       const admin = adminOf(cache, repo);
-      if (cut.key !== `task:${s.task}:part:${s.part}:${s.kind}:${s.item}:${s.attempt}`) why = "The snapshot file belongs to another run.";
+      // Such a command can change any file that the app reads, past each check of the app.
+      if (cut.shell === "any" || cut.shell === "unrestricted") why = "Claude could run any command in the run.";
       else if (!admin) why = "The worktree of the part is gone.";
       else {
         const env = gitEnv(join(data, "git", "empty.gitconfig"));
@@ -498,7 +502,6 @@ export function keepCut(db: Database, dataDir: string, s: CutStep) {
     } catch (e) {
       why = `The app could not check the run: ${noUrl((e as Error).message)}`;
     }
-    rmSync(file, { force: true });
     const notes = stepDetailOf(db, s.id).notes;
     if (why === null) patchStep(db, s.id, { checked: true, written, dirtyBefore, notes: [...notes, KEEP_NOTE] });
     else patchStep(db, s.id, { checked: false, notes: [...notes, cutNote(why)] });
@@ -767,7 +770,8 @@ const STEP_SQL = {
   insert: `INSERT INTO task_step (task, part, kind, run, state, attempt, item, ord, started_at)
     VALUES ($task, $part, $kind, $run, $state, $attempt, $item, (SELECT COALESCE(MAX(ord), 0) + 1 FROM task_step WHERE task = $task), $now)
     RETURNING id`,
-  end: "UPDATE task_step SET state = $state, detail_json = $detail, ended_at = $now WHERE id = $id",
+  end: "UPDATE task_step SET state = $state, detail_json = $detail, ended_at = $now, cut_json = NULL WHERE id = $id",
+  cut: "UPDATE task_step SET cut_json = $cut WHERE id = $id",
   detail: "SELECT detail_json FROM task_step WHERE id = $id",
   partUsage: "SELECT usage_json FROM task_part WHERE id = $id",
   setUsage: "UPDATE task_part SET usage_json = $usage, updated_at = $now WHERE id = $id",
@@ -1187,14 +1191,10 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   let snap: GitSnap | null = null;
   let moved: string[] = [];
   let runOut: RunOutcome | null = null;
-  // The snapshot file is for a restart only. finish() and each start that runs nothing delete it. A file that stays fails the key check.
-  const dropCut = () => {
-    try {
-      rmSync(cutFile(wt), { force: true });
-    } catch (e) {
-      log(`Could not delete ${basename(cutFile(wt))}: ${noUrl((e as Error).message)}`);
-    }
-  };
+  // The snapshot for a restart (keepCut). started() writes it to the step row, and endStep clears it.
+  let cut: string | null = null;
+  // The notes that the run wrote during the run (part-session.md section 2.10). endStep writes the notes again.
+  const runNotes: string[] = [];
   const row = taskRow(db, i.task);
   const session = i.session;
   const start: ImplementRunStart = {
@@ -1231,6 +1231,12 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     ...(session && { session: { keep: session.keep, ...(session.resume && { resume: session.resume }) } }),
     started: (d, run) => {
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());
+      if (cut !== null) d.query(STEP_SQL.cut).run({ id: step, cut });
+    },
+    note: (d, text) => {
+      if (runNotes.includes(text)) return;
+      runNotes.push(text);
+      patchStep(d, step, { notes: [...stepDetailOf(d, step).notes, text] });
     },
     after: async (o, early, servers, gaps) => {
       runOut = o;
@@ -1279,7 +1285,6 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     finish: (d, run, e) => {
       // A run that ended before after() leaves its watch on.
       if (snap) stopGit(snap);
-      dropCut();
       const problems = check?.problems ?? [];
       const undone = problems.length > 0 || moved.length > 0;
       const full = undo?.full === true;
@@ -1302,6 +1307,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
           patch: full && !broken ? (undo?.reset ? basename(undo.reset) : PATCH_LOST) : null,
           notes: [
             ...(i.shell?.notes ?? []),
+            ...runNotes,
             ...(broken ? [broken] : []),
             ...(moved.length ? [movedText(moved)] : []),
             ...problems.map((p) => `${p.path}: ${p.reason}`),
@@ -1392,23 +1398,21 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     })();
     return { status: 409, blocked: b };
   }
-  // Without the file, a restart only costs the keep of the work.
+  // Without the snapshot, a restart only costs the keep of the work.
   if (!trees && !i.resolveCheck)
-    await saveCut(wt, snap, {
-      key: start.key,
+    cut = await cutJson(wt, snap, {
       allow: [...i.allow],
       ignored: [...ignored],
-      shell: !!i.shell,
+      shell: i.shell?.mode ?? null,
       dirtyBefore: i.dirtyBefore ?? [],
     }).catch((e) => {
-      log(`Could not save ${basename(cutFile(wt))}: ${noUrl((e as Error).message)}`);
-      dropCut();
+      log(`Could not save the git snapshot of the run: ${noUrl((e as Error).message)}`);
+      return null;
     });
   // A Stop during the awaits above finds no run to cancel.
   const cur = taskRow(db, i.task);
   if (i.live ? !i.live() : cur?.state !== "implementing" || cur.blocked_json !== null) {
     stopGit(snap);
-    dropCut();
     const id =
       i.step ??
       insertStep(db, { task: i.task, part: i.part.id, kind: i.mode, attempt: i.attempt, item: i.item, state: "cancelled" }, now());
@@ -1418,9 +1422,6 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     return { status: 409, stopped: true };
   }
   const started = i.review.taskRun(db, start, i.extra);
-  if (started.status !== 202) {
-    stopGit(snap);
-    dropCut();
-  }
+  if (started.status !== 202) stopGit(snap);
   return started;
 }

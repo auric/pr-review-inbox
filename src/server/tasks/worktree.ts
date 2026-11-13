@@ -176,19 +176,28 @@ export async function takenBranches(dataDir: string, cache: string, remote: Bran
 }
 
 // git in the worktree. --git-dir and --work-tree name both folders, so a changed repo/.git file cannot point git at another repository.
+// git(1) GIT_OPTIONAL_LOCKS=0: a read such as git status does not refresh and write the index. A write still takes its lock.
 export function wtGit(wt: Worktree, args: string[], o: { stdin?: string; extra?: Record<string, string>; signal?: AbortSignal } = {}) {
   return git([`--git-dir=${wt.admin}`, `--work-tree=${wt.repo}`, "--literal-pathspecs", ...args], {
-    env: { ...wt.env, ...o.extra },
+    env: { ...wt.env, GIT_OPTIONAL_LOCKS: "0", ...o.extra },
     cwd: wt.repo,
     ...(o.stdin !== undefined && { stdin: o.stdin }),
     ...(o.signal && { signal: o.signal }),
   });
 }
 
-// git that blocks, for the restart recovery inside a database transaction (tasks.ts recoverTasks). It only reads.
+// git that blocks, for the restart recovery inside a database transaction (tasks.ts recoverTasks). The recovery only compares, so the
+// calls must not write. GIT_OPTIONAL_LOCKS=0 as in wtGit.
 const SYNC_MS = 60_000;
 export function gitSync(args: string[], env: Record<string, string>, cwd?: string): string {
-  const p = Bun.spawnSync(["git", ...args], { env, cwd, stdout: "pipe", stderr: "pipe", timeout: SYNC_MS, killSignal: "SIGKILL" });
+  const p = Bun.spawnSync(["git", ...args], {
+    env: { ...env, GIT_OPTIONAL_LOCKS: "0" },
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: SYNC_MS,
+    killSignal: "SIGKILL",
+  });
   if (p.exitCode !== 0) {
     const cmd = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
     throw new GitError(`git ${cmd} failed (exit ${p.exitCode}): ${p.stderr.toString().trim().slice(-2_000)}`);
@@ -685,9 +694,15 @@ export async function matchEol(wt: Worktree, added: readonly string[], only?: re
   }
 }
 
+// The files of a paused merge, cherry-pick, revert, or rebase in the git folder of a worktree. git-commit(1): with MERGE_HEAD, git commit
+// makes a merge commit with a second parent that no diff of the step shows. With CHERRY_PICK_HEAD, it takes the author of that commit
+// over GIT_AUTHOR_NAME (builtin/commit.c, author_message).
+export const SEQUENCER = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"];
+
 // spec.md section 6.7: the line ends first (matchEol), then `git add -u` (tracked changes and deletes), `git add` of add (the new files
 // that the commit takes), then `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name and email.
 // --no-verify also skips the hooks that core.hooksPath would name. null: nothing to commit. eol false: the line ends stay, for the repair.
+// The update of a part makes its own merge commits (update.ts), so a paused operation here is not the app's.
 export async function commitStep(
   wt: Worktree,
   message: string,
@@ -696,11 +711,31 @@ export async function commitStep(
   eol = true,
 ): Promise<string | null> {
   if (!message.trim()) throw new WorkspaceError("A commit needs a message.");
+  const paused = SEQUENCER.filter((f) => lstatSync(join(wt.admin, f), { throwIfNoEntry: false }));
+  if (paused.length) throw new WorkspaceError(`The app did not commit: the worktree has a paused git operation (${paused.join(", ")}).`);
   if (eol) await matchEol(wt, add);
   await wtGit(wt, ["add", "-u"]);
   if (add.length) await wtGit(wt, ["add", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: `${add.join("\0")}\0` });
   if (!(await wtGit(wt, ["diff", "--cached", "--name-only", "-z"])).length) return null;
   const ids = { GIT_AUTHOR_NAME: who.name, GIT_AUTHOR_EMAIL: who.email, GIT_COMMITTER_NAME: who.name, GIT_COMMITTER_EMAIL: who.email };
+  const before = await headOf(wt);
   await wtGit(wt, ["commit", "-q", "--no-verify", "-F", "-"], { stdin: message, extra: ids });
-  return headOf(wt);
+  const made = await headOf(wt);
+  await oneParent(wt, before, made);
+  return made;
+}
+
+// A commit of the app has exactly one parent: before, the HEAD before the commit. Else HEAD goes back to before, the index keeps the
+// work, and it throws. cat-file prints the raw parents, which no graft and, with --no-replace-objects, no replace ref changes.
+export async function oneParent(wt: Worktree, before: string, made: string) {
+  const raw = await wtGit(wt, ["--no-replace-objects", "cat-file", "commit", made]);
+  const parents = raw
+    .slice(0, raw.indexOf("\n\n"))
+    .split("\n")
+    .flatMap((l) => (l.startsWith("parent ") ? [l.slice("parent ".length)] : []));
+  if (parents.length === 1 && parents[0] === before) return;
+  await wtGit(wt, ["update-ref", "-m", "rl: undo a commit with other parents", "HEAD", before, made]);
+  throw new WorkspaceError(
+    `The app undid its commit ${made.slice(0, 12)}: it had ${parents.length} parents, not only ${before.slice(0, 12)}.`,
+  );
 }

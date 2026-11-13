@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Starts, watches, and stops one Claude Code review process. The flags, env, and cwd rules come from integration-check.md, "Gate v3, local".
-import { copyFileSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FileSink } from "bun";
 import { EFFORTS, type Effort, modelName } from "../../shared/dto";
 import type { RunCut, RunErrorKind, RunEvent, SDKResultMessage, SDKSystemMessage } from "../../shared/run-log";
@@ -18,8 +18,10 @@ import {
   classify,
   createStreamParser,
   LOOP_MAX,
+  LOOP_NOTE,
   LOOP_TEXT,
   LOOP_WARN,
+  OPEN_STALL_MS,
   REFUSED_MAX,
   type Refusal,
   type Repeat,
@@ -158,8 +160,8 @@ export type RunnerOptions = {
   command?: string[];
   // The time of a run without its own timeoutMs. A function is read at the start of each run. Default: RUN_TIMEOUT_MS.
   timeoutMs?: number | (() => number);
-  // The stall guard of implement runs (stream.ts STALL_MS and BASH_STALL_EXTRA_MS). Tests pass short times.
-  stall?: { idleMs: number; bashExtraMs: number };
+  // The stall guard of implement runs (stream.ts STALL_MS, BASH_STALL_EXTRA_MS, and OPEN_STALL_MS). Tests pass short times.
+  stall?: { idleMs: number; bashExtraMs: number; openMs: number };
 };
 
 // The message of the loop guard to a live run (part-session.md section 2.10).
@@ -428,11 +430,22 @@ const KEEP_WAIT_MS = 200;
 // works across volumes. A killed CLI can hold the file for a moment on Windows (EBUSY, EPERM). Returns the kept file, or null.
 async function keepTranscript(projectsDir: string, cwd: string, id: string, dir: string): Promise<string | null> {
   if (!SESSION_ID.test(id)) return null;
+  const folder = join(projectsDir, cwdName(cwd));
+  const from = join(folder, `${id}.jsonl`);
   const to = join(dir, `${id}.jsonl`);
+  const at = (p: string) => lstatSync(p, { throwIfNoEntry: false });
+  // copyFileSync and mkdirSync follow links. A Bash command of the run can put a link or a junction to any file or folder of the user
+  // on each path. lstat gives a junction as a link, not as a folder.
+  const refused = () => {
+    log(`Did not keep the Claude Code session ${id}: a path of the keep is a link or of the wrong kind.`);
+    return null;
+  };
   for (let i = 1; ; i++)
     try {
+      if (!lstatSync(folder).isDirectory() || !lstatSync(from).isFile() || at(dirname(dir))?.isDirectory() === false) return refused();
       mkdirSync(dir, { recursive: true });
-      copyFileSync(join(projectsDir, cwdName(cwd), `${id}.jsonl`), to);
+      if (!at(dir)?.isDirectory() || at(to)?.isFile() === false) return refused();
+      copyFileSync(from, to);
       return to;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code ?? "";
@@ -700,8 +713,13 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
     return { ok: true, command, version, projectsDir };
   }
 
-  // Runs one review. onEvents gets each new or changed run_event. Only one run is active at a time.
-  async function run(spec: RunSpec | ResumeSpec | ImplementSpec, onEvents: (events: RunEvent[]) => void = () => {}): Promise<RunOutcome> {
+  // Runs one review. onEvents gets each new or changed run_event. onNote gets the loop warning of an implement run (LOOP_NOTE). Only one
+  // run is active at a time.
+  async function run(
+    spec: RunSpec | ResumeSpec | ImplementSpec,
+    onEvents: (events: RunEvent[]) => void = () => {},
+    onNote: (text: string) => void = () => {},
+  ): Promise<RunOutcome> {
     if (active) throw new Error("A review run is active.");
     const self: Active = { cancelled: false };
     active = self;
@@ -741,7 +759,8 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       parser = ps;
       const live = "implement" in spec && !!spec.live;
       // part-session.md section 2.10: the stall and loop guards end implement runs only.
-      const guard = "implement" in spec ? (opts.stall ?? { idleMs: STALL_MS, bashExtraMs: BASH_STALL_EXTRA_MS }) : null;
+      const guard =
+        "implement" in spec ? (opts.stall ?? { idleMs: STALL_MS, bashExtraMs: BASH_STALL_EXTRA_MS, openMs: OPEN_STALL_MS }) : null;
       const marker = crypto.randomUUID();
       const p = Bun.spawn([...c.command, ...args], {
         cwd,
@@ -799,7 +818,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         void killTree(p.pid);
       };
       // The stall deadline counts from the last stream line. An open Agent or Advisor call keeps the normal deadline. Any other open call
-      // stops the stall guard, and only the run time limit applies.
+      // gets openMs.
       let stall: ReturnType<typeof setTimeout> | undefined;
       const arm = () => {
         clearTimeout(stall);
@@ -808,9 +827,9 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         const ms = open.some((e) => e.tool === "Bash")
           ? (shell?.bashTimeoutSec ?? 0) * 1000 + guard.bashExtraMs
           : open.some((e) => e.tool !== "Agent" && e.tool !== ADVISOR_TOOL)
-            ? null
+            ? guard.openMs
             : guard.idleMs;
-        if (ms !== null) stall = setTimeout(() => end({ cut: "stall", text: stallText(ms) }), ms);
+        stall = setTimeout(() => end({ cut: "stall", text: stallText(ms) }), ms);
       };
       arm();
       const handle = (line: string) => {
@@ -832,6 +851,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         if (ps.state.loopWarns > warned) {
           warned = ps.state.loopWarns;
           write(LOOP_MESSAGE);
+          if (guard) onNote(LOOP_NOTE);
         }
         if (ps.state.results.length >= sent) close();
         arm();

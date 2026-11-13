@@ -6,7 +6,18 @@
 // repositories only. The user's clone is a temp clone that no call touches.
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, gitEnv } from "../../src/server/review/git";
@@ -20,17 +31,20 @@ import {
   inside,
   linksOn,
   newFiles,
+  oneParent,
   openWorktree,
   partDir,
   readSetupMark,
   removeWorktree,
   resetWorktree,
+  SEQUENCER,
   SPARSE,
   savePatch,
   setupHash,
   setupMark,
   slug,
   status,
+  statusSync,
   tasksRoot,
   type Worktree,
   writeSetupMark,
@@ -405,6 +419,79 @@ describe("branch names", () => {
       await git([`--git-dir=${s.cache}`, "branch", "feature/K-1-thing-3", s.base], { env: gitEnv(join(s.root, "empty.gitconfig")) });
       expect(await freeBranch(s.dataDir, s.cache, remote, "feature/K-1-thing")).toBe("feature/K-1-thing-4");
       await expect(freeBranch(s.dataDir, s.cache, remote, "feature/K-1 bad")).rejects.toThrow("not a valid branch name");
+    },
+    SLOW,
+  );
+});
+
+describe("the commit and the recovery git calls", () => {
+  test(
+    "AC-B324: a planted MERGE_HEAD or another file of a paused git operation stops the commit, and HEAD stays",
+    async () => {
+      const s = await setup();
+      const wt = await s.open();
+      const tree = (await wtGit(wt, ["rev-parse", `${s.base}^{tree}`])).trim();
+      const id = ["-c", "user.name=p", "-c", "user.email=p@example.invalid"];
+      const other = (await wtGit(wt, [...id, "commit-tree", tree, "-p", s.base, "-m", "other"])).trim();
+      writeFileSync(join(wt.repo, "src", "app.ts"), "changed\n");
+      for (const f of SEQUENCER) {
+        const p = join(wt.admin, f);
+        if (f.startsWith("rebase-") || f === "sequencer") mkdirSync(p);
+        else writeFileSync(p, `${other}\n`);
+        await expect(commitStep(wt, "K-1 T1.1: Change the app", WHO, [])).rejects.toThrow(`paused git operation (${f})`);
+        expect(await headOf(wt)).toBe(s.base);
+        rmSync(p, { recursive: true, force: true });
+      }
+      const made = await commitStep(wt, "K-1 T1.1: Change the app", WHO, []);
+      expect((await wtGit(wt, ["show", "-s", "--format=%P", made as string])).trim()).toBe(s.base);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B330: a commit with a second parent or another parent goes back, and the index keeps the work",
+    async () => {
+      const s = await setup();
+      const wt = await s.open();
+      const id = ["-c", "user.name=p", "-c", "user.email=p@example.invalid"];
+      writeFileSync(join(wt.repo, "src", "app.ts"), "changed\n");
+      await wtGit(wt, ["add", "-u"]);
+      const tree = (await wtGit(wt, ["write-tree"])).trim();
+      const other = (await wtGit(wt, [...id, "commit-tree", tree, "-m", "other"])).trim();
+      for (const parents of [
+        ["-p", s.base, "-p", other],
+        ["-p", other],
+      ]) {
+        const made = (await wtGit(wt, [...id, "commit-tree", tree, ...parents, "-m", "made"])).trim();
+        await wtGit(wt, ["update-ref", "HEAD", made, s.base]);
+        await expect(oneParent(wt, s.base, made)).rejects.toThrow(`The app undid its commit ${made.slice(0, 12)}`);
+        expect(await headOf(wt)).toBe(s.base);
+        expect((await wtGit(wt, ["diff", "--cached", "--name-only"])).trim()).toBe("src/app.ts");
+      }
+      const one = (await wtGit(wt, [...id, "commit-tree", tree, "-p", s.base, "-m", "one"])).trim();
+      await wtGit(wt, ["update-ref", "HEAD", one, s.base]);
+      await oneParent(wt, s.base, one);
+      expect(await headOf(wt)).toBe(one);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B329: git status of the app in a worktree, blocking or not, does not refresh and write the index",
+    async () => {
+      const s = await setup();
+      const wt = await s.open();
+      const index = join(wt.admin, "index");
+      // The same bytes with an older time: git status would write the new stat data of the entry.
+      const old = new Date("2020-01-01T00:00:00Z");
+      utimesSync(join(wt.repo, "README.md"), old, old);
+      const before = readFileSync(index);
+      expect(statusSync(wt)).toEqual([]);
+      expect(await status(wt)).toEqual([]);
+      expect(readFileSync(index).equals(before)).toBe(true);
+      // Control: git status without GIT_OPTIONAL_LOCKS=0 writes the index.
+      await git([`--git-dir=${wt.admin}`, `--work-tree=${wt.repo}`, "status", "--porcelain"], { env: wt.env, cwd: wt.repo });
+      expect(readFileSync(index).equals(before)).toBe(false);
     },
     SLOW,
   );

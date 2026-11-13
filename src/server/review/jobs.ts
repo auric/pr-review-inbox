@@ -375,6 +375,8 @@ export type ImplementRunStart = {
   // gets the kept transcript in o.kept.
   session?: { keep: string; resume?: string; live?: boolean };
   started: (db: Database, run: number) => void;
+  // A note of the run for the Log while it runs, such as the loop warning (part-session.md section 2.10).
+  note?: (db: Database, text: string) => void;
   after: (o: RunOutcome | null, early: Ending | null, servers: string[], gaps: string[]) => Promise<Ending>;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
 };
@@ -1557,6 +1559,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
               },
               (events) => {
                 j.db.transaction(() => upsertEvents(j.db, j.id, events))();
+                notify(j.id, undefined, t.task);
+              },
+              (text) => {
+                j.db.transaction(() => t.note?.(j.db, text))();
                 notify(j.id, undefined, t.task);
               },
             );

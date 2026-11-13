@@ -15,7 +15,7 @@ import { CONTINUE_PATHS_MAX, continueFile } from "../../src/server/review/contex
 import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
 import { snapGit, stopGit } from "../../src/server/tasks/gitstate";
-import { cutFile, PATCH_LOST, type StepOutcome, saveCut, startStep } from "../../src/server/tasks/implement";
+import { cutJson, PATCH_LOST, type StepOutcome, startStep } from "../../src/server/tasks/implement";
 import {
   changedLines,
   createLoop,
@@ -807,7 +807,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
     "AC-B203, AC-B297: a run that an app restart cut gives error/restart; Continue resets it, and the patch goes to continue-diff.md",
     async () => {
       const { s } = await stopInGate();
-      // The app stopped while the build run ran: its row and its run were still open, and no snapshot file was written.
+      // The app stopped while the build run ran: its row and its run were still open, and it had no snapshot.
       const impl = s.steps().find((x) => x.kind === "implement") as Step;
       s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: impl.id });
       s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: impl.run });
@@ -838,19 +838,20 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "AC-B266: a run that an app restart cut keeps its work when its snapshot file passes; checked stays, and Continue goes on in the worktree",
+    "AC-B266: a run that an app restart cut keeps its work when its snapshot passes; checked stays, and Continue goes on in the worktree",
     async () => {
       const { s } = await stopInGate();
       const impl = s.steps().find((x) => x.kind === "implement") as Step;
-      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: impl.id });
-      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: impl.run });
-      s.db.query("UPDATE task SET state = 'implementing', stopped_from = NULL").run();
-      // The snapshot file of the run start: the git state, and the inputs of the path check.
+      // The snapshot of the run start in the step row: the git state, and the inputs of the path check.
       const w = await s.wt();
       const snap = await snapGit([w]);
-      const key = `task:${s.task}:part:${s.part().id}:implement:${impl.item}:${impl.attempt}`;
-      await saveCut(w, snap, { key, allow: [], ignored: [...(await ignoredSnapshot(w))], shell: false, dirtyBefore: [] });
+      const json = await cutJson(w, snap, { allow: [], ignored: [...(await ignoredSnapshot(w))], shell: null, dirtyBefore: [] });
       stopGit(snap);
+      s.db
+        .query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}', cut_json = $json WHERE id = $id")
+        .run({ id: impl.id, json });
+      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: impl.run });
+      s.db.query("UPDATE task SET state = 'implementing', stopped_from = NULL").run();
       recoverTasks(s.db, Date.now(), s.dataDir);
       s.db
         .query(
@@ -862,7 +863,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(s.blocked()).toMatchObject({ kind: "error", cause: "restart", step: impl.id });
       expect(JSON.parse(cut.detail_json)).toMatchObject({ checked: true, patch: null });
       expect(JSON.parse(cut.detail_json).written).toContain("repo/src/feature.ts");
-      expect(existsSync(cutFile(w))).toBe(false);
+      expect(s.db.query("SELECT cut_json FROM task_step WHERE id = $id").get({ id: impl.id })).toEqual({ cut_json: null });
       s.mode("feature");
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);

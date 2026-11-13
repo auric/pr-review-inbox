@@ -5,11 +5,11 @@
 // the changes of Claude, also with two steps on one cache. "Claude" here is git that runs past the app's git(), as a Bash command does.
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { git } from "../../src/server/review/git";
-import { checkGit, snapGit } from "../../src/server/tasks/gitstate";
+import { checkGit, diskDiff, diskSnapOf, snapGit, stopGit } from "../../src/server/tasks/gitstate";
 import { openWorktree } from "../../src/server/tasks/worktree";
 import { taskCache, taskRemote } from "./fixture";
 
@@ -47,7 +47,7 @@ async function setup() {
   const at = (ref: string) => claude(["rev-parse", "--verify", "-q", ref]);
   const tree = claude(["rev-parse", `${base}^{tree}`]);
   const planted = claude(["-c", "user.name=p", "-c", "user.email=p@example.invalid", "commit-tree", tree, "-p", base, "-m", "planted"]);
-  return { cache, base, a, b, app, claude, at, planted };
+  return { cache, base, a, b, open, app, claude, at, planted, root };
 }
 
 describe("fix F: who changed a ref during the step", () => {
@@ -98,6 +98,99 @@ describe("fix F: who changed a ref during the step", () => {
       expect(existsSync(join(s.cache, "commondir"))).toBe(false);
       expect(s.at("refs/rl/task/1/base")).toBe(s.base);
       expect(() => s.claude(["config", "--file", join(s.cache, "config"), "--get", "core.hooksPath"])).toThrow();
+    },
+    SLOW,
+  );
+});
+
+// AC-B323: the files of a paused git operation in the worktree git folder, info/exclude of the cache, and the entries of
+// <cache>/worktrees. git commit with MERGE_HEAD makes a merge commit, info/exclude hides files from git status, and a new entry is a
+// worktree that the app does not know.
+describe("AC-B323: sequencer files, info/exclude, and worktree entries", () => {
+  test(
+    "a planted MERGE_HEAD, rebase-merge/, info/exclude line, and worktree entry are items, and each goes back",
+    async () => {
+      const s = await setup();
+      const admin = `${basename(s.cache)}/worktrees/${basename(s.a.admin)}`;
+      // The app makes its cache with no template, so info/exclude is absent.
+      expect(existsSync(join(s.cache, "info", "exclude"))).toBe(false);
+      const snap = await snapGit([s.a]);
+      writeFileSync(join(s.a.admin, "MERGE_HEAD"), `${s.planted}\n`);
+      mkdirSync(join(s.a.admin, "rebase-merge"));
+      writeFileSync(join(s.a.admin, "rebase-merge", "onto"), `${s.planted}\n`);
+      mkdirSync(join(s.cache, "info"), { recursive: true });
+      writeFileSync(join(s.cache, "info", "exclude"), "*\n");
+      s.claude(["worktree", "add", "--detach", join(s.root, "planted-wt"), s.base]);
+      const moved = await checkGit(snap);
+      expect(moved).toEqual([
+        `${admin}/MERGE_HEAD`,
+        `${admin}/rebase-merge`,
+        `${basename(s.cache)}/info/exclude`,
+        `${basename(s.cache)}/worktrees/planted-wt (new)`,
+      ]);
+      expect(existsSync(join(s.a.admin, "MERGE_HEAD"))).toBe(false);
+      expect(existsSync(join(s.a.admin, "rebase-merge"))).toBe(false);
+      expect(existsSync(join(s.cache, "info", "exclude"))).toBe(false);
+      expect(readdirSync(join(s.cache, "worktrees")).sort()).toEqual([basename(s.a.admin), basename(s.b.admin)].sort());
+    },
+    SLOW,
+  );
+
+  test(
+    "a paused operation of the app stays as it was: a changed file in rebase-merge/ and a deleted MERGE_HEAD come back",
+    async () => {
+      const s = await setup();
+      mkdirSync(join(s.a.admin, "rebase-merge", "sub"), { recursive: true });
+      writeFileSync(join(s.a.admin, "rebase-merge", "onto"), `${s.base}\n`);
+      writeFileSync(join(s.a.admin, "rebase-merge", "sub", "done"), "pick 1\n");
+      writeFileSync(join(s.a.admin, "MERGE_HEAD"), `${s.base}\n`);
+      const snap = await snapGit([s.a]);
+      expect(await checkGit(snap)).toEqual([]);
+      const again = await snapGit([s.a]);
+      writeFileSync(join(s.a.admin, "rebase-merge", "onto"), `${s.planted}\n`);
+      rmSync(join(s.a.admin, "MERGE_HEAD"));
+      const admin = `${basename(s.cache)}/worktrees/${basename(s.a.admin)}`;
+      expect(await checkGit(again)).toEqual([`${admin}/MERGE_HEAD`, `${admin}/rebase-merge`]);
+      expect(readFileSync(join(s.a.admin, "rebase-merge", "onto"), "utf8")).toBe(`${s.base}\n`);
+      expect(readFileSync(join(s.a.admin, "rebase-merge", "sub", "done"), "utf8")).toBe("pick 1\n");
+      expect(readFileSync(join(s.a.admin, "MERGE_HEAD"), "utf8")).toBe(`${s.base}\n`);
+    },
+    SLOW,
+  );
+
+  test(
+    "a worktree that the app adds during the step is no item; one that Claude deletes fails the restore",
+    async () => {
+      const s = await setup();
+      const snap = await snapGit([s.a]);
+      const c = await s.open(3);
+      expect(await checkGit(snap)).toEqual([]);
+      expect(existsSync(c.admin)).toBe(true);
+      const again = await snapGit([s.a]);
+      rmSync(s.b.admin, { recursive: true, force: true });
+      await expect(checkGit(again)).rejects.toThrow(`The worktree entry ${basename(s.b.admin)} is gone.`);
+    },
+    SLOW,
+  );
+
+  test(
+    "the restart check sees the same changes",
+    async () => {
+      const s = await setup();
+      const snap = await snapGit([s.a]);
+      const d = await diskSnapOf(snap);
+      stopGit(snap);
+      expect(diskDiff(d, [s.a])).toEqual([]);
+      writeFileSync(join(s.a.admin, "MERGE_HEAD"), `${s.planted}\n`);
+      mkdirSync(join(s.cache, "info"), { recursive: true });
+      writeFileSync(join(s.cache, "info", "exclude"), "*\n");
+      s.claude(["worktree", "add", "--detach", join(s.root, "planted-wt"), s.base]);
+      const admin = `${basename(s.cache)}/worktrees/${basename(s.a.admin)}`;
+      expect(diskDiff(d, [s.a])).toEqual([
+        `${admin}/MERGE_HEAD`,
+        `${basename(s.cache)}/info/exclude`,
+        `${basename(s.cache)}/worktrees/planted-wt (new)`,
+      ]);
     },
     SLOW,
   );

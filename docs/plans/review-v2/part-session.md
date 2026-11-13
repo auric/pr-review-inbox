@@ -117,7 +117,7 @@ Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, an
 **Start**
 
 - The first build run of a part starts a fresh session. It uses implementArgs without `--no-session-persistence`.
-- The runner gets `keep: {dir}`. Before removeCwdFolders (claude.ts:700), it moves `<projectsDir>/<encoded cwd>/<session id>.jsonl` into dir. The ID comes from init.session_id, and the file keeps its name.
+- The runner gets `keep: {dir}`. Before removeCwdFolders (claude.ts:700), it moves `<projectsDir>/<encoded cwd>/<session id>.jsonl` into dir. The ID comes from init.session_id, and the file keeps its name. The keep step reads the session folder, the file, dir, the parent folder of dir, and the target file with lstat. A link, a junction, or a path of the wrong kind keeps no file, because a Bash command of the run can put a link there (security review of PS2, 2026-11).
 - dir is `<taskDir>/sessions/part-<ord>/` (taskDir worktree.ts:67). It is outside the part folder (partDir :68), so the path check never sees it.
 - task_part_session (section 5.3) stores these values: the session ID, the file name, its SHA-256, the session heads, the context size, and the run count.
 
@@ -240,11 +240,12 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 - When the second check is clean, the run sets checked, and the other work stays.
 - The part waits with "Needs you: Claude changed <path>, which a task may not change. The app undid that file and kept the other work." The primary button is Continue. The next run starts a fresh session (guard rule 4).
 
-**Git snapshot on disk (build-redesign.md WP-R6)**
+**Git snapshot of a run (build-redesign.md WP-R6)**
 
-- Before each run, snapGit (gitstate.ts:52-88) writes `{files, refs, heads}` to `<taskDir>/part-<ord>.gitsnap.json`.
-- After a restart, recoverTasks runs checkGit from that file. No app git call ran after the crash, so the missing watch changes nothing.
+- Before each run, the start transaction writes the snapshot of snapGit to `task_step.cut_json` (migration 053). A file in the task folder is no place for it, because a Bash command of the run can change that file (security review of PS1, 2026-11).
+- After a restart, recoverTasks compares the disk with that snapshot (diskDiff). No app git call ran after the crash, so the missing watch changes nothing.
 - A clean check keeps the work. So a restart no longer costs a whole part.
+- A run whose Bash tool could run any command ("Most commands" or unrestricted) never keeps its work after a restart. Such a command can change any file that the app reads.
 
 ### 2.6 The final checks gate and the fix loop
 
@@ -293,9 +294,11 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 
 - Stall: when no stream line comes for STALL_MS = 15 min and no tool call is open, the app ends the run.
 - An open Bash call gets its own limit: the bash_timeout_sec of the repository plus 5 min (BASH_TIMEOUT_MAX_SEC = 3600, shared/task.ts:412). So the CLI ends a long command first.
-- An open Agent call follows the normal rule, because its nested events keep the stream going.
+- An open Agent call follows the normal rule, because its nested events keep the stream going. When an Agent call ends, each of its calls that got no result ends too.
+- Any other open call, such as an MCP call that gets no result, gets OPEN_STALL_MS = 30 min (security review of PS2, 2026-11).
 - Loop: in one thread (one parent), the app counts consecutive calls with the same tool, the same input JSON, and the same result text.
-  - At 3, it writes a Log note. With live input, it also sends "You made the same call 3 times with the same result. Change the approach, or set question and stop."
+  - A call that takes more than LOOP_SLOW_MS = 10 s from its tool_use to its tool_result starts the count again. So a run that polls with a wait (`sleep 30; test -f done || echo waiting`) goes on (security review of PS2, 2026-11).
+  - At 3, it writes a Log note to the step, once per step. With live input, it also sends "You made the same call 3 times with the same result. Change the approach, or set question and stop."
   - At 5, it ends the run.
 - Both guards keep the work (the checked rule). The part waits with "Needs you: Claude sent nothing for 15 minutes. The app stopped the run and kept the work." The primary button is Continue.
 - The settings "Task step time" and "Part time" go (shared/task.ts:92-93). RUN_TIME_MAX_MS stays as the cap of one process.
@@ -667,7 +670,7 @@ Tests per package:
   - A locked repository resets only its own tree.
   - A problem that is left after the undo takes the full reset.
   - The patch holds only the problem paths.
-  - After recoverTasks, a clean snapshot on disk keeps the work, and checked stays.
+  - After recoverTasks, a clean snapshot in task_step.cut_json keeps the work, and checked stays.
   - A changed ref after a restart blocks.
   - Control mutation: make the undo reset everything. The "other file stays" test must turn red.
 - **PS2** (tests/review/runner.test.ts):
@@ -747,7 +750,7 @@ Risks:
 - A prompt injection can live in a transcript. The fresh session after a denied path or a git state change, and the hash check, limit this risk.
 - A Bash command in Unrestricted mode can write the live transcript during its run. This falls under the known limit of BRIEF.md:162.
 - Compaction can drop the rules. The digest repeats them in each run.
-- A whole part waits for one commit. The git snapshot on disk keeps the work over a restart.
+- A whole part waits for one commit. The git snapshot of the run keeps the work over a restart, except for a run in "Most commands" or unrestricted.
 - On Linux, the CLI runs in its own process group (claude.ts:626), so it can outlive an app crash. The marker scan at the next start must end it before the recovery. Not verified.
 - Red-build pushes go out without the user's look. The consent is bounded, the lease rules stay, and each push gives a notification.
 

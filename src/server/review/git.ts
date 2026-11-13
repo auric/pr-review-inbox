@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Runs git with an argument array and an isolated config (plan v3 section 2, "Git isolation").
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { log } from "../log";
 
@@ -63,10 +63,20 @@ export const CACHE_FILES = [
   "commondir",
   "HEAD",
   "info/attributes",
+  "info/exclude",
   "info/grafts",
   "shallow",
   "objects/info/alternates",
 ];
+
+// The entries of <cache>/worktrees: each is a worktree that git knows.
+export function worktreeNames(cache: string): string[] {
+  try {
+    return readdirSync(join(cache, "worktrees"));
+  } catch {
+    return [];
+  }
+}
 
 // stopped: the time limit or the abort signal killed git. git itself reported no error.
 export class GitError extends Error {
@@ -209,15 +219,17 @@ function bytesOf(file: string): string | null {
   }
 }
 
-// The state of a cache: "file <name>" for each of CACHE_FILES with its bytes in base64, and "ref <name>" for each ref with its object.
-// files false: the refs only.
+// The state of a cache: "file <name>" for each of CACHE_FILES with its bytes in base64, "worktree <name>" for each entry of
+// <cache>/worktrees, and "ref <name>" for each ref with its object. files false: the refs only.
 export async function cacheState(cache: string, env: Record<string, string>, files = true): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  if (files)
+  if (files) {
     for (const f of CACHE_FILES) {
       const b = bytesOf(join(cache, f));
       if (b !== null) out.set(`file ${f}`, b);
     }
+    for (const n of worktreeNames(cache)) out.set(`worktree ${n}`, "1");
+  }
   const refs = await spawnGit([`--git-dir=${cache}`, "for-each-ref", "--format=%(objectname) %(refname)"], { env });
   for (const l of refs.split("\n")) {
     const at = l.indexOf(" ");

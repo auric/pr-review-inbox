@@ -28,14 +28,14 @@ import { IMPLEMENT_TOOLS, implementArgs, type RunOutcome } from "../../src/serve
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
 import { createReviewJobs, IMPLEMENT_MCP_LINES, type ImplementRunStart } from "../../src/server/review/jobs";
-import { LOOP_TEXT } from "../../src/server/review/stream";
+import { LOOP_NOTE, LOOP_TEXT } from "../../src/server/review/stream";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { diskDiff, movedText, snapGit, stopGit } from "../../src/server/tasks/gitstate";
 import {
   ciPath,
   commitTask,
-  cutFile,
+  cutJson,
   endStep,
   GIT_KEPT_TEXT,
   implementPrompt,
@@ -45,7 +45,6 @@ import {
   pathCheck,
   type StepInput,
   type StepOutcome,
-  saveCut,
   sparseHidden,
   startStep,
   undoStep,
@@ -63,7 +62,7 @@ import {
   writeSetupMark,
   wtGit,
 } from "../../src/server/tasks/worktree";
-import { implementJsonSchema, type TaskBlocked } from "../../src/shared/task";
+import { implementJsonSchema, type ShellMode, type TaskBlocked } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { fakeRunner, stubListTools } from "../support/review-fixture";
 import { taskCache, taskRemote } from "./fixture";
@@ -506,6 +505,31 @@ describe("implement run", () => {
       expect(patch).toContain("diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml");
       expect(patch).toContain("diff --git a/docs/AGENTS.md b/docs/AGENTS.md");
       expect(patch).not.toContain("src/");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B325: in a shell step, an ignored CLAUDE.local.md or .claude/settings.local.json that a Bash command wrote is a problem; other build output passes",
+    async () => {
+      const s = await setup();
+      const o = { allow: [], ignored: await ignoredSnapshot(s.wt), written: [] };
+      mkdirSync(join(s.wt.repo, "ignored", ".claude"), { recursive: true });
+      writeFileSync(join(s.wt.repo, "ignored", "CLAUDE.local.md"), "planted\n");
+      writeFileSync(join(s.wt.repo, "ignored", ".claude", "settings.local.json"), "{}\n");
+      writeFileSync(join(s.wt.repo, "ignored", "build.log"), "ok\n");
+      const check = await pathCheck(s.wt, o);
+      expect(check.ignored).toEqual(["ignored/.claude/settings.local.json", "ignored/CLAUDE.local.md", "ignored/build.log"]);
+      expect(check.problems).toEqual([
+        { path: "ignored/.claude/settings.local.json", reason: "A step may not change this path." },
+        { path: "ignored/CLAUDE.local.md", reason: "A step may not change this path." },
+      ]);
+      // The undo removes the two files and keeps the build output.
+      const u = await undoStep(s.wt, s.base, check, join(s.root, "patches", "6.patch"), o);
+      expect([u.full, u.left]).toEqual([false, []]);
+      expect(existsSync(join(s.wt.repo, "ignored", "CLAUDE.local.md"))).toBe(false);
+      expect(existsSync(join(s.wt.repo, "ignored", ".claude", "settings.local.json"))).toBe(false);
+      expect(readFileSync(join(s.wt.repo, "ignored", "build.log"), "utf8")).toBe("ok\n");
     },
     SLOW,
   );
@@ -1261,6 +1285,8 @@ describe("a step with the Bash tool", () => {
       expect(taskRow(s.db, s.task)?.state).toBe("implementing");
       const d = JSON.parse(s.stepRow(outcome?.step as number).detail_json);
       expect([s.stepRow(outcome?.step as number).state, d.checked, d.shell.commands.length]).toEqual(["failed", true, 5]);
+      // AC-B326: the warning at 3 equal calls is a Log note of the step, also without live input.
+      expect(d.notes.filter((n: string) => n === LOOP_NOTE)).toHaveLength(1);
       expect(readFileSync(join(s.wt.repo, "src", "app.ts"), "utf8")).toBe("changed\n");
     },
     SLOW,
@@ -1399,14 +1425,16 @@ describe("fix F: the git state around a step", () => {
   );
 });
 
-// docs/plans/review-v2/part-session.md sections 2.5 and 9.5: the snapshot file of a run that an app restart cut. recoverTasks keeps the
-// work only when the git state equals the snapshot and the path check of the run passes.
-describe("AC-B266 to AC-B268: a run that an app restart cut", () => {
+// docs/plans/review-v2/part-session.md sections 2.5 and 9.5: the snapshot of a run that an app restart cut, in task_step.cut_json.
+// recoverTasks keeps the work only when the git state equals the snapshot and the path check of the run passes.
+describe("AC-B266 to AC-B268, AC-B321, AC-B322: a run that an app restart cut", () => {
   const KEEP = "The app stopped during the run. The git state and the changed files passed the checks, so Continue keeps the work.";
+  const cutOf = (s: Awaited<ReturnType<typeof setup>>, id: number) =>
+    (s.db.query("SELECT cut_json FROM task_step WHERE id = $id").get({ id }) as { cut_json: string | null }).cut_json;
 
-  // The state that startStep leaves before its run: an open step row, a running run, and the snapshot file. Then Claude writes files,
+  // The state that startStep leaves before its run: an open step row with its snapshot, and a running run. Then Claude writes files,
   // the run log holds each Write call, and the app stops.
-  async function cut(s: Awaited<ReturnType<typeof setup>>, writes: { path: string; text: string }[]) {
+  async function cut(s: Awaited<ReturnType<typeof setup>>, writes: { path: string; text: string }[], shell: ShellMode | null = null) {
     const now = Date.now();
     const run = (
       s.db
@@ -1418,10 +1446,9 @@ describe("AC-B266 to AC-B268: a run that an app restart cut", () => {
     ).id;
     const step = insertStep(s.db, { task: s.task, part: s.part, kind: "implement", run, item: "T1.1", attempt: 1 });
     const snap = await snapGit([s.wt]);
-    const key = `task:${s.task}:part:${s.part}:implement:T1.1:1`;
-    await saveCut(s.wt, snap, { key, allow: ["src/app.ts"], ignored: [...(await ignoredSnapshot(s.wt))], shell: false, dirtyBefore: [] });
+    const json = await cutJson(s.wt, snap, { allow: ["src/app.ts"], ignored: [...(await ignoredSnapshot(s.wt))], shell, dirtyBefore: [] });
     stopGit(snap);
-    expect(existsSync(cutFile(s.wt))).toBe(true);
+    s.db.query("UPDATE task_step SET cut_json = $json WHERE id = $id").run({ id: step, json });
     for (const [k, w] of writes.entries()) {
       mkdirSync(join(s.wt.dir, w.path, ".."), { recursive: true });
       writeFileSync(join(s.wt.dir, w.path), w.text);
@@ -1454,13 +1481,13 @@ describe("AC-B266 to AC-B268: a run that an app restart cut", () => {
       expect(s.blockedOf()).toMatchObject({ kind: "error", cause: "restart", step });
       expect(detailOf(s, step)).toMatchObject({ checked: true, written: ["repo/src/app.ts", "repo/src/new.ts"], notes: [KEEP] });
       expect(readFileSync(join(s.wt.repo, "src", "new.ts"), "utf8")).toBe("new\n");
-      expect(existsSync(cutFile(s.wt))).toBe(false);
+      expect(cutOf(s, step)).toBeNull();
     },
     SLOW,
   );
 
   test(
-    "AC-B266: a real run writes the snapshot file with the key of its step row; the run start leaves the git state equal; the run end deletes the file",
+    "AC-B266, AC-B321: a real run writes the snapshot into its running step row; the run start leaves the git state equal; the run end clears it",
     async () => {
       const s = await setup();
       s.scenario({ hang: true });
@@ -1468,24 +1495,70 @@ describe("AC-B266 to AC-B268: a run that an app restart cut", () => {
       const end = Date.now() + 15_000;
       while (!s.calls().some((c) => (c as { childPid?: number }).childPid !== undefined) && Date.now() < end) await Bun.sleep(100);
       expect(s.runCalls()).toHaveLength(1);
-      const bytes = readFileSync(cutFile(s.wt), "utf8");
-      const file = JSON.parse(bytes) as { key: string; git: Parameters<typeof diskDiff>[0] };
-      const row = s.db.query("SELECT kind, item, attempt FROM task_step WHERE state = 'running'").get() as Record<string, unknown>;
-      expect(file.key).toBe(`task:${s.task}:part:${s.part}:${row.kind}:${row.item}:${row.attempt}`);
+      const row = s.db.query("SELECT id, cut_json FROM task_step WHERE state = 'running'").get() as { id: number; cut_json: string };
+      const json = JSON.parse(row.cut_json) as { git: Parameters<typeof diskDiff>[0]; allow: string[]; shell: string | null };
+      expect([json.allow, json.shell]).toEqual([["src/app.ts"], null]);
       // The recovery would see this if the app stopped now: the app's own work at the run start changed no ref and no file.
-      expect(diskDiff(file.git, [s.wt])).toEqual([]);
+      expect(diskDiff(json.git, [s.wt])).toEqual([]);
+      // The snapshot file of the older design is no more.
+      expect(readdirSync(join(s.wt.dir, "..")).filter((n) => n.endsWith(".gitsnap.json"))).toEqual([]);
       expect(s.review.cancelTask(s.db, s.task)).toBe(true);
       const outcome = (await done).outcome as StepOutcome;
       expect(outcome.status).toBe("cancelled");
-      expect(existsSync(cutFile(s.wt))).toBe(false);
-      // The same file after a restart in the run keeps the work.
-      writeFileSync(cutFile(s.wt), bytes);
-      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: outcome.step });
+      expect(outcome.step).toBe(row.id);
+      expect(cutOf(s, outcome.step)).toBeNull();
+      // The same snapshot after a restart in the run keeps the work.
+      s.db
+        .query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}', cut_json = $cut WHERE id = $id")
+        .run({ id: outcome.step, cut: row.cut_json });
       s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: outcome.run });
       recover(s);
       expect(detailOf(s, outcome.step)).toMatchObject({ checked: true, notes: [KEEP] });
+      expect(cutOf(s, outcome.step)).toBeNull();
     },
     SLOW,
+  );
+
+  test(
+    "AC-B321: a moved ref fails the keep also when a planted snapshot file matches the moved state; the app reads only the step row",
+    async () => {
+      const s = await setup();
+      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }]);
+      const p = Bun.spawnSync(["git", `--git-dir=${s.wt.cache}`, "update-ref", "refs/heads/planted", s.base], { env: s.wt.env });
+      expect(p.exitCode).toBe(0);
+      // A Bash command of the run writes the file of the older design with the git state after the move.
+      const snap = await snapGit([s.wt]);
+      const forged = await cutJson(s.wt, snap, { allow: ["src/app.ts"], ignored: [], shell: null, dirtyBefore: [] });
+      stopGit(snap);
+      writeFileSync(`${s.wt.dir}.gitsnap.json`, forged);
+      recover(s);
+      const d = detailOf(s, step);
+      expect(d.checked).toBe(false);
+      expect(d.notes[0]).toContain("refs/heads/planted (new)");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B322: a cut run whose Bash tool could run any command never keeps its work; an allowlist run with a clean state does",
+    async () => {
+      for (const shell of ["any", "unrestricted"] as const) {
+        const s = await setup();
+        const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }], shell);
+        recover(s);
+        const d = detailOf(s, step);
+        expect([shell, d.checked]).toEqual([shell, false]);
+        expect(d.notes).toEqual([
+          "The app stopped during the run. Claude could run any command in the run. Continue resets the work and keeps a patch.",
+        ]);
+        expect(s.blockedOf()).toMatchObject({ kind: "error", cause: "restart", step });
+      }
+      const s = await setup();
+      const step = await cut(s, [{ path: "repo/src/app.ts", text: "changed\n" }], "allowlist");
+      recover(s);
+      expect(detailOf(s, step)).toMatchObject({ checked: true, notes: [KEEP] });
+    },
+    SLOW * 2,
   );
 
   test(
@@ -1505,7 +1578,7 @@ describe("AC-B266 to AC-B268: a run that an app restart cut", () => {
       expect(taskRow(s.db, s.task)?.state).toBe("implementing");
       expect(s.blockedOf()).toMatchObject({ kind: "error", cause: "restart", step });
       expect((await git([`--git-dir=${s.wt.cache}`, "rev-parse", "refs/heads/planted"], { env: s.wt.env })).trim()).toBe(s.base);
-      expect(existsSync(cutFile(s.wt))).toBe(false);
+      expect(cutOf(s, step)).toBeNull();
     },
     SLOW,
   );

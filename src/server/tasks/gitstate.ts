@@ -5,18 +5,18 @@
 // git through `bash -c` (Gate B34), so the app saves the state before the step and puts it back after the step. The files go back before
 // any other git call of the app reads them.
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { z } from "zod";
-import { CACHE_FILES, cacheState, exclusive, gitRaw, otherWatches, record, watchCache } from "../review/git";
-import { gitSync, headOf, type Worktree, wtGit, wtGitSync } from "./worktree";
+import { CACHE_FILES, cacheState, exclusive, gitRaw, otherWatches, record, watchCache, worktreeNames } from "../review/git";
+import { gitSync, headOf, SEQUENCER, type Worktree, wtGit, wtGitSync } from "./worktree";
 
-// The files of the git folder of a worktree that git reads, besides the index.
+// The files of the git folder of a worktree that git reads, besides the index and SEQUENCER.
 const ADMIN_FILES = ["HEAD", "commondir", "gitdir", "config.worktree", "info/sparse-checkout"];
 
 // quiet: the file goes back, but a change of it is no item. git status of a step rewrites the index, and a restore removes what a step
-// staged past the commit of the app.
-type FileSnap = { path: string; label: string; bytes: Buffer | null; quiet?: boolean };
+// staged past the commit of the app. tree: a file or a folder (SEQUENCER), with bytes from readTree.
+type FileSnap = { path: string; label: string; bytes: Buffer | null; quiet?: boolean; tree?: boolean };
 type CacheSnap = {
   cache: string;
   env: Record<string, string>;
@@ -42,8 +42,44 @@ function put(path: string, bytes: Buffer | null) {
   writeFileSync(path, bytes);
 }
 
+// A file or a folder as one value: the path under it, the kind, and the bytes of each entry, in name order. A link is an entry of kind
+// "other", and the read does not follow it. null: nothing at path.
+function readTree(path: string): Buffer | null {
+  if (!lstatSync(path, { throwIfNoEntry: false })) return null;
+  const out: [string, string, string][] = [];
+  const walk = (sub: string) => {
+    const p = sub ? join(path, ...sub.split("/")) : path;
+    const st = lstatSync(p);
+    if (st.isDirectory()) {
+      out.push([sub, "dir", ""]);
+      for (const n of readdirSync(p).sort()) walk(sub ? `${sub}/${n}` : n);
+    } else out.push([sub, st.isFile() ? "file" : "other", st.isFile() ? readFileSync(p).toString("base64") : ""]);
+  };
+  walk("");
+  return Buffer.from(JSON.stringify(out));
+}
+
+function putTree(path: string, bytes: Buffer | null) {
+  rmSync(path, { recursive: true, force: true, maxRetries: 3 });
+  if (bytes === null) return;
+  for (const [sub, kind, b64] of JSON.parse(bytes.toString()) as [string, string, string][]) {
+    const p = sub ? join(path, ...sub.split("/")) : path;
+    if (kind === "dir") mkdirSync(p, { recursive: true });
+    else if (kind === "file") put(p, Buffer.from(b64, "base64"));
+  }
+}
+
+const readOf = (f: Omit<FileSnap, "bytes">) => (f.tree ? readTree(f.path) : read(f.path));
 const same = (a: Buffer | null, b: Buffer | null) => (a === null || b === null ? a === b : a.equals(b));
 const rel = (wt: Worktree, p: string) => relative(wt.dir, p).replaceAll("\\", "/");
+
+// The entries of <cache>/worktrees that differ from the "worktree <name>" keys of want.
+function entryChanges(cache: string, want: Iterable<string>) {
+  const was = new Set([...want].filter((k) => k.startsWith("worktree ")).map((k) => k.slice("worktree ".length)));
+  const now = new Set(worktreeNames(cache));
+  return { now, added: [...now].filter((n) => !was.has(n)), gone: [...was].filter((n) => !now.has(n)) };
+}
+const entryLabel = (cache: string, n: string, added: boolean) => `${basename(cache)}/worktrees/${n} (${added ? "new" : "deleted"})`;
 
 export const stopGit = (s: Pick<GitSnap, "caches">) => {
   for (const c of s.caches) c.watch.stop();
@@ -57,7 +93,9 @@ function gitFiles(wts: readonly Worktree[]): Omit<FileSnap, "bytes">[] {
   for (const wt of wts) {
     const link = join(wt.repo, ".git");
     out.push({ path: link, label: rel(wt, link) });
-    for (const f of ADMIN_FILES) out.push({ path: join(wt.admin, f), label: `${basename(wt.cache)}/worktrees/${basename(wt.admin)}/${f}` });
+    const admin = `${basename(wt.cache)}/worktrees/${basename(wt.admin)}`;
+    for (const f of ADMIN_FILES) out.push({ path: join(wt.admin, f), label: `${admin}/${f}` });
+    for (const f of SEQUENCER) out.push({ path: join(wt.admin, f), label: `${admin}/${f}`, tree: true });
     out.push({ path: join(wt.admin, "index"), label: "index", quiet: true });
   }
   return out;
@@ -82,7 +120,7 @@ export async function snapGit(wts: readonly Worktree[]): Promise<GitSnap> {
         }),
       );
     }
-    const files: FileSnap[] = gitFiles(wts).map((f) => ({ ...f, bytes: read(f.path) }));
+    const files: FileSnap[] = gitFiles(wts).map((f) => ({ ...f, bytes: readOf(f) }));
     const heads: GitSnap["heads"] = [];
     for (const wt of wts) heads.push({ wt, head: await headOf(wt) });
     return { files, caches, heads };
@@ -100,9 +138,9 @@ export async function checkGit(s: GitSnap): Promise<string[]> {
   const wants = new Map<string, Map<string, string>>();
   try {
     for (const f of s.files) {
-      if (same(read(f.path), f.bytes)) continue;
+      if (same(readOf(f), f.bytes)) continue;
       if (!f.quiet) moved.push(f.label);
-      put(f.path, f.bytes);
+      (f.tree ? putTree : put)(f.path, f.bytes);
     }
     for (const c of s.caches)
       await exclusive(c.cache, async () => {
@@ -120,6 +158,18 @@ export async function checkGit(s: GitSnap): Promise<string[]> {
           moved.push(`${basename(c.cache)}/${f}`);
           put(join(c.cache, f), b === undefined ? null : Buffer.from(b, "base64"));
         }
+        // A new entry goes. The files of a gone entry are lost, so it fails the restore.
+        const failed: string[] = [];
+        const e = entryChanges(c.cache, want.keys());
+        for (const n of e.now) before.set(`worktree ${n}`, "1");
+        for (const n of e.added) {
+          moved.push(entryLabel(c.cache, n, true));
+          rmSync(join(c.cache, "worktrees", n), { recursive: true, force: true, maxRetries: 3 });
+        }
+        for (const n of e.gone) {
+          moved.push(entryLabel(c.cache, n, false));
+          failed.push(`The worktree entry ${n} is gone.`);
+        }
         // git reads the files above, so the refs come only now.
         const refs = await cacheState(c.cache, c.env, false);
         for (const [k, v] of refs) before.set(k, v);
@@ -136,7 +186,6 @@ export async function checkGit(s: GitSnap): Promise<string[]> {
         }
         // One ref per call, so a ref that cannot come back does not stop the others. --no-deref: a symbolic ref that the step made goes
         // itself, not its target.
-        const failed: string[] = [];
         for (const l of lines)
           await gitRaw([`--git-dir=${c.cache}`, "update-ref", "--no-deref", "--stdin"], { env: c.env, stdin: `${l}\n` }).catch((e) =>
             failed.push((e as Error).message),
@@ -147,7 +196,7 @@ export async function checkGit(s: GitSnap): Promise<string[]> {
           const after = await cacheState(c.cache, c.env);
           for (const o of others) record(before, after, o);
         }
-        if (failed.length) throw new Error(`The app could not restore the refs of ${basename(c.cache)}: ${failed.join(" ")}`);
+        if (failed.length) throw new Error(`The app could not restore the git state of ${basename(c.cache)}: ${failed.join(" ")}`);
       });
   } finally {
     stopGit(s);
@@ -173,12 +222,12 @@ export function movedReason(moved: readonly string[]) {
 // spec.md section 6.8: the reason of a task whose step changed the git state.
 export const movedText = (moved: readonly string[]) => `Needs you: ${movedReason(moved)}.`;
 
-// ---------- The snapshot on disk (docs/plans/review-v2/part-session.md sections 2.5 and 9.5) ----------
+// ---------- The snapshot of a run (docs/plans/review-v2/part-session.md sections 2.5 and 9.5) ----------
 
 // The git state at the start of a run, for the check after an app restart. The check only compares: the app git calls during the run
-// left no record, so a restore could undo them. It holds hashes, the refs, and the HEAD commits, in the order of gitFiles and of the
-// worktrees. It holds no bytes, no env, and no path. index: the index entries with their flags (`git ls-files -s -v`), without the
-// stat data that a git status rewrites.
+// left no record, so a restore could undo them. It holds hashes, the refs, the worktree entries, and the HEAD commits, in the order of
+// gitFiles and of the worktrees. It holds no bytes, no env, and no path. index: the index entries with their flags
+// (`git ls-files -s -v`), without the stat data that a git status rewrites.
 export const diskSnap = z.object({
   files: z.array(z.string().nullable()),
   caches: z.array(z.record(z.string(), z.string())),
@@ -217,13 +266,16 @@ export function diskDiff(d: DiskSnap, wts: readonly Worktree[]): string[] {
     d.heads.length !== wts.length ||
     d.index.length !== wts.length
   )
-    return ["the snapshot file"];
-  const out = files.flatMap((f, k) => (fileHash(read(f.path)) === d.files[k] ? [] : [f.label]));
-  for (const [k, wt] of caches.entries())
+    return ["the snapshot"];
+  const out = files.flatMap((f, k) => (fileHash(readOf(f)) === d.files[k] ? [] : [f.label]));
+  for (const [k, wt] of caches.entries()) {
     for (const f of CACHE_FILES) {
       const b = read(join(wt.cache, f));
       if ((b === null ? undefined : sha(b.toString("base64"))) !== d.caches[k]?.[`file ${f}`]) out.push(`${basename(wt.cache)}/${f}`);
     }
+    const e = entryChanges(wt.cache, Object.keys(d.caches[k] ?? {}));
+    out.push(...e.added.map((n) => entryLabel(wt.cache, n, true)), ...e.gone.map((n) => entryLabel(wt.cache, n, false)));
+  }
   if (out.length) return out;
   for (const [k, wt] of caches.entries()) {
     const want = new Map(Object.entries(d.caches[k] ?? {}).filter(([key]) => key.startsWith("ref ")));

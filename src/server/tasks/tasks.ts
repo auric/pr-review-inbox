@@ -192,9 +192,10 @@ const SQL = {
       OR EXISTS (SELECT 1 FROM task_step s WHERE s.task = t.id AND s.state IN ('waiting', 'running'))
       OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id AND p.state = 'implementing'))
     ORDER BY t.id`,
-  failSteps: "UPDATE task_step SET state = 'failed', ended_at = $now WHERE state IN ('waiting', 'running')",
-  // docs/plans/review-v2/part-session.md section 2.5: the Claude steps whose run the restart cut. A resolve step writes no snapshot file.
-  cut: `SELECT id, task, part, kind, item, attempt, run FROM task_step WHERE state = 'running' AND run IS NOT NULL AND part IS NOT NULL
+  // The cut query reads cut_json first.
+  failSteps: "UPDATE task_step SET state = 'failed', ended_at = $now, cut_json = NULL WHERE state IN ('waiting', 'running')",
+  // docs/plans/review-v2/part-session.md section 2.5: the Claude steps whose run the restart cut. A resolve step has no snapshot.
+  cut: `SELECT id, task, part, run, cut_json AS cut FROM task_step WHERE state = 'running' AND run IS NOT NULL AND part IS NOT NULL
     AND kind IN ('tests', 'implement', 'fix', 'instruct')`,
   // spec.md section 6.25.3: part rows hold reasons only while the task builds.
   clearWaits: "UPDATE task_part SET blocked_json = NULL WHERE task = $id AND blocked_json IS NOT NULL",
@@ -268,7 +269,7 @@ export function advancePart(
 // ends failed. An interview or spec task stops, so Resume runs its run again. A task that builds or follows up keeps its state: each
 // part with an open step row gets the reason error/restart, or the reason update for an update. A part that built between two steps
 // gets error/restart with no step. Held and waiting part rows stay. Call it before the run recovery (run-rows.ts SQL.recover), which
-// ends the runs themselves with kind restart. dataDir: the data folder. With it, a cut run whose snapshot file passes the checks keeps
+// ends the runs themselves with kind restart. dataDir: the data folder. With it, a cut run whose snapshot passes the checks keeps
 // its work (implement.ts keepCut).
 export const RESTART_TEXT = (ord: number | null) =>
   `Needs you: the app stopped during the work on ${ord === null ? "the task" : `part ${ord}`}. Continue goes on from there.`;
@@ -478,7 +479,9 @@ const Q = {
   codeParts: `SELECT p.ord, p.state, pr.state AS pr_state FROM task_part p LEFT JOIN pull_request pr ON pr.id = p.pr
     WHERE p.task = $id AND p.kind <> 'spec' ORDER BY p.ord`,
   questions: "SELECT * FROM task_question WHERE task = $id ORDER BY round, ord, id",
-  steps: "SELECT * FROM task_step WHERE task = $id ORDER BY id DESC LIMIT 50",
+  // cut_json can hold a large snapshot while a step runs, and no view needs it.
+  steps: `SELECT id, part, ord, kind, run, state, attempt, item, detail_json, started_at, ended_at FROM task_step WHERE task = $id
+    ORDER BY id DESC LIMIT 50`,
   busy: "SELECT 1 FROM task_step WHERE task = $id AND state IN ('waiting', 'running')",
   stepInsert: `INSERT INTO task_step (task, kind, run, state, ord, started_at)
     VALUES ($task, $kind, $run, 'running', (SELECT COALESCE(MAX(ord), 0) + 1 FROM task_step WHERE task = $task), $now) RETURNING id`,

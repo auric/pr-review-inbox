@@ -34,9 +34,14 @@ export const TIME_LIMIT_TEXT = "The run passed its time limit.";
 // call. An open Bash call gets the bash_timeout_sec of the step plus BASH_STALL_EXTRA_MS, so the CLI ends a long command first.
 export const STALL_MS = 15 * 60_000;
 export const BASH_STALL_EXTRA_MS = 5 * 60_000;
-// Equal calls in one thread: a note at LOOP_WARN, the end of an implement run at LOOP_MAX.
+// An open call of another tool than Bash, Agent, and Advisor, such as an MCP call that never gets its result.
+export const OPEN_STALL_MS = 30 * 60_000;
+// Equal calls in one thread: a note at LOOP_WARN, the end of an implement run at LOOP_MAX. A call that takes more than LOOP_SLOW_MS from
+// its tool_use to its tool_result starts the count again, so a run that polls with a wait (`sleep 30; test -f done`) goes on.
 export const LOOP_WARN = 3;
 export const LOOP_MAX = 5;
+export const LOOP_SLOW_MS = 10_000;
+export const LOOP_NOTE = `Claude made the same call ${LOOP_WARN} times with the same result. At ${LOOP_MAX}, the app stops the run.`;
 export function stallText(ms: number) {
   const min = Math.max(1, Math.round(ms / 60_000));
   return `Claude sent nothing for ${min} ${min === 1 ? "minute" : "minutes"}, so the app stopped the run.`;
@@ -200,6 +205,13 @@ export function createStreamParser(opts: {
     events.set(id, next);
     changed.set(id, next);
     open.delete(id);
+    // A call of a subagent that got no result ends with its Agent call.
+    if (e.tool === "Agent")
+      for (const c of [...open])
+        if (events.get(c)?.parent === id) {
+          inputs.delete(c);
+          end(changed, c, "stopped", null);
+        }
   }
 
   function add(changed: Map<string, RunEvent>, e: RunEvent) {
@@ -213,6 +225,7 @@ export function createStreamParser(opts: {
     const input = inputs.get(call.id);
     inputs.delete(call.id);
     if (input === undefined || refusedIds.has(call.id)) return;
+    if (now() - call.startedAt > LOOP_SLOW_MS) return void streaks.delete(call.parent);
     const sig = JSON.stringify([call.tool, input, result]);
     const last = streaks.get(call.parent);
     const n = last?.sig === sig ? last.n + 1 : 1;
