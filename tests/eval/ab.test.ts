@@ -8,12 +8,13 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { type AbOptions, failedRuns, largeBaseline, largeCases, modeText, parseAb, reuseRefusal, runArgs } from "../../scripts/eval/ab";
-import { evalProfile, parseOptions } from "../../scripts/eval/run";
+import { callsDir, evalProfile, parseOptions } from "../../scripts/eval/run";
 import type { EvalResult } from "../../scripts/eval/score";
 import { dbPath, PROFILES_VERSION } from "../../src/server/config";
 import { profileRevision, promptVersion } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
 import { openDb } from "../../src/server/storage/db";
+import { readRecords, schemaKind } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 
 const SLOW = 180_000;
@@ -140,12 +141,18 @@ beforeAll(async () => {
 
 const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   repeat: "1",
+  candidateRepeat: null,
   variants: ["order", "rules2"],
   modules: ["failures"],
   baseEffort: null,
   effort: null,
   reviewerEffort: null,
+  reviewerMode: null,
   verifier: null,
+  verifierEffort: null,
+  replay: false,
+  baselineOnly: false,
+  reviewOnly: false,
   large: false,
   build: [],
   results: null,
@@ -199,9 +206,27 @@ describe("eval:ab --baseline checks", () => {
     expect(refused({ promptVersion: "1.0" })).toContain("ran prompt version 1.0, but the baseline now has prompt version");
     expect(refused({ requested: { model: "opus", effort: a.requested?.effort as string } })).toContain("ran with model opus");
     expect(refused({ profile: { ...a.profile, revision: "0".repeat(64) } })).toContain("ran profile revision 00000000");
-    expect(refused({ repeat: 2 })).toContain("ran with --repeat 2, but this run asks for --repeat 1");
+    expect(refused({ repeat: 2 }, opts({ repeat: "3" }))).toContain("ran with --repeat 2, but the candidate runs 3 repeats");
+    expect(refused({ repeat: 2 }, opts({ candidateRepeat: "3" }))).toContain("ran with --repeat 2, but the candidate runs 3 repeats");
     // A different commit and CLI version are allowed.
     expect(refused({ commit: "def", cliVersion: "2.0.0" })).toBeNull();
+  });
+
+  test("a repeat-2 candidate reuses a repeat-3 baseline, also with no --repeat", () => {
+    const a = { ...header("review", "baseline"), repeat: 3 };
+    expect(reuseRefusal("review", a, opts({ candidateRepeat: "2" }), FP)).toBeNull();
+    expect(reuseRefusal("review", a, opts({ repeat: "3", candidateRepeat: "2" }), FP)).toBeNull();
+    expect(reuseRefusal("review", a, opts(), FP)).toBeNull();
+    expect(reuseRefusal("review", a, opts({ candidateRepeat: "4" }), FP)).toContain("ran with --repeat 3, but the candidate runs 4");
+  });
+
+  test("a stored candidate of the current shipped profile passes with an older profile version, a stored baseline does not", () => {
+    const a = { ...header("review", "baseline"), profileVersion: PROFILES_VERSION - 1 };
+    expect(reuseRefusal("review", a, opts(), FP)).toContain(`but the shipped profile is now version ${PROFILES_VERSION}`);
+    expect(reuseRefusal("review", a, opts(), FP, true)).toBeNull();
+    // The revision still decides: a candidate with its own module is no baseline.
+    const b = header("review", "candidate", opts({ variants: [] }));
+    expect(reuseRefusal("review", b, opts(), FP, true)).toContain("Refused: the stored review candidate ran profile revision");
   });
 
   test("the profile warning shows only when the base profiles differ", () => {
@@ -331,17 +356,33 @@ describe("eval:ab --large (docs/plans/review-v3.md WP-V13)", () => {
 
 describe("eval:ab arguments", () => {
   test("defaults, overrides, and the build flags", () => {
-    const o = parseAb(["--repeat", "2", "--db", "x.sqlite", "--runner", "cli", "a"]);
+    const o = parseAb(["--repeat", "2", "--db", "x.sqlite", "--clean", "8", "--runner", "cli", "a"]);
     if ("error" in o) throw new Error(o.error);
     expect(o).toMatchObject({
       repeat: "2",
-      variants: ["order", "rules2"],
-      modules: ["failures"],
+      candidateRepeat: null,
+      variants: [],
+      modules: [],
       baseEffort: null,
       effort: null,
+      reviewerMode: null,
+      verifierEffort: null,
+      replay: false,
+      baselineOnly: false,
+      reviewOnly: false,
       runner: ["cli", "a"],
     });
-    expect(o.build).toEqual(["--db", "x.sqlite"]);
+    // eval:local gets --clean, so the rebuilt set keeps the clean cases of a stored baseline.
+    expect(o.build).toEqual(["--db", "x.sqlite", "--clean", "8"]);
+    expect(parseAb(["--candidate-repeat", "2", "--candidate-replay", "--baseline-only", "--review-only"])).toMatchObject({
+      error: expect.stringContaining("--baseline-only runs only the baseline"),
+    });
+    expect(parseAb(["--candidate-repeat", "2", "--review-only", "--baseline-only"])).toMatchObject({
+      candidateRepeat: "2",
+      reviewOnly: true,
+      baselineOnly: true,
+    });
+    expect(parseAb(["--candidate-repeat", "0"])).toMatchObject({ error: expect.stringContaining("--repeat must be") });
     const none = parseAb(["--candidate-variants", "", "--candidate-modules", ""]);
     expect(none).toMatchObject({ variants: [], modules: [] });
     expect(parseAb(["--candidate-effort", "max"])).toMatchObject({ effort: "max" });
@@ -400,8 +441,9 @@ describe("eval:ab arguments", () => {
       "--ordinals",
       "--real",
     ]);
+    // rereview-strict joins a re-review candidate only through --candidate-variants.
     expect(runArgs("rereview", "candidate", opts({ runner: null }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "order,rules2,rereview-strict"],
+      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "order,rules2"],
       ...["--modules", `${shippedModules},failures`, "--ordinals", "--real"],
     ]);
     // Bisect: no variants and no extra module. rereview-strict changes nothing in a review run, so the review candidate drops it.
@@ -419,6 +461,67 @@ describe("eval:ab arguments", () => {
     ]);
     expect(runArgs("rereview", "candidate", bare, "")).toContain("rereview-strict");
   });
+
+  test("the default candidate equals the baseline in both modes", () => {
+    const o = parseAb([]);
+    if ("error" in o) throw new Error(o.error);
+    const revision = (mode: "review" | "rereview", side: "baseline" | "candidate") => header(mode, side, o).profile.revision;
+    for (const mode of ["review", "rereview"] as const) expect(revision(mode, "candidate")).toBe(revision(mode, "baseline"));
+  });
+
+  test("the reviewer mode, verify effort, and candidate repeat reach only the candidate runner arguments", () => {
+    const o = parseAb([
+      ...["--repeat", "3", "--candidate-repeat", "2", "--candidate-reviewer-mode", "off"],
+      ...["--candidate-verifier-effort", "high"],
+    ]);
+    if ("error" in o) throw new Error(o.error);
+    const at = (a: string[], flag: string) => (a.includes(flag) ? a[a.indexOf(flag) + 1] : undefined);
+    for (const mode of ["review", "rereview"] as const) {
+      const base = runArgs(mode, "baseline", o, "");
+      const cand = runArgs(mode, "candidate", o, "", [], "r.json");
+      expect([at(base, "--repeat"), at(base, "--reviewer-mode"), at(base, "--verifier-effort"), at(base, "--replay-find")]).toEqual([
+        "3",
+        undefined,
+        undefined,
+        undefined,
+      ]);
+      expect([at(cand, "--repeat"), at(cand, "--reviewer-mode"), at(cand, "--verifier-effort")]).toEqual(["2", "off", "high"]);
+      expect(at(cand, "--replay-find")).toBe("r.json");
+    }
+    expect(parseAb(["--candidate-reviewer-mode", "bogus"])).toMatchObject({ error: expect.stringContaining("--reviewer-mode must be") });
+    expect(parseAb(["--candidate-verifier-effort", "bogus"])).toMatchObject({
+      error: expect.stringContaining("--verifier-effort must be"),
+    });
+  });
+
+  test("--candidate-replay refuses a candidate flag that changes the finder, and keeps the verifier flags", () => {
+    for (const flags of [
+      ["--candidate-effort", "low"],
+      ["--candidate-reviewer-effort", "low"],
+      ["--candidate-reviewer-mode", "off"],
+      ["--candidate-modules", "failures"],
+      ["--candidate-variants", "order"],
+      // catalog.ts checked(): the verify mode changes the finder prompt.
+      ["--candidate-verifier", "off"],
+    ])
+      expect(parseAb(["--candidate-replay", ...flags])).toMatchObject({
+        error: expect.stringContaining("--candidate-replay replays the finder of the baseline, but the candidate changes"),
+      });
+    expect(parseAb(["--candidate-replay", "--candidate-verifier-effort", "high"])).toMatchObject({ replay: true, verifierEffort: "high" });
+    // --effort changes both sides, so the finder of the replay matches its baseline.
+    expect(parseAb(["--candidate-replay", "--effort", "medium"])).toMatchObject({ replay: true });
+  });
+
+  test(
+    "the command exits 2 on --candidate-replay with a finder flag, before any build",
+    async () => {
+      const r = await bun([AB, "--candidate-replay", "--candidate-effort", "low"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--candidate-replay replays the finder of the baseline, but the candidate changes effort");
+      expect(r.stdout).not.toContain("Local eval set");
+    },
+    SLOW,
+  );
 
   test("a run that did not finish counts as failed, an incomplete run does not", () => {
     const r = { runs: [{ status: "completed" }, { status: "incomplete" }, { status: "failed" }, { status: "error" }] };
@@ -525,10 +628,11 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(id).toBeTruthy();
       for (const s of [id, REPO_NAME, PR_TITLE, PATH, out]) expect(r.stdout).not.toContain(s);
       expect(r.stdout).toContain("[1/1] case 1 #1:");
+      // The default candidate adds nothing to the shipped profile.
       expect(a.profile.variants).toEqual([]);
       expect(a.profile.modules).not.toContain("failures");
-      expect(b.profile.variants).toEqual(["order", "rules2"]);
-      expect(b.profile.modules).toContain("failures");
+      expect(b.profile.variants).toEqual([]);
+      expect(b.profile.modules).toEqual(a.profile.modules);
       expect(a.requested?.effort).not.toBe("low");
       expect(b.requested?.effort).toBe("low");
       expect(a.fingerprint).toBe(b.fingerprint as string);
@@ -563,12 +667,28 @@ describe("eval:ab end to end with the fake CLI", () => {
   );
 
   test(
+    "--baseline takes a stored candidate of the shipped profile when the folder has no baseline",
+    async () => {
+      // results-reuse holds only the default candidate of the test above: the shipped profile.
+      const reuse = join(TMP, "results-reuse");
+      const before = calls();
+      const r = await run(["--results", join(TMP, "results-from-candidate"), "--baseline", reuse]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      const [b] = readdirSync(join(reuse, "review-candidate")).filter((x) => x.endsWith(".json"));
+      expect(r.stdout).toContain(`--- review baseline: reused ${join(reuse, "review-candidate", b as string)} ---`);
+      expect(calls() - before).toBe(firstRun / 2);
+    },
+    SLOW,
+  );
+
+  test(
     "--baseline refuses a stored baseline of another repeat count or effort, before any run",
     async () => {
       const before = calls();
       const repeat = await run(["--results", join(TMP, "results-refused"), "--baseline", results, "--repeat", "2"]);
       expect(repeat.code).toBe(2);
-      expect(repeat.stderr).toContain("Refused: the stored review baseline ran with --repeat 1, but this run asks for --repeat 2.");
+      expect(repeat.stderr).toContain("Refused: the stored review baseline ran with --repeat 1, but the candidate runs 2 repeats.");
       const effort = await run(["--results", join(TMP, "results-refused"), "--baseline", results, "--effort", "max"]);
       expect(effort.code).toBe(2);
       expect(effort.stderr).toContain("but this run needs effort max.");
@@ -601,6 +721,42 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(r.stdout).toContain(`No review baseline in ${empty}, so the review baseline runs.`);
       expect(calls() - before).toBe(firstRun);
       expect(readdirSync(again).sort()).toEqual(["review-baseline", "review-candidate"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "--baseline-only records the calls, and --candidate-replay on that baseline runs only the verify calls",
+    async () => {
+      const only = join(TMP, "results-only");
+      const r = await run(["--results", only, "--baseline-only", "--review-only"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("== Review cases: 1 cases x 1, baseline only ==");
+      expect(r.stdout).toContain("== Re-review cases: skipped, --review-only ==");
+      expect(readdirSync(only)).toEqual(["review-baseline"]);
+      const base = join(only, "review-baseline");
+      const file = readdirSync(base).find((f) => f.endsWith(".json")) as string;
+      const a = JSON.parse(readFileSync(join(base, file), "utf8")) as EvalResult;
+      const id = a.cases[0]?.id as string;
+      expect(readdirSync(callsDir(join(base, file))).sort()).toEqual([`${id}-1-1.json`, `${id}-1-2.json`]);
+
+      const kinds = () =>
+        readRecords<{ argv: string[] }>(join(dir, "calls.jsonl"))
+          .filter((x) => x.argv.includes("-p"))
+          .map((x) => schemaKind(JSON.parse(x.argv[x.argv.indexOf("--json-schema") + 1] ?? "{}").properties ?? {}));
+      const before = kinds().length;
+      const replayed = join(TMP, "results-replay");
+      const c = await run(["--results", replayed, "--baseline", only, "--candidate-replay", "--candidate-verifier-effort", "high"]);
+      expect(c.stderr).toBe("");
+      expect(c.code).toBe(0);
+      expect(c.stdout).toContain(`finder replayed from ${file}`);
+      // The finder of the candidate came from the recording: the fake CLI saw only the verify call.
+      expect(kinds().slice(before)).toEqual(["verify"]);
+      const cand = join(replayed, "review-candidate");
+      const b = JSON.parse(readFileSync(join(cand, readdirSync(cand).find((f) => f.endsWith(".json")) as string), "utf8")) as EvalResult;
+      expect(b.requested).toMatchObject({ replayOf: file, verifierEffort: "high", reviewerMode: "auto" });
+      expect(b.runs[0]?.items.map((i) => [i.path, i.line, i.verdict])).toEqual(a.runs[0]?.items.map((i) => [i.path, i.line, i.verdict]));
     },
     SLOW,
   );

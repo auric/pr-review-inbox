@@ -6,7 +6,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import {
   buildRepo,
   type EvalCase,
@@ -17,8 +17,20 @@ import {
   MANIFEST_FILE,
   SETS,
 } from "../../scripts/eval/cases";
-import { compareText } from "../../scripts/eval/compare";
-import { DEFAULT_MODEL_WARNING, evalProfile, type Options, parseOptions, partFacts, runFacts, WARNING } from "../../scripts/eval/run";
+import { compareText, readResult } from "../../scripts/eval/compare";
+import {
+  callsDir,
+  caseInfo,
+  DEFAULT_MODEL_WARNING,
+  evalProfile,
+  finderChange,
+  type Options,
+  parseOptions,
+  partFacts,
+  replayRefusal,
+  runFacts,
+  WARNING,
+} from "../../scripts/eval/run";
 import { type EvalResult, score } from "../../scripts/eval/score";
 import { PROFILES_VERSION } from "../../src/server/config";
 import { profileRevision, SHIPPED_PROFILES, shippedProfileAt } from "../../src/server/review/catalog";
@@ -27,7 +39,7 @@ import { createStreamParser } from "../../src/server/review/stream";
 import { DEFAULT_VERIFIER } from "../../src/shared/dto";
 import { REVIEW_PROMPT_VERSION } from "../../src/shared/review";
 import { CHECK_EVENT, type RunEvent } from "../../src/shared/run-log";
-import { readRecords } from "../support/fake-claude";
+import { readRecords, schemaKind } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 
 const SLOW = 120_000;
@@ -129,6 +141,58 @@ describe("eval harness without --real (AC-M2)", () => {
     if ("error" in p) throw new Error(p.error);
     expect(p.profile.reviewer).toEqual({ ...(SHIPPED_PROFILES[0]?.reviewer as typeof p.profile.reviewer), effort: "xhigh" });
     expect(p.profile.effort).toBe(SHIPPED_PROFILES[0]?.effort ?? null);
+  });
+
+  test("the two reviewer flags and the two verifier flags survive together (review-quality-2026.md E2)", () => {
+    // None of the four values is the shipped one, so a flag that drops another shows.
+    const o = parseOptions([
+      ...["--reviewer-effort", "xhigh", "--reviewer-mode", "off"],
+      ...["--verifier", "off", "--verifier-effort", "high"],
+    ]);
+    if ("error" in o) throw new Error(o.error);
+    const p = evalProfile(o);
+    if ("error" in p) throw new Error(p.error);
+    expect(p.profile.reviewer).toEqual({ model: null, effort: "xhigh", mode: "off" });
+    expect(p.profile.verifier).toEqual({ mode: "off", model: null, effort: "high" });
+    const one = evalProfile(parseOptions(["--reviewer-mode", "always", "--verifier-effort", "low"]) as Options);
+    if ("error" in one) throw new Error(one.error);
+    expect(one.profile.reviewer).toEqual({ ...(SHIPPED_PROFILES[0]?.reviewer as typeof one.profile.reviewer), mode: "always" });
+    expect(one.profile.verifier).toEqual({ ...DEFAULT_VERIFIER, ...SHIPPED_PROFILES[0]?.verifier, effort: "low" });
+    expect(parseOptions(["--reviewer-mode", "bogus"])).toMatchObject({ error: expect.stringContaining("--reviewer-mode must be") });
+    expect(parseOptions(["--verifier-effort", "bogus"])).toMatchObject({ error: expect.stringContaining("--verifier-effort must be") });
+  });
+
+  test("finderChange names the finder fields, and leaves out the verifier effort and model", () => {
+    const p = evalProfile(parseOptions([]) as Options);
+    if ("error" in p) throw new Error(p.error);
+    const base = { ...p.profile, revision: "a" };
+    expect(
+      finderChange(base, { ...p.profile, revision: "b", verifier: { ...p.profile.verifier, effort: "max", model: "sonnet" } }),
+    ).toEqual([]);
+    expect(finderChange(base, { ...p.profile, verifier: { ...p.profile.verifier, mode: "off" } })).toEqual(["verifier"]);
+    expect(finderChange(base, { ...p.profile, effort: "low", reviewer: { ...p.profile.reviewer, mode: "off" } })).toEqual([
+      "effort",
+      "reviewer",
+    ]);
+    expect(finderChange(base, { ...p.profile, variants: ["order"] })).toEqual(["variants"]);
+  });
+
+  test("the result case keeps the case fields clean, group, hasTask, large, and task", () => {
+    const [c] = loadCases("ts-cache-race");
+    if (!c) throw new Error("The case ts-cache-race is missing.");
+    const info = caseInfo({ ...c, clean: true, group: "pr1", hasTask: true, large: false, task: "Task text." }, "b", "h");
+    expect(info).toMatchObject({
+      id: c.id,
+      base: "b",
+      head: "h",
+      clean: true,
+      group: "pr1",
+      hasTask: true,
+      large: false,
+      task: "Task text.",
+    });
+    const plain = JSON.parse(JSON.stringify(caseInfo({ ...c, task: undefined }, "b", "h")));
+    for (const k of ["clean", "group", "hasTask", "large", "task"]) expect(plain).not.toHaveProperty(k);
   });
 
   test("runFacts counts rl-reviewer calls and the repository files that the finder opened, never a context file", () => {
@@ -420,7 +484,14 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const file = join(out, files[0] as string);
       const result = JSON.parse(readFileSync(file, "utf8")) as EvalResult;
       expect(result).toMatchObject({ format: 1, promptVersion: REVIEW_PROMPT_VERSION, runner: "fake", repeat: 1, volume: "balanced" });
-      expect(result.requested).toEqual({ model: "default", effort: "high", verifier: "on" });
+      // Shipped efforts: no --effort flag runs the finder at high and the verify call at medium.
+      expect(result.requested).toEqual({
+        model: "default",
+        effort: "high",
+        verifier: "on",
+        verifierEffort: "medium",
+        reviewerMode: "auto",
+      });
       expect(result.profileVersion).toBe(PROFILES_VERSION);
       expect(r.stdout).toContain(DEFAULT_MODEL_WARNING);
       expect(result.cliVersion).toContain("2.1.302");
@@ -428,6 +499,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(result.cases.map((x) => [x.id, x.head])).toEqual([[c.id, repo.head]]);
       const [run] = result.runs;
       expect(run).toMatchObject({ case: c.id, repeat: 1, status: "completed", error: null, questions: 0 });
+      expect(run?.finderQuestions).toEqual({ asked: 0, answered: 0, findings: 0, kept: 0 });
       expect(run?.agentCalls).toBeNumber();
       expect(run?.toolsPerCall).toBeNumber();
       expect(run?.opened).toBeArray();
@@ -717,7 +789,9 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
       const version = `${REVIEW_PROMPT_VERSION}+order+rules2`;
-      expect(r.stdout).toContain(`with variants rules2, order, model haiku, effort low, verifier off, prompt version ${version}`);
+      expect(r.stdout).toContain(
+        `with variants rules2, order, model haiku, effort low, reviewer mode auto, verifier off, verifier effort medium, prompt version ${version}`,
+      );
       expect(r.stdout).not.toContain(DEFAULT_MODEL_WARNING);
       const argv = readRecords<{ argv: string[] }>(record).find((x) => x.argv.includes("-p"))?.argv ?? [];
       expect(argv[argv.indexOf("--model") + 1]).toBe("haiku");
@@ -725,7 +799,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
 
       const files = readdirSync(out).filter((f) => f.endsWith(".json"));
       const a = JSON.parse(readFileSync(join(out, files[0] as string), "utf8")) as EvalResult;
-      expect(a.requested).toEqual({ model: "haiku", effort: "low", verifier: "off" });
+      expect(a.requested).toEqual({ model: "haiku", effort: "low", verifier: "off", verifierEffort: "medium", reviewerMode: "auto" });
       expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["order", "rules2"] });
       expect(a.promptVersion).toBe(version);
       const [run] = a.runs;
@@ -746,7 +820,143 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(compareText(a, { ...a, requested: { model: "haiku", effort: "low", verifier: "on" } })).toContain(
         "A and B used different verify modes: off and on. The numbers do not compare.",
       );
-      expect(text).toContain("verifier off");
+      expect(text).toContain("reviewer mode auto, verifier off, verifier effort medium, fake CLI");
+      expect(compareText(a, { ...a, requested: { model: "haiku", effort: "low" } })).toContain(
+        "reviewer mode not recorded, verifier off, verifier effort not recorded, fake CLI",
+      );
+    },
+    SLOW,
+  );
+
+  test(
+    "a run records its calls, --replay-find runs only the verify calls, and a missing recording gives an error run with no live finder",
+    async () => {
+      const dir = temp("replay");
+      const [task] = loadCases("probe-task-csv-quoting", SETS.probe);
+      const bug = task?.bugs[0];
+      if (!task || !bug) throw new Error("The case probe-task-csv-quoting or its bug is missing.");
+      const repo = await buildRepo(task, temp("repo"));
+      const text = (await repo.show(repo.head, bug.path)).split("\n");
+      const finding = {
+        path: bug.path,
+        side: "new",
+        line: bug.lines[0],
+        lineEnd: bug.lines[1],
+        anchorText: (text[bug.lines[0] - 1] ?? "").trim(),
+        severity: "major",
+        category: "logic",
+        body: "A finding of the fake CLI.",
+        evidence: `${bug.path}:${bug.lines[0]}`,
+        evidenceStatus: "code",
+        confidence: "high",
+        agent: null,
+      };
+      const scenario = (name: string, findings: unknown[]) => {
+        const file = join(dir, `${name}.json`);
+        const structured = {
+          summary: "Fake review.",
+          risks: [],
+          questions: [],
+          coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
+          findings,
+        };
+        writeFileSync(
+          file,
+          JSON.stringify({
+            record: join(dir, `${name}-calls.jsonl`),
+            auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
+            fixture: claudeStream(dir, name, "claude-synthetic/review-agent-tree.jsonl", structured),
+            delayMs: 1,
+          }),
+        );
+        return file;
+      };
+      // The --json-schema kind and the --effort value of each model call of a scenario.
+      const calls = (name: string) =>
+        readRecords<{ argv: string[] }>(join(dir, `${name}-calls.jsonl`))
+          .filter((x) => x.argv.includes("-p"))
+          .map((x) => [
+            schemaKind(JSON.parse(x.argv[x.argv.indexOf("--json-schema") + 1] ?? "{}").properties ?? {}),
+            x.argv[x.argv.indexOf("--effort") + 1],
+          ]);
+      const run = async (name: string, findings: unknown[], args: string[]) => {
+        const out = join(dir, `out-${name}`);
+        const r = await bun([RUN, "--set", "probe", ...args, "--out", out, "--runner", process.execPath, FAKE, scenario(name, findings)]);
+        // A refused run makes no out folder.
+        const names = r.code === 0 ? readdirSync(out, { withFileTypes: true }) : [];
+        const file = join(out, names.find((f) => f.isFile() && f.name.endsWith(".json"))?.name ?? "none");
+        return { ...r, file };
+      };
+      const ids = `probe-clean-axis-ticks,${task.id}`;
+      const rec = await run("record", [finding], ["--cases", ids]);
+      expect(rec.stderr).toBe("");
+      expect(rec.code).toBe(0);
+      const a = readResult(rec.file);
+      // review-quality-2026.md E5: the slices read the case fields from the result file.
+      expect(a.cases.find((c) => c.id === "probe-clean-axis-ticks")).toMatchObject({ clean: true });
+      expect(a.cases.find((c) => c.id === task.id)?.task).toBe(task.task as string);
+      // The clean case has no file of the finding, so its run has no candidate and no verify call.
+      expect(readdirSync(callsDir(rec.file)).sort()).toEqual([
+        "probe-clean-axis-ticks-1-1.json",
+        `${task.id}-1-1.json`,
+        `${task.id}-1-2.json`,
+      ]);
+      expect(calls("record")).toEqual([
+        ["review", "high"],
+        ["review", "high"],
+        ["verify", "medium"],
+      ]);
+      const found = (r: EvalResult) => r.runs.find((x) => x.case === task.id)?.items.map((i) => [i.path, i.line, i.verdict]);
+      expect(found(a)).toEqual([[bug.path, bug.lines[0], "confirmed"]]);
+
+      // A live finder of this scenario finds nothing, so the found item comes from the recording.
+      const replay = await run("replay", [], ["--cases", ids, "--replay-find", rec.file, "--verifier-effort", "high"]);
+      expect(replay.stderr).toBe("");
+      expect(replay.code).toBe(0);
+      expect(replay.stdout).toContain(`Replay: the finder and salvage calls come from ${basename(rec.file)}.`);
+      const b = readResult(replay.file);
+      expect(b.requested).toMatchObject({ replayOf: basename(rec.file), verifierEffort: "high", reviewerMode: "auto" });
+      expect(found(b)).toEqual(found(a));
+      expect(calls("replay")).toEqual([["verify", "high"]]);
+      // The replay records its calls too, so a later replay can use it.
+      expect(readdirSync(callsDir(replay.file)).sort()).toEqual(readdirSync(callsDir(rec.file)).sort());
+
+      // Another mode, set, repeat count, or finder prompt version is refused.
+      const refusal = (args: string[], r: EvalResult = a) => {
+        const o = parseOptions(["--set", "probe", "--replay-find", rec.file, ...args]);
+        if ("error" in o) throw new Error(o.error);
+        const p = evalProfile(o);
+        if ("error" in p) throw new Error(p.error);
+        return replayRefusal(r, o, p.profile);
+      };
+      expect(refusal([])).toBeNull();
+      expect(refusal(["--verifier-effort", "max"])).toBeNull();
+      expect(refusal(["--rereview"])).toContain("the recording ran the other mode");
+      expect(refusal(["--set", "hard"])).toContain("the recording ran set probe, but this run has set hard");
+      expect(refusal(["--repeat", "2"])).toContain("the recording has 1 repeats, but this run asks for 2");
+      expect(refusal([], { ...a, promptVersion: "2.0" })).toContain("the recording ran finder prompt version 2.0");
+      expect(refusal(["--verifier", "off"])).toContain("changes the finder setup of the recording: verifier.");
+
+      // A flag that changes the finder exits 2 before any run.
+      const flag = await run("flag", [], ["--cases", ids, "--replay-find", rec.file, "--effort", "low"]);
+      expect(flag.code).toBe(2);
+      expect(flag.stderr).toContain("Refused: --replay-find: this run changes the finder setup of the recording: effort.");
+      expect(calls("flag")).toEqual([]);
+
+      // A missing recording and a case that the recording has no run of give error runs. No finder runs live.
+      rmSync(join(callsDir(rec.file), `${task.id}-1-1.json`));
+      const gap = await run("gap", [finding], ["--cases", `${ids},probe-claim-single-thread`, "--replay-find", rec.file]);
+      expect(gap.stderr).toBe("");
+      expect(gap.code).toBe(0);
+      const g = readResult(gap.file);
+      const runOf = (r: EvalResult, id: string) => r.runs.find((x) => x.case === id);
+      expect(runOf(g, task.id)).toMatchObject({ status: "error", error: `The recording has no finder call ${task.id}-1-1.json.` });
+      expect(runOf(g, "probe-claim-single-thread")).toMatchObject({
+        status: "error",
+        error: "The recording has no run of this case at this head.",
+      });
+      expect(runOf(g, "probe-clean-axis-ticks")?.status).toBe(runOf(a, "probe-clean-axis-ticks")?.status);
+      expect(calls("gap")).toEqual([]);
     },
     SLOW,
   );

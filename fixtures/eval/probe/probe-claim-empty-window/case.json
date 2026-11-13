@@ -39,7 +39,7 @@
       "root": 1,
       "author": "reviewer-1",
       "at": 1767344400000,
-      "text": "What does averageMs() return for an endpoint with no samples in the window? count is 0 then.",
+      "text": "Which samples does averageMs() get from collect() for each endpoint?",
       "path": "src/metrics/latency.ts",
       "side": "new",
       "lines": [15, 15],

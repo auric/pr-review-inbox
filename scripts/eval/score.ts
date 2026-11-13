@@ -100,6 +100,8 @@ export type CaseRun = {
   // files made before these fields existed.
   parts?: number;
   partsRead?: number;
+  // The counts of summary.finderQuestions (prompt version 2.7). Absent in files made before this field existed, and in a run without them.
+  finderQuestions?: { asked: number; answered: number; findings: number; kept: number };
 };
 
 // An earlier finding of a re-review case (cases.ts evalEarlier). lines: its range at the head of the case, or null when the change from
@@ -128,6 +130,12 @@ export type EvalCaseInfo = {
   human?: EvalHuman[];
   // A re-review case only: the findings of the earlier run.
   earlier?: EarlierInfo[];
+  // The case fields of cases.ts for the slices of review-quality-2026.md E5. Absent in files made before these fields existed.
+  clean?: true;
+  group?: string;
+  hasTask?: boolean;
+  large?: boolean;
+  task?: string;
 };
 
 export type EvalResult = {
@@ -143,8 +151,10 @@ export type EvalResult = {
   profile: Record<string, unknown> & { id: string; name: string; revision: string };
   volume: Volume | null;
   // The --model and --effort values of the run, or "default" for no flag. Absent in files made before this field existed.
-  // verifier: the verify mode that ran, after --verifier. Absent in files made before the flag existed.
-  requested?: { model: string; effort: string; verifier?: string };
+  // verifier: the verify mode that ran, after --verifier. verifierEffort and reviewerMode: the values that ran, after
+  // --verifier-effort and --reviewer-mode. Absent in files made before the flags existed. replayOf: the file name of the
+  // --replay-find result. Absent: the finder ran.
+  requested?: { model: string; effort: string; verifier?: string; verifierEffort?: string; reviewerMode?: string; replayOf?: string };
   // The case set. Absent in files made before this field existed: v1.
   set?: EvalSet;
   // Set by eval:rescore, which replaces the bugs and traps of each case with the current fixture.

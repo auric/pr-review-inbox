@@ -3,10 +3,8 @@
 
 // Gate U-V1 in one command (docs/plans/review-v3.md, docs/eval/local.md): build the local set from the data folder of the app, then
 // run the shipped profile (baseline) and the candidate on it, for the review cases and the re-review cases, and print one table each.
-// Usage: bun run eval:ab -- [--repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--db f] [--cache d] [--out d]
-//   [--effort e] [--candidate-effort e] [--candidate-reviewer-effort e] [--candidate-verifier on|off] [--large] [--user slug] [--results d] [--baseline d]
-//   [--runner <command> <args...>]
-// Without --runner, the runs use the claude CLI on PATH. Exit codes: 0 done, 1 a build error or a failed run, 2 a usage error.
+// Usage: see USAGE. Without --runner, the runs use the claude CLI on PATH. Exit codes: 0 done, 1 a build error or a failed run, 2 a
+// usage error.
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -16,32 +14,41 @@ import { delegation, type Profile, profileRevision, promptVersion } from "../../
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git } from "../../src/server/review/git";
 import { diffArgs } from "../../src/server/review/workspace";
-import { EFFORTS, type Variant, VERIFIER_MODES } from "../../src/shared/dto";
+import { EFFORTS, REVIEWER_MODES, type Variant, VERIFIER_MODES } from "../../src/shared/dto";
 import { bundleRepo, type EvalCase, loadCases, localDir, setDir, setFingerprint } from "./cases";
 import { compareText, readResult, refusal, suiteDelta } from "./compare";
 import { main as buildMain, type Manifest } from "./local";
-import { checkoutState, evalProfile, parseOptions, main as runMain } from "./run";
+import { callsDir, checkoutState, evalProfile, finderChange, parseOptions, main as runMain } from "./run";
 import { type EvalResult, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-variants order,rules2] [--candidate-modules failures] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}] [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--large] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
+export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}]
+  [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-reviewer-mode ${REVIEWER_MODES.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--candidate-verifier-effort ${EFFORTS.join("|")}]
+  [--candidate-replay] [--baseline-only] [--review-only] [--large] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
---baseline: the folder of an earlier eval:ab run. Its review-baseline/ and rereview-baseline/ results replace the baseline runs. A mode without its folder runs the baseline.
---candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. An empty value adds nothing.
+--baseline: the folder of an earlier eval:ab run. Its review-baseline/ and rereview-baseline/ results replace the baseline runs. A candidate result there that matches the current shipped profile can serve as well. A mode without a result runs the baseline.
+--repeat: the repeats of the baseline. --candidate-repeat: the repeats of the candidate, at most those of the baseline. Default: --repeat.
+--candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. Default: nothing, so the candidate is the shipped profile.
 --effort: the effort of the baseline and candidate runs. Default: the effort of the shipped profile.
 --candidate-effort: the effort of the candidate runs. Default: the effort of the baseline.
---candidate-reviewer-effort: the rl-reviewer effort of the candidate runs. Default: the rl-reviewer effort of the shipped profile.
---candidate-verifier: the verify mode of the candidate runs. Default: the verify mode of the shipped profile.
+--candidate-reviewer-effort and --candidate-reviewer-mode: the rl-reviewer effort and mode of the candidate runs. Default: those of the shipped profile.
+--candidate-verifier and --candidate-verifier-effort: the verify mode and effort of the candidate runs. Default: those of the shipped profile.
+--candidate-replay: the candidate replays the recorded finder calls of the baseline and runs only the verify calls. It refuses a candidate flag that changes the finder.
+--baseline-only: run only the baseline. --review-only: skip the re-review cases.
 --large: run only the review cases that give the baseline the rl-reviewer agent. The re-review cases do not run.
+--clean N: the clean cases of the set build (eval:local --clean). Give the same N to each run that compares with a stored baseline.
 --runner runs the given CLI instead of the claude CLI on PATH and must come last.`;
-const DEFAULT_VARIANTS = "order,rules2";
-const DEFAULT_MODULES = "failures";
-// docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin. The re-review candidate always adds it.
+// review-quality-2026.md E2: the default candidate is the shipped profile.
+const DEFAULT_VARIANTS = "";
+const DEFAULT_MODULES = "";
+// docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin. A review candidate drops it.
 const STRICT: Variant = "rereview-strict";
 
 export type Mode = "review" | "rereview";
 export type AbOptions = {
   repeat: string;
+  // null: the candidate runs --repeat repeats.
+  candidateRepeat: string | null;
   variants: string[];
   modules: string[];
   // null: both sides run with the effort of the shipped profile.
@@ -50,8 +57,16 @@ export type AbOptions = {
   effort: string | null;
   // null: the candidate runs with the rl-reviewer effort of the shipped profile.
   reviewerEffort: string | null;
+  // null: the candidate keeps the rl-reviewer mode of the shipped profile. run.ts --reviewer-mode checks the value.
+  reviewerMode: string | null;
   // null: the candidate keeps the verify mode of the shipped profile. run.ts --verifier checks the value.
   verifier: string | null;
+  // null: the candidate keeps the verify effort of the shipped profile. run.ts --verifier-effort checks the value.
+  verifierEffort: string | null;
+  // The candidate replays the recorded finder and salvage calls of the baseline (run.ts --replay-find).
+  replay: boolean;
+  baselineOnly: boolean;
+  reviewOnly: boolean;
   // docs/plans/review-v3.md WP-V13: only the review cases where delegation() of the baseline profile is not null.
   large: boolean;
   build: string[];
@@ -75,13 +90,20 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
       allowPositionals: false,
       options: {
         repeat: { type: "string", default: "1" },
+        "candidate-repeat": { type: "string" },
         "candidate-variants": { type: "string", default: DEFAULT_VARIANTS },
         "candidate-modules": { type: "string", default: DEFAULT_MODULES },
         effort: { type: "string" },
         "candidate-effort": { type: "string" },
         "candidate-reviewer-effort": { type: "string" },
+        "candidate-reviewer-mode": { type: "string" },
         "candidate-verifier": { type: "string" },
+        "candidate-verifier-effort": { type: "string" },
+        "candidate-replay": { type: "boolean", default: false },
+        "baseline-only": { type: "boolean", default: false },
+        "review-only": { type: "boolean", default: false },
         large: { type: "boolean", default: false },
+        clean: { type: "string" },
         db: { type: "string" },
         cache: { type: "string" },
         out: { type: "string" },
@@ -94,17 +116,24 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     return { error: (e as Error).message };
   }
   const str = (k: string) => v[k] as string | undefined;
-  const build = (["db", "cache", "out", "user"] as const).flatMap((k) => (v[k] === undefined ? [] : [`--${k}`, str(k) as string]));
+  // local.ts checks --clean. Each run builds the set again, so a stored baseline compares only with the same --clean.
+  const build = (["db", "cache", "out", "user", "clean"] as const).flatMap((k) => (v[k] === undefined ? [] : [`--${k}`, str(k) as string]));
   const results = str("results");
   const baseline = str("baseline");
   const o: AbOptions = {
     repeat: str("repeat") ?? "1",
+    candidateRepeat: str("candidate-repeat") ?? null,
     variants: list(str("candidate-variants") ?? DEFAULT_VARIANTS),
     modules: list(str("candidate-modules") ?? DEFAULT_MODULES),
     baseEffort: str("effort") ?? null,
     effort: str("candidate-effort") ?? null,
     reviewerEffort: str("candidate-reviewer-effort") ?? null,
+    reviewerMode: str("candidate-reviewer-mode") ?? null,
     verifier: str("candidate-verifier") ?? null,
+    verifierEffort: str("candidate-verifier-effort") ?? null,
+    replay: v["candidate-replay"] === true,
+    baselineOnly: v["baseline-only"] === true,
+    reviewOnly: v["review-only"] === true,
     large: v.large === true,
     build,
     results: results === undefined ? null : resolve(results),
@@ -112,6 +141,8 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     runner,
   };
   if (o.baseline !== null && !existsSync(o.baseline)) return { error: `--baseline: no folder ${o.baseline}.` };
+  if (o.baselineOnly && (o.baseline !== null || o.replay))
+    return { error: "--baseline-only runs only the baseline. Leave out --baseline and --candidate-replay." };
   for (const [flag, e] of [
     ["--effort", o.baseEffort],
     ["--candidate-effort", o.effort],
@@ -119,13 +150,18 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
   ] as const)
     if (e !== null && !(EFFORTS as readonly string[]).includes(e)) return { error: `${flag} must be one of ${EFFORTS.join(", ")}.` };
   // The eval runner checks each name and the repeat count.
-  for (const mode of ["review", "rereview"] as const)
+  for (const mode of ["review", "rereview"] as const) {
+    const profiles: Profile[] = [];
     for (const side of ["baseline", "candidate"] as const) {
       const p = parseOptions(runArgs(mode, side, o, ""));
-      if ("error" in p) return p;
-      const e = evalProfile(p);
-      if (e.error !== undefined) return { error: e.error };
+      const e = "error" in p ? p : evalProfile(p);
+      if ("error" in e) return { error: e.error ?? "Invalid profile." };
+      profiles.push(e.profile);
     }
+    const changed = o.replay ? finderChange(profiles[0] as Profile, profiles[1] as Profile) : [];
+    if (changed.length)
+      return { error: `--candidate-replay replays the finder of the baseline, but the candidate changes ${changed.join(", ")}.` };
+  }
   return o;
 }
 
@@ -138,42 +174,56 @@ function shipped() {
 }
 
 // The eval runner arguments of one run. The candidate adds its variants and modules to the shipped profile. cases: the --large cases.
-export function runArgs(mode: Mode, side: "baseline" | "candidate", o: AbOptions, out: string, cases: string[] = []): string[] {
-  const args = ["--set", "local", "--repeat", o.repeat, ...(mode === "rereview" ? ["--rereview"] : [])];
+// replay: the baseline result whose recorded finder calls the candidate replays.
+export function runArgs(
+  mode: Mode,
+  side: "baseline" | "candidate",
+  o: AbOptions,
+  out: string,
+  cases: string[] = [],
+  replay?: string,
+): string[] {
+  const cand = side === "candidate";
+  const repeat = (cand ? o.candidateRepeat : null) ?? o.repeat;
+  const args = ["--set", "local", "--repeat", repeat, ...(mode === "rereview" ? ["--rereview"] : [])];
   if (cases.length) args.push("--cases", cases.join(","));
-  if (side === "candidate") {
+  if (cand) {
     const base = shipped();
-    const extra = mode === "rereview" ? [...o.variants, STRICT] : o.variants.filter((x) => x !== STRICT);
+    const extra = mode === "rereview" ? o.variants : o.variants.filter((x) => x !== STRICT);
     const variants = [...new Set([...base.variants, ...extra])];
     if (variants.length) args.push("--variants", variants.join(","));
     args.push("--modules", [...new Set([...base.modules, ...o.modules])].join(","));
   }
-  const effort = (side === "candidate" ? o.effort : null) ?? o.baseEffort;
+  const effort = (cand ? o.effort : null) ?? o.baseEffort;
   if (effort !== null) args.push("--effort", effort);
-  if (side === "candidate" && o.reviewerEffort !== null) args.push("--reviewer-effort", o.reviewerEffort);
-  if (side === "candidate" && o.verifier !== null) args.push("--verifier", o.verifier);
+  if (cand && o.reviewerEffort !== null) args.push("--reviewer-effort", o.reviewerEffort);
+  if (cand && o.reviewerMode !== null) args.push("--reviewer-mode", o.reviewerMode);
+  if (cand && o.verifier !== null) args.push("--verifier", o.verifier);
+  if (cand && o.verifierEffort !== null) args.push("--verifier-effort", o.verifierEffort);
+  if (cand && replay) args.push("--replay-find", replay);
   args.push("--ordinals");
   if (out) args.push("--out", out);
   args.push(...(o.runner ? ["--runner", ...o.runner] : ["--real"]));
   return args;
 }
 
-// --baseline: why the stored baseline of a mode does not match the baseline that this run would make, or null.
-// fingerprint: the set fingerprint of the mode in MANIFEST.json. A different commit or CLI version is allowed.
-export function reuseRefusal(mode: Mode, a: EvalResult, o: AbOptions, fingerprint: string): string | null {
+// --baseline: why the stored result of a mode does not match the baseline that this run would make, or null.
+// fingerprint: the set fingerprint of the mode in MANIFEST.json. A different commit or CLI version is allowed. candidate: the result
+// is the candidate of an earlier run. It ran the shipped profile of its time, so only its revision must match, not its profile version.
+export function reuseRefusal(mode: Mode, a: EvalResult, o: AbOptions, fingerprint: string, candidate = false): string | null {
   const p = parseOptions(runArgs(mode, "baseline", o, ""));
   const e = "error" in p ? p : evalProfile(p);
   if ("error" in e) return e.error ?? "Invalid baseline profile.";
   const want = e.profile;
-  const it = `Refused: the stored ${mode} baseline`;
+  const it = `Refused: the stored ${mode} ${candidate ? "candidate" : "baseline"}`;
   const ran = a.requested ?? { model: "not recorded", effort: "not recorded" };
   const short = (s: string | undefined) => s?.slice(0, 12) ?? "none";
   if (!!a.rereview !== (mode === "rereview")) return `${it} ran the other mode.`;
   if (a.fingerprint !== fingerprint)
-    return `${it} ran case set ${short(a.fingerprint)}, but the set now has fingerprint ${short(fingerprint)}.`;
+    return `${it} ran case set ${short(a.fingerprint)}, but the set now has fingerprint ${short(fingerprint)}. Give the --clean of the stored run.`;
   if (ran.effort !== (want.effort ?? "default"))
     return `${it} ran with effort ${ran.effort}, but this run needs effort ${want.effort ?? "default"}.`;
-  if (a.profileVersion !== PROFILES_VERSION)
+  if (!candidate && a.profileVersion !== PROFILES_VERSION)
     return `${it} ran profile version ${a.profileVersion ?? "not recorded"}, but the shipped profile is now version ${PROFILES_VERSION}.`;
   if (a.promptVersion !== promptVersion(want))
     return `${it} ran prompt version ${a.promptVersion}, but the baseline now has prompt version ${promptVersion(want)}.`;
@@ -181,7 +231,8 @@ export function reuseRefusal(mode: Mode, a: EvalResult, o: AbOptions, fingerprin
     return `${it} ran with model ${ran.model}, but this run needs model ${want.model ?? "default"}.`;
   if (a.profile.revision !== profileRevision(want))
     return `${it} ran profile revision ${a.profile.revision.slice(0, 8)}, but the shipped profile is now revision ${profileRevision(want).slice(0, 8)}.`;
-  if (String(a.repeat) !== o.repeat) return `${it} ran with --repeat ${a.repeat}, but this run asks for --repeat ${o.repeat}.`;
+  const runs = Number(o.candidateRepeat ?? o.repeat);
+  if (a.repeat < runs) return `${it} ran with --repeat ${a.repeat}, but the candidate runs ${runs} repeats.`;
   return null;
 }
 
@@ -201,9 +252,16 @@ export async function largeCases(cases: Pick<EvalCase, "id" | "local">[], profil
 
 // --large with --baseline: a full-set baseline passes reuseRefusal against the full fingerprint, then keeps only the large cases and
 // gets the subset fingerprint. A baseline that ran the subset already passes against the subset fingerprint. Else the refusal text.
-export function largeBaseline(a: EvalResult, o: AbOptions, full: string, subset: string, ids: string[]): EvalResult | string {
-  if (a.fingerprint === subset) return reuseRefusal("review", a, o, subset) ?? a;
-  const refused = reuseRefusal("review", a, o, full);
+export function largeBaseline(
+  a: EvalResult,
+  o: AbOptions,
+  full: string,
+  subset: string,
+  ids: string[],
+  candidate = false,
+): EvalResult | string {
+  if (a.fingerprint === subset) return reuseRefusal("review", a, o, subset, candidate) ?? a;
+  const refused = reuseRefusal("review", a, o, full, candidate);
   if (refused) return refused;
   const missing = ids.filter((id) => !a.cases.some((c) => c.id === id) || !a.runs.some((r) => r.case === id)).length;
   if (missing) return `Refused: the stored review baseline has no run of ${missing} large case${missing === 1 ? "" : "s"}.`;
@@ -224,16 +282,17 @@ export const failedRuns = (r: EvalResult) => r.runs.filter((x) => x.status !== "
 
 const total = (r: EvalResult, f: (x: EvalResult["runs"][number]) => number | null | undefined) =>
   r.runs.reduce((n, x) => n + (f(x) ?? 0), 0);
+const titleOf = (mode: Mode) => (mode === "review" ? "Review cases" : "Re-review cases");
+const cost = (r: EvalResult) => `$${total(r, (x) => x.usage?.costUsd).toFixed(3)} for ${r.repeat} repeats`;
+const time = (r: EvalResult) => `${total(r, (x) => x.minutes).toFixed(1)} min`;
 
 export function modeText(mode: Mode, a: EvalResult, b: EvalResult, files: [string, string]): string {
-  const title = mode === "review" ? "Review cases" : "Re-review cases";
   // compareText: the A and B headers and the warnings come before the first blank line.
   const order = [...new Set([...a.cases, ...b.cases].map((c) => c.id))];
   const head = compareText(a, b, (id) => `case ${order.indexOf(id) + 1}`, baseRevision(a, b)).split("\n\n")[0] ?? "";
-  const cost = (r: EvalResult) => `$${total(r, (x) => x.usage?.costUsd).toFixed(3)}`;
-  const time = (r: EvalResult) => `${total(r, (x) => x.minutes).toFixed(1)} min`;
+  const repeats = a.repeat === b.repeat ? `${a.repeat}` : `${a.repeat} (baseline), ${b.repeat} (candidate)`;
   return [
-    `== ${title}: ${a.cases.length} cases x ${a.repeat} ==`,
+    `== ${titleOf(mode)}: ${a.cases.length} cases x ${repeats} ==`,
     head,
     "",
     suiteDelta(score(a), score(b), ["baseline (A)", "candidate (B)"]),
@@ -244,6 +303,15 @@ export function modeText(mode: Mode, a: EvalResult, b: EvalResult, files: [strin
     `Result B: ${files[1]}`,
   ].join("\n");
 }
+
+// --baseline-only: the totals of the baseline. run.ts printed its table.
+const baselineText = (mode: Mode, a: EvalResult, file: string) =>
+  [
+    `== ${titleOf(mode)}: ${a.cases.length} cases x ${a.repeat}, baseline only ==`,
+    `Total cost: ${cost(a)}. Total time: ${time(a)}.`,
+    `Failed runs: ${failedRuns(a)}.`,
+    `Result A: ${file}`,
+  ].join("\n");
 
 export async function main(argv: string[]): Promise<number> {
   const o = parseAb(argv);
@@ -287,61 +355,83 @@ export async function main(argv: string[]): Promise<number> {
   const subset = large;
   const cases = (mode: Mode) => (mode === "review" && subset ? subset.ids : []);
   const count = (mode: Mode) =>
-    subset ? (mode === "review" ? subset.ids.length : 0) : mode === "review" ? manifest.counts.cases : manifest.rereview.counts.cases;
-  // --baseline: check each stored baseline before any run, so a refusal costs no run.
-  const stored = new Map<Mode, string>();
+    mode === "review" ? (subset?.ids.length ?? manifest.counts.cases) : subset || o.reviewOnly ? 0 : manifest.rereview.counts.cases;
+  // --baseline: check each stored result before any run, so a refusal costs no run. The baseline result comes first, then a candidate
+  // result whose profile shipped since. origin: the stored file. Its recorded calls sit beside it, not beside a --large cut copy.
+  const stored = new Map<Mode, { path: string; origin: string }>();
   const from = o.baseline;
   for (const mode of from === null ? [] : (["review", "rereview"] as const).filter((m) => count(m) > 0)) {
-    const dir = join(from as string, `${mode}-baseline`);
-    const file = existsSync(dir) ? readdirSync(dir).find((f) => f.endsWith(".json")) : undefined;
-    if (!file) {
+    const found = (["baseline", "candidate"] as const).flatMap((side) => {
+      const dir = join(from as string, `${mode}-${side}`);
+      const file = existsSync(dir) ? readdirSync(dir).find((f) => f.endsWith(".json")) : undefined;
+      return file ? [{ side, origin: join(dir, file) }] : [];
+    });
+    if (!found.length) {
       console.log(`No ${mode} baseline in ${from}, so the ${mode} baseline runs.`);
       continue;
     }
-    let refused: string | null;
-    let path = join(dir, file);
-    try {
-      const a = readResult(path);
-      if (subset) {
-        const cut = largeBaseline(a, o, manifest.fingerprint, subset.fingerprint, subset.ids);
-        refused = typeof cut === "string" ? cut : null;
-        if (typeof cut !== "string" && cut !== a) {
-          // The cut copy goes to the new result folder, so a later --large --baseline can reuse that folder as it is.
-          const to = join(results, `${mode}-baseline`);
-          mkdirSync(to, { recursive: true });
-          path = join(to, basename(file));
-          writeFileSync(path, `${JSON.stringify(cut, null, 2)}\n`);
+    const refusals: string[] = [];
+    for (const { side, origin } of found) {
+      const candidate = side === "candidate";
+      try {
+        const a = readResult(origin);
+        const fingerprint = mode === "review" ? manifest.fingerprint : manifest.rereview.fingerprint;
+        const kept = subset
+          ? largeBaseline(a, o, manifest.fingerprint, subset.fingerprint, subset.ids, candidate)
+          : (reuseRefusal(mode, a, o, fingerprint, candidate) ?? a);
+        if (typeof kept === "string") refusals.push(kept);
+        else if (o.replay && !existsSync(callsDir(origin)))
+          refusals.push(`Refused: the stored ${mode} ${side} has no recorded calls for --candidate-replay.`);
+        else {
+          let path = origin;
+          if (kept !== a) {
+            // The cut copy goes to the new result folder, so a later --large --baseline can reuse that folder as it is.
+            const to = join(results, `${mode}-baseline`);
+            mkdirSync(to, { recursive: true });
+            path = join(to, basename(origin));
+            writeFileSync(path, `${JSON.stringify(kept, null, 2)}\n`);
+          }
+          stored.set(mode, { path, origin });
+          break;
         }
-      } else refused = reuseRefusal(mode, a, o, mode === "review" ? manifest.fingerprint : manifest.rereview.fingerprint);
-    } catch (e) {
-      refused = (e as Error).message;
+      } catch (e) {
+        refusals.push((e as Error).message);
+      }
     }
-    if (refused) {
-      console.error(refused);
+    if (!stored.has(mode)) {
+      console.error(refusals.join("\n"));
       return 2;
     }
-    stored.set(mode, path);
   }
+  const runs = Number(o.candidateRepeat ?? o.repeat);
+  if (!o.baselineOnly && runs > Number(o.repeat) && (["review", "rereview"] as const).some((m) => count(m) > 0 && !stored.has(m))) {
+    console.error(
+      `--candidate-repeat ${runs} is above --repeat ${o.repeat}. The baseline needs at least as many repeats as the candidate.`,
+    );
+    return 2;
+  }
+  const sides = o.baselineOnly ? (["baseline"] as const) : (["baseline", "candidate"] as const);
   const texts: string[] = [];
   let failed = false;
   for (const mode of ["review", "rereview"] as const) {
     const n = count(mode);
     if (n === 0) {
-      const why = subset ? "--large runs only review cases" : "the set has none";
-      texts.push(`== ${mode === "review" ? "Review" : "Re-review"} cases: skipped, ${why} ==`);
+      const why = subset ? "--large runs only review cases" : o.reviewOnly ? "--review-only" : "the set has none";
+      texts.push(`== ${titleOf(mode)}: skipped, ${why} ==`);
       continue;
     }
     const files: string[] = [];
-    for (const side of ["baseline", "candidate"] as const) {
+    for (const side of sides) {
       const reused = side === "baseline" ? stored.get(mode) : undefined;
       if (reused) {
-        console.log(`\n--- ${mode} baseline: reused ${reused} ---`);
-        files.push(reused);
+        console.log(`\n--- ${mode} baseline: reused ${reused.path} ---`);
+        files.push(reused.path);
         continue;
       }
       const out = join(results, `${mode}-${side}`);
       console.log(`\n--- ${mode} ${side} ---`);
-      const code = await runMain(runArgs(mode, side, o, out, cases(mode)));
+      const replay = o.replay ? (stored.get(mode)?.origin ?? files[0]) : undefined;
+      const code = await runMain(runArgs(mode, side, o, out, cases(mode), replay));
       const file = existsSync(out) ? readdirSync(out).find((f) => f.endsWith(".json")) : undefined;
       if (code !== 0 || !file) {
         failed = true;
@@ -351,8 +441,14 @@ export async function main(argv: string[]): Promise<number> {
       }
       files.push(join(out, file));
     }
-    if (files.length !== 2) {
-      texts.push(`== ${mode === "review" ? "Review" : "Re-review"} cases: no table, a run failed ==`);
+    if (files.length !== sides.length) {
+      texts.push(`== ${titleOf(mode)}: no table, a run failed ==`);
+      continue;
+    }
+    if (o.baselineOnly) {
+      const a = readResult(files[0] as string);
+      if (failedRuns(a)) failed = true;
+      texts.push(baselineText(mode, a, files[0] as string));
       continue;
     }
     const [a, b] = files.map(readResult) as [EvalResult, EvalResult];

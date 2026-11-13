@@ -262,9 +262,11 @@ export type ReviewJobsOptions = {
   // The Claude Code config folder for profile skills and MCP servers. Absent: CLAUDE_CONFIG_DIR or the default, read at each run.
   claudeConfigDir?: string;
   now?: () => number;
+  // Eval only (scripts/eval/run.ts record and replay). Absent: the plain runner.
+  runnerWrap?: (r: Runner) => Runner;
 };
 
-type Runner = ReturnType<typeof createClaudeRunner>;
+export type Runner = ReturnType<typeof createClaudeRunner>;
 
 // threads: the threads of a reply or fix run, else null. findings: the review item IDs of a fix run.
 // question: the question of an ask run, else null. profile: the profile as it was at the start.
@@ -427,7 +429,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   const dataDir = opts.dataDir ?? defaultDataDir();
   // Settings > Tasks "Review run time", read at the start of each run. A task step gives its own time.
   const runTimeMs = () => runLimitsOf(settings.config()?.runLimits).reviewMinutes * 60_000;
-  const newRunner = () => createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
+  const newRunner = (): Runner => {
+    const r = createClaudeRunner({ command: opts.runnerCommand, timeoutMs: runTimeMs });
+    return opts.runnerWrap?.(r) ?? r;
+  };
   // Runs only check(). Each run gets its own runner.
   const checker = newRunner();
   // Its own runner: a proposal uses no run folder, no git ref, and no database, so it runs beside the run pool.

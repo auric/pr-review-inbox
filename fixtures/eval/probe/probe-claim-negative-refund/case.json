@@ -44,7 +44,7 @@
       "root": 1,
       "author": "reviewer-1",
       "at": 1767344400000,
-      "text": "Can quantity be negative here? A negative refund would take money from the customer.",
+      "text": "Which checks does quantity pass before refund() credits the wallet?",
       "path": "shop/refunds.py",
       "side": "new",
       "lines": [13, 13]
