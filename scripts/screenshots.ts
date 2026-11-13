@@ -3,6 +3,7 @@
 
 // The README screenshots of the demo (scripts/demo.ts): synthetic data, a fake Bitbucket, a fake Jira, and the fake CLI.
 // Usage: bun run screenshots. It builds the UI, starts the demo on SHOTS_PORT (default 7419), and writes WebP files to docs/screenshots/.
+// SHOTS_OUT sets another output folder, for a check run that keeps the committed images.
 // The demo gets its own temp folder, so the script can delete every file that the demo makes. The run log shows paths in it.
 // So on Windows the folder is at the drive root, outside the user profile. SHOTS_TEMP sets another parent folder.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -12,7 +13,7 @@ import { join, resolve } from "node:path";
 import { type Browser, chromium, type Locator, type Page } from "@playwright/test";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const OUT = join(ROOT, "docs", "screenshots");
+const OUT = resolve(process.env.SHOTS_OUT || join(ROOT, "docs", "screenshots"));
 const PORT = Number(process.env.SHOTS_PORT || 7419);
 const BASE = `http://127.0.0.1:${PORT}`;
 const START_MS = 60_000;
@@ -300,7 +301,7 @@ async function shots(browser: Browser) {
   await save(page, "settings-commands", page.locator("section[aria-labelledby='h-commands']"));
   // Settings > Tasks: the branch prefixes and the run limits (docs/plans/review-v2/limits.md decision 3).
   await page.goto(`${BASE}/settings/tasks`);
-  await page.locator("#limit-stepMinutes").waitFor();
+  await page.locator("#limit-sessionTurns").waitFor();
   await rest();
   await save(page, "settings-tasks", page.locator("section[aria-labelledby='h-tasks']"));
   await page.setViewportSize(WIDE);
