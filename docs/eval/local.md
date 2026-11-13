@@ -140,6 +140,36 @@ Each run records two more facts:
 
 The tables show "part files per case" and "parts read" next to "rl-reviewer calls per case". A result file from before these facts shows "-".
 
+## Label the findings (eval:label)
+
+`bun run eval:label -- <result folder or file> --real` labels the findings of eval results (docs/plans/review-v2/review-quality-2026.md E3, E4). Give the folder of an eval:ab run, or one result file. Without `--real`, the command prints the open work and a cost estimate, and exits with code 2. With no open work, it prints the scores and needs no `--real`. It exits with code 1 when a CLI run fails or gives an invalid answer. Run it again to continue: each stored answer stays.
+
+- Matcher: a Sonnet run at effort low compares the findings with the gold items of the same file. A finding has the files of its anchor and its cause. A gold item has its path and each alt path. One run gets up to 10 findings and 10 gold items. Its folder holds only `context/match.md`. It has the read tools only: no MCP server and no agent. The finding text stays out of stdin. A fixture item has no `text`, so its `note` or `why` stands in.
+- Judge: a Sonnet run at effort medium labels each finding that matches no gold item, also a folded or hidden one. A label is tp or fp, with severity, category, and scope. The judge runs in a sanitized workspace of the case head with `pr.md` and `task.md`, the read tools, and rl-git. It gets no Bash and no agent. The PR threads stay out of `pr.md`.
+- Reuse: first the matcher compares each new unmatched finding with the labelled findings of the same case. A match takes the stored label. So only new findings cost judge runs.
+- Calibration: once per label set, the judge labels the must-finds and your own comments (expected tp) and the traps (expected fp) of each case. The output prints the agreement. It is no ship gate.
+- Storage: `<eval-local>/labels/<key>/matches.json` and `labels.json`. The key is the set fingerprint of a local result. A fixture set uses its name and a hash of its case truth. A matcher answer has the item hash, the gold key, the matcher version, and the prompt hash. A judge label has the model, the effort, the prompt hash, and the CLI version. The labels never go into case.json. A second run on the same results costs nothing.
+- Disagreements: `labels/<key>/disagreements.md` lists each finding and gold item pair where the line match (T = 3 on the local set, traps at 0) and the matcher disagree. Audit the list once. The matcher becomes the primary column only when you agree with it more often than with the line match. The file holds finding text, so the output gives only the count.
+- A `--large` run has another set fingerprint, so its labels go to another folder.
+- A local result needs the build of the set that it ran, as for eval:rescore. eval:ab builds the set again before each run, so label a result before a new decision in the app changes the set.
+- eval:compare and eval:rescore read the labels of a result when they exist.
+
+### Grounded and augmented metrics
+
+Ship decisions use grounded metrics only. Grounded metrics come from the matcher and the gold items. Augmented metrics also count the judge labels, so they are diagnostics only.
+
+- grounded recall: counted must-finds that a shown finding matches. One finding can find two must-finds.
+- grounded precision: shown findings that claim a must-find or one of your own comments, over the shown findings that claim a gold item other than an extra. Findings claim gold items in finding order, and each gold item goes to one finding (ReviewBench 6.2.4). A finding whose matches are all claimed counts as unmatched and goes to the judge. A trap claim is a matched fp. An extra claim is neutral.
+- grounded noise: shown findings that claim no gold item, per case run.
+- grounded raised and verifier loss: the counted must-finds that any finding matches, and the state of the best finding of each one, in this order: main (in main and not refuted), demoted (refuted, but it stays in the list), folded (in fold and not refuted), duplicate, or refuted (both hidden). All use the counted must-finds as one denominator, so raised = the sum of the five states. A demoted finding in main still counts for grounded recall.
+- Recall in bugs per repeat gives the found must-finds of each repeat and their spread. The ship rules read S_R from it.
+- augmented precision, augmented recall, and new tp per case add the unmatched shown findings that the judge gives tp. severity above: the share of those findings whose app severity is above the judge severity. Blocker and major are high, minor is medium, nit is low.
+- refuted shown: refuted findings that stay in main (the protected classes), per case. `bun run eval:rescore -- <result.json> --fold-refuted` moves them to fold and prints recall and noise for that case.
+- The line match (recall, precision, noise) stays in its own rows beside the grounded rows. candidate recall now divides by the counted must-finds, as recall does, so candidate recall - recall is the share that the check lost.
+- The summary also prints a mean per case (macro) beside the pooled number (micro), the verifier confusion matrix (the gold or judge label of each finding by its verdict), the slices (severity, source, module, bug class, size, task text, clean cases), union recall over k repeats, and the finder question sums. The probe set is its own slice: run it with `--set probe`.
+- eval:compare prints a paired delta: the mean of B - A of the hit rate per counted must-find, with a 90% bootstrap interval over the PR groups and a fixed seed. It is information only.
+- A result without labels shows "-" for each grounded and augmented metric.
+
 ## Bisect when the result is mixed
 
 Run the command again with one change at a time: `--candidate-variants order --candidate-modules ""`, then `--candidate-variants rules2 --candidate-modules ""`, then `--candidate-variants "" --candidate-modules failures`. Each run builds the same set again, so the tables compare.

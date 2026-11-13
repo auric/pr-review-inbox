@@ -4,9 +4,12 @@
 // Prints the scores of eval result files (docs/plans/review-v2/spec.md section 4.3).
 // Usage: bun run eval:compare <a.json> <b.json>. Exit codes: 0 done, 2 a usage error, an unreadable file, or a refusal().
 import { readFileSync } from "node:fs";
-import { type EvalResult, METRICS, type Metric, type Score, type Stat, score } from "./score";
+import { BOOTSTRAP, type EvalResult, type Grounding, METRICS, type Metric, pairedDelta, type Score, type Stat, score } from "./score";
 
 const LABEL: Record<Metric, string> = {
+  groundedRecall: "grounded recall: counted must-finds that a shown finding matches, by the matcher",
+  groundedPrecision: "grounded precision: shown findings that claim a must-find, over those that claim a must-find or a trap",
+  groundedNoise: "grounded noise: shown findings that claim no gold item, per case",
   recall: "recall: seeded bugs with a shown finding",
   humanRecall: "human recall: your own inline comments with a shown finding (local set)",
   precision: "precision: shown findings that match a bug or one of your own comments",
@@ -25,9 +28,54 @@ const LABEL: Record<Metric, string> = {
   minutes: "minutes per case",
   costUsd: "cost per case in USD, as the CLI reports it",
   notCompleted: "runs that did not complete, per repeat",
+  groundedRaised: "grounded raised: counted must-finds that any finding matches, hidden ones included",
+  lossMain: "verifier loss, main: counted must-finds whose best finding is in main and not refuted",
+  lossDemoted: "verifier loss, demoted: counted must-finds whose best finding is refuted but stays in the list",
+  lossFolded: "verifier loss, folded: counted must-finds whose best finding is folded and not refuted",
+  lossDuplicate: "verifier loss, duplicate: counted must-finds whose best finding is a hidden duplicate",
+  lossRefuted: "verifier loss, refuted: counted must-finds whose best finding is hidden as refuted",
+  refutedShown: "refuted shown: refuted findings that stay in main, per case",
+  augmentedPrecision: "augmented precision (diagnostic): shown findings that claim a must-find or that the judge gives tp",
+  augmentedRecall: "augmented recall (diagnostic): found must-finds and new judge tp, over must-finds and new judge tp",
+  newTp: "new tp (diagnostic): unmatched shown findings that the judge gives tp, per case",
+  severityAbove: "severity above: unmatched judge tp whose app severity is above the judge severity",
 };
-const RATE = new Set<Metric>(["recall", "humanRecall", "precision", "trapRate", "severityOk", "candidateRecall", "bugOpened", "verdictOk"]);
+const RATE = new Set<Metric>([
+  "recall",
+  "humanRecall",
+  "precision",
+  "trapRate",
+  "severityOk",
+  "candidateRecall",
+  "bugOpened",
+  "verdictOk",
+  "groundedRecall",
+  "groundedPrecision",
+  "groundedRaised",
+  "lossMain",
+  "lossDemoted",
+  "lossFolded",
+  "lossDuplicate",
+  "lossRefuted",
+  "augmentedPrecision",
+  "augmentedRecall",
+  "severityAbove",
+]);
 const DIGITS: Record<Metric, number> = {
+  groundedRecall: 1,
+  groundedPrecision: 1,
+  groundedNoise: 2,
+  groundedRaised: 1,
+  lossMain: 1,
+  lossDemoted: 1,
+  lossFolded: 1,
+  lossDuplicate: 1,
+  lossRefuted: 1,
+  refutedShown: 2,
+  augmentedPrecision: 1,
+  augmentedRecall: 1,
+  newTp: 2,
+  severityAbove: 1,
   reRaises: 2,
   verdictOk: 1,
   recall: 1,
@@ -91,7 +139,7 @@ const header = (r: EvalResult) => {
   // A file made before "requested" existed does not record the flags. The models and efforts that ran still show.
   const q = r.requested ?? { model: "not recorded", effort: "not recorded" };
   const runs = `${r.cases.length} case${r.cases.length === 1 ? "" : "s"} x ${r.repeat}`;
-  const rescored = r.rescoredAt ? `, re-scored ${r.rescoredAt}` : "";
+  const rescored = `${r.rescoredAt ? `, re-scored ${r.rescoredAt}` : ""}${r.refutedFolded ? ", refuted findings folded" : ""}`;
   const set = `set ${r.set ?? "v1"}${r.fingerprint ? ` (fingerprint ${r.fingerprint.slice(0, 12)})` : ""}, tolerance ${r.tolerance ?? 0} lines`;
   // review-quality-2026.md E2. A file made before these fields existed does not record them.
   const e2 = r.requested;
@@ -99,9 +147,66 @@ const header = (r: EvalResult) => {
   return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
 };
 
+const pct = (a: number, b: number) => (b === 0 ? "-" : `${((a / b) * 100).toFixed(1)}%`);
+const per = (x: number | null) => (x === null ? "-" : x.toFixed(2));
+
+// The tables of review-quality-2026.md E5 that are no metric row: the verifier confusion matrix, the slices, union recall, and the
+// finder question sums. Empty parts stay out.
+export function detailText(s: Score): string {
+  const out = [
+    s.grounded
+      ? "Labels: grounded metrics come from eval:label. Ship decisions use grounded metrics only."
+      : "Labels: none. The grounded metrics show -. Run bun run eval:label (docs/eval/local.md).",
+  ];
+  if (s.confusion) {
+    const verdicts = Object.keys(s.confusion).sort();
+    out.push(
+      "",
+      "Verifier confusion: the label of each finding (gold item, else judge) by its verdict, all runs",
+      table([["verdict", "tp", "fp"], ...verdicts.map((v) => [v, String(s.confusion?.[v]?.tp ?? 0), String(s.confusion?.[v]?.fp ?? 0)])]),
+    );
+  }
+  if (s.slices.length)
+    out.push(
+      "",
+      `Slices (${s.grounded ? "matcher" : "line match"}): must-finds over all runs, noise and judge fp per case run`,
+      table([
+        ["slice", "found", "recall", "case runs", "noise", "judge fp"],
+        ...s.slices.map((x) => [
+          x.name,
+          `${x.found}/${x.mustFinds}`,
+          pct(x.found, x.mustFinds),
+          x.runs === null ? "-" : String(x.runs),
+          per(x.noise),
+          per(x.judgeFp),
+        ]),
+      ]),
+    );
+  if (s.union.length)
+    out.push(
+      "",
+      `Union recall: counted must-finds that any of k repeats shows or raises, mean over the k-subsets: ${s.union
+        .map((u) => `k=${u.k} shown ${(u.shown * 100).toFixed(1)}%, raised ${(u.raised * 100).toFixed(1)}%`)
+        .join("; ")}.`,
+    );
+  if (s.recallBugs.length) {
+    const found = s.recallBugs.map((x) => x.found);
+    out.push(
+      "",
+      `Recall in bugs per repeat (${s.grounded ? "matcher" : "line match"}): ${s.recallBugs.map((x) => `${x.repeat}: ${x.found}/${x.mustFinds}`).join(", ")}. Spread: ${Math.max(...found) - Math.min(...found)} bugs.`,
+    );
+  }
+  const q = s.finderQuestions;
+  if (q) out.push("", `Finder questions, all runs: ${q.asked} asked, ${q.answered} answered, ${q.findings} findings, ${q.kept} kept.`);
+  return out.join("\n");
+}
+
 // name: the label of a case in the rows. eval:ab passes ordinals, so its output holds no case ID.
 export function summaryText(r: EvalResult, s: Score = score(r), name = (id: string) => id): string {
-  const rows = [["metric", "all cases"], ...METRICS.map((m) => [LABEL[m], cell(m, s.suite[m])])];
+  const rows = [
+    ["metric", "all cases", "mean per case"],
+    ...METRICS.map((m) => [LABEL[m], cell(m, s.suite[m]), s.macro[m] === null ? "-" : num(m, s.macro[m])]),
+  ];
   const ids = Object.keys(s.cases);
   const perCase = [
     ["case", "recall", "precision", "false positives", "noise", "bug opened", "rl-reviewer calls", "parts", "parts read", "minutes"],
@@ -123,7 +228,7 @@ export function summaryText(r: EvalResult, s: Score = score(r), name = (id: stri
   ];
   const { count, severities } = s.leftOut;
   const left = `Must-find items this volume cannot show: ${count}${severities.length ? ` (${severities.join(", ")})` : ""}.`;
-  return [header(r), left, "", table(rows), "", table(perCase)].join("\n");
+  return [header(r), left, "", table(rows), "", table(perCase), "", detailText(s)].join("\n");
 }
 
 // One row per metric: the "all cases" numbers of two scores and the delta.
@@ -150,9 +255,16 @@ export function refusal(a: EvalResult, b: EvalResult): string | null {
 }
 
 // revB: the profile revision of B to compare with A. eval:ab passes the candidate revision without its added variants and modules.
-export function compareText(a: EvalResult, b: EvalResult, name = (id: string) => id, revB = b.profile.revision): string {
-  const sa = score(a);
-  const sb = score(b);
+// g: the eval:label labels of A and B, when they exist.
+export function compareText(
+  a: EvalResult,
+  b: EvalResult,
+  name = (id: string) => id,
+  revB = b.profile.revision,
+  g: [Grounding | undefined, Grounding | undefined] = [undefined, undefined],
+): string {
+  const sa = score(a, g[0]);
+  const sb = score(b, g[1]);
   const ta = truth(a);
   const tb = truth(b);
   const out = [
@@ -182,6 +294,15 @@ export function compareText(a: EvalResult, b: EvalResult, name = (id: string) =>
     out.push(
       `A and B used different profiles: revision ${a.profile.revision.slice(0, 8)} of profile version ${a.profileVersion ?? "not recorded"}, revision ${revB.slice(0, 8)} of profile version ${b.profileVersion ?? "not recorded"}. The numbers do not compare.`,
     );
+  const pd = pairedDelta(a, b, g[0], g[1]);
+  if (pd) {
+    const pts = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}`;
+    // The blank line keeps the line out of the eval:ab head (ab.ts modeText).
+    out.push(
+      "",
+      `Paired delta (information only): B - A hit rate per counted must-find, ${pd.grounded ? "matcher" : "line match"}: ${pts(pd.delta)} pts, 90% interval ${pts(pd.low)} to ${pts(pd.high)} pts (bootstrap over ${pd.groups} PR groups, ${pd.mustFinds} must-finds, seed ${BOOTSTRAP.seed}).`,
+    );
+  }
   const ids = [...ta.keys()].filter((id) => tb.has(id)).sort();
   for (const m of METRICS) {
     const rows = [
@@ -195,6 +316,7 @@ export function compareText(a: EvalResult, b: EvalResult, name = (id: string) =>
     ];
     out.push("", LABEL[m], table(rows));
   }
+  out.push("", `A: ${detailText(sa)}`, "", `B: ${detailText(sb)}`);
   return out.join("\n");
 }
 
@@ -214,7 +336,9 @@ if (import.meta.main) {
     const [a, b] = [readResult(files[0] as string), readResult(files[1] as string)];
     const refused = refusal(a, b);
     if (refused) throw new Error(refused);
-    console.log(compareText(a, b));
+    // label.ts imports this module, so it loads here.
+    const { loadGrounding } = await import("./label");
+    console.log(compareText(a, b, undefined, undefined, [loadGrounding(a), loadGrounding(b)]));
   } catch (e) {
     console.error((e as Error).message);
     process.exit(2);

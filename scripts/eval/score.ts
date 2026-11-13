@@ -5,6 +5,7 @@
 import type { RunPhase, RunUsage, VerifySummary, Volume } from "../../src/shared/dto";
 import {
   type AnchorState,
+  bugClass,
   type Check,
   type Coverage,
   type DisplayGroup,
@@ -165,6 +166,8 @@ export type EvalResult = {
   fingerprint?: string;
   // --rereview: each case ran as a re-review after its seeded earlier run. Absent: false.
   rereview?: boolean;
+  // eval:rescore --fold-refuted moved each refuted item of main to fold. Absent: false.
+  refutedFolded?: boolean;
   repeat: number;
   cases: EvalCaseInfo[];
   runs: CaseRun[];
@@ -182,7 +185,77 @@ export const matches = (i: EvalItem, r: Spot & { alt?: Spot[] }, t = 0) =>
     (p) => i.path === p.path && i.side === p.side && overlaps([i.line, i.lineEnd], [p.lines[0] - t, p.lines[1] + t]),
   );
 
+// ---------- Gold items, matcher labels, and judge labels (docs/plans/review-v2/review-quality-2026.md E3, E4) ----------
+
+export type GoldKind = "bug" | "human" | "trap" | "extra";
+// key: the kind and the ID, because two kinds can use the same ID. An extra has no ID, so its key holds its index. text: the gold text,
+// else note or why, because a fixture set has no text.
+export type Gold = Spot & { key: string; kind: GoldKind; alt?: Spot[]; text: string };
+
+// The order is the claim order below: bugs and your own comments first, then traps, then extras.
+export function goldOf(c: Pick<EvalCaseInfo, "bugs" | "traps" | "extras" | "human">): Gold[] {
+  const spot = (x: Spot & { alt?: Spot[] }) => ({ path: x.path, side: x.side, lines: x.lines, ...(x.alt && { alt: x.alt }) });
+  return [
+    ...c.bugs.map((b) => ({ ...spot(b), key: `bug:${b.id}`, kind: "bug" as const, text: b.text ?? b.note })),
+    ...(c.human ?? []).map((h) => ({ ...spot(h), key: `human:${h.id}`, kind: "human" as const, text: h.text ?? h.note })),
+    ...c.traps.map((x) => ({ ...spot(x), key: `trap:${x.id}`, kind: "trap" as const, text: x.text ?? x.why })),
+    ...(c.extras ?? []).map((x, n) => ({ ...spot(x), key: `extra:${n}`, kind: "extra" as const, text: x.text ?? x.note })),
+  ];
+}
+
+// The matcher compares an item and a gold item only when they share a file. An item has the files of its anchor and its cause. A gold
+// item has its path and each alt path.
+export const itemFiles = (i: Pick<EvalItem, "path" | "cause">) => [...new Set([i.path, ...(i.cause ? [i.cause.path] : [])])];
+export const goldFiles = (g: Pick<Gold, "path" | "alt">) => [...new Set([g.path, ...(g.alt ?? []).map((p) => p.path)])];
+export const shareFile = (a: string[], b: string[]) => a.some((f) => b.includes(f));
+
+export const JUDGE_LEVELS = ["low", "medium", "high"] as const;
+export type JudgeLevel = (typeof JUDGE_LEVELS)[number];
+export type JudgeLabel = { label: "tp" | "fp"; severity: JudgeLevel; category: string; scope: string; why: string };
+// The judge level of each app severity, from the severity lines of the finder (catalog.ts) and of the judge prompt (label.ts): blocker
+// and major must be fixed before the merge (high), minor should be fixed (medium), nit can wait (low).
+const LEVEL: Record<Severity, number> = { nit: 0, minor: 1, major: 2, blocker: 2 };
+
+// matches: the gold keys that the matcher matched to the item, [] for none. undefined: a gold item in a file of the item has no matcher
+// answer. judge: the judge label of the item, or undefined.
+export type Grounding = {
+  matches: (c: EvalCaseInfo, i: EvalItem) => readonly string[] | undefined;
+  judge: (c: EvalCaseInfo, i: EvalItem) => JudgeLabel | undefined;
+};
+
+// ReviewBench 6.2.4 (review-quality-2026.md E3): shown items claim gold items in item order. Each item claims at most one, the first
+// unclaimed one of its matches, and each gold item goes to one item. A shown item whose matches are all claimed gets null. An item
+// outside main claims nothing and takes its first match. null: the judge labels the item.
+export function goldLabels(gold: Gold[], items: EvalItem[], matched: (n: number) => readonly string[]): (Gold | null)[] {
+  const taken = new Set<string>();
+  return items.map((i, n) => {
+    const m = matched(n);
+    const shown = i.group === "main";
+    const g = gold.find((x) => m.includes(x.key) && !(shown && taken.has(x.key))) ?? null;
+    if (g && shown) taken.add(g.key);
+    return g;
+  });
+}
+
+// review-quality-2026.md E5, verifier loss: the state of an item after the check, in the order of visibility. demoted: a refuted
+// finding that stays in the list (review.ts FindingPayload.demoted). folded: in fold and not refuted. duplicate, refuted: hidden.
+export const STATES = ["main", "demoted", "folded", "duplicate", "refuted"] as const;
+type State = (typeof STATES)[number];
+const stateOf = (i: EvalItem): State =>
+  i.group === "hidden"
+    ? i.verdict === "duplicate"
+      ? "duplicate"
+      : "refuted"
+    : i.verdict === "refuted"
+      ? "demoted"
+      : i.group === "main"
+        ? "main"
+        : "folded";
+
 export const METRICS = [
+  "groundedRecall",
+  "groundedPrecision",
+  "groundedNoise",
   "recall",
   "humanRecall",
   "precision",
@@ -201,20 +274,110 @@ export const METRICS = [
   "minutes",
   "costUsd",
   "notCompleted",
+  "groundedRaised",
+  "lossMain",
+  "lossDemoted",
+  "lossFolded",
+  "lossDuplicate",
+  "lossRefuted",
+  "refutedShown",
+  "augmentedPrecision",
+  "augmentedRecall",
+  "newTp",
+  "severityAbove",
 ] as const;
 export type Metric = (typeof METRICS)[number];
 export type Stat = { mean: number; min: number; max: number } | null;
-// leftOut: the bugs of all cases that recall leaves out under the volume, and their severities.
+// One slice of review-quality-2026.md E5. A gold slice counts the counted must-finds of its kind. A case slice counts the case runs of
+// its kind, and their noise and unmatched shown items that the judge gives fp. null: no grounded number.
+export type Slice = { name: string; mustFinds: number; found: number; runs: number | null; noise: number | null; judgeFp: number | null };
+// leftOut: the bugs of all cases that recall leaves out under the volume, and their severities. grounded: the grounded metrics and the
+// slices come from the matcher. macro: the mean over the cases of the case means. confusion: the label (gold or judge) of every item by
+// its verdict, over all runs. union: unionRecall for k = 1 to the repeat count. finderQuestions: the sums over all runs. recallBugs:
+// the found must-finds of each repeat, for the spread S_R in bugs of the ship rules (review-quality-2026.md section 2).
 export type Score = {
   suite: Record<Metric, Stat>;
   cases: Record<string, Record<Metric, Stat>>;
   leftOut: { count: number; severities: Severity[] };
+  grounded: boolean;
+  macro: Record<Metric, number | null>;
+  confusion: Record<string, { tp: number; fp: number }> | null;
+  slices: Slice[];
+  union: { k: number; shown: number; raised: number }[];
+  finderQuestions: { asked: number; answered: number; findings: number; kept: number } | null;
+  recallBugs: { repeat: number; found: number; mustFinds: number }[];
 };
 
-// The counts of one run of one case.
+// The counted must-finds (goldOf keys) that a shown item finds and that any item raises.
+type Hits = { shown: Set<string>; raised: Set<string> };
+
+// The grounded counts of one run (review-quality-2026.md E5). tp, fp: shown items that claim a bug or your own comment, or a trap.
+// shown: shown items that claim no extra. unmatched: shown items that claim nothing. newTp, judgeFp, above: null when an unmatched
+// shown item has no judge label. confusion: null when an item has neither a gold item nor a judge label.
+type Ground = {
+  hits: Hits;
+  loss: Record<State, number>;
+  tp: number;
+  fp: number;
+  shown: number;
+  unmatched: number;
+  newTp: number | null;
+  judgeFp: number | null;
+  above: number | null;
+  confusion: Record<string, { tp: number; fp: number }> | null;
+};
+
+// null: an item has no matcher answer.
+function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding): Ground | null {
+  const m = r.items.map((i) => g.matches(c, i));
+  if (m.some((x) => x === undefined)) return null;
+  const of = (n: number) => m[n] ?? [];
+  const labels = goldLabels(goldOf(c), r.items, of);
+  const counted = mustFind(c, volume).map((b) => `bug:${b.id}`);
+  const on = (k: string, shownOnly: boolean) => r.items.filter((i, n) => of(n).includes(k) && (!shownOnly || i.group === "main"));
+  const shownKeys = counted.filter((k) => on(k, true).length);
+  const raisedKeys = counted.filter((k) => on(k, false).length);
+  const loss = Object.fromEntries(STATES.map((s) => [s, 0])) as Record<State, number>;
+  for (const k of raisedKeys) {
+    const best = STATES[Math.min(...on(k, false).map((i) => STATES.indexOf(stateOf(i))))];
+    if (best) loss[best]++;
+  }
+  const shown = r.items.flatMap((i, n) => (i.group === "main" ? [{ i, gold: labels[n] ?? null }] : []));
+  const unmatched = shown.filter((x) => x.gold === null).map((x) => ({ i: x.i, j: g.judge(c, x.i) }));
+  const judged = unmatched.every((x) => x.j !== undefined);
+  const count = (f: (x: (typeof unmatched)[number]) => boolean) => (judged ? unmatched.filter(f).length : null);
+  const truth = r.items.map((i, n) => {
+    const gl = labels[n];
+    return gl ? (gl.kind === "trap" ? "fp" : "tp") : g.judge(c, i)?.label;
+  });
+  let confusion: Ground["confusion"] = null;
+  if (truth.every((x) => x !== undefined)) {
+    const rows: Record<string, { tp: number; fp: number }> = {};
+    r.items.forEach((i, n) => {
+      const row = rows[i.verdict ?? "none"] ?? { tp: 0, fp: 0 };
+      rows[i.verdict ?? "none"] = row;
+      row[truth[n] as "tp" | "fp"]++;
+    });
+    confusion = rows;
+  }
+  return {
+    hits: { shown: new Set(shownKeys), raised: new Set(raisedKeys) },
+    loss,
+    tp: shown.filter((x) => x.gold?.kind === "bug" || x.gold?.kind === "human").length,
+    fp: shown.filter((x) => x.gold?.kind === "trap").length,
+    // An item on an extra leaves the shown count, as in the line match.
+    shown: shown.filter((x) => x.gold?.kind !== "extra").length,
+    unmatched: unmatched.length,
+    newTp: count((x) => x.j?.label === "tp"),
+    judgeFp: count((x) => x.j?.label === "fp"),
+    above: count((x) => x.j?.label === "tp" && LEVEL[x.i.severity] > JUDGE_LEVELS.indexOf(x.j.severity)),
+    confusion,
+  };
+}
+
+// The counts of one run of one case. hits: by the line match. ground: by the matcher, null without labels.
 type Tally = {
   bugs: number;
-  allBugs: number;
   found: number;
   human: number;
   humanFound: number;
@@ -239,10 +402,13 @@ type Tally = {
   minutes: number | null;
   costUsd: number | null;
   notCompleted: number;
+  refutedShown: number;
+  hits: Hits;
+  ground: Ground | null;
 };
 
 // t: the tolerance of the result. Traps use t = 0 (docs/plans/review-v3.md WP-V1).
-function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): Tally {
+function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null, g: Grounding | undefined): Tally {
   const shown = r.items.filter((i) => i.group === "main");
   const human = c.human ?? [];
   // docs/plans/review-v3.md WP-V3: a re-raise is a new item on an earlier finding that you posted or discarded. Its lines must be the
@@ -253,6 +419,8 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): T
   const scored = (c.earlier ?? []).filter((e) => e.status === "posted" && e.resolved !== null);
   const bugs = mustFind(c, volume);
   const found = bugs.filter((b) => shown.some((i) => matches(i, b, t)));
+  // review-quality-2026.md E5: the denominator of recall, so candidateRecall - recall is the share that the check lost.
+  const raised = bugs.filter((b) => r.items.some((i) => matches(i, b, t)));
   let severityOk = 0;
   for (const b of found) {
     const best = Math.max(...shown.filter((i) => matches(i, b, t)).map((i) => RANK[i.severity]));
@@ -268,7 +436,6 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): T
   const extraHits = shown.filter(extraHit).length;
   return {
     bugs: bugs.length,
-    allBugs: c.bugs.length,
     found: found.length,
     human: human.length,
     humanFound: human.filter((h) => shown.some((i) => matches(i, h, t))).length,
@@ -279,7 +446,7 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): T
     noise: shown.filter((i) => !bugHit(i) && !extraHit(i) && !trapHit(i)).length,
     extraHits,
     severityOk,
-    candidates: c.bugs.filter((b) => r.items.some((i) => matches(i, b, t))).length,
+    candidates: raised.length,
     openedOf: r.opened ? bugs.length : 0,
     // Any place of the bug counts: its main place or an alt place.
     bugOpened: r.opened ? bugs.filter((b) => [b, ...(b.alt ?? [])].some((p) => r.opened?.includes(p.path))).length : 0,
@@ -294,20 +461,55 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null): T
     minutes: r.minutes,
     costUsd: r.usage ? r.usage.costUsd : null,
     notCompleted: r.status === "completed" ? 0 : 1,
+    // review-quality-2026.md E5: refuted items of the protected classes stay in main (displayGroup). They count apart.
+    refutedShown: shown.filter((i) => i.verdict === "refuted").length,
+    hits: { shown: new Set(found.map((b) => `bug:${b.id}`)), raised: new Set(raised.map((b) => `bug:${b.id}`)) },
+    ground: g ? ground(c, r, volume, g) : null,
   };
 }
 
 const ratio = (a: number, b: number) => (b === 0 ? null : a / b);
-const sum = (ts: Tally[], k: Exclude<keyof Tally, "rereview">) => ts.reduce((s, t) => s + (t[k] ?? 0), 0);
+type Count = { [K in keyof Tally]: Tally[K] extends number | null ? K : never }[keyof Tally];
+const sum = (ts: Tally[], k: Count) => ts.reduce((s, t) => s + (t[k] ?? 0), 0);
 // null when no run reports the value.
 const meanOf = (xs: (number | null)[]) => {
   const v = xs.filter((x): x is number => x !== null);
   return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null;
 };
 
-// The metrics of a set of case runs, pooled: recall is all found bugs over all bugs, noise and time are per case run.
+// The metrics of a set of case runs, pooled: recall is all found bugs over all bugs, noise and time are per case run. The grounded
+// metrics are null unless every run has its ground counts.
 function metrics(ts: Tally[]): Record<Metric, number | null> {
+  const gr = ts.every((t) => t.ground !== null) ? ts.map((t) => t.ground as Ground) : null;
+  // null without ground counts, or when a run has no value.
+  const gs = (f: (x: Ground) => number | null) => {
+    if (!gr) return null;
+    let s = 0;
+    for (const x of gr) {
+      const v = f(x);
+      if (v === null) return null;
+      s += v;
+    }
+    return s;
+  };
+  const counted = sum(ts, "bugs");
+  const found = gs((x) => x.hits.shown.size);
+  const tp = gs((x) => x.tp);
+  const fp = gs((x) => x.fp);
+  const newTp = gs((x) => x.newTp);
+  const of = (v: number | null, d: number | null) => (v === null || d === null ? null : ratio(v, d));
+  const loss = (s: State) =>
+    of(
+      gs((x) => x.loss[s]),
+      counted,
+    );
   return {
+    groundedRecall: of(found, counted),
+    groundedPrecision: of(tp, tp === null || fp === null ? null : tp + fp),
+    groundedNoise: of(
+      gs((x) => x.unmatched),
+      ts.length,
+    ),
     recall: ratio(sum(ts, "found"), sum(ts, "bugs")),
     humanRecall: ratio(sum(ts, "humanFound"), sum(ts, "human")),
     precision: ratio(sum(ts, "shownMatched"), sum(ts, "shown")),
@@ -316,7 +518,7 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     falsePositives: ratio(sum(ts, "shown") - sum(ts, "shownMatched"), ts.length),
     extras: ratio(sum(ts, "extraHits"), ts.length),
     severityOk: ratio(sum(ts, "severityOk"), sum(ts, "found")),
-    candidateRecall: ratio(sum(ts, "candidates"), sum(ts, "allBugs")),
+    candidateRecall: ratio(sum(ts, "candidates"), sum(ts, "bugs")),
     bugOpened: ratio(sum(ts, "bugOpened"), sum(ts, "openedOf")),
     agentCalls: meanOf(ts.map((t) => t.agentCalls)),
     parts: meanOf(ts.map((t) => t.parts)),
@@ -327,6 +529,26 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     minutes: meanOf(ts.map((t) => t.minutes)),
     costUsd: meanOf(ts.map((t) => t.costUsd)),
     notCompleted: sum(ts, "notCompleted"),
+    groundedRaised: of(
+      gs((x) => x.hits.raised.size),
+      counted,
+    ),
+    lossMain: loss("main"),
+    lossDemoted: loss("demoted"),
+    lossFolded: loss("folded"),
+    lossDuplicate: loss("duplicate"),
+    lossRefuted: loss("refuted"),
+    refutedShown: ratio(sum(ts, "refutedShown"), ts.length),
+    augmentedPrecision: of(
+      tp === null || newTp === null ? null : tp + newTp,
+      gs((x) => x.shown),
+    ),
+    augmentedRecall: of(found === null || newTp === null ? null : found + newTp, newTp === null ? null : counted + newTp),
+    newTp: of(newTp, ts.length),
+    severityAbove: of(
+      gs((x) => x.above),
+      newTp,
+    ),
   };
 }
 
@@ -340,22 +562,202 @@ function stats(perRepeat: Record<Metric, number | null>[]): Record<Metric, Stat>
   return out;
 }
 
-export function score(r: EvalResult): Score {
+type RunTally = { repeat: number; c: EvalCaseInfo; t: Tally };
+
+// The tallies of the runs of known cases. The result is grounded only when every run has its ground counts. Else no run keeps them, so
+// no metric mixes the matcher and the line match.
+function tallies(r: EvalResult, g?: Grounding): { runs: RunTally[]; grounded: boolean; hits: (x: RunTally) => Hits } {
   const byId = new Map(r.cases.map((c) => [c.id, c]));
   const runs = r.runs.flatMap((x) => {
     const c = byId.get(x.case);
-    return c ? [{ repeat: x.repeat, case: c.id, t: tally(c, x, r.tolerance ?? 0, r.volume) }] : [];
+    return c ? [{ repeat: x.repeat, c, t: tally(c, x, r.tolerance ?? 0, r.volume, g) }] : [];
   });
+  const grounded = g !== undefined && runs.every((x) => x.t.ground !== null);
+  if (!grounded) for (const x of runs) x.t.ground = null;
+  return { runs, grounded, hits: (x) => x.t.ground?.hits ?? x.t.hits };
+}
+
+// The class names of shared/review.ts bugClass, as local.ts BUG_CLASS_NAMES has them.
+const CLASS_NAMES = ["security", "concurrency", "resource", "behavior", "other"] as const;
+
+// review-quality-2026.md E5. Gold slices: severity, source, module, and bug class of the counted must-finds. Case slices: size, task
+// text, and clean cases. The probe set is a set of its own (--set probe), so its result is its slice.
+function slices(runs: RunTally[], grounded: boolean, hits: (x: RunTally) => Hits, volume: Volume | null): Slice[] {
+  type Acc = { mustFinds: number; found: number; runs: number; noise: number; judgeFp: number | null; gold: boolean };
+  const acc = new Map<string, Acc>();
+  const row = (name: string, gold: boolean) => {
+    let a = acc.get(name);
+    if (!a) {
+      a = { mustFinds: 0, found: 0, runs: 0, noise: 0, judgeFp: grounded ? 0 : null, gold };
+      acc.set(name, a);
+    }
+    return a;
+  };
+  for (const x of runs) {
+    const h = hits(x);
+    for (const b of mustFind(x.c, volume)) {
+      const hit = h.shown.has(`bug:${b.id}`) ? 1 : 0;
+      for (const name of [
+        `severity ${b.severityMin === "blocker" || b.severityMin === "major" ? "blocker, major" : "minor, nit"}`,
+        `source ${b.source ?? "none"}`,
+        `module ${b.module}`,
+        `class ${CLASS_NAMES[bugClass({ module: b.module, category: b.category })] ?? "other"}`,
+      ]) {
+        const a = row(name, true);
+        a.mustFinds++;
+        a.found += hit;
+      }
+    }
+    const names = [
+      ...(x.c.large === undefined ? [] : [x.c.large ? "large cases" : "small cases"]),
+      x.c.hasTask || x.c.task !== undefined ? "cases with task text" : "cases without task text",
+      ...(x.c.clean ? ["clean cases"] : []),
+    ];
+    for (const name of names) {
+      const a = row(name, false);
+      a.runs++;
+      a.mustFinds += x.t.bugs;
+      a.found += h.shown.size;
+      a.noise += x.t.ground?.unmatched ?? x.t.noise;
+      const fp = x.t.ground?.judgeFp ?? null;
+      a.judgeFp = a.judgeFp === null || fp === null ? null : a.judgeFp + fp;
+    }
+  }
+  return [...acc]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, a]) => ({
+      name,
+      mustFinds: a.mustFinds,
+      found: a.found,
+      runs: a.gold ? null : a.runs,
+      noise: a.gold ? null : a.noise / a.runs,
+      judgeFp: a.gold || a.judgeFp === null ? null : a.judgeFp / a.runs,
+    }));
+}
+
+const subsetsOf = <T>(xs: T[], k: number): T[][] =>
+  k === 0 ? [[]] : xs.flatMap((x, n) => subsetsOf(xs.slice(n + 1), k - 1).map((s) => [x, ...s]));
+
+// review-quality-2026.md E5: the mean over the k-subsets of repeats of the share of the counted must-finds that any run of the subset
+// shows (shown) or raises (raised). Grounded with labels, else by the line match. null: k is out of range, or no must-find counts.
+export function unionRecall(r: EvalResult, k: number, g?: Grounding): { shown: number; raised: number } | null {
+  const { runs, hits } = tallies(r, g);
+  const repeats = [...new Set(runs.map((x) => x.repeat))].sort((a, b) => a - b);
+  const total = r.cases.reduce((n, c) => n + mustFind(c, r.volume).length, 0);
+  if (k < 1 || k > repeats.length || total === 0) return null;
+  const subsets = subsetsOf(repeats, k);
+  let shown = 0;
+  let raised = 0;
+  for (const set of subsets)
+    for (const c of r.cases) {
+      const mine = runs.filter((x) => x.c.id === c.id && set.includes(x.repeat));
+      shown += new Set(mine.flatMap((x) => [...hits(x).shown])).size;
+      raised += new Set(mine.flatMap((x) => [...hits(x).raised])).size;
+    }
+  return { shown: shown / subsets.length / total, raised: raised / subsets.length / total };
+}
+
+// A small seeded generator (mulberry32), so the bootstrap interval is the same on each call.
+const seeded = (seed: number) => () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = seed;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+export const BOOTSTRAP = { seed: 2026, samples: 2000 } as const;
+
+// review-quality-2026.md E5, information only: the mean over the counted must-finds of both results of the hit rate in B minus the hit
+// rate in A. The hit rate of a must-find is the share of the runs of its case that show it. The 90% interval comes from a bootstrap over
+// the PR groups (the case group, else the case ID). Grounded when both results have labels, else by the line match on both sides.
+// null: no must-find has runs in both results.
+export function pairedDelta(
+  a: EvalResult,
+  b: EvalResult,
+  ga?: Grounding,
+  gb?: Grounding,
+): { delta: number; low: number; high: number; mustFinds: number; groups: number; grounded: boolean } | null {
+  let ta = tallies(a, ga);
+  let tb = tallies(b, gb);
+  const grounded = ta.grounded && tb.grounded;
+  if (!grounded) [ta, tb] = [tallies(a), tallies(b)];
+  const rate = (p: typeof ta, id: string, key: string) => {
+    const mine = p.runs.filter((x) => x.c.id === id);
+    return mine.length ? mine.filter((x) => p.hits(x).shown.has(key)).length / mine.length : null;
+  };
+  const byGroup = new Map<string, number[]>();
+  for (const c of a.cases) {
+    const other = b.cases.find((x) => x.id === c.id);
+    if (!other) continue;
+    const inB = new Set(mustFind(other, b.volume).map((x) => `bug:${x.id}`));
+    for (const key of mustFind(c, a.volume).map((x) => `bug:${x.id}`)) {
+      const x = rate(ta, c.id, key);
+      const y = rate(tb, c.id, key);
+      if (!inB.has(key) || x === null || y === null) continue;
+      const group = c.group ?? c.id;
+      byGroup.set(group, [...(byGroup.get(group) ?? []), y - x]);
+    }
+  }
+  const groups = [...byGroup.values()];
+  const all = groups.flat();
+  if (!all.length) return null;
+  const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
+  const next = seeded(BOOTSTRAP.seed);
+  const means = Array.from({ length: BOOTSTRAP.samples }, () =>
+    mean(Array.from({ length: groups.length }, () => groups[Math.floor(next() * groups.length)] ?? []).flat()),
+  ).sort((x, y) => x - y);
+  const at = (q: number) => means[Math.min(means.length - 1, Math.floor(q * means.length))] as number;
+  return { delta: mean(all), low: at(0.05), high: at(0.95), mustFinds: all.length, groups: groups.length, grounded };
+}
+
+// g: the matcher and judge labels of eval:label. Without g, or when a run has no labels, every grounded metric is null.
+export function score(r: EvalResult, g?: Grounding): Score {
+  const { runs, grounded, hits } = tallies(r, g);
   const repeats = [...new Set(runs.map((x) => x.repeat))].sort((a, b) => a - b);
   const suite = stats(repeats.map((n) => metrics(runs.filter((x) => x.repeat === n).map((x) => x.t))));
   const cases: Record<string, Record<Metric, Stat>> = {};
   for (const c of r.cases) {
-    const mine = runs.filter((x) => x.case === c.id);
+    const mine = runs.filter((x) => x.c.id === c.id);
     if (mine.length) cases[c.id] = stats(mine.map((x) => metrics([x.t])));
   }
+  const macro = Object.fromEntries(METRICS.map((m) => [m, meanOf(Object.values(cases).map((c) => c[m]?.mean ?? null))])) as Record<
+    Metric,
+    number | null
+  >;
+  let confusion: Score["confusion"] = null;
+  if (grounded && runs.every((x) => x.t.ground?.confusion)) {
+    confusion = {};
+    for (const x of runs)
+      for (const [v, n] of Object.entries(x.t.ground?.confusion ?? {})) {
+        const row = confusion[v] ?? { tp: 0, fp: 0 };
+        confusion[v] = row;
+        row.tp += n.tp;
+        row.fp += n.fp;
+      }
+  }
+  const union = repeats.flatMap((_, n) => {
+    const u = unionRecall(r, n + 1, g);
+    return u ? [{ k: n + 1, ...u }] : [];
+  });
+  const fq = r.runs.flatMap((x) => (x.finderQuestions ? [x.finderQuestions] : []));
+  const add = (k: "asked" | "answered" | "findings" | "kept") => fq.reduce((s, x) => s + x[k], 0);
   const severities = unshowable(r.volume);
   const count = r.cases.reduce((n, c) => n + c.bugs.length - mustFind(c, r.volume).length, 0);
-  return { suite, cases, leftOut: { count, severities } };
+  return {
+    suite,
+    cases,
+    leftOut: { count, severities },
+    grounded,
+    macro,
+    confusion,
+    slices: slices(runs, grounded, hits, r.volume),
+    union,
+    finderQuestions: fq.length ? { asked: add("asked"), answered: add("answered"), findings: add("findings"), kept: add("kept") } : null,
+    recallBugs: repeats.map((n) => {
+      const mine = runs.filter((x) => x.repeat === n);
+      return { repeat: n, found: mine.reduce((s, x) => s + hits(x).shown.size, 0), mustFinds: mine.reduce((s, x) => s + x.t.bugs, 0) };
+    }),
+  };
 }
 
 // ---------- Reply cases (docs/plans/review-v2/spec.md section 2.13, `--replies`) ----------

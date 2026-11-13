@@ -4,7 +4,8 @@
 // Re-scores an eval result file with the bugs, traps, and extras of the current case fixtures, offline (docs/plans/review-v2/spec.md section 4.3).
 // --tolerance N scores with another near-line tolerance (docs/plans/review-v3.md WP-V1). A local case keeps its stored truth, so a
 // local result needs the build of the set that it ran (localRefusal).
-// Usage: bun run eval:rescore <result.json> [--tolerance N] [--out <file>]. Exit codes: 0 done, 2 a usage error, an unreadable file, or a local result of another build of the set.
+// --fold-refuted moves the refuted findings of main to fold (review-quality-2026.md E5).
+// Usage: bun run eval:rescore <result.json> [--tolerance N] [--fold-refuted] [--out <file>]. Exit codes: 0 done, 2 a usage error, an unreadable file, or a local result of another build of the set.
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import { readResult, suiteDelta, summaryText } from "./compare";
 import { type EvalResult, score } from "./score";
 
 export type CaseTruth = { head: string; bugs: EvalBug[]; traps: EvalTrap[]; extras: EvalExtra[] };
+const USAGE = "Usage: bun run eval:rescore <result.json> [--tolerance N] [--fold-refuted] [--out <file>]";
 
 // current: the truth of the current fixtures by case ID. A case with no fixture keeps its stored bugs and traps.
 // tolerance: the new tolerance of the result, or undefined to keep it.
@@ -44,6 +46,21 @@ export function rescore(
   if (tolerance !== undefined && tolerance !== (r.tolerance ?? 0))
     notes.push(`The tolerance goes from ${r.tolerance ?? 0} to ${tolerance} lines.`);
   return { result: { ...r, cases, rescoredAt: at, ...(tolerance !== undefined && { tolerance }) }, notes };
+}
+
+// review-quality-2026.md E5: each refuted item of main goes to fold, as if the app folded the refuted findings of the protected
+// classes. n: the items that moved.
+export function foldRefuted(r: EvalResult): { result: EvalResult; n: number } {
+  let n = 0;
+  const runs = r.runs.map((x) => ({
+    ...x,
+    items: x.items.map((i) => {
+      if (i.group !== "main" || i.verdict !== "refuted") return i;
+      n++;
+      return { ...i, group: "fold" as const };
+    }),
+  }));
+  return { result: { ...r, runs, refutedFolded: true }, n };
 }
 
 // null, or why a local result does not fit the cases in dir. dir: the cases folder of the set. run.ts hashes all selected cases, so a
@@ -90,21 +107,23 @@ export async function main(argv: string[]): Promise<number> {
   let file: string;
   let out: string | undefined;
   let tolerance: number | undefined;
+  let fold = false;
   try {
     const { values, positionals } = parseArgs({
       args: argv,
       strict: true,
       allowPositionals: true,
-      options: { out: { type: "string" }, tolerance: { type: "string" } },
+      options: { out: { type: "string" }, tolerance: { type: "string" }, "fold-refuted": { type: "boolean" } },
     });
     if (positionals.length !== 1) throw new Error("Give one result file.");
     file = positionals[0] as string;
     out = values.out;
+    fold = values["fold-refuted"] === true;
     tolerance = values.tolerance === undefined ? undefined : Number(values.tolerance);
     if (tolerance !== undefined && !(Number.isInteger(tolerance) && tolerance >= 0))
       throw new Error("--tolerance must be a whole number of lines, 0 or more.");
   } catch (e) {
-    console.error(`${(e as Error).message}\nUsage: bun run eval:rescore <result.json> [--tolerance N] [--out <file>]`);
+    console.error(`${(e as Error).message}\n${USAGE}`);
     return 2;
   }
   let before: EvalResult;
@@ -119,9 +138,17 @@ export async function main(argv: string[]): Promise<number> {
     console.error(refused);
     return 2;
   }
-  const { result, notes } = rescore(before, await currentTruth(before), new Date().toISOString(), tolerance);
+  const done = rescore(before, await currentTruth(before), new Date().toISOString(), tolerance);
+  const folded = fold ? foldRefuted(done.result) : null;
+  const result = folded ? folded.result : done.result;
+  const notes = [...done.notes, ...(folded ? [`Refuted findings moved from main to fold: ${folded.n}.`] : [])];
+  // The labels of eval:label, when they exist. label.ts imports this module, so it loads here.
+  const { loadGrounding } = await import("./label");
+  const ga = loadGrounding(before);
+  const gb = loadGrounding(result);
   console.log([`Re-scored ${file} with the current case fixtures.`, ...notes, ""].join("\n"));
-  console.log(`${suiteDelta(score(before), score(result), ["stored", "current"])}\n\n${summaryText(result)}`);
+  const after = score(result, gb);
+  console.log(`${suiteDelta(score(before, ga), after, ["stored", "current"])}\n\n${summaryText(result, after)}`);
   if (out) {
     writeFileSync(resolve(out), `${JSON.stringify(result, null, 2)}\n`);
     console.log(`Wrote ${resolve(out)}.`);

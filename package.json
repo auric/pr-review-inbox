@@ -35,6 +35,7 @@
     "eval:local": "bun scripts/eval/local.ts",
     "eval:ab": "bun scripts/eval/ab.ts",
     "eval:threads": "bun scripts/eval/threads.ts",
+    "eval:label": "bun scripts/eval/label.ts",
     "gate:ci": "bun scripts/gate/ci.ts",
     "gate:jira": "bun scripts/gate/jira.ts",
     "screenshots": "bun run build && node scripts/screenshots.ts"

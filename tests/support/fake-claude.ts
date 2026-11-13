@@ -72,6 +72,10 @@ export type FakeScenario = {
   // The structured output of the own review of a task part only: a review run whose stdin says "- Pull request: none yet.". Absent:
   // review. The demo keeps the fixture result for its PR reviews this way.
   taskReview?: unknown;
+  // docs/plans/review-v2/review-quality-2026.md E3, E4 (scripts/eval/label.ts): the matcher result (properties.candidates) and the judge
+  // result (properties.labels). Absent: the fixture result.
+  matcher?: unknown;
+  judge?: unknown;
   // Fields for the Nth run of one call key (callKey), after bySchema. The last entry repeats. The record file counts the earlier runs.
   seq?: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq">>[]>;
   // Fields for a run whose ./context Markdown files hold the text when, after seq. The first entry that matches wins. Its seq counts only
@@ -80,7 +84,7 @@ export type FakeScenario = {
   match?: { when: string; seq: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq" | "match">>[]> }[];
 };
 
-export type SchemaKind = "verify" | "explain" | "discuss" | "interview" | "spec" | "implement" | "review";
+export type SchemaKind = "verify" | "explain" | "discuss" | "interview" | "spec" | "implement" | "review" | "matcher" | "judge";
 // The review v2 run kind that a --json-schema shape names, else null. A re-review has its own key (earlier), so it is no review.
 export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
   props.verdicts !== undefined
@@ -97,7 +101,11 @@ export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
               ? "implement"
               : props.findings !== undefined && props.earlier === undefined
                 ? "review"
-                : null;
+                : props.candidates !== undefined
+                  ? "matcher"
+                  : props.labels !== undefined
+                    ? "judge"
+                    : null;
 
 // The key of a run for seq: the schema kind, and for an implement run "implement:<mode>" from the "- Mode:" line of its stdin.
 export function callKey(argv: string[], stdin: string): string | null {
@@ -506,6 +514,8 @@ async function main() {
     if (kind === "spec") return s.spec ?? echoSpec();
     if (kind === "implement") return s.implement ?? echoImplement();
     if (kind === "review") return s.taskReview !== undefined && stdin.includes("- Pull request: none yet.") ? s.taskReview : s.review;
+    if (kind === "matcher") return s.matcher;
+    if (kind === "judge") return s.judge;
     if (props.replies !== undefined) return s.replies ?? echoReplies(stdin, { notes: s.notes, cites: s.cites });
     if (props.earlier !== undefined) return s.rereview ?? echoRereview(stdin, fixture);
     if (props.answer !== undefined) return s.answer ?? echoAnswer(stdin);
