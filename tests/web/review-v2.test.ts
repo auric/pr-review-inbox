@@ -9,6 +9,7 @@ import { MODULE_IDS, type ReviewItemDto, type RunDto, type RunSummary, TRIAL_MOD
 import type { FindingPayload, VerifyMark } from "../../src/shared/review";
 import type { RunEvent } from "../../src/shared/run-log";
 import {
+  answeredQuestions,
   checkChip,
   checkFailedText,
   checkText,
@@ -259,6 +260,21 @@ describe("run line (spec.md sections 1.1 and 1.9)", () => {
     // The check off: each finding is unchecked, but nothing failed.
     expect(checkFailedText(summary({ verify: { ...VERIFY, unchecked: 4 } }))).toBeNull();
     expect(checkFailedText(null)).toBeNull();
+  });
+
+  test("the questions that the check answered fold into one line with each question and its answer (review-questions.md)", () => {
+    const fq = (answers: { text: string; answer: string }[]) =>
+      summary({ finderQuestions: { asked: answers.length + 1, answered: answers.length, findings: 0, kept: 1, answers } });
+    const a = { text: "Must `flush()` stay atomic?", answer: "Readers take the same lock." };
+    expect(answeredQuestions(fq([a]))).toEqual({ label: "1 question answered by the check", items: [a] });
+    expect(answeredQuestions(fq([a, { text: "Who reads b2?", answer: "  " }]))).toEqual({
+      label: "2 questions answered by the check",
+      items: [a, { text: "Who reads b2?", answer: "The check gave no reason." }],
+    });
+    // A run before prompt version 2.7 has no key. A run whose check answered nothing shows no line.
+    expect(answeredQuestions(summary())).toBeNull();
+    expect(answeredQuestions(fq([]))).toBeNull();
+    expect(answeredQuestions(null)).toBeNull();
   });
 });
 

@@ -722,6 +722,17 @@ export function hiddenParts(hidden: ReviewItemDto[]): string[] {
   return [refuted ? `${refuted} refuted by the check` : "", dup ? plural(dup, "duplicate") : ""].filter(Boolean);
 }
 
+// docs/plans/review-v2/review-questions.md: the finder questions that the check answered. They are not posted. null: none, or a
+// run before prompt version 2.7.
+export function answeredQuestions(s: RunSummary | null | undefined): { label: string; items: { text: string; answer: string }[] } | null {
+  const a = s?.finderQuestions?.answers ?? [];
+  if (!a.length) return null;
+  return {
+    label: `${plural(a.length, "question")} answered by the check`,
+    items: a.map((q) => ({ text: q.text, answer: q.answer.trim() || "The check gave no reason." })),
+  };
+}
+
 // spec.md section 1.1: the state of a running run. A review names its phase.
 export function runningText(r: RunDto): string {
   if (r.phase === "indexing") return "Indexing for codegraph…";

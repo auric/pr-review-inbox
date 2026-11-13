@@ -3,7 +3,7 @@
 
 // Review UI v2 browser acceptance (docs/plans/review-v2/spec.md sections 1.1, 1.4, 1.9; AC-UX1, AC-UX3, AC-UX10 for the brief and
 // Drafts): the checks and the volume in the brief, the phase line, the ledger, the fold, the check chip, the refuted list with
-// Restore, the run log groups, and a check that did not finish. Runs against serve.ts only: the fake Bitbucket, a temp git remote,
+// Restore, the questions that the check answered, the run log groups, and a check that did not finish. Runs against serve.ts only: the fake Bitbucket, a temp git remote,
 // and the fake Claude Code CLI.
 import { test as base, expect, type Page } from "@playwright/test";
 import { APP_PORT, control, E2E_TOKEN, FAKE_URL, openApp } from "./control";
@@ -200,7 +200,7 @@ test("a two-phase run: the phase line, the ledger, the fold, the check chip, the
   await expect(log.locator("[data-log-phase]")).toHaveText(["Find", "Check"]);
 });
 
-test("a refuted concurrency finding stays in the Drafts list, last in its group, with the Refuted chip and the check reason (AC-R17)", async ({
+test("a refuted concurrency finding stays in the Drafts list, last in its group, with the Refuted chip and the check reason (AC-R17); an answered question folds into the run record", async ({
   page,
 }) => {
   const verify = {
@@ -209,6 +209,8 @@ test("a refuted concurrency finding stays in the Drafts list, last in its group,
       verdict(1, "refuted", "blocker", "One lock guards the whole loop at the head commit.", "src/cache/flush.ts:2"),
       verdict(2, "confirmed", "minor", "No finally block releases the lock.", "src/cache/flush.ts:6"),
       verdict(3, "confirmed", "nit", "The README names no order.", "README.md:1"),
+      // The finder question of REVIEW_RESULT is block 4. The check answers it, so it drops (review-questions.md).
+      verdict(4, "refuted", "minor", "Readers take the same lock in `read()`.", "src/cache/flush.ts:1"),
     ],
   };
   await control("claude", { stream: "tree", verify });
@@ -227,6 +229,19 @@ test("a refuted concurrency finding stays in the Drafts list, last in its group,
     "Check: One lock guards the whole loop at the head commit. (src/cache/flush.ts:2)",
   );
   await expect(runRow(page).getByRole("button", { name: /refuted by the check/ })).toHaveCount(0);
+
+  // The answered question is no draft. The run record folds it into one line. Enter opens the question and the answer.
+  await expect(page.locator("[data-draft-question]")).toHaveCount(0);
+  const answered = runRow(page).getByRole("button", { name: "1 question answered by the check" });
+  await expect(answered).toHaveAttribute("aria-expanded", "false");
+  await answered.focus();
+  await page.keyboard.press("Enter");
+  await expect(answered).toHaveAttribute("aria-expanded", "true");
+  const qa = runRow(page).getByRole("list", { name: "Questions that the check answered" }).locator("[data-answered-item]");
+  await expect(qa).toHaveCount(1);
+  await expect(qa.locator("p")).toHaveText(["Must flush() stay atomic for readers?", "Answer: Readers take the same lock in read()."]);
+  await page.keyboard.press("Space");
+  await expect(answered).toHaveAttribute("aria-expanded", "false");
 });
 
 test("a volume change keeps the view of an earlier run; the next run shows everything with the Low confidence chip", async ({ page }) => {

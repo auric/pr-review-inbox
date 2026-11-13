@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The review result now has a line such as "2 questions answered by the check". Open it to read each question that the check answered and its answer. These questions are not posted.
 - The server uses hono 4.13.16, which fixes a CSRF check gap.
 - Reviews ask fewer questions. Claude now looks for the answer in the code, the tests, and the task text first. The check step also checks each question of the review: an answered question drops, a question whose answer shows a defect becomes a finding, and only a question that the author must answer stays.
 - When a review profile has an MCP tool that reads your issue tracker, the review now reads the acceptance criteria of the linked tasks with it, read only. Settings, Review quality now shows per profile how many questions the reviews asked, answered, turned into findings, and kept.
