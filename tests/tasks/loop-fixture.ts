@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
+import type { SESSION_GATES } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
@@ -174,8 +175,8 @@ export type Setup = {
   remote?: () => Promise<void>;
   // Settings > Tasks run limits in config.json.
   runLimits?: Partial<RunLimits>;
-  // part-session.md section 2.2: the gates of Gate B37 for the runner and the loop. Absent: SESSION_GATES (all off).
-  sessionGates?: { resume: boolean; live: boolean };
+  // part-session.md section 2.2: the gates of Gate B37 for the runner and the loop. Absent: SESSION_GATES.
+  sessionGates?: typeof SESSION_GATES;
 };
 
 // part-session.md section 9.7, invariant 8: the parts of a database that hold two or more open step rows.

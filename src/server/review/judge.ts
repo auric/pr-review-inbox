@@ -266,7 +266,7 @@ export type Found = {
 
 // Validates the finder result of a review run. servers: the MCP servers of the spec. gaps: the servers and skills left out of the spec.
 // rereview: the earlier findings of a re-review at their current lines. asked: the threads of context/questions.md.
-// rules: the project instruction files of the run. An Ending: the finder failed.
+// rules: the project instruction files of the run. addedOnly: validate.ts ValidateInput.addedOnly. An Ending: the finder failed.
 export async function judge(
   o: RunOutcome,
   ws: Workspace,
@@ -276,6 +276,7 @@ export async function judge(
   rereview: { carry: Carry; items: EarlierItem[] } | null,
   asked: AskedThread[],
   rules: readonly RuleSource[] = [],
+  addedOnly = false,
 ): Promise<Ending | Found> {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
@@ -287,7 +288,7 @@ export async function judge(
   const agents = o.events.filter((e) => e.tool === "Agent" && e.agent !== null && e.status === "ok").map((e) => e.agent as string);
   const causes = parsed.data.findings.flatMap((f) => (f.cause ? [{ ...f, ...f.cause }] : []));
   const blobs = await readBlobs(ws, [...parsed.data.findings, ...causes, ...earlierCases(earlier, items).cases.map((c) => c.finding)]);
-  const check = () => validate({ result: parsed.data, diff: ws.diff, ...blobs, agents, explain: profile.explain, rules });
+  const check = () => validate({ result: parsed.data, diff: ws.diff, ...blobs, agents, explain: profile.explain, rules, addedOnly });
   let v = check();
   if (v.dropped.some((d) => d.reason === "file" || d.reason === "match")) {
     await blobs.loadChanged();

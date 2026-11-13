@@ -501,6 +501,27 @@ describe("changed lines, causes, and rules", () => {
     expect(own.findings[0]?.cause).toEqual({ ...added, line: 14, anchorText: "const a13 = 13;" });
   });
 
+  test("AC-B333: addedOnly keeps a finding only when each line of its anchor range is an added line", () => {
+    const list = [
+      F({ ...added, lineEnd: 11, anchorText: "const a10 = 100; const a10b = 101;" }),
+      F({ ...added, line: 9, lineEnd: 10, anchorText: "const a9 = 9; const a10 = 100;" }),
+      F({ ...ctx, cause: added }),
+      F({ side: "old", line: 10, anchorText: "const a10 = 10;" }),
+      F({ path: "src/tie.ts", line: 2, anchorText: "dup();" }),
+      F(added),
+    ];
+    // Control: without the flag, the mixed range, the cause, and the removed line stay.
+    expect(drops(run(list))).toEqual([]);
+    const r = run(list, { addedOnly: true });
+    expect(drops(r)).toEqual(["unchanged", "unchanged", "unchanged"]);
+    expect(r.kept).toEqual([0, null, null, null, 1, 2]);
+    expect(r.findings.map((f) => [f.anchor.path, f.anchor.line, f.anchor.lineEnd])).toEqual([
+      ["src/a.ts", 10, 11],
+      ["src/tie.ts", 2, 2],
+      ["src/a.ts", 10, 10],
+    ]);
+  });
+
   test("AC-R8: a rule quote must be in the instructions; a quote from another scope keeps the finding as core; whitespace collapses", () => {
     const rules = [
       { scope: null, text: "## Root\n\nLog   no\ntokens." },

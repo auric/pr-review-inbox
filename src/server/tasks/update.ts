@@ -16,6 +16,7 @@ import { outsideRepo, type PathProblem, sparseHidden } from "./implement";
 import { sourceOf, type TaskRepoRow, type UpdateRepo } from "./repos";
 import {
   addedFolders,
+  commitIndex,
   deepestFirst,
   gitLinkOk,
   headOf,
@@ -26,6 +27,7 @@ import {
   matchEol,
   noneChanges,
   type RepoTree,
+  refusePaused,
   remoteBranches,
   resetWorktree,
   status,
@@ -264,11 +266,13 @@ export async function pointerFor(
   );
 }
 
-// Commits the gitlink of path at commit in the parent worktree, unless it is already there (spec.md section 6.18.3, Pointer).
+// Commits the gitlink of path at commit in the parent worktree, unless it is already there (spec.md section 6.18.3, Pointer). Both
+// callers commit after the update of the parent ends, so the commit has one parent.
 export async function commitPointer(wt: Worktree, path: string, commit: string, message: string, who: { name: string; email: string }) {
   if ((await gitlinkAt(wt, "HEAD", path)) === commit) return false;
+  refusePaused(wt);
   await setGitlink(wt, path, commit);
-  await wtGit(wt, ["commit", "-q", "--no-verify", "-F", "-"], { stdin: message, extra: ids(who) });
+  await commitIndex(wt, message, who);
   return true;
 }
 

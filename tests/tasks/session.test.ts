@@ -24,7 +24,7 @@ for (const m of ["tasks/loop", "tasks/implement", "tasks/tasks", "review/jobs", 
 
 afterEach(cleanupAll);
 
-const GATES_ON = { resume: true, live: false };
+const GATES_ON = { resume: true, live: true, resolve: false };
 const detailOf = (s: { steps: () => Step[] }, id: number) => JSON.parse((s.steps().find((x) => x.id === id) as Step).detail_json);
 // A fixture with no line: the CLI sends no init and no tool event, as a resume that finds no conversation.
 const emptyFixture = (root: string) => {
@@ -106,6 +106,9 @@ describe("the build run (part-session.md sections 2.3, 2.4, and 2.6)", () => {
       await s.build();
       expect(s.part().state).toBe("self_reviewed");
       const call = s.runCalls()[0] as Call;
+      // claude.ts SESSION_GATES: live input on, resume off.
+      expect(call.argv).toContain("--input-format");
+      expect(call.argv).not.toContain("--resume");
       expect(call.stdin).toStartWith(
         "You build part 1 of an approved plan in ./repo. You can change files only in ./repo. You post nothing. Git is denied. The app commits after its checks, and the user pushes. You cannot run commands.",
       );

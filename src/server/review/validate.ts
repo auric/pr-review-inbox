@@ -49,6 +49,8 @@ export type ValidateInput = {
   explain?: boolean;
   // The project instructions of the run. Absent: none, so every rule finding drops.
   rules?: readonly RuleSource[];
+  // The critic (part-session.md section 2.7): a finding stays only when each line of its anchor range is an added line.
+  addedOnly?: boolean;
 };
 
 export const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -177,6 +179,12 @@ export function anchorer(input: Pick<ValidateInput, "diff" | "newFiles" | "oldFi
     for (let k = a.line; k <= a.lineEnd; k++) if (lines?.get(k) === kind) return true;
     return false;
   };
+  // Each line of the anchor range is an added line of side new.
+  const added = (a: Anchor, side: Side): boolean => {
+    const lines = side === "new" ? (byNew.get(a.path) ?? byOld.get(a.path))?.newLines : undefined;
+    for (let k = a.line; k <= a.lineEnd; k++) if (lines?.get(k) !== "add") return false;
+    return true;
+  };
 
   const anchor = (f: Placed): Anchor | DropReason => {
     const p = repoPath(f.path);
@@ -231,7 +239,7 @@ export function anchorer(input: Pick<ValidateInput, "diff" | "newFiles" | "oldFi
     }
     return hit && { ...f, path: hit.path, side: "new", line: hit.s, lineEnd: hit.e === hit.s ? null : hit.e };
   };
-  return { anchor, changed, relocate };
+  return { anchor, changed, added, relocate };
 }
 
 // The file of an anchored line: the new path on side new, the base path on side old.
@@ -253,7 +261,7 @@ function ruleCheck(sources: readonly RuleSource[]) {
 export function validate(input: ValidateInput): ValidatedResult & { kept: (number | null)[] } {
   const { findings, ...rest } = input.result;
   if (input.explain) return { ...rest, findings: [], dropped: [], kept: findings.map(() => null) };
-  const { anchor, changed, relocate } = anchorer(input);
+  const { anchor, changed, added, relocate } = anchorer(input);
   const holds = ruleCheck(input.rules ?? []);
   const agents = new Set(input.agents);
   const out: ValidatedResult & { kept: (number | null)[] } = { ...rest, findings: [], dropped: [], kept: [] };
@@ -275,6 +283,10 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     }
     if (typeof a === "string") {
       drop(f, a);
+      continue;
+    }
+    if (input.addedOnly && !added(a, f.side)) {
+      drop(f, "unchanged");
       continue;
     }
     // spec.md section 1.7 steps 2 to 4: a finding is in the change by its anchor, else by its cause.

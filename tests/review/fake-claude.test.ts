@@ -20,10 +20,11 @@ import {
   rereviewJsonSchema,
   rereviewResult,
   reviewJsonSchema,
+  reviewResult,
   verifyJsonSchema,
   verifyResult,
 } from "../../src/shared/review";
-import type { FakeScenario } from "../support/fake-claude";
+import { CRITIC_ARGS, callKey, type FakeScenario } from "../support/fake-claude";
 import { claudeStream, REVIEW_RESULT } from "../support/review-fixture";
 
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
@@ -58,7 +59,7 @@ const STDIN = [
 
 let n = 0;
 // Runs the fake CLI once. Returns the init tools and the structured_output of the result.
-async function run(schema: Record<string, unknown>, tools: string, extra: Partial<FakeScenario> = {}, exit = 0) {
+async function run(schema: Record<string, unknown>, tools: string, extra: Partial<FakeScenario> = {}, exit = 0, more: string[] = []) {
   const scenario = join(dir, `scenario-${n++}.json`);
   writeFileSync(
     scenario,
@@ -70,7 +71,7 @@ async function run(schema: Record<string, unknown>, tools: string, extra: Partia
       ...extra,
     } satisfies FakeScenario),
   );
-  const p = Bun.spawn([process.execPath, FAKE, scenario, "-p", "--json-schema", JSON.stringify(schema), "--tools", tools], {
+  const p = Bun.spawn([process.execPath, FAKE, scenario, "-p", "--json-schema", JSON.stringify(schema), "--tools", tools, ...more], {
     cwd: dir,
     stdin: new Blob([STDIN]),
     stdout: "pipe",
@@ -220,6 +221,18 @@ describe("fake CLI", () => {
     expect((await run(discussJsonSchema(), "Read", { discuss })).output).toEqual(discuss);
     const explain = { ...e.output, summary: "Scripted." };
     expect((await run(explainJsonSchema(), "Read", { explain })).output).toEqual(explain);
+  });
+
+  test("AC-B333: a review schema with model haiku and 30 turns is a critic run with no findings, or the scenario critic result", async () => {
+    const flags = ["--model", CRITIC_ARGS.model, "--max-turns", CRITIC_ARGS.maxTurns];
+    const argv = ["-p", "--json-schema", JSON.stringify(reviewJsonSchema())];
+    expect(callKey([...argv, ...flags], "")).toBe("critic");
+    expect(callKey([...argv, "--model", CRITIC_ARGS.model], "")).toBe("review");
+    const r = await run(reviewJsonSchema(), "Read", {}, 0, flags);
+    expect(reviewResult.parse(r.output).findings).toEqual([]);
+    const critic = { ...REVIEW_RESULT, summary: "Critic." };
+    expect((await run(reviewJsonSchema(), "Read", { critic }, 0, flags)).output).toEqual(critic);
+    expect((await run(reviewJsonSchema(), "Read", { critic })).output).toEqual(REVIEW_RESULT);
   });
 
   test("bySchema replaces scenario fields for one schema only, so a verify phase can fail while the finder run passes", async () => {

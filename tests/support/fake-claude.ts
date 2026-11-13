@@ -80,6 +80,8 @@ export type FakeScenario = {
   // The structured output of the own review of a task part only: a review run whose stdin says "- Pull request: none yet.". Absent:
   // review. The demo keeps the fixture result for its PR reviews this way.
   taskReview?: unknown;
+  // part-session.md section 2.7: the structured output of a critic run (call key critic). Absent: a result with no findings.
+  critic?: unknown;
   // Fields for the Nth run of one call key (callKey), after bySchema. The last entry repeats. The record file counts the earlier runs.
   seq?: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq">>[]>;
   // Fields for a run whose ./context Markdown files hold the text when, after seq. The first entry that matches wins. Its seq counts only
@@ -107,11 +109,17 @@ export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
                 ? "review"
                 : null;
 
-// The key of a run for seq: the schema kind, and for an implement run "implement:<mode>" from the "- Mode:" line of its stdin.
+// AC-B333: a critic run is a review run with model haiku and 30 turns. An own review with that model and turn cap also reads as critic.
+export const CRITIC_ARGS = { model: "haiku", maxTurns: "30" };
+
+// The key of a run for seq: the schema kind, "critic" for a critic run, and for an implement run "implement:<mode>" from the "- Mode:"
+// line of its stdin.
 export function callKey(argv: string[], stdin: string): string | null {
   const at = argv.indexOf("--json-schema");
   if (!argv.includes("-p") || at < 0) return null;
   const kind = schemaKind(JSON.parse(argv[at + 1] ?? "null")?.properties ?? {});
+  const flag = (name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+  if (kind === "review" && flag("--model") === CRITIC_ARGS.model && flag("--max-turns") === CRITIC_ARGS.maxTurns) return "critic";
   if (kind !== "implement") return kind;
   return `implement:${/^- Mode: (\w+)$/m.exec(stdin)?.[1] ?? "?"}`;
 }
@@ -315,6 +323,16 @@ export const echoImplement = () => ({
   coverage: NO_COVERAGE,
 });
 
+// A critic result with no findings.
+export const echoCritic = () => ({
+  summary: "Echo: no critic points.",
+  risks: [],
+  questions: [],
+  findings: [],
+  answered: [],
+  coverage: NO_COVERAGE,
+});
+
 // A session answer (docs/plans/session-consult.md part C): one reject per item tag with status open in the stdin.
 // fix: the schema asks for fixes too (part D). A reject needs no fix, so the fix has no note and no edit.
 export function echoConsult(stdin: string, fix = false) {
@@ -410,18 +428,17 @@ async function main() {
     process.exitCode = s.authExit ?? 0;
     return;
   }
-  if (!run || !s.fixture) {
-    console.error(`fake-claude: no answer for ${args.join(" ")}`);
-    process.exitCode = 2;
-    return;
-  }
+  // An open stdin read of live input keeps the process alive.
+  const fail = (code: number, text: string) => {
+    console.error(text);
+    if (live) process.exit(code);
+    process.exitCode = code;
+  };
+  if (!run || !s.fixture) return fail(2, `fake-claude: no answer for ${args.join(" ")}`);
   // docs/plans/session-consult.md section 1: a resume without --fork-session attaches to a running session or exits with code 1.
   const resume = args.includes("--resume") ? args[args.indexOf("--resume") + 1] : undefined;
-  if (resume !== undefined && (!args.includes("--fork-session") || !existsSync(resume))) {
-    console.error(args.includes("--fork-session") ? `No conversation found at ${resume}` : "fake-claude: --resume needs --fork-session");
-    process.exitCode = 1;
-    return;
-  }
+  if (resume !== undefined && (!args.includes("--fork-session") || !existsSync(resume)))
+    return fail(1, args.includes("--fork-session") ? `No conversation found at ${resume}` : "fake-claude: --resume needs --fork-session");
 
   // Gate B4: 2.1.295 writes these per-cwd folders also with --no-session-persistence.
   const name = process.cwd().replace(/[^a-zA-Z0-9]/g, "-");
@@ -606,6 +623,7 @@ async function main() {
     if (kind === "interview") return s.interview ?? echoInterview(stdin);
     if (kind === "spec") return s.spec ?? echoSpec();
     if (kind === "implement") return s.implement ?? echoImplement();
+    if (key === "critic") return s.critic ?? echoCritic();
     if (kind === "review") return s.taskReview !== undefined && stdin.includes("- Pull request: none yet.") ? s.taskReview : s.review;
     if (props.replies !== undefined) return s.replies ?? echoReplies(stdin, { notes: s.notes, cites: s.cites });
     if (props.earlier !== undefined) return s.rereview ?? echoRereview(stdin, fixture);
@@ -680,10 +698,10 @@ async function main() {
     setInterval(() => {}, 1000);
     return;
   }
-  // Live input: one more result for each later message, until stdin closes.
+  // Live input: one more result for each later message, until stdin closes. A stream with no result ended before a result, as a crash.
   const last = lines.findLast((l) => JSON.parse(l).type === "result");
   const until = Date.now() + LIVE_WAIT_MS;
-  while ((!eof || inbox.length) && Date.now() < until) {
+  while (last !== undefined && (!eof || inbox.length) && Date.now() < until) {
     const text = inbox.shift();
     if (text !== undefined && last) await out(placed(last));
     else await Bun.sleep(10);

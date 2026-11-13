@@ -119,9 +119,14 @@ export type ImplementSpec = {
   live?: boolean;
 };
 
-// Gate B37 (part-session.md section 4) has not run. resume needs U97, U98, and U103. live needs U104. While a value is false, jobs.ts
-// passes no resume file or no live input, so each run starts a fresh session.
-export const SESSION_GATES: Readonly<{ resume: boolean; live: boolean }> = { resume: false, live: false };
+// Gate B37 (part-session.md section 4) passed with CLI 2.1.323, so live (U104) is on. resume (U97, U98, U103) stays off. After a cut,
+// a reset, or a restart, a resumed run would fork a transcript without the last run. No continue.md covers that run (section 2.2, Cut
+// runs). resolve needs the resolve runs of U99. While a value is false, jobs.ts passes no resume file or no live input.
+export const SESSION_GATES: Readonly<{ resume: boolean; live: boolean; resolve: boolean }> = {
+  resume: false,
+  live: true,
+  resolve: false,
+};
 
 // Gate B17 (integration-check.md U72): with these tools, --restricted keeps Edit and Write inside the cwd. No Bash, no Agent.
 export const IMPLEMENT_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"];

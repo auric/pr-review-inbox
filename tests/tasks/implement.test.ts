@@ -24,7 +24,7 @@ import { gitAuth } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import { DEFAULT_PROFILE, DOCS_RULE, EXPLORER_RULE, profileOf } from "../../src/server/review/catalog";
-import { IMPLEMENT_TOOLS, implementArgs, type RunOutcome } from "../../src/server/review/claude";
+import { IMPLEMENT_TOOLS, implementArgs, type RunOutcome, type SESSION_GATES } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
 import { createReviewJobs, IMPLEMENT_MCP_LINES, type ImplementRunStart } from "../../src/server/review/jobs";
@@ -50,8 +50,9 @@ import {
   undoStep,
 } from "../../src/server/tasks/implement";
 import { pushTaskBranch } from "../../src/server/tasks/push";
-import { recoverTasks, taskRow } from "../../src/server/tasks/tasks";
+import { partSession, recoverTasks, taskRow } from "../../src/server/tasks/tasks";
 import {
+  commitStep,
   headOf,
   ignoredSnapshot,
   openWorktree,
@@ -62,9 +63,9 @@ import {
   writeSetupMark,
   wtGit,
 } from "../../src/server/tasks/worktree";
-import { implementJsonSchema, type ShellMode, type TaskBlocked } from "../../src/shared/task";
+import { implementJsonSchema, type SessionPurpose, type ShellMode, type TaskBlocked } from "../../src/shared/task";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
-import { fakeRunner, stubListTools } from "../support/review-fixture";
+import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
 import { taskCache, taskRemote } from "./fixture";
 
 for (const m of ["tasks/implement", "tasks/worktree", "review/claude", "review/jobs", "review/instructions"])
@@ -95,7 +96,7 @@ afterEach(async () => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 3 });
 });
 
-async function setup(o: { claudeConfigDir?: string; sessionGates?: { resume: boolean; live: boolean } } = {}) {
+async function setup(o: { claudeConfigDir?: string; sessionGates?: typeof SESSION_GATES } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb3-impl-")));
   dirs.push(root);
   const r = await taskRemote(root);
@@ -1131,6 +1132,40 @@ describe("the prompt lines of the shell state", () => {
     expect(l).not.toContain("Run the failing check first to see the failure. Run it again after your change.");
     expect(lines("implement", null).join("\n")).not.toContain("Set question and give the reason.");
   });
+
+  test("AC-B335: a fix run with points gets the 6.23.8 lines in a new and a resumed session; other runs do not", () => {
+    const FIRST = "./context/failure.md holds review points from a second Claude run. Each point is a claim to check, not an order.";
+    const LAST =
+      "When ./context/answers.md says to fix a point anyway, fix it and do not push back again. When you cannot fix it, set question.";
+    const of = (mode: "implement" | "fix" | "instruct" | "resolve", points: boolean, resume: number | null) =>
+      implementPrompt(
+        mode,
+        "specs/K-1/",
+        false,
+        false,
+        "x",
+        "",
+        { skills: [], mcp: [] },
+        null,
+        {
+          ord: 1,
+          tasksFile: "./repo/specs/K-1/plan.md",
+          resume,
+          purpose: "review",
+        },
+        points,
+      ).split("\n");
+    for (const resume of [null, 2]) {
+      const l = of("fix", true, resume);
+      expect(l.indexOf(LAST) - l.indexOf(FIRST)).toBe(11);
+      expect(l).toContain("Push back when the code already handles the point, or when the point is wrong.");
+      expect(l).toContain("Put the proof in cite: path:line, spec/<file>.md#<heading>, or answers.md#<round>.<question>.");
+      // Red checks: no points.
+      expect(of("fix", false, resume)).not.toContain(FIRST);
+      for (const mode of ["implement", "instruct", "resolve"] as const) expect(of(mode, true, resume)).not.toContain(FIRST);
+    }
+    expect(of("fix", true, 2)).toContain("# Run 2: Fix the review points");
+  });
 });
 
 // spec.md section 6.21: a step with the Bash tool. D7 (the commands in the step detail), D8 (the path check), and D3 (the runner ends
@@ -1662,7 +1697,7 @@ describe("part sessions in the jobs", () => {
   test(
     "AC-B278: implementSteps passes keep and gives after() the kept file; with the gates off, a resume file and live input start a fresh run",
     async () => {
-      const s = await setup();
+      const s = await setup({ sessionGates: { resume: false, live: false, resolve: false } });
       const keep = join(s.root, "sessions");
       const o = await sessionRun(s, { keep, resume: oldFile(s), live: true }).done;
       const argv = s.runCalls().at(-1)?.argv ?? [];
@@ -1684,7 +1719,7 @@ describe("part sessions in the jobs", () => {
   test(
     "AC-B278: with the gates on, the run forks the resume file with live input",
     async () => {
-      const s = await setup({ sessionGates: { resume: true, live: true } });
+      const s = await setup({ sessionGates: { resume: true, live: true, resolve: false } });
       const keep = join(s.root, "sessions");
       const old = oldFile(s);
       const o = await sessionRun(s, { keep, resume: old, live: true }).done;
@@ -1720,6 +1755,185 @@ describe("part sessions in the jobs", () => {
       expect(ended2).toBe(false);
       expect(s.review.cancelTask(s.db, s.task)).toBe(true);
       expect((await two.done)?.status).toBe("cancelled");
+    },
+    SLOW,
+  );
+
+  test(
+    "part-session.md section 2.9: sendPart writes a user message to the live run of its part only",
+    async () => {
+      const record = (s: S) => readRecords<{ childPid?: number; input?: string }>(join(s.root, "calls.jsonl"));
+      const s = await setup({ sessionGates: { resume: false, live: true, resolve: false } });
+      s.scenario({ hang: true });
+      const run = sessionRun(s, { keep: join(s.root, "sessions"), live: true });
+      expect(await waitUntil(() => record(s).some((c) => c.childPid))).toBe(true);
+      expect(s.review.sendPart(s.db, s.task, s.part + 1, "Another part.")).toBe(false);
+      expect(s.review.sendPart(s.db, s.task, s.part, "Use the new name.")).toBe(true);
+      expect(await waitUntil(() => record(s).some((c) => c.input))).toBe(true);
+      expect(record(s).flatMap((c) => (c.input ? [c.input] : []))).toEqual(["Use the new name."]);
+      expect(s.review.cancelPart(s.db, s.task, s.part)).toBe(true);
+      expect((await run.done)?.status).toBe("cancelled");
+      expect(s.review.sendPart(s.db, s.task, s.part, "Too late.")).toBe(false);
+      // The live gate off: the run has no live input.
+      const off = await setup({ sessionGates: { resume: false, live: false, resolve: false } });
+      off.scenario({ hang: true });
+      const plain = sessionRun(off, { keep: join(off.root, "sessions"), live: true });
+      expect(await waitUntil(() => record(off).some((c) => c.childPid))).toBe(true);
+      expect(off.review.sendPart(off.db, off.task, off.part, "Use the new name.")).toBe(false);
+      expect(off.runCalls().at(-1)?.argv).not.toContain("--input-format");
+      off.review.cancelPart(off.db, off.task, off.part);
+      await plain.done;
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B333: a critic run has no rl-reviewer and no verify phase, and keeps only findings on added lines",
+    async () => {
+      const s = await setup();
+      writeFileSync(join(s.wt.repo, "src", "app.ts"), "src/app.ts\nconst added = 1;\nconst more = 2;\n");
+      const head = (await commitStep(s.wt, "K-1: Add lines", { name: "Ada Example", email: "ada@example.invalid" }, [])) as string;
+      const finding = (line: number, lineEnd: number, anchorText: string) => ({
+        path: "src/app.ts",
+        side: "new",
+        line,
+        lineEnd,
+        anchorText,
+        severity: "major",
+        category: "Correctness",
+        body: `Lines ${line} to ${lineEnd}.`,
+        evidence: "src/app.ts",
+        evidenceStatus: "code",
+        confidence: "high",
+        agent: null,
+        title: `Lines ${line} to ${lineEnd}`,
+        trigger: "Call it twice.",
+        cause: null,
+        rule: "",
+        module: "core",
+      });
+      const critic = {
+        summary: "Two points.",
+        risks: [],
+        questions: [],
+        findings: [finding(2, 3, "const added = 1; const more = 2;"), finding(1, 2, "src/app.ts const added = 1;")],
+        answered: [],
+        coverage: { read: ["repo/src/app.ts"], skipped: [], unavailable: [], notChecked: [] },
+      };
+      s.scenario({ fixture: claudeStream(s.root, "critic", "claude/b6-hostile-repo.jsonl"), critic });
+      const base = profileOf(s.settings.profiles(), DEFAULT_PROFILE);
+      // The critic profile of AC-B333, with rl-reviewer and the verify phase on, so only the critic flag turns them off.
+      const profile = {
+        ...base,
+        model: "haiku",
+        maxTurns: 30,
+        reviewer: { ...base.reviewer, mode: "always" as const },
+        verifier: { ...base.verifier, mode: "on" as const },
+      };
+      const review = async (critic: boolean) => {
+        const before = s.runCalls().length;
+        let run = 0;
+        const r = s.review.taskRun(
+          s.db,
+          {
+            task: s.task,
+            kind: "review",
+            key: `task:${s.task}:part:${s.part}:critic:${head}:${critic ? 1 : 2}`,
+            profile,
+            project: "PROJ",
+            repo: "repo",
+            base: s.base,
+            head,
+            taskKey: "K-1",
+            files: [
+              { name: "task.md", text: "## K-1\n\nDo the thing.\n" },
+              { name: "pr.md", text: "# K-1: Thing\n" },
+            ],
+            attachments: [],
+            ...(critic && { critic: true as const }),
+            started: (_d, id) => {
+              run = id;
+            },
+            finish: () => undefined,
+          },
+          true,
+        );
+        if (r.status !== 202) throw new Error("The run did not start.");
+        await r.done;
+        const items = s.db.query("SELECT kind, line, line_end FROM review_item WHERE run = $run ORDER BY id").all({ run }) as {
+          kind: string;
+          line: number;
+          line_end: number;
+        }[];
+        return { calls: s.runCalls().slice(before), items };
+      };
+      const c = await review(true);
+      expect(c.calls.length).toBe(1);
+      expect([flag(c.calls[0]?.argv ?? [], "--model"), flag(c.calls[0]?.argv ?? [], "--max-turns")]).toEqual(["haiku", "30"]);
+      expect(Object.keys(c.calls[0]?.agents ?? {})).not.toContain("rl-reviewer");
+      expect(c.items).toEqual([{ kind: "finding", line: 2, line_end: 3 }]);
+      // Control: the same profile without the critic flag delegates, verifies, and keeps the mixed range.
+      const r = await review(false);
+      expect(r.calls.length).toBe(2);
+      expect(Object.keys(r.calls[0]?.agents ?? {})).toContain("rl-reviewer");
+      expect(r.items.map((x) => [x.kind, x.line])).toEqual([
+        ["finding", 2],
+        ["finding", 1],
+      ]);
+    },
+    SLOW,
+  );
+});
+
+// docs/plans/review-v2/ps4-plan.md WP-1: the step side of a part session.
+describe("PS4 session runs in startStep", () => {
+  const USAGE_FIXTURE = resolve(import.meta.dir, "../../fixtures/claude-synthetic/usage-limit.jsonl");
+  const sessionOf = (root: string, purpose: SessionPurpose): NonNullable<StepInput["session"]> => ({
+    keep: join(root, "sessions", "part-1"),
+    resume: null,
+    why: "No transcript is kept.",
+    purpose,
+    heads: [],
+    tasksFile: "./repo/specs/K-1/plan.md",
+    run: 1,
+    turns: 50,
+  });
+
+  test(
+    "AC-B334: the step outcome of a usage-limited run holds the resetsAt of the run",
+    async () => {
+      const s = await setup();
+      s.scenario({ fixture: USAGE_FIXTURE, exitCode: 1 });
+      const limited = (await s.step()).outcome;
+      expect([limited?.kind, limited?.resetsAt]).toEqual(["usage_limit", 1791678600]);
+      s.scenario();
+      const ok = (await s.step({ attempt: 2 })).outcome;
+      expect([ok?.status, ok?.resetsAt]).toEqual(["completed", null]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B336: an instruct session run keeps its transcript; an instruct run with no session drops the stored transcript",
+    async () => {
+      const s = await setup({ sessionGates: { resume: false, live: true, resolve: false } });
+      const live = () => s.runCalls().at(-1)?.argv.includes("--input-format");
+      await s.step({ session: sessionOf(s.root, "build") });
+      expect(live()).toBe(true);
+      const built = partSession(s.db, s.part);
+      expect(existsSync(built?.file as string)).toBe(true);
+      await s.step({ mode: "instruct", item: "instruct", instructions: "Rename it.", session: sessionOf(s.root, "message") });
+      expect(live()).toBe(true);
+      const told = partSession(s.db, s.part);
+      expect(told?.runs).toBe(2);
+      expect(told?.sha256).not.toBe(built?.sha256);
+      expect(readFileSync(told?.file as string, "utf8")).toContain("Rename it.");
+      // part-session.md section 2.9: a resolve run takes no message.
+      await s.step({ mode: "resolve", item: "resolve", session: sessionOf(s.root, "resolve") });
+      expect(live()).toBe(false);
+      await s.step({ mode: "instruct", item: "instruct-2", instructions: "Rename it again." });
+      expect(live()).toBe(false);
+      expect(partSession(s.db, s.part)).toBeNull();
     },
     SLOW,
   );

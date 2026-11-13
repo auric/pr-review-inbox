@@ -398,6 +398,9 @@ export type TaskReviewStart = {
   files: ContextFile[];
   // The included files of the task for context/attachments/ (spec.md section 6.17).
   attachments: AttachmentFile[];
+  // part-session.md section 2.7: a critic run. No rl-reviewer, no verify phase, and only findings on added lines. The caller passes the
+  // critic profile.
+  critic?: true;
   started: (db: Database, run: number) => void;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
 };
@@ -1633,9 +1636,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (skills.lost) return skills.lost;
     const { folders, always } = skills;
     const langs = profile.languageChecks ? languagesOf(changed) : [];
-    const delegate = delegation(profile, changed);
+    const delegate = t.critic ? null : delegation(profile, changed);
     log(
-      `Task run ${j.id}: own review of task ${t.task}, ${t.base.slice(0, 12)}..${t.head.slice(0, 12)}, ${changed.length} changed files, rl-reviewer ${delegate ? `on (${delegate})` : "off"}.`,
+      `Task run ${j.id}: ${t.critic ? "critic" : "own review"} of task ${t.task}, ${t.base.slice(0, 12)}..${t.head.slice(0, 12)}, ${changed.length} changed files, rl-reviewer ${delegate ? `on (${delegate})` : "off"}.`,
     );
     const context: ReviewContext = {
       taskFile: true,
@@ -1703,20 +1706,23 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       e.result?.summary.coverage.notChecked.push(tools.unmarked);
       return { ...e, raw: `${tools.unmarked}\n\n${e.raw}` };
     };
-    const found = await judge(o, ws, profile, servers, [...tools.gaps, ...skills.gaps], null, [], instructions.sources);
+    const found = await judge(o, ws, profile, servers, [...tools.gaps, ...skills.gaps], null, [], instructions.sources, t.critic);
     if (!("candidates" in found)) return noted(found);
-    const v = await verifyPhase(j, ws, o, found, {
-      profile,
-      context,
-      input,
-      rereview: false,
-      folders,
-      always,
-      task: true,
-      used: tools.used,
-      instructions,
-      mcpServers,
-    });
+    // settle reads no verdict as unchecked, as with the verifier off.
+    const v = t.critic
+      ? { check: null, verify: false, written: 0 }
+      : await verifyPhase(j, ws, o, found, {
+          profile,
+          context,
+          input,
+          rereview: false,
+          folders,
+          always,
+          task: true,
+          used: tools.used,
+          instructions,
+          mcpServers,
+        });
     if ("status" in v) return v;
     return noted(
       settle(found, {
@@ -2491,6 +2497,21 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // own reviews (implement.ts startStep, loop.ts reviewRun).
     cancelPart(db: Database, task: number, part: number): boolean {
       return cancelWhere((j) => j.pr === null && j.db === db && j.t.task === task && j.key.startsWith(`task:${task}:part:${part}:`));
+    },
+
+    // part-session.md section 2.9: writes text as a user message to the stdin of the running implement run of one part. false: the live
+    // gate is off, or no run of the part takes live input now.
+    sendPart(db: Database, task: number, part: number, text: string): boolean {
+      if (!gates.live) return false;
+      return [...active, ...extras].some(
+        (j) =>
+          j.pr === null &&
+          j.db === db &&
+          j.t.task === task &&
+          j.t.kind === "implement" &&
+          j.key.startsWith(`task:${task}:part:${part}:`) &&
+          j.runner.send(text),
+      );
     },
 
     // The conflict of a full pool, or null while a slot is free.

@@ -699,10 +699,26 @@ export async function matchEol(wt: Worktree, added: readonly string[], only?: re
 // over GIT_AUTHOR_NAME (builtin/commit.c, author_message).
 export const SEQUENCER = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"];
 
+// Throws when the git folder of wt holds a file of SEQUENCER. The update of a part makes its own merge commits (update.ts), so a paused
+// operation before a one-parent commit of the app is not the app's.
+export function refusePaused(wt: Pick<Worktree, "admin">) {
+  const paused = SEQUENCER.filter((f) => lstatSync(join(wt.admin, f), { throwIfNoEntry: false }));
+  if (paused.length) throw new WorkspaceError(`The app did not commit: the worktree has a paused git operation (${paused.join(", ")}).`);
+}
+
+// `git commit -F -` of the index with the isolated git config, the empty core.hooksPath, and the user's name and email, then oneParent.
+// --no-verify also skips the hooks that core.hooksPath would name. Call refusePaused first.
+export async function commitIndex(wt: Worktree, message: string, who: { name: string; email: string }): Promise<string> {
+  const ids = { GIT_AUTHOR_NAME: who.name, GIT_AUTHOR_EMAIL: who.email, GIT_COMMITTER_NAME: who.name, GIT_COMMITTER_EMAIL: who.email };
+  const before = await headOf(wt);
+  await wtGit(wt, ["commit", "-q", "--no-verify", "-F", "-"], { stdin: message, extra: ids });
+  const made = await headOf(wt);
+  await oneParent(wt, before, made);
+  return made;
+}
+
 // spec.md section 6.7: the line ends first (matchEol), then `git add -u` (tracked changes and deletes), `git add` of add (the new files
-// that the commit takes), then `git commit -F -` with the isolated git config, the empty core.hooksPath, and the user's name and email.
-// --no-verify also skips the hooks that core.hooksPath would name. null: nothing to commit. eol false: the line ends stay, for the repair.
-// The update of a part makes its own merge commits (update.ts), so a paused operation here is not the app's.
+// that the commit takes), then commitIndex. null: nothing to commit. eol false: the line ends stay, for the repair.
 export async function commitStep(
   wt: Worktree,
   message: string,
@@ -711,18 +727,12 @@ export async function commitStep(
   eol = true,
 ): Promise<string | null> {
   if (!message.trim()) throw new WorkspaceError("A commit needs a message.");
-  const paused = SEQUENCER.filter((f) => lstatSync(join(wt.admin, f), { throwIfNoEntry: false }));
-  if (paused.length) throw new WorkspaceError(`The app did not commit: the worktree has a paused git operation (${paused.join(", ")}).`);
+  refusePaused(wt);
   if (eol) await matchEol(wt, add);
   await wtGit(wt, ["add", "-u"]);
   if (add.length) await wtGit(wt, ["add", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: `${add.join("\0")}\0` });
   if (!(await wtGit(wt, ["diff", "--cached", "--name-only", "-z"])).length) return null;
-  const ids = { GIT_AUTHOR_NAME: who.name, GIT_AUTHOR_EMAIL: who.email, GIT_COMMITTER_NAME: who.name, GIT_COMMITTER_EMAIL: who.email };
-  const before = await headOf(wt);
-  await wtGit(wt, ["commit", "-q", "--no-verify", "-F", "-"], { stdin: message, extra: ids });
-  const made = await headOf(wt);
-  await oneParent(wt, before, made);
-  return made;
+  return commitIndex(wt, message, who);
 }
 
 // A commit of the app has exactly one parent: before, the HEAD before the commit. Else HEAD goes back to before, the index keeps the

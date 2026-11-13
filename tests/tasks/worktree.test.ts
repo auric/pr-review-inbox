@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, gitEnv } from "../../src/server/review/git";
 import { changedLines } from "../../src/server/tasks/loop";
-import { continueUpdate, mergeInto } from "../../src/server/tasks/update";
+import { commitPointer, continueUpdate, gitlinkAt, mergeInto } from "../../src/server/tasks/update";
 import {
   branchName,
   commitStep,
@@ -444,6 +444,36 @@ describe("the commit and the recovery git calls", () => {
       }
       const made = await commitStep(wt, "K-1 T1.1: Change the app", WHO, []);
       expect((await wtGit(wt, ["show", "-s", "--format=%P", made as string])).trim()).toBe(s.base);
+    },
+    SLOW,
+  );
+
+  test(
+    "a paused git operation stops the pointer commit before the index changes; the pointer commit has one parent",
+    async () => {
+      const s = await setup();
+      const wt = await s.open();
+      const tree = (await wtGit(wt, ["rev-parse", `${s.base}^{tree}`])).trim();
+      const id = ["-c", "user.name=p", "-c", "user.email=p@example.invalid"];
+      const other = (await wtGit(wt, [...id, "commit-tree", tree, "-p", s.base, "-m", "other"])).trim();
+      // A gitlink at lib, as a submodule of the parent has.
+      await wtGit(wt, ["update-index", "--add", "--cacheinfo", `160000,${s.base},lib`]);
+      await wtGit(wt, [...id, "commit", "-q", "--no-verify", "-m", "add lib"]);
+      const before = await headOf(wt);
+      for (const f of SEQUENCER) {
+        const p = join(wt.admin, f);
+        if (f.startsWith("rebase-") || f === "sequencer") mkdirSync(p);
+        else writeFileSync(p, `${other}\n`);
+        await expect(commitPointer(wt, "lib", other, "K-1: point lib", WHO)).rejects.toThrow(`paused git operation (${f})`);
+        expect(await headOf(wt)).toBe(before);
+        expect((await wtGit(wt, ["diff", "--cached", "--name-only"])).trim()).toBe("");
+        rmSync(p, { recursive: true, force: true });
+      }
+      expect(await commitPointer(wt, "lib", other, "K-1: point lib", WHO)).toBe(true);
+      const made = await headOf(wt);
+      expect((await wtGit(wt, ["show", "-s", "--format=%P", made])).trim()).toBe(before);
+      expect(await gitlinkAt(wt, "HEAD", "lib")).toBe(other);
+      expect(await commitPointer(wt, "lib", other, "K-1: point lib", WHO)).toBe(false);
     },
     SLOW,
   );

@@ -552,7 +552,24 @@ const PURPOSE_TITLE: Record<SessionPurpose, string> = {
   points: "Fix the small review points",
   comments: "PR comments",
   ci: "Fix the red build",
+  resolve: "Resolve the conflicts",
 };
+
+// pushback.md section 6.23.8, fix mode: only when failure.md holds review points.
+const POINTS_LINES = [
+  "./context/failure.md holds review points from a second Claude run. Each point is a claim to check, not an order.",
+  "Judge each point before you change code. Read the code at the point, the plan in ./context/spec/, and ./context/answers.md.",
+  "The approved plan and the answers of the user win over a review point.",
+  "Fix a point when the code shows the problem and the fix fits the plan.",
+  "Push back when the code already handles the point, or when the point is wrong.",
+  "Also push back when the plan or an answer decides otherwise, or puts the work in another part.",
+  "Give one entry in points for each point. Set verdict to fixed or pushback.",
+  "For pushback, set why, and give the reason in one or two sentences.",
+  "Put the proof in cite: path:line, spec/<file>.md#<heading>, or answers.md#<round>.<question>.",
+  "Agree with a point only when the code or the plan supports it. Push back only with proof, never to save work.",
+  "The user reads each push-back and decides. A wrong fix costs the user more than a push-back with a clear reason.",
+  "When ./context/answers.md says to fix a point anyway, fix it and do not push back again. When you cannot fix it, set question.",
+];
 
 // spec.md section 6.6, implement agent. Its rl-main has an empty prompt to keep the default system prompt, so the rules go into the stdin.
 // attachments: ./context/attachments/ exists (spec.md section 6.17). instructions: the text of "Tell Claude" (mode instruct, spec.md
@@ -560,7 +577,8 @@ const PURPOSE_TITLE: Record<SessionPurpose, string> = {
 // combined project instructions with their "# Project instructions" heading (spec.md section 6.7). They stand after the rules. lines:
 // the skill lines of the profile (skillLines with context/skills) and the MCP lines. They stand after the rules too. shell: the Bash
 // tool of the step (spec.md section 6.21). null: no Bash. session: a run of a part session (part-session.md section 2.3). A resumed run
-// gets the rules digest instead of the full rules, because compaction can drop the first prompt.
+// gets the rules digest instead of the full rules, because compaction can drop the first prompt. points: failure.md of a fix run holds
+// review points (pushback.md section 6.23.8).
 export function implementPrompt(
   mode: StepMode,
   specDir: string,
@@ -571,6 +589,7 @@ export function implementPrompt(
   lines: { skills: string[]; mcp: string[] } = { skills: [], mcp: [] },
   shell: StepShell | null = null,
   session: SessionPrompt | null = null,
+  points = false,
 ): string {
   const user = [...(project ? ['"Project instructions"'] : []), ...(mode === "instruct" ? ['"Your instructions"'] : [])];
   const plan = `When the plan is wrong, change the plan file under ${specDir} in ./repo, stop, and say why in specChange.`;
@@ -592,6 +611,7 @@ export function implementPrompt(
       "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
       'failure.md marks a command that also failed on the part base with "Also red on the part base". Do not try to fix that command. Fix only the new failures.',
       ...(checks.length ? ["Run the failing check first to see the failure. Run it again after your change."] : []),
+      ...(points ? POINTS_LINES : []),
     ],
     // spec.md section 6.18.2, prompt lines of mode instruct.
     instruct: [
@@ -1020,9 +1040,11 @@ export type StepInput = {
   extra?: boolean;
   // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
   shell?: StepShell;
+  // Mode fix: context/failure.md holds review points, so the prompt gets the lines of pushback.md section 6.23.8.
+  points?: boolean;
   // part-session.md section 2.2: a run of the part session. keep: the folder of the kept transcript. resume: the kept file to fork, null
   // for a fresh session; why: the reason for a fresh session. heads: the HEAD of each worktree at the run start. turns: --max-turns of
-  // a build run (Settings > Tasks "Session run turns"). Absent: no session, as for instruct and resolve.
+  // a build run (Settings > Tasks "Session run turns"). Absent: no session run.
   session?: {
     keep: string;
     resume: string | null;
@@ -1045,7 +1067,8 @@ export type StepInput = {
 // over REFUSED_MAX refused commands, some of them refused by the allowlist; the task did not stop, so the loop builds the requests
 // (spec.md section 6.21, D3). part-session.md sections 2.2 and 9.3.3: cut: the limit or guard of the runner that ended the run. kind: the
 // error kind of a failed run. events: the tool events of the run; 0 for a resume that failed before any tool call. resumed: the run
-// forked a kept transcript. broken: the app could not check the worktree, so implement.ts stopped the task.
+// forked a kept transcript. broken: the app could not check the worktree, so implement.ts stopped the task. resetsAt: the raw value
+// of RunOutcome.resetsAt (stream.ts StreamState.resetsAt); null: none.
 export type StepOutcome = {
   step: number;
   run: number;
@@ -1063,6 +1086,7 @@ export type StepOutcome = {
   events: number;
   resumed: boolean;
   broken: boolean;
+  resetsAt: number | null;
 };
 
 // D7: the Bash commands of a step for its detail, in run order.
@@ -1223,12 +1247,16 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         session
           ? { ord: i.part.ord, tasksFile: session.tasksFile, resume: session.resume ? session.run : null, purpose: session.purpose }
           : null,
+        i.points === true,
       ),
     maxTurns: i.mode === "implement" ? (session?.turns ?? RUN_LIMITS.sessionTurns.def) : STEP_TURNS[i.mode],
     // part-session.md section 2.10: no step time. The process cap stays.
     timeoutMs: RUN_TIME_MAX_MS,
     ...(i.shell && { shell: i.shell }),
-    ...(session && { session: { keep: session.keep, ...(session.resume && { resume: session.resume }) } }),
+    // part-session.md section 2.9: live input for the runs that can take a message. jobs drops it while the live gate is off.
+    ...(session && {
+      session: { keep: session.keep, ...(session.resume && { resume: session.resume }), ...(i.mode !== "resolve" && { live: true }) },
+    }),
     started: (d, run) => {
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());
       if (cut !== null) d.query(STEP_SQL.cut).run({ id: step, cut });
@@ -1331,8 +1359,8 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       // part-session.md section 2.2: a part keeps the transcript of its last run that ended ok. Guard rule 4: after a denied path or a
       // git state change, the next run starts a new session. A cut transcript stays out until Gate B37 verifies U101.
       const transcript = runOut?.kept ?? null;
-      // An instruct run is no session run until PS4, so the kept transcript does not know its changes.
-      if ((session && undone) || i.mode === "instruct") dropSessions(d, { part: i.part.id });
+      // An instruct run with no session changes the work outside the kept transcript.
+      if ((session && undone) || (i.mode === "instruct" && !session)) dropSessions(d, { part: i.part.id });
       // A locked file on Windows must not break the run end. The next run then starts a new session.
       try {
         if (session && transcript && ran && !undone && !broken) {
@@ -1384,6 +1412,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         events: runOut?.events.length ?? 0,
         resumed: session?.resume != null,
         broken: broken !== null,
+        resetsAt: runOut?.resetsAt ?? null,
       };
       return i.onEnd ? () => i.onEnd?.(outcome) : undefined;
     },

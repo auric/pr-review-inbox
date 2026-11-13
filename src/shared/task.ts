@@ -208,7 +208,18 @@ export const STEP_MODES = ["implement", "fix", "instruct", "resolve"] as const;
 export type StepMode = (typeof STEP_MODES)[number];
 export const STEP_TURNS: Record<Exclude<StepMode, "implement">, number> = { fix: 40, instruct: 80, resolve: 40 };
 // part-session.md sections 2.2 and 9.3.3: why a session run runs. The phase of an open step row follows from its kind and purpose.
-export const SESSION_PURPOSES = ["build", "continue", "checks", "critic", "review", "message", "points", "comments", "ci"] as const;
+export const SESSION_PURPOSES = [
+  "build",
+  "continue",
+  "checks",
+  "critic",
+  "review",
+  "message",
+  "points",
+  "comments",
+  "ci",
+  "resolve",
+] as const;
 export type SessionPurpose = (typeof SESSION_PURPOSES)[number];
 // part-session.md section 2.2: context/continue-diff.md of a fresh session holds at most this many bytes of the diff.
 export const CONTINUE_DIFF_MAX = 2 * 1024 * 1024;

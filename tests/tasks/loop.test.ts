@@ -275,7 +275,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       ).toEqual([1, 2, 3, 4, 5, 6]);
       expect(s.blocked()?.text).toBe("Needs you: the checks of part 1 stay red after 3 tries.");
       expect(existsSync(join(w.dir, "..", "patches"))).toBe(false);
-      // part-session.md section 2.2: each fix run starts a new session (Gate B37 has not passed), with continue.md and the kept diff.
+      // part-session.md section 2.2: each fix run starts a new session (the resume gate is off), with continue.md and the kept diff.
       const fourth = s.runCalls().filter((c) => s.modeOf(c) === "fix")[3] as Call;
       expect(fourth.context["continue.md"]).toContain("## Ticked tasks\n\n- T1.1 Write the feature");
       expect(fourth.context["continue-diff.md"]).toContain("try 3");
