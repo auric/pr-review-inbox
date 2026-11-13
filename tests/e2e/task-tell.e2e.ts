@@ -178,10 +178,10 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   await text.fill(ASK);
   await expect(sendButton).toBeEnabled();
   await text.press("Control+Enter");
-  await expect(status(page)).toHaveText(/^\S+ works on your instructions\.$/);
+  await expect(status(page)).toHaveText(/^\S+ works on your instructions for your change\.$/);
   await expect(text).toHaveValue("");
   await expect(primary(page)).toHaveCount(0);
-  await expect(box.getByText(/^\S+ or the checks are working\. You can send when this step ends\.$/)).toBeVisible();
+  await expect(box.getByText(/^\S+ or the checks are working\. You can send when this run ends\.$/)).toBeVisible();
   await text.fill("A second idea");
   await expect(sendButton).toBeDisabled();
   await text.fill("");

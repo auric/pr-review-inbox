@@ -2,7 +2,46 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The server needs it for the task notifications (src/server/tasks/notify.ts), so it is shared.
-import type { TaskRowDto } from "./dto";
+import type { TaskRowDto, TaskStepDto } from "./dto";
+
+// ps5-plan.md D4: what the open step row of a part does. The DTO has no stored value for it, so it follows from the step kind and item.
+// null: no build work, such as the interview, the plan, a push, or a PR.
+export type RowPhase =
+  | "building"
+  | "following"
+  | "judging"
+  | "fixing"
+  | "setup"
+  | "baseline"
+  | "checking"
+  | "critic"
+  | "reviewing"
+  | "updating"
+  | "resolving";
+export function rowPhase(s: Pick<TaskStepDto, "kind" | "item">): RowPhase | null {
+  switch (s.kind) {
+    case "implement":
+    case "tests":
+      return "building";
+    case "fix":
+      if (s.item === "points" || s.item === "pushback") return "following";
+      return s.item === "review" || s.item === "critic" ? "judging" : "fixing";
+    case "instruct":
+      return "following";
+    case "check":
+      return s.item === "setup" ? "setup" : s.item === "base" ? "baseline" : "checking";
+    case "commit":
+      return "checking";
+    case "review":
+      return s.item === "critic" ? "critic" : "reviewing";
+    case "update":
+      return "updating";
+    case "resolve":
+      return "resolving";
+    default:
+      return null;
+  }
+}
 
 // spec.md section 6.12, Inbox: the status in the meta line of a Tasks row.
 const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {

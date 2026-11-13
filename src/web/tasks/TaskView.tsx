@@ -48,6 +48,7 @@ import {
   prName,
   prRowLook,
   questionPart,
+  questionSource,
   runningStep,
   type SubRow,
   stoppedSend,
@@ -773,8 +774,9 @@ function Content(props: {
   );
 
   if (screen === "questions") {
-    const loop = t.state === "implementing";
-    const open = openQuestions(t, loop ? "loop" : "interview");
+    const source = questionSource(t);
+    const loop = source === "loop";
+    const open = openQuestions(t, source);
     return (
       <div className="grid gap-4">
         {t.interview?.summary && !loop && (

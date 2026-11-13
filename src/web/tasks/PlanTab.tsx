@@ -58,6 +58,7 @@ import {
   SIZE_LINE,
   type StartPick,
   showRepos,
+  stageBadge,
   startBranch,
   startCycle,
   startLabel,
@@ -916,6 +917,7 @@ export function PlanParts({ t }: { t: TaskDto }) {
     <ul className="m-0 grid list-none gap-3 p-0">
       {parts.map((p) => {
         const time = partTime(t, p.id);
+        const stage = stageBadge(t, p);
         return (
           <li key={p.id} data-task-item tabIndex={-1} className="grid gap-1.5 rounded-md border bg-card px-3 py-2.5 outline-offset-2">
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
@@ -923,6 +925,7 @@ export function PlanParts({ t }: { t: TaskDto }) {
                 {t.subtasks ? `${partLabel(t, p)}: ${p.title}` : parts.length > 1 ? `Part ${p.ord}: ${p.title}` : p.title}
               </span>
               <Badge variant="quiet">{PART_STATE_TEXT[p.state]}</Badge>
+              {stage && <Badge variant="quiet">{stage}</Badge>}
               {p.remotePr !== null && <span className="text-ink-2">PR #{p.remotePr}</span>}
             </div>
             <p className="m-0 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-ink-2">

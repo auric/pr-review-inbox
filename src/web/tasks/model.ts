@@ -23,7 +23,16 @@ import {
   type TaskRepoDto,
   type TaskStepDto,
 } from "../../shared/dto";
-import { branchName, type FoundItem, type RepoAccess, START_MODES, type StartMode, type TaskSize } from "../../shared/task";
+import {
+  branchName,
+  type FoundItem,
+  PART_STATE_TEXT,
+  type RepoAccess,
+  START_MODES,
+  type StartMode,
+  type TaskSize,
+} from "../../shared/task";
+import { type RowPhase, rowPhase } from "../../shared/task-status";
 import { namedBuild } from "../pr/build";
 import { attachmentRows, sizeText } from "../review/tasks";
 
@@ -140,6 +149,12 @@ export const openQuestions = (t: Pick<TaskDto, "questions">, source: TaskQuestio
 // The step that runs or waits for the run slot. The steps come newest first.
 export const runningStep = (t: Pick<TaskDto, "steps">): TaskStepDto | null =>
   t.steps.find((s) => s.state === "running" || s.state === "waiting") ?? null;
+// The open step row of one part. Parts of a task with sub-tasks can build at the same time, and each part has at most one open row.
+const partStep = (t: Pick<TaskDto, "steps">, part: number): TaskStepDto | null =>
+  t.steps.find((s) => s.part === part && (s.state === "running" || s.state === "waiting")) ?? null;
+// ps5-plan.md section 4.4: a push-back question can wait in ready too, so both states read the loop questions.
+export const questionSource = (t: Pick<TaskDto, "state">): TaskQuestionDto["source"] =>
+  t.state === "implementing" || t.state === "ready" ? "loop" : "interview";
 
 // The part that the build works on or that waits for its PR: the first code part that did not merge or drop out.
 export function currentPart(t: Pick<TaskDto, "parts">): TaskPartDto | null {
@@ -212,6 +227,50 @@ export function logRows(steps: TaskStepDto[]): LogRow[] {
     }
   }
   return out.reverse();
+}
+
+// ps5-plan.md section 4.8: the runs of one session of a part, with the rows of that part between them. part: the task_part ID.
+export type SessionGroup = { part: number; rows: LogRow[] };
+export type SessionRow = LogRow | SessionGroup;
+const rowSteps = (r: LogRow) => ("send" in r ? [r.send, ...r.steps] : [r.step]);
+
+// A second pass over logRows for the Log tab only. activeSend and sendNote read the send groups of logRows. A run with a new session
+// starts a group of its part. The session ID cannot group the runs, because each resume forks a new ID. A group sits at the place of
+// its newest row.
+export function sessionRows(rows: LogRow[]): SessionRow[] {
+  const out: SessionRow[] = [];
+  const open = new Map<number, SessionGroup>();
+  for (const r of rows.toReversed()) {
+    const part = rowSteps(r)[0]?.part ?? null;
+    let g = part === null ? undefined : open.get(part);
+    if (part !== null && rowSteps(r).some((s) => s.detail.session?.resumed === false)) {
+      g = { part, rows: [] };
+      open.set(part, g);
+    }
+    if (!g) {
+      out.push(r);
+      continue;
+    }
+    g.rows.unshift(r);
+    const at = out.indexOf(g);
+    if (at >= 0) out.splice(at, 1);
+    out.push(g);
+  }
+  return out.reverse();
+}
+
+// "<runner> session of part 2", or "<runner> session" in a task with one part.
+export function sessionTitle(t: Pick<TaskDto, "parts">, g: SessionGroup, runner: string): string {
+  const ord = t.parts.find((p) => p.id === g.part)?.ord;
+  return ord !== undefined && codeParts(t).length > 1 ? `${runner} session of part ${ord}` : `${runner} session`;
+}
+export const sessionRuns = (g: SessionGroup) => g.rows.flatMap(rowSteps).filter((s) => s.detail.session !== null).length;
+// The session line of a run in the Log tab, or null for a step without a session.
+export function sessionNote(s: Pick<TaskStepDto, "detail">): string | null {
+  const x = s.detail.session;
+  if (!x) return null;
+  if (x.resumed) return "Resumed";
+  return x.why ? `New session: ${x.why}` : "New session";
 }
 
 // The send or the update that the loop works on now, else null.
@@ -299,13 +358,72 @@ function updateSentence(t: TaskDto, s: TaskStepDto, runner: string): string {
   return `Updating ${what} from ${label}${how}.`;
 }
 
-// One sentence for a running step: who works, and on what.
-export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string): string {
+// ps5-plan.md section 3: what a working part does, by the stage of its open row. ref: "your change", "part 2", or the part label of a
+// sub-task. Without ref, the short text of a sub-task row. null: the stage has no text of its own.
+function workText(s: TaskStepDto, runner: string, ref?: string): string | null {
+  const of = ref ? ` of ${ref}` : "";
+  const forRef = ref ? ` for ${ref}` : "";
+  switch (rowPhase(s)) {
+    case "building":
+      return `${runner} builds ${ref ?? "it"}.`;
+    case "checking":
+      return `The app runs the checks${of}.`;
+    case "fixing":
+      return `${runner} fixes the checks${of}.`;
+    case "critic":
+    case "reviewing":
+      return `A second ${runner} run reviews ${ref ?? "it"}.`;
+    case "judging":
+      return `${runner} works on the review points${of}.`;
+    case "following":
+      if (s.kind === "instruct") return `${runner} works on your instructions${forRef}.`;
+      return s.item === "points"
+        ? `${runner} fixes the listed points${of}.`
+        : `${runner} fixes the review points that you chose to fix${forRef}.`;
+    case "setup":
+      return `The app runs the setup commands${of}.`;
+    case "baseline":
+      return `The app runs the checks on the base${of}.`;
+    default:
+      return null;
+  }
+}
+// The stages whose row keeps "Pause after this step". ps5-plan.md section 3 puts Hold on the same rows.
+const PAUSE_AT = new Set<RowPhase | null>(["building", "fixing", "judging"]);
+// The stages where the app works and the runner waits.
+const APP_AT = new Set<RowPhase | null>(["checking", "setup", "baseline"]);
+
+// ps5-plan.md section 4.1: the badge of a working part in the Plan tab.
+export const STAGE_TEXT: Record<RowPhase, string> = {
+  building: "Building",
+  checking: "The checks run",
+  fixing: "Fixing the checks",
+  critic: "Quick review",
+  reviewing: "Own review",
+  judging: "Review points",
+  following: "Your instructions",
+  setup: "Setup",
+  baseline: "Checks on the base",
+  updating: "Update",
+  resolving: "Conflicts",
+};
+// The stage badge of a part, or null when no row of the part is open or the badge would repeat the part state.
+export function stageBadge(t: Pick<TaskDto, "steps">, p: Pick<TaskPartDto, "id" | "state">): string | null {
+  const s = partStep(t, p.id);
+  const stage = s && rowPhase(s);
+  const text = stage ? STAGE_TEXT[stage] : null;
+  return text === PART_STATE_TEXT[p.state] ? null : text;
+}
+
+// One sentence for a running step: who works, and on what. name: the part label of a sub-task.
+export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string, name?: string): string {
   const ord = t.parts.find((p) => p.id === s.part)?.ord ?? null;
   const of = partWords(t, ord);
+  // ps5-plan.md D4 maps each commit to the checks, but the pointer commit runs outside the build.
+  if (s.kind === "commit" && s.item === "pointer") return `Pointing ${t.project}/${t.repo} at the merged commit.`;
+  const work = workText(s, runner, name ?? (of ? `part ${ord}` : "your change"));
+  if (work) return work;
   switch (s.kind) {
-    case "instruct":
-      return `${runner} works on your instructions${of}.`;
     case "update":
     case "resolve":
       return updateSentence(t, s, runner);
@@ -314,24 +432,6 @@ export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string): string
     case "spec":
     case "replan":
       return `${runner} is writing the plan.`;
-    case "tests":
-      return `${runner} is writing the tests${of}.`;
-    case "implement":
-      return s.item ? `${runner} is writing the code of task ${s.item}${of}.` : `${runner} is writing the code${of}.`;
-    case "fix":
-      if (s.item === "review") return `${runner} is fixing the points of its own review${of}.`;
-      if (s.item === "points") return `${runner} is fixing the small points${of}.`;
-      return `${runner} is fixing the failing checks${of}.`;
-    case "check":
-      return s.item === "setup"
-        ? `Running the setup commands${of}.`
-        : s.item === "base"
-          ? `Running the checks on the base${of}.`
-          : `Running the tests${of}.`;
-    case "review":
-      return `${runner} checks its own change${of}.`;
-    case "commit":
-      return s.item === "pointer" ? `Pointing ${t.project}/${t.repo} at the merged commit.` : `Saving the change as a commit${of}.`;
     // A step of the PR rows names its repository (pr.ts runRows). The one-PR route names the part branch.
     case "push":
       return s.item && t.prs.some((r) => prName(r) === s.item) ? `Pushing the branch to ${s.item}.` : "Pushing the branch.";
@@ -581,7 +681,7 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   const pause: Action = { kind: "pause", label: "Pause after this step" };
   // A send or an update ends by itself, and Pause applies to the build only.
   const stopOnly = !!send || t.state === "ready";
-  if (run) return working(stepSentence(t, run, R), stopOnly || run.kind === "check" ? [STOP] : [pause, STOP]);
+  if (run) return working(stepSentence(t, run, R, o.name), stopOnly || !PAUSE_AT.has(rowPhase(run)) ? [STOP] : [pause, STOP]);
   if (t.working || (t.state === "implementing" && part?.state !== "self_reviewed"))
     return working(t.working ? "The app prepares the next step." : `${R} is building your change.`, stopOnly ? [STOP] : [pause, STOP]);
 
@@ -1090,8 +1190,11 @@ function partRow(t: TaskDto, p: TaskPartDto, o: SubOpts): Pick<SubRow, "text" | 
     }
     case "implementing": {
       const reason = reasonOf(t, p);
+      if (reason?.kind === "held") return { text: "On hold. Its work is kept.", actor: "You", action: null };
       if (reason) return { text: reason.text, actor: "You", action: null };
-      return { text: `${R} builds it.`, actor: R, action: null };
+      const s = partStep(t, p.id);
+      const work = s && workText(s, R);
+      return { text: work || `${R} builds it.`, actor: s && work && APP_AT.has(rowPhase(s)) ? "The app" : R, action: null };
     }
     case "self_reviewed":
       return { text: "Ready. Open its PR.", actor: "You", action: { kind: "open-pr", label: "Open the PR" } };
@@ -1260,6 +1363,8 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
   const narrow: TaskDto = {
     ...t,
     working: t.working && (run ? run.part === p.id : p.state === "implementing"),
+    // The open row of another part is no work of this part, and the working rows name this part.
+    steps: t.steps.filter((s) => s.part === p.id || (s.state !== "running" && s.state !== "waiting")),
     parts: [p],
     bases: p.bases,
     prs: t.prs.filter((r) => r.part === p.id),
@@ -1300,18 +1405,22 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
       const acts = [...(row.action && row.action.kind !== "drop" ? [row.action] : []), drop];
       return { ...base, status: `${name}: ${row.text}`, primary: null, more: [...acts, ...extra], screen: "build" };
     }
-    case "implementing":
+    case "implementing": {
       // spec.md section 6.25.6: the reason of another part holds this part too.
       if (b && b.kind !== "slot")
         return { ...base, status: `${name} waits until you act on ${firstLabel(t)}.`, primary: null, more: [STOP], screen: "build" };
+      // Another part can hold the first open row of the task, so this part reads its own row.
+      const own = partStep(t, p.id);
+      const pause = !own || PAUSE_AT.has(rowPhase(own));
       return {
         ...base,
-        status: `${o.runner} builds ${name}.`,
+        status: own ? stepSentence(narrow, own, o.runner, name) : `${o.runner} builds ${name}.`,
         primary: null,
-        more: [{ kind: "pause", label: "Pause after this step" }, STOP],
+        more: pause ? [{ kind: "pause", label: "Pause after this step" }, STOP] : [STOP],
         screen: "build",
         running: true,
       };
+    }
     case "merged":
     case "abandoned":
       return { ...base, status: `${name}: ${p.state === "merged" ? "merged" : "dropped"}.`, primary: null, more: extra, screen: "pr" };

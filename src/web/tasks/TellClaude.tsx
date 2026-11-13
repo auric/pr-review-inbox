@@ -88,8 +88,8 @@ export function TellClaude(props: {
         />
         <FieldDescription id="tell-hint" className="text-xs">
           {busy
-            ? `${runner} or the checks are working. You can send when this step ends.`
-            : `${runner} makes one change step. The app then runs the checks and its own review, and waits for you. Pushes and other git actions stay buttons.`}
+            ? `${runner} or the checks are working. You can send when this run ends.`
+            : `${runner} gets your message in a run of this part. The app then runs the checks and its own review. Pushes and other git actions stay buttons.`}
         </FieldDescription>
       </Field>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">

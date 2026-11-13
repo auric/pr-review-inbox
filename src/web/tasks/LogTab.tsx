@@ -4,7 +4,8 @@
 // The Log tab (docs/plans/review-v2/spec.md sections 6.7 and 6.12): the steps, newest first, with their commands, exit codes or time
 // limits, the output tails folded (a running command shows its output so far), the saved patch, the commands that the runner ran and the commands that it asked to allow (section 6.21.6), and a
 // link to the run log of each step with a run (RunLog.tsx). A send of the Tell box is one
-// group "Your instructions" with its text, its result, and its steps inside (section 6.18.1).
+// group "Your instructions" with its text, its result, and its steps inside (section 6.18.1). The runs of one session of a part form one
+// group (ps5-plan.md section 4.8).
 import { CircleAlert, CircleCheck, CircleDashed, CircleMinus, LoaderCircle, ScrollText } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,20 @@ import { cn } from "@/lib/utils";
 import type { TaskDto, TaskStepDto } from "../../shared/dto";
 import { limitText, type StepDetail } from "../../shared/task";
 import { DECIDED_TEXT, shellText } from "./allow";
-import { logRows, type SendGroup, STEP_TEXT, type StepLook, sendResult, stepLook } from "./model";
+import {
+  type LogRow,
+  logRows,
+  type SendGroup,
+  type SessionGroup,
+  STEP_TEXT,
+  type StepLook,
+  sendResult,
+  sessionNote,
+  sessionRows,
+  sessionRuns,
+  sessionTitle,
+  stepLook,
+} from "./model";
 
 const KIND: Record<TaskStepDto["kind"], string> = {
   interview: "Questions",
@@ -66,22 +80,55 @@ export function LogTab({
   if (!t.steps.length) return <p className="m-0 text-sm text-muted-foreground">No step has run yet.</p>;
   return (
     <ol aria-label="Steps, newest first" className="m-0 grid list-none gap-2 p-0">
-      {logRows(t.steps).map((r) =>
-        "send" in r ? (
-          <SendRow key={r.send.id} g={r} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />
+      {sessionRows(logRows(t.steps)).map((r) =>
+        "rows" in r ? (
+          <SessionRow key={`session-${firstId(r)}`} t={t} g={r} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />
         ) : (
-          <li
-            key={r.step.id}
-            id={stepId(r.step.id)}
-            data-task-item
-            tabIndex={-1}
-            className="grid gap-1.5 rounded-md border bg-card px-3 py-2 outline-offset-2 focus-visible:outline-2"
-          >
-            <StepBody s={r.step} runner={runner} onRunLog={onRunLog} />
-          </li>
+          <LogItem key={rowId(r)} r={r} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />
         ),
       )}
     </ol>
+  );
+}
+
+type RowProps = { runner: string; onRunLog: (run: number) => void; onDiff?: () => void };
+const rowId = (r: LogRow) => ("send" in r ? r.send.id : r.step.id);
+// The run that started the session stays the same while newer rows join, so the group keeps its key.
+const firstId = (g: SessionGroup) => {
+  const r = g.rows.at(-1);
+  return r ? rowId(r) : g.part;
+};
+
+function LogItem({ r, runner, onRunLog, onDiff }: RowProps & { r: LogRow }) {
+  if ("send" in r) return <SendRow g={r} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />;
+  return (
+    <li
+      id={stepId(r.step.id)}
+      data-task-item
+      tabIndex={-1}
+      className="grid gap-1.5 rounded-md border bg-card px-3 py-2 outline-offset-2 focus-visible:outline-2"
+    >
+      <StepBody s={r.step} runner={runner} onRunLog={onRunLog} />
+    </li>
+  );
+}
+
+// ps5-plan.md section 4.8: the runs of one session of a part, newest first. The rows inside keep data-task-item, so the j and k keys
+// reach each run and "See why" focuses its step.
+function SessionRow({ t, g, ...props }: RowProps & { t: TaskDto; g: SessionGroup }) {
+  const n = sessionRuns(g);
+  return (
+    <li data-session={g.part} className="grid gap-1.5">
+      <p className="m-0 flex flex-wrap items-baseline gap-x-2 text-sm">
+        <span className="font-semibold">{sessionTitle(t, g, props.runner)}</span>
+        <span className="text-xs text-muted-foreground">{n === 1 ? "1 run" : `${n} runs`}</span>
+      </p>
+      <ol aria-label="Runs of this session, newest first" className="m-0 grid list-none gap-2 border-l-2 py-0.5 pl-3">
+        {g.rows.map((r) => (
+          <LogItem key={rowId(r)} r={r} {...props} />
+        ))}
+      </ol>
+    </li>
   );
 }
 
@@ -177,6 +224,7 @@ function StepBody({
   const Icon = st.icon;
   const d = s.detail;
   const ms = s.endedAt === null ? null : s.endedAt - s.startedAt;
+  const session = sessionNote(s);
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
@@ -206,6 +254,7 @@ function StepBody({
           </span>
         )}
       </div>
+      {session && <p className="m-0 text-xs text-ink-2">{session}</p>}
       {d.baseline && (
         <p className="m-0 text-xs text-ink-2">
           The approved checks on the part base, before the first step of {runner}. The fix steps compare with this run.

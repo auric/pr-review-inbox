@@ -13,17 +13,19 @@ import { MAX_TASK_ANSWER, type TaskAnswersInput, type TaskQuestionDto } from "..
 
 type Pick = { choice: number | null; text: string };
 
+// ps5-plan.md section 4.4: a push-back question (point set) has no recommended option, and its answer needs an option.
+const recommendedOf = (q: TaskQuestionDto) => (q.kind === "choice" && q.point === null ? q.recommended : null);
 const start = (qs: TaskQuestionDto[]): Record<number, Pick> =>
-  Object.fromEntries(qs.map((q) => [q.id, { choice: q.kind === "choice" ? q.recommended : null, text: "" }]));
+  Object.fromEntries(qs.map((q) => [q.id, { choice: recommendedOf(q), text: "" }]));
 
 // The answers of the form: a choice question sends its option and its note, a text question its text. A choice without an option
-// and without a note gets an error line.
+// and without a note gets an error line. A push-back question needs its option, also with a note.
 export function answersOf(qs: TaskQuestionDto[], picks: Record<number, Pick>): TaskAnswersInput["answers"] | { missing: number } {
   const out: TaskAnswersInput["answers"] = [];
   for (const q of qs) {
     const p = picks[q.id] ?? { choice: null, text: "" };
     const text = p.text.trim();
-    if (q.kind === "choice" && p.choice === null && !text) return { missing: q.id };
+    if (q.kind === "choice" && p.choice === null && (!text || q.point !== null)) return { missing: q.id };
     out.push({ question: q.id, ...(q.kind === "choice" && p.choice !== null && { choice: p.choice }), ...(text && { text }) });
   }
   return out;
@@ -38,6 +40,7 @@ export function QuestionsForm(props: {
   onRecommended: () => void;
 }) {
   const { questions } = props;
+  const noRecommended = questions.some((q) => q.point !== null);
   const [picks, setPicks] = useState(() => start(questions));
   const [missing, setMissing] = useState<number | null>(null);
   const set = (id: number, p: Partial<Pick>) => setPicks((all) => ({ ...all, [id]: { ...(all[id] ?? { choice: null, text: "" }), ...p } }));
@@ -98,7 +101,7 @@ export function QuestionsForm(props: {
                     />
                     <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
                       <span className="font-medium">{o.label}</span>
-                      {q.recommended === k && <Badge variant="soft">Recommended</Badge>}
+                      {recommendedOf(q) === k && <Badge variant="soft">Recommended</Badge>}
                     </span>
                     {o.detail && <span className="col-start-2 text-xs text-muted-foreground">{o.detail}</span>}
                   </label>
@@ -134,7 +137,7 @@ export function QuestionsForm(props: {
             )}
             {missing === q.id && (
               <p role="alert" className="m-0 text-sm text-destructive">
-                Pick an option or add a note.
+                {q.point === null ? "Pick an option or add a note." : "Pick one option."}
               </p>
             )}
           </FieldSet>
@@ -145,9 +148,11 @@ export function QuestionsForm(props: {
         <Button type="submit" variant="outline" disabled={props.busy}>
           Send answers
         </Button>
-        <Button type="button" variant="outline" disabled={props.busy} onClick={props.onRecommended}>
-          Use the recommended answers
-        </Button>
+        {!noRecommended && (
+          <Button type="button" variant="outline" disabled={props.busy} onClick={props.onRecommended}>
+            Use the recommended answers
+          </Button>
+        )}
       </div>
     </form>
   );

@@ -4,6 +4,8 @@
 // docs/plans/review-v2/spec.md sections 6.12 and 7.1 (WP-B5, AC-UX1, AC-UX3, AC-UX9): one test per state row of the Task view table for
 // small tasks, the status line of a Tasks row, and the plain-word helpers. WP-MR3 adds the rows of several repositories (section 6.16).
 import { describe, expect, test } from "bun:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { noMergeText } from "../../src/server/tasks/pointer";
 import type {
   AttachmentDto,
@@ -20,6 +22,8 @@ import type {
   TaskStepDto,
 } from "../../src/shared/dto";
 import { stepDetail, taskProfileId } from "../../src/shared/task";
+import { type RowPhase, rowPhase } from "../../src/shared/task-status";
+import { LogTab } from "../../src/web/tasks/LogTab";
 import {
   ACCESS_TEXT,
   addPlanSentence,
@@ -55,6 +59,7 @@ import {
   prRowLook,
   prTitle,
   questionPart,
+  questionSource,
   REPOS_SHOWN,
   repoChoices,
   repoMatches,
@@ -65,7 +70,12 @@ import {
   type SendGroup,
   STEP_TEXT,
   sendResult,
+  sessionNote,
+  sessionRows,
+  sessionRuns,
+  sessionTitle,
   showRepos,
+  stageBadge,
   startCycle,
   stepLook,
   stoppedAt,
@@ -80,6 +90,8 @@ import {
   timedOutSetup,
   withSetup,
 } from "../../src/web/tasks/model";
+import { answersOf, QuestionsForm } from "../../src/web/tasks/Questions";
+import { TellClaude } from "../../src/web/tasks/TellClaude";
 
 console.log(`tasks-model.test.ts imported from ${Bun.resolveSync("../../src/web/tasks/model", import.meta.dir)}`);
 
@@ -282,24 +294,24 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     expect(v.status).toContain("cannot open that PR yet");
   });
 
-  test("implementing, running: the step sentence names Claude and the step, with Pause after this step", () => {
+  test("implementing, running: the step sentence names Claude and your change, with Pause after this step", () => {
     const v = view(building({ steps: [step({ id: 9, kind: "tests", part: 7, item: "P1", state: "running", endedAt: null })] }));
     expect(shape(v)).toEqual({
-      status: "Claude is writing the tests.",
+      status: "Claude builds your change.",
       primary: null,
       more: ["Pause after this step", "Stop"],
       screen: "build",
     });
   });
 
-  test("implementing, checks: Running the tests, Stop only", () => {
+  test("implementing, checks: the app runs the checks, Stop only", () => {
     const v = view(building({ steps: [step({ id: 9, kind: "check", part: 7, item: "T1.1", state: "running", endedAt: null })] }));
-    expect(shape(v)).toEqual({ status: "Running the tests.", primary: null, more: ["Stop"], screen: "build" });
+    expect(shape(v)).toEqual({ status: "The app runs the checks of your change.", primary: null, more: ["Stop"], screen: "build" });
   });
 
-  test("implementing, own review: Claude checks its own change", () => {
+  test("implementing, own review: a second Claude run reviews your change", () => {
     const v = view(building({ steps: [step({ id: 9, kind: "review", part: 7, state: "running", endedAt: null })] }));
-    expect(v.status).toBe("Claude checks its own change.");
+    expect(v.status).toBe("A second Claude run reviews your change.");
   });
 
   test("implementing, ready: Your change is ready, Open the PR, and the small points in More", () => {
@@ -733,7 +745,7 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
 
   test("instruct running: Claude works on your instructions, with the part when the task has more; Stop only", () => {
     expect(shape(view(rows.instructRunning))).toEqual({
-      status: "Claude works on your instructions.",
+      status: "Claude works on your instructions for your change.",
       primary: null,
       more: ["Stop"],
       screen: "build",
@@ -1900,5 +1912,287 @@ describe("the plan of a task with sub-tasks (spec.md sections 6.20.1 and 6.20.5)
       "ABC-14, ABC-15: Measure",
     ]);
     expect(prTitle(task(), part())).toBe("ABC-12: Trim spaces in user names");
+  });
+});
+
+// ---------- docs/plans/review-v2/ps5-plan.md, PS5-C1: the working rows, point questions, and the Log session groups ----------
+
+describe("ps5-plan.md D4: the stage of a step row", () => {
+  test("rowPhase maps each step kind and item", () => {
+    const cases: [TaskStepDto["kind"], string | null, RowPhase | null][] = [
+      ["implement", "build", "building"],
+      ["tests", "P1", "building"],
+      ["fix", "points", "following"],
+      ["fix", "pushback", "following"],
+      ["fix", "review", "judging"],
+      ["fix", "critic", "judging"],
+      ["fix", "checks", "fixing"],
+      ["fix", "I1", "fixing"],
+      ["instruct", "I1", "following"],
+      ["check", "setup", "setup"],
+      ["check", "base", "baseline"],
+      ["check", "checks", "checking"],
+      ["check", "I1", "checking"],
+      ["commit", "build", "checking"],
+      ["review", "critic", "critic"],
+      ["review", "review", "reviewing"],
+      ["update", "U1", "updating"],
+      ["resolve", "U1", "resolving"],
+      ["interview", null, null],
+      ["spec", null, null],
+      ["replan", null, null],
+      ["push", null, null],
+      ["pr", null, null],
+      ["question", null, null],
+    ];
+    expect(cases.map(([kind, item]) => [kind, item, rowPhase({ kind, item })])).toEqual(cases);
+  });
+});
+
+// ps5-plan.md section 3 (AC-B368, AC-B380): the status of a working row follows the stage of the open row of its part. The count of
+// done tasks and the try and round counts need stored facts (PS5-S1), so the sentences have no count yet.
+describe("ps5-plan.md section 3: the working rows", () => {
+  const open = (kind: TaskStepDto["kind"], item: string | null, part = 7, id = 9) =>
+    step({ id, kind, part, item, state: "running", endedAt: null });
+  const PAUSE = ["Pause after this step", "Stop"];
+
+  test("one part: each stage has its sentence for your change; Pause stays only where Hold comes later", () => {
+    const rows: [TaskStepDto["kind"], string, string, string[]][] = [
+      ["implement", "build", "Claude builds your change.", PAUSE],
+      ["check", "checks", "The app runs the checks of your change.", ["Stop"]],
+      ["commit", "build", "The app runs the checks of your change.", ["Stop"]],
+      ["fix", "checks", "Claude fixes the checks of your change.", PAUSE],
+      ["review", "review", "A second Claude run reviews your change.", ["Stop"]],
+      ["review", "critic", "A second Claude run reviews your change.", ["Stop"]],
+      ["fix", "review", "Claude works on the review points of your change.", PAUSE],
+      ["fix", "points", "Claude fixes the listed points of your change.", ["Stop"]],
+      ["fix", "pushback", "Claude fixes the review points that you chose to fix for your change.", ["Stop"]],
+      ["check", "setup", "The app runs the setup commands of your change.", ["Stop"]],
+      ["check", "base", "The app runs the checks on the base of your change.", ["Stop"]],
+    ];
+    expect(
+      rows.map(([kind, item]) => {
+        const v = view(building({ steps: [open(kind, item)] }));
+        return [kind, item, v.status, v.more.map((a) => a.label)];
+      }),
+    ).toEqual(rows);
+  });
+
+  test("one part: other steps keep their sentence, and the pointer commit is no check", () => {
+    const at = (s: TaskStepDto) => view(building({ steps: [s] })).status;
+    expect(at(open("commit", "pointer"))).toBe("Pointing PROJ/repo at the merged commit.");
+    expect(at(open("push", null))).toBe("Pushing the branch.");
+    expect(at(open("pr", null))).toBe("Opening the PR.");
+  });
+
+  test("several parts: the sentence names part k", () => {
+    const two = (kind: TaskStepDto["kind"], item: string) =>
+      view(building({ parts: [part({ id: 6, state: "self_reviewed" }), part({ id: 7, ord: 2 })], steps: [open(kind, item)] })).status;
+    expect(two("implement", "build")).toBe("Claude builds part 2.");
+    expect(two("check", "checks")).toBe("The app runs the checks of part 2.");
+    expect(two("fix", "checks")).toBe("Claude fixes the checks of part 2.");
+    expect(two("fix", "review")).toBe("Claude works on the review points of part 2.");
+    expect(two("review", "review")).toBe("A second Claude run reviews part 2.");
+    expect(two("check", "setup")).toBe("The app runs the setup commands of part 2.");
+  });
+
+  test("sub-tasks: the view names the part label, and each row gives the short text and who acts", () => {
+    const at = (kind: TaskStepDto["kind"], item: string) =>
+      subTask([p12(), p13({ state: "implementing" })], { steps: [open(kind, item, 13)] });
+    expect(subtaskView(at("fix", "review"), null, SUB_OPTS).status).toBe("Claude works on the review points of ABC-13 (2 of 2).");
+    expect(subtaskView(at("implement", "build"), null, SUB_OPTS).status).toBe("Claude builds ABC-13 (2 of 2).");
+    const rows: [TaskStepDto["kind"], string, string, string][] = [
+      ["implement", "build", "Claude builds it.", R],
+      ["check", "checks", "The app runs the checks.", "The app"],
+      ["fix", "checks", "Claude fixes the checks.", R],
+      ["review", "review", "A second Claude run reviews it.", R],
+      ["fix", "review", "Claude works on the review points.", R],
+      ["instruct", "I1", "Claude works on your instructions.", R],
+      ["check", "setup", "The app runs the setup commands.", "The app"],
+    ];
+    expect(
+      rows.map(([kind, item]) => {
+        const row = subtaskRows(at(kind, item), SUB_OPTS).find((r) => r.part?.id === 13);
+        return [kind, item, row?.text, row?.actor];
+      }),
+    ).toEqual(rows);
+  });
+
+  test("sub-tasks: two parts build at once, and each part shows the stage of its own row", () => {
+    const t = subTask([p13({ state: "implementing" }), p14({ state: "implementing", head: "d".repeat(40) })], {
+      steps: [open("check", "checks", 14, 9), open("fix", "checks", 13, 8)],
+    });
+    expect(subtaskView(t, t.parts[0] ?? null, SUB_OPTS).status).toBe("Claude fixes the checks of ABC-13 (1 of 2).");
+    expect(subtaskView(t, t.parts[1] ?? null, SUB_OPTS).status).toBe("The app runs the checks of ABC-14 (2 of 2).");
+    expect(subtaskRows(t, SUB_OPTS).flatMap((r) => (r.part ? [r.text] : []))).toEqual([
+      "Claude fixes the checks.",
+      "The app runs the checks.",
+    ]);
+  });
+
+  test("sub-tasks: a part in review or ready never takes the open row of another part as its own", () => {
+    const review = p13({ state: "pr_open", remotePr: 52, pushed: "a".repeat(40), waiting: ["Anna"] });
+    const other = p14({ state: "implementing", head: "f".repeat(40) });
+    const t = subTask([p12(), review, other], { steps: [open("implement", "build", 14)], working: true });
+    const v = subtaskView(t, review, SUB_OPTS);
+    expect([v.status, v.primary?.kind, v.running]).toEqual(["ABC-13 (2 of 3): In review by Anna.", "go-pr", false]);
+    const ready = p13({ state: "self_reviewed" });
+    const r = subtaskView({ ...t, parts: [p12(), ready, other] }, ready, SUB_OPTS);
+    expect([r.status, r.primary?.kind]).toEqual(["ABC-13 (2 of 3) is ready and checked by Claude.", "open-pr"]);
+  });
+
+  test("sub-tasks: a held part row says that its work is kept", () => {
+    const held = p13({ state: "implementing", blocked: { kind: "held", step: null, text: "Part 2 is held." } });
+    expect(subtaskRows(subTask([p12(), held]), SUB_OPTS).find((r) => r.part?.id === 13)).toMatchObject({
+      text: "On hold. Its work is kept.",
+      actor: "You",
+    });
+  });
+
+  test("the Plan tab badge of a working part names its stage, and never repeats the state", () => {
+    const at = (p: TaskPartDto, steps: TaskStepDto[]) => stageBadge(building({ parts: [p], steps }), p);
+    expect(at(part(), [open("implement", "build")])).toBeNull();
+    expect(at(part(), [open("check", "checks")])).toBe("The checks run");
+    expect(at(part(), [open("fix", "review")])).toBe("Review points");
+    expect(at(part(), [open("review", "critic")])).toBe("Quick review");
+    expect(at(part(PR_PART), [updateStep()])).toBe("Update");
+    expect(at(part(), [])).toBeNull();
+    expect(at(part(), [step({ id: 9, kind: "check", part: 7, item: "checks" })])).toBeNull();
+  });
+});
+
+// ps5-plan.md section 4.4 (AC-B373, AC-B374): a push-back question has no recommended answer and needs an option. It can wait in
+// ready, so the questions screen reads the loop questions there too.
+describe("ps5-plan.md section 4.4: push-back questions", () => {
+  const pushback = question({ id: 5, source: "loop", point: 31, recommended: 0 });
+  const form = (questions: TaskQuestionDto[]) =>
+    renderToStaticMarkup(createElement(QuestionsForm, { questions, busy: false, onSend: () => {}, onRecommended: () => {} }));
+
+  test("the loop questions in implementing and ready, the interview questions before the build", () => {
+    expect(questionSource(building())).toBe("loop");
+    expect(questionSource(building({ state: "ready" }))).toBe("loop");
+    expect(questionSource(task())).toBe("interview");
+    expect(questionSource(task({ state: "spec_draft" }))).toBe("interview");
+  });
+
+  test("a push-back question shows no recommended answer, no preselected option, and no Use the recommended answers", () => {
+    const html = form([pushback, question({ id: 6, source: "loop" })]);
+    expect(html).not.toContain("Use the recommended answers");
+    expect(html.match(/Recommended/g)?.length).toBe(1);
+    expect(html).not.toMatch(/id="tq-5-\d"[^>]*checked/);
+    expect(html).toMatch(/id="tq-6-0"[^>]*checked/);
+    const plain = form([question({ id: 6, source: "loop" })]);
+    expect(plain).toContain("Use the recommended answers");
+  });
+
+  test("a push-back answer needs an option, also with a note; another question takes a note alone", () => {
+    expect(answersOf([pushback], { 5: { choice: null, text: "It is fine." } })).toEqual({ missing: 5 });
+    expect(answersOf([pushback], { 5: { choice: 1, text: "" } })).toEqual([{ question: 5, choice: 1 }]);
+    const plain = question({ id: 6 });
+    expect(answersOf([plain], { 6: { choice: null, text: "Keep it short." } })).toEqual([{ question: 6, text: "Keep it short." }]);
+  });
+});
+
+// ps5-plan.md section 4.10: the hint under the Tell box.
+describe("ps5-plan.md section 4.10: the Tell box hint", () => {
+  const hint = (busy: boolean) =>
+    renderToStaticMarkup(createElement(TellClaude, { runner: R, busy, restore: null, onSend: async () => {} }));
+
+  test("open: the message goes into a run of this part; busy: the send waits for the end of the run", () => {
+    expect(hint(false)).toContain(
+      "Claude gets your message in a run of this part. The app then runs the checks and its own review. Pushes and other git actions stay buttons.",
+    );
+    expect(hint(true)).toContain("Claude or the checks are working. You can send when this run ends.");
+  });
+});
+
+// ps5-plan.md section 4.8 (AC-B379): a run that starts a new session opens a group for its part. Later rows of that part join it.
+describe("ps5-plan.md section 4.8: the session groups of the Log tab", () => {
+  const ses = (resumed: boolean, id: string, why: string | null = resumed ? null : "No transcript is kept.") =>
+    stepDetail.parse({ session: { id, resumed, why, purpose: "build" } });
+  const run = (id: number, part: number, kind: TaskStepDto["kind"], detail = stepDetail.parse({})) => step({ id, part, kind, detail });
+  const shapeOf = (rows: ReturnType<typeof sessionRows>) =>
+    rows.map((r) =>
+      "rows" in r
+        ? `session ${r.part}: ${r.rows.map((x) => ("send" in x ? `send ${x.send.id}` : x.step.id)).join(" ")}`
+        : "send" in r
+          ? `send ${r.send.id}`
+          : `${r.step.id}`,
+    );
+
+  test("two parts that build at once give two groups; each group sits at its newest row", () => {
+    const steps = [
+      run(6, 7, "commit"),
+      run(5, 8, "check"),
+      run(4, 7, "fix", ses(true, "s7b")),
+      run(3, 8, "implement", ses(false, "s8")),
+      run(2, 7, "implement", ses(false, "s7")),
+      run(1, 7, "check"),
+    ];
+    expect(shapeOf(sessionRows(logRows(steps)))).toEqual(["session 7: 6 4 2", "session 8: 5 3", "1"]);
+  });
+
+  test("a run with a new session starts a new group; a resumed run with a new ID stays in the group", () => {
+    const steps = [
+      run(5, 7, "check"),
+      run(4, 7, "fix", ses(false, "s7c", "The branch moved after the last run.")),
+      run(3, 7, "fix", ses(true, "s7b")),
+      run(2, 7, "implement", ses(false, "s7a")),
+    ];
+    const rows = sessionRows(logRows(steps));
+    expect(shapeOf(rows)).toEqual(["session 7: 5 4", "session 7: 3 2"]);
+    const t = building({ steps });
+    expect(rows.map((r) => ("rows" in r ? `${sessionTitle(t, r, R)}, ${sessionRuns(r)}` : ""))).toEqual([
+      "Claude session, 1",
+      "Claude session, 2",
+    ]);
+    expect(steps.map(sessionNote)).toEqual([
+      null,
+      "New session: The branch moved after the last run.",
+      "Resumed",
+      "New session: No transcript is kept.",
+    ]);
+  });
+
+  test("the title names part k when the task has more parts", () => {
+    const steps = [run(2, 8, "implement", ses(false, "s8"))];
+    const t = building({ parts: [part(), part({ id: 8, ord: 2 })], steps });
+    const g = sessionRows(logRows(steps))[0];
+    expect(g && "rows" in g ? sessionTitle(t, g, R) : null).toBe("Claude session of part 2");
+  });
+
+  test("rows before the first session run and the rows of an old task stay top level", () => {
+    const old = [run(3, 7, "commit"), run(2, 7, "implement"), run(1, 7, "check")];
+    expect(shapeOf(sessionRows(logRows(old)))).toEqual(["3", "2", "1"]);
+    const interview = step({ id: 1, kind: "interview" });
+    expect(shapeOf(sessionRows(logRows([run(3, 7, "check"), run(2, 7, "implement", ses(false, "s")), interview])))).toEqual([
+      "session 7: 3 2",
+      "1",
+    ]);
+  });
+
+  test("a send nests in the session group of its part, and the Tell box still finds the running send", () => {
+    const steps = [
+      step({ id: 5, kind: "check", part: 7, item: "I1", state: "running", endedAt: null }),
+      instruct({ id: 4 }),
+      run(3, 7, "fix", ses(true, "s7b")),
+      run(2, 7, "implement", ses(false, "s7")),
+    ];
+    expect(shapeOf(sessionRows(logRows(steps)))).toEqual(["session 7: send 4 3 2"]);
+    const t = building({ parts: [part({ state: "self_reviewed" })], steps, canInstruct: false });
+    expect(tellBox(t)).toBe("busy");
+    expect(view(t).more.map((a) => a.label)).toEqual(["Stop"]);
+  });
+
+  test("the Log tab shows a group with its title, its run count, and the session line of each run; each run stays a task item", () => {
+    const steps = [run(4, 7, "check"), run(3, 7, "fix", ses(true, "s7b")), run(2, 7, "implement", ses(false, "s7")), run(1, 7, "check")];
+    const html = renderToStaticMarkup(createElement(LogTab, { t: building({ steps }), runner: R, onRunLog: () => {} }));
+    expect(html).toContain('<li data-session="7"');
+    expect(html).toContain("Claude session</span>");
+    expect(html).toContain("2 runs");
+    expect(html).toContain('aria-label="Runs of this session, newest first"');
+    expect(html).toContain("New session: No transcript is kept.");
+    expect(html).toContain("Resumed");
+    expect(html.match(/<li id="task-step-\d+" data-task-item/g)?.length).toBe(4);
   });
 });
