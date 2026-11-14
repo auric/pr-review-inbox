@@ -13,8 +13,14 @@
 - Build a Jira task: a usage limit now shows its reset time. Continue before that time arms a resume, and the step runs again once at the reset time. "Cancel the resume" turns it off. The new switch "Resume by itself after a usage limit" in Settings, Tasks, Run limits arms it at once. It is off by default.
 - Build a Jira task: Tell Claude and "Fix these too" now run in the same build loop as the part. Continue after the PR opened runs the step that each reason of a built part needs.
 - Build a Jira task: a Tell Claude or "Fix these too" run can fail, reach its turn cap twice, or hit the usage limit. The part then waits with that reason and keeps the work. Continue runs it again.
-- Build a Jira task: after the first commit of a part, a quick review by a small model runs once. Claude fixes the points that it confirms. The full own review still runs.
+- Build a Jira task: after the first commit of a part, a quick review (Opus at low effort) runs once. Claude fixes the points that it confirms. The full own review still runs. After an app restart, the quick review runs again.
 - Build a Jira task: when Claude disagrees with a point of its own review, you get a question with Claude's reason and proof. "Accept" drops the point, and the next review does not raise it again. "Fix it anyway" makes Claude fix it.
+- Build a Jira task: "Start this part again" also drops the push-backs that you accepted before.
+- Build a Jira task: a push-back proof such as repo/src/file.ts:12 now counts as found.
+- Build a Jira task: after an app restart, the Tasks row and the notification say "Needs you: the app restarted".
+- Build a Jira task: after an update from the base branch, the build of the other parts goes on.
+- Build a Jira task: Continue on a task whose only working part is on hold, and Tell Claude on a held part, now say to continue the part first.
+- A review start while Claude builds a task now says to start your run when its step ends.
 - Build a Jira task: each later run of a part goes on in the same Claude session, so Claude remembers the earlier work. A run that was cut or stopped also goes on in its session.
 - Build a Jira task: when a reviewer withdraws "Needs work" and the PR gate still fails, the part now shows "PR open" again, not "Changes asked".
 - Build a Jira task: Resume now keeps the work. A step that Claude finished is not run again, and a step that stopped early (Stop, its time limit, its turn cap, or a failed run) continues with its earlier changes. The next try reads the list and the diff of those changes. Tests that stay red after the fix tries get new fix tries with the earlier fixes kept. Before, Resume dropped every change since the last commit into a patch file and ran the step again from the start.

@@ -71,7 +71,7 @@ Sources: part-session.md sections 2 to 9, spec.md section 6.28, `machine.ts`, `l
 | Guard | Rule after PS4 | WP |
 |---|---|---|
 | follow | a waiting row of the part with kind `instruct`, or kind `fix` with item `points` or `pushback` | 3 |
-| critic | part implementing, an ok build commit after the restart mark, and no critic row (ok or failed) after the mark. A cancelled critic runs again. | 6 |
+| critic | part implementing, an ok build commit after the restart mark, and no critic row (ok or failed) after the mark. A cancelled critic runs again. A critic that an app restart cut ends cancelled (tasks.ts SQL.failSteps). | 6 |
 | review | the PS3 rule, plus: only rows after the restart mark; `Q.reviewsAfter` reads item `review` only; a resolved green `update` row counts as a commit of Claude's work (Q57) | 4, 5, 6 |
 | baseline | unchanged; the restart mark does not affect it | none |
 | claudeRan | only rows after the restart mark | 4 |
@@ -179,7 +179,7 @@ Status: built in c6b4ad8.
 
 ### WP-6. Critic, judging, push-back questions (implementer-xhigh)
 
-- `loop.ts`: `criticRun` (item critic, haiku, 30 turns, no reviewer, no verifier, no language checks; a failure or cut writes a note and sends CLEAN); critic judging with Log lines for a push-back; `judgePoints`; push-back questions with `point` after the review gate; `reviewFailure` with the 6.23.3 header; `answer()` handles Accept and "Fix it anyway"; `Q.reviewsAfter` reads item `review`.
+- `loop.ts`: `criticRun` (item critic, opus, effort low, 30 turns, no reviewer, no verifier, no language checks; a failure or cut writes a note and sends CLEAN); critic judging with Log lines for a push-back; `judgePoints`; push-back questions with `point` after the review gate; `reviewFailure` with the 6.23.3 header; `answer()` handles Accept and "Fix it anyway"; `Q.reviewsAfter` reads item `review`.
 - Tests: session (AC-B299 order, a clean critic keeps the own review, critic once), new pushback.test.ts, loop, and `bun run test:e2e`.
 - Risk: each fake-CLI build gets a critic run, so run and row counts shift.
 
@@ -220,7 +220,7 @@ held and usage live in `blocked_json`. The restart mark is a `commit` row. The c
 
 ## 6. Acceptance criteria
 
-- AC-B333. A critic run is a task review run with item critic, model haiku, 30 turns, no rl-reviewer, and no verify phase. It keeps a finding only when each line of its anchor range is an added line of base..head.
+- AC-B333. A critic run is a task review run with item critic, model opus, effort low, 30 turns, no rl-reviewer, and no verify phase. It keeps a finding only when each line of its anchor range is an added line of base..head.
 - AC-B334. The step outcome of a usage-limited run holds resetsAt.
 - AC-B335. A fix run with review, critic, or point items in failure.md gets the lines of 6.23.8. A fix run for red checks does not.
 - AC-B336. An instruct session run keeps its transcript. An instruct run with no session drops the stored transcript.
