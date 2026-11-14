@@ -190,7 +190,18 @@ describe("reason exits in ready", () => {
         }
       }
       expect(s.runCalls().filter((c) => s.modeOf(c) === "instruct")).toHaveLength(cases.filter(([, p]) => p === "following").length);
-      // Form reasons: their own action comes first. The update runs again only through its route until WP-5.
+      // ps4-plan.md WP-5: Continue on the reason update runs the update again. The base has no new commits, so it waits again.
+      seed(s, { kind: "update", step: send, ...n });
+      const at = s.phases.length;
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.phases.slice(at).map((p) => `${p.event}>${p.to}`)).toEqual(["UPDATE>updating", "WAIT>idle"]);
+      expect([s.t().state, s.blocked()?.kind, s.blocked()?.text]).toEqual([
+        "ready",
+        "update",
+        "The update from main stopped: main has no new commits. The branch is as it was.",
+      ]);
+      // Form reasons: their own action comes first.
       s.db
         .query(
           `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, step, asked_at)
@@ -202,7 +213,6 @@ describe("reason exits in ready", () => {
         [{ kind: "spec_change", step: send, ...n }, "Accept or reject the change to the spec first."],
         [{ kind: "allow", step: send, ...n }, "Pick a choice for each command first."],
         [{ kind: "slot", step: send, ...n }, "The build waits for the run slot. It goes on by itself."],
-        [{ kind: "update", step: send, ...n }, "All PRs of the task are open."],
       ];
       for (const [b, error] of forms) {
         seed(s, b);

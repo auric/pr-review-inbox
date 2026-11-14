@@ -27,6 +27,7 @@ import {
   KEY,
   MAX_TURNS,
   point,
+  QUESTION,
   review,
   SLOW,
   SPEC,
@@ -38,6 +39,7 @@ import {
   until,
   WORKS,
 } from "./loop-fixture";
+import { remoteCommit } from "./update-fixture";
 
 for (const m of ["tasks/loop", "tasks/implement", "tasks/tasks", "review/jobs", "review/claude"])
   console.log(`session.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -811,6 +813,120 @@ describe("the transcript at the end of a part (part-session.md section 2.2, End 
       expect(readFileSync(join(w.repo, "specs", KEY, "plan.md"), "utf8")).toContain("### [x] T1.1");
       // The plan helpers of the fixture render the same plan that the loop committed.
       expect(renderDocs(KEY, "Add the feature", "small", toPlan(SPEC, s.base, [false], [])).plan).toContain("### [ ] T1.1");
+    },
+    SLOW,
+  );
+});
+
+// ps4-plan.md WP-5 (AC-B358, part-session.md section 2.13): the resolve run of an update with one conflict stop on a built part whose
+// build run had Bash and the Agent tool.
+describe("resolve runs in the part session (ps4-plan.md WP-5)", () => {
+  const RESOLVED = { path: "repo/src/feature.ts", text: "export const feature = 'works';\nexport const base = 'base';\n" };
+  const ON = { resume: true, live: true, resolve: true };
+  const tools = (c: Call) => (c.argv[c.argv.indexOf("--tools") + 1] ?? "").split(",");
+  const updated = async (gates: typeof ON, resolve: (root: string) => object[]) => {
+    const s = await setup({ sessionGates: gates });
+    s.scenario({
+      seq: {
+        "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+        "implement:resolve": resolve(s.root),
+        review: [{ review: CLEAN }],
+      },
+    });
+    s.db.run("UPDATE repo_task_settings SET shell_mode = 'any'");
+    await s.build();
+    expect(s.part().state).toBe("self_reviewed");
+    const kept = partSession(s.db, s.part().id);
+    await remoteCommit(s.r, "main", { "src/feature.ts": "export const feature = 'base';\n" });
+    expect((await s.loop.update(s.db, s.task, s.part().id, { version: s.t().version })).status).toBe(202);
+    await s.loop.idle(s.task);
+    expect(JSON.parse(s.steps().find((x) => x.kind === "update")?.detail_json ?? "{}").update).toMatchObject({
+      result: "green",
+      resolved: true,
+    });
+    const build = s.runCalls().find((c) => s.modeOf(c) === "build") as Call;
+    expect(tools(build)).toEqual(expect.arrayContaining(["Bash", "Agent"]));
+    return { s, kept, resolves: s.runCalls().filter((c) => s.modeOf(c) === "resolve") };
+  };
+
+  test(
+    "AC-B358: with the resume and resolve gates on, the resolve run forks the session without Bash and Agent, and the heads move to the update",
+    async () => {
+      const { s, kept, resolves } = await updated(ON, () => [{ writes: [RESOLVED] }]);
+      const [call] = resolves as [Call];
+      const at = call.argv.indexOf("--resume");
+      expect([call.argv[at + 1], call.argv[at + 2]]).toEqual([kept?.file as string, "--fork-session"]);
+      expect(tools(call)).toEqual(["Read", "Grep", "Glob", "Edit", "Write"]);
+      expect(call.argv).not.toContain("--agents");
+      expect(call.argv).not.toContain("--no-session-persistence");
+      const row = s.steps().find((x) => x.kind === "resolve") as Step;
+      expect(detailOf(s, row.id).session).toMatchObject({ purpose: "resolve", resumed: true, why: null });
+      // The fork is the one transcript of the part now, and its heads are the heads after the update.
+      const session = partSession(s.db, s.part().id);
+      expect(session?.file === kept?.file).toBe(false);
+      expect(session?.heads).toEqual([{ taskRepo: expect.any(Number), head: s.part().head as string }]);
+      expect(resumeProblem(session, session?.heads ?? [], 100_000, ON)).toBeNull();
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B358: with the resolve gate off, the resolve run is new, keeps no transcript, and moves no session head",
+    async () => {
+      const { s, kept, resolves } = await updated({ ...ON, resolve: false }, () => [{ writes: [RESOLVED] }]);
+      const [call] = resolves as [Call];
+      expect(call.argv).not.toContain("--resume");
+      expect(call.argv).toContain("--no-session-persistence");
+      const row = s.steps().find((x) => x.kind === "resolve") as Step;
+      expect(detailOf(s, row.id).session).toBeNull();
+      const session = partSession(s.db, s.part().id);
+      expect([session?.file, session?.heads]).toEqual([kept?.file, kept?.heads]);
+      const heads = [{ taskRepo: kept?.heads[0]?.taskRepo as number, head: s.part().head as string }];
+      expect(resumeProblem(session, heads, 100_000, ON)).toBe("The branch moved after the last run.");
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B358: a merge stop keeps HEAD, so an update that aborts after a resolve fork drops the kept transcript",
+    async () => {
+      const s = await setup({ sessionGates: ON });
+      s.scenario({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          "implement:resolve": [{ implement: QUESTION }],
+          review: [{ review: CLEAN }],
+        },
+      });
+      await s.build();
+      // A pushed part takes a merge (spec.md section 6.18.3).
+      s.db.query("UPDATE task_part SET pushed = head WHERE id = $id").run({ id: s.part().id });
+      const head = s.part().head;
+      await remoteCommit(s.r, "main", { "src/feature.ts": "export const feature = 'base';\n" });
+      expect((await s.loop.update(s.db, s.task, s.part().id, { version: s.t().version })).status).toBe(202);
+      await s.loop.idle(s.task);
+      const call = s.runCalls().find((c) => s.modeOf(c) === "resolve") as Call;
+      expect(call.argv).toContain("--resume");
+      expect(JSON.parse(s.steps().find((x) => x.kind === "update")?.detail_json ?? "{}").update).toMatchObject({
+        result: "aborted",
+        repos: [expect.objectContaining({ mode: "merge" })],
+      });
+      expect([s.part().head, s.blocked()?.kind]).toEqual([head, "update"]);
+      expect(partSession(s.db, s.part().id)).toBeNull();
+    },
+    SLOW,
+  );
+
+  test(
+    "part-session.md section 2.2: a resolve fork that fails before any tool call runs once more with no session; the heads stay",
+    async () => {
+      const { s, kept, resolves } = await updated(ON, (root) => [{ fixture: emptyFixture(root), exitCode: 1 }, { writes: [RESOLVED] }]);
+      expect(resolves.map((c) => c.argv.includes("--resume"))).toEqual([true, false]);
+      const [failed, fresh] = s.steps().filter((x) => x.kind === "resolve") as [Step, Step];
+      expect([failed.state, fresh.state]).toEqual(["failed", "ok"]);
+      expect(detailOf(s, failed.id).notes).toContain("The app could not resume the session. It started a new one with the earlier work.");
+      expect(detailOf(s, fresh.id).session).toBeNull();
+      expect(partSession(s.db, s.part().id)?.heads).toEqual(kept?.heads);
     },
     SLOW,
   );

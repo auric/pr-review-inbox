@@ -25,7 +25,7 @@ import type { ProfileInput } from "../../src/shared/dto";
 import { type RunLimits, specResult, type TaskBlocked } from "../../src/shared/task";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
-import { commitOnMain, taskCache, taskRemote } from "./fixture";
+import { commitOnMain, openTwice, taskCache, taskRemote } from "./fixture";
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
 export const SLOW = 180_000;
@@ -181,14 +181,6 @@ export type Setup = {
   sessionGates?: typeof SESSION_GATES;
 };
 
-// part-session.md section 9.7, invariant 8: the parts of a database that hold two or more open step rows.
-export const openTwice = (db: Database) =>
-  db
-    .query(
-      "SELECT part, COUNT(*) AS n FROM task_step WHERE state IN ('waiting', 'running') AND part IS NOT NULL GROUP BY part HAVING n > 1",
-    )
-    .all() as { part: number; n: number }[];
-
 export async function setup(o: Setup = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rl-wpb4-")));
   dirs.push(root);
@@ -218,7 +210,7 @@ export async function setup(o: Setup = {}) {
   const live = createLive();
   const events: { event: string; data: unknown }[] = [];
   // Each change notice checks that no part holds two open step rows. The cleanup fails the test on a hit.
-  const twice: { part: number; n: number }[] = [];
+  const twice: ReturnType<typeof openTwice> = [];
   let watched: Database | null = null;
   const broadcast = live.broadcast;
   live.broadcast = (event, data) => {

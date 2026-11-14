@@ -371,6 +371,8 @@ export type ImplementRunStart = {
   timeoutMs: number;
   // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
   shell?: StepShell;
+  // part-session.md section 2.13: a resolve fork gets no rl-explorer, so no Agent tool (Gate B37 U99). Absent: rl-explorer.
+  noExplorer?: true;
   // part-session.md section 2.2: ImplementSpec keep, resume, and live. Each gate of SESSION_GATES that is off drops its field. after()
   // gets the kept transcript in o.kept.
   session?: { keep: string; resume?: string; live?: boolean };
@@ -1552,7 +1554,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                 effort: j.profile.effort,
                 advisor: j.profile.advisor,
                 timeoutMs: t.timeoutMs,
-                explorer: explorerAgent(j.profile),
+                ...(!t.noExplorer && { explorer: explorerAgent(j.profile) }),
                 ...(t.shell && { shell: { ...t.shell, dataDir, origins: originsOf(settings.config()) } }),
                 ...(t.session && {
                   keep: t.session.keep,

@@ -119,12 +119,13 @@ export type ImplementSpec = {
   live?: boolean;
 };
 
-// Gate B37 (part-session.md section 4) passed in full with CLI 2.1.323: resume (U97, U98, U101, U103) and live (U104) are on. resolve
-// needs the resolve runs of U99. While a value is false, jobs.ts passes no resume file or no live input.
+// Gate B37 (part-session.md section 4) passed in full with CLI 2.1.323: resume (U97, U98, U101, U103), live (U104), and a resume
+// without Bash and Agent (U99) are on. While a value is false, jobs.ts passes no resume file or no live input, and the loop runs each
+// resolve run with no session.
 export const SESSION_GATES: Readonly<{ resume: boolean; live: boolean; resolve: boolean }> = {
   resume: true,
   live: true,
-  resolve: false,
+  resolve: true,
 };
 
 // Gate B17 (integration-check.md U72): with these tools, --restricted keeps Edit and Write inside the cwd. No Bash, no Agent.

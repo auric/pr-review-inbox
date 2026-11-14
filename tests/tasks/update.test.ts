@@ -4,17 +4,33 @@
 // docs/plans/review-v2/spec.md sections 6.18.3 to 6.18.5 (WP-TU1, AC-B58 to AC-B65): "Update from <base>" of a built small task part.
 // Temp bare remotes, the fake CLI, and a bun script as the test command. The update pushes nothing.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
+import { insertStep } from "../../src/server/tasks/implement";
 import { pushTaskBranch } from "../../src/server/tasks/push";
 import { recoverTasks, taskDto, UPDATE_RESTART } from "../../src/server/tasks/tasks";
 import { gitlinkAt, inMerge, inRebase, markerLeft } from "../../src/server/tasks/update";
 import { status, type Worktree, wtGit } from "../../src/server/tasks/worktree";
 import { MERGE_CONFLICTED, RESOLVE_STOPS } from "../../src/shared/task";
-import { BRANCH, builtTask, cleanup, headOf, implement, KEY, multiTask, remoteCommit, SLOW, WHO, write } from "./update-fixture";
+import { readRecords } from "../support/fake-claude";
+import {
+  BRANCH,
+  builtTask,
+  CLEAN,
+  cleanup,
+  headOf,
+  implement,
+  KEY,
+  multiTask,
+  remoteCommit,
+  SLOW,
+  until,
+  WHO,
+  write,
+} from "./update-fixture";
 
 for (const m of ["tasks/loop", "tasks/update", "tasks/tasks", "tasks/implement"])
   console.log(`update.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -31,6 +47,10 @@ const update = async (s: Pick<S, "loop" | "db" | "task" | "part" | "t">) => {
   await s.loop.idle(s.task);
   return r;
 };
+// part-session.md section 9.3.3: the sends of the phase helper from index from on, as "<event>><to>".
+const order = (s: Pick<S, "phases">, from = 0) => s.phases.slice(from).map((p) => `${p.event}>${p.to}`);
+const UPDATED = ["UPDATE>updating", "CLEAN>checking"];
+const RESOLVED_ONCE = ["UPDATE>updating", "CONFLICT>resolving", "RUN_DONE>updating", "CLEAN>checking"];
 const parents = async (s: Pick<S, "log">) => (await s.log()).map((l) => l.split("|")[1]?.split(" ").length);
 const spyGit = () => {
   const spawn = Bun.spawn;
@@ -78,6 +98,8 @@ describe("Update from the base branch (spec.md section 6.18.3)", () => {
       expect(spy.calls.some((a) => a.includes("rebase") && a.includes("--onto") && a.includes(n))).toBe(true);
       expect(spy.calls.some((a) => a.includes("push") || a.includes("merge"))).toBe(false);
       expect(s.flow()).toEqual(["update:U1:ok", "check:U1:ok"]);
+      // AC-B355: a clean update. No resolve ran, so no own review.
+      expect(order(s)).toEqual([...UPDATED, "CHECKS_GREEN>idle"]);
       expect(s.steps()[0]?.detail.update).toMatchObject({
         result: "green",
         repos: [{ base: "release/2.1", mode: "rebase", newBaseHead: n }],
@@ -120,6 +142,8 @@ describe("Update from the base branch (spec.md section 6.18.3)", () => {
       const n = await remoteCommit(s.r, "main", BASE_FEATURE);
       expect((await update(s)).status).toBe(202);
       expect(s.flow()).toEqual(["update:U1:ok", "resolve:U1:ok", "check:U1:ok", "review:review:ok"]);
+      // AC-B355, AC-B357: CONFLICT and RUN_DONE around the resolve run, then the own review through GO.
+      expect(order(s)).toEqual([...RESOLVED_ONCE, "CHECKS_GREEN>idle", "GO>reviewing", "CLEAN>idle"]);
       const call = s.runCalls().find((c) => s.modeOf(c) === "resolve");
       const conflicts = call?.context["conflicts.md"] ?? "";
       expect(conflicts).toStartWith("# UNTRUSTED DATA");
@@ -160,7 +184,14 @@ describe("Update from the base branch (spec.md section 6.18.3)", () => {
       await remoteCommit(s.r, "main", BASE_FEATURE);
       const reasons: string[] = [];
       for (let k = 0; k < 3; k++) {
-        expect((await update(s)).status).toBe(202);
+        const at = s.phases.length;
+        // part-session.md section 9.4: Continue on the reason update runs the update again, as "Try again" does.
+        if (k === 1) {
+          expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+          await s.loop.idle(s.task);
+        } else expect((await update(s)).status).toBe(202);
+        // AC-B355: an abort sends WAIT from the phase of the step.
+        expect(order(s, at)).toEqual(["UPDATE>updating", "CONFLICT>resolving", "WAIT>idle"]);
         const b = s.blocked();
         expect(b?.kind).toBe("update");
         reasons.push(b?.text ?? "");
@@ -214,7 +245,9 @@ describe("Update from the base branch (spec.md section 6.18.3)", () => {
       const n = await remoteCommit(s.r, "main", { "README.md": "new readme\n" });
       s.mode("red");
       expect((await update(s)).status).toBe(202);
-      expect(s.blocked()).toMatchObject({ kind: "red", text: "Needs you: the tests fail after the update from main." });
+      // AC-B356: CHECKS_RED with afterUpdate gives red/update.
+      expect(order(s)).toEqual([...UPDATED, "CHECKS_RED>idle"]);
+      expect(s.blocked()).toMatchObject({ kind: "red", cause: "update", text: "Needs you: the tests fail after the update from main." });
       expect(s.steps()[0]?.detail.update?.result).toBe("red");
       expect(s.t().base_commit).toBe(n);
       expect(taskDto(s.db, s.t()).canUndoUpdate).toBe(true);
@@ -294,6 +327,96 @@ describe("Update from the base branch (spec.md section 6.18.3)", () => {
       expect(row?.state).toBe("failed");
       expect(row?.detail.update).toMatchObject({ result: "restart", recovered: true });
       expect(row?.detail.notes).toContain("The app stopped during the update.");
+    },
+    SLOW,
+  );
+});
+
+// ps4-plan.md WP-5 (AC-B355 to AC-B357): the update and its resolve runs in the phase machine.
+describe("Update and resolve in the phase machine (ps4-plan.md WP-5)", () => {
+  // The resolve keeps the conflict but loses "works", so the checks go red.
+  const BROKEN = { path: "repo/src/feature.ts", text: "export const feature = 'broken';\nexport const base = 'base';\n" };
+
+  test(
+    "AC-B355: a Stop during a resolve run sends STOPPED, and the update aborts with the branch as it was",
+    async () => {
+      const s = await builtTask({ seq: { "implement:resolve": [{ hang: true, writes: [RESOLVED] }] } });
+      const head = s.part().head;
+      await remoteCommit(s.r, "main", BASE_FEATURE);
+      expect((await s.loop.update(s.db, s.task, s.part().id, { version: s.t().version })).status).toBe(202);
+      await until(() => readRecords<{ childPid?: number }>(join(s.root, "calls.jsonl")).some((x) => x.childPid));
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(order(s)).toEqual(["UPDATE>updating", "CONFLICT>resolving", "STOPPED>idle"]);
+      expect([s.t().state, s.blocked()]).toEqual([
+        "implementing",
+        expect.objectContaining({ kind: "update", text: "The update from main stopped: you stopped it. The branch is as it was." }),
+      ]);
+      expect(await headOf(await s.wt())).toBe(head);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B356 (Q-SM6): red checks after an update wait with red/update; Continue starts the fix runs with tries from 0, in implementing and in ready",
+    async () => {
+      for (const state of ["implementing", "ready"] as const) {
+        const s = await builtTask({ seq: { "implement:resolve": [{ writes: [BROKEN] }], "implement:fix": [{ writes: [RESOLVED] }] } });
+        s.db.query("UPDATE task SET state = $state WHERE id = $id").run({ state, id: s.task });
+        await remoteCommit(s.r, "main", BASE_FEATURE);
+        expect((await update(s)).status).toBe(202);
+        expect([state, order(s)]).toEqual([state, [...RESOLVED_ONCE, "CHECKS_RED>idle"]]);
+        expect([state, s.blocked()]).toEqual([state, expect.objectContaining({ kind: "red", cause: "update" })]);
+        // Q56: no fix run before the click, and no own review after red checks.
+        expect(s.runCalls().map((c) => s.modeOf(c))).toEqual(["resolve"]);
+        const at = s.phases.length;
+        expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+        await s.loop.idle(s.task);
+        const after = order(s, at);
+        expect([state, after.slice(after.indexOf("GO>checking"))]).toEqual([
+          state,
+          ["GO>checking", "CHECKS_RED>fixing", "RUN_DONE>checking", "CHECKS_GREEN>idle", "GO>reviewing", "CLEAN>idle"],
+        ]);
+        expect([state, s.t().state, s.blocked()]).toEqual([state, state, null]);
+        expect(s.runCalls().filter((c) => s.modeOf(c) === "fix")).toHaveLength(1);
+        await cleanup();
+      }
+    },
+    SLOW * 2,
+  );
+
+  test(
+    "AC-B357: a green update with a resolve run makes the own review due through GO, after the restart mark and after an app restart; a failed own review gives error/run",
+    async () => {
+      const s = await builtTask();
+      const empty = join(s.root, "empty.jsonl");
+      writeFileSync(empty, "");
+      s.scenario({ "implement:resolve": [{ writes: [RESOLVED] }], review: [{ fixture: empty, exitCode: 1 }, { review: CLEAN }] });
+      // ps4-plan.md section 1 item 5: the guards read only the rows after the restart mark.
+      insertStep(s.db, { task: s.task, part: s.part().id, kind: "commit", item: "restart", state: "ok" });
+      await remoteCommit(s.r, "main", BASE_FEATURE);
+      expect((await update(s)).status).toBe(202);
+      expect(order(s)).toEqual([...RESOLVED_ONCE, "CHECKS_GREEN>idle", "GO>reviewing", "WAIT>idle"]);
+      const own = s.steps().find((x) => x.kind === "review");
+      expect([own?.state, s.blocked()]).toEqual(["failed", expect.objectContaining({ kind: "error", cause: "run", step: own?.id })]);
+      expect(s.steps().find((x) => x.kind === "update")?.detail.update).toMatchObject({ result: "green", resolved: true });
+      // An app restart keeps the reason. Continue runs the own review through GO.
+      recoverTasks(s.db, Date.now());
+      s.loop.recover(s.db);
+      await s.loop.idle(s.task);
+      expect(s.blocked()?.kind).toBe("error");
+      const at = s.phases.length;
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(order(s, at).filter((x) => x.startsWith("GO>"))).toContain("GO>reviewing");
+      expect(order(s, at).slice(-2)).toEqual(["GO>reviewing", "CLEAN>idle"]);
+      expect([
+        s.blocked(),
+        s
+          .steps()
+          .filter((x) => x.kind === "review")
+          .map((x) => x.state),
+      ]).toEqual([null, ["failed", "ok"]]);
     },
     SLOW,
   );

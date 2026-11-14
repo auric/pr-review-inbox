@@ -6,19 +6,21 @@
 // multiTask adds the submodules of repos-fixture.ts and the fake Bitbucket. No test starts the real CLI, reaches a forge, or touches the
 // user's clone or data folder.
 import type { Database } from "bun:sqlite";
+import { expect } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBitbucketProvider } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
+import type { SESSION_GATES } from "../../src/server/review/claude";
 import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { fetchInto } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { commitTask } from "../../src/server/tasks/implement";
-import { createLoop } from "../../src/server/tasks/loop";
+import { createLoop, type PhaseStep } from "../../src/server/tasks/loop";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import { type RepoDeps, resolveTaskRepos, taskRepos } from "../../src/server/tasks/repos";
 import { taskRow } from "../../src/server/tasks/tasks";
@@ -27,7 +29,7 @@ import { type StepDetail, specResult, stepDetail, type TaskBlocked } from "../..
 import { FAKE_TOKEN, FAKE_USER, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
-import { taskCache, taskRemote } from "./fixture";
+import { openTwice, taskCache, taskRemote } from "./fixture";
 import { bareRepo, depsOf, mainCache, multiRepo } from "./repos-fixture";
 
 export const KEY = "TU-1";
@@ -132,13 +134,15 @@ export const until = async (f: () => boolean, ms = 60_000) => {
 };
 
 // The app side: the fake CLI, the settings, the review jobs, the loop, the test command, the user's identity, and the task row. forge:
-// the fake Bitbucket becomes the configured server with its token.
+// the fake Bitbucket becomes the configured server with its token. gates: the gates of Gate B37; absent: SESSION_GATES. phases: each
+// send of the phase helper.
 async function app(
   root: string,
   remote: (project: string, repo: string) => Promise<Remote>,
   repo: string,
   seq: FakeScenario["seq"],
   forge?: string,
+  gates?: typeof SESSION_GATES,
 ) {
   const runner = fakeRunner(root);
   const stream = claudeStream(root, "tu1", "claude/b6-hostile-repo.jsonl");
@@ -150,13 +154,33 @@ async function app(
   if (forge) await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });
   const live = createLive();
-  const jobs = createReviewJobs({ settings, live, dataDir, runnerCommand: runner.command, repoRemote: remote, listTools: stubListTools });
+  // Each change notice checks that no part holds two open step rows. The cleanup fails the test on a hit.
+  const twice: ReturnType<typeof openTwice> = [];
+  let watched: Database | null = null;
+  const broadcast = live.broadcast;
+  live.broadcast = (event, data) => {
+    if (watched) twice.push(...openTwice(watched));
+    broadcast(event, data);
+  };
+  const jobs = createReviewJobs({
+    settings,
+    live,
+    dataDir,
+    runnerCommand: runner.command,
+    repoRemote: remote,
+    listTools: stubListTools,
+    ...(gates && { sessionGates: gates }),
+  });
   const db = jobs.open() as Database;
-  const loop = createLoop({ review: jobs, settings, live });
+  watched = db;
+  const phases: PhaseStep[] = [];
+  const loop = createLoop({ review: jobs, settings, live, onPhase: (p) => phases.push(p) });
   jobs.onStop(() => loop.shutdown());
   cleanups.unshift(async () => {
     await jobs.stop();
+    watched = null;
     db.close();
+    expect(twice).toEqual([]);
   });
   const empty = join(root, "identity.gitconfig");
   writeFileSync(empty, "");
@@ -199,7 +223,7 @@ async function app(
     ).id;
     return { id, plan: (docs.plan as string).replace(/### \[ \] T1\.1/, "### [x] T1.1") };
   };
-  return { dataDir, settings, live, jobs, db, loop, scenario, mode, addTask };
+  return { dataDir, settings, live, jobs, db, loop, scenario, mode, addTask, phases };
 }
 
 // The views of one task for the assertions.
@@ -245,6 +269,7 @@ export type Setup = {
   base?: string;
   // Each entry is one more commit of the part after the plan commit, with these files.
   commits?: Record<string, string>[];
+  sessionGates?: typeof SESSION_GATES;
 };
 
 // One repository PROJ/repo with a built part: the plan commit adds src/feature.ts.
@@ -254,7 +279,7 @@ export async function builtTask(o: Setup = {}) {
   const r = await taskRemote(root);
   const baseName = o.base ?? "main";
   if (baseName !== "main") await git(["--git-dir", r.remote, "update-ref", `refs/heads/${baseName}`, r.base], { env: r.env });
-  const a = await app(root, async () => ({ url: r.remote, config: [] }), "repo", o.seq);
+  const a = await app(root, async () => ({ url: r.remote, config: [] }), "repo", o.seq, undefined, o.sessionGates);
   const { db, dataDir } = a;
   const { base } = await taskCache(dataDir, r.remote);
   const { id: task, plan } = a.addTask(base, baseName);

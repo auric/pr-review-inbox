@@ -92,6 +92,7 @@ import {
   budgetOf,
   buildsAtOnceOf,
   currentPart,
+  dropSessions,
   holdBlocked,
   instructTarget,
   keysOf,
@@ -465,8 +466,8 @@ type Ctx = {
   // build: the build of the part, in state implementing. instruct and update (spec.md section 6.18): one step on a built part, also in
   // state ready. setup: "Run setup again" (spec.md section 6.7), also in state ready.
   mode: DriverMode;
-  // part-session.md section 9.3.3: the phase of the part. Only the build driver tracks it; null in the other drivers. rounds: the
-  // review rounds of this driver. waited: a run or a step of this part set its own reason.
+  // part-session.md section 9.3.3: the phase of the part. The build, follow-up, and update drivers track it; null in the setup driver.
+  // rounds: the review rounds of this driver. waited: a run or a step of this part set its own reason.
   phase: Phase | null;
   rounds: number;
   waited: boolean;
@@ -577,6 +578,10 @@ const Q = {
     LIMIT 1`,
   workCommit: `SELECT MAX(id) AS id FROM task_step WHERE part = $part AND kind = 'commit' AND state = 'ok'
     AND item NOT IN ('plan', 'eol', 'spec', 'restart') AND id > ${MARK}`,
+  // Q57: a green update whose resolve run wrote code counts as a commit of Claude's work. An undone update left no code.
+  resolvedUpdate: `SELECT MAX(id) AS id FROM task_step WHERE part = $part AND kind = 'update' AND state = 'ok' AND id > ${MARK}
+    AND json_extract(detail_json, '$.update.result') = 'green' AND json_extract(detail_json, '$.update.resolved') = 1
+    AND COALESCE(json_extract(detail_json, '$.update.undone'), 0) = 0`,
   reviewsAfter: "SELECT run FROM task_step WHERE part = $part AND kind = 'review' AND state = 'ok' AND run IS NOT NULL AND id > $after",
   reviewAt: `SELECT s.id, s.run FROM task_step s JOIN review_run r ON r.id = s.run WHERE s.part = $part AND s.kind = 'review'
     AND s.state = 'ok' AND r.idem_key LIKE $key ORDER BY s.id DESC LIMIT 1`,
@@ -1111,7 +1116,7 @@ export function createLoop(opts: LoopOptions) {
   // One Claude run in the run slot (implement.ts), with its outcome. row: the step row that the route wrote (an instruct or a resolve
   // step). A run that did not start (a stop, a reason such as the cost limit) halts. A run of a part session (implement or fix) picks
   // its session by the guard of part-session.md section 2.2. A new session with earlier runs gets context/continue.md. extra: more lines
-  // of step.md. again: a new session at once.
+  // of step.md. again: a new session at once. session: the session that the caller picked (a resolve run), or null for none.
   async function runStep(
     c: Ctx,
     mode: StepMode,
@@ -1126,6 +1131,7 @@ export function createLoop(opts: LoopOptions) {
       purpose?: SessionPurpose;
       extra?: string[];
       again?: boolean;
+      session?: StepInput["session"] | null;
     },
   ): Promise<{ r: StepOutcome | null; shell: StepShell | null; unchanged: boolean }> {
     let waiting: number | null = o.row ?? null;
@@ -1136,8 +1142,11 @@ export function createLoop(opts: LoopOptions) {
         o.row === undefined ? nextAttempt(c, mode, item) : (c.db.query(Q.rowAttempt).get({ id: o.row }) as { attempt: number }).attempt;
       const own = setupFiles(c);
       const before = (await dirty(c.trees)).filter((p) => !own.has(p));
-      const session = SESSION_MODES.has(mode) ? await sessionOf(c, o.purpose ?? "build", o.again === true) : null;
-      const cont = session ? await freshFiles(c, session.resume !== null) : null;
+      const session =
+        o.session !== undefined ? o.session : SESSION_MODES.has(mode) ? await sessionOf(c, o.purpose ?? "build", o.again === true) : null;
+      // part-session.md section 2.13: a resolve fork gets no continue files. The dirty paths of a conflict stop are the unmerged files.
+      const joined = !!session && mode !== "resolve";
+      const cont = joined ? await freshFiles(c, session.resume !== null) : null;
       // check-fix.md item 1: a fix run that changes no file stops the fixes. spec.md section 6.18.2: a send that changes no file commits
       // nothing. A run that continues a cut run finishes kept changes, so it may change none.
       const snap = (mode === "fix" || mode === "instruct") && !o.extra?.length ? await snapshot(c.trees) : null;
@@ -1162,7 +1171,7 @@ export function createLoop(opts: LoopOptions) {
         item,
         attempt,
         profile: c.profile,
-        untrusted: [...task.files, ...(failure ? [failure] : []), ...(cont?.files ?? []), ...(session ? [baselineFile(c)] : [])],
+        untrusted: [...task.files, ...(failure ? [failure] : []), ...(cont?.files ?? []), ...(joined ? [baselineFile(c)] : [])],
         attachments: task.attachments,
         own: [
           ...(answers ? [answers] : []),
@@ -1271,7 +1280,7 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // part-session.md sections 2.11 and 9.4, ps4-plan.md section 1 items 8 and 9: the reason of a run that hit the usage limit. resetsAt is in
-  // seconds (Gate B37 U106 not verified). The reason starts armed when the setting is on and the previous Claude run of the part did not
+  // seconds (Gate B37 U106). The reason starts armed when the setting is on and the previous Claude run of the part did not
   // end with the usage limit, so the app resumes once per limit.
   function usageReason(c: Ctx, step: number, resetsAt: number | null): TaskBlocked {
     const prev = c.db.query(Q.prevRun).get({ part: c.part.id, step }) as { error_kind: string | null } | null;
@@ -1473,8 +1482,10 @@ export function createLoop(opts: LoopOptions) {
   // part-session.md section 9.3.3, guard review: a commit of Claude's work has no own review yet, or an own review after it holds a
   // confirmed blocker or major point.
   function reviewDue(c: Ctx) {
-    const after = (c.db.query(Q.workCommit).get({ part: c.part.id }) as { id: number | null }).id;
-    if (after === null) return false;
+    const after = Math.max(
+      ...[Q.workCommit, Q.resolvedUpdate].map((q) => (c.db.query(q).get({ part: c.part.id }) as { id: number | null }).id ?? 0),
+    );
+    if (!after) return false;
     const runs = (c.db.query(Q.reviewsAfter).all({ part: c.part.id, after }) as { run: number }[]).map((r) => r.run);
     return !runs.length || runs.some((run) => mustFix(pointsOf(c, run)).length > 0);
   }
@@ -1795,9 +1806,8 @@ export function createLoop(opts: LoopOptions) {
       await s.done;
       changed(c.id);
       const r = ended as Ended | null;
-      // An update restores its own reason (spec.md section 6.18.4). part-session.md section 9.3.4 (Q-SM1): a failed review of the build
-      // or of a follow-up gives the reason error/run. ps4-plan.md section 1 item 20: a review that hit the usage limit gives usage.
-      if (r && !r.ok && c.mode === "update") throw new StepFailed(r.text ?? "The review failed.");
+      // part-session.md section 9.3.4 (Q-SM1): a failed review of the build, of a follow-up, or of an update gives the reason error/run.
+      // ps4-plan.md section 1 item 20: a review that hit the usage limit gives usage.
       if (!r || r.cancelled) throw new Halt();
       if (!r.ok && r.usage) block(c, usageReason(c, r.step, r.resetsAt));
       if (!r.ok)
@@ -1850,10 +1860,12 @@ export function createLoop(opts: LoopOptions) {
     return true;
   }
 
-  // The own review of a driver other than the build (spec.md section 6.18): rounds until no point waits.
+  // The own review after an update with a resolve run (part-session.md section 9.3.3, Q57): GO with the guard review, round by round,
+  // while the review is due. GO picks no other phase here, so the update adds no setup or baseline step.
   async function ownReview(c: Ctx) {
-    for (;;) {
+    while (reviewDue(c)) {
       send(c, { type: "GO" }, { review: true });
+      // A stored review at an unchanged head writes no row, so CLEAN ends the rounds.
       if (!(await reviewRound(c))) return;
     }
   }
@@ -2661,17 +2673,23 @@ export function createLoop(opts: LoopOptions) {
 
   // spec.md sections 6.18.3 and 6.18.4: one update of a built part. row: its update step, which the route wrote. Each repository takes
   // its own picked base, deepest first: a rebase before the first push, else a merge. A conflict goes to a resolve step. Any failure
-  // before the checks aborts the update in every repository.
+  // before the checks aborts the update in every repository. The phase goes idle, updating, (resolving, updating)*, checking, idle
+  // (part-session.md section 9.3.3).
   async function driveUpdate(db: Database, id: number, partId: number, row: number) {
     let c: Ctx | null = null;
     let pre: UpdateDetail["preHeads"] | null = null;
     let phase: "git" | "checks" | "review" = "git";
     let label = taskRow(db, id)?.target_branch ?? "";
+    let forked = false;
     try {
+      // A base check of the Task view fetches into the same refs.
+      await checking.get(id);
       await recoverUpdates(db, id);
       const t = taskRow(db, id) as TaskRow;
       let part = parts(db, id).find((p) => p.id === partId) as PartRow;
       c = await context(db, t, part, "update");
+      c.phase = "idle";
+      send(c, { type: "UPDATE" });
       const ctx = c;
       await undo(c.trees, db, id, lastBefore(db, part.id, row));
       refreshPlan(c);
@@ -2685,6 +2703,8 @@ export function createLoop(opts: LoopOptions) {
       // Step 1: the heads of every repository before any git command that changes one.
       pre = await headsOf(c.trees, baseOf(t, part));
       patchStep(db, row, { update: updateDetail.parse({ repos: [], preHeads: pre }) });
+      // part-session.md section 2.13: the resolve runs fork the part session only when its guard holds now. A conflict stop moves HEAD.
+      let joined = review.sessionGates.resolve && (await sessionOf(c, "resolve", false)).why === null;
       // Step 2: the fetched head of each base. A PR that Bitbucket reports with conflicts takes the update too.
       const conflicted = new Set(
         (taskDto(db, t).parts.find((x) => x.id === part.id)?.bases ?? []).filter((b) => b.conflicted).map((b) => b.taskRepo),
@@ -2741,7 +2761,10 @@ export function createLoop(opts: LoopOptions) {
                 );
               }
               if (stop.files.length) {
-                await resolveConflicts(ctx, tree, r, at, stop.files, row);
+                send(ctx, { type: "CONFLICT" });
+                forked ||= joined;
+                joined = await resolveConflicts(ctx, tree, r, at, stop.files, row, joined);
+                send(ctx, { type: "RUN_DONE" });
                 resolved = true;
               }
               stop = await continueUpdate(wt, at.mode, tree.full, stop.files, links, who);
@@ -2782,30 +2805,42 @@ export function createLoop(opts: LoopOptions) {
         }
         for (const f of followed) db.query(Q.repoPin).run({ id: f.row.id, pinned: f.commit, base: f.commit });
         patchStep(db, row, { update: { ...(stepDetailOf(db, row).update as UpdateDetail), postHeads: post, stops, resolved } });
+        // part-session.md section 2.13: the transcript of a session resolve knows the new heads. A clean update moves no session head.
+        if (resolved && joined) moveHeads(db, part.id, post, now());
       })();
+      send(ctx, { type: "CLEAN" });
       phase = "checks";
       part = parts(db, id).find((x) => x.id === partId) as PartRow;
       c = await context(db, taskRow(db, id) as TaskRow, part, "update");
+      c.phase = ctx.phase;
       await countLines(c);
-      // spec.md section 6.18.3, Checks (Q56): red keeps the update and waits for the user. No fix step runs.
+      // spec.md section 6.18.3, Checks (Q56): red keeps the update and waits for the user. No fix step runs before Continue (Q-SM6).
       const k = await checks(c, itemOf(db, row));
+      send(c, k.green ? { type: "CHECKS_GREEN" } : { type: "CHECKS_RED" }, { afterUpdate: true });
       db.transaction(() => {
         endStep(db, row, "ok", { notes: stepDetailOf(db, row).notes }, now());
         patchStep(db, row, { update: { ...(stepDetailOf(db, row).update as UpdateDetail), result: k.green ? "green" : "red" } });
-        if (!k.green) setReason(db, id, { kind: "red", step: k.step, text: `Needs you: the tests fail after the update from ${label}.` });
+        if (!k.green)
+          setReason(db, id, {
+            kind: "red",
+            cause: "update",
+            step: k.step,
+            text: `Needs you: the tests fail after the update from ${label}.`,
+          });
       })();
       changed(id);
       // Q57: Claude wrote code in a resolve step, so the own review runs.
       phase = "review";
       if (k.green && resolved) await ownReview(c);
     } catch (e) {
-      await endUpdate(db, id, row, c, pre, label, phase, e);
+      await endUpdate(db, id, row, c, pre, label, phase, e, forked);
     }
   }
 
   // One resolve step (spec.md section 6.18.4): context/conflicts.md, the path check against the unmerged paths of this stop, and the
   // marker check. Its changes go to patches/<step>.patch. A question, a changed path without a conflict, a remaining marker, or a failed
-  // run aborts the update.
+  // run aborts the update. fork: the session guard held at the update start (part-session.md section 2.13), so the run forks the newest
+  // kept transcript; an earlier resolve run of the update replaced it. Returns true when the run forked the session.
   async function resolveConflicts(
     c: Ctx,
     tree: RepoTree,
@@ -2813,28 +2848,42 @@ export function createLoop(opts: LoopOptions) {
     p: { newBaseHead: string; mode: "rebase" | "merge" },
     paths: string[],
     row: number,
-  ) {
+    fork: boolean,
+  ): Promise<boolean> {
     const wt = tree.wt as Worktree;
     const item = itemOf(c.db, row);
     const at = (x: string) => (tree.full ? `${tree.full}/${x}` : x);
-    const rrow = insertStep(
-      c.db,
-      { task: c.id, part: c.part.id, kind: "resolve", item, attempt: nextAttempt(c, "resolve", item), state: "waiting" },
-      now(),
-    );
-    patchStep(c.db, rrow, { resolve: { taskRepo: tree.row.id, paths } });
     const file = conflictsFile({ name: repoName(r), full: tree.full, base: r.base, newBaseHead: p.newBaseHead, mode: p.mode, paths });
     const before = await resolveSnapshot(c.trees, tree);
-    const { r: out } = await runStep(c, "resolve", item, {
-      allow: [],
-      step: (a) => partStepFile(c.plan, c.plan.parts, "resolve", a),
-      failure: file,
-      row: rrow,
-      resolveCheck: (context, ignored) => resolveProblems(c.trees, tree, paths, before, context, ignored),
-    });
+    const run = async (kept: string | null) => {
+      const rrow = insertStep(
+        c.db,
+        { task: c.id, part: c.part.id, kind: "resolve", item, attempt: nextAttempt(c, "resolve", item), state: "waiting" },
+        now(),
+      );
+      patchStep(c.db, rrow, { resolve: { taskRepo: tree.row.id, paths } });
+      const session = kept ? { ...(await sessionOf(c, "resolve", false)), resume: kept, why: null } : null;
+      const { r: o } = await runStep(c, "resolve", item, {
+        allow: [],
+        step: (a) => partStepFile(c.plan, c.plan.parts, "resolve", a),
+        failure: file,
+        row: rrow,
+        resolveCheck: (context, ignored) => resolveProblems(c.trees, tree, paths, before, context, ignored),
+        session,
+      });
+      return o;
+    };
+    let kept = (fork && partSession(c.db, c.part.id)?.file) || null;
+    let out = await run(kept);
+    // part-session.md section 2.2: a fork that failed before any tool call runs once more with no session.
+    if (out && kept && !out.result && out.resumed && out.events === 0 && out.kind !== "usage_limit") {
+      patchStep(c.db, out.step, { notes: [...stepDetailOf(c.db, out.step).notes, RESUME_FAILED] });
+      kept = null;
+      out = await run(null);
+    }
     if (out) {
-      const saved = await savePatch(wt, patchFile(dataDir, c.db, c.id, rrow), paths, true).catch(() => null);
-      if (saved) patchStep(c.db, rrow, { patch: basename(saved) });
+      const saved = await savePatch(wt, patchFile(dataDir, c.db, c.id, out.step), paths, true).catch(() => null);
+      if (saved) patchStep(c.db, out.step, { patch: basename(saved) });
     }
     if (!out) throw new Halt();
     if (!out.result) {
@@ -2848,6 +2897,7 @@ export function createLoop(opts: LoopOptions) {
     if (q) throw new UpdateAbort(`Claude could not resolve ${at(paths[0] as string)}: ${oneLine(q.text).replace(/\.$/, "")}`);
     const left = await markerLeft(wt, paths);
     if (left) throw new UpdateAbort(`conflict markers remain in ${at(left)}`);
+    return kept !== null;
   }
 
   // spec.md section 6.20.10 step 3: the merges of a pushed part whose lower part merged, into the main repository. A merge commit or a
@@ -2902,7 +2952,9 @@ export function createLoop(opts: LoopOptions) {
 
   // The end of an update that did not finish (spec.md section 6.18.4, Abort). Before the checks, and on a Stop during the checks, every
   // repository goes back to its head before the update, and the reason "update" says why. A reason of the own review after a resolve
-  // step stays.
+  // step stays (part-session.md section 9.3.4, Q-SM1). The phase ends before the reason write: WAIT, or STOPPED for a Stop. forked: a
+  // resolve run forked the session, so the kept transcript holds a resolve that the abort undoes. A merge stop leaves HEAD as it was, so
+  // the guard cannot see it. The transcript goes, as after a git state change (part-session.md section 2.2, guard rule 4).
   async function endUpdate(
     db: Database,
     id: number,
@@ -2912,10 +2964,13 @@ export function createLoop(opts: LoopOptions) {
     label: string,
     phase: "git" | "checks" | "review",
     e: unknown,
+    forked: boolean,
   ) {
     const stopped = stopping.has(id);
+    if (c?.phase && c.phase !== "idle" && (phase !== "review" || e instanceof Halt))
+      send(c, { type: (phase === "review" ? !c.waited : stopped) ? "STOPPED" : "WAIT" });
     if (phase === "review") {
-      if (!(e instanceof Halt) || (!stopped && !(e instanceof StepFailed))) failed(db, id, e);
+      failed(db, id, e);
       changed(id);
       return;
     }
@@ -2942,6 +2997,7 @@ export function createLoop(opts: LoopOptions) {
     }
     db.transaction(() => {
       if (isOpen(db, row)) endStep(db, row, "failed", { notes: [why] }, now());
+      if (forked && c) dropSessions(db, { part: c.part.id });
       const d = stepDetailOf(db, row).update;
       if (d) patchStep(db, row, { update: { ...d, result: "aborted", reason: why } });
       const end = /[?!]$/.test(why) ? "" : ".";
@@ -3006,6 +3062,19 @@ export function createLoop(opts: LoopOptions) {
       return true;
     })();
     if (go) goOn(db, id, partOf(db, b), reset, b);
+    changed(id);
+  }
+
+  // spec.md section 6.18.3: the update row "U<n>" of a part, the clear of the reason update, and the update driver. The route and Continue
+  // on the reason update (part-session.md section 9.4) start it.
+  function beginUpdate(db: Database, id: number, partId: number, version: number) {
+    const row = db.transaction(() => {
+      const n = (db.query(Q.sends).get({ task: id, kind: "update" }) as { n: number }).n + 1;
+      const r = insertStep(db, { task: id, part: partId, kind: "update", item: `U${n}`, state: "running" }, now());
+      setBlocked(db, { task: id, version }, null, now());
+      return r;
+    })();
+    start(db, id, () => driveUpdate(db, id, partId, row), "update");
     changed(id);
   }
 
@@ -3448,8 +3517,15 @@ export function createLoop(opts: LoopOptions) {
       }
       const form = formOf(db, id, b);
       if (form) return conflict(db, id, form);
-      // The update runs again through its own route until WP-5 moves it into the phase machine.
-      if (t.state === "ready" && (!b || b.kind === "update")) return conflict(db, id, TASK_STATE_TEXT.ready);
+      // part-session.md section 9.4: Continue on the reason update runs the update of its part again, as "Try again" does.
+      if (b?.kind === "update") {
+        const part = partOf(db, b);
+        const target = part === null ? { error: b.text } : updateTarget(db, t, part);
+        if ("error" in target) return conflict(db, id, target.error);
+        beginUpdate(db, id, target.part.id, t.version);
+        return { status: 200, task: dto(db, id) };
+      }
+      if (t.state === "ready" && !b) return conflict(db, id, TASK_STATE_TEXT.ready);
       if (t.state === "implementing" && !b && (drivers.has(id) || !buildingAll(db, id).length))
         return conflict(db, id, TASK_STATE_TEXT.implementing);
       // spec.md section 6.25.4: the clear moves the next reason up and starts no driver, so the option would be lost.
@@ -3811,14 +3887,7 @@ export function createLoop(opts: LoopOptions) {
       if (drivers.has(id)) return conflict(db, id, WORKING);
       const ready = updateTarget(db, again, partId);
       if ("error" in ready) return conflict(db, id, ready.error);
-      const row = db.transaction(() => {
-        const n = (db.query(Q.sends).get({ task: id, kind: "update" }) as { n: number }).n + 1;
-        const r = insertStep(db, { task: id, part: partId, kind: "update", item: `U${n}`, state: "running" }, now());
-        setBlocked(db, { task: id, version: again.version }, null, now());
-        return r;
-      })();
-      start(db, id, () => driveUpdate(db, id, partId, row), "update");
-      changed(id);
+      beginUpdate(db, id, partId, again.version);
       return { status: 202, task: dto(db, id) };
     },
 

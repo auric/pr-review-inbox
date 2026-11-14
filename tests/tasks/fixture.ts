@@ -3,6 +3,7 @@
 
 // A temp bare remote with the files that the sparse patterns of a task worktree hide, and the cache of the app made from it with the
 // task run code (prepareTaskWorkspace). WP-B3 tests only. No test reaches a forge.
+import type { Database } from "bun:sqlite";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { git, gitEnv } from "../../src/server/review/git";
@@ -25,6 +26,23 @@ export const HIDDEN = [
   ".husky/pre-commit",
 ];
 export const SHOWN = ["README.md", "src/app.ts", "sub/code.ts", ".github/workflows/ci.yml", ".gitignore"];
+
+// part-session.md section 9.7, invariant 8: the parts of a database that hold two or more open step rows, with "<kind>:<item>" of
+// each. One pair is no hit: loop.ts driveUpdate keeps its update row open while one resolve run or the checks of that update ("U<n>")
+// run. The phase is then the phase of that row.
+export const openTwice = (db: Database) =>
+  (
+    db
+      .query(
+        `SELECT part, COUNT(*) AS n, GROUP_CONCAT(kind || ':' || COALESCE(item, '-'), ' ') AS rows FROM task_step
+        WHERE state IN ('waiting', 'running') AND part IS NOT NULL GROUP BY part HAVING n > 1`,
+      )
+      .all() as { part: number; n: number; rows: string }[]
+  ).filter((x) => {
+    const rows = x.rows.split(" ");
+    const item = rows.find((r) => r.startsWith("update:"))?.slice("update:".length);
+    return !(x.n === 2 && item !== undefined && rows.some((r) => r === `resolve:${item}` || r === `check:${item}`));
+  });
 
 export const IDENTITY = {
   GIT_AUTHOR_NAME: "fixture",

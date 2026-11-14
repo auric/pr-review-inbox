@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AnyStateMachine, initialTransition, transition } from "xstate";
 import { openDb } from "../../src/server/storage/db";
+import { insertStep } from "../../src/server/tasks/implement";
 import {
   machineMermaid,
   PART_EVENTS,
@@ -29,6 +30,7 @@ import {
 } from "../../src/server/tasks/machine";
 import { advance, advancePart, recoverTasks, TASK_CHANGED } from "../../src/server/tasks/tasks";
 import { PART_STATES, type PartState, TASK_STATE_TEXT, TASK_STATES, type TaskState } from "../../src/shared/task";
+import { openTwice } from "./fixture";
 
 for (const m of ["tasks/machine", "tasks/tasks"])
   console.log(`machine.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -398,6 +400,55 @@ describe("Hold, Skip, and Start again (ps4-plan.md WP-4)", () => {
   });
 });
 
+// ps4-plan.md section 2.1, row Update (AC-B355 to AC-B357): the orders that driveUpdate and endUpdate send, from idle back to idle.
+describe("Update and resolve (ps4-plan.md WP-5)", () => {
+  const walk = (steps: [PhaseEventType, Partial<PhaseContext>?][]) => {
+    let at: Phase = "idle";
+    const out: string[] = [];
+    for (const [type, facts] of steps) {
+      const r = phaseStep(at, type, { ...NO_FACTS, ...facts });
+      expect([at, type, r.can]).toEqual([at, type, true]);
+      at = r.to;
+      out.push(`${type}>${at}`);
+    }
+    return out;
+  };
+
+  test("a clean update, a conflict, red checks, and the own review after a resolve", () => {
+    expect(walk([["UPDATE"], ["CLEAN"], ["CHECKS_GREEN"]])).toEqual(["UPDATE>updating", "CLEAN>checking", "CHECKS_GREEN>idle"]);
+    expect(walk([["UPDATE"], ["CONFLICT"], ["RUN_DONE"], ["CONFLICT"], ["RUN_DONE"], ["CLEAN"]]).at(-1)).toBe("CLEAN>checking");
+    // afterUpdate wins over triesLeft: red checks after an update run no fix.
+    expect(walk([["UPDATE"], ["CLEAN"], ["CHECKS_RED", { afterUpdate: true, triesLeft: true }]]).at(-1)).toBe("CHECKS_RED>idle");
+    expect(phaseStep("checking", "CHECKS_RED", { ...NO_FACTS, triesLeft: true }).to).toBe("fixing");
+    expect(
+      walk([["UPDATE"], ["CONFLICT"], ["RUN_DONE"], ["CLEAN"], ["CHECKS_GREEN"], ["GO", { review: true, checks: false }], ["CLEAN"]]),
+    ).toEqual([
+      "UPDATE>updating",
+      "CONFLICT>resolving",
+      "RUN_DONE>updating",
+      "CLEAN>checking",
+      "CHECKS_GREEN>idle",
+      "GO>reviewing",
+      "CLEAN>idle",
+    ]);
+  });
+
+  test("an abort sends WAIT and a Stop sends STOPPED from updating, resolving, and checking; idle refuses both", () => {
+    for (const from of ["updating", "resolving", "checking"] as const)
+      for (const type of ["WAIT", "STOPPED"] as const)
+        expect([from, type, phaseStep(from, type)]).toEqual([from, type, { can: true, to: "idle" }]);
+    for (const type of ["WAIT", "STOPPED"] as const) expect(phaseStep("idle", type).can).toBe(false);
+  });
+
+  test("UPDATE leaves only idle; CONFLICT leaves only updating; resolving takes no CLEAN and no CONFLICT", () => {
+    for (const from of PHASES) {
+      expect([from, phaseStep(from, "UPDATE").can]).toEqual([from, from === "idle"]);
+      expect([from, phaseStep(from, "CONFLICT").can]).toEqual([from, from === "updating"]);
+    }
+    expect([phaseStep("resolving", "CLEAN").can, phaseStep("resolving", "RUN_DONE").to]).toEqual([false, "updating"]);
+  });
+});
+
 describe("senders (part-session.md section 9.7, invariant 7)", () => {
   // A sender passes the event to advance(), advancePart(), or the phase send helper as `type: "E"`, or returns it from an event helper
   // (gates.ts eventOf: `return "E"`; tasks.ts adoption: `? "E" : "F"`). BUILD has no sender: the create route uses initialTransition.
@@ -730,5 +781,60 @@ describe("advance", () => {
       { ord: 1, state: "failed", ended_at: 50 },
       { ord: 2, state: "ok", ended_at: null },
     ]);
+  });
+
+  // part-session.md section 9.7, invariant 8, as the fixtures check it. The update driver keeps its row open beside one resolve or check
+  // row of the same update.
+  test("invariant 8: an open update row with one open resolve or check row of the same update is no hit; every other pair is", () => {
+    const hits = (rows: [Parameters<typeof insertStep>[1]["kind"], string, "waiting" | "running"][]) => {
+      const task = newTask("ready", "small");
+      const part = (
+        db
+          .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+            VALUES ($task, 1, 'single', 'T', 'b', 'main', 'self_reviewed', 1, 1) RETURNING id`)
+          .get({ task }) as { id: number }
+      ).id;
+      for (const [kind, item, state] of rows) insertStep(db, { task, part, kind, item, state });
+      return openTwice(db)
+        .filter((x) => x.part === part)
+        .map((x) => x.rows);
+    };
+    expect(
+      hits([
+        ["update", "U1", "running"],
+        ["resolve", "U1", "running"],
+      ]),
+    ).toEqual([]);
+    expect(
+      hits([
+        ["update", "U2", "running"],
+        ["check", "U2", "running"],
+      ]),
+    ).toEqual([]);
+    expect(
+      hits([
+        ["update", "U1", "running"],
+        ["check", "U2", "running"],
+      ]),
+    ).toEqual(["update:U1 check:U2"]);
+    expect(
+      hits([
+        ["update", "U1", "running"],
+        ["implement", "build", "waiting"],
+      ]),
+    ).toEqual(["update:U1 implement:build"]);
+    expect(
+      hits([
+        ["update", "U1", "running"],
+        ["resolve", "U1", "running"],
+        ["check", "U1", "running"],
+      ]),
+    ).toEqual(["update:U1 resolve:U1 check:U1"]);
+    expect(
+      hits([
+        ["fix", "checks", "waiting"],
+        ["check", "checks", "running"],
+      ]),
+    ).toEqual(["fix:checks check:checks"]);
   });
 });

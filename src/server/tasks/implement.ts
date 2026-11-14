@@ -1257,6 +1257,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     // part-session.md section 2.10: no step time. The process cap stays.
     timeoutMs: RUN_TIME_MAX_MS,
     ...(i.shell && { shell: i.shell }),
+    ...(i.mode === "resolve" && session?.resume != null && { noExplorer: true as const }),
     // part-session.md section 2.9: live input for the runs that can take a message. jobs drops it while the live gate is off.
     ...(session && {
       session: { keep: session.keep, ...(session.resume && { resume: session.resume }), ...(i.mode !== "resolve" && { live: true }) },
