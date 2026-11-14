@@ -1034,6 +1034,8 @@ purpose is a new field of StepDetail.session, which section 5.3 already adds. Th
 | unchanged | the run changed no file | loop.ts:1297, :2077 |
 | roundsLeft | the review rounds are fewer than REVIEW_FIX_TRIES | loop.ts:183, :1488 |
 
+StepDetail.tries of a fix row (ps5-plan.md D5) is for display only. triesLeft and roundsLeft still read the loop counters: `tries` of greenOrFix and `c.rounds` of reviewRound. The guard review skips a point with skipFix (option without, ps5-plan.md D3).
+
 App-only commits need no review: the plan commit, the line-end repair, a clean merge of an update, and a pointer commit.
 
 **Transitions.** WAIT means that the step ended with a reason, and the event carries that reason. STOPPED means that a Stop or a Hold ended the step.
@@ -1157,7 +1159,10 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | New (PS6): POST /tasks/:id/parts/:part/comments, /comments/send | none (reply run); GO with follow (purpose comments) | the sentence of the state |
 | New (PS7a): POST /tasks/:id/parts/:part/ci | GO with follow (purpose ci) | the sentence of the state |
 | New (PS7b): POST /tasks/:id/parts/:part/ci-mode | mode off | "Red-build fixes are off." |
-| Goes: /pause, /dismiss, /limit, /parts/:part/setup | resume options (section 5.2): leave, more-time, setup | none |
+| POST /tasks/:id/limit | none: "Change the limit" sets the task line limit only, keeps every reason, and starts nothing (ps5-plan.md D1) | TASK_STATE_TEXT outside implementing and ready; WORKING while a driver works |
+| Goes: /pause, /dismiss, /parts/:part/setup, and the `keep` form of /limit (PS5-S2) | resume options (section 5.2): leave, more-time, setup | none |
+
+/limit stays with `lineBudget` only (ps5-plan.md D1). The `keep` form stays until PS5-S2, because the web still sends it.
 
 #### 9.3.7 Diagrams
 
@@ -1328,10 +1333,10 @@ stateDiagram-v2
 | question/task_done (legacy) | loop.ts:1384 | I | no | CONTINUE | Stop | clears; taskStep goes in PS3 |
 | question/paused (legacy) | loop.ts:810 | I | no (soft) | CONTINUE | Stop | builds with no reset (loop.ts:2629-2642); Hold replaces it in PS4, and the /pause route goes in PS5 |
 | red/checks | loop.ts:1290-1295 | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | "Test-fix tries" more fix runs; the work stays |
-| red/setup | loop.ts:1723 | I, R | yes | CONTINUE | See why; Stop | setup runs again (option setup deletes the mark) |
+| red/setup | loop.ts:1723 | I, R | yes | CONTINUE | "Run setup again" (option setup with part: deletes the setup mark of the part, then takes Continue); See why; Stop | setup runs again |
 | red/setup_time | loop.ts:1717-1722 | I, R | yes | "Change the time limit" (editor), then CONTINUE | See why; Stop | setup runs with the new limit |
 | red/update | loop.ts:2294 | I, R | no | CONTINUE (Q-SM6) | Undo the update; See why; the message box; R: leave | the fix runs start on the update result |
-| blocker | loop.ts:1488-1495 | I, R | yes | CONTINUE | "Go on without these fixes" (Not verified: answer to build-redesign.md Q3); See why; Stop; R: leave | one more judging round with the stored points |
+| blocker | loop.ts:1488-1495 | I, R | yes | CONTINUE | "Go on without these fixes" (option without: the must-fix points get skipFix, then the part goes on as after Continue; R: the reason before the follow-up comes back); See why; Stop; R: leave | one more judging round with the stored points |
 | spec_change | loop.ts:1068-1073 | I, R | yes | ACCEPT | REJECT; Stop | 409 "Accept or reject the change to the spec first." (loop.ts:2643) |
 | allow | loop.ts:1038-1041 | I, R | yes | ALLOW | Stop | 409 "Pick a choice for each command first." (loop.ts:2644) |
 | denied_path/path | implement.ts:1038-1040 | I, R | yes | CONTINUE | See why; Stop; R: leave | a fresh session run (guard rule 4); the undone paths stay undone (PS1) |
@@ -1424,6 +1429,8 @@ After a restart, each Continue runs GO. GO picks the next phase by the guard ord
 4. A derived wait holds (order below).
 5. The default row of the part state.
 
+The phase comes from the open row that the shared `phaseRow` (src/shared/task-status.ts) picks, as invariant 8 of 9.7 says. A waiting message beside another open row gives no phase. The web `runningStep` and `partStep` call `phaseRow`.
+
 **Rows of section 2.17.** I is implementing, and R is ready.
 
 | Row | Task state | Part state | Reason key | Phase | Derived wait | Primary |
@@ -1496,7 +1503,7 @@ The last row has no primary today. Its comment says that no route exists (model.
 5. The machines are pure: no actions, no invoke, and no createActor. machine.ts imports only xstate and types.
 6. Each mutating route sends one user event or one reason exit (9.3.6).
 7. Every event has a sender, or it is in RESERVED with its owner package.
-8. A part has at most one open step row, with two exceptions. An open update row can sit beside exactly one open resolve or check row of the same update (WP-5). One waiting instruct row can sit beside one other open row (WP-7). The phase is that of the open row, of the resolve or check row, or of the row beside the waiting instruct row.
+8. A part has at most one open step row, with two exceptions. An open update row can sit beside exactly one open resolve or check row of the same update (WP-5). One waiting instruct row can sit beside one other open row (WP-7). The phase is that of the open row, of the resolve or check row, or of the row beside the waiting instruct row. The shared `phaseRow` (src/shared/task-status.ts) picks this row.
 9. After a restart, each state takes the recovery transition of 9.5. No waiting part row is lost.
 10. Only the user's Stop and an error that no reason covers send STOP from implementing or ready.
 
@@ -1551,4 +1558,4 @@ Not owned yet: G4, a PR that opened while PR_OPENED was refused. It needs a pr.t
 5. **Q-SM5.** Keep the kind budget for the cost limit only. Section 5.1 drops budget, but the cost limit still blocks (implement.ts:521-522). Recommended: keep it, with a 409 until the limit changes. Not verified: a UI field for partCost.
 6. **Q-SM6.** Continue on red/update starts the fix runs. Today the user gets only See why, Undo, and the message box (spec.md 6.18.3, Q56). Recommended: yes. The click is still the user's choice.
 7. **Q-SM7.** The derived wait order of 9.6. Recommended: as listed. Work that changes or publishes the branch comes before server feedback.
-8. **Q-SM8.** "Go on without these fixes" for blocker. build-redesign.md Q3 recommended it. Not verified: the user's answer.
+8. **Q-SM8.** "Go on without these fixes" for blocker. build-redesign.md Q3 recommended it. User answer: yes ("Q3 yes" in build-redesign.md). PS5-S1 built it as resume option without (ps5-plan.md D3).

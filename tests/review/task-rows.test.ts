@@ -335,26 +335,45 @@ describe("a task run row is in no PR read", () => {
     });
   });
 
-  test("review/jobs.ts: the restart recovery ends a running task run with kind restart and stops its task", () => {
+  // part-session.md section 9.5: a restart keeps a task in implementing, and the open step gets the reason error/restart.
+  test("review/jobs.ts: the restart recovery ends a running task run with kind restart, and its task keeps implementing with error/restart", () => {
     const got = rollback(() => {
       const running = run({ pr: null, task: K.task, kind: "implement", status: "running", key: "t-running" });
       const prRun = run({ pr, kind: "review", status: "running", key: "p-running" });
-      db.query("INSERT INTO task_step (task, ord, kind, run, state, started_at) VALUES ($task, 1, 'implement', $run, 'running', 1)").run({
-        task: K.task,
-        run: running,
-      });
+      const step = id(
+        "INSERT INTO task_step (task, ord, kind, run, state, started_at) VALUES ($task, 1, 'implement', $run, 'running', 1) RETURNING id",
+        { task: K.task, run: running },
+      );
       const fresh = createReviewJobs({ settings, live: createLive(), dataDir: dir, runnerCommand: [process.execPath, "--version"] });
       fresh.open();
       const status = (r: number) => db.query("SELECT status, error_kind FROM review_run WHERE id = $r").get({ r });
+      const t = db.query("SELECT state, stopped_from, version, blocked_json FROM task WHERE id = $id").get({ id: K.task }) as {
+        state: string;
+        stopped_from: string | null;
+        version: number;
+        blocked_json: string | null;
+      };
       return {
-        task: db.query("SELECT state, stopped_from, version FROM task WHERE id = $id").get({ id: K.task }),
+        task: { ...t, blocked_json: t.blocked_json === null ? null : JSON.parse(t.blocked_json) },
+        stepId: step,
         step: db.query("SELECT state FROM task_step WHERE run = $run").get({ run: running }),
         taskRun: status(running),
         prRun: status(prRun),
       };
     });
     expect(got).toEqual({
-      task: { state: "stopped", stopped_from: "implementing", version: 5 },
+      task: {
+        state: "implementing",
+        stopped_from: null,
+        version: 5,
+        blocked_json: {
+          kind: "error",
+          cause: "restart",
+          step: got.stepId,
+          text: "Needs you: the app stopped during the work on the task. Continue goes on from there.",
+        },
+      },
+      stepId: got.stepId,
       step: { state: "failed" },
       taskRun: { status: "failed", error_kind: "restart" },
       prRun: { status: "failed", error_kind: "restart" },

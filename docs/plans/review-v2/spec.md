@@ -1466,10 +1466,11 @@ Section 6.16.10 adds the reads for the base branch, the branch search, the write
 | POST /api/tasks/:id/parts/:part/push | `{version, force?: true}` | 202; 409 on a lease failure |
 | POST /api/tasks/:id/parts/:part/retarget | `{version}` | 202 |
 | POST /api/tasks/:id/size | `{version, size}` | 200 |
+| POST /api/tasks/:id/limit | `{version, lineBudget: 1 to 100,000}` ("Change the limit"), or `{version, keep: true}` ("Keep one PR") until PS5-S2 (section 6.28, PS5) | 200; 400 for another value; 409 outside implementing and ready, or while a driver works; keep: 409 "No part waits for the line limit." without a size reason |
 | POST /api/tasks/:id/spec-change/:step | `{version, accept: boolean}` | 200 |
 | POST /api/tasks/:id/parts/:part/setup | `{version}` | 202, "Run setup again" (section 6.7); 409 while a driver works or without a worktree or a setup command |
 | POST /api/tasks/:id/pause, /stop, /close | `{version}` | 200 |
-| POST /api/tasks/:id/resume | `{version, option?: "start-step-again"}` (section 6.7, Continue) | 200; 400 for another option; 409 for an option on a paused build, or while the reason of another part waits |
+| POST /api/tasks/:id/resume | `{version, option?: "start-step-again" \| "leave" \| "disarm" \| "without" \| "setup", part?}` (section 6.7, Continue; section 6.28, PS4 and PS5) | 200; 202 for option setup; 400 for another option, for setup without part, and for part with another option; 409 for an option on a paused build, or while the reason of another part waits; section 6.28 PS5 gives the 409 of without and setup |
 | POST /api/tasks/:id/dismiss | `{version}` | 200; 409 "No reason waits for Dismiss." (section 6.18.2) |
 | GET /api/tasks/:id/parts/:part/diff | | DiffDto (existing rows) |
 | GET, PUT /api/repos/:project/:repo/task-settings | repo_task_settings fields (no branchPrefix, section 6.16.1) | 200 |
@@ -3028,7 +3029,7 @@ pushback.md reserves section 6.23, and add-repo.md reserves section 6.24 and AC-
 
 - After an action clears its reason, the loop starts only when task.blocked_json is null after the move. Else the action answers as before, and no driver starts. This applies to answer, allow, limit, spec-change accept and reject, resume, wait for the merge, and the base branch change.
 - One answer submit answers every open loop question. It clears each part row question whose step owns an answered question. It clears the first reason only when the step of that reason owns an answered question. Else the first reason stays, and the version moves.
-- Change the limit and Keep one PR also clear every part row of kind size. A part over the new limit stops again at its size check.
+- Keep one PR also clears every part row of kind size. Since PS5-S1, Change the limit keeps every reason (section 6.28, PS5).
 
 #### 6.25.5 Other actions
 
@@ -3129,7 +3130,7 @@ Acceptance criteria:
 6. AC-B210. The run usage of a run with advisor calls names the advisor model from modelUsage, and the run setup line shows it.
 7. AC-B211. Gate GADV.2 ignores `slash_commands`. GADV.2, GADV.4, and GADV.5a judge by init.tools and the advisor calls, with the run with `--advisor` as the control. GADV.5b judges by the advisor calls of that run.
 
-### 6.28 Part sessions (docs/plans/review-v2/part-session.md, packages PS3 and PS4)
+### 6.28 Part sessions (docs/plans/review-v2/part-session.md, packages PS3, PS4, and PS5-S1)
 
 One Claude session builds one part. This section covers the loop of PS3 and the follow-up runs of PS4 (docs/plans/review-v2/ps4-plan.md). PR comments and red builds come in PS6 and PS7 (ps6-ps7-plan.md).
 
@@ -3204,7 +3205,7 @@ Acceptance criteria (PS4):
 32. AC-B351. Start again refuses a pushed part and a part that runs a step. It saves the patch, writes refs/rl/task/<id>/backup/part-<ord>-<n>, resets each edit repository, writes the restart mark, deletes the transcript, and clears the reasons. It keeps the baseline and the setup mark. The next run is a new session with no continue.md. The critic and the own review run again.
 33. AC-B352. A usage-limited run gives usage with resumeAt equal to resetsAt times 1000. With no resetsAt, it has no resumeAt. armed is true only when the setting is on and the previous Claude run of the part did not end with usage_limit.
 34. AC-B353. Continue before resumeAt arms every usage reason. Continue after resumeAt, or with no resumeAt, runs. disarm clears armed. The timer fires once for the first reason; a capped delay arms it again. Recovery arms the timer again, and a past resumeAt fires at once.
-35. AC-B354. RESERVED has no RESTART, UPDATE, or CONFLICT. The only planned REASON_EXITS entry is "Go on without these fixes" (option without, PS5). Each option of an exit that is not planned parses in taskResumeInput.
+35. AC-B354. RESERVED has no RESTART, UPDATE, or CONFLICT. Since PS5-S1, no REASON_EXITS entry is planned. Each option of an exit parses in taskResumeInput.
 36. AC-B355. An update sends UPDATE, then CONFLICT and RUN_DONE for each resolve stop, then CLEAN. Then it sends CHECKS_GREEN, or CHECKS_RED with afterUpdate. An abort sends WAIT with the reason update. A Stop during a resolve run sends STOPPED, and the update aborts with the branch as it was.
 37. AC-B356. Red checks after an update give red/update. Continue starts the fix runs with the tries from 0, in implementing and in ready.
 38. AC-B357. A green update with a resolve run makes the own review due through GO, also after the restart mark and after an app restart. A failed own review then gives error/run.
@@ -3216,6 +3217,20 @@ Acceptance criteria (PS4):
 44. AC-B363. "Fix these too" judges its points with the same rules. Its push-back gives a question with its point after the gate.
 45. AC-B364. With the live gate on, a message during a session run of the part reaches stdin, and the step gets the note "Your message: <text>". With the gate off, a message during the build run waits as one follow-up row per part. It survives an app restart while the task implements, and the next GO runs it. A Stop, a failed build, a Skip, or a Start again cancels it. Its text goes back to the box. A live send moves the task version. A second message, or a message during a follow-up run with the gate off, gets 409.
 46. AC-B365. The demo and e2e builds stay green with the critic step. No test names this criterion. `bun run test:e2e` and `bun run demo` check it.
+
+PS5: server facts of the Task view (ps5-plan.md decisions D1 to D6, package PS5-S1; no migration). The web uses them in PS5-C. ps5-plan.md section 8 holds the acceptance criteria.
+
+- Option `without` ("Go on without these fixes", D3) acts on the first reason blocker, in implementing and in ready. The own reviews of the part after its newest work commit are those of the guard review. Each confirmed blocker or major point of these reviews gets `skipFix: true`. The reason clear and these writes are one transaction. GO then starts no own review and no judging round, and "Fix these too" lists the points. In implementing, the part goes on as after Continue. When no other guard holds, the part takes REVIEWED. In ready, the reason before the follow-up comes back, as with leave, and no driver starts. The answer is 200. A missing reason, a reason of another kind, or a blocker with no part gives 409 "No point waits for a fix.". Outside implementing and ready, the answer is 409 with the state sentence. A working driver gives 409.
+- Option `setup` with `part` ("Run setup again", D2) replaces the route /parts/:part/setup. Option setup without part gives 400 "Give the part of the setup.". A part with another option gives 400 "Give a part or an option, not both.". A part with no option still names a held part. The option deletes the setup mark of the part worktree, so the next GO of the part runs setup first. With no first reason, the part goes on. On a red setup reason of the same part, the option takes Continue. The answer is 202.
+- Option setup keeps the refusals of the old route. Outside implementing and ready, it gives 409 with the state sentence. A working driver gives 409 "Claude or the checks are working.". A wrong part gives 404 "Part not found.". Other 409 texts: "This part has no worktree." and "This repository has no setup command.". A part with a waiting or held row gives 409 "This part waits for you. Act on the first reason first.". The option also refuses each first reason other than the red setup reason of the part. The test is the step item `setup`, so red/setup_time passes too. A reason of another part gives "Another part waits for you. Act on each reason first.". Any other reason gives "This part waits for you. Act on the first reason first.".
+- `/limit` with `lineBudget` ("Change the limit", D1) sets the line limit of the task in implementing and in ready. It needs no reason. It keeps the first reason and each part row, and it starts nothing. The answer is 200 with the TaskDto. A driver that works gives 409 "Claude or the checks are working.". Other states give 409 with the state sentence. A value outside 1 to 100,000 gives 400. The form `keep` ("Keep one PR") stays until PS5-S2, because the web still sends it. It keeps its old rule. It needs a size reason in implementing. It clears the size reasons, and the build goes on.
+- StepDetail.ticked (D5, default []): a build, fix, or instruct run row holds all ticks of the tasks file against HEAD. The loop reads them at the run end. A tick that a cut or stopped run left uncommitted thus shows on the next run row too. A commit row holds the ticks of its commit body. The plan commit holds none.
+- StepDetail.tries (D5, default null): `{n, of}`. A fix run of red checks holds its try of "Test-fix tries". A judging run of the own review holds its round of REVIEW_FIX_TRIES. The loop writes it at the run start, so the running row holds it, and the end of the step keeps it. It is for display only. The guards triesLeft and roundsLeft still read the counters of the loop.
+- FindingPayload.skipFix (D3, optional): only option without sets it. mustFixPoint is false for a skipFix point. The point stays in the list of the own review.
+- TaskRowDto.progress.held (D6): the number of parts with the reason held in the part row.
+- Tasks row status (D6): Done, Closed, Failed, and Stopped come first. A first usage reason with armed true shows "Resumes after the usage limit", and needsYou is false. With no first reason and at least one held part, the row shows "On hold", and needsYou is false.
+- Phase of a part: the shared `phaseRow` (src/shared/task-status.ts) picks the open row that gives the phase (part-session.md section 9.7, invariant 8). A waiting message beside another open row gives no phase. An update row beside its resolve or check row gives none either. The web `runningStep` and `partStep` call it.
+- REASON_EXITS has no planned exit. PATCH_LOST moves to src/shared/task.ts and keeps its stored value.
 
 ## 7. UX rules check
 

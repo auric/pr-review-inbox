@@ -150,6 +150,13 @@ TanStack Query: no new key. Task actions go through `useTaskAction` (sets `['tas
 ## 5. Server packages
 
 PS5-S1 (before the web):
+
+Status: built in 77f9137. Deviations from the list below:
+- `ticked` on a run row holds all ticks of the tasks file against HEAD at the run end. These include ticks that a cut or stopped run left uncommitted.
+- `without` marks the must-fix points of every own review after the newest work commit (D3 says the newest own review). These are the reviews of the guard review.
+- Option `setup` refuses each first reason except the red setup reason of the same part. The test is the step item `setup`, so red/setup_time passes too. The old route refused no first reason.
+- Option `setup` starts the part through `goOnReason` or `goOn`, not through `goPart` directly. `goOn` calls `goPart` for a built part. For a part that builds, it starts the build driver.
+- `taskLimitInput` keeps the `keep` form until PS5-S2, because the web still sends it.
 - `shared/dto.ts`: `taskResumeInput` adds `without` and `setup` and the D2 refine; `taskLimitInput` becomes `{version, lineBudget}`; `TaskRowDto.progress.held`.
 - `shared/task.ts`: `PATCH_LOST`; StepDetail `ticked` and `tries`; REASON_EXITS drops `planned` from `without`.
 - `shared/review.ts`: `FindingPayload.skipFix?: boolean`.
@@ -223,7 +230,7 @@ Each package ends green on `bun run check`. A, E, and D also run `bun run test:e
 
 ## 10. Invariants
 
-- A part has at most one open step row, and its phase is the phase of that row (part-session.md 9.7 invariant 8). The web finds the row with `runningStep`.
+- A part has at most one open step row, and its phase is the phase of that row (part-session.md 9.7 invariant 8). The web finds the row with `runningStep`, which calls the shared `phaseRow` (src/shared/task-status.ts).
 - Continue decides by kind and cause, never by text (9.4, storage rule 3). The web follows the same rule (D9).
 - UI code names no product; texts take the runner and the forge from meta. Task screens avoid the words that ui-words forbids.
 - Every task mutation refreshes `['task', id]` and `['tasks']`.
