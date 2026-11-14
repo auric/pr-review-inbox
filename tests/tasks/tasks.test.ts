@@ -632,7 +632,10 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
         .query("INSERT INTO review_item (run, kind, payload_json, body) VALUES ($run, 'finding', '{}', 'f') RETURNING id")
         .get({ run: h.runs(c.body.id)[0]?.id as number }) as { id: number };
       h.db.query("UPDATE task_question SET point = $item WHERE id = $id").run({ item: item.id, id: asked.questions[0]?.id as number });
-      expect((await h.get(c.body.id)).questions.map((q) => q.point)).toEqual([item.id, null]);
+      expect((await h.get(c.body.id)).questions.map((q) => q.point)).toEqual([
+        { id: item.id, check: null, reason: "", cite: "", citeFound: false },
+        null,
+      ]);
       h.db.query("DELETE FROM review_item WHERE id = $id").run({ id: item.id });
       expect((await h.get(c.body.id)).questions.map((q) => q.point)).toEqual([null, null]);
       const stop = await h.json<TaskDto>(`/api/tasks/${c.body.id}/stop`, { body: { version: asked.version } });

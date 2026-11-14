@@ -159,7 +159,17 @@ export type WithdrawnMark = { run: number; reason: string; was: "new" | "accepte
 // run). It waits for Use the new text or Keep mine (items.ts) and never counts as a finding. dropped: Keep mine, Use the new text, or a
 // newer revision ended the wait. revisedBy: on the finding, the revision whose text the user took.
 // demoted: a refuted finding that stays in the list, last in its group (spec.md section 1.8).
+// pushback (pushback.md section 6.23.2): Claude pushed back on the point in the judging row step. citeFound: the cite names a file of the
+// part worktree, a plan file, or answers.md. fixedBy: the commit row of "Fix it anyway", else null.
 export type FindingPayload = AnchoredFinding & {
+  pushback?: {
+    step: number;
+    why: "already" | "invalid" | "plan" | "scope" | null;
+    reason: string;
+    cite: string;
+    citeFound: boolean;
+    fixedBy: number | null;
+  };
   verify?: VerifyMark;
   finderSeverity?: Severity;
   discardedBy?: "verify";

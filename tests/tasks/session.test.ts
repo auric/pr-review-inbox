@@ -57,7 +57,7 @@ const emptyFixture = (root: string) => {
 
 describe("the phase machine in the build (part-session.md section 9.3.3)", () => {
   test(
-    "AC-B299: the phase send helper takes GO setup, CLEAN, GO baseline, CLEAN, GO run, RUN_DONE, CHECKS_GREEN, GO review, CLEAN; then REVIEWED",
+    "AC-B299, AC-B359, AC-B360: the phase send helper takes GO setup, CLEAN, GO baseline, CLEAN, GO run, RUN_DONE, CHECKS_GREEN, GO critic, CLEAN, GO review, CLEAN; then REVIEWED",
     async () => {
       const s = await setup({ seq: { "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }] } });
       await s.build();
@@ -70,9 +70,16 @@ describe("the phase machine in the build (part-session.md section 9.3.3)", () =>
         "GO>building",
         "RUN_DONE>checking",
         "CHECKS_GREEN>idle",
+        "GO>critic",
+        "CLEAN>idle",
         "GO>reviewing",
         "CLEAN>idle",
       ]);
+      // AC-B333: the critic is a review run with model haiku, 30 turns, no rl-reviewer, and no verify phase.
+      const critic = s.runCalls().find((c) => c.argv.includes("haiku")) as Call;
+      expect(critic.argv.slice(critic.argv.indexOf("--max-turns"), critic.argv.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "30"]);
+      expect(Object.keys(critic.agents ?? {})).toEqual(["rl-main"]);
+      expect(s.flow().filter((f) => f.startsWith("review:"))).toEqual(["review:critic:ok", "review:review:ok"]);
       expect(new Set(s.phases.map((p) => p.part))).toEqual(new Set([s.part().id]));
     },
     SLOW,
@@ -105,6 +112,87 @@ describe("the phase machine in the build (part-session.md section 9.3.3)", () =>
       expect(t.phases.at(-1)).toMatchObject({ from: "building", event: "STOPPED", to: "idle" });
     },
     SLOW * 2,
+  );
+});
+
+// part-session.md section 2.7 and ps4-plan.md WP-6: the critic once after the first build commit.
+describe("the critic (part-session.md section 2.7)", () => {
+  const onTest = {
+    ...point("minor"),
+    path: "tests/feature.test.ts",
+    anchorText: "test('feature works', () => {});",
+    body: "A test point.",
+  };
+  const MORE = { path: "repo/src/feature.ts", text: "export const feature = 'works';\nexport const checked = true;\n// More.\n" };
+
+  test(
+    "AC-B359: kept critic points start one judging run, the gate, and the commit; a push-back gives a Log line only; the critic runs once",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          critic: [{ critic: review([point("major"), onTest]) }],
+          "implement:fix": [
+            {
+              writes: [FIXED],
+              judge: [
+                { verdict: "fixed" },
+                { verdict: "pushback", why: "invalid", reason: "The test is fine.", cite: "tests/feature.test.ts:1" },
+              ],
+            },
+            { writes: [MORE] },
+          ],
+          review: [{ review: review([point("blocker")]) }, { review: CLEAN }],
+        },
+      });
+      await s.build();
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+      expect(s.phases.map((p) => `${p.event}>${p.to}`).slice(7, 15)).toEqual([
+        "GO>critic",
+        "POINTS>judging",
+        "RUN_DONE>checking",
+        "CHECKS_GREEN>idle",
+        "GO>reviewing",
+        "POINTS>judging",
+        "RUN_DONE>checking",
+        "CHECKS_GREEN>idle",
+      ]);
+      // The critic runs once: the review round after its commit runs no second critic.
+      expect(s.runCalls().filter((c) => c.argv.includes("haiku"))).toHaveLength(1);
+      expect(s.flow().filter((f) => f.startsWith("review:"))).toEqual(["review:critic:ok", "review:review:ok", "review:review:ok"]);
+      const judging = s.runCalls().find((c) => c.stdin.includes("- Mode: fix")) as Call;
+      expect(judging.context["failure.md"]).toContain("A quick second Claude run reviewed the added lines of this part.");
+      expect(judging.context["failure.md"]).not.toContain("- Check:");
+      expect(judging.stdin).toContain("Judge each point before you change code.");
+      const fix = s.steps().find((x) => x.kind === "fix" && x.item === "critic") as Step;
+      expect(detailOf(s, fix.id).notes.at(-1)).toMatch(
+        /^Claude pushes back on critic point \d+: The test is fine\. Proof: tests\/feature\.test\.ts:1\.$/,
+      );
+      expect(s.db.query("SELECT COUNT(*) AS n FROM task_question WHERE task = $t").get({ t: s.task })).toEqual({ n: 0 });
+      expect(await s.log()).toContain(`Ada Example <ada@example.invalid>|${KEY}: Fix the critic points of part 1`);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B359: a failed critic writes a note and CLEAN, and the own review still runs",
+    async () => {
+      const s = await setup();
+      s.scenario({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          critic: [{ fixture: emptyFixture(s.root), exitCode: 1 }],
+          review: [{ review: CLEAN }],
+        },
+      });
+      await s.build();
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+      expect(s.phases.map((p) => `${p.event}>${p.to}`).slice(7)).toEqual(["GO>critic", "CLEAN>idle", "GO>reviewing", "CLEAN>idle"]);
+      const critic = s.steps().find((x) => x.kind === "review" && x.item === "critic") as Step;
+      expect(critic.state).toBe("failed");
+      expect(detailOf(s, critic.id).notes.at(-1)).toBe("The quick review failed. The own review still runs.");
+    },
+    SLOW,
   );
 });
 

@@ -4,6 +4,7 @@
 // The Questions form (docs/plans/review-v2/spec.md sections 6.12 and 7.1, AC-UX5): each question with "Why it matters", radio
 // buttons with the recommended option preselected and labeled, an optional note, "Send answers", and "Use the recommended answers".
 // The answered questions of earlier rounds show below as a read-only list.
+import { TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -79,9 +80,13 @@ export function QuestionsForm(props: {
               ) : null}
               {q.text}
             </FieldLegend>
-            <FieldDescription id={why} className="m-0 text-sm">
-              Why it matters: {q.why}
-            </FieldDescription>
+            {q.point ? (
+              <PointLines id={why} point={q.point} />
+            ) : (
+              <FieldDescription id={why} className="m-0 text-sm">
+                Why it matters: {q.why}
+              </FieldDescription>
+            )}
             {q.kind === "choice" ? (
               <>
                 {q.options.map((o, k) => (
@@ -155,6 +160,28 @@ export function QuestionsForm(props: {
         )}
       </div>
     </form>
+  );
+}
+
+// ps5-plan.md section 4.4 (AC-B373): the card lines of a push-back question. The radios point at them with aria-describedby.
+function PointLines({ id, point }: { id: string; point: NonNullable<TaskQuestionDto["point"]> }) {
+  return (
+    <div id={id} className="grid gap-0.5 text-sm text-muted-foreground">
+      {point.check && <p className="m-0">Check: {point.check}</p>}
+      <p className="m-0">Reason: {point.reason}</p>
+      <p className="m-0">
+        Proof:{" "}
+        <code translate="no" className="break-all">
+          {point.cite || "none"}
+        </code>
+      </p>
+      {!point.citeFound && (
+        <p className="m-0 flex items-center gap-1.5 text-foreground">
+          <TriangleAlert aria-hidden="true" className="size-4 shrink-0" />
+          The app did not find this place in the code or the plan.
+        </p>
+      )}
+    </div>
   );
 }
 

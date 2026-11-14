@@ -1592,7 +1592,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   }
 
   // docs/plans/review-v2/spec.md section 6.7, own review: the review steps of a PR run on a snapshot of the part commit. The run has no
-  // PR, so it gets no history, questions, PR context, or notes.
+  // PR, so it gets no questions, PR context, or notes. Its history.md lists only the accepted push-backs of the part.
   async function taskReviewSteps(j: TaskJob, t: TaskReviewStart, held: { ws?: Workspace }): Promise<Ending> {
     const c = await check();
     if (!c.ok) return failure(c.kind === "auth" ? "auth" : "process", c.message);
@@ -1645,7 +1645,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const context: ReviewContext = {
       taskFile: true,
       attachments: t.attachments.length > 0,
-      history: false,
+      // pushback.md section 6.23.6: the accepted push-backs of the part (loop.ts reviewRun).
+      history: t.files.some((f) => f.name === "history.md"),
       questions: false,
       rereview: false,
       instructions: instructions.text !== "",

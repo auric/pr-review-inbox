@@ -10,7 +10,7 @@
 import type { Database } from "bun:sqlite";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { initialTransition, transition } from "xstate";
 import { indentBlock, oneLine } from "../../shared/consult";
 import type { TaskAllowInput, TaskAnswersInput, TaskResumeInput } from "../../shared/dto";
@@ -50,9 +50,9 @@ import {
 import { foundOf } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
-import type { Profile } from "../review/catalog";
+import { DEFAULT_PROFILE, type Profile, SHIPPED_PROFILES } from "../review/catalog";
 import { identity } from "../review/clone";
-import { continueDiffFile, continueFile } from "../review/context-files";
+import { continueDiffFile, continueFile, pushbackHistory } from "../review/context-files";
 import { fold } from "../review/edits";
 import { git } from "../review/git";
 import type { ReviewJobs, TaskReviewStart } from "../review/jobs";
@@ -226,6 +226,28 @@ const HELD_TEXT = (ord: number) => `Part ${ord} is on hold. Its work is kept.`;
 const NO_ARM = "No resume is armed.";
 // setTimeout takes at most 2^31 - 1 ms.
 const TIMER_MAX_MS = 2 ** 31 - 1;
+// part-session.md section 2.7: the note of a failed or cut critic, and the critic run (AC-B333).
+const CRITIC_FAILED = "The quick review failed. The own review still runs.";
+// ps4-plan.md section 8 item 2: the prompt and the modules of the shipped default profile, so the user's profile edits do not reach it.
+const SHIPPED = SHIPPED_PROFILES.find((p) => p.id === DEFAULT_PROFILE) as Profile;
+const CRITIC_PROFILE: Profile = {
+  ...SHIPPED,
+  model: "haiku",
+  maxTurns: 30,
+  effort: null,
+  advisor: null,
+  languageChecks: false,
+  reviewer: { ...SHIPPED.reviewer, mode: "off" },
+  verifier: { ...SHIPPED.verifier, mode: "off" },
+};
+// pushback.md sections 6.23.4 and 6.23.5: the options of a push-back question, the 400 of an answer without a choice, and the discard
+// reason of an accepted push-back by its why.
+const PUSHBACK_OPTIONS = [
+  { label: "Accept the push-back", detail: "The point closes. Later reviews of this part skip it." },
+  { label: "Fix it anyway", detail: "Claude fixes the point in the next step." },
+];
+const PUSHBACK_FIRST = "Judge each push-back of Claude first.";
+const DISCARD_OF = { already: "bug", invalid: "bug", scope: "place", plan: "intended" } as const;
 
 // The loop stops here: a reason now blocks the task, or the task stopped. The reason is already stored.
 class Halt extends Error {}
@@ -389,16 +411,28 @@ export function checkFailure(r: Extract<ChecksResult, { status: "ran" }>, base: 
 }
 
 type Point = { id: number; payload: FindingPayload };
+type FindingPushback = NonNullable<FindingPayload["pushback"]>;
 
 // The points of the own review that the loop fixes: confirmed blocker and major findings (spec.md section 6.7).
 export const mustFix = (points: Point[]) => points.filter((p) => mustFixPoint(p.payload));
 
-// context/failure.md of a fix step after the own review: the confirmed points with path:line.
-export function reviewFailure(points: Point[]): ContextFile {
-  const out = ["# Review points", "", "Claude's own review of this part confirmed these points. Fix the cause of each one.", ""];
+// pushback.md section 6.23.3: the header of failure.md after the own review. The critic has no check step (part-session.md section 2.7).
+export const REVIEW_HEAD =
+  "A second Claude run reviewed this part. Its check step confirmed these points. Judge each one against the code and the plan.";
+export const CRITIC_HEAD =
+  "A quick second Claude run reviewed the added lines of this part. Judge each point against the code and the plan.";
+
+// context/failure.md of a judging run: the points with path:line, and the check reason and evidence of each checked point.
+export function reviewFailure(points: Point[], head = REVIEW_HEAD): ContextFile {
+  const out = ["# Review points", "", head, ""];
   for (const { id, payload: f } of points) {
     out.push(`## Point ${id}: ${f.severity} at ${oneLine(f.path)}:${f.line}`, "", indentBlock(f.body.trim() || "(no text)"), "");
-    if (f.trigger?.trim()) out.push(`- Trigger: ${oneLine(f.trigger)}`, "");
+    const lines = [
+      ...(f.trigger?.trim() ? [`- Trigger: ${oneLine(f.trigger)}`] : []),
+      ...(f.verify?.reason ? [`- Check: ${oneLine(f.verify.reason)}`] : []),
+      ...(f.verify?.evidence ? [`- Evidence: ${oneLine(f.verify.evidence)}`] : []),
+    ];
+    if (lines.length) out.push(...lines, "");
   }
   return { name: "failure.md", text: out.join("\n") };
 }
@@ -582,7 +616,25 @@ const Q = {
   resolvedUpdate: `SELECT MAX(id) AS id FROM task_step WHERE part = $part AND kind = 'update' AND state = 'ok' AND id > ${MARK}
     AND json_extract(detail_json, '$.update.result') = 'green' AND json_extract(detail_json, '$.update.resolved') = 1
     AND COALESCE(json_extract(detail_json, '$.update.undone'), 0) = 0`,
-  reviewsAfter: "SELECT run FROM task_step WHERE part = $part AND kind = 'review' AND state = 'ok' AND run IS NOT NULL AND id > $after",
+  // ps4-plan.md section 1 item 4: a critic row is a review row with item critic. It is no own review.
+  reviewsAfter: `SELECT run FROM task_step WHERE part = $part AND kind = 'review' AND item = 'review' AND state = 'ok' AND run IS NOT NULL
+    AND id > $after`,
+  // ps4-plan.md section 2.2, guard critic: a critic row that ended ok or failed after the restart mark. A cancelled critic runs again.
+  criticRan: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'review' AND item = 'critic' AND state IN ('ok', 'failed')
+    AND id > ${MARK} LIMIT 1`,
+  // The points of a review run that the user did not discard (an accepted push-back, pushback.md section 6.23.5).
+  livePoints: "SELECT id, payload_json FROM review_item WHERE run = $run AND kind = 'finding' AND status <> 'discarded' ORDER BY id",
+  item: "SELECT id, payload_json FROM review_item WHERE id = $id AND kind = 'finding' AND status <> 'discarded'",
+  setPayload: "UPDATE review_item SET payload_json = $payload, revision = revision + 1 WHERE id = $id",
+  discard: "UPDATE review_item SET status = 'discarded', payload_json = $payload, revision = revision + 1 WHERE id = $id",
+  // pushback.md section 6.23.4 item 3: the push-back questions of one judging run share one round.
+  round: "SELECT COALESCE(MAX(round), 0) + 1 AS n FROM task_question WHERE task = $task",
+  pushback: `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, recommended, step, point, asked_at)
+    VALUES ($task, 'loop', $round, $ord, $text, $why, 'choice', $options, NULL, $step, $point, $now)`,
+  // pushback.md section 6.23.6: the accepted push-backs of a part for context/history.md of its next own review.
+  accepted: `SELECT i.id, i.payload_json FROM review_item i JOIN task_step s ON s.run = i.run WHERE s.part = $part AND s.kind = 'review'
+    AND s.item = 'review' AND i.kind = 'finding' AND i.status = 'discarded' AND json_extract(i.payload_json, '$.pushback') IS NOT NULL
+    ORDER BY i.id`,
   reviewAt: `SELECT s.id, s.run FROM task_step s JOIN review_run r ON r.id = s.run WHERE s.part = $part AND s.kind = 'review'
     AND s.state = 'ok' AND r.idem_key LIKE $key ORDER BY s.id DESC LIMIT 1`,
   redBeforeSeen: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'check' AND item = $item
@@ -627,7 +679,7 @@ const SHELL_STEPS: ReadonlySet<StepMode> = new Set(["implement", "fix", "instruc
 const SESSION_MODES: ReadonlySet<StepMode> = new Set(["implement", "fix", "instruct"]);
 const NO_FACTS = Object.fromEntries(PHASE_GUARDS.map((k) => [k, false])) as PhaseContext;
 // part-session.md section 2.6 item 5: the subject of the commit of each kind of gate.
-type Round = "build" | "checks" | "review";
+type Round = "build" | "checks" | "critic" | "review";
 // The item of the check and fix rows, the item and subject of the commit, and the step.md of the fix runs of one gate.
 type Gate = { check: string; commit: string; subject: string; step: (attempt: number) => ContextFile };
 
@@ -1132,6 +1184,7 @@ export function createLoop(opts: LoopOptions) {
       extra?: string[];
       again?: boolean;
       session?: StepInput["session"] | null;
+      points?: boolean;
     },
   ): Promise<{ r: StepOutcome | null; shell: StepShell | null; unchanged: boolean }> {
     let waiting: number | null = o.row ?? null;
@@ -1192,6 +1245,7 @@ export function createLoop(opts: LoopOptions) {
         extra: beside(c),
         ...(shell && { shell }),
         ...(session && { session }),
+        ...(o.points && { points: true }),
         dirtyBefore: before,
         now,
       });
@@ -1334,6 +1388,8 @@ export function createLoop(opts: LoopOptions) {
       row?: number;
       instructions?: string;
       purpose?: SessionPurpose;
+      // failure.md holds review points (pushback.md section 6.23.8).
+      points?: boolean;
     },
   ): Promise<StepOutcome & { result: ImplementResult; unchanged: boolean; ticks: string[] }> {
     let extra: string[] = [];
@@ -1668,6 +1724,7 @@ export function createLoop(opts: LoopOptions) {
     subject: {
       build: `${c.label}: ${oneLine(c.title)}`,
       checks: `${c.label}: Fix the checks of part ${c.part.ord}`,
+      critic: `${c.label}: Fix the critic points of part ${c.part.ord}`,
       review: `${c.label}: Fix the review points of part ${c.part.ord}`,
     }[round],
     step: (a) => partStepFile(c.plan, c.plan.parts, "checks", a),
@@ -1675,17 +1732,18 @@ export function createLoop(opts: LoopOptions) {
 
   // part-session.md section 2.6 items 5 and 6: the gate, then one commit. The gate stays green at the new HEAD, so GO goes on to the
   // review. ps4-plan.md section 1 gap 16 (AC-B347): a green gate at an unchanged HEAD runs no command. The phase is checking at the start
-  // and idle at the end.
-  async function checkGate(c: Ctx, g: Gate) {
+  // and idle at the end. Returns the commit row, or null when nothing committed.
+  async function checkGate(c: Ctx, g: Gate): Promise<number | null> {
     if (await gateDone(c)) {
       send(c, { type: "CHECKS_GREEN" });
-      return;
+      return null;
     }
     const allow = allFiles(c);
     const k = await greenOrFix(c, g.check, allow, g.step);
-    await commit(c, g.commit, g.subject, allow);
+    const step = await commit(c, g.commit, g.subject, allow);
     patchStep(c.db, k.step, { head: await headOf(c.wt) });
     send(c, { type: "CHECKS_GREEN" });
+    return step;
   }
 
   // Saves the uncommitted changes as a patch, then returns the worktree to its last commit (spec.md section 6.7, Continue). Several
@@ -1718,8 +1776,10 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // The own review run (kind review, task set, pr NULL) on a snapshot of the part head. sub: a changed submodule instead of the main
-  // repository; its run reads that repository's base..head (spec.md section 6.16.5, Snapshots).
-  async function reviewRun(c: Ctx, sub?: ChangedSub): Promise<{ step: number; points: Point[] }> {
+  // repository; its run reads that repository's base..head (spec.md section 6.16.5, Snapshots). critic: the critic run of
+  // part-session.md section 2.7. A failed or cut critic gives a note and no point.
+  async function reviewRun(c: Ctx, sub?: ChangedSub, critic = false): Promise<{ step: number; points: Point[] }> {
+    const item = critic ? "critic" : "review";
     let waiting: number | null = null;
     for (;;) {
       await gate(c);
@@ -1728,11 +1788,22 @@ export function createLoop(opts: LoopOptions) {
       const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
       const issue = task.files.map((f) => f.text).join("\n\n");
       const head = sub ? sub.head : await headOf(c.wt);
-      const prefix = `task:${c.id}:part:${c.part.id}:review:${sub ? `${sub.tree.row.id}:` : ""}${head}:`;
+      const prefix = `task:${c.id}:part:${c.part.id}:${item}:${sub ? `${sub.tree.row.id}:` : ""}${head}:`;
       // spec.md section 6.7, own review: a review of this repository at this head that ended ok gives its points again.
-      const done = c.db.query(Q.reviewAt).get({ part: c.part.id, key: `${prefix}%` }) as { id: number; run: number } | null;
+      const done = critic
+        ? null
+        : (c.db.query(Q.reviewAt).get({ part: c.part.id, key: `${prefix}%` }) as { id: number; run: number } | null);
       if (done) return { step: done.id, points: pointsOf(c, done.run) };
-      const attempt = nextAttempt(c, "review", "review");
+      const attempt = nextAttempt(c, "review", item);
+      // pushback.md section 6.23.6 (AC-B111): the accepted push-backs of the part, so the own review does not raise them again.
+      const history = critic
+        ? null
+        : pushbackHistory(
+            (c.db.query(Q.accepted).all({ part: c.part.id }) as { id: number; payload_json: string }[]).map((x) => ({
+              id: x.id,
+              payload: JSON.parse(x.payload_json) as FindingPayload,
+            })),
+          );
       const src = sub
         ? sourceOf(
             c.trees.map((x) => x.row),
@@ -1756,7 +1827,8 @@ export function createLoop(opts: LoopOptions) {
         task: c.id,
         kind: "review",
         key: `${prefix}${attempt}`,
-        profile: c.profile,
+        profile: critic ? CRITIC_PROFILE : c.profile,
+        ...(critic && { critic: true as const }),
         project: src?.project ?? c.t.project,
         repo: src?.repo ?? c.t.repo,
         base: sub ? sub.base : c.base,
@@ -1768,10 +1840,11 @@ export function createLoop(opts: LoopOptions) {
             name: "pr.md",
             text: `# ${c.label}: ${oneLine(c.title)}\n\nThis change has no pull request yet. The app builds it for task ${c.key} on the branch ${c.part.branch}.${sub ? ` This review covers the ${sub.tree.row.role === "added" ? "repository" : "submodule"} at ${oneLine(sub.tree.full)} only.` : ""}\n\n## Goal\n\n${goals.join("\n")}\n`,
           },
+          ...(history ? [history] : []),
         ],
         attachments: task.attachments,
         started: (d, run) => {
-          step = runningStep(d, { task: c.id, part: c.part.id, kind: "review", run, item: "review", attempt }, waiting, now());
+          step = runningStep(d, { task: c.id, part: c.part.id, kind: "review", run, item, attempt }, waiting, now());
         },
         finish: (d, run, e: Ending) => {
           const ok = e.status === "completed" || e.status === "incomplete";
@@ -1799,7 +1872,7 @@ export function createLoop(opts: LoopOptions) {
       guard(c);
       const s = review.taskRun(c.db, start, beside(c));
       if (s.status === 409) {
-        waiting = await waitSlot(c, { kind: "review", item: "review", attempt }, s.conflict, waiting);
+        waiting = await waitSlot(c, { kind: "review", item, attempt }, s.conflict, waiting);
         continue;
       }
       changed(c.id);
@@ -1807,8 +1880,12 @@ export function createLoop(opts: LoopOptions) {
       changed(c.id);
       const r = ended as Ended | null;
       // part-session.md section 9.3.4 (Q-SM1): a failed review of the build, of a follow-up, or of an update gives the reason error/run.
-      // ps4-plan.md section 1 item 20: a review that hit the usage limit gives usage.
+      // ps4-plan.md section 1 item 20: a review that hit the usage limit gives usage. The phase critic has no WAIT edge.
       if (!r || r.cancelled) throw new Halt();
+      if (!r.ok && critic) {
+        patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, CRITIC_FAILED] });
+        return { step: r.step, points: [] };
+      }
       if (!r.ok && r.usage) block(c, usageReason(c, r.step, r.resetsAt));
       if (!r.ok)
         block(c, {
@@ -1822,7 +1899,7 @@ export function createLoop(opts: LoopOptions) {
   }
 
   const pointsOf = (c: Ctx, run: number): Point[] =>
-    (c.db.query(Q.points).all({ run }) as { id: number; payload_json: string }[]).map((x) => ({
+    (c.db.query(Q.livePoints).all({ run }) as { id: number; payload_json: string }[]).map((x) => ({
       id: x.id,
       payload: JSON.parse(x.payload_json) as FindingPayload,
     }));
@@ -1854,10 +1931,119 @@ export function createLoop(opts: LoopOptions) {
     }
     c.rounds++;
     const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
-    await claude(c, "fix", "review", { allow: allFiles(c), step, failure: reviewFailure(must), purpose: "review" });
+    const r = await claude(c, "fix", "review", { allow: allFiles(c), step, failure: reviewFailure(must), purpose: "review", points: true });
+    const back = judgePoints(c, r, must);
     send(c, { type: "RUN_DONE" });
     await checkGate(c, roundGate(c, "review"));
+    askPushbacks(c, r.step, back, must);
     return true;
+  }
+
+  // part-session.md section 2.7 (AC-B359, AC-B360): the critic once after the first build commit. A failed or cut critic gave a note
+  // and no point. Kept points start one judging run, then the gate and one commit. A push-back gives a Log line only. The phase is critic
+  // at the start and idle at the end.
+  async function criticRun(c: Ctx) {
+    const { points } = await reviewRun(c, undefined, true);
+    if (!points.length) {
+      send(c, { type: "CLEAN" });
+      return;
+    }
+    send(c, { type: "POINTS" });
+    const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
+    const failure = reviewFailure(points, CRITIC_HEAD);
+    const r = await claude(c, "fix", "critic", { allow: allFiles(c), step, failure, purpose: "critic", points: true });
+    const back = judgePoints(c, r, points);
+    if (back.length)
+      patchStep(c.db, r.step, {
+        notes: [
+          ...stepDetailOf(c.db, r.step).notes,
+          ...back.map((b) => `Claude pushes back on critic point ${b.id}: ${oneLine(b.reason)} Proof: ${oneLine(b.cite) || "none"}.`),
+        ],
+      });
+    send(c, { type: "RUN_DONE" });
+    await checkGate(c, roundGate(c, "critic"));
+  }
+
+  // pushback.md section 6.23.4 item 4: the path before ":" or "#" of a cite is a file of the part worktree, a plan file, or answers.md.
+  // A cite is model output, so a path outside the worktree never counts.
+  function citeFound(c: Ctx, cite: string): boolean {
+    const path = (cite.trim().split(/[:#]/)[0] ?? "").replace(/^\.\//, "");
+    if (path === "answers.md" || docNames(c.size).some((n) => path === `spec/${n}.md`)) return true;
+    const segs = path.split(/[\\/]/);
+    return path !== "" && !isAbsolute(path) && !segs.includes("..") && existsSync(onDisk(c.wt, path));
+  }
+
+  type Pushback = { id: number; why: FindingPushback["why"]; reason: string; cite: string; citeFound: boolean };
+  // pushback.md section 6.23.4 items 1 and 4 (AC-B361): the verdicts of a judging run on the points of its failure.md. An unknown ID
+  // drops with a note. A missing entry gives "No verdict for point N" and counts as fixed. forced: the user chose "Fix it anyway" for
+  // each point, so a push-back drops with a note (section 6.23.6). Each other push-back gets payload.pushback. Returns them.
+  function judgePoints(c: Ctx, r: { step: number; result: ImplementResult }, points: Point[], forced = false): Pushback[] {
+    const ids = new Set(points.map((p) => p.id));
+    const seen = new Set<number>();
+    const notes: string[] = [];
+    const back: Pushback[] = [];
+    for (const v of r.result.points) {
+      if (!ids.has(v.id)) {
+        notes.push(`Claude gave a verdict on point ${v.id}, which failure.md does not hold. The app dropped it.`);
+        continue;
+      }
+      if (seen.has(v.id)) {
+        notes.push(`Claude gave more than one verdict on point ${v.id}. The app used the first one.`);
+        continue;
+      }
+      seen.add(v.id);
+      if (v.verdict !== "pushback") continue;
+      if (forced) {
+        notes.push(`The user decided to fix point ${v.id}.`);
+        continue;
+      }
+      back.push({ id: v.id, why: v.why, reason: v.reason, cite: v.cite, citeFound: citeFound(c, v.cite) });
+    }
+    for (const id of ids) if (!seen.has(id)) notes.push(`No verdict for point ${id}.`);
+    const kept: Pushback[] = [];
+    c.db.transaction(() => {
+      if (notes.length) patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, ...notes] });
+      for (const { id, ...b } of back) {
+        const row = c.db.query(Q.item).get({ id }) as { payload_json: string } | null;
+        if (!row) continue;
+        const payload: FindingPayload = { ...JSON.parse(row.payload_json), pushback: { step: r.step, ...b, fixedBy: null } };
+        c.db.query(Q.setPayload).run({ id, payload: JSON.stringify(payload) });
+        kept.push({ id, ...b });
+      }
+    })();
+    return kept;
+  }
+
+  // pushback.md section 6.23.4 item 3 (AC-B361): after the gate, one question per push-back with point set and no recommended answer,
+  // then the reason question/claude at idle. step: the judging row. Its part halts as claude() does when its row cannot keep the reason.
+  function askPushbacks(c: Ctx, step: number, back: Pushback[], points: Point[]) {
+    if (!back.length) return;
+    if (onHold(c.db, c.part.id)) throw new Halt();
+    if (held(c) && !keeps(c, step)) halt(c, step);
+    c.db.transaction(() => {
+      const round = (c.db.query(Q.round).get({ task: c.id }) as { n: number }).n;
+      for (const [ord, b] of back.entries()) {
+        const f = (points.find((x) => x.id === b.id) as Point).payload;
+        c.db.query(Q.pushback).run({
+          task: c.id,
+          round,
+          ord,
+          text: `Review point ${b.id} (${f.severity}, ${oneLine(f.path)}:${f.line}): ${oneLine(f.title || f.body).slice(0, 200)}`,
+          why: `Claude: ${oneLine(b.reason)} Proof: ${oneLine(b.cite) || "none"}`,
+          options: JSON.stringify(PUSHBACK_OPTIONS),
+          step,
+          point: b.id,
+          now: now(),
+        });
+      }
+    })();
+    const n = back.length;
+    block(c, {
+      kind: "question",
+      cause: "claude",
+      step,
+      text: `Needs you: Claude disagrees with ${n === 1 ? "1 review point" : `${n} review points`} of part ${c.part.ord}. Judge ${n === 1 ? "it" : "them"}.`,
+    });
   }
 
   // The own review after an update with a resolve run (part-session.md section 9.3.3, Q57): GO with the guard review, round by round,
@@ -2144,6 +2330,11 @@ export function createLoop(opts: LoopOptions) {
       follow: c.db.query(Q.follow).get({ part: c.part.id }) !== null,
       run: c.part.state === "implementing" && openTasks(c).length > 0,
       checks: !(await gateDone(c)),
+      // ps4-plan.md section 2.2, guard critic: once per build, after the restart mark.
+      critic:
+        c.part.state === "implementing" &&
+        c.db.query(Q.buildCommit).get({ part: c.part.id }) !== null &&
+        c.db.query(Q.criticRan).get({ part: c.part.id }) === null,
       review: reviewDue(c),
     };
   }
@@ -2172,6 +2363,7 @@ export function createLoop(opts: LoopOptions) {
         } else if (at === "building") await buildRun(c);
         else if (at === "checking")
           await checkGate(c, roundGate(c, c.db.query(Q.buildCommit).get({ part: c.part.id }) ? "checks" : "build"));
+        else if (at === "critic") await criticRun(c);
         else if (at === "reviewing") await reviewRound(c);
         else throw new Error(`GO picked the phase ${at}, which the loop does not run.`);
       }
@@ -2183,16 +2375,25 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // ps4-plan.md WP-3, phase following: one follow-up run of the part session on the oldest waiting follow-up row. An instruct row runs
-  // "Your instructions" (spec.md section 6.18.2). A fix row with item points runs "Fix these too" with the open points. A run that
-  // changes no file gives back the reason before the follow-up and returns false. Else the gate and one commit follow. The phase is
-  // following at the start and idle at the end.
+  // "Your instructions" (spec.md section 6.18.2). A fix row with item points runs "Fix these too" with the open points. A fix row with
+  // item pushback runs "Fix it anyway" with the points in its findings (pushback.md section 6.23.6). A run that changes no file gives
+  // back the reason before the follow-up and returns false. Else the gate and one commit follow. The push-backs of a fix row get their
+  // questions at the end (AC-B363). The phase is following at the start and idle at the end.
   async function followRun(c: Ctx): Promise<boolean> {
     const f = c.db.query(Q.follow).get({ part: c.part.id }) as { id: number; kind: StepMode; item: string };
     c.follow ??= f.id;
     const info = stepDetailOf(c.db, f.id).instruct;
     const allow = allFiles(c);
     const step = (a: number) => partStepFile(c.plan, c.plan.parts, info ? "instruct" : "review", a);
-    const points = info ? [] : openPoints(c.db, c.id);
+    const forced = f.item === "pushback";
+    const points: Point[] = info
+      ? []
+      : forced
+        ? stepDetailOf(c.db, f.id).findings.flatMap((id) => {
+            const row = c.db.query(Q.item).get({ id }) as { payload_json: string } | null;
+            return row ? [{ id, payload: JSON.parse(row.payload_json) as FindingPayload }] : [];
+          })
+        : openPoints(c.db, c.id);
     if (!info && !points.length) {
       endStep(c.db, f.id, "cancelled", { notes: [NO_POINTS] }, now());
       send(c, { type: "RUN_DONE" }, { unchanged: true });
@@ -2204,8 +2405,9 @@ export function createLoop(opts: LoopOptions) {
       f.item,
       info
         ? { allow, step, row: f.id, instructions: info.text, purpose: "message" }
-        : { allow, step, row: f.id, failure: reviewFailure(points), purpose: "points" },
+        : { allow, step, row: f.id, failure: reviewFailure(points), purpose: forced ? "review" : "points", points: true },
     );
+    const back = info ? [] : judgePoints(c, r, points, forced);
     if (!r.changed.length || r.unchanged) {
       // spec.md section 6.18.2, step 2: no check, commit, or review runs, and the task waits as before the follow-up.
       send(c, { type: "RUN_DONE" }, { unchanged: true });
@@ -2213,18 +2415,35 @@ export function createLoop(opts: LoopOptions) {
         patchStep(c.db, r.step, { instruct: { ...info, result: "no_change" } });
         reason(c.db, c.id, info.blockedBefore);
       }
+      askPushbacks(c, r.step, back, points);
       return false;
     }
     send(c, { type: "RUN_DONE" });
-    const subject = info ? firstLine(info.text) : `Fix the small review points of part ${c.part.ord}`;
+    const subject = info
+      ? firstLine(info.text)
+      : forced
+        ? `Fix the chosen review points of part ${c.part.ord}`
+        : `Fix the small review points of part ${c.part.ord}`;
     // ps4-plan.md section 2.5: a fix row of the gate maps to fixing, so its item is no follow-up item.
-    await checkGate(c, { check: info ? f.item : "checks", commit: f.item, subject: `${c.label}: ${subject}`, step });
+    const done = await checkGate(c, { check: info ? f.item : "checks", commit: f.item, subject: `${c.label}: ${subject}`, step });
     if (info) patchStep(c.db, r.step, { instruct: { ...info, result: "done", committed: true } });
+    // pushback.md section 6.23.6: the commit of "Fix it anyway" sets fixedBy.
+    if (forced && done !== null)
+      c.db.transaction(() => {
+        for (const p of points) {
+          const row = c.db.query(Q.item).get({ id: p.id }) as { payload_json: string } | null;
+          const payload = row ? (JSON.parse(row.payload_json) as FindingPayload) : null;
+          if (payload?.pushback)
+            c.db
+              .query(Q.setPayload)
+              .run({ id: p.id, payload: JSON.stringify({ ...payload, pushback: { ...payload.pushback, fixedBy: done } }) });
+        }
+      })();
+    askPushbacks(c, r.step, back, points);
     return true;
   }
 
-  // part-session.md section 9.3.3: the build of one part. When no guard of GO holds, the part has no work: REVIEWED and PART_READY. The
-  // critic comes in WP-6.
+  // part-session.md section 9.3.3: the build of one part. When no guard of GO holds, the part has no work: REVIEWED and PART_READY.
   async function runPart(db: Database, t: TaskRow, part: PartRow) {
     const repo = repoSettings(db, t.project, t.repo);
     if (!repo.commands.some((x) => x.kind === "test")) {
@@ -2448,8 +2667,10 @@ export function createLoop(opts: LoopOptions) {
     const r = db.query(Q.step).get({ id: row, task: id }) as { part: number; kind: StepMode; item: string };
     const attempt = (db.query(Q.attempt).get({ part: r.part, kind: r.kind, item: r.item }) as { n: number }).n;
     const next = insertStep(db, { task: id, part: r.part, kind: r.kind, item: r.item, attempt, state: "waiting" }, at);
-    const info = stepDetailOf(db, row).instruct;
+    const { instruct: info, findings } = stepDetailOf(db, row);
     if (info) patchStep(db, next, { instruct: { ...info, result: null, committed: false } });
+    // pushback.md section 6.23.6: the points of "Fix it anyway".
+    if (r.item === "pushback") patchStep(db, next, { findings });
     return next;
   };
   const lastBefore = (db: Database, part: number, row: number) =>
@@ -3541,7 +3762,7 @@ export function createLoop(opts: LoopOptions) {
       if ("status" in t) return t;
       const first = blockedOf(t);
       if (first?.kind !== "question") return conflict(db, id, "No question waits for an answer.");
-      const open = db.query(Q.openLoop).all({ task: id }) as (QuestionRow & { step: number | null })[];
+      const open = db.query(Q.openLoop).all({ task: id }) as (QuestionRow & { step: number | null; point: number | null })[];
       if (!open.length) return conflict(db, id, "No question waits for an answer.");
       const given = new Map(input.answers.map((a) => [a.question, a]));
       if (given.size !== input.answers.length) return { status: 400, error: "Each question takes one answer." };
@@ -3549,6 +3770,8 @@ export function createLoop(opts: LoopOptions) {
         if (!open.some((x) => x.id === q)) return { status: 400, error: `Question ${q} does not wait for an answer.` };
       for (const q of open) {
         const a = given.get(q.id);
+        // pushback.md section 6.23.5 (AC-B362): a push-back has no recommended answer, so it needs the user's choice.
+        if (q.point !== null && (a?.choice ?? null) === null) return { status: 400, error: PUSHBACK_FIRST };
         if (!a && !input.recommended) return { status: 400, error: "Answer each question, or use the recommended answers." };
         const problem = a && answerProblem(q, a);
         if (problem) return { status: 400, error: problem };
@@ -3567,11 +3790,33 @@ export function createLoop(opts: LoopOptions) {
           // spec.md section 6.25.4: one submit answers the waiting questions of other parts too.
           if (q.step !== null) db.query(Q.clearAsked).run({ task: id, step: q.step });
         }
+        // pushback.md sections 6.23.5 and 6.23.6 (AC-B362): Accept discards the point with the reason of its why. "Fix it anyway" keeps
+        // it, and one waiting fix row with item pushback per part takes those points.
+        const forced = new Map<number, number[]>();
+        for (const q of open) {
+          if (q.point === null || q.step === null) continue;
+          const row = db.query(Q.item).get({ id: q.point }) as { payload_json: string } | null;
+          if (!row) continue;
+          if (given.get(q.id)?.choice === 0) {
+            const { discardReason: _, ...p } = JSON.parse(row.payload_json) as FindingPayload & { discardReason?: unknown };
+            const why = p.pushback?.why;
+            db.query(Q.discard).run({ id: q.point, payload: JSON.stringify(why ? { ...p, discardReason: { code: DISCARD_OF[why] } } : p) });
+            continue;
+          }
+          const part = (db.query(Q.step).get({ id: q.step, task: id }) as StepRow).part as number;
+          forced.set(part, [...(forced.get(part) ?? []), q.point]);
+        }
+        for (const [part, findings] of forced) {
+          const attempt = (db.query(Q.attempt).get({ part, kind: "fix", item: "pushback" }) as { n: number }).n;
+          const row = insertStep(db, { task: id, part, kind: "fix", item: "pushback", attempt, state: "waiting" }, at);
+          patchStep(db, row, { findings });
+        }
         // The first reason clears only when its step owns an answered question. Else it stays, and the version moves.
         const own = first.step !== null && open.some((q) => q.step === first.step);
         setBlocked(db, { task: id, version: t.version }, own ? null : first, at);
         if (!free(db, id)) return false;
-        if (asked && isFollow(asked)) requeue(db, id, asked.id, at);
+        // A push-back question asks about a judging run that already committed, so that run does not run again.
+        if (asked && isFollow(asked) && !open.some((q) => q.step === asked.id && q.point !== null)) requeue(db, id, asked.id, at);
         return true;
       })();
       if (go) goOn(db, id, asked?.part ?? null, true);

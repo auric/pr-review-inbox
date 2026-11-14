@@ -745,6 +745,15 @@ const POINTS = {
   items: "SELECT id, payload_json FROM review_item WHERE run = $run AND kind = 'finding' AND status <> 'discarded' ORDER BY id",
 };
 
+// ps5-plan.md section 4.4: the card of a push-back question from its review item (pushback.md section 6.23.2).
+function pushbackOf(db: Database, id: number): TaskQuestionDto["point"] {
+  const r = db.query("SELECT payload_json FROM review_item WHERE id = $id").get({ id }) as { payload_json: string } | null;
+  if (!r) return null;
+  const p = JSON.parse(r.payload_json) as FindingPayload;
+  const b = p.pushback;
+  return { id, check: p.verify?.reason ?? null, reason: b?.reason ?? "", cite: b?.cite ?? "", citeFound: b?.citeFound ?? false };
+}
+
 // The points that "Fix these too" fixes: the newest own review of a part that waits for its PR, without the points that the
 // verify phase discarded or demoted, or that the user discarded. Empty after the commit of their fix.
 export function openPoints(db: Database, id: number): (TaskPointDto & { payload: FindingPayload })[] {
@@ -1438,7 +1447,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       recommended: q.recommended,
       answer: q.answer_json === null ? null : (JSON.parse(q.answer_json) as Answer),
       step: q.step,
-      point: q.point,
+      point: q.point === null ? null : pushbackOf(db, q.point),
       askedAt: q.asked_at,
       answeredAt: q.answered_at,
     })),

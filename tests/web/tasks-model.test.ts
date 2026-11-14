@@ -2082,7 +2082,8 @@ describe("ps5-plan.md section 3: the working rows", () => {
 // ps5-plan.md section 4.4 (AC-B373, AC-B374): a push-back question has no recommended answer and needs an option. It can wait in
 // ready, so the questions screen reads the loop questions there too.
 describe("ps5-plan.md section 4.4: push-back questions", () => {
-  const pushback = question({ id: 5, source: "loop", point: 31, recommended: 0 });
+  const card = { id: 31, check: "The loop reads past the end.", reason: "The guard at line 4 stops it.", cite: "src/a.ts:4" };
+  const pushback = question({ id: 5, source: "loop", point: { ...card, citeFound: true }, recommended: 0 });
   const form = (questions: TaskQuestionDto[]) =>
     renderToStaticMarkup(createElement(QuestionsForm, { questions, busy: false, onSend: () => {}, onRecommended: () => {} }));
 
@@ -2101,6 +2102,20 @@ describe("ps5-plan.md section 4.4: push-back questions", () => {
     expect(html).toMatch(/id="tq-6-0"[^>]*checked/);
     const plain = form([question({ id: 6, source: "loop" })]);
     expect(plain).toContain("Use the recommended answers");
+  });
+
+  test("a push-back card shows the check, the reason, and the proof; the warning only when the app did not find the proof", () => {
+    const html = form([pushback]);
+    expect(html).toContain("Check: The loop reads past the end.");
+    expect(html).toContain("Reason: The guard at line 4 stops it.");
+    expect(html).toMatch(/Proof: <code translate="no"[^>]*>src\/a\.ts:4<\/code>/);
+    expect(html).not.toContain("Why it matters");
+    expect(html).toMatch(/id="tq-5-0"[^>]*aria-describedby="tq-5-why"/);
+    expect(html).toMatch(/<div id="tq-5-why"/);
+    expect(html).not.toContain("The app did not find this place");
+    const lost = form([question({ id: 5, source: "loop", point: { ...card, check: null, citeFound: false } })]);
+    expect(lost).toContain("The app did not find this place in the code or the plan.");
+    expect(lost).not.toContain("Check:");
   });
 
   test("a push-back answer needs an option, also with a note; another question takes a note alone", () => {

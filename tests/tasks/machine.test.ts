@@ -449,6 +449,67 @@ describe("Update and resolve (ps4-plan.md WP-5)", () => {
   });
 });
 
+// ps4-plan.md section 2.1, rows Critic and Review judging with push-back (AC-B359 to AC-B363): the orders that criticRun, reviewRound,
+// and followRun send.
+describe("critic, judging, and push-back (ps4-plan.md WP-6)", () => {
+  const walk = (steps: [PhaseEventType, Partial<PhaseContext>?][], from: Phase = "idle") => {
+    let at = from;
+    return steps.map(([type, facts]) => {
+      const r = phaseStep(at, type, { ...NO_FACTS, ...facts });
+      expect([at, type, r.can]).toEqual([at, type, true]);
+      at = r.to;
+      return `${type}>${at}`;
+    });
+  };
+
+  test("GO picks the critic after the gate and before the own review; a waiting follow-up comes first", () => {
+    expect(phaseStep("idle", "GO", { ...NO_FACTS, critic: true, review: true }).to).toBe("critic");
+    expect(phaseStep("idle", "GO", { ...NO_FACTS, checks: true, critic: true }).to).toBe("checking");
+    expect(phaseStep("idle", "GO", { ...NO_FACTS, follow: true, critic: true }).to).toBe("following");
+    expect(phaseStep("idle", "GO", { ...NO_FACTS, review: true }).to).toBe("reviewing");
+  });
+
+  test("a clean or failed critic, a critic with kept points, and a cancelled critic", () => {
+    expect(walk([["GO", { critic: true }], ["CLEAN"]])).toEqual(["GO>critic", "CLEAN>idle"]);
+    expect(walk([["GO", { critic: true }], ["POINTS"], ["RUN_DONE"], ["CHECKS_GREEN"]])).toEqual([
+      "GO>critic",
+      "POINTS>judging",
+      "RUN_DONE>checking",
+      "CHECKS_GREEN>idle",
+    ]);
+    expect(walk([["GO", { critic: true }], ["STOPPED"]])).toEqual(["GO>critic", "STOPPED>idle"]);
+    // A failed critic sends CLEAN: the phase critic has no WAIT edge.
+    expect(phaseStep("critic", "WAIT").can).toBe(false);
+  });
+
+  test("review judging with push-back ends at idle, so the questions come at idle; a judging run with no change still takes RUN_DONE to checking", () => {
+    expect(walk([["GO", { review: true }], ["POINTS", { roundsLeft: true }], ["RUN_DONE"], ["CHECKS_GREEN"]])).toEqual([
+      "GO>reviewing",
+      "POINTS>judging",
+      "RUN_DONE>checking",
+      "CHECKS_GREEN>idle",
+    ]);
+    expect(phaseStep("judging", "RUN_DONE", { ...NO_FACTS, unchanged: true }).to).toBe("checking");
+    for (const type of ["WAIT", "STOPPED"] as const) expect(phaseStep("judging", type).to).toBe("idle");
+  });
+
+  test("Fix these too and Fix it anyway: following with a change goes to checking; with no change back to idle", () => {
+    expect(walk([["GO", { follow: true }], ["RUN_DONE"], ["CHECKS_GREEN"], ["GO", { review: true }], ["CLEAN"]])).toEqual([
+      "GO>following",
+      "RUN_DONE>checking",
+      "CHECKS_GREEN>idle",
+      "GO>reviewing",
+      "CLEAN>idle",
+    ]);
+    expect(
+      walk([
+        ["GO", { follow: true }],
+        ["RUN_DONE", { unchanged: true }],
+      ]),
+    ).toEqual(["GO>following", "RUN_DONE>idle"]);
+  });
+});
+
 describe("senders (part-session.md section 9.7, invariant 7)", () => {
   // A sender passes the event to advance(), advancePart(), or the phase send helper as `type: "E"`, or returns it from an event helper
   // (gates.ts eventOf: `return "E"`; tasks.ts adoption: `? "E" : "F"`). BUILD has no sender: the create route uses initialTransition.

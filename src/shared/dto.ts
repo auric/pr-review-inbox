@@ -1649,8 +1649,9 @@ export type TaskQuestionDto = {
   recommended: number | null;
   answer: { choice: number | null; text: string } | null;
   step: number | null;
-  // The review_item of a push-back question (ps4-plan.md section 5). null for other questions and after the item is gone.
-  point: number | null;
+  // A push-back question (ps4-plan.md section 5, ps5-plan.md section 4.4): the review_item, the reason of its check step, Claude's
+  // reason, the proof, and whether the app found the place of the proof. null for other questions and after the item is gone.
+  point: { id: number; check: string | null; reason: string; cite: string; citeFound: boolean } | null;
   askedAt: number;
   answeredAt: number | null;
 };

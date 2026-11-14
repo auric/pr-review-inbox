@@ -365,6 +365,32 @@ export function historyFile(db: Database, pr: number, head: string, review = fal
   return { name: "history.md", text: out.join("\n"), asks: kept };
 }
 
+// pushback.md section 6.23.6 (AC-B111): context/history.md of the own review of a task part. It lists the push-backs of Claude that the
+// user accepted. null: none. The state line matches the finder and verify rules of catalog.ts.
+export function pushbackHistory(points: { id: number; payload: FindingPayload }[]): ContextFile | null {
+  if (!points.length) return null;
+  const blocks = points.map(({ id, payload: f }) => {
+    const end = f.lineEnd !== null && f.lineEnd !== f.line ? `-${f.lineEnd}` : "";
+    return [
+      `### Finding ${id}`,
+      "",
+      `- Path: ${oneLine(f.path)}`,
+      `- Lines: ${f.line}${end}`,
+      `- Severity: ${f.severity}`,
+      "- State: discarded by the user",
+      `- Why: ${oneLine(f.pushback?.reason ?? "")}`,
+      "",
+      "Text:",
+      "",
+      indentBlock(f.body),
+      "",
+    ];
+  });
+  const head = ["## Accepted push-backs", "", "Claude pushed back on these points, and the user accepted each push-back.", ""];
+  const c = capped(blocks, HISTORY_FINDING_BYTES, (n) => `${n} more findings left out.`);
+  return { name: "history.md", text: [...head, ...c.lines].join("\n") };
+}
+
 // docs/plans/review-v2/spec.md section 2.16: the earlier turns of a follow-up in its stdin.
 export const ASK_TURNS = 3;
 export const ASK_TURN_QUESTION_BYTES = 1024;

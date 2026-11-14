@@ -193,9 +193,10 @@ describe("Start again (AC-B351)", () => {
       expect((await s.log()).map((l) => l.split("|")[1])).toEqual(["K-1: Add the plan", "K-1: Add the feature"]);
       expect(await headOf(w)).not.toBe(old);
       expect(existsSync(join(w.repo, "notes.txt"))).toBe(false);
-      // The baseline ran once. The build and the own review ran again, the build in a new session with no continue.md.
+      // The baseline ran once. The build, the critic, and the own review ran again, the build in a new session with no continue.md.
       expect(s.steps().filter((x) => x.kind === "check" && x.item === "base").length).toBe(1);
-      expect(s.steps().filter((x) => x.kind === "review" && x.state === "ok").length).toBe(2);
+      const ok = (item: string) => s.steps().filter((x) => x.kind === "review" && x.item === item && x.state === "ok").length;
+      expect([ok("critic"), ok("review")]).toEqual([2, 2]);
       const builds = s.runCalls().filter((c) => s.modeOf(c) === "build");
       expect(builds.length).toBe(2);
       expect(builds[1]?.context["continue.md"]).toBeUndefined();
@@ -248,7 +249,15 @@ describe("Hold and Continue with part (AC-B348, AC-B349)", () => {
       expect(s.loop.resume(s.db, s.task, { ...v(s), part: partId(s) }).status).toBe(200);
       expect(rowOf(s)).toBeNull();
       await s.loop.idle(s.task);
-      expect(order(s, at)).toEqual(["GO>building", "RUN_DONE>checking", "CHECKS_GREEN>idle", "GO>reviewing", "CLEAN>idle"]);
+      expect(order(s, at)).toEqual([
+        "GO>building",
+        "RUN_DONE>checking",
+        "CHECKS_GREEN>idle",
+        "GO>critic",
+        "CLEAN>idle",
+        "GO>reviewing",
+        "CLEAN>idle",
+      ]);
       expect([s.t().state, s.part().state, s.blocked()]).toEqual(["implementing", "self_reviewed", null]);
       expect(
         s

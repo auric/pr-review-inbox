@@ -849,10 +849,10 @@ export function patchStep(db: Database, id: number, detail: Partial<StepDetail>)
 }
 
 // The instruct, update, and resolve keys that the loop wrote at the start of the step stay (spec.md section 6.18.6). A saved patch stays
-// too: it marks a reset for the Continue rule.
+// too: it marks a reset for the Continue rule. The findings of a "Fix it anyway" row stay (pushback.md section 6.23.6).
 export function endStep(db: Database, id: number, state: StepState, detail: Partial<StepDetail>, now = Date.now()) {
   const prev = stepDetailOf(db, id);
-  const keep = { instruct: prev.instruct, update: prev.update, resolve: prev.resolve, patch: prev.patch };
+  const keep = { instruct: prev.instruct, update: prev.update, resolve: prev.resolve, patch: prev.patch, findings: prev.findings };
   db.query(STEP_SQL.end).run({ id, state, detail: JSON.stringify(stepDetail.parse({ ...keep, ...detail })), now });
 }
 

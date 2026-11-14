@@ -344,8 +344,8 @@ describe("several parts with the scheduler (spec.md section 6.20.6)", () => {
         ["Part two", "ABC-12", "9012", "9011"],
       ] as const) {
         const runs = byPart(title);
-        // The build run, one fix run, and the own review.
-        expect(runs.length).toBe(3);
+        // The build run, one fix run, the critic (part-session.md section 2.7), and the own review.
+        expect(runs.length).toBe(4);
         for (const c of runs) {
           expect(c.attachments).toEqual(["9001.txt", key]);
           // The own review gets the sub-tasks in its task.md.

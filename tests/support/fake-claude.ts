@@ -48,6 +48,9 @@ export type FakeScenario = {
   // writes before its stream, by path relative to the cwd. A path outside the cwd is refused, as --restricted refuses it (Gate B17), and
   // the record gets { refused: path }. junction: a folder link to that target in place of a file.
   implement?: unknown;
+  // pushback.md section 6.23.2: the verdicts of a judging run, one per "## Point <id>:" heading of ./context/failure.md in order. The
+  // last entry repeats, and null gives that point no entry. They follow the points of the implement result.
+  judge?: ({ verdict: "fixed" | "pushback"; why?: string | null; reason?: string; cite?: string } | null)[];
   writes?: { path: string; text?: string; junction?: string }[];
   // part-session.md section 2.3: after writes, an Edit of the plan file at path that ticks each task heading `### [ ] <id> `.
   ticks?: { path: string; ids: string[] };
@@ -622,7 +625,17 @@ async function main() {
     if (kind === "discuss") return s.discuss ?? echoDiscuss(stdin);
     if (kind === "interview") return s.interview ?? echoInterview(stdin);
     if (kind === "spec") return s.spec ?? echoSpec();
-    if (kind === "implement") return s.implement ?? echoImplement();
+    if (kind === "implement") {
+      const r = (s.implement ?? echoImplement()) as { points?: unknown[] };
+      const judge = s.judge ?? [];
+      if (!judge.length) return r;
+      const ids = [...(context["failure.md"] ?? "").matchAll(/^## Point (\d+):/gm)].map((m) => Number(m[1]));
+      const entries = ids.flatMap((id, i) => {
+        const j = judge[Math.min(i, judge.length - 1)];
+        return j ? [{ id, why: null, reason: "Echo reason.", cite: "", ...j }] : [];
+      });
+      return { ...r, points: [...(r.points ?? []), ...entries] };
+    }
     if (key === "critic") return s.critic ?? echoCritic();
     if (kind === "review") return s.taskReview !== undefined && stdin.includes("- Pull request: none yet.") ? s.taskReview : s.review;
     if (props.replies !== undefined) return s.replies ?? echoReplies(stdin, { notes: s.notes, cites: s.cites });
