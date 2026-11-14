@@ -12,6 +12,7 @@ import { serveStatic } from "hono/bun";
 import { createLive } from "../../src/server/live";
 import { startServer } from "../../src/server/main";
 import { createOutbox } from "../../src/server/publish/outbox";
+import { SESSION_GATES } from "../../src/server/review/claude";
 import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
@@ -147,6 +148,20 @@ const STREAMS: Record<ClaudeScenario["stream"], string> = {
 // The verify phase of a review run (docs/plans/review-v2/spec.md section 1.6): one tool call and no subagent, so the run log keeps the
 // subagents of the finder. The fake CLI gives a confirmed verdict per candidate. A scenario bySchema replaces it.
 const CHECK_STREAM = claudeStream(claudeDir, "check", "claude/b6-hostile-repo.jsonl");
+// part-session.md section 2.11: the synthetic usage limit with the reset time usageAt (epoch seconds), for each seq entry with exitCode 1.
+function usageSeq(seq: ClaudeScenario["seq"], usageAt: number | undefined): ClaudeScenario["seq"] {
+  if (usageAt === undefined || !seq) return seq;
+  const file = join(claudeDir, `usage-${usageAt}.jsonl`);
+  const lines = readFileSync(resolve(import.meta.dir, "../../fixtures/claude-synthetic/usage-limit.jsonl"), "utf8").split("\n");
+  const set = (l: string) => {
+    const e = JSON.parse(l);
+    return JSON.stringify(e.type === "rate_limit_event" ? { ...e, rate_limit_info: { ...e.rate_limit_info, resetsAt: usageAt } } : e);
+  };
+  writeFileSync(file, `${lines.filter(Boolean).map(set).join("\n")}\n`);
+  return Object.fromEntries(
+    Object.entries(seq).map(([k, list]) => [k, list.map((x) => (x.exitCode === 1 && !x.fixture ? { ...x, fixture: file } : x))]),
+  );
+}
 function setClaude(c: ClaudeScenario) {
   runner.write({
     fixture: STREAMS[c.stream],
@@ -169,7 +184,7 @@ function setClaude(c: ClaudeScenario) {
     spec: c.spec,
     implement: c.implement,
     review: c.review,
-    seq: c.seq,
+    seq: usageSeq(c.seq, c.usageAt),
     match: c.match,
     bySchema: c.bySchema ?? { verify: { fixture: CHECK_STREAM } },
     authMethod: c.login,
@@ -310,6 +325,8 @@ await remoteGit(["update-ref", `refs/heads/${(A.pr.toRef as unknown as { display
 // A release base that a task can pick (spec.md section 6.18.3). /__control/task-base moves it, and a reset puts it back.
 const releaseBase = () => remoteGit(["update-ref", `refs/heads/${RELEASE}`, remote.target]);
 await releaseBase();
+// A bare remote keeps no ref log by default. /__control/task-remote reads the log to count the pushes of each task branch.
+await remoteGit(["config", "core.logAllRefUpdates", "always"]);
 
 // The dashboard and the PR route share the PR A object, so both report the pushed head and the description.
 // The git remote moves the PR ref too, so a review after the push fetches the pushed head (plan r2 UI-RR).
@@ -652,6 +669,8 @@ const openFolder = async (path: string) => {
 // The app. A restart keeps the data folder and the secret store, as a process restart with the OS store does.
 let secrets = createSecrets(null);
 let jiraSecrets = createSecrets(null, "jira-token");
+// part-session.md section 2.9: the live gate of claude.ts SESSION_GATES. /__control/live-gate sets it, and a reset puts it back.
+let liveGate = true;
 function boot() {
   const live = createLive();
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets });
@@ -670,6 +689,7 @@ function boot() {
     listTools: stubListTools,
     gitRemote: remote.gitRemote,
     repoRemote,
+    sessionGates: { ...SESSION_GATES, live: liveGate },
   });
   const outbox = createOutbox({ settings, live });
   const server = startServer({
@@ -732,6 +752,14 @@ r[key("POST", "/__control/reset")] = async () => {
   rmSync(sessionsDir, { recursive: true, force: true });
   // Run IDs start at 1 again, so an old record can name the run folder of a new run. halt() waits for the end of each fake CLI.
   rmSync(join(claudeDir, "calls.jsonl"), { force: true });
+  liveGate = true;
+  app = boot();
+  return NO_CONTENT;
+};
+// Sets the live gate ({ live }) and restarts the app with it. The page needs a reload after it.
+r[key("POST", "/__control/live-gate")] = async (req) => {
+  liveGate = ((await req.json()) as { live: boolean }).live;
+  await halt();
   app = boot();
   return NO_CONTENT;
 };
@@ -804,7 +832,21 @@ r[key("POST", "/__control/writes")] = () =>
 // The branches of the local git remote with their commits, and the bodies of the task PR creates since the last reset.
 r[key("POST", "/__control/task-remote")] = async () => {
   const lines = (await remoteGit(["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"])).split("\n").filter(Boolean);
-  return ok({ heads: Object.fromEntries(lines.map((l) => l.split(" "))), creates: taskRepo.writes.map((w) => w.body) });
+  // updates: the [old, new] pairs of the ref log of each branch, oldest first. A push of one branch adds one pair.
+  const log = (b: string) => {
+    const file = join(remote.remote, "logs", "refs", "heads", ...b.split("/"));
+    return existsSync(file)
+      ? readFileSync(file, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => l.split(" ").slice(0, 2))
+      : [];
+  };
+  return ok({
+    heads: Object.fromEntries(lines.map((l) => l.split(" "))),
+    updates: Object.fromEntries(lines.map((l) => [l.split(" ")[0], log(l.split(" ")[0] as string)])),
+    creates: taskRepo.writes.map((w) => w.body),
+  });
 };
 // spec.md section 6.18.5 (WP-TU2): move adds one commit with the given files to a branch of the local remote, as a colleague's merge
 // into the base does. conflicted sets properties.mergeResult of every task PR, and one sync stores it. Answers the new head.

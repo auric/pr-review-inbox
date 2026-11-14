@@ -178,6 +178,9 @@ export type ClaudeScenario = {
   match?: FakeScenario["match"];
   bySchema?: FakeScenario["bySchema"];
   login?: string;
+  // part-session.md section 2.11: each seq entry with exitCode 1 and no fixture replays the synthetic usage limit with this resetsAt
+  // (epoch seconds).
+  usageAt?: number;
 };
 
 // PR 1001 comment posts. drop: the next POST is stored, then the connection drops (A9). fail: the next POST gets this status
@@ -226,10 +229,18 @@ export async function liveStreams(): Promise<number> {
 // ---------- Build a Jira task (docs/plans/review-v2/spec.md section 6.9) ----------
 
 // The branches of the local git remote of the tasks with their commits, and the body of each task PR create since the last reset.
-export async function taskRemote(): Promise<{ heads: Record<string, string>; creates: Record<string, unknown>[] }> {
+// updates: the [old, new] commit pairs of the ref log of each branch, oldest first. Each push of a branch adds one pair.
+export type TaskRemote = { heads: Record<string, string>; updates: Record<string, string[][]>; creates: Record<string, unknown>[] };
+export async function taskRemote(): Promise<TaskRemote> {
   const res = await fetch(`${FAKE_URL}/__control/task-remote`, { method: "POST", headers: { Authorization: `Bearer ${E2E_TOKEN}` } });
   if (!res.ok) throw new Error(`control task-remote: ${res.status}`);
-  return (await res.json()) as { heads: Record<string, string>; creates: Record<string, unknown>[] };
+  return (await res.json()) as TaskRemote;
+}
+
+// part-session.md section 2.9: turns the live gate of the app on or off, and restarts the app. A reset turns it on. Reload the page.
+export async function liveGate(live: boolean): Promise<void> {
+  const res = await fetch(`${FAKE_URL}/__control/live-gate`, { method: "POST", headers: auth, body: JSON.stringify({ live }) });
+  if (!res.ok) throw new Error(`control live-gate: ${res.status}`);
 }
 
 // The release base of the task tests (spec.md section 6.18). serve.ts makes it at the target of PR 1001, and a reset puts it back.
