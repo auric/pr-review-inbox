@@ -28,19 +28,22 @@ export const HIDDEN = [
 export const SHOWN = ["README.md", "src/app.ts", "sub/code.ts", ".github/workflows/ci.yml", ".gitignore"];
 
 // part-session.md section 9.7, invariant 8: the parts of a database that hold two or more open step rows, with "<kind>:<item>" of
-// each. One pair is no hit: loop.ts driveUpdate keeps its update row open while one resolve run or the checks of that update ("U<n>")
-// run. The phase is then the phase of that row.
+// each. Two pairs are no hit: loop.ts driveUpdate keeps its update row open while one resolve run or the checks of that update ("U<n>")
+// run. The phase is then the phase of that row. ps4-plan.md WP-7: one waiting instruct row (a message for the next GO) waits beside one
+// other open row.
 export const openTwice = (db: Database) =>
   (
     db
       .query(
-        `SELECT part, COUNT(*) AS n, GROUP_CONCAT(kind || ':' || COALESCE(item, '-'), ' ') AS rows FROM task_step
+        `SELECT part, COUNT(*) AS n, GROUP_CONCAT(kind || ':' || COALESCE(item, '-'), ' ') AS rows,
+          SUM(kind = 'instruct' AND state = 'waiting') AS queued FROM task_step
         WHERE state IN ('waiting', 'running') AND part IS NOT NULL GROUP BY part HAVING n > 1`,
       )
-      .all() as { part: number; n: number; rows: string }[]
+      .all() as { part: number; n: number; rows: string; queued: number }[]
   ).filter((x) => {
     const rows = x.rows.split(" ");
     const item = rows.find((r) => r.startsWith("update:"))?.slice("update:".length);
+    if (x.n === 2 && x.queued === 1) return false;
     return !(x.n === 2 && item !== undefined && rows.some((r) => r === `resolve:${item}` || r === `check:${item}`));
   });
 

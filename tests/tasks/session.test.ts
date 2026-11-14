@@ -16,8 +16,20 @@ import { openDb } from "../../src/server/storage/db";
 import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import { REVIEW_FIX_TRIES, resumeProblem, tickDiff, tickTask } from "../../src/server/tasks/loop";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
-import { advance, advancePart, dropSessions, partSession, saveSession, sha256File, taskRow } from "../../src/server/tasks/tasks";
+import {
+  advance,
+  advancePart,
+  dropSessions,
+  partSession,
+  RESTART_TEXT,
+  recoverTasks,
+  saveSession,
+  sha256File,
+  taskRow,
+  WORKING,
+} from "../../src/server/tasks/tasks";
 import { specResult, type TaskBlocked } from "../../src/shared/task";
+import { readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 import {
   type Call,
@@ -809,6 +821,231 @@ describe("follow-ups in the phase loop (ps4-plan.md WP-3)", () => {
     },
     SLOW,
   );
+});
+
+describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => {
+  const SEND = "Add the flag checked.";
+  // The message goes out after the CLI reads its first message and before its result.
+  const SLOW_BUILD = { writes: [TEST_FILE, WORKS], ticks: TICK, delayMs: 250 };
+  const OFF = { resume: true, live: false, resolve: false };
+  type S = Awaited<ReturnType<typeof setup>>;
+  const inputs = (s: S) => readRecords<{ input?: string }>(join(s.root, "calls.jsonl")).flatMap((c) => (c.input ? [c.input] : []));
+  const building = (s: S) =>
+    s.steps().some((x) => x.kind === "implement" && x.state === "running" && x.run !== null) &&
+    s.runCalls().some((c) => s.modeOf(c) === "build");
+  const order = (s: S) => s.phases.map((p) => `${p.event}>${p.to}`);
+  const BUILD = ["GO>setup", "CLEAN>idle", "GO>baseline", "CLEAN>idle", "GO>building", "RUN_DONE>checking", "CHECKS_GREEN>idle"];
+  const END = ["GO>critic", "CLEAN>idle", "GO>reviewing", "CLEAN>idle"];
+  const sent = (s: S) => s.runCalls().filter((c) => s.modeOf(c) === "instruct");
+
+  test(
+    "AC-B364: with the live gate on, a message during the build run reaches its stdin, the step gets the note, and no follow-up runs",
+    async () => {
+      const s = await setup({ seq: { "implement:build": [SLOW_BUILD] } });
+      s.loop.build(s.db, s.task);
+      await until(() => building(s));
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect(inputs(s)).toEqual([SEND]);
+      const build = s.steps().find((x) => x.kind === "implement") as Step;
+      expect(detailOf(s, build.id).notes).toContain(`Your message: ${SEND}`);
+      expect([s.steps().filter((x) => x.kind === "instruct"), sent(s)]).toEqual([[], []]);
+      expect(order(s)).toEqual([...BUILD, ...END]);
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B364: with the live gate off, a message during the build run waits as a follow-up row, and GO runs it after the gate of the build",
+    async () => {
+      const s = await setup({ sessionGates: OFF, seq: { "implement:build": [SLOW_BUILD], "implement:instruct": [{ writes: [FIXED] }] } });
+      s.loop.build(s.db, s.task);
+      await until(() => building(s));
+      const v = s.t().version;
+      expect(s.loop.instruct(s.db, s.task, { version: v, text: SEND }).status).toBe(202);
+      const queued = s.steps().at(-1) as Step;
+      expect([queued.kind, queued.item, queued.state, s.t().version]).toEqual(["instruct", "I1", "waiting", v + 1]);
+      expect(detailOf(s, queued.id).instruct).toEqual({
+        text: SEND,
+        part: s.part().id,
+        blockedBefore: null,
+        result: null,
+        committed: false,
+      });
+      // One waiting message per part.
+      const second = s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Use works." });
+      expect([second.status, (second as { error: string }).error]).toEqual([409, WORKING]);
+      await s.loop.idle(s.task);
+      expect(inputs(s)).toEqual([]);
+      expect(order(s)).toEqual([...BUILD, "GO>following", "RUN_DONE>checking", "CHECKS_GREEN>idle", ...END]);
+      expect([sent(s).length, sent(s)[0]?.stdin.endsWith(`# Your instructions\n\n${SEND}`)]).toEqual([1, true]);
+      expect(s.flow().filter((x) => x.includes(":I1:"))).toEqual(["instruct:I1:ok", "check:I1:ok", "commit:I1:ok"]);
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+    },
+    SLOW,
+  );
+
+  test(
+    "WP-7: a waiting message that changes no file keeps a reason that came during its run",
+    async () => {
+      const s = await setup({
+        sessionGates: OFF,
+        seq: { "implement:build": [SLOW_BUILD], "implement:instruct": [{ writes: [], delayMs: 250 }] },
+      });
+      s.loop.build(s.db, s.task);
+      await until(() => building(s));
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
+      await until(() => s.steps().some((x) => x.kind === "instruct" && x.state === "running"));
+      // The reason of another part (spec.md section 6.25.1).
+      const other: TaskBlocked = { kind: "red", step: null, text: "Needs you: the tests of part 2 stay red after 3 tries." };
+      s.db.query("UPDATE task SET blocked_json = $b, version = version + 1 WHERE id = $id").run({ id: s.task, b: JSON.stringify(other) });
+      await s.loop.idle(s.task);
+      const row = s.steps().find((x) => x.kind === "instruct") as Step;
+      expect([row.state, detailOf(s, row.id).instruct.result]).toEqual(["ok", "no_change"]);
+      expect(s.blocked()).toEqual(other);
+    },
+    SLOW,
+  );
+
+  // A message waits beside the build run, and a Stop ends the driver. The rows stay as at that moment.
+  const stoppedWithMessage = async () => {
+    const s = await setup({ sessionGates: OFF, seq: { "implement:build": [SLOW_BUILD], "implement:instruct": [{ writes: [FIXED] }] } });
+    s.loop.build(s.db, s.task);
+    await until(() => building(s));
+    expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
+    const queued = (s.steps().at(-1) as Step).id;
+    const build = (s.steps().find((x) => x.kind === "implement") as Step).id;
+    expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+    await s.loop.idle(s.task);
+    expect(s.flow().at(-1)).toBe("instruct:I1:waiting");
+    return { s, queued, build };
+  };
+  // The app stopped during the build run: the build row and the task go back to their state at that moment.
+  const crashed = (s: S, build: number) => {
+    s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL WHERE id = $id").run({ id: build });
+    s.db.query("UPDATE task SET state = 'implementing', stopped_from = NULL WHERE id = $id").run({ id: s.task });
+  };
+  const ranOnce = (s: S, flow: string[]) => {
+    expect([sent(s).length, sent(s)[0]?.stdin.endsWith(`# Your instructions\n\n${SEND}`)]).toEqual([1, true]);
+    expect(s.flow().filter((x) => x.startsWith("instruct:"))).toEqual(flow);
+    expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+  };
+
+  test(
+    "AC-B364: a restart during the build run: the message stays waiting, the build row takes the reason, and Continue runs the message",
+    async () => {
+      const { s, queued, build } = await stoppedWithMessage();
+      crashed(s, build);
+      recoverTasks(s.db, Date.now(), s.dataDir);
+      expect([s.t().state, s.blocked()]).toEqual(["implementing", { kind: "error", cause: "restart", step: build, text: RESTART_TEXT(1) }]);
+      expect(s.steps().find((x) => x.id === queued)?.state).toBe("waiting");
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      ranOnce(s, ["instruct:I1:ok"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B364: a restart while the part waits with its own reason: the message stays waiting, and Continue on that reason runs it",
+    async () => {
+      // The first build run ticks nothing, so the part waits with unfinished. The second one finishes the part.
+      const s = await setup({
+        sessionGates: OFF,
+        seq: {
+          "implement:build": [
+            { writes: [TEST_FILE, WORKS], delayMs: 250 },
+            { writes: [TEST_FILE, WORKS], ticks: TICK },
+          ],
+          "implement:instruct": [{ writes: [FIXED] }],
+        },
+      });
+      s.loop.build(s.db, s.task);
+      await until(() => building(s));
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
+      const queued = (s.steps().at(-1) as Step).id;
+      await s.loop.idle(s.task);
+      const unfinished = s.blocked();
+      expect([unfinished?.kind, s.steps().find((x) => x.id === queued)?.state]).toEqual(["unfinished", "waiting"]);
+      recoverTasks(s.db, Date.now(), s.dataDir);
+      expect([s.blocked(), s.steps().find((x) => x.id === queued)?.state]).toEqual([unfinished, "waiting"]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      ranOnce(s, ["instruct:I1:ok"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B364: a Stop keeps the message, a restart in stopped keeps it too, and Resume runs it",
+    async () => {
+      const { s, queued } = await stoppedWithMessage();
+      recoverTasks(s.db, Date.now(), s.dataDir);
+      expect([s.t().state, s.steps().find((x) => x.id === queued)?.state]).toEqual(["stopped", "waiting"]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      ranOnce(s, ["instruct:I1:ok"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B364: in a follow-up driver, a message during the follow-up run and its fix run reaches stdin with the live gate on; else 409",
+    async () => {
+      for (const live of [true, false]) {
+        const s = await setup({
+          sessionGates: { resume: true, live, resolve: false },
+          seq: {
+            "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+            "implement:instruct": [{ writes: [TODO], delayMs: 250 }],
+            "implement:fix": [{ writes: [WORKS], delayMs: 250 }],
+          },
+        });
+        await s.build();
+        expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
+        const runs = (kind: string) => s.steps().filter((x) => x.kind === kind && x.state === "running" && x.run !== null).length;
+        const tell = (text: string) => {
+          const r = s.loop.instruct(s.db, s.task, { version: s.t().version, text });
+          expect([text, r.status as number, (r as { error?: string }).error]).toEqual([
+            text,
+            ...(live ? [202, undefined] : [409, WORKING]),
+          ]);
+        };
+        await until(() => runs("instruct") === 1 && sent(s).length === 1);
+        tell("Use works.");
+        // The follow-up made the checks red. The fix run of its gate is no follow-up row.
+        await until(() => runs("fix") === 1 && s.runCalls().some((c) => s.modeOf(c) === "fix"));
+        tell("Keep the old name.");
+        await s.loop.idle(s.task);
+        const sendRow = s.steps().find((x) => x.kind === "instruct") as Step;
+        const fix = s.steps().find((x) => x.kind === "fix") as Step;
+        expect(s.steps().filter((x) => x.kind === "instruct")).toHaveLength(1);
+        expect(inputs(s)).toEqual(live ? ["Use works.", "Keep the old name."] : []);
+        expect([
+          detailOf(s, sendRow.id).notes.includes("Your message: Use works."),
+          detailOf(s, fix.id).notes.includes("Your message: Keep the old name."),
+        ]).toEqual([live, live]);
+        expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+      }
+    },
+    SLOW * 2,
+  );
+
+  test("WP-7: Hold takes the run row of the part, also with a waiting message below it", async () => {
+    const s = await setup();
+    const part = (
+      s.db
+        .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+          VALUES ($t, 1, 'single', 'Add the feature', 'feature/K-1-add-the-feature', 'main', 'implementing', 1, 1) RETURNING id`)
+        .get({ t: s.task }) as { id: number }
+    ).id;
+    insertStep(s.db, { task: s.task, part, kind: "instruct", item: "I1", state: "waiting" });
+    const fix = insertStep(s.db, { task: s.task, part, kind: "fix", item: "checks", state: "running" });
+    expect(s.loop.hold(s.db, s.task, part, { version: s.t().version }).status).toBe(200);
+    const row = s.db.query("SELECT blocked_json FROM task_part WHERE id = $id").get({ id: part }) as { blocked_json: string };
+    expect(JSON.parse(row.blocked_json)).toMatchObject({ kind: "held", step: fix });
+  });
 });
 
 describe("the transcript at the end of a part (part-session.md section 2.2, End and deletion)", () => {

@@ -897,5 +897,25 @@ describe("advance", () => {
         ["check", "checks", "running"],
       ]),
     ).toEqual(["fix:checks check:checks"]);
+    // ps4-plan.md WP-7: one waiting message beside one open row is no hit. Two messages, or a running instruct row, are.
+    expect(
+      hits([
+        ["implement", "build", "running"],
+        ["instruct", "I1", "waiting"],
+      ]),
+    ).toEqual([]);
+    expect(
+      hits([
+        ["implement", "build", "running"],
+        ["instruct", "I1", "waiting"],
+        ["instruct", "I2", "waiting"],
+      ]),
+    ).toEqual(["implement:build instruct:I1 instruct:I2"]);
+    expect(
+      hits([
+        ["implement", "build", "running"],
+        ["instruct", "I1", "running"],
+      ]),
+    ).toEqual(["implement:build instruct:I1"]);
   });
 });

@@ -1651,7 +1651,7 @@ describe("AC-B266 to AC-B268, AC-B321, AC-B322: a run that an app restart cut", 
 describe("part sessions in the jobs", () => {
   type S = Awaited<ReturnType<typeof setup>>;
   // One implement run of part. after() gets the outcome of the runner.
-  function sessionRun(s: S, session: ImplementRunStart["session"], part = s.part) {
+  function sessionRun(s: S, session: ImplementRunStart["session"], part = s.part, notes?: string[]) {
     let seen: RunOutcome | null = null;
     const start: ImplementRunStart = {
       task: s.task,
@@ -1671,6 +1671,7 @@ describe("part sessions in the jobs", () => {
       timeoutMs: 60_000,
       ...(session && { session }),
       started: () => {},
+      ...(notes && { note: (_db: Database, text: string) => notes.push(text) }),
       after: async (o, early) => {
         seen = o;
         return early ?? { status: o?.status ?? "failed", kind: o?.kind ?? null, text: o?.text ?? null, raw: "", ...(o && { outcome: o }) };
@@ -1760,29 +1761,34 @@ describe("part sessions in the jobs", () => {
   );
 
   test(
-    "part-session.md section 2.9: sendPart writes a user message to the live run of its part only",
+    "part-session.md section 2.9, AC-B364: sendPart writes a user message to the live run of its part only, then the note of the step",
     async () => {
       const record = (s: S) => readRecords<{ childPid?: number; input?: string }>(join(s.root, "calls.jsonl"));
       const s = await setup({ sessionGates: { resume: false, live: true, resolve: false } });
       s.scenario({ hang: true });
-      const run = sessionRun(s, { keep: join(s.root, "sessions"), live: true });
+      const notes: string[] = [];
+      const run = sessionRun(s, { keep: join(s.root, "sessions"), live: true }, s.part, notes);
       expect(await waitUntil(() => record(s).some((c) => c.childPid))).toBe(true);
-      expect(s.review.sendPart(s.db, s.task, s.part + 1, "Another part.")).toBe(false);
-      expect(s.review.sendPart(s.db, s.task, s.part, "Use the new name.")).toBe(true);
+      expect(s.review.sendPart(s.db, s.task, s.part + 1, "Another part.", "Your message: Another part.")).toBe(false);
+      expect(s.review.sendPart(s.db, s.task, s.part, "Use the new name.", "Your message: Use the new name.")).toBe(true);
       expect(await waitUntil(() => record(s).some((c) => c.input))).toBe(true);
       expect(record(s).flatMap((c) => (c.input ? [c.input] : []))).toEqual(["Use the new name."]);
+      expect(notes).toEqual(["Your message: Use the new name."]);
       expect(s.review.cancelPart(s.db, s.task, s.part)).toBe(true);
       expect((await run.done)?.status).toBe("cancelled");
-      expect(s.review.sendPart(s.db, s.task, s.part, "Too late.")).toBe(false);
-      // The live gate off: the run has no live input.
+      expect(s.review.sendPart(s.db, s.task, s.part, "Too late.", "Your message: Too late.")).toBe(false);
+      expect(notes).toHaveLength(1);
+      // The live gate off: the run has no live input, and no line and no note go out.
       const off = await setup({ sessionGates: { resume: false, live: false, resolve: false } });
       off.scenario({ hang: true });
-      const plain = sessionRun(off, { keep: join(off.root, "sessions"), live: true });
+      const none: string[] = [];
+      const plain = sessionRun(off, { keep: join(off.root, "sessions"), live: true }, off.part, none);
       expect(await waitUntil(() => record(off).some((c) => c.childPid))).toBe(true);
-      expect(off.review.sendPart(off.db, off.task, off.part, "Use the new name.")).toBe(false);
+      expect(off.review.sendPart(off.db, off.task, off.part, "Use the new name.", "Your message: Use the new name.")).toBe(false);
       expect(off.runCalls().at(-1)?.argv).not.toContain("--input-format");
       off.review.cancelPart(off.db, off.task, off.part);
       await plain.done;
+      expect([record(off).filter((c) => c.input).length, none]).toEqual([0, []]);
     },
     SLOW,
   );

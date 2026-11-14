@@ -194,7 +194,8 @@ const SQL = {
         AND p.state = 'implementing' AND json_extract(p.blocked_json, '$.kind') IS NOT 'held'))
     ORDER BY t.id`,
   // The cut query reads cut_json first.
-  failSteps: "UPDATE task_step SET state = 'failed', ended_at = $now, cut_json = NULL WHERE state IN ('waiting', 'running')",
+  failSteps: `UPDATE task_step SET state = 'failed', ended_at = $now, cut_json = NULL WHERE state IN ('waiting', 'running')
+    AND id NOT IN (SELECT value FROM json_each($keep))`,
   // docs/plans/review-v2/part-session.md section 2.5: the Claude steps whose run the restart cut. A resolve step has no snapshot.
   cut: `SELECT id, task, part, run, cut_json AS cut FROM task_step WHERE state = 'running' AND run IS NOT NULL AND part IS NOT NULL
     AND kind IN ('tests', 'implement', 'fix', 'instruct')`,
@@ -205,7 +206,8 @@ const SQL = {
   // spec.md section 6.18.4, Restart: an update that ran at the last stop. The loop aborts its rebase or merge and resets every repository
   // to the heads before it (loop.ts recoverUpdates).
   // part-session.md section 9.5: the open step rows of the parts, oldest first, before failSteps ends them.
-  open: `SELECT s.id, s.task, s.part, s.kind, p.ord FROM task_step s LEFT JOIN task_part p ON p.id = s.part
+  open: `SELECT s.id, s.task, s.part, s.kind, s.state, s.run, p.ord, t.state AS task_state, p.state AS part_state
+    FROM task_step s JOIN task t ON t.id = s.task LEFT JOIN task_part p ON p.id = s.part
     WHERE s.state IN ('waiting', 'running') ORDER BY s.id`,
   building: `SELECT id, ord FROM task_part WHERE task = $task AND state = 'implementing'
     AND json_extract(blocked_json, '$.kind') IS NOT 'held' ORDER BY ord`,
@@ -273,9 +275,9 @@ export function advancePart(
 // spec.md section 6.14 and part-session.md sections 9.3.4 and 9.5 (Q-SM2): a step that ran at the last stop has no process now, so it
 // ends failed. An interview or spec task stops, so Resume runs its run again. A task that builds or follows up keeps its state: each
 // part with an open step row gets the reason error/restart, or the reason update for an update. A part that built between two steps
-// gets error/restart with no step. Held and waiting part rows stay. Call it before the run recovery (run-rows.ts SQL.recover), which
-// ends the runs themselves with kind restart. dataDir: the data folder. With it, a cut run whose snapshot passes the checks keeps
-// its work (implement.ts keepCut).
+// gets error/restart with no step. Held and waiting part rows stay, and so does a waiting message (ps4-plan.md WP-7). Call it before
+// the run recovery (run-rows.ts SQL.recover), which ends the runs themselves with kind restart. dataDir: the data folder. With it, a
+// cut run whose snapshot passes the checks keeps its work (implement.ts keepCut).
 export const RESTART_TEXT = (ord: number | null) =>
   `Needs you: the app stopped during the work on ${ord === null ? "the task" : `part ${ord}`}. Continue goes on from there.`;
 export const UPDATE_RESTART = "The update stopped: the app stopped during the update. The branch is as it was.";
@@ -283,9 +285,30 @@ export function recoverTasks(db: Database, now = Date.now(), dataDir?: string) {
   db.transaction(() => {
     const tasks = db.query(SQL.running).all() as { id: number; version: number }[];
     const cut = dataDir === undefined ? [] : (db.query(SQL.cut).all() as CutStep[]);
-    const open = db.query(SQL.open).all() as { id: number; task: number; part: number | null; kind: string; ord: number | null }[];
+    const all = db.query(SQL.open).all() as {
+      id: number;
+      task: number;
+      part: number | null;
+      kind: string;
+      state: string;
+      run: number | null;
+      ord: number | null;
+      task_state: string;
+      part_state: string | null;
+    }[];
+    // ps4-plan.md WP-7: a message that never ran on a part in its build stays waiting for the next GO of that part. The reason of the part
+    // can come from another row, and Continue puts only the step of a reason in the queue again. A built part keeps the WP-3 rule.
+    const keep = all.filter(
+      (o) =>
+        o.kind === "instruct" &&
+        o.state === "waiting" &&
+        o.run === null &&
+        o.part_state === "implementing" &&
+        (o.task_state === "implementing" || o.task_state === "stopped"),
+    );
+    const open = all.filter((o) => !keep.includes(o));
     db.query(SQL.restartUpdates).run();
-    db.query(SQL.failSteps).run({ now });
+    db.query(SQL.failSteps).run({ now, keep: JSON.stringify(keep.map((o) => o.id)) });
     for (const s of cut) keepCut(db, dataDir as string, s);
     for (const { id } of tasks) {
       const t = taskRow(db, id);
@@ -488,6 +511,8 @@ const Q = {
   steps: `SELECT id, part, ord, kind, run, state, attempt, item, detail_json, started_at, ended_at FROM task_step WHERE task = $id
     ORDER BY id DESC LIMIT 50`,
   busy: "SELECT 1 FROM task_step WHERE task = $id AND state IN ('waiting', 'running')",
+  session: `SELECT 1 FROM task_step WHERE part = $part AND state = 'running' AND run IS NOT NULL
+    AND kind IN ('implement', 'fix', 'instruct')`,
   stepInsert: `INSERT INTO task_step (task, kind, run, state, ord, started_at)
     VALUES ($task, $kind, $run, 'running', (SELECT COALESCE(MAX(ord), 0) + 1 FROM task_step WHERE task = $task), $now) RETURNING id`,
   stepEnd: "UPDATE task_step SET state = $state, ended_at = $now WHERE run = $run AND state = 'running' RETURNING id",
@@ -1223,7 +1248,11 @@ export const ADOPTED = "This PR is in review outside the app. The app does not c
 // spec.md section 6.25.5: the 409 of Tell Claude while a part row holds a reason.
 export const WAITING = "Another part waits for you. Act on each reason first.";
 
-// The part of a Tell Claude send (spec.md section 6.18.1), or the sentence of the 409 in a state without the box.
+// ps4-plan.md WP-7: an implement, fix, or instruct run of the part runs now. Only these runs take live input (part-session.md section 2.9).
+export const sessionRunning = (db: Database, part: number) => db.query(Q.session).get({ part }) !== null;
+
+// The part of a Tell Claude send (spec.md section 6.18.1), or the sentence of the 409 in a state without the box. A session run of the
+// part lets the send through (ps4-plan.md WP-7).
 export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string } {
   if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
   if (partId !== undefined && currentPart(db, t, partId)?.adopted) return { error: ADOPTED };
@@ -1231,12 +1260,13 @@ export function instructTarget(db: Database, t: TaskRow, partId?: number): { par
   if (waitingOf(db, t.id)) return { error: WAITING };
   const b = blockedOf(t);
   if (b && !BOX_REASONS.has(b.kind)) return { error: b.text };
-  if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
   const part = currentPart(db, t, partId);
+  const live = !!part && sessionRunning(db, part.id);
+  if (!live && db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
   if (!part || !HAS_WORKTREE.has(part.state))
     return { error: partId === undefined ? TASK_STATE_TEXT[t.state] : "This part has no worktree." };
   // No reason and a part in the build: the loop works on it.
-  if (!b && !BUILT.has(part.state)) return { error: WORKING };
+  if (!b && !BUILT.has(part.state) && !live) return { error: WORKING };
   return { part };
 }
 

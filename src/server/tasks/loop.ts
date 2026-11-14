@@ -112,6 +112,7 @@ import {
   type SessionHeads,
   saveAllow,
   scheduleOf,
+  sessionRunning,
   setBaseMoves,
   setBlocked,
   setLowerHow,
@@ -650,6 +651,12 @@ const Q = {
   follow: `SELECT id, kind, item FROM task_step WHERE part = $part AND state = 'waiting' AND ${FOLLOW} ORDER BY id LIMIT 1`,
   newestFollow: `SELECT id, item FROM task_step WHERE part = $part AND ${FOLLOW} ORDER BY id DESC LIMIT 1`,
   lastFollow: `SELECT id FROM task_step WHERE part = $part AND item = $item AND ${FOLLOW} ORDER BY id DESC LIMIT 1`,
+  openFollow: `SELECT 1 FROM task_step WHERE part = $part AND state IN ('waiting', 'running') AND ${FOLLOW}`,
+  // ps4-plan.md WP-7: a waiting row that never ran takes the next ID when newer rows of its part exist. The guards read rows by ID order.
+  renew: `UPDATE task_step SET id = (SELECT MAX(id) + 1 FROM task_step), ord = (SELECT MAX(ord) + 1 FROM task_step WHERE task = $task),
+      started_at = $now
+    WHERE id = $id AND state = 'waiting' AND run IS NULL AND EXISTS (SELECT 1 FROM task_step WHERE part = $part AND id > $id)
+    RETURNING id`,
   // part-session.md section 9.4 rule 6 and ps4-plan.md section 2.6: held lives in the row of its part only.
   held: "SELECT 1 FROM task_part WHERE id = $id AND json_extract(blocked_json, '$.kind') = 'held'",
   hold: "UPDATE task_part SET blocked_json = $b, updated_at = $now WHERE id = $id AND task = $task AND blocked_json IS NULL",
@@ -2380,7 +2387,9 @@ export function createLoop(opts: LoopOptions) {
   // back the reason before the follow-up and returns false. Else the gate and one commit follow. The push-backs of a fix row get their
   // questions at the end (AC-B363). The phase is following at the start and idle at the end.
   async function followRun(c: Ctx): Promise<boolean> {
-    const f = c.db.query(Q.follow).get({ part: c.part.id }) as { id: number; kind: StepMode; item: string };
+    const q = c.db.query(Q.follow).get({ part: c.part.id }) as { id: number; kind: StepMode; item: string };
+    const moved = c.db.query(Q.renew).get({ id: q.id, part: c.part.id, task: c.id, now: now() }) as { id: number } | null;
+    const f = moved ? { ...q, id: moved.id } : q;
     c.follow ??= f.id;
     const info = stepDetailOf(c.db, f.id).instruct;
     const allow = allFiles(c);
@@ -2413,7 +2422,8 @@ export function createLoop(opts: LoopOptions) {
       send(c, { type: "RUN_DONE" }, { unchanged: true });
       if (info) {
         patchStep(c.db, r.step, { instruct: { ...info, result: "no_change" } });
-        reason(c.db, c.id, info.blockedBefore);
+        // A message of the build driver (WP-7) has no reason before it. A null here would clear the reason of another part.
+        if (info.blockedBefore) reason(c.db, c.id, info.blockedBefore);
       }
       askPushbacks(c, r.step, back, points);
       return false;
@@ -3508,14 +3518,11 @@ export function createLoop(opts: LoopOptions) {
       const part = parts(db, id).find((p) => p.id === partId);
       if (!part) return { status: 404, error: "Part not found." };
       if (onHold(db, partId)) return conflict(db, id, `Part ${part.ord} is on hold already.`);
-      const open = (db.query(Q.open).all({ part: partId }) as { id: number; kind: string }[])[0];
-      if (
-        t.state !== "implementing" ||
-        part.state !== "implementing" ||
-        part.blocked_json !== null ||
-        !open ||
-        (open.kind !== "implement" && open.kind !== "fix")
-      )
+      // A waiting message (WP-7) can sit below the run row.
+      const open = (db.query(Q.open).all({ part: partId }) as { id: number; kind: string }[]).find(
+        (o) => o.kind === "implement" || o.kind === "fix",
+      );
+      if (t.state !== "implementing" || part.state !== "implementing" || part.blocked_json !== null || !open)
         return conflict(db, id, HOLD_WHEN(part.ord));
       const b: TaskBlocked = { kind: "held", step: open.id, part: partId, text: HELD_TEXT(part.ord) };
       db.transaction(() => {
@@ -4037,21 +4044,34 @@ export function createLoop(opts: LoopOptions) {
     },
 
     // POST /api/tasks/:id/instructions (spec.md section 6.18.2): one send starts exactly one instruct step. The text goes to Claude only.
+    // ps4-plan.md WP-7 (part-session.md section 2.9): while a session run of the part runs, the text goes to the stdin of that run. Else
+    // the build driver gets it as a waiting follow-up row, which the next GO picks. A mode driver takes no waiting row: endFollow reads
+    // the newest follow-up row of the part as its own.
     instruct(db: Database, id: number, input: { version: number; part?: number; text: string }): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
-      if (drivers.has(id)) return conflict(db, id, WORKING);
       const target = instructTarget(db, t, input.part);
+      const running = drivers.has(id);
+      if (running && !("part" in target && sessionRunning(db, target.part.id))) return conflict(db, id, WORKING);
       if ("error" in target) return conflict(db, id, target.error);
       const part = target.part;
+      if (running && review.sendPart(db, id, part.id, input.text, `Your message: ${input.text}`)) {
+        changed(id);
+        return { status: 202, task: dto(db, id) };
+      }
+      // One waiting message per part, and none beside an open follow-up: invariant 8 allows one waiting message beside the open row,
+      // and a cut follow-up goes in the queue again as a new waiting row.
+      if (running && (modes.has(id) || db.query(Q.openFollow).get({ part: part.id }))) return conflict(db, id, WORKING);
       db.transaction(() => {
         const n = (db.query(Q.sends).get({ task: id, kind: "instruct" }) as { n: number }).n + 1;
         const r = insertStep(db, { task: id, part: part.id, kind: "instruct", item: `I${n}`, state: "waiting" }, now());
-        patchStep(db, r, { instruct: { text: input.text, part: part.id, blockedBefore: blockedOf(t), result: null, committed: false } });
-        // The version moves, so a second tab gets 409 with the current task (spec.md section 6.18.7).
-        setBlocked(db, { task: id, version: t.version }, null, now());
+        const before = running ? null : blockedOf(t);
+        patchStep(db, r, { instruct: { text: input.text, part: part.id, blockedBefore: before, result: null, committed: false } });
+        // The version moves, so a second tab gets 409 with the current task (spec.md section 6.18.7). A waiting message keeps the reason.
+        if (running) bump(db, id, t.version);
+        else setBlocked(db, { task: id, version: t.version }, null, now());
       })();
-      goPart(db, id, part.id);
+      if (!running) goPart(db, id, part.id);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },

@@ -2502,19 +2502,19 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       return cancelWhere((j) => j.pr === null && j.db === db && j.t.task === task && j.key.startsWith(`task:${task}:part:${part}:`));
     },
 
-    // part-session.md section 2.9: writes text as a user message to the stdin of the running implement run of one part. false: the live
-    // gate is off, or no run of the part takes live input now.
-    sendPart(db: Database, task: number, part: number, text: string): boolean {
+    // part-session.md section 2.9: writes text as a user message to the stdin of the running implement run of one part. note: the Log
+    // note of the step after the write. false: the live gate is off, or no run of the part takes live input now.
+    sendPart(db: Database, task: number, part: number, text: string, note?: string): boolean {
       if (!gates.live) return false;
-      return [...active, ...extras].some(
-        (j) =>
-          j.pr === null &&
-          j.db === db &&
-          j.t.task === task &&
-          j.t.kind === "implement" &&
-          j.key.startsWith(`task:${task}:part:${part}:`) &&
-          j.runner.send(text),
-      );
+      for (const j of [...active, ...extras]) {
+        if (j.pr !== null || j.db !== db || j.t.task !== task || j.t.kind !== "implement") continue;
+        if (!j.key.startsWith(`task:${task}:part:${part}:`) || !j.runner.send(text)) continue;
+        const t = j.t;
+        if (note !== undefined) j.db.transaction(() => t.note?.(j.db, note))();
+        notify(j.id, undefined, task);
+        return true;
+      }
+      return false;
     },
 
     // The conflict of a full pool, or null while a slot is free.
