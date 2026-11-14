@@ -50,14 +50,15 @@ describe("gate:ci dry run", () => {
     const r = run(SCRIPT, ["--dry-run"]);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
-    for (const id of ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI10", "CI11", "CI12"]) expect(r.out).toContain(`PASS    ${id} `);
+    for (const id of ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI10", "CI11", "CI12", "CI13"])
+      expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("INFO    CI9 ");
     const line = (id: string) => r.out.split("\n").find((l) => l.includes(` ${id} `)) ?? "";
     expect(line("CI1")).toContain("state=OPEN head present=true branch present=true");
     expect(line("CI2")).toContain("successful=1 inProgress=0 failed=1 cancelled=0 unknown=0");
     expect(line("CI3")).toContain("count=2");
     expect(line("CI3")).toContain(
-      "k1: state=FAILED same origin as --jenkins=true shape=<ctx>/job/<s>/job/<s>/job/<s>/<n>/display/redirect last job=branch display/redirect=true",
+      "k1: state=FAILED same origin as --jenkins=true shape=<ctx>/job/<s>/job/<s>/job/<s>/<n>/ last job=branch display/redirect=false",
     );
     expect(line("CI3")).toContain("k2: state=SUCCESSFUL same origin as --jenkins=false");
     expect(line("CI5")).toContain("authenticated=true anonymous=false name equals --jenkins-user=true version=2.479.3");
@@ -76,6 +77,9 @@ describe("gate:ci dry run", () => {
     expect(line("CI11")).toContain("auto-built without a POST=true");
     expect(line("CI12")).toBe(
       "PASS    CI12 progressiveText GET: HTTP 200 (ok) X-Text-Size=64 X-More-Data=absent content type=text/plain;charset=UTF-8 size=64 B",
+    );
+    expect(line("CI13")).toBe(
+      "PASS    CI13 first FAILED status: same origin as --jenkins=true shape=<ctx>/job/<s>/job/<s>/job/<s>/<n>/; readLog: HTTP 200 X-Text-Size=64 start=0 read=64 B",
     );
     expect(r.out).not.toContain("Finished: FAILURE");
     expect(r.out).toContain("dry run: PASS");
@@ -96,10 +100,9 @@ describe("gate:ci dry run", () => {
       ]);
       expect(d.jenkins.builds).toEqual([]);
       expect(d.jenkins.scans).toBe(0);
-      // CI12 reads the log once, from byte 0, below the --jenkins base.
-      expect(d.jenkins.requests.filter((q) => q.includes("logText"))).toEqual([
-        "GET /jenkins/job/team/job/sample-ci/job/feature%252FABC-1-fix/3/logText/progressiveText?start=0",
-      ]);
+      // CI12 and CI13 each read the log once, from byte 0, below the --jenkins base.
+      const read = "GET /jenkins/job/team/job/sample-ci/job/feature%252FABC-1-fix/3/logText/progressiveText?start=0";
+      expect(d.jenkins.requests.filter((q) => q.includes("logText"))).toEqual([read, read]);
     } finally {
       d.stop();
     }
@@ -121,6 +124,62 @@ describe("gate:ci dry run", () => {
     expect(r.out).toBe("");
     expect(r.err).toContain("self-check failed: the output holds a value of kind: repo.");
     expectNoNames(r.err);
+  });
+});
+
+// CI13 with other CI3 status lists. The evidence must hold no path segment, host, or token.
+describe("gate:ci CI13", () => {
+  async function ci13(statuses: Record<string, unknown>[]) {
+    const d = await dryRun({ build: false, scan: false, statuses });
+    try {
+      const { results } = await runChecks(d.ctx);
+      const r = results.find((x) => x.check === "CI13");
+      const text = `${r?.status} ${r?.evidence}`;
+      expectNoNames(text);
+      for (const seg of ["feature%252FABC-1-fix", "other-job", "ci.example.invalid", "outside"]) expect(text).not.toContain(seg);
+      return { text, logReads: d.jenkins.requests.filter((q) => q.includes("logText")).length };
+    } finally {
+      d.stop();
+    }
+  }
+  const lint = { state: "SUCCESSFUL", key: "lint", url: "https://lint.example.invalid/r/1" };
+
+  test("a FAILED status URL that Jenkins serves gives PASS", async () => {
+    const r = await ci13([lint, { state: "FAILED", key: "k", url: "<job>/feature%252FABC-1-fix/3/" }]);
+    expect(r.text).toBe(
+      "PASS first FAILED status: same origin as --jenkins=true shape=<ctx>/job/<s>/job/<s>/job/<s>/<n>/; readLog: HTTP 200 X-Text-Size=64 start=0 read=64 B",
+    );
+  });
+  test("a FAILED status on another origin gives FAIL with the reason origin, and the token does not go there", async () => {
+    const r = await ci13([
+      { state: "SUCCESSFUL", key: "k1", url: "<job>/feature%252FABC-1-fix/2/" },
+      { state: "FAILED", key: "k2", url: "https://ci.example.invalid/job/other-job/3/" },
+    ]);
+    expect(r.text).toBe(
+      "FAIL first FAILED status: same origin as --jenkins=false shape=/job/<s>/<n>/; readLog refused or failed: kind=origin reason=origin",
+    );
+    expect(r.logReads).toBe(1);
+  });
+  test("a FAILED status outside the --jenkins base path gives FAIL with the reason base path", async () => {
+    const r = await ci13([{ state: "FAILED", key: "k", url: "<origin>/outside/job/other-job/3/" }]);
+    expect(r.text).toContain("readLog refused or failed: kind=origin reason=base path");
+  });
+  test("a display/redirect status URL gives FAIL with the HTTP status", async () => {
+    const r = await ci13([{ state: "FAILED", key: "k", url: "<job>/feature%252FABC-1-fix/3/display/redirect" }]);
+    expect(r.text).toBe(
+      "FAIL first FAILED status: same origin as --jenkins=true shape=<ctx>/job/<s>/job/<s>/job/<s>/<n>/display/redirect; readLog refused or failed: kind=not_found reason=HTTP 404 (not found)",
+    );
+  });
+  test("no FAILED status: the first status with the Jenkins origin, and the line says so", async () => {
+    const r = await ci13([lint, { state: "SUCCESSFUL", key: "k", url: "<job>/feature%252FABC-1-fix/3/" }]);
+    expect(r.text).toStartWith(
+      "PASS no FAILED status with a URL, so the first status with the --jenkins origin: same origin as --jenkins=true",
+    );
+  });
+  test("no status URL with the Jenkins origin gives INFO and no log read", async () => {
+    const r = await ci13([lint, { state: "FAILED", key: "k", url: "https://ci.example.invalid/job/other-job/3/" }]);
+    expect(r.text).toBe("INFO no status URL of 2 has the --jenkins origin");
+    expect(r.logReads).toBe(1);
   });
 });
 

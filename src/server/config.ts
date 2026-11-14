@@ -37,6 +37,8 @@ const config = z.object({
   // Absent: no Jira connection. The Jira token lives in the secret store under "jira-token".
   // email: present for Jira Cloud only. It is personal data: never put it in prompts or logs.
   jira: z.object({ baseUrl: z.string(), caFile: z.string().optional(), email: z.string().optional() }).optional().catch(undefined),
+  // Absent: no Jenkins connection. The Jenkins token lives in the secret store under "jenkins-token".
+  jenkins: z.object({ baseUrl: z.string(), user: z.string(), caFile: z.string().optional() }).optional().catch(undefined),
   // Absent: off. On: each run reads the global CLAUDE.md of the Claude config folder (src/server/review/instructions.ts).
   globalInstructions: z.boolean().optional().catch(undefined),
   // Absent: off. On: "Ask your session" lists the transcripts of the Claude config folder (src/server/review/sessions.ts).

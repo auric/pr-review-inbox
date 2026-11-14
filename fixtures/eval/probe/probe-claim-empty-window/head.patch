@@ -1,0 +1,53 @@
+diff --git a/src/metrics/latency.ts b/src/metrics/latency.ts
+new file mode 100644
+index 0000000..31c2441
+--- /dev/null
++++ b/src/metrics/latency.ts
+@@ -0,0 +1,23 @@
++import { collect } from "./collect";
++import type { Row, Sample } from "./types";
++
++export const LIMIT_MS = 800;
++export const WINDOW_MS = 5 * 60_000;
++
++export function averageMs(samples: readonly Sample[]): number {
++  let total = 0;
++  let count = 0;
++  for (const s of samples) {
++    if (s.ms == null) continue;
++    total += s.ms;
++    count++;
++  }
++  return total / count;
++}
++
++export function latencyRows(all: readonly Sample[], endpoints: readonly string[], now: number): Row[] {
++  return endpoints.map((endpoint): Row => {
++    const avg = averageMs(collect(all, endpoint, now - WINDOW_MS));
++    return { endpoint, averageMs: Math.round(avg), status: avg <= LIMIT_MS ? "ok" : "slow" };
++  });
++}
+diff --git a/tests/metrics/latency.test.ts b/tests/metrics/latency.test.ts
+new file mode 100644
+index 0000000..ad3008b
+--- /dev/null
++++ b/tests/metrics/latency.test.ts
+@@ -0,0 +1,18 @@
++import { describe, expect, test } from "vitest";
++import { averageMs, latencyRows } from "../../src/metrics/latency";
++
++describe("latency", () => {
++  test("averages the samples with a response time", () => {
++    const at = (t: number, ms: number | null) => ({ endpoint: "/a", at: t, ms });
++    expect(averageMs([at(1, 100), at(2, null), at(3, 300)])).toBe(200);
++  });
++
++  test("marks an endpoint over the limit as slow", () => {
++    const now = 10 * 60_000;
++    const samples = [
++      { endpoint: "/a", at: now - 1000, ms: 900 },
++      { endpoint: "/b", at: now - 1000, ms: 100 },
++    ];
++    expect(latencyRows(samples, ["/a", "/b"], now).map((r) => r.status)).toEqual(["slow", "ok"]);
++  });
++});

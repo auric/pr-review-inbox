@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Starts, watches, and stops one Claude Code review process. The flags, env, and cwd rules come from integration-check.md, "Gate v3, local".
-import { copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FileSink } from "bun";
@@ -35,9 +35,11 @@ export const MIN_CLI_VERSION = "2.1.302";
 export const MAIN_AGENT = "rl-main";
 // docs/plans/review-v2/task-subagents.md decision 1: the read-only subagent of a task step.
 export const EXPLORER_AGENT = "rl-explorer";
-const READ_TOOLS = ["Read", "Grep", "Glob"];
+export const READ_TOOLS = ["Read", "Grep", "Glob"];
 // Gate B1: a subagent with these tools denied has no shell and no write tool.
-const SUBAGENT_DENY = ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"];
+export const SUBAGENT_DENY = ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "Agent"];
+// Gate B38 (2.1.323): these rules refuse an Agent call that passes model or effort. A subagent keeps its definition model and effort.
+export const AGENT_PARAM_DENY = ["Agent(model:*)", "Agent(effort:*)"];
 // Names go into comma lists of CLI flags.
 export const NAME = /^[A-Za-z0-9_-]+$/;
 const STDERR_TAIL = 16_384;
@@ -192,8 +194,9 @@ export function childEnv(): Record<string, string> {
   return env;
 }
 
-// docs/plans/review-v2/advisor.md. Off: the advisor switch is a second guard; its effect is not verified (ADV4). On: the advisor needs
-// feature-flag fetching, which DISABLE_TELEMETRY turns off. childEnv already drops the CLAUDE_CODE_* switches that turn it off.
+// docs/plans/review-v2/advisor.md. Off: the advisor switch is a second guard; GADV.4 verified that it turns the advisor off. The app never
+// relies on --tools, --allowedTools, or --disallowedTools for the advisor (GADV.5a, 5b). On: the advisor needs feature-flag fetching, which
+// DISABLE_TELEMETRY turns off. childEnv already drops the CLAUDE_CODE_* switches that turn it off.
 export function advisorEnv(env: Record<string, string>, advisor: string | null | undefined): Record<string, string> {
   if (!advisor) return { ...env, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" };
   return Object.fromEntries(Object.entries(env).filter(([k]) => k.toUpperCase() !== "DISABLE_TELEMETRY"));
@@ -468,6 +471,40 @@ function outside(dir: string, path: string) {
   return r === ".." || r.startsWith(`..${sep}`) || isAbsolute(r);
 }
 
+const realDir = (p: string) => {
+  try {
+    const s = lstatSync(p);
+    return s.isDirectory() && !s.isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
+// CLI 2.1.322 writes subagent output to <root>/<16 hex>/<session id>/tasks/<agent id>.output (Gate B35, B36). root: <tmpdir>/claude.
+// Only real folders count: a link is never followed.
+export function sessionFolders(sessionIds: string[], root = join(tmpdir(), "claude")): string[] {
+  const ids = [...new Set(sessionIds.filter((s) => SESSION_ID.test(s)))];
+  if (!ids.length || !realDir(root)) return [];
+  return readdirSync(root)
+    .filter((h) => realDir(join(root, h)))
+    .flatMap((h) => ids.map((id) => join(root, h, id)).filter(realDir));
+}
+
+// Deletes the session folders, then each parent folder that is empty. Other sessions can share a parent folder.
+export function removeSessionFolders(sessionIds: string[], root = join(tmpdir(), "claude")) {
+  for (const dir of sessionFolders(sessionIds, root))
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+      try {
+        rmdirSync(dirname(dir));
+      } catch (e) {
+        if (!["ENOTEMPTY", "EEXIST", "ENOENT"].includes((e as NodeJS.ErrnoException).code ?? "")) throw e;
+      }
+    } catch (e) {
+      log(`Could not delete a Claude Code session folder: ${(e as Error).message}`);
+    }
+}
+
 // Checks the servers and writes mcp.json into appDir. tools: the full names of the chosen tools. allow: the --allowedTools entries.
 // denied: the other tools of the user servers.
 function writeMcp(appDir: string, mcpServers: Record<string, McpServerSpec>) {
@@ -527,6 +564,7 @@ function prepare(spec: RunSpec) {
   const readTools = [...builtins, ...mcp.tools];
   const denied = mcp.denied;
   const agentTool = subs.length ? [`Agent(${subs.join(", ")})`] : [];
+  const deny = [...denied, ...(subs.length ? AGENT_PARAM_DENY : [])];
   const mcpFile = mcp.file;
   const agentsFile = join(spec.appDir, "agents.json");
   // Gate B9: without StructuredOutput in the rl-main tools, no result carries structured_output.
@@ -554,7 +592,7 @@ function prepare(spec: RunSpec) {
     [...builtins, ...(subs.length ? ["Agent"] : [])].join(","),
     ...(spec.noTools ? [] : ["--allowedTools", [...READ_TOOLS, ...mcp.allow].join(",")]),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
-    ...(denied.length ? ["--disallowedTools", denied.join(",")] : []),
+    ...(deny.length ? ["--disallowedTools", deny.join(",")] : []),
     "--agents",
     agentsFile,
     "--agent",
@@ -573,8 +611,12 @@ function prepare(spec: RunSpec) {
     throw new Error("The MCP tool lists are too long for the command line. Pick fewer MCP servers.");
   // Init can list a denied tool. The deny rule keeps it off, so the init check accepts it.
   const allowed = new Set([...readTools, ...denied, "StructuredOutput", ...(subs.length ? ["Agent", "Task"] : [])]);
-  return { args, allowed, agents: new Set([MAIN_AGENT, ...subs]) };
+  return { args, allowed, agents: new Set([MAIN_AGENT, ...subs]), models: defModels(agents) };
 }
+
+// The definition model of each subagent that has one. rl-main runs on the run model.
+const defModels = (defs: Record<string, { model?: string | null }>) =>
+  new Map(Object.entries(defs).flatMap(([n, d]) => (n !== MAIN_AGENT && d.model ? [[n, d.model] as const] : [])));
 
 // The CLI arguments of a session fork. Resume does not restore the launch flags, so each one is passed again (session-consult.md
 // section 1). --fork-session is always present: without it, a running background session attaches, or the CLI exits with code 1.
@@ -609,7 +651,7 @@ export function resumeArgs(spec: ResumeSpec) {
     String(spec.maxTurns),
     "--no-session-persistence",
   ];
-  return { args, allowed: new Set([...READ_TOOLS, "StructuredOutput"]), agents: new Set<string>() };
+  return { args, allowed: new Set([...READ_TOOLS, "StructuredOutput"]), agents: new Set<string>(), models: new Map<string, string>() };
 }
 
 // The CLI arguments of an implement run: the flags of Gate B17 (scripts/gate/claude-checks.ts b17) and the runner output flags. No
@@ -645,6 +687,7 @@ export function implementArgs(spec: ImplementSpec) {
     };
     writeFileSync(agentsFile, JSON.stringify({ [MAIN_AGENT]: main, [EXPLORER_AGENT]: explorerDef(spec.explorer) }));
   }
+  const deny = [...(mcp?.denied ?? []), ...(agentsFile ? AGENT_PARAM_DENY : [])];
   const args = [
     "-p",
     ...(spec.resume ? ["--resume", spec.resume, "--fork-session"] : []),
@@ -660,7 +703,7 @@ export function implementArgs(spec: ImplementSpec) {
     "--allowedTools",
     [...IMPLEMENT_TOOLS, ...(mcp?.allow ?? [])].join(","),
     // A deny rule wins over every allow rule. The other tools of a user server stay off.
-    ...(mcp?.denied.length ? ["--disallowedTools", mcp.denied.join(",")] : []),
+    ...(deny.length ? ["--disallowedTools", deny.join(",")] : []),
     ...(settings ? ["--settings", settings] : []),
     ...(agentsFile ? ["--agents", agentsFile, "--agent", MAIN_AGENT] : []),
     "--json-schema",
@@ -679,6 +722,7 @@ export function implementArgs(spec: ImplementSpec) {
     args,
     allowed: new Set([...builtins, ...(mcp?.tools ?? []), ...(mcp?.denied ?? []), "StructuredOutput", ...agentTools]),
     agents: new Set(agentsFile ? [MAIN_AGENT, EXPLORER_AGENT] : []),
+    models: defModels(agentsFile && spec.explorer ? { [EXPLORER_AGENT]: spec.explorer } : {}),
   };
 }
 
@@ -752,7 +796,8 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       // Gate B9: an 8.3 short cwd makes the CLI refuse Reads inside it.
       cwd = realpathSync.native(spec.cwd);
       projectsDir = c.projectsDir;
-      const { args, allowed, agents } = "implement" in spec ? implementArgs(spec) : "resume" in spec ? resumeArgs(spec) : prepare(spec);
+      const { args, allowed, agents, models } =
+        "implement" in spec ? implementArgs(spec) : "resume" in spec ? resumeArgs(spec) : prepare(spec);
       const own = "implement" in spec || "resume" in spec ? spec.timeoutMs : undefined;
       const base = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
       const limit = Math.min(own ?? base ?? RUN_TIMEOUT_MS, RUN_TIME_MAX_MS);
@@ -760,7 +805,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
       const advisor = "resume" in spec ? null : spec.advisor;
       // implementArgs wrote this file beside shell.json.
       const shellGit = "implement" in spec && spec.appDir ? shellGitConfig(spec.appDir) : "";
-      const ps = createStreamParser({ cwd, allowedTools: allowed, agents, shell: shell?.mode });
+      const ps = createStreamParser({ cwd, allowedTools: allowed, agents, models, shell: shell?.mode });
       parser = ps;
       const live = "implement" in spec && !!spec.live;
       // part-session.md section 2.10: the stall and loop guards end implement runs only.
@@ -924,6 +969,7 @@ export function createClaudeRunner(opts: RunnerOptions = {}) {
         if (outcome) outcome.kept = kept;
       }
       if (cwd && projectsDir) removeCwdFolders(cwd, projectsDir);
+      removeSessionFolders((parser?.state.inits ?? []).map((i) => i.session_id));
       active = undefined;
     }
   }

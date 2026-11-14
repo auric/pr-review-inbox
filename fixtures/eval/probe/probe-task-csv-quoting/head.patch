@@ -1,0 +1,48 @@
+diff --git a/src/export/csv.ts b/src/export/csv.ts
+new file mode 100644
+index 0000000..4b16de5
+--- /dev/null
++++ b/src/export/csv.ts
+@@ -0,0 +1,12 @@
++import type { Order } from "../orders/types";
++
++const HEADER = ["id", "customer", "total"];
++
++export function ordersCsv(orders: readonly Order[]): string {
++  const rows = [HEADER.join(",")];
++  for (const o of orders) {
++    const total = (o.totalCents / 100).toFixed(2);
++    rows.push([o.id, o.customer, total].join(","));
++  }
++  return `${rows.join("\r\n")}\r\n`;
++}
+diff --git a/src/export/route.ts b/src/export/route.ts
+new file mode 100644
+index 0000000..93996bc
+--- /dev/null
++++ b/src/export/route.ts
+@@ -0,0 +1,7 @@
++import { ordersOf } from "../orders/list";
++import type { Order } from "../orders/types";
++import { ordersCsv } from "./csv";
++
++export function exportDay(all: readonly Order[], day: string): { type: string; body: string } {
++  return { type: "text/csv; charset=utf-8", body: ordersCsv(ordersOf(all, day)) };
++}
+diff --git a/tests/export/csv.test.ts b/tests/export/csv.test.ts
+new file mode 100644
+index 0000000..f6c2bd4
+--- /dev/null
++++ b/tests/export/csv.test.ts
+@@ -0,0 +1,11 @@
++import { expect, test } from "vitest";
++import { ordersCsv } from "../../src/export/csv";
++
++test("writes the header and one row per order", () => {
++  const order = { id: "o-1", day: "2026-01-02", customer: "Ada", totalCents: 1250 };
++  expect(ordersCsv([order])).toBe("id,customer,total\r\no-1,Ada,12.50\r\n");
++});
++
++test("an empty list gives the header only", () => {
++  expect(ordersCsv([])).toBe("id,customer,total\r\n");
++});

@@ -92,9 +92,19 @@ export const useRuns = () => useQuery({ queryKey: ["runs"], queryFn: async () =>
 export const useRunSlots = () =>
   useQuery({ queryKey: ["runs", "slots"], queryFn: async () => read<RunSlotsDto>(await api.api.runs.slots.$get()) });
 
-export const getRun = async (id: number) => read<RunDetail>(await api.api.runs[":id"].$get(param(id)));
+// The server frees the slot of a run before or with its end write (jobs.ts). So an ended run holds no slot. The slots can refetch
+// after the run detail. While a run row shows the end, the start controls (useSlots) must not refuse a start.
+export async function getRun(qc: QueryClient, id: number) {
+  const d = await read<RunDetail>(await api.api.runs[":id"].$get(param(id)));
+  if (d.run.status !== "running")
+    qc.setQueryData<RunSlotsDto>(["runs", "slots"], (s) =>
+      s?.running.some((r) => r.run === id) ? { ...s, running: s.running.filter((r) => r.run !== id) } : undefined,
+    );
+  return d;
+}
 
-export const useRun = (id: number | null) => useQuery({ queryKey: ["run", id], enabled: id !== null, queryFn: () => getRun(id ?? 0) });
+export const useRun = (id: number | null) =>
+  useQuery({ queryKey: ["run", id], enabled: id !== null, queryFn: ({ client }) => getRun(client, id ?? 0) });
 
 // The raw output of an ended run does not change.
 export const useRaw = (id: number, enabled: boolean) =>

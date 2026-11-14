@@ -104,7 +104,7 @@ async function setup(o: { config?: string; profiles?: ProfileInput[]; runLimits?
   // Bitbucket names the default branch in HEAD of the repository.
   await git(["--git-dir", remote.remote, "symbolic-ref", "HEAD", "refs/heads/main"], { env: gitEnv(join(root, "empty.gitconfig")) });
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl");
   const scenario = (s: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...s });
   scenario();
   const fake = startFakeBitbucket();
@@ -1851,5 +1851,12 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
     expect(holdBlocked(h.db, h.t(), q2)).toBe(true);
     expect(advance(h.db, h.ref(), { type: "STOP" }, {}, 8).status).toBe(200);
     expect([h.t().state, ...h.rows()]).toEqual(["stopped", null, null, null]);
+  });
+
+  test("AC-B241: the task row lists every code part in its build", () => {
+    const h = light();
+    expect(rowDto(h.db, h.t()).progress).toMatchObject({ part: 1, parts: 3, building: [1, 2, 3] });
+    h.db.query("UPDATE task_part SET state = 'pr_open' WHERE id = $id").run({ id: h.parts[0] });
+    expect(rowDto(h.db, h.t()).progress).toMatchObject({ part: 1, parts: 3, building: [2, 3] });
   });
 });

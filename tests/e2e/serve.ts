@@ -118,14 +118,14 @@ process.env.CLAUDE_CONFIG_DIR = claudeConfig;
 const remote = await reviewRemote(claudeDir, { 1001: "source", 210: "source", 77: "source", 1004: "source" });
 
 const STREAMS: Record<ClaudeScenario["stream"], string> = {
-  // b9: the main agent, two refused agents, and one rl-reviewer subagent with three calls.
-  tree: claudeStream(claudeDir, "tree", "claude/b9-wp8-flags.jsonl", REVIEW_RESULT),
-  schema: claudeStream(claudeDir, "schema", "claude/b9-wp8-flags.jsonl", { summary: "SCHEMA-CANARY", findings: "none" }),
+  // review-agent-tree.jsonl: the main agent, two refused agents, and one rl-reviewer subagent with three calls.
+  tree: claudeStream(claudeDir, "tree", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT),
+  schema: claudeStream(claudeDir, "schema", "claude-synthetic/review-agent-tree.jsonl", { summary: "SCHEMA-CANARY", findings: "none" }),
   limit: claudeStream(claudeDir, "limit", "claude-synthetic/usage-limit.jsonl"),
   gaps: claudeStream(
     claudeDir,
     "gaps",
-    "claude/b9-wp8-flags.jsonl",
+    "claude-synthetic/review-agent-tree.jsonl",
     {
       ...REVIEW_RESULT,
       findings: [],
@@ -142,11 +142,11 @@ const STREAMS: Record<ClaudeScenario["stream"], string> = {
   // A session fork (docs/plans/session-consult.md part C): the read tools only, one Read, and the structured answer.
   session: resolve(import.meta.dir, "../../fixtures/claude-synthetic/session-resume.jsonl"),
   // A task run (docs/plans/review-v2/spec.md section 6.2): no subagent. The scenario gives the structured results.
-  task: claudeStream(claudeDir, "task", "claude/b6-hostile-repo.jsonl"),
+  task: claudeStream(claudeDir, "task", "claude-synthetic/review-flat.jsonl"),
 };
 // The verify phase of a review run (docs/plans/review-v2/spec.md section 1.6): one tool call and no subagent, so the run log keeps the
 // subagents of the finder. The fake CLI gives a confirmed verdict per candidate. A scenario bySchema replaces it.
-const CHECK_STREAM = claudeStream(claudeDir, "check", "claude/b6-hostile-repo.jsonl");
+const CHECK_STREAM = claudeStream(claudeDir, "check", "claude-synthetic/review-flat.jsonl");
 function setClaude(c: ClaudeScenario) {
   runner.write({
     fixture: STREAMS[c.stream],

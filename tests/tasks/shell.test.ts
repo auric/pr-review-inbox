@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createStreamParser } from "../../src/server/review/stream";
 import {
   allowAsks,
   checkRules,
@@ -413,6 +414,31 @@ describe("allow requests and the allowlist", () => {
       ["scp -r repo build1:/tmp", "scp -r repo build1:/tmp"],
     ]);
     expect(r.notes).toEqual([]);
+  });
+
+  test("a killed run: a refused file-changing command in allowlist mode becomes a request with its exact command", () => {
+    const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell: "allowlist" });
+    for (let i = 0; i < 6; i++) {
+      const id = `t${i}`;
+      p.line(
+        JSON.stringify({
+          type: "assistant",
+          message: { role: "assistant", content: [{ type: "tool_use", id, name: "Bash", input: { command: `touch out${i}.txt` } }] },
+        }),
+      );
+      p.line(
+        JSON.stringify({
+          type: "system",
+          subtype: "permission_denied",
+          tool_name: "Bash",
+          tool_use_id: id,
+          message: `touch in '/w/out${i}.txt' needs approval. The path is inside the working directories for this session ('/w') and Claude Code asks before a shell command creates, changes or removes files there.`,
+        }),
+      );
+    }
+    const r = allowAsks({ ...base, killed: true, refused: p.state.refused });
+    expect(r.asks.map((a) => a.pattern)).toEqual(["touch out0.txt", "touch out1.txt", "touch out2.txt"]);
+    expect(r.notes).toEqual([3, 4, 5].map((i) => `Claude asked for more than 3 commands. The app left out touch out${i}.txt.`));
   });
 
   test("a request for a command that the deny list refused, a refused-before pattern, a pattern of the run, and a bad pattern go to the notes", () => {

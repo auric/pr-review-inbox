@@ -141,7 +141,7 @@ async function setup(o: { openB?: boolean; seq?: Record<string, unknown[]> } = {
   const r = await taskRemote(root);
   const runner = fakeRunner(root);
   runner.write({
-    fixture: claudeStream(root, "st4", "claude/b6-hostile-repo.jsonl"),
+    fixture: claudeStream(root, "st4", "claude-synthetic/review-flat.jsonl"),
     seq: { review: [{ review: CLEAN }], ...o.seq },
   });
   const fake = startFakeBitbucket();

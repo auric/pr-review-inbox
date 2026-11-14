@@ -454,7 +454,9 @@ test("an MCP server picked in the dialog gets only its ticked tools in the run",
   expect(run?.servers).toContain("fake-docs");
   expect(run?.allowed?.split(",")).toEqual(expect.arrayContaining(["mcp__fake-docs__search", "mcp__fake-docs__note_tool"]));
   expect(run?.allowed).not.toContain("mcp__fake-docs__lookup");
-  expect(run?.denied?.split(",").sort()).toEqual(["mcp__fake-docs__delete_item", "mcp__fake-docs__lookup"]);
+  // A run with subagents also denies the Agent model and effort parameters (AGENT_PARAM_DENY).
+  const mcpDenied = run?.denied?.split(",").filter((r) => !r.startsWith("Agent("));
+  expect(mcpDenied?.sort()).toEqual(["mcp__fake-docs__delete_item", "mcp__fake-docs__lookup"]);
   await runLine(page).getByRole("button", { name: "Cancel" }).click();
   await expect(runRow(page)).toHaveAttribute("data-run-state", "cancelled", { timeout: RUN_MS });
 });

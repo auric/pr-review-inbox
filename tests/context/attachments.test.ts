@@ -478,7 +478,7 @@ describe("run inclusion", () => {
     const remote = await reviewRemote(fresh(), { 2: "source" });
     const claudeDir = fresh();
     const runner = fakeRunner(claudeDir);
-    runner.write({ fixture: claudeStream(claudeDir, "tree", "claude/b9-wp8-flags.jsonl", REVIEW_RESULT), hang: true });
+    runner.write({ fixture: claudeStream(claudeDir, "tree", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT), hang: true });
     const live = createLive();
     const review = createReviewJobs({
       settings,

@@ -2,6 +2,8 @@
 
 These cases measure how well a review finds real bugs and how much noise it adds. docs/plans/review-v2/spec.md section 4.3 is the spec. The code is in `scripts/eval/`. All code in the cases is synthetic. It holds no real names, hosts, or paths.
 
+`bun run eval:w1` runs wave W1 of the local set (probe smoke run, baseline, labels, summary) in one command. See docs/eval/local.md, "Run W1 in one command".
+
 ## Smoke test
 
 Run this first to check the harness end to end with a cheap model. Its scores do not count:
@@ -90,17 +92,21 @@ It prints one table per metric with the delta, for all cases and for each case. 
 ## Options
 
 - `--real`: run the `claude` CLI on PATH. Without `--real` or `--runner`, the harness prints the plan and exits with code 2.
-- `--set v1`, `--set hard`, or `--set local`: the case set, `fixtures/eval/cases/`, `fixtures/eval/hard/`, or the local set from your own decisions in `REVIEW_LOOP_EVAL_LOCAL` (docs/eval/local.md). Default: v1.
+- `--set v1`, `--set hard`, `--set probe`, or `--set local`: the case set, `fixtures/eval/cases/`, `fixtures/eval/hard/`, the synthetic probe cases in `fixtures/eval/probe/` (docs/eval/local.md), or the local set from your own decisions in `REVIEW_LOOP_EVAL_LOCAL` (docs/eval/local.md). Default: v1.
 - `--cases all` or `--cases id,id`: the cases of the set to run. Default: all.
 - `--profile <id>`: a shipped review profile. Default: `general`.
 - `--profile-version N`: run the shipped values of the profile at profile version N, 1 to the current version (6). The result file records it as `profileVersion`. Default: no flag, so the current shipped profile runs. The flag changes only the profile. The prompts and the schema stay those of the current pipeline.
 - `--modules a,b` and `--volume quiet|balanced|thorough`: profile fields of prompt version 2. Prompt version 1 refuses them. `--modules` also takes the trial module `failures` (docs/plans/review-v3.md WP-V2), which the app UI does not offer. An unknown module name exits with code 2. An empty value runs no check section.
-- `--variants a,b`: the prompt variants of docs/plans/review-v3.md WP-V2, for this eval only: `order`, `rereview-strict`, and `signal`. An unknown name exits with code 2. The result file records the variants in `promptVersion`, sorted, such as `2.3+order+signal`. Default: the variants of the profile (none).
+- `--variants a,b`: the prompt variants, for this eval only. `broad` and `verify2`: docs/plans/review-v2/review-quality-2026.md items 3 and 4. `parts`: docs/plans/review-v3.md WP-V14. An unknown or retired name (`signal`, `order`, `rules2`, `rereview-strict`) exits with code 2. The result file records the variants in `promptVersion`, sorted, such as `2.8+broad+verify2`. Default: the variants of the profile (none).
 - The run prints `Model:` and `Effort:`: the value of the profile after `--model` and `--effort`, else the default of your Claude Code settings.
 - `--model <name>`: the model of the runs, for this eval only. A model alias such as `haiku`, `sonnet`, or `opus`, or a full model ID such as `claude-opus-5-5`. Default: the model of the profile, else your Claude Code default.
 - `--effort low|medium|high|xhigh|max`: the effort of the runs, for this eval only. Default: the effort of the profile (high for the current Review profile), else your Claude Code default.
 - `--verifier on|off`: the verify mode of the profile, for this eval only. `off` runs the finder only. The result file records the mode as `requested.verifier`, and the run prints it. `eval:compare` warns when two files used different modes. Default: the mode of the profile (on).
-- `--rereview`: run the re-review cases of the set (docs/plans/review-v3.md WP-V3). Each case seeds its earlier run into the temp database, then runs a re-review as the app does. The result file records `rereview: true`, and `eval:compare` refuses a mix of re-review and plain results. Sets v1 and hard have no re-review case yet, so they exit with code 2. `--variants rereview-strict` needs `--rereview`, else it exits with code 2, because the variant changes only the re-review stdin.
+- `--verifier-effort low|medium|high|xhigh|max`: the effort of the verify call, for this eval only. The result file records it as `requested.verifierEffort`. Default: the verify effort of the profile (medium).
+- `--reviewer-mode off|auto|always`: the rl-reviewer mode of the profile, for this eval only. `off` gives the finder no rl-reviewer. The result file records it as `requested.reviewerMode`. Default: the mode of the profile (auto).
+- Each run writes the outcome of each CLI call to `<result>.calls/<case>-<repeat>-<k>.json` beside the result file, with k from 1 in call order. It writes no run argument, because a run argument can hold the secrets of an MCP server.
+- `--replay-find <result.json>`: take the finder and salvage calls from the recording of that result, and run only the verify calls. The result file records the file name as `requested.replayOf`. The command exits with code 2 when the recording has another mode, set, finder prompt version, or fewer repeats. It also exits with code 2 when a flag changes the finder. Only `--verifier-effort` and a verify-only variant (`verify2`) leave the finder as it is. A case with another head than in the recording gives an error run. A call without a recording also gives an error run. No finder runs live.
+- `--rereview`: run the re-review cases of the set (docs/plans/review-v3.md WP-V3). Each case seeds its earlier run into the temp database, then runs a re-review as the app does. The result file records `rereview: true`, and `eval:compare` refuses a mix of re-review and plain results. Sets v1 and hard have no re-review case yet, so they exit with code 2.
 - `--repeat N`: runs of each case, 1 to 10. Default: 1.
 - `--out <folder>`: the folder for the result file. Default: `eval-results/` in the repository, which git ignores.
 - `--keep`: keep the temp folders of each case for a look at the run.

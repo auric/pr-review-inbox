@@ -129,7 +129,7 @@ async function setup(o: { baseUrl?: string } = {}) {
   dirs.push(root);
   const remote = await fixRemote(join(root, "remote"));
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl");
   const scenario = (o: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...o });
   scenario();
 

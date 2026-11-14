@@ -29,13 +29,16 @@ const langs = (...paths: string[]) => languagesOf(paths.map((p) => file(p)));
 const longSentences = (text: string) => text.split(/(?<=[.?!])\s+/).filter((s) => s.split(/\s+/).filter(Boolean).length > 20);
 
 describe("language map", () => {
-  test("C++, C, and Python suffixes map to their lists, in any case", () => {
+  test("C++, C, Python, and C# suffixes map to their lists, in any case", () => {
     for (const ext of [".cpp", ".cc", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".h++", ".tcc", ".ipp", ".inl", ".tpp", ".ixx", ".cppm"])
       expect(langs(`src/a${ext}`)).toEqual(["cpp"]);
     expect(langs("src/A.CPP", "include/B.Hpp")).toEqual(["cpp"]);
     expect(langs("lib/a.c")).toEqual(["c"]);
     for (const ext of [".py", ".pyi", ".PYW"]) expect(langs(`tools/a${ext}`)).toEqual(["python"]);
-    expect(langs("src/app.ts", "README.md", "Makefile", "dir.cpp/notes", ".py", "a.cs", "a.m")).toEqual([]);
+    for (const ext of [".cs", ".CS", ".csx"]) expect(langs(`src/A${ext}`)).toEqual(["csharp"]);
+    expect(
+      langs("src/app.ts", "README.md", "Makefile", "dir.cpp/notes", ".py", ".cs", "a.m", "Pages/A.razor", "Views/A.cshtml", "a.csproj"),
+    ).toEqual([]);
   });
 
   test("a .h file gets the C++ list; a change with .c files also gets the C list", () => {
@@ -45,8 +48,8 @@ describe("language map", () => {
   });
 
   test("the result follows LANGUAGES order and holds each language once", () => {
-    expect(LANGUAGES).toEqual(["cpp", "c", "python"]);
-    expect(langs("x.py", "y.c", "z.cpp", "w.py", "v.hpp")).toEqual(["cpp", "c", "python"]);
+    expect(LANGUAGES).toEqual(["cpp", "c", "python", "csharp"]);
+    expect(langs("u.cs", "x.py", "y.c", "z.cpp", "w.py", "v.hpp")).toEqual(["cpp", "c", "python", "csharp"]);
   });
 
   test("a deleted file counts by its old path; a rename by its new path; a binary file not at all", () => {
@@ -134,5 +137,15 @@ describe("agent prompt", () => {
     const n = (l: { items: readonly string[]; skip: readonly string[] }) => l.items.length + l.skip.length;
     expect(lines.filter((l) => l.startsWith("- "))).toHaveLength(n(CHECKLISTS.c) + n(CHECKLISTS.python));
     expect(withLanguages(agent, ["c", "python"])).toEqual({ description: "D", prompt: ["P", ...lines].join("\n") });
+  });
+
+  test("a C# change gets the C# list, which ends with its skip list; other changes do not get it", () => {
+    const lines = languageLines(langs("src/Service.cs"));
+    const skip = lines.indexOf("Do not report in C#:");
+    expect(lines.slice(lines.indexOf("C# list:") + 1, skip)).toEqual(CHECKLISTS.csharp.items.map((i) => `- ${i}`));
+    expect(lines.slice(skip + 1, -1)).toEqual(CHECKLISTS.csharp.skip.map((i) => `- ${i}`));
+    expect(lines.at(-1)).toBe(SKIP_COMMON);
+    for (const other of [["src/a.py"], ["src/a.cpp", "lib/b.c"], ["src/app.ts"]])
+      expect(languageLines(langs(...other))).not.toContain("C# list:");
   });
 });

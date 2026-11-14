@@ -333,7 +333,7 @@ function makeDb(dir: string, h: Heads) {
       db
         .query(
           `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, since_head, status, started_at)
-          VALUES ($pr, 'review', 'general', '', $key, $head, $base, $base, $since, 'completed', 1) RETURNING id`,
+          VALUES ($pr, 'review', 'general', '', $key, $head, $base, $base, $since, 'completed', 1000) RETURNING id`,
         )
         .get({ pr, key: `k${keys++}`, head, base: h.base, since }) as { id: number }
     ).id;
@@ -382,6 +382,18 @@ function makeDb(dir: string, h: Heads) {
   db.run(
     `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at, updated_at)
       VALUES (1, 200, 0, NULL, 200, 'me', 'b', '{}', 1, 1, 1)`,
+  );
+  // A general comment of another person before the head time: the re-review case gets it as thread 1.
+  db.run(
+    `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at, updated_at)
+      VALUES (1, 201, 0, NULL, 201, 'quinn-other', 'A claim in a thread.', NULL, 0, 1, 1)`,
+  );
+  // Replies in the thread of the posted finding. The re-review case gets the reply of the PR author before the run start only.
+  db.run(
+    `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at, updated_at)
+      VALUES (1, 202, 0, 200, 200, 'author', 'The author explains the posted finding.', NULL, 0, 5, 5),
+        (1, 203, 0, 200, 200, 'author', 'After the run start.', NULL, 0, 2000, 2000),
+        (1, 204, 0, 200, 200, 'quinn-other', 'Another person in your thread.', NULL, 0, 5, 5)`,
   );
   db.close();
   return { file, ids };
@@ -459,7 +471,7 @@ describe("eval:local re-review cases", () => {
         JSON.stringify({
           record,
           auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-          fixture: claudeStream(dir, "eval", "claude/b9-wp8-flags.jsonl", {
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", {
             summary: "s",
             risks: [],
             questions: [],
@@ -482,6 +494,18 @@ describe("eval:local re-review cases", () => {
       expect(stdin).toContain(`An earlier run reviewed this change at ${heads.a}.`);
       expect(stdin).toContain("Earlier findings: 4, 1");
       expect(stdin).toContain("Posted findings: 1.");
+      // The thread IDs follow the seeded earlier roots, so thread 2 of the case is comment 7 of the run. Local ID 1 is the root of the
+      // posted finding, which seedEarlier seeds as comment 1.
+      expect(rrCase().threads).toEqual([
+        { id: 2, root: 2, author: "reviewer-1", at: 1, text: "A claim in a thread." },
+        { id: 3, root: 1, author: "eval-author", at: 5, text: "The author explains the posted finding.", earlier: `item-${ids.posted}` },
+      ]);
+      const context = readRecords<{ argv: string[]; context?: Record<string, string> }>(record).find((x) => x.argv.includes("-p"))?.context;
+      expect(context?.["pr-context.md"]).toContain("### Thread 7 · general comment · started by reviewer-1 (another person)");
+      expect(context?.["pr-context.md"]).not.toContain("quinn");
+      // The reply of the PR author is the newest message of the thread of the posted finding.
+      expect(context?.["pr-context.md"]).toContain("- Newest message 8 by eval-author:\n\n    The author explains the posted finding.");
+      for (const gone of ["After the run start.", "Another person in your thread."]) expect(context?.["pr-context.md"]).not.toContain(gone);
       const [file] = readdirSync(out).filter((f) => f.endsWith(".json"));
       const result = JSON.parse(readFileSync(join(out, file as string), "utf8")) as EvalResult;
       expect(result.rereview).toBe(true);
@@ -510,12 +534,13 @@ describe("eval:local re-review cases", () => {
   );
 
   test("--rereview refusals exit 2", async () => {
-    const strict = await bun([RUN, "--variants", "rereview-strict"]);
+    // review-quality-2026.md WP-R1: rereview-strict is retired.
+    const strict = await bun([RUN, "--set", "local", "--rereview", "--variants", "rereview-strict"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(strict.code).toBe(2);
-    expect(strict.stderr).toContain("--variants rereview-strict changes only the re-review prompt. Add --rereview");
-    const plan = await bun([RUN, "--set", "local", "--rereview", "--variants", "rereview-strict"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
+    expect(strict.stderr).toContain("--variants must be a comma list of broad, parts, verify2.");
+    const plan = await bun([RUN, "--set", "local", "--rereview", "--variants", "verify2"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(plan.code).toBe(2);
-    expect(plan.stdout).toContain("Eval plan: 1 case, 1 repeat, profile general with variants rereview-strict, set local, re-reviews.");
+    expect(plan.stdout).toContain("Eval plan: 1 case, 1 repeat, profile general with variants verify2, set local, re-reviews.");
     expect(plan.stdout).toContain("5 earlier findings");
     const v1 = await bun([RUN, "--set", "v1", "--rereview"]);
     expect(v1.code).toBe(2);

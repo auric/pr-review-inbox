@@ -145,7 +145,7 @@ async function app(
   gates?: typeof SESSION_GATES,
 ) {
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "tu1", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "tu1", "claude-synthetic/review-flat.jsonl");
   const scenario = (s: FakeScenario["seq"]) => runner.write({ fixture: stream, seq: { review: [{ review: CLEAN }], ...s } });
   scenario(seq);
   const dataDir = join(root, "data");

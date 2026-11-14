@@ -7,6 +7,7 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writ
 import { homedir } from "node:os";
 import { join, posix } from "node:path";
 import { alwaysSkillError, type SkillDto } from "../../shared/dto";
+import { plural } from "../../shared/outcome";
 import { blobBytes } from "./clone";
 import { git, gitEnv } from "./git";
 
@@ -345,8 +346,8 @@ function taskIndexText(listed: Listed[], left: string[], root: string): string {
     "",
     ...listed.map((s) => {
       const d = one(s.description).slice(0, MAX_INDEX_DESCRIPTION);
-      const skipped = s.skipped ? ` (${s.skipped} files left out: hidden, link, binary, or over the caps)` : "";
-      const keys = s.keys ? ` (${s.keys} key files left out)` : "";
+      const skipped = s.skipped ? ` (${plural(s.skipped, "file")} left out: hidden, link, binary, or over the caps)` : "";
+      const keys = s.keys ? ` (${plural(s.keys, "key file")} left out)` : "";
       return `- ${one(s.name)} (${s.source}): ./${root}/${s.folder}/SKILL.md${skipped}${keys}.${d ? ` ${d}` : ""}`;
     }),
     ...(listed.length ? [] : ["No skill."]),

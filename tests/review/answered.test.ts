@@ -90,7 +90,7 @@ async function setup() {
   const remote = await reviewRemote(root, { 2: "source" });
   const runner = fakeRunner(root);
   let streams = 0;
-  const stream = (structured: unknown) => claudeStream(root, `s${streams++}`, "claude/b6-hostile-repo.jsonl", structured);
+  const stream = (structured: unknown) => claudeStream(root, `s${streams++}`, "claude-synthetic/review-flat.jsonl", structured);
   runner.write({ fixture: stream(BASE_RESULT) });
 
   const dir = join(root, "data");

@@ -18,6 +18,7 @@ import { Hint } from "../shell/Hint";
 import { setTheme, type Theme, useTheme } from "../theme";
 import { About } from "./About";
 import { BranchPrefixes } from "./BranchPrefixes";
+import { CiSettings } from "./CiSettings";
 import { Clones } from "./Clones";
 import { JiraSettings } from "./JiraSettings";
 import { ProjectInstructions } from "./ProjectInstructions";
@@ -44,8 +45,9 @@ function jump(e: MouseEvent<HTMLAnchorElement>, id: string) {
 // A modified click opens the section URL in a new tab or window.
 const plainClick = (e: MouseEvent) => e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
 
-// The section that the URL names, and the heading of each section.
-export type SettingsAt = { section: SettingsSection | null; profile: string | null; n: number };
+// The section that the URL names, and the heading of each section. focus: the ID of a field that takes the focus after this open.
+// It never goes into the URL.
+export type SettingsAt = { section: SettingsSection | null; profile: string | null; n: number; focus?: string };
 const HEADINGS: Record<SettingsSection, string> = {
   connection: "h-connection",
   checks: "checks-title",
@@ -56,6 +58,7 @@ const HEADINGS: Record<SettingsSection, string> = {
   quality: "h-quality",
   "task-ids": "h-taskids",
   tracker: "h-tracker",
+  ci: "h-ci",
   tasks: "h-tasks",
   commands: "h-commands",
   clones: "h-clones",
@@ -186,6 +189,7 @@ export function Settings({
           ["quality", "Review quality"],
           ["task-ids", "Task IDs"],
           ...(tracker ? ([["tracker", tracker.name]] as [SettingsSection, string][]) : []),
+          ["ci", "CI server"],
           ["tasks", "Tasks"],
           ["commands", "Commands"],
           ["clones", "Clones"],
@@ -195,9 +199,11 @@ export function Settings({
   const { hold, pane } = spy;
   // ReviewProfiles scrolls to the profile on each new target, so the target changes only with at.
   const target = useMemo(() => (at.profile ? { id: at.profile, n: at.n } : null), [at.profile, at.n]);
-  // The URL names a section: its heading takes the focus. No section: the pane starts at the top.
+  // A focus field takes the focus first. The URL names a section: its heading takes the focus. No section: the pane starts at the top.
   useEffect(() => {
     if (at.profile) return;
+    const field = at.focus ? document.getElementById(at.focus) : null;
+    if (field) return field.focus();
     const id = at.section ? HEADINGS[at.section] : null;
     const el = id ? document.getElementById(id) : null;
     if (!id || !el) {
@@ -380,6 +386,7 @@ export function Settings({
         {settings.baseUrl !== null && <ReviewQuality />}
         {settings.baseUrl !== null && <TaskRules settings={settings} prs={prs} selected={selected} />}
         {settings.baseUrl !== null && <JiraSettings settings={settings} />}
+        {settings.baseUrl !== null && <CiSettings settings={settings} />}
         {settings.baseUrl !== null && <BranchPrefixes settings={settings} />}
         {settings.baseUrl !== null && <TaskCommands />}
         {settings.baseUrl !== null && <Clones settings={settings} />}

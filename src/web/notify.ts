@@ -46,7 +46,8 @@ export function runText(e: ClaimedEvent): string {
 const taskNote = (e: ClaimedTaskEvent): Note => ({
   title: `${e.key}: ${e.title}`,
   body: e.text,
-  tag: `task-${e.task}`,
+  // One tag per event: a tag of the task would let two events of one claim replace each other.
+  tag: `task-${e.task}-${e.id}`,
   pr: null,
   task: e.task,
 });
@@ -59,9 +60,11 @@ export function planNotes(claimed: Claimed[], first: boolean): Note[] {
   const byPr = new Map<number, ClaimedEvent[]>();
   for (const e of events) byPr.set(e.pr, [...(byPr.get(e.pr) ?? []), e]);
   if (first || events.some((e) => e.digest)) {
+    // A task can have several events, such as two parts that got ready.
+    const waiting = new Set(tasks.map((e) => e.task)).size;
     const parts = [
       ...(events.length ? [`${plural(events.length, "update")} in ${plural(byPr.size, "pull request")}`] : []),
-      ...(tasks.length ? [`${plural(tasks.length, "task")} ${tasks.length === 1 ? "needs" : "need"} you`] : []),
+      ...(waiting ? [`${plural(waiting, "task")} ${waiting === 1 ? "needs" : "need"} you`] : []),
     ];
     return [{ title: "PR Review Inbox", body: parts.join(", "), tag: "digest", pr: null }];
   }

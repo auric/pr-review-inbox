@@ -147,7 +147,7 @@ describe("the critic (part-session.md section 2.7)", () => {
           "implement:fix": [
             {
               writes: [FIXED],
-              judge: [
+              pointVerdicts: [
                 { verdict: "fixed" },
                 { verdict: "pushback", why: "invalid", reason: "The test is fine.", cite: "tests/feature.test.ts:1" },
               ],

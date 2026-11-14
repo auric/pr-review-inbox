@@ -137,17 +137,18 @@ export function createTaskRunner(opts: { budgetMs?: number; retryBudgetMs?: numb
         return r.timedOut === null ? r : extractOnce(rules, input, retryBudget);
       });
     },
-    // The syntax error of each pattern, or null.
+    // The syntax error of each pattern, or null. Compiling never runs the pattern, so it needs no worker or budget. Keep the flags equal to worker.ts.
     check(patterns: string[]): Promise<(string | null)[]> {
-      return serial(async () => {
-        const out: (string | null)[] = [];
-        for (const pattern of patterns) {
-          const reply = await ask({ pattern, text: "", max: 0 }, budget);
-          if (!reply) stop();
-          out.push(reply && "error" in reply ? reply.error : null);
-        }
-        return out;
-      });
+      return Promise.resolve(
+        patterns.map((pattern) => {
+          try {
+            new RegExp(pattern, "g");
+            return null;
+          } catch (e) {
+            return (e as Error).message;
+          }
+        }),
+      );
     },
     close: stop,
   };

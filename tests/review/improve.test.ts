@@ -207,7 +207,7 @@ function setup() {
   const root = mkdtempSync(join(tmpdir(), "rl-improve-test-"));
   dirs.push(root);
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl");
   const scenario = (o: Omit<FakeScenario, "record" | "auth"> & { authMethod?: string } = {}) => runner.write({ fixture: stream, ...o });
   scenario();
   const settings = createSettings({ dir: join(root, "data"), secrets: createSecrets(null) });

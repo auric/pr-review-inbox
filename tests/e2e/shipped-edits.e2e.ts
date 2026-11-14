@@ -73,8 +73,9 @@ test("an edited field of the shipped Review profile shows Edited, resets to ship
   await expect(edits(page).getByRole("listitem")).toHaveText([/^Turn cap\s*Edited/, /^Prompt\s*Edited/]);
   await expect.poll(async () => (await settingsApi(page)).profileEdits.general?.fields).toEqual(["prompt", "maxTurns"]);
 
-  // Reset one field. The other edit stays.
-  await page.getByRole("button", { name: "Reset to shipped turn cap of profile 1" }).click();
+  // The list of edits has no reset of its own. The reset next to the field sets it back, and the other edit stays.
+  await expect(edits(page).getByRole("button", { name: /Reset/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Reset turn cap of profile 1 to the shipped value" }).click();
   await expect(field(page, "Turn cap", 1)).toHaveValue(String(shipped.maxTurns));
   await saved(page);
   await expect(edits(page).getByRole("listitem")).toHaveText([/^Prompt\s*Edited/]);

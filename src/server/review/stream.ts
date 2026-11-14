@@ -68,7 +68,7 @@ function advisorOutcome(content: unknown): { status: RunEventStatus; target: str
   // Messages API: stop_reason "refusal" means that the model declined the request.
   return { status: "ok", target: c.stop_reason === "refusal" ? "declined" : "reviewed" };
 }
-// Gate B5 (b5-auth.jsonl): the CLI writes its own error messages with this model name.
+// Gate B5 (integration-check.md, fixtures/claude-synthetic/auth-failed.jsonl): the CLI writes its own error messages with this model name.
 const SYNTHETIC = "<synthetic>";
 const count = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
 const modelOf = (v: unknown) => (typeof v === "string" && v && v !== SYNTHETIC ? v : null);
@@ -154,12 +154,22 @@ function resultText(b: ContentBlock, sep = " ") {
 
 const blocks = (c: unknown): ContentBlock[] => (Array.isArray(c) ? c.filter((b) => b && typeof b === "object") : []);
 
-// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin. shell: the mode of a run that must
-// get Bash.
+// Gate B38 (2.1.323): the message of a permission_denied event for a deny rule on an Agent parameter.
+const PARAM_DENIED = /^Permission to use Agent with (model|effort):\* has been denied\.$/;
+const askedOf = (input: Record<string, unknown>) => ({
+  model: typeof input.model === "string" ? input.model : null,
+  effort: typeof input.effort === "string" ? input.effort : null,
+});
+// A model alias such as "sonnet" is part of the resolved model ID, as in Gate B38.
+const sameModel = (resolved: string, alias: string) => resolved.toLowerCase().includes(alias.toLowerCase());
+
+// agents: the subagent names that the run defined. An Agent call of any other name is marked builtin. models: the definition model of
+// each subagent that has one. shell: the mode of a run that must get Bash.
 export function createStreamParser(opts: {
   cwd: string;
   allowedTools: Set<string>;
   agents?: ReadonlySet<string>;
+  models?: ReadonlyMap<string, string>;
   shell?: ShellMode;
   now?: () => number;
 }) {
@@ -171,6 +181,10 @@ export function createStreamParser(opts: {
   const inputs = new Map<string, string>();
   const refusedIds = new Set<string>();
   const streaks = new Map<string | null, { sig: string; n: number }>();
+  // The model and effort that the lead put on each Agent call, by tool_use id.
+  const asked = new Map<string, { model: string | null; effort: string | null }>();
+  // Notes of Agent calls that the end of the call must keep.
+  const kept = new Map<string, string>();
   // A background Agent call gets its tool_result at launch. Only its task_notification ends it.
   const background = new Set<string>();
   const state: StreamState = {
@@ -201,7 +215,7 @@ export function createStreamParser(opts: {
   function end(changed: Map<string, RunEvent>, id: string, status: RunEventStatus, text: string | null) {
     const e = events.get(id);
     if (e?.status !== "running") return;
-    const next = { ...e, status, note: text, endedAt: now() };
+    const next = { ...e, status, note: kept.get(id) ?? text, endedAt: now() };
     events.set(id, next);
     changed.set(id, next);
     open.delete(id);
@@ -234,6 +248,14 @@ export function createStreamParser(opts: {
     if (n >= LOOP_WARN && n > (state.loop?.count ?? 0)) state.loop = { tool: call.tool, target: call.target, count: n };
   }
 
+  // Sets a note of an Agent call that stays after the call ends.
+  function keepNote(changed: Map<string, RunEvent>, e: RunEvent, text: string) {
+    kept.set(e.id, text);
+    const next = { ...e, note: text };
+    events.set(e.id, next);
+    changed.set(e.id, next);
+  }
+
   // Sets the model or the token total of an Agent call. A null value keeps the old one.
   function agentStats(changed: Map<string, RunEvent>, id: string | null | undefined, model: string | null, tokens: number | null) {
     const e = id ? events.get(id) : undefined;
@@ -242,6 +264,11 @@ export function createStreamParser(opts: {
     if (next.model === e.model && next.tokens === e.tokens) return;
     events.set(e.id, next);
     changed.set(e.id, next);
+    // A deny rule refuses a per-call model (Gate B38). This note shows a CLI that runs the call on it anyway.
+    const want = asked.get(e.id)?.model;
+    const def = e.agent ? opts.models?.get(e.agent) : undefined;
+    if (model && want && def && !kept.has(e.id) && sameModel(model, want) && !sameModel(model, def))
+      keepNote(changed, next, `The lead changed the model of ${e.agent} to ${want}. The app rule did not stop it.`);
   }
 
   // Returns the events that this line created or changed.
@@ -258,7 +285,7 @@ export function createStreamParser(opts: {
     if (m.type === "assistant") {
       const a = m as SDKAssistantMessage;
       if (a.error) state.apiErrors.push(a.error);
-      // Gate B5 (b5-auth.jsonl): a message of the CLI itself has zero usage.
+      // Gate B5 (integration-check.md): a message of the CLI itself has zero usage.
       const u = a.message?.usage;
       if (!a.parent_tool_use_id && a.message?.model !== SYNTHETIC && u) {
         const [i, r, c] = [count(u.input_tokens), count(u.cache_read_input_tokens), count(u.cache_creation_input_tokens)];
@@ -314,6 +341,7 @@ export function createStreamParser(opts: {
           startedAt: now(),
           endedAt: null,
         });
+        if (tool === "Agent") asked.set(b.id, askedOf(input));
       }
     } else if (m.type === "user") {
       const u = m as SDKUserMessage;
@@ -336,18 +364,19 @@ export function createStreamParser(opts: {
       for (const t of tools) if (!opts.allowedTools.has(t) && !state.badTools.includes(t)) state.badTools.push(t);
       if (opts.shell && !tools.includes("Bash")) state.noBash = true;
     } else if (m.type === "system" && m.subtype === "permission_denied") {
-      // V7. b17-write-confinement.jsonl: this event comes before the error tool_result of the call, so end() keeps the refusal note.
+      // V7. Gate B17 order (fixtures/claude-synthetic/implement-ok.jsonl): this event comes before the error tool_result of the call, so end() keeps the refusal note.
       const d = m as SDKPermissionDeniedMessage;
       if (d.tool_name === "Bash") {
         // SU3: a deny rule arrives as type "rule", or as "subcommandResults" with this message. No allow rule: type "other" with
-        // "This command requires approval", which only allowlist mode can give. Each other refusal is a safety check of the CLI, such as
-        // the B22 redirect outside the working folders, with no type.
+        // "This command requires approval", which only allowlist mode can give. Gate B36 (2.1.323): a command that changes files in the
+        // working folders gets the file-change ask with no type, and an allow rule such as "touch *" satisfies it. Each other refusal is
+        // a safety check of the CLI, such as the B22 redirect outside the working folders, with no type.
         const deny =
           d.decision_reason_type === "rule" || /^Permission to use \w+ with command [\s\S]* has been denied\.$/.test(d.message ?? "");
         const unlisted =
           opts.shell === "allowlist" &&
-          d.decision_reason_type === "other" &&
-          /requires approval/.test(d.message ?? d.decision_reason ?? "");
+          ((d.decision_reason_type === "other" && /requires approval/.test(d.message ?? d.decision_reason ?? "")) ||
+            /asks before a shell command creates, changes or removes files/i.test(d.message ?? ""));
         const by = deny ? "deny" : unlisted ? "allowlist" : "check";
         const id = typeof d.tool_use_id === "string" ? d.tool_use_id : "";
         state.refused.push({ command: events.get(id)?.target ?? "", by });
@@ -355,6 +384,15 @@ export function createStreamParser(opts: {
         // SU14 (B30a): `cd <dir> && <command>`. SU18 (B31): the read block of allowlist mode refuses a lone cd.
         const cd = by === "check" && /requires approval: cd\s|^cd names a path that is computed at run time/.test(d.message ?? "");
         end(changed, id, "error", cd ? CD_REFUSED_NOTE : REFUSED_NOTE[by]);
+      } else if (AGENT_TOOLS.has(d.tool_name)) {
+        const e = typeof d.tool_use_id === "string" ? events.get(d.tool_use_id) : undefined;
+        const param = PARAM_DENIED.exec(d.message ?? "")?.[1] as "model" | "effort" | undefined;
+        const value = e && param ? asked.get(e.id)?.[param] : null;
+        if (e && param && value) {
+          const text = `The lead asked for ${param} ${value} for ${e.agent ?? "an agent"}. The app refused it, so that agent step did not run.`;
+          keepNote(changed, e, text.slice(0, NOTE_MAX));
+          end(changed, e.id, "error", null);
+        }
       }
     } else if (m.type === "system" && m.subtype === "task_started") {
       const t = m as SDKTaskStartedMessage;

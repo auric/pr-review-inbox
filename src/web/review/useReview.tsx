@@ -18,7 +18,6 @@ import { ordered, type ThreadModel } from "../pr/threads";
 import { usePosts } from "../publish/data";
 import type { Hints } from "../shell/Hint";
 import { failText, prKey } from "../shell/model";
-import { createTask } from "../tasks/data";
 import { BriefComposer, ReviewButton } from "./Brief";
 import { Talk, type TalkCtx, ThreadTalk } from "./Discuss";
 import { type DraftCtx, Drafts } from "./Drafts";
@@ -123,8 +122,6 @@ export function useReview(
     onSettings: () => void;
     // Opens Settings, Task IDs: "Set up task IDs" in the brief.
     onTaskIds: () => void;
-    // Opens the Task view after "Build this task" on a task chip.
-    onTask: (id: number) => void;
     // Opens the settings at one profile: "Edit <profile>" in the brief.
     onProfile: (id: string) => void;
     // Focuses the line of a draft or a thread in the diff.
@@ -425,8 +422,6 @@ export function useReview(
     busy: triage.busy,
   });
   const { rr } = st;
-  // docs/plans/review-v2/spec.md section 6.12: one click creates the task, or finds its open task, then the Task view opens.
-  const buildTask = async (key: string) => o.onTask((await createTask({ project: pr.project, repo: pr.repo, key, originPr: pr.id })).id);
   return {
     action: (
       <ReviewButton
@@ -457,7 +452,6 @@ export function useReview(
           onClose={st.closeBrief}
           onSettings={o.onSettings}
           onTaskIds={o.onTaskIds}
-          onBuild={buildTask}
           onEditProfile={o.onProfile}
           announce={o.announce}
         />
@@ -474,7 +468,6 @@ export function useReview(
         compact
         announce={o.announce}
         onSettings={o.onSettings}
-        onBuild={buildTask}
       />
     ),
     run: (

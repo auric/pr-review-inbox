@@ -7,27 +7,30 @@
 // memory secrets. No run reaches Bitbucket or the user's data folder. The real CLI runs only with --real.
 // Exit codes: 0 done, 1 a failed CLI check or a harness error, 2 a usage error or no --real.
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { PROFILES_VERSION, writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import {
   GIT_SERVER,
   type ListTools,
+  type Profile,
   profileOf,
   profileRevision,
   promptVersion,
   REVIEWER,
   SHIPPED_PROFILES,
+  sameValue,
   shippedProfileAt,
+  verifierEffort,
 } from "../../src/server/review/catalog";
-import { createClaudeRunner } from "../../src/server/review/claude";
+import { createClaudeRunner, type RunOutcome } from "../../src/server/review/claude";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
-import { createReviewJobs, type ReviewJobs } from "../../src/server/review/jobs";
+import { createReviewJobs, type ReviewJobs, type Runner } from "../../src/server/review/jobs";
 import { partsOf, unreadParts } from "../../src/server/review/parts";
 import { diffArgs, type GitRemote, syncCache } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
@@ -39,21 +42,33 @@ import {
   MODULE_IDS,
   modelName,
   profileList,
+  REVIEWER_MODES,
+  type ReviewerMode,
   type RunDetail,
   VARIANTS,
   type Variant,
   VERIFIER_MODES,
   type VerifierSetup,
 } from "../../src/shared/dto";
-import { checkOf, displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION, type ReplyPayload } from "../../src/shared/review";
+import {
+  checkOf,
+  displayGroup,
+  type FindingPayload,
+  REVIEW_PROMPT_VERSION,
+  type ReplyPayload,
+  verifyJsonSchema,
+} from "../../src/shared/review";
 import { eventPhase, type RunEvent } from "../../src/shared/run-log";
 import { stubListTools } from "../../tests/support/review-fixture";
 import {
   buildRepo,
   bundleRepo,
+  EVAL_AUTHOR,
+  EVAL_USER,
   type EvalCase,
   type EvalEarlier,
   type EvalSet,
+  type EvalThreadComment,
   loadCases,
   localDir,
   mapSpot,
@@ -63,7 +78,7 @@ import {
   setDir,
   setFingerprint,
 } from "./cases";
-import { summaryText } from "./compare";
+import { readResult, summaryText } from "./compare";
 import {
   type CaseRun,
   type EarlierInfo,
@@ -92,12 +107,12 @@ const TASK_KEY = "EVAL-1";
 const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
-  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--reviewer-effort ${EFFORTS.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--runner <command> <args...>]
+  [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--reviewer-effort ${EFFORTS.join("|")}] [--reviewer-mode ${REVIEWER_MODES.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--verifier-effort ${EFFORTS.join("|")}]
+  [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
---ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.`;
-// docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin.
-const REREVIEW_ONLY: readonly Variant[] = ["rereview-strict"];
+--ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.
+Each run records its CLI calls in <result>.calls/. --replay-find takes the finder and salvage calls from the recording of that result and runs only the verify calls. It refuses a change of the finder setup.`;
 
 export type Options = {
   real: boolean;
@@ -114,8 +129,14 @@ export type Options = {
   effort: Effort | null;
   // null: no flag, so the rl-reviewer effort of the profile applies (docs/plans/review-v3.md WP-V13).
   reviewerEffort: Effort | null;
+  // null: no flag, so the rl-reviewer mode of the profile applies. off: no rl-reviewer.
+  reviewerMode: ReviewerMode | null;
   // null: no flag, so the verify mode of the profile applies.
   verifier: VerifierSetup["mode"] | null;
+  // null: no flag, so the verify effort of the profile applies.
+  verifierEffort: Effort | null;
+  // The result file whose recorded finder and salvage calls this run replays. null: the finder runs.
+  replayFind: string | null;
   // null: no flag, so the variants of the profile apply (docs/plans/review-v3.md WP-V2).
   variants: Variant[] | null;
   // docs/plans/review-v3.md WP-V3: run the re-review cases as re-reviews.
@@ -147,7 +168,10 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         model: { type: "string" },
         effort: { type: "string" },
         "reviewer-effort": { type: "string" },
+        "reviewer-mode": { type: "string" },
         verifier: { type: "string" },
+        "verifier-effort": { type: "string" },
+        "replay-find": { type: "string" },
         variants: { type: "string" },
         rereview: { type: "boolean", default: false },
         ordinals: { type: "boolean", default: false },
@@ -181,9 +205,15 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   const reviewerEffort = v["reviewer-effort"] ?? null;
   if (reviewerEffort !== null && !(EFFORTS as readonly string[]).includes(reviewerEffort))
     return { error: `--reviewer-effort must be one of ${EFFORTS.join(", ")}.` };
+  const reviewerMode = v["reviewer-mode"] ?? null;
+  if (reviewerMode !== null && !(REVIEWER_MODES as readonly string[]).includes(reviewerMode))
+    return { error: `--reviewer-mode must be one of ${REVIEWER_MODES.join(", ")}.` };
   const verifier = v.verifier ?? null;
   if (verifier !== null && !(VERIFIER_MODES as readonly string[]).includes(verifier))
     return { error: `--verifier must be one of ${VERIFIER_MODES.join(", ")}.` };
+  const verifierEffort = v["verifier-effort"] ?? null;
+  if (verifierEffort !== null && !(EFFORTS as readonly string[]).includes(verifierEffort))
+    return { error: `--verifier-effort must be one of ${EFFORTS.join(", ")}.` };
   // An empty value runs no check section.
   const modules = v.modules === undefined ? null : v.modules.trim() ? v.modules.split(",").map((s) => s.trim()) : [];
   if (modules?.some((x) => !(MODULE_IDS as readonly string[]).includes(x)))
@@ -192,9 +222,6 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   if (variants?.some((x) => !(VARIANTS as readonly string[]).includes(x)))
     return { error: `--variants must be a comma list of ${VARIANTS.join(", ")}.` };
   const rereview = v.rereview ?? false;
-  const idle = variants?.filter((x) => (REREVIEW_ONLY as readonly string[]).includes(x)) ?? [];
-  if (idle.length && !rereview)
-    return { error: `--variants ${idle.join(",")} changes only the re-review prompt. Add --rereview, or the run measures no change.` };
   return {
     real: v.real ?? false,
     runner,
@@ -207,7 +234,10 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     model: model?.data ?? null,
     effort: effort as Effort | null,
     reviewerEffort: reviewerEffort as Effort | null,
+    reviewerMode: reviewerMode as ReviewerMode | null,
     verifier: verifier as VerifierSetup["mode"] | null,
+    verifierEffort: verifierEffort as Effort | null,
+    replayFind: v["replay-find"] === undefined ? null : resolve(v["replay-find"]),
     variants: variants as Variant[] | null,
     rereview,
     ordinals: v.ordinals ?? false,
@@ -217,18 +247,22 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   };
 }
 
-// The profile of the run with the --modules, --volume, --model, --effort, --reviewer-effort, --verifier, and --variants values. A field that this app
-// version does not know is an error, so a result file never names a setup that did not run.
+// The profile of the run with the --modules, --volume, --model, --effort, --reviewer-effort, --reviewer-mode, --verifier,
+// --verifier-effort, and --variants values. A field that this app version does not know is an error, so a result file never names a
+// setup that did not run.
 export function evalProfile(o: Options) {
   const shipped = SHIPPED_PROFILES.some((p) => p.id === o.profile) && shippedProfileAt(o.profile, o.profileVersion ?? PROFILES_VERSION);
   if (!shipped) return { error: `Unknown profile ${o.profile}. Shipped profiles: ${SHIPPED_PROFILES.map((p) => p.id).join(", ")}.` };
+  // One spread per object, so one flag never drops the value of another.
+  const reviewer = { ...(o.reviewerEffort && { effort: o.reviewerEffort }), ...(o.reviewerMode && { mode: o.reviewerMode }) };
+  const verifier = { ...(o.verifier && { mode: o.verifier }), ...(o.verifierEffort && { effort: o.verifierEffort }) };
   const extra = {
     ...(o.modules && { modules: o.modules }),
     ...(o.volume && { volume: o.volume }),
     ...(o.model && { model: o.model }),
     ...(o.effort && { effort: o.effort }),
-    ...(o.reviewerEffort && shipped && { reviewer: { ...shipped.reviewer, effort: o.reviewerEffort } }),
-    ...(o.verifier && shipped && { verifier: { ...shipped.verifier, mode: o.verifier } }),
+    ...((o.reviewerEffort || o.reviewerMode) && { reviewer: { ...shipped.reviewer, ...reviewer } }),
+    ...((o.verifier || o.verifierEffort) && { verifier: { ...shipped.verifier, ...verifier } }),
     ...(o.variants && { variants: o.variants }),
   };
   const list = profileList.safeParse(SHIPPED_PROFILES.map((p) => (p.id === o.profile ? { ...shipped, ...extra } : p)));
@@ -238,6 +272,47 @@ export function evalProfile(o: Options) {
   if (lost.length) return { error: `This app version has no profile field ${lost.join(", ")} (prompt version ${PROMPT_VERSION}).` };
   if (profile.explain) return { error: `Profile ${o.profile} gives no findings. Pick a review profile.` };
   return { list: list.data, profile };
+}
+
+// The CLI calls of a result file X.json: X.calls/<case>-<repeat>-<k>.json, k from 1 in call order.
+export const callsDir = (result: string) => result.replace(/\.json$/, ".calls");
+type Recorded = { kind: "find" | "verify"; outcome: RunOutcome };
+// review-quality-2026.md E2: the variants that change only the verify prompt. A replay can change them.
+export const VERIFY_ONLY: readonly string[] = ["verify2"] satisfies Variant[];
+// The profile fields of a and b that differ and reach a finder or salvage call. catalog.ts checked(): the verify mode changes the finder
+// prompt. The verifier effort, model, and outcome, and the verify-only variants, reach only the verify call.
+export function finderChange(a: Record<string, unknown>, b: Record<string, unknown>): string[] {
+  const side = (p: Record<string, unknown>): Record<string, unknown> => ({
+    ...p,
+    revision: undefined,
+    verifier: (p.verifier as { mode?: string } | undefined)?.mode,
+    variants: ((p.variants as string[] | undefined) ?? []).filter((x) => !VERIFY_ONLY.includes(x)),
+  });
+  const x = side(a);
+  const y = side(b);
+  return [...new Set([...Object.keys(x), ...Object.keys(y)])].filter((k) => !sameValue(x[k], y[k])).sort();
+}
+
+const finderVersion = (v: string) =>
+  v
+    .split("+")
+    .filter((x) => !VERIFY_ONLY.includes(x))
+    .join("+");
+
+// --replay-find: why the recorded result cannot give the finder calls of this run, or null. The heads of the cases are checked per case.
+export function replayRefusal(rec: EvalResult, o: Options, profile: Profile): string | null {
+  const it = "Refused: --replay-find";
+  if (!o.replayFind || !existsSync(callsDir(o.replayFind))) return `${it}: the result has no recorded calls.`;
+  if (!!rec.rereview !== o.rereview) return `${it}: the recording ran the other mode.`;
+  if ((rec.set ?? "v1") !== o.set) return `${it}: the recording ran set ${rec.set ?? "v1"}, but this run has set ${o.set}.`;
+  if (o.repeat > rec.repeat) return `${it}: the recording has ${rec.repeat} repeats, but this run asks for ${o.repeat}.`;
+  const was = finderVersion(rec.promptVersion);
+  const now = finderVersion(promptVersion(profile));
+  if (was !== now) return `${it}: the recording ran finder prompt version ${was}, but this run has ${now}.`;
+  const changed = finderChange(rec.profile, profile);
+  if (changed.length)
+    return `${it}: this run changes the finder setup of the recording: ${changed.join(", ")}. A replay can change only the verifier.`;
+  return null;
 }
 
 const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -395,6 +470,66 @@ function seedEarlier(
   return roots;
 }
 
+// The PR threads of a local case (local.ts caseThreads), as sync stores them. loadPrContext then lists them in pr-context.md.
+// offset: the comment IDs before the first thread ID, so no ID meets a root of seedEarlier. An anchor numbers a new-side range with
+// multilineSpan (shared/types.ts anchorSpan) and an old-side comment with its first line. roots: the seedEarlier roots by earlier ID.
+function seedThreads(
+  db: Database,
+  pr: number,
+  at: { head: string; base: string },
+  threads: EvalThreadComment[],
+  offset: number,
+  roots: Map<string, number>,
+) {
+  for (const c of threads) {
+    const anchor =
+      c.id !== c.root || c.path === undefined
+        ? null
+        : {
+            path: c.path,
+            ...(c.lines &&
+              (c.side === "old"
+                ? { line: c.lines[0], lineType: c.lineType ?? "REMOVED", fileType: "FROM" }
+                : {
+                    line: c.lines[1],
+                    lineType: "ADDED",
+                    fileType: "TO",
+                    ...(c.lines[1] > c.lines[0] && { multilineSpan: { dstSpanStart: c.lines[0], dstSpanEnd: c.lines[1] } }),
+                  })),
+            diffType: "EFFECTIVE",
+            fromHash: at.base,
+            toHash: at.head,
+          };
+    const earlier = c.earlier === undefined ? undefined : roots.get(c.earlier);
+    if (c.earlier !== undefined && earlier === undefined) continue;
+    const root = earlier ?? offset + c.root;
+    // seedEarlier dates its roots now. A reply must come after its root, or the thread turn is wrong.
+    if (earlier !== undefined)
+      db.query(
+        "UPDATE comment SET created_at = MIN(created_at, $at - 1), updated_at = MIN(updated_at, $at - 1) WHERE pr = $pr AND comment_id = $root",
+      ).run({
+        pr,
+        root,
+        at: c.at,
+      });
+    db.query(
+      `INSERT INTO comment (pr, comment_id, version, parent_id, root_id, author_slug, text, anchor_json, thread_resolved, created_at,
+        updated_at, tombstoned_at) VALUES ($pr, $id, 0, $parent, $root, $author, $text, $anchor, $resolved, $at, $at, $deleted)`,
+    ).run({
+      pr,
+      id: offset + c.id,
+      parent: c.id === c.root && earlier === undefined ? null : root,
+      root,
+      author: c.author,
+      text: c.text,
+      anchor: anchor && JSON.stringify(anchor),
+      resolved: c.resolved ? 1 : 0,
+      at: c.at,
+      deleted: c.deleted ? c.at : null,
+    });
+  }
+}
+
 // The earlier findings at the head of the case. New-side lines move with the diff from the earlier head to the head, old-side lines
 // with the diff from the earlier merge base to the merge base.
 async function earlierAt(
@@ -444,9 +579,65 @@ type Context = {
   // bundleRepo: the bare repository of each bundle file.
   bundles: Map<string, string>;
   rereview: boolean;
+  // callsDir of the result file: the run writes each CLI call there.
+  calls: string;
+  // --replay-find: the callsDir of the recording, and the head of each recorded case by case ID.
+  replay: { dir: string; heads: Map<string, string> } | null;
 };
 
-const USER = "eval-reviewer";
+// The case of a result file. The case fields serve the slices of review-quality-2026.md E5.
+export function caseInfo(c: EvalCase, base: string, head: string, earlier?: EarlierInfo[]): EvalCaseInfo {
+  const { clean, group, hasTask, large, task } = c;
+  // An undefined field stays out of the JSON file.
+  return {
+    id: c.id,
+    title: c.title,
+    language: c.language,
+    changedLines: c.changedLines,
+    base,
+    head,
+    bugs: c.bugs,
+    traps: c.traps,
+    extras: c.extras ?? [],
+    ...(c.human && { human: c.human }),
+    ...(earlier && { earlier }),
+    clean,
+    group,
+    hasTask,
+    large,
+    task,
+  };
+}
+
+// Records each CLI call of one case run in ctx.calls. With ctx.replay, a finder or salvage call returns its recorded outcome, and
+// only a verify call runs the CLI. A call without a recording sets missing and fails the run, so no finder runs live.
+function recorder(c: EvalCase, repeat: number, ctx: Context, missing: { name: string | null }) {
+  let k = 0;
+  return (r: Runner): Runner => ({
+    ...r,
+    run: async (spec, onEvents) => {
+      const name = `${c.id}-${repeat}-${++k}.json`;
+      const kind = "schema" in spec && sameValue(spec.schema, verifyJsonSchema()) ? "verify" : "find";
+      let outcome: RunOutcome;
+      if (ctx.replay && kind === "find") {
+        const at = join(ctx.replay.dir, name);
+        const rec = existsSync(at) ? (JSON.parse(readFileSync(at, "utf8")) as Recorded) : null;
+        if (rec?.kind !== "find") {
+          missing.name = name;
+          // jobs.ts logs this text to stdout. The case ID stays out, as --ordinals needs.
+          throw new Error("The recording has no finder call for this run.");
+        }
+        outcome = rec.outcome;
+        onEvents?.(outcome.events);
+      } else outcome = await r.run(spec, onEvents);
+      // The outcome only: a run spec can hold the secrets of an MCP server entry (claude.ts UserMcpEntry).
+      writeFileSync(join(ctx.calls, name), JSON.stringify({ kind, outcome } satisfies Recorded));
+      return outcome;
+    },
+  });
+}
+
+const USER = EVAL_USER;
 
 async function runCase(
   c: EvalCase,
@@ -464,6 +655,8 @@ async function runCase(
     const { since, sinceBase } = repo;
     const rr = ctx.rereview && c.rereview && since && sinceBase ? { ...repo, since, sinceBase, earlier: c.rereview.earlier } : null;
     if (ctx.rereview && !rr) return { run: errorRun(c, repeat, "The case has no earlier run."), head, base };
+    if (ctx.replay && ctx.replay.heads.get(c.id) !== head)
+      return { run: errorRun(c, repeat, "The recording has no run of this case at this head."), head, base };
     const earlier = rr ? await earlierAt(rr, rr.earlier) : undefined;
     const dir = join(root, "data");
     writeConfig(dir, { baseUrl: BASE_URL, userSlug: USER, notifications: false, profiles: ctx.profiles });
@@ -477,6 +670,7 @@ async function runCase(
       targetRef: "refs/heads/main",
       fetchConfig: [],
     };
+    const missing: { name: string | null } = { name: null };
     const jobs = createReviewJobs({
       settings,
       live: createLive(),
@@ -484,6 +678,7 @@ async function runCase(
       runnerCommand: ctx.runner,
       listTools: ctx.listTools,
       gitRemote: async () => remote,
+      runnerWrap: recorder(c, repeat, ctx, missing),
     });
     ctx.onJobs(jobs);
     try {
@@ -501,7 +696,7 @@ async function runCase(
         .query(
           `INSERT INTO pull_request (project, repo, pr_id, title, description, author_slug, author_name, my_role, state, source_head,
             target_head, source_branch, target_branch, web_url, updated_date, on_dashboard, followed)
-          VALUES ($project, $repo, 1, $title, $description, 'eval-author', 'Eval Author', 'REVIEWER', 'OPEN', $head, $base, 'feature/eval',
+          VALUES ($project, $repo, 1, $title, $description, $author, 'Eval Author', 'REVIEWER', 'OPEN', $head, $base, 'feature/eval',
             'main', $web, $now, 1, 1) RETURNING id`,
         )
         .get({
@@ -509,6 +704,7 @@ async function runCase(
           repo: c.id,
           title: c.pr.title,
           description: c.pr.description,
+          author: EVAL_AUTHOR,
           head,
           base,
           web: `${BASE_URL}/projects/${PROJECT}/repos/${c.id}/pull-requests/1`,
@@ -552,12 +748,15 @@ async function runCase(
         saveInstructionSettings(db, { project: PROJECT, repo: c.id }, { target: true, local: [], extra: c.instructions });
       jobs.saveBrief(db, pr, { note: "", profile: ctx.profile });
       const roots = rr ? seedEarlier(db, pr, ctx.profile, rr, rr.earlier, USER) : new Map<number, string>();
+      const earlierRoots = new Map([...roots].map(([root, id]) => [id, root]));
+      seedThreads(db, pr, { head, base }, c.threads ?? [], rr ? rr.earlier.length : 0, earlierRoots);
       const started = rr ? jobs.rereview(db, pr) : jobs.review(db, pr);
       if (started.status !== 202) {
         const why = "error" in started ? started.error : "conflict" in started ? started.conflict.error : `status ${started.status}`;
         return { run: errorRun(c, repeat, `The run did not start: ${why}`), head, base, earlier };
       }
       await jobs.wait();
+      if (missing.name) return { run: errorRun(c, repeat, `The recording has no finder call ${missing.name}.`), head, base, earlier };
       const d = jobs.run(db, started.run.id);
       if (!d) return { run: errorRun(c, repeat, "The run row is missing."), head, base, earlier };
       const r = d.run;
@@ -573,6 +772,7 @@ async function runCase(
         profile.variants.includes("parts") && r.mergeBase
           ? parseDiff(await git(["--git-dir", repo.url, "diff", ...diffArgs, r.mergeBase, head], { env: repo.env }))
           : [];
+      const fq = r.summary?.finderQuestions;
       return {
         earlier,
         run: {
@@ -603,6 +803,8 @@ async function runCase(
             reason: x.reason,
           })),
           questions: d.items.filter((i) => i.kind === "question").length,
+          // Counts only: answers holds text.
+          ...(fq && { finderQuestions: { asked: fq.asked, answered: fq.answered, findings: fq.findings, kept: fq.kept } }),
           ...runFacts(d.events),
           ...partFacts(d.events, partsOf(profile, changed).length),
           ...(rr && { resolves }),
@@ -661,6 +863,18 @@ export async function main(argv: string[]): Promise<number> {
     console.error(p.error);
     return 2;
   }
+  let replay: Context["replay"] = null;
+  if (o.replayFind) {
+    try {
+      const rec = readResult(o.replayFind);
+      const refused = replayRefusal(rec, o, p.profile);
+      if (refused) throw new Error(refused);
+      replay = { dir: callsDir(o.replayFind), heads: new Map(rec.cases.map((c) => [c.id, c.head])) };
+    } catch (e) {
+      console.error((e as Error).message);
+      return 2;
+    }
+  }
   if (!o.real && !o.runner) {
     console.log(plan(o, cases, p.profile));
     return 2;
@@ -691,9 +905,17 @@ export async function main(argv: string[]): Promise<number> {
     const { commit, dirty } = await checkoutState();
     mkdirSync(o.out, { recursive: true });
     const file = join(o.out, `${new Date().toISOString().replace(/[:.]/g, "-")}-${commit}.json`);
+    mkdirSync(callsDir(file));
     const profile = p.profile;
     const volume = ((profile as { volume?: Volume }).volume ?? null) as Volume | null;
-    const requested = { model: profile.model ?? "default", effort: profile.effort ?? "default", verifier: profile.verifier.mode };
+    const requested = {
+      model: profile.model ?? "default",
+      effort: profile.effort ?? "default",
+      verifier: profile.verifier.mode,
+      verifierEffort: verifierEffort(profile),
+      reviewerMode: profile.reviewer.mode,
+      ...(o.replayFind && { replayOf: basename(o.replayFind) }),
+    };
     const result: EvalResult = {
       format: 1,
       createdAt: new Date().toISOString(),
@@ -730,10 +952,14 @@ export async function main(argv: string[]): Promise<number> {
       },
       bundles: new Map(),
       rereview: o.rereview,
+      calls: callsDir(file),
+      replay,
     };
     console.log(
-      `Eval: set ${o.set}${o.rereview ? " (re-reviews)" : ""}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, verifier ${requested.verifier}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
+      `Eval: set ${o.set}${o.rereview ? " (re-reviews)" : ""}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, reviewer mode ${requested.reviewerMode}, verifier ${requested.verifier}, verifier effort ${requested.verifierEffort}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
     );
+    if (requested.replayOf)
+      console.log(`Replay: the finder and salvage calls come from ${requested.replayOf}. The verify calls run the CLI.`);
     console.log(runSetup(profile));
     if (o.real) console.log(WARNING);
     const total = cases.length * o.repeat;
@@ -745,19 +971,7 @@ export async function main(argv: string[]): Promise<number> {
         n++;
         const { run, head, base, earlier } = await runCase(c, repeat, ctx);
         if (!info.has(c.id) && head && (earlier || !o.rereview)) {
-          info.set(c.id, {
-            id: c.id,
-            title: c.title,
-            language: c.language,
-            changedLines: c.changedLines,
-            base,
-            head,
-            bugs: c.bugs,
-            traps: c.traps,
-            extras: c.extras ?? [],
-            ...(c.human && { human: c.human }),
-            ...(earlier && { earlier }),
-          });
+          info.set(c.id, caseInfo(c, base, head, earlier));
           result.cases = [...info.values()];
         }
         result.runs.push(run);

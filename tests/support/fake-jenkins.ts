@@ -25,6 +25,14 @@ export type FakeJenkinsOptions = {
   scanDelayMs?: number;
   requireCrumb?: boolean;
   params?: string[];
+  // log: the console log of every build, in place of JENKINS_LOG. ignoreStart: the log route sends the whole log for any start.
+  log?: string;
+  ignoreStart?: boolean;
+  // whoAmIStatus: whoAmI answers this status with no body. anonymous: whoAmI reports an anonymous user.
+  whoAmIStatus?: number;
+  anonymous?: boolean;
+  // logRedirect: the log route answers 302 with this Location.
+  logRedirect?: string;
 };
 
 export function startFakeJenkins(o: FakeJenkinsOptions = {}) {
@@ -68,13 +76,15 @@ export function startFakeJenkins(o: FakeJenkinsOptions = {}) {
         return reply(403);
       const p = url.pathname.slice(CTX.length);
       if (req.method === "GET" && p === "/whoAmI/api/json")
-        return reply(200, {
-          _class: "hudson.security.WhoAmI",
-          name: JENKINS_USER,
-          anonymous: false,
-          authenticated: true,
-          authorities: ["authenticated"],
-        });
+        return o.whoAmIStatus
+          ? reply(o.whoAmIStatus)
+          : reply(200, {
+              _class: "hudson.security.WhoAmI",
+              name: o.anonymous ? "anonymous" : JENKINS_USER,
+              anonymous: o.anonymous === true,
+              authenticated: true,
+              authorities: ["authenticated"],
+            });
       if (req.method === "GET" && p === "/crumbIssuer/api/json")
         return requireCrumb
           ? reply(
@@ -132,8 +142,9 @@ export function startFakeJenkins(o: FakeJenkinsOptions = {}) {
       if (!job) return reply(404);
       // The log of a done build from byte start. X-Text-Size is the end offset. Jenkins sends X-More-Data only while a build runs.
       if (/^\d+\/logText\/progressiveText$/.test(rest) && req.method === "GET") {
-        const bytes = new TextEncoder().encode(JENKINS_LOG);
-        const start = Math.min(Number(url.searchParams.get("start")) || 0, bytes.length);
+        if (o.logRedirect) return reply(302, undefined, { Location: o.logRedirect });
+        const bytes = new TextEncoder().encode(o.log ?? JENKINS_LOG);
+        const start = o.ignoreStart ? 0 : Math.min(Number(url.searchParams.get("start")) || 0, bytes.length);
         return new Response(bytes.slice(start), {
           headers: { "X-Jenkins": JENKINS_VERSION, "Content-Type": "text/plain;charset=UTF-8", "X-Text-Size": String(bytes.length) },
         });

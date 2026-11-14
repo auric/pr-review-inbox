@@ -66,7 +66,7 @@ export const toolCalls = (events: unknown[]): ToolCall[] =>
           parent: typeof e.parent_tool_use_id === "string" ? e.parent_tool_use_id : null,
         })),
     );
-const resultOf = (events: unknown[], id: string) =>
+export const resultOf = (events: unknown[], id: string) =>
   objs(events)
     .filter((e) => e.type === "user")
     .flatMap(contentOf)

@@ -82,7 +82,7 @@ export const TODO = { path: "repo/src/feature.ts", text: "export const feature =
 export const WORKS = { path: "repo/src/feature.ts", text: "export const feature = 'works';\n" };
 // part-session.md section 2.3: the build run ticks the open tasks in the plan file of the task (fake-claude.ts ticks).
 export const TICK = { path: "*", ids: ["*"] };
-export const MAX_TURNS = resolve(import.meta.dir, "../../fixtures/claude/b5-max-turns.jsonl");
+export const MAX_TURNS = resolve(import.meta.dir, "../../fixtures/claude-synthetic/session-max-turns.jsonl");
 // The fix after a review point keeps line 1, so the point still anchors there.
 export const FIXED = { path: "repo/src/feature.ts", text: "export const feature = 'works';\nexport const checked = true;\n" };
 // An implement result that asks a question with two options.
@@ -187,7 +187,7 @@ export async function setup(o: Setup = {}) {
   const r = await taskRemote(root);
   if (o.main) await commitOnMain(r.remote, root, o.main);
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "loop", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "loop", "claude-synthetic/session-usage.jsonl");
   const scenario = (s: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...s });
   scenario({
     seq: {

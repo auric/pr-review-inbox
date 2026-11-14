@@ -1,14 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Writes fixtures/claude/*.jsonl from the Gate B raw stream-json in .gate0/v3-local/raw/.
+// Writes .gate0/claude/*.jsonl (git-ignored) from the Gate B raw stream-json in .gate0/v3-local/raw/.
 // Usage: bun scripts/gate/sanitize-claude.ts [--raw <dir>] [--out <dir>]
 // Real values come from the raw files, `claude auth status`, and the local Claude config at run time. This file holds no real values.
 // Output is counts only. Exit code 1 when the scan finds a real value in the output.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { countHits, formPairs, isObj, type Json, sanitizer, scanPatterns, UUID } from "./sanitize-core";
+import {
+  claudeOutDir,
+  countHits,
+  filesIn,
+  formPairs,
+  hideAgentOutput,
+  isObj,
+  type Json,
+  sanitizer,
+  scanPatterns,
+  UUID,
+} from "./sanitize-core";
+import { agentFront } from "./workflow";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const args = process.argv.slice(2);
@@ -17,7 +29,13 @@ const opt = (name: string, def: string) => {
   return i >= 0 && args[i + 1] ? resolve(args[i + 1] as string) : def;
 };
 const RAW = opt("--raw", join(ROOT, ".gate0/v3-local/raw"));
-const OUT = opt("--out", join(ROOT, "fixtures/claude"));
+let OUT: string;
+try {
+  OUT = claudeOutDir(ROOT, opt("--out", "") || undefined);
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(1);
+}
 
 const CHECKS: Record<string, string> = {
   b1: "B1. A review agent from an `--agents` file tries a shell command, Write, and a Read of a sibling folder.",
@@ -37,7 +55,10 @@ const CHECKS: Record<string, string> = {
     "B11, fix run. The runner flag set without review agents and the fix JSON schema. Expect `structured_output` with one edit whose `new` text has 2 KB or more.",
   gadv: "Gate G-ADV. The app flag set with `--advisor`: an advisor call, no `--advisor` (`none`), `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (`envoff`), `--disallowedTools advisor` (`disallowed`), and `--tools` with the advisor (`tools`).",
   b12: "B12. The runner flag set without review agents. The agent reads a PNG attachment with Read and names its color in `structured_output`.",
+  b35: "B35. A write run as `--agent rl-main` with `Agent(rl-explorer)` and the shell allowlist (`agent`), the same step without `--agent` (`plain`), and a Stop during an rl-explorer call (`stop`).",
+  b36: "B36. Workflow agents under an rl-main lead: agent writes and Bash in allowlist mode (`writer`) and Most commands mode (`any`), Stop in an agent `sleep 600` (`stop`), turn caps (`turns`), a writer with Agent disallowed and no spawn depth variable (`nodepth`), model priority and two agents at once (`models`), model inherit and an unknown alias (`badmodel`), `--advisor` (`advisor`), and Opus efforts (`opus`, with `--opus` only).",
   b37: "B37. One Claude session per task part: a create run with the implement flags and no `--no-session-persistence`, resumes with `--resume <kept file> --fork-session` (all flags, no Bash and Agent, another model), a run cut by the app kill and its resume, stream-json input, and a critic review run.",
+  b38: "B38. Deny rules `Agent(model:*)` and `Agent(effort:*)` with the review flags (`review`) and the implement flags (`implement`): a pinned agent without and with a per-call model or effort. The implement flags without the rules (`effort`).",
 };
 // Public built-in agent and product names. They are not private data, and a replacement would break the event shapes.
 const RESERVED = new Set(["claude", "general-purpose", "explore", "plan", "statusline-setup", "claude-code-guide", "builtin"]);
@@ -47,7 +68,7 @@ if (!existsSync(RAW)) {
   console.error(`no raw folder: ${RAW}`);
   process.exit(1);
 }
-const files = readdirSync(RAW)
+const files = filesIn(RAW)
   .filter((f) => f.endsWith(".jsonl"))
   .sort();
 if (!files.length) {
@@ -115,10 +136,14 @@ const configDir =
 const homeForms = [...[...homes].flatMap((h) => formPairs(h, FAKE_HOME)), ...formPairs(configDir, `${FAKE_HOME}\\.claude`)];
 add(basename(configDir), "config", () => ".claude");
 const list = (d: string) => (existsSync(d) ? readdirSync(d) : []);
+// U88: the gate calls one user agent by its front-matter name. Its reply is the user's text.
+const agentNames = new Set<string>();
 for (const f of list(join(configDir, "agents")).filter((x) => x.endsWith(".md"))) {
-  const body = readFileSync(join(configDir, "agents", f), "utf8");
-  add(body.match(/^name:\s*(.+)$/m)?.[1] ?? basename(f, ".md"), "agent", (n) => `user-agent-${n}`);
-  add(basename(f, ".md"), "agent", (n) => `user-agent-${n}`);
+  const { name } = agentFront(readFileSync(join(configDir, "agents", f), "utf8"), f);
+  for (const n of [name, basename(f, ".md")]) {
+    add(n, "agent", (k) => `user-agent-${k}`);
+    if (!RESERVED.has(n.trim().toLowerCase())) agentNames.add(n.trim().toLowerCase());
+  }
 }
 for (const d of list(join(configDir, "skills"))) add(d, "skill", (n) => `user-skill-${n}`);
 
@@ -146,10 +171,10 @@ const uuidMap = new Map([...realUuids].map((u, i) => [u, `00000000-0000-4000-800
 const { sanitize } = sanitizer(tokenMap, homeForms, uuidMap);
 
 mkdirSync(OUT, { recursive: true });
-for (const f of list(OUT)) if (f.endsWith(".jsonl")) rmSync(join(OUT, f));
+for (const f of filesIn(OUT)) if (f.endsWith(".jsonl")) rmSync(join(OUT, f));
 let version = "";
 for (const [f, evs] of raw) {
-  const out = evs.map((e) => sanitize(e));
+  const out = hideAgentOutput(evs, agentNames).map((e) => sanitize(e));
   for (const e of out) if (isObj(e) && e.subtype === "init" && typeof e.claude_code_version === "string") version ||= e.claude_code_version;
   writeFileSync(join(OUT, f), `${out.map((e) => JSON.stringify(e)).join("\n")}\n`);
 }
@@ -163,7 +188,7 @@ writeFileSync(
     "",
     `Recorded with Claude Code ${version || "unknown"}. WP8 requires this CLI version or later.`,
     "",
-    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, and user hook output. Do not edit the files by hand.",
+    "`scripts/gate/sanitize-claude.ts` writes these files from the raw output of `scripts/gate/claude-checks.ts`. It replaces session IDs, UUIDs, home paths, the user name, email, organization, user agent, skill, plugin, and MCP server names, user hook output, and the reply text of a user agent. Do not commit these files. Tests read only the hand-written streams in `fixtures/claude-synthetic/`.",
     "",
     "| File | Check |",
     "|---|---|",
@@ -175,7 +200,7 @@ writeFileSync(
 // ---------- scan ----------
 const { res, names } = scanPatterns(tokenMap, [...homes, configDir], realUuids);
 const hits = countHits(
-  list(OUT).map((f) => readFileSync(join(OUT, f), "utf8")),
+  filesIn(OUT).map((f) => readFileSync(join(OUT, f), "utf8")),
   res,
 );
 console.log(

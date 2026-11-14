@@ -74,6 +74,7 @@ import {
   type TaskBlocked,
   type TaskCommand,
   type TaskDoc,
+  type TaskEventKind,
   type TaskRunKind,
   type TaskSettings,
   type TaskSize,
@@ -202,8 +203,9 @@ export const MODULE_IDS = [
 export type ModuleId = (typeof MODULE_IDS)[number];
 // docs/plans/review-v3.md V2 and V3: eval switches. The UI and the Improve prompt do not offer them until WP-V4 ships or deletes them.
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
-// "parts": docs/plans/review-v3.md WP-V14, opt-in only. The shipped profiles do not have it. The retired "signal" drops on read.
-export const VARIANTS = ["order", "parts", "rereview-strict", "rules2"] as const;
+// Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "broad" and "verify2":
+// docs/plans/review-v2/review-quality-2026.md items 3 and 4. A retired name ("signal", "order", "rules2", "rereview-strict") drops on read.
+export const VARIANTS = ["broad", "parts", "verify2"] as const;
 export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];
@@ -360,6 +362,8 @@ export type SettingsDto = {
   // baseUrl: null when Jira is not connected.
   // email: the Atlassian account email of Jira Cloud. null for Server/Data Center.
   jira: { baseUrl: string | null; caFile: string | null; email: string | null; tokenStored: boolean };
+  // The CI server (part-session.md section 2.15). baseUrl: null when it is not connected.
+  jenkins: { baseUrl: string | null; user: string | null; caFile: string | null; tokenStored: boolean };
   // The opt-in of "Ask your session" (docs/plans/session-consult.md part C). Default off.
   sessions: boolean;
   // "Resume by itself after a usage limit" (ps4-plan.md section 0). Default off.
@@ -530,8 +534,16 @@ export type ClaimedEvent = {
 // rereview: the run has a base run. findings: the open findings, as RunDto counts them.
 export type ClaimedRun = { kind: "review" | "explain"; rereview: boolean; status: RunStatus; findings: number; error: string | null };
 
-// A task that waits for the user (task_event kind needs_you). text: the status of the task list at claim time.
-export type ClaimedTaskEvent = { id: number; task: number; kind: "needs_you"; createdAt: number; key: string; title: string; text: string };
+// A task event (spec.md section 6.13). text: the status of the task list at claim time for a wait, else the sentence of the event.
+export type ClaimedTaskEvent = {
+  id: number;
+  task: number;
+  kind: TaskEventKind;
+  createdAt: number;
+  key: string;
+  title: string;
+  text: string;
+};
 
 export type Claimed = ClaimedEvent | ClaimedTaskEvent;
 
@@ -592,6 +604,16 @@ export type RunSummary = Pick<ValidatedResult, "summary" | "risks" | "coverage" 
   volume?: Volume;
   verify?: VerifySummary;
   phases?: RunPhase[];
+  finderQuestions?: FinderQuestions;
+};
+// docs/plans/review-v2/review-questions.md: the finder questions of a review run. asked = answered + findings + kept. answered: the
+// check found the answer, which answers holds. findings: the answer showed a defect. Absent in runs before prompt version 2.7.
+export type FinderQuestions = {
+  asked: number;
+  answered: number;
+  findings: number;
+  kept: number;
+  answers: { text: string; answer: string }[];
 };
 
 // session: a direct consult of the user's own session (docs/plans/session-consult.md part C).
@@ -652,6 +674,8 @@ export type RunDto = {
   phase?: "indexing" | "finding" | "checking";
   // Phase checking only: the number of candidates that the verify phase checks.
   candidates?: number;
+  // Phase checking only: the number of finder questions that it checks (docs/plans/review-v2/review-questions.md).
+  checkQuestions?: number;
   // A session run only: the transcript that it forked and the text that it got, with no transcript text. tokens: sessionTokens(bytes).
   // mode: consult.ts sessionModes, absent for runs made before part D. run: on a fix run that an import made from the proposal of a
   // session run (session-consult.md part D), that session run.
@@ -1057,6 +1081,18 @@ export const jiraSettingsInput = z.object({
 });
 export type JiraSettingsInput = z.infer<typeof jiraSettingsInput>;
 
+// PUT /api/settings/jenkins and POST /api/settings/jenkins/test. Empty baseUrl on PUT disconnects and clears the token.
+// Absent or empty token keeps the stored token of the same origin.
+export const jenkinsSettingsInput = z.object({
+  baseUrl: z.string().trim().max(2048),
+  user: z.string().trim().max(256).optional(),
+  token: z.string().trim().optional(),
+  caFile: z.string().trim().optional(),
+});
+export type JenkinsSettingsInput = z.infer<typeof jenkinsSettingsInput>;
+// POST /api/settings/jenkins/test: the user name that the CI server reports.
+export type JenkinsTestDto = { user: string };
+
 // ---------- Diff (plan r2 S-DIFF) ----------
 
 export const DIFF_PAGE_ROWS = 1000;
@@ -1348,6 +1384,8 @@ export type ReviewStatsDto = {
   outcomes: Record<Severity, PostOutcomes>;
   medianMinutes: number | null;
   usage: { costUsd: number; turns: number };
+  // The sums of summary.finderQuestions. runs: the runs with that key.
+  questions: Omit<FinderQuestions, "answers"> & { runs: number };
 };
 export type PostOutcomes = { addressed: number; open: number; pending: number };
 
@@ -1769,6 +1807,7 @@ export type TaskStepDto = {
 
 // GET /api/tasks. A row of the Tasks view. progress: the facts of the status line (spec.md section 6.12, Inbox). part: the ordinal of
 // the first code part that did not merge, 0 before the build. ready: that part waits for its PR. merged: every PR of the task merged.
+// building: the ordinals of the code parts in their build, in order. Several parts can build at the same time (spec.md section 6.20.6).
 export type TaskRowDto = {
   id: number;
   project: string;
@@ -1783,7 +1822,7 @@ export type TaskRowDto = {
   version: number;
   updatedAt: number;
   closedAt: number | null;
-  progress: { planReady: boolean; part: number; parts: number; ready: boolean; merged: boolean };
+  progress: { planReady: boolean; part: number; parts: number; ready: boolean; merged: boolean; building: number[] };
 };
 
 // The newest interview result (spec.md section 6.5) of round round. done false: the answers start round 2 when it is left.

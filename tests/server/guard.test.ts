@@ -3,8 +3,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { csrf } from "hono/csrf";
 import { createApp } from "../../src/server/app";
-import { guard } from "../../src/server/guard";
+import { allowedOrigins, guard } from "../../src/server/guard";
 import { createLive } from "../../src/server/live";
 
 const PORT = 7317;
@@ -105,6 +106,14 @@ describe("app", () => {
     const api = await app.request(req("/api/missing", {}));
     expect(api.status).toBe(404);
     expect(await api.text()).not.toContain(TOKEN);
+  });
+
+  // GHSA-46wx-v44x-9hh2: hono before 4.13.16 let csrf() pass a text/ping POST from <a ping>.
+  test("text/ping POST from a foreign Origin gives 403", async () => {
+    const ping = (path: string) => req(path, { origin: "http://evil.example", "content-type": "text/ping", "x-rl-session": TOKEN }, "POST");
+    expect((await app.request(ping("/api/sync"))).status).toBe(403);
+    const bare = new Hono().use(csrf({ origin: allowedOrigins({ port: PORT, token: TOKEN }) })).post("/api/thing", (c) => c.text("ok"));
+    expect((await bare.request(ping("/api/thing"))).status).toBe(403);
   });
 
   test("no response has Access-Control-Allow-Origin", async () => {

@@ -6,7 +6,16 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { advisorInInit, advisorOff, advisorStream, advisorTools, counts, namesModel } from "../../scripts/gate/advisor";
+import {
+  advisorInInit,
+  advisorOff,
+  advisorOn,
+  advisorStream,
+  advisorTools,
+  counts,
+  flagEffect,
+  namesModel,
+} from "../../scripts/gate/advisor";
 
 const JSONL = [
   { type: "system", subtype: "init", tools: ["Read", "advisor"], model: "claude-sonnet-4-6", advisorModel: "opus", plugins: [] },
@@ -73,6 +82,22 @@ describe("Gate G-ADV helpers", () => {
     expect(advisorOff({ init, used: false }, 0)).toBe("UNKNOWN");
     expect(advisorOff({ init: undefined, used: false }, 1)).toBe("UNKNOWN");
     expect(advisorOff(undefined, 1)).toBe("UNKNOWN");
+  });
+
+  // CLI 2.1.322: the --advisor run called the advisor, but init.tools did not list it, and the gate said FAIL.
+  test("GADV.3 judges by advisor calls, not by init.tools", () => {
+    const run = [
+      { type: "system", subtype: "init", tools: ["Read", "Grep", "Glob"], slash_commands: ["advisor"] },
+      { type: "assistant", message: { content: [{ type: "server_tool_use", id: "srvtoolu_9", name: "advisor", input: {} }] } },
+    ];
+    expect(advisorTools(run[0])).toEqual([]);
+    expect(advisorOn(advisorStream(run).advisorCalls)).toBe("PASS");
+    expect(advisorOn(advisorStream(run.slice(0, 1)).advisorCalls)).toBe("FAIL");
+  });
+
+  test("GADV.5a and GADV.5b report the flag effect as text", () => {
+    expect(flagEffect(2)).toBe("the flag does not remove the advisor: calls=2");
+    expect(flagEffect(0)).toBe("no advisor call: calls=0");
   });
 
   // GADV.5b: run "advisor" omits the advisor from --tools. The control is run "tools", which lists it in --tools.

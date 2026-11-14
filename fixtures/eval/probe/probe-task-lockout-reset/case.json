@@ -1,0 +1,50 @@
+{
+  "id": "probe-task-lockout-reset",
+  "title": "Login lockout, with one unmet criterion",
+  "language": "python",
+  "pr": {
+    "title": "Lock an account after failed logins",
+    "description": "Adds `Lockout` and uses it in `login()`."
+  },
+  "task": "Lock a login after failed attempts.\n\nAcceptance criteria:\n1. After 5 failed logins within 15 minutes, the account is locked for 15 minutes.\n2. A locked account gets the error \"locked\", also with the right password.\n3. A successful login resets the count of failed logins.\n4. The count and the lock are per account, not per IP address.",
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "auth/login.py",
+      "side": "new",
+      "lines": [16, 19],
+      "alt": [
+        {
+          "path": "auth/lockout.py",
+          "side": "new",
+          "lines": [8, 8]
+        },
+        {
+          "path": "auth/lockout.py",
+          "side": "new",
+          "lines": [17, 17]
+        }
+      ],
+      "severityMin": "major",
+      "module": "intent",
+      "note": "Acceptance criterion 3 is not met: a successful login does not reset the failed logins. Lockout has no reset, and login() does not clear the count, so four failures, a success, and one more failure within 15 minutes lock the account."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "auth/lockout.py",
+      "side": "new",
+      "lines": [21, 21],
+      "why": "Criterion 1 locks the account at the 5th failure in the window, so >= FAILS_MAX is right. > would allow a 6th try."
+    }
+  ],
+  "extras": [
+    {
+      "path": "auth/lockout.py",
+      "side": "new",
+      "lines": [24, 24],
+      "note": "login() calls failed() also for a name without an account, and Lockout never removes an entry, so _fails and _locked_until grow with each new name. A real but small issue that no criterion asks about."
+    }
+  ]
+}

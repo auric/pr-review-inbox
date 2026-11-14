@@ -18,10 +18,14 @@ import {
   readUserServers,
   userServers,
 } from "../../src/server/review/user-mcp";
-import { mcpToolSafety, profileInput } from "../../src/shared/dto";
+import { type McpToolDto, mcpToolSafety, profileInput } from "../../src/shared/dto";
 
 const FAKE_MCP = resolve(import.meta.dir, "../support/fake-mcp.ts");
 const SLOW = 30_000;
+// A loaded machine can take more than the 10 s app limit to start a stdio server. The test timeout stays above this limit.
+const LIST_LIMIT = 60_000;
+const LIST_SLOW = LIST_LIMIT + SLOW;
+const listLong = (e: UserMcpEntry) => listUserTools(e, LIST_LIMIT);
 const dirs: string[] = [];
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -181,25 +185,29 @@ describe("plugin MCP discovery", () => {
     for (const id of ["off:gone", "alpha:esc", "alpha:cfg", "beta:bad.name", "beta:dup"]) expect(servers.has(id)).toBe(false);
   });
 
-  test(
-    "run setup copies a picked plugin server under its key",
-    async () => {
-      const { config, file } = pluginConfig();
-      const r = await userServers(
-        [
-          { server: "beta:srv", tools: ["search", "note_tool"] },
-          { server: "off:gone", tools: ["x"] },
-        ],
-        file,
-        config,
-      );
-      expect(Object.keys(r.servers)).toEqual(["plugin_beta_srv"]);
-      expect(r.servers.plugin_beta_srv).toMatchObject({ tools: ["search", "note_tool"], deny: ["lookup", "delete_item"] });
-      expect(r.unmarked).toEqual(["note_tool (plugin beta:srv)"]);
-      expect(r.gaps).toEqual(["MCP server off:gone: not found in the Claude config"]);
-    },
-    SLOW,
-  );
+  test("run setup copies a picked plugin server under its key", async () => {
+    const { config, file } = pluginConfig();
+    // The tools of fake-mcp.ts with --extra=note_tool, without a process.
+    const list = async (): Promise<McpToolDto[]> => [
+      { name: "search", description: "", readOnlyHint: true, destructiveHint: null },
+      { name: "lookup", description: "", readOnlyHint: true, destructiveHint: null },
+      { name: "delete_item", description: "", readOnlyHint: false, destructiveHint: null },
+      { name: "note_tool", description: "", readOnlyHint: null, destructiveHint: null },
+    ];
+    const r = await userServers(
+      [
+        { server: "beta:srv", tools: ["search", "note_tool"] },
+        { server: "off:gone", tools: ["x"] },
+      ],
+      file,
+      config,
+      list,
+    );
+    expect(Object.keys(r.servers)).toEqual(["plugin_beta_srv"]);
+    expect(r.servers.plugin_beta_srv).toMatchObject({ tools: ["search", "note_tool"], deny: ["lookup", "delete_item"] });
+    expect(r.unmarked).toEqual(["note_tool (plugin beta:srv)"]);
+    expect(r.gaps).toEqual(["MCP server off:gone: not found in the Claude config"]);
+  });
 });
 
 describe("user MCP tools", () => {
@@ -207,7 +215,7 @@ describe("user MCP tools", () => {
     "tools/list over stdio gives names, descriptions, and hints; names that a CLI flag cannot hold are dropped",
     async () => {
       // biome-ignore lint/suspicious/noTemplateCurlyInString: the Claude config syntax for env expansion.
-      const tools = await listUserTools(fakeEntry(["--extra=${RL_TEST_UNSET_VAR:-expanded_tool}"]));
+      const tools = await listLong(fakeEntry(["--extra=${RL_TEST_UNSET_VAR:-expanded_tool}"]));
       expect(tools).toEqual([
         { name: "search", description: "Searches the fake index.", readOnlyHint: true, destructiveHint: null },
         { name: "lookup", description: "Looks up one fake record.", readOnlyHint: true, destructiveHint: null },
@@ -215,19 +223,33 @@ describe("user MCP tools", () => {
         { name: "expanded_tool", description: "An extra tool.", readOnlyHint: null, destructiveHint: null },
       ]);
     },
-    SLOW,
+    LIST_SLOW,
   );
 
   test(
     "a stdio server starts in a fresh empty folder that is gone after the listing",
     async () => {
-      const tools = await listUserTools(fakeEntry(["--cwd"]));
+      const tools = await listLong(fakeEntry(["--cwd"]));
       const probe = tools.find((t) => t.name === "cwd_probe");
       const { cwd, entries } = JSON.parse(probe?.description ?? "{}") as { cwd: string; entries: number };
       expect(resolve(cwd)).not.toBe(resolve(tmpdir()));
       expect(basename(cwd)).toStartWith("rl-mcp-");
       expect(entries).toBe(0);
       expect(existsSync(cwd)).toBe(false);
+    },
+    LIST_SLOW,
+  );
+
+  test(
+    "a server that never answers fails after the limit with a short message",
+    async () => {
+      const silent: UserMcpEntry = { type: "stdio", command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], env: {} };
+      const start = performance.now();
+      const e = await listUserTools(silent, 500).catch((x: Error) => x);
+      expect(e).toBeInstanceOf(McpListError);
+      expect((e as Error).message).toBe("no answer in 0.5 s");
+      // The app limit is 10 s. An earlier end proves that the injected limit fired.
+      expect(performance.now() - start).toBeLessThan(10_000);
     },
     SLOW,
   );
@@ -263,6 +285,8 @@ describe("user MCP tools", () => {
           { server: "empty", tools: [] },
         ],
         file,
+        undefined,
+        listLong,
       );
       expect(Object.keys(r.servers)).toEqual(["fake"]);
       expect(r.servers.fake).toMatchObject({ tools: ["search"], deny: ["lookup", "delete_item"] });
@@ -273,7 +297,7 @@ describe("user MCP tools", () => {
       );
       expect(r.gaps).toHaveLength(3);
     },
-    SLOW,
+    LIST_SLOW,
   );
 });
 
@@ -292,12 +316,12 @@ describe("MCP tool safety rule", () => {
     "run setup never allows a blocked tool of a saved profile and lists the allowed unmarked tools",
     async () => {
       const file = configFile({ fake: { command: process.execPath, args: [FAKE_MCP, "--extra=note_tool"] } });
-      const r = await userServers([{ server: "fake", tools: ["search", "delete_item", "note_tool"] }], file);
+      const r = await userServers([{ server: "fake", tools: ["search", "delete_item", "note_tool"] }], file, undefined, listLong);
       expect(r.servers.fake).toMatchObject({ tools: ["search", "note_tool"], deny: ["lookup", "delete_item"] });
       expect(r.gaps).toEqual(["MCP tool fake/delete_item: blocked by the safety rule"]);
       expect(r.unmarked).toEqual(["note_tool (fake)"]);
     },
-    SLOW,
+    LIST_SLOW,
   );
 });
 

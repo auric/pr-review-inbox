@@ -33,7 +33,7 @@ const { id } = db
   .get({ source: remote.source, target: remote.target }) as { id: number };
 
 const runner = fakeRunner(root);
-runner.write({ fixture: claudeStream(root, "tree", "claude/b9-wp8-flags.jsonl", REVIEW_RESULT), hang: true });
+runner.write({ fixture: claudeStream(root, "tree", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT), hang: true });
 const review = createReviewJobs({
   settings,
   live: createLive(),

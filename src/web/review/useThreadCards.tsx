@@ -74,7 +74,7 @@ export function useThreadCards(
   };
   // "Keep the fix" of a "yes" conflict: discard the reply, then restore the nofix draft of the note when the run holds one.
   const keepFix = async (c: Extract<Conflict, { kind: "yes" }>, thread: number) => {
-    const d = await qc.fetchQuery({ queryKey: ["run", c.run], queryFn: () => getRun(c.run) }).catch(() => null);
+    const d = await qc.fetchQuery({ queryKey: ["run", c.run], queryFn: () => getRun(qc, c.run) }).catch(() => null);
     const back = d?.items.find((x) => {
       const p = replyOf(x);
       return x.kind === "reply" && x.status === "discarded" && p.thread === thread && p.origin === "nofix" && !p.declined;

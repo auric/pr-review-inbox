@@ -30,7 +30,7 @@ import {
 } from "../../shared/task";
 import { attachmentsRoot } from "../context/attachments";
 import { log } from "../log";
-import { EXPLORER_RULE, type Profile } from "../review/catalog";
+import { AGENT_PARAMS_RULE, EXPLORER_RULE, type Profile } from "../review/catalog";
 import type { RunOutcome } from "../review/claude";
 import { deniedPath, fold } from "../review/edits";
 import { gitEnv } from "../review/git";
@@ -701,6 +701,7 @@ export function implementPrompt(
       ...shellLines,
       untrusted,
       ...userLines,
+      AGENT_PARAMS_RULE,
       "",
       `# Run ${session.resume}: ${PURPOSE_TITLE[session.purpose]}`,
       "",
@@ -752,6 +753,7 @@ export function implementPrompt(
     ...lines.mcp,
     ...lines.skills,
     EXPLORER_RULE,
+    AGENT_PARAMS_RULE,
     "In coverage, list what you read, what you skipped, and what was not available.",
     "",
     modeLine,

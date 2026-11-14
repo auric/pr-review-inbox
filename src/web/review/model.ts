@@ -611,7 +611,7 @@ export const MODULE_LABEL: Record<ModuleId, string> = {
 // languageChecks, the last one under "More checks". TRIAL_MODULES are in neither list.
 export const SHOWN_CHECKS: readonly ModuleId[] = ["security", "concurrency", "performance", "tests", "api", "simplify"];
 export const MORE_CHECKS: readonly ModuleId[] = ["docs", "rules", "intent"];
-export const LANGUAGE_LABEL = "Language checklists (C++, C, Python)";
+export const LANGUAGE_LABEL = "Language checklists (C++, C, Python, C#)";
 
 // spec.md section 1.4.
 export const VOLUME_NAME: Record<Volume, string> = { quiet: "Only what matters", balanced: "Balanced", thorough: "Show everything" };
@@ -722,11 +722,26 @@ export function hiddenParts(hidden: ReviewItemDto[]): string[] {
   return [refuted ? `${refuted} refuted by the check` : "", dup ? plural(dup, "duplicate") : ""].filter(Boolean);
 }
 
+// docs/plans/review-v2/review-questions.md: the finder questions that the check answered. They are not posted. null: none, or a
+// run before prompt version 2.7.
+export function answeredQuestions(s: RunSummary | null | undefined): { label: string; items: { text: string; answer: string }[] } | null {
+  const a = s?.finderQuestions?.answers ?? [];
+  if (!a.length) return null;
+  return {
+    label: `${plural(a.length, "question")} answered by the check`,
+    items: a.map((q) => ({ text: q.text, answer: q.answer.trim() || "The check gave no reason." })),
+  };
+}
+
 // spec.md section 1.1: the state of a running run. A review names its phase.
 export function runningText(r: RunDto): string {
   if (r.phase === "indexing") return "Indexing for codegraph…";
   if (r.kind !== "review" || r.explain) return RUN_TEXT[r.kind].running;
-  if (r.phase === "checking") return `Checking ${plural(r.candidates ?? 0, "finding")}…`;
+  // docs/plans/review-v2/review-questions.md: a check of finder questions only names the questions.
+  if (r.phase === "checking")
+    return !r.candidates && r.checkQuestions
+      ? `Checking ${plural(r.checkQuestions, "question")}…`
+      : `Checking ${plural(r.candidates ?? 0, "finding")}…`;
   return r.since ? `Finding problems in the changes since ${shortHash(r.since.head)}…` : "Finding problems…";
 }
 

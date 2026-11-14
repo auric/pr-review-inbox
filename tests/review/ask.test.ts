@@ -52,7 +52,7 @@ async function setup(o: { brief?: boolean } = {}) {
   dirs.push(root);
   const remote = await reviewRemote(root, { 2: "source" });
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl");
   const scenario = (o: Omit<FakeScenario, "record" | "auth" | "fixture"> & { authMethod?: string } = {}) =>
     runner.write({ fixture: stream, ...o });
   scenario();

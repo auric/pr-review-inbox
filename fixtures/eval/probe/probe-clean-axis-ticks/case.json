@@ -1,0 +1,20 @@
+{
+  "id": "probe-clean-axis-ticks",
+  "title": "Tick marks of a chart axis, a clean change",
+  "language": "typescript",
+  "pr": {
+    "title": "Draw the tick marks of the chart axis",
+    "description": "Adds `tickPositions()`, which gives the x position of each tick mark of an axis with n segments, and draws the ticks under the axis line."
+  },
+  "clean": true,
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/chart/ticks.ts",
+      "side": "new",
+      "lines": [5, 5],
+      "why": "n segments have n + 1 edges, and each edge gets a tick, so i <= segments is right. The test expects five ticks for four segments. An off-by-one finding is wrong."
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+diff --git a/src/ui/format.ts b/src/ui/format.ts
+new file mode 100644
+index 0000000..ba23c12
+--- /dev/null
++++ b/src/ui/format.ts
+@@ -0,0 +1,11 @@
++const UNITS = ["B", "KiB", "MiB", "GiB"];
++
++export function formatBytes(bytes: number): string {
++  let value = bytes;
++  let unit = 0;
++  while (unit < UNITS.length - 1 && Number(value.toFixed(1)) >= 1024) {
++    value /= 1024;
++    unit++;
++  }
++  return unit === 0 ? `${value} ${UNITS[unit]}` : `${value.toFixed(1)} ${UNITS[unit]}`;
++}
+diff --git a/src/ui/uploads.ts b/src/ui/uploads.ts
+index b9dd259..d1d3bf0 100644
+--- a/src/ui/uploads.ts
++++ b/src/ui/uploads.ts
+@@ -1,5 +1,7 @@
++import { formatBytes } from "./format";
++
+ export type Upload = { name: string; bytes: number };
+ 
+ export function uploadRows(uploads: readonly Upload[]): string[] {
+-  return uploads.map((u) => u.name);
++  return uploads.map((u) => `${u.name} (${formatBytes(u.bytes)})`);
+ }
+diff --git a/tests/ui/format.test.ts b/tests/ui/format.test.ts
+new file mode 100644
+index 0000000..a6e9585
+--- /dev/null
++++ b/tests/ui/format.test.ts
+@@ -0,0 +1,7 @@
++import { expect, test } from "vitest";
++import { formatBytes } from "../../src/ui/format";
++
++test("formats each unit", () => {
++  const sizes = [0, 1023, 1024, 1536, 1024 ** 2 - 1, 5 * 1024 ** 2, 2 * 1024 ** 3];
++  expect(sizes.map(formatBytes)).toEqual(["0 B", "1023 B", "1.0 KiB", "1.5 KiB", "1.0 MiB", "5.0 MiB", "2.0 GiB"]);
++});

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Fake `claude` CLI for tests. It replays a recorded stream-json fixture and never calls a model.
+// Fake `claude` CLI for tests. It replays a stream-json fixture and never calls a model.
 // Usage: bun tests/support/fake-claude.ts <scenario.json> <claude arguments>
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -50,7 +50,7 @@ export type FakeScenario = {
   implement?: unknown;
   // pushback.md section 6.23.2: the verdicts of a judging run, one per "## Point <id>:" heading of ./context/failure.md in order. The
   // last entry repeats, and null gives that point no entry. They follow the points of the implement result.
-  judge?: ({ verdict: "fixed" | "pushback"; why?: string | null; reason?: string; cite?: string } | null)[];
+  pointVerdicts?: ({ verdict: "fixed" | "pushback"; why?: string | null; reason?: string; cite?: string } | null)[];
   writes?: { path: string; text?: string; junction?: string }[];
   // part-session.md section 2.3: after writes, an Edit of the plan file at path that ticks each task heading `### [ ] <id> `.
   ticks?: { path: string; ids: string[] };
@@ -85,6 +85,10 @@ export type FakeScenario = {
   taskReview?: unknown;
   // part-session.md section 2.7: the structured output of a critic run (call key critic). Absent: a result with no findings.
   critic?: unknown;
+  // docs/plans/review-v2/review-quality-2026.md E3, E4 (scripts/eval/label.ts): the matcher result (properties.candidates) and the judge
+  // result (properties.labels). Absent: the fixture result.
+  matcher?: unknown;
+  judge?: unknown;
   // Fields for the Nth run of one call key (callKey), after bySchema. The last entry repeats. The record file counts the earlier runs.
   seq?: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq">>[]>;
   // Fields for a run whose ./context Markdown files hold the text when, after seq. The first entry that matches wins. Its seq counts only
@@ -93,7 +97,7 @@ export type FakeScenario = {
   match?: { when: string; seq: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq" | "match">>[]> }[];
 };
 
-export type SchemaKind = "verify" | "explain" | "discuss" | "interview" | "spec" | "implement" | "review";
+export type SchemaKind = "verify" | "explain" | "discuss" | "interview" | "spec" | "implement" | "review" | "matcher" | "judge";
 // The review v2 run kind that a --json-schema shape names, else null. A re-review has its own key (earlier), so it is no review.
 export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
   props.verdicts !== undefined
@@ -110,7 +114,11 @@ export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
               ? "implement"
               : props.findings !== undefined && props.earlier === undefined
                 ? "review"
-                : null;
+                : props.candidates !== undefined
+                  ? "matcher"
+                  : props.labels !== undefined
+                    ? "judge"
+                    : null;
 
 // AC-B333: a critic run is a review run with model haiku and 30 turns. An own review with that model and turn cap also reads as critic.
 export const CRITIC_ARGS = { model: "haiku", maxTurns: "30" };
@@ -564,7 +572,7 @@ async function main() {
     );
   }
 
-  // The Bash calls: the tool_use, then for a refused call the permission_denied event before the error tool_result (b17 order).
+  // The Bash calls: the tool_use, then for a refused call the permission_denied event before the error tool_result (Gate B17 order).
   for (const [k, b] of (s.bash ?? []).entries()) {
     const id = `toolu_fake_bash_${k}`;
     if (!b.refused)
@@ -627,7 +635,7 @@ async function main() {
     if (kind === "spec") return s.spec ?? echoSpec();
     if (kind === "implement") {
       const r = (s.implement ?? echoImplement()) as { points?: unknown[] };
-      const judge = s.judge ?? [];
+      const judge = s.pointVerdicts ?? [];
       if (!judge.length) return r;
       const ids = [...(context["failure.md"] ?? "").matchAll(/^## Point (\d+):/gm)].map((m) => Number(m[1]));
       const entries = ids.flatMap((id, i) => {
@@ -638,6 +646,8 @@ async function main() {
     }
     if (key === "critic") return s.critic ?? echoCritic();
     if (kind === "review") return s.taskReview !== undefined && stdin.includes("- Pull request: none yet.") ? s.taskReview : s.review;
+    if (kind === "matcher") return s.matcher;
+    if (kind === "judge") return s.judge;
     if (props.replies !== undefined) return s.replies ?? echoReplies(stdin, { notes: s.notes, cites: s.cites });
     if (props.earlier !== undefined) return s.rereview ?? echoRereview(stdin, fixture);
     if (props.answer !== undefined) return s.answer ?? echoAnswer(stdin);
@@ -680,7 +690,7 @@ async function main() {
     return r === undefined ? l : JSON.stringify({ ...e, structured_output: r });
   };
 
-  // The fixture paths name the recorded Windows cwd. Replace it and its separator with the real cwd and separator.
+  // The fixture paths name the Windows cwd of init. Replace it and its separator with the real cwd and separator.
   const lines = readFileSync(s.fixture, "utf8").split("\n").filter(Boolean).map(rewrite);
   const init = lines.map((l) => JSON.parse(l)).find((e) => e.type === "system" && e.subtype === "init");
   const esc = (p: string) => JSON.stringify(p).slice(1, -1);

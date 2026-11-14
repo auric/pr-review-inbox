@@ -502,7 +502,7 @@ function ValueBlock({ title, text }: { title: string; text: string }) {
   );
 }
 
-// The edited fields of a profile with a shipped ID. Each field resets to its shipped value by itself.
+// The edited fields of a profile with a shipped ID. The reset of each field is next to its control (FieldReset).
 function ShippedEdits(props: RowProps & { shipped: ProfileInput }) {
   const { d, i, shipped, newer } = props;
   const edited = editedOf(d, shipped);
@@ -533,19 +533,6 @@ function ShippedEdits(props: RowProps & { shipped: ProfileInput }) {
                   </Button>
                 </>
               )}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="ml-auto text-ink-2"
-                onClick={() => props.onChange({ act: "reset", i, field: f, shipped })}
-              >
-                <RotateCcw data-icon="inline-start" />
-                Reset to shipped
-                <span className="sr-only">
-                  {" "}
-                  {fieldWords(f)} of profile {i + 1}
-                </span>
-              </Button>
             </li>
           );
         })}

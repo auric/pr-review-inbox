@@ -39,7 +39,7 @@ Status: decided, 2026-10-22. design.md gives the reasons, the alternatives, and 
 ### 1.1 What the user sees
 
 - The brief (r) shows "Review" with a few checkboxes, a three-step volume, and one primary button "Start review". The profile picker shows only when the user has 2 or more review profiles. A checkbox or volume change saves to the profile at once, and a line says "Applies to every review with this setup."
-- Shown checkboxes: "Security", "Threads and races", "Performance", "Tests", "Compatibility", "Simplify (what to delete)". Under "More checks": "Docs and comments", "Project rules", "Matches the task", "Language checklists (C++, C, Python)".
+- Shown checkboxes: "Security", "Threads and races", "Performance", "Tests", "Compatibility", "Simplify (what to delete)". Under "More checks": "Docs and comments", "Project rules", "Matches the task", "Language checklists (C++, C, Python, C#)".
 - Volume: "Only what matters", "Balanced", "Show everything". One line under it says what it does (section 1.4).
 - While the run works, the run line says "Finding problems…" and then "Checking 9 findings…". The log groups the checking events under "Check".
 - After the run, the Drafts header says the ledger in plain words, for example "2 must fix · 3 worth fixing". Must fix counts blocker and major. Worth fixing counts minor. Then the main list. Then a fold "Low confidence (4)". The run record has one line "3 refuted by the check · 1 duplicate". It opens a list with the reason of each point and Restore.
@@ -85,9 +85,9 @@ Stored form (PROFILES_VERSION 7, catalog.ts storeProfiles and resolveProfiles): 
 | docs | Docs and comments | off | "Check that docs, comments, and the changelog that describe changed behavior still match the code." / "Report a wrong doc only when a reader would act wrongly on it." |
 | simplify | Simplify (what to delete) | off | The lines of the Over-engineering prompt (catalog.ts:94-101) without "Put a defect into risks" and "In summary, give the number of lines", plus "Use module simplify." |
 | rules | Project rules | on | "Check the changed files against the project instructions. Each instruction file names the paths that it applies to." / "Use a rule only for files in its scope." / "In rule, copy the exact sentence of the rule. The app checks the quote against the loaded instructions." / "Report a rule finding only when the change breaks the rule, not when old code breaks it." |
-| intent | Matches the task | on | "Compare the change with the goal in ./context/pr.md and ./context/task.md." / "Report a stated requirement that the change does not meet. Quote the requirement in evidence." / "Report a change that the goal does not explain only when it changes behavior for users." |
+| intent | Matches the task | on | "Compare the change with the goal in ./context/pr.md and ./context/task.md." / "List each acceptance criterion of the tasks. When task.md does not hold them, read them with an issue tool, if the MCP list has one." / "Report a stated requirement or acceptance criterion that the change does not meet. Quote it in evidence." / "Put a criterion that the code cannot show into coverage notChecked, with the reason." / "Report a change that the goal does not explain only when it changes behavior for users." (prompt version 2.7, review-questions.md) |
 
-- languageChecks stays its own boolean field and shows as "Language checklists (C++, C, Python)" among the checkboxes. withLanguages (languages.ts) stays.
+- languageChecks stays its own boolean field and shows as "Language checklists (C++, C, Python, C#)" among the checkboxes. withLanguages (languages.ts) stays.
 - rules adds nothing when the run has no project instructions. intent adds nothing when pr.md has no description and task.md does not exist. The coverage then says "Project rules: no instructions loaded." or "Matches the task: no description or task."
 - A module ID that the app does not know is dropped on parse (zod catch on each entry).
 
@@ -138,14 +138,14 @@ Each prompt line with its reason:
 | Finder: "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there, and set cause to the changed line that makes it reachable or worse." | R6: the app checks it. |
 | Finder: the path line, the side line, and "Copy anchorText exactly from the lines line to lineEnd on that side. The app compares it with the file." | S4. The model knows why the quote matters. |
 | Finder: "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result." | S9: concrete scenario. |
-| Finder: "When you cannot name a trigger, write a question for the author instead of a finding." | S9: "please verify" points become questions. |
+| Finder: "When you cannot name a trigger, search the code for one. When you still cannot name one, write a question for the author." | S9, review-questions.md: the finder looks for a trigger before it asks. Prompt version 2.7. |
 | Finder: "In title, name the problem in one line of 12 words or fewer. In body, give the consequence and a fix direction in 3 sentences or fewer." | Short rows and short comments. |
 | Finder: "In evidence, give path:line for each line that shows the problem." | Grounding. |
 | Finder: "Set evidenceStatus to code when you read each line of the trigger path. Else set it to unverified." | Clear meaning for the cap. |
 | Finder: "Set confidence to high when you traced the trigger in the code, medium when you read the code but did not trace each step, and low when you only suspect it." | Calibrated values for the fold. |
 | Finder: "Set module to core, or to the ID of the check section that found it." | Stats per module. |
 | Finder: "Set category to security, concurrency, resource, or behavior for a finding of that class. resource: a leak or a missing release. behavior: a change that users or callers see." | The classes that the check never hides (section 1.7). Prompt version 2.4. |
-| Finder: "Put open points about the intent into questions. Say what you need to know and why it matters." | Questions stay apart. |
+| Finder: "Before you ask a question, look for the answer yourself. Read the changed code, its callers, its tests, its config, and the files in ./context." / "When you find the answer, ask nothing. When the answer shows a defect, report a finding with that evidence." / "Put a point into questions only when no file and no tool of this run gives the answer. In why, name what you checked and why it did not answer the point." | review-questions.md: fewer questions. rl-main and the salvage run only. Prompt version 2.7. |
 | Do-not-flag: "Do not report the points below. The check step refutes them, so they only cost time:" then "style, naming, formatting, or comment wording" / "what a compiler, type checker, linter, or formatter reports" / "a problem that the code already handles: read the guards and the callers first" / "a rule that the code turns off on purpose, such as a suppression with a reason" / "a risk with no trigger, such as 'this might break'" / "behavior that the pull request text or the task asks for" / "code that only moved or was renamed, with no change of logic" / "a choice between two correct designs" / "a missing test, unless the Tests check is on" | S11, research practice 4. The reason line says why. |
 | Rubric: "Set severity by what the merge must wait for." and the blocker, major, and minor lines (catalog.ts:256-258) | Kept. |
 | Rubric: the nit line of the volume (section 1.4) | R10. |
@@ -201,6 +201,8 @@ export const verdict = z.object({
   evidence: z.string().max(1000).describe("path:line of the line that confirms or refutes it."),
   duplicateOf: z.number().int().min(1).nullable().default(null).describe("For duplicate: the candidate that it repeats. Else null."),
   question: z.string().max(1000).default("").describe("For question: the question for the author. Else empty."),
+  // Prompt version 2.7 (review-questions.md): the defect that answers a finder question. Gate B20 must run again on this shape.
+  finding: z.object({ ...place, title: z.string().max(200), body: z.string().max(2000) }).nullable().default(null),
 });
 export const verifyResult = z.object({ verdicts: z.array(verdict).max(MAX_FINDINGS), coverage });
 ```
@@ -217,16 +219,19 @@ rl-verify agent prompt, line by line:
 | "confirmed: the code shows the trigger and the wrong result." | Verdict meaning. |
 | "refuted: the code prevents the trigger, the problem is not in the change, or the candidate is on the do-not-flag list. In reason, name the guard or the list item with path:line." | Verdict meaning with proof. |
 | "unsure: the code that you can read neither confirms nor refutes it. In reason, name what is missing." | Honest middle state. |
-| "question: the candidate depends on what the author intends. Write the question for the author in question." | S9: "please verify" points become questions. |
+| "question: only the author can answer the point, and no file or tool of this run answers it. Write the question in question. In reason, name what you checked." | S9, review-questions.md. Prompt version 2.7. |
+| "When the code or the task text answers the point, give confirmed or refuted, not question." | review-questions.md: fewer questions. |
+| "For a candidate without a trigger, look for one. When you find it, give confirmed, and put the trigger into reason." | review-questions.md: a found trigger keeps the finding. |
 | "duplicate: another candidate of the same group describes the same problem at the same place. Set duplicateOf to the clearer candidate." | R4. |
 | "A candidate that ./context/history.md lists as discarded by the user is refuted, unless the code at that place changed." | No re-raise. |
 | "Set severity by the rubric below. Lower it for a rare trigger or a small impact. Raise it only when the code shows a worse result than the candidate says." | S9 reflect pass. |
 | The rubric lines and the do-not-flag list of section 1.5 | One rubric for both phases. |
 | "Look for no new problems. A finder already ran." | Scope and time. |
+| Only when candidates.md holds finder questions: the "## Question N" lines of review-questions.md (QUESTION_BLOCK_RULES) | AC-R33 to AC-R35. |
 | TRUST lines, the coverage line, and the docs rule | Kept. |
-| Delegation (above VERIFY_SPLIT): "Give the candidates to the rl-verifier agent in calls of at most 6 candidates. Give each candidate to one call. Copy each verdict into verdicts." | R3. |
+| Delegation (above VERIFY_SPLIT): "Give the candidates to the rl-verifier agent in calls of at most 6 candidates. Give each candidate to one call. Copy each verdict into verdicts." With finder questions, also "Give the questions to the rl-verifier agent too. Each question counts as one candidate of its call." The split counts candidates and questions together. | R3, review-questions.md. |
 
-rl-verifier prompt: the same lines, with "You check the candidates that the request names." instead of the delegation line, and "Report each verdict with candidate, verdict, severity, reason, evidence, duplicateOf, and question." Its definition sets model and effort from profile.verifier and the read-only tools of rl-reviewer.
+rl-verifier prompt: the same lines, with "You check the candidates that the request names." instead of the delegation line, and "Report each verdict with candidate, verdict, severity, reason, evidence, duplicateOf, and question." With finder questions in candidates.md, that line ends with "duplicateOf, question, and finding." Its definition sets model and effort from profile.verifier and the read-only tools of rl-reviewer.
 
 Salvage run (a finder that reaches its turn cap):
 
@@ -326,6 +331,15 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 28. AC-R28. Addressed rate of posted findings (review-ideas.md candidate A). A posted finding is addressed when its root thread is resolved, or its root comment got orphaned_at after the post. Else it is open when the PR source head is not the head of the post run, or the PR is merged or declined. Else it is pending. A "Fixed in" draft is no signal. The rule reads local SQLite only and never changes a finding or a post.
 29. AC-R29. On a seeded database, ReviewStatsDto.outcomes counts addressed, open, and pending per severity of the last copy. A changed line counts as addressed. A resolved thread counts as addressed. An untouched line with no new head is pending. A new head that leaves the anchor not orphaned counts as open. A merged or declined PR counts the rest as open. An anchor orphaned before the post is no change.
 30. AC-R30. Settings, Review quality has the table "Addressed by a later change": one row per prompt version over all profiles, newest first, with "Addressed: X of Y posted findings (Z%)" and "N pending" apart. Y is addressed plus open. One column per severity shows "X of Y (Z%)". The Posted cell of the main table says "N resolved or fixed" for the AC-M4 addressed count.
+31. AC-R31. A change with a .cs or .csx file gets the C# list. A change without one does not. .razor and .cshtml files get no list. The C# list ends with "Do not report in C#:" and one to three items. Each item sentence has at most 20 words. The "Language checklists" checkbox names C#. A profile with language checks on gets the list with no profile upgrade. REVIEW_PROMPT_VERSION is "2.6".
+32. AC-R32. rl-main and the salvage run hold the finder question rules of review-questions.md. rl-reviewer holds none of them. They came with REVIEW_PROMPT_VERSION "2.7".
+33. AC-R33. candidates.md holds a "## Question N" block for each finder question after the finding candidates. N continues after the last candidate number. A question gets a block only when every candidate has one. The byte cap and MAX_FINDINGS cover both kinds. A finder result with questions and no finding starts the verify phase. A check of questions only shows "Checking N questions…".
+34. AC-R34. A refuted finder question drops, and summary.finderQuestions.answers keeps its text and the answer. A confirmed one with a place that the finder validator anchors becomes a finding with category "question" and the verdict severity. A confirmed one without such a place keeps the question with the verdict reason in why. A question verdict keeps the question with the verdict text and reason. Unsure, duplicate, and no verdict keep the finder question. A question without a verdict never makes the run incomplete. Question verdicts do not change summary.verify.
+35. AC-R35. rl-verify and rl-verifier hold the question line, the answer line, and the trigger line of review-questions.md. The "## Question N" lines are only in a prompt whose candidates.md holds questions. Above VERIFY_SPLIT blocks, the delegation of rl-verify also names the questions.
+36. AC-R36. With picked MCP tools, the issue lines and the remote exception of review-questions.md are in the review finder (rl-main and rl-reviewer), the verify phase, the salvage run, and the own review of a task. Explain, Ask, Fix, Discuss, reply runs, and task steps do not get them. Without picked tools, no run has them. No line names a server.
+37. AC-R37. The intent module lists the acceptance criteria, reads them with an issue tool when the MCP list has one, reports an unmet criterion with a quote, and puts a criterion that the code cannot show into coverage notChecked.
+38. AC-R38. summary.finderQuestions of a review run holds asked, answered, findings, kept, and answers. Settings, Review quality sums the counts per profile and prompt version and shows "Questions: N asked, A answered, F to findings, K kept" in the Check cell. A group without such a run shows no question line. The own review of a task stays out.
+39. AC-R39. Each run that offers the Agent tool has `Agent(model:*)` and `Agent(effort:*)` in `--disallowedTools`. A run without it keeps its flags. Each lead with the Agent tool has the line "Never pass model or effort on an Agent call. Each agent has its own model and effort." A refused Agent call gets a Log note that names the asked model or effort. REVIEW_PROMPT_VERSION is "2.8" (Gate B38, review-quality-2026.md item 9).
 
 ## 2. Part 2: Discuss a finding
 
@@ -1481,7 +1495,7 @@ Section 6.17.4 adds POST /api/tasks/issue and PUT /api/tasks/:id/files/:att. Sec
 
 ### 6.12 UI: the Task view
 
-- Start: the Jira chip menu item "Build this task" (one click: POST /api/tasks, then the Task view). The sidebar view "Tasks" with "Build a Jira task" (key, "Main repository", and "Profile" (section 6.19.1), then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16).
+- Start: the sidebar view "Tasks" with "Build a Jira task" (key, "Main repository", and "Profile" (section 6.19.1), then "Read the task" with the attachment boxes of section 6.17.1, then "Build this task"). The base branch comes from section 6.16.3, and the plan screen shows the branch type, the base picker, the existing-branch choice, and the proposed repositories (section 6.16). The Jira chips of a PR have no Build button (section 6.30).
 - Route `/tasks/:id`. Layout: a header (key, title, size line, repository line, profile name), the step strip, one status sentence, one primary button, a More menu, then the content of the current step. Tabs under the content, all secondary: Questions, Attachments (section 6.17.1), Spec, Spec PR (medium, large), Plan, Log, Diff.
 - Step strip per size: small "Questions › Plan › Build › Done"; medium "Questions › Plan › Spec review › Build › Done"; large "Questions › Plan › Spec review › Build parts (2 of 4) › Done". The current step is bold with aria-current="step".
 
@@ -1552,6 +1566,7 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 - task_event kinds: needs_you (ref: step ID), part_ready (ref: part ID and head), spec_approved (ref: spec PR head). One tab claims each event (as draft_stale). The notifications setting applies.
 - Texts: "<KEY> needs you: the tests stay red." / "<KEY>: part 2 of 4 is ready for its PR." / "<KEY>: the spec is approved. You can start building."
 - No notification for a running step, a green check of the app, a commit, or a wait.
+- Section 6.30 (user decision of 2026-11-03): part_ready fires when a code part is self_reviewed and no step of it waits or runs. It replaces the needs_you wait "Needs you: open the PR". The restart recovery adds one needs_you event (ref `restart@<time>`) for each task that it stops, with the text "The app restarted and stopped this task. Resume continues it.". A task that builds or follows up does not stop at a restart (part-session.md section 9.5). Each part that worked waits with its restart reason, and that new wait gives a needs_you event.
 - Build status (docs/plans/ci-builds.md, Layer A): the PR events build_failed and build_passed (ref: the source head) notify only for the user's own PRs, task PRs included. Texts: "build failed" and "build passed". They never fire on the first build read of a PR or while a build runs. Each kind fires at most once per head.
 
 ### 6.14 Edge cases
@@ -1577,7 +1592,7 @@ Build status rows (docs/plans/ci-builds.md, Layer A). They come after the "not p
 
 ### 6.15 Acceptance criteria (part 6)
 
-1. AC-B1. "Build this task" on a chip creates one task, starts an interview run (kind interview, read-only tools, sanitized snapshot of the target head), and a second click opens the same task.
+1. AC-B1. POST /api/tasks ("Build this task") creates one task, starts an interview run (kind interview, read-only tools, sanitized snapshot of the target head), and a second click opens the same task.
 2. AC-B2. Questions show as a form with the recommended option preselected. "Use the recommended answers" sends them and starts the spec run.
 3. AC-B3. Claude asks a second round at most once. A third interview result with questions is stored, and the spec run starts anyway.
 4. AC-B4. A spec result with db true and size small is shown as medium with the rule line. An estimate of 900 lines with a 400 budget shows large. The user cannot pick a size under a rule's minimum.
@@ -1856,7 +1871,7 @@ The attachments of the Jira key belong to the task, with or without an origin PR
 - "Include all" ticks every box. It asks the policy question once when the setting asks.
 - Empty state: "No attachments" with "<runner> reads the task text only.". Error state: the fixed sentence of the Jira error under the form (routes.ts FAILED).
 - Task view: the secondary tab "Attachments" (when the issue lists a file) with the same boxes and "Include all". The line "<runner> reads the ticked files in each step. A change applies from the next step." stands above the list. Each row says "<runner> gets it in each step.", "Downloaded. <runner> does not get it.", or "Not downloaded. A tick downloads it.". A tick waits for its download, and a failed download shows its error under the row. The tab adds no primary button.
-- A chip start ("Build this task" on a PR) has no form. It follows the setting: off gives every file with a box, on gives none.
+- POST /api/tasks without `files` follows the setting: off gives every file with a box, on gives none. The UI always sends the ticked files (section 6.30).
 
 #### 6.17.2 Data and files
 
@@ -2110,7 +2125,7 @@ Constants (src/shared/task.ts): SUBTASKS_READ = 20, SUBTASK_PARTS_MAX = 12 (the 
 #### 6.20.1 Start
 
 - "Read the task" reads the parent once. When the parent has sub-tasks, the form shows "ABC-10 has 4 sub-tasks: 2 open, 2 in review." and two radio buttons: "Build the sub-tasks, one PR each" and "Build ABC-10 as one task". The first one starts selected when at least one sub-task is not done (design.md Q64).
-- "Build this task" on the Jira chip uses the same rule, so one click still works.
+- POST /api/tasks without `subtasks` uses the same rule.
 - The parent has no sub-tasks: the normal flow, and the form shows no choice.
 - The create click reads each sub-task that is not done: summary, text, status, parent, links, attachment list, and comments. It reads at most SUBTASKS_READ sub-tasks, in Jira order. A read sub-task whose `fields.parent.key` is not the parent key is dropped. Done sub-tasks keep only key, summary, and status from the parent read (design.md Q70).
 - The interview and the spec run get context/subtasks.md. The app writes it as untrusted data. Per sub-task, it holds the key, the status, the summary, the text, the attachments (section 6.20.3), the links to other sub-tasks of the parent, and the branches and PRs that name its key. A link line uses the link text of the server, for example "ABC-13 is blocked by ABC-12".
@@ -3211,6 +3226,63 @@ Acceptance criteria (PS4):
 45. AC-B364 (WP-7, in progress). With the live gate on, a message during a session run reaches stdin. With the gate off, the message waits as a follow-up row and survives a restart.
 46. AC-B365. The demo and e2e builds stay green with the critic step. No test names this criterion. `bun run test:e2e` and `bun run demo` check it.
 
+### 6.29 Agent file library (docs/plans/review-v2/agent-workflow.md sections 3.4 to 3.6, 3.10; AW1)
+
+- `src/server/tasks/agents.ts` reads the preset agents and `<config>/agents/*.md` (top level only). `<config>` is CLAUDE_CONFIG_DIR or ~/.claude. It parses the front matter with Bun.YAML and writes the app definition of each agent. Nothing in a task step uses it yet (AW2).
+- Release 1 has two agent sources: preset and user. Repository agents come in release 2 (section 3.7 of the design).
+
+Acceptance criteria:
+
+1. AC-B231. Each refusal of agent-workflow.md section 3.5 gives its exact text: no readable front matter, a bad name, an `rl-` name, no description, a bad model, a bad effort, a file over 64 KB, a private key, and an empty body. A refused file still has a row. Its definition cannot be built.
+2. AC-B232. A maxTurns that is not a positive integer, an unknown tool name, a tool rule such as `Bash(npm *)`, and a dropped key give notes, not refusals.
+3. AC-B233. A definition holds only description, prompt, tools, disallowedTools, model, effort, maxTurns, and omitClaudeMd. permissionMode, mcpServers, hooks, memory, skills, isolation, background, initialPrompt, autoCompactWindow, and every other key never reach it.
+4. AC-B234. The tools are the cap intersected with the file tools: Read, Grep, Glob, Edit, and Write, plus Bash in a shell step. Read-only sets the cap to Read, Grep, and Glob. A file with no tools field gets the full cap. A tool rule gives no tool. An agent with no tool left gets no definition and a note.
+5. AC-B235. disallowedTools always holds Agent, NotebookEdit, PowerShell, WebFetch, and WebSearch, the file list, and each SUBAGENT_DENY entry outside the tools. omitClaudeMd is always true. maxTurns is the smaller of the file value and STEP_TURNS of the step.
+6. AC-B236. The model and the effort come from the workflow override, else the file, else none. The app never adds a model or an effort that the user did not set. `inherit` passes as it is.
+7. AC-B237. The prompt is the app rules, then "Instructions from the agent file <source>:<name>:", then the file body. The description is cut at 1,024 characters. The SHA-256 is of the exact file bytes.
+8. AC-B238. The preset "Lead and agents" has the six agents of section 3.10. Each passes the model and effort checks. rl-explorer has the profile reviewer model. rl-planner is not picked. The lead is the App lead on opus, high, with "The lead may edit files" on.
+9. AC-B239. The workflow save checks refuse a name clash ("Two agents are named <name>. Pick one."), a workflow with no agent, an agent that is not available or refused, and an implement workflow with no writer and the lead edit switch off.
+### 6.30 UI cleanup (user decision of 2026-11-03)
+
+- Tasks row: `TaskRowDto.progress.building` lists the ordinals of the code parts in state implementing. The meta line says "Building part 3 of 4", or "Building parts 2 and 3 of 4" while parts build at the same time. Without a part in its build, it names the first open part as before.
+- Task notifications (section 6.13): part_ready (ref: part ID and head) fires for each code part in state self_reviewed while no step of it waits or runs. The text is "Part 2 of 4 is ready for its PR.". The needs_you wait of "Needs you: open the PR" gives no event. spec_approved fires once per spec PR head while the task is in spec_approved, with "The spec is approved. You can start building.". No flow reaches spec_approved before the spec PR packages (WP-B6 to WP-B10). recoverTasks adds one needs_you event (ref `restart@<time>`) for each task that it stops. Its text is "The app restarted and stopped this task. Resume continues it.". Known limit: a clean stop (SIGINT, SIGTERM, or SIGHUP, src/server/main.ts stopOnSignals) cancels the runs first. A task that its cancelled run stops gets "The run was cancelled." and no event. A build that the clean stop leaves in implementing gets the event at the next start. A claim drops an event whose fact no longer holds: the part opened its PR or got a new head, the task left spec_approved, or the task left stopped. The digest counts each task once. This amends AC-B21 and AC-UX8: the kinds stay the three of section 6.13.
+- Jira chips of a PR: no "Build" button. POST /api/tasks keeps `originPr` for API callers. A chip with fetched text has the text button "Clear text" (accessible name "Clear text of <KEY>"). Its confirm is "Clear the <KEY> text?" with "Clear text", and the live region says "Cleared the <KEY> text.".
+- Settings, Review profiles: "Your edits to the shipped <name> profile" lists each edited field with "Edited" and, for a newer shipped value, View. It has no reset button. The small reset next to each control and "Reset to shipped" in the View dialog stay.
+- The skills index (INDEX.md) uses the shared plural: "1 file left out" and "1 key file left out".
+
+Acceptance criteria:
+1. AC-B241. With parts 2 and 3 in their build, the Tasks row says "Building parts 2 and 3 of 4". With part 2 in review and part 3 in its build, it says "Building part 3 of 4" (tests/web/tasks-model.test.ts, tests/tasks/tasks.test.ts).
+2. AC-B242. Each code part that waits for its PR gives one part_ready event per head, also when two parts build at the same time, and no needs_you event. A step of the part that runs holds the event until it ends. The browser shows "Part 1 of 1 is ready for its PR." once and no "Needs you: open the PR" (tests/tasks/notify.test.ts, tests/web/notify.test.ts, tests/e2e/task-small.e2e.ts).
+3. AC-B243. A task in spec_approved gives one spec_approved event with its text (tests/tasks/notify.test.ts).
+4. AC-B244. A task that the restart recovery stops gets one needs_you event with the restart text. A second recovery and the next wait check add none. A task that left stopped before the claim gives no notification (tests/tasks/notify.test.ts).
+5. AC-B245. The Jira chips of a PR have no Build button. "Clear text" asks first, Cancel and Escape keep the text, and the confirm deletes it (tests/e2e/jira.e2e.ts).
+6. AC-B246. The list of edits of a shipped profile has no reset button. The reset next to the field sets it back, and the other edits stay (tests/e2e/shipped-edits.e2e.ts).
+7. AC-B247. INDEX.md says "(1 file left out: ...)" and "(1 key file left out)" for one file (tests/review/skills.test.ts).
+
+### 6.31 CI server connection (part-session.md section 2.15, package C2)
+
+- src/server/ci/jenkins.ts holds every call to Jenkins. It sends GET only, with Basic auth of the user and the API token, and `redirect: "manual"`. A 3xx is an error. The base URL must use https, except on 127.0.0.1, localhost, and [::1].
+- Config: `jenkins: {baseUrl, user, caFile}` in config.json. The token goes only into the OS store under `jenkins-token`. A Bitbucket settings PUT keeps the block.
+- PUT /api/settings/jenkins saves after a whoAmI check (GET `<base>/whoAmI/api/json`: 200, `authenticated` true, `anonymous` false). An empty baseUrl disconnects and deletes the token. An absent token reuses the stored token of the same origin. A new origin needs a new token.
+- POST /api/settings/jenkins/test runs the same check with the form values and writes nothing. It returns `{user}`.
+- Error texts: 401 "Jenkins rejected the user name or API token. Make a new token in Jenkins and save it again." 403 "Jenkins accepted the login, but user <u> may not read <path>. Ask a Jenkins admin for Overall/Read and Job/Read." 404 "Jenkins has no page at <path>. Check the Jenkins URL." 3xx "Jenkins answered with a redirect. Use the Jenkins URL that the browser shows after login." Other: "Jenkins failed to answer (HTTP <n>)." A failed check logs only the kind and the status.
+- Log read `readLog(buildUrl)`: the build URL must have the configured origin, lie below the base path, and hold no user info. Otherwise the client sends nothing. The first GET is `<build URL>logText/progressiveText?start=0`. Its X-Text-Size gives the log size. A log within the cap (2 MB) is that answer. A larger log takes a second GET with start = X-Text-Size - 2 MB, and the first body is dropped. A body over the cap, or an answer without X-Text-Size, is an error. The read is not verified on a real server (integration-check.md CI12).
+- The read has no caller yet. "Let Claude fix the build" and the red-build fixes add the callers.
+- Settings has the card "CI server" (section `ci`) with the URL, the user name, the API token, the CA file, Save, Test, and Disconnect. Its visible text names no product. The code keeps the key `jenkins` of the DTO and the route.
+
+Acceptance criteria:
+
+1. AC-B283. Save sends one whoAmI GET and stores the token only in the secret store. config.json has the URL and the user, and no file of the data folder holds the token (tests/ci/settings.test.ts).
+2. AC-B284. A Bitbucket settings PUT keeps the jenkins block (tests/ci/settings.test.ts).
+3. AC-B285. Test returns the user name and writes nothing (tests/ci/settings.test.ts).
+4. AC-B286. 401 and 403 give their own texts, store nothing, and log only the kind and the status. No log line holds the token (tests/ci/settings.test.ts, tests/ci/jenkins.test.ts).
+5. AC-B287. http to a host other than loopback, a bad URL, a missing user or token, and an unreadable CA file give 400 and send no request (tests/ci/settings.test.ts, tests/ci/jenkins.test.ts).
+6. AC-B288. The same origin reuses the stored token. A new origin needs a new token and gets no request. An empty URL deletes the token (tests/ci/settings.test.ts).
+7. AC-B289. readLog refuses a build URL of another origin, outside the base path, or with user info, and sends no request (tests/ci/jenkins.test.ts).
+8. AC-B290. readLog follows no redirect. The redirect target gets no request (tests/ci/jenkins.test.ts).
+9. AC-B291. A log within the cap takes one GET from start 0. A larger log takes a second GET from X-Text-Size - cap and gives the tail. A body over the cap is an error (tests/ci/jenkins.test.ts).
+10. AC-B292. readLog gives its own error for 401, 404, and an answer without X-Text-Size (tests/ci/jenkins.test.ts).
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule
@@ -3243,7 +3315,7 @@ Screens checked against the rules:
 
 Small task (a one-file fix, about 80 lines):
 
-1. The user opens a PR, clicks the Jira chip "ABC-12", and picks "Build this task". Primary: none. Status: "Claude is reading the task and the code. About 2 min left."
+1. The user opens Tasks, clicks "Build a Jira task", enters "ABC-12" and the repository, clicks "Read the task", then "Build this task". Primary: none. Status: "Claude is reading the task and the code. About 2 min left."
 2. Status: "Claude has 2 questions before it writes the plan." Primary: "Answer 2 questions". The user keeps the recommended options and clicks "Send answers".
 3. Status: "The plan is ready: small, 1 PR, about 80 changed lines." Primary: "Approve the plan". On the first task in this repository, the approval shows the command list and the warning.
 4. Status: "Claude is writing tests. About 3 min left." then "Running the tests." then "Claude checks its own change."
@@ -3335,6 +3407,7 @@ db.test.ts per migration: the version number, a database of the version before w
 | POST /api/tasks/:id/plan-again, /parts/:part/start, /parts/:part/push, /parts/:part/move, /parts/:part/drop, /jira-check, /jira-read; GET, POST /api/tasks/:id/jira/:key/transitions; POST /api/tasks and /plan gain subtasks (section 6.20.12) | 6 |
 | PUT settings gains taskPlanCheck (section 6.22.10) | 6 |
 | GET /api/runs/slots; PUT settings runLimits gains runsAtOnce (section 6.26) | 6 |
+| PUT /api/settings/jenkins; POST /api/settings/jenkins/test (section 6.31) | 6 |
 | GET, POST /api/prs/:id/notes; PUT, DELETE /api/notes/:id (section 2.9) | 2 |
 | POST /api/prs/:id/ask gains parent; GET /api/prs/:id/asks gives parent (section 2.15) | 2 |
 | /api/prs/:id/autopilot, /api/autopilot/…, /api/prs/:id/dependencies, /api/dependencies/:id, POST /api/items/:id/post-now (section 11.12) | 7 (on hold) |

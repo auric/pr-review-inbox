@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { mainUsage, resumeShape, sessionArgs } from "../../scripts/gate/session";
 import { explorerAgent, type Profile, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import {
+  AGENT_PARAM_DENY,
   createClaudeRunner,
   IMPLEMENT_TOOLS,
   type ImplementSpec,
@@ -40,7 +41,6 @@ for (const m of ["review/claude", "review/stream", "review/catalog", "tasks/shel
   console.log(`runner.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
 
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
-const REAL = join(import.meta.dir, "../../fixtures/claude");
 const SYNTHETIC = join(import.meta.dir, "../../fixtures/claude-synthetic");
 const SCHEMA = { type: "object", properties: { summary: { type: "string" } }, required: ["summary"], additionalProperties: false };
 const DERIVED = mkdtempSync(join(tmpdir(), "rl-wp8-fixtures-"));
@@ -51,12 +51,12 @@ afterEach(() => {
 });
 afterAll(() => rmSync(DERIVED, { recursive: true, force: true }));
 
-const real = (name: string) => join(REAL, name);
+const sample = (name: string) => join(SYNTHETIC, name);
 const encoded = (p: string) => p.replace(/[^a-zA-Z0-9]/g, "-");
 
-// A real fixture with one patch per event. The file says which fixture it came from.
+// A synthetic fixture with one patch per event. The file name says which fixture it came from.
 function derive(name: string, patch: (e: Record<string, unknown>) => Record<string, unknown>) {
-  const out = readFileSync(real(name), "utf8")
+  const out = readFileSync(sample(name), "utf8")
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.stringify(patch(JSON.parse(l))));
@@ -64,9 +64,8 @@ function derive(name: string, patch: (e: Record<string, unknown>) => Record<stri
   writeFileSync(f, `${out.join("\n")}\n`);
   return f;
 }
-// b6 is a flat run without --json-schema. The patch adds the structured_output that a schema run sends.
-const flatSuccess = () =>
-  derive("b6-hostile-repo.jsonl", (e) => (e.type === "result" ? { ...e, structured_output: { summary: "ok" } } : e));
+// review-flat.jsonl is a flat run without --json-schema. The patch adds the structured_output that a schema run sends.
+const flatSuccess = () => derive("review-flat.jsonl", (e) => (e.type === "result" ? { ...e, structured_output: { summary: "ok" } } : e));
 
 function alive(pid: number) {
   try {
@@ -137,16 +136,16 @@ describe("outcomes", () => {
   });
 
   test("subagent tree: parent from parent_tool_use_id, task events end the agent", async () => {
-    const { runner, spec } = setup({ fixture: real("b9-wp8-flags.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("review-agent-tree.jsonl") });
     const seen: RunEvent[] = [];
     const o = await runner.run(spec, (ev) => seen.push(...ev));
     expect(o.status).toBe("completed");
     expect(o.result?.structured_output).toEqual({ mainWord: "MAGNOLIA", reviewerWord: "JUNIPER", fact: "STUBFACT-5150" });
 
-    const agent = byId(o.events, "toolu_01LSbcECPmHiTBS4CDvWoCbj");
+    const agent = byId(o.events, "toolu_synthetic_tree_agent");
     expect(agent).toMatchObject({ parent: null, tool: "Agent", agent: "rl-reviewer", target: "Run rl-reviewer step list", status: "ok" });
     expect(agent?.note).toStartWith("1. Read note-reviewer.txt: succeeded.");
-    const secret = "C:/Users/user/AppData/Local/Temp/rl-gb-b9-ByCyyZ/app/secret.txt";
+    const secret = "C:/rl-synthetic/app/secret.txt";
     expect(o.events.filter((e) => e.parent === agent?.id).map((e) => [e.tool, e.target, e.status])).toEqual([
       ["Read", "note-reviewer.txt", "ok"],
       ["Read", secret, "error"],
@@ -169,10 +168,10 @@ describe("outcomes", () => {
   });
 
   test("subagent stats: model, tokens, and the built-in mark come from the stream", async () => {
-    const { runner, spec } = setup({ fixture: real("b9-wp8-flags.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("review-agent-tree.jsonl") });
     const seen: RunEvent[] = [];
     const o = await runner.run(spec, (ev) => seen.push(...ev));
-    const id = "toolu_01LSbcECPmHiTBS4CDvWoCbj";
+    const id = "toolu_synthetic_tree_agent";
     // The first subagent message names the model. task_progress raises the tokens. The tool result gives totalTokens.
     expect(byId(o.events, id)).toMatchObject({ agent: "rl-reviewer", model: "claude-haiku-5-5", tokens: 5382, builtin: false });
     const live = seen.filter((e) => e.id === id).map((e) => [e.status, e.model, e.tokens]);
@@ -189,12 +188,12 @@ describe("outcomes", () => {
   });
 
   test("two result events: the final one with structured_output wins; a background agent ends at its notification", async () => {
-    const { runner, spec } = setup({ fixture: real("b3-default.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("background-agent.jsonl") });
     const o = await runner.run(spec);
     expect(o.status).toBe("completed");
     expect((o.result?.structured_output as { answer?: string } | undefined)?.answer).toStartWith("No word available.");
     expect(o.result?.origin?.kind).toBe("task-notification");
-    const agent = byId(o.events, "toolu_012D82eht13YtSvEVwCqV89Z");
+    const agent = byId(o.events, "toolu_synthetic_bg_agent");
     expect(agent?.status).toBe("ok");
     expect(agent?.note).toStartWith("Read of `");
     expect(o.events.filter((e) => e.parent === agent?.id).map((e) => [e.tool, e.target, e.status])).toEqual([
@@ -205,7 +204,7 @@ describe("outcomes", () => {
   });
 
   test("max turns (AC-B281: cut turns)", async () => {
-    const { runner, spec } = setup({ fixture: real("b5-max-turns.jsonl"), exitCode: 1 });
+    const { runner, spec } = setup({ fixture: sample("max-turns.jsonl"), exitCode: 1 });
     const o = await runner.run(spec);
     expect(o).toMatchObject({
       status: "failed",
@@ -218,7 +217,7 @@ describe("outcomes", () => {
   });
 
   test("auth failure in the stream (Gate B5)", async () => {
-    const { runner, spec } = setup({ fixture: real("b5-auth.jsonl"), exitCode: 1 });
+    const { runner, spec } = setup({ fixture: sample("auth-failed.jsonl"), exitCode: 1 });
     const o = await runner.run(spec);
     expect(o).toMatchObject({ status: "failed", kind: "auth", text: "Not logged in · Please run /login" });
   });
@@ -232,7 +231,7 @@ describe("outcomes", () => {
   });
 
   test("schema failure: a success without structured_output (Gate B9 first try)", async () => {
-    const { runner, spec } = setup({ fixture: real("b9-first-try.jsonl") });
+    const { runner, spec } = setup({ fixture: sample("no-structured-output.jsonl") });
     const o = await runner.run(spec);
     expect(o).toMatchObject({ status: "failed", kind: "schema", text: "The result has no structured output." });
     expect(o.result?.subtype).toBe("success");
@@ -297,7 +296,7 @@ describe("outcomes", () => {
   });
 
   test("no result event: process error with the stderr tail", async () => {
-    const fixture = derive("b6-hostile-repo.jsonl", (e) => (e.type === "result" ? { type: "noise" } : e));
+    const fixture = derive("review-flat.jsonl", (e) => (e.type === "result" ? { type: "noise" } : e));
     const { runner, spec } = setup({ fixture, exitCode: 3, stderr: "boom\n" });
     const o = await runner.run(spec);
     expect(o).toMatchObject({
@@ -311,7 +310,7 @@ describe("outcomes", () => {
 
 describe("safety", () => {
   test("init tool check kills the run before any tool use", async () => {
-    const { runner, spec, calls } = setup({ fixture: real("b8-plain.jsonl"), delayMs: 30 });
+    const { runner, spec, calls } = setup({ fixture: sample("plain.jsonl"), delayMs: 30 });
     const seen: RunEvent[] = [];
     const o = await runner.run(spec, (ev) => seen.push(...ev));
     expect(o.status).toBe("failed");
@@ -424,6 +423,8 @@ describe("safety", () => {
       "Read,Grep,Glob,Agent",
       "--allowedTools",
       "Read,Grep,Glob,mcp__rl-stub",
+      "--disallowedTools",
+      "Agent(model:*),Agent(effort:*)",
       "--agents",
       join(app, "agents.json"),
       "--agent",
@@ -553,7 +554,7 @@ describe("safety", () => {
 
   test("limits decision 3: a timeoutMs function gives the time limit of each run at its start", async () => {
     let ms = 60 * 60_000;
-    const { runner, spec } = setup({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 }, { timeoutMs: () => ms });
+    const { runner, spec } = setup({ fixture: sample("review-agent-tree.jsonl"), hang: true, delayMs: 20 }, { timeoutMs: () => ms });
     ms = 300;
     const started = Date.now();
     const o = await runner.run(spec);
@@ -562,7 +563,7 @@ describe("safety", () => {
   });
 
   test("cancel ends the CLI and its child, stops running events, and cleans up", async () => {
-    const { runner, spec, work, projects, calls } = setup({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 });
+    const { runner, spec, work, projects, calls } = setup({ fixture: sample("review-agent-tree.jsonl"), hang: true, delayMs: 20 });
     const seen: RunEvent[] = [];
     const run = runner.run(spec, (ev) => {
       seen.push(...ev);
@@ -929,6 +930,32 @@ describe("shell steps", () => {
     expect(labels("any").notes).not.toContain("Refused by the allowlist");
   });
 
+  test("Gate B36 touch-rule: the file-change ask with no type is the allowlist in allowlist mode only", () => {
+    // Synthetic text in the form of the CLI 2.1.323 event. An allow rule such as "touch *" satisfies this ask.
+    const ASK =
+      "touch in '/w/out.txt' needs approval. The path is inside the working directories for this session ('/w') and Claude Code asks before a shell command creates, changes or removes files there.";
+    const labels = (shell: "allowlist" | "any") => {
+      const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell });
+      const seen: [string, string, Record<string, string>][] = [
+        ["f1", "touch out.txt", { message: ASK }],
+        ["f2", "rm OUT.txt", { message: ASK.replace("Claude Code asks", "CLAUDE CODE ASKS").toUpperCase() }],
+        ["f3", "echo x > /tmp/outside.txt", { message: REDIRECT }],
+        [
+          "f4",
+          "git status",
+          { decision_reason_type: "subcommandResults", message: "Permission to use Bash with command git status has been denied." },
+        ],
+      ];
+      for (const [id, cmd, fields] of seen) {
+        p.line(JSON.stringify(line.bash(id, cmd)));
+        p.line(JSON.stringify({ type: "system", subtype: "permission_denied", tool_name: "Bash", tool_use_id: id, ...fields }));
+      }
+      return p.state.refused.map((r) => r.by);
+    };
+    expect(labels("allowlist")).toEqual(["allowlist", "allowlist", "check", "deny"]);
+    expect(labels("any")).toEqual(["check", "check", "check", "deny"]);
+  });
+
   test("Gate B30a: a refused `cd <dir> && <command>` keeps the label check and gets the cd note in both modes", () => {
     for (const shell of ["allowlist", "any"] as const) {
       const p = createStreamParser({ cwd: "/w", allowedTools: new Set(), shell });
@@ -1088,6 +1115,34 @@ describe("rl-explorer in task steps", () => {
     expect(without.agents["rl-main"]?.tools).toEqual(["Read", "Grep", "Glob", "mcp__rl-stub__get_fact", "StructuredOutput"]);
   });
 
+  test("Gate B38: a run with the Agent tool denies the Agent model and effort parameters; a run without it keeps its flags", async () => {
+    const rules = AGENT_PARAM_DENY.join(",");
+    const { runner, spec, calls } = setup({ fixture: flatSuccess() });
+    const last = () => (calls().at(-1) as unknown as AgentsRec).argv;
+    await runner.run(spec);
+    expect(flagOf(last(), "--disallowedTools")).toBe(rules);
+    await runner.run({ ...spec, agents: {}, explorer: EXPLORER });
+    expect(flagOf(last(), "--disallowedTools")).toBe(rules);
+    await runner.run({ ...spec, agents: {} });
+    expect(last()).not.toContain("--disallowedTools");
+    expect(last().join(" ")).not.toContain("Agent(model");
+
+    const { cwd, app } = folder();
+    const step = { implement: true as const, cwd, appDir: app, prompt: "p", schema: SCHEMA_I, maxTurns: 80 };
+    const withIt = implementArgs({ ...step, explorer: EXPLORER });
+    expect(flagOf(withIt.args, "--disallowedTools")).toBe(rules);
+    expect([...withIt.models]).toEqual([["rl-explorer", "sonnet"]]);
+    const plain = implementArgs(step);
+    expect(plain.args).not.toContain("--disallowedTools");
+    expect(plain.models.size).toBe(0);
+    // The denied tools of a user server come first, in one flag.
+    const entry = { type: "stdio" as const, command: "node", args: [], env: {} };
+    const user = { "u-docs": { user: entry, tools: ["search"], deny: ["drop"] } };
+    const both = implementArgs({ ...step, mcpServers: user, explorer: EXPLORER });
+    expect(flagOf(both.args, "--disallowedTools")).toBe(`mcp__u-docs__drop,${rules}`);
+    expect(both.args.filter((a) => a === "--disallowedTools")).toHaveLength(1);
+  });
+
   test("the init check: with rl-explorer Agent and Task pass, and each other extra tool still stops the step; without it Task stops", () => {
     const { cwd, app } = folder();
     const step = { implement: true as const, cwd, appDir: app, prompt: "p", schema: SCHEMA_I, maxTurns: 80 };
@@ -1110,8 +1165,101 @@ describe("rl-explorer in task steps", () => {
     expect(p.state.badTools).toEqual(["Task"]);
   });
 
+  // Gate B38 shapes (2.1.323): the CLI refuses a per-call model or effort with permission_denied, then an error tool_result.
+  describe("the Log notes of an Agent call with model or effort", () => {
+    const callLine = (id: string, extra: Record<string, unknown>) =>
+      JSON.stringify({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          model: "m",
+          content: [{ type: "tool_use", id, name: "Agent", input: { subagent_type: "rl-explorer", description: "d", ...extra } }],
+        },
+      });
+    const denied = (id: string, param: string) =>
+      JSON.stringify({
+        type: "system",
+        subtype: "permission_denied",
+        tool_name: "Agent",
+        tool_use_id: id,
+        decision_reason_type: "rule",
+        decision_reason: "",
+        message: `Permission to use Agent with ${param}:* has been denied.`,
+      });
+    const errorResult = (id: string) =>
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: id, is_error: true, content: "Permission to use Agent has been denied." }],
+        },
+      });
+    const okResult = (id: string, model: string) =>
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: id, content: "report" }] },
+        tool_use_result: { resolvedModel: model, totalTokens: 10 },
+      });
+    const parser = () =>
+      createStreamParser({
+        cwd: "/w",
+        allowedTools: new Set(["Agent"]),
+        agents: new Set(["rl-main", "rl-explorer"]),
+        models: new Map([["rl-explorer", "sonnet"]]),
+      });
+    const ev = (p: ReturnType<typeof parser>, id: string) => p.events().find((e) => e.id === id);
+
+    test("a refused model or effort ends the call with a note, before or after its error result", () => {
+      const p = parser();
+      p.line(callLine("t1", { model: "haiku" }));
+      p.line(denied("t1", "model"));
+      p.line(errorResult("t1"));
+      expect(ev(p, "t1")).toMatchObject({
+        status: "error",
+        note: "The lead asked for model haiku for rl-explorer. The app refused it, so that agent step did not run.",
+      });
+      p.line(callLine("t2", { effort: "high" }));
+      p.line(errorResult("t2"));
+      p.line(denied("t2", "effort"));
+      expect(ev(p, "t2")).toMatchObject({
+        status: "error",
+        note: "The lead asked for effort high for rl-explorer. The app refused it, so that agent step did not run.",
+      });
+      // An Agent refusal is not a refused command.
+      expect(p.state.refused).toEqual([]);
+    });
+
+    test("a permission_denied event of another rule keeps the error text of the result", () => {
+      const p = parser();
+      p.line(callLine("t1", {}));
+      p.line(JSON.stringify({ ...JSON.parse(denied("t1", "model")), message: "Permission to use Agent has been denied." }));
+      p.line(errorResult("t1"));
+      expect(ev(p, "t1")).toMatchObject({ status: "error", note: "Permission to use Agent has been denied." });
+    });
+
+    test("a call that runs on the asked model instead of its definition model gets a note; other calls get none", () => {
+      const p = parser();
+      p.line(callLine("t1", { model: "haiku" }));
+      p.line(okResult("t1", "claude-haiku-x"));
+      expect(ev(p, "t1")).toMatchObject({
+        status: "ok",
+        model: "claude-haiku-x",
+        note: "The lead changed the model of rl-explorer to haiku. The app rule did not stop it.",
+      });
+      // The asked model is the definition model, no model was asked, or the call ran on the definition model.
+      for (const [id, extra, model] of [
+        ["t2", { model: "sonnet" }, "claude-sonnet-x"],
+        ["t3", {}, "claude-haiku-x"],
+        ["t4", { model: "haiku" }, "claude-sonnet-x"],
+      ] as const) {
+        p.line(callLine(id, extra));
+        p.line(okResult(id, model));
+        expect(ev(p, id)).toMatchObject({ status: "ok", note: null });
+      }
+    });
+  });
+
   test("an rl-explorer call of an implement step nests its calls under it in the step log, as an app agent", async () => {
-    const fixture = derive("b9-wp8-flags.jsonl", (e) => JSON.parse(JSON.stringify(e).replaceAll("rl-reviewer", "rl-explorer")));
+    const fixture = derive("review-agent-tree.jsonl", (e) => JSON.parse(JSON.stringify(e).replaceAll("rl-reviewer", "rl-explorer")));
     const { runner, work, app, calls } = setup({ fixture });
     const o = await runner.run({
       implement: true,
@@ -1126,7 +1274,7 @@ describe("rl-explorer in task steps", () => {
     expect(o.status).toBe("completed");
     expect(o.init?.tools).toContain("Task");
     expect(flagOf(calls().at(-1)?.argv ?? [], "--agent")).toBe("rl-main");
-    const agent = byId(o.events, "toolu_01LSbcECPmHiTBS4CDvWoCbj");
+    const agent = byId(o.events, "toolu_synthetic_tree_agent");
     expect(agent).toMatchObject({ parent: null, tool: "Agent", agent: "rl-explorer", builtin: false, status: "ok" });
     const node = logTree(o.events).find((n) => n.e.id === agent?.id);
     expect(node?.kids.map((k) => [k.e.tool, k.e.parent])).toEqual([
@@ -1270,6 +1418,8 @@ describe("part sessions", () => {
     expect(fork.slice(0, 6)).toEqual(["-p", "--resume", resume, "--fork-session", "--input-format", "stream-json"]);
     expect(fork).toEqual(sessionArgs(plain, { resume, live: true }));
     expect(resumeShape(fork)).toBe(true);
+    // Gate B38: the resumed run with rl-explorer keeps the deny rules on the Agent model and effort.
+    expect(fork[fork.indexOf("--disallowedTools") + 1]).toBe(AGENT_PARAM_DENY.join(","));
     // A resume without keep forks with no new transcript (Gate B16 d).
     expect(implementArgs({ ...spec, resume }).args.at(-1)).toBe("--no-session-persistence");
     // A transcript in the step folder could be changed by the step, and it replays as trusted history.
@@ -1298,7 +1448,7 @@ describe("part sessions", () => {
   });
 
   test("AC-B272: a cancel still keeps the partial transcript", async () => {
-    const { runner, spec, keep, calls } = session({ fixture: real("b9-wp8-flags.jsonl"), hang: true, delayMs: 20 });
+    const { runner, spec, keep, calls } = session({ fixture: sample("review-agent-tree.jsonl"), hang: true, delayMs: 20 });
     const o = await runner.run({ ...spec, keep }, (ev) => {
       if (ev.length) runner.cancel();
     });
@@ -1326,7 +1476,7 @@ describe("part sessions", () => {
   });
 
   test("AC-B274: the init check still kills a resumed run whose init lists an extra tool", async () => {
-    const { runner, spec, keep, calls } = session({ fixture: real("b9-wp8-flags.jsonl"), initExtra: ["WebFetch"], delayMs: 20 });
+    const { runner, spec, keep, calls } = session({ fixture: sample("review-agent-tree.jsonl"), initExtra: ["WebFetch"], delayMs: 20 });
     mkdirSync(keep, { recursive: true });
     const old = join(keep, "old.jsonl");
     writeFileSync(old, `${JSON.stringify({ type: "user", message: { role: "user", content: "first" } })}\n`);
@@ -1681,12 +1831,12 @@ describe("part sessions", () => {
     expect(p.state.resetsAt).toBe(1791678600);
     limit({ status: "rejected" });
     expect(p.state.resetsAt).toBeNull();
-    // A real stream: the gate reader of U105 gives the same size.
-    const events = lines(real("b9-wp8-flags.jsonl"));
+    // A synthetic stream: the gate reader of U105 gives the same size.
+    const events = lines(sample("session-usage.jsonl"));
     const q = createStreamParser({ cwd: "/w", allowedTools: new Set() });
     for (const e of events) q.line(JSON.stringify(e));
     expect(q.state.context).toBe(mainUsage(events).context);
-    expect(q.state.context).toBeGreaterThan(0);
+    expect(q.state.context).toBe(14600);
   });
 
   test("AC-B281: a result with structured_output wins over a guard and a time limit", () => {

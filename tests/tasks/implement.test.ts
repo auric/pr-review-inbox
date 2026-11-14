@@ -23,7 +23,15 @@ import { basename, join, resolve } from "node:path";
 import { gitAuth } from "../../src/server/bitbucket/provider";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { DEFAULT_PROFILE, DOCS_RULE, EXPLORER_RULE, profileOf } from "../../src/server/review/catalog";
+import {
+  AGENT_PARAMS_RULE,
+  DEFAULT_PROFILE,
+  DOCS_RULE,
+  EXPLORER_RULE,
+  ISSUE_LINES,
+  ISSUE_REMOTE_RULE,
+  profileOf,
+} from "../../src/server/review/catalog";
 import { IMPLEMENT_TOOLS, implementArgs, type RunOutcome, type SESSION_GATES } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
@@ -73,8 +81,8 @@ for (const m of ["tasks/implement", "tasks/worktree", "review/claude", "review/j
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
 const SLOW = 90_000;
-const FIXTURE = resolve(import.meta.dir, "../../fixtures/claude/b17-write-confinement.jsonl");
-const MAX_TURNS_FIXTURE = resolve(import.meta.dir, "../../fixtures/claude/b5-max-turns.jsonl");
+const FIXTURE = resolve(import.meta.dir, "../../fixtures/claude-synthetic/implement-ok.jsonl");
+const MAX_TURNS_FIXTURE = resolve(import.meta.dir, "../../fixtures/claude-synthetic/max-turns.jsonl");
 const SECRET = "Bearer secret-token-4411";
 
 type Call = {
@@ -293,7 +301,7 @@ describe("implement run", () => {
       const row = s.stepRow(outcome.step);
       expect([row.kind, row.state, row.part, row.item, row.attempt, row.run]).toEqual(["implement", "ok", s.part, "T1.1", 1, outcome.run]);
       // spec.md section 6.7, Commit: the step row keeps the Write targets from the part folder, so the commit after a restart has them.
-      // The b17 fixture holds a Write call with a path relative to the cwd.
+      // implement-ok.jsonl holds a Write call with a path relative to the cwd.
       expect(JSON.parse(row.detail_json).written).toEqual(["repo/src/new.ts", "./repo/a.txt"]);
       const run = s.db
         .query("SELECT kind, pr, task, status, source_head FROM review_run WHERE id = $id")
@@ -327,6 +335,8 @@ describe("implement run", () => {
         "Read,Grep,Glob,Edit,Write,Agent",
         "--allowedTools",
         "Read,Grep,Glob,Edit,Write,mcp__rl-git,mcp__learn,mcp__deepwiki",
+        "--disallowedTools",
+        "Agent(model:*),Agent(effort:*)",
         "--agents",
         agentsFile,
         "--agent",
@@ -403,6 +413,7 @@ describe("implement run", () => {
         expect(call.agents?.["rl-main"]?.tools?.[0]).toBe("Agent(rl-explorer)");
         expect(call.agents?.["rl-explorer"]?.tools).toEqual(["Read", "Grep", "Glob"]);
         expect(call.stdin).toContain(EXPLORER_RULE);
+        expect(call.stdin).toContain(AGENT_PARAMS_RULE);
       }
       // The sparse rule stays: the CLI sees no CLAUDE.md in ./repo, and the part folder gets none.
       expect(existsSync(join(s.wt.repo, "CLAUDE.md"))).toBe(false);
@@ -1005,6 +1016,8 @@ describe("implement run with the profile tools", () => {
       expect(call.stdin).toContain("except the skills in ./context/skills/");
       expect(call.stdin).toContain("The user added these MCP tools: mcp__fake__search, mcp__cg__codegraph_explore.");
       expect(call.stdin).toContain(IMPLEMENT_MCP_LINES[0] as string);
+      // review-questions.md (AC-R36): an implement step gets no issue tool lines.
+      for (const l of [...ISSUE_LINES, ISSUE_REMOTE_RULE]) expect(call.stdin).not.toContain(l);
 
       const second = await s.step({ profile, attempt: 2 });
       expect(second.outcome?.problems).toEqual([]);
@@ -1165,6 +1178,7 @@ describe("the prompt lines of the shell state", () => {
       for (const mode of ["implement", "instruct", "resolve"] as const) expect(of(mode, true, resume)).not.toContain(FIRST);
     }
     expect(of("fix", true, 2)).toContain("# Run 2: Fix the review points");
+    expect(of("fix", true, 2)).toContain(AGENT_PARAMS_RULE);
   });
 });
 
@@ -1826,7 +1840,7 @@ describe("part sessions in the jobs", () => {
         answered: [],
         coverage: { read: ["repo/src/app.ts"], skipped: [], unavailable: [], notChecked: [] },
       };
-      s.scenario({ fixture: claudeStream(s.root, "critic", "claude/b6-hostile-repo.jsonl"), critic });
+      s.scenario({ fixture: claudeStream(s.root, "critic", "claude-synthetic/review-flat.jsonl"), critic });
       const base = profileOf(s.settings.profiles(), DEFAULT_PROFILE);
       // The critic profile of AC-B333, with rl-reviewer and the verify phase on, so only the critic flag turns them off.
       const profile = {

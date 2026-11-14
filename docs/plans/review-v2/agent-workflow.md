@@ -1,6 +1,6 @@
 # Agent workflows in Build a Jira task
 
-Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. Gate B35 and the new Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. User answers of 2026-11-11: option C (one lead per Claude step); project agents in release 2; the preset lead may edit files (Q5 differs from the recommendation); all other recommendations accepted (Q1 to Q4, Q6 to Q15).
+Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not built. AW0 (the Gate B35 and B36 script) and AW1 (the agent file library, spec.md section 6.29, AC-B231 to AC-B239) are code complete. Gate B35 and Gate B36 are not run. User scope of 2026-11-11: the user sets up the workflow from agent files in the user's Claude config folder or in the project folder; the lead-and-agents workflow is one shipped preset. User answers of 2026-11-11: option C (one lead per Claude step); project agents in release 2; the preset lead may edit files (Q5 differs from the recommendation); all other recommendations accepted (Q1 to Q4, Q6 to Q15).
 
 ## Summary
 
@@ -41,7 +41,7 @@ Status: design of 2026-11-11 against main 8958774 plus WP-R1a (b103a48). Not bui
 | `--agent rl-main` with `Agent(<names>)` refuses general-purpose and user agents | B2, B9; task-subagents.md |
 | `--restricted` keeps Edit and Write of the main thread inside the cwd | U72 (B17) |
 | The shell.json allow and deny rules and the compound check apply to the main thread | SU2, SU4 |
-| Nested subagent tool calls show in stream-json with parent_tool_use_id | fixtures/claude/b9-first-try.jsonl, b1-review-agent.jsonl |
+| Nested subagent tool calls show in stream-json with parent_tool_use_id | Gates B1 and B9 (integration-check.md U91); fixtures/claude-synthetic/review-agent-tree.jsonl |
 | With CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, subagents run in the foreground | B3 (claude.ts:138-139) |
 | Subagent files go to the per-cwd folders, which the run end deletes | B4 (claude.ts:337-346) |
 | `--advisor` works with the app flags. The run usage counts the advisor | ADV1, ADV5 |
@@ -53,7 +53,7 @@ Source: code.claude.com/docs/en/sub-agents, read 2026-11-11.
 - D1. An `--agents` definition takes description, prompt, tools, disallowedTools, model, permissionMode, mcpServers, hooks, maxTurns, autoCompactWindow, skills, initialPrompt, memory, effort, background, omitClaudeMd, and isolation. The CLI ignores color and experimental.
 - D2. `--strict-mcp-config` does not filter inline MCP servers of an `--agents` definition.
 - D3. The `Agent(<types>)` list works only for the main thread. A subagent with the Agent tool can start any type, up to the depth limit. `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` turns nesting off.
-- D4. Model order: first the `model` parameter of the Agent call (aliases only), then the definition `model` (`inherit` means the main model), then `CLAUDE_CODE_SUBAGENT_MODEL`, then the main model.
+- D4. Model order: first the `model` parameter of the Agent call (aliases only), then the definition `model` (`inherit` means the main model), then `CLAUDE_CODE_SUBAGENT_MODEL`, then the main model. Gate B38 (2.1.323): the app denies `Agent(model:*)` and `Agent(effort:*)` in each run with the Agent tool. The CLI refuses the whole call, so the definition model and effort always apply.
 - D5. Name priority: managed, then `--agents`, then `.claude/agents/`, then `~/.claude/agents/`, then plugins.
 - D6. Only name and description are required. The CLI ignores an unknown field and gives no error. A name has at most 256 characters and no `:`.
 - D7. Front matter hooks run while the subagent runs. An unset permissionMode inherits the parent mode (that part of the docs was read only in part).
@@ -240,10 +240,10 @@ Workflow save checks:
 
 ### 4.2 New risks and limits
 
-- R1. Subagents may not inherit the run limits: cwd confinement, allow rules, and shell rules. Gate B36 (U83 to U86) checks this. If U83, U84, or U85 fails, the app refuses agents that write files or run commands ("Agents that write files wait for a Claude Code check."), and only read-only agents run.
+- R1. Subagents may not inherit the run limits: cwd confinement, allow rules, and shell rules. Gate B36 (U83 to U86) checks this. If U83, U84, or U85 fails, the app refuses agents that write files or run commands ("Agents that write files wait for a Claude Code check."), and only read-only agents run. Run 1 (CLI 2.1.322): U85 failed only on gate bugs (the `touch` command and the event parent), and every refusal held. A re-run is due. Writer agents also need the cleanup of the subagent output folders; the app now does it at the run end.
 - R2. A file field could lift a limit: permissionMode, hooks, inline mcpServers, isolation, or memory. The app writes only the kept keys (section 3.6).
 - R3. A subagent with the Agent tool can start any type (D3). Every agent gets Agent in disallowedTools, and the run sets depth 1 (U89).
-- R4. The lead can set a model on an Agent call (D4). The app cannot block this without a hook, and the app never adds a hook (SU16 decision). The lead line forbids it, and a note records it.
+- R4. The lead can try to set a model or effort on an Agent call (D4). The deny rules of Gate B38 block it without a hook. The lead does not retry a refused call, so that agent step is lost. The lead line forbids the parameters, and a Log note records each refusal.
 - R5. Two writing agents can run at the same time. The lead line forbids it, and a note records it. The path and git checks still run at the step end.
 - R6. A project agent can carry a prompt injection. Limits: the approval pinned to a hash, the app rules first in the prompt, and the forced limits.
 - R7. The refusal cap counts the lead and its agents together (stream.ts:300), so a noisy command agent can end the step sooner. The cap stays. The note names the agent through the permission_denied tool_use_id (U85).
@@ -262,9 +262,9 @@ Workflow save checks:
 
 ## 6. Gate B36
 
-- Number: gate numbers B1 to B35 are taken (B35 is planned and has no script). AC-B36 is an acceptance criterion ID in another list. The new facts are U83 to U96 in integration-check.md, section "Workflow agents (Gate B36, not run)".
-- Run: `bun scripts/gate/claude-checks.ts --only B35,B36`, then `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0`.
-- Setup: haiku for the lead and the agents, except one opt-in Opus call (`--opus`). At most 8 calls. A temp part folder with repo/, a temp git repository, the app's implementArgs, shell.json, shellEnv, and the agents.json of the new transform.
+- Number: gate numbers B1 to B35 are taken. AC-B36 is an acceptance criterion ID in another list. The new facts are U83 to U96 in integration-check.md, section "Workflow agents (Gate B36, run 1)".
+- Run: `bun scripts/gate/claude-checks.ts --only B35`, then `bun scripts/gate/claude-checks.ts --only B36`, then `bun scripts/gate/sanitize-claude.ts`. It must print `hits=0`. The results go to `.gate0/v3-local/results.b35.json` and `results.b36.json`. docs/gate-v2.md has the run table.
+- Setup: haiku for the lead and the agents, except one opt-in Opus call (`--opus`). At most 8 calls (7 without `--opus`). A temp part folder with repo/, a temp git repository, the app's implementArgs, shell.json, shellEnv, and the agents.json of the new transform. The gate uses its own copy of section 3.6 (scripts/gate/workflow.ts). tests/tasks/agents.test.ts checks that AW1 writes the same kept keys. U88 reads `<config>/agents` only and never writes a file there.
 - Writers are allowed only when U83, U84, U85, U86, U89 (first part), and U93 pass. The other checks are INFO and feed the design.
 
 | Fact | Check | PASS |
@@ -291,13 +291,13 @@ One implementer at a time, in this order. Release 1 is AW0 to AW3. Release 2 is 
 
 | WP | Tier | Scope (files) | Depends on |
 |---|---|---|---|
-| AW0 Gate B35 and B36 script | implementer-xhigh | `scripts/gate/claude-checks.ts`, `scripts/gate/sanitize-claude.ts`, `integration-check.md` (U83 to U96 rows), `docs/gate-v2.md` | none |
+| AW0 Gate B35 and B36 script (code complete) | implementer-xhigh | `scripts/gate/claude-checks.ts`, `scripts/gate/sanitize-claude.ts`, `integration-check.md` (U83 to U96 rows), `docs/gate-v2.md` | none |
 | (user) Run B35 and B36 | user | real CLI | AW0 |
-| AW1 Agent file library | implementer | new `src/server/tasks/agents.ts` (discover, parse with Bun.YAML, validate, cap, drop fields, app rules, SHA-256, preset definitions), new `src/shared/agents.ts` (AgentInfo, AgentDef, Workflow zod schemas), `tests/tasks/agents.test.ts` | none (may run before the gate) |
+| AW1 Agent file library (code complete) | implementer | new `src/server/tasks/agents.ts` (discover, parse with Bun.YAML, validate, cap, drop fields, app rules, SHA-256, preset definitions), new `src/shared/agents.ts` (AgentInfo, AgentDef, Workflow zod schemas), `tests/tasks/agents.test.ts` | none (may run before the gate) |
 | AW2 Lead steps | implementer-xhigh | `src/server/review/claude.ts` (ImplementSpec, implementArgs, childEnv), `src/server/review/stream.ts`, `src/shared/run-log.ts`, `src/server/tasks/implement.ts` (implementPrompt, notes), `src/server/review/jobs.ts`, `src/server/tasks/loop.ts`, `src/server/tasks/tasks.ts` (pin at Build), migration `0NN_task_workflow.sql`, `tests/support/fake-claude.ts`, tests | AW1, gate results |
 | AW3 Workflows UI and Build select | implementer | settings routes and config schema (`workflows`), `GET /api/tasks/agents`, `src/web` Settings > Tasks > Workflows, Build form select, Task header, `tests/web`, `tests/e2e/task-workflow.e2e.ts`, screenshots, README | AW2 |
 | AW4 Project agents and trust | implementer-xhigh | `src/server/tasks/agents.ts` (read at the base commit), migration `0NN_repo_agents.sql`, repository settings routes and UI, Build check, tests, screenshots | AW3 |
-| AW5 Docs | implementer | `BRIEF.md` 3.5 (implement bullet) and the Task runs bullet, `spec.md` 6.19.2 and a new section 6.27, `docs/plans/review-v2/task-subagents.md` point 2, `docs/smoke-task.md` part W, `CHANGELOG.md` | AW3 (then AW4) |
+| AW5 Docs | implementer | `BRIEF.md` 3.5 (implement bullet) and the Task runs bullet, `spec.md` 6.19.2 and a new section 6.29, `docs/plans/review-v2/task-subagents.md` point 2, `docs/smoke-task.md` part W, `CHANGELOG.md` | AW3 (then AW4) |
 
 Smallest first release: AW0, the gate run, AW1, AW2, and AW3. With them, the user gets the preset, or a workflow built from the user's own agent files, with a lead model and effort per workflow. If B36 fails the writer checks, AW2 ships with read-only agents only, and "The lead may edit files" turns on.
 
@@ -315,7 +315,7 @@ Smallest first release: AW0, the gate run, AW1, AW2, and AW3. With them, the use
 
 - `after()` runs for every run end, a cancel too (jobs.ts:1546).
 - The path check and the git snapshot read files and git state, not the stream (implement.ts:136-170; gitstate.ts:50-88).
-- The parser records nested tool calls with their parent (stream.ts:183-206; fixtures b9-first-try.jsonl).
+- The parser records nested tool calls with their parent (stream.ts:183-206; fixtures/claude-synthetic/review-agent-tree.jsonl).
 - `written` takes ok Edit and Write events of any depth (implement.ts:933).
 - A deny rule wins over every allow rule (V5; claude.ts:529-530).
 - `--agents` outranks the `.claude/agents` and `~/.claude/agents` files (D5). The app definition wins a name clash with a file on disk (U88 confirms).

@@ -13,7 +13,8 @@ import {
 } from "../../src/server/tasks/rules";
 import type { TaskRule } from "../../src/shared/dto";
 
-const runner = createTaskRunner();
+// Budgets well above the defaults, so a normal pattern does not time out on a busy machine.
+const runner = createTaskRunner({ budgetMs: 5_000, retryBudgetMs: 5_000 });
 // JavaScriptCore stops runaway backtracking after about 950 ms. The ReDoS tests need budgets well below that.
 const fast = createTaskRunner({ budgetMs: 50, retryBudgetMs: 100 });
 afterAll(() => {
@@ -69,6 +70,19 @@ describe("task-ID rules", () => {
     const [ok, bad] = await runner.check([ID, "([A-Z]+"]);
     expect(ok).toBeNull();
     expect(bad).toEqual(expect.any(String));
+  });
+
+  test("check needs no time budget, and its error text equals the worker's", async () => {
+    const busy = createTaskRunner({ budgetMs: 0, retryBudgetMs: 0 });
+    try {
+      const [bad, ok] = await busy.check(["([A-Z]+", String.raw`[A-Z]+-\d+`]);
+      expect(ok).toBeNull();
+      expect(bad).toEqual(expect.any(String));
+      const r = await runner.extract([{ source: "title", pattern: "([A-Z]+" }], input("", "ABC-1"));
+      expect(r.errors).toEqual([bad as string]);
+    } finally {
+      busy.close();
+    }
   });
 
   test("ReDoS: (a+)+$ times out within 1 s, and the next call works", async () => {

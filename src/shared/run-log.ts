@@ -81,7 +81,7 @@ export type SDKAssistantMessageError =
   | "max_output_tokens"
   | "cloud_credential_error";
 
-// The token counts of one API call (fixture b9-wp8-flags.jsonl). The CLI sends more fields.
+// The token counts of one API call (fixtures/claude-synthetic/review-agent-tree.jsonl). The CLI sends more fields.
 export type SDKMessageUsage = { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
 
 export type SDKAssistantMessage = {
@@ -152,7 +152,7 @@ export type SDKTaskProgressMessage = {
   usage?: SDKTaskUsage;
 };
 
-// A refused tool call (fixtures b1, b3, b17). decision_reason_type: for example "other" or "asyncAgent".
+// A refused tool call (Gates B1, B3, B17). decision_reason_type: for example "other" or "asyncAgent".
 export type SDKPermissionDeniedMessage = {
   type: "system";
   subtype: "permission_denied";

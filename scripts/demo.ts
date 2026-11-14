@@ -190,7 +190,7 @@ const DISCUSS = {
   reply: "",
   coverage: { read: ["src/cache/flush.ts"], skipped: [], unavailable: [], notChecked: [] },
 };
-// Build a Jira task (docs/plans/review-v2/spec.md sections 6.5 and 7.2) from the task chip of my PR 1004: the questions, a small plan
+// Build a Jira task (docs/plans/review-v2/spec.md sections 6.5 and 7.2) for ABC-10688 of my PR 1004: the questions, a small plan
 // for src/cache/flush.ts of main, the files of each build step, and an own review with no point. The approved command is "bun test".
 const READ_FLUSH = { read: ["src/cache/flush.ts"], skipped: [], unavailable: [], notChecked: [] };
 const TASK_INTERVIEW = {
@@ -358,9 +358,9 @@ const SUB_SPEC = {
 };
 
 // The verify phase of a review run gets one tool call and no subagent (docs/plans/review-v2/spec.md section 1.6).
-const NO_AGENTS = claudeStream(claudeDir, "check", "claude/b6-hostile-repo.jsonl");
+const NO_AGENTS = claudeStream(claudeDir, "check", "claude-synthetic/review-flat.jsonl");
 runner.write({
-  fixture: claudeStream(claudeDir, "tree", "claude/b9-wp8-flags.jsonl", REVIEW_RESULT),
+  fixture: claudeStream(claudeDir, "tree", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT),
   fix: FIX,
   answered: ANSWERED,
   verify: VERIFY,

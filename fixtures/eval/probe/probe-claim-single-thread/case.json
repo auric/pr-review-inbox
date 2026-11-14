@@ -1,0 +1,38 @@
+{
+  "id": "probe-claim-single-thread",
+  "title": "Event counts on the dispatcher thread, with a correct claim in a thread",
+  "language": "python",
+  "pr": {
+    "title": "Count the events by kind",
+    "description": "Adds `EventStats`, a dispatcher handler that counts the events by kind and logs the counts on each tick event."
+  },
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "jobs/stats.py",
+      "side": "new",
+      "lines": [18, 18],
+      "why": "The thread claim is right: Dispatcher._run() calls each handler on the one dispatcher thread, and submit() only puts the event on the queue (dispatcher.py). record() and _report() never run at the same time, so the read-modify-write needs no lock."
+    }
+  ],
+  "threads": [
+    {
+      "id": 1,
+      "root": 1,
+      "author": "reviewer-1",
+      "at": 1767344400000,
+      "text": "This read-modify-write is not atomic. Two threads that record events at the same time can lose a count. Please add a lock.",
+      "path": "jobs/stats.py",
+      "side": "new",
+      "lines": [18, 18]
+    },
+    {
+      "id": 2,
+      "root": 1,
+      "author": "eval-author",
+      "at": 1767348000000,
+      "text": "Only the dispatcher thread calls record(). Dispatcher._run() calls every handler on that one thread, and submit() from other threads only puts the event on the queue. So no lock is needed."
+    }
+  ]
+}

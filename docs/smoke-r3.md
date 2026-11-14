@@ -102,7 +102,7 @@ This test checks the Release 3 features against a real Bitbucket Server, a real 
 7. Expect no include switch for the binary file and "Downloaded. Runs list it by name only."
 8. Press Shift+R and start a review with the Review profile. Wait for the end. Press 3. Expect a Read of `context/task.md`, a Read of `context/attachments/<id>.png` or `.jpg` without an error (U23, U24), and a Read of `context/attachments/<id>.txt`. Expect no file for the binary file in `context/attachments/`. Press Esc.
 9. Open the AI summary. Expect the Context row to name `<KEY>` with the fetch time of this run.
-10. Click Delete on each file. Expect "Not downloaded." again. Click Remove on the task chip. Expect the task folder to be gone from the data folder.
+10. Click Delete on each file. Expect "Not downloaded." again. Click "Clear text" on the task chip, then "Clear text" in the confirm. Expect the task folder to be gone from the data folder.
 
 ## G. Linux binary under WSL
 

@@ -1,6 +1,6 @@
 # Build a Jira task: one Claude session per part
 
-Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. PS0 is code complete: the Gate B37 script (`scripts/gate/claude-checks.ts`, `scripts/gate/session.ts`) and CI12 (`scripts/gate/ci.ts`). Gate B37 passed in full on CLI 2.1.323 (2026-11-13). CI12 is not run. PS-M, PS1 to PS3, and PS4 WP-1 to WP-6 are built (ps4-plan.md section 3). The other packages are not built. All user requirements of 2026-11-12 are decided. User answers of 2026-11-12: Q1 to Q9 take the recommended answers. Section 3 is approved, items 1 to 15, with the red-build fixes as a tick per part. RUN_TIME_MAX_MS (240 min) stays. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
+Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. PS0 is code complete: the Gate B37 script (`scripts/gate/claude-checks.ts`, `scripts/gate/session.ts`) and CI12 (`scripts/gate/ci.ts`). Gate B37 passed in full in run 2 on CLI 2.1.323 (2026-11-13), and CI12 passed on 2026-11-13 (integration-check.md). PS-M, PS1 to PS3, and PS4 WP-1 to WP-6 are built (ps4-plan.md section 3). The other packages are not built. All user requirements of 2026-11-12 are decided. User answers of 2026-11-12: Q1 to Q9 take the recommended answers. Section 3 is approved, items 1 to 15, with the red-build fixes as a tick per part. RUN_TIME_MAX_MS (240 min) stays. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
 
 Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, and shared/task.ts are those of the WP-R1b tree. The other files are equal on main.
 
@@ -192,7 +192,7 @@ Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, an
 8. The trust lines, the skills, the MCP lines, and the explorer rule, as today (:450-462).
 9. The project instructions, and "Mode: build".
 
-**Later runs (resume).** The stdin holds the rules digest, then "# Run <n>: <purpose>" and the lines of that purpose. The digest is about 10 lines: the folders, git denied, the trust lines, the tick rule, the result rule, and the untrusted-data rule.
+**Later runs (resume).** The stdin holds the rules digest, then "# Run <n>: <purpose>" and the lines of that purpose. The digest is about 10 lines: the folders, git denied, the trust lines, the tick rule, the result rule, the untrusted-data rule, and the rule that an Agent call never passes model or effort (Gate B38).
 
 | Purpose | Step row kind | Context files that the app writes | Lines |
 |---|---|---|---|

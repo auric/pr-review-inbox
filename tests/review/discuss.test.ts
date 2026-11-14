@@ -82,7 +82,7 @@ async function setup() {
   dirs.push(root);
   const remote = await reviewRemote(root, { 2: "source" });
   const runner = fakeRunner(root);
-  const stream = claudeStream(root, "b6", "claude/b6-hostile-repo.jsonl");
+  const stream = claudeStream(root, "b6", "claude-synthetic/review-flat.jsonl");
   const scenario = (s: Omit<FakeScenario, "record" | "auth" | "fixture"> = {}) => runner.write({ fixture: stream, ...s });
   scenario();
   const fake = startFakeBitbucket();

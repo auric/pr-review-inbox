@@ -18,7 +18,11 @@ const lineNo = z.number().int().min(1);
 // "2.3": the Build section of pr-context.md stays out of coverage, and a rule finding out of its scope stays as core.
 // "2.4": the category classes that the check never hides, and the skip list of each language checklist.
 // "2.5": the Fix rules that confirm the defect, keep the fix small, keep rules by design, and define scope.
-export const REVIEW_PROMPT_VERSION = "2.5";
+// "2.6": the C# language checklist.
+// "2.7": the finder looks for answers before it asks, the check judges each finder question, the issue tool lines, and the
+// acceptance criteria of the intent module (docs/plans/review-v2/review-questions.md).
+// "2.8": each lead with the Agent tool passes no model and no effort on an Agent call (Gate B38).
+export const REVIEW_PROMPT_VERSION = "2.8";
 
 const place = {
   path: z.string().describe("File path relative to the repository root, with / separators."),
@@ -136,6 +140,16 @@ export const verifyVerdict = z.object({
   // The defaults keep entries without these keys valid. --json-schema still lists them as required.
   duplicateOf: lineNo.nullable().default(null).describe("For duplicate: the candidate that it repeats. Else null."),
   question: z.string().max(1000).default("").describe("For question: the question for the author. Else empty."),
+  // docs/plans/review-v2/review-questions.md: the defect that answers a finder question.
+  finding: z
+    .object({
+      ...place,
+      title: z.string().max(200).describe("The defect in one line of 12 words or fewer."),
+      body: z.string().max(2000).describe("The consequence and a fix direction in 3 sentences or fewer."),
+    })
+    .nullable()
+    .default(null)
+    .describe('For confirmed on a "## Question N" block: the place and the title of the defect. Else null.'),
 });
 
 export const verifyResult = z.object({ verdicts: z.array(verifyVerdict).max(MAX_FINDINGS), coverage });
@@ -149,7 +163,10 @@ export type Severity = (typeof severities)[number];
 // The check state of a finding item. It comes from the verdict at read time (spec.md section 1.7).
 export type Check = "checked" | "unsure" | "unchecked";
 // payload.verify of a finding item with a verdict. duplicateOf: an item ID. by: the agent that gave the verdict.
-export type VerifyMark = Omit<VerifyVerdict, "candidate" | "question" | "duplicateOf"> & { duplicateOf: number | null; by: string };
+export type VerifyMark = Omit<VerifyVerdict, "candidate" | "question" | "duplicateOf" | "finding"> & {
+  duplicateOf: number | null;
+  by: string;
+};
 // docs/plans/review-v2/spec.md section 2.2: a discuss run withdrew the finding. run: that discuss run. was: the status before.
 // restored: the user restored the finding. The mark stays.
 export type WithdrawnMark = { run: number; reason: string; was: "new" | "accepted"; restored?: true };

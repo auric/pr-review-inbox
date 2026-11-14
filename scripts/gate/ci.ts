@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Gate CI1 to CI12 (WP-CI0, the CI builds plan, and part-session.md section 2.15): the Bitbucket build status facts and the Jenkins facts.
+// Gate CI1 to CI13 (WP-CI0, the CI builds plan, and part-session.md section 2.15): the Bitbucket build status facts and the Jenkins facts.
 // CI1 to CI8 send GET requests only. CI9 sends POST api/json?tree=_class, which starts nothing.
 // CI10 starts one build, only with --authorize-build. CI11 scans the multibranch project, only with --authorize-scan.
 // A scan can start builds of other changed branches. Run CI11 only on a project where that is allowed.
 // CI12 reads the log of the --build build with one GET and prints only its status, headers, and byte count, never the log text.
+// CI13 reads the log at the URL of the first FAILED status of the CI3 list with the app's Jenkins client (readLog).
 // Usage: bun run gate:ci -- <PR URL> [--jenkins <base URL>] [--jenkins-user <user>] [--job <folder/project>] [--build <build URL>]
 //          [--authorize-build] [--authorize-scan]
 //        bun run gate:ci -- --dry-run
@@ -16,6 +17,7 @@
 // A self-check exits 3 before any output when the text holds a sensitive value.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { createJenkinsClient, JenkinsError } from "../../src/server/ci/jenkins";
 import { parsePrUrl } from "../../src/shared/pr-url";
 
 const SERVICE = "review-loop";
@@ -29,7 +31,7 @@ const AUTO_BUILD_WAIT_MS = 30_000;
 // The page size of the status list that Layer A reads.
 const STATUS_LIMIT = 25;
 // The plan has no CI4.
-const CHECKS = ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI9", "CI10", "CI11", "CI12"] as const;
+const CHECKS = ["CI1", "CI2", "CI3", "CI5", "CI6", "CI7", "CI8", "CI9", "CI10", "CI11", "CI12", "CI13"] as const;
 const USAGE = [
   "usage: bun run gate:ci -- <PR URL> [--jenkins <base URL>] [--jenkins-user <user>] [--job <folder/project>]",
   "         [--build <build URL>] [--authorize-build] [--authorize-scan]",
@@ -49,7 +51,7 @@ export type Result = { check: string; status: Status; evidence: string };
 type Call = { status: number; body: unknown; headers: Headers; size: number };
 export type Ctx = {
   bitbucket: { base: string; project: string; repo: string; id: number; token: string };
-  // Absent: CI5 to CI12 are skipped.
+  // Absent: CI5 to CI13 are skipped.
   jenkins?: { base: string; user: string; token: string };
   // The multibranch project path from --job, as job names.
   job?: string[];
@@ -72,6 +74,8 @@ type State = {
   params: number;
   // undefined: not read. null: CSRF protection is off.
   crumb?: { field: string; value: string; cookie?: string } | null;
+  // The CI3 list in its order. url: the raw status URL.
+  statuses?: { state: string; url?: string }[];
 };
 
 // ---------- sanitized values ----------
@@ -300,6 +304,7 @@ async function ci3(c: Ctx, st: State): Promise<Result> {
       `${keyIds.get(key)}: state=${state} ${url} buildNumber present=${v.buildNumber !== undefined} ref present=${v.ref !== undefined}`,
     );
   }
+  if (r.status === 200) st.statuses = values.map((v) => ({ state: enumLike(v.state), url: typeof v.url === "string" ? v.url : undefined }));
   const keyUnion = [...new Set(values.flatMap(keysOf))].sort().join(",") || "none";
   const stateText = [...states].map(([s, n]) => `${s}:${n}`).join(",") || "none";
   return {
@@ -535,6 +540,54 @@ async function ci12(c: Ctx, st: State): Promise<Result> {
   };
 }
 
+// CI13 (ps6-ps7-plan.md PS7b-P): the CI12 read through readLog of src/server/ci/jenkins.ts on a status URL from CI3.
+// Only fixed words, numbers, and the masked path shape go out. A JenkinsError message can hold the path and the user name.
+async function ci13(c: Ctx, st: State): Promise<Result> {
+  const j = c.jenkins;
+  if (!j) return skip("CI13", "no --jenkins");
+  if (!st.statuses) return skip("CI13", "no status list (CI3)");
+  const base = new URL(j.base);
+  const ctxPath = base.pathname.replace(/\/+$/, "");
+  const parse = (v: string | undefined) => {
+    try {
+      return v === undefined ? undefined : new URL(v);
+    } catch {
+      return undefined;
+    }
+  };
+  const ours = st.statuses.filter((s) => parse(s.url)?.origin === base.origin);
+  if (!ours.length) return { check: "CI13", status: "INFO", evidence: `no status URL of ${st.statuses.length} has the --jenkins origin` };
+  const failed = st.statuses.find((s) => s.state === "FAILED" && s.url !== undefined);
+  const pick = failed ?? ours[0];
+  if (pick?.url === undefined) return skip("CI13", "no status URL");
+  const u = parse(pick.url);
+  const from = failed ? "first FAILED status" : "no FAILED status with a URL, so the first status with the --jenkins origin";
+  const same = u?.origin === base.origin;
+  const shape = u ? `same origin as --jenkins=${same} shape=${pathShape(u, same ? ctxPath : undefined)}` : "url=not a URL";
+  try {
+    const log = await createJenkinsClient({ baseUrl: j.base, user: j.user, token: j.token }).readLog(pick.url);
+    return {
+      check: "CI13",
+      status: "PASS",
+      evidence: `${from}: ${shape}; readLog: HTTP 200 X-Text-Size=${log.size} start=${log.start} read=${new TextEncoder().encode(log.text).byteLength} B`,
+    };
+  } catch (e) {
+    if (!(e instanceof JenkinsError)) throw e;
+    // The same tests as readLog (jenkins.ts), to name the refusal that the kind "origin" covers.
+    const refusal = !u
+      ? "not a URL"
+      : !same
+        ? "origin"
+        : !`${u.pathname}/`.startsWith(`${ctxPath}/`)
+          ? "base path"
+          : u.username || u.password
+            ? "user info"
+            : "other";
+    const reason = e.kind === "origin" ? refusal : e.status !== undefined ? `HTTP ${e.status} (${words(e.status)})` : e.kind;
+    return { check: "CI13", status: "FAIL", evidence: `${from}: ${shape}; readLog refused or failed: kind=${e.kind} reason=${reason}` };
+  }
+}
+
 const RUNNERS: Record<(typeof CHECKS)[number], (c: Ctx, st: State) => Promise<Result>> = {
   CI1: ci1,
   CI2: ci2,
@@ -547,6 +600,7 @@ const RUNNERS: Record<(typeof CHECKS)[number], (c: Ctx, st: State) => Promise<Re
   CI10: ci10,
   CI11: ci11,
   CI12: ci12,
+  CI13: ci13,
 };
 
 // Runs the checks. The results are already masked. needles: the sensitive values for the self-check.
@@ -568,7 +622,8 @@ export async function runChecks(c: Ctx): Promise<{ results: Result[]; needles: N
 
 // ---------- dry run ----------
 // The fake Bitbucket serves under /bb and the fake Jenkins under /jenkins, so both context paths are exercised.
-export async function dryRun(opts: { build: boolean; scan: boolean }) {
+// statuses: the CI3 status list in place of the default one. In a url, "<job>" becomes the multibranch project URL plus "/job", and "<origin>" the fake Jenkins origin.
+export async function dryRun(opts: { build: boolean; scan: boolean; statuses?: Record<string, unknown>[] }) {
   const { FAKE_TOKEN, key, startFakeBitbucket } = await import("../../tests/support/fake-bitbucket");
   const { JENKINS_TOKEN, JENKINS_USER, startFakeJenkins } = await import("../../tests/support/fake-jenkins");
   const branch = "feature/ABC-1-fix";
@@ -599,16 +654,20 @@ export async function dryRun(opts: { build: boolean; scan: boolean }) {
           limit: 25,
           start: 0,
           isLastPage: true,
-          values: [
-            {
-              state: "FAILED",
-              key: "sample-ci-feature-ABC-1-fix",
-              name: `sample-ci » ${branch} #3`,
-              url: `${job}/feature%252FABC-1-fix/3/display/redirect`,
-              dateAdded: 1_760_000_000_000,
-            },
-            { state: "SUCCESSFUL", key: "lint", name: "lint", url: "https://lint.example.invalid/r/1", dateAdded: 1_760_000_000_001 },
-          ],
+          values: (
+            opts.statuses ?? [
+              {
+                state: "FAILED",
+                key: "sample-ci-feature-ABC-1-fix",
+                name: `sample-ci » ${branch} #3`,
+                url: "<job>/feature%252FABC-1-fix/3/",
+                dateAdded: 1_760_000_000_000,
+              },
+              { state: "SUCCESSFUL", key: "lint", name: "lint", url: "https://lint.example.invalid/r/1", dateAdded: 1_760_000_000_001 },
+            ]
+          ).map((v) =>
+            typeof v.url === "string" ? { ...v, url: v.url.replace("<job>", job).replace("<origin>", new URL(jenkins.url).origin) } : v,
+          ),
         },
       },
     },

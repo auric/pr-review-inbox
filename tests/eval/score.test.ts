@@ -5,8 +5,21 @@
 import { describe, expect, test } from "bun:test";
 import type { EvalBug } from "../../scripts/eval/cases";
 import { compareText, summaryText } from "../../scripts/eval/compare";
-import { rescore } from "../../scripts/eval/rescore";
-import { type CaseRun, type EvalItem, type EvalResult, overlaps, score } from "../../scripts/eval/score";
+import { foldRefuted, rescore } from "../../scripts/eval/rescore";
+import {
+  type CaseRun,
+  type EvalCaseInfo,
+  type EvalItem,
+  type EvalResult,
+  type Grounding,
+  type JudgeLabel,
+  overlaps,
+  pairedDelta,
+  score,
+  unionRecall,
+} from "../../scripts/eval/score";
+
+console.log(`Code under test: ${Bun.resolveSync("../../scripts/eval/score.ts", import.meta.dir)}`);
 
 const item = (o: Partial<EvalItem> & Pick<EvalItem, "path" | "side" | "line" | "lineEnd">): EvalItem => ({
   anchorState: "exact",
@@ -441,5 +454,283 @@ describe("recall leaves out the bugs that the volume cannot show", () => {
   test("no volume counts every bug", () => {
     expect(score(RESULT).leftOut).toEqual({ count: 0, severities: [] });
     expect(summaryText(RESULT)).toContain("Must-find items this volume cannot show: 0.");
+  });
+});
+
+// ---------- Grounded metrics (docs/plans/review-v2/review-quality-2026.md E3 to E5) ----------
+
+// A hand grounding: the matcher answer and the judge label of each item by its title. An item without an answer is unlabelled.
+const grounding = (m: Record<string, string[]>, j: Record<string, Pick<JudgeLabel, "label" | "severity">> = {}): Grounding => ({
+  matches: (_c, i) => m[i.title],
+  judge: (_c, i) => {
+    const x = j[i.title];
+    return x && { ...x, category: "correctness", scope: "introduced", why: "w" };
+  },
+});
+const gbug = (id: string, line: number, o: Partial<EvalBug> = {}): EvalBug => ({
+  id,
+  path: "g.ts",
+  side: "new",
+  lines: [line, line],
+  severityMin: "major",
+  module: "core",
+  note: "n",
+  ...o,
+});
+const at = (title: string, o: Partial<EvalItem> = {}) => item({ path: "g.ts", side: "new", line: 1, lineEnd: 1, title, ...o });
+const gcase = (id: string, bugs: EvalBug[], o: Partial<EvalCaseInfo> = {}): EvalCaseInfo => ({
+  id,
+  title: id,
+  language: "typescript",
+  changedLines: 10,
+  base: "b",
+  head: "h",
+  bugs,
+  traps: [{ id: "T1", path: "g.ts", side: "new", lines: [70, 70], why: "w" }],
+  extras: [{ path: "g.ts", side: "new", lines: [90, 90], note: "x" }],
+  ...o,
+});
+const gresult = (cases: EvalCaseInfo[], runs: CaseRun[], volume: EvalResult["volume"] = null): EvalResult => ({
+  ...RESULT,
+  volume,
+  repeat: Math.max(...runs.map((x) => x.repeat)),
+  cases,
+  runs,
+});
+
+describe("grounded metrics (review-quality-2026.md E5)", () => {
+  // B1, B2, B3 are counted must-finds. dual matches B1 and B2, dup repeats B1 (a claimed duplicate), trap hits T1, extra hits the
+  // extra, noise and over match nothing, gone is a hidden refuted item on B3.
+  const c = gcase("g", [gbug("B1", 10), gbug("B2", 30, { severityMin: "minor" }), gbug("B3", 50)]);
+  const items = [
+    at("dual", { verdict: "confirmed", check: "checked" }),
+    at("dup", { verdict: "confirmed", check: "checked" }),
+    at("trap", { verdict: "unsure", check: "unsure" }),
+    at("extra"),
+    at("noise"),
+    at("over", { severity: "blocker", verdict: "confirmed", check: "checked" }),
+    at("gone", { verdict: "refuted", check: "unchecked", group: "hidden" }),
+  ];
+  const r = gresult([c], [run("g", 1, items)]);
+  const g = grounding(
+    { dual: ["bug:B1", "bug:B2"], dup: ["bug:B1"], trap: ["trap:T1"], extra: ["extra:0"], noise: [], over: [], gone: ["bug:B3"] },
+    { dup: { label: "tp", severity: "high" }, noise: { label: "fp", severity: "low" }, over: { label: "tp", severity: "low" } },
+  );
+
+  test("ReviewBench: one item that matches two gold items finds both and claims one; a claimed duplicate goes to the judge", () => {
+    const s = score(r, g);
+    expect(s.grounded).toBe(true);
+    // Found: B1 and B2 of 3. Claims: dual takes B1 (tp), trap takes T1 (fp), extra leaves the shown count. dup finds B1 taken.
+    expect(s.suite.groundedRecall?.mean).toBeCloseTo(2 / 3, 10);
+    expect(s.suite.groundedPrecision?.mean).toBe(0.5);
+    // Unmatched shown: dup, noise, over.
+    expect(s.suite.groundedNoise?.mean).toBe(3);
+  });
+
+  test("augmented precision, new tp, augmented recall, and severity above use the judge labels of unmatched shown items", () => {
+    const s = score(r, g).suite;
+    // (1 claimed tp + 2 judge tp) over 5 shown items without the extra.
+    expect(s.augmentedPrecision?.mean).toBe(0.6);
+    expect(s.newTp?.mean).toBe(2);
+    expect(s.augmentedRecall?.mean).toBe(4 / 5);
+    // over: blocker against the judge level low. dup: minor (medium) against high is not above.
+    expect(s.severityAbove?.mean).toBe(0.5);
+  });
+
+  test("the verifier confusion matrix labels every item by gold item, else by judge, by its verdict", () => {
+    expect(score(r, g).confusion).toEqual({
+      confirmed: { tp: 3, fp: 0 },
+      unsure: { tp: 0, fp: 1 },
+      none: { tp: 1, fp: 1 },
+      refuted: { tp: 1, fp: 0 },
+    });
+  });
+
+  test("an item without a matcher answer makes every grounded metric null, and the summary says so", () => {
+    const s = score(r, grounding({ dual: ["bug:B1"] }));
+    expect(s.grounded).toBe(false);
+    expect(s.suite.groundedRecall).toBeNull();
+    expect(s.confusion).toBeNull();
+    expect(s.suite.recall).toEqual(score(r).suite.recall);
+    expect(summaryText(r, s)).toContain("Labels: none.");
+    expect(summaryText(r, score(r, g))).toContain("Ship decisions use grounded metrics only.");
+  });
+
+  test("an unmatched shown item without a judge label leaves the judge metrics null, not the matcher metrics", () => {
+    const s = score(r, grounding({ dual: ["bug:B1"], dup: [], trap: [], extra: [], noise: [], over: [], gone: [] })).suite;
+    expect(s.groundedRecall?.mean).toBeCloseTo(1 / 3, 10);
+    expect(s.augmentedPrecision).toBeNull();
+    expect(s.newTp).toBeNull();
+  });
+
+  test("verifier loss: each raised must-find counts once, by the state of its best item, on one denominator", () => {
+    const lc = gcase("l", [gbug("L1", 1), gbug("L2", 2), gbug("L3", 3), gbug("L4", 4), gbug("L5", 5)]);
+    const lr = gresult(
+      [lc],
+      [
+        run("l", 1, [
+          at("folded", { group: "fold", severity: "minor" }),
+          at("folded-refuted", { group: "hidden", verdict: "refuted" }),
+          // A refuted finding of a protected class stays in main (review.ts FindingPayload.demoted).
+          at("demoted", { verdict: "refuted" }),
+          at("duplicate", { group: "hidden", verdict: "duplicate" }),
+          at("refuted", { group: "hidden", verdict: "refuted" }),
+          at("demoted-too", { verdict: "refuted" }),
+          at("shown"),
+        ]),
+      ],
+      "balanced",
+    );
+    const lg = grounding({
+      folded: ["bug:L1"],
+      "folded-refuted": ["bug:L1"],
+      demoted: ["bug:L2"],
+      duplicate: ["bug:L3"],
+      refuted: ["bug:L4"],
+      "demoted-too": ["bug:L5"],
+      shown: ["bug:L5"],
+    });
+    const s = score(lr, lg).suite;
+    // Shown: L2 (demoted, in main) and L5.
+    expect(s.groundedRecall?.mean).toBe(0.4);
+    expect(s.groundedRaised?.mean).toBe(1);
+    const states = ["lossMain", "lossDemoted", "lossFolded", "lossDuplicate", "lossRefuted"] as const;
+    for (const m of states) expect(s[m]?.mean).toBe(0.2);
+    expect(states.reduce((n, m) => n + (s[m]?.mean ?? 0), 0)).toBeCloseTo(s.groundedRaised?.mean ?? 0, 10);
+  });
+
+  test("refuted findings in main count apart, and --fold-refuted folds them for recall and noise", () => {
+    const fc = gcase("f", [gbug("F1", 10)], { traps: [], extras: [] });
+    const fr = gresult(
+      [fc],
+      [
+        run("f", 1, [
+          item({ path: "g.ts", side: "new", line: 10, lineEnd: 10, verdict: "refuted", title: "kept" }),
+          item({ path: "g.ts", side: "new", line: 40, lineEnd: 40, verdict: "refuted", title: "noise" }),
+        ]),
+      ],
+    );
+    expect(score(fr).suite.refutedShown?.mean).toBe(2);
+    expect(score(fr).suite.recall?.mean).toBe(1);
+    expect(score(fr).suite.noise?.mean).toBe(1);
+    const { result, n } = foldRefuted(fr);
+    expect(n).toBe(2);
+    const s = score(result).suite;
+    expect(s.refutedShown?.mean).toBe(0);
+    expect(s.recall?.mean).toBe(0);
+    expect(s.noise?.mean).toBe(0);
+    expect(summaryText(result)).toContain("refuted findings folded");
+  });
+
+  test("candidate recall divides by the counted must-finds, as recall does", () => {
+    // balanced: the nit bug N is out of the count. N is raised in fold, M is shown, J is missed.
+    const cr = gresult(
+      [gcase("c", [gbug("N", 10, { severityMin: "nit" }), gbug("M", 20, { severityMin: "minor" }), gbug("J", 30)])],
+      [
+        run("c", 1, [
+          item({ path: "g.ts", side: "new", line: 10, lineEnd: 10, severity: "nit", group: "fold" }),
+          item({ path: "g.ts", side: "new", line: 20, lineEnd: 20 }),
+        ]),
+      ],
+      "balanced",
+    );
+    const s = score(cr).suite;
+    expect(s.recall?.mean).toBe(0.5);
+    // The old count: 2 raised of all 3 bugs. Now 1 raised of the 2 counted bugs.
+    expect(s.candidateRecall?.mean).toBe(0.5);
+  });
+
+  test("slices count by severity, source, module, bug class, size, task text, and clean cases", () => {
+    const sc = gcase(
+      "s",
+      [
+        gbug("S1", 10, { source: "posted", module: "intent", category: "security" }),
+        gbug("S2", 20, { severityMin: "minor", source: "other" }),
+      ],
+      { large: true, hasTask: true },
+    );
+    const clean = gcase("k", [], { large: false, clean: true });
+    const sr = gresult([sc, clean], [run("s", 1, [at("hit"), at("miss")]), run("k", 1, [at("k-noise"), at("k-fp")])]);
+    const sg = grounding(
+      { hit: ["bug:S1"], miss: [], "k-noise": [], "k-fp": [] },
+      {
+        miss: { label: "tp", severity: "medium" },
+        "k-noise": { label: "tp", severity: "low" },
+        "k-fp": { label: "fp", severity: "low" },
+      },
+    );
+    const rows = Object.fromEntries(score(sr, sg).slices.map((x) => [x.name, x]));
+    expect(rows["severity blocker, major"]).toMatchObject({ mustFinds: 1, found: 1, runs: null });
+    expect(rows["severity minor, nit"]).toMatchObject({ mustFinds: 1, found: 0 });
+    expect(rows["source posted"]).toMatchObject({ mustFinds: 1, found: 1 });
+    expect(rows["source other"]).toMatchObject({ mustFinds: 1, found: 0 });
+    expect(rows["module intent"]).toMatchObject({ mustFinds: 1, found: 1 });
+    expect(rows["class security"]).toMatchObject({ mustFinds: 1, found: 1 });
+    expect(rows["class other"]).toMatchObject({ mustFinds: 1, found: 0 });
+    expect(rows["large cases"]).toMatchObject({ mustFinds: 2, found: 1, runs: 1, noise: 1, judgeFp: 0 });
+    expect(rows["small cases"]).toMatchObject({ mustFinds: 0, runs: 1, noise: 2, judgeFp: 1 });
+    expect(rows["clean cases"]).toMatchObject({ runs: 1, noise: 2, judgeFp: 1 });
+    expect(rows["cases with task text"]).toMatchObject({ runs: 1 });
+    expect(rows["cases without task text"]).toMatchObject({ runs: 1 });
+    expect(summaryText(sr, score(sr, sg))).toMatch(/clean cases\s+0\/0\s+-\s+1\s+2\.00\s+1\.00/);
+  });
+
+  test("macro is the mean of the case means, micro pools the cases", () => {
+    const a = gcase("a", [gbug("A1", 10)], { traps: [], extras: [] });
+    const b = gcase("b", [gbug("B1", 10), gbug("B2", 20), gbug("B3", 30)], { traps: [], extras: [] });
+    const mr = gresult([a, b], [run("a", 1, [item({ path: "g.ts", side: "new", line: 10, lineEnd: 10 })]), run("b", 1, [])]);
+    const s = score(mr);
+    expect(s.suite.recall?.mean).toBe(0.25);
+    expect(s.macro.recall).toBe(0.5);
+    expect(summaryText(mr, s)).toMatch(/recall: seeded bugs with a shown finding\s+25\.0%\s+50\.0%/);
+  });
+
+  test("finderQuestions sums the counts of every run", () => {
+    const q = {
+      ...RESULT,
+      runs: RESULT.runs.map((x, n) => ({ ...x, finderQuestions: { asked: n + 1, answered: n, findings: 1, kept: 0 } })),
+    };
+    expect(score(q).finderQuestions).toEqual({ asked: 10, answered: 6, findings: 4, kept: 0 });
+    expect(summaryText(q)).toContain("Finder questions, all runs: 10 asked, 6 answered, 4 findings, 0 kept.");
+    expect(score(RESULT).finderQuestions).toBeNull();
+  });
+
+  test("unionRecall: the mean over the k-subsets of repeats of the must-finds that any run shows or raises", () => {
+    const u = gcase("u", [gbug("X", 10), gbug("Y", 20)], { traps: [], extras: [] });
+    const ur = gresult(
+      [u],
+      [
+        run("u", 1, [item({ path: "g.ts", side: "new", line: 10, lineEnd: 10 })]),
+        run("u", 2, [
+          item({ path: "g.ts", side: "new", line: 20, lineEnd: 20 }),
+          item({ path: "g.ts", side: "new", line: 10, lineEnd: 10, group: "hidden", verdict: "refuted" }),
+        ]),
+      ],
+    );
+    expect(unionRecall(ur, 1)).toEqual({ shown: 0.5, raised: 0.75 });
+    expect(unionRecall(ur, 2)).toEqual({ shown: 1, raised: 1 });
+    expect(unionRecall(ur, 3)).toBeNull();
+    expect(score(ur).union).toEqual([
+      { k: 1, shown: 0.5, raised: 0.75 },
+      { k: 2, shown: 1, raised: 1 },
+    ]);
+    // The ship rules read the spread S_R in bugs.
+    expect(score(ur).recallBugs).toEqual([
+      { repeat: 1, found: 1, mustFinds: 2 },
+      { repeat: 2, found: 1, mustFinds: 2 },
+    ]);
+    expect(summaryText(ur)).toContain("Recall in bugs per repeat (line match): 1: 1/2, 2: 1/2. Spread: 0 bugs.");
+  });
+
+  test("pairedDelta: per must-find hit rate of B minus A, with a fixed-seed bootstrap over PR groups", () => {
+    const p1 = gcase("p1", [gbug("P", 10)], { group: "g1", traps: [], extras: [] });
+    const p2 = gcase("p2", [gbug("P", 10)], { group: "g2", traps: [], extras: [] });
+    const a = gresult([p1, p2], [run("p1", 1, []), run("p2", 1, [])]);
+    const b = gresult([p1, p2], [run("p1", 1, [item({ path: "g.ts", side: "new", line: 10, lineEnd: 10 })]), run("p2", 1, [])]);
+    const d = pairedDelta(a, b);
+    expect(d).toMatchObject({ delta: 0.5, low: 0, high: 1, mustFinds: 2, groups: 2, grounded: false });
+    expect(pairedDelta(a, b)).toEqual(d);
+    expect(compareText(a, b)).toContain("Paired delta (information only): B - A hit rate per counted must-find, line match: +50.0 pts");
+    expect(pairedDelta(a, { ...b, cases: [] })).toBeNull();
   });
 });

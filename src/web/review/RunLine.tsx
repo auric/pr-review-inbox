@@ -17,6 +17,7 @@ import { Hint } from "../shell/Hint";
 import { useNow } from "../shell/Sidebar";
 import { AiAvatar, Dotted, Dropped, Inline, Severity } from "./Drafts";
 import {
+  answeredQuestions,
   checkFailedText,
   checkText,
   clockDur,
@@ -311,6 +312,8 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
   const setup = part("setup");
   const read = part("read");
   const risk = part("risk");
+  const qa = part("qa");
+  const answered = review ? answeredQuestions(sum) : null;
   // The phase is part of the key, so the live region reads "Checking 9 findings…" when the check starts.
   const state = `${run.id}:${s.kind}:${s.kind === "running" ? (run.phase ?? "") : ""}`;
   const failedCheck = review && s.kind === "done" ? checkFailedText(run.summary) : null;
@@ -527,6 +530,30 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
           </p>
           {row.ledger}
           {row.refuted}
+          {answered && (
+            <div className="grid gap-1.5" data-answered>
+              <div>
+                <Disc on={qa.on} controls={qa.id} onClick={qa.flip}>
+                  {answered.label}
+                </Disc>
+              </div>
+              <Reveal id={qa.id} on={qa.on}>
+                <ul aria-label="Questions that the check answered" className={revealList}>
+                  {answered.items.map((q, i) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: two questions can have the same words.
+                    <li key={i} data-answered-item className="grid gap-1 border-b border-rule pb-2 last:border-b-0 last:pb-0">
+                      <p className="m-0 text-sm [overflow-wrap:anywhere]">
+                        <Inline text={q.text} />
+                      </p>
+                      <p className="m-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                        <span className="font-semibold">Answer:</span> <Inline text={q.answer} />
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </Reveal>
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-x-[18px] gap-y-1">
             {files.length > 0 && (
               <Disc on={read.on} controls={read.id} onClick={read.flip}>

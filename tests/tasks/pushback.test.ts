@@ -49,9 +49,9 @@ describe("judge the review points (pushback.md section 6.23)", () => {
             {
               writes: [FIXED],
               implement: { ...ECHO, points: [{ id: 9999, verdict: "fixed", why: null, reason: "Done.", cite: "" }] },
-              judge: [PLAN, LOST, null],
+              pointVerdicts: [PLAN, LOST, null],
             },
-            { writes: [FORCED], judge: [{ verdict: "pushback", why: "invalid", reason: "Still fine.", cite: "" }] },
+            { writes: [FORCED], pointVerdicts: [{ verdict: "pushback", why: "invalid", reason: "Still fine.", cite: "" }] },
           ],
         },
       });
@@ -182,7 +182,7 @@ describe("judge the review points (pushback.md section 6.23)", () => {
         seq: {
           "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
           review: [{ review: review([point("blocker")]) }],
-          "implement:fix": [{ judge: [PLAN] }],
+          "implement:fix": [{ pointVerdicts: [PLAN] }],
         },
       });
       await s.build();

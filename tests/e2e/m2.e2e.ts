@@ -359,3 +359,35 @@ test("a full run pool names the limit and the running run, and a run end frees S
   await expect(start).not.toHaveAttribute("aria-disabled", "true", { timeout: RUN_MS });
   await expect(start).toHaveAccessibleDescription("Ctrl+Enter starts the review. Esc closes the brief.");
 });
+
+// A new Bitbucket origin opens another database and cancels the runs. Their end write fails on the closed database, so no live update
+// names them. The Settings save refreshes the runs itself.
+test("a settings save that swaps the database ends the running run in the page and frees Start without a reload", async ({ page }) => {
+  await control("claude", { stream: "tree", hang: true });
+  await connect(page);
+  await startWithBrief(page);
+  await expect(runLine(page)).toContainText("Finding problems…", { timeout: RUN_MS });
+  await expect(page.locator("#nav-runs")).toHaveAccessibleName("Review runs: 1, 1 running");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const conn = page.locator("section[aria-labelledby='h-connection']");
+  // The same fake server under another origin.
+  await conn.getByLabel("Bitbucket URL").fill(FAKE_URL.replace("127.0.0.1", "localhost"));
+  await conn.getByLabel("Access token").fill(E2E_TOKEN);
+  const saved = page.waitForResponse((r) => r.request().method() === "PUT" && new URL(r.url()).pathname === "/api/settings");
+  await conn.getByRole("button", { name: "Save" }).click();
+  expect((await saved).status()).toBe(200);
+  await expect(conn).toHaveCount(0);
+
+  // The new database fills at its first sync.
+  await expect(row(page)).toBeVisible({ timeout: RUN_MS });
+  await row(page).click();
+  await expect(page.locator("section[aria-label='Details'] h1")).toHaveText(TITLE);
+  await page.keyboard.press("r");
+  const start = page.locator("#brief").getByRole("button", { name: "Start review" });
+  await expect(start).toBeVisible();
+  await expect(start).not.toHaveAttribute("aria-disabled", "true");
+  await expect(start).toHaveAccessibleDescription("Ctrl+Enter starts the review. Esc closes the brief.");
+  // The sidebar stays mounted through the save, so only the save refreshes its run count.
+  await expect(page.locator("#nav-runs")).toHaveAccessibleName("Review runs: 0");
+});

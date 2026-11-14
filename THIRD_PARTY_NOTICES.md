@@ -82,7 +82,7 @@ The web bundle and the compiled binary include these packages.
 | fast-uri | 3.1.8 | BSD-3-Clause |
 | hast-util-to-jsx-runtime | 2.3.6 | MIT |
 | hast-util-whitespace | 3.0.0 | MIT |
-| hono | 4.13.13 | MIT |
+| hono | 4.13.16 | MIT |
 | html-url-attributes | 3.0.1 | MIT |
 | inline-style-parser | 0.2.7 | MIT |
 | internmap | 2.0.3 | ISC |
@@ -3820,7 +3820,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### hono 4.13.13
+### hono 4.13.16
 
 License: MIT. Ships in the web bundle, compiled binary.
 

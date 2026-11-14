@@ -117,7 +117,7 @@ async function setup() {
     .get({ source: repo.source, target: repo.target }) as { id: number };
 
   const runner = fakeRunner(root);
-  runner.write({ fixture: claudeStream(root, "run", "claude/b9-wp8-flags.jsonl", REVIEW_RESULT) });
+  runner.write({ fixture: claudeStream(root, "run", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT) });
   const fileRemote: GitRemote = {
     url: repo.remote,
     sourceUrl: repo.remote,

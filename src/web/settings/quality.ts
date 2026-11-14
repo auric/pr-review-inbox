@@ -44,5 +44,9 @@ const share = (o: PostOutcomes, noun: string) => {
 };
 
 export const addressedText = (o: PostOutcomes) => `Addressed: ${share(o, " posted findings")}`;
+
+// docs/plans/review-v2/review-questions.md: the finder questions of the runs with counts. Empty: no such run.
+export const questionsText = (q: ReviewStatsDto["questions"]) =>
+  q.runs ? `Questions: ${q.asked} asked, ${q.answered} answered, ${q.findings} to findings, ${q.kept} kept` : "";
 export const severityText = (o: PostOutcomes) => (o.addressed + o.open + o.pending ? share(o, "") : "–");
 export const pendingText = (o: PostOutcomes) => (o.pending ? `${o.pending} pending` : "");
