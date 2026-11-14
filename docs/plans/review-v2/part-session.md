@@ -284,11 +284,12 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 ### 2.9 Live messages
 
 - The Tell Claude box (spec.md section 6.18.1) becomes the message box of the part. It shows in every state that has a worktree.
-- While a run works, "Send" writes a stream-json user message to the stdin of that run (U104). The Log shows "Your message" with the time.
+- While an implement, fix, or instruct run of the part works, "Send" writes a stream-json user message to the stdin of that run (U104). No new step starts. The step of that run gets the Log note "Your message: <text>".
 - While no run works, "Send" starts a run with the text as "Your instructions" (spec.md section 6.18.2).
 - The text is user text. It can steer the work, but never the rules. The app never parses it.
 - Runner: `--input-format stream-json`, with stdin as a pipe. The first message is the prompt. The runner closes stdin after a result event when no message waits.
-- If U104 fails, a message sent during a run waits and goes into the next run as "Your instructions". The hint says "Claude reads this when the current run ends."
+- Fallback (ps4-plan.md WP-7): when the live write fails under the build driver, the message waits as an instruct row with blockedBefore null. The live gate is off, or the run takes no input now. The next GO of the part runs the row as "Your instructions". A part holds at most one waiting message. The waiting message keeps the reason of the task. The hint says "Claude reads this when the current run ends."
+- Every other send while the loop works gets 409 "Claude or the checks are working.": a second waiting message of the part, a failed live write under a follow-up or other mode driver, and a send while no session run of the part runs.
 
 ### 2.10 Stall and loop guard
 
@@ -320,6 +321,7 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 - **Hold** (More, per part): the app cancels the run of that part only, with a new cancel by the key prefix `task:<id>:part:<part>:`. Today's jobs.ts:2445-2447 cancels the whole task.
   - The work stays. The status says "Part 2 is on hold. Its work is kept." The primary button is Continue.
   - Hold replaces "Pause after this step" (loop.ts:2529-2538) and "Pause after each task" (:1360-1361).
+  - Hold takes the open implement or fix row of the part as its step. A waiting message (2.9) can sit beside that row.
 - **Skip this part** (a task with sub-tasks, before the PR of the part): a confirm comes first. Then the app saves the patch, sends ABANDON (machine.ts:109-110), removes the worktree, and deletes the transcript.
 - **Start this part again** (before the first push only):
   - The confirm says "Claude starts part 2 again from the plan. The app keeps the old work as a patch and as a backup branch in the app cache. Nothing goes to Bitbucket."
@@ -992,7 +994,7 @@ PartContext gains `unpushed`: task_part.pushed is NULL. It is NULL for a new bra
 
 The phase machine orders the work of one part. It is flat, so machineMermaid prints it (machine.ts:135-147). Like the other two machines, it has no actions. Each part has its own phase.
 
-**Where the phase lives.** The phase is the open task_step row of the part. A part has at most one open step row (spec.md section 6.20.6), with one exception: an open update row can sit beside exactly one open resolve or check row of the same update (WP-5). The phase is then that of the resolve or check row. After a restart, failSteps leaves no open row, so every phase is idle.
+**Where the phase lives.** The phase is the open task_step row of the part. A part has at most one open step row (spec.md section 6.20.6), with two exceptions. An open update row can sit beside exactly one open resolve or check row of the same update (WP-5). The phase is then that of the resolve or check row. One waiting instruct row, a message for the next GO (2.9), can sit beside one other open row (ps4-plan.md WP-7). The phase is then that of the other row. After a restart, failSteps leaves no open row except a kept waiting message (9.5). That row has not run, so every phase is idle.
 
 **Restart mark.** Start again writes a commit row with item restart (ps4-plan.md section 1 item 5). The guards critic, review, and claudeRan, and the build and work commit reads, read only rows after the mark. The baseline guard ignores the mark.
 
@@ -1144,7 +1146,7 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | POST /tasks/:id/parts/:part/start | none (START comes from the scheduler) | loop.ts:2495, :2501 |
 | POST /tasks/:id/parts/:part/wait-merge | WAIT_MERGE | "This part does not wait for you." (loop.ts:2476) |
 | POST /tasks/:id/parts/:part/drop | ABANDON | loop.ts:2530, :2536 |
-| POST /tasks/:id/instructions | GO with follow, or a live message to a running session run (no event) | WORKING, WAITING (tasks.ts:1052-1066) |
+| POST /tasks/:id/instructions | GO with follow; a live message to a running session run of the part (no event); or, under the build driver, a waiting row for the next GO (no event) | WORKING, WAITING (tasks.ts:1052-1066) |
 | POST /tasks/:id/parts/:part/update | UPDATE | updateTarget texts (tasks.ts:1069-1078) |
 | POST /tasks/:id/parts/:part/update/undo | UNDO_UPDATE | undoTarget texts (tasks.ts:1082-1119) |
 | POST /tasks/:id/parts/:part/fix | GO with follow (purpose points) | "No point waits for a fix." (loop.ts:2792) |
@@ -1387,7 +1389,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 | Runs in the pool and beside it | jobs.ts; recovery jobs.ts:444-455 | runs end with kind restart | stays |
 | Git snapshot | gitstate.ts:52; implement.ts:1060 | lost; Continue resets with the patch | task_step.cut_json of the cut step row (migration 053, security fix of PS1) |
 | Session run handle (Hold, live stdin) | new, key task:<id>:part:<part>: | none | gone; the last stored transcript is the resume point (2.2) |
-| Live message | new | none | The app writes it into the open step row before the stdin write. After a restart, the next run gets it as "Your instructions". |
+| Live message | new | none | The app writes it to stdin first. Then the step of the run gets the Log note "Your message: <text>". A message in stdin has no row of its own. A waiting message (2.9) keeps its row; see the recovery table. |
 | Stall and loop guard | new, per process | none | gone with the process |
 | Usage timer | new, per task | none | loop.recover rebuilds it from usage reasons with armed true |
 | BUILD_WAIT timer | new, per part | none | rebuilt from ci_fix_left > 0 and ended_at of the newest ok push step; a past deadline ends the mode at once |
@@ -1398,6 +1400,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 |---|---|---|
 | interview or spec_draft with a run | step failed; STOP; Resume runs it again (tasks.ts:2523-2554) | same |
 | implementing, phase not idle | step failed; STOP; part rows cleared (G6) | step failed; reason error/restart on that part (first or queued); the task stays implementing; held and waiting rows stay |
+| implementing or stopped, a waiting message that never ran, on a part that still builds (ps4-plan.md WP-7) | new | the message row stays waiting for the next GO of the part; the other open rows of the part fail, and the reason goes to them; a built part keeps the WP-3 rule: the row fails, and Continue puts it in the queue again |
 | implementing, a part builds between steps | STOP (tasks.ts:191) | reason error/restart with step null on that part (it does not queue) |
 | implementing, phase in a slot wait | waiting step failed; STOP | as "phase not idle"; Continue waits for the slot again |
 | implementing, a reason, no open step | kept | kept; usage timers armed again |
@@ -1493,7 +1496,7 @@ The last row has no primary today. Its comment says that no route exists (model.
 5. The machines are pure: no actions, no invoke, and no createActor. machine.ts imports only xstate and types.
 6. Each mutating route sends one user event or one reason exit (9.3.6).
 7. Every event has a sender, or it is in RESERVED with its owner package.
-8. A part has at most one open step row, with one exception: an open update row can sit beside exactly one open resolve or check row of the same update (WP-5). The phase is that of the open row, or of the resolve or check row in the exception.
+8. A part has at most one open step row, with two exceptions. An open update row can sit beside exactly one open resolve or check row of the same update (WP-5). One waiting instruct row can sit beside one other open row (WP-7). The phase is that of the open row, of the resolve or check row, or of the row beside the waiting instruct row.
 9. After a restart, each state takes the recovery transition of 9.5. No waiting part row is lost.
 10. Only the user's Stop and an error that no reason covers send STOP from implementing or ready.
 
@@ -1514,7 +1517,7 @@ The last row has no primary today. Its comment says that no route exists (model.
 | Reason exits: seed each reason in I and in R. The primary exit answers 2xx and clears the reason or starts the right driver. Continue on a form reason answers 409 with its text. | new tests/tasks/reasons.test.ts (fake CLI) | PS3, PS4 | make Continue refuse ready again: red |
 | Route grid: each mutating route over fixture states (task state, part state, reason, phase) answers 2xx, 400, 404, or 409 with a sentence. It never answers 500, and no driver starts on 409. | new tests/tasks/routes-grid.test.ts | PS5 | remove one 409 check: red |
 | Loop order: the phase send helper asserts can(). A full fake-CLI build gives GO setup, CLEAN, GO baseline, CLEAN, GO run, RUN_DONE, CHECKS_GREEN, GO critic, CLEAN, GO review, CLEAN, then REVIEWED. | tests/tasks/session.test.ts | PS3 | skip the critic: red |
-| One open step per part (invariant 8, with the update exception of WP-5): an after-each check over every loop test | tests/tasks/fixture.ts helper | PS3, PS4 WP-5 | open two rows in a test: red |
+| One open step per part (invariant 8, with the update exception of WP-5 and the message exception of WP-7): an after-each check over every loop test | tests/tasks/fixture.ts helper | PS3, PS4 WP-5, WP-7 | open two rows in a test: red |
 | Restart per state: seed each row of 9.5, then run recoverTasks and loop.recover. Check the target column. Then Continue reaches the phase that GO picks. | new tests/tasks/recover.test.ts | PS1 (snapshot), PS3 (phases), PS4 (held, usage), PS7b (BUILD_WAIT) | clear held rows in clearWaits: red |
 | Queued reasons: two parts with usage arm together; held survives Stop and a restart; Continue of a held part pokes a running driver | tests/tasks/concurrent.test.ts | PS4 | remove the held skip in nextReason: red |
 | UI rows: each row of 9.6 has one test with at most one primary | tests/web/tasks-model.test.ts | PS5, PS6, PS7a, PS7b | swap derived waits 6 and 8: red |
