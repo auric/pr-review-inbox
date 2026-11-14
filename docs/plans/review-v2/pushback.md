@@ -101,6 +101,9 @@ Fix and reply agents, only when task.md holds the plan:
 **6.23.10 Data.** Migration `0NN_task_question_point.sql`, at the next free number (044 today): `ALTER TABLE task_question ADD COLUMN point INTEGER REFERENCES review_item (id) ON DELETE SET NULL;`. TaskQuestionDto adds `point: {id, severity, path, line, text, check, why, reason, cite, citeFound} | null`.
 
 **6.23.11 Acceptance criteria.**
+
+Replaced: the reservation AC-B105 to AC-B115 is void. PS4 builds this design under AC-B333 and up (ps4-plan.md section 6; section 1 item 19). The list below keeps the old numbers for reference only.
+
 1. AC-B105. A review fix step gets the new failure.md with the check reason and the evidence. Only then does the prompt hold the point lines. A fix step for red checks keeps its prompt (tests/tasks/implement.test.ts).
 2. AC-B106. Unknown IDs drop with a note. A missing entry gives "No verdict for point N" and counts as fixed (tests/tasks/pushback.test.ts).
 3. AC-B107. A push-back gives checks, a commit, one question per push-back with `point` set and `recommended` null, and the reason text. No review run starts, and the try count does not change (pushback.test.ts).
@@ -145,7 +148,7 @@ Fix and reply agents, only when task.md holds the plan:
 4. Should accepted push-backs count as user discards in the stats and the review v3 eval set? Yes. `payload.pushback` lets the eval filter them.
 5. Should the app auto-accept a repeat push-back that cites an earlier accepted answer? No, not in version 1.
 6. Should history.md cover one part or the whole task? One part, because each review covers one part diff.
-7. AC numbers: spec.md 6.22.14 reserves AC-B104 and up for section 6.21. This section takes AC-B105 to AC-B115, so 6.21 gets only AC-B104 unless one section is renumbered.
+7. AC numbers: spec.md 6.22.14 reserves AC-B104 and up for section 6.21. This section takes AC-B105 to AC-B115, so 6.21 gets only AC-B104 unless one section is renumbered. Replaced: PS4 uses AC-B333 and up instead (ps4-plan.md section 1 item 19).
 8. Colleague comments: should this wave only add the plan to PR runs? Yes. Queued item 3 (PR threads into Tell Claude, fix commits into the part worktree) stays separate and reuses `points` later.
 
 Things I did not check:

@@ -128,6 +128,8 @@ A `fix` row with item `points` or `pushback` maps to following. A `fix` row with
 
 ### WP-1. Runner and review side (implementer-xhigh)
 
+Status: built in 5cb44d7.
+
 - `implement.ts`: `StepOutcome.resetsAt`; the session of an `ImplementRunStart` gets `live: true` for implement, fix, and instruct (jobs drops it while `gates.live` is false); `StepInput.points` adds the 6.23.8 lines to the prompt; `PURPOSE_TITLE.resolve` "Resolve the conflicts".
 - `shared/task.ts`: `SESSION_PURPOSES` adds `resolve`.
 - `claude.ts`: `SESSION_GATES` adds `resolve: false`.
@@ -139,6 +141,8 @@ A `fix` row with item `points` or `pushback` maps to following. A `fix` row with
 
 ### WP-2. Reason storage, data, inputs (implementer-xhigh)
 
+Status: built in 3534a18.
+
 - `tasks.ts`: `clearWaits` keeps held rows for stopped and ready; `WAIT.first` and `WAIT.count` skip held; `SQL.running` and `recoverTasks` skip held parts; new `setUsageArmed`; `POINTS.review` reads item `review`; `openPoints` skips discarded items; the question DTO adds `point`.
 - `notify.ts`: `waits` skips held.
 - Migration 054 and its import in `db.ts`.
@@ -148,6 +152,8 @@ A `fix` row with item `points` or `pushback` maps to following. A `fix` row with
 
 ### WP-3. One GO loop, follow-ups, instruct session, Continue in ready (implementer-xhigh)
 
+Status: built in f4e7634.
+
 - `loop.ts`: `phases(c, once)` as the shared GO loop with the `follow` fact and the `following` case; `requeue` generalizes `resend`; `followRun`; `claude()` gives instruct the cut, usage, and failure path of the other session modes; `SESSION_MODES` adds instruct; `checkGate` skips at a green unchanged HEAD; `driveFollow` replaces `driveInstruct` and `drivePoints`; `goPart`; `resume()` becomes async and handles ready and built parts; `instruct()`, `fixPoints()`, `answer()`, `allow()`, `specChange()` use `goPart`.
 - `routes.ts`: await `loop.resume`.
 - `shared/task.ts`: REASON_EXITS drops `planned` from LEAVE.
@@ -156,11 +162,15 @@ A `fix` row with item `points` or `pushback` maps to following. A `fix` row with
 
 ### WP-4. Hold, Skip, Start again, usage (implementer-xhigh)
 
+Status: built in 32683c1.
+
 - `loop.ts`: the `active` set and `partIdle`; `guard(c)` halts a held part; `buildParts` skips held parts; `hold`, `skip`, `restart` (gaps 5, 6, 7, 17); `Q.mark`; usage in `runReason`, `reviewRun`, `resume()`; `usageTimers`, `rearm`, `due`; the timer delay capped at 2^31−1 ms; `shutdown` clears timers.
 - `routes.ts`: 3 new routes. `machine.ts`: RESERVED drops RESTART. `shared/task.ts`: REASON_EXITS updates.
 - Tests: new hold.test.ts (start with the gap 17 case), concurrent, recover (usage timer), session, with control mutations.
 
 ### WP-5. Update and resolve in the phase machine (implementer-xhigh)
+
+Status: built in c6b4ad8.
 
 - `loop.ts`: `driveUpdate` sends UPDATE, CONFLICT, RUN_DONE, CLEAN, CHECKS_GREEN or CHECKS_RED{afterUpdate}; own review after a resolve; `endUpdate` sends WAIT or STOPPED and gives error/run for a failed own review; the resolve session behind `gates.resolve`; `reviewDue` counts a resolved green update row.
 - `machine.ts`: RESERVED drops UPDATE and CONFLICT.
@@ -243,7 +253,7 @@ held and usage live in `blocked_json`. The restart mark is a `commit` row. The c
 - The machines are pure. `advance` and `advancePart` are the only writers of state.
 - `send()` asserts `can()`. A refused event throws, and `failed()` stops the task.
 - `after()` runs for every run end, also for a cancel.
-- A part has at most one open step row.
+- A part has at most one open step row, with one exception: an open update row can sit beside exactly one open resolve or check row of the same update (WP-5, accepted). The fixtures check this rule after each test.
 - `holdBlocked` never replaces the reason of another part.
 - `cancelPart` matches the key prefix `task:<id>:part:<part>:`.
 - `advancePart` drops the transcript on RESTART and on merged, declined, or abandoned.
