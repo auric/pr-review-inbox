@@ -167,6 +167,26 @@ describe("eval score (AC-M1)", () => {
     expect(s.minutes).toEqual({ mean: 4.75, min: 4.5, max: 5 });
     expect(s.costUsd?.mean).toBeCloseTo(0.85, 10);
     expect(s.notCompleted).toEqual({ mean: 0.5, min: 0, max: 1 });
+    expect(s.incomplete).toEqual({ mean: 0, min: 0, max: 0 });
+  });
+
+  test("failed runs count failed, cancelled, and error runs; incomplete runs count apart", () => {
+    const r: EvalResult = {
+      ...RESULT,
+      runs: [
+        run("a", 1, [], { status: "incomplete" }),
+        run("b", 1, [], { status: "failed" }),
+        run("a", 2, [], { status: "cancelled" }),
+        run("b", 2, [], { status: "error" }),
+      ],
+    };
+    const s = score(r).suite;
+    expect(s.notCompleted).toEqual({ mean: 1.5, min: 1, max: 2 });
+    expect(s.incomplete).toEqual({ mean: 0.5, min: 0, max: 1 });
+    const text = summaryText(r);
+    expect(text).toMatch(/failed runs: failed, cancelled, or error, per repeat\s+1\.5 \(1\.0 to 2\.0\)/);
+    expect(text).toMatch(/runs with coverage gaps \(incomplete\), per repeat\s+0\.5 \(0\.0 to 1\.0\)/);
+    expect(compareText(r, r)).toContain("runs with coverage gaps (incomplete), per repeat");
   });
 
   test("case numbers use the repeats of that case", () => {

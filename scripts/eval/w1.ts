@@ -3,8 +3,8 @@
 
 // Wave W1 of docs/plans/review-v2/review-quality-2026.md in one command (docs/eval/local.md): pre-checks, the probe smoke run, the
 // baseline (eval:ab), the labels (eval:label), and a summary to paste. Each step writes <step>.done into the results folder, and a
-// re-run skips it. Usage: see USAGE.
-// Exit codes: 0 done, 1 a step failed, 2 a usage error, a failed pre-check, or a No answer, 3 the usage limit, 130 stopped.
+// re-run skips it. A re-run continues a cut baseline (eval:ab --resume). Usage: see USAGE.
+// Exit codes: 0 done, 1 a step failed, 2 a usage error, a failed pre-check, a refusal, or a No answer, 3 the usage limit, 130 stopped.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join, relative, resolve } from "node:path";
@@ -13,23 +13,27 @@ import { dataDir, dbPath } from "../../src/server/config";
 import { DEFAULT_PORT } from "../../src/server/main";
 import { createClaudeRunner } from "../../src/server/review/claude";
 import { main as abMain, failedRuns } from "./ab";
-import { loadCases, setDir } from "./cases";
+import { loadCases, localDir, setDir } from "./cases";
 import { readResult, summaryText } from "./compare";
 import { main as labelMain, loadGrounding } from "./label";
-import { main as runMain } from "./run";
-import { type EvalResult, score } from "./score";
+import type { Manifest } from "./local";
+import { parseOptions, main as runMain } from "./run";
+import { type EvalResult, hitLimit, keptRun, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
-export const USAGE = `Usage: bun run eval:w1 -- [--results <folder>] [--yes] [--skip-smoke] [--runner <command> <args...>]
+export const USAGE = `Usage: bun run eval:w1 -- [--results <folder>] [--repeat N] [--yes] [--skip-smoke] [--runner <command> <args...>]
 --results: the folder of the results and the step markers. Default: eval-results/w1.
+--repeat: the repeats of the baseline. Default: 3.
 --yes: start the baseline and the labels without a question.
 --skip-smoke: skip the probe smoke run. A broken setup then fails in the costly baseline.
 --runner runs the given CLI instead of the claude CLI on PATH and must come last. It is for tests.`;
 export const STEPS = ["smoke", "baseline", "labels"] as const;
 export type Step = (typeof STEPS)[number];
-// review-quality-2026.md section 3, wave W1. Not measured.
-export const PLAN_TEXT =
-  "Plan estimate for the W1 baseline and labels, not measured: about $140-180 and about 5 hours at the shipped efforts.";
+// The W1 baseline of 2026-11-14 at the shipped efforts.
+const RUN_MINUTES = 8;
+const RUN_USD = 4;
+export const PLAN_TEXT = `Measured on 2026-11-14: about ${RUN_MINUTES} minutes and $${RUN_USD} per case run (large cases 13-18 minutes).`;
+const estimate = (runs: number) => `about ${((runs * RUN_MINUTES) / 60).toFixed(1)} hours and $${runs * RUN_USD}`;
 export const PASTE = "Paste the lines between the two markers to Claude.";
 export const BEGIN = "===== W1 summary begin =====";
 export const END = "===== W1 summary end =====";
@@ -45,7 +49,8 @@ const askUser = (question: string) => /^y(es)?$/i.test(prompt(question)?.trim() 
 const DEPS: Deps = { run: runMain, ab: abMain, label: labelMain, ask: askUser };
 
 type Marker = { file: string | null; costUsd: number; minutes: number; finishedAt: string };
-type Outcome = { code: number; file: string | null; costUsd: number; limit: boolean; why: string | null };
+// costUsd: this attempt. fileUsd: all runs of the result file, for the marker. Absent: costUsd.
+type Outcome = { code: number; file: string | null; costUsd: number; fileUsd?: number; limit: boolean; why: string | null };
 
 export const markerPath = (results: string, step: Step) => join(results, `${step}.done`);
 const readMarker = (results: string, step: Step): Marker | null =>
@@ -113,7 +118,7 @@ function runOutcome(code: number, dir: string, expected: number | null): Outcome
   if (!name) return { code: code || 1, file: null, costUsd: 0, limit: false, why: `the run gave no result file (exit code ${code})` };
   const file = join(dir, name);
   const r = readResult(file);
-  const limit = r.runs.some((x) => x.errorKind === "usage_limit");
+  const limit = r.runs.some(hitLimit);
   const failed = failedRuns(r);
   const why =
     code === 130
@@ -143,13 +148,33 @@ async function teed(f: () => Promise<number>): Promise<{ code: number; text: str
   }
 }
 
+// The case count of the last local set build, or null. eval:ab builds the set there, as w1 gives it no --out.
+function setCases(): number | null {
+  try {
+    return (JSON.parse(readFileSync(join(localDir(), "MANIFEST.json"), "utf8")) as Manifest).counts.cases;
+  } catch {
+    return null;
+  }
+}
+
 // The arguments of each step. eval:ab takes no --real: it runs the claude CLI on PATH unless --runner is given.
-export function stepArgs(results: string, runner: string[] | null) {
+export function stepArgs(results: string, runner: string[] | null, repeat = 3, resume = false) {
   const cli = runner ? ["--runner", ...runner] : ["--real"];
   const baseline = join(results, "baseline");
   return {
     smoke: ["--set", "probe", "--repeat", "1", "--out", join(results, "smoke"), ...cli],
-    baseline: ["--clean", "8", "--repeat", "3", "--baseline-only", "--review-only", "--results", baseline, ...(runner ? cli : [])],
+    baseline: [
+      "--clean",
+      "8",
+      "--repeat",
+      String(repeat),
+      "--baseline-only",
+      "--review-only",
+      "--results",
+      baseline,
+      ...(resume ? ["--resume"] : []),
+      ...(runner ? cli : []),
+    ],
     plan: [baseline],
     labels: [baseline, ...cli],
   };
@@ -158,13 +183,18 @@ export function stepArgs(results: string, runner: string[] | null) {
 export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
   const at = argv.indexOf("--runner");
   const runner = at < 0 ? null : argv.slice(at + 1);
-  let v: { results?: string; yes?: boolean; "skip-smoke"?: boolean };
+  let v: { results?: string; repeat?: string; yes?: boolean; "skip-smoke"?: boolean };
   try {
     v = parseArgs({
       args: at < 0 ? argv : argv.slice(0, at),
       strict: true,
       allowPositionals: false,
-      options: { results: { type: "string" }, yes: { type: "boolean" }, "skip-smoke": { type: "boolean" } },
+      options: {
+        results: { type: "string" },
+        repeat: { type: "string", default: "3" },
+        yes: { type: "boolean" },
+        "skip-smoke": { type: "boolean" },
+      },
     }).values;
   } catch (e) {
     console.error(`${(e as Error).message}\n${USAGE}`);
@@ -174,8 +204,14 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
     console.error(`--runner needs a command.\n${USAGE}`);
     return 2;
   }
+  const checkedRepeat = parseOptions(["--repeat", v.repeat ?? "3"]);
+  if ("error" in checkedRepeat) {
+    console.error(`${checkedRepeat.error}\n${USAGE}`);
+    return 2;
+  }
+  const repeat = checkedRepeat.repeat;
   const results = resolve(v.results ?? join(REPO, "eval-results", "w1"));
-  const args = stepArgs(results, runner);
+  const args = stepArgs(results, runner, repeat);
 
   // Step 0: no check starts a model call.
   const checked = await createClaudeRunner({ command: runner ?? undefined }).check();
@@ -226,7 +262,7 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
       console.error(
         `Your Claude usage limit is reached. Run \`bun run eval:w1\` again after the limit resets. Finished steps are kept. This ${name} attempt cost ${usd(o.costUsd)}.`,
       );
-      if (name === "baseline") console.error("eval:ab cannot continue a cut baseline. The next run repeats the whole baseline.");
+      if (name === "baseline") console.error("The next run resumes the baseline and keeps its finished runs.");
       return 3;
     }
     if (!ok) {
@@ -235,7 +271,7 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
     }
     const marker: Marker = {
       file: o.file && relative(results, o.file),
-      costUsd: o.costUsd,
+      costUsd: o.fileUsd ?? o.costUsd,
       minutes,
       finishedAt: new Date().toISOString(),
     };
@@ -265,12 +301,38 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
   // Step 2: the baseline.
   const baseline = join(results, "baseline");
   let stop = await step("baseline", async () => {
-    console.log(PLAN_TEXT);
+    const dir = join(baseline, "review-baseline");
+    const cut = firstJson(dir);
+    const prior = cut ? readResult(join(dir, cut)) : null;
+    const kept = prior ? { ...prior, runs: prior.runs.filter(keptRun) } : null;
+    const n = setCases();
+    console.log(`${PLAN_TEXT} The baseline runs --repeat ${repeat}.`);
+    if (kept) {
+      const all = n === null ? null : n * repeat;
+      console.log(
+        all === null
+          ? `Resuming the baseline: ${kept.runs.length} runs are done.`
+          : `Resuming the baseline: ${kept.runs.length} of ${all} runs are done. The other ${all - kept.runs.length} runs take ${estimate(all - kept.runs.length)}.`,
+      );
+    } else if (n !== null)
+      console.log(`The last set build has ${n} cases: ${n * repeat} case runs at --repeat ${repeat} take ${estimate(n * repeat)}.`);
     if (!v.yes && !deps.ask("Start the baseline? [y/N]")) return "no";
-    freshFolder(baseline);
-    const code = await deps.ab(args.baseline);
-    // eval:ab passes no case list, so a complete run holds cases x repeats runs.
-    const o = runOutcome(code, join(baseline, "review-baseline"), null);
+    if (!kept) freshFolder(baseline);
+    const code = await deps.ab(kept ? stepArgs(results, runner, repeat, true).baseline : args.baseline);
+    if (code === 2)
+      return {
+        code,
+        file: null,
+        costUsd: 0,
+        limit: false,
+        why: `eval:ab refused the run (exit code 2)${kept ? ". To start a new baseline, move the baseline folder away" : ""}`,
+      };
+    // run.ts adds a resumes entry before its first case run. Without it, the file still holds the old runs of the cut attempt.
+    if (prior && cut && (readResult(join(dir, cut)).resumes?.length ?? 0) === (prior.resumes?.length ?? 0))
+      return { code: code || 1, file: null, costUsd: 0, limit: false, why: `eval:ab did not start the resume (exit code ${code})` };
+    // eval:ab passes no case list, so a complete run holds cases x repeats runs. The kept runs of a cut result cost an earlier attempt.
+    const run = runOutcome(code, dir, null);
+    const o = kept ? { ...run, costUsd: run.costUsd - costOf(kept), fileUsd: run.costUsd } : run;
     if (!o.file || o.limit || code === 130) return o;
     const r = readResult(o.file);
     const total = r.cases.length * r.repeat;
@@ -279,7 +341,8 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
     if (failed === 0) return o;
     if (failed > total * MAX_FAILED_SHARE)
       return { ...o, why: `${failed} of ${total} baseline runs failed (${failedKinds(r)}), more than 25%, so the numbers are not usable` };
-    // A failed run scores as a run with no finding (score.ts notCompleted). eval:ab --baseline accepts the result.
+    // A failed run scores as a run with no finding (score.ts notCompleted). eval:ab --baseline refuses the result until eval:ab
+    // --resume runs the failed runs again.
     console.log(`Warning: ${failedText(r)}. The baseline is kept. The summary marks it.`);
     return { ...o, why: null };
   });

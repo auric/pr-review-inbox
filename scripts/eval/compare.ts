@@ -40,7 +40,8 @@ const LABEL: Record<Metric, string> = {
   verdictOk: "verdict ok: posted earlier findings whose fixed verdict matches your later resolve (--rereview)",
   minutes: "minutes per case",
   costUsd: "cost per case in USD, as the CLI reports it",
-  notCompleted: "runs that did not complete, per repeat",
+  notCompleted: "failed runs: failed, cancelled, or error, per repeat",
+  incomplete: "runs with coverage gaps (incomplete), per repeat",
   groundedRaised: "grounded raised: counted must-finds that any finding matches, hidden ones included",
   lossMain: "verifier loss, main: counted must-finds whose best finding is in main and not refuted",
   lossDemoted: "verifier loss, demoted: counted must-finds whose best finding is refuted but stays in the list",
@@ -107,6 +108,7 @@ const DIGITS: Record<Metric, number> = {
   minutes: 1,
   costUsd: 3,
   notCompleted: 1,
+  incomplete: 1,
 };
 
 const num = (m: Metric, x: number) => (RATE.has(m) ? `${(x * 100).toFixed(DIGITS[m])}%` : x.toFixed(DIGITS[m]));
@@ -157,7 +159,8 @@ const header = (r: EvalResult) => {
   // review-quality-2026.md E2. A file made before these fields existed does not record them.
   const e2 = r.requested;
   const replay = e2?.replayOf ? `, finder replayed from ${e2.replayOf}` : "";
-  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
+  const resumed = (r.resumes ?? []).map((x) => `${x.commit}${x.dirty ? " (uncommitted changes)" : ""}`);
+  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}${resumed.length ? `, resumed at commit ${resumed.join(", ")}` : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
 };
 
 const pct = (a: number, b: number) => (b === 0 ? "-" : `${((a / b) * 100).toFixed(1)}%`);

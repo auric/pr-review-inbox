@@ -295,7 +295,7 @@ Report other problems too.
 | Wave | Work | Shared runs | Model cost |
 |---|---|---|---|
 | W0 | E1, E2, E3-E5 code; probe smoke run | none | about $5 |
-| W1 | Rebuild the set (`eval:local --clean 8`); baseline-only run at shipped efforts, repeat 3, recorded; labels; judge calibration; zero-cost checks (union bound, refuted in main, verifier matrix, evidence references: `bun run eval:label -- eval-results/w1/baseline --evidence`, category counts) | none | about $140-180, about 5 h |
+| W1 | Rebuild the set (`eval:local --clean 8`); baseline-only run at shipped efforts, repeat 3, recorded; labels; judge calibration; zero-cost checks (union bound, refuted in main, verifier matrix, evidence references: `bun run eval:label -- eval-results/w1/baseline --evidence`, category counts) | none | baseline measured on 2026-11-14: about $4 and 8 min per case run (large cases 13-18 min), so 42 cases x 3 cost about $500 and 17 h; labels extra |
 | W2 (cheap) | C1 = improvements 1+2; replays (control, verify2, one effort); improvement 5 by rescore; probe set | bisect C1 only if large cases are mixed | about $130-210 |
 | W3 (costly) | C2 broad; C3 runs3 if gated; C4 classes if gated; improvement 8 rides on C2 or C4 | none; superiority tests run alone | about $55-450 by gates |
 | W3b (security, if gated) | Item 10: security2-verify replay, then C5 security2 | none; runs alone | one verify replay plus about the cost of C4 |

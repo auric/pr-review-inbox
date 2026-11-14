@@ -157,6 +157,7 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   build: [],
   results: null,
   baseline: null,
+  resume: false,
   runner: ["fake"],
   ...o,
 });
@@ -210,6 +211,39 @@ describe("eval:ab --baseline checks", () => {
     expect(refused({ repeat: 2 }, opts({ candidateRepeat: "3" }))).toContain("ran with --repeat 2, but the candidate runs 3 repeats");
     // A different commit and CLI version are allowed.
     expect(refused({ commit: "def", cliVersion: "2.0.0" })).toBeNull();
+  });
+
+  test("a cut or short baseline is refused: its finished runs are fewer than the set cases x repeats", () => {
+    const run = (id: string, status: string, o: Partial<EvalResult["runs"][number]> = {}) =>
+      ({ case: id, repeat: 1, status, errorKind: null, ...o }) as EvalResult["runs"][number];
+    const info = (id: string) => ({ id, title: id, language: "ts", changedLines: 1, base: "b", head: "h", bugs: [], traps: [] });
+    const a = (runs: EvalResult["runs"]) => ({ ...header("review", "baseline"), cases: ["a", "b"].map(info), runs });
+    const full = a([run("a", "completed"), run("b", "incomplete")]);
+    expect(reuseRefusal("review", full, opts(), FP, false, 2)).toBeNull();
+    // A cut in the first pass: a.cases lists only the cases that ran, so the set count decides.
+    const cut = { ...a([run("a", "completed")]), cases: [info("a")] };
+    expect(reuseRefusal("review", cut, opts(), FP, false, 2)).toBe(
+      "Refused: the stored review baseline has 1 finished runs of 2 (2 cases x 1 repeats). Resume it with eval:ab --resume, then use it.",
+    );
+    expect(
+      reuseRefusal("review", a([run("a", "completed"), run("b", "failed", { errorKind: "process" })]), opts(), FP, false, 2),
+    ).toContain("has 1 finished runs of 2");
+    // judge.ts: a usage limit in the check phase leaves an incomplete run with verify.failed.
+    const limited = run("b", "incomplete", { verify: { failed: { kind: "usage_limit", text: null } } as never });
+    expect(reuseRefusal("review", a([run("a", "completed"), limited]), opts(), FP, false, 2)).toContain("has 1 finished runs of 2");
+    expect(reuseRefusal("review", cut, opts(), FP, true, 2)).toBe(
+      "Refused: the stored review candidate has 1 finished runs of 2 (2 cases x 1 repeats).",
+    );
+  });
+
+  test("--resume needs --results and --baseline-only, and reaches only the runner arguments of its run", () => {
+    expect(parseAb(["--resume"])).toEqual({ error: "--resume needs --results and --baseline-only." });
+    expect(parseAb(["--resume", "--results", "r"])).toEqual({ error: "--resume needs --results and --baseline-only." });
+    expect(parseAb(["--resume", "--results", "r", "--baseline-only"])).toMatchObject({ resume: true });
+    expect(parseAb([])).toMatchObject({ resume: false });
+    const args = runArgs("review", "baseline", opts(), "out", [], undefined, "cut.json");
+    expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2)).toEqual(["--resume", "cut.json"]);
+    expect(runArgs("review", "baseline", opts(), "out")).not.toContain("--resume");
   });
 
   test("a repeat-2 candidate reuses a repeat-3 baseline, also with no --repeat", () => {
@@ -291,7 +325,7 @@ describe("eval:ab --large (docs/plans/review-v3.md WP-V13)", () => {
   const FULL = "f".repeat(64);
   const SUB = "5".repeat(64);
   const caseInfo = (id: string) => ({ id, title: id, language: "ts", changedLines: 1, base: "b", head: "h", bugs: [], traps: [] });
-  const caseRun = (id: string, repeat = 1) => ({ case: id, repeat }) as EvalResult["runs"][number];
+  const caseRun = (id: string, repeat = 1) => ({ case: id, repeat, status: "completed" }) as EvalResult["runs"][number];
   const full = (): EvalResult => ({
     ...header("review", "baseline"),
     cases: ["a", "b", "c"].map(caseInfo),
@@ -775,6 +809,65 @@ describe("eval:ab end to end with the fake CLI", () => {
       const b = JSON.parse(readFileSync(join(cand, readdirSync(cand).find((f) => f.endsWith(".json")) as string), "utf8")) as EvalResult;
       expect(b.requested).toMatchObject({ replayOf: file, verifierEffort: "high", reviewerMode: "auto" });
       expect(b.runs[0]?.items.map((i) => [i.path, i.line, i.verdict])).toEqual(a.runs[0]?.items.map((i) => [i.path, i.line, i.verdict]));
+    },
+    SLOW,
+  );
+
+  test(
+    "--resume continues the cut baseline in its own file, and a lower --repeat works only when the finished runs fit",
+    async () => {
+      const res = join(TMP, "results-resume");
+      const flags = ["--results", res, "--baseline-only", "--review-only"];
+      const none = await run([...flags, "--resume"]);
+      expect(none.code).toBe(2);
+      expect(none.stderr).toContain("review-baseline holds 0 result files, but it must hold exactly one.");
+
+      const first = await run([...flags, "--repeat", "2"]);
+      expect(first.code).toBe(0);
+      const base = join(res, "review-baseline");
+      const name = readdirSync(base).find((f) => f.endsWith(".json")) as string;
+      const file = join(base, name);
+      const read = () => JSON.parse(readFileSync(file, "utf8")) as EvalResult;
+      const a = read();
+      expect(a.runs.map((x) => x.repeat)).toEqual([1, 2]);
+      // The cut: the run of repeat 2 has no entry. Its calls stay on disk.
+      writeFileSync(file, JSON.stringify({ ...a, runs: a.runs.slice(0, 1) }));
+      // A cut result is no baseline to reuse.
+      const reuse = await run(["--results", join(TMP, "results-resume-reuse"), "--baseline", res, "--repeat", "2"]);
+      expect(reuse.code).toBe(2);
+      expect(reuse.stderr).toContain("Refused: the stored review baseline has 1 finished runs of 2 (1 cases x 2 repeats).");
+
+      const before = calls();
+      const r = await run([...flags, "--repeat", "2", "--resume"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Resume: 1 of 2 runs are done.");
+      expect(r.stdout).not.toContain("[1/2]");
+      expect(r.stdout).toContain("[2/2] case 1 #2:");
+      expect(calls() - before).toBe(firstRun / 2);
+      expect(readdirSync(base).filter((f) => f.endsWith(".json"))).toEqual([name]);
+      const b = read();
+      expect(b.runs.map((x) => x.repeat)).toEqual([1, 2]);
+      expect(b.runs[0]).toEqual(a.runs[0] as EvalResult["runs"][number]);
+      expect(b.resumes).toHaveLength(1);
+
+      // Repeat 2 holds a finished run, so --repeat 1 does not fit. The file stays as it is.
+      const bytes = readFileSync(file, "utf8");
+      const low = await run([...flags, "--repeat", "1", "--resume"]);
+      expect(low.code).toBe(2);
+      expect(low.stderr).toContain("Refused: --resume: 1 finished runs of the saved result are outside 1 cases x 1 repeats.");
+      expect(readFileSync(file, "utf8")).toBe(bytes);
+      // A cut in repeat 1 fits --repeat 1: no case run, the result takes repeat 1, and the calls of repeat 2 go.
+      const id = a.cases[0]?.id as string;
+      const pairOne = readdirSync(callsDir(file)).filter((f) => f.startsWith(`${id}-1-`));
+      expect(pairOne.length).toBeGreaterThan(0);
+      writeFileSync(file, JSON.stringify({ ...b, runs: b.runs.slice(0, 1) }));
+      const fit = await run([...flags, "--repeat", "1", "--resume"]);
+      expect(fit.stderr).toBe("");
+      expect(fit.code).toBe(0);
+      expect(fit.stdout).toContain("Resume: 1 of 1 runs are done.");
+      expect(read()).toMatchObject({ repeat: 1, runs: [b.runs[0]] });
+      expect(readdirSync(callsDir(file)).sort()).toEqual(pairOne.sort());
     },
     SLOW,
   );

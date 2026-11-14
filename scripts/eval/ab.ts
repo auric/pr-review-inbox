@@ -4,7 +4,7 @@
 // Gate U-V1 in one command (docs/plans/review-v3.md, docs/eval/local.md): build the local set from the data folder of the app, then
 // run the shipped profile (baseline) and the candidate on it, for the review cases and the re-review cases, and print one table each.
 // Usage: see USAGE. Without --runner, the runs use the claude CLI on PATH. Exit codes: 0 done, 1 a build error or a failed run, 2 a
-// usage error.
+// usage error or a refusal, 130 stopped.
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -19,13 +19,14 @@ import { bundleRepo, type EvalCase, loadCases, localDir, setDir, setFingerprint 
 import { compareText, readResult, refusal, suiteDelta } from "./compare";
 import { main as buildMain, type Manifest } from "./local";
 import { callsDir, checkoutState, evalProfile, finderChange, parseOptions, main as runMain } from "./run";
-import { type EvalResult, score } from "./score";
+import { type EvalResult, finished, keptRun, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
 export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}]
   [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-reviewer-mode ${REVIEWER_MODES.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--candidate-verifier-effort ${EFFORTS.join("|")}]
-  [--candidate-replay] [--baseline-only] [--review-only] [--large] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--runner <command> <args...>]
+  [--candidate-replay] [--baseline-only] [--review-only] [--large] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--resume] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
+--resume: continue the cut baseline result in each <mode>-baseline folder of --results (run.ts --resume). It needs --results and --baseline-only. Give the flags of the cut run. --repeat can be lower when the finished runs fit.
 --baseline: the folder of an earlier eval:ab run. Its review-baseline/ and rereview-baseline/ results replace the baseline runs. A candidate result there that matches the current shipped profile can serve as well. A mode without a result runs the baseline.
 --repeat: the repeats of the baseline. --candidate-repeat: the repeats of the candidate, at most those of the baseline. Default: --repeat.
 --candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. Default: nothing, so the candidate is the shipped profile.
@@ -71,6 +72,8 @@ export type AbOptions = {
   results: string | null;
   // The folder of an earlier eval:ab run whose baseline results this run reuses.
   baseline: string | null;
+  // Continue the cut baseline results in the results folder.
+  resume: boolean;
   runner: string[] | null;
 };
 
@@ -108,6 +111,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
         user: { type: "string" },
         results: { type: "string" },
         baseline: { type: "string" },
+        resume: { type: "boolean", default: false },
       },
     }).values;
   } catch (e) {
@@ -136,11 +140,14 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     build,
     results: results === undefined ? null : resolve(results),
     baseline: baseline === undefined ? null : resolve(baseline),
+    resume: v.resume === true,
     runner,
   };
   if (o.baseline !== null && !existsSync(o.baseline)) return { error: `--baseline: no folder ${o.baseline}.` };
   if (o.baselineOnly && (o.baseline !== null || o.replay))
     return { error: "--baseline-only runs only the baseline. Leave out --baseline and --candidate-replay." };
+  // A new candidate result in a used folder would sit beside the old one, and main reads the first file it finds.
+  if (o.resume && (o.results === null || !o.baselineOnly)) return { error: "--resume needs --results and --baseline-only." };
   for (const [flag, e] of [
     ["--effort", o.baseEffort],
     ["--candidate-effort", o.effort],
@@ -172,7 +179,7 @@ function shipped() {
 }
 
 // The eval runner arguments of one run. The candidate adds its variants and modules to the shipped profile. cases: the --large cases.
-// replay: the baseline result whose recorded finder calls the candidate replays.
+// replay: the baseline result whose recorded finder calls the candidate replays. resume: the cut result that the run continues.
 export function runArgs(
   mode: Mode,
   side: "baseline" | "candidate",
@@ -180,6 +187,7 @@ export function runArgs(
   out: string,
   cases: string[] = [],
   replay?: string,
+  resume?: string,
 ): string[] {
   const cand = side === "candidate";
   const repeat = (cand ? o.candidateRepeat : null) ?? o.repeat;
@@ -198,6 +206,7 @@ export function runArgs(
   if (cand && o.verifier !== null) args.push("--verifier", o.verifier);
   if (cand && o.verifierEffort !== null) args.push("--verifier-effort", o.verifierEffort);
   if (cand && replay) args.push("--replay-find", replay);
+  if (resume) args.push("--resume", resume);
   args.push("--ordinals");
   if (out) args.push("--out", out);
   args.push(...(o.runner ? ["--runner", ...o.runner] : ["--real"]));
@@ -207,7 +216,15 @@ export function runArgs(
 // --baseline: why the stored result of a mode does not match the baseline that this run would make, or null.
 // fingerprint: the set fingerprint of the mode in MANIFEST.json. A different commit or CLI version is allowed. candidate: the result
 // is the candidate of an earlier run. It ran the shipped profile of its time, so only its revision must match, not its profile version.
-export function reuseRefusal(mode: Mode, a: EvalResult, o: AbOptions, fingerprint: string, candidate = false): string | null {
+// cases: the case count of the set. a.cases lists only the cases that ran, so a cut result has too few.
+export function reuseRefusal(
+  mode: Mode,
+  a: EvalResult,
+  o: AbOptions,
+  fingerprint: string,
+  candidate = false,
+  cases = a.cases.length,
+): string | null {
   const p = parseOptions(runArgs(mode, "baseline", o, ""));
   const e = "error" in p ? p : evalProfile(p);
   if ("error" in e) return e.error ?? "Invalid baseline profile.";
@@ -230,6 +247,9 @@ export function reuseRefusal(mode: Mode, a: EvalResult, o: AbOptions, fingerprin
     return `${it} ran profile revision ${a.profile.revision.slice(0, 8)}, but the shipped profile is now revision ${profileRevision(want).slice(0, 8)}.`;
   const runs = Number(o.candidateRepeat ?? o.repeat);
   if (a.repeat < runs) return `${it} ran with --repeat ${a.repeat}, but the candidate runs ${runs} repeats.`;
+  const kept = a.runs.filter(keptRun).length;
+  if (kept < cases * a.repeat)
+    return `${it} has ${kept} finished runs of ${cases * a.repeat} (${cases} cases x ${a.repeat} repeats).${candidate ? "" : " Resume it with eval:ab --resume, then use it."}`;
   return null;
 }
 
@@ -249,6 +269,7 @@ export async function largeCases(cases: Pick<EvalCase, "id" | "local">[], profil
 
 // --large with --baseline: a full-set baseline passes reuseRefusal against the full fingerprint, then keeps only the large cases and
 // gets the subset fingerprint. A baseline that ran the subset already passes against the subset fingerprint. Else the refusal text.
+// fullCases: the case count of the full set.
 export function largeBaseline(
   a: EvalResult,
   o: AbOptions,
@@ -256,9 +277,10 @@ export function largeBaseline(
   subset: string,
   ids: string[],
   candidate = false,
+  fullCases = a.cases.length,
 ): EvalResult | string {
-  if (a.fingerprint === subset) return reuseRefusal("review", a, o, subset, candidate) ?? a;
-  const refused = reuseRefusal("review", a, o, full, candidate);
+  if (a.fingerprint === subset) return reuseRefusal("review", a, o, subset, candidate, ids.length) ?? a;
+  const refused = reuseRefusal("review", a, o, full, candidate, fullCases);
   if (refused) return refused;
   const missing = ids.filter((id) => !a.cases.some((c) => c.id === id) || !a.runs.some((r) => r.case === id)).length;
   if (missing) return `Refused: the stored review baseline has no run of ${missing} large case${missing === 1 ? "" : "s"}.`;
@@ -275,7 +297,7 @@ export function baseRevision(a: EvalResult, b: EvalResult): string {
 }
 
 // The runs that did not finish: a failed, cancelled, or error run. An incomplete run finished with gaps and counts.
-export const failedRuns = (r: EvalResult) => r.runs.filter((x) => x.status !== "completed" && x.status !== "incomplete").length;
+export const failedRuns = (r: EvalResult) => r.runs.filter((x) => !finished(x)).length;
 
 const total = (r: EvalResult, f: (x: EvalResult["runs"][number]) => number | null | undefined) =>
   r.runs.reduce((n, x) => n + (f(x) ?? 0), 0);
@@ -374,8 +396,8 @@ export async function main(argv: string[]): Promise<number> {
         const a = readResult(origin);
         const fingerprint = mode === "review" ? manifest.fingerprint : manifest.rereview.fingerprint;
         const kept = subset
-          ? largeBaseline(a, o, manifest.fingerprint, subset.fingerprint, subset.ids, candidate)
-          : (reuseRefusal(mode, a, o, fingerprint, candidate) ?? a);
+          ? largeBaseline(a, o, manifest.fingerprint, subset.fingerprint, subset.ids, candidate, manifest.counts.cases)
+          : (reuseRefusal(mode, a, o, fingerprint, candidate, count(mode)) ?? a);
         if (typeof kept === "string") refusals.push(kept);
         else if (o.replay && !existsSync(callsDir(origin)))
           refusals.push(`Refused: the stored ${mode} ${side} has no recorded calls for --candidate-replay.`);
@@ -399,6 +421,17 @@ export async function main(argv: string[]): Promise<number> {
       console.error(refusals.join("\n"));
       return 2;
     }
+  }
+  // --resume: the one cut result of each baseline mode, found before any run.
+  const resumed = new Map<Mode, string>();
+  for (const mode of o.resume ? (["review", "rereview"] as const).filter((m) => count(m) > 0) : []) {
+    const dir = join(results, `${mode}-baseline`);
+    const found = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+    if (found.length !== 1) {
+      console.error(`--resume: ${dir} holds ${found.length} result files, but it must hold exactly one.`);
+      return 2;
+    }
+    resumed.set(mode, join(dir, found[0] as string));
   }
   const runs = Number(o.candidateRepeat ?? o.repeat);
   if (!o.baselineOnly && runs > Number(o.repeat) && (["review", "rereview"] as const).some((m) => count(m) > 0 && !stored.has(m))) {
@@ -428,12 +461,13 @@ export async function main(argv: string[]): Promise<number> {
       const out = join(results, `${mode}-${side}`);
       console.log(`\n--- ${mode} ${side} ---`);
       const replay = o.replay ? (stored.get(mode)?.origin ?? files[0]) : undefined;
-      const code = await runMain(runArgs(mode, side, o, out, cases(mode), replay));
+      const code = await runMain(runArgs(mode, side, o, out, cases(mode), replay, resumed.get(mode)));
       const file = existsSync(out) ? readdirSync(out).find((f) => f.endsWith(".json")) : undefined;
       if (code !== 0 || !file) {
         failed = true;
         console.error(`The ${mode} ${side} run failed with exit code ${code}.`);
-        if (code === 130) return 130;
+        // 2: run.ts refused the run before its first case run, for example a --resume refusal.
+        if (code === 130 || code === 2) return code;
         break;
       }
       files.push(join(out, file));

@@ -97,6 +97,7 @@ A fixture case can have `threads` and `clean`, as a local case can. The run seed
 - `--user <slug>`: your user slug. Default: `userSlug` of `config.json` beside the database file.
 - `--results <folder>`: the folder of the result files. Default: a new folder in `eval-results/`.
 - `--baseline <folder>`: the folder of an earlier eval:ab run. See "Reuse a baseline".
+- `--resume`: continue the cut baseline result in each `<mode>-baseline/` folder of `--results`. It needs `--results` and `--baseline-only`, and each folder must hold exactly one result file. Give the flags of the cut run. The run keeps the completed and incomplete runs, runs the other case runs, and writes the same file. See "Run W1 in one command" for the refusal rules.
 
 ## Reuse a baseline
 
@@ -108,7 +109,7 @@ bun run eval:ab -- --baseline eval-results/ab-<stamp>-<commit> --candidate-varia
 
 - The command reads the baseline results from `review-baseline/` and `rereview-baseline/` of that folder.
 - A mode without its folder runs the baseline as usual. The output says so in one line.
-- The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, or model, or fewer repeats than the candidate runs. The check runs before any run.
+- The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, or model, or fewer repeats than the candidate runs. It also refuses a baseline with fewer finished runs (completed or incomplete, no usage limit) than cases x repeats, such as a cut baseline. Resume that baseline with `--resume` first. The checks run before any run.
 - Give the same `--effort` and `--clean` as the earlier run. The candidate can run fewer repeats than the stored baseline.
 - Each run records its CLI calls automatically in `<result>.calls/` beside its result file. `--candidate-replay` uses the recording of the baseline result. A new commit or CLI version is allowed. The A and B header lines show both.
 - The set must not change. A new decision in the app changes the set fingerprint, and the command then refuses the reuse.
@@ -147,17 +148,20 @@ The tables show "part files per case" and "parts read" next to "rl-reviewer call
 
 1. Pre-checks, with no model call: `claude auth status` must show authMethod claude.ai, the app must be closed (nothing listens on 127.0.0.1 at `REVIEW_LOOP_PORT` or 7317), and the data folder of the app must hold the database, the git cache, and a user slug. The command prints the CLI version.
 2. Smoke: the probe set once (`bun run eval -- --set probe --repeat 1`). A failed or missing case run stops the command with exit code 1.
-3. Baseline: the command prints the plan estimate (about $140-180 and about 5 hours, not measured) and asks "Start the baseline? [y/N]". Then it runs `eval:ab -- --clean 8 --repeat 3 --baseline-only --review-only`.
+3. Baseline: the command prints the cost per case run (about 8 minutes and $4, measured on 2026-11-14; large cases take 13-18 minutes). When an earlier set build exists, it also prints the total for its cases x `--repeat`. Then it asks "Start the baseline? [y/N]" and runs `eval:ab -- --clean 8 --repeat 3 --baseline-only --review-only`. `--repeat N` changes the repeats of the baseline. For example, 42 cases x 3 repeats take about 17 hours and $500.
 4. Labels: the command runs eval:label without `--real`, prints the open work and its estimate, and asks "Start the labels? [y/N]". Then it labels with `--real`.
 5. Summary: aggregate numbers, case rows by ordinal, and the step costs between two marker lines. Paste these lines to Claude.
 
 - Each finished step writes `<step>.done` into the results folder. A new run prints "Done before: <step>" and skips it. A smoke or label step with a failed run writes no marker.
-- A complete baseline with failed runs (not the usage limit) is kept when 25% or fewer of its runs failed. The command prints a warning with the count and the error kinds, and the summary marks them. A failed run scores as a run with no finding. A later eval:ab with `--baseline` accepts the result, but exits with code 1 because the baseline has failed runs. Above 25%, a stop, or fewer runs than cases x repeats, the baseline writes no marker.
+- A complete baseline with failed runs (not the usage limit) is kept when 25% or fewer of its runs failed. The command prints a warning with the count and the error kinds, and the summary marks them. A failed run scores as a run with no finding. A later eval:ab with `--baseline` refuses the result, because it has fewer finished runs than cases x repeats. Run the failed runs again first: `bun run eval:ab -- --clean 8 --repeat 3 --baseline-only --review-only --results eval-results/w1/baseline --resume`. Above 25%, a stop, or fewer runs than cases x repeats, the baseline writes no marker.
 - `costs.jsonl` in the results folder records the cost and the minutes of each step attempt.
 - `--yes` answers both questions with yes. Any answer other than y or yes stops the command with exit code 2.
 - `--skip-smoke` skips the smoke run and prints a warning.
-- Usage limit: the command stops with exit code 3. Run it again after the limit resets. eval:ab cannot continue a cut baseline, so the next run repeats the whole baseline. The cut baseline folder stays as `baseline-earlier-<stamp>`. eval:label continues from its stored answers.
-- Exit codes: 0 done, 1 a failed step, 2 a failed pre-check, a usage error, or a No answer, 3 the usage limit.
+- Usage limit: the command stops with exit code 3. Run the same command again after the limit resets. eval:label continues from its stored answers.
+- A cut baseline resumes. After a usage limit, a crash, or Ctrl+C, the next run finds the result file in `baseline/review-baseline/` and prints "Resuming the baseline: K of N runs are done." It runs `eval:ab` with `--resume`, which keeps the completed and incomplete runs. A failed, cancelled, or error run and a run that hit the usage limit run again. The result stays in the same file.
+- A resume refuses a change of the run setup: the prompt version, the profile version and revision, the model and effort flags, the CLI version, the runner, the set and its fingerprint, the mode, the volume, or the tolerance. A new commit is allowed. The command then prints a warning, and the result file records each commit in `resumes`. A lower `--repeat` is allowed when every finished run fits in it.
+- A refused resume stops with exit code 2. To start a new baseline, move the folder `baseline` away and run the command again. A Claude Code update changes the CLI version, and a new set build after you used the app can change the fingerprint.
+- Exit codes: 0 done, 1 a failed step, 2 a failed pre-check, a usage error, a refusal, or a No answer, 3 the usage limit.
 
 ## Label the findings (eval:label)
 

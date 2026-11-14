@@ -169,10 +169,20 @@ export type EvalResult = {
   rereview?: boolean;
   // eval:rescore --fold-refuted moved each refuted item of main to fold. Absent: false.
   refutedFolded?: boolean;
+  // run.ts --resume: the checkout of each resume, in order. commit and dirty above are those of the first run. Absent: no resume.
+  resumes?: { commit: string; dirty: boolean; at: string }[];
   repeat: number;
   cases: EvalCaseInfo[];
   runs: CaseRun[];
 };
+
+// A run that finished: completed, or incomplete with coverage gaps. A failed, cancelled, or error run did not.
+export const finished = (r: Pick<CaseRun, "status">) => r.status === "completed" || r.status === "incomplete";
+// judge.ts: a usage limit in the check phase ends the run incomplete, with verify.failed.kind usage_limit and no errorKind.
+export const hitLimit = (r: Pick<CaseRun, "errorKind" | "verify">) =>
+  r.errorKind === "usage_limit" || r.verify?.failed?.kind === "usage_limit";
+// A run that run.ts --resume keeps and that counts toward a full result.
+export const keptRun = (r: CaseRun) => finished(r) && !hitLimit(r);
 
 // The tolerance of a run on the local set (docs/plans/review-v3.md Q2). Fixture sets run with 0.
 export const LOCAL_TOLERANCE = 3;
@@ -275,6 +285,7 @@ export const METRICS = [
   "minutes",
   "costUsd",
   "notCompleted",
+  "incomplete",
   "groundedRaised",
   "lossMain",
   "lossDemoted",
@@ -418,7 +429,9 @@ type Tally = {
   verdictOk: number;
   minutes: number | null;
   costUsd: number | null;
+  // A failed, cancelled, or error run. An incomplete run finished and counts in incomplete.
   notCompleted: number;
+  incomplete: number;
   refutedShown: number;
   hits: Hits;
   ground: Ground | null;
@@ -477,7 +490,8 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null, g:
     verdictOk: scored.filter((e) => (r.resolves ?? []).includes(e.id) === e.resolved).length,
     minutes: r.minutes,
     costUsd: r.usage ? r.usage.costUsd : null,
-    notCompleted: r.status === "completed" ? 0 : 1,
+    notCompleted: finished(r) ? 0 : 1,
+    incomplete: r.status === "incomplete" ? 1 : 0,
     // review-quality-2026.md E5: refuted items of the protected classes stay in main (displayGroup). They count apart.
     refutedShown: shown.filter((i) => i.verdict === "refuted").length,
     hits: { shown: new Set(found.map((b) => `bug:${b.id}`)), raised: new Set(raised.map((b) => `bug:${b.id}`)) },
@@ -546,6 +560,7 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     minutes: meanOf(ts.map((t) => t.minutes)),
     costUsd: meanOf(ts.map((t) => t.costUsd)),
     notCompleted: sum(ts, "notCompleted"),
+    incomplete: sum(ts, "incomplete"),
     groundedRaised: of(
       gs((x) => x.hits.raised.size),
       counted,

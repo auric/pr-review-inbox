@@ -4,7 +4,7 @@
 // bun run eval:w1: pre-checks, step order, markers, questions, failed steps, and the usage limit. The auth check runs the fake CLI.
 // The steps run stand-ins of run.ts, ab.ts, and label.ts that write synthetic result files.
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -126,6 +126,8 @@ type Script = {
   labelCode?: number;
   answers?: boolean[];
   baselineFailed?: number;
+  // The exit code of eval:ab when it stops before any case run and writes nothing.
+  abExit?: number;
 };
 function deps(s: Script = {}) {
   const calls: { name: string; argv: string[] }[] = [];
@@ -142,7 +144,10 @@ function deps(s: Script = {}) {
     ab: async (argv) => {
       calls.push({ name: "ab", argv });
       dataAtAb = dataDir();
-      const r = result(16, 3, s.baseline, s.baselineFailed);
+      if (s.abExit !== undefined) return s.abExit;
+      const r = result(16, Number(flag(argv, "--repeat")), s.baseline, s.baselineFailed);
+      // run.ts --resume records each resume in the result file.
+      if (argv.includes("--resume")) r.resumes = [{ commit: "abc", dirty: false, at: "2026-11-14T01:00:00.000Z" }];
       save(join(flag(argv, "--results"), "review-baseline"), r);
       return r.runs.some((x) => x.status !== "completed") ? 1 : 0;
     },
@@ -213,7 +218,9 @@ describe("eval:w1", () => {
     expect(markers()).toEqual(["smoke", "baseline", "labels"]);
     expect(r.stdout).toContain("Claude Code ");
     expect(r.stdout).toContain("Smoke: 8 case runs, 0 failed, $4.00");
-    expect(r.stdout).toContain("about $140-180 and about 5 hours");
+    expect(r.stdout).toContain(
+      "Measured on 2026-11-14: about 8 minutes and $4 per case run (large cases 13-18 minutes). The baseline runs --repeat 3.",
+    );
 
     // The summary: aggregates and ordinals between the markers, no case text and no path.
     const summary = r.stdout.slice(r.stdout.indexOf(BEGIN), r.stdout.indexOf(END));
@@ -267,22 +274,87 @@ describe("eval:w1", () => {
     expect(r.stdout).toContain("smoke skipped");
   });
 
-  test("a usage limit in the baseline exits 3 with no marker, and the next run repeats the baseline in a new folder", async () => {
+  test("a usage limit in the baseline exits 3 with no marker, and the next run resumes the baseline in its folder", async () => {
     const f = deps({ baseline: { status: "failed", errorKind: "usage_limit" } });
     const r = await go(["--results", results, "--yes"], f.d);
     expect(r.code).toBe(3);
     expect(r.stderr).toContain("Your Claude usage limit is reached. Run `bun run eval:w1` again after the limit resets.");
-    expect(r.stderr).toContain("The next run repeats the whole baseline.");
+    expect(r.stderr).toContain("The next run resumes the baseline and keeps its finished runs.");
     expect(r.stderr).toContain("This baseline attempt cost $24.00.");
     expect(markers()).toEqual(["smoke"]);
 
-    const again = deps();
-    const r2 = await go(["--results", results, "--yes"], again.d);
-    expect(r2.code).toBe(0);
-    expect(again.calls.map((c) => c.name)).toEqual(["ab", "label-plan", "label"]);
-    // The cut baseline stays aside. The summary reads the new result only.
-    expect(readdirSync(results).filter((x) => x.startsWith("baseline-earlier-")).length).toBe(1);
-    expect(r2.stdout).toContain("48 case runs, 0 failed runs");
+    // The case count of the last set build gives N.
+    const manifest = join(TMP, "eval-local", "MANIFEST.json");
+    mkdirSync(join(TMP, "eval-local"), { recursive: true });
+    writeFileSync(manifest, JSON.stringify({ counts: { cases: 16 } }));
+    try {
+      const again = deps();
+      const r2 = await go(["--results", results, "--yes"], again.d);
+      expect(r2.stderr).toBe("");
+      expect(r2.code).toBe(0);
+      expect(again.calls.map((c) => c.name)).toEqual(["ab", "label-plan", "label"]);
+      expect(again.calls[0]?.argv).toEqual(stepArgs(results, runner.slice(1), 3, true).baseline);
+      expect(again.calls[0]?.argv).toContain("--resume");
+      expect(r2.stdout).toContain("Resuming the baseline: 47 of 48 runs are done. The other 1 runs take about 0.1 hours and $4.");
+      // No folder moved aside: the cut result continued in place.
+      expect(readdirSync(results).filter((x) => x.startsWith("baseline-earlier-"))).toEqual([]);
+      expect(r2.stdout).toContain("48 case runs, 0 failed runs");
+      // The attempt cost counts only the runs of this attempt. The marker keeps the cost of the whole result.
+      const costs = readFileSync(join(results, "costs.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+      expect(costs.filter((c) => c.step === "baseline").map((c) => [c.outcome, c.costUsd])).toEqual([
+        ["usage limit", 24],
+        ["done", 0.5],
+      ]);
+      expect(JSON.parse(readFileSync(markerPath(results, "baseline"), "utf8")).costUsd).toBe(24);
+    } finally {
+      rmSync(manifest);
+    }
+  });
+
+  test("a refused resume exits 2, keeps the cut result, and names the way to a new baseline", async () => {
+    const cut = deps({ baseline: { status: "failed", errorKind: "usage_limit" } });
+    expect((await go(["--results", results, "--yes"], cut.d)).code).toBe(3);
+    const refused = deps({ abExit: 2 });
+    const r = await go(["--results", results, "--yes"], refused.d);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      "The baseline step failed: eval:ab refused the run (exit code 2). To start a new baseline, move the baseline folder away.",
+    );
+    expect(readdirSync(join(results, "baseline", "review-baseline"))).toHaveLength(1);
+    expect(markers()).toEqual(["smoke"]);
+
+    // A set build error stops eval:ab before run.ts opens the file. The old usage-limit runs give no exit 3, and no cost.
+    const broken = deps({ abExit: 1 });
+    const r2 = await go(["--results", results, "--yes"], broken.d);
+    expect(r2.code).toBe(1);
+    expect(r2.stderr).toContain("The baseline step failed: eval:ab did not start the resume (exit code 1). This attempt cost $0.00.");
+    expect(r2.stderr).not.toContain("usage limit");
+    expect(markers()).toEqual(["smoke"]);
+  });
+
+  test("--repeat reaches eval:ab and the plan text, and a bad value exits 2 before any step", async () => {
+    const manifest = join(TMP, "eval-local", "MANIFEST.json");
+    mkdirSync(join(TMP, "eval-local"), { recursive: true });
+    writeFileSync(manifest, JSON.stringify({ counts: { cases: 42 } }));
+    try {
+      const f = deps();
+      const r = await go(["--results", results, "--yes", "--repeat", "2"], f.d);
+      expect(r.code).toBe(0);
+      expect(flag(f.calls[1]?.argv ?? [], "--repeat")).toBe("2");
+      expect(r.stdout).toContain("The baseline runs --repeat 2.");
+      expect(r.stdout).toContain("The last set build has 42 cases: 84 case runs at --repeat 2 take about 11.2 hours and $336.");
+      expect(r.stdout).toContain("16 cases x 2 repeats, 32 case runs");
+    } finally {
+      rmSync(manifest);
+    }
+    const bad = deps();
+    const r2 = await go(["--results", results, "--yes", "--repeat", "0"], bad.d);
+    expect(r2.code).toBe(2);
+    expect(r2.stderr).toContain("--repeat must be 1 to 10.");
+    expect(bad.calls).toEqual([]);
   });
 
   test("a complete baseline with 1 failed run of 48 keeps its marker, warns, and the summary marks it", async () => {
@@ -346,6 +418,7 @@ describe("eval:w1", () => {
       const a = stepArgs(results, r);
       expect(parseOptions(a.smoke)).not.toHaveProperty("error");
       expect(parseAb(a.baseline)).not.toHaveProperty("error");
+      expect(parseAb(stepArgs(results, r, 2, true).baseline)).toMatchObject({ resume: true, repeat: "2" });
       expect(parseLabel(a.plan)).toMatchObject({ real: false, runner: null });
       expect(parseLabel(a.labels)).toMatchObject(r ? { real: false, runner: r } : { real: true, runner: null });
     }

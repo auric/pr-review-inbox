@@ -5,9 +5,9 @@
 // those of the local set.
 // Each case runs the review pipeline of this checkout: a temp git remote, a temp data folder, a temp database with one PR row, and
 // memory secrets. No run reaches Bitbucket or the user's data folder. The real CLI runs only with --real.
-// Exit codes: 0 done, 1 a failed CLI check or a harness error, 2 a usage error or no --real.
+// Exit codes: 0 done, 1 a failed CLI check or a harness error, 2 a usage error, a refusal, or no --real.
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -85,6 +85,7 @@ import {
   type EvalCaseInfo,
   type EvalItem,
   type EvalResult,
+  keptRun,
   LOCAL_TOLERANCE,
   mustFind,
   score,
@@ -108,11 +109,12 @@ const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
   [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--reviewer-effort ${EFFORTS.join("|")}] [--reviewer-mode ${REVIEWER_MODES.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--verifier-effort ${EFFORTS.join("|")}]
-  [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--runner <command> <args...>]
+  [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--resume <result.json>] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
 --ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.
-Each run records its CLI calls in <result>.calls/. --replay-find takes the finder and salvage calls from the recording of that result and runs only the verify calls. It refuses a change of the finder setup.`;
+Each run records its CLI calls in <result>.calls/. --replay-find takes the finder and salvage calls from the recording of that result and runs only the verify calls. It refuses a change of the finder setup.
+--resume continues a cut result and writes to that file. It keeps the completed and incomplete runs and runs the other case runs. It refuses a change of the run setup.`;
 
 export type Options = {
   real: boolean;
@@ -137,6 +139,8 @@ export type Options = {
   verifierEffort: Effort | null;
   // The result file whose recorded finder and salvage calls this run replays. null: the finder runs.
   replayFind: string | null;
+  // The cut result file that this run continues and writes. null: a new result file in out.
+  resume: string | null;
   // null: no flag, so the variants of the profile apply (docs/plans/review-v3.md WP-V2).
   variants: Variant[] | null;
   // docs/plans/review-v3.md WP-V3: run the re-review cases as re-reviews.
@@ -172,6 +176,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         verifier: { type: "string" },
         "verifier-effort": { type: "string" },
         "replay-find": { type: "string" },
+        resume: { type: "string" },
         variants: { type: "string" },
         rereview: { type: "boolean", default: false },
         ordinals: { type: "boolean", default: false },
@@ -238,6 +243,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     verifier: verifier as VerifierSetup["mode"] | null,
     verifierEffort: verifierEffort as Effort | null,
     replayFind: v["replay-find"] === undefined ? null : resolve(v["replay-find"]),
+    resume: v.resume === undefined ? null : resolve(v.resume),
     variants: variants as Variant[] | null,
     rereview,
     ordinals: v.ordinals ?? false,
@@ -312,6 +318,37 @@ export function replayRefusal(rec: EvalResult, o: Options, profile: Profile): st
   const changed = finderChange(rec.profile, profile);
   if (changed.length)
     return `${it}: this run changes the finder setup of the recording: ${changed.join(", ")}. A replay can change only the verifier.`;
+  return null;
+}
+
+// --resume: why the saved result cannot continue in this run, or null. now: the header of this run. ids: its case IDs. Only the kept
+// runs must fit in ids x now.repeat, because the other runs run again. A different commit is allowed.
+export function resumeRefusal(saved: EvalResult, now: EvalResult, ids: string[]): string | null {
+  const it = "Refused: --resume";
+  const asked = (r: EvalResult) => (r.requested ?? {}) as Record<string, unknown>;
+  const fields: [string, unknown, unknown][] = [
+    ["prompt version", saved.promptVersion, now.promptVersion],
+    ["profile version", saved.profileVersion, now.profileVersion],
+    ["profile revision", saved.profile.revision, now.profile.revision],
+    ["CLI", saved.cliVersion, now.cliVersion],
+    ["runner", saved.runner, now.runner],
+    ["set", saved.set ?? "v1", now.set ?? "v1"],
+    ["set fingerprint", saved.fingerprint, now.fingerprint],
+    ["mode", saved.rereview ? "re-review" : "review", now.rereview ? "re-review" : "review"],
+    ["volume", saved.volume, now.volume],
+    ["tolerance", saved.tolerance ?? 0, now.tolerance ?? 0],
+    ...[...new Set([...Object.keys(asked(saved)), ...Object.keys(asked(now))])]
+      .sort()
+      .map((k): [string, unknown, unknown] => [`requested ${k}`, asked(saved)[k], asked(now)[k]]),
+  ];
+  // A hash shows its first 12 characters.
+  const show = (name: string, v: unknown) =>
+    v === undefined || v === null ? "none" : name.endsWith("revision") || name.endsWith("fingerprint") ? String(v).slice(0, 12) : String(v);
+  for (const [name, a, b] of fields)
+    if (!sameValue(a ?? null, b ?? null)) return `${it}: the saved result ran ${name} ${show(name, a)}, but this run has ${show(name, b)}.`;
+  const known = new Set(ids);
+  const out = saved.runs.filter((r) => keptRun(r) && (!known.has(r.case) || r.repeat > now.repeat)).length;
+  if (out) return `${it}: ${out} finished runs of the saved result are outside ${ids.length} cases x ${now.repeat} repeats.`;
   return null;
 }
 
@@ -903,9 +940,6 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
     const { commit, dirty } = await checkoutState();
-    mkdirSync(o.out, { recursive: true });
-    const file = join(o.out, `${new Date().toISOString().replace(/[:.]/g, "-")}-${commit}.json`);
-    mkdirSync(callsDir(file));
     const profile = p.profile;
     const volume = ((profile as { volume?: Volume }).volume ?? null) as Volume | null;
     const requested = {
@@ -916,7 +950,7 @@ export async function main(argv: string[]): Promise<number> {
       reviewerMode: profile.reviewer.mode,
       ...(o.replayFind && { replayOf: basename(o.replayFind) }),
     };
-    const result: EvalResult = {
+    let result: EvalResult = {
       format: 1,
       createdAt: new Date().toISOString(),
       commit,
@@ -938,7 +972,51 @@ export async function main(argv: string[]): Promise<number> {
       cases: [],
       runs: [],
     };
-    const info = new Map<string, EvalCaseInfo>();
+    let file = join(o.out, `${new Date().toISOString().replace(/[:.]/g, "-")}-${commit}.json`);
+    let resumed = "";
+    if (o.resume) {
+      let saved: EvalResult;
+      try {
+        saved = readResult(o.resume);
+      } catch (e) {
+        console.error(`--resume: ${(e as Error).message}`);
+        return 2;
+      }
+      const ids = cases.map((c) => c.id);
+      const refused = resumeRefusal(saved, result, ids);
+      if (refused) {
+        console.error(refused);
+        return 2;
+      }
+      const last = saved.resumes?.at(-1) ?? saved;
+      if (last.commit !== commit || last.dirty !== dirty)
+        console.log(
+          `Warning: the saved result ran at commit ${last.commit}${last.dirty ? " (uncommitted changes)" : ""}. This run continues it at commit ${commit}${dirty ? " (uncommitted changes)" : ""}.`,
+        );
+      const kept = saved.runs.filter(keptRun);
+      result = {
+        ...saved,
+        resumes: [...(saved.resumes ?? []), { commit, dirty, at: new Date().toISOString() }],
+        repeat: o.repeat,
+        cases: saved.cases.filter((c) => ids.includes(c.id)),
+        runs: kept,
+      };
+      file = o.resume;
+      // The calls of each run that does not stay go, also the calls of a cut run with no entry. Its next run records them again.
+      const pairs = new Set(kept.map((r) => `${r.case}\n${r.repeat}`));
+      mkdirSync(callsDir(file), { recursive: true });
+      for (const f of readdirSync(callsDir(file))) {
+        const m = /^(.*)-(\d+)-\d+\.json$/.exec(f);
+        if (m && !pairs.has(`${m[1]}\n${m[2]}`)) rmSync(join(callsDir(file), f), { force: true });
+      }
+      save(file, result);
+      const dropped = saved.runs.length - kept.length;
+      resumed = `Resume: ${kept.length} of ${cases.length * o.repeat} runs are done.${dropped ? ` It drops ${count(dropped, "saved run")} that did not finish or hit the usage limit.` : ""}`;
+    } else {
+      mkdirSync(o.out, { recursive: true });
+      mkdirSync(callsDir(file));
+    }
+    const info = new Map<string, EvalCaseInfo>(result.cases.map((c) => [c.id, c]));
     const ctx: Context = {
       tmp,
       runner,
@@ -962,13 +1040,16 @@ export async function main(argv: string[]): Promise<number> {
       console.log(`Replay: the finder and salvage calls come from ${requested.replayOf}. The verify calls run the CLI.`);
     console.log(runSetup(profile));
     if (o.real) console.log(WARNING);
+    if (resumed) console.log(resumed);
     const total = cases.length * o.repeat;
     const name = (id: string) => (o.ordinals ? `case ${cases.findIndex((c) => c.id === id) + 1}` : id);
+    const done = new Set(result.runs.map((r) => `${r.case}\n${r.repeat}`));
     let n = 0;
     for (let repeat = 1; repeat <= o.repeat && !stopping; repeat++)
       for (const c of cases) {
         if (stopping) break;
         n++;
+        if (done.has(`${c.id}\n${repeat}`)) continue;
         const { run, head, base, earlier } = await runCase(c, repeat, ctx);
         if (!info.has(c.id) && head && (earlier || !o.rereview)) {
           info.set(c.id, caseInfo(c, base, head, earlier));
