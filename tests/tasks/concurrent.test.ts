@@ -843,6 +843,11 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(loop.hold(s.db, s.task, s.p2, v()).status).toBe(200);
       await until(() => !open(s.p2));
       expect([open(s.p1), reasons(s)[2]?.kind, s.t().blocked_json]).toEqual([true, "held", null]);
+      // part-session.md section 9.4: Tell Claude on the held part names the hold, also while the driver builds part 1.
+      expect(loop.instruct(s.db, s.task, { ...v(), part: s.p2, text: "Name the flag." })).toMatchObject({
+        status: 409,
+        error: "Part 2 is on hold. Continue it first.",
+      });
       expect(loop.resume(s.db, s.task, { ...v(), part: s.p2 }).status).toBe(200);
       await until(() => runsOf(2) === 2);
       // Hold, then Start again: the backup ref, the reset, and the plan commit of part 2 go through the app git helper.

@@ -23,7 +23,7 @@ import { ignoredSnapshot, openWorktree, readSetupMark, status } from "../../src/
 import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
 import { DEFAULT_TEST_GLOBS, RUN_TIME_MAX_MS, type TaskBlocked } from "../../src/shared/task";
 import { rowStatus } from "../../src/shared/task-status";
-import { readRecords } from "../support/fake-claude";
+import { callKey, readRecords } from "../support/fake-claude";
 import { logOf, pngOf } from "../support/fake-jira";
 import {
   type Call,
@@ -130,10 +130,10 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       const s = await setup({ config, profiles: [...SHIPPED_PROFILES, strict], profile: "strict", main });
       await s.build();
       expect(s.part().state).toBe("self_reviewed");
-      // part-session.md section 2.7: the critic runs with its own profile (haiku), not the profile of the task.
+      // part-session.md section 2.7: the critic runs with its own profile (opus), not the profile of the task.
       const all = s.runCalls();
-      const critic = all.filter((c) => c.argv.includes("haiku"));
-      expect(critic.map((c) => c.argv[c.argv.indexOf("--model") + 1])).toEqual(["haiku"]);
+      const critic = all.filter((c) => callKey(c.argv, c.stdin) === "critic");
+      expect(critic.map((c) => c.argv[c.argv.indexOf("--model") + 1])).toEqual(["opus"]);
       const calls = all.filter((c) => !critic.includes(c));
       expect(calls.map(s.modeOf)).toEqual(["build", "fix", "review"]);
       for (const c of calls) expect(c.argv[c.argv.indexOf("--model") + 1]).toBe("sonnet");
@@ -649,7 +649,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
         .get({ h: s.base }) as { id: number };
       const start = s.jobs.review(s.db, pr) as { status: number; conflict?: RunConflict };
       expect(start.status).toBe(409);
-      expect(start.conflict?.error).toBe("Claude is building K-2. Pause building after this step to start your run.");
+      expect(start.conflict?.error).toBe("Claude is building K-2. Start your run when its step ends.");
       expect(start.conflict?.running).toMatchObject({ pr: null, kind: "implement", task: other });
       // The loop of K-1 finds the slot busy: its build run waits, and the reason names the holder.
       s.loop.build(s.db, s.task);

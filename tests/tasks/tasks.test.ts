@@ -398,7 +398,7 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       // A PR start during the task run names it.
       const busy = await h.json<RunConflict>(`/api/prs/${h.pr}/review`, { method: "POST" });
       expect([busy.status, busy.body.running, busy.body.full]).toEqual([409, { run, pr: null, kind: "interview", task: a.body.id }, 1]);
-      expect(busy.body.error).toBe(`Claude is building ${ISSUE_KEY}. Pause building after this step to start your run.`);
+      expect(busy.body.error).toBe(`Claude is building ${ISSUE_KEY}. Start your run when its step ends.`);
       await h.review.stop();
       const t = await h.get(a.body.id);
       expect([t.state, t.stoppedFrom]).toEqual(["stopped", "interview"]);
@@ -1834,10 +1834,7 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
     expect(rowDto(h.db, h.t()).queued).toBe(2);
     expect(taskDto(h.db, h.t()).parts.map((p) => p.blocked)).toEqual([null, q2, c3]);
 
-    // keep clears the first reason and moves nothing ("Run setup again"). A plain clear moves the first waiting reason up, by part order.
-    setBlocked(h.db, h.ref(), null, 2, true);
-    expect([h.first(), ...h.rows()]).toEqual([null, null, q2, c3]);
-    setBlocked(h.db, h.ref(), q1, 3);
+    // A clear moves the first waiting reason up, by part order.
     setBlocked(h.db, h.ref(), null, 4);
     expect([h.first(), ...h.rows()]).toEqual([q2, null, null, c3]);
     // A restart keeps every reason: no step ran, so recovery does not stop the task.

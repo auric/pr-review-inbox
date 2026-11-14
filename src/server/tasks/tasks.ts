@@ -193,9 +193,10 @@ const SQL = {
       OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id
         AND p.state = 'implementing' AND json_extract(p.blocked_json, '$.kind') IS NOT 'held'))
     ORDER BY t.id`,
-  // The cut query reads cut_json first.
-  failSteps: `UPDATE task_step SET state = 'failed', ended_at = $now, cut_json = NULL WHERE state IN ('waiting', 'running')
-    AND id NOT IN (SELECT value FROM json_each($keep))`,
+  // The cut query reads cut_json first. loop.ts Q.criticRan counts no cancelled critic row.
+  failSteps: `UPDATE task_step SET state = iif(kind = 'review' AND item = 'critic', 'cancelled', 'failed'), ended_at = $now,
+      cut_json = NULL
+    WHERE state IN ('waiting', 'running') AND id NOT IN (SELECT value FROM json_each($keep))`,
   // docs/plans/review-v2/part-session.md section 2.5: the Claude steps whose run the restart cut. A resolve step has no snapshot.
   cut: `SELECT id, task, part, run, cut_json AS cut FROM task_step WHERE state = 'running' AND run IS NOT NULL AND part IS NOT NULL
     AND kind IN ('tests', 'implement', 'fix', 'instruct')`,
@@ -288,8 +289,9 @@ export function advancePart(
 }
 
 // spec.md section 6.14 and part-session.md sections 9.3.4 and 9.5 (Q-SM2): a step that ran at the last stop has no process now, so it
-// ends failed. An interview or spec task stops, so Resume runs its run again. A task that builds or follows up keeps its state: each
-// part with an open step row gets the reason error/restart, or the reason update for an update. A part that built between two steps
+// ends failed. A critic row ends cancelled, so the critic runs again (user decision of 2026-11-14). An interview or spec task stops,
+// so Resume runs its run again. A task that builds or follows up keeps its state: each part with an open step row gets the reason
+// error/restart, or the reason update for an update. A part that built between two steps
 // gets error/restart with no step. Held and waiting part rows stay, and so does a waiting message (ps4-plan.md WP-7). Call it before
 // the run recovery (run-rows.ts SQL.recover), which ends the runs themselves with kind restart. dataDir: the data folder. With it, a
 // cut run whose snapshot passes the checks keeps its work (implement.ts keepCut).
@@ -750,11 +752,9 @@ export function partOf(db: Database, b: TaskBlocked | null): number | null {
 }
 
 // Sets task.blocked_json (spec.md section 6.2) with the version check. Returns the new version. spec.md section 6.25.3: a clear moves the
-// first waiting reason of a part up, unless keep.
-export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, now = Date.now(), keep = false) =>
-  db.transaction(() =>
-    patch(db, ref.task, ref.version, { blocked_json: b === null && !keep ? nextReason(db, ref.task) : blocked(b) }, now),
-  )();
+// first waiting reason of a part up.
+export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, now = Date.now()) =>
+  db.transaction(() => patch(db, ref.task, ref.version, { blocked_json: b === null ? nextReason(db, ref.task) : blocked(b) }, now))();
 
 // part-session.md section 9.4, usage rules: one arm or disarm sets armed on every usage reason of the task, first and waiting, with one
 // version move. Returns the new version.
@@ -1271,16 +1271,20 @@ export const WAITING = "Another part waits for you. Act on each reason first.";
 // ps4-plan.md WP-7: an implement, fix, or instruct run of the part runs now. Only these runs take live input (part-session.md section 2.9).
 export const sessionRunning = (db: Database, part: number) => db.query(Q.session).get({ part }) !== null;
 
+// part-session.md section 9.4: a held part goes on by "Continue with part" only, so it takes no send.
+export const HELD_TELL = (ord: number) => `Part ${ord} is on hold. Continue it first.`;
+
 // The part of a Tell Claude send (spec.md section 6.18.1), or the sentence of the 409 in a state without the box. A session run of the
-// part lets the send through (ps4-plan.md WP-7).
-export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string } {
+// part lets the send through (ps4-plan.md WP-7). held: the part is on hold, which comes before the WORKING of a driver.
+export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string; held?: true } {
   if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
-  if (partId !== undefined && currentPart(db, t, partId)?.adopted) return { error: ADOPTED };
+  const part = currentPart(db, t, partId);
+  if (partId !== undefined && part?.adopted) return { error: ADOPTED };
+  if (part && parseBlocked(part.blocked_json)?.kind === "held") return { error: HELD_TELL(part.ord), held: true };
   // spec.md section 6.25.5: an answer or an allow of a send restarts the send of the first question only.
   if (waitingOf(db, t.id)) return { error: WAITING };
   const b = blockedOf(t);
   if (b && !BOX_REASONS.has(b.kind)) return { error: b.text };
-  const part = currentPart(db, t, partId);
   const live = !!part && sessionRunning(db, part.id);
   if (!live && db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
   if (!part || !HAS_WORKTREE.has(part.state))

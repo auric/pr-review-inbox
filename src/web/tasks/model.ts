@@ -838,7 +838,8 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
         return blocked({ kind: "answer", label }, [STOP], "questions");
       }
       case "size":
-        // No code sets size/large_repos (G13), so Stop is its only exit. A legacy size reason takes the plain Continue row.
+        // loop.ts commit() sets size/large_repos for a large task only, and no large task builds yet (G13, WP-B8). So Stop is its only
+        // exit. A legacy size reason takes the plain Continue row.
         return b.cause === "large_repos" ? blocked(STOP, []) : blocked(go, [...why, STOP, ...leave]);
       case "spec_change":
         return blocked({ kind: "review-change", label: "Review the change" }, [{ kind: "reject-change", label: "Reject" }, STOP], "change");

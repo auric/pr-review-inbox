@@ -35,7 +35,12 @@ export type PromptInput = {
   notes?: boolean;
   // ./context/finding.md and ./context/discussion.md exist. Discuss runs only (docs/plans/review-v2/spec.md section 2.4).
   discuss?: boolean;
+  // The critic of a task part (part-session.md section 2.7). validate.ts keeps only its findings on added lines.
+  critic?: boolean;
 };
+
+// The task line of a critic run. tests/support/fake-claude.ts finds a critic run by it.
+export const CRITIC_TASK = "This is a quick first review. Report only problems in the lines that this change adds.";
 
 // thread: the root comment ID. replyTo: the message to answer. mine: the user wrote the root comment. joined: the user wrote a live message in the thread.
 // revise: the ID of the draft that the user edited or accepted. The run revises its text (docs/plans/thread-outcome.md). Reply runs only.
@@ -130,6 +135,7 @@ export function buildPrompt(i: PromptInput): string {
       ? `Explain the change ${range} in ./repo. Give the summary, the risks, and your questions.`
       : `Review the change ${range} in ./repo. Give the findings, the risks, and your questions.`,
     "",
+    ...(i.critic ? [CRITIC_TASK, ""] : []),
     // The history rule lives in the context block of each review agent (catalog.ts), so every agent of the run gets it.
     ...(i.questions && !i.profile.explain ? QUESTIONS_TASK : []),
     ...common(i),

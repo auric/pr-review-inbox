@@ -73,6 +73,8 @@ const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {
   stuck: "Needs you: Claude is stuck",
   unfinished: "Needs you: open tasks are left",
 };
+// part-session.md section 9.4: a "<kind>/<cause>" key with its own status. Other causes take the status of their kind.
+const CAUSE_NEEDS: Partial<Record<string, string>> = { "error/restart": "Needs you: the app restarted" };
 export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
   const p = r.progress;
   if (r.state === "done") return { text: r.closedAt === null ? "Done" : "Closed", needsYou: false };
@@ -84,8 +86,9 @@ export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
     const more = r.queued > 0 ? `, and ${r.queued} more` : "";
     // ps5-plan.md D6: an armed usage reason goes on by itself.
     const armed = r.blocked.kind === "usage" && r.blocked.armed === true;
+    const needs = CAUSE_NEEDS[`${r.blocked.kind}/${r.blocked.cause}`] ?? NEEDS[r.blocked.kind];
     return {
-      text: `${armed ? "Resumes after the usage limit" : NEEDS[r.blocked.kind]}${more}`,
+      text: `${armed ? "Resumes after the usage limit" : needs}${more}`,
       needsYou: r.blocked.kind !== "slot" && !armed,
     };
   }

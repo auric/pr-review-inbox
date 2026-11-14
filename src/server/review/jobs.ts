@@ -1666,6 +1666,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       taskFile: true,
       attachments: t.attachments.length > 0,
       instructions: instructions.text,
+      ...(t.critic && { critic: true }),
     };
     j.phase = "finding";
     notify(j.id, undefined, t.task);
@@ -1863,12 +1864,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   }
 
   // docs/plans/review-v2/spec.md section 6.26. n: the limit of a full pool, absent for the run of the same PR. AC-B18: a task step names
-  // the pause action of its task.
+  // its task. PS5-S2 removed Pause, and Hold works only on a build or fix run, so the text names the end of the step.
   const busyConflict = (j: Job | TaskJob, n?: number): RunConflict => {
     const { taskKey, ...running } = holder(j);
     const error =
       j.pr === null
-        ? `Claude is building ${taskKey ?? `task ${j.t.task}`}. Pause building after this step to start your run.`
+        ? `Claude is building ${taskKey ?? `task ${j.t.task}`}. Start your run when its step ends.`
         : n === undefined
           ? "A run is working on this pull request. Start yours when it ends."
           : `Claude runs ${plural(n, "run")} at once, your limit. Start yours when one ends.`;

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/server/storage/db";
 import { claimTaskEvents, noteTaskWaits } from "../../src/server/tasks/notify";
+import { RESTART_TEXT } from "../../src/server/tasks/tasks";
 import { RUN_CANCELLED } from "../../src/shared/task";
 
 console.log(`notify.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/notify", import.meta.dir)}`);
@@ -142,5 +143,13 @@ describe("claimTaskEvents", () => {
     h.set("implementing", null);
     expect(claimTaskEvents(h.db, 23)).toEqual([]);
     expect(h.db.query("SELECT COUNT(*) AS n FROM task_event WHERE claimed_at IS NULL").get()).toEqual({ n: 0 });
+  });
+
+  // part-session.md section 9.4: the reason that recoverTasks writes reaches the notification with the Tasks row status.
+  test("error/restart gives the text that the app restarted", () => {
+    const h = setup();
+    h.set("implementing", { kind: "error", cause: "restart", step: 4, text: RESTART_TEXT(1) });
+    noteTaskWaits(h.db, [h.id], 10);
+    expect(claimTaskEvents(h.db, 20).map((e) => e.text)).toEqual(["Needs you: the app restarted"]);
   });
 });

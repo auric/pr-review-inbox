@@ -91,7 +91,8 @@ export type StreamState = {
   results: SDKResultMessage[];
   apiErrors: SDKAssistantMessageError[];
   rateLimitRejected: boolean;
-  // resetsAt of the last rate_limit_event with status rejected, as the CLI sends it. U106 has not verified the unit. null: none.
+  // resetsAt of the last rate_limit_event with status rejected, as the CLI sends it: a Unix time in seconds (U106 run 2). U106 saw
+  // only events with status allowed. null: none.
   resetsAt: number | null;
   // The input, cache-read, and cache-creation tokens of the last main-thread API call (part-session.md section 2.4, U105). null: no call
   // had all three.

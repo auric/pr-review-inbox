@@ -1187,6 +1187,16 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     expect(rowStatus(row({ state: "ready", blocked: { ...usage, armed: false } })).needsYou).toBe(true);
     expect(rowStatus(row({ state: "stopped", progress: progress({ held: 1 }) })).text).toBe("Stopped");
   });
+
+  // part-session.md section 9.4: error/restart has its own status. Another cause of error keeps the status of its kind.
+  test("error/restart says the app restarted; error/run says an error", () => {
+    const error = (cause: "restart" | "run") => ({ kind: "error" as const, cause, step: 1, text: "x" });
+    expect(rowStatus(row({ state: "implementing", blocked: error("restart"), queued: 1 }))).toEqual({
+      text: "Needs you: the app restarted, and 1 more",
+      needsYou: true,
+    });
+    expect(rowStatus(row({ state: "implementing", blocked: error("run") })).text).toBe("Needs you: an error");
+  });
 });
 
 describe("the attachments of a task (spec.md section 6.17)", () => {

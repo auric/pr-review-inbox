@@ -6,6 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CRITIC_TASK } from "../../src/server/review/prompt";
 import {
   askJsonSchema,
   askResult,
@@ -24,7 +25,7 @@ import {
   verifyJsonSchema,
   verifyResult,
 } from "../../src/shared/review";
-import { CRITIC_ARGS, callKey, type FakeScenario } from "../support/fake-claude";
+import { CRITIC_LINE, callKey, type FakeScenario } from "../support/fake-claude";
 import { claudeStream, REVIEW_RESULT } from "../support/review-fixture";
 
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
@@ -59,7 +60,14 @@ const STDIN = [
 
 let n = 0;
 // Runs the fake CLI once. Returns the init tools and the structured_output of the result.
-async function run(schema: Record<string, unknown>, tools: string, extra: Partial<FakeScenario> = {}, exit = 0, more: string[] = []) {
+async function run(
+  schema: Record<string, unknown>,
+  tools: string,
+  extra: Partial<FakeScenario> = {},
+  exit = 0,
+  more: string[] = [],
+  stdin = STDIN,
+) {
   const scenario = join(dir, `scenario-${n++}.json`);
   writeFileSync(
     scenario,
@@ -73,7 +81,7 @@ async function run(schema: Record<string, unknown>, tools: string, extra: Partia
   );
   const p = Bun.spawn([process.execPath, FAKE, scenario, "-p", "--json-schema", JSON.stringify(schema), "--tools", tools, ...more], {
     cwd: dir,
-    stdin: new Blob([STDIN]),
+    stdin: new Blob([stdin]),
     stdout: "pipe",
     stderr: "pipe",
     timeout: 30_000,
@@ -223,15 +231,17 @@ describe("fake CLI", () => {
     expect((await run(explainJsonSchema(), "Read", { explain })).output).toEqual(explain);
   });
 
-  test("AC-B333: a review schema with model haiku and 30 turns is a critic run with no findings, or the scenario critic result", async () => {
-    const flags = ["--model", CRITIC_ARGS.model, "--max-turns", CRITIC_ARGS.maxTurns];
+  test("AC-B333: a review run whose stdin holds the critic task line is a critic run with no findings, or the scenario critic result", async () => {
+    expect(CRITIC_LINE).toBe(CRITIC_TASK);
     const argv = ["-p", "--json-schema", JSON.stringify(reviewJsonSchema())];
-    expect(callKey([...argv, ...flags], "")).toBe("critic");
-    expect(callKey([...argv, "--model", CRITIC_ARGS.model], "")).toBe("review");
-    const r = await run(reviewJsonSchema(), "Read", {}, 0, flags);
+    const stdin = `${STDIN}\n${CRITIC_TASK}\n`;
+    expect(callKey(argv, stdin)).toBe("critic");
+    // The model, the effort, and the turn cap of the critic profile do not make a critic run.
+    expect(callKey([...argv, "--model", "opus", "--effort", "low", "--max-turns", "30"], STDIN)).toBe("review");
+    const r = await run(reviewJsonSchema(), "Read", {}, 0, [], stdin);
     expect(reviewResult.parse(r.output).findings).toEqual([]);
     const critic = { ...REVIEW_RESULT, summary: "Critic." };
-    expect((await run(reviewJsonSchema(), "Read", { critic }, 0, flags)).output).toEqual(critic);
+    expect((await run(reviewJsonSchema(), "Read", { critic }, 0, [], stdin)).output).toEqual(critic);
     expect((await run(reviewJsonSchema(), "Read", { critic })).output).toEqual(REVIEW_RESULT);
   });
 

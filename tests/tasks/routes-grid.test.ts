@@ -98,7 +98,8 @@ const NOT_409: Record<State, Record<string, number>> = {
   // A driver works: Hold and Stop act on it, and a message goes to its session run (ps4-plan.md WP-7).
   running: { ...READS, stop: 200, hold: 200, instructions: 202 },
   red: { ...READS, stop: 200, resume: 200, limit: 200, restart: 200, instructions: 202 },
-  held: { ...READS, stop: 200, resume: 200, "resume part": 200, limit: 200, restart: 200, pointer: 404 },
+  // part-session.md section 9.4: a held part goes on by Continue with part only, so a plain Continue builds nothing and answers 409.
+  held: { ...READS, stop: 200, "resume part": 200, limit: 200, restart: 200, pointer: 404 },
   // The form of the reason answers. An empty answer list is a 400 of the loop. Continue gets 409 with the form sentence.
   question: { ...READS, answers: 400, answer: 202, stop: 200, limit: 200, restart: 200 },
   allow: { ...READS, allow: 202, stop: 200, limit: 200, restart: 200 },

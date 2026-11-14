@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { sweepCwdFolders } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
+import { CRITIC_TASK } from "../../src/server/review/prompt";
 import { openDb } from "../../src/server/storage/db";
 import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import { REVIEW_FIX_TRIES, resumeProblem, tickDiff, tickTask } from "../../src/server/tasks/loop";
@@ -33,7 +34,7 @@ import {
 } from "../../src/server/tasks/tasks";
 import { specResult, type TaskBlocked } from "../../src/shared/task";
 import { stoppedSend } from "../../src/web/tasks/model";
-import { readRecords } from "../support/fake-claude";
+import { callKey, readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 import {
   type Call,
@@ -98,9 +99,13 @@ describe("the phase machine in the build (part-session.md section 9.3.3)", () =>
         "GO>reviewing",
         "CLEAN>idle",
       ]);
-      // AC-B333: the critic is a review run with model haiku, 30 turns, no rl-reviewer, and no verify phase.
-      const critic = s.runCalls().find((c) => c.argv.includes("haiku")) as Call;
-      expect(critic.argv.slice(critic.argv.indexOf("--max-turns"), critic.argv.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "30"]);
+      // AC-B333 and the user decision of 2026-11-14: the critic is a review run with model opus, effort low, 30 turns, no rl-reviewer,
+      // and no verify phase.
+      const critic = s.runCalls().find((c) => callKey(c.argv, c.stdin) === "critic") as Call;
+      const flag = (name: string) => critic.argv[critic.argv.indexOf(name) + 1];
+      expect([flag("--model"), flag("--effort"), flag("--max-turns")]).toEqual(["opus", "low", "30"]);
+      expect(critic.stdin).toContain(CRITIC_TASK);
+      expect(s.runCalls().filter((c) => c.stdin.includes(CRITIC_TASK))).toEqual([critic]);
       expect(Object.keys(critic.agents ?? {})).toEqual(["rl-main"]);
       expect(s.flow().filter((f) => f.startsWith("review:"))).toEqual(["review:critic:ok", "review:review:ok"]);
       expect(new Set(s.phases.map((p) => p.part))).toEqual(new Set([s.part().id]));
@@ -181,7 +186,7 @@ describe("the critic (part-session.md section 2.7)", () => {
         "CHECKS_GREEN>idle",
       ]);
       // The critic runs once: the review round after its commit runs no second critic.
-      expect(s.runCalls().filter((c) => c.argv.includes("haiku"))).toHaveLength(1);
+      expect(s.runCalls().filter((c) => callKey(c.argv, c.stdin) === "critic")).toHaveLength(1);
       expect(s.flow().filter((f) => f.startsWith("review:"))).toEqual(["review:critic:ok", "review:review:ok", "review:review:ok"]);
       const judging = s.runCalls().find((c) => c.stdin.includes("- Mode: fix")) as Call;
       expect(judging.context["failure.md"]).toContain("A quick second Claude run reviewed the added lines of this part.");
@@ -214,6 +219,44 @@ describe("the critic (part-session.md section 2.7)", () => {
       const critic = s.steps().find((x) => x.kind === "review" && x.item === "critic") as Step;
       expect(critic.state).toBe("failed");
       expect(detailOf(s, critic.id).notes.at(-1)).toBe("The quick review failed. The own review still runs.");
+    },
+    SLOW,
+  );
+
+  // User decision of 2026-11-14: a critic run that an app restart cut runs again. recoverTasks ends its row cancelled, not failed.
+  test(
+    "a critic that an app restart cut ends cancelled with error/restart; Continue runs the critic again, then the own review",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          critic: [{ hang: true }, {}],
+          review: [{ review: CLEAN }],
+        },
+      });
+      s.loop.build(s.db, s.task);
+      await until(() => readRecords<{ childPid?: number }>(join(s.root, "calls.jsonl")).some((x) => x.childPid));
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      // The state at the app stop: the critic row and its run still run, and the task builds.
+      const cut = s.steps().find((x) => x.kind === "review" && x.item === "critic") as Step;
+      s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL WHERE id = $id").run({ id: cut.id });
+      s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: cut.run });
+      s.db.query("UPDATE task SET state = 'implementing', stopped_from = NULL, blocked_json = NULL WHERE id = $id").run({ id: s.task });
+      recoverTasks(s.db, Date.now(), s.dataDir);
+      s.db
+        .query(
+          "UPDATE review_run SET status = 'failed', error_kind = 'restart', error_text = 'The app stopped during the run.' WHERE id = $id",
+        )
+        .run({ id: cut.run });
+      expect((s.steps().find((x) => x.id === cut.id) as Step).state).toBe("cancelled");
+      expect(s.blocked()).toMatchObject({ kind: "error", cause: "restart", step: cut.id });
+      const at = s.phases.length;
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.phases.slice(at).map((p) => `${p.event}>${p.to}`)).toEqual(["GO>critic", "CLEAN>idle", "GO>reviewing", "CLEAN>idle"]);
+      expect(s.flow().filter((f) => f.startsWith("review:"))).toEqual(["review:critic:cancelled", "review:critic:ok", "review:review:ok"]);
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
     },
     SLOW,
   );

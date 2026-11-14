@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { DEFAULT_PROFILE, profileOf } from "../../src/server/review/catalog";
 import { git, worktreeNames } from "../../src/server/review/git";
 import { checkGit, snapGit } from "../../src/server/tasks/gitstate";
-import { insertStep, startStep } from "../../src/server/tasks/implement";
+import { insertStep, patchStep, startStep } from "../../src/server/tasks/implement";
 import { backupPart, resetToStart } from "../../src/server/tasks/loop";
 import type { TaskRepoRow } from "../../src/server/tasks/repos";
 import { headOf, openWorktree, removeWorktree, type Worktree, wtGit } from "../../src/server/tasks/worktree";
@@ -156,6 +156,13 @@ describe("409 grid (ps4-plan.md section 4)", () => {
     await check("continue, unknown part", () => s.loop.resume(s.db, s.task, { ...v(s), part: part + 99 }), 404, "Part not found.");
     s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: part, b: JSON.stringify(held) });
     await check("hold, held part", hold, 409, "Part 1 is on hold already.");
+    // part-session.md section 9.4: a held part goes on by Continue with part only. A plain Continue and Tell Claude start nothing.
+    set("UPDATE task_part SET state = 'implementing' WHERE id = $id");
+    const go = "Part 1 is on hold. Continue it from its row.";
+    await check("continue, only a held part", () => s.loop.resume(s.db, s.task, v(s)), 409, go);
+    const tell = () => s.loop.instruct(s.db, s.task, { ...v(s), part, text: "Name the flag." });
+    await check("tell, held part", tell, 409, "Part 1 is on hold. Continue it first.");
+    set("UPDATE task_part SET state = 'self_reviewed' WHERE id = $id");
     set("UPDATE task SET state = 'done' WHERE id = $t");
     await check("continue, closed task", () => s.loop.resume(s.db, s.task, { ...v(s), part }), 409, "The task is done.");
     set("UPDATE task SET state = 'implementing' WHERE id = $t");
@@ -204,6 +211,43 @@ describe("Start again (AC-B351)", () => {
     },
     SLOW,
   );
+
+  // part-session.md section 2.12: Start again clears the reason of its part. The route grid answers 200 in these states, so no reason
+  // may stay that points at the old work.
+  test(
+    "Start again during question/claude, allow, and an armed usage reason of the part clears the reason and the open questions",
+    async () => {
+      const s = await setup({ seq: { "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }], review: [{ review: CLEAN }] } });
+      await s.build();
+      const part = partId(s);
+      const asks = () =>
+        s.db.query("SELECT COUNT(*) AS n FROM task_question WHERE task = $t AND answer_json IS NULL").get({ t: s.task }) as { n: number };
+      for (const kind of ["question", "allow", "usage"] as const) {
+        const step = insertStep(s.db, { task: s.task, part, kind: "implement", item: "build", state: "ok" });
+        const b: TaskBlocked =
+          kind === "question"
+            ? { kind, cause: "claude", step, text: "Needs you: Claude asks: Which flag name?" }
+            : kind === "allow"
+              ? { kind, step, text: "Needs you: Claude asks to allow a command." }
+              : { kind, step, text: "Needs you: the usage limit.", resumeAt: Date.now() + 3_600_000, armed: true };
+        if (kind === "question")
+          s.db
+            .query(`INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, step, asked_at)
+              VALUES ($t, 'loop', 1, 0, 'Which flag name?', 'Callers use it.', 'text', '[]', $step, 1)`)
+            .run({ t: s.task, step });
+        if (kind === "allow")
+          patchStep(s.db, step, {
+            allowAsk: { requests: [{ pattern: "make build", command: "make build", reason: "The step runs make build." }], decisions: [] },
+          });
+        s.db.query("UPDATE task SET blocked_json = $b WHERE id = $t").run({ t: s.task, b: JSON.stringify(b) });
+        const r = await s.loop.restart(s.db, s.task, part, v(s));
+        expect([kind, r.status, s.blocked(), rowOf(s), asks().n]).toEqual([kind, 200, null, null, 0]);
+        await s.loop.idle(s.task);
+        expect([kind, s.part().state, s.blocked()]).toEqual([kind, "self_reviewed", null]);
+      }
+    },
+    SLOW * 2,
+  );
 });
 
 describe("Hold and Continue with part (AC-B348, AC-B349)", () => {
@@ -240,9 +284,9 @@ describe("Hold and Continue with part (AC-B348, AC-B349)", () => {
       ).toEqual(["cancelled"]);
       expect(readFileSync(join((await s.wt()).repo, "src", "feature.ts"), "utf8")).toContain("todo");
       expect(s.loop.hold(s.db, s.task, partId(s), v(s))).toMatchObject({ status: 409, error: "Part 1 is on hold already." });
-      // A Continue with no part leaves the held part alone.
-      expect(s.loop.resume(s.db, s.task, v(s)).status).toBe(200);
-      await s.loop.idle(s.task);
+      // A Continue with no part leaves the held part alone. It would build nothing, so it answers 409 and starts no driver.
+      expect(s.loop.resume(s.db, s.task, v(s))).toMatchObject({ status: 409, error: "Part 1 is on hold. Continue it from its row." });
+      expect(s.loop.running(s.task)).toBe(false);
       expect([rowOf(s)?.kind, s.steps().filter((x) => x.kind === "implement").length]).toEqual(["held", 1]);
       // Continue with part ends the hold, and the part builds to its end.
       const at = s.phases.length;

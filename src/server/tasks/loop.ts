@@ -223,6 +223,8 @@ const NO_POINTS = "No point waits for a fix.";
 const HOLD_WHEN = (ord: number) => `Hold works while Claude builds or fixes part ${ord}.`;
 const HOLD_FIRST = (ord: number) => `Hold part ${ord} first.`;
 const HELD_TEXT = (ord: number) => `Part ${ord} is on hold. Its work is kept.`;
+// part-session.md section 9.4: a held part goes on by "Continue with part" only.
+const HELD_GO = (ord: number) => `Part ${ord} is on hold. Continue it from its row.`;
 const NO_ARM = "No resume is armed.";
 // setTimeout takes at most 2^31 - 1 ms.
 const TIMER_MAX_MS = 2 ** 31 - 1;
@@ -230,11 +232,12 @@ const TIMER_MAX_MS = 2 ** 31 - 1;
 const CRITIC_FAILED = "The quick review failed. The own review still runs.";
 // ps4-plan.md section 8 item 2: the prompt and the modules of the shipped default profile, so the user's profile edits do not reach it.
 const SHIPPED = SHIPPED_PROFILES.find((p) => p.id === DEFAULT_PROFILE) as Profile;
+// User decision of 2026-11-14: Opus at low effort, not Haiku.
 const CRITIC_PROFILE: Profile = {
   ...SHIPPED,
-  model: "haiku",
+  model: "opus",
   maxTurns: 30,
-  effort: null,
+  effort: "low",
   advisor: null,
   languageChecks: false,
   reviewer: { ...SHIPPED.reviewer, mode: "off" },
@@ -618,7 +621,8 @@ const Q = {
   // ps4-plan.md section 1 item 4: a critic row is a review row with item critic. It is no own review.
   reviewsAfter: `SELECT run FROM task_step WHERE part = $part AND kind = 'review' AND item = 'review' AND state = 'ok' AND run IS NOT NULL
     AND id > $after`,
-  // ps4-plan.md section 2.2, guard critic: a critic row that ended ok or failed after the restart mark. A cancelled critic runs again.
+  // ps4-plan.md section 2.2, guard critic: a critic row that ended ok or failed after the restart mark. A cancelled critic runs again,
+  // and so does a critic that an app restart cut (tasks.ts SQL.failSteps).
   criticRan: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'review' AND item = 'critic' AND state IN ('ok', 'failed')
     AND id > ${MARK} LIMIT 1`,
   // The points of a review run that the user did not discard (an accepted push-back, pushback.md section 6.23.5).
@@ -633,9 +637,10 @@ const Q = {
   pushback: `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, recommended, step, point, asked_at)
     VALUES ($task, 'loop', $round, $ord, $text, $why, 'choice', $options, NULL, $step, $point, $now)`,
   // pushback.md section 6.23.6: the accepted push-backs of a part for context/history.md of its next own review.
+  // User decision of 2026-11-14: Start again drops them, so only the reviews after the restart mark count.
   accepted: `SELECT i.id, i.payload_json FROM review_item i JOIN task_step s ON s.run = i.run WHERE s.part = $part AND s.kind = 'review'
     AND s.item = 'review' AND i.kind = 'finding' AND i.status = 'discarded' AND json_extract(i.payload_json, '$.pushback') IS NOT NULL
-    ORDER BY i.id`,
+    AND s.id > ${MARK} ORDER BY i.id`,
   reviewAt: `SELECT s.id, s.run FROM task_step s JOIN review_run r ON r.id = s.run WHERE s.part = $part AND s.kind = 'review'
     AND s.state = 'ok' AND r.idem_key LIKE $key ORDER BY s.id DESC LIMIT 1`,
   redBeforeSeen: `SELECT 1 FROM task_step WHERE part = $part AND kind = 'check' AND item = $item
@@ -1976,12 +1981,14 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // pushback.md section 6.23.4 item 4: the path before ":" or "#" of a cite is a file of the part worktree, a plan file, or answers.md.
-  // A cite is model output, so a path outside the worktree never counts.
+  // A cite is model output, so a path outside the worktree never counts. The run works in the part folder, so a cite can start with
+  // repo/ (implement.ts). A repository can also hold its own repo/ folder, so the path as written counts too.
   function citeFound(c: Ctx, cite: string): boolean {
     const path = (cite.trim().split(/[:#]/)[0] ?? "").replace(/^\.\//, "");
     if (path === "answers.md" || docNames(c.size).some((n) => path === `spec/${n}.md`)) return true;
-    const segs = path.split(/[\\/]/);
-    return path !== "" && !isAbsolute(path) && !segs.includes("..") && existsSync(onDisk(c.wt, path));
+    return [path, path.replace(/^repo[\\/]/, "")].some(
+      (p) => p !== "" && !isAbsolute(p) && !p.split(/[\\/]/).includes("..") && existsSync(onDisk(c.wt, p)),
+    );
   }
 
   type Pushback = { id: number; why: FindingPushback["why"]; reason: string; cite: string; citeFound: boolean };
@@ -2866,7 +2873,7 @@ export function createLoop(opts: LoopOptions) {
   // spec.md sections 6.18.3 and 6.18.4: one update of a built part. row: its update step, which the route wrote. Each repository takes
   // its own picked base, deepest first: a rebase before the first push, else a merge. A conflict goes to a resolve step. Any failure
   // before the checks aborts the update in every repository. The phase goes idle, updating, (resolving, updating)*, checking, idle
-  // (part-session.md section 9.3.3).
+  // (part-session.md section 9.3.3). In implementing, the driver then builds the other parts, as driveFollow does.
   async function driveUpdate(db: Database, id: number, partId: number, row: number) {
     let c: Ctx | null = null;
     let pre: UpdateDetail["preHeads"] | null = null;
@@ -3024,6 +3031,10 @@ export function createLoop(opts: LoopOptions) {
       // Q57: Claude wrote code in a resolve step, so the own review runs.
       phase = "review";
       if (k.green && resolved) await ownReview(c);
+      if (taskRow(db, id)?.state === "implementing" && free(db, id) && !stopping.has(id)) {
+        modes.delete(id);
+        await buildParts(db, id);
+      }
     } catch (e) {
       await endUpdate(db, id, row, c, pre, label, phase, e, forked);
     }
@@ -3750,6 +3761,13 @@ export function createLoop(opts: LoopOptions) {
       if (t.state === "ready" && !b) return conflict(db, id, TASK_STATE_TEXT.ready);
       if (t.state === "implementing" && !b && (drivers.has(id) || !buildingAll(db, id).length))
         return conflict(db, id, TASK_STATE_TEXT.implementing);
+      // A plain Continue builds nothing when each part in its build is held. A planned part of a task with sub-tasks can still start.
+      if (t.state === "implementing" && !b) {
+        const all = parts(db, id);
+        const held = all.find((p) => p.state === "implementing" && onHold(db, p.id));
+        const other = all.some((p) => (p.state === "implementing" && !onHold(db, p.id)) || (t.subtasks === 1 && p.state === "planned"));
+        if (held && !other) return conflict(db, id, HELD_GO(held.ord));
+      }
       goOnReason(db, t, b, true);
       return { status: 200, task: dto(db, id) };
     },
@@ -3997,6 +4015,7 @@ export function createLoop(opts: LoopOptions) {
       if ("status" in t) return t;
       const target = instructTarget(db, t, input.part);
       const running = drivers.has(id);
+      if ("held" in target) return conflict(db, id, target.error);
       if (running && !("part" in target && sessionRunning(db, target.part.id))) return conflict(db, id, WORKING);
       if ("error" in target) return conflict(db, id, target.error);
       const part = target.part;

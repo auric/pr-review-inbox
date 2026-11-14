@@ -112,8 +112,9 @@ export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
                 ? "review"
                 : null;
 
-// AC-B333: a critic run is a review run with model haiku and 30 turns. An own review with that model and turn cap also reads as critic.
-export const CRITIC_ARGS = { model: "haiku", maxTurns: "30" };
+// AC-B333: a critic run is a review run whose stdin holds the critic task line. This is a copy of CRITIC_TASK of
+// src/server/review/prompt.ts, so a run does not load the prompt modules. tests/review/fake-claude.test.ts checks that both are equal.
+export const CRITIC_LINE = "This is a quick first review. Report only problems in the lines that this change adds.";
 
 // The key of a run for seq: the schema kind, "critic" for a critic run, and for an implement run "implement:<mode>" from the "- Mode:"
 // line of its stdin.
@@ -121,8 +122,7 @@ export function callKey(argv: string[], stdin: string): string | null {
   const at = argv.indexOf("--json-schema");
   if (!argv.includes("-p") || at < 0) return null;
   const kind = schemaKind(JSON.parse(argv[at + 1] ?? "null")?.properties ?? {});
-  const flag = (name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
-  if (kind === "review" && flag("--model") === CRITIC_ARGS.model && flag("--max-turns") === CRITIC_ARGS.maxTurns) return "critic";
+  if (kind === "review" && stdin.includes(CRITIC_LINE)) return "critic";
   if (kind !== "implement") return kind;
   return `implement:${/^- Mode: (\w+)$/m.exec(stdin)?.[1] ?? "?"}`;
 }
