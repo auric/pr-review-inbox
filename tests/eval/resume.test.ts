@@ -137,7 +137,7 @@ describe("eval --resume with the fake CLI", () => {
       expect(after.runs.find((x) => x.case === TASK && x.repeat === 1)).toMatchObject({ status: "completed", errorKind: null });
       expect(after.cases).toEqual(full.cases);
       expect(after).toMatchObject({ createdAt: full.createdAt, commit: full.commit, dirty: full.dirty, repeat: 2 });
-      expect(after.resumes).toEqual([{ commit: full.commit, dirty: full.dirty, at: expect.any(String) }]);
+      expect(after.resumes).toEqual([{ commit: full.commit, dirty: full.dirty, cliVersion: full.cliVersion, at: expect.any(String) }]);
       // The calls of the kept run stay as they were. The stray calls are gone, and each run that ran again has its calls.
       expect(readFileSync(join(calls, `${CLEAN}-1-1.json`), "utf8")).toBe(keptCalls);
       expect(readdirSync(calls).sort()).toEqual(
@@ -176,15 +176,22 @@ describe("eval --resume with the fake CLI", () => {
   );
 
   test(
-    "another CLI version is refused before any case run",
+    "another CLI version gives a warning, and the result records it in its resumes and keeps the CLI version of the first run",
     async () => {
       expect(file).not.toBe("");
-      const bytes = readFileSync(file, "utf8");
+      const before = read(file);
       const r = await bun([RUN, ...base, "--resume", file, "--runner", process.execPath, FAKE, scenario("cli", "9.9.9 (Claude Code)")]);
-      expect(r.code).toBe(2);
-      expect(r.stderr).toContain(`Refused: --resume: the saved result ran CLI ${full.cliVersion}, but this run has 9.9.9.`);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`Warning: the saved result ran CLI ${full.cliVersion}. This run continues it with CLI 9.9.9.`);
+      expect(r.stdout).not.toContain("Warning: the saved result ran at commit");
+      expect(r.stdout).toContain("(CLI 9.9.9), set probe");
       expect(modelCalls("cli")).toBe(0);
-      expect(readFileSync(file, "utf8")).toBe(bytes);
+      const after = read(file);
+      expect(after.cliVersion).toBe(full.cliVersion);
+      expect(after.runs).toEqual(before.runs);
+      expect(after.resumes?.at(-1)).toMatchObject({ commit: full.commit, cliVersion: "9.9.9" });
+      expect(after.resumes).toHaveLength((before.resumes?.length ?? 0) + 1);
     },
     SLOW,
   );
@@ -220,7 +227,8 @@ describe("resumeRefusal", () => {
 
   test("each field of the run setup is refused when it differs", () => {
     const refused = (o: Partial<EvalResult>) => resumeRefusal(saved(), now(o), ["a", "b"]);
-    expect(refused({ cliVersion: "2.1.400" })).toBe(`${it} CLI 2.1.302, but this run has 2.1.400.`);
+    // Claude Code updates itself almost daily. run.ts warns on a new CLI version and records it.
+    expect(refused({ cliVersion: "2.1.400" })).toBeNull();
     expect(refused({ fingerprint: "e".repeat(64) })).toBe(`${it} set fingerprint ffffffffffff, but this run has eeeeeeeeeeee.`);
     // The check compares the whole hash. The text shows its first 12 characters.
     expect(refused({ fingerprint: `${"f".repeat(63)}0` })).toBe(`${it} set fingerprint ffffffffffff, but this run has ffffffffffff.`);

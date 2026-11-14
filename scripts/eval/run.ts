@@ -322,7 +322,8 @@ export function replayRefusal(rec: EvalResult, o: Options, profile: Profile): st
 }
 
 // --resume: why the saved result cannot continue in this run, or null. now: the header of this run. ids: its case IDs. Only the kept
-// runs must fit in ids x now.repeat, because the other runs run again. A different commit is allowed.
+// runs must fit in ids x now.repeat, because the other runs run again. A different commit or CLI version is allowed: Claude Code
+// updates itself almost daily, and a baseline can take more than a day.
 export function resumeRefusal(saved: EvalResult, now: EvalResult, ids: string[]): string | null {
   const it = "Refused: --resume";
   const asked = (r: EvalResult) => (r.requested ?? {}) as Record<string, unknown>;
@@ -330,7 +331,6 @@ export function resumeRefusal(saved: EvalResult, now: EvalResult, ids: string[])
     ["prompt version", saved.promptVersion, now.promptVersion],
     ["profile version", saved.profileVersion, now.profileVersion],
     ["profile revision", saved.profile.revision, now.profile.revision],
-    ["CLI", saved.cliVersion, now.cliVersion],
     ["runner", saved.runner, now.runner],
     ["set", saved.set ?? "v1", now.set ?? "v1"],
     ["set fingerprint", saved.fingerprint, now.fingerprint],
@@ -993,10 +993,12 @@ export async function main(argv: string[]): Promise<number> {
         console.log(
           `Warning: the saved result ran at commit ${last.commit}${last.dirty ? " (uncommitted changes)" : ""}. This run continues it at commit ${commit}${dirty ? " (uncommitted changes)" : ""}.`,
         );
+      if (last.cliVersion !== checked.version)
+        console.log(`Warning: the saved result ran CLI ${last.cliVersion}. This run continues it with CLI ${checked.version}.`);
       const kept = saved.runs.filter(keptRun);
       result = {
         ...saved,
-        resumes: [...(saved.resumes ?? []), { commit, dirty, at: new Date().toISOString() }],
+        resumes: [...(saved.resumes ?? []), { commit, dirty, cliVersion: checked.version, at: new Date().toISOString() }],
         repeat: o.repeat,
         cases: saved.cases.filter((c) => ids.includes(c.id)),
         runs: kept,

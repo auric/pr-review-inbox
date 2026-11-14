@@ -159,7 +159,7 @@ const header = (r: EvalResult) => {
   // review-quality-2026.md E2. A file made before these fields existed does not record them.
   const e2 = r.requested;
   const replay = e2?.replayOf ? `, finder replayed from ${e2.replayOf}` : "";
-  const resumed = (r.resumes ?? []).map((x) => `${x.commit}${x.dirty ? " (uncommitted changes)" : ""}`);
+  const resumed = (r.resumes ?? []).map((x) => `${x.commit}${x.dirty ? " (uncommitted changes)" : ""} (CLI ${x.cliVersion})`);
   return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}${resumed.length ? `, resumed at commit ${resumed.join(", ")}` : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
 };
 

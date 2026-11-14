@@ -147,7 +147,7 @@ function deps(s: Script = {}) {
       if (s.abExit !== undefined) return s.abExit;
       const r = result(16, Number(flag(argv, "--repeat")), s.baseline, s.baselineFailed);
       // run.ts --resume records each resume in the result file.
-      if (argv.includes("--resume")) r.resumes = [{ commit: "abc", dirty: false, at: "2026-11-14T01:00:00.000Z" }];
+      if (argv.includes("--resume")) r.resumes = [{ commit: "abc", dirty: false, cliVersion: "2.1.0", at: "2026-11-14T01:00:00.000Z" }];
       save(join(flag(argv, "--results"), "review-baseline"), r);
       return r.runs.some((x) => x.status !== "completed") ? 1 : 0;
     },

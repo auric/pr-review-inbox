@@ -169,8 +169,9 @@ export type EvalResult = {
   rereview?: boolean;
   // eval:rescore --fold-refuted moved each refuted item of main to fold. Absent: false.
   refutedFolded?: boolean;
-  // run.ts --resume: the checkout of each resume, in order. commit and dirty above are those of the first run. Absent: no resume.
-  resumes?: { commit: string; dirty: boolean; at: string }[];
+  // run.ts --resume: the checkout and the CLI version of each resume, in order. commit, dirty, and cliVersion above are those of the
+  // first run. Absent: no resume.
+  resumes?: { commit: string; dirty: boolean; cliVersion: string; at: string }[];
   repeat: number;
   cases: EvalCaseInfo[];
   runs: CaseRun[];
