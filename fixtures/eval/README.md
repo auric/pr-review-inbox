@@ -2,6 +2,8 @@
 
 These cases measure how well a review finds real bugs and how much noise it adds. docs/plans/review-v2/spec.md section 4.3 is the spec. The code is in `scripts/eval/`. All code in the cases is synthetic. It holds no real names, hosts, or paths.
 
+`bun run eval:w1` runs wave W1 of the local set (probe smoke run, baseline, labels, summary) in one command. See docs/eval/local.md, "Run W1 in one command".
+
 ## Smoke test
 
 Run this first to check the harness end to end with a cheap model. Its scores do not count:

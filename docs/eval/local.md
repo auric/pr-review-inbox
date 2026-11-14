@@ -140,6 +140,24 @@ Each run records two more facts:
 
 The tables show "part files per case" and "parts read" next to "rl-reviewer calls per case". A result file from before these facts shows "-".
 
+## Run W1 in one command
+
+`bun run eval:w1` runs wave W1 of docs/plans/review-v2/review-quality-2026.md. It writes into `eval-results/w1/`. `--results <folder>` changes the folder.
+
+1. Pre-checks, with no model call: `claude auth status` must show authMethod claude.ai, the app must be closed (nothing listens on 127.0.0.1 at `REVIEW_LOOP_PORT` or 7317), and the data folder of the app must hold the database, the git cache, and a user slug. The command prints the CLI version.
+2. Smoke: the probe set once (`bun run eval -- --set probe --repeat 1`). A failed or missing case run stops the command with exit code 1.
+3. Baseline: the command prints the plan estimate (about $140-180 and about 5 hours, not measured) and asks "Start the baseline? [y/N]". Then it runs `eval:ab -- --clean 8 --repeat 3 --baseline-only --review-only`.
+4. Labels: the command runs eval:label without `--real`, prints the open work and its estimate, and asks "Start the labels? [y/N]". Then it labels with `--real`.
+5. Summary: aggregate numbers, case rows by ordinal, and the step costs between two marker lines. Paste these lines to Claude.
+
+- Each finished step writes `<step>.done` into the results folder. A new run prints "Done before: <step>" and skips it. A smoke or label step with a failed run writes no marker.
+- A complete baseline with failed runs (not the usage limit) is kept when 25% or fewer of its runs failed. The command prints a warning with the count and the error kinds, and the summary marks them. A failed run scores as a run with no finding. A later eval:ab with `--baseline` accepts the result, but exits with code 1 because the baseline has failed runs. Above 25%, a stop, or fewer runs than cases x repeats, the baseline writes no marker.
+- `costs.jsonl` in the results folder records the cost and the minutes of each step attempt.
+- `--yes` answers both questions with yes. Any answer other than y or yes stops the command with exit code 2.
+- `--skip-smoke` skips the smoke run and prints a warning.
+- Usage limit: the command stops with exit code 3. Run it again after the limit resets. eval:ab cannot continue a cut baseline, so the next run repeats the whole baseline. The cut baseline folder stays as `baseline-earlier-<stamp>`. eval:label continues from its stored answers.
+- Exit codes: 0 done, 1 a failed step, 2 a failed pre-check, a usage error, or a No answer, 3 the usage limit.
+
 ## Label the findings (eval:label)
 
 `bun run eval:label -- <result folder or file> --real` labels the findings of eval results (docs/plans/review-v2/review-quality-2026.md E3, E4). Give the folder of an eval:ab run, or one result file. Without `--real`, the command prints the open work and a cost estimate, and exits with code 2. With no open work, it prints the scores and needs no `--real`. It exits with code 1 when a CLI run fails or gives an invalid answer. Run it again to continue: each stored answer stays.
