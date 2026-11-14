@@ -459,9 +459,11 @@ describe("eval:ab arguments", () => {
   test("--candidate-variants takes broad and verify2 and refuses the retired variants", () => {
     expect(parseAb(["--candidate-variants", "broad"])).toMatchObject({ variants: ["broad"] });
     expect(parseAb(["--candidate-variants", "verify2,broad"])).toMatchObject({ variants: ["verify2", "broad"] });
+    // review-quality-2026.md item 7.
+    expect(parseAb(["--candidate-variants", "classes"])).toMatchObject({ variants: ["classes"] });
     for (const retired of ["signal", "order", "rules2", "rereview-strict"])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
-        error: expect.stringContaining("--variants must be a comma list of broad, parts, verify2."),
+        error: expect.stringContaining("--variants must be a comma list of broad, classes, parts, verify2."),
       });
   });
 
@@ -505,6 +507,7 @@ describe("eval:ab arguments", () => {
       ["--candidate-modules", "failures"],
       ["--candidate-variants", "broad"],
       ["--candidate-variants", "broad,verify2"],
+      ["--candidate-variants", "classes"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
       ["--candidate-verifier", "off"],
     ])

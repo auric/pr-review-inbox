@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Scoring of an eval result file (docs/plans/review-v2/spec.md section 4.3). Pure: no file, no process, no clock.
+import { repoPath } from "../../src/server/review/validate";
 import type { RunPhase, RunUsage, VerifySummary, Volume } from "../../src/shared/dto";
 import {
   type AnchorState,
@@ -824,5 +825,87 @@ export function scoreReplies(r: ReplyEvalResult): ReplyScore {
       pass: share((x) => x.judgement && x.action && x.cites),
     };
   }
+  return out;
+}
+
+// ---------- Evidence references (review-quality-2026.md item 8, the zero-cost gate) ----------
+
+// catalog.ts asks the finder for "path:line for each line that shows the problem" in evidence. A reference is a token with a "/", "\",
+// or "." before ":<line>", with an optional "-<line>" end. It starts at the text start, after white space, or after an opening quote,
+// backtick, or bracket. So a URL is none, and a path with another character, such as "[id]" or "@types", is none too.
+const EVIDENCE_REF = /(?<=^|[\s"'`([{<])([\w./\\-]*[./\\][\w./\\-]*):(\d+)(?:-(\d+))?/g;
+export type EvidenceRef = { path: string; line: number; end: number };
+// path: the repository path, or the raw token when repoPath refuses it, so that the head lookup fails.
+export const evidenceRefs = (text: string): EvidenceRef[] =>
+  [...text.matchAll(EVIDENCE_REF)].map((m) => {
+    const line = Number(m[2]);
+    return { path: repoPath(m[1] as string) ?? (m[1] as string), line, end: Math.max(line, Number(m[3] ?? line)) };
+  });
+
+// The label of an item for the evidence table: the kind of the gold item that it claims, else the judge label.
+export const EVIDENCE_LABELS = ["must-find", "trap", "extra", "judge tp", "judge fp", "no label"] as const;
+export type EvidenceLabel = (typeof EVIDENCE_LABELS)[number];
+// findings: items of all runs. unrecorded: items without the evidence field (files made before it existed). noRef: items whose
+// evidence has no reference. withRef: items with one or more references, and refs their references. noFile: items with a reference to
+// a file that is not in the head tree. pastEnd: items with a reference to a line that the head file does not have. A cut or prefixed
+// path lands in noFile, so only pastEnd is free of parser misses.
+export type EvidenceRow = {
+  findings: number;
+  unrecorded: number;
+  noRef: number;
+  withRef: number;
+  refs: number;
+  noFile: number;
+  pastEnd: number;
+};
+
+// lines: the line count of a file at the head of a case, undefined when the head tree has no such file. A line is out of the file when
+// it is 0 or its end is past the last line. An old-side reference also counts against the head.
+export function evidenceCheck(
+  results: EvalResult[],
+  g: Grounding | undefined,
+  lines: (caseId: string, path: string) => number | undefined,
+): Record<EvidenceLabel, EvidenceRow> {
+  const out = Object.fromEntries(
+    EVIDENCE_LABELS.map((l) => [l, { findings: 0, unrecorded: 0, noRef: 0, withRef: 0, refs: 0, noFile: 0, pastEnd: 0 }]),
+  ) as Record<EvidenceLabel, EvidenceRow>;
+  for (const r of results)
+    for (const run of r.runs) {
+      const c = r.cases.find((x) => x.id === run.case);
+      if (!c) continue;
+      const m = run.items.map((i) => g?.matches(c, i));
+      const gold = m.every((x) => x !== undefined) ? goldLabels(goldOf(c), run.items, (n) => m[n] ?? []) : null;
+      run.items.forEach((i, n) => {
+        const gl = gold?.[n];
+        const j = gold && !gl ? g?.judge(c, i) : undefined;
+        const label: EvidenceLabel = gl
+          ? gl.kind === "trap"
+            ? "trap"
+            : gl.kind === "extra"
+              ? "extra"
+              : "must-find"
+          : j
+            ? j.label === "tp"
+              ? "judge tp"
+              : "judge fp"
+            : "no label";
+        const row = out[label];
+        row.findings++;
+        if (i.evidence === undefined) {
+          row.unrecorded++;
+          return;
+        }
+        const refs = evidenceRefs(i.evidence);
+        if (!refs.length) {
+          row.noRef++;
+          return;
+        }
+        row.withRef++;
+        row.refs += refs.length;
+        const counts = refs.map((x) => lines(c.id, x.path));
+        if (counts.some((n) => n === undefined)) row.noFile++;
+        if (refs.some((x, k) => counts[k] !== undefined && (x.line < 1 || x.end > (counts[k] as number)))) row.pastEnd++;
+      });
+    }
   return out;
 }

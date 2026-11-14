@@ -4,7 +4,20 @@
 // Prints the scores of eval result files (docs/plans/review-v2/spec.md section 4.3).
 // Usage: bun run eval:compare <a.json> <b.json>. Exit codes: 0 done, 2 a usage error, an unreadable file, or a refusal().
 import { readFileSync } from "node:fs";
-import { BOOTSTRAP, type EvalResult, type Grounding, METRICS, type Metric, pairedDelta, type Score, type Stat, score } from "./score";
+import {
+  BOOTSTRAP,
+  EVIDENCE_LABELS,
+  type EvalResult,
+  type EvidenceLabel,
+  type EvidenceRow,
+  type Grounding,
+  METRICS,
+  type Metric,
+  pairedDelta,
+  type Score,
+  type Stat,
+  score,
+} from "./score";
 
 const LABEL: Record<Metric, string> = {
   groundedRecall: "grounded recall: counted must-finds that a shown finding matches, by the matcher",
@@ -199,6 +212,42 @@ export function detailText(s: Score): string {
   const q = s.finderQuestions;
   if (q) out.push("", `Finder questions, all runs: ${q.asked} asked, ${q.answered} answered, ${q.findings} findings, ${q.kept} kept.`);
   return out.join("\n");
+}
+
+// review-quality-2026.md item 8 gate: the evidence references by label (score.ts evidenceCheck). Counts only, no path and no text.
+export function evidenceText(rows: Record<EvidenceLabel, EvidenceRow>): string {
+  return [
+    "Evidence references (review-quality-2026.md item 8 gate): the findings of all runs by label. Missing file: a reference names a file that is not in the head tree, also when the parse cut its path. Line out of file: a reference names line 0 or a line past the end of a head file. Shares are over the findings with path:line.",
+    table([
+      [
+        "label",
+        "findings",
+        "no evidence field",
+        "no path:line",
+        "with path:line",
+        "references",
+        "missing file",
+        "share",
+        "line out of file",
+        "share",
+      ],
+      ...EVIDENCE_LABELS.map((l) => {
+        const x = rows[l];
+        return [
+          l,
+          String(x.findings),
+          String(x.unrecorded),
+          String(x.noRef),
+          String(x.withRef),
+          String(x.refs),
+          String(x.noFile),
+          pct(x.noFile, x.withRef),
+          String(x.pastEnd),
+          pct(x.pastEnd, x.withRef),
+        ];
+      }),
+    ]),
+  ].join("\n");
 }
 
 // name: the label of a case in the rows. eval:ab passes ordinals, so its output holds no case ID.

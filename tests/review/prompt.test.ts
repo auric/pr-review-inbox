@@ -8,6 +8,7 @@ import {
   ANSWERED_RULES,
   askAgent,
   BROAD_THREAD_CLAIM,
+  CLASSES_LINES,
   contextBlock,
   DISCUSS_RULES,
   DO_NOT_FLAG,
@@ -921,6 +922,28 @@ describe("review v3 prompt switches", () => {
     expect(promptVersion(v)).toBe(`${REVIEW_PROMPT_VERSION}+verify2`);
   });
 
+  // docs/plans/review-v2/review-quality-2026.md item 7.
+  test("classes: the finder agents get the bug kinds after the profile prompt, and nothing else changes", () => {
+    const k = withVariants("classes");
+    const after = `${general.prompt}\n${CLASSES_LINES.join("\n")}`;
+    for (const c of [FULL, RE, NO_CONTEXT]) {
+      expect(mainAgent(k, c).prompt).toBe(mainAgent(general, c).prompt.replace(general.prompt, after));
+      expect(reviewerAgent(k, c).prompt).toBe(reviewerAgent(general, c).prompt.replace(general.prompt, after));
+      expect(reviewerAgent(k, c, true).prompt).toBe(reviewerAgent(general, c, true).prompt.replace(general.prompt, after));
+    }
+    expect(CLASSES_LINES.at(-1)).toBe("Report other problems too.");
+    // The verify phase, the shared rules, every stdin, and the other run kinds do not change.
+    for (const agent of [verifyAgent, verifierAgent]) expect(agent(k, FULL, true).prompt).toBe(agent(general, FULL, true).prompt);
+    expect(sharedRules(k)).toEqual(sharedRules(general));
+    expect(buildPrompt({ ...full, profile: k })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: k })).toBe(buildRereviewPrompt(rereviewInput));
+    expect(buildVerifyPrompt({ ...full, profile: k, count: 3, rereview: false })).toBe(
+      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
+    );
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(k, FULL).prompt).toBe(kind(general, FULL).prompt);
+    expect(promptVersion(k)).toBe(`${REVIEW_PROMPT_VERSION}+classes`);
+  });
+
   test("ASD-STE100: every switch line has at most 20 words", () => {
     expect(
       longSentences([
@@ -930,6 +953,7 @@ describe("review v3 prompt switches", () => {
         ...Object.values(BROAD_THREAD_CLAIM),
         ...languageSkipLines([...LANGUAGES]),
         ...Object.values(VERIFY2),
+        ...CLASSES_LINES,
       ]),
     ).toEqual([]);
   });
@@ -937,7 +961,7 @@ describe("review v3 prompt switches", () => {
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
     expect(promptVersion(withVariants("verify2", "broad"))).toBe("2.8+broad+verify2");
-    expect(VARIANTS).toEqual(["broad", "parts", "verify2"]);
+    expect(VARIANTS).toEqual(["broad", "classes", "parts", "verify2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
     expect(parsed.variants).toEqual([]);
@@ -949,7 +973,13 @@ describe("review v3 prompt switches", () => {
       "verify2",
     ]);
     expect(profileInput.parse({ ...old, variants: retired }).variants).toEqual([]);
-    const revisions = [general, withVariants("broad"), withVariants("verify2"), withVariants("broad", "verify2")].map(profileRevision);
+    const revisions = [
+      general,
+      withVariants("broad"),
+      withVariants("verify2"),
+      withVariants("broad", "verify2"),
+      withVariants("classes"),
+    ].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
     // spec.md section 1.8: outcome hide parses to no key and keeps the revision. Demote changes it.
     const hide = profileInput.parse({ ...general, verifier: { ...general.verifier, outcome: "hide" } });

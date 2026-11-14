@@ -4,13 +4,15 @@
 // docs/plans/review-v2 AC-M1: the eval scorer gives the documented numbers on a hand-made result. No process, no file.
 import { describe, expect, test } from "bun:test";
 import type { EvalBug } from "../../scripts/eval/cases";
-import { compareText, summaryText } from "../../scripts/eval/compare";
+import { compareText, evidenceText, summaryText } from "../../scripts/eval/compare";
 import { foldRefuted, rescore } from "../../scripts/eval/rescore";
 import {
   type CaseRun,
   type EvalCaseInfo,
   type EvalItem,
   type EvalResult,
+  evidenceCheck,
+  evidenceRefs,
   type Grounding,
   type JudgeLabel,
   overlaps,
@@ -732,5 +734,72 @@ describe("grounded metrics (review-quality-2026.md E5)", () => {
     expect(pairedDelta(a, b)).toEqual(d);
     expect(compareText(a, b)).toContain("Paired delta (information only): B - A hit rate per counted must-find, line match: +50.0 pts");
     expect(pairedDelta(a, { ...b, cases: [] })).toBeNull();
+  });
+});
+
+describe("evidence references (review-quality-2026.md item 8 gate)", () => {
+  test("a reference is path:line or path:line-line with a / or . in the path; a URL, a bare word, and prose are none", () => {
+    expect(evidenceRefs("src/a.ts:12 and `lib/b.py:3-5`, (c.go:7).")).toEqual([
+      { path: "src/a.ts", line: 12, end: 12 },
+      { path: "lib/b.py", line: 3, end: 5 },
+      { path: "c.go", line: 7, end: 7 },
+    ]);
+    // A backslash path and a ./ prefix become repository paths. A column after the line is no end line.
+    expect(evidenceRefs("src\\win\\x.cs:4 ./d/e.ts:9:2")).toEqual([
+      { path: "src/win/x.cs", line: 4, end: 4 },
+      { path: "d/e.ts", line: 9, end: 9 },
+    ]);
+    expect(evidenceRefs("see https://host.invalid:8080/x, Note:3, line 42 of a.ts, ratio 3:4")).toEqual([]);
+    // A token must start at a boundary, so a path with a character outside the class is no reference, not a cut path.
+    expect(evidenceRefs("src/app/[id]/page.tsx:12 src/@types/x.d.ts:3 x+y/a.cc:3")).toEqual([]);
+    // A path that repoPath refuses stays raw, so the head lookup fails.
+    expect(evidenceRefs("../up.ts:1")).toEqual([{ path: "../up.ts", line: 1, end: 1 }]);
+  });
+
+  // g.ts has 10 lines at the head. dual claims B1, trap claims T1, extra claims the extra, dup (a claimed duplicate) and noise get
+  // judge labels, and plain has no label.
+  const c = gcase("g", [gbug("B1", 10)]);
+  const items = [
+    at("dual", { evidence: "g.ts:10 and g.ts:9-10" }),
+    at("dup", { evidence: "g.ts:11" }),
+    at("trap", { evidence: "gone.ts:1" }),
+    at("extra", { evidence: "no reference" }),
+    at("noise", { evidence: "g.ts:0, g.ts:10-11, gone.ts:2" }),
+    at("plain"),
+  ];
+  const r = gresult([c], [run("g", 1, items)]);
+  const g = grounding(
+    { dual: ["bug:B1"], dup: ["bug:B1"], trap: ["trap:T1"], extra: ["extra:0"], noise: [], plain: [] },
+    { dup: { label: "tp", severity: "high" }, noise: { label: "fp", severity: "low" } },
+  );
+  const lines = (id: string, path: string) => (id === "g" && path === "g.ts" ? 10 : undefined);
+  const zero = { findings: 0, unrecorded: 0, noRef: 0, withRef: 0, refs: 0, noFile: 0, pastEnd: 0 };
+
+  test("each finding counts under its gold or judge label; a missing file and a line out of the file count apart", () => {
+    expect(evidenceCheck([r], g, lines)).toEqual({
+      "must-find": { ...zero, findings: 1, withRef: 1, refs: 2 },
+      trap: { ...zero, findings: 1, withRef: 1, refs: 1, noFile: 1 },
+      extra: { ...zero, findings: 1, noRef: 1 },
+      "judge tp": { ...zero, findings: 1, withRef: 1, refs: 1, pastEnd: 1 },
+      "judge fp": { ...zero, findings: 1, withRef: 1, refs: 3, noFile: 1, pastEnd: 1 },
+      "no label": { ...zero, findings: 1, unrecorded: 1 },
+    });
+    // Without labels, or with an item that has no matcher answer, every finding of the run has no label.
+    const none = evidenceCheck([r], undefined, lines)["no label"];
+    expect(none).toEqual({ findings: 6, unrecorded: 1, noRef: 1, withRef: 4, refs: 7, noFile: 2, pastEnd: 2 });
+    expect(evidenceCheck([r], grounding({ dual: ["bug:B1"] }), lines)["no label"]).toEqual(none);
+    // Two results pool their runs.
+    expect(evidenceCheck([r, r], g, lines).trap.findings).toBe(2);
+  });
+
+  test("the table prints counts and shares, and no path or finding text", () => {
+    const text = evidenceText(evidenceCheck([r], g, lines));
+    expect(text).toMatch(
+      /label\s+findings\s+no evidence field\s+no path:line\s+with path:line\s+references\s+missing file\s+share\s+line out of file\s+share/,
+    );
+    expect(text).toMatch(/\ntrap\s+1\s+0\s+0\s+1\s+1\s+1\s+100\.0%\s+0\s+0\.0%\n/);
+    expect(text).toMatch(/\nextra\s+1\s+0\s+1\s+0\s+0\s+0\s+-\s+0\s+-\n/);
+    expect(text).not.toContain("g.ts");
+    expect(text).not.toContain("dual");
   });
 });

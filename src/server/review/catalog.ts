@@ -601,6 +601,19 @@ export const BROAD_THREAD_CLAIM = {
 };
 const threadClaim = (p: FinderProfile, c: RunFiles) =>
   c.prContext && has(p, "broad") ? [checked(p) ? BROAD_THREAD_CLAIM.checked : BROAD_THREAD_CLAIM.unchecked] : [];
+// docs/plans/review-v2/review-quality-2026.md item 7: the finder lines of the "classes" variant. They stay out of REVIEW_LENS, because
+// an edit of REVIEW_LENS changes profileRevision.
+export const CLASSES_LINES = [
+  "Look hardest at the kinds of problems that authors fix most often:",
+  "- a wrong condition, comparison, or loop bound",
+  "- a wrong conversion of a type, a unit, or a format",
+  "- a missing null, empty, or error case",
+  "- an error that the code loses or reports wrong",
+  "- a resource that the code does not release",
+  "- a wrong effect on a caller outside the diff",
+  "Report other problems too.",
+];
+const classes = (p: Profile) => (has(p, "classes") ? CLASSES_LINES : []);
 
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.
 export const VOLUME_NITS: Record<Volume, string> = {
@@ -836,6 +849,7 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec 
     prompt: [
       "You are a read-only code reviewer. You cannot change files, and you post nothing.",
       p.prompt,
+      ...classes(p),
       ...contextBlock(c),
       ...finderRules(p, true),
       ...finderList(p),
@@ -1226,6 +1240,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
     prompt: [
       "You review one part of a change, read-only. The request names the paths and the git_diff range to review.",
       p.prompt,
+      ...classes(p),
       ...contextBlock(c),
       ...finderRules(p, false),
       ...finderList(p),

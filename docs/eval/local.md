@@ -13,6 +13,7 @@ The command builds the local set from the data folder of the app into `eval-loca
 - Review and re-review cases: the default candidate is the shipped profile. `--candidate-variants` and `--candidate-modules` add switches to it. The verify mode stays as shipped.
 - `broad` (docs/plans/review-v2/review-quality-2026.md item 3): with the verify phase on, the finder gets no do-not-flag list and no language skip lists. The verify phase gets the skip lists of the languages of the change. With `pr-context.md`, the finder learns that a thread comment is a claim, not a reason to leave out a finding.
 - `verify2` (item 4): the verify phase gets a wider duplicate rule and a rule for thread claims. It also gets a rule for findings of the intent section. A split check gives one group to one rl-verifier call. The variant changes only the verify prompts, so `--candidate-replay` can test it.
+- `classes` (item 7): rl-main and rl-reviewer get a list of the bug kinds that authors fix most often, after the profile prompt. The list ends with "Report other problems too." The variant changes the finder, so `--candidate-replay` refuses it. Example: `--candidate-variants classes --candidate-repeat 2 --clean 8`.
 - `parts`: see "Part files". `failures`: a trial module with a failure checklist.
 - The variants `signal`, `order`, `rules2`, and `rereview-strict` are removed. The first three lost in U-V1 (docs/eval/results.md). U-V1 gave no decision for `rereview-strict`, and no plan uses it. A saved profile that still lists one loads without it. `--variants` and `--candidate-variants` refuse them. No run reads `REVIEW.md` now.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
@@ -185,6 +186,19 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 - The summary also prints a mean per case (macro) beside the pooled number (micro), the verifier confusion matrix (the gold or judge label of each finding by its verdict), the slices (severity, source, module, bug class, size, task text, clean cases), union recall over k repeats, and the finder question sums. The probe set is its own slice: run it with `--set probe`.
 - eval:compare prints a paired delta: the mean of B - A of the hit rate per counted must-find, with a 90% bootstrap interval over the PR groups and a fixed seed. It is information only.
 - A result without labels shows "-" for each grounded and augmented metric.
+
+### Evidence references (item 8 gate)
+
+`bun run eval:label -- eval-results/w1/baseline --evidence` checks the `path:line` references in the evidence of each finding against the files at the case head (docs/plans/review-v2/review-quality-2026.md item 8). It runs no CLI, costs nothing, and writes nothing. Run it after `eval:w1` finished the labels.
+
+- A reference is a token with a `/`, `\`, or `.` before `:<line>`, with an optional `-<line>` end, as the finder prompt asks ("path:line"). It starts at the text start, after white space, or after an opening quote, backtick, or bracket. A URL, a word without a dot, and a path with another character (such as `[id]` or `@types`) are no reference. In `a.ts:12, 15`, only line 12 counts.
+- Missing file: a reference names a file that is not in the head tree. A path that the parse cut, or a path with a `repo/` prefix, also lands here.
+- Line out of file: a reference names line 0 or a line past the end of a file in the head tree. An old-side reference also counts against the head. Parser misses do not reach this column, so trust it more.
+- The table counts the findings of all runs, shown, folded, and hidden, by label: must-find, trap, and extra (the matcher claim), judge tp and judge fp, and no label. A finding without a matcher answer or a judge label counts as no label.
+- Columns: findings, no evidence field (a result file made before the field existed), no path:line, with path:line, references, missing file and its share, line out of file and its share. Each share is over the findings with path:line.
+- The output holds counts only: no path, no finding text, and no case ID.
+- Gate: build variant "quotes" only when the shares of judge fp are clearly above those of judge tp and must-find.
+- Give the `baseline` folder, not `eval-results/w1`. That folder also holds the probe smoke run, and a `baseline-earlier-<stamp>` folder of a cut run, which the current build of the set refuses.
 
 ## Bisect when the result is mixed
 

@@ -269,7 +269,7 @@ Report other problems too.
 ### 8. Evidence quotes, severity cap only (variant "quotes")
 
 - Hypothesis: a false finding often cites lines that do not say what its trigger claims. [A] "find a supporting quote ... retract the claim". [R] RovoDev uses a factual-correctness judge. [O] Moved anchors were more common on true findings (4 of 21), so this only caps severity.
-- Gate (zero cost): on W1, check the `path:line` references in evidence against the head files. Build only if bad references are clearly more common among judge-fp than tp findings.
+- Gate (zero cost): on W1, check the `path:line` references in evidence against the head files. Build only if bad references are clearly more common among judge-fp than tp findings. Command: `bun run eval:label -- eval-results/w1/baseline --evidence` (docs/eval/local.md).
 - catalog.ts:565 evidence line becomes: "In evidence, give one line for each code line that shows the problem. Write path:line, a colon, a space, and the exact text of that line."
 - judge.ts: a new `checkEvidence` step after `validate`, reusing validate.ts `nearest` and `collapse` with `CONTEXT_LINES` (3). A failed quote sets `evidenceStatus` "unverified" and `evidenceFailed`; candidates.md adds "- Evidence check: <path:line> does not hold the quoted text."; `capOf` caps severity only when the verifier did not confirm the finding.
 - A window is acceptable here, unlike for anchors (review-v3 section 7): an anchor decides where a comment posts, but an evidence line only feeds a severity cap.
@@ -281,7 +281,7 @@ Report other problems too.
 | Wave | Work | Shared runs | Model cost |
 |---|---|---|---|
 | W0 | E1, E2, E3-E5 code; probe smoke run | none | about $5 |
-| W1 | Rebuild the set (`eval:local --clean 8`); baseline-only run at shipped efforts, repeat 3, recorded; labels; judge calibration; zero-cost checks (union bound, refuted in main, verifier matrix, evidence references, category counts) | none | about $140-180, about 5 h |
+| W1 | Rebuild the set (`eval:local --clean 8`); baseline-only run at shipped efforts, repeat 3, recorded; labels; judge calibration; zero-cost checks (union bound, refuted in main, verifier matrix, evidence references: `bun run eval:label -- eval-results/w1/baseline --evidence`, category counts) | none | about $140-180, about 5 h |
 | W2 (cheap) | C1 = improvements 1+2; replays (control, verify2, one effort); improvement 5 by rescore; probe set | bisect C1 only if large cases are mixed | about $130-210 |
 | W3 (costly) | C2 broad; C3 runs3 if gated; C4 classes if gated; improvement 8 rides on C2 or C4 | none; superiority tests run alone | about $55-450 by gates |
 
