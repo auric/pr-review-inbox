@@ -304,10 +304,16 @@ export type Score = {
   macro: Record<Metric, number | null>;
   confusion: Record<string, { tp: number; fp: number }> | null;
   slices: Slice[];
+  // review-quality-2026.md item 10: the shown findings with category security, summed over all runs. gold: they claim a gold item.
+  // tp, fp, unlabeled: the judge label of the other ones. null: not grounded.
+  security: Sec | null;
   union: { k: number; shown: number; raised: number }[];
   finderQuestions: { asked: number; answered: number; findings: number; kept: number } | null;
   recallBugs: { repeat: number; found: number; mustFinds: number }[];
 };
+
+export type Sec = { runs: number; shown: number; gold: number; tp: number; fp: number; unlabeled: number };
+const SEC_KEYS = ["shown", "gold", "tp", "fp", "unlabeled"] as const;
 
 // The counted must-finds (goldOf keys) that a shown item finds and that any item raises.
 type Hits = { shown: Set<string>; raised: Set<string> };
@@ -326,6 +332,7 @@ type Ground = {
   judgeFp: number | null;
   above: number | null;
   confusion: Record<string, { tp: number; fp: number }> | null;
+  security: Omit<Sec, "runs">;
 };
 
 // null: an item has no matcher answer.
@@ -346,6 +353,8 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
   const shown = r.items.flatMap((i, n) => (i.group === "main" ? [{ i, gold: labels[n] ?? null }] : []));
   const unmatched = shown.filter((x) => x.gold === null).map((x) => ({ i: x.i, j: g.judge(c, x.i) }));
   const judged = unmatched.every((x) => x.j !== undefined);
+  // The exact category text, as the verify rules of catalog.ts SECURITY2 match it.
+  const sec = unmatched.filter((x) => x.i.category === "security");
   const count = (f: (x: (typeof unmatched)[number]) => boolean) => (judged ? unmatched.filter(f).length : null);
   const truth = r.items.map((i, n) => {
     const gl = labels[n];
@@ -373,6 +382,13 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
     judgeFp: count((x) => x.j?.label === "fp"),
     above: count((x) => x.j?.label === "tp" && LEVEL[x.i.severity] > JUDGE_LEVELS.indexOf(x.j.severity)),
     confusion,
+    security: {
+      shown: shown.filter((x) => x.i.category === "security").length,
+      gold: shown.filter((x) => x.i.category === "security" && x.gold !== null).length,
+      tp: sec.filter((x) => x.j?.label === "tp").length,
+      fp: sec.filter((x) => x.j?.label === "fp").length,
+      unlabeled: sec.filter((x) => x.j === undefined).length,
+    },
   };
 }
 
@@ -744,6 +760,8 @@ export function score(r: EvalResult, g?: Grounding): Score {
   const add = (k: "asked" | "answered" | "findings" | "kept") => fq.reduce((s, x) => s + x[k], 0);
   const severities = unshowable(r.volume);
   const count = r.cases.reduce((n, c) => n + c.bugs.length - mustFind(c, r.volume).length, 0);
+  const security: Sec | null = grounded ? { runs: runs.length, shown: 0, gold: 0, tp: 0, fp: 0, unlabeled: 0 } : null;
+  if (security) for (const x of runs) for (const k of SEC_KEYS) security[k] += x.t.ground?.security[k] ?? 0;
   return {
     suite,
     cases,
@@ -752,6 +770,7 @@ export function score(r: EvalResult, g?: Grounding): Score {
     macro,
     confusion,
     slices: slices(runs, grounded, hits, r.volume),
+    security,
     union,
     finderQuestions: fq.length ? { asked: add("asked"), answered: add("answered"), findings: add("findings"), kept: add("kept") } : null,
     recallBugs: repeats.map((n) => {

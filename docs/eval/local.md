@@ -186,6 +186,7 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 - refuted shown: refuted findings that stay in main (the protected classes), per case. `bun run eval:rescore -- <result.json> --fold-refuted` moves them to fold and prints recall and noise for that case.
 - The line match (recall, precision, noise) stays in its own rows beside the grounded rows. candidate recall now divides by the counted must-finds, as recall does, so candidate recall - recall is the share that the check lost.
 - The summary also prints a mean per case (macro) beside the pooled number (micro), the verifier confusion matrix (the gold or judge label of each finding by its verdict), the slices (severity, source, module, bug class, size, task text, clean cases), union recall over k repeats, and the finder question sums. The probe set is its own slice: run it with `--set probe`.
+- Shown security findings (improvement 10): the shown findings whose category is exactly security, per case run, by gold match, judge tp, judge fp, and no label. It prints only with labels: in the eval:label and eval:rescore summaries, and for A and B in eval:compare.
 - eval:compare prints a paired delta: the mean of B - A of the hit rate per counted must-find, with a 90% bootstrap interval over the PR groups and a fixed seed. It is information only.
 - A result without labels shows "-" for each grounded and augmented metric.
 

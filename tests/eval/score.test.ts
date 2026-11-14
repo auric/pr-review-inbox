@@ -677,6 +677,40 @@ describe("grounded metrics (review-quality-2026.md E5)", () => {
     expect(summaryText(sr, score(sr, sg))).toMatch(/clean cases\s+0\/0\s+-\s+1\s+2\.00\s+1\.00/);
   });
 
+  test("the security row counts shown findings with category security per case run, by gold match and judge label", () => {
+    const sec = { category: "security" };
+    const sc = gcase("s", [gbug("S1", 10)]);
+    const sr = gresult(
+      [sc],
+      [
+        run("s", 1, [at("hit", sec), at("tp", sec), at("fp", sec), at("fp2", sec), at("other-fp")]),
+        // A hidden finding and the category "injection" stay out.
+        run("s", 2, [at("open", sec), at("hidden-fp", { ...sec, group: "hidden" }), at("inj-fp", { category: "injection" })]),
+      ],
+    );
+    const sg = grounding(
+      { hit: ["bug:S1"], tp: [], fp: [], fp2: [], "other-fp": [], open: [], "hidden-fp": [], "inj-fp": [] },
+      {
+        tp: { label: "tp", severity: "medium" },
+        fp: { label: "fp", severity: "low" },
+        fp2: { label: "fp", severity: "low" },
+        "other-fp": { label: "fp", severity: "low" },
+        "hidden-fp": { label: "fp", severity: "low" },
+        "inj-fp": { label: "fp", severity: "low" },
+      },
+    );
+    const s = score(sr, sg);
+    expect(s.security).toEqual({ runs: 2, shown: 5, gold: 1, tp: 1, fp: 2, unlabeled: 1 });
+    expect(summaryText(sr, s)).toMatch(
+      /\ncase runs\s+shown\s+gold match\s+judge tp\s+judge fp\s+no label\n2\s+2\.50\s+0\.50\s+0\.50\s+1\.00\s+0\.50\n/,
+    );
+    // eval:compare prints the row for A and for B.
+    expect(
+      compareText(sr, sr, (id) => id, sr.profile.revision, [sg, sg]).match(/\n2\s+2\.50\s+0\.50\s+0\.50\s+1\.00\s+0\.50\n/g),
+    ).toHaveLength(2);
+    expect(score(sr).security).toBeNull();
+  });
+
   test("macro is the mean of the case means, micro pools the cases", () => {
     const a = gcase("a", [gbug("A1", 10)], { traps: [], extras: [] });
     const b = gcase("b", [gbug("B1", 10), gbug("B2", 20), gbug("B3", 30)], { traps: [], extras: [] });

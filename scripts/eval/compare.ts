@@ -195,6 +195,16 @@ export function detailText(s: Score): string {
         ]),
       ]),
     );
+  const sec = s.security;
+  if (sec)
+    out.push(
+      "",
+      "Shown security findings (review-quality-2026.md item 10): shown findings with category security, per case run",
+      table([
+        ["case runs", "shown", "gold match", "judge tp", "judge fp", "no label"],
+        [String(sec.runs), ...[sec.shown, sec.gold, sec.tp, sec.fp, sec.unlabeled].map((x) => per(sec.runs ? x / sec.runs : null))],
+      ]),
+    );
   if (s.union.length)
     out.push(
       "",
