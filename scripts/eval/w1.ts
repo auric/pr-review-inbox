@@ -143,6 +143,18 @@ async function teed(f: () => Promise<number>): Promise<{ code: number; text: str
   }
 }
 
+// The arguments of each step. eval:ab takes no --real: it runs the claude CLI on PATH unless --runner is given.
+export function stepArgs(results: string, runner: string[] | null) {
+  const cli = runner ? ["--runner", ...runner] : ["--real"];
+  const baseline = join(results, "baseline");
+  return {
+    smoke: ["--set", "probe", "--repeat", "1", "--out", join(results, "smoke"), ...cli],
+    baseline: ["--clean", "8", "--repeat", "3", "--baseline-only", "--review-only", "--results", baseline, ...(runner ? cli : [])],
+    plan: [baseline],
+    labels: [baseline, ...cli],
+  };
+}
+
 export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
   const at = argv.indexOf("--runner");
   const runner = at < 0 ? null : argv.slice(at + 1);
@@ -163,7 +175,7 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
     return 2;
   }
   const results = resolve(v.results ?? join(REPO, "eval-results", "w1"));
-  const cli = runner ? ["--runner", ...runner] : ["--real"];
+  const args = stepArgs(results, runner);
 
   // Step 0: no check starts a model call.
   const checked = await createClaudeRunner({ command: runner ?? undefined }).check();
@@ -237,7 +249,7 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
     const stop = await step("smoke", async () => {
       const dir = join(results, "smoke");
       freshFolder(dir);
-      const code = await deps.run(["--set", "probe", "--repeat", "1", "--out", dir, ...cli]);
+      const code = await deps.run(args.smoke);
       const o = runOutcome(code, dir, loadCases("all", setDir("probe")).length);
       if (o.file) {
         const r = readResult(o.file);
@@ -256,7 +268,7 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
     console.log(PLAN_TEXT);
     if (!v.yes && !deps.ask("Start the baseline? [y/N]")) return "no";
     freshFolder(baseline);
-    const code = await deps.ab(["--clean", "8", "--repeat", "3", "--baseline-only", "--review-only", "--results", baseline, ...cli]);
+    const code = await deps.ab(args.baseline);
     // eval:ab passes no case list, so a complete run holds cases x repeats runs.
     const o = runOutcome(code, join(baseline, "review-baseline"), null);
     if (!o.file || o.limit || code === 130) return o;
@@ -275,13 +287,13 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
 
   // Step 3: the labels. eval:label resumes from its cache.
   stop = await step("labels", async () => {
-    const dry = await teed(() => deps.label([baseline]));
+    const dry = await teed(() => deps.label(args.plan));
     const none: Outcome = { code: 0, file: null, costUsd: 0, limit: false, why: null };
     if (dry.code === 0) return none;
     if (dry.code !== 2 || !dry.text.includes("Open work:"))
       return { ...none, code: dry.code, why: `eval:label refused the baseline (exit code ${dry.code})` };
     if (!v.yes && !deps.ask("Start the labels? [y/N]")) return "no";
-    const real = await teed(() => deps.label([baseline, ...cli]));
+    const real = await teed(() => deps.label(args.labels));
     const costUsd = Number(real.text.match(LABEL_COST)?.[1] ?? 0);
     const limit = LABEL_LIMIT.test(real.text);
     return { code: real.code, file: null, costUsd, limit, why: real.code === 0 ? null : `eval:label ended with exit code ${real.code}` };

@@ -743,17 +743,24 @@ const usd = (x: number) => `$${x.toFixed(2)}`;
 export const USAGE =
   "Usage: bun run eval:label -- <result folder or file> [--real] [--runner <command> <args...>]\n--real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the open work prints and the exit code is 2.";
 
-export async function main(argv: string[]): Promise<number> {
+export function parseLabel(argv: string[]): { path: string; real: boolean; runner: string[] | null } | null {
   const at = argv.indexOf("--runner");
   const runner = at < 0 ? null : argv.slice(at + 1);
   const args = at < 0 ? argv : argv.slice(0, at);
   const real = args.includes("--real");
   const paths = args.filter((a) => a !== "--real");
-  if (paths.length !== 1 || paths[0]?.startsWith("-") || runner?.length === 0 || (real && runner)) {
+  if (paths.length !== 1 || paths[0]?.startsWith("-") || runner?.length === 0 || (real && runner)) return null;
+  return { path: paths[0] as string, real, runner };
+}
+
+export async function main(argv: string[]): Promise<number> {
+  const p = parseLabel(argv);
+  if (!p) {
     console.error(USAGE);
     return 2;
   }
-  const path = resolve(paths[0] as string);
+  const { real, runner } = p;
+  const path = resolve(p.path);
   if (!existsSync(path)) {
     console.error(`No file or folder ${path}.\n${USAGE}`);
     return 2;

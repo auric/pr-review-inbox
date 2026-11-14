@@ -8,8 +8,11 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { parseAb } from "../../scripts/eval/ab";
+import { parseLabel } from "../../scripts/eval/label";
+import { parseOptions } from "../../scripts/eval/run";
 import type { CaseRun, EvalResult } from "../../scripts/eval/score";
-import { BEGIN, type Deps, END, main, markerPath, PASTE } from "../../scripts/eval/w1";
+import { BEGIN, type Deps, END, main, markerPath, PASTE, stepArgs } from "../../scripts/eval/w1";
 import { dataDir, dbPath } from "../../src/server/config";
 
 const ROOT = resolve(import.meta.dir, "../..");
@@ -335,6 +338,16 @@ describe("eval:w1", () => {
       expect(f.calls).toEqual([]);
     } finally {
       process.env.REVIEW_LOOP_DATA_DIR = old;
+    }
+  });
+
+  test("each step passes only the flags that its script parses, with the real CLI and with --runner", () => {
+    for (const r of [null, ["fake-claude", "--x"]]) {
+      const a = stepArgs(results, r);
+      expect(parseOptions(a.smoke)).not.toHaveProperty("error");
+      expect(parseAb(a.baseline)).not.toHaveProperty("error");
+      expect(parseLabel(a.plan)).toMatchObject({ real: false, runner: null });
+      expect(parseLabel(a.labels)).toMatchObject(r ? { real: false, runner: r } : { real: true, runner: null });
     }
   });
 });
