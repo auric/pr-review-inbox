@@ -21,7 +21,7 @@ import { createSyncEngine } from "../../src/server/sync/engine";
 import { insertStep } from "../../src/server/tasks/implement";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
 import type { ApiError, RunDetail, TaskConflict, TaskDiffDto, TaskDto } from "../../src/shared/dto";
-import { specResult } from "../../src/shared/task";
+import { specResult, type TaskBlocked } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, key, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoSpec, type FakeScenario } from "../support/fake-claude";
 import { claudeStream, fakeRunner, stubListTools } from "../support/review-fixture";
@@ -324,12 +324,38 @@ describe("close (spec.md section 6.12)", () => {
 
 describe("the line limit (spec.md section 6.1)", () => {
   test(
-    "AC-B302: a part over the line limit gets a note and no stop; the limit route refuses without a size reason",
+    "AC-B302: a part over the line limit gets a note and no stop; Keep one PR refuses without a size reason",
     async () => {
       const s = await setup({ budget: 5 });
       const done = await s.build();
       expect([done.blocked, done.parts[0]?.state]).toEqual([null, "self_reviewed"]);
       expect((await s.post<TaskConflict>("/limit", { keep: true })).body.error).toBe("No part waits for the line limit.");
+    },
+    SLOW,
+  );
+
+  // ps5-plan.md D1 (AC-B377): "Change the limit" posts lineBudget only. It needs no size reason, keeps every reason, and starts nothing.
+  test(
+    "AC-B377: /limit with lineBudget works with no reason and with a reason in implementing and ready; it keeps the reason and starts nothing",
+    async () => {
+      const s = await setup({ budget: 5 });
+      await s.build();
+      const steps = (await s.get()).steps.length;
+      const r = await s.post("/limit", { lineBudget: 900 });
+      expect([r.status, r.body.settings.lineBudget, r.body.blocked, r.body.working]).toEqual([200, 900, null, false]);
+      const red: TaskBlocked = { kind: "red", cause: "checks", step: null, text: "Needs you: the checks stay red." };
+      for (const state of ["implementing", "ready"]) {
+        s.db
+          .query("UPDATE task SET state = $state, blocked_json = $b, version = version + 1 WHERE id = $id")
+          .run({ id: s.task, state, b: JSON.stringify(red) });
+        const x = await s.post("/limit", { lineBudget: 700 });
+        expect([state, x.status, x.body.settings.lineBudget, x.body.blocked, x.body.working]).toEqual([state, 200, 700, red, false]);
+      }
+      expect((await s.get()).steps.length).toBe(steps);
+      s.db.query("UPDATE task SET state = 'stopped', stopped_from = 'implementing' WHERE id = $id").run({ id: s.task });
+      const stopped = await s.post<TaskConflict>("/limit", { lineBudget: 600 });
+      expect([stopped.status, stopped.body.error]).toEqual([409, "The task is stopped."]);
+      expect((await s.post<ApiError>("/limit", { lineBudget: 0 })).status).toBe(400);
     },
     SLOW,
   );

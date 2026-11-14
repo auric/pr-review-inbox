@@ -10,9 +10,12 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import type { Phase } from "../../src/server/tasks/machine";
+import { openPoints, rowDto, taskDto } from "../../src/server/tasks/tasks";
 import { setupMark } from "../../src/server/tasks/worktree";
+import type { FindingPayload } from "../../src/shared/review";
 import type { TaskBlocked } from "../../src/shared/task";
-import { cleanupAll, FIXED, point, SLOW, setup, TEST_FILE, TICK, WORKS } from "./loop-fixture";
+import { rowStatus } from "../../src/shared/task-status";
+import { cleanupAll, FIXED, point, review, SLOW, setup, TEST_FILE, TICK, WORKS } from "./loop-fixture";
 
 for (const m of ["tasks/loop", "tasks/tasks"])
   console.log(`reasons.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
@@ -222,4 +225,100 @@ describe("reason exits in ready", () => {
     },
     SLOW * 2,
   );
+});
+
+// ps5-plan.md D3 (AC-B375): "Go on without these fixes" of the reason blocker. The must-fix points get skipFix, so GO starts no own
+// review again and no judging round. The part goes on to ready as after Continue, and "Fix these too" lists the points. No phase event
+// is new: GO finds no guard, and the part takes REVIEWED.
+describe("Go on without these fixes (ps5-plan.md D3)", () => {
+  const BLOCKER = {
+    "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+    // Each fix makes a new commit, so each review sees a new head.
+    "implement:fix": [{ writes: [FIXED] }, { writes: [WORKS] }, { writes: [FIXED] }],
+    review: [{ review: review([point("blocker")]) }],
+  };
+  // The finding payloads of each review run, by run.
+  const payloads = (s: S) =>
+    (
+      s.db.query("SELECT run, payload_json FROM review_item WHERE kind = 'finding' ORDER BY id").all() as {
+        run: number;
+        payload_json: string;
+      }[]
+    ).map((r) => ({ run: r.run, ...(JSON.parse(r.payload_json) as FindingPayload) }));
+
+  test(
+    "AC-B375: in implementing, option without sets skipFix, starts no review or judging run, and the part goes to ready with the points listed",
+    async () => {
+      const s = await setup({ seq: BLOCKER });
+      await s.build();
+      expect([s.blocked()?.kind, s.part().state]).toEqual(["blocker", "implementing"]);
+      const count = () =>
+        s.steps().filter((x) => (x.kind === "review" && x.item === "review") || (x.kind === "fix" && x.item === "review")).length;
+      const [before, at] = [count(), s.phases.length];
+      // The step of the reason is the newest own review, after the newest commit.
+      const newest = (s.steps().find((x) => x.id === s.blocked()?.step) as { run: number }).run;
+      expect(openPoints(s.db, s.task)).toEqual([]);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "without" }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect([s.blocked(), s.part().state, count()]).toEqual([null, "self_reviewed", before]);
+      expect(s.phases.slice(at)).toEqual([]);
+      // The confirmed blocker points of the newest own review are skipFix, and "Fix these too" lists them. Older reviews stay as they were.
+      const must = payloads(s).filter((p) => p.verify?.verdict === "confirmed" && p.severity === "blocker");
+      expect(must.filter((p) => p.run === newest).map((p) => p.skipFix)).toEqual([true]);
+      expect(must.filter((p) => p.run !== newest).every((p) => p.skipFix === undefined)).toBe(true);
+      expect(taskDto(s.db, s.t()).points.map((p) => p.severity)).toEqual(["blocker"]);
+      // A second without has no blocker.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "without" })).toMatchObject({
+        status: 409,
+        error: "No point waits for a fix.",
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B375: in ready, option without sets skipFix and gives back the reason before the follow-up, as leave does; it starts nothing",
+    async () => {
+      const s = await setup({ seq: { "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }] } });
+      await s.build();
+      const part = s.part().id;
+      s.db.query("UPDATE task_part SET state = 'pr_open' WHERE id = $id").run({ id: part });
+      s.db.query("UPDATE task SET state = 'ready' WHERE id = $id").run({ id: s.task });
+      // The own review of the send holds a confirmed major point, and the send left the reason blocker.
+      const own = s
+        .steps()
+        .filter((x) => x.kind === "review" && x.item === "review")
+        .at(-1) as { id: number; run: number };
+      s.db
+        .query("INSERT INTO review_item (run, kind, payload_json, body) VALUES ($run, 'finding', $p, 'b')")
+        .run({ run: own.run, p: JSON.stringify({ ...point("major"), verify: { verdict: "confirmed" } }) });
+      const earlier: TaskBlocked = { kind: "update", step: null, part, text: "The update from main stopped: x. The branch is as it was." };
+      const send = insertStep(s.db, { task: s.task, part, kind: "instruct", item: "I1", state: "ok" });
+      patchStep(s.db, send, { instruct: { text: "Rename the flag.", part, blockedBefore: earlier, result: null, committed: false } });
+      // A reason that is no blocker refuses the option.
+      seed(s, { kind: "red", cause: "checks", step: null, part, text: "Needs you: red." });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "without" })).toMatchObject({
+        status: 409,
+        error: "No point waits for a fix.",
+      });
+      seed(s, { kind: "blocker", step: own.id, text: "Needs you: points stay." });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "without" }).status).toBe(200);
+      expect([s.t().state, s.blocked(), s.loop.running(s.task)]).toEqual(["ready", earlier, false]);
+      expect(payloads(s).find((p) => p.severity === "major")?.skipFix).toBe(true);
+    },
+    SLOW,
+  );
+});
+
+// ps5-plan.md D6 (AC-B381): the Tasks row counts the parts on hold.
+describe("held in the Tasks row (ps5-plan.md D6)", () => {
+  test("progress.held counts the held part rows, and the row shows On hold", async () => {
+    const s = await setup();
+    const part = partRow(s, "implementing");
+    expect(rowDto(s.db, s.t()).progress.held).toBe(0);
+    const held: TaskBlocked = { kind: "held", step: null, part, text: "Part 1 is on hold." };
+    s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: part, b: JSON.stringify(held) });
+    const row = rowDto(s.db, s.t());
+    expect([row.progress.held, row.queued, rowStatus(row)]).toEqual([1, 0, { text: "On hold", needsYou: false }]);
+  });
 });

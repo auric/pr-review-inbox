@@ -486,7 +486,7 @@ export const REASON_EXITS = {
   },
   blocker: {
     primary: CONTINUE,
-    other: [exit("Go on without these fixes", "POST /tasks/:id/resume", { option: "without", planned: "PS5" }), SEE_WHY, STOP, LEAVE],
+    other: [exit("Go on without these fixes", "POST /tasks/:id/resume", { option: "without" }), SEE_WHY, STOP, LEAVE],
   },
   spec_change: {
     primary: exit("Accept the change", "POST /tasks/:id/spec-change/:step"),
@@ -776,8 +776,17 @@ export const stepDetail = z.object({
     })
     .nullable()
     .default(null),
+  // ps5-plan.md D5: a build, fix, or instruct run row holds the task IDs that the tasks file ticks against HEAD at the run end. A commit
+  // row holds the ticks of its commit.
+  ticked: z.array(z.string()).default([]),
+  // ps5-plan.md D5: the try of a fix run of the checks ("Test-fix tries"), or the round of a judging run (REVIEW_FIX_TRIES). The loop
+  // writes it at the run start, so the running row has it.
+  tries: z.object({ n: z.number().int(), of: z.number().int() }).nullable().default(null),
 });
 export type StepDetail = z.infer<typeof stepDetail>;
+// StepDetail.patch of a reset that saved no patch file. It still marks the reset for the Continue rule (build-redesign.md section 2.2).
+// The loop compares the stored value, so it never changes.
+export const PATCH_LOST = "no file: the app could not save them";
 
 // ---------- Run results (spec.md section 6.5) ----------
 

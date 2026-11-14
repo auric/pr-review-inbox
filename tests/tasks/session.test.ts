@@ -512,6 +512,26 @@ describe("run ends (part-session.md sections 2.2 and 9.3.4)", () => {
     SLOW,
   );
 
+  // ps5-plan.md D5 (AC-B380): a cut run keeps its ticks with its work. The next run row lists them, so the ok rows give the same ticks
+  // as the commit.
+  test(
+    "AC-B380: the ticks of a cut run show on the row of the run that continues it and on the commit row",
+    async () => {
+      const s = await setup({
+        seq: { "implement:build": [{ fixture: MAX_TURNS, writes: [TEST_FILE, WORKS], ticks: TICK }, { writes: [] }] },
+      });
+      await s.build();
+      expect(s.part().state).toBe("self_reviewed");
+      const rows = s.steps().filter((x) => x.kind === "implement" || (x.kind === "commit" && x.item === "build"));
+      expect(rows.map((x) => [x.kind, x.state, detailOf(s, x.id).ticked])).toEqual([
+        ["implement", "failed", []],
+        ["implement", "ok", ["T1.1"]],
+        ["commit", "ok", ["T1.1"]],
+      ]);
+    },
+    SLOW,
+  );
+
   test(
     "AC-B295: a failed run gives error/run on the part, and the task does not stop; Continue runs it again",
     async () => {

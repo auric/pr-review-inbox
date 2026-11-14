@@ -707,6 +707,7 @@ const WAIT = {
   set: "UPDATE task_part SET blocked_json = $b WHERE id = $id AND task = $task AND blocked_json IS NULL",
   count: `SELECT COUNT(*) AS n FROM task_part WHERE task = $task AND blocked_json IS NOT NULL
     AND json_extract(blocked_json, '$.kind') IS NOT 'held'`,
+  held: "SELECT COUNT(*) AS n FROM task_part WHERE task = $task AND json_extract(blocked_json, '$.kind') = 'held'",
   stepPart: "SELECT part FROM task_step WHERE id = $id",
   // ps4-plan.md section 2.7: arm or disarm the first reason and each waiting row of kind usage.
   armTask: `UPDATE task SET blocked_json = iif(json_extract(blocked_json, '$.kind') = 'usage', json_set(blocked_json, '$.armed',
@@ -749,17 +750,19 @@ export const setUsageArmed = (db: Database, ref: TaskRef, armed: boolean, now = 
     return ref.version + 1;
   })();
 
-// spec.md section 6.1, "Keep one PR" and "Change the limit": new task settings, and the size reason goes. Returns the new version.
-export function setSettings(db: Database, ref: TaskRef, s: TaskSettings, now = Date.now()): number {
+// spec.md section 6.1, "Keep one PR": new task settings, and the size reason goes. ps5-plan.md D1: "Change the limit" (clear false) keeps
+// every reason. Returns the new version.
+export function setSettings(db: Database, ref: TaskRef, s: TaskSettings, now = Date.now(), clear = true): number {
   return db.transaction(() =>
-    patch(db, ref.task, ref.version, { settings_json: JSON.stringify(s), blocked_json: nextReason(db, ref.task) }, now),
+    patch(db, ref.task, ref.version, { settings_json: JSON.stringify(s), ...(clear && { blocked_json: nextReason(db, ref.task) }) }, now),
   )();
 }
 export const taskSettingsOf = settingsOf;
 
-// spec.md section 6.7: the loop fixes the confirmed blocker and major points of its own review. The other points stay listed.
-export const mustFixPoint = (p: Pick<FindingPayload, "verify" | "severity">) =>
-  p.verify?.verdict === "confirmed" && (p.severity === "blocker" || p.severity === "major");
+// spec.md section 6.7: the loop fixes the confirmed blocker and major points of its own review. The other points stay listed. ps5-plan.md
+// D3: a point of "Go on without these fixes" stays listed too.
+export const mustFixPoint = (p: Pick<FindingPayload, "verify" | "severity" | "skipFix">) =>
+  p.verify?.verdict === "confirmed" && (p.severity === "blocker" || p.severity === "major") && p.skipFix !== true;
 
 // ps4-plan.md section 1 item 4: a critic row is a review row with item critic. It is no own review.
 const POINTS = {
@@ -897,6 +900,7 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
       parts: code.length,
       ready: open?.state === "self_reviewed",
       merged: code.length > 0 && code.every((p) => merged(p) || p.state === "abandoned"),
+      held: (db.query(WAIT.held).get({ task: t.id }) as { n: number }).n,
     },
     id: t.id,
     project: t.project,

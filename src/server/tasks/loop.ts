@@ -160,6 +160,7 @@ import {
   UpdateAbort,
 } from "./update";
 import {
+  adminOf,
   branchName,
   deepestFirst,
   firstFree,
@@ -170,6 +171,7 @@ import {
   noneChanges,
   openRepoTrees,
   openWorktree,
+  partDir,
   patchFile,
   type RepoTree,
   readSetupMark,
@@ -627,6 +629,8 @@ const Q = {
   livePoints: "SELECT id, payload_json FROM review_item WHERE run = $run AND kind = 'finding' AND status <> 'discarded' ORDER BY id",
   item: "SELECT id, payload_json FROM review_item WHERE id = $id AND kind = 'finding' AND status <> 'discarded'",
   setPayload: "UPDATE review_item SET payload_json = $payload, revision = revision + 1 WHERE id = $id",
+  skipFix:
+    "UPDATE review_item SET payload_json = json_set(payload_json, '$.skipFix', json('true')), revision = revision + 1 WHERE id = $id",
   discard: "UPDATE review_item SET status = 'discarded', payload_json = $payload, revision = revision + 1 WHERE id = $id",
   // pushback.md section 6.23.4 item 3: the push-back questions of one judging run share one round.
   round: "SELECT COALESCE(MAX(round), 0) + 1 AS n FROM task_question WHERE task = $task",
@@ -697,6 +701,13 @@ const refusedOf = (db: Database, task: number) =>
       (stepDetail.parse(JSON.parse(r.detail_json)).allowAsk?.decisions ?? []).filter((d) => d.choice === "refuse").map((d) => d.pattern),
     ),
   );
+
+// part-session.md section 9.3.3, guard review: the own review runs of a part after the newest commit of Claude's work. null: the part
+// has no such commit.
+function reviewsAfterWork(db: Database, part: number): number[] | null {
+  const after = Math.max(...[Q.workCommit, Q.resolvedUpdate].map((q) => (db.query(q).get({ part }) as { id: number | null }).id ?? 0));
+  return after ? (db.query(Q.reviewsAfter).all({ part, after }) as { run: number }[]).map((r) => r.run) : null;
+}
 
 // The changed paths of every worktree, from the main repository root.
 async function dirty(trees: readonly RepoTree[]): Promise<string[]> {
@@ -1192,6 +1203,7 @@ export function createLoop(opts: LoopOptions) {
       again?: boolean;
       session?: StepInput["session"] | null;
       points?: boolean;
+      tries?: StepInput["tries"];
     },
   ): Promise<{ r: StepOutcome | null; shell: StepShell | null; unchanged: boolean }> {
     let waiting: number | null = o.row ?? null;
@@ -1253,6 +1265,7 @@ export function createLoop(opts: LoopOptions) {
         ...(shell && { shell }),
         ...(session && { session }),
         ...(o.points && { points: true }),
+        ...(o.tries && { tries: o.tries }),
         dirtyBefore: before,
         now,
       });
@@ -1397,6 +1410,7 @@ export function createLoop(opts: LoopOptions) {
       purpose?: SessionPurpose;
       // failure.md holds review points (pushback.md section 6.23.8).
       points?: boolean;
+      tries?: StepInput["tries"];
     },
   ): Promise<StepOutcome & { result: ImplementResult; unchanged: boolean; ticks: string[] }> {
     let extra: string[] = [];
@@ -1444,6 +1458,11 @@ export function createLoop(opts: LoopOptions) {
         block(c, runReason(c, r));
       }
       const plan = await planChanges(c, r.changed);
+      // ps5-plan.md D5: the row gets every tick of the tasks file against HEAD. A cut or stopped run keeps its ticks with its work, and
+      // the next run row lists them. A run can leave the tasks file out of changed, so the file is read again.
+      const all = plan.ticks.length ? plan.ticks : ((await ticksOf(c)) ?? []);
+      if (all.length) patchStep(c.db, r.step, { ticked: all });
+      const ticked = plan.ticks.filter((id) => !before.includes(id));
       // spec.md sections 6.20.6 and 6.25.4: the reason of another part stays. This part writes its question or plan change row and its
       // reason to its part row, or it halts without them when that row cannot keep the reason.
       if ((plan.spec.length || r.result.question) && held(c) && !keeps(c, r.step)) halt(c, r.step);
@@ -1454,7 +1473,6 @@ export function createLoop(opts: LoopOptions) {
         block(c, { kind: "spec_change", step, text: "Needs you: Claude proposes a change to the spec." });
       }
       // part-session.md section 2.4: result.ticked should name the new ticks. A difference gives a Log note only.
-      const ticked = plan.ticks.filter((id) => !before.includes(id));
       const listed = [...new Set(r.result.ticked)];
       if (mode === "implement" && (listed.length !== ticked.length || listed.some((id) => !ticked.includes(id))))
         patchStep(c.db, r.step, {
@@ -1545,12 +1563,8 @@ export function createLoop(opts: LoopOptions) {
   // part-session.md section 9.3.3, guard review: a commit of Claude's work has no own review yet, or an own review after it holds a
   // confirmed blocker or major point.
   function reviewDue(c: Ctx) {
-    const after = Math.max(
-      ...[Q.workCommit, Q.resolvedUpdate].map((q) => (c.db.query(q).get({ part: c.part.id }) as { id: number | null }).id ?? 0),
-    );
-    if (!after) return false;
-    const runs = (c.db.query(Q.reviewsAfter).all({ part: c.part.id, after }) as { run: number }[]).map((r) => r.run);
-    return !runs.length || runs.some((run) => mustFix(pointsOf(c, run)).length > 0);
+    const runs = reviewsAfterWork(c.db, c.part.id);
+    return runs !== null && (!runs.length || runs.some((run) => mustFix(pointsOf(c, run)).length > 0));
   }
 
   // spec.md section 6.7, Line endings, Repair (AC-B171): a part with line-ending-only changes from before the line end rule gets one
@@ -1655,6 +1669,8 @@ export function createLoop(opts: LoopOptions) {
     if (r.status === "refused") block(c, { kind: "denied_path", cause: "commit", step: null, text: deniedText(r.problems) });
     changed(c.id);
     const step = r.status === "committed" ? r.step : null;
+    // ps5-plan.md D5: the ticks of the commit body.
+    if (step !== null && ticks?.length) patchStep(c.db, step, { ticked: ticks });
     await sizeNote(c, step);
     if (step !== null) moveHeads(c.db, c.part.id, await headsNow(c), now());
     return step;
@@ -1709,7 +1725,13 @@ export function createLoop(opts: LoopOptions) {
         });
       }
       send(c, { type: "CHECKS_RED" }, { triesLeft: true });
-      const r = await claude(c, "fix", item, { allow, step, failure: checkFailure(k, base), purpose });
+      const r = await claude(c, "fix", item, {
+        allow,
+        step,
+        failure: checkFailure(k, base),
+        purpose,
+        tries: { n: tries + 1, of: fixTries },
+      });
       if (r.unchanged) {
         send(c, { type: "RUN_DONE" }, { unchanged: true });
         block(c, {
@@ -1938,7 +1960,14 @@ export function createLoop(opts: LoopOptions) {
     }
     c.rounds++;
     const step = (a: number) => partStepFile(c.plan, c.plan.parts, "review", a);
-    const r = await claude(c, "fix", "review", { allow: allFiles(c), step, failure: reviewFailure(must), purpose: "review", points: true });
+    const r = await claude(c, "fix", "review", {
+      allow: allFiles(c),
+      step,
+      failure: reviewFailure(must),
+      purpose: "review",
+      points: true,
+      tries: { n: c.rounds, of: REVIEW_FIX_TRIES },
+    });
     const back = judgePoints(c, r, must);
     send(c, { type: "RUN_DONE" });
     await checkGate(c, roundGate(c, "review"));
@@ -3251,12 +3280,13 @@ export function createLoop(opts: LoopOptions) {
           : null;
 
   // spec.md section 6.18.2: a reason that the newest send left gives back the reason of the task before the send, once. Else the reason
-  // clears. The next driver applies the Continue rule to the changes of the step first (settle).
-  function restore(db: Database, t: TaskRow, b: TaskBlocked): TaskResult {
+  // clears. The next driver applies the Continue rule to the changes of the step first (settle). first: a write in the same transaction.
+  function restore(db: Database, t: TaskRow, b: TaskBlocked, first?: () => void): TaskResult {
     const last = db.query(Q.lastBuilt).get({ task: t.id }) as { id: number; kind: string } | null;
     const info = last?.kind === "instruct" ? stepDetailOf(db, last.id).instruct : null;
     const before = info?.result === null && JSON.stringify(info.blockedBefore) !== JSON.stringify(b) ? info.blockedBefore : null;
     db.transaction(() => {
+      first?.();
       setBlocked(db, { task: t.id, version: t.version }, before, now());
       if (last && info && before) patchStep(db, last.id, { instruct: { ...info, blockedBefore: null } });
     })();
@@ -3272,6 +3302,58 @@ export function createLoop(opts: LoopOptions) {
     return b ? restore(db, t, b) : conflict(db, t.id, TASK_STATE_TEXT.ready);
   }
 
+  // ps5-plan.md D3: option without is "Go on without these fixes" of the reason blocker. The guard review reads the own reviews after the
+  // newest work commit. Each must-fix point of them gets skipFix, in the transaction of the reason clear. So GO starts no review round,
+  // and "Fix these too" lists the points. In implementing, the part goes on as after Continue. In ready, the reason before the follow-up
+  // comes back, as leave does.
+  function withoutFixes(db: Database, t: TaskRow, b: TaskBlocked | null): TaskResult {
+    if (t.state !== "implementing" && t.state !== "ready") return conflict(db, t.id, TASK_STATE_TEXT[t.state]);
+    const part = b?.kind === "blocker" ? partOf(db, b) : null;
+    if (!b || part === null) return conflict(db, t.id, NO_POINTS);
+    const skip = () => {
+      for (const run of reviewsAfterWork(db, part) ?? [])
+        for (const x of db.query(Q.livePoints).all({ run }) as { id: number; payload_json: string }[])
+          if (mustFixPoint(JSON.parse(x.payload_json) as FindingPayload)) db.query(Q.skipFix).run({ id: x.id });
+    };
+    if (t.state === "ready") return restore(db, t, b, skip);
+    goOnReason(db, t, b, true, skip);
+    return { status: 200, task: dto(db, t.id) };
+  }
+
+  // ps5-plan.md D2 and section 5: option setup is "Run setup again" of a part (build-redesign.md Q6). The setup mark of the part goes,
+  // so the next GO of the part runs setup first. A red setup of the part left no mark, so its reason takes Continue. Any other reason
+  // comes first. The refusals are those of the old route /parts/:part/setup.
+  function setupAgainOf(db: Database, t: TaskRow, partId: number): TaskResult {
+    const id = t.id;
+    if (t.state !== "implementing" && t.state !== "ready") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+    if (drivers.has(id) || closing) return conflict(db, id, WORKING);
+    const part = parts(db, id).find((p) => p.id === partId);
+    if (!part) return { status: 404, error: "Part not found." };
+    if (!WORKTREE.has(part.state) || part.adopted) return conflict(db, id, "This part has no worktree.");
+    if (!repoSettings(db, t.project, t.repo).commands.some((x) => x.kind === "setup"))
+      return conflict(db, id, "This repository has no setup command.");
+    // spec.md section 6.25.5: a part with a waiting reason or on hold acts on that reason first.
+    if (part.blocked_json !== null) return conflict(db, id, SETUP_WAITS);
+    const b = blockedOf(t);
+    const of = partOf(db, b);
+    const item = b?.step == null ? null : (db.query(Q.step).get({ id: b.step, task: id }) as StepRow | null)?.item;
+    if (b && !(b.kind === "red" && item === "setup" && of === partId))
+      return conflict(db, id, of !== null && of !== partId ? WAITING : SETUP_WAITS);
+    // The mark lives in the git folder of the worktree (worktree.ts setupMark). No worktree: a new one has no mark.
+    const admin = adminOf(
+      cachePath(longPath(dataDir), { project: t.project, repo: t.repo, id }),
+      join(partDir(dataDir, db, id, part.ord), "repo"),
+    );
+    if (admin) rmSync(setupMark({ admin } as Worktree), { force: true });
+    if (b) goOnReason(db, t, b, true);
+    else {
+      bump(db, id, t.version);
+      goOn(db, id, partId, false);
+      changed(id);
+    }
+    return { status: 202, task: dto(db, id) };
+  }
+
   // The checks of a mutation: the task and its version.
   function load(db: Database, id: number, version: number): TaskRow | TaskResult {
     const t = taskRow(db, id);
@@ -3281,12 +3363,14 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // part-session.md section 9.4 column "Continue does": the reason clears, a follow-up row that did not finish goes in the queue again
-  // (ps4-plan.md section 1 gap 14), and the part of the reason runs on (gap 15). The usage timer takes the same path.
-  function goOnReason(db: Database, t: TaskRow, b: TaskBlocked | null, reset: Reset) {
+  // (ps4-plan.md section 1 gap 14), and the part of the reason runs on (gap 15). The usage timer takes the same path. first: a write in
+  // the transaction of the clear.
+  function goOnReason(db: Database, t: TaskRow, b: TaskBlocked | null, reset: Reset, first?: () => void) {
     const id = t.id;
     const step = b?.step == null ? null : (db.query(Q.step).get({ id: b.step, task: id }) as StepRow | null);
     // part-session.md section 5.4: Continue clears a reason of a kind that the app sets no more (budget/time, size/budget, push).
     const go = db.transaction(() => {
+      first?.();
       if (b) setBlocked(db, { task: id, version: t.version }, null, now());
       if (!free(db, id)) return false;
       if (step && isFollow(step) && step.state !== "ok") requeue(db, id, step.id);
@@ -3686,10 +3770,12 @@ export function createLoop(opts: LoopOptions) {
     // follow-up row that did not finish goes in the queue again, and the reason of a built part runs that part, in implementing and in
     // ready. "start-step-again" resets the part of the reason, or each part that builds, to its last commit with the patch saved (spec.md
     // section 6.7, Continue). leave gives back the reason before the follow-up in ready. part ends the hold of that part (ps4-plan.md section
-    // 2.6). disarm and Continue before the reset time act on the usage arm (section 2.7).
+    // 2.6). disarm and Continue before the reset time act on the usage arm (section 2.7). ps5-plan.md D2: setup runs setup again on the
+    // part. D3: without goes on past the points of the reason blocker.
     resume(db: Database, id: number, input: TaskResumeInput): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
+      if (input.option === "setup") return setupAgainOf(db, t, input.part ?? 0);
       if (input.part !== undefined) return resumePart(db, t, input.part);
       const b = blockedOf(t);
       const usage = (t.state === "implementing" || t.state === "ready") && b?.kind === "usage" ? b : null;
@@ -3712,6 +3798,7 @@ export function createLoop(opts: LoopOptions) {
       const paused = pause && gates.has(id);
       if (drivers.has(id) && !paused) return conflict(db, id, BUSY);
       if (input.option === "leave") return leaveReason(db, t, b);
+      if (input.option === "without") return withoutFixes(db, t, b);
       const reset: Reset = input.option === "start-step-again" ? { again: partOf(db, b) } : true;
       if (t.state === "stopped") {
         if (t.stopped_from !== "implementing") return conflict(db, id, TASK_STATE_TEXT.stopped);
@@ -3878,23 +3965,26 @@ export function createLoop(opts: LoopOptions) {
       return { status: 202, task: dto(db, id) };
     },
 
-    // POST /api/tasks/:id/limit (spec.md section 6.1): "Keep one PR" or "Change the limit" of a part over the line limit. The build goes
-    // on from the last commit. A new limit under the changed lines stops it again.
+    // POST /api/tasks/:id/limit. ps5-plan.md D1: "Change the limit" sets the line limit of the task while no driver runs. It needs no
+    // reason, keeps every reason, and starts nothing. "Keep one PR" of an old size reason (spec.md section 6.1) goes on from the last
+    // commit.
     limit(db: Database, id: number, input: { version: number; keep?: true; lineBudget?: number }): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
+      const s = taskSettingsOf(t);
+      if (!input.keep) {
+        if (t.state !== "implementing" && t.state !== "ready") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+        if (drivers.has(id)) return conflict(db, id, WORKING);
+        setSettings(db, { task: id, version: t.version }, { ...s, lineBudget: input.lineBudget }, now(), false);
+        changed(id);
+        return { status: 200, task: dto(db, id) };
+      }
       if (t.state !== "implementing" || blockedOf(t)?.kind !== "size") return conflict(db, id, "No part waits for the line limit.");
       if (drivers.has(id)) return conflict(db, id, BUSY);
-      const s = taskSettingsOf(t);
-      // spec.md section 6.25.4: the new limit ends the waiting size reasons too. A part over it stops again at its size check.
+      // spec.md section 6.25.4: Keep one PR ends the waiting size reasons too.
       db.transaction(() => {
         db.query(Q.clearSize).run({ task: id });
-        setSettings(
-          db,
-          { task: id, version: t.version },
-          input.keep ? { ...s, keepOnePr: true } : { ...s, lineBudget: input.lineBudget },
-          now(),
-        );
+        setSettings(db, { task: id, version: t.version }, { ...s, keepOnePr: true }, now());
       })();
       if (free(db, id)) kick(db, id, true);
       changed(id);

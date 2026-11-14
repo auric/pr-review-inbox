@@ -43,6 +43,16 @@ export function rowPhase(s: Pick<TaskStepDto, "kind" | "item">): RowPhase | null
   }
 }
 
+// part-session.md section 9.7, invariant 8: the open row that gives the phase of a part. Absent part: of the task. steps: newest first,
+// as TaskDto.steps. A waiting message (ps4-plan.md WP-7) beside another open row gives no phase. An update row beside its resolve or
+// check row (WP-5) gives none too.
+export function phaseRow<T extends Pick<TaskStepDto, "kind" | "state" | "part">>(steps: readonly T[], part?: number): T | null {
+  const open = steps.filter((s) => (s.state === "running" || s.state === "waiting") && (part === undefined || s.part === part));
+  const runs = open.filter((s) => s.kind !== "instruct" || s.state !== "waiting");
+  const rows = runs.length ? runs : open;
+  return rows.find((s) => s.kind !== "update") ?? rows[0] ?? null;
+}
+
 // spec.md section 6.12, Inbox: the status in the meta line of a Tasks row.
 const NEEDS: Record<NonNullable<TaskRowDto["blocked"]>["kind"], string> = {
   question: "Needs you: a question",
@@ -72,8 +82,15 @@ export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
     if (r.state === "interview") return { text: "Needs you: answer the questions", needsYou: true };
     // spec.md section 6.25.6: the reasons of other parts that wait behind the first one.
     const more = r.queued > 0 ? `, and ${r.queued} more` : "";
-    return { text: `${NEEDS[r.blocked.kind]}${more}`, needsYou: r.blocked.kind !== "slot" };
+    // ps5-plan.md D6: an armed usage reason goes on by itself.
+    const armed = r.blocked.kind === "usage" && r.blocked.armed === true;
+    return {
+      text: `${armed ? "Resumes after the usage limit" : NEEDS[r.blocked.kind]}${more}`,
+      needsYou: r.blocked.kind !== "slot" && !armed,
+    };
   }
+  // ps5-plan.md D6: held lives in the part rows only.
+  if (p.held > 0) return { text: "On hold", needsYou: false };
   if (r.state === "interview") return { text: "Reading the task", needsYou: false };
   if (r.state === "spec_draft")
     return p.planReady ? { text: "Needs you: approve the plan", needsYou: true } : { text: "Writing the plan", needsYou: false };

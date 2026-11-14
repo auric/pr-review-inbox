@@ -1546,14 +1546,18 @@ export const specChangeInput = z.object({ version, accept: z.boolean() });
 export const taskVersionInput = z.object({ version });
 // POST /api/tasks/:id/resume (build-redesign.md section 2.2). option "start-step-again": the build resets to the last commit with the
 // patch saved, and the step starts again. Absent: Continue keeps the work. ps4-plan.md section 4: "leave" restores the reason before a
-// follow-up in ready, "disarm" cancels an armed usage resume, and part names a held part.
+// follow-up in ready, "disarm" cancels an armed usage resume, and part names a held part. ps5-plan.md D3: "without" is "Go on without
+// these fixes" of the reason blocker. D2: "setup" is "Run setup again" of the part in part.
 export const taskResumeInput = z
   .object({
     version,
-    option: z.enum(["start-step-again", "leave", "disarm"]).optional(),
+    option: z.enum(["start-step-again", "leave", "disarm", "without", "setup"]).optional(),
     part: z.number().int().positive().optional(),
   })
-  .refine((v) => v.option === undefined || v.part === undefined, { message: "Give a part or an option, not both." });
+  .refine((v) => v.option !== "setup" || v.part !== undefined, { message: "Give the part of the setup." })
+  .refine((v) => v.option === undefined || v.option === "setup" || v.part === undefined, {
+    message: "Give a part or an option, not both.",
+  });
 export type TaskResumeInput = z.infer<typeof taskResumeInput>;
 // spec.md section 6.20.12: "Start <key> now" overrides the review of the lower part. "Move" with push pushes first.
 export const taskStartInput = z.object({ version, override: z.literal(true) });
@@ -1570,8 +1574,6 @@ export const taskInstructionsInput = z.object({
   part: positiveInt.optional(),
   text: z.string().trim().min(1).max(MAX_INSTRUCTION),
 });
-// POST /api/tasks/:id/limit (spec.md section 6.1, a part over the line limit): keep, "Keep one PR"; lineBudget, "Change the limit" for
-// this task.
 // POST /api/tasks/:id/allow (spec.md section 6.21): one choice for each pattern that the step asks for. shellWarning: the first-use
 // warning of the commands that Claude runs is accepted.
 export const taskAllowInput = z.object({
@@ -1584,6 +1586,8 @@ export const taskAllowInput = z.object({
   shellWarning: z.literal(true).optional(),
 });
 export type TaskAllowInput = z.infer<typeof taskAllowInput>;
+// POST /api/tasks/:id/limit: lineBudget, "Change the limit" for this task (ps5-plan.md D1). keep, "Keep one PR" of an old size reason,
+// stays until PS5-S2, because the web still sends it.
 export const taskLimitInput = z.union([
   z.object({ version, keep: z.literal(true) }),
   z.object({ version, lineBudget: z.number().int().min(1).max(100_000) }),
@@ -1783,7 +1787,8 @@ export type TaskRowDto = {
   version: number;
   updatedAt: number;
   closedAt: number | null;
-  progress: { planReady: boolean; part: number; parts: number; ready: boolean; merged: boolean };
+  // held: the number of parts on hold (ps5-plan.md D6).
+  progress: { planReady: boolean; part: number; parts: number; ready: boolean; merged: boolean; held: number };
 };
 
 // The newest interview result (spec.md section 6.5) of round round. done false: the answers start round 2 when it is left.

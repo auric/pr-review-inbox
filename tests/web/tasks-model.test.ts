@@ -22,7 +22,7 @@ import type {
   TaskStepDto,
 } from "../../src/shared/dto";
 import { stepDetail, taskProfileId } from "../../src/shared/task";
-import { type RowPhase, rowPhase } from "../../src/shared/task-status";
+import { phaseRow, type RowPhase, rowPhase } from "../../src/shared/task-status";
 import { LogTab } from "../../src/web/tasks/LogTab";
 import {
   ACCESS_TEXT,
@@ -180,7 +180,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     version: 3,
     updatedAt: NOW,
     closedAt: null,
-    progress: { planReady: false, part: 0, parts: 0, ready: false, merged: false },
+    progress: { planReady: false, part: 0, parts: 0, ready: false, merged: false, held: 0 },
     interview: null,
     plan: null,
     strip: { steps: ["Questions", "Plan", "Build", "Done"], current: 0 },
@@ -1085,7 +1085,15 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     const { interview: _i, plan: _p, ...r } = task();
     return { ...r, ...o } as TaskRowDto;
   };
-  const progress = (o: Partial<TaskRowDto["progress"]>) => ({ planReady: false, part: 0, parts: 0, ready: false, merged: false, ...o });
+  const progress = (o: Partial<TaskRowDto["progress"]>) => ({
+    planReady: false,
+    part: 0,
+    parts: 0,
+    ready: false,
+    merged: false,
+    held: 0,
+    ...o,
+  });
 
   test("one meta line per state", () => {
     expect(rowStatus(row({ state: "interview" }))).toEqual({ text: "Reading the task", needsYou: false });
@@ -1108,6 +1116,30 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     expect(rowStatus(row({ state: "ready" })).text).toBe("Waiting for review");
     expect(rowStatus(row({ state: "stopped" })).text).toBe("Stopped");
     expect(rowStatus(row({ state: "done", closedAt: NOW })).text).toBe("Closed");
+  });
+
+  // ps5-plan.md D6 (AC-B381): held lives in the part rows, and an armed usage reason goes on by itself.
+  test("On hold for a task whose only reason is held; Resumes after the usage limit for an armed usage reason", () => {
+    const usage = { kind: "usage" as const, step: 1, text: "x", resumeAt: NOW + MIN };
+    expect(rowStatus(row({ state: "implementing", progress: progress({ part: 1, parts: 2, held: 1 }) }))).toEqual({
+      text: "On hold",
+      needsYou: false,
+    });
+    // A first reason of another part comes first.
+    expect(rowStatus(row({ state: "implementing", blocked: usage, progress: progress({ held: 1 }) }))).toEqual({
+      text: "Needs you: the usage limit",
+      needsYou: true,
+    });
+    expect(rowStatus(row({ state: "implementing", blocked: { ...usage, armed: true } }))).toEqual({
+      text: "Resumes after the usage limit",
+      needsYou: false,
+    });
+    expect(rowStatus(row({ state: "ready", blocked: { ...usage, armed: true }, queued: 1 }))).toEqual({
+      text: "Resumes after the usage limit, and 1 more",
+      needsYou: false,
+    });
+    expect(rowStatus(row({ state: "ready", blocked: { ...usage, armed: false } })).needsYou).toBe(true);
+    expect(rowStatus(row({ state: "stopped", progress: progress({ held: 1 }) })).text).toBe("Stopped");
   });
 });
 
@@ -1965,6 +1997,33 @@ describe("ps5-plan.md D4: the stage of a step row", () => {
     ];
     expect(cases.map(([kind, item]) => [kind, item, rowPhase({ kind, item })])).toEqual(cases);
   });
+
+  // part-session.md section 9.7 invariant 8, ps4-plan.md WP-5 and WP-7: the open row that gives the stage of a part. Steps come newest
+  // first, so a message that waits for the next GO comes before the run row of its part.
+  test("phaseRow takes the run row of the part, not a waiting message beside it, and the resolve or check row of an update", () => {
+    const at = (id: number, kind: TaskStepDto["kind"], state: TaskStepDto["state"], item: string | null, p = 7) =>
+      step({ id, kind, state, item, part: p, endedAt: null });
+    const message = at(9, "instruct", "waiting", "I1");
+    const build = at(8, "implement", "running", "build");
+    const cases: [TaskStepDto[], number | undefined, number | null][] = [
+      [[message, build], 7, 8],
+      // The run row waits for the run slot beside the message.
+      [[message, at(8, "fix", "waiting", "checks")], 7, 8],
+      // A message alone is the follow-up that GO runs next, or that waits for the run slot.
+      [[message], 7, 9],
+      [[at(9, "instruct", "running", "I1")], 7, 9],
+      [[at(11, "resolve", "running", "U1"), at(10, "update", "running", "U1")], 7, 11],
+      [[at(12, "check", "running", "U1"), at(10, "update", "running", "U1")], 7, 12],
+      [[at(10, "update", "running", "U1")], 7, 10],
+      [[message, at(10, "update", "running", "U1")], 7, 10],
+      // Ended rows and rows of other parts give no stage.
+      [[at(13, "implement", "running", "build", 8), at(8, "implement", "ok", "build")], 7, null],
+      [[message, at(13, "implement", "running", "build", 8)], undefined, 13],
+      [[], 7, null],
+    ];
+    expect(cases.map(([steps, p, want]) => [p, want, phaseRow(steps, p)?.id ?? null])).toEqual(cases.map(([, p, want]) => [p, want, want]));
+    expect(rowPhase(phaseRow([message, build], 7) as TaskStepDto)).toBe("building");
+  });
 });
 
 // ps5-plan.md section 3 (AC-B368, AC-B380): the status of a working row follows the stage of the open row of its part. The count of
@@ -1994,6 +2053,13 @@ describe("ps5-plan.md section 3: the working rows", () => {
         return [kind, item, v.status, v.more.map((a) => a.label)];
       }),
     ).toEqual(rows);
+  });
+
+  // ps4-plan.md WP-7: a message that waits for the next GO sits beside the run row of its part, and it is newer.
+  test("one part: a waiting message beside the build run row keeps the building sentence and Hold", () => {
+    const message = step({ id: 10, kind: "instruct", part: 7, item: "I1", state: "waiting", endedAt: null });
+    const v = view(building({ steps: [message, open("implement", "build")] }));
+    expect([v.status, v.more.map((a) => a.label)]).toEqual(["Claude builds your change.", HOLD]);
   });
 
   test("one part: other steps keep their sentence, and the pointer commit is no check", () => {

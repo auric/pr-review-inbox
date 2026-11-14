@@ -1950,6 +1950,75 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
     SLOW,
   );
 
+  // ps5-plan.md D2 and section 5 (AC-B376): "Run setup again" is the resume option setup with part. It deletes the setup mark, so GO of
+  // the part runs setup first. The refusals are those of the old route.
+  test(
+    "AC-B376: option setup on a built part runs GO setup, CLEAN and nothing else; 409 while it runs; the old refusals stay",
+    async () => {
+      const s = await setup();
+      withSetup(s, "venv");
+      await s.build();
+      expect([s.part().state, setups(s)]).toEqual(["self_reviewed", 1]);
+      const part = s.part().id;
+      const again = () => s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part });
+      const at = s.phases.length;
+      expect(again().status).toBe(202);
+      expect(again()).toMatchObject({ status: 409, error: "Claude or the checks are working." });
+      await s.loop.idle(s.task);
+      expect([setups(s), s.part().state, s.blocked()]).toEqual([2, "self_reviewed", null]);
+      expect(s.phases.slice(at).map((p) => `${p.event}>${p.to}`)).toEqual(["GO>setup", "CLEAN>idle"]);
+      expect(s.flow().filter((x) => x.startsWith("check:setup:"))).toEqual(["check:setup:ok", "check:setup:ok"]);
+      // The refusals: a part that is not there, a reason of this part that is no setup reason, a reason of another part, a part on hold,
+      // and a repository with no setup command. None starts a driver.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: part + 50 })).toMatchObject({
+        status: 404,
+        error: "Part not found.",
+      });
+      const seed = (b: TaskBlocked | null) =>
+        s.db
+          .query("UPDATE task SET blocked_json = $b, version = version + 1 WHERE id = $id")
+          .run({ id: s.task, b: b && JSON.stringify(b) });
+      const own = s.steps().find((x) => x.kind === "check" && x.item === "checks") as Step;
+      seed({ kind: "red", cause: "checks", step: own.id, text: "Needs you: red." });
+      expect(again()).toMatchObject({ status: 409, error: "This part waits for you. Act on the first reason first." });
+      seed({ kind: "error", cause: "app", step: null, part: part + 50, text: "Needs you: x." });
+      expect(again()).toMatchObject({ status: 409, error: "Another part waits for you. Act on each reason first." });
+      seed(null);
+      const held: TaskBlocked = { kind: "held", step: null, part, text: "On hold." };
+      s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: part, b: JSON.stringify(held) });
+      expect(again()).toMatchObject({ status: 409, error: "This part waits for you. Act on the first reason first." });
+      s.db.query("UPDATE task_part SET blocked_json = NULL WHERE id = $id").run({ id: part });
+      s.db.query("UPDATE repo_task_settings SET commands_json = $c").run({ c: JSON.stringify([]) });
+      expect(again()).toMatchObject({ status: 409, error: "This repository has no setup command." });
+      expect([setups(s), s.loop.running(s.task)]).toEqual([2, false]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B376: option setup on a red setup of the part takes Continue: setup runs, the build goes on, and a Stop of that build stops the task",
+    async () => {
+      const s = await setup({ seq: { "implement:build": [{ hang: true }] } });
+      withSetup(s, "venv");
+      writeFileSync(join(s.root, "setup-mode.txt"), "fail");
+      await s.build();
+      expect([s.blocked()?.kind, s.blocked()?.cause]).toEqual(["red", "setup"]);
+      writeFileSync(join(s.root, "setup-mode.txt"), "ok");
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: s.part().id }).status).toBe(202);
+      await until(() => s.flow().includes("implement:build:running"));
+      expect([setups(s), s.blocked()]).toEqual([2, null]);
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect([s.t().state, s.t().stopped_from]).toEqual(["stopped", "implementing"]);
+      // A stopped task refuses the option.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: s.part().id })).toMatchObject({
+        status: 409,
+        error: "The task is stopped.",
+      });
+    },
+    SLOW,
+  );
+
   test(
     "AC-B200: setup runs again when its list changes and after a reset that removed a setup file; a reset of Claude's files only does not run it",
     async () => {
@@ -2359,6 +2428,74 @@ describe("Fix these too judges its points (pushback.md section 6.23)", () => {
       };
       expect([row.status, JSON.parse(row.payload_json).discardReason]).toEqual(["discarded", { code: "place" }]);
       expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+    },
+    SLOW,
+  );
+});
+
+// ps5-plan.md D5 (AC-B368, AC-B380): the tick and try facts. A build, fix, or instruct run lists its new ticks, and a commit row the
+// ticks of its body. A fix run of the checks holds its try of "Test-fix tries", and a judging run its round of REVIEW_FIX_TRIES. The
+// running row holds the try already, and the ended row keeps it.
+describe("the tick and try facts (ps5-plan.md D5)", () => {
+  const detailOf = (x: Step) => JSON.parse(x.detail_json) as { ticked: string[]; tries: { n: number; of: number } | null };
+  const STILL = { path: "repo/src/feature.ts", text: "export const feature = 'still todo';\n" };
+
+  test(
+    "AC-B380: the build run row and the build commit row list the ticked task; the plan commit lists none",
+    async () => {
+      const s = await setup({ seq: { "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }] } });
+      await s.build();
+      expect(s.part().state).toBe("self_reviewed");
+      const rows = s.steps().filter((x) => x.kind === "implement" || x.kind === "commit");
+      expect(rows.map((x) => [x.kind, x.item, detailOf(x).ticked])).toEqual([
+        ["commit", "plan", []],
+        ["implement", "build", ["T1.1"]],
+        ["commit", "build", ["T1.1"]],
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B368: each fix run of red checks holds its try while it runs and after it ends; the build run holds none",
+    async () => {
+      const s = await setup({
+        runLimits: { testFixTries: 2 },
+        seq: { "implement:fix": [{ delayMs: 1500, writes: [STILL] }, { writes: [WORKS] }] },
+      });
+      s.loop.build(s.db, s.task);
+      const running = () => s.steps().find((x) => x.kind === "fix" && x.state === "running");
+      await until(() => running() !== undefined);
+      expect(detailOf(running() as Step).tries).toEqual({ n: 1, of: 2 });
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      const rows = s.steps().filter((x) => x.kind === "fix" || x.kind === "implement");
+      expect(rows.map((x) => [x.kind, x.item, x.state, detailOf(x).tries])).toEqual([
+        ["implement", "build", "ok", null],
+        ["fix", "checks", "ok", { n: 1, of: 2 }],
+        ["fix", "checks", "ok", { n: 2, of: 2 }],
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B368: each judging run of the own review holds its round",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          "implement:fix": [{ writes: [FIXED] }, { writes: [WORKS] }, { writes: [FIXED] }],
+          review: [{ review: review([point("blocker")]) }],
+        },
+      });
+      await s.build();
+      expect(s.blocked()?.kind).toBe("blocker");
+      const rows = s.steps().filter((x) => x.kind === "fix");
+      expect(rows.map((x) => [x.item, detailOf(x).tries])).toEqual([
+        ["review", { n: 1, of: REVIEW_FIX_TRIES }],
+        ["review", { n: 2, of: REVIEW_FIX_TRIES }],
+      ]);
     },
     SLOW,
   );

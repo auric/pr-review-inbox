@@ -34,7 +34,7 @@ import {
   type TaskBlocked,
   type TaskSize,
 } from "../../shared/task";
-import { type RowPhase, rowPhase } from "../../shared/task-status";
+import { phaseRow, type RowPhase, rowPhase } from "../../shared/task-status";
 import { namedBuild } from "../pr/build";
 import { attachmentRows, sizeText } from "../review/tasks";
 
@@ -156,12 +156,10 @@ export const openQuestions = (t: Pick<TaskDto, "questions">, source: TaskQuestio
   const round = Math.max(0, ...open.map((q) => q.round));
   return open.filter((q) => q.round === round);
 };
-// The step that runs or waits for the run slot. The steps come newest first.
-export const runningStep = (t: Pick<TaskDto, "steps">): TaskStepDto | null =>
-  t.steps.find((s) => s.state === "running" || s.state === "waiting") ?? null;
-// The open step row of one part. Parts of a task with sub-tasks can build at the same time, and each part has at most one open row.
-const partStep = (t: Pick<TaskDto, "steps">, part: number): TaskStepDto | null =>
-  t.steps.find((s) => s.part === part && (s.state === "running" || s.state === "waiting")) ?? null;
+// The step that runs or waits for the run slot. A message that waits beside a run row is not it (shared/task-status.ts phaseRow).
+export const runningStep = (t: Pick<TaskDto, "steps">): TaskStepDto | null => phaseRow(t.steps);
+// The open step row of one part. Parts of a task with sub-tasks can build at the same time.
+const partStep = (t: Pick<TaskDto, "steps">, part: number): TaskStepDto | null => phaseRow(t.steps, part);
 // ps5-plan.md section 4.4: a push-back question can wait in ready too, so both states read the loop questions.
 export const questionSource = (t: Pick<TaskDto, "state">): TaskQuestionDto["source"] =>
   t.state === "implementing" || t.state === "ready" ? "loop" : "interview";

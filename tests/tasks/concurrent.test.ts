@@ -774,7 +774,8 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(reasons(s)).toEqual([next, null, null, null]);
       expect(loop.running(s.task)).toBe(false);
 
-      // Change the limit: the size reason of part 2 goes too. Part 3 builds now, and its red checks move up.
+      // Keep one PR of an old size reason: the size reason of part 2 goes too. Part 3 builds now, and its red checks move up. ps5-plan.md
+      // D1: Change the limit keeps every reason (tests/tasks/ui-routes.test.ts).
       s.db.query("UPDATE task_part SET state = 'implementing' WHERE id = $id").run({ id: s.p3 });
       const size = (part: number): TaskBlocked => ({ kind: "size", step: step(part, "size"), text: "Needs you: over the limit." });
       next = red(s.p3);
@@ -782,9 +783,9 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
         [s.p2, size(s.p2)],
         [s.p3, next],
       ]);
-      expect(loop.limit(s.db, s.task, { ...v(), lineBudget: 900 }).status).toBe(200);
+      expect(loop.limit(s.db, s.task, { ...v(), keep: true }).status).toBe(200);
       expect(reasons(s)).toEqual([next, null, null, null]);
-      expect(taskDto(s.db, s.t()).settings.lineBudget).toBe(900);
+      expect(taskDto(s.db, s.t()).settings.keepOnePr).toBe(true);
       expect(loop.running(s.task)).toBe(false);
 
       // An allow choice keeps its decision, and the red checks of part 2 move up.
