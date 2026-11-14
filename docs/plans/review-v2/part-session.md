@@ -284,11 +284,11 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 ### 2.9 Live messages
 
 - The Tell Claude box (spec.md section 6.18.1) becomes the message box of the part. It shows in every state that has a worktree.
-- While an implement, fix, or instruct run of the part works, "Send" writes a stream-json user message to the stdin of that run (U104). No new step starts. The step of that run gets the Log note "Your message: <text>".
+- While an implement, fix, or instruct run of the part works, "Send" writes a stream-json user message to the stdin of that run (U104). No new step starts. The step of that run gets the Log note "Your message: <text>", one note for each send. The send moves the task version, so a second tab gets 409.
 - While no run works, "Send" starts a run with the text as "Your instructions" (spec.md section 6.18.2).
 - The text is user text. It can steer the work, but never the rules. The app never parses it.
 - Runner: `--input-format stream-json`, with stdin as a pipe. The first message is the prompt. The runner closes stdin after a result event when no message waits.
-- Fallback (ps4-plan.md WP-7): when the live write fails under the build driver, the message waits as an instruct row with blockedBefore null. The live gate is off, or the run takes no input now. The next GO of the part runs the row as "Your instructions". A part holds at most one waiting message. The waiting message keeps the reason of the task. The hint says "Claude reads this when the current run ends."
+- Fallback (ps4-plan.md WP-7): when the live write fails under the build driver, the message waits as an instruct row with blockedBefore null. The live gate is off, or the run takes no input now. The next GO of the part runs the row as "Your instructions". A part holds at most one waiting message. The waiting message keeps the reason of the task. The hint says "Claude reads this when the current run ends." These actions cancel the waiting message with the result "stopped": a Stop, a failed build, a Skip, and a Start again. The text goes back to the box. A Stop while the message runs under the build driver also sets the result "stopped". After a restart, Continue can start the message. A Stop of it then gives back the reason that Continue cleared.
 - Every other send while the loop works gets 409 "Claude or the checks are working.": a second waiting message of the part, a failed live write under a follow-up or other mode driver, and a send while no session run of the part runs.
 
 ### 2.10 Stall and loop guard
@@ -986,7 +986,7 @@ PartContext gains `unpushed`: task_part.pushed is NULL. It is NULL for a new bra
 | declined | ABANDON | none | abandoned | route drop | as planned ABANDON | none |
 | merged, abandoned | none | none | final | none | none | none |
 
-- RESTART and Skip need the phase idle, so no step of the part may be open. The route refuses a running part with "Hold part 2 first."
+- RESTART and Skip need the phase idle, so no step of the part may be open. The route refuses a running part with "Hold part 2 first." A waiting message (2.9) is the exception: RESTART and Skip cancel it.
 - RESTART from self_reviewed keeps the task in implementing. A self_reviewed part already keeps it there (WAITS_PR, loop.ts:193).
 - Refused by design (no write, no version move): GATE_FAILED in pr_open, CHANGES_REQUESTED in changes_requested, and GATE_PASSED in approved.
 
@@ -1400,7 +1400,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 |---|---|---|
 | interview or spec_draft with a run | step failed; STOP; Resume runs it again (tasks.ts:2523-2554) | same |
 | implementing, phase not idle | step failed; STOP; part rows cleared (G6) | step failed; reason error/restart on that part (first or queued); the task stays implementing; held and waiting rows stay |
-| implementing or stopped, a waiting message that never ran, on a part that still builds (ps4-plan.md WP-7) | new | the message row stays waiting for the next GO of the part; the other open rows of the part fail, and the reason goes to them; a built part keeps the WP-3 rule: the row fails, and Continue puts it in the queue again |
+| implementing, a waiting message that never ran, on a part that still builds (ps4-plan.md WP-7) | new | the message row stays waiting for the next GO of the part; the other open rows of the part fail, and the reason goes to them; a built part keeps the WP-3 rule: the row fails, and Continue puts it in the queue again; in stopped, the row fails, because a Stop already cancelled each waiting message |
 | implementing, a part builds between steps | STOP (tasks.ts:191) | reason error/restart with step null on that part (it does not queue) |
 | implementing, phase in a slot wait | waiting step failed; STOP | as "phase not idle"; Continue waits for the slot again |
 | implementing, a reason, no open step | kept | kept; usage timers armed again |

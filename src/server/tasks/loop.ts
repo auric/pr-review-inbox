@@ -122,6 +122,7 @@ import {
   softReason,
   stepAnswers,
   stopForRun,
+  stopSends,
   TASK_CHANGED,
   type TaskResult,
   type TaskRow,
@@ -667,7 +668,7 @@ const Q = {
   unhold: `UPDATE task_part SET blocked_json = NULL, updated_at = $now WHERE id = $id AND task = $task
     AND json_extract(blocked_json, '$.kind') = 'held'`,
   bump: "UPDATE task SET version = version + 1, updated_at = $now WHERE id = $id AND version = $version",
-  open: "SELECT id, kind FROM task_step WHERE part = $part AND state IN ('waiting', 'running') ORDER BY id",
+  open: "SELECT id, kind, state FROM task_step WHERE part = $part AND state IN ('waiting', 'running') ORDER BY id",
   // ps4-plan.md section 2.3: unpushed is task_part.pushed NULL with no pushed task_pr row of the part.
   pushedPr: "SELECT 1 FROM task_pr WHERE part = $part AND pushed IS NOT NULL LIMIT 1",
   // Skip and Start again: the reasons and the open loop questions of the part go. Start again also drops the old heads.
@@ -926,8 +927,10 @@ export function createLoop(opts: LoopOptions) {
     enter(active, id, part);
     return true;
   };
+  // A waiting message (WP-7) does not keep the part busy: Skip and Start again end it (stopSends).
   const partIdle = (db: Database, id: number, part: number) =>
-    !active.get(id)?.has(part) && (db.query(Q.open).all({ part }) as unknown[]).length === 0;
+    !active.get(id)?.has(part) &&
+    (db.query(Q.open).all({ part }) as { kind: string; state: string }[]).every((o) => o.kind === "instruct" && o.state === "waiting");
   // The version move of a change of a part row only.
   const bump = (db: Database, id: number, version: number) => {
     if (db.query(Q.bump).run({ id, version, now: now() }).changes !== 1) throw new Error(TASK_CHANGED);
@@ -2890,7 +2893,8 @@ export function createLoop(opts: LoopOptions) {
       if (isOpen(db, f.id)) endStep(db, f.id, "cancelled", {}, now());
       const d = stepDetailOf(db, f.id);
       patchStep(db, f.id, { ...(info && { instruct: { ...info, result: "stopped", committed } }), notes: [...d.notes, text] });
-      setReason(db, id, info?.blockedBefore ?? null);
+      // A message of the build driver (WP-7) has no reason before it: before is the reason that Continue cleared.
+      setReason(db, id, info?.blockedBefore ?? before ?? null);
     })();
     changed(id);
   }
@@ -3648,6 +3652,7 @@ export function createLoop(opts: LoopOptions) {
             if (cur.state !== "implementing" && cur.state !== "stopped") return TASK_STATE_TEXT[cur.state];
             const r = advancePart(db, { task: id, version: cur.version, part: partId }, { type: "ABANDON" }, {}, now());
             if (r.status !== 200) return r.error;
+            stopSends(db, id, partId, now());
             partsDone(db, id, dropReasons(db, id, partId, r.version));
             return null;
           })();
@@ -3698,6 +3703,7 @@ export function createLoop(opts: LoopOptions) {
             const unpushed = parts(db, id).find((p) => p.id === partId)?.pushed === null && !db.query(Q.pushedPr).get({ part: partId });
             const r = advancePart(db, { task: id, version: cur.version, part: partId }, { type: "RESTART" }, { unpushed }, now());
             if (r.status !== 200) return r.error;
+            stopSends(db, id, partId, now());
             const mark = insertStep(db, { task: id, part: partId, kind: "commit", item: "restart", state: "ok" }, now());
             const notes = [`Started again from the part base. The old head is at ${ref}.`];
             if (patch) notes.push(`The work that was not committed is in the patch ${patch}.`);
@@ -4146,6 +4152,8 @@ export function createLoop(opts: LoopOptions) {
       if ("error" in target) return conflict(db, id, target.error);
       const part = target.part;
       if (running && review.sendPart(db, id, part.id, input.text, `Your message: ${input.text}`)) {
+        // spec.md section 6.18.7: a second tab with the same version gets 409.
+        bump(db, id, t.version);
         changed(id);
         return { status: 202, task: dto(db, id) };
       }

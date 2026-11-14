@@ -189,8 +189,9 @@ Status: built in ba7ad13.
 
 - `loop.ts` `instruct()` during a session run of the part (`sessionRunning`: an implement, fix, or instruct run): with `live` on, `review.sendPart` writes stdin and adds the Log note "Your message: <text>". When the write fails under the build driver, one waiting instruct row per part with blockedBefore null; the next GO runs it. Else 409 WORKING. `tasks.ts` `instructTarget` lets a session run of the part through.
 - `followRun` gives a waiting row that never ran the next row ID (gap 22). A no-change message with no blockedBefore keeps the reason of another part. `hold` takes the open implement or fix row.
-- `recoverTasks` keeps a waiting message that never ran on a part that still builds, in implementing or stopped. A built part keeps the WP-3 rule.
-- Tests: session (AC-B364: live on and off, Stop, restart, follow-up driver, Hold), implement (sendPart), machine and fixture (invariant 8).
+- `recoverTasks` keeps a waiting message that never ran on a part that still builds, in implementing only. A built part keeps the WP-3 rule.
+- The live path moves the task version. Each send gets its own Log note. A move to stopped in `tasks.ts` `advance` runs `stopSends`. A Stop and `failed()` make this move. `stopSends` cancels each waiting message with result "stopped". A running message gets result "stopped" too. Skip and Start again run `stopSends` for their part. `partIdle` ignores a waiting message. `endFollow` gives back `before` when the message has no blockedBefore.
+- Tests: session (AC-B364: live on and off, two tabs, Stop, restart, follow-up driver, Skip, Start again, Hold), implement (sendPart), machine (STOP ends the messages) and fixture (invariant 8).
 
 ### WP-8. Docs (implementer)
 
@@ -250,7 +251,7 @@ held and usage live in `blocked_json`. The restart mark is a `commit` row. The c
 - AC-B361. A review judging run drops an unknown ID with a note. A missing entry gives "No verdict for point N" and counts as fixed. Each push-back gets payload.pushback with citeFound. After the gate, each push-back gets one question with point set and recommended null.
 - AC-B362. Accept discards the item with the mapped reason. "Fix it anyway" queues a pushback follow-up that commits as pushback and sets fixedBy. The recommended answers with an open push-back give 400.
 - AC-B363. "Fix these too" judges its points with the same rules.
-- AC-B364 (WP-7). With the live gate on, a message during a session run of the part reaches stdin, and the step gets the note "Your message: <text>". With the gate off, a message during the build run waits as one follow-up row per part. It survives a Stop and an app restart, and the next GO runs it.
+- AC-B364 (WP-7). With the live gate on, a message during a session run of the part reaches stdin, and the step gets the note "Your message: <text>". With the gate off, a message during the build run waits as one follow-up row per part. It survives an app restart while the task implements, and the next GO runs it. A Stop, a failed build, a Skip, or a Start again cancels it. Its text goes back to the box. A live send moves the task version.
 - AC-B365. The demo and e2e builds stay green with the critic step.
 
 ## 7. Invariants

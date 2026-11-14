@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AnyStateMachine, initialTransition, transition } from "xstate";
 import { openDb } from "../../src/server/storage/db";
-import { insertStep } from "../../src/server/tasks/implement";
+import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import {
   machineMermaid,
   PART_EVENTS,
@@ -28,7 +28,7 @@ import {
   type TaskContext,
   taskMachine,
 } from "../../src/server/tasks/machine";
-import { advance, advancePart, recoverTasks, TASK_CHANGED } from "../../src/server/tasks/tasks";
+import { advance, advancePart, recoverTasks, SEND_STOPPED, stopForRun, TASK_CHANGED } from "../../src/server/tasks/tasks";
 import { PART_STATES, type PartState, TASK_STATE_TEXT, TASK_STATES, type TaskState } from "../../src/shared/task";
 import { openTwice } from "./fixture";
 
@@ -917,5 +917,50 @@ describe("advance", () => {
         ["instruct", "I1", "running"],
       ]),
     ).toEqual(["implement:build instruct:I1"]);
+  });
+
+  test("ps4-plan.md WP-7: STOP (a Stop or a failed build) ends the waiting messages of the task as stopped and marks a running one", () => {
+    const part = (task: number, ord: number) =>
+      (
+        db
+          .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+            VALUES ($task, $ord, 'part', 'P', $branch, 'main', 'implementing', 1, 1) RETURNING id`)
+          .get({ task, ord, branch: `feature/K-${task}-${ord}` }) as { id: number }
+      ).id;
+    const message = (task: number, p: number, item: string, state: "waiting" | "running") => {
+      const s = insertStep(db, { task, part: p, kind: "instruct", item, state });
+      patchStep(db, s, { instruct: { text: item, part: p, blockedBefore: null, result: null, committed: false } });
+      return s;
+    };
+    const of = (id: number) =>
+      db
+        .query(`SELECT state, json_extract(detail_json, '$.instruct.result') AS result, json_extract(detail_json, '$.notes[#-1]') AS note
+          FROM task_step WHERE id = $id`)
+        .get({ id });
+    for (const stop of ["route", "failed"] as const) {
+      const id = newTask("implementing");
+      const other = newTask("implementing");
+      const one = part(id, 1);
+      const waiting = message(id, one, "I1", "waiting");
+      const running = message(id, part(id, 2), "I2", "running");
+      const build = insertStep(db, { task: id, part: one, kind: "implement", item: "build", state: "running" });
+      const kept = message(other, part(other, 1), "I3", "waiting");
+      // A row with the default detail '{}' has no notes array: the note must still land.
+      const bare = insertStep(db, { task: id, part: one, kind: "instruct", item: "I4", state: "waiting" });
+      if (stop === "route") expect(advance(db, { task: id, version: 0 }, { type: "STOP" }).status).toBe(200);
+      else stopForRun(db, { task: id, version: 0 }, null, { status: "failed", text: "The build stopped: x" });
+      expect([stop, row(id).state, of(waiting), of(running), of(build), of(kept)]).toEqual([
+        stop,
+        "stopped",
+        { state: "cancelled", result: "stopped", note: SEND_STOPPED },
+        { state: "running", result: "stopped", note: null },
+        { state: "running", result: null, note: null },
+        { state: "waiting", result: null, note: null },
+      ]);
+      expect([db.query("SELECT detail_json FROM task_step WHERE id = $id").get({ id: bare }), of(bare)]).toEqual([
+        { detail_json: JSON.stringify({ notes: [SEND_STOPPED] }) },
+        { state: "cancelled", result: null, note: SEND_STOPPED },
+      ]);
+    }
   });
 });

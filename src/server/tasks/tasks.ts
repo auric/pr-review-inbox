@@ -214,7 +214,21 @@ const SQL = {
   restartUpdates: `UPDATE task_step SET detail_json = json_insert(json_set(detail_json, '$.update.result', 'restart'), '$.notes[#]',
       'The app stopped during the update.')
     WHERE kind = 'update' AND state IN ('waiting', 'running') AND json_type(detail_json, '$.update') = 'object'`,
+  // ps4-plan.md WP-7: the result "stopped" gives the text back to the box (spec.md section 6.18.1). A running row ends by its run.
+  stopSends: `UPDATE task_step SET detail_json = json_set(detail_json, '$.instruct.result', 'stopped')
+    WHERE task = $task AND ($part IS NULL OR part = $part) AND kind = 'instruct' AND state IN ('waiting', 'running')
+      AND json_type(detail_json, '$.instruct') = 'object' AND json_extract(detail_json, '$.instruct.result') IS NULL`,
+  cancelSends: `UPDATE task_step SET state = 'cancelled', ended_at = $now, detail_json = json_insert(detail_json, '$.notes[#]', $note)
+    WHERE task = $task AND ($part IS NULL OR part = $part) AND kind = 'instruct' AND state = 'waiting'`,
 };
+
+export const SEND_STOPPED = "Stopped. The message did not run. The text is back in the box.";
+// ps4-plan.md WP-7: a Stop of the task, a Skip, or a Start again of the part ends each message that waits for the next GO. part null:
+// every part of the task.
+export function stopSends(db: Database, task: number, part: number | null, now = Date.now()) {
+  db.query(SQL.stopSends).run({ task, part });
+  db.query(SQL.cancelSends).run({ task, part, now, note: SEND_STOPPED });
+}
 
 type StateRow = { state: TaskState; stopped_from: TaskState | null; size: TaskSize | null; version: number };
 
@@ -238,6 +252,7 @@ export function advance(db: Database, ref: TaskRef, event: TaskEvent, facts: Fac
     write(db, SQL.setTask, { id: ref.task, version: ref.version, state, stopped: state === "stopped" ? row.state : null, now });
     // ps4-plan.md section 2.6: Stop and ready keep a held part row. CLOSE and FAIL clear it.
     if (state !== "implementing") db.query(SQL.clearWaits).run({ id: ref.task, all: state === "stopped" || state === "ready" ? 0 : 1 });
+    if (state === "stopped") stopSends(db, ref.task, null, now);
     // part-session.md section 9.3.1: ALL_MERGED and CLOSE delete the transcripts of the task.
     if (state === "done") dropSessions(db, { task: ref.task });
     return { status: 200, state, version: ref.version + 1 };
@@ -297,14 +312,15 @@ export function recoverTasks(db: Database, now = Date.now(), dataDir?: string) {
       part_state: string | null;
     }[];
     // ps4-plan.md WP-7: a message that never ran on a part in its build stays waiting for the next GO of that part. The reason of the part
-    // can come from another row, and Continue puts only the step of a reason in the queue again. A built part keeps the WP-3 rule.
+    // can come from another row, and Continue puts only the step of a reason in the queue again. A built part keeps the WP-3 rule. A
+    // stopped task has no GO, so its message fails.
     const keep = all.filter(
       (o) =>
         o.kind === "instruct" &&
         o.state === "waiting" &&
         o.run === null &&
         o.part_state === "implementing" &&
-        (o.task_state === "implementing" || o.task_state === "stopped"),
+        o.task_state === "implementing",
     );
     const open = all.filter((o) => !keep.includes(o));
     db.query(SQL.restartUpdates).run();

@@ -1277,8 +1277,8 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       if (cut !== null) d.query(STEP_SQL.cut).run({ id: step, cut });
       if (i.tries) patchStep(d, step, { tries: i.tries });
     },
-    note: (d, text) => {
-      if (runNotes.includes(text)) return;
+    note: (d, text, each) => {
+      if (!each && runNotes.includes(text)) return;
       runNotes.push(text);
       patchStep(d, step, { notes: [...stepDetailOf(d, step).notes, text] });
     },

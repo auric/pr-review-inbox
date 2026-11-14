@@ -23,12 +23,16 @@ import {
   partSession,
   RESTART_TEXT,
   recoverTasks,
+  SEND_STOPPED,
   saveSession,
   sha256File,
+  TASK_CHANGED,
+  taskDto,
   taskRow,
   WORKING,
 } from "../../src/server/tasks/tasks";
 import { specResult, type TaskBlocked } from "../../src/shared/task";
+import { stoppedSend } from "../../src/web/tasks/model";
 import { readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 import {
@@ -53,8 +57,15 @@ import {
 } from "./loop-fixture";
 import { remoteCommit } from "./update-fixture";
 
-for (const m of ["tasks/loop", "tasks/implement", "tasks/tasks", "review/jobs", "review/claude"])
-  console.log(`session.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
+for (const m of [
+  "server/tasks/loop",
+  "server/tasks/implement",
+  "server/tasks/tasks",
+  "server/review/jobs",
+  "server/review/claude",
+  "web/tasks/model",
+])
+  console.log(`session.test.ts imported from ${Bun.resolveSync(`../../src/${m}`, import.meta.dir)}`);
 
 afterEach(cleanupAll);
 
@@ -864,11 +875,17 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
       const s = await setup({ seq: { "implement:build": [SLOW_BUILD] } });
       s.loop.build(s.db, s.task);
       await until(() => building(s));
+      const v = s.t().version;
+      expect(s.loop.instruct(s.db, s.task, { version: v, text: SEND }).status).toBe(202);
+      // The live send moves the version, so a second tab with the same version gets 409 (spec.md section 6.18.7).
+      const tab = s.loop.instruct(s.db, s.task, { version: v, text: SEND });
+      expect([s.t().version, tab.status, (tab as { error: string }).error]).toEqual([v + 1, 409, TASK_CHANGED]);
+      // The same text again is a new message with its own note.
       expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
       await s.loop.idle(s.task);
-      expect(inputs(s)).toEqual([SEND]);
+      expect(inputs(s)).toEqual([SEND, SEND]);
       const build = s.steps().find((x) => x.kind === "implement") as Step;
-      expect(detailOf(s, build.id).notes).toContain(`Your message: ${SEND}`);
+      expect(detailOf(s, build.id).notes.filter((n: string) => n === `Your message: ${SEND}`)).toHaveLength(2);
       expect([s.steps().filter((x) => x.kind === "instruct"), sent(s)]).toEqual([[], []]);
       expect(order(s)).toEqual([...BUILD, ...END]);
       expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
@@ -928,23 +945,38 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
     SLOW,
   );
 
-  // A message waits beside the build run, and a Stop ends the driver. The rows stay as at that moment.
-  const stoppedWithMessage = async () => {
-    const s = await setup({ sessionGates: OFF, seq: { "implement:build": [SLOW_BUILD], "implement:instruct": [{ writes: [FIXED] }] } });
+  // A message waits beside the build run, and a Stop ends the driver and the message.
+  const stoppedWithMessage = async (message: object = { writes: [FIXED] }) => {
+    const s = await setup({ sessionGates: OFF, seq: { "implement:build": [SLOW_BUILD], "implement:instruct": [message] } });
     s.loop.build(s.db, s.task);
     await until(() => building(s));
     expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
-    const queued = (s.steps().at(-1) as Step).id;
+    const row = s.steps().at(-1) as Step;
     const build = (s.steps().find((x) => x.kind === "implement") as Step).id;
     expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
     await s.loop.idle(s.task);
-    expect(s.flow().at(-1)).toBe("instruct:I1:waiting");
-    return { s, queued, build };
+    expect(s.flow().at(-1)).toBe("instruct:I1:cancelled");
+    return { s, queued: row.id, build, waiting: row.detail_json };
   };
-  // The app stopped during the build run: the build row and the task go back to their state at that moment.
-  const crashed = (s: S, build: number) => {
+  // The app stopped during the build run: the build row, the message, and the task go back to their state at that moment.
+  const crashed = (s: S, build: number, queued: number, waiting: string) => {
     s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL WHERE id = $id").run({ id: build });
+    s.db.query("UPDATE task_step SET state = 'waiting', ended_at = NULL, detail_json = $d WHERE id = $id").run({ id: queued, d: waiting });
     s.db.query("UPDATE task SET state = 'implementing', stopped_from = NULL WHERE id = $id").run({ id: s.task });
+  };
+  // A restart during the build run: the build row has the reason error/restart, and the message waits.
+  const restarted = async (message?: object) => {
+    const r = await stoppedWithMessage(message);
+    crashed(r.s, r.build, r.queued, r.waiting);
+    recoverTasks(r.s.db, Date.now(), r.s.dataDir);
+    return r;
+  };
+  const dto = (s: S) => taskDto(s.db, taskRow(s.db, s.task) as NonNullable<ReturnType<typeof taskRow>>);
+  const open = (s: S) => s.steps().filter((x) => x.state === "waiting" || x.state === "running");
+  // The message row ended as stopped, and the Tell box gets its text back (web/tasks/model.ts stoppedSend).
+  const textBack = (s: S, id: number) => {
+    expect([s.steps().find((x) => x.id === id)?.state, detailOf(s, id).instruct.result]).toEqual(["cancelled", "stopped"]);
+    expect(stoppedSend(dto(s))).toEqual({ id, text: SEND });
   };
   const ranOnce = (s: S, flow: string[]) => {
     expect([sent(s).length, sent(s)[0]?.stdin.endsWith(`# Your instructions\n\n${SEND}`)]).toEqual([1, true]);
@@ -955,9 +987,7 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
   test(
     "AC-B364: a restart during the build run: the message stays waiting, the build row takes the reason, and Continue runs the message",
     async () => {
-      const { s, queued, build } = await stoppedWithMessage();
-      crashed(s, build);
-      recoverTasks(s.db, Date.now(), s.dataDir);
+      const { s, queued, build } = await restarted();
       expect([s.t().state, s.blocked()]).toEqual(["implementing", { kind: "error", cause: "restart", step: build, text: RESTART_TEXT(1) }]);
       expect(s.steps().find((x) => x.id === queued)?.state).toBe("waiting");
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
@@ -998,16 +1028,96 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
   );
 
   test(
-    "AC-B364: a Stop keeps the message, a restart in stopped keeps it too, and Resume runs it",
+    "AC-B364: a Stop ends the waiting message as stopped with its text back in the box, a restart keeps it ended, and Resume skips it",
     async () => {
       const { s, queued } = await stoppedWithMessage();
+      textBack(s, queued);
+      expect(detailOf(s, queued).notes.at(-1)).toBe(SEND_STOPPED);
+      // Close refuses a task with an open row (tasks.ts close).
+      expect([s.t().state, open(s)]).toEqual(["stopped", []]);
       recoverTasks(s.db, Date.now(), s.dataDir);
-      expect([s.t().state, s.steps().find((x) => x.id === queued)?.state]).toEqual(["stopped", "waiting"]);
+      expect(s.t().state).toBe("stopped");
+      textBack(s, queued);
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
-      ranOnce(s, ["instruct:I1:ok"]);
+      expect([sent(s).length, s.part().state, s.blocked()]).toEqual([0, "self_reviewed", null]);
     },
     SLOW,
+  );
+
+  test("AC-B364: a restart in stopped ends a waiting message, so no open row blocks Close", async () => {
+    const s = await setup();
+    const part = (
+      s.db
+        .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+          VALUES ($t, 1, 'single', 'Add the feature', 'feature/K-1-add-the-feature', 'main', 'implementing', 1, 1) RETURNING id`)
+        .get({ t: s.task }) as { id: number }
+    ).id;
+    const row = insertStep(s.db, { task: s.task, part, kind: "instruct", item: "I1", state: "waiting" });
+    patchStep(s.db, row, { instruct: { text: SEND, part, blockedBefore: null, result: null, committed: false } });
+    s.db.query("UPDATE task SET state = 'stopped', stopped_from = 'implementing' WHERE id = $id").run({ id: s.task });
+    recoverTasks(s.db, Date.now(), s.dataDir);
+    expect([s.t().state, s.steps().find((x) => x.id === row)?.state, open(s)]).toEqual(["stopped", "failed", []]);
+  });
+
+  test(
+    "WP-7: a Stop while the waiting message runs under the build ends its row as stopped, and the text goes back to the box",
+    async () => {
+      const s = await setup({
+        sessionGates: OFF,
+        seq: { "implement:build": [SLOW_BUILD], "implement:instruct": [{ writes: [FIXED], delayMs: 250 }] },
+      });
+      s.loop.build(s.db, s.task);
+      await until(() => building(s));
+      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
+      await until(() => s.steps().some((x) => x.kind === "instruct" && x.state === "running" && x.run !== null) && sent(s).length === 1);
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect(s.t().state).toBe("stopped");
+      textBack(s, (s.steps().find((x) => x.kind === "instruct") as Step).id);
+      // Resume does not run the message again: its text is in the box.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect([sent(s).length, s.steps().filter((x) => x.kind === "instruct").length]).toEqual([1, 1]);
+    },
+    SLOW,
+  );
+
+  test(
+    "WP-7: after a restart, a Stop of the message that Continue started gives back the reason error/restart",
+    async () => {
+      const { s, build } = await restarted({ writes: [FIXED], delayMs: 250 });
+      const reason = s.blocked();
+      expect(reason).toEqual({ kind: "error", cause: "restart", step: build, text: RESTART_TEXT(1) });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await until(() => s.steps().some((x) => x.kind === "instruct" && x.state === "running" && x.run !== null) && sent(s).length === 1);
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect([s.t().state, s.blocked(), s.loop.running(s.task)]).toEqual(["implementing", reason, false]);
+      textBack(s, (s.steps().find((x) => x.kind === "instruct") as Step).id);
+      // Continue builds the part on, and the message does not run again.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
+      expect([sent(s).length, s.steps().filter((x) => x.kind === "instruct").length]).toEqual([1, 1]);
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+    },
+    SLOW,
+  );
+
+  test(
+    "WP-7: after a restart, Skip and Start again end the waiting message of the part as stopped",
+    async () => {
+      for (const action of ["skip", "restart"] as const) {
+        const { s, queued } = await restarted();
+        expect(s.steps().find((x) => x.id === queued)?.state).toBe("waiting");
+        if (action === "skip") s.db.query("UPDATE task SET subtasks = 1 WHERE id = $id").run({ id: s.task });
+        const r = await s.loop[action](s.db, s.task, s.part().id, { version: s.t().version });
+        expect([action, r.status]).toEqual([action, 200]);
+        textBack(s, queued);
+        await s.loop.idle(s.task);
+      }
+    },
+    SLOW * 2,
   );
 
   test(

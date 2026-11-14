@@ -378,7 +378,8 @@ export type ImplementRunStart = {
   session?: { keep: string; resume?: string; live?: boolean };
   started: (db: Database, run: number) => void;
   // A note of the run for the Log while it runs, such as the loop warning (part-session.md section 2.10).
-  note?: (db: Database, text: string) => void;
+  // each: a user message (part-session.md section 2.9) gets a note for each send, also with the same text.
+  note?: (db: Database, text: string, each?: boolean) => void;
   after: (o: RunOutcome | null, early: Ending | null, servers: string[], gaps: string[]) => Promise<Ending>;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
 };
@@ -2510,7 +2511,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         if (j.pr !== null || j.db !== db || j.t.task !== task || j.t.kind !== "implement") continue;
         if (!j.key.startsWith(`task:${task}:part:${part}:`) || !j.runner.send(text)) continue;
         const t = j.t;
-        if (note !== undefined) j.db.transaction(() => t.note?.(j.db, note))();
+        if (note !== undefined) j.db.transaction(() => t.note?.(j.db, note, true))();
         notify(j.id, undefined, task);
         return true;
       }
