@@ -23,6 +23,7 @@ import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/tur
 import type { Reviewer, Role, User } from "../../shared/types";
 import { byArchive, byInbox } from "../../shared/views";
 import { OPEN_FINDINGS } from "../review/run-rows";
+import { liveTaskPart } from "../tasks/task-pr";
 import { BUILD_COLUMNS, type RawBuild, toBuild } from "./builds";
 import { openDrafts, staleCount } from "./stale";
 
@@ -333,7 +334,9 @@ export function prDetail(db: Database, me: string, id: number): PrDetail | null 
   const { description, source_head } = db.query(SQL.description).get({ id }) as { description: string | null; source_head: string | null };
   const commits = db.query(SQL.commits).all({ pr: id }) as CommitDto[];
   const files = db.query(SQL.files).all({ pr: id }) as ChangedFile[];
-  return { pr, description, sourceHead: source_head, comments, files, commits };
+  const live = liveTaskPart(db, id);
+  const task = live && { id: live.task, key: live.key, part: live.part };
+  return { pr, description, sourceHead: source_head, comments, files, commits, task };
 }
 
 // null for an unknown PR.

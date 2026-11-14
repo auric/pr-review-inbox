@@ -99,7 +99,11 @@ export function buildHistory(thread: number, rows: HistoryRows): ThreadHistoryDt
   }
   const drafts = items.map(({ r, p }) => {
     const ran = r.run_finished ?? r.run_started ?? 0;
-    const at = p.fix ? (commitAt.get(p.fix.id) ?? ran) : p.declined ? (runAt.get(p.declined.run) ?? ran) : ran;
+    const at = p.fix
+      ? ((p.fix.id === null ? undefined : commitAt.get(p.fix.id)) ?? ran)
+      : p.declined
+        ? (runAt.get(p.declined.run) ?? ran)
+        : ran;
     let replacedBy: number | null = null;
     if (r.status === "discarded") {
       replacedBy = explicit.get(r.id) ?? null;

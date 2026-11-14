@@ -30,13 +30,13 @@ import {
   type InstructionsInput,
   instructionsInput,
 } from "../../shared/dto";
-import { isMe } from "../../shared/me";
 import { type FixNote, parseFixNotes, type ReplyPayload } from "../../shared/review";
 import { newestLive, type TurnMsg } from "../../shared/turn";
 import type { PullRequest } from "../../shared/types";
 import { openFolder } from "../context/attachments";
 import type { Live } from "../live";
 import type { Settings } from "../settings";
+import { liveTaskPart, taskPrText } from "../tasks/task-pr";
 import {
   applyCheck,
   applyIndex,
@@ -58,7 +58,7 @@ import {
   toFixCommitDto,
   treeEntries,
 } from "./clone";
-import { currentDrafts, DROP_REVISIONS, keptText, revisedText, touched, userDraft } from "./drafts";
+import { currentDrafts, writeThreadDraft } from "./drafts";
 import { GitError, git } from "./git";
 import { GLOBAL_FILE, instructionSettings, projectInstructions, saveInstructionSettings } from "./instructions";
 import type { ReviewJobs } from "./jobs";
@@ -112,21 +112,10 @@ const SQL = {
   committed: "UPDATE fix_commit SET state = 'committed', commit_hash = $hash, short_hash = $short, updated_at = $now WHERE id = $id",
   undone: "UPDATE fix_commit SET state = 'undone', updated_at = $now WHERE id = $id",
   remove: "DELETE FROM fix_commit WHERE id = $id",
-  // drafts.ts SUPERSEDE: a new reply draft replaces the open drafts of its thread that the user did not touch. Posted drafts stay.
-  replaceable: `SELECT i.id FROM review_item i JOIN review_run r ON r.id = i.run
-    WHERE r.pr = $pr AND i.kind = 'reply' AND i.thread = $thread AND i.status = 'new' AND i.edited = 0 ORDER BY i.id`,
-  supersede: "UPDATE review_item SET status = 'discarded', revision = revision + 1 WHERE id = $id AND status = 'new'",
   thread: `SELECT comment_id AS id, root_id AS rootId, author_slug AS authorSlug, author_login AS authorLogin, created_at AS createdAt,
       tombstoned_at IS NOT NULL AS deleted, thread_resolved AS threadResolved FROM comment WHERE pr = $pr AND root_id = $root`,
   item: `INSERT INTO review_item (run, kind, payload_json, body, status, thread, edited)
     VALUES ($run, 'reply', $payload, $body, 'new', $thread, 0) RETURNING id`,
-  // drafts.ts: a revision of the user's draft waits as a discarded item. A newer one drops the older ones of the thread.
-  revision: `INSERT INTO review_item (run, kind, payload_json, body, status, thread, edited)
-    VALUES ($run, 'reply', $payload, $body, 'discarded', $thread, 0)`,
-  dropRevisions: DROP_REVISIONS,
-  // The fix run records each thread where the commit kept the user's draft. A second commit adds no second line.
-  kept: `UPDATE review_run SET summary_json = json_insert(summary_json, '$.coverage.skipped[#]', $text)
-    WHERE id = $run AND json_valid(summary_json) AND NOT EXISTS (SELECT 1 FROM json_each(summary_json, '$.coverage.skipped') WHERE value = $text)`,
   fixDrafts: "SELECT thread, payload_json FROM review_item WHERE kind = 'reply' AND json_extract(payload_json, '$.fix.id') = $id",
   discard: `UPDATE review_item SET status = 'discarded', revision = revision + 1
     WHERE kind = 'reply' AND status IN ('new', 'accepted') AND json_extract(payload_json, '$.fix.id') = $id`,
@@ -305,54 +294,19 @@ export function createFixRoutes(opts: {
       const all = db.query(SQL.edits).all({ run: run.run }) as EditRow[];
       const held = new Set((db.query(SQL.held).all({ run: run.run }) as { id: number }[]).map((r) => r.id));
       for (const thread of new Set(edits.flatMap((e) => (e.thread === null ? [] : [e.thread])))) {
-        const msgs = db.query(SQL.thread).all({ pr: run.pr, root: thread }) as TurnMsg[];
-        const last = newestLive(msgs);
-        if (!last) continue;
-        // The user asked for this fix, so a discarded draft does not block the "Fixed in" draft.
-        const cur = drafts.get(thread);
-        const mine = cur && touched(cur) ? cur : null;
-        if (!mine && userDraft(cur, false)) {
-          db.query(SQL.kept).run({ run: run.run, text: keptText(thread) });
-          continue;
-        }
-        const was = cur?.status === "new" ? (JSON.parse(cur.payload_json) as ReplyPayload) : null;
-        const answer = mine
-          ? mine.body.trim()
-          : was && !was.fix && was.origin !== "nofix" && was.origin !== "resolve"
-            ? (cur?.body.trim() ?? "")
-            : "";
-        const replaced = mine ? [] : (db.query(SQL.replaceable).all({ thread, pr: run.pr }) as { id: number }[]).map((r) => r.id);
-        for (const r of replaced) db.query(SQL.supersede).run({ id: r });
-        const root = msgs.find((m) => m.id === thread);
         const partly = all.some((e) => e.thread === thread && !held.has(e.id));
         const what = notes.find((n) => n.thread === thread)?.reply.trim() ?? "";
-        const line = `${partly ? "Partly fixed" : "Fixed"} in ${made.short}${what ? `: ${what}` : "."}`;
-        const body = answer ? `${answer}\n\n${line}` : line;
         const paths = [...new Set(edits.filter((e) => e.thread === thread).map((e) => e.path))];
-        // A full fix proposes to resolve the thread. Only a thread that the user started gets the tick by default.
-        const payload: ReplyPayload = {
+        writeThreadDraft(db, drafts, me, {
+          pr: run.pr,
+          run: run.run,
           thread,
-          action: "reply",
-          body,
+          line: `${partly ? "Partly fixed" : "Fixed"} in ${made.short}${what ? `: ${what}` : "."}`,
           reason: partly ? "The app committed a part of the fix." : "The app committed the fix.",
-          evidenceStatus: "code",
-          judgement: null,
-          replyTo: last.id,
-          fix: { id, commit: made.commit, ...(replaced.length > 0 && { replaced }) },
-          resolve: !partly,
-          resolveEvidence: partly ? "" : `Commit ${made.short} changes ${paths.join(", ")}.`,
-          resolveTick: !partly && !!root && isMe({ slug: root.authorSlug, login: root.authorLogin }, me),
-          threadOpen: !msgs.some((m) => m.threadResolved),
           origin: "fix",
-          ...(mine && { revises: mine.id }),
-        };
-        const at = { run: run.run, payload: JSON.stringify(payload), body, thread };
-        db.query(SQL.dropRevisions).run({ thread, pr: run.pr });
-        if (!mine) db.query(SQL.item).run(at);
-        else {
-          db.query(SQL.revision).run(at);
-          db.query(SQL.kept).run({ run: run.run, text: revisedText(thread) });
-        }
+          fix: { id, commit: made.commit },
+          resolveEvidence: partly ? null : `Commit ${made.short} changes ${paths.join(", ")}.`,
+        });
       }
     })();
   }
@@ -514,6 +468,9 @@ export function createFixRoutes(opts: {
   async function commit(db: Database, runId: number, input: FixCommitInput): Promise<Out> {
     const run = db.query(SQL.run).get({ id: runId }) as RunRow | null;
     if (run?.kind !== "fix") return { status: 404, body: notFound("Fix run") };
+    // AC-B396: an older fix run of a PR that became a live task PR. Undo stays open.
+    const live = liveTaskPart(db, run.pr);
+    if (live) return conflict(taskPrText(live.key));
     const ids = [...new Set(input.edits)].sort((a, b) => a - b);
     const edits = (db.query(SQL.edits).all({ run: runId }) as EditRow[]).filter((e) => ids.includes(e.id));
     if (edits.length !== ids.length) return { status: 404, body: notFound("Fix edit") };

@@ -177,9 +177,10 @@ async function inBranch(path: string, branch: string, commit: string): Promise<b
 
 // Plan r3: a "Fixed in" reply posts only when the stored PR commits hold its commit and belong to the current heads.
 // Else commit-gone when the clone branch of the fix no longer holds the commit, and unpushed in every other case. null: it can post.
+// fix.id null: a task commit (AC-B394). It has no clone row, so it waits as unpushed.
 async function fixCheck(db: Database, pr: number, fix: NonNullable<ReplyPayload["fix"]>) {
   if (db.query(SQL.fixed).get({ pr, hash: fix.commit })) return null;
-  const row = db.query(SQL.fixRow).get({ id: fix.id }) as {
+  const row = (fix.id === null ? null : db.query(SQL.fixRow).get({ id: fix.id })) as {
     short_hash: string | null;
     mode: string;
     clone_path: string | null;

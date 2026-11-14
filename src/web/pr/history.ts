@@ -186,7 +186,7 @@ export function historyLines(dto: ThreadHistoryDto, t: HistoryThread, names: His
     const o = originOf(it);
     const w = writerOf(it, names.ai);
     const said = (p.body ?? it.body).trim();
-    const fixed = p.fix ? commitOf.get(p.fix.id) : undefined;
+    const fixed = p.fix && p.fix.id !== null ? commitOf.get(p.fix.id) : undefined;
     const tags: string[] = [];
     const judged = p.judgement ? JUDGED[p.judgement] : undefined;
     if (judged) tags.push(judged);

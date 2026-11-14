@@ -495,7 +495,8 @@ export type CommentDto = {
   orphanedAt?: number;
 };
 
-// sourceHead: the source head of the last sync. null before the first sync.
+// sourceHead: the source head of the last sync. null before the first sync. task: the live task part of the PR (AC-B397), with the
+// task_part ID as part. null: no live task part.
 export type PrDetail = {
   pr: PrRow;
   description: string | null;
@@ -503,6 +504,7 @@ export type PrDetail = {
   comments: CommentDto[];
   files?: ChangedFile[];
   commits?: CommitDto[];
+  task: { id: number; key: string; part: number } | null;
 };
 
 export type FollowState = { id: number; followed: boolean; archivedAt: number | null };

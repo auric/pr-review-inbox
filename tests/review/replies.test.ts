@@ -64,6 +64,7 @@ const draft = (thread: number, o: Partial<ReplyDraft> = {}): ReplyDraft => ({
   resolve: false,
   resolveEvidence: "",
   cites: [],
+  group: null,
   ...o,
 });
 

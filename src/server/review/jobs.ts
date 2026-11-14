@@ -60,14 +60,15 @@ import { implementJsonSchema, runLimitsOf, type TaskRunKind } from "../../shared
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { PrRef } from "../../shared/types";
 import { dataDir as defaultDataDir } from "../config";
-import { taskContext, taskParents } from "../context/task-file";
+import { TASK_FILE, taskContext, taskParents } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { Settings } from "../settings";
 import { noteTaskWaits } from "../tasks/notify";
 import { taskRepos } from "../tasks/repos";
 import { originsOf, type StepShell } from "../tasks/shell";
-import { recoverTasks, taskRow } from "../tasks/tasks";
+import { liveTaskPart, taskPrText } from "../tasks/task-pr";
+import { recoverTasks, stepAnswers, taskRow } from "../tasks/tasks";
 import { inside, tasksRoot } from "../tasks/worktree";
 import {
   askAgent,
@@ -131,6 +132,7 @@ import {
   fixStateFile,
   historyFile,
   notesFile,
+  planSection,
   prContextFile,
   questionsFile,
   salvageNotesFile,
@@ -143,7 +145,7 @@ import { prFixes } from "./fix-routes";
 import { gitEnv } from "./git";
 import { gitMcpServer } from "./git-mcp";
 import { createImprover } from "./improve";
-import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, projectInstructions } from "./instructions";
+import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, projectInstructions, treeReader } from "./instructions";
 import {
   addUsage,
   type CandidateLink,
@@ -815,6 +817,27 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return { servers: { ...docs.servers, ...user.servers }, used, unmarked, gaps: [...docs.unavailable, ...user.gaps] };
   }
 
+  // AC-B386: the plan section of a PR run on the main PR of a live task part. The blobs come from the cache at the source head, so a
+  // link in the branch never loads. null when the head holds no plan file.
+  async function taskPlan(db: Database, pr: number, ws: Workspace): Promise<string | null> {
+    const live = liveTaskPart(db, pr);
+    if (!live?.main) return null;
+    const read = treeReader(ws.cache, gitEnv("/dev/null"), ws.sourceHead);
+    const files: ContextFile[] = [];
+    let loaded = 0;
+    for (const path of live.plan) {
+      const r = await read.load(null, path);
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      if ("bytes" in r) {
+        files.push({ name, text: new TextDecoder().decode(r.bytes) });
+        loaded++;
+      } else if (!r.missing) files.push({ name, text: `(The app did not load this file: ${r.error}.)` });
+    }
+    if (!loaded) return null;
+    const answers = stepAnswers(db, live.task);
+    return planSection(answers ? [...files, answers] : files);
+  }
+
   async function steps(j: Job, pr: Heads, brief: BriefInput, held: { ws?: Workspace }) {
     const cancelled = cancelledEnding;
     const c = await check();
@@ -907,6 +930,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (j.cancelled) return cancelled();
     // spec.md section 2.8: the user wrote or kept each note, so notes.md has no UNTRUSTED banner.
     if (ctx?.notes) writeFileSync(join(ws.context, ctx.notes.name), ctx.notes.text);
+    const plan = await taskPlan(j.db, j.pr, ws);
+    if (j.cancelled) return cancelled();
+    if (plan) {
+      const task = join(ws.context, TASK_FILE);
+      writeFileSync(task, existsSync(task) ? `${readFileSync(task, "utf8").trimEnd()}\n\n${plan}` : UNTRUSTED + plan);
+    }
+    const taskFile = files.length > 0 || plan !== null;
 
     const changed = parseDiff(ws.diff);
     const instructions = await loadInstructions(
@@ -939,15 +969,16 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         `Review run ${j.id}: ${changed.length} changed files, rl-reviewer ${delegate ? `on (${delegate}${parts.length ? `, ${parts.length} parts` : ""})` : "off"}.`,
       );
     const context: ReviewContext = {
-      taskFile: files.length > 0,
+      taskFile,
       attachments: attachments.length > 0,
       history: history !== null,
       questions: j.asked.length > 0,
       rereview: !!carry,
       instructions: instructions.text !== "",
-      goal: !!pr.description?.trim() || files.length > 0,
+      goal: !!pr.description?.trim() || taskFile,
       prContext: !!ctx,
       notes: !!ctx?.notes,
+      plan: plan !== null,
     };
     const gaps = [...tools.gaps, ...skills.gaps];
     const input = {
@@ -957,7 +988,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       profile,
       pr: { project: pr.project, repo: pr.repo, prId: pr.pr_id, webUrl: pr.web_url },
       tasks: j.db.query(SQL.tasks).all({ pr: j.pr }) as PrTask[],
-      taskFile: files.length > 0,
+      taskFile,
       attachments: attachments.length > 0,
       history: history !== null,
       fixState: fixState !== null,
@@ -2419,6 +2450,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const { source_head, target_head } = pr;
       if (!source_head || !target_head) return { status: 409, error: "Sync the pull request first." };
       if (pr.my_role !== "AUTHOR") return { status: 409, error: "Fix works only on your own pull requests." };
+      // AC-B396: the task loop is the only writer of a live task PR. An adopted part keeps Fix.
+      const live = liveTaskPart(db, id);
+      if (live) return { status: 409, error: taskPrText(live.key) };
       const brief = briefOf(db, id);
       const profile = profileOf(settings.profiles(), profileId ?? brief.profile);
       if (profile.explain) return { status: 409, error: "The Explain profile proposes no fixes. Pick a review profile first." };

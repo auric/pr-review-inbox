@@ -900,6 +900,45 @@ export function prContextFile(i: PrContextInput): ContextFile & { threads: numbe
   return { name: "pr-context.md", text, threads: focused.length + blocks.length, left, peers: peers.shown };
 }
 
+// ---------- Task PR context (docs/plans/review-v2/ps6-ps7-plan.md section 1 items 2 and 12) ----------
+
+// The byte cap of context/comments.md, the UNTRUSTED banner included.
+export const COMMENTS_BYTES = 48 * 1024;
+
+// context/comments.md of a comment run of a task part: the picked threads with every live message, by group. The run writer puts the
+// UNTRUSTED banner before the text. The cut drops the threads after the first thread that does not fit. threads: the IDs in the file.
+export function commentsFile(groups: { n: number; threads: PrContextThread[] }[]): ContextFile & { threads: number[]; left: number } {
+  const all = groups.flatMap((g) => g.threads.map((t) => ({ g: g.n, t })));
+  const LEFT = (n: number) => `${n} more threads left out.`;
+  const room = COMMENTS_BYTES - size(UNTRUSTED) - size(LEFT(all.length)) - 2;
+  const out: string[] = [];
+  const kept: number[] = [];
+  let used = 0;
+  let group: number | null = null;
+  for (const { g, t } of all) {
+    const lines = focusLines(t, new Set(t.msgs.map((m) => m.id))).join("\n");
+    const text = g === group ? lines : `## Group ${g}\n\n${lines}`;
+    if (used + size(text) + 2 > room) break;
+    out.push(text);
+    used += size(text) + 2;
+    kept.push(t.id);
+    group = g;
+  }
+  const left = all.length - kept.length;
+  return { name: "comments.md", text: `${[...out, ...(left ? [LEFT(left)] : [])].join("\n\n")}\n`, threads: kept, left };
+}
+
+// The cap of the plan section in context/task.md of a PR run on a live task PR.
+export const PLAN_CONTEXT_BYTES = 60 * 1024;
+const PLAN_CUT = `\n\nThe app cut the plan at ${PLAN_CONTEXT_BYTES / 1024} KB.\n`;
+
+// AC-B386: the "# The plan of the task" section. files: the plan files at the source head, then answers.md. null without a file.
+export function planSection(files: ContextFile[]): string | null {
+  if (!files.length) return null;
+  const text = `# The plan of the task\n\n${files.map((f) => `## ${f.name}\n\n${f.text.trim()}`).join("\n\n")}\n`;
+  return size(text) <= PLAN_CONTEXT_BYTES ? text : cutBytes(text, PLAN_CONTEXT_BYTES - size(PLAN_CUT)) + PLAN_CUT;
+}
+
 // A kept note for context/notes.md. ref: the PR that this PR waits for, with its stored state.
 export type KeptNote = {
   id: number;

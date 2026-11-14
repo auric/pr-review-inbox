@@ -473,8 +473,9 @@ export type ReviewContext = {
   goal: boolean;
 } & RunFiles;
 
-// docs/plans/review-v2/spec.md section 2.10: ./context/pr-context.md and ./context/notes.md exist.
-export type RunFiles = { prContext?: boolean; notes?: boolean };
+// docs/plans/review-v2/spec.md section 2.10: ./context/pr-context.md and ./context/notes.md exist. plan: ./context/task.md holds the plan
+// of the task (docs/plans/review-v2/ps6-ps7-plan.md AC-B386).
+export type RunFiles = { prContext?: boolean; notes?: boolean; plan?: boolean };
 
 // spec.md section 2.10: the context block of every agent of a run with ./context/pr-context.md. The notes line shows only with notes.md.
 export const PR_CONTEXT_RULES = [
@@ -854,6 +855,15 @@ export function explainAgent(p: Profile): AgentSpec {
   return { description: "Read-only walkthrough of one pull request.", prompt: [p.prompt, ...EXPLAIN_RULES, ...docsRule(p)].join("\n") };
 }
 
+// pushback.md section 6.23.8 and docs/plans/review-v2/part-session.md section 2.14: the reply lines of a run whose task.md holds the plan.
+// Fix refuses a task PR, so the fix agent gets no plan lines (ps6-ps7-plan.md section 1 item 13).
+export const PLAN_REPLY_RULES = [
+  "When ./context/task.md holds the plan of the task, judge each comment against the plan and the answers of the user.",
+  "A comment can be right when it disagrees with the plan. Then name the plan line that it changes.",
+  "Give each thread with a judgement a group number. Threads with one cause share a group number. Start at 1.",
+  "Set group to null when judgement is null.",
+];
+
 // Plan replies.md R11: a reply run gets no subagents, so the caller passes agents {} and the CLI gets no Agent tool.
 export function replyAgent(p: Profile, c: RunFiles = {}): AgentSpec {
   return {
@@ -878,6 +888,7 @@ export function replyAgent(p: Profile, c: RunFiles = {}): AgentSpec {
       'When a newer message answers only a part of the user\'s question, set judgement to "unsettled" and resolve to false. In the reply, ask the open part again.',
       "A thread can hold several questions of the user, such as the general comment with the questions of a review. Set resolve to true only when newer messages answer each question. Else name each open question in the reply.",
       TASK_RULE,
+      ...(c.plan ? PLAN_REPLY_RULES : []),
       "Never put secrets, tokens, passwords, or credentials into a reply.",
       p.prompt,
       ...prContextRules(c),

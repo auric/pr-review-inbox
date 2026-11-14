@@ -382,6 +382,11 @@ export const replyDraft = z.object({
     .default("")
     .describe("For resolve true: the proof in one line, such as path:line at the head commit or the message that settles it. Else empty."),
   cites,
+  // docs/plans/review-v2/part-session.md section 2.14. The default keeps drafts stored before it valid.
+  group: lineNo
+    .nullable()
+    .default(null)
+    .describe("Threads with one cause share a number, starting at 1. null: the judgement is null, or the instructions ask for no groups."),
 });
 
 export const replyResult = z.object({
@@ -400,8 +405,9 @@ export const replyOrigins = ["review", "reply", "fix", "nofix", "session", "reso
 export type ReplyOrigin = (typeof replyOrigins)[number];
 // replyTo: the message that the reply answers. The post uses it as the parent.
 // judgement: absent in drafts stored before Release 3. Read it as null.
-// fix: a "Fixed in" reply. It posts only when the PR commits hold the commit (plan r3). replaced: the drafts that the commit
-// discarded. Undo brings them back.
+// fix: a "Fixed in" reply. It posts only when the PR commits hold the commit (plan r3). id: the fix_commit row, null for a task
+// commit (docs/plans/review-v2/ps6-ps7-plan.md section 1 item 4). replaced: the drafts that the commit discarded. Undo brings them back.
+// group: the group of the thread in a reply run of a task PR. Absent in older drafts: read it as null.
 // resolve, resolveEvidence: the proposal to resolve the thread. Absent in drafts stored before it existed.
 // resolveTick: the user's choice to resolve the thread after the post. Only a ticked draft resolves.
 // threadOpen: the thread was open when the app stored the draft. Absent in drafts stored before it existed.
@@ -415,11 +421,12 @@ export type ReplyOrigin = (typeof replyOrigins)[number];
 // touchedAt: the time (ms) of the last accept, edit, plain, reply-to-newest, or use-revision. Absent: no such action since it existed.
 // revisionOf: on a used revision, the ID of the user's draft that it revised (items.ts takeRevision).
 // cites: the other threads whose decision the reply relies on (spec.md section 2.9). Absent in older drafts: read it as [].
-export type ReplyPayload = Omit<ReplyDraft, "judgement" | "resolve" | "resolveEvidence" | "cites"> & {
+export type ReplyPayload = Omit<ReplyDraft, "judgement" | "resolve" | "resolveEvidence" | "cites" | "group"> & {
   cites?: number[];
   judgement?: Judgement | null;
+  group?: number | null;
   replyTo: number;
-  fix?: { id: number; commit: string; replaced?: number[] };
+  fix?: { id: number | null; commit: string; replaced?: number[] };
   resolve?: boolean;
   resolveEvidence?: string;
   resolveTick?: boolean;

@@ -168,6 +168,8 @@ export function echoReplies(stdin: string, extra: { notes?: unknown; cites?: unk
             evidenceStatus: "code",
           }),
       judgement: JUDGEMENTS[i % JUDGEMENTS.length],
+      // Per round of JUDGEMENTS: valid and partly share one group, invalid and question get one each, null gets none.
+      group: i % 5 === 4 ? null : 3 * Math.floor(i / 5) + ([1, 1, 2, 3][i % 5] as number),
     })),
     coverage: { read: ["src/cache/flush.ts"], skipped: [], unavailable: [], notChecked: [] },
   };

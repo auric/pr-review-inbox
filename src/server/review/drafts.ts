@@ -4,7 +4,9 @@
 // The reply drafts of review threads (docs/plans/thread-outcome.md): the current draft, writer priority, revisions, and supersede.
 import type { Database } from "bun:sqlite";
 import type { ReviewItemDto } from "../../shared/dto";
-import type { ReplyPayload } from "../../shared/review";
+import { isMe } from "../../shared/me";
+import type { ReplyOrigin, ReplyPayload } from "../../shared/review";
+import { newestLive, type TurnMsg } from "../../shared/turn";
 import { type ItemRow, type NewItem, RUN_COLS, toItemDto } from "./run-rows";
 
 // The current reply draft of each thread: the newest open draft, else the newest draft. A draft of an undone fix commit never
@@ -126,4 +128,84 @@ export function placeReplies(
     if (!revised.has(thread)) supersede.run({ thread, pr });
   }
   return out;
+}
+
+const WRITE = {
+  thread: `SELECT comment_id AS id, root_id AS rootId, author_slug AS authorSlug, author_login AS authorLogin, created_at AS createdAt,
+      tombstoned_at IS NOT NULL AS deleted, thread_resolved AS threadResolved FROM comment WHERE pr = $pr AND root_id = $root`,
+  // SUPERSEDE by ID, so the new draft can name the drafts that it replaced (payload fix.replaced). Posted drafts stay.
+  replaceable: `SELECT i.id FROM review_item i JOIN review_run r ON r.id = i.run
+    WHERE r.pr = $pr AND i.kind = 'reply' AND i.thread = $thread AND i.status = 'new' AND i.edited = 0 ORDER BY i.id`,
+  supersede: "UPDATE review_item SET status = 'discarded', revision = revision + 1 WHERE id = $id AND status = 'new'",
+  item: `INSERT INTO review_item (run, kind, payload_json, body, status, thread, edited)
+    VALUES ($run, 'reply', $payload, $body, 'new', $thread, 0)`,
+  revision: `INSERT INTO review_item (run, kind, payload_json, body, status, thread, edited)
+    VALUES ($run, 'reply', $payload, $body, 'discarded', $thread, 0)`,
+  // The run records each thread where it kept the user's draft. A second write adds no second line.
+  kept: `UPDATE review_run SET summary_json = json_insert(summary_json, '$.coverage.skipped[#]', $text)
+    WHERE id = $run AND json_valid(summary_json) AND NOT EXISTS (SELECT 1 FROM json_each(summary_json, '$.coverage.skipped') WHERE value = $text)`,
+};
+
+// One writer draft of one thread, such as "Fixed in X: <what>". run: the run that owns the draft. line: the text after the kept answer.
+// fix.id: the fix_commit row, null for a task commit. resolveEvidence: the proof of a resolve proposal, null for no proposal.
+export type ThreadDraft = {
+  pr: number;
+  run: number;
+  thread: number;
+  line: string;
+  reason: string;
+  origin: ReplyOrigin;
+  fix?: { id: number | null; commit: string };
+  resolveEvidence: string | null;
+};
+
+// docs/plans/thread-outcome.md. The caller holds the transaction. The user asked for this write, so a discarded draft does not block it.
+// A draft that the user declined the fix with stays, and the run records it. A draft that the user edited or accepted stays too, and
+// the new text waits as its revision. Else the new draft keeps an untouched answer of a reply run above the line and supersedes the
+// untouched open drafts. Only a thread that the user started gets the resolve tick by default. drafts: currentDrafts at the start.
+export function writeThreadDraft(db: Database, drafts: Map<number, ItemRow>, me: string | null, d: ThreadDraft): void {
+  const { pr, run, thread } = d;
+  const msgs = db.query(WRITE.thread).all({ pr, root: thread }) as TurnMsg[];
+  const last = newestLive(msgs);
+  if (!last) return;
+  const cur = drafts.get(thread);
+  const mine = cur && touched(cur) ? cur : null;
+  if (!mine && userDraft(cur, false)) {
+    db.query(WRITE.kept).run({ run, text: keptText(thread) });
+    return;
+  }
+  const was = cur?.status === "new" ? (JSON.parse(cur.payload_json) as ReplyPayload) : null;
+  const answer = mine
+    ? mine.body.trim()
+    : was && !was.fix && was.origin !== "nofix" && was.origin !== "resolve"
+      ? (cur?.body.trim() ?? "")
+      : "";
+  const replaced = mine ? [] : (db.query(WRITE.replaceable).all({ thread, pr }) as { id: number }[]).map((r) => r.id);
+  for (const r of replaced) db.query(WRITE.supersede).run({ id: r });
+  const root = msgs.find((m) => m.id === thread);
+  const body = answer ? `${answer}\n\n${d.line}` : d.line;
+  const resolve = d.resolveEvidence !== null;
+  const payload: ReplyPayload = {
+    thread,
+    action: "reply",
+    body,
+    reason: d.reason,
+    evidenceStatus: "code",
+    judgement: null,
+    replyTo: last.id,
+    ...(d.fix && { fix: { ...d.fix, ...(replaced.length > 0 && { replaced }) } }),
+    resolve,
+    resolveEvidence: d.resolveEvidence ?? "",
+    resolveTick: resolve && !!root && isMe({ slug: root.authorSlug, login: root.authorLogin }, me),
+    threadOpen: !msgs.some((m) => m.threadResolved),
+    origin: d.origin,
+    ...(mine && { revises: mine.id }),
+  };
+  const at = { run, payload: JSON.stringify(payload), body, thread };
+  db.query(DROP_REVISIONS).run({ thread, pr });
+  if (!mine) db.query(WRITE.item).run(at);
+  else {
+    db.query(WRITE.revision).run(at);
+    db.query(WRITE.kept).run({ run, text: revisedText(thread) });
+  }
 }
