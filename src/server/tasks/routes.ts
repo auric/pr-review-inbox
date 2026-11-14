@@ -140,10 +140,13 @@ export function createTaskRoutes(opts: {
     syncNow: () => void opts.sync?.syncNow().catch((e) => log(`The sync after a task PR failed: ${noUrl((e as Error).message)}`)),
   });
   review.onStop(() => prs.shutdown());
-  // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works.
+  // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works, except for a send
+  // to a session run of the part (TaskPartDto.instructRun, ps4-plan.md WP-7).
   const live = (t: TaskDto): TaskDto => {
     const working = loop.running(t.id);
-    return { ...t, working, canInstruct: t.canInstruct && !working, canSetup: t.canSetup && !working };
+    const db = working ? openDb() : null;
+    const parts = db ? t.parts.map((p) => ({ ...p, instructRun: loop.instructRun(db, t.id, p.id) })) : t.parts;
+    return { ...t, parts, working, canInstruct: t.canInstruct && !working, canSetup: t.canSetup && !working };
   };
   // spec.md section 6.18.4, Restart: the first open of a database resets the updates that a restart stopped.
   const recovered = new WeakSet<object>();

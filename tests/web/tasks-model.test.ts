@@ -21,11 +21,12 @@ import type {
   TaskRowDto,
   TaskStepDto,
 } from "../../src/shared/dto";
-import { stepDetail, taskProfileId } from "../../src/shared/task";
+import { PATCH_LOST, REASON_EXITS, type StepDetail, stepDetail, type TaskBlocked, taskProfileId } from "../../src/shared/task";
 import { phaseRow, type RowPhase, rowPhase } from "../../src/shared/task-status";
 import { LogTab } from "../../src/web/tasks/LogTab";
 import {
   ACCESS_TEXT,
+  type ActionKind,
   addPlanSentence,
   basePicks,
   branchApproval,
@@ -46,9 +47,11 @@ import {
   logRows,
   NO_MERGE,
   openQuestions,
+  overLimit,
   parentHint,
   partLabel,
   partRows,
+  patchText,
   pickedPrefix,
   plannedBranch,
   plannedTasks,
@@ -62,6 +65,7 @@ import {
   questionPart,
   questionSource,
   REPOS_SHOWN,
+  readyNotes,
   repoChoices,
   repoMatches,
   repoName,
@@ -71,6 +75,7 @@ import {
   rowStatus,
   type SendGroup,
   STEP_TEXT,
+  sendOf,
   sendResult,
   sessionNote,
   sessionRows,
@@ -142,6 +147,7 @@ const part = (o: Partial<TaskPartDto> = {}): TaskPartDto => ({
   gate: null,
   wait: null,
   blocked: null,
+  instructRun: null,
   ...o,
 });
 
@@ -318,7 +324,7 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     expect(v.status).toBe("A second Claude run reviews your change.");
   });
 
-  test("implementing, ready: Your change is ready, Open the PR, and the small points in More", () => {
+  test("implementing, ready: Your change is ready with its facts, Open the PR, Fix these too, and Start this part again", () => {
     const v = view(
       building({
         parts: [part({ state: "self_reviewed" })],
@@ -326,23 +332,32 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
       }),
     );
     expect(shape(v)).toEqual({
-      status: "Your change is ready and checked by Claude.",
+      status: "Your change is ready: 80 lines.",
       primary: "Open the PR",
-      more: ["Show the diff", "Fix the small points too"],
+      more: ["Show the diff", "Fix these too", "Start this part again"],
       screen: "ready",
     });
   });
 
   test("spec.md section 6.7: Run setup again stands before Stop for a part with a worktree, and never while a step runs", () => {
+    // loop.ts setupAgainOf: a reason of the task refuses it, except a red setup of this part.
     const red = building({
-      blocked: { kind: "red", step: 4, text: "Needs you: the tests of part 1 stay red after 3 tries." },
+      blocked: { kind: "red", cause: "setup", step: 4, text: "Needs you: the setup of part 1 failed." },
+      steps: [step({ id: 4, kind: "check", part: 7, item: "setup", state: "failed" })],
       canSetup: true,
     });
     const at = (t: TaskDto) => withSetup(t, t.parts[0] ?? null, view(t)).more.map((a) => a.label);
-    expect(at(red)).toEqual(["Resume", "Run setup again", "Stop"]);
+    expect(at(red)).toEqual(["See why", "Run setup again", "Stop"]);
+    const checks = { ...red, blocked: { kind: "red" as const, cause: "checks" as const, step: 5, text: "Needs you: red." } };
+    expect(at({ ...checks, steps: [step({ id: 5, kind: "check", part: 7, item: "checks", state: "failed" })] })).not.toContain(
+      "Run setup again",
+    );
+    expect(at({ ...red, steps: [step({ id: 4, kind: "check", part: 8, item: "setup", state: "failed" })] })).not.toContain(
+      "Run setup again",
+    );
     const ready = building({ parts: [part({ state: "self_reviewed" })], canSetup: true });
-    expect(at(ready)).toEqual(["Show the diff", "Run setup again"]);
-    expect(at({ ...ready, canSetup: false })).toEqual(["Show the diff"]);
+    expect(at(ready)).toEqual(["Show the diff", "Start this part again", "Run setup again"]);
+    expect(at({ ...ready, canSetup: false })).toEqual(["Show the diff", "Start this part again"]);
     expect(at({ ...ready, parts: [part({ state: "planned" })] })).not.toContain("Run setup again");
     const running = building({ steps: [step({ id: 9, kind: "tests", part: 7, state: "running", endedAt: null })], canSetup: true });
     expect(at(running)).toEqual(["Hold", "Stop"]);
@@ -358,25 +373,33 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     const text = 'Needs you: the setup command "venv" of part 1 reached its time limit of 10 min.';
     const late = { name: "venv", argv: ["python"], exit: null, ms: 600_000, tail: "", timedOut: true, timeoutSec: 600 };
     const setupStep = (timedOut: boolean) =>
-      step({ id: 4, kind: "check", item: "setup", state: "failed", detail: stepDetail.parse({ commands: [{ ...late, timedOut }] }) });
-    const t = building({ blocked: { kind: "red", step: 4, text }, steps: [setupStep(true)], canSetup: true });
+      step({
+        id: 4,
+        kind: "check",
+        part: 7,
+        item: "setup",
+        state: "failed",
+        detail: stepDetail.parse({ commands: [{ ...late, timedOut }] }),
+      });
+    const t = building({ blocked: { kind: "red", cause: "setup_time", step: 4, text }, steps: [setupStep(true)], canSetup: true });
     expect(shape(view(t))).toEqual({
       status: text,
       primary: "Change the time limit",
-      more: ["See why", "Resume", "Stop"],
+      more: ["See why", "Continue", "Stop"],
       screen: "build",
     });
     expect(timedOutSetup(t)).toMatchObject({ name: "venv", timeoutSec: 600 });
-    expect(withSetup(t, t.parts[0] ?? null, view(t)).more.map((a) => a.label)).toEqual(["See why", "Resume", "Run setup again", "Stop"]);
-    // A failed setup without a time limit, and a check that is no setup, keep See why.
-    expect(view({ ...t, steps: [setupStep(false)] }).primary?.label).toBe("See why");
-    expect(view({ ...t, steps: [{ ...setupStep(true), item: "T1.1" }] }).primary?.label).toBe("See why");
+    expect(withSetup(t, t.parts[0] ?? null, view(t)).more.map((a) => a.label)).toEqual(["See why", "Continue", "Run setup again", "Stop"]);
+    // A failed setup without a time limit, and a check that is no setup, take Continue.
+    expect(view({ ...t, steps: [setupStep(false)] }).primary?.label).toBe("Continue");
+    expect(view({ ...t, steps: [{ ...setupStep(true), item: "T1.1" }] }).primary?.label).toBe("Continue");
   });
 
-  test("blocked red: the server sentence, See why, Resume and Stop", () => {
+  test("blocked red: the server sentence, Continue, then See why and Stop", () => {
     const text = "Needs you: the tests of part 1 stay red after 3 tries.";
     const v = view(building({ blocked: { kind: "red", step: 4, text } }));
-    expect(shape(v)).toEqual({ status: text, primary: "See why", more: ["Resume", "Stop"], screen: "build" });
+    expect(shape(v)).toEqual({ status: text, primary: "Continue", more: ["See why", "Stop"], screen: "build" });
+    expect(v.primary?.kind).toBe("resume");
   });
 
   test("spec.md section 6.21.4: blocked allow: the server sentence, Continue, and Stop; no Resume and no Tell box", () => {
@@ -390,9 +413,10 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     expect(view({ ...t, allowAsk: null }).primary).toBeNull();
   });
 
-  test("blocked blocker: See why", () => {
+  test("AC-B375: blocked blocker: Continue, then Go on without these fixes, See why, and Stop", () => {
     const v = view(building({ blocked: { kind: "blocker", step: 4, text: "Needs you: Claude's review of part 1 still finds 1 point." } }));
-    expect(v.primary?.label).toBe("See why");
+    expect(shape(v)).toMatchObject({ primary: "Continue", more: ["Go on without these fixes", "See why", "Stop"] });
+    expect([v.primary?.kind, v.more[0]?.kind]).toEqual(["resume", "without"]);
   });
 
   test("blocked question with a question row: Answer the question on the questions screen", () => {
@@ -421,10 +445,12 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     expect(shape(v)).toEqual({ status: text, primary: "Continue", more: ["See why", "Stop"], screen: "build" });
   });
 
-  test("blocked size: Keep one PR, then Change the limit in More", () => {
+  test("ps5-plan.md section 4.6: a legacy size reason takes the plain Continue row; size/large_repos has Stop only", () => {
     const text = "Needs you: this PR would have 520 changed lines, over your 400 limit.";
     const v = view(building({ blocked: { kind: "size", step: 6, text } }));
-    expect(shape(v)).toEqual({ status: text, primary: "Keep one PR", more: ["Change the limit", "Stop"], screen: "build" });
+    expect(shape(v)).toEqual({ status: text, primary: "Continue", more: ["See why", "Stop"], screen: "build" });
+    const large = view(building({ blocked: { kind: "size", cause: "large_repos", step: null, text: "Needs you: x." } }));
+    expect([large.primary?.kind, large.more]).toEqual(["stop", []]);
   });
 
   test("blocked spec_change: Review the change, Reject in More", () => {
@@ -437,24 +463,24 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     });
   });
 
-  test("blocked budget: Continue with 60 more minutes", () => {
+  test("blocked budget, a legacy kind: Continue and Stop", () => {
     const v = view(
       building({ blocked: { kind: "budget", step: null, text: "Needs you: part 1 used its 120 min. Continue with 60 more min?" } }),
     );
-    expect(v.primary?.label).toBe("Continue with 60 more minutes");
+    expect(shape(v)).toMatchObject({ primary: "Continue", more: ["Stop"] });
   });
 
-  test("blocked denied_path: the sentence with the paths, Resume", () => {
+  test("blocked denied_path: the sentence with the paths, Continue, See why, and Stop", () => {
     const text = "Needs you: the step changed .claude/settings.json, which the app does not commit.";
     const v = view(building({ blocked: { kind: "denied_path", step: 6, text } }));
-    expect(shape(v)).toEqual({ status: text, primary: "Resume", more: ["Stop"], screen: "build" });
+    expect(shape(v)).toEqual({ status: text, primary: "Continue", more: ["See why", "Stop"], screen: "build" });
   });
 
-  test("blocked error: one sentence with the cause, Resume", () => {
+  test("blocked error: one sentence with the cause, Continue", () => {
     const v = view(
       building({ blocked: { kind: "error", step: null, text: "Needs you: set user.name and user.email in your git config." } }),
     );
-    expect(v.primary?.label).toBe("Resume");
+    expect(shape(v)).toMatchObject({ primary: "Continue", more: ["Stop"] });
   });
 
   test("blocked slot: the wait, no primary, Stop", () => {
@@ -466,7 +492,7 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     expect(v.needsYou).toBe(false);
   });
 
-  test("stopped: Stopped at with the part step, Resume, Close the task", () => {
+  test("stopped in the build: the work is kept, Continue, Start this part again while unpushed, and Close the task", () => {
     const v = view(
       building({
         state: "stopped",
@@ -476,12 +502,12 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
       }),
     );
     expect(shape(v)).toEqual({
-      status: "Stopped at: task T1.1, running the tests.",
-      primary: "Resume",
-      more: ["Close the task"],
+      status: "Stopped. The work is kept.",
+      primary: "Continue",
+      more: ["Start this part again", "Close the task"],
       screen: "build",
     });
-    expect(v.detail).toBe("The run was cancelled.");
+    expect([v.primary?.kind, v.more[0]?.part, v.detail]).toEqual(["resume", 7, "The run was cancelled."]);
   });
 
   test("ready: waiting for the named reviewers, Go to the PR, Close the task", () => {
@@ -570,6 +596,18 @@ describe("rules over every row (spec.md section 7.1)", () => {
         ["stuck", "stall"],
       ] as const
     ).map(([kind, cause]) => building({ blocked: { kind, cause, step: 4, text: `Needs you: ${kind}.` } })),
+    // ps5-plan.md section 3: the rows in ready with Leave it, the push row, a build stop, and the large size reason.
+    ...(["red", "blocker", "denied_path", "question", "update", "preflight", "error"] as const).map((kind) =>
+      building({
+        state: "ready",
+        parts: [part({ ...PR_PART })],
+        canUndoUpdate: kind === "red",
+        blocked: { kind, step: 4, text: `Needs you: ${kind}.` },
+      }),
+    ),
+    building({ state: "ready", parts: [part({ ...PR_PART, head: "d".repeat(40) })] }),
+    building({ state: "stopped", stoppedFrom: "implementing", parts: [part({ id: 6, state: "self_reviewed" }), part({ ord: 2 })] }),
+    building({ blocked: { kind: "size", cause: "large_repos", step: null, text: "Needs you: size." } }),
   ];
 
   test("AC-UX1: at most one primary action, and no primary action also in More", () => {
@@ -597,6 +635,8 @@ const instruct = (o: Partial<TaskStepDto> & { result?: "done" | "no_change" | "s
     kind: "instruct",
     part: 7,
     item: "I1",
+    // A send that ran has its run. A message that waits for its run has none (ps4-plan.md WP-7).
+    run: 300,
     ...o,
     detail: stepDetail.parse({
       instruct: { text: "Rename the flag to useNewParser.", part: 7, blockedBefore: null, result: o.result ?? null },
@@ -671,7 +711,7 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     expect(shape(view(rows.baseMoved))).toEqual({
       status: "release/2.1 has 5 new commits since the branch point.",
       primary: "Update from release/2.1",
-      more: ["Open the PR as is", "Show the diff"],
+      more: ["Open the PR as is", "Show the diff", "Start this part again"],
       screen: "ready",
     });
   });
@@ -698,7 +738,7 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     expect(shape(view(rows.asks))).toEqual({
       status: "Claude says the branch needs the newest release/2.1: the new parser API is only on release/2.1.",
       primary: "Update from release/2.1",
-      more: ["Open the PR as is", "Show the diff"],
+      more: ["Open the PR as is", "Show the diff", "Start this part again"],
       screen: "ready",
     });
   });
@@ -723,31 +763,36 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     expect(view({ ...rows.updating, bases: moved(), steps: [early] }).status).toBe("Updating your change from release/2.1.");
   });
 
-  test("update red: See why, then Undo the update and Stop", () => {
+  test("ps5-plan.md D8: update red: Continue, then Undo the update, See why, Stop, and Leave it in ready", () => {
     expect(shape(view(rows.updateRed))).toEqual({
       status: "Needs you: the tests fail after the update from release/2.1.",
-      primary: "See why",
-      more: ["Undo the update", "Stop"],
+      primary: "Continue",
+      more: ["Undo the update", "See why", "Stop", "Leave it"],
       screen: "build",
     });
   });
 
-  test("spec.md section 6.18.2: a reason of a send on a built part has Dismiss as its way back", () => {
+  // part-session.md section 9.4 rule 9: "Leave it" replaces Dismiss. loop.ts leaveReason refuses only in implementing and for a reason
+  // with its own form: a plan change, an allow request, and an open question.
+  test("ps5-plan.md section 3: a reason in ready takes Continue, and Leave it stands last in More", () => {
     const of = (kind: NonNullable<TaskDto["blocked"]>["kind"], step: number | null, o: Partial<TaskDto> = {}) =>
       shape(view({ ...rows.open, blocked: { kind, step, text: `Needs you: ${kind}.` }, ...o }));
-    expect(of("red", 42)).toMatchObject({ primary: "See why", more: ["Dismiss", "Stop"] });
-    expect(of("blocker", 43)).toMatchObject({ primary: "See why", more: ["Dismiss", "Stop"] });
-    expect(of("denied_path", null)).toMatchObject({ primary: "Dismiss", more: ["Stop"] });
-    expect(of("size", 44)).toMatchObject({ primary: "Dismiss", more: ["Stop"] });
-    expect(of("question", 45)).toMatchObject({ primary: "Dismiss", more: ["See why", "Stop"] });
-    // An open question, a plan change, an allow request, and red checks after an update have their own way back.
+    expect(of("red", 42)).toMatchObject({ primary: "Continue", more: ["See why", "Stop", "Leave it"] });
+    expect(of("blocker", 43)).toMatchObject({ primary: "Continue", more: ["Go on without these fixes", "See why", "Stop", "Leave it"] });
+    expect(of("denied_path", null)).toMatchObject({ primary: "Continue", more: ["Stop", "Leave it"] });
+    expect(of("size", 44)).toMatchObject({ primary: "Continue", more: ["See why", "Stop", "Leave it"] });
+    expect(of("question", 45)).toMatchObject({ primary: "Continue", more: ["See why", "Stop", "Leave it"] });
+    expect(of("preflight", null)).toMatchObject({ primary: "Try again", more: ["Stop", "Leave it"] });
     const asked = { questions: [question({ source: "loop", step: 45 })] };
     expect(of("question", 45, asked)).toMatchObject({ primary: "Answer the question", more: ["Stop"] });
-    expect(of("spec_change", 46).more).not.toContain("Dismiss");
-    expect(of("red", 42, { canUndoUpdate: true }).more).toEqual(["Undo the update", "Stop"]);
-    // The same reason during the build keeps Resume.
+    expect(of("spec_change", 46).more).not.toContain("Leave it");
+    const allowAsk = { step: 47, requests: [{ pattern: "make", command: "make", reason: "It builds." }], warning: false };
+    expect(of("allow", 47, { allowAsk }).more).toEqual(["Stop"]);
+    const leave = view({ ...rows.open, blocked: { kind: "red", step: 42, text: "Needs you: red." } }).more.at(-1);
+    expect(leave).toEqual({ kind: "leave", label: "Leave it" });
+    // The same reason during the build has no Leave it: the server takes it in ready only.
     expect(shape(view(building({ blocked: { kind: "denied_path", step: null, text: "Needs you: x." } })))).toMatchObject({
-      primary: "Resume",
+      primary: "Continue",
       more: ["Stop"],
     });
   });
@@ -756,7 +801,7 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     expect(shape(view(rows.updateStopped))).toEqual({
       status: "The update from release/2.1 stopped: conflict markers remain in src/a.ts. The branch is as it was.",
       primary: "Try again",
-      more: ["Go to the PR"],
+      more: ["Go to the PR", "Leave it"],
       screen: "pr",
     });
   });
@@ -775,13 +820,15 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     expect(view({ ...rows.ready, canInstruct: false, steps: [checks, instruct({})] }).more.map((a) => a.label)).toEqual(["Stop"]);
   });
 
-  test("implementing, not pushed: the sentence only, because 'Push to <branch>' has no route yet", () => {
-    expect(shape(view(rows.notPushed))).toEqual({
+  test("ps5-plan.md section 3: not pushed: Push to <branch> sends POST /parts/:part/push, and Show the diff stays in More", () => {
+    const v = view(rows.notPushed);
+    expect(shape(v)).toEqual({
       status: "Your change has new commits that are not on the server yet.",
-      primary: null,
+      primary: "Push to feature/ABC-12-trim-spaces-in-user-names",
       more: ["Show the diff", "Go to the PR", "Close the task"],
       screen: "pr",
     });
+    expect([v.primary?.kind, v.needsYou, sendOf("push", 7)]).toEqual(["push", true, { kind: "push", part: 7 }]);
   });
 
   test("several repositories: one label for two bases, and one line per repository, deepest first", () => {
@@ -824,11 +871,11 @@ describe("the rows of Update from the base branch and Tell Claude (spec.md secti
     expect(same.status).toBe("release/2.1 has new commits in 2 repositories since the branch point.");
   });
 
-  test("a reason after the PR opened: no Resume, Continue, or line limit, because the server takes them while building only; Dismiss instead", () => {
+  test("AC-B344: a reason after the PR opened takes Continue, because the server takes it in ready too; Leave it is the way back", () => {
     const red = view({ ...rows.open, blocked: { kind: "red", step: 4, text: "Needs you: the tests of part 1 stay red after 3 tries." } });
-    expect(shape(red)).toMatchObject({ primary: "See why", more: ["Dismiss", "Stop"] });
+    expect(shape(red)).toMatchObject({ primary: "Continue", more: ["See why", "Stop", "Leave it"] });
     const denied = view({ ...rows.open, blocked: { kind: "denied_path", step: 4, text: "Needs you: the step changed .env." } });
-    expect(shape(denied)).toMatchObject({ primary: "Dismiss", more: ["Stop"] });
+    expect(shape(denied)).toMatchObject({ primary: "Continue", more: ["See why", "Stop", "Leave it"] });
     expect(denied.needsYou).toBe(true);
   });
 
@@ -884,6 +931,9 @@ describe("AC-B52: the Tell Claude box shows in the states of spec.md section 6.1
     // A send from a reason of the build: the part is not built, and the send runs.
     const fromBuild = building({ parts: [part()], steps: [instruct({ state: "running", endedAt: null })] });
     expect(tellBox(fromBuild)).toBe("busy");
+    // ps5-plan.md section 4.10: the first build has the box too. The checks keep it busy.
+    const checks = building({ steps: [step({ id: 9, kind: "check", part: 7, item: "T1.1", state: "running", endedAt: null })] });
+    expect(tellBox(checks)).toBe("busy");
   });
 
   test("no box before a worktree exists, for the other reasons, in a stopped, failed, or done task, and in the first build", () => {
@@ -903,13 +953,9 @@ describe("AC-B52: the Tell Claude box shows in the states of spec.md section 6.1
       failed: building({ state: "failed", parts: [part({ state: "self_reviewed" })] }),
       done: building({ state: "done", parts: [part({ ...PR_PART, state: "merged" })] }),
       "ready, every PR merged": building({ state: "ready", parts: [part({ ...PR_PART, state: "merged", prState: "MERGED" })] }),
-      "implementing, running (the first build)": building({
-        steps: [step({ id: 9, kind: "tests", part: 7, item: "P1", state: "running", endedAt: null })],
-      }),
-      "implementing, checks (the first build)": building({
-        steps: [step({ id: 9, kind: "check", part: 7, item: "T1.1", state: "running", endedAt: null })],
-      }),
       "implementing, no part yet": building({ parts: [] }),
+      // A held part goes on by Continue only, and the server refuses a send there.
+      "implementing, on hold": building({ parts: [part({ blocked: HELD })], canInstruct: true }),
     };
     for (const [name, t] of Object.entries(without)) expect([name, tellBox(t)]).toEqual([name, "none"]);
   });
@@ -1347,9 +1393,9 @@ const READY_OPEN = { state: "ready" as const, parts: [part(PR_PART)] };
 describe("the rows of several repositories (spec.md sections 6.12 and 6.16.8)", () => {
   test("implementing, ready: the repository count, and Open 2 PRs; the moved base keeps Open the PR as is", () => {
     expect(shape(view(multi([LIB, MAIN])))).toEqual({
-      status: "Your change in 2 repositories is ready and checked by Claude.",
+      status: "Your change in 2 repositories is ready: 80 lines.",
       primary: "Open 2 PRs",
-      more: ["Show the diff"],
+      more: ["Show the diff", "Start this part again"],
       screen: "ready",
     });
     const moved2 = view(
@@ -1358,7 +1404,7 @@ describe("the rows of several repositories (spec.md sections 6.12 and 6.16.8)", 
     expect(shape(moved2)).toMatchObject({
       status: "develop has 3 new commits since the branch point.",
       primary: "Update from develop",
-      more: ["Open the PR as is", "Show the diff"],
+      more: ["Open the PR as is", "Show the diff", "Start this part again"],
     });
     // One changed repository keeps the one-PR words.
     expect(view(multi([MAIN])).primary?.label).toBe("Open the PR");
@@ -1796,8 +1842,9 @@ describe("the focused sub-task and its one primary button (spec.md sections 6.20
   test("a ready part opens its PR under its own name; the More menu keeps the tracker actions and no task Close", () => {
     const ready = p13({ state: "self_reviewed" });
     const v = subtaskView(subTask([p12(), ready]), ready, SUB_OPTS);
-    expect([v.status, v.primary]).toEqual(["ABC-13 (2 of 2) is ready and checked by Claude.", { kind: "open-pr", label: "Open the PR" }]);
-    expect(v.more.map((a) => a.label)).toEqual(["Show the diff", "Move in Tracker…", "Read Tracker again"]);
+    expect([v.status, v.primary]).toEqual(["ABC-13 (2 of 2) is ready: 80 lines.", { kind: "open-pr", label: "Open the PR" }]);
+    expect(v.more.map((a) => a.label)).toEqual(["Show the diff", "Start this part again", "Move in Tracker…", "Read Tracker again"]);
+    expect(v.more[1]).toEqual({ kind: "restart", label: "Start this part again", part: 13 });
   });
 
   test("a part in review while another part builds: its own sentence and Go to the PR, not the build of the other part", () => {
@@ -2122,7 +2169,7 @@ describe("ps5-plan.md section 3: the working rows", () => {
     expect([v.status, v.primary?.kind, v.running]).toEqual(["ABC-13 (2 of 3): In review by Anna.", "go-pr", false]);
     const ready = p13({ state: "self_reviewed" });
     const r = subtaskView({ ...t, parts: [p12(), ready, other] }, ready, SUB_OPTS);
-    expect([r.status, r.primary?.kind]).toEqual(["ABC-13 (2 of 3) is ready and checked by Claude.", "open-pr"]);
+    expect([r.status, r.primary?.kind]).toEqual(["ABC-13 (2 of 3) is ready: 80 lines.", "open-pr"]);
   });
 
   test("sub-tasks: a held part row says that its work is kept", () => {
@@ -2194,14 +2241,37 @@ describe("ps5-plan.md section 4.4: push-back questions", () => {
 
 // ps5-plan.md section 4.10: the hint under the Tell box.
 describe("ps5-plan.md section 4.10: the Tell box hint", () => {
-  const hint = (busy: boolean) =>
-    renderToStaticMarkup(createElement(TellClaude, { runner: R, busy, restore: null, onSend: async () => {} }));
+  const html = (box: "open" | "live" | "queued" | "busy", pending = false) =>
+    renderToStaticMarkup(
+      createElement(TellClaude, { runner: R, box, pending, restore: { id: 1, text: "Use works." }, onSend: async () => {} }),
+    );
+  const sendable = (h: string) => !/<button type="submit"[^>]* disabled=""/.test(h);
 
   test("open: the message goes into a run of this part; busy: the send waits for the end of the run", () => {
-    expect(hint(false)).toContain(
+    expect(html("open")).toContain(
       "Claude gets your message in a run of this part. The app then runs the checks and its own review. Pushes and other git actions stay buttons.",
     );
-    expect(hint(true)).toContain("Claude or the checks are working. You can send when this run ends.");
+    expect(html("busy")).toContain("Claude or the checks are working. You can send when this run ends.");
+    expect([sendable(html("open")), sendable(html("busy")), sendable(html("open", true))]).toEqual([true, false, false]);
+  });
+
+  // part-session.md section 2.9 and ps4-plan.md WP-7: a send during a session run of the part goes to it now, or waits for its end.
+  test("live: Claude reads this now; queued: Claude reads this when the current run ends; both can send", () => {
+    expect(html("live")).toContain("Claude reads this now.");
+    expect(html("queued")).toContain("Claude reads this when the current run ends.");
+    expect([sendable(html("live")), sendable(html("queued"))]).toEqual([true, true]);
+  });
+
+  test("tellBox takes live or queued from the part, and the first build has the box", () => {
+    const run = step({ id: 9, kind: "implement", part: 7, item: "build", state: "running", run: 4, endedAt: null });
+    const at = (instructRun: TaskPartDto["instructRun"], canInstruct: boolean) =>
+      tellBox(building({ parts: [part({ instructRun })], steps: [run], working: true, canInstruct }));
+    expect([at("live", true), at("queued", true), at(null, false)]).toEqual(["live", "queued", "busy"]);
+    // A built part with no run of its own: a send starts a run.
+    expect(tellBox(building({ parts: [part({ state: "self_reviewed" })], canInstruct: true }))).toBe("open");
+    // A reason that the server refuses for a send keeps the box away, also with a live run.
+    const usage = { kind: "usage" as const, step: 9, text: "x" };
+    expect(tellBox(building({ parts: [part({ instructRun: "live" })], blocked: usage, canInstruct: true }))).toBe("none");
   });
 });
 
@@ -2336,7 +2406,7 @@ describe("ps5-plan.md section 4.2: Hold, On hold, Skip, and Start again", () => 
     expect(acts(view(building({ state: "ready", parts: [part({ state: "self_reviewed" })], steps: [open("fix", "checks")] })))).toEqual(
       stop,
     );
-    expect(view(building({ working: true })).more.map((a) => a.kind)).toEqual(["pause", "stop"]);
+    expect(view(building({ working: true })).more.map((a) => a.kind)).toEqual(["stop"]);
   });
 
   test("AC-B369: sub-tasks: Hold acts on the focused part, also when another part holds the first open row", () => {
@@ -2425,10 +2495,10 @@ describe("ps5-plan.md section 4.2: Hold, On hold, Skip, and Start again", () => 
       more: ["Skip this part", "Start this part again", "Close the task"],
       screen: "build",
     });
-    // A focus on a part that is not held keeps the stopped row, because a plain Resume leaves the hold in place.
+    // A focus on a part that is not held keeps the stopped row, because a plain Continue leaves the hold in place.
     const free = p14({ state: "implementing", head: "d".repeat(40) });
     const both = subTask([p, free], { state: "stopped", stoppedFrom: "implementing" });
-    expect(subtaskView(both, free, SUB_OPTS).primary).toEqual({ kind: "resume", label: "Resume" });
+    expect(subtaskView(both, free, SUB_OPTS).primary).toEqual({ kind: "resume", label: "Continue" });
     expect(subtaskView(both, p, SUB_OPTS).primary).toEqual({ kind: "continue-part", label: "Continue", part: 13 });
   });
 
@@ -2458,7 +2528,9 @@ describe("ps5-plan.md section 4.2: Hold, On hold, Skip, and Start again", () => 
       expect(more.slice(i + 1).every((a) => a.kind === "see-why" || a.kind === "stop")).toBe(true);
       expect(at({ kind, cause }, { parts: [part({ pushed: "a".repeat(40) })] }).more.some((a) => a.kind === "restart")).toBe(false);
     }
-    expect(at({ kind: "unfinished" }).more.map((a) => a.kind)).toEqual(["restart", "stop"]);
+    // ps5-plan.md section 3: See why shows when the reason names a step.
+    expect(at({ kind: "unfinished" }).more.map((a) => a.kind)).toEqual(["restart", "see-why", "stop"]);
+    expect(at({ kind: "unfinished", step: null }).more.map((a) => a.kind)).toEqual(["restart", "stop"]);
     expect(at({ kind: "question", cause: "no_change" }).more.map((a) => a.kind)).toEqual(["restart", "see-why", "stop"]);
     // Other reasons and an old reason with no cause get no Start again, and neither does ready.
     const others = [
@@ -2568,12 +2640,12 @@ describe("Start again leftovers of ps4-plan.md WP-4", () => {
 
   test("the Plan tab counts no commit of a part before its newest restart mark", () => {
     const steps = [commit(9, 7, "T1.2"), commit(8, 7, "restart"), commit(7, 8, "T2.1"), commit(6, 7, "T1.1"), commit(5, 7, "restart")];
-    expect(plannedTasks({ docs, steps }).map((x) => [x.id, x.done])).toEqual([
+    expect(plannedTasks({ docs, steps, subtasks: null }).map((x) => [x.id, x.done])).toEqual([
       ["T1.1", false],
       ["T1.2", true],
       ["T2.1", true],
     ]);
-    expect(plannedTasks({ docs, steps: steps.filter((s) => s.item !== "restart") }).every((x) => x.done)).toBe(true);
+    expect(plannedTasks({ docs, steps: steps.filter((s) => s.item !== "restart"), subtasks: null }).every((x) => x.done)).toBe(true);
   });
 
   test("a restart mark is a row of its own in the Log tab, with no Show the diff", () => {
@@ -2582,5 +2654,324 @@ describe("Start again leftovers of ps4-plan.md WP-4", () => {
     expect(logRows(steps).map((r) => ("send" in r ? `send ${r.steps.length}` : r.step.item))).toEqual(["restart", "send 1"]);
     const html = renderToStaticMarkup(createElement(LogTab, { t: building({ steps }), runner: R, onRunLog: () => {}, onDiff: () => {} }));
     expect(html.match(/Show the diff/g)?.length).toBe(1);
+  });
+});
+
+// ---------- PS5-C2b: the rest of the Task view (ps5-plan.md sections 3 and 4) ----------
+
+describe("ps5-plan.md section 3 and AC-B367: the primary of each REASON_EXITS key", () => {
+  // The web action of each exit route. The reason update keeps "Try again" on the update route, which Continue also runs (part-session.md
+  // section 9.4, "Continue does").
+  const KINDS: Record<string, (ActionKind | null)[]> = {
+    "POST /tasks/:id/resume": ["resume", "continue-part"],
+    "POST /tasks/:id/answers": ["answer"],
+    "PUT /repos/:project/:repo/task-settings": ["time-limit"],
+    "POST /tasks/:id/spec-change/:step": ["review-change"],
+    "POST /tasks/:id/allow": ["allow"],
+    "POST /tasks/:id/parts/:part/wait-merge": ["wait-merge"],
+    "POST /tasks/:id/stop": ["stop"],
+  };
+  const late = { name: "venv", argv: ["python"], exit: null, ms: 1, tail: "", timedOut: true, timeoutSec: 600 };
+  const seeded = (key: string): TaskView => {
+    const [kind, cause] = key.split("/") as [TaskBlocked["kind"], string | undefined];
+    const s4 = step({ id: 4, kind: "implement", part: 7 });
+    if (kind === "held") return view(building({ parts: [part({ blocked: HELD })] }));
+    if (kind === "usage")
+      return view(building({ blocked: { kind, step: 4, text: "x", resumeAt: NOW + MIN, armed: cause === "armed" }, steps: [s4] }));
+    const b = { kind, ...(cause && { cause }), step: 4, text: `Needs you: ${key}.` } as TaskBlocked;
+    if (key === "error/lower_repo") {
+      const p = p13({ state: "planned", head: null });
+      return subtaskView(subTask([p12(), p], { blocked: { ...b, step: null, part: 13 } }), p, SUB_OPTS);
+    }
+    const o: Partial<TaskDto> = { blocked: b, steps: [s4] };
+    if (key === "question/claude") o.questions = [question({ source: "loop", step: 4 })];
+    if (key === "red/setup_time")
+      o.steps = [step({ id: 4, kind: "check", part: 7, item: "setup", state: "failed", detail: stepDetail.parse({ commands: [late] }) })];
+    if (kind === "allow") o.allowAsk = { step: 4, requests: [{ pattern: "make", command: "make", reason: "It builds." }], warning: false };
+    if (kind === "slot") o.steps = [{ ...s4, state: "waiting", endedAt: null }];
+    return view(building(o));
+  };
+
+  test("each key gives a primary that maps to its exit route, or no primary for an app exit", () => {
+    const got = Object.entries(REASON_EXITS).map(([key, e]) => {
+      const want: (ActionKind | null)[] = "app" in e.primary ? [null] : key === "update" ? ["update"] : (KINDS[e.primary.route] ?? []);
+      return [key, want.includes(seeded(key).primary?.kind ?? null)];
+    });
+    expect(got).toEqual(Object.keys(REASON_EXITS).map((key) => [key, true]));
+  });
+
+  test("AC-B366: each seeded row has at most one primary, no primary also in More, and Stop except for update", () => {
+    for (const key of Object.keys(REASON_EXITS)) {
+      const v = seeded(key);
+      expect([key, v.more.some((a) => a.kind === v.primary?.kind)]).toEqual([key, false]);
+      // ps5-plan.md D8: Stop stays for every reason but update.
+      const stop = v.primary?.kind === "stop" || v.more.some((a) => a.kind === "stop");
+      expect([key, stop]).toEqual([key, key !== "update"]);
+    }
+  });
+
+  test("the Needs-you row: Continue, then Start this part again while unpushed, See why when the reason names a step, and Stop", () => {
+    const at = (key: string) => seeded(key).more.map((a) => a.kind);
+    expect(at("red/checks")).toEqual(["restart", "see-why", "stop"]);
+    expect(at("stuck/stall")).toEqual(["restart", "see-why", "stop"]);
+    expect(at("denied_path/path")).toEqual(["see-why", "stop"]);
+    expect(at("blocker")).toEqual(["without", "see-why", "stop"]);
+    expect(at("budget/time")).toEqual(["see-why", "stop"]);
+    expect(seeded("unfinished").primary).toEqual({ kind: "resume", label: "Continue" });
+  });
+});
+
+describe("ps5-plan.md section 4.2: the request of each action", () => {
+  test("the actions that send at once map to their route and option; the confirms and forms send nothing", () => {
+    expect(sendOf("resume", 7)).toEqual({ kind: "resume" });
+    // AC-B375 and section 3: "Go on without these fixes" and "Leave it" are resume options.
+    expect(sendOf("without", 7)).toEqual({ kind: "resume", option: "without" });
+    expect(sendOf("leave", 7)).toEqual({ kind: "resume", option: "leave" });
+    expect(sendOf("cancel-resume", 7)).toEqual({ kind: "resume", option: "disarm" });
+    expect(sendOf("continue-part", 7)).toEqual({ kind: "resume", part: 7 });
+    // AC-B376: "Run setup again" is the resume option setup with the part, not the old /parts/:part/setup route.
+    expect(sendOf("setup", 7)).toEqual({ kind: "resume", option: "setup", part: 7 });
+    expect(sendOf("hold", 7)).toEqual({ kind: "hold", part: 7 });
+    expect(sendOf("push", 7)).toEqual({ kind: "push", part: 7 });
+    expect(sendOf("stop", 7)).toEqual({ kind: "stop" });
+    expect(sendOf("close", null)).toEqual({ kind: "close" });
+    for (const k of ["skip", "restart", "open-pr", "change-limit", "see-why"] as const) expect([k, sendOf(k, 7)]).toEqual([k, null]);
+    for (const k of ["setup", "hold", "push", "continue-part"] as const) expect([k, sendOf(k, null)]).toEqual([k, null]);
+  });
+});
+
+describe("ps5-plan.md section 3 (AC-B368, AC-B380): ticks and tries", () => {
+  const docs = { version: 1, plan: "### [ ] T1.1 Trim\n### [ ] T1.2 Test\n### [ ] T2.1 Flush\n" };
+  const open = (kind: TaskStepDto["kind"], item: string, o: Partial<TaskStepDto> = {}) =>
+    step({ id: 20, kind, part: 7, item, state: "running", endedAt: null, run: 5, ...o });
+  const ticked = (id: number, p: number, kind: TaskStepDto["kind"], ids: string[], state: TaskStepDto["state"] = "ok") =>
+    step({ id, kind, part: p, item: "build", state, detail: stepDetail.parse({ ticked: ids }) });
+
+  test("the build row counts the done tasks of its part; no count when the plan lists no task", () => {
+    const steps = [open("implement", "build"), ticked(8, 7, "commit", ["T1.1"]), ticked(7, 7, "implement", ["T1.2"], "cancelled")];
+    expect(view(building({ docs, steps })).status).toBe("Claude builds your change: 1 of 3 tasks done.");
+    expect(view(building({ steps })).status).toBe("Claude builds your change.");
+    const two = building({ docs, parts: [part({ id: 6, state: "self_reviewed" }), part({ ord: 2 })], steps });
+    expect(view(two).status).toBe("Claude builds part 2: 1 of 3 tasks done.");
+  });
+
+  test("fixing shows try n of N, and judging round n of N; no brackets without the stored count", () => {
+    const tries = (n: number, of: number) => stepDetail.parse({ tries: { n, of } });
+    expect(view(building({ steps: [open("fix", "checks", { detail: tries(1, 3) })] })).status).toBe(
+      "Claude fixes the checks of your change (try 1 of 3).",
+    );
+    expect(view(building({ steps: [open("fix", "review", { detail: tries(2, 2) })] })).status).toBe(
+      "Claude works on the review points of your change (round 2 of 2).",
+    );
+    expect(view(building({ steps: [open("fix", "checks")] })).status).toBe("Claude fixes the checks of your change.");
+    expect(view(building({ steps: [open("fix", "critic", { detail: tries(1, 2) })] })).status).toBe(
+      "Claude works on the review points of your change (round 1 of 2).",
+    );
+  });
+
+  test("sub-tasks: the row text counts the tasks T<n>. of its plan part, and gives no try count", () => {
+    const steps = [open("implement", "build", { part: 13 }), ticked(8, 13, "implement", ["T2.1"])];
+    const t = subTask([p12(), p13({ state: "implementing" })], { docs, steps });
+    expect(subtaskRows(t, SUB_OPTS).find((r) => r.part?.id === 13)?.text).toBe("Claude builds it: 1 of 1 tasks done.");
+    expect(subtaskView(t, null, SUB_OPTS).status).toBe("Claude builds ABC-13 (2 of 2): 1 of 1 tasks done.");
+    const fix = subTask([p12(), p13({ state: "implementing" })], {
+      steps: [open("fix", "checks", { part: 13, detail: stepDetail.parse({ tries: { n: 1, of: 3 } }) })],
+    });
+    expect(subtaskRows(fix, SUB_OPTS).find((r) => r.part?.id === 13)?.text).toBe("Claude fixes the checks.");
+    expect(subtaskView(fix, null, SUB_OPTS).status).toBe("Claude fixes the checks of ABC-13 (2 of 2) (try 1 of 3).");
+  });
+
+  test("plannedTasks: a tick of an ok commit row or run row of the part, the plan file tick, and the per-part filter", () => {
+    const t = { docs: { ...docs, plan: `${docs.plan}### [x] T2.2 Done in the file\n` }, subtasks: null };
+    const steps = [ticked(9, 7, "fix", ["T1.2"]), ticked(8, 7, "commit", ["T1.1"]), ticked(7, 8, "implement", ["T2.1"])];
+    const done = (x: ReturnType<typeof plannedTasks>) => x.filter((k) => k.done).map((k) => k.id);
+    expect(done(plannedTasks({ ...t, steps }))).toEqual(["T1.1", "T1.2", "T2.1", "T2.2"]);
+    // One part: the rows of another part do not tick its tasks. A task without sub-tasks lists every task of the plan.
+    expect(done(plannedTasks({ ...t, steps }, { id: 7, ord: 1 }))).toEqual(["T1.1", "T1.2", "T2.2"]);
+    // With sub-tasks, task_part.ord is the plan part number (tasks.ts partDocsOf).
+    const sub = plannedTasks({ ...t, steps, subtasks: [] }, { id: 8, ord: 2 });
+    expect(sub.map((k) => [k.id, k.done])).toEqual([
+      ["T2.1", true],
+      ["T2.2", true],
+    ]);
+    // A failed row ticks nothing.
+    expect(done(plannedTasks({ ...t, steps: [ticked(9, 7, "fix", ["T1.2"], "failed")] }))).toEqual(["T2.2"]);
+  });
+});
+
+describe("part-session.md section 2.17: the ready row", () => {
+  const docs = { version: 1, plan: "### [ ] T1.1 Trim\n### [ ] T1.2 Test\n" };
+  const check = (state: TaskStepDto["state"]) => step({ id: 9, kind: "check", part: 7, item: "checks", state });
+  const ready = (o: Partial<TaskPartDto> = {}, t: Partial<TaskDto> = {}) =>
+    view(building({ docs, parts: [part({ state: "self_reviewed", lines: 340, ...o })], steps: [check("ok")], ...t }));
+
+  test("the facts of the part: its tasks, its lines, and green checks; a fact that is not known stays out", () => {
+    expect(ready().status).toBe("Your change is ready: 2 tasks, 340 lines, checks green.");
+    expect(ready({ lines: null }, { docs: null, steps: [] }).status).toBe("Your change is ready.");
+    expect(ready({}, { steps: [check("failed")] }).status).toBe("Your change is ready: 2 tasks, 340 lines.");
+    // The checks on the part base are no checks of the change.
+    expect(ready({}, { steps: [step({ id: 9, kind: "check", part: 7, item: "base", state: "ok" })] }).status).toBe(
+      "Your change is ready: 2 tasks, 340 lines.",
+    );
+    const two = building({ docs, parts: [part({ id: 6, state: "merged" }), part({ ord: 2, state: "self_reviewed" })] });
+    expect(view(two).status).toBe("Part 2 is ready: 2 tasks, 80 lines.");
+    expect(view(two).primary?.label).toBe("Open PR for part 2 of 2");
+  });
+
+  test("More: Show the diff, Fix these too with points, and Start this part again before the first push", () => {
+    const points = [{ id: 3, severity: "minor" as const, path: "src/a.ts", line: 2, text: "Name the lock." }];
+    expect(ready({}, { points }).more.map((a) => [a.kind, a.label])).toEqual([
+      ["show-diff", "Show the diff"],
+      ["fix-points", "Fix these too"],
+      ["restart", "Start this part again"],
+    ]);
+    expect(ready({ pushed: "b".repeat(40) }).more.map((a) => a.kind)).toEqual(["show-diff"]);
+  });
+});
+
+describe("ps5-plan.md section 3: the stopped row of a build", () => {
+  const stopped = (o: Partial<TaskDto>) => view(building({ state: "stopped", stoppedFrom: "implementing", ...o }));
+
+  test("several parts: Stopped at part k with the part of the newest row; sub-tasks: the part label", () => {
+    const parts = [part({ id: 6, state: "self_reviewed" }), part({ ord: 2 })];
+    const v = stopped({ parts, steps: [step({ id: 9, kind: "fix", part: 7, state: "cancelled" }), step({ id: 8, kind: "push" })] });
+    expect(shape(v)).toEqual({
+      status: "Stopped at part 2. The work is kept.",
+      primary: "Continue",
+      more: ["Start this part again", "Close the task"],
+      screen: "build",
+    });
+    const t = subTask([p12(), p13({ state: "implementing" })], {
+      state: "stopped",
+      stoppedFrom: "implementing",
+      steps: [step({ id: 9, kind: "implement", part: 13, state: "cancelled" })],
+    });
+    expect(shape(subtaskView(t, null, SUB_OPTS))).toMatchObject({
+      status: "Stopped at ABC-13 (2 of 2). The work is kept.",
+      primary: "Continue",
+    });
+  });
+
+  test("a pushed part has no Start again; a stop before the build keeps its text with Continue", () => {
+    expect(stopped({ parts: [part({ pushed: "a".repeat(40) })] }).more.map((a) => a.kind)).toEqual(["close"]);
+    const v = view(task({ state: "stopped", stoppedFrom: "interview", steps: [step({ id: 1, kind: "interview", state: "cancelled" })] }));
+    expect(shape(v)).toEqual({ status: "Stopped at: reading the task.", primary: "Continue", more: ["Close the task"], screen: "build" });
+  });
+});
+
+describe("ps5-plan.md section 3: push-back questions in the status row", () => {
+  const card = { id: 31, check: null, reason: "The guard stops it.", cite: "src/a.ts:4", citeFound: true };
+  const asked = (questions: TaskQuestionDto[]) =>
+    view(building({ blocked: { kind: "question", cause: "claude", step: 4, text: "Needs you: x." }, questions }));
+
+  test("Judge the push-back, Judge N push-backs, or Answer the question when one question has no point", () => {
+    const pb = (id: number) => question({ id, source: "loop", step: 4, point: { ...card, id }, recommended: null });
+    expect(asked([pb(1)]).primary).toEqual({ kind: "answer", label: "Judge the push-back" });
+    expect(asked([pb(1), pb(2)]).primary?.label).toBe("Judge 2 push-backs");
+    expect(asked([pb(1), question({ id: 2, source: "loop", step: 4 })]).primary?.label).toBe("Answer the question");
+  });
+});
+
+describe("ps5-plan.md section 4.6 (AC-B377): the size note", () => {
+  const commit = (id: number, p: number, notes: string[], o: Partial<TaskStepDto> = {}) =>
+    step({ id, kind: "commit", part: p, item: "build", detail: stepDetail.parse({ notes }), ...o });
+  const NOTE = "This PR has 520 changed lines, over your 400 limit.";
+
+  test("the Build box shows the notes of the newest ok commit of the part; a restart mark and another part do not count", () => {
+    const steps = [
+      commit(12, 8, ["Other part."]),
+      commit(11, 7, ["Started again."], { item: "restart" }),
+      commit(10, 7, ["Failed."], { state: "failed" }),
+      commit(9, 7, [NOTE, "The commit added or changed no test file."]),
+      commit(8, 7, ["Old."]),
+    ];
+    expect(readyNotes({ steps }, { id: 7 })).toEqual([NOTE, "The commit added or changed no test file."]);
+    expect(readyNotes({ steps }, null)).toEqual([]);
+  });
+
+  test("Change the limit shows only over the limit, and not after Keep one PR", () => {
+    const t = building({ plan: { ...PLAN, budget: 400 } });
+    expect(overLimit(t, { lines: 520 })).toBe(true);
+    expect(overLimit(t, { lines: 400 })).toBe(false);
+    expect(overLimit(t, { lines: null })).toBe(false);
+    expect(overLimit({ ...t, settings: { lineBudget: 600 } }, { lines: 520 })).toBe(false);
+    expect(overLimit({ ...t, settings: { keepOnePr: true } }, { lines: 520 })).toBe(false);
+    expect(overLimit({ ...t, plan: null }, { lines: 520 })).toBe(false);
+  });
+});
+
+describe("ps5-plan.md section 4.7 (AC-B378): a patch that the app could not save", () => {
+  const log = (patch: string) =>
+    renderToStaticMarkup(
+      createElement(LogTab, {
+        t: building({ steps: [step({ id: 4, kind: "implement", part: 7, detail: stepDetail.parse({ patch }) })] }),
+        runner: R,
+        onRunLog: () => {},
+      }),
+    );
+
+  test("the Log and the denied path row say that no patch was saved, and never 'saved in no file'", () => {
+    expect(patchText(PATCH_LOST, false)).toEqual({
+      lead: "The app could not save the changes of this step as a patch.",
+      file: null,
+      tail: "",
+    });
+    expect(patchText(PATCH_LOST, true)).toEqual({
+      lead: "The worktree went back to the last commit. The app could not save the changes as a patch. Continue starts a new run.",
+      file: null,
+      tail: "",
+    });
+    expect(patchText("p/4.patch", true)).toEqual({
+      lead: "The worktree went back to the last commit. The changes are saved in ",
+      file: "p/4.patch",
+      tail: ". Continue starts a new run.",
+    });
+    expect(log(PATCH_LOST)).toContain("The app could not save the changes of this step as a patch.");
+    expect(log(PATCH_LOST)).not.toContain("saved in");
+    expect(log("p/4.patch")).toMatch(/The changes of this step are saved in <code translate="no"[^>]*>p\/4\.patch<\/code>\./);
+  });
+});
+
+describe("ps4-plan.md WP-7: a message that waits for the next run of its part", () => {
+  const queued = (o: Parameters<typeof instruct>[0] = {}) => instruct({ id: 10, state: "waiting", run: null, endedAt: null, ...o });
+  const review = step({ id: 11, kind: "review", part: 7, item: "review", state: "running", run: 6, endedAt: null });
+  const build = step({ id: 9, kind: "implement", part: 7, item: "build", run: 5 });
+
+  test("the Log shows it as a waiting send that owns no row of the run beside it", () => {
+    const rows = logRows([review, queued(), build]);
+    expect(rows.map((r) => ("send" in r ? `send ${r.send.id}: ${r.steps.length}` : `${r.step.id}`))).toEqual(["11", "send 10: 0", "9"]);
+    expect(sendResult(rows[1] as SendGroup, R)).toBe("Waiting");
+    const t = building({ steps: [review, queued(), build] });
+    const html = renderToStaticMarkup(createElement(LogTab, { t, runner: R, onRunLog: () => {} }));
+    expect(html).toMatch(/data-send="10"[\s\S]*?Waiting/);
+    // A message that a Stop ended before its run owns no later row either.
+    const stopped = queued({ state: "cancelled", result: "stopped" });
+    expect(logRows([review, stopped, build]).map((r) => ("send" in r ? r.steps.length : -1))).toEqual([-1, 0, -1]);
+  });
+
+  test("the status keeps the run beside it, and the box text comes back for each part on its own", () => {
+    expect(view(building({ steps: [review, queued(), build] })).status).toBe("A second Claude run reviews your change.");
+    const a = instruct({ id: 21, part: 6, state: "cancelled", run: null, result: "stopped" });
+    const b = instruct({ id: 22, part: 7, state: "cancelled", run: null, result: "stopped" });
+    const second = {
+      ...b,
+      detail: { ...b.detail, instruct: { ...(b.detail.instruct as NonNullable<StepDetail["instruct"]>), text: "Part 2." } },
+    };
+    const t = { steps: [second, a] };
+    expect([stoppedSend(t, 6)?.text, stoppedSend(t, 7)?.text, stoppedSend(t)?.text]).toEqual([
+      "Rename the flag to useNewParser.",
+      "Part 2.",
+      "Part 2.",
+    ]);
+    expect(stoppedSend(t, 8)).toBeNull();
+  });
+});
+
+describe("ps5-plan.md section 4.4 (AC-B379): the quick review row of the Log", () => {
+  test("a review row with item critic says Quick review", () => {
+    const steps = [step({ id: 5, kind: "review", part: 7, item: "critic" }), step({ id: 4, kind: "review", part: 7, item: "review" })];
+    const html = renderToStaticMarkup(createElement(LogTab, { t: building({ steps }), runner: R, onRunLog: () => {} }));
+    expect(html.match(/Quick review/g)?.length).toBe(1);
+    expect(html.match(/Own review/g)?.length).toBe(1);
   });
 });

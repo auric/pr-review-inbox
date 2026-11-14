@@ -145,7 +145,7 @@ test("Hold keeps the work of a building part, the confirm of Start again sends n
   await primary(page).click();
 
   // 1. The build run hangs. A Hold before the CLI starts would leave the hang entry unused, so the test waits for the build run.
-  await expect(status(page)).toHaveText(/^\S+ builds your change\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^\S+ builds your change(: \d+ of \d+ tasks done)?\.$/, { timeout: 180_000 });
   await expect.poll(async () => (await runArgv())?.stdin.includes("- Mode: build") ?? false, { timeout: 60_000 }).toBe(true);
   const building = await menu(page);
   await expect(building.getByRole("menuitem")).toHaveText(["Hold", "Stop"]);
@@ -174,5 +174,5 @@ test("Hold keeps the work of a building part, the confirm of Start again sends n
   // 4. Enter on Continue resumes the part, and the build ends green.
   await primary(page).focus();
   await page.keyboard.press("Enter");
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 180_000 });
 });

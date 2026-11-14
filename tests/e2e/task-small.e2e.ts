@@ -269,11 +269,11 @@ test("a small task: chip, questions, plan with the branch and the warning, a siz
   await expect(page.locator('[aria-current="step"]')).toHaveText("Build", { timeout: 60_000 });
 
   // 5. The change is ready and checked. The small point of the own review is listed. Nothing went out before the click.
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 180_000 });
   await expect(primary(page)).toHaveText("Open the PR");
   await expect(primary(page)).toBeFocused();
   await expect(page.getByText("Say what works in the title.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Fix the small points too" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Fix these too" })).toBeVisible();
   const before = await taskRemote();
   expect(Object.keys(before.heads).filter((b) => b.startsWith("task/"))).toEqual([]);
   expect(before.creates).toEqual([]);

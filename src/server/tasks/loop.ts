@@ -4339,6 +4339,17 @@ export function createLoop(opts: LoopOptions) {
     },
     // true while a driver works on the task.
     running: (id: number) => drivers.has(id),
+    // ps4-plan.md WP-7: TaskPartDto.instructRun, by the rules of instruct() before its write. live: the live gate is on, so the send goes
+    // to the stdin of the session run of the part; a failed write still falls back as instruct() does. queued: the send waits as the
+    // message of the part. null: no driver works, or the send gets 409.
+    instructRun(db: Database, id: number, partId: number): "live" | "queued" | null {
+      const t = taskRow(db, id);
+      if (!t || !drivers.has(id)) return null;
+      const target = instructTarget(db, t, partId);
+      if ("error" in target || !sessionRunning(db, partId)) return null;
+      if (review.sessionGates.live) return "live";
+      return modes.has(id) || db.query(Q.openFollow).get({ part: partId }) ? null : "queued";
+    },
 
     // spec.md section 6.7, Line endings, Repair: pr.ts runs it before each push and PR create of a part.
     async matchBase(db: Database, id: number, partId: number) {

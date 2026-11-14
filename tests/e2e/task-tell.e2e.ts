@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // docs/plans/review-v2/spec.md section 6.18 (WP-TU2): "Tell Claude" and "Update from <base>" in the browser. A small task on the
-// release base release/2.1: the box sends with Ctrl+Enter, waits while the step runs, and gets its text back after Stop. A second send
+// release base release/2.1: the box sends with Ctrl+Enter, can send into the run of the step, and gets its text back after Stop. A second send
 // changes the code. Then the release base moves, so "Open the PR" checks the base and offers "Update from release/2.1" instead of the
 // dialog. After the PR opens, the fake PR reports
 // conflicts, and the update stops at a conflict that the resolve step leaves. Each screen has at most one primary button (AC-UX1).
@@ -161,7 +161,7 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   await expect(page.locator("#task-branch")).toHaveText("task/ABC-42-flush-the-cache-before-the-write-lock");
   await page.getByRole("checkbox", { name: "I understand" }).check();
   await primary(page).click();
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 180_000 });
 
   // 2. The box under the primary button: a label, the hint, and a disabled send while the text is empty (spec.md section 6.18.1).
   const box = page.getByRole("form", { name: /^Tell \S+$/ });
@@ -174,21 +174,22 @@ test("Tell Claude sends, waits, and gets its text back after Stop; Update from r
   await expect(box.getByText("Pushes and other git actions stay buttons.", { exact: false })).toBeVisible();
   const before = await taskRemote();
 
-  // 3. Ctrl+Enter sends. The step runs, the box clears and stays editable, and the hint says why the send waits.
+  // 3. Ctrl+Enter sends. The step runs, the box clears and stays editable. While the run of the send works, a second message goes into
+  // that run (part-session.md section 2.9), so the hint says so and Send works.
   await text.fill(ASK);
   await expect(sendButton).toBeEnabled();
   await text.press("Control+Enter");
   await expect(status(page)).toHaveText(/^\S+ works on your instructions for your change\.$/);
   await expect(text).toHaveValue("");
   await expect(primary(page)).toHaveCount(0);
-  await expect(box.getByText(/^\S+ or the checks are working\. You can send when this run ends\.$/)).toBeVisible();
+  await expect(box.getByText(/^\S+ reads this now\.$/)).toBeVisible({ timeout: 60_000 });
   await text.fill("A second idea");
-  await expect(sendButton).toBeDisabled();
+  await expect(sendButton).toBeEnabled();
   await text.fill("");
 
   // 4. Stop at once, mostly before the CLI of the send starts: the task waits as before, and the text is back in the box.
   await more(page, "Stop");
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 60_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 60_000 });
   await expect(page.getByText("Stopped. Your instructions changed nothing. The text is back in the box.").first()).toBeVisible();
   await expect(text).toHaveValue(ASK);
   await expect(primary(page)).toHaveCount(1);

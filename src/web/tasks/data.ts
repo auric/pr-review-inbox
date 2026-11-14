@@ -185,13 +185,14 @@ export type TaskAction =
   | { kind: "repo"; taskRepo: number; add: boolean }
   | { kind: "docs"; doc: TaskDoc; text: string }
   | { kind: "size"; size: TaskSize }
-  | { kind: "pause" | "stop" | "close" | "dismiss" }
+  | { kind: "stop" | "close" }
   // ps4-plan.md section 4: leave gives back the reason before a follow-up in ready, disarm cancels an armed usage resume, and part ends
-  // the hold of that part. The server refuses part together with an option (400).
-  | { kind: "resume"; option?: "leave" | "disarm"; part?: number }
+  // the hold of that part. ps5-plan.md D2 and D3: without is "Go on without these fixes", and setup with part is "Run setup again". The
+  // server refuses part together with any other option (400).
+  | { kind: "resume"; option?: "leave" | "disarm" | "without" | "setup"; part?: number }
   // ps4-plan.md section 4: Hold, Skip, and Start again of one part.
   | { kind: "hold" | "skip" | "restart"; part: number }
-  | { kind: "keep" }
+  // ps5-plan.md D1: "Change the limit" sets the line limit of the task.
   | { kind: "limit"; lineBudget: number }
   | { kind: "change"; step: number; accept: boolean }
   | { kind: "pr"; part: number; reviewers: string[] }
@@ -199,8 +200,6 @@ export type TaskAction =
   | { kind: "prs"; part: number; rows: { taskRepo: number; reviewers: string[] }[] }
   | { kind: "pointer"; taskPr: number; newest?: true }
   | { kind: "fix"; part: number }
-  // spec.md section 6.7: "Run setup again" (202).
-  | { kind: "setup"; part: number }
   // spec.md section 6.21.4: the choice for each command that the step asks to allow (202).
   | { kind: "allow"; step: number; decisions: TaskAllowInput["decisions"]; shellWarning?: true }
   // spec.md section 6.18.6: a send of the Tell box, "Update from <base>", and "Undo the update". part: the focused part of a task
@@ -239,8 +238,6 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       return read(await tasks.docs.$put({ param, json: { version, doc: a.doc, text: a.text } }));
     case "size":
       return read(await tasks.size.$post({ param, json: { version, size: a.size } }));
-    case "pause":
-      return read(await tasks.pause.$post({ param, json: { version } }));
     case "stop":
       return read(await tasks.stop.$post({ param, json: { version } }));
     case "resume":
@@ -258,10 +255,6 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       return read(await tasks.parts[":part"].restart.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "close":
       return read(await tasks.close.$post({ param, json: { version } }));
-    case "dismiss":
-      return read(await tasks.dismiss.$post({ param, json: { version } }));
-    case "keep":
-      return read(await tasks.limit.$post({ param, json: { version, keep: true } }));
     case "limit":
       return read(await tasks.limit.$post({ param, json: { version, lineBudget: a.lineBudget } }));
     case "change":
@@ -283,8 +276,6 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       );
     case "fix":
       return read(await tasks.parts[":part"].fix.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
-    case "setup":
-      return read(await tasks.parts[":part"].setup.$post({ param: { ...param, part: String(a.part) }, json: { version } }));
     case "allow":
       return read(
         await tasks.allow.$post({

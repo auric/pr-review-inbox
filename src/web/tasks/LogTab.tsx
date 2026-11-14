@@ -16,6 +16,7 @@ import { DECIDED_TEXT, shellText } from "./allow";
 import {
   type LogRow,
   logRows,
+  patchText,
   type SendGroup,
   type SessionGroup,
   STEP_TEXT,
@@ -26,6 +27,7 @@ import {
   sessionRuns,
   sessionTitle,
   stepLook,
+  unstarted,
 } from "./model";
 
 const KIND: Record<TaskStepDto["kind"], string> = {
@@ -139,7 +141,8 @@ function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string
   const end = s.detail.instruct?.result;
   const failed = end === "failed";
   const open = [s, ...g.steps].some((x) => x.state === "running" || x.state === "waiting");
-  const look: StepLook = end === "stopped" ? "cancelled" : failed ? "failed" : end ? "ok" : open ? "running" : stepLook(s);
+  const look: StepLook =
+    end === "stopped" ? "cancelled" : failed ? "failed" : end ? "ok" : unstarted(s) ? "waiting" : open ? "running" : stepLook(s);
   const Icon = ICON[look].icon;
   const at = new Date(s.startedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   return (
@@ -230,12 +233,15 @@ function StepBody({
   const d = s.detail;
   const ms = s.endedAt === null ? null : s.endedAt - s.startedAt;
   const session = sessionNote(s);
+  // part-session.md section 2.7: the critic is a quick review before the own review.
+  const critic = s.kind === "review" && s.item === "critic";
+  const patch = d.patch ? patchText(d.patch, false) : null;
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
         <Icon aria-hidden className={cn("size-4 shrink-0", st.className)} />
-        <span className="font-semibold">{KIND[s.kind]}</span>
-        {s.item && (
+        <span className="font-semibold">{critic ? "Quick review" : KIND[s.kind]}</span>
+        {s.item && !critic && (
           <code translate="no" className="font-mono text-xs text-ink-2">
             {s.item}
           </code>
@@ -342,12 +348,15 @@ function StepBody({
           </span>
         </p>
       )}
-      {d.patch && (
+      {patch && (
         <p className="m-0 text-xs text-ink-2">
-          The changes of this step are saved in{" "}
-          <code translate="no" className="font-mono [overflow-wrap:anywhere]">
-            {d.patch}
-          </code>
+          {patch.lead}
+          {patch.file && (
+            <code translate="no" className="font-mono [overflow-wrap:anywhere]">
+              {patch.file}
+            </code>
+          )}
+          {patch.tail}
         </p>
       )}
       {d.notes.map((n) => (

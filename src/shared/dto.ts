@@ -1695,6 +1695,10 @@ export type TaskPartDto = {
   wait: string | null;
   // spec.md section 6.25: the reason that waits in this part row while TaskDto.blocked holds the reason of another part.
   blocked: TaskBlocked | null;
+  // ps4-plan.md WP-7 (part-session.md section 2.9): how a Tell Claude send of this part goes while the loop works (loop.ts instructRun).
+  // live: into the stdin of the session run of the part now. queued: as the waiting message that the next run of the part reads. null:
+  // no session run of the part takes a send now; canInstruct then decides.
+  instructRun: "live" | "queued" | null;
 };
 
 // A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a

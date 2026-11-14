@@ -923,6 +923,33 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
     SLOW,
   );
 
+  // TaskPartDto.instructRun: the Tell box hint and its Send follow what instruct() then does.
+  test(
+    "WP-7: instructRun says live with the gate on and queued with it off; after a waiting message and with no driver it says nothing",
+    async () => {
+      const on = await setup({ seq: { "implement:build": [SLOW_BUILD] } });
+      on.loop.build(on.db, on.task);
+      await until(() => building(on));
+      expect(on.loop.instructRun(on.db, on.task, on.part().id)).toBe("live");
+      expect(on.loop.instruct(on.db, on.task, { version: on.t().version, text: SEND }).status).toBe(202);
+      expect(on.steps().filter((x) => x.kind === "instruct")).toEqual([]);
+      await on.loop.idle(on.task);
+      expect(on.loop.instructRun(on.db, on.task, on.part().id)).toBeNull();
+
+      const off = await setup({ sessionGates: OFF, seq: { "implement:build": [SLOW_BUILD], "implement:instruct": [{ writes: [FIXED] }] } });
+      off.loop.build(off.db, off.task);
+      await until(() => building(off));
+      expect(off.loop.instructRun(off.db, off.task, off.part().id)).toBe("queued");
+      expect(off.loop.instruct(off.db, off.task, { version: off.t().version, text: SEND }).status).toBe(202);
+      expect((off.steps().at(-1) as Step).state).toBe("waiting");
+      // One waiting message per part: the next send gets 409, and the flag says so before it.
+      expect(off.loop.instructRun(off.db, off.task, off.part().id)).toBeNull();
+      expect(off.loop.instruct(off.db, off.task, { version: off.t().version, text: "Use works." }).status).toBe(409);
+      await off.loop.idle(off.task);
+    },
+    SLOW,
+  );
+
   test(
     "WP-7: a waiting message that changes no file keeps a reason that came during its run",
     async () => {

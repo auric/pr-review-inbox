@@ -874,9 +874,10 @@ export function PlanParts({ t }: { t: TaskDto }) {
   const parts = codeParts(t);
   const tasks = plannedTasks(t);
   const budget = t.settings.lineBudget ?? t.plan?.budget ?? null;
-  const taskList = (
+  // ps5-plan.md section 4.9 (AC-B380): each part ticks its own tasks.
+  const taskList = (list: ReturnType<typeof plannedTasks>) => (
     <ul className="m-0 grid list-none gap-1 p-0">
-      {tasks.map((k) => (
+      {list.map((k) => (
         <li key={k.id} className="flex items-start gap-2 text-sm">
           {k.done ? (
             <Check aria-hidden className="mt-0.5 size-4 shrink-0" />
@@ -898,7 +899,7 @@ export function PlanParts({ t }: { t: TaskDto }) {
     return (
       <div className="grid gap-2">
         <p className="m-0 text-sm text-ink-2">The build has not started. The plan has these tasks:</p>
-        {tasks.length ? taskList : <p className="m-0 text-sm text-muted-foreground">No task yet.</p>}
+        {tasks.length ? taskList(tasks) : <p className="m-0 text-sm text-muted-foreground">No task yet.</p>}
       </div>
     );
   return (
@@ -906,6 +907,7 @@ export function PlanParts({ t }: { t: TaskDto }) {
       {parts.map((p) => {
         const time = partTime(t, p.id);
         const stage = stageBadge(t, p);
+        const own = plannedTasks(t, p);
         return (
           <li key={p.id} data-task-item tabIndex={-1} className="grid gap-1.5 rounded-md border bg-card px-3 py-2.5 outline-offset-2">
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
@@ -924,7 +926,7 @@ export function PlanParts({ t }: { t: TaskDto }) {
               {time && <span>Time: {time}</span>}
               {p.usage && <span>{p.usage.turns} turns</span>}
             </p>
-            {tasks.length > 0 && taskList}
+            {own.length > 0 && taskList(own)}
           </li>
         );
       })}

@@ -27,6 +27,7 @@ import {
   branchName,
   type FoundItem,
   PART_STATE_TEXT,
+  PATCH_LOST,
   REASON_EXITS,
   type RepoAccess,
   START_MODES,
@@ -37,6 +38,7 @@ import {
 import { phaseRow, type RowPhase, rowPhase } from "../../shared/task-status";
 import { namedBuild } from "../pr/build";
 import { attachmentRows, sizeText } from "../review/tasks";
+import type { TaskAction } from "./data";
 
 export type ActionKind =
   | "answer"
@@ -45,11 +47,8 @@ export type ActionKind =
   | "edit-plan"
   | "change-size"
   | "stop"
-  | "pause"
   | "resume"
-  | "continue"
   | "see-why"
-  | "keep-size"
   | "change-limit"
   | "review-change"
   | "reject-change"
@@ -63,9 +62,7 @@ export type ActionKind =
   | "pointer"
   | "pick-base"
   | "close"
-  // spec.md section 6.18.2: "Dismiss" of a reason on a built part whose own action runs in state implementing only.
-  | "dismiss"
-  // spec.md section 6.7: "Run setup again" on the part that the view shows.
+  // spec.md section 6.7: "Run setup again" on the part that the view shows. ps5-plan.md D2: the resume option setup with the part.
   | "setup"
   // spec.md section 6.7: "Change the time limit" of a setup command that reached its time limit.
   | "time-limit"
@@ -90,9 +87,37 @@ export type ActionKind =
   | "skip"
   | "restart"
   // ps5-plan.md section 4.3: resume option disarm.
-  | "cancel-resume";
+  | "cancel-resume"
+  // ps5-plan.md sections 3 and 4.5: the resume options without ("Go on without these fixes") and leave ("Leave it", ready only).
+  | "without"
+  | "leave";
 // part: the task_part ID of an action that acts on one part. Absent: the part that the view shows.
 export type Action = { kind: ActionKind; label: string; part?: number };
+
+// The request of an action that sends at once. part: the part of the action. null: the action opens a form, a dialog, or a tab first,
+// or it needs a part (TaskView.tsx run).
+export function sendOf(kind: ActionKind, part: number | null): TaskAction | null {
+  switch (kind) {
+    case "stop":
+    case "close":
+    case "resume":
+      return { kind };
+    case "without":
+    case "leave":
+      return { kind: "resume", option: kind };
+    case "cancel-resume":
+      return { kind: "resume", option: "disarm" };
+    case "continue-part":
+      return part === null ? null : { kind: "resume", part };
+    case "setup":
+      return part === null ? null : { kind: "resume", option: "setup", part };
+    case "hold":
+    case "push":
+      return part === null ? null : { kind, part };
+    default:
+      return null;
+  }
+}
 
 // screen: the content under the header. questions: the Questions form. plan: the plan approval. change: the spec change review.
 // build: the progress of the build. ready: the part that waits for its PR. pr: the open PR. end: done, failed, or closed.
@@ -127,9 +152,12 @@ const CLOSE: Action = { kind: "close", label: "Close the task" };
 const HAS_WORKTREE = new Set<TaskPartDto["state"]>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 
 // spec.md section 6.7: "Run setup again" for a part with a worktree while nothing runs. It stands before Stop and Close the task.
-// spec.md section 6.25.5: a part with a waiting reason gets no "Run setup again".
-export function withSetup(t: Pick<TaskDto, "canSetup">, part: TaskPartDto | null, v: TaskView): TaskView {
+// spec.md section 6.25.5: a part with a waiting reason gets no "Run setup again". loop.ts setupAgainOf refuses a reason of the task,
+// except a red setup of this part.
+export function withSetup(t: Pick<TaskDto, "canSetup" | "blocked" | "steps">, part: TaskPartDto | null, v: TaskView): TaskView {
   if (!t.canSetup || v.running || !part || part.adopted || part.blocked || !HAS_WORKTREE.has(part.state)) return v;
+  const b = t.blocked;
+  if (b && !(b.kind === "red" && blockedPart(t) === part.id && t.steps.find((s) => s.id === b.step)?.item === "setup")) return v;
   const at = v.more.findIndex((a) => a.kind === "stop" || a.kind === "close");
   const more = [...v.more];
   more.splice(at < 0 ? more.length : at, 0, { kind: "setup", label: "Run setup again" });
@@ -299,7 +327,11 @@ export function baseLines(t: Pick<TaskDto, "bases" | "repos">): string[] {
 export type SendGroup = { send: TaskStepDto; steps: TaskStepDto[] };
 export type LogRow = { step: TaskStepDto } | SendGroup;
 
-// The rows of the Log tab, newest first: each send with its steps in one group (spec.md section 6.18.1, Step history).
+// ps4-plan.md WP-7: a send that has not run yet. A message that waits beside a run row of its part, or a send that waits for the run slot.
+export const unstarted = (s: Pick<TaskStepDto, "state" | "run">) => s.state === "waiting" && s.run === null;
+
+// The rows of the Log tab, newest first: each send with its steps in one group (spec.md section 6.18.1, Step history). The steps of a send
+// come from its run, so a send with no run owns no row: the rows after a waiting message belong to the run beside it.
 export function logRows(steps: TaskStepDto[]): LogRow[] {
   const out: LogRow[] = [];
   let g: SendGroup | null = null;
@@ -307,7 +339,7 @@ export function logRows(steps: TaskStepDto[]): LogRow[] {
     if (s.kind === "instruct") {
       g = { send: s, steps: [] };
       out.push(g);
-    } else if (g && s.part === g.send.part && (s.item === g.send.item || s.item === "review")) g.steps.unshift(s);
+    } else if (g && g.send.run !== null && s.part === g.send.part && (s.item === g.send.item || s.item === "review")) g.steps.unshift(s);
     else {
       g = null;
       out.push({ step: s });
@@ -372,17 +404,18 @@ export function activeSend(t: Pick<TaskDto, "steps" | "working">): TaskStepDto |
   return !open || first.send === open || first.steps.includes(open) ? first.send : null;
 }
 
-// spec.md section 6.18.1: a stopped or failed send gives its text back to the box. A later send replaces it.
-export function stoppedSend(t: Pick<TaskDto, "steps">): { id: number; text: string } | null {
-  const s = t.steps.find((x) => x.kind === "instruct");
+// spec.md section 6.18.1: a stopped or failed send gives its text back to the box. A later send of the part replaces it. part: the part of
+// the box. A Stop ends the waiting message of each part (ps4-plan.md WP-7), so each box gets the text of its own part back.
+export function stoppedSend(t: Pick<TaskDto, "steps">, part: number | null = null): { id: number; text: string } | null {
+  const s = t.steps.find((x) => x.kind === "instruct" && (part === null || x.part === part));
   const i = s?.detail.instruct;
   return s && i && (i.result === "stopped" || i.result === "failed") ? { id: s.id, text: i.text } : null;
 }
 
-// spec.md section 6.18.1: the sentence of a stop or a failure of the newest send ("Stopped. Your instructions changed nothing. The
-// text is back in the box."), while nothing newer ran.
-function sendNote(t: TaskDto): string | null {
-  const first = logRows(t.steps)[0];
+// spec.md section 6.18.1: the sentence of a stop or a failure of the newest send of the part ("Stopped. Your instructions changed nothing.
+// The text is back in the box."), while nothing newer ran.
+function sendNote(t: TaskDto, part: number | null): string | null {
+  const first = logRows(t.steps.filter((s) => part === null || s.part === part))[0];
   if (!first || !("send" in first)) return null;
   const r = first.send.detail.instruct?.result;
   return r === "stopped" || r === "failed" ? (first.send.detail.notes.at(-1) ?? null) : null;
@@ -404,27 +437,28 @@ export function sendResult(g: SendGroup, runner: string): string {
     case "failed":
       return g.send.detail.notes.findLast((n) => n.startsWith("Failed: ")) ?? "Failed";
     default: {
+      if (unstarted(g.send)) return STEP_TEXT.waiting;
       const open = [g.send, ...g.steps].some((s) => s.state === "running" || s.state === "waiting");
       return open ? STEP_TEXT.running : STEP_TEXT[stepLook(g.send)];
     }
   }
 }
 
-// spec.md section 6.18.1: the Tell box. none: no box. open: it can send. busy: a step, a check, or an update runs; the box keeps
-// its text and waits. tasks.ts instructTarget has the same rules on the server.
-export type TellBox = "none" | "open" | "busy";
+// spec.md section 6.18.1 and part-session.md section 2.9: the Tell box of a part with a worktree, also in its first build. none: no box.
+// open: a send starts a run of the part. live: a send goes into the session run of the part now. queued: a send waits for the next run
+// of the part. busy: the checks or another run work; the box keeps its text and waits. tasks.ts instructTarget and loop.ts instructRun
+// have the same rules on the server.
+export type TellBox = "none" | "open" | "live" | "queued" | "busy";
 const BOX_REASONS = new Set<NonNullable<TaskDto["blocked"]>["kind"]>(["red", "size", "blocker", "denied_path", "update"]);
-const WORKTREE = new Set<TaskPartDto["state"]>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
-const BUILT = new Set<TaskPartDto["state"]>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
 export function tellBox(t: TaskDto): TellBox {
   // spec.md section 6.25.5: no box while the reason of a part waits behind the first one.
   if ((t.state !== "implementing" && t.state !== "ready") || t.queued > 0) return "none";
   const b = t.blocked;
   if (b && !BOX_REASONS.has(b.kind)) return "none";
   const part = currentPart(t);
-  if (!part || !WORKTREE.has(part.state)) return "none";
-  // The first build of the part runs. A send from a reason of that build keeps the box while it runs.
-  if (!b && !BUILT.has(part.state) && !activeSend(t)) return "none";
+  // A held part goes on by Continue only. The app never changes the branch of a tracked PR.
+  if (!part || !HAS_WORKTREE.has(part.state) || part.blocked || part.adopted) return "none";
+  if (part.instructRun) return part.instructRun;
   return t.canInstruct ? "open" : "busy";
 }
 
@@ -446,22 +480,27 @@ function updateSentence(t: TaskDto, s: TaskStepDto, runner: string): string {
 }
 
 // ps5-plan.md section 3: what a working part does, by the stage of its open row. ref: "your change", "part 2", or the part label of a
-// sub-task. Without ref, the short text of a sub-task row. null: the stage has no text of its own.
-function workText(s: TaskStepDto, runner: string, ref?: string): string | null {
+// sub-task. Without ref, the short text of a sub-task row, with no try count. null: the stage has no text of its own. AC-B368: the done
+// tasks of the part, and the try or round of a fix row (StepDetail.tries).
+function workText(t: Pick<TaskDto, "docs" | "steps" | "parts" | "subtasks">, s: TaskStepDto, runner: string, ref?: string): string | null {
   const of = ref ? ` of ${ref}` : "";
   const forRef = ref ? ` for ${ref}` : "";
+  const tries = ref ? s.detail.tries : null;
   switch (rowPhase(s)) {
-    case "building":
-      return `${runner} builds ${ref ?? "it"}.`;
+    case "building": {
+      const tasks = plannedTasks(t, t.parts.find((p) => p.id === s.part) ?? null);
+      const done = tasks.length ? `: ${tasks.filter((k) => k.done).length} of ${tasks.length} tasks done` : "";
+      return `${runner} builds ${ref ?? "it"}${done}.`;
+    }
     case "checking":
       return `The app runs the checks${of}.`;
     case "fixing":
-      return `${runner} fixes the checks${of}.`;
+      return `${runner} fixes the checks${of}${tries ? ` (try ${tries.n} of ${tries.of})` : ""}.`;
     case "critic":
     case "reviewing":
       return `A second ${runner} run reviews ${ref ?? "it"}.`;
     case "judging":
-      return `${runner} works on the review points${of}.`;
+      return `${runner} works on the review points${of}${tries ? ` (round ${tries.n} of ${tries.of})` : ""}.`;
     case "following":
       if (s.kind === "instruct") return `${runner} works on your instructions${forRef}.`;
       return s.item === "points"
@@ -505,22 +544,61 @@ export function stageBadge(t: Pick<TaskDto, "steps">, p: Pick<TaskPartDto, "id" 
 // "### [ ] T1.1 Title" lines of the tasks grammar (spec.md section 6.4) in the plan files of the task.
 const TASK_LINE = /^### \[( |x)\] (T\d+\.\d+) (.+)$/gm;
 
-// The tasks of the Plan tab. A restart mark (commit item "restart") resets its part, so the commits of that part before its newest mark
-// do not count.
-export function plannedTasks(t: Pick<TaskDto, "docs" | "steps">) {
+// The tasks of the Plan tab. part: the tasks of one part. A task is done when the plan file ticks it, when an ok row lists it in
+// detail.ticked (ps5-plan.md D5), or when an ok commit row of an old task has it as its item. A restart mark (commit item "restart")
+// resets its part, so the rows of that part before its newest mark do not count. With sub-tasks, task_part.ord is the plan part number
+// (tasks.ts partDocsOf), so a part lists only the tasks T<ord>. of its plan part. Without sub-tasks, the part builds the whole plan.
+export function plannedTasks(t: Pick<TaskDto, "docs" | "steps" | "subtasks">, part: Pick<TaskPartDto, "id" | "ord"> | null = null) {
   const text = [t.docs?.plan, t.docs?.tasks].filter(Boolean).join("\n");
   const mark = new Map<number | null, number>();
   for (const s of t.steps) if (s.kind === "commit" && s.item === "restart") mark.set(s.part, Math.max(mark.get(s.part) ?? 0, s.id));
-  const committed = new Set(
+  const done = new Set(
     t.steps
-      .filter((s) => s.kind === "commit" && s.state === "ok" && s.item && s.item !== "restart" && s.id > (mark.get(s.part) ?? 0))
-      .map((s) => s.item as string),
+      .filter((s) => s.state === "ok" && s.item !== "restart" && s.id > (mark.get(s.part) ?? 0) && (!part || s.part === part.id))
+      .flatMap((s) => [...s.detail.ticked, ...(s.kind === "commit" && s.item ? [s.item] : [])]),
   );
-  return [...text.matchAll(TASK_LINE)].map((m) => ({
-    id: m[2] as string,
-    title: (m[3] as string).trim(),
-    done: m[1] === "x" || committed.has(m[2] as string),
-  }));
+  const prefix = part && t.subtasks !== null ? `T${part.ord}.` : "";
+  return [...text.matchAll(TASK_LINE)]
+    .filter((m) => (m[2] as string).startsWith(prefix))
+    .map((m) => ({ id: m[2] as string, title: (m[3] as string).trim(), done: m[1] === "x" || done.has(m[2] as string) }));
+}
+
+// part-session.md section 2.17: "Part 2 is ready: 5 tasks, 340 lines, checks green." A fact that the task does not know stays out. The
+// checks gate leaves the newest check row of a ready part green; a repository without checks has no check row.
+function readyText(t: TaskDto, p: TaskPartDto, who: string): string {
+  const n = plannedTasks(t, p).length;
+  const check = t.steps.find((s) => s.part === p.id && s.kind === "check" && s.item !== "setup" && s.item !== "base");
+  const facts = [
+    ...(n ? [plural(n, "task")] : []),
+    ...(p.lines === null ? [] : [plural(p.lines, "line")]),
+    ...(check?.state === "ok" ? ["checks green"] : []),
+  ];
+  return `${who} is ready${facts.length ? `: ${facts.join(", ")}` : ""}.`;
+}
+
+// ps5-plan.md section 4.6: the Build box shows the notes of the newest commit of the part, such as the size note. The restart mark is no
+// commit.
+export const readyNotes = (t: Pick<TaskDto, "steps">, part: Pick<TaskPartDto, "id"> | null): string[] =>
+  (part && t.steps.find((s) => s.part === part.id && s.kind === "commit" && s.state === "ok" && s.item !== "restart")?.detail.notes) || [];
+
+// ps5-plan.md D1: "Change the limit" shows while the part is over the line limit of the task (loop.ts budgetOf), and not after "Keep one
+// PR" of an old size reason, because the size note then stays away (loop.ts sizeNote).
+export function overLimit(t: Pick<TaskDto, "settings" | "plan">, part: Pick<TaskPartDto, "lines"> | null): boolean {
+  const budget = t.settings.lineBudget ?? t.plan?.budget ?? null;
+  return !t.settings.keepOnePr && budget !== null && part?.lines != null && part.lines > budget;
+}
+
+// ps5-plan.md section 4.7 (AC-B378): the line of a saved patch. PATCH_LOST marks a reset that saved no file, so no text names it as one.
+// reason: the line under a denied_path reason, else the line of the Log tab. file: the patch path, shown as code between lead and tail.
+export function patchText(patch: string, reason: boolean): { lead: string; file: string | null; tail: string } {
+  const back = "The worktree went back to the last commit.";
+  if (patch === PATCH_LOST)
+    return reason
+      ? { lead: `${back} The app could not save the changes as a patch. Continue starts a new run.`, file: null, tail: "" }
+      : { lead: "The app could not save the changes of this step as a patch.", file: null, tail: "" };
+  return reason
+    ? { lead: `${back} The changes are saved in `, file: patch, tail: ". Continue starts a new run." }
+    : { lead: "The changes of this step are saved in ", file: patch, tail: "." };
 }
 
 // One sentence for a running step: who works, and on what. name: the part label of a sub-task.
@@ -529,7 +607,7 @@ export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string, name?: 
   const of = partWords(t, ord);
   // ps5-plan.md D4 maps each commit to the checks, but the pointer commit runs outside the build.
   if (s.kind === "commit" && s.item === "pointer") return `Pointing ${t.project}/${t.repo} at the merged commit.`;
-  const work = workText(s, runner, name ?? (of ? `part ${ord}` : "your change"));
+  const work = workText(t, s, runner, name ?? (of ? `part ${ord}` : "your change"));
   if (work) return work;
   switch (s.kind) {
     case "update":
@@ -639,16 +717,22 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   // subtaskView shows the hold of the focused part only.
   const held = t.subtasks === null ? codeParts(t).find((p) => p.blocked?.kind === "held") : undefined;
   if (held && (t.state === "implementing" || t.state === "stopped")) return heldView(t, held);
-  if (t.state === "stopped")
+  if (t.state === "stopped") {
+    // ps5-plan.md section 3: a stop of the build names the part of its newest row and keeps the work. A stop before the build keeps the
+    // stoppedAt text.
+    const build = t.stoppedFrom === "implementing" || t.stoppedFrom === "ready";
+    const at = build ? (codeParts(t).find((p) => p.id === t.steps.find((s) => s.part !== null)?.part) ?? currentPart(t)) : null;
+    const many = t.subtasks !== null || codeParts(t).length > 1;
     return {
       ...base,
-      status: stoppedAt(t),
+      status: !at ? stoppedAt(t) : many ? `Stopped at ${partRef(t, at)}. The work is kept.` : "Stopped. The work is kept.",
       detail: b?.text ?? null,
-      primary: { kind: "resume", label: "Resume" },
-      more: [CLOSE],
+      primary: { kind: "resume", label: "Continue" },
+      more: [...(at ? againOf(t, at) : []), CLOSE],
       screen: "build",
       needsYou: true,
     };
+  }
 
   if (t.state === "interview") {
     const open = openQuestions(t, "interview");
@@ -714,94 +798,79 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   if (b) {
     if (b.kind === "usage") return usageView(b, R, o.now);
     const step = stepFor(t, b.step);
-    // The server takes Resume, Continue, and the line limit in state implementing only.
-    const loopOnly = new Set<ActionKind>(["resume", "continue", "keep-size", "change-limit"]);
-    const keep = (a: Action | null) => (a && (t.state === "implementing" || !loopOnly.has(a.kind)) ? a : null);
+    // ps5-plan.md section 3, D8, and D9: the row follows the kind and the cause. Continue works in implementing and in ready (AC-B344).
     // REASON_EXITS RUN_ENDS and KEPT: "Start this part again" stands before See why and Stop.
     const owner = t.parts.find((x) => x.id === blockedPart(t)) ?? part;
     const again = owner && AGAIN_KEYS.has(reasonKey(b)) ? againOf(t, owner) : [];
-    // spec.md section 6.18.2: on a built part, Dismiss gives a way back from a reason whose own action runs in state implementing only.
-    // Red checks after an update keep "Undo the update" as their way back.
-    const dismiss =
-      t.state === "ready" &&
-      !["spec_change", "allow", "update"].includes(b.kind) &&
-      !(b.kind === "question" && openQuestions(t, "loop").length) &&
-      !(b.kind === "red" && t.canUndoUpdate);
-    const blocked = (primary: Action | null, more: Action[], screen: Screen = "build"): TaskView => {
-      const p = keep(primary);
-      const m = more.filter((a) => keep(a) !== null);
-      const at = m.findIndex((a) => a.kind === "see-why" || a.kind === "stop");
-      m.splice(at < 0 ? m.length : at, 0, ...again);
-      const d: Action = { kind: "dismiss", label: "Dismiss" };
-      return {
-        ...base,
-        status: b.text,
-        primary: p ?? (dismiss ? d : null),
-        more: dismiss && p ? [d, ...m] : m,
-        screen,
-        needsYou: true,
-      };
-    };
+    const why: Action[] = b.step === null ? [] : [{ kind: "see-why", label: "See why" }];
+    // part-session.md section 9.4 rule 9: "Leave it" replaces Dismiss in ready. loop.ts leaveReason refuses only the reasons with their
+    // own form (a plan change, an allow request, an open question), and resume refuses the slot wait.
+    const leave: Action[] = t.state === "ready" ? [{ kind: "leave", label: "Leave it" }] : [];
+    const go: Action = { kind: "resume", label: "Continue" };
+    const blocked = (primary: Action | null, more: Action[], screen: Screen = "build"): TaskView => ({
+      ...base,
+      status: b.text,
+      primary,
+      more,
+      screen,
+      needsYou: true,
+    });
     switch (b.kind) {
       case "red":
-        if (timedOutSetup(t))
-          return blocked({ kind: "time-limit", label: "Change the time limit" }, [
-            { kind: "see-why", label: "See why" },
-            { kind: "resume", label: "Resume" },
-            STOP,
-          ]);
-        // spec.md section 6.18.3, Checks: red checks after an update keep it until "Undo the update".
-        return blocked(
-          { kind: "see-why", label: "See why" },
-          t.canUndoUpdate ? [{ kind: "undo-update", label: "Undo the update" }, STOP] : [{ kind: "resume", label: "Resume" }, STOP],
-        );
+        if (timedOutSetup(t)) return blocked({ kind: "time-limit", label: "Change the time limit" }, [...why, go, STOP]);
+        // spec.md section 6.18.3, Checks: red checks after an update offer "Undo the update".
+        return blocked(go, [
+          ...(t.canUndoUpdate ? [{ kind: "undo-update", label: "Undo the update" } as const] : []),
+          ...again,
+          ...why,
+          STOP,
+          ...leave,
+        ]);
       case "blocker":
-        return blocked({ kind: "see-why", label: "See why" }, [{ kind: "resume", label: "Resume" }, STOP]);
-      case "question":
-        // check-fix.md: a question of the app, such as a fix step that changed no file, names its step.
-        return openQuestions(t, "loop").length
-          ? blocked({ kind: "answer", label: "Answer the question" }, [STOP], "questions")
-          : blocked({ kind: "continue", label: "Continue" }, [
-              ...(b.step !== null ? [{ kind: "see-why", label: "See why" } as const] : []),
-              STOP,
-            ]);
+        return blocked(go, [{ kind: "without", label: "Go on without these fixes" }, ...why, STOP, ...leave]);
+      case "question": {
+        // check-fix.md: a question of the app, such as a fix step that changed no file, names its step. pushback.md: each push-back
+        // question has its point.
+        const open = openQuestions(t, "loop");
+        if (!open.length) return blocked(go, [...again, ...why, STOP, ...leave]);
+        const judge = open.every((q) => q.point !== null);
+        const label = !judge ? "Answer the question" : open.length === 1 ? "Judge the push-back" : `Judge ${open.length} push-backs`;
+        return blocked({ kind: "answer", label }, [STOP], "questions");
+      }
       case "size":
-        // "Split into parts" needs the large flow (WP-B8), so "Keep one PR" leads here.
-        return blocked({ kind: "keep-size", label: "Keep one PR" }, [{ kind: "change-limit", label: "Change the limit" }, STOP]);
+        // No code sets size/large_repos (G13), so Stop is its only exit. A legacy size reason takes the plain Continue row.
+        return b.cause === "large_repos" ? blocked(STOP, []) : blocked(go, [...why, STOP, ...leave]);
       case "spec_change":
         return blocked({ kind: "review-change", label: "Review the change" }, [{ kind: "reject-change", label: "Reject" }, STOP], "change");
-      case "budget":
-        return blocked({ kind: "continue", label: "Continue with 60 more minutes" }, [STOP]);
       case "slot":
         return { ...working(b.text, [STOP]), detail: step ? elapsed(o.now - step.startedAt) : null };
       case "preflight":
         // spec.md section 6.16.7: a base that is gone gets "Pick a base branch". Every other reason says what to fix on the forge, and
         // "Try again" runs the checks again.
         return b.base
-          ? blocked({ kind: "pick-base", label: "Pick a base branch" }, [{ kind: "resume", label: "Try again" }, STOP])
-          : blocked({ kind: "resume", label: "Try again" }, [STOP]);
+          ? blocked({ kind: "pick-base", label: "Pick a base branch" }, [{ kind: "resume", label: "Try again" }, STOP, ...leave])
+          : blocked({ kind: "resume", label: "Try again" }, [STOP, ...leave]);
       case "allow":
-        // spec.md section 6.21.4: Resume gives 409 until each command has a choice, so "Continue" sends the choices.
+        // spec.md section 6.21.4: Continue of the reason gives 409 until each command has a choice, so "Continue" sends the choices.
         return blocked(t.allowAsk ? { kind: "allow", label: "Continue" } : null, [STOP]);
       case "update":
-        // spec.md section 6.18.4: "The update from <base> stopped: <reason>. The branch is as it was."
+        // spec.md section 6.18.4: "The update from <base> stopped: <reason>. The branch is as it was." REASON_EXITS: no Stop.
         return blocked(
           { kind: "update", label: "Try again" },
-          hasPr ? [goPr] : [{ kind: "show-diff", label: "Show the diff" }],
+          [...(hasPr ? [goPr] : [{ kind: "show-diff", label: "Show the diff" } as const]), ...leave],
           hasPr ? "pr" : "build",
         );
       default:
-        // denied_path, push, and error: one sentence with the cause, and Resume starts the step again from the last commit.
-        return blocked({ kind: "resume", label: "Resume" }, [STOP]);
+        // The other Needs-you reasons, and the legacy kinds budget and push: the sentence of the server and Continue.
+        return blocked(go, [...again, ...why, STOP, ...leave]);
     }
   }
   const send = activeSend(t);
-  const pause: Action = { kind: "pause", label: "Pause after this step" };
-  // A send or an update ends by itself, and Pause and Hold apply to the build only.
+  // A send or an update ends by itself, and Hold applies to the build only. Hold needs an open row of the part.
   const stopOnly = !!send || t.state === "ready";
   if (run) return working(stepSentence(t, run, R, o.name), stopOnly || !HOLD_AT.has(rowPhase(run)) ? [STOP] : [...holdOf(run.part), STOP]);
   if (t.working || (t.state === "implementing" && part?.state !== "self_reviewed"))
-    return working(t.working ? "The app prepares the next step." : `${R} is building your change.`, stopOnly ? [STOP] : [pause, STOP]);
+    return working(t.working ? "The app prepares the next step." : `${R} is building your change.`, [STOP]);
 
   // spec.md section 6.16.8: the PR rows of a part that changes several repositories. A failed row comes first, then the pointer of a
   // merged submodule.
@@ -852,7 +921,8 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   const update: Action | null = bases.length ? { kind: "update", label: `Update from ${baseLabel(bases.map((x) => x.branch))}` } : null;
   const asked = t.needsBase;
   const label = (list: TaskDto["bases"]) => (list.length ? baseLabel(list.map((x) => x.branch)) : t.targetBranch);
-  const detail = sendNote(t) ?? (asked && !moved ? `${R} asked for the newest ${label(t.bases)}. The branch already has it.` : null);
+  const detail =
+    sendNote(t, part?.id ?? null) ?? (asked && !moved ? `${R} asked for the newest ${label(t.bases)}. The branch already has it.` : null);
   const why = asked?.reason.trim().replace(/[^.?!]$/, "$&.");
   const askedStatus = asked && `${R} says the branch needs the newest ${label(bases)}${why ? `: ${why}` : "."}`;
   const wait = (status: string, primary: Action | null, more: Action[], screen: Screen, needsYou: boolean): TaskView => ({
@@ -870,7 +940,8 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
     const n = prs.length;
     const more: Action[] = [
       { kind: "show-diff", label: "Show the diff" },
-      ...(t.points.length ? [{ kind: "fix-points" as const, label: "Fix the small points too" }] : []),
+      ...(t.points.length ? [{ kind: "fix-points" as const, label: "Fix these too" }] : []),
+      ...againOf(t, part),
     ];
     const asIs: Action = { kind: "open-pr", label: "Open the PR as is" };
     if (update && pickedStatus) return wait(pickedStatus, update, more, "ready", true);
@@ -878,15 +949,15 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
     if (update && moved) return wait(`${baseNews(t)} since the branch point.`, update, [asIs, ...more], "ready", true);
     if (rows.length > 1)
       return wait(
-        `Your change in ${rows.length} repositories is ready and checked by ${R}.`,
+        readyText(t, part, `Your change in ${rows.length} repositories`),
         { kind: "open-pr", label: `Open ${plural(rows.filter((r) => r.remotePr === null).length, "PR")}` },
         more,
         "ready",
         true,
       );
-    if (o.name) return wait(`${o.name} is ready and checked by ${R}.`, { kind: "open-pr", label: "Open the PR" }, more, "ready", true);
+    if (o.name) return wait(readyText(t, part, o.name), { kind: "open-pr", label: "Open the PR" }, more, "ready", true);
     return wait(
-      n > 1 ? `Part ${part.ord} of ${n} is ready and checked by ${R}.` : `Your change is ready and checked by ${R}.`,
+      readyText(t, part, n > 1 ? `Part ${part.ord}` : "Your change"),
       { kind: "open-pr", label: n > 1 ? `Open PR for part ${part.ord} of ${n}` : "Open the PR" },
       more,
       "ready",
@@ -907,15 +978,16 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
     );
   }
   if (update && askedStatus) return wait(askedStatus, update, [goPr, CLOSE], "pr", true);
-  // spec.md section 6.18.2, step 7: a commit after the push. "Push to <branch>" has no route yet, so the row has no primary action.
+  // spec.md section 6.18.2, step 7: a commit after the push goes to the server only on the click of "Push to <branch>"
+  // (POST /parts/:part/push, pr.ts pushNow).
   if (part?.pushed && part.head && part.head !== part.pushed) {
     const who = prs.length > 1 ? `Part ${part.ord}` : "Your change";
     return wait(
       `${who} has new commits that are not on the server yet.`,
-      null,
+      { kind: "push", label: `Push to ${part.branch}` },
       [{ kind: "show-diff", label: "Show the diff" }, goPr, ...(update ? [update] : []), CLOSE],
       "pr",
-      false,
+      true,
     );
   }
   // docs/plans/ci-builds.md, Layer A: the build of the newest PR.
@@ -1312,7 +1384,7 @@ function partRow(t: TaskDto, p: TaskPartDto, o: SubOpts): Pick<SubRow, "text" | 
       if (reason?.kind === "usage") return { text: usageStatus(reason, R, o.now), actor: reason.armed ? "The app" : "You", action: null };
       if (reason) return { text: reason.text, actor: "You", action: null };
       const s = partStep(t, p.id);
-      const work = s && workText(s, R);
+      const work = s && workText(t, s, R);
       return { text: work || `${R} builds it.`, actor: s && work && APP_AT.has(rowPhase(s)) ? "The app" : R, action: null };
     }
     case "self_reviewed":
@@ -1534,11 +1606,7 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
         return { ...base, status: `${name} waits until you act on ${firstLabel(t)}.`, primary: null, more: [STOP], screen: "build" };
       // Another part can hold the first open row of the task, so this part reads its own row. Hold needs an open row.
       const own = partStep(t, p.id);
-      const more: Action[] = !own
-        ? [{ kind: "pause", label: "Pause after this step" }, STOP]
-        : HOLD_AT.has(rowPhase(own))
-          ? [...holdOf(p.id), STOP]
-          : [STOP];
+      const more: Action[] = own && HOLD_AT.has(rowPhase(own)) ? [...holdOf(p.id), STOP] : [STOP];
       return {
         ...base,
         status: own ? stepSentence(narrow, own, o.runner, name) : `${o.runner} builds ${name}.`,

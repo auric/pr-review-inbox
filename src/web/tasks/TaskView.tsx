@@ -39,11 +39,13 @@ import {
   goneBase,
   NO_MERGE,
   openQuestions,
+  overLimit,
   parentHint,
   partLabel,
   partName,
   partRef,
   partRows,
+  patchText,
   plannedTasks,
   pointerRow,
   prBuild,
@@ -51,7 +53,9 @@ import {
   prRowLook,
   questionPart,
   questionSource,
+  readyNotes,
   type SubRow,
+  sendOf,
   stoppedSend,
   stripSteps,
   subtaskRows,
@@ -292,6 +296,9 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const run = (kind: ActionKind, target = part) => {
     if (subs && target && ["start-now", "wait-merge", "drop", "push", "move", "push-move", "tell", "tracker-move"].includes(kind))
       return partAction(kind, target);
+    // The actions that send at once, such as Continue, its options, Hold, and Push (model.ts sendOf).
+    const direct = sendOf(kind, target?.id ?? null);
+    if (direct) return send(direct);
     switch (kind) {
       case "ask-again":
         setAsking(true);
@@ -301,7 +308,6 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       case "start-now":
       case "wait-merge":
       case "drop":
-      case "push":
       case "move":
       case "push-move":
       case "tell":
@@ -327,21 +333,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       }
       case "change-size":
         return focus(`task-size-${t.size ?? t.plan?.proposed ?? "small"}`);
-      case "stop":
-      case "pause":
-      case "resume":
-      case "close":
-      case "dismiss":
-        return send({ kind });
-      case "continue":
-        return send({ kind: "resume" });
       // ps5-plan.md section 4.2: the part comes from the action. Skip and Start again wait for one confirm, and Cancel sends nothing.
-      case "hold":
-        return target && send({ kind: "hold", part: target.id });
-      case "continue-part":
-        return target && send({ kind: "resume", part: target.id });
-      case "cancel-resume":
-        return send({ kind: "resume", option: "disarm" });
       case "skip": {
         if (!target) return;
         const { id } = target;
@@ -370,8 +362,6 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         const step = (subs && part?.blocked ? part.blocked : t.blocked)?.step;
         return step && focus(stepId(step));
       }
-      case "keep-size":
-        return send({ kind: "keep" });
       case "change-limit":
         setLimitOpen(true);
         return focus("task-limit");
@@ -396,8 +386,6 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return focus("task-tab-diff");
       case "fix-points":
         return part && send({ kind: "fix", part: part.id });
-      case "setup":
-        return target && send({ kind: "setup", part: target.id });
       case "go-pr": {
         if (subs && target?.remotePr) return onPr({ project: t.project, repo: t.repo, id: target.remotePr });
         const p = [...t.parts].reverse().find((x) => x.remotePr !== null);
@@ -631,9 +619,12 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
 
       {box !== "none" && (
         <TellClaude
+          // A text belongs to the part of its box, so a focus on another part starts an empty box.
+          key={part?.id ?? 0}
           runner={runner}
-          busy={box === "busy" || busy}
-          restore={stoppedSend(t)}
+          box={box}
+          pending={busy}
+          restore={stoppedSend(t, part?.id ?? null)}
           onSend={(text) => {
             setErrorText(null);
             return act.mutateAsync({ kind: "instruct", text, ...(subs && part && { part: part.id }) });
@@ -900,10 +891,13 @@ function Content(props: {
     );
 
   if (screen === "build" || screen === "ready") {
-    const tasks = plannedTasks(t);
+    const tasks = plannedTasks(t, part);
     const done = tasks.filter((k) => k.done).length;
     const parts = t.parts.filter((p) => p.kind !== "spec").length;
     const budget = t.settings.lineBudget ?? t.plan?.budget ?? null;
+    const notes = readyNotes(t, part);
+    const over = overLimit(t, part);
+    const patch = step?.detail.patch ? patchText(step.detail.patch, true) : null;
     return box(
       <>
         <p className="m-0 flex flex-wrap gap-x-5 gap-y-1 text-sm">
@@ -919,7 +913,21 @@ function Content(props: {
             <span className="text-ink-2">{budget ? `Lines: ${part.lines} of ${budget}` : `Lines: ${part.lines}`}</span>
           )}
         </p>
-        {b?.kind === "size" && props.limitOpen && (
+        {notes.length > 0 && (
+          <ul aria-label="Notes of the newest commit" className="m-0 grid list-none gap-0.5 p-0 text-sm text-ink-2">
+            {notes.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
+        )}
+        {over && !props.limitOpen && (
+          <div>
+            <Button variant="outline" size="sm" disabled={busy || t.working} onClick={() => props.onRun("change-limit")}>
+              Change the limit
+            </Button>
+          </div>
+        )}
+        {over && props.limitOpen && (
           <form
             className="flex flex-wrap items-end gap-2"
             onSubmit={(e) => {
@@ -960,13 +968,15 @@ function Content(props: {
                 </span>
               </p>
             )}
-            {step.detail.patch && (
+            {patch && (
               <p className="m-0">
-                The worktree went back to the last commit. The changes are saved in{" "}
-                <code translate="no" className="font-mono text-xs [overflow-wrap:anywhere]">
-                  {step.detail.patch}
-                </code>
-                . Resume starts the step again.
+                {patch.lead}
+                {patch.file && (
+                  <code translate="no" className="font-mono text-xs [overflow-wrap:anywhere]">
+                    {patch.file}
+                  </code>
+                )}
+                {patch.tail}
               </p>
             )}
           </div>
@@ -974,7 +984,7 @@ function Content(props: {
         {screen === "ready" && t.points.length > 0 && (
           <div className="grid gap-2">
             <p className="m-0 text-sm">
-              {runner}'s own review left {t.points.length === 1 ? "1 small point" : `${t.points.length} small points`}:
+              {runner}'s own review left {t.points.length === 1 ? "1 point" : `${t.points.length} points`}:
             </p>
             <ul className="m-0 grid list-none gap-1.5 p-0 text-sm">
               {t.points.map((p) => (
@@ -992,7 +1002,7 @@ function Content(props: {
             </ul>
             <div>
               <Button variant="outline" size="sm" disabled={busy} onClick={() => props.onRun("fix-points")}>
-                Fix the small points too
+                Fix these too
               </Button>
             </div>
           </div>
