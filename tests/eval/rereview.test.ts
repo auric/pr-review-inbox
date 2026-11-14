@@ -402,6 +402,7 @@ function makeDb(dir: string, h: Heads) {
 let heads: Heads;
 let ids: ReturnType<typeof makeDb>["ids"];
 let OUT: string;
+let CACHE: string;
 let built: { code: number; stdout: string; stderr: string };
 const rrCase = (): LocalCaseFile => {
   const [id] = readdirSync(join(OUT, "rereview"));
@@ -413,6 +414,7 @@ beforeAll(async () => {
     console.log(`Code under test: ${Bun.resolveSync(`../../scripts/eval/${f}`, import.meta.dir)}`);
   const repo = await makeCache(temp("cache"));
   heads = repo;
+  CACHE = repo.cache;
   const copy = temp("copy");
   const db = makeDb(copy, heads);
   ids = db.ids;
@@ -425,7 +427,9 @@ describe("eval:local re-review cases", () => {
     expect(built.stderr).toBe("");
     expect(built.code).toBe(0);
     expect(built.stdout).toContain("Re-review cases: 1, with 5 earlier findings. Must find: 2. Must not raise: 1. Neutral: 0.");
-    expect(built.stdout).toContain("Re-reviews left out: 1 without their earlier run, 0 with missing commits, 0 with nothing to measure.");
+    expect(built.stdout).toContain(
+      "Re-reviews left out: 1 without their earlier run, 0 without an earlier finding, 0 with missing commits, 0 with nothing to measure.",
+    );
     const m = JSON.parse(readFileSync(join(OUT, "MANIFEST.json"), "utf8")) as Manifest;
     expect(m.rereview.counts).toEqual({ cases: 1, bugs: 2, traps: 1, extras: 0, earlier: 5 });
     expect(readdirSync(join(OUT, "rereview"))).toEqual([`pr1-rr2`]);
@@ -450,6 +454,86 @@ describe("eval:local re-review cases", () => {
     ]);
     expect(c.traps.map((t) => [t.id, t.lines])).toEqual([[`item-${ids.trap}`, [35, 35]]]);
   });
+
+  test(
+    "a re-review whose earlier run has no finding left is skipped and counted, and the build passes",
+    async () => {
+      const dir = temp("no-findings");
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ baseUrl: "https://bitbucket.example.invalid", userSlug: "me" }));
+      const file = join(dir, "db-test.sqlite");
+      const db = openDb(file);
+      db.query(
+        `INSERT INTO pull_request (id, project, repo, pr_id, title, description, author_slug, source_head, target_head)
+          VALUES (1, 'PROJ', 'repo', 7, 'Add the calc helpers', '', 'author', $b, $base)`,
+      ).run({ b: heads.b, base: heads.base });
+      const run = (k: string, head: string, since: string | null) =>
+        (
+          db
+            .query(
+              `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, since_head, status, started_at)
+              VALUES (1, 'review', 'general', '', $k, $head, $base, $base, $since, 'completed', 1000) RETURNING id`,
+            )
+            .get({ k, head, base: heads.base, since }) as { id: number }
+        ).id;
+      // The earlier run at A has no finding. The re-review at B posts one, so the case has a must find but no earlier finding.
+      run("k0", heads.a, null);
+      db.query(
+        `INSERT INTO review_item (run, kind, payload_json, body, path, side, line, line_end, status)
+          VALUES ($run, 'finding', $payload, 'Finding at 2.', $path, 'new', 2, 2, 'posted')`,
+      ).run({ run: run("k1", heads.b, heads.a), payload: JSON.stringify({ ...finding(B_TEXT, 2), module: "core" }), path: PATH });
+      db.close();
+      const out = join(temp("set"), "eval-local");
+      const r = await bun([LOCAL, "--db", file, "--cache", CACHE, "--out", out]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Re-reviews left out: 0 without their earlier run, 1 without an earlier finding,");
+      const m = JSON.parse(readFileSync(join(out, "MANIFEST.json"), "utf8")) as Manifest;
+      expect(m.rereview.counts.cases).toBe(0);
+      expect(m.rereview.skipped.noFindings).toBe(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "a stored end line before the start line is put in order, and a case that fails the schema is left out and counted",
+    async () => {
+      const dir = temp("invalid");
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ baseUrl: "https://bitbucket.example.invalid", userSlug: "me" }));
+      const file = join(dir, "db-test.sqlite");
+      const db = openDb(file);
+      db.query(
+        `INSERT INTO pull_request (id, project, repo, pr_id, title, description, author_slug, source_head, target_head)
+          VALUES (1, 'PROJ', 'repo', 7, 'Reversed lines', '', 'author', $a, $base), (2, 'PROJ', 'repo', 8, 'Empty task key', '', 'author', $a, $base)`,
+      ).run({ a: heads.a, base: heads.base });
+      // A pr_task row with an empty key fails tasks.0.key of the case schema.
+      db.run("INSERT INTO pr_task (pr, key, source, ord) VALUES (2, '', 'branch', 0)");
+      for (const pr of [1, 2]) {
+        const { id } = db
+          .query(
+            `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, since_head, status, started_at)
+            VALUES ($pr, 'review', 'general', '', $k, $a, $base, $base, NULL, 'completed', 1000) RETURNING id`,
+          )
+          .get({ pr, k: `k${pr}`, a: heads.a, base: heads.base }) as { id: number };
+        db.query(
+          `INSERT INTO review_item (run, kind, payload_json, body, path, side, line, line_end, status)
+            VALUES ($run, 'finding', $payload, 'Finding at 12.', $path, 'new', 12, 10, 'posted')`,
+        ).run({ run: id, payload: JSON.stringify({ ...finding(A_TEXT, 12), module: "core" }), path: PATH });
+      }
+      db.close();
+      const out = join(temp("set"), "eval-local");
+      const r = await bun([LOCAL, "--db", file, "--cache", CACHE, "--out", out]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Cases left out: 1 that failed the case schema (first: tasks.0.key too_small).");
+      const m = JSON.parse(readFileSync(join(out, "MANIFEST.json"), "utf8")) as Manifest;
+      expect(m.counts.cases).toBe(1);
+      expect(m.invalid).toEqual({ cases: 1, first: "tasks.0.key too_small" });
+      const [id] = readdirSync(join(out, "cases"));
+      const c = JSON.parse(readFileSync(join(out, "cases", id as string, "case.json"), "utf8")) as LocalCaseFile;
+      expect(c.bugs.map((b) => b.lines)).toEqual([[10, 12]]);
+    },
+    SLOW,
+  );
 
   test(
     "--rereview seeds the earlier run, runs a re-review, and scores re-raises and verdicts",

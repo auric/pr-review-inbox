@@ -251,7 +251,8 @@ export type RereviewDraft = Omit<Draft, "runs" | "first" | "last" | "human"> & {
 
 // noEarlier: a re-review run whose earlier run is not in the copy, or does not match its earlier head. badPayload: an earlier finding
 // whose stored payload is no finding.
-export type RereviewSkipped = { noEarlier: number; badPayload: number; missingCommits: number; emptyCases: number };
+// noFindings: the earlier run has no finding left that the case can seed (cases.ts rereviewBlock needs one).
+export type RereviewSkipped = { noEarlier: number; noFindings: number; badPayload: number; missingCommits: number; emptyCases: number };
 
 export type Skipped = {
   refuted: number;
@@ -296,6 +297,9 @@ export const BUG_CLASS_NAMES = ["security", "concurrency", "resource", "behavior
 
 export const caseId = (d: Pick<Draft, "pr" | "head" | "base">) => `pr${d.pr}-${d.head.slice(0, 12)}-${d.base.slice(0, 8)}`;
 export const rereviewId = (d: Pick<RereviewDraft, "pr" | "run">) => `pr${d.pr}-rr${d.run}`;
+
+// The stored end line can be before the start line. cases.ts range needs them in order.
+const span = (line: number, end: number | null): [number, number] => [Math.min(line, end ?? line), Math.max(line, end ?? line)];
 
 // Pure: the database rows to drafts. me: the user slug, as isMe reads it. textOf: the text of a comment of the PR as caseThreads
 // writes it, with the names replaced and the cap.
@@ -345,7 +349,7 @@ export function select(
   };
   const drafts = new Map<string, Draft>();
   const byRun = new Map<number, Draft>();
-  const rrSkipped: RereviewSkipped = { noEarlier: 0, badPayload: 0, missingCommits: 0, emptyCases: 0 };
+  const rrSkipped: RereviewSkipped = { noEarlier: 0, noFindings: 0, badPayload: 0, missingCommits: 0, emptyCases: 0 };
   const rrByRun = new Map<number, RereviewDraft & { from: number }>();
   const runs = db.query(SQL.runs).all() as RunRow[];
   for (const [k, r] of runs.entries()) {
@@ -410,7 +414,7 @@ export function select(
       skipped.noAnchor++;
       continue;
     }
-    const spot: Spot = { path: i.path, side: i.side, lines: [i.line, i.line_end ?? i.line] };
+    const spot: Spot = { path: i.path, side: i.side, lines: span(i.line, i.line_end) };
     const end = last(i);
     const code = end.p.discardReason?.code;
     // A re-review case gets the decisions on the items of its own run.
@@ -494,7 +498,7 @@ export function select(
         id: `item-${i.id}`,
         path: i.path,
         side: i.side,
-        lines: [i.line, i.line_end ?? i.line],
+        lines: span(i.line, i.line_end),
         status: yours ? status : "dropped",
         resolved: status === "posted" ? (resolved.get(i.id) ?? null) : null,
         body: i.body,
@@ -533,7 +537,7 @@ export function select(
     const at = list.filter((d) => d.head === anchor.toHash && (spot.side === "new" || d.base === anchor.fromHash));
     if (!at.length) skipped[mine ? "commentOtherHead" : "otherOtherHead"]++;
     else if (!mine) sources.other++;
-    const place = { path: spot.path, side: spot.side, lines: [spot.line, spot.lineEnd] as [number, number] };
+    const place = { path: spot.path, side: spot.side, lines: span(spot.line, spot.lineEnd) };
     const text = textOf(c.pr, c.text);
     for (const d of at)
       if (mine) d.human.push({ id: `comment-${c.comment_id}`, ...place, note: `Your comment ${c.comment_id}.`, text, source: "own" });
@@ -801,7 +805,7 @@ export async function caseThreads(
     const spot = anchor ? threadSpot({ anchor, excerpt }) : null;
     if (spot && spot.line === null) t.where.path = spot.path;
     else if (spot && anchor) {
-      const s = { path: spot.path, lines: [spot.line as number, spot.lineEnd] as [number, number] };
+      const s = { path: spot.path, lines: span(spot.line as number, spot.lineEnd) };
       const m = await o.place(s, spot.side === "new" ? anchor.toHash : anchor.fromHash, spot.side);
       if (!m) Object.assign(t, { where: { path: spot.path }, unplaced: true });
       else {
@@ -890,6 +894,9 @@ export type Manifest = {
     counts: { cases: number; bugs: number; traps: number; extras: number; earlier: number };
     skipped: RereviewSkipped;
   };
+  // The plain and re-review cases that failed the case schema, left out. first: the zod path and code of the first one. Absent in an
+  // older manifest.
+  invalid: { cases: number; first: string | null };
 };
 
 // The cases of one repository between carry and the write.
@@ -956,12 +963,24 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
 
     // A re-review case needs something to find, to avoid, or to not raise again.
     const rrSkipped = sel.rereviewSkipped;
-    const rereviews = sel.rereviews.filter(
+    const seeded = sel.rereviews.filter((r) => r.earlier.length > 0);
+    rrSkipped.noFindings += sel.rereviews.length - seeded.length;
+    const rereviews = seeded.filter(
       (r) => r.bugs.length || r.traps.length || r.earlier.some((e) => e.status === "posted" || e.status === "discarded"),
     );
-    rrSkipped.emptyCases += sel.rereviews.length - rereviews.length;
+    rrSkipped.emptyCases += seeded.length - rereviews.length;
     mkdirSync(join(o.out, "rereview"), { recursive: true });
 
+    // One case that fails the schema stays out. Any other error still fails the build.
+    const invalid: Manifest["invalid"] = { cases: 0, first: null };
+    const valid = (raw: unknown): LocalCaseFile | null => {
+      const r = localCaseFile.safeParse(raw);
+      if (r.success) return r.data;
+      invalid.cases++;
+      const i = r.error.issues[0];
+      invalid.first ??= `${i?.path.join(".")} ${i?.code}`;
+      return null;
+    };
     const written: { id: string; hash: string }[] = [];
     const rrWritten: { id: string; hash: string }[] = [];
     let runs = 0;
@@ -1084,7 +1103,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
       };
 
       for (const d of cases) {
-        const c: LocalCaseFile = localCaseFile.parse({
+        const c = valid({
           id: caseId(d),
           ...(await fields(d)),
           bugs: d.bugs,
@@ -1095,6 +1114,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
           ...(chosen.has(d) && { clean: true }),
           ...(await threadsOf(d)),
         });
+        if (!c) continue;
         const text = `${JSON.stringify(c, null, 2)}\n`;
         mkdirSync(join(o.out, "cases", c.id));
         writeFileSync(join(o.out, "cases", c.id, "case.json"), text);
@@ -1102,7 +1122,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
         runs += d.runs;
       }
       for (const d of rrOk) {
-        const c: LocalCaseFile = localCaseFile.parse({
+        const c = valid({
           id: rereviewId(d),
           ...(await fields(d)),
           bugs: d.bugs,
@@ -1112,6 +1132,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
           rereview: { since: d.since, sinceBase: d.sinceBase, earlier: d.earlier },
           ...(await threadsOf(d)),
         });
+        if (!c) continue;
         const text = `${JSON.stringify(c, null, 2)}\n`;
         mkdirSync(join(o.out, "rereview", c.id));
         writeFileSync(join(o.out, "rereview", c.id, "case.json"), text);
@@ -1155,6 +1176,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
         },
         skipped: rrSkipped,
       },
+      invalid,
     };
     writeFileSync(join(o.out, "MANIFEST.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     return manifest;
@@ -1176,8 +1198,9 @@ export function report(m: Manifest): string {
     `PR threads of other people at the reviewed heads: ${m.threads.threads} threads with ${m.threads.comments} comments in ${m.threads.cases} cases. Left out: ${m.threads.capped} comments over the cap of ${THREAD_COMMENTS_MAX} per case, ${m.threads.mineRoot} replies in threads that you started, ${m.threads.overlap} threads on the lines of a must find, ${m.threads.edited} comments edited from the run start on. Without lines: ${m.threads.unplaced} inline threads whose lines do not map to the reviewed head. Re-review cases: ${m.threads.earlier} replies of the PR author to posted earlier findings.`,
     `Fingerprint: ${m.fingerprint.slice(0, 12)}. MANIFEST.json holds these counts.`,
     `Re-review cases: ${r.counts.cases}, with ${r.counts.earlier} earlier findings. Must find: ${r.counts.bugs}. Must not raise: ${r.counts.traps}. Neutral: ${r.counts.extras}.`,
-    `Re-reviews left out: ${r.skipped.noEarlier} without their earlier run, ${r.skipped.missingCommits} with missing commits, ${r.skipped.emptyCases} with nothing to measure. Earlier findings left out: ${r.skipped.badPayload} with a payload that is no finding.`,
+    `Re-reviews left out: ${r.skipped.noEarlier} without their earlier run, ${r.skipped.noFindings} without an earlier finding, ${r.skipped.missingCommits} with missing commits, ${r.skipped.emptyCases} with nothing to measure. Earlier findings left out: ${r.skipped.badPayload} with a payload that is no finding.`,
   ];
+  if (m.invalid.cases) lines.push(`Cases left out: ${m.invalid.cases} that failed the case schema (first: ${m.invalid.first}).`);
   if (n.cases < MINIMUM.cases || n.bugs < MINIMUM.bugs || n.traps < MINIMUM.traps)
     lines.push(
       `The set is below the recommended minimum of ${MINIMUM.cases} cases, ${MINIMUM.bugs} must-find findings, and ${MINIMUM.traps} must-not-raise findings.`,
