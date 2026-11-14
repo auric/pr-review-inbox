@@ -142,7 +142,7 @@ beforeAll(async () => {
 const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   repeat: "1",
   candidateRepeat: null,
-  variants: ["order", "rules2"],
+  variants: ["broad", "verify2"],
   modules: ["failures"],
   baseEffort: null,
   effort: null,
@@ -415,12 +415,12 @@ describe("eval:ab arguments", () => {
       "fake",
     ]);
     expect(runArgs("review", "candidate", opts(), "o")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "order,rules2", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "broad,verify2", "--modules", `${shippedModules},failures`],
       ...["--ordinals", "--out", "o", "--runner", "fake"],
     ]);
     // --candidate-effort: only the candidate gets --effort.
     expect(runArgs("review", "candidate", opts({ effort: "xhigh" }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "order,rules2", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "broad,verify2", "--modules", `${shippedModules},failures`],
       ...["--effort", "xhigh", "--ordinals", "--runner", "fake"],
     ]);
     expect(runArgs("review", "baseline", opts({ effort: "xhigh" }), "")).not.toContain("--effort");
@@ -441,25 +441,28 @@ describe("eval:ab arguments", () => {
       "--ordinals",
       "--real",
     ]);
-    // rereview-strict joins a re-review candidate only through --candidate-variants.
+    // A re-review candidate gets the same variants as a review candidate.
     expect(runArgs("rereview", "candidate", opts({ runner: null }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "order,rules2"],
+      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "broad,verify2"],
       ...["--modules", `${shippedModules},failures`, "--ordinals", "--real"],
     ]);
-    // Bisect: no variants and no extra module. rereview-strict changes nothing in a review run, so the review candidate drops it.
-    const bare = opts({ variants: ["rereview-strict"], modules: [] });
-    expect(runArgs("review", "candidate", bare, "")).toEqual([
-      "--set",
-      "local",
-      "--repeat",
-      "1",
-      "--modules",
-      shippedModules,
-      "--ordinals",
-      "--runner",
-      "fake",
-    ]);
-    expect(runArgs("rereview", "candidate", bare, "")).toContain("rereview-strict");
+    // Bisect: no variants and no extra module.
+    const bare = opts({ variants: [], modules: [] });
+    for (const mode of ["review", "rereview"] as const)
+      expect(runArgs(mode, "candidate", bare, "")).toEqual([
+        ...["--set", "local", "--repeat", "1", ...(mode === "rereview" ? ["--rereview"] : [])],
+        ...["--modules", shippedModules, "--ordinals", "--runner", "fake"],
+      ]);
+  });
+
+  // review-quality-2026.md WP-R1: the retired variants are refused before any build.
+  test("--candidate-variants takes broad and verify2 and refuses the retired variants", () => {
+    expect(parseAb(["--candidate-variants", "broad"])).toMatchObject({ variants: ["broad"] });
+    expect(parseAb(["--candidate-variants", "verify2,broad"])).toMatchObject({ variants: ["verify2", "broad"] });
+    for (const retired of ["signal", "order", "rules2", "rereview-strict"])
+      expect(parseAb(["--candidate-variants", retired])).toMatchObject({
+        error: expect.stringContaining("--variants must be a comma list of broad, parts, verify2."),
+      });
   });
 
   test("the default candidate equals the baseline in both modes", () => {
@@ -500,7 +503,8 @@ describe("eval:ab arguments", () => {
       ["--candidate-reviewer-effort", "low"],
       ["--candidate-reviewer-mode", "off"],
       ["--candidate-modules", "failures"],
-      ["--candidate-variants", "order"],
+      ["--candidate-variants", "broad"],
+      ["--candidate-variants", "broad,verify2"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
       ["--candidate-verifier", "off"],
     ])
@@ -508,6 +512,8 @@ describe("eval:ab arguments", () => {
         error: expect.stringContaining("--candidate-replay replays the finder of the baseline, but the candidate changes"),
       });
     expect(parseAb(["--candidate-replay", "--candidate-verifier-effort", "high"])).toMatchObject({ replay: true, verifierEffort: "high" });
+    // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can test it.
+    expect(parseAb(["--candidate-replay", "--candidate-variants", "verify2"])).toMatchObject({ replay: true, variants: ["verify2"] });
     // --effort changes both sides, so the finder of the replay matches its baseline.
     expect(parseAb(["--candidate-replay", "--effort", "medium"])).toMatchObject({ replay: true });
   });

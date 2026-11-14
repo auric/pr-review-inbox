@@ -113,8 +113,6 @@ export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_N
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
 --ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.
 Each run records its CLI calls in <result>.calls/. --replay-find takes the finder and salvage calls from the recording of that result and runs only the verify calls. It refuses a change of the finder setup.`;
-// docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin.
-const REREVIEW_ONLY: readonly Variant[] = ["rereview-strict"];
 
 export type Options = {
   real: boolean;
@@ -224,9 +222,6 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   if (variants?.some((x) => !(VARIANTS as readonly string[]).includes(x)))
     return { error: `--variants must be a comma list of ${VARIANTS.join(", ")}.` };
   const rereview = v.rereview ?? false;
-  const idle = variants?.filter((x) => (REREVIEW_ONLY as readonly string[]).includes(x)) ?? [];
-  if (idle.length && !rereview)
-    return { error: `--variants ${idle.join(",")} changes only the re-review prompt. Add --rereview, or the run measures no change.` };
   return {
     real: v.real ?? false,
     runner,
@@ -283,7 +278,7 @@ export function evalProfile(o: Options) {
 export const callsDir = (result: string) => result.replace(/\.json$/, ".calls");
 type Recorded = { kind: "find" | "verify"; outcome: RunOutcome };
 // review-quality-2026.md E2: the variants that change only the verify prompt. A replay can change them.
-export const VERIFY_ONLY: readonly string[] = [];
+export const VERIFY_ONLY: readonly string[] = ["verify2"] satisfies Variant[];
 // The profile fields of a and b that differ and reach a finder or salvage call. catalog.ts checked(): the verify mode changes the finder
 // prompt. The verifier effort, model, and outcome, and the verify-only variants, reach only the verify call.
 export function finderChange(a: Record<string, unknown>, b: Record<string, unknown>): string[] {

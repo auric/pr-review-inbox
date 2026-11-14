@@ -219,8 +219,8 @@ describe("target branch", () => {
     expect(bad.notLoaded[0]).toContain("the app cannot read the target branch commit");
   });
 
-  // docs/plans/review-v3.md section 5, the "rules2" variant: REVIEW.md at the repository root, with the CLAUDE.md caps and trust line.
-  test("review reads REVIEW.md at the root after the root CLAUDE.md files, with the same caps; off reads none", async () => {
+  // review-quality-2026.md WP-R1: the retired "rules2" variant read REVIEW.md. No run reads it now.
+  test("the target reader reads no REVIEW.md, at the root or in a changed folder", async () => {
     const dir = join(root, "review-md");
     mkdirSync(dir);
     const empty = join(dir, "empty.gitconfig");
@@ -250,40 +250,12 @@ describe("target branch", () => {
       "sub/REVIEW.md": "Nested review rules.\n",
       "sub/CLAUDE.md": "Sub rules.\n",
     });
-    const read = (review: boolean) =>
-      buildInstructions({ target: treeReader(bare, env, commit), scoped: ["sub"], review, clone: null, local: [], extra: "" });
-    const off = await read(false);
-    expect(off.files.map((f) => f.path)).toEqual(["CLAUDE.md", "sub/CLAUDE.md"]);
-    expect(off.text).not.toContain("Review rules.");
-    const on = await read(true);
-    expect(on.files.map((f) => f.path)).toEqual(["CLAUDE.md", "REVIEW.md", "docs/review-extra.md", "sub/CLAUDE.md"]);
-    expect(on.text.startsWith(`# Project instructions\n\n${INSTRUCTIONS_TRUST}\n\n`)).toBe(true);
-    expect(on.text.split(INSTRUCTIONS_TRUST).length).toBe(2);
-    expect(on.text).toContain("## From the target branch: REVIEW.md (applies to all files)\n\nReview rules. `@docs/review-extra.md`\n");
-    expect(on.text).not.toContain("Nested review rules.");
-    expect(on.sources.map((s) => s.text)).toContain("Review rules. `@docs/review-extra.md`\n");
-    expect(on.bytes).toBe(
-      off.bytes + Buffer.byteLength("Review rules. @docs/review-extra.md\n") + Buffer.byteLength("Extra review rules.\n"),
-    );
-    // A REVIEW.md without CLAUDE.md loads alone. A missing REVIEW.md is no gap.
+    const b = await buildInstructions({ target: treeReader(bare, env, commit), scoped: ["sub"], clone: null, local: [], extra: "" });
+    expect(b.files.map((f) => f.path)).toEqual(["CLAUDE.md", "sub/CLAUDE.md"]);
+    expect(b.text).not.toMatch(/review rules/i);
+    expect(b.notLoaded).toEqual([]);
     const only = await commitOf({ "REVIEW.md": "Only review rules.\n" });
-    const alone = await buildInstructions({ target: treeReader(bare, env, only), review: true, clone: null, local: [], extra: "" });
-    expect(alone.files.map((f) => f.path)).toEqual(["REVIEW.md"]);
-    const none = await commitOf({ "CLAUDE.md": "Root rules.\n" });
-    const missing = await buildInstructions({ target: treeReader(bare, env, none), review: true, clone: null, local: [], extra: "" });
-    expect(missing.notLoaded).toEqual([]);
-    // FILE_CAP and TOTAL_CAP apply as for CLAUDE.md.
-    const big = await commitOf({ "CLAUDE.md": "Root rules.\n", "REVIEW.md": "x".repeat(FILE_CAP + 1) });
-    const over = await buildInstructions({ target: treeReader(bare, env, big), review: true, clone: null, local: [], extra: "" });
-    expect(over.files.map((f) => f.path)).toEqual(["CLAUDE.md"]);
-    expect(over.notLoaded).toEqual([`REVIEW.md from the target branch (the file is over ${FILE_CAP / 1024} KB)`]);
-    const first = FILE_CAP - 10;
-    const full = await commitOf({ "CLAUDE.md": "c".repeat(first), "REVIEW.md": "r".repeat(TOTAL_CAP - first + 1) });
-    const capped = await buildInstructions({ target: treeReader(bare, env, full), review: true, clone: null, local: [], extra: "" });
-    expect(capped.files.map((f) => f.path)).toEqual(["CLAUDE.md"]);
-    expect(capped.notLoaded).toEqual([
-      `REVIEW.md from the target branch (the instructions are over ${TOTAL_CAP.toLocaleString("en-US")} bytes)`,
-    ]);
+    expect((await buildInstructions({ target: treeReader(bare, env, only), clone: null, local: [], extra: "" })).files).toEqual([]);
   }, 60_000);
 });
 

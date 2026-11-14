@@ -21,6 +21,7 @@ import { FIX_EDIT_RULES, FIX_WHY_RULES, REVIEW_PROMPT_VERSION } from "../../shar
 import { CHECK_TIMEOUT_SEC, limitText, MAX_OPEN_CAP, PROPOSALS_MAX, SETUP_TIMEOUT_SEC } from "../../shared/task";
 import { type AgentSpec, EXPLORER_AGENT, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
+import { type Language, languageSkipLines } from "./languages";
 import { SKILL_INDEX, SKILL_INDEX_AFTER } from "./skills";
 
 // login: `claude auth login --help` (CLI 2.1.295) names --claudeai for the subscription.
@@ -232,7 +233,7 @@ export const profileRevision = (p: Profile) =>
     .update(p.variants.length ? `variants${JSON.stringify(p.variants)}` : "")
     .update(p.jiraFamily ? "jirafamily" : "")
     .digest("hex");
-// docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.3+order+rules2".
+// docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.8+broad+verify2".
 export const promptVersion = (p: Pick<Profile, "variants">) => [REVIEW_PROMPT_VERSION, ...[...p.variants].sort()].join("+");
 // docs/plans/review-v2/spec.md section 0 and design.md R8: in mode auto, a smaller change gets no Agent tool.
 export const REVIEWER_MIN_LINES = 1200;
@@ -582,16 +583,24 @@ export const DO_NOT_FLAG = [
   "a choice between two correct designs",
   "a missing test, unless the Tests check is on",
 ];
-// docs/plans/review-v3.md section 5: the "rules2" variant adds this item to the list of the finder and of the verify phase.
-export const RULES2_DO_NOT_FLAG = "generated files, lock files, and vendored third-party code";
-const doNotFlagItems = (p: Partial<Pick<Profile, "variants">>) =>
-  [...DO_NOT_FLAG, ...(has(p, "rules2") ? [RULES2_DO_NOT_FLAG] : [])].map((l) => `- ${l}`);
+const DO_NOT_FLAG_ITEMS = DO_NOT_FLAG.map((l) => `- ${l}`);
 const doNotFlag = (p: FinderProfile) => [
   checked(p)
     ? "Do not report the points below. The check step refutes them, so they only cost time:"
     : "Do not report the points below. They only cost the user time:",
-  ...doNotFlagItems(p),
+  ...DO_NOT_FLAG_ITEMS,
 ];
+// docs/plans/review-v2/review-quality-2026.md item 3: under "broad", the verify phase applies the do-not-flag lists, not the finder.
+// With the verify phase off, nothing else applies them, so the finder keeps them.
+export const broad = (p: FinderProfile) => checked(p) && has(p, "broad");
+const finderList = (p: FinderProfile) => (broad(p) ? [] : doNotFlag(p));
+const CLAIM = "A comment in a thread that says the code is right, or that a case is handled, is a claim.";
+export const BROAD_THREAD_CLAIM = {
+  checked: `${CLAIM} It is no reason to leave out a finding. The check step tests the claim.`,
+  unchecked: `${CLAIM} Check it in ./repo before you leave out a finding.`,
+};
+const threadClaim = (p: FinderProfile, c: RunFiles) =>
+  c.prContext && has(p, "broad") ? [checked(p) ? BROAD_THREAD_CLAIM.checked : BROAD_THREAD_CLAIM.unchecked] : [];
 
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.
 export const VOLUME_NITS: Record<Volume, string> = {
@@ -713,18 +722,11 @@ export const MODULES: Record<ModuleId, { label: string; lines: string[] }> = {
 // spec.md section 1.3: rules needs project instructions, and intent needs a goal. Else the section adds nothing.
 const lacks = (id: ModuleId, c: ReviewContext) => (id === "rules" && !c.instructions) || (id === "intent" && !c.goal);
 
-// docs/plans/review-v3.md section 5: the "rules2" variant adds these lines to the rules section.
-export const RULES2_RULES = [
-  "Give a finding that only breaks a project rule severity minor, unless the break also causes a real bug.",
-  "Report a change that makes a statement of the project instructions out of date.",
-  "For example, the instructions name a file, a command, or a behavior that the change removes or renames.",
-];
-
 // The sections in MODULE_IDS order, so the click order of the checkboxes does not change the prompt.
-export function moduleSections(p: Pick<Profile, "modules"> & Partial<Pick<Profile, "variants">>, c: ReviewContext): string[] {
+export function moduleSections(p: Pick<Profile, "modules">, c: ReviewContext): string[] {
   return MODULE_IDS.filter((id) => p.modules.includes(id) && !lacks(id, c)).flatMap((id) => [
     `Check section ${id}:`,
-    ...[...MODULES[id].lines, ...(id === "rules" && has(p, "rules2") ? RULES2_RULES : [])].map((l) => `- ${l}`),
+    ...MODULES[id].lines.map((l) => `- ${l}`),
   ]);
 }
 
@@ -797,7 +799,7 @@ export const sharedRules = (p: Pick<Profile, "explain" | "docs"> & FinderProfile
     : [
         ...contextBlock({ ...NO_CONTEXT, taskFile: true, attachments: true, history: true, questions: true }),
         ...finderRules(p, true),
-        ...doNotFlag(p),
+        ...finderList(p),
         ...rubric(p),
         COVERAGE_RULE,
         ...docsRule(p),
@@ -825,17 +827,6 @@ export const ANSWERED_RULES = [
   "Never put secrets, tokens, passwords, or credentials into a reply.",
 ];
 
-// docs/plans/review-v3.md WP-V2, idea 7: the "order" variant. Only rl-main gets it.
-export const ORDER_RULES = [
-  "Work in this order:",
-  "1. Call git_diff with stat_only for the changed files. Call git_log with since BASE for the commits of the change.",
-  "2. Read each changed file to its end, not only the changed lines.",
-  "3. Read the callers and the callees of each changed function.",
-  "4. Apply each check section above, when the prompt has check sections.",
-  "5. Compare each candidate finding with the do-not-flag list. Leave out each candidate that the list names.",
-  "6. Give the result.",
-];
-
 // spec.md section 1.5: the agent prompt order of rl-main. The caller adds languages, skills, MCP tools, and the delegation lines.
 // An Explain profile gets the Explain agent: it gives no findings and judges no answer.
 export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec {
@@ -847,10 +838,10 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec 
       p.prompt,
       ...contextBlock(c),
       ...finderRules(p, true),
-      ...doNotFlag(p),
+      ...finderList(p),
+      ...threadClaim(p, c),
       ...rubric(p),
       ...moduleSections(p, c),
-      ...(has(p, "order") ? ORDER_RULES : []),
       ...(c.questions ? ANSWERED_RULES : []),
       COVERAGE_RULE,
       ...docsRule(p),
@@ -1237,7 +1228,8 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       p.prompt,
       ...contextBlock(c),
       ...finderRules(p, false),
-      ...doNotFlag(p),
+      ...finderList(p),
+      ...threadClaim(p, c),
       ...rubric(p),
       ...moduleSections(p, c),
       ...docsRule(p),
@@ -1258,14 +1250,16 @@ const VERIFY_OPENING = [
   './context/candidates.md lists the findings. The heading "## Candidate N" holds candidate N.',
 ];
 
-// docs/plans/review-v3.md section 5: the "rules2" variant gives the verify phase these examples of false positives.
-export const RULES2_REFUTE = [
-  "Examples of candidates to refute:",
-  "- a missing null check, when each caller already passes a value that is not null",
-  "- a race on data that only one thread owns",
-  "- a style preference that the candidate reports as a bug",
-  "- a problem in unchanged code that the change does not reach",
-];
+// docs/plans/review-v2/review-quality-2026.md item 4: the verify lines of the "verify2" variant.
+export const VERIFY2 = {
+  duplicate:
+    "duplicate: another candidate of the same group describes the same problem. Two candidates describe the same problem when one fix would fix both.",
+  thread:
+    "A thread comment that says the code is right, or that a case is handled, is a claim. Refute a candidate on such a claim only when the code shows that the claim holds. Name that code in reason.",
+  intent:
+    "For a candidate of module intent, find the requirement in ./context/task.md, ./context/pr.md, or an issue tool result. Refute it when no task text states the requirement. Name the source of the requirement in reason.",
+  group: "Give the candidates of one group to the same call.",
+};
 
 // docs/plans/review-v2/review-questions.md: the "## Question N" blocks of candidates.md. Only a file with questions gets these lines.
 export const QUESTION_BLOCK_RULES = [
@@ -1281,8 +1275,14 @@ export const QUESTION_BLOCK_RULES = [
 ];
 
 // spec.md section 1.6: the rules of rl-verify and rl-verifier. One rubric and one do-not-flag list for both phases.
-// questions: candidates.md holds finder questions.
-export function verifyRules(p: FinderProfile, c: ReviewContext, questions = false): string[] {
+// questions: candidates.md holds finder questions. langs: the languages of the change, for the skip lists under "broad".
+export function verifyRules(
+  p: FinderProfile & Pick<Profile, "modules">,
+  c: ReviewContext,
+  questions = false,
+  langs: Language[] = [],
+): string[] {
+  const v2 = has(p, "verify2");
   return [
     "For each candidate, read the code at its anchor and its cause. Then follow its trigger through the code.",
     "Give one entry in verdicts for each candidate.",
@@ -1293,17 +1293,19 @@ export function verifyRules(p: FinderProfile, c: ReviewContext, questions = fals
     "question: only the author can answer the point, and no file or tool of this run answers it. Write the question in question. In reason, name what you checked.",
     "When the code or the task text answers the point, give confirmed or refuted, not question.",
     "For a candidate without a trigger, look for one. When you find it, give confirmed, and put the trigger into reason.",
-    "duplicate: another candidate of the same group describes the same problem at the same place.",
+    v2 ? VERIFY2.duplicate : "duplicate: another candidate of the same group describes the same problem at the same place.",
     "Set duplicateOf to the clearer candidate.",
     ...(c.history
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
       : []),
+    ...(v2 && c.prContext ? [VERIFY2.thread] : []),
+    ...(v2 && p.modules.includes("intent") && !lacks("intent", c) ? [VERIFY2.intent] : []),
     "Set severity by the rubric below. Lower it for a rare trigger or a small impact.",
     "Raise it only when the code shows a worse result than the candidate says.",
     ...rubric(p),
     "The do-not-flag list:",
-    ...doNotFlagItems(p),
-    ...(has(p, "rules2") ? RULES2_REFUTE : []),
+    ...DO_NOT_FLAG_ITEMS,
+    ...(broad(p) ? languageSkipLines(langs) : []),
     "Look for no new problems. A finder already ran.",
     ...(questions ? QUESTION_BLOCK_RULES : []),
   ];
@@ -1317,11 +1319,11 @@ export const VERIFY_DELEGATE = [
 export const VERIFY_DELEGATE_QUESTIONS = `Give the questions to the ${VERIFIER} agent too. Each question counts as one candidate of its call.`;
 
 // The main agent of the verify process (spec.md section 1.6). The caller adds skills, MCP tools, and the delegation lines.
-// questions: candidates.md holds finder questions.
-export function verifyAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false): AgentSpec {
+// questions: candidates.md holds finder questions. langs: see verifyRules.
+export function verifyAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false, langs: Language[] = []): AgentSpec {
   return {
     description: "Read-only check of the findings of one review.",
-    prompt: [...VERIFY_OPENING, ...contextBlock(c), ...verifyRules(p, c, questions), COVERAGE_RULE, ...docsRule(p)].join("\n"),
+    prompt: [...VERIFY_OPENING, ...contextBlock(c), ...verifyRules(p, c, questions, langs), COVERAGE_RULE, ...docsRule(p)].join("\n"),
   };
 }
 
@@ -1349,17 +1351,27 @@ export function salvageAgent(p: Profile): AgentSpec {
   };
 }
 
-// The delegation lines come last, as for the finder. questions: candidates.md holds finder questions.
-export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = false): AgentSpec =>
+// The delegation lines come last, as for the finder. questions: candidates.md holds finder questions. group: the "verify2" variant.
+export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = false, group = false): AgentSpec =>
   on
-    ? { ...a, prompt: [a.prompt, AGENT_PARAMS_RULE, ...VERIFY_DELEGATE, ...(questions ? [VERIFY_DELEGATE_QUESTIONS] : [])].join("\n") }
+    ? {
+        ...a,
+        prompt: [
+          a.prompt,
+          AGENT_PARAMS_RULE,
+          ...VERIFY_DELEGATE,
+          ...(group ? [VERIFY2.group] : []),
+          ...(questions ? [VERIFY_DELEGATE_QUESTIONS] : []),
+        ].join("\n"),
+      }
     : a;
 
 // spec.md sections 1.2 and 1.6: the verifier effort null means medium. A null model leaves the agent field out.
 export const verifierEffort = (p: Pick<Profile, "verifier">) => p.verifier.effort ?? "medium";
 
-// The caller adds skills, MCP tools, and the project instructions. questions: candidates.md holds finder questions.
-export function verifierAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false): AgentSpec {
+// The caller adds skills, MCP tools, and the project instructions. questions: candidates.md holds finder questions. langs: see
+// verifyRules.
+export function verifierAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false, langs: Language[] = []): AgentSpec {
   return {
     ...(p.verifier.model !== null && { model: p.verifier.model }),
     effort: verifierEffort(p),
@@ -1368,7 +1380,7 @@ export function verifierAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questio
       ...VERIFY_OPENING,
       "You check the candidates that the request names.",
       ...contextBlock(c),
-      ...verifyRules(p, c, questions),
+      ...verifyRules(p, c, questions, langs),
       COVERAGE_RULE,
       ...docsRule(p),
       questions

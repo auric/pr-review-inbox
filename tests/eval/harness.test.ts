@@ -29,6 +29,7 @@ import {
   partFacts,
   replayRefusal,
   runFacts,
+  VERIFY_ONLY,
   WARNING,
 } from "../../scripts/eval/run";
 import { type EvalResult, score } from "../../scripts/eval/score";
@@ -174,7 +175,11 @@ describe("eval harness without --real (AC-M2)", () => {
       "effort",
       "reviewer",
     ]);
-    expect(finderChange(base, { ...p.profile, variants: ["order"] })).toEqual(["variants"]);
+    expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
+    // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
+    expect(VERIFY_ONLY).toEqual(["verify2"]);
+    expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
+    expect(finderChange(base, { ...p.profile, variants: ["broad", "verify2"] })).toEqual(["variants"]);
   });
 
   test("the result case keeps the case fields clean, group, hasTask, large, and task", () => {
@@ -282,15 +287,13 @@ describe("eval harness without --real (AC-M2)", () => {
       return p.profile;
     };
     expect(parseOptions([])).toMatchObject({ variants: null });
-    expect(parseOptions(["--variants", "rules2, order"])).toMatchObject({ variants: ["rules2", "order"] });
-    for (const bad of ["bogus", "signal", "rules2,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
+    expect(parseOptions(["--variants", "verify2, broad"])).toMatchObject({ variants: ["verify2", "broad"] });
+    // review-quality-2026.md WP-R1: the retired variants are unknown names.
+    for (const bad of ["bogus", "signal", "order", "rules2", "rereview-strict", "broad,", ""])
+      expect(parseOptions(["--variants", bad])).toHaveProperty("error");
     expect(profileOf([]).variants).toEqual([]);
-    expect(profileOf(["--variants", "rules2,order"]).variants).toEqual(["order", "rules2"]);
-    expect(profileOf(["--variants", "rereview-strict", "--rereview", "--profile-version", "4"]).variants).toEqual(["rereview-strict"]);
-    // WP-V3: rereview-strict changes only the re-review stdin, so a run without --rereview would measure no change.
-    expect(parseOptions(["--variants", "rules2,rereview-strict"])).toEqual({
-      error: "--variants rereview-strict changes only the re-review prompt. Add --rereview, or the run measures no change.",
-    });
+    expect(profileOf(["--variants", "verify2,broad"]).variants).toEqual(["broad", "verify2"]);
+    expect(profileOf(["--variants", "verify2", "--rereview", "--profile-version", "4"]).variants).toEqual(["verify2"]);
   });
 
   test("--modules takes only module IDs of this app version, so a typo never runs a profile without the check", () => {
@@ -307,7 +310,7 @@ describe("eval harness without --real (AC-M2)", () => {
       ["--effort", "huge", "--effort must be one of"],
       ["--reviewer-effort", "bogus", "--reviewer-effort must be one of"],
       ["--model", "bad name", "--model must be a model alias"],
-      ["--variants", "bogus", "--variants must be a comma list of order, parts, rereview-strict, rules2."],
+      ["--variants", "rules2", "--variants must be a comma list of broad, parts, verify2."],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
       const r = await bun([RUN, flag, value, "--runner", process.execPath, FAKE, "none.json"]);
@@ -781,16 +784,16 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         "--verifier",
         "off",
         "--variants",
-        "rules2,order",
+        "verify2,broad",
         "--out",
         out,
       ];
       const r = await bun([RUN, ...args, "--runner", process.execPath, FAKE, scenario]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      const version = `${REVIEW_PROMPT_VERSION}+order+rules2`;
+      const version = `${REVIEW_PROMPT_VERSION}+broad+verify2`;
       expect(r.stdout).toContain(
-        `with variants rules2, order, model haiku, effort low, reviewer mode auto, verifier off, verifier effort medium, prompt version ${version}`,
+        `with variants verify2, broad, model haiku, effort low, reviewer mode auto, verifier off, verifier effort medium, prompt version ${version}`,
       );
       expect(r.stdout).not.toContain(DEFAULT_MODEL_WARNING);
       const argv = readRecords<{ argv: string[] }>(record).find((x) => x.argv.includes("-p"))?.argv ?? [];
@@ -800,7 +803,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const files = readdirSync(out).filter((f) => f.endsWith(".json"));
       const a = JSON.parse(readFileSync(join(out, files[0] as string), "utf8")) as EvalResult;
       expect(a.requested).toEqual({ model: "haiku", effort: "low", verifier: "off", verifierEffort: "medium", reviewerMode: "auto" });
-      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["order", "rules2"] });
+      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["broad", "verify2"] });
       expect(a.promptVersion).toBe(version);
       const [run] = a.runs;
       expect(run).toMatchObject({ status: "completed", effort: "low" });
@@ -936,6 +939,12 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(refusal(["--repeat", "2"])).toContain("the recording has 1 repeats, but this run asks for 2");
       expect(refusal([], { ...a, promptVersion: "2.0" })).toContain("the recording ran finder prompt version 2.0");
       expect(refusal(["--verifier", "off"])).toContain("changes the finder setup of the recording: verifier.");
+      // review-quality-2026.md item 4: verify2 changes only the verify prompts. broad changes the finder.
+      expect(refusal(["--variants", "verify2"])).toBeNull();
+      expect(refusal(["--variants", "broad"])).toContain("the recording ran finder prompt version");
+      expect(refusal(["--variants", "verify2"], { ...a, promptVersion: `${a.promptVersion}+broad` })).toContain(
+        `the recording ran finder prompt version ${a.promptVersion}+broad`,
+      );
 
       // A flag that changes the finder exits 2 before any run.
       const flag = await run("flag", [], ["--cases", ids, "--replay-find", rec.file, "--effort", "low"]);

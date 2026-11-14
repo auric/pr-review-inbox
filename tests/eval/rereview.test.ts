@@ -534,12 +534,13 @@ describe("eval:local re-review cases", () => {
   );
 
   test("--rereview refusals exit 2", async () => {
-    const strict = await bun([RUN, "--variants", "rereview-strict"]);
+    // review-quality-2026.md WP-R1: rereview-strict is retired.
+    const strict = await bun([RUN, "--set", "local", "--rereview", "--variants", "rereview-strict"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(strict.code).toBe(2);
-    expect(strict.stderr).toContain("--variants rereview-strict changes only the re-review prompt. Add --rereview");
-    const plan = await bun([RUN, "--set", "local", "--rereview", "--variants", "rereview-strict"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
+    expect(strict.stderr).toContain("--variants must be a comma list of broad, parts, verify2.");
+    const plan = await bun([RUN, "--set", "local", "--rereview", "--variants", "verify2"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(plan.code).toBe(2);
-    expect(plan.stdout).toContain("Eval plan: 1 case, 1 repeat, profile general with variants rereview-strict, set local, re-reviews.");
+    expect(plan.stdout).toContain("Eval plan: 1 case, 1 repeat, profile general with variants verify2, set local, re-reviews.");
     expect(plan.stdout).toContain("5 earlier findings");
     const v1 = await bun([RUN, "--set", "v1", "--rereview"]);
     expect(v1.code).toBe(2);

@@ -12,22 +12,22 @@ import { writeConfig } from "../../src/server/config";
 import { createJiraSource } from "../../src/server/context/jira";
 import { createLive, type LiveEvent } from "../../src/server/live";
 import {
+  BROAD_THREAD_CLAIM,
   DEFAULT_PROFILE,
+  DO_NOT_FLAG,
   DOC_SERVERS,
   DOCS_RULE,
   ISSUE_LINES,
   type ListTools,
-  ORDER_RULES,
   type Profile,
   profileOf,
   profileRevision,
   SHIPPED_PROFILES,
+  VERIFY2,
 } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
-import { INSTRUCTIONS_TRUST } from "../../src/server/review/instructions";
 import { createReviewJobs } from "../../src/server/review/jobs";
-import { LANGUAGE_INTRO } from "../../src/server/review/languages";
-import { STRICT_REREVIEW } from "../../src/server/review/prompt";
+import { LANGUAGE_INTRO, languageSkipLines, SKIP_COMMON } from "../../src/server/review/languages";
 import { type GitRemote, UNTRUSTED } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
@@ -1652,71 +1652,84 @@ describe("language checks", () => {
   );
 
   test(
-    "review v3 WP-V2: the profile variants reach rl-main and the re-review stdin; only review rows record them",
+    "review v3 WP-V2: the profile variants reach rl-main and rl-reviewer of review and re-review runs; only review rows record them",
     async () => {
       const h = await setup();
-      const variants: ProfileInput["variants"] = ["order", "rereview-strict"];
+      const variants: ProfileInput["variants"] = ["broad", "verify2"];
       expect(
         (await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [{ ...general, variants }] } })).status,
       ).toBe(200);
       await h.brief(NOTE, "general");
       const review = await hungAgents(h, h.start);
-      expect(review.agents["rl-main"]?.prompt).toContain(`\n${ORDER_RULES.join("\n")}\n`);
-      expect(review.agents["rl-reviewer"]?.prompt).not.toContain(ORDER_RULES[0] as string);
-      expect(review.stdin).not.toContain(STRICT_REREVIEW[0] as string);
+      for (const name of ["rl-main", "rl-reviewer"]) {
+        expect(review.agents[name]?.prompt).toContain(`\n${BROAD_THREAD_CLAIM.checked}\n`);
+        expect(review.agents[name]?.prompt).not.toContain("Do not report the points below.");
+      }
 
       h.scenario({ fixture: subagentRun() });
       const base = await h.finish((await h.start()).body.id);
       h.db.query("UPDATE review_run SET source_head = $head WHERE id = $id").run({ head: h.repo.base, id: base.run.id });
       const rereview = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/rereview`, { method: "POST" }));
-      expect(rereview.stdin).toContain(`\n${STRICT_REREVIEW.join("\n")}\n`);
-      await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
-      const switched = `${REVIEW_PROMPT_VERSION}+order+rereview-strict`;
+      expect(rereview.stdin).toContain(`An earlier run reviewed this change at ${h.repo.base}.`);
+      expect(rereview.agents["rl-main"]?.prompt).toContain(`\n${BROAD_THREAD_CLAIM.checked}\n`);
+      const ask = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
+      expect(Object.keys(ask.agents)).toEqual(["rl-main"]);
+      expect(ask.agents["rl-main"]?.prompt).not.toContain(BROAD_THREAD_CLAIM.checked);
+      const switched = `${REVIEW_PROMPT_VERSION}+broad+verify2`;
       expect(h.db.query("SELECT kind, prompt_version FROM review_run ORDER BY id").all()).toEqual([
         ...[1, 2, 3].map(() => ({ kind: "review", prompt_version: switched })),
         { kind: "ask", prompt_version: REVIEW_PROMPT_VERSION },
       ]);
-      // Without rules2, no run reads REVIEW.md.
-      for (const r of [review, rereview]) expect(r.stdin).not.toContain("REVIEW-RULES-CANARY");
+      // review-quality-2026.md WP-R1: the retired rules2 read REVIEW.md. No run reads it now.
+      for (const r of [review, rereview, ask]) {
+        expect(r.stdin).toContain("TARGET-RULES-CANARY");
+        expect(r.stdin).not.toContain("REVIEW-RULES-CANARY");
+      }
     },
     SLOW,
   );
 
   test(
-    "review v3 rules2: a review run reads REVIEW.md of the target branch as project instructions; an ask run does not",
+    "review-quality-2026 items 3 and 4: the languages of the change reach the verify phase; broad moves the skip lists there",
     async () => {
-      const h = await setup();
-      const variants: ProfileInput["variants"] = ["rules2"];
-      expect(
-        (await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [{ ...general, variants }] } })).status,
-      ).toBe(200);
-      await h.brief(NOTE, "general");
-      const review = await hungAgents(h, h.start);
-      const section = stdinSection(review.stdin, "Project instructions") ?? "";
-      // One trust line for all files. REVIEW.md follows the root CLAUDE.md and its import.
-      expect(section.startsWith(`# Project instructions\n\n${INSTRUCTIONS_TRUST}\n\n`)).toBe(true);
-      expect(section.split(INSTRUCTIONS_TRUST).length).toBe(2);
-      const heads = [
-        "## From the target branch: CLAUDE.md",
-        "## From the target branch: docs/main.md (imported by CLAUDE.md)",
-        "## From the target branch: REVIEW.md (applies to all files)\n\nREVIEW-RULES-CANARY",
-      ];
-      const at = heads.map((x) => section.indexOf(x));
-      expect(at.every((i, k) => i > (at[k - 1] ?? -1))).toBe(true);
-      expect(review.agents["rl-reviewer"]?.prompt).toContain("REVIEW-RULES-CANARY");
-      const ask = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
-      expect(ask.stdin).toContain("TARGET-RULES-CANARY");
-      expect(ask.stdin).not.toContain("REVIEW-RULES-CANARY");
-      const rows = h.db.query("SELECT kind, instructions_json FROM review_run ORDER BY id").all() as {
-        kind: string;
-        instructions_json: string;
-      }[];
-      expect(
-        rows.map((r) => [r.kind, (JSON.parse(r.instructions_json) as { files: { path: string }[] }).files.map((f) => f.path)]),
-      ).toEqual([
-        ["review", ["CLAUDE.md", "docs/main.md", "REVIEW.md"]],
-        ["ask", ["CLAUDE.md", "docs/main.md"]],
-      ]);
+      const h = await setup({ source: NATIVE });
+      const langs = ["cpp", "python"] as const;
+      const skip = `\n- ${DO_NOT_FLAG.at(-1)}\n${languageSkipLines([...langs]).join("\n")}\nLook for no new problems.`;
+      const isVerify = (c: Call) => flag(c.argv, "--json-schema")?.includes('"verdicts"') === true;
+      // One full run with the profile variants: the agents of the finder call and of the verify call.
+      const run = async (variants: ProfileInput["variants"]) => {
+        const put = { baseUrl: h.fake.url, profiles: [{ ...general, variants }] };
+        expect((await h.json("/api/settings", { method: "PUT", body: put })).status).toBe(200);
+        await h.brief(NOTE, "general");
+        h.scenario({ fixture: subagentRun() });
+        const before = h.calls().length;
+        const d = await h.finish((await h.start()).body.id);
+        expect(d.run.status).toBe("completed");
+        const calls = h
+          .calls()
+          .slice(before)
+          .filter((c) => c.argv?.includes("-p")) as (Call & { agents: Agents })[];
+        const find = calls.find((c) => !isVerify(c));
+        const check = calls.find(isVerify);
+        expect(find && check).toBeTruthy();
+        const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: d.run.id }) as { prompt_version: string };
+        return { find: find?.agents ?? {}, check: check?.agents ?? {}, version: row.prompt_version };
+      };
+      const plain = await run([]);
+      const on = await run(["broad", "verify2"]);
+      expect(Object.keys(plain.find).sort()).toEqual(Object.keys(on.find).sort());
+      for (const name of Object.keys(plain.find)) {
+        expect(plain.find[name]?.prompt).toContain("\nDo not report in C++:\n");
+        expect(plain.find[name]?.prompt).toContain(`\n${SKIP_COMMON}`);
+        expect(on.find[name]?.prompt).toContain("\nC++ list:\n- lifetime: ");
+        expect(on.find[name]?.prompt).not.toContain("Do not report in ");
+        expect(on.find[name]?.prompt).not.toContain(SKIP_COMMON);
+      }
+      expect(plain.check["rl-main"]?.prompt).not.toContain("The do-not-flag list of each language:");
+      expect(plain.check["rl-main"]?.prompt).not.toContain(VERIFY2.duplicate);
+      expect(on.check["rl-main"]?.prompt).toContain(skip);
+      expect(on.check["rl-main"]?.prompt).toContain(`\n${VERIFY2.duplicate}\n`);
+      expect([plain.version, on.version]).toEqual([REVIEW_PROMPT_VERSION, `${REVIEW_PROMPT_VERSION}+broad+verify2`]);
     },
     SLOW,
   );

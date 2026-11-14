@@ -71,6 +71,7 @@ import { recoverTasks, taskRow } from "../tasks/tasks";
 import { inside, tasksRoot } from "../tasks/worktree";
 import {
   askAgent,
+  broad,
   createDocServers,
   DEFAULT_PROFILE,
   DOCS_RULE,
@@ -158,7 +159,7 @@ import {
   unreadAlways,
   usageOf,
 } from "./judge";
-import { languagesOf, withLanguages } from "./languages";
+import { type Language, languagesOf, withLanguages } from "./languages";
 import { liveThreads, proposalContext, proposeNotes, storeProposals, suggestionsByItem } from "./notes";
 import { partFile, partNotes, partsOf, partText } from "./parts";
 import { loadPrContext } from "./pr-context";
@@ -674,14 +675,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   }
 
   // The run reads every source again. The text goes to the prompts and the run folder. SQLite and the log get the paths and sizes only.
-  // paths: the changed files, whose folders can add a CLAUDE.md. The variants change only the prompts of a review or re-review run.
+  // paths: the changed files, whose folders can add a CLAUDE.md.
   async function loadInstructions(j: Job | TaskJob, ws: Workspace, ref: { project: string; repo: string }, paths: string[]) {
     const instructions = await projectInstructions(
       j.db,
       { project: ref.project, repo: ref.repo },
       { cache: ws.cache, env: gitEnv("/dev/null"), commit: ws.targetHead, paths },
       settings.globalInstructions() ? (opts.claudeConfigDir ?? claudeConfigDir()) : null,
-      j.kind === "review" && j.profile.variants.includes("rules2"),
     );
     if (instructions.text) writeFileSync(join(ws.work, "CLAUDE.md"), instructions.text);
     j.db
@@ -990,7 +990,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cwd: ws.work,
         appDir: ws.app,
         ...spec,
-        main: withDelegation(withMcp(withSkills(withLanguages(spec.main, langs), folders, always), used, finder), delegate, parts.length),
+        main: withDelegation(
+          withMcp(withSkills(withLanguages(spec.main, langs, !broad(profile)), folders, always), used, finder),
+          delegate,
+          parts.length,
+        ),
         maxTurns: d
           ? Math.min(profile.maxTurns, DISCUSS_MAX_TURNS)
           : reply || fix
@@ -1003,7 +1007,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs), folders, always), used, finder),
+                withMcp(
+                  withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs, !broad(profile)), folders, always),
+                  used,
+                  finder,
+                ),
                 instructions.text,
               ),
             }
@@ -1067,6 +1075,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       used,
       instructions,
       mcpServers,
+      langs,
     });
     if ("status" in v) return v;
     return noted(
@@ -1246,9 +1255,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       used: McpUse[];
       instructions: { text: string };
       mcpServers: Record<string, McpServerSpec>;
+      // The languages of the finder. Under "broad", the verify phase gets their skip lists.
+      langs: Language[];
     },
   ): Promise<{ check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding> } | Ending> {
-    const { profile, context, folders, always, used, task } = r;
+    const { profile, context, folders, always, used, task, langs } = r;
     const verify = profile.verifier.mode === "on";
     // docs/plans/review-v2/review-questions.md: the finder questions get a check too, also in a run with no finding.
     const file = verify && (found.candidates.length || found.questions.length) ? candidatesFile(found.candidates, found.questions) : null;
@@ -1272,7 +1283,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       seq: e.seq + offset,
     });
     const verifier = withInstructions(
-      withMcp(withSkills(verifierAgent(profile, context, asked > 0), folders, always, task), used, true),
+      withMcp(withSkills(verifierAgent(profile, context, asked > 0, langs), folders, always, task), used, true),
       r.instructions.text,
     );
     // No await between this check and run(), so a later Cancel reaches the new process.
@@ -1285,9 +1296,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         prompt: buildVerifyPrompt({ ...r.input, count: written, asked, rereview: r.rereview }),
         schema: verifyJsonSchema(),
         main: withVerifyDelegation(
-          withMcp(withSkills(verifyAgent(profile, context, asked > 0), folders, always, task), used, true),
+          withMcp(withSkills(verifyAgent(profile, context, asked > 0, langs), folders, always, task), used, true),
           split,
           asked > 0,
+          profile.variants.includes("verify2"),
         ),
         maxTurns: verifyMaxTurns(profile, written + asked),
         model: profile.verifier.model ?? profile.model,
@@ -1659,7 +1671,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         prompt: buildPrompt(input),
         schema: reviewJsonSchema(false),
         main: withDelegation(
-          withMcp(withSkills(withLanguages(mainAgent(profile, context), langs), folders, always, true), tools.used, true),
+          withMcp(withSkills(withLanguages(mainAgent(profile, context), langs, !broad(profile)), folders, always, true), tools.used, true),
           delegate,
         ),
         maxTurns: profile.maxTurns,
@@ -1669,7 +1681,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(withSkills(withLanguages(reviewerAgent(profile, context), langs), folders, always, true), tools.used, true),
+                withMcp(
+                  withSkills(withLanguages(reviewerAgent(profile, context), langs, !broad(profile)), folders, always, true),
+                  tools.used,
+                  true,
+                ),
                 instructions.text,
               ),
             }
@@ -1703,6 +1719,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       used: tools.used,
       instructions,
       mcpServers,
+      langs,
     });
     if ("status" in v) return v;
     return noted(

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { PR_CONTEXT_RULES, SHIPPED_PROFILES } from "../../src/server/review/catalog";
+import { PR_CONTEXT_RULES, SHIPPED_PROFILES, VERIFY2 } from "../../src/server/review/catalog";
 import { historyFile } from "../../src/server/review/context-files";
 import { git, gitEnv } from "../../src/server/review/git";
 import { triage } from "../../src/server/review/items";
@@ -157,6 +157,7 @@ async function setup() {
     { ...general, id: "bare", name: "Bare", verifier: { mode: "on", model: null, effort: null } },
     { ...general, id: "tuned", name: "Tuned", maxTurns: 30, verifier: { mode: "on", model: "haiku", effort: "high" } },
     { ...general, id: "off", name: "Off", verifier: { mode: "off", model: null, effort: null } },
+    { ...general, id: "variants", name: "Variants", variants: ["broad", "verify2"] },
     explain,
   ];
   writeConfig(dir, { baseUrl: "https://bitbucket.example.invalid", userSlug: "me", notifications: false, profiles });
@@ -564,6 +565,25 @@ describe("verify phase in a review run", () => {
       );
       expect(agents["rl-main"]?.prompt.endsWith("Copy each verdict into verdicts.")).toBe(true);
       expect(agents["rl-main"]?.prompt).toContain("Give the candidates to the rl-verifier agent in calls of at most 6 candidates.");
+      for (const a of Object.values(agents)) expect(a.prompt).not.toContain(VERIFY2.duplicate);
+      expect(h.review.cancel(h.db, id)).toBe("cancelled");
+      await h.review.wait();
+    },
+    SLOW,
+  );
+
+  test(
+    "review-quality-2026 item 4: above 12 candidates, verify2 keeps one group in one rl-verifier call and gives rl-verifier its lines",
+    async () => {
+      const h = await setup();
+      h.runner.write({ fixture: h.stream(RESULT(Array.from({ length: 13 }, (_, k) => F(k)))), bySchema: { verify: { hang: true } } });
+      const id = h.start("variants");
+      expect(await waitFor(() => h.verifyCalls().length === 1)).toBe(true);
+      const c = h.verifyCalls()[0] as Call;
+      const agents = JSON.parse(readFileSync(flag(c.argv, "--agents"), "utf8")) as Record<string, { prompt: string }>;
+      expect(Object.keys(agents)).toEqual(["rl-main", "rl-verifier"]);
+      expect(agents["rl-main"]?.prompt.endsWith(`Copy each verdict into verdicts.\n${VERIFY2.group}`)).toBe(true);
+      for (const a of Object.values(agents)) expect(a.prompt).toContain(`\n${VERIFY2.duplicate}\n`);
       expect(h.review.cancel(h.db, id)).toBe("cancelled");
       await h.review.wait();
     },

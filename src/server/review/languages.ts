@@ -145,20 +145,30 @@ export const LANGUAGE_INTRO = [
 export const SKIP_COMMON =
   "In each language, do not report linter or analyzer warnings, formatting, generated files, or speed-ups without a shown hot path.";
 
-export function languageLines(langs: Language[]): string[] {
+// skip: the finder gets the skip lists. docs/plans/review-v2/review-quality-2026.md item 3: under "broad", languageSkipLines gives
+// them to the verify phase.
+export function languageLines(langs: Language[], skip = true): string[] {
   if (!langs.length) return [];
   return [
     ...LANGUAGE_INTRO,
     ...langs.flatMap((l) => [
       `${CHECKLISTS[l].title} list:`,
       ...CHECKLISTS[l].items.map((i) => `- ${i}`),
-      `Do not report in ${CHECKLISTS[l].title}:`,
-      ...CHECKLISTS[l].skip.map((i) => `- ${i}`),
+      ...(skip ? [`Do not report in ${CHECKLISTS[l].title}:`, ...CHECKLISTS[l].skip.map((i) => `- ${i}`)] : []),
     ]),
-    SKIP_COMMON,
+    ...(skip ? [SKIP_COMMON] : []),
+  ];
+}
+
+export function languageSkipLines(langs: Language[]): string[] {
+  if (!langs.length) return [];
+  return [
+    "The do-not-flag list of each language:",
+    ...langs.flatMap((l) => CHECKLISTS[l].skip.map((i) => `- ${CHECKLISTS[l].title}: ${i}`)),
+    "- In each language: linter or analyzer warnings, formatting, generated files, and speed-ups without a shown hot path.",
   ];
 }
 
 // Adds the checklists to the prompt of an agent.
-export const withLanguages = (a: AgentSpec, langs: Language[]): AgentSpec =>
-  langs.length ? { ...a, prompt: [a.prompt, ...languageLines(langs)].join("\n") } : a;
+export const withLanguages = (a: AgentSpec, langs: Language[], skip = true): AgentSpec =>
+  langs.length ? { ...a, prompt: [a.prompt, ...languageLines(langs, skip)].join("\n") } : a;

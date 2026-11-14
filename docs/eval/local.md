@@ -10,13 +10,11 @@ The local eval set measures the review against your own decisions (docs/plans/re
 
 The command builds the local set from the data folder of the app into `eval-local/`. Then it runs the shipped profile (A) and the candidate (B) on the set with your Claude CLI. It prints one table for the review cases and one for the re-review cases, with cost and time, and the paths of the result files. It skips a mode without cases. It exits with code 1 when a run fails, and with code 2 on a usage error or an unknown name.
 
-- Review cases: the candidate adds the variants `order,rules2` and the `failures` module to the shipped profile. The verify mode stays as shipped.
-- `order`: a fixed review order. `failures`: a failure checklist.
-- The variant `signal` (high-signal finder rules) is removed. U-V1 showed that it cut recall from 30.8% to 11.5%. A saved profile that still lists it loads without it.
-- `rules2`: a rule-only finding gets severity minor, unless it causes a real bug. The rules section also flags a change that makes the project instructions out of date.
-- `rules2` also reads `REVIEW.md` at the repository root of the target branch, as project instructions with the CLAUDE.md caps. Only review and re-review runs read it.
-- `rules2` adds generated files, lock files, and vendored third-party code to the do-not-flag list. The verify phase gets four examples of false positives to refute.
-- Re-review cases: the candidate also adds `rereview-strict`.
+- Review and re-review cases: the default candidate is the shipped profile. `--candidate-variants` and `--candidate-modules` add switches to it. The verify mode stays as shipped.
+- `broad` (docs/plans/review-v2/review-quality-2026.md item 3): with the verify phase on, the finder gets no do-not-flag list and no language skip lists. The verify phase gets the skip lists of the languages of the change. With `pr-context.md`, the finder learns that a thread comment is a claim, not a reason to leave out a finding.
+- `verify2` (item 4): the verify phase gets a wider duplicate rule and a rule for thread claims. It also gets a rule for findings of the intent section. A split check gives one group to one rl-verifier call. The variant changes only the verify prompts, so `--candidate-replay` can test it.
+- `parts`: see "Part files". `failures`: a trial module with a failure checklist.
+- The variants `signal`, `order`, `rules2`, and `rereview-strict` are removed. The first three lost in U-V1 (docs/eval/results.md). U-V1 gave no decision for `rereview-strict`, and no plan uses it. A saved profile that still lists one loads without it. `--variants` and `--candidate-variants` refuse them. No run reads `REVIEW.md` now.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
 - Must find: each posted finding, each finding that a Fix commit covered, and each finding that your session accepted (Ask your session). Your own discard still wins over a session accept. Over a Fix commit, only your discard with a reason wins. Your own root comments at a reviewed head are must-find too. A root line comment of another reviewer at a reviewed head is must-find too. It counts when its thread is resolved, or when a later push changed its line (an orphaned anchor). It is a bug with `source: "other"` and severity minor in case.json. So recall counts it only at `balanced` and `thorough`. A comment on the lines of another must-find of the same case adds no second must-find. Comments of the PR author stay out. General comments, file comments, and open comments on unchanged lines also stay out.
 - Must not raise: each finding that you discarded as "Not a bug" or "Intended", and each posted finding that you withdrew in its thread. A withdrawal is a reply of "Discuss" with the verdict withdrawn that you posted in the thread of the posted finding.
@@ -102,7 +100,7 @@ A fixture case can have `threads` and `clean`, as a local case can. The run seed
 A new candidate does not need a new baseline run. Give the folder of an earlier run, and only the candidate runs:
 
 ```
-bun run eval:ab -- --baseline eval-results/ab-<stamp>-<commit> --candidate-variants order,rules2
+bun run eval:ab -- --baseline eval-results/ab-<stamp>-<commit> --candidate-variants broad
 ```
 
 - The command reads the baseline results from `review-baseline/` and `rereview-baseline/` of that folder.
@@ -190,4 +188,4 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 
 ## Bisect when the result is mixed
 
-Run the command again with one change at a time: `--candidate-variants order --candidate-modules ""`, then `--candidate-variants rules2 --candidate-modules ""`, then `--candidate-variants "" --candidate-modules failures`. Each run builds the same set again, so the tables compare.
+Run the command again with one change at a time: `--candidate-variants broad --candidate-modules ""`, then `--candidate-variants verify2 --candidate-modules ""`, then `--candidate-variants "" --candidate-modules failures`. Each run builds the same set again, so the tables compare.

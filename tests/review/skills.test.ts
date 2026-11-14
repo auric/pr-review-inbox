@@ -215,12 +215,12 @@ describe("skill prompts and profiles", () => {
     expect(profileRevision({ ...(read as typeof general), skills: ["x"] })).not.toBe(before);
   });
 
-  test("a saved profile with the retired variant signal reads without it and keeps the other variants", () => {
+  test("a saved profile with retired variants reads without them and keeps the other variants", () => {
     const dir = temp("cfg");
-    const stored = { ...general, variants: ["signal", "order"] };
+    const stored = { ...general, variants: ["signal", "verify2", "order", "rules2", "rereview-strict", "broad"] };
     json(join(dir, "config.json"), { baseUrl: "https://example.test", userSlug: "me", notifications: false, profiles: [stored] });
     const read = readConfig(dir)?.profiles?.find((p) => p.id === general.id);
-    expect(read).toEqual({ ...general, variants: ["order"] });
+    expect(read).toEqual({ ...general, variants: ["broad", "verify2"] });
   });
 
   test("the profile schema dedupes skills and refuses bad IDs", () => {

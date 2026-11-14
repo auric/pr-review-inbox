@@ -14,7 +14,7 @@ import { delegation, type Profile, profileRevision, promptVersion } from "../../
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git } from "../../src/server/review/git";
 import { diffArgs } from "../../src/server/review/workspace";
-import { EFFORTS, REVIEWER_MODES, type Variant, VERIFIER_MODES } from "../../src/shared/dto";
+import { EFFORTS, REVIEWER_MODES, VERIFIER_MODES } from "../../src/shared/dto";
 import { bundleRepo, type EvalCase, loadCases, localDir, setDir, setFingerprint } from "./cases";
 import { compareText, readResult, refusal, suiteDelta } from "./compare";
 import { main as buildMain, type Manifest } from "./local";
@@ -41,8 +41,6 @@ export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-repeat
 // review-quality-2026.md E2: the default candidate is the shipped profile.
 const DEFAULT_VARIANTS = "";
 const DEFAULT_MODULES = "";
-// docs/plans/review-v3.md WP-V2: this variant changes only the re-review stdin. A review candidate drops it.
-const STRICT: Variant = "rereview-strict";
 
 export type Mode = "review" | "rereview";
 export type AbOptions = {
@@ -189,8 +187,7 @@ export function runArgs(
   if (cases.length) args.push("--cases", cases.join(","));
   if (cand) {
     const base = shipped();
-    const extra = mode === "rereview" ? o.variants : o.variants.filter((x) => x !== STRICT);
-    const variants = [...new Set([...base.variants, ...extra])];
+    const variants = [...new Set([...base.variants, ...o.variants])];
     if (variants.length) args.push("--variants", variants.join(","));
     args.push("--modules", [...new Set([...base.modules, ...o.modules])].join(","));
   }

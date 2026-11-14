@@ -7,6 +7,7 @@ import {
   AGENT_PARAMS_RULE,
   ANSWERED_RULES,
   askAgent,
+  BROAD_THREAD_CLAIM,
   contextBlock,
   DISCUSS_RULES,
   DO_NOT_FLAG,
@@ -24,7 +25,6 @@ import {
   moduleSections,
   NO_CONTEXT,
   NOTES_RULES,
-  ORDER_RULES,
   PART_REVIEWER,
   PR_CONTEXT_RULES,
   partLines,
@@ -32,20 +32,19 @@ import {
   promptVersion,
   RETIRED_PROFILES,
   type ReviewContext,
-  RULES2_DO_NOT_FLAG,
-  RULES2_REFUTE,
-  RULES2_RULES,
   replyAgent,
   resolveProfiles,
   reviewerAgent,
   rubric,
   SHIPPED_PROFILES,
   SPARSE_VERSION,
+  sharedRules,
   storeProfiles,
   upgradeProfile,
   VERIFY_BATCH,
   VERIFY_DELEGATE,
   VERIFY_SPLIT,
+  VERIFY2,
   VOLUME_NITS,
   verifierAgent,
   verifyAgent,
@@ -58,6 +57,15 @@ import {
 import { buildImprovePrompt } from "../../src/server/review/improve";
 import { INSTRUCTIONS_TRUST } from "../../src/server/review/instructions";
 import {
+  CHECKLISTS,
+  LANGUAGE_INTRO,
+  LANGUAGES,
+  languageLines,
+  languageSkipLines,
+  SKIP_COMMON,
+  withLanguages,
+} from "../../src/server/review/languages";
+import {
   buildAskPrompt,
   buildDiscussPrompt,
   buildExplainPrompt,
@@ -67,7 +75,6 @@ import {
   buildRereviewPrompt,
   buildVerifyPrompt,
   type PromptInput,
-  STRICT_REREVIEW,
 } from "../../src/server/review/prompt";
 import { SESSION_FIX_RULES } from "../../src/shared/consult";
 import { MODULE_IDS, type ModuleId, type ProfileInput, profileInput, TRIAL_MODULES, VARIANTS, VOLUMES } from "../../src/shared/dto";
@@ -781,14 +788,6 @@ describe("review v3 prompt switches", () => {
     expect(promptVersion(p)).toBe(`${REVIEW_PROMPT_VERSION}+parts`);
   });
 
-  test("order adds its lines to rl-main only, after the check sections", () => {
-    const order = withVariants("order");
-    const sections = moduleSections(general, FULL).join("\n");
-    expect(mainAgent(order, FULL).prompt).toBe(mainAgent(general, FULL).prompt.replace(sections, `${sections}\n${ORDER_RULES.join("\n")}`));
-    expect(reviewerAgent(order, FULL).prompt).toBe(reviewerAgent(general, FULL).prompt);
-    expect(buildPrompt({ ...full, profile: order })).toBe(buildPrompt(full));
-  });
-
   test("the failures module is a trial module with its own section, an ordered checklist with a trigger rule", () => {
     expect(TRIAL_MODULES).toEqual(["failures"]);
     expect(MODULES.failures.label).toBe("Failure paths");
@@ -801,74 +800,156 @@ describe("review v3 prompt switches", () => {
     );
   });
 
-  test("rereview-strict adds its lines to the re-review stdin only", () => {
-    const strict = withVariants("rereview-strict");
-    const text = buildRereviewPrompt({ ...rereviewInput, profile: strict });
-    expect(text.replace(`${STRICT_REREVIEW.join("\n")}\n`, "")).toBe(buildRereviewPrompt(rereviewInput));
-    expect(text).toContain(`Posted findings: 2.`);
-    expect(text.indexOf(STRICT_REREVIEW[0] as string)).toBeGreaterThan(text.indexOf("Posted findings: 2."));
-    expect(text.indexOf(STRICT_REREVIEW[0] as string)).toBeLessThan(text.indexOf("# Tools"));
-    expect(buildPrompt({ ...full, profile: strict })).toBe(buildPrompt(full));
-    expect(mainAgent(strict, RE).prompt).toBe(mainAgent(general, RE).prompt);
+  // docs/plans/review-v2/review-quality-2026.md item 3.
+  test("broad: with the verify phase on, the finder gets no do-not-flag lists and the verify phase gets the language skip lists", () => {
+    const b = withVariants("broad");
+    const items = DO_NOT_FLAG.map((l) => `- ${l}`).join("\n");
+    const list = `Do not report the points below. The check step refutes them, so they only cost time:\n${items}`;
+    const noPr = { ...FULL, prContext: false, notes: false };
+    for (const agent of [mainAgent, reviewerAgent]) {
+      expect(agent(b, FULL).prompt).toBe(agent(general, FULL).prompt.replace(list, BROAD_THREAD_CLAIM.checked));
+      expect(agent(b, noPr).prompt).toBe(agent(general, noPr).prompt.replace(`\n${list}`, ""));
+    }
+    // With the verify phase off, nothing else applies the lists: the finder keeps them, and the thread line asks for a check in ./repo.
+    const off = { ...general, verifier: { ...general.verifier, mode: "off" as const } };
+    const offB = { ...off, variants: b.variants };
+    const offItems = `Do not report the points below. They only cost the user time:\n${items}`;
+    for (const agent of [mainAgent, reviewerAgent]) {
+      expect(agent(offB, FULL).prompt).toBe(agent(off, FULL).prompt.replace(offItems, `${offItems}\n${BROAD_THREAD_CLAIM.unchecked}`));
+      expect(agent(offB, noPr).prompt).toBe(agent(off, noPr).prompt);
+      expect(agent(offB, FULL).prompt).not.toMatch(/second step|check step/);
+    }
+    // The Improve prompt shows the shared rules without the list.
+    expect(sharedRules(b).join("\n")).toBe(sharedRules(general).join("\n").replace(`\n${list}`, ""));
+    expect(sharedRules({ ...off, variants: b.variants })).toEqual(sharedRules(off));
+    // The finder language lines without the skip lists. The default lines keep their bytes (hash of 91e60d0).
+    const all = [...LANGUAGES];
+    expect(sha(languageLines(all).join("\n"))).toBe("38ea7d89f9d2cb6449864e94c40499261e8ea3ad6f1ec261710855c07dbc0809");
+    expect(languageLines(all, false)).toEqual([
+      ...LANGUAGE_INTRO,
+      ...all.flatMap((l) => [`${CHECKLISTS[l].title} list:`, ...CHECKLISTS[l].items.map((i) => `- ${i}`)]),
+    ]);
+    expect(languageLines(all)).toContain(SKIP_COMMON);
+    expect(languageLines([], false)).toEqual([]);
+    expect(withLanguages(mainAgent(general, FULL), all, true)).toEqual(withLanguages(mainAgent(general, FULL), all));
+    expect(languageSkipLines([])).toEqual([]);
+    expect(languageSkipLines(["c", "python"])).toEqual([
+      "The do-not-flag list of each language:",
+      "- C: a goto to a cleanup label on an error path",
+      "- C: a cast of the malloc result, or a missing cast",
+      "- Python: an f-string or % format in a log call",
+      "- Python: a broad except in a top-level handler that logs the error and stops or retries",
+      "- Python: a missing type hint or docstring",
+      "- In each language: linter or analyzer warnings, formatting, generated files, and speed-ups without a shown hot path.",
+    ]);
+    // The verify phase gets the skip lists after the do-not-flag items, only under broad.
+    const last = `- ${DO_NOT_FLAG.at(-1)}`;
+    const skip = languageSkipLines(["cpp", "csharp"]);
+    for (const agent of [verifyAgent, verifierAgent])
+      for (const q of [false, true]) {
+        const plain = agent(general, FULL, q).prompt;
+        expect(agent(general, FULL, q, ["cpp", "csharp"]).prompt).toBe(plain);
+        expect(agent(b, FULL, q).prompt).toBe(plain);
+        expect(agent(b, FULL, q, ["cpp", "csharp"]).prompt).toBe(plain.replace(`\n${last}\n`, `\n${last}\n${skip.join("\n")}\n`));
+      }
+    // The stdin and the other run kinds do not change.
+    expect(buildPrompt({ ...full, profile: b })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: b })).toBe(buildRereviewPrompt(rereviewInput));
+    expect(buildVerifyPrompt({ ...full, profile: b, count: 3, rereview: false })).toBe(
+      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
+    );
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(b, FULL).prompt).toBe(kind(general, FULL).prompt);
+    expect(promptVersion(b)).toBe(`${REVIEW_PROMPT_VERSION}+broad`);
   });
 
-  test("rules2 adds its lines to the rules section, the do-not-flag lists, and the verify phase only", () => {
-    const r2 = withVariants("rules2");
-    const rules = ["Check section rules:", ...MODULES.rules.lines.map((l) => `- ${l}`)].join("\n");
-    const rulesOn = `${rules}\n${RULES2_RULES.map((l) => `- ${l}`).join("\n")}`;
-    const lastItem = `- ${DO_NOT_FLAG.at(-1)}`;
-    const itemOn = `${lastItem}\n- ${RULES2_DO_NOT_FLAG}`;
-    for (const agent of [mainAgent, reviewerAgent]) {
-      const off = agent(general, FULL).prompt;
-      expect(off).not.toContain(RULES2_DO_NOT_FLAG);
-      expect(off).not.toContain(RULES2_RULES[0] as string);
-      expect(agent(r2, FULL).prompt).toBe(off.replace(lastItem, itemOn).replace(rules, rulesOn));
+  // docs/plans/review-v2/review-quality-2026.md item 4.
+  test("verify2: the duplicate, thread claim, and intent lines and the group delegation line reach the verify phase only", () => {
+    const v = withVariants("verify2");
+    const dup = "duplicate: another candidate of the same group describes the same problem at the same place.";
+    const history =
+      'A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.';
+    expect(general.modules).toContain("intent");
+    for (const agent of [verifyAgent, verifierAgent])
+      for (const q of [false, true]) {
+        const plain = (c: ReviewContext) => agent(general, c, q).prompt;
+        expect(agent(v, FULL, q).prompt).toBe(
+          plain(FULL).replace(dup, VERIFY2.duplicate).replace(history, `${history}\n${VERIFY2.thread}\n${VERIFY2.intent}`),
+        );
+        // No pr-context.md: no thread line. No goal or no intent module: no intent line.
+        const noPr = { ...FULL, prContext: false, notes: false };
+        expect(agent(v, noPr, q).prompt).toBe(
+          plain(noPr).replace(dup, VERIFY2.duplicate).replace(history, `${history}\n${VERIFY2.intent}`),
+        );
+        const noGoal = { ...FULL, goal: false };
+        expect(agent(v, noGoal, q).prompt).toBe(
+          plain(noGoal).replace(dup, VERIFY2.duplicate).replace(history, `${history}\n${VERIFY2.thread}`),
+        );
+        const noIntent = { ...v, modules: general.modules.filter((m) => m !== "intent") };
+        expect(agent(noIntent, FULL, q).prompt).toBe(
+          agent({ ...general, modules: noIntent.modules }, FULL, q)
+            .prompt.replace(dup, VERIFY2.duplicate)
+            .replace(history, `${history}\n${VERIFY2.thread}`),
+        );
+        // Without history.md, the new lines follow the duplicateOf line.
+        const noHistory = { ...FULL, history: false };
+        expect(agent(v, noHistory, q).prompt).toContain(
+          `${VERIFY2.duplicate}\nSet duplicateOf to the clearer candidate.\n${VERIFY2.thread}\n${VERIFY2.intent}\n`,
+        );
+      }
+    // The group line follows the delegation lines, before the questions line. Without delegation, nothing changes.
+    const main = verifyAgent(v, FULL);
+    expect(withVerifyDelegation(main, true, false, true).prompt).toBe(`${withVerifyDelegation(main, true).prompt}\n${VERIFY2.group}`);
+    expect(withVerifyDelegation(main, true, true, true).prompt).toBe(
+      withVerifyDelegation(main, true, true).prompt.replace(
+        `\n${VERIFY_DELEGATE.at(-1)}\n`,
+        `\n${VERIFY_DELEGATE.at(-1)}\n${VERIFY2.group}\n`,
+      ),
+    );
+    expect(withVerifyDelegation(main, false, true, true)).toEqual(main);
+    // The finder agents and every stdin do not change, so a replay keeps the recorded finder calls.
+    for (const c of [FULL, RE]) {
+      expect(mainAgent(v, c)).toEqual(mainAgent(general, c));
+      expect(reviewerAgent(v, c)).toEqual(reviewerAgent(general, c));
     }
-    // No rules section without instructions: the section lines stay out, the do-not-flag item stays in.
-    const bare = { ...FULL, instructions: false };
-    expect(mainAgent(r2, bare).prompt).toBe(mainAgent(general, bare).prompt.replace(lastItem, itemOn));
-    for (const agent of [verifyAgent, verifierAgent]) {
-      const off = agent(general, FULL).prompt;
-      expect(off).not.toContain(RULES2_REFUTE[0] as string);
-      expect(agent(r2, FULL).prompt).toBe(off.replace(lastItem, `${itemOn}\n${RULES2_REFUTE.join("\n")}`));
-    }
-    expect(RULES2_RULES[0]).toContain("severity minor");
-    expect(RULES2_RULES[1]).toContain("out of date");
-    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(r2, FULL).prompt).toBe(kind(general, FULL).prompt);
-    expect(buildPrompt({ ...full, profile: r2 })).toBe(buildPrompt(full));
-    expect(buildRereviewPrompt({ ...rereviewInput, profile: r2 })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.8+order+rules2");
+    expect(sharedRules(v)).toEqual(sharedRules(general));
+    expect(buildPrompt({ ...full, profile: v })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: v })).toBe(buildRereviewPrompt(rereviewInput));
+    expect(buildVerifyPrompt({ ...full, profile: v, count: 3, rereview: false })).toBe(
+      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
+    );
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(v, FULL).prompt).toBe(kind(general, FULL).prompt);
+    expect(promptVersion(v)).toBe(`${REVIEW_PROMPT_VERSION}+verify2`);
   });
 
   test("ASD-STE100: every switch line has at most 20 words", () => {
     expect(
       longSentences([
-        ...ORDER_RULES,
-        ...STRICT_REREVIEW,
         ...MODULES.failures.lines,
-        ...RULES2_RULES,
-        RULES2_DO_NOT_FLAG,
-        ...RULES2_REFUTE,
         ...partLines(6),
         PART_REVIEWER,
+        ...Object.values(BROAD_THREAD_CLAIM),
+        ...languageSkipLines([...LANGUAGES]),
+        ...Object.values(VERIFY2),
       ]),
     ).toEqual([]);
   });
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("rules2", "order"))).toBe("2.8+order+rules2");
-    expect(VARIANTS).toEqual(["order", "parts", "rereview-strict", "rules2"]);
+    expect(promptVersion(withVariants("verify2", "broad"))).toBe("2.8+broad+verify2");
+    expect(VARIANTS).toEqual(["broad", "parts", "verify2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
     expect(parsed.variants).toEqual([]);
     expect(profileRevision(parsed)).toBe(profileRevision(general));
-    // The retired "signal" drops like any unknown name.
-    expect(profileInput.parse({ ...old, variants: ["rules2", "signal", "bogus", 7, "order", "rules2"] }).variants).toEqual([
-      "order",
-      "rules2",
+    // The retired names drop like any unknown name.
+    const retired = ["signal", "order", "rules2", "rereview-strict"];
+    expect(profileInput.parse({ ...old, variants: ["verify2", ...retired, "bogus", 7, "broad", "verify2"] }).variants).toEqual([
+      "broad",
+      "verify2",
     ]);
-    const revisions = [general, withVariants("rules2"), withVariants("order"), withVariants("order", "rules2")].map(profileRevision);
+    expect(profileInput.parse({ ...old, variants: retired }).variants).toEqual([]);
+    const revisions = [general, withVariants("broad"), withVariants("verify2"), withVariants("broad", "verify2")].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
     // spec.md section 1.8: outcome hide parses to no key and keeps the revision. Demote changes it.
     const hide = profileInput.parse({ ...general, verifier: { ...general.verifier, outcome: "hide" } });
