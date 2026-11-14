@@ -4,6 +4,8 @@ Status (2026-10-29): Layer A is code complete. Layer B and Layer C are ON HOLD. 
 
 Update (2026-11-12): docs/plans/review-v2/part-session.md section 2.15 replaces Layer C. Package PS7a gives "Let Claude fix the build" with a pasted log. Package PS7b reads the failed log from Jenkins and adds the red-build fixes, a tick per part that allows up to N fix pushes (user approval of 2026-11-12). The CI server card and the log client of PS7b are built. Probe fact CI12 (the log read) PASS: HTTP 200, text/plain, X-Text-Size present, X-More-Data absent on a finished build (integration-check.md). Layer B stays on hold.
 
+Probe fact CI13 is NOT RUN. It reads the log at the Bitbucket status URL of a failed build with the app client `readLog`. If it fails, the app cannot read logs from status URLs.
+
 - Layer A reads the build status that the CI server already posts to Bitbucket. It uses the existing Bitbucket token and sends GET only.
 - Layer B starts a Jenkins build. The probe showed that the plan's multibranch design does not fit the user's Jenkins. Layer B needs a new design before it resumes.
 - Layer C explains why a build failed. It builds on Layer B.
