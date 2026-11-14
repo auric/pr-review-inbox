@@ -1919,7 +1919,10 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 - States without the box: interview, spec_draft, spec_pr_open, and spec_approved (no worktree yet; Q54); blocked question (its form takes the text: "Add a note (optional)"); blocked spec_change ("Review the change" first); blocked budget, slot, and preflight; stopped and failed (Q55); done.
 - The box adds no primary button (AC-UX1).
 - Empty: "Send to Claude" is disabled while the trimmed text is empty. Over MAX_INSTRUCTION, the counter says "4,120 of 4,000 characters", and the button stays disabled.
-- Busy: while a Claude step, a check, or an update runs, the box stays visible and editable and keeps the text. "Send to Claude" is disabled, and the hint says "Claude or the checks are working. You can send when this step ends." The web keeps this block also during a session run of the part. PS5 shows the live message of section 6.18.2.
+- Box rule (PS5, model.ts tellBox): the box shows for each implementing or ready part with a worktree, also in its first build. It shows nothing for a held part, an adopted part, or a waiting reason (section 6.25.5). With a first reason, only the reasons red, size, blocker, denied_path, and update show the box (tasks.ts BOX_REASONS).
+- Busy: while the checks, an update, or a run that takes no message works, the box stays visible and editable and keeps the text. "Send to Claude" is disabled, and the hint says "Claude or the checks are working. You can send when this run ends."
+- Session run (PS5, part-session.md section 2.9): during a session run of the part, Send works. The hint says "Claude reads this now." or "Claude reads this when the current run ends." TaskPartDto.instructRun ("live", "queued", or null; loop.ts instructRun) gives the choice. null leaves the choice to canInstruct.
+- A waiting message shows in the Log with the result "Waiting". Each part gets the text of its own stopped message back.
 - Server check: instructTarget lets a send through while an implement, fix, or instruct run of the part runs (part-session.md section 2.9). The other refusals of this section stay.
 - Send: POST /api/tasks/:id/instructions. A 202 clears the box. The status says "Claude works on your instructions for part 2. About 4 min left." A 409 keeps the text and shows the sentence of the answer.
 - Stop: More "Stop" during an instruct step ends the CLI process tree, as Stop does elsewhere. Every repository of the part goes back to its last commit, deepest first, and the discarded changes go to `<task folder>/patches/<step>.patch`. A commit that the step already made stays. The step ends cancelled. The task goes back to the waiting state that it had before the send: the same blocked value, not stopped (Q61). The box gets the text back. Status: "Stopped. Your instructions changed nothing. The text is back in the box." After a commit, the sentence is "Stopped after the commit. The own review did not run." A Stop of a "Fix these too" or push-back fix run clears the reason, and its note is "Stopped. The fix changed nothing." A Stop before the CLI of an instruct or resolve step starts adds the step note "Stopped before Claude started." A build step keeps "The build stopped before the step started."
@@ -2052,7 +2055,7 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 
 1. AC-B52. The box shows in each state of the section 6.18.1 list and in no other state. Each state keeps one primary button (AC-UX1).
 2. AC-B53. A send starts exactly one instruct step (fake CLI call counter 1) with the text as the only content of "Your instructions", the implement tools, and the path check. A denied path resets the step and blocks with denied_path.
-3. AC-B54. The text "push the branch and rebase onto develop" starts one instruct step and no git push, fetch, rebase, or merge (spy on git argv). While a step runs, "Send to Claude" is disabled and the route returns 409.
+3. AC-B54. The text "push the branch and rebase onto develop" starts one instruct step and no git push, fetch, rebase, or merge (spy on git argv). While a check or a run that takes no message runs, "Send to Claude" is disabled and the route returns 409.
 4. AC-B55. A result with needsBase true and a moved base shows "Update from <base>" with Claude's reason. With a base that did not move, it shows "The branch already has it." and no button.
 5. AC-B56. Stop during an instruct step kills the process tree, resets the worktrees to the last commit, writes the patch file, and returns the task to its earlier waiting state with the text back in the box.
 6. AC-B57. The Log tab shows the "Your instructions" group with the text and the rows of the step. A step without a changed file shows "Claude changed no file" and runs no check.
@@ -3130,7 +3133,7 @@ Acceptance criteria:
 6. AC-B210. The run usage of a run with advisor calls names the advisor model from modelUsage, and the run setup line shows it.
 7. AC-B211. Gate GADV.2 ignores `slash_commands`. GADV.2, GADV.4, and GADV.5a judge by init.tools and the advisor calls, with the run with `--advisor` as the control. GADV.5b judges by the advisor calls of that run.
 
-### 6.28 Part sessions (docs/plans/review-v2/part-session.md, packages PS3, PS4, and PS5-S1)
+### 6.28 Part sessions (docs/plans/review-v2/part-session.md, packages PS3, PS4, PS5-S1, and PS5-C)
 
 One Claude session builds one part. This section covers the loop of PS3 and the follow-up runs of PS4 (docs/plans/review-v2/ps4-plan.md). PR comments and red builds come in PS6 and PS7 (ps6-ps7-plan.md).
 
@@ -3231,6 +3234,17 @@ PS5: server facts of the Task view (ps5-plan.md decisions D1 to D6, package PS5-
 - Tasks row status (D6): Done, Closed, Failed, and Stopped come first. A first usage reason with armed true shows "Resumes after the usage limit", and needsYou is false. With no first reason and at least one held part, the row shows "On hold", and needsYou is false.
 - Phase of a part: the shared `phaseRow` (src/shared/task-status.ts) picks the open row that gives the phase (part-session.md section 9.7, invariant 8). A waiting message beside another open row gives no phase. An update row beside its resolve or check row gives none either. The web `runningStep` and `partStep` call it.
 - REASON_EXITS has no planned exit. PATCH_LOST moves to src/shared/task.ts and keeps its stored value.
+
+PS5-C: the Task view (ps5-plan.md sections 3 and 4; part-session.md sections 2.17 and 9.6):
+
+- Continue replaces Resume on the reason rows and on the stopped row. The usage row keeps "Resume at <time>" and "Resume".
+- "Leave it" replaces Dismiss. In ready, the reason rows show it in More and send option leave. It follows loop.ts leaveReason. The rows of the form reasons (question with open questions, spec_change, allow), slot, usage, and red/setup_time show no "Leave it".
+- Pause is gone from the web.
+- "Push to <branch>" is the primary of a part with new commits that are not on the server yet (POST /parts/:part/push).
+- The Build box shows the notes of the newest ok commit row of the part, such as the size note. A restart mark is no commit. "Change the limit" shows only while the part is over the line limit and Keep one PR is off. It posts /limit with lineBudget.
+- Working rows show "3 of 5 tasks done" on a build run, "(try n of N)" on a fix run of red checks, and "(round n of N)" on a judging run. The counts come from the plan ticks and StepDetail.tries. A row without a planned task or without tries leaves the count out. The Plan tab ticks the tasks of each part.
+- A critic row in the Log says "Quick review".
+- The ready and stopped sentences follow part-session.md section 2.17. Tell Claude follows section 6.18.1.
 
 ## 7. UX rules check
 

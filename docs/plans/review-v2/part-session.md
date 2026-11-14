@@ -426,7 +426,7 @@ Each state has one primary button or none.
 | Checking | "The app runs the checks of part 2." | none | Stop |
 | Fixing | "Claude fixes the checks of part 2 (try 1 of 3)." | none (message box) | Hold, Stop |
 | Critic or review | "A second Claude run reviews part 2." | none | Stop |
-| Ready | "Part 2 is ready: 5 tasks, 340 lines, checks green." | "Open PR for part 2" | Show the diff, Fix these too, Start this part again |
+| Ready | "Your change is ready: 2 tasks, 340 lines, checks green." With several parts: "Part 2 is ready: 5 tasks, 340 lines, checks green." | "Open the PR", or "Open PR for part 2 of 3" | Show the diff, Fix these too, Start this part again |
 | Claude asks | "Claude asks: <question>" | "Answer" | Use the recommended answers, Stop |
 | Claude asks to run a command | "Claude asks to run a command." | "Continue" | Stop |
 | Plan change | "Claude proposes a change to the plan." | "Review the change" | Reject, Stop |
@@ -439,9 +439,11 @@ Each state has one primary button or none.
 | Fixed, not pushed | "Part 2 has 1 new commit. 3 replies wait." | "Push and post 3 replies" | Show the diff |
 | Build failed | "The build of your PR failed: <name>." | "Let Claude fix the build" | Go to the PR |
 | Red-build fixes on | "Claude fixes red builds of part 2 by itself (1 of 2 used)." | none | Stop red-build fixes, Go to the PR |
-| Stopped | "Stopped at part 2. The work is kept." | "Continue" | Start this part again, Close the task |
+| Stopped | One part: "Stopped. The work is kept." More parts: "Stopped at part 2. The work is kept." or "Stopped at <part label>. The work is kept." | "Continue" | Start this part again, Close the task |
 
 - Every Needs you box uses Continue (build-redesign.md section 2.5). Stop stays in More.
+- The ready sentence leaves out a fact that is not known: the task count with no planned task, the lines with no line count, and "checks green" with no green check row.
+- A stop before the build keeps the sentence of spec.md section 6.12, such as "Stopped at: writing the plan."
 - The Plan tab shows the tick progress of each part.
 - The Log tab groups the runs of one session under "Claude session of part 2". Each run shows "resumed" or "new session".
 
@@ -1439,7 +1441,7 @@ The phase comes from the open row that the shared `phaseRow` (src/shared/task-st
 | Checking | I, R | worktree state | none | checking | none | none |
 | Fixing | I, R | worktree state | none | fixing | none | none (message box) |
 | Critic or review | I, R | worktree state | none | critic, reviewing | none | none |
-| Ready | I | self_reviewed | none | idle | none | "Open PR for part 2" |
+| Ready | I | self_reviewed | none | idle | none | "Open the PR", or "Open PR for part 2 of 3" |
 | Claude asks | I, R | worktree state | question/claude | idle | none | "Answer" |
 | Claude asks to run a command | I, R | worktree state | allow | idle | none | "Continue" |
 | Plan change | I, R | worktree state | spec_change | idle | none | "Review the change" |
@@ -1488,9 +1490,9 @@ The phase comes from the open row that the shared `phaseRow` (src/shared/task-st
 | CI outside the code (PS7a) | the newest ci run: cause infra or unknown, no change | "Claude says the build failed outside the code: <quote>." | "Go to the build" | Go to the PR |
 | Declined | part declined | "The PR was declined on the server." (model.ts:495-496) | "Close the task" | Open the PR again, Drop |
 | Done, closed, failed | task done or failed | model.ts:419-429, :488-494 | per row | none |
-| Unpushed, no replies | derived wait 6 | "Part 2 has 1 new commit that is not on the server yet." | "Push to <branch>" | Show the diff |
+| Unpushed, no replies | derived wait 6 | "Part 2 has new commits that are not on the server yet." | "Push to <branch>" | Show the diff, Go to the PR, Close the task |
 
-The last row has no primary today. Its comment says that no route exists (model.ts:692), but routes.ts:361 serves POST /parts/:part/push. Not verified: that route fits this row.
+Unpushed with no replies: POST /parts/:part/push fits this row (PS5-C). For this row, pr.ts pushNow refuses only for a first reason, a running step or driver, or a merged lower part. Its generic checks also refuse a stale version, a PR open in progress, an adopted part, a part with no built head, and a failed pre-flight.
 
 ### 9.7 Invariants and test plan
 

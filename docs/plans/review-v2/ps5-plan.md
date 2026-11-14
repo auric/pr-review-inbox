@@ -86,6 +86,15 @@ Idle rows:
 
 ## 4. Items
 
+Status: PS5-C (C1, C2a, and C2b) is built in 171c5c3 and f6a1c5f. Deviations of C2b from the items below:
+- The flag `instructRun` is on TaskPartDto, one value for each part. The routes set it from loop.ts `instructRun` while the loop works.
+- `instructRun` predicts "queued" only with the live gate off. It gives null while a follow-up or other mode driver works, or while a message of the part waits.
+- With a first reason, "Run setup again" shows only for the red setup reason of the same part. With no reason, it shows for a part with a worktree while nothing runs.
+- See why shows on the rows that keep it (section 3, REASON_EXITS) only when the reason names a step. This applies to the blocker row too.
+- "Leave it" follows the server rule of loop.ts `leaveReason`: each reason row in ready, except the form reasons, slot, usage, and red/setup_time.
+- The `T<ord>.` task filter of `plannedTasks` applies only with sub-tasks. Without sub-tasks, each part lists all tasks of the plan (open question 5).
+- The box reasons stay the server `BOX_REASONS` (tasks.ts): red, size, blocker, denied_path, and update. The exclusion list of 4.10 does not apply.
+
 4.1 Phase of each part (PS5-C)
 - `model.ts`: import `rowPhase`; rewrite the implement, fix, check, review, and commit cases of `stepSentence` to the table above; tick count from `plannedTasks`; `tries` from the row detail.
 - `partRow` implementing gives short texts: "<R> builds it: 3 of 5 tasks done.", "The app runs the checks.", "<R> fixes the checks.", "A second <R> run reviews it.", "<R> works on the review points.", "<R> works on your instructions.", "The app runs the setup commands.", "On hold. Its work is kept."
@@ -245,7 +254,7 @@ Each package ends green on `bun run check`. A, E, and D also run `bun run test:e
 3. The server rule for a note-only answer to a point question is not known. The web asks for a choice.
 4. The usage timer path calls `changed()`, so SSE refreshes the view (not verified).
 5. Plan part n equals task_part ord in a task without sub-tasks (not verified).
-6. WP-7 is optional. Without it, the box stays busy during a run.
+6. WP-7 landed (ba7ad13). PS5-C shows the live and queued hints of 4.10.
 7. User answer (2026-11-13): the 2.17 ready sentence replaces "is ready and checked by <R>". Update the tests and the README.
 8. User answer (2026-11-13): remove the resume option `start-step-again` in PS5-S2.
 9. budget/cost (Q-SM5) still has no owner. PS5 shows Continue only.
