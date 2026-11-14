@@ -735,11 +735,45 @@ export const MODULES: Record<ModuleId, { label: string; lines: string[] }> = {
 // spec.md section 1.3: rules needs project instructions, and intent needs a goal. Else the section adds nothing.
 const lacks = (id: ModuleId, c: ReviewContext) => (id === "rules" && !c.instructions) || (id === "intent" && !c.goal);
 
+// docs/plans/review-v2/review-quality-2026.md item 10: the lines of the "security2" variant, adapted from
+// anthropics/claude-code-security-review (MIT, third-party-licenses/prompts/). They stay out of MODULES, because an edit of
+// MODULES[*].lines changes profileRevision. finder: added to the security section. verify: rules of the verify phase.
+export const SECURITY2 = {
+  finder: [
+    "Check XML parsing with external entities, template injection, unsafe deserialization, and path traversal in file access.",
+    "Check server-side requests whose host or protocol comes from input.",
+    "Check JWT handling and session management for flaws.",
+    "Check privilege escalation: a path that lets a user act with rights that the user does not have.",
+    "Check weak or self-made cryptography, weak random values for secrets, and certificate checks that the code turns off.",
+    "Check that logs and error messages show no secrets, passwords, request headers, or personal data.",
+    "In trigger of a security finding, name the untrusted source, the path through the code, and the sink.",
+  ],
+  verifyHead: "For a candidate with the category security, also apply these rules:",
+  verify: [
+    "A security claim holds only when an untrusted source reaches the sink on a path in this code.",
+    "Name the source, the path, and the sink in reason.",
+    "These sources are trusted: environment variables, command-line flags, and the config of the operator.",
+    "A UUID is not guessable. A claim that needs a guessed UUID does not hold.",
+    "Framework escaping, such as React text output, stops cross-site scripting. Only a raw HTML call, such as dangerouslySetInnerHTML, can fail.",
+    "Client-side code is no trust boundary. A missing permission check in client-side code is no security hole.",
+    "A claim about code that only tests use does not hold.",
+    "A race that no practical timing can trigger does not hold.",
+    "An outdated library version is out of scope. It does not hold.",
+    "User input inside an AI prompt is no security hole by itself.",
+    "Refute a security claim that does not hold, and name the rule in reason.",
+    "Some security candidates show a real defect that is no security hole.",
+    "Examples: a leak, a crash, unbounded load, or a missing rate limit.",
+    "Never refute such a candidate because it is no security hole. Confirm or refute that defect by its trigger.",
+    "Set severity by the rubric below for that defect. In reason, write that it is no security hole.",
+  ],
+};
+const security2Verify = (p: Partial<Pick<Profile, "variants">>) => has(p, "security2") || has(p, "security2-verify");
+
 // The sections in MODULE_IDS order, so the click order of the checkboxes does not change the prompt.
-export function moduleSections(p: Pick<Profile, "modules">, c: ReviewContext): string[] {
+export function moduleSections(p: Pick<Profile, "modules"> & Partial<Pick<Profile, "variants">>, c: ReviewContext): string[] {
   return MODULE_IDS.filter((id) => p.modules.includes(id) && !lacks(id, c)).flatMap((id) => [
     `Check section ${id}:`,
-    ...MODULES[id].lines.map((l) => `- ${l}`),
+    ...[...MODULES[id].lines, ...(id === "security" && has(p, "security2") ? SECURITY2.finder : [])].map((l) => `- ${l}`),
   ]);
 }
 
@@ -1315,6 +1349,7 @@ export function verifyRules(
       : []),
     ...(v2 && c.prContext ? [VERIFY2.thread] : []),
     ...(v2 && p.modules.includes("intent") && !lacks("intent", c) ? [VERIFY2.intent] : []),
+    ...(security2Verify(p) ? [SECURITY2.verifyHead, ...SECURITY2.verify.map((l) => `- ${l}`)] : []),
     "Set severity by the rubric below. Lower it for a rare trigger or a small impact.",
     "Raise it only when the code shows a worse result than the candidate says.",
     ...rubric(p),

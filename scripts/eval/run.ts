@@ -277,8 +277,8 @@ export function evalProfile(o: Options) {
 // The CLI calls of a result file X.json: X.calls/<case>-<repeat>-<k>.json, k from 1 in call order.
 export const callsDir = (result: string) => result.replace(/\.json$/, ".calls");
 type Recorded = { kind: "find" | "verify"; outcome: RunOutcome };
-// review-quality-2026.md E2: the variants that change only the verify prompt. A replay can change them.
-export const VERIFY_ONLY: readonly string[] = ["verify2"] satisfies Variant[];
+// review-quality-2026.md E2 and item 10: the variants that change only the verify prompt. A replay can change them.
+export const VERIFY_ONLY: readonly string[] = ["security2-verify", "verify2"] satisfies Variant[];
 // The profile fields of a and b that differ and reach a finder or salvage call. catalog.ts checked(): the verify mode changes the finder
 // prompt. The verifier effort, model, and outcome, and the verify-only variants, reach only the verify call.
 export function finderChange(a: Record<string, unknown>, b: Record<string, unknown>): string[] {

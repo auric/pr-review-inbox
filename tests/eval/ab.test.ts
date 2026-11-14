@@ -461,9 +461,12 @@ describe("eval:ab arguments", () => {
     expect(parseAb(["--candidate-variants", "verify2,broad"])).toMatchObject({ variants: ["verify2", "broad"] });
     // review-quality-2026.md item 7.
     expect(parseAb(["--candidate-variants", "classes"])).toMatchObject({ variants: ["classes"] });
+    // review-quality-2026.md item 10.
+    expect(parseAb(["--candidate-variants", "security2"])).toMatchObject({ variants: ["security2"] });
+    expect(parseAb(["--candidate-variants", "security2-verify"])).toMatchObject({ variants: ["security2-verify"] });
     for (const retired of ["signal", "order", "rules2", "rereview-strict"])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
-        error: expect.stringContaining("--variants must be a comma list of broad, classes, parts, verify2."),
+        error: expect.stringContaining("--variants must be a comma list of broad, classes, parts, security2, security2-verify, verify2."),
       });
   });
 
@@ -508,6 +511,7 @@ describe("eval:ab arguments", () => {
       ["--candidate-variants", "broad"],
       ["--candidate-variants", "broad,verify2"],
       ["--candidate-variants", "classes"],
+      ["--candidate-variants", "security2"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
       ["--candidate-verifier", "off"],
     ])
@@ -517,6 +521,11 @@ describe("eval:ab arguments", () => {
     expect(parseAb(["--candidate-replay", "--candidate-verifier-effort", "high"])).toMatchObject({ replay: true, verifierEffort: "high" });
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can test it.
     expect(parseAb(["--candidate-replay", "--candidate-variants", "verify2"])).toMatchObject({ replay: true, variants: ["verify2"] });
+    // review-quality-2026.md item 10: security2-verify is the verify half of security2.
+    expect(parseAb(["--candidate-replay", "--candidate-variants", "security2-verify"])).toMatchObject({
+      replay: true,
+      variants: ["security2-verify"],
+    });
     // --effort changes both sides, so the finder of the replay matches its baseline.
     expect(parseAb(["--candidate-replay", "--effort", "medium"])).toMatchObject({ replay: true });
   });

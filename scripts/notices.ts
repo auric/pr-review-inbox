@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Writes THIRD_PARTY_NOTICES.md from what ships: the npm packages in the web bundle (Vite source maps), in the server bundle
-// (Bun metafile), and in the CSS imports of src/web/index.css, the Bun runtime of the compiled binary, and the project skills.
+// (Bun metafile), and in the CSS imports of src/web/index.css, the Bun runtime of the compiled binary, the adapted prompt text, and the
+// project skills.
 // Usage: bun scripts/notices.ts [--check]. --check writes nothing and fails when the file is out of date.
 // It exits with code 1 when a license is not on the compatible list or a license text is missing.
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -33,6 +34,17 @@ const SKILL_LICENSE: Record<string, string> = {
   "shadcn-ui/ui": "MIT",
   "vercel-labs/agent-skills": "MIT",
 };
+
+// Prompt text that src/ adapts from another project: the source, its license, the upstream commit, and where the text goes. The
+// license text is in third-party-licenses/prompts/<owner>-<repo>/.
+const ADAPTED_PROMPTS: { source: string; license: string; commit: string; use: string }[] = [
+  {
+    source: "anthropics/claude-code-security-review",
+    license: "MIT",
+    commit: "0c6a49f1fa56a1d472575da86a94dbc1edb78eda",
+    use: 'The security rules of the review variants "security2" and "security2-verify" (src/server/review/catalog.ts SECURITY2)',
+  },
+];
 
 // The license of npm packages whose package.json has no license field, from the license file of the package.
 const NPM_LICENSE: Record<string, string> = { "khroma@2.1.0": "MIT" };
@@ -167,6 +179,13 @@ async function main() {
     skills.push(`### ${source}\n\nSkills: ${ids.sort().join(", ")}. License: ${license ?? "UNKNOWN"}.\n\n${block(texts)}`);
   }
 
+  const adapted = ADAPTED_PROMPTS.map((a) => {
+    if (!compatible(a.license)) problems.push(`prompt source ${a.source}: license ${a.license} is not on the compatible list`);
+    const texts = filesIn(join(VENDORED, "prompts", a.source.replace("/", "-")), () => true);
+    if (!texts.length) problems.push(`prompt source ${a.source}: no license text in third-party-licenses/prompts/.`);
+    return `### ${a.source}\n\n${a.use} adapt rules of this project at commit ${a.commit}. License: ${a.license}.\n\n${block(texts)}`;
+  });
+
   const summary = list.map((p) => `| ${p.name} | ${p.version} | ${p.license} |`).join("\n");
   const doc = `# Third-party notices
 
@@ -187,6 +206,12 @@ ${sections.join("\n\n")}
 The compiled binary embeds the Bun runtime.
 
 ${block(bunTexts)}
+
+## Adapted prompt text
+
+The app and the compiled binary include prompt text that is adapted from these projects.
+
+${adapted.join("\n\n")}
 
 ## Project skills
 

@@ -621,7 +621,7 @@ describe("eval:local re-review cases", () => {
     // review-quality-2026.md WP-R1: rereview-strict is retired.
     const strict = await bun([RUN, "--set", "local", "--rereview", "--variants", "rereview-strict"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(strict.code).toBe(2);
-    expect(strict.stderr).toContain("--variants must be a comma list of broad, classes, parts, verify2.");
+    expect(strict.stderr).toContain("--variants must be a comma list of broad, classes, parts, security2, security2-verify, verify2.");
     const plan = await bun([RUN, "--set", "local", "--rereview", "--variants", "verify2"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(plan.code).toBe(2);
     expect(plan.stdout).toContain("Eval plan: 1 case, 1 repeat, profile general with variants verify2, set local, re-reviews.");

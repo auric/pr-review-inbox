@@ -177,8 +177,11 @@ describe("eval harness without --real (AC-M2)", () => {
     ]);
     expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
-    expect(VERIFY_ONLY).toEqual(["verify2"]);
+    expect(VERIFY_ONLY).toEqual(["security2-verify", "verify2"]);
     expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
+    // review-quality-2026.md item 10: security2 changes the finder, security2-verify only the verify prompts.
+    expect(finderChange(base, { ...p.profile, variants: ["security2-verify"] })).toEqual([]);
+    expect(finderChange(base, { ...p.profile, variants: ["security2"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["broad", "verify2"] })).toEqual(["variants"]);
   });
 
@@ -310,7 +313,7 @@ describe("eval harness without --real (AC-M2)", () => {
       ["--effort", "huge", "--effort must be one of"],
       ["--reviewer-effort", "bogus", "--reviewer-effort must be one of"],
       ["--model", "bad name", "--model must be a model alias"],
-      ["--variants", "rules2", "--variants must be a comma list of broad, classes, parts, verify2."],
+      ["--variants", "rules2", "--variants must be a comma list of broad, classes, parts, security2, security2-verify, verify2."],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
       const r = await bun([RUN, flag, value, "--runner", process.execPath, FAKE, "none.json"]);

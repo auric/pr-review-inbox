@@ -276,6 +276,20 @@ Report other problems too.
 - Expected: severity agreement up; main recall about the same; output +2-5%. Risk: a real finding with one bad quote gets capped.
 - Experiment: rides on any later candidate run. Ship rule: among capped items judge-fp clearly outnumber tp, and capped must-finds are at most S_R.
 
+### 10. Security rules from the Anthropic security review (variant security2)
+
+- Status: built, opt-in (user approval of 2026-11-14). Two names: "security2" changes the finder and the verify phase; "security2-verify" changes only the verify phase, so a replay can test it alone (`VERIFY_ONLY`, run.ts).
+- Hypothesis: the security section names too few attack kinds, and the verifier has no rule for a security claim without a real attack path. [V] anthropics/claude-code-security-review (MIT): its audit prompt names more categories and asks for an exploit scenario; its second-pass filter drops claims by hard exclusions and precedents. [O] `MODULES.security` names sinks, auth, secrets, unsafe defaults, and memory bounds only.
+- Finder change (catalog.ts `SECURITY2.finder`): under "security2", seven lines follow the lines of check section security, only when the profile has that section. They name XXE, template injection, deserialization, path traversal, SSRF to an input-controlled host or protocol, JWT and session management flaws, privilege escalation, weak cryptography and randomness, certificate check bypass, and secrets or personal data in logs and errors. The last line asks for the untrusted source, the path, and the sink in trigger.
+- Verify change (catalog.ts `SECURITY2.verify`, in `verifyRules` before the rubric): rules for a candidate with category security only. A claim holds only when an untrusted source reaches the sink on a path in this code. Adapted precedents: environment variables, command-line flags, and operator config are trusted; UUIDs are not guessable; framework escaping stops cross-site scripting; client-side code is no trust boundary; test-only code, theoretical races, and outdated libraries do not hold; user input in an AI prompt is no hole by itself.
+- Not adopted, because our review also reports normal bugs: the upstream exclusions of DoS, rate limits, resource leaks, crashes, and open redirects. A security candidate that shows such a defect keeps the verdict of that defect. The verdict schema has no category field, so the category stays security; the verifier sets severity by the rubric and writes "no security hole" in reason.
+- Expected: more security must-finds from the finder; fewer judge-fp security findings after the check; cost about the same.
+- Risks: a refuted security finding stays in main (`neverHidden`, judge.ts `capOf` demote), so the verify half shows only with `eval:rescore -- <result.json> --fold-refuted` (improvement 5) or in the refuted count of the confusion matrix. A real hole with a trusted-looking source can be refuted. The rules cover category security only, not injection or sql.
+- Gate (zero cost): the "class security" slice row of the W1 summary must show at least 15 must-finds. The row counts must-finds over all runs, so at repeat 3 that is 5 distinct security must-finds. Reason: with fewer, one missed bug moves the slice recall by 20% or more, which no result can tell from the run spread. If the slice is too small, the next step is a few synthetic security cases in the probe set (not built).
+- Gap: no summary row counts judge fp by finding category. Count the main items with category security and judge label fp in the result file, or add that slice first.
+- Experiment: verify half first, cheap: `bun run eval:ab -- --baseline eval-results/w1/baseline --candidate-variants security2-verify --candidate-replay --review-only --clean 8`. Then both halves: `bun run eval:ab -- --baseline eval-results/w1/baseline --candidate-variants security2 --candidate-repeat 2 --review-only --clean 8`.
+- Ship rule: fewer judge-fp security findings with no lost security must-find. When it ships, the lines stay out of `MODULES[*].lines`, because an edit there changes `profileRevision`.
+
 ## 3. Waves and cost (estimates)
 
 | Wave | Work | Shared runs | Model cost |
@@ -284,6 +298,7 @@ Report other problems too.
 | W1 | Rebuild the set (`eval:local --clean 8`); baseline-only run at shipped efforts, repeat 3, recorded; labels; judge calibration; zero-cost checks (union bound, refuted in main, verifier matrix, evidence references: `bun run eval:label -- eval-results/w1/baseline --evidence`, category counts) | none | about $140-180, about 5 h |
 | W2 (cheap) | C1 = improvements 1+2; replays (control, verify2, one effort); improvement 5 by rescore; probe set | bisect C1 only if large cases are mixed | about $130-210 |
 | W3 (costly) | C2 broad; C3 runs3 if gated; C4 classes if gated; improvement 8 rides on C2 or C4 | none; superiority tests run alone | about $55-450 by gates |
+| W3b (security, if gated) | Item 10: security2-verify replay, then C5 security2 | none; runs alone | one verify replay plus about the cost of C4 |
 
 A cost cutter that ships makes its result folder the next baseline. Add one repeat before the next superiority test.
 
