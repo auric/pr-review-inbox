@@ -1,6 +1,6 @@
 # Build a Jira task: one Claude session per part
 
-Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. PS0 is code complete: the Gate B37 script (`scripts/gate/claude-checks.ts`, `scripts/gate/session.ts`) and CI12 (`scripts/gate/ci.ts`). Gate B37 passed in full on CLI 2.1.323 (2026-11-13). CI12 is not run. PS-M, PS1 to PS3, and PS4 WP-1 to WP-5 are built (ps4-plan.md section 3). The other packages are not built. All user requirements of 2026-11-12 are decided. User answers of 2026-11-12: Q1 to Q9 take the recommended answers. Section 3 is approved, items 1 to 15, with the red-build fixes as a tick per part. RUN_TIME_MAX_MS (240 min) stays. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
+Status: design of 2026-11-12 against main 31f8205 plus the uncommitted package WP-R1b. PS0 is code complete: the Gate B37 script (`scripts/gate/claude-checks.ts`, `scripts/gate/session.ts`) and CI12 (`scripts/gate/ci.ts`). Gate B37 passed in full on CLI 2.1.323 (2026-11-13). CI12 is not run. PS-M, PS1 to PS3, and PS4 WP-1 to WP-6 are built (ps4-plan.md section 3). The other packages are not built. All user requirements of 2026-11-12 are decided. User answers of 2026-11-12: Q1 to Q9 take the recommended answers. Section 3 is approved, items 1 to 15, with the red-build fixes as a tick per part. RUN_TIME_MAX_MS (240 min) stays. This design replaces WP-R2 to WP-R5 and WP-R7 of build-redesign.md. It also replaces the per-step lead of agent-workflow.md option C. It folds in items 1 to 7 and 11 of build-redesign.md section 7.
 
 Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, and shared/task.ts are those of the WP-R1b tree. The other files are equal on main.
 
@@ -134,7 +134,7 @@ Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, an
 2. The HEAD of each edit worktree equals its session head.
 3. The context size of the last run is known and is at most "Session context cap". An unknown size counts as over the cap.
 4. The last run of the session ended without a denied path and without a git state change. Such a run can carry a prompt injection in its context.
-5. Gate B37 passed the facts that the run kind needs (section 4).
+5. Gate B37 passed the facts that the run kind needs (section 4). Gate B37 passed in full on 2026-11-13 with CLI 2.1.323 (integration-check.md). claude.ts SESSION_GATES has resume, live, and resolve on.
 
 **What moves the session heads**
 
@@ -159,7 +159,7 @@ Line numbers of loop.ts, implement.ts, stream.ts, context-files.ts, tasks.ts, an
 **Cut runs**
 
 - Stop, Hold, the stall guard, and the loop guard kill the process. The keep step still runs in the finally block.
-- When U101 passes, the next run resumes the cut transcript. Else the app keeps the older stored file, and continue.md covers the cut run.
+- The keep step keeps the transcript of a cut, cancelled, or ok run, and the next run resumes it. U101 showed this: a kill keeps a partial transcript of whole lines. Its resume exits 0 and knows the Write of the cut run. U101 is PASS in run 1 and INFO in run 2, because run 2 showed no Write result before the kill. A resumed run whose transcript does not know the last run also gets continue.md and the restart or reset line.
 - The turn cap and the process cap (RUN_TIME_MAX_MS) continue once by themselves with "Continue where you stopped." (build-redesign.md Q2). A second cut waits for Continue.
 
 **End and deletion**
@@ -305,7 +305,7 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 
 ### 2.11 Usage limit
 
-- The parser stores resetsAt from the last rate_limit_event with status rejected. Its unit is not verified (U106).
+- The parser stores resetsAt from the last rate_limit_event with status rejected. Its unit is seconds: Gate B37 run 2 recorded a Unix time in seconds (U106, INFO).
 - The run ends with kind usage_limit (stream.ts:287). The part gets the new reason kind usage, with resumeAt. The task does not stop.
 - Status: "Your Claude usage limit is reached. It resets at 14:30." The primary button is "Resume at 14:30".
   - A click before that time arms the resume. The status then says "Claude resumes at 14:30.", and More has "Cancel the resume".
@@ -406,7 +406,9 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 - The main thread of the part session is the lead of agent-workflow.md. It can use the pinned workflow of the task (task.workflow_json).
 - Build, fix, and message runs use the workflow. Resolve runs, the critic, and the own review never use it.
 - Agents that write files or run commands still wait for Gate B36. B37 adds one check: a resume keeps the limits of the agents file (U108).
-- agent-workflow.md rejected option B for four reasons. This design answers each one:
+- Gate B38 (2026-11-14, CLI 2.1.323, integration-check.md): the deny rules `Agent(model:*)` and `Agent(effort:*)` pin each subagent to the model and effort of its definition. The CLI refuses the whole Agent call with a per-call model or effort. It does not remove the parameter.
+- B38.model.retry: the lead does not retry after a refusal, so that agent step is lost. So each lead with the Agent tool needs a line that forbids the per-call model and effort.
+- B38.effort-level (INFO, a run without the deny rules): a per-call model keeps the pinned effort of the definition. A per-call effort replaces it.- agent-workflow.md rejected option B for four reasons. This design answers each one:
   - the app runs the checks before each commit, so spec.md section 6.21.7 holds;
   - the path check and the git check run after each run;
   - a denied path undoes only its own files;
@@ -768,7 +770,7 @@ Risks:
 
 ## 9. State machines
 
-Status: design of 2026-11-12. User answers of 2026-11-12: Q-SM1 and Q-SM2 yes; Q-SM3 to Q-SM8 take the recommended answers. Update of 2026-11-14: the decisions of ps4-plan.md section 1 are in 9.3.2, 9.3.3, 9.4, 9.5, and 9.7. PS4 WP-1 to WP-5 are built; ps4-plan.md section 3 lists the commits. Line numbers of loop.ts, implement.ts, tasks.ts, routes.ts, and shared/task.ts are those of the WP-R1b worktree on 2026-11-12. They are up to 25 lines higher than the citations of sections 1 to 6. machine.ts, gates.ts, pr.ts, model.ts, and the migrations are equal on main.
+Status: design of 2026-11-12. User answers of 2026-11-12: Q-SM1 and Q-SM2 yes; Q-SM3 to Q-SM8 take the recommended answers. Update of 2026-11-14: the decisions of ps4-plan.md section 1 are in 9.3.2, 9.3.3, 9.4, 9.5, and 9.7. PS4 WP-1 to WP-6 are built; ps4-plan.md section 3 lists the commits. Line numbers of loop.ts, implement.ts, tasks.ts, routes.ts, and shared/task.ts are those of the WP-R1b worktree on 2026-11-12. They are up to 25 lines higher than the citations of sections 1 to 6. A number often points at the sender or the check inside the named function. PS4 moved most lines of loop.ts and tasks.ts. In a later tree, find each symbol by name. machine.ts, gates.ts, pr.ts, model.ts, and the migrations are equal on main.
 
 This section has three machines, plus reasons, derived waits, and one mode:
 
@@ -1361,7 +1363,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 - rearm(task) runs in loop changed() (loop.ts:629-633) and in loop.recover (loop.ts:3093-3102). It arms a timer for the first reason when that reason is usage with armed true. A past resumeAt fires at once. Not verified: every reason write passes changed().
 - The arm route also calls rearm (ps4-plan.md section 7).
 - A usage reason starts armed only when "Resume by itself after a usage limit" is on and the previous Claude run of the part did not end with usage_limit. So a second limit needs a click (2.11). StepDetail.session.why keeps its meaning, "why a fresh session" (ps4-plan.md section 1 item 8).
-- resumeAt is resetsAt times 1000. resetsAt is in seconds in the recorded fixtures (integration-check.md U106). An own review that hits the usage limit also gives usage, not error/run.
+- resumeAt is resetsAt times 1000. resetsAt is in seconds (integration-check.md U106, Gate B37 run 2). An own review that hits the usage limit also gives usage, not error/run.
 
 **Queued reasons (spec.md 6.25) for parts that build at the same time.**
 
