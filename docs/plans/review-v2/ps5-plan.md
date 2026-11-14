@@ -150,7 +150,7 @@ Status: PS5-C (C1, C2a, and C2b) is built in 171c5c3 and f6a1c5f. Deviations of 
 - Test: ticks from a commit row and a run row, and the per-part filter.
 
 4.10 Message box (PS5-C)
-- `tellBox` shows the box for each implementing or ready part with a worktree, also during the first build, except with `queued > 0`, an adopted part, and the reasons question (open questions), spec_change, allow, preflight, slot, and usage. `canInstruct` decides open or busy.
+- `tellBox` shows the box for each implementing or ready part with a worktree, also during the first build, except with `queued > 0`, a held or waiting part, and an adopted part. With a first reason, the box shows only for the reasons of BOX_REASONS and spec.md section 6.18.1: red, size, blocker, denied_path, and update. `canInstruct` decides open or busy.
 - `TellClaude.tsx` hint. Open: "<R> gets your message in a run of this part. The app then runs the checks and its own review. Pushes and other git actions stay buttons." Busy: "<R> or the checks are working. You can send when this run ends."
 - Only if WP-7 lands: queued "<R> reads this when the current run ends."; live "<R> reads this now."
 
@@ -176,6 +176,14 @@ Status: built in 77f9137. Deviations from the list below:
 - Tests: reasons, ui-routes (`/limit` without a reason), loop (ticked, tries), session, and tests/web for rowStatus, each with a control mutation.
 
 PS5-S2 (after the web):
+
+Status: built in e9501fb. Deviations from the list below:
+- The legacy question/paused Continue path stays (part-session.md section 9.4). Continue of a stored row builds with no reset.
+- AC-B153 now follows the new setup rule: option setup on the red setup of the first reason clears it, the next reason moves up, and setup runs at the next GO of the part.
+- The resume option `start-step-again` goes too (section 11 item 8). The 409 for an option while another part waits goes with it.
+- Continue of a task that stopped in ready goes back to ready and starts nothing. When every part merged or was dropped meanwhile, it ends in done (part-session.md section 9.3.1).
+- The grid control mutation: limit without its state check gives 200 in done.
+
 - `routes.ts` drops `/pause`, `/dismiss`, and `/parts/:part/setup`.
 - `loop.ts` drops `pause`, `dismiss`, `setupAgain`, `driveSetup`, `pauseAsked`, `gates`, `openGates` (if PS4 left them), `NO_DISMISS`, `Q.clearSize`, and the `keep` path of `limit`. `SETUP_WAITS` stays only as the 409 sentence of option setup.
 - Rewrite or remove the tests that call the old routes (tests/tasks loop, concurrent, instruct, ui-routes). Check name-only matches (slots, caps, limits) and change only real callers.

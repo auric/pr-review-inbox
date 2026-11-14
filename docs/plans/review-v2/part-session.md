@@ -952,7 +952,7 @@ Owners: route (routes.ts handler), loop (loop.ts driver), tasks (tasks.ts servic
 | ready | START_BUILDING | none | implementing | tasks, sub-task added | loop.build | none |
 | interview to ready | STOP | none | stopped | route stop; loop failed() for an error that no reason covers; tasks for a failed or cut interview or spec run | cancel runs and abort checks (route); clear the first reason and every part row except held (route, tasks) | fewer senders (9.3.4) |
 | non-final | FAIL | none | failed | reserved | clear the part rows (tasks) | no sender |
-| stopped | RESUME | stoppedFrom X | X | route resume | Continue rule, then GO for each building part (loop) | none |
+| stopped | RESUME | stoppedFrom X | X | route resume | Continue rule, then GO for each building part (loop). For stoppedFrom ready, loop.resume sends RESUME, then the all-merged check (partsDone, gap 18) in the same transaction, and starts no driver | PS5-S2: loop.resume takes stoppedFrom ready |
 | stopped | CLOSE | none | done | route close | closed_at; delete transcripts | PS3 side effect |
 | done | CLOSE | none | done | route close | clear task.blocked_json and the waiting part rows; version + 2; closed_at keeps its first value | none |
 
@@ -1162,9 +1162,9 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | New (PS7a): POST /tasks/:id/parts/:part/ci | GO with follow (purpose ci) | the sentence of the state |
 | New (PS7b): POST /tasks/:id/parts/:part/ci-mode | mode off | "Red-build fixes are off." |
 | POST /tasks/:id/limit | none: "Change the limit" sets the task line limit only, keeps every reason, and starts nothing (ps5-plan.md D1) | TASK_STATE_TEXT outside implementing and ready; WORKING while a driver works |
-| Goes: /pause, /dismiss, /parts/:part/setup, and the `keep` form of /limit (PS5-S2) | resume options (section 5.2): leave, more-time, setup | none |
+| Gone in PS5-S2 (built): /pause, /dismiss, /parts/:part/setup, and the `keep` form of /limit | Hold and the resume options leave and setup replace them | the three routes answer 404; the `keep` form answers 400 |
 
-/limit stays with `lineBudget` only (ps5-plan.md D1). The `keep` form stays until PS5-S2, because the web still sends it.
+/limit stays with `lineBudget` only (ps5-plan.md D1).
 
 #### 9.3.7 Diagrams
 
@@ -1333,7 +1333,7 @@ stateDiagram-v2
 | question/red_before | loop.ts:1280-1289 | I, R | yes | CONTINUE | See why; Stop; R: leave | the fix runs start, tries from 0 |
 | question/no_change | loop.ts:1297-1298 | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | the gate runs again, tries from 0 |
 | question/task_done (legacy) | loop.ts:1384 | I | no | CONTINUE | Stop | clears; taskStep goes in PS3 |
-| question/paused (legacy) | loop.ts:810 | I | no (soft) | CONTINUE | Stop | builds with no reset (loop.ts:2629-2642); Hold replaces it in PS4, and the /pause route goes in PS5 |
+| question/paused (legacy) | no setter since PS5-S2; older rows only | I | no (soft) | CONTINUE | Stop | builds with no reset (loop.ts resume, legacy question/paused branch); Hold replaces it in PS4. The /pause route is gone since PS5-S2; Continue of a stored row builds with no reset |
 | red/checks | loop.ts:1290-1295 | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | "Test-fix tries" more fix runs; the work stays |
 | red/setup | loop.ts:1723 | I, R | yes | CONTINUE | "Run setup again" (option setup with part: deletes the setup mark of the part, then takes Continue); See why; Stop | setup runs again |
 | red/setup_time | loop.ts:1717-1722 | I, R | yes | "Change the time limit" (editor), then CONTINUE | See why; Stop | setup runs with the new limit |
@@ -1388,7 +1388,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 | Item | Code | After a restart today | Target |
 |---|---|---|---|
 | drivers (lock) | loop.ts:600 | gone; recoverTasks stops tasks that worked | stays a lock, never a state |
-| pauseAsked, gates | loop.ts:602-603 | gone; loop.ts:2636-2642 covers it | removed with the /pause route in PS5; Hold (PS4) replaces it |
+| pauseAsked, gates | none | none | removed in PS5-S2 with the /pause route; Hold (PS4) replaces it |
 | slotWaits | loop.ts:604 | the waiting step fails (tasks.ts:193) | stays; recovery gives error/restart |
 | aborts | loop.ts:605 | gone with the processes | stays; also keyed by part, for Hold (PS4) |
 | pokes, modes, stopping, checking, ending, closing | loop.ts:607, :621-627 | transient | stay |
@@ -1524,7 +1524,7 @@ Unpushed with no replies: POST /parts/:part/push fits this row (PS5-C). For this
 | G3: a withdrawn "Needs work" with a failing gate moves changes_requested to pr_open | tests/tasks/gates.test.ts | PS-M | drop the edge: red |
 | REASON_EXITS: each kind and cause has a primary exit, and each exit names a route of routes.ts | new tests/shared/reasons.test.ts | PS-M | delete one entry: red |
 | Reason exits: seed each reason in I and in R. The primary exit answers 2xx and clears the reason or starts the right driver. Continue on a form reason answers 409 with its text. | new tests/tasks/reasons.test.ts (fake CLI) | PS3, PS4 | make Continue refuse ready again: red |
-| Route grid: each mutating route over fixture states (task state, part state, reason, phase) answers 2xx, 400, 404, or 409 with a sentence. It never answers 500, and no driver starts on 409. | new tests/tasks/routes-grid.test.ts | PS5 | remove one 409 check: red |
+| Route grid: each mutating route over fixture states (task state, part state, reason, phase) answers 2xx, 400, 404, or 409 with a sentence. It never answers 500, and no driver starts on 409. | built in tests/tasks/routes-grid.test.ts (PS5-S2) | PS5 | limit without its state check gives 200 in done: red |
 | Loop order: the phase send helper asserts can(). A full fake-CLI build gives GO setup, CLEAN, GO baseline, CLEAN, GO run, RUN_DONE, CHECKS_GREEN, GO critic, CLEAN, GO review, CLEAN, then REVIEWED. | tests/tasks/session.test.ts | PS3 | skip the critic: red |
 | One open step per part (invariant 8, with the update exception of WP-5 and the message exception of WP-7): an after-each check over every loop test | tests/tasks/fixture.ts helper | PS3, PS4 WP-5, WP-7 | open two rows in a test: red |
 | Restart per state: seed each row of 9.5, then run recoverTasks and loop.recover. Check the target column. Then Continue reaches the phase that GO picks. | new tests/tasks/recover.test.ts | PS1 (snapshot), PS3 (phases), PS4 (held, usage), PS7b (BUILD_WAIT) | clear held rows in clearWaits: red |
