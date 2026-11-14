@@ -84,7 +84,9 @@ describe("REASON_EXITS (part-session.md section 9.4)", () => {
     expect(ok({ option: "setup", part: 2 })).toBe(true);
     expect(ok({ option: "setup" })).toBe(false);
     expect(ok({ part: 2 })).toBe(true);
-    for (const option of ["start-step-again", "leave", "disarm", "without"]) {
+    // ps5-plan.md section 11 item 8: the option start-step-again is gone.
+    expect(ok({ option: "start-step-again" })).toBe(false);
+    for (const option of ["leave", "disarm", "without"]) {
       expect([option, ok({ option })]).toEqual([option, true]);
       expect([option, ok({ option, part: 2 })]).toEqual([option, false]);
     }

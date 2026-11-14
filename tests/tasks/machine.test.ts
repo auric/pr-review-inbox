@@ -398,6 +398,15 @@ describe("Hold, Skip, and Start again (ps4-plan.md WP-4)", () => {
     expect(taskStep("implementing", "LAST_PR_OPEN")).toEqual({ can: true, to: "ready" });
     expect(taskStep("ready", "ALL_MERGED")).toEqual({ can: true, to: "done" });
   });
+
+  // part-session.md section 9.3.1, RESUME with stoppedFrom ready: loop.resume sends it and runs the gap 18 check in the same transaction,
+  // so a sync that merged every PR while the task stopped reaches done.
+  test("gap 18 from ready: stopped RESUME goes back to ready, and ALL_MERGED then reaches done", () => {
+    const fromReady = { ...BASE, stoppedFrom: "ready" } as const;
+    expect(taskStep("stopped", "RESUME", fromReady)).toEqual({ can: true, to: "ready" });
+    expect(taskStep("stopped", "ALL_MERGED", fromReady).can).toBe(false);
+    expect(taskStep("ready", "ALL_MERGED", fromReady)).toEqual({ can: true, to: "done" });
+  });
 });
 
 // ps4-plan.md section 2.1, row Update (AC-B355 to AC-B357): the orders that driveUpdate and endUpdate send, from idle back to idle.

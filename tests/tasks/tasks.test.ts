@@ -655,8 +655,9 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       expect((await h.json<{ error: string }>(`/api/tasks/${c.body.id}/resume`, { body: { option: "nap" } })).body.error).toBe(
         "Give the task version and a valid option.",
       );
-      for (const one of [{ option: "start-step-again" }, { option: "leave" }, { option: "disarm" }, { part: 1 }])
+      for (const one of [{ option: "without" }, { option: "leave" }, { option: "disarm" }, { part: 1 }])
         expect(taskResumeInput.safeParse({ version: 1, ...one }).success).toBe(true);
+      expect(taskResumeInput.safeParse({ version: 1, option: "start-step-again" }).success).toBe(false);
       // ps4-plan.md section 4: a task that stopped before its build has no part to hold and no armed usage reason.
       const stop2 = await h.json<TaskDto>(`/api/tasks/${c.body.id}/stop`, { body: { version: back.body.version } });
       expect([stop2.status, stop2.body.state]).toEqual([200, "stopped"]);

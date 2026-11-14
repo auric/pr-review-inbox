@@ -385,7 +385,7 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
   );
 
   test(
-    "AC-B153: two red setups both wait; a green Run setup again on the first part moves the second reason up and builds nothing",
+    "AC-B153: two red setups both wait; Run setup again on the first part moves the second reason up and builds nothing",
     async () => {
       const s = await setup({ atOnce: 2, third: "base", scenario: BUILD });
       const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
@@ -427,11 +427,10 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
       const waiting = taskDto(s.db, s.t()).parts.find((p) => p.id === other)?.blocked;
       expect(waiting?.text).toBe(`Needs you: the setup commands of part ${s.part(other).ord} failed. See why.`);
       expect(taskDto(s.db, s.t()).queued).toBe(1);
-      // Run setup again on the waiting part gets 409. Tell Claude gets 409 while a part waits.
-      expect(loop.setupAgain(s.db, s.task, other, { version: s.t().version })).toMatchObject({
-        status: 409,
-        error: "This part waits for you. Act on the first reason first.",
-      });
+      // ps5-plan.md D2: "Run setup again" is the resume option setup with the part. On the waiting part it gets 409. Tell Claude gets 409
+      // while a part waits.
+      const setupAgain = (part: number) => loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part });
+      expect(setupAgain(other)).toMatchObject({ status: 409, error: "This part waits for you. Act on the first reason first." });
       expect(loop.instruct(s.db, s.task, { version: s.t().version, part: red, text: "Use the cache." })).toMatchObject({
         status: 409,
         error: WAITING,
@@ -443,10 +442,11 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
             .query("SELECT COUNT(*) AS n FROM task_step WHERE part = $part AND kind = 'check' AND item = 'setup' AND state = 'ok'")
             .get({ part }) as { n: number }
         ).n;
-      expect(loop.setupAgain(s.db, s.task, red, { version: s.t().version }).status).toBe(202);
-      await until(() => !loop.running(s.task));
-      // The green run ends the reason of its own part only. The waiting reason moves up, and nothing builds.
-      expect(green(red)).toBe(1);
+      // ps5-plan.md section 5: the option takes Continue on the red setup of its part. The reason clears, the waiting reason moves up, and
+      // no driver starts, so setup waits for the next GO of the part.
+      expect(setupAgain(red).status).toBe(202);
+      expect(loop.running(s.task)).toBe(false);
+      expect(green(red)).toBe(0);
       expect(JSON.parse(s.t().blocked_json as string)).toEqual(waiting);
       expect(taskDto(s.db, s.t()).parts.map((p) => p.blocked)).toEqual([null, null, null]);
       expect(parts()).toEqual([
@@ -455,13 +455,11 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
         [3, "planned"],
       ]);
       expect(s.implementRuns()).toEqual([]);
-      // A green run of a part without a reason keeps the setup reason of the other part.
-      expect(loop.setupAgain(s.db, s.task, red, { version: s.t().version }).status).toBe(202);
-      await until(() => !loop.running(s.task));
-      expect(green(red)).toBe(2);
-      expect(s.t().blocked_json).toBe(JSON.stringify(waiting));
+      // The part of a waiting reason of another part gets 409 and keeps that reason.
+      expect(setupAgain(red)).toMatchObject({ status: 409, error: WAITING });
+      expect(JSON.parse(s.t().blocked_json as string)).toEqual(waiting);
       expect(s.implementRuns()).toEqual([]);
-      expect(loop.setupAgain(s.db, s.task, other, { version: s.t().version }).status).toBe(202);
+      expect(setupAgain(other).status).toBe(202);
       await until(() => !loop.running(s.task) && s.part(s.p3).state !== "planned", 180_000);
       await loop.idle(s.task);
       expect(s.t().blocked_json).toBeNull();
@@ -470,6 +468,8 @@ describe("parts at the same time (spec.md section 6.20.6)", () => {
         [2, "self_reviewed"],
         [3, "self_reviewed"],
       ]);
+      // The build ran the setup of both parts green.
+      expect([green(red), green(other)]).toEqual([1, 1]);
     },
     SLOW,
   );
@@ -647,32 +647,6 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
   );
 
   test(
-    'AC-B215: "Start the step again" gets 409 while another reason waits, so the option is never lost; a plain Continue moves it up',
-    async () => {
-      const s = await setup({ atOnce: 3, third: "base", scenario: HANG });
-      const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
-      s.db.query("UPDATE task_part SET state = 'implementing' WHERE id IN ($a, $b)").run({ a: s.p1, b: s.p2 });
-      const red = (part: number): TaskBlocked => {
-        const step = insertStep(s.db, { task: s.task, part, kind: "check", state: "ok" });
-        return { kind: "red", step, text: `Needs you: red ${part}.` };
-      };
-      const first = red(s.p1);
-      const next = red(s.p2);
-      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(first) });
-      s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: s.p2, b: JSON.stringify(next) });
-      expect(loop.resume(s.db, s.task, { version: s.t().version, option: "start-step-again" })).toMatchObject({
-        status: 409,
-        error: WAITING,
-      });
-      expect(reasons(s)).toEqual([first, null, next, null]);
-      expect(loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
-      expect(reasons(s)).toEqual([next, null, null, null]);
-      expect(loop.running(s.task)).toBe(false);
-    },
-    SLOW,
-  );
-
-  test(
     "AC-B345: Continue on the reason of a built part runs that part in implementing, then the build of the other parts",
     async () => {
       const [one, two, three] = BUILD.match as [(typeof BUILD.match)[number], (typeof BUILD.match)[number], (typeof BUILD.match)[number]];
@@ -750,7 +724,7 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
   );
 
   test(
-    "each action that clears the first reason starts no driver while another reason waits; Tell Claude and Dismiss refuse",
+    "each action that clears the first reason starts no driver while another reason waits; Tell Claude and Leave it refuse",
     async () => {
       const s = await setup({ atOnce: 3, third: "base", scenario: HANG });
       const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
@@ -774,18 +748,13 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(reasons(s)).toEqual([next, null, null, null]);
       expect(loop.running(s.task)).toBe(false);
 
-      // Keep one PR of an old size reason: the size reason of part 2 goes too. Part 3 builds now, and its red checks move up. ps5-plan.md
+      // part-session.md section 5.4: Continue clears a legacy size reason. Part 3 builds now, and its red checks move up. ps5-plan.md
       // D1: Change the limit keeps every reason (tests/tasks/ui-routes.test.ts).
       s.db.query("UPDATE task_part SET state = 'implementing' WHERE id = $id").run({ id: s.p3 });
-      const size = (part: number): TaskBlocked => ({ kind: "size", step: step(part, "size"), text: "Needs you: over the limit." });
       next = red(s.p3);
-      set(size(s.p1), [
-        [s.p2, size(s.p2)],
-        [s.p3, next],
-      ]);
-      expect(loop.limit(s.db, s.task, { ...v(), keep: true }).status).toBe(200);
+      set({ kind: "size", step: step(s.p1, "size"), text: "Needs you: over the limit." }, [[s.p3, next]]);
+      expect(loop.resume(s.db, s.task, v()).status).toBe(200);
       expect(reasons(s)).toEqual([next, null, null, null]);
-      expect(taskDto(s.db, s.t()).settings.keepOnePr).toBe(true);
       expect(loop.running(s.task)).toBe(false);
 
       // An allow choice keeps its decision, and the red checks of part 2 move up.
@@ -823,18 +792,20 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       expect(s.t().version).toBeGreaterThan(at);
       expect(loop.running(s.task)).toBe(false);
 
-      // Tell Claude gets 409 while a part waits. Dismiss gets 409 in state implementing, and no reason moves.
+      // Tell Claude gets 409 while a part waits. Leave it (option leave, ps4-plan.md section 4) gets 409 in state implementing, and no
+      // reason moves.
       const waiting = red(s.p2);
       set(red(s.p1), [[s.p2, waiting]]);
       const before = reasons(s);
+      const leave = () => loop.resume(s.db, s.task, { ...v(), option: "leave" });
       expect(loop.instruct(s.db, s.task, { ...v(), part: s.p1, text: "Use the cache." })).toMatchObject({ status: 409, error: WAITING });
-      expect(loop.dismiss(s.db, s.task, v())).toMatchObject({ status: 409, error: "No reason waits for Dismiss." });
+      expect(leave()).toMatchObject({ status: 409, error: "Leave works only in ready." });
       expect(reasons(s)).toEqual(before);
-      // Dismiss acts in state ready only, and a task leaves implementing with no waiting reason. So Dismiss never moves one up.
+      // Leave acts in state ready only, and a task leaves implementing with no waiting reason. So Leave never moves one up.
       expect(advance(s.db, { task: s.task, ...v() }, { type: "LAST_PR_OPEN" }).status).toBe(200);
       expect(s.t().state).toBe("ready");
       expect(reasons(s)).toEqual([before[0], null, null, null]);
-      expect(loop.dismiss(s.db, s.task, v()).status).toBe(200);
+      expect(leave().status).toBe(200);
       expect(reasons(s)).toEqual([null, null, null, null]);
       expect(loop.running(s.task)).toBe(false);
     },

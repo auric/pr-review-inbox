@@ -1257,8 +1257,8 @@ export type InstructionPreviewDto = {
 export type RunDetail = { run: RunDto; events: RunEvent[]; items: ReviewItemDto[] };
 
 // A run start gives 409 with this body while its PR has a running run or the run pool is full (A14, spec.md section 6.26).
-// running: the run of the PR, else the oldest pool run. pr null: a task run, and task names its task (POST /api/tasks/:id/pause frees
-// the slot after the step). full: the run limit, set only for a full pool.
+// running: the run of the PR, else the oldest pool run. pr null: a task run, and task names its task. full: the run limit, set only for
+// a full pool.
 export type RunConflict = ApiError & { running: { run: number; pr: number | null; kind: RunKind; task?: number }; full?: number };
 
 // GET /api/runs/slots (spec.md section 6.26): the run limit and the pool runs, oldest first. taskKey: the Jira key of a task run.
@@ -1541,17 +1541,16 @@ export const taskPushInput = z.object({ version, force: z.literal(true).optional
 export const taskSizeInput = z.object({ version, size: taskSize });
 // POST /api/tasks/:id/spec-change/:step.
 export const specChangeInput = z.object({ version, accept: z.boolean() });
-// POST /api/tasks/:id/pause, /resume, /stop, /close, /parts/:part/retarget, /parts/:part/fix ("Fix these too"), /parts/:part/update,
-// and /parts/:part/update/undo (spec.md section 6.18.6).
+// POST /api/tasks/:id/stop, /close, /parts/:part/fix ("Fix these too"), /parts/:part/update, /parts/:part/update/undo (spec.md section
+// 6.18.6), and the other part actions.
 export const taskVersionInput = z.object({ version });
-// POST /api/tasks/:id/resume (build-redesign.md section 2.2). option "start-step-again": the build resets to the last commit with the
-// patch saved, and the step starts again. Absent: Continue keeps the work. ps4-plan.md section 4: "leave" restores the reason before a
-// follow-up in ready, "disarm" cancels an armed usage resume, and part names a held part. ps5-plan.md D3: "without" is "Go on without
-// these fixes" of the reason blocker. D2: "setup" is "Run setup again" of the part in part.
+// POST /api/tasks/:id/resume (build-redesign.md section 2.2). Absent option: Continue applies the Continue rule. ps4-plan.md section 4:
+// "leave" restores the reason before a follow-up in ready, "disarm" cancels an armed usage resume, and part names a held part.
+// ps5-plan.md D3: "without" is "Go on without these fixes" of the reason blocker. D2: "setup" is "Run setup again" of the part in part.
 export const taskResumeInput = z
   .object({
     version,
-    option: z.enum(["start-step-again", "leave", "disarm", "without", "setup"]).optional(),
+    option: z.enum(["leave", "disarm", "without", "setup"]).optional(),
     part: z.number().int().positive().optional(),
   })
   .refine((v) => v.option !== "setup" || v.part !== undefined, { message: "Give the part of the setup." })
@@ -1586,12 +1585,8 @@ export const taskAllowInput = z.object({
   shellWarning: z.literal(true).optional(),
 });
 export type TaskAllowInput = z.infer<typeof taskAllowInput>;
-// POST /api/tasks/:id/limit: lineBudget, "Change the limit" for this task (ps5-plan.md D1). keep, "Keep one PR" of an old size reason,
-// stays until PS5-S2, because the web still sends it.
-export const taskLimitInput = z.union([
-  z.object({ version, keep: z.literal(true) }),
-  z.object({ version, lineBudget: z.number().int().min(1).max(100_000) }),
-]);
+// POST /api/tasks/:id/limit: lineBudget, "Change the limit" for this task (ps5-plan.md D1).
+export const taskLimitInput = z.object({ version, lineBudget: z.number().int().min(1).max(100_000) });
 // PUT /api/repos/:project/:repo/task-settings. spec_dir: a relative folder; {key} stands for the Jira key.
 export const repoTaskSettingsInput = z.object({
   specDir: z

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // docs/plans/review-v2/spec.md sections 6.1, 6.7, 6.9, 6.11, and 6.12 (WP-B5): the routes that the Task view adds. "Open the PR" pushes
-// the part branch to a temp bare remote and creates one PR at the fake Bitbucket, only on its click. Close, "Keep one PR", "Change the
-// limit", "Fix the small points too", the part diff, and the log of a task run. The fake CLI writes the files; a bun script stands in for
+// the part branch to a temp bare remote and creates one PR at the fake Bitbucket, only on its click. Close, "Change the limit", "Fix the
+// small points too", the part diff, and the log of a task run. The fake CLI writes the files; a bun script stands in for
 // the approved test command. No test starts the real CLI, reaches a forge, or touches the user's clone or data folder.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -324,12 +324,13 @@ describe("close (spec.md section 6.12)", () => {
 
 describe("the line limit (spec.md section 6.1)", () => {
   test(
-    "AC-B302: a part over the line limit gets a note and no stop; Keep one PR refuses without a size reason",
+    "AC-B302: a part over the line limit gets a note and no stop; the keep form of /limit is gone (400)",
     async () => {
       const s = await setup({ budget: 5 });
       const done = await s.build();
       expect([done.blocked, done.parts[0]?.state]).toEqual([null, "self_reviewed"]);
-      expect((await s.post<TaskConflict>("/limit", { keep: true })).body.error).toBe("No part waits for the line limit.");
+      const keep = await s.post<TaskConflict>("/limit", { keep: true });
+      expect([keep.status, keep.body.error]).toEqual([400, "Give the task version and a line limit."]);
     },
     SLOW,
   );
