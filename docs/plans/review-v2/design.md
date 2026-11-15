@@ -97,7 +97,7 @@ Non-goals:
 | R13 | Path-scoped project rules: CLAUDE.md files of the target head on the path of each changed file join the project instructions with a scope header. A rule finding quotes the rule. The app checks that the quote is in a loaded file whose scope covers the path. | Root CLAUDE.md only (today). | S8: only rules that apply to the path, and an exact quote. |
 | R14 | Subagent parity: one context block (Tools lines for the existing context files, the intent rule, the history rule, the do-not-flag list, the rubric, modules, language lists, project instructions) goes to every agent of the run. | Per-agent lists (today, W4). | Same facts in every agent. No re-raise of discarded findings. |
 | R15 | Explain leaves the review schema. It gets its own run kind and schema (part 3). | Keep explain true on review runs. | W9. |
-| R16 | The UI uses the stored verdicts: confirmed points show; unsure points fold under "Low confidence"; refuted and duplicate points stay in the run record and the log, with Restore. | Show everything as today. | S10, S11. Nothing is lost, and the main list is short. |
+| R16 | The UI uses the stored verdicts: confirmed points show; unsure points fold under "Low confidence"; refuted and duplicate points stay in the run record and the log, with Restore. A refuted point that stays in the list (a protected class, or outcome demote) also folds at quiet and balanced (review-quality-2026.md E5, shipped 2026-11-15). | Show everything as today. | S10, S11. Nothing is lost, and the main list is short. |
 | R17 | REVIEW_PROMPT_VERSION (a constant in src/shared/review.ts) goes into each run row. | Profile revision only. | Stats and the eval compare prompt versions. |
 
 ### 4.2 Part 2: Discuss a finding

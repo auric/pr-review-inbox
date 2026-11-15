@@ -4,13 +4,14 @@
 // Re-scores an eval result file with the bugs, traps, and extras of the current case fixtures, offline (docs/plans/review-v2/spec.md section 4.3).
 // --tolerance N scores with another near-line tolerance (docs/plans/review-v3.md WP-V1). A local case keeps its stored truth, so a
 // local result needs the build of the set that it ran (localRefusal).
-// --fold-refuted moves the refuted findings of main to fold (review-quality-2026.md E5).
+// --fold-refuted applies the fold rule of demoted findings to an older result (review-quality-2026.md E5).
 // Usage: bun run eval:rescore <result.json> [--tolerance N] [--fold-refuted] [--out <file>]. Exit codes: 0 done, 2 a usage error, an unreadable file, or a local result of another build of the set.
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { displayGroup } from "../../src/shared/review";
 import { buildRepo, type EvalBug, type EvalExtra, type EvalTrap, findCase, rereviewDir, setDir, setFingerprint } from "./cases";
 import { readResult, suiteDelta, summaryText } from "./compare";
 import { type EvalResult, score } from "./score";
@@ -48,16 +49,18 @@ export function rescore(
   return { result: { ...r, cases, rescoredAt: at, ...(tolerance !== undefined && { tolerance }) }, notes };
 }
 
-// review-quality-2026.md E5: each refuted item of main goes to fold, as if the app folded the refuted findings of the protected
-// classes. n: the items that moved.
+// review-quality-2026.md E5: each refuted item of main gets the group that displayGroup gives a demoted finding now. An eval has no
+// Restore, so each refuted item of main is demoted. n: the items that moved.
 export function foldRefuted(r: EvalResult): { result: EvalResult; n: number } {
   let n = 0;
   const runs = r.runs.map((x) => ({
     ...x,
     items: x.items.map((i) => {
       if (i.group !== "main" || i.verdict !== "refuted") return i;
+      const group = displayGroup({ severity: i.severity, verify: { verdict: "refuted" }, demoted: true }, r.volume ?? undefined);
+      if (group === "main") return i;
       n++;
-      return { ...i, group: "fold" as const };
+      return { ...i, group };
     }),
   }));
   return { result: { ...r, runs, refutedFolded: true }, n };

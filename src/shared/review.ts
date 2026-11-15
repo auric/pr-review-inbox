@@ -212,9 +212,14 @@ export const checkOf = (p: { verify?: Pick<VerifyMark, "verdict"> }): Check =>
 export type DisplayGroup = "main" | "fold" | "hidden";
 
 // spec.md section 1.4: the place of a finding from its check, its severity, and the volume of its run. A run without a volume is from
-// before review v2, which showed every finding.
-export function displayGroup(p: Pick<FindingPayload, "severity" | "verify" | "discardedBy">, volume: Volume | undefined): DisplayGroup {
+// before review v2, which showed every finding. A demoted finding goes to fold (review-quality-2026.md E5). markCopy can keep demoted
+// on a copy that a later check confirmed, so the verdict must also be refuted.
+export function displayGroup(
+  p: Pick<FindingPayload, "severity" | "discardedBy" | "demoted"> & { verify?: Pick<VerifyMark, "verdict"> },
+  volume: Volume | undefined,
+): DisplayGroup {
   if (p.discardedBy === "verify") return "hidden";
+  if (p.demoted && p.verify?.verdict === "refuted" && (volume === "quiet" || volume === "balanced")) return "fold";
   const check = checkOf(p);
   if (volume === "quiet") return check !== "unsure" && (p.severity === "blocker" || p.severity === "major") ? "main" : "fold";
   if (volume === "balanced") return check !== "unsure" && p.severity !== "nit" ? "main" : "fold";

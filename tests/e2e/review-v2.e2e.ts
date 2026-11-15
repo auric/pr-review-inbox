@@ -105,7 +105,7 @@ test("the brief: checks and the volume save to the profile at once, and Start re
   const volume = brief(page).getByRole("group", { name: "Show" });
   await expect(volume.getByRole("button", { name: "Balanced" })).toHaveAttribute("aria-pressed", "true");
   await expect(brief(page).locator("#brief-volume-line")).toHaveText(
-    "Balanced: must-fix and worth-fixing points. Unsure points wait in a fold.",
+    "Balanced: must-fix and worth-fixing points. Unsure and refuted points wait in a fold.",
   );
   await volume.getByRole("button", { name: "Show everything" }).click();
   await expect(volume.getByRole("button", { name: "Show everything" })).toHaveAttribute("aria-pressed", "true");
@@ -200,7 +200,7 @@ test("a two-phase run: the phase line, the ledger, the fold, the check chip, the
   await expect(log.locator("[data-log-phase]")).toHaveText(["Find", "Check"]);
 });
 
-test("a refuted concurrency finding stays in the Drafts list, last in its group, with the Refuted chip and the check reason (AC-R17); an answered question folds into the run record", async ({
+test("a refuted concurrency finding goes to the fold, last, with the Refuted chip and the check reason (AC-R17); an answered question folds into the run record", async ({
   page,
 }) => {
   const verify = {
@@ -217,10 +217,14 @@ test("a refuted concurrency finding stays in the Drafts list, last in its group,
   await connect(page);
   await start(page);
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
-  await expect(drafts(page)).toHaveCount(2);
-  // The refuted blocker of category Concurrency is not hidden. It comes after the confirmed minor.
+  // The refuted blocker of category Concurrency is not hidden. At balanced it waits in the fold, after the confirmed nit.
+  await expect(drafts(page)).toHaveCount(1);
   await expect(drafts(page).nth(0)).toContainText("Release the lock in a finally block.");
-  const low = drafts(page).nth(1);
+  const fold = page.getByRole("button", { name: "Low confidence (2)" });
+  await fold.click();
+  await expect(fold).toHaveAttribute("aria-expanded", "true");
+  await expect(drafts(page)).toHaveCount(3);
+  const low = drafts(page).nth(2);
   await expect(low).toHaveAttribute("data-demoted", "true");
   await expect(low.locator("[data-check]")).toHaveText("Refuted");
   await expect(low).toHaveAccessibleName(/Refuted by the check\. It stays last in its group\./);

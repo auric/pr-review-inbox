@@ -20,6 +20,7 @@ import {
   score,
   unionRecall,
 } from "../../scripts/eval/score";
+import { displayGroup } from "../../src/shared/review";
 
 console.log(`Code under test: ${Bun.resolveSync("../../scripts/eval/score.ts", import.meta.dir)}`);
 
@@ -631,6 +632,7 @@ describe("grounded metrics (review-quality-2026.md E5)", () => {
           item({ path: "g.ts", side: "new", line: 40, lineEnd: 40, verdict: "refuted", title: "noise" }),
         ]),
       ],
+      "balanced",
     );
     expect(score(fr).suite.refutedShown?.mean).toBe(2);
     expect(score(fr).suite.recall?.mean).toBe(1);
@@ -642,6 +644,22 @@ describe("grounded metrics (review-quality-2026.md E5)", () => {
     expect(s.recall?.mean).toBe(0);
     expect(s.noise?.mean).toBe(0);
     expect(summaryText(result)).toContain("refuted findings folded");
+    // The app keeps a demoted finding in main at thorough and in a run without a volume.
+    expect(foldRefuted({ ...fr, volume: "thorough" }).n).toBe(0);
+    expect(foldRefuted({ ...fr, volume: null }).n).toBe(0);
+  });
+
+  test("--fold-refuted gives each refuted item of main the group of the app", () => {
+    for (const volume of [null, "quiet", "balanced", "thorough"] as const)
+      for (const severity of ["blocker", "major", "minor", "nit"] as const) {
+        const app = displayGroup({ severity, verify: { verdict: "refuted" }, demoted: true }, volume ?? undefined);
+        const r = gresult(
+          [gcase("f", [], { traps: [], extras: [] })],
+          [run("f", 1, [item({ path: "g.ts", side: "new", line: 1, lineEnd: 1, severity, verdict: "refuted" })])],
+          volume,
+        );
+        expect(foldRefuted(r).result.runs[0]?.items[0]?.group).toBe(app);
+      }
   });
 
   test("candidate recall divides by the counted must-finds, as recall does", () => {

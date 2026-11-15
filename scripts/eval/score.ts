@@ -497,7 +497,7 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null, g:
     costUsd: r.usage ? r.usage.costUsd : null,
     notCompleted: finished(r) ? 0 : 1,
     incomplete: r.status === "incomplete" ? 1 : 0,
-    // review-quality-2026.md E5: refuted items of the protected classes stay in main (displayGroup). They count apart.
+    // review-quality-2026.md E5: refuted items in main count apart. displayGroup folds them at quiet and balanced, so only thorough and older results have them.
     refutedShown: shown.filter((i) => i.verdict === "refuted").length,
     hits: { shown: new Set(found.map((b) => `bug:${b.id}`)), raised: new Set(raised.map((b) => `bug:${b.id}`)) },
     ground: g ? ground(c, r, volume, g) : null,

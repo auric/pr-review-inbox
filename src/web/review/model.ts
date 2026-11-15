@@ -617,7 +617,7 @@ export const LANGUAGE_LABEL = "Language checklists (C++, C, Python, C#)";
 export const VOLUME_NAME: Record<Volume, string> = { quiet: "Only what matters", balanced: "Balanced", thorough: "Show everything" };
 export const VOLUME_LINE: Record<Volume, string> = {
   quiet: "Only what matters: must-fix points. Everything else waits in a fold.",
-  balanced: "Balanced: must-fix and worth-fixing points. Unsure points wait in a fold.",
+  balanced: "Balanced: must-fix and worth-fixing points. Unsure and refuted points wait in a fold.",
   thorough: "Show everything: also small polish and unsure points.",
 };
 const FOLD_NAME: Record<Volume, string | null> = { quiet: "More", balanced: "Low confidence", thorough: null };

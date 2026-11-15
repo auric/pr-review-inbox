@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Review: a refuted finding that stays in the Drafts list now waits in the fold at "Only what matters" and "Balanced", last, with the chip "Refuted". This applies to the protected classes and to profiles with "Refuted findings: Show last". "Show everything" keeps it in the main list. Older runs show the same way.
 - Runs: a run is now "incomplete" only when the app finds a gap, for example a value that it cut, a dropped verdict, a failed check, or an MCP server that did not connect. The notes of Claude about what it skipped or could not reach still show, but the run stays done. Older runs keep their status.
 - Settings, Review profiles: the "Use my default" choice of the model and the effort is now "Default". Runs send `--restricted`, so Claude Code ignores your Claude Code settings file, and the app no longer reads the model or the effort from it. The run setup says "(default)" instead of "(your default)".
 - Build a Jira task: one Claude run now builds all open tasks of a part. Claude writes the tests first, then the code, and ticks each task in the plan file when its tests pass. The app then runs your approved checks. Red checks get up to "Test-fix tries" fix runs, and green checks give one commit with the ticked tasks in its message. The separate tests step and the commit per task are gone.

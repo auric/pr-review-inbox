@@ -203,6 +203,7 @@ The do-not-flag list of each language:
 - Expected: noise in main down by the demoted count; main recall down by the refuted must-finds, which stay visible in the fold. Zero cost.
 - Experiment: `rescore --fold-refuted` on the W1 baseline (zero cost).
 - Ship rule: the refuted must-finds are at most S_R, and noise drops by more than S_N. The user decides first.
+- Status: shipped 2026-11-15. `eval:rescore --fold-refuted` on the W1 baseline: no must-find left main, noise per case run 2.15 to 1.73, judge false positives 0.43 to 0.25, augmented precision 83.4% to 88.4%. The ship rule passed, and the user approved it. The rule also needs a refuted verdict, because markCopy can keep demoted on a copy that a later check confirmed. It also folds the refuted findings of "Show last" profiles. `foldRefuted` calls `displayGroup`, and new eval runs score with the fold.
 
 ### 6. Three finder runs and a merge ("Deep check", variant "runs3")
 
@@ -323,7 +324,7 @@ Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--c
 
 1. Judge labels for unmatched findings, stored apart from the cases, with ship gates on grounded metrics only? Recommended: yes, sonnet at medium.
 2. Baseline size: repeat 3 with 8 clean cases (about $140-180), or repeat 2 (about $95-120)? Recommended: repeat 3.
-3. Fold refuted protected findings under balanced and quiet? Recommended: yes, if the rescore passes the rule of improvement 5.
+3. Fold refuted protected findings under balanced and quiet? Recommended: yes, if the rescore passes the rule of improvement 5. Answered 2026-11-15: yes, shipped.
 4. If one agent wins on large PRs, ship reviewer mode "off" with "auto" left as a choice? Recommended: yes.
 5. Deep check as a per-run toggle in the brief (default off) or a profile option? Recommended: the per-run toggle.
 

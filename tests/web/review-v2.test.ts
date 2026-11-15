@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { MODULES } from "../../src/server/review/catalog";
 import { MODULE_IDS, type ReviewItemDto, type RunDto, type RunSummary, TRIAL_MODULES, type Volume } from "../../src/shared/dto";
-import type { FindingPayload, VerifyMark } from "../../src/shared/review";
+import { displayGroup, type FindingPayload, type VerifyMark } from "../../src/shared/review";
 import type { RunEvent } from "../../src/shared/run-log";
 import {
   answeredQuestions,
@@ -129,18 +129,44 @@ describe("display groups per volume (spec.md section 1.4)", () => {
     expect(restoredNote(SET[0] as ReviewItemDto)).toBeNull();
   });
 
-  test("a demoted finding stays in its group, last, with the Refuted chip and its note (spec.md section 1.8)", () => {
+  test("a demoted finding goes to the fold at quiet and balanced, last, with the Refuted chip and its note (review-quality-2026.md E5)", () => {
     const low = finding(11, { severity: "major", verify: mark("refuted"), demoted: true });
     const lowNit = finding(12, { severity: "nit", verify: mark("refuted"), demoted: true });
-    const g = draftGroups([low, ...SET, lowNit], summary({ volume: "balanced", verify: VERIFY }));
+    const list = [low, ...SET, lowNit];
+    const g = draftGroups(list, summary({ volume: "balanced", verify: VERIFY }));
     expect([ids(g.main), ids(g.fold), ids(g.hidden)]).toEqual([
-      [1, 2, 3, 11],
-      [4, 5, 12],
+      [1, 2, 3],
+      [4, 5, 11, 12],
       [6, 7],
     ]);
+    expect(ledgerParts(g, null).map(ledgerText)).toEqual(["2 must fix", "1 worth fixing", "4 low confidence"]);
+    const quiet = draftGroups(list, summary({ volume: "quiet", verify: VERIFY }));
+    expect([ids(quiet.main), ids(quiet.fold)]).toEqual([
+      [1, 2],
+      [3, 4, 5, 11, 12],
+    ]);
+    // thorough has no fold: a demoted finding stays last in main.
+    const all = draftGroups(list, summary({ volume: "thorough", verify: VERIFY }));
+    expect([ids(all.main), ids(all.fold)]).toEqual([[1, 2, 3, 4, 5, 11, 12], []]);
     expect(checkChip(low, g.checked)).toBe("Refuted");
     expect(restoredNote(low)).toBe("Refuted by the check. It stays last in its group.");
     expect(checkText(low)).toBe("Check: The guard on line 12 stops it. (src/cache.ts:12)");
+  });
+
+  test("displayGroup: only a refuted demoted finding folds; hidden and unsure keep their rule", () => {
+    const refuted = { severity: "blocker", verify: { verdict: "refuted" }, demoted: true } as const;
+    expect(displayGroup(refuted, "quiet")).toBe("fold");
+    expect(displayGroup(refuted, "balanced")).toBe("fold");
+    expect(displayGroup(refuted, "thorough")).toBe("main");
+    expect(displayGroup(refuted, undefined)).toBe("main");
+    // Outcome hide on a class that is not protected: the check discards it.
+    expect(displayGroup({ ...refuted, demoted: undefined, discardedBy: "verify" }, "balanced")).toBe("hidden");
+    // markCopy keeps demoted on a copy that the user accepted, when a later check confirms it.
+    expect(displayGroup({ ...refuted, verify: { verdict: "confirmed" } }, "balanced")).toBe("main");
+    // A restored refuted finding has no demoted mark.
+    expect(displayGroup({ ...refuted, demoted: undefined }, "balanced")).toBe("main");
+    expect(displayGroup({ severity: "blocker", verify: { verdict: "unsure" } }, "balanced")).toBe("fold");
+    expect(displayGroup({ severity: "blocker", verify: { verdict: "unsure" } }, "thorough")).toBe("main");
   });
 
   test("AC-R25: bug classes come first in class order; each class keeps the run order; no finding drops", () => {
@@ -158,7 +184,10 @@ describe("display groups per volume (spec.md section 1.4)", () => {
     // security, concurrency, resource, behavior (category behavior or module api), then the rest. A demoted finding stays last.
     expect(ids(g.main)).toEqual([4, 5, 8, 2, 3, 1, 7, 6]);
     const balanced = draftGroups(list, summary({ volume: "balanced", verify: VERIFY }));
-    expect([ids(balanced.main), ids(balanced.fold)]).toEqual([[4, 5, 8, 3, 1, 7, 6], [2]]);
+    expect([ids(balanced.main), ids(balanced.fold)]).toEqual([
+      [4, 5, 8, 3, 1, 7],
+      [2, 6],
+    ]);
   });
 });
 
@@ -310,7 +339,7 @@ describe("checks and volume of a profile (spec.md sections 1.1 to 1.4)", () => {
     expect(MODULE_LABEL).toEqual(Object.fromEntries(MODULE_IDS.map((m) => [m, MODULES[m].label])) as typeof MODULE_LABEL);
     // docs/plans/review-v3.md WP-V2: a trial module stays out of the brief until WP-V4.
     expect([...SHOWN_CHECKS, ...MORE_CHECKS, ...TRIAL_MODULES].sort()).toEqual([...MODULE_IDS].sort());
-    expect(VOLUME_LINE.balanced).toBe("Balanced: must-fix and worth-fixing points. Unsure points wait in a fold.");
+    expect(VOLUME_LINE.balanced).toBe("Balanced: must-fix and worth-fixing points. Unsure and refuted points wait in a fold.");
   });
 
   test("the editor keeps the check step: an empty model or effort saves as null, and a bad model name is a problem", () => {

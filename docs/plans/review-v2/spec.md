@@ -97,9 +97,9 @@ Path scope of project rules (instructions.ts): the target head loader also reads
 
 | Volume | Label line | Finder nit rule | Main list | Fold |
 |---|---|---|---|---|
-| quiet | "Only what matters: must-fix points. Everything else waits in a fold." | "Give no nits." | Checked blocker and major. Not checked blocker and major. | "More (N)": the rest, except refuted and duplicates. |
-| balanced | "Balanced: must-fix and worth-fixing points. Unsure points wait in a fold." | "Give no nits." | Checked and not checked, except nits and unsure. | "Low confidence (N)": unsure points and nits. |
-| thorough | "Show everything: also small polish and unsure points." | "Give nits for small, clear improvements." | Everything except refuted and duplicates. Unsure points carry the "Low confidence" chip. | none |
+| quiet | "Only what matters: must-fix points. Everything else waits in a fold." | "Give no nits." | Checked blocker and major. Not checked blocker and major. No demoted finding. | "More (N)": the rest and the demoted findings, except hidden refuted findings and duplicates. |
+| balanced | "Balanced: must-fix and worth-fixing points. Unsure and refuted points wait in a fold." | "Give no nits." | Checked and not checked, except nits, unsure, and demoted findings. | "Low confidence (N)": unsure points, nits, and demoted findings. |
+| thorough | "Show everything: also small polish and unsure points." | "Give nits for small, clear improvements." | Everything except hidden refuted findings and duplicates. Unsure points carry the "Low confidence" chip. Demoted findings come last. | none |
 
 summary_json.volume stores the volume of the run. The display uses it, so an old run keeps its view after a profile change.
 
@@ -271,11 +271,11 @@ else:
   -> finding item, status new, payload.verify, payload.finderSeverity when it differs
 ```
 
-Order of severities: blocker > major > minor > nit. The display group comes from check, severity, and the run volume (section 1.4) at read time.
+Order of severities: blocker > major > minor > nit. The display group comes from check, severity, the demoted mark, and the run volume (section 1.4) at read time.
 
 Protected classes (judge.ts neverHidden): module security, concurrency, or api, or a category (trimmed, lower case) from this list. Security: security, injection, sql, deserialization, unsafe-calls, format. Concurrency: concurrency, races, atomics, locks, threads, async-tasks. Resource handling: resource, ownership, resources, memory, windows. Behavior change: behavior, abi, packaging. The words after the class names are the category words of the language checklists (languages.ts). The finder has no category enum: category is free text, and the finder rule of section 1.5 names the four class words. A duplicate always hides, because the candidate that it repeats stays.
 
-Demoted finding: it shows in its display group, after the other drafts of the group. The card shows the chip "Refuted", the check reason ("Check: <reason> (path:line)"), and "Refuted by the check. It stays last in its group." The user triages it like any other draft. Task self-review points ("Fix these too") leave it out. A re-review verdict on its copy sets or removes the mark.
+Demoted finding: displayGroup puts it in the fold at quiet and balanced, and in main at thorough and in a run without a volume. It needs a refuted verdict, so a copy that a later check confirmed stays in its group. It shows after the other drafts of its group. The card shows the chip "Refuted", the check reason ("Check: <reason> (path:line)"), and "Refuted by the check. It stays last in its group." The user triages it like any other draft. Task self-review points ("Fix these too") leave it out. A re-review verdict on its copy sets or removes the mark.
 
 Wrong file (validate.ts relocate): when the anchor of a finding drops with "file" or "match", the app searches its anchorText (whitespace collapsed) in the new side of each other changed text file of the diff. Exactly one match, on a range that holds a changed line, moves the finding to that file and line, side new, and payload.movedFrom keeps {path, line} of the finder. The card says "Moved from <path>:<line>: the quoted code is only in this file." Zero matches, two or more matches, or a match without a changed line keep the first drop. judge.ts reads the other changed files only when a finding drops with "file" or "match".
 
@@ -319,7 +319,7 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 15. AC-R15. Each run row stores prompt_version REVIEW_PROMPT_VERSION (now "2.4"). A row with NULL reads as "1".
 16. AC-R16. history.md shows "refuted by the check" for a refuted item, and the finder history rule names only "discarded by the user".
 17. AC-R17. With verifier outcome hide, a refuted candidate of module security, or with a category of a protected class, becomes a new item with demoted true. Another refuted candidate becomes a discarded item. A duplicate is discarded in both modes.
-18. AC-R18. With verifier outcome demote, each refuted candidate becomes a new item with demoted true. In the Drafts list it is last in its group, with the chip "Refuted" and the check reason.
+18. AC-R18. With verifier outcome demote, each refuted candidate becomes a new item with demoted true. In the Drafts list it is last in its group, with the chip "Refuted" and the check reason. At quiet and balanced its group is the fold, also for a class that is not protected.
 19. AC-R19. Outcome hide parses to no key, and profileRevision stays the same. Outcome demote is an edit of the verifier field: storeProfiles keeps it, and upgradeProfile keeps it. Copy to all profiles gives the outcome to the other profiles and keeps their mode, model, and effort.
 20. AC-R20. A finding whose anchorText is not in its file, or whose file does not exist, moves to the one exact match on a changed line of another changed file, with movedFrom. Two matches, a match on an unchanged line, or a match only in an unchanged file keep the drop.
 21. AC-R21. Each language checklist ends with a "Do not report in <language>:" list of one to three items. One common line follows the lists: linter or analyzer warnings, formatting, generated files, and speed-ups without a shown hot path. REVIEW_PROMPT_VERSION is "2.4".
