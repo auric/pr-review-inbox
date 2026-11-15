@@ -8,8 +8,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { REVIEW_HEAD } from "../../src/server/tasks/loop";
 import { taskDto } from "../../src/server/tasks/tasks";
 import type { FindingPayload } from "../../src/shared/review";
+import { callKey } from "../support/fake-claude";
 import {
   type Call,
+  CLEAN,
   cleanupAll,
   FIXED,
   KEY,
@@ -152,7 +154,7 @@ describe("judge the review points (pushback.md section 6.23)", () => {
       expect(run.context["failure.md"]).not.toContain(`## Point ${a}:`);
       expect(run.context["answers.md"]).toContain("- Answer: Fix it anyway.");
       // AC-B111: the next own review holds history.md with the accepted point, and the finder and verify prompts hold the history lines.
-      const reviews = s.runCalls().filter((x) => s.modeOf(x) === "review" && !x.argv.includes("haiku"));
+      const reviews = s.runCalls().filter((x) => s.modeOf(x) === "review" && callKey(x.argv, x.stdin) !== "critic");
       const next = reviews.at(-1) as Call;
       expect(next.context["history.md"]).toContain(`### Finding ${a}`);
       expect(next.context["history.md"]).toContain("- State: discarded by the user");
@@ -196,6 +198,54 @@ describe("judge the review points (pushback.md section 6.23)", () => {
         "fix:review:ok",
       ]);
       expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+    },
+    SLOW,
+  );
+
+  // User decision of 2026-11-14: Start again drops the accepted push-backs, so history.md of the next own review does not hold them.
+  test(
+    "after Start again, the next own review gets no history.md with a push-back that the user accepted before",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          review: [{ review: review([point("blocker")]) }, { review: CLEAN }],
+          "implement:fix": [{ pointVerdicts: [PLAN] }],
+        },
+      });
+      await s.build();
+      const q = taskDto(s.db, s.t()).questions.find((x) => x.source === "loop" && x.answer === null);
+      expect(s.loop.answer(s.db, s.task, { version: s.t().version, answers: [{ question: q?.id as number, choice: 0 }] }).status).toBe(202);
+      await s.loop.idle(s.task);
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+      const before = s.runCalls().length;
+      expect((await s.loop.restart(s.db, s.task, s.part().id, { version: s.t().version })).status).toBe(200);
+      await s.loop.idle(s.task);
+      const own = s
+        .runCalls()
+        .slice(before)
+        .filter((x) => s.modeOf(x) === "review" && callKey(x.argv, x.stdin) !== "critic");
+      expect(own).toHaveLength(1);
+      expect((own[0] as Call).context["history.md"]).toBeUndefined();
+      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+    },
+    SLOW,
+  );
+
+  // implement.ts tells Claude to write paths from the part folder, such as repo/src/file.ts. citeFound reads them in repo/.
+  test(
+    "pushback.md section 6.23.4 item 4: a cite with ./repo/ in front of a worktree file counts as found",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          review: [{ review: review([point("blocker")]) }],
+          "implement:fix": [{ pointVerdicts: [{ ...LOST, cite: "./repo/src/feature.ts:1" }] }],
+        },
+      });
+      await s.build();
+      const q = taskDto(s.db, s.t()).questions.find((x) => x.source === "loop" && x.answer === null);
+      expect(q?.point).toMatchObject({ cite: "./repo/src/feature.ts:1", citeFound: true });
     },
     SLOW,
   );

@@ -158,7 +158,7 @@ test("a base that is gone at the build start offers Pick a base branch, and the 
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading")).toHaveText(/^Build on \S+\?$/);
   await dialog.getByRole("button", { name: /^Use \S+$/ }).click();
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 180_000 });
   await expect(page.getByText(`${REPO} into ${RELEASE}`)).toHaveCount(0);
   await expect(primary(page)).toHaveText("Open the PR");
   // The picked base moved nothing on the server.

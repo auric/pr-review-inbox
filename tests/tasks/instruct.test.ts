@@ -380,7 +380,7 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
       );
 
   test(
-    "spec.md section 6.18.2: Dismiss of a reason of a send on a built part restores the earlier reason, then clears it; 409 elsewhere",
+    "ps4-plan.md section 4: Leave it (option leave) through the route restores the earlier reason of a send, then clears it; 409 elsewhere; /dismiss is gone",
     async () => {
       const s = await builtTask({ seq: { "implement:instruct": [{ writes: [{ path: "repo/.claude/settings.json", text: "{}" }] }] } });
       s.db.query("UPDATE task SET state = 'ready', blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
@@ -390,28 +390,32 @@ describe("Tell Claude (spec.md section 6.18.2)", () => {
       const SESSION = "s".repeat(64);
       const ORIGIN = "http://127.0.0.1:7317";
       const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
-      const dismiss = async (version: number) => {
-        const res = await app.request(`${ORIGIN}/api/tasks/${s.task}/dismiss`, {
+      const call = async (path: string, version: number, option?: "leave") => {
+        const res = await app.request(`${ORIGIN}/api/tasks/${s.task}/${path}`, {
           method: "POST",
           headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
-          body: JSON.stringify({ version }),
+          body: JSON.stringify({ version, ...(option && { option }) }),
         });
-        return { status: res.status, body: (await res.json()) as TaskDto & { error?: string } };
+        const json = res.headers.get("content-type")?.includes("json");
+        return { status: res.status, body: (json ? await res.json() : {}) as TaskDto & { error?: string } };
       };
-      expect((await dismiss(s.t().version - 1)).status).toBe(409);
-      const first = await dismiss(s.t().version);
+      const leave = (version: number) => call("resume", version, "leave");
+      // ps5-plan.md section 5, PS5-S2: the old route is gone.
+      expect((await call("dismiss", s.t().version)).status).toBe(404);
+      expect((await leave(s.t().version - 1)).status).toBe(409);
+      const first = await leave(s.t().version);
       expect([first.status, first.body.blocked]).toEqual([200, RED]);
-      // RED is the earlier reason of the same send, so the next Dismiss clears it.
-      const second = await dismiss(s.t().version);
+      // RED is the earlier reason of the same send, so the next leave clears it.
+      const second = await leave(s.t().version);
       expect([second.status, second.body.blocked]).toEqual([200, null]);
-      expect((await dismiss(s.t().version)).body.error).toBe("No reason waits for Dismiss.");
-      // A plan change has its own actions, and the build has Resume.
+      expect((await leave(s.t().version)).body.error).toBe("All PRs of the task are open.");
+      // A plan change has its own actions, and the build has Continue.
       s.db
         .query("UPDATE task SET blocked_json = $b WHERE id = $id")
         .run({ b: JSON.stringify({ ...RED, kind: "spec_change" }), id: s.task });
-      expect((await dismiss(s.t().version)).status).toBe(409);
+      expect((await leave(s.t().version)).body.error).toBe("Accept or reject the change to the spec first.");
       s.db.query("UPDATE task SET state = 'implementing', blocked_json = $b WHERE id = $id").run({ b: JSON.stringify(RED), id: s.task });
-      expect((await dismiss(s.t().version)).body.error).toBe("No reason waits for Dismiss.");
+      expect((await leave(s.t().version)).body.error).toBe("Leave works only in ready.");
     },
     SLOW,
   );

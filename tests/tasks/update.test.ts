@@ -5,7 +5,7 @@
 // Temp bare remotes, the fake CLI, and a bun script as the test command. The update pushes nothing.
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
@@ -417,6 +417,32 @@ describe("Update and resolve in the phase machine (ps4-plan.md WP-5)", () => {
           .filter((x) => x.kind === "review")
           .map((x) => x.state),
       ]).toEqual([null, ["failed", "ok"]]);
+    },
+    SLOW,
+  );
+
+  // part-session.md section 9.4, reason update: Continue runs the update again. The first reason halted the build of part 2, and no
+  // other driver takes it up, so the update driver builds on after a green update, as the follow-up driver does (AC-B345).
+  test(
+    "Continue on the reason update of a built part: after a green update, the halted build of part 2 goes on",
+    async () => {
+      const s = await builtTask({ seq: { "implement:build": [{ hang: true }] } });
+      const p1 = s.part().id;
+      s.db
+        .query(`INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+          VALUES ($task, 2, 'part', 'Add the flag', 'feature/TU-1-add-the-flag', 'main', 'implementing', 1, 1)`)
+        .run({ task: s.task });
+      const row = insertStep(s.db, { task: s.task, part: p1, kind: "update", item: "U1", state: "failed" });
+      const stopped = { kind: "update", step: row, text: "The update from main stopped: you stopped it. The branch is as it was." };
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(stopped) });
+      await remoteCommit(s.r, "main", { "README.md": "new readme\n" });
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      const builds = () => s.runCalls().filter((c) => s.modeOf(c) === "build");
+      await until(() => builds().length > 0 || !s.loop.running(s.task));
+      expect(s.steps().find((x) => x.item === "U2")?.detail.update?.result).toBe("green");
+      expect(builds().map((c) => basename(c.cwd))).toEqual(["part-2"]);
+      expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
+      await s.loop.idle(s.task);
     },
     SLOW,
   );

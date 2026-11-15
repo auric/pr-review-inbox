@@ -147,7 +147,7 @@ test("several repositories: the plan with access and a proposal, two PR rows, a 
   expect(bases?.map((b) => b.branch)).toEqual(["main", "main"]);
 
   // 2. The build changes both repositories. Nothing goes out before the click.
-  await expect(status(page)).toHaveText(/^Your change in 2 repositories is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change in 2 repositories is ready(: [^.]+)?\.$/, { timeout: 180_000 });
   await expect(primary(page)).toHaveText("Open 2 PRs");
   const before = await taskRepos();
   expect([Object.keys(before.heads.app), Object.keys(before.heads.lib), before.creates]).toEqual([["main"], ["main"], []]);

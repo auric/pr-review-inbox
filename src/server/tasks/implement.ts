@@ -14,6 +14,7 @@ import { REFUSED_NOTES, type RunEvent } from "../../shared/run-log";
 import {
   type ImplementResult,
   implementResult,
+  PATCH_LOST,
   RUN_CANCELLED,
   RUN_LIMITS,
   RUN_TIME_MAX_MS,
@@ -292,8 +293,8 @@ export async function treeCheck(trees: readonly RepoTree[], o: TreeOptions): Pro
   };
 }
 
-// StepDetail.patch of a reset that saved no patch file. It still marks the reset for the Continue rule (build-redesign.md section 2.2).
-export const PATCH_LOST = "no file: the app could not save them";
+export { PATCH_LOST };
+
 const patchLost = (file: string, e: unknown) => {
   log(`Could not save the patch ${basename(file)}: ${noUrl((e as Error).message)}`);
   return null;
@@ -850,11 +851,18 @@ export function patchStep(db: Database, id: number, detail: Partial<StepDetail>)
   });
 }
 
-// The instruct, update, and resolve keys that the loop wrote at the start of the step stay (spec.md section 6.18.6). A saved patch stays
-// too: it marks a reset for the Continue rule. The findings of a "Fix it anyway" row stay (pushback.md section 6.23.6).
+// The instruct, update, resolve, and tries keys that the loop wrote at the start of the step stay (spec.md section 6.18.6). A saved patch
+// stays too: it marks a reset for the Continue rule. The findings of a "Fix it anyway" row stay (pushback.md section 6.23.6).
 export function endStep(db: Database, id: number, state: StepState, detail: Partial<StepDetail>, now = Date.now()) {
   const prev = stepDetailOf(db, id);
-  const keep = { instruct: prev.instruct, update: prev.update, resolve: prev.resolve, patch: prev.patch, findings: prev.findings };
+  const keep = {
+    instruct: prev.instruct,
+    update: prev.update,
+    resolve: prev.resolve,
+    patch: prev.patch,
+    findings: prev.findings,
+    tries: prev.tries,
+  };
   db.query(STEP_SQL.end).run({ id, state, detail: JSON.stringify(stepDetail.parse({ ...keep, ...detail })), now });
 }
 
@@ -1063,6 +1071,8 @@ export type StepInput = {
   };
   // StepDetail.dirtyBefore of the step row (build-redesign.md section 2.3).
   dirtyBefore?: string[];
+  // StepDetail.tries of the step row (ps5-plan.md D5).
+  tries?: StepDetail["tries"];
   now?: () => number;
 };
 
@@ -1267,9 +1277,10 @@ export async function startStep(i: StepInput): Promise<StepStart> {
     started: (d, run) => {
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());
       if (cut !== null) d.query(STEP_SQL.cut).run({ id: step, cut });
+      if (i.tries) patchStep(d, step, { tries: i.tries });
     },
-    note: (d, text) => {
-      if (runNotes.includes(text)) return;
+    note: (d, text, each) => {
+      if (!each && runNotes.includes(text)) return;
       runNotes.push(text);
       patchStep(d, step, { notes: [...stepDetailOf(d, step).notes, text] });
     },

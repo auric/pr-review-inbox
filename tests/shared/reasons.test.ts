@@ -68,15 +68,28 @@ describe("REASON_EXITS (part-session.md section 9.4)", () => {
     }
   });
 
-  test("AC-B354: no exit is planned for PS4; each option of an exit that is not planned parses in taskResumeInput", () => {
+  test("AC-B354: no exit is planned; each option of an exit parses in taskResumeInput", () => {
     const exits = entries.flatMap(([, x]) => [x.primary, ...x.other]);
-    expect(exits.filter((e) => "planned" in e && e.planned === "PS4")).toEqual([]);
-    const options = new Set(exits.flatMap((e) => ("option" in e && e.option && !e.planned ? [e.option] : [])));
-    expect([...options].sort()).toEqual(["disarm", "leave", "part"]);
+    expect(exits.filter((e) => "planned" in e && e.planned)).toEqual([]);
+    const options = new Set(exits.flatMap((e) => ("option" in e && e.option ? [e.option] : [])));
+    expect([...options].sort()).toEqual(["disarm", "leave", "part", "without"]);
     // part is the input field part, which names a task_part ID.
     for (const option of options)
       expect(taskResumeInput.safeParse({ version: 1, ...(option === "part" ? { part: 1 } : { option }) }).success).toBe(true);
-    expect(exits.filter((e) => "planned" in e && e.planned).map((e) => ("option" in e ? e.option : null))).toEqual(["without"]);
+  });
+
+  // ps5-plan.md D2 (AC-B376): option setup takes part. part with any other option gives 400. part alone names a held part.
+  test("AC-B376: option setup needs a part; a part with any other option does not parse", () => {
+    const ok = (o: object) => taskResumeInput.safeParse({ version: 1, ...o }).success;
+    expect(ok({ option: "setup", part: 2 })).toBe(true);
+    expect(ok({ option: "setup" })).toBe(false);
+    expect(ok({ part: 2 })).toBe(true);
+    // ps5-plan.md section 11 item 8: the option start-step-again is gone.
+    expect(ok({ option: "start-step-again" })).toBe(false);
+    for (const option of ["leave", "disarm", "without"]) {
+      expect([option, ok({ option })]).toEqual([option, true]);
+      expect([option, ok({ option, part: 2 })]).toEqual([option, false]);
+    }
   });
 
   test("Stop is an exit of every reason but the update reasons and held; a driver takes the primary exit only of slot and armed usage", () => {

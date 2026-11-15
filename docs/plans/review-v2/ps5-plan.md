@@ -86,6 +86,15 @@ Idle rows:
 
 ## 4. Items
 
+Status: PS5-C (C1, C2a, and C2b) is built in 171c5c3 and f6a1c5f. Deviations of C2b from the items below:
+- The flag `instructRun` is on TaskPartDto, one value for each part. The routes set it from loop.ts `instructRun` while the loop works.
+- `instructRun` predicts "queued" only with the live gate off. It gives null while a follow-up or other mode driver works, or while a message of the part waits.
+- With a first reason, "Run setup again" shows only for the red setup reason of the same part. With no reason, it shows for a part with a worktree while nothing runs.
+- See why shows on the rows that keep it (section 3, REASON_EXITS) only when the reason names a step. This applies to the blocker row too.
+- "Leave it" follows the server rule of loop.ts `leaveReason`: each reason row in ready, except the form reasons, slot, usage, and red/setup_time.
+- The `T<ord>.` task filter of `plannedTasks` applies only with sub-tasks. Without sub-tasks, each part lists all tasks of the plan (open question 5).
+- The box reasons stay the server `BOX_REASONS` (tasks.ts): red, size, blocker, denied_path, and update. The exclusion list of 4.10 does not apply.
+
 4.1 Phase of each part (PS5-C)
 - `model.ts`: import `rowPhase`; rewrite the implement, fix, check, review, and commit cases of `stepSentence` to the table above; tick count from `plannedTasks`; `tries` from the row detail.
 - `partRow` implementing gives short texts: "<R> builds it: 3 of 5 tasks done.", "The app runs the checks.", "<R> fixes the checks.", "A second <R> run reviews it.", "<R> works on the review points.", "<R> works on your instructions.", "The app runs the setup commands.", "On hold. Its work is kept."
@@ -141,7 +150,7 @@ Idle rows:
 - Test: ticks from a commit row and a run row, and the per-part filter.
 
 4.10 Message box (PS5-C)
-- `tellBox` shows the box for each implementing or ready part with a worktree, also during the first build, except with `queued > 0`, an adopted part, and the reasons question (open questions), spec_change, allow, preflight, slot, and usage. `canInstruct` decides open or busy.
+- `tellBox` shows the box for each implementing or ready part with a worktree, also during the first build, except with `queued > 0`, a held or waiting part, and an adopted part. With a first reason, the box shows only for the reasons of BOX_REASONS and spec.md section 6.18.1: red, size, blocker, denied_path, and update. `canInstruct` decides open or busy.
 - `TellClaude.tsx` hint. Open: "<R> gets your message in a run of this part. The app then runs the checks and its own review. Pushes and other git actions stay buttons." Busy: "<R> or the checks are working. You can send when this run ends."
 - Only if WP-7 lands: queued "<R> reads this when the current run ends."; live "<R> reads this now."
 
@@ -150,6 +159,13 @@ TanStack Query: no new key. Task actions go through `useTaskAction` (sets `['tas
 ## 5. Server packages
 
 PS5-S1 (before the web):
+
+Status: built in 77f9137. Deviations from the list below:
+- `ticked` on a run row holds all ticks of the tasks file against HEAD at the run end. These include ticks that a cut or stopped run left uncommitted.
+- `without` marks the must-fix points of every own review after the newest work commit (D3 says the newest own review). These are the reviews of the guard review.
+- Option `setup` refuses each first reason except the red setup reason of the same part. The test is the step item `setup`, so red/setup_time passes too. The old route refused no first reason.
+- Option `setup` starts the part through `goOnReason` or `goOn`, not through `goPart` directly. `goOn` calls `goPart` for a built part. For a part that builds, it starts the build driver.
+- `taskLimitInput` keeps the `keep` form until PS5-S2, because the web still sends it.
 - `shared/dto.ts`: `taskResumeInput` adds `without` and `setup` and the D2 refine; `taskLimitInput` becomes `{version, lineBudget}`; `TaskRowDto.progress.held`.
 - `shared/task.ts`: `PATCH_LOST`; StepDetail `ticked` and `tries`; REASON_EXITS drops `planned` from `without`.
 - `shared/review.ts`: `FindingPayload.skipFix?: boolean`.
@@ -160,6 +176,14 @@ PS5-S1 (before the web):
 - Tests: reasons, ui-routes (`/limit` without a reason), loop (ticked, tries), session, and tests/web for rowStatus, each with a control mutation.
 
 PS5-S2 (after the web):
+
+Status: built in e9501fb. Deviations from the list below:
+- The legacy question/paused Continue path stays (part-session.md section 9.4). Continue of a stored row builds with no reset.
+- AC-B153 now follows the new setup rule: option setup on the red setup of the first reason clears it, the next reason moves up, and setup runs at the next GO of the part.
+- The resume option `start-step-again` goes too (section 11 item 8). The 409 for an option while another part waits goes with it.
+- Continue of a task that stopped in ready goes back to ready and starts nothing. When every part merged or was dropped meanwhile, it ends in done (part-session.md section 9.3.1).
+- The grid control mutation: limit without its state check gives 200 in done.
+
 - `routes.ts` drops `/pause`, `/dismiss`, and `/parts/:part/setup`.
 - `loop.ts` drops `pause`, `dismiss`, `setupAgain`, `driveSetup`, `pauseAsked`, `gates`, `openGates` (if PS4 left them), `NO_DISMISS`, `Q.clearSize`, and the `keep` path of `limit`. `SETUP_WAITS` stays only as the 409 sentence of option setup.
 - Rewrite or remove the tests that call the old routes (tests/tasks loop, concurrent, instruct, ui-routes). Check name-only matches (slots, caps, limits) and change only real callers.
@@ -223,7 +247,7 @@ Each package ends green on `bun run check`. A, E, and D also run `bun run test:e
 
 ## 10. Invariants
 
-- A part has at most one open step row, and its phase is the phase of that row (part-session.md 9.7 invariant 8). The web finds the row with `runningStep`.
+- A part has at most one open step row, and its phase is the phase of that row (part-session.md 9.7 invariant 8). The web finds the row with `runningStep`, which calls the shared `phaseRow` (src/shared/task-status.ts).
 - Continue decides by kind and cause, never by text (9.4, storage rule 3). The web follows the same rule (D9).
 - UI code names no product; texts take the runner and the forge from meta. Task screens avoid the words that ui-words forbids.
 - Every task mutation refreshes `['task', id]` and `['tasks']`.
@@ -238,7 +262,7 @@ Each package ends green on `bun run check`. A, E, and D also run `bun run test:e
 3. The server rule for a note-only answer to a point question is not known. The web asks for a choice.
 4. The usage timer path calls `changed()`, so SSE refreshes the view (not verified).
 5. Plan part n equals task_part ord in a task without sub-tasks (not verified).
-6. WP-7 is optional. Without it, the box stays busy during a run.
+6. WP-7 landed (ba7ad13). PS5-C shows the live and queued hints of 4.10.
 7. User answer (2026-11-13): the 2.17 ready sentence replaces "is ready and checked by <R>". Update the tests and the README.
 8. User answer (2026-11-13): remove the resume option `start-step-again` in PS5-S2.
 9. budget/cost (Q-SM5) still has no owner. PS5 shows Continue only.

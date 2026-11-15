@@ -36,6 +36,7 @@ import { IMPLEMENT_TOOLS, implementArgs, type RunOutcome, type SESSION_GATES } f
 import { git } from "../../src/server/review/git";
 import { IMPLEMENT_TRUST, INSTRUCTIONS_TRUST, saveInstructionSettings } from "../../src/server/review/instructions";
 import { createReviewJobs, IMPLEMENT_MCP_LINES, type ImplementRunStart } from "../../src/server/review/jobs";
+import { CRITIC_TASK } from "../../src/server/review/prompt";
 import { LOOP_NOTE, LOOP_TEXT } from "../../src/server/review/stream";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
@@ -1840,12 +1841,14 @@ describe("part sessions in the jobs", () => {
         answered: [],
         coverage: { read: ["repo/src/app.ts"], skipped: [], unavailable: [], notChecked: [] },
       };
-      s.scenario({ fixture: claudeStream(s.root, "critic", "claude-synthetic/review-flat.jsonl"), critic });
+      // The control run without the critic flag is no critic call of the fake CLI, so it takes review.
+      s.scenario({ fixture: claudeStream(s.root, "critic", "claude-synthetic/review-flat.jsonl"), critic, review: critic });
       const base = profileOf(s.settings.profiles(), DEFAULT_PROFILE);
       // The critic profile of AC-B333, with rl-reviewer and the verify phase on, so only the critic flag turns them off.
       const profile = {
         ...base,
-        model: "haiku",
+        model: "opus",
+        effort: "low" as const,
         maxTurns: 30,
         reviewer: { ...base.reviewer, mode: "always" as const },
         verifier: { ...base.verifier, mode: "on" as const },
@@ -1889,12 +1892,15 @@ describe("part sessions in the jobs", () => {
       };
       const c = await review(true);
       expect(c.calls.length).toBe(1);
-      expect([flag(c.calls[0]?.argv ?? [], "--model"), flag(c.calls[0]?.argv ?? [], "--max-turns")]).toEqual(["haiku", "30"]);
+      const argv = c.calls[0]?.argv ?? [];
+      expect([flag(argv, "--model"), flag(argv, "--effort"), flag(argv, "--max-turns")]).toEqual(["opus", "low", "30"]);
+      expect(c.calls[0]?.stdin).toContain(CRITIC_TASK);
       expect(Object.keys(c.calls[0]?.agents ?? {})).not.toContain("rl-reviewer");
       expect(c.items).toEqual([{ kind: "finding", line: 2, line_end: 3 }]);
       // Control: the same profile without the critic flag delegates, verifies, and keeps the mixed range.
       const r = await review(false);
       expect(r.calls.length).toBe(2);
+      expect(r.calls[0]?.stdin).not.toContain(CRITIC_TASK);
       expect(Object.keys(r.calls[0]?.agents ?? {})).toContain("rl-reviewer");
       expect(r.items.map((x) => [x.kind, x.line])).toEqual([
         ["finding", 2],

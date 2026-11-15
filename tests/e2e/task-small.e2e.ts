@@ -290,11 +290,11 @@ test("a small task: the Build form, questions, plan with the branch and the warn
   await expect(page.locator('[aria-current="step"]')).toHaveText("Build", { timeout: 60_000 });
 
   // 5. The change is ready and checked. The small point of the own review is listed. Nothing went out before the click.
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 180_000 });
   await expect(primary(page)).toHaveText("Open the PR");
   await expect(primary(page)).toBeFocused();
   await expect(page.getByText("Say what works in the title.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Fix the small points too" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Fix these too" })).toBeVisible();
   // AC-B242: the part that waits for its PR gives one note of its own, and no "open the PR" wait note.
   await expect
     .poll(async () => (await notes(page)).filter((n) => n.body === "Part 1 of 1 is ready for its PR."), { timeout: 30_000 })

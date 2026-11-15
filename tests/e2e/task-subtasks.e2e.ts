@@ -196,7 +196,7 @@ test("a task with sub-tasks: mode choice, plan with a tracked PR, one part built
   await primary(page).click();
 
   // 3. The build of ABC-13. ABC-14 waits for its merge. Nothing went out before the click.
-  await expect(status(page)).toHaveText(/^ABC-13 \(\d of 3\) is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^ABC-13 \(\d of 3\) is ready(: [^.]+)?\.$/, { timeout: 180_000 });
   expect(((await api(page, "GET", `/api/tasks/${id}`)).json as { settings: { buildsAtOnce?: number } }).settings.buildsAtOnce).toBe(1);
   await expect(primary(page)).toHaveCount(1);
   await expect(primary(page)).toHaveText("Open the PR");

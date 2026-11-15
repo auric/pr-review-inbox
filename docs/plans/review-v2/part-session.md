@@ -268,7 +268,7 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 ### 2.7 The critic
 
 - When: once, after the first commit of a build. It needs the committed base..head.
-- Run: a task review run (review.taskRun, as reviewRun loop.ts:1366-1443) with item critic. It uses model haiku, no verify phase, no subagent, a fixed app prompt, the review finding schema, and 30 turns.
+- Run: a task review run (review.taskRun, as reviewRun loop.ts:1366-1443) with item critic. It uses model opus at low effort, no verify phase, no subagent, a fixed app prompt, the review finding schema, and 30 turns.
 - Filter: validate (validate.ts) runs as for a review, with one more rule. The app keeps a finding only when each line of its anchor range is an added line of base..head.
 - Kept points: one resume run judges them with the pushback lines. A push-back gets a Log line only. Then the gate of section 2.6 runs.
 - No kept point: nothing runs. A failed critic gives a Log note and never stops the part.
@@ -284,11 +284,12 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 ### 2.9 Live messages
 
 - The Tell Claude box (spec.md section 6.18.1) becomes the message box of the part. It shows in every state that has a worktree.
-- While a run works, "Send" writes a stream-json user message to the stdin of that run (U104). The Log shows "Your message" with the time.
+- While an implement, fix, or instruct run of the part works, "Send" writes a stream-json user message to the stdin of that run (U104). No new step starts. The step of that run gets the Log note "Your message: <text>", one note for each send. The send moves the task version, so a second tab gets 409.
 - While no run works, "Send" starts a run with the text as "Your instructions" (spec.md section 6.18.2).
 - The text is user text. It can steer the work, but never the rules. The app never parses it.
 - Runner: `--input-format stream-json`, with stdin as a pipe. The first message is the prompt. The runner closes stdin after a result event when no message waits.
-- If U104 fails, a message sent during a run waits and goes into the next run as "Your instructions". The hint says "Claude reads this when the current run ends."
+- Fallback (ps4-plan.md WP-7): when the live write fails under the build driver, the message waits as an instruct row with blockedBefore null. The live gate is off, or the run takes no input now. The next GO of the part runs the row as "Your instructions". A part holds at most one waiting message. The waiting message keeps the reason of the task. The hint says "Claude reads this when the current run ends." These actions cancel the waiting message with the result "stopped": a Stop, a failed build, a Skip, and a Start again. The text goes back to the box. A Stop while the message runs under the build driver also sets the result "stopped". After a restart, Continue can start the message. A Stop of it then gives back the reason that Continue cleared.
+- Every other send while the loop works gets 409 "Claude or the checks are working.": a second waiting message of the part, a failed live write under a follow-up or other mode driver, and a send while no session run of the part runs.
 
 ### 2.10 Stall and loop guard
 
@@ -320,6 +321,7 @@ The checks stay as they are. The undo touches only the problem paths. The app fi
 - **Hold** (More, per part): the app cancels the run of that part only, with a new cancel by the key prefix `task:<id>:part:<part>:`. Today's jobs.ts:2445-2447 cancels the whole task.
   - The work stays. The status says "Part 2 is on hold. Its work is kept." The primary button is Continue.
   - Hold replaces "Pause after this step" (loop.ts:2529-2538) and "Pause after each task" (:1360-1361).
+  - Hold takes the open implement or fix row of the part as its step. A waiting message (2.9) can sit beside that row.
 - **Skip this part** (a task with sub-tasks, before the PR of the part): a confirm comes first. Then the app saves the patch, sends ABANDON (machine.ts:109-110), removes the worktree, and deletes the transcript.
 - **Start this part again** (before the first push only):
   - The confirm says "Claude starts part 2 again from the plan. The app keeps the old work as a patch and as a backup branch in the app cache. Nothing goes to Bitbucket."
@@ -424,7 +426,7 @@ Each state has one primary button or none.
 | Checking | "The app runs the checks of part 2." | none | Stop |
 | Fixing | "Claude fixes the checks of part 2 (try 1 of 3)." | none (message box) | Hold, Stop |
 | Critic or review | "A second Claude run reviews part 2." | none | Stop |
-| Ready | "Part 2 is ready: 5 tasks, 340 lines, checks green." | "Open PR for part 2" | Show the diff, Fix these too, Start this part again |
+| Ready | "Your change is ready: 2 tasks, 340 lines, checks green." With several parts: "Part 2 is ready: 5 tasks, 340 lines, checks green." | "Open the PR", or "Open PR for part 2 of 3" | Show the diff, Fix these too, Start this part again |
 | Claude asks | "Claude asks: <question>" | "Answer" | Use the recommended answers, Stop |
 | Claude asks to run a command | "Claude asks to run a command." | "Continue" | Stop |
 | Plan change | "Claude proposes a change to the plan." | "Review the change" | Reject, Stop |
@@ -437,9 +439,11 @@ Each state has one primary button or none.
 | Fixed, not pushed | "Part 2 has 1 new commit. 3 replies wait." | "Push and post 3 replies" | Show the diff |
 | Build failed | "The build of your PR failed: <name>." | "Let Claude fix the build" | Go to the PR |
 | Red-build fixes on | "Claude fixes red builds of part 2 by itself (1 of 2 used)." | none | Stop red-build fixes, Go to the PR |
-| Stopped | "Stopped at part 2. The work is kept." | "Continue" | Start this part again, Close the task |
+| Stopped | One part: "Stopped. The work is kept." More parts: "Stopped at part 2. The work is kept." or "Stopped at <part label>. The work is kept." | "Continue" | Start this part again, Close the task |
 
 - Every Needs you box uses Continue (build-redesign.md section 2.5). Stop stays in More.
+- The ready sentence leaves out a fact that is not known: the task count with no planned task, the lines with no line count, and "checks green" with no green check row.
+- A stop before the build keeps the sentence of spec.md section 6.12, such as "Stopped at: writing the plan."
 - The Plan tab shows the tick progress of each part.
 - The Log tab groups the runs of one session under "Claude session of part 2". Each run shows "resumed" or "new session".
 
@@ -781,6 +785,8 @@ This section has three machines, plus reasons, derived waits, and one mode:
 
 ### 9.1 Today's machines
 
+This section audits the code before PS1. The headings of 9.1.2 and 9.1.3 and the tasks.ts rows of 9.1.4 point to the code of 2026-11-15. The other line numbers point to the code before PS1. The Pause rows describe code that PS5-S2 removed.
+
 #### 9.1.1 How the app uses the machines
 
 - machine.ts is a pure transition function: no actions, no invoke, no actor (machine.ts:4-6). tests/tasks/machine.test.ts:147-170 checks this.
@@ -789,11 +795,11 @@ This section has three machines, plus reasons, derived waits, and one mode:
 - advancePart (tasks.ts:228-248) refuses with "This part is <chip>." (tasks.ts:240-241). It moves the task version (tasks.ts:244).
 - task.state and task_part.state have SQL CHECK lists (033_task.sql:13, :107). task_part has child tables (033_task.sql:114; 035_task_repos.sql:18; 037_task_update.sql:6). So a new stored state value needs a table rebuild.
 
-#### 9.1.2 Task machine (machine.ts:56-98)
+#### 9.1.2 Task machine (machine.ts:60-102)
 
 | State | Event | Guard | Target | Sender today |
 |---|---|---|---|---|
-| (none) | BUILD | none | interview | initialTransition at task create (machine.ts:55) |
+| (none) | BUILD | none | interview | initialTransition at task create (machine.ts:59) |
 | interview | ASKED | none | interview | interview run end (tasks.ts:1528) |
 | interview | ANSWERED | none | spec_draft | tasks.ts:1535, :2013 |
 | spec_draft | APPROVE | small | implementing | plan approval (tasks.ts:2199) |
@@ -815,7 +821,7 @@ This section has three machines, plus reasons, derived waits, and one mode:
 | done | CLOSE | none | done | tasks.ts:2564. It clears task.blocked_json and the waiting part rows, and adds 2 to the version (advance tasks.ts:2564, patch :2566). closed_at keeps its first value (COALESCE, :2567). |
 | failed | none | none | final | none |
 
-#### 9.1.3 Part machine (machine.ts:100-126)
+#### 9.1.3 Part machine (machine.ts:106-135)
 
 | State | Event | Guard | Target | Sender today |
 |---|---|---|---|---|
@@ -842,9 +848,9 @@ syncParts sends one event per changed PR and ignores a refusal (gates.ts:86-88).
 
 | Condition | Storage | Code | Effect |
 |---|---|---|---|
-| First reason | task.blocked_json (033_task.sql:21) | setBlocked tasks.ts:551-554; holdBlocked :1033-1044 | It halts every part (loop.ts:648, :666-670) |
-| Soft reasons | the same column | softReason tasks.ts:1015-1017 | Pause and slot halt no other part. Another reason replaces them. |
-| Waiting reason of a part | task_part.blocked_json (048_task_part_blocked.sql:3) | waitingPart tasks.ts:1021-1029; nextReason :533-537 | It moves up on a clear. Each successful move whose target is not implementing clears it (tasks.ts:223). |
+| First reason | task.blocked_json (033_task.sql:21) | setBlocked tasks.ts:756-757; holdBlocked :1253-1269 | It halts every part (loop.ts:648, :666-670) |
+| Soft reasons | the same column | softReason tasks.ts:1236-1237 | Pause and slot halt no other part. Another reason replaces them. |
+| Waiting reason of a part | task_part.blocked_json (048_task_part_blocked.sql:3) | waitingPart tasks.ts:1241-1249; nextReason :738-742 | It moves up on a clear. Each successful move whose target is not implementing clears it (tasks.ts:223). |
 | Pause | question with step null and the text PAUSED, plus pauseAsked and gates in memory | loop.ts:602-603, :807-818, :2609 | text match |
 | Pause after each task | question with step null | loop.ts:1384 | Continue clears it |
 | Slot wait | soft reason slot, a waiting step row, slotWaits in memory | loop.ts:604, :755-803 | It goes on by itself |
@@ -948,7 +954,7 @@ Owners: route (routes.ts handler), loop (loop.ts driver), tasks (tasks.ts servic
 | ready | START_BUILDING | none | implementing | tasks, sub-task added | loop.build | none |
 | interview to ready | STOP | none | stopped | route stop; loop failed() for an error that no reason covers; tasks for a failed or cut interview or spec run | cancel runs and abort checks (route); clear the first reason and every part row except held (route, tasks) | fewer senders (9.3.4) |
 | non-final | FAIL | none | failed | reserved | clear the part rows (tasks) | no sender |
-| stopped | RESUME | stoppedFrom X | X | route resume | Continue rule, then GO for each building part (loop) | none |
+| stopped | RESUME | stoppedFrom X | X | route resume | Continue rule, then GO for each building part (loop). For stoppedFrom ready, loop.resume sends RESUME, then the all-merged check (partsDone, gap 18) in the same transaction, and starts no driver | PS5-S2: loop.resume takes stoppedFrom ready |
 | stopped | CLOSE | none | done | route close | closed_at; delete transcripts | PS3 side effect |
 | done | CLOSE | none | done | route close | clear task.blocked_json and the waiting part rows; version + 2; closed_at keeps its first value | none |
 
@@ -984,7 +990,7 @@ PartContext gains `unpushed`: task_part.pushed is NULL. It is NULL for a new bra
 | declined | ABANDON | none | abandoned | route drop | as planned ABANDON | none |
 | merged, abandoned | none | none | final | none | none | none |
 
-- RESTART and Skip need the phase idle, so no step of the part may be open. The route refuses a running part with "Hold part 2 first."
+- RESTART and Skip need the phase idle, so no step of the part may be open. The route refuses a running part with "Hold part 2 first." A waiting message (2.9) is the exception: RESTART and Skip cancel it.
 - RESTART from self_reviewed keeps the task in implementing. A self_reviewed part already keeps it there (WAITS_PR, loop.ts:193).
 - Refused by design (no write, no version move): GATE_FAILED in pr_open, CHANGES_REQUESTED in changes_requested, and GATE_PASSED in approved.
 
@@ -992,7 +998,7 @@ PartContext gains `unpushed`: task_part.pushed is NULL. It is NULL for a new bra
 
 The phase machine orders the work of one part. It is flat, so machineMermaid prints it (machine.ts:135-147). Like the other two machines, it has no actions. Each part has its own phase.
 
-**Where the phase lives.** The phase is the open task_step row of the part. A part has at most one open step row (spec.md section 6.20.6), with one exception: an open update row can sit beside exactly one open resolve or check row of the same update (WP-5). The phase is then that of the resolve or check row. After a restart, failSteps leaves no open row, so every phase is idle.
+**Where the phase lives.** The phase is the open task_step row of the part. A part has at most one open step row (spec.md section 6.20.6), with two exceptions. An open update row can sit beside exactly one open resolve or check row of the same update (WP-5). The phase is then that of the resolve or check row. One waiting instruct row, a message for the next GO (2.9), can sit beside one other open row (ps4-plan.md WP-7). The phase is then that of the other row. After a restart, failSteps leaves no open row except a kept waiting message (9.5). That row has not run, so every phase is idle.
 
 **Restart mark.** Start again writes a commit row with item restart (ps4-plan.md section 1 item 5). The guards critic, review, and claudeRan, and the build and work commit reads, read only rows after the mark. The baseline guard ignores the mark.
 
@@ -1023,7 +1029,7 @@ purpose is a new field of StepDetail.session, which section 5.3 already adds. Th
 | follow | a waiting row of this part with kind instruct, or kind fix with item points or pushback | the instruct row of a send (loop.ts:2930-2933) |
 | run | the part is implementing, and it has open tasks or a cut build run | cutBy loop.ts:571-582 |
 | checks | the worktree holds work, or no green gate exists at HEAD | checksDone loop.ts:1142-1151 |
-| critic | the part is implementing, an ok build commit exists after the restart mark, and no critic row (ok or failed) exists after the mark. A cancelled critic runs again. | new (2.7) |
+| critic | the part is implementing, an ok build commit exists after the restart mark, and no critic row (ok or failed) exists after the mark. A cancelled critic runs again. A critic that an app restart cut ends cancelled, so it runs again. | new (2.7) |
 | review | a commit after the last ok own review holds work of a Claude run. Only rows after the restart mark count, the own review rows are those with item review, and a green update row with a resolve run counts as such a commit. | loop.ts:2297-2298 (Q57); spec.md 6.7, Own review |
 | firstCut | the run reached its turn cap or process cap, and no earlier cut of this purpose follows the last commit | new (2.2, Cut runs) |
 | afterUpdate | the gate runs after an update | loop.ts:2289-2294 |
@@ -1031,6 +1037,8 @@ purpose is a new field of StepDetail.session, which section 5.3 already adds. Th
 | triesLeft | the fix runs of this gate are fewer than "Test-fix tries" | loop.ts:1273-1274, :1290 |
 | unchanged | the run changed no file | loop.ts:1297, :2077 |
 | roundsLeft | the review rounds are fewer than REVIEW_FIX_TRIES | loop.ts:183, :1488 |
+
+StepDetail.tries of a fix row (ps5-plan.md D5) is for display only. triesLeft and roundsLeft still read the loop counters: `tries` of greenOrFix and `c.rounds` of reviewRound. The guard review skips a point with skipFix (option without, ps5-plan.md D3).
 
 App-only commits need no review: the plan commit, the line-end repair, a clean merge of an update, and a pointer commit.
 
@@ -1135,7 +1143,7 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | POST /tasks/:id/allow | ALLOW | "No command waits for your choice." (loop.ts:2723) |
 | POST /tasks/:id/plan | APPROVE | TASK_STATE_TEXT (tasks.ts:219) |
 | POST /tasks/:id/stop | STOP, or STOPPED of a follow-up | TASK_STATE_TEXT |
-| POST /tasks/:id/resume | RESUME, or CONTINUE of a reason | the reason texts (loop.ts:2606-2650) |
+| POST /tasks/:id/resume | RESUME, or CONTINUE of a reason | the reason texts (loop.ts:2606-2650); a plain Continue in implementing when each part in the build is held: "Part N is on hold. Continue it from its row." A planned part of a task with sub-tasks can still start. |
 | POST /tasks/:id/close | CLOSE | "Stop the build first, then close the task." (tasks.ts:2565) |
 | POST /tasks/:id/spec-change/:step | ACCEPT or REJECT | "No change to the spec waits for this step." (loop.ts:2829) |
 | POST /tasks/:id/parts/:part/pr, /prs | PR_OPENED | the part state sentence (tasks.ts:240-241) |
@@ -1144,7 +1152,7 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | POST /tasks/:id/parts/:part/start | none (START comes from the scheduler) | loop.ts:2495, :2501 |
 | POST /tasks/:id/parts/:part/wait-merge | WAIT_MERGE | "This part does not wait for you." (loop.ts:2476) |
 | POST /tasks/:id/parts/:part/drop | ABANDON | loop.ts:2530, :2536 |
-| POST /tasks/:id/instructions | GO with follow, or a live message to a running session run (no event) | WORKING, WAITING (tasks.ts:1052-1066) |
+| POST /tasks/:id/instructions | GO with follow; a live message to a running session run of the part (no event); or, under the build driver, a waiting row for the next GO (no event) | a held part: "Part N is on hold. Continue it first."; WORKING, WAITING (tasks.ts:1052-1066) |
 | POST /tasks/:id/parts/:part/update | UPDATE | updateTarget texts (tasks.ts:1069-1078) |
 | POST /tasks/:id/parts/:part/update/undo | UNDO_UPDATE | undoTarget texts (tasks.ts:1082-1119) |
 | POST /tasks/:id/parts/:part/fix | GO with follow (purpose points) | "No point waits for a fix." (loop.ts:2792) |
@@ -1155,7 +1163,10 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | New (PS6): POST /tasks/:id/parts/:part/comments, /comments/send | none (reply run); GO with follow (purpose comments) | the sentence of the state |
 | New (PS7a): POST /tasks/:id/parts/:part/ci | GO with follow (purpose ci) | the sentence of the state |
 | New (PS7b): POST /tasks/:id/parts/:part/ci-mode | mode off | "Red-build fixes are off." |
-| Goes: /pause, /dismiss, /limit, /parts/:part/setup | resume options (section 5.2): leave, more-time, setup | none |
+| POST /tasks/:id/limit | none: "Change the limit" sets the task line limit only, keeps every reason, and starts nothing (ps5-plan.md D1) | TASK_STATE_TEXT outside implementing and ready; WORKING while a driver works |
+| Gone in PS5-S2 (built): /pause, /dismiss, /parts/:part/setup, and the `keep` form of /limit | Hold and the resume options leave and setup replace them | the three routes answer 404; the `keep` form answers 400 |
+
+/limit stays with `lineBudget` only (ps5-plan.md D1).
 
 #### 9.3.7 Diagrams
 
@@ -1324,12 +1335,12 @@ stateDiagram-v2
 | question/red_before | loop.ts:1280-1289 | I, R | yes | CONTINUE | See why; Stop; R: leave | the fix runs start, tries from 0 |
 | question/no_change | loop.ts:1297-1298 | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | the gate runs again, tries from 0 |
 | question/task_done (legacy) | loop.ts:1384 | I | no | CONTINUE | Stop | clears; taskStep goes in PS3 |
-| question/paused (legacy) | loop.ts:810 | I | no (soft) | CONTINUE | Stop | builds with no reset (loop.ts:2629-2642); Hold replaces it in PS4, and the /pause route goes in PS5 |
+| question/paused (legacy) | no setter since PS5-S2; older rows only | I | no (soft) | CONTINUE | Stop | builds with no reset (loop.ts resume, legacy question/paused branch); Hold replaces it in PS4. The /pause route is gone since PS5-S2; Continue of a stored row builds with no reset |
 | red/checks | loop.ts:1290-1295 | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | "Test-fix tries" more fix runs; the work stays |
-| red/setup | loop.ts:1723 | I, R | yes | CONTINUE | See why; Stop | setup runs again (option setup deletes the mark) |
+| red/setup | loop.ts:1723 | I, R | yes | CONTINUE | "Run setup again" (option setup with part: deletes the setup mark of the part, then takes Continue); See why; Stop | setup runs again |
 | red/setup_time | loop.ts:1717-1722 | I, R | yes | "Change the time limit" (editor), then CONTINUE | See why; Stop | setup runs with the new limit |
 | red/update | loop.ts:2294 | I, R | no | CONTINUE (Q-SM6) | Undo the update; See why; the message box; R: leave | the fix runs start on the update result |
-| blocker | loop.ts:1488-1495 | I, R | yes | CONTINUE | "Go on without these fixes" (Not verified: answer to build-redesign.md Q3); See why; Stop; R: leave | one more judging round with the stored points |
+| blocker | loop.ts:1488-1495 | I, R | yes | CONTINUE | "Go on without these fixes" (option without: the must-fix points get skipFix, then the part goes on as after Continue; R: the reason before the follow-up comes back); See why; Stop; R: leave | one more judging round with the stored points |
 | spec_change | loop.ts:1068-1073 | I, R | yes | ACCEPT | REJECT; Stop | 409 "Accept or reject the change to the spec first." (loop.ts:2643) |
 | allow | loop.ts:1038-1041 | I, R | yes | ALLOW | Stop | 409 "Pick a choice for each command first." (loop.ts:2644) |
 | denied_path/path | implement.ts:1038-1040 | I, R | yes | CONTINUE | See why; Stop; R: leave | a fresh session run (guard rule 4); the undone paths stay undone (PS1) |
@@ -1340,7 +1351,7 @@ stateDiagram-v2
 | error/run | today STOP (implement.ts:1041-1042; loop.ts:1026-1034, :1446) | I, R | yes | CONTINUE | Start this part again; See why; Stop; R: leave | the cut run runs again: resume when the guard holds, else fresh (2.2) |
 | error/app | loop.ts:747, :1228, :1379, :1730-1733; implement.ts:884-890, :902-908, :1059-1067 | I, R | no | CONTINUE | Stop | the loop runs again after the user fixed the cause |
 | error/lower_repo | loop.ts:1605-1612 | I | no | WAIT_MERGE | Stop | the scheduler runs again; the reason comes back while the lower PR is open |
-| error/restart (new) | recover (Q-SM2) | I, R | yes, when it names a step | CONTINUE | Start this part again; Stop; R: leave | the cut phase runs again with the kept work (PS1 snapshot) |
+| error/restart (new) | recover (Q-SM2) | I, R | yes, when it names a step | CONTINUE | Start this part again; Stop; R: leave | the cut phase runs again with the kept work (PS1 snapshot). A critic that an app restart cut ends cancelled, so it runs again. The Tasks row and the notification say "Needs you: the app restarted". |
 | budget/time (legacy) | implement.ts:517-520 | I | no | CONTINUE | Stop | clears (section 5.4); time limits go in PS3 |
 | budget/cost | implement.ts:521-522 | I, R | no | change the cost limit, then CONTINUE | Stop | 409 "Raise the cost limit first." while the cost is over (Q-SM5; fixes G11) |
 | size/budget (legacy) | loop.ts:1191-1199 | I | no | CONTINUE | Stop | clears; the size check gives a note in PS3 |
@@ -1349,7 +1360,7 @@ stateDiagram-v2
 | slot (soft) | loop.ts:755-803 | I, R | never | SLOT_FREE (app, loop.ts:785-789) | Stop | 409 "The build waits for the run slot. It goes on by itself." (loop.ts:2606-2607) |
 | usage, armed false (new) | PS4, from the run end | I, R | yes | CONTINUE ("Resume at 14:30") | Stop | Before resumeAt, it arms every usage reason of the task. After that time, or when there is no time, the cut run runs again. |
 | usage, armed true (new) | PS4 | I, R | yes | RESUME_DUE (timer) | "Cancel the resume" (option disarm); Stop | After resumeAt, the cut run runs again. Before it, 200 with no change. |
-| held (new) | PS4, route hold | I, stopped | part row only | CONTINUE with part | Skip this part (a task with sub-tasks only); Start this part again (unpushed only) | clears the row; the part builds with the kept work. In stopped, it also resumes the task. |
+| held (new) | PS4, route hold | I, stopped | part row only | CONTINUE with part | Skip this part (a task with sub-tasks only); Start this part again (unpushed only) | clears the row; the part builds with the kept work. In stopped, it also resumes the task. A plain Continue answers 409 "Part N is on hold. Continue it from its row." when each part in the build is held; a planned part of a task with sub-tasks can still start. Tell Claude on a held part answers 409 "Part N is on hold. Continue it first." |
 | stuck/stall (new) | PS2 detects, PS3 writes | I, R | yes | CONTINUE | Start this part again; Stop; R: leave | resumes the session; the work stays |
 | stuck/loop (new) | same | I, R | yes | CONTINUE | same | same |
 | stuck/turns, stuck/time (new) | PS3, second cut | I, R | yes | CONTINUE | same | one more continuation run |
@@ -1379,7 +1390,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 | Item | Code | After a restart today | Target |
 |---|---|---|---|
 | drivers (lock) | loop.ts:600 | gone; recoverTasks stops tasks that worked | stays a lock, never a state |
-| pauseAsked, gates | loop.ts:602-603 | gone; loop.ts:2636-2642 covers it | removed with the /pause route in PS5; Hold (PS4) replaces it |
+| pauseAsked, gates | none | none | removed in PS5-S2 with the /pause route; Hold (PS4) replaces it |
 | slotWaits | loop.ts:604 | the waiting step fails (tasks.ts:193) | stays; recovery gives error/restart |
 | aborts | loop.ts:605 | gone with the processes | stays; also keyed by part, for Hold (PS4) |
 | pokes, modes, stopping, checking, ending, closing | loop.ts:607, :621-627 | transient | stay |
@@ -1387,7 +1398,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 | Runs in the pool and beside it | jobs.ts; recovery jobs.ts:444-455 | runs end with kind restart | stays |
 | Git snapshot | gitstate.ts:52; implement.ts:1060 | lost; Continue resets with the patch | task_step.cut_json of the cut step row (migration 053, security fix of PS1) |
 | Session run handle (Hold, live stdin) | new, key task:<id>:part:<part>: | none | gone; the last stored transcript is the resume point (2.2) |
-| Live message | new | none | The app writes it into the open step row before the stdin write. After a restart, the next run gets it as "Your instructions". |
+| Live message | new | none | The app writes it to stdin first. Then the step of the run gets the Log note "Your message: <text>". A message in stdin has no row of its own. A waiting message (2.9) keeps its row; see the recovery table. |
 | Stall and loop guard | new, per process | none | gone with the process |
 | Usage timer | new, per task | none | loop.recover rebuilds it from usage reasons with armed true |
 | BUILD_WAIT timer | new, per part | none | rebuilt from ci_fix_left > 0 and ended_at of the newest ok push step; a past deadline ends the mode at once |
@@ -1398,6 +1409,7 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 |---|---|---|
 | interview or spec_draft with a run | step failed; STOP; Resume runs it again (tasks.ts:2523-2554) | same |
 | implementing, phase not idle | step failed; STOP; part rows cleared (G6) | step failed; reason error/restart on that part (first or queued); the task stays implementing; held and waiting rows stay |
+| implementing, a waiting message that never ran, on a part that still builds (ps4-plan.md WP-7) | new | the message row stays waiting for the next GO of the part; the other open rows of the part fail, and the reason goes to them; a built part keeps the WP-3 rule: the row fails, and Continue puts it in the queue again; in stopped, the row fails, because a Stop already cancelled each waiting message |
 | implementing, a part builds between steps | STOP (tasks.ts:191) | reason error/restart with step null on that part (it does not queue) |
 | implementing, phase in a slot wait | waiting step failed; STOP | as "phase not idle"; Continue waits for the slot again |
 | implementing, a reason, no open step | kept | kept; usage timers armed again |
@@ -1411,6 +1423,8 @@ Every reason has a primary exit. Stop is also an exit for every reason except up
 
 After a restart, each Continue runs GO. GO picks the next phase by the guard order of 9.3.3.
 
+The update driver ends a green update of a task in implementing with the build of the other parts, as the follow-up driver does (loop.ts driveUpdate, driveFollow). It does not when the task holds a reason or a Stop is under way.
+
 ### 9.6 UI mapping
 
 **View key and priority.** The view takes the first rule that holds:
@@ -1421,6 +1435,8 @@ After a restart, each Continue runs GO. GO picks the next phase by the guard ord
 4. A derived wait holds (order below).
 5. The default row of the part state.
 
+The phase comes from the open row that the shared `phaseRow` (src/shared/task-status.ts) picks, as invariant 8 of 9.7 says. A waiting message beside another open row gives no phase. The web `runningStep` and `partStep` call `phaseRow`.
+
 **Rows of section 2.17.** I is implementing, and R is ready.
 
 | Row | Task state | Part state | Reason key | Phase | Derived wait | Primary |
@@ -1429,7 +1445,7 @@ After a restart, each Continue runs GO. GO picks the next phase by the guard ord
 | Checking | I, R | worktree state | none | checking | none | none |
 | Fixing | I, R | worktree state | none | fixing | none | none (message box) |
 | Critic or review | I, R | worktree state | none | critic, reviewing | none | none |
-| Ready | I | self_reviewed | none | idle | none | "Open PR for part 2" |
+| Ready | I | self_reviewed | none | idle | none | "Open the PR", or "Open PR for part 2 of 3" |
 | Claude asks | I, R | worktree state | question/claude | idle | none | "Answer" |
 | Claude asks to run a command | I, R | worktree state | allow | idle | none | "Continue" |
 | Plan change | I, R | worktree state | spec_change | idle | none | "Review the change" |
@@ -1478,9 +1494,9 @@ After a restart, each Continue runs GO. GO picks the next phase by the guard ord
 | CI outside the code (PS7a) | the newest ci run: cause infra or unknown, no change | "Claude says the build failed outside the code: <quote>." | "Go to the build" | Go to the PR |
 | Declined | part declined | "The PR was declined on the server." (model.ts:495-496) | "Close the task" | Open the PR again, Drop |
 | Done, closed, failed | task done or failed | model.ts:419-429, :488-494 | per row | none |
-| Unpushed, no replies | derived wait 6 | "Part 2 has 1 new commit that is not on the server yet." | "Push to <branch>" | Show the diff |
+| Unpushed, no replies | derived wait 6 | "Part 2 has new commits that are not on the server yet." | "Push to <branch>" | Show the diff, Go to the PR, Close the task |
 
-The last row has no primary today. Its comment says that no route exists (model.ts:692), but routes.ts:361 serves POST /parts/:part/push. Not verified: that route fits this row.
+Unpushed with no replies: POST /parts/:part/push fits this row (PS5-C). For this row, pr.ts pushNow refuses only for a first reason, a running step or driver, or a merged lower part. Its generic checks also refuse a stale version, a PR open in progress, an adopted part, a part with no built head, and a failed pre-flight.
 
 ### 9.7 Invariants and test plan
 
@@ -1493,7 +1509,7 @@ The last row has no primary today. Its comment says that no route exists (model.
 5. The machines are pure: no actions, no invoke, and no createActor. machine.ts imports only xstate and types.
 6. Each mutating route sends one user event or one reason exit (9.3.6).
 7. Every event has a sender, or it is in RESERVED with its owner package.
-8. A part has at most one open step row, with one exception: an open update row can sit beside exactly one open resolve or check row of the same update (WP-5). The phase is that of the open row, or of the resolve or check row in the exception.
+8. A part has at most one open step row, with two exceptions. An open update row can sit beside exactly one open resolve or check row of the same update (WP-5). One waiting instruct row can sit beside one other open row (WP-7). The phase is that of the open row, of the resolve or check row, or of the row beside the waiting instruct row. The shared `phaseRow` (src/shared/task-status.ts) picks this row.
 9. After a restart, each state takes the recovery transition of 9.5. No waiting part row is lost.
 10. Only the user's Stop and an error that no reason covers send STOP from implementing or ready.
 
@@ -1512,9 +1528,9 @@ The last row has no primary today. Its comment says that no route exists (model.
 | G3: a withdrawn "Needs work" with a failing gate moves changes_requested to pr_open | tests/tasks/gates.test.ts | PS-M | drop the edge: red |
 | REASON_EXITS: each kind and cause has a primary exit, and each exit names a route of routes.ts | new tests/shared/reasons.test.ts | PS-M | delete one entry: red |
 | Reason exits: seed each reason in I and in R. The primary exit answers 2xx and clears the reason or starts the right driver. Continue on a form reason answers 409 with its text. | new tests/tasks/reasons.test.ts (fake CLI) | PS3, PS4 | make Continue refuse ready again: red |
-| Route grid: each mutating route over fixture states (task state, part state, reason, phase) answers 2xx, 400, 404, or 409 with a sentence. It never answers 500, and no driver starts on 409. | new tests/tasks/routes-grid.test.ts | PS5 | remove one 409 check: red |
+| Route grid: each mutating route over fixture states (task state, part state, reason, phase) answers 2xx, 400, 404, or 409 with a sentence. It never answers 500, and no driver starts on 409. | built in tests/tasks/routes-grid.test.ts (PS5-S2) | PS5 | limit without its state check gives 200 in done: red |
 | Loop order: the phase send helper asserts can(). A full fake-CLI build gives GO setup, CLEAN, GO baseline, CLEAN, GO run, RUN_DONE, CHECKS_GREEN, GO critic, CLEAN, GO review, CLEAN, then REVIEWED. | tests/tasks/session.test.ts | PS3 | skip the critic: red |
-| One open step per part (invariant 8, with the update exception of WP-5): an after-each check over every loop test | tests/tasks/fixture.ts helper | PS3, PS4 WP-5 | open two rows in a test: red |
+| One open step per part (invariant 8, with the update exception of WP-5 and the message exception of WP-7): an after-each check over every loop test | tests/tasks/fixture.ts helper | PS3, PS4 WP-5, WP-7 | open two rows in a test: red |
 | Restart per state: seed each row of 9.5, then run recoverTasks and loop.recover. Check the target column. Then Continue reaches the phase that GO picks. | new tests/tasks/recover.test.ts | PS1 (snapshot), PS3 (phases), PS4 (held, usage), PS7b (BUILD_WAIT) | clear held rows in clearWaits: red |
 | Queued reasons: two parts with usage arm together; held survives Stop and a restart; Continue of a held part pokes a running driver | tests/tasks/concurrent.test.ts | PS4 | remove the held skip in nextReason: red |
 | UI rows: each row of 9.6 has one test with at most one primary | tests/web/tasks-model.test.ts | PS5, PS6, PS7a, PS7b | swap derived waits 6 and 8: red |
@@ -1548,4 +1564,4 @@ Not owned yet: G4, a PR that opened while PR_OPENED was refused. It needs a pr.t
 5. **Q-SM5.** Keep the kind budget for the cost limit only. Section 5.1 drops budget, but the cost limit still blocks (implement.ts:521-522). Recommended: keep it, with a 409 until the limit changes. Not verified: a UI field for partCost.
 6. **Q-SM6.** Continue on red/update starts the fix runs. Today the user gets only See why, Undo, and the message box (spec.md 6.18.3, Q56). Recommended: yes. The click is still the user's choice.
 7. **Q-SM7.** The derived wait order of 9.6. Recommended: as listed. Work that changes or publishes the branch comes before server feedback.
-8. **Q-SM8.** "Go on without these fixes" for blocker. build-redesign.md Q3 recommended it. Not verified: the user's answer.
+8. **Q-SM8.** "Go on without these fixes" for blocker. build-redesign.md Q3 recommended it. User answer: yes ("Q3 yes" in build-redesign.md). PS5-S1 built it as resume option without (ps5-plan.md D3).

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// docs/plans/review-v2/spec.md sections 6.2, 6.7, and 6.14, and part-session.md (AC-B10 to AC-B13, AC-B18 to AC-B20, AC-B293 to
+// docs/plans/review-v2/spec.md sections 6.2, 6.7, and 6.14, and part-session.md (AC-B10 to AC-B13, AC-B19, AC-B20, AC-B293 to
 // AC-B305): the build loop of a small task part. loop-fixture.ts holds the setup: the fake CLI, the check script, and a temp bare remote.
 // No test starts the real CLI, reaches a forge, or touches the user's clone or data folder.
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
@@ -16,23 +16,14 @@ import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
 import { snapGit, stopGit } from "../../src/server/tasks/gitstate";
 import { cutJson, PATCH_LOST, type StepOutcome, startStep } from "../../src/server/tasks/implement";
-import {
-  changedLines,
-  createLoop,
-  globMatch,
-  LOCK_GLOBS,
-  PAUSED,
-  REVIEW_FIX_TRIES,
-  TEST_FIX_TRIES,
-  tickTask,
-} from "../../src/server/tasks/loop";
+import { changedLines, createLoop, globMatch, LOCK_GLOBS, REVIEW_FIX_TRIES, TEST_FIX_TRIES, tickTask } from "../../src/server/tasks/loop";
 import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
-import { recoverTasks, taskDto } from "../../src/server/tasks/tasks";
+import { PAUSED, recoverTasks, taskDto } from "../../src/server/tasks/tasks";
 import { ignoredSnapshot, openWorktree, readSetupMark, status } from "../../src/server/tasks/worktree";
 import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
 import { DEFAULT_TEST_GLOBS, RUN_TIME_MAX_MS, type TaskBlocked } from "../../src/shared/task";
 import { rowStatus } from "../../src/shared/task-status";
-import { readRecords } from "../support/fake-claude";
+import { callKey, readRecords } from "../support/fake-claude";
 import { logOf, pngOf } from "../support/fake-jira";
 import {
   type Call,
@@ -139,10 +130,10 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       const s = await setup({ config, profiles: [...SHIPPED_PROFILES, strict], profile: "strict", main });
       await s.build();
       expect(s.part().state).toBe("self_reviewed");
-      // part-session.md section 2.7: the critic runs with its own profile (haiku), not the profile of the task.
+      // part-session.md section 2.7: the critic runs with its own profile (opus), not the profile of the task.
       const all = s.runCalls();
-      const critic = all.filter((c) => c.argv.includes("haiku"));
-      expect(critic.map((c) => c.argv[c.argv.indexOf("--model") + 1])).toEqual(["haiku"]);
+      const critic = all.filter((c) => callKey(c.argv, c.stdin) === "critic");
+      expect(critic.map((c) => c.argv[c.argv.indexOf("--model") + 1])).toEqual(["opus"]);
       const calls = all.filter((c) => !critic.includes(c));
       expect(calls.map(s.modeOf)).toEqual(["build", "fix", "review"]);
       for (const c of calls) expect(c.argv[c.argv.indexOf("--model") + 1]).toBe("sonnet");
@@ -668,7 +659,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
         .get({ h: s.base }) as { id: number };
       const start = s.jobs.review(s.db, pr) as { status: number; conflict?: RunConflict };
       expect(start.status).toBe(409);
-      expect(start.conflict?.error).toBe("Claude is building K-2. Pause building after this step to start your run.");
+      expect(start.conflict?.error).toBe("Claude is building K-2. Start your run when its step ends.");
       expect(start.conflict?.running).toMatchObject({ pr: null, kind: "implement", task: other });
       // The loop of K-1 finds the slot busy: its build run waits, and the reason names the holder.
       s.loop.build(s.db, s.task);
@@ -918,47 +909,10 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    'AC-B203: "start-step-again" resets to the last commit with the patch saved; the route takes only that option',
-    async () => {
-      const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
-      await s.build();
-      expect(s.blocked()?.text).toBe("Needs you: the checks of part 1 stay red after 1 try.");
-      const fix = s.steps().find((x) => x.kind === "fix") as Step;
-      // The route: zod refuses an unknown option.
-      const SESSION = "s".repeat(64);
-      const ORIGIN = "http://127.0.0.1:7317";
-      const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
-      const post = async (body: unknown) =>
-        (
-          await app.request(`${ORIGIN}/api/tasks/${s.task}/resume`, {
-            method: "POST",
-            headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
-            body: JSON.stringify(body),
-          })
-        ).status;
-      expect(await post({ version: s.t().version, option: "keep-one-pr" })).toBe(400);
-      // A stale version passes zod and gets 409, so the route takes the option. The app has its own loop, so the test acts on s.loop.
-      expect(await post({ version: s.t().version - 1, option: "start-step-again" })).toBe(409);
-      const w = await s.wt();
-      expect((await status(w)).map((e) => e.path).sort()).toEqual(["specs/K-1/plan.md", "src/feature.ts", "tests/feature.test.ts"]);
-      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "start-step-again" }).status).toBe(200);
-      await s.loop.idle(s.task);
-      expect(readFileSync(join(w.dir, "..", "patches", `${fix.id}.patch`), "utf8")).toContain("src/feature.ts");
-      expect(JSON.parse((s.steps().find((x) => x.id === fix.id) as Step).detail_json).patch).toBe(`${fix.id}.patch`);
-      // The reset takes the ticks too, so the build runs again on the last commit and reads the patch.
-      const again = s.runCalls().filter((c) => s.modeOf(c) === "build")[1] as Call;
-      expect(again.context["step.md"]).toContain("The app reset the work of the last run. ./context/continue-diff.md holds it as a patch.");
-      expect(again.context["continue-diff.md"]).toContain("+export const feature = 'works';");
-      expect(s.steps().filter((x) => x.kind === "implement")).toHaveLength(2);
-    },
-    SLOW,
-  );
-
-  test(
-    "AC-B215: a second reset before a new Claude run keeps the first patch; Start the step again picks a new file and never replaces one",
+    "AC-B215: a second Continue before a new Claude run keeps the first patch and the work after it; the next build run reads that patch",
     async () => {
       const { s } = await stopInGate();
-      // The app restart cut the build run, as in the AC-B203 test.
+      // The app restart cut the build run.
       const impl = s.steps().find((x) => x.kind === "implement") as Step;
       s.db.query("UPDATE task_step SET state = 'running', ended_at = NULL, detail_json = '{}' WHERE id = $id").run({ id: impl.id });
       s.db.query("UPDATE review_run SET status = 'running' WHERE id = $id").run({ id: impl.run });
@@ -971,11 +925,10 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       // No approved test command: each Continue makes its reset and then waits before the next Claude run.
       const commands = (s.db.query("SELECT commands_json FROM repo_task_settings").get() as { commands_json: string }).commands_json;
       s.db.run("UPDATE repo_task_settings SET commands_json = '[]'");
-      const last = s.steps().at(-1) as Step;
       const w = await s.wt();
       const patches = join(w.dir, "..", "patches");
-      const resume = async (option?: "start-step-again") => {
-        expect(s.loop.resume(s.db, s.task, { version: s.t().version, option }).status).toBe(200);
+      const resume = async () => {
+        expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
         await s.loop.idle(s.task);
         expect(s.blocked()?.kind).toBe("error");
       };
@@ -986,18 +939,10 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       writeFileSync(join(w.repo, "junk1.txt"), "one\n");
       await resume();
       expect(readFileSync(join(patches, `${impl.id}.patch`), "utf8")).toBe(first);
+      expect(readdirSync(patches)).toEqual([`${impl.id}.patch`]);
       expect(existsSync(join(w.repo, "junk1.txt"))).toBe(true);
-      // Start the step again resets under the newest row of the part. A second one with the same row picks a new file name.
-      await resume("start-step-again");
-      expect(readFileSync(join(patches, `${last.id}.patch`), "utf8")).toContain("junk1.txt");
-      writeFileSync(join(w.repo, "junk2.txt"), "two\n");
-      await resume("start-step-again");
-      expect(readFileSync(join(patches, `${last.id}.patch`), "utf8")).toContain("junk1.txt");
-      expect(readFileSync(join(patches, `${last.id}.1.patch`), "utf8")).toContain("junk2.txt");
-      expect(readFileSync(join(patches, `${impl.id}.patch`), "utf8")).toBe(first);
-      // The row keeps the mark that names its first patch.
-      expect(JSON.parse((s.steps().find((x) => x.id === last.id) as Step).detail_json).patch).toBe(`${last.id}.patch`);
-      // With the command back, the next build run reads the patch of the cut run, not a later one.
+      rmSync(join(w.repo, "junk1.txt"));
+      // With the command back, the next build run reads the patch of the cut run.
       s.db.query("UPDATE repo_task_settings SET commands_json = $c").run({ c: commands });
       s.mode("feature");
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
@@ -1013,14 +958,27 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   test(
     "AC-B215: a reset whose patch cannot be saved still marks the step, so the next run reads that the app reset the work",
     async () => {
-      const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
-      await s.build();
-      const fix = s.steps().find((x) => x.kind === "fix") as Step;
+      // As in the AC-B216 test: the build run halts before its question row exists, so the Continue rule resets its work.
+      const s = await setup({
+        seq: {
+          "implement:build": [
+            { writes: [TODO], implement: QUESTION, delayMs: 400 },
+            { writes: [TEST_FILE, WORKS], ticks: TICK },
+          ],
+        },
+      });
+      s.loop.build(s.db, s.task);
+      await until(() => s.runCalls().some((c) => s.modeOf(c) === "build"));
+      const held = { kind: "red", step: null, part: s.part().id, text: "Needs you: held." };
+      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id: s.task, b: JSON.stringify(held) });
+      await s.loop.idle(s.task);
+      const impl = s.steps().find((x) => x.kind === "implement") as Step;
+      expect([impl.state, JSON.parse(impl.detail_json).checked]).toEqual(["ok", false]);
       // A file in place of the patches folder makes each patch save fail.
       writeFileSync(join((await s.wt()).dir, "..", "patches"), "not a folder\n");
-      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "start-step-again" }).status).toBe(200);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
-      expect(JSON.parse((s.steps().find((x) => x.id === fix.id) as Step).detail_json).patch).toBe(PATCH_LOST);
+      expect(JSON.parse((s.steps().find((x) => x.id === impl.id) as Step).detail_json).patch).toBe(PATCH_LOST);
       const again = s.runCalls().filter((c) => s.modeOf(c) === "build")[1] as Call;
       expect(again.context["step.md"]).toContain("The app reset the work of the last run to the last commit.");
     },
@@ -1303,83 +1261,28 @@ describe("the loop of one part (spec.md section 6.7)", () => {
     SLOW,
   );
 
+  // part-session.md section 9.4: Hold replaced "Pause after this step" (tests/tasks/hold.test.ts), and PS5-S2 removed the /pause
+  // route. A stored reason question/paused of an older app version still takes Continue.
   test(
-    "Pause after this step: the loop holds before it takes the run slot again and keeps the work; Resume goes on",
+    "Continue of the legacy reason question/paused after an app restart builds with no reset, so the changes of the done run stay",
     async () => {
-      const s = await setup({ seq: { "implement:build": [{ delayMs: 60, writes: [TEST_FILE, TODO], ticks: TICK }] } });
-      s.loop.build(s.db, s.task);
-      await until(() => s.steps().some((x) => x.kind === "implement" && x.state === "running"));
-      expect(s.loop.pause(s.db, s.task, { version: s.t().version }).status).toBe(200);
-      await until(() => s.blocked()?.text === PAUSED);
-      expect(s.blocked()).toEqual({ kind: "question", step: null, text: PAUSED });
-      // The slot is free for the user's run. The gate ran its checks before the pause, and the fix run waits.
-      expect(s.jobs.busy()).toBeNull();
-      expect(s.flow()).toEqual(["commit:plan:ok", "check:base:ok", "implement:build:ok", "check:checks:failed"]);
-      expect(s.loop.running(s.task)).toBe(true);
-      const r = s.loop.resume(s.db, s.task, { version: s.t().version });
-      expect(r.status).toBe(200);
-      await s.loop.idle(s.task);
-      expect(s.part().state).toBe("self_reviewed");
-      // A pause with no build gets 409.
-      expect(s.loop.pause(s.db, s.task, { version: s.t().version }).status).toBe(409);
-    },
-    SLOW,
-  );
-
-  test(
-    "Pause: a pause that no gate takes ends with its driver, so the next driver runs; a driver that only ends its base check refuses Pause",
-    async () => {
-      let hold: Promise<void> | null = null;
-      let release = () => {};
-      let held = false;
-      let built = () => false;
-      const s = await setup({
-        seq: { review: [{ delayMs: 400, review: CLEAN }, { review: CLEAN }], "implement:instruct": [{ writes: [FIXED] }] },
-        remote: async () => {
-          if (hold && built()) {
-            held = true;
-            await hold;
-          }
-        },
-      });
-      built = () => (s.part() as { state: string } | null)?.state === "self_reviewed";
-      s.loop.build(s.db, s.task);
-      // The own review is the last step of the part. A pause in it reaches no gate. The critic runs before it.
-      await until(() => s.steps().some((x) => x.kind === "review" && x.item === "review" && x.state === "running"));
-      expect(s.loop.pause(s.db, s.task, { version: s.t().version }).status).toBe(200);
-      await s.loop.idle(s.task);
-      expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
-      // The base check at the driver end: no step is left, so Pause gets 409.
-      hold = new Promise<void>((r) => {
-        release = r;
-      });
-      expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Add the check flag." }).status).toBe(202);
-      await until(() => held || s.blocked()?.text === PAUSED);
-      expect(s.blocked()).toBeNull();
-      expect(s.loop.running(s.task)).toBe(true);
-      const r = s.loop.pause(s.db, s.task, { version: s.t().version });
-      expect([r.status, (r as { error?: string }).error]).toEqual([409, "No step is left to pause. The build ends now."]);
-      release();
-      await s.loop.idle(s.task);
-      expect(s.flow().slice(-4)).toEqual(["instruct:I1:ok", "check:I1:ok", "commit:I1:ok", "review:review:ok"]);
-      expect(s.blocked()).toBeNull();
-    },
-    SLOW,
-  );
-
-  test(
-    "Continue after a pause and an app restart goes on with no reset, so the changes of the done run stay",
-    async () => {
-      const s = await setup({ mode: "late-red", seq: { "implement:fix": [{ delayMs: 300, writes: [WORKS] }] } });
-      s.loop.build(s.db, s.task);
-      // The first fix run writes WORKS. The checks stay red, so the next fix run waits at the gate with WORKS not committed.
-      await until(() => s.steps().some((x) => x.kind === "fix" && x.state === "running"));
-      expect(s.loop.pause(s.db, s.task, { version: s.t().version }).status).toBe(200);
-      await until(() => s.blocked()?.text === PAUSED);
+      const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 } });
+      await s.build();
+      expect(s.blocked()?.text).toBe("Needs you: the checks of part 1 stay red after 1 try.");
+      // The fix run wrote WORKS, and the red checks left it uncommitted.
       const w = await s.wt();
       expect(readFileSync(join(w.repo, "src", "feature.ts"), "utf8")).toContain("works");
       expect((await status(w)).map((e) => e.path).sort()).toEqual(["specs/K-1/plan.md", "src/feature.ts", "tests/feature.test.ts"]);
-      // The app stops and starts again over the same database. No gate holds the part now.
+      // The row of an older app version. The fix row reads unchecked, so the Continue rule would reset WORKS, and only the no-reset rule
+      // of the legacy reason keeps it.
+      const fix = s
+        .steps()
+        .filter((x) => x.kind === "fix")
+        .at(-1) as Step;
+      s.db.query("UPDATE task_step SET detail_json = json_set(detail_json, '$.checked', json('false')) WHERE id = $id").run({ id: fix.id });
+      const paused = { kind: "question", step: null, text: PAUSED };
+      s.db.query("UPDATE task SET blocked_json = $b, version = version + 1 WHERE id = $id").run({ id: s.task, b: JSON.stringify(paused) });
+      // The app stops and starts again over the same database.
       await s.loop.shutdown();
       recoverTasks(s.db);
       expect([s.t().state, s.blocked()?.text]).toEqual(["implementing", PAUSED]);
@@ -1645,10 +1548,9 @@ describe("restart recovery and the helpers", () => {
 
 describe("routes (spec.md section 6.11)", () => {
   test(
-    "spec.md section 6.18.5: Keep one PR during the base check at the driver end waits for that check and gets 200",
+    "spec.md section 6.18.5: Change the limit during the base check at the driver end waits for that check and gets 200",
     async () => {
-      // The base check at the driver end waits at this gate. part-session.md section 5.4: a size reason of an old task still takes Keep
-      // one PR, so the test writes one while the driver ends.
+      // The base check at the driver end waits at this gate. ps5-plan.md D1: /limit refuses while a driver works.
       const gate = Promise.withResolvers<void>();
       let held = false;
       let blockedNow = () => false;
@@ -1676,21 +1578,18 @@ describe("routes (spec.md section 6.11)", () => {
       s.db.query("UPDATE task SET state = 'stopped', stopped_from = 'implementing' WHERE id = $id").run({ id: s.task });
       expect((await call(`/api/tasks/${s.task}/resume`, { version: s.t().version })).status).toBe(200);
       await until(() => held, 120_000);
-      const old: TaskBlocked = { kind: "size", step: null, text: "Needs you: this PR would have 9 changed lines, over your 5 limit." };
-      s.db.query("UPDATE task SET blocked_json = $b, version = version + 1 WHERE id = $id").run({ id: s.task, b: JSON.stringify(old) });
-      expect(s.blocked()?.kind).toBe("size");
-      const keep = call(`/api/tasks/${s.task}/limit`, { version: s.t().version, keep: true });
+      const limit = call(`/api/tasks/${s.task}/limit`, { version: s.t().version, lineBudget: 50 });
       await Bun.sleep(200);
       gate.resolve();
-      const r = await keep;
+      const r = await limit;
       expect([r.status, r.body.error]).toEqual([200, undefined]);
-      expect(r.body.settings).toMatchObject({ keepOnePr: true });
+      expect(r.body.settings).toMatchObject({ lineBudget: 50 });
     },
     SLOW,
   );
 
   test(
-    "pause, stop, resume, and answers go to the loop; a version mismatch gives 409 with the task",
+    "stop, resume, and answers go to the loop; a version mismatch gives 409 with the task; /pause is gone",
     async () => {
       const s = await setup({ mode: "green" });
       const SESSION = "s".repeat(64);
@@ -1702,9 +1601,11 @@ describe("routes (spec.md section 6.11)", () => {
           headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
           body: JSON.stringify(body),
         });
-        return { status: res.status, body: (await res.json()) as TaskDto & { error?: string; task?: TaskDto } };
+        const json = res.headers.get("content-type")?.includes("json");
+        return { status: res.status, body: (json ? await res.json() : {}) as TaskDto & { error?: string; task?: TaskDto } };
       };
-      expect((await call(`/api/tasks/${s.task}/pause`, { version: s.t().version })).status).toBe(409);
+      // ps5-plan.md section 5, PS5-S2: Hold replaced Pause, and the route is gone.
+      expect((await call(`/api/tasks/${s.task}/pause`, { version: s.t().version })).status).toBe(404);
       expect((await call(`/api/tasks/${s.task}/stop`, { version: s.t().version + 5 })).body.error).toBe(
         "The task changed on another page. Check it again.",
       );
@@ -1858,15 +1759,16 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
         ["plan", false],
         ["build", true],
       ]);
-      // "Run setup again" through the route: 202, 409 while it runs, then a second setup row.
+      // "Run setup again" through the route (ps5-plan.md D2: the resume option setup with the part): 202, 409 while it runs, then a
+      // second setup row.
       const SESSION = "s".repeat(64);
       const ORIGIN = "http://127.0.0.1:7317";
       const app = createApp({ port: 7317, token: SESSION, live: s.live, settings: s.settings, review: s.jobs });
-      const call = async (body: unknown) => {
-        const res = await app.request(`${ORIGIN}/api/tasks/${s.task}/parts/${s.part().id}/setup`, {
+      const call = async (body: { version: number }) => {
+        const res = await app.request(`${ORIGIN}/api/tasks/${s.task}/resume`, {
           method: "POST",
           headers: { host: "127.0.0.1:7317", origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ ...body, option: "setup", part: s.part().id }),
         });
         return { status: res.status, body: (await res.json()) as TaskDto & { error?: string } };
       };
@@ -1912,7 +1814,7 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       expect(s.part().state).toBe("implementing");
       expect(s.flow()).toEqual(["commit:plan:ok", "check:setup:failed"]);
       writeFileSync(join(s.root, "setup-mode.txt"), "ok");
-      expect(s.loop.setupAgain(s.db, s.task, s.part().id, { version: s.t().version }).status).toBe(202);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: s.part().id }).status).toBe(202);
       await until(() => setups(s) === 2 && s.blocked() === null && !s.loop.running(s.task));
       expect(s.flow().slice(0, 3)).toEqual(["commit:plan:ok", "check:setup:failed", "check:setup:ok"]);
       expect(s.flow()).toContain("review:review:ok");
@@ -1940,22 +1842,71 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
     SLOW,
   );
 
+  // ps5-plan.md D2 and section 5 (AC-B376): "Run setup again" is the resume option setup with part. It deletes the setup mark, so GO of
+  // the part runs setup first. The refusals are those of the old route.
   test(
-    "Stop during the build that a green Run setup again started stops the task",
+    "AC-B376: option setup on a built part runs GO setup, CLEAN and nothing else; 409 while it runs; the old refusals stay",
+    async () => {
+      const s = await setup();
+      withSetup(s, "venv");
+      await s.build();
+      expect([s.part().state, setups(s)]).toEqual(["self_reviewed", 1]);
+      const part = s.part().id;
+      const again = () => s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part });
+      const at = s.phases.length;
+      expect(again().status).toBe(202);
+      expect(again()).toMatchObject({ status: 409, error: "Claude or the checks are working." });
+      await s.loop.idle(s.task);
+      expect([setups(s), s.part().state, s.blocked()]).toEqual([2, "self_reviewed", null]);
+      expect(s.phases.slice(at).map((p) => `${p.event}>${p.to}`)).toEqual(["GO>setup", "CLEAN>idle"]);
+      expect(s.flow().filter((x) => x.startsWith("check:setup:"))).toEqual(["check:setup:ok", "check:setup:ok"]);
+      // The refusals: a part that is not there, a reason of this part that is no setup reason, a reason of another part, a part on hold,
+      // and a repository with no setup command. None starts a driver.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: part + 50 })).toMatchObject({
+        status: 404,
+        error: "Part not found.",
+      });
+      const seed = (b: TaskBlocked | null) =>
+        s.db
+          .query("UPDATE task SET blocked_json = $b, version = version + 1 WHERE id = $id")
+          .run({ id: s.task, b: b && JSON.stringify(b) });
+      const own = s.steps().find((x) => x.kind === "check" && x.item === "checks") as Step;
+      seed({ kind: "red", cause: "checks", step: own.id, text: "Needs you: red." });
+      expect(again()).toMatchObject({ status: 409, error: "This part waits for you. Act on the first reason first." });
+      seed({ kind: "error", cause: "app", step: null, part: part + 50, text: "Needs you: x." });
+      expect(again()).toMatchObject({ status: 409, error: "Another part waits for you. Act on each reason first." });
+      seed(null);
+      const held: TaskBlocked = { kind: "held", step: null, part, text: "On hold." };
+      s.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: part, b: JSON.stringify(held) });
+      expect(again()).toMatchObject({ status: 409, error: "This part waits for you. Act on the first reason first." });
+      s.db.query("UPDATE task_part SET blocked_json = NULL WHERE id = $id").run({ id: part });
+      s.db.query("UPDATE repo_task_settings SET commands_json = $c").run({ c: JSON.stringify([]) });
+      expect(again()).toMatchObject({ status: 409, error: "This repository has no setup command." });
+      expect([setups(s), s.loop.running(s.task)]).toEqual([2, false]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B376: option setup on a red setup of the part takes Continue: setup runs, the build goes on, and a Stop of that build stops the task",
     async () => {
       const s = await setup({ seq: { "implement:build": [{ hang: true }] } });
       withSetup(s, "venv");
       writeFileSync(join(s.root, "setup-mode.txt"), "fail");
       await s.build();
-      expect(s.blocked()?.text).toBe("Needs you: the setup commands of part 1 failed. See why.");
+      expect([s.blocked()?.kind, s.blocked()?.cause]).toEqual(["red", "setup"]);
       writeFileSync(join(s.root, "setup-mode.txt"), "ok");
-      expect(s.loop.setupAgain(s.db, s.task, s.part().id, { version: s.t().version }).status).toBe(202);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: s.part().id }).status).toBe(202);
       await until(() => s.flow().includes("implement:build:running"));
+      expect([setups(s), s.blocked()]).toEqual([2, null]);
       expect(s.loop.stop(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
-      expect(s.t().state).toBe("stopped");
-      expect(s.t().stopped_from).toBe("implementing");
-      expect(s.flow()).toContain("implement:build:cancelled");
+      expect([s.t().state, s.t().stopped_from]).toEqual(["stopped", "implementing"]);
+      // A stopped task refuses the option.
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: s.part().id })).toMatchObject({
+        status: 409,
+        error: "The task is stopped.",
+      });
     },
     SLOW,
   );
@@ -1967,9 +1918,18 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       const fix = (n: number) => ({ writes: [{ path: "repo/src/feature.ts", text: `export const feature = 'works ${n}';\n` }] });
       const s = await setup({ mode: "late-red", runLimits: { testFixTries: 1 }, seq: { "implement:fix": [1, 2, 3, 4].map(fix) } });
       withSetup(s, "ignored");
-      // A Continue keeps the work, so "Start the step again" makes the reset here.
-      const resume = async (option?: "start-step-again") => {
-        expect(s.loop.resume(s.db, s.task, { version: s.t().version, option }).status).toBe(200);
+      // A Continue keeps checked work. For a reset, the newest fix row reads unchecked, as after a stop before its checks, so the
+      // Continue rule resets the work (build-redesign.md section 2.2).
+      const resume = async (reset = false) => {
+        const fix = s
+          .steps()
+          .filter((x) => x.kind === "fix")
+          .at(-1) as Step;
+        if (reset)
+          s.db
+            .query("UPDATE task_step SET detail_json = json_set(detail_json, '$.checked', json('false')) WHERE id = $id")
+            .run({ id: fix.id });
+        expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
         await s.loop.idle(s.task);
       };
       const RED = "Needs you: the checks of part 1 stay red after 1 try.";
@@ -1979,7 +1939,7 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       // The reset removes a file that setup did not make: setup does not run.
       const junk = join((await s.wt()).repo, "junk.txt");
       writeFileSync(junk, "left by a stop\n");
-      await resume("start-step-again");
+      await resume(true);
       expect(existsSync(junk)).toBe(false);
       expect(s.blocked()?.text).toBe(RED);
       expect(setups(s)).toBe(1);
@@ -1992,7 +1952,7 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       expect(readSetupMark(await s.wt())?.files).toEqual(["gen/made.txt"]);
       // The reset removes gen/made.txt, so setup runs again.
       s.mode("feature");
-      await resume("start-step-again");
+      await resume(true);
       expect(setups(s)).toBe(3);
       expect(s.part().state).toBe("self_reviewed");
       expect(s.flow().filter((x) => x.startsWith("check:setup:"))).toEqual(["check:setup:ok", "check:setup:ok", "check:setup:ok"]);
@@ -2078,7 +2038,7 @@ describe("commit only Claude's files and run setup again (spec.md section 6.7)",
       expect(s.blocked()?.text).toBe("Needs you: the setup commands of part 1 failed. See why.");
       writeFileSync(join((await s.wt()).repo, "left.txt"), "a change\n");
       writeFileSync(join(s.root, "setup-mode.txt"), "ok");
-      expect(s.loop.setupAgain(s.db, s.task, s.part().id, { version: s.t().version }).status).toBe(202);
+      expect(s.loop.resume(s.db, s.task, { version: s.t().version, option: "setup", part: s.part().id }).status).toBe(202);
       await until(() => !s.loop.running(s.task));
       expect(s.part().state).toBe("self_reviewed");
       // The change runs the gate once, and the gate of the judging run runs the checks again.
@@ -2372,6 +2332,74 @@ describe("Fix these too judges its points (pushback.md section 6.23)", () => {
       };
       expect([row.status, JSON.parse(row.payload_json).discardReason]).toEqual(["discarded", { code: "place" }]);
       expect([s.part().state, s.blocked()]).toEqual(["self_reviewed", null]);
+    },
+    SLOW,
+  );
+});
+
+// ps5-plan.md D5 (AC-B368, AC-B380): the tick and try facts. A build, fix, or instruct run lists its new ticks, and a commit row the
+// ticks of its body. A fix run of the checks holds its try of "Test-fix tries", and a judging run its round of REVIEW_FIX_TRIES. The
+// running row holds the try already, and the ended row keeps it.
+describe("the tick and try facts (ps5-plan.md D5)", () => {
+  const detailOf = (x: Step) => JSON.parse(x.detail_json) as { ticked: string[]; tries: { n: number; of: number } | null };
+  const STILL = { path: "repo/src/feature.ts", text: "export const feature = 'still todo';\n" };
+
+  test(
+    "AC-B380: the build run row and the build commit row list the ticked task; the plan commit lists none",
+    async () => {
+      const s = await setup({ seq: { "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }] } });
+      await s.build();
+      expect(s.part().state).toBe("self_reviewed");
+      const rows = s.steps().filter((x) => x.kind === "implement" || x.kind === "commit");
+      expect(rows.map((x) => [x.kind, x.item, detailOf(x).ticked])).toEqual([
+        ["commit", "plan", []],
+        ["implement", "build", ["T1.1"]],
+        ["commit", "build", ["T1.1"]],
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B368: each fix run of red checks holds its try while it runs and after it ends; the build run holds none",
+    async () => {
+      const s = await setup({
+        runLimits: { testFixTries: 2 },
+        seq: { "implement:fix": [{ delayMs: 1500, writes: [STILL] }, { writes: [WORKS] }] },
+      });
+      s.loop.build(s.db, s.task);
+      const running = () => s.steps().find((x) => x.kind === "fix" && x.state === "running");
+      await until(() => running() !== undefined);
+      expect(detailOf(running() as Step).tries).toEqual({ n: 1, of: 2 });
+      await s.loop.idle(s.task);
+      expect(s.part().state).toBe("self_reviewed");
+      const rows = s.steps().filter((x) => x.kind === "fix" || x.kind === "implement");
+      expect(rows.map((x) => [x.kind, x.item, x.state, detailOf(x).tries])).toEqual([
+        ["implement", "build", "ok", null],
+        ["fix", "checks", "ok", { n: 1, of: 2 }],
+        ["fix", "checks", "ok", { n: 2, of: 2 }],
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B368: each judging run of the own review holds its round",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [{ writes: [TEST_FILE, WORKS], ticks: TICK }],
+          "implement:fix": [{ writes: [FIXED] }, { writes: [WORKS] }, { writes: [FIXED] }],
+          review: [{ review: review([point("blocker")]) }],
+        },
+      });
+      await s.build();
+      expect(s.blocked()?.kind).toBe("blocker");
+      const rows = s.steps().filter((x) => x.kind === "fix");
+      expect(rows.map((x) => [x.item, detailOf(x).tries])).toEqual([
+        ["review", { n: 1, of: REVIEW_FIX_TRIES }],
+        ["review", { n: 2, of: REVIEW_FIX_TRIES }],
+      ]);
     },
     SLOW,
   );

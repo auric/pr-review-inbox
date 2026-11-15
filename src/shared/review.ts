@@ -178,7 +178,9 @@ export type WithdrawnMark = { run: number; reason: string; was: "new" | "accepte
 // demoted: a refuted finding that stays in the list, last in its group (spec.md section 1.8).
 // pushback (pushback.md section 6.23.2): Claude pushed back on the point in the judging row step. citeFound: the cite names a file of the
 // part worktree, a plan file, or answers.md. fixedBy: the commit row of "Fix it anyway", else null.
+// skipFix (ps5-plan.md D3): the user chose "Go on without these fixes". The loop fixes the point no more, and "Fix these too" lists it.
 export type FindingPayload = AnchoredFinding & {
+  skipFix?: boolean;
   pushback?: {
     step: number;
     why: "already" | "invalid" | "plan" | "scope" | null;

@@ -211,7 +211,7 @@ test("setup: saved commands first, the time limit with its reason, the live outp
 
   // 4. Run setup again passes with the new limit, and the build goes on to the own review.
   await more(page, "Run setup again");
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 240_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 240_000 });
   await expect(page.locator("[data-task-item] details", { hasText: "deps" }).first()).toContainText("exit 0");
 
   // 5. Settings > Commands has its own heading and section link. The Tasks link goes to the Tasks heading.

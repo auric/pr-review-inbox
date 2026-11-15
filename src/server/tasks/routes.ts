@@ -140,10 +140,13 @@ export function createTaskRoutes(opts: {
     syncNow: () => void opts.sync?.syncNow().catch((e) => log(`The sync after a task PR failed: ${noUrl((e as Error).message)}`)),
   });
   review.onStop(() => prs.shutdown());
-  // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works.
+  // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works, except for a send
+  // to a session run of the part (TaskPartDto.instructRun, ps4-plan.md WP-7).
   const live = (t: TaskDto): TaskDto => {
     const working = loop.running(t.id);
-    return { ...t, working, canInstruct: t.canInstruct && !working, canSetup: t.canSetup && !working };
+    const db = working ? openDb() : null;
+    const parts = db ? t.parts.map((p) => ({ ...p, instructRun: loop.instructRun(db, t.id, p.id) })) : t.parts;
+    return { ...t, parts, working, canInstruct: t.canInstruct && !working, canSetup: t.canSetup && !working };
   };
   // spec.md section 6.18.4, Restart: the first open of a database resets the updates that a restart stopped.
   const recovered = new WeakSet<object>();
@@ -284,10 +287,6 @@ export function createTaskRoutes(opts: {
         const db = openDb();
         return db ? answer(c, await tasks.planAgain(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
-      .post("/tasks/:id/pause", idParam, body(taskVersionInput, "Give the task version."), (c) => {
-        const db = openDb();
-        return db ? answer(c, loop.pause(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
-      })
       .post("/tasks/:id/stop", idParam, body(taskVersionInput, "Give the task version."), (c) => {
         const db = openDb();
         return db ? answer(c, loop.stop(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
@@ -299,23 +298,16 @@ export function createTaskRoutes(opts: {
         await loop.settle(id);
         const t = taskRow(db, id);
         const input = c.req.valid("json");
-        // loop.resume refuses an option or a part for a task that did not stop in its build.
-        const before = t?.state === "stopped" && t.stopped_from !== "implementing" && !input.option && input.part === undefined;
+        // loop.resume refuses an option or a part for a task that did not stop in its build or in ready.
+        const build = t?.stopped_from === "implementing" || t?.stopped_from === "ready";
+        const before = t?.state === "stopped" && !build && !input.option && input.part === undefined;
         return answer(c, before ? tasks.resume(db, id, input) : loop.resume(db, id, input));
-      })
-      // spec.md section 6.18.2: "Dismiss" of a reason on a built part.
-      .post("/tasks/:id/dismiss", idParam, body(taskVersionInput, "Give the task version."), async (c) => {
-        const db = openDb();
-        if (!db) return c.json(unconfigured, 409);
-        const { id } = c.req.valid("param");
-        await loop.settle(id);
-        return answer(c, loop.dismiss(db, id, c.req.valid("json")));
       })
       .post("/tasks/:id/close", idParam, body(taskVersionInput, "Give the task version."), (c) => {
         const db = openDb();
         return db ? answer(c, tasks.close(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
       })
-      .post("/tasks/:id/limit", idParam, body(taskLimitInput, "Give the task version, and keep true or a line limit."), async (c) => {
+      .post("/tasks/:id/limit", idParam, body(taskLimitInput, "Give the task version and a line limit."), async (c) => {
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);
         const { id } = c.req.valid("param");
@@ -517,14 +509,6 @@ export function createTaskRoutes(opts: {
         const { id, part } = c.req.valid("param");
         await loop.settle(id);
         return answer(c, loop.fixPoints(db, id, part, c.req.valid("json")));
-      })
-      // spec.md section 6.7: "Run setup again". The commands come only from the stored settings of the repository.
-      .post("/tasks/:id/parts/:part/setup", partParam, body(taskVersionInput, "Give the task version."), async (c) => {
-        const db = openDb();
-        if (!db) return c.json(unconfigured, 409);
-        const { id, part } = c.req.valid("param");
-        await loop.settle(id);
-        return answer(c, loop.setupAgain(db, id, part, c.req.valid("json")));
       })
       .get("/tasks/:id/parts/:part/diff", partParam, async (c) => {
         const db = openDb();

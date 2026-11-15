@@ -24,7 +24,7 @@ const SQL = {
   spec: "SELECT head FROM task_part WHERE task = $task AND kind = 'spec' ORDER BY ord LIMIT 1",
 };
 
-export const RESTART_TEXT = "The app restarted and stopped this task. Resume continues it.";
+export const RESTART_TEXT = "The app restarted and stopped this task. Continue goes on from there.";
 export const SPEC_APPROVED_TEXT = "The spec is approved. You can start building.";
 const readyText = (ord: number, parts: number) => `Part ${ord} of ${parts} is ready for its PR.`;
 

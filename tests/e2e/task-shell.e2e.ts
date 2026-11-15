@@ -262,7 +262,7 @@ test("Commands Claude may run: the warnings, the plan picks, an allow request wi
   await expect(second.getByRole("radio", { name: "Allow for this repository" })).toBeChecked();
   await form.locator(`[data-allow-ask='${ASKS[2]?.pattern}']`).getByRole("radio", { name: "Refuse" }).check();
   await primary(page).click();
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 180_000 });
   await expect(page.locator("[data-task-shell]")).toHaveText("Commands: allowlist, 2 patterns");
   expect((await shell(page)).allow.map((a) => [a.pattern, a.source])).toEqual([
     ["bun run gen *", "plan"],
@@ -415,7 +415,7 @@ test("a fix step that changes no file asks; the approved checks switch gives the
 
   // Continue: the next fix step can run the test command, and the build ends green.
   await primary(page).click();
-  await expect(status(page)).toHaveText(/^Your change is ready and checked by \S+\.$/, { timeout: 180_000 });
+  await expect(status(page)).toHaveText(/^Your change is ready(: [^.]+)?\.$/, { timeout: 180_000 });
   await page.getByRole("tab", { name: "Log" }).click();
   // part-session.md section 2.6: Continue goes on in the session at the checks gate. The code run does not run again, and fix try 2
   // can run the test command.

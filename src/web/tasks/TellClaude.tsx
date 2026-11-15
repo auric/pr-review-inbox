@@ -10,18 +10,28 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { MAX_INSTRUCTION } from "../../shared/task";
+import type { TellBox } from "./model";
 
 const count = (n: number) => n.toLocaleString("en-US");
 
-// busy: a step, a check, or an update runs, so the box keeps its text and cannot send. restore: the text of a stopped send, which comes
-// back once when the box is empty. onSend: POST /api/tasks/:id/instructions; it rejects with the sentence of a 409.
+// box: the state of the box (model.ts tellBox). busy: the checks or another run work, so the box keeps its text and cannot send. pending:
+// a task action of the page waits for the server. restore: the text of a stopped send, which comes back once when the box is empty.
+// onSend: POST /api/tasks/:id/instructions; it rejects with the sentence of a 409.
 export function TellClaude(props: {
   runner: string;
-  busy: boolean;
+  box: Exclude<TellBox, "none">;
+  pending: boolean;
   restore: { id: number; text: string } | null;
   onSend: (text: string) => Promise<unknown>;
 }) {
   const { runner } = props;
+  // part-session.md section 2.9: a send during a session run of the part goes to it now (live) or waits for its end (queued).
+  const hint = {
+    open: `${runner} gets your message in a run of this part. The app then runs the checks and its own review. Pushes and other git actions stay buttons.`,
+    live: `${runner} reads this now.`,
+    queued: `${runner} reads this when the current run ends.`,
+    busy: `${runner} or the checks are working. You can send when this run ends.`,
+  }[props.box];
   const [text, setText] = useState(props.restore?.text ?? "");
   const [restored, setRestored] = useState(props.restore?.id ?? null);
   const [sending, setSending] = useState(false);
@@ -33,7 +43,7 @@ export function TellClaude(props: {
   }
   const size = text.trim().length;
   const over = size > MAX_INSTRUCTION;
-  const busy = props.busy || sending;
+  const busy = props.box === "busy" || props.pending || sending;
   const canSend = !busy && size > 0 && !over;
 
   const send = async () => {
@@ -87,9 +97,7 @@ export function TellClaude(props: {
           }}
         />
         <FieldDescription id="tell-hint" className="text-xs">
-          {busy
-            ? `${runner} or the checks are working. You can send when this run ends.`
-            : `${runner} gets your message in a run of this part. The app then runs the checks and its own review. Pushes and other git actions stay buttons.`}
+          {hint}
         </FieldDescription>
       </Field>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">

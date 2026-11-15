@@ -3,7 +3,7 @@
 
 // "Change the time limit" (docs/plans/review-v2/spec.md section 6.7): the commands editor of the repository with the focus on the time
 // limit of the setup command that reached it. Save stores the list as Settings > Commands does. The build does not start again by itself:
-// Resume or "Run setup again" runs setup with the new limit.
+// Continue or "Run setup again" runs setup with the new limit.
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -42,7 +42,7 @@ export function TimeLimitDialog(props: { project: string; repo: string; late: La
           <DialogTitle>Change the time limit</DialogTitle>
           <DialogDescription>
             The setup command “{late.name}” reached its time limit of {limitText(late.timeoutSec ?? 0)}. Give it more time, then click
-            Resume or “Run setup again”.
+            Continue or “Run setup again”.
           </DialogDescription>
         </DialogHeader>
         {q.error ? (

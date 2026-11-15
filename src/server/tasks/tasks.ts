@@ -195,9 +195,10 @@ const SQL = {
       OR (t.state = 'implementing' AND t.blocked_json IS NULL AND EXISTS (SELECT 1 FROM task_part p WHERE p.task = t.id
         AND p.state = 'implementing' AND json_extract(p.blocked_json, '$.kind') IS NOT 'held'))
     ORDER BY t.id`,
-  // The cut query reads cut_json first.
-  failSteps: `UPDATE task_step SET state = 'failed', ended_at = $now, cut_json = NULL WHERE state IN ('waiting', 'running')
-    AND id NOT IN (SELECT value FROM json_each($keep))`,
+  // The cut query reads cut_json first. loop.ts Q.criticRan counts no cancelled critic row.
+  failSteps: `UPDATE task_step SET state = iif(kind = 'review' AND item = 'critic', 'cancelled', 'failed'), ended_at = $now,
+      cut_json = NULL
+    WHERE state IN ('waiting', 'running') AND id NOT IN (SELECT value FROM json_each($keep))`,
   // docs/plans/review-v2/part-session.md section 2.5: the Claude steps whose run the restart cut. A resolve step has no snapshot.
   cut: `SELECT id, task, part, run, cut_json AS cut FROM task_step WHERE state = 'running' AND run IS NOT NULL AND part IS NOT NULL
     AND kind IN ('tests', 'implement', 'fix', 'instruct')`,
@@ -217,7 +218,21 @@ const SQL = {
       'The app stopped during the update.')
     WHERE kind = 'update' AND state IN ('waiting', 'running') AND json_type(detail_json, '$.update') = 'object'`,
   noteRestart: "INSERT INTO task_event (task, kind, ref, created_at) VALUES ($task, 'needs_you', $ref, $now) ON CONFLICT DO NOTHING",
+  // ps4-plan.md WP-7: the result "stopped" gives the text back to the box (spec.md section 6.18.1). A running row ends by its run.
+  stopSends: `UPDATE task_step SET detail_json = json_set(detail_json, '$.instruct.result', 'stopped')
+    WHERE task = $task AND ($part IS NULL OR part = $part) AND kind = 'instruct' AND state IN ('waiting', 'running')
+      AND json_type(detail_json, '$.instruct') = 'object' AND json_extract(detail_json, '$.instruct.result') IS NULL`,
+  cancelSends: `UPDATE task_step SET state = 'cancelled', ended_at = $now, detail_json = json_insert(detail_json, '$.notes[#]', $note)
+    WHERE task = $task AND ($part IS NULL OR part = $part) AND kind = 'instruct' AND state = 'waiting'`,
 };
+
+export const SEND_STOPPED = "Stopped. The message did not run. The text is back in the box.";
+// ps4-plan.md WP-7: a Stop of the task, a Skip, or a Start again of the part ends each message that waits for the next GO. part null:
+// every part of the task.
+export function stopSends(db: Database, task: number, part: number | null, now = Date.now()) {
+  db.query(SQL.stopSends).run({ task, part });
+  db.query(SQL.cancelSends).run({ task, part, now, note: SEND_STOPPED });
+}
 
 type StateRow = { state: TaskState; stopped_from: TaskState | null; size: TaskSize | null; version: number };
 
@@ -241,6 +256,7 @@ export function advance(db: Database, ref: TaskRef, event: TaskEvent, facts: Fac
     write(db, SQL.setTask, { id: ref.task, version: ref.version, state, stopped: state === "stopped" ? row.state : null, now });
     // ps4-plan.md section 2.6: Stop and ready keep a held part row. CLOSE and FAIL clear it.
     if (state !== "implementing") db.query(SQL.clearWaits).run({ id: ref.task, all: state === "stopped" || state === "ready" ? 0 : 1 });
+    if (state === "stopped") stopSends(db, ref.task, null, now);
     // part-session.md section 9.3.1: ALL_MERGED and CLOSE delete the transcripts of the task.
     if (state === "done") dropSessions(db, { task: ref.task });
     return { status: 200, state, version: ref.version + 1 };
@@ -276,12 +292,12 @@ export function advancePart(
 }
 
 // spec.md section 6.14 and part-session.md sections 9.3.4 and 9.5 (Q-SM2): a step that ran at the last stop has no process now, so it
-// ends failed. An interview or spec task stops, so Resume runs its run again. Each task that stops gets one needs_you event (spec.md
-// section 6.13). A task that builds or follows up keeps its state: each part with an open step row gets the reason error/restart, or
-// the reason update for an update. A part that built between two steps gets error/restart with no step. Held and waiting part rows
-// stay, and so does a waiting message (ps4-plan.md WP-7). Call it before the run recovery (run-rows.ts SQL.recover), which ends the
-// runs themselves with kind restart. dataDir: the data folder. With it, a cut run whose snapshot passes the checks keeps its work
-// (implement.ts keepCut).
+// ends failed. A critic row ends cancelled, so the critic runs again (user decision of 2026-11-14). An interview or spec task stops,
+// so Resume runs its run again. Each task that stops gets one needs_you event (spec.md section 6.13). A task that builds or follows up
+// keeps its state: each part with an open step row gets the reason error/restart, or the reason update for an update. A part that
+// built between two steps gets error/restart with no step. Held and waiting part rows stay, and so does a waiting message (ps4-plan.md
+// WP-7). Call it before the run recovery (run-rows.ts SQL.recover), which ends the runs themselves with kind restart. dataDir: the
+// data folder. With it, a cut run whose snapshot passes the checks keeps its work (implement.ts keepCut).
 export const RESTART_TEXT = (ord: number | null) =>
   `Needs you: the app stopped during the work on ${ord === null ? "the task" : `part ${ord}`}. Continue goes on from there.`;
 export const UPDATE_RESTART = "The update stopped: the app stopped during the update. The branch is as it was.";
@@ -301,14 +317,15 @@ export function recoverTasks(db: Database, now = Date.now(), dataDir?: string) {
       part_state: string | null;
     }[];
     // ps4-plan.md WP-7: a message that never ran on a part in its build stays waiting for the next GO of that part. The reason of the part
-    // can come from another row, and Continue puts only the step of a reason in the queue again. A built part keeps the WP-3 rule.
+    // can come from another row, and Continue puts only the step of a reason in the queue again. A built part keeps the WP-3 rule. A
+    // stopped task has no GO, so its message fails.
     const keep = all.filter(
       (o) =>
         o.kind === "instruct" &&
         o.state === "waiting" &&
         o.run === null &&
         o.part_state === "implementing" &&
-        (o.task_state === "implementing" || o.task_state === "stopped"),
+        o.task_state === "implementing",
     );
     const open = all.filter((o) => !keep.includes(o));
     db.query(SQL.restartUpdates).run();
@@ -712,6 +729,7 @@ const WAIT = {
   set: "UPDATE task_part SET blocked_json = $b WHERE id = $id AND task = $task AND blocked_json IS NULL",
   count: `SELECT COUNT(*) AS n FROM task_part WHERE task = $task AND blocked_json IS NOT NULL
     AND json_extract(blocked_json, '$.kind') IS NOT 'held'`,
+  held: "SELECT COUNT(*) AS n FROM task_part WHERE task = $task AND json_extract(blocked_json, '$.kind') = 'held'",
   stepPart: "SELECT part FROM task_step WHERE id = $id",
   // ps4-plan.md section 2.7: arm or disarm the first reason and each waiting row of kind usage.
   armTask: `UPDATE task SET blocked_json = iif(json_extract(blocked_json, '$.kind') = 'usage', json_set(blocked_json, '$.armed',
@@ -738,11 +756,9 @@ export function partOf(db: Database, b: TaskBlocked | null): number | null {
 }
 
 // Sets task.blocked_json (spec.md section 6.2) with the version check. Returns the new version. spec.md section 6.25.3: a clear moves the
-// first waiting reason of a part up, unless keep.
-export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, now = Date.now(), keep = false) =>
-  db.transaction(() =>
-    patch(db, ref.task, ref.version, { blocked_json: b === null && !keep ? nextReason(db, ref.task) : blocked(b) }, now),
-  )();
+// first waiting reason of a part up.
+export const setBlocked = (db: Database, ref: TaskRef, b: TaskBlocked | null, now = Date.now()) =>
+  db.transaction(() => patch(db, ref.task, ref.version, { blocked_json: b === null ? nextReason(db, ref.task) : blocked(b) }, now))();
 
 // part-session.md section 9.4, usage rules: one arm or disarm sets armed on every usage reason of the task, first and waiting, with one
 // version move. Returns the new version.
@@ -754,17 +770,19 @@ export const setUsageArmed = (db: Database, ref: TaskRef, armed: boolean, now = 
     return ref.version + 1;
   })();
 
-// spec.md section 6.1, "Keep one PR" and "Change the limit": new task settings, and the size reason goes. Returns the new version.
-export function setSettings(db: Database, ref: TaskRef, s: TaskSettings, now = Date.now()): number {
+// spec.md section 6.1, "Keep one PR": new task settings, and the size reason goes. ps5-plan.md D1: "Change the limit" (clear false) keeps
+// every reason. Returns the new version.
+export function setSettings(db: Database, ref: TaskRef, s: TaskSettings, now = Date.now(), clear = true): number {
   return db.transaction(() =>
-    patch(db, ref.task, ref.version, { settings_json: JSON.stringify(s), blocked_json: nextReason(db, ref.task) }, now),
+    patch(db, ref.task, ref.version, { settings_json: JSON.stringify(s), ...(clear && { blocked_json: nextReason(db, ref.task) }) }, now),
   )();
 }
 export const taskSettingsOf = settingsOf;
 
-// spec.md section 6.7: the loop fixes the confirmed blocker and major points of its own review. The other points stay listed.
-export const mustFixPoint = (p: Pick<FindingPayload, "verify" | "severity">) =>
-  p.verify?.verdict === "confirmed" && (p.severity === "blocker" || p.severity === "major");
+// spec.md section 6.7: the loop fixes the confirmed blocker and major points of its own review. The other points stay listed. ps5-plan.md
+// D3: a point of "Go on without these fixes" stays listed too.
+export const mustFixPoint = (p: Pick<FindingPayload, "verify" | "severity" | "skipFix">) =>
+  p.verify?.verdict === "confirmed" && (p.severity === "blocker" || p.severity === "major") && p.skipFix !== true;
 
 // ps4-plan.md section 1 item 4: a critic row is a review row with item critic. It is no own review.
 const POINTS = {
@@ -903,6 +921,7 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
       ready: open?.state === "self_reviewed",
       merged: code.length > 0 && code.every((p) => merged(p) || p.state === "abandoned"),
       building: code.filter((p) => p.state === "implementing").map((p) => p.ord),
+      held: (db.query(WAIT.held).get({ task: t.id }) as { n: number }).n,
     },
     id: t.id,
     project: t.project,
@@ -1257,16 +1276,20 @@ export const WAITING = "Another part waits for you. Act on each reason first.";
 // ps4-plan.md WP-7: an implement, fix, or instruct run of the part runs now. Only these runs take live input (part-session.md section 2.9).
 export const sessionRunning = (db: Database, part: number) => db.query(Q.session).get({ part }) !== null;
 
+// part-session.md section 9.4: a held part goes on by "Continue with part" only, so it takes no send.
+export const HELD_TELL = (ord: number) => `Part ${ord} is on hold. Continue it first.`;
+
 // The part of a Tell Claude send (spec.md section 6.18.1), or the sentence of the 409 in a state without the box. A session run of the
-// part lets the send through (ps4-plan.md WP-7).
-export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string } {
+// part lets the send through (ps4-plan.md WP-7). held: the part is on hold, which comes before the WORKING of a driver.
+export function instructTarget(db: Database, t: TaskRow, partId?: number): { part: PartRow } | { error: string; held?: true } {
   if (t.state !== "implementing" && t.state !== "ready") return { error: TASK_STATE_TEXT[t.state] };
-  if (partId !== undefined && currentPart(db, t, partId)?.adopted) return { error: ADOPTED };
+  const part = currentPart(db, t, partId);
+  if (partId !== undefined && part?.adopted) return { error: ADOPTED };
+  if (part && parseBlocked(part.blocked_json)?.kind === "held") return { error: HELD_TELL(part.ord), held: true };
   // spec.md section 6.25.5: an answer or an allow of a send restarts the send of the first question only.
   if (waitingOf(db, t.id)) return { error: WAITING };
   const b = blockedOf(t);
   if (b && !BOX_REASONS.has(b.kind)) return { error: b.text };
-  const part = currentPart(db, t, partId);
   const live = !!part && sessionRunning(db, part.id);
   if (!live && db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
   if (!part || !HAS_WORKTREE.has(part.state))
@@ -1424,6 +1447,8 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       gate: partGate(db, p, approvals),
       wait: schedule?.waits.get(p.id) ?? null,
       blocked: parseBlocked(p.blocked_json),
+      // The routes set it from the loop.
+      instructRun: null,
     };
   });
   const docs = docsOf(t);

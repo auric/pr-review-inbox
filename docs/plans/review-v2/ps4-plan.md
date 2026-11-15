@@ -47,6 +47,7 @@ Sources: part-session.md sections 2 to 9, spec.md section 6.28, `machine.ts`, `l
 19. pushback.md reserves AC-B105 to AC-B115. PS4 uses AC-B333 and up. Mark the old reservation as replaced.
 20. An own review that hits the usage limit gives `error/run` today. Decision: give `usage` there too.
 21. Keep the `/pause` route until PS5, because the web calls it.
+22. A waiting follow-up row can wait while newer rows of its part come (WP-7). The guards read rows in ID order. Decision: a waiting row that never ran takes the next row ID and the next ord before it runs.
 
 ## 2. Machine changes
 
@@ -70,7 +71,7 @@ Sources: part-session.md sections 2 to 9, spec.md section 6.28, `machine.ts`, `l
 | Guard | Rule after PS4 | WP |
 |---|---|---|
 | follow | a waiting row of the part with kind `instruct`, or kind `fix` with item `points` or `pushback` | 3 |
-| critic | part implementing, an ok build commit after the restart mark, and no critic row (ok or failed) after the mark. A cancelled critic runs again. | 6 |
+| critic | part implementing, an ok build commit after the restart mark, and no critic row (ok or failed) after the mark. A cancelled critic runs again. A critic that an app restart cut ends cancelled (tasks.ts SQL.failSteps). | 6 |
 | review | the PS3 rule, plus: only rows after the restart mark; `Q.reviewsAfter` reads item `review` only; a resolved green `update` row counts as a commit of Claude's work (Q57) | 4, 5, 6 |
 | baseline | unchanged; the restart mark does not affect it | none |
 | claudeRan | only rows after the restart mark | 4 |
@@ -100,7 +101,7 @@ A `fix` row with item `points` or `pushback` maps to following. A `fix` row with
 
 | From | Event | Guard | To | Owner |
 |---|---|---|---|---|
-| none | HOLD | task implementing; part implementing; open row of kind implement or fix; part row empty | held | route |
+| none | HOLD | task implementing; part implementing; an open row of kind implement or fix, also beside a waiting message (WP-7); part row empty | held, with that row as step | route |
 | held | CONTINUE with `part` | task implementing or stopped | none; poke the running driver, else kick. In stopped, also RESUME. | route |
 | held | SKIP | task has sub-tasks | none, part abandoned | route |
 | held | RESTART | unpushed | none, part implementing, restart mark written | route |
@@ -178,14 +179,19 @@ Status: built in c6b4ad8.
 
 ### WP-6. Critic, judging, push-back questions (implementer-xhigh)
 
-- `loop.ts`: `criticRun` (item critic, haiku, 30 turns, no reviewer, no verifier, no language checks; a failure or cut writes a note and sends CLEAN); critic judging with Log lines for a push-back; `judgePoints`; push-back questions with `point` after the review gate; `reviewFailure` with the 6.23.3 header; `answer()` handles Accept and "Fix it anyway"; `Q.reviewsAfter` reads item `review`.
+- `loop.ts`: `criticRun` (item critic, opus, effort low, 30 turns, no reviewer, no verifier, no language checks; a failure or cut writes a note and sends CLEAN); critic judging with Log lines for a push-back; `judgePoints`; push-back questions with `point` after the review gate; `reviewFailure` with the 6.23.3 header; `answer()` handles Accept and "Fix it anyway"; `Q.reviewsAfter` reads item `review`.
 - Tests: session (AC-B299 order, a clean critic keeps the own review, critic once), new pushback.test.ts, loop, and `bun run test:e2e`.
 - Risk: each fake-CLI build gets a critic run, so run and row counts shift.
 
 ### WP-7 (optional). Live messages behind `live` (implementer)
 
-- `loop.ts` `instruct()` during a session run: with `live` on, `review.sendPart`; otherwise queue a waiting instruct row. `tasks.ts` `instructTarget` lets a session run through.
-- Waits on gate U104.
+Status: built in ba7ad13.
+
+- `loop.ts` `instruct()` during a session run of the part (`sessionRunning`: an implement, fix, or instruct run): with `live` on, `review.sendPart` writes stdin and adds the Log note "Your message: <text>". When the write fails under the build driver, one waiting instruct row per part with blockedBefore null; the next GO runs it. Else 409 WORKING. `tasks.ts` `instructTarget` lets a session run of the part through.
+- `followRun` gives a waiting row that never ran the next row ID (gap 22). A no-change message with no blockedBefore keeps the reason of another part. `hold` takes the open implement or fix row.
+- `recoverTasks` keeps a waiting message that never ran on a part that still builds, in implementing only. A built part keeps the WP-3 rule.
+- The live path moves the task version. Each send gets its own Log note. A move to stopped in `tasks.ts` `advance` runs `stopSends`. A Stop and `failed()` make this move. `stopSends` cancels each waiting message with result "stopped". A running message gets result "stopped" too. Skip and Start again run `stopSends` for their part. `partIdle` ignores a waiting message. `endFollow` gives back `before` when the message has no blockedBefore.
+- Tests: session (AC-B364: live on and off, two tabs, Stop, restart, follow-up driver, Skip, Start again, Hold), implement (sendPart), machine (STOP ends the messages) and fixture (invariant 8).
 
 ### WP-8. Docs (implementer)
 
@@ -214,7 +220,7 @@ held and usage live in `blocked_json`. The restart mark is a `commit` row. The c
 
 ## 6. Acceptance criteria
 
-- AC-B333. A critic run is a task review run with item critic, model haiku, 30 turns, no rl-reviewer, and no verify phase. It keeps a finding only when each line of its anchor range is an added line of base..head.
+- AC-B333. A critic run is a task review run with item critic, model opus, effort low, 30 turns, no rl-reviewer, and no verify phase. It keeps a finding only when each line of its anchor range is an added line of base..head.
 - AC-B334. The step outcome of a usage-limited run holds resetsAt.
 - AC-B335. A fix run with review, critic, or point items in failure.md gets the lines of 6.23.8. A fix run for red checks does not.
 - AC-B336. An instruct session run keeps its transcript. An instruct run with no session drops the stored transcript.
@@ -245,7 +251,7 @@ held and usage live in `blocked_json`. The restart mark is a `commit` row. The c
 - AC-B361. A review judging run drops an unknown ID with a note. A missing entry gives "No verdict for point N" and counts as fixed. Each push-back gets payload.pushback with citeFound. After the gate, each push-back gets one question with point set and recommended null.
 - AC-B362. Accept discards the item with the mapped reason. "Fix it anyway" queues a pushback follow-up that commits as pushback and sets fixedBy. The recommended answers with an open push-back give 400.
 - AC-B363. "Fix these too" judges its points with the same rules.
-- AC-B364 (WP-7). With the live gate on, a message during a session run reaches stdin. With the gate off, the message waits as a follow-up row and survives a restart.
+- AC-B364 (WP-7). With the live gate on, a message during a session run of the part reaches stdin, and the step gets the note "Your message: <text>". With the gate off, a message during the build run waits as one follow-up row per part. It survives an app restart while the task implements, and the next GO runs it. A Stop, a failed build, a Skip, or a Start again cancels it. Its text goes back to the box. A live send moves the task version.
 - AC-B365. The demo and e2e builds stay green with the critic step.
 
 ## 7. Invariants
@@ -253,7 +259,7 @@ held and usage live in `blocked_json`. The restart mark is a `commit` row. The c
 - The machines are pure. `advance` and `advancePart` are the only writers of state.
 - `send()` asserts `can()`. A refused event throws, and `failed()` stops the task.
 - `after()` runs for every run end, also for a cancel.
-- A part has at most one open step row, with one exception: an open update row can sit beside exactly one open resolve or check row of the same update (WP-5, accepted). The fixtures check this rule after each test.
+- A part has at most one open step row, with two exceptions. An open update row can sit beside exactly one open resolve or check row of the same update (WP-5, accepted). One waiting instruct row can sit beside one other open row (WP-7). The fixtures check this rule after each test.
 - `holdBlocked` never replaces the reason of another part.
 - `cancelPart` matches the key prefix `task:<id>:part:<part>:`.
 - `advancePart` drops the transcript on RESTART and on merged, declined, or abandoned.

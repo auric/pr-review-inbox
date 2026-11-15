@@ -386,7 +386,8 @@ export type ImplementRunStart = {
   session?: { keep: string; resume?: string; live?: boolean };
   started: (db: Database, run: number) => void;
   // A note of the run for the Log while it runs, such as the loop warning (part-session.md section 2.10).
-  note?: (db: Database, text: string) => void;
+  // each: a user message (part-session.md section 2.9) gets a note for each send, also with the same text.
+  note?: (db: Database, text: string, each?: boolean) => void;
   after: (o: RunOutcome | null, early: Ending | null, servers: string[], gaps: string[]) => Promise<Ending>;
   finish: (db: Database, run: { id: number; head: string | null }, e: Ending) => (() => void) | undefined;
 };
@@ -1728,6 +1729,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       taskFile: true,
       attachments: t.attachments.length > 0,
       instructions: instructions.text,
+      ...(t.critic && { critic: true }),
     };
     j.phase = "finding";
     notify(j.id, undefined, t.task);
@@ -1937,12 +1939,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   }
 
   // docs/plans/review-v2/spec.md section 6.26. n: the limit of a full pool, absent for the run of the same PR. AC-B18: a task step names
-  // the pause action of its task.
+  // its task. PS5-S2 removed Pause, and Hold works only on a build or fix run, so the text names the end of the step.
   const busyConflict = (j: Job | TaskJob, n?: number): RunConflict => {
     const { taskKey, ...running } = holder(j);
     const error =
       j.pr === null
-        ? `Claude is building ${taskKey ?? `task ${j.t.task}`}. Pause building after this step to start your run.`
+        ? `Claude is building ${taskKey ?? `task ${j.t.task}`}. Start your run when its step ends.`
         : n === undefined
           ? "A run is working on this pull request. Start yours when it ends."
           : `Claude runs ${plural(n, "run")} at once, your limit. Start yours when one ends.`;
@@ -2588,7 +2590,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         if (j.pr !== null || j.db !== db || j.t.task !== task || j.t.kind !== "implement") continue;
         if (!j.key.startsWith(`task:${task}:part:${part}:`) || !j.runner.send(text)) continue;
         const t = j.t;
-        if (note !== undefined) j.db.transaction(() => t.note?.(j.db, note))();
+        if (note !== undefined) j.db.transaction(() => t.note?.(j.db, note, true))();
         notify(j.id, undefined, task);
         return true;
       }

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { cleanupEvents } from "../../src/server/inbox/queries";
 import { openDb } from "../../src/server/storage/db";
 import { claimTaskEvents, noteTaskWaits, RESTART_TEXT, SPEC_APPROVED_TEXT } from "../../src/server/tasks/notify";
-import { recoverTasks } from "../../src/server/tasks/tasks";
+import { RESTART_TEXT as RESTART_REASON, recoverTasks } from "../../src/server/tasks/tasks";
 import { RUN_CANCELLED } from "../../src/shared/task";
 
 console.log(`notify.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/notify", import.meta.dir)}`);
@@ -222,7 +222,7 @@ describe("the restart recovery (AC-B244)", () => {
     expect(h.count()).toBe(0);
     expect(noteTaskWaits(h.db, [h.id], 51)).toBe(true);
     expect(noteTaskWaits(h.db, [h.id], 52)).toBe(false);
-    expect(claimTaskEvents(h.db, 53).map((e) => [e.kind, e.text])).toEqual([["needs_you", "Needs you: an error"]]);
+    expect(claimTaskEvents(h.db, 53).map((e) => [e.kind, e.text])).toEqual([["needs_you", "Needs you: the app restarted"]]);
   });
 });
 
@@ -270,6 +270,14 @@ describe("claimTaskEvents", () => {
     noteTaskWaits(h.db, [h.id], 12);
     h.db.query("UPDATE task_part SET state = 'pr_open' WHERE id = $id").run({ id: p1 });
     expect(claimTaskEvents(h.db, 13)).toEqual([]);
+  });
+
+  // part-session.md section 9.4: the reason that recoverTasks writes reaches the notification with the Tasks row status.
+  test("error/restart gives the text that the app restarted", () => {
+    const h = setup();
+    h.set("implementing", { kind: "error", cause: "restart", step: 4, text: RESTART_REASON(1) });
+    noteTaskWaits(h.db, [h.id], 10);
+    expect(claimTaskEvents(h.db, 20).map((e) => e.text)).toEqual(["Needs you: the app restarted"]);
   });
 });
 
