@@ -86,7 +86,7 @@ Scroll order: Header, Action bar (sticky), Status strip, Panel slot (brief or As
 - Running: spinner (static with reduced motion), "N tool calls · m:ss", Cancel, Log. The counter is outside the live region.
 - Done: the one-line summary. Then a ledger of counts, each a jump to its first draft: Blocker (`--err`, icon and word), Major, Minor, Nit, question.
 - Then the coverage line: "Read N files", "Not checked: N" (`--warn`, icon and words), "Risk areas: N", "Run setup", "Log". Each of the first three opens in place.
-- N of "Not checked" = `coverage.skipped` + `coverage.unavailable`. This is the rule that marks a run incomplete (jobs.ts:523). The reveal shows one plain line per item. Below: "Also not done, by design: <coverage.notChecked>" and a pointer to the Log.
+- N of "Not checked" = `coverage.skipped` + `coverage.unavailable`. Only the lines that the app adds mark a run incomplete (judge.ts ended(), review-v2/spec.md section 1.9). The reveal shows one plain line per item. Below: "Also not done, by design: <coverage.notChecked>" and a pointer to the Log.
 - "Not checked" starts open the first time a run with N > 0 shows.
 - Dropped findings: one line in the same reveal, with "Show it".
 - Other run kinds (replies, ask, fix) use the same block with one line: "<kind> done · N ... · head · age · Log". Their gaps use the same "Not checked" reveal and never jump to the Log.

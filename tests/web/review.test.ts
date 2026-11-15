@@ -363,24 +363,17 @@ describe("brief state", () => {
 
 describe("run setup of a profile in the brief", () => {
   const p = (o: Partial<ProfileDto> = {}): ProfileDto => ({ ...(PROFILES[0] as ProfileDto), ...o });
-  const defaults: RunnerDefaults = {
-    model: { value: "opus", sure: true },
-    effort: {
-      "": { value: "xhigh", sure: true },
-      "claude-opus-5-5": { value: "medium", sure: true },
-      "opus[1m]": { value: "high", sure: false },
-    },
-  };
+  const defaults: RunnerDefaults = { model: "opus", effort: { "": "xhigh", "claude-opus-5-5": "medium" } };
 
-  test("without flags it names the defaults of the runner settings", () => {
+  test("without flags it names the defaults of the runner", () => {
     expect(profileSetupText(p(), defaults)).toBe(
-      "opus (your default), xhigh effort (your default). Reviewer agents: Auto. No skills or MCP servers.",
+      "opus (default), xhigh effort (default). Reviewer agents: Auto. No skills or MCP servers.",
     );
     expect(profileSetupText(p(), null)).toBe("default model, default effort. Reviewer agents: Auto. No skills or MCP servers.");
   });
 
-  test("a profile model finds its default effort by its own text; a value that is not sure stays plain", () => {
-    expect(profileSetupText(p({ model: "claude-opus-5-5" }), defaults)).toMatch(/^claude-opus-5-5, medium effort \(your default\)\./);
+  test("a profile model finds its default effort by its own text; an unknown value stays plain", () => {
+    expect(profileSetupText(p({ model: "claude-opus-5-5" }), defaults)).toMatch(/^claude-opus-5-5, medium effort \(default\)\./);
     expect(profileSetupText(p({ model: "opus[1m]" }), defaults)).toMatch(/^opus\[1m\], default effort\./);
     expect(profileSetupText(p({ model: "unknown-model" }), defaults)).toMatch(/^unknown-model, default effort\./);
   });
@@ -390,7 +383,7 @@ describe("run setup of a profile in the brief", () => {
       "haiku, low effort. Reviewer agents: Always. 2 skills, 1 MCP server.",
     );
     expect(profileSetupText(p({ explain: true, mcpCount: 3 }), defaults)).toBe(
-      "opus (your default), xhigh effort (your default). No reviewer agents. 3 MCP servers.",
+      "opus (default), xhigh effort (default). No reviewer agents. 3 MCP servers.",
     );
   });
 });
@@ -827,9 +820,9 @@ describe("model and effort of a run", () => {
     status: "completed" as const,
     ...o,
   });
-  const defaults: RunnerDefaults = { model: { value: "opus", sure: true }, effort: { "": { value: "xhigh", sure: true } } };
+  const defaults: RunnerDefaults = { model: "opus", effort: { "": "xhigh" } };
 
-  test("without a settings file, an unknown value reads as default", () => {
+  test("without defaults, an unknown value reads as default", () => {
     expect(setupText(run({ model: "claude-opus-5-5", effort: "high" }), null)).toBe("claude-opus-5-5, high effort");
     expect(setupText(run({}), null)).toBe("default model, default effort");
     // A run from before the effort column ran without --effort.
@@ -845,33 +838,27 @@ describe("model and effort of a run", () => {
     expect(setupText({ ...run({ model: "claude-sonnet-5-5", effort: "high" }), usage }, null)).toBe("claude-sonnet-5-5, high effort");
   });
 
-  test("a run without --effort names the effort from the user settings", () => {
-    expect(setupText(run({ model: "claude-opus-5-5", effortDefault: "xhigh" }), defaults)).toBe(
-      "claude-opus-5-5, xhigh effort (your default)",
-    );
+  test("a run without --effort names the default effort of the runner", () => {
+    expect(setupText(run({ model: "claude-opus-5-5", effortDefault: "xhigh" }), defaults)).toBe("claude-opus-5-5, xhigh effort (default)");
     // An explicit --effort wins over a stale default.
     expect(setupText(run({ model: "m", effort: "low", effortDefault: "xhigh" }), defaults)).toBe("m, low effort");
   });
 
   test("a running run before its init event names the default model and the effort stored at its start", () => {
-    expect(setupText(run({ status: "running", effortDefault: "xhigh" }), defaults)).toBe(
-      "opus (your default), xhigh effort (your default)",
-    );
-    // A model value that the runner docs do not rank stays plain.
-    expect(setupText(run({ status: "running" }), { ...defaults, model: { value: "opus", sure: false } })).toBe(
-      "default model, default effort",
-    );
+    expect(setupText(run({ status: "running", effortDefault: "xhigh" }), defaults)).toBe("opus (default), xhigh effort (default)");
+    // Without ANTHROPIC_MODEL the app cannot see the default model.
+    expect(setupText(run({ status: "running" }), { ...defaults, model: null })).toBe("default model, default effort");
   });
 
-  test("a run that stored no default effort names the current settings value as now", () => {
+  test("a run that stored no default effort names the default of now", () => {
     expect(setupText(run({ model: "claude-opus-5-5", effortDefault: "xhigh", effortNow: true }), defaults)).toBe(
-      "claude-opus-5-5, xhigh effort (your default now)",
+      "claude-opus-5-5, xhigh effort (default now)",
     );
     expect(setupText(run({ model: "claude-haiku-5-5", effort: null, effortDefault: "medium", effortNow: true }), defaults)).toBe(
-      "claude-haiku-5-5, medium effort (your default now)",
+      "claude-haiku-5-5, medium effort (default now)",
     );
     // A run that ended before its init event without --model.
-    expect(setupText(run({ status: "failed" }), defaults)).toBe("opus (your default now), default effort");
+    expect(setupText(run({ status: "failed" }), defaults)).toBe("opus (default now), default effort");
   });
 });
 

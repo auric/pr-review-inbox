@@ -289,7 +289,8 @@ export function runLine(r: RunDto, d: RunDetail | undefined, profiles: ProfileDt
   }
 }
 
-// Plan pr-view-v4 2.6. judge.ts ended(): a skipped or an unavailable item makes the run incomplete, so n counts both.
+// Plan pr-view-v4 2.6. n counts the skipped and the unavailable lines of the model and of the app. judge.ts ended(): only the app
+// lines make the run incomplete.
 // lines: one plain line per gap. design: coverage.notChecked, what the run leaves out by design.
 export type NotChecked = { n: number; label: string; lines: string[]; design: string | null };
 
@@ -495,21 +496,21 @@ export const skillsText = (run: Pick<RunDto, "skills">) => {
   return [picked.join(", "), available.length ? `available: ${available.join(", ")}` : ""].filter(Boolean).join("; ");
 };
 
-// The model and the effort of a run. A run without an init event and without --model names the default model of the settings.
+// The model and the effort of a run. A run without an init event and without --model names the default model of the run env.
 // usage.advisor: the advisor models of a run with advisor calls.
-// effortNow: the run stored no default effort, so the text names the effort of the current settings.
-// defaults null: the settings file is absent or unreadable, so the text stays plain.
+// effortNow: the run stored no default effort, so the app resolved it now.
+// The runner ignores the user settings file (--restricted), so no text names it.
 export const setupText = (
   run: Pick<RunDto, "model" | "effort" | "effortDefault" | "effortNow" | "status"> & Partial<Pick<RunDto, "usage">>,
   defaults: RunnerDefaults | null,
 ) => {
-  const mine = run.status === "running" ? "your default" : "your default now";
-  const model = run.model ?? (defaults?.model?.sure ? `${defaults.model.value} (${mine})` : "default model");
+  const mine = run.status === "running" ? "default" : "default now";
+  const model = run.model ?? (defaults?.model ? `${defaults.model} (${mine})` : "default model");
   const effort =
     run.effort && run.effort !== "default"
       ? `${run.effort} effort`
       : run.effortDefault
-        ? `${run.effortDefault} effort (${run.effortNow ? "your default now" : "your default"})`
+        ? `${run.effortDefault} effort (${run.effortNow ? "default now" : "default"})`
         : "default effort";
   const advisor = run.usage?.advisor?.length ? `, ${run.usage.advisor.join(", ")} advisor` : "";
   return `${model}, ${effort}${advisor}`;
@@ -552,10 +553,9 @@ const MODE_NAME: Record<ReviewerMode, string> = { auto: "Auto", always: "Always"
 
 // The run setup of a profile before a run, as the brief shows it. A model or effort without a flag names the runner default.
 export function profileSetupText(p: ProfileDto, defaults: RunnerDefaults | null): string {
-  const effort = defaults?.effort[p.model ?? ""];
-  // A profile reads the settings of now, as a running run does.
+  // A profile reads the defaults of now, as a running run does.
   const flags = setupText(
-    { model: p.model, effort: p.effort, effortDefault: effort?.sure ? effort.value : null, effortNow: false, status: "running" },
+    { model: p.model, effort: p.effort, effortDefault: defaults?.effort[p.model ?? ""] ?? null, effortNow: false, status: "running" },
     defaults,
   );
   const agents = p.explain ? "No reviewer agents" : `Reviewer agents: ${MODE_NAME[p.reviewerMode]}`;

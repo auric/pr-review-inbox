@@ -935,8 +935,8 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
   const check = VERIFIER_MODES.find(([m]) => m === d.verifier.mode);
   const defaults = meta?.defaults;
   // The model and the effort of the main run: the profile value, else the runner default that the server found.
-  const mainModel = d.model.trim() || defaults?.model?.value;
-  const mainEffort = d.effort || defaults?.effort[d.model.trim()]?.value;
+  const mainModel = d.model.trim() || defaults?.model;
+  const mainEffort = d.effort || defaults?.effort[d.model.trim()];
   const help = "m-0 text-xs text-muted-foreground";
   return (
     <fieldset aria-labelledby={head} className="col-span-full grid min-w-0 gap-2 rounded-lg bg-pane-2 px-3 pt-2.5 pb-3">
@@ -945,7 +945,7 @@ function RunSetup(props: RowProps & { found: ReturnType<typeof problems> }) {
           Run setup<span className="sr-only"> of profile {i + 1}</span>
         </p>
         <p className="m-0 text-xs text-muted-foreground">
-          Applies to every run of this profile. Use my default leaves the choice to your {runner} settings.
+          Applies to every run of this profile. Default leaves the choice to {runner}. Runs ignore your {runner} settings file.
         </p>
       </div>
       <div className={setupRow}>
@@ -1232,7 +1232,7 @@ function ModelPick(props: {
           if (v !== "other") props.onPick(v);
         }}
       >
-        <option value="">{props.fallback ?? "Use my default"}</option>
+        <option value="">{props.fallback ?? "Default"}</option>
         {aliases.map((m) => (
           <option key={m} value={m}>
             {aliasName(m)}
@@ -1277,7 +1277,7 @@ function EffortPick(props: {
       disabled={props.disabled}
       onChange={(e) => props.onPick(e.target.value as Effort | "")}
     >
-      <option value="">{props.fallback ?? "Use my default"}</option>
+      <option value="">{props.fallback ?? "Default"}</option>
       {EFFORT_CHOICES.map((e) => (
         <option key={e} value={e}>
           {EFFORT_NAME[e]}

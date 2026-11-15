@@ -389,7 +389,8 @@ export function validateEarlier(
 // ---------- Reply drafts (plan replies.md WP17) ----------
 
 export type ValidatedReply = { payload: ReplyPayload; status: "new" | "discarded" };
-export type ValidatedReplies = { summary: string; coverage: Coverage; replies: ValidatedReply[] };
+// added: the lines that the app added to coverage.skipped. Only they make the run incomplete.
+export type ValidatedReplies = { summary: string; coverage: Coverage; replies: ValidatedReply[]; added: string[] };
 
 // Plan replies.md R11: only requested threads pass. Every drop and every unanswered thread goes to coverage.skipped.
 // live: the threads of the PR with a live message. A cite outside it drops (docs/plans/review-v2/spec.md section 2.9).
@@ -401,7 +402,7 @@ export function validateReplies(
   const replyTo = new Map(requested.map((r) => [r.thread, r.replyTo]));
   const mine = new Set(requested.filter((r) => r.mine).map((r) => r.thread));
   const answered = new Set<number>();
-  const skipped = [...result.coverage.skipped];
+  const skipped: string[] = [];
   const replies: ValidatedReply[] = [];
   for (const r of result.replies) {
     const to = replyTo.get(r.thread);
@@ -446,7 +447,12 @@ export function validateReplies(
     });
   }
   for (const r of requested) if (!answered.has(r.thread)) skipped.push(`Thread ${r.thread} has no reply.`);
-  return { summary: result.summary, coverage: { ...result.coverage, skipped }, replies };
+  return {
+    summary: result.summary,
+    coverage: { ...result.coverage, skipped: [...result.coverage.skipped, ...skipped] },
+    replies,
+    added: skipped,
+  };
 }
 
 // ---------- Answered questions of a review run (docs/plans/thread-outcome.md section 9) ----------

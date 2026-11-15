@@ -625,11 +625,11 @@ test("the run setup saves model, effort, and reviewer agents; the run row and th
   await expect(runRow(page).locator("[data-run-setup]")).toHaveText("Model and effort: claude-haiku-5-5, high effort");
 
   await openSettings(page);
-  // The settings file names no model, so the default model and its effort are unknown. An alias has a known default effort.
-  await expect(field(page, "Model", 1).locator("option").first()).toHaveText("Use my default");
-  await expect(field(page, "Effort", 1).locator("option").first()).toHaveText("Use my default");
+  // The run env names no model, so the default model and its effort are unknown. An alias has a known default effort.
+  await expect(field(page, "Model", 1).locator("option").first()).toHaveText("Default");
+  await expect(field(page, "Effort", 1).locator("option").first()).toHaveText("Default");
   await field(page, "Model", 1).selectOption("haiku");
-  await expect(field(page, "Effort", 1).locator("option").first()).toHaveText("Use my default (medium)");
+  await expect(field(page, "Effort", 1).locator("option").first()).toHaveText("Default (medium)");
   await field(page, "Model", 1).selectOption("other");
   const id = page.getByLabel("Model ID of profile 1", { exact: true });
   await expect(id).toBeFocused();
@@ -638,7 +638,7 @@ test("the run setup saves model, effort, and reviewer agents; the run row and th
   await id.fill("claude-opus-5-5");
   await id.blur();
   // The server resolves the default effort for the full model ID of the profile too.
-  await expect(field(page, "Effort", 1).locator("option").first()).toHaveText("Use my default (medium)");
+  await expect(field(page, "Effort", 1).locator("option").first()).toHaveText("Default (medium)");
   // xhigh, not the shipped high, so the run line of the next run differs from the first one.
   await field(page, "Effort", 1).selectOption("xhigh");
   await page.getByRole("radiogroup", { name: "Reviewer agents of profile 1" }).getByText("Always", { exact: true }).click();

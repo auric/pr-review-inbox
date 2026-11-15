@@ -283,7 +283,7 @@ Run: `bun scripts/gate/claude-checks.ts --only B13`.
 
 ## Default model and effort (not run)
 
-Status: NOT RUN, 2026-10-14. The rows come from code.claude.com/docs (model-config, settings, settings-reference, env-vars, commands). `src/server/review/defaults.ts` implements them. The app reads only the user settings file `<config>/settings.json` and only the keys `model`, `effortLevel`, `maxEffortLevel`, `modelSettings`, and named `env` entries.
+Status: NOT RUN, 2026-10-14. The rows come from code.claude.com/docs (model-config, settings, settings-reference, env-vars, commands). `src/server/review/defaults.ts` implements them. Since B39, the app no longer reads the user settings file: every app run sends `--restricted`, which ignores it. The resolver reads only `ANTHROPIC_MODEL`, the `ANTHROPIC_DEFAULT_<FAMILY>_MODEL` pins of the app env, and the model defaults of U33.
 
 Run: `bun scripts/gate/claude-checks.ts --only B14`.
 
@@ -294,11 +294,12 @@ Run: `bun scripts/gate/claude-checks.ts --only B14`.
 | U32. Opus 5.5, Sonnet 5.5, and Haiku 5.5 ignore a top-level `effortLevel` in the user settings file | DOCUMENTED | settings-reference `effortLevel`. The app applies the key only to the older models it knows. An unknown model gets no top-level level. |
 | U33. Model defaults: `medium` for the 5.5 models, `xhigh` for Opus 4.7, `high` for the other models with effort | DOCUMENTED | model-config "Adjust effort level", item 3. An organization default effort can change it. The app cannot see that value. |
 | U34. Aliases on the Anthropic API: `opus`, `sonnet`, `haiku` resolve to the 5.5 models | DOCUMENTED | model-config "Model aliases". An `ANTHROPIC_DEFAULT_<FAMILY>_MODEL` variable replaces the alias target. |
-| U35. Model order: `--model`, `ANTHROPIC_MODEL`, the `model` key, `ANTHROPIC_DEFAULT_MODEL`, the account default | DOCUMENTED | model-config "Setting your model". childEnv keeps `ANTHROPIC_MODEL`. An organization default or a managed `model` can override the user key. The app shows the source "from your settings" for `ANTHROPIC_DEFAULT_MODEL` and for the settings env block. |
-| U36. The `env` block of the user settings file wins over the settings keys, like a shell variable | UNVERIFIED | The docs do not state it. The app shows such values as "from your settings" and stores no run value from them. |
+| U35. Model order: `--model`, `ANTHROPIC_MODEL`, the `model` key, `ANTHROPIC_DEFAULT_MODEL`, the account default | DOCUMENTED | model-config "Setting your model". childEnv keeps `ANTHROPIC_MODEL`. An organization default or a managed `model` can override the user key. B39: `--restricted` ignores the `model` key, so the app shows only `ANTHROPIC_MODEL` as the default model. |
+| U36. The `env` block of the user settings file wins over the settings keys, like a shell variable | NOT NEEDED | B39: `--restricted` ignores the `env` block, so app runs never get it. The app does not read the block. |
 | U37. Managed settings and the organization defaults do not change the default model or effort | UNVERIFIED | The app does not read managed sources. B14 compares the resolver with the CLI. |
 | U38. The init event names the effort level | NO | The fixtures carry `per_turn_effort_active` only. The run end resolves the effort for the init model instead. |
-| B14. `/effort status` in `-p`, without `--model` and with `--model haiku`, prints the level that the resolver gives | NOT RUN | Two calls, own cap 2. `/effort status` should make no model call. PASS when the first level in the output equals the resolver value for both runs. |
+| B14. `/effort status` in `-p` with `--restricted`, without `--model` and with `--model haiku`, prints the level that the resolver gives | NOT RUN | Two calls, own cap 2. `/effort status` should make no model call. PASS when the first level in the output equals the resolver value for both runs. |
+| B39. `--restricted` and the user settings file: a `model` key and an `env.ANTHROPIC_MODEL` entry in settings.json | INFO (2.1.325, 2026-11-15) | Canary by the user. Without `--restricted`, the settings model applied. With `--restricted`, the CLI ignored both entries, and the run used the Claude Code default model. The `modelSettings` effort is not checked. |
 
 ## Project instructions
 

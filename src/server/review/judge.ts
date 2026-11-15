@@ -206,9 +206,10 @@ export function unreadAlways(o: RunOutcome, always: { id: string; folder: string
     .map((s) => `Skill ${s.id} (always use): the model did not read SKILL.md.`);
 }
 
-function ended(raw: string, o: RunOutcome, result: NonNullable<Ending["result"]>): Ending {
-  const c = result.summary.coverage;
-  return { status: c.skipped.length || c.unavailable.length ? "incomplete" : "completed", kind: null, text: null, raw, outcome: o, result };
+// gaps: the lines that the app added to coverage skipped and unavailable. Only they make the run incomplete. The lines of the model
+// stay in the coverage, but they do not change the status (docs/plans/review-v2/spec.md section 1.9).
+function ended(raw: string, o: RunOutcome, result: NonNullable<Ending["result"]>, gaps: readonly string[]): Ending {
+  return { status: gaps.length ? "incomplete" : "completed", kind: null, text: null, raw, outcome: o, result };
 }
 
 type Placed = Pick<StoredFinding, "path" | "side">;
@@ -271,6 +272,8 @@ export type Found = {
   questions: Question[];
   replies: ValidatedReply[];
   checked?: CheckedEarlier[];
+  // The lines that the app added to coverage skipped and unavailable (ended).
+  gaps: string[];
 };
 
 // Validates the finder result of a review run. servers: the MCP servers of the spec. gaps: the servers and skills left out of the spec.
@@ -307,10 +310,12 @@ export async function judge(
   const a = profile.explain ? null : validateAnswered(parsed.data.answered, asked, v.kept);
   const dropped = v.dropped.map((d) => (d.reason === "file" && blobs.oversized(d) ? { ...d, reason: "size" as const } : d));
   const base = rereview?.carry.incomplete ? [`Run ${rereview.carry.base}, the base of this re-review, was incomplete.`] : [];
+  const added = [...parsed.cuts, ...(e?.skipped ?? []), ...(a?.skipped ?? [])];
+  const down = unavailable(o, servers, gaps);
   const coverage = {
     ...v.coverage,
     skipped: [...parsed.cuts, ...v.coverage.skipped, ...(e?.skipped ?? []), ...(a?.skipped ?? [])],
-    unavailable: [...v.coverage.unavailable, ...unavailable(o, servers, gaps)],
+    unavailable: [...v.coverage.unavailable, ...down],
     notChecked: [...v.coverage.notChecked, ...base],
   };
   // spec.md section 1.9: the open carried findings of the base run with code at the head join after the new ones. A posted finding
@@ -331,6 +336,7 @@ export async function judge(
     questions: v.questions,
     replies: a?.replies ?? [],
     ...(e && { checked: e.checked }),
+    gaps: [...added, ...down],
   };
 }
 
@@ -529,6 +535,7 @@ export function settle(f: Found, s: SettleInput): Ending {
     unavailable: [...f.summary.coverage.unavailable],
     notChecked: [...f.summary.coverage.notChecked],
   };
+  const gaps = [...f.gaps];
   const phases: RunPhase[] = [s.find];
   let usage = s.find.usage;
   let raw = f.raw;
@@ -547,11 +554,15 @@ export function settle(f: Found, s: SettleInput): Ending {
       const v = verdictsOf(parsed.data.verdicts, s.check.written, s.check.asked);
       got = effectiveVerdicts(f.candidates.slice(0, s.check.written), v.verdicts);
       const c = parsed.data.coverage;
-      coverage.skipped.push(...parsed.cuts.map((x) => `Check: ${x}`), ...v.skipped);
+      const lines = [...parsed.cuts.map((x) => `Check: ${x}`), ...v.skipped];
+      coverage.skipped.push(...lines);
+      gaps.push(...lines);
       coverage.read = union(coverage.read, c.read);
       coverage.notChecked.push(...[...c.skipped, ...c.notChecked, ...c.unavailable].map((x) => `Check: ${x}`));
     }
-    coverage.unavailable = union(coverage.unavailable, unavailable(o, s.servers, []));
+    const down = unavailable(o, s.servers, []);
+    coverage.unavailable = union(coverage.unavailable, down);
+    gaps.push(...down);
   }
   const verify: VerifySummary = {
     candidates: f.candidates.length,
@@ -637,15 +648,22 @@ export function settle(f: Found, s: SettleInput): Ending {
   }
   if (failed) {
     verify.failed = failed;
-    coverage.skipped.push(`The check did not finish: ${findings(verify.unchecked)} not checked.${failed.text ? ` ${failed.text}` : ""}`);
+    const line = `The check did not finish: ${findings(verify.unchecked)} not checked.${failed.text ? ` ${failed.text}` : ""}`;
+    coverage.skipped.push(line);
+    gaps.push(line);
   }
-  const ending = ended(raw, f.outcome, {
-    summary: { ...f.summary, coverage, volume: s.volume, verify, phases, finderQuestions },
-    items: [...items, ...kept.map(questionItem), ...asked.map(questionItem), ...f.replies.map(replyItem)],
-    ...(f.checked && { checked: f.checked }),
-    links,
-    carried,
-  });
+  const ending = ended(
+    raw,
+    f.outcome,
+    {
+      summary: { ...f.summary, coverage, volume: s.volume, verify, phases, finderQuestions },
+      items: [...items, ...kept.map(questionItem), ...asked.map(questionItem), ...f.replies.map(replyItem)],
+      ...(f.checked && { checked: f.checked }),
+      links,
+      carried,
+    },
+    gaps,
+  );
   return { ...ending, usage };
 }
 
@@ -802,26 +820,31 @@ export async function judgeExplain(o: RunOutcome, ws: Workspace, servers: string
       : { ...x, path: null, line: null, lineEnd: null };
   });
   const walk = checkWalkthrough(r.walkthrough, files);
+  const checks = [
+    ...(walk.badLinks ? [`${count(walk.badLinks, "link", "links")} did not match the change.`] : []),
+    ...(r.order.length > order.length
+      ? [`${count(r.order.length - order.length, "path of the reading order is", "paths of the reading order are")} not in the change.`]
+      : []),
+    ...(r.files.length > listed.length
+      ? [`${count(r.files.length - listed.length, "path of the file list is", "paths of the file list are")} not in the change.`]
+      : []),
+  ];
+  const down = unavailable(o, servers, gaps);
   const coverage = {
     ...r.coverage,
-    skipped: [
-      ...parsed.cuts,
-      ...r.coverage.skipped,
-      ...(walk.badLinks ? [`${count(walk.badLinks, "link", "links")} did not match the change.`] : []),
-      ...(r.order.length > order.length
-        ? [`${count(r.order.length - order.length, "path of the reading order is", "paths of the reading order are")} not in the change.`]
-        : []),
-      ...(r.files.length > listed.length
-        ? [`${count(r.files.length - listed.length, "path of the file list is", "paths of the file list are")} not in the change.`]
-        : []),
-    ],
-    unavailable: [...r.coverage.unavailable, ...unavailable(o, servers, gaps)],
+    skipped: [...parsed.cuts, ...r.coverage.skipped, ...checks],
+    unavailable: [...r.coverage.unavailable, ...down],
   };
-  return ended(raw, o, {
-    summary: { summary: r.summary, risks: [], coverage, dropped: [] },
-    items: r.questions.map(questionItem),
-    explain: { ...r, walkthrough: walk.text, order, files: listed, risks, coverage },
-  });
+  return ended(
+    raw,
+    o,
+    {
+      summary: { summary: r.summary, risks: [], coverage, dropped: [] },
+      items: r.questions.map(questionItem),
+      explain: { ...r, walkthrough: walk.text, order, files: listed, risks, coverage },
+    },
+    [...parsed.cuts, ...checks, ...down],
+  );
 }
 
 // A cancel during the verify phase or the salvage run. The run keeps the log and the usage of both processes, and no item.
@@ -863,16 +886,22 @@ export function judgeReplies(o: RunOutcome, threads: ReplyThread[], servers: str
   const parsed = parseCut(replyResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "reply", raw, o);
   const v = validateReplies(parsed.data, threads, live);
+  const down = unavailable(o, servers, gaps);
   const coverage = {
     ...v.coverage,
     skipped: [...parsed.cuts, ...v.coverage.skipped],
-    unavailable: [...v.coverage.unavailable, ...unavailable(o, servers, gaps)],
+    unavailable: [...v.coverage.unavailable, ...down],
   };
-  return ended(raw, o, {
-    summary: { summary: v.summary, risks: [], coverage, dropped: [] },
-    items: v.replies.map(replyItem),
-    notes: parsed.data.notes,
-  });
+  return ended(
+    raw,
+    o,
+    {
+      summary: { summary: v.summary, risks: [], coverage, dropped: [] },
+      items: v.replies.map(replyItem),
+      notes: parsed.data.notes,
+    },
+    [...parsed.cuts, ...v.added, ...down],
+  );
 }
 
 const firstLine = (s: string) =>
@@ -889,18 +918,24 @@ export function judgeDiscuss(o: RunOutcome, servers: string[], gaps: string[]): 
   const parsed = parseCut(discussResult, o.result?.structured_output);
   if (!parsed.success) return schemaFailure(parsed.error.issues, "discuss", raw, o);
   const r = parsed.data;
+  const down = unavailable(o, servers, gaps);
   const coverage = {
     ...r.coverage,
     skipped: [...parsed.cuts, ...r.coverage.skipped],
-    unavailable: [...r.coverage.unavailable, ...unavailable(o, servers, gaps)],
+    unavailable: [...r.coverage.unavailable, ...down],
   };
-  return ended(raw, o, {
-    summary: { summary: firstLine(r.answer), risks: [], coverage, dropped: [] },
-    items: [],
-    answer: r.answer,
-    notes: r.notes,
-    discuss: { ...r, revision: r.verdict === "revised" ? r.revision : null },
-  });
+  return ended(
+    raw,
+    o,
+    {
+      summary: { summary: firstLine(r.answer), risks: [], coverage, dropped: [] },
+      items: [],
+      answer: r.answer,
+      notes: r.notes,
+      discuss: { ...r, revision: r.verdict === "revised" ? r.revision : null },
+    },
+    [...parsed.cuts, ...down],
+  );
 }
 
 // docs/plans/review-v2/spec.md section 6.5: an interview or spec run makes no items. check: the app checks of the parsed result. It
@@ -919,17 +954,23 @@ export async function judgeTask<T extends { summary?: string; title?: string; co
   if (!parsed.success) return schemaFailure(parsed.error.issues, what, raw, o);
   const c = await check(parsed.data);
   const cov = c.result.coverage;
+  const down = unavailable(o, servers, gaps);
   const coverage = {
     ...cov,
     skipped: [...parsed.cuts, ...cov.skipped, ...c.skipped],
-    unavailable: [...cov.unavailable, ...unavailable(o, servers, gaps)],
+    unavailable: [...cov.unavailable, ...down],
   };
-  return ended(raw, o, {
-    summary: { summary: firstLine(c.result.summary ?? c.result.title ?? ""), risks: [], coverage, dropped: [] },
-    items: [],
-    ...(c.answer !== undefined && { answer: c.answer }),
-    task: { ...c.result, coverage },
-  });
+  return ended(
+    raw,
+    o,
+    {
+      summary: { summary: firstLine(c.result.summary ?? c.result.title ?? ""), risks: [], coverage, dropped: [] },
+      items: [],
+      ...(c.answer !== undefined && { answer: c.answer }),
+      task: { ...c.result, coverage },
+    },
+    [...parsed.cuts, ...c.skipped, ...down],
+  );
 }
 
 // Plan r2 S-ASK: an ask run makes no items, so nothing of it can post.
@@ -940,20 +981,26 @@ export function judgeAsk(o: RunOutcome, servers: string[], gaps: string[]): Endi
   if (!parsed.success) return schemaFailure(parsed.error.issues, "ask", raw, o);
   const { answer, coverage } = parsed.data;
   const summary = firstLine(answer);
-  return ended(raw, o, {
-    summary: {
-      summary,
-      risks: [],
-      coverage: {
-        ...coverage,
-        skipped: [...parsed.cuts, ...coverage.skipped],
-        unavailable: [...coverage.unavailable, ...unavailable(o, servers, gaps)],
+  const down = unavailable(o, servers, gaps);
+  return ended(
+    raw,
+    o,
+    {
+      summary: {
+        summary,
+        risks: [],
+        coverage: {
+          ...coverage,
+          skipped: [...parsed.cuts, ...coverage.skipped],
+          unavailable: [...coverage.unavailable, ...down],
+        },
+        dropped: [],
       },
-      dropped: [],
+      items: [],
+      answer,
     },
-    items: [],
-    answer,
-  });
+    [...parsed.cuts, ...down],
+  );
 }
 
 // docs/plans/session-consult.md part C: a session run makes no items. Its entries go to answer. The answer preview checks each
@@ -968,21 +1015,29 @@ export async function judgeSession(o: RunOutcome, fix: { ws: Workspace; asked: s
   const n = parsed.data.answers.length;
   const answers = `${n} ${n === 1 ? "answer" : "answers"}`;
   const none = { read: [], skipped: parsed.cuts, unavailable: [], notChecked: [] };
-  const result = (summary: string, coverage: RunSummary["coverage"], edits?: { threads: FixNote[]; edits: ValidEdit[] }) =>
-    ended(raw, o, {
-      summary: { summary, risks: [], coverage, dropped: [] },
-      items: [],
-      answer: JSON.stringify(parsed.data.answers),
-      ...(edits && { fix: edits }),
-    });
-  if (!fix) return result(answers, none);
+  const result = (
+    summary: string,
+    coverage: RunSummary["coverage"],
+    gaps: readonly string[],
+    edits?: { threads: FixNote[]; edits: ValidEdit[] },
+  ) =>
+    ended(
+      raw,
+      o,
+      {
+        summary: { summary, risks: [], coverage, dropped: [] },
+        items: [],
+        answer: JSON.stringify(parsed.data.answers),
+        ...(edits && { fix: edits }),
+      },
+      gaps,
+    );
+  if (!fix) return result(answers, none, parsed.cuts);
   const proposal = fixResult.safeParse(parsed.data.fix);
   if (!proposal.success) {
     const issues = issuesText(proposal.error.issues);
-    return result(answers, {
-      ...none,
-      skipped: [...parsed.cuts, `The fix does not match the fix schema, so the run keeps no edit. ${issues}`],
-    });
+    const skipped = [...parsed.cuts, `The fix does not match the fix schema, so the run keeps no edit. ${issues}`];
+    return result(answers, { ...none, skipped }, skipped);
   }
   const files = await readFixFiles(
     fix.ws,
@@ -991,7 +1046,10 @@ export async function judgeSession(o: RunOutcome, fix: { ws: Workspace; asked: s
   const v = validateFix(proposal.data, acceptedTargets(parsed.data.answers, fix.asked), files);
   const m = v.edits.length;
   const coverage = { ...v.coverage, skipped: [...parsed.cuts, ...v.coverage.skipped] };
-  return result(`${answers}, ${m} ${m === 1 ? "edit" : "edits"}`, coverage, { threads: v.threads, edits: v.edits });
+  return result(`${answers}, ${m} ${m === 1 ? "edit" : "edits"}`, coverage, [...parsed.cuts, ...v.added], {
+    threads: v.threads,
+    edits: v.edits,
+  });
 }
 
 export const cancelledEnding = (o?: RunOutcome): Ending => ({
@@ -1088,18 +1146,27 @@ export async function judgeFix(
   );
   const v = validateFix(parsed.data, { threads: threads.map((t) => t.thread), findings }, files);
   const skipped = [...parsed.cuts, ...v.coverage.skipped];
+  const added = [...parsed.cuts, ...v.added];
   const items = v.threads.flatMap((n): NewItem[] => {
     const t = threads.find((x) => x.thread === n.thread);
     const body = n.reply.trim();
     if (!t || n.fixed || !NOFIX_DRAFT.has(n.why) || !body) return [];
     if (body.length <= MAX_NOTE) return [nofixItem(n, t, body)];
-    skipped.push(`Reply for thread ${t.thread} dropped: the body is longer than ${MAX_NOTE} characters.`);
+    const line = `Reply for thread ${t.thread} dropped: the body is longer than ${MAX_NOTE} characters.`;
+    skipped.push(line);
+    added.push(line);
     return [];
   });
-  const coverage = { ...v.coverage, skipped, unavailable: [...v.coverage.unavailable, ...unavailable(o, servers, gaps)] };
-  return ended(raw, o, {
-    summary: { summary: v.summary, risks: [], coverage, dropped: [] },
-    items,
-    fix: { threads: v.threads, edits: v.edits },
-  });
+  const down = unavailable(o, servers, gaps);
+  const coverage = { ...v.coverage, skipped, unavailable: [...v.coverage.unavailable, ...down] };
+  return ended(
+    raw,
+    o,
+    {
+      summary: { summary: v.summary, risks: [], coverage, dropped: [] },
+      items,
+      fix: { threads: v.threads, edits: v.edits },
+    },
+    [...added, ...down],
+  );
 }

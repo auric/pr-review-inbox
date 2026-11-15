@@ -331,7 +331,7 @@ export function toFixEditDto(r: FixEditRow): FixEditDto {
   };
 }
 
-// The effort that the current user settings give a run without --effort. It reads the settings file once per model.
+// The default effort of a run without --effort, resolved now (defaults.ts runEffort). It resolves each model once.
 export function effortsNow() {
   const seen = new Map<string, string | null>();
   return (model: string | null) => {
@@ -341,7 +341,7 @@ export function effortsNow() {
   };
 }
 
-// A run without --effort and without a stored default (for example, from before migration 019) gets the effort of the current settings.
+// A run without --effort and without a stored default (for example, from before migration 019) gets the default effort of now.
 // A run from before migration 018 has effort null and ran without --effort.
 export function toRunDto(r: RunRow, resolve = effortsNow()): RunDto {
   const noFlag = r.effort === null || r.effort === "default";

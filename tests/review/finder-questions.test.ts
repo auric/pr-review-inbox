@@ -102,6 +102,7 @@ const found = (candidates: Candidate[], questions: Question[]): Found => ({
   candidates,
   questions,
   replies: [],
+  gaps: [],
 });
 const check = (verdicts: VerifyVerdict[], written: number, asked: number): CheckRun => ({
   o: outcome({ verdicts, coverage: NONE }),

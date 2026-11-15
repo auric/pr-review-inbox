@@ -647,9 +647,9 @@ export type RunDto = {
   model: string | null;
   // The --effort value of the run, or "default" for no flag. null for runs made before it was stored.
   effort: string | null;
-  // effort "default" or null only: the effort that the user settings give. null: unknown.
+  // effort "default" or null only: the default effort of the run model. null: unknown.
   effortDefault: string | null;
-  // true: effortDefault comes from the current settings, because the run stored none.
+  // true: the app resolved effortDefault now, because the run stored none.
   effortNow: boolean;
   usage: RunUsage | null;
   // Ended runs with a valid result only.
@@ -1303,12 +1303,10 @@ export type RunConflict = ApiError & { running: { run: number; pr: number | null
 // GET /api/runs/slots (spec.md section 6.26): the run limit and the pool runs, oldest first. taskKey: the Jira key of a task run.
 export type RunSlotsDto = { limit: number; running: (RunConflict["running"] & { taskKey?: string })[] };
 
-// sure: false when the source has a precedence that the runner docs do not state.
-export type SettingValue = { value: string; sure: boolean };
-// model: the model of a run without --model. null: the account default, which the app cannot see.
+// model: the model of a run without --model, from ANTHROPIC_MODEL. null: the Claude Code default, which the app cannot see.
 // effort: the effort of a run without --effort, by model choice. Key "": no --model. The other keys: each alias and each profile model text.
 // An absent key: unknown.
-export type RunnerDefaults = { model: SettingValue | null; effort: Record<string, SettingValue> };
+export type RunnerDefaults = { model: string | null; effort: Record<string, string> };
 
 // GET /api/meta. Product names, and the default model and effort of the runner. No other setting value.
 export type MetaDto = {
@@ -1327,8 +1325,8 @@ export type MetaDto = {
     advisors: string[];
     modelExample: string;
     check: RunnerCheckDto | null;
-    // defaults: from the user settings file of the runner. null: the file is absent or unreadable.
-    defaults: RunnerDefaults | null;
+    // defaults: from the run env and the runner docs. Runs ignore the user settings file of the runner (--restricted).
+    defaults: RunnerDefaults;
   };
   // Run log labels, keyed by RunEvent.tool.
   tools: Record<string, string>;

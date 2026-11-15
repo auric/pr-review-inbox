@@ -413,18 +413,17 @@ function Foot({ detail, meta, raw, onRaw }: { detail: RunDetail; meta: MetaDto; 
       const time = r.usage ? clockDur(r.usage.durationMs / 1000) : r.finishedAt ? clockDur((r.finishedAt - r.startedAt) / 1000) : "";
       // An ask run has no items. Its answer shows in Ask, in the panel slot.
       const count = countText(detail.items, r.status === "incomplete", r.kind, r.summary?.verify !== undefined);
+      const c = r.summary?.coverage;
+      const notes = c ? [...c.skipped, ...c.unavailable, ...c.notChecked] : [];
       return (
         <span>
           {count ? `Result: ${count}.` : "Answered."} {[tokens === null ? "" : tokenText(tokens), time].filter(Boolean).join(", ")}
           {tokens !== null || time ? "." : ""}
           {/* Only a review run has a summary section. The gaps of other runs show here. */}
           {r.status === "incomplete" &&
-            (r.kind !== "review"
-              ? ` Coverage has gaps. ${r.summary ? [...r.summary.coverage.skipped, ...r.summary.coverage.unavailable, ...r.summary.coverage.notChecked].join(" ") : ""}`
-              : " Coverage has gaps. The summary lists them.")}
-          {r.status === "completed" && r.kind !== "review" && r.summary?.coverage.notChecked.length
-            ? ` ${r.summary.coverage.notChecked.join(" ")}`
-            : null}
+            (r.kind !== "review" ? ` Coverage has gaps. ${notes.join(" ")}` : " Coverage has gaps. The summary lists them.")}
+          {/* judge.ts ended(): the notes of the model do not make a run incomplete, but they still show. */}
+          {r.status === "completed" && r.kind !== "review" && notes.length ? ` ${notes.join(" ")}` : null}
         </span>
       );
     }

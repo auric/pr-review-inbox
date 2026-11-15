@@ -19,7 +19,7 @@ export const createMeta = (review: ReviewJobs, settings: Settings) =>
     return c.json({
       app: { version: pkg.version, commit: BUILD_COMMIT },
       forge: { name: "Bitbucket" },
-      runner: { ...RUNNER, check: review.runnerCheck(), defaults: runnerDefaults(undefined, undefined, models) },
+      runner: { ...RUNNER, check: review.runnerCheck(), defaults: runnerDefaults(undefined, models) },
       tools: TOOL_LABELS,
       profiles: profiles.map((p) => ({
         id: p.id,

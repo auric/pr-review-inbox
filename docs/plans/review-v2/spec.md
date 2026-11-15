@@ -291,6 +291,7 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 ### 1.9 States, keys, and edges
 
 - Running: phase "finding", "checking", or "indexing" (existing). Cancel stops the current process and the run ends cancelled.
+- Incomplete: only a gap that the app finds makes a run incomplete. App gaps: a value that the app cut to a cap, a dropped verdict, reply, note, edit, or link, a candidate or a thread without an answer, a failed check, and an MCP server of the spec that is down or absent. The skipped, unavailable, and notChecked notes of the model stay in the coverage and show, but they do not change the status (user decision of 2026-11-15).
 - Verify phase failed: status incomplete, items with check "unchecked", the run line "The check did not finish: 9 findings are not checked." with "Show log".
 - No candidates: the verify phase does not start. A complete finder run with no candidates and full coverage says "No problems found in the checked areas." An incomplete one says what it did not check, never "no issues" (G6).
 - Verify off: no phase. Items show "Not checked".

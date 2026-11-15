@@ -512,7 +512,7 @@ describe("run pipeline", () => {
   );
 
   test(
-    "coverage gaps and an MCP server that did not connect make the run incomplete",
+    "an MCP server that did not connect makes the run incomplete; a skipped note of the model alone does not",
     async () => {
       const h = await setup();
       h.scenario({ fixture: subagentRun(RESULT, "failed") });
@@ -523,7 +523,8 @@ describe("run pipeline", () => {
       h.scenario({ fixture: subagentRun({ ...RESULT, coverage: { ...RESULT.coverage, skipped: ["src/big.bin"] } }) });
       const second = await h.finish((await h.start()).body.id);
       expect(second.run.id).not.toBe(first.run.id);
-      expect(second.run.status).toBe("incomplete");
+      expect(second.run.status).toBe("completed");
+      expect(second.run.summary?.coverage.skipped).toEqual(["src/big.bin"]);
       expect(second.items.length).toBe(3);
     },
     SLOW,
@@ -938,7 +939,8 @@ describe("brief and meta", () => {
       advisors: ["fable", "opus"],
       modelExample: "claude-opus-5-5",
       check: null,
-      defaults: null,
+      // The run env decides the values. The defaults test pins them.
+      defaults: expect.objectContaining({ effort: expect.any(Object) }),
     });
     expect(meta.profiles.map((p) => [p.id, p.name, p.explain, p.maxTurns])).toEqual([
       ["general", "Review", false, 100],
@@ -1370,9 +1372,11 @@ describe("editable profiles (M4)", () => {
   );
 
   test(
-    "a run without --effort stores the effort of the user settings: first for the settings model, then for the init model",
+    "a run without --effort stores the default effort of the init model and ignores the user settings file (--restricted)",
     async () => {
       const saved = process.env.CLAUDE_CONFIG_DIR;
+      const savedModel = process.env.ANTHROPIC_MODEL;
+      delete process.env.ANTHROPIC_MODEL;
       const config = mkdtempSync(join(tmpdir(), "rl-jobs-config-"));
       writeFileSync(
         join(config, "settings.json"),
@@ -1385,29 +1389,22 @@ describe("editable profiles (M4)", () => {
       try {
         const h = await setup();
         const meta = (await h.json<MetaDto>("/api/meta")).body;
-        expect(meta.runner.defaults).toEqual({
-          model: { value: "opus", sure: true },
-          effort: {
-            "": { value: "xhigh", sure: true },
-            opus: { value: "xhigh", sure: true },
-            sonnet: { value: "medium", sure: true },
-            haiku: { value: "low", sure: true },
-          },
-        });
+        // integration-check.md B39: the runs ignore the settings file, so its model and effort levels do not count.
+        expect(meta.runner.defaults).toEqual({ model: null, effort: { opus: "medium", sonnet: "medium", haiku: "medium" } });
         // A profile without an effort runs without --effort.
         expect((await putProfiles(h, [{ ...general, effort: null }])).status).toBe(200);
         await h.brief(NOTE, "general");
         const a = await h.start();
-        expect(a.body).toMatchObject({ effort: "default", effortDefault: "xhigh" });
+        expect(a.body).toMatchObject({ effort: "default", effortDefault: null });
         // The fake CLI init event names claude-haiku-5-5.
         const d = await h.finish(a.body.id);
-        expect(d.run).toMatchObject({ model: "claude-haiku-5-5", effort: "default", effortDefault: "low", effortNow: false });
+        expect(d.run).toMatchObject({ model: "claude-haiku-5-5", effort: "default", effortDefault: "medium", effortNow: false });
         // A run from before migration 019 stored no default effort. A run from before 018 stored no effort. Both ran without --effort.
         const runOf = async () => (await h.json<RunDetail>(`/api/runs/${a.body.id}`)).body.run;
         h.db.query("UPDATE review_run SET effort_default = NULL WHERE id = ?").run(a.body.id);
-        expect(await runOf()).toMatchObject({ effort: "default", effortDefault: "low", effortNow: true });
+        expect(await runOf()).toMatchObject({ effort: "default", effortDefault: "medium", effortNow: true });
         h.db.query("UPDATE review_run SET effort = NULL WHERE id = ?").run(a.body.id);
-        expect(await runOf()).toMatchObject({ effort: null, effortDefault: "low", effortNow: true });
+        expect(await runOf()).toMatchObject({ effort: null, effortDefault: "medium", effortNow: true });
         // The DTO resolves the value. The row keeps NULL.
         expect(h.db.query("SELECT effort_default FROM review_run WHERE id = ?").get(a.body.id)).toEqual({ effort_default: null });
         // An explicit --effort never gets a default.
@@ -1426,12 +1423,13 @@ describe("editable profiles (M4)", () => {
           200,
         );
         const after = (await h.json<MetaDto>("/api/meta")).body;
-        expect(after.runner.defaults?.effort["Opus[1m]"]).toEqual({ value: "xhigh", sure: true });
-        expect(after.runner.defaults?.effort["claude-opus-5-5-20260101"]).toEqual({ value: "xhigh", sure: true });
+        expect(after.runner.defaults.effort["Opus[1m]"]).toBe("medium");
+        expect(after.runner.defaults.effort["claude-opus-5-5-20260101"]).toBe("medium");
         expect(after.profiles[0]).toMatchObject({ model: "Opus[1m]", effort: null, reviewerMode: "off", skillCount: 1, mcpCount: 0 });
       } finally {
         if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
         else process.env.CLAUDE_CONFIG_DIR = saved;
+        if (savedModel !== undefined) process.env.ANTHROPIC_MODEL = savedModel;
         rmSync(config, { recursive: true, force: true });
       }
     },

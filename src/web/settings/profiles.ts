@@ -14,7 +14,6 @@ import {
   type McpToolSafety,
   type ProfileInput,
   type ReviewerMode,
-  type SettingValue,
   type VerifierOutcome,
 } from "../../shared/dto";
 
@@ -38,9 +37,8 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,199}$/;
 // The EFFORTS of src/shared/dto.ts.
 export const EFFORT_CHOICES: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
-// The text of the "no flag" choice. v: the value from the runner settings, if the server knows it.
-export const defaultChoice = (v: SettingValue | null | undefined) =>
-  v ? `Use my default (${v.value}${v.sure ? "" : ", from your settings"})` : "Use my default";
+// The text of the "no flag" choice. v: the default of the runner, if the server knows it.
+export const defaultChoice = (v: string | null | undefined) => (v ? `Default (${v})` : "Default");
 
 // A new profile saves at once, so it starts valid: a review profile with 100 turns, the documentation servers, and language checks.
 const NEW_NAME = "New profile";
@@ -360,7 +358,7 @@ export function valueText(field: ShippedField, v: ProfileInput, names: { module:
       return names.volume(v.volume);
     case "model":
     case "effort":
-      return flag(v[field], "Use my default");
+      return flag(v[field], "Default");
     case "advisor":
       return flag(v.advisor, "Off");
     case "reviewer":

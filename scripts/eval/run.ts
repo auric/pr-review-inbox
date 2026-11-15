@@ -94,8 +94,8 @@ import {
 
 const REPO = resolve(import.meta.dir, "../..");
 export const WARNING = "Each case runs your Claude CLI and uses your plan quota.";
-export const DEFAULT_MODEL_WARNING = "The result depends on your Claude Code settings.";
-const CLI_DEFAULT = "the default of your Claude Code settings";
+export const DEFAULT_MODEL_WARNING = "The result depends on the Claude Code default. The runs ignore your Claude Code settings file.";
+const CLI_DEFAULT = "the Claude Code default";
 // The model and effort of the main run: the profile value after the flags, else the CLI default.
 export const runSetup = (p: { model: string | null; effort: string | null }) =>
   `Model: ${p.model ?? CLI_DEFAULT}. Effort: ${p.effort ?? CLI_DEFAULT}.${p.model === null || p.effort === null ? ` ${DEFAULT_MODEL_WARNING}` : ""}`;
@@ -1064,8 +1064,8 @@ export async function main(argv: string[]): Promise<number> {
         const recall = counted === 0 ? "no seeded bug" : s?.recall ? `${Math.round(s.recall.mean * counted)}/${counted} bugs` : "no score";
         const time = run.minutes === null ? "" : `, ${run.minutes.toFixed(1)} min`;
         const shown = run.items.filter((i) => i.group === "main").length;
-        // judge.ts: skipped or unavailable coverage entries make a run incomplete.
-        const cov = run.status === "incomplete" ? run.coverage : null;
+        // The skipped and unavailable lines of each run. judge.ts: only the lines that the app adds make a run incomplete.
+        const cov = run.coverage ?? null;
         const gaps = cov
           ? (["skipped", "unavailable"] as const)
               .map((k) => (!cov[k].length ? "" : o.ordinals ? `, ${cov[k].length} ${k}` : `\n    ${k}: ${cov[k].join("; ")}`))

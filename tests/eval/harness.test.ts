@@ -92,16 +92,14 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(r.stdout).toContain(`Eval plan: ${loadCases("all").length} cases, 2 repeats, profile general, set v1.`);
     expect(r.stdout).toContain(WARNING);
     expect(r.stdout).toContain(DEFAULT_MODEL_WARNING);
-    expect(r.stdout).toContain("Model: the default of your Claude Code settings. Effort: high.");
+    expect(r.stdout).toContain("Model: the Claude Code default. Effort: high.");
     const hard = await bun([RUN, "--set", "hard"], guard);
     expect(hard.code).toBe(2);
     expect(hard.stdout).toContain(`Eval plan: ${loadCases("all", SETS.hard).length} cases, 1 repeat, profile general, set hard.`);
     const v4 = await bun([RUN, "--set", "hard", "--profile-version", "4"], guard);
     expect(v4.code).toBe(2);
     expect(v4.stdout).toContain("profile general of profile version 4, set hard.");
-    expect(v4.stdout).toContain(
-      "Model: the default of your Claude Code settings. Effort: the default of your Claude Code settings. The result depends on your Claude Code settings.",
-    );
+    expect(v4.stdout).toContain(`Model: the Claude Code default. Effort: the Claude Code default. ${DEFAULT_MODEL_WARNING}`);
   });
 
   test("--set picks the case folder, and --cases works within it", () => {
@@ -671,7 +669,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
   );
 
   test(
-    "an incomplete run records its coverage, and its run line names the skipped and unavailable entries",
+    "the model notes alone keep a run completed; the run records its coverage, and its run line names the skipped and unavailable entries",
     async () => {
       const [c] = loadCases("cpp-job-queue");
       if (!c) throw new Error("The case cpp-job-queue is missing.");
@@ -703,7 +701,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const r = await bun([RUN, "--cases", c.id, "--out", out, "--runner", process.execPath, FAKE, scenario]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      expect(r.stdout).toContain(`[1/1] ${c.id} #1: incomplete`);
+      expect(r.stdout).toContain(`[1/1] ${c.id} #1: completed`);
       expect(r.stdout).toContain("    skipped: tests/thread_pool_test.cpp: over the read limit\n");
       expect(r.stdout).toContain("    unavailable: third_party/: not in the snapshot\n");
       const files = readdirSync(out).filter((f) => f.endsWith(".json"));
@@ -711,7 +709,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(result.set).toBe("v1");
       // The case has no project rules, so the app adds the spec 1.3 line to notChecked.
       expect(result.runs[0]).toMatchObject({
-        status: "incomplete",
+        status: "completed",
         coverage: { ...coverage, notChecked: [...coverage.notChecked, "Project rules: no instructions loaded."] },
       });
     },

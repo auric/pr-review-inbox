@@ -1805,21 +1805,22 @@ async function b13() {
 }
 
 // ---------- B14: the default effort of a run without --effort ----------
-// The app labels its "Use my default" choices from the user settings file (src/server/review/defaults.ts).
+// The app labels its "Default" choices from the run env and the runner docs (src/server/review/defaults.ts).
 // `/effort status` prints the session level and works in -p (code.claude.com/docs/en/commands).
-// Run 1: no --model and no --effort. Run 2: --model haiku. Each run must print the level that the resolver gives.
+// Run 1: no --model and no --effort. Run 2: --model haiku. Both send --restricted, as app runs do. Each run must print the level
+// that the resolver gives.
 async function b14() {
   const { work, drop } = runnerFolder("b14");
   try {
-    const d = runnerDefaults(configDir, childEnv);
+    const d = runnerDefaults(childEnv);
     const cases = [
-      { name: "b14-default", model: null, want: d?.effort[""] },
-      { name: "b14-haiku", model: "haiku", want: d?.effort.haiku },
+      { name: "b14-default", model: null, want: d.effort[""] },
+      { name: "b14-haiku", model: "haiku", want: d.effort.haiku },
     ];
     const seen: string[] = [];
     let pass = true;
     for (const c of cases) {
-      const r = await runClaude(c.name, ["--strict-mcp-config", "--no-session-persistence"], "/effort status", work, {
+      const r = await runClaude(c.name, ["--restricted", "--strict-mcp-config", "--no-session-persistence"], "/effort status", work, {
         model: c.model,
         maxTurns: 1,
       });
@@ -1828,13 +1829,13 @@ async function b14() {
       const got = EFFORTS.map((l) => ({ l, i: text.search(new RegExp(`\\b${l}\\b`, "i")) }))
         .filter((x) => x.i >= 0)
         .sort((a, b) => a.i - b.i)[0]?.l;
-      pass &&= !!c.want && got === c.want.value;
+      pass &&= !!c.want && got === c.want;
       seen.push(
-        `${c.name}: exit=${r.exit} init.model=${String(r.init ? (r.init as { model?: unknown }).model : "none")} want=${c.want ? `${c.want.value}${c.want.sure ? "" : " (not sure)"}` : "unknown"} got=${got ?? "none"} text=${JSON.stringify(short(text, 160))}`,
+        `${c.name}: exit=${r.exit} init.model=${String(r.init ? (r.init as { model?: unknown }).model : "none")} want=${c.want ?? "unknown"} got=${got ?? "none"} text=${JSON.stringify(short(text, 160))}`,
       );
     }
-    if (DRY) return dry("B14", `resolver: model=${JSON.stringify(d?.model ?? null)} effort=${JSON.stringify(d?.effort ?? null)}`);
-    push("B14", pass ? "PASS" : "FAIL", `resolver model=${JSON.stringify(d?.model ?? null)}; ${seen.join("; ")}`, { defaults: d });
+    if (DRY) return dry("B14", `resolver: model=${JSON.stringify(d.model)} effort=${JSON.stringify(d.effort)}`);
+    push("B14", pass ? "PASS" : "FAIL", `resolver model=${JSON.stringify(d.model)}; ${seen.join("; ")}`, { defaults: d });
   } finally {
     drop();
   }

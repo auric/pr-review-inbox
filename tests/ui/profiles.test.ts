@@ -449,11 +449,10 @@ describe("pickers", () => {
 });
 
 describe("the no flag choice", () => {
-  test("names the value from the runner settings, and its source when the precedence is not documented", () => {
-    expect(defaultChoice(null)).toBe("Use my default");
-    expect(defaultChoice(undefined)).toBe("Use my default");
-    expect(defaultChoice({ value: "xhigh", sure: true })).toBe("Use my default (xhigh)");
-    expect(defaultChoice({ value: "low", sure: false })).toBe("Use my default (low, from your settings)");
+  test("names the runner default when the server knows it, never the user settings", () => {
+    expect(defaultChoice(null)).toBe("Default");
+    expect(defaultChoice(undefined)).toBe("Default");
+    expect(defaultChoice("xhigh")).toBe("Default (xhigh)");
   });
 });
 
@@ -553,7 +552,7 @@ describe("shipped profile edits and Duplicate", () => {
     expect(valueText("maxTurns", shipped, names)).toBe("100");
     expect(valueText("docs", shipped, names)).toBe("On");
     expect(valueText("modules", shipped, names)).toBe("SECURITY");
-    expect(valueText("model", shipped, names)).toBe("Use my default");
+    expect(valueText("model", shipped, names)).toBe("Default");
     expect(valueText("reviewer", shipped, names)).toBe("Auto, model same as the main run, effort high");
     expect(valueText("verifier", shipped, names)).toBe("On, model same as the main run, effort medium, refuted findings hide");
     expect(valueText("mcp", { ...shipped, mcp: [{ server: "docs", tools: ["a", "b"] }] }, names)).toBe("docs (a, b)");

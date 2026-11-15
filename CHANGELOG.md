@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Runs: a run is now "incomplete" only when the app finds a gap, for example a value that it cut, a dropped verdict, a failed check, or an MCP server that did not connect. The notes of Claude about what it skipped or could not reach still show, but the run stays done. Older runs keep their status.
+- Settings, Review profiles: the "Use my default" choice of the model and the effort is now "Default". Runs send `--restricted`, so Claude Code ignores your Claude Code settings file, and the app no longer reads the model or the effort from it. The run setup says "(default)" instead of "(your default)".
 - Build a Jira task: one Claude run now builds all open tasks of a part. Claude writes the tests first, then the code, and ticks each task in the plan file when its tests pass. The app then runs your approved checks. Red checks get up to "Test-fix tries" fix runs, and green checks give one commit with the ticked tasks in its message. The separate tests step and the commit per task are gone.
 - Build a Jira task: a part over its line budget no longer stops. Its commit gets the note "This PR has 520 changed lines, over your 400 limit." A part that changed no test file gets the note "Claude added or changed no test file."
 - Build a Jira task: a failed Claude run, a run that reached its turn cap twice, a run that the stall or loop guard stopped, and a usage limit now wait on their part with a reason and Continue. The task no longer stops. A run at its turn cap goes on once by itself. After an app restart, the task keeps its state, and each part that worked waits with "Needs you: the app stopped during the work on part 1. Continue goes on from there." Continue goes on with the kept work.

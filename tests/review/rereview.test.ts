@@ -328,13 +328,15 @@ const finding = (line: number, o: Record<string, unknown> = {}) => ({
   ...o,
 });
 const LINES = [3, 10, 20, 30, 35];
-// The base review: one finding per line in LINES and one question. The skipped file makes it incomplete.
+// The base review: one finding per line in LINES and one question. The run asks no thread, so the app drops the answer, and the
+// drop makes the run incomplete. The skipped note of the model alone would not.
 const BASE_RESULT = {
   summary: "Five lines change.",
   risks: [],
   questions: [{ text: "QUESTION-CANARY Must the flush stay atomic?", why: "The description does not say." }],
   coverage: { read: [], skipped: ["src/big.bin"], unavailable: [], notChecked: [] },
   findings: LINES.map((l) => finding(l)),
+  answered: [{ thread: 999, question: null, outcome: "settled", evidence: "Message 1.", reply: "", finding: null }],
 };
 
 async function setup() {

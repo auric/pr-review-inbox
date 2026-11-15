@@ -242,7 +242,7 @@ Review Loop principles:
 4. Zero-token tracking: polling, unread state, notifications, and publication never call an LLM. Only reviews, explanations, drafts, fix proposals, Ask answers, and task steps use tokens.
 5. Several runs run at once, up to the run limit in Settings (default 3). Each pull request has one run at a time. Each run shows the usage that the CLI reports. No automatic retry after a usage limit. A task loop takes a run slot for each run of a part session and frees it between runs. After one plan approval, it runs many steps until it needs the user (decision Q5). Exception (user decision of 2026-11-02): a task with sub-tasks that builds two or more parts at the same time runs their steps beside the run slots, one process per part.
 6. Revision-pinned evidence: every result names the commits it reviewed. A result for older commits shows as stale.
-7. Honest coverage: every result lists what it read, skipped, and could not reach. An incomplete run never reports "no issues".
+7. Honest coverage: every result lists what it read, skipped, and could not reach. An incomplete run never reports "no issues". Only a gap that the app finds makes a run incomplete. The coverage notes of the model show, but they do not change the status.
 8. No blind retry: after an unknown write outcome, reconcile with the code host first. Never claim exactly-once delivery without server support.
 9. Private code stays private: never put proprietary code, internal URLs, or PR text into public documentation queries.
 10. Deployment prerequisite: the company authorizes sending source code to Claude and using the documentation services.

@@ -12,6 +12,7 @@ import {
   capOf,
   effectiveVerdicts,
   type Found,
+  judgeAsk,
   markCopy,
   neverHidden,
   type SettleInput,
@@ -111,6 +112,7 @@ const found = (candidates: Candidate[]): Found => ({
   candidates,
   questions: [{ text: "Finder question?", why: "Why." }],
   replies: [],
+  gaps: [],
 });
 const FIND: RunPhase = {
   name: "find",
@@ -228,6 +230,37 @@ describe("verdicts", () => {
       [8, "unsure", null],
       [1, "confirmed", null],
     ]);
+  });
+});
+
+describe("run status (spec.md section 1.9)", () => {
+  const confirmed = (n: number) => run(outcome({ verdicts: [V(1, "confirmed")], coverage: NONE }), n);
+
+  test("the skipped and unavailable notes of the model alone keep the run complete, and the notes stay", () => {
+    const f = found([C(1)]);
+    const notes = { ...NONE, skipped: ["The build was not run."], unavailable: ["No test runner."] };
+    const e = settle({ ...f, summary: { ...f.summary, coverage: notes } }, input({ check: confirmed(1), written: 1 }));
+    expect(e.status).toBe("completed");
+    expect(e.result?.summary.coverage.skipped).toEqual(["The build was not run."]);
+    expect(e.result?.summary.coverage.unavailable).toEqual(["No test runner."]);
+    const ask = judgeAsk(outcome({ answer: "A.", coverage: notes }), [], []);
+    expect(ask.status).toBe("completed");
+    expect(ask.result?.summary.coverage.skipped).toEqual(["The build was not run."]);
+  });
+
+  test("a gap that the app adds makes the run incomplete", () => {
+    const f = found([C(1)]);
+    const down = "MCP server rl-git: absent";
+    const finder = { ...f, summary: { ...f.summary, coverage: { ...NONE, unavailable: [down] } }, gaps: [down] };
+    expect(settle(finder, input({ check: confirmed(1), written: 1 })).status).toBe("incomplete");
+    // A candidate without a verdict.
+    const e = settle(found([C(1), C(2)]), input({ check: confirmed(2), written: 2 }));
+    expect(e.status).toBe("incomplete");
+    expect(e.result?.summary.coverage.skipped).toEqual(["Candidate 2 has no verdict. It stays unchecked."]);
+    // An MCP server of the spec that did not connect.
+    const ask = judgeAsk(outcome({ answer: "A.", coverage: NONE }), ["rl-git"], []);
+    expect(ask.status).toBe("incomplete");
+    expect(ask.result?.summary.coverage.unavailable).toEqual([down]);
   });
 });
 

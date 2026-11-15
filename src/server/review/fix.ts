@@ -14,7 +14,8 @@ export type FixFile = { mode: string; bytes: Uint8Array } | "blocked" | "size";
 
 // ord: the index of the edit in the result. Exactly one of thread and finding is set.
 export type ValidEdit = Located & { ord: number; thread: number | null; finding: number | null; path: string; rows: DiffRowDto[] };
-export type ValidatedFix = { summary: string; coverage: Coverage; threads: FixNote[]; edits: ValidEdit[] };
+// added: the lines that the app added to coverage.skipped. Only they make the run incomplete.
+export type ValidatedFix = { summary: string; coverage: Coverage; threads: FixNote[]; edits: ValidEdit[]; added: string[] };
 // The threads and the findings that the run asked for.
 export type FixRequest = { threads: readonly number[]; findings: readonly number[] };
 
@@ -51,7 +52,7 @@ export function validateFix(result: FixResult, requested: FixRequest, files: Rea
     ]),
   ];
   const wanted = new Set(order);
-  const skipped = [...result.coverage.skipped];
+  const skipped: string[] = [];
   const notes = new Map<string, FixThread>();
   for (const [i, t] of result.threads.entries()) {
     const at = targetOf(t);
@@ -115,5 +116,11 @@ export function validateFix(result: FixResult, requested: FixRequest, files: Rea
       threads.push({ ...note, why: "dropped", drops: drops.get(key) ?? [] });
     } else threads.push(note);
   }
-  return { summary: result.summary, coverage: { ...result.coverage, skipped }, threads, edits };
+  return {
+    summary: result.summary,
+    coverage: { ...result.coverage, skipped: [...result.coverage.skipped, ...skipped] },
+    threads,
+    edits,
+    added: skipped,
+  };
 }

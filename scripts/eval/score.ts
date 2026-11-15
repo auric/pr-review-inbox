@@ -82,7 +82,8 @@ export type CaseRun = {
   finishedAt: number | null;
   minutes: number | null;
   usage: RunUsage | null;
-  // The coverage of the run summary. Skipped or unavailable entries make a run incomplete. Absent in files made before this field existed.
+  // The coverage of the run summary. Only the skipped or unavailable lines that the app adds make a run incomplete. Absent in files made
+  // before this field existed.
   coverage?: Coverage | null;
   // The verdict counts and the find and check phases of the run summary. usage is the sum of both phases. Absent in files made before
   // prompt version 2.1.
