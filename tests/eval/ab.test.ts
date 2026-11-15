@@ -6,10 +6,25 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
-import { type AbOptions, failedRuns, largeBaseline, largeCases, modeText, parseAb, reuseRefusal, runArgs } from "../../scripts/eval/ab";
+import { basename, join, relative, resolve } from "node:path";
+import {
+  type AbOptions,
+  FLAGS_FILE,
+  failedRuns,
+  flagsRefusal,
+  largeBaseline,
+  largeCases,
+  modeText,
+  parseAb,
+  reuseRefusal,
+  runArgs,
+  runFlags,
+} from "../../scripts/eval/ab";
 import { callsDir, evalProfile, parseOptions } from "../../scripts/eval/run";
-import type { EvalResult } from "../../scripts/eval/score";
+import { type EvalResult, endedOnLimit, LIMIT_EXIT } from "../../scripts/eval/score";
+
+console.log(`ab.test.ts imported from ${Bun.resolveSync("../../scripts/eval/ab", import.meta.dir)}`);
+
 import { dbPath, PROFILES_VERSION } from "../../src/server/config";
 import { profileRevision, promptVersion } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
@@ -157,6 +172,7 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   build: [],
   results: null,
   baseline: null,
+  resume: false,
   runner: ["fake"],
   ...o,
 });
@@ -210,6 +226,85 @@ describe("eval:ab --baseline checks", () => {
     expect(refused({ repeat: 2 }, opts({ candidateRepeat: "3" }))).toContain("ran with --repeat 2, but the candidate runs 3 repeats");
     // A different commit and CLI version are allowed.
     expect(refused({ commit: "def", cliVersion: "2.0.0" })).toBeNull();
+  });
+
+  test("a cut or short baseline is refused: its finished runs are fewer than the set cases x repeats", () => {
+    const run = (id: string, status: string, o: Partial<EvalResult["runs"][number]> = {}) =>
+      ({ case: id, repeat: 1, status, errorKind: null, ...o }) as EvalResult["runs"][number];
+    const info = (id: string) => ({ id, title: id, language: "ts", changedLines: 1, base: "b", head: "h", bugs: [], traps: [] });
+    const a = (runs: EvalResult["runs"]) => ({ ...header("review", "baseline"), cases: ["a", "b"].map(info), runs });
+    const full = a([run("a", "completed"), run("b", "incomplete")]);
+    expect(reuseRefusal("review", full, opts(), FP, false, 2)).toBeNull();
+    // A cut in the first pass: a.cases lists only the cases that ran, so the set count decides.
+    const cut = { ...a([run("a", "completed")]), cases: [info("a")] };
+    expect(reuseRefusal("review", cut, opts(), FP, false, 2)).toBe(
+      "Refused: the stored review baseline has 1 finished runs of 2 (2 cases x 1 repeats). Resume it with eval:ab --resume, then use it.",
+    );
+    expect(
+      reuseRefusal("review", a([run("a", "completed"), run("b", "failed", { errorKind: "process" })]), opts(), FP, false, 2),
+    ).toContain("has 1 finished runs of 2");
+    // judge.ts: a usage limit in the check phase leaves an incomplete run with verify.failed.
+    const limited = run("b", "incomplete", { verify: { failed: { kind: "usage_limit", text: null } } as never });
+    expect(reuseRefusal("review", a([run("a", "completed"), limited]), opts(), FP, false, 2)).toContain("has 1 finished runs of 2");
+    expect(reuseRefusal("review", cut, opts(), FP, true, 2)).toBe(
+      "Refused: the stored review candidate has 1 finished runs of 2 (2 cases x 1 repeats).",
+    );
+  });
+
+  test("--resume needs --results, also for a candidate run, and reaches only the runner arguments of its run", () => {
+    expect(parseAb(["--resume"])).toEqual({ error: "--resume needs --results." });
+    expect(parseAb(["--resume", "--results", "r"])).toMatchObject({ resume: true, baselineOnly: false });
+    expect(parseAb(["--resume", "--results", "r", "--baseline-only"])).toMatchObject({ resume: true });
+    expect(parseAb(["--resume", "--results", "r", "--candidate-replay"])).toMatchObject({ resume: true, replay: true });
+    expect(parseAb([])).toMatchObject({ resume: false });
+    const args = runArgs("review", "baseline", opts(), "out", [], undefined, "cut.json");
+    expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2)).toEqual(["--resume", "cut.json"]);
+    expect(runArgs("review", "baseline", opts(), "out")).not.toContain("--resume");
+  });
+
+  test("--resume refuses each run flag that differs from the cut run and names it; a baseline-only run can lower --repeat", () => {
+    const parsed = (argv: string[]) => {
+      const o = parseAb(argv);
+      if ("error" in o) throw new Error(o.error);
+      return o;
+    };
+    const cut = ["--clean", "8", "--repeat", "2", "--candidate-variants", "broad", "--candidate-effort", "low", "--review-only"];
+    const saved = runFlags(parsed(cut));
+    expect(flagsRefusal(saved, parsed(cut))).toBeNull();
+    // A changed or dropped flag of the cut run, and a flag that it did not have.
+    const changes: [string[], string][] = [
+      [cut.map((x) => (x === "broad" ? "verify2" : x)), "--candidate-variants broad, but this run has --candidate-variants verify2."],
+      [cut.map((x) => (x === "low" ? "high" : x)), "--candidate-effort low, but this run has --candidate-effort high."],
+      [
+        [...cut, "--candidate-reviewer-effort", "high"],
+        "--candidate-reviewer-effort none, but this run has --candidate-reviewer-effort high.",
+      ],
+      [[...cut, "--candidate-reviewer-mode", "off"], "--candidate-reviewer-mode none, but this run has --candidate-reviewer-mode off."],
+      [cut.map((x) => (x === "2" ? "3" : x)), "--repeat 2, but this run has --repeat 3."],
+      [[...cut, "--candidate-repeat", "1"], "--candidate-repeat none, but this run has --candidate-repeat 1."],
+      [cut.filter((x) => x !== "--review-only"), "--review-only on, but this run has --review-only off."],
+      [cut.map((x) => (x === "8" ? "4" : x)), "--clean 8, but this run has --clean 4."],
+    ];
+    for (const [argv, why] of changes)
+      expect(flagsRefusal(saved, parsed(argv))).toBe(`Refused: --resume: the cut run had ${why} Give the flags of the cut run.`);
+    // --candidate-replay refuses a finder change, so it compares on a cut run that changes only the verifier.
+    const verify = ["--candidate-verifier-effort", "high"];
+    expect(flagsRefusal(runFlags(parsed(verify)), parsed([...verify, "--candidate-replay"]))).toBe(
+      "Refused: --resume: the cut run had --candidate-replay off, but this run has --candidate-replay on. Give the flags of the cut run.",
+    );
+    const only = ["--repeat", "3", "--baseline-only", "--review-only"];
+    expect(flagsRefusal(runFlags(parsed(only)), parsed(["--repeat", "2", "--baseline-only", "--review-only"]))).toBeNull();
+    expect(flagsRefusal(runFlags(parsed(only)), parsed(["--repeat", "3", "--baseline-only"]))).toContain("--review-only on");
+  });
+
+  test("a usage limit in the finder or the verify phase counts as a limit, a failed or completed run does not", () => {
+    const run = (o: Partial<EvalResult["runs"][number]>) => ({ case: "a", repeat: 1, status: "completed", errorKind: null, ...o }) as never;
+    expect(LIMIT_EXIT).toBe(3);
+    expect(endedOnLimit({ runs: [run({}), run({ status: "failed", errorKind: "usage_limit" })] })).toBe(true);
+    expect(endedOnLimit({ runs: [run({ status: "incomplete", verify: { failed: { kind: "usage_limit", text: null } } as never })] })).toBe(
+      true,
+    );
+    expect(endedOnLimit({ runs: [run({}), run({ status: "failed", errorKind: "process" })] })).toBe(false);
   });
 
   test("a repeat-2 candidate reuses a repeat-3 baseline, also with no --repeat", () => {
@@ -291,7 +386,7 @@ describe("eval:ab --large (docs/plans/review-v3.md WP-V13)", () => {
   const FULL = "f".repeat(64);
   const SUB = "5".repeat(64);
   const caseInfo = (id: string) => ({ id, title: id, language: "ts", changedLines: 1, base: "b", head: "h", bugs: [], traps: [] });
-  const caseRun = (id: string, repeat = 1) => ({ case: id, repeat }) as EvalResult["runs"][number];
+  const caseRun = (id: string, repeat = 1) => ({ case: id, repeat, status: "completed" }) as EvalResult["runs"][number];
   const full = (): EvalResult => ({
     ...header("review", "baseline"),
     cases: ["a", "b", "c"].map(caseInfo),
@@ -459,9 +554,14 @@ describe("eval:ab arguments", () => {
   test("--candidate-variants takes broad and verify2 and refuses the retired variants", () => {
     expect(parseAb(["--candidate-variants", "broad"])).toMatchObject({ variants: ["broad"] });
     expect(parseAb(["--candidate-variants", "verify2,broad"])).toMatchObject({ variants: ["verify2", "broad"] });
+    // review-quality-2026.md item 7.
+    expect(parseAb(["--candidate-variants", "classes"])).toMatchObject({ variants: ["classes"] });
+    // review-quality-2026.md item 10.
+    expect(parseAb(["--candidate-variants", "security2"])).toMatchObject({ variants: ["security2"] });
+    expect(parseAb(["--candidate-variants", "security2-verify"])).toMatchObject({ variants: ["security2-verify"] });
     for (const retired of ["signal", "order", "rules2", "rereview-strict"])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
-        error: expect.stringContaining("--variants must be a comma list of broad, parts, verify2."),
+        error: expect.stringContaining("--variants must be a comma list of broad, classes, parts, security2, security2-verify, verify2."),
       });
   });
 
@@ -505,6 +605,8 @@ describe("eval:ab arguments", () => {
       ["--candidate-modules", "failures"],
       ["--candidate-variants", "broad"],
       ["--candidate-variants", "broad,verify2"],
+      ["--candidate-variants", "classes"],
+      ["--candidate-variants", "security2"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
       ["--candidate-verifier", "off"],
     ])
@@ -514,6 +616,11 @@ describe("eval:ab arguments", () => {
     expect(parseAb(["--candidate-replay", "--candidate-verifier-effort", "high"])).toMatchObject({ replay: true, verifierEffort: "high" });
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can test it.
     expect(parseAb(["--candidate-replay", "--candidate-variants", "verify2"])).toMatchObject({ replay: true, variants: ["verify2"] });
+    // review-quality-2026.md item 10: security2-verify is the verify half of security2.
+    expect(parseAb(["--candidate-replay", "--candidate-variants", "security2-verify"])).toMatchObject({
+      replay: true,
+      variants: ["security2-verify"],
+    });
     // --effort changes both sides, so the finder of the replay matches its baseline.
     expect(parseAb(["--candidate-replay", "--effort", "medium"])).toMatchObject({ replay: true });
   });
@@ -642,7 +749,7 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(a.requested?.effort).not.toBe("low");
       expect(b.requested?.effort).toBe("low");
       expect(a.fingerprint).toBe(b.fingerprint as string);
-      expect(readdirSync(results).sort()).toEqual(["review-baseline", "review-candidate"]);
+      expect(readdirSync(results).sort()).toEqual([FLAGS_FILE, "review-baseline", "review-candidate"]);
       firstRun = calls();
     },
     SLOW,
@@ -667,7 +774,7 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(r.stdout).toContain("== Review cases: 1 cases x 1 ==");
       // Same base profile, same effort: the candidate adds only variants and modules.
       expect(r.stdout).not.toContain("A and B used different profiles");
-      expect(readdirSync(again)).toEqual(["review-candidate"]);
+      expect(readdirSync(again).sort()).toEqual([FLAGS_FILE, "review-candidate"]);
     },
     SLOW,
   );
@@ -726,7 +833,7 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(r.code).toBe(0);
       expect(r.stdout).toContain(`No review baseline in ${empty}, so the review baseline runs.`);
       expect(calls() - before).toBe(firstRun);
-      expect(readdirSync(again).sort()).toEqual(["review-baseline", "review-candidate"]);
+      expect(readdirSync(again).sort()).toEqual([FLAGS_FILE, "review-baseline", "review-candidate"]);
     },
     SLOW,
   );
@@ -740,7 +847,7 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(r.code).toBe(0);
       expect(r.stdout).toContain("== Review cases: 1 cases x 1, baseline only ==");
       expect(r.stdout).toContain("== Re-review cases: skipped, --review-only ==");
-      expect(readdirSync(only)).toEqual(["review-baseline"]);
+      expect(readdirSync(only).sort()).toEqual([FLAGS_FILE, "review-baseline"]);
       const base = join(only, "review-baseline");
       const file = readdirSync(base).find((f) => f.endsWith(".json")) as string;
       const a = JSON.parse(readFileSync(join(base, file), "utf8")) as EvalResult;
@@ -763,6 +870,184 @@ describe("eval:ab end to end with the fake CLI", () => {
       const b = JSON.parse(readFileSync(join(cand, readdirSync(cand).find((f) => f.endsWith(".json")) as string), "utf8")) as EvalResult;
       expect(b.requested).toMatchObject({ replayOf: file, verifierEffort: "high", reviewerMode: "auto" });
       expect(b.runs[0]?.items.map((i) => [i.path, i.line, i.verdict])).toEqual(a.runs[0]?.items.map((i) => [i.path, i.line, i.verdict]));
+    },
+    SLOW,
+  );
+
+  test(
+    "--resume continues the cut baseline in its own file, and a lower --repeat works only when the finished runs fit",
+    async () => {
+      const res = join(TMP, "results-resume");
+      const flags = ["--results", res, "--baseline-only", "--review-only"];
+      const none = await run([...flags, "--resume"]);
+      expect(none.code).toBe(2);
+      expect(none.stderr).toContain(`--resume: ${res} holds no cut result.`);
+
+      const first = await run([...flags, "--repeat", "2"]);
+      expect(first.code).toBe(0);
+      const base = join(res, "review-baseline");
+      const name = readdirSync(base).find((f) => f.endsWith(".json")) as string;
+      const file = join(base, name);
+      const read = () => JSON.parse(readFileSync(file, "utf8")) as EvalResult;
+      const a = read();
+      expect(a.runs.map((x) => x.repeat)).toEqual([1, 2]);
+      // A baseline of an earlier version has no flag record. A baseline-only resume works without it.
+      rmSync(join(res, FLAGS_FILE));
+      // The cut: the run of repeat 2 has no entry. Its calls stay on disk.
+      writeFileSync(file, JSON.stringify({ ...a, runs: a.runs.slice(0, 1) }));
+      // A cut result is no baseline to reuse.
+      const reuse = await run(["--results", join(TMP, "results-resume-reuse"), "--baseline", res, "--repeat", "2"]);
+      expect(reuse.code).toBe(2);
+      expect(reuse.stderr).toContain("Refused: the stored review baseline has 1 finished runs of 2 (1 cases x 2 repeats).");
+
+      const before = calls();
+      const r = await run([...flags, "--repeat", "2", "--resume"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Resume: 1 of 2 runs are done.");
+      expect(r.stdout).not.toContain("[1/2]");
+      expect(r.stdout).toContain("[2/2] case 1 #2:");
+      expect(calls() - before).toBe(firstRun / 2);
+      expect(readdirSync(base).filter((f) => f.endsWith(".json"))).toEqual([name]);
+      const b = read();
+      expect(b.runs.map((x) => x.repeat)).toEqual([1, 2]);
+      expect(b.runs[0]).toEqual(a.runs[0] as EvalResult["runs"][number]);
+      expect(b.resumes).toHaveLength(1);
+
+      // Repeat 2 holds a finished run, so --repeat 1 does not fit. The file stays as it is.
+      const bytes = readFileSync(file, "utf8");
+      const low = await run([...flags, "--repeat", "1", "--resume"]);
+      expect(low.code).toBe(2);
+      expect(low.stderr).toContain("Refused: --resume: 1 finished runs of the saved result are outside 1 cases x 1 repeats.");
+      expect(readFileSync(file, "utf8")).toBe(bytes);
+      // A cut in repeat 1 fits --repeat 1: no case run, the result takes repeat 1, and the calls of repeat 2 go.
+      const id = a.cases[0]?.id as string;
+      const pairOne = readdirSync(callsDir(file)).filter((f) => f.startsWith(`${id}-1-`));
+      expect(pairOne.length).toBeGreaterThan(0);
+      writeFileSync(file, JSON.stringify({ ...b, runs: b.runs.slice(0, 1) }));
+      const fit = await run([...flags, "--repeat", "1", "--resume"]);
+      expect(fit.stderr).toBe("");
+      expect(fit.code).toBe(0);
+      expect(fit.stdout).toContain("Resume: 1 of 1 runs are done.");
+      expect(read()).toMatchObject({ repeat: 1, runs: [b.runs[0]] });
+      expect(readdirSync(callsDir(file)).sort()).toEqual(pairOne.sort());
+    },
+    SLOW,
+  );
+
+  const resultIn = (d: string) => join(d, readdirSync(d).find((f) => f.endsWith(".json")) as string);
+  const readJson = (f: string) => JSON.parse(readFileSync(f, "utf8")) as EvalResult;
+
+  test(
+    "--resume continues a cut candidate run with --baseline, and refuses a changed flag or a missing flag record before any run",
+    async () => {
+      const res = join(TMP, "results-cand-resume");
+      const flags = ["--results", res, "--baseline", results, "--candidate-effort", "low"];
+      const first = await run(flags);
+      expect(first.code).toBe(0);
+      const file = resultIn(join(res, "review-candidate"));
+      const a = readJson(file);
+      writeFileSync(file, JSON.stringify({ ...a, runs: [] }));
+      const bytes = readFileSync(file, "utf8");
+      const before = calls();
+      const effort = await run([...flags.slice(0, -2), "--resume"]);
+      expect(effort.code).toBe(2);
+      expect(effort.stderr).toContain(
+        "Refused: --resume: the cut run had --candidate-effort low, but this run has --candidate-effort none. Give the flags of the cut run.",
+      );
+      const only = await run([...flags, "--review-only", "--resume"]);
+      expect(only.code).toBe(2);
+      expect(only.stderr).toContain("the cut run had --review-only off, but this run has --review-only on.");
+      expect(calls()).toBe(before);
+      expect(readFileSync(file, "utf8")).toBe(bytes);
+
+      const r = await run([...flags, "--resume"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("--- review baseline: reused");
+      expect(r.stdout).toContain("Resume: 0 of 1 runs are done.");
+      expect(r.stdout).toContain("== Review cases: 1 cases x 1 ==");
+      expect(calls() - before).toBe(firstRun / 2);
+      expect(readdirSync(join(res, "review-candidate")).filter((f) => f.endsWith(".json"))).toEqual([basename(file)]);
+      const b = readJson(file);
+      expect(b.runs).toHaveLength(1);
+      expect(b.resumes).toHaveLength(1);
+      expect(b.requested?.effort).toBe("low");
+
+      rmSync(join(res, FLAGS_FILE));
+      const lost = await run([...flags, "--resume"]);
+      expect(lost.code).toBe(2);
+      expect(lost.stderr).toContain(`--resume: ${res} has no ${FLAGS_FILE}, so the flags of the cut run are not known.`);
+    },
+    SLOW,
+  );
+
+  test(
+    "--resume continues a cut --candidate-replay run with only the verify calls",
+    async () => {
+      const only = join(TMP, "results-only");
+      const replayed = join(TMP, "results-replay");
+      const file = resultIn(join(replayed, "review-candidate"));
+      const a = readJson(file);
+      writeFileSync(file, JSON.stringify({ ...a, runs: [] }));
+      const kinds = () =>
+        readRecords<{ argv: string[] }>(join(dir, "calls.jsonl"))
+          .filter((x) => x.argv.includes("-p"))
+          .map((x) => schemaKind(JSON.parse(x.argv[x.argv.indexOf("--json-schema") + 1] ?? "{}").properties ?? {}));
+      const before = kinds().length;
+      const r = await run([
+        "--results",
+        replayed,
+        "--baseline",
+        only,
+        "--candidate-replay",
+        "--candidate-verifier-effort",
+        "high",
+        "--resume",
+      ]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Resume: 0 of 1 runs are done.");
+      expect(kinds().slice(before)).toEqual(["verify"]);
+      const b = readJson(file);
+      expect(b.resumes).toHaveLength(1);
+      expect(b.runs.map((x) => x.items.map((i) => [i.path, i.line, i.verdict]))).toEqual(
+        a.runs.map((x) => x.items.map((i) => [i.path, i.line, i.verdict])),
+      );
+    },
+    SLOW,
+  );
+
+  test(
+    "a usage limit exits 3 and stops before the candidate, and the same command with --resume finishes both sides",
+    async () => {
+      const limit = join(dir, "limit.json");
+      writeFileSync(
+        limit,
+        JSON.stringify({
+          record: join(dir, "calls.jsonl"),
+          auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
+          fixture: claudeStream(dir, "limit", "claude-synthetic/usage-limit.jsonl"),
+          exitCode: 1,
+          delayMs: 1,
+        }),
+      );
+      const res = join(TMP, "results-limit");
+      const hit = await bun([AB, "--out", out, "--results", res, "--runner", process.execPath, FAKE, limit]);
+      expect(hit.code).toBe(3);
+      expect(hit.stderr).toContain(
+        "The review baseline run hit the usage limit. Run the same command with --resume after the limit resets.",
+      );
+      expect(readdirSync(res).sort()).toEqual([FLAGS_FILE, "review-baseline"]);
+      expect(readJson(resultIn(join(res, "review-baseline"))).runs[0]).toMatchObject({ status: "failed", errorKind: "usage_limit" });
+
+      const r = await run(["--results", res, "--resume"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("It drops 1 saved run that did not finish or hit the usage limit.");
+      expect(r.stdout).toContain("Failed runs: baseline 0, candidate 0.");
+      expect(readJson(resultIn(join(res, "review-baseline"))).resumes).toHaveLength(1);
+      expect(readJson(resultIn(join(res, "review-candidate"))).resumes).toBeUndefined();
     },
     SLOW,
   );

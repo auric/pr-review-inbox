@@ -4,8 +4,9 @@
 // Labels the findings of eval results (docs/plans/review-v2/review-quality-2026.md E3, E4). A matcher compares each finding with the
 // gold items of its files. A judge labels each finding that matches no gold item. The labels go to <eval-local>/labels/<key>/, never
 // into case.json. A later run reuses each stored answer, so a rescore costs nothing.
-// Usage: bun run eval:label -- <result folder or file> [--real] [--runner <command> <args...>]. Without --real or --runner, the command
-// prints the open work and exits with code 2. With no open work, it prints the scores and needs no CLI.
+// Usage: bun run eval:label -- <result folder or file> [--real | --evidence] [--runner <command> <args...>]. Without --real or --runner,
+// the command prints the open work and exits with code 2. With no open work, it prints the scores and needs no CLI. --evidence prints the
+// evidence reference table of each label set and needs no CLI.
 // Exit codes: 0 done, 1 a CLI run failed or gave an invalid answer, 2 a usage error, a refused result, or the plan.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -15,6 +16,7 @@ import { z } from "zod";
 import { taskFiles } from "../../src/server/context/task-file";
 import { GIT_SERVER } from "../../src/server/review/catalog";
 import { type AgentSpec, createClaudeRunner, type RunOutcome, type RunSpec, type StdioServerSpec } from "../../src/server/review/claude";
+import { git } from "../../src/server/review/git";
 import { gitMcpServer } from "../../src/server/review/git-mcp";
 import { verifyMaxTurns } from "../../src/server/review/jobs";
 import { usageOf } from "../../src/server/review/judge";
@@ -26,13 +28,15 @@ import type { IssueContext } from "../../src/shared/dto";
 import { coverage } from "../../src/shared/review";
 import type { PullRequest } from "../../src/shared/types";
 import { buildRepo, bundleRepo, EVAL_AUTHOR, type EvalCase, findCase, loadCase, localDir, rereviewDir, setDir } from "./cases";
-import { readResult, summaryText } from "./compare";
+import { evidenceText, readResult, summaryText } from "./compare";
 import { localRefusal } from "./rescore";
 import {
   type CaseRun,
   type EvalCaseInfo,
   type EvalItem,
   type EvalResult,
+  evidenceCheck,
+  evidenceRefs,
   type Gold,
   type Grounding,
   goldFiles,
@@ -458,14 +462,39 @@ function taskMd(fx: EvalCase): ContextFile[] {
 
 type Judge = { ws: Workspace; git: StdioServerSpec };
 
-// E4: a sanitized workspace of the case head, as jobs.ts builds it, with pr.md and task.md. Threads stay out of pr.md: a thread can claim
-// a label. A local case needs the build of the set that ran (localRefusal), a fixture case its current fixture at the same head.
-async function judgeWorkspace(r: EvalResult, c: EvalCaseInfo, ctx: Ctx): Promise<Judge> {
+// The fixture of a case and a bare repository at its head: the local bundle, or the fixture patch.
+async function caseRepo(r: EvalResult, c: EvalCaseInfo, ctx: Pick<Ctx, "tmp" | "bundles">) {
   const fx = r.set === "local" ? loadCase(join(r.rereview ? rereviewDir() : setDir("local"), c.id)) : findCase(c.id);
   // The messages name no case: main adds its ordinal, as the output of a local set holds no case ID.
   if (!fx) throw new Error("The case has no fixture now.");
   const repo = fx.local ? await bundleRepo(fx.local, ctx.tmp, ctx.bundles) : await buildRepo(fx, mkdtempSync(join(ctx.tmp, "repo-")));
   if (repo.head !== c.head) throw new Error("The fixture head is not the head that the runs reviewed.");
+  return { fx, repo };
+}
+
+// review-quality-2026.md item 8 gate: the line count of each file at the case head that an evidence reference names. The line count
+// follows validate.ts: a last newline adds no line.
+async function headLines(w: CaseWork, ctx: Pick<Ctx, "tmp" | "bundles">): Promise<Map<string, number>> {
+  const cited = new Set(w.runs.flatMap((run) => run.items.flatMap((i) => evidenceRefs(i.evidence ?? "").map((x) => x.path))));
+  const out = new Map<string, number>();
+  if (!cited.size) return out;
+  const { repo } = await caseRepo(w.result, w.c, ctx);
+  const g = (args: string[]) => git(["--git-dir", repo.url, ...args], { env: repo.env });
+  // ls-tree -z: "<mode> <type> <object>\t<path>" per entry. Only blobs are files: a submodule entry is a commit.
+  const entries = (await g(["ls-tree", "-r", "-z", repo.head])).split("\0");
+  const tree = new Set(entries.filter((e) => e.split("\t")[0]?.split(" ")[1] === "blob").map((e) => e.slice(e.indexOf("\t") + 1)));
+  for (const path of cited) {
+    if (!tree.has(path)) continue;
+    const lines = (await g(["cat-file", "blob", `${repo.head}:${path}`])).split("\n");
+    out.set(path, lines.at(-1) === "" ? lines.length - 1 : lines.length);
+  }
+  return out;
+}
+
+// E4: a sanitized workspace of the case head, as jobs.ts builds it, with pr.md and task.md. Threads stay out of pr.md: a thread can claim
+// a label. A local case needs the build of the set that ran (localRefusal), a fixture case its current fixture at the same head.
+async function judgeWorkspace(r: EvalResult, c: EvalCaseInfo, ctx: Ctx): Promise<Judge> {
+  const { fx, repo } = await caseRepo(r, c, ctx);
   const remote: GitRemote = {
     url: repo.url,
     sourceUrl: repo.url,
@@ -741,16 +770,49 @@ function openWork(groups: Group[]) {
 
 const usd = (x: number) => `$${x.toFixed(2)}`;
 export const USAGE =
-  "Usage: bun run eval:label -- <result folder or file> [--real] [--runner <command> <args...>]\n--real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the open work prints and the exit code is 2.";
+  "Usage: bun run eval:label -- <result folder or file> [--real | --evidence] [--runner <command> <args...>]\n--real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the open work prints and the exit code is 2.\n--evidence runs no CLI. It checks the path:line references in the evidence of each finding against the head files, and prints one table per label set.";
 
-export function parseLabel(argv: string[]): { path: string; real: boolean; runner: string[] | null } | null {
+// review-quality-2026.md item 8 gate: the evidence table of each label set. No CLI run. The output holds counts only, because a path
+// or a case ID can name a private project.
+async function evidenceMain(groups: Group[]): Promise<number> {
+  const tmp = mkdtempSync(join(tmpdir(), "rl-eval-evidence-"));
+  const ctx = { tmp, bundles: new Map<string, string>() };
+  try {
+    for (const gr of groups) {
+      const heads = new Map<string, Map<string, number>>();
+      for (const [n, w] of gr.cases.entries()) {
+        try {
+          heads.set(w.c.id, await headLines(w, ctx));
+        } catch (e) {
+          console.error(`Case ${n + 1} of label set ${gr.key.slice(0, 12)}: ${(e as Error).message.replaceAll(w.c.id, `case ${n + 1}`)}`);
+          return 1;
+        }
+      }
+      const rows = evidenceCheck(
+        gr.results.map((x) => x.r),
+        groundingOf(openStore(gr.dir)),
+        (id, path) => heads.get(id)?.get(path),
+      );
+      console.log(
+        `\nLabel set ${gr.key.slice(0, 12)}: ${gr.results.length} result files, ${gr.cases.length} cases.\n${evidenceText(rows)}`,
+      );
+    }
+    return 0;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
+export function parseLabel(argv: string[]): { path: string; real: boolean; evidence: boolean; runner: string[] | null } | null {
   const at = argv.indexOf("--runner");
   const runner = at < 0 ? null : argv.slice(at + 1);
   const args = at < 0 ? argv : argv.slice(0, at);
   const real = args.includes("--real");
-  const paths = args.filter((a) => a !== "--real");
-  if (paths.length !== 1 || paths[0]?.startsWith("-") || runner?.length === 0 || (real && runner)) return null;
-  return { path: paths[0] as string, real, runner };
+  const evidence = args.includes("--evidence");
+  const paths = args.filter((a) => a !== "--real" && a !== "--evidence");
+  if (paths.length !== 1 || paths[0]?.startsWith("-") || runner?.length === 0 || (real && runner) || (evidence && (real || runner)))
+    return null;
+  return { path: paths[0] as string, real, evidence, runner };
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -759,7 +821,7 @@ export async function main(argv: string[]): Promise<number> {
     console.error(USAGE);
     return 2;
   }
-  const { real, runner } = p;
+  const { real, evidence, runner } = p;
   const path = resolve(p.path);
   if (!existsSync(path)) {
     console.error(`No file or folder ${path}.\n${USAGE}`);
@@ -786,6 +848,7 @@ export async function main(argv: string[]): Promise<number> {
     }
   }
   const groups = groupsOf(results);
+  if (evidence) return evidenceMain(groups);
   const before = openWork(groups);
   const open = before.chunks + before.findings + before.calibrations;
   if (open && !real && !runner) {

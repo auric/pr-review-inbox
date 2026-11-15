@@ -235,6 +235,39 @@ describe("eval:label with the fake CLI (E3, E4)", () => {
       const results = join(dir, "results");
       mkdirSync(join(results, "review-baseline", "x.calls"), { recursive: true });
       writeFileSync(join(results, "review-baseline", "r.json"), JSON.stringify(result));
+      // review-quality-2026.md item 8 gate: a copy of the result with evidence, in its own folder. Evidence is not in the item hash, so
+      // the copy shares the label set. i1 cites the last line of csv.ts at the head, i3 the line after it, i4 a file that is not there.
+      const head = (await repo.show(repo.head, csv)).split("\n");
+      const last = head.at(-1) === "" ? head.length - 1 : head.length;
+      const ev = (i: EvalItem, evidence: string) => ({ ...i, evidence });
+      const evDir = join(dir, "evidence");
+      mkdirSync(evDir);
+      writeFileSync(
+        join(evDir, "r.json"),
+        JSON.stringify({
+          ...result,
+          runs: [
+            caseRun(1, [
+              ev(i1, `${csv}:${last}`),
+              ev(i2, "no reference"),
+              ev(i3, `${csv}:${last + 1}`),
+              ev(i4, "src/export/nope.ts:1"),
+              i5,
+            ]),
+            caseRun(2, [ev(i1, `${csv}:1-${last}`), ev(i4b, `https://host.invalid:8080/x and ${csv}:1`)]),
+          ],
+        }),
+      );
+      const evidence = async () => {
+        const x = await label([evDir, "--evidence"], local);
+        expect(x.stderr).toBe("");
+        expect(x.code).toBe(0);
+        expect(x.stdout).not.toContain("csv.ts");
+        expect(x.stdout).not.toContain(fx.id);
+        return x.stdout;
+      };
+      // No labels yet: every finding has no label. No CLI runs.
+      expect(await evidence()).toMatch(/\nno label\s+7\s+1\s+1\s+5\s+5\s+1\s+20\.0%\s+1\s+20\.0%(\n|$)/);
       // A JSON file that is no result.
       writeFileSync(join(results, "MANIFEST.json"), "{}");
 
@@ -371,6 +404,15 @@ describe("eval:label with the fake CLI (E3, E4)", () => {
       expect(again.stdout).toContain("agreement 100.0%");
       expect(existsSync(join(local, "labels", labelKey(result), "matches.json"))).toBe(true);
 
+      // The evidence table with the labels: i1 claims B1 twice, i3 claims T1, i2 is judge tp, and i4, i5, i4b are judge fp.
+      const table = await evidence();
+      expect(table).toContain("Label set ");
+      expect(table).toMatch(/\nmust-find\s+2\s+0\s+0\s+2\s+2\s+0\s+0\.0%\s+0\s+0\.0%\n/);
+      expect(table).toMatch(/\ntrap\s+1\s+0\s+0\s+1\s+1\s+0\s+0\.0%\s+1\s+100\.0%\n/);
+      expect(table).toMatch(/\njudge tp\s+1\s+0\s+1\s+0\s+0\s+0\s+-\s+0\s+-\n/);
+      expect(table).toMatch(/\njudge fp\s+3\s+1\s+0\s+2\s+2\s+1\s+50\.0%\s+0\s+0\.0%\n/);
+      expect(table).toMatch(/\nno label\s+0\s+0\s+0\s+0\s+0\s+0\s+-\s+0\s+-(\n|$)/);
+
       // eval:compare and eval:rescore read the same labels.
       const file = join(results, "review-baseline", "r.json");
       const cmp = await label([file, file], local, COMPARE);
@@ -473,8 +515,8 @@ describe("eval:label with the fake CLI (E3, E4)", () => {
         runs: [
           {
             ...caseRun(1, [
-              item({ path: "a.ts", line: 5, title: "Loop ends early" }),
-              item({ path: "a.ts", line: 2, title: "Unused import" }),
+              item({ path: "a.ts", line: 5, title: "Loop ends early", evidence: "a.ts:10" }),
+              item({ path: "a.ts", line: 2, title: "Unused import", evidence: "a.ts:11" }),
             ]),
             case: id,
           },
@@ -526,6 +568,15 @@ describe("eval:label with the fake CLI (E3, E4)", () => {
       expect(runs[2]?.context["findings.md"]).toContain("Unused import");
       expect(out.stdout).toMatch(/grounded noise: [^\n]+1\.00/);
 
+      // review-quality-2026.md item 8 gate: the head files come from the bundle. a.ts has 10 lines, so a.ts:11 is out of the file.
+      const ev = await label([file, "--evidence"], local);
+      expect(ev.stderr).toBe("");
+      expect(ev.code).toBe(0);
+      expect(ev.stdout).toMatch(/\nmust-find\s+1\s+0\s+0\s+1\s+1\s+0\s+0\.0%\s+0\s+0\.0%\n/);
+      expect(ev.stdout).toMatch(/\njudge fp\s+1\s+0\s+0\s+1\s+1\s+0\s+0\.0%\s+1\s+100\.0%\n/);
+      expect(ev.stdout).not.toContain(id);
+      expect(ev.stdout).not.toContain("a.ts");
+
       // A new build of the set changes case.json, so the labels of this result no longer fit.
       writeFileSync(caseFile, `${caseJson}\n`);
       const refused = await label([file], local);
@@ -539,6 +590,7 @@ describe("eval:label with the fake CLI (E3, E4)", () => {
     const dir = mkdtempSync(join(TMP, "usage-"));
     expect((await label([], dir)).code).toBe(2);
     expect((await label([dir, "--real", "--runner", "x"], dir)).code).toBe(2);
+    expect((await label([dir, "--evidence", "--real"], dir)).code).toBe(2);
     const none = await label([dir], dir);
     expect(none.code).toBe(2);
     expect(none.stderr).toContain("No eval result file");

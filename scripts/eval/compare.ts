@@ -4,7 +4,20 @@
 // Prints the scores of eval result files (docs/plans/review-v2/spec.md section 4.3).
 // Usage: bun run eval:compare <a.json> <b.json>. Exit codes: 0 done, 2 a usage error, an unreadable file, or a refusal().
 import { readFileSync } from "node:fs";
-import { BOOTSTRAP, type EvalResult, type Grounding, METRICS, type Metric, pairedDelta, type Score, type Stat, score } from "./score";
+import {
+  BOOTSTRAP,
+  EVIDENCE_LABELS,
+  type EvalResult,
+  type EvidenceLabel,
+  type EvidenceRow,
+  type Grounding,
+  METRICS,
+  type Metric,
+  pairedDelta,
+  type Score,
+  type Stat,
+  score,
+} from "./score";
 
 const LABEL: Record<Metric, string> = {
   groundedRecall: "grounded recall: counted must-finds that a shown finding matches, by the matcher",
@@ -27,7 +40,8 @@ const LABEL: Record<Metric, string> = {
   verdictOk: "verdict ok: posted earlier findings whose fixed verdict matches your later resolve (--rereview)",
   minutes: "minutes per case",
   costUsd: "cost per case in USD, as the CLI reports it",
-  notCompleted: "runs that did not complete, per repeat",
+  notCompleted: "failed runs: failed, cancelled, or error, per repeat",
+  incomplete: "runs with coverage gaps (incomplete), per repeat",
   groundedRaised: "grounded raised: counted must-finds that any finding matches, hidden ones included",
   lossMain: "verifier loss, main: counted must-finds whose best finding is in main and not refuted",
   lossDemoted: "verifier loss, demoted: counted must-finds whose best finding is refuted but stays in the list",
@@ -94,6 +108,7 @@ const DIGITS: Record<Metric, number> = {
   minutes: 1,
   costUsd: 3,
   notCompleted: 1,
+  incomplete: 1,
 };
 
 const num = (m: Metric, x: number) => (RATE.has(m) ? `${(x * 100).toFixed(DIGITS[m])}%` : x.toFixed(DIGITS[m]));
@@ -144,7 +159,8 @@ const header = (r: EvalResult) => {
   // review-quality-2026.md E2. A file made before these fields existed does not record them.
   const e2 = r.requested;
   const replay = e2?.replayOf ? `, finder replayed from ${e2.replayOf}` : "";
-  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
+  const resumed = (r.resumes ?? []).map((x) => `${x.commit}${x.dirty ? " (uncommitted changes)" : ""} (CLI ${x.cliVersion})`);
+  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}${resumed.length ? `, resumed at commit ${resumed.join(", ")}` : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
 };
 
 const pct = (a: number, b: number) => (b === 0 ? "-" : `${((a / b) * 100).toFixed(1)}%`);
@@ -182,6 +198,16 @@ export function detailText(s: Score): string {
         ]),
       ]),
     );
+  const sec = s.security;
+  if (sec)
+    out.push(
+      "",
+      "Shown security findings (review-quality-2026.md item 10): shown findings with category security, per case run",
+      table([
+        ["case runs", "shown", "gold match", "judge tp", "judge fp", "no label"],
+        [String(sec.runs), ...[sec.shown, sec.gold, sec.tp, sec.fp, sec.unlabeled].map((x) => per(sec.runs ? x / sec.runs : null))],
+      ]),
+    );
   if (s.union.length)
     out.push(
       "",
@@ -199,6 +225,42 @@ export function detailText(s: Score): string {
   const q = s.finderQuestions;
   if (q) out.push("", `Finder questions, all runs: ${q.asked} asked, ${q.answered} answered, ${q.findings} findings, ${q.kept} kept.`);
   return out.join("\n");
+}
+
+// review-quality-2026.md item 8 gate: the evidence references by label (score.ts evidenceCheck). Counts only, no path and no text.
+export function evidenceText(rows: Record<EvidenceLabel, EvidenceRow>): string {
+  return [
+    "Evidence references (review-quality-2026.md item 8 gate): the findings of all runs by label. Missing file: a reference names a file that is not in the head tree, also when the parse cut its path. Line out of file: a reference names line 0 or a line past the end of a head file. Shares are over the findings with path:line.",
+    table([
+      [
+        "label",
+        "findings",
+        "no evidence field",
+        "no path:line",
+        "with path:line",
+        "references",
+        "missing file",
+        "share",
+        "line out of file",
+        "share",
+      ],
+      ...EVIDENCE_LABELS.map((l) => {
+        const x = rows[l];
+        return [
+          l,
+          String(x.findings),
+          String(x.unrecorded),
+          String(x.noRef),
+          String(x.withRef),
+          String(x.refs),
+          String(x.noFile),
+          pct(x.noFile, x.withRef),
+          String(x.pastEnd),
+          pct(x.pastEnd, x.withRef),
+        ];
+      }),
+    ]),
+  ].join("\n");
 }
 
 // name: the label of a case in the rows. eval:ab passes ordinals, so its output holds no case ID.

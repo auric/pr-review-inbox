@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Scoring of an eval result file (docs/plans/review-v2/spec.md section 4.3). Pure: no file, no process, no clock.
+import { repoPath } from "../../src/server/review/validate";
 import type { RunPhase, RunUsage, VerifySummary, Volume } from "../../src/shared/dto";
 import {
   type AnchorState,
@@ -168,10 +169,24 @@ export type EvalResult = {
   rereview?: boolean;
   // eval:rescore --fold-refuted moved each refuted item of main to fold. Absent: false.
   refutedFolded?: boolean;
+  // run.ts --resume: the checkout and the CLI version of each resume, in order. commit, dirty, and cliVersion above are those of the
+  // first run. Absent: no resume.
+  resumes?: { commit: string; dirty: boolean; cliVersion: string; at: string }[];
   repeat: number;
   cases: EvalCaseInfo[];
   runs: CaseRun[];
 };
+
+// A run that finished: completed, or incomplete with coverage gaps. A failed, cancelled, or error run did not.
+export const finished = (r: Pick<CaseRun, "status">) => r.status === "completed" || r.status === "incomplete";
+// judge.ts: a usage limit in the check phase ends the run incomplete, with verify.failed.kind usage_limit and no errorKind.
+export const hitLimit = (r: Pick<CaseRun, "errorKind" | "verify">) =>
+  r.errorKind === "usage_limit" || r.verify?.failed?.kind === "usage_limit";
+// A run that run.ts --resume keeps and that counts toward a full result.
+export const keptRun = (r: CaseRun) => finished(r) && !hitLimit(r);
+// eval:ab and eval:w1 exit with LIMIT_EXIT when a result that they ran holds a run that hit the usage limit. run.ts exits 0 then.
+export const LIMIT_EXIT = 3;
+export const endedOnLimit = (r: Pick<EvalResult, "runs">) => r.runs.some(hitLimit);
 
 // The tolerance of a run on the local set (docs/plans/review-v3.md Q2). Fixture sets run with 0.
 export const LOCAL_TOLERANCE = 3;
@@ -274,6 +289,7 @@ export const METRICS = [
   "minutes",
   "costUsd",
   "notCompleted",
+  "incomplete",
   "groundedRaised",
   "lossMain",
   "lossDemoted",
@@ -303,10 +319,16 @@ export type Score = {
   macro: Record<Metric, number | null>;
   confusion: Record<string, { tp: number; fp: number }> | null;
   slices: Slice[];
+  // review-quality-2026.md item 10: the shown findings with category security, summed over all runs. gold: they claim a gold item.
+  // tp, fp, unlabeled: the judge label of the other ones. null: not grounded.
+  security: Sec | null;
   union: { k: number; shown: number; raised: number }[];
   finderQuestions: { asked: number; answered: number; findings: number; kept: number } | null;
   recallBugs: { repeat: number; found: number; mustFinds: number }[];
 };
+
+export type Sec = { runs: number; shown: number; gold: number; tp: number; fp: number; unlabeled: number };
+const SEC_KEYS = ["shown", "gold", "tp", "fp", "unlabeled"] as const;
 
 // The counted must-finds (goldOf keys) that a shown item finds and that any item raises.
 type Hits = { shown: Set<string>; raised: Set<string> };
@@ -325,6 +347,7 @@ type Ground = {
   judgeFp: number | null;
   above: number | null;
   confusion: Record<string, { tp: number; fp: number }> | null;
+  security: Omit<Sec, "runs">;
 };
 
 // null: an item has no matcher answer.
@@ -345,6 +368,8 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
   const shown = r.items.flatMap((i, n) => (i.group === "main" ? [{ i, gold: labels[n] ?? null }] : []));
   const unmatched = shown.filter((x) => x.gold === null).map((x) => ({ i: x.i, j: g.judge(c, x.i) }));
   const judged = unmatched.every((x) => x.j !== undefined);
+  // The exact category text, as the verify rules of catalog.ts SECURITY2 match it.
+  const sec = unmatched.filter((x) => x.i.category === "security");
   const count = (f: (x: (typeof unmatched)[number]) => boolean) => (judged ? unmatched.filter(f).length : null);
   const truth = r.items.map((i, n) => {
     const gl = labels[n];
@@ -372,6 +397,13 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
     judgeFp: count((x) => x.j?.label === "fp"),
     above: count((x) => x.j?.label === "tp" && LEVEL[x.i.severity] > JUDGE_LEVELS.indexOf(x.j.severity)),
     confusion,
+    security: {
+      shown: shown.filter((x) => x.i.category === "security").length,
+      gold: shown.filter((x) => x.i.category === "security" && x.gold !== null).length,
+      tp: sec.filter((x) => x.j?.label === "tp").length,
+      fp: sec.filter((x) => x.j?.label === "fp").length,
+      unlabeled: sec.filter((x) => x.j === undefined).length,
+    },
   };
 }
 
@@ -401,7 +433,9 @@ type Tally = {
   verdictOk: number;
   minutes: number | null;
   costUsd: number | null;
+  // A failed, cancelled, or error run. An incomplete run finished and counts in incomplete.
   notCompleted: number;
+  incomplete: number;
   refutedShown: number;
   hits: Hits;
   ground: Ground | null;
@@ -460,7 +494,8 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null, g:
     verdictOk: scored.filter((e) => (r.resolves ?? []).includes(e.id) === e.resolved).length,
     minutes: r.minutes,
     costUsd: r.usage ? r.usage.costUsd : null,
-    notCompleted: r.status === "completed" ? 0 : 1,
+    notCompleted: finished(r) ? 0 : 1,
+    incomplete: r.status === "incomplete" ? 1 : 0,
     // review-quality-2026.md E5: refuted items of the protected classes stay in main (displayGroup). They count apart.
     refutedShown: shown.filter((i) => i.verdict === "refuted").length,
     hits: { shown: new Set(found.map((b) => `bug:${b.id}`)), raised: new Set(raised.map((b) => `bug:${b.id}`)) },
@@ -529,6 +564,7 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     minutes: meanOf(ts.map((t) => t.minutes)),
     costUsd: meanOf(ts.map((t) => t.costUsd)),
     notCompleted: sum(ts, "notCompleted"),
+    incomplete: sum(ts, "incomplete"),
     groundedRaised: of(
       gs((x) => x.hits.raised.size),
       counted,
@@ -743,6 +779,8 @@ export function score(r: EvalResult, g?: Grounding): Score {
   const add = (k: "asked" | "answered" | "findings" | "kept") => fq.reduce((s, x) => s + x[k], 0);
   const severities = unshowable(r.volume);
   const count = r.cases.reduce((n, c) => n + c.bugs.length - mustFind(c, r.volume).length, 0);
+  const security: Sec | null = grounded ? { runs: runs.length, shown: 0, gold: 0, tp: 0, fp: 0, unlabeled: 0 } : null;
+  if (security) for (const x of runs) for (const k of SEC_KEYS) security[k] += x.t.ground?.security[k] ?? 0;
   return {
     suite,
     cases,
@@ -751,6 +789,7 @@ export function score(r: EvalResult, g?: Grounding): Score {
     macro,
     confusion,
     slices: slices(runs, grounded, hits, r.volume),
+    security,
     union,
     finderQuestions: fq.length ? { asked: add("asked"), answered: add("answered"), findings: add("findings"), kept: add("kept") } : null,
     recallBugs: repeats.map((n) => {
@@ -824,5 +863,87 @@ export function scoreReplies(r: ReplyEvalResult): ReplyScore {
       pass: share((x) => x.judgement && x.action && x.cites),
     };
   }
+  return out;
+}
+
+// ---------- Evidence references (review-quality-2026.md item 8, the zero-cost gate) ----------
+
+// catalog.ts asks the finder for "path:line for each line that shows the problem" in evidence. A reference is a token with a "/", "\",
+// or "." before ":<line>", with an optional "-<line>" end. It starts at the text start, after white space, or after an opening quote,
+// backtick, or bracket. So a URL is none, and a path with another character, such as "[id]" or "@types", is none too.
+const EVIDENCE_REF = /(?<=^|[\s"'`([{<])([\w./\\-]*[./\\][\w./\\-]*):(\d+)(?:-(\d+))?/g;
+export type EvidenceRef = { path: string; line: number; end: number };
+// path: the repository path, or the raw token when repoPath refuses it, so that the head lookup fails.
+export const evidenceRefs = (text: string): EvidenceRef[] =>
+  [...text.matchAll(EVIDENCE_REF)].map((m) => {
+    const line = Number(m[2]);
+    return { path: repoPath(m[1] as string) ?? (m[1] as string), line, end: Math.max(line, Number(m[3] ?? line)) };
+  });
+
+// The label of an item for the evidence table: the kind of the gold item that it claims, else the judge label.
+export const EVIDENCE_LABELS = ["must-find", "trap", "extra", "judge tp", "judge fp", "no label"] as const;
+export type EvidenceLabel = (typeof EVIDENCE_LABELS)[number];
+// findings: items of all runs. unrecorded: items without the evidence field (files made before it existed). noRef: items whose
+// evidence has no reference. withRef: items with one or more references, and refs their references. noFile: items with a reference to
+// a file that is not in the head tree. pastEnd: items with a reference to a line that the head file does not have. A cut or prefixed
+// path lands in noFile, so only pastEnd is free of parser misses.
+export type EvidenceRow = {
+  findings: number;
+  unrecorded: number;
+  noRef: number;
+  withRef: number;
+  refs: number;
+  noFile: number;
+  pastEnd: number;
+};
+
+// lines: the line count of a file at the head of a case, undefined when the head tree has no such file. A line is out of the file when
+// it is 0 or its end is past the last line. An old-side reference also counts against the head.
+export function evidenceCheck(
+  results: EvalResult[],
+  g: Grounding | undefined,
+  lines: (caseId: string, path: string) => number | undefined,
+): Record<EvidenceLabel, EvidenceRow> {
+  const out = Object.fromEntries(
+    EVIDENCE_LABELS.map((l) => [l, { findings: 0, unrecorded: 0, noRef: 0, withRef: 0, refs: 0, noFile: 0, pastEnd: 0 }]),
+  ) as Record<EvidenceLabel, EvidenceRow>;
+  for (const r of results)
+    for (const run of r.runs) {
+      const c = r.cases.find((x) => x.id === run.case);
+      if (!c) continue;
+      const m = run.items.map((i) => g?.matches(c, i));
+      const gold = m.every((x) => x !== undefined) ? goldLabels(goldOf(c), run.items, (n) => m[n] ?? []) : null;
+      run.items.forEach((i, n) => {
+        const gl = gold?.[n];
+        const j = gold && !gl ? g?.judge(c, i) : undefined;
+        const label: EvidenceLabel = gl
+          ? gl.kind === "trap"
+            ? "trap"
+            : gl.kind === "extra"
+              ? "extra"
+              : "must-find"
+          : j
+            ? j.label === "tp"
+              ? "judge tp"
+              : "judge fp"
+            : "no label";
+        const row = out[label];
+        row.findings++;
+        if (i.evidence === undefined) {
+          row.unrecorded++;
+          return;
+        }
+        const refs = evidenceRefs(i.evidence);
+        if (!refs.length) {
+          row.noRef++;
+          return;
+        }
+        row.withRef++;
+        row.refs += refs.length;
+        const counts = refs.map((x) => lines(c.id, x.path));
+        if (counts.some((n) => n === undefined)) row.noFile++;
+        if (refs.some((x, k) => counts[k] !== undefined && (x.line < 1 || x.end > (counts[k] as number)))) row.pastEnd++;
+      });
+    }
   return out;
 }

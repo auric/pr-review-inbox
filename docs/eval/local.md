@@ -13,6 +13,9 @@ The command builds the local set from the data folder of the app into `eval-loca
 - Review and re-review cases: the default candidate is the shipped profile. `--candidate-variants` and `--candidate-modules` add switches to it. The verify mode stays as shipped.
 - `broad` (docs/plans/review-v2/review-quality-2026.md item 3): with the verify phase on, the finder gets no do-not-flag list and no language skip lists. The verify phase gets the skip lists of the languages of the change. With `pr-context.md`, the finder learns that a thread comment is a claim, not a reason to leave out a finding.
 - `verify2` (item 4): the verify phase gets a wider duplicate rule and a rule for thread claims. It also gets a rule for findings of the intent section. A split check gives one group to one rl-verifier call. The variant changes only the verify prompts, so `--candidate-replay` can test it.
+- `classes` (item 7): rl-main and rl-reviewer get a list of the bug kinds that authors fix most often, after the profile prompt. The list ends with "Report other problems too." The variant changes the finder, so `--candidate-replay` refuses it. Example: `--candidate-variants classes --candidate-repeat 2 --clean 8`.
+- `security2` (item 10): the security section of rl-main and rl-reviewer gets more attack kinds and a source-path-sink rule for the trigger. The verify phase gets rules for candidates of category security. A real defect that is no security hole keeps its verdict. The rules adapt anthropics/claude-code-security-review (MIT, THIRD_PARTY_NOTICES.md). The variant changes the finder, so `--candidate-replay` refuses it.
+- `security2-verify` (item 10): only the verify rules of `security2`, so `--candidate-replay` can test them on the recorded finder calls.
 - `parts`: see "Part files". `failures`: a trial module with a failure checklist.
 - The variants `signal`, `order`, `rules2`, and `rereview-strict` are removed. The first three lost in U-V1 (docs/eval/results.md). U-V1 gave no decision for `rereview-strict`, and no plan uses it. A saved profile that still lists one loads without it. `--variants` and `--candidate-variants` refuse them. No run reads `REVIEW.md` now.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
@@ -90,10 +93,27 @@ A fixture case can have `threads` and `clean`, as a local case can. The run seed
 - `--candidate-reviewer-effort low|medium|high|xhigh|max`: the rl-reviewer effort of the candidate runs. Default: none, so the candidate keeps the rl-reviewer effort of the shipped profile. `--effort` does not change the rl-reviewer effort. The eval header shows it as "reviewer effort".
 - `--large`: run only the large review cases. A case is large when the baseline profile gives the review the rl-reviewer agent: 1,200 or more changed lines, or 30 or more changed files. The re-review cases do not run, because a re-review never gets rl-reviewer. The command prints the number of large cases. It exits with code 2 when the set has none.
 - `--db <file>` and `--cache <folder>`: another database file and git folder. Default: those of the data folder.
-- `--out <folder>`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/`, which git ignores.
+- `--out <folder>`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/`, which git ignores. The folder can hold only an earlier build and the `labels` folder of eval:label. The build keeps `labels` as it is.
 - `--user <slug>`: your user slug. Default: `userSlug` of `config.json` beside the database file.
 - `--results <folder>`: the folder of the result files. Default: a new folder in `eval-results/`.
 - `--baseline <folder>`: the folder of an earlier eval:ab run. See "Reuse a baseline".
+- `--resume`: continue a cut run in `--results`. It needs `--results`. See "Resume a cut run".
+
+## Resume a cut run
+
+A cut run continues with the same command and `--resume`:
+
+```
+bun run eval:ab -- --results eval-results/ab-<stamp>-<commit> --baseline <folder> --candidate-variants broad --resume
+```
+
+- Each `<mode>-<side>/` folder with one result file continues that file. The run keeps the completed and incomplete runs, runs the other case runs, and writes the same file. A folder with no result file runs from the start. A folder with two or more result files is refused.
+- The resume works for a baseline-only run and for a candidate run, also with `--candidate-replay`. A stored baseline from `--baseline` is reused as it is. Only the missing runs run.
+- Each run writes its flags to `eval-ab-flags.txt` in `--results`. A resume refuses each flag that differs from the cut run and names the flag. A baseline-only run can take a lower `--repeat` when the finished runs fit.
+- A candidate resume needs `eval-ab-flags.txt`. A baseline-only folder of an earlier version has no such file and resumes without the flag check.
+- run.ts refuses a different prompt version, profile version, profile revision, runner, set, set fingerprint, volume, tolerance, or requested setting. A different commit, a dirty checkout, or a new CLI version gives a warning. Each resume adds an entry to `resumes` in the result file.
+- Exit code 3: a run hit the usage limit. The command stops before the next run. Wait for the limit to reset, then run the same command with `--resume`.
+- eval:ab exit codes: 0 done, 1 a build error or a failed run, 2 a usage error or a refusal, 3 the usage limit, 130 stopped.
 
 ## Reuse a baseline
 
@@ -105,7 +125,7 @@ bun run eval:ab -- --baseline eval-results/ab-<stamp>-<commit> --candidate-varia
 
 - The command reads the baseline results from `review-baseline/` and `rereview-baseline/` of that folder.
 - A mode without its folder runs the baseline as usual. The output says so in one line.
-- The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, or model, or fewer repeats than the candidate runs. The check runs before any run.
+- The command refuses the reuse with exit code 2 when the stored baseline has a different set fingerprint, effort, profile version, profile revision, prompt version, or model, or fewer repeats than the candidate runs. It also refuses a baseline with fewer finished runs (completed or incomplete, no usage limit) than cases x repeats, such as a cut baseline. Resume that baseline with `--resume` first. The checks run before any run.
 - Give the same `--effort` and `--clean` as the earlier run. The candidate can run fewer repeats than the stored baseline.
 - Each run records its CLI calls automatically in `<result>.calls/` beside its result file. `--candidate-replay` uses the recording of the baseline result. A new commit or CLI version is allowed. The A and B header lines show both.
 - The set must not change. A new decision in the app changes the set fingerprint, and the command then refuses the reuse.
@@ -144,17 +164,20 @@ The tables show "part files per case" and "parts read" next to "rl-reviewer call
 
 1. Pre-checks, with no model call: `claude auth status` must show authMethod claude.ai, the app must be closed (nothing listens on 127.0.0.1 at `REVIEW_LOOP_PORT` or 7317), and the data folder of the app must hold the database, the git cache, and a user slug. The command prints the CLI version.
 2. Smoke: the probe set once (`bun run eval -- --set probe --repeat 1`). A failed or missing case run stops the command with exit code 1.
-3. Baseline: the command prints the plan estimate (about $140-180 and about 5 hours, not measured) and asks "Start the baseline? [y/N]". Then it runs `eval:ab -- --clean 8 --repeat 3 --baseline-only --review-only`.
+3. Baseline: the command prints the cost per case run (about 8 minutes and $4, measured on 2026-11-14; large cases take 13-18 minutes). When an earlier set build exists, it also prints the total for its cases x `--repeat`. Then it asks "Start the baseline? [y/N]" and runs `eval:ab -- --clean 8 --repeat 3 --baseline-only --review-only`. `--repeat N` changes the repeats of the baseline. For example, 42 cases x 3 repeats take about 17 hours and $500.
 4. Labels: the command runs eval:label without `--real`, prints the open work and its estimate, and asks "Start the labels? [y/N]". Then it labels with `--real`.
 5. Summary: aggregate numbers, case rows by ordinal, and the step costs between two marker lines. Paste these lines to Claude.
 
 - Each finished step writes `<step>.done` into the results folder. A new run prints "Done before: <step>" and skips it. A smoke or label step with a failed run writes no marker.
-- A complete baseline with failed runs (not the usage limit) is kept when 25% or fewer of its runs failed. The command prints a warning with the count and the error kinds, and the summary marks them. A failed run scores as a run with no finding. A later eval:ab with `--baseline` accepts the result, but exits with code 1 because the baseline has failed runs. Above 25%, a stop, or fewer runs than cases x repeats, the baseline writes no marker.
+- A complete baseline with failed runs (not the usage limit) is kept when 25% or fewer of its runs failed. The command prints a warning with the count and the error kinds, and the summary marks them. A failed run scores as a run with no finding. A later eval:ab with `--baseline` refuses the result, because it has fewer finished runs than cases x repeats. Run the failed runs again first: `bun run eval:ab -- --clean 8 --repeat 3 --baseline-only --review-only --results eval-results/w1/baseline --resume`. Above 25%, a stop, or fewer runs than cases x repeats, the baseline writes no marker.
 - `costs.jsonl` in the results folder records the cost and the minutes of each step attempt.
 - `--yes` answers both questions with yes. Any answer other than y or yes stops the command with exit code 2.
 - `--skip-smoke` skips the smoke run and prints a warning.
-- Usage limit: the command stops with exit code 3. Run it again after the limit resets. eval:ab cannot continue a cut baseline, so the next run repeats the whole baseline. The cut baseline folder stays as `baseline-earlier-<stamp>`. eval:label continues from its stored answers.
-- Exit codes: 0 done, 1 a failed step, 2 a failed pre-check, a usage error, or a No answer, 3 the usage limit.
+- Usage limit: the command stops with exit code 3. Run the same command again after the limit resets. eval:label continues from its stored answers.
+- A cut baseline resumes. After a usage limit, a crash, or Ctrl+C, the next run finds the result file in `baseline/review-baseline/` and prints "Resuming the baseline: K of N runs are done." It runs `eval:ab` with `--resume`, which keeps the completed and incomplete runs. A failed, cancelled, or error run and a run that hit the usage limit run again. The result stays in the same file.
+- A resume refuses a change of the run setup: the prompt version, the profile version and revision, the model and effort flags, the runner, the set and its fingerprint, the mode, the volume, or the tolerance. A new commit or a new Claude Code version is allowed, because Claude Code updates itself almost daily. The command then prints a warning line. The result file keeps the commit and the CLI version of the first run, and records those of each resume in `resumes`. The eval:compare header shows them. A lower `--repeat` is allowed when every finished run fits in it.
+- A refused resume stops with exit code 2. To start a new baseline, move the folder `baseline` away and run the command again. A new set build after you used the app can change the fingerprint.
+- Exit codes: 0 done, 1 a failed step, 2 a failed pre-check, a usage error, a refusal, or a No answer, 3 the usage limit.
 
 ## Label the findings (eval:label)
 
@@ -164,7 +187,7 @@ The tables show "part files per case" and "parts read" next to "rl-reviewer call
 - Judge: a Sonnet run at effort medium labels each finding that matches no gold item, also a folded or hidden one. A label is tp or fp, with severity, category, and scope. The judge runs in a sanitized workspace of the case head with `pr.md` and `task.md`, the read tools, and rl-git. It gets no Bash and no agent. The PR threads stay out of `pr.md`.
 - Reuse: first the matcher compares each new unmatched finding with the labelled findings of the same case. A match takes the stored label. So only new findings cost judge runs.
 - Calibration: once per label set, the judge labels the must-finds and your own comments (expected tp) and the traps (expected fp) of each case. The output prints the agreement. It is no ship gate.
-- Storage: `<eval-local>/labels/<key>/matches.json` and `labels.json`. The key is the set fingerprint of a local result. A fixture set uses its name and a hash of its case truth. A matcher answer has the item hash, the gold key, the matcher version, and the prompt hash. A judge label has the model, the effort, the prompt hash, and the CLI version. The labels never go into case.json. A second run on the same results costs nothing.
+- Storage: `<eval-local>/labels/<key>/matches.json` and `labels.json`. The set build (eval:local and each eval:ab run) accepts the `labels` folder in `--out` and never changes it. The key is the set fingerprint of a local result, so a new build of the same set keeps its labels. A fixture set uses its name and a hash of its case truth. A matcher answer has the item hash, the gold key, the matcher version, and the prompt hash. A judge label has the model, the effort, the prompt hash, and the CLI version. The labels never go into case.json. A second run on the same results costs nothing.
 - Disagreements: `labels/<key>/disagreements.md` lists each finding and gold item pair where the line match (T = 3 on the local set, traps at 0) and the matcher disagree. Audit the list once. The matcher becomes the primary column only when you agree with it more often than with the line match. The file holds finding text, so the output gives only the count.
 - A `--large` run has another set fingerprint, so its labels go to another folder.
 - A local result needs the build of the set that it ran, as for eval:rescore. eval:ab builds the set again before each run, so label a result before a new decision in the app changes the set.
@@ -183,8 +206,22 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 - refuted shown: refuted findings that stay in main (the protected classes), per case. `bun run eval:rescore -- <result.json> --fold-refuted` moves them to fold and prints recall and noise for that case.
 - The line match (recall, precision, noise) stays in its own rows beside the grounded rows. candidate recall now divides by the counted must-finds, as recall does, so candidate recall - recall is the share that the check lost.
 - The summary also prints a mean per case (macro) beside the pooled number (micro), the verifier confusion matrix (the gold or judge label of each finding by its verdict), the slices (severity, source, module, bug class, size, task text, clean cases), union recall over k repeats, and the finder question sums. The probe set is its own slice: run it with `--set probe`.
+- Shown security findings (improvement 10): the shown findings whose category is exactly security, per case run, by gold match, judge tp, judge fp, and no label. It prints only with labels: in the eval:label and eval:rescore summaries, and for A and B in eval:compare.
 - eval:compare prints a paired delta: the mean of B - A of the hit rate per counted must-find, with a 90% bootstrap interval over the PR groups and a fixed seed. It is information only.
 - A result without labels shows "-" for each grounded and augmented metric.
+
+### Evidence references (item 8 gate)
+
+`bun run eval:label -- eval-results/w1/baseline --evidence` checks the `path:line` references in the evidence of each finding against the files at the case head (docs/plans/review-v2/review-quality-2026.md item 8). It runs no CLI, costs nothing, and writes nothing. Run it after `eval:w1` finished the labels.
+
+- A reference is a token with a `/`, `\`, or `.` before `:<line>`, with an optional `-<line>` end, as the finder prompt asks ("path:line"). It starts at the text start, after white space, or after an opening quote, backtick, or bracket. A URL, a word without a dot, and a path with another character (such as `[id]` or `@types`) are no reference. In `a.ts:12, 15`, only line 12 counts.
+- Missing file: a reference names a file that is not in the head tree. A path that the parse cut, or a path with a `repo/` prefix, also lands here.
+- Line out of file: a reference names line 0 or a line past the end of a file in the head tree. An old-side reference also counts against the head. Parser misses do not reach this column, so trust it more.
+- The table counts the findings of all runs, shown, folded, and hidden, by label: must-find, trap, and extra (the matcher claim), judge tp and judge fp, and no label. A finding without a matcher answer or a judge label counts as no label.
+- Columns: findings, no evidence field (a result file made before the field existed), no path:line, with path:line, references, missing file and its share, line out of file and its share. Each share is over the findings with path:line.
+- The output holds counts only: no path, no finding text, and no case ID.
+- Gate: build variant "quotes" only when the shares of judge fp are clearly above those of judge tp and must-find.
+- Give the `baseline` folder, not `eval-results/w1`. That folder also holds the probe smoke run, and a `baseline-earlier-<stamp>` folder of a cut run, which the current build of the set refuses.
 
 ## Bisect when the result is mixed
 
