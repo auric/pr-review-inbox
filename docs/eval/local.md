@@ -93,11 +93,27 @@ A fixture case can have `threads` and `clean`, as a local case can. The run seed
 - `--candidate-reviewer-effort low|medium|high|xhigh|max`: the rl-reviewer effort of the candidate runs. Default: none, so the candidate keeps the rl-reviewer effort of the shipped profile. `--effort` does not change the rl-reviewer effort. The eval header shows it as "reviewer effort".
 - `--large`: run only the large review cases. A case is large when the baseline profile gives the review the rl-reviewer agent: 1,200 or more changed lines, or 30 or more changed files. The re-review cases do not run, because a re-review never gets rl-reviewer. The command prints the number of large cases. It exits with code 2 when the set has none.
 - `--db <file>` and `--cache <folder>`: another database file and git folder. Default: those of the data folder.
-- `--out <folder>`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/`, which git ignores.
+- `--out <folder>`: the folder of the set. Default: `REVIEW_LOOP_EVAL_LOCAL`, else `eval-local/`, which git ignores. The folder can hold only an earlier build and the `labels` folder of eval:label. The build keeps `labels` as it is.
 - `--user <slug>`: your user slug. Default: `userSlug` of `config.json` beside the database file.
 - `--results <folder>`: the folder of the result files. Default: a new folder in `eval-results/`.
 - `--baseline <folder>`: the folder of an earlier eval:ab run. See "Reuse a baseline".
-- `--resume`: continue the cut baseline result in each `<mode>-baseline/` folder of `--results`. It needs `--results` and `--baseline-only`, and each folder must hold exactly one result file. Give the flags of the cut run. The run keeps the completed and incomplete runs, runs the other case runs, and writes the same file. See "Run W1 in one command" for the refusal rules.
+- `--resume`: continue a cut run in `--results`. It needs `--results`. See "Resume a cut run".
+
+## Resume a cut run
+
+A cut run continues with the same command and `--resume`:
+
+```
+bun run eval:ab -- --results eval-results/ab-<stamp>-<commit> --baseline <folder> --candidate-variants broad --resume
+```
+
+- Each `<mode>-<side>/` folder with one result file continues that file. The run keeps the completed and incomplete runs, runs the other case runs, and writes the same file. A folder with no result file runs from the start. A folder with two or more result files is refused.
+- The resume works for a baseline-only run and for a candidate run, also with `--candidate-replay`. A stored baseline from `--baseline` is reused as it is. Only the missing runs run.
+- Each run writes its flags to `eval-ab-flags.txt` in `--results`. A resume refuses each flag that differs from the cut run and names the flag. A baseline-only run can take a lower `--repeat` when the finished runs fit.
+- A candidate resume needs `eval-ab-flags.txt`. A baseline-only folder of an earlier version has no such file and resumes without the flag check.
+- run.ts refuses a different prompt version, profile version, profile revision, runner, set, set fingerprint, volume, tolerance, or requested setting. A different commit, a dirty checkout, or a new CLI version gives a warning. Each resume adds an entry to `resumes` in the result file.
+- Exit code 3: a run hit the usage limit. The command stops before the next run. Wait for the limit to reset, then run the same command with `--resume`.
+- eval:ab exit codes: 0 done, 1 a build error or a failed run, 2 a usage error or a refusal, 3 the usage limit, 130 stopped.
 
 ## Reuse a baseline
 
@@ -171,7 +187,7 @@ The tables show "part files per case" and "parts read" next to "rl-reviewer call
 - Judge: a Sonnet run at effort medium labels each finding that matches no gold item, also a folded or hidden one. A label is tp or fp, with severity, category, and scope. The judge runs in a sanitized workspace of the case head with `pr.md` and `task.md`, the read tools, and rl-git. It gets no Bash and no agent. The PR threads stay out of `pr.md`.
 - Reuse: first the matcher compares each new unmatched finding with the labelled findings of the same case. A match takes the stored label. So only new findings cost judge runs.
 - Calibration: once per label set, the judge labels the must-finds and your own comments (expected tp) and the traps (expected fp) of each case. The output prints the agreement. It is no ship gate.
-- Storage: `<eval-local>/labels/<key>/matches.json` and `labels.json`. The key is the set fingerprint of a local result. A fixture set uses its name and a hash of its case truth. A matcher answer has the item hash, the gold key, the matcher version, and the prompt hash. A judge label has the model, the effort, the prompt hash, and the CLI version. The labels never go into case.json. A second run on the same results costs nothing.
+- Storage: `<eval-local>/labels/<key>/matches.json` and `labels.json`. The set build (eval:local and each eval:ab run) accepts the `labels` folder in `--out` and never changes it. The key is the set fingerprint of a local result, so a new build of the same set keeps its labels. A fixture set uses its name and a hash of its case truth. A matcher answer has the item hash, the gold key, the matcher version, and the prompt hash. A judge label has the model, the effort, the prompt hash, and the CLI version. The labels never go into case.json. A second run on the same results costs nothing.
 - Disagreements: `labels/<key>/disagreements.md` lists each finding and gold item pair where the line match (T = 3 on the local set, traps at 0) and the matcher disagree. Audit the list once. The matcher becomes the primary column only when you agree with it more often than with the line match. The file holds finding text, so the output gives only the count.
 - A `--large` run has another set fingerprint, so its labels go to another folder.
 - A local result needs the build of the set that it ran, as for eval:rescore. eval:ab builds the set again before each run, so label a result before a new decision in the app changes the set.

@@ -15,6 +15,8 @@ import type { CaseRun, EvalResult } from "../../scripts/eval/score";
 import { BEGIN, type Deps, END, main, markerPath, PASTE, stepArgs } from "../../scripts/eval/w1";
 import { dataDir, dbPath } from "../../src/server/config";
 
+console.log(`w1.test.ts imported from ${Bun.resolveSync("../../scripts/eval/w1", import.meta.dir)}`);
+
 const ROOT = resolve(import.meta.dir, "../..");
 const FAKE = join(ROOT, "tests/support/fake-claude.ts");
 const TMP = mkdtempSync(join(tmpdir(), "rl-eval-w1-test-"));

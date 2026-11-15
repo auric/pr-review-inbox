@@ -4,7 +4,7 @@
 // Gate U-V1 in one command (docs/plans/review-v3.md, docs/eval/local.md): build the local set from the data folder of the app, then
 // run the shipped profile (baseline) and the candidate on it, for the review cases and the re-review cases, and print one table each.
 // Usage: see USAGE. Without --runner, the runs use the claude CLI on PATH. Exit codes: 0 done, 1 a build error or a failed run, 2 a
-// usage error or a refusal, 130 stopped.
+// usage error or a refusal, 3 a run hit the usage limit (run the same command with --resume after the reset), 130 stopped.
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -19,14 +19,15 @@ import { bundleRepo, type EvalCase, loadCases, localDir, setDir, setFingerprint 
 import { compareText, readResult, refusal, suiteDelta } from "./compare";
 import { main as buildMain, type Manifest } from "./local";
 import { callsDir, checkoutState, evalProfile, finderChange, parseOptions, main as runMain } from "./run";
-import { type EvalResult, finished, keptRun, score } from "./score";
+import { type EvalResult, endedOnLimit, finished, keptRun, LIMIT_EXIT, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
 export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}]
   [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-reviewer-mode ${REVIEWER_MODES.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--candidate-verifier-effort ${EFFORTS.join("|")}]
   [--candidate-replay] [--baseline-only] [--review-only] [--large] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--resume] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
---resume: continue the cut baseline result in each <mode>-baseline folder of --results (run.ts --resume). It needs --results and --baseline-only. Give the flags of the cut run. --repeat can be lower when the finished runs fit.
+--resume: continue the cut run in --results (run.ts --resume). Each <mode>-<side> folder with one result continues it, and an empty folder runs. It needs --results. Give the flags of the cut run: a different flag is refused. A baseline-only run can take a lower --repeat when the finished runs fit.
+Exit code 3: a run hit the usage limit. Run the same command with --resume after the limit resets.
 --baseline: the folder of an earlier eval:ab run. Its review-baseline/ and rereview-baseline/ results replace the baseline runs. A candidate result there that matches the current shipped profile can serve as well. A mode without a result runs the baseline.
 --repeat: the repeats of the baseline. --candidate-repeat: the repeats of the candidate, at most those of the baseline. Default: --repeat.
 --candidate-variants and --candidate-modules: what the candidate adds to the shipped profile. Default: nothing, so the candidate is the shipped profile.
@@ -72,7 +73,7 @@ export type AbOptions = {
   results: string | null;
   // The folder of an earlier eval:ab run whose baseline results this run reuses.
   baseline: string | null;
-  // Continue the cut baseline results in the results folder.
+  // Continue the cut results in the results folder.
   resume: boolean;
   runner: string[] | null;
 };
@@ -146,8 +147,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
   if (o.baseline !== null && !existsSync(o.baseline)) return { error: `--baseline: no folder ${o.baseline}.` };
   if (o.baselineOnly && (o.baseline !== null || o.replay))
     return { error: "--baseline-only runs only the baseline. Leave out --baseline and --candidate-replay." };
-  // A new candidate result in a used folder would sit beside the old one, and main reads the first file it finds.
-  if (o.resume && (o.results === null || !o.baselineOnly)) return { error: "--resume needs --results and --baseline-only." };
+  if (o.resume && o.results === null) return { error: "--resume needs --results." };
   for (const [flag, e] of [
     ["--effort", o.baseEffort],
     ["--candidate-effort", o.effort],
@@ -168,6 +168,42 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
       return { error: `--candidate-replay replays the finder of the baseline, but the candidate changes ${changed.join(", ")}.` };
   }
   return o;
+}
+
+// The flags of a run in its results folder, for --resume. A result file does not hold --review-only or --clean. The name must not end
+// in .json: label.ts resultFiles and main read each .json file as a result.
+export const FLAGS_FILE = "eval-ab-flags.txt";
+export function runFlags(o: AbOptions): Record<string, string | boolean | null> {
+  const clean = o.build.indexOf("--clean");
+  return {
+    "--repeat": o.repeat,
+    "--candidate-repeat": o.candidateRepeat,
+    "--candidate-variants": o.variants.join(","),
+    "--candidate-modules": o.modules.join(","),
+    "--effort": o.baseEffort,
+    "--candidate-effort": o.effort,
+    "--candidate-reviewer-effort": o.reviewerEffort,
+    "--candidate-reviewer-mode": o.reviewerMode,
+    "--candidate-verifier": o.verifier,
+    "--candidate-verifier-effort": o.verifierEffort,
+    "--candidate-replay": o.replay,
+    "--baseline-only": o.baselineOnly,
+    "--review-only": o.reviewOnly,
+    "--large": o.large,
+    "--clean": clean < 0 ? null : (o.build[clean + 1] as string),
+  };
+}
+
+// --resume: the first flag that differs from the flags of the cut run, or null. A baseline-only run can take a lower --repeat:
+// run.ts resumeRefusal checks that its finished runs fit.
+export function flagsRefusal(saved: Record<string, unknown>, o: AbOptions): string | null {
+  const show = (v: unknown) => (v === true ? "on" : v === false ? "off" : v === null || v === undefined || v === "" ? "none" : String(v));
+  for (const [flag, now] of Object.entries(runFlags(o))) {
+    if (o.baselineOnly && flag === "--repeat") continue;
+    if ((saved[flag] ?? null) !== now)
+      return `Refused: --resume: the cut run had ${flag} ${show(saved[flag])}, but this run has ${flag} ${show(now)}. Give the flags of the cut run.`;
+  }
+  return null;
 }
 
 // The modules and variants of the shipped profile: the baseline.
@@ -338,6 +374,19 @@ export async function main(argv: string[]): Promise<number> {
     console.error(`${o.error}\n${USAGE}`);
     return 2;
   }
+  // --resume: the flags of the cut run. A baseline-only run of an earlier version has no record and resumes without the check.
+  const flagsAt = o.results === null ? null : join(o.results, FLAGS_FILE);
+  const savedFlags =
+    o.resume && flagsAt && existsSync(flagsAt) ? (JSON.parse(readFileSync(flagsAt, "utf8")) as Record<string, unknown>) : null;
+  if (o.resume && !savedFlags && !o.baselineOnly) {
+    console.error(`--resume: ${o.results} has no ${FLAGS_FILE}, so the flags of the cut run are not known.`);
+    return 2;
+  }
+  const flagsRefused = savedFlags && flagsRefusal(savedFlags, o);
+  if (flagsRefused) {
+    console.error(flagsRefused);
+    return 2;
+  }
   const built = await buildMain(o.build);
   if (built !== 0) return built;
   // The eval runner reads the set from REVIEW_LOOP_EVAL_LOCAL.
@@ -422,16 +471,22 @@ export async function main(argv: string[]): Promise<number> {
       return 2;
     }
   }
-  // --resume: the one cut result of each baseline mode, found before any run.
-  const resumed = new Map<Mode, string>();
-  for (const mode of o.resume ? (["review", "rereview"] as const).filter((m) => count(m) > 0) : []) {
-    const dir = join(results, `${mode}-baseline`);
-    const found = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
-    if (found.length !== 1) {
-      console.error(`--resume: ${dir} holds ${found.length} result files, but it must hold exactly one.`);
-      return 2;
+  const sides = o.baselineOnly ? (["baseline"] as const) : (["baseline", "candidate"] as const);
+  // --resume: the cut result of each run, found before any run. A folder with no result is a run that did not save its first case.
+  const resumed = new Map<string, string>();
+  for (const mode of o.resume ? (["review", "rereview"] as const).filter((m) => count(m) > 0) : [])
+    for (const side of sides.filter((s) => s === "candidate" || !stored.has(mode))) {
+      const dir = join(results, `${mode}-${side}`);
+      const found = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+      if (found.length > 1) {
+        console.error(`--resume: ${dir} holds ${found.length} result files, but it must hold one at most.`);
+        return 2;
+      }
+      if (found.length) resumed.set(`${mode}-${side}`, join(dir, found[0] as string));
     }
-    resumed.set(mode, join(dir, found[0] as string));
+  if (o.resume && !savedFlags && !resumed.size) {
+    console.error(`--resume: ${results} holds no cut result.`);
+    return 2;
   }
   const runs = Number(o.candidateRepeat ?? o.repeat);
   if (!o.baselineOnly && runs > Number(o.repeat) && (["review", "rereview"] as const).some((m) => count(m) > 0 && !stored.has(m))) {
@@ -440,7 +495,10 @@ export async function main(argv: string[]): Promise<number> {
     );
     return 2;
   }
-  const sides = o.baselineOnly ? (["baseline"] as const) : (["baseline", "candidate"] as const);
+  if (!o.resume) {
+    mkdirSync(results, { recursive: true });
+    writeFileSync(join(results, FLAGS_FILE), `${JSON.stringify(runFlags(o), null, 2)}\n`);
+  }
   const texts: string[] = [];
   let failed = false;
   for (const mode of ["review", "rereview"] as const) {
@@ -461,13 +519,20 @@ export async function main(argv: string[]): Promise<number> {
       const out = join(results, `${mode}-${side}`);
       console.log(`\n--- ${mode} ${side} ---`);
       const replay = o.replay ? (stored.get(mode)?.origin ?? files[0]) : undefined;
-      const code = await runMain(runArgs(mode, side, o, out, cases(mode), replay, resumed.get(mode)));
+      const code = await runMain(runArgs(mode, side, o, out, cases(mode), replay, resumed.get(`${mode}-${side}`)));
       const file = existsSync(out) ? readdirSync(out).find((f) => f.endsWith(".json")) : undefined;
+      if (code !== 0 || !file) console.error(`The ${mode} ${side} run failed with exit code ${code}.`);
+      // 2: run.ts refused the run before its first case run, for example a --resume refusal.
+      if (code === 130 || code === 2) return code;
+      // The later runs would hit the limit too.
+      if (file && endedOnLimit(readResult(join(out, file)))) {
+        console.error(
+          `The ${mode} ${side} run hit the usage limit. Run the same command with --resume after the limit resets. The finished runs are kept.`,
+        );
+        return LIMIT_EXIT;
+      }
       if (code !== 0 || !file) {
         failed = true;
-        console.error(`The ${mode} ${side} run failed with exit code ${code}.`);
-        // 2: run.ts refused the run before its first case run, for example a --resume refusal.
-        if (code === 130 || code === 2) return code;
         break;
       }
       files.push(join(out, file));

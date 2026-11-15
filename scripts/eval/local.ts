@@ -52,6 +52,8 @@ const TRAP_CODES = new Set(["bug", "intended"]);
 const MINIMUM = { cases: 30, bugs: 40, traps: 20 };
 // The builder writes only these names into --out. It removes them before a new build.
 const OUT_NAMES = new Set(["cases", "rereview", "bundles", "MANIFEST.json"]);
+// eval:label keeps its cache in <out>/labels/ (label.ts labelsRoot). The builder never touches it.
+const KEPT_NAMES = new Set(["labels"]);
 
 // ---------- Paths ----------
 
@@ -94,10 +96,10 @@ async function ignored(path: string): Promise<boolean> {
   );
 }
 
-// null: --out is missing or empty, or it holds only the files of an earlier build.
+// null: --out is missing or empty, or it holds only the files of an earlier build and the label cache.
 function outRefusal(out: string): string | null {
   if (!existsSync(out)) return null;
-  return readdirSync(out).some((f) => !OUT_NAMES.has(f))
+  return readdirSync(out).some((f) => !OUT_NAMES.has(f) && !KEPT_NAMES.has(f))
     ? "Refused: the --out folder holds other files. Pick an empty folder or the folder of an earlier build."
     : null;
 }

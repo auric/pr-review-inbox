@@ -18,7 +18,7 @@ import { readResult, summaryText } from "./compare";
 import { main as labelMain, loadGrounding } from "./label";
 import type { Manifest } from "./local";
 import { parseOptions, main as runMain } from "./run";
-import { type EvalResult, hitLimit, keptRun, score } from "./score";
+import { type EvalResult, endedOnLimit, keptRun, LIMIT_EXIT, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
 export const USAGE = `Usage: bun run eval:w1 -- [--results <folder>] [--repeat N] [--yes] [--skip-smoke] [--runner <command> <args...>]
@@ -118,7 +118,7 @@ function runOutcome(code: number, dir: string, expected: number | null): Outcome
   if (!name) return { code: code || 1, file: null, costUsd: 0, limit: false, why: `the run gave no result file (exit code ${code})` };
   const file = join(dir, name);
   const r = readResult(file);
-  const limit = r.runs.some(hitLimit);
+  const limit = endedOnLimit(r);
   const failed = failedRuns(r);
   const why =
     code === 130
@@ -263,7 +263,7 @@ export async function main(argv: string[], deps: Deps = DEPS): Promise<number> {
         `Your Claude usage limit is reached. Run \`bun run eval:w1\` again after the limit resets. Finished steps are kept. This ${name} attempt cost ${usd(o.costUsd)}.`,
       );
       if (name === "baseline") console.error("The next run resumes the baseline and keeps its finished runs.");
-      return 3;
+      return LIMIT_EXIT;
     }
     if (!ok) {
       console.error(`The ${name} step failed: ${o.why}. This attempt cost ${usd(o.costUsd)}.`);

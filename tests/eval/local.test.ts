@@ -31,6 +31,8 @@ import { bugClass } from "../../src/shared/review";
 import { readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 
+console.log(`local.test.ts imported from ${Bun.resolveSync("../../scripts/eval/local", import.meta.dir)}`);
+
 const SLOW = 120_000;
 const ROOT = resolve(import.meta.dir, "../..");
 const LOCAL = join(ROOT, "scripts/eval/local.ts");
@@ -821,6 +823,29 @@ describe("eval:local refusals", () => {
     expect(r.stderr).toContain("holds other files");
     expect(readdirSync(out)).toEqual(["notes.txt"]);
   });
+
+  test(
+    "a rebuild keeps the labels folder of eval:label byte for byte, and the same set keeps its fingerprint",
+    async () => {
+      const out = temp("labels");
+      const labels = join(out, "labels", "key");
+      mkdirSync(labels, { recursive: true });
+      writeFileSync(join(labels, "labels.json"), '{"format":1}\n');
+      const fingerprint = () => (JSON.parse(readFileSync(join(out, "MANIFEST.json"), "utf8")) as Manifest).fingerprint;
+      const first = await bun([LOCAL, "--db", dbFile, "--cache", cache, "--out", out]);
+      expect(first.stderr).toBe("");
+      expect(first.code).toBe(0);
+      const was = fingerprint();
+      const again = await bun([LOCAL, "--db", dbFile, "--cache", cache, "--out", out]);
+      expect(again.stderr).toBe("");
+      expect(again.code).toBe(0);
+      expect(fingerprint()).toBe(was);
+      expect(readdirSync(join(out, "labels"))).toEqual(["key"]);
+      expect(readdirSync(labels)).toEqual(["labels.json"]);
+      expect(readFileSync(join(labels, "labels.json"), "utf8")).toBe('{"format":1}\n');
+    },
+    SLOW,
+  );
 
   test("--clean takes a whole number only", async () => {
     for (const bad of ["x", "1.5", ""]) {

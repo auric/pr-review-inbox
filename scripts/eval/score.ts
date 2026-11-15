@@ -184,6 +184,9 @@ export const hitLimit = (r: Pick<CaseRun, "errorKind" | "verify">) =>
   r.errorKind === "usage_limit" || r.verify?.failed?.kind === "usage_limit";
 // A run that run.ts --resume keeps and that counts toward a full result.
 export const keptRun = (r: CaseRun) => finished(r) && !hitLimit(r);
+// eval:ab and eval:w1 exit with LIMIT_EXIT when a result that they ran holds a run that hit the usage limit. run.ts exits 0 then.
+export const LIMIT_EXIT = 3;
+export const endedOnLimit = (r: Pick<EvalResult, "runs">) => r.runs.some(hitLimit);
 
 // The tolerance of a run on the local set (docs/plans/review-v3.md Q2). Fixture sets run with 0.
 export const LOCAL_TOLERANCE = 3;
