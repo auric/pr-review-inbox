@@ -146,6 +146,33 @@ describe("noteTaskWaits", () => {
     expect(h.count()).toBe(0);
   });
 
+  test("AC-B242: a part or task reason gives no part_ready event; clearing the reason gives one", () => {
+    const h = setup();
+    const p1 = h.part(1, "self_reviewed", "aaa");
+    const wait = (b: object | null) =>
+      h.db.query("UPDATE task_part SET blocked_json = $b WHERE id = $id").run({ id: p1, b: b === null ? null : JSON.stringify(b) });
+    wait({ kind: "red", step: 5, text: "Needs you: the tests of part 1 stay red." });
+    noteTaskWaits(h.db, [h.id], 10);
+    expect(h.count("part_ready")).toBe(0);
+    wait(null);
+    h.set("implementing", { kind: "red", step: 4, text: "The tests stay red." });
+    noteTaskWaits(h.db, [h.id], 11);
+    expect(h.count("part_ready")).toBe(0);
+    h.set("implementing", null);
+    expect(noteTaskWaits(h.db, [h.id], 12)).toBe(true);
+    expect(h.count("part_ready")).toBe(1);
+  });
+
+  test("a part reason at claim time drops the part_ready event", () => {
+    const h = setup();
+    const p1 = h.part(1, "self_reviewed", "aaa");
+    expect(noteTaskWaits(h.db, [h.id], 10)).toBe(true);
+    h.db
+      .query("UPDATE task_part SET blocked_json = $b WHERE id = $id")
+      .run({ id: p1, b: JSON.stringify({ kind: "red", step: 4, text: "Needs you: the tests of part 1 stay red." }) });
+    expect(claimTaskEvents(h.db, 11).filter((e) => e.kind === "part_ready")).toEqual([]);
+  });
+
   test("a part of a task that does not build adds no part_ready event", () => {
     const h = setup();
     h.part(1, "self_reviewed", "aaa");
@@ -286,6 +313,7 @@ describe("cleanupEvents", () => {
     const h = setup();
     const day = 86_400_000;
     h.part(1, "self_reviewed", "aaa");
+    noteTaskWaits(h.db, [h.id], 9);
     h.set("implementing", { kind: "red", step: 4, text: "The tests stay red." });
     noteTaskWaits(h.db, [h.id], 10);
     h.set("spec_approved", null);

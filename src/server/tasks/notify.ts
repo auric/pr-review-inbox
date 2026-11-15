@@ -17,9 +17,10 @@ const SQL = {
   // part-session.md section 9.4 rule 6: held is no waiting reason.
   waits: `SELECT json_extract(blocked_json, '$.step') AS step FROM task_part WHERE task = $task AND blocked_json IS NOT NULL
     AND json_extract(blocked_json, '$.kind') IS NOT 'held' ORDER BY ord`,
-  // A part waits for its PR only while its task builds and no step of it waits or runs, such as "Fix these too" or an update.
+  // A part waits for its PR only while its task builds, neither the part nor the task holds a reason, and no step of it waits or runs,
+  // such as "Fix these too" or an update.
   ready: `SELECT p.id, p.ord, p.head FROM task_part p JOIN task t ON t.id = p.task AND t.state = 'implementing'
-    WHERE p.task = $task AND p.kind <> 'spec' AND p.state = 'self_reviewed'
+    WHERE p.task = $task AND p.kind <> 'spec' AND p.state = 'self_reviewed' AND p.blocked_json IS NULL AND t.blocked_json IS NULL
     AND NOT EXISTS (SELECT 1 FROM task_step s WHERE s.part = p.id AND s.state IN ('waiting', 'running')) ORDER BY p.ord`,
   spec: "SELECT head FROM task_part WHERE task = $task AND kind = 'spec' ORDER BY ord LIMIT 1",
 };
