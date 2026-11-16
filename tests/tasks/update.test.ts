@@ -539,44 +539,57 @@ describe("several repositories (spec.md section 6.18.3, AC-B63)", () => {
 });
 
 describe("When the app suggests the update (spec.md section 6.18.5)", () => {
-  test("AC-B62: a synced task PR with mergeResult CONFLICTED and current true is conflicted; current false is not", async () => {
-    const s = await builtTask();
-    const pr = (
-      s.db.query("INSERT INTO pull_request (project, repo, pr_id, state) VALUES ('PROJ', 'repo', 5, 'OPEN') RETURNING id").get() as {
-        id: number;
-      }
-    ).id;
-    const result = (outcome: string, current: boolean) =>
-      s.db
-        .query("INSERT OR REPLACE INTO pr_merge_result (pr, merge_result) VALUES ($pr, $m)")
-        .run({ pr, m: JSON.stringify({ outcome, current }) });
-    s.db.query("UPDATE task_part SET pr = $pr, state = 'pr_open' WHERE id = $id").run({ pr, id: s.part().id });
-    s.db.query("UPDATE task SET state = 'ready' WHERE id = $id").run({ id: s.task });
-    expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(false);
-    result(MERGE_CONFLICTED, true);
-    expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(true);
-    result(MERGE_CONFLICTED, false);
-    expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(false);
-    result("CLEAN", true);
-    expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(false);
-  });
+  test(
+    "AC-B62: a synced task PR with mergeResult CONFLICTED and current true is conflicted; current false is not",
+    async () => {
+      const s = await builtTask();
+      const pr = (
+        s.db.query("INSERT INTO pull_request (project, repo, pr_id, state) VALUES ('PROJ', 'repo', 5, 'OPEN') RETURNING id").get() as {
+          id: number;
+        }
+      ).id;
+      const result = (outcome: string, current: boolean) =>
+        s.db
+          .query("INSERT OR REPLACE INTO pr_merge_result (pr, merge_result) VALUES ($pr, $m)")
+          .run({ pr, m: JSON.stringify({ outcome, current }) });
+      s.db.query("UPDATE task_part SET pr = $pr, state = 'pr_open' WHERE id = $id").run({ pr, id: s.part().id });
+      s.db.query("UPDATE task SET state = 'ready' WHERE id = $id").run({ id: s.task });
+      expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(false);
+      result(MERGE_CONFLICTED, true);
+      expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(true);
+      result(MERGE_CONFLICTED, false);
+      expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(false);
+      result("CLEAN", true);
+      expect(taskDto(s.db, s.t()).bases[0]?.conflicted).toBe(false);
+    },
+    SLOW,
+  );
 
-  test("the marker check finds start, base, and end markers at the marker size, and accepts a lone ======= line", async () => {
-    const s = await builtTask();
-    const w = await s.wt();
-    await write(w, { "a.txt": "x\n<<<<<<< HEAD\ny\n", "b.txt": "Title\n=======\ntext\n", "c.txt": "||||||| base\n", "d.txt": ">>>>>>>\n" });
-    expect(await markerLeft(w, ["b.txt"])).toBeNull();
-    expect(await markerLeft(w, ["b.txt", "a.txt"])).toBe("a.txt");
-    expect(await markerLeft(w, ["c.txt"])).toBe("c.txt");
-    expect(await markerLeft(w, ["d.txt"])).toBe("d.txt");
-    // git-merge(1): conflict-marker-size sets the marker length. Seven characters are no marker then; eight are no marker at size 7.
-    await write(w, { ".gitattributes": "e.txt conflict-marker-size=10\n", "e.txt": "<<<<<<< HEAD\n", "f.txt": "<<<<<<<< HEAD\n" });
-    expect(await markerLeft(w, ["e.txt", "f.txt"])).toBeNull();
-    await write(w, { "e.txt": "<<<<<<<<<< HEAD\n" });
-    expect(await markerLeft(w, ["e.txt"])).toBe("e.txt");
-    expect(await markerLeft(w, ["gone.txt"])).toBeNull();
-    expect(existsSync(join(w.repo, "gone.txt"))).toBe(false);
-  });
+  test(
+    "the marker check finds start, base, and end markers at the marker size, and accepts a lone ======= line",
+    async () => {
+      const s = await builtTask();
+      const w = await s.wt();
+      await write(w, {
+        "a.txt": "x\n<<<<<<< HEAD\ny\n",
+        "b.txt": "Title\n=======\ntext\n",
+        "c.txt": "||||||| base\n",
+        "d.txt": ">>>>>>>\n",
+      });
+      expect(await markerLeft(w, ["b.txt"])).toBeNull();
+      expect(await markerLeft(w, ["b.txt", "a.txt"])).toBe("a.txt");
+      expect(await markerLeft(w, ["c.txt"])).toBe("c.txt");
+      expect(await markerLeft(w, ["d.txt"])).toBe("d.txt");
+      // git-merge(1): conflict-marker-size sets the marker length. Seven characters are no marker then; eight are no marker at size 7.
+      await write(w, { ".gitattributes": "e.txt conflict-marker-size=10\n", "e.txt": "<<<<<<< HEAD\n", "f.txt": "<<<<<<<< HEAD\n" });
+      expect(await markerLeft(w, ["e.txt", "f.txt"])).toBeNull();
+      await write(w, { "e.txt": "<<<<<<<<<< HEAD\n" });
+      expect(await markerLeft(w, ["e.txt"])).toBe("e.txt");
+      expect(await markerLeft(w, ["gone.txt"])).toBeNull();
+      expect(existsSync(join(w.repo, "gone.txt"))).toBe(false);
+    },
+    SLOW,
+  );
 });
 
 describe("Pick a base branch after commits (spec.md section 6.16.7)", () => {

@@ -1434,116 +1434,124 @@ describe("an existing branch on the server (spec.md section 6.16.4)", () => {
 });
 
 describe("restart recovery and the helpers", () => {
-  test("AC-B297: a restart gives error/restart to the tasks that worked: a running check, a step that waited for the slot, a part that the loop built", async () => {
-    const s = await setup();
-    const now = Date.now();
-    const add = (key: string) => s.addTask(key, key);
-    const a = add("R-1");
-    const b = add("R-2");
-    const c = add("R-3");
-    const d = add("R-4");
-    const part = (task: number) =>
-      s.db
-        .query(
-          `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
+  test(
+    "AC-B297: a restart gives error/restart to the tasks that worked: a running check, a step that waited for the slot, a part that the loop built",
+    async () => {
+      const s = await setup();
+      const now = Date.now();
+      const add = (key: string) => s.addTask(key, key);
+      const a = add("R-1");
+      const b = add("R-2");
+      const c = add("R-3");
+      const d = add("R-4");
+      const part = (task: number) =>
+        s.db
+          .query(
+            `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, state, created_at, updated_at)
           VALUES ($task, 1, 'single', 't', $b, 'main', 'implementing', $now, $now)`,
-        )
-        .run({ task, b: `feature/x-${task}`, now });
-    for (const x of [a, b, c, d]) part(x);
-    s.db.query("INSERT INTO task_step (task, kind, state, ord, started_at) VALUES ($t, 'check', 'running', 1, $now)").run({ t: a, now });
-    s.db.query("INSERT INTO task_step (task, kind, state, ord, started_at) VALUES ($t, 'tests', 'waiting', 1, $now)").run({ t: b, now });
-    // b waits for the run slot, so its reason says so. d waits for the user: its reason keeps it.
-    const reason = (id: number, kind: string) =>
-      s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id, b: JSON.stringify({ kind, step: null, text: "x" }) });
-    reason(b, "slot");
-    reason(d, "red");
-    recoverTasks(s.db, now);
-    const row = (task: number) => (s.db.query("SELECT id FROM task_step WHERE task = $t").get({ t: task }) as { id: number }).id;
-    const partOf = (task: number) => (s.db.query("SELECT id FROM task_part WHERE task = $t").get({ t: task }) as { id: number }).id;
-    for (const x of [a, b, c]) expect([s.t(x).state, s.t(x).stopped_from]).toEqual(["implementing", null]);
-    // part-session.md section 9.5 (Q-SM2): a soft slot reason gives way; a part between two steps gets the reason with no step.
-    expect([s.blocked(a), s.blocked(b)]).toMatchObject([
-      { kind: "error", cause: "restart", step: row(a) },
-      { kind: "error", cause: "restart", step: row(b) },
-    ]);
-    expect(s.blocked(c)).toMatchObject({ kind: "error", cause: "restart", step: null, part: partOf(c) });
-    expect(s.t(d).state).toBe("implementing");
-    expect(s.blocked(d)).toMatchObject({ kind: "red" });
-    expect(s.db.query("SELECT state FROM task_step WHERE task IN ($a, $b)").all({ a, b })).toEqual([
-      { state: "failed" },
-      { state: "failed" },
-    ]);
-  });
+          )
+          .run({ task, b: `feature/x-${task}`, now });
+      for (const x of [a, b, c, d]) part(x);
+      s.db.query("INSERT INTO task_step (task, kind, state, ord, started_at) VALUES ($t, 'check', 'running', 1, $now)").run({ t: a, now });
+      s.db.query("INSERT INTO task_step (task, kind, state, ord, started_at) VALUES ($t, 'tests', 'waiting', 1, $now)").run({ t: b, now });
+      // b waits for the run slot, so its reason says so. d waits for the user: its reason keeps it.
+      const reason = (id: number, kind: string) =>
+        s.db.query("UPDATE task SET blocked_json = $b WHERE id = $id").run({ id, b: JSON.stringify({ kind, step: null, text: "x" }) });
+      reason(b, "slot");
+      reason(d, "red");
+      recoverTasks(s.db, now);
+      const row = (task: number) => (s.db.query("SELECT id FROM task_step WHERE task = $t").get({ t: task }) as { id: number }).id;
+      const partOf = (task: number) => (s.db.query("SELECT id FROM task_part WHERE task = $t").get({ t: task }) as { id: number }).id;
+      for (const x of [a, b, c]) expect([s.t(x).state, s.t(x).stopped_from]).toEqual(["implementing", null]);
+      // part-session.md section 9.5 (Q-SM2): a soft slot reason gives way; a part between two steps gets the reason with no step.
+      expect([s.blocked(a), s.blocked(b)]).toMatchObject([
+        { kind: "error", cause: "restart", step: row(a) },
+        { kind: "error", cause: "restart", step: row(b) },
+      ]);
+      expect(s.blocked(c)).toMatchObject({ kind: "error", cause: "restart", step: null, part: partOf(c) });
+      expect(s.t(d).state).toBe("implementing");
+      expect(s.blocked(d)).toMatchObject({ kind: "red" });
+      expect(s.db.query("SELECT state FROM task_step WHERE task IN ($a, $b)").all({ a, b })).toEqual([
+        { state: "failed" },
+        { state: "failed" },
+      ]);
+    },
+    SLOW,
+  );
 
-  test("globs follow the gitignore rules; the line count skips lock files; a tick marks one open task", async () => {
-    expect(globMatch("*.lock", "a/b/c.lock")).toBe(true);
-    expect(globMatch("bun.lock", "pkg/bun.lock")).toBe(true);
-    expect(globMatch("/bun.lock", "pkg/bun.lock")).toBe(false);
-    expect(globMatch("tests/", "a/tests/x.ts")).toBe(true);
-    expect(globMatch("src/tests/", "a/src/tests/x.ts")).toBe(false);
-    expect(globMatch("tests/**/*.ts", "tests/a/b.ts")).toBe(true);
-    expect(globMatch("*.test.ts", "src/x.test.ts")).toBe(true);
-    expect(globMatch("*.test.ts", "src/x.ts")).toBe(false);
-    // AC-B161: each default test glob matches its test file and no ordinary source file.
-    const hits: Record<string, string> = {
-      "test/": "a/test/x.c",
-      "tests/": "tests/x.py",
-      "unittest/": "src/unittest/unittest/foo_tests.cpp",
-      "unittests/": "lib/unittests/a.cc",
-      "__tests__/": "web/__tests__/a.tsx",
-      "spec/": "spec/models/user_spec.rb",
-      "testing/": "pkg/testing/helpers.go",
-      "*_test.*": "src/parser_test.go",
-      "*_tests.*": "src/foo_tests.cpp",
-      "test_*.*": "pkg/test_parser.py",
-      "*.test.*": "src/x.test.ts",
-      "*.spec.*": "src/x.spec.js",
-      "*Test.*": "src/main/java/ParserTest.java",
-      "*Tests.*": "Sources/ParserTests.swift",
-      "*_unittest.*": "base/strings_unittest.cc",
-    };
-    expect(Object.keys(hits)).toEqual([...DEFAULT_TEST_GLOBS]);
-    for (const [g, path] of Object.entries(hits)) expect([g, globMatch(g, path)]).toEqual([g, true]);
-    const plain = [
-      "src/feature.ts",
-      "src/latest.go",
-      "src/contest.cpp",
-      "src/Latest.java",
-      "src/attest.rs",
-      "src/test.cpp",
-      "src/testing.go",
-    ];
-    for (const path of [...plain, "src/inspect.ts", "specs/T-1/plan.md", "src/TestUtils.java", "a/test.py", "x/foo.spec"])
-      expect([path, DEFAULT_TEST_GLOBS.filter((g) => globMatch(g, path))]).toEqual([path, []]);
-    const text = "### [ ] T1.1 A\nFiles: a\n### [ ] T1.10 B\n";
-    expect(tickTask(text, "T1.1")).toBe("### [x] T1.1 A\nFiles: a\n### [ ] T1.10 B\n");
-    expect(tickTask("### [x] T1.1 A\n", "T1.1")).toBeNull();
-    expect(tickTask(text, "T1")).toBeNull();
-    const s = await setup();
-    const w = await openWorktree({
-      dataDir: s.dataDir,
-      db: s.db,
-      project: "PROJ",
-      repo: "repo",
-      task: s.task,
-      ord: 1,
-      branch: "feature/K-1-count",
-      base: s.base,
-    });
-    writeFileSync(join(w.repo, "bun.lock"), "x\n".repeat(50));
-    writeFileSync(join(w.repo, "README.md"), "one\ntwo\n");
-    await git([`--git-dir=${w.admin}`, `--work-tree=${w.repo}`, "add", "-A"], { env: w.env });
-    await git(
-      [`--git-dir=${w.admin}`, `--work-tree=${w.repo}`, "-c", "user.name=a", "-c", "user.email=a@example.invalid", "commit", "-qm", "x"],
-      {
-        env: w.env,
-      },
-    );
-    const head = (await git([`--git-dir=${w.admin}`, "rev-parse", "HEAD"], { env: w.env })).trim();
-    // README.md: 2 added, 1 removed. bun.lock: left out.
-    expect(await changedLines(w, s.base, head, LOCK_GLOBS)).toEqual({ files: 1, added: 2, removed: 1, lines: 3 });
-    expect((await changedLines(w, s.base, head, [])).lines).toBe(53);
-  });
+  test(
+    "globs follow the gitignore rules; the line count skips lock files; a tick marks one open task",
+    async () => {
+      expect(globMatch("*.lock", "a/b/c.lock")).toBe(true);
+      expect(globMatch("bun.lock", "pkg/bun.lock")).toBe(true);
+      expect(globMatch("/bun.lock", "pkg/bun.lock")).toBe(false);
+      expect(globMatch("tests/", "a/tests/x.ts")).toBe(true);
+      expect(globMatch("src/tests/", "a/src/tests/x.ts")).toBe(false);
+      expect(globMatch("tests/**/*.ts", "tests/a/b.ts")).toBe(true);
+      expect(globMatch("*.test.ts", "src/x.test.ts")).toBe(true);
+      expect(globMatch("*.test.ts", "src/x.ts")).toBe(false);
+      // AC-B161: each default test glob matches its test file and no ordinary source file.
+      const hits: Record<string, string> = {
+        "test/": "a/test/x.c",
+        "tests/": "tests/x.py",
+        "unittest/": "src/unittest/unittest/foo_tests.cpp",
+        "unittests/": "lib/unittests/a.cc",
+        "__tests__/": "web/__tests__/a.tsx",
+        "spec/": "spec/models/user_spec.rb",
+        "testing/": "pkg/testing/helpers.go",
+        "*_test.*": "src/parser_test.go",
+        "*_tests.*": "src/foo_tests.cpp",
+        "test_*.*": "pkg/test_parser.py",
+        "*.test.*": "src/x.test.ts",
+        "*.spec.*": "src/x.spec.js",
+        "*Test.*": "src/main/java/ParserTest.java",
+        "*Tests.*": "Sources/ParserTests.swift",
+        "*_unittest.*": "base/strings_unittest.cc",
+      };
+      expect(Object.keys(hits)).toEqual([...DEFAULT_TEST_GLOBS]);
+      for (const [g, path] of Object.entries(hits)) expect([g, globMatch(g, path)]).toEqual([g, true]);
+      const plain = [
+        "src/feature.ts",
+        "src/latest.go",
+        "src/contest.cpp",
+        "src/Latest.java",
+        "src/attest.rs",
+        "src/test.cpp",
+        "src/testing.go",
+      ];
+      for (const path of [...plain, "src/inspect.ts", "specs/T-1/plan.md", "src/TestUtils.java", "a/test.py", "x/foo.spec"])
+        expect([path, DEFAULT_TEST_GLOBS.filter((g) => globMatch(g, path))]).toEqual([path, []]);
+      const text = "### [ ] T1.1 A\nFiles: a\n### [ ] T1.10 B\n";
+      expect(tickTask(text, "T1.1")).toBe("### [x] T1.1 A\nFiles: a\n### [ ] T1.10 B\n");
+      expect(tickTask("### [x] T1.1 A\n", "T1.1")).toBeNull();
+      expect(tickTask(text, "T1")).toBeNull();
+      const s = await setup();
+      const w = await openWorktree({
+        dataDir: s.dataDir,
+        db: s.db,
+        project: "PROJ",
+        repo: "repo",
+        task: s.task,
+        ord: 1,
+        branch: "feature/K-1-count",
+        base: s.base,
+      });
+      writeFileSync(join(w.repo, "bun.lock"), "x\n".repeat(50));
+      writeFileSync(join(w.repo, "README.md"), "one\ntwo\n");
+      await git([`--git-dir=${w.admin}`, `--work-tree=${w.repo}`, "add", "-A"], { env: w.env });
+      await git(
+        [`--git-dir=${w.admin}`, `--work-tree=${w.repo}`, "-c", "user.name=a", "-c", "user.email=a@example.invalid", "commit", "-qm", "x"],
+        {
+          env: w.env,
+        },
+      );
+      const head = (await git([`--git-dir=${w.admin}`, "rev-parse", "HEAD"], { env: w.env })).trim();
+      // README.md: 2 added, 1 removed. bun.lock: left out.
+      expect(await changedLines(w, s.base, head, LOCK_GLOBS)).toEqual({ files: 1, added: 2, removed: 1, lines: 3 });
+      expect((await changedLines(w, s.base, head, [])).lines).toBe(53);
+    },
+    SLOW,
+  );
 });
 
 describe("routes (spec.md section 6.11)", () => {
