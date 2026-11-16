@@ -92,12 +92,12 @@ Non-goals:
 | R8 | The app decides delegation from the diff stat. Below 1,200 changed lines and 30 files, the finder gets no Agent tool. | The model decides (today, auto mode). | S5. A fixed agent set with a known shape per run. |
 | R9 | One default review profile "Review" with module checkboxes and a three-step volume. The shipped Security and Over-engineering profiles retire when the user never edited them; "Security" and "Simplify" become modules. The Explain profile becomes the setup of "Explain this PR". | Keep four topic profiles. Keep General and Over-engineering as two shipped profiles. | S13 and the UX rules: one choice that most users never change. A pure cut pass stays possible as the user's own profile. Section 10 Q7. |
 | R10 | Volume (Only what matters, Balanced, Show everything) changes the display and the nit rule only. The finder always reports the rest. | Volume changes the finder prompt. | S2: the finder must not self-filter. |
-| R11 | Explicit effort per agent. Shipped: finder high, rl-reviewer high, verify phase medium, Explain medium. Discuss and Ask use the effort of the profile in the brief. | Leave null (W7). | S1. The profile keeps each field editable. |
+| R11 | Explicit effort per agent. Shipped: finder medium, rl-reviewer medium, verify phase medium, Explain medium. The finder and rl-reviewer ran at high before PROFILES_VERSION 8 (review-quality-2026.md item 2, shipped 2026-11-16). Discuss and Ask use the effort of the profile in the brief. | Leave null (W7). | S1. The profile keeps each field editable. |
 | R12 | Author intent goes to every agent: each agent prompt says to read ./context/pr.md and ./context/task.md first. The stdin keeps no PR text. | Put the PR title and description into stdin. | BRIEF prompt rule: stdin never quotes PR or tracker text (prompt.ts:3). |
 | R13 | Path-scoped project rules: CLAUDE.md files of the target head on the path of each changed file join the project instructions with a scope header. A rule finding quotes the rule. The app checks that the quote is in a loaded file whose scope covers the path. | Root CLAUDE.md only (today). | S8: only rules that apply to the path, and an exact quote. |
 | R14 | Subagent parity: one context block (Tools lines for the existing context files, the intent rule, the history rule, the do-not-flag list, the rubric, modules, language lists, project instructions) goes to every agent of the run. | Per-agent lists (today, W4). | Same facts in every agent. No re-raise of discarded findings. |
 | R15 | Explain leaves the review schema. It gets its own run kind and schema (part 3). | Keep explain true on review runs. | W9. |
-| R16 | The UI uses the stored verdicts: confirmed points show; unsure points fold under "Low confidence"; refuted and duplicate points stay in the run record and the log, with Restore. A refuted point that stays in the list (a protected class, or outcome demote) also folds at quiet and balanced (review-quality-2026.md E5, shipped 2026-11-15). | Show everything as today. | S10, S11. Nothing is lost, and the main list is short. |
+| R16 | The UI uses the stored verdicts: confirmed points show; unsure points and nits fold under "More"; refuted and duplicate points stay in the run record and the log, with Restore. A refuted point that stays in the list (a protected class, or outcome demote) also folds at quiet and balanced (review-quality-2026.md E5, shipped 2026-11-15). | Show everything as today. | S10, S11. Nothing is lost, and the main list is short. |
 | R17 | REVIEW_PROMPT_VERSION (a constant in src/shared/review.ts) goes into each run row. | Profile revision only. | Stats and the eval compare prompt versions. |
 
 ### 4.2 Part 2: Discuss a finding
@@ -507,7 +507,7 @@ Cost: one autopilot run per burst of comments, about one reply-run cost. A guard
 | Idea | Verdict | Reason |
 |---|---|---|
 | Time and cost per run and phase in the run line | Now | usage_json exists. Users need it to trust the verify phase. |
-| Summary ledger in plain words ("2 must fix, 3 worth fixing, 4 low confidence") | Now | Part of WP-R4. |
+| Summary ledger in plain words ("2 must fix, 3 worth fixing, 4 more") | Now | Part of WP-R4. |
 | Two passes, cheap then deep (a fast triage marks risky files, a deep pass reads them) | Later | The verify phase comes first. The eval shows if recall needs it. |
 | CodeGraph for the finder by default when the user has it | Later | Index time up to 120 s per run. Measure with an eval case that has a caller bug first. |
 | Re-anchor dropped findings (post as a general comment) | Later | BRIEF: invalid references become coverage problems. Needs a user decision. |

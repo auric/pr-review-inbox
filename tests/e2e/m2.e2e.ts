@@ -100,24 +100,24 @@ test("a brief with a note and a profile; drafts, summary, and the subagent tree;
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
   await expect(runLine(page)).toContainText("3 findings, 1 question");
   // Plan pr-view-v4 2.7: one Drafts section between the Description and the threads. It holds the findings, then the question.
-  // docs/plans/review-v2/spec.md section 1.4: the Balanced volume keeps the nit in the closed Low confidence fold between them.
+  // docs/plans/review-v2/spec.md section 1.4: the Balanced volume keeps the nit in the closed More fold between them.
   // Only the first untriaged row starts open. The ledger names the open drafts in plain words. The status strip counts all four.
   const section = page.locator("#s-drafts");
   const heads = section.locator("[data-row-head]");
   await expect(page.locator("#s-overview ~ #s-drafts ~ #s-threads")).toHaveCount(1);
   await expect(section.locator("h2")).toHaveText("Drafts");
-  await expect(section.locator("[data-drafts-ledger]")).toHaveText("1 must fix · 1 worth fixing · 1 low confidence · 1 question");
+  await expect(section.locator("[data-drafts-ledger]")).toHaveText("1 must fix · 1 worth fixing · 1 more · 1 question");
   await expect(page.getByRole("navigation", { name: "Pull request summary" }).getByRole("button", { name: "4 drafts" })).toBeVisible();
   await expect(heads).toHaveCount(4);
   await expect(heads.nth(0)).toContainText("Blocker");
   await expect(heads.nth(0)).toContainText("src/cache/flush.ts:3");
-  await expect(heads.nth(2)).toHaveText("Low confidence (1)");
+  await expect(heads.nth(2)).toHaveText("More (1)");
   await expect(heads.nth(3)).toContainText("QuestionMust flush() stay atomic for readers?");
   for (const [i, open] of [true, false, false, false].entries()) await expect(heads.nth(i)).toHaveAttribute("aria-expanded", String(open));
   await expect(page.locator("#s-threads [data-draft], #s-threads [data-draft-question]")).toHaveCount(0);
   // One button per part of the ledger. Each one goes to its first draft. The fold part opens the fold first.
-  await expect(runLine(page).locator("[data-ledger]")).toHaveText(["1 must fix", "1 worth fixing", "1 low confidence", "1 question"]);
-  await runLine(page).getByRole("button", { name: "1 low confidence" }).click();
+  await expect(runLine(page).locator("[data-ledger]")).toHaveText(["1 must fix", "1 worth fixing", "1 more", "1 question"]);
+  await runLine(page).getByRole("button", { name: "1 more" }).click();
   await expect(page.getByRole("article", { name: /^Draft from Claude\. Nit\. README\.md:1\./ })).toBeFocused();
   await expect(heads.nth(2)).toHaveAttribute("aria-expanded", "true");
   // Run setup opens in place with the inputs of the run.

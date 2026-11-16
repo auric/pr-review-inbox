@@ -57,7 +57,7 @@ async function open(page: Page) {
 }
 
 // Shift+R opens the brief. Ctrl+Enter starts the review. The fake CLI gives 3 drafts and 1 question. The README nit waits in the
-// Low confidence fold between the findings and the question (docs/plans/review-v2/spec.md section 1.4). The fold opens here, so the
+// More fold between the findings and the question (docs/plans/review-v2/spec.md section 1.4). The fold opens here, so the
 // tests triage all 3 drafts.
 async function reviewed(page: Page) {
   await page.keyboard.press("Shift+R");
@@ -65,7 +65,7 @@ async function reviewed(page: Page) {
   await page.getByLabel("Your note").press("Control+Enter");
   await expect(page.locator("#runline [data-run-kind='review']")).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
   await expect(drafts(page)).toHaveCount(2);
-  await page.getByRole("button", { name: "Low confidence (1)" }).click();
+  await page.getByRole("button", { name: "More (1)" }).click();
   await expect(drafts(page)).toHaveCount(3);
 }
 

@@ -63,7 +63,7 @@ async function connect(page: Page) {
 }
 
 // Shift+R opens the brief. Ctrl+Enter starts the review. The fake CLI gives 3 drafts and 1 question. The README nit waits in the
-// closed Low confidence fold (docs/plans/review-v2/spec.md section 1.4).
+// closed More fold (docs/plans/review-v2/spec.md section 1.4).
 async function review(page: Page) {
   await page.keyboard.press("Shift+R");
   await page.getByLabel("Your note").press("Control+Enter");
@@ -137,7 +137,7 @@ test("get the code, open flush.ts, cards on their lines, Show in diff and back, 
   const strip = page.getByRole("navigation", { name: "Pull request summary" });
   const ledger = page.locator("[data-drafts-ledger]");
   await expect(strip.getByRole("button", { name: "4 drafts" })).toBeVisible();
-  await expect(ledger).toHaveText("1 must fix · 1 worth fixing · 1 low confidence · 1 question");
+  await expect(ledger).toHaveText("1 must fix · 1 worth fixing · 1 more · 1 question");
   const minor = drafts(page).nth(1).locator("[data-row-head]");
   await expect(minor).toHaveAttribute("aria-expanded", "false");
   await minor.focus();
@@ -154,7 +154,7 @@ test("get the code, open flush.ts, cards on their lines, Show in diff and back, 
   await page.keyboard.press("d");
   await expect(page.locator("[data-draft-question]")).toHaveAccessibleName("Discarded question");
   await expect(strip.getByRole("button", { name: "3 drafts" })).toBeVisible();
-  await expect(ledger).toHaveText("1 must fix · 1 worth fixing · 1 low confidence");
+  await expect(ledger).toHaveText("1 must fix · 1 worth fixing · 1 more");
 
   // Show in diff from the inline thread finds the old-side line.
   const mine = page.locator("[data-thread]", { hasText: "flush.ts" }).first();

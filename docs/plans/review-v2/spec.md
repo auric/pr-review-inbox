@@ -42,7 +42,7 @@ Status: decided, 2026-10-22. design.md gives the reasons, the alternatives, and 
 - Shown checkboxes: "Security", "Threads and races", "Performance", "Tests", "Compatibility", "Simplify (what to delete)". Under "More checks": "Docs and comments", "Project rules", "Matches the task", "Language checklists (C++, C, Python, C#)".
 - Volume: "Only what matters", "Balanced", "Show everything". One line under it says what it does (section 1.4).
 - While the run works, the run line says "Finding problems…" and then "Checking 9 findings…". The log groups the checking events under "Check".
-- After the run, the Drafts header says the ledger in plain words, for example "2 must fix · 3 worth fixing". Must fix counts blocker and major. Worth fixing counts minor. Then the main list. Then a fold "Low confidence (4)". The run record has one line "3 refuted by the check · 1 duplicate". It opens a list with the reason of each point and Restore.
+- After the run, the Drafts header says the ledger in plain words, for example "2 must fix · 3 worth fixing". Must fix counts blocker and major. Worth fixing counts minor. Then the main list. Then a fold "More (4)". The run record has one line "3 refuted by the check · 1 duplicate". It opens a list with the reason of each point and Restore.
 - A finding card shows: severity, a check chip ("Checked", "Low confidence", or "Not checked"), the title, the body, "When: <trigger>", the check reason ("Check: <reason> (path:line)"), the evidence, and the link "Ask Claude about this".
 - The run line of a finished run shows the time of each phase and the usage that the CLI reports, for example "Finding 8 min · Checking 3 min".
 
@@ -98,7 +98,7 @@ Path scope of project rules (instructions.ts): the target head loader also reads
 | Volume | Label line | Finder nit rule | Main list | Fold |
 |---|---|---|---|---|
 | quiet | "Only what matters: must-fix points. Everything else waits in a fold." | "Give no nits." | Checked blocker and major. Not checked blocker and major. No demoted finding. | "More (N)": the rest and the demoted findings, except hidden refuted findings and duplicates. |
-| balanced | "Balanced: must-fix and worth-fixing points. Unsure and refuted points wait in a fold." | "Give no nits." | Checked and not checked, except nits, unsure, and demoted findings. | "Low confidence (N)": unsure points, nits, and demoted findings. |
+| balanced | "Balanced: must-fix and worth-fixing points. Unsure and refuted points wait in a fold." | "Give no nits." | Checked and not checked, except nits, unsure, and demoted findings. | "More (N)": unsure points, nits, and demoted findings. |
 | thorough | "Show everything: also small polish and unsure points." | "Give nits for small, clear improvements." | Everything except hidden refuted findings and duplicates. Unsure points carry the "Low confidence" chip. Demoted findings come last. | none |
 
 summary_json.volume stores the volume of the run. The display uses it, so an old run keeps its view after a profile change.
@@ -306,7 +306,7 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 2. AC-R2. The finder argv for a 200-line change has no Agent tool. A 1,300-line change with reviewer mode auto has `Agent` in --tools and rl-reviewer in the agents file.
 3. AC-R3. The verify argv carries `--effort medium` by default and the verifier effort when set. The rl-reviewer definition carries the reviewer effort.
 4. AC-R4. A refuted candidate becomes a discarded item with discardedBy "verify". It is not in the Drafts list and shows in the run record list with its reason. Restore makes it new.
-5. AC-R5. An unsure candidate with severity major is stored as minor and shows in the "Low confidence" fold under Balanced.
+5. AC-R5. An unsure candidate with severity major is stored as minor and shows in the "More" fold under Balanced.
 6. AC-R6. A candidate with an empty trigger and verdict unsure becomes a question item.
 7. AC-R7. A finding anchored on a context line, with no cause, drops with reason "unchanged". The same finding with a cause on an added line stays.
 8. AC-R8. A rules finding whose rule text is not in the loaded instructions drops with reason "rule". A quote from a scoped CLAUDE.md for a path outside its scope keeps the finding with module "core" and an empty rule.
@@ -3342,7 +3342,7 @@ Screens checked against the rules:
 | Screen | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Review brief | Start review | "Threads and races" | phase line | shipped profile | n/a | none | run line errors | existing | run line | Brief.tsx |
-| Drafts and folds | n/a (per card a, d, e) | "Low confidence" | ledger | volume default | n/a | none | n/a | none | count | Drafts.tsx |
+| Drafts and folds | n/a (per card a, d, e) | "More" | ledger | volume default | n/a | none | n/a | none | count | Drafts.tsx |
 | Discuss chat | Ask | "Claude keeps this point" | "Claude is reading the code" | none | n/a | none | slot busy line | none | n/a | Markdown.tsx |
 | Ask panel (follow-ups) | Ask | "Follow up", "New question" | "Claude is answering" and the head-changed line | brief or parent profile, no setup | n/a | none | slot busy and "moved on" toasts | none | n/a | AskPanel Answer, Textarea, Button, Text |
 | Notes block | Add a note, or Save in the box | "Claude suggests", "Keep" | "Claude does not use a suggestion until you keep it." | empty block, no setup | n/a | none (Delete has Undo) | 409 and 404 sentences | none | n/a | Button, chip, row |

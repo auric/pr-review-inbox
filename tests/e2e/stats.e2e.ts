@@ -38,9 +38,9 @@ async function reviewed(page: Page) {
   await page.getByLabel("Your note").fill("ABC-1: check the lock scope.");
   await page.getByLabel("Your note").press("Control+Enter");
   await expect(page.locator("#runline [data-run-kind='review']")).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
-  // The README nit waits in the Low confidence fold (docs/plans/review-v2/spec.md section 1.4). The fold opens for the triage.
+  // The README nit waits in the More fold (docs/plans/review-v2/spec.md section 1.4). The fold opens for the triage.
   await expect(drafts(page)).toHaveCount(2);
-  await page.getByRole("button", { name: "Low confidence (1)" }).click();
+  await page.getByRole("button", { name: "More (1)" }).click();
   await expect(drafts(page)).toHaveCount(3);
 }
 

@@ -99,9 +99,9 @@ describe("display groups per volume (spec.md section 1.4)", () => {
     expect([ids(g.main), ids(g.fold), ids(g.hidden), g.foldName]).toEqual([[1, 2], [3, 4, 5], [6, 7], "More"]);
   });
 
-  test("balanced: no nits and no unsure points in main; they wait in Low confidence", () => {
+  test("balanced: no nits and no unsure points in main; they wait in More", () => {
     const g = groupsOf("balanced");
-    expect([ids(g.main), ids(g.fold), ids(g.hidden), g.foldName]).toEqual([[1, 2, 3], [4, 5], [6, 7], "Low confidence"]);
+    expect([ids(g.main), ids(g.fold), ids(g.hidden), g.foldName]).toEqual([[1, 2, 3], [4, 5], [6, 7], "More"]);
   });
 
   test("thorough: everything but refuted and duplicates in main, no fold", () => {
@@ -139,7 +139,7 @@ describe("display groups per volume (spec.md section 1.4)", () => {
       [4, 5, 11, 12],
       [6, 7],
     ]);
-    expect(ledgerParts(g, null).map(ledgerText)).toEqual(["2 must fix", "1 worth fixing", "4 low confidence"]);
+    expect(ledgerParts(g, null).map(ledgerText)).toEqual(["2 must fix", "1 worth fixing", "4 more"]);
     const quiet = draftGroups(list, summary({ volume: "quiet", verify: VERIFY }));
     expect([ids(quiet.main), ids(quiet.fold)]).toEqual([
       [1, 2],
@@ -215,7 +215,7 @@ describe("ledger and refuted line", () => {
     expect(ledgerParts(g, { n: 2, first: 30 }).map((p) => [ledgerText(p), p.first])).toEqual([
       ["2 must fix", 1],
       ["1 worth fixing", 3],
-      ["2 low confidence", 4],
+      ["2 more", 4],
       ["2 questions", 30],
     ]);
     expect(ledgerParts(groupsOf("quiet"), null).map(ledgerText)).toEqual(["2 must fix", "3 more"]);

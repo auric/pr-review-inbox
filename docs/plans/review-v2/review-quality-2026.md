@@ -308,6 +308,8 @@ W2 result (2026-11-16, docs/eval/results.md): the verify2 replay failed its rule
 
 A cost cutter that ships makes its result folder the next baseline. Add one repeat before the next superiority test.
 
+Next baseline: C1b (`eval-results/w2/c1b`, the shipped profile at effort medium, 42 cases, repeat 2), not W1, because W1 ran at effort high. S_R for C1b is 1 bug (17 and 16 bugs), so a "better" result on it needs a mean of at least 18 bugs. Two repeats give a weak spread, so the paired 90% interval (`pairedDelta`) must also exclude zero.
+
 Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--clean 8`). Another value changes the set fingerprint, and eval:ab then refuses the W1 baseline.
 
 ## 4. What not to do

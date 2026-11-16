@@ -134,7 +134,7 @@ async function draftReplies(page: Page) {
 }
 
 // Shift+R opens the brief. Ctrl+Enter starts the review. On PR 1004 the fake CLI gives 3 finding drafts and 1 question. The README
-// nit waits in the closed Low confidence fold (docs/plans/review-v2/spec.md section 1.4).
+// nit waits in the closed More fold (docs/plans/review-v2/spec.md section 1.4).
 async function review(page: Page) {
   await page.keyboard.press("Shift+R");
   await page.getByLabel("Your note").press("Control+Enter");

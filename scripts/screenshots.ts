@@ -147,8 +147,8 @@ async function shots(browser: Browser) {
     .click();
   await toTop(page.locator("#runline"), 64);
   await save(page, "review");
-  // The Drafts list with its check chips and the open "Low confidence" fold.
-  await page.getByRole("button", { name: /^Low confidence \(/ }).click();
+  // The Drafts list with its check chips and the open "More" fold.
+  await page.getByRole("button", { name: /^More \(/ }).click();
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   // The rows of the fold fade in (.rl-enter).
   await page.waitForTimeout(400);

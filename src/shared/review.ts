@@ -208,7 +208,7 @@ export const checkOf = (p: { verify?: Pick<VerifyMark, "verdict"> }): Check =>
       ? "unsure"
       : "unchecked";
 
-// main: the Drafts list. fold: "More" (quiet) or "Low confidence" (balanced). hidden: refuted and duplicates, in the run record only.
+// main: the Drafts list. fold: "More" (quiet and balanced). hidden: refuted and duplicates, in the run record only.
 export type DisplayGroup = "main" | "fold" | "hidden";
 
 // spec.md section 1.4: the place of a finding from its check, its severity, and the volume of its run. A run without a volume is from

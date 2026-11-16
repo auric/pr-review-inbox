@@ -135,8 +135,8 @@ test("a two-phase run: the phase line, the ledger, the fold, the check chip, the
   await expect(runRow(page).locator("[data-phase-time]")).toHaveText([/^Finding \d+ s$/, /^Checking \d+ s$/]);
 
   // Balanced: the confirmed blocker shows. The unsure nit waits in the fold. The refuted minor stays in the run record.
-  await expect(page.locator("[data-drafts-ledger]")).toHaveText("1 must fix · 1 low confidence · 1 question");
-  await expect(runLine(page).locator("[data-ledger]")).toHaveText(["1 must fix", "1 low confidence", "1 question"]);
+  await expect(page.locator("[data-drafts-ledger]")).toHaveText("1 must fix · 1 more · 1 question");
+  await expect(runLine(page).locator("[data-ledger]")).toHaveText(["1 must fix", "1 more", "1 question"]);
   await expect(drafts(page)).toHaveCount(1);
   const blocker = drafts(page).first();
   await expect(blocker.locator("[data-check]")).toHaveText("Checked");
@@ -144,7 +144,7 @@ test("a two-phase run: the phase line, the ledger, the fold, the check chip, the
   await expect(blocker.locator("[data-check-reason]")).toHaveText(
     "Check: write() reads the batch between two entries without the lock. (src/cache/flush.ts:4)",
   );
-  const fold = page.getByRole("button", { name: "Low confidence (1)" });
+  const fold = page.getByRole("button", { name: "More (1)" });
   await expect(fold).toHaveAttribute("aria-expanded", "false");
 
   // The run record: one line for the refuted point. It opens the reason and Restore.
@@ -220,7 +220,7 @@ test("a refuted concurrency finding goes to the fold, last, with the Refuted chi
   // The refuted blocker of category Concurrency is not hidden. At balanced it waits in the fold, after the confirmed nit.
   await expect(drafts(page)).toHaveCount(1);
   await expect(drafts(page).nth(0)).toContainText("Release the lock in a finally block.");
-  const fold = page.getByRole("button", { name: "Low confidence (2)" });
+  const fold = page.getByRole("button", { name: "More (2)" });
   await fold.click();
   await expect(fold).toHaveAttribute("aria-expanded", "true");
   await expect(drafts(page)).toHaveCount(3);
@@ -253,18 +253,18 @@ test("a volume change keeps the view of an earlier run; the next run shows every
   await connect(page);
   await start(page);
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
-  await expect(page.getByRole("button", { name: "Low confidence (1)" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "More (1)" })).toBeVisible();
 
   await page.keyboard.press("r");
   await brief(page).getByRole("group", { name: "Show" }).getByRole("button", { name: "Show everything" }).click();
   await expect.poll(async () => (await review(page))?.volume).toBe("thorough");
   await page.keyboard.press("Escape");
   // The run stored its volume, so its fold stays.
-  await expect(page.getByRole("button", { name: "Low confidence (1)" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "More (1)" })).toBeVisible();
 
   await start(page);
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
-  await expect.poll(async () => page.getByRole("button", { name: /^Low confidence \(/ }).count(), { timeout: RUN_MS }).toBe(0);
+  await expect.poll(async () => page.getByRole("button", { name: /^More \(/ }).count(), { timeout: RUN_MS }).toBe(0);
   await expect(drafts(page)).toHaveCount(2);
   await expect(page.locator("[data-drafts-ledger]")).toHaveText("1 must fix · 1 polish · 1 question");
   await expect(page.getByRole("article", { name: /README\.md:1\..* Low confidence\.$/ })).toBeVisible();

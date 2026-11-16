@@ -468,7 +468,7 @@ describe("verify phase in a review run", () => {
   );
 
   test(
-    "AC-R5, AC-R6: an unsure major is stored as minor in the Low confidence fold; an empty trigger with unsure becomes a question",
+    "AC-R5, AC-R6: an unsure major is stored as minor in the More fold; an empty trigger with unsure becomes a question",
     async () => {
       const h = await setup();
       h.runner.write({

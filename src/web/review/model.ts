@@ -620,7 +620,7 @@ export const VOLUME_LINE: Record<Volume, string> = {
   balanced: "Balanced: must-fix and worth-fixing points. Unsure and refuted points wait in a fold.",
   thorough: "Show everything: also small polish and unsure points.",
 };
-const FOLD_NAME: Record<Volume, string | null> = { quiet: "More", balanced: "Low confidence", thorough: null };
+const FOLD_NAME: Record<Volume, string | null> = { quiet: "More", balanced: "More", thorough: null };
 
 export const CHECK_LABEL: Record<Check, string> = { checked: "Checked", unsure: "Low confidence", unchecked: "Not checked" };
 
@@ -685,9 +685,8 @@ export const draftTitle = (it: ReviewItemDto) => (it.kind === "finding" && (it.p
 export type LedgerPart = { key: "must" | "worth" | "polish" | "fold" | "questions"; n: number; first: number; word: string };
 export const ledgerText = (p: LedgerPart) => `${p.n} ${p.word}`;
 
-// docs/plans/review-v2/design.md section 8: the open drafts in plain words, for example "2 must fix · 3 worth fixing · 4 low
-// confidence". Must fix counts blocker and major, worth fixing minor, and polish nit, all in the main list. first: the draft that
-// the part goes to. qs: questionJump of the run.
+// docs/plans/review-v2/design.md section 8: the open drafts in plain words, for example "2 must fix · 3 worth fixing · 4 more".
+// Must fix counts blocker and major, worth fixing minor, and polish nit, all in the main list. first: the draft that the part goes to. qs: questionJump of the run.
 export function ledgerParts(g: DraftGroups, qs: { n: number; first: number } | null): LedgerPart[] {
   const open = (l: ReviewItemDto[]) => l.filter((i) => i.status !== "discarded");
   const sev = (it: ReviewItemDto) => (it.payload as AnchoredFinding).severity;

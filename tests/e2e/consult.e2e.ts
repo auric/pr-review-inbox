@@ -63,13 +63,13 @@ async function openPr(page: Page) {
 }
 
 // Shift+R opens the brief. Ctrl+Enter starts the review. The fake CLI gives 3 finding drafts, and the run fills the git cache.
-// The README nit waits in the closed Low confidence fold (docs/plans/review-v2/spec.md section 1.4).
+// The README nit waits in the closed More fold (docs/plans/review-v2/spec.md section 1.4).
 async function review(page: Page) {
   await page.keyboard.press("Shift+R");
   await page.getByLabel("Your note").press("Control+Enter");
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
   await expect(page.locator("#s-drafts [data-draft]")).toHaveCount(2);
-  await expect(page.getByRole("button", { name: "Low confidence (1)" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "More (1)" })).toBeVisible();
 }
 
 // A sync or the first-draft rule can open a row first, so the click repeats until the row stays open.

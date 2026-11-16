@@ -142,7 +142,7 @@ test("review drafts stay after a reply run (R14), and a per-thread draft replace
   await page.getByLabel("Your note").fill("ABC-1: check the lock scope.");
   await page.getByLabel("Your note").press("Control+Enter");
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
-  // The README nit waits in the closed Low confidence fold (docs/plans/review-v2/spec.md section 1.4).
+  // The README nit waits in the closed More fold (docs/plans/review-v2/spec.md section 1.4).
   await expect(drafts(page)).toHaveCount(2);
 
   await repliesButton(page).click();
