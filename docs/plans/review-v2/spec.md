@@ -58,16 +58,16 @@ New fields of profileInput (dto.ts:118-150), each with a parse default:
 
 profileRevision (catalog.ts:145) adds each new field only when it differs from its default, as for the older fields.
 
-Shipped values (PROFILES_VERSION 5):
+Shipped values (PROFILES_VERSION 5, with the general efforts of version 8):
 
 | ID | name | note | effort | reviewer | modules | volume | verifier | languageChecks | maxTurns |
 |---|---|---|---|---|---|---|---|---|---|
-| general | "Review" | "Bugs, security, and effects outside the change" | "high" | {model null, effort "high", mode "auto"} | security, concurrency, api, rules, intent | balanced | {on, null, "medium"} | true | 100 |
+| general | "Review" | "Bugs, security, and effects outside the change" | "medium" | {model null, effort "medium", mode "auto"} | security, concurrency, api, rules, intent | balanced | {on, null, "medium"} | true | 100 |
 | explain | "Explain" | "A readable walkthrough of the change" | "medium" | default | [] | balanced | {off, null, null} | false | 60 |
 
 The shipped prompt of general is the "Review lens" of section 1.5. The shipped prompt of explain is the "Explain lens" of section 3.4.
 
-FORMER[4] holds the version 4 values that differ: general {name "General", note "Correctness, concurrency, effects outside the diff", prompt <v4 prompt>, effort null, reviewer {null, null, "auto"}, modules [], verifier default}, explain {note "Summary and questions only, at lower cost", prompt <v4 explain prompt>, effort null, maxTurns 50}. upgradeProfile compares arrays and objects by JSON text.
+FORMER[4] holds the version 4 values that differ: general {name "General", note "Correctness, concurrency, effects outside the diff", prompt <v4 prompt>, effort null, reviewer {null, null, "auto"}, modules [], verifier default}, explain {note "Summary and questions only, at lower cost", prompt <v4 explain prompt>, effort null, maxTurns 50}. FORMER[7] holds the general efforts of versions 5 to 7: effort "high", reviewer {null, "high", "auto"}. Version 8 changed both to "medium" (review-quality-2026.md item 2). upgradeProfile compares arrays and objects by JSON text.
 
 Retire rule (settings.ts upgradeConfig) for a saved PROFILES_VERSION of 4 or lower: a profile with id security or over leaves the list when each field equals its version 4 shipped value. This includes skills, mcp, model, effort, and reviewer. Else the profile stays with all its fields and gets no later shipped upgrade. When security leaves, general gets "security" in modules. When over leaves, general gets "simplify". Both additions apply only while general.modules is unedited.
 
@@ -312,7 +312,7 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 8. AC-R8. A rules finding whose rule text is not in the loaded instructions drops with reason "rule". A quote from a scoped CLAUDE.md for a path outside its scope keeps the finding with module "core" and an empty rule.
 9. AC-R9. Two candidates with overlapping anchors share a group in candidates.md. A duplicate verdict discards one of them.
 10. AC-R10. A verify run that ends with a usage limit leaves the run incomplete, every candidate unchecked, and the run line never says "no issues".
-11. AC-R11. A version 4 config with unedited security and over profiles upgrades to two profiles. general has the shipped modules, effort "high", and name "Review". An edited over profile stays.
+11. AC-R11. A version 4 config with unedited security and over profiles upgrades to two profiles. general has the shipped modules, the shipped effort ("medium" from version 8), and name "Review". An edited over profile stays.
 12. AC-R12. A version 4 general profile with an edited prompt keeps the prompt and gets the new modules, volume, and efforts.
 13. AC-R13. rl-reviewer and rl-verify prompts hold the pr.md line, the history line (when history.md exists), and the do-not-flag list.
 14. AC-R14. The CLI schema of a review run is valid draft-07, lists the new keys as required, and an older stored result without them parses.

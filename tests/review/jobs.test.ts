@@ -396,8 +396,8 @@ describe("run pipeline", () => {
         via: "pull-request-ref",
         cliVersion: "2.1.295",
         model: "claude-haiku-5-5",
-        // docs/plans/review-v2/spec.md section 1.2: the shipped Review profile runs with effort high.
-        effort: "high",
+        // docs/plans/review-v2/spec.md section 1.2: the shipped Review profile runs with effort medium.
+        effort: "medium",
         stale: null,
         hasRaw: true,
         findings: 2,

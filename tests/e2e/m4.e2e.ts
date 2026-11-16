@@ -618,11 +618,11 @@ test("the run setup saves model, effort, and reviewer agents; the run row and th
   request,
 }) => {
   await connect(page);
-  // Before any change, a run shows the shipped setup: the init event names the model, and the Review profile sends --effort high.
+  // Before any change, a run shows the shipped setup: the init event names the model, and the Review profile sends --effort medium.
   await page.keyboard.press("Shift+R");
   await page.getByLabel("Your note").press("Control+Enter");
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
-  await expect(runRow(page).locator("[data-run-setup]")).toHaveText("Model and effort: claude-haiku-5-5, high effort");
+  await expect(runRow(page).locator("[data-run-setup]")).toHaveText("Model and effort: claude-haiku-5-5, medium effort");
 
   await openSettings(page);
   // The run env names no model, so the default model and its effort are unknown. An alias has a known default effort.
@@ -766,7 +766,7 @@ test("every review start opens the brief first; Cancel and Esc start nothing; th
   // The Review button opens the brief with the run setup of the brief profile. Cancel starts nothing.
   await reviewButton(page).click();
   await expect(note).toBeFocused();
-  await expect(setup).toHaveText("Run setup: default model, high effort. Reviewer agents: Auto. No skills or MCP servers.");
+  await expect(setup).toHaveText("Run setup: default model, medium effort. Reviewer agents: Auto. No skills or MCP servers.");
   // No stored brief and no profile used yet: the default profile, without the mark.
   await expect(radio("Review")).toBeChecked();
   await expect(lastUsed).toHaveCount(0);

@@ -118,9 +118,9 @@ export const SHIPPED_PROFILES: Profile[] = [
     alwaysSkills: [],
     mcp: [],
     model: null,
-    effort: "high",
+    effort: "medium",
     advisor: null,
-    reviewer: { model: null, effort: "high", mode: "auto" },
+    reviewer: { model: null, effort: "medium", mode: "auto" },
     modules: ["security", "concurrency", "api", "rules", "intent"],
     volume: "balanced",
     verifier: { mode: "on", model: null, effort: "medium" },
@@ -251,8 +251,8 @@ export const MIN_EDIT_TURNS = 100;
 
 // The shipped field values of each former PROFILES_VERSION (src/server/config.ts). The value of a field at version v is its entry at v,
 // else its entry at the next later version that has it, else the current value. So an entry holds each field whose value differs from that.
-// From PROFILES_VERSION 7, config.json keeps no unedited field of a shipped profile, so a change to a shipped value needs no entry here.
-// The entries serve the upgrade of files from before version 7.
+// From PROFILES_VERSION 7, config.json keeps no unedited field of a shipped profile. A file from before version 7 keeps every field,
+// so each change to a shipped value still needs an entry here.
 // languageChecks: absent before version 3, so a stored profile of that time parses as false.
 // modules, volume, verifier: absent before version 5, so a stored profile of that time parses with their defaults.
 // A retired profile (RETIRED_PROFILES) upgrades to its version 4 values and gets no entry from version 4 on.
@@ -280,6 +280,7 @@ const FORMER: Record<number, Record<string, Former>> = {
     explain: { verifier: { ...DEFAULT_VERIFIER } },
   },
   5: { explain: { note: "Summary and questions only, at lower cost", prompt: V4_EXPLAIN, maxTurns: 50, effort: null } },
+  7: { general: { effort: "high", reviewer: { model: null, effort: "high", mode: "auto" } } },
 };
 const FORMER_VERSIONS = Object.keys(FORMER)
   .map(Number)

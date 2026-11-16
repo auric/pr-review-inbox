@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { branchPrefixList, MAX_TASK_RULES, runLimitsInput, settingsInput, taskRuleInput } from "../shared/dto";
 import { log } from "./log";
-import { type Profile, type ProfileEdits, resolveProfiles, SPARSE_VERSION, storeProfiles } from "./review/catalog";
+import { type Profile, type ProfileEdits, resolveProfiles, storeProfiles } from "./review/catalog";
 
 // No secret goes into this file.
 const config = z.object({
@@ -64,7 +64,9 @@ export type Config = Omit<z.infer<typeof config>, "profiles"> & { profiles?: Pro
 // Version 6: Explain this PR (spec.md section 3). Explain got the walkthrough prompt, a note, effort medium, and a turn cap of 60.
 // Version 7: no shipped value changed. A shipped profile stores only its edited fields, so the other fields follow each later shipped
 // value without a version bump. The conversion drops each field that the upgrade finds unedited.
-export const PROFILES_VERSION = SPARSE_VERSION;
+// Version 8: Review runs at effort medium, and its rl-reviewer too (docs/plans/review-v2/review-quality-2026.md item 2). A file
+// of version 6 or lower stores every field, so FORMER[7] marks "high" as unedited there.
+export const PROFILES_VERSION = 8;
 
 export function dataDir(): string {
   const env = process.env;

@@ -305,13 +305,13 @@ describe("delegation in a run", () => {
       expect(flag(small.argv, "--tools")).toBe("Read,Grep,Glob");
       expect(Object.keys(small.agents)).toEqual(["rl-main"]);
       expect(small.agents["rl-main"]?.prompt).not.toContain("rl-reviewer");
-      expect(flag(small.argv, "--effort")).toBe("high");
+      expect(flag(small.argv, "--effort")).toBe("medium");
 
       const large = await h.hung(2, "general");
       expect(flag(large.argv, "--tools")).toBe("Read,Grep,Glob,Agent");
       expect(Object.keys(large.agents)).toEqual(["rl-main", "rl-reviewer"]);
       // design.md R11: the shipped Review profile pins the rl-reviewer effort.
-      expect(large.agents["rl-reviewer"]?.effort).toBe("high");
+      expect(large.agents["rl-reviewer"]?.effort).toBe("medium");
       expect(large.agents["rl-main"]?.prompt).toContain("\nThe change is large. Give parts of it to the rl-reviewer agent.");
       expect(large.agents["rl-main"]?.prompt.endsWith('set agent to "rl-reviewer" on each of them.')).toBe(true);
 

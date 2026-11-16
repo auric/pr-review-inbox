@@ -1,6 +1,6 @@
 # Review quality 2026: eval fixes and ranked reviewer improvements
 
-Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Nothing else is built. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
+Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and item 10 is built as an opt-in. Items 1 and 4 (verify2) failed in W2. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
 
 Short answer: fix the eval before any reviewer change, because today it cannot measure precision or large-PR recall. Then run cheap tests that cut cost, then verifier tests replayed on fixed finder output, and last the recall bets, each behind a gate that costs nothing to check.
 
@@ -153,6 +153,7 @@ Ship rules:
 - Risk: one agent can hit maxTurns 100 on a 59-file change and move load to salvage. Watch notCompleted, salvaged runs, and `bugOpened`.
 - Experiment: shared run C1 with improvement 2: `eval:ab -- --baseline <W1> --candidate-effort medium --candidate-reviewer-effort medium --candidate-reviewer-mode off --candidate-repeat 2 --review-only --clean 8`. Bisect with `--large --candidate-reviewer-mode off --clean 8` at high only if the large cases are mixed.
 - Ship rule: not worse, on the large slice.
+- Status: failed 2026-11-16, not shipped. C1a (`--large --candidate-reviewer-mode off` at high, 12 large cases, repeat 2) found 1 and 1 of 24 bugs against 5 and 3 for the W1 baseline. rl-reviewer stays "auto".
 
 ### 2. Finder effort medium (rl-main and rl-reviewer)
 
@@ -161,6 +162,7 @@ Ship rules:
 - Expected: recall, precision, severity about the same; finder cost down 20-40%; fewer minutes.
 - Risk: fewer searches on large changes. Read the large slice apart.
 - Experiment: C1 (the small cases measure this item alone). Ship rule: not worse, on all cases.
+- Status: shipped 2026-11-16 as PROFILES_VERSION 8, with `FORMER[7]` for the old efforts. The user approved it. C1b (`--candidate-effort medium --candidate-reviewer-effort medium`, 42 cases, repeat 2) against the W1 baseline: grounded recall 26.4% (21, 16 bugs) to 23.6% (17, 16); mean 16.5 >= 18.5 - S_R 5 = 13.5; paired delta -2.9 points (90% -6.1 to 0.0); large cases 8/48 to 7/48. Noise per case run 2.15 to 1.44, judge fp 0.43 to 0.26, augmented precision 83.4% to 85.7%, severityOk 100%. Cost per case run $2.67 to $1.59, minutes 6.3 to 3.8. With the shipped fold (item 5): recall 22.1%, noise 0.99, precision 93.7%. A profile with an edited effort keeps it.
 
 ### 3. A finder that reports everything (variant "broad")
 
@@ -195,6 +197,7 @@ The do-not-flag list of each language:
 - Risk: the intent guard can refute a criterion that came from an issue tool result that the verifier did not read.
 - Experiment: `--candidate-replay --clean 8` on 2 recorded baseline repeats: a control replay (the verifier's own spread), "verify2", one effort level, plus the probe set.
 - Ship rule: false findings kept in main drop by more than the control spread, and true findings lost rise by no more than the control spread.
+- Status: verify2 failed in W2 (2026-11-16). False findings kept in main went from 14 to 17. It stays opt-in.
 
 ### 5. Fold refuted protected findings
 
@@ -301,6 +304,8 @@ Report other problems too.
 | W3 (costly) | C2 broad; C3 runs3 if gated; C4 classes if gated; improvement 8 rides on C2 or C4 | none; superiority tests run alone | about $55-450 by gates |
 | W3b (security, if gated) | Item 10: security2-verify replay, then C5 security2 | none; runs alone | one verify replay plus about the cost of C4 |
 
+W2 result (2026-11-16, docs/eval/results.md): the verify2 replay failed its rule (false findings kept in main 14 to 17). C1 (items 1 and 2) passed "not worse, on all cases" only at the boundary and halved the large-case recall. The bisect followed: C1a (item 1) failed, and C1b (item 2) passed and shipped.
+
 A cost cutter that ships makes its result folder the next baseline. Add one repeat before the next superiority test.
 
 Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--clean 8`). Another value changes the set fingerprint, and eval:ab then refuses the W1 baseline.
@@ -325,7 +330,7 @@ Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--c
 1. Judge labels for unmatched findings, stored apart from the cases, with ship gates on grounded metrics only? Recommended: yes, sonnet at medium.
 2. Baseline size: repeat 3 with 8 clean cases (about $140-180), or repeat 2 (about $95-120)? Recommended: repeat 3.
 3. Fold refuted protected findings under balanced and quiet? Recommended: yes, if the rescore passes the rule of improvement 5. Answered 2026-11-15: yes, shipped.
-4. If one agent wins on large PRs, ship reviewer mode "off" with "auto" left as a choice? Recommended: yes.
+4. If one agent wins on large PRs, ship reviewer mode "off" with "auto" left as a choice? Recommended: yes. Answered 2026-11-16: one agent lost on large PRs (C1a), so the mode stays "auto".
 5. Deep check as a per-run toggle in the brief (default off) or a profile option? Recommended: the per-run toggle.
 
 ## 6. Work packages (in this order)

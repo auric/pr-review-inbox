@@ -92,7 +92,7 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(r.stdout).toContain(`Eval plan: ${loadCases("all").length} cases, 2 repeats, profile general, set v1.`);
     expect(r.stdout).toContain(WARNING);
     expect(r.stdout).toContain(DEFAULT_MODEL_WARNING);
-    expect(r.stdout).toContain("Model: the Claude Code default. Effort: high.");
+    expect(r.stdout).toContain("Model: the Claude Code default. Effort: medium.");
     const hard = await bun([RUN, "--set", "hard"], guard);
     expect(hard.code).toBe(2);
     expect(hard.stdout).toContain(`Eval plan: ${loadCases("all", SETS.hard).length} cases, 1 repeat, profile general, set hard.`);
@@ -121,7 +121,14 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(v4).toMatchObject({ name: "General", effort: null, modules: [], volume: "balanced", verifier: DEFAULT_VERIFIER });
     // The revision of the first baseline file (commit 9391ec4, prompt version 1).
     expect(profileRevision(v4 as NonNullable<typeof v4>)).toBe("3a4df4727d3b45ecb2b399e811d6bc1a9d379877122c4137d88e672f6c6789d8");
-    expect(shippedProfileAt("general", 5)).toEqual(SHIPPED_PROFILES[0] as NonNullable<typeof v4>);
+    // Versions 5 to 7 shipped the finder and rl-reviewer efforts high (FORMER[7]).
+    const v7 = {
+      ...(SHIPPED_PROFILES[0] as NonNullable<typeof v4>),
+      ...({ effort: "high", reviewer: { model: null, effort: "high", mode: "auto" } } as const),
+    };
+    expect(shippedProfileAt("general", 5)).toEqual(v7);
+    expect(shippedProfileAt("general", 7)).toEqual(v7);
+    expect(shippedProfileAt("general", 8)).toEqual(SHIPPED_PROFILES[0] as NonNullable<typeof v4>);
   });
 
   test("parses --model and --effort with the profile rules of the app", () => {
@@ -488,10 +495,10 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const file = join(out, files[0] as string);
       const result = JSON.parse(readFileSync(file, "utf8")) as EvalResult;
       expect(result).toMatchObject({ format: 1, promptVersion: REVIEW_PROMPT_VERSION, runner: "fake", repeat: 1, volume: "balanced" });
-      // Shipped efforts: no --effort flag runs the finder at high and the verify call at medium.
+      // Shipped efforts: no --effort flag runs the finder and the verify call at medium.
       expect(result.requested).toEqual({
         model: "default",
-        effort: "high",
+        effort: "medium",
         verifier: "on",
         verifierEffort: "medium",
         reviewerMode: "auto",
@@ -906,8 +913,8 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         `${task.id}-1-2.json`,
       ]);
       expect(calls("record")).toEqual([
-        ["review", "high"],
-        ["review", "high"],
+        ["review", "medium"],
+        ["review", "medium"],
         ["verify", "medium"],
       ]);
       const found = (r: EvalResult) => r.runs.find((x) => x.case === task.id)?.items.map((i) => [i.path, i.line, i.verdict]);

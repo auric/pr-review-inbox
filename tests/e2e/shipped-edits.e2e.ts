@@ -125,8 +125,8 @@ test("Duplicate adds an editable copy after the profile with every field, and th
   await page.reload();
   await expect(field(page, "Name", 2)).toHaveValue("Review copy");
 
-  // Review has effort High and no model, so the agent pickers name the main run values.
-  await expect(page.locator("#profile-0-reviewer-effort option").first()).toHaveText("Same as the main run (High)");
+  // Review has effort Medium and no model, so the agent pickers name the main run values.
+  await expect(page.locator("#profile-0-reviewer-effort option").first()).toHaveText("Same as the main run (Medium)");
   await expect(page.locator("#profile-0-reviewer-model option").first()).toHaveText(/^Same as the main run/);
   await expect(page.locator("#profile-0-verifier-model option").first()).toHaveText(/^Same as the main run/);
   await expect(page.getByText("Model and effort of the lead agent that writes the findings.").first()).toBeVisible();

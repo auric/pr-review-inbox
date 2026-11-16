@@ -458,7 +458,7 @@ describe("reviewer agents (profile run setup)", () => {
     expect(reviewerAgent(bare)).not.toHaveProperty("model");
     expect(reviewerAgent(bare)).not.toHaveProperty("effort");
     // docs/plans/review-v2/design.md R11: the shipped Review profile pins the rl-reviewer effort.
-    expect(reviewerAgent(general)).toMatchObject({ effort: "high" });
+    expect(reviewerAgent(general)).toMatchObject({ effort: "medium" });
     const set = reviewerAgent({ ...general, reviewer: { model: "haiku", effort: "low", mode: "auto" } });
     expect(set).toMatchObject({ model: "haiku", effort: "low" });
   });

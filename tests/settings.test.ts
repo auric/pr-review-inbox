@@ -9,7 +9,7 @@ import { createApp } from "../src/server/app";
 import { dbPath, PROFILES_VERSION, readConfig } from "../src/server/config";
 import { createLive } from "../src/server/live";
 import { log } from "../src/server/log";
-import { EXPLAIN_V2, type Profile, profileRevision, RETIRED_PROFILES, SHIPPED_PROFILES } from "../src/server/review/catalog";
+import { EXPLAIN_V2, type Profile, profileRevision, RETIRED_PROFILES, SHIPPED_PROFILES, shippedHash } from "../src/server/review/catalog";
 import { createSecrets, type SecretBackend } from "../src/server/secrets";
 import { createSettings, type Settings } from "../src/server/settings";
 import { profileInput, type SettingsDto } from "../src/shared/dto";
@@ -748,10 +748,9 @@ describe("settings API", () => {
     const again = setup();
     expect((await again.get()).profiles).toEqual(upgraded);
     expect((await again.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
-    // effort "high" equals the shipped effort, so the file does not keep it.
-    const { effort: _, ...stored } = setupEdits;
+    // effort "high" differs from the shipped effort "medium", so the file keeps it.
     expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({
-      profiles: [{ id: "general", ...stored }],
+      profiles: [{ id: "general", ...setupEdits }],
       profilesVersion: PROFILES_VERSION,
     });
     expect(readConfig(dir)?.profiles).toEqual(upgraded);
@@ -764,15 +763,15 @@ describe("settings API", () => {
   // ---------- PROFILES_VERSION 5 (docs/plans/review-v2/spec.md section 1.2) ----------
 
   test("AC-R11: a version 4 config with unedited Security and Over-engineering profiles upgrades to two profiles; an edited one stays", async () => {
-    expect(PROFILES_VERSION).toBe(7);
+    expect(PROFILES_VERSION).toBe(8);
     const { write, load } = await oldConfig();
     write(4, [v4.general, v4.over, v4.security, v4.explain]);
     const two = await load();
     expect(two).toEqual([withSimplify, explain]);
     expect(two[0]).toMatchObject({
       name: "Review",
-      effort: "high",
-      reviewer: { effort: "high" },
+      effort: "medium",
+      reviewer: { effort: "medium" },
       verifier: { mode: "on", effort: "medium" },
     });
     expect(two[0]?.modules).toEqual(["security", "concurrency", "api", "rules", "intent", "simplify"]);
@@ -789,7 +788,7 @@ describe("settings API", () => {
     write(4, [{ ...v4.general, prompt: "My prompt" }, v4.explain]);
     const [mine] = await load();
     expect(mine).toEqual({ ...general, prompt: "My prompt" });
-    expect(mine).toMatchObject({ volume: "balanced", effort: "high", reviewer: { effort: "high" }, verifier: { effort: "medium" } });
+    expect(mine).toMatchObject({ volume: "balanced", effort: "medium", reviewer: { effort: "medium" }, verifier: { effort: "medium" } });
   });
 
   // ---------- PROFILES_VERSION 6 (docs/plans/review-v2/spec.md sections 1.2 and 3.4) ----------
@@ -830,20 +829,69 @@ describe("settings API", () => {
     ]);
   });
 
+  // The Review efforts of PROFILES_VERSION 5 to 7.
+  const v7efforts = { effort: "high", reviewer: { model: null, effort: "high", mode: "auto" } } as const;
+
   test("a version 5 config keeps every profile but Explain, also a profile with the values of a retired one", async () => {
     const { write, load } = await oldConfig();
     const mine: Profile = { ...general, name: "Mine", modules: [] };
-    write(5, [mine, over, security, { ...explain, maxTurns: 50, verifier: { mode: "on" } }]);
+    write(5, [{ ...mine, ...v7efforts }, over, security, { ...explain, maxTurns: 50, verifier: { mode: "on" } }]);
     // The turn cap 50 is the version 5 value, so it upgrades. The verifier was edited, so it stays.
     expect(await load()).toEqual([mine, over, security, { ...explain, verifier: { mode: "on", model: null, effort: null } }]);
   });
 
-  test("a version 6 config changes nothing", async () => {
+  test("a version 6 config changes only the unedited Review efforts", async () => {
     const { write, load } = await oldConfig();
     const mine: Profile = { ...general, name: "Mine", modules: [] };
     const old = { ...explain, note: "Summary and questions only, at lower cost", prompt: V4_EXPLAIN, effort: null, maxTurns: 50 };
-    write(6, [mine, over, security, old]);
+    write(6, [{ ...mine, ...v7efforts }, over, security, old]);
     expect(await load()).toEqual([mine, over, security, old]);
+  });
+
+  // ---------- PROFILES_VERSION 8: Review runs at effort medium (review-quality-2026.md item 2) ----------
+
+  test("a version 6 Review with the old efforts gets medium; an edited effort or reviewer stays", async () => {
+    const { write } = await oldConfig();
+    write(6, [{ ...general, ...v7efforts }, explain]);
+    let s = setup();
+    let got = await s.get();
+    expect(got.profiles[0]).toMatchObject({ effort: "medium", reviewer: { model: null, effort: "medium", mode: "auto" } });
+    expect(got.profileEdits.general).toEqual({ fields: [], newer: [] });
+    s.settings.close();
+    const reviewer = { model: null, effort: "high", mode: "always" } as const;
+    write(6, [{ ...general, effort: "xhigh", reviewer }, explain]);
+    s = setup();
+    got = await s.get();
+    expect(got.profiles[0]).toMatchObject({ effort: "xhigh", reviewer });
+    // The edits were made against the version 6 values, so both fields show a newer shipped version.
+    expect(got.profileEdits.general).toEqual({ fields: ["effort", "reviewer"], newer: ["effort", "reviewer"] });
+    s.settings.close();
+  });
+
+  test("a version 7 Review follows the new efforts; a stored effort edit stays and shows the newer shipped value", async () => {
+    const { file } = await oldConfig();
+    const base = JSON.parse(readFileSync(file, "utf8"));
+    const put = (profiles: unknown[]) => writeFileSync(file, JSON.stringify({ ...base, profilesVersion: 7, profiles }));
+    put([{ id: "general" }, { id: "explain" }]);
+    let s = setup();
+    let got = await s.get();
+    expect(got.profiles[0]).toMatchObject({ effort: "medium", reviewer: { model: null, effort: "medium", mode: "auto" } });
+    expect(got.profileEdits.general).toEqual({ fields: [], newer: [] });
+    s.settings.close();
+    // An edit made at version 7 holds the hash of the version 7 value "high".
+    const highHash = shippedHash("high");
+    put([{ id: "general", effort: "max", edited: { effort: highHash } }, { id: "explain" }]);
+    s = setup();
+    got = await s.get();
+    expect(got.profiles[0]).toMatchObject({ effort: "max", reviewer: { effort: "medium" } });
+    expect(got.profileEdits.general).toEqual({ fields: ["effort"], newer: ["effort"] });
+    // A save keeps the edit and its old hash, and stamps version 8.
+    expect((await s.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
+    s.settings.close();
+    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({
+      profiles: [{ id: "general", effort: "max", edited: { effort: highHash } }, { id: "explain" }],
+      profilesVersion: 8,
+    });
   });
 
   // ---------- PROFILES_VERSION 7: a shipped profile stores only its edits ----------

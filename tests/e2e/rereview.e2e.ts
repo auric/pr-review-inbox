@@ -85,7 +85,7 @@ test("a push after a review: c and the button open the brief; Start reviews the 
   await page.keyboard.press("c");
   await expect(brief.getByRole("heading", { name: `Review changes since ${head}` })).toBeVisible();
   await expect(brief).toContainText(`after ${head}. The open drafts carry over and get a new check.`);
-  await expect(brief).toContainText("Run setup: default model, high effort. Reviewer agents: Auto.");
+  await expect(brief).toContainText("Run setup: default model, medium effort. Reviewer agents: Auto.");
   await expect(page.getByLabel("Your note")).toBeFocused();
   await expect(page.getByLabel("Your note")).toHaveValue("ABC-1: check the lock scope.");
   await brief.getByRole("button", { name: "Cancel" }).click();
