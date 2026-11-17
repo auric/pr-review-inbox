@@ -119,7 +119,7 @@ export const SHIPPED_PROFILES: Profile[] = [
     mcp: [],
     model: null,
     effort: "medium",
-    advisor: null,
+    advisor: "fable",
     reviewer: { model: null, effort: "medium", mode: "auto" },
     modules: ["security", "concurrency", "api", "rules", "intent"],
     volume: "balanced",
@@ -257,7 +257,10 @@ export const MIN_EDIT_TURNS = 100;
 // modules, volume, verifier: absent before version 5, so a stored profile of that time parses with their defaults.
 // A retired profile (RETIRED_PROFILES) upgrades to its version 4 values and gets no entry from version 4 on.
 type Former = Partial<
-  Pick<Profile, "name" | "note" | "prompt" | "maxTurns" | "languageChecks" | "effort" | "reviewer" | "modules" | "volume" | "verifier">
+  Pick<
+    Profile,
+    "name" | "note" | "prompt" | "maxTurns" | "languageChecks" | "effort" | "advisor" | "reviewer" | "modules" | "volume" | "verifier"
+  >
 >;
 const FORMER: Record<number, Record<string, Former>> = {
   1: {
@@ -281,6 +284,7 @@ const FORMER: Record<number, Record<string, Former>> = {
   },
   5: { explain: { note: "Summary and questions only, at lower cost", prompt: V4_EXPLAIN, maxTurns: 50, effort: null } },
   7: { general: { effort: "high", reviewer: { model: null, effort: "high", mode: "auto" } } },
+  8: { general: { advisor: null } },
 };
 const FORMER_VERSIONS = Object.keys(FORMER)
   .map(Number)

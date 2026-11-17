@@ -501,11 +501,12 @@ describe("settings API", () => {
       expect(res.status).toBe(200);
       expect(s.settings.profiles()[0]?.advisor).toBe(p.advisor);
     }
-    // A shipped profile stores the advisor as an edited field. A stored profile from before the field reads as off.
+    // A shipped profile stores an advisor other than the shipped fable as an edited field. A stored custom profile from before the
+    // field reads as off.
     const general = SHIPPED_PROFILES[0] as Profile;
-    expect((await s.put({ baseUrl: fake.url, profiles: [{ ...general, advisor: "fable" }] })).status).toBe(200);
+    expect((await s.put({ baseUrl: fake.url, profiles: [{ ...general, advisor: "opus" }] })).status).toBe(200);
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).profiles).toEqual([
-      { id: "general", advisor: "fable", edited: { advisor: expect.any(String) } },
+      { id: "general", advisor: "opus", edited: { advisor: expect.any(String) } },
     ]);
     s.settings.close();
     const file = join(dir, "config.json");
@@ -763,7 +764,7 @@ describe("settings API", () => {
   // ---------- PROFILES_VERSION 5 (docs/plans/review-v2/spec.md section 1.2) ----------
 
   test("AC-R11: a version 4 config with unedited Security and Over-engineering profiles upgrades to two profiles; an edited one stays", async () => {
-    expect(PROFILES_VERSION).toBe(8);
+    expect(PROFILES_VERSION).toBe(9);
     const { write, load } = await oldConfig();
     write(4, [v4.general, v4.over, v4.security, v4.explain]);
     const two = await load();
@@ -885,13 +886,70 @@ describe("settings API", () => {
     got = await s.get();
     expect(got.profiles[0]).toMatchObject({ effort: "max", reviewer: { effort: "medium" } });
     expect(got.profileEdits.general).toEqual({ fields: ["effort"], newer: ["effort"] });
-    // A save keeps the edit and its old hash, and stamps version 8.
+    // A save keeps the edit and its old hash, and stamps the current version.
     expect((await s.put({ baseUrl: fake.url, notifications: true })).status).toBe(200);
     s.settings.close();
     expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({
       profiles: [{ id: "general", effort: "max", edited: { effort: highHash } }, { id: "explain" }],
-      profilesVersion: 8,
+      profilesVersion: PROFILES_VERSION,
     });
+  });
+
+  // ---------- PROFILES_VERSION 9: Review runs with a Fable advisor (docs/plans/review-v2/advisor.md) ----------
+
+  test("a version 6 Review without an advisor gets fable; an edited advisor stays", async () => {
+    expect(general.advisor).toBe("fable");
+    expect(explain.advisor).toBeNull();
+    const { write } = await oldConfig();
+    const { advisor: _, ...noAdvisor } = general;
+    // Files from before the field have no advisor. A null is the same value.
+    for (const old of [noAdvisor, { ...general, advisor: null }]) {
+      write(6, [old, explain]);
+      const s = setup();
+      const got = await s.get();
+      s.settings.close();
+      expect(got.profiles[0]).toEqual(general);
+      expect(got.profileEdits.general).toEqual({ fields: [], newer: [] });
+    }
+    write(6, [{ ...general, advisor: "opus" }, explain]);
+    const s = setup();
+    const got = await s.get();
+    s.settings.close();
+    expect(got.profiles[0]).toMatchObject({ advisor: "opus" });
+    expect(got.profileEdits.general).toEqual({ fields: ["advisor"], newer: ["advisor"] });
+  });
+
+  test("a version 8 Review follows the new advisor; a stored advisor edit stays; Off saved at version 9 stays Off", async () => {
+    const { file } = await oldConfig();
+    const base = JSON.parse(readFileSync(file, "utf8"));
+    const put = (profiles: unknown[]) => writeFileSync(file, JSON.stringify({ ...base, profilesVersion: 8, profiles }));
+    put([{ id: "general" }, { id: "explain" }]);
+    let s = setup();
+    let got = await s.get();
+    expect(got.profiles[0]).toMatchObject({ advisor: "fable" });
+    expect(got.profiles[1]).toMatchObject({ advisor: null });
+    s.settings.close();
+    // An edit made at version 8 holds the hash of the version 8 value null.
+    const offHash = shippedHash(null);
+    put([{ id: "general", advisor: "opus", edited: { advisor: offHash } }, { id: "explain" }]);
+    s = setup();
+    got = await s.get();
+    expect(got.profiles[0]).toMatchObject({ advisor: "opus" });
+    expect(got.profileEdits.general).toEqual({ fields: ["advisor"], newer: ["advisor"] });
+    s.settings.close();
+    // Off is now an edit. The file keeps it, and a reload keeps it.
+    s = setup();
+    expect((await s.put({ baseUrl: fake.url, profiles: [{ ...general, advisor: null }, explain] })).status).toBe(200);
+    s.settings.close();
+    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({
+      profiles: [{ id: "general", advisor: null }, { id: "explain" }],
+      profilesVersion: 9,
+    });
+    s = setup();
+    got = await s.get();
+    s.settings.close();
+    expect(got.profiles[0]).toEqual({ ...general, advisor: null });
+    expect(got.profileEdits.general).toEqual({ fields: ["advisor"], newer: [] });
   });
 
   // ---------- PROFILES_VERSION 7: a shipped profile stores only its edits ----------

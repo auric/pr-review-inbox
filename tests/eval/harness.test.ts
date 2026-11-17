@@ -121,14 +121,14 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(v4).toMatchObject({ name: "General", effort: null, modules: [], volume: "balanced", verifier: DEFAULT_VERIFIER });
     // The revision of the first baseline file (commit 9391ec4, prompt version 1).
     expect(profileRevision(v4 as NonNullable<typeof v4>)).toBe("3a4df4727d3b45ecb2b399e811d6bc1a9d379877122c4137d88e672f6c6789d8");
-    // Versions 5 to 7 shipped the finder and rl-reviewer efforts high (FORMER[7]).
-    const v7 = {
-      ...(SHIPPED_PROFILES[0] as NonNullable<typeof v4>),
-      ...({ effort: "high", reviewer: { model: null, effort: "high", mode: "auto" } } as const),
-    };
+    expect(v4?.advisor).toBeNull();
+    // Versions 5 to 7 shipped the finder and rl-reviewer efforts high (FORMER[7]). Versions 1 to 8 shipped no advisor (FORMER[8]).
+    const v8 = { ...(SHIPPED_PROFILES[0] as NonNullable<typeof v4>), advisor: null };
+    const v7 = { ...v8, ...({ effort: "high", reviewer: { model: null, effort: "high", mode: "auto" } } as const) };
     expect(shippedProfileAt("general", 5)).toEqual(v7);
     expect(shippedProfileAt("general", 7)).toEqual(v7);
-    expect(shippedProfileAt("general", 8)).toEqual(SHIPPED_PROFILES[0] as NonNullable<typeof v4>);
+    expect(shippedProfileAt("general", 8)).toEqual(v8);
+    expect(shippedProfileAt("general", 9)).toEqual(SHIPPED_PROFILES[0] as NonNullable<typeof v4>);
   });
 
   test("parses --model and --effort with the profile rules of the app", () => {

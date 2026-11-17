@@ -66,7 +66,9 @@ export type Config = Omit<z.infer<typeof config>, "profiles"> & { profiles?: Pro
 // value without a version bump. The conversion drops each field that the upgrade finds unedited.
 // Version 8: Review runs at effort medium, and its rl-reviewer too (docs/plans/review-v2/review-quality-2026.md item 2). A file
 // of version 6 or lower stores every field, so FORMER[7] marks "high" as unedited there.
-export const PROFILES_VERSION = 8;
+// Version 9: Review runs with a Fable advisor (user decision of 2026-11-17, docs/plans/review-v2/advisor.md). A file of version 6 or
+// lower stores every field, so FORMER[8] marks the advisor null as unedited there.
+export const PROFILES_VERSION = 9;
 
 export function dataDir(): string {
   const env = process.env;

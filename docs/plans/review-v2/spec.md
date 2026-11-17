@@ -58,16 +58,16 @@ New fields of profileInput (dto.ts:118-150), each with a parse default:
 
 profileRevision (catalog.ts:145) adds each new field only when it differs from its default, as for the older fields.
 
-Shipped values (PROFILES_VERSION 5, with the general efforts of version 8):
+Shipped values (PROFILES_VERSION 5, with the general efforts of version 8 and the general advisor of version 9):
 
-| ID | name | note | effort | reviewer | modules | volume | verifier | languageChecks | maxTurns |
-|---|---|---|---|---|---|---|---|---|---|
-| general | "Review" | "Bugs, security, and effects outside the change" | "medium" | {model null, effort "medium", mode "auto"} | security, concurrency, api, rules, intent | balanced | {on, null, "medium"} | true | 100 |
-| explain | "Explain" | "A readable walkthrough of the change" | "medium" | default | [] | balanced | {off, null, null} | false | 60 |
+| ID | name | note | effort | advisor | reviewer | modules | volume | verifier | languageChecks | maxTurns |
+|---|---|---|---|---|---|---|---|---|---|---|
+| general | "Review" | "Bugs, security, and effects outside the change" | "medium" | "fable" | {model null, effort "medium", mode "auto"} | security, concurrency, api, rules, intent | balanced | {on, null, "medium"} | true | 100 |
+| explain | "Explain" | "A readable walkthrough of the change" | "medium" | null | default | [] | balanced | {off, null, null} | false | 60 |
 
 The shipped prompt of general is the "Review lens" of section 1.5. The shipped prompt of explain is the "Explain lens" of section 3.4.
 
-FORMER[4] holds the version 4 values that differ: general {name "General", note "Correctness, concurrency, effects outside the diff", prompt <v4 prompt>, effort null, reviewer {null, null, "auto"}, modules [], verifier default}, explain {note "Summary and questions only, at lower cost", prompt <v4 explain prompt>, effort null, maxTurns 50}. FORMER[7] holds the general efforts of versions 5 to 7: effort "high", reviewer {null, "high", "auto"}. Version 8 changed both to "medium" (review-quality-2026.md item 2). upgradeProfile compares arrays and objects by JSON text.
+FORMER[4] holds the version 4 values that differ: general {name "General", note "Correctness, concurrency, effects outside the diff", prompt <v4 prompt>, effort null, reviewer {null, null, "auto"}, modules [], verifier default}, explain {note "Summary and questions only, at lower cost", prompt <v4 explain prompt>, effort null, maxTurns 50}. FORMER[7] holds the general efforts of versions 5 to 7: effort "high", reviewer {null, "high", "auto"}. Version 8 changed both to "medium" (review-quality-2026.md item 2). upgradeProfile compares arrays and objects by JSON text. FORMER[8] holds the general advisor of versions 1 to 8: null. Version 9 changed it to "fable" (user decision of 2026-11-17).
 
 Retire rule (settings.ts upgradeConfig) for a saved PROFILES_VERSION of 4 or lower: a profile with id security or over leaves the list when each field equals its version 4 shipped value. This includes skills, mcp, model, effort, and reviewer. Else the profile stays with all its fields and gets no later shipped upgrade. When security leaves, general gets "security" in modules. When over leaves, general gets "simplify". Both additions apply only while general.modules is unedited.
 
@@ -3133,7 +3133,7 @@ Acceptance criteria:
 
 ### 6.27 Advisor (docs/plans/review-v2/advisor.md)
 
-- Profile field `advisor`: null (Off, the default) or a model name. The menu offers `fable` and `opus`. "Other model ID…" takes any other name, such as `sonnet` or a full model ID. A profile from before the field reads as Off. Each profile has the field, so task steps use the field of the task profile.
+- Profile field `advisor`: null (Off) or a model name. The shipped Review profile has `fable` from PROFILES_VERSION 9 (user decision of 2026-11-17). Explain and a new profile have null. FORMER[8] holds the version 8 value null, so an unedited Off in a file from before version 7 upgrades to `fable`. The menu offers `fable` and `opus`. "Other model ID…" takes any other name, such as `sonnet` or a full model ID. A profile from before the field reads as Off. Each profile has the field, so task steps use the field of the task profile.
 - A save refuses a Haiku advisor, and an advisor whose model family (haiku, sonnet, opus, fable) ranks below the profile model or the check model. A null model is the user's default, and the app does not check it. A stored list always reads back.
 - On: each run of the profile gets `--advisor <model>`: review, salvage, check, Explain, Ask, Fix, reply, discuss, task steps, and the own review of a task part. The child env has no `DISABLE_TELEMETRY`. childEnv already drops `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` with all `CLAUDE_CODE_*` names.
 - Off: no `--advisor`, and the child env gets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`. Session consult and Improve prompt are not profile runs, so they run Off.

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Review: the Review profile now has the advisor Fable by default. A stronger model gives Claude advice at hard points in each run of the profile, also in task steps. It uses more of your plan. A profile whose advisor you changed keeps your value.
 - Review: the fold of the Drafts list at "Balanced" is now "More", as at "Only what matters". It holds unsure points, nits, and refuted points, so "Low confidence" was wrong. The Drafts header counts it as "4 more".
 - Review: the Review profile now runs at medium effort by default, and its reviewer agents too. A review costs about 40% less and takes about 40% less time. A profile whose effort or reviewer agents you changed keeps your values.
 - Review: a refuted finding that stays in the Drafts list now waits in the fold at "Only what matters" and "Balanced", last, with the chip "Refuted". This applies to the protected classes and to profiles with "Refuted findings: Show last". "Show everything" keeps it in the main list. Older runs show the same way.

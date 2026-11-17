@@ -295,6 +295,10 @@ Report other problems too.
 - Experiment: verify half first, cheap: `bun run eval:ab -- --baseline eval-results/w1/baseline --candidate-variants security2-verify --candidate-replay --review-only --clean 8`. Then both halves: `bun run eval:ab -- --baseline eval-results/w1/baseline --candidate-variants security2 --candidate-repeat 2 --review-only --clean 8`.
 - Ship rule: fewer judge fp per case run in the "Shown security findings" row, with no lost security must-find: the recall of the "class security" slice row does not fall. Label both results first, so that "no label" shows 0.00. When it ships, the lines stay out of `MODULES[*].lines`, because an edit there changes `profileRevision`.
 
+### Advisor on by default (not an eval item)
+
+- Status: shipped 2026-11-17 as PROFILES_VERSION 9, by user decision. The Review profile runs with a Fable advisor (docs/plans/review-v2/advisor.md). No eval has measured it. The C1b baseline ran version 8 with no advisor. eval:ab refuses that stored baseline, so a new baseline run is needed. `--profile-version 8` reproduces the run without the advisor.
+
 ## 3. Waves and cost (estimates)
 
 | Wave | Work | Shared runs | Model cost |
