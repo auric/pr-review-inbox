@@ -29,3 +29,14 @@ Aggregate numbers only. The local set holds company code, so no case names, path
 - C1b noise per case run 2.15 to 1.44, judge false positives 0.43 to 0.26, augmented precision 83.4% to 85.7%, severityOk 100%. Cost per case run $2.67 to $1.59, minutes 6.3 to 3.8.
 - C1b with the shipped fold of refuted findings (item 5): recall 22.1%, noise 0.99, precision 93.7%.
 - Decision: C1b passed "not worse, on all cases". The user approved it on 2026-11-16, and Review now runs at effort medium (PROFILES_VERSION 8).
+
+## 2026-11-17: W3 (review-quality-2026.md item 3, variant "broad")
+
+- Run: C2 (`--candidate-variants broad --candidate-repeat 2 --clean 8`), 42 cases, repeat 2, effort medium, commit 54335bd. Baseline A: the C1b result, reused. Labels from eval:label, numbers from eval:compare.
+- Grounded recall 23.6% (17 and 16 bugs) to 24.3% (18 and 16). Paired delta +0.7 points (90% interval -5.8 to +7.1), over 14 PR groups and 70 must-finds. Raised recall, with hidden findings, 26.4% to 29.3%.
+- Union recall at k=2: shown 27.1% to 30.0%, raised 30.0% to 37.1%.
+- Grounded precision 100% in both. Grounded noise per case 1.44 to 1.33. severityOk 100% to 93.5%. Failed runs 0 in both.
+- Cost per case $1.59 to $1.96 (+23%), minutes 3.8 to 4.4.
+- The coverage-gap row is not comparable. C1b ran before runs were marked incomplete only for gaps of the app.
+- Probe set (synthetic, 8 cases, repeat 2, line match, no labels): recall 7/8 to 8/8, paired delta +12.5 points (90% interval 0 to +37.5). Precision 100%, trap rate 0, and noise 0 in both. severityOk 100% to 87.5%. Cost per case $0.16 to $0.15. The comment-thread case has no counted must-find, so the probe does not measure the thread-line rule.
+- Decision: "not worse" holds, but "better" fails. "Better" needs a mean of 18 or more bugs and a paired 90% interval that excludes zero. The mean is 17, and the interval includes zero. "broad" does not ship and stays opt-in. C1b stays the baseline, and REVIEW_PROMPT_VERSION does not change.

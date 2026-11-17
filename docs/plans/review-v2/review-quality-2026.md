@@ -1,6 +1,6 @@
 # Review quality 2026: eval fixes and ranked reviewer improvements
 
-Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and item 10 is built as an opt-in. Items 1 and 4 (verify2) failed in W2. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
+Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and item 10 is built as an opt-in. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
 
 Short answer: fix the eval before any reviewer change, because today it cannot measure precision or large-PR recall. Then run cheap tests that cut cost, then verifier tests replayed on fixed finder output, and last the recall bets, each behind a gate that costs nothing to check.
 
@@ -183,6 +183,7 @@ The do-not-flag list of each language:
 - Risks: more candidates push more runs over `VERIFY_SPLIT` (12); a style finding with category "behavior" stays in main when refuted (improvement 5 fixes that).
 - Experiment: C2 `--candidate-variants broad --candidate-repeat 2 --clean 8` on the shipped baseline after C1, plus the probe set for the thread cases (the local set cannot test the thread line; its rule there is "no worse").
 - Ship rule: better. `REVIEW_PROMPT_VERSION` goes up when the variant becomes default.
+- Status: failed 2026-11-17 (W3), not shipped. "broad" stays opt-in, and `REVIEW_PROMPT_VERSION` does not change. C2 against the C1b baseline (42 cases, repeat 2, effort medium): grounded recall 23.6% (17, 16 bugs) to 24.3% (18, 16); paired delta +0.7 points (90% -5.8 to +7.1); raised recall 26.4% to 29.3%. "Not worse" holds. "Better" fails: the mean is 17, not 18 or more, and the interval includes zero. Precision 100% in both, noise per case 1.44 to 1.33, severityOk 100% to 93.5%. Cost per case $1.59 to $1.96 (+23%), minutes 3.8 to 4.4. Probe set: recall 7/8 to 8/8 (paired +12.5 points, 90% 0 to +37.5), trap rate and noise 0, severityOk 100% to 87.5%. The probe thread case has no counted must-find, so no run measured the thread-line rule.
 
 ### 4. Verifier tuning by replay (variant "verify2", verifier effort)
 
@@ -305,6 +306,8 @@ Report other problems too.
 | W3b (security, if gated) | Item 10: security2-verify replay, then C5 security2 | none; runs alone | one verify replay plus about the cost of C4 |
 
 W2 result (2026-11-16, docs/eval/results.md): the verify2 replay failed its rule (false findings kept in main 14 to 17). C1 (items 1 and 2) passed "not worse, on all cases" only at the boundary and halved the large-case recall. The bisect followed: C1a (item 1) failed, and C1b (item 2) passed and shipped.
+
+W3 result (2026-11-17, docs/eval/results.md): C2 (item 3, "broad") held "not worse" but failed "better" (mean 17 bugs, paired 90% interval -5.8 to +7.1 points). It does not ship, so C1b stays the baseline.
 
 A cost cutter that ships makes its result folder the next baseline. Add one repeat before the next superiority test.
 
