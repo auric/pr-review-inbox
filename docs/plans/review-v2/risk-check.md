@@ -305,6 +305,12 @@ WP-RC3 edits files of WP-RC1 and WP-RC2. It runs alone, after both are committed
 6. Is category "risk" correct for found risks? A confirmed bug from a risk then sorts after the bug classes. Recommended: yes.
 7. Rule 15 narrows "comment wording" for risk blocks only. Does the user want it? Case (b) needs it.
 
+### User answers of 2026-11-17
+
+- Question 3: yes. The own review of a task gets the risk check.
+- Question 5: yes. If rule 4 of Gate RC-A fails, risk questions become open lines with no item.
+- Question 7: yes, with limits. Rule 15 applies only when the comment, TODO, or doc states something false about the code at the head, and the change touched that code or made the text false. Wording, style, and grammar stay out. The severity is nit or minor, so under "balanced" the finding waits in "More". The rule applies to risk blocks only in WP-RC1. A wider rule for the finder waits for the Gate RC-B data.
+
 ## 11. Out of scope
 
 - A post action for a raw risk.
