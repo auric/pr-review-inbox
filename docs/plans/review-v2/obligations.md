@@ -149,6 +149,7 @@ export const obligation = z.object({
 6. "A surface obligation is one of these kinds:"
 7. "- A doc, a guide, a sample, or a contract states something about the interface that is false at the head."
 8. "- A test must guard the interface, because the task asks for one, or because the repository guards the same kind of interface with a test."
+8a. "- The change brings an interface to a new platform, target, or variant. The repository guards that interface on another platform with a test, a link-time setting, or a symbol script. Then the new platform needs a matching guard."
 9. "- A changelog entry must exist, because the repository keeps a changelog for changes of that kind."
 10. "A criterion obligation is an acceptance criterion or a stated requirement in ./context/task.md or ./context/pr.md that the change is about."
 11. "Callers and migrations are no obligations here. The finder checks them."
@@ -417,7 +418,7 @@ The user took the recommended answers.
 
 - Question 1: yes. Kind 8 counts a missing guard test when a cited guard test of the same kind exists, or a task line asks for the test.
 - Questions 2, 3, 4, and 6: yes, as recommended.
-- Question 7: open. A check of the repository of miss 1 decides whether kind 8 needs a wider form.
+- Question 7: answered by a check of the repository of miss 1. At the base, no test compared any export list. The nearest guard was a narrow runtime test of leaked symbols on another OS, plus a linker symbol script. So kind 8 alone would miss it. Rule 8a adds the narrow form: a guard on one platform needs a matching guard on a new platform. The cite is the existing guard. Probe case probe-obl-export-guard gets a second form for rule 8a in WP-OB2.
 - Question 8: the Gate OB-B numbers stay as proposed: at least 2 of the 5 omission cases found, and at most 1 obligation draft that the user would discard.
 
 ## 12. Out of scope
