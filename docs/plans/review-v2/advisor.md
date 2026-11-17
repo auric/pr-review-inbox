@@ -32,7 +32,7 @@ Status: built (WP-ADV1, spec.md section 6.27, AC-B205 to AC-B211). Design of 202
 
 ## Design
 
-- Profile field "Advisor": Off or a model (`opus`, `fable`, or a full model ID). User decision of 2026-11-17: the shipped Review profile has `fable` (PROFILES_VERSION 9). Explain and a new profile have Off. Gate G-ADV tested an `opus` advisor over a `sonnet` main model only. A `fable` advisor over the default Opus is not gate-tested. The task profile has the same field for task steps.
+- Profile field "Advisor": Off or a model (`opus`, `fable`, or a full model ID). User decision of 2026-11-17: the shipped Review profile has `fable` (PROFILES_VERSION 9). Explain and a new profile have Off. Gate G-ADV run 4 (2026-11-17, CLI 2.1.326) passed with a `fable` advisor over an `opus` main model. The task profile has the same field for task steps.
 - Off: the run gets no `--advisor` (ADV2: then it has no advisor). The child env also gets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` as a second guard, verified by GADV.4. The app never relies on the tool flags for the advisor.
 - On: the run gets `--advisor <model>`. The app refuses a profile save when the advisor ranks below the main model or is Haiku.
 - The init check needs no change: init.tools never lists the advisor (ADV3).
