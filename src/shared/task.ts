@@ -649,6 +649,23 @@ export const taskSettings = z.object({
 });
 export type TaskSettings = z.infer<typeof taskSettings>;
 
+// docs/plans/review-v2/ps6-ps7-plan.md section 1 item 1: why an instruct step runs. message: the text of "Tell Claude". comments: the
+// sorted PR comments of a task PR.
+export const INSTRUCT_PURPOSES = ["message", "comments"] as const;
+// The comments of a comment run. run: the reply run that sorted them; it owns the drafts. group: the group of the sort, null for none.
+// verdicts: Claude's verdict per thread, null before the run ended. drafted: the run wrote its "Fixed in" drafts, or never will.
+export const instructComments = z.object({
+  pr: z.number().int(),
+  run: z.number().int(),
+  threads: z.array(z.object({ thread: z.number().int(), replyTo: z.number().int(), group: z.number().int().nullable() })),
+  verdicts: z
+    .array(z.object({ thread: z.number().int(), verdict: z.enum(["fixed", "pushback"]), reason: z.string() }))
+    .nullable()
+    .default(null),
+  drafted: z.boolean().default(false),
+});
+export type InstructComments = z.infer<typeof instructComments>;
+
 // spec.md section 6.18.2: an instruct step. blockedBefore: the reason that the task had at the send; a stop or a failure restores it.
 // committed: the step made its commit.
 export const instructDetail = z.object({
@@ -657,6 +674,8 @@ export const instructDetail = z.object({
   blockedBefore: taskBlocked.nullable(),
   result: z.enum(["done", "no_change", "stopped", "failed"]).nullable().default(null),
   committed: z.boolean().default(false),
+  purpose: z.enum(INSTRUCT_PURPOSES).default("message"),
+  comments: instructComments.nullable().default(null),
 });
 export type InstructDetail = z.infer<typeof instructDetail>;
 
@@ -784,6 +803,8 @@ export const stepDetail = z.object({
   tries: z.object({ n: z.number().int(), of: z.number().int() }).nullable().default(null),
 });
 export type StepDetail = z.infer<typeof stepDetail>;
+// The keys with a default can be left out of a patch.
+export type StepDetailInput = z.input<typeof stepDetail>;
 // StepDetail.patch of a reset that saved no patch file. It still marks the reset for the Continue rule (build-redesign.md section 2.2).
 // The loop compares the stored value, so it never changes.
 export const PATCH_LOST = "no file: the app could not save them";

@@ -1447,8 +1447,9 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       gate: partGate(db, p, approvals),
       wait: schedule?.waits.get(p.id) ?? null,
       blocked: parseBlocked(p.blocked_json),
-      // The routes set it from the loop.
+      // The routes set both: instructRun from the loop, comments with the user slug.
       instructRun: null,
+      comments: null,
     };
   });
   const docs = docsOf(t);

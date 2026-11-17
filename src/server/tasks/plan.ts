@@ -907,7 +907,7 @@ export function stepFile(p: Plan, taskId: string, attempt: number): ContextFile 
 export function partStepFile(
   p: Plan,
   parts: PlanPart[],
-  what: "build" | "review" | "checks" | "instruct" | "resolve",
+  what: "build" | "review" | "checks" | "instruct" | "comments" | "resolve",
   attempt: number,
 ): ContextFile {
   const files = new Set(parts.flatMap((x) => x.tasks.flatMap((t) => t.files)).map((f) => repoPath(f) ?? f));
@@ -917,6 +917,7 @@ export function partStepFile(
     checks: "- Task: fix the failed checks of the whole part in ./context/failure.md.",
     review: "- Task: fix the points of the review in ./context/failure.md.",
     instruct: '- Mode: instruct\n- Task: do the request of "Your instructions" in the message.',
+    comments: "- Mode: comments\n- Task: judge and fix the PR comments in ./context/comments.md.",
     resolve: "- Mode: resolve\n- Task: resolve the conflicts that ./context/conflicts.md lists.",
   }[what];
   const out = [

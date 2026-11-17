@@ -84,6 +84,8 @@ const ROUTES: Route[] = [
   { name: "update", method: "POST", pattern: "parts/:part/update", body: {} },
   { name: "undo", method: "POST", pattern: "parts/:part/update/undo", body: {} },
   { name: "fix", method: "POST", pattern: "parts/:part/fix", body: {} },
+  // ps6-ps7-plan.md section 3: no seeded part has a PR of the app, so each state answers 409.
+  { name: "comments", method: "POST", pattern: "parts/:part/comments", body: { threads: [101] } },
   { name: "base", method: "PUT", pattern: "base", body: { branch: "main" } },
   { name: "file", method: "PUT", pattern: "files/:att", body: { include: true }, versioned: false },
 ];

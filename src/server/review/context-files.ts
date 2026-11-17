@@ -23,6 +23,7 @@ import {
 } from "../../shared/review";
 import { CONTINUE_DIFF_MAX } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg } from "../../shared/turn";
+import { commentLines } from "../../shared/types";
 import type { BuildStats } from "../bitbucket/provider";
 import { currentDrafts, touched } from "./drafts";
 import { type FindingRow, type ItemRow, type RunRow, SQL } from "./run-rows";
@@ -674,6 +675,24 @@ export type PrContextThread = {
   state: string;
   msgs: PrContextMsg[];
 };
+const parseJson = <T>(s: string | null): T | undefined => {
+  try {
+    return s ? (JSON.parse(s) as T) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// The place of a thread from the anchor_json and excerpt_json of its root comment: "general comment", or "inline comment on <path>
+// line <n>" as pr.md names it.
+export function threadPlace(anchorJson: string | null, excerptJson: string | null): { path: string | null; place: string } {
+  const anchor = parseJson<{ path?: unknown }>(anchorJson);
+  const path = typeof anchor?.path === "string" ? anchor.path : null;
+  const l = path === null ? undefined : commentLines({ anchor, excerpt: parseJson(excerptJson) });
+  const lines = !l ? "" : l.lineEnd > l.line ? ` lines ${l.line}-${l.lineEnd}` : ` line ${l.line}`;
+  return { path, place: path === null ? "general comment" : `inline comment on ${path}${lines}` };
+}
+
 // paths: the paths of the other PR that equal a path or src_path of this PR.
 export type PeerPr = {
   prId: number;

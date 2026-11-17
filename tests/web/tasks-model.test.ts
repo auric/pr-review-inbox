@@ -148,6 +148,7 @@ const part = (o: Partial<TaskPartDto> = {}): TaskPartDto => ({
   wait: null,
   blocked: null,
   instructRun: null,
+  comments: null,
   ...o,
 });
 

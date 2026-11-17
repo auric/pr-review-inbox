@@ -15,6 +15,7 @@ import {
   type ExplainResult,
   type FixedMark,
   type FixNote,
+  type Judgement,
   MAX_DISCUSS_MESSAGES,
   MAX_FIX_EDITS,
   MAX_FIX_ITEMS,
@@ -1612,6 +1613,17 @@ export const taskInstructionsInput = z.object({
   part: positiveInt.optional(),
   text: z.string().trim().min(1).max(MAX_INSTRUCTION),
 });
+// POST /api/tasks/:id/parts/:part/comments (docs/plans/review-v2/ps6-ps7-plan.md section 3): the threads of the newest sorted run that
+// go to Claude.
+export const taskCommentsInput = z.object({
+  version,
+  threads: z
+    .array(positiveInt)
+    .min(1)
+    .max(MAX_REPLY_THREADS)
+    .refine((t) => new Set(t).size === t.length, { message: "Give each thread once." }),
+});
+export type TaskCommentsInput = z.infer<typeof taskCommentsInput>;
 // POST /api/tasks/:id/allow (spec.md section 6.21): one choice for each pattern that the step asks for. shellWarning: the first-use
 // warning of the commands that Claude runs is accepted.
 export const taskAllowInput = z.object({
@@ -1733,6 +1745,17 @@ export type TaskPartDto = {
   // live: into the stdin of the session run of the part now. queued: as the waiting message that the next run of the part reads. null:
   // no session run of the part takes a send now; canInstruct then decides.
   instructRun: "live" | "queued" | null;
+  // ps6-ps7-plan.md section 4, PS6-B: the PR comments of the main PR of a live task part, null otherwise. turn: the threads that wait
+  // for your reply. sorted: the newest reply run that no comment run sent yet, by group (tasks/task-pr.ts groupsOf); item: the reply
+  // draft. accepted: the accepted reply drafts that wait to post. The routes set it.
+  comments: {
+    turn: number;
+    sorted: {
+      run: number;
+      groups: { n: number; threads: { thread: number; place: string; judgement: Judgement | null; body: string; item: number }[] }[];
+    } | null;
+    accepted: number;
+  } | null;
 };
 
 // A repository of the task (spec.md section 6.16.5). path: from the main repository root, null for main. project and repo: null for a

@@ -230,13 +230,18 @@ const createSentence = (e: unknown, at: { project: string; repo: string }) =>
 
 const nameOf = (r: Pick<PrRow, "project" | "repo">) => `${r.project}/${r.repo}`;
 
+// ps6-ps7-plan.md section 1 item 7: the most time that "Push to <branch>" waits for one sync cycle.
+export const SYNC_WAIT_MS = 60_000;
+
 export type OpenPrDeps = {
   review: ReviewJobs;
   settings: Settings;
   // true while the build loop works on the task (loop.running).
   working: (id: number) => boolean;
-  // Starts a sync cycle, so the new PR shows in My PRs.
-  syncNow: () => void;
+  // Starts a sync cycle, so the new PR shows in My PRs. A promise resolves when that cycle ends. A test can return any value.
+  syncNow: () => unknown;
+  // The most time that a push waits for its sync cycle. Absent: SYNC_WAIT_MS.
+  syncWaitMs?: number;
   // A PR of the task opened. The sync cycle after it reads the Jira statuses (spec.md section 6.20.9).
   opened?: (db: Database, id: number) => void;
   live: Pick<Live, "broadcast">;
@@ -372,7 +377,7 @@ export function createPrOpener(deps: OpenPrDeps) {
       return fail(502, createSentence(e, t), prStep);
     }
     linkMain(db, t, part, created, prStep);
-    deps.syncNow();
+    void deps.syncNow();
     return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
@@ -546,7 +551,7 @@ export function createPrOpener(deps: OpenPrDeps) {
       }
     }
     if (opened && provider) await linkRows(db, id, partId, provider, urls);
-    if (opened) deps.syncNow();
+    if (opened) void deps.syncNow();
   }
 
   // The PR of a submodule or an added repository (spec.md section 6.16.9, task_pr).
@@ -741,7 +746,7 @@ export function createPrOpener(deps: OpenPrDeps) {
       db.query(Q.pointed).run({ id: taskPr });
       endStep(db, push, "ok", { notes: [`Pushed ${main.head} to ${main.branch} of ${nameOf(main)}.`] }, now());
     })();
-    deps.syncNow();
+    void deps.syncNow();
   }
 
   // The checks of the push and the move: the part, not a tracked PR, with a built head.
@@ -770,6 +775,18 @@ export function createPrOpener(deps: OpenPrDeps) {
   const bump = (db: Database, id: number) =>
     db.transaction(() => setBlocked(db, { task: id, version: (taskRow(db, id) as TaskRow).version }, null, now()))();
 
+  async function syncWait() {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cap = new Promise<void>((done) => {
+      timer = setTimeout(done, deps.syncWaitMs ?? SYNC_WAIT_MS);
+    });
+    try {
+      await Promise.race([Promise.resolve(deps.syncNow()), cap]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // POST /api/tasks/:id/parts/:part/push (spec.md section 6.20.10): "Push to <branch>" of the commits that are not on the server yet, as a
   // fast-forward with the lease of the last push. 409 for a tracked PR, a push that needs force, or a lease failure.
   async function pushNow(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
@@ -784,6 +801,9 @@ export function createPrOpener(deps: OpenPrDeps) {
     try {
       const failed = await pushChanged(db, t, part);
       if (failed) return failed;
+      // ps6-ps7-plan.md section 1 item 7: "Push and post" confirms its replies after this answer, so the PR commits of the push must be
+      // stored first. A slow forge ends the wait, and the replies then wait as unpushed.
+      await syncWait();
       bump(db, id);
       return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
     } finally {
@@ -835,7 +855,7 @@ export function createPrOpener(deps: OpenPrDeps) {
       db.query(Q.retargeted).run({ id: partId, branch: t.target_branch, base, now: now() });
       bump(db, id);
       log(`Task ${id}: ${name} moved from ${lower.branch} to ${t.target_branch}.`);
-      if (cur.remote_pr !== null) deps.syncNow();
+      if (cur.remote_pr !== null) void deps.syncNow();
       return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
     } finally {
       opening.delete(id);

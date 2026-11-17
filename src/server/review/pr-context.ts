@@ -8,10 +8,17 @@ import type { CommitDto, IssueContext, ReviewItemDto } from "../../shared/dto";
 import { isMe } from "../../shared/me";
 import { stateText, threadOutcome } from "../../shared/outcome";
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
-import { commentLines } from "../../shared/types";
 import { ForgeError } from "../bitbucket/client";
 import type { ForgeProvider } from "../bitbucket/provider";
-import { type KeptNote, PEER_PRS_READ, PEER_READ_MS, type PeerPr, type PrContextInput, type PrContextThread } from "./context-files";
+import {
+  type KeptNote,
+  PEER_PRS_READ,
+  PEER_READ_MS,
+  type PeerPr,
+  type PrContextInput,
+  type PrContextThread,
+  threadPlace,
+} from "./context-files";
 import { currentDrafts, revisions, withRevision } from "./drafts";
 import { prFixes } from "./fix-routes";
 import { keptNotes, refreshLinks, within } from "./notes";
@@ -69,6 +76,55 @@ const json = <T>(s: string | null): T | undefined => {
 
 // The other PR's paths and src paths that equal a path or src path of this PR. No glob and no fuzzy match.
 const overlap = (own: ReadonlySet<string>, theirs: readonly string[]) => [...new Set(theirs.filter((p) => own.has(p)))].sort();
+
+// Threads with the State line (shared/outcome.ts, the same input as the UI), from the stored rows only. A thread with no live message
+// is left out. The comment run of a task part (tasks/loop.ts) reads them too.
+export function contextThreads(
+  db: Database,
+  pr: Pick<Heads, "id" | "my_role" | "source_head" | "project" | "repo" | "pr_id">,
+  me: string | null,
+  dataDir: string,
+): PrContextThread[] {
+  const author = pr.my_role === "AUTHOR";
+  // GET reply-drafts (jobs.ts replyDrafts): the current draft of each thread, unless it is posted, with its waiting revision.
+  const revs = revisions(db, pr.id);
+  const drafts = new Map<number, ReviewItemDto>();
+  for (const [thread, r] of currentDrafts(db, pr.id)) if (r.status !== "posted") drafts.set(thread, withRevision(r, revs));
+  const fixes = prFixes(db, dataDir, pr);
+  const commits = db.query(SQL.commits).all({ pr: pr.id }) as CommitDto[];
+  const rows = (db.query(SQL.comments).all({ pr: pr.id }) as CommentRow[]).map((r) => ({
+    ...r,
+    deleted: r.deleted === 1,
+    threadResolved: r.threadResolved === 1,
+  }));
+  const threads: PrContextThread[] = [];
+  for (const [id, list] of byThread(rows)) {
+    const live = list.filter((m) => !m.deleted);
+    if (!live.length) continue;
+    const root = list.find((m) => m.id === id) ?? (list[0] as (typeof list)[number]);
+    const { path, place } = threadPlace(root.anchor, root.excerpt);
+    const { outcome } = threadOutcome({
+      thread: { id, turn: threadTurn(list, me, author), newest: newestLive(list)?.id ?? null, orphanedAt: root.orphanedAt },
+      draft: drafts.get(id),
+      fixes,
+      commits,
+      ticks: new Map(),
+      author,
+      prHead: pr.source_head,
+    });
+    const mine = (m: typeof root) => isMe({ slug: m.authorSlug, login: m.authorLogin }, me);
+    threads.push({
+      id,
+      place,
+      path,
+      starter: { author: root.authorName ?? root.authorSlug, mine: mine(root) },
+      resolved: list.some((m) => m.threadResolved),
+      state: stateText(outcome),
+      msgs: live.map((m) => ({ id: m.id, author: m.authorName ?? m.authorSlug, mine: mine(m), at: m.createdAt, text: m.text })),
+    });
+  }
+  return threads;
+}
 
 export async function loadPrContext(
   db: Database,
@@ -185,50 +241,10 @@ export async function loadPrContext(
     readPeers(),
   ]);
 
-  // ---------- Threads with the State line (shared/outcome.ts, the same input as the UI) ----------
-  // GET reply-drafts (jobs.ts replyDrafts): the current draft of each thread, unless it is posted, with its waiting revision.
-  const revs = revisions(db, pr.id);
-  const drafts = new Map<number, ReviewItemDto>();
-  for (const [thread, r] of currentDrafts(db, pr.id)) if (r.status !== "posted") drafts.set(thread, withRevision(r, revs));
-  const fixes = prFixes(db, o.dataDir, pr);
-  const commits = db.query(SQL.commits).all({ pr: pr.id }) as CommitDto[];
-  const rows = (db.query(SQL.comments).all({ pr: pr.id }) as CommentRow[]).map((r) => ({
-    ...r,
-    deleted: r.deleted === 1,
-    threadResolved: r.threadResolved === 1,
-  }));
-  const threads: PrContextThread[] = [];
+  const threads = contextThreads(db, pr, me, o.dataDir);
   const focusPaths = new Set(focus.paths ?? []);
   const focusIds = new Set(focus.threads);
-  for (const [id, list] of byThread(rows)) {
-    const live = list.filter((m) => !m.deleted);
-    if (!live.length) continue;
-    const root = list.find((m) => m.id === id) ?? (list[0] as (typeof list)[number]);
-    const anchor = json<{ path?: unknown }>(root.anchor);
-    const path = typeof anchor?.path === "string" ? anchor.path : null;
-    const l = path === null ? undefined : commentLines({ anchor, excerpt: json(root.excerpt) });
-    const lines = !l ? "" : l.lineEnd > l.line ? ` lines ${l.line}-${l.lineEnd}` : ` line ${l.line}`;
-    const { outcome } = threadOutcome({
-      thread: { id, turn: threadTurn(list, me, author), newest: newestLive(list)?.id ?? null, orphanedAt: root.orphanedAt },
-      draft: drafts.get(id),
-      fixes,
-      commits,
-      ticks: new Map(),
-      author,
-      prHead: pr.source_head,
-    });
-    const mine = (m: typeof root) => isMe({ slug: m.authorSlug, login: m.authorLogin }, me);
-    if (focusIds.has(id) && path !== null) focusPaths.add(path);
-    threads.push({
-      id,
-      place: path === null ? "general comment" : `inline comment on ${path}${lines}`,
-      path,
-      starter: { author: root.authorName ?? root.authorSlug, mine: mine(root) },
-      resolved: list.some((m) => m.threadResolved),
-      state: stateText(outcome),
-      msgs: live.map((m) => ({ id: m.id, author: m.authorName ?? m.authorSlug, mine: mine(m), at: m.createdAt, text: m.text })),
-    });
-  }
+  for (const t of threads) if (focusIds.has(t.id) && t.path !== null) focusPaths.add(t.path);
 
   // ---------- Linked tasks ----------
   const summaries = new Map(

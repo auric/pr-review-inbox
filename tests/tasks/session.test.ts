@@ -952,6 +952,8 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
         blockedBefore: null,
         result: null,
         committed: false,
+        purpose: "message",
+        comments: null,
       });
       // One waiting message per part.
       const second = s.loop.instruct(s.db, s.task, { version: s.t().version, text: "Use works." });

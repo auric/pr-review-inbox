@@ -31,6 +31,7 @@ import {
   taskAllowInput,
   taskAnswersInput,
   taskBaseInput,
+  taskCommentsInput,
   taskCreateInput,
   taskDocInput,
   taskInstructionsInput,
@@ -51,6 +52,7 @@ import {
   taskTransitionInput,
   taskVersionInput,
 } from "../../shared/dto";
+import { MAX_REPLY_THREADS } from "../../shared/review";
 import { MAX_INSTRUCTION } from "../../shared/task";
 import type { Live } from "../live";
 import { log } from "../log";
@@ -61,6 +63,7 @@ import { lowerUnread, startable, syncParts } from "./gates";
 import { createLoop } from "./loop";
 import { createPrOpener, partDiff } from "./pr";
 import { hostsOf, originsOf } from "./shell";
+import { partComments } from "./task-pr";
 import { createTaskService, preselectProfile, repoSettings, saveRepoSettings, type TaskResult, taskRow } from "./tasks";
 
 const unconfigured = { error: "Configure the Bitbucket URL and token first." } satisfies ApiError;
@@ -137,15 +140,22 @@ export function createTaskRoutes(opts: {
     working: loop.running,
     matchBase: loop.matchBase,
     opened: tasks.statusDue,
-    syncNow: () => void opts.sync?.syncNow().catch((e) => log(`The sync after a task PR failed: ${noUrl((e as Error).message)}`)),
+    syncNow: () => opts.sync?.syncNow().catch((e) => log(`The sync after a task PR failed: ${noUrl((e as Error).message)}`)),
   });
   review.onStop(() => prs.shutdown());
   // TaskDto.working comes from the loop, which only this layer knows. The Tell Claude box waits while the loop works, except for a send
-  // to a session run of the part (TaskPartDto.instructRun, ps4-plan.md WP-7).
+  // to a session run of the part (TaskPartDto.instructRun, ps4-plan.md WP-7). TaskPartDto.comments needs the user slug of the settings.
   const live = (t: TaskDto): TaskDto => {
     const working = loop.running(t.id);
-    const db = working ? openDb() : null;
-    const parts = db ? t.parts.map((p) => ({ ...p, instructRun: loop.instructRun(db, t.id, p.id) })) : t.parts;
+    const db = openDb();
+    const me = opts.settings.config()?.userSlug ?? null;
+    const parts = db
+      ? t.parts.map((p) => ({
+          ...p,
+          instructRun: working ? loop.instructRun(db, t.id, p.id) : null,
+          comments: partComments(db, p, me),
+        }))
+      : t.parts;
     return { ...t, parts, working, canInstruct: t.canInstruct && !working, canSetup: t.canSetup && !working };
   };
   // spec.md section 6.18.4, Restart: the first open of a database resets the updates that a restart stopped.
@@ -510,6 +520,19 @@ export function createTaskRoutes(opts: {
         await loop.settle(id);
         return answer(c, loop.fixPoints(db, id, part, c.req.valid("json")));
       })
+      // docs/plans/review-v2/ps6-ps7-plan.md section 3: "Send N groups to Claude" of the sorted PR comments of a task part.
+      .post(
+        "/tasks/:id/parts/:part/comments",
+        partParam,
+        body(taskCommentsInput, `Give the task version and 1 to ${MAX_REPLY_THREADS} thread IDs, each once.`),
+        async (c) => {
+          const db = openDb();
+          if (!db) return c.json(unconfigured, 409);
+          const { id, part } = c.req.valid("param");
+          await loop.settle(id);
+          return answer(c, loop.comments(db, id, part, c.req.valid("json")));
+        },
+      )
       .get("/tasks/:id/parts/:part/diff", partParam, async (c) => {
         const db = openDb();
         if (!db) return c.json(unconfigured, 409);

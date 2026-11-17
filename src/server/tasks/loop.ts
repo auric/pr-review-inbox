@@ -13,7 +13,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { initialTransition, transition } from "xstate";
 import { indentBlock, oneLine } from "../../shared/consult";
-import type { TaskAllowInput, TaskAnswersInput, TaskResumeInput } from "../../shared/dto";
+import type { TaskAllowInput, TaskAnswersInput, TaskCommentsInput, TaskResumeInput } from "../../shared/dto";
+import { shortHash } from "../../shared/outcome";
 import type { FindingPayload } from "../../shared/review";
 import type { RunCut } from "../../shared/run-log";
 import {
@@ -25,6 +26,8 @@ import {
   DEFAULT_TEST_GLOBS,
   FAILURE_TAIL,
   type ImplementResult,
+  type InstructComments,
+  type InstructDetail,
   LARGE_REPOS_TEXT,
   limitText,
   PART_STATE_TEXT,
@@ -52,11 +55,13 @@ import type { Live } from "../live";
 import { log } from "../log";
 import { DEFAULT_PROFILE, type Profile, SHIPPED_PROFILES } from "../review/catalog";
 import { identity } from "../review/clone";
-import { continueDiffFile, continueFile, pushbackHistory } from "../review/context-files";
+import { commentsFile, continueDiffFile, continueFile, pushbackHistory } from "../review/context-files";
+import { currentDrafts, writeThreadDraft } from "../review/drafts";
 import { fold } from "../review/edits";
 import { git } from "../review/git";
 import type { ReviewJobs, TaskReviewStart } from "../review/jobs";
 import type { Ending } from "../review/judge";
+import { contextThreads } from "../review/pr-context";
 import { TIME_LIMIT_TEXT } from "../review/stream";
 import { repoPath } from "../review/validate";
 import { type BranchRemote, type ContextFile, cachePath, locked, longPath, noUrl } from "../review/workspace";
@@ -85,6 +90,7 @@ import { type Docs, docNames, type Plan, parsePlan, parseTasks, partStepFile } f
 import { type PreflightDeps, preflight } from "./preflight";
 import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
 import { allowAsks, checkRules, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
+import { groupsOf, liveTaskPart, NO_TASK_PR, sortedRun } from "./task-pr";
 import {
   advance,
   advancePart,
@@ -441,7 +447,7 @@ export function reviewFailure(points: Point[], head = REVIEW_HEAD): ContextFile 
 }
 
 // spec.md section 6.21.5: context/failure.md of the step after a shell step whose Bash commands wrote new files. files: the new files
-// that are still on disk. A failure.md of the step keeps its text, and this section follows it.
+// that are still on disk. A failure.md or comments.md of the step keeps its name and text, and this section follows it.
 export function bashFailure(failure: ContextFile | undefined, files: readonly string[]): ContextFile | undefined {
   if (!files.length) return failure;
   const out = [
@@ -452,7 +458,7 @@ export function bashFailure(failure: ContextFile | undefined, files: readonly st
     ...files.map((p) => `- ${bashLine(p)}`),
     "",
   ].join("\n");
-  return { name: "failure.md", text: failure ? `${failure.text.trimEnd()}\n\n${out}` : out };
+  return { name: failure?.name ?? "failure.md", text: failure ? `${failure.text.trimEnd()}\n\n${out}` : out };
 }
 
 type PartRow = {
@@ -519,6 +525,8 @@ const FOLLOW = "(kind = 'instruct' OR (kind = 'fix' AND item IN ('points', 'push
 const MARK = "COALESCE((SELECT MAX(id) FROM task_step WHERE part = $part AND kind = 'commit' AND item = 'restart'), 0)";
 const isFollow = (r: { kind: string; item: string | null }) =>
   r.kind === "instruct" || (r.kind === "fix" && (r.item === "points" || r.item === "pushback"));
+// ps6-ps7-plan.md AC-B392: the note of a comment run whose fixes a reset removed before their commit.
+const RESET_COMMENTS = "The app reset the work before its commit, so it writes no Fixed-in draft for this run.";
 // What a driver does first with the uncommitted work of each part that builds (build-redesign.md section 2.2). false: nothing. true:
 // the Continue rule.
 type Reset = boolean;
@@ -540,6 +548,13 @@ const Q = {
   setBase: "UPDATE task SET base_commit = $base WHERE id = $id",
   attempt: "SELECT COALESCE(MAX(attempt), 0) + 1 AS n FROM task_step WHERE part = $part AND kind = $kind AND item = $item",
   committed: "SELECT 1 FROM task_step WHERE part = $part AND kind = 'commit' AND item = $item AND state = 'ok'",
+  // ps6-ps7-plan.md AC-B392: the comment runs of a part that judged their threads and wait for the commit of their fixes.
+  undrafted: `SELECT id FROM task_step WHERE part = $part AND kind = 'instruct'
+    AND json_extract(detail_json, '$.instruct.comments.verdicts') IS NOT NULL AND json_extract(detail_json, '$.instruct.comments.drafted') = 0
+    ORDER BY id`,
+  prHeads: "SELECT id, project, repo, pr_id, my_role, source_head FROM pull_request WHERE id = $id",
+  partPr: "SELECT pr FROM task_part WHERE id = $id",
+  stepPart: "SELECT part FROM task_step WHERE id = $id",
   lastStep: "SELECT MAX(id) AS id FROM task_step WHERE part = $part",
   lines: "UPDATE task_part SET lines = $lines, files = $files, updated_at = $now WHERE id = $id",
   clone: "SELECT path FROM repo_clone WHERE project = $project AND repo = $repo",
@@ -1648,6 +1663,7 @@ export function createLoop(opts: LoopOptions) {
       now,
     });
     if (r.status === "refused") block(c, { kind: "denied_path", cause: "commit", step: null, text: deniedText(r.problems) });
+    if (r.status === "committed") draftFixes(c, r.commit);
     changed(c.id);
     const step = r.status === "committed" ? r.step : null;
     // ps5-plan.md D5: the ticks of the commit body.
@@ -1655,6 +1671,91 @@ export function createLoop(opts: LoopOptions) {
     await sizeNote(c, step);
     if (step !== null) moveHeads(c.db, c.part.id, await headsNow(c), now());
     return step;
+  }
+
+  // ---------- PR comments of a task part (docs/plans/review-v2/ps6-ps7-plan.md section 4, PS6-B) ----------
+
+  // AC-B392: the first commit after a comment run writes "Fixed in <short>: <reason>" for each thread that Claude fixed. After red checks
+  // that is the commit after Continue. The reply run that sorted the comments owns the drafts. fix.commit is the full hash, because the
+  // outbox matches pr_commit.hash.
+  function draftFixes(c: Ctx, commit: string) {
+    const rows = c.db.query(Q.undrafted).all({ part: c.part.id }) as { id: number }[];
+    if (!rows.length) return;
+    const me = settings.config()?.userSlug ?? null;
+    c.db.transaction(() => {
+      for (const { id } of rows) {
+        const info = stepDetailOf(c.db, id).instruct;
+        const k = info?.comments;
+        if (!info || !k?.verdicts || k.drafted) continue;
+        const drafts = currentDrafts(c.db, k.pr);
+        for (const v of k.verdicts)
+          if (v.verdict === "fixed")
+            writeThreadDraft(c.db, drafts, me, {
+              pr: k.pr,
+              run: k.run,
+              thread: v.thread,
+              line: `Fixed in ${shortHash(commit)}: ${v.reason}`,
+              reason: "The task committed the fix.",
+              origin: "fix",
+              fix: { id: null, commit },
+              resolveEvidence: null,
+            });
+        patchStep(c.db, id, { instruct: { ...info, comments: { ...k, drafted: true } } });
+      }
+    })();
+  }
+
+  // AC-B392: a reset of the uncommitted work removed the fixes of each comment run of the part that waits for its commit, so no later
+  // commit may claim them. step: a step row of the part.
+  function closeComments(db: Database, step: number) {
+    const part = (db.query(Q.stepPart).get({ id: step }) as { part: number | null } | null)?.part ?? null;
+    if (part === null) return;
+    db.transaction(() => {
+      for (const { id } of db.query(Q.undrafted).all({ part }) as { id: number }[]) {
+        const d = stepDetailOf(db, id);
+        const info = d.instruct as InstructDetail;
+        if (!info.comments) continue;
+        patchStep(db, id, { instruct: { ...info, comments: { ...info.comments, drafted: true } }, notes: [...d.notes, RESET_COMMENTS] });
+      }
+    })();
+  }
+
+  // context/comments.md of a comment run: the sent threads as they are now, by group. A thread with no live message is left out.
+  function commentsOf(c: Ctx, k: InstructComments): ContextFile {
+    const pr = c.db.query(Q.prHeads).get({ id: k.pr }) as Parameters<typeof contextThreads>[1] | null;
+    const now = new Map((pr ? contextThreads(c.db, pr, settings.config()?.userSlug ?? null, dataDir) : []).map((t) => [t.id, t]));
+    const groups = groupsOf(k.threads).map((g) => ({ n: g.n, threads: g.threads.flatMap((t) => now.get(t.thread) ?? []) }));
+    return commentsFile(groups.filter((g) => g.threads.length > 0));
+  }
+
+  // AC-B390 and AC-B391: one verdict per sent thread, kept in the run row. A push-back writes Claude's reason as the draft at once.
+  function judgeComments(c: Ctx, r: { step: number; result: ImplementResult }, k: InstructComments) {
+    const sent = new Set(k.threads.map((t) => t.thread));
+    const verdicts: NonNullable<InstructComments["verdicts"]> = [];
+    const notes: string[] = [];
+    for (const p of r.result.points)
+      if (!sent.has(p.id)) notes.push(`Claude gave a verdict for thread ${p.id}, which the run did not send. The app dropped it.`);
+      else if (verdicts.some((v) => v.thread === p.id)) notes.push(`Claude gave thread ${p.id} a second verdict. The app kept the first.`);
+      else verdicts.push({ thread: p.id, verdict: p.verdict, reason: p.reason.trim() });
+    for (const t of k.threads) if (!verdicts.some((v) => v.thread === t.thread)) notes.push(`No verdict for thread ${t.thread}.`);
+    const me = settings.config()?.userSlug ?? null;
+    c.db.transaction(() => {
+      const d = stepDetailOf(c.db, r.step);
+      const info = d.instruct as InstructDetail;
+      patchStep(c.db, r.step, { instruct: { ...info, comments: { ...k, verdicts } }, notes: [...d.notes, ...notes] });
+      const drafts = currentDrafts(c.db, k.pr);
+      for (const v of verdicts)
+        if (v.verdict === "pushback")
+          writeThreadDraft(c.db, drafts, me, {
+            pr: k.pr,
+            run: k.run,
+            thread: v.thread,
+            line: v.reason,
+            reason: "Claude pushed back on the comment.",
+            origin: "nofix",
+            resolveEvidence: null,
+          });
+    })();
   }
 
   // The checks on the part base (spec.md section 6.7, Baseline), or null before they ran.
@@ -1782,6 +1883,7 @@ export function createLoop(opts: LoopOptions) {
     else await resetTrees(trees, await headOf(main));
     const had = stepDetailOf(db, step).patch;
     if (had === null || had === PATCH_LOST) patchStep(db, step, { patch: saved ? basename(saved) : PATCH_LOST });
+    closeComments(db, step);
     return saved && basename(saved);
   }
 
@@ -2396,15 +2498,17 @@ export function createLoop(opts: LoopOptions) {
   // "Your instructions" (spec.md section 6.18.2). A fix row with item points runs "Fix these too" with the open points. A fix row with
   // item pushback runs "Fix it anyway" with the points in its findings (pushback.md section 6.23.6). A run that changes no file gives
   // back the reason before the follow-up and returns false. Else the gate and one commit follow. The push-backs of a fix row get their
-  // questions at the end (AC-B363). The phase is following at the start and idle at the end.
+  // questions at the end (AC-B363). An instruct row with purpose comments runs the sent PR threads in context/comments.md (ps6-ps7-plan.md
+  // section 4, PS6-B). The phase is following at the start and idle at the end.
   async function followRun(c: Ctx): Promise<boolean> {
     const q = c.db.query(Q.follow).get({ part: c.part.id }) as { id: number; kind: StepMode; item: string };
     const moved = c.db.query(Q.renew).get({ id: q.id, part: c.part.id, task: c.id, now: now() }) as { id: number } | null;
     const f = moved ? { ...q, id: moved.id } : q;
     c.follow ??= f.id;
     const info = stepDetailOf(c.db, f.id).instruct;
+    const k = info?.purpose === "comments" ? info.comments : null;
     const allow = allFiles(c);
-    const step = (a: number) => partStepFile(c.plan, c.plan.parts, info ? "instruct" : "review", a);
+    const step = (a: number) => partStepFile(c.plan, c.plan.parts, k ? "comments" : info ? "instruct" : "review", a);
     const forced = f.item === "pushback";
     const points: Point[] = info
       ? []
@@ -2423,16 +2527,23 @@ export function createLoop(opts: LoopOptions) {
       c,
       f.kind,
       f.item,
-      info
-        ? { allow, step, row: f.id, instructions: info.text, purpose: "message" }
-        : { allow, step, row: f.id, failure: reviewFailure(points), purpose: forced ? "review" : "points", points: true },
+      k
+        ? { allow, step, row: f.id, failure: commentsOf(c, k), purpose: "comments" }
+        : info
+          ? { allow, step, row: f.id, instructions: info.text, purpose: "message" }
+          : { allow, step, row: f.id, failure: reviewFailure(points), purpose: forced ? "review" : "points", points: true },
     );
     const back = info ? [] : judgePoints(c, r, points, forced);
+    if (k) judgeComments(c, r, k);
+    // The run row holds the verdicts now, so each patch reads it again.
+    const ran = () => stepDetailOf(c.db, r.step).instruct ?? (info as InstructDetail);
     if (!r.changed.length || r.unchanged) {
       // spec.md section 6.18.2, step 2: no check, commit, or review runs, and the task waits as before the follow-up.
       send(c, { type: "RUN_DONE" }, { unchanged: true });
       if (info) {
-        patchStep(c.db, r.step, { instruct: { ...info, result: "no_change" } });
+        // A run with no change has no commit, so its "fixed" verdicts get no draft.
+        const x = ran();
+        patchStep(c.db, r.step, { instruct: { ...x, result: "no_change", comments: x.comments && { ...x.comments, drafted: true } } });
         // A message of the build driver (WP-7) has no reason before it. A null here would clear the reason of another part.
         if (info.blockedBefore) reason(c.db, c.id, info.blockedBefore);
       }
@@ -2440,14 +2551,16 @@ export function createLoop(opts: LoopOptions) {
       return false;
     }
     send(c, { type: "RUN_DONE" });
-    const subject = info
-      ? firstLine(info.text)
-      : forced
-        ? `Fix the chosen review points of part ${c.part.ord}`
-        : `Fix the small review points of part ${c.part.ord}`;
+    const subject = k
+      ? `Address the PR comments of part ${c.part.ord}`
+      : info
+        ? firstLine(info.text)
+        : forced
+          ? `Fix the chosen review points of part ${c.part.ord}`
+          : `Fix the small review points of part ${c.part.ord}`;
     // ps4-plan.md section 2.5: a fix row of the gate maps to fixing, so its item is no follow-up item.
     const done = await checkGate(c, { check: info ? f.item : "checks", commit: f.item, subject: `${c.label}: ${subject}`, step });
-    if (info) patchStep(c.db, r.step, { instruct: { ...info, result: "done", committed: true } });
+    if (info) patchStep(c.db, r.step, { instruct: { ...ran(), result: "done", committed: true } });
     // pushback.md section 6.23.6: the commit of "Fix it anyway" sets fixedBy.
     if (forced && done !== null)
       c.db.transaction(() => {
@@ -2681,7 +2794,15 @@ export function createLoop(opts: LoopOptions) {
     const attempt = (db.query(Q.attempt).get({ part: r.part, kind: r.kind, item: r.item }) as { n: number }).n;
     const next = insertStep(db, { task: id, part: r.part, kind: r.kind, item: r.item, attempt, state: "waiting" }, at);
     const { instruct: info, findings } = stepDetailOf(db, row);
-    if (info) patchStep(db, next, { instruct: { ...info, result: null, committed: false } });
+    if (info)
+      patchStep(db, next, {
+        instruct: {
+          ...info,
+          result: null,
+          committed: false,
+          comments: info.comments && { ...info.comments, verdicts: null, drafted: false },
+        },
+      });
     // pushback.md section 6.23.6: the points of "Fix it anyway".
     if (r.item === "pushback") patchStep(db, next, { findings });
     return next;
@@ -2857,13 +2978,20 @@ export function createLoop(opts: LoopOptions) {
     const committed = db.query(Q.committed).get({ part: c.part.id, item: f.item }) !== null;
     const text = committed
       ? "Stopped after the commit. The own review did not run."
-      : info
-        ? "Stopped. Your instructions changed nothing. The text is back in the box."
-        : "Stopped. The fix changed nothing.";
+      : info?.comments
+        ? "Stopped. The app undid the work on the PR comments, so it wrote no Fixed-in draft."
+        : info
+          ? "Stopped. Your instructions changed nothing. The text is back in the box."
+          : "Stopped. The fix changed nothing.";
     db.transaction(() => {
       if (isOpen(db, f.id)) endStep(db, f.id, "cancelled", {}, now());
       const d = stepDetailOf(db, f.id);
-      patchStep(db, f.id, { ...(info && { instruct: { ...info, result: "stopped", committed } }), notes: [...d.notes, text] });
+      // AC-B392: the undo removed the fixes, so no later commit may claim them.
+      const k = info?.comments && !committed ? { ...info.comments, drafted: true } : info?.comments;
+      patchStep(db, f.id, {
+        ...(info && { instruct: { ...info, result: "stopped", committed, comments: k ?? null } }),
+        notes: [...d.notes, text],
+      });
       // A message of the build driver (WP-7) has no reason before it: before is the reason that Continue cleared.
       setReason(db, id, info?.blockedBefore ?? before ?? null);
     })();
@@ -4038,6 +4166,48 @@ export function createLoop(opts: LoopOptions) {
         else setBlocked(db, { task: id, version: t.version }, null, now());
       })();
       if (!running) goPart(db, id, part.id);
+      changed(id);
+      return { status: 202, task: dto(db, id) };
+    },
+
+    // POST /api/tasks/:id/parts/:part/comments (ps6-ps7-plan.md section 3, AC-B388): the picked threads of the newest sorted run go to
+    // the part session as one waiting instruct row with purpose comments, as a send of "Tell Claude" does. The comment text never goes
+    // to the stdin of a running run, so a working driver refuses.
+    comments(db: Database, id: number, partId: number, input: TaskCommentsInput): TaskResult {
+      const t = load(db, id, input.version);
+      if ("status" in t) return t;
+      const pr = (db.query(Q.partPr).get({ id: partId }) as { pr: number | null } | null)?.pr ?? null;
+      const live = pr === null ? null : liveTaskPart(db, pr);
+      if (pr === null || !live?.main || live.part !== partId) return conflict(db, id, NO_TASK_PR);
+      const target = instructTarget(db, t, partId);
+      if ("error" in target) return conflict(db, id, target.error);
+      if (drivers.has(id)) return conflict(db, id, WORKING);
+      const sorted = sortedRun(db, partId, pr);
+      if (!sorted) return conflict(db, id, "Sort the comments first.");
+      const by = new Map(sorted.threads.map((x) => [x.thread, x]));
+      const missing = input.threads.find((x) => !by.has(x));
+      if (missing !== undefined) return { status: 400, error: `Thread ${missing} is not in the newest sorted run.` };
+      const threads = input.threads.map((thread) => {
+        const p = (by.get(thread) as NonNullable<ReturnType<typeof by.get>>).payload;
+        return { thread, replyTo: p.replyTo, group: p.group ?? null };
+      });
+      db.transaction(() => {
+        const n = (db.query(Q.sends).get({ task: id, kind: "instruct" }) as { n: number }).n + 1;
+        const r = insertStep(db, { task: id, part: partId, kind: "instruct", item: `C${n}`, state: "waiting" }, now());
+        patchStep(db, r, {
+          instruct: {
+            text: `Address the PR comments of part ${target.part.ord}`,
+            part: partId,
+            blockedBefore: blockedOf(t),
+            result: null,
+            committed: false,
+            purpose: "comments",
+            comments: { pr, run: sorted.run, threads, verdicts: null, drafted: false },
+          },
+        });
+        setBlocked(db, { task: id, version: t.version }, null, now());
+      })();
+      goPart(db, id, partId);
       changed(id);
       return { status: 202, task: dto(db, id) };
     },
