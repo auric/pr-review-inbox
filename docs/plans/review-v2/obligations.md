@@ -411,6 +411,15 @@ Order: WP-RC1, WP-RC2, WP-OB1, WP-OB2, Joint Gate A, WP-RC3 with WP-OB3, WP-RC4 
 7. Did the repository of miss 1 guard the exports of sibling libraries with a test? If not, kind 8 does not catch miss 1. Unverified. The user knows the case.
 8. The Gate OB-B numbers are proposals. The user sets them.
 
+### User answers of 2026-11-18
+
+The user took the recommended answers.
+
+- Question 1: yes. Kind 8 counts a missing guard test when a cited guard test of the same kind exists, or a task line asks for the test.
+- Questions 2, 3, 4, and 6: yes, as recommended.
+- Question 7: open. A check of the repository of miss 1 decides whether kind 8 needs a wider form.
+- Question 8: the Gate OB-B numbers stay as proposed: at least 2 of the 5 omission cases found, and at most 1 obligation draft that the user would discard.
+
 ## 12. Out of scope
 
 - A blind run on the merge base.
