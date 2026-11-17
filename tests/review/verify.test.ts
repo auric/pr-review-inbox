@@ -10,7 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { PR_CONTEXT_RULES, SHIPPED_PROFILES, VERIFY2 } from "../../src/server/review/catalog";
+import {
+  PR_CONTEXT_RULES,
+  RISK_BLOCK_RULES,
+  SHIPPED_PROFILES,
+  VERIFIER,
+  VERIFY_DELEGATE_RISKS,
+  VERIFY2,
+} from "../../src/server/review/catalog";
 import { historyFile } from "../../src/server/review/context-files";
 import { git, gitEnv } from "../../src/server/review/git";
 import { triage } from "../../src/server/review/items";
@@ -158,6 +165,7 @@ async function setup() {
     { ...general, id: "tuned", name: "Tuned", maxTurns: 30, verifier: { mode: "on", model: "haiku", effort: "high" } },
     { ...general, id: "off", name: "Off", verifier: { mode: "off", model: null, effort: null } },
     { ...general, id: "variants", name: "Variants", variants: ["broad", "verify2"] },
+    { ...general, id: "risks", name: "Risks", variants: ["risk-check"] },
     explain,
   ];
   writeConfig(dir, { baseUrl: "https://bitbucket.example.invalid", userSlug: "me", notifications: false, profiles });
@@ -686,6 +694,133 @@ describe("verify phase in a review run", () => {
       const d = await h.done(h.start("explain"));
       expect(h.calls()).toHaveLength(1);
       expect(d.run.summary?.verify).toBeUndefined();
+    },
+    SLOW,
+  );
+});
+
+// docs/plans/review-v2/risk-check.md WP-RC1 (AC-R40 to AC-R45): under the variant "risk-check", the check judges the finder risks.
+// tests/review/risk-check.test.ts holds the pure parts.
+describe("finder risks in the verify phase", () => {
+  const RISKS: [string, string, string] = ["b1 can hold the wrong value.", "The TODO in app.ts is stale.", "Does b2 go into the bundle?"];
+  const place = {
+    path: "src/server/app.ts",
+    side: "new",
+    line: 22,
+    lineEnd: null,
+    anchorText: "export const b1 = 1;",
+    title: "b1 has the wrong value",
+    body: "Callers read 1. Set b1 to 2.",
+  };
+
+  test(
+    "a result with risks only starts the check; the placed risk is a finding of category risk; the run stays complete",
+    async () => {
+      const h = await setup();
+      h.runner.write({
+        fixture: h.stream({ ...RESULT([]), risks: RISKS }),
+        bySchema: {
+          verify: {
+            verify: VERIFY([
+              V(1, "confirmed", { severity: "minor", reason: "The task asks for b1 = 2.", finding: place }),
+              V(2, "refuted", { reason: "src/server/app.ts:23 is no TODO.", evidence: "src/server/app.ts:23" }),
+              V(3, "question", { question: "Must b2 ship?", reason: "No config in ./repo names b2." }),
+            ]),
+          },
+        },
+      });
+      const d = await h.done(h.start("risks"));
+      expect(d.run.status).toBe("completed");
+      expect(h.verifyCalls()).toHaveLength(1);
+      const c = h.verifyCalls()[0] as Call & { context: Record<string, string>; agents: Record<string, { prompt: string }> };
+      expect(c.stdin).toContain("# Task\n\nCheck the 3 risks in ./context/candidates.md against the change ");
+      expect(c.stdin).toContain("Give one verdict for each risk.");
+      expect(c.context["candidates.md"]?.match(/^## \w+ \d+$/gm)).toEqual(["## Risk 1", "## Risk 2", "## Risk 3"]);
+      for (const l of RISK_BLOCK_RULES) expect(c.agents["rl-main"]?.prompt).toContain(`\n${l}\n`);
+      expect(c.agents[VERIFIER]).toBeUndefined();
+      expect(flag(c.argv, "--max-turns")).toBe(String(verifyMaxTurns(general, 3)));
+      // AC-R45, through placeAnswers and the finder validator.
+      const made = h.findings(d);
+      expect(made).toHaveLength(1);
+      expect(h.payload(made[0] as ReviewItemDto)).toMatchObject({
+        category: "risk",
+        module: "core",
+        evidenceStatus: "code",
+        confidence: "high",
+        trigger: "",
+        severity: "minor",
+        title: "b1 has the wrong value",
+        body: "Callers read 1. Set b1 to 2.",
+        anchor: { state: "exact", line: 22 },
+        verify: { verdict: "confirmed", reason: "The task asks for b1 = 2." },
+      });
+      expect(d.items.filter((i) => i.kind === "question").map((i) => i.payload as Question)).toEqual([
+        { text: "Must b2 ship?", why: "No config in ./repo names b2." },
+      ]);
+      expect(d.run.summary?.finderRisks).toEqual({
+        listed: 3,
+        found: 1,
+        asked: 1,
+        cleared: 1,
+        covered: 0,
+        open: 0,
+        list: [
+          { text: RISKS[0], outcome: "found", note: "b1 has the wrong value" },
+          { text: RISKS[1], outcome: "cleared", note: "src/server/app.ts:23 is no TODO. Evidence: src/server/app.ts:23" },
+          { text: RISKS[2], outcome: "asked", note: "Must b2 ship?" },
+        ],
+      });
+      // AC-R44: the risks stay out of the verdict counts and the coverage.
+      expect(d.run.summary?.verify).toEqual({
+        candidates: 0,
+        confirmed: 0,
+        refuted: 0,
+        unsure: 0,
+        questions: 0,
+        duplicates: 0,
+        unchecked: 0,
+      });
+      expect(d.run.summary?.coverage.skipped).toEqual([]);
+      expect(d.run.summary?.risks).toEqual(RISKS);
+    },
+    SLOW,
+  );
+
+  test(
+    "without the variant, the same result starts no check, and the summary has no finderRisks key",
+    async () => {
+      const h = await setup();
+      h.runner.write({ fixture: h.stream({ ...RESULT([]), risks: RISKS }) });
+      const d = await h.done(h.start());
+      expect(h.verifyCalls()).toHaveLength(0);
+      expect(d.items).toEqual([]);
+      expect(d.run.summary?.finderRisks).toBeUndefined();
+      expect(d.run.summary?.risks).toEqual(RISKS);
+    },
+    SLOW,
+  );
+
+  test(
+    "the split and the turn cap count the risks; rl-verifier gets the risk lines; a risk without a verdict stays open",
+    async () => {
+      const h = await setup();
+      // 10 candidates alone stay at or below VERIFY_SPLIT. With 3 risks, the check delegates.
+      h.runner.write({ fixture: h.stream({ ...RESULT(Array.from({ length: 10 }, (_, k) => F(k))), risks: RISKS }) });
+      const d = await h.done(h.start("risks"));
+      expect(d.run.status).toBe("completed");
+      const c = h.verifyCalls()[0] as Call & { context: Record<string, string>; agents: Record<string, { prompt: string }> };
+      expect(c.context["candidates.md"]?.match(/^## Risk \d+$/gm)).toEqual(["## Risk 11", "## Risk 12", "## Risk 13"]);
+      expect(c.agents["rl-main"]?.prompt.endsWith(VERIFY_DELEGATE_RISKS)).toBe(true);
+      expect(c.agents[VERIFIER]?.prompt).toContain(`\n${RISK_BLOCK_RULES[0]}\n`);
+      expect(c.agents[VERIFIER]?.prompt).toContain(
+        "\nReport each verdict with candidate, verdict, severity, reason, evidence, duplicateOf, question, and finding.",
+      );
+      expect(flag(c.argv, "--max-turns")).toBe(String(verifyMaxTurns(general, 13)));
+      // The fake check confirms each candidate and gives no risk a verdict.
+      expect(d.run.summary?.verify).toMatchObject({ candidates: 10, confirmed: 10, unchecked: 0 });
+      expect(d.run.summary?.finderRisks).toMatchObject({ listed: 3, open: 3 });
+      expect(d.run.summary?.finderRisks?.list.map((x) => x.note)).toEqual(Array(3).fill("The check gave no verdict."));
+      expect(d.run.summary?.coverage.skipped).toEqual([]);
     },
     SLOW,
   );

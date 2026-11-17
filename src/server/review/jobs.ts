@@ -96,6 +96,7 @@ import {
   type ReviewContext,
   replyAgent,
   reviewerAgent,
+  riskCheck,
   SALVAGE_MAX_TURNS,
   salvageAgent,
   skillLines,
@@ -305,10 +306,12 @@ type Job = {
   session: SessionStart | null;
   cancelled: boolean;
   done: Promise<void>;
-  // The step of the run. RunDto.phase shows it. candidates, checkQuestions: the candidates and finder questions of phase checking.
+  // The step of the run. RunDto.phase shows it. candidates, checkQuestions, checkRisks: the candidates, finder questions, and finder
+  // risks of phase checking.
   phase?: RunDto["phase"];
   candidates?: number;
   checkQuestions?: number;
+  checkRisks?: number;
   // Stops the step before the CLI starts.
   abort?: AbortController;
   // The other open PRs of the run's pr-context.md, for the link rule of note proposals (docs/plans/review-v2/spec.md section 2.9).
@@ -429,6 +432,7 @@ type TaskJob = {
   phase?: RunDto["phase"];
   candidates?: number;
   checkQuestions?: number;
+  checkRisks?: number;
   abort?: AbortController;
   t: TaskRunStart | ImplementRunStart | TaskReviewStart;
   runner: Runner;
@@ -1149,6 +1153,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         servers,
         demote: profile.verifier.outcome === "demote",
         placed: v.placed,
+        risks: riskCheck(profile),
       }),
     );
   }
@@ -1323,18 +1328,25 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const { profile, context, folders, always, used, task, langs } = r;
     const verify = profile.verifier.mode === "on";
     // docs/plans/review-v2/review-questions.md: the finder questions get a check too, also in a run with no finding.
-    const file = verify && (found.candidates.length || found.questions.length) ? candidatesFile(found.candidates, found.questions) : null;
+    // docs/plans/review-v2/risk-check.md section 4.2: so do the finder risks under the risk check.
+    const listed = riskCheck(profile) ? found.summary.risks : [];
+    const file =
+      verify && (found.candidates.length || found.questions.length || listed.length)
+        ? candidatesFile(found.candidates, found.questions, listed)
+        : null;
     const written = file?.written ?? 0;
     const asked = file?.asked ?? 0;
-    if (!file || written + asked === 0) return { check: null, verify, written };
+    const risks = file?.risks ?? 0;
+    if (!file || written + asked + risks === 0) return { check: null, verify, written };
     writeFileSync(join(ws.context, file.file.name), file.file.text);
-    const split = written + asked > VERIFY_SPLIT;
+    const split = written + asked + risks > VERIFY_SPLIT;
     log(
-      `Review run ${j.id}: checks ${written} of ${found.candidates.length} candidates and ${asked} of ${found.questions.length} questions, ${VERIFIER} ${split ? "on" : "off"}.`,
+      `Review run ${j.id}: checks ${written} of ${found.candidates.length} candidates, ${asked} of ${found.questions.length} questions, and ${risks} of ${listed.length} risks, ${VERIFIER} ${split ? "on" : "off"}.`,
     );
     j.phase = "checking";
     j.candidates = written;
     j.checkQuestions = asked;
+    j.checkRisks = risks;
     notify(j.id);
     const offset = o.events.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
     const tag = (e: RunEvent): RunEvent => ({
@@ -1344,7 +1356,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       seq: e.seq + offset,
     });
     const verifier = withInstructions(
-      withMcp(withSkills(verifierAgent(profile, context, asked > 0, langs), folders, always, task), used, true),
+      withMcp(withSkills(verifierAgent(profile, context, asked > 0, langs, risks > 0), folders, always, task), used, true),
       r.instructions.text,
     );
     // No await between this check and run(), so a later Cancel reaches the new process.
@@ -1354,15 +1366,16 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       {
         cwd: ws.work,
         appDir: ws.app,
-        prompt: buildVerifyPrompt({ ...r.input, count: written, asked, rereview: r.rereview }),
+        prompt: buildVerifyPrompt({ ...r.input, count: written, asked, risks, rereview: r.rereview }),
         schema: verifyJsonSchema(),
         main: withVerifyDelegation(
-          withMcp(withSkills(verifyAgent(profile, context, asked > 0, langs), folders, always, task), used, true),
+          withMcp(withSkills(verifyAgent(profile, context, asked > 0, langs, risks > 0), folders, always, task), used, true),
           split,
           asked > 0,
           profile.variants.includes("verify2"),
+          risks > 0,
         ),
-        maxTurns: verifyMaxTurns(profile, written + asked),
+        maxTurns: verifyMaxTurns(profile, written + asked + risks),
         model: profile.verifier.model ?? profile.model,
         effort: verifierEffort(profile),
         advisor: profile.advisor,
@@ -1376,7 +1389,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     );
     j.db.transaction(() => upsertEvents(j.db, j.id, o2.events.map(tag)))();
     if (j.cancelled) return cancelledCheck(o, o2);
-    const check: CheckRun = { o: o2, startedAt, endedAt: now(), written, asked };
+    const check: CheckRun = { o: o2, startedAt, endedAt: now(), written, asked, risks };
     return { check, verify, written, placed: await placeAnswers(ws, check) };
   }
 
@@ -1807,6 +1820,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         servers,
         demote: profile.verifier.outcome === "demote",
         placed: v.placed,
+        risks: riskCheck(profile),
       }),
     );
   }
@@ -1908,6 +1922,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           phase: j.phase,
           ...(j.phase === "checking" && j.candidates !== undefined && { candidates: j.candidates }),
           ...(j.phase === "checking" && j.checkQuestions && { checkQuestions: j.checkQuestions }),
+          ...(j.phase === "checking" && j.checkRisks && { checkRisks: j.checkRisks }),
         }
       : r;
   };

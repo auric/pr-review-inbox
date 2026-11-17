@@ -11,7 +11,9 @@ import { parseCut } from "../../shared/caps";
 import { acceptedTargets, consultCaps, consultOutput } from "../../shared/consult";
 import {
   type FinderQuestions,
+  type FinderRisks,
   MAX_NOTE,
+  type RiskOutcome,
   type RunPhase,
   type RunSummary,
   type RunUsage,
@@ -379,20 +381,23 @@ export function addUsage(a: RunUsage | null, b: RunUsage | null): RunUsage | nul
 }
 
 // The verify process of a review run (spec.md section 1.6). written: the candidates in candidates.md, from candidate 1. asked: the
-// finder questions after them, numbered from written + 1 (context-files.ts candidatesFile).
-export type CheckRun = { o: RunOutcome; startedAt: number; endedAt: number; written: number; asked: number };
+// finder questions after them, numbered from written + 1 (context-files.ts candidatesFile). risks: the finder risks after the
+// questions, numbered from written + asked + 1. Absent: none (docs/plans/review-v2/risk-check.md section 4.6).
+export type CheckRun = { o: RunOutcome; startedAt: number; endedAt: number; written: number; asked: number; risks?: number };
 
-// One verdict per candidate and per finder question in candidates.md. An unknown or a second verdict goes to skipped. A candidate
-// without a verdict stays unchecked, and its line in skipped makes the run incomplete (spec.md section 1.9). A question without a
-// verdict stays as the finder asked it and adds no line, as before prompt version 2.7 (docs/plans/review-v2/review-questions.md).
-export function verdictsOf(list: readonly VerifyVerdict[], written: number, asked = 0) {
+// One verdict per candidate, per finder question, and per finder risk in candidates.md. An unknown or a second verdict goes to skipped.
+// A candidate without a verdict stays unchecked, and its line in skipped makes the run incomplete (spec.md section 1.9). A question
+// without a verdict stays as the finder asked it and adds no line, as before prompt version 2.7 (docs/plans/review-v2/review-questions.md).
+// risk-check.md AC-R44: a risk verdict adds no line, so a second verdict for a risk drops without one.
+export function verdictsOf(list: readonly VerifyVerdict[], written: number, asked = 0, risks = 0) {
   const verdicts = new Map<number, VerifyVerdict>();
   const skipped: string[] = [];
   for (const v of list) {
-    if (v.candidate > written + asked)
+    if (v.candidate > written + asked + risks)
       skipped.push(`Verdict for candidate ${v.candidate} dropped: ./context/candidates.md has no such candidate.`);
-    else if (verdicts.has(v.candidate)) skipped.push(`Verdict for candidate ${v.candidate} dropped: a second verdict for the candidate.`);
-    else verdicts.set(v.candidate, v);
+    else if (verdicts.has(v.candidate)) {
+      if (v.candidate <= written + asked) skipped.push(`Verdict for candidate ${v.candidate} dropped: a second verdict for the candidate.`);
+    } else verdicts.set(v.candidate, v);
   }
   for (let n = 1; n <= written; n++) if (!verdicts.has(n)) skipped.push(`Candidate ${n} has no verdict. It stays unchecked.`);
   return { verdicts, skipped };
@@ -472,24 +477,98 @@ export type SettleInput = {
   servers: string[];
   // The profile keeps refuted findings in the list (verifier outcome demote).
   demote?: boolean;
-  // placeAnswers: the anchored finding of each confirmed finder question, by its number in candidates.md.
+  // placeAnswers: the anchored finding of each confirmed finder question and finder risk, by its number in candidates.md.
   placed?: ReadonlyMap<number, AnchoredFinding>;
+  // The risk check is on (catalog.ts riskCheck). Absent or false: the summary gets no finderRisks key.
+  risks?: boolean;
 };
 
-// The first verdict of each finder question of a finished check. Empty: the check failed or had no question.
+const mark = (v: VerifyVerdict): VerifyMark => ({
+  verdict: v.verdict,
+  severity: v.severity,
+  reason: v.reason,
+  evidence: v.evidence,
+  duplicateOf: null,
+  by: "rl-verify",
+});
+
+// docs/plans/review-v2/risk-check.md section 4.4: what settle knows about one finder risk. verify: the verify step is on. fits: the
+// risk has a block in candidates.md. failed: the check failed or its result failed the verify schema. v: the raw verdict of the block
+// (verdictsOf, never effectiveVerdicts). at: its anchored finding (placeAnswers). cands: the candidates 1 to written of candidates.md,
+// each with its title and the verdict of the run.
+export type RiskStep = {
+  verify: boolean;
+  fits: boolean;
+  failed: boolean;
+  v?: VerifyVerdict;
+  at?: AnchoredFinding;
+  cands: ReadonlyMap<number, { title: string; verdict: string }>;
+};
+export type RiskEnd = {
+  outcome: RiskOutcome;
+  note: string;
+  item?: { kind: "finding"; finding: FindingPayload } | { kind: "question"; question: Question };
+};
+
+// risk-check.md section 4.4, rows R0 to R10: the outcome of one finder risk. The first row that matches wins. Only found and asked
+// make an item.
+export function riskOutcome(text: string, s: RiskStep): RiskEnd {
+  const v = s.v;
+  // risk-check.md section 7, the fallback: return { outcome: "open", note: question.text } here, and R5 and R6 make no item.
+  const ask = (question: Question, note: string): RiskEnd => ({ outcome: "asked", note, item: { kind: "question", question } });
+  if (!s.verify) return { outcome: "open", note: "Not checked: the check step is off." };
+  if (!s.fits) return { outcome: "open", note: "Not checked: the check file reached its size limit." };
+  if (s.failed) return { outcome: "open", note: "Not checked: the check did not finish." };
+  if (!v) return { outcome: "open", note: "The check gave no verdict." };
+  switch (v.verdict) {
+    case "confirmed":
+      if (s.at)
+        return {
+          outcome: "found",
+          note: s.at.title?.trim() || s.at.body,
+          item: { kind: "finding", finding: { ...s.at, verify: mark(v) } },
+        };
+      return ask({ text: v.finding?.title.trim() || text, why: v.reason }, "Confirmed, but the check could not place it.");
+    case "question": {
+      const question = { text: v.question.trim() || text, why: v.reason };
+      return ask(question, question.text);
+    }
+    case "refuted":
+      return {
+        outcome: "cleared",
+        note: [v.reason.trim(), v.evidence.trim() && `Evidence: ${v.evidence.trim()}`].filter(Boolean).join(" "),
+      };
+    case "duplicate": {
+      const same = v.duplicateOf === null ? undefined : s.cands.get(v.duplicateOf);
+      if (same) return { outcome: "covered", note: `Same point as: ${same.title} (${same.verdict})` };
+      return { outcome: "open", note: "The check named no finding for this repeat." };
+    }
+    case "unsure":
+      return { outcome: "open", note: v.reason.trim() };
+  }
+}
+
+// The first verdict of each finder question and finder risk of a finished check. Empty: the check failed or had neither.
 function questionVerdicts(check: CheckRun | null): Map<number, VerifyVerdict> {
-  if (!check?.asked || check.o.status !== "completed") return new Map();
+  if (!(check?.asked || check?.risks) || check.o.status !== "completed") return new Map();
   const parsed = parseCut(verifyResult, check.o.result?.structured_output);
   if (!parsed.success) return new Map();
-  return new Map([...verdictsOf(parsed.data.verdicts, check.written, check.asked).verdicts].filter(([n]) => n > check.written));
+  return new Map(
+    [...verdictsOf(parsed.data.verdicts, check.written, check.asked, check.risks).verdicts].filter(([n]) => n > check.written),
+  );
 }
 
 // docs/plans/review-v2/review-questions.md: the finding that a confirmed finder question becomes. The check reads the code, so the
 // evidence status is code and the confidence high. The trigger stays empty: the check reason holds it, and the card shows that once.
-const answerFinding = (v: VerifyVerdict, at: NonNullable<VerifyVerdict["finding"]>): Finding => ({
+// category "risk": a confirmed finder risk (docs/plans/review-v2/risk-check.md section 4.4).
+export const answerFinding = (
+  v: VerifyVerdict,
+  at: NonNullable<VerifyVerdict["finding"]>,
+  category: "question" | "risk" = "question",
+): Finding => ({
   ...at,
   severity: v.severity,
-  category: "question",
+  category,
   body: at.body.trim() || v.reason,
   evidence: v.evidence,
   evidenceStatus: "code",
@@ -501,11 +580,13 @@ const answerFinding = (v: VerifyVerdict, at: NonNullable<VerifyVerdict["finding"
   module: "core",
 });
 
-// The anchored finding of each confirmed finder question with a place, by its number in candidates.md. The finder validator anchors
-// it. A place that it drops gives no entry, so the question stays.
+// The anchored finding of each confirmed finder question and finder risk with a place, by its number in candidates.md. The finder
+// validator anchors it. A place that it drops gives no entry, so the question stays, and the risk gets asked (risk-check.md R5).
 export async function placeAnswers(ws: Workspace, check: CheckRun | null): Promise<Map<number, AnchoredFinding>> {
   const made = [...questionVerdicts(check)].flatMap(([n, v]) =>
-    v.verdict === "confirmed" && v.finding ? [{ n, finding: answerFinding(v, v.finding) }] : [],
+    v.verdict === "confirmed" && v.finding
+      ? [{ n, finding: answerFinding(v, v.finding, check && n > check.written + check.asked ? "risk" : "question") }]
+      : [],
   );
   const out = new Map<number, AnchoredFinding>();
   if (!made.length) return out;
@@ -540,6 +621,8 @@ export function settle(f: Found, s: SettleInput): Ending {
   let usage = s.find.usage;
   let raw = f.raw;
   let got = new Map<number, VerifyVerdict>();
+  // risk-check.md section 4.4: the risk rows read these, because effectiveVerdicts turns each duplicate of a risk into unsure.
+  let verdicts: ReadonlyMap<number, VerifyVerdict> = new Map();
   let failed: VerifySummary["failed"];
   if (s.check) {
     const o = s.check.o;
@@ -551,7 +634,8 @@ export function settle(f: Found, s: SettleInput): Ending {
     else if (!parsed.success)
       failed = { kind: "schema", text: `The result does not match the verify schema. ${issuesText(parsed.error.issues)}` };
     else {
-      const v = verdictsOf(parsed.data.verdicts, s.check.written, s.check.asked);
+      const v = verdictsOf(parsed.data.verdicts, s.check.written, s.check.asked, s.check.risks);
+      verdicts = v.verdicts;
       got = effectiveVerdicts(f.candidates.slice(0, s.check.written), v.verdicts);
       const c = parsed.data.coverage;
       const lines = [...parsed.cuts.map((x) => `Check: ${x}`), ...v.skipped];
@@ -582,14 +666,6 @@ export function settle(f: Found, s: SettleInput): Ending {
   const asked: Question[] = [];
   const links = new Map<NewItem, CandidateLink>();
   const carried = new Map<number, CarriedMark>();
-  const mark = (v: VerifyVerdict): VerifyMark => ({
-    verdict: v.verdict,
-    severity: v.severity,
-    reason: v.reason,
-    evidence: v.evidence,
-    duplicateOf: null,
-    by: "rl-verify",
-  });
   for (const c of f.candidates) {
     const v = got.get(c.n);
     if (v) verify[COUNT[v.verdict]]++;
@@ -646,6 +722,33 @@ export function settle(f: Found, s: SettleInput): Ending {
       );
     }
   }
+  // docs/plans/review-v2/risk-check.md section 4.4: one outcome per finder risk. Risk k has number written + asked + k + 1.
+  let finderRisks: FinderRisks | undefined;
+  const riskQuestions: Question[] = [];
+  if (s.risks) {
+    const written = s.check?.written ?? 0;
+    const cands = new Map(
+      f.candidates
+        .slice(0, written)
+        .map((c) => [c.n, { title: c.finding.title?.trim() || c.finding.body, verdict: got.get(c.n)?.verdict ?? "unchecked" }]),
+    );
+    finderRisks = { listed: f.summary.risks.length, found: 0, asked: 0, cleared: 0, covered: 0, open: 0, list: [] };
+    for (const [k, text] of f.summary.risks.entries()) {
+      const n = written + (s.check?.asked ?? 0) + k + 1;
+      const fits = k < (s.check?.risks ?? 0);
+      const r = riskOutcome(text, {
+        verify: s.verify,
+        fits,
+        failed: failed !== undefined,
+        ...(fits && { v: verdicts.get(n), at: s.placed?.get(n) }),
+        cands,
+      });
+      finderRisks[r.outcome]++;
+      finderRisks.list.push({ text, outcome: r.outcome, note: r.note });
+      if (r.item?.kind === "finding") items.push(findingItem(r.item.finding));
+      else if (r.item) riskQuestions.push(r.item.question);
+    }
+  }
   if (failed) {
     verify.failed = failed;
     const line = `The check did not finish: ${findings(verify.unchecked)} not checked.${failed.text ? ` ${failed.text}` : ""}`;
@@ -656,8 +759,14 @@ export function settle(f: Found, s: SettleInput): Ending {
     raw,
     f.outcome,
     {
-      summary: { ...f.summary, coverage, volume: s.volume, verify, phases, finderQuestions },
-      items: [...items, ...kept.map(questionItem), ...asked.map(questionItem), ...f.replies.map(replyItem)],
+      summary: { ...f.summary, coverage, volume: s.volume, verify, phases, finderQuestions, ...(finderRisks && { finderRisks }) },
+      items: [
+        ...items,
+        ...kept.map(questionItem),
+        ...riskQuestions.map(questionItem),
+        ...asked.map(questionItem),
+        ...f.replies.map(replyItem),
+      ],
       ...(f.checked && { checked: f.checked }),
       links,
       carried,

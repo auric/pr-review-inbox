@@ -1339,13 +1339,43 @@ export const QUESTION_BLOCK_RULES = [
   "Never give duplicate for a question. Set finding to null in every verdict, except confirmed for a question.",
 ];
 
+// docs/plans/review-v2/risk-check.md section 4.3: the "## Risk N" blocks of candidates.md. Only a file with risks gets these lines.
+// The verify phase checks finder risks only under the variant "risk-check" (WP-RC1).
+export const riskCheck = (p: Partial<Pick<Profile, "variants">>) => has(p, "risk-check");
+export const RISK_BLOCK_RULES = [
+  'The heading "## Risk N" holds a risk that the finder noted and did not check. N is no finding number.',
+  "Give its verdict with candidate N.",
+  "A risk has no trigger yet. Look for one in the changed code, its callers, its tests, its config, and the files in ./context.",
+  FIND_CODE,
+  "confirmed: the code shows the problem. Put the trigger into reason. A defect that confirms a risk is no new problem.",
+  "In finding, give the place, the title, and the body of that defect. Anchor it on the changed line that the defect is about.",
+  "In body, name who sees the effect: a caller, a user, a build, or a later task. Then give a fix direction.",
+  "refuted: the code or the task text shows that the problem cannot happen. In reason, name that line with path:line.",
+  "duplicate: a candidate already reports the risk. Set duplicateOf to that candidate. Never name a question or a risk there.",
+  "question: only the author can settle the risk, for example a plan or another pull request. In reason, name what you checked.",
+  "unsure: no file or tool of this run settles the risk. In reason, name what is missing and who would see the effect.",
+  'The do-not-flag item "a risk with no trigger" does not apply to a risk block.',
+  "For a risk about a requirement, quote the criterion in evidence. Take it from ./context/task.md, ./context/pr.md, or an issue tool result.",
+  "For a confirmed requirement risk, say in body whether the change meets the criterion in part or not at all.",
+  // The user's answer of 2026-11-17 to question 7 narrows rule 15 of section 4.3.
+  "A risk can be about a comment, a TODO, or a doc. Confirm it only when the text states something false about the code at the head.",
+  "The change must also touch that code or make the text false. Such a false text is no comment wording.",
+  "Wording, style, and grammar stay on the do-not-flag list. A false comment or TODO is a nit. A false doc or guide that users or callers read is minor.",
+];
+// risk-check.md section 4.3 rule 17: the last question line with risks in the file.
+const QUESTION_FINDING_LINE = QUESTION_BLOCK_RULES.at(-1) as string;
+const QUESTION_RISK_FINDING_LINE =
+  "Never give duplicate for a question. Set finding to null in every verdict, except confirmed for a question or a risk.";
+
 // spec.md section 1.6: the rules of rl-verify and rl-verifier. One rubric and one do-not-flag list for both phases.
-// questions: candidates.md holds finder questions. langs: the languages of the change, for the skip lists under "broad".
+// questions: candidates.md holds finder questions. langs: the languages of the change, for the skip lists under "broad". risks:
+// candidates.md holds finder risks.
 export function verifyRules(
   p: FinderProfile & Pick<Profile, "modules">,
   c: ReviewContext,
   questions = false,
   langs: Language[] = [],
+  risks = false,
 ): string[] {
   const v2 = has(p, "verify2");
   return [
@@ -1373,7 +1403,8 @@ export function verifyRules(
     ...DO_NOT_FLAG_ITEMS,
     ...(broad(p) ? languageSkipLines(langs) : []),
     "Look for no new problems. A finder already ran.",
-    ...(questions ? QUESTION_BLOCK_RULES : []),
+    ...(questions ? QUESTION_BLOCK_RULES.map((l) => (risks && l === QUESTION_FINDING_LINE ? QUESTION_RISK_FINDING_LINE : l)) : []),
+    ...(risks ? [...RISK_BLOCK_RULES, ...(questions ? [] : PLACE_RULES)] : []),
   ];
 }
 
@@ -1383,13 +1414,23 @@ export const VERIFY_DELEGATE = [
 ];
 // docs/plans/review-v2/review-questions.md: a question without a call gets no verdict, so the delegation names the questions too.
 export const VERIFY_DELEGATE_QUESTIONS = `Give the questions to the ${VERIFIER} agent too. Each question counts as one candidate of its call.`;
+// docs/plans/review-v2/risk-check.md section 4.3: the same for the risks.
+export const VERIFY_DELEGATE_RISKS = `Give the risks to the ${VERIFIER} agent too. Each risk counts as one candidate of its call.`;
 
 // The main agent of the verify process (spec.md section 1.6). The caller adds skills, MCP tools, and the delegation lines.
-// questions: candidates.md holds finder questions. langs: see verifyRules.
-export function verifyAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false, langs: Language[] = []): AgentSpec {
+// questions: candidates.md holds finder questions. langs: see verifyRules. risks: candidates.md holds finder risks.
+export function verifyAgent(
+  p: Profile,
+  c: ReviewContext = NO_CONTEXT,
+  questions = false,
+  langs: Language[] = [],
+  risks = false,
+): AgentSpec {
   return {
     description: "Read-only check of the findings of one review.",
-    prompt: [...VERIFY_OPENING, ...contextBlock(c), ...verifyRules(p, c, questions, langs), COVERAGE_RULE, ...docsRule(p)].join("\n"),
+    prompt: [...VERIFY_OPENING, ...contextBlock(c), ...verifyRules(p, c, questions, langs, risks), COVERAGE_RULE, ...docsRule(p)].join(
+      "\n",
+    ),
   };
 }
 
@@ -1418,7 +1459,8 @@ export function salvageAgent(p: Profile): AgentSpec {
 }
 
 // The delegation lines come last, as for the finder. questions: candidates.md holds finder questions. group: the "verify2" variant.
-export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = false, group = false): AgentSpec =>
+// risks: candidates.md holds finder risks.
+export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = false, group = false, risks = false): AgentSpec =>
   on
     ? {
         ...a,
@@ -1428,6 +1470,7 @@ export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = fals
           ...VERIFY_DELEGATE,
           ...(group ? [VERIFY2.group] : []),
           ...(questions ? [VERIFY_DELEGATE_QUESTIONS] : []),
+          ...(risks ? [VERIFY_DELEGATE_RISKS] : []),
         ].join("\n"),
       }
     : a;
@@ -1436,8 +1479,14 @@ export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = fals
 export const verifierEffort = (p: Pick<Profile, "verifier">) => p.verifier.effort ?? "medium";
 
 // The caller adds skills, MCP tools, and the project instructions. questions: candidates.md holds finder questions. langs: see
-// verifyRules.
-export function verifierAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false, langs: Language[] = []): AgentSpec {
+// verifyRules. risks: candidates.md holds finder risks. A confirmed risk needs finding, so the report line names it.
+export function verifierAgent(
+  p: Profile,
+  c: ReviewContext = NO_CONTEXT,
+  questions = false,
+  langs: Language[] = [],
+  risks = false,
+): AgentSpec {
   return {
     ...(p.verifier.model !== null && { model: p.verifier.model }),
     effort: verifierEffort(p),
@@ -1446,10 +1495,10 @@ export function verifierAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questio
       ...VERIFY_OPENING,
       "You check the candidates that the request names.",
       ...contextBlock(c),
-      ...verifyRules(p, c, questions, langs),
+      ...verifyRules(p, c, questions, langs, risks),
       COVERAGE_RULE,
       ...docsRule(p),
-      questions
+      questions || risks
         ? "Report each verdict with candidate, verdict, severity, reason, evidence, duplicateOf, question, and finding."
         : "Report each verdict with candidate, verdict, severity, reason, evidence, duplicateOf, and question.",
     ].join("\n"),

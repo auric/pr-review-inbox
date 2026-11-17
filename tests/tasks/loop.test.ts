@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { store, taskFileDir } from "../../src/server/context/attachments";
-import { DEFAULT_PROFILE, profileOf, SHIPPED_PROFILES } from "../../src/server/review/catalog";
+import { DEFAULT_PROFILE, profileOf, RISK_BLOCK_RULES, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import { CONTINUE_PATHS_MAX, continueFile } from "../../src/server/review/context-files";
 import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
@@ -20,7 +20,7 @@ import { changedLines, createLoop, globMatch, LOCK_GLOBS, REVIEW_FIX_TRIES, TEST
 import { pushTaskBranch, staleText } from "../../src/server/tasks/push";
 import { PAUSED, recoverTasks, taskDto } from "../../src/server/tasks/tasks";
 import { ignoredSnapshot, openWorktree, readSetupMark, status } from "../../src/server/tasks/worktree";
-import type { ProfileInput, RunConflict, TaskAllowInput, TaskDto } from "../../src/shared/dto";
+import type { ProfileInput, RunConflict, RunSummary, TaskAllowInput, TaskDto } from "../../src/shared/dto";
 import { DEFAULT_TEST_GLOBS, RUN_TIME_MAX_MS, type TaskBlocked } from "../../src/shared/task";
 import { rowStatus } from "../../src/shared/task-status";
 import { callKey, readRecords } from "../support/fake-claude";
@@ -549,6 +549,51 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       const judging = s.steps().find((x) => x.kind === "fix" && x.item === "review") as Step;
       // part-session.md section 2.8: the judging run forks the session.
       expect(JSON.parse(judging.detail_json).session).toMatchObject({ purpose: "review", resumed: true });
+    },
+    SLOW,
+  );
+
+  test(
+    "risk-check.md section 4.7: under the variant, the own review of a task checks the finder risks; the critic does not",
+    async () => {
+      const risky = { ...SHIPPED_PROFILES[0], id: "risky", name: "Risky", variants: ["risk-check"] } as ProfileInput;
+      const risk = "The feature string can go stale.";
+      const verdict = {
+        candidate: 1,
+        verdict: "refuted",
+        severity: "minor",
+        reason: "src/feature.ts:1 holds the final value.",
+        evidence: "src/feature.ts:1",
+        duplicateOf: null,
+        question: "",
+      };
+      const s = await setup({
+        profiles: [...SHIPPED_PROFILES, risky],
+        profile: "risky",
+        seq: {
+          review: [{ review: { ...CLEAN, risks: [risk] } }],
+          critic: [{ critic: { ...CLEAN, risks: ["A critic risk."] } }],
+          verify: [{ verify: { verdicts: [verdict], coverage: NO_COVERAGE } }],
+        },
+      });
+      await s.build();
+      expect(s.blocked()).toBeNull();
+      expect(s.part().state).toBe("self_reviewed");
+      // Before the variant, a review with no finding started no check.
+      expect(s.runCalls().map(s.modeOf)).toEqual(["build", "fix", "review", "review", "verify"]);
+      const check = s.runCalls().find((c) => s.modeOf(c) === "verify") as Call;
+      expect(check.context["candidates.md"]?.match(/^## \w+ \d+$/gm)).toEqual(["## Risk 1"]);
+      expect(check.agents?.["rl-main"]?.prompt).toContain(`\n${RISK_BLOCK_RULES[0]}\n`);
+      const summaries = (
+        s.db.query("SELECT summary_json FROM review_run WHERE kind = 'review' AND task = $task ORDER BY id").all({ task: s.task }) as {
+          summary_json: string;
+        }[]
+      ).map((r) => JSON.parse(r.summary_json) as RunSummary);
+      // The critic runs with CRITIC_PROFILE, which lacks the variant.
+      expect(summaries.map((x) => x.finderRisks?.listed)).toEqual([undefined, 1]);
+      expect(summaries[1]?.finderRisks?.list).toEqual([
+        { text: risk, outcome: "cleared", note: "src/feature.ts:1 holds the final value. Evidence: src/feature.ts:1" },
+      ]);
     },
     SLOW,
   );

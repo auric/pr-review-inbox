@@ -205,9 +205,9 @@ export type ModuleId = (typeof MODULE_IDS)[number];
 // docs/plans/review-v3.md V2 and V3: eval switches. The UI and the Improve prompt do not offer them until WP-V4 ships or deletes them.
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "broad", "verify2", "classes",
-// "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. A retired name ("signal",
-// "order", "rules2", "rereview-strict") drops on read.
-export const VARIANTS = ["broad", "classes", "parts", "security2", "security2-verify", "verify2"] as const;
+// "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. "risk-check":
+// docs/plans/review-v2/risk-check.md WP-RC1. A retired name ("signal", "order", "rules2", "rereview-strict") drops on read.
+export const VARIANTS = ["broad", "classes", "parts", "risk-check", "security2", "security2-verify", "verify2"] as const;
 export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];
@@ -609,6 +609,7 @@ export type RunSummary = Pick<ValidatedResult, "summary" | "risks" | "coverage" 
   verify?: VerifySummary;
   phases?: RunPhase[];
   finderQuestions?: FinderQuestions;
+  finderRisks?: FinderRisks;
 };
 // docs/plans/review-v2/review-questions.md: the finder questions of a review run. asked = answered + findings + kept. answered: the
 // check found the answer, which answers holds. findings: the answer showed a defect. Absent in runs before prompt version 2.7.
@@ -618,6 +619,14 @@ export type FinderQuestions = {
   findings: number;
   kept: number;
   answers: { text: string; answer: string }[];
+};
+// docs/plans/review-v2/risk-check.md section 4.4: the outcome of each finder risk. listed = found + asked + cleared + covered + open.
+// list: one entry per finder risk, in finder order. Absent when the run had no risk check.
+export const riskOutcomes = ["found", "asked", "cleared", "covered", "open"] as const;
+export type RiskOutcome = (typeof riskOutcomes)[number];
+export type FinderRisks = Record<RiskOutcome, number> & {
+  listed: number;
+  list: { text: string; outcome: RiskOutcome; note: string }[];
 };
 
 // session: a direct consult of the user's own session (docs/plans/session-consult.md part C).
@@ -680,6 +689,8 @@ export type RunDto = {
   candidates?: number;
   // Phase checking only: the number of finder questions that it checks (docs/plans/review-v2/review-questions.md).
   checkQuestions?: number;
+  // Phase checking only: the number of finder risks that it checks (docs/plans/review-v2/risk-check.md section 4.2).
+  checkRisks?: number;
   // A session run only: the transcript that it forked and the text that it got, with no transcript text. tokens: sessionTokens(bytes).
   // mode: consult.ts sessionModes, absent for runs made before part D. run: on a fix run that an import made from the proposal of a
   // session run (session-consult.md part D), that session run.
@@ -1388,6 +1399,9 @@ export type ReviewStatsDto = {
   usage: { costUsd: number; turns: number };
   // The sums of summary.finderQuestions. runs: the runs with that key.
   questions: Omit<FinderQuestions, "answers"> & { runs: number };
+  // docs/plans/review-v2/risk-check.md section 4.6: the sums of summary.finderRisks, and the posted and discarded findings of category
+  // risk. runs: the runs with that key. Absent until stats.ts fills it (WP-RC4).
+  risks?: Omit<FinderRisks, "list"> & { runs: number; posted: number; discarded: number };
 };
 export type PostOutcomes = { addressed: number; open: number; pending: number };
 
