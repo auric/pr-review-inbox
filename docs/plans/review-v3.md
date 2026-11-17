@@ -1,6 +1,6 @@
 # Review v3 plan
 
-Status: planned, 2026-10-28. WP-V1, WP-V2, and WP-V3 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md): the default prompts stay at 2.3. Wave 5 (section 10, recall on large PRs) is next. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
+Status: planned, 2026-10-28. WP-V1, WP-V2, WP-V3, and WP-V4 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removed the lost variants. Wave 5 (section 10, recall on large PRs) stopped on 2026-11-01 after its first gate. Later review work goes on in review-v2/review-quality-2026.md. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
 
 Sources: a comparison of our review pipeline with a similar app (2026-10-28, not in the repository), BRIEF.md sections 3.5 and 3.6, docs/plans/review-v2/design.md (R1 to R17, M1 to M4), docs/plans/review-v2/tasks.md (package format), scripts/eval/, and src/server/review/{catalog.ts, prompt.ts, validate.ts, codegraph.ts, jobs.ts}. Never name the other app, its author, or any company, host, or project in this repository.
 

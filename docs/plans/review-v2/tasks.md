@@ -10,7 +10,7 @@ Update (2026-10-26): the user decided Q52 and Q53 (design.md section 10.6): the 
 
 Update (2026-10-29): the user approved Q64 to Q76 (design.md section 10.8): build a Jira task with sub-tasks, one branch and one PR per sub-task (spec.md section 6.20). They add WP-ST-D, WP-ST-G, WP-ST1 to WP-ST7 (wave W9d), Gates G19 and J1 to J4, and the user smoke UT. WP-B8 shrinks to the large-task wiring of the sub-task engine. The prerequisites exist: WP-CA1 of docs/plans/ci-builds.md (pr_build, 2734de5) and Jira Cloud auth (698b7aa, de32843).
 
-Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It adds WP-PQ-D and WP-PQ1 to WP-PQ5 (wave WPQ) and the user smoke UP. Its open questions and their recommended defaults are in spec.md section 6.22.14.
+Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It adds WP-PQ-D and WP-PQ1 to WP-PQ5 (wave WPQ) and the user smoke UP. Its open questions and their recommended defaults are in spec.md section 6.22.14. WP-PQ-D, WP-PQ1, and WP-PQ2 are built. WP-PQ3 to WP-PQ5 and Gate UP are open.
 
 ## 0. Rules for every work package
 
