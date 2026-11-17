@@ -15,6 +15,7 @@ import {
   type Metric,
   pairedDelta,
   type Score,
+  type Sec,
   type Stat,
   score,
 } from "./score";
@@ -198,16 +199,19 @@ export function detailText(s: Score): string {
         ]),
       ]),
     );
-  const sec = s.security;
-  if (sec)
-    out.push(
-      "",
-      "Shown security findings (review-quality-2026.md item 10): shown findings with category security, per case run",
-      table([
-        ["case runs", "shown", "gold match", "judge tp", "judge fp", "no label"],
-        [String(sec.runs), ...[sec.shown, sec.gold, sec.tp, sec.fp, sec.unlabeled].map((x) => per(sec.runs ? x / sec.runs : null))],
-      ]),
-    );
+  const shownRow = (title: string, sec: Sec | null) => {
+    if (sec)
+      out.push(
+        "",
+        title,
+        table([
+          ["case runs", "shown", "gold match", "judge tp", "judge fp", "no label"],
+          [String(sec.runs), ...[sec.shown, sec.gold, sec.tp, sec.fp, sec.unlabeled].map((x) => per(sec.runs ? x / sec.runs : null))],
+        ]),
+      );
+  };
+  shownRow("Shown security findings (review-quality-2026.md item 10): shown findings with category security, per case run", s.security);
+  shownRow("Shown risk findings (risk-check.md section 7): shown findings with category risk, per case run", s.risk);
   if (s.union.length)
     out.push(
       "",
@@ -224,6 +228,20 @@ export function detailText(s: Score): string {
   }
   const q = s.finderQuestions;
   if (q) out.push("", `Finder questions, all runs: ${q.asked} asked, ${q.answered} answered, ${q.findings} findings, ${q.kept} kept.`);
+  const k = s.finderRisks;
+  if (k)
+    out.push(
+      "",
+      `Finder risks, all runs: ${k.listed} listed, ${k.found} found, ${k.asked} asked, ${k.cleared} cleared, ${k.covered} same as a finding, ${k.open} open.`,
+    );
+  if (s.questionItems.length) {
+    // score.ts takes each repeat from a run, so runs is above 0.
+    const each = s.questionItems.map((x) => x.items / x.runs);
+    out.push(
+      "",
+      `Question items per case run, per repeat (all question items): ${s.questionItems.map((x, n) => `${x.repeat}: ${x.items}/${x.runs} = ${per(each[n] ?? null)}`).join(", ")}. Spread: ${per(Math.max(...each) - Math.min(...each))}.`,
+    );
+  }
   return out.join("\n");
 }
 

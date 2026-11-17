@@ -283,8 +283,8 @@ export function evalProfile(o: Options) {
 // The CLI calls of a result file X.json: X.calls/<case>-<repeat>-<k>.json, k from 1 in call order.
 export const callsDir = (result: string) => result.replace(/\.json$/, ".calls");
 type Recorded = { kind: "find" | "verify"; outcome: RunOutcome };
-// review-quality-2026.md E2 and item 10: the variants that change only the verify prompt. A replay can change them.
-export const VERIFY_ONLY: readonly string[] = ["security2-verify", "verify2"] satisfies Variant[];
+// review-quality-2026.md E2 and item 10, risk-check.md section 7: the variants that change only the verify prompt. A replay can change them.
+export const VERIFY_ONLY: readonly string[] = ["risk-check", "security2-verify", "verify2"] satisfies Variant[];
 // The profile fields of a and b that differ and reach a finder or salvage call. catalog.ts checked(): the verify mode changes the finder
 // prompt. The verifier effort, model, and outcome, and the verify-only variants, reach only the verify call.
 export function finderChange(a: Record<string, unknown>, b: Record<string, unknown>): string[] {
@@ -810,6 +810,7 @@ async function runCase(
           ? parseDiff(await git(["--git-dir", repo.url, "diff", ...diffArgs, r.mergeBase, head], { env: repo.env }))
           : [];
       const fq = r.summary?.finderQuestions;
+      const fr = r.summary?.finderRisks;
       return {
         earlier,
         run: {
@@ -842,6 +843,10 @@ async function runCase(
           questions: d.items.filter((i) => i.kind === "question").length,
           // Counts only: answers holds text.
           ...(fq && { finderQuestions: { asked: fq.asked, answered: fq.answered, findings: fq.findings, kept: fq.kept } }),
+          // Counts only: list holds text.
+          ...(fr && {
+            finderRisks: { listed: fr.listed, found: fr.found, asked: fr.asked, cleared: fr.cleared, covered: fr.covered, open: fr.open },
+          }),
           ...runFacts(d.events),
           ...partFacts(d.events, partsOf(profile, changed).length),
           ...(rr && { resolves }),

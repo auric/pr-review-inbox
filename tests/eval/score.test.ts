@@ -769,6 +769,64 @@ describe("grounded metrics (review-quality-2026.md E5)", () => {
     expect(score(RESULT).finderQuestions).toBeNull();
   });
 
+  test("finderRisks sums the counts of every run; a file without them prints no risk line", () => {
+    const q = {
+      ...RESULT,
+      runs: RESULT.runs.map((x, n) => ({
+        ...x,
+        finderRisks: { listed: n + 5, found: n, asked: 1, cleared: 2, covered: 1, open: 1 },
+      })),
+    };
+    expect(score(q).finderRisks).toEqual({ listed: 26, found: 6, asked: 4, cleared: 8, covered: 4, open: 4 });
+    expect(summaryText(q)).toContain("Finder risks, all runs: 26 listed, 6 found, 4 asked, 8 cleared, 4 same as a finding, 4 open.");
+    expect(score(RESULT).finderRisks).toBeNull();
+    expect(summaryText(RESULT)).not.toContain("Finder risks");
+  });
+
+  test("question items per case run counts all question items of each repeat, with the spread", () => {
+    const q = { ...RESULT, runs: RESULT.runs.map((x, n) => ({ ...x, questions: n })) };
+    const s = score(q);
+    expect(s.questionItems.reduce((n, x) => n + x.items, 0)).toBe(6);
+    expect(s.questionItems.reduce((n, x) => n + x.runs, 0)).toBe(RESULT.runs.length);
+    expect(summaryText(q, s)).toMatch(
+      /Question items per case run, per repeat \(all question items\): 1: \d+\/\d+ = \d+\.\d\d.*Spread: \d+\.\d\d\./,
+    );
+  });
+
+  test("the risk row counts shown findings with category risk per case run, by gold match and judge label", () => {
+    const risk = { category: "risk" };
+    const sc = gcase("s", [gbug("S1", 10)]);
+    const sr = gresult(
+      [sc],
+      [
+        run("s", 1, [at("hit", risk), at("tp", risk), at("fp", risk), at("other-fp", { category: "security" })]),
+        run("s", 2, [at("open", risk), at("hidden-fp", { ...risk, group: "hidden" })]),
+      ],
+    );
+    const sg = grounding(
+      { hit: ["bug:S1"], tp: [], fp: [], "other-fp": [], open: [], "hidden-fp": [] },
+      {
+        tp: { label: "tp", severity: "medium" },
+        fp: { label: "fp", severity: "low" },
+        "other-fp": { label: "fp", severity: "low" },
+        "hidden-fp": { label: "fp", severity: "low" },
+      },
+    );
+    const s = score(sr, sg);
+    expect(s.risk).toEqual({ runs: 2, shown: 4, gold: 1, tp: 1, fp: 1, unlabeled: 1 });
+    expect(s.security).toEqual({ runs: 2, shown: 1, gold: 0, tp: 0, fp: 1, unlabeled: 0 });
+    expect(summaryText(sr, s)).toMatch(
+      /Shown risk findings \(risk-check\.md section 7\)[^\n]*\ncase runs\s+shown\s+gold match\s+judge tp\s+judge fp\s+no label\n2\s+2\.00\s+0\.50\s+0\.50\s+0\.50\s+0\.50\n/,
+    );
+    // eval:compare prints the row for A and for B.
+    expect(
+      compareText(sr, sr, (id) => id, sr.profile.revision, [sg, sg]).match(
+        /Shown risk findings[^\n]*\n[^\n]*\n2\s+2\.00\s+0\.50\s+0\.50\s+0\.50\s+0\.50\n/g,
+      ),
+    ).toHaveLength(2);
+    expect(score(sr).risk).toBeNull();
+  });
+
   test("unionRecall: the mean over the k-subsets of repeats of the must-finds that any run shows or raises", () => {
     const u = gcase("u", [gbug("X", 10), gbug("Y", 20)], { traps: [], extras: [] });
     const ur = gresult(

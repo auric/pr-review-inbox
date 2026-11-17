@@ -182,8 +182,10 @@ describe("eval harness without --real (AC-M2)", () => {
     ]);
     expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
-    expect(VERIFY_ONLY).toEqual(["security2-verify", "verify2"]);
+    expect(VERIFY_ONLY).toEqual(["risk-check", "security2-verify", "verify2"]);
     expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
+    // risk-check.md section 7: the risk check changes only the verify prompts.
+    expect(finderChange(base, { ...p.profile, variants: ["risk-check"] })).toEqual([]);
     // review-quality-2026.md item 10: security2 changes the finder, security2-verify only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["security2-verify"] })).toEqual([]);
     expect(finderChange(base, { ...p.profile, variants: ["security2"] })).toEqual(["variants"]);
@@ -866,11 +868,11 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         confidence: "high",
         agent: null,
       };
-      const scenario = (name: string, findings: unknown[]) => {
+      const scenario = (name: string, findings: unknown[], risks: string[]) => {
         const file = join(dir, `${name}.json`);
         const structured = {
           summary: "Fake review.",
-          risks: [],
+          risks,
           questions: [],
           coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
           findings,
@@ -894,16 +896,29 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
             schemaKind(JSON.parse(x.argv[x.argv.indexOf("--json-schema") + 1] ?? "{}").properties ?? {}),
             x.argv[x.argv.indexOf("--effort") + 1],
           ]);
-      const run = async (name: string, findings: unknown[], args: string[]) => {
+      const run = async (name: string, findings: unknown[], args: string[], risks: string[] = []) => {
         const out = join(dir, `out-${name}`);
-        const r = await bun([RUN, "--set", "probe", ...args, "--out", out, "--runner", process.execPath, FAKE, scenario(name, findings)]);
+        const r = await bun([
+          RUN,
+          "--set",
+          "probe",
+          ...args,
+          "--out",
+          out,
+          "--runner",
+          process.execPath,
+          FAKE,
+          scenario(name, findings, risks),
+        ]);
         // A refused run makes no out folder.
         const names = r.code === 0 ? readdirSync(out, { withFileTypes: true }) : [];
         const file = join(out, names.find((f) => f.isFile() && f.name.endsWith(".json"))?.name ?? "none");
         return { ...r, file };
       };
       const ids = `probe-clean-axis-ticks,${task.id}`;
-      const rec = await run("record", [finding], ["--cases", ids]);
+      // Without the variant risk-check, a finder risk changes no call.
+      const RISK = "A secret risk text of the fake CLI.";
+      const rec = await run("record", [finding], ["--cases", ids], [RISK]);
       expect(rec.stderr).toBe("");
       expect(rec.code).toBe(0);
       const a = readResult(rec.file);
@@ -935,6 +950,24 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(calls("replay")).toEqual([["verify", "high"]]);
       // The replay records its calls too, so a later replay can use it.
       expect(readdirSync(callsDir(replay.file)).sort()).toEqual(readdirSync(callsDir(rec.file)).sort());
+      expect(b.runs.map((x) => x.finderRisks)).toEqual([undefined, undefined]);
+
+      // risk-check.md section 7: the risk check changes only the verify prompts, so a replay can switch it on.
+      const risky = await run("risky", [], ["--cases", ids, "--replay-find", rec.file, "--variants", "risk-check"]);
+      expect(risky.stderr).toBe("");
+      expect(risky.code).toBe(0);
+      const k = readResult(risky.file);
+      // The echo check gives no risk verdict, so each risk stays open. A run with only a risk starts the verify phase.
+      const open = { listed: 1, found: 0, asked: 0, cleared: 0, covered: 0, open: 1 };
+      expect(k.runs.map((x) => x.finderRisks)).toEqual([open, open]);
+      expect(calls("risky")).toEqual([
+        ["verify", "medium"],
+        ["verify", "medium"],
+      ]);
+      // The result file holds the counts, never the risk text.
+      expect(readFileSync(risky.file, "utf8")).not.toContain(RISK);
+      expect(risky.stdout).toContain("Finder risks, all runs: 2 listed, 0 found, 0 asked, 0 cleared, 0 same as a finding, 2 open.");
+      expect(risky.stdout).toContain("Question items per case run, per repeat (all question items): 1: 0/2 = 0.00. Spread: 0.00.");
 
       // Another mode, set, repeat count, or finder prompt version is refused.
       const refusal = (args: string[], r: EvalResult = a) => {

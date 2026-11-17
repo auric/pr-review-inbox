@@ -105,7 +105,11 @@ export type CaseRun = {
   partsRead?: number;
   // The counts of summary.finderQuestions (prompt version 2.7). Absent in files made before this field existed, and in a run without them.
   finderQuestions?: { asked: number; answered: number; findings: number; kept: number };
+  // The counts of summary.finderRisks (risk-check.md section 7). Absent in files made before this field existed, and in a run without them.
+  finderRisks?: RiskCounts;
 };
+export type RiskCounts = { listed: number; found: number; asked: number; cleared: number; covered: number; open: number };
+const RISK_KEYS = ["listed", "found", "asked", "cleared", "covered", "open"] as const;
 
 // An earlier finding of a re-review case (cases.ts evalEarlier). lines: its range at the head of the case, or null when the change from
 // the earlier head to the head touches it. resolved: the later state of the thread of a posted finding, else null.
@@ -310,8 +314,9 @@ export type Stat = { mean: number; min: number; max: number } | null;
 export type Slice = { name: string; mustFinds: number; found: number; runs: number | null; noise: number | null; judgeFp: number | null };
 // leftOut: the bugs of all cases that recall leaves out under the volume, and their severities. grounded: the grounded metrics and the
 // slices come from the matcher. macro: the mean over the cases of the case means. confusion: the label (gold or judge) of every item by
-// its verdict, over all runs. union: unionRecall for k = 1 to the repeat count. finderQuestions: the sums over all runs. recallBugs:
-// the found must-finds of each repeat, for the spread S_R in bugs of the ship rules (review-quality-2026.md section 2).
+// its verdict, over all runs. union: unionRecall for k = 1 to the repeat count. finderQuestions, finderRisks: the sums over all runs.
+// recallBugs: the found must-finds of each repeat, for the spread S_R in bugs of the ship rules (review-quality-2026.md section 2).
+// questionItems: the question items and the case runs of each repeat (risk-check.md section 7, rule 4).
 export type Score = {
   suite: Record<Metric, Stat>;
   cases: Record<string, Record<Metric, Stat>>;
@@ -323,9 +328,13 @@ export type Score = {
   // review-quality-2026.md item 10: the shown findings with category security, summed over all runs. gold: they claim a gold item.
   // tp, fp, unlabeled: the judge label of the other ones. null: not grounded.
   security: Sec | null;
+  // risk-check.md section 7: the same counts for the shown findings with category risk.
+  risk: Sec | null;
   union: { k: number; shown: number; raised: number }[];
   finderQuestions: { asked: number; answered: number; findings: number; kept: number } | null;
+  finderRisks: RiskCounts | null;
   recallBugs: { repeat: number; found: number; mustFinds: number }[];
+  questionItems: { repeat: number; items: number; runs: number }[];
 };
 
 export type Sec = { runs: number; shown: number; gold: number; tp: number; fp: number; unlabeled: number };
@@ -349,6 +358,7 @@ type Ground = {
   above: number | null;
   confusion: Record<string, { tp: number; fp: number }> | null;
   security: Omit<Sec, "runs">;
+  risk: Omit<Sec, "runs">;
 };
 
 // null: an item has no matcher answer.
@@ -369,8 +379,17 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
   const shown = r.items.flatMap((i, n) => (i.group === "main" ? [{ i, gold: labels[n] ?? null }] : []));
   const unmatched = shown.filter((x) => x.gold === null).map((x) => ({ i: x.i, j: g.judge(c, x.i) }));
   const judged = unmatched.every((x) => x.j !== undefined);
-  // The exact category text, as the verify rules of catalog.ts SECURITY2 match it.
-  const sec = unmatched.filter((x) => x.i.category === "security");
+  // The exact category text, as the verify rules of catalog.ts SECURITY2 and judge.ts answerFinding write it.
+  const ofCategory = (category: string): Omit<Sec, "runs"> => {
+    const un = unmatched.filter((x) => x.i.category === category);
+    return {
+      shown: shown.filter((x) => x.i.category === category).length,
+      gold: shown.filter((x) => x.i.category === category && x.gold !== null).length,
+      tp: un.filter((x) => x.j?.label === "tp").length,
+      fp: un.filter((x) => x.j?.label === "fp").length,
+      unlabeled: un.filter((x) => x.j === undefined).length,
+    };
+  };
   const count = (f: (x: (typeof unmatched)[number]) => boolean) => (judged ? unmatched.filter(f).length : null);
   const truth = r.items.map((i, n) => {
     const gl = labels[n];
@@ -398,13 +417,8 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
     judgeFp: count((x) => x.j?.label === "fp"),
     above: count((x) => x.j?.label === "tp" && LEVEL[x.i.severity] > JUDGE_LEVELS.indexOf(x.j.severity)),
     confusion,
-    security: {
-      shown: shown.filter((x) => x.i.category === "security").length,
-      gold: shown.filter((x) => x.i.category === "security" && x.gold !== null).length,
-      tp: sec.filter((x) => x.j?.label === "tp").length,
-      fp: sec.filter((x) => x.j?.label === "fp").length,
-      unlabeled: sec.filter((x) => x.j === undefined).length,
-    },
+    security: ofCategory("security"),
+    risk: ofCategory("risk"),
   };
 }
 
@@ -780,8 +794,14 @@ export function score(r: EvalResult, g?: Grounding): Score {
   const add = (k: "asked" | "answered" | "findings" | "kept") => fq.reduce((s, x) => s + x[k], 0);
   const severities = unshowable(r.volume);
   const count = r.cases.reduce((n, c) => n + c.bugs.length - mustFind(c, r.volume).length, 0);
-  const security: Sec | null = grounded ? { runs: runs.length, shown: 0, gold: 0, tp: 0, fp: 0, unlabeled: 0 } : null;
-  if (security) for (const x of runs) for (const k of SEC_KEYS) security[k] += x.t.ground?.security[k] ?? 0;
+  const sum = (key: "security" | "risk"): Sec | null => {
+    if (!grounded) return null;
+    const out: Sec = { runs: runs.length, shown: 0, gold: 0, tp: 0, fp: 0, unlabeled: 0 };
+    for (const x of runs) for (const k of SEC_KEYS) out[k] += x.t.ground?.[key][k] ?? 0;
+    return out;
+  };
+  const fr = r.runs.flatMap((x) => (x.finderRisks ? [x.finderRisks] : []));
+  const known = new Set(r.cases.map((c) => c.id));
   return {
     suite,
     cases,
@@ -790,12 +810,18 @@ export function score(r: EvalResult, g?: Grounding): Score {
     macro,
     confusion,
     slices: slices(runs, grounded, hits, r.volume),
-    security,
+    security: sum("security"),
+    risk: sum("risk"),
     union,
     finderQuestions: fq.length ? { asked: add("asked"), answered: add("answered"), findings: add("findings"), kept: add("kept") } : null,
+    finderRisks: fr.length ? (Object.fromEntries(RISK_KEYS.map((k) => [k, fr.reduce((s, x) => s + x[k], 0)])) as RiskCounts) : null,
     recallBugs: repeats.map((n) => {
       const mine = runs.filter((x) => x.repeat === n);
       return { repeat: n, found: mine.reduce((s, x) => s + hits(x).shown.size, 0), mustFinds: mine.reduce((s, x) => s + x.t.bugs, 0) };
+    }),
+    questionItems: repeats.map((n) => {
+      const mine = r.runs.filter((x) => x.repeat === n && known.has(x.case));
+      return { repeat: n, items: mine.reduce((s, x) => s + x.questions, 0), runs: mine.length };
     }),
   };
 }
