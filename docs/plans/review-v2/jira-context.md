@@ -1,6 +1,6 @@
 # Jira context before a review
 
-Status: design of 2026-11-18. Not started. It needs the user decisions of section 10 first. REVIEW_PROMPT_VERSION does not change.
+Status: design of 2026-11-18. Approved by the user on 2026-11-18 (section 10). Not started. REVIEW_PROMPT_VERSION does not change.
 
 ## 1. Request and verdict
 
@@ -339,6 +339,20 @@ Unverified:
 - U-JC4. The pull_request table keeps merged and declined PRs long enough for section 3.4.
 - U-JC5. The eval harness settings have no Jira. WP-JC-E adds the check.
 - U-JC6. A field over the 10 MB body cap fails the `*all` read. The narrow read had no such risk. No fallback is planned.
+
+### User answers of 2026-11-18
+
+The user took the recommended answers ("let's do as recommended").
+
+- Question 1: yes. BRIEF says "automatically at the start of each PR run, and on a click".
+- Question 2: yes. Review, re-review, and Explain refresh a text that is 5 min old or older.
+- Question 3: the cap is 3 keys per run.
+- Question 4: yes. jiraFamily becomes true in the shipped Review and Explain profiles after Gate JC-A (WP-JC6).
+- Question 5: yes. Build-task task.md gets the new fields too.
+- Question 6: no off switch. The Jira setup is the consent, and Clear works per key.
+- Question 7: a setting for extra criteria fields comes only if Gate JC-G shows criteria outside textarea fields.
+- Question 8: not now.
+- Question 9: no read when the Brief opens.
 
 ## 11. Out of scope
 

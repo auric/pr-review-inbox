@@ -284,6 +284,134 @@ export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: bo
     );
   }
 
+  // The answer of GET issue with fields=*all,-comment,-worklog and expand=renderedFields,names,schema (jira-context.md section 3.3).
+  // The field IDs, schema values, and custom type keys are assumptions (jira-context.md U-JC1 to U-JC3). Gate J5 and J6 check them.
+  const TEXTAREA = "com.atlassian.jira.plugin.system.customfieldtypes:textarea";
+  const TEXTFIELD = "com.atlassian.jira.plugin.system.customfieldtypes:textfield";
+  const EPIC_LINK = "com.pyxis.greenhopper.jira:gh-epic-link";
+  // A custom field type of an app vendor. Its key names the vendor.
+  const VENDOR_TYPE = "com.example.checklist:checklist-field";
+  const SCHEMA: Record<string, Record<string, unknown>> = {
+    summary: { type: "string", system: "summary" },
+    description: { type: "string", system: "description" },
+    status: { type: "status", system: "status" },
+    attachment: { type: "array", items: "attachment", system: "attachment" },
+    issuetype: { type: "issuetype", system: "issuetype" },
+    labels: { type: "array", items: "string", system: "labels" },
+    components: { type: "array", items: "component", system: "components" },
+    fixVersions: { type: "array", items: "version", system: "fixVersions" },
+    issuelinks: { type: "array", items: "issuelinks", system: "issuelinks" },
+    subtasks: { type: "array", items: "issuelinks", system: "subtasks" },
+    reporter: { type: "user", system: "reporter" },
+    customfield_10100: { type: "string", custom: TEXTAREA, customId: 10100 },
+    customfield_10101: { type: "string", custom: TEXTFIELD, customId: 10101 },
+    customfield_10102: { type: "string", custom: TEXTAREA, customId: 10102 },
+    customfield_10008: { type: "any", custom: EPIC_LINK, customId: 10008 },
+    customfield_10103: { type: "option", custom: "com.atlassian.jira.plugin.system.customfieldtypes:select", customId: 10103 },
+    customfield_10200: { type: "array", items: "string", custom: VENDOR_TYPE, customId: 10200 },
+  };
+  const NAMES: Record<string, string> = {
+    summary: "Summary",
+    description: "Description",
+    status: "Status",
+    attachment: "Attachment",
+    issuetype: "Issue Type",
+    labels: "Labels",
+    components: "Component/s",
+    fixVersions: "Fix Version/s",
+    issuelinks: "Linked Issues",
+    subtasks: "Sub-Tasks",
+    reporter: "Reporter",
+    customfield_10100: "Acceptance Criteria",
+    customfield_10101: "Review Owner Note",
+    customfield_10102: "Test Plan",
+    customfield_10008: "Epic Link",
+    customfield_10103: "Risk Class",
+    customfield_10200: "Done Checklist",
+  };
+  const typeOf = (id: string, name: string) => ({ self: self(`issuetype/${id}`), id, name, subtask: false, avatarId: 10318 });
+  // Serves the issue with the fields that the query asks for: a list, or *all with -field exclusions. Fields that the issue lacks stay out.
+  function serveByQuery(issueKey: string) {
+    fake.routes[key("GET", `/rest/api/2/issue/${issueKey}`)] = (req) => {
+      const issue = issues.get(issueKey) as unknown as Record<string, unknown> & { fields: Record<string, unknown> };
+      const q = new URL(req.url).searchParams;
+      const asked = (q.get("fields") ?? "*all").split(",");
+      const expand = (q.get("expand") ?? "").split(",");
+      const ids = Object.keys(issue.fields).filter((id) => (asked.includes("*all") || asked.includes(id)) && !asked.includes(`-${id}`));
+      const only = (m: Record<string, unknown>) => Object.fromEntries(ids.filter((id) => id in m).map((id) => [id, m[id]]));
+      const { renderedFields, ...rest } = issue;
+      return {
+        status: 200,
+        body: {
+          ...rest,
+          fields: only(issue.fields),
+          ...(expand.includes("renderedFields") ? { renderedFields: only((renderedFields ?? {}) as Record<string, unknown>) } : {}),
+          ...(expand.includes("names") ? { names: only(NAMES) } : {}),
+          ...(expand.includes("schema") ? { schema: only(SCHEMA) } : {}),
+        },
+      };
+    };
+  }
+  // Gives an issue the fields of the *all read: issue type, labels, components, fix versions, a filled acceptance criteria field, an empty
+  // textarea field, a select field, a vendor checklist field, an epic link to ABC-30, a reporter, and two more links: it blocks ABC-31
+  // (done), and ABC-32 relates to it.
+  // The issue keeps its fields and links. It answers the field list and the expand of each query.
+  function addFullIssue(issueKey: string) {
+    if (!issues.has(issueKey)) addIssue(issueKey);
+    const add = (k: string, summary: string, fields: Record<string, unknown>) => {
+      if (!issues.has(k)) addIssue(k, summary);
+      Object.assign(issues.get(k)?.fields as Record<string, unknown>, fields);
+    };
+    add("ABC-30", "Rework the cache layer", { status: statusOf("indeterminate"), issuetype: typeOf("10000", "Epic") });
+    add("ABC-31", "Remove the old flush path", { status: statusOf("done"), issuetype: typeOf("10002", "Task") });
+    add("ABC-32", "Lock wait dashboard", { status: statusOf("new"), issuetype: typeOf("10001", "Story") });
+    const f = issues.get(issueKey)?.fields as Record<string, unknown>;
+    const linkType = (name: string, inward: string, outward: string, id: string) => ({
+      id,
+      name,
+      inward,
+      outward,
+      self: self(`issueLinkType/${id}`),
+    });
+    Object.assign(f, {
+      issuetype: f.issuetype ?? typeOf("10001", "Story"),
+      labels: ["backend-cache", "q4-perf"],
+      components: [{ self: self("component/10500"), id: "10500", name: "Sync Worker", description: "The background sync worker" }],
+      fixVersions: [
+        { self: self("version/10600"), id: "10600", name: "Release 2.4", archived: false, released: false, releaseDate: "2026-12-01" },
+      ],
+      reporter: { name: "asmith", displayName: "Alex Smith", emailAddress: "asmith@example.com", active: true },
+      customfield_10100: "Given a full cache, the flush finishes before the write lock.",
+      customfield_10101: null,
+      customfield_10102: "",
+      customfield_10008: "ABC-30",
+      customfield_10103: { self: self("customFieldOption/10700"), value: "Elevated risk", id: "10700", disabled: false },
+      customfield_10200: ["Write the flush test"],
+      issuelinks: [
+        ...((f.issuelinks as unknown[]) ?? []),
+        {
+          id: "10301",
+          self: self("issueLink/10301"),
+          type: linkType("Blocks", "is blocked by", "blocks", "10000"),
+          outwardIssue: ref("ABC-31"),
+        },
+        {
+          id: "10302",
+          self: self("issueLink/10302"),
+          type: linkType("Relates", "relates to", "relates to", "10003"),
+          inwardIssue: ref("ABC-32"),
+        },
+      ],
+    });
+    const issue = issues.get(issueKey) as unknown as { renderedFields?: Record<string, unknown> };
+    issue.renderedFields = {
+      ...issue.renderedFields,
+      customfield_10100: "<p>Given a full cache, the flush finishes before the write lock.</p>",
+      customfield_10102: "",
+    };
+    serveByQuery(issueKey);
+  }
+
   // The number of requests with this method and path, any query.
   const count = (method: string, path: string) => fake.requests.filter((r) => r.split("?")[0] === `${method} ${path}`).length;
 
@@ -293,6 +421,7 @@ export function startFakeJira(opts: { port?: number; https?: boolean; cloud?: bo
     addSubtasks,
     addSubtask,
     addSubtaskSet,
+    addFullIssue,
     setStatus,
     count,
     transitions,

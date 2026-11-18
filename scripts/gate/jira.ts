@@ -4,14 +4,18 @@
 // Gate J1 to J4 (WP-ST-G, docs/plans/review-v2/spec.md section 6.20.17): the Jira facts for sub-tasks.
 // J1: the subtasks field with status.statusCategory, and the parent field of a sub-task. J2: the issuelinks shape.
 // J3: the transitions list, the file links in comments, and the image src in the rendered HTML (U79).
-// J1 to J3 send GET requests only. J4 sends one transition POST, only with --authorize-transition.
+// Gate J5 to J7 (Gate JC-G, docs/plans/review-v2/jira-context.md section 5): the read of all fields with names and schema.
+// J5: the *all read. J6: the issuelinks of that read on an issue with links. J7: the time of the reads of one run-start fetch.
+// J1 to J3 and J5 to J7 send GET requests only. J4 sends one transition POST, only with --authorize-transition.
 // Usage: bun run gate:jira -- --url <Jira base URL> --issue <PARENT KEY> [--email <email>] [--only J1,J2,J3]
+//        bun run gate:jira -- --url <Jira base URL> --only J5,J6,J7 --issue <KEY> --links-issue <KEY> [--email <email>]
 //        bun run gate:jira -- --url <Jira base URL> --only J4 --transition-issue <KEY> --transition <id> --authorize-transition [--email <email>]
 //        bun run gate:jira -- --dry-run
 // --email: Jira Cloud (Basic auth of the email and an API token, REST v2). Absent: Server or Data Center (Bearer PAT).
 // --dry-run: all checks, J4 included, against the fake Jira in Server mode and in Cloud mode. It reads no secret.
 // Token: GATE_JIRA_TOKEN, else the stored app token ("jira-token"), only for the origin of the stored Jira URL.
-// Console output and .gate0/jira/*.json hold only status codes, booleans, counts, key names, enum-like values, and URL shapes.
+// Console output and .gate0/jira/*.json hold only status codes, booleans, counts, bytes, ms, key names, enum-like values, and URL shapes.
+// J5 also prints custom field type keys in the Atlassian namespaces (JIRA_TYPE). Other type keys name an app vendor and stay masked.
 // A self-check exits 3 before any output when the text holds a sensitive value.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -29,10 +33,11 @@ const SUBTASK_READS = 5;
 const COMMENT_LIMIT = 100;
 const TRANSITION_ID = /^\d{1,10}$/;
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
-const CHECKS = ["J1", "J2", "J3", "J4"] as const;
+const CHECKS = ["J1", "J2", "J3", "J4", "J5", "J6", "J7"] as const;
 type CheckId = (typeof CHECKS)[number];
 const USAGE = [
   "usage: bun run gate:jira -- --url <Jira base URL> --issue <PARENT KEY> [--email <email>] [--only J1,J2,J3]",
+  "       bun run gate:jira -- --url <Jira base URL> --only J5,J6,J7 --issue <KEY> --links-issue <KEY> [--email <email>]",
   "       bun run gate:jira -- --url <Jira base URL> --only J4 --transition-issue <KEY> --transition <id> --authorize-transition [--email <email>]",
   "       bun run gate:jira -- --dry-run",
 ].join("\n");
@@ -51,6 +56,8 @@ export type Ctx = {
   // Present: Jira Cloud.
   email?: string;
   issue?: string;
+  // J6: an issue with links.
+  linksIssue?: string;
   transitionIssue?: string;
   transition?: string;
   authorize: boolean;
@@ -148,8 +155,37 @@ function collect(v: unknown, out: Set<string>, parent = "") {
   else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) collect(x, out, k);
 }
 
+export const FULL_QUERY = "fields=*all,-comment,-worklog&expand=renderedFields,names,schema";
+// Atlassian custom field type keys (U-JC2: Gate J5 confirms them).
+const TEXTAREA = "com.atlassian.jira.plugin.system.customfieldtypes:textarea";
+const TEXTFIELD = "com.atlassian.jira.plugin.system.customfieldtypes:textfield";
+const EPIC_LINK = "com.pyxis.greenhopper.jira:gh-epic-link";
+// The namespaces of the Jira and Jira Software type keys. A type key outside them names an app vendor, so it stays a needle.
+const JIRA_TYPE = /^(com\.atlassian\.|com\.pyxis\.greenhopper\.jira:)/;
+const isObj = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
+
+// The schema of a field: Jira defines its type, items, and system values.
+const SCHEMA_KEYS = new Set(["type", "items", "system", "custom"]);
+function bodyStrings(body: unknown, out: Set<string>) {
+  const b = obj(body);
+  if (!isObj(b.schema)) return collect(body, out);
+  collect(Object.fromEntries(Object.entries(b).filter(([k]) => k !== "schema")), out);
+  for (const s of Object.values(obj(b.schema)).map(obj)) {
+    collect(Object.fromEntries(Object.entries(s).filter(([k]) => !SCHEMA_KEYS.has(k))), out);
+    if (typeof s.custom === "string" && !JIRA_TYPE.test(s.custom)) collect(s.custom, out);
+  }
+}
+function keyNames(v: unknown, out: Set<string>) {
+  if (Array.isArray(v)) for (const x of v) keyNames(x, out);
+  else if (v && typeof v === "object")
+    for (const [k, x] of Object.entries(v)) {
+      out.add(k.toLowerCase());
+      keyNames(x, out);
+    }
+}
+
 // ---------- HTTP ----------
-type Call = { status: number; body: unknown };
+type Call = { status: number; body: unknown; bytes: number; ms: number };
 type State = { bodies: unknown[]; posts: number };
 
 function client(c: Ctx, st: State) {
@@ -158,8 +194,10 @@ function client(c: Ctx, st: State) {
   const authorization = c.email ? `Basic ${Buffer.from(`${c.email}:${c.token}`).toString("base64")}` : `Bearer ${c.token}`;
   return async function call(method: "GET" | "POST", path: string, body?: unknown): Promise<Call> {
     const target = new URL(c.base + path);
-    if (target.origin !== origin) return { status: 0, body: { network: "OtherOrigin" } };
+    if (target.origin !== origin) return { status: 0, body: { network: "OtherOrigin" }, bytes: 0, ms: 0 };
     if (method === "POST") st.posts++;
+    const start = performance.now();
+    const ms = () => Math.round(performance.now() - start);
     try {
       const res = await fetch(target, {
         method,
@@ -172,22 +210,32 @@ function client(c: Ctx, st: State) {
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      const text = await res.text();
+      const raw = new Uint8Array(await res.arrayBuffer());
+      const text = new TextDecoder().decode(raw);
       let json: unknown = null;
       if (text.length <= MAX_BODY_BYTES)
         try {
           json = text ? JSON.parse(text) : null;
         } catch {}
       st.bodies.push(json);
-      return { status: res.status, body: json };
+      return { status: res.status, body: json, bytes: raw.byteLength, ms: ms() };
     } catch (e) {
-      return { status: 0, body: { network: (e as Error).name } };
+      return { status: 0, body: { network: (e as Error).name }, bytes: 0, ms: ms() };
     }
   };
 }
 
 // ---------- checks ----------
-type Run = { c: Ctx; st: State; call: ReturnType<typeof client>; parent: () => Promise<Call>; subtasks: () => Promise<Call[]> };
+type Run = {
+  c: Ctx;
+  st: State;
+  call: ReturnType<typeof client>;
+  parent: () => Promise<Call>;
+  subtasks: () => Promise<Call[]>;
+  // The *all reads of --issue and --links-issue.
+  full: () => Promise<Call>;
+  linked: () => Promise<Call>;
+};
 const issuePath = (k: string) => `/rest/api/2/issue/${encodeURIComponent(k)}`;
 const http = (r: Call) => `HTTP ${r.status}`;
 
@@ -302,7 +350,105 @@ async function j4(r: Run): Promise<Result> {
   };
 }
 
-const RUNNERS: Record<CheckId, (r: Run) => Promise<Result>> = { J1: j1, J2: j2, J3: j3, J4: j4 };
+// ---------- J5 to J7: the read of all fields (jira-context.md sections 3.3 and 5) ----------
+const filled = (v: unknown) =>
+  v !== null &&
+  v !== undefined &&
+  !(typeof v === "string" && !v.trim()) &&
+  !(Array.isArray(v) && !v.length) &&
+  !(isObj(v) && !keysOf(v).length);
+const sized = (r: Call) => `${http(r)} bytes=${r.bytes} ms=${r.ms}`;
+
+function valueShape(v: unknown) {
+  if (v === null || v === undefined) return v === null ? "null" : "absent";
+  if (typeof v === "string") return JIRA_KEY.test(v) ? "key string" : "other string";
+  if (Array.isArray(v)) return `array count=${v.length}`;
+  return isObj(v) ? `object keys=${keysOf(v).join(",") || "none"}` : typeof v;
+}
+
+async function j5(r: Run): Promise<Result> {
+  const p = await r.full();
+  if (p.status !== 200) return { check: "J5", status: "FAIL", evidence: `read: ${sized(p)}` };
+  const b = obj(p.body);
+  const f = obj(b.fields);
+  const names = obj(b.names);
+  const schema = obj(b.schema);
+  const rendered = obj(b.renderedFields);
+  const custom = Object.keys(f).filter((id) => id.startsWith("customfield_"));
+  const type = (id: string) => obj(schema[id]).custom;
+  const withValue = custom.filter((id) => filled(f[id]));
+  const ofType = (t: string) => withValue.filter((id) => type(id) === t);
+  const textareas = ofType(TEXTAREA);
+  const other = withValue.filter((id) => ![TEXTAREA, TEXTFIELD, EPIC_LINK].includes(String(type(id))));
+  const jiraTypes = other.map((id) => type(id)).filter((t): t is string => typeof t === "string" && JIRA_TYPE.test(t));
+  const epic = custom.filter((id) => type(id) === EPIC_LINK);
+  const list = (k: string) => arr(f[k]);
+  const evidence = [
+    `read: ${sized(p)} top keys=${keysOf(b).join(",") || "none"}`,
+    `names is an object=${isObj(b.names)} count=${keysOf(names).length} schema is an object=${isObj(b.schema)} count=${keysOf(schema).length} renderedFields is an object=${isObj(b.renderedFields)} count=${keysOf(rendered).length}`,
+    `fields count=${keysOf(f).length} custom=${custom.length} custom with a value=${withValue.length} with a schema custom type=${custom.filter((id) => typeof type(id) === "string").length} of ${custom.length}`,
+    `textarea with a value=${textareas.length} with a name=${textareas.filter((id) => typeof names[id] === "string").length} with a rendered string=${textareas.filter((id) => typeof rendered[id] === "string").length} textfield with a value=${ofType(TEXTFIELD).length}`,
+    `other custom with a value=${other.length} Jira types=${distinct(jiraTypes)} app vendor types=${other.length - jiraTypes.length}`,
+    `epicLink fields=${epic.length} value shapes=${distinct(epic.map((id) => valueShape(f[id])))} parent=${valueShape(f.parent)}`,
+    `issuetype keys=${keysOf(f.issuetype).join(",") || "none"}; labels ${valueShape(f.labels)} strings=${list("labels").filter((x) => typeof x === "string").length}; components ${valueShape(f.components)} entry keys=${keyUnion(list("components"))}; fixVersions ${valueShape(f.fixVersions)} entry keys=${keyUnion(list("fixVersions"))}`,
+  ].join("; ");
+  if (!isObj(b.names) || !isObj(b.schema)) return { check: "J5", status: "FAIL", evidence: `${evidence}. names or schema is absent.` };
+  if (!textareas.length)
+    return {
+      check: "J5",
+      status: "INFO",
+      evidence: `${evidence}. No textarea field has a value. Name an issue with filled acceptance criteria.`,
+    };
+  return { check: "J5", status: "PASS", evidence };
+}
+
+function sideFacts(items: Obj[], side: "inwardIssue" | "outwardIssue") {
+  const xs = items.filter((l) => l[side]).map((l) => obj(l[side]));
+  const complete = xs.filter((x) => {
+    const xf = obj(x.fields);
+    return typeof x.key === "string" && typeof xf.summary === "string" && typeof category(xf.status) === "string" && isObj(xf.issuetype);
+  });
+  return {
+    ok: complete.length === xs.length,
+    line: `${side} count=${xs.length} keys=${keyUnion(xs)} fields keys=${keyUnion(xs.map((x) => x.fields))} status keys=${keyUnion(xs.map((x) => obj(x.fields).status))} issuetype keys=${keyUnion(xs.map((x) => obj(x.fields).issuetype))} with summary and statusCategory.key and issuetype=${complete.length} of ${xs.length}`,
+  };
+}
+
+async function j6(r: Run): Promise<Result> {
+  if (!r.c.linksIssue)
+    return { check: "J6", status: "SKIPPED", evidence: "No --links-issue. Nothing was sent. J6 reads an issue with links." };
+  const p = await r.linked();
+  if (p.status !== 200) return { check: "J6", status: "FAIL", evidence: `read: ${sized(p)}` };
+  const f = obj(obj(p.body).fields);
+  const items = arr(f.issuelinks).map(obj);
+  const all = linkFacts(items, new Set());
+  const inward = sideFacts(items, "inwardIssue");
+  const outward = sideFacts(items, "outwardIssue");
+  const evidence = `read: ${sized(p)} issuelinks is an array=${Array.isArray(f.issuelinks)} ${all.line}; ${inward.line}; ${outward.line}`;
+  if (!Array.isArray(f.issuelinks) || !all.ok || !inward.ok || !outward.ok) return { check: "J6", status: "FAIL", evidence };
+  if (!items.length) return { check: "J6", status: "INFO", evidence: `${evidence}. The issue has no links. Name an issue with links.` };
+  return { check: "J6", status: "PASS", evidence };
+}
+
+async function j7(r: Run): Promise<Result> {
+  const issue = r.c.issue as string;
+  const p = await r.full();
+  const f = obj(obj(p.body).fields);
+  const schema = obj(obj(p.body).schema);
+  const epic = Object.keys(f).find((id) => obj(schema[id]).custom === EPIC_LINK && JIRA_KEY.test(String(f[id])));
+  const parentKey = obj(f.parent).key;
+  const [source, target] =
+    typeof parentKey === "string" && JIRA_KEY.test(parentKey) ? ["parent", parentKey] : epic ? ["epicLink", String(f[epic])] : ["none", ""];
+  // The comment page and the parent read of src/server/context/jira.ts.
+  const cm = await r.call("GET", `${issuePath(issue)}/comment?startAt=0&maxResults=${COMMENT_LIMIT}&expand=renderedBody`);
+  const par = target ? await r.call("GET", `${issuePath(target)}?fields=summary,description,status&expand=renderedFields`) : null;
+  const evidence = `full read: ${sized(p)}; comment page: ${sized(cm)}; parent read from ${source}: ${par ? sized(par) : "not sent"}; total ms=${p.ms + cm.ms + (par?.ms ?? 0)}`;
+  if (p.status !== 200 || cm.status !== 200 || (par && par.status !== 200)) return { check: "J7", status: "FAIL", evidence };
+  if (!par) return { check: "J7", status: "INFO", evidence: `${evidence}. The issue has no parent and no epic link.` };
+  return { check: "J7", status: "PASS", evidence };
+}
+
+const RUNNERS: Record<CheckId, (r: Run) => Promise<Result>> = { J1: j1, J2: j2, J3: j3, J4: j4, J5: j5, J6: j6, J7: j7 };
 
 function needlesOf(c: Ctx, st: State): Needle[] {
   const out: Needle[] = [];
@@ -318,13 +464,19 @@ function needlesOf(c: Ctx, st: State): Needle[] {
   add("token", c.token);
   add("email", c.email);
   if (c.email) add("Basic auth", Buffer.from(`${c.email}:${c.token}`).toString("base64"));
-  for (const k of [c.issue, c.transitionIssue]) {
+  for (const k of [c.issue, c.linksIssue, c.transitionIssue]) {
     add("issue key", k);
     add("project key", k?.split("-")[0]);
   }
   const strings = new Set<string>();
-  for (const b of st.bodies) collect(b, strings);
+  const keys = new Set<string>();
+  for (const b of st.bodies) {
+    bodyStrings(b, strings);
+    keyNames(b, keys);
+  }
   for (const s of strings) {
+    // The output prints key names. A value equal to a key name, such as the field name "Summary", would mask that key name.
+    if (keys.has(s.toLowerCase())) continue;
     add("Jira value", s);
     // A Jira key also names its project.
     if (JIRA_KEY.test(s)) add("project key", s.split("-")[0]);
@@ -356,7 +508,9 @@ export async function runChecks(c: Ctx): Promise<{ results: Result[]; needles: N
     for (const k of keys) out.push(await call("GET", `${issuePath(k)}?fields=summary,status,parent,issuelinks`));
     return out;
   });
-  const run: Run = { c, st, call, parent, subtasks };
+  const full = memo(() => call("GET", `${issuePath(c.issue ?? "")}?${FULL_QUERY}`));
+  const linked = memo(() => call("GET", `${issuePath(c.linksIssue ?? "")}?${FULL_QUERY}`));
+  const run: Run = { c, st, call, parent, subtasks, full, linked };
   const results: Result[] = [];
   for (const id of c.only) {
     try {
@@ -373,6 +527,7 @@ export async function runChecks(c: Ctx): Promise<{ results: Result[]; needles: N
 
 // ---------- dry run ----------
 // The fake Jira: parent ABC-17 with sub-tasks ABC-18 (done), ABC-19 (in progress), and ABC-20 (to do). ABC-20 is blocked by ABC-19.
+// ABC-17 also has the fields of the *all read, the epic ABC-30, and two more links. J5 to J7 read it.
 export async function dryRun(opts: { cloud: boolean; authorize: boolean }) {
   const { JIRA_EMAIL, JIRA_TOKEN, startFakeJira } = await import("../../tests/support/fake-jira");
   const jira = startFakeJira({ cloud: opts.cloud });
@@ -385,11 +540,13 @@ export async function dryRun(opts: { cloud: boolean; authorize: boolean }) {
     ],
     [["ABC-20", "ABC-19"]],
   );
+  jira.addFullIssue("ABC-17");
   const ctx: Ctx = {
     base: jira.url,
     token: JIRA_TOKEN,
     email: opts.cloud ? JIRA_EMAIL : undefined,
     issue: "ABC-17",
+    linksIssue: "ABC-17",
     transitionIssue: "ABC-20",
     transition: "21",
     authorize: opts.authorize,
@@ -402,7 +559,7 @@ export async function dryRun(opts: { cloud: boolean; authorize: boolean }) {
 // ---------- main ----------
 function parseArgs(argv: string[]) {
   const FLAGS = new Set(["--dry-run", "--authorize-transition"]);
-  const VALUES = new Set(["--url", "--issue", "--email", "--only", "--transition-issue", "--transition"]);
+  const VALUES = new Set(["--url", "--issue", "--links-issue", "--email", "--only", "--transition-issue", "--transition"]);
   const flags = new Set<string>();
   const opt: Record<string, string> = {};
   const only = new Set<CheckId>();
@@ -452,9 +609,14 @@ function storedJiraUrl(): string | null {
 async function liveCtx(flags: Set<string>, opt: Record<string, string>, only: CheckId[]): Promise<Ctx> {
   if (!opt["--url"]) usage("--url is required: the Jira base URL.");
   const base = jiraBase(opt["--url"]);
-  const reads = only.some((c) => c !== "J4");
+  const reads = only.some((c) => c !== "J4" && c !== "J6");
   const issue = opt["--issue"];
-  if (reads && !JIRA_KEY.test(issue ?? "")) usage("J1 to J3 need --issue <KEY-123>: a parent issue with sub-tasks.");
+  if (reads && !JIRA_KEY.test(issue ?? ""))
+    usage(
+      "J1 to J3, J5, and J7 need --issue <KEY-123>: for J1 to J3 a parent issue with sub-tasks, for J5 and J7 an issue with acceptance criteria and a parent or epic.",
+    );
+  const linksIssue = opt["--links-issue"];
+  if (linksIssue !== undefined && !JIRA_KEY.test(linksIssue)) usage("--links-issue needs <KEY-123>: an issue with links.");
   const authorize = flags.has("--authorize-transition");
   if (authorize && !only.includes("J4")) usage("--authorize-transition needs J4 in --only.");
   if (only.includes("J4") && authorize) {
@@ -471,7 +633,17 @@ async function liveCtx(flags: Set<string>, opt: Record<string, string>, only: Ch
     if (!stored || new URL(stored).origin !== new URL(base).origin)
       usage("Refused: the stored Jira token belongs to another server, or no Jira URL is stored. Set GATE_JIRA_TOKEN for this server.");
   }
-  return { base, token, email, issue, transitionIssue: opt["--transition-issue"], transition: opt["--transition"], authorize, only };
+  return {
+    base,
+    token,
+    email,
+    issue,
+    linksIssue,
+    transitionIssue: opt["--transition-issue"],
+    transition: opt["--transition"],
+    authorize,
+    only,
+  };
 }
 
 // serverInfo allows anonymous access. A deployment that does not match the auth stops the run, as the app check does.
@@ -528,7 +700,7 @@ async function main() {
   console.log(`Recorded in .gate0/jira/${file}.`);
   const failed = results.some((r) => r.status === "FAIL");
   if (dry) console.log(failed ? "dry run: FAIL" : "dry run: PASS");
-  else console.log("Copy the lines above into the J1 to J4 rows of integration-check.md.");
+  else console.log("Copy the lines above into the J1 to J7 rows of integration-check.md.");
   process.exitCode = failed ? 1 : 0;
 }
 

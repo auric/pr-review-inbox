@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forms } from "../../scripts/gate/ci";
-import { dryRun, runChecks, urlShape } from "../../scripts/gate/jira";
+import { dryRun, FULL_QUERY, runChecks, urlShape } from "../../scripts/gate/jira";
 import { JIRA_EMAIL, JIRA_TOKEN } from "../support/fake-jira";
 
 const ROOT = join(import.meta.dir, "../..");
@@ -32,6 +32,30 @@ const NAMES = [
   "To Do",
   "Sub-task",
   "127.0.0.1",
+  // The *all read of ABC-17 (addFullIssue): field names, field values, the epic, the linked issues, and the vendor type key.
+  "ABC-30",
+  "ABC-31",
+  "ABC-32",
+  "Rework the cache layer",
+  "Remove the old flush path",
+  "Lock wait dashboard",
+  "Acceptance Criteria",
+  "Given a full cache, the flush finishes before the write lock.",
+  "Review Owner Note",
+  "Test Plan",
+  "Risk Class",
+  "Elevated risk",
+  "Done Checklist",
+  "Write the flush test",
+  "com.example.checklist:checklist-field",
+  "backend-cache",
+  "q4-perf",
+  "Sync Worker",
+  "The background sync worker",
+  "Release 2.4",
+  "asmith@example.com",
+  "Epic",
+  "Story",
   JIRA_EMAIL,
   JIRA_TOKEN,
 ];
@@ -58,11 +82,12 @@ function expectNoNames(text: string) {
 }
 
 describe("gate:jira dry run", () => {
-  test("J1 to J4 pass in Server and Cloud mode, and no fake name shows", () => {
+  test("J1 to J7 pass in Server and Cloud mode, and no fake name shows", () => {
     const r = run(SCRIPT, ["--dry-run"]);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
-    for (const mode of ["server", "cloud"]) for (const id of ["J1", "J2", "J3", "J4"]) expect(r.out).toContain(`PASS    ${id} [${mode}] `);
+    for (const mode of ["server", "cloud"])
+      for (const id of ["J1", "J2", "J3", "J4", "J5", "J6", "J7"]) expect(r.out).toContain(`PASS    ${id} [${mode}] `);
     const line = (id: string, mode: string) => r.out.split("\n").find((l) => l.includes(` ${id} [${mode}] `)) ?? "";
     expect(r.out).toContain("[server] serverInfo HTTP 200 deploymentType=Server auth=Bearer");
     expect(r.out).toContain("[cloud] serverInfo HTTP 200 deploymentType=Cloud auth=Basic");
@@ -78,6 +103,9 @@ describe("gate:jira dry run", () => {
       "category before=new after=indeterminate transition target=indeterminate reached the target=true",
     );
     expect(r.out).toContain("dry run: PASS");
+    // Field names such as "Summary" and "Labels" must not mask the key names.
+    expect(r.out).not.toContain("<masked>");
+    expect(r.out).toContain("Recorded in .gate0/jira/result.dry-run.json.");
     expectNoNames(r.out);
     expectNoNames(readFileSync(join(ROOT, ".gate0/jira/result.dry-run.json"), "utf8"));
   });
@@ -86,7 +114,7 @@ describe("gate:jira dry run", () => {
     const d = await dryRun({ cloud, authorize: false });
     try {
       const { results, posts } = await runChecks(d.ctx);
-      expect(results.map((r) => r.status)).toEqual(["PASS", "PASS", "PASS", "SKIPPED"]);
+      expect(results.map((r) => r.status)).toEqual(["PASS", "PASS", "PASS", "SKIPPED", "PASS", "PASS", "PASS"]);
       expect(posts).toBe(0);
       expect(d.jira.requests.filter((q) => q.startsWith("POST "))).toEqual([]);
       expect(d.jira.transitions.size).toBe(0);
@@ -116,6 +144,63 @@ describe("gate:jira dry run", () => {
   });
 });
 
+describe("gate:jira J5 to J7", () => {
+  const ids = ["J5", "J6", "J7"] as const;
+  test.each([false, true])(
+    "the *all read gives names, schema, criteria, links, and times, and no field value (cloud=%p)",
+    async (cloud) => {
+      const d = await dryRun({ cloud, authorize: false });
+      d.ctx.only = [...ids];
+      try {
+        const { results, posts } = await runChecks(d.ctx);
+        expect(results.map((r) => [r.check, r.status])).toEqual(ids.map((id) => [id, "PASS"]));
+        expect(posts).toBe(0);
+        const [j5, j6, j7] = results.map((r) => r.evidence);
+        expect(d.jira.requests).toContain(`GET /rest/api/2/issue/ABC-17?${FULL_QUERY}`);
+        expect(j5).toContain("names is an object=true count=17 schema is an object=true count=17");
+        expect(j5).toContain("textarea with a value=1 with a name=1 with a rendered string=1 textfield with a value=0");
+        expect(j5).toContain(
+          "other custom with a value=2 Jira types=com.atlassian.jira.plugin.system.customfieldtypes:select app vendor types=1",
+        );
+        expect(j5).toContain("epicLink fields=1 value shapes=key string parent=absent");
+        expect(j5).toContain("labels array count=2 strings=2; components array count=1 entry keys=description,id,name,self");
+        expect(j5).toContain("fixVersions array count=1 entry keys=archived,id,name,releaseDate,released,self");
+        expect(j6).toContain("type names=Blocks,Relates");
+        expect(j6).toContain("inwardIssue count=2 keys=fields,id,key,self fields keys=issuetype,status,summary");
+        expect(j6).toContain("outwardIssue count=1 keys=fields,id,key,self fields keys=issuetype,status,summary");
+        expect(j6).toContain("with summary and statusCategory.key and issuetype=1 of 1");
+        expect(j7).toMatch(
+          /^\[(server|cloud)\] full read: HTTP 200 bytes=\d+ ms=\d+; comment page: HTTP 200 bytes=\d+ ms=\d+; parent read from epicLink: HTTP 200 bytes=\d+ ms=\d+; total ms=\d+$/,
+        );
+        expect(d.jira.count("GET", "/rest/api/2/issue/ABC-30")).toBe(1);
+        const text = results.map((r) => r.evidence).join("\n");
+        expect(text).not.toContain("<masked>");
+        expectNoNames(text);
+      } finally {
+        d.stop();
+      }
+    },
+  );
+
+  test("J5 fails without names and schema, J6 without --links-issue sends nothing, and J7 without a parent gives INFO", async () => {
+    const d = await dryRun({ cloud: false, authorize: false });
+    d.ctx.only = [...ids];
+    d.ctx.issue = "ABC-42";
+    d.ctx.linksIssue = undefined;
+    try {
+      const { results } = await runChecks(d.ctx);
+      expect(results.map((r) => r.status)).toEqual(["FAIL", "SKIPPED", "INFO"]);
+      expect(results[0]?.evidence).toContain("names is an object=false");
+      expect(results[0]?.evidence).toContain("names or schema is absent.");
+      expect(results[1]?.evidence).toContain("No --links-issue. Nothing was sent.");
+      expect(results[2]?.evidence).toContain("parent read from none: not sent");
+      expect(d.jira.requests.filter((q) => q.includes("ABC-17"))).toEqual([]);
+    } finally {
+      d.stop();
+    }
+  });
+});
+
 describe("gate:jira URL shapes", () => {
   test("hosts, names, and IDs are masked, and the context path is marked", () => {
     expect(urlShape("/jira/secure/attachment/10101/a.log", "https://example.invalid/jira")).toBe("<ctx>/secure/attachment/<n>/<s>");
@@ -131,7 +216,7 @@ describe("gate:jira arguments", () => {
   const URL = "https://example.atlassian.net";
   test.each([
     [[], "--url is required"],
-    [["--url", URL], "J1 to J3 need --issue"],
+    [["--url", URL], "J1 to J3, J5, and J7 need --issue"],
     [["--url", "http://example.atlassian.net", "--issue", "PROJ-1"], "--url needs https"],
     [["--url", URL, "--issue", "PROJ-1", "--only", "J1", "--authorize-transition"], "--authorize-transition needs J4"],
     [["--url", URL, "--only", "J4", "--authorize-transition", "--transition", "21"], "J4 needs --transition-issue"],
@@ -140,7 +225,9 @@ describe("gate:jira arguments", () => {
       "J4 needs --transition <id>",
     ],
     [["--url", URL, "--issue", "PROJ-1", "--email", "not-an-email"], "--email is not an email address"],
-    [["--dry-run", "--only", "J5"], "unknown check: J5"],
+    [["--url", URL, "--only", "J5"], "J1 to J3, J5, and J7 need --issue"],
+    [["--url", URL, "--only", "J6", "--links-issue", "not a key"], "--links-issue needs <KEY-123>"],
+    [["--dry-run", "--only", "J8"], "unknown check: J8"],
     [["--dry-run", "--bogus"], "unknown argument: --bogus"],
   ])("refuses %j before any request", (args, message) => {
     const r = run(SCRIPT, args);

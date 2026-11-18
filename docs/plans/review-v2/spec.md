@@ -791,6 +791,30 @@ The existing line "Answer only the question in the user message." stays for ever
 
 Eval: no eval case. The harness scores findings and reply judgements, and an answer has no deterministic score. The user checks follow-ups in docs/smoke-v2.md part E: ask about a function, follow up with "and its callers?", and check that the answer names the function of the first answer. A later eval mode can score a follow-up by the paths that the answer links.
 
+### 2.19 Jira task text at run start (docs/plans/review-v2/jira-context.md, user decisions of 2026-11-18)
+
+- The design holds the behavior, the state machine, the task.md layout, the gates, and the work packages WP-JC-D to WP-JC6.
+- The app fetches the task text at the start of each PR run, and on a Fetch click. A run fetches at most 3 keys. Review, re-review, and Explain refresh a text that is 5 min old or older. One deadline of 15 s covers all Jira reads of a run. A failed read never fails a run.
+
+1. AC-JC1. A review of a PR with key K and no text reads K before task.md is built. task.md holds the text of K.
+2. AC-JC2. Review, re-review, and Explain read again a text that is 5 min old or older. A younger text gets no request.
+3. AC-JC3. Ask, reply, Fix, and discuss send no Jira request for a key with text.
+4. AC-JC4. A run reads at most 3 keys in pr_task order. Skipped keys, sticky failures, and task-owned keys do not count.
+5. AC-JC5. A run waits at most 15 s for Jira. Cancel ends the wait at once. A late result is stored for the next run.
+6. AC-JC6. A failed read never fails a run. Coverage gets the lines of jira-context.md section 4.6.
+7. AC-JC7. Without Jira settings, a run sends no request and adds no line.
+8. AC-JC8. Clear makes the key skipped. No automatic read changes it. Fetch ends the skip.
+9. AC-JC9. Sticky failures get no automatic retry until Fetch or a Jira settings save. Other failures retry after 5 min.
+10. AC-JC10. Two runs and a Fetch of the same key at the same time send one issue read.
+11. AC-JC11. The run line shows the fetch time of the text that the run used.
+12. AC-JC12. An automatic read never writes a row that a Build task reads.
+13. AC-JC13. The read stores the fields of jira-context.md section 3.3 within the caps. `links` keeps only sibling sub-task links.
+14. AC-JC14. A row without the new fields gives the same task.md bytes as before.
+15. AC-JC15. task.md lists other stored PRs that name a fetched key or its parent key, at most 20, without URLs.
+16. AC-JC16. No agent prompt text changes. REVIEW_PROMPT_VERSION stays. The hash test stays green.
+17. AC-JC17. The chips show the states of jira-context.md section 4.8. No new panel or setting.
+18. AC-JC18. No token, email, or people field reaches task.md, a log, a row, or a DTO.
+
 ## 3. Part 3: Explain this PR
 
 ### 3.1 What the user sees
@@ -3473,6 +3497,7 @@ The review start route keeps its input. Modules and volume come from the profile
 | 3.5, 3.6, 7 Plan (part 2, PR context and notes) | 3.5: runs get context/pr-context.md (untrusted) and context/notes.md (the user's kept notes), rebuilt per run with no LLM call. 3.6 outbound reads: the open-PR list, the change list of an open PR, and build stats of the PR head. 7 Plan: the pr_note table, the notes routes, the cites and notes keys of the reply and discuss results. Ask follow-ups: the last 3 turns of a conversation go into the Ask stdin as data; review_run.parent_run. |
 | 2, 3.6, 7 Plan, Hard rules (part 6, sub-tasks, 2026-10-29) | 2: a task with sub-tasks builds one branch and one PR per sub-task; non-goal "No Jira change without a click". 3.6: Jira reads during the sync, one Jira POST of a transition after a confirm, the found-work GET reads. 7: task.subtasks, task_subtask, the new task_part and task_file columns, schedule.ts and gates.ts, the part gate after a squash merge. Hard rules: "Nothing goes to Bitbucket or Jira without an explicit user action"; "Continue on <branch>" for a found branch with the part key. |
 | 3.6, 7 Plan (part 6, plan quality, 2026-11-03) | 3.6: every spec run reads the branch search for the task key and its parent key, one page of open PRs, and one page of merged PRs (GET only). 7: the plan check is a read-only task run of kind spec. The plan format adds "Contracts and risks" and "Rollout". Settings > Tasks gets "Check each plan". |
+| 2, 3.3, 3.6, 4 Architecture, 7 Plan (Jira task text at run start, 2026-11-18) | 2 and 3.3: the app fetches the task text at the start of each PR run, and on a click, with the 3-key cap, the 5 min refresh, the 15 s deadline, and Clear as a skip. 3.6: the run-start Jira reads. 4: the context/ line. 7: the run task times and the task_fetch table. WP-JC-D wrote them. |
 | 5 Constitution, 3.6, Hard rules (part 7, on hold: do not change BRIEF.md until part 7 resumes) | Principle 1 and the hard rule "Nothing goes to Bitbucket without an explicit user action" add ", unless the user turned on Autopilot for that PR" (Q25, decided 2026-10-22), with the safeguards list of design.md section 10.1. Principle 4 allows reply runs from a sync on PRs in draft or post mode. 3.6 outbound adds comment delete of own Autopilot replies, the open-PR list, and the blocking-PR read. 7 Plan adds run kind autopilot, the guard phase, the part 7 tables, and the Autopilot mark. CLAUDE.md "Hard rules" gets the same rule text. |
 
 ## 11. Part 7: Autopilot replies
