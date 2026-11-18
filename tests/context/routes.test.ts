@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { dbPath, writeConfig } from "../../src/server/config";
 import { createContextRoutes } from "../../src/server/context/routes";
+import type { TaskFetchDto } from "../../src/server/context/task-fetch";
 import { taskFiles } from "../../src/server/context/task-file";
 import { createLive } from "../../src/server/live";
 import { createReviewJobs } from "../../src/server/review/jobs";
@@ -156,9 +157,11 @@ describe("task context API", () => {
     expect(jira.requests.length).toBe(before);
   });
 
-  test("Jira errors give 502 with fixed texts and store nothing", async () => {
+  // jira-context.md section 4.4: a failed POST sends MANUAL_ERR. The key without text becomes failed with the kind of the error.
+  test("Jira errors give 502 with fixed texts, store no text, store failed with the kind, and broadcast", async () => {
     const s = setup();
     await s.connect();
+    const before = jira.requests.length;
     const post = async (k = ISSUE_KEY) => {
       const res = await s.call("POST", `/prs/${s.pr}/task-context/${k}`);
       return { status: res.status, error: ((await res.json()) as { error: string }).error };
@@ -171,18 +174,86 @@ describe("task context API", () => {
     expect(await post()).toEqual({ status: 502, error: "Jira sent an answer in an unknown format." });
     jira.token = "rotated";
     expect(await post()).toEqual({ status: 502, error: "Jira rejected the token. Check the Jira settings." });
+    expect(jira.requests.length - before).toBe(4);
     expect(s.db.query("SELECT COUNT(*) AS n FROM task_context").get()).toEqual({ n: 0 });
-    expect(s.events).toEqual([]);
+    expect(s.db.query("SELECT key, state, kind FROM task_fetch ORDER BY key").all()).toEqual([
+      { key: "ABC-404", state: "failed", kind: "not_found" },
+      { key: ISSUE_KEY, state: "failed", kind: "auth" },
+    ]);
+    expect(JSON.stringify(s.db.query("SELECT * FROM task_fetch").all())).not.toContain("CANARY");
+    expect(s.events).toEqual(Array(4).fill({ event: "changed", data: { prs: [s.pr] } }));
   });
 
-  test("DELETE removes the row and gives 204", async () => {
+  test("GET task-fetch lists each task key in pr_task order with its state, kind, reason, and time; an unknown PR gives 404", async () => {
+    const s = setup();
+    const list = async () => (await (await s.call("GET", `/prs/${s.pr}/task-fetch`)).json()) as TaskFetchDto[];
+    expect(await list()).toEqual([
+      { key: ISSUE_KEY, state: "none", kind: null, reason: null, at: null },
+      { key: "ABC-404", state: "none", kind: null, reason: null, at: null },
+    ]);
+    await s.connect();
+    await s.call("POST", `/prs/${s.pr}/task-context/${ISSUE_KEY}`);
+    await s.call("POST", `/prs/${s.pr}/task-context/ABC-404`);
+    expect(await list()).toEqual([
+      { key: ISSUE_KEY, state: "fetched", kind: null, reason: null, at: null },
+      {
+        key: "ABC-404",
+        state: "failed",
+        kind: "not_found",
+        reason: "Jira has no such issue, or the token may not see it.",
+        at: expect.any(Number),
+      },
+    ]);
+    jira.token = "rotated";
+    await s.call("POST", `/prs/${s.pr}/task-context/${ISSUE_KEY}`);
+    expect((await list())[0]).toEqual({
+      key: ISSUE_KEY,
+      state: "refreshFailed",
+      kind: "auth",
+      reason: "Jira rejected the token. Check the Jira settings.",
+      at: expect.any(Number),
+    });
+    expect((await s.call("GET", "/prs/999/task-fetch")).status).toBe(404);
+  });
+
+  test("DELETE removes the text, gives 204, and makes the key skipped; a DELETE without text writes nothing", async () => {
     const s = setup();
     await s.connect();
     await s.call("POST", `/prs/${s.pr}/task-context/${ISSUE_KEY}`);
+    s.events.length = 0;
     const res = await s.call("DELETE", `/prs/${s.pr}/task-context/${ISSUE_KEY}`);
     expect(res.status).toBe(204);
     expect(await (await s.call("GET", `/prs/${s.pr}/task-context`)).json()).toEqual([]);
+    expect(s.events).toEqual([{ event: "changed", data: { prs: [s.pr] } }]);
+    const states = async () => ((await (await s.call("GET", `/prs/${s.pr}/task-fetch`)).json()) as TaskFetchDto[]).map((r) => r.state);
+    expect(await states()).toEqual(["skipped", "none"]);
+    // Section 4.4: skipped and none take no CLEAR.
+    const rows = () => s.db.query("SELECT * FROM task_fetch").all();
+    const before = rows();
     expect((await s.call("DELETE", `/prs/${s.pr}/task-context/${ISSUE_KEY}`)).status).toBe(204);
+    expect((await s.call("DELETE", `/prs/${s.pr}/task-context/ABC-404`)).status).toBe(204);
+    expect(rows()).toEqual(before);
+    expect(s.events.length).toBe(1);
+    expect(await states()).toEqual(["skipped", "none"]);
+  });
+
+  test("AC-JC8: a Fetch ends the skip, whether it fails or succeeds", async () => {
+    const s = setup();
+    await s.connect();
+    const base = `/prs/${s.pr}/task-context/${ISSUE_KEY}`;
+    const state = async () => ((await (await s.call("GET", `/prs/${s.pr}/task-fetch`)).json()) as TaskFetchDto[])[0]?.state;
+    await s.call("POST", base);
+    await s.call("DELETE", base);
+    expect(await state()).toBe("skipped");
+    jira.routes[key("GET", `/rest/api/2/issue/${ISSUE_KEY}`)] = { status: 503, body: null };
+    expect((await s.call("POST", base)).status).toBe(502);
+    expect(await state()).toBe("failed");
+    jira.addIssue(ISSUE_KEY);
+    expect((await s.call("POST", base)).status).toBe(200);
+    await s.call("DELETE", base);
+    expect(await state()).toBe("skipped");
+    expect((await s.call("POST", base)).status).toBe(200);
+    expect(await state()).toBe("fetched");
   });
 
   test("the Jira token never reaches config.json, the database, a response, or the log", async () => {

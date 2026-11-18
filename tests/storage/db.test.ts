@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 52;
+const LATEST = 53;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1894,6 +1894,43 @@ test("AC-B338: migration from a version-51 database keeps the question rows and 
       { id: 4, point: null },
       { id: 5, point: null },
     ]);
+  } finally {
+    db.close();
+  }
+});
+
+// ---------- The fetch state of a task key (056_task_fetch.sql) ----------
+
+// jira-context.md section 4.3: the task_context rows stay, task_fetch starts empty, its checks hold, and a PR delete cascades.
+test("migration from a version-52 database keeps the task_context rows and adds an empty task_fetch", () => {
+  const path = join(dir, "v52.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  const files = readdirSync(join(import.meta.dir, "../../src/server/storage/migrations")).filter((f) => f >= "031" && f < "055");
+  migrate(old, [...V30, ...files.sort()]);
+  old.exec("PRAGMA user_version = 52");
+  old.exec(`INSERT INTO pull_request (id, project, repo, pr_id) VALUES (1, 'P', 'a', 1);
+    INSERT INTO task_context (pr, key, source, json, fetched_at) VALUES (1, 'ABC-1', 'jira', '{}', 5);`);
+  const before = old.query("SELECT * FROM task_context").all() as object[];
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(db.query("SELECT * FROM task_context").all()).toEqual(before);
+    expect(db.query("SELECT COUNT(*) AS n FROM task_fetch").get()).toEqual({ n: 0 });
+    const add = (key: string, state: string, kind: string | null) =>
+      db.query("INSERT INTO task_fetch (pr, key, state, kind, at) VALUES (1, $key, $state, $kind, 9)").run({ key, state, kind });
+    add("ABC-1", "failed", "timeout");
+    add("ABC-2", "skipped", null);
+    expect(() => add("ABC-3", "failed", null)).toThrow(/CHECK/);
+    expect(() => add("ABC-4", "skipped", "auth")).toThrow(/CHECK/);
+    expect(() => add("ABC-5", "fetched", null)).toThrow(/CHECK/);
+    expect(() => db.run("INSERT INTO task_fetch (pr, key, state, kind, at) VALUES (99, 'ABC-6', 'skipped', NULL, 1)")).toThrow(
+      /FOREIGN KEY/,
+    );
+    db.run("DELETE FROM pull_request WHERE id = 1");
+    expect(db.query("SELECT COUNT(*) AS n FROM task_fetch").get()).toEqual({ n: 0 });
   } finally {
     db.close();
   }

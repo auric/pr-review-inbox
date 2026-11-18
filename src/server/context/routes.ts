@@ -3,7 +3,8 @@
 
 // Task context API (plan r2 S-JIRA): GET /prs/:id/task-context, POST and DELETE /prs/:id/task-context/:key, PUT /settings/jira.
 // Plan r3 S-ATT: the attachment files of a task under /prs/:id/task-context/:key/files/:att, and open-folder.
-// Jira gets a request only on a POST here or on a Jira settings save.
+// Jira gets a request on a POST here, on a Jira settings save, and at run start (task-fetch.ts autoFetch).
+// jira-context.md section 4.8: GET /prs/:id/task-fetch gives the fetch state of each task key.
 import type { Database } from "bun:sqlite";
 import { mkdirSync, rmSync, statSync } from "node:fs";
 import { Hono } from "hono";
@@ -26,6 +27,7 @@ import type { ReviewJobs } from "../review/jobs";
 import type { Settings } from "../settings";
 import { openFolder, RASTER_TYPE, type Raster, rasterOfFile, resolveFile, safeName, sniffFile, store, taskDir } from "./attachments";
 import { ContextError, type ContextErrorKind, type ContextSource } from "./source";
+import { fetchStates, jiraSaved, readShared, type TaskFetchDto, writeFetch } from "./task-fetch";
 
 // Fixed texts. A Jira answer body never reaches the client. The task routes use them too.
 export const FAILED: Record<ContextErrorKind, string> = {
@@ -167,7 +169,11 @@ export function createContextRoutes(opts: {
       }),
       async (c) => {
         const r = await settings.saveJira(c.req.valid("json"));
-        return "status" in r ? c.json<ApiError>({ error: r.error }, r.status) : c.json(r, 200);
+        if ("status" in r) return c.json<ApiError>({ error: r.error }, r.status);
+        const db = settings.db();
+        const prs = db ? jiraSaved(db) : [];
+        if (prs.length) live.broadcast("changed", { prs });
+        return c.json(r, 200);
       },
     )
     .get("/prs/:id/task-context", params, (c) => {
@@ -177,6 +183,15 @@ export function createContextRoutes(opts: {
       const rows = db.query("SELECT key, source, json, fetched_at FROM task_context WHERE pr = $id ORDER BY key").all({ id }) as Row[];
       return c.json(
         rows.map((r) => toDto(db, review.dataDir, id, r)),
+        200,
+      );
+    })
+    .get("/prs/:id/task-fetch", params, (c) => {
+      const db = settings.db();
+      const { id } = c.req.valid("param");
+      if (!db || !hasPr(db, id)) return c.json(prNotFound, 404);
+      return c.json(
+        fetchStates(db, id).map((r): TaskFetchDto => ({ ...r, reason: r.kind ? FAILED[r.kind] : null })),
         200,
       );
     })
@@ -195,33 +210,19 @@ export function createContextRoutes(opts: {
       if (!source) return c.json<ApiError>({ error: "Set up Jira in Settings first." }, 409);
       let issue: IssueContext;
       try {
-        issue = await source.fetchIssue(key);
+        issue = await readShared(db, source, key);
       } catch (e) {
         if (!(e instanceof ContextError)) throw e;
         log(`Jira fetch failed: ${e.message}`);
+        if (settings.db() === db && writeFetch(db, id, key, { type: "MANUAL_ERR", kind: e.kind })) live.broadcast("changed", { prs: [id] });
         return c.json<ApiError>({ error: FAILED[e.kind] }, 502);
       }
-      // jira-context.md section 4.2: the row keeps the parent or epic text, so a run needs no parent read.
-      const up = issue.parent ?? issue.epic;
-      if (up) {
-        try {
-          issue = { ...issue, parentIssue: await source.fetchParent(up) };
-        } catch (e) {
-          log(`Jira parent read of ${key} failed: ${e instanceof ContextError ? e.message : (e as Error).name}`);
-          issue = { ...issue, parentIssue: null };
-        }
-      }
+      // A settings swap during the read closes this database.
+      if (settings.db() !== db) return c.json<ApiError>({ error: "The settings changed. Try again." }, 409);
       const row: Row = { key, source: "jira", json: JSON.stringify(issue), fetched_at: Date.now() };
       // The PR or its task can go away during the request.
-      const stored = db.transaction(() => {
-        if (!hasTask(db, id, key)) return false;
-        db.query(
-          `INSERT INTO task_context (pr, key, source, json, fetched_at) VALUES ($pr, $key, $source, $json, $at)
-            ON CONFLICT (pr, key) DO UPDATE SET source = excluded.source, json = excluded.json, fetched_at = excluded.fetched_at`,
-        ).run({ pr: id, key, source: row.source, json: row.json, at: row.fetched_at });
-        return true;
-      })();
-      if (!stored) return c.json<ApiError>({ error: "This pull request does not name that task." }, 404);
+      if (!writeFetch(db, id, key, { type: "MANUAL_OK", issue }, row.fetched_at))
+        return c.json<ApiError>({ error: "This pull request does not name that task." }, 404);
       live.broadcast("changed", { prs: [id] });
       return c.json(toDto(db, review.dataDir, id, row), 200);
     })
@@ -229,14 +230,14 @@ export function createContextRoutes(opts: {
       const db = settings.db();
       if (!db) return c.json(unconfigured, 409);
       const { id, key } = c.req.valid("param");
-      // The task_attachment rows go by the foreign key cascade.
-      const r = db.query("DELETE FROM task_context WHERE pr = $id AND key = $key").run({ id, key });
+      // jira-context.md section 4.4: only fetched and refreshFailed take CLEAR. The other states write nothing.
+      if (writeFetch(db, id, key, { type: "CLEAR" }) === null) return c.body(null, 204);
       try {
         rmSync(resolveFile(review.dataDir, taskDir(db, id, key)) as string, { recursive: true, force: true, maxRetries: 3 });
       } catch (e) {
         log(`Could not delete the attachments of ${key}. The next start deletes them. ${(e as Error).message}`);
       }
-      if (r.changes) live.broadcast("changed", { prs: [id] });
+      live.broadcast("changed", { prs: [id] });
       return c.body(null, 204);
     })
     .post("/prs/:id/task-context/:key/files/:att", fileParams, async (c) => {
