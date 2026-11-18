@@ -1,0 +1,50 @@
+diff --git a/src/catalog/errors.ts b/src/catalog/errors.ts
+new file mode 100644
+index 0000000..d995fd3
+--- /dev/null
++++ b/src/catalog/errors.ts
+@@ -0,0 +1,9 @@
++export class NotFoundError extends Error {
++  readonly sku: string;
++
++  constructor(sku: string) {
++    super(`No item has the SKU ${sku}.`);
++    this.name = "NotFoundError";
++    this.sku = sku;
++  }
++}
+diff --git a/src/catalog/find.ts b/src/catalog/find.ts
+index 94ea3d0..1647e06 100644
+--- a/src/catalog/find.ts
++++ b/src/catalog/find.ts
+@@ -1,6 +1,9 @@
++import { NotFoundError } from "./errors";
+ import type { Item } from "./item";
+ 
+ // When two items share a SKU, the last one wins.
+-export function findSku(items: readonly Item[], sku: string): Item | null {
+-  return items.findLast((i) => i.sku === sku) ?? null;
++export function findSku(items: readonly Item[], sku: string): Item {
++  const hit = items.findLast((i) => i.sku === sku);
++  if (hit === undefined) throw new NotFoundError(sku);
++  return hit;
+ }
+diff --git a/tests/catalog/find.test.ts b/tests/catalog/find.test.ts
+new file mode 100644
+index 0000000..249170d
+--- /dev/null
++++ b/tests/catalog/find.test.ts
+@@ -0,0 +1,13 @@
++import { expect, test } from "vitest";
++import { NotFoundError } from "../../src/catalog/errors";
++import { findSku } from "../../src/catalog/find";
++
++test("the last item with the SKU wins", () => {
++  const a = { sku: "A-1", name: "old", priceCents: 100 };
++  const b = { sku: "A-1", name: "new", priceCents: 120 };
++  expect(findSku([a, b], "A-1")).toBe(b);
++});
++
++test("an unknown SKU throws", () => {
++  expect(() => findSku([], "A-1")).toThrow(NotFoundError);
++});

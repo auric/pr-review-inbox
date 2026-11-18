@@ -1,0 +1,29 @@
+{
+  "id": "probe-obl-platform-guard",
+  "title": "A C library gains a macOS build with no symbol guard",
+  "language": "cpp",
+  "pr": {
+    "title": "Build geo on macOS",
+    "description": "Adds the macOS build of the geo library: a toolchain file for a universal binary and the rpath settings."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "CMakeLists.txt",
+      "side": "new",
+      "lines": [12, 12],
+      "severityMin": "minor",
+      "module": "tests",
+      "note": "On Linux, geo.map limits the exported symbols and tests/check_symbols.sh fails on an extra export. The new macOS branch has neither an exported symbols list (-exported_symbols_list) nor a symbol test, so a leaked symbol on macOS goes unnoticed. Add a matching guard for macOS."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "cmake/macos.cmake",
+      "side": "new",
+      "lines": [4, 4],
+      "why": "A semicolon separates the items of a CMake list, so \"arm64;x86_64\" gives a universal binary. A finding that it must use a comma or a space is wrong."
+    }
+  ]
+}

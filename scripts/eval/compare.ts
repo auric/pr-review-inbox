@@ -212,6 +212,7 @@ export function detailText(s: Score): string {
   };
   shownRow("Shown security findings (review-quality-2026.md item 10): shown findings with category security, per case run", s.security);
   shownRow("Shown risk findings (risk-check.md section 7): shown findings with category risk, per case run", s.risk);
+  shownRow("Shown obligation findings (obligations.md section 8): shown findings with category obligation, per case run", s.obligation);
   if (s.union.length)
     out.push(
       "",
@@ -233,6 +234,12 @@ export function detailText(s: Score): string {
     out.push(
       "",
       `Finder risks, all runs: ${k.listed} listed, ${k.found} found, ${k.asked} asked, ${k.cleared} cleared, ${k.covered} same as a finding, ${k.open} open.`,
+    );
+  const o = s.obligations;
+  if (o)
+    out.push(
+      "",
+      `Obligations, all runs: ${o.listed} listed, ${o.met} met, ${o.deferred} deferred, ${o.covered} same as a finding, ${o.found} found, ${o.open} open.`,
     );
   if (s.questionItems.length) {
     // score.ts takes each repeat from a run, so runs is above 0.

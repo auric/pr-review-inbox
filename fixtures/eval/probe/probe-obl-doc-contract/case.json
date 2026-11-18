@@ -1,0 +1,29 @@
+{
+  "id": "probe-obl-doc-contract",
+  "title": "A lookup throws where its API doc promises null",
+  "language": "typescript",
+  "pr": {
+    "title": "Throw NotFoundError for an unknown SKU",
+    "description": "findSku() now throws NotFoundError when no item matches, so a caller cannot ignore a missing item."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/catalog/find.ts",
+      "side": "new",
+      "lines": [7, 7],
+      "severityMin": "minor",
+      "module": "docs",
+      "note": "docs/api.md still says that findSku returns null when no item matches. The change makes it throw NotFoundError, so a caller that follows the doc checks for null and never catches the error. Update the findSku section of docs/api.md."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/catalog/find.ts",
+      "side": "new",
+      "lines": [6, 6],
+      "why": "findLast is right: the comment and docs/api.md say that the last item with a SKU wins. A finding that it must be find is wrong."
+    }
+  ]
+}

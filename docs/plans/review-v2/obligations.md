@@ -360,7 +360,7 @@ Ship rule, candidate against the reference:
 2. Grounded noise per case is at most the reference plus S_N. Judge fp per case run rise by no more than the reference spread.
 3. In the "Shown obligation findings" row, gold matches plus judge tp are at least the judge fp.
 4. Cost per case rises by 20% or less, and minutes by 1.0 or less. Above that, the user decides.
-5. Probe: the candidate finds at least 3 of the 4 seeded omissions in each repeat.
+5. Probe: the candidate finds at least 4 of the 5 seeded omissions in each repeat. The fifth is the rule 8a case (probe-obl-platform-guard).
 6. Probe: the candidate raises no finding on a trap of the 3 met cases. The 8 old probe cases keep the control result.
 
 ### Gate OB-B (manual, user)

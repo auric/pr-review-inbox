@@ -1,0 +1,20 @@
+{
+  "id": "probe-obl-met-guard",
+  "title": "The units package exports a new function, with its guard entry",
+  "language": "typescript",
+  "pr": {
+    "title": "Add toMeters to the units package",
+    "description": "Adds toMeters(), which converts feet to meters, and exports it from the units package. tests/exports.test.ts lists the new export."
+  },
+  "clean": true,
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "packages/units/src/index.ts",
+      "side": "new",
+      "lines": [1, 1],
+      "why": "tests/exports.test.ts lists toMeters in the units entry in the same change, so the new export has its guard. A finding of a missing export test is wrong."
+    }
+  ]
+}

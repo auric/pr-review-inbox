@@ -1,0 +1,7 @@
+GEO_1 {
+  global:
+    geo_distance;
+    geo_bearing;
+  local:
+    *;
+};

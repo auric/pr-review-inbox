@@ -1,0 +1,21 @@
+{
+  "id": "probe-obl-met-followup",
+  "title": "A rate limit meets one criterion, and the PR names the follow-up ticket",
+  "language": "typescript",
+  "pr": {
+    "title": "Limit the requests of each API key",
+    "description": "Adds the limit of 100 requests per minute for each API key. A request over the limit gets status 429. The Retry-After header comes in SHOP-42."
+  },
+  "task": "Add a rate limit to the public API.\n\nAcceptance criteria:\n1. Each API key gets at most 100 requests per minute. A request over the limit gets status 429.\n2. The 429 reply has a Retry-After header with the seconds until the current window ends.",
+  "clean": true,
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/api/server.ts",
+      "side": "new",
+      "lines": [6, 6],
+      "why": "The PR text says that the Retry-After header of criterion 2 comes in SHOP-42, so the rest of the criterion is deferred to a named ticket. A finding of an unmet criterion is wrong."
+    }
+  ]
+}

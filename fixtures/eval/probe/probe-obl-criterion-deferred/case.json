@@ -1,0 +1,30 @@
+{
+  "id": "probe-obl-criterion-deferred",
+  "title": "A rate limit meets one criterion, and the PR defers the rest with no ticket",
+  "language": "typescript",
+  "pr": {
+    "title": "Limit the requests of each API key",
+    "description": "Adds the limit of 100 requests per minute for each API key. A request over the limit gets status 429. The Retry-After header comes later."
+  },
+  "task": "Add a rate limit to the public API.\n\nAcceptance criteria:\n1. Each API key gets at most 100 requests per minute. A request over the limit gets status 429.\n2. The 429 reply has a Retry-After header with the seconds until the current window ends.",
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/api/server.ts",
+      "side": "new",
+      "lines": [6, 6],
+      "severityMin": "minor",
+      "module": "intent",
+      "note": "Criterion 2 is not met: the 429 reply has no Retry-After header. The PR text defers it (\"comes later\") but names no ticket or pull request, so nothing tracks the rest of the criterion. Add the header, or name the follow-up ticket."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/api/limit.ts",
+      "side": "new",
+      "lines": [8, 8],
+      "why": "A fixed window of one minute is what criterion 1 asks for: at most 100 requests per minute. The new window resets the count. A finding of a sliding-window or off-by-one problem here is wrong."
+    }
+  ]
+}

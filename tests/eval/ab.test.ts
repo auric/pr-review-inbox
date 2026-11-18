@@ -625,6 +625,11 @@ describe("eval:ab arguments", () => {
     });
     // risk-check.md section 7: the risk check changes only the verify prompts.
     expect(parseAb(["--candidate-replay", "--candidate-variants", "risk-check"])).toMatchObject({ replay: true, variants: ["risk-check"] });
+    // obligations.md section 8: the obligation check changes only the verify prompts.
+    expect(parseAb(["--candidate-replay", "--candidate-variants", "risk-check,obligations"])).toMatchObject({
+      replay: true,
+      variants: ["risk-check", "obligations"],
+    });
     // --effort changes both sides, so the finder of the replay matches its baseline.
     expect(parseAb(["--candidate-replay", "--effort", "medium"])).toMatchObject({ replay: true });
   });

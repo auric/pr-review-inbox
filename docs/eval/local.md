@@ -17,6 +17,7 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `security2` (item 10): the security section of rl-main and rl-reviewer gets more attack kinds and a source-path-sink rule for the trigger. The verify phase gets rules for candidates of category security. A real defect that is no security hole keeps its verdict. The rules adapt anthropics/claude-code-security-review (MIT, THIRD_PARTY_NOTICES.md). The variant changes the finder, so `--candidate-replay` refuses it.
 - `security2-verify` (item 10): only the verify rules of `security2`, so `--candidate-replay` can test them on the recorded finder calls.
 - `risk-check` (docs/plans/review-v2/risk-check.md): the verify phase checks each finder risk. A confirmed risk becomes a finding of category risk. The variant changes only the verify prompts, so `--candidate-replay` can test it. A run file holds the risk counts, never the risk text.
+- `obligations` (docs/plans/review-v2/obligations.md): the verify phase lists at most 5 obligations of the change and checks each one. It also starts with zero blocks. A missing obligation with an app-checked cite becomes a finding of category obligation. The variant changes only the verify prompts and the verify schema, so `--candidate-replay` can test it. A replay runs each verify call live, also one with the obligations schema. A run file holds the obligation counts, never the obligation text.
 - `parts`: see "Part files". `failures`: a trial module with a failure checklist.
 - The variants `signal`, `order`, `rules2`, and `rereview-strict` are removed. The first three lost in U-V1 (docs/eval/results.md). U-V1 gave no decision for `rereview-strict`, and no plan uses it. A saved profile that still lists one loads without it. `--variants` and `--candidate-variants` refuse them. No run reads `REVIEW.md` now.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
@@ -69,7 +70,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 
 ## Probe set
 
-`fixtures/eval/probe/` holds 8 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
+`fixtures/eval/probe/` holds 16 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
 
 - 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
 - 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
@@ -77,6 +78,13 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 - 1 case has task text, and unchanged code meets the criterion. The line that seems to miss it is a trap.
 - 1 case has PR text that states no requirement. Its traps are where a reviewer invents one.
 - 1 case is clean (`clean: true`). It has no bug and one trap on a line that looks wrong but is correct.
+- 5 cases (`probe-obl-*`, obligations.md section 8) have a seeded omission that a diff review cannot see. Each one is a must-find of severity minor on the changed line that makes the obligation:
+  - `probe-obl-guide-signature`: a public function gets a new parameter and per-OS behavior. `docs/guide.md` still shows the old call.
+  - `probe-obl-export-guard`: a package exports a new symbol. `tests/exports.test.ts` guards the exports of each sibling package, but not of this one.
+  - `probe-obl-doc-contract`: `docs/api.md` says that the lookup returns null when nothing matches. The change makes it throw.
+  - `probe-obl-criterion-deferred`: the task has two criteria. The change meets one. The PR text says that the rest "comes later" and names no ticket.
+  - `probe-obl-platform-guard` (rule 8a): a C library gets a macOS build. A linker symbol script and a symbol test guard the Linux build. The macOS branch gets no guard.
+- 3 cases (`probe-obl-met-*`) are clean: the change meets the obligation. Each trap is on the line where a careless check reports it: `probe-obl-met-guide` (the guide shows the new call), `probe-obl-met-guard` (the change adds the guard entry), and `probe-obl-met-followup` (the PR text names the follow-up ticket SHOP-42).
 
 A fixture case can have `threads` and `clean`, as a local case can. The run seeds the threads into the comment table, so `pr-context.md` lists them. A fixture case has no `text` on its items: `note` and `why` describe them.
 
@@ -206,9 +214,11 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 - augmented precision, augmented recall, and new tp per case add the unmatched shown findings that the judge gives tp. severity above: the share of those findings whose app severity is above the judge severity. Blocker and major are high, minor is medium, nit is low.
 - refuted shown: refuted findings that stay in main, per case. Since 2026-11-15 the app folds them at quiet and balanced, so only thorough and older results have them. `bun run eval:rescore -- <result.json> --fold-refuted` gives an older result the current fold and prints recall and noise for that case.
 - The line match (recall, precision, noise) stays in its own rows beside the grounded rows. candidate recall now divides by the counted must-finds, as recall does, so candidate recall - recall is the share that the check lost.
-- The summary also prints a mean per case (macro) beside the pooled number (micro), the verifier confusion matrix (the gold or judge label of each finding by its verdict), the slices (severity, source, module, bug class, size, task text, clean cases), union recall over k repeats, the finder question sums, and the finder risk sums. The probe set is its own slice: run it with `--set probe`.
+- The summary also prints a mean per case (macro) beside the pooled number (micro), the verifier confusion matrix (the gold or judge label of each finding by its verdict), the slices (severity, source, module, bug class, size, task text, clean cases), union recall over k repeats, the finder question sums, the finder risk sums, and the obligation sums. The probe set is its own slice: run it with `--set probe`.
 - Shown security findings (improvement 10): the shown findings whose category is exactly security, per case run, by gold match, judge tp, judge fp, and no label. It prints only with labels: in the eval:label and eval:rescore summaries, and for A and B in eval:compare.
 - Shown risk findings (risk-check.md section 7): the same row for the shown findings whose category is exactly risk. It prints only with labels.
+- Shown obligation findings (obligations.md section 8): the same row for the shown findings whose category is exactly obligation. It prints only with labels.
+- Obligations, all runs: the sums of the obligation outcomes over all runs: listed, met, deferred, same as a finding, found, and open. Only a run with the variant `obligations` records them. A result without them prints no such line.
 - Finder risks, all runs: the sums of the risk outcomes over all runs: listed, found, asked, cleared, same as a finding, and open. Only a run with the variant `risk-check` records them. A result without them prints no such line, as for the finder questions.
 - Question items per case run: all question items of each repeat over its case runs, and the spread over the repeats. The finder questions and the asked risks both count.
 - eval:compare prints a paired delta: the mean of B - A of the hit rate per counted must-find, with a 90% bootstrap interval over the PR groups and a fixed seed. It is information only.

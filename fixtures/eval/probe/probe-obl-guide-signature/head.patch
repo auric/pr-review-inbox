@@ -1,0 +1,32 @@
+diff --git a/src/files/paths.ts b/src/files/paths.ts
+index 60e1034..9a3a7cf 100644
+--- a/src/files/paths.ts
++++ b/src/files/paths.ts
+@@ -1,3 +1,9 @@
+-export function joinPath(dir: string, name: string): string {
+-  return dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
++export type Os = "posix" | "windows";
++
++const SEPARATOR: Record<Os, string> = { posix: "/", windows: "\\" };
++
++export function joinPath(dir: string, name: string, os: Os = "posix"): string {
++  const sep = SEPARATOR[os];
++  const trimmed = dir.endsWith("/") || dir.endsWith("\\") ? dir.slice(0, -1) : dir;
++  return `${trimmed}${sep}${name}`;
+ }
+diff --git a/tests/files/paths.test.ts b/tests/files/paths.test.ts
+new file mode 100644
+index 0000000..e06d69c
+--- /dev/null
++++ b/tests/files/paths.test.ts
+@@ -0,0 +1,10 @@
++import { expect, test } from "vitest";
++import { joinPath } from "../../src/files/paths";
++
++test("posix is the default separator", () => {
++  expect(joinPath("out/", "a.txt")).toBe("out/a.txt");
++});
++
++test("windows uses a backslash", () => {
++  expect(joinPath("out\\", "a.txt", "windows")).toBe("out\\a.txt");
++});

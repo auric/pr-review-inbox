@@ -37,6 +37,8 @@ const kind = (c: EvalCase) => {
   const onBug = roots.some((t) => c.bugs.some((b) => b.path === t.path && overlaps(b.lines, t.lines as [number, number])));
   const onTrap = roots.some((t) => c.traps.some((x) => x.path === t.path && overlaps(x.lines, t.lines as [number, number])));
   const claim = (c.threads ?? []).some((t) => t.author === "eval-author" && t.text.includes(CLAIM));
+  // obligations.md section 8: the obligation cases, by a seeded omission or a met obligation.
+  if (c.id.startsWith("probe-obl-")) return c.clean ? "met obligation" : "missing obligation";
   if (c.clean) return "clean";
   if (onBug && claim && c.bugs.length === 1) return "wrong claim";
   if (onTrap && !c.bugs.length) return "right claim";
@@ -45,8 +47,8 @@ const kind = (c: EvalCase) => {
 };
 
 describe("probe set", () => {
-  test("8 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, and 1 clean case", () => {
-    expect(cases).toHaveLength(8);
+  test("16 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, 1 clean case, 5 missing obligations, and 3 met obligations", () => {
+    expect(cases).toHaveLength(16);
     const by = Object.groupBy(cases, kind);
     expect(Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v?.length]))).toEqual({
       "wrong claim": 2,
@@ -55,9 +57,11 @@ describe("probe set", () => {
       "met criterion": 1,
       "no requirement": 1,
       clean: 1,
+      "missing obligation": 5,
+      "met obligation": 3,
     });
     // A trap only, and a clean case has no bug. Each PR text is non-empty, so the intent module runs (catalog.ts lacks).
-    for (const k of ["right claim", "met criterion", "no requirement", "clean"] as const)
+    for (const k of ["right claim", "met criterion", "no requirement", "clean", "met obligation"] as const)
       for (const c of by[k] ?? []) expect(c.bugs).toEqual([]);
     expect(cases.filter((c) => !c.pr.description.trim())).toEqual([]);
     // The case IDs differ from the other sets, so eval:rescore finds each case by its ID.

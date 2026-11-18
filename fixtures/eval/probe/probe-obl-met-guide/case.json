@@ -1,0 +1,20 @@
+{
+  "id": "probe-obl-met-guide",
+  "title": "A path helper gets a per-OS separator, and the guide follows",
+  "language": "typescript",
+  "pr": {
+    "title": "Join paths with the separator of the target OS",
+    "description": "joinPath() gets an os parameter. Windows paths now use a backslash. The default stays posix, so the callers keep working. docs/guide.md shows the new call."
+  },
+  "clean": true,
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "docs/guide.md",
+      "side": "new",
+      "lines": [9, 9],
+      "why": "The guide example is right: in the Markdown code block the TypeScript result string \"out\\\\report.txt\" is one backslash. The guide shows the new parameter and the per-OS separator, so no doc finding applies."
+    }
+  ]
+}

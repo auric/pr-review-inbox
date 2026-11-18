@@ -1,0 +1,29 @@
+{
+  "id": "probe-obl-guide-signature",
+  "title": "A path helper gets a per-OS separator, and the guide keeps the old call",
+  "language": "typescript",
+  "pr": {
+    "title": "Join paths with the separator of the target OS",
+    "description": "joinPath() gets an os parameter. Windows paths now use a backslash. The default stays posix, so the callers keep working."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/files/paths.ts",
+      "side": "new",
+      "lines": [5, 5],
+      "severityMin": "minor",
+      "module": "docs",
+      "note": "docs/guide.md still shows the old call joinPath(dir, name) and says that the separator is always a forward slash. The change adds the os parameter and a backslash for windows, so a reader of the guide gets wrong Windows paths. The guide must show the os parameter and the per-OS separator."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/files/paths.ts",
+      "side": "new",
+      "lines": [3, 3],
+      "why": "\"\\\\\" in TypeScript source is one backslash, the Windows separator. A finding that the separator has two backslashes is wrong."
+    }
+  ]
+}

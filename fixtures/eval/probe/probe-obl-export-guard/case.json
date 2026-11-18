@@ -1,0 +1,29 @@
+{
+  "id": "probe-obl-export-guard",
+  "title": "The units package exports a new function, and no export guard covers it",
+  "language": "typescript",
+  "pr": {
+    "title": "Add toMeters to the units package",
+    "description": "Adds toMeters(), which converts feet to meters, and exports it from the units package."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "packages/units/src/index.ts",
+      "side": "new",
+      "lines": [1, 1],
+      "severityMin": "minor",
+      "module": "tests",
+      "note": "tests/exports.test.ts guards the export list of the sibling packages money and dates, but not of units. The change adds the export toMeters to units, and no guard checks the units exports. A later change can drop or add a units export without a failing test. Add a units entry to tests/exports.test.ts."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "packages/units/src/length.ts",
+      "side": "new",
+      "lines": [2, 2],
+      "why": "One meter is 3.28084 feet, so feet / FEET_PER_METER gives meters. A finding that the factor is inverted or wrong is wrong."
+    }
+  ]
+}

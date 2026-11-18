@@ -1,0 +1,32 @@
+diff --git a/packages/units/src/index.ts b/packages/units/src/index.ts
+index 0c7e20b..fe1b5e4 100644
+--- a/packages/units/src/index.ts
++++ b/packages/units/src/index.ts
+@@ -1 +1,2 @@
++export { toMeters } from "./length";
+ export { toKilograms } from "./mass";
+diff --git a/packages/units/src/length.ts b/packages/units/src/length.ts
+new file mode 100644
+index 0000000..c819fac
+--- /dev/null
++++ b/packages/units/src/length.ts
+@@ -0,0 +1,7 @@
++// One meter is 3.28084 feet (international foot of 0.3048 m).
++const FEET_PER_METER = 3.28084;
++
++export function toMeters(feet: number): number {
++  if (!Number.isFinite(feet)) throw new RangeError("feet must be a finite number");
++  return feet / FEET_PER_METER;
++}
+diff --git a/tests/units/length.test.ts b/tests/units/length.test.ts
+new file mode 100644
+index 0000000..063b888
+--- /dev/null
++++ b/tests/units/length.test.ts
+@@ -0,0 +1,6 @@
++import { expect, test } from "vitest";
++import { toMeters } from "../../packages/units/src/length";
++
++test("ten feet are about three meters", () => {
++  expect(toMeters(10)).toBeCloseTo(3.048, 3);
++});

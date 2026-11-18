@@ -19,6 +19,7 @@ import {
 } from "../../scripts/eval/cases";
 import { compareText, readResult } from "../../scripts/eval/compare";
 import {
+  callKind,
   callsDir,
   caseInfo,
   DEFAULT_MODEL_WARNING,
@@ -38,7 +39,7 @@ import { profileRevision, SHIPPED_PROFILES, shippedProfileAt } from "../../src/s
 import { git } from "../../src/server/review/git";
 import { createStreamParser } from "../../src/server/review/stream";
 import { DEFAULT_VERIFIER } from "../../src/shared/dto";
-import { REVIEW_PROMPT_VERSION } from "../../src/shared/review";
+import { REVIEW_PROMPT_VERSION, reviewJsonSchema, verifyJsonSchema } from "../../src/shared/review";
 import { CHECK_EVENT, type RunEvent } from "../../src/shared/run-log";
 import { readRecords, schemaKind } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
@@ -182,10 +183,17 @@ describe("eval harness without --real (AC-M2)", () => {
     ]);
     expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
-    expect(VERIFY_ONLY).toEqual(["risk-check", "security2-verify", "verify2"]);
+    expect(VERIFY_ONLY).toEqual(["obligations", "risk-check", "security2-verify", "verify2"]);
     expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
     // risk-check.md section 7: the risk check changes only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["risk-check"] })).toEqual([]);
+    // obligations.md section 8: the obligation check changes only the verify prompts.
+    expect(finderChange(base, { ...p.profile, variants: ["risk-check", "obligations"] })).toEqual([]);
+    // A replay runs each verify call live, also one with the obligations schema.
+    expect(callKind({ schema: verifyJsonSchema() })).toBe("verify");
+    expect(callKind({ schema: verifyJsonSchema(true) })).toBe("verify");
+    expect(callKind({ schema: reviewJsonSchema() })).toBe("find");
+    expect(callKind({})).toBe("find");
     // review-quality-2026.md item 10: security2 changes the finder, security2-verify only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["security2-verify"] })).toEqual([]);
     expect(finderChange(base, { ...p.profile, variants: ["security2"] })).toEqual(["variants"]);
@@ -868,7 +876,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         confidence: "high",
         agent: null,
       };
-      const scenario = (name: string, findings: unknown[], risks: string[]) => {
+      const scenario = (name: string, findings: unknown[], risks: string[], extra: Record<string, unknown>) => {
         const file = join(dir, `${name}.json`);
         const structured = {
           summary: "Fake review.",
@@ -884,6 +892,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
             auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
             fixture: claudeStream(dir, name, "claude-synthetic/review-agent-tree.jsonl", structured),
             delayMs: 1,
+            ...extra,
           }),
         );
         return file;
@@ -896,7 +905,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
             schemaKind(JSON.parse(x.argv[x.argv.indexOf("--json-schema") + 1] ?? "{}").properties ?? {}),
             x.argv[x.argv.indexOf("--effort") + 1],
           ]);
-      const run = async (name: string, findings: unknown[], args: string[], risks: string[] = []) => {
+      const run = async (name: string, findings: unknown[], args: string[], risks: string[] = [], extra: Record<string, unknown> = {}) => {
         const out = join(dir, `out-${name}`);
         const r = await bun([
           RUN,
@@ -908,7 +917,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
           "--runner",
           process.execPath,
           FAKE,
-          scenario(name, findings, risks),
+          scenario(name, findings, risks, extra),
         ]);
         // A refused run makes no out folder.
         const names = r.code === 0 ? readdirSync(out, { withFileTypes: true }) : [];
@@ -968,6 +977,42 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(readFileSync(risky.file, "utf8")).not.toContain(RISK);
       expect(risky.stdout).toContain("Finder risks, all runs: 2 listed, 0 found, 0 asked, 0 cleared, 0 same as a finding, 2 open.");
       expect(risky.stdout).toContain("Question items per case run, per repeat (all question items): 1: 0/2 = 0.00. Spread: 0.00.");
+      expect(k.runs.map((x) => x.obligations)).toEqual([undefined, undefined]);
+
+      // obligations.md section 8: the obligation check changes only the verify prompts, so a replay can switch it on. Its verify call
+      // has its own schema, and the replay must still run it live.
+      const MUST = "A secret obligation text of the fake CLI.";
+      const obligation = (status: string) => ({
+        source: "surface",
+        must: MUST,
+        consumer: "A reader of docs/guide.md.",
+        cite: { path: "docs/guide.md", quote: "x" },
+        status,
+        evidence: "docs/guide.md:1",
+        severity: "minor",
+        duplicateOf: null,
+        finding: null,
+      });
+      const verify = {
+        verdicts: [],
+        coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
+        obligations: [obligation("met"), obligation("unsure")],
+      };
+      const obliged = await run(
+        "obliged",
+        [],
+        ["--cases", "probe-clean-axis-ticks", "--replay-find", rec.file, "--variants", "obligations"],
+        [],
+        { verify },
+      );
+      expect(obliged.stderr).toBe("");
+      expect(obliged.code).toBe(0);
+      const o = readResult(obliged.file);
+      // O1 gives met, O8 gives open. The clean case has no candidate, so the check starts with zero blocks.
+      expect(o.runs.map((x) => x.obligations)).toEqual([{ listed: 2, met: 1, deferred: 0, covered: 0, found: 0, open: 1 }]);
+      expect(calls("obliged")).toEqual([["verify", "medium"]]);
+      expect(readFileSync(obliged.file, "utf8")).not.toContain(MUST);
+      expect(obliged.stdout).toContain("Obligations, all runs: 2 listed, 1 met, 0 deferred, 0 same as a finding, 0 found, 1 open.");
 
       // Another mode, set, repeat count, or finder prompt version is refused.
       const refusal = (args: string[], r: EvalResult = a) => {
