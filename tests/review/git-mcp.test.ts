@@ -16,16 +16,46 @@ const SLOW = 60_000;
 let root = "";
 let cache = "";
 let client: Client;
+let movesClient: Client;
 const c = { c1: "", c2: "", c3: "", c4: "", c5: "" };
+const m = { m1: "", m2: "", m3: "" };
+// git blame -M and -C need a moved block of at least 20 alphanumeric characters.
+const LONG = ["alpha line that is long enough to move", "beta line that is long enough to move", "gamma line that is long enough to move"];
 
 // A 20,000-line added file. Its diff spans many pages.
 const HUGE = Array.from({ length: 20_000 }, (_, i) => `line ${i + 1} of the huge change\n`).join("");
 
 // A bare repository like the WP6 cache. Commits go through a temp index.
 // c1 -> c2 (target); c1 -> c3 -> c4 (head); c1 -> c5 (side, unrelated to both pins). The merge base is c1.
+// The moves repository: m1 -> m2 (rename old.txt to new.txt) -> m3 (move the first line of f.txt to the end).
 async function fixture() {
   root = mkdtempSync(join(tmpdir(), "rl-wp7-"));
   cache = join(root, "cache.git");
+  await repo(cache, async (commit) => {
+    const big = `${"x".repeat(99)}\n`.repeat(4000);
+    c.c1 = await commit(null, { "a.txt": "one\ntwo\nthree\n", "big.txt": big }, "first commit");
+    c.c2 = await commit(c.c1, { "a.txt": "one\ntwo\nthree\nfour\n" }, "target change");
+    c.c3 = await commit(c.c1, { "src/b.txt": "bee\n" }, "add bee");
+    c.c4 = await commit(c.c3, { "a.txt": "one\nTWO\nthree\n", "huge.txt": HUGE }, "shout two");
+    c.c5 = await commit(c.c1, { "side.txt": "side\n" }, "side work");
+    return [
+      ["refs/rl/1/source", c.c4],
+      ["refs/rl/1/target", c.c2],
+      ["refs/heads/side", c.c5],
+    ];
+  });
+  await repo(join(root, "moves.git"), async (commit) => {
+    m.m1 = await commit(null, { "old.txt": "kept through a rename\n", "f.txt": `${LONG.join("\n")}\n` }, "add files");
+    m.m2 = await commit(m.m1, { "old.txt": null, "new.txt": "kept through a rename\n" }, "rename old to new");
+    m.m3 = await commit(m.m2, { "f.txt": `${LONG[1]}\n${LONG[2]}\n${LONG[0]}\n` }, "move alpha down");
+    return [["refs/rl/2/source", m.m3]];
+  });
+}
+
+type Commit = (parent: string | null, files: Record<string, string | null>, msg: string) => Promise<string>;
+
+// A bare repository like the WP6 cache. Commits go through a temp index. A null body removes the path.
+async function repo(dir: string, build: (commit: Commit) => Promise<[string, string][]>) {
   const empty = join(root, "empty.gitconfig");
   writeFileSync(empty, "");
   const env = {
@@ -36,12 +66,17 @@ async function fixture() {
     GIT_COMMITTER_EMAIL: "ann@example.invalid",
     GIT_INDEX_FILE: join(root, "author.index"),
   };
-  const g = async (args: string[], stdin?: string) => (await git([`--git-dir=${cache}`, ...args], { env, stdin })).trim();
-  await git(["init", "-q", "--bare", "--template=", cache], { env });
+  const g = async (args: string[], stdin?: string) => (await git([`--git-dir=${dir}`, ...args], { env, stdin })).trim();
+  await git(["init", "-q", "--bare", "--template=", dir], { env });
   let n = 0;
-  const commit = async (parent: string | null, files: Record<string, string>, msg: string) => {
+  const commit: Commit = async (parent, files, msg) => {
     await g(parent ? ["read-tree", parent] : ["read-tree", "--empty"]);
     for (const [path, body] of Object.entries(files)) {
+      if (body === null) {
+        // A bare repository has no work tree for --force-remove. Mode 0 in --index-info removes the entry.
+        await g(["update-index", "--index-info"], `0 ${"0".repeat(40)}\t${path}\n`);
+        continue;
+      }
       const f = join(root, `blob-${n++}`);
       writeFileSync(f, body);
       const sha = await g(["hash-object", "-w", "--no-filters", f]);
@@ -49,15 +84,7 @@ async function fixture() {
     }
     return g(["commit-tree", await g(["write-tree"]), ...(parent ? ["-p", parent] : []), "-m", msg]);
   };
-  const big = `${"x".repeat(99)}\n`.repeat(4000);
-  c.c1 = await commit(null, { "a.txt": "one\ntwo\nthree\n", "big.txt": big }, "first commit");
-  c.c2 = await commit(c.c1, { "a.txt": "one\ntwo\nthree\nfour\n" }, "target change");
-  c.c3 = await commit(c.c1, { "src/b.txt": "bee\n" }, "add bee");
-  c.c4 = await commit(c.c3, { "a.txt": "one\nTWO\nthree\n", "huge.txt": HUGE }, "shout two");
-  c.c5 = await commit(c.c1, { "side.txt": "side\n" }, "side work");
-  await g(["update-ref", "refs/rl/1/source", c.c4]);
-  await g(["update-ref", "refs/rl/1/target", c.c2]);
-  await g(["update-ref", "refs/heads/side", c.c5]);
+  for (const [ref, sha] of await build(commit)) await g(["update-ref", ref, sha]);
   rmSync(join(root, "author.index"));
 }
 
@@ -89,10 +116,14 @@ beforeAll(async () => {
   const spec = gitMcpServer({ cache, sourceHead: c.c4, rangeBase: c.c1, targetHead: c.c2 }, MAIN);
   client = new Client({ name: "wp7-test", version: "0" });
   await client.connect(new StdioClientTransport({ command: spec.command, args: spec.args, stderr: "pipe" }));
+  const moves = gitMcpServer({ cache: join(root, "moves.git"), sourceHead: m.m3, rangeBase: m.m1, targetHead: m.m1 }, MAIN);
+  movesClient = new Client({ name: "wp7-moves-test", version: "0" });
+  await movesClient.connect(new StdioClientTransport({ command: moves.command, args: moves.args, stderr: "pipe" }));
 }, SLOW);
 
 afterAll(async () => {
   await client?.close();
+  await movesClient?.close();
   rmSync(root, { recursive: true, force: true, maxRetries: 3 });
 });
 
@@ -143,6 +174,23 @@ describe("git MCP server", () => {
     expect(lines[1]).toStartWith(c.c4);
     expect(await ok("git_blame", { path: "a.txt", start_line: 2, max_lines: 1 })).toContain("TWO");
     await refused("git_blame", { path: "a.txt", max_lines: 401 });
+  });
+
+  test("git_log with a path follows a rename", async () => {
+    const r = (await movesClient.callTool({ name: "git_log", arguments: { path: "new.txt" } })) as Result;
+    expect(r.isError, r.content[0]?.text).toBeFalsy();
+    expect(r.content[0]?.text).toContain(m.m2);
+    expect(r.content[0]?.text).toContain(m.m1);
+  });
+
+  test("git_blame keeps the commit of a moved line", async () => {
+    const r = (await movesClient.callTool({ name: "git_blame", arguments: { path: "f.txt" } })) as Result;
+    expect(r.isError, r.content[0]?.text).toBeFalsy();
+    const lines = (r.content[0]?.text ?? "").trim().split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[2]).toContain(LONG[0] as string);
+    // The root commit prints as a boundary: "^" and 39 hex digits.
+    expect(lines[2]).toStartWith(`^${m.m1.slice(0, 39)}`);
   });
 
   test("git_show shows a commit and a file at a commit", async () => {

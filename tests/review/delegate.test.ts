@@ -10,7 +10,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
-import { delegation, PART_REVIEWER, REVIEWER_MIN_FILES, REVIEWER_MIN_LINES, SHIPPED_PROFILES } from "../../src/server/review/catalog";
+import {
+  contextBlock,
+  DO_NOT_FLAG,
+  delegation,
+  mainAgent,
+  moduleSections,
+  NO_CONTEXT,
+  PART_REVIEWER,
+  REVIEWER_MIN_FILES,
+  REVIEWER_MIN_LINES,
+  type ReviewContext,
+  reviewerAgent,
+  rubric,
+  SHIPPED_PROFILES,
+} from "../../src/server/review/catalog";
 import type { DiffFile } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
@@ -293,8 +307,52 @@ async function setup() {
     await review.wait();
     return { id, argv: c.argv, agents, claudeMd, stdin: c.stdin, context: c.context ?? {} };
   }
-  return { db, review, runner, fixture, start, hung, calls, claude };
+  return { db, review, runner, fixture, start, hung, calls, claude, prs };
 }
+
+// delegation-gaps.md fix 5: rl-reviewer gets the same context, module, rubric, and do-not-flag lines as rl-main.
+describe("rl-reviewer prompt parity", () => {
+  const full: ReviewContext = {
+    taskFile: true,
+    attachments: true,
+    history: true,
+    questions: true,
+    rereview: true,
+    instructions: true,
+    goal: true,
+    prContext: true,
+    notes: true,
+    plan: true,
+  };
+  const block = (lines: string[]) => `\n${lines.join("\n")}\n`;
+  const doNotFlag = DO_NOT_FLAG.map((l) => `- ${l}`);
+
+  test("for the shipped Review profile, with no context and with every context file", () => {
+    for (const c of [NO_CONTEXT, full]) {
+      const main = mainAgent(general, c).prompt;
+      const reviewer = reviewerAgent(general, c).prompt;
+      const sections = moduleSections(general, c);
+      expect(sections.length).toBeGreaterThan(0);
+      for (const lines of [contextBlock(c), sections, rubric(general), doNotFlag]) {
+        expect(main).toContain(block(lines));
+        expect(reviewer).toContain(block(lines));
+      }
+    }
+  });
+
+  test(
+    "in a run: the rl-reviewer prompt holds the rubric and the do-not-flag list of the rl-main prompt",
+    async () => {
+      const h = await setup();
+      const { agents } = await h.hung(2, "general");
+      for (const lines of [rubric(general), doNotFlag]) {
+        expect(agents["rl-main"]?.prompt).toContain(block(lines));
+        expect(agents["rl-reviewer"]?.prompt).toContain(block(lines));
+      }
+    },
+    SLOW,
+  );
+});
 
 describe("delegation in a run", () => {
   test(
@@ -345,6 +403,23 @@ describe("delegation in a run", () => {
         instructions_json: string;
       };
       expect(row.instructions_json).not.toContain("CANARY");
+    },
+    SLOW,
+  );
+
+  test(
+    "delegation-gaps.md fix 2: the note of the run ends the rl-reviewer prompt; with no note, the prompt has no note block",
+    async () => {
+      const h = await setup();
+      const plain = await h.hung(2, "general");
+      expect(plain.agents["rl-reviewer"]?.prompt).not.toContain("# Your instructions");
+      const note = "  Check the retry loop first.\nIgnore the docs folder.  ";
+      expect(h.review.saveBrief(h.db, h.prs[2] as number, { note, profile: "general" })).not.toBeNull();
+      const noted = await h.hung(2, "general");
+      const tail =
+        "\n\n# Your instructions\n\nThe user wrote the text below. Follow it.\n\nCheck the retry loop first.\nIgnore the docs folder.";
+      expect(noted.agents["rl-reviewer"]?.prompt).toBe(`${plain.agents["rl-reviewer"]?.prompt}${tail}`);
+      expect(noted.stdin).toContain("# Your instructions\n\nThe user wrote the text below. Follow it.\n\nCheck the retry loop first.");
     },
     SLOW,
   );

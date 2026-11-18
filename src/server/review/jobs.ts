@@ -189,6 +189,7 @@ import {
   buildRereviewPrompt,
   buildSalvagePrompt,
   buildVerifyPrompt,
+  noteSection,
   type PromptInput,
   type ReplyThread,
 } from "./prompt";
@@ -1078,12 +1079,15 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(
-                  withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs, !broad(profile)), folders, always),
-                  used,
-                  finder,
+                withInstructions(
+                  withMcp(
+                    withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs, !broad(profile)), folders, always),
+                    used,
+                    finder,
+                  ),
+                  instructions.text,
                 ),
-                instructions.text,
+                noteSection(brief.note),
               ),
             }
           : {},

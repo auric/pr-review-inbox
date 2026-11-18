@@ -167,6 +167,8 @@ export function createGitMcp(pins: Pins) {
           `--max-count=${a.max_count}`,
           "--date=short",
           "--format=%H %ad %an%n    %s",
+          // git allows --follow with exactly one path.
+          ...(a.path ? ["--follow"] : []),
           "--end-of-options",
           range,
           "--",
@@ -202,6 +204,9 @@ export function createGitMcp(pins: Pins) {
           "--no-color-by-age",
           ...NO_DIFF_HELPERS,
           "-l",
+          // One -C looks only at files changed in the same commit. -C -C and -C -C -C search more and cost more.
+          "-M",
+          "-C",
           "--date=short",
           "-L",
           `${a.start_line},+${a.max_lines}`,

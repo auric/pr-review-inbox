@@ -53,6 +53,13 @@ const starter = (t: ReplyThread) =>
 // posted: the IDs in earlier of findings that the user posted. Each has an open thread.
 export type RereviewInput = PromptInput & { since: string; rangeBase: string; earlier: number[]; posted?: number[] };
 
+const NOTE_TRUST = "The user wrote the text below. Follow it.";
+
+// The note of a review run for the rl-reviewer prompt (docs/plans/review-v2/delegation-gaps.md fix 2). An empty note gives "",
+// so withInstructions keeps the agent prompt unchanged.
+export const noteSection = (note: string): string =>
+  note.trim() ? ["# Your instructions", "", NOTE_TRUST, "", note.trim()].join("\n") : "";
+
 // The Tools, Project instructions, Your instructions, and Metadata sections.
 // The agent prompt owns the trust, docs, MCP, and skill rules (catalog.ts). Do not repeat them here.
 // The project instructions come right before the note: they are standing rules, and the note of this run comes last, so it is the newest word.
@@ -106,7 +113,7 @@ function common(i: PromptInput, rereview?: { earlier: number[] }, question?: str
     ...(i.instructions ? [i.instructions.trimEnd(), ""] : []),
     "# Your instructions",
     "",
-    ...(question === undefined ? ["The user wrote the text below. Follow it.", "", i.note.trim() || "(none)"] : [question]),
+    ...(question === undefined ? [NOTE_TRUST, "", i.note.trim() || "(none)"] : [question]),
     "",
     "# Metadata",
     "",
