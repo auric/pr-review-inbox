@@ -873,6 +873,11 @@ button.rl-ll:hover {
 [data-jump]:not(.rl-dr):focus {
   background: var(--sel);
 }
+/* A form control shows no background, so it takes the focus ring. */
+input[data-jump]:focus {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
 /* A diff row keeps its added or removed color. Its mark is a band inside the focus ring of .rl-dr:focus. */
 .rl-dr[data-jump]:focus {
   box-shadow: inset 0 0 0 4px var(--sel);

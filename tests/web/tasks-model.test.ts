@@ -299,6 +299,21 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     });
   });
 
+  test("spec.md section 6.1: a minimum of large hides Change size; a lower minimum shows it", () => {
+    const t = task({
+      state: "spec_draft",
+      size: "large",
+      plan: { ...PLAN, minimum: "large", rules: ["Set to large: the estimate is over 400 changed lines."] },
+      estimate: { ...ESTIMATE, lines: 900 },
+    });
+    expect(shape(view(t)).more).toEqual(["Edit", "Stop"]);
+    const medium = task({ state: "spec_draft", size: "medium", plan: { ...PLAN, minimum: "medium" }, estimate: ESTIMATE });
+    expect(shape(view(medium)).more).toEqual(["Edit", "Change size", "Stop"]);
+    // The plan screen has no size field with sub-tasks.
+    const sub = task({ state: "spec_draft", size: "small", plan: PLAN, estimate: ESTIMATE, subtasks: [] });
+    expect(shape(view(sub)).more).toEqual(["Edit", "Stop"]);
+  });
+
   test("spec_draft, approved medium: the plan waits, and the view says that this version cannot open the spec PR", () => {
     const v = view(task({ state: "spec_draft", size: "medium", plan: { ...PLAN, approved: true }, estimate: ESTIMATE }));
     expect(v.primary).toBeNull();

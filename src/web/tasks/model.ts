@@ -762,7 +762,14 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
       ...base,
       status: planSentence(t),
       primary: { kind: "approve", label: "Approve the plan" },
-      more: [{ kind: "edit-plan", label: "Edit" }, { kind: "change-size", label: "Change size" }, STOP],
+      // spec.md section 6.1: a minimum of large leaves one size, and a task with sub-tasks shows no size.
+      more: [
+        { kind: "edit-plan", label: "Edit" },
+        ...(t.plan.minimum !== "large" && t.subtasks === null && !t.plan.adding
+          ? [{ kind: "change-size" as const, label: "Change size" }]
+          : []),
+        STOP,
+      ],
       screen: "plan",
       needsYou: true,
     };

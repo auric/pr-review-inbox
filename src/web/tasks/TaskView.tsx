@@ -7,7 +7,7 @@
 // new primary button after a state change.
 import { useQueryClient } from "@tanstack/react-query";
 import { Ellipsis, TriangleAlert } from "lucide-react";
-import { forwardRef, type ReactNode, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { type FormEvent, forwardRef, type ReactNode, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -76,6 +76,8 @@ import { TellClaude } from "./TellClaude";
 import { TimeLimitDialog } from "./TimeLimitDialog";
 
 // The shell keys of the Task view (keys.ts): j and k move over the steps and parts, Enter runs the primary action, Esc closes the run log.
+const LIMIT_FORM = "task-limit-form";
+
 export type TaskApi = { step: (d: 1 | -1) => void; primary: () => void; layer: (target: EventTarget | null) => Layer; close: () => void };
 
 type Tab = "questions" | "attachments" | "spec" | "plan" | "log" | "diff";
@@ -190,6 +192,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const root = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
   const focusAfter = useRef<string | null>(null);
+  const menuFocus = useRef<HTMLElement | null>(null);
 
   const send = (a: TaskAction, after?: () => void) => {
     setErrorText(null);
@@ -332,7 +335,9 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         return d && focus(`doc-edit-${d}`);
       }
       case "change-size":
-        return focus(`task-size-${t.size ?? t.plan?.proposed ?? "small"}`);
+        // The item runs inside the open menu, so the menu close moves the focus (finalFocus).
+        menuFocus.current = document.getElementById(`task-size-${t.size ?? t.plan?.proposed ?? "small"}`);
+        return;
       // ps5-plan.md section 4.2: the part comes from the action. Skip and Start again wait for one confirm, and Cancel sends nothing.
       case "skip": {
         if (!target) return;
@@ -576,7 +581,22 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
                     <Ellipsis aria-hidden data-icon="inline-end" />
                   </DropdownMenuTrigger>
                 </Hint>
-                <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuContent
+                  align="start"
+                  className="w-64"
+                  finalFocus={() => {
+                    const el = menuFocus.current;
+                    menuFocus.current = null;
+                    if (!el) return true;
+                    // A mouse click shows no :focus-visible, so data-jump marks the target ([data-jump]:focus in index.css).
+                    el.setAttribute("data-jump", "");
+                    // The lib of TypeScript 5 has no focusVisible.
+                    el.focus({ focusVisible: true } as FocusOptions);
+                    el.addEventListener("blur", () => el.removeAttribute("data-jump"), { once: true });
+                    el.scrollIntoView({ block: "center" });
+                    return false;
+                  }}
+                >
                   <DropdownMenuGroup>
                     {view.more.map((a) => (
                       <DropdownMenuItem key={a.kind} onClick={() => run(a.kind, partFor(a))}>
@@ -796,6 +816,44 @@ function Content(props: {
       {children}
     </section>
   );
+  // "Change the limit" (ps5-plan.md D1). form: the ID of a form outside the plan form, because forms do not nest.
+  const limitButton = (
+    <div>
+      <Button type="button" variant="outline" size="sm" disabled={busy || t.working} onClick={() => props.onRun("change-limit")}>
+        Change the limit
+      </Button>
+    </div>
+  );
+  const saveLimit = (e: FormEvent) => {
+    e.preventDefault();
+    const n = Number(props.limit);
+    if (Number.isInteger(n) && n > 0) props.onSend({ kind: "limit", lineBudget: n });
+  };
+  const limitFields = (placeholder: string, form?: string) => (
+    <>
+      <div className="grid gap-1 text-sm">
+        <label htmlFor="task-limit" className="text-ink-2">
+          New line limit for this task
+        </label>
+        <Input
+          id="task-limit"
+          name="lineBudget"
+          type="number"
+          min={1}
+          max={100000}
+          inputMode="numeric"
+          className="h-8 w-32"
+          form={form}
+          value={props.limit}
+          placeholder={placeholder}
+          onChange={(e) => props.onLimit(e.target.value)}
+        />
+      </div>
+      <Button type="submit" variant="outline" form={form} disabled={busy || !props.limit}>
+        Save the limit
+      </Button>
+    </>
+  );
 
   if (screen === "questions") {
     const source = questionSource(t);
@@ -834,20 +892,31 @@ function Content(props: {
         />
       );
     if (!t.plan || t.plan.approved) return null;
+    // spec.md section 6.1: only the line rule sets large, and a new limit can lift it.
+    const limit =
+      t.plan.minimum !== "large" ? null : props.limitOpen ? (
+        <div className="flex flex-wrap items-end gap-2">{limitFields(String(t.estimate?.lines ?? t.plan.budget), LIMIT_FORM)}</div>
+      ) : (
+        limitButton
+      );
     return (
-      <PlanApproval
-        key={[...t.plan.commands.map((c) => c.id), ...t.plan.allow.map((a) => `${a.id}=${a.pattern}`)].join(",")}
-        t={t}
-        runner={runner}
-        busy={busy}
-        onSize={(size) => props.onSend({ kind: "size", size })}
-        onApprove={(input) => props.onSend({ kind: "plan", input })}
-        onBase={props.onBase}
-        onRepo={(taskRepo, add) => props.onSend({ kind: "repo", taskRepo, add })}
-        tracker={props.tracker}
-        onMove={props.onMove}
-        onHold={props.onHold}
-      />
+      <>
+        <form id={LIMIT_FORM} hidden onSubmit={saveLimit} />
+        <PlanApproval
+          key={[...t.plan.commands.map((c) => c.id), ...t.plan.allow.map((a) => `${a.id}=${a.pattern}`)].join(",")}
+          t={t}
+          runner={runner}
+          busy={busy}
+          onSize={(size) => props.onSend({ kind: "size", size })}
+          onApprove={(input) => props.onSend({ kind: "plan", input })}
+          onBase={props.onBase}
+          onRepo={(taskRepo, add) => props.onSend({ kind: "repo", taskRepo, add })}
+          tracker={props.tracker}
+          onMove={props.onMove}
+          onHold={props.onHold}
+          limit={limit}
+        />
+      </>
     );
   }
 
@@ -920,42 +989,10 @@ function Content(props: {
             ))}
           </ul>
         )}
-        {over && !props.limitOpen && (
-          <div>
-            <Button variant="outline" size="sm" disabled={busy || t.working} onClick={() => props.onRun("change-limit")}>
-              Change the limit
-            </Button>
-          </div>
-        )}
+        {over && !props.limitOpen && limitButton}
         {over && props.limitOpen && (
-          <form
-            className="flex flex-wrap items-end gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const n = Number(props.limit);
-              if (Number.isInteger(n) && n > 0) props.onSend({ kind: "limit", lineBudget: n });
-            }}
-          >
-            <div className="grid gap-1 text-sm">
-              <label htmlFor="task-limit" className="text-ink-2">
-                New line limit for this task
-              </label>
-              <Input
-                id="task-limit"
-                name="lineBudget"
-                type="number"
-                min={1}
-                max={100000}
-                inputMode="numeric"
-                className="h-8 w-32"
-                value={props.limit}
-                placeholder={String(part?.lines ?? budget ?? "")}
-                onChange={(e) => props.onLimit(e.target.value)}
-              />
-            </div>
-            <Button type="submit" variant="outline" disabled={busy || !props.limit}>
-              Save the limit
-            </Button>
+          <form className="flex flex-wrap items-end gap-2" onSubmit={saveLimit}>
+            {limitFields(String(part?.lines ?? budget ?? ""))}
           </form>
         )}
         {b?.kind === "denied_path" && step && (

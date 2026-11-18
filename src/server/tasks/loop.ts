@@ -98,6 +98,7 @@ import {
   budgetOf,
   buildsAtOnceOf,
   currentPart,
+  docsOf,
   dropSessions,
   holdBlocked,
   instructTarget,
@@ -4017,11 +4018,13 @@ export function createLoop(opts: LoopOptions) {
     },
 
     // POST /api/tasks/:id/limit. ps5-plan.md D1: "Change the limit" sets the line limit of the task while no driver runs. It needs no
-    // reason, keeps every reason, and starts nothing.
+    // reason, keeps every reason, and starts nothing. spec.md section 6.1: a plan that waits for its approval takes it too, and the size
+    // rules use the new limit.
     limit(db: Database, id: number, input: { version: number; lineBudget: number }): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
-      if (t.state !== "implementing" && t.state !== "ready") return conflict(db, id, TASK_STATE_TEXT[t.state]);
+      const waits = t.state === "spec_draft" && docsOf(t)?.approved === false;
+      if (t.state !== "implementing" && t.state !== "ready" && !waits) return conflict(db, id, TASK_STATE_TEXT[t.state]);
       if (drivers.has(id)) return conflict(db, id, WORKING);
       setSettings(db, { task: id, version: t.version }, { ...taskSettingsOf(t), lineBudget: input.lineBudget }, now(), false);
       changed(id);

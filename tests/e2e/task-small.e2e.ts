@@ -373,6 +373,80 @@ test("a small task: the Build form, questions, plan with the branch and the warn
   await expect(page.locator('[aria-current="step"]')).toHaveText("Build", { timeout: 60_000 });
 });
 
+// docs/plans/review-v2/spec.md section 6.1: an estimate over the line limit leaves large only. A new limit on the plan screen unlocks
+// small, "Change size" focuses the size with a visible ring, and the small plan approves.
+test("a plan over the line limit: the rule line, Change the limit, then small, Change size, and Approve", async ({ page }) => {
+  test.setTimeout(240_000);
+  await control("claude", {
+    stream: "task",
+    spec: { ...SPEC, estimate: { ...SPEC.estimate, lines: 50 } },
+    review: { summary: "A small change.", risks: [], questions: [], coverage: NO_COVERAGE, findings: [] },
+  });
+  await openApp(page);
+  await page.getByLabel("Bitbucket URL").fill(FAKE_URL);
+  await page.getByLabel("Access token").fill(E2E_TOKEN);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByLabel("Access token")).toBeHidden();
+  await control("state", { task: true });
+  expect((await api(page, "PUT", "/api/settings/jira", { baseUrl: JIRA_URL, token: E2E_JIRA_TOKEN })).status).toBe(200);
+  const prs = (await api(page, "GET", "/api/prs")).json as { id: number; prId: number }[];
+  const prA = prs.find((p) => p.prId === 1001)?.id as number;
+  expect((await api(page, "PUT", `/api/prs/${prA}/clone`, { path: await makeClone(1001) })).status).toBe(200);
+  const path = "/api/repos/PROJ1/sample-repo-2/task-settings";
+  const { project: _p, repo: _r, warnedAt: _w, ...rest } = (await api(page, "GET", path)).json as Record<string, unknown>;
+  expect((await api(page, "PUT", path, { ...rest, lineBudget: LIMIT })).status).toBe(200);
+  await page.reload();
+
+  await buildTask(page, "PROJ1/sample-repo-2");
+  await expect(page).toHaveURL(/\/tasks\/\d+$/);
+  await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
+  await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();
+  await expect(primary(page)).toHaveText("Approve the plan", { timeout: 60_000 });
+
+  // 1. Only large fits. The rule line explains each disabled size, and the More menu has no "Change size".
+  const rules = page.locator("#task-size-rules");
+  await expect(rules).toContainText("Only large fits.");
+  await expect(rules).toContainText(`Set to large: the estimate is over ${LIMIT} changed lines.`);
+  const small = page.getByRole("radio", { name: /^Small: one PR/ });
+  await expect(small).toBeDisabled();
+  await expect(small).toHaveAttribute("aria-describedby", "task-size-rules");
+  await page.getByRole("button", { name: "More actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Change size" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  // 2. A new limit for this task. Enter in its field saves the limit and does not approve the plan.
+  await page.getByRole("button", { name: "Change the limit" }).click();
+  const field = page.getByLabel("New line limit for this task");
+  await expect(field).toBeFocused();
+  await field.fill("100");
+  const saved = page.waitForResponse((r) => r.request().method() === "POST" && /\/api\/tasks\/\d+\/limit$/.test(r.url()));
+  await field.press("Enter");
+  expect((await saved).status()).toBe(200);
+  await expect(rules).toHaveCount(0);
+  await expect(small).toBeEnabled();
+  await expect(page.locator('[aria-current="step"]')).toHaveText("Plan");
+
+  // 3. "Change size" focuses the picked size with a visible ring.
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Change size" }).click();
+  const large = page.locator("#task-size-large");
+  await expect(large).toBeFocused();
+  await expect(large).toBeInViewport();
+  expect(await large.evaluate((e) => getComputedStyle(e).outlineStyle)).toBe("solid");
+
+  // 4. Small, then the approval goes to the build.
+  const sized = page.waitForResponse((r) => r.request().method() === "POST" && /\/api\/tasks\/\d+\/size$/.test(r.url()));
+  await page.locator("label", { has: small }).click();
+  expect((await sized).status()).toBe(200);
+  await expect(small).toBeChecked();
+  await page.getByRole("checkbox", { name: "I understand" }).check();
+  const approved = page.waitForResponse((r) => r.request().method() === "POST" && /\/api\/tasks\/\d+\/plan$/.test(r.url()));
+  await primary(page).click();
+  expect((await approved).status()).toBe(200);
+  await expect(page.locator('[aria-current="step"]')).toHaveText("Build", { timeout: 60_000 });
+});
+
 // docs/plans/review-v2/spec.md section 6.17: fixtures/jira/issue.json lists a PNG and a log. The fake Jira serves both.
 test("the Build form lists the attachments with boxes and asks the policy question once; each step gets the ticked files", async ({
   page,

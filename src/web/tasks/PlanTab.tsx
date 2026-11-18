@@ -67,6 +67,7 @@ import {
 } from "./model";
 
 export const PLAN_FORM = "task-plan";
+const SIZE_RULES = "task-size-rules";
 
 // spec.md section 6.3: the build needs a test command to see red and green tests (loop.ts NO_TEST).
 export function planProblem(t: TaskDto, picks: readonly CommandDraft[], warned: boolean): string | null {
@@ -100,6 +101,8 @@ export function PlanApproval(props: {
   tracker?: string;
   onMove?: (issue: { key: string; status: string | null }) => void;
   onHold?: (reason: string | null) => void;
+  // "Change the limit" next to the rule lines, when the line rule sets the minimum.
+  limit?: ReactNode;
 }) {
   const { t, runner } = props;
   const names = useShellNames();
@@ -224,11 +227,17 @@ export function PlanApproval(props: {
         <p className="m-0 text-sm text-ink-2">
           {runner} proposes: {plan.proposed}.
         </p>
-        {plan.rules.map((r) => (
-          <p key={r} className="m-0 text-sm text-ink-2">
-            {r}
-          </p>
-        ))}
+        {plan.rules.length > 0 && (
+          <div id={SIZE_RULES} className="grid gap-1.5">
+            {plan.minimum === "large" && <p className="m-0 text-sm font-medium">Only large fits.</p>}
+            {plan.rules.map((r) => (
+              <p key={r} className="m-0 text-sm text-ink-2">
+                {r}
+              </p>
+            ))}
+          </div>
+        )}
+        {props.limit}
         {TASK_SIZES.map((s) => {
           const low = sizeRank(s) < sizeRank(plan.minimum);
           return (
@@ -245,6 +254,7 @@ export function PlanApproval(props: {
                 name="task-size"
                 checked={size === s}
                 disabled={low || props.busy}
+                aria-describedby={low ? SIZE_RULES : undefined}
                 className="m-0 mt-[3px] size-4 accent-foreground"
                 onChange={() => props.onSize(s)}
               />

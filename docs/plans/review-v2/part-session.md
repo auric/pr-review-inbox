@@ -1163,7 +1163,7 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | New (PS6): POST /tasks/:id/parts/:part/comments, /comments/send | none (reply run); GO with follow (purpose comments) | the sentence of the state |
 | New (PS7a): POST /tasks/:id/parts/:part/ci | GO with follow (purpose ci) | the sentence of the state |
 | New (PS7b): POST /tasks/:id/parts/:part/ci-mode | mode off | "Red-build fixes are off." |
-| POST /tasks/:id/limit | none: "Change the limit" sets the task line limit only, keeps every reason, and starts nothing (ps5-plan.md D1) | TASK_STATE_TEXT outside implementing and ready; WORKING while a driver works |
+| POST /tasks/:id/limit | none: "Change the limit" sets the task line limit only, keeps every reason, and starts nothing (ps5-plan.md D1) | TASK_STATE_TEXT outside implementing, ready, and a spec_draft plan that waits for its approval; WORKING while a driver works |
 | Gone in PS5-S2 (built): /pause, /dismiss, /parts/:part/setup, and the `keep` form of /limit | Hold and the resume options leave and setup replace them | the three routes answer 404; the `keep` form answers 400 |
 
 /limit stays with `lineBudget` only (ps5-plan.md D1).

@@ -1066,6 +1066,39 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
   );
 
   test(
+    "spec.md section 6.1: a new line limit on a plan that waits for its approval unlocks small, and the small plan approves",
+    async () => {
+      const h = await setup();
+      h.scenario({ spec: specWith({ estimate: { ...echoSpec().estimate, lines: 900 } }) });
+      const t = await h.toPlan();
+      const r = await h.json<TaskDto>(`/api/tasks/${t.id}/limit`, { body: { version: t.version, lineBudget: 1000 } });
+      expect([r.status, r.body.state, r.body.size, r.body.settings.lineBudget]).toEqual([200, "spec_draft", "large", 1000]);
+      expect([r.body.plan?.minimum, r.body.plan?.rules, r.body.plan?.budget]).toEqual(["small", [], 1000]);
+      const s = await h.json<TaskDto>(`/api/tasks/${t.id}/size`, { body: { version: r.body.version, size: "small" } });
+      expect([s.status, s.body.size]).toEqual([200, "small"]);
+      const body = { version: s.body.version, size: "small", commands: ["new-1"], warning: true };
+      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body });
+      expect([ok.status, ok.body.state]).toEqual([200, "implementing"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "/limit refuses an approved plan that waits for its spec PR",
+    async () => {
+      const h = await setup();
+      h.scenario({ spec: specWith({ estimate: { ...echoSpec().estimate, lines: 900 } }) });
+      const t = await h.toPlan();
+      const body = { version: t.version, size: "large", commands: ["new-1"], warning: true };
+      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body });
+      expect([ok.status, ok.body.state, ok.body.plan?.approved]).toEqual([200, "spec_draft", true]);
+      const r = await h.json<TaskConflict>(`/api/tasks/${t.id}/limit`, { body: { version: ok.body.version, lineBudget: 1000 } });
+      expect([r.status, r.body.error]).toEqual([409, "The plan is not approved yet."]);
+    },
+    SLOW,
+  );
+
+  test(
     "plan approval: the first plan of a repository needs the warning and stores the picked commands; a small plan goes to the build",
     async () => {
       const h = await setup();
