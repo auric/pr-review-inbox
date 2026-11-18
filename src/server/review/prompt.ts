@@ -183,10 +183,13 @@ export function buildRereviewPrompt(i: RereviewInput): string {
 // docs/plans/review-v2/spec.md section 1.6: the verify phase. The candidate text stays in ./context/candidates.md.
 // rereview: BASE of the git tools is the base of the reviewed range, and the change to check runs from the merge base.
 // asked: the finder questions in candidates.md (docs/plans/review-v2/review-questions.md). risks: the finder risks in candidates.md
-// (docs/plans/review-v2/risk-check.md section 4.2).
-export function buildVerifyPrompt(i: PromptInput & { count: number; asked?: number; risks?: number; rereview: boolean }): string {
+// (docs/plans/review-v2/risk-check.md section 4.2). obligations: the check also lists the obligations (obligations.md section 4.1).
+export function buildVerifyPrompt(
+  i: PromptInput & { count: number; asked?: number; risks?: number; obligations?: boolean; rereview: boolean },
+): string {
   const asked = i.asked ?? 0;
   const risks = i.risks ?? 0;
+  const own = i.obligations && i.count + asked + risks === 0;
   const kinds = [
     ...(i.count || !(asked || risks) ? [[`${i.count} ${i.count === 1 ? "candidate" : "candidates"}`, "each candidate"]] : []),
     ...(asked ? [[`${asked} ${asked === 1 ? "question" : "questions"}`, "each question"]] : []),
@@ -199,7 +202,9 @@ export function buildVerifyPrompt(i: PromptInput & { count: number; asked?: numb
   return [
     "# Task",
     "",
-    `Check the ${list(0)} in ./context/candidates.md against the change ${i.mergeBase}..${i.head} in ./repo. Give one verdict for ${list(1)}.`,
+    own
+      ? `Check the obligations of the change ${i.mergeBase}..${i.head} in ./repo, as your instructions say.`
+      : `Check the ${list(0)} in ./context/candidates.md against the change ${i.mergeBase}..${i.head} in ./repo. Give one verdict for ${list(1)}.${i.obligations ? " Then check the obligations of the change, as your instructions say." : ""}`,
     "",
     ...common({ ...i, candidates: true }, i.rereview ? { earlier: [] } : undefined),
   ].join("\n");

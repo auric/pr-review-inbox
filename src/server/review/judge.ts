@@ -3,16 +3,20 @@
 
 // The run end (jobs.ts): turns a runner outcome into the stored status, summary, items, answer, or fix notes and edits.
 // A review run ends in two steps: judge() validates the finder result, and settle() merges the verdicts of the verify phase.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 import type { ZodType } from "zod";
-import { parseCut } from "../../shared/caps";
+import { cutToCaps, parseCut } from "../../shared/caps";
 import { acceptedTargets, consultCaps, consultOutput } from "../../shared/consult";
 import {
   type FinderQuestions,
   type FinderRisks,
   MAX_NOTE,
+  type ObligationOutcome,
+  type Obligations,
   type RiskOutcome,
   type RunPhase,
   type RunSummary,
@@ -24,6 +28,7 @@ import {
   type AnchoredFinding,
   askResult,
   type Check,
+  type Defect,
   type DiscussResult,
   discussResult,
   type ExplainResult,
@@ -37,6 +42,7 @@ import {
   MAX_DIAGRAMS,
   type NoteProposal,
   neverHidden,
+  type Obligation,
   type Question,
   type ReplyPayload,
   type RereviewResult,
@@ -66,6 +72,7 @@ import {
   type AskedThread,
   anchorer,
   type CheckedEarlier,
+  collapse,
   type EarlierItem,
   earlierCases,
   MAX_FILE_CHARS,
@@ -382,8 +389,17 @@ export function addUsage(a: RunUsage | null, b: RunUsage | null): RunUsage | nul
 
 // The verify process of a review run (spec.md section 1.6). written: the candidates in candidates.md, from candidate 1. asked: the
 // finder questions after them, numbered from written + 1 (context-files.ts candidatesFile). risks: the finder risks after the
-// questions, numbered from written + asked + 1. Absent: none (docs/plans/review-v2/risk-check.md section 4.6).
-export type CheckRun = { o: RunOutcome; startedAt: number; endedAt: number; written: number; asked: number; risks?: number };
+// questions, numbered from written + asked + 1. Absent: none (docs/plans/review-v2/risk-check.md section 4.6). obligations: the check
+// also listed the obligations of the change (docs/plans/review-v2/obligations.md section 4.1). Absent: no.
+export type CheckRun = {
+  o: RunOutcome;
+  startedAt: number;
+  endedAt: number;
+  written: number;
+  asked: number;
+  risks?: number;
+  obligations?: boolean;
+};
 
 // One verdict per candidate, per finder question, and per finder risk in candidates.md. An unknown or a second verdict goes to skipped.
 // A candidate without a verdict stays unchecked, and its line in skipped makes the run incomplete (spec.md section 1.9). A question
@@ -481,7 +497,11 @@ export type SettleInput = {
   placed?: ReadonlyMap<number, AnchoredFinding>;
   // The risk check is on (catalog.ts riskCheck). Absent or false: the summary gets no finderRisks key.
   risks?: boolean;
+  // placeObligations: the app checks of the obligations, by list index.
+  obligations?: PlacedObligations;
 };
+
+const OBLIGATION_LIST = verifyResult.pick({ obligations: true });
 
 const mark = (v: VerifyVerdict): VerifyMark => ({
   verdict: v.verdict,
@@ -560,11 +580,12 @@ function questionVerdicts(check: CheckRun | null): Map<number, VerifyVerdict> {
 
 // docs/plans/review-v2/review-questions.md: the finding that a confirmed finder question becomes. The check reads the code, so the
 // evidence status is code and the confidence high. The trigger stays empty: the check reason holds it, and the card shows that once.
-// category "risk": a confirmed finder risk (docs/plans/review-v2/risk-check.md section 4.4).
+// category "risk": a confirmed finder risk (docs/plans/review-v2/risk-check.md section 4.4). category "obligation": a missing
+// obligation (docs/plans/review-v2/obligations.md section 4.6).
 export const answerFinding = (
-  v: VerifyVerdict,
-  at: NonNullable<VerifyVerdict["finding"]>,
-  category: "question" | "risk" = "question",
+  v: Pick<VerifyVerdict, "severity" | "reason" | "evidence">,
+  at: Defect,
+  category: "question" | "risk" | "obligation" = "question",
 ): Finding => ({
   ...at,
   severity: v.severity,
@@ -588,6 +609,11 @@ export async function placeAnswers(ws: Workspace, check: CheckRun | null): Promi
       ? [{ n, finding: answerFinding(v, v.finding, check && n > check.written + check.asked ? "risk" : "question") }]
       : [],
   );
+  return anchorAll(ws, made);
+}
+
+// The finder validator pass of placeAnswers and placeObligations: n keys each made finding. A dropped place gives no entry.
+async function anchorAll(ws: Workspace, made: { n: number; finding: Finding }[]): Promise<Map<number, AnchoredFinding>> {
   const out = new Map<number, AnchoredFinding>();
   if (!made.length) return out;
   const findings = made.map((m) => m.finding);
@@ -608,6 +634,110 @@ export async function placeAnswers(ws: Workspace, check: CheckRun | null): Promi
   return out;
 }
 
+// ---------- Obligations (docs/plans/review-v2/obligations.md sections 4.4 to 4.6) ----------
+
+// The obligations of a finished check with the mode on. Empty: the mode is off, or the check failed.
+function obligationsOf(check: CheckRun | null): Obligation[] {
+  if (!check?.obligations || check.o.status !== "completed") return [];
+  const parsed = parseCut(verifyResult, check.o.result?.structured_output);
+  return parsed.success ? parsed.data.obligations : [];
+}
+
+// section 4.4 steps 1 and 2: the only files of ./context that a cite can name. They are copies of the task text and the PR text.
+const CITE_CONTEXT = ["context/task.md", "context/pr.md", "context/pr-context.md"];
+
+// Where the cite check reads the file. null: the path can leave the snapshot, so the check fails.
+export function citeSource(raw: string): { kind: "context"; name: string } | { kind: "repo"; path: string } | null {
+  const p = repoPath(raw);
+  if (p === null) return null;
+  return CITE_CONTEXT.includes(p) ? { kind: "context", name: p.slice("context/".length) } : { kind: "repo", path: p };
+}
+
+// section 4.4 step 3: text undefined means that the file is absent at the head.
+export const citeHolds = (quote: string, text: string | undefined) => {
+  const q = collapse(quote);
+  return q !== "" && text !== undefined && collapse(text).includes(q);
+};
+
+// section 4.6: the finding of a missing obligation. Step 6 lowers blocker to major.
+export const obligationFinding = (o: Obligation, at: Defect): Finding =>
+  answerFinding(
+    {
+      severity: o.severity === "blocker" ? "major" : o.severity,
+      reason: `${o.must.trim()} ${o.consumer.trim()}`,
+      evidence: `${o.cite.path}: ${o.cite.quote}`,
+    },
+    at,
+    "obligation",
+  );
+
+// placeObligations, by list index: the missing obligations with a passed cite, and those with a place that the validator kept.
+export type PlacedObligations = { cited: ReadonlySet<number>; placed: ReadonlyMap<number, AnchoredFinding> };
+
+// section 4.4: the app checks of each missing obligation. The cite reads a repository file from the cache clone at the head, never
+// from the sanitized worktree. A context cite reads only the files of CITE_CONTEXT.
+export async function placeObligations(ws: Workspace, check: CheckRun | null): Promise<PlacedObligations> {
+  const missing = obligationsOf(check).flatMap((o, i) => (o.status === "missing" ? [{ i, o, src: citeSource(o.cite.path) }] : []));
+  const repo = missing.flatMap((m) => (m.src?.kind === "repo" ? [{ path: m.src.path, side: "new" as const }] : []));
+  const blobs = repo.length ? await readBlobs(ws, repo) : null;
+  const context = (name: string) => {
+    try {
+      return readFileSync(join(ws.context, name), "utf8");
+    } catch {
+      return undefined;
+    }
+  };
+  const cited = new Set(
+    missing
+      .filter(({ o, src }) =>
+        citeHolds(o.cite.quote, src === null ? undefined : src.kind === "context" ? context(src.name) : blobs?.newFiles.get(src.path)),
+      )
+      .map((m) => m.i),
+  );
+  const made = missing.flatMap(({ i, o }) => (cited.has(i) && o.finding ? [{ n: i, finding: obligationFinding(o, o.finding) }] : []));
+  return { cited, placed: await anchorAll(ws, made) };
+}
+
+// section 4.5: what settle knows about one obligation. cited: the cite check passed. at: the anchored finding. blocks: the text of each
+// block of candidates.md, by its number: the candidate title, or the question or risk text.
+export type ObligationStep = { cited: boolean; at?: AnchoredFinding; blocks: ReadonlyMap<number, string> };
+export type ObligationEnd = { outcome: ObligationOutcome; note: string; item?: FindingPayload };
+
+// section 4.5, rows O1 to O8: the outcome of one obligation. The first row that matches wins. Only found makes an item.
+export function obligationOutcome(o: Obligation, s: ObligationStep): ObligationEnd {
+  switch (o.status) {
+    case "met":
+      return { outcome: "met", note: `The check says: ${o.evidence.trim()}` };
+    case "deferred":
+      return { outcome: "deferred", note: `Deferred: ${o.evidence.trim()}` };
+    case "covered": {
+      const same = o.duplicateOf === null ? undefined : s.blocks.get(o.duplicateOf);
+      if (same !== undefined) return { outcome: "covered", note: `Same point as: ${same}` };
+      return { outcome: "open", note: "The check named no block for this repeat." };
+    }
+    case "missing":
+      if (!s.cited) return { outcome: "open", note: `The cited text is not in ${o.cite.path}.` };
+      if (!s.at) return { outcome: "open", note: "Missing, but the check could not place it." };
+      return {
+        outcome: "found",
+        note: s.at.title?.trim() || s.at.body,
+        item: {
+          ...s.at,
+          verify: {
+            verdict: "confirmed",
+            severity: s.at.severity,
+            reason: `${o.must.trim()} ${o.consumer.trim()}`,
+            evidence: o.evidence,
+            duplicateOf: null,
+            by: "rl-verify",
+          },
+        },
+      };
+    case "unsure":
+      return { outcome: "open", note: `Not settled: ${o.evidence.trim()}` };
+  }
+}
+
 // The run end of a review run: the verdicts and the caps of each candidate, the items, and the summary (spec.md sections 1.7 and 1.8).
 export function settle(f: Found, s: SettleInput): Ending {
   const coverage = {
@@ -624,6 +754,9 @@ export function settle(f: Found, s: SettleInput): Ending {
   // risk-check.md section 4.4: the risk rows read these, because effectiveVerdicts turns each duplicate of a risk into unsure.
   let verdicts: ReadonlyMap<number, VerifyVerdict> = new Map();
   let failed: VerifySummary["failed"];
+  // obligations.md section 4.5: a check with zero blocks only lists the obligations, so none of its lines is a gap (AC-R54).
+  const own = s.check?.obligations === true && s.check.written + s.check.asked + (s.check.risks ?? 0) === 0;
+  let listed: Obligation[] | undefined;
   if (s.check) {
     const o = s.check.o;
     raw = cap(`${raw}\n# Check phase\n\n${rawOutput(o)}`);
@@ -638,15 +771,21 @@ export function settle(f: Found, s: SettleInput): Ending {
       verdicts = v.verdicts;
       got = effectiveVerdicts(f.candidates.slice(0, s.check.written), v.verdicts);
       const c = parsed.data.coverage;
-      const lines = [...parsed.cuts.map((x) => `Check: ${x}`), ...v.skipped];
-      coverage.skipped.push(...lines);
-      gaps.push(...lines);
+      // obligations.md section 4.5: the cut notes of the obligation list go to notChecked. cutToCaps names its schema path in each note.
+      const listCuts = new Set(s.check.obligations ? cutToCaps(OBLIGATION_LIST, o.result?.structured_output).notes : []);
+      const lines = [...parsed.cuts.filter((x) => !listCuts.has(x)).map((x) => `Check: ${x}`), ...v.skipped];
+      if (own) coverage.notChecked.push(...lines);
+      else {
+        coverage.skipped.push(...lines);
+        gaps.push(...lines);
+      }
       coverage.read = union(coverage.read, c.read);
-      coverage.notChecked.push(...[...c.skipped, ...c.notChecked, ...c.unavailable].map((x) => `Check: ${x}`));
+      coverage.notChecked.push(...[...c.skipped, ...c.notChecked, ...c.unavailable, ...listCuts].map((x) => `Check: ${x}`));
+      if (s.check.obligations) listed = parsed.data.obligations;
     }
     const down = unavailable(o, s.servers, []);
     coverage.unavailable = union(coverage.unavailable, down);
-    gaps.push(...down);
+    if (!own) gaps.push(...down);
   }
   const verify: VerifySummary = {
     candidates: f.candidates.length,
@@ -749,7 +888,26 @@ export function settle(f: Found, s: SettleInput): Ending {
       else if (r.item) riskQuestions.push(r.item.question);
     }
   }
-  if (failed) {
+  // obligations.md section 4.5: one outcome per obligation of a finished check with the mode on. The blocks of candidates.md hold the
+  // candidates, then the questions, then the risks.
+  let obligations: Obligations | undefined;
+  if (s.check && listed) {
+    const { written, asked } = s.check;
+    const blocks = new Map<number, string>([
+      ...f.candidates.slice(0, written).map((c): [number, string] => [c.n, c.finding.title?.trim() || c.finding.body]),
+      ...f.questions.slice(0, asked).map((q, k): [number, string] => [written + k + 1, q.text.trim()]),
+      ...f.summary.risks.slice(0, s.check.risks ?? 0).map((r, k): [number, string] => [written + asked + k + 1, r.trim()]),
+    ]);
+    obligations = { listed: listed.length, met: 0, deferred: 0, covered: 0, found: 0, open: 0, list: [] };
+    for (const [i, o] of listed.entries()) {
+      const r = obligationOutcome(o, { cited: s.obligations?.cited.has(i) === true, at: s.obligations?.placed.get(i), blocks });
+      obligations[r.outcome]++;
+      obligations.list.push({ source: o.source, must: o.must, outcome: r.outcome, note: r.note });
+      if (r.item) items.push(findingItem(r.item));
+    }
+  }
+  if (failed && own) coverage.notChecked.push("Obligations: not checked: the check did not finish.");
+  else if (failed) {
     verify.failed = failed;
     const line = `The check did not finish: ${findings(verify.unchecked)} not checked.${failed.text ? ` ${failed.text}` : ""}`;
     coverage.skipped.push(line);
@@ -759,7 +917,16 @@ export function settle(f: Found, s: SettleInput): Ending {
     raw,
     f.outcome,
     {
-      summary: { ...f.summary, coverage, volume: s.volume, verify, phases, finderQuestions, ...(finderRisks && { finderRisks }) },
+      summary: {
+        ...f.summary,
+        coverage,
+        volume: s.volume,
+        verify,
+        phases,
+        finderQuestions,
+        ...(finderRisks && { finderRisks }),
+        ...(obligations && { obligations }),
+      },
       items: [
         ...items,
         ...kept.map(questionItem),

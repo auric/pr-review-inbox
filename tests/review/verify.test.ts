@@ -11,14 +11,16 @@ import { join } from "node:path";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import {
+  obligationRules,
   PR_CONTEXT_RULES,
   RISK_BLOCK_RULES,
   SHIPPED_PROFILES,
   VERIFIER,
+  VERIFY_DELEGATE_OBLIGATIONS,
   VERIFY_DELEGATE_RISKS,
   VERIFY2,
 } from "../../src/server/review/catalog";
-import { historyFile } from "../../src/server/review/context-files";
+import { candidatesFile, historyFile } from "../../src/server/review/context-files";
 import { git, gitEnv } from "../../src/server/review/git";
 import { triage } from "../../src/server/review/items";
 import { createReviewJobs, verifyMaxTurns } from "../../src/server/review/jobs";
@@ -26,7 +28,7 @@ import type { GitRemote } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import type { ProfileInput, ReviewItemDto, RunDetail, RunDto } from "../../src/shared/dto";
-import { checkOf, displayGroup, type FindingPayload, type Question, REVIEW_PROMPT_VERSION } from "../../src/shared/review";
+import { checkOf, displayGroup, type FindingPayload, MAX_OBLIGATIONS, type Question, REVIEW_PROMPT_VERSION } from "../../src/shared/review";
 import { eventPhase } from "../../src/shared/run-log";
 import { FAKE_TOKEN } from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
@@ -58,7 +60,7 @@ async function waitFor(pred: () => boolean, ms = 30_000) {
 }
 
 // A bare remote. main adds a root CLAUDE.md and one in src/server and in web. PR 1 adds 30 lines to src/server/app.ts and one line to
-// web/main.ts. PR 2 is one commit after PR 1, for the re-review.
+// web/main.ts. PR 2 is one commit after PR 1, for the re-review. docs/guide.md is the same at the base and the head.
 async function remote(root: string) {
   mkdirSync(root, { recursive: true });
   const empty = join(root, "empty.gitconfig");
@@ -87,7 +89,11 @@ async function remote(root: string) {
     await g(["update-index", "--index-info"], `${entries.map(([path], i) => `100644 ${shas[i]}\t${path}`).join("\n")}\n`);
     return g(["commit-tree", await g(["write-tree"]), ...(parent ? ["-p", parent] : []), "-m", "c"]);
   }
-  const base = await commit(null, { "src/server/app.ts": `${lines(20, "a")}\n`, "web/main.ts": "export {};\n" });
+  const base = await commit(null, {
+    "src/server/app.ts": `${lines(20, "a")}\n`,
+    "web/main.ts": "export {};\n",
+    "docs/guide.md": "# Guide\n\nCall a3 before a4.\n",
+  });
   const target = await commit(base, {
     "CLAUDE.md": "Log no tokens.\n",
     "src/server/CLAUDE.md": `${RULE}\n`,
@@ -166,7 +172,16 @@ async function setup() {
     { ...general, id: "off", name: "Off", verifier: { mode: "off", model: null, effort: null } },
     { ...general, id: "variants", name: "Variants", variants: ["broad", "verify2"] },
     { ...general, id: "risks", name: "Risks", variants: ["risk-check"] },
+    { ...general, id: "obligations", name: "Obligations", variants: ["obligations"] },
+    {
+      ...general,
+      id: "obligations-off",
+      name: "Obligations off",
+      variants: ["obligations"],
+      verifier: { mode: "off", model: null, effort: null },
+    },
     explain,
+    { ...explain, id: "explain-obligations", name: "Explain obligations", variants: ["obligations"] },
   ];
   writeConfig(dir, { baseUrl: "https://bitbucket.example.invalid", userSlug: "me", notifications: false, profiles });
   const secrets = createSecrets(null);
@@ -821,6 +836,289 @@ describe("finder risks in the verify phase", () => {
       expect(d.run.summary?.finderRisks).toMatchObject({ listed: 3, open: 3 });
       expect(d.run.summary?.finderRisks?.list.map((x) => x.note)).toEqual(Array(3).fill("The check gave no verdict."));
       expect(d.run.summary?.coverage.skipped).toEqual([]);
+    },
+    SLOW,
+  );
+});
+
+// docs/plans/review-v2/obligations.md WP-OB1 (AC-R48 to AC-R54): under the variant "obligations", the check also lists the obligations
+// of the change. tests/review/obligations.test.ts holds the pure parts.
+describe("obligations in the verify phase", () => {
+  type Checked = Call & { context: Record<string, string>; agents: Record<string, { prompt: string }> };
+  const NONE = { read: [], skipped: [], unavailable: [], notChecked: [] };
+  const FIRST = obligationRules(false, true)[0] as string;
+  const FAILED_LINE = "Obligations: not checked: the check did not finish.";
+  // A place on added line 21 + k of src/server/app.ts.
+  const at = (k: number, o: Record<string, unknown> = {}) => ({
+    path: "src/server/app.ts",
+    side: "new",
+    line: 21 + k,
+    lineEnd: null,
+    anchorText: `export const b${k} = ${k};`,
+    title: `Obligation at b${k}`,
+    body: `Body b${k}.`,
+    ...o,
+  });
+  const OB = (status: string, o: Record<string, unknown> = {}) => ({
+    source: "surface",
+    must: "docs/guide.md must name b1.",
+    consumer: "A reader of docs/guide.md.",
+    cite: { path: "src/server/app.ts", quote: "export const a3 = 3;" },
+    status,
+    evidence: "src/server/app.ts:4",
+    severity: "minor",
+    duplicateOf: null,
+    finding: null,
+    ...o,
+  });
+  const CHECKED = (obligations: unknown[], verdicts: unknown[] = []) => ({ verdicts, coverage: NONE, obligations });
+
+  test(
+    "AC-R48, AC-R52, AC-R53: a clean finder result starts the check; the cite reads the head and three context files only",
+    async () => {
+      const h = await setup();
+      h.runner.write({
+        fixture: h.stream(RESULT([])),
+        bySchema: {
+          verify: {
+            verify: CHECKED([
+              // A repository file outside the diff, with other white space. Two obligations on one changed line both stay.
+              OB("missing", {
+                severity: "blocker",
+                cite: { path: "docs/guide.md", quote: "# Guide\n   Call a3 before a4." },
+                finding: at(1),
+              }),
+              OB("missing", {
+                source: "criterion",
+                cite: { path: "./context/pr.md", quote: "Synthetic change" },
+                finding: at(1, { title: "The criterion is met in part" }),
+              }),
+              // A file of ./context that is no cite file, a path out of the snapshot, and an empty quote.
+              OB("missing", { cite: { path: "context/candidates.md", quote: "# Candidates" }, finding: at(2) }),
+              OB("missing", { cite: { path: "../remote/empty.gitconfig", quote: "x" }, finding: at(2) }),
+              OB("missing", { cite: { path: "src/server/app.ts", quote: " \n " }, finding: at(2) }),
+            ]),
+          },
+        },
+      });
+      const d = await h.done(h.start("obligations"));
+      expect(d.run.status).toBe("completed");
+      expect(h.verifyCalls()).toHaveLength(1);
+      const c = h.verifyCalls()[0] as Checked;
+      expect(c.context["pr.md"]).toContain("Synthetic change");
+      expect(c.stdin).toContain("# Task\n\nCheck the obligations of the change ");
+      expect(c.stdin).toContain(" in ./repo, as your instructions say.\n");
+      expect(c.context["candidates.md"]).toBe(candidatesFile([]).file.text);
+      expect(h.schemaOf(c)).toEqual(["verdicts", "coverage", "obligations"]);
+      for (const l of obligationRules(false, true)) expect(c.agents["rl-main"]?.prompt).toContain(`\n${l}\n`);
+      expect(c.agents[VERIFIER]).toBeUndefined();
+      // AC-R50: MAX_OBLIGATIONS counts as blocks. With zero blocks, the cap is 25 turns.
+      expect(flag(c.argv, "--max-turns")).toBe("25");
+      expect(verifyMaxTurns(general, MAX_OBLIGATIONS)).toBe(25);
+      const made = h.findings(d).map((i) => h.payload(i));
+      expect(made.map((p) => [p.category, p.severity, p.title, p.evidence, p.anchor.state, p.anchor.line])).toEqual([
+        ["obligation", "major", "Obligation at b1", "docs/guide.md: # Guide\n   Call a3 before a4.", "exact", 22],
+        ["obligation", "minor", "The criterion is met in part", "./context/pr.md: Synthetic change", "exact", 22],
+      ]);
+      expect(made[0]).toMatchObject({
+        module: "core",
+        evidenceStatus: "code",
+        confidence: "high",
+        trigger: "",
+        cause: null,
+        body: "Body b1.",
+        verify: {
+          verdict: "confirmed",
+          severity: "major",
+          reason: "docs/guide.md must name b1. A reader of docs/guide.md.",
+          evidence: "src/server/app.ts:4",
+          duplicateOf: null,
+          by: "rl-verify",
+        },
+      });
+      expect(d.run.summary?.obligations).toEqual({
+        listed: 5,
+        met: 0,
+        deferred: 0,
+        covered: 0,
+        found: 2,
+        open: 3,
+        list: [
+          { source: "surface", must: "docs/guide.md must name b1.", outcome: "found", note: "Obligation at b1" },
+          { source: "criterion", must: "docs/guide.md must name b1.", outcome: "found", note: "The criterion is met in part" },
+          {
+            source: "surface",
+            must: "docs/guide.md must name b1.",
+            outcome: "open",
+            note: "The cited text is not in context/candidates.md.",
+          },
+          {
+            source: "surface",
+            must: "docs/guide.md must name b1.",
+            outcome: "open",
+            note: "The cited text is not in ../remote/empty.gitconfig.",
+          },
+          { source: "surface", must: "docs/guide.md must name b1.", outcome: "open", note: "The cited text is not in src/server/app.ts." },
+        ],
+      });
+      // AC-R54: the check changes no verdict count, adds no gap, and makes no question.
+      expect(d.run.summary?.verify).toEqual({
+        candidates: 0,
+        confirmed: 0,
+        refuted: 0,
+        unsure: 0,
+        questions: 0,
+        duplicates: 0,
+        unchecked: 0,
+      });
+      expect(d.run.summary?.coverage.skipped).toEqual([]);
+      expect(d.items.filter((i) => i.kind === "question")).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-R51: with blocks, the task line adds the obligations; met, deferred, covered, and unsure make no item; a place off the change drops",
+    async () => {
+      const h = await setup();
+      h.runner.write({
+        fixture: h.stream(RESULT([F(0)])),
+        bySchema: {
+          verify: {
+            verify: CHECKED(
+              [
+                OB("met"),
+                OB("deferred", { evidence: "pr.md: the rest comes in TASK-2." }),
+                OB("covered", { duplicateOf: 1 }),
+                OB("unsure", { evidence: "No doc in ./repo names b1." }),
+                // The cite holds, but line 2 is no changed line and the finding has no cause.
+                OB("missing", {
+                  cite: { path: "web/main.ts", quote: "export {};" },
+                  finding: at(-19, { anchorText: "export const a1 = 1;" }),
+                }),
+              ],
+              [V(1, "confirmed")],
+            ),
+          },
+        },
+      });
+      const d = await h.done(h.start("obligations"));
+      expect(d.run.status).toBe("completed");
+      const c = h.verifyCalls()[0] as Checked;
+      expect(c.stdin).toContain(
+        "Give one verdict for each candidate. Then check the obligations of the change, as your instructions say.\n",
+      );
+      expect(c.context["candidates.md"]?.match(/^## \w+ \d+$/gm)).toEqual(["## Candidate 1"]);
+      expect(flag(c.argv, "--max-turns")).toBe(String(verifyMaxTurns(general, 1 + MAX_OBLIGATIONS)));
+      expect(d.run.summary?.obligations?.list.map((x) => [x.outcome, x.note])).toEqual([
+        ["met", "The check says: src/server/app.ts:4"],
+        ["deferred", "Deferred: pr.md: the rest comes in TASK-2."],
+        ["covered", "Same point as: Title 0"],
+        ["open", "Not settled: No doc in ./repo names b1."],
+        ["open", "Missing, but the check could not place it."],
+      ]);
+      expect(h.findings(d).map((i) => h.payload(i).title)).toEqual(["Title 0"]);
+      expect(d.run.summary?.verify).toMatchObject({ candidates: 1, confirmed: 1, unchecked: 0 });
+      expect(d.run.summary?.coverage.skipped).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-R54: a failed check with zero blocks gives one notChecked line, no key, and no gap; with blocks it fails as before",
+    async () => {
+      const zero = await setup();
+      zero.runner.write({ fixture: zero.stream(RESULT([])), bySchema: { verify: { fixture: zero.limit } } });
+      const d = await zero.done(zero.start("obligations"));
+      expect(zero.verifyCalls()).toHaveLength(1);
+      expect(d.run.status).toBe("completed");
+      expect(d.run.summary?.obligations).toBeUndefined();
+      expect(d.run.summary?.coverage.notChecked).toContain(FAILED_LINE);
+      expect(d.run.summary?.coverage.skipped).toEqual([]);
+      expect(d.run.summary?.verify?.failed).toBeUndefined();
+      const blocks = await setup();
+      blocks.runner.write({ fixture: blocks.stream(RESULT([F(0)])), bySchema: { verify: { fixture: blocks.limit } } });
+      const b = await blocks.done(blocks.start("obligations"));
+      expect(b.run.status).toBe("incomplete");
+      expect(b.run.summary?.obligations).toBeUndefined();
+      expect(b.run.summary?.verify).toMatchObject({ candidates: 1, unchecked: 1, failed: { kind: "usage_limit" } });
+      expect(b.run.summary?.coverage.notChecked).not.toContain(FAILED_LINE);
+    },
+    SLOW,
+  );
+
+  test(
+    "while the check runs, the run shows checkObligations; a cancel gives no outcome",
+    async () => {
+      const h = await setup();
+      h.runner.write({ fixture: h.stream(RESULT([])), bySchema: { verify: { hang: true } } });
+      const id = h.start("obligations");
+      expect(await waitFor(() => h.verifyCalls().length === 1 && h.review.run(h.db, id)?.run.phase === "checking")).toBe(true);
+      expect(h.review.run(h.db, id)?.run).toMatchObject({ status: "running", phase: "checking", candidates: 0, checkObligations: true });
+      expect(h.review.cancel(h.db, id)).toBe("cancelled");
+      const d = await h.done(id);
+      expect(d.run.status).toBe("cancelled");
+      expect(d.run.summary?.obligations).toBeUndefined();
+      expect(d.items).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-R50: above VERIFY_SPLIT, rl-main keeps the obligations and rl-verifier gets no obligation line",
+    async () => {
+      const h = await setup();
+      h.runner.write({ fixture: h.stream(RESULT(Array.from({ length: 13 }, (_, k) => F(k)))), bySchema: { verify: { hang: true } } });
+      const id = h.start("obligations");
+      expect(await waitFor(() => h.verifyCalls().length === 1)).toBe(true);
+      const c = h.verifyCalls()[0] as Call;
+      const agents = JSON.parse(readFileSync(flag(c.argv, "--agents"), "utf8")) as Record<string, { prompt: string }>;
+      expect(Object.keys(agents)).toEqual(["rl-main", VERIFIER]);
+      expect(agents["rl-main"]?.prompt.endsWith(VERIFY_DELEGATE_OBLIGATIONS)).toBe(true);
+      expect(agents["rl-main"]?.prompt).toContain(`\n${FIRST}\n`);
+      expect(agents[VERIFIER]?.prompt).not.toContain("obligation");
+      expect(flag(c.argv, "--max-turns")).toBe(String(verifyMaxTurns(general, 13 + MAX_OBLIGATIONS)));
+      expect(h.review.cancel(h.db, id)).toBe("cancelled");
+      await h.review.wait();
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-R48: no obligation check without the variant, with the verify step off, in Explain, or in a re-review",
+    async () => {
+      const h = await setup();
+      h.runner.write({ fixture: h.stream(RESULT([])) });
+      for (const profile of ["general", "obligations-off", "explain-obligations"]) {
+        const d = await h.done(h.start(profile));
+        expect(d.run.summary?.obligations).toBeUndefined();
+      }
+      expect(h.verifyCalls()).toHaveLength(0);
+      // A re-review under the variant: the check has no obligation line, no key, and the turns of its blocks only. The fake check
+      // confirms each candidate and lists no obligation.
+      h.runner.write({ fixture: h.stream(RESULT([F(0)])) });
+      const first = await h.done(h.start("obligations"));
+      expect(first.run.status).toBe("completed");
+      expect(first.run.summary?.obligations?.listed).toBe(0);
+      await h.repo.advance();
+      h.db.query("UPDATE pull_request SET source_head = $head WHERE id = $id").run({ head: h.repo.next, id: h.pr });
+      h.runner.write({
+        fixture: h.stream(RESULT([F(2)])),
+        rereview: {
+          ...RESULT([F(2)]),
+          earlier: h.findings(first).map((i) => ({ id: i.id, status: "open", reason: "Still there.", path: null, line: null })),
+        },
+      });
+      const r = h.review.rereview(h.db, h.pr);
+      expect(r.status).toBe(202);
+      const d = await h.done((r as { run: RunDto }).run.id);
+      expect(d.run.status).toBe("completed");
+      const check = h.verifyCalls().at(-1) as Checked;
+      expect(check.stdin).not.toContain("obligations");
+      expect(h.schemaOf(check)).toEqual(["verdicts", "coverage"]);
+      expect(check.agents["rl-main"]?.prompt).not.toContain(FIRST);
+      expect(flag(check.argv, "--max-turns")).toBe(String(verifyMaxTurns(general, 2)));
+      expect(d.run.summary?.obligations).toBeUndefined();
     },
     SLOW,
   );

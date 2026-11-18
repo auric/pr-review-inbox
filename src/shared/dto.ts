@@ -206,8 +206,9 @@ export type ModuleId = (typeof MODULE_IDS)[number];
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "broad", "verify2", "classes",
 // "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. "risk-check":
-// docs/plans/review-v2/risk-check.md WP-RC1. A retired name ("signal", "order", "rules2", "rereview-strict") drops on read.
-export const VARIANTS = ["broad", "classes", "parts", "risk-check", "security2", "security2-verify", "verify2"] as const;
+// docs/plans/review-v2/risk-check.md WP-RC1. "obligations": docs/plans/review-v2/obligations.md WP-OB1. A retired name ("signal",
+// "order", "rules2", "rereview-strict") drops on read.
+export const VARIANTS = ["broad", "classes", "obligations", "parts", "risk-check", "security2", "security2-verify", "verify2"] as const;
 export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];
@@ -610,6 +611,7 @@ export type RunSummary = Pick<ValidatedResult, "summary" | "risks" | "coverage" 
   phases?: RunPhase[];
   finderQuestions?: FinderQuestions;
   finderRisks?: FinderRisks;
+  obligations?: Obligations;
 };
 // docs/plans/review-v2/review-questions.md: the finder questions of a review run. asked = answered + findings + kept. answered: the
 // check found the answer, which answers holds. findings: the answer showed a defect. Absent in runs before prompt version 2.7.
@@ -627,6 +629,14 @@ export type RiskOutcome = (typeof riskOutcomes)[number];
 export type FinderRisks = Record<RiskOutcome, number> & {
   listed: number;
   list: { text: string; outcome: RiskOutcome; note: string }[];
+};
+// docs/plans/review-v2/obligations.md section 4.5: the outcome of each obligation of the check. listed = met + deferred + covered + found
+// + open, at most MAX_OBLIGATIONS. list: one entry per obligation, in check order. Absent when the run had no obligation check.
+export const obligationOutcomes = ["met", "deferred", "covered", "found", "open"] as const;
+export type ObligationOutcome = (typeof obligationOutcomes)[number];
+export type Obligations = Record<ObligationOutcome, number> & {
+  listed: number;
+  list: { source: "surface" | "criterion"; must: string; outcome: ObligationOutcome; note: string }[];
 };
 
 // session: a direct consult of the user's own session (docs/plans/session-consult.md part C).
@@ -691,6 +701,8 @@ export type RunDto = {
   checkQuestions?: number;
   // Phase checking only: the number of finder risks that it checks (docs/plans/review-v2/risk-check.md section 4.2).
   checkRisks?: number;
+  // Phase checking only: the check also lists the obligations of the change (docs/plans/review-v2/obligations.md section 4.1).
+  checkObligations?: true;
   // A session run only: the transcript that it forked and the text that it got, with no transcript text. tokens: sessionTokens(bytes).
   // mode: consult.ts sessionModes, absent for runs made before part D. run: on a fix run that an import made from the proposal of a
   // session run (session-consult.md part D), that session run.
@@ -1402,6 +1414,9 @@ export type ReviewStatsDto = {
   // docs/plans/review-v2/risk-check.md section 4.6: the sums of summary.finderRisks, and the posted and discarded findings of category
   // risk. runs: the runs with that key. Absent until stats.ts fills it (WP-RC4).
   risks?: Omit<FinderRisks, "list"> & { runs: number; posted: number; discarded: number };
+  // docs/plans/review-v2/obligations.md section 4.7: the sums of summary.obligations, and the posted and discarded findings of category
+  // obligation. runs: the runs with that key. Absent until stats.ts fills it (WP-OB4).
+  obligations?: Omit<Obligations, "list"> & { runs: number; posted: number; discarded: number };
 };
 export type PostOutcomes = { addressed: number; open: number; pending: number };
 

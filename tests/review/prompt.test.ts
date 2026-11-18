@@ -1018,7 +1018,7 @@ describe("review v3 prompt switches", () => {
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
     expect(promptVersion(withVariants("verify2", "broad"))).toBe("2.8+broad+verify2");
-    expect(VARIANTS).toEqual(["broad", "classes", "parts", "risk-check", "security2", "security2-verify", "verify2"]);
+    expect(VARIANTS).toEqual(["broad", "classes", "obligations", "parts", "risk-check", "security2", "security2-verify", "verify2"]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
     expect(parsed.variants).toEqual([]);

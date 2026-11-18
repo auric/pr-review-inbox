@@ -46,6 +46,7 @@ import {
   MAX_DISCUSS_MESSAGES,
   MAX_EARLIER,
   MAX_FIX_ITEMS,
+  MAX_OBLIGATIONS,
   MAX_REPLY_THREADS,
   type NoteProposal,
   REVIEW_PROMPT_VERSION,
@@ -88,6 +89,7 @@ import {
   mainAgent,
   mcpLines,
   moduleNotes,
+  obligationCheck,
   type Profile,
   profileOf,
   profileRevision,
@@ -164,7 +166,9 @@ import {
   judgeReplies,
   judgeSession,
   markCopy,
+  type PlacedObligations,
   placeAnswers,
+  placeObligations,
   salvaged,
   salvageFailed,
   settle,
@@ -312,6 +316,7 @@ type Job = {
   candidates?: number;
   checkQuestions?: number;
   checkRisks?: number;
+  checkObligations?: boolean;
   // Stops the step before the CLI starts.
   abort?: AbortController;
   // The other open PRs of the run's pr-context.md, for the link rule of note proposals (docs/plans/review-v2/spec.md section 2.9).
@@ -433,6 +438,7 @@ type TaskJob = {
   candidates?: number;
   checkQuestions?: number;
   checkRisks?: number;
+  checkObligations?: boolean;
   abort?: AbortController;
   t: TaskRunStart | ImplementRunStart | TaskReviewStart;
   runner: Runner;
@@ -1154,6 +1160,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         demote: profile.verifier.outcome === "demote",
         placed: v.placed,
         risks: riskCheck(profile),
+        obligations: v.obligations,
       }),
     );
   }
@@ -1324,29 +1331,35 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       // The languages of the finder. Under "broad", the verify phase gets their skip lists.
       langs: Language[];
     },
-  ): Promise<{ check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding> } | Ending> {
+  ): Promise<
+    | { check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding>; obligations?: PlacedObligations }
+    | Ending
+  > {
     const { profile, context, folders, always, used, task, langs } = r;
     const verify = profile.verifier.mode === "on";
     // docs/plans/review-v2/review-questions.md: the finder questions get a check too, also in a run with no finding.
     // docs/plans/review-v2/risk-check.md section 4.2: so do the finder risks under the risk check.
     const listed = riskCheck(profile) ? found.summary.risks : [];
+    // docs/plans/review-v2/obligations.md section 4.1: the obligation check starts also with zero blocks. A re-review has none.
+    const obligations = verify && !r.rereview && obligationCheck(profile);
     const file =
-      verify && (found.candidates.length || found.questions.length || listed.length)
+      verify && (found.candidates.length || found.questions.length || listed.length || obligations)
         ? candidatesFile(found.candidates, found.questions, listed)
         : null;
     const written = file?.written ?? 0;
     const asked = file?.asked ?? 0;
     const risks = file?.risks ?? 0;
-    if (!file || written + asked + risks === 0) return { check: null, verify, written };
+    if (!file || (written + asked + risks === 0 && !obligations)) return { check: null, verify, written };
     writeFileSync(join(ws.context, file.file.name), file.file.text);
     const split = written + asked + risks > VERIFY_SPLIT;
     log(
-      `Review run ${j.id}: checks ${written} of ${found.candidates.length} candidates, ${asked} of ${found.questions.length} questions, and ${risks} of ${listed.length} risks, ${VERIFIER} ${split ? "on" : "off"}.`,
+      `Review run ${j.id}: checks ${written} of ${found.candidates.length} candidates, ${asked} of ${found.questions.length} questions, and ${risks} of ${listed.length} risks, ${VERIFIER} ${split ? "on" : "off"}.${obligations ? " It also checks the obligations." : ""}`,
     );
     j.phase = "checking";
     j.candidates = written;
     j.checkQuestions = asked;
     j.checkRisks = risks;
+    j.checkObligations = obligations;
     notify(j.id);
     const offset = o.events.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
     const tag = (e: RunEvent): RunEvent => ({
@@ -1366,16 +1379,18 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       {
         cwd: ws.work,
         appDir: ws.app,
-        prompt: buildVerifyPrompt({ ...r.input, count: written, asked, risks, rereview: r.rereview }),
-        schema: verifyJsonSchema(),
+        prompt: buildVerifyPrompt({ ...r.input, count: written, asked, risks, ...(obligations && { obligations }), rereview: r.rereview }),
+        schema: verifyJsonSchema(obligations),
         main: withVerifyDelegation(
-          withMcp(withSkills(verifyAgent(profile, context, asked > 0, langs, risks > 0), folders, always, task), used, true),
+          withMcp(withSkills(verifyAgent(profile, context, asked > 0, langs, risks > 0, obligations), folders, always, task), used, true),
           split,
           asked > 0,
           profile.variants.includes("verify2"),
           risks > 0,
+          obligations,
         ),
-        maxTurns: verifyMaxTurns(profile, written + asked + risks),
+        // obligations.md section 4.1: the obligations count as MAX_OBLIGATIONS blocks.
+        maxTurns: verifyMaxTurns(profile, written + asked + risks + (obligations ? MAX_OBLIGATIONS : 0)),
         model: profile.verifier.model ?? profile.model,
         effort: verifierEffort(profile),
         advisor: profile.advisor,
@@ -1389,8 +1404,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     );
     j.db.transaction(() => upsertEvents(j.db, j.id, o2.events.map(tag)))();
     if (j.cancelled) return cancelledCheck(o, o2);
-    const check: CheckRun = { o: o2, startedAt, endedAt: now(), written, asked, risks };
-    return { check, verify, written, placed: await placeAnswers(ws, check) };
+    const check: CheckRun = { o: o2, startedAt, endedAt: now(), written, asked, risks, ...(obligations && { obligations }) };
+    return {
+      check,
+      verify,
+      written,
+      placed: await placeAnswers(ws, check),
+      ...(obligations && { obligations: await placeObligations(ws, check) }),
+    };
   }
 
   // docs/plans/session-consult.md part C: a fork of the user's session in a fresh sanitized snapshot of the PR head, never in the
@@ -1821,6 +1842,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         demote: profile.verifier.outcome === "demote",
         placed: v.placed,
         risks: riskCheck(profile),
+        obligations: v.obligations,
       }),
     );
   }
@@ -1923,6 +1945,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           ...(j.phase === "checking" && j.candidates !== undefined && { candidates: j.candidates }),
           ...(j.phase === "checking" && j.checkQuestions && { checkQuestions: j.checkQuestions }),
           ...(j.phase === "checking" && j.checkRisks && { checkRisks: j.checkRisks }),
+          ...(j.phase === "checking" && j.checkObligations && { checkObligations: true as const }),
         }
       : r;
   };

@@ -131,6 +131,13 @@ export const reviewJsonSchema = (explain = false): Record<string, unknown> =>
 export const verifyVerdicts = ["confirmed", "refuted", "unsure", "question", "duplicate"] as const;
 export type VerifyVerdictName = (typeof verifyVerdicts)[number];
 
+// The place, the title, and the body of a defect that the verify phase reports. Its JSON schema is the one of prompt version 2.7.
+const defect = z.object({
+  ...place,
+  title: z.string().max(200).describe("The defect in one line of 12 words or fewer."),
+  body: z.string().max(2000).describe("The consequence and a fix direction in 3 sentences or fewer."),
+});
+
 export const verifyVerdict = z.object({
   candidate: lineNo.describe("A candidate number from ./context/candidates.md."),
   verdict: z.enum(verifyVerdicts),
@@ -141,23 +148,54 @@ export const verifyVerdict = z.object({
   duplicateOf: lineNo.nullable().default(null).describe("For duplicate: the candidate that it repeats. Else null."),
   question: z.string().max(1000).default("").describe("For question: the question for the author. Else empty."),
   // docs/plans/review-v2/review-questions.md: the defect that answers a finder question.
-  finding: z
-    .object({
-      ...place,
-      title: z.string().max(200).describe("The defect in one line of 12 words or fewer."),
-      body: z.string().max(2000).describe("The consequence and a fix direction in 3 sentences or fewer."),
-    })
+  finding: defect
     .nullable()
     .default(null)
     .describe('For confirmed on a "## Question N" block: the place and the title of the defect. Else null.'),
 });
 
-export const verifyResult = z.object({ verdicts: z.array(verifyVerdict).max(MAX_FINDINGS), coverage });
+// docs/plans/review-v2/obligations.md section 4.2: a thing that must be true at the head for the change to be complete.
+export const MAX_OBLIGATIONS = 5;
+export const obligationSources = ["surface", "criterion"] as const;
+export const obligationStatuses = ["met", "deferred", "covered", "missing", "unsure"] as const;
+
+export const obligation = z.object({
+  source: z
+    .enum(obligationSources)
+    .describe(
+      "surface: a public interface that the change adds, removes, or changes. criterion: an acceptance criterion or a stated requirement of the task.",
+    ),
+  must: z.string().max(300).describe("What must exist or change, and in which file, in one sentence."),
+  consumer: z.string().max(200).describe("Who acts wrongly or fails when it is missing."),
+  cite: z.object({
+    path: z.string().describe("A repository path, or context/task.md, context/pr.md, or context/pr-context.md."),
+    quote: z.string().max(500).describe("Text copied exactly from that file at the head."),
+  }),
+  status: z.enum(obligationStatuses),
+  evidence: z
+    .string()
+    .max(1000)
+    .describe("met: path:line. deferred: the line that names the other pull request or ticket. unsure: what is missing."),
+  severity: z.enum(severities),
+  duplicateOf: lineNo.nullable().default(null).describe("For covered: the block number in ./context/candidates.md. Else null."),
+  finding: defect.nullable().default(null).describe("For missing: the place, the title, and the body. Else null."),
+});
+
+// Results stored before the obligations key get the default.
+export const verifyResult = z.object({
+  verdicts: z.array(verifyVerdict).max(MAX_FINDINGS),
+  coverage,
+  obligations: z.array(obligation).max(MAX_OBLIGATIONS).default([]),
+});
 
 export type VerifyVerdict = z.infer<typeof verifyVerdict>;
 export type VerifyResult = z.infer<typeof verifyResult>;
+export type Obligation = z.infer<typeof obligation>;
+export type Defect = z.infer<typeof defect>;
 
-export const verifyJsonSchema = (): Record<string, unknown> => aiJsonSchema(verifyResult);
+// obligations: the check of obligations.md is on. Without it, the schema has no obligations key, as for the explain key above.
+export const verifyJsonSchema = (obligations = false): Record<string, unknown> =>
+  aiJsonSchema(obligations ? verifyResult : verifyResult.omit({ obligations: true }));
 
 export type Severity = (typeof severities)[number];
 // The check state of a finding item. It comes from the verdict at read time (spec.md section 1.7).

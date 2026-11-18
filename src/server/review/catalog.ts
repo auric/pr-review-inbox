@@ -17,7 +17,7 @@ import {
   type Variant,
   type Volume,
 } from "../../shared/dto";
-import { FIX_EDIT_RULES, FIX_WHY_RULES, REVIEW_PROMPT_VERSION } from "../../shared/review";
+import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, REVIEW_PROMPT_VERSION } from "../../shared/review";
 import { CHECK_TIMEOUT_SEC, limitText, MAX_OPEN_CAP, PROPOSALS_MAX, SETUP_TIMEOUT_SEC } from "../../shared/task";
 import { type AgentSpec, EXPLORER_AGENT, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
@@ -1362,6 +1362,55 @@ export const RISK_BLOCK_RULES = [
   "The change must also touch that code or make the text false. Such a false text is no comment wording.",
   "Wording, style, and grammar stay on the do-not-flag list. A false comment or TODO is a nit. A false doc or guide that users or callers read is minor.",
 ];
+// docs/plans/review-v2/obligations.md section 4.3: the obligation check of rl-verify. rl-verifier never gets these lines.
+// The verify phase lists obligations only under the variant "obligations" (WP-OB1).
+export const obligationCheck = (p: Partial<Pick<Profile, "variants">>) => has(p, "obligations");
+// history: the line of rule 16. place: the place rules, when no question or risk line gave them.
+export const obligationRules = (history: boolean, place: boolean): string[] => [
+  "After the verdicts, check the obligations of the change. This check is the one exception to 'Look for no new problems'.",
+  "An obligation is a thing that must be true at the head for the change to be complete. This holds whatever design the author chose.",
+  "A surface obligation comes from a public interface that the change adds, removes, or changes.",
+  "Examples: exported symbols, function signatures, config keys, CLI flags, file formats, and documented behavior.",
+  "Find the files that name each changed interface: tests, docs, guides, samples, contracts, and the changelog.",
+  FIND_CODE,
+  "A surface obligation is one of these kinds:",
+  "- A doc, guide, sample, or contract states something false about the interface at the head.",
+  "- A test must guard the interface. Either the task asks for one, or the repository guards the same kind of interface with a test.",
+  "- The change brings an interface to a new platform, target, or variant. The repository guards that interface on another platform with a test, a link-time setting, or a symbol script. Then the new platform needs a matching guard.",
+  "- A changelog entry must exist, because the repository keeps a changelog for changes of that kind.",
+  "A criterion obligation is an acceptance criterion or a stated requirement in ./context/task.md or ./context/pr.md that the change is about.",
+  "Callers and migrations are no obligations here. The finder checks them.",
+  `List at most ${MAX_OBLIGATIONS} obligations. List the surface obligations first.`,
+  "Never list a design choice, a refactor, naming, style, or a thing that you would do in another way.",
+  'The do-not-flag item "a missing test, unless the Tests check is on" does not apply to these kinds.',
+  'The do-not-flag item "comment wording" does not apply to these kinds either.',
+  "The wording, the style, and the grammar of a doc stay out.",
+  ...(history ? ["Never list an obligation that ./context/history.md shows as discarded by the user, unless the cited text changed."] : []),
+  "In must, write in one sentence what must exist or change, and in which file.",
+  "In consumer, name who acts wrongly or fails when it is missing. For example: the reader of a named doc, a caller, a build, a user, or an operator.",
+  "In cite, give a path and a quote. The app looks for the quote in that file at the head. Copy it exactly.",
+  "- For a false doc, cite the false line of the doc.",
+  "- For a missing test, cite the test that guards the same kind of interface. Or cite the task line that asks for the test.",
+  "- For a missing guard on a new platform, cite the guard on the other platform.",
+  "- For a changelog entry, cite the last entry of the same kind.",
+  "- For a criterion, cite the criterion. Give the path context/task.md or context/pr.md.",
+  "met: the head meets the obligation. In evidence, give path:line.",
+  "deferred: a line in ./context names another pull request or a ticket that does the rest. Quote that line in evidence.",
+  "covered: a candidate, a question, or a risk in ./context/candidates.md already raises the point. Set duplicateOf to its number.",
+  "missing: the head does not meet the obligation, and no line defers it. Give finding.",
+  "unsure: no file or tool of this run settles it. In evidence, name what is missing.",
+  "In finding, anchor the place on the changed line that makes the obligation, such as the changed signature or export.",
+  ...(place ? PLACE_RULES : []),
+  "In body, name the file and line to change, the consumer, and a fix direction, in 3 sentences or fewer.",
+  "Set the severity of a missing obligation like this. Never use blocker.",
+  "- major: the change does not meet a criterion, in full or in part, and no line defers the rest.",
+  "- minor: a line defers the rest of a criterion but names no ticket or pull request. Also a false doc, a missing test, and a missing guard.",
+  "- nit: a missing changelog entry.",
+  "Set finding to null for each status except missing.",
+];
+// obligations.md section 4.1: above VERIFY_SPLIT, the main agent keeps the obligations.
+export const VERIFY_DELEGATE_OBLIGATIONS = `Check the obligations yourself. Give none to the ${VERIFIER} agent.`;
+
 // risk-check.md section 4.3 rule 17: the last question line with risks in the file.
 const QUESTION_FINDING_LINE = QUESTION_BLOCK_RULES.at(-1) as string;
 const QUESTION_RISK_FINDING_LINE =
@@ -1418,19 +1467,26 @@ export const VERIFY_DELEGATE_QUESTIONS = `Give the questions to the ${VERIFIER} 
 export const VERIFY_DELEGATE_RISKS = `Give the risks to the ${VERIFIER} agent too. Each risk counts as one candidate of its call.`;
 
 // The main agent of the verify process (spec.md section 1.6). The caller adds skills, MCP tools, and the delegation lines.
-// questions: candidates.md holds finder questions. langs: see verifyRules. risks: candidates.md holds finder risks.
+// questions: candidates.md holds finder questions. langs: see verifyRules. risks: candidates.md holds finder risks. obligations: the
+// check of docs/plans/review-v2/obligations.md is on.
 export function verifyAgent(
   p: Profile,
   c: ReviewContext = NO_CONTEXT,
   questions = false,
   langs: Language[] = [],
   risks = false,
+  obligations = false,
 ): AgentSpec {
   return {
     description: "Read-only check of the findings of one review.",
-    prompt: [...VERIFY_OPENING, ...contextBlock(c), ...verifyRules(p, c, questions, langs, risks), COVERAGE_RULE, ...docsRule(p)].join(
-      "\n",
-    ),
+    prompt: [
+      ...VERIFY_OPENING,
+      ...contextBlock(c),
+      ...verifyRules(p, c, questions, langs, risks),
+      ...(obligations ? obligationRules(c.history, !(questions || risks)) : []),
+      COVERAGE_RULE,
+      ...docsRule(p),
+    ].join("\n"),
   };
 }
 
@@ -1459,8 +1515,15 @@ export function salvageAgent(p: Profile): AgentSpec {
 }
 
 // The delegation lines come last, as for the finder. questions: candidates.md holds finder questions. group: the "verify2" variant.
-// risks: candidates.md holds finder risks.
-export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = false, group = false, risks = false): AgentSpec =>
+// risks: candidates.md holds finder risks. obligations: the obligation check is on.
+export const withVerifyDelegation = (
+  a: AgentSpec,
+  on: boolean,
+  questions = false,
+  group = false,
+  risks = false,
+  obligations = false,
+): AgentSpec =>
   on
     ? {
         ...a,
@@ -1471,6 +1534,7 @@ export const withVerifyDelegation = (a: AgentSpec, on: boolean, questions = fals
           ...(group ? [VERIFY2.group] : []),
           ...(questions ? [VERIFY_DELEGATE_QUESTIONS] : []),
           ...(risks ? [VERIFY_DELEGATE_RISKS] : []),
+          ...(obligations ? [VERIFY_DELEGATE_OBLIGATIONS] : []),
         ].join("\n"),
       }
     : a;

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { store, taskFileDir } from "../../src/server/context/attachments";
-import { DEFAULT_PROFILE, profileOf, RISK_BLOCK_RULES, SHIPPED_PROFILES } from "../../src/server/review/catalog";
+import { DEFAULT_PROFILE, obligationRules, profileOf, RISK_BLOCK_RULES, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import { CONTINUE_PATHS_MAX, continueFile } from "../../src/server/review/context-files";
 import { git } from "../../src/server/review/git";
 import { cachePath, gitSetup, longPath } from "../../src/server/review/workspace";
@@ -593,6 +593,92 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       expect(summaries.map((x) => x.finderRisks?.listed)).toEqual([undefined, 1]);
       expect(summaries[1]?.finderRisks?.list).toEqual([
         { text: risk, outcome: "cleared", note: "src/feature.ts:1 holds the final value. Evidence: src/feature.ts:1" },
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "obligations.md section 4.8: under the variant, the own review of a task checks the obligations, also with no finding; the critic does not",
+    async () => {
+      const bound = { ...SHIPPED_PROFILES[0], id: "bound", name: "Bound", variants: ["obligations"] } as ProfileInput;
+      const base = {
+        source: "surface",
+        must: "docs/feature.md must name the feature value.",
+        consumer: "A reader of docs/feature.md.",
+        cite: { path: "src/feature.ts", quote: "export const feature = 'works';" },
+        evidence: "src/feature.ts:1",
+        severity: "minor",
+        duplicateOf: null,
+        finding: null,
+      };
+      const missing = {
+        ...base,
+        status: "missing",
+        finding: {
+          path: "src/feature.ts",
+          side: "new",
+          line: 1,
+          lineEnd: null,
+          anchorText: "export const feature = 'works';",
+          title: "No doc names the feature value",
+          body: "Add docs/feature.md.",
+        },
+      };
+      const s = await setup({
+        profiles: [...SHIPPED_PROFILES, bound],
+        profile: "bound",
+        seq: {
+          review: [{ review: CLEAN }],
+          critic: [{ critic: CLEAN }],
+          verify: [
+            {
+              verify: {
+                verdicts: [],
+                coverage: NO_COVERAGE,
+                obligations: [
+                  { ...base, status: "met" },
+                  missing,
+                  // A criterion cites ./context/task.md, which holds the task text and the plan.
+                  {
+                    ...missing,
+                    source: "criterion",
+                    cite: { path: "context/task.md", quote: "# The plan of the task" },
+                    finding: { ...missing.finding, title: "The criterion is met in part" },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      });
+      await s.build();
+      expect(s.blocked()).toBeNull();
+      // A minor obligation finding stays listed. Only a major one enters the fix loop.
+      expect(s.part().state).toBe("self_reviewed");
+      expect(s.runCalls().map(s.modeOf)).toEqual(["build", "fix", "review", "review", "verify"]);
+      const check = s.runCalls().find((c) => s.modeOf(c) === "verify") as Call;
+      expect(check.stdin).toContain("# Task\n\nCheck the obligations of the change ");
+      expect(check.context["candidates.md"]?.match(/^## /gm)).toBeNull();
+      expect(check.agents?.["rl-main"]?.prompt).toContain(`\n${obligationRules(false, true)[0]}\n`);
+      const runs = s.db
+        .query("SELECT id, summary_json FROM review_run WHERE kind = 'review' AND task = $task ORDER BY id")
+        .all({ task: s.task }) as { id: number; summary_json: string }[];
+      const summaries = runs.map((r) => JSON.parse(r.summary_json) as RunSummary);
+      // The critic has no verify phase.
+      expect(summaries.map((x) => x.obligations?.listed)).toEqual([undefined, 3]);
+      expect(check.context["task.md"]).toContain("# The plan of the task");
+      expect(summaries[1]?.obligations?.list.map((x) => [x.outcome, x.note])).toEqual([
+        ["met", "The check says: src/feature.ts:1"],
+        ["found", "No doc names the feature value"],
+        ["found", "The criterion is met in part"],
+      ]);
+      const items = s.db
+        .query("SELECT payload_json FROM review_item WHERE run = $run AND kind = 'finding'")
+        .all({ run: runs[1]?.id ?? 0 }) as { payload_json: string }[];
+      expect(items.map((i) => JSON.parse(i.payload_json))).toMatchObject([
+        { category: "obligation", severity: "minor", evidence: "src/feature.ts: export const feature = 'works';" },
+        { category: "obligation", severity: "minor", evidence: "context/task.md: # The plan of the task" },
       ]);
     },
     SLOW,
