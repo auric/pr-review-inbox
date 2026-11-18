@@ -957,6 +957,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const carry = j.carry;
     const earlier = carry?.items.filter((r) => r.kind === "finding") ?? [];
     const posted = new Set(carry?.posted.map((r) => r.id));
+    const heads = new Map([...earlier, ...(carry?.posted ?? [])].map((r) => [r.id, r as Partial<PostedFinding>]));
     // A re-review gets findings.md instead. An explain run gets no history (docs/plans/review-v2/spec.md section 3.2). A discuss run gets
     // finding.md and discussion.md instead (spec.md section 2.4).
     const history =
@@ -987,15 +988,18 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const extra = [
       ...(carry && (earlier.length || carry.posted.length)
         ? [
-            findingsFile<ItemRow & Partial<PostedFinding>>([...current(j.db, earlier), ...carry.posted], (r, side) =>
-              posted.has(r.id)
-                ? side === "new"
-                  ? (r.run_head ?? carry.since)
-                  : (r.run_base ?? `the merge base of run ${r.run}`)
-                : side === "new"
-                  ? carry.since
-                  : (carry.sinceBase ?? "the earlier merge base"),
-            ),
+            // docs/plans/review-v2/stale-drafts.md F2: the lines of an item count on the heads of its own run (SQL.carry, SQL.posted).
+            // current() reads only the item columns.
+            findingsFile<ItemRow & Partial<PostedFinding>>([...current(j.db, earlier), ...carry.posted], (r, side) => {
+              const own = heads.get(r.id);
+              if (side === "new") return own?.run_head ?? carry.since;
+              return (
+                own?.run_base ??
+                (posted.has(r.id) || r.run !== carry.base
+                  ? `the merge base of run ${r.run}`
+                  : (carry.sinceBase ?? "the earlier merge base"))
+              );
+            }),
           ]
         : []),
       ...(fixRows.length
@@ -2435,7 +2439,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const key = [id, "rereview", base.id, source_head, target_head, brief.profile, profileRevision(profile), sha256(brief.note)].join(
         ":",
       );
-      const items = db.query(SQL.carry).all({ run: base.id }) as ItemRow[];
+      const rows = db.query(SQL.carry).all({ base: base.id, pr: id }) as ItemRow[];
+      // docs/plans/review-v2/stale-drafts.md F2: the findings of earlier runs fill only the room that the base run leaves.
+      // The others stay on their run, so the post plan shows them as older-commit.
+      let earlier = MAX_EARLIER - rows.filter((r) => r.kind === "finding" && r.run === base.id).length;
+      const items = rows.filter((r) => r.kind !== "finding" || r.run === base.id || earlier-- > 0);
       const room = MAX_EARLIER - items.filter((r) => r.kind === "finding").length;
       const carry: Carry = {
         base: base.id,

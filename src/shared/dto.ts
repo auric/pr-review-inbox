@@ -854,10 +854,21 @@ export type PlannedPost = {
 };
 // docs/plans/thread-outcome.md: a reply draft that confirm cannot post now. out-of-date: new messages or a deleted parent.
 // resolved-since: the thread was resolved after the draft. unpushed: the fix commit is not on the PR yet. commit-gone: the clone
-// branch of the fix no longer holds the fix commit, after a rebase, squash, or reset. thread: the root comment.
-// revision: the item revision, for an item action. commit: the short hash of the fix commit, for unpushed and commit-gone.
-export type BlockedReason = "out-of-date" | "resolved-since" | "unpushed" | "commit-gone";
-export type BlockedDraft = { item: number; revision: number; thread: number; reason: BlockedReason; commit?: string };
+// branch of the fix no longer holds the fix commit, after a rebase, squash, or reset. thread: the root comment, for a reply only.
+// docs/plans/review-v2/stale-drafts.md F1: older-commit is an accepted finding or question of a run whose source head is not the
+// stored PR head. path, line: the place of such a finding. A question has none.
+// revision: the item revision, for an item action. commit: the short hash of the fix commit, for unpushed and commit-gone, or of
+// the run head, for older-commit.
+export type BlockedReason = "out-of-date" | "resolved-since" | "unpushed" | "commit-gone" | "older-commit";
+export type BlockedDraft = {
+  item: number;
+  revision: number;
+  thread?: number;
+  reason: BlockedReason;
+  commit?: string;
+  path?: string;
+  line?: number;
+};
 // posts: per run in run order, the inline comments and the replies in item order, then the general comment.
 // blocked: the drafts that the plan leaves out. Absent: none.
 export type PostPlanDto = { pr: number; posts: PlannedPost[]; blocked?: BlockedDraft[] };

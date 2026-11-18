@@ -96,6 +96,9 @@ const SQL = {
   owned: "SELECT remote_id FROM post WHERE pr = $pr AND id != $id AND remote_id IS NOT NULL",
   ref: "SELECT project, repo, pr_id AS id FROM pull_request WHERE id = $pr",
   heads: "SELECT source_head, target_head FROM review_run WHERE id = $run",
+  // docs/plans/review-v2/stale-drafts.md F1: the runs of the PR on another source head than the stored one.
+  older: `SELECT r.id, r.source_head AS head FROM review_run r JOIN pull_request p ON p.id = r.pr
+    WHERE r.pr = $pr AND r.source_head <> p.source_head`,
   parent: "SELECT root_id, tombstoned_at FROM comment WHERE pr = $pr AND comment_id = $id",
   // Plan r3: sync writes pr_commit and meta_head together, after a complete commits fetch for the current heads.
   fixed: `SELECT 1 FROM pull_request p JOIN pr_commit c ON c.pr = p.id AND c.hash = $hash
@@ -197,10 +200,20 @@ async function fixCheck(db: Database, pr: number, fix: NonNullable<ReplyPayload[
 // docs/plans/thread-outcome.md: the accepted reply drafts that confirm cannot post now, with one reason each, in this order:
 // out-of-date, resolved-since, then unpushed or commit-gone. resolved: the root comments of the resolved threads.
 // A draft without text posts no reply, so a resolved thread never blocks it.
+// docs/plans/review-v2/stale-drafts.md F1: an accepted finding or question of a run on an older head is older-commit. A revision
+// never posts (plan.ts), so it never blocks. Confirm still checks the live head of the posts that remain.
 export async function blockedDrafts(db: Database, pr: number, items: ReviewItemDto[], resolved: number[] = []): Promise<BlockedDraft[]> {
   const shut = new Set(resolved);
+  const older = new Map((db.query(SQL.older).all({ pr }) as { id: number; head: string }[]).map((r) => [r.id, r.head]));
   const out: BlockedDraft[] = [];
   for (const it of items) {
+    const head = older.get(it.run);
+    if ((it.kind === "finding" || it.kind === "question") && it.status === "accepted" && head !== undefined) {
+      if ((it.payload as { revises?: number }).revises !== undefined) continue;
+      const at = it.anchor && { path: it.anchor.path, line: it.anchor.line };
+      out.push({ item: it.id, revision: it.revision, reason: "older-commit", commit: head.slice(0, 7), ...at });
+      continue;
+    }
     if (it.kind !== "reply" || it.status !== "accepted") continue;
     const p = it.payload as ReplyPayload;
     const text = it.body.trim() !== "";

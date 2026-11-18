@@ -207,7 +207,12 @@ export const SQL = {
   // Plan r2 S-RR. An Explain run has no findings. A run from before M4 has no explain value.
   baseRun: `WHERE r.pr = $pr AND r.kind = 'review' AND r.status IN ('completed', 'incomplete') AND COALESCE(r.explain, r.profile = 'explain') = 0
     ORDER BY r.id DESC LIMIT 1`,
-  carry: "SELECT * FROM review_item WHERE run = $run AND kind IN ('finding', 'question') AND status IN ('new', 'accepted') ORDER BY id",
+  // docs/plans/review-v2/stale-drafts.md F2: also the accepted items of the earlier review runs. run_head, run_base: the heads that
+  // the lines of the item count on.
+  carry: `SELECT i.*, r.source_head AS run_head, r.merge_base AS run_base FROM review_item i JOIN review_run r ON r.id = i.run
+    WHERE i.kind IN ('finding', 'question') AND ((i.run = $base AND i.status IN ('new', 'accepted'))
+      OR (i.status = 'accepted' AND i.run IN (SELECT id FROM review_run WHERE pr = $pr AND kind = 'review' AND id < $base)))
+    ORDER BY i.id`,
   // An inline post holds one finding. Its confirmed comment starts the thread. The newest findings come first.
   posted: `SELECT i.*, p.remote_id AS root, r.source_head AS run_head, r.merge_base AS run_base FROM review_item i
     JOIN review_run r ON r.id = i.run

@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import type { BlockedDraft, CommentDto, PostDto, PostPlanDto, PrRow } from "../../shared/dto";
 import { itemsSettled, sendItem, usePrRuns } from "../review/data";
-import { shortHash } from "../review/model";
+import { plural, shortHash } from "../review/model";
 import { ApiError } from "../shell/data";
 import { failText, prKey } from "../shell/model";
 import { type BlockedGroup, Confirm, type ConfirmEntry } from "./Confirm";
@@ -20,15 +20,16 @@ import {
   BLOCKED,
   blockedGroups,
   blockedNote,
+  blockedText,
   destLabel,
   destText,
   mergePosts,
+  olderNote,
   planItems,
   planSig,
   reopenNote,
   resolveLabel,
   resolveNote,
-  threadText,
 } from "./model";
 
 type Open = { plan: PostPlanDto | null; posting: boolean; error: string | null };
@@ -68,9 +69,9 @@ const blockedList = (
       text,
       items: g.items.map((b) => ({
         key: `b:${b.item}`,
-        dest: threadText(b.thread, comments),
+        dest: blockedText(b, comments),
         detail: b.commit ?? null,
-        onThread: () => thread(b),
+        onThread: b.thread === undefined ? null : () => thread(b),
         action: action ? { label: action, run: () => act(b) } : null,
       })),
     };
@@ -96,6 +97,8 @@ export function usePostBar(
   const [c, setC] = useState<Open | null>(null);
   const posts = plan.data?.posts ?? [];
   const blocked = plan.data?.blocked ?? [];
+  const older = blocked.filter((b) => b.reason === "older-commit");
+  const [discarding, setDiscarding] = useState(false);
   const key = prKey(pr);
 
   const close = () => {
@@ -120,6 +123,48 @@ export function usePostBar(
     }
   };
 
+  // docs/plans/review-v2/stale-drafts.md F1: Discard sends the item discard for each older-commit draft. error: the text for the
+  // drafts that did not change, else null.
+  const discard = async (list: BlockedDraft[]) => {
+    setDiscarding(true);
+    const out = await Promise.allSettled(list.map((b) => sendItem(b.item, { action: "discard", revision: b.revision })));
+    const gone = out.flatMap((r) => (r.status === "fulfilled" && "item" in r.value ? [r.value.item] : []));
+    await qc.invalidateQueries({ queryKey: planKey(pr.id) });
+    setDiscarding(false);
+    const kept = list.length - gone.length;
+    return { gone, error: kept ? `Cannot discard ${plural(kept, "draft")}. It changed in another page, or the request failed.` : null };
+  };
+
+  // No screen lists a discarded older-commit draft, so the toast of the bar Discard offers Undo. A restore gives the status new,
+  // so Undo accepts the draft again. The toast covers the right end of the bar, so Undo closes it.
+  const discardOlder = async () => {
+    const { gone, error } = await discard(older);
+    if (error) toast.add({ title: error });
+    if (!gone.length) return;
+    const undo = async () => {
+      const back = await Promise.allSettled(
+        gone.map(async (it) => {
+          const r = await sendItem(it.id, { action: "restore", revision: it.revision });
+          if ("conflict" in r || "conflict" in (await sendItem(it.id, { action: "accept", revision: r.item.revision })))
+            throw new Error("changed");
+        }),
+      );
+      await qc.invalidateQueries({ queryKey: planKey(pr.id) });
+      if (back.some((r) => r.status === "rejected"))
+        toast.add({ title: "Undo failed", description: "A draft changed in another page, or the request failed." });
+    };
+    const id = toast.add({
+      title: `${plural(gone.length, "draft")} discarded`,
+      actionProps: {
+        children: "Undo",
+        onClick: () => {
+          toast.close(id);
+          void undo();
+        },
+      },
+    });
+  };
+
   // plain: the draft loses its commit link. reply-to-newest: the draft answers the newest message with the same text
   // (docs/plans/thread-outcome.md). The draft stays accepted, so the new plan lists it as a reply to post.
   const fixDraft = async (b: BlockedDraft, action: "plain" | "reply-to-newest", done: string) => {
@@ -135,7 +180,7 @@ export function usePostBar(
 
   // The thread of a blocked draft. The confirm closes, so the thread takes the focus.
   const toThread = (b: BlockedDraft) => {
-    if (c?.posting) return;
+    if (c?.posting || b.thread === undefined) return;
     setC(null);
     o.jump(b.thread);
   };
@@ -144,7 +189,14 @@ export function usePostBar(
     if (b.reason === "commit-gone") return void (await fixDraft(b, "plain", "The draft is now a plain reply in the list."));
     if (b.reason === "out-of-date")
       return void (await fixDraft(b, "reply-to-newest", "The draft answers the newest message now. It is in the list."));
-    if (b.reason !== "resolved-since") return;
+    // A toast would cover the Discard of the next row, so the live region tells, after the new list.
+    if (b.reason === "older-commit") {
+      const { gone, error } = await discard([b]);
+      await load(error);
+      if (gone.length) o.announce("The draft is discarded.");
+      return;
+    }
+    if (b.reason !== "resolved-since" || b.thread === undefined) return;
     const out = await o.reopen(b.thread).catch((e: unknown) => ({ error: (e as Error).message, reason: null }));
     if (out === "ask") return toThread(b);
     if (!out) o.announce("The thread is open again.");
@@ -229,8 +281,18 @@ export function usePostBar(
         {/* The counts are a live region, so a change reads out while the bar shows. */}
         <span role="status" className="contents">
           {posts.length > 0 && <span>Ready to post: {destText(posts)}</span>}
-          {blocked.length > 0 && <span className="text-ink-2">{blockedNote(blocked)}</span>}
+          {blocked.length > older.length && <span className="text-ink-2">{blockedNote(blocked)}</span>}
+          {older.length > 0 && (
+            <span id="older-note" className="text-ink-2">
+              {olderNote(older)}
+            </span>
+          )}
         </span>
+        {older.length > 0 && (
+          <Button size="sm" variant="outline" disabled={discarding} aria-describedby="older-note" onClick={() => void discardOlder()}>
+            Discard
+          </Button>
+        )}
         <Button id="post-btn" size="sm" title="Key: p" aria-keyshortcuts="p" className="ml-auto" onClick={open}>
           <Send aria-hidden data-icon="inline-start" />
           Post to {o.forge}

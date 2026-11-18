@@ -20,13 +20,13 @@ export type ConfirmEntry = {
   resolve: string | null;
 };
 
-// docs/plans/thread-outcome.md: a draft that the post leaves out. onThread: go to its thread. detail: the fix commit, else null.
-// action: a button that can make the draft postable, else null.
+// docs/plans/thread-outcome.md: a draft that the post leaves out. onThread: go to its thread, null for a draft without a thread.
+// detail: the fix commit or the run head, else null. action: a button that makes the draft postable or discards it, else null.
 export type BlockedEntry = {
   key: string;
   dest: string;
   detail: string | null;
-  onThread: () => void;
+  onThread: (() => void) | null;
   action: { label: string; run: () => void } | null;
 };
 // The blocked drafts of one reason. text: what the user can do.
@@ -135,13 +135,17 @@ export function Confirm(props: {
                 {g.items.map((b) => (
                   <li key={b.key} data-blocked className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b py-1.5 text-sm">
                     {/* The target is 24 px high (WCAG 2.5.8). The negative margins keep the row as it was. */}
-                    <button
-                      type="button"
-                      className="-my-[3px] inline-flex min-h-6 min-w-0 cursor-pointer items-center rounded text-left font-medium text-pen [overflow-wrap:anywhere] hover:underline"
-                      onClick={b.onThread}
-                    >
-                      {b.dest}
-                    </button>
+                    {b.onThread ? (
+                      <button
+                        type="button"
+                        className="-my-[3px] inline-flex min-h-6 min-w-0 cursor-pointer items-center rounded text-left font-medium text-pen [overflow-wrap:anywhere] hover:underline"
+                        onClick={b.onThread}
+                      >
+                        {b.dest}
+                      </button>
+                    ) : (
+                      <span className="min-w-0 font-medium [overflow-wrap:anywhere]">{b.dest}</span>
+                    )}
                     {b.detail && (
                       <code translate="no" className="font-mono text-xs text-muted-foreground">
                         {b.detail}

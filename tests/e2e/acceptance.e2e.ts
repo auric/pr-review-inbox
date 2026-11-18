@@ -76,14 +76,16 @@ test("A7: a push after the review marks it stale, and the post stays blocked wit
   // The README nit waits in the closed More fold (docs/plans/review-v2/spec.md section 1.4).
   await expect(drafts(page)).toHaveCount(2);
 
+  // docs/plans/review-v2/stale-drafts.md F1: the draft is on an older commit. It leaves the posts and blocks nothing else.
+  await expect(page.locator("[data-post-part]")).toContainText("1 draft is on an older commit. Review changes (c) carries it, or Discard.");
+  await expect(page.locator("[data-post-part]")).not.toContainText("Ready to post");
   await page.keyboard.press("p");
-  const box = page.getByRole("dialog", { name: /^Post .* to PROJ1\/sample-repo-2 #1001\?$/ });
-  await expect(box).toContainText(`The source branch has new commits since ${head}. Bitbucket gets nothing until you review again.`);
-  const post = box.getByRole("button", { name: "Post", exact: true });
-  await post.click();
-  await expect(box.getByRole("alert")).toHaveText("The source branch has new commits since the review. Review it again.");
-  // Posting removes the button. The refused post puts the focus back on it.
-  await expect(post).toBeFocused();
+  const box = page.getByRole("dialog", { name: "Post to PROJ1/sample-repo-2 #1001?" });
+  await expect(box).toContainText("No accepted draft can post now. Each group below says why.");
+  const group = box.locator("[data-blocked-group='older-commit']");
+  await expect(group).toContainText("On an older commit (1)");
+  await expect(group.locator("[data-blocked]")).toContainText(`src/cache/flush.ts:3${head}`);
+  await expect(box.getByRole("button", { name: "Post", exact: true })).toBeDisabled();
   await expect(page.locator("[data-post]")).toHaveCount(0);
   expect(await posts()).toEqual([]);
 });

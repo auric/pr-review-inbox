@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Review: an accepted draft on an older commit no longer blocks the other posts of the PR. The Post bar names it and offers Discard, and the next Review changes carries it.
 - Review: Claude can now read earlier commits of the PR in a re-review, also by HEAD~1 or BASE^.
 - Review: your note for a review now also reaches the reviewer agents that read parts of a large PR.
 - Review: the Review profile now has the advisor Fable by default. A stronger model gives Claude advice at hard points in each run of the profile, also in task steps. It uses more of your plan. A profile whose advisor you changed keeps your value.

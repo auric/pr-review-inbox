@@ -11,7 +11,8 @@ import { type ItemRow, type NewItem, NO_ANCHOR, SQL } from "./run-rows";
 import type { CheckedEarlier } from "./validate";
 
 // A re-review (plan r2 S-RR). since: the source head of the base run. sinceBase: its merge base.
-// items: the findings and questions of the base run with status new or accepted at the start.
+// items: the findings and questions of the base run with status new or accepted at the start, and the accepted ones of the earlier
+// review runs (docs/plans/review-v2/stale-drafts.md F2).
 // posted: the posted inline findings of the PR with an open thread. root: the thread. run_head, run_base: the heads of their run.
 export type PostedFinding = ItemRow & { root: number; run_head: string; run_base: string | null };
 export type Carry = {

@@ -8,11 +8,13 @@ import {
   BLOCKED,
   blockedGroups,
   blockedNote,
+  blockedText,
   destLabel,
   destText,
   draftKey,
   editDraft,
   mergePosts,
+  olderNote,
   parentOf,
   parseDraft,
   planItems,
@@ -220,6 +222,18 @@ describe("post states", () => {
       text: "The commit is not on the branch. Post as plain reply.",
       action: "Post as plain reply",
     });
+    // docs/plans/review-v2/stale-drafts.md F1: a finding names its line, a question has no place, a reply names its thread.
+    expect(BLOCKED["older-commit"]).toEqual({
+      title: "On an older commit",
+      text: "The review ran on an older commit. Review changes (c) carries these drafts, or Discard.",
+      action: "Discard",
+    });
+    const older = { item: 1, revision: 1, reason: "older-commit" as const, commit: "abc1234" };
+    expect(blockedText({ ...older, path: "src/cache/flush.ts", line: 3 }, [root])).toBe("src/cache/flush.ts:3");
+    expect(blockedText(older, [root])).toBe("Question");
+    expect(blockedText({ item: 2, revision: 1, thread: 100, reason: "out-of-date" }, [root])).toBe(
+      "Thread of mlopez in src/cache/flush.ts:3",
+    );
   });
 
   test("thread outcome: blocked drafts group by reason in a fixed order, and the bar counts the out-of-date ones", () => {
@@ -241,6 +255,15 @@ describe("post states", () => {
     expect(blockedNote([b(1, "unpushed")])).toBe("1 draft cannot post now");
     expect(blockedNote([b(1, "out-of-date")])).toBe("1 draft out of date");
     expect(blockedNote(list)).toBe("4 drafts cannot post now, 2 out of date");
+    // docs/plans/review-v2/stale-drafts.md F1: the older-commit drafts group last and have their own bar line.
+    const older = (item: number): BlockedDraft => ({ item, revision: 1, reason: "older-commit", commit: "abc1234" });
+    expect(blockedGroups([older(5), ...list]).map((g) => g.reason)).toEqual(["out-of-date", "unpushed", "commit-gone", "older-commit"]);
+    expect(blockedNote([older(5), ...list])).toBe("4 drafts cannot post now, 2 out of date");
+    expect(blockedNote([older(5)])).toBe("");
+    expect(olderNote(list)).toBe("");
+    expect(olderNote([older(5), ...list])).toBe("1 draft is on an older commit. Review changes (c) carries it, or Discard.");
+    expect(olderNote([older(5), older(6)])).toBe("2 drafts are on an older commit. Review changes (c) carries them, or Discard.");
+    expect(readyLine({ posts: [], blocked: [older(5), older(6)] })).toEqual({ posts: null, blocked: "2 cannot post" });
   });
 
   test("thread outcome: the Ready to post line names the posts and the drafts that cannot post", () => {

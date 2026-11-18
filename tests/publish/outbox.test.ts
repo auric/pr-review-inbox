@@ -675,6 +675,45 @@ describe("confirm", () => {
     expect("blocked" in plan).toBe(false);
   });
 
+  test("stale-drafts F1: accepted drafts of a run on an older head are blocked and leave the posts; the others post; Discard clears them", async () => {
+    const s = await setup();
+    const old = seedRun(s, { source: "a".repeat(40), target: TARGET });
+    const finding = old.item("Old text.", 3);
+    const question = old.item("Old question.", null);
+    const { item } = seedRun(s);
+    const inline = item("Inline text.", 3);
+    const reply = seedReply(s, THEIRS);
+    await accept(s, finding, question, inline, reply);
+    const plan = (await s.call<PostPlanDto>(`/api/prs/${s.pr}/post-plan`)).body;
+    expect(plan.posts.map((p) => [p.destination.kind, p.body])).toEqual([
+      ["inline", "Inline text."],
+      ["reply", "Reply text."],
+    ]);
+    expect(plan.blocked).toEqual([
+      { item: finding, revision: 1, reason: "older-commit", commit: "aaaaaaa", path: "src/app.ts", line: 3 },
+      { item: question, revision: 1, reason: "older-commit", commit: "aaaaaaa" },
+    ]);
+
+    // A confirm that names a blocked draft is not the plan on screen.
+    const named = await s.call<{ error: string }>(`/api/prs/${s.pr}/confirm`, {
+      items: [...itemsOf(plan.posts), { id: finding, revision: 1 }],
+    });
+    expect([named.status, named.body.error]).toEqual([409, "A draft in the list cannot post now. The new list shows why."]);
+    // The other drafts post. The live head check covers only the runs of the posts.
+    const r = await s.call<ConfirmDto>(`/api/prs/${s.pr}/confirm`, { items: itemsOf(plan.posts) });
+    expect(r.status).toBe(202);
+    await s.settle();
+    expect(s.posts.bodies.map((b) => b.text)).toEqual(["Inline text.", "Reply text."]);
+    expect([itemRow(s, finding).status, itemRow(s, question).status]).toEqual(["accepted", "accepted"]);
+
+    // Discard of each blocked draft leaves nothing to post.
+    for (const id of [finding, question])
+      expect((await s.call<ReviewItemDto>(`/api/items/${id}`, { action: "discard", revision: 1 })).body.status).toBe("discarded");
+    const after = (await s.call<PostPlanDto>(`/api/prs/${s.pr}/post-plan`)).body;
+    expect([after.posts, "blocked" in after]).toEqual([[], false]);
+    expect(s.sent()).toBe(2);
+  });
+
   test("a confirm that differs from the plan gives 409 and sends nothing", async () => {
     const s = await setup();
     const { item } = seedRun(s);

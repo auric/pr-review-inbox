@@ -21,7 +21,7 @@ import { cachePath, type GitRemote, prepareWorkspace, UNTRUSTED } from "../../sr
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import type { PostPlanDto, ReviewItemDto, RunConflict, RunDetail, RunDto } from "../../src/shared/dto";
-import type { Carried, EarlierVerdict, Finding, ReplyPayload } from "../../src/shared/review";
+import { type Carried, type EarlierVerdict, type Finding, MAX_EARLIER, type ReplyPayload } from "../../src/shared/review";
 import type { PullRequest } from "../../src/shared/types";
 import { FAKE_TOKEN, FAKE_USER } from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
@@ -401,6 +401,8 @@ async function setup() {
     { "src/app.ts": appText({ ...edits, 20: "line 20" }, ["// header", "// more"]), "src/new.ts": NEW_FILE },
     "next",
   );
+  // A third head. src/app.ts stays as in s2.
+  const s3 = await r.commit([s2], { "docs/notes.md": "notes\n" }, "third");
   await r.point(s1, target);
 
   const runner = fakeRunner(root);
@@ -466,7 +468,7 @@ async function setup() {
       await git([`--git-dir=${cache}`, "rev-parse", "--verify", "--quiet", "refs/rl/2/reviewed"], { env: r.env }).catch(() => "")
     ).trim();
   };
-  return { base, target, s1, s2, db, pr, runner, stream, json, post, brief, finish, push, runCalls, reviewed };
+  return { base, target, s1, s2, s3, db, pr, runner, stream, json, post, brief, finish, push, runCalls, reviewed };
 }
 
 describe("re-review runs", () => {
@@ -664,6 +666,190 @@ describe("re-review runs", () => {
       ]);
       expect(plan[0]?.destination).toMatchObject({ path: "src/app.ts", line: 5 });
       expect(await h.reviewed()).toBe(h.s2);
+    },
+    SLOW,
+  );
+});
+
+// docs/plans/review-v2/stale-drafts.md: the proposed state table of section 2. Each step names its row.
+describe("stale accepted drafts", () => {
+  const EMPTY = {
+    summary: "Only the docs changed.",
+    risks: [],
+    questions: [],
+    coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
+    findings: [],
+  };
+  const blockedOf = (it: ReviewItemDto, head: string) => ({
+    item: it.id,
+    revision: it.revision,
+    reason: "older-commit" as const,
+    commit: head.slice(0, 7),
+    ...(it.anchor && { path: it.anchor.path, line: it.anchor.line }),
+  });
+  const verdict = (it: ReviewItemDto, status: string) => ({ id: it.id, status, reason: `Scenario ${status}.`, path: null, line: null });
+  const ids = (list: ReviewItemDto[]) => list.map((i) => i.id).sort((x, y) => x - y);
+
+  test(
+    "rows 1 to 4: blocked on an older head, Discard, postable again on its head, and the next re-review carries them",
+    async () => {
+      const h = await setup();
+      await h.brief("general");
+      const a = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/review`)).body.id);
+      const at = (line: number) => a.items.find((i) => i.kind === "finding" && i.anchor?.line === line) as ReviewItemDto;
+      const accept = async (it: ReviewItemDto) =>
+        (await h.post<ReviewItemDto>(`/api/items/${it.id}`, { action: "accept", revision: it.revision })).body;
+      const fa = await accept(at(3));
+      const fb = await accept(at(10));
+      const fc = await accept(at(35));
+      const question = await accept(a.items.find((i) => i.kind === "question") as ReviewItemDto);
+      const plan = async () => (await h.json<PostPlanDto>(`/api/prs/${h.pr}/post-plan`)).body;
+      const posts = (p: PostPlanDto) => p.posts.map((x) => [x.run, x.destination.kind, x.items.map((i) => i.id)]);
+      expect((await plan()).blocked).toBeUndefined();
+
+      // Row 1: a new head. The accepted drafts of run A are blocked and leave the posts. The draft of the full review B posts.
+      await h.push(h.s2);
+      const added = finding(1, { path: "src/new.ts", anchorText: "export const x = 1;", body: "Export x only when needed." });
+      h.runner.write({ fixture: h.stream({ ...BASE_RESULT, questions: [], answered: [], findings: [added] }) });
+      const b = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/review`)).body.id);
+      const nb = await accept(b.items.find((i) => i.kind === "finding") as ReviewItemDto);
+      let p = await plan();
+      expect(posts(p)).toEqual([[b.run.id, "inline", [nb.id]]]);
+      expect(p.blocked).toEqual([fa, fb, fc, question].map((it) => blockedOf(it, h.s1)));
+
+      // Row 4: the PR head returns to the head of run A. Its drafts post again with no write. Now run B is on the other head.
+      await h.push(h.s1);
+      p = await plan();
+      expect(p.posts.flatMap((x) => x.items.map((i) => i.id)).sort((x, y) => x - y)).toEqual(ids([fa, fb, fc, question]));
+      expect(p.blocked).toEqual([blockedOf(nb, h.s2)]);
+      await h.push(h.s2);
+
+      // Row 2: Discard on the blocked line discards the draft.
+      const gone = (await h.post<ReviewItemDto>(`/api/items/${fc.id}`, { action: "discard", revision: fc.revision })).body;
+      expect(gone.status).toBe("discarded");
+      expect((await plan()).blocked).toEqual([fa, fb, question].map((it) => blockedOf(it, h.s1)));
+
+      // Row 3: the next re-review carries the accepted drafts of each earlier review run, with the open items of its base run B.
+      await h.push(h.s3);
+      h.runner.write({
+        fixture: h.stream(BASE_RESULT),
+        rereview: { ...EMPTY, earlier: [verdict(fa, "open"), verdict(fb, "fixed"), verdict(nb, "open")] },
+      });
+      const c = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/rereview`)).body.id);
+      expect(c.run.since).toMatchObject({ head: h.s2 });
+      expect(c.items.map((i) => [i.kind, carriedOf(i)?.from ?? null, carriedOf(i)?.verdict ?? null, i.status])).toEqual([
+        ["finding", fa.id, "open", "accepted"],
+        ["finding", nb.id, "open", "accepted"],
+        ["question", question.id, "open", "accepted"],
+        ["finding", fb.id, "fixed", "discarded"],
+      ]);
+      expect(c.items[0]?.anchor).toMatchObject({ path: "src/app.ts", line: 5, state: "moved" });
+      // The lines of each earlier finding count on the head of its own run.
+      const call = h.runCalls().at(-1) as Call & { context: Record<string, string> };
+      expect(call.stdin).toContain(`Earlier findings: ${[fa, fb, nb].map((i) => i.id).join(", ")}\n`);
+      expect(call.context["findings.md"]).toContain(`## Finding ${fa.id}\n\n- Path: src/app.ts\n- Side: new\n- Lines: 3 at ${h.s1}\n`);
+      expect(call.context["findings.md"]).toContain(`## Finding ${nb.id}\n\n- Path: src/new.ts\n- Side: new\n- Lines: 1 at ${h.s2}\n`);
+
+      // Each carried source is discarded. A new draft of run A is not carried, and the discarded one stays discarded.
+      const runA = new Map((await h.json<RunDetail>(`/api/runs/${a.run.id}`)).body.items.map((i) => [i.id, i.status]));
+      expect([fa, fb, question, fc, at(20), at(30)].map((i) => runA.get(i.id))).toEqual([
+        "discarded",
+        "discarded",
+        "discarded",
+        "discarded",
+        "new",
+        "new",
+      ]);
+      // Nothing is blocked now. The carried drafts post on the new head.
+      p = await plan();
+      expect("blocked" in p).toBe(false);
+      const [ca, cb, cq] = c.items as [ReviewItemDto, ReviewItemDto, ReviewItemDto];
+      expect(posts(p)).toEqual([
+        [c.run.id, "inline", [ca.id]],
+        [c.run.id, "inline", [cb.id]],
+        [c.run.id, "general", [cq.id]],
+      ]);
+      expect(p.posts.map((x) => x.sourceHead)).toEqual([h.s3, h.s3, h.s3]);
+    },
+    SLOW,
+  );
+
+  test(
+    "an item accepted while a re-review runs stays on its run: it is blocked, and the next re-review carries it",
+    async () => {
+      const h = await setup();
+      await h.brief("general");
+      const a = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/review`)).body.id);
+      const x = a.items.find((i) => i.kind === "finding" && i.anchor?.line === 3) as ReviewItemDto;
+      const plan = async () => (await h.json<PostPlanDto>(`/api/prs/${h.pr}/post-plan`)).body;
+
+      await h.push(h.s2);
+      h.runner.write({ fixture: h.stream(BASE_RESULT), delayMs: 100, rereview: { ...EMPTY, earlier: [] } });
+      const b = await h.post<RunDto>(`/api/prs/${h.pr}/rereview`);
+      expect(await waitFor(() => h.runCalls().length === 2)).toBe(true);
+      const accepted = (await h.post<ReviewItemDto>(`/api/items/${x.id}`, { action: "accept", revision: x.revision })).body;
+      expect(accepted.status).toBe("accepted");
+      const done = await h.finish(b.body.id);
+      // rereview.ts carryOver skips a source whose status changed during the run.
+      expect(done.items.some((i) => carriedOf(i)?.from === x.id)).toBe(false);
+      expect((await plan()).blocked).toEqual([blockedOf(accepted, h.s1)]);
+
+      await h.push(h.s3);
+      h.runner.write({ fixture: h.stream(BASE_RESULT), rereview: { ...EMPTY, earlier: [verdict(x, "open")] } });
+      const c = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/rereview`)).body.id);
+      const copy = c.items.find((i) => carriedOf(i)?.from === x.id) as ReviewItemDto;
+      expect([copy.status, copy.anchor?.line]).toEqual(["accepted", 5]);
+      const p = await plan();
+      expect("blocked" in p).toBe(false);
+      expect(p.posts.map((q) => [q.run, q.items.map((i) => i.id)])).toEqual([[c.run.id, [copy.id]]]);
+    },
+    SLOW,
+  );
+
+  test(
+    "MAX_EARLIER caps the carried findings: the earlier runs fill only the room that the base run leaves; the rest stays blocked",
+    async () => {
+      const h = await setup();
+      await h.brief("general");
+      const a = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/review`)).body.id);
+      const accept = async (it: ReviewItemDto) =>
+        (await h.post<ReviewItemDto>(`/api/items/${it.id}`, { action: "accept", revision: it.revision })).body;
+      const [first, second] = a.items.filter((i) => i.kind === "finding") as [ReviewItemDto, ReviewItemDto];
+      const fa = await accept(first);
+      const fb = await accept(second);
+
+      // A full review run B at s2 with MAX_EARLIER - 1 new findings.
+      await h.push(h.s2);
+      const { id: b } = h.db
+        .query(
+          `INSERT INTO review_run (pr, profile, note, idem_key, source_head, target_head, merge_base, status, started_at, finished_at)
+          VALUES ($pr, 'general', '', 'seed-b', $s, $t, $base, 'completed', 1, 2) RETURNING id`,
+        )
+        .get({ pr: h.pr, s: h.s2, t: h.target, base: h.base }) as { id: number };
+      const anchor = { state: "exact", path: "src/app.ts", oldPath: null, line: 3, lineEnd: 3, excerpt: [] };
+      for (let n = 0; n < MAX_EARLIER - 1; n++)
+        h.db
+          .query(
+            `INSERT INTO review_item (run, kind, payload_json, body, path, side, line, line_end, anchor_state, excerpt_json)
+            VALUES ($run, 'finding', $payload, $body, 'src/app.ts', 'new', 3, 3, 'exact', '[]')`,
+          )
+          .run({ run: b, payload: JSON.stringify({ ...finding(3), anchor }), body: `Seeded ${n}.` });
+
+      await h.push(h.s3);
+      h.runner.write({ fixture: h.stream(BASE_RESULT), rereview: { ...EMPTY, earlier: [] } });
+      const c = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/rereview`)).body.id);
+      const earlier = (
+        h
+          .runCalls()
+          .at(-1)
+          ?.stdin.match(/^Earlier findings: (.*)$/m)?.[1] ?? ""
+      )
+        .split(", ")
+        .map(Number);
+      expect(earlier).toHaveLength(MAX_EARLIER);
+      expect([earlier.includes(fa.id), earlier.includes(fb.id)]).toEqual([true, false]);
+      expect(c.items.filter((i) => carriedOf(i)?.from === fb.id)).toEqual([]);
+      expect((await h.json<PostPlanDto>(`/api/prs/${h.pr}/post-plan`)).body.blocked).toEqual([blockedOf(fb, h.s1)]);
     },
     SLOW,
   );

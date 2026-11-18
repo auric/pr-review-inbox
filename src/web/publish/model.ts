@@ -84,7 +84,16 @@ export const BLOCKED: Record<BlockedReason, { title: string; text: string; actio
     text: "The commit is not on the branch. Post as plain reply.",
     action: "Post as plain reply",
   },
+  "older-commit": {
+    title: "On an older commit",
+    text: "The review ran on an older commit. Review changes (c) carries these drafts, or Discard.",
+    action: "Discard",
+  },
 };
+
+// docs/plans/review-v2/stale-drafts.md F1: the place of a blocked draft. A reply names its thread, a finding its line.
+export const blockedText = (b: BlockedDraft, comments: CommentDto[]) =>
+  b.thread !== undefined ? threadText(b.thread, comments) : b.path ? `${b.path}:${b.line}` : "Question";
 
 // The blocked drafts grouped by reason, in the order of BLOCKED. Empty groups are left out.
 export const blockedGroups = (blocked: BlockedDraft[]): { reason: BlockedReason; items: BlockedDraft[] }[] =>
@@ -93,12 +102,21 @@ export const blockedGroups = (blocked: BlockedDraft[]): { reason: BlockedReason;
     .filter((g) => g.items.length > 0);
 
 // The blocked count of the post bar, with the out-of-date drafts called out. "" when nothing is blocked.
-export function blockedNote(blocked: Pick<BlockedDraft, "reason">[]): string {
+// The older-commit drafts have their own line (olderNote).
+export function blockedNote(list: Pick<BlockedDraft, "reason">[]): string {
+  const blocked = list.filter((b) => b.reason !== "older-commit");
   const stale = blocked.filter((b) => b.reason === "out-of-date").length;
   const all = plural(blocked.length, "draft");
   if (!blocked.length) return "";
   if (stale === blocked.length) return `${all} out of date`;
   return stale ? `${all} cannot post now, ${stale} out of date` : `${all} cannot post now`;
+}
+
+// docs/plans/review-v2/stale-drafts.md F1: the post bar line of the older-commit drafts. "" when there are none.
+export function olderNote(blocked: Pick<BlockedDraft, "reason">[]): string {
+  const n = blocked.filter((b) => b.reason === "older-commit").length;
+  if (!n) return "";
+  return `${n === 1 ? "1 draft is" : `${n} drafts are`} on an older commit. Review changes (c) carries ${n === 1 ? "it" : "them"}, or Discard.`;
 }
 
 // The line of a PR in the Ready to post view. null: the PR has nothing to post and nothing blocked.

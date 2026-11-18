@@ -156,6 +156,71 @@ test("a push after a review: c and the button open the brief; Start reviews the 
   expect(String(sent[0]?.anchor?.toHash)).toMatch(new RegExp(`^${to}[0-9a-f]{33}$`));
 });
 
+test("stale drafts: drafts accepted before a push and a full review are on an older commit; Discard in the confirm and on the bar clears them, and a new draft posts", async ({
+  page,
+}) => {
+  await connect(page);
+  const head = await reviewed(page);
+  await drafts(page).nth(0).getByRole("button", { name: "Accept" }).click();
+  // The focus moves on to the next draft. The third is the README draft in the More fold.
+  await page.keyboard.press("a");
+  await page.keyboard.press("a");
+  const bar = page.locator("[data-post-part]");
+  await expect(bar).toContainText("Ready to post: 2 inline comments");
+
+  await control("state", { push: true });
+  await expect(runLine(page)).toContainText("New commits since");
+  await expect(bar).toContainText("3 drafts are on an older commit. Review changes (c) carries them, or Discard.");
+  await expect(bar).not.toContainText("Ready to post");
+
+  // A full review of the new head does not carry them. The Drafts list shows the new run.
+  await page.keyboard.press("Shift+R");
+  await page.getByLabel("Your note").press("Control+Enter");
+  await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
+  const [to = "?"] = await range(page);
+  expect(to).not.toBe(head);
+  await expect(bar).toContainText("3 drafts are on an older commit.");
+
+  // The confirm lists each draft with its line and the reviewed commit. Its Discard removes one row after another.
+  await page.keyboard.press("p");
+  const box = page.getByRole("dialog", { name: "Post to PROJ1/sample-repo-2 #1001?" });
+  const group = box.locator("[data-blocked-group='older-commit']");
+  await expect(group).toContainText("On an older commit (3)");
+  for (const place of ["src/cache/flush.ts:3", "src/cache/flush.ts:5", "README.md:1"])
+    await expect(group.locator("[data-blocked]", { hasText: `${place}${head}` })).toHaveCount(1);
+  await expect(box.getByRole("button", { name: "Post", exact: true })).toBeDisabled();
+  for (const left of [2, 1]) {
+    await group.locator("[data-blocked]").nth(0).getByRole("button", { name: "Discard" }).click();
+    await expect(group).toContainText(`On an older commit (${left})`);
+  }
+  await expect(page.getByRole("status").filter({ hasText: /^The draft is discarded\.$/ })).toHaveCount(1);
+  await box.getByRole("button", { name: "Cancel" }).click();
+  await expect(box).toBeHidden();
+
+  // Discard on the bar discards the rest. Undo in the toast brings it back, and the next Discard removes it again.
+  await expect(bar).toContainText("1 draft is on an older commit. Review changes (c) carries it, or Discard.");
+  await bar.getByRole("button", { name: "Discard" }).click();
+  await expect(bar).toHaveCount(0);
+  const discarded = page.locator("[data-slot='toast']", { hasText: "1 draft discarded" });
+  await discarded.getByRole("button", { name: "Undo" }).click();
+  await expect(discarded).toHaveCount(0);
+  await expect(bar).toContainText("1 draft is on an older commit.");
+  await bar.getByRole("button", { name: "Discard" }).click();
+  await expect(bar).toHaveCount(0);
+
+  // A draft of the new run posts on the new head.
+  await drafts(page).nth(0).getByRole("button", { name: "Accept" }).click();
+  await expect(page.getByText("Ready to post: 1 inline comment")).toBeVisible();
+  await page.keyboard.press("p");
+  const next = page.getByRole("dialog", { name: "Post 1 inline comment to PROJ1/sample-repo-2 #1001?" });
+  await next.getByRole("button", { name: "Post", exact: true }).click();
+  await expect(next).toBeHidden();
+  await expect(page.locator("[data-post]", { hasText: "Posted." })).toHaveCount(1);
+  const sent = await posts();
+  expect(sent).toHaveLength(1);
+  expect(String(sent[0]?.anchor?.toHash)).toMatch(new RegExp(`^${to}[0-9a-f]{33}$`));
+});
+
 test("a carried draft whose code is gone closes as outdated with no Restore, and d says why", async ({ page }) => {
   await connect(page);
   await reviewed(page);
