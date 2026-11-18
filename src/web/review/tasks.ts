@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
+import type { ContextErrorKind } from "../../server/context/source";
+import type { TaskFetchDto } from "../../server/context/task-fetch";
 // Imported task text (plan r2, task context UI): the pure rules. TaskChips.tsx and Brief.tsx hold the requests.
 import {
   type AttachmentDto,
@@ -23,27 +25,60 @@ export type Tracker = { id: TaskContextDto["source"]; name: string; configured: 
 export const trackerOf = (meta: MetaDto) => (meta.context[0] as Tracker | undefined) ?? null;
 
 // source null: a fetched task that the PR no longer names. Its text still goes to the review, so the brief shows it with Remove.
+// fetch: the state of GET /prs/:id/task-fetch. null: no entry yet, or a key that the PR no longer names.
 export type TaskChip = {
   key: string;
   source: PrTask["source"] | null;
   url: string | null;
   fetched: TaskContextDto | null;
+  fetch: TaskFetchDto | null;
   fetchable: boolean;
 };
 
-export function taskChips(tasks: PrTask[], rows: TaskContextDto[], on: boolean): TaskChip[] {
+export function taskChips(tasks: PrTask[], rows: TaskContextDto[], on: boolean, states: TaskFetchDto[] = []): TaskChip[] {
   const fetched = new Map(rows.map((r) => [r.key, r]));
+  const fetch = new Map(states.map((r) => [r.key, r]));
   const out: TaskChip[] = tasks.map((t) => ({
     key: t.key,
     source: t.source,
     url: t.url,
     fetched: fetched.get(t.key) ?? null,
+    fetch: fetch.get(t.key) ?? null,
     fetchable: on && JIRA_KEY.test(t.key),
   }));
   const named = new Set(tasks.map((t) => t.key));
-  for (const r of rows) if (!named.has(r.key)) out.push({ key: r.key, source: null, url: null, fetched: r, fetchable: false });
+  for (const r of rows) if (!named.has(r.key)) out.push({ key: r.key, source: null, url: null, fetched: r, fetch: null, fetchable: false });
   return out;
 }
+
+// jira-context.md section 4.8. The full text (FAILED in routes.ts) shows in the hint.
+export const SHORT_REASON: Record<ContextErrorKind, string> = {
+  auth: "token rejected",
+  forbidden: "no access",
+  not_found: "no such issue",
+  redirect: "Jira redirected",
+  rate: "Jira busy",
+  server: "Jira error",
+  shape: "unknown answer",
+  timeout: "timed out",
+  network: "Jira unreachable",
+};
+
+// The fetch state in words. A skipped row wins over text, as on the server (task-fetch.ts stateOf).
+export function stateText(c: Pick<TaskChip, "fetched" | "fetch">, now: number): string {
+  const f = c.fetch;
+  if (f?.state === "skipped") return "skipped";
+  const failed = (f?.state === "failed" || f?.state === "refreshFailed") && f.kind ? SHORT_REASON[f.kind] : null;
+  if (c.fetched) return failed ? `${fetchedText(c.fetched, now)}, refresh failed` : fetchedText(c.fetched, now);
+  return failed ? `not fetched: ${failed}` : "not fetched";
+}
+
+// The full chip in the brief adds the state to the source only for these states.
+export const notable = (c: Pick<TaskChip, "fetch">) =>
+  c.fetch?.state === "failed" || c.fetch?.state === "refreshFailed" || c.fetch?.state === "skipped";
+
+// Skip sends CLEAR to a key without text. Clear text covers a key with text.
+export const skippable = (c: TaskChip) => c.fetchable && !c.fetched && c.fetch !== null && c.fetch.state !== "skipped";
 
 // "Set up" shows only for a PR that names a key in the tracker key format.
 export const offerSetup = (tasks: PrTask[], on: boolean) => !on && tasks.some((t) => JIRA_KEY.test(t.key));

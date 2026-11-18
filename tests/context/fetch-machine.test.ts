@@ -16,7 +16,7 @@ import {
   type FetchState,
   fetchMachine,
 } from "../../src/server/context/fetch-machine";
-import { type FetchEvent, fetchStates, writeFetch } from "../../src/server/context/task-fetch";
+import { type FetchEvent, fetchGen, fetchStates, jiraSaved, writeFetch } from "../../src/server/context/task-fetch";
 import { openDb } from "../../src/server/storage/db";
 import type { IssueContext } from "../../src/shared/dto";
 
@@ -25,7 +25,7 @@ for (const m of ["context/fetch-machine", "context/task-fetch"])
 
 // Section 4.4, Transitions, cell by cell. A pair that the table leaves out is blank: the event is ignored, and nothing is written.
 const TABLE: Record<FetchState, Partial<Record<FetchEventType, FetchState>>> = {
-  none: { AUTO_OK: "fetched", AUTO_ERR: "failed", MANUAL_OK: "fetched", MANUAL_ERR: "failed", JIRA_SAVED: "none" },
+  none: { AUTO_OK: "fetched", AUTO_ERR: "failed", MANUAL_OK: "fetched", MANUAL_ERR: "failed", CLEAR: "skipped", JIRA_SAVED: "none" },
   fetched: {
     AUTO_OK: "fetched",
     AUTO_ERR: "refreshFailed",
@@ -34,7 +34,7 @@ const TABLE: Record<FetchState, Partial<Record<FetchEventType, FetchState>>> = {
     CLEAR: "skipped",
     JIRA_SAVED: "fetched",
   },
-  failed: { AUTO_OK: "fetched", AUTO_ERR: "failed", MANUAL_OK: "fetched", MANUAL_ERR: "failed", JIRA_SAVED: "none" },
+  failed: { AUTO_OK: "fetched", AUTO_ERR: "failed", MANUAL_OK: "fetched", MANUAL_ERR: "failed", CLEAR: "skipped", JIRA_SAVED: "none" },
   refreshFailed: {
     AUTO_OK: "fetched",
     AUTO_ERR: "refreshFailed",
@@ -45,11 +45,16 @@ const TABLE: Record<FetchState, Partial<Record<FetchEventType, FetchState>>> = {
   },
   skipped: { MANUAL_OK: "fetched", MANUAL_ERR: "failed", JIRA_SAVED: "skipped" },
 };
-// Section 4.4: AUTO_* also need pr_task to name the key and no task with (origin_pr, key) = (pr, key). MANUAL_* need pr_task.
-const allowed = (type: FetchEventType, c: FetchContext) =>
-  type.startsWith("AUTO_") ? c.named && !c.owned : type.startsWith("MANUAL_") ? c.named : true;
-const CONTEXTS: FetchContext[] = [false, true].flatMap((named) => [false, true].map((owned) => ({ named, owned })));
-const PASS: FetchContext = { named: true, owned: false };
+// Section 4.4: AUTO_* also need pr_task to name the key and no task with (origin_pr, key) = (pr, key). MANUAL_* need pr_task. *_ERR
+// also need a read that started after the last JIRA_SAVED. CLEAR in none needs pr_task.
+const allowed = (state: FetchState, type: FetchEventType, c: FetchContext) =>
+  (type.startsWith("AUTO_") ? c.named && !c.owned : type.startsWith("MANUAL_") ? c.named : true) &&
+  (!type.endsWith("_ERR") || c.current) &&
+  (state !== "none" || type !== "CLEAR" || c.named);
+const CONTEXTS: FetchContext[] = [false, true].flatMap((named) =>
+  [false, true].flatMap((owned) => [false, true].map((current) => ({ named, owned, current }))),
+);
+const PASS: FetchContext = { named: true, owned: false, current: true };
 
 function step(state: FetchState, type: FetchEventType, context: FetchContext = PASS) {
   const snapshot = fetchMachine.resolveState({ value: state, context });
@@ -69,9 +74,9 @@ describe("fetch machine", () => {
     expect(actions).toEqual([]);
   });
 
-  test("the table has 25 filled cells and the 5 blank cells of section 4.4", () => {
+  test("the table has 27 filled cells and the 3 blank cells of section 4.4", () => {
     const blank = FETCH_STATES.flatMap((s) => FETCH_EVENTS.filter((e) => TABLE[s][e] === undefined).map((e) => `${s}/${e}`));
-    expect(blank).toEqual(["none/CLEAR", "failed/CLEAR", "skipped/AUTO_OK", "skipped/AUTO_ERR", "skipped/CLEAR"]);
+    expect(blank).toEqual(["skipped/AUTO_OK", "skipped/AUTO_ERR", "skipped/CLEAR"]);
   });
 
   for (const state of FETCH_STATES)
@@ -82,12 +87,12 @@ describe("fetch machine", () => {
       }
     });
 
-  test("guard grid: each cell under each named and owned value", () => {
+  test("guard grid: each cell under each named, owned, and current value", () => {
     for (const state of FETCH_STATES)
       for (const type of FETCH_EVENTS)
         for (const context of CONTEXTS) {
           const cell = TABLE[state][type];
-          const go = cell !== undefined && allowed(type, context);
+          const go = cell !== undefined && allowed(state, type, context);
           expect({ state, type, context, ...step(state, type, context) }).toEqual({
             state,
             type,
@@ -190,9 +195,9 @@ describe("writeFetch: every cell through the rows", () => {
   };
   const EVENTS: Record<FetchEventType, FetchEvent> = {
     AUTO_OK: { type: "AUTO_OK", issue: ISSUE },
-    AUTO_ERR: { type: "AUTO_ERR", kind: "timeout" },
+    AUTO_ERR: { type: "AUTO_ERR", kind: "timeout", gen: 0 },
     MANUAL_OK: { type: "MANUAL_OK", issue: ISSUE },
-    MANUAL_ERR: { type: "MANUAL_ERR", kind: "not_found" },
+    MANUAL_ERR: { type: "MANUAL_ERR", kind: "not_found", gen: 0 },
     CLEAR: { type: "CLEAR" },
     JIRA_SAVED: { type: "JIRA_SAVED" },
   };
@@ -267,8 +272,30 @@ describe("writeFetch: every cell through the rows", () => {
     db.run("DELETE FROM pr_task");
     expect(writeFetch(db, pr, KEY, EVENTS.MANUAL_OK, NOW)).toBeNull();
     expect(writeFetch(db, pr, KEY, EVENTS.JIRA_SAVED, NOW)).toBe("none");
+    // CLEAR in none needs pr_task, so a key that the PR does not name gets no row.
+    expect(writeFetch(db, pr, KEY, EVENTS.CLEAR, NOW)).toBeNull();
+    expect(writeFetch(db, pr, "XYZ-9", EVENTS.CLEAR, NOW)).toBeNull();
     expect(rows(db)).toEqual({ text: [], fetch: [], files: [] });
     db.close();
+  });
+
+  test("an error of a read that started before the last JIRA_SAVED writes nothing; a result with text still lands", () => {
+    for (const from of FETCH_STATES) {
+      const { db, pr } = seeded(from);
+      const gen = fetchGen(db);
+      jiraSaved(db);
+      const before = rows(db);
+      const state = fetchStates(db, pr)[0]?.state;
+      for (const type of ["AUTO_ERR", "MANUAL_ERR"] as const) {
+        expect({ from, type, to: writeFetch(db, pr, KEY, { type, kind: "auth", gen }, NOW) }).toEqual({ from, type, to: null });
+        expect(rows(db)).toEqual(before);
+      }
+      // The same error from a read that started after the save writes its row.
+      const after = TABLE[state as FetchState].MANUAL_ERR ?? null;
+      expect(writeFetch(db, pr, KEY, { type: "MANUAL_ERR", kind: "auth", gen: fetchGen(db) }, NOW)).toBe(after);
+      expect(writeFetch(db, pr, KEY, { type: "MANUAL_OK", issue: ISSUE }, NOW)).toBe("fetched");
+      db.close();
+    }
   });
 
   test("text with a skipped row, as a tasks.ts write after Clear leaves it, counts as skipped; Fetch ends it", () => {

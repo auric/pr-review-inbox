@@ -741,6 +741,7 @@ r[key("POST", "/__control/reset")] = async () => {
   builds.clear();
   fake.requests.length = 0;
   jira.requests.length = 0;
+  jira.addIssue(JIRA_ISSUE);
   // The sub-task scenario: the statuses of the set come back, and the open-PR list of the task repository goes again.
   jira.addSubtaskSet();
   jira.transitions.clear();
@@ -964,6 +965,13 @@ r[key("POST", "/__control/jira-status")] = async (req) => {
 r[key("POST", "/__control/live")] = () => ok({ streams: app.live.size() });
 r[key("POST", "/__control/jira-requests")] = () => ok({ requests: jira.requests });
 r[key("POST", "/__control/jira-cloud")] = () => ok({ url: jiraCloud.url, email: JIRA_EMAIL });
+// The answer to the next reads of one issue (control.ts jiraIssue).
+r[key("POST", "/__control/jira-issue")] = async (req) => {
+  const c = (await req.json()) as { issue: string; status?: number };
+  if (c.status === undefined) jira.addIssue(c.issue);
+  else jira.routes[key("GET", `/rest/api/2/issue/${c.issue}`)] = { status: c.status, body: null };
+  return NO_CONTENT;
+};
 // Sets the answer of the next open-folder calls. Answers with every folder that the app asked to open since the last reset.
 r[key("POST", "/__control/open-folder")] = async (req) => {
   const { opens } = (await req.json()) as { opens?: boolean };

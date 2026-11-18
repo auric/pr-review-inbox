@@ -13,40 +13,47 @@ export type FetchState = (typeof FETCH_STATES)[number];
 export const FETCH_EVENTS = ["AUTO_OK", "AUTO_ERR", "MANUAL_OK", "MANUAL_ERR", "CLEAR", "JIRA_SAVED"] as const;
 export type FetchEventType = (typeof FETCH_EVENTS)[number];
 
-// The facts that the guards read. named: pr_task names the key. owned: a task row has (origin_pr, key) = (pr, key).
-export type FetchContext = { named: boolean; owned: boolean };
+// The facts that the guards read. named: pr_task names the key. owned: a task row has (origin_pr, key) = (pr, key). current: the read
+// started after the last JIRA_SAVED of this database, so it used the saved token.
+export type FetchContext = { named: boolean; owned: boolean; current: boolean };
 
-// AUTO_* need named and not owned. MANUAL_* need named. CLEAR and JIRA_SAVED have no guard.
+// AUTO_* need named and not owned. MANUAL_* need named. The *_ERR events also need current. CLEAR in none needs named. CLEAR in the
+// other states and JIRA_SAVED have no guard.
 const auto = (target: FetchState) => ({ guard: "auto", target }) as const;
+const autoErr = (target: FetchState) => ({ guard: "autoErr", target }) as const;
 const manual = (target: FetchState) => ({ guard: "named", target }) as const;
+const manualErr = (target: FetchState) => ({ guard: "manualErr", target }) as const;
 
 // A state without an event ignores it, and nothing is written.
 export const fetchMachine = setup({
   types: { context: {} as FetchContext, events: {} as { type: FetchEventType } },
   guards: {
     auto: ({ context }) => context.named && !context.owned,
+    autoErr: ({ context }) => context.named && !context.owned && context.current,
     named: ({ context }) => context.named,
+    manualErr: ({ context }) => context.named && context.current,
   },
 }).createMachine({
   id: "fetch",
   initial: "none",
-  context: { named: false, owned: false },
+  context: { named: false, owned: false, current: true },
   states: {
     none: {
       on: {
         AUTO_OK: auto("fetched"),
-        AUTO_ERR: auto("failed"),
+        AUTO_ERR: autoErr("failed"),
         MANUAL_OK: manual("fetched"),
-        MANUAL_ERR: manual("failed"),
+        MANUAL_ERR: manualErr("failed"),
+        CLEAR: { guard: "named", target: "skipped" },
         JIRA_SAVED: "none",
       },
     },
     fetched: {
       on: {
         AUTO_OK: auto("fetched"),
-        AUTO_ERR: auto("refreshFailed"),
+        AUTO_ERR: autoErr("refreshFailed"),
         MANUAL_OK: manual("fetched"),
-        MANUAL_ERR: manual("refreshFailed"),
+        MANUAL_ERR: manualErr("refreshFailed"),
         CLEAR: "skipped",
         JIRA_SAVED: "fetched",
       },
@@ -54,22 +61,23 @@ export const fetchMachine = setup({
     failed: {
       on: {
         AUTO_OK: auto("fetched"),
-        AUTO_ERR: auto("failed"),
+        AUTO_ERR: autoErr("failed"),
         MANUAL_OK: manual("fetched"),
-        MANUAL_ERR: manual("failed"),
+        MANUAL_ERR: manualErr("failed"),
+        CLEAR: "skipped",
         JIRA_SAVED: "none",
       },
     },
     refreshFailed: {
       on: {
         AUTO_OK: auto("fetched"),
-        AUTO_ERR: auto("refreshFailed"),
+        AUTO_ERR: autoErr("refreshFailed"),
         MANUAL_OK: manual("fetched"),
-        MANUAL_ERR: manual("refreshFailed"),
+        MANUAL_ERR: manualErr("refreshFailed"),
         CLEAR: "skipped",
         JIRA_SAVED: "fetched",
       },
     },
-    skipped: { on: { MANUAL_OK: manual("fetched"), MANUAL_ERR: manual("failed"), JIRA_SAVED: "skipped" } },
+    skipped: { on: { MANUAL_OK: manual("fetched"), MANUAL_ERR: manualErr("failed"), JIRA_SAVED: "skipped" } },
   },
 });

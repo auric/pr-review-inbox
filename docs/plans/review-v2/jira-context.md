@@ -91,7 +91,7 @@ Caps (jira.ts CAPS):
 ### 3.6 UI
 
 - The task chips show the fetch state. There is no new panel and no new setting.
-- Clear keeps its place and its label. It now also stops automatic reads of that key.
+- Clear keeps its place and its label. It now also stops automatic reads of that key. A key without text, never fetched or failed, gets Skip, which does the same (WP-JC4).
 
 ## 4. Design
 
@@ -99,7 +99,7 @@ Caps (jira.ts CAPS):
 
 1. steps() calls `autoFetch(db, pr, kind, jira)` before `check()`. The call never rejects.
 2. autoFetch reads pr_task, task_context, task_fetch, and task (origin_pr, key) rows. It picks the keys (section 3.2) and applies `due()` (section 4.4).
-3. Each due key gets one shared read: the issue, then the parent or epic. A map of in-flight reads by key keeps one Jira read per key at a time. Runs and the POST route share it.
+3. Each due key gets one shared read: the issue, then the parent or epic. A map of in-flight reads by key and JIRA_SAVED count keeps one Jira read per key at a time. Runs and the POST route share it. A read after a Jira settings save starts anew (section 4.4).
 4. A write follows each read, per (pr, key). The write applies the machine event in one transaction (section 4.4). The write goes to the database of the read start. If settings changed the database, the write drops the result.
 5. steps() waits for the reads, at most 15 s from their start. A new j.abort makes Cancel end the wait at once.
 6. steps() updates review_run.tasks_json with the current rows (new SQL `setTasks` in run-rows.ts).
@@ -145,16 +145,18 @@ Transitions (blank: the event is ignored, and nothing is written):
 
 | State | AUTO_OK | AUTO_ERR | MANUAL_OK | MANUAL_ERR | CLEAR | JIRA_SAVED |
 |---|---|---|---|---|---|---|
-| none | fetched | failed | fetched | failed | | none |
+| none | fetched | failed | fetched | failed | skipped | none |
 | fetched | fetched | refreshFailed | fetched | refreshFailed | skipped | fetched |
-| failed | fetched | failed | fetched | failed | | none |
+| failed | fetched | failed | fetched | failed | skipped | none |
 | refreshFailed | fetched | refreshFailed | fetched | refreshFailed | skipped | fetched |
 | skipped | | | fetched | failed | | skipped |
 
 - AUTO_OK and AUTO_ERR also need: pr_task names the key, and no task row has (origin_pr, key) = (pr, key). Else the result drops.
 - MANUAL_OK and MANUAL_ERR need pr_task to name the key, as today (routes.ts:188, 207).
+- AUTO_ERR and MANUAL_ERR also need a read that started after the last JIRA_SAVED of this database. Else the error drops, because the read can have used the old token. Each read carries the JIRA_SAVED count at its start. A read after a save never joins a read from before it. AUTO_OK and MANUAL_OK need no such check.
+- CLEAR in none needs pr_task to name the key, so a DELETE of an unknown key writes no row. CLEAR in the other states has no guard. The chip offers Skip for a key without text and Clear text for a key with text. Both send CLEAR.
 - The AUTO_* events come from writes after an automatic read. MANUAL_* come from POST /prs/:id/task-context/:key. CLEAR comes from DELETE. JIRA_SAVED comes from a successful PUT /settings/jira.
-- Write effects: fetched upserts the text with fetched_at = now and deletes the task_fetch row. failed and refreshFailed upsert the task_fetch row. skipped deletes the text, its attachment rows, and its files, as today, and upserts the task_fetch row. JIRA_SAVED deletes all 'failed' rows.
+- Write effects: fetched upserts the text with fetched_at = now and deletes the task_fetch row. failed and refreshFailed upsert the task_fetch row. skipped deletes the text, its attachment rows, and its files, as today, and upserts the task_fetch row. A key without text has no files, so the delete of its folder does nothing. JIRA_SAVED deletes all 'failed' rows.
 
 Start of an automatic read, `due()` (a pure function with its own table test):
 
@@ -210,6 +212,8 @@ Start of an automatic read, `due()` (a pure function with its own table test):
 - Chip state text: "fetched 2 min ago" (exists), "fetched 3 days ago, refresh failed", "not fetched: <short reason>", "skipped", "not fetched" (exists). A Hint shows the full reason.
 - Short reasons: token rejected, no access, no such issue, Jira redirected, Jira busy, Jira error, unknown answer, timed out, Jira unreachable.
 - The full chip in the Brief shows the source, then the state for failed and skipped keys.
+- Skip sends CLEAR for a key without text that is not skipped: never fetched or failed. It needs no confirm, because it deletes no text. Clear text sends CLEAR for a key with text, after a confirm. Fetch ends a skip.
+- The chip state text wraps on a narrow pane. The key and the buttons do not wrap.
 
 ### 4.9 Security
 

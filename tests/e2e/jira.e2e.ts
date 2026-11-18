@@ -341,11 +341,13 @@ test("the run buttons and the Ask section share the task chips of the brief, and
   await page.getByLabel("Your note").press("Control+Enter");
   await expect(runRow(page)).toHaveAttribute("data-run-state", "done", { timeout: RUN_MS });
   await expect(runTasks(page, JIRA_ISSUE)).toBeVisible();
+  // jira-context.md section 4.4: the run read ABC-404 at its start. Jira gave 404, so the key keeps a sticky failure.
+  await expect(runs).toContainText(`${MISSING} · not fetched: no such issue`);
 
-  // Clear text changes the PR tasks, not the record of the run.
+  // Clear text changes the PR tasks, not the record of the run. The key is skipped until the next Fetch.
   await runs.getByRole("button", { name: `Clear text of ${JIRA_ISSUE}` }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Clear text", exact: true }).click();
-  await expect(runs).toContainText(`${JIRA_ISSUE} · not fetched`);
+  await expect(runs).toContainText(`${JIRA_ISSUE} · skipped`);
   await expect(runs.getByRole("button", { name: `Fetch ${JIRA_ISSUE} from Jira` })).toBeFocused();
   await expect(runTasks(page, JIRA_ISSUE)).toBeVisible();
   await page.locator("#runline-log").click();
@@ -356,7 +358,7 @@ test("the run buttons and the Ask section share the task chips of the brief, and
   await page.keyboard.press("q");
   const ask = askChips(page);
   await expect(runs).toHaveCount(0);
-  await expect(ask).toContainText(`${JIRA_ISSUE} · not fetched`);
+  await expect(ask).toContainText(`${JIRA_ISSUE} · skipped`);
   await ask.getByRole("button", { name: `Fetch ${MISSING} from Jira` }).click();
   await expect(ask.getByText(`${MISSING}: Jira has no such issue, or the token may not see it.`)).toBeVisible();
   await ask.getByRole("button", { name: `Fetch ${JIRA_ISSUE} from Jira` }).click();

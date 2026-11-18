@@ -17,6 +17,7 @@ import {
   autoFetch,
   due,
   type FetchRow,
+  fetchGen,
   fetchStates,
   MAX_KEYS,
   plan,
@@ -428,16 +429,43 @@ describe("with the routes", () => {
     expect(jira.count("GET", ISSUE_PATH)).toBe(2);
   });
 
+  test("a read that started before a Jira settings save writes no failed row; a read after the save does not join it", async () => {
+    const s = setup([ISSUE_KEY]);
+    expect((await s.connect()).status).toBe(200);
+    const [p1, p2] = s.prs as [number, number];
+    // The first issue read gets 401, as a read with an old token does. Later reads get the issue.
+    const k = route("GET", ISSUE_PATH);
+    const issue = jira.routes[k];
+    let reads = 0;
+    jira.routes[k] = (req) =>
+      reads++ === 0 ? { status: 401, body: null } : typeof issue === "function" ? issue(req) : (issue ?? { status: 404, body: null });
+    const held = hold(ISSUE_PATH);
+    const a = await autoFetch(s.db, p1, "review", s.settings);
+    const post = Promise.resolve(s.call("POST", `/prs/${p2}/task-context/${ISSUE_KEY}`));
+    await within(held.started);
+    expect((await s.connect()).status).toBe(200);
+    // This Fetch starts after the save. It sends its own read with the new token.
+    const after = Promise.resolve(s.call("POST", `/prs/${p1}/task-context/${ISSUE_KEY}`));
+    held.release();
+    expect(await within(a.reads[0]?.done as Promise<unknown>)).toBeNull();
+    expect((await within(post)).status).toBe(502);
+    expect((await within(after)).status).toBe(200);
+    expect(jira.count("GET", ISSUE_PATH)).toBe(2);
+    expect(fetchStates(s.db, p1)).toEqual([{ key: ISSUE_KEY, state: "fetched", kind: null, at: null }]);
+    expect(fetchStates(s.db, p2)).toEqual([{ key: ISSUE_KEY, state: "none", kind: null, at: null }]);
+    expect(s.db.query("SELECT COUNT(*) AS n FROM task_fetch").get()).toEqual({ n: 0 });
+  });
+
   test("AC-JC9: a Jira settings save ends every failed state; fetched text stays, skipped stays, and the PRs get changed", async () => {
     const s = setup(["ABC-1", "ABC-2", "ABC-3"]);
     expect((await s.connect()).status).toBe(200);
     const [p1, p2] = s.prs as [number, number];
-    writeFetch(s.db, p1, "ABC-1", { type: "AUTO_ERR", kind: "auth" });
+    writeFetch(s.db, p1, "ABC-1", { type: "AUTO_ERR", kind: "auth", gen: fetchGen(s.db) });
     writeFetch(s.db, p1, "ABC-2", { type: "MANUAL_OK", issue: ISSUE("ABC-2") }, 7);
-    writeFetch(s.db, p1, "ABC-2", { type: "AUTO_ERR", kind: "timeout" });
+    writeFetch(s.db, p1, "ABC-2", { type: "AUTO_ERR", kind: "timeout", gen: fetchGen(s.db) });
     writeFetch(s.db, p1, "ABC-3", { type: "MANUAL_OK", issue: ISSUE("ABC-3") }, 7);
     writeFetch(s.db, p1, "ABC-3", { type: "CLEAR" });
-    writeFetch(s.db, p2, "ABC-1", { type: "MANUAL_ERR", kind: "forbidden" });
+    writeFetch(s.db, p2, "ABC-1", { type: "MANUAL_ERR", kind: "forbidden", gen: fetchGen(s.db) });
     const get = async (pr: number) => (await (await s.call("GET", `/prs/${pr}/task-fetch`)).json()) as TaskFetchDto[];
     expect((await get(p1)).map((r) => [r.key, r.state, r.kind])).toEqual([
       ["ABC-1", "failed", "auth"],

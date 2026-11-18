@@ -88,8 +88,11 @@ This test checks the Release 3 features against a real Bitbucket Server, a real 
 4. Open the browser network tab and reload. Open the task fold again. Expect no request to the Jira host. Expect requests to 127.0.0.1 only.
 5. In a browser where you are logged in to Jira, open `<JIRA_URL>/rest/api/2/issue/<KEY>?fields=description&expand=renderedFields`. Record whether `renderedFields.description` exists. Record its tag names only, for example `p h3 ul li table tr th td pre a img`. Open `<JIRA_URL>/rest/api/2/issue/<KEY>/comment?expand=renderedBody`. Record whether `renderedBody` exists (U25).
 6. Click "Draft replies". Wait for the end of the run. Expect the run line to show `<KEY>`. Its tooltip says "Task text that this run read: <KEY>".
-7. Click Remove on the chip next to Draft replies. Expect the chip "<KEY> · not fetched". Expect the run line to keep `<KEY>`. Fetch the task again.
+7. Click "Clear text" on the chip next to Draft replies, then "Clear text" in the dialog. Expect the chip "<KEY> · skipped". Expect the run line to keep `<KEY>`. Fetch the task again.
 8. Press q. Expect the same task chip in Ask, in the panel slot. Press Esc.
+9. Add a key that Jira does not have, for example `<PROJECT>-999999`, to the pull request description. Click "Check now". Start a review. Expect its chip "<PROJECT>-999999 · not fetched: no such issue". Hover the chip. Expect the hint "Jira has no such issue, or the token may not see it."
+10. Start a second review. Expect "0 failed" in the run log line "task text: ...". A sticky failure gets no new read.
+11. Click "Skip" on that chip. Expect "<PROJECT>-999999 · skipped" and no confirm dialog. Click its Fetch button. Expect "not fetched: no such issue" again. Remove the key from the description.
 
 ## F. Jira attachments
 

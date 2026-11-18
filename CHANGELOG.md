@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Review: the app now fetches the Jira task text at the start of each review, re-review, and Explain. Ask, replies, Fix, and discuss fetch only tasks without text.
+- Review: the task chips now show when the app fetched the text, or why it did not, for example "not fetched: no such issue". A hint shows the full reason. A failed refresh keeps the old text and says "refresh failed".
+- Review: Clear text and the new Skip button skip a task. Runs do not read a skipped task. Fetch ends the skip.
 - Build a Jira task: a plan over the line limit now shows "Only large fits." with "Change the limit". A new limit for the task unlocks the smaller sizes before you approve the plan.
 - Build a Jira task: "Change size" in the More menu now shows only when another size fits. It moves the focus to the picked size and shows the focus ring.
 - Review: an accepted draft on an older commit no longer blocks the other posts of the PR. The Post bar names it and offers Discard, and the next Review changes carries it.

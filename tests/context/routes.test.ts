@@ -216,7 +216,7 @@ describe("task context API", () => {
     expect((await s.call("GET", "/prs/999/task-fetch")).status).toBe(404);
   });
 
-  test("DELETE removes the text, gives 204, and makes the key skipped; a DELETE without text writes nothing", async () => {
+  test("DELETE removes the text, gives 204, and makes the key skipped; skipped, unnamed keys, and unknown PRs write nothing", async () => {
     const s = setup();
     await s.connect();
     await s.call("POST", `/prs/${s.pr}/task-context/${ISSUE_KEY}`);
@@ -227,14 +227,34 @@ describe("task context API", () => {
     expect(s.events).toEqual([{ event: "changed", data: { prs: [s.pr] } }]);
     const states = async () => ((await (await s.call("GET", `/prs/${s.pr}/task-fetch`)).json()) as TaskFetchDto[]).map((r) => r.state);
     expect(await states()).toEqual(["skipped", "none"]);
-    // Section 4.4: skipped and none take no CLEAR.
+    // Section 4.4: skipped takes no CLEAR. None takes it only for a key that the PR names.
     const rows = () => s.db.query("SELECT * FROM task_fetch").all();
     const before = rows();
     expect((await s.call("DELETE", `/prs/${s.pr}/task-context/${ISSUE_KEY}`)).status).toBe(204);
-    expect((await s.call("DELETE", `/prs/${s.pr}/task-context/ABC-404`)).status).toBe(204);
+    expect((await s.call("DELETE", `/prs/${s.pr}/task-context/XYZ-1`)).status).toBe(204);
+    expect((await s.call("DELETE", `/prs/999/task-context/${ISSUE_KEY}`)).status).toBe(204);
     expect(rows()).toEqual(before);
     expect(s.events.length).toBe(1);
-    expect(await states()).toEqual(["skipped", "none"]);
+    // A never-fetched key has no text and no folder. CLEAR makes it skipped.
+    expect((await s.call("DELETE", `/prs/${s.pr}/task-context/ABC-404`)).status).toBe(204);
+    expect(await states()).toEqual(["skipped", "skipped"]);
+    expect(s.events.length).toBe(2);
+  });
+
+  test("DELETE of a failed key makes it skipped, so no run reads it; a Fetch ends the skip", async () => {
+    const s = setup();
+    await s.connect();
+    const base = `/prs/${s.pr}/task-context/ABC-404`;
+    expect((await s.call("POST", base)).status).toBe(502);
+    const list = async () => ((await (await s.call("GET", `/prs/${s.pr}/task-fetch`)).json()) as TaskFetchDto[])[1];
+    expect((await list())?.state).toBe("failed");
+    s.events.length = 0;
+    expect((await s.call("DELETE", base)).status).toBe(204);
+    expect(await list()).toEqual({ key: "ABC-404", state: "skipped", kind: null, reason: null, at: expect.any(Number) });
+    expect(s.events).toEqual([{ event: "changed", data: { prs: [s.pr] } }]);
+    expect(s.db.query("SELECT COUNT(*) AS n FROM task_context").get()).toEqual({ n: 0 });
+    expect((await s.call("POST", base)).status).toBe(502);
+    expect((await list())?.state).toBe("failed");
   });
 
   test("AC-JC8: a Fetch ends the skip, whether it fails or succeeds", async () => {

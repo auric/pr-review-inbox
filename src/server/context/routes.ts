@@ -27,7 +27,7 @@ import type { ReviewJobs } from "../review/jobs";
 import type { Settings } from "../settings";
 import { openFolder, RASTER_TYPE, type Raster, rasterOfFile, resolveFile, safeName, sniffFile, store, taskDir } from "./attachments";
 import { ContextError, type ContextErrorKind, type ContextSource } from "./source";
-import { fetchStates, jiraSaved, readShared, type TaskFetchDto, writeFetch } from "./task-fetch";
+import { fetchGen, fetchStates, jiraSaved, readShared, type TaskFetchDto, writeFetch } from "./task-fetch";
 
 // Fixed texts. A Jira answer body never reaches the client. The task routes use them too.
 export const FAILED: Record<ContextErrorKind, string> = {
@@ -201,6 +201,7 @@ export function createContextRoutes(opts: {
       const { id, key } = c.req.valid("param");
       if (!hasPr(db, id)) return c.json(prNotFound, 404);
       if (!hasTask(db, id, key)) return c.json<ApiError>({ error: "This pull request does not name that task." }, 404);
+      const gen = fetchGen(db);
       let source: ContextSource | null;
       try {
         source = await settings.jira();
@@ -210,11 +211,12 @@ export function createContextRoutes(opts: {
       if (!source) return c.json<ApiError>({ error: "Set up Jira in Settings first." }, 409);
       let issue: IssueContext;
       try {
-        issue = await readShared(db, source, key);
+        issue = await readShared(db, source, key, gen);
       } catch (e) {
         if (!(e instanceof ContextError)) throw e;
         log(`Jira fetch failed: ${e.message}`);
-        if (settings.db() === db && writeFetch(db, id, key, { type: "MANUAL_ERR", kind: e.kind })) live.broadcast("changed", { prs: [id] });
+        if (settings.db() === db && writeFetch(db, id, key, { type: "MANUAL_ERR", kind: e.kind, gen }))
+          live.broadcast("changed", { prs: [id] });
         return c.json<ApiError>({ error: FAILED[e.kind] }, 502);
       }
       // A settings swap during the read closes this database.
@@ -230,7 +232,8 @@ export function createContextRoutes(opts: {
       const db = settings.db();
       if (!db) return c.json(unconfigured, 409);
       const { id, key } = c.req.valid("param");
-      // jira-context.md section 4.4: only fetched and refreshFailed take CLEAR. The other states write nothing.
+      // jira-context.md section 4.4: skipped, and none of a key that the PR does not name, ignore CLEAR and write nothing. A key without
+      // text has no attachment folder, and the forced delete of a missing folder does nothing.
       if (writeFetch(db, id, key, { type: "CLEAR" }) === null) return c.body(null, 204);
       try {
         rmSync(resolveFile(review.dataDir, taskDir(db, id, key)) as string, { recursive: true, force: true, maxRetries: 3 });

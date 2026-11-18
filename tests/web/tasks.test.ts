@@ -3,6 +3,7 @@
 
 // Plan r2 UI-JIRA: the pure task text rules of the brief and the AI summary.
 import { describe, expect, test } from "bun:test";
+import type { TaskFetchDto } from "../../src/server/context/task-fetch";
 import type { AttachmentDto, MetaDto, PrTask, RunDto, TaskContextDto } from "../../src/shared/dto";
 import {
   attachmentImages,
@@ -11,20 +12,27 @@ import {
   commentsText,
   contextLines,
   dropFile,
+  fetchedText,
   fileKind,
   fileState,
   imageIds,
   includable,
   mergeTask,
+  notable,
   offerSetup,
   putFile,
   removeText,
+  SHORT_REASON,
   sizeText,
+  skippable,
   sourceTime,
+  stateText,
   taskChips,
   trackerOf,
   typeText,
 } from "../../src/web/review/tasks";
+
+console.log(`tasks.test.ts imported from ${Bun.resolveSync("../../src/web/review/tasks", import.meta.dir)}`);
 
 const task = (key: string, source: PrTask["source"] = "description"): PrTask => ({ key, source, url: null });
 const row = (key: string, o: Partial<TaskContextDto> = {}): TaskContextDto => ({
@@ -59,6 +67,80 @@ describe("taskChips", () => {
       ["ABC-42", "description", "ABC-42", true],
       ["OLD-7", null, "OLD-7", false],
     ]);
+  });
+});
+
+// jira-context.md section 4.8: the chip state text, the short reasons, and Skip.
+describe("fetch state of a chip", () => {
+  const NOW = 1_000 + 3 * 86_400_000;
+  const st = (key: string, state: TaskFetchDto["state"], kind: TaskFetchDto["kind"] = null): TaskFetchDto => ({
+    key,
+    state,
+    kind,
+    reason: kind && `Full ${kind}`,
+    at: 5,
+  });
+
+  test("each state has its text; a skipped row wins over text", () => {
+    const old = row("ABC-1");
+    const fetched = fetchedText(old, NOW);
+    expect(fetched).toStartWith("fetched ");
+    const cases: [TaskContextDto | null, TaskFetchDto | null, string][] = [
+      [old, st("ABC-1", "fetched"), fetched],
+      [old, st("ABC-1", "refreshFailed", "timeout"), `${fetched}, refresh failed`],
+      [null, st("ABC-1", "failed", "not_found"), "not fetched: no such issue"],
+      [null, st("ABC-1", "skipped"), "skipped"],
+      [old, st("ABC-1", "skipped"), "skipped"],
+      [null, st("ABC-1", "none"), "not fetched"],
+      [null, null, "not fetched"],
+      [old, null, fetched],
+    ];
+    for (const [f, fetch, text] of cases) expect(stateText({ fetched: f, fetch }, NOW)).toBe(text);
+  });
+
+  test("each error kind has a short reason of at most 3 words", () => {
+    expect(SHORT_REASON).toEqual({
+      auth: "token rejected",
+      forbidden: "no access",
+      not_found: "no such issue",
+      redirect: "Jira redirected",
+      rate: "Jira busy",
+      server: "Jira error",
+      shape: "unknown answer",
+      timeout: "timed out",
+      network: "Jira unreachable",
+    });
+    for (const r of Object.values(SHORT_REASON)) expect(r.split(" ").length).toBeLessThanOrEqual(3);
+  });
+
+  test("the brief adds the state only for failed, refresh failed, and skipped keys", () => {
+    expect((["none", "fetched", "failed", "refreshFailed", "skipped"] as const).filter((s) => notable({ fetch: st("A-1", s) }))).toEqual([
+      "failed",
+      "refreshFailed",
+      "skipped",
+    ]);
+    expect(notable({ fetch: null })).toBe(false);
+  });
+
+  test("taskChips joins the fetch states; Skip shows for a fetchable key without text that is not skipped", () => {
+    const tasks = [task("ABC-1"), task("ABC-2"), task("ABC-3"), task("ABC-4"), task("abc-5")];
+    const states = [
+      st("ABC-1", "none"),
+      st("ABC-2", "failed", "auth"),
+      st("ABC-3", "skipped"),
+      st("ABC-4", "fetched"),
+      st("abc-5", "none"),
+    ];
+    const chips = taskChips(tasks, [row("ABC-4"), row("OLD-7")], true, states);
+    expect(chips.map((c) => [c.key, c.fetch?.state ?? null, skippable(c)])).toEqual([
+      ["ABC-1", "none", true],
+      ["ABC-2", "failed", true],
+      ["ABC-3", "skipped", false],
+      ["ABC-4", "fetched", false],
+      ["abc-5", "none", false],
+      ["OLD-7", null, false],
+    ]);
+    expect(taskChips(tasks, [], false, states).some(skippable)).toBe(false);
   });
 });
 

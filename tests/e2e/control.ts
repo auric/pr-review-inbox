@@ -333,6 +333,12 @@ export async function jiraRequests(): Promise<string[]> {
   return ((await res.json()) as { requests: string[] }).requests;
 }
 
+// The answer of the fake Jira to an issue read. status: that status with no body. No status: the issue again. A reset restores JIRA_ISSUE.
+export async function jiraIssue(issue: string, status?: number): Promise<void> {
+  const res = await fetch(`${FAKE_URL}/__control/jira-issue`, { method: "POST", headers: auth, body: JSON.stringify({ issue, status }) });
+  if (!res.ok) throw new Error(`control jira-issue: ${res.status}`);
+}
+
 // The URL of the Jira Cloud fake and the email that it accepts with E2E_JIRA_TOKEN.
 export async function jiraCloud(): Promise<{ url: string; email: string }> {
   const res = await fetch(`${FAKE_URL}/__control/jira-cloud`, { method: "POST", headers: auth });

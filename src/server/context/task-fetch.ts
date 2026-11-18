@@ -37,10 +37,15 @@ export type FetchRow = { state: FetchState; kind: ContextErrorKind | null; at: n
 // GET /prs/:id/task-fetch (section 4.8). One entry per pr_task key, in pr_task order. reason: the FAILED text of kind, else null.
 export type TaskFetchDto = { key: string; state: FetchState; kind: ContextErrorKind | null; reason: string | null; at: number | null };
 
+// gen: fetchGen() at the start of the failed read. A read that started before the last JIRA_SAVED can carry an old token.
 export type FetchEvent =
   | { type: "AUTO_OK" | "MANUAL_OK"; issue: IssueContext }
-  | { type: "AUTO_ERR" | "MANUAL_ERR"; kind: ContextErrorKind }
+  | { type: "AUTO_ERR" | "MANUAL_ERR"; kind: ContextErrorKind; gen: number }
   | { type: "CLEAR" | "JIRA_SAVED" };
+
+// The count of JIRA_SAVED per database. Memory only: a restart ends all reads.
+const gens = new WeakMap<Database, number>();
+export const fetchGen = (db: Database) => gens.get(db) ?? 0;
 
 type Stored = { fetchedAt: number | null; stored: "failed" | "skipped" | null; kind: ContextErrorKind | null; at: number | null };
 
@@ -82,7 +87,8 @@ const sticky = (r: FetchRow) => (r.state === "failed" || r.state === "refreshFai
 export function writeFetch(db: Database, pr: number, key: string, event: FetchEvent, now = Date.now()): FetchState | null {
   return db.transaction((): FetchState | null => {
     const r = db.query(SQL.one).get({ pr, key }) as Stored & { named: number; owned: number };
-    const snapshot = fetchMachine.resolveState({ value: stateOf(r), context: { named: r.named === 1, owned: r.owned === 1 } });
+    const current = !("gen" in event) || event.gen === fetchGen(db);
+    const snapshot = fetchMachine.resolveState({ value: stateOf(r), context: { named: r.named === 1, owned: r.owned === 1, current } });
     if (!snapshot.can({ type: event.type })) return null;
     const [next] = transition(fetchMachine, snapshot, { type: event.type });
     switch (event.type) {
@@ -106,8 +112,9 @@ export function writeFetch(db: Database, pr: number, key: string, event: FetchEv
   })();
 }
 
-// A successful PUT /settings/jira: JIRA_SAVED to every key with a failed row. Returns the PR row IDs that changed.
+// A successful PUT /settings/jira: a new generation, then JIRA_SAVED to every key with a failed row. Returns the PR row IDs that changed.
 export function jiraSaved(db: Database): number[] {
+  gens.set(db, fetchGen(db) + 1);
   return db.transaction(() => {
     const rows = db.query(SQL.failed).all() as { pr: number; key: string }[];
     for (const r of rows) writeFetch(db, r.pr, r.key, { type: "JIRA_SAVED" });
@@ -175,16 +182,18 @@ async function readIssue(source: ContextSource, key: string): Promise<IssueConte
   }
 }
 
-// Section 4.1 step 3: one read per database and key at a time. Runs and POST /prs/:id/task-context/:key share it. Each caller writes
-// its own event for its own (pr, key).
+// Section 4.1 step 3: one read per database, generation, and key at a time. Runs and POST /prs/:id/task-context/:key share it. Each
+// caller writes its own event for its own (pr, key). gen: fetchGen() before the caller got source, so a read after a save never joins a
+// read with the old token.
 const inflight = new WeakMap<Database, Map<string, Promise<IssueContext>>>();
-export function readShared(db: Database, source: ContextSource, key: string): Promise<IssueContext> {
+export function readShared(db: Database, source: ContextSource, key: string, gen: number): Promise<IssueContext> {
   const reads = inflight.get(db) ?? new Map<string, Promise<IssueContext>>();
   inflight.set(db, reads);
-  const running = reads.get(key);
+  const id = `${gen} ${key}`;
+  const running = reads.get(id);
   if (running) return running;
-  const read = readIssue(source, key).finally(() => reads.delete(key));
-  reads.set(key, read);
+  const read = readIssue(source, key).finally(() => reads.delete(id));
+  reads.set(id, read);
   return read;
 }
 
@@ -206,6 +215,7 @@ export async function autoFetch(db: Database, pr: number, kind: RunKind, setting
     return none;
   }
   if (!keys.due.length && !keys.capped.length) return none;
+  const gen = fetchGen(db);
   let source: ContextSource | null;
   try {
     source = await settings.jira();
@@ -228,7 +238,7 @@ export async function autoFetch(db: Database, pr: number, kind: RunKind, setting
   const reads = keys.due.map(
     (key): AutoRead => ({
       key,
-      done: readShared(db, jira, key).then(
+      done: readShared(db, jira, key, gen).then(
         (issue) => {
           const state = write(key, { type: "AUTO_OK", issue });
           return state && { state, kind: null };
@@ -237,7 +247,7 @@ export async function autoFetch(db: Database, pr: number, kind: RunKind, setting
           // Section 4.4: an error that is not a ContextError counts as kind server. The log gets its name only.
           const kind = e instanceof ContextError ? e.kind : "server";
           log(`Jira task read of ${key} failed: ${e instanceof ContextError ? kind : (e as Error)?.name}`);
-          const state = write(key, { type: "AUTO_ERR", kind });
+          const state = write(key, { type: "AUTO_ERR", kind, gen });
           return state && { state, kind };
         },
       ),
