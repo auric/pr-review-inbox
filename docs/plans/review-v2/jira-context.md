@@ -354,6 +354,8 @@ The user took the recommended answers ("let's do as recommended").
 - Question 8: not now.
 - Question 9: no read when the Brief opens.
 
+Gate JC-G run 1 (2026-11-18, Jira Server): the full read returns names and schema, links have summary, status with statusCategory, and issuetype, and the reads take 292 ms. The user's team writes acceptance criteria in the description or in the comments, not in a custom field. Both are read today. So question 7 needs no setting, and the custom text field read stays only for teams that use such a field.
+
 ## 11. Out of scope
 
 - Descriptions of linked issues, remote links, and Jira history.
