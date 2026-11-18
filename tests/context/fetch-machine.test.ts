@@ -136,7 +136,8 @@ describe("senders and writers", () => {
     expect(Object.fromEntries(FETCH_EVENTS.map((e) => [e, senders(e)]))).toEqual({
       AUTO_OK: ["context/task-fetch.ts"],
       AUTO_ERR: ["context/task-fetch.ts"],
-      MANUAL_OK: ["context/routes.ts"],
+      // tasks.ts storeContext sends it for the Build-task read of the origin PR text.
+      MANUAL_OK: ["context/routes.ts", "tasks/tasks.ts"],
       MANUAL_ERR: ["context/routes.ts"],
       CLEAR: ["context/routes.ts"],
       // jiraSaved() sends it. PUT /settings/jira calls jiraSaved() after a successful save.
@@ -149,7 +150,8 @@ describe("senders and writers", () => {
     const writes = (table: string) =>
       files.filter((f) => new RegExp(`(?:INSERT INTO|DELETE FROM|UPDATE|REPLACE INTO) ${table}\\b`).test(text.get(f) ?? ""));
     expect(writes("task_fetch")).toEqual(["context/task-fetch.ts"]);
-    // jira-context.md section 4.4 names writeFetch() the only writer. tasks.ts is outside WP-JC2, so it stays a known exception.
+    // jira-context.md section 4.4 names writeFetch() the only writer. tasks.ts storeContext writes directly only for a key that the
+    // origin PR no longer names and for the status after a move. Both rows belong to a Build task.
     expect(writes("task_context")).toEqual(["context/task-fetch.ts", "tasks/tasks.ts"]);
   });
 });

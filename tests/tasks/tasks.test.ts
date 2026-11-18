@@ -379,6 +379,32 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
   );
 
   test(
+    "jira-context.md section 4.4: the create click writes the origin PR text through writeFetch; Read Jira again writes it when the PR no longer names the key",
+    async () => {
+      const h = await setup();
+      await h.connectJira();
+      h.db
+        .query("INSERT INTO task_fetch (pr, key, state, kind, at) VALUES ($pr, $key, 'failed', 'timeout', 1)")
+        .run({ pr: h.pr, key: ISSUE_KEY });
+      const c = await h.create();
+      expect(c.status).toBe(201);
+      // MANUAL_OK ends the failed state.
+      expect(h.db.query("SELECT key FROM task_fetch WHERE pr = $pr").all({ pr: h.pr })).toEqual([]);
+      await h.settle();
+      // A sync can drop the key from the PR. The task still reads the row of its origin PR.
+      h.db.query("DELETE FROM pr_task WHERE pr = $pr").run({ pr: h.pr });
+      h.db.query("UPDATE task_context SET fetched_at = 1 WHERE pr = $pr").run({ pr: h.pr });
+      const t = await h.get(c.body.id);
+      expect((await h.json<TaskDto>(`/api/tasks/${t.id}/jira-read`, { body: { version: t.version } })).status).toBe(200);
+      const row = h.db.query("SELECT fetched_at FROM task_context WHERE pr = $pr AND key = $key").get({ pr: h.pr, key: ISSUE_KEY }) as {
+        fetched_at: number;
+      };
+      expect(row.fetched_at).toBeGreaterThan(1);
+    },
+    SLOW,
+  );
+
+  test(
     "the snapshot is sanitized, the task text is untrusted data, and a cancelled run stops the task",
     async () => {
       // AC-B18, AC-B197: with the run limit 1, the task run holds the only slot.

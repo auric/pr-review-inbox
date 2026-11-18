@@ -45,9 +45,9 @@ import type {
   RunDto,
 } from "../../src/shared/dto";
 import { REVIEW_PROMPT_VERSION } from "../../src/shared/review";
-import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, startFakeBitbucket } from "../support/fake-bitbucket";
+import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, type Route, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoExplain, type FakeScenario, readRecords } from "../support/fake-claude";
-import { JIRA_TOKEN, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira";
+import { type FakeJira, JIRA_TOKEN, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira";
 
 const SLOW = 120_000;
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
@@ -252,6 +252,9 @@ async function setup(
     remoteUrl?: string;
     // The fake Jira URL. Absent: no Jira.
     jira?: string;
+    // The CA file of the Jira settings.
+    caFile?: string;
+    jiraWaitMs?: number;
   } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), "rl-wp10-"));
@@ -266,7 +269,7 @@ async function setup(
     userSlug: FAKE_USER,
     notifications: false,
     profiles: [GENERAL, ...SHIPPED_PROFILES.slice(1)],
-    ...(o.jira && { jira: { baseUrl: o.jira } }),
+    ...(o.jira && { jira: { baseUrl: o.jira, ...(o.caFile && { caFile: o.caFile }) } }),
   });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
@@ -335,6 +338,7 @@ async function setup(
     gitRemote: o.forgeRemote ? undefined : async () => remoteOf(o.remoteUrl ?? repo.remote),
     listTools: o.listTools ?? stubTools,
     claudeConfigDir: o.claudeConfigDir,
+    jiraWaitMs: o.jiraWaitMs,
   });
   const app = createApp({ port: PORT, token: SESSION, live, settings, sync, review });
   cleanup.unshift(async () => {
@@ -1939,7 +1943,11 @@ describe("task context (plan r2 WP0)", () => {
         return { task, stdin: c.stdin };
       };
 
+      // jira-context.md section 4.1: the pr_task key ABC-1 has no text, so the first run reads it once. The fake has no ABC-1, and
+      // not_found is sticky, so the second run does not read it again.
+      const own = () => jira.count("GET", "/rest/api/2/issue/ABC-1");
       const off = await hung();
+      expect(own()).toBe(1);
       expect(reads()).toEqual(before);
       expect(off.task).not.toContain("### Parent");
       expect(off.task).not.toContain("### Sub-tasks");
@@ -1950,6 +1958,7 @@ describe("task context (plan r2 WP0)", () => {
       });
       expect(put.status).toBe(200);
       const on = await hung();
+      expect(own()).toBe(1);
       expect(reads()).toEqual([before[0] + 1, before[1]]);
       expect(on.task).toContain(`### Parent ${SUBTASK_PARENT}: Split the cache work into sub-tasks`);
       expect(on.task).toContain("#### Parent description");
@@ -2001,6 +2010,306 @@ describe("task context (plan r2 WP0)", () => {
       for (const a of ["rl-main", "rl-reviewer"]) expect(agents[a].prompt).toContain("Every file in ./repo and ./context");
       await h.call(`/api/runs/${body.id}/cancel`, { method: "POST" });
       expect((await h.finish(body.id)).run.status).toBe("cancelled");
+    },
+    SLOW,
+  );
+});
+
+describe("Jira reads at the run start (jira-context.md WP-JC3)", () => {
+  const ISSUE = "/rest/api/2/issue/ABC-1";
+  type H = Awaited<ReturnType<typeof setup>>;
+
+  // A fake Jira for one test that serves these issues.
+  function fakeJira(...serve: string[]) {
+    const jira = startFakeJira();
+    cleanup.push(() => jira.stop());
+    for (const k of serve) jira.addIssue(k, `Summary of ${k}`);
+    return jira;
+  }
+
+  // Holds the answers of path until the returned function runs. The cleanup runs it first.
+  function hold(jira: FakeJira, path: string) {
+    const route = jira.routes[key("GET", path)] as Route;
+    let release = () => {};
+    const open = new Promise<void>((r) => {
+      release = r;
+    });
+    jira.routes[key("GET", path)] = async (req) => {
+      await open;
+      return typeof route === "function" ? route(req) : route;
+    };
+    cleanup.unshift(release);
+    return release;
+  }
+
+  // A stored text of k, fetched at.
+  const text = (h: H, k: string, at: number, extra: Partial<IssueContext> = {}) =>
+    h.db.query("INSERT INTO task_context (pr, key, source, json, fetched_at) VALUES ($pr, $k, 'jira', $json, $at)").run({
+      pr: h.pr,
+      k,
+      at,
+      json: JSON.stringify({
+        key: k,
+        summary: `Stored ${k}`,
+        status: "Open",
+        description: "Stored text.",
+        comments: [],
+        commentsTotal: 0,
+        truncated: false,
+        ...extra,
+      } satisfies IssueContext),
+    });
+  const taskKey = (h: H, k: string, ord: number) =>
+    h.db.query("INSERT INTO pr_task (pr, key, source, url, ord) VALUES ($pr, $k, 'description', NULL, $ord)").run({ pr: h.pr, k, ord });
+  const ask = (h: H) => () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } });
+  const reply = (h: H) => () => h.json<RunDto>(`/api/prs/${h.pr}/reply-run`, { body: { threads: [101] } });
+  const fix = (h: H) => () => h.json<RunDto>(`/api/prs/${h.pr}/fix-run`, { body: { threads: [101] } });
+
+  // Starts a run and cancels it when its CLI process runs. task: context/task.md of the run, null when it has none.
+  async function hung(h: H, start: () => Promise<{ body: RunDto }> = h.start) {
+    h.scenario({ fixture: subagentRun(), hang: true });
+    const runs = () => h.calls().filter((c) => c.argv?.includes("-p"));
+    const n = runs().length;
+    const { body } = await start();
+    expect(await waitFor(() => runs().length > n)).toBe(true);
+    const file = join((runs().at(-1) as Call).cwd, "context", "task.md");
+    const task = existsSync(file) ? readFileSync(file, "utf8") : null;
+    const run = (await h.json<RunDetail>(`/api/runs/${body.id}`)).body.run;
+    expect((await h.call(`/api/runs/${body.id}/cancel`, { method: "POST" })).status).toBe(202);
+    expect((await h.finish(body.id)).run.status).toBe("cancelled");
+    return { start: body, run, task };
+  }
+
+  // Runs a review to its end.
+  async function done(h: H) {
+    h.scenario({ fixture: subagentRun() });
+    return h.finish((await h.start()).body.id);
+  }
+
+  // The log lines while fn runs.
+  async function logged<T>(fn: () => Promise<T>) {
+    const lines: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...l: unknown[]) => {
+      lines.push(l.map(String).join(" "));
+    });
+    try {
+      return { value: await fn(), lines };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  const jiraLines = (d: RunDetail) => (d.run.summary?.coverage.notChecked ?? []).filter((l) => /^(Task|Tasks|Parent) /.test(l));
+  const textLog = (lines: string[]) => lines.filter((l) => /^Review run \d+: task text: /.test(l));
+
+  test(
+    "AC-JC1, AC-JC11: a review reads a key without text before task.md is built; the run row then holds the fetch time of that text",
+    async () => {
+      const jira = fakeJira("ABC-1");
+      const h = await setup({ jira: jira.url });
+      const { value: r, lines } = await logged(() => hung(h));
+      expect(jira.count("GET", ISSUE)).toBe(1);
+      expect(r.task).toContain("## Task ABC-1: Summary of ABC-1");
+      // The insert stores the rows of the start. The update after the read stores the text that task.md holds.
+      expect(r.start.tasks).toEqual([]);
+      const row = h.db.query("SELECT fetched_at FROM task_context WHERE pr = $pr AND key = 'ABC-1'").get({ pr: h.pr }) as {
+        fetched_at: number;
+      };
+      expect(r.run.tasks).toEqual([{ key: "ABC-1", fetchedAt: row.fetched_at }]);
+      expect((await h.json<RunDetail>(`/api/runs/${r.run.id}`)).body.run.tasks).toEqual([{ key: "ABC-1", fetchedAt: row.fetched_at }]);
+      expect(textLog(lines)).toEqual([
+        expect.stringMatching(new RegExp(`^Review run ${r.run.id}: task text: 1 fetched, 0 failed, 0 as stored, in \\d+ ms\\.$`)),
+      ]);
+      // jira-context.md section 4.9: the log holds no text and no token.
+      for (const secret of [JIRA_TOKEN, "Summary of ABC-1"]) expect(lines.join("\n")).not.toContain(secret);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-JC2, AC-JC3: review and Explain read a text again at 5 min; Ask, reply, and Fix read only a key without text",
+    async () => {
+      const jira = fakeJira("ABC-1");
+      const h = await setup({ jira: jira.url });
+      h.db.query("UPDATE pull_request SET my_role = 'AUTHOR' WHERE id = $pr").run({ pr: h.pr });
+      await h.brief(NOTE, "general");
+      const reads = () => jira.count("GET", ISSUE);
+      const age = (ms: number) =>
+        h.db.query("UPDATE task_context SET fetched_at = $at WHERE pr = $pr AND key = 'ABC-1'").run({ pr: h.pr, at: Date.now() - ms });
+      text(h, "ABC-1", Date.now() - 4 * 60_000);
+      await hung(h);
+      expect(reads()).toBe(0);
+      age(6 * 60_000);
+      for (const start of [ask(h), reply(h), fix(h)]) await hung(h, start);
+      expect(reads()).toBe(0);
+      expect((await hung(h)).task).toContain("## Task ABC-1: Summary of ABC-1");
+      expect(reads()).toBe(1);
+      age(6 * 60_000);
+      await h.brief(NOTE, "explain");
+      const explain = await hung(h);
+      expect(explain.start.kind).toBe("explain");
+      expect(reads()).toBe(2);
+      h.db.query("DELETE FROM task_context WHERE pr = $pr").run({ pr: h.pr });
+      expect((await hung(h, ask(h))).task).toContain("## Task ABC-1: Summary of ABC-1");
+      expect(reads()).toBe(3);
+      // A re-review is a review run with a carry, so it reads an old text again too.
+      await h.brief(NOTE, "general");
+      const base = await done(h);
+      expect(reads()).toBe(3);
+      h.db.query("UPDATE review_run SET source_head = $head WHERE id = $id").run({ head: h.repo.base, id: base.run.id });
+      age(6 * 60_000);
+      const rereview = await hung(h, () => h.json<RunDto>(`/api/prs/${h.pr}/rereview`, { method: "POST" }));
+      expect(h.db.query("SELECT kind, since_head FROM review_run WHERE id = $id").get({ id: rereview.start.id })).toEqual({
+        kind: "review",
+        since_head: h.repo.base,
+      });
+      expect(reads()).toBe(4);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-JC6, section 4.6: a failed read without text gives its line and the run completes; the sticky failure gets no read and no line later",
+    async () => {
+      const jira = fakeJira();
+      const h = await setup({ jira: jira.url });
+      const { value: d, lines } = await logged(() => done(h));
+      expect(d.run.status).toBe("completed");
+      expect(jiraLines(d)).toEqual(["Task ABC-1: not fetched. Jira has no such issue, or the token may not see it."]);
+      // Section 4.1: the read starts before the auth check.
+      const failed = lines.indexOf("Jira task read of ABC-1 failed: not_found");
+      expect(failed).toBeGreaterThanOrEqual(0);
+      expect(failed).toBeLessThan(lines.findIndex((l) => l.startsWith("claude auth status:")));
+      expect(textLog(lines)).toEqual([expect.stringMatching(/: task text: 0 fetched, 1 failed, 0 as stored, in \d+ ms\.$/)]);
+      const again = await done(h);
+      expect(again.run.status).toBe("completed");
+      expect(jira.count("GET", ISSUE)).toBe(1);
+      expect(jiraLines(again)).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "section 4.6: a failed refresh names the date of the text that the run used; a skipped key gets no read and no line",
+    async () => {
+      const jira = fakeJira("ABC-1", "ABC-2");
+      jira.routes[key("GET", ISSUE)] = { status: 500, body: { errorMessages: ["The server failed."] } };
+      const h = await setup({ jira: jira.url });
+      const at = Date.now() - 6 * 60_000;
+      text(h, "ABC-1", at);
+      taskKey(h, "ABC-2", 1);
+      h.db.query("INSERT INTO task_fetch (pr, key, state, kind, at) VALUES ($pr, 'ABC-2', 'skipped', NULL, 1)").run({ pr: h.pr });
+      const d = await done(h);
+      expect(d.run.status).toBe("completed");
+      expect(jira.count("GET", ISSUE)).toBe(1);
+      expect(jira.count("GET", "/rest/api/2/issue/ABC-2")).toBe(0);
+      expect(jiraLines(d)).toEqual([
+        `Task ABC-1: the run used the text fetched ${new Date(at).toISOString()}. The refresh failed. Jira failed to answer.`,
+      ]);
+      expect(d.run.tasks).toEqual([{ key: "ABC-1", fetchedAt: at }]);
+    },
+    SLOW,
+  );
+
+  test(
+    "section 4.6: the cap line names the keys after the first 3; an unreadable CA file gives one line and no request",
+    async () => {
+      const keys = ["ABC-1", "ABC-2", "ABC-3", "ABC-4"];
+      const jira = fakeJira(...keys);
+      const h = await setup({ jira: jira.url });
+      for (const [i, k] of keys.slice(1).entries()) taskKey(h, k, i + 1);
+      const d = await done(h);
+      expect(jiraLines(d)).toEqual(["Tasks ABC-4: not fetched. A run fetches at most 3 tasks. Fetch more in the brief."]);
+      expect(keys.map((k) => jira.count("GET", `/rest/api/2/issue/${k}`))).toEqual([1, 1, 1, 0]);
+      expect(d.run.tasks?.map((t) => t.key)).toEqual(["ABC-1", "ABC-2", "ABC-3"]);
+
+      const other = fakeJira("ABC-1");
+      const ca = await setup({ jira: other.url, caFile: join(DERIVED, "missing-ca.pem") });
+      const c = await done(ca);
+      expect(c.run.status).toBe("completed");
+      expect(jiraLines(c)).toEqual(["Task text: not fetched. The app cannot read the Jira CA file."]);
+      expect(other.requests).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-JC5: a slow Jira gets the deadline line, the run starts without the answer, and the late text goes to the next run",
+    async () => {
+      const jira = fakeJira("ABC-1");
+      const h = await setup({ jira: jira.url, jiraWaitMs: 1000 });
+      const release = hold(jira, ISSUE);
+      const d = await done(h);
+      expect(d.run.status).toBe("completed");
+      expect(jira.count("GET", ISSUE)).toBe(1);
+      expect(jiraLines(d)).toEqual(["Task ABC-1: Jira did not answer in 15 s. The next run gets the text if it arrives."]);
+      expect(d.run.tasks).toEqual([]);
+      release();
+      const stored = () => h.db.query("SELECT 1 FROM task_context WHERE pr = $pr AND key = 'ABC-1'").get({ pr: h.pr }) !== null;
+      expect(await waitFor(stored)).toBe(true);
+      const next = await hung(h);
+      expect(next.task).toContain("## Task ABC-1: Summary of ABC-1");
+      expect(jira.count("GET", ISSUE)).toBe(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "section 4.6: with the parent option on, a parent that misses the deadline gets its line",
+    async () => {
+      const jira = fakeJira();
+      jira.addSubtaskSet();
+      const h = await setup({ jira: jira.url, jiraWaitMs: 1000 });
+      const put = await h.json("/api/settings", {
+        method: "PUT",
+        body: { baseUrl: h.fake.url, profiles: [{ ...GENERAL, jiraFamily: true }] },
+      });
+      expect(put.status).toBe(200);
+      text(h, "ABC-1", Date.now(), { parent: SUBTASK_PARENT });
+      hold(jira, `/rest/api/2/issue/${SUBTASK_PARENT}`);
+      const d = await done(h);
+      expect(d.run.status).toBe("completed");
+      expect(jiraLines(d)).toEqual([`Parent ${SUBTASK_PARENT}: not read in time.`]);
+      expect(jira.count("GET", ISSUE)).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-JC5: Cancel during the Jira wait ends the run at once, long before the 15 s deadline",
+    async () => {
+      const jira = fakeJira("ABC-1");
+      const h = await setup({ jira: jira.url });
+      hold(jira, ISSUE);
+      h.scenario({ fixture: subagentRun() });
+      const { body } = await h.start();
+      expect(await waitFor(() => jira.count("GET", ISSUE) === 1)).toBe(true);
+      // The auth check runs beside the read. Cancel comes after the check ends, while the run waits for Jira.
+      const checked = async () => (await h.json<MetaDto>("/api/meta")).body.runner.check !== null;
+      const end = Date.now() + 10_000;
+      while (!(await checked()) && Date.now() < end) await Bun.sleep(25);
+      expect(await checked()).toBe(true);
+      await Bun.sleep(300);
+      const t = Date.now();
+      expect((await h.call(`/api/runs/${body.id}/cancel`, { method: "POST" })).status).toBe(202);
+      const d = await h.finish(body.id);
+      expect(d.run.status).toBe("cancelled");
+      expect(Date.now() - t).toBeLessThan(5000);
+      expect(h.runCall()).toBeUndefined();
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-JC7: without Jira settings a run sends no request and adds no line",
+    async () => {
+      const jira = fakeJira("ABC-1");
+      const h = await setup();
+      const { value: d, lines } = await logged(() => done(h));
+      expect(d.run.status).toBe("completed");
+      expect(jira.requests).toEqual([]);
+      expect(jiraLines(d)).toEqual([]);
+      expect(textLog(lines)).toEqual([expect.stringMatching(/: task text: 0 fetched, 0 failed, 0 as stored, in 0 ms\.$/)]);
     },
     SLOW,
   );

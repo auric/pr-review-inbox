@@ -61,7 +61,10 @@ import { implementJsonSchema, runLimitsOf, type TaskRunKind } from "../../shared
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { PrRef } from "../../shared/types";
 import { dataDir as defaultDataDir } from "../config";
-import { TASK_FILE, taskContext, taskParents } from "../context/task-file";
+import { FAILED } from "../context/routes";
+import type { ContextSource } from "../context/source";
+import { type AutoRead, autoFetch, MAX_KEYS } from "../context/task-fetch";
+import { TASK_FILE, type TaskParents, taskContext, taskParents } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { Settings } from "../settings";
@@ -176,7 +179,7 @@ import {
   usageOf,
 } from "./judge";
 import { type Language, languagesOf, withLanguages } from "./languages";
-import { liveThreads, proposalContext, proposeNotes, storeProposals, suggestionsByItem } from "./notes";
+import { liveThreads, proposalContext, proposeNotes, storeProposals, suggestionsByItem, within } from "./notes";
 import { partFile, partNotes, partsOf, partText } from "./parts";
 import { loadPrContext } from "./pr-context";
 import {
@@ -260,6 +263,8 @@ export const IMPLEMENT_MCP_LINES = [
 export const verifyMaxTurns = (p: Pick<Profile, "maxTurns">, candidates: number) => Math.max(12, Math.min(p.maxTurns, 10 + 3 * candidates));
 // spec.md section 0: a discuss run gets min(profile.maxTurns, DISCUSS_MAX_TURNS).
 export const DISCUSS_MAX_TURNS = 40;
+// docs/plans/review-v2/jira-context.md section 3.1: one deadline covers all Jira reads at the start of a PR run, the parent reads too.
+export const JIRA_WAIT_MS = 15_000;
 
 // The source item ID of a carried copy (rereview.ts carryOver).
 const carriedFrom = (it: NewItem) => (JSON.parse(it.payload_json) as { carried?: Carried }).carried?.from;
@@ -284,6 +289,8 @@ export type ReviewJobsOptions = {
   sessionGates?: typeof SESSION_GATES;
   // Eval only (scripts/eval/run.ts record and replay). Absent: the plain runner.
   runnerWrap?: (r: Runner) => Runner;
+  // Absent: JIRA_WAIT_MS. The tests pass a shorter wait.
+  jiraWaitMs?: number;
 };
 
 export type Runner = ReturnType<typeof createClaudeRunner>;
@@ -850,17 +857,103 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return planSection(answers ? [...files, answers] : files);
   }
 
+  // docs/plans/review-v2/jira-context.md section 4.1 steps 1 to 4: the automatic task reads of a PR run. got: the result of each read
+  // that ended. last: the time of the last end. Each stored result notifies, so the chips also show a result after the wait.
+  function startReads(j: Job) {
+    const started = Date.now();
+    const got = new Map<string, Awaited<AutoRead["done"]>>();
+    let last = started;
+    const reads = autoFetch(j.db, j.pr, j.kind, settings).then((f) => ({
+      ...f,
+      all: Promise.all(
+        f.reads.map((r) =>
+          r.done.then((v) => {
+            got.set(r.key, v);
+            last = Date.now();
+            if (v) notify(j.id, j.pr);
+          }),
+        ),
+      ),
+    }));
+    return { started, reads, got, last: () => last };
+  }
+
+  // jira-context.md section 4.1 steps 5 to 9 and section 4.6. One deadline covers the task reads and the parent reads. Cancel ends the
+  // wait at once. A read that ends later is stored for the next run. null: Cancel came.
+  async function taskTexts(j: Job, r: ReturnType<typeof startReads>) {
+    const f = await r.reads;
+    if (j.cancelled) return null;
+    j.abort = new AbortController();
+    const signal = AbortSignal.any([
+      j.abort.signal,
+      AbortSignal.timeout(Math.max(0, r.started + (opts.jiraWaitMs ?? JIRA_WAIT_MS) - Date.now())),
+    ]);
+    const late: string[] = [];
+    let ms = 0;
+    let parents: TaskParents | undefined;
+    try {
+      await within(f.all, signal).catch(() => undefined);
+      ms = (r.got.size < f.reads.length ? Date.now() : r.last()) - r.started;
+      // taskParents takes no signal, so each parent read races the rest of the deadline.
+      const jira = async (): Promise<ContextSource | null> => {
+        const s = await settings.jira();
+        return (
+          s && {
+            ...s,
+            fetchParent: async (key) => {
+              try {
+                if (signal.aborted) throw signal.reason;
+                return await within(s.fetchParent(key), signal);
+              } catch (e) {
+                if (signal.aborted) late.push(key);
+                throw e;
+              }
+            },
+          }
+        );
+      };
+      if (j.profile.jiraFamily && !j.cancelled) parents = await taskParents(j.db, j.pr, jira);
+    } finally {
+      j.abort = undefined;
+    }
+    if (j.cancelled) return null;
+    // tasks_json, task.md, and the coverage lines read the rows at this point. The caller builds task.md with no await before it.
+    const tasks = j.db.query(SQL.fetched).all({ pr: j.pr }) as { key: string; fetchedAt: number }[];
+    j.db.query(SQL.setTasks).run({ id: j.id, tasks: JSON.stringify(tasks) });
+    notify(j.id);
+    const used = new Map(tasks.map((t) => [t.key, t.fetchedAt]));
+    const lines = f.ca ? ["Task text: not fetched. The app cannot read the Jira CA file."] : [];
+    let fetched = 0;
+    for (const { key } of f.reads) {
+      const g = r.got.get(key);
+      const at = used.get(key);
+      if (!r.got.has(key))
+        lines.push(`Task ${key}: Jira did not answer in ${JIRA_WAIT_MS / 1000} s. The next run gets the text if it arrives.`);
+      else if (g?.state === "fetched") fetched++;
+      else if (g?.kind && g.state === "failed") lines.push(`Task ${key}: not fetched. ${FAILED[g.kind]}`);
+      else if (g?.kind && g.state === "refreshFailed" && at !== undefined)
+        lines.push(`Task ${key}: the run used the text fetched ${new Date(at).toISOString()}. The refresh failed. ${FAILED[g.kind]}`);
+    }
+    if (f.capped.length)
+      lines.push(`Tasks ${f.capped.join(", ")}: not fetched. A run fetches at most ${MAX_KEYS} tasks. Fetch more in the brief.`);
+    for (const key of late) lines.push(`Parent ${key}: not read in time.`);
+    const stored = tasks.filter((t) => r.got.get(t.key)?.state !== "fetched").length;
+    log(`Review run ${j.id}: task text: ${fetched} fetched, ${f.reads.length - fetched} failed, ${stored} as stored, in ${ms} ms.`);
+    return { parents, lines };
+  }
+
   async function steps(j: Job, pr: Heads, brief: BriefInput, held: { ws?: Workspace }) {
     const cancelled = cancelledEnding;
+    const reading = startReads(j);
     const c = await check();
     if (!c.ok) return failure(c.kind === "auth" ? "auth" : "process", c.message);
     if (j.cancelled) return cancelled();
 
     await prune();
     let ws: Workspace;
-    const parents = j.profile.jiraFamily ? await taskParents(j.db, j.pr, () => settings.jira()) : undefined;
-    if (j.cancelled) return cancelled();
-    const { files, attachments } = taskContext(j.db, j.pr, dataDir, parents);
+    const texts = await taskTexts(j, reading);
+    if (!texts) return cancelled();
+    const { files, attachments } = taskContext(j.db, j.pr, dataDir, texts.parents);
     const carry = j.carry;
     const earlier = carry?.items.filter((r) => r.kind === "finding") ?? [];
     const posted = new Set(carry?.posted.map((r) => r.id));
@@ -1109,7 +1202,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const modules = j.kind === "review" && !profile.explain ? moduleNotes(profile, context) : [];
     const unparted = partNotes(o.events, parts);
     const noted = (e: Ending): Ending => {
-      e.result?.summary.coverage.notChecked.push(...unread, ...left, ...modules, ...unparted);
+      e.result?.summary.coverage.notChecked.push(...texts.lines, ...unread, ...left, ...modules, ...unparted);
       if (!unmarked) return e;
       e.result?.summary.coverage.notChecked.push(unmarked);
       return { ...e, raw: `${unmarked}\n\n${e.raw}` };

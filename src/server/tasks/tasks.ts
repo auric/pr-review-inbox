@@ -88,6 +88,7 @@ import type { ForgeProvider } from "../bitbucket/provider";
 import { JiraRefusedError } from "../context/jira";
 import { FAILED as JIRA_FAILED } from "../context/routes";
 import { ContextError, type ContextSource, type JiraTransition } from "../context/source";
+import { writeFetch } from "../context/task-fetch";
 import { type TaskFileOptions, taskFileContext, taskIssue } from "../context/task-file";
 import { buildOf } from "../inbox/builds";
 import { followKey } from "../inbox/queries";
@@ -598,6 +599,14 @@ type SettingsRow = {
 };
 
 export const taskRow = (db: Database, id: number) => db.query(Q.row).get({ id }) as TaskRow | null;
+
+// The text of a task in the row of its origin PR (task-file.ts taskIssue). read: a Jira read gave the issue, so writeFetch writes it
+// (jira-context.md section 4.4). writeFetch drops a write when the PR no longer names the key, but the task still reads the row. That
+// write and a status change after a move go in directly.
+function storeContext(db: Database, pr: number, key: string, issue: IssueContext, at: number, read: boolean) {
+  if (read && writeFetch(db, pr, key, { type: "MANUAL_OK", issue }, at)) return;
+  db.query(Q.storeContext).run({ pr, key, json: JSON.stringify(issue), at });
+}
 
 // spec.md section 6.2: each step reads the profile of its task at the step start, as a review run reads its profile at its start.
 export const taskProfile = (list: Profile[], t: Pick<TaskRow, "profile">): Profile => profileOf(list, taskProfileId(list, t.profile));
@@ -2061,7 +2070,7 @@ export function createTaskService(opts: TaskServiceOptions) {
           dropFetched(review.dataDir, fetched);
           return again.id;
         }
-        if (pr && !stored) db.query(Q.storeContext).run({ pr: pr.id, key: input.key, json: JSON.stringify(issue), at: fetchedAt });
+        if (pr && !stored) storeContext(db, pr.id, input.key, issue, fetchedAt, true);
         const repo = repoSettings(db, input.project, input.repo);
         const row = db.query(Q.insert).get({
           project: input.project,
@@ -2898,9 +2907,10 @@ export function createTaskService(opts: TaskServiceOptions) {
     return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
-  // The stored issue of the task: the task_context row of its origin PR, else task.issue_json (taskIssue reads the same place).
-  function saveIssue(db: Database, t: TaskRow, issue: IssueContext, at: number) {
-    if (t.origin_pr !== null) db.query(Q.storeContext).run({ pr: t.origin_pr, key: t.key, json: JSON.stringify(issue), at });
+  // The stored issue of the task: the task_context row of its origin PR, else task.issue_json (taskIssue reads the same place). read: as in
+  // storeContext.
+  function saveIssue(db: Database, t: TaskRow, issue: IssueContext, at: number, read: boolean) {
+    if (t.origin_pr !== null) storeContext(db, t.origin_pr, t.key, issue, at, read);
     else db.query(Q.setIssue).run({ id: t.id, issue: JSON.stringify(issue) });
   }
 
@@ -2922,7 +2932,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     db.transaction(() => {
       const cur = taskRow(db, id);
       if (!cur) return;
-      saveIssue(db, cur, got.issue, at);
+      saveIssue(db, cur, got.issue, at, true);
       for (const { sub, issue } of subs)
         db.query(Q.subtaskRead).run({
           task: id,
@@ -2994,7 +3004,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     }
     if (key === t.key) {
       const stored = taskIssue(db, t)?.issue;
-      if (stored) saveIssue(db, t, { ...stored, status: move.to ?? stored.status }, now());
+      if (stored) saveIssue(db, t, { ...stored, status: move.to ?? stored.status }, now(), false);
     } else await readStatuses(db, id, 0);
     changed(id);
     return { to: move.to, task: taskDto(db, taskRow(db, id) as TaskRow) };

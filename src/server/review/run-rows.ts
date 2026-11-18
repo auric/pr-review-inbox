@@ -165,6 +165,8 @@ export const SQL = {
     RETURNING id`,
   // Plan r3 Feature C: the fetched tasks at the start of a run, in the order of task.md.
   fetched: "SELECT key, fetched_at AS fetchedAt FROM task_context WHERE pr = $pr ORDER BY key",
+  // docs/plans/review-v2/jira-context.md section 4.1: the fetched tasks after the reads at the run start (AC-JC11).
+  setTasks: "UPDATE review_run SET tasks_json = $tasks WHERE id = $id",
   run: `SELECT r.id, r.pr, r.kind, r.profile, r.profile_name, r.explain, r.note, r.source_head, r.target_head, r.merge_base, r.fetch_via, r.status, r.error_kind, r.error_text,
       r.session_id, r.cli_version, r.model, r.effort, r.effort_default, r.usage_json, r.summary_json, r.raw_output IS NOT NULL AS has_raw, r.started_at, r.finished_at,
       p.source_head AS pr_source, p.target_head AS pr_target, r.since_head, r.range_base, r.question, r.answer, r.fix_json, r.tasks_json, r.instructions_json, r.skills_json,
