@@ -5,7 +5,15 @@
 // GET only, except transition() (spec.md section 6.20.9).
 import { readFileSync } from "node:fs";
 import { z } from "zod";
-import { ATT_ID, type AttachmentMeta, type IssueContext, type IssueLink, type IssueSubtask, JIRA_KEY } from "../../shared/dto";
+import {
+  ATT_ID,
+  type AttachmentMeta,
+  type IssueContext,
+  type IssueLink,
+  type IssueRelated,
+  type IssueSubtask,
+  JIRA_KEY,
+} from "../../shared/dto";
 import { COMPILED } from "../build";
 import { log } from "../log";
 import { fenced } from "./markdown";
@@ -17,7 +25,20 @@ export const JIRA = { id: "jira", name: "Jira" } as const;
 const TIMEOUT_MS = 30_000;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
-export const CAPS = { description: 20_000, comment: 5_000, comments: 500, totalBytes: 200_000 };
+export const CAPS = {
+  description: 20_000,
+  comment: 5_000,
+  comments: 500,
+  totalBytes: 200_000,
+  // jira-context.md section 3.3.
+  texts: 10,
+  text: 5_000,
+  list: 20,
+  related: 50,
+};
+// Custom field type keys (scripts/gate/jira.ts). Gate J5 saw the epic-link key on Jira Server. It saw no filled textarea field.
+const TEXTAREA = "com.atlassian.jira.plugin.system.customfieldtypes:textarea";
+const EPIC_LINK = "com.pyxis.greenhopper.jira:gh-epic-link";
 // A larger answer body is an error of kind shape.
 export const MAX_BODY_BYTES = 10 * 1024 * 1024;
 // A larger rendered field uses the wiki text.
@@ -114,8 +135,9 @@ const myself = z
   .pipe(z.string().min(1));
 // Jira Cloud always gives deploymentType "Cloud". Server/Data Center can omit it.
 const serverInfo = z.object({ deploymentType: z.string().nullish() });
+// Loose: the *all read keeps the custom field values. names and schema stay unknown, so an odd entry never fails the read.
 const issue = z.object({
-  fields: z.object({
+  fields: z.looseObject({
     summary: z.string(),
     description: z.string().nullish(),
     status: z.object({ name: z.string() }).nullish(),
@@ -124,7 +146,9 @@ const issue = z.object({
     subtasks: z.unknown().optional(),
     issuelinks: z.unknown().optional(),
   }),
-  renderedFields: z.object({ description: z.string().nullish() }).nullish(),
+  renderedFields: z.looseObject({ description: z.string().nullish() }).nullish(),
+  names: z.unknown().optional(),
+  schema: z.unknown().optional(),
 });
 // An entry with another shape is left out of the list.
 const attachment = z.object({
@@ -174,6 +198,29 @@ const subtaskEntry = z
       category: CATEGORIES.find((c) => c === fields?.status?.statusCategory?.key) ?? null,
     }),
   );
+const named = z.object({ name: z.string() }).transform((v) => v.name);
+const relatedSide = z.object({
+  key: z.string().regex(JIRA_KEY),
+  fields: z
+    .object({
+      summary: z.string().nullish().catch(null),
+      status: z
+        .object({ name: z.string().nullish().catch(null), statusCategory: z.object({ key: z.unknown() }).nullish().catch(null) })
+        .nullish()
+        .catch(null),
+      issuetype: z
+        .object({ name: z.string().nullish().catch(null) })
+        .nullish()
+        .catch(null),
+    })
+    .nullish()
+    .catch(null),
+});
+const relatedEntry = z.object({
+  type: z.object({ inward: z.string(), outward: z.string() }),
+  inwardIssue: relatedSide.nullish(),
+  outwardIssue: relatedSide.nullish(),
+});
 const linkEntry = z.object({
   type: z.object({ inward: z.string(), outward: z.string() }),
   inwardIssue: issueRef.nullish(),
@@ -205,6 +252,32 @@ function linksOf(list: unknown, keep: ReadonlySet<string>): IssueLink[] {
     return [];
   });
 }
+
+// Every link, with the phrase of its side as in linksOf. An entry with no side or with both sides is left out.
+function relatedOf(list: unknown): IssueRelated[] {
+  return entries(list, relatedEntry)
+    .flatMap((l) => {
+      if (!l.inwardIssue === !l.outwardIssue) return [];
+      const [text, side] = l.inwardIssue ? [l.type.inward, l.inwardIssue] : [l.type.outward, l.outwardIssue];
+      if (!side) return [];
+      const f = side.fields;
+      return [
+        {
+          key: side.key,
+          text,
+          summary: f?.summary ?? "",
+          status: f?.status?.name ?? null,
+          category: CATEGORIES.find((c) => c === f?.status?.statusCategory?.key) ?? null,
+          type: f?.issuetype?.name ?? null,
+        },
+      ];
+    })
+    .slice(0, CAPS.related);
+}
+
+// The value as a record, or null for another shape.
+const recordOf = (v: unknown): Record<string, unknown> | null =>
+  v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 
 // Every 4xx and 5xx of the transition POST. A bad transition ID gives 400, 404, or 500 on Server and Data Center, and 400, 401, 404,
 // 409, or 422 on Cloud. The message holds only the status and the issue key.
@@ -336,10 +409,12 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
   async function read(key: string, scope?: { parent: string; siblings: readonly string[] }): Promise<IssueContext | null> {
     if (!JIRA_KEY.test(key)) throw new ContextError("not_found", "/rest/api/2/issue");
     const path = `/rest/api/2/issue/${encodeURIComponent(key)}`;
-    const { fields, renderedFields } = await get(
-      `${path}?fields=summary,description,status,attachment,parent,subtasks,issuelinks&expand=renderedFields`,
-      issue,
-    );
+    const {
+      fields,
+      renderedFields,
+      names: rawNames,
+      schema: rawSchema,
+    } = await get(`${path}?fields=*all,-comment,-worklog&expand=renderedFields,names,schema`, issue);
     const parent = issueRef.safeParse(fields.parent).data?.key ?? null;
     if (scope && parent !== scope.parent) return null;
     const subtasks = entries(fields.subtasks, subtaskEntry);
@@ -367,12 +442,38 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
     };
     const converter = createConverter(base, convertMs.field, convertMs.total);
     const markdown = markdownOf(converter);
+    const names = recordOf(rawNames);
+    const schema = recordOf(rawSchema);
+    if (!names || !schema) log(`Jira issue ${key}: the answer has no field names or schema. The read keeps no custom text fields.`);
+    const customType = (id: string) => recordOf(schema?.[id])?.custom;
+    // Field ID order with numbers compared as numbers: customfield_9000 comes before customfield_10100.
+    const customIds = Object.keys(fields)
+      .filter((id) => customType(id) !== undefined)
+      .sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
+    const textIds = customIds.filter((id) => {
+      const v = fields[id];
+      return customType(id) === TEXTAREA && typeof names?.[id] === "string" && typeof v === "string" && v.trim() !== "";
+    });
+    const epic = customIds.map((id) => (customType(id) === EPIC_LINK ? fields[id] : null)).find((v) => typeof v === "string");
+    const list = (v: unknown, item: z.ZodType<string>) => entries(v, item).slice(0, CAPS.list);
+
     let description: string | null;
+    const texts: NonNullable<IssueContext["texts"]> = [];
     const comments: IssueContext["comments"] = [];
     try {
       const text = await markdown(renderedFields?.description, fields.description);
       description = text == null ? null : cut(text, CAPS.description);
       let bytes = Buffer.byteLength(fields.summary) + Buffer.byteLength(description ?? "");
+      // The text caps leave truncated alone: task.md shows no custom text yet (jira-context.md WP-JC5).
+      for (const id of textIds.slice(0, CAPS.texts)) {
+        const html = renderedFields?.[id];
+        const text = (await markdown(typeof html === "string" ? html : null, String(fields[id]))) ?? "";
+        const out = { id, name: String(names?.[id]), text: text.slice(0, CAPS.text) };
+        const size = Buffer.byteLength(out.name) + Buffer.byteLength(out.text);
+        if (bytes + size > CAPS.totalBytes) break;
+        bytes += size;
+        texts.push(out);
+      }
       if (raw.length > CAPS.comments) truncated = true;
       for (const c of raw.slice(0, CAPS.comments)) {
         const out = {
@@ -409,6 +510,13 @@ export function createJiraSource(opts: JiraOptions): ContextSource {
       parent,
       subtasks,
       links: linksOf(fields.issuelinks, keep),
+      type: named.safeParse(fields.issuetype).data ?? null,
+      labels: list(fields.labels, z.string()),
+      components: list(fields.components, named),
+      versions: list(fields.fixVersions, named),
+      texts,
+      epic: typeof epic === "string" && JIRA_KEY.test(epic) ? epic : null,
+      related: relatedOf(fields.issuelinks),
     };
   }
 

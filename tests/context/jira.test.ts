@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Plan r2 S-JIRA and r3 S-JMD: the Jira REST client against the fake Jira. No test calls a real server.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   CAPS,
   CONVERT_FIELD_MS,
@@ -39,7 +39,7 @@ async function failure(p: Promise<unknown>): Promise<ContextError> {
 }
 
 const ISSUE = `/rest/api/2/issue/${ISSUE_KEY}`;
-const ISSUE_QUERY = "?fields=summary,description,status,attachment,parent,subtasks,issuelinks&expand=renderedFields";
+const ISSUE_QUERY = "?fields=*all,-comment,-worklog&expand=renderedFields,names,schema";
 const COMMENTS = (start: number) => `${ISSUE}/comment?startAt=${start}&maxResults=100&expand=renderedBody`;
 
 // One comment page with these comments.
@@ -170,6 +170,13 @@ describe("Jira client", () => {
       parent: null,
       subtasks: [],
       links: [],
+      type: null,
+      labels: [],
+      components: [],
+      versions: [],
+      texts: [],
+      epic: null,
+      related: [],
     });
     // Links to Jira resolve against the configured base. The attachment image becomes a token, never a remote image.
     expect(issue.description).toContain("| Flush \\| now | Alex Smith |");
@@ -580,5 +587,210 @@ describe.each([false, true])("Jira sub-tasks (cloud=%p)", (cloud) => {
       expect((await failure(source.fetchSubtask(PARENT, SIBLINGS, k))).kind).toBe("not_found");
     }
     expect(fake.requests).toEqual([]);
+  });
+});
+
+// WP-JC1 (jira-context.md sections 3.3 and 4.2): the *all read with names and schema.
+describe("Jira context fields", () => {
+  const FULL = "ABC-17";
+  const TEXTAREA = "com.atlassian.jira.plugin.system.customfieldtypes:textarea";
+  const NO_NAMES = `Jira issue ${ISSUE_KEY}: the answer has no field names or schema. The read keeps no custom text fields.`;
+
+  function full() {
+    const fake = startFakeJira();
+    stops.push(fake.stop);
+    fake.addFullIssue(FULL);
+    return { fake, source: createJiraSource({ baseUrl: fake.url, token: JIRA_TOKEN }) };
+  }
+
+  // Captures the log lines of fn.
+  async function logged<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+    const lines: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...a: unknown[]) => void lines.push(a.map(String).join(" ")));
+    try {
+      return { value: await fn(), lines };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  test("the read extracts type, lists, filled textarea fields, the epic, and every link; no people field is kept", async () => {
+    const { fake, source } = full();
+    const { value: issue, lines } = await logged(() => source.fetchIssue(FULL));
+    expect(fake.requests[0]).toBe(`GET /rest/api/2/issue/${FULL}${ISSUE_QUERY}`);
+    expect(issue).toMatchObject({
+      type: "Story",
+      labels: ["backend-cache", "q4-perf"],
+      components: ["Sync Worker"],
+      versions: ["Release 2.4"],
+      // The empty textarea, the null textfield, the select, and the vendor field are left out.
+      texts: [
+        { id: "customfield_10100", name: "Acceptance Criteria", text: "Given a full cache, the flush finishes before the write lock." },
+      ],
+      epic: "ABC-30",
+      related: [
+        { key: "ABC-31", text: "blocks", summary: "Remove the old flush path", status: "Done", category: "done", type: "Task" },
+        { key: "ABC-32", text: "relates to", summary: "Lock wait dashboard", status: "To Do", category: "new", type: "Story" },
+      ],
+      // No sub-tasks, so no link is a sibling link.
+      links: [],
+      truncated: false,
+    });
+    expect(issue.comments.length).toBe(3);
+    expect(Object.keys(issue)).not.toContain("reporter");
+    expect(JSON.stringify(issue)).not.toContain("asmith@example.com");
+    expect(JSON.stringify(issue)).not.toContain("Elevated risk");
+    expect(lines).toEqual([]);
+  });
+
+  test("links keeps only sibling sub-tasks; related holds every link, inward and outward", async () => {
+    const fake = startFakeJira();
+    stops.push(fake.stop);
+    fake.addSubtaskSet();
+    fake.addFullIssue(SUBTASK_PARENT);
+    const source = createJiraSource({ baseUrl: fake.url, token: JIRA_TOKEN });
+    const issue = await source.fetchIssue(SUBTASK_PARENT);
+    expect(issue.links).toEqual([{ text: "is blocked by", key: "ABC-11" }]);
+    expect(issue.related?.map((r) => [r.text, r.key])).toEqual([
+      ["is blocked by", "ABC-11"],
+      ["blocks", "ABC-31"],
+      ["relates to", "ABC-32"],
+    ]);
+    expect(issue.related?.[0]).toEqual({
+      key: "ABC-11",
+      text: "is blocked by",
+      summary: "Batch the cache writes",
+      status: "Done",
+      category: "done",
+      type: "Sub-task",
+    });
+  });
+
+  test("caps: 10 text fields in numeric field ID order at 5,000 characters, 20 list entries, 50 links", async () => {
+    const { fake, source } = setup();
+    const ids = [10105, 9000, 10100, 10099, 10110, 10101, 10102, 10103, 10104, 10106, 10107, 10108].map((n) => `customfield_${n}`);
+    const ref = (n: number) => ({
+      key: `ABC-${100 + n}`,
+      fields: { summary: `S${n}`, status: { name: "Open" }, issuetype: { name: "Bug" } },
+    });
+    const value = (id: string) => (id === "customfield_9000" ? "t".repeat(CAPS.text + 7) : `value of ${id}`);
+    fake.routes[key("GET", ISSUE)] = {
+      status: 200,
+      body: {
+        fields: {
+          summary: "S",
+          labels: Array.from({ length: 25 }, (_, i) => `l${i}`),
+          components: Array.from({ length: 25 }, (_, i) => ({ name: `c${i}` })),
+          fixVersions: [{ name: "v1" }, { id: "no name" }, "odd", { name: "v2" }],
+          issuetype: { id: "1" },
+          issuelinks: Array.from({ length: 60 }, (_, i) => ({ type: { inward: "in", outward: "out" }, outwardIssue: ref(i) })),
+          ...Object.fromEntries(ids.map((id) => [id, value(id)])),
+        },
+        names: Object.fromEntries(ids.map((id) => [id, `Name ${id}`])),
+        schema: Object.fromEntries(ids.map((id) => [id, { type: "string", custom: TEXTAREA }])),
+      },
+    };
+    const issue = await source.fetchIssue(ISSUE_KEY);
+    const order = ids.slice().sort((a, b) => Number(a.slice(12)) - Number(b.slice(12)));
+    expect(issue.texts?.map((t) => t.id)).toEqual(order.slice(0, CAPS.texts));
+    expect(issue.texts?.[0]?.id).toBe("customfield_9000");
+    expect(issue.texts?.[0]?.text).toBe(`${"`".repeat(3)}\n${"t".repeat(CAPS.text - 4)}`);
+    // The text caps leave truncated alone until task.md shows the texts (WP-JC5).
+    expect(issue.truncated).toBe(false);
+    expect(issue.labels).toEqual(Array.from({ length: CAPS.list }, (_, i) => `l${i}`));
+    expect(issue.components?.length).toBe(CAPS.list);
+    expect(issue.versions).toEqual(["v1", "v2"]);
+    expect(issue.type).toBeNull();
+    expect(issue.related?.length).toBe(CAPS.related);
+    expect(issue.related?.[49]).toEqual({ key: "ABC-149", text: "out", summary: "S49", status: "Open", category: null, type: "Bug" });
+  });
+
+  test("an epic link value that is not a key gives null; odd names and schema never fail the read", async () => {
+    const { fake, source } = setup();
+    const body = (epic: unknown, names: unknown, schema: unknown) => ({
+      status: 200,
+      body: { fields: { summary: "S", customfield_10008: epic, customfield_10100: "Criteria" }, names, schema },
+    });
+    const epicType = { custom: "com.pyxis.greenhopper.jira:gh-epic-link" };
+    const textType = { custom: TEXTAREA };
+    fake.routes[key("GET", ISSUE)] = body(null, {}, { customfield_10008: epicType });
+    expect((await source.fetchIssue(ISSUE_KEY)).epic).toBeNull();
+    fake.routes[key("GET", ISSUE)] = body("not a key", {}, { customfield_10008: epicType });
+    expect((await source.fetchIssue(ISSUE_KEY)).epic).toBeNull();
+    // A textarea field without a string name is left out.
+    fake.routes[key("GET", ISSUE)] = body("ABC-30", { customfield_10100: 7 }, { customfield_10008: epicType, customfield_10100: textType });
+    expect(await source.fetchIssue(ISSUE_KEY)).toMatchObject({ epic: "ABC-30", texts: [] });
+    fake.routes[key("GET", ISSUE)] = body("ABC-30", ["odd"], "odd");
+    const { value, lines } = await logged(() => source.fetchIssue(ISSUE_KEY));
+    expect(value).toMatchObject({ summary: "S", epic: null, texts: [] });
+    expect(lines).toEqual([NO_NAMES]);
+  });
+
+  test("no names or schema: no custom text fields, one log line with the key only, and the read succeeds", async () => {
+    const { source } = setup();
+    const { value: issue, lines } = await logged(() => source.fetchIssue(ISSUE_KEY));
+    expect(issue.summary).toBe("Flush the cache before the write lock");
+    expect(issue.texts).toEqual([]);
+    expect(issue.comments.length).toBe(3);
+    expect(lines).toEqual([NO_NAMES]);
+  });
+
+  test("custom texts count first under the 200 KB cap, and every comment stays while the budget allows", async () => {
+    const { fake, source } = setup();
+    const ids = Array.from({ length: CAPS.texts }, (_, i) => `customfield_${10100 + i}`);
+    fake.routes[key("GET", ISSUE)] = {
+      status: 200,
+      body: {
+        fields: {
+          summary: "S",
+          description: "d".repeat(CAPS.description),
+          ...Object.fromEntries(ids.map((id) => [id, "a".repeat(CAPS.text)])),
+        },
+        names: Object.fromEntries(ids.map((id) => [id, "Acceptance Criteria"])),
+        schema: Object.fromEntries(ids.map((id) => [id, { custom: TEXTAREA }])),
+      },
+    };
+    const comments = (n: number) =>
+      page(Array.from({ length: n }, (_, i) => ({ author: { name: "u" }, created: "C", body: `${i} ${"x".repeat(3990)}` })));
+    // About 70 KB of description and texts, then 26 comments of about 4 KB each.
+    fake.routes[key("GET", `${ISSUE}/comment`)] = comments(26);
+    const issue = await source.fetchIssue(ISSUE_KEY);
+    expect(issue.texts?.length).toBe(CAPS.texts);
+    expect(issue.comments.length).toBe(26);
+    // More comments pass the budget: the later ones drop, and the texts stay.
+    fake.routes[key("GET", `${ISSUE}/comment`)] = comments(60);
+    const cut = await source.fetchIssue(ISSUE_KEY);
+    expect(cut.texts?.length).toBe(CAPS.texts);
+    expect(cut.comments.length).toBeGreaterThan(26);
+    expect(cut.comments.length).toBeLessThan(60);
+    expect(cut.truncated).toBe(true);
+    const bytes =
+      Buffer.byteLength(cut.summary) +
+      Buffer.byteLength(cut.description ?? "") +
+      (cut.texts ?? []).reduce((n, t) => n + Buffer.byteLength(t.name + t.text), 0) +
+      cut.comments.reduce((n, c) => n + Buffer.byteLength(c.author + c.created + c.body), 0);
+    expect(bytes).toBeLessThanOrEqual(CAPS.totalBytes);
+  });
+
+  test("a text over the budget drops without charging it, so a later comment that fits stays", async () => {
+    const { fake, source } = setup();
+    const ids = Array.from({ length: CAPS.texts }, (_, i) => `customfield_${10100 + i}`);
+    // 3-byte characters: about 60 KB of description and 15 KB per text, so the tenth text passes 200 KB.
+    fake.routes[key("GET", ISSUE)] = {
+      status: 200,
+      body: {
+        fields: {
+          summary: "S",
+          description: "€".repeat(CAPS.description),
+          ...Object.fromEntries(ids.map((id) => [id, "€".repeat(CAPS.text)])),
+        },
+        names: Object.fromEntries(ids.map((id) => [id, "Acceptance Criteria"])),
+        schema: Object.fromEntries(ids.map((id) => [id, { custom: TEXTAREA }])),
+      },
+    };
+    fake.routes[key("GET", `${ISSUE}/comment`)] = page([{ author: { name: "u" }, created: "C", body: "The criteria: flush first." }]);
+    const issue = await source.fetchIssue(ISSUE_KEY);
+    expect(issue.texts?.map((t) => t.id)).toEqual(ids.slice(0, 9));
+    expect(issue.comments.map((c) => c.body)).toEqual(["```\nThe criteria: flush first.\n```"]);
   });
 });

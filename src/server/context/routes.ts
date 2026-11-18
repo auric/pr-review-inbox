@@ -201,6 +201,16 @@ export function createContextRoutes(opts: {
         log(`Jira fetch failed: ${e.message}`);
         return c.json<ApiError>({ error: FAILED[e.kind] }, 502);
       }
+      // jira-context.md section 4.2: the row keeps the parent or epic text, so a run needs no parent read.
+      const up = issue.parent ?? issue.epic;
+      if (up) {
+        try {
+          issue = { ...issue, parentIssue: await source.fetchParent(up) };
+        } catch (e) {
+          log(`Jira parent read of ${key} failed: ${e instanceof ContextError ? e.message : (e as Error).name}`);
+          issue = { ...issue, parentIssue: null };
+        }
+      }
       const row: Row = { key, source: "jira", json: JSON.stringify(issue), fetched_at: Date.now() };
       // The PR or its task can go away during the request.
       const stored = db.transaction(() => {

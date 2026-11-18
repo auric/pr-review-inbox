@@ -1021,6 +1021,27 @@ export type IssueContext = {
   parent?: string | null;
   subtasks?: IssueSubtask[];
   links?: IssueLink[];
+  // jira-context.md section 4.2. Rows stored before WP-JC1 have none of these fields.
+  type?: string | null;
+  labels?: string[];
+  components?: string[];
+  versions?: string[];
+  // Custom textarea fields with a value, in field ID order. name: the Jira field name, untrusted.
+  texts?: { id: string; name: string; text: string }[];
+  epic?: string | null;
+  // Every issue link. text: the link phrase of this side, as in "<this key> <text> <key>".
+  related?: IssueRelated[];
+  // The parent text, else the epic text. null: the read failed. Absent: no parent and no epic, or a row stored before WP-JC1.
+  parentIssue?: IssueParent | null;
+};
+export type IssueParent = Pick<IssueContext, "key" | "summary" | "status" | "description" | "truncated" | "format">;
+export type IssueRelated = {
+  key: string;
+  text: string;
+  summary: string;
+  status: string | null;
+  category: IssueSubtask["category"];
+  type: string | null;
 };
 // category: statusCategory.key of Jira. null when absent or another value.
 export type IssueSubtask = { key: string; summary: string; status: string | null; category: "new" | "indeterminate" | "done" | null };

@@ -17,6 +17,7 @@ import { createSecrets } from "../../src/server/secrets";
 import { createSettings, type Settings } from "../../src/server/settings";
 import {
   type AttachmentDto,
+  type IssueContext,
   MAX_ATTACHMENT_BYTES,
   MAX_PR_ATTACHMENT_BYTES,
   type MetaDto,
@@ -108,6 +109,40 @@ describe("task context API", () => {
     expect(file?.name).toBe("task.md");
     expect(file?.text).toContain(`## Task ${ISSUE_KEY}: Flush the cache before the write lock`);
     expect(file?.text).toContain("QA: test with an empty cache too.");
+  });
+
+  test("POST stores the epic text as parentIssue; a failed parent read stores null and logs one line", async () => {
+    const s = setup();
+    await s.connect();
+    jira.addFullIssue("ABC-17");
+    s.db.query("INSERT INTO pr_task (pr, key, source, url, ord) VALUES ($pr, 'ABC-17', 'title', NULL, 2)").run({ pr: s.pr });
+    const stored = () =>
+      JSON.parse((s.db.query("SELECT json FROM task_context WHERE key = 'ABC-17'").get() as { json: string }).json) as IssueContext;
+    expect((await s.call("POST", `/prs/${s.pr}/task-context/ABC-17`)).status).toBe(200);
+    expect(stored().parentIssue).toMatchObject({ key: "ABC-30", summary: "Rework the cache layer", status: "In Progress" });
+    expect(jira.count("GET", "/rest/api/2/issue/ABC-30")).toBe(1);
+    // task.md shows no new field before WP-JC5.
+    const text = taskFiles(s.db, s.pr).find((f) => f.name === "task.md")?.text ?? "";
+    expect(text).toContain("## Task ABC-17");
+    for (const part of ["Sync Worker", "Given a full cache", "Rework the cache layer", "ABC-31", "The app cut this text"])
+      expect(text).not.toContain(part);
+
+    jira.routes[key("GET", "/rest/api/2/issue/ABC-30")] = { status: 500, body: { errorMessages: ["BODY-CANARY"] } };
+    const lines: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...a: unknown[]) => void lines.push(a.map(String).join(" ")));
+    try {
+      expect((await s.call("POST", `/prs/${s.pr}/task-context/ABC-17`)).status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(stored().parentIssue).toBeNull();
+    expect(lines.filter((l) => l.includes("parent"))).toEqual([expect.stringMatching(/^Jira parent read of ABC-17 failed: /)]);
+    expect(lines.join("\n")).not.toContain("BODY-CANARY");
+    // An issue without a parent or an epic gets no parent read and no parentIssue field.
+    expect((await s.call("POST", `/prs/${s.pr}/task-context/${ISSUE_KEY}`)).status).toBe(200);
+    expect(
+      Object.keys(JSON.parse((s.db.query(`SELECT json FROM task_context WHERE key = '${ISSUE_KEY}'`).get() as { json: string }).json)),
+    ).not.toContain("parentIssue");
   });
 
   test("bad key 400, key outside the PR 404, unknown PR 404; no Jira request", async () => {

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // ContextSource (BRIEF section 7): an issue source behind one boundary. Jira (jira.ts) is the only implementation.
-import type { IssueContext, IssueSubtask } from "../../shared/dto";
+import type { IssueContext, IssueParent, IssueSubtask } from "../../shared/dto";
 
 // to: the status name after the move, null when absent.
 export type JiraTransition = { id: string; name: string; to: string | null };
@@ -23,7 +23,7 @@ export class ContextError extends Error {
 }
 
 // The parent of an issue without comments, attachments, or links. truncated, format: as in IssueContext.
-export type IssueParent = Pick<IssueContext, "key" | "summary" | "status" | "description" | "truncated" | "format">;
+export type { IssueParent };
 
 export type ContextSource = {
   id: "jira";
