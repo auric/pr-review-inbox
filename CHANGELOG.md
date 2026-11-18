@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Review: Claude can now read earlier commits of the PR in a re-review, also by HEAD~1 or BASE^.
 - Review: your note for a review now also reaches the reviewer agents that read parts of a large PR.
 - Review: the Review profile now has the advisor Fable by default. A stronger model gives Claude advice at hard points in each run of the profile, also in task steps. It uses more of your plan. A profile whose advisor you changed keeps your value.
 - Review: the fold of the Drafts list at "Balanced" is now "More", as at "Only what matters". It holds unsure points, nits, and refuted points, so "Low confidence" was wrong. The Drafts header counts it as "4 more".

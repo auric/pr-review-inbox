@@ -17,7 +17,8 @@ let root = "";
 let cache = "";
 let client: Client;
 let movesClient: Client;
-const c = { c1: "", c2: "", c3: "", c4: "", c5: "" };
+let rereviewClient: Client;
+const c = { c1: "", c2: "", c3: "", c4: "", c5: "", c6: "", c7: "" };
 const m = { m1: "", m2: "", m3: "" };
 // git blame -M and -C need a moved block of at least 20 alphanumeric characters.
 const LONG = ["alpha line that is long enough to move", "beta line that is long enough to move", "gamma line that is long enough to move"];
@@ -26,7 +27,8 @@ const LONG = ["alpha line that is long enough to move", "beta line that is long 
 const HUGE = Array.from({ length: 20_000 }, (_, i) => `line ${i + 1} of the huge change\n`).join("");
 
 // A bare repository like the WP6 cache. Commits go through a temp index.
-// c1 -> c2 (target); c1 -> c3 -> c4 (head); c1 -> c5 (side, unrelated to both pins). The merge base is c1.
+// c1 -> c2 (target); c1 -> c3 -> c4 (head); c1 -> c5 (side, unrelated to all pins). The merge base is c1.
+// Re-review: c1 -> c6 (an earlier head before a force push); c7 = merge(c6, c1), an app-made range base like rangeBaseOf builds.
 // The moves repository: m1 -> m2 (rename old.txt to new.txt) -> m3 (move the first line of f.txt to the end).
 async function fixture() {
   root = mkdtempSync(join(tmpdir(), "rl-wp7-"));
@@ -38,10 +40,13 @@ async function fixture() {
     c.c3 = await commit(c.c1, { "src/b.txt": "bee\n" }, "add bee");
     c.c4 = await commit(c.c3, { "a.txt": "one\nTWO\nthree\n", "huge.txt": HUGE }, "shout two");
     c.c5 = await commit(c.c1, { "side.txt": "side\n" }, "side work");
+    c.c6 = await commit(c.c1, { "old.txt": "old head\n" }, "old head before force push");
+    c.c7 = await commit([c.c6, c.c1], {}, "Range base");
     return [
       ["refs/rl/1/source", c.c4],
       ["refs/rl/1/target", c.c2],
       ["refs/heads/side", c.c5],
+      ["refs/rl/1/reviewed", c.c6],
     ];
   });
   await repo(join(root, "moves.git"), async (commit) => {
@@ -52,7 +57,7 @@ async function fixture() {
   });
 }
 
-type Commit = (parent: string | null, files: Record<string, string | null>, msg: string) => Promise<string>;
+type Commit = (parent: string | string[] | null, files: Record<string, string | null>, msg: string) => Promise<string>;
 
 // A bare repository like the WP6 cache. Commits go through a temp index. A null body removes the path.
 async function repo(dir: string, build: (commit: Commit) => Promise<[string, string][]>) {
@@ -70,7 +75,8 @@ async function repo(dir: string, build: (commit: Commit) => Promise<[string, str
   await git(["init", "-q", "--bare", "--template=", dir], { env });
   let n = 0;
   const commit: Commit = async (parent, files, msg) => {
-    await g(parent ? ["read-tree", parent] : ["read-tree", "--empty"]);
+    const parents = parent === null ? [] : [parent].flat();
+    await g(parents[0] ? ["read-tree", parents[0]] : ["read-tree", "--empty"]);
     for (const [path, body] of Object.entries(files)) {
       if (body === null) {
         // A bare repository has no work tree for --force-remove. Mode 0 in --index-info removes the entry.
@@ -82,7 +88,7 @@ async function repo(dir: string, build: (commit: Commit) => Promise<[string, str
       const sha = await g(["hash-object", "-w", "--no-filters", f]);
       await g(["update-index", "--add", "--cacheinfo", `100644,${sha},${path}`]);
     }
-    return g(["commit-tree", await g(["write-tree"]), ...(parent ? ["-p", parent] : []), "-m", msg]);
+    return g(["commit-tree", await g(["write-tree"]), ...parents.flatMap((p) => ["-p", p]), "-m", msg]);
   };
   for (const [ref, sha] of await build(commit)) await g(["update-ref", ref, sha]);
   rmSync(join(root, "author.index"));
@@ -119,23 +125,27 @@ beforeAll(async () => {
   const moves = gitMcpServer({ cache: join(root, "moves.git"), sourceHead: m.m3, rangeBase: m.m1, targetHead: m.m1 }, MAIN);
   movesClient = new Client({ name: "wp7-moves-test", version: "0" });
   await movesClient.connect(new StdioClientTransport({ command: moves.command, args: moves.args, stderr: "pipe" }));
+  const rereview = gitMcpServer({ cache, sourceHead: c.c4, rangeBase: c.c7, targetHead: c.c2 }, MAIN);
+  rereviewClient = new Client({ name: "wp7-rereview-test", version: "0" });
+  await rereviewClient.connect(new StdioClientTransport({ command: rereview.command, args: rereview.args, stderr: "pipe" }));
 }, SLOW);
 
 afterAll(async () => {
   await client?.close();
   await movesClient?.close();
+  await rereviewClient?.close();
   rmSync(root, { recursive: true, force: true, maxRetries: 3 });
 });
 
 type Result = { isError?: boolean; content: { type: string; text: string }[] };
-const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as Result;
-const ok = async (name: string, args: Record<string, unknown>) => {
-  const r = await call(name, args);
+const call = async (name: string, args: Record<string, unknown>, on = client) => (await on.callTool({ name, arguments: args })) as Result;
+const ok = async (name: string, args: Record<string, unknown>, on = client) => {
+  const r = await call(name, args, on);
   expect(r.isError, r.content[0]?.text).toBeFalsy();
   return r.content[0]?.text ?? "";
 };
-const refused = async (name: string, args: Record<string, unknown>) => {
-  const r = await call(name, args);
+const refused = async (name: string, args: Record<string, unknown>, on = client) => {
+  const r = await call(name, args, on);
   expect(r.isError).toBe(true);
   return r.content[0]?.text ?? "";
 };
@@ -200,6 +210,18 @@ describe("git MCP server", () => {
     expect(await ok("git_show", { rev: "HEAD", path: "src/b.txt" })).toBe("bee\n");
   });
 
+  test("git_show names a missing file instead of a bad revision", async () => {
+    for (const [rev, p] of [
+      ["BASE", "src/b.txt"],
+      ["HEAD~1", "src/none.txt"],
+    ]) {
+      const out = await refused("git_show", { rev, path: p });
+      expect(out).toContain(`File ${p} does not exist at ${rev}.`);
+      expect(out).not.toContain("bad revision");
+    }
+    expect(await ok("git_show", { rev: "HEAD~1", path: "src/b.txt" })).toBe("bee\n");
+  });
+
   test("git_diff shows the PR changes", async () => {
     const out = await ok("git_diff", {});
     expect(out).toContain("+TWO");
@@ -210,7 +232,21 @@ describe("git MCP server", () => {
   });
 
   test("refuses options, traversal, refs, and commits outside the pinned history", async () => {
-    for (const bad of ["--output=x", "-c", "-p", "HEAD~1", "refs/rl/1/source", "side", "main"]) {
+    const bads = [
+      "--output=x",
+      "-c",
+      "-p",
+      "refs/rl/1/source",
+      "side",
+      "main",
+      "HEAD@{1}",
+      "HEAD^{tree}",
+      ":/side",
+      "HEAD~1:a.txt",
+      "HEAD^3",
+      "HEAD~",
+    ];
+    for (const bad of [...bads, `${c.c1}..${c.c4}`]) {
       await refused("git_show", { rev: bad });
       await refused("git_diff", { from: bad });
     }
@@ -224,6 +260,25 @@ describe("git MCP server", () => {
     await refused("git_log", { rev: "HEAD", extra: "--output=x" });
     // TARGET history is allowed.
     expect(await ok("git_show", { rev: c.c2 })).toContain("target change");
+  });
+
+  test("accepts ~N and ^N after a hash or an alias", async () => {
+    for (const r of ["HEAD~1", "HEAD^", "HEAD^1", `${c.c4}~1`, `${c.c4.slice(0, 8)}^`])
+      expect(await ok("git_show", { rev: r })).toContain("add bee");
+    expect(await ok("git_log", { rev: "HEAD~1", since: "HEAD~2" })).toContain(c.c3);
+    expect(await refused("git_show", { rev: "HEAD~9" })).toContain("Unknown or ambiguous commit");
+    expect(await refused("git_show", { rev: `${c.c5}~0` })).toContain("not in the history");
+  });
+
+  test("a re-review accepts the BASE history, also by hash", async () => {
+    // c7 and c6 are only in the history of BASE. A first review refuses them.
+    expect(await refused("git_show", { rev: c.c6 })).toContain("HEAD, BASE, or TARGET");
+    expect(await ok("git_show", { rev: c.c7 }, rereviewClient)).toContain("Range base");
+    expect(await ok("git_show", { rev: c.c6 }, rereviewClient)).toContain("old head before force push");
+    expect(await ok("git_show", { rev: "BASE^" }, rereviewClient)).toContain("old head before force push");
+    expect(await ok("git_show", { rev: "BASE^2", path: "a.txt" }, rereviewClient)).toBe("one\ntwo\nthree\n");
+    expect(await ok("git_diff", { from: c.c7, stat_only: true }, rereviewClient)).toContain("src/b.txt");
+    for (const r of [c.c5, `${c.c5}~0`, "side", "refs/rl/1/reviewed"]) await refused("git_show", { rev: r }, rereviewClient);
   });
 
   test("git_diff pages a 20,000-line change without a gap", async () => {

@@ -6,12 +6,15 @@ import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
+import { gitMcpServer } from "../../src/server/review/git-mcp";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { CODE_GONE, NO_VERDICT, validateEarlier } from "../../src/server/review/validate";
 import { cachePath, type GitRemote, prepareWorkspace, UNTRUSTED } from "../../src/server/review/workspace";
@@ -31,6 +34,7 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
 const SESSION = "s".repeat(64);
 const HEADERS = { host: `127.0.0.1:${PORT}`, origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" };
 const NEW_FILE = "export const x = 1;\n";
+const MAIN = resolve(import.meta.dir, "../../src/server/main.ts");
 
 const dirs: string[] = [];
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -199,6 +203,51 @@ describe("range base", () => {
       expect(mg.mergeBase).toBe(t2);
       expect(mg.files).toEqual(["A\tsrc/new.ts"]);
       expect(mg.validator).toEqual(["src/app.ts", "src/new.ts"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "the git MCP of a rebase re-review reads the range base by hash and refuses another head in the cache",
+    async () => {
+      const root = temp();
+      const r = await remoteRepo(join(root, "remote"));
+      const base = await r.commit([], { "src/app.ts": appText() });
+      const t1 = await r.commit([base], { "docs/main.md": "main\n" });
+      const other = await r.commit([base], { "other.txt": "other\n" }, "another head");
+      await workspace(root, r, other, t1);
+      const s1 = await r.commit([base], { "src/app.ts": appText({ 3: "line 3 changed" }) }, "reviewed head");
+      await workspace(root, r, s1, t1);
+      const s1r = await r.commit([t1], { "src/app.ts": appText({ 3: "line 3 changed" }) });
+      const s2r = await r.commit([s1r], { "src/new.ts": NEW_FILE });
+      await r.point(s2r, t1);
+      const ws = await prepareWorkspace({
+        dataDir: join(root, "data"),
+        runId: "mcp",
+        pr: prAt(s2r, t1),
+        comments: [],
+        remote: r.remote,
+        since: s1,
+      });
+      cleanup.push(() => ws.remove());
+      expect([s1, t1]).not.toContain(ws.rangeBase);
+      const spec = gitMcpServer(ws, MAIN);
+      const client = new Client({ name: "rereview-git-mcp", version: "0" });
+      await client.connect(new StdioClientTransport({ command: spec.command, args: spec.args, stderr: "pipe" }));
+      cleanup.unshift(() => client.close());
+      type Result = { isError?: boolean; content: { text: string }[] };
+      const show = async (rev: string) => (await client.callTool({ name: "git_show", arguments: { rev } })) as Result;
+      for (const [rev, text] of [
+        [ws.rangeBase, "Range base"],
+        [s1, "reviewed head"],
+      ] as const) {
+        const ok = await show(rev);
+        expect(ok.isError, ok.content[0]?.text).toBeFalsy();
+        expect(ok.content[0]?.text).toContain(text);
+      }
+      const no = await show(other);
+      expect(no.isError).toBe(true);
+      expect(no.content[0]?.text).toContain("not in the history of HEAD, BASE, or TARGET");
     },
     SLOW,
   );

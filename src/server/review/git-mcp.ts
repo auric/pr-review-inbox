@@ -16,6 +16,9 @@ export const GIT_MCP_TOOLS = ["git_log", "git_blame", "git_show", "git_diff"];
 export const MAX_COMMITS = 200;
 export const MAX_BLAME_LINES = 400;
 const FULL = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+// A hash or an alias, then only ~N and ^N steps. No ref names, @{...}, ^{...}, :/text, ranges, or paths.
+const REV = /^(?:[0-9a-f]{4,40}|[0-9a-f]{64}|HEAD|BASE|TARGET)(?:~\d{1,4}|\^[12]?)*$/;
+const ALIAS = /^(HEAD|BASE|TARGET)(.*)$/;
 // Pathspec magic stays off (--literal-pathspecs). "-" would read as an option.
 const CONTROL = /\p{Cc}/u;
 // --no-optional-locks: a read never writes the index or other optional files.
@@ -42,8 +45,13 @@ export function gitMcpServer(ws: Pick<Workspace, "cache" | "sourceHead" | "range
 
 const rev = z
   .string()
-  .regex(/^(?:[0-9a-f]{4,40}|[0-9a-f]{64}|HEAD|BASE|TARGET)$/, "Use a hex commit hash (4 to 40 characters) or HEAD, BASE, or TARGET.")
-  .describe("A commit: a hex hash, or HEAD (PR source head), BASE (merge base), or TARGET (target branch head).");
+  .regex(
+    REV,
+    "Use a hex commit hash (4 to 40 characters) or HEAD, BASE, or TARGET, optionally followed by ~N or ^N (for example HEAD~1 or BASE^).",
+  )
+  .describe(
+    "A commit: a hex hash, or HEAD (PR source head), BASE (the base of the reviewed range, the merge base in a first review), or TARGET (target branch head). Add ~N for the Nth first-parent ancestor or ^N for the Nth parent, for example HEAD~1 or BASE^.",
+  );
 
 const path = z
   .string()
@@ -123,17 +131,20 @@ export function createGitMcp(pins: Pins) {
     }
   };
 
-  // Returns the full hash. The commit must be in the history of the pinned head or the pinned target.
+  // Returns the full hash. The commit must be in the history of the pinned head, base, or target.
   const resolve = async (r: string) => {
     const alias = aliases[r];
     if (alias) return alias;
+    const m = ALIAS.exec(r);
+    const spec = m ? `${aliases[m[1] as string]}${m[2]}` : r;
     let hash = "";
     try {
-      hash = (await run(["rev-parse", "--verify", "--quiet", "--end-of-options", `${r}^{commit}`])).trim();
+      hash = (await run(["rev-parse", "--verify", "--quiet", "--end-of-options", `${spec}^{commit}`])).trim();
     } catch {}
-    if (!FULL.test(hash)) throw new Error(`Unknown or ambiguous commit: ${r}. Use a longer hash.`);
-    if ((await isAncestor(hash, pins.head)) || (await isAncestor(hash, pins.target))) return hash;
-    throw new Error(`Commit ${r} is not in the history of HEAD or TARGET.`);
+    if (!FULL.test(hash)) throw new Error(`Unknown or ambiguous commit: ${r}. Use a longer hash or an existing ancestor.`);
+    // BASE can be an app-made merge commit or an earlier head after a force push. Neither is in the history of HEAD or TARGET.
+    for (const pin of [pins.head, pins.base, pins.target]) if (await isAncestor(hash, pin)) return hash;
+    throw new Error(`Commit ${r} is not in the history of HEAD, BASE, or TARGET.`);
   };
 
   const text = (out: string, n: number) => ({ content: [{ type: "text" as const, text: pageOf(out, n) }] });
@@ -223,7 +234,7 @@ export function createGitMcp(pins: Pins) {
     {
       title: "Git show",
       description:
-        "Without path: show a commit with its message, a file summary, and its patch. With path: show the file content at that commit. Read the files in ./repo for the head commit.",
+        "Without path: show a commit with its message, a file summary, and its patch. With path: show the file content at that commit. A file that the change or the task adds does not exist at BASE. Read the files in ./repo for the head commit.",
       inputSchema: z.object({ rev, path: path.optional(), page }).strict(),
       annotations,
     },
@@ -231,7 +242,20 @@ export function createGitMcp(pins: Pins) {
       const hash = await resolve(a.rev);
       const opts = a.path ? [] : ["--format=fuller", "--stat", "--patch"];
       const object = a.path ? `${hash}:${a.path}` : hash;
-      return text(await run(["show", "--no-color", ...NO_DIFF_HELPERS, ...opts, "--end-of-options", object, "--"]), a.page);
+      try {
+        return text(await run(["show", "--no-color", ...NO_DIFF_HELPERS, ...opts, "--end-of-options", object, "--"]), a.page);
+      } catch (e) {
+        // With the trailing "--", git reports a missing path as "bad revision".
+        if (
+          a.path &&
+          !(await run(["cat-file", "-e", "--end-of-options", object]).then(
+            () => true,
+            () => false,
+          ))
+        )
+          throw new Error(`File ${a.path} does not exist at ${a.rev}.`);
+        throw e;
+      }
     },
   );
 
@@ -281,7 +305,7 @@ export async function runGitMcp(args: string[]) {
     options: { "git-dir": { type: "string" }, head: { type: "string" }, base: { type: "string" }, target: { type: "string" } },
   });
   const pins = { gitDir: values["git-dir"] ?? "", head: values.head ?? "", base: values.base ?? "", target: values.target ?? "" };
-  if (!isAbsolute(pins.gitDir) || ![pins.head, pins.base, pins.target].every((h) => FULL.test(h))) {
+  if (!isAbsolute(pins.gitDir) || ![pins.head, pins.target].every((h) => FULL.test(h))) {
     console.error("usage: --git-mcp --git-dir=<absolute path> --head=<hash> --base=<hash> --target=<hash>");
     process.exit(2);
   }

@@ -322,7 +322,7 @@ describe("implement run", () => {
       expect(existsSync(mcpFile as string)).toBe(false);
       // part-session.md section 2.18: a build run takes Settings > Tasks "Session run turns", 500 by default.
       const spec = { implement: true as const, cwd: s.wt.dir, prompt: "", schema: implementJsonSchema(), maxTurns: 500 };
-      const expected = implementArgs({ ...spec, model: p?.model, effort: p?.effort }).args;
+      const expected = implementArgs({ ...spec, model: p?.model, effort: p?.effort, advisor: p?.advisor }).args;
       const at = expected.indexOf("--tools");
       // task-subagents.md: the agents file sits beside the MCP file, and it goes with the run.
       const agentsFile = flag(call.argv, "--agents") as string;
