@@ -55,6 +55,7 @@ import {
   prefixProblem,
   proposals,
   repoName,
+  reviewChoice,
   roleText,
   SIZE_LINE,
   type StartPick,
@@ -184,6 +185,8 @@ export function PlanApproval(props: {
         const approve = (shellWarning: boolean) =>
           props.onApprove({
             size: sub ? "small" : size,
+            // self-approved-plans.md section 3.3: the spec PR cannot open yet, so a large plan goes with the self review.
+            ...(reviewChoice(t, size) && { review: "self" as const }),
             commands,
             ...(plan.warning && { warning: true }),
             allow: shell.allow,
@@ -259,14 +262,37 @@ export function PlanApproval(props: {
                 onChange={() => props.onSize(s)}
               />
               <span className="text-sm">{SIZE_LINE[s]}</span>
-              {s === "large" && (
-                <span className="col-start-2 text-xs text-muted-foreground">
-                  This version builds small and medium tasks only. A large plan waits after its approval.
-                </span>
-              )}
             </label>
           );
         })}
+        {reviewChoice(t, size) && (
+          <FieldSet className="ml-6 gap-1">
+            <FieldLegend className="text-sm font-medium">Plan review</FieldLegend>
+            <label className="-mx-1.5 grid min-h-6 cursor-pointer grid-cols-[auto_minmax(0,1fr)] gap-x-2 rounded-[5px] px-1.5 py-1 hover:bg-hover">
+              <input
+                type="radio"
+                name="task-review"
+                defaultChecked
+                disabled={props.busy}
+                className="m-0 mt-[3px] size-4 accent-foreground"
+              />
+              <span className="text-sm">I approve the plan myself. Colleagues review only the code PRs.</span>
+            </label>
+            <label className="-mx-1.5 grid min-h-6 cursor-default grid-cols-[auto_minmax(0,1fr)] gap-x-2 rounded-[5px] px-1.5 py-1 opacity-60">
+              <input
+                type="radio"
+                name="task-review"
+                disabled
+                aria-describedby="task-review-later"
+                className="m-0 mt-[3px] size-4 accent-foreground"
+              />
+              <span className="text-sm">Colleagues review the plan first, in a spec PR.</span>
+              <span id="task-review-later" className="col-start-2 text-xs text-muted-foreground">
+                This version cannot open a spec PR yet.
+              </span>
+            </label>
+          </FieldSet>
+        )}
       </FieldSet>
       <BranchSection
         t={t}
@@ -278,7 +304,7 @@ export function PlanApproval(props: {
         onPick={setPick}
         onBase={(branch) => props.onBase(branch)}
         base={!several}
-        chipsOnly={sub}
+        chipsOnly={sub || size === "large"}
       />
       {several && <RepoSection t={t} runner={runner} busy={props.busy} onBase={props.onBase} onRepo={props.onRepo} />}
       {plan.missing > 0 && (

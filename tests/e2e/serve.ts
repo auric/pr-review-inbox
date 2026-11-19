@@ -856,6 +856,16 @@ r[key("POST", "/__control/task-remote")] = async () => {
     creates: taskRepo.writes.map((w) => w.body),
   });
 };
+// self-approved-plans.md section 5.5 (SA-3): a colleague approves the newest open task PR. One sync reads it, so the part gate passes.
+r[key("POST", "/__control/task-pr-approve")] = async () => {
+  const pr = [...taskRepo.prs.values()].filter((p) => p.state === "OPEN").at(-1);
+  if (!pr) return NOT_FOUND;
+  pr.reviewers = [{ user: alex as unknown as (typeof pr.reviewers)[number]["user"], role: "REVIEWER", approved: true, status: "APPROVED" }];
+  pr.version++;
+  pr.updatedDate++;
+  await app.sync.syncNow();
+  return ok({ pr: pr.id });
+};
 // spec.md section 6.18.5 (WP-TU2): move adds one commit with the given files to a branch of the local remote, as a colleague's merge
 // into the base does. conflicted sets properties.mergeResult of every task PR, and one sync stores it. Answers the new head.
 const baseEnv = {

@@ -1159,7 +1159,7 @@ One route sends one user event. Follow-on events (START, PART_READY, LAST_PR_OPE
 | POST /tasks/:id/parts/:part/fix | GO with follow (purpose points) | "No point waits for a fix." (loop.ts:2792) |
 | PUT /tasks/:id/base | PICK_BASE | "The base branch changes only before the build." (loop.ts:2953) |
 | New: POST /tasks/:id/parts/:part/hold | reason held, then cancel the run of the part | "Hold works while Claude builds or fixes part 2." |
-| New: POST /tasks/:id/parts/:part/skip | ABANDON | "Only a part of a task with sub-tasks can be skipped." |
+| New: POST /tasks/:id/parts/:part/skip | ABANDON | "Only a task with several PRs can skip a part." |
 | New: POST /tasks/:id/parts/:part/restart | RESTART | "Part 2 is on the server. It cannot start again." |
 | New (PS6): POST /tasks/:id/parts/:part/comments, /comments/send | none (reply run); GO with follow (purpose comments) | the sentence of the state |
 | New (PS7a): POST /tasks/:id/parts/:part/ci | GO with follow (purpose ci) | the sentence of the state |

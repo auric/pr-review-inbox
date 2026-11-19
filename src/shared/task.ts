@@ -320,13 +320,16 @@ export function branchName(
 
 // spec.md section 6.12: the step strip of the Task view. current: the index of the current step, -1 for a failed task.
 // A task without a size shows the small strip. Large counts the code parts: the first one that did not merge is the current one.
-// subtasks (spec.md section 6.20.13): the done and all sub-tasks of a task that builds its Jira sub-tasks.
+// subtasks (spec.md section 6.20.13): the done and all sub-tasks of a task that builds its Jira sub-tasks. planReview
+// (self-approved-plans.md section 4.1): only a large plan for a spec PR has the spec review step. The plan screen picks the self review
+// by default (section 3.1), so a plan without a stored choice shows no spec review before the spec PR opens.
 export function stepStrip(t: {
   size: TaskSize | null;
   state: TaskState;
   stoppedFrom: TaskState | null;
   parts: { kind: PartKind; state: PartState }[];
   subtasks?: { done: number; total: number } | null;
+  planReview?: (typeof PLAN_REVIEWS)[number];
 }): { steps: string[]; current: number } {
   const code = t.parts.filter((p) => p.kind !== "spec");
   const left = code.findIndex((p) => p.state !== "merged" && p.state !== "abandoned");
@@ -335,7 +338,7 @@ export function stepStrip(t: {
     : t.size === "large" && code.length
       ? `Build parts (${left < 0 ? code.length : left + 1} of ${code.length})`
       : "Build";
-  const review = t.size === "medium" || t.size === "large";
+  const review = t.size === "large" && (t.planReview === "spec-pr" || t.state === "spec_pr_open" || t.state === "spec_approved");
   const steps = ["Questions", "Plan", ...(review ? ["Spec review"] : []), build, "Done"];
   const state = t.state === "stopped" ? t.stoppedFrom : t.state;
   const at: Record<TaskState, number> = {

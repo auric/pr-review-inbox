@@ -1043,7 +1043,7 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
         ["Set to medium: it changes the database."],
       ]);
       expect(Object.keys(t.docs ?? {}).sort()).toEqual(["design", "spec", "tasks", "version"]);
-      expect(t.strip.steps).toEqual(["Questions", "Plan", "Spec review", "Build", "Done"]);
+      expect(t.strip.steps).toEqual(["Questions", "Plan", "Build", "Done"]);
       for (const path of ["size", "plan"]) {
         const r = await h.json<TaskConflict>(`/api/tasks/${t.id}/${path}`, { body: { version: t.version, size: "small", commands: [] } });
         expect([r.status, r.body.error]).toEqual([409, "Set to medium: it changes the database."]);

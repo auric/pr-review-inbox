@@ -1538,7 +1538,14 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
     createdAt: t.created_at,
     interview: interviewOf(db, t.id),
     plan: docs ? planDto(db, t, docs) : null,
-    strip: stepStrip({ size: t.size, state: t.state, stoppedFrom: t.stopped_from, parts, subtasks: subtaskCount(db, t, partRows) }),
+    strip: stepStrip({
+      size: t.size,
+      state: t.state,
+      stoppedFrom: t.stopped_from,
+      parts,
+      subtasks: subtaskCount(db, t, partRows),
+      planReview: settingsOf(t).planReview,
+    }),
     reviewers: defaultReviewers(db, t),
     points: openPoints(db, t.id).map(({ payload: _, ...p }) => p),
     // The routes set it from the loop.

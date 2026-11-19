@@ -1,6 +1,6 @@
 # Self-approved plans: build a large task with no spec PR
 
-Status: design of 2026-11-18 against main a789260. User decision of 2026-11-18: build a large Jira task that only the user approves, with no spec PR review by colleagues. It is designed together with PS9 (spec size levels). The user approved D1 to D7 on 2026-11-19. SA-D (docs) and SA-1 (machine and medium) are built. SA-2, SA-3, and Gate UL-S are open.
+Status: design of 2026-11-18 against main a789260. User decision of 2026-11-18: build a large Jira task that only the user approves, with no spec PR review by colleagues. It is designed together with PS9 (spec size levels). The user approved D1 to D7 on 2026-11-19. SA-D (docs), SA-1 (machine and medium), SA-2 (large self build), and SA-3 (web, e2e, docs) are built. Gate UL-S is open.
 
 ## Summary
 

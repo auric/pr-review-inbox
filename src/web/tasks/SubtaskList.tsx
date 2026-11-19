@@ -3,7 +3,8 @@
 
 // The sub-task list of the Task view (docs/plans/review-v2/spec.md section 6.20.13): one row per sub-task with one sentence, the person
 // who acts, and the tracker status. A click on a row moves the focus, so the status and the primary button follow that part. Each row
-// has at most one secondary action and the More item "Move in <tracker>…". model.ts subtaskRows decides the words.
+// has at most one secondary action and the More item "Move in <tracker>…". model.ts subtaskRows decides the words. A stack plan
+// (self-approved-plans.md section 5.1) lists its parts with no tracker status, no tracker item, and no parent row.
 // ConfirmDialog is the one confirm of a part action that changes the code host, such as "Move <key> to <base>".
 import { Ellipsis } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +20,8 @@ export function SubtaskList(props: {
   focused: number | null;
   // The primary action of the shown part. The focused row leaves out the same action, so it shows once.
   primary: Action["kind"] | null;
-  tracker: string;
+  // null: a stack plan, whose parts are no sub-tasks.
+  tracker: string | null;
   busy: boolean;
   // The parent row: its key, its status, and the hint when every part merged.
   parent: { key: string; status: string | null; hint: string | null };
@@ -31,7 +33,7 @@ export function SubtaskList(props: {
   return (
     <section aria-labelledby="subtask-list" className="grid gap-2">
       <h3 id="subtask-list" className="m-0 text-sm font-semibold">
-        Sub-tasks
+        {tracker === null ? "Parts" : "Sub-tasks"}
       </h3>
       <ul className="m-0 grid list-none gap-2 p-0">
         {props.rows.map((r) => {
@@ -49,7 +51,7 @@ export function SubtaskList(props: {
                     type="button"
                     data-task-item
                     aria-pressed={focused}
-                    aria-label={`${r.label}: ${r.summary}. ${focused ? "Shown above." : "Show this sub-task above."}`}
+                    aria-label={`${r.label}: ${r.summary}. ${focused ? "Shown above." : `Show this ${tracker === null ? "part" : "sub-task"} above.`}`}
                     className="cursor-pointer rounded-[4px] text-left text-sm font-semibold underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                     onClick={() => r.part && props.onFocus(r.part.id)}
                   >
@@ -71,9 +73,11 @@ export function SubtaskList(props: {
               <p className="m-0 flex flex-wrap gap-x-4 gap-y-0.5 text-sm">
                 <span>{r.text}</span>
                 <span className="text-ink-2">Who acts: {r.actor}</span>
-                <span className="text-ink-2">
-                  {tracker}: {r.status ?? "not known"}
-                </span>
+                {tracker !== null && (
+                  <span className="text-ink-2">
+                    {tracker}: {r.status ?? "not known"}
+                  </span>
+                )}
               </p>
               {r.hint && <p className="m-0 text-xs text-ink-2">{r.hint}</p>}
               <div className="flex flex-wrap items-center gap-2">
@@ -88,32 +92,34 @@ export function SubtaskList(props: {
                     {r.action.label}
                   </Button>
                 )}
-                <RowMore label={`More for ${r.key}`} item={`Move in ${tracker}…`} onMove={() => props.onMove(move)} />
+                {tracker !== null && <RowMore label={`More for ${r.key}`} item={`Move in ${tracker}…`} onMove={() => props.onMove(move)} />}
               </div>
             </li>
           );
         })}
-        <li data-subtask={props.parent.key} className="grid gap-1 rounded-md border border-dashed bg-card px-3 py-2.5">
-          <p className="m-0 flex flex-wrap gap-x-4 gap-y-0.5 text-sm">
-            <span className="font-semibold">
-              Parent{" "}
-              <span translate="no" className="font-mono">
-                {props.parent.key}
+        {tracker !== null && (
+          <li data-subtask={props.parent.key} className="grid gap-1 rounded-md border border-dashed bg-card px-3 py-2.5">
+            <p className="m-0 flex flex-wrap gap-x-4 gap-y-0.5 text-sm">
+              <span className="font-semibold">
+                Parent{" "}
+                <span translate="no" className="font-mono">
+                  {props.parent.key}
+                </span>
               </span>
-            </span>
-            <span className="text-ink-2">
-              {tracker}: {props.parent.status ?? "not known"}
-            </span>
-          </p>
-          {props.parent.hint && <p className="m-0 text-sm">{props.parent.hint}</p>}
-          <div>
-            <RowMore
-              label={`More for ${props.parent.key}`}
-              item={`Move in ${tracker}…`}
-              onMove={() => props.onMove({ key: props.parent.key, status: props.parent.status })}
-            />
-          </div>
-        </li>
+              <span className="text-ink-2">
+                {tracker}: {props.parent.status ?? "not known"}
+              </span>
+            </p>
+            {props.parent.hint && <p className="m-0 text-sm">{props.parent.hint}</p>}
+            <div>
+              <RowMore
+                label={`More for ${props.parent.key}`}
+                item={`Move in ${tracker}…`}
+                onMove={() => props.onMove({ key: props.parent.key, status: props.parent.status })}
+              />
+            </div>
+          </li>
+        )}
       </ul>
     </section>
   );

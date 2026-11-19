@@ -53,6 +53,8 @@ import {
   parentHint,
   partLabel,
   partRows,
+  partsHeader,
+  partsPlan,
   patchText,
   pickedPrefix,
   plannedBranch,
@@ -63,6 +65,7 @@ import {
   prefixProblem,
   proposals,
   prRowLook,
+  prTarget,
   prTitle,
   questionPart,
   questionSource,
@@ -72,6 +75,7 @@ import {
   repoMatches,
   repoName,
   resetText,
+  reviewChoice,
   roleText,
   rowSize,
   rowStatus,
@@ -2687,12 +2691,16 @@ describe("Start again leftovers of ps4-plan.md WP-4", () => {
 
   test("the Plan tab counts no commit of a part before its newest restart mark", () => {
     const steps = [commit(9, 7, "T1.2"), commit(8, 7, "restart"), commit(7, 8, "T2.1"), commit(6, 7, "T1.1"), commit(5, 7, "restart")];
-    expect(plannedTasks({ docs, steps, subtasks: null }).map((x) => [x.id, x.done])).toEqual([
+    expect(plannedTasks({ docs, steps, subtasks: null, size: "small", settings: {} }).map((x) => [x.id, x.done])).toEqual([
       ["T1.1", false],
       ["T1.2", true],
       ["T2.1", true],
     ]);
-    expect(plannedTasks({ docs, steps: steps.filter((s) => s.item !== "restart"), subtasks: null }).every((x) => x.done)).toBe(true);
+    expect(
+      plannedTasks({ docs, steps: steps.filter((s) => s.item !== "restart"), subtasks: null, size: "small", settings: {} }).every(
+        (x) => x.done,
+      ),
+    ).toBe(true);
   });
 
   test("a restart mark is a row of its own in the Log tab, with no Show the diff", () => {
@@ -2829,7 +2837,12 @@ describe("ps5-plan.md section 3 (AC-B368, AC-B380): ticks and tries", () => {
   });
 
   test("plannedTasks: a tick of an ok commit row or run row of the part, the plan file tick, and the per-part filter", () => {
-    const t = { docs: { ...docs, plan: `${docs.plan}### [x] T2.2 Done in the file\n` }, subtasks: null };
+    const t = {
+      docs: { ...docs, plan: `${docs.plan}### [x] T2.2 Done in the file\n` },
+      subtasks: null,
+      size: "large" as const,
+      settings: {},
+    };
     const steps = [ticked(9, 7, "fix", ["T1.2"]), ticked(8, 7, "commit", ["T1.1"]), ticked(7, 8, "implement", ["T2.1"])];
     const done = (x: ReturnType<typeof plannedTasks>) => x.filter((k) => k.done).map((k) => k.id);
     expect(done(plannedTasks({ ...t, steps }))).toEqual(["T1.1", "T1.2", "T2.1", "T2.2"]);
@@ -2841,6 +2854,9 @@ describe("ps5-plan.md section 3 (AC-B368, AC-B380): ticks and tries", () => {
       ["T2.1", true],
       ["T2.2", true],
     ]);
+    // A self-approved large plan lists the tasks of each part as sub-tasks do (self-approved-plans.md section 5.1).
+    const stack = plannedTasks({ ...t, steps, settings: { planReview: "self" } }, { id: 8, ord: 2 });
+    expect(stack.map((k) => k.id)).toEqual(["T2.1", "T2.2"]);
     // A failed row ticks nothing.
     expect(done(plannedTasks({ ...t, steps: [ticked(9, 7, "fix", ["T1.2"], "failed")] }))).toEqual(["T2.2"]);
   });
@@ -3148,5 +3164,85 @@ describe("AC-B398: the PR comment rows of a task PR", () => {
     });
     expect(verdictText(s)).toBe("1 fixed, 1 pushed back");
     expect(sendResult({ send: s, steps: [] }, R)).toBe("Claude changed no file. Comments: 1 fixed, 1 pushed back.");
+  });
+});
+
+// docs/plans/review-v2/self-approved-plans.md sections 3.1, 5.1, and 12 (SA-3, AC-SA4, AC-SA13): a large plan that the user approves
+// alone builds as parts without keys, one PR each, on the part engine.
+describe("self-approved large plans (self-approved-plans.md sections 3.1 and 5.1)", () => {
+  const stack = (parts: TaskPartDto[], o: Partial<TaskDto> = {}) =>
+    task({
+      key: "ABC-10",
+      title: "Split the cache work",
+      state: "implementing",
+      size: "large",
+      settings: { planReview: "self" },
+      parts,
+      ...o,
+    });
+  const s1 = (o: Partial<TaskPartDto> = {}) =>
+    part({ id: 21, ord: 1, title: "Part one", branch: "task/ABC-10-1-part-one", baseBranch: "main", start: "base", ...o });
+  const s2 = (o: Partial<TaskPartDto> = {}) =>
+    part({
+      id: 22,
+      ord: 2,
+      title: "Part two",
+      branch: "task/ABC-10-2-part-two",
+      baseBranch: "task/ABC-10-1-part-one",
+      start: "stack",
+      after: 21,
+      state: "planned",
+      head: null,
+      ...o,
+    });
+
+  test("AC-SA4: the plan review choice shows only for a large plan of a task without sub-tasks", () => {
+    expect(reviewChoice(task(), "large")).toBe(true);
+    expect(reviewChoice(task(), "medium")).toBe(false);
+    expect(reviewChoice(task(), "small")).toBe(false);
+    expect(reviewChoice(subTask([]), "large")).toBe(false);
+  });
+
+  test("partsPlan: sub-tasks, or large with the self review; a large plan for a spec PR builds one part", () => {
+    expect(partsPlan(stack([]))).toBe(true);
+    expect(partsPlan(subTask([]))).toBe(true);
+    expect(partsPlan(stack([], { settings: { planReview: "spec-pr" } }))).toBe(false);
+    expect(partsPlan(stack([], { settings: {} }))).toBe(false);
+    expect(partsPlan(stack([], { size: "medium" }))).toBe(false);
+  });
+
+  test("AC-SA13: the header counts the parts, and a one-PR task shows its size", () => {
+    expect(partsHeader(stack([s1(), s2()]))).toBe("Parts: 2, one PR each");
+    expect(partsHeader(subTask([p13()]))).toBe("Sub-tasks: 4, one PR each");
+    expect(partsHeader(building())).toBeNull();
+  });
+
+  test("AC-SA13: one row per part with the part label, Drop this part, and no tracker action", () => {
+    const t = stack([s1({ state: "pr_open", remotePr: 41, waiting: ["Anna"] }), s2({ wait: "Waits for a review of ABC-10 (1 of 2)." })]);
+    const rows = subtaskRows(t, SUB_OPTS);
+    expect(rows.map((r) => [r.key, r.label, r.summary, r.text, r.actor, r.action?.label ?? null])).toEqual([
+      ["ABC-10 (1 of 2)", "ABC-10 (1 of 2)", "Part one", "In review by Anna.", "Anna", "Go to the PR"],
+      ["ABC-10 (2 of 2)", "ABC-10 (2 of 2)", "Part two", "Waits for a review of ABC-10 (1 of 2).", "Anna", "Start now"],
+    ]);
+    const planned = subtaskView(t, t.parts[1] ?? null, SUB_OPTS);
+    expect([planned.status, planned.more.map((a) => a.label)]).toEqual([
+      "ABC-10 (2 of 2): Waits for a review of ABC-10 (1 of 2).",
+      ["Start now", "Drop this part"],
+    ]);
+    const open = subtaskView(t, t.parts[0] ?? null, SUB_OPTS);
+    expect(open.more.map((a) => a.kind)).not.toContain("tracker-move");
+    expect(open.more.map((a) => a.kind)).not.toContain("tracker-read");
+    // A task with sub-tasks keeps its words.
+    expect(subtaskView(subTask([p12(), p14()]), p14(), SUB_OPTS).more.map((a) => a.label)).toContain("Drop this sub-task");
+  });
+
+  test("the PR title and the PR target of a part follow the stack", () => {
+    const t = stack([s1(), s2({ state: "self_reviewed", head: "d".repeat(40) })]);
+    expect(prTitle(t, s2())).toBe("ABC-10 (part 2 of 2): Part two");
+    expect(prTarget(t, s2())).toBe("task/ABC-10-1-part-one");
+    expect(prTarget(t, s1())).toBe("main");
+    const one = building({ settings: {}, size: "large" });
+    expect(prTarget(one, part({ baseBranch: "other" }))).toBe("main");
+    expect(prTitle(one, part())).toBe("ABC-12: Trim spaces in user names");
   });
 });

@@ -148,7 +148,7 @@ export type TaskView = {
 export const SIZE_LINE: Record<TaskSize, string> = {
   small: "Small: one PR with a short plan and the code.",
   medium: "Medium: one PR with the plan and the code.",
-  large: "Large: colleagues review the plan first, then the code comes in small PRs, one after another.",
+  large: "Large: the code comes in small PRs, one after another.",
 };
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -210,9 +210,29 @@ function partWords(t: TaskDto, part: number | null) {
 
 // ---------- Hold, Start again, and the usage limit (ps5-plan.md sections 3, 4.2, and 4.3) ----------
 
-// <ref> of a part: the part label with sub-tasks, "part k" with several parts, else "your change".
-export function partRef(t: Pick<TaskDto, "key" | "parts" | "subtasks">, p: Pick<TaskPartDto, "id" | "ord" | "keys">): string {
-  if (t.subtasks !== null) return partLabel(t, p);
+// self-approved-plans.md section 5.1: the task builds its plan as several PRs on the part engine (server tasks.ts partsPlan).
+export const partsPlan = (t: Pick<TaskDto, "subtasks" | "size" | "settings">) =>
+  t.subtasks !== null || (t.size === "large" && t.settings.planReview === "self");
+
+// self-approved-plans.md section 3.1: the "Plan review" choice shows for a large plan of a task without sub-tasks.
+export const reviewChoice = (t: Pick<TaskDto, "subtasks">, size: TaskSize) => size === "large" && t.subtasks === null;
+
+// The header count of a parts plan (self-approved-plans.md section 5.1). null: one PR, so the header shows the size.
+export function partsHeader(t: Pick<TaskDto, "subtasks" | "size" | "settings" | "parts">): string | null {
+  if (t.subtasks !== null) return `Sub-tasks: ${t.subtasks.length}, one PR each`;
+  return partsPlan(t) ? `Parts: ${codeParts(t).length}, one PR each` : null;
+}
+
+// spec.md section 6.20.6: a part of a parts plan targets its own base, the branch of its lower part or the task base.
+export const prTarget = (t: Pick<TaskDto, "subtasks" | "size" | "settings" | "targetBranch">, p: Pick<TaskPartDto, "baseBranch">) =>
+  partsPlan(t) ? p.baseBranch : t.targetBranch;
+
+// <ref> of a part: the part label in a parts plan, "part k" with several parts, else "your change".
+export function partRef(
+  t: Pick<TaskDto, "key" | "parts" | "subtasks" | "size" | "settings">,
+  p: Pick<TaskPartDto, "id" | "ord" | "keys">,
+): string {
+  if (partsPlan(t)) return partLabel(t, p);
   return codeParts(t).length > 1 ? `part ${p.ord}` : "your change";
 }
 const upper = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -243,7 +263,7 @@ function heldView(t: TaskDto, p: TaskPartDto): TaskView {
     lines: [],
     primary: { kind: "continue-part", label: "Continue", part: p.id },
     more: [
-      ...(t.subtasks !== null ? [{ kind: "skip" as const, label: "Skip this part", part: p.id }] : []),
+      ...(partsPlan(t) ? [{ kind: "skip" as const, label: "Skip this part", part: p.id }] : []),
       ...againOf(t, p),
       t.state === "stopped" ? CLOSE : STOP,
     ],
@@ -508,7 +528,12 @@ function updateSentence(t: TaskDto, s: TaskStepDto, runner: string): string {
 // ps5-plan.md section 3: what a working part does, by the stage of its open row. ref: "your change", "part 2", or the part label of a
 // sub-task. Without ref, the short text of a sub-task row, with no try count. null: the stage has no text of its own. AC-B368: the done
 // tasks of the part, and the try or round of a fix row (StepDetail.tries).
-function workText(t: Pick<TaskDto, "docs" | "steps" | "parts" | "subtasks">, s: TaskStepDto, runner: string, ref?: string): string | null {
+function workText(
+  t: Pick<TaskDto, "docs" | "steps" | "parts" | "subtasks" | "size" | "settings">,
+  s: TaskStepDto,
+  runner: string,
+  ref?: string,
+): string | null {
   const of = ref ? ` of ${ref}` : "";
   const forRef = ref ? ` for ${ref}` : "";
   const tries = ref ? s.detail.tries : null;
@@ -575,7 +600,10 @@ const TASK_LINE = /^### \[( |x)\] (T\d+\.\d+) (.+)$/gm;
 // detail.ticked (ps5-plan.md D5), or when an ok commit row of an old task has it as its item. A restart mark (commit item "restart")
 // resets its part, so the rows of that part before its newest mark do not count. With sub-tasks, task_part.ord is the plan part number
 // (tasks.ts partDocsOf), so a part lists only the tasks T<ord>. of its plan part. Without sub-tasks, the part builds the whole plan.
-export function plannedTasks(t: Pick<TaskDto, "docs" | "steps" | "subtasks">, part: Pick<TaskPartDto, "id" | "ord"> | null = null) {
+export function plannedTasks(
+  t: Pick<TaskDto, "docs" | "steps" | "subtasks" | "size" | "settings">,
+  part: Pick<TaskPartDto, "id" | "ord"> | null = null,
+) {
   const text = [t.docs?.plan, t.docs?.tasks].filter(Boolean).join("\n");
   const mark = new Map<number | null, number>();
   for (const s of t.steps) if (s.kind === "commit" && s.item === "restart") mark.set(s.part, Math.max(mark.get(s.part) ?? 0, s.id));
@@ -584,7 +612,7 @@ export function plannedTasks(t: Pick<TaskDto, "docs" | "steps" | "subtasks">, pa
       .filter((s) => s.state === "ok" && s.item !== "restart" && s.id > (mark.get(s.part) ?? 0) && (!part || s.part === part.id))
       .flatMap((s) => [...s.detail.ticked, ...(s.kind === "commit" && s.item ? [s.item] : [])]),
   );
-  const prefix = part && t.subtasks !== null ? `T${part.ord}.` : "";
+  const prefix = part && partsPlan(t) ? `T${part.ord}.` : "";
   return [...text.matchAll(TASK_LINE)]
     .filter((m) => (m[2] as string).startsWith(prefix))
     .map((m) => ({ id: m[2] as string, title: (m[3] as string).trim(), done: m[1] === "x" || done.has(m[2] as string) }));
@@ -763,14 +791,14 @@ export function taskView(
   }
   // ps4-plan.md section 2.6: held stays in the part row, never in t.blocked, and comes before a slot wait or an open row. With sub-tasks,
   // subtaskView shows the hold of the focused part only.
-  const held = t.subtasks === null ? codeParts(t).find((p) => p.blocked?.kind === "held") : undefined;
+  const held = !partsPlan(t) ? codeParts(t).find((p) => p.blocked?.kind === "held") : undefined;
   if (held && (t.state === "implementing" || t.state === "stopped")) return heldView(t, held);
   if (t.state === "stopped") {
     // ps5-plan.md section 3: a stop of the build names the part of its newest row and keeps the work. A stop before the build keeps the
     // stoppedAt text.
     const build = t.stoppedFrom === "implementing" || t.stoppedFrom === "ready";
     const at = build ? (codeParts(t).find((p) => p.id === t.steps.find((s) => s.part !== null)?.part) ?? currentPart(t)) : null;
-    const many = t.subtasks !== null || codeParts(t).length > 1;
+    const many = partsPlan(t) || codeParts(t).length > 1;
     return {
       ...base,
       status: !at ? stoppedAt(t) : many ? `Stopped at ${partRef(t, at)}. The work is kept.` : "Stopped. The work is kept.",
@@ -1340,13 +1368,18 @@ export type SubOpts = { runner: string; forge: string; tracker: string; now: num
 const FINAL = new Set<TaskPartDto["state"]>(["merged", "abandoned"]);
 const WITH_PR = new Set<TaskPartDto["state"]>(["pr_open", "changes_requested", "approved"]);
 
-// "ABC-12", or "ABC-15, ABC-16" for a part that builds two sub-tasks.
-export const partName = (t: Pick<TaskDto, "key">, p: Pick<TaskPartDto, "keys">) => (p.keys.length ? p.keys.join(", ") : t.key);
+// "ABC-12", or "ABC-15, ABC-16" for a part that builds two sub-tasks. A part without keys takes its label "ABC-10 (2 of 3)", as the
+// server names it (tasks.ts partNames).
+export const partName = (t: Pick<TaskDto, "key" | "parts">, p: Pick<TaskPartDto, "id" | "keys">) =>
+  p.keys.length ? p.keys.join(", ") : partLabel(t, p);
 
 // The PR title of a part, as the server writes it (pr.ts subtaskPrText): "ABC-12: <title>", "ABC-13 (part 2 of 2): <title>" for a
 // split sub-task, "ABC-15, ABC-16: <title>" for two sub-tasks. A task without sub-tasks: "<KEY>: <task title>".
-export function prTitle(t: Pick<TaskDto, "key" | "title" | "parts" | "subtasks">, p: Pick<TaskPartDto, "id" | "keys" | "title">) {
-  if (!t.subtasks) return `${t.key}: ${t.title}`;
+export function prTitle(
+  t: Pick<TaskDto, "key" | "title" | "parts" | "subtasks" | "size" | "settings">,
+  p: Pick<TaskPartDto, "id" | "keys" | "title">,
+) {
+  if (!partsPlan(t)) return `${t.key}: ${t.title}`;
   const key = p.keys[0] ?? t.key;
   const twins = codeParts(t).filter((x) => (x.keys[0] ?? t.key) === key);
   const name =
@@ -1361,7 +1394,7 @@ export function prTitle(t: Pick<TaskDto, "key" | "title" | "parts" | "subtasks">
 // "ABC-12 (2 of 4)": the part k of n of the task (spec.md section 6.20.13).
 export function partLabel(t: Pick<TaskDto, "key" | "parts">, p: Pick<TaskPartDto, "id" | "keys">): string {
   const parts = codeParts(t);
-  return `${partName(t, p)} (${parts.findIndex((x) => x.id === p.id) + 1} of ${parts.length})`;
+  return `${p.keys.length ? p.keys.join(", ") : t.key} (${parts.findIndex((x) => x.id === p.id) + 1} of ${parts.length})`;
 }
 
 const subOf = (t: Pick<TaskDto, "subtasks">, key: string | undefined) => t.subtasks?.find((s) => s.key === key) ?? null;
@@ -1390,8 +1423,11 @@ const firstLabel = (t: TaskDto) => {
 };
 
 // spec.md section 6.25.6: the part label of a loop question in a task with sub-tasks, by the part of its step.
-export function questionPart(t: Pick<TaskDto, "key" | "parts" | "steps" | "subtasks">, q: TaskQuestionDto): string | null {
-  if (t.subtasks === null || q.source !== "loop") return null;
+export function questionPart(
+  t: Pick<TaskDto, "key" | "parts" | "steps" | "subtasks" | "size" | "settings">,
+  q: TaskQuestionDto,
+): string | null {
+  if (!partsPlan(t) || q.source !== "loop") return null;
   const id = t.steps.find((s) => s.id === q.step)?.part;
   const p = t.parts.find((x) => x.id === id);
   return p ? partLabel(t, p) : null;
@@ -1435,6 +1471,8 @@ export type SubRow = {
   hint: string | null;
 };
 
+// self-approved-plans.md section 5.1: a part of a plan without sub-tasks is no sub-task.
+const dropOf = (t: Pick<TaskDto, "subtasks">): Action => ({ kind: "drop", label: t.subtasks ? "Drop this sub-task" : "Drop this part" });
 const trackerMove = (tracker: string): Action => ({ kind: "tracker-move", label: `Move in ${tracker}…` });
 
 // The sentence, the actor, and the row action of a part (spec.md section 6.20.13 table).
@@ -1443,7 +1481,7 @@ function partRow(t: TaskDto, p: TaskPartDto, o: SubOpts): Pick<SubRow, "text" | 
   const name = partName(t, p);
   const who = p.waiting.length ? listText(p.waiting) : null;
   const goPr: Action = { kind: "go-pr", label: "Go to the PR" };
-  const drop: Action = { kind: "drop", label: "Drop this sub-task" };
+  const drop = dropOf(t);
   if (p.lower !== null && !FINAL.has(p.state) && p.state !== "planned")
     return {
       text: `${p.lower.key} merged. Move ${name} to ${t.targetBranch}.`,
@@ -1636,7 +1674,8 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
   const p = shown;
   if (!p) return taskView(t, o);
   const name = partLabel(t, p);
-  const extra = [trackerMove(o.tracker), read];
+  // A stack plan has no tracker items (self-approved-plans.md section 5.1).
+  const extra = t.subtasks ? [trackerMove(o.tracker), read] : [];
   const withExtra = (v: TaskView): TaskView => ({ ...v, more: [...v.more.filter((a) => a.kind !== "close"), ...extra] });
   // The task stays in implementing while another part builds or waits. The view of a part with a PR reads like a task in ready, and
   // the loop work on another part is not the work of this part.
@@ -1652,7 +1691,7 @@ export function subtaskView(t: TaskDto, focus: TaskPartDto | null, o: SubOpts): 
   };
   const base = { detail: null, lines: [], needsYou: false, running: false } satisfies Partial<TaskView>;
   const goPr: Action = { kind: "go-pr", label: "Go to the PR" };
-  const drop: Action = { kind: "drop", label: "Drop this sub-task" };
+  const drop = dropOf(t);
   const b = t.blocked;
   const bp = blockedPart(t);
   if (p.blocked?.kind === "held") return withExtra(heldView(t, p));

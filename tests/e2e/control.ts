@@ -210,7 +210,7 @@ export type PostControl = {
 export type PostBody = { text: string; parent?: { id: number }; anchor?: Record<string, unknown> };
 
 // Test-only control routes on the fake Bitbucket. The app has no such route.
-export async function control(action: "reset" | "restart" | "shutdown"): Promise<void>;
+export async function control(action: "reset" | "restart" | "shutdown" | "task-pr-approve"): Promise<void>;
 export async function control(action: "state", change: Partial<Scenario>): Promise<void>;
 export async function control(action: "claude", change: ClaudeScenario): Promise<void>;
 export async function control(action: string, change?: Partial<Scenario> | ClaudeScenario) {

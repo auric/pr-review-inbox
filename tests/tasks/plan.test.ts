@@ -787,7 +787,12 @@ describe("step strip (spec.md section 6.12)", () => {
       current: 0,
     });
     expect(stepStrip({ size: "small", state: "implementing", stoppedFrom: null, parts: [] }).current).toBe(2);
-    expect(stepStrip({ size: "medium", state: "spec_pr_open", stoppedFrom: null, parts: [] })).toEqual({
+    // self-approved-plans.md section 4.1: medium has no spec review.
+    expect(stepStrip({ size: "medium", state: "implementing", stoppedFrom: null, parts: [] })).toEqual({
+      steps: ["Questions", "Plan", "Build", "Done"],
+      current: 2,
+    });
+    expect(stepStrip({ size: "large", state: "spec_pr_open", stoppedFrom: null, parts: [] })).toEqual({
       steps: ["Questions", "Plan", "Spec review", "Build", "Done"],
       current: 2,
     });
@@ -797,8 +802,19 @@ describe("step strip (spec.md section 6.12)", () => {
         state: "implementing",
         stoppedFrom: null,
         parts: [part("merged"), part("pr_open"), part("planned"), part("planned")],
+        planReview: "spec-pr",
       }),
     ).toEqual({ steps: ["Questions", "Plan", "Spec review", "Build parts (2 of 4)", "Done"], current: 3 });
+    // A large plan before the choice, and a plan that the user approves alone, have no spec review.
+    expect(stepStrip({ size: "large", state: "spec_draft", stoppedFrom: null, parts: [] }).steps).toEqual([
+      "Questions",
+      "Plan",
+      "Build",
+      "Done",
+    ]);
+    expect(
+      stepStrip({ size: "large", state: "implementing", stoppedFrom: null, parts: [part("pr_open"), part("planned")], planReview: "self" }),
+    ).toEqual({ steps: ["Questions", "Plan", "Build parts (1 of 2)", "Done"], current: 2 });
     expect(stepStrip({ size: "small", state: "stopped", stoppedFrom: "spec_draft", parts: [] }).current).toBe(1);
     expect(stepStrip({ size: "small", state: "failed", stoppedFrom: null, parts: [] }).current).toBe(-1);
     expect(stepStrip({ size: "small", state: "done", stoppedFrom: null, parts: [] }).current).toBe(3);

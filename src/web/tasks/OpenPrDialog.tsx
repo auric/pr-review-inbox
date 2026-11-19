@@ -16,7 +16,7 @@ import type { TaskDto, TaskPartDto, TaskPrDto } from "../../shared/dto";
 import { MAX_TASK_REVIEWERS } from "../../shared/dto";
 import { dialogKeys } from "../fix/CloneDialog";
 import { useTaskDiff } from "./data";
-import { prName, prRowLook, prTitle, type RowLook, rowSize } from "./model";
+import { prName, prRowLook, prTarget, prTitle, type RowLook, rowSize } from "./model";
 
 export function OpenPrDialog(props: {
   t: TaskDto;
@@ -31,8 +31,7 @@ export function OpenPrDialog(props: {
   const [reviewers, setReviewers] = useState<string[]>(t.reviewers);
   const diff = useTaskDiff(t.id, part.id, part.head, props.open);
   const files = diff.data?.files.length;
-  // spec.md section 6.20.6: a part of a task with sub-tasks targets its own base, the branch of its lower part or the task base.
-  const target = t.subtasks ? part.baseBranch : t.targetBranch;
+  const target = prTarget(t, part);
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="sm:max-w-[520px]" onKeyDown={dialogKeys(() => props.onOpenChange(false))}>

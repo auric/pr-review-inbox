@@ -49,12 +49,15 @@ import {
   partName,
   partRef,
   partRows,
+  partsHeader,
+  partsPlan,
   patchText,
   plannedTasks,
   pointerRow,
   prBuild,
   prName,
   prRowLook,
+  prTarget,
   questionPart,
   questionSource,
   readyNotes,
@@ -144,7 +147,9 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   // moves the focus. A part that is gone gives the default focus back.
   const tracker = trackerOf(meta);
   const trackerName = tracker?.name ?? "tracker";
-  const subs = t.subtasks !== null;
+  const subs = partsPlan(t);
+  // A stack plan has no sub-tasks, so it reads and moves nothing in the tracker (self-approved-plans.md section 5.1).
+  const fromTracker = t.subtasks !== null;
   const [focusId, setFocusId] = useState<number | null>(null);
   const focused = subs ? (codeParts(t).find((p) => p.id === focusId) ?? defaultFocus(t)) : null;
   const part = focused ?? currentPart(t);
@@ -165,8 +170,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   // spec.md section 6.20.12: the status read when the view opens. The server reads at most once per minute.
   const source = tracker?.id;
   useEffect(() => {
-    if (subs && source) checkTracker(qc, t.id, source).catch(() => {});
-  }, [subs, source, t.id, qc]);
+    if (fromTracker && source) checkTracker(qc, t.id, source).catch(() => {});
+  }, [fromTracker, source, t.id, qc]);
   // The PR rows of a part that changes several repositories. One row keeps the one-PR dialog and route.
   const rows = partRows(t, part);
   const several = rows.length > 1;
@@ -243,7 +248,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       case "start-now":
         return setConfirm({
           title: `Start ${name} now?`,
-          text: `Colleagues have not approved ${lower ? partName(t, lower) : "the sub-task below"} yet. Start ${name} anyway?`,
+          text: `Colleagues have not approved ${lower ? partName(t, lower) : `the ${fromTracker ? "sub-task" : "part"} below`} yet. Start ${name} anyway?`,
           confirm: "Start now",
           run: () => send({ kind: "start", part: p.id }),
         });
@@ -578,6 +583,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
       </Button>
     );
   const subRows = subs && codeParts(t).length ? subtaskRows(t, opts) : [];
+  const header = partsHeader(t);
 
   return (
     <div ref={root} data-task={t.id} className="grid max-w-[920px] gap-5 px-6 pt-5 pb-10">
@@ -587,8 +593,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             {t.key}
           </code>
           <h2 className="m-0 min-w-0 text-[19px] font-bold tracking-[-0.01em] [overflow-wrap:anywhere]">{t.title}</h2>
-          {subs ? (
-            <span className="text-sm text-ink-2">Sub-tasks: {t.subtasks?.length ?? 0}, one PR each</span>
+          {header ? (
+            <span className="text-sm text-ink-2">{header}</span>
           ) : (
             t.size && <span className="text-sm text-ink-2">Size: {t.size}</span>
           )}
@@ -711,7 +717,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
           rows={subRows}
           focused={focused?.id ?? null}
           primary={view.primary?.kind ?? null}
-          tracker={trackerName}
+          tracker={fromTracker ? trackerName : null}
           busy={busy}
           parent={{ key: t.key, status: t.issueStatus, hint: parentHint(t, trackerName) }}
           onFocus={(id) => {
@@ -1066,7 +1072,7 @@ function Content(props: {
       <>
         <p className="m-0 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <span className="font-medium">
-            {t.subtasks && part ? partLabel(t, part) : parts > 1 && part ? `Part ${part.ord} of ${parts}` : "Your change"}
+            {partsPlan(t) && part ? partLabel(t, part) : parts > 1 && part ? `Part ${part.ord} of ${parts}` : "Your change"}
           </span>
           {tasks.length > 0 && (
             <span className="text-ink-2">
@@ -1186,7 +1192,7 @@ function Content(props: {
     );
 
   if (screen === "pr") {
-    const p = t.subtasks ? part : [...t.parts].reverse().find((x) => x.remotePr !== null);
+    const p = partsPlan(t) ? part : [...t.parts].reverse().find((x) => x.remotePr !== null);
     const notes = t.steps.find((s) => s.kind === "pr" && s.state === "ok")?.detail.notes ?? [];
     return box(
       <>
@@ -1198,7 +1204,7 @@ function Content(props: {
             </span>{" "}
             into{" "}
             <span translate="no" className="font-mono text-xs">
-              {t.subtasks && p ? p.baseBranch : t.targetBranch}
+              {p ? prTarget(t, p) : t.targetBranch}
             </span>
             .
           </p>

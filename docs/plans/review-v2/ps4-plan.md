@@ -205,7 +205,7 @@ Status: built in ba7ad13.
 | Route | Input | Event or exit | Refusals (409) |
 |---|---|---|---|
 | POST /tasks/:id/parts/:part/hold | partParam, version | held, then STOPPED | "Hold works while Claude builds or fixes part <k>."; "Part <k> is on hold already." |
-| POST /tasks/:id/parts/:part/skip | partParam, version | ABANDON | "Only a part of a task with sub-tasks can be skipped."; "Hold part <k> first."; "This part has a PR." |
+| POST /tasks/:id/parts/:part/skip | partParam, version | ABANDON | "Only a task with several PRs can skip a part."; "Hold part <k> first."; "This part has a PR." |
 | POST /tasks/:id/parts/:part/restart | partParam, version | RESTART | "Part <k> is on the server. It cannot start again."; "Hold part <k> first." |
 | POST /tasks/:id/resume | version, option?, part? (not both) | CONTINUE, leave, disarm, arm | "Part <k> is not on hold."; "No resume is armed."; "Leave works only in ready." |
 | PUT settings | usageResume? | none | none |
