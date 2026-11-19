@@ -8,8 +8,15 @@ import { type AnyStateMachine, setup } from "xstate";
 import type { TaskSize, TaskState } from "../../shared/task";
 
 // The facts that the guards read. The app passes them; the machine stores nothing. gate: the spec or part PR passed its review rules.
-// selfReview: task.settings_json.planReview is "self" (self-approved-plans.md section 4.1).
-export type TaskContext = { size: TaskSize | null; gate: boolean; stoppedFrom: TaskState | null; selfReview: boolean };
+// selfReview: task.settings_json.planReview is "self" (self-approved-plans.md section 4.1). openChecklist: a task_external row is open
+// (task-builder-v2.md section 11.1, the FINISHED guard). Absent counts as false.
+export type TaskContext = {
+  size: TaskSize | null;
+  gate: boolean;
+  stoppedFrom: TaskState | null;
+  selfReview: boolean;
+  openChecklist?: boolean;
+};
 // unpushed: task_part.pushed is NULL. A continued branch holds the remote head there, so RESTART never needs a force push. Absent
 // counts as false.
 export type PartContext = { gate: boolean; unpushed?: boolean };
@@ -65,6 +72,7 @@ export const taskMachine = setup({
     specPr: ({ context }) => context.size === "large" && !context.selfReview,
     gate: ({ context }) => context.gate,
     stoppedFrom: ({ context }, params: { state: TaskState }) => context.stoppedFrom === params.state,
+    checklistDone: ({ context }) => context.openChecklist !== true,
   },
 }).createMachine({
   id: "task",
@@ -88,7 +96,9 @@ export const taskMachine = setup({
     spec_approved: { on: { START_BUILDING: "implementing", ...halt } },
     implementing: { on: { PART_READY: "implementing", LAST_PR_OPEN: "ready", ...halt } },
     // spec.md section 6.20.14: the approval of a changed plan adds a part to build.
-    ready: { on: { ALL_MERGED: "done", CLOSE: "done", START_BUILDING: "implementing", ...halt } },
+    ready: {
+      on: { ALL_MERGED: { guard: "checklistDone", target: "done" }, CLOSE: "done", START_BUILDING: "implementing", ...halt },
+    },
     stopped: {
       on: {
         RESUME: RESUMABLE.map((state) => ({ guard: { type: "stoppedFrom" as const, params: { state } }, target: state })),
@@ -132,6 +142,21 @@ export const partMachine = setup({
     merged: { type: "final" },
     declined: { on: { REOPENED: "pr_open", ABANDON: "abandoned" } },
     abandoned: { type: "final" },
+  },
+});
+
+export const EXTERNAL_EVENTS = ["DONE", "WAIVE", "REOPEN"] as const;
+export type ExternalEvent = { type: (typeof EXTERNAL_EVENTS)[number] };
+
+// task-builder-v2.md section 11.4: one checklist row (task_external.state). ADD is the insert in the initial state (initialTransition).
+// No state is final, because the FINISHED guard of the task reads the states.
+export const externalMachine = setup({ types: { events: {} as ExternalEvent } }).createMachine({
+  id: "external",
+  initial: "open",
+  states: {
+    open: { on: { DONE: "done", WAIVE: "waived" } },
+    done: { on: { REOPEN: "open" } },
+    waived: { on: { REOPEN: "open" } },
   },
 });
 

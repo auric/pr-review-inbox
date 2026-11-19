@@ -34,6 +34,7 @@ import {
   taskCommentsInput,
   taskCreateInput,
   taskDocInput,
+  taskExternalInput,
   taskInstructionsInput,
   taskIssueInput,
   taskLimitInput,
@@ -86,6 +87,11 @@ const partParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
   const part = positive(v.part);
   return id && part ? { id, part } : c.json<ApiError>({ error: "Invalid task or part ID." }, 400);
+});
+const itemParam = validator("param", (v: Record<string, string>, c) => {
+  const id = positive(v.id);
+  const item = positive(v.item);
+  return id && item ? { id, item } : c.json<ApiError>({ error: "Invalid task or checklist step ID." }, 400);
 });
 const fileParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
@@ -316,6 +322,13 @@ export function createTaskRoutes(opts: {
       .post("/tasks/:id/close", idParam, body(taskVersionInput, "Give the task version."), (c) => {
         const db = openDb();
         return db ? answer(c, tasks.close(db, c.req.valid("param").id, c.req.valid("json"))) : c.json(unconfigured, 409);
+      })
+      // docs/plans/task-builder-v2.md section 11.4: done, waive, or reopen one checklist step.
+      .post("/tasks/:id/external/:item", itemParam, body(taskExternalInput, "Give the task version and done, waive, or reopen."), (c) => {
+        const db = openDb();
+        if (!db) return c.json(unconfigured, 409);
+        const { id, item } = c.req.valid("param");
+        return answer(c, tasks.external(db, id, item, c.req.valid("json")));
       })
       .post("/tasks/:id/limit", idParam, body(taskLimitInput, "Give the task version and a line limit."), async (c) => {
         const db = openDb();

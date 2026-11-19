@@ -88,11 +88,13 @@ const ROUTES: Route[] = [
   { name: "comments", method: "POST", pattern: "parts/:part/comments", body: { threads: [101] } },
   { name: "base", method: "PUT", pattern: "base", body: { branch: "main" } },
   { name: "file", method: "PUT", pattern: "files/:att", body: { include: true }, versioned: false },
+  // task-builder-v2.md section 11.4: the seeded checklist row is done, so Reopen is a valid event in each state that is not final.
+  { name: "external", method: "POST", pattern: "external/:item", body: { action: "reopen" } },
 ];
 
 // The cells that do not answer 409. Every other cell answers 409. jira-check and base-check read only, and the fixture lists no
 // attachment.
-const READS = { "jira-check": 200, "base-check": 200, file: 404 };
+const READS = { "jira-check": 200, "base-check": 200, file: 404, external: 200 };
 const NOT_409: Record<State, Record<string, number>> = {
   interview: { ...READS, stop: 200, base: 200 },
   spec_draft: { ...READS, docs: 200, plan: 200, "plan-again": 202, stop: 200, base: 200 },
@@ -113,7 +115,7 @@ const NOT_409: Record<State, Record<string, number>> = {
   ready_red: { ...READS, stop: 200, resume: 200, "resume leave": 200, close: 200, limit: 200, instructions: 202 },
   stopped_impl: { ...READS, resume: 200, close: 200, restart: 200 },
   stopped_ready: { ...READS, resume: 200, close: 200 },
-  done: { ...READS, close: 200 },
+  done: { ...READS, close: 200, external: 409 },
 };
 
 type S = Awaited<ReturnType<typeof setup>>;
@@ -166,7 +168,7 @@ async function grid() {
   return { s, app, send, working, quiet, enter };
 }
 
-type Ids = { part: number; step: number; question: number };
+type Ids = { part: number; step: number; question: number; item: number };
 
 // The seeded state of the task and its one part. Each cell seeds again, so no cell sees what an earlier cell did.
 function seed(s: S, st: State): Ids {
@@ -174,6 +176,14 @@ function seed(s: S, st: State): Ids {
   s.db.query("DELETE FROM task_question WHERE task = $t").run({ t });
   s.db.query("DELETE FROM task_part WHERE task = $t").run({ t });
   s.db.query("DELETE FROM task_step WHERE task = $t").run({ t });
+  s.db.query("DELETE FROM task_external WHERE task = $t").run({ t });
+  // A done row: ALL_MERGED of gap 18 still passes its checklist guard.
+  const item = (
+    s.db
+      .query(`INSERT INTO task_external (task, part, ord, kind, title, state, by, at, created_at)
+        VALUES ($t, 1, 1, 'merge', 'Merge the PR', 'done', 'user', 1, 1) RETURNING id`)
+      .get({ t }) as { id: number }
+  ).id;
   const partState: Record<State, string> = {
     interview: "planned",
     spec_draft: "planned",
@@ -265,7 +275,7 @@ function seed(s: S, st: State): Ids {
         version = version + 1 WHERE id = $t`,
     )
     .run({ t, state: state[st], from, b: reason && JSON.stringify(reason) });
-  return { part, step, question };
+  return { part, step, question, item };
 }
 
 const fill = (pattern: string, ids: Ids) =>
@@ -275,7 +285,8 @@ const fill = (pattern: string, ids: Ids) =>
     .replace(":taskRepo", "1")
     .replace(":taskPr", "1")
     .replace(":key", "K-1")
-    .replace(":att", "1");
+    .replace(":att", "1")
+    .replace(":item", String(ids.item));
 
 function bodyOf(s: S, r: Route, ids: Ids, version: number) {
   if (!r.body) return undefined;

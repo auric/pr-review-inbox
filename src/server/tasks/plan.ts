@@ -11,6 +11,10 @@ import {
   allowProblem,
   COMMAND_TIMEOUT_MAX_SEC,
   defaultTimeoutSec,
+  EXTERNAL_KINDS,
+  type ExternalKind,
+  type ExternalOwner,
+  externalOwner,
   LARGE_REPOS_TEXT,
   type PlanProblem,
   type PlanSeverity,
@@ -107,7 +111,11 @@ export function checkProposals(
 export type MapEntry = SpecResult["map"][number] & { missing: boolean; from?: number; mark?: "absent" | "far" };
 // missing: the path is not empty and is not found at base.
 export type PlanContract = SpecResult["contracts"][number] & { missing: boolean };
-export type PlanTask = { id: string; title: string; files: string[]; run: string[]; done: string; ticked: boolean };
+// outside: the `[-]` mark. The app moved the task to the checklist (task-builder-v2.md section 5.4). It counts as closed, not as done.
+export type PlanTask = { id: string; title: string; files: string[]; run: string[]; done: string; ticked: boolean; outside?: boolean };
+// task-builder-v2.md section 5.1: a step for the app or the user. The owner follows from the kind (externalOwner).
+export type PlanExternal = SpecResult["external"][number] & { owner: ExternalOwner };
+export const closedTask = (t: Pick<PlanTask, "ticked" | "outside">) => t.ticked || t.outside === true;
 export type PartKindName = SpecResult["parts"][number]["kind"];
 // lines: the estimate of Claude for the part. null for a part that the user added.
 export type PlanPart = {
@@ -140,6 +148,8 @@ export type Plan = {
   contracts?: PlanContract[];
   risks?: SpecResult["risks"];
   checks?: PlanProblem[];
+  // task-builder-v2.md section 5.1. Absent in a plan stored before: [].
+  external?: PlanExternal[];
 };
 // task.docs_json. approved: a medium or large plan waits for its spec PR.
 export type Docs = Partial<Record<TaskDoc, string>> & { version: number; parsed: Plan; approved: boolean };
@@ -207,8 +217,12 @@ export function toPlan(
     contracts: r.contracts.map((c, i) => ({ ...c, missing: app?.contracts[i] === true })),
     risks: r.risks,
     checks: app?.checks ?? [],
+    external: r.external.map((e, i) => ({ ...e, id: externalId(i), owner: externalOwner(e.kind) })),
   };
 }
+
+// Entry IDs become E<n> in list order, as task IDs become T<part>.<n>.
+const externalId = (i: number) => `E${i + 1}`;
 
 // ---------- Map check (spec.md section 6.4) ----------
 
@@ -337,15 +351,17 @@ export type AppChecks = {
   more: number;
 };
 
-// The app checks of a spec result against the base commit: the map paths and symbols, the task files, and the contracts. specDir: the
-// spec folder of the task, whose files the tasks may name. nested: as askOf. The checks make no Claude call.
+// The app checks of a spec result against the base commit: the map paths and symbols, the task files, the contracts, and the proofs and
+// owners of task-builder-v2.md section 5.3. specDir: the spec folder of the task, whose files the tasks may name. nested: as askOf.
+// known: the names of the saved commands of the repository and of the build hosts of the manifest. The checks make no Claude call.
 export async function checkPlan(
-  r: Pick<SpecResult, "map" | "parts" | "contracts" | "estimate">,
+  r: Pick<SpecResult, "map" | "parts" | "contracts" | "estimate" | "testing" | "external">,
   specDir: string,
   base: string,
   cache: string,
   env: Record<string, string>,
   nested: Nested[] = [],
+  known: { saved: readonly string[]; hosts: readonly string[] } = { saved: [], hosts: [] },
 ): Promise<AppChecks> {
   const g = gitIn(env);
   const readBlob = blobText(g);
@@ -372,10 +388,17 @@ export async function checkPlan(
     return slash < 0 ? null : { cache: a.cache, object: a.object.slice(0, slash) };
   };
   const contracts = r.contracts.map((c) => (c.path.trim() ? ask(c.path) : null));
-  const seen = await lookup(g, [...map, ...uses.map((u) => u.asked), ...uses.map((u) => u.asked && parentOf(u.asked)), ...contracts]);
+  const proofs = r.parts.map((p) => p.tasks.map((t) => (t.proof.test.trim() ? ask(t.proof.test) : null)));
+  const seen = await lookup(g, [
+    ...map,
+    ...uses.map((u) => u.asked),
+    ...uses.map((u) => u.asked && parentOf(u.asked)),
+    ...contracts,
+    ...proofs.flat(),
+  ]);
   const missing = await missingOf(r.map, map.map(seen), readBlob);
 
-  // group: 0 the map, 1 the tasks, 2 the contracts.
+  // group: 0 the map, 1 the tasks, 2 the contracts, 3 the proofs and owners.
   const problems: ({ group: number } & Omit<PlanProblem, "id">)[] = [];
   const add = (severity: PlanSeverity, group: number, p: Omit<PlanProblem, "id" | "severity">) => problems.push({ group, severity, ...p });
 
@@ -455,6 +478,53 @@ export async function checkPlan(
   if ((r.estimate.db || r.estimate.api) && !r.contracts.length) {
     const text = "The plan changes the database or an API, but it lists no contract.";
     add("minor", 2, { part: null, path: "", line: null, text, fix: "List each changed table, route, or schema in contracts." });
+  }
+
+  // task-builder-v2.md section 5.3: group 3, the proofs and owners.
+  const commands = new Set([...r.testing.commands.map((c) => c.name), ...known.saved]);
+  const hosts = new Set(known.hosts);
+  const planFiles = new Set(r.parts.flatMap((p) => p.tasks.flatMap((t) => t.files.map((f) => repoPath(f) ?? f))));
+  for (const [pi, p] of r.parts.entries())
+    for (const [ti, t] of p.tasks.entries()) {
+      const id = `T${pi + 1}.${ti + 1}`;
+      const part = pi + 1;
+      const command = t.proof.command.trim();
+      const test = t.proof.test.trim();
+      const where = t.where.trim() || "local";
+      if (!command && !test)
+        add("major", 3, { part, path: "", line: null, text: `${id} names no proof.`, fix: "Name an approved command or a test file." });
+      if (command && !commands.has(command)) {
+        const text = `${id} names the command ${oneLine(command)}, which the plan does not list.`;
+        add("major", 3, { part, path: "", line: null, text, fix: "Name a command of testing.commands or a saved command." });
+      }
+      if (test && !planFiles.has(repoPath(test) ?? test) && seen(proofs[pi]?.[ti] ?? null) === null) {
+        const path = oneLine(test);
+        const text = `${id} names the test ${path}, which no task changes and which is not found at ${at}.`;
+        add("major", 3, { part, path, line: null, text, fix: "Name a test file of the task files or of the base commit." });
+      }
+      if (!t.files.some((f) => f.trim()) && !hosts.has(where) && !command)
+        add("major", 3, {
+          part,
+          path: "",
+          line: null,
+          text: `${id} changes no file. Move it to external.`,
+          fix: "Move the step to external.",
+        });
+      if (where !== "local" && !hosts.has(where)) {
+        const text = `${id} runs on ${oneLine(where)}, which the manifest does not list.`;
+        add("major", 3, { part, path: "", line: null, text, fix: 'Set where to "local", or move the step to external.' });
+      }
+    }
+  for (const [i, e] of r.external.entries()) {
+    const id = externalId(i);
+    if (e.after !== null && e.after > r.parts.length) {
+      const text = `${id} follows part ${e.after}, which the plan does not have.`;
+      add("major", 3, { part: null, path: "", line: null, text, fix: "Name a part of the plan, or null for the whole task." });
+    }
+    if (e.host.trim() && !hosts.has(e.host.trim())) {
+      const text = `${id} names the host ${oneLine(e.host)}, which the manifest does not list.`;
+      add("major", 3, { part: e.after, path: "", line: null, text, fix: "Name a build host of the manifest, or leave the host empty." });
+    }
   }
 
   const rank: Record<PlanSeverity, number> = { blocker: 0, major: 1, minor: 2, info: 3 };
@@ -550,13 +620,27 @@ export function tasksBody(p: Plan, size: TaskSize): string {
     for (const t of part.tasks)
       out.push(
         "",
-        `### [${t.ticked ? "x" : " "}] ${t.id} ${oneLine(t.title)}`,
+        `### [${mark(t)}] ${t.id} ${oneLine(t.title)}`,
         `Files: ${list(t.files) || "none"}`,
         `Run: ${list(t.run)}`,
         `Done when: ${oneLine(t.done)}`,
       );
   }
+  if (p.external?.length) out.push("", OUTSIDE_HEADING, "", ...p.external.flatMap(externalLines));
   return `${out.join("\n")}\n`;
+}
+
+const mark = (t: Pick<PlanTask, "ticked" | "outside">) => (t.outside ? "-" : t.ticked ? "x" : " ");
+
+// task-builder-v2.md section 5.2: the steps outside Claude close the tasks grammar. The owner chip is "you" or "app".
+const OUTSIDE_HEADING = "## Outside Claude";
+const OWNER_CHIP: Record<ExternalOwner, string> = { user: "you", app: "app" };
+// The build parses the plan file again, so the line always parses: a host loses its parentheses, and an empty title takes the kind.
+function externalLines(e: PlanExternal): string[] {
+  const host = oneLine(e.host).replace(/[()]/g, "").trim();
+  const more = [e.after === null ? "" : `, after part ${e.after}`, host ? `, host ${host}` : ""].join("");
+  const line = `- ${e.id} [${OWNER_CHIP[e.owner]}] ${oneLine(e.title).trim() || e.kind} (${e.kind}${more})`;
+  return e.why.trim() ? [line, `Why: ${oneLine(e.why)}`] : [line];
 }
 
 const title = (key: string, t: string) => `${key} ${oneLine(t)}`;
@@ -682,7 +766,10 @@ export function convertDocs(key: string, t: string, from: TaskSize, to: TaskSize
 export type ParseError = { line: number; error: string };
 
 const PART = /^## Part (\d+): (.+) \(kind: (contract|part|cleanup|prep|spike)\)$/;
-const TASK = /^### \[( |x)\] T(\d+)\.(\d+) (.+)$/;
+const TASK = /^### \[( |x|-)\] T(\d+)\.(\d+) (.+)$/;
+const EXTERNAL = new RegExp(
+  `^- (E\\d{1,2}) \\[(you|app)\\] (.+) \\((${EXTERNAL_KINDS.join("|")})(?:, after part ([1-9]\\d*))?(?:, host ([^()]+))?\\)$`,
+);
 const ACCEPT = /^- \[( |x)\] (\S+) (.+)$/;
 const TEST = /^- (.+): proves (.+)$/;
 const HEADER: Record<string, RegExp> = {
@@ -705,15 +792,18 @@ const splitList = (s: string, sep = ", ") =>
         .map((x) => x.trim())
         .filter(Boolean);
 
+export type ParsedTasks = { parts: PlanPart[]; external: PlanExternal[] };
+
 // Parses the tasks grammar in lines, which start at line number first. previous: the stored parts, for the line estimates.
 // The parse keeps every line: a line of another form is an error, so a later render loses nothing.
-function parseGrammar(lines: string[], first: number, previous: PlanPart[]): { parts: PlanPart[] } | ParseError {
+function parseGrammar(lines: string[], first: number, previous: PlanPart[]): ParsedTasks | ParseError {
   const fail = (i: number, error: string): ParseError => ({ line: first + i, error });
   const seen = new Set<string>();
   const parts: PlanPart[] = [];
+  const external: PlanExternal[] = [];
   let part: PlanPart | null = null;
   let partAt = 0;
-  let mode: "head" | "acceptance" | "tests" | "task" | "part" = "head";
+  let mode: "head" | "acceptance" | "tests" | "task" | "part" | "external" = "head";
   let task: (PlanTask & { has: Set<string> }) | null = null;
   let taskAt = 0;
   const endTask = (): ParseError | null => {
@@ -725,7 +815,8 @@ function parseGrammar(lines: string[], first: number, previous: PlanPart[]): { p
     ] as const)
       if (!task.has.has(k)) return fail(taskAt, `a task needs a "${name}" line`);
     if (!task.run.length) return fail(taskAt, 'a task needs at least one test in its "Run" line');
-    part?.tasks.push({ id: task.id, title: task.title, files: task.files, run: task.run, done: task.done, ticked: task.ticked });
+    const { has: _, ...kept } = task;
+    part?.tasks.push(kept);
     task = null;
     return null;
   };
@@ -743,6 +834,31 @@ function parseGrammar(lines: string[], first: number, previous: PlanPart[]): { p
   for (const [i, raw] of lines.entries()) {
     const l = raw.replace(/\r$/, "").trimEnd();
     if (!l) continue;
+    if (mode === "external") {
+      const last = external.at(-1);
+      if (l.startsWith("Why: ")) {
+        if (!last || last.why) return fail(i, 'a "Why" line follows the line of its step, once');
+        last.why = l.slice("Why: ".length).trim();
+        continue;
+      }
+      const em = EXTERNAL.exec(l);
+      if (!em) return fail(i, 'a step outside Claude must look like "- E1 [you] <title> (merge, after part 1)"');
+      const kind = em[4] as ExternalKind;
+      const owner = externalOwner(kind);
+      if (em[2] !== OWNER_CHIP[owner]) return fail(i, `a ${kind} step has the owner [${OWNER_CHIP[owner]}]`);
+      if (external.some((e) => e.id === em[1])) return fail(i, `step ${em[1]} is listed twice`);
+      // checkPlan reports an after with no part. The build parses the plan file again, so this parse does not refuse it.
+      const after = em[5] === undefined ? null : Number(em[5]);
+      external.push({ id: em[1] as string, kind, title: (em[3] as string).trim(), after, host: em[6]?.trim() ?? "", why: "", owner });
+      continue;
+    }
+    if (l === OUTSIDE_HEADING) {
+      if (mode === "head") return fail(i, "the plan needs at least one part");
+      const e = endPart();
+      if (e) return e;
+      mode = "external";
+      continue;
+    }
     const pm = PART.exec(l);
     if (pm) {
       if (mode === "head") {
@@ -784,7 +900,16 @@ function parseGrammar(lines: string[], first: number, previous: PlanPart[]): { p
       if (Number(tm[2]) !== part?.n) return fail(i, `task ${id} must be in part ${tm[2]}`);
       if (parts.some((p) => p.tasks.some((t) => t.id === id)) || part.tasks.some((t) => t.id === id))
         return fail(i, `task ${id} is listed twice`);
-      task = { id, title: (tm[4] as string).trim(), files: [], run: [], done: "", ticked: tm[1] === "x", has: new Set() };
+      task = {
+        id,
+        title: (tm[4] as string).trim(),
+        files: [],
+        run: [],
+        done: "",
+        ticked: tm[1] === "x",
+        ...(tm[1] === "-" && { outside: true }),
+        has: new Set(),
+      };
       taskAt = i;
       mode = "task";
       continue;
@@ -837,13 +962,13 @@ function parseGrammar(lines: string[], first: number, previous: PlanPart[]): { p
   if (mode === "head") return fail(lines.length, "the plan needs at least one part");
   const e = endPart();
   if (e) return e;
-  return { parts };
+  return { parts, external };
 }
 
 const at = (doc: string, e: ParseError): ParseError => ({ line: e.line, error: `Fix line ${e.line} of ${doc}: ${e.error}.` });
 
 // tasks.md: "# Tasks: <KEY> <title>", then the grammar. Line numbers count from 1.
-export function parseTasks(text: string, previous: PlanPart[]): { parts: PlanPart[] } | ParseError {
+export function parseTasks(text: string, previous: PlanPart[]): ParsedTasks | ParseError {
   const lines = text.split("\n");
   if (!lines[0]?.startsWith("# Tasks: ")) return at("tasks.md", { line: 1, error: 'the file must start with "# Tasks: <key> <title>"' });
   const r = parseGrammar(lines.slice(1), 2, previous);
@@ -851,7 +976,7 @@ export function parseTasks(text: string, previous: PlanPart[]): { parts: PlanPar
 }
 
 // plan.md: "# Plan: ...", then the sections Integration map, Change, and Tasks in this order. The Tasks section holds the grammar.
-export function parsePlan(text: string, previous: PlanPart[]): { parts: PlanPart[] } | ParseError {
+export function parsePlan(text: string, previous: PlanPart[]): ParsedTasks | ParseError {
   const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
   if (!lines[0]?.startsWith("# Plan: ")) return at("plan.md", { line: 1, error: 'the file must start with "# Plan: <key> <title>"' });
   let from = 0;
@@ -938,7 +1063,7 @@ export function partStepFile(
   if (what === "build") {
     out.push("## Open tasks", "");
     for (const x of parts)
-      for (const t of x.tasks.filter((k) => !k.ticked))
+      for (const t of x.tasks.filter((k) => !closedTask(k)))
         out.push(
           `### ${t.id} ${oneLine(t.title)}`,
           "",
@@ -951,7 +1076,7 @@ export function partStepFile(
   out.push("## Tasks", "");
   for (const x of parts)
     for (const t of x.tasks)
-      out.push(`- ${t.ticked ? "[x]" : "[ ]"} ${t.id} ${oneLine(t.title)}. Files: ${list(t.files) || "none"}. Run: ${list(t.run)}.`);
+      out.push(`- [${mark(t)}] ${t.id} ${oneLine(t.title)}. Files: ${list(t.files) || "none"}. Run: ${list(t.run)}.`);
   out.push("", "## Map entries of these files", "", ...(map.length ? map.map((e) => mapLine(e, p.base)) : ["(none)"]), "");
   return { name: "step.md", text: out.join("\n") };
 }

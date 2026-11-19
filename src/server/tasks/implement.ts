@@ -674,7 +674,7 @@ export function implementPrompt(
     : `You do one step of an approved plan in ./repo. You can change files only in ${where}. ${caps ? "You post nothing." : "You cannot run commands, and you post nothing."}`;
   const result =
     mode === "implement"
-      ? "End the run when every open task is ticked and its tests pass, or when you need the user. Set done to true only then. List the IDs that you ticked in ticked."
+      ? "End the run when every open task is ticked and its tests pass, or when you need the user. Set done to true only then. List the IDs that you ticked in ticked. When an open task needs the app or the user, list it in outside with its kind and why. Do not tick it."
       : "Set done to true only when the step is complete.";
   // spec.md section 6.21, D3, D6, and D7.
   const ask =

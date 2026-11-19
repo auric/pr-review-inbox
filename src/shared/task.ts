@@ -843,6 +843,30 @@ export const interviewResult = z.object({
 export type InterviewResult = z.infer<typeof interviewResult>;
 export const interviewJsonSchema = (): Record<string, unknown> => aiJsonSchema(interviewResult);
 
+// docs/plans/task-builder-v2.md section 5.1: the kinds of a step outside Claude and their owner. The owner follows from the kind. D3 is
+// deferred and D4 is not built, so ci_rebuild and remote_check stay user steps.
+export const EXTERNAL_KINDS = [
+  "submodule_pointer",
+  "jira_move",
+  "ci_rebuild",
+  "remote_check",
+  "merge",
+  "approve",
+  "tracker_comment",
+  "secret",
+  "ci_job",
+  "manual_verify",
+  "other",
+] as const;
+export type ExternalKind = (typeof EXTERNAL_KINDS)[number];
+export type ExternalOwner = "app" | "user";
+export const externalOwner = (kind: ExternalKind): ExternalOwner => (kind === "submodule_pointer" || kind === "jira_move" ? "app" : "user");
+// Section 11.4: the states of a checklist row (task_external.state).
+export const EXTERNAL_STATES = ["open", "done", "waived"] as const;
+export type ExternalState = (typeof EXTERNAL_STATES)[number];
+export const EXTERNAL_MAX = 20;
+export const OUTSIDE_MAX = 10;
+
 const specPart = z.object({
   n: z.number().int().min(1),
   kind: z.enum(["contract", "part", "cleanup", "prep", "spike"]),
@@ -866,6 +890,15 @@ const specPart = z.object({
           .min(1)
           .max(10),
         done: z.string().max(300),
+        // task-builder-v2.md section 5.1. A plan stored before has neither: the defaults.
+        proof: z
+          .object({
+            command: exact(z.string().max(60).describe("The exact name of a command in testing.commands or of a saved command.")),
+            test: exact(z.string().max(400).describe("The path of a test file that a build run can execute.")),
+          })
+          .default({ command: "", test: "" })
+          .describe("Set at least one of command and test."),
+        where: exact(z.string().max(60)).default("local").describe('"local", or the name of a build host that the manifest lists.'),
       }),
     )
     .min(1)
@@ -986,6 +1019,21 @@ export const specResult = z.object({
   maxOpenReason: z.string().max(300).default(""),
   contracts: z.array(contract).max(12).default([]),
   risks: z.array(risk).max(8).default([]),
+  // task-builder-v2.md section 5.1: the steps that need the app or the user. They are never plan tasks.
+  external: z
+    .array(
+      z.object({
+        id: z.string().regex(/^E[0-9]{1,2}$/),
+        kind: z.enum(EXTERNAL_KINDS),
+        title: z.string().max(200),
+        after: z.number().int().min(1).nullable().describe("The part that the step follows. null: the whole task."),
+        host: exact(z.string().max(60)).default("").describe("The build host of the step, or empty."),
+        why: z.string().max(300).describe("Why Claude cannot do this step in its sandbox."),
+      }),
+    )
+    .max(EXTERNAL_MAX)
+    .default([])
+    .describe("The steps for the app or the user, such as a merge, a Jira move, a CI job, or a secret."),
   coverage,
 });
 export type SpecResult = z.infer<typeof specResult>;
@@ -1037,6 +1085,19 @@ export const implementResult = z.object({
     .object({ cause: z.enum(["code", "test", "infra", "unknown"]), quote: z.string().max(500) })
     .nullable()
     .default(null),
+  // task-builder-v2.md section 5.4 (D10): the open plan tasks that need the app or the user. The app moves each one to the checklist.
+  outside: z
+    .array(
+      z.object({
+        task: exact(z.string().max(40).describe("The ID of an open task of the plan, such as T2.3.")),
+        kind: z.enum(EXTERNAL_KINDS),
+        why: z.string().max(300),
+        blocking: z.boolean().describe("true only when the part cannot go on before the step is done."),
+      }),
+    )
+    .max(OUTSIDE_MAX)
+    .default([])
+    .describe("The open tasks that need the app or the user. Do not tick them."),
   coverage,
 });
 export type ImplementResult = z.infer<typeof implementResult>;

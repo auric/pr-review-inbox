@@ -78,6 +78,12 @@ const SPEC = specResult.parse({
   title: "Build the sub-tasks",
   map: NAMES.map((name) => ({ path: `src/${name}.ts`, line: null, symbol: "", kind: "change", what: `The ${name}.` })),
   parts: NAMES.map((name, i) => planPart(i + 1, name)),
+  // task-builder-v2.md section 5.2: the plan file of a part lists the steps of the whole task and of that part.
+  external: [
+    { id: "E1", kind: "jira_move", title: "Move the task to review", after: null, host: "", why: "" },
+    { id: "E2", kind: "merge", title: "Merge part one", after: 1, host: "", why: "A person merges PRs." },
+    { id: "E3", kind: "manual_verify", title: "Check part two by hand", after: 2, host: "", why: "" },
+  ],
 });
 
 type Part = {
@@ -762,6 +768,10 @@ describe("start now, drop, and the routes (spec.md sections 6.20.6, 6.20.7, and 
       const docs = partDocsOf(s.db, s.t(), { ord: 2, keys_json: '["ABC-12"]', title: "" });
       const parsed = docs?.parsed as NonNullable<typeof docs>["parsed"];
       expect(parsed.parts.map((p) => p.n)).toEqual([2]);
+      expect(parsed.external?.map((e) => e.id)).toEqual(["E1", "E3"]);
+      expect(docs?.plan).toContain(
+        "## Outside Claude\n\n- E1 [app] Move the task to review (jira_move)\n- E3 [you] Check part two by hand (manual_verify, after part 2)",
+      );
       expect(partStepFile(parsed, parsed.parts, "build", 1).text).toContain("- Part 2 of 3: Part two");
     },
     SLOW,

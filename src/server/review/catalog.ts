@@ -18,7 +18,15 @@ import {
   type Volume,
 } from "../../shared/dto";
 import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, PREEXISTING_MAX, REVIEW_PROMPT_VERSION } from "../../shared/review";
-import { CHECK_TIMEOUT_SEC, limitText, MAX_OPEN_CAP, PROPOSALS_MAX, SETUP_TIMEOUT_SEC } from "../../shared/task";
+import {
+  CHECK_TIMEOUT_SEC,
+  EXTERNAL_KINDS,
+  externalOwner,
+  limitText,
+  MAX_OPEN_CAP,
+  PROPOSALS_MAX,
+  SETUP_TIMEOUT_SEC,
+} from "../../shared/task";
 import { type AgentSpec, EXPLORER_AGENT, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
 import { type Language, languageSkipLines } from "./languages";
@@ -1097,13 +1105,15 @@ export const INTERVIEW_RULES = [
   "In summary, say in plain words what the task asks for and what you plan to build.",
   "In unknowns, list facts that only a small experiment can find out.",
 ];
-// docs/plans/task-builder-v2.md section 4.2: the proof and owner rules. TB-2 adds the external list of the plan.
+// docs/plans/task-builder-v2.md sections 4.2 and 5.1: the proof and owner rules, and the owner of each external kind.
 export const PROOF_RULES = [
   "Give each task a proof: an approved command or a test file.",
   "A Done-when line names an approved command or a test file that a build run can execute.",
 ];
-export const OWNER_RULE = "Put a step that needs the app or the user in risks, with that step as check. Never put it in tasks.";
-const INTERVIEW_OWNER_RULE = "A step that needs the app or the user is a step for the user. Do not plan it as a task for Claude.";
+export const OWNER_RULE = "Put each step that needs the app or the user in external, with its kind. Never put it in tasks.";
+export const OWNER_KINDS_LINE = `The app does the ${EXTERNAL_KINDS.filter((k) => externalOwner(k) === "app").join(" and ")} steps. The user does every other kind.`;
+const INTERVIEW_OWNER_RULE =
+  "A step that needs the app or the user goes to the external list of the plan, with its owner. Never plan it as a task for Claude.";
 // Rounds after round 1 only.
 export const INTERVIEW_ANSWERS_RULE =
   "./context/answers.md holds the user's answers to the earlier rounds. Do not ask again what they settle.";
@@ -1167,6 +1177,7 @@ export const specRules = (budget: number, platform: string = process.platform, t
   "For each unknown that only code can answer, plan a spike part. A spike is never merged. Its result updates the plan.",
   ...PROOF_RULES,
   OWNER_RULE,
+  OWNER_KINDS_LINE,
   'In testing, give the commands that build and test the repository as argument lists, such as ["bun","test"].',
   "When the Project instructions name a build, test, or setup command, use that command. They win over the repository files.",
   "Else take the commands from the repository files, such as package.json, a Makefile, or the CI configuration.",

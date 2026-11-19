@@ -91,6 +91,9 @@ describe("the CLI schema keeps only the exact caps", () => {
         "map[].symbol",
         "parts[].tests[].test",
         "parts[].tasks[].run[]",
+        "parts[].tasks[].proof.command",
+        "parts[].tasks[].proof.test",
+        "parts[].tasks[].where",
         "parts[].after",
         "testing.commands[].name",
         "testing.commands[].argv",
@@ -100,9 +103,10 @@ describe("the CLI schema keeps only the exact caps", () => {
         "repos[].project",
         "repos[].repo",
         "contracts[].path",
+        "external[].host",
       ],
     ],
-    ["implement", implementJsonSchema(), ["allowRequest[].pattern", "allowRequest[].command"]],
+    ["implement", implementJsonSchema(), ["allowRequest[].pattern", "allowRequest[].command", "outside[].task"]],
   ];
   for (const [name, schema, want] of exact)
     test(name, () => {

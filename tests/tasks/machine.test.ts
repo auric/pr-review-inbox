@@ -13,6 +13,8 @@ import { type AnyStateMachine, initialTransition, transition } from "xstate";
 import { openDb } from "../../src/server/storage/db";
 import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import {
+  EXTERNAL_EVENTS,
+  externalMachine,
   machineMermaid,
   PART_EVENTS,
   type PartContext,
@@ -29,7 +31,15 @@ import {
   taskMachine,
 } from "../../src/server/tasks/machine";
 import { advance, advancePart, recoverTasks, SEND_STOPPED, stopForRun, TASK_CHANGED } from "../../src/server/tasks/tasks";
-import { PART_STATES, type PartState, TASK_STATE_TEXT, TASK_STATES, type TaskState } from "../../src/shared/task";
+import {
+  EXTERNAL_STATES,
+  type ExternalState,
+  PART_STATES,
+  type PartState,
+  TASK_STATE_TEXT,
+  TASK_STATES,
+  type TaskState,
+} from "../../src/shared/task";
 import { openTwice } from "./fixture";
 
 for (const m of ["tasks/machine", "tasks/tasks"])
@@ -253,6 +263,71 @@ describe("task machine", () => {
     for (const from of ["interview", "spec_draft", "spec_pr_open", "spec_approved", "implementing", "ready"] as const)
       expectTask("stopped", "RESUME", from, { ...BASE, stoppedFrom: from });
     for (const from of [null, "done", "failed", "stopped"] as const) expectTask("stopped", "RESUME", null, { ...BASE, stoppedFrom: from });
+  });
+
+  test("AC-TB7: ALL_MERGED waits while a checklist row is open (task-builder-v2.md section 11.1)", () => {
+    expectTask("ready", "ALL_MERGED", null, { ...BASE, openChecklist: true });
+    expectTask("ready", "ALL_MERGED", "done", { ...BASE, openChecklist: false });
+    expectTask("ready", "CLOSE", "done", { ...BASE, openChecklist: true });
+  });
+});
+
+// task-builder-v2.md section 11.4: the checklist row machine. ADD is the insert in state open.
+const EXTERNAL_TABLE: Record<ExternalState, Partial<Record<(typeof EXTERNAL_EVENTS)[number], ExternalState>>> = {
+  open: { DONE: "done", WAIVE: "waived" },
+  done: { REOPEN: "open" },
+  waived: { REOPEN: "open" },
+};
+
+describe("checklist item machine (task-builder-v2.md section 11.4)", () => {
+  const step = (state: ExternalState, type: (typeof EXTERNAL_EVENTS)[number]) => {
+    const snapshot = externalMachine.resolveState({ value: state, context: {} });
+    const [next, actions] = transition(externalMachine, snapshot, { type });
+    expect(actions).toEqual([]);
+    return { can: snapshot.can({ type }), to: next.value as ExternalState };
+  };
+
+  test("its states are the CHECK list of 057_task_external.sql, and ADD starts in open", () => {
+    expect(Object.keys(externalMachine.config.states ?? {}).sort()).toEqual([...EXTERNAL_STATES].sort());
+    const sql = readFileSync(join(import.meta.dir, "../../src/server/storage/migrations/057_task_external.sql"), "utf8");
+    expect(/state IN \(([^)]*)\)/.exec(sql)?.[1]).toBe(EXTERNAL_STATES.map((s) => `'${s}'`).join(", "));
+    expect(initialTransition(externalMachine)[0].value).toBe("open");
+  });
+
+  for (const state of EXTERNAL_STATES)
+    test(`${state}: every event of the table, allowed and refused`, () => {
+      for (const type of EXTERNAL_EVENTS) {
+        const to = EXTERNAL_TABLE[state][type] ?? null;
+        expect({ state, type, ...step(state, type) }).toEqual({ state, type, can: to !== null, to: to ?? state });
+      }
+    });
+
+  test("each state is reachable, and no state is a dead end: the FINISHED guard reads the states", () => {
+    const { seen, leaves } = explore(externalMachine, EXTERNAL_EVENTS, () => [{}]);
+    expect([...seen].sort()).toEqual([...EXTERNAL_STATES].sort());
+    for (const s of EXTERNAL_STATES) expect({ s, exits: (leaves.get(s)?.size ?? 0) > 0 }).toEqual({ s, exits: true });
+  });
+
+  test("advanceExternal is the only writer of task_external.state, and each event has a sender", () => {
+    const root = join(import.meta.dir, "../../src");
+    const files = (readdirSync(root, { recursive: true }) as string[]).filter((f) => /\.(ts|tsx)$/.test(f));
+    const writers = files.filter((f) => /UPDATE task_external SET state/.test(readFileSync(join(root, f), "utf8")));
+    expect(writers.map((f) => f.replaceAll("\\", "/"))).toEqual(["server/tasks/external.ts"]);
+    const route = readFileSync(join(root, "server/tasks/tasks.ts"), "utf8");
+    for (const e of EXTERNAL_EVENTS) expect({ e, sent: route.includes(`"${e}"`) }).toEqual({ e, sent: true });
+  });
+
+  test("the Mermaid diagram", () => {
+    expect(machineMermaid(externalMachine)).toBe(
+      [
+        "stateDiagram-v2",
+        "  [*] --> open",
+        "  open --> done: DONE",
+        "  open --> waived: WAIVE",
+        "  done --> open: REOPEN",
+        "  waived --> open: REOPEN",
+      ].join("\n"),
+    );
   });
 });
 
@@ -608,7 +683,7 @@ describe("machineMermaid", () => {
   implementing --> ready: LAST_PR_OPEN
   implementing --> stopped: STOP
   implementing --> failed: FAIL
-  ready --> done: ALL_MERGED
+  ready --> done: ALL_MERGED if checklistDone
   ready --> done: CLOSE
   ready --> implementing: START_BUILDING
   ready --> stopped: STOP

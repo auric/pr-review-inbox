@@ -194,7 +194,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     version: 3,
     updatedAt: NOW,
     closedAt: null,
-    progress: { planReady: false, part: 0, parts: 0, ready: false, merged: false, building: [], held: 0 },
+    progress: { planReady: false, part: 0, parts: 0, ready: false, merged: false, building: [], held: 0, checklist: 0 },
     interview: null,
     plan: null,
     strip: { steps: ["Questions", "Plan", "Build", "Done"], current: 0 },
@@ -230,6 +230,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     shell: { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false, checks: 0 },
     allowAsk: null,
     capabilities: [],
+    external: [],
     ...o,
   };
 }
@@ -582,6 +583,35 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
   test("ready with a merged PR: Done, Close the task", () => {
     const v = view(building({ state: "ready", parts: [part({ state: "pr_open", remotePr: 101, prState: "MERGED" })] }));
     expect(shape(v)).toMatchObject({ status: "Done. The PR merged.", primary: "Close the task" });
+  });
+
+  test("task-builder-v2.md section 11.1: ready with a merged PR and an open checklist step names the wait, with no primary", () => {
+    const row = (state: "open" | "done" | "waived", id: number) => ({
+      id,
+      part: 1,
+      kind: "merge" as const,
+      owner: "user" as const,
+      title: "Merge the lib PR",
+      why: "",
+      host: "",
+      planTask: null,
+      state,
+      by: null,
+      at: null,
+    });
+    const merged = [part({ state: "pr_open", remotePr: 101, prState: "MERGED" })];
+    const v = view(building({ state: "ready", parts: merged, external: [row("open", 1), row("done", 2), row("open", 3)] }));
+    expect(shape(v)).toEqual({
+      status: "The PR merged. Finish your checklist: 2 steps are open.",
+      primary: null,
+      more: ["Close the task"],
+      screen: "end",
+    });
+    expect(v.needsYou).toBe(true);
+    const one = view(building({ state: "ready", parts: merged, external: [row("open", 1), row("waived", 2)] }));
+    expect(one.status).toBe("The PR merged. Finish your checklist: 1 step is open.");
+    const none = view(building({ state: "ready", parts: merged, external: [row("done", 1), row("waived", 2)] }));
+    expect(shape(none)).toMatchObject({ status: "Done. The PR merged.", primary: "Close the task" });
   });
 
   test("done: Close the task, then Closed with no primary", () => {
@@ -1167,6 +1197,7 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
     merged: false,
     building: [],
     held: 0,
+    checklist: 0,
     ...o,
   });
 
@@ -1193,6 +1224,13 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
       needsYou: false,
     });
     expect(rowStatus(row({ state: "ready" })).text).toBe("Waiting for review");
+    // task-builder-v2.md section 11.1: a merged task waits for its open checklist steps.
+    expect(rowStatus(row({ state: "ready", progress: progress({ merged: true, checklist: 2 }) }))).toEqual({
+      text: "Needs you: finish your checklist",
+      needsYou: true,
+    });
+    expect(rowStatus(row({ state: "ready", progress: progress({ merged: true, checklist: 0 }) })).text).toBe("Merged");
+    expect(rowStatus(row({ state: "ready", progress: progress({ merged: false, checklist: 2 }) })).text).toBe("Waiting for review");
     expect(rowStatus(row({ state: "stopped" })).text).toBe("Stopped");
     expect(rowStatus(row({ state: "done", closedAt: NOW })).text).toBe("Closed");
   });
@@ -2702,6 +2740,24 @@ describe("Start again leftovers of ps4-plan.md WP-4", () => {
         (x) => x.done,
       ),
     ).toBe(true);
+  });
+
+  test("task-builder-v2.md section 5.4: a task that the app moved to the checklist leaves the count", () => {
+    const moved = {
+      id: 1,
+      part: 1,
+      kind: "secret" as const,
+      owner: "user" as const,
+      title: "Test",
+      why: "",
+      host: "",
+      planTask: "T1.2",
+      state: "open" as const,
+      by: null,
+      at: null,
+    };
+    const tasks = plannedTasks({ docs, steps: [], subtasks: null, size: "small", settings: {}, external: [moved] });
+    expect(tasks.map((x) => x.id)).toEqual(["T1.1", "T2.1"]);
   });
 
   test("a restart mark is a row of its own in the Log tab, with no Show the diff", () => {

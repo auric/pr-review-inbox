@@ -250,12 +250,13 @@ Run this part when TB-1 to TB-4 of docs/plans/task-builder-v2.md are built. It c
 
 1. Click "Tasks", then "Build a Jira task". Type `<KEYV>`, pick `<REPOV>`, and click "Build this task".
 2. Answer each question. For each question, record its cause: a real decision, or a question that the code, the task, or an earlier answer settles.
-3. When the plan is ready, open the Plan tab. Expect no plan task that needs a merge, a CI job, a Jira change, a signing key, or a person on a remote host. Such a step shows under "Contracts and risks" as a step for the app or for you.
+3. When the plan is ready, open the Plan tab. Expect no plan task that needs a merge, a CI job, a Jira change, a signing key, or a person on a remote host. Such a step shows under "Outside Claude" in the plan file, with the owner [you] or [app]. After the approval, the Task view shows it in the checklist with Done and Waive.
 4. Expect each Done-when line to name an approved command or a test file.
 5. Pick "I approve the plan myself. Colleagues review only the code PRs." when the size offers it. Tick the commands that run on this computer and click "Approve the plan".
-6. Let the build run. For each stop, record the cause, the title, and the button that you clicked. Expect no stop that asks for work outside the sandbox. Expect no fix run after a check that did not start on this computer.
+6. Let the build run. For each stop, record the cause, the title, and the button that you clicked. Expect no stop that asks for work outside the sandbox. Expect no fix run after a check that did not start on this computer. A plan task that needs you or the app moves to the checklist, and the part goes on. Its heading shows `[-]` in the plan file of the PR.
 7. Open the files that Claude left for you in the Task view. Expect each file of ./out to stay after the next run.
 8. When a part is ready, click "Open the PR" and "Push and open PR". Check Bitbucket: the PR is open, and its files hold only the plan file and the files of the task.
+9. Click Done or Waive on each checklist step. After the PR merges, expect the task to stay open with "Needs you: finish your checklist" until no step is open.
 
 ## Record
 

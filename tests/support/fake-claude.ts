@@ -316,7 +316,18 @@ export const echoSpec = () => ({
       lines: 20,
       acceptance: [{ id: "A1", text: "Echo: the title line names the app." }],
       tests: [{ test: "tests/readme.test.ts", proves: ["A1"] }],
-      tasks: [{ id: "T1", title: "Echo task", files: ["README.md"], run: ["tests/readme.test.ts"], done: "Echo: the test passes." }],
+      // task-builder-v2.md section 5.1: the proof names the planned test command.
+      tasks: [
+        {
+          id: "T1",
+          title: "Echo task",
+          files: ["README.md"],
+          run: ["tests/readme.test.ts"],
+          done: "Echo: the test passes.",
+          proof: { command: "test", test: "" },
+          where: "local",
+        },
+      ],
     },
   ],
   testing: { commands: [{ name: "test", kind: "test", argv: ["bun", "test"] }], services: [], notes: "" },

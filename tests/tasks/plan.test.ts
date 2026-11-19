@@ -20,6 +20,7 @@ import {
   type Plan,
   parsePlan,
   parseTasks,
+  partStepFile,
   renderDocs,
   sizeFloor,
   stepFile,
@@ -529,7 +530,16 @@ const checked = mapRepo("checks", {
 });
 const AT = (base: string) => base.slice(0, 12);
 const entry = (path: string, line: number | null, symbol: string) => ({ path, line, symbol, kind: "change" as const, what: "W." });
-const task = (files: string[]) => ({ id: "t", title: "Do it", files, run: ["tests/a.test.ts"], done: "It passes." });
+// The proof names a file at the base, so the proof checks of task-builder-v2.md section 5.3 stay quiet.
+const task = (files: string[]) => ({
+  id: "t",
+  title: "Do it",
+  files,
+  run: ["tests/a.test.ts"],
+  done: "It passes.",
+  proof: { command: "", test: "src/a.ts" },
+  where: "local",
+});
 const part = (n: number, tasks: string[][]) => ({
   n,
   kind: "part" as const,
@@ -818,5 +828,169 @@ describe("step strip (spec.md section 6.12)", () => {
     expect(stepStrip({ size: "small", state: "stopped", stoppedFrom: "spec_draft", parts: [] }).current).toBe(1);
     expect(stepStrip({ size: "small", state: "failed", stoppedFrom: null, parts: [] }).current).toBe(-1);
     expect(stepStrip({ size: "small", state: "done", stoppedFrom: null, parts: [] }).current).toBe(3);
+  });
+});
+
+// ---------- Proofs, owners, and the checklist (docs/plans/task-builder-v2.md sections 5.1 to 5.4, TB-2) ----------
+
+type ProofTask = ReturnType<typeof task>;
+const external = (o: Partial<SpecResult["external"][number]> = {}): SpecResult["external"][number] => ({
+  id: "E1",
+  kind: "merge",
+  title: "Merge the submodule PR",
+  after: 1,
+  host: "",
+  why: "A person merges PRs.",
+  ...o,
+});
+
+describe("proof and owner checks (task-builder-v2.md section 5.3, AC-TB4)", () => {
+  const majors = async (
+    tasks: Partial<ProofTask>[],
+    o: Partial<SpecResult> = {},
+    known = { saved: [] as string[], hosts: [] as string[] },
+  ): Promise<string[]> => {
+    const { repo, empty, base } = await checked;
+    const r = spec({
+      map: [entry("src/a.ts", null, "")],
+      parts: [{ ...part(1, []), tasks: tasks.map((t) => ({ ...task(["src/a.ts"]), ...t })) }],
+      ...o,
+    });
+    const app = await checkPlan(r, "specs/ABC-12/", base, repo, gitEnv(empty), [], known);
+    return app.checks.filter((c) => c.severity === "major").map((c) => c.text.replace(AT(base), "<base>"));
+  };
+
+  test("a proof command must name a testing command or a saved command", async () => {
+    expect(await majors([{ proof: { command: "lint", test: "" } }])).toEqual([
+      "T1.1 names the command lint, which the plan does not list.",
+    ]);
+    expect(await majors([{ proof: { command: "test", test: "" } }])).toEqual([]);
+    expect(await majors([{ proof: { command: "e2e", test: "" } }], {}, { saved: ["e2e"], hosts: [] })).toEqual([]);
+  });
+
+  test("a proof test must be a file of the task files or a file at the base", async () => {
+    expect(await majors([{ proof: { command: "", test: "tests/missing.test.ts" } }])).toEqual([
+      "T1.1 names the test tests/missing.test.ts, which no task changes and which is not found at <base>.",
+    ]);
+    expect(await majors([{ files: ["src/a.ts", "tests/new.test.ts"], proof: { command: "", test: "tests/new.test.ts" } }])).toEqual([]);
+    expect(await majors([{ proof: { command: "", test: "src/b.ts" } }])).toEqual([]);
+  });
+
+  test("a task names at least one proof", async () => {
+    expect(await majors([{ proof: { command: "", test: "" } }])).toEqual(["T1.1 names no proof."]);
+  });
+
+  test("a task with no files needs a host or a proof command", async () => {
+    expect(await majors([{ files: [] }])).toEqual(["T1.1 changes no file. Move it to external."]);
+    expect(await majors([{ files: [], proof: { command: "test", test: "" } }])).toEqual([]);
+    expect(await majors([{ files: [], where: "mac" }], {}, { saved: [], hosts: ["mac"] })).toEqual([]);
+  });
+
+  test("where names a host of the manifest", async () => {
+    expect(await majors([{ where: "mac" }])).toEqual(["T1.1 runs on mac, which the manifest does not list."]);
+    expect(await majors([{ where: "mac" }], {}, { saved: [], hosts: ["mac"] })).toEqual([]);
+  });
+
+  test("an external step follows a part of the plan and names a host of the manifest or none", async () => {
+    expect(await majors([{}], { external: [external({ after: 3 }), external({ after: null, host: "mac" })] })).toEqual([
+      "E1 follows part 3, which the plan does not have.",
+      "E2 names the host mac, which the manifest does not list.",
+    ]);
+    expect(await majors([{}], { external: [external({ host: "mac" })] }, { saved: [], hosts: ["mac"] })).toEqual([]);
+  });
+});
+
+describe("the external list and the [-] mark in the plan files (task-builder-v2.md sections 5.1, 5.2, and 5.4)", () => {
+  const kinds = [
+    external({ kind: "submodule_pointer", title: "Point app at the merged commit" }),
+    external({ kind: "jira_move", title: "Move ABC-12 to review", after: null, why: "" }),
+    external({ kind: "ci_rebuild", title: "Start the CI build again", after: 2 }),
+    external({ kind: "remote_check", title: "Check the build on the Mac", after: null, host: "mac" }),
+  ];
+  const outsideT12 = (p: Plan): Plan => ({
+    ...p,
+    parts: p.parts.map((x) => ({ ...x, tasks: x.tasks.map((t) => (t.id === "T1.2" ? { ...t, outside: true } : t)) })),
+  });
+
+  test("AC-TB5 basis: toPlan gives each step its owner from the kind and the IDs E1 and up", () => {
+    const p = planOf({ external: [...kinds, external({ id: "E1" })] });
+    expect(p.external?.map((e) => [e.id, e.kind, e.owner])).toEqual([
+      ["E1", "submodule_pointer", "app"],
+      ["E2", "jira_move", "app"],
+      ["E3", "ci_rebuild", "user"],
+      ["E4", "remote_check", "user"],
+      ["E5", "merge", "user"],
+    ]);
+  });
+
+  test("tasks.md and plan.md end with Outside Claude, and the parse gives the same steps and the [-] mark back", () => {
+    const moved = outsideT12(planOf({ external: kinds }));
+    const body = tasksBody(moved, "medium");
+    expect(body).toContain("### [-] T1.2 Add the cases");
+    expect(body).toContain(
+      [
+        "## Outside Claude",
+        "",
+        "- E1 [app] Point app at the merged commit (submodule_pointer, after part 1)",
+        "Why: A person merges PRs.",
+        "- E2 [app] Move ABC-12 to review (jira_move)",
+        "- E3 [you] Start the CI build again (ci_rebuild, after part 2)",
+        "Why: A person merges PRs.",
+        "- E4 [you] Check the build on the Mac (remote_check, host mac)",
+      ].join("\n"),
+    );
+    const want = { parts: moved.parts, external: moved.external ?? [] };
+    expect(parseTasks(`# Tasks: ABC-12 Trim names\n\n${body}`, moved.parts)).toEqual(want);
+    const plan = renderDocs("ABC-12", "Trim names", "small", moved).plan as string;
+    expect(parsePlan(plan, moved.parts)).toEqual(want);
+    // The size change keeps the section, and both directions parse.
+    const docs: Docs = { ...renderDocs("ABC-12", "Trim names", "small", moved), version: 1, parsed: moved, approved: false };
+    const medium = convertDocs("ABC-12", "Trim names", "small", "medium", docs);
+    expect(parseTasks(medium.tasks as string, moved.parts)).toEqual(want);
+    const back = convertDocs("ABC-12", "Trim names", "medium", "small", { ...docs, ...medium });
+    expect(parsePlan(back.plan as string, moved.parts)).toEqual(want);
+  });
+
+  test("a host with parentheses and an empty title still render a line that parses", () => {
+    const p = planOf({ external: [external({ title: " ", host: "mac (arm)" })] });
+    const body = tasksBody(p, "small");
+    expect(body).toContain("- E1 [you] merge (merge, after part 1, host mac arm)");
+    const r = parseTasks(`# Tasks: ABC-12 Trim names\n\n${body}`, p.parts);
+    expect("error" in r ? r.error : r.external.map((e) => [e.title, e.host])).toEqual([["merge", "mac arm"]]);
+  });
+
+  test("a plan without steps outside Claude has no section and parses to an empty list", () => {
+    const p = planOf();
+    expect(tasksBody(p, "small")).not.toContain("Outside Claude");
+    expect(parseTasks(`# Tasks: ABC-12 Trim names\n\n${tasksBody(p, "small")}`, p.parts)).toEqual({ parts: p.parts, external: [] });
+  });
+
+  test("parse errors of the section name the line", () => {
+    const p = planOf();
+    const doc = (lines: string[]) => `# Tasks: ABC-12 Trim names\n\n${tasksBody(p, "small")}\n## Outside Claude\n\n${lines.join("\n")}\n`;
+    const err = (lines: string[]) => {
+      const r = parseTasks(doc(lines), p.parts);
+      return "error" in r ? r.error.replace(/^Fix line \d+ of tasks.md: /, "") : null;
+    };
+    expect(err(["- E1 [app] Merge the PR (merge)"])).toBe("a merge step has the owner [you].");
+    expect(err(["- E1 [you] Merge the PR (merge)", "- E1 [you] Merge again (merge)"])).toBe("step E1 is listed twice.");
+    expect(err(["- E1 [you] Merge the PR (deploy)"])).toBe(
+      'a step outside Claude must look like "- E1 [you] <title> (merge, after part 1)".',
+    );
+    expect(err(["Why: no step before it."])).toBe('a "Why" line follows the line of its step, once.');
+    expect(err(["- E1 [you] Merge the PR (merge, after part 1)", "Why: One.", "Why: Two."])).toBe(
+      'a "Why" line follows the line of its step, once.',
+    );
+    // checkPlan reports a step after a part that the plan does not have. The build parses the file again, so the parse keeps it.
+    expect(err(["- E1 [you] Merge the PR (merge, after part 9)"])).toBeNull();
+  });
+
+  test("step.md of a build lists a moved task as [-] and leaves it out of the open tasks", () => {
+    const p = outsideT12(planOf());
+    const text = partStepFile(p, p.parts, "build", 1).text;
+    const open = text.slice(text.indexOf("## Open tasks"), text.indexOf("## Tasks"));
+    expect(open).toContain("### T1.1 ");
+    expect(open).not.toContain("T1.2");
+    expect(text).toContain("- [-] T1.2 Add the cases.");
   });
 });

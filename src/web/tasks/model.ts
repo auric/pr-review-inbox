@@ -601,9 +601,11 @@ const TASK_LINE = /^### \[( |x)\] (T\d+\.\d+) (.+)$/gm;
 // resets its part, so the rows of that part before its newest mark do not count. With sub-tasks, task_part.ord is the plan part number
 // (tasks.ts partDocsOf), so a part lists only the tasks T<ord>. of its plan part. Without sub-tasks, the part builds the whole plan.
 export function plannedTasks(
-  t: Pick<TaskDto, "docs" | "steps" | "subtasks" | "size" | "settings">,
+  t: Pick<TaskDto, "docs" | "steps" | "subtasks" | "size" | "settings"> & Partial<Pick<TaskDto, "external">>,
   part: Pick<TaskPartDto, "id" | "ord"> | null = null,
 ) {
+  // docs/plans/task-builder-v2.md section 5.4: a task that the app moved to the checklist is no task of the runner.
+  const moved = new Set((t.external ?? []).flatMap((x) => (x.planTask ? [x.planTask] : [])));
   const text = [t.docs?.plan, t.docs?.tasks].filter(Boolean).join("\n");
   const mark = new Map<number | null, number>();
   for (const s of t.steps) if (s.kind === "commit" && s.item === "restart") mark.set(s.part, Math.max(mark.get(s.part) ?? 0, s.id));
@@ -614,7 +616,7 @@ export function plannedTasks(
   );
   const prefix = part && partsPlan(t) ? `T${part.ord}.` : "";
   return [...text.matchAll(TASK_LINE)]
-    .filter((m) => (m[2] as string).startsWith(prefix))
+    .filter((m) => (m[2] as string).startsWith(prefix) && !moved.has(m[2] as string))
     .map((m) => ({ id: m[2] as string, title: (m[3] as string).trim(), done: m[1] === "x" || done.has(m[2] as string) }));
 }
 
@@ -859,7 +861,19 @@ export function taskView(
   const prs = codeParts(t);
   const last = prs.at(-1);
   if (t.state === "ready") {
-    if (prs.length && prs.every((p) => p.prState === "MERGED" || p.state === "merged" || p.state === "abandoned"))
+    const open = t.external.filter((x) => x.state === "open").length;
+    const merged = prs.length > 0 && prs.every((p) => p.prState === "MERGED" || p.state === "merged" || p.state === "abandoned");
+    // docs/plans/task-builder-v2.md section 11.1: a merged task waits for its checklist. Each row has its own Done and Waive.
+    if (merged && open)
+      return {
+        ...base,
+        status: `${prs.length > 1 ? `All ${prs.length} PRs merged` : "The PR merged"}. Finish your checklist: ${open === 1 ? "1 step is" : `${open} steps are`} open.`,
+        primary: null,
+        more: [CLOSE],
+        screen: "end",
+        needsYou: true,
+      };
+    if (merged)
       return {
         ...base,
         status: prs.length > 1 ? `Done. All ${prs.length} PRs merged.` : "Done. The PR merged.",

@@ -68,6 +68,7 @@ import { type BranchRemote, type ContextFile, cachePath, locked, longPath, noUrl
 import { branchPrefixesOf, type Settings } from "../settings";
 import { buildShell, manifest } from "./capabilities";
 import { CHECK_KINDS, type ChecksResult, checkStep } from "./checks";
+import { addExternal, movedTasks, type NewExternal } from "./external";
 import { movedReason } from "./gitstate";
 import {
   bashLine,
@@ -87,7 +88,7 @@ import {
 import { type Answer, answerProblem, type QuestionRow } from "./interview";
 import { PHASE_GUARDS, type Phase, type PhaseContext, type PhaseEvent, partMachine, phaseMachine } from "./machine";
 import { noteTaskWaits } from "./notify";
-import { type Docs, docNames, type Plan, parsePlan, parseTasks, partStepFile } from "./plan";
+import { closedTask, type Docs, docNames, type Plan, parsePlan, parseTasks, partStepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
 import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
 import { allowAsks, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
@@ -326,20 +327,27 @@ const under = (path: string, dir: string) => {
 const same = (a: string, b: string) =>
   (repoPath(a) ?? a).split("/").map(fold).join("/") === (repoPath(b) ?? b).split("/").map(fold).join("/");
 
-// The tick of a task in the tasks grammar (spec.md section 6.4). null: the plan has no open task with this ID.
-export function tickTask(text: string, id: string): string | null {
-  const re = new RegExp(`^### \\[ \\] ${id.replaceAll(".", "\\.")} `, "m");
-  return re.test(text) ? text.replace(re, `### [x] ${id} `) : null;
-}
+// The ID comes from Claude or from a heading on disk, so every regex character is escaped.
+const heading = (mark: " " | "x" | "-", id: string) => new RegExp(`^### \\[${mark}\\] ${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `, "m");
+const markTask = (text: string, id: string, mark: "x" | "-") =>
+  heading(" ", id).test(text) ? text.replace(heading(" ", id), `### [${mark}] ${id} `) : null;
+
+// The tick of a task in the tasks grammar (spec.md section 6.4). null: the plan has no open task with this ID. A task with the [-] mark
+// is closed (task-builder-v2.md section 5.4).
+export const tickTask = (text: string, id: string): string | null => markTask(text, id, "x");
+// task-builder-v2.md section 5.4: the app moves an open task to the checklist with the [-] mark. null as tickTask.
+export const moveTask = (text: string, id: string): string | null => markTask(text, id, "-");
 
 // part-session.md section 2.4: the IDs that disk ticks against head, when disk equals head with only these ticks (`### [ ] <id> ` to
 // `### [x] <id> `). null: disk holds another change, such as a tick of a heading that head does not hold open. Line ends do not count.
-export function tickDiff(head: string, disk: string): string[] | null {
+// moved: the plan tasks that the app moved to the checklist (external.ts movedTasks). Only they may change from `[ ]` to `[-]`.
+export function tickDiff(head: string, disk: string, moved: ReadonlySet<string> = new Set()): string[] | null {
   const h = head.replaceAll("\r\n", "\n");
   const d = disk.replaceAll("\r\n", "\n");
   const ids = [...d.matchAll(/^### \[x\] (\S+) /gm)].map((m) => m[1] as string).filter((id) => tickTask(h, id) !== null);
   let text = h;
   for (const id of ids) text = tickTask(text, id) as string;
+  for (const id of moved) if (heading("-", id).test(d)) text = moveTask(text, id) ?? text;
   return text === d ? ids : null;
 }
 
@@ -1080,7 +1088,8 @@ export function createLoop(opts: LoopOptions) {
 
   // The plan file that Claude ticks (spec.md section 6.4), as a path in the main repository.
   const tasksPath = (c: Pick<Ctx, "specDir" | "size">) => specPath(c.specDir, c.size === "small" ? "plan" : "tasks");
-  const openTasks = (c: Ctx) => c.plan.parts.flatMap((p) => p.tasks.filter((t) => !t.ticked));
+  // task-builder-v2.md section 5.4: a task with the [-] mark is outside Claude, so the gate never waits for it.
+  const openTasks = (c: Ctx) => c.plan.parts.flatMap((p) => p.tasks.filter((t) => !closedTask(t)));
   const allFiles = (c: Ctx) => c.plan.parts.flatMap((x) => x.tasks.flatMap((t) => t.files));
   async function headsNow(c: Ctx): Promise<SessionHeads> {
     const out: SessionHeads = [];
@@ -1151,7 +1160,7 @@ export function createLoop(opts: LoopOptions) {
         commits: log.split("\n").filter(Boolean),
         stat: stat.trim(),
         ticked: tasks.filter((t) => t.ticked).map((t) => `${t.id} ${t.title}`),
-        open: tasks.filter((t) => !t.ticked).map((t) => `${t.id} ${t.title}`),
+        open: tasks.filter((t) => !closedTask(t)).map((t) => `${t.id} ${t.title}`),
         summary: d?.summary ?? null,
         notes: d?.notes ?? [],
         paths,
@@ -1384,7 +1393,7 @@ export function createLoop(opts: LoopOptions) {
     const p = onDisk(c.wt, file);
     if (!existsSync(p)) return null;
     const head = await wtGit(c.wt, ["show", `HEAD:${file}`]).catch(() => null);
-    return head === null ? null : tickDiff(head, readFileSync(p, "utf8"));
+    return head === null ? null : tickDiff(head, readFileSync(p, "utf8"), movedTasks(c.db, c.id));
   }
 
   // Each changed plan file must equal its HEAD text, except the ticks of the tasks file. spec: the plan files with another change.
@@ -1415,7 +1424,7 @@ export function createLoop(opts: LoopOptions) {
       points?: boolean;
       tries?: StepInput["tries"];
     },
-  ): Promise<StepOutcome & { result: ImplementResult; unchanged: boolean; ticks: string[] }> {
+  ): Promise<StepOutcome & { result: ImplementResult; unchanged: boolean; ticks: string[]; checklist: string[] }> {
     let extra: string[] = [];
     let again = false;
     let row = o.row;
@@ -1484,6 +1493,13 @@ export function createLoop(opts: LoopOptions) {
             `Claude listed the ticks ${listed.join(", ") || "none"}, and the plan file holds the new ticks ${ticked.join(", ") || "none"}.`,
           ],
         });
+      const moved = moveOutside(c, r.step, r.result.outside);
+      if (moved.blocking.length) {
+        if (held(c) && !keeps(c, r.step)) halt(c, r.step);
+        const it = moved.blocking.length === 1 ? "it" : "them";
+        const text = `Needs you: Claude cannot do ${moved.blocking.join(", ")} in its sandbox. The app moved ${it} to your checklist. Do ${it}, then click Continue.`;
+        block(c, { kind: "unfinished", step: r.step, text });
+      }
       const q = r.result.question;
       if (q) {
         c.db.transaction(() => {
@@ -1502,8 +1518,41 @@ export function createLoop(opts: LoopOptions) {
       }
       // spec.md section 6.18.2: needsBase runs the base check at once.
       if (r.result.needsBase) await refreshBases(c.db, c.id);
-      return { ...r, result: r.result, unchanged, ticks: plan.ticks };
+      return { ...r, result: r.result, unchanged, ticks: plan.ticks, checklist: moved.ids };
     }
+  }
+
+  // task-builder-v2.md section 5.4 (D10): the [-] mark in the plan file on disk and one checklist row per moved task. The next app commit
+  // takes the mark. An entry that names no open task of the plan gets a Log note only.
+  function moveOutside(c: Ctx, step: number, outside: ImplementResult["outside"]): { ids: string[]; blocking: string[] } {
+    const out = { ids: [] as string[], blocking: [] as string[] };
+    if (!outside.length) return out;
+    const p = onDisk(c.wt, tasksPath(c));
+    let text = existsSync(p) ? readFileSync(p, "utf8") : "";
+    const notes: string[] = [];
+    const rows: NewExternal[] = [];
+    for (const o of outside) {
+      const part = c.plan.parts.find((x) => x.tasks.some((t) => t.id === o.task));
+      const task = part?.tasks.find((t) => t.id === o.task);
+      const next = task ? moveTask(text, o.task) : null;
+      if (!part || !task || next === null) {
+        notes.push(`Claude named ${oneLine(o.task)} as a step outside its sandbox, but the plan has no open task with this ID.`);
+        continue;
+      }
+      text = next;
+      out.ids.push(o.task);
+      if (o.blocking) out.blocking.push(o.task);
+      rows.push({ part: part.n, kind: o.kind, title: task.title, why: o.why, host: "", planTask: o.task });
+    }
+    if (out.ids.length) {
+      writeFileSync(p, text);
+      c.db.transaction(() => addExternal(c.db, c.id, rows, now()))();
+      notes.push(`The app moved ${out.ids.join(", ")} to your checklist.`);
+      refreshPlan(c);
+      changed(c.id);
+    }
+    patchStep(c.db, step, { notes: [...stepDetailOf(c.db, step).notes, ...notes] });
+    return out;
   }
 
   // The approved checks with their step row. A stop kills the commands (AC-B19). baseline: the checks on the part base.
@@ -2429,7 +2478,8 @@ export function createLoop(opts: LoopOptions) {
     const step = (a: number) => partStepFile(c.plan, c.plan.parts, "build", a);
     const r = await claude(c, "implement", "build", { allow: allFiles(c), step, purpose: "build" });
     refreshPlan(c);
-    if (!r.result.done || openTasks(c).length)
+    // task-builder-v2.md section 5.4: a run that moved tasks to the checklist and left no open task goes to the gate.
+    if (openTasks(c).length || (!r.result.done && !r.checklist.length))
       block(c, {
         kind: "unfinished",
         step: r.step,

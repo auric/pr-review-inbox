@@ -43,6 +43,9 @@ import {
   BASH_TIMEOUT_MAX_SEC,
   BUILDS_AT_ONCE_CAP,
   commandId,
+  type ExternalKind,
+  type ExternalOwner,
+  type ExternalState,
   type FoundItem,
   INTERVIEW_QUESTIONS,
   JIRA_KEY,
@@ -1911,6 +1914,7 @@ export type TaskStepDto = {
 // GET /api/tasks. A row of the Tasks view. progress: the facts of the status line (spec.md section 6.12, Inbox). part: the ordinal of
 // the first code part that did not merge, 0 before the build. ready: that part waits for its PR. merged: every PR of the task merged.
 // building: the ordinals of the code parts in their build, in order. Several parts can build at the same time (spec.md section 6.20.6).
+// checklist: the open steps outside Claude (task-builder-v2.md section 5.2).
 export type TaskRowDto = {
   id: number;
   project: string;
@@ -1926,7 +1930,16 @@ export type TaskRowDto = {
   updatedAt: number;
   closedAt: number | null;
   // held: the number of parts on hold (ps5-plan.md D6).
-  progress: { planReady: boolean; part: number; parts: number; ready: boolean; merged: boolean; building: number[]; held: number };
+  progress: {
+    planReady: boolean;
+    part: number;
+    parts: number;
+    ready: boolean;
+    merged: boolean;
+    building: number[];
+    held: number;
+    checklist: number;
+  };
 };
 
 // The newest interview result (spec.md section 6.5) of round round. done false: the answers start round 2 when it is left.
@@ -2051,7 +2064,29 @@ export type TaskDto = TaskRowDto & {
   // spec.md section 6.21. allowAsk: null unless the task waits on blocked kind allow.
   shell: TaskShellDto;
   allowAsk: TaskAllowAskDto | null;
+  // docs/plans/task-builder-v2.md section 5.2: the checklist of the steps outside Claude, in order. Empty before the approval.
+  external: TaskExternalDto[];
 };
+
+// One task_external row. part: the plan part that the step follows, null for the whole task. planTask: the plan task that a build run
+// moved here, null for a step of the approved plan. by and at: the last state change.
+export type TaskExternalDto = {
+  id: number;
+  part: number | null;
+  kind: ExternalKind;
+  owner: ExternalOwner;
+  title: string;
+  why: string;
+  host: string;
+  planTask: string | null;
+  state: ExternalState;
+  by: "user" | "app" | null;
+  at: number | null;
+};
+
+// POST /api/tasks/:id/external/:item (task-builder-v2.md section 11.4): done (DONE), waive (WAIVE), or reopen (REOPEN).
+export const taskExternalInput = z.object({ version: z.number().int().nonnegative(), action: z.enum(["done", "waive", "reopen"]) });
+export type TaskExternalInput = z.infer<typeof taskExternalInput>;
 
 // taskRepo: task_repo.id. branch: the base branch that the user picked for the repository. changed: "Pick a base branch" set the branch
 // after commits on the old base, so the update must run before the PR (spec.md section 6.16.7).

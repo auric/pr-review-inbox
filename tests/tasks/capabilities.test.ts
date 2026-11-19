@@ -159,7 +159,11 @@ describe("AC-TB3: the spec and interview prompts hold the build manifest and the
       for (const r of PROOF_RULES) expect(prompt).toContain(r);
     }
     expect(spec).toContain(OWNER_RULE);
-    expect(interview).toContain("A step that needs the app or the user is a step for the user.");
+    // TB-2: the external list replaces the risks stopgap of TB-1, and the owners follow from the kinds.
+    expect(OWNER_RULE).toContain("in external, with its kind");
+    expect(spec).toContain("The app does the submodule_pointer and jira_move steps. The user does every other kind.");
+    expect(spec).not.toContain("with that step as check");
+    expect(interview).toContain("A step that needs the app or the user goes to the external list of the plan, with its owner.");
     expect(spec).not.toContain("Give each part acceptance criteria that a test can prove");
     // Without a manifest, the agents keep their old start.
     expect(interviewAgent(p, 1).prompt.startsWith(INTERVIEW_RULES[0] ?? "")).toBe(true);

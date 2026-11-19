@@ -177,6 +177,18 @@ export async function putTaskFile(qc: QueryClient, id: number, att: string, incl
   return dto;
 }
 
+// POST /api/tasks/:id/external/:item (docs/plans/task-builder-v2.md section 11.4): done, waive, or reopen one checklist step.
+export async function postExternal(qc: QueryClient, t: TaskDto, item: number, action: "done" | "waive" | "reopen"): Promise<TaskDto> {
+  const dto = await read<TaskDto>(
+    await api.api.tasks[":id"].external[":item"].$post({
+      param: { id: String(t.id), item: String(item) },
+      json: { version: t.version, action },
+    }),
+  );
+  qc.setQueryData(["task", t.id], dto);
+  return dto;
+}
+
 // A 409 of a task mutation holds the current task (TaskConflict). The view takes it, so the next click sends the new version.
 export type TaskAction =
   | { kind: "answers"; input: Omit<TaskAnswersInput, "version"> }

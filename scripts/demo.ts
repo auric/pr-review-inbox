@@ -253,9 +253,22 @@ const TASK_SPEC = {
           files: ["src/cache/flush.ts"],
           run: ["tests/flush.test.ts"],
           done: "tests/flush.test.ts passes.",
+          proof: { command: "test", test: "" },
         },
       ],
     },
+  ],
+  // docs/plans/task-builder-v2.md section 5.1: the steps for the app and the user go to the checklist of the Task view.
+  external: [
+    {
+      id: "E1",
+      kind: "manual_verify",
+      title: "Watch the readers during a long flush on staging",
+      after: 1,
+      host: "",
+      why: "Only a person sees the staging readers.",
+    },
+    { id: "E2", kind: "jira_move", title: "Move the Jira task to review", after: null, host: "", why: "" },
   ],
   testing: {
     ...TESTING,
@@ -313,7 +326,14 @@ const MULTI_SPEC = {
       acceptance: [{ id: "A1", text: "lock_wait() adds one to the count." }],
       tests: [{ test: "tests/lock.test.ts", proves: ["A1"] }],
       tasks: [
-        { id: "T1", title: "Count each wait", files: ["lib/lock.c"], run: ["tests/lock.test.ts"], done: "tests/lock.test.ts passes." },
+        {
+          id: "T1",
+          title: "Count each wait",
+          files: ["lib/lock.c"],
+          run: ["tests/lock.test.ts"],
+          done: "tests/lock.test.ts passes.",
+          proof: { command: "test", test: "" },
+        },
       ],
     },
   ],

@@ -24,6 +24,7 @@ import {
   type TaskAnswersInput,
   type TaskCreateInput,
   type TaskDto,
+  type TaskExternalInput,
   type TaskInterviewDto,
   type TaskIssueDto,
   type TaskPartDto,
@@ -103,6 +104,7 @@ import { repoPath } from "../review/validate";
 import { type ContextFile, noUrl, remoteHead, type SnapshotRepo } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import { buildToolLines, capabilities, capabilityLines } from "./capabilities";
+import { addExternal, advanceExternal, approveExternal, externalDtos, openChecklist } from "./external";
 import {
   dropFetched,
   type Fetched,
@@ -256,6 +258,7 @@ export function advance(db: Database, ref: TaskRef, event: TaskEvent, facts: Fac
         gate: facts.gate === true,
         stoppedFrom: row.stopped_from,
         selfReview: settingsOf(row).planReview === "self",
+        openChecklist: openChecklist(db, ref.task),
       },
     });
     if (!snapshot.can(event)) return { status: 409, error: TASK_STATE_TEXT[row.state], state: row.state, version: row.version };
@@ -938,6 +941,7 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
       merged: code.length > 0 && code.every((p) => merged(p) || p.state === "abandoned"),
       building: code.filter((p) => p.state === "implementing").map((p) => p.ord),
       held: (db.query(WAIT.held).get({ task: t.id }) as { n: number }).n,
+      checklist: externalDtos(db, t.id).filter((x) => x.state === "open").length,
     },
     id: t.id,
     project: t.project,
@@ -978,7 +982,13 @@ function allowOf(p: Plan, saved: readonly AllowEntry[]): TaskPlanDto["allow"] {
 // docs_json.adding: the changed plan of "Add to plan" until its approval (section 6.20.14). Its part numbers come after every part
 // of the task, and its parts, map entries, contracts, and risks join parsed at the approval. contracts and risks: only those of a part,
 // so the plans of the approved parts stay as they are (section 6.22.3). Absent in a changed plan of an older version.
-type Adding = SubtaskPlan & { parts: PlanPart[]; map: Plan["map"]; contracts?: Plan["contracts"]; risks?: Plan["risks"] };
+type Adding = SubtaskPlan & {
+  parts: PlanPart[];
+  map: Plan["map"];
+  contracts?: Plan["contracts"];
+  risks?: Plan["risks"];
+  external?: Plan["external"];
+};
 type SubDocs = Docs & { subtasks?: SubtaskPlan; adding?: Adding };
 const subPlanOf = (docs: Docs): SubtaskPlan | null => (docs as SubDocs).subtasks ?? null;
 const addingOf = (docs: Docs | null): Adding | null => (docs as SubDocs | null)?.adding ?? null;
@@ -1014,6 +1024,8 @@ function shiftAdded(plan: Plan, sub: SubtaskPlan, top: number): Adding {
     map: plan.map,
     contracts: (plan.contracts ?? []).flatMap((x) => (x.part === null ? [] : [{ ...x, part: x.part + top }])),
     risks: (plan.risks ?? []).flatMap((x) => (x.part === null ? [] : [{ ...x, part: x.part + top }])),
+    // A step for the whole task of "Add to plan" is new work too, so it stays.
+    external: (plan.external ?? []).map((x) => ({ ...x, after: x.after === null ? null : x.after + top })),
   };
 }
 
@@ -1210,6 +1222,7 @@ export function partDocsOf(db: Database, t: TaskRow, part: { ord: number; keys_j
     partCount: docs.parsed.parts.length,
     contracts: (docs.parsed.contracts ?? []).filter(own),
     risks: (docs.parsed.risks ?? []).filter(own),
+    external: (docs.parsed.external ?? []).filter((x) => x.after === null || x.after === pp.n),
   };
   const key = keysOf(part)[0] ?? t.key;
   const summary = subtaskRows(db, t.id).find((r) => r.key === key)?.summary ?? part.title;
@@ -1576,6 +1589,7 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
         : 0,
     },
     allowAsk: allowAsk && b?.step ? { step: b.step, requests: allowAsk.requests, warning: repo.shellWarnedAt === null } : null,
+    external: externalDtos(db, t.id),
   };
 }
 
@@ -1914,7 +1928,12 @@ export function createTaskService(opts: TaskServiceOptions) {
       judge: (o, ws, servers, gaps) =>
         judgeTask(o, specResult, "spec", servers, gaps, async (r) => {
           const base = ws.sourceHead;
-          const app = await checkPlan(r, t.spec_dir, base, ws.cache, gitEnv("/dev/null"), nested);
+          // task-builder-v2.md section 5.3: the proofs name a saved command or a planned one, and the hosts come from the manifest.
+          const known = {
+            saved: repoSettings(db, t.project, t.repo).commands.map((c) => c.name),
+            hosts: capabilities(db, t, "spec", originsOf(settings.config())).buildHosts.map((h) => h.name),
+          };
+          const app = await checkPlan(r, t.spec_dir, base, ws.cache, gitEnv("/dev/null"), nested, known);
           // spec.md section 6.22.2: in add mode the lines join sub.notes, which go to skipped too.
           const lines = checkLines(app);
           const skipped = add ? [] : lines;
@@ -2343,7 +2362,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       ...l.docs,
       [input.doc]: text,
       version: l.docs.version + 1,
-      parsed: parsed ? { ...l.docs.parsed, parts: parsed.parts } : l.docs.parsed,
+      parsed: parsed ? { ...l.docs.parsed, parts: parsed.parts, external: parsed.external } : l.docs.parsed,
     };
     patch(db, id, l.t.version, { docs_json: JSON.stringify(next) }, now());
     changed(id);
@@ -2477,6 +2496,8 @@ export function createTaskService(opts: TaskServiceOptions) {
         const v = patch(db, id, t.version, { ...resized(t, docs, size, true), settings_json: JSON.stringify(s) }, at);
         const r = advance(db, { task: id, version: v }, { type: "APPROVE" }, {}, at);
         if (r.status !== 200) throw new Refused(r.error);
+        // task-builder-v2.md section 5.2: one checklist row per step outside Claude, in the transaction of the part rows.
+        approveExternal(db, id, docs.parsed.external ?? [], at);
         if (sub) approveParts(db, { ...t, version: r.version }, sub.parts, at);
       })();
     } catch (e) {
@@ -2520,6 +2541,10 @@ export function createTaskService(opts: TaskServiceOptions) {
       db.transaction(() => {
         const at = now();
         const { adding: _, ...rest } = docs;
+        // The plan file of a part lists the steps of the whole task, so the IDs of the added steps go on after the earlier ones.
+        const had = docs.parsed.external ?? [];
+        const top = Math.max(0, ...had.map((e) => Number(e.id.slice(1)) || 0));
+        const added = (adding.external ?? []).map((e, i) => ({ ...e, id: `E${top + i + 1}` }));
         const next: SubDocs = {
           ...rest,
           version: docs.version + 1,
@@ -2529,12 +2554,20 @@ export function createTaskService(opts: TaskServiceOptions) {
             map: [...docs.parsed.map, ...adding.map],
             contracts: [...(docs.parsed.contracts ?? []), ...(adding.contracts ?? [])],
             risks: [...(docs.parsed.risks ?? []), ...(adding.risks ?? [])],
+            external: [...had, ...added],
           },
           ...(rest.subtasks && { subtasks: { ...rest.subtasks, starts: [...rest.subtasks.starts, ...adding.starts] } }),
         };
         const builds = input.subtasks?.buildsAtOnce;
         const settingsJson = JSON.stringify({ ...s, maxOpen: a.maxOpen, ...(builds !== undefined && { buildsAtOnce: builds }) });
         const v = patch(db, id, t.version, { docs_json: JSON.stringify(next), settings_json: settingsJson }, at);
+        // task-builder-v2.md section 5.2: the new steps join the checklist. The rows of the first approval stay.
+        addExternal(
+          db,
+          id,
+          added.map((e) => ({ part: e.after, kind: e.kind, title: e.title, why: e.why, host: e.host, planTask: null })),
+          at,
+        );
         approveParts(db, { ...t, version: v }, a.parts, at, fixed);
         // spec.md section 6.20.7: implementing holds while a part waits for its build.
         const cur = taskRow(db, id) as TaskRow;
@@ -3042,6 +3075,28 @@ export function createTaskService(opts: TaskServiceOptions) {
     return { to: move.to, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
+  // POST /api/tasks/:id/external/:item (task-builder-v2.md section 11.4): the user's done, waive, or reopen of a checklist row. The user
+  // also ticks a row of the app: no column links a row to the click of its app action (TB-7W). A done or waived row runs the FINISHED
+  // check: a ready task whose parts all merged or were dropped ends with ALL_MERGED, whose guard reads the open rows.
+  function external(db: Database, id: number, item: number, input: TaskExternalInput): TaskResult {
+    const t = taskRow(db, id);
+    if (!t) return { status: 404, error: "Task not found." };
+    if (t.state === "done" || t.state === "failed") return conflict(db, t, TASK_STATE_TEXT[t.state]);
+    const event = ({ done: "DONE", waive: "WAIVE", reopen: "REOPEN" } as const)[input.action];
+    const r = db.transaction(() => {
+      const a = advanceExternal(db, { task: id, version: input.version, item }, { type: event }, "user", now());
+      if (a.status !== 200 || event === "REOPEN" || t.state !== "ready") return a;
+      const states = (db.query(Q.parts).all({ id }) as PartRow[]).map((p) => p.state);
+      if (states.length && states.every((s) => s === "merged" || s === "abandoned"))
+        advance(db, { task: id, version: a.version }, { type: "ALL_MERGED" }, {}, now());
+      return a;
+    })();
+    if (r.status === 404) return { status: 404, error: r.error };
+    if (r.status === 409) return conflict(db, taskRow(db, id) as TaskRow, r.error);
+    changed(id);
+    return { status: 200, task: taskDto(db, taskRow(db, id) as TaskRow) };
+  }
+
   return {
     syncStatuses,
     statusDue,
@@ -3062,6 +3117,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     repoChoice,
     resume,
     close,
+    external,
     writableList,
     get(db: Database, id: number): TaskDto | null {
       const t = taskRow(db, id);

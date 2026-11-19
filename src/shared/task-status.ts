@@ -110,6 +110,8 @@ export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
     if (p.ready) return { text: "Needs you: open the PR", needsYou: true };
     return { text: buildingText(p), needsYou: false };
   }
+  // task-builder-v2.md section 11.1: a merged task ends only when its checklist is done or waived.
+  if (r.state === "ready" && p.merged && p.checklist > 0) return { text: "Needs you: finish your checklist", needsYou: true };
   if (r.state === "ready") return { text: p.merged ? "Merged" : "Waiting for review", needsYou: false };
   return { text: "Waiting for colleagues", needsYou: false };
 }

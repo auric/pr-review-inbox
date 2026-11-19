@@ -27,6 +27,7 @@ import { ALLOW_FORM, AllowAskForm } from "./AllowAsk";
 import { TaskFiles } from "./Attachments";
 import { shellText } from "./allow";
 import { BaseField } from "./BranchSection";
+import { Checklist } from "./Checklist";
 import { CommentGroups } from "./CommentGroups";
 import { DiffTab } from "./DiffTab";
 import { acceptedReplies, checkTracker, sortComments, type TaskAction, useSortRun, useTask, useTaskAction, useTaskRun } from "./data";
@@ -770,6 +771,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         onMove={setMoving}
         onHold={setHold}
       />
+
+      <Checklist t={t} runner={runner} />
 
       <section aria-label="Details" className="grid gap-3">
         <div role="tablist" aria-label="Task details" className="flex flex-wrap gap-1 border-b">

@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 53;
+const LATEST = 54;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -1931,6 +1931,50 @@ test("migration from a version-52 database keeps the task_context rows and adds 
     );
     db.run("DELETE FROM pull_request WHERE id = 1");
     expect(db.query("SELECT COUNT(*) AS n FROM task_fetch").get()).toEqual({ n: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+// ---------- The checklist of steps outside Claude (057_task_external.sql) ----------
+
+// docs/plans/task-builder-v2.md section 5.2: the task rows stay, task_external starts empty, its checks hold, a moved plan task has one
+// row, and a task delete cascades.
+test("migration from a version-53 database keeps the task rows and adds an empty task_external", () => {
+  const path = join(dir, "v53.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  const files = readdirSync(join(import.meta.dir, "../../src/server/storage/migrations")).filter((f) => f >= "031" && f < "057");
+  migrate(old, [...V30, ...files.sort()]);
+  old.exec("PRAGMA user_version = 53");
+  old.exec(`INSERT INTO task (id, project, repo, key, title, state, target_branch, spec_dir, created_at, updated_at)
+    VALUES (1, 'P', 'r', 'ABC-1', 'One', 'implementing', 'main', 'specs/ABC-1/', 1, 1);`);
+  const before = old.query("SELECT * FROM task").all() as object[];
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(db.query("SELECT * FROM task").all()).toEqual(before);
+    expect(db.query("SELECT COUNT(*) AS n FROM task_external").get()).toEqual({ n: 0 });
+    const add = (ord: number, state: string, planTask: string | null, by: string | null = null, task = 1) =>
+      db
+        .query(
+          `INSERT INTO task_external (task, part, ord, kind, title, plan_task, state, by, created_at)
+          VALUES ($task, 1, $ord, 'merge', 'Merge the PR', $planTask, $state, $by, 9)`,
+        )
+        .run({ task, ord, state, planTask, by });
+    add(1, "open", null);
+    add(2, "done", null, "user");
+    add(3, "waived", "T1.2", "app");
+    expect(() => add(4, "closed", null)).toThrow(/CHECK/);
+    expect(() => add(5, "open", null, "bot")).toThrow(/CHECK/);
+    expect(() => add(1, "open", null)).toThrow(/UNIQUE/);
+    expect(() => add(6, "open", "T1.2")).toThrow(/UNIQUE/);
+    expect(() => add(7, "open", null, null, 99)).toThrow(/FOREIGN KEY/);
+    expect(db.query("SELECT why, host FROM task_external WHERE ord = 1").get()).toEqual({ why: "", host: "" });
+    db.run("DELETE FROM task WHERE id = 1");
+    expect(db.query("SELECT COUNT(*) AS n FROM task_external").get()).toEqual({ n: 0 });
   } finally {
     db.close();
   }
