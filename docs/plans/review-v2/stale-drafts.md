@@ -1,6 +1,6 @@
 # Stale accepted drafts
 
-Status: analysis and fix plan of 2026-11-18. Not started.
+Status: analysis and fix plan of 2026-11-18. F1 and F2 are built (ff0d795). F3 is deferred ("not now").
 
 ## 1. Problem
 

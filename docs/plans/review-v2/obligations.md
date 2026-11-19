@@ -1,6 +1,6 @@
 # Obligations
 
-Status: design of 2026-11-18. Not started. It builds on risk-check.md (WP-RC1 to WP-RC4). REVIEW_PROMPT_VERSION stays until WP-OB3. The criteria AC-R48 to AC-R55 go into spec.md section 1 in WP-OB3.
+Status: design of 2026-11-18. WP-OB1 (07c4d80) and WP-OB2 (dce9f3d) are built as the opt-in variant "obligations". Joint Gate A, WP-OB3, and WP-OB4 are open. It builds on risk-check.md (WP-RC1 to WP-RC4). REVIEW_PROMPT_VERSION stays until WP-OB3. The criteria AC-R48 to AC-R55 go into spec.md section 1 in WP-OB3.
 
 ## 1. Request and verdict
 

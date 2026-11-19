@@ -206,7 +206,7 @@ export const MODULE_IDS = [
   "failures",
 ] as const;
 export type ModuleId = (typeof MODULE_IDS)[number];
-// docs/plans/review-v3.md V2 and V3: eval switches. The UI and the Improve prompt do not offer them until WP-V4 ships or deletes them.
+// docs/plans/review-v3.md V2 and V3: eval switches. Gate U-V1 had no winner, so they stay eval-only. The UI and the Improve prompt do not offer them.
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "broad", "verify2", "classes",
 // "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. "risk-check":

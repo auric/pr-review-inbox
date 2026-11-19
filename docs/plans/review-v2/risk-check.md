@@ -1,6 +1,6 @@
 # Risk check
 
-Status: design of 2026-11-17. Not started. REVIEW_PROMPT_VERSION stays "2.8" until WP-RC3 ships. The criteria AC-R40 to AC-R47 go into spec.md section 1 in WP-RC3.
+Status: design of 2026-11-17. WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) are built as the opt-in variant "risk-check". Joint Gate A, WP-RC3, and WP-RC4 are open. REVIEW_PROMPT_VERSION stays "2.8" until WP-RC3 ships. The criteria AC-R40 to AC-R47 go into spec.md section 1 in WP-RC3.
 
 ## 1. Request and verdict
 

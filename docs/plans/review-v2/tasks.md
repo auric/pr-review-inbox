@@ -2,7 +2,7 @@
 
 Status: decided, 2026-10-22. design.md gives the decisions; section 10 holds the user's answers of 2026-10-22. spec.md gives the behavior and the acceptance criteria (AC-…). The user approved Q1 to Q5 on 2026-10-22. Part 6 starts only after Gate WP-G0 passes, and write runs only after Gate B17 passes (Q1). Part 7 (Autopilot replies, section 5) was added on 2026-10-22 after the user's decisions Q25 to Q27. Post mode ships only after Gate G-EVAL-A and the user smoke UA1. Part 7 is on hold since 2026-10-22 (design.md section 10.3), and its waves are not in the active order. Part 2 gained "PR context and PR notes" on 2026-10-22: WP-PG (W2) and WP-PN (W3). Part 2 gained "Ask follow-ups" later the same day: WP-AF (W3, after WP-PN).
 
-Progress (2026-10-23, HEAD 4b04c77): parts 1 to 4 are merged except WP-D2 (in progress) and WP-D3. Part 6 has WP-D6 and WP-B1 (provider and push only). Other merged commits: the build moved to Bun 1.4.4 (7cf674f); the eval rebuilds an earlier shipped profile (9a5cefe) and follows the check phase (8566b7c). Migrations: 030 review v2, 031 pr_note, 032 ask_parent. WP-B0 takes the next free number when it merges (033 unless WP-D2 takes it).
+Progress (2026-11-20, HEAD 12fd622): parts 1 to 4 are merged, including WP-D2 and WP-D3 (the finding discussion). The CLAUDE.md status gives the part 6 state. review-ledger.md gives the state of each review improvement. The rest of this line is the state of 2026-10-23. Other merged commits: the build moved to Bun 1.4.4 (7cf674f); the eval rebuilds an earlier shipped profile (9a5cefe) and follows the check phase (8566b7c). Migrations: 030 review v2, 031 pr_note, 032 ask_parent. WP-B0 takes the next free number when it merges (033 unless WP-D2 takes it).
 
 Update (2026-10-23): the user decided Q42 to Q46 (design.md section 10.4): a global branch prefix list, the full summary in the branch name, a base branch picker, "Continue on <branch>", and several repositories with submodules. They add WP-GB (gate G13 to G17), WP-BR1 and WP-BR2 (branches and base), and WP-MR1 to WP-MR3 (several repositories), all before WP-B6 (section 1, waves W9a and W9b).
 
@@ -11,6 +11,13 @@ Update (2026-10-26): the user decided Q52 and Q53 (design.md section 10.6): the 
 Update (2026-10-29): the user approved Q64 to Q76 (design.md section 10.8): build a Jira task with sub-tasks, one branch and one PR per sub-task (spec.md section 6.20). They add WP-ST-D, WP-ST-G, WP-ST1 to WP-ST7 (wave W9d), Gates G19 and J1 to J4, and the user smoke UT. WP-B8 shrinks to the large-task wiring of the sub-task engine. The prerequisites exist: WP-CA1 of docs/plans/ci-builds.md (pr_build, 2734de5) and Jira Cloud auth (698b7aa, de32843).
 
 Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It adds WP-PQ-D and WP-PQ1 to WP-PQ5 (wave WPQ) and the user smoke UP. Its open questions and their recommended defaults are in spec.md section 6.22.14. WP-PQ-D, WP-PQ1, and WP-PQ2 are built. WP-PQ3 to WP-PQ5 and Gate UP are open.
+
+Update (2026-11-20): review packages outside this file. review-ledger.md holds the full list.
+
+- risk-check.md: WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) are built as the opt-in variant "risk-check". WP-RC3 and WP-RC4 are not started; they wait for Joint Gate A. WP-RC5 is optional and not started.
+- obligations.md: WP-OB1 (07c4d80) and WP-OB2 (dce9f3d) are built as the opt-in variant "obligations". WP-OB3 and WP-OB4 are not started; they wait for Joint Gate A.
+- jira-context.md: WP-JC-D, WP-JC0, and Gate JC-G are done (4311cdb, 8e53029). WP-JC1 to WP-JC4 are built (cd0ab6c, 71dbfbc, a77e30a, 5e78593). WP-JC5 and WP-JC-E are in progress on a branch, not on main. Gates JC-A and JC-B and WP-JC6 are open.
+- review-v3.md: the variants "preexisting" (WP-V6) and "callers" (the D2 caller rule) are built opt-in (81d86d4). They run against the Gate A baseline before WP-RC3.
 
 ## 0. Rules for every work package
 

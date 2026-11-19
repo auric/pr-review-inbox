@@ -1,6 +1,6 @@
 # Delegation gaps: what an rl-reviewer subagent knows
 
-Status: analysis of 2026-11-18, main at acb0b77. Not started. Each fix ships first as a variant, so REVIEW_PROMPT_VERSION stays "2.8" until a variant wins.
+Status: analysis of 2026-11-18, main at acb0b77. Fixes 2, 5, and 6 are done (6ebd49f, a789260). Fixes 1, 3, and 4 are not started. Each fix ships first as a variant, so REVIEW_PROMPT_VERSION stays "2.8" until a variant wins.
 
 ## 1. Verdict
 
