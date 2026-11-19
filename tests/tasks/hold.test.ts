@@ -125,7 +125,7 @@ describe("409 grid (ps4-plan.md section 4)", () => {
     s.db.query("UPDATE task_part SET blocked_json = NULL WHERE id = $id").run({ id: part });
     await check("hold, unknown part", () => s.loop.hold(s.db, s.task, part + 99, v(s)), 404, "Part not found.");
     // Skip and Start again refuse a working part: a part with an open row.
-    await check("skip, no sub-tasks", skip, 409, "Only a part of a task with sub-tasks can be skipped.");
+    await check("skip, no sub-tasks", skip, 409, "Only a task with several PRs can skip a part.");
     set("UPDATE task SET subtasks = 1 WHERE id = $t");
     await check("skip, working part", skip, 409, "Hold part 1 first.");
     await check("restart, working part", restart, 409, "Hold part 1 first.");

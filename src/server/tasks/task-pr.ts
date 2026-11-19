@@ -10,12 +10,14 @@ import { byThread, type TurnMsg, threadTurn } from "../../shared/turn";
 import { threadPlace } from "../review/context-files";
 import { currentDrafts } from "../review/drafts";
 import { docNames } from "./plan";
+import { partsPlan } from "./tasks";
 
 // A live task PR: the PR of a task_part or task_pr row whose part is not adopted and whose task is not done or failed. The newest
 // part wins. main: the PR is task_part.pr, so its branch holds the plan files. plan: the repository paths of the plan files.
 export type LiveTaskPart = { task: number; key: string; part: number; main: boolean; plan: string[] };
 
-const LIVE = `SELECT t.id AS task, t.key, p.id AS part, p.pr = $pr AS main, COALESCE(p.spec_dir, t.spec_dir) AS specDir, t.size
+const LIVE = `SELECT t.id AS task, t.key, p.id AS part, p.pr = $pr AS main, COALESCE(p.spec_dir, t.spec_dir) AS specDir, t.size,
+    t.subtasks, t.settings_json
   FROM task_part p JOIN task t ON t.id = p.task
   WHERE p.adopted = 0 AND t.state NOT IN ('done', 'failed')
     AND (p.pr = $pr OR EXISTS (SELECT 1 FROM task_pr x WHERE x.part = p.id AND x.pr = $pr))
@@ -32,10 +34,12 @@ export function liveTaskPart(db: Database, pr: number): LiveTaskPart | null {
     main: number | null;
     specDir: string;
     size: TaskSize | null;
+    subtasks: number;
+    settings_json: string;
   } | null;
   if (!r) return null;
-  // A task without a size has no plan files yet.
-  const plan = r.size === null ? [] : docNames(r.size).map((n) => specPath(r.specDir, n));
+  // A task without a size has no plan files yet. A part of a parts plan holds the plan.md of its slice.
+  const plan = r.size === null ? [] : docNames(partsPlan(r) ? "small" : r.size).map((n) => specPath(r.specDir, n));
   return { task: r.task, key: r.key, part: r.part, main: r.main === 1, plan };
 }
 

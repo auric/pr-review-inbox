@@ -696,7 +696,7 @@ describe("create and interview (spec.md sections 6.2 and 6.11, AC-B1)", () => {
       // The routes of Hold, Skip, and Start again validate the input and answer through the loop.
       for (const [route, status, error] of [
         ["hold", 404, "Part not found."],
-        ["skip", 409, "Only a part of a task with sub-tasks can be skipped."],
+        ["skip", 409, "Only a task with several PRs can skip a part."],
         ["restart", 404, "Part not found."],
       ] as const) {
         const bad = await h.json<{ error: string }>(`/api/tasks/${c.body.id}/parts/1/${route}`, { body: {} });

@@ -40,6 +40,7 @@ import {
   lowerOf,
   partDocsOf,
   partNames,
+  partsPlan,
   setBlocked,
   TASK_CHANGED,
   type TaskResult,
@@ -143,8 +144,9 @@ export function prText(t: Pick<TaskRow, "key" | "title" | "spec_dir">, plan: Pla
   return { title: `${t.key}: ${t.title}`, description: mark ? AI_MARK + description : description };
 }
 
-// spec.md section 6.20.6: the PR text of a part of a task with sub-tasks. The title and the plan link name the part. The description adds
-// the parent key, one line with the PR of each part, and a keep-branch sentence for each part that builds on this one (section 6.9).
+// spec.md section 6.20.6: the PR text of a part of a parts plan. The title and the plan link name the part. The description adds the
+// parent key of a task with sub-tasks, one line with the PR of each part, and a keep-branch sentence for each part that builds on this one
+// (section 6.9).
 // null: the part has no plan part.
 export function subtaskPrText(db: Database, t: TaskRow, partId: number, mark: boolean): { title: string; description: string } | null {
   const rows = db.query(Q.list).all({ task: t.id }) as ListRow[];
@@ -178,16 +180,17 @@ export function subtaskPrText(db: Database, t: TaskRow, partId: number, mark: bo
   const description = [
     own.description,
     "",
-    `Parent: ${t.key}`,
+    // self-approved-plans.md section 5.6: a stack plan has no parent issue.
+    ...(t.subtasks === 1 ? [`Parent: ${t.key}`] : []),
     live.map((p) => `${name(p)}: ${stateOf(p)}`).join(" · "),
     ...uppers.map((p) => `Please keep this branch until ${name(p)} moves to the new target.`),
   ].join("\n");
   return { title: own.title, description: mark ? AI_MARK + description : description };
 }
 
-// The PR text of a part: the text of its sub-task part, else the text of the task.
+// The PR text of a part: the text of its part of a parts plan, else the text of the task.
 const textOf = (db: Database, t: TaskRow, part: { id: number }, plan: Plan, mark: boolean) =>
-  (t.subtasks === 1 ? subtaskPrText(db, t, part.id, mark) : null) ?? prText(t, plan, mark, t.size === "small" ? "plan.md" : "tasks.md");
+  (partsPlan(t) ? subtaskPrText(db, t, part.id, mark) : null) ?? prText(t, plan, mark, t.size === "small" ? "plan.md" : "tasks.md");
 
 // spec.md section 6.20.6: the PR target of a part with its own base, else the task base. The push guard takes the key of the part.
 const targetOf = (t: TaskRow, part: Pick<PartRow, "base_branch" | "base_commit">) =>

@@ -160,6 +160,7 @@ import {
   type SubtaskPlan,
   type SubtaskRow,
   saveSubtasks,
+  stackParts,
   subtaskDtos,
   subtaskRows,
 } from "./subtasks";
@@ -1071,9 +1072,14 @@ export function setBaseMoves(db: Database, task: number, moves: BaseMoves, at: n
 }
 export const baseCheckOf = (db: Database, task: number) => baseChecks.get(db)?.get(task) ?? null;
 
+// self-approved-plans.md section 5.1: the task builds its plan as several PRs on the part engine. task.subtasks stays 0 for a stack plan,
+// because that flag also means the Jira sub-task reads.
+export function partsPlan(t: Pick<TaskRow, "subtasks" | "size" | "settings_json">): boolean {
+  return t.subtasks === 1 || (t.size === "large" && settingsOf(t).planReview === "self");
+}
+
 // spec.md section 6.18.2: the part of a send: the part in the body, else the part of the reason, else the part that the loop builds,
-// else the last part that is not merged. A task with sub-tasks takes the default focus of spec.md section 6.20.13 after the part of the
-// reason.
+// else the last part that is not merged. A parts plan takes the default focus of spec.md section 6.20.13 after the part of the reason.
 export function currentPart(db: Database, t: TaskRow, partId?: number): PartRow | null {
   const all = db.query(Q.parts).all({ id: t.id }) as PartRow[];
   if (partId !== undefined) return all.find((p) => p.id === partId) ?? null;
@@ -1084,7 +1090,7 @@ export function currentPart(db: Database, t: TaskRow, partId?: number): PartRow 
   const ownId = b?.part ?? own?.part;
   return (
     all.find((p) => p.id === ownId) ??
-    (t.subtasks === 1 ? focusOf(db, t, all) : undefined) ??
+    (partsPlan(t) ? focusOf(db, t, all) : undefined) ??
     all.find((p) => p.state === "implementing") ??
     all.findLast((p) => p.adopted === 0 && HAS_WORKTREE.has(p.state)) ??
     null
@@ -1146,11 +1152,11 @@ export type LowerPart = { id: number; name: string; branch: string; aFinal: stri
 type LowerRow = Pick<PartRow, "id" | "ord" | "keys_json" | "branch" | "state" | "pushed" | "adopted" | "pr" | "remote_pr">;
 export function lowerOf(
   db: Database,
-  t: Pick<TaskRow, "id" | "key" | "subtasks" | "target_branch">,
+  t: Pick<TaskRow, "id" | "key" | "subtasks" | "size" | "settings_json" | "target_branch">,
   part: Pick<PartRow, "after_part" | "base_branch" | "base_commit" | "adopted">,
   rows: readonly LowerRow[] = db.query(Q.parts).all({ id: t.id }) as PartRow[],
 ): LowerPart | null {
-  if (t.subtasks !== 1 || part.after_part === null || part.base_commit === null || part.adopted === 1) return null;
+  if (!partsPlan(t) || part.after_part === null || part.base_commit === null || part.adopted === 1) return null;
   const lower = rows.find((p) => p.id === part.after_part);
   if (!lower || lower.branch !== part.base_branch || part.base_branch === t.target_branch) return null;
   const pr =
@@ -1183,12 +1189,12 @@ export function setLowerHow(db: Database, part: number, how: LowerHow) {
 }
 export const lowerHowOf = (db: Database, part: number): LowerHow | null => lowerHows.get(db)?.get(part) ?? null;
 
-// spec.md section 6.20.6, Plan file: the docs of one part of a task with sub-tasks. The plan holds only this part (task_part.ord is its
-// plan part number) and the map entries of its files, under the first key and the summary of its sub-task. A task without sub-tasks
-// keeps its docs. null: no plan, or no plan part with this number.
+// spec.md section 6.20.6, Plan file: the docs of one part of a parts plan. The plan holds only this part (task_part.ord is its plan part
+// number) and the map entries of its files, under the first key and the summary of its sub-task, else the task key and the part title.
+// Every other task keeps its docs. null: no plan, or no plan part with this number.
 export function partDocsOf(db: Database, t: TaskRow, part: { ord: number; keys_json: string | null; title: string }): Docs | null {
   const docs = docsOf(t);
-  if (!docs || t.subtasks !== 1) return docs;
+  if (!docs || !partsPlan(t)) return docs;
   const pp = docs.parsed.parts.find((x) => x.n === part.ord);
   if (!pp) return null;
   const files = new Set(pp.tasks.flatMap((x) => x.files).map((f) => repoPath(f) ?? f));
@@ -1219,10 +1225,11 @@ type ScheduleRow = {
   override: number;
 };
 
-// spec.md section 6.20.6: the scheduler over the part rows of a task with sub-tasks. null for a task without sub-tasks. The sync sends
-// GATE_PASSED when the part gate passes and GATE_FAILED when it fails later (section 6.20.7), so the state approved holds the gate result.
+// spec.md section 6.20.6: the scheduler over the part rows of a parts plan. null for every other task. The sync sends GATE_PASSED when
+// the part gate passes and GATE_FAILED when it fails later (section 6.20.7), so the state approved holds the gate result. A part without
+// keys is never done by Jira.
 export function scheduleOf(db: Database, t: TaskRow, rows: readonly ScheduleRow[]): Schedule | null {
-  if (t.subtasks !== 1) return null;
+  if (!partsPlan(t)) return null;
   const done = new Set(
     subtaskRows(db, t.id)
       .filter((r) => r.category === "done")
@@ -2336,6 +2343,9 @@ export function createTaskService(opts: TaskServiceOptions) {
   // POST /api/tasks/:id/plan: the plan approval with the size and the picked commands. The first plan of a repository needs the warning.
   function plan(db: Database, id: number, input: TaskPlanInput): TaskResult {
     const t0 = taskRow(db, id);
+    // self-approved-plans.md section 3.2: only a large plan of a task without sub-tasks takes a plan review choice.
+    if (input.review && t0?.subtasks === 1)
+      return { status: 400, error: "A task with sub-tasks builds one PR per sub-task. It takes no plan review." };
     if (t0?.subtasks === 1 && (t0.state === "implementing" || t0.state === "ready")) return approveAdded(db, t0, input);
     const l = loadPlan(db, id, input.version);
     if ("status" in l) return l;
@@ -2343,6 +2353,7 @@ export function createTaskService(opts: TaskServiceOptions) {
     // spec.md section 6.20.4: a sub-task task is small. The size rules of section 6.1 do not apply to it.
     const subtasks = t.subtasks === 1;
     if (input.subtasks && !subtasks) return { status: 400, error: `${t.key} builds no sub-tasks.` };
+    if (input.review && input.size !== "large") return { status: 400, error: "Only a large plan takes a plan review choice." };
     const size = subtasks ? "small" : input.size;
     const problem = subtasks ? null : (sizeProblem(db, t, docs, size) ?? largeRepoProblem(size, docs.parsed.parts, repoDtos(db, t)));
     if (problem) return conflict(db, t, problem);
@@ -2412,6 +2423,10 @@ export function createTaskService(opts: TaskServiceOptions) {
       if ("bad" in a) return { status: 400, error: a.bad };
       sub = a;
     }
+    // self-approved-plans.md section 3.2: an API call without review never builds a large plan without colleagues. Other sizes drop
+    // planReview. A self-approved plan builds its stack with the repository max_open.
+    const review = size === "large" ? (input.review ?? "spec-pr") : undefined;
+    if (review === "self") sub = { parts: stackParts(t, docs.parsed.parts, prefix), maxOpen: repo.maxOpen };
     // A picked proposal gets the first free ID cmd<n>, so the IDs of the repository stay unique.
     const used = new Set(picked.filter((c) => !c.id.startsWith(NEW_COMMAND)).map((c) => c.id));
     let n = 1;
@@ -2440,10 +2455,12 @@ export function createTaskService(opts: TaskServiceOptions) {
         // spec.md section 6.16: the branch prefix and the existing-branch pick go with the approval. Section 6.20.8: maxOpen and
         // buildsAtOnce too.
         const builds = input.subtasks?.buildsAtOnce;
+        const { planReview: _, ...kept } = settingsOf(t);
         const s: TaskSettings = {
-          ...settingsOf(t),
+          ...kept,
           branchPrefix: prefix,
           existing: input.existing ?? "continue",
+          ...(review && { planReview: review }),
           ...(sub && { maxOpen: sub.maxOpen }),
           ...(sub && builds !== undefined && { buildsAtOnce: builds }),
         };

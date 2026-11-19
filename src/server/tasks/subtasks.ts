@@ -376,6 +376,31 @@ export type PlannedPart = {
   pr: FoundPr | null;
 };
 
+// self-approved-plans.md section 5.2: the part rows of a self-approved large plan, in plan order (design.md:380-381). Part 1 starts from
+// the target branch. Each later part builds on the part before it. The start and after fields of the spec result stay unread.
+export function stackParts(
+  t: { key: string; target_branch: string; spec_dir: string },
+  plan: readonly { n: number; title: string }[],
+  prefix: string,
+): PlannedPart[] {
+  const out: PlannedPart[] = [];
+  for (const p of [...plan].sort((a, b) => a.n - b.n)) {
+    const below = out.at(-1);
+    out.push({
+      n: p.n,
+      keys: [],
+      title: p.title,
+      branch: branchName(prefix, t.key, { kind: "part", n: p.n, title: p.title }),
+      base: below?.branch ?? t.target_branch,
+      start: below ? "stack" : "base",
+      after: below ? String(below.n) : null,
+      specDir: `${t.spec_dir.replace(/\/?$/, "/")}part-${p.n}/`,
+      pr: null,
+    });
+  }
+  return out;
+}
+
 export type ApprovalInput = {
   parts: { n: number; start: StartMode; after: string | null; existing?: "continue" | "new" }[];
   track: { key: string; pr: number }[];

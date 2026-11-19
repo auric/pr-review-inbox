@@ -50,6 +50,7 @@ import {
   MAX_OPEN_CAP,
   type PartKind,
   type PartState,
+  PLAN_REVIEWS,
   type PlanProblem,
   PREFIX_MAX,
   PREFIXES_MAX,
@@ -1574,6 +1575,8 @@ export const taskPlanInput = z.object({
     .array(z.object({ taskRepo: positiveInt, branch: branchName }))
     .max(100)
     .optional(),
+  // self-approved-plans.md section 3.2: who reviews a large plan. Absent with size large: "spec-pr".
+  review: z.enum(PLAN_REVIEWS).optional(),
   // spec.md section 6.20.5: the plan of a sub-task task. parts: the start of each plan part n; after names a part number or a tracked
   // sub-task key. existing: the found branch of the part key. track: the PR that the app follows for a sub-task with several open PRs.
   // buildsAtOnce (section 6.20.6): the parts that build at the same time. Absent: the stored value.

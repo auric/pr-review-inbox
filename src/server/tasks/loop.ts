@@ -115,6 +115,7 @@ import {
   partNames,
   partOf,
   partSession,
+  partsPlan,
   repoSettings,
   type SessionHeads,
   saveAllow,
@@ -581,6 +582,9 @@ const Q = {
   // spec.md section 6.20.8: the base commit of a part with its own base.
   partBase: "UPDATE task_part SET base_commit = $base, updated_at = $now WHERE id = $id",
   override: "UPDATE task_part SET override = 1, updated_at = $now WHERE id = $id AND state = 'planned'",
+  // self-approved-plans.md section 5.8: the planned parts on top of a dropped part build on the part below it, else on the target.
+  repoint: `UPDATE task_part SET after_part = $to, base_branch = COALESCE((SELECT branch FROM task_part WHERE id = $to), $target),
+    updated_at = $now WHERE task = $task AND after_part = $from AND state = 'planned'`,
   repoBase: "UPDATE task_repo SET base_commit = $base WHERE id = $id",
   repoPin: "UPDATE task_repo SET pinned = $pinned, base_commit = $base WHERE id = $id",
   prBase: "UPDATE task_pr SET base_commit = $base, head = $head WHERE part = $part AND task_repo = $repo",
@@ -1644,8 +1648,8 @@ export function createLoop(opts: LoopOptions) {
   async function commit(c: Ctx, item: string, message: string, allow: string[], own: string[] = []): Promise<number | null> {
     guard(c);
     if (!c.who) block(c, { kind: "error", cause: "app", step: null, text: "Needs you: set user.name and user.email in your git config." });
-    // spec.md section 6.16.5, Size: a large build that changes a submodule stops.
-    if (c.size === "large")
+    // spec.md section 6.16.5, Size: a large build that changes a submodule stops. c.size is "small" for a part of a stack plan.
+    if (c.t.size === "large")
       for (const s of c.trees)
         if (s.row.role === "submodule" && s.wt && (await status(s.wt)).length)
           block(c, { kind: "size", cause: "large_repos", step: null, text: LARGE_REPOS_TEXT });
@@ -2335,7 +2339,7 @@ export function createLoop(opts: LoopOptions) {
   }
 
   async function context(db: Database, t: TaskRow, part: PartRow, mode: DriverMode = "build"): Promise<Ctx> {
-    // spec.md section 6.20.6: a part of a task with sub-tasks has its own plan, base commit, and plan folder.
+    // spec.md section 6.20.6: a part of a parts plan has its own plan, base commit, and plan folder.
     const docs = partDocsOf(db, t, part);
     const base = baseOf(t, part);
     if (!docs || !base || !t.size) throw new Error("The task has no approved plan.");
@@ -2352,7 +2356,8 @@ export function createLoop(opts: LoopOptions) {
     });
     const clone = db.query(Q.clone).get({ project: t.project, repo: t.repo }) as { path: string } | null;
     const p = taskProfile(settings.profiles(), t);
-    const name = t.subtasks === 1 ? partNames(t.key, parts(db, t.id)).get(part.id) : undefined;
+    const many = partsPlan(t);
+    const name = many ? partNames(t.key, parts(db, t.id)).get(part.id) : undefined;
     return {
       db,
       id: t.id,
@@ -2365,7 +2370,8 @@ export function createLoop(opts: LoopOptions) {
       label: name?.commit ?? t.key,
       title: name ? part.title : t.title,
       specDir: part.spec_dir ?? t.spec_dir,
-      size: t.size,
+      // self-approved-plans.md section 5.6: each part of a parts plan commits and ticks the plan.md of its own slice.
+      size: many ? "small" : t.size,
       docs,
       plan: docs.parsed,
       budget: budgetOf(db, t),
@@ -2649,7 +2655,7 @@ export function createLoop(opts: LoopOptions) {
       rerun.delete(part.id);
       const p = (async () => {
         const t = taskRow(db, id) as TaskRow;
-        if (resumed && t.subtasks === 1) await settle(db, t, part);
+        if (resumed && partsPlan(t)) await settle(db, t, part);
         await runPart(db, taskRow(db, id) as TaskRow, part);
       })()
         .catch((e) => failed(db, id, e))
@@ -2671,7 +2677,7 @@ export function createLoop(opts: LoopOptions) {
           // ps4-plan.md section 2.6: a held part does not build.
           for (const p of buildingAll(db, id))
             if (!running.has(p.id) && !ended.has(p.id) && !onHold(db, p.id) && claim(id, p.id)) go(p, !keep);
-          if (t.subtasks === 1)
+          if (partsPlan(t))
             for (let p = await startPart(db, id); p; p = await startPart(db, id)) {
               if (claim(id, p.id)) go(p, false);
               if (closing) break;
@@ -2705,11 +2711,11 @@ export function createLoop(opts: LoopOptions) {
             } finally {
               leave(active, id, part.id);
             }
-      // spec.md section 6.16.7: the pre-flight passes before any Claude step of the build. A part of a task with sub-tasks runs it at its
-      // start (startPart), and again for each part that builds when a driver starts.
+      // spec.md section 6.16.7: the pre-flight passes before any Claude step of the build. A part of a parts plan runs it at its start
+      // (startPart), and again for each part that builds when a driver starts.
       const t0 = taskRow(db, id);
       if (t0?.state === "implementing" && t0.blocked_json === null) {
-        const branches = t0.subtasks === 1 ? buildingAll(db, id).map((p) => p.branch) : [plannedBranch(db, t0)];
+        const branches = partsPlan(t0) ? buildingAll(db, id).map((p) => p.branch) : [plannedBranch(db, t0)];
         for (const branch of branches) {
           const b = await preflight(db, preflightDeps, t0, branch, null);
           if (b) {
@@ -2834,14 +2840,15 @@ export function createLoop(opts: LoopOptions) {
     return p ? p.mergeCommit({ project: t.project, repo: t.repo, id: lower.remotePr as number }) : null;
   };
 
-  // spec.md section 6.18.5, Base check of the current part. A task with sub-tasks checks each built part on its own base (section
+  // spec.md section 6.18.5, Base check of the current part. A parts plan checks each built part on its own base (section
   // 6.20.10). A part whose lower part merged checks the task base, and the first check finds how the lower part merged. It stores the
   // counts for the Task view. A failed read keeps the last result. The caller sends the change notice after the check, also after a failure.
   async function refreshBases(db: Database, id: number): Promise<(BaseMove & { part: number })[]> {
     const t = taskRow(db, id);
     if (!t || (t.state !== "implementing" && t.state !== "ready")) return [];
-    const one = t.subtasks === 1 ? null : currentPart(db, t);
-    const list = one ? [one] : t.subtasks === 1 ? parts(db, id).filter((p) => p.adopted === 0 && WORKTREE.has(p.state)) : [];
+    const many = partsPlan(t);
+    const one = many ? null : currentPart(db, t);
+    const list = one ? [one] : many ? parts(db, id).filter((p) => p.adopted === 0 && WORKTREE.has(p.state)) : [];
     const out: (BaseMove & { part: number })[] = [];
     const cache = cachePath(longPath(dataDir), { project: t.project, repo: t.repo, id });
     try {
@@ -3528,6 +3535,13 @@ export function createLoop(opts: LoopOptions) {
     return upper ? `${name(upper)} builds on ${name(part)}. Move or drop ${name(upper)} first.` : null;
   }
 
+  // self-approved-plans.md section 5.8 (D4): after a Skip or a Drop in a stack plan, each planned part on top of the part builds on the
+  // part below it. A task with sub-tasks keeps the base start of spec.md section 6.20.7. In the transaction of ABANDON.
+  function repoint(db: Database, t: TaskRow, part: PartRow) {
+    if (t.subtasks === 1 || !partsPlan(t)) return;
+    db.query(Q.repoint).run({ task: t.id, from: part.id, to: part.after_part, target: t.target_branch, now: now() });
+  }
+
   // Skip and Start again (part-session.md section 9.3.2): the reasons of the part go, from its row and from the task when the first reason
   // is the part's, and its open loop questions go. In the transaction of the part event. Returns the new version.
   function dropReasons(db: Database, id: number, partId: number, version: number): number {
@@ -3642,8 +3656,8 @@ export function createLoop(opts: LoopOptions) {
     },
 
     // POST /api/tasks/:id/parts/:part/drop (spec.md section 6.20.7): "Drop this sub-task" sends ABANDON for a planned or declined part. 409
-    // while a started part builds on it. A planned part on top of it starts from the base (schedule.ts). The task is ready when no part
-    // waits for its PR, and done when every part merged or was dropped.
+    // while a started part builds on it. A planned part on top of it starts from the base (schedule.ts), or in a stack plan builds on the
+    // part below it (repoint). The task is ready when no part waits for its PR, and done when every part merged or was dropped.
     drop(db: Database, id: number, partId: number, input: { version: number }): TaskResult {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
@@ -3658,6 +3672,7 @@ export function createLoop(opts: LoopOptions) {
       const error = db.transaction((): string | null => {
         const r = advancePart(db, { task: id, version: t.version, part: partId }, { type: "ABANDON" }, {}, now());
         if (r.status !== 200) return r.error;
+        repoint(db, t, part);
         partsDone(db, id, r.version);
         return null;
       })();
@@ -3693,7 +3708,7 @@ export function createLoop(opts: LoopOptions) {
       return { status: 200, task: dto(db, id) };
     },
 
-    // POST /api/tasks/:id/parts/:part/skip (part-session.md sections 2.12 and 9.3.2): "Skip this part" of a task with sub-tasks, before
+    // POST /api/tasks/:id/parts/:part/skip (part-session.md sections 2.12 and 9.3.2): "Skip this part" of a parts plan, before
     // the PR of the part. The patch of the work is saved, the part takes ABANDON, its reasons and its transcript go, and then its
     // worktree. A Skip while another part runs a step keeps the task live (ps4-plan.md section 1 gap 17). In stopped, RESUME runs the
     // check of the task state (gap 18).
@@ -3701,7 +3716,7 @@ export function createLoop(opts: LoopOptions) {
       const t = load(db, id, input.version);
       if ("status" in t) return t;
       if (t.state !== "implementing" && t.state !== "stopped") return conflict(db, id, TASK_STATE_TEXT[t.state]);
-      if (t.subtasks !== 1) return conflict(db, id, "Only a part of a task with sub-tasks can be skipped.");
+      if (!partsPlan(t)) return conflict(db, id, "Only a task with several PRs can skip a part.");
       const part = parts(db, id).find((p) => p.id === partId);
       if (!part) return { status: 404, error: "Part not found." };
       if (HAS_PR.has(part.state) || part.state === "declined" || part.state === "merged") return conflict(db, id, "This part has a PR.");
@@ -3722,6 +3737,7 @@ export function createLoop(opts: LoopOptions) {
             const r = advancePart(db, { task: id, version: cur.version, part: partId }, { type: "ABANDON" }, {}, now());
             if (r.status !== 200) return r.error;
             stopSends(db, id, partId, now());
+            repoint(db, cur, part);
             partsDone(db, id, dropReasons(db, id, partId, r.version));
             return null;
           })();
@@ -3891,11 +3907,11 @@ export function createLoop(opts: LoopOptions) {
       if (t.state === "ready" && !b) return conflict(db, id, TASK_STATE_TEXT.ready);
       if (t.state === "implementing" && !b && (drivers.has(id) || !buildingAll(db, id).length))
         return conflict(db, id, TASK_STATE_TEXT.implementing);
-      // A plain Continue builds nothing when each part in its build is held. A planned part of a task with sub-tasks can still start.
+      // A plain Continue builds nothing when each part in its build is held. A planned part of a parts plan can still start.
       if (t.state === "implementing" && !b) {
         const all = parts(db, id);
         const held = all.find((p) => p.state === "implementing" && onHold(db, p.id));
-        const other = all.some((p) => (p.state === "implementing" && !onHold(db, p.id)) || (t.subtasks === 1 && p.state === "planned"));
+        const other = all.some((p) => (p.state === "implementing" && !onHold(db, p.id)) || (partsPlan(t) && p.state === "planned"));
         if (held && !other) return conflict(db, id, HELD_GO(held.ord));
       }
       goOnReason(db, t, b, true);
