@@ -19,6 +19,8 @@ export function changedFilters(data: { prs?: number[]; runs?: number[]; tasks?: 
   // A run event without PRs is a log update. The PR list does not change with it.
   if (prs.length || (!runs.length && !tasks.length)) out.push({ queryKey: ["prs"] }, { queryKey: ["status"] });
   if (tasks.length) out.push({ queryKey: ["tasks"] }, ...tasks.map((id) => ({ queryKey: ["task", id] })));
+  // TaskPartDto.comments reads the reply runs and drafts of a task PR, and their events name only the PR.
+  if (prs.length) out.push({ queryKey: ["task"], predicate: (q) => q.queryKey.length === 2 });
   for (const id of prs)
     out.push(
       {

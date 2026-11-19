@@ -11,7 +11,9 @@ import type {
   BranchCheckDto,
   BranchSearchDto,
   RepoTaskSettingsDto,
+  ReviewItemDto,
   RunDetail,
+  RunDto,
   TaskAllowInput,
   TaskAnswersInput,
   TaskContextDto,
@@ -213,7 +215,9 @@ export type TaskAction =
   | { kind: "push" | "wait-merge" | "drop"; part: number }
   | { kind: "move"; part: number; push?: true }
   | { kind: "start"; part: number }
-  | { kind: "tracker-read"; source: TrackerId };
+  | { kind: "tracker-read"; source: TrackerId }
+  // ps6-ps7-plan.md section 3: the threads of the Fix groups of the sorted PR comments.
+  | { kind: "comments"; part: number; threads: number[] };
 
 async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
   const param = id$(t.id);
@@ -312,6 +316,10 @@ async function send(t: TaskDto, a: TaskAction): Promise<TaskDto> {
       return read(await tasks.parts[":part"].start.$post({ param: { ...param, part: String(a.part) }, json: { version, override: true } }));
     case "tracker-read":
       return read(await tasks[`${a.source}-read`].$post({ param, json: { version } }));
+    case "comments":
+      return read(
+        await tasks.parts[":part"].comments.$post({ param: { ...param, part: String(a.part) }, json: { version, threads: a.threads } }),
+      );
   }
 }
 
@@ -331,4 +339,24 @@ export function useTaskAction(t: TaskDto | undefined) {
       if (t) qc.invalidateQueries({ queryKey: ["task", t.id] });
     },
   });
+}
+
+// ---------- PR comments of a task PR (ps6-ps7-plan.md section 1 items 3 and 7) ----------
+
+const pr$ = (pr: number) => ({ param: { id: String(pr) } });
+// "Sort the comments": the reply run of the PR for every thread where it is your turn (POST /api/prs/:id/reply-run).
+export const sortComments = async (pr: number) => read<RunDto>(await api.api.prs[":id"]["reply-run"].$post({ ...pr$(pr), json: {} }));
+// The sort run that this page started. live.ts refetches ['runs', 'pr', pr] at each run event of the PR.
+export function useSortRun(s: { pr: number; run: number } | null): RunDto | null {
+  const q = useQuery({
+    queryKey: ["runs", "pr", s?.pr ?? 0],
+    queryFn: async () => read<RunDto[]>(await api.api.prs[":id"].runs.$get(pr$(s?.pr ?? 0))),
+    enabled: s !== null,
+  });
+  return q.data?.find((r) => r.id === s?.run) ?? null;
+}
+// The accepted reply drafts of the PR, for the text of the post confirm.
+export async function acceptedReplies(pr: number): Promise<ReviewItemDto[]> {
+  const items = await read<ReviewItemDto[]>(await api.api.prs[":id"]["reply-drafts"].$get(pr$(pr)));
+  return items.filter((x) => x.status === "accepted");
 }

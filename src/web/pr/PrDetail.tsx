@@ -142,6 +142,7 @@ export function PrDetail({
   onTaskIds,
   onProfile,
   onRestore,
+  onTask,
   ref,
 }: {
   pr: PrRow;
@@ -159,6 +160,8 @@ export function PrDetail({
   onTaskIds: () => void;
   onProfile: (id: string) => void;
   onRestore: (pr: PrRow) => void;
+  // AC-B397: opens the Task view of a task.
+  onTask: (task: number) => void;
   ref: Ref<DetailApi | null>;
 }) {
   const q = usePr(row.id);
@@ -341,6 +344,7 @@ export function PrDetail({
     onProfile,
     showInDiff: (card) => showDiff.current(card),
     openExplain: () => onExplain(true),
+    onTask: data?.task ? () => onTask((data.task as NonNullable<typeof data.task>).id) : null,
   });
   draftReply.current = review.api.draftReply;
   fixRef.current = { open: review.api.fix, copy: review.fix.copyPrompt };

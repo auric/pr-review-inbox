@@ -41,7 +41,9 @@ import {
   fileMeta,
   firstPick,
   firstPicks,
+  fixThreads,
   goneBase,
+  groupChoice,
   inTask,
   listText,
   logRows,
@@ -96,6 +98,7 @@ import {
   tellBox,
   ticks,
   timedOutSetup,
+  verdictText,
   withSetup,
 } from "../../src/web/tasks/model";
 import { answersOf, QuestionsForm } from "../../src/web/tasks/Questions";
@@ -3013,5 +3016,133 @@ describe("ps5-plan.md section 4.4 (AC-B379): the quick review row of the Log", (
     const html = renderToStaticMarkup(createElement(LogTab, { t: building({ steps }), runner: R, onRunLog: () => {} }));
     expect(html.match(/Quick review/g)?.length).toBe(1);
     expect(html.match(/Own review/g)?.length).toBe(1);
+  });
+});
+
+// docs/plans/review-v2/ps6-ps7-plan.md section 4, PS6-C, AC-B398: the PR comment rows of a task PR, one test each, at most one primary,
+// in the order of section 2.1.
+describe("AC-B398: the PR comment rows of a task PR", () => {
+  const rows = tellRows();
+  const groups = [
+    { n: 1, threads: [{ thread: 101, place: "src/a.ts:3", judgement: "valid" as const, body: "Agreed.", item: 1 }] },
+    { n: 2, threads: [{ thread: 102, place: "General comment", judgement: "invalid" as const, body: "The name is fine.", item: 2 }] },
+    { n: 3, threads: [{ thread: 103, place: "General comment", judgement: "question" as const, body: "It runs once.", item: 3 }] },
+  ];
+  const withC = (c: Partial<NonNullable<TaskPartDto["comments"]>>, o: Partial<TaskPartDto> = {}) => ({
+    ...rows.open,
+    parts: [part({ ...PR_PART, ...o, comments: { turn: 0, sorted: null, accepted: 0, ...c } })],
+  });
+  const comments = (
+    o: Parameters<typeof instruct>[0] & { verdicts?: { thread: number; verdict: "fixed" | "pushback"; reason: string }[] },
+  ) =>
+    step({
+      ...instruct(o),
+      item: "C1",
+      detail: stepDetail.parse({
+        instruct: {
+          text: "Address the PR comments of part 1",
+          part: 7,
+          blockedBefore: null,
+          result: o.result ?? null,
+          purpose: "comments",
+          comments: { pr: 5, run: 9, threads: [{ thread: 101, replyTo: 101, group: 1 }], verdicts: o.verdicts ?? null },
+        },
+        notes: o.notes ?? [],
+      }),
+    });
+
+  test("PR comments: 'N comments on the PR wait for you.' with Sort the comments", () => {
+    const v = view(withC({ turn: 3 }));
+    expect(shape(v)).toEqual({
+      status: "3 comments on the PR wait for you.",
+      primary: "Sort the comments",
+      more: ["Go to the PR", "Close the task"],
+      screen: "pr",
+    });
+    expect([v.primary?.kind, v.needsYou]).toEqual(["sort-comments", true]);
+  });
+
+  test("Comments sorted: the counts by choice, and Send N groups sends only the Fix groups", () => {
+    const t = withC({ turn: 3, sorted: { run: 9, groups } });
+    expect(shape(view(t))).toEqual({
+      status: "1 group to fix, 1 to push back, 1 to answer.",
+      primary: "Send 1 group to Claude",
+      more: ["Go to the PR", "Close the task"],
+      screen: "pr",
+    });
+    expect(groups.map(groupChoice)).toEqual(["fix", "pushback", "reply"]);
+    expect(fixThreads(groups)).toEqual([101]);
+    // The user picks Fix for group 2: the count and the threads follow.
+    const picks = { 2: "fix" as const };
+    expect(taskView(t, { runner: R, forge: "Bitbucket", now: NOW, picks }).primary?.label).toBe("Send 2 groups to Claude");
+    expect(fixThreads(groups, picks)).toEqual([101, 102]);
+    // No Fix group: Go to the PR, where the drafts of the sort post.
+    const none = taskView(t, { runner: R, forge: "Bitbucket", now: NOW, picks: { 1: "reply" } });
+    expect([none.status, none.primary?.kind]).toEqual(["1 group to push back, 2 to answer.", "go-pr"]);
+  });
+
+  test("Fixed, not pushed with replies: Push and post N replies", () => {
+    const v = view(withC({ accepted: 2 }, { head: "d".repeat(40) }));
+    expect(shape(v)).toEqual({
+      status: "Your change has new commits that are not on the server yet. 2 replies wait.",
+      primary: "Push and post 2 replies",
+      more: ["Show the diff", "Go to the PR", "Close the task"],
+      screen: "pr",
+    });
+    expect(v.primary?.kind).toBe("push-post");
+    // Without accepted replies the row stays Push to <branch>.
+    expect(view(withC({}, { head: "d".repeat(40) })).primary?.kind).toBe("push");
+  });
+
+  test("Replies wait: Post N replies, before the sorted and PR comment rows", () => {
+    const v = view(withC({ accepted: 1, turn: 2, sorted: { run: 9, groups } }));
+    expect(shape(v)).toEqual({ status: "1 reply waits.", primary: "Post 1 reply", more: ["Go to the PR", "Close the task"], screen: "pr" });
+    expect(v.primary?.kind).toBe("post-replies");
+    // A sorted run with no group left falls through to the PR comments row.
+    expect(view(withC({ turn: 2, sorted: { run: 9, groups: [] } })).primary?.kind).toBe("sort-comments");
+    // Section 2.1 order: sorted before PR comments.
+    expect(view(withC({ turn: 2, sorted: { run: 9, groups } })).primary?.kind).toBe("send-comments");
+  });
+
+  test("Following (comments): Claude works on the PR comments; Stop only", () => {
+    const t = { ...rows.open, canInstruct: false, steps: [comments({ state: "running", endedAt: null })] };
+    expect(shape(view(t))).toEqual({
+      status: "Claude works on the PR comments for your change.",
+      primary: null,
+      more: ["Stop"],
+      screen: "build",
+    });
+  });
+
+  test("a stopped comment run never refills the Tell box, and its note names no box", () => {
+    const note = "Stopped. The app undid the work on the PR comments, so it wrote no Fixed-in draft.";
+    const t = { ...rows.open, steps: [comments({ state: "cancelled", result: "stopped", notes: [note] })] };
+    expect(stoppedSend(t)).toBeNull();
+    expect(view(t).detail).toBe(note);
+    // A Stop before the run started: the server note says that the text is back in the box, which is false for comments.
+    const queued = {
+      ...rows.open,
+      steps: [
+        comments({
+          run: null,
+          state: "cancelled",
+          result: "stopped",
+          notes: ["Stopped. The message did not run. The text is back in the box."],
+        }),
+      ],
+    };
+    expect([stoppedSend(queued), view(queued).detail]).toEqual([null, "Stopped. The PR comments did not go to Claude."]);
+  });
+
+  test("the Log result of a comment run counts the verdicts", () => {
+    const s = comments({
+      result: "no_change",
+      verdicts: [
+        { thread: 101, verdict: "fixed", reason: "Renamed." },
+        { thread: 102, verdict: "pushback", reason: "Fine." },
+      ],
+    });
+    expect(verdictText(s)).toBe("1 fixed, 1 pushed back");
+    expect(sendResult({ send: s, steps: [] }, R)).toBe("Claude changed no file. Comments: 1 fixed, 1 pushed back.");
   });
 });

@@ -865,6 +865,7 @@ function Shell({ stale }: { stale: boolean }) {
                     setKs((k) => ({ ...k, selected: ids[i + 1] ?? ids[i - 1] ?? null }));
                   }}
                   onRestore={onRestore}
+                  onTask={openTask}
                 />
               </div>
             </>

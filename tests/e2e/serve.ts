@@ -18,6 +18,7 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { createSyncEngine } from "../../src/server/sync/engine";
+import type { PrRef } from "../../src/shared/types";
 import {
   buildStatuses,
   FAKE_USER,
@@ -687,7 +688,12 @@ function boot() {
     dataDir,
     runnerCommand,
     listTools: stubListTools,
-    gitRemote: remote.gitRemote,
+    // A task PR fetches its own branches. Every other PR keeps the fixture refs.
+    gitRemote: async (ref: PrRef) => {
+      const t = ref.repo === "sample-repo-2" ? taskRepo.prs.get(ref.id) : undefined;
+      const r = await remote.gitRemote();
+      return t ? { ...r, sourceRef: t.fromRef.id, targetRef: t.toRef.id } : r;
+    },
     repoRemote,
     sessionGates: { ...SESSION_GATES, live: liveGate },
   });
@@ -731,6 +737,7 @@ r[key("POST", "/__control/reset")] = async () => {
   await resetClones();
   await headA();
   for (const p of [postsA, postsB, postsC, postsD]) p.reset();
+  taskPosts = null;
   // The task PRs and the task branches of the last test go. The other branches and the PR refs stay.
   taskRepo.prs.clear();
   taskRepo.writes.length = 0;
@@ -888,6 +895,54 @@ r[key("POST", "/__control/task-base")] = async (req) => {
     await app.sync.syncNow();
   }
   return ok({ head });
+};
+// ps6-ps7-plan.md section 4 (PS6-C): the reviewer Alex adds these root threads to the newest task PR, which then reports its real source
+// and target heads with their commits, so a pushed "Fixed in" reply can post. The app posts replies there. One sync reads the threads.
+// Answers the comment POST bodies of that PR so far. An empty body changes nothing.
+let taskPosts: ReturnType<typeof S.commentPosts> | null = null;
+r[key("POST", "/__control/task-pr-comments")] = async (req) => {
+  const c = (await req.json()) as { threads?: { id: number; text: string }[] };
+  const pr = [...taskRepo.prs.values()].at(-1);
+  if (c.threads && pr) {
+    const path = `${taskRepo.path}/pull-requests/${pr.id}`;
+    const roots = c.threads.map(({ id, text }, i): S.Activity => {
+      const root = S.clone(S.findComment(base(), ROOT));
+      Object.assign(root, { id, version: 0, text, author: alex, comments: [], createdDate: T0 + i, updatedDate: T0 + i });
+      return { id: 60000000 + i, action: "COMMENTED", commentAction: "ADDED", comment: root };
+    });
+    const posts = S.commentPosts(path, () => roots, me, 4_400_001);
+    taskPosts = posts;
+    const live = async () => {
+      const head = (await remoteGit(["rev-parse", pr.fromRef.id])).trim();
+      const target = (await remoteGit(["rev-parse", pr.toRef.id])).trim();
+      if (head !== pr.fromRef.latestCommit) {
+        pr.version++;
+        pr.updatedDate++;
+      }
+      pr.fromRef.latestCommit = head;
+      pr.toRef.latestCommit = target;
+      return { head, target };
+    };
+    Object.assign(r, posts.routes, {
+      [key("GET", path)]: async () => {
+        await live();
+        return ok(pr);
+      },
+      [key("GET", `${path}/activities`)]: () => ok(S.onePage(posts.activities())),
+      [key("GET", `${path}/commits`)]: async () => {
+        const { head, target } = await live();
+        return ok(S.onePage((await forgeMeta(head, target)).commits));
+      },
+      [key("GET", `${path}/changes`)]: async () => {
+        const { head, target } = await live();
+        return ok(S.onePage((await forgeMeta(head, target)).changes));
+      },
+    });
+    pr.version++;
+    pr.updatedDate++;
+    await app.sync.syncNow();
+  }
+  return ok({ bodies: taskPosts?.bodies ?? [] });
 };
 // spec.md section 6.16.8 (WP-MR3): the task of PROJ1/app and PROJ1/lib. clone: the user's clone of PROJ1/app, so the task commits carry
 // its identity, never the identity of the user's git config. refuse: the next PR create of lib gets HTTP 403. merge: the open PR of lib

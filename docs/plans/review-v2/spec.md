@@ -3173,9 +3173,9 @@ Acceptance criteria:
 6. AC-B210. The run usage of a run with advisor calls names the advisor model from modelUsage, and the run setup line shows it.
 7. AC-B211. Gate GADV.2 ignores `slash_commands`. GADV.2, GADV.4, and GADV.5a judge by init.tools and the advisor calls, with the run with `--advisor` as the control. GADV.5b judges by the advisor calls of that run.
 
-### 6.28 Part sessions (docs/plans/review-v2/part-session.md, packages PS3, PS4, PS5-S1, PS5-C, and PS5-S2)
+### 6.28 Part sessions (docs/plans/review-v2/part-session.md, packages PS3, PS4, PS5-S1, PS5-C, PS5-S2, and PS6-C)
 
-One Claude session builds one part. This section covers the loop of PS3 and the follow-up runs of PS4 (docs/plans/review-v2/ps4-plan.md). PR comments and red builds come in PS6 and PS7 (ps6-ps7-plan.md).
+One Claude session builds one part. This section covers the loop of PS3 and the follow-up runs of PS4 (docs/plans/review-v2/ps4-plan.md). PS6 adds the PR comments of a task PR (see PS6-C below). Red builds come in PS7 (ps6-ps7-plan.md).
 
 - Session run: one `claude -p` process of a part session. A build run (step kind implement, mode build) and a fix run (kind fix) are session runs. Each takes one pool slot and one step row. StepDetail.session holds the session ID, resumed, why the run started a new session, and the purpose (build, continue, checks, review, points; PS4 adds message).
 - Start: the first session run of a part starts a new session without `--no-session-persistence`. The runner moves the transcript into `<task folder>/sessions/part-<n>/` (section 2.2 of the design). It keeps no file when the session folder, the transcript, the keep folder, its parent folder, or the target file is a link, a junction, or of the wrong kind. A run that ended ok stores its file in task_part_session with its SHA-256, the HEAD of each worktree at the run start, the context size, and the run count. The app then deletes the older file, so a part keeps one transcript. Since PS4, a cut or cancelled run also keeps its file, and the next run resumes it. A failed run keeps no file.
@@ -3287,6 +3287,15 @@ PS5-C: the Task view (ps5-plan.md sections 3 and 4; part-session.md sections 2.1
 - Working rows show "3 of 5 tasks done" on a build run, "(try n of N)" on a fix run of red checks, and "(round n of N)" on a judging run. The counts come from the plan ticks and StepDetail.tries. A row without a planned task or without tries leaves the count out. The Plan tab ticks the tasks of each part.
 - A critic row in the Log says "Quick review".
 - The ready and stopped sentences follow part-session.md section 2.17. Tell Claude follows section 6.18.1.
+
+PS6-C: the Task view of PR comments (ps6-ps7-plan.md section 4; part-session.md sections 2.14 and 2.17):
+
+- Derived waits after "Push to <branch>", in this order: "N replies wait." with "Post N replies"; the sorted comments ("1 group to fix, 1 to push back, 1 to answer.") with "Send N groups to Claude", or "Go to the PR" when no group is Fix; "N comments on the PR wait for you." with "Sort the comments". The unpushed row with accepted replies says "<who> has new commits that are not on the server yet. N replies wait." with "Push and post N replies".
+- "Sort the comments" posts POST /api/prs/:id/reply-run for every your-turn thread. The view says "Claude sorts the comments. The groups show here when the run ends." A failed sort shows its error. live.ts refetches each open task on a PR event, because TaskPartDto.comments reads the reply runs of the PR.
+- CommentGroups.tsx lists each group with its threads (place, judgement, the draft of the sort) and one choice: Fix (default for valid or partly), Push back (default for invalid), Reply only (default otherwise). A group with mixed judgements takes the first default in that order. "Send N groups" posts the threads of the Fix groups to POST /tasks/:id/parts/:part/comments. Push back and Reply only send nothing: their sort drafts post from the PR view. A refusal shows its sentence under the status.
+- "Push and post N replies" and "Post N replies" open one confirm with the branch and each accepted reply text. Push and post sends POST /parts/:part/push, which waits for one sync, then reads GET /prs/:id/post-plan and confirms only its reply posts. A reply that the plan still blocks posts nothing, and the view says "The replies wait until the server shows the pushed commits. Post them again later."
+- A comment run (instruct purpose comments) never gives its text back to the Tell box. The working row says "Claude works on the PR comments for <ref>.", the stopped row names "the PR comments", and a Stop before the run says "Stopped. The PR comments did not go to Claude." The Log names the group "PR comments" and adds "Comments: 1 fixed, 1 pushed back." to its result.
+- On a live task PR (PrDetail.task), each Fix entry of the PR view opens the Task view (AC-B397).
 
 ### 6.29 Agent file library (docs/plans/review-v2/agent-workflow.md sections 3.4 to 3.6, 3.10; AW1)
 

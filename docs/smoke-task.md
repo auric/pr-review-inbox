@@ -118,6 +118,19 @@ Run this part after part S. You need a clone of `<REPO>` of your own to move `<R
 14. Pick a base branch after a delete. In your own clone, push a new branch `<GONE>` from `<RELEASE>` with one commit that the task does not change. Start `<KEY7>` as in S1, pick `<GONE>` in "Base branch", and approve the plan. While "Claude is building your change." shows, click Stop in "More actions". Delete `<GONE>` on Bitbucket. Click "Continue". Expect "Needs you: `<GONE>` no longer exists in `<REPO>`. Pick another base branch." with the main button "Pick a base branch" and "Try again" in "More actions".
 15. Click "Pick a base branch". Expect the focus in "Base branch" under the status. Pick `<RELEASE>`. Expect the confirm "Build on `<RELEASE>`?" and click "Use `<RELEASE>`". Expect the build to go on, then "The base branch is now `<RELEASE>`. Update the branch before the PR." with the main button "Update from `<RELEASE>`" and no "Open the PR as is". Click it. Expect "Your change is ready and checked by Claude." Click "Open the PR", then "Push and open PR". Check Bitbucket: the PR into `<RELEASE>` has only the task commits, not the commit of `<GONE>`. Close the task.
 
+## PC. PR comments on a task PR (PS6)
+
+Run this part after part S. You need a second Bitbucket user who can comment on `<REPO>`, here called the reviewer.
+
+1. Start `<KEY6>` as in S1, approve the plan, and open the PR. Expect "Waiting for the review of your PR. Nothing to do."
+2. As the reviewer, add two comments to the PR: one that asks for a small change in a task file, and one that asks for a change that is wrong. In the app, click "Check now" and open the Task view. Expect "2 comments on the PR wait for you." with the main button "Sort the comments" and "Go to the PR" in "More actions".
+3. Click "Sort the comments". Expect "Claude sorts the comments. The groups show here when the run ends." and a disabled main button. When the run ends, expect the list "Sorted PR comments" with one group per cause. Each group shows the place, the judgement, the draft reply, and the choice Fix, Push back, or Reply only. Record the status sentence, such as "1 group to fix, 1 to push back.".
+4. Pick Fix for the wrong comment too. Expect "Send 2 groups to Claude". Click it. While "Claude works on the PR comments for your change." shows, click Stop in "More actions". Expect the Tell Claude box to stay empty. Expect "2 comments on the PR wait for you." again.
+5. Click "Sort the comments" again, keep the default choices, and click "Send 1 group to Claude", or pick Fix for both. Expect the checks, the commit, and the own review, then "Your change has new commits that are not on the server yet." Open the Log tab. Expect the group "PR comments" with "Comments: <n> fixed, <m> pushed back." Check Bitbucket: no new commit on the task branch yet.
+6. Click "Go to the PR" in "More actions". Expect "Fixed in <short>: <what changed>" in the fixed thread and Claude's reason in a pushed-back thread. Accept both drafts. Check Bitbucket: no reply yet.
+7. Go back to the Task view. Expect "Your change has new commits that are not on the server yet. 2 replies wait." with "Push and post 2 replies". Click it. Expect a confirm with the branch and each reply text. Click "Push and post". Check Bitbucket: the task branch has the new commit, and both replies show under their threads. Record when a "Fixed in" reply did not post: the view then says "The replies wait until the server shows the pushed commits." and later offers "Post 1 reply".
+8. Open the PR in the PR view and press f. Expect the Task view of `<KEY6>`, not the Fix list. Close the task.
+
 ## N. Several repositories: a repository and its submodule
 
 Write `<KEY7>` so that it changes one file in `<PATH>` and adds or changes one test in `<MAIN>`. The app never runs `git submodule` and never uses your clone of `<MAIN>` for the build.

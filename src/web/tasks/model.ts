@@ -90,7 +90,13 @@ export type ActionKind =
   | "cancel-resume"
   // ps5-plan.md sections 3 and 4.5: the resume options without ("Go on without these fixes") and leave ("Leave it", ready only).
   | "without"
-  | "leave";
+  | "leave"
+  // ps6-ps7-plan.md section 4, PS6-C: the PR comments of a task PR. sort-comments starts the reply run of the PR, send-comments sends the
+  // Fix groups to the part session, push-post pushes and then posts the accepted replies, and post-replies posts them.
+  | "sort-comments"
+  | "send-comments"
+  | "push-post"
+  | "post-replies";
 // part: the task_part ID of an action that acts on one part. Absent: the part that the view shows.
 export type Action = { kind: ActionKind; label: string; part?: number };
 
@@ -406,23 +412,43 @@ export function activeSend(t: Pick<TaskDto, "steps" | "working">): TaskStepDto |
 
 // spec.md section 6.18.1: a stopped or failed send gives its text back to the box. A later send of the part replaces it. part: the part of
 // the box. A Stop ends the waiting message of each part (ps4-plan.md WP-7), so each box gets the text of its own part back.
+// Only a message gives its text back: the text of a comment run is the app's own line (ps6-ps7-plan.md section 1 item 1).
 export function stoppedSend(t: Pick<TaskDto, "steps">, part: number | null = null): { id: number; text: string } | null {
   const s = t.steps.find((x) => x.kind === "instruct" && (part === null || x.part === part));
   const i = s?.detail.instruct;
-  return s && i && (i.result === "stopped" || i.result === "failed") ? { id: s.id, text: i.text } : null;
+  return s && i && i.purpose === "message" && (i.result === "stopped" || i.result === "failed") ? { id: s.id, text: i.text } : null;
+}
+
+// The send is a comment run of a task PR (ps6-ps7-plan.md section 1 item 1).
+export const isComments = (s: Pick<TaskStepDto, "detail">) => s.detail.instruct?.purpose === "comments";
+
+// "1 fixed, 1 pushed back" of a comment run, or null before its verdicts.
+export function verdictText(s: Pick<TaskStepDto, "detail">): string | null {
+  const v = s.detail.instruct?.comments?.verdicts;
+  if (!v?.length) return null;
+  const fixed = v.filter((x) => x.verdict === "fixed").length;
+  return [...(fixed ? [`${fixed} fixed`] : []), ...(v.length - fixed ? [`${v.length - fixed} pushed back`] : [])].join(", ");
 }
 
 // spec.md section 6.18.1: the sentence of a stop or a failure of the newest send of the part ("Stopped. Your instructions changed nothing.
 // The text is back in the box."), while nothing newer ran.
-function sendNote(t: TaskDto, part: number | null): string | null {
+function sendNote(t: TaskDto, part: number | null, runner: string): string | null {
   const first = logRows(t.steps.filter((s) => part === null || s.part === part))[0];
   if (!first || !("send" in first)) return null;
   const r = first.send.detail.instruct?.result;
-  return r === "stopped" || r === "failed" ? (first.send.detail.notes.at(-1) ?? null) : null;
+  if (r !== "stopped" && r !== "failed") return null;
+  // tasks.ts SEND_STOPPED says that the text is back in the box, which holds only for a message.
+  if (r === "stopped" && isComments(first.send) && first.send.run === null) return `Stopped. The PR comments did not go to ${runner}.`;
+  return first.send.detail.notes.at(-1) ?? null;
 }
 
 // The Log tab result of a send (spec.md section 6.18.1, Step history).
 export function sendResult(g: SendGroup, runner: string): string {
+  const v = verdictText(g.send);
+  const text = sendEnd(g, runner);
+  return v ? `${text} Comments: ${v}.` : text;
+}
+function sendEnd(g: SendGroup, runner: string): string {
   const i = g.send.detail.instruct;
   switch (i?.result) {
     case "done": {
@@ -431,7 +457,7 @@ export function sendResult(g: SendGroup, runner: string): string {
       return `Done: ${plural(files, "file")} changed. Checks green.${checked}`;
     }
     case "no_change":
-      return `${runner} changed no file: ${g.send.detail.summary ?? ""}`.trimEnd();
+      return g.send.detail.summary ? `${runner} changed no file: ${g.send.detail.summary}` : `${runner} changed no file.`;
     case "stopped":
       return "Stopped";
     case "failed":
@@ -502,7 +528,8 @@ function workText(t: Pick<TaskDto, "docs" | "steps" | "parts" | "subtasks">, s: 
     case "judging":
       return `${runner} works on the review points${of}${tries ? ` (round ${tries.n} of ${tries.of})` : ""}.`;
     case "following":
-      if (s.kind === "instruct") return `${runner} works on your instructions${forRef}.`;
+      if (s.kind === "instruct")
+        return isComments(s) ? `${runner} works on the PR comments${forRef}.` : `${runner} works on your instructions${forRef}.`;
       return s.item === "points"
         ? `${runner} fixes the listed points${of}.`
         : `${runner} fixes the review points that you chose to fix${forRef}.`;
@@ -655,7 +682,7 @@ export function stoppedAt(t: TaskDto): string {
   const where = [
     ...(ord !== null && codeParts(t).length > 1 ? [`part ${ord}`] : []),
     ...(s.item && /^T\d/.test(s.item) ? [`task ${s.item}`] : []),
-    ...(DOING[s.kind] ? [DOING[s.kind] as string] : []),
+    ...(isComments(s) ? ["the PR comments"] : DOING[s.kind] ? [DOING[s.kind] as string] : []),
   ];
   return where.length ? `Stopped at: ${where.join(", ")}.` : "Stopped.";
 }
@@ -684,10 +711,31 @@ export const timedOutSetup = (t: TaskDto) => {
   return (s?.item === "setup" && s.detail.commands.find((c) => c.timedOut)) || null;
 };
 
+// ---------- PR comments of a task PR (ps6-ps7-plan.md section 4, part-session.md section 2.14) ----------
+
+// fix: the group goes to the part session. pushback and reply: the draft of the sort stays the answer, and nothing goes to the session.
+export type CommentChoice = "fix" | "pushback" | "reply";
+export type CommentPicks = Readonly<Record<number, CommentChoice>>;
+type SortedGroup = NonNullable<NonNullable<TaskPartDto["comments"]>["sorted"]>["groups"][number];
+// part-session.md section 2.14 step 3: Fix for valid and partly, Push back for invalid, Reply only for a question. A group with mixed
+// judgements takes the first match in that order, so one thread that asks for a change makes the group Fix.
+export function groupChoice(g: SortedGroup): CommentChoice {
+  const j = new Set(g.threads.map((x) => x.judgement));
+  return j.has("valid") || j.has("partly") ? "fix" : j.has("invalid") ? "pushback" : "reply";
+}
+export const choiceOf = (g: SortedGroup, picks: CommentPicks = {}) => picks[g.n] ?? groupChoice(g);
+// The threads of the Fix groups, for POST /tasks/:id/parts/:part/comments.
+export const fixThreads = (groups: readonly SortedGroup[], picks: CommentPicks = {}) =>
+  groups.filter((g) => choiceOf(g, picks) === "fix").flatMap((g) => g.threads.map((x) => x.thread));
+
 // forge: the short name of the code host from meta, for the conflict row (spec.md section 6.18.5). newest: the task_pr ID whose merge
 // commit the forge did not name, after the user saw that 409; the pointer button then points at the newest base commit.
 // name: the focused part of a task with sub-tasks, such as "ABC-12 (2 of 4)" (spec.md section 6.20.13). The ready sentences use it.
-export function taskView(t: TaskDto, o: { runner: string; forge: string; now: number; newest?: number | null; name?: string }): TaskView {
+// picks: the choices of the user in the sorted comment groups (CommentGroups.tsx). Absent: the defaults of groupChoice.
+export function taskView(
+  t: TaskDto,
+  o: { runner: string; forge: string; now: number; newest?: number | null; name?: string; picks?: CommentPicks },
+): TaskView {
   const R = o.runner;
   const run = runningStep(t);
   const base = { detail: null, lines: [], more: [], needsYou: false, running: false } satisfies Partial<TaskView>;
@@ -930,7 +978,8 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   const asked = t.needsBase;
   const label = (list: TaskDto["bases"]) => (list.length ? baseLabel(list.map((x) => x.branch)) : t.targetBranch);
   const detail =
-    sendNote(t, part?.id ?? null) ?? (asked && !moved ? `${R} asked for the newest ${label(t.bases)}. The branch already has it.` : null);
+    sendNote(t, part?.id ?? null, R) ??
+    (asked && !moved ? `${R} asked for the newest ${label(t.bases)}. The branch already has it.` : null);
   const why = asked?.reason.trim().replace(/[^.?!]$/, "$&.");
   const askedStatus = asked && `${R} says the branch needs the newest ${label(bases)}${why ? `: ${why}` : "."}`;
   const wait = (status: string, primary: Action | null, more: Action[], screen: Screen, needsYou: boolean): TaskView => ({
@@ -988,12 +1037,47 @@ export function taskView(t: TaskDto, o: { runner: string; forge: string; now: nu
   if (update && askedStatus) return wait(askedStatus, update, [goPr, CLOSE], "pr", true);
   // spec.md section 6.18.2, step 7: a commit after the push goes to the server only on the click of "Push to <branch>"
   // (POST /parts/:part/push, pr.ts pushNow).
+  // ps6-ps7-plan.md section 2.1: the PR comments of a task PR. accepted: the reply drafts that the user accepted in the PR view.
+  const c = part?.comments ?? null;
+  const replies = (n: number) => plural(n, "reply", "replies");
+  const waits = (n: number) => `${replies(n)} ${n === 1 ? "waits" : "wait"}.`;
   if (part?.pushed && part.head && part.head !== part.pushed) {
     const who = prs.length > 1 ? `Part ${part.ord}` : "Your change";
+    const posts = c?.accepted ?? 0;
     return wait(
-      `${who} has new commits that are not on the server yet.`,
-      { kind: "push", label: `Push to ${part.branch}` },
+      `${who} has new commits that are not on the server yet.${posts ? ` ${waits(posts)}` : ""}`,
+      posts ? { kind: "push-post", label: `Push and post ${replies(posts)}` } : { kind: "push", label: `Push to ${part.branch}` },
       [{ kind: "show-diff", label: "Show the diff" }, goPr, ...(update ? [update] : []), CLOSE],
+      "pr",
+      true,
+    );
+  }
+  if (c?.accepted)
+    return wait(waits(c.accepted), { kind: "post-replies", label: `Post ${replies(c.accepted)}` }, [goPr, CLOSE], "pr", true);
+  // A sorted run whose drafts all posted or went has no group left, so the row falls through.
+  if (c?.sorted?.groups.length) {
+    const by = (k: CommentChoice) => c.sorted?.groups.filter((g) => choiceOf(g, o.picks) === k).length ?? 0;
+    const [fix, back, reply] = [by("fix"), by("pushback"), by("reply")];
+    const words = [
+      ...(fix ? [`${plural(fix, "group")} to fix`] : []),
+      ...(back ? [`${fix ? back : plural(back, "group")} to push back`] : []),
+      ...(reply ? [`${fix || back ? reply : plural(reply, "group")} to answer`] : []),
+    ];
+    // part-session.md section 2.17 and ps6-ps7-plan.md section 10 item 4: the drafts of the sort post from the PR view.
+    return wait(
+      `${words.join(", ")}.`.replace(/^./, (x) => x.toUpperCase()),
+      fix ? { kind: "send-comments", label: `Send ${plural(fix, "group")} to ${R}` } : goPr,
+      fix ? [goPr, CLOSE] : [CLOSE],
+      "pr",
+      true,
+    );
+  }
+  if (c?.turn) {
+    const on = prs.length > 1 ? ` of part ${part?.ord}` : "";
+    return wait(
+      `${plural(c.turn, "comment")} on the PR${on} wait for you.`,
+      { kind: "sort-comments", label: "Sort the comments" },
+      [goPr, CLOSE],
       "pr",
       true,
     );
@@ -1256,7 +1340,7 @@ export function goneBase(t: Pick<TaskDto, "blocked" | "repos" | "project" | "rep
 // ---------- Sub-tasks: one PR per sub-task (spec.md section 6.20) ----------
 
 // tracker: the tracker name from meta. forge: the code host name from meta. UI code names no product.
-export type SubOpts = { runner: string; forge: string; tracker: string; now: number; newest?: number | null };
+export type SubOpts = { runner: string; forge: string; tracker: string; now: number; newest?: number | null; picks?: CommentPicks };
 
 const FINAL = new Set<TaskPartDto["state"]>(["merged", "abandoned"]);
 const WITH_PR = new Set<TaskPartDto["state"]>(["pr_open", "changes_requested", "approved"]);

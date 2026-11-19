@@ -136,7 +136,8 @@ function RowMore(props: { label: string; item: string; onMove: () => void }) {
 }
 
 // One confirm before a part action that changes the code host. confirm: the label of its primary button.
-export type Confirm = { title: string; text: string; confirm: string; run: () => void };
+// list: lines under the text, such as the replies that a post sends.
+export type Confirm = { title: string; text: string; confirm: string; run: () => void; list?: string[] };
 
 export function ConfirmDialog(props: { confirm: Confirm | null; busy: boolean; onClose: () => void }) {
   const c = props.confirm;
@@ -147,6 +148,17 @@ export function ConfirmDialog(props: { confirm: Confirm | null; busy: boolean; o
           <DialogTitle>{c?.title}</DialogTitle>
           <DialogDescription>{c?.text}</DialogDescription>
         </DialogHeader>
+        {c?.list && c.list.length > 0 && (
+          <ul aria-label="Replies" className="m-0 grid max-h-64 list-none gap-1.5 overflow-auto p-0 text-sm">
+            {c.list.map((x, i) => (
+              // The same text can repeat, so the place keys the line.
+              // biome-ignore lint/suspicious/noArrayIndexKey: a static list of one dialog
+              <li key={i} className="rounded-md border bg-card px-2 py-1 whitespace-pre-wrap">
+                {x}
+              </li>
+            ))}
+          </ul>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={props.onClose}>
             Cancel

@@ -312,6 +312,18 @@ export async function pushClone(pr: number, path: string): Promise<string> {
   return ((await res.json()) as { head: string }).head;
 }
 
+// ps6-ps7-plan.md section 4 (PS6-C): threads adds root threads of the reviewer to the newest task PR, and one sync reads them. Answers
+// the comment POST bodies of that PR since the last reset.
+export async function taskPrComments(threads?: { id: number; text: string }[]): Promise<PostBody[]> {
+  const res = await fetch(`${FAKE_URL}/__control/task-pr-comments`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${E2E_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(threads ? { threads } : {}),
+  });
+  if (!res.ok) throw new Error(`control task-pr-comments: ${res.status}`);
+  return ((await res.json()) as { bodies: PostBody[] }).bodies;
+}
+
 // Applies the change, then returns every comment POST body of PR 1001 since the last reset.
 export async function posts(change: PostControl = {}): Promise<PostBody[]> {
   const res = await fetch(`${FAKE_URL}/__control/posts`, {

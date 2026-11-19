@@ -18,6 +18,7 @@ import { type TaskDoc, taskProfileId } from "../../shared/task";
 import type { Layer } from "../keys";
 import { formatRoute, listRoute, type PrRef } from "../lib/route";
 import { BuildLine } from "../pr/Header";
+import { confirmPosts, fetchPlan } from "../publish/data";
 import { RunLog } from "../review/RunLog";
 import { trackerOf } from "../review/tasks";
 import { ApiError } from "../shell/data";
@@ -26,16 +27,19 @@ import { ALLOW_FORM, AllowAskForm } from "./AllowAsk";
 import { TaskFiles } from "./Attachments";
 import { shellText } from "./allow";
 import { BaseField } from "./BranchSection";
+import { CommentGroups } from "./CommentGroups";
 import { DiffTab } from "./DiffTab";
-import { checkTracker, type TaskAction, useTask, useTaskAction, useTaskRun } from "./data";
+import { acceptedReplies, checkTracker, sortComments, type TaskAction, useSortRun, useTask, useTaskAction, useTaskRun } from "./data";
 import { JiraMoveDialog } from "./JiraMoveDialog";
 import { LogTab, stepId } from "./LogTab";
 import {
   type Action,
   type ActionKind,
+  type CommentPicks,
   codeParts,
   currentPart,
   defaultFocus,
+  fixThreads,
   goneBase,
   NO_MERGE,
   openQuestions,
@@ -143,8 +147,12 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   const subs = t.subtasks !== null;
   const [focusId, setFocusId] = useState<number | null>(null);
   const focused = subs ? (codeParts(t).find((p) => p.id === focusId) ?? defaultFocus(t)) : null;
-  const opts = { runner, forge: meta.forge.name, tracker: trackerName, now, newest };
   const part = focused ?? currentPart(t);
+  // The choices in the sorted comment groups, for one sorted run only.
+  const sorted = part?.comments?.sorted ?? null;
+  const [groupPick, setGroupPick] = useState<{ run: number; picks: CommentPicks } | null>(null);
+  const groupPicks = sorted && groupPick?.run === sorted.run ? groupPick.picks : {};
+  const opts = { runner, forge: meta.forge.name, tracker: trackerName, now, newest, picks: groupPicks };
   const view = withSetup(t, part, subs ? subtaskView(t, focused, opts) : taskView(t, opts));
   const late = timedOutSetup(t);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
@@ -296,6 +304,58 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
     return partAction(a.kind, r.part);
   };
 
+  // ps6-ps7-plan.md section 1 item 7 and AC-B395: the push goes first, and pushNow waits for one sync. Then only the reply posts of the
+  // plan go out. A reply whose commit the server does not show yet stays blocked and waits.
+  const [posting, setPosting] = useState(false);
+  // The PR whose sort run this page started. The note goes when the groups show.
+  const [sorting, setSorting] = useState<{ pr: number; run: number } | null>(null);
+  const sortRun = useSortRun(sorting);
+  const sortFailed = sortRun?.status === "failed" || sortRun?.status === "cancelled";
+  // A sort that ended well leaves the row, so the note holds only while the run works.
+  const sortNote =
+    sorting !== null && sorting.pr === part?.pr && view.primary?.kind === "sort-comments" && (!sortRun || sortRun.status === "running");
+  const postReplies = async (pr: number, push: number | null) => {
+    setErrorText(null);
+    setPosting(true);
+    try {
+      if (push !== null) await act.mutateAsync({ kind: "push", part: push });
+      const posts = (await fetchPlan(pr)).posts.filter((x) => x.destination.kind === "reply");
+      if (!posts.length) setErrorText("The replies wait until the server shows the pushed commits. Post them again later.");
+      else
+        await confirmPosts(
+          pr,
+          posts.flatMap((x) => x.items),
+        );
+    } catch (e) {
+      setErrorText((e as Error).message);
+    } finally {
+      setPosting(false);
+      qc.invalidateQueries({ queryKey: ["task", t.id] });
+    }
+  };
+  const askPost = async (p: TaskPartDto, push: boolean) => {
+    const pr = p.pr;
+    if (pr === null) return;
+    setErrorText(null);
+    let list: string[];
+    try {
+      list = (await acceptedReplies(pr)).map((x) => x.body);
+    } catch (e) {
+      return setErrorText((e as Error).message);
+    }
+    const n = `${list.length} ${list.length === 1 ? "reply" : "replies"}`;
+    const to = p.remotePr === null ? "the PR" : `PR #${p.remotePr}`;
+    setConfirm({
+      title: push ? `Push to ${p.branch} and post ${n}?` : `Post ${n}?`,
+      text: push
+        ? `The app pushes the new commits to ${p.branch} first. Then it posts these replies to ${to}. A "Fixed in" reply waits until the server has its commit.`
+        : `The app posts these replies to ${to}.`,
+      confirm: push ? "Push and post" : "Post",
+      list,
+      run: () => void postReplies(pr, push ? p.id : null),
+    });
+  };
+
   const run = (kind: ActionKind, target = part) => {
     if (subs && target && ["start-now", "wait-merge", "drop", "push", "move", "push-move", "tell", "tracker-move"].includes(kind))
       return partAction(kind, target);
@@ -399,6 +459,22 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         const r = rows.find((x) => x.remotePr !== null);
         return r?.remotePr && onPr({ project: r.project, repo: r.repo, id: r.remotePr });
       }
+      case "sort-comments": {
+        const pr = target?.pr;
+        if (pr == null) return;
+        setErrorText(null);
+        return void sortComments(pr).then(
+          (r) => setSorting({ pr, run: r.id }),
+          (e: Error) => setErrorText(e.message),
+        );
+      }
+      case "send-comments": {
+        const s = target?.comments?.sorted;
+        return target && s && send({ kind: "comments", part: target.id, threads: fixThreads(s.groups, groupPicks) });
+      }
+      case "push-post":
+      case "post-replies":
+        return target && void askPost(target, kind === "push-post");
       case "update":
         return target && send({ kind: "update", part: target.id });
       case "undo-update":
@@ -470,7 +546,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
   }, [allOpen]);
   const openPrAction = [view.primary, ...view.more].some((a) => a?.kind === "open-pr");
 
-  const busy = act.isPending;
+  const busy = act.isPending || posting;
   const primary = view.primary;
   const gone = goneBase(t);
   // An action with a part acts on that part, else on the part that the view shows.
@@ -492,7 +568,12 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
         {a.label}
       </Button>
     ) : (
-      <Button ref={primaryRef} data-primary disabled={busy} onClick={() => run(a.kind, partFor(a))}>
+      <Button
+        ref={primaryRef}
+        data-primary
+        disabled={busy || (sortNote && a.kind === "sort-comments")}
+        onClick={() => run(a.kind, partFor(a))}
+      >
         {a.kind === "move" && part && retry === part.id ? "Try again" : a.label}
       </Button>
     );
@@ -541,6 +622,12 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             {view.status}
           </p>
           {view.detail && <p className="m-0 text-sm text-ink-2">{view.detail}</p>}
+          {sortNote && <p className="m-0 text-sm text-ink-2">{runner} sorts the comments. The groups show here when the run ends.</p>}
+          {sortFailed && sorting?.pr === part?.pr && view.primary?.kind === "sort-comments" && (
+            <p role="alert" className="m-0 text-sm text-destructive">
+              The sort of the comments stopped{sortRun?.errorText ? `: ${sortRun.errorText}` : "."}
+            </p>
+          )}
           {view.screen === "pr" && (
             <BuildLine b={subs ? (part?.remotePr != null ? part.build : null) : prBuild(t)} className="text-sm text-ink-2" />
           )}
@@ -559,6 +646,14 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
             </p>
           )}
         </div>
+        {sorted && sorted.groups.length > 0 && view.screen === "pr" && !view.running && (
+          <CommentGroups
+            sorted={sorted}
+            picks={groupPicks}
+            disabled={busy}
+            onPick={(n, c) => setGroupPick({ run: sorted.run, picks: { ...groupPicks, [n]: c } })}
+          />
+        )}
         {gone && (
           <BaseField
             id={PICK_BASE}

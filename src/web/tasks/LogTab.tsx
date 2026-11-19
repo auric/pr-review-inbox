@@ -14,6 +14,7 @@ import type { TaskDto, TaskStepDto } from "../../shared/dto";
 import { limitText, type StepDetail } from "../../shared/task";
 import { DECIDED_TEXT, shellText } from "./allow";
 import {
+  isComments,
   type LogRow,
   logRows,
   patchText,
@@ -138,6 +139,7 @@ function SessionRow({ t, g, ...props }: RowProps & { t: TaskDto; g: SessionGroup
 function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string; onRunLog: (run: number) => void; onDiff?: () => void }) {
   const s = g.send;
   const result = sendResult(g, runner);
+  const comments = isComments(s);
   const end = s.detail.instruct?.result;
   const failed = end === "failed";
   const open = [s, ...g.steps].some((x) => x.state === "running" || x.state === "waiting");
@@ -155,7 +157,7 @@ function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
         <Icon aria-hidden className={cn("size-4 shrink-0", ICON[look].className)} />
-        <span className="font-semibold">{KIND.instruct}</span>
+        <span className="font-semibold">{comments ? "PR comments" : KIND.instruct}</span>
         <time dateTime={new Date(s.startedAt).toISOString()} className="text-xs text-muted-foreground">
           {at}
         </time>
@@ -176,7 +178,10 @@ function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string
           </p>
         ))}
       {g.steps.length > 0 && (
-        <ol aria-label="Steps of these instructions, newest first" className="m-0 grid list-none gap-1.5 border-l-2 py-0.5 pl-3">
+        <ol
+          aria-label={comments ? "Steps of this comment run, newest first" : "Steps of these instructions, newest first"}
+          className="m-0 grid list-none gap-1.5 border-l-2 py-0.5 pl-3"
+        >
           {g.steps.map((x) => (
             <li key={x.id} id={stepId(x.id)} tabIndex={-1} className="grid gap-1.5 outline-offset-2 focus-visible:outline-2">
               <StepBody

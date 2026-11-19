@@ -129,6 +129,8 @@ export function useFix(
     showFindings: (ids: number[]) => void;
     // "Copy for your session" in the Fix list footer.
     onConsult: () => void;
+    // AC-B397: the PR belongs to a live task part, so each Fix opens that Task view instead. null: Fix works here.
+    onTask: (() => void) | null;
   },
 ): FixUi {
   const author = pr.role === "AUTHOR";
@@ -173,6 +175,7 @@ export function useFix(
     setPick(new Set(ticks));
   };
   const open = (thread?: number | null, key = false) => {
+    if (o.onTask) return o.onTask();
     if (!author) return void toast.add({ title: OWN_ONLY });
     if (thread === undefined) {
       const rows = targets.rows.flatMap((r) => (r.tick ? [tick("thread", r.thread)] : []));
@@ -184,12 +187,14 @@ export function useFix(
     showList([tick("thread", t.id)], key);
   };
   const openFinding = (id: number, key = false) => {
+    if (o.onTask) return o.onTask();
     if (!author) return void toast.add({ title: OWN_ONLY });
     const why = findingFixWhy(findings.current.find((x) => x.id === id));
     if (why !== null) return void toast.add({ title: why });
     showList([tick("finding", id)], key);
   };
   const openWith = (targets: FixTarget[]) => {
+    if (o.onTask) return o.onTask();
     if (!author) return void toast.add({ title: OWN_ONLY });
     showList(targets.map(cardKey), false);
   };

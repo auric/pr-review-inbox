@@ -128,6 +128,8 @@ export function useReview(
     showInDiff: (card: Card) => void;
     // Opens the Explain page: "Open the walkthrough" on the Explain row of the run record.
     openExplain: () => void;
+    // AC-B397: opens the Task view of the live task part of the PR. null: the PR has none.
+    onTask: (() => void) | null;
   },
 ): ReviewUi {
   const meta = useMeta().data as MetaDto;
@@ -190,6 +192,7 @@ export function useReview(
     show: o.show,
     showFindings: tr.showFindings,
     onConsult: () => onConsult.current(),
+    onTask: o.onTask,
   });
   onFix.current = fix.openFinding;
   const consult = useConsult(pr, { announce: o.announce, openFix: fix.openWith });
