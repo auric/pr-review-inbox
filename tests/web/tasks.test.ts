@@ -22,7 +22,7 @@ import {
   offerSetup,
   putFile,
   removeText,
-  SHORT_REASON,
+  shortReason,
   sizeText,
   skippable,
   sourceTime,
@@ -95,22 +95,24 @@ describe("fetch state of a chip", () => {
       [null, null, "not fetched"],
       [old, null, fetched],
     ];
-    for (const [f, fetch, text] of cases) expect(stateText({ fetched: f, fetch }, NOW)).toBe(text);
+    for (const [f, fetch, text] of cases) expect(stateText({ fetched: f, fetch }, NOW, "Tracker")).toBe(text);
   });
 
   test("each error kind has a short reason of at most 3 words", () => {
-    expect(SHORT_REASON).toEqual({
+    const kinds = ["auth", "forbidden", "not_found", "redirect", "rate", "server", "shape", "timeout", "network"] as const;
+    const all = Object.fromEntries(kinds.map((k) => [k, shortReason(k, "Tracker")]));
+    expect(all).toEqual({
       auth: "token rejected",
       forbidden: "no access",
       not_found: "no such issue",
-      redirect: "Jira redirected",
-      rate: "Jira busy",
-      server: "Jira error",
+      redirect: "Tracker redirected",
+      rate: "Tracker busy",
+      server: "Tracker error",
       shape: "unknown answer",
       timeout: "timed out",
-      network: "Jira unreachable",
+      network: "Tracker unreachable",
     });
-    for (const r of Object.values(SHORT_REASON)) expect(r.split(" ").length).toBeLessThanOrEqual(3);
+    for (const r of Object.values(all)) expect(r.split(" ").length).toBeLessThanOrEqual(3);
   });
 
   test("the brief adds the state only for failed, refresh failed, and skipped keys", () => {

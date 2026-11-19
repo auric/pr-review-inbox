@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// Task chips (plan r2 task context UI, plan r3 Feature C, jira-context.md section 4.8): the task IDs of the PR with their fetch state,
+// Task chips (plan r2 task context UI, plan r3 Feature C, the task context plan in docs/plans/review-v2/, section 4.8): the task IDs of the PR with their fetch state,
 // Fetch, Fetch again, Skip, and Clear text.
 // Every run kind reads the fetched task text. So the brief, the run buttons, and Ask in the panel slot show the chips.
 // All places share one query, so a fetch in one place shows in all.
@@ -37,7 +37,7 @@ export const useTaskContext = (pr: number) =>
     queryFn: async () => read<TaskContextDto[]>(await api.api.prs[":id"]["task-context"].$get(keyParam(pr, ""))),
   });
 
-// The fetch state of each task key (jira-context.md section 4.8). live.ts refetches it with the task text.
+// The fetch state of each task key (the task context plan, section 4.8). live.ts refetches it with the task text.
 const useTaskFetch = (pr: number) =>
   useQuery({
     queryKey: fetchKey(pr),
@@ -167,9 +167,9 @@ export function TaskChips(props: {
         {chips.map((t) => {
           const url = webLink(t.url);
           const state = compact
-            ? stateText(t, now)
+            ? stateText(t, now, source || "tracker")
             : t.source
-              ? `from ${SOURCE[t.source]}${notable(t) ? ` · ${stateText(t, now)}` : ""}`
+              ? `from ${SOURCE[t.source]}${notable(t) ? ` · ${stateText(t, now, source || "tracker")}` : ""}`
               : "no longer in this pull request";
           // The full reason of a failed read. The hint shows it, and the accessible name of the chip carries it.
           const reason = t.fetch?.reason ?? null;

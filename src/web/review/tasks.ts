@@ -51,24 +51,27 @@ export function taskChips(tasks: PrTask[], rows: TaskContextDto[], on: boolean, 
   return out;
 }
 
-// jira-context.md section 4.8. The full text (FAILED in routes.ts) shows in the hint.
-export const SHORT_REASON: Record<ContextErrorKind, string> = {
+// The task context plan (docs/plans/review-v2/, section 4.8). The full text (FAILED in routes.ts) shows in the hint. UI code names no
+// product, so the reasons that name the tracker take its name from meta at render time.
+const SHORT_REASON: Record<ContextErrorKind, string> = {
   auth: "token rejected",
   forbidden: "no access",
   not_found: "no such issue",
-  redirect: "Jira redirected",
-  rate: "Jira busy",
-  server: "Jira error",
+  redirect: "{tracker} redirected",
+  rate: "{tracker} busy",
+  server: "{tracker} error",
   shape: "unknown answer",
   timeout: "timed out",
-  network: "Jira unreachable",
+  network: "{tracker} unreachable",
 };
+export const shortReason = (kind: ContextErrorKind, tracker: string) => SHORT_REASON[kind].replace("{tracker}", tracker);
 
 // The fetch state in words. A skipped row wins over text, as on the server (task-fetch.ts stateOf).
-export function stateText(c: Pick<TaskChip, "fetched" | "fetch">, now: number): string {
+// tracker: the name of the tracker from meta.
+export function stateText(c: Pick<TaskChip, "fetched" | "fetch">, now: number, tracker: string): string {
   const f = c.fetch;
   if (f?.state === "skipped") return "skipped";
-  const failed = (f?.state === "failed" || f?.state === "refreshFailed") && f.kind ? SHORT_REASON[f.kind] : null;
+  const failed = (f?.state === "failed" || f?.state === "refreshFailed") && f.kind ? shortReason(f.kind, tracker) : null;
   if (c.fetched) return failed ? `${fetchedText(c.fetched, now)}, refresh failed` : fetchedText(c.fetched, now);
   return failed ? `not fetched: ${failed}` : "not fetched";
 }
