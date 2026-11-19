@@ -1,6 +1,6 @@
 # Build a Jira task, version 2
 
-Status: design of 2026-11-19 against main 4324ab7 plus branch `sa` (SA-1 and SA-2 committed, SA-3 running). Nothing is built. Section 13 holds wording for approval. The decisions of section 15 wait for the user. The machine tables of section 11 start from the `sa` machine (guards `noSpecPr` and `specPr`).
+Status: design of 2026-11-19, approved by the user on 2026-11-19 (section 15: D3 deferred, the rest as recommended). Nothing is built. Section 13 holds wording; item 2 (D3) waits. The machine tables of section 11 start from the `sa` machine (guards `noSpecPr` and `specPr`).
 
 ## 0. Summary
 
@@ -433,6 +433,11 @@ No state is final. The task's FINISHED guard reads the states.
 | D10 | Outside tasks move to the checklist with no ask | Yes. `blocking` gives an ask |
 | D11 | Closed tasks before all merges become abandoned | Yes |
 | D12 | WP-PQ3 to PQ5 after Gate U2 | Yes |
+
+### User answers of 2026-11-19
+
+- D3: deferred. The user is not sure about the Jenkins rebuild POST. TB-10 moves to a later wave with no date, and BRIEF 3.6:172 keeps "The client sends GET only" until the user decides. Rebuild stays a user step (external kind ci_rebuild, owner user).
+- D1, D2, D4 to D12: as recommended.
 
 ## 16. Work packages
 
