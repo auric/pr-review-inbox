@@ -2232,11 +2232,12 @@ export function createLoop(opts: LoopOptions) {
     }
   }
 
-  // A small task gets one part (spec.md section 6.16.4).
+  // A small or medium task gets one part (spec.md section 6.16.4; self-approved-plans.md section 6).
   async function ensureParts(db: Database, id: number) {
     const t = taskRow(db, id);
     if (t?.state !== "implementing" || parts(db, id).length) return;
-    if (t.size !== "small") throw new Error(`The app builds a ${t.size ?? "task without a size"} task only after its spec PR.`);
+    if (t.size !== "small" && t.size !== "medium")
+      throw new Error(`The app builds a ${t.size ?? "task without a size"} task only after its spec PR.`);
     if (!t.base_commit) throw new Error("The task has no approved plan.");
     const s = taskSettingsOf(t);
     const prefix = s.branchPrefix ?? (branchPrefixesOf(settings.config())[0] as string);

@@ -292,7 +292,7 @@ What keeps this safe:
 - Nothing goes to Bitbucket before "Push and open PR" or "Push and open 2 PRs". The app pushes only the branch of the task, never the target branch, and always with a lease, so it never overwrites the push of someone else. "Point <repository> at the merged commit" pushes only after its click.
 - Claude never runs git. "Tell Claude" sends your text to Claude only, and every git action stays a button. A failed update puts every repository of the task back at its commit before the update.
 
-This version builds small tasks: one pull request with the plan and the code in each changed repository. A medium or large plan waits after its approval, because the plan review pull request and the parts come in a later version. The task notices no merge by itself yet: close it when its pull request is done. A commit after the pull request opened, from "Tell Claude", the PR comments, or an update, stays local until you click "Push to <branch>" or "Push and post N replies".
+This version builds small and medium tasks: one pull request with the plan and the code in each changed repository. A large plan waits after its approval, because the plan review pull request and the parts come in a later version. The task notices no merge by itself yet: close it when its pull request is done. A commit after the pull request opened, from "Tell Claude", the PR comments, or an update, stays local until you click "Push to <branch>" or "Push and post N replies".
 
 <details>
 <summary>The states of a task</summary>
@@ -304,9 +304,9 @@ stateDiagram-v2
   interview --> spec_draft: ANSWERED
   interview --> stopped: STOP
   interview --> failed: FAIL
-  spec_draft --> implementing: APPROVE if small
-  spec_draft --> spec_draft: APPROVE if planReview
-  spec_draft --> spec_pr_open: OPEN_SPEC_PR if planReview
+  spec_draft --> implementing: APPROVE if noSpecPr
+  spec_draft --> spec_draft: APPROVE if specPr
+  spec_draft --> spec_pr_open: OPEN_SPEC_PR if specPr
   spec_draft --> stopped: STOP
   spec_draft --> failed: FAIL
   spec_pr_open --> spec_approved: SPEC_GATE_PASSED if gate

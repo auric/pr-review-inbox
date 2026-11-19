@@ -226,6 +226,24 @@ Run this part after part S, when "Commands Claude may run" is code complete (WP-
 15. In the data folder, open the part folder of the task and go to `context/skills/remote-build/`. Expect SKILL.md and no `id_smoke`. Expect the skills index to name 1 key file left out.
 16. Open "More actions" and click "Close the task". Run `ssh <build-host alias> rm -rf <dir>`.
 
+## LS. A large task that you approve yourself (Gate UL-S)
+
+Run this part after part S, when SA-3 of self-approved-plans.md is built. It checks a large plan with no spec PR: stacked part PRs, the wait for the lower review, and the move after a merge. `<KEY20>` is a Jira task for `<REPO>` whose estimate is over the line limit, so only large fits. Run it twice: run 1 merges part 1 with a merge commit, and run 2 merges it with a squash. Nothing goes to Bitbucket before a click on "Push and open PR" or "Push and move".
+
+1. Click "Tasks", then "Build a Jira task". Type `<KEY20>`, pick `<REPO>`, and click "Build this task". Answer the questions as in S3.
+2. When the plan is ready, open the Plan tab. Expect "Only large fits." and the large radio "Large: the code comes in small PRs, one after another." Record the count of parts `<n>`. When `<n>` is 1, write a bigger task and start again.
+3. Under the large radio, expect "Plan review" with "I approve the plan myself. Colleagues review only the code PRs." selected. Expect "Colleagues review the plan first, in a spec PR." disabled, with "This version cannot open a spec PR yet."
+4. Expect the branch prefix chips only, with no single branch name. Tick the test command and click "Approve the plan".
+5. Check Bitbucket: no new branch and no new pull request exist. Expect the header "Parts: `<n>`, one PR each" and one row per part, such as "`<KEY20>` (1 of `<n>`)".
+6. Expect part 1 to build. Expect part 2 with "Waits for a review of `<KEY20>` (1 of `<n>`)." and the button "Start now". Expect part 2 not to start by itself.
+7. When part 1 is ready, click "Open the PR". Expect the dialog "Push `<PREFIX>``<KEY20>`-1-`<slug>` and open a PR into `<TARGET>`?" with the title "`<KEY20>` (part 1 of `<n>`): `<part title>`". Click "Push and open PR".
+8. Check Bitbucket: the PR of part 1 goes into `<TARGET>`. Its description lists each part, such as "`<KEY20>` (2 of `<n>`): next, builds on this PR", and has no "Parent:" line. Its files hold `specs/<KEY20>/part-1/plan.md` and no design.md, spec.md, or tasks.md.
+9. In Bitbucket, approve the PR of part 1 as a colleague. In the app, click "Check now". Expect part 2 to start. Record the time from the approval to the start.
+10. When part 2 is ready, click "Open the PR". Expect the dialog "Push `<PREFIX>``<KEY20>`-2-`<slug>` and open a PR into `<PREFIX>``<KEY20>`-1-`<slug>`?" Click "Push and open PR". Check Bitbucket: the PR of part 2 targets the branch of part 1. Its Diff tab lists only the files of part 2. The PR of part 1 says "Please keep this branch until `<KEY20>` (2 of `<n>`) moves to the new target."
+11. Run 1: merge the PR of part 1 with a merge commit. Untick "Delete source branch after merging". In the app, click "Check now". Expect "Move `<KEY20>` (2 of `<n>`) to `<TARGET>`". Click it and confirm. Check Bitbucket: the PR of part 2 targets `<TARGET>`, and its branch has no new commit.
+12. Run 2: merge the PR of part 1 with the squash strategy. Untick "Delete source branch after merging". Click "Check now". Expect "Update from `<TARGET>`" on part 2. Click it, then "Push and move to `<TARGET>`" and confirm. Check Bitbucket: the PR of part 2 targets `<TARGET>`, its Diff tab lists only the files of part 2, and its branch history still holds the head of step 10. So no force push happened.
+13. Open "More actions" and click "Close the task".
+
 ## Record
 
 - The commit of preparation step 1, the OS, the Bun version, the `git` version, and the `claude` version.
@@ -239,5 +257,6 @@ Run this part after part S, when "Commands Claude may run" is code complete (WP-
 - From part U: the result line of each "Your instructions" group, the rebase result of step 9, the row of step 10 (conflict row or base row), and the case of step 11 with its reason.
 - From part N: the repository rows with their access and reason, the proposal (name or "none"), the order of the two creates, and whether Bitbucket named the merge commit.
 - From part T: the Jira deployment, the start and the reason of each plan row, the proposed open PR limit with its reason, the time of the status sync or "manual read", the move names of the dialog, the merge line of step 29, the sentence of ABC-17 after the approval, and whether "Close the task" needed "Stop" first.
+- From part LS: the count of parts, the time from the approval to the start of part 2, and the result of the move in run 1 and of the update in run 2.
 - From part T2: the proposed patterns with their reasons, the count of commands Claude ran, the time of the remote build, each allow request or "no request", and what Stop left on the build host.
 - Clean up: delete the `smoke/` branches and the pull requests on Bitbucket, the task branches of `<MAIN>` and `<SUB>`, and the part T branches with `<PREFIX>ABC-14-early`, close the Jira tasks, and delete the data folder.

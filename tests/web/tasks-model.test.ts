@@ -317,10 +317,13 @@ describe("the Task view table (spec.md section 6.12, small rows)", () => {
     expect(shape(view(sub)).more).toEqual(["Edit", "Stop"]);
   });
 
-  test("spec_draft, approved medium: the plan waits, and the view says that this version cannot open the spec PR", () => {
-    const v = view(task({ state: "spec_draft", size: "medium", plan: { ...PLAN, approved: true }, estimate: ESTIMATE }));
-    expect(v.primary).toBeNull();
-    expect(v.status).toContain("cannot open that PR yet");
+  test("self-approved-plans.md section 6: an approved plan in spec_draft offers Approve the plan again", () => {
+    for (const size of ["medium", "large"] as const) {
+      const v = view(task({ state: "spec_draft", size, plan: { ...PLAN, approved: true }, estimate: ESTIMATE }));
+      expect(v.primary).toEqual({ kind: "approve", label: "Approve the plan" });
+      expect(v.status).toBe("The plan waits for a spec PR, which this version cannot open. Approve it again to build it now.");
+      expect(v.needsYou).toBe(true);
+    }
   });
 
   test("implementing, running: the step sentence names Claude and your change, with Hold", () => {
@@ -1077,7 +1080,8 @@ describe("the branch line of the plan (spec.md section 6.8)", () => {
     expect(plannedBranch("feature/", task(), "small")).toBe("feature/ABC-12-trim-spaces-in-user-names");
     expect(plannedBranch("", task(), "small")).toBe("ABC-12-trim-spaces-in-user-names");
     expect(plannedBranch("task/", task({ title: "Додати прапор" }), "small")).toBe("task/ABC-12-task");
-    expect(plannedBranch("feature/", task(), "medium")).toBe("feature/ABC-12-");
+    expect(plannedBranch("feature/", task(), "medium")).toBe("feature/ABC-12-trim-spaces-in-user-names");
+    expect(plannedBranch("feature/", task(), "large")).toBe("feature/ABC-12-");
   });
 
   test("the prefix rule of the task settings route, with its sentence", () => {

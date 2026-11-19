@@ -630,6 +630,10 @@ export const allowPattern = (hosts: readonly string[]) =>
       if (problem) ctx.addIssue({ code: "custom", message: problem });
     });
 
+// self-approved-plans.md section 3.2: who reviews a large plan. "self": the user approves it alone. "spec-pr": colleagues review it in a
+// spec PR first.
+export const PLAN_REVIEWS = ["self", "spec-pr"] as const;
+
 // task.settings_json: the overrides of one task. Absent keys take the repository settings.
 export const taskSettings = z.object({
   lineBudget: z.number().int().positive().optional(),
@@ -646,6 +650,8 @@ export const taskSettings = z.object({
   // spec.md section 6.16: the branch prefix of the plan approval, and the pick for a branch that exists on the server.
   branchPrefix: z.string().min(1).max(PREFIX_MAX).optional(),
   existing: z.enum(["continue", "new"]).optional(),
+  // A large plan only. Absent counts as "spec-pr", so an old approved plan waits.
+  planReview: z.enum(PLAN_REVIEWS).optional(),
 });
 export type TaskSettings = z.infer<typeof taskSettings>;
 

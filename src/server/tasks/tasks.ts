@@ -183,7 +183,7 @@ export const TASK_CHANGED = "The task changed on another page. Check it again.";
 export const RESTART_REF = "restart";
 
 const SQL = {
-  task: "SELECT state, stopped_from, size, version FROM task WHERE id = $id",
+  task: "SELECT state, stopped_from, size, version, settings_json FROM task WHERE id = $id",
   part: "SELECT p.state, t.version FROM task_part p JOIN task t ON t.id = p.task WHERE p.id = $part AND p.task = $task",
   setTask: `UPDATE task SET state = $state, stopped_from = $stopped, version = version + 1, updated_at = $now
     WHERE id = $id AND version = $version`,
@@ -235,7 +235,7 @@ export function stopSends(db: Database, task: number, part: number | null, now =
   db.query(SQL.cancelSends).run({ task, part, now, note: SEND_STOPPED });
 }
 
-type StateRow = { state: TaskState; stopped_from: TaskState | null; size: TaskSize | null; version: number };
+type StateRow = { state: TaskState; stopped_from: TaskState | null; size: TaskSize | null; version: number; settings_json: string };
 
 function write(db: Database, sql: string, params: Record<string, string | number | null>) {
   // The version check of the same statement. The read in the same transaction already saw this version.
@@ -249,7 +249,12 @@ export function advance(db: Database, ref: TaskRef, event: TaskEvent, facts: Fac
     if (row.version !== ref.version) return { status: 409, error: TASK_CHANGED, state: row.state, version: row.version };
     const snapshot = taskMachine.resolveState({
       value: row.state,
-      context: { size: row.size, gate: facts.gate === true, stoppedFrom: row.stopped_from },
+      context: {
+        size: row.size,
+        gate: facts.gate === true,
+        stoppedFrom: row.stopped_from,
+        selfReview: settingsOf(row).planReview === "self",
+      },
     });
     if (!snapshot.can(event)) return { status: 409, error: TASK_STATE_TEXT[row.state], state: row.state, version: row.version };
     const [next] = transition(taskMachine, snapshot, event);
@@ -700,7 +705,7 @@ export function saveRepoSettings(
   return null;
 }
 
-const settingsOf = (t: TaskRow): TaskSettings => {
+const settingsOf = (t: Pick<TaskRow, "settings_json">): TaskSettings => {
   const r = taskSettings.safeParse(JSON.parse(t.settings_json));
   return r.success ? r.data : {};
 };
@@ -2625,13 +2630,13 @@ export function createTaskService(opts: TaskServiceOptions) {
   }
 
   // GET /api/tasks/:id/branch (spec.md section 6.16.4): the planned name, where it exists on the server, the open PR from it to the
-  // base, and the first free suffix. A small task names its one branch. A larger one names its spec branch.
+  // base, and the first free suffix. A small or medium task names its one branch. A large one names its spec branch.
   async function branch(db: Database, id: number, input: { prefix?: string; base?: string }): Promise<BranchCheckDto | TaskResult> {
     const t = taskRow(db, id);
     if (!t) return { status: 404, error: "Task not found." };
     const prefix = input.prefix ?? settingsOf(t).branchPrefix ?? (branchPrefixesOf(settings.config())[0] as string);
-    const small = (t.size ?? docsOf(t)?.parsed.proposed ?? "small") === "small";
-    const name = branchName(prefix, t.key, small ? { kind: "small", title: t.title } : { kind: "spec" });
+    const one = (t.size ?? docsOf(t)?.parsed.proposed ?? "small") !== "large";
+    const name = branchName(prefix, t.key, one ? { kind: "small", title: t.title } : { kind: "spec" });
     // The query comes before the remote read: a shutdown can close db while the read runs.
     const pr = db.query(Q.openPr).get({ project: t.project, repo: t.repo, branch: name, base: input.base ?? t.target_branch }) as {
       id: number;

@@ -468,6 +468,7 @@ Settings > Tasks > Run limits:
 
 - docNames (plan.ts:642) and the spec run prompt change per size.
 - Medium leaves the spec PR states of the task machine (machine.ts:72-81).
+- Note of 2026-11-19 (self-approved-plans.md, SA-1): the machine part is built before PS9. Medium and a large plan with plan review self take noSpecPr. A part of a part plan (sub-tasks or a self-approved stack) takes the small level after PS9 (self-approved-plans.md section 7).
 
 ## 3. Hard rules: wording for approval
 
@@ -940,9 +941,9 @@ Owners: route (routes.ts handler), loop (loop.ts driver), tasks (tasks.ts servic
 | (none) | BUILD | none | interview | route POST /tasks | interview run (tasks) | none |
 | interview | ASKED | none | interview | tasks | question reason (tasks) | none |
 | interview | ANSWERED | none | spec_draft | route answers; tasks | spec run (tasks) | none |
-| spec_draft | APPROVE | noSpecPr (small or medium) | implementing | route plan | loop.build, then part START (route, loop) | PS9: medium joins |
-| spec_draft | APPROVE | specPr (large) | spec_draft | route plan | none | PS9 |
-| spec_draft | OPEN_SPEC_PR | specPr | spec_pr_open | reserved, WP-B8 | push and PR create (pr) | no sender |
+| spec_draft | APPROVE | noSpecPr (small, medium, or large with plan review self) | implementing | route plan | loop.build, then part START (route, loop). Large with self: the part rows of the stack first (SA-2) | SA-1: medium joins; large with self (self-approved-plans.md section 4.2) |
+| spec_draft | APPROVE | specPr (large without plan review self) | spec_draft | route plan | docs approved | SA-1 |
+| spec_draft | OPEN_SPEC_PR | specPr | spec_pr_open | reserved, WP-B8 | push and PR create (pr) | no sender; SA-1 guard |
 | spec_pr_open | SPEC_GATE_PASSED | gate | spec_approved | reserved, WP-B8 | notification | no sender |
 | spec_pr_open | OVERRIDE | none | spec_approved | reserved, WP-B8 | none | no sender |
 | spec_pr_open | CLOSE | none | done | route close | closed_at (tasks) | none |
@@ -958,9 +959,9 @@ Owners: route (routes.ts handler), loop (loop.ts driver), tasks (tasks.ts servic
 | stopped | CLOSE | none | done | route close | closed_at; delete transcripts | PS3 side effect |
 | done | CLOSE | none | done | route close | clear task.blocked_json and the waiting part rows; version + 2; closed_at keeps its first value | none |
 
-- Guard renames (PS9): small becomes noSpecPr, and planReview becomes specPr. The README diagram changes in the same package (tests/tasks/readme.test.ts:10-14).
+- Guard renames (SA-1, before PS9): small becomes noSpecPr, and planReview becomes specPr. TaskContext adds selfReview from task.settings_json.planReview. The README diagram changes in the same package (tests/tasks/readme.test.ts:10-14).
 - machine.ts:51 changes. "Stop, a restart, or a usage limit stops a task" becomes "The user's Stop, or an error that no reason covers, stops a task."
-- Section 5.4 keeps the old flow for "an old medium task that already has a spec PR". G1 shows that no such task can exist. An old approved medium plan waits in spec_draft. PS9 lets "Approve the plan" show again for it. Not verified: the plan route accepts an approved plan again.
+- Section 5.4 keeps the old flow for "an old medium task that already has a spec PR". G1 shows that no such task can exist. An old approved medium plan waits in spec_draft. SA-1 lets "Approve the plan" show again for it, and the plan route accepts the second approval (tests/tasks/medium.test.ts).
 
 #### 9.3.2 Part machine
 

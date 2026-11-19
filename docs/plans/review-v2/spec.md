@@ -980,8 +980,10 @@ design.md section 8 lists each idea with now, later, or reject. The "now" items 
 | Size | UI line | PRs |
 |---|---|---|
 | small | "Small: one PR with a short plan and the code." | 1 (plan.md and code) |
-| medium | "Medium: colleagues review the plan first, then one PR with the code." | spec PR, 1 code PR |
-| large | "Large: colleagues review the plan first, then the code comes in small PRs, one after another." | spec PR, optional contract PR, 2 or more part PRs, optional cleanup PR |
+| medium | "Medium: one PR with the plan and the code." | 1 code PR (design.md, spec.md, tasks.md, and code) |
+| large | "Large: the code comes in small PRs, one after another." | 2 or more stacked part PRs; a spec PR only when colleagues review the plan |
+
+- Plan review (section 6.32): before a large build, the user picks "I approve the plan myself" (self) or a spec PR (spec-pr). Medium has no spec PR. This version cannot open a spec PR, so a large plan with spec-pr waits in spec_draft.
 
 - A large plan starts with a contract part (types, interfaces, API schemas, migrations) only when estimate.db or estimate.api is true. A cleanup part exists when the plan has a feature flag or temporary code. Medium puts its contract tasks into the one code PR.
 - Claude proposes the size in the spec result. The app raises it: estimate.db or estimate.api true gives at least medium; estimate.lines above the line budget gives large. The plan screen shows "Claude proposes: small" and, when a rule raised it, "Set to large: the estimate is over 400 changed lines."
@@ -1000,8 +1002,8 @@ Task states (task.state):
 |---|---|---|---|---|
 | interview | yes | yes | yes | Claude reads and asks. |
 | spec_draft | yes | yes | yes | Claude writes the plan, or it waits for the user's approval. |
-| spec_pr_open | no | yes | yes | The spec PR waits for colleagues. |
-| spec_approved | no | yes | yes | The spec PR passed its gate, or the user overrode it. |
+| spec_pr_open | no | no | spec-pr only | The spec PR waits for colleagues. |
+| spec_approved | no | no | spec-pr only | The spec PR passed its gate, or the user overrode it. |
 | implementing | yes | yes | yes | Parts are built or wait for their gates. |
 | ready | yes | yes | yes | Every PR of the task is open, and the last one waits for review. |
 | done | yes | yes | yes | Every PR merged, or the user closed the task. |
@@ -1021,9 +1023,9 @@ Main transitions:
 | (none) | "Build this task" click | interview, the interview run starts |
 | interview | Claude asks questions | interview, blocked question |
 | interview | answers sent, or done true | spec_draft, the spec run starts (round 2 runs first when Claude asks again, at most once) |
-| spec_draft | the user approves the plan, size small | implementing, part 1 starts |
-| spec_draft | the user approves the plan, size medium or large | spec_draft, primary "Open the spec PR" |
-| spec_draft | "Open the spec PR" confirm | spec_pr_open (push and create PR) |
+| spec_draft | the user approves the plan; noSpecPr: small, medium, or large with plan review self | implementing, part 1 starts |
+| spec_draft | the user approves the plan; specPr: large without plan review self | spec_draft, primary "Open the spec PR" (WP-B8) |
+| spec_draft | "Open the spec PR" confirm; specPr | spec_pr_open (push and create PR) |
 | spec_pr_open | the spec PR passes the gate | spec_approved, notification "spec approved" |
 | spec_pr_open | the user overrides with a confirm | spec_approved |
 | spec_approved | "Start building" | implementing |
@@ -1036,7 +1038,7 @@ Main transitions:
 The machine (src/server/tasks/machine.ts, XState v5 as a pure function; design.md section 5.5, Libraries):
 
 - `taskMachine` and `partMachine` are declared with `setup({ types, guards }).createMachine({...})`. Their states are the task.state and task_part.state values of this section. Their events are the rows of the table above (BUILD, ASKED, ANSWERED, APPROVE, OPEN_SPEC_PR, SPEC_GATE_PASSED, OVERRIDE, START_BUILDING, PART_READY, LAST_PR_OPEN, ALL_MERGED, STOP, RESUME, FAIL, CLOSE, and the part events).
-- Guards read only the context that the app passes: size (APPROVE goes to implementing for small, else stays in spec_draft), the gate result, and stopped_from (RESUME goes back to the state in stopped_from).
+- Guards read only the context that the app passes: size and selfReview (section 6.32.2: noSpecPr sends APPROVE to implementing; specPr keeps it in spec_draft and allows OPEN_SPEC_PR), the gate result, and stopped_from (RESUME goes back to the state in stopped_from). advance sets selfReview when task.settings_json.planReview is "self".
 - advance(db, task, event) in src/server/tasks/tasks.ts: build the snapshot with `taskMachine.resolveState({ value: row.state, context })`; refuse the event when `snapshot.can(event)` is false (409 with the sentence of the current state); compute `const [next] = transition(taskMachine, snapshot, event)`; write next.value into task.state with the version check, in the same transaction as the step row. The app runs every effect (a run start, a push, a notification) after the commit, from the new state.
 - The machine has no entry, exit, or transition actions and no invoke. No code calls `createActor`. No XState snapshot goes into SQLite.
 - API names (XState docs "Pure transitions", stately.ai/docs/pure-transitions, and the core changelog 5.19.0): `transition(logic, snapshot, event)` returns `[nextSnapshot, actions]` and executes no action; `initialTransition(logic, input?)` returns `[initialSnapshot, actions]`. `machine.resolveState({ value, context? })` builds a snapshot from a stored value (stately.ai/docs/persistence). `snapshot.can(event)` returns true when the event changes the state and runs the guards (stately.ai/docs/states).
@@ -2149,7 +2151,7 @@ Constants: MAX_INSTRUCTION = 4,000 characters (MAX_QUESTION), RESOLVE_STOPS = 10
 
 ### 6.20 Sub-tasks: one branch and one PR per sub-task (design.md B28 to B33, section 10.8, user decisions of 2026-10-29)
 
-A Jira task with sub-tasks builds each sub-task as its own branch and PR. The feature reuses the task flow: one task row for the parent key, one task_part row per PR, the loop of one part (section 6.7), Tell Claude and the update (section 6.18), the PR rows (section 6.16.8), and the plan screen. There is no second flow. The parts share one engine with per-part bases, a scheduler, a part gate from the sync, a push route, and a move route. WP-B8 (large tasks) reuses this engine later.
+A Jira task with sub-tasks builds each sub-task as its own branch and PR. The feature reuses the task flow: one task row for the parent key, one task_part row per PR, the loop of one part (section 6.7), Tell Claude and the update (section 6.18), the PR rows (section 6.16.8), and the plan screen. There is no second flow. The parts share one engine with per-part bases, a scheduler, a part gate from the sync, a push route, and a move route. A self-approved large plan reuses this engine as a stack of parts without keys (section 6.32). WP-B8 (the spec PR) reuses it later.
 
 Every Jira call of this section works on Jira Server, Data Center, and Cloud. Both deployments use REST v2. Cloud uses Basic auth of `email:token` (BRIEF section 7). The app reads sub-tasks and links from the issue fields `subtasks`, `parent`, and `issuelinks`. It never calls the `/subtask` endpoint, which exists on Data Center only.
 
@@ -3354,6 +3356,54 @@ Acceptance criteria:
 8. AC-B290. readLog follows no redirect. The redirect target gets no request (tests/ci/jenkins.test.ts).
 9. AC-B291. A log within the cap takes one GET from start 0. A larger log takes a second GET from X-Text-Size - cap and gives the tail. A body over the cap is an error (tests/ci/jenkins.test.ts).
 10. AC-B292. readLog gives its own error for 401, 404, and an answer without X-Text-Size (tests/ci/jenkins.test.ts).
+
+### 6.32 Self-approved plans: a large task with no spec PR (docs/plans/review-v2/self-approved-plans.md, user answers of 2026-11-19)
+
+The design file holds the full transition table, the engine sites, the edge cases, and the evidence. This section holds the behavior and the acceptance criteria.
+
+#### 6.32.1 The choice
+
+- The Size fieldset of the plan screen shows "Plan review" under the large radio, only for a large pick without sub-tasks. Radios: "I approve the plan myself. Colleagues review only the code PRs." and "Colleagues review the plan first, in a spec PR." The second radio is disabled with "This version cannot open a spec PR yet." Default: the stored planReview, else self.
+- shared/task.ts: `PLAN_REVIEWS = ["self", "spec-pr"]` and `taskSettings.planReview`. settings_json is zod data, so no migration.
+- POST /api/tasks/:id/plan takes `review`. Review with a sub-task task, or with a size other than large, gives 400. Large stores `planReview = review ?? "spec-pr"`. Other sizes remove planReview. Large with self also stores maxOpen = the repository max_open. One transaction holds the patch, APPROVE, and the part rows.
+
+#### 6.32.2 Machine
+
+- `TaskContext.selfReview` is true when planReview is "self". A parse error gives false.
+- noSpecPr: small, medium, or large with selfReview. specPr: large without selfReview.
+- spec_draft APPROVE noSpecPr goes to implementing. APPROVE specPr stays in spec_draft with docs approved. OPEN_SPEC_PR needs specPr and stays reserved for WP-B8. No edge goes from implementing back to a spec PR state.
+- The part machine, the phase machine, and the scheduler do not change.
+
+#### 6.32.3 Medium
+
+- A medium approval goes to implementing. ensureParts makes one part on `<prefix><KEY>-<slug>`. Until PS9, the part commits design.md, spec.md, and tasks.md, and ticks tasks.md. The PR text names tasks.md. GET /branch names the one branch.
+- An approved plan in spec_draft (an old medium plan, or a large plan with spec-pr) shows "The plan waits for a spec PR, which this version cannot open. Approve it again to build it now." with the primary "Approve the plan". The second approval applies the machine row.
+
+#### 6.32.4 Large with self review
+
+- The approval writes one part row per plan part, with keys []. Part n gets the branch `<prefix><KEY>-<n>-<slug>` and the plan folder `<spec_dir>part-<n>/`. Part 1 starts from the target branch. Part k starts on part k-1 (start stack, after k-1), and its PR targets the branch of part k-1.
+- The scheduler, the part gate, the push, the move, and the three-step merge of section 6.20 apply unchanged. One part builds at a time. At most max_open PRs are open.
+- Each part commits only its plan slice `specs/<KEY>/part-<n>/plan.md`. The full plan stays in the Plan tab and is never committed. Commits and the PR title name "<KEY> (part k of n)". The description lists the parts and the keep-branch sentence, and has no "Parent:" line.
+- Skip or Drop of a middle part: each planned part on top of it builds on the part below the dropped one. A sub-task task keeps its base start.
+- A submodule change in a part blocks with LARGE_REPOS_TEXT. Stacks across repositories stay out of scope.
+- The approval and the loop push and post nothing. Each PR opens only on the user's click.
+
+#### 6.32.5 Acceptance criteria
+
+1. AC-SA1. The task machine follows the table of self-approved-plans.md section 4.2 under each size and selfReview value. The README diagram equals machineMermaid(taskMachine).
+2. AC-SA2. A medium approval builds one part with one PR, as section 6.32.3 describes.
+3. AC-SA3. An approved plan in spec_draft shows "Approve the plan". A second POST /plan returns 200 and applies the machine row.
+4. AC-SA4. The radios show only for large without sub-tasks. Spec-pr is disabled with its note. Approve sends review self.
+5. AC-SA5. Large with review self goes to implementing and writes n part rows: keys [], `<prefix><KEY>-<n>-<slug>`, part 1 base, part k stack after k-1, `<spec_dir>part-<n>/`, planReview self, maxOpen = repository max_open. The fake write counter stays 0.
+6. AC-SA6. Large with review spec-pr, or with no review, stays in spec_draft with approved true. A second approval with self moves on.
+7. AC-SA7. Review with small or medium gives 400. Review on a sub-task task gives 400.
+8. AC-SA8. Part 1 starts from the target. Part 2 waits with the scheduler sentence, and "Start now" overrides. Part 2 branches from part 1's pushed head, and its PR targets part 1's branch.
+9. AC-SA9. Each part commits only `specs/<KEY>/part-<n>/plan.md` of its slice. Commits and the PR title name "<KEY> (part k of n)". The description lists the parts and the keep-branch sentence, and has no "Parent:" line. liveTaskPart lists the part plan path.
+10. AC-SA10. A merge commit of part 1 gives one PUT and no git merge. A squash gives the three merges. No push argv after the first push has a force flag or a `+` refspec.
+11. AC-SA11. A Skip or Drop of part 2 makes planned part 3 build on part 1. A sub-task task keeps its base start.
+12. AC-SA12. A submodule change in a stack part blocks with LARGE_REPOS_TEXT.
+13. AC-SA13. The build view of a stack plan shows one row per part, the primary of the focused part, no tracker action, "Parts: n, one PR each", and "Drop this part".
+14. AC-SA14. The e2e of SA-3 passes.
 
 ## 7. UX rules check
 

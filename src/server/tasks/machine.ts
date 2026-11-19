@@ -8,7 +8,8 @@ import { type AnyStateMachine, setup } from "xstate";
 import type { TaskSize, TaskState } from "../../shared/task";
 
 // The facts that the guards read. The app passes them; the machine stores nothing. gate: the spec or part PR passed its review rules.
-export type TaskContext = { size: TaskSize | null; gate: boolean; stoppedFrom: TaskState | null };
+// selfReview: task.settings_json.planReview is "self" (self-approved-plans.md section 4.1).
+export type TaskContext = { size: TaskSize | null; gate: boolean; stoppedFrom: TaskState | null; selfReview: boolean };
 // unpushed: task_part.pushed is NULL. A continued branch holds the remote head there, so RESTART never needs a force push. Absent
 // counts as false.
 export type PartContext = { gate: boolean; unpushed?: boolean };
@@ -60,24 +61,24 @@ const halt = { STOP: "stopped", FAIL: "failed" } as const;
 export const taskMachine = setup({
   types: { context: {} as TaskContext, events: {} as TaskEvent },
   guards: {
-    small: ({ context }) => context.size === "small",
-    planReview: ({ context }) => context.size === "medium" || context.size === "large",
+    noSpecPr: ({ context }) => context.size === "small" || context.size === "medium" || (context.size === "large" && context.selfReview),
+    specPr: ({ context }) => context.size === "large" && !context.selfReview,
     gate: ({ context }) => context.gate,
     stoppedFrom: ({ context }, params: { state: TaskState }) => context.stoppedFrom === params.state,
   },
 }).createMachine({
   id: "task",
   initial: "interview",
-  context: { size: null, gate: false, stoppedFrom: null },
+  context: { size: null, gate: false, stoppedFrom: null, selfReview: false },
   states: {
     interview: { on: { ASKED: "interview", ANSWERED: "spec_draft", ...halt } },
     spec_draft: {
       on: {
         APPROVE: [
-          { guard: "small", target: "implementing" },
-          { guard: "planReview", target: "spec_draft" },
+          { guard: "noSpecPr", target: "implementing" },
+          { guard: "specPr", target: "spec_draft" },
         ],
-        OPEN_SPEC_PR: { guard: "planReview", target: "spec_pr_open" },
+        OPEN_SPEC_PR: { guard: "specPr", target: "spec_pr_open" },
         ...halt,
       },
     },

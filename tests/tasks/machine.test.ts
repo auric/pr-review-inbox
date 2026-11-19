@@ -41,7 +41,8 @@ type PhaseEventType = (typeof PHASE_EVENTS)[number];
 type PhaseGuard = (typeof PHASE_GUARDS)[number];
 
 // The context of the table: every guard that the table rows need passes. The guard cases below vary one fact at a time.
-const BASE: TaskContext = { size: "medium", gate: true, stoppedFrom: "implementing" };
+// Large without self review keeps APPROVE in spec_draft and allows OPEN_SPEC_PR (self-approved-plans.md section 4.5).
+const BASE: TaskContext = { size: "large", gate: true, stoppedFrom: "implementing", selfReview: false };
 
 // spec.md section 6.2, main transitions. A pair that the table leaves out is refused.
 const TASK_TABLE: Record<TaskState, Partial<Record<TaskEventType, TaskState>>> = {
@@ -197,7 +198,11 @@ function explore(machine: AnyStateMachine, events: readonly string[], contexts: 
 }
 
 const TASK_CONTEXTS: TaskContext[] = [null, "small", "medium", "large"].flatMap((size) =>
-  [false, true].flatMap((gate) => [null, ...TASK_STATES].map((stoppedFrom) => ({ size, gate, stoppedFrom }) as TaskContext)),
+  [false, true].flatMap((gate) =>
+    [false, true].flatMap((selfReview) =>
+      [null, ...TASK_STATES].map((stoppedFrom) => ({ size, gate, stoppedFrom, selfReview }) as TaskContext),
+    ),
+  ),
 );
 const PART_CONTEXTS = combos(["gate", "unpushed"] as const, { gate: false, unpushed: false });
 
@@ -220,17 +225,22 @@ describe("task machine", () => {
       for (const type of TASK_EVENTS) expectTask(state, type, TASK_TABLE[state][type] ?? null);
     });
 
-  test("APPROVE goes to implementing for small and stays in spec_draft for medium and large; no size is refused", () => {
-    expectTask("spec_draft", "APPROVE", "implementing", { ...BASE, size: "small" });
-    expectTask("spec_draft", "APPROVE", "spec_draft", { ...BASE, size: "medium" });
-    expectTask("spec_draft", "APPROVE", "spec_draft", { ...BASE, size: "large" });
-    expectTask("spec_draft", "APPROVE", null, { ...BASE, size: null });
+  test("APPROVE: noSpecPr goes to implementing, specPr stays in spec_draft, no size is refused (self-approved-plans.md 4.2)", () => {
+    for (const selfReview of [false, true]) {
+      expectTask("spec_draft", "APPROVE", "implementing", { ...BASE, size: "small", selfReview });
+      expectTask("spec_draft", "APPROVE", "implementing", { ...BASE, size: "medium", selfReview });
+      expectTask("spec_draft", "APPROVE", null, { ...BASE, size: null, selfReview });
+    }
+    expectTask("spec_draft", "APPROVE", "implementing", { ...BASE, size: "large", selfReview: true });
+    expectTask("spec_draft", "APPROVE", "spec_draft", { ...BASE, size: "large", selfReview: false });
   });
 
-  test("a small task never opens a spec PR", () => {
-    expectTask("spec_draft", "OPEN_SPEC_PR", null, { ...BASE, size: "small" });
-    expectTask("spec_draft", "OPEN_SPEC_PR", "spec_pr_open", { ...BASE, size: "large" });
-    expectTask("spec_draft", "OPEN_SPEC_PR", null, { ...BASE, size: null });
+  test("OPEN_SPEC_PR: only a large plan without self review opens a spec PR", () => {
+    for (const selfReview of [false, true]) {
+      for (const size of ["small", "medium", null] as const) expectTask("spec_draft", "OPEN_SPEC_PR", null, { ...BASE, size, selfReview });
+    }
+    expectTask("spec_draft", "OPEN_SPEC_PR", "spec_pr_open", { ...BASE, size: "large", selfReview: false });
+    expectTask("spec_draft", "OPEN_SPEC_PR", null, { ...BASE, size: "large", selfReview: true });
   });
 
   test("the spec gate result decides SPEC_GATE_PASSED; OVERRIDE needs no gate", () => {
@@ -581,9 +591,9 @@ describe("machineMermaid", () => {
   interview --> spec_draft: ANSWERED
   interview --> stopped: STOP
   interview --> failed: FAIL
-  spec_draft --> implementing: APPROVE if small
-  spec_draft --> spec_draft: APPROVE if planReview
-  spec_draft --> spec_pr_open: OPEN_SPEC_PR if planReview
+  spec_draft --> implementing: APPROVE if noSpecPr
+  spec_draft --> spec_draft: APPROVE if specPr
+  spec_draft --> spec_pr_open: OPEN_SPEC_PR if specPr
   spec_draft --> stopped: STOP
   spec_draft --> failed: FAIL
   spec_pr_open --> spec_approved: SPEC_GATE_PASSED if gate
@@ -742,6 +752,19 @@ describe("advance", () => {
     db.query("UPDATE task SET size = 'small' WHERE id = $id").run({ id });
     expect(advance(db, { task: id, version: 2 }, { type: "APPROVE" }, {}, 7)).toEqual({ status: 200, state: "implementing", version: 3 });
     expect(row(id)).toEqual({ state: "implementing", stopped_from: null, version: 3, updated_at: 7 });
+  });
+
+  test("advance reads planReview: a large plan with self goes to implementing; with spec-pr or none it stays", () => {
+    const walk = (settings: string) => {
+      const id = newTask("spec_draft", "large");
+      db.query("UPDATE task SET settings_json = $s WHERE id = $id").run({ id, s: settings });
+      const r = advance(db, { task: id, version: 0 }, { type: "APPROVE" });
+      return "state" in r ? r.state : null;
+    };
+    expect(walk('{"planReview":"self"}')).toBe("implementing");
+    expect(walk('{"planReview":"spec-pr"}')).toBe("spec_draft");
+    expect(walk("{}")).toBe("spec_draft");
+    expect(walk('{"planReview":"other"}')).toBe("spec_draft");
   });
 
   test("a refused event returns 409 with the sentence of the state and writes nothing", () => {

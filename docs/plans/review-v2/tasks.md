@@ -54,6 +54,8 @@ Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It add
 | UT | User smoke docs/smoke-task.md part T (a parent with 4 sub-tasks, 2 in review outside the app, one squash merge) | W9d |
 | WPQ | WP-PQ-D, then WP-PQ1, WP-PQ2, WP-PQ3, WP-PQ4, WP-PQ5 (one branch, one after another; shared files) | W9d merged (done) |
 | UP | User smoke docs/smoke-task.md part P (plan quality) | WPQ |
+| WSA | WP-SA-D, then WP-SA-1, WP-SA-2, WP-SA-3 (one branch, one after another; shared files) | the user answers of 2026-11-19 (self-approved-plans.md section 2) |
+| UL-S | User smoke docs/smoke-task.md part LS (a self-approved large task) | WSA |
 | W10 | WP-B6 ∥ WP-B7 | UN and UTU (the medium code PR uses the several-repository PR flow of WP-MR2) |
 | UM | User smoke part M (medium task) | W10 |
 | W11 | WP-B8, then WP-B9 ∥ WP-B10 | UM |
@@ -511,6 +513,16 @@ Integration first. They change the spec run (tasks.ts `specRun`), the plan model
 
 - docs/smoke-task.md part P on the test repository. Build one small task with the check on. Record the check state, the problems, any repair, the turns and time per run, and the unchecked symbol count. Check that "Approve the plan" waits during the check. Stop one check and resume. Turn the setting off, build again, and check that no check run starts.
 
+### Self-approved plans (wave WSA, spec.md section 6.32, self-approved-plans.md)
+
+A large plan that the user approves alone builds as stacked part PRs on the part engine of section 6.20. Medium has no spec PR. Section 11 of the design holds the files of each package.
+
+- WP-SA-D. Docs (implementer): BRIEF.md, spec.md (6.1, 6.2, 6.20 preface, 6.32), part-session.md (2.19, 9.3.1), tasks.md, ps6-ps7-plan.md section 7, CLAUDE.md, docs/smoke-task.md part LS. Built.
+- WP-SA-1. Machine and medium (implementer): TaskContext.selfReview, the guards noSpecPr and specPr, PLAN_REVIEWS, the medium build with one part, "Approve the plan" again for an approved plan, the README diagram. AC-SA1 to AC-SA3. Control mutation: remove medium from noSpecPr; the medium build test fails. Built.
+- WP-SA-2. Large self build (implementer-xhigh): taskPlanInput.review, partsPlan, stackParts, the engine sites, the Skip and Drop re-point. AC-SA5 to AC-SA12. Open.
+- WP-SA-3. Web, e2e, docs (implementer): the plan review radios, the stack build view, tests/e2e/task-large.e2e.ts, screenshots, README, CHANGELOG. AC-SA4, AC-SA13, AC-SA14. Open.
+- Gate UL-S (user): docs/smoke-task.md part LS. Open.
+
 ### WP-B6. Spec PR flow (implementer-xhigh, W10)
 
 - Files: src/server/tasks/{specpr.ts (branch, commit of the plan files, push, create PR, link task_part to the PR row, follow), gates.ts (spec gate from the synced reviewers_json, tasks, and builds)} (new); src/server/sync/* (read build stats for task PR heads during the normal PR sync); src/server/review/fix-routes.ts and clone.ts (Apply mode "task": commit into the part worktree; push stays a click); tests/tasks/specpr.test.ts (new); tests/review/fix-task.test.ts (new).
@@ -528,6 +540,8 @@ Integration first. They change the spec run (tasks.ts `specRun`), the plan model
 - docs/smoke-task.md part M: a task with one migration. The spec PR with one colleague comment, Draft replies and Fix on the spec, the approval, the code PR.
 
 ### WP-B8. Large-task wiring of the part engine (implementer-xhigh, W11)
+
+- Note of 2026-11-19: WSA builds a self-approved large plan on the engine first (spec.md section 6.32). WP-B8 keeps the spec PR branch of a large plan (plan review spec-pr): it enables the disabled "spec PR" radio, gives OPEN_SPEC_PR a sender, and stacks part 1 on the spec branch.
 
 - Files: src/server/tasks/{loop.ts, tasks.ts (large plans on the engine of WP-ST3 to WP-ST5: stacked parts on the spec branch, max open from repo_task_settings, replan after merges)}; tests/tasks/large.test.ts (new). schedule.ts, gates.ts, the push and move routes, and the three-step merge come from WP-ST3 to WP-ST5.
 - Behavior: design.md section 5.5 (stack rules); spec.md sections 6.10 (part gate), 6.11, and 6.20.10 (updates and the move after a merge). AC-B14, AC-B15.

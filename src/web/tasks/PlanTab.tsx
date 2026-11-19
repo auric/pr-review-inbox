@@ -259,9 +259,9 @@ export function PlanApproval(props: {
                 onChange={() => props.onSize(s)}
               />
               <span className="text-sm">{SIZE_LINE[s]}</span>
-              {s !== "small" && (
+              {s === "large" && (
                 <span className="col-start-2 text-xs text-muted-foreground">
-                  This version builds small tasks only. A {s} plan waits after its approval.
+                  This version builds small and medium tasks only. A large plan waits after its approval.
                 </span>
               )}
             </label>

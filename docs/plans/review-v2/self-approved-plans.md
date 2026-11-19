@@ -1,6 +1,6 @@
 # Self-approved plans: build a large task with no spec PR
 
-Status: design of 2026-11-18 against main a789260. User decision of 2026-11-18: build a large Jira task that only the user approves, with no spec PR review by colleagues. It is designed together with PS9 (spec size levels). Nothing is built. The decisions of section 2 wait for the user.
+Status: design of 2026-11-18 against main a789260. User decision of 2026-11-18: build a large Jira task that only the user approves, with no spec PR review by colleagues. It is designed together with PS9 (spec size levels). The user approved D1 to D7 on 2026-11-19. SA-D (docs) and SA-1 (machine and medium) are built. SA-2, SA-3, and Gate UL-S are open.
 
 ## Summary
 
@@ -30,7 +30,9 @@ Status: design of 2026-11-18 against main a789260. User decision of 2026-11-18: 
 - The spec run already splits the work into parts of at most the line budget (catalog.ts:1114).
 - Q9 of part-session.md (approved 2026-11-12): medium loses its spec PR.
 
-## 2. Decisions (recommended answers; the plan uses them until the user answers)
+## 2. Decisions
+
+User answers of 2026-11-19: D1-D7 as recommended.
 
 | ID | Question | Recommended |
 |---|---|---|
@@ -314,7 +316,7 @@ Run one at a time. They are not file-disjoint: SA-1 and SA-2 share tasks.ts and 
 
 | WP | Tier | Files | Starts after |
 |---|---|---|---|
-| SA-D Docs | implementer | BRIEF.md (approved text of section 8), docs/plans/review-v2/spec.md (6.1, 6.2 tables and machine, the 6.20 preface, new 6.29 with this design), part-session.md (2.19 note, 9.3.1 rows), tasks.md (SA rows, WP-B8 note), ps6-ps7-plan.md section 7 (PS9 scope), CLAUDE.md status line, docs/smoke-task.md part LS | the separate limit package; the user approves D6 |
+| SA-D Docs | implementer | BRIEF.md (approved text of section 8), docs/plans/review-v2/spec.md (6.1, 6.2 tables and machine, the 6.20 preface, new 6.32 with this design (6.29 to 6.31 were taken)), part-session.md (2.19 note, 9.3.1 rows), tasks.md (SA rows, WP-B8 note), ps6-ps7-plan.md section 7 (PS9 scope), CLAUDE.md status line, docs/smoke-task.md part LS | the separate limit package; the user approves D6 |
 | SA-1 Machine and medium | implementer | src/server/tasks/machine.ts; src/shared/task.ts (PLAN_REVIEWS, taskSettings.planReview); src/server/tasks/tasks.ts (SQL.task, StateRow, advance context, GET /branch :2634); src/server/tasks/loop.ts (:2238); src/web/tasks/model.ts (SIZE_LINE.medium, plannedBranch, :751-760); src/web/tasks/PlanTab.tsx (note for large only); README.md diagram; tests/tasks/machine.test.ts; tests/tasks/medium.test.ts (new); tests/web model tests | SA-D |
 | SA-2 Large self build | implementer-xhigh | src/shared/dto.ts (taskPlanInput.review); src/server/tasks/tasks.ts (partsPlan, the engine sites, plan route); src/server/tasks/subtasks.ts (stackParts); src/server/tasks/loop.ts (engine sites, context size, :1647, skip and drop re-point, skip text); src/server/tasks/pr.ts (:181, :190); src/server/tasks/task-pr.ts (:18, :38); tests/tasks/large.test.ts (new); tests that assert the old skip text | SA-1 |
 | SA-3 Web, e2e, docs | implementer | src/web/tasks/{model.ts, PlanTab.tsx, TaskView.tsx, OpenPrDialog.tsx}; tests/web; tests/e2e/task-large.e2e.ts (new); demo data if a screenshot needs a large task; docs/screenshots (bun run screenshots); README.md prose of "Build a Jira task"; CHANGELOG.md | SA-2 |

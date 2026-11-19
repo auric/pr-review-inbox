@@ -147,7 +147,7 @@ export type TaskView = {
 // spec.md section 6.1: the one-line meaning of each size.
 export const SIZE_LINE: Record<TaskSize, string> = {
   small: "Small: one PR with a short plan and the code.",
-  medium: "Medium: colleagues review the plan first, then one PR with the code.",
+  medium: "Medium: one PR with the plan and the code.",
   large: "Large: colleagues review the plan first, then the code comes in small PRs, one after another.",
 };
 
@@ -798,17 +798,12 @@ export function taskView(
 
   if (t.state === "spec_draft") {
     if (run || !t.plan) return working(`${R} is writing the plan.`, [STOP], "plan");
-    if (t.plan.approved)
-      return {
-        ...base,
-        status: "The plan is approved. Colleagues review a medium or large plan as a PR. This version cannot open that PR yet.",
-        primary: null,
-        more: [STOP],
-        screen: "plan",
-      };
     return {
       ...base,
-      status: planSentence(t),
+      // self-approved-plans.md section 6: a second approval of a plan that waits for a spec PR builds it.
+      status: t.plan.approved
+        ? "The plan waits for a spec PR, which this version cannot open. Approve it again to build it now."
+        : planSentence(t),
       primary: { kind: "approve", label: "Approve the plan" },
       // spec.md section 6.1: a minimum of large leaves one size, and a task with sub-tasks shows no size.
       more: [
@@ -1193,7 +1188,7 @@ export const STEP_TEXT: Record<StepLook, string> = {
 
 // spec.md section 6.8: the branch of a small task. A larger task gets more branches, and each one starts with <prefix><KEY>-.
 export const plannedBranch = (prefix: string, t: Pick<TaskDto, "key" | "title">, size: TaskSize) =>
-  size === "small" ? branchName(prefix, t.key, { kind: "small", title: t.title }) : `${prefix}${t.key}-`;
+  size !== "large" ? branchName(prefix, t.key, { kind: "small", title: t.title }) : `${prefix}${t.key}-`;
 
 // The branch prefix rule of the plan approval (branchPrefix in dto.ts, spec.md section 6.16.1), with its sentence.
 export function prefixProblem(prefix: string): string | null {

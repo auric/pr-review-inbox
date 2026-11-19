@@ -48,8 +48,8 @@ export function BranchSection(props: {
   const prefix = pick && pickedPrefix(pick);
   const name = prefix !== null && prefixProblem(prefix) === null ? plannedBranch(prefix, t, size) : null;
   const typed = pick?.chip === null && pick.other ? prefixProblem(pick.other) : null;
-  const small = size === "small";
-  const lead = small ? "The change goes to" : "The branches of this task start with";
+  const one = size !== "large";
+  const lead = one ? "The change goes to" : "The branches of this task start with";
   // The check of the picked prefix. A typed prefix reaches it after the wait, so a check of an earlier prefix shows nothing.
   const current = check.checked !== null && check.checked === prefix;
   const found = current && check.data?.exists.length ? check.data : null;

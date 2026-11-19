@@ -1352,7 +1352,7 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
   );
 
   test(
-    "a medium plan stays in spec_draft after its approval; the next plan of the repository needs no warning and offers a saved command once",
+    "a large plan without a plan review stays in spec_draft after its approval; the next plan of the repository needs no warning and offers a saved command once",
     async () => {
       const h = await setup();
       const first = await h.toPlan();
@@ -1371,7 +1371,7 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
       const t = await h.recommend(await h.get(c.body.id));
       expect([t.size, t.plan?.warning]).toEqual(["medium", false]);
       expect(t.plan?.commands).toEqual([{ id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: true }]);
-      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body: { version: t.version, size: "medium", commands: ["cmd1"] } });
+      const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body: { version: t.version, size: "large", commands: ["cmd1"] } });
       expect([ok.status, ok.body.state, ok.body.plan?.approved]).toEqual([200, "spec_draft", true]);
     },
     SLOW,
