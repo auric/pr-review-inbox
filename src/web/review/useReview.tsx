@@ -494,6 +494,8 @@ export function useReview(
         ledger={ledger}
         foldOpen={tr.foldOpen}
         onFold={tr.toggleFold}
+        preOpen={tr.preOpen}
+        onPre={tr.togglePre}
         isOpen={tr.isDraftOpen}
         triage={triage}
         cards={findingCards}

@@ -981,3 +981,59 @@ describe("evidence references (review-quality-2026.md item 8 gate)", () => {
     expect(text).not.toContain("dual");
   });
 });
+
+// docs/plans/review-v3.md WP-V6: the items of the Pre-existing fold count apart.
+describe("pre-existing items (review-v3.md WP-V6)", () => {
+  // B1 is a must-find at g.ts:10, T1 a trap at g.ts:70, and the extra is at g.ts:90. Each pre-existing item sits on one of them or on
+  // nothing. label.ts judges only an item without a gold match.
+  const c = gcase("g", [gbug("B1", 10)]);
+  const base = [at("hit", { line: 10, lineEnd: 10, severity: "major" }), at("noise", { line: 20, lineEnd: 20 })];
+  const pre = [
+    at("pre-bug", { line: 10, lineEnd: 10, severity: "major", group: "preexisting" }),
+    at("pre-trap", { line: 70, lineEnd: 70, severity: "major", group: "preexisting" }),
+    at("pre-new", { line: 40, lineEnd: 40, severity: "blocker", group: "preexisting" }),
+    at("pre-extra", { line: 90, lineEnd: 90, severity: "major", group: "preexisting" }),
+  ];
+  const g = grounding(
+    { hit: ["bug:B1"], noise: [], "pre-bug": ["bug:B1"], "pre-trap": ["trap:T1"], "pre-new": [], "pre-extra": ["extra:0"] },
+    { noise: { label: "fp", severity: "low" }, "pre-new": { label: "tp", severity: "high" } },
+  );
+
+  test("the main-list metrics do not change when pre-existing items join the run", () => {
+    const without = gresult([c], [run("g", 1, base), run("g", 2, [base[1] as EvalItem])]);
+    const withPre = gresult([c], [run("g", 1, [...base, ...pre]), run("g", 2, [base[1] as EvalItem, ...pre])]);
+    for (const grounded of [undefined, g]) {
+      const a = score(without, grounded);
+      const b = score(withPre, grounded);
+      for (const m of Object.keys(a.suite) as (keyof typeof a.suite)[])
+        if (m !== "preexisting") expect([m, b.suite[m]]).toEqual([m, a.suite[m]]);
+      expect(b.slices).toEqual(a.slices);
+      expect(b.confusion).toEqual(a.confusion);
+      expect(b.recallBugs).toEqual(a.recallBugs);
+      expect(unionRecall(withPre, 2, grounded)).toEqual(unionRecall(without, 2, grounded));
+    }
+    // Repeat 2 shows no must-find, and a pre-existing item on B1 does not raise it.
+    expect(score(withPre).suite.candidateRecall).toEqual({ mean: 0.5, min: 0, max: 1 });
+    expect(score(withPre).suite.preexisting).toEqual({ mean: 4, min: 4, max: 4 });
+    expect(score(without).suite.preexisting).toEqual({ mean: 0, min: 0, max: 0 });
+  });
+
+  test("with labels, the pre-existing row counts gold matches and judge labels; compare prints the count and the row", () => {
+    const r = gresult([c], [run("g", 1, [...base, ...pre])]);
+    expect(score(r, g).preexisting).toEqual({ runs: 1, shown: 4, gold: 2, tp: 1, fp: 1, unlabeled: 0 });
+    expect(score(r).preexisting).toBeNull();
+    const text = summaryText(r, score(r, g));
+    expect(text).toMatch(
+      /\npre-existing: findings in the Pre-existing fold, per case \(variant preexisting\); no other row counts them\s+4\.00\s+4\.00\n/,
+    );
+    expect(text).toContain("Pre-existing findings (review-v3.md WP-V6): findings in the Pre-existing fold, per case run");
+    const both = compareText(gresult([c], [run("g", 1, base)]), r);
+    expect(both).toMatch(
+      /\npre-existing: findings in the Pre-existing fold[^\n]*\ncase\s+A\s+B\s+delta\nall cases\s+0\.00\s+4\.00\s+\+4\.00\n/,
+    );
+    // A result without pre-existing items prints no pre-existing row in the details.
+    expect(summaryText(gresult([c], [run("g", 1, base)]), score(gresult([c], [run("g", 1, base)]), g))).not.toContain(
+      "Pre-existing findings",
+    );
+  });
+});

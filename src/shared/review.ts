@@ -56,7 +56,18 @@ export const finding = z.object({
   // validate.ts matches rule verbatim against the loaded instruction files, and module is an ID, so a cut would change them.
   rule: exact(z.string().max(2000)).default("").describe("The exact sentence of the project rule, for a rule finding. Else empty."),
   module: exact(z.string().max(40)).default("core").describe("core, or the ID of the check section that found it."),
+  // docs/plans/review-v3.md WP-V6. Optional, so results without the key parse. The CLI schema lists it only under the variant
+  // "preexisting" (reviewJsonSchema), so the default --json-schema keeps its bytes.
+  preexisting: z.boolean().optional(),
 });
+
+// docs/plans/review-v3.md Q6: at most this many pre-existing findings per run (judge.ts settle).
+export const PREEXISTING_MAX = 5;
+const PREEXISTING = z
+  .boolean()
+  .describe("true only for a blocker or major problem in unchanged code that the change touches or relies on. Else false.");
+const findingList = (preexisting: boolean) =>
+  z.array(preexisting ? finding.extend({ preexisting: PREEXISTING }) : finding.omit({ preexisting: true })).max(MAX_FINDINGS);
 
 export const question = z.object({ text: z.string(), why: z.string() });
 
@@ -121,9 +132,12 @@ export type AnsweredQuestion = z.infer<typeof answeredQuestion>;
 export type ReviewResult = z.infer<typeof reviewResult>;
 
 // The CLI checks the schema with a default Ajv instance, which knows draft-07 only. A 2020-12 $schema fails every run.
-// An Explain run gets no answered key: it judges no answer (docs/plans/thread-outcome.md section 9).
-export const reviewJsonSchema = (explain = false): Record<string, unknown> =>
-  aiJsonSchema(explain ? reviewResult.omit({ answered: true }) : reviewResult);
+// An Explain run gets no answered key: it judges no answer (docs/plans/thread-outcome.md section 9). preexisting: the variant
+// "preexisting" is on (catalog.ts preexisting).
+export const reviewJsonSchema = (explain = false, preexisting = false): Record<string, unknown> => {
+  const r = reviewResult.extend({ findings: findingList(preexisting) });
+  return aiJsonSchema(explain ? r.omit({ answered: true }) : r);
+};
 
 // ---------- Verify phase (docs/plans/review-v2/spec.md sections 1.6 to 1.8) ----------
 
@@ -246,17 +260,19 @@ export const checkOf = (p: { verify?: Pick<VerifyMark, "verdict"> }): Check =>
       ? "unsure"
       : "unchecked";
 
-// main: the Drafts list. fold: "More" (quiet and balanced). hidden: refuted and duplicates, in the run record only.
-export type DisplayGroup = "main" | "fold" | "hidden";
+// main: the Drafts list. fold: "More" (quiet and balanced). hidden: refuted and duplicates, in the run record only. preexisting: a
+// problem in unchanged code (docs/plans/review-v3.md WP-V6) in its own fold. The app never posts it.
+export type DisplayGroup = "main" | "fold" | "preexisting" | "hidden";
 
 // spec.md section 1.4: the place of a finding from its check, its severity, and the volume of its run. A run without a volume is from
 // before review v2, which showed every finding. A demoted finding goes to fold (review-quality-2026.md E5). markCopy can keep demoted
 // on a copy that a later check confirmed, so the verdict must also be refuted.
 export function displayGroup(
-  p: Pick<FindingPayload, "severity" | "discardedBy" | "demoted"> & { verify?: Pick<VerifyMark, "verdict"> },
+  p: Pick<FindingPayload, "severity" | "discardedBy" | "demoted" | "preexisting"> & { verify?: Pick<VerifyMark, "verdict"> },
   volume: Volume | undefined,
 ): DisplayGroup {
   if (p.discardedBy === "verify") return "hidden";
+  if (p.preexisting === true) return "preexisting";
   if (p.demoted && p.verify?.verdict === "refuted" && (volume === "quiet" || volume === "balanced")) return "fold";
   const check = checkOf(p);
   if (volume === "quiet") return check !== "unsure" && (p.severity === "blocker" || p.severity === "major") ? "main" : "fold";
@@ -616,7 +632,8 @@ export const rereviewResult = reviewResult.extend({ earlier: z.array(earlierVerd
 export type EarlierVerdict = z.infer<typeof earlierVerdict>;
 export type RereviewResult = z.infer<typeof rereviewResult>;
 
-export const rereviewJsonSchema = (): Record<string, unknown> => aiJsonSchema(rereviewResult);
+export const rereviewJsonSchema = (preexisting = false): Record<string, unknown> =>
+  aiJsonSchema(rereviewResult.extend({ findings: findingList(preexisting) }));
 
 // A finding or question that a re-review copied from its base run. from: the source item ID. since: the head that the base run reviewed.
 export type Carried = { from: number; verdict: Verdict; reason: string; since: string };

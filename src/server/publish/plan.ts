@@ -112,10 +112,12 @@ export function buildPlan(input: PlanInput): PlannedPost[] {
   const blocked = new Set(input.blocked?.map((b) => b.item));
   // docs/plans/review-v2/spec.md section 2.2: a revision of a finding never posts. Only Use the new text moves its text to the finding.
   const revision = (i: ReviewItemDto) => i.kind === "finding" && (i.payload as { revises?: number }).revises !== undefined;
+  // docs/plans/review-v3.md D1: a pre-existing finding never posts. items.ts refuses to accept it.
+  const pre = (i: ReviewItemDto) => i.kind === "finding" && (i.payload as { preexisting?: boolean }).preexisting === true;
   for (const run of input.runs) {
     const heads = { run: run.id, sourceHead: run.sourceHead, targetHead: run.targetHead, mergeBase: run.mergeBase };
     const items = input.items
-      .filter((i) => i.run === run.id && i.status === "accepted" && !blocked.has(i.id) && !revision(i))
+      .filter((i) => i.run === run.id && i.status === "accepted" && !blocked.has(i.id) && !revision(i) && !pre(i))
       .sort((a, b) => a.id - b.id);
     const general: { ref: string; body: string }[] = [];
     const questions: { body: string; why: string }[] = [];

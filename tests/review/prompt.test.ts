@@ -8,6 +8,7 @@ import {
   ANSWERED_RULES,
   askAgent,
   BROAD_THREAD_CLAIM,
+  CALLERS_LINES,
   CLASSES_LINES,
   contextBlock,
   DISCUSS_RULES,
@@ -28,6 +29,9 @@ import {
   NOTES_RULES,
   PART_REVIEWER,
   PR_CONTEXT_RULES,
+  PREEXISTING_LINES,
+  PREEXISTING_REVIEWER,
+  PREEXISTING_VERIFY,
   partLines,
   profileRevision,
   promptVersion,
@@ -40,6 +44,7 @@ import {
   SECURITY2,
   SHIPPED_PROFILES,
   SPARSE_VERSION,
+  salvageAgent,
   sharedRules,
   storeProfiles,
   upgradeProfile,
@@ -80,7 +85,15 @@ import {
 } from "../../src/server/review/prompt";
 import { SESSION_FIX_RULES } from "../../src/shared/consult";
 import { MODULE_IDS, type ModuleId, type ProfileInput, profileInput, TRIAL_MODULES, VARIANTS, VOLUMES } from "../../src/shared/dto";
-import { FIX_WHY_RULES, fixJsonSchema, REVIEW_PROMPT_VERSION, replyJsonSchema, replyResult } from "../../src/shared/review";
+import {
+  FIX_WHY_RULES,
+  fixJsonSchema,
+  REVIEW_PROMPT_VERSION,
+  replyJsonSchema,
+  replyResult,
+  rereviewJsonSchema,
+  reviewJsonSchema,
+} from "../../src/shared/review";
 
 console.log(`prompt.test.ts imported from ${Bun.resolveSync("../../src/server/review/catalog", import.meta.dir)}`);
 
@@ -998,6 +1011,91 @@ describe("review v3 prompt switches", () => {
     expect(promptVersion(v)).toBe(`${REVIEW_PROMPT_VERSION}+security2-verify`);
   });
 
+  // docs/plans/review-v3.md WP-V6, D1, and Q6.
+  const ANCHOR_LINE =
+    "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.";
+  const REPORT_LINE = "Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.";
+  const HISTORY_LINE =
+    'A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.';
+  const withPre = (s: string) => s.replace(ANCHOR_LINE, `${ANCHOR_LINE}\n${PREEXISTING_LINES.join("\n")}`);
+
+  test("preexisting: rl-main, rl-reviewer, and salvage get the exception after the anchor line; the verify phase gets its lines", () => {
+    const p = withVariants("preexisting");
+    for (const c of [FULL, RE, NO_CONTEXT]) {
+      expect(mainAgent(p, c).prompt).toBe(withPre(mainAgent(general, c).prompt));
+      expect(reviewerAgent(p, c).prompt).toBe(
+        withPre(reviewerAgent(general, c).prompt).replace(REPORT_LINE, `${REPORT_LINE}\n${PREEXISTING_REVIEWER}`),
+      );
+    }
+    expect(salvageAgent(p).prompt).toBe(withPre(salvageAgent(general).prompt));
+    // The rule "only what the change adds" stays, and the exception names the severity floor and the cap of Q6.
+    expect(mainAgent(p, FULL).prompt).toContain(
+      "\nReport only problems that the change adds or makes reachable. BASE..HEAD is the change.\n",
+    );
+    expect(PREEXISTING_LINES.join(" ")).toContain("only at severity blocker or major. Report at most 5 of them.");
+    for (const agent of [verifyAgent, verifierAgent])
+      for (const q of [false, true])
+        expect(agent(p, FULL, q).prompt).toBe(
+          agent(general, FULL, q).prompt.replace(HISTORY_LINE, `${HISTORY_LINE}\n${PREEXISTING_VERIFY.join("\n")}`),
+        );
+    // Every stdin and the other run kinds do not change.
+    expect(buildPrompt({ ...full, profile: p })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: p })).toBe(buildRereviewPrompt(rereviewInput));
+    expect(buildVerifyPrompt({ ...full, profile: p, count: 3, rereview: false })).toBe(
+      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
+    );
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(p, FULL).prompt).toBe(kind(general, FULL).prompt);
+    expect(promptVersion(p)).toBe(`${REVIEW_PROMPT_VERSION}+preexisting`);
+  });
+
+  test("preexisting: the CLI schemas ask for the mark only under the variant; the default schemas keep their bytes", () => {
+    const shaOf = (x: unknown) => sha(JSON.stringify(x));
+    // Hashes of the tree before WP-V6 (3663f94).
+    expect({ review: shaOf(reviewJsonSchema()), explain: shaOf(reviewJsonSchema(true)), rereview: shaOf(rereviewJsonSchema()) }).toEqual({
+      review: "e8b1f996c338c443aace9a291d28bc90619c7c98da2883e8408caee8b757ee7d",
+      explain: "198ba47a7da200b851abdecfdbf18281cf48e96676f7eab44e43e092922d01cd",
+      rereview: "8490b62e8eb23b1cc87f11b65230d8b710952d3ad2ffd5b3a4bc8d3f1df98a54",
+    });
+    type Node = { type?: string; required?: string[]; properties?: Record<string, Node>; items?: Node };
+    const item = (s: Record<string, unknown>) => (s as Node).properties?.findings?.items as Node;
+    for (const s of [reviewJsonSchema(false, true), reviewJsonSchema(true, true), rereviewJsonSchema(true)]) {
+      expect(item(s).required).toContain("preexisting");
+      expect(item(s).properties?.preexisting?.type).toBe("boolean");
+    }
+    for (const s of [reviewJsonSchema(), reviewJsonSchema(true), rereviewJsonSchema()])
+      expect(Object.keys(item(s).properties ?? {})).not.toContain("preexisting");
+  });
+
+  // docs/plans/review-v3.md D2 and docs/plans/review-v2/research/review-practice-2026-11.md T6.
+  test("callers: rl-main and rl-reviewer get the caller lines after the finder rules; salvage and the verify phase do not", () => {
+    const k = withVariants("callers");
+    const dnf = "Do not report the points below. The check step refutes them, so they only cost time:";
+    const plus = (s: string) => s.replace(dnf, `${CALLERS_LINES.join("\n")}\n${dnf}`);
+    for (const c of [FULL, RE, NO_CONTEXT]) {
+      expect(mainAgent(k, c).prompt).toBe(plus(mainAgent(general, c).prompt));
+      expect(reviewerAgent(k, c).prompt).toBe(plus(reviewerAgent(general, c).prompt));
+      expect(reviewerAgent(k, c, true).prompt).toBe(plus(reviewerAgent(general, c, true).prompt));
+    }
+    // With the verify phase off, the lines still follow the finder rules.
+    const off = { ...general, verifier: { ...general.verifier, mode: "off" as const } };
+    const offDnf = "Do not report the points below. They only cost the user time:";
+    expect(mainAgent({ ...off, variants: k.variants }, FULL).prompt).toBe(
+      mainAgent(off, FULL).prompt.replace(offDnf, `${CALLERS_LINES.join("\n")}\n${offDnf}`),
+    );
+    expect(CALLERS_LINES.join(" ")).toContain("Find them with the codegraph tools when the run has them. Else use Grep and Read.");
+    expect(CALLERS_LINES.at(-1)).toBe("When one breaks, report it. In evidence, give the path:line of that caller or consumer.");
+    expect(salvageAgent(k)).toEqual(salvageAgent(general));
+    for (const agent of [verifyAgent, verifierAgent]) expect(agent(k, FULL, true).prompt).toBe(agent(general, FULL, true).prompt);
+    expect(buildPrompt({ ...full, profile: k })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: k })).toBe(buildRereviewPrompt(rereviewInput));
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(k, FULL).prompt).toBe(kind(general, FULL).prompt);
+    expect(promptVersion(k)).toBe(`${REVIEW_PROMPT_VERSION}+callers`);
+    // Stacked with preexisting: both sets, each in its place.
+    const both = withVariants("preexisting", "callers");
+    expect(mainAgent(both, FULL).prompt).toBe(plus(withPre(mainAgent(general, FULL).prompt)));
+    expect(promptVersion(both)).toBe(`${REVIEW_PROMPT_VERSION}+callers+preexisting`);
+  });
+
   test("ASD-STE100: every switch line has at most 20 words", () => {
     expect(
       longSentences([
@@ -1011,6 +1109,10 @@ describe("review v3 prompt switches", () => {
         ...SECURITY2.finder,
         SECURITY2.verifyHead,
         ...SECURITY2.verify,
+        ...PREEXISTING_LINES,
+        PREEXISTING_REVIEWER,
+        ...PREEXISTING_VERIFY,
+        ...CALLERS_LINES,
       ]),
     ).toEqual([]);
   });
@@ -1018,7 +1120,18 @@ describe("review v3 prompt switches", () => {
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
     expect(promptVersion(withVariants("verify2", "broad"))).toBe("2.8+broad+verify2");
-    expect(VARIANTS).toEqual(["broad", "classes", "obligations", "parts", "risk-check", "security2", "security2-verify", "verify2"]);
+    expect(VARIANTS).toEqual([
+      "broad",
+      "callers",
+      "classes",
+      "obligations",
+      "parts",
+      "preexisting",
+      "risk-check",
+      "security2",
+      "security2-verify",
+      "verify2",
+    ]);
     const { variants: _, ...old } = general;
     const parsed = profileInput.parse(old);
     expect(parsed.variants).toEqual([]);
@@ -1038,6 +1151,8 @@ describe("review v3 prompt switches", () => {
       withVariants("classes"),
       withVariants("security2"),
       withVariants("security2-verify"),
+      withVariants("preexisting"),
+      withVariants("callers"),
     ].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
     // spec.md section 1.8: outcome hide parses to no key and keeps the revision. Demote changes it.

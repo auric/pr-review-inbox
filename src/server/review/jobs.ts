@@ -94,6 +94,7 @@ import {
   moduleNotes,
   obligationCheck,
   type Profile,
+  preexisting,
   profileOf,
   profileRevision,
   promptVersion,
@@ -1135,7 +1136,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   earlier: [...earlier, ...carry.posted].map((r) => r.id),
                   posted: carry.posted.map((r) => r.id),
                 }),
-                schema: rereviewJsonSchema(),
+                schema: rereviewJsonSchema(preexisting(profile)),
                 main: mainAgent(profile, context),
               }
             : explain
@@ -1146,7 +1147,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                     schema: discussJsonSchema(),
                     main: discussAgent(profile, context),
                   }
-                : { prompt: buildPrompt(input), schema: reviewJsonSchema(profile.explain), main: mainAgent(profile, context) };
+                : {
+                    prompt: buildPrompt(input),
+                    schema: reviewJsonSchema(profile.explain, preexisting(profile)),
+                    main: mainAgent(profile, context),
+                  };
     // docs/plans/review-v2/spec.md section 1.9: a review run shows phase finding, then checking.
     const finder = j.kind === "review" && !profile.explain;
     if (finder) {
@@ -1876,7 +1881,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cwd: ws.work,
         appDir: ws.app,
         prompt: buildPrompt(input),
-        schema: reviewJsonSchema(false),
+        schema: reviewJsonSchema(false, preexisting(profile)),
         main: withDelegation(
           withMcp(withSkills(withLanguages(mainAgent(profile, context), langs, !broad(profile)), folders, always, true), tools.used, true),
           delegate,

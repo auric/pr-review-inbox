@@ -28,6 +28,7 @@ import {
   type AnchoredFinding,
   askResult,
   type Check,
+  confidences,
   type Defect,
   type DiscussResult,
   discussResult,
@@ -43,6 +44,7 @@ import {
   type NoteProposal,
   neverHidden,
   type Obligation,
+  PREEXISTING_MAX,
   type Question,
   type ReplyPayload,
   type RereviewResult,
@@ -52,13 +54,14 @@ import {
   reviewResult,
   type Severity,
   type StoredFinding,
+  severities,
   type VerifyMark,
   type VerifyVerdict,
   type VerifyVerdictName,
   verifyResult,
 } from "../../shared/review";
 import type { RunErrorKind, RunStatus } from "../../shared/run-log";
-import type { Profile } from "./catalog";
+import { type Profile, preexisting } from "./catalog";
 import type { RunOutcome } from "./claude";
 import type { Candidate } from "./context-files";
 import { type DiffFile, parseDiff } from "./diffmap";
@@ -309,7 +312,17 @@ export async function judge(
   const agents = o.events.filter((e) => e.tool === "Agent" && e.agent !== null && e.status === "ok").map((e) => e.agent as string);
   const causes = parsed.data.findings.flatMap((f) => (f.cause ? [{ ...f, ...f.cause }] : []));
   const blobs = await readBlobs(ws, [...parsed.data.findings, ...causes, ...earlierCases(earlier, items).cases.map((c) => c.finding)]);
-  const check = () => validate({ result: parsed.data, diff: ws.diff, ...blobs, agents, explain: profile.explain, rules, addedOnly });
+  const check = () =>
+    validate({
+      result: parsed.data,
+      diff: ws.diff,
+      ...blobs,
+      agents,
+      explain: profile.explain,
+      rules,
+      addedOnly,
+      preexisting: preexisting(profile),
+    });
   let v = check();
   if (v.dropped.some((d) => d.reason === "file" || d.reason === "match")) {
     await blobs.loadChanged();
@@ -805,12 +818,21 @@ export function settle(f: Found, s: SettleInput): Ending {
   const asked: Question[] = [];
   const links = new Map<NewItem, CandidateLink>();
   const carried = new Map<number, CarriedMark>();
+  // docs/plans/review-v3.md WP-V6 and Q6: the shown pre-existing findings, capped after the loop. low: those that ended below major or as
+  // a question. A pre-existing finding is never demoted, never asked, and never posted.
+  const pres: { item: NewItem; link: CandidateLink; rank: number }[] = [];
+  let low = 0;
   for (const c of f.candidates) {
     const v = got.get(c.n);
     if (v) verify[COUNT[v.verdict]]++;
     else verify.unchecked++;
-    const out = capOf(c.finding, v, c.from !== null, s.demote === true || neverHidden(c.finding));
+    const pre = c.from === null && c.finding.preexisting === true;
+    const out = capOf(c.finding, v, c.from !== null, !pre && (s.demote === true || neverHidden(c.finding)));
     const link = { n: c.n, duplicateOf: v?.verdict === "duplicate" ? v.duplicateOf : null };
+    if (pre && (out.kind === "question" || (out.status === "new" && out.severity !== "blocker" && out.severity !== "major"))) {
+      low++;
+      continue;
+    }
     if (out.kind === "question") {
       asked.push(out.question);
       continue;
@@ -834,9 +856,26 @@ export function settle(f: Found, s: SettleInput): Ending {
       ...(out.demoted && { demoted: true as const }),
     };
     const item = findingItem(payload, out.status);
+    if (pre && out.status === "new") {
+      pres.push({ item, link, rank: severities.indexOf(out.severity) * confidences.length + confidences.indexOf(c.finding.confidence) });
+      continue;
+    }
     links.set(item, link);
     items.push(item);
   }
+  // By severity, then confidence. The sort is stable, so equal ranks keep the finder order.
+  pres.sort((a, b) => a.rank - b.rank);
+  for (const p of pres.slice(0, PREEXISTING_MAX)) {
+    links.set(p.item, p.link);
+    items.push(p.item);
+  }
+  const over = Math.max(0, pres.length - PREEXISTING_MAX);
+  if (low)
+    coverage.notChecked.push(`${low} pre-existing ${low === 1 ? "finding was" : "findings were"} left out: below major after the check.`);
+  if (over)
+    coverage.notChecked.push(
+      `${over} pre-existing ${over === 1 ? "finding was" : "findings were"} left out: a run shows at most ${PREEXISTING_MAX}.`,
+    );
   // docs/plans/review-v2/review-questions.md: the verdict of each finder question. Question k has number written + k + 1.
   const finderQuestions: FinderQuestions = { asked: f.questions.length, answered: 0, findings: 0, kept: 0, answers: [] };
   const kept: Question[] = [];

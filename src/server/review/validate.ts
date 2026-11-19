@@ -51,6 +51,8 @@ export type ValidateInput = {
   rules?: readonly RuleSource[];
   // The critic (part-session.md section 2.7): a finding stays only when each line of its anchor range is an added line.
   addedOnly?: boolean;
+  // docs/plans/review-v3.md WP-V6: the variant "preexisting" is on. Else every preexisting mark drops.
+  preexisting?: boolean;
 };
 
 export const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -269,7 +271,7 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     out.dropped.push({ ...f, reason });
     out.kept.push(null);
   };
-  for (const raw of findings) {
+  for (const { preexisting: marked, ...raw } of findings) {
     let f: Finding = { ...raw, agent: raw.agent !== null && agents.has(raw.agent) ? raw.agent : null };
     let a = anchor(f);
     let movedFrom: AnchoredFinding["movedFrom"];
@@ -289,15 +291,20 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
       drop(f, "unchanged");
       continue;
     }
-    // spec.md section 1.7 steps 2 to 4: a finding is in the change by its anchor, else by its cause.
+    // spec.md section 1.7 steps 2 to 4: a finding is in the change by its anchor, else by its cause. docs/plans/review-v3.md WP-V6:
+    // else a pre-existing finding at blocker or major stays, without its cause. A finding in the change loses its mark.
     let cause: AnchoredFinding["cause"] = f.cause;
+    let pre = false;
     if (!changed(a, f.side)) {
       const c = f.cause ? anchor(f.cause) : null;
-      if (!f.cause || c === null || typeof c === "string" || !changed(c, f.cause.side)) {
+      if (f.cause && c !== null && typeof c !== "string" && changed(c, f.cause.side)) cause = { ...f.cause, anchor: c };
+      else if (input.preexisting && marked === true && (f.severity === "blocker" || f.severity === "major")) {
+        pre = true;
+        cause = null;
+      } else {
         drop(f, "unchanged");
         continue;
       }
-      cause = { ...f.cause, anchor: c };
     }
     const rule = f.module === "rules" && f.rule.trim() ? holds(f.rule, sidePath(a, f.side)) : "held";
     if (rule === "missing") {
@@ -306,7 +313,7 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     }
     // A rule from another scope does not apply here. The finding stays as a core finding, and the verify phase judges it.
     const kept = rule === "scope" ? { ...f, module: "core", rule: "" } : f;
-    out.kept.push(out.findings.push({ ...kept, cause, anchor: a, ...(movedFrom && { movedFrom }) }) - 1);
+    out.kept.push(out.findings.push({ ...kept, cause, anchor: a, ...(movedFrom && { movedFrom }), ...(pre && { preexisting: true }) }) - 1);
   }
   return out;
 }

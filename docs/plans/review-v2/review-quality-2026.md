@@ -1,6 +1,6 @@
 # Review quality 2026: eval fixes and ranked reviewer improvements
 
-Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and item 10 is built as an opt-in. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
+Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and items 10 and 11 are built as opt-ins. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
 
 Short answer: fix the eval before any reviewer change, because today it cannot measure precision or large-PR recall. Then run cheap tests that cut cost, then verifier tests replayed on fixed finder output, and last the recall bets, each behind a gate that costs nothing to check.
 
@@ -294,6 +294,12 @@ Report other problems too.
 - Measure: the "Shown security findings" row counts the shown findings with category security (exact text, as the verify rules match it), per case run: gold match, judge tp, judge fp, and no label. It needs labels: run eval:label on the eval:ab folder. Then eval:label prints the row for each result, and `bun run eval:compare -- <A> <B>` prints it for A and B. The eval:ab output itself has no labels, so it has no row.
 - Experiment: verify half first, cheap: `bun run eval:ab -- --baseline eval-results/w1/baseline --candidate-variants security2-verify --candidate-replay --review-only --clean 8`. Then both halves: `bun run eval:ab -- --baseline eval-results/w1/baseline --candidate-variants security2 --candidate-repeat 2 --review-only --clean 8`.
 - Ship rule: fewer judge fp per case run in the "Shown security findings" row, with no lost security must-find: the recall of the "class security" slice row does not fall. Label both results first, so that "no label" shows 0.00. When it ships, the lines stay out of `MODULES[*].lines`, because an edit there changes `profileRevision`.
+
+### 11. Caller check and pre-existing problems (variants "callers" and "preexisting")
+
+- Status: built 2026-11-19 as opt-in variants for the eval against the Gate A baseline (prompt 2.8, PROFILES_VERSION 9). Not run yet. docs/plans/review-v3.md WP-V6 and WP-V5 hold the rules, the commands, and the ship rule draft.
+- "callers": the finder checks the callers and consumers of each changed symbol outside the diff (research T6). Ship rule: "better" of section 2.
+- "preexisting": blocker and major problems in unchanged code go to their own fold, never to a post. The eval counts them apart (metric `preexisting`, row "Pre-existing findings"), so they are neither noise nor recall.
 
 ### Advisor on by default (not an eval item)
 

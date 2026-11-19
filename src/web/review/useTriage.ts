@@ -12,7 +12,7 @@ import { planKey } from "../publish/data";
 import { failText } from "../shell/model";
 import { draftDomId, type TriageState } from "./Drafts";
 import { replyKey, sendItem } from "./data";
-import { draftGroups, drafts, questions, replyCard, replyOf, triageText } from "./model";
+import { draftGroups, drafts, isPreexisting, questions, replyCard, replyOf, triageText } from "./model";
 import { storedEdit, type TriageAction, type TriageCtx, writeEdit } from "./Triage";
 import type { Focus } from "./useReview";
 
@@ -39,8 +39,9 @@ export function useTriage(
     const id = storedEdit(pr.id);
     return { open: id === null ? null : { id, mode: "edit", quiet: true }, busy: new Set(), chips: null };
   });
-  // docs/plans/review-v2/spec.md section 1.4: the fold of the Drafts list starts closed.
+  // docs/plans/review-v2/spec.md section 1.4: the fold of the Drafts list starts closed. So does the Pre-existing fold.
   const [foldOpen, setFoldOpen] = useState(false);
+  const [preOpen, setPreOpen] = useState(false);
 
   // Stable while the items stay, so the diff renders again only when they change.
   const ds = useMemo(() => (items.length ? drafts(items) : NO_ITEMS), [items]);
@@ -49,16 +50,21 @@ export function useTriage(
   // Plan pr-view-v4 2.7: one list of the findings, then the questions. The fold of findings sits between them. The first untriaged
   // row outside the fold starts open. shown: the rows on screen. A closed fold renders no rows.
   const list = useMemo(() => [...groups.main, ...qs], [groups, qs]);
-  const shown = useMemo(() => (foldOpen ? [...groups.main, ...groups.fold, ...qs] : list), [foldOpen, list, groups, qs]);
+  const shown = useMemo(
+    () => (foldOpen || preOpen ? [...groups.main, ...(foldOpen ? groups.fold : []), ...(preOpen ? groups.preexisting : []), ...qs] : list),
+    [foldOpen, preOpen, list, groups, qs],
+  );
   const firstNew = list.find((x) => x.status === "new")?.id ?? null;
   const all = [...items, ...o.replyItems];
   const latestItems = useRef(all);
   latestItems.current = all;
   const latestList = useRef({ list: shown, firstNew, volume: summary?.volume });
   latestList.current = { list: shown, firstNew, volume: summary?.volume };
-  // A draft in the closed fold opens the fold first, so its row exists before the focus moves.
+  // A draft in a closed fold opens that fold first, so its row exists before the focus moves.
   const reveal = useCallback((it: ReviewItemDto | undefined) => {
-    if (it?.kind === "finding" && displayGroup(it.payload as FindingPayload, latestList.current.volume) === "fold") setFoldOpen(true);
+    const g = it?.kind === "finding" ? displayGroup(it.payload as FindingPayload, latestList.current.volume) : null;
+    if (g === "fold") setFoldOpen(true);
+    else if (g === "preexisting") setPreOpen(true);
   }, []);
   const isDraftOpen = (it: ReviewItemDto) => openDrafts.get(it.id) ?? it.id === firstNew;
   const toggleDraft = useCallback(
@@ -231,12 +237,18 @@ export function useTriage(
       toast.add({ title: "New messages arrived after this draft. Draft it again, or reply to the newest as is." });
       return;
     }
+    // The card of a pre-existing finding has no Accept and no Edit (Acts noPost). items.ts refuses them too.
+    if (isPreexisting(it) && (key === "edit" || (key === "accept" && it.status !== "accepted"))) {
+      toast.add({ title: "The app does not post a pre-existing finding. Discard it, or use Discuss or Fix." });
+      return;
+    }
     if (key === "accept") triageFns.act(it, it.status === "accepted" ? "restore" : "accept");
     else if (key === "discard") triageFns.act(it, it.status === "discarded" ? "restore" : "discard");
     else if (it.status !== "discarded") triageFns.edit(it);
   };
 
   const toggleFold = useCallback(() => setFoldOpen((v) => !v), []);
+  const togglePre = useCallback(() => setPreOpen((v) => !v), []);
   return {
     triage,
     ds,
@@ -245,6 +257,8 @@ export function useTriage(
     list,
     foldOpen,
     toggleFold,
+    preOpen,
+    togglePre,
     isDraftOpen,
     toggleDraft,
     showFindings,

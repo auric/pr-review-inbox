@@ -17,7 +17,7 @@ import {
   type Variant,
   type Volume,
 } from "../../shared/dto";
-import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, REVIEW_PROMPT_VERSION } from "../../shared/review";
+import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, PREEXISTING_MAX, REVIEW_PROMPT_VERSION } from "../../shared/review";
 import { CHECK_TIMEOUT_SEC, limitText, MAX_OPEN_CAP, PROPOSALS_MAX, SETUP_TIMEOUT_SEC } from "../../shared/task";
 import { type AgentSpec, EXPLORER_AGENT, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
@@ -555,6 +555,30 @@ export const FINDER_QUESTION_RULES = [
   "Put a point into questions only when no file and no tool of this run gives the answer. In why, name what you checked and why it did not answer the point.",
 ];
 
+// docs/plans/review-v3.md WP-V6, D1, and Q6: the finder lines of the variant "preexisting". validate.ts keeps such a finding only at
+// blocker or major, and judge.ts settle caps them at PREEXISTING_MAX. A stale comment or doc is never pre-existing: the change must make
+// it false (risk-check.md rule 15), so it has a changed cause.
+export const preexisting = (p: Partial<Pick<Profile, "variants">>) => has(p, "preexisting");
+export const PREEXISTING_LINES = [
+  "One exception: you can also report a problem in unchanged code that the change touches or relies on.",
+  "Report it only when the problem exists at BASE without the change. Set preexisting to true on it.",
+  "Anchor it on the unchanged code, and set cause to null.",
+  "Set its severity by its impact, as if the change added it.",
+  `Report such a problem only at severity blocker or major. Report at most ${PREEXISTING_MAX} of them.`,
+  "When the change makes the problem reachable or worse, it is no pre-existing problem. Set cause, and set preexisting to false.",
+  "A false comment, TODO, or doc is never a pre-existing problem.",
+  "Set preexisting to false on every other finding.",
+];
+export const PREEXISTING_REVIEWER = "Also report preexisting for each finding.";
+// The verify lines of the variant. context-files.ts candidatesFile marks a pre-existing candidate.
+export const PREEXISTING_VERIFY = [
+  'A candidate with the line "Pre-existing: yes" is about unchanged code that the change touches or relies on.',
+  "Never refute it only because the problem is not in the change. Check its trigger as for any other candidate.",
+  "Set its severity by its impact, as if the change added it.",
+  "The app keeps a pre-existing candidate only at severity blocker or major.",
+  "When a pre-existing candidate and another candidate describe one problem, the pre-existing one is the duplicate.",
+];
+
 // spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for.
 export function finderRules(p: FinderProfile, main: boolean): string[] {
   return [
@@ -563,6 +587,7 @@ export function finderRules(p: FinderProfile, main: boolean): string[] {
       : "Report every problem that you find, with its severity and its confidence.",
     "Report only problems that the change adds or makes reachable. BASE..HEAD is the change.",
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
+    ...(preexisting(p) ? PREEXISTING_LINES : []),
     ...PLACE_RULES,
     "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.",
     ...(main
@@ -620,6 +645,16 @@ export const CLASSES_LINES = [
   "Report other problems too.",
 ];
 const classes = (p: Profile) => (has(p, "classes") ? CLASSES_LINES : []);
+// docs/plans/review-v3.md D2 and docs/plans/review-v2/research/review-practice-2026-11.md T6: the finder lines of the variant "callers".
+// rl-main and rl-reviewer get them after the finder rules. The salvage run does not, because it looks for no new problems.
+export const CALLERS_LINES = [
+  "For each changed function, type, config key, or message format, find its callers and consumers outside the diff.",
+  "Look also in tests, scripts, and build files.",
+  "Find them with the codegraph tools when the run has them. Else use Grep and Read.",
+  "Check that each caller and consumer still works with the change.",
+  "When one breaks, report it. In evidence, give the path:line of that caller or consumer.",
+];
+const callers = (p: Profile) => (has(p, "callers") ? CALLERS_LINES : []);
 
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.
 export const VOLUME_NITS: Record<Volume, string> = {
@@ -892,6 +927,7 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec 
       ...classes(p),
       ...contextBlock(c),
       ...finderRules(p, true),
+      ...callers(p),
       ...finderList(p),
       ...threadClaim(p, c),
       ...rubric(p),
@@ -1317,6 +1353,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       ...classes(p),
       ...contextBlock(c),
       ...finderRules(p, false),
+      ...callers(p),
       ...finderList(p),
       ...threadClaim(p, c),
       ...rubric(p),
@@ -1324,6 +1361,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       ...docsRule(p),
       "Report each finding with its place: path, side, line, lineEnd, anchorText, and cause.",
       "Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.",
+      ...(preexisting(p) ? [PREEXISTING_REVIEWER] : []),
       ...(parts ? [PART_REVIEWER] : []),
     ].join("\n"),
   };
@@ -1466,6 +1504,7 @@ export function verifyRules(
     ...(c.history
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
       : []),
+    ...(preexisting(p) ? PREEXISTING_VERIFY : []),
     ...(v2 && c.prContext ? [VERIFY2.thread] : []),
     ...(v2 && p.modules.includes("intent") && !lacks("intent", c) ? [VERIFY2.intent] : []),
     ...(security2Verify(p) ? [SECURITY2.verifyHead, ...SECURITY2.verify.map((l) => `- ${l}`)] : []),

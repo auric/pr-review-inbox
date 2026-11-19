@@ -629,17 +629,28 @@ export const isHidden = (it: ReviewItemDto) => it.kind === "finding" && (it.payl
 
 // The finding drafts of one run by display group, each in screen order. foldName: null when the volume has no fold.
 // checked: the run is a review v2 run (summary.verify), so each card shows its check chip. A run from before review v2 has no volume,
-// so every draft is in main.
+// so every draft is in main. preexisting: the drafts of the Pre-existing fold (docs/plans/review-v3.md WP-V6), at every volume.
 export type DraftGroups = {
   main: ReviewItemDto[];
   fold: ReviewItemDto[];
+  preexisting: ReviewItemDto[];
   hidden: ReviewItemDto[];
   foldName: string | null;
   checked: boolean;
 };
+export const PREEXISTING_NAME = "Pre-existing";
+// A pre-existing finding never posts, so its card has no Accept, Edit, or Move (Triage.tsx Acts noPost).
+export const isPreexisting = (it: ReviewItemDto) => it.kind === "finding" && (it.payload as FindingPayload).preexisting === true;
 export function draftGroups(ds: ReviewItemDto[], summary: RunSummary | null | undefined): DraftGroups {
   const volume = summary?.volume;
-  const g: DraftGroups = { main: [], fold: [], hidden: [], foldName: volume ? FOLD_NAME[volume] : null, checked: !!summary?.verify };
+  const g: DraftGroups = {
+    main: [],
+    fold: [],
+    preexisting: [],
+    hidden: [],
+    foldName: volume ? FOLD_NAME[volume] : null,
+    checked: !!summary?.verify,
+  };
   // spec.md AC-R25: the bug classes first, in class order. The sort is stable, so each class keeps the run order.
   const byClass = [...ds].sort((a, b) => bugClass(a.payload as FindingPayload) - bugClass(b.payload as FindingPayload));
   for (const d of byClass) g[displayGroup(d.payload as FindingPayload, volume)].push(d);

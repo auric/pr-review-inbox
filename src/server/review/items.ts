@@ -94,6 +94,8 @@ export function triage(db: Database, id: number, input: ItemActionInput, at = Da
   if (reply?.dropped || finding?.dropped) return conflict("A newer revision or Keep mine dropped this revision.");
   // docs/plans/thread-outcome.md P9: an out-of-date draft cannot post (outbox.ts blockedDrafts), so no action approves its text.
   const approves = input.action === "accept" || input.action === "edit" || input.action === "plain";
+  // docs/plans/review-v3.md D1: the app never posts a pre-existing finding (publish/plan.ts skips it too).
+  if (finding?.preexisting === true && approves) return { status: 400, error: "A pre-existing finding is never posted." };
   if (reply && approves && !replyCurrent(db, row.pr, reply.replyTo))
     return conflict("New messages arrived after this draft. Draft it again, or reply to the newest as is.");
   // One open draft per thread.

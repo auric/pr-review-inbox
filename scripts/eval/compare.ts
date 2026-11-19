@@ -50,6 +50,7 @@ const LABEL: Record<Metric, string> = {
   lossDuplicate: "verifier loss, duplicate: counted must-finds whose best finding is a hidden duplicate",
   lossRefuted: "verifier loss, refuted: counted must-finds whose best finding is hidden as refuted",
   refutedShown: "refuted shown: refuted findings that stay in main, per case",
+  preexisting: "pre-existing: findings in the Pre-existing fold, per case (variant preexisting); no other row counts them",
   augmentedPrecision: "augmented precision (diagnostic): shown findings that claim a must-find or that the judge gives tp",
   augmentedRecall: "augmented recall (diagnostic): found must-finds and new judge tp, over must-finds and new judge tp",
   newTp: "new tp (diagnostic): unmatched shown findings that the judge gives tp, per case",
@@ -87,6 +88,7 @@ const DIGITS: Record<Metric, number> = {
   lossDuplicate: 1,
   lossRefuted: 1,
   refutedShown: 2,
+  preexisting: 2,
   augmentedPrecision: 1,
   augmentedRecall: 1,
   newTp: 2,
@@ -213,6 +215,11 @@ export function detailText(s: Score): string {
   shownRow("Shown security findings (review-quality-2026.md item 10): shown findings with category security, per case run", s.security);
   shownRow("Shown risk findings (risk-check.md section 7): shown findings with category risk, per case run", s.risk);
   shownRow("Shown obligation findings (obligations.md section 8): shown findings with category obligation, per case run", s.obligation);
+  if (s.preexisting?.shown)
+    shownRow(
+      "Pre-existing findings (review-v3.md WP-V6): findings in the Pre-existing fold, per case run. Gold match includes extras; judge fp includes trap matches",
+      s.preexisting,
+    );
   if (s.union.length)
     out.push(
       "",

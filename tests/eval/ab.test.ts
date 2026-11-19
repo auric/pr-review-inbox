@@ -559,10 +559,15 @@ describe("eval:ab arguments", () => {
     // review-quality-2026.md item 10.
     expect(parseAb(["--candidate-variants", "security2"])).toMatchObject({ variants: ["security2"] });
     expect(parseAb(["--candidate-variants", "security2-verify"])).toMatchObject({ variants: ["security2-verify"] });
+    // review-v3.md WP-V6 and the caller rule, with the flags of the Gate A command.
+    const gate = ["--review-only", "--clean", "8", "--repeat", "2"];
+    expect(parseAb([...gate, "--candidate-variants", "preexisting"])).toMatchObject({ variants: ["preexisting"], reviewOnly: true });
+    expect(parseAb([...gate, "--candidate-variants", "callers"])).toMatchObject({ variants: ["callers"], repeat: "2" });
+    expect(parseAb([...gate, "--candidate-variants", "preexisting,callers"])).toMatchObject({ variants: ["preexisting", "callers"] });
     for (const retired of ["signal", "order", "rules2", "rereview-strict"])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
         error: expect.stringContaining(
-          "--variants must be a comma list of broad, classes, obligations, parts, risk-check, security2, security2-verify, verify2.",
+          "--variants must be a comma list of broad, callers, classes, obligations, parts, preexisting, risk-check, security2, security2-verify, verify2.",
         ),
       });
   });
@@ -609,6 +614,9 @@ describe("eval:ab arguments", () => {
       ["--candidate-variants", "broad,verify2"],
       ["--candidate-variants", "classes"],
       ["--candidate-variants", "security2"],
+      // review-v3.md WP-V6 and the caller rule change the finder prompt.
+      ["--candidate-variants", "preexisting"],
+      ["--candidate-variants", "callers"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
       ["--candidate-verifier", "off"],
     ])

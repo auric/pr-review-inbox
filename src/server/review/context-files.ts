@@ -110,6 +110,8 @@ export function candidatesFile(
       "",
       `- Place: ${oneLine(path)}:${lineRange(a.line, a.lineEnd)} (${f.side} side).${group === null ? "" : ` Group ${group}.`}`,
       ...(c && cause ? [`- Cause: ${cause} (${c.side} side).`] : []),
+      // docs/plans/review-v3.md WP-V6: validate.ts keeps the mark only under the variant "preexisting".
+      ...(f.preexisting ? ["- Pre-existing: yes."] : []),
       `- Severity: ${f.severity}. Confidence: ${f.confidence}. Evidence status: ${f.evidenceStatus}. Module: ${oneLine(f.module ?? "core")}. Category: ${oneLine(f.category)}.`,
       "- Title:",
       text(f.title),

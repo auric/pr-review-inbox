@@ -30,9 +30,11 @@ import {
   EVIDENCE,
   fixedNote,
   isDemoted,
+  isPreexisting,
   type LedgerPart,
   ledgerText,
   lineText,
+  PREEXISTING_NAME,
   restoredNote,
   SEVERITY,
   sessionNote,
@@ -170,7 +172,7 @@ export const Draft = memo(function Draft({
       ? closed === "Discarded"
         ? `Discarded draft. ${where}.`
         : `Draft, ${closed.toLowerCase()}. ${where}.`
-      : `Draft from ${short}. ${SEVERITY[f.severity]}. ${where}.${accepted ? " Accepted." : ""}${carried ? ` ${carried}` : ""}${restored ? ` ${restored}` : ""}${chip ? ` ${chip}.` : ""}${it.revised ? " A new text waits." : ""}`;
+      : `Draft from ${short}. ${SEVERITY[f.severity]}. ${where}.${isPreexisting(it) ? " Pre-existing." : ""}${accepted ? " Accepted." : ""}${carried ? ` ${carried}` : ""}${restored ? ` ${restored}` : ""}${chip ? ` ${chip}.` : ""}${it.revised ? " A new text waits." : ""}`;
   const cut = path ? path.lastIndexOf("/") + 1 : 0;
   return (
     <article
@@ -260,6 +262,7 @@ export const Draft = memo(function Draft({
 
 // The body lines up with the kind column of the row.
 const body = "pt-1 pr-1.5 pb-4 pl-[30px]";
+const PREEXISTING_NOTE = "Pre-existing: the problem is in unchanged code that the change touches. The app does not post it.";
 const note = "m-0 mt-1.5 max-w-[72ch] text-xs text-muted-foreground [overflow-wrap:anywhere]";
 
 function FindingBody(props: { it: ReviewItemDto; mode: TriageMode; busy: boolean; fix: ReactNode; talk: ReactNode; ctx: DraftCtx }) {
@@ -276,6 +279,7 @@ function FindingBody(props: { it: ReviewItemDto; mode: TriageMode; busy: boolean
   const rev = it.revised;
   const trigger = f.trigger?.trim();
   const check = checkText(it);
+  const pre = isPreexisting(it);
   const onFix = ctx.onFix;
   // Acts shows lead only for a draft that is not discarded. jobs.ts fixFindings also needs the anchor.
   const toFix = onFix && a && (
@@ -356,13 +360,19 @@ function FindingBody(props: { it: ReviewItemDto; mode: TriageMode; busy: boolean
             </p>
           )}
           {anchored && <p className={note}>{anchored}</p>}
-          {mode === "move" ? (
+          {pre && (
+            <p className={note} data-preexisting>
+              {PREEXISTING_NOTE}
+            </p>
+          )}
+          {mode === "move" && !pre ? (
             <Mover it={it} busy={busy} ctx={ctx.triage} />
           ) : (
             <Acts
               it={it}
               busy={busy}
               flush
+              noPost={pre}
               ctx={ctx.triage}
               lead={toFix}
               always={<TalkLink it={it} open={!!props.talk} runner={short} onClick={() => ctx.talk.toggle(it.id)} />}
@@ -442,17 +452,53 @@ export function Dotted({ parts }: { parts: ReactNode[] }) {
 // The ID of the fold row element. j and k reach its button as a Drafts row (PrDetail.tsx DRAFT_ROWS); the keys a, e, and d find no
 // item in it.
 const FOLD_ROW = "fold";
+const PRE_ROW = "pre-fold";
+
+// One fold of the Drafts list: a button row, then its rows only while open. id: the list element.
+function Fold(props: {
+  row: string;
+  id: string;
+  name: string;
+  items: ReviewItemDto[];
+  open: boolean;
+  onToggle: () => void;
+  render: (it: ReviewItemDto) => ReactNode;
+}) {
+  return (
+    <>
+      <div data-item={props.row} className="border-b">
+        <button
+          id={`${props.row}-btn`}
+          data-row-head
+          type="button"
+          aria-expanded={props.open}
+          aria-controls={props.id}
+          onClick={props.onToggle}
+          className="flex min-h-[38px] w-full cursor-pointer items-center gap-2 rounded px-1.5 py-[7px] text-left text-sm font-medium text-ink-2 hover:bg-hover"
+        >
+          <ChevronRight aria-hidden className={cn("rl-chev", icon)} />
+          {props.name} ({props.items.length})
+        </button>
+      </div>
+      <ol id={props.id} hidden={!props.open} aria-label={props.name} className="m-0 list-none p-0">
+        {props.open && props.items.map(props.render)}
+      </ol>
+    </>
+  );
+}
 
 // groups: the findings of the newest review run by display group (docs/plans/review-v2/spec.md section 1.4). questions: its questions.
-// The main findings come first, then the fold, then the questions (plan pr-view-v4 2.7: the findings, then the questions). A closed
-// fold renders no rows, so j and k skip them. ledger: the open drafts in plain words. cards: the fix card of each finding, by item ID.
-// talks: the open talk under each finding card, by item ID.
+// The main findings come first, then the fold, then the Pre-existing fold (docs/plans/review-v3.md WP-V6), then the questions (plan
+// pr-view-v4 2.7: the findings, then the questions). A closed fold renders no rows, so j and k skip them. ledger: the open drafts in
+// plain words. cards: the fix card of each finding, by item ID. talks: the open talk under each finding card, by item ID.
 export function Drafts({
   groups,
   questions,
   ledger,
   foldOpen,
   onFold,
+  preOpen,
+  onPre,
   isOpen,
   triage,
   cards,
@@ -464,6 +510,8 @@ export function Drafts({
   ledger: LedgerPart[];
   foldOpen: boolean;
   onFold: () => void;
+  preOpen: boolean;
+  onPre: () => void;
   isOpen: (it: ReviewItemDto) => boolean;
   triage: TriageState;
   cards: ReadonlyMap<number, ReactNode>;
@@ -471,7 +519,8 @@ export function Drafts({
   ctx: DraftCtx;
 }) {
   const fold = groups.foldName ? groups.fold : [];
-  if (!groups.main.length && !fold.length && !questions.length) return null;
+  const pre = groups.preexisting;
+  if (!groups.main.length && !fold.length && !pre.length && !questions.length) return null;
   const row = (it: ReviewItemDto) => {
     const mode = modeOf(triage, it.id);
     return (
@@ -505,25 +554,10 @@ export function Drafts({
       <div className="border-t">
         <ol className="m-0 list-none p-0">{groups.main.map(row)}</ol>
         {fold.length > 0 && (
-          <>
-            <div data-item={FOLD_ROW} className="border-b">
-              <button
-                id="fold-btn"
-                data-row-head
-                type="button"
-                aria-expanded={foldOpen}
-                aria-controls="d-fold"
-                onClick={onFold}
-                className="flex min-h-[38px] w-full cursor-pointer items-center gap-2 rounded px-1.5 py-[7px] text-left text-sm font-medium text-ink-2 hover:bg-hover"
-              >
-                <ChevronRight aria-hidden className={cn("rl-chev", icon)} />
-                {groups.foldName} ({fold.length})
-              </button>
-            </div>
-            <ol id="d-fold" hidden={!foldOpen} aria-label={groups.foldName ?? undefined} className="m-0 list-none p-0">
-              {foldOpen && fold.map(row)}
-            </ol>
-          </>
+          <Fold row={FOLD_ROW} id="d-fold" name={groups.foldName ?? ""} items={fold} open={foldOpen} onToggle={onFold} render={row} />
+        )}
+        {pre.length > 0 && (
+          <Fold row={PRE_ROW} id="d-pre" name={PREEXISTING_NAME} items={pre} open={preOpen} onToggle={onPre} render={row} />
         )}
         <ol className="m-0 list-none p-0">{questions.map(row)}</ol>
       </div>

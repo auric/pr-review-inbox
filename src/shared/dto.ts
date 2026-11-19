@@ -207,9 +207,21 @@ export type ModuleId = (typeof MODULE_IDS)[number];
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "broad", "verify2", "classes",
 // "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. "risk-check":
-// docs/plans/review-v2/risk-check.md WP-RC1. "obligations": docs/plans/review-v2/obligations.md WP-OB1. A retired name ("signal",
-// "order", "rules2", "rereview-strict") drops on read.
-export const VARIANTS = ["broad", "classes", "obligations", "parts", "risk-check", "security2", "security2-verify", "verify2"] as const;
+// docs/plans/review-v2/risk-check.md WP-RC1. "obligations": docs/plans/review-v2/obligations.md WP-OB1. "preexisting":
+// docs/plans/review-v3.md WP-V6. "callers": docs/plans/review-v3.md D2, the caller rule. A retired name ("signal", "order", "rules2",
+// "rereview-strict") drops on read.
+export const VARIANTS = [
+  "broad",
+  "callers",
+  "classes",
+  "obligations",
+  "parts",
+  "preexisting",
+  "risk-check",
+  "security2",
+  "security2-verify",
+  "verify2",
+] as const;
 export type Variant = (typeof VARIANTS)[number];
 export const VOLUMES = ["quiet", "balanced", "thorough"] as const;
 export type Volume = (typeof VOLUMES)[number];

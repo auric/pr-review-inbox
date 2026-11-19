@@ -306,6 +306,7 @@ export const METRICS = [
   "lossDuplicate",
   "lossRefuted",
   "refutedShown",
+  "preexisting",
   "augmentedPrecision",
   "augmentedRecall",
   "newTp",
@@ -336,6 +337,8 @@ export type Score = {
   risk: Sec | null;
   // obligations.md section 8: the same counts for the shown findings with category obligation.
   obligation: Sec | null;
+  // docs/plans/review-v3.md WP-V6: the same counts for the pre-existing findings. They are not shown in the main list.
+  preexisting: Sec | null;
   union: { k: number; shown: number; raised: number }[];
   finderQuestions: { asked: number; answered: number; findings: number; kept: number } | null;
   finderRisks: RiskCounts | null;
@@ -461,12 +464,36 @@ type Tally = {
   notCompleted: number;
   incomplete: number;
   refutedShown: number;
+  // docs/plans/review-v3.md WP-V6: the pre-existing items of the run, and their labels (null without labels).
+  preexisting: number;
   hits: Hits;
   ground: Ground | null;
+  pre: Omit<Sec, "runs"> | null;
 };
 
-// t: the tolerance of the result. Traps use t = 0 (docs/plans/review-v3.md WP-V1).
-function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null, g: Grounding | undefined): Tally {
+// docs/plans/review-v3.md WP-V6: the pre-existing items of one run. An item outside main takes its first gold match (goldLabels), and
+// label.ts judges only an item without one. gold: the match is a must-find, your own comment, or an extra. fp: the match is a trap, or
+// the judge gives fp. tp: the judge gives tp. null: an item has no matcher answer.
+function preCounts(c: EvalCaseInfo, pre: EvalItem[], g: Grounding): Omit<Sec, "runs"> | null {
+  const m = pre.map((i) => g.matches(c, i));
+  if (m.some((x) => x === undefined)) return null;
+  const labels = goldLabels(goldOf(c), pre, (n) => m[n] ?? []);
+  const un = pre.filter((_, n) => !labels[n]).map((i) => g.judge(c, i));
+  const traps = labels.filter((x) => x?.kind === "trap").length;
+  return {
+    shown: pre.length,
+    gold: labels.filter((x) => x !== null && x.kind !== "trap").length,
+    tp: un.filter((j) => j?.label === "tp").length,
+    fp: traps + un.filter((j) => j?.label === "fp").length,
+    unlabeled: un.filter((j) => j === undefined).length,
+  };
+}
+
+// t: the tolerance of the result. Traps use t = 0 (docs/plans/review-v3.md WP-V1). docs/plans/review-v3.md WP-V6: the pre-existing items
+// leave every count of the main list. They are neither noise nor a hit, and they raise no must-find.
+function tally(c: EvalCaseInfo, run: CaseRun, t: number, volume: Volume | null, g: Grounding | undefined): Tally {
+  const pre = run.items.filter((i) => i.group === "preexisting");
+  const r = pre.length ? { ...run, items: run.items.filter((i) => i.group !== "preexisting") } : run;
   const shown = r.items.filter((i) => i.group === "main");
   const human = c.human ?? [];
   // docs/plans/review-v3.md WP-V3: a re-raise is a new item on an earlier finding that you posted or discarded. Its lines must be the
@@ -522,8 +549,10 @@ function tally(c: EvalCaseInfo, r: CaseRun, t: number, volume: Volume | null, g:
     incomplete: r.status === "incomplete" ? 1 : 0,
     // review-quality-2026.md E5: refuted items in main count apart. displayGroup folds them at quiet and balanced, so only thorough and older results have them.
     refutedShown: shown.filter((i) => i.verdict === "refuted").length,
+    preexisting: pre.length,
     hits: { shown: new Set(found.map((b) => `bug:${b.id}`)), raised: new Set(raised.map((b) => `bug:${b.id}`)) },
     ground: g ? ground(c, r, volume, g) : null,
+    pre: g ? preCounts(c, pre, g) : null,
   };
 }
 
@@ -599,6 +628,7 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     lossDuplicate: loss("duplicate"),
     lossRefuted: loss("refuted"),
     refutedShown: ratio(sum(ts, "refutedShown"), ts.length),
+    preexisting: ratio(sum(ts, "preexisting"), ts.length),
     augmentedPrecision: of(
       tp === null || newTp === null ? null : tp + newTp,
       gs((x) => x.shown),
@@ -632,8 +662,12 @@ function tallies(r: EvalResult, g?: Grounding): { runs: RunTally[]; grounded: bo
     const c = byId.get(x.case);
     return c ? [{ repeat: x.repeat, c, t: tally(c, x, r.tolerance ?? 0, r.volume, g) }] : [];
   });
-  const grounded = g !== undefined && runs.every((x) => x.t.ground !== null);
-  if (!grounded) for (const x of runs) x.t.ground = null;
+  const grounded = g !== undefined && runs.every((x) => x.t.ground !== null && x.t.pre !== null);
+  if (!grounded)
+    for (const x of runs) {
+      x.t.ground = null;
+      x.t.pre = null;
+    }
   return { runs, grounded, hits: (x) => x.t.ground?.hits ?? x.t.hits };
 }
 
@@ -809,6 +843,8 @@ export function score(r: EvalResult, g?: Grounding): Score {
     for (const x of runs) for (const k of SEC_KEYS) out[k] += x.t.ground?.[key][k] ?? 0;
     return out;
   };
+  const pre: Sec | null = grounded ? { runs: runs.length, shown: 0, gold: 0, tp: 0, fp: 0, unlabeled: 0 } : null;
+  if (pre) for (const x of runs) for (const k of SEC_KEYS) pre[k] += x.t.pre?.[k] ?? 0;
   const fr = r.runs.flatMap((x) => (x.finderRisks ? [x.finderRisks] : []));
   const ob = r.runs.flatMap((x) => (x.obligations ? [x.obligations] : []));
   const known = new Set(r.cases.map((c) => c.id));
@@ -823,6 +859,7 @@ export function score(r: EvalResult, g?: Grounding): Score {
     security: sum("security"),
     risk: sum("risk"),
     obligation: sum("obligation"),
+    preexisting: pre,
     union,
     finderQuestions: fq.length ? { asked: add("asked"), answered: add("answered"), findings: add("findings"), kept: add("kept") } : null,
     finderRisks: fr.length ? (Object.fromEntries(RISK_KEYS.map((k) => [k, fr.reduce((s, x) => s + x[k], 0)])) as RiskCounts) : null,

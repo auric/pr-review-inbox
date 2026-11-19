@@ -13,12 +13,14 @@ import { createJiraSource } from "../../src/server/context/jira";
 import { createLive, type LiveEvent } from "../../src/server/live";
 import {
   BROAD_THREAD_CLAIM,
+  CALLERS_LINES,
   DEFAULT_PROFILE,
   DO_NOT_FLAG,
   DOC_SERVERS,
   DOCS_RULE,
   ISSUE_LINES,
   type ListTools,
+  PREEXISTING_LINES,
   type Profile,
   profileOf,
   profileRevision,
@@ -44,7 +46,7 @@ import type {
   RunDetail,
   RunDto,
 } from "../../src/shared/dto";
-import { REVIEW_PROMPT_VERSION } from "../../src/shared/review";
+import { displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION } from "../../src/shared/review";
 import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, type Route, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoExplain, type FakeScenario, readRecords } from "../support/fake-claude";
 import { type FakeJira, JIRA_TOKEN, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira";
@@ -1732,6 +1734,64 @@ describe("language checks", () => {
       expect(on.check["rl-main"]?.prompt).toContain(skip);
       expect(on.check["rl-main"]?.prompt).toContain(`\n${VERIFY2.duplicate}\n`);
       expect([plain.version, on.version]).toEqual([REVIEW_PROMPT_VERSION, `${REVIEW_PROMPT_VERSION}+broad+verify2`]);
+    },
+    SLOW,
+  );
+
+  test(
+    "review v3 WP-V6 and the caller rule: the variants reach the CLI schema and the finder agents; a pre-existing finding stores in its group",
+    async () => {
+      const h = await setup();
+      // README.md is the same at base and head, so a finding there is in unchanged code.
+      const pre = {
+        path: "README.md",
+        side: "new",
+        line: 1,
+        lineEnd: null,
+        anchorText: "# Sample",
+        severity: "major",
+        category: "behavior",
+        body: "An old defect.",
+        evidence: "README.md:1",
+        evidenceStatus: "code",
+        confidence: "high",
+        agent: null,
+        title: "Old defect",
+        trigger: "A reader follows the heading.",
+        cause: null,
+        rule: "",
+        module: "core",
+        preexisting: true,
+      };
+      const run = async (variants: ProfileInput["variants"]) => {
+        const off = { ...general, variants, verifier: { ...general.verifier, mode: "off" as const } };
+        expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [off] } })).status).toBe(200);
+        await h.brief(NOTE, "general");
+        h.scenario({ fixture: subagentRun({ ...RESULT, findings: [...RESULT.findings, pre] }) });
+        const before = h.calls().length;
+        const d = await h.finish((await h.start()).body.id);
+        expect(d.run.status).toBe("completed");
+        const find = h.calls().slice(before).find(finderCall) as Call & { agents: Agents };
+        return { d, schema: flag(find.argv, "--json-schema") ?? "", agents: find.agents };
+      };
+      const plain = await run([]);
+      expect(plain.schema).not.toContain('"preexisting"');
+      expect(plain.d.items.some((i) => i.anchor?.path === "README.md")).toBe(false);
+      expect(plain.d.run.summary?.dropped.map((x) => [x.path, x.reason])).toContainEqual(["README.md", "unchanged"]);
+      for (const name of ["rl-main", "rl-reviewer"]) {
+        expect(plain.agents[name]?.prompt).not.toContain(PREEXISTING_LINES[0]);
+        expect(plain.agents[name]?.prompt).not.toContain(CALLERS_LINES[0]);
+      }
+      const on = await run(["preexisting", "callers"]);
+      expect(on.schema).toContain('"preexisting"');
+      for (const name of ["rl-main", "rl-reviewer"]) {
+        expect(on.agents[name]?.prompt).toContain(`\n${PREEXISTING_LINES.join("\n")}\n`);
+        expect(on.agents[name]?.prompt).toContain(`\n${CALLERS_LINES.join("\n")}\n`);
+      }
+      const kept = on.d.items.filter((i) => i.anchor?.path === "README.md");
+      expect(kept.map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "preexisting"]]);
+      const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
+      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+callers+preexisting`);
     },
     SLOW,
   );

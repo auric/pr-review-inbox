@@ -77,19 +77,22 @@ function onEscape(e: KeyboardEvent, close: () => void) {
 // prototype/v3 acts(), pr-view-v4 drafts(). Each button names its key in the tooltip.
 // flush: no indent under an avatar, as in the open rows of the Drafts section. lead: a button after the triage buttons, before Move.
 // lead and children show only on an item that is not discarded. always: the last control, also on a discarded item. stale: an
-// out-of-date reply draft. items.ts refuses Accept and Edit for it, so only Discard or Undo accept shows.
+// out-of-date reply draft. items.ts refuses Accept and Edit for it, so only Discard or Undo accept shows. noPost: a pre-existing
+// finding. items.ts refuses Accept and Edit for it, and a place change has no use, so only Discard shows.
 export function Acts(props: {
   it: ReviewItemDto;
   busy: boolean;
   flush?: boolean;
   stale?: boolean;
+  noPost?: boolean;
   ctx: TriageCtx;
   lead?: ReactNode;
   children?: ReactNode;
   always?: ReactNode;
 }) {
   const { it, busy, ctx } = props;
-  const edit = !props.stale && (
+  const locked = props.stale || props.noPost;
+  const edit = !locked && (
     <Button size="sm" variant="outline" disabled={busy} title="Key: e" aria-keyshortcuts="e" onClick={() => ctx.edit(it)}>
       <Pencil aria-hidden data-icon="inline-start" />
       Edit
@@ -109,7 +112,7 @@ export function Acts(props: {
       </div>
     );
   }
-  const move = it.kind === "finding" && it.anchor && (
+  const move = !props.noPost && it.kind === "finding" && it.anchor && (
     <button
       type="button"
       disabled={busy}
@@ -134,7 +137,7 @@ export function Acts(props: {
         </>
       ) : (
         <>
-          {!props.stale && (
+          {!locked && (
             <Button size="sm" variant="outline" disabled={busy} title="Key: a" aria-keyshortcuts="a" onClick={() => ctx.act(it, "accept")}>
               <Check aria-hidden data-icon="inline-start" />
               Accept
