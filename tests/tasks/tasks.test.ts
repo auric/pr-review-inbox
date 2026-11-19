@@ -18,6 +18,7 @@ import { createReviewJobs } from "../../src/server/review/jobs";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import { openDb } from "../../src/server/storage/db";
+import { NO_COMMANDS_LINE } from "../../src/server/tasks/capabilities";
 import { pickProblem } from "../../src/server/tasks/files";
 import { insertStep } from "../../src/server/tasks/implement";
 import { type Docs, stepFile } from "../../src/server/tasks/plan";
@@ -289,6 +290,8 @@ describe("the profile of a task (spec.md section 6.2)", () => {
         expect(prompt).toContain("Read ./skills/INDEX.md first.");
         // task-subagents.md decision 1: the interview and the spec run can start rl-explorer, and their prompt says so.
         expect(prompt).toContain(EXPLORER_RULE);
+        // task-builder-v2.md section 4 (AC-TB2, AC-TB3): the manifest of the build runs. The fixture repository has no pattern.
+        expect(prompt).toContain(`The build runs of this task have these tools:\n- ${NO_COMMANDS_LINE}\n`);
         expect(call.agents?.["rl-main"]?.tools?.[0]).toBe("Agent(rl-explorer)");
         expect(call.agents?.["rl-explorer"]?.tools).toEqual(["Read", "Grep", "Glob"]);
         // It runs on the model of the review subagents.

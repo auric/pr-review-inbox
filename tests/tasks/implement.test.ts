@@ -40,6 +40,7 @@ import { CRITIC_TASK } from "../../src/server/review/prompt";
 import { LOOP_NOTE, LOOP_TEXT } from "../../src/server/review/stream";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
+import { manifest, UNRESTRICTED_LINE } from "../../src/server/tasks/capabilities";
 import { diskDiff, movedText, snapGit, stopGit } from "../../src/server/tasks/gitstate";
 import {
   ciPath,
@@ -59,6 +60,7 @@ import {
   undoStep,
 } from "../../src/server/tasks/implement";
 import { pushTaskBranch } from "../../src/server/tasks/push";
+import type { StepShell } from "../../src/server/tasks/shell";
 import { partSession, recoverTasks, taskRow } from "../../src/server/tasks/tasks";
 import {
   commitStep,
@@ -1039,10 +1041,13 @@ describe("implement run with the profile tools", () => {
   );
 });
 
+// task-builder-v2.md section 4: the manifest of a step with this shell.
+const capsOf = (shell: StepShell | null) => shell && manifest(shell, { repo: "PROJ/repo", mode: shell.mode, origins: [] });
+
 // check-fix.md and spec.md section 6.21.4: the prompt says what the step can run, and the fix lines end a failure that code cannot fix.
 describe("the prompt lines of the shell state", () => {
-  const lines = (mode: "fix" | "implement", shell: Parameters<typeof implementPrompt>[7]) =>
-    implementPrompt(mode, "specs/K-1/", false, false, "", "", { skills: [], mcp: [] }, shell).split("\n");
+  const lines = (mode: "fix" | "implement", shell: StepShell | null) =>
+    implementPrompt(mode, "specs/K-1/", false, false, "", "", { skills: [], mcp: [] }, capsOf(shell)).split("\n");
   const RUNS = "The app runs the approved build, test, and lint commands after your step.";
 
   test("no shell: no command runs, and the checks are the app's", () => {
@@ -1082,9 +1087,8 @@ describe("the prompt lines of the shell state", () => {
       expect(of(mode)).toContain(NEW);
       expect(of(mode).join("\n")).not.toContain("as a command of its own");
     }
-    expect(of("unrestricted")).toContain(
-      "You can run every command with the Bash tool, except git and commands that name the Bitbucket or Jira host. Do not try another form of a refused command.",
-    );
+    expect(of("unrestricted")).toContain(UNRESTRICTED_LINE);
+    expect(of("unrestricted")).toContain("Do not try another form of a refused command.");
     expect(of("unrestricted").join("\n")).not.toContain("allowRequest");
     for (const line of [NO_CD, CD, EDIT, NEW]) expect(lines("implement", null)).not.toContain(line);
   });
@@ -1119,12 +1123,12 @@ describe("the prompt lines of the shell state", () => {
           "x",
           "",
           { skills: [], mcp: [] },
-          {
+          capsOf({
             mode,
             rules: [],
             checks: ["bun test"],
             bashTimeoutSec: 600,
-          },
+          }),
         );
         for (const l of text.split("\n").filter((x) => /\bcd\b/.test(x))) {
           expect(l).not.toMatch(/never|not|instead|only from|of its own|join/i);

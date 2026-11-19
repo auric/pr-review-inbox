@@ -14,6 +14,7 @@ import { sweepCwdFolders } from "../../src/server/review/claude";
 import { git } from "../../src/server/review/git";
 import { CRITIC_TASK } from "../../src/server/review/prompt";
 import { openDb } from "../../src/server/storage/db";
+import { NO_COMMANDS_LINE } from "../../src/server/tasks/capabilities";
 import { insertStep, patchStep } from "../../src/server/tasks/implement";
 import { REVIEW_FIX_TRIES, resumeProblem, tickDiff, tickTask } from "../../src/server/tasks/loop";
 import { renderDocs, toPlan } from "../../src/server/tasks/plan";
@@ -286,9 +287,11 @@ describe("the build run (part-session.md sections 2.3, 2.4, and 2.6)", () => {
       expect(call.argv).toContain("--input-format");
       expect(call.argv).not.toContain("--resume");
       expect(call.stdin).toStartWith(
-        "You build part 1 of an approved plan in ./repo. You can change files only in ./repo. You post nothing. Git is denied. The app commits after its checks, and the user pushes. You cannot run commands.",
+        "You build part 1 of an approved plan in ./repo. You can change files only in ./repo. You post nothing. Git is denied. The app commits after its checks, and the user pushes.\n",
       );
       for (const line of [
+        // task-builder-v2.md section 4 (AC-TB2): the manifest of a repository with no pattern.
+        NO_COMMANDS_LINE,
         `./context/spec/ holds a read-only copy of the plan. Tick tasks only in ./repo/specs/${KEY}/plan.md.`,
         "Do the open tasks of ./context/step.md in plan order, one at a time.",
         "For each task, write or change its tests first. Then change the code.",

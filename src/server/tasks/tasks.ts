@@ -102,6 +102,7 @@ import { buildInterviewPrompt, buildSpecPrompt } from "../review/prompt";
 import { repoPath } from "../review/validate";
 import { type ContextFile, noUrl, remoteHead, type SnapshotRepo } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
+import { buildToolLines, capabilities, capabilityLines } from "./capabilities";
 import {
   dropFetched,
   type Fetched,
@@ -1562,6 +1563,8 @@ export function taskDto(db: Database, t: TaskRow): TaskDto {
       (t.state === "implementing" || t.state === "ready") && repoSettings(db, t.project, t.repo).commands.some((c) => c.kind === "setup"),
     subtasks: t.subtasks === 1 ? subtaskDtos(db, t.id, partRows) : null,
     issueStatus: taskIssue(db, t)?.issue.status ?? null,
+    // The header has no config at hand, so the lines name no host (as checks below).
+    capabilities: capabilityLines(capabilities(db, t, "implement")),
     shell: {
       mode: repo.shellMode,
       allow: repo.allow,
@@ -1744,7 +1747,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       own: answers ? [answers] : [],
       maxTurns: INTERVIEW_TURNS,
       schema: interviewJsonSchema(),
-      agent: interviewAgent(p, round, t.subtasks === 1),
+      agent: interviewAgent(p, round, t.subtasks === 1, buildToolLines(capabilities(db, t, "interview", originsOf(settings.config())))),
       explorer: true,
       prompt: (head, instructions) =>
         buildInterviewPrompt({
@@ -1891,7 +1894,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       own: answers ? [answers] : [],
       maxTurns: runLimitsOf(settings.config()?.runLimits).planTurns,
       schema: specJsonSchema(),
-      agent: specAgent(p, budget, process.platform, subtasks),
+      agent: specAgent(p, budget, process.platform, subtasks, buildToolLines(capabilities(db, t, "spec", originsOf(settings.config())))),
       explorer: true,
       prompt: (head, instructions) => {
         const text = buildSpecPrompt({

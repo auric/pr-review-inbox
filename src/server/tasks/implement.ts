@@ -51,6 +51,7 @@ import {
   TASK_ATTACHMENT_NAME,
   UNTRUSTED,
 } from "../review/workspace";
+import { type Capabilities, capabilityLines, manifest } from "./capabilities";
 import { checkGit, diskDiff, diskSnap, diskSnapOf, type GitSnap, movedText, snapGit, stopGit } from "./gitstate";
 import { fullPath, reposFile, taskRepos } from "./repos";
 import type { StepShell } from "./shell";
@@ -592,9 +593,9 @@ const COMMENT_LINES = [
 // attachments: ./context/attachments/ exists (spec.md section 6.17). instructions: the text of "Tell Claude" (mode instruct, spec.md
 // section 6.18.2). It is the only content of "Your instructions" and the last text of the stdin, so the rules come first. project: the
 // combined project instructions with their "# Project instructions" heading (spec.md section 6.7). They stand after the rules. lines:
-// the skill lines of the profile (skillLines with context/skills) and the MCP lines. They stand after the rules too. shell: the Bash
-// tool of the step (spec.md section 6.21). null: no Bash. session: a run of a part session (part-session.md section 2.3). A resumed run
-// gets the rules digest instead of the full rules, because compaction can drop the first prompt. points: failure.md of a fix run holds
+// the skill lines of the profile (skillLines with context/skills) and the MCP lines. They stand after the rules too. caps: the manifest
+// of the step (task-builder-v2.md section 4). caps.commands: the step has the Bash tool. null: no manifest and no Bash (a resolve step).
+// session: a run of a part session (part-session.md section 2.3). A resumed run gets the rules digest instead of the full rules, because compaction can drop the first prompt. points: failure.md of a fix run holds
 // review points (pushback.md section 6.23.8).
 export function implementPrompt(
   mode: StepMode,
@@ -604,7 +605,7 @@ export function implementPrompt(
   instructions = "",
   project = "",
   lines: { skills: string[]; mcp: string[] } = { skills: [], mcp: [] },
-  shell: StepShell | null = null,
+  caps: Capabilities | null = null,
   session: SessionPrompt | null = null,
   points = false,
 ): string {
@@ -613,6 +614,7 @@ export function implementPrompt(
   const message = mode === "instruct" && !comments;
   const user = [...(project ? ['"Project instructions"'] : []), ...(message ? ['"Your instructions"'] : [])];
   const plan = `When the plan is wrong, change the plan file under ${specDir} in ./repo, stop, and say why in specChange.`;
+  const shell = caps?.commands ? caps : null;
   const checks = shell?.checks ?? [];
   const tick = "change `### [ ] <id> ` to `### [x] <id> `. Tick only task headings. Change nothing else in the plan file.";
   const modeLines = {
@@ -668,8 +670,8 @@ export function implementPrompt(
   const modeLine = `- Mode: ${mode === "implement" ? "build" : comments ? "comments" : mode}`;
   const tail = [...(message ? ["", "# Your instructions", "", instructions.trim()] : [])];
   const role = session
-    ? `You build part ${session.ord} of an approved plan in ./repo. You can change files only in ${where}. You post nothing. Git is denied. The app commits after its checks, and the user pushes.${shell ? "" : " You cannot run commands."}`
-    : `You do one step of an approved plan in ./repo. You can change files only in ${where}. ${shell ? "You post nothing." : "You cannot run commands, and you post nothing."}`;
+    ? `You build part ${session.ord} of an approved plan in ./repo. You can change files only in ${where}. You post nothing. Git is denied. The app commits after its checks, and the user pushes.${caps ? "" : " You cannot run commands."}`
+    : `You do one step of an approved plan in ./repo. You can change files only in ${where}. ${caps ? "You post nothing." : "You cannot run commands, and you post nothing."}`;
   const result =
     mode === "implement"
       ? "End the run when every open task is ticked and its tests pass, or when you need the user. Set done to true only then. List the IDs that you ticked in ticked."
@@ -677,24 +679,19 @@ export function implementPrompt(
   // spec.md section 6.21, D3, D6, and D7.
   const ask =
     "When Claude Code refuses a command that the step needs, do not try another form of it. End the step: set allowRequest with the narrowest pattern, the refused command, and a reason. Set done to false.";
+  const capLines = caps ? capabilityLines(caps) : [];
   // Gate B31: the read block of allowlist mode refuses every cd. The other modes run `cd repo && <command>`.
   const shellLines = !shell
     ? []
     : [
         ...(shell.mode === "allowlist"
           ? [
-              `You can run only these commands: ${[...shell.rules, ...checks.map((c) => `${c} *`)].map((r) => `\`${r}\``).join(", ")}. Read-only commands, such as ls, cat, grep, and rg, also run. Claude Code refuses every other command.`,
               ask,
               "Never ask to allow a read-only command, git, a shell, or the Bitbucket or Jira host.",
               ...(message ? ["When the request asks for allowlist changes, set allowRequest and change no file."] : []),
               "Use paths such as repo/src/file.ts. Never run cd. For a tool that must run in the repository, use its folder option, such as make -C repo or npm --prefix repo.",
             ]
-          : [
-              shell.mode === "any"
-                ? "You can run commands with the Bash tool. A fixed deny list refuses git and some other commands. Do not try another form of a refused command."
-                : "You can run every command with the Bash tool, except git and commands that name the Bitbucket or Jira host. Do not try another form of a refused command.",
-              "You may run `cd repo` before a command that must run in the repository.",
-            ]),
+          : ["Do not try another form of a refused command.", "You may run `cd repo` before a command that must run in the repository."]),
         "Change files only with the Edit and Write tools. Read a file before you edit it. Never write files with Bash redirection, tee, or a heredoc.",
         `When ./context/${comments ? "comments.md" : "failure.md"} lists new files that a Bash command wrote, write each file that the step needs with the Write tool.`,
         "Pipe long build output through `tail -n 200`.",
@@ -720,6 +717,7 @@ export function implementPrompt(
       "Read ./context/step.md first. It says what this run does.",
       result,
       commands,
+      ...capLines,
       ...shellLines,
       untrusted,
       ...userLines,
@@ -744,6 +742,7 @@ export function implementPrompt(
   return [
     role,
     commands,
+    ...capLines,
     ...shellLines,
     "Read ./context/step.md first. It names the part, the task, and what done means.",
     ...(attachments
@@ -1075,6 +1074,8 @@ export type StepInput = {
   extra?: boolean;
   // spec.md section 6.21: the Bash tool of the step. Absent: no Bash.
   shell?: StepShell;
+  // task-builder-v2.md section 4: the manifest of the step. Absent: the manifest of shell, with no host name, or none without shell.
+  caps?: Capabilities;
   // Mode fix: context/failure.md holds review points, so the prompt gets the lines of pushback.md section 6.23.8.
   points?: boolean;
   // part-session.md section 2.2: a run of the part session. keep: the folder of the kept transcript. resume: the kept file to fork, null
@@ -1280,7 +1281,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
         i.instructions,
         project,
         lines,
-        i.shell ?? null,
+        i.caps ?? (i.shell ? manifest(i.shell, { repo: `${row?.project}/${row?.repo}`, mode: i.shell.mode, origins: [] }) : null),
         session
           ? { ord: i.part.ord, tasksFile: session.tasksFile, resume: session.resume ? session.run : null, purpose: session.purpose }
           : null,

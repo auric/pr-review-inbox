@@ -66,6 +66,7 @@ import { TIME_LIMIT_TEXT } from "../review/stream";
 import { repoPath } from "../review/validate";
 import { type BranchRemote, type ContextFile, cachePath, locked, longPath, noUrl } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
+import { buildShell, manifest } from "./capabilities";
 import { CHECK_KINDS, type ChecksResult, checkStep } from "./checks";
 import { movedReason } from "./gitstate";
 import {
@@ -89,7 +90,7 @@ import { noteTaskWaits } from "./notify";
 import { type Docs, docNames, type Plan, parsePlan, parseTasks, partStepFile } from "./plan";
 import { type PreflightDeps, preflight } from "./preflight";
 import { saveMainRepo, sourceOf, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
-import { allowAsks, checkRules, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
+import { allowAsks, hostsOf, mergeAllow, originsOf, type StepShell } from "./shell";
 import { groupsOf, liveTaskPart, NO_TASK_PR, sortedRun } from "./task-pr";
 import {
   advance,
@@ -1228,6 +1229,14 @@ export function createLoop(opts: LoopOptions) {
       // task and of its own sub-tasks only.
       const task = taskFilesOf(c.db, dataDir, c.t, filesFor(c));
       const shell = shellOf(c, mode, item);
+      // task-builder-v2.md section 4: the prompt states the tools of this run. A resolve run has no manifest.
+      const caps = SHELL_STEPS.has(mode)
+        ? manifest(shell, {
+            repo: `${c.t.project}/${c.t.repo}`,
+            mode: repoSettings(c.db, c.t.project, c.t.repo).shellMode,
+            origins: originsOf(settings.config()),
+          })
+        : null;
       const refused = SHELL_STEPS.has(mode) ? [...refusedOf(c.db, c.id)].map(refusedLine) : [];
       const extra = [...refused, ...rejectedLines(c, item), ...(cont ? [cont.line] : []), ...(o.extra ?? [])];
       const stepMd = o.step(attempt);
@@ -1264,6 +1273,7 @@ export function createLoop(opts: LoopOptions) {
         live: () => goes(c),
         extra: beside(c),
         ...(shell && { shell }),
+        ...(caps && { caps }),
         ...(session && { session }),
         ...(o.points && { points: true }),
         ...(o.tries && { tries: o.tries }),
@@ -1299,18 +1309,10 @@ export function createLoop(opts: LoopOptions) {
   // of a network program (shell.ts). Most commands and Unrestricted list the checks for the prompt only and give no notes.
   function shellOf(c: Ctx, mode: StepMode, item: string): StepShell | null {
     if (!SHELL_STEPS.has(mode)) return null;
-    const repo = repoSettings(c.db, c.t.project, c.t.repo);
     const last = c.db.query(Q.lastRun).get({ part: c.part.id, kind: mode, item }) as { detail_json: string } | null;
     const ask = last ? stepDetail.parse(JSON.parse(last.detail_json)).allowAsk : null;
     const once = (ask?.decisions ?? []).filter((d) => d.choice === "once").map((d) => d.pattern);
-    const rules = [...new Set([...repo.allow.map((e) => e.pattern), ...once])];
-    const any = repo.shellMode !== "allowlist";
-    const run =
-      any || repo.runChecks
-        ? checkRules(repo.commands, { mode: repo.shellMode, rules, hosts: hostsOf(originsOf(settings.config())) })
-        : { checks: [], notes: [] };
-    if (!any && !rules.length && !run.checks.length) return null;
-    return { mode: repo.shellMode, rules, checks: run.checks, bashTimeoutSec: repo.bashTimeoutSec, notes: any ? [] : run.notes };
+    return buildShell(c.db, c.t, originsOf(settings.config()), once);
   }
 
   // A step that halts before its question, plan change, or allow request is written is no result that the loop took. The next Continue

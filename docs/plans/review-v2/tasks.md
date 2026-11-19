@@ -523,6 +523,30 @@ A large plan that the user approves alone builds as stacked part PRs on the part
 - WP-SA-3. Web, e2e, docs (implementer): the plan review radios, the stack build view, tests/e2e/task-large.e2e.ts, screenshots, README, CHANGELOG. AC-SA4, AC-SA13, AC-SA14. Open.
 - Gate UL-S (user): docs/smoke-task.md part LS. Open.
 
+### Task builder v2 (spec.md section 6.33, docs/plans/task-builder-v2.md)
+
+Wave 1 makes one real task reach an open PR (Gate U1). One implementer at a time: the packages share loop.ts, tasks.ts, and shared/task.ts. Section 16 of the design holds the files and tests of each package. Each package ends green on `bun run check`.
+
+- TB-D0. Docs (implementer): spec.md 6.33, these rows, CLAUDE.md status, docs/smoke-task.md part V. Built.
+- TB-1. Manifest and prompts (implementer): capabilities.ts, the spec, interview, and implement prompt lines, TaskDto.capabilities. AC-TB1 to AC-TB3. Built.
+- TB-2. Plan owners and checklist (implementer-xhigh): proof, where, external, task_external, `[-]` tasks. AC-TB4 to AC-TB7. Open.
+- TB-3. Checks (implementer-xhigh): kind order, skip after a failed build, env or code class, the approval program check. AC-TB8 to AC-TB10. Open.
+- TB-4. Files from Claude (implementer): ./out, the copy with lstat and caps, the download route. AC-TB11. Open.
+- Gate U1 (user): docs/smoke-task.md part V. Open.
+- TB-5. Asks (implementer-xhigh): ASK_CAUSES, ASK_EFFECTS, /asks/:ask, answers per key, assumptions. AC-TB12 to AC-TB15. After Gate U1. Open.
+- TB-6. Machines and migration (implementer-xhigh): design sections 11.1 to 11.4 and 11.6. AC-TB16 to AC-TB18. Open.
+- TB-7W. Web (implementer): ask cards, checklist, owner chips, "What Claude can do in this task", check markers, files, Finish, Abandon. AC-TB19. Open.
+- Gate U2 (user): docs/smoke-task.md part V2. Open.
+- TB-8. Spec part (implementer-xhigh): the spec PR on the approval click, the plan-edit run from comments. AC-TB20, AC-TB21. Takes over WP-B6. Open.
+- TB-8W. Spec part web (implementer): the review choice for medium and large. AC-TB22. Takes over WP-B7. Open.
+- TB-9. PR grant, D1 (implementer): AC-TB23. Open.
+- PS7a and PS7b: as ps6-ps7-plan.md, after TB-9.
+- TB-10. Rebuild, D3 (implementer-xhigh): AC-TB24. Deferred with no date (user answer of 2026-11-19). A rebuild stays a user step.
+- TB-11. Build hosts (implementer): Settings > Tasks hosts, "Test the host", manifest hosts. AC-TB25. After TB-9. Open.
+- TB-12. Remote checks, D4 (implementer-xhigh): AC-TB26. Open.
+- TB-D1. Final docs (implementer): BRIEF section 13 wording, spec.md 6.1 to 6.28, smoke files, CHANGELOG. Takes over PS8. Open.
+- WP-PQ3 to WP-PQ5 and Gate UP wait for Gate U2 (D12).
+
 ### WP-B6. Spec PR flow (implementer-xhigh, W10)
 
 - Files: src/server/tasks/{specpr.ts (branch, commit of the plan files, push, create PR, link task_part to the PR row, follow), gates.ts (spec gate from the synced reviewers_json, tasks, and builds)} (new); src/server/sync/* (read build stats for task PR heads during the normal PR sync); src/server/review/fix-routes.ts and clone.ts (Apply mode "task": commit into the part worktree; push stays a click); tests/tasks/specpr.test.ts (new); tests/review/fix-task.test.ts (new).
@@ -589,6 +613,7 @@ A large plan that the user approves alone builds as stacked part PRs on the part
 | G19 | `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G19` on the test repository (writes: a squash merge of a test PR) | after WP-ST-G, before WP-ST4 merges | The MERGED activity commit has one parent, the tree check holds, and the upper PR changes list only the upper files after the three merges and the PUT. |
 | J1 to J4 | `bun scripts/gate/jira.ts --only J1,J2,J3` (read only), then `--only J4 --authorize-transition` on a test issue; on Server or Data Center and on Cloud | after WP-ST-G, before WP-ST1 merges (J1, J2) and WP-ST5 merges (J3, J4) | The shapes of subtasks with statusCategory and of issuelinks, the transitions list, the comment and Cloud image links, and a 204 for the POST. |
 | Smoke task T (UT) | docs/smoke-task.md part T | after W9d | Every step as written. Nothing goes to Bitbucket or Jira without a click. |
+| Smoke task V (U1) | docs/smoke-task.md part V | after TB-4 | The real task reaches an open PR. No impossible ask. No fix run for an environment fault. |
 | Smoke task P (UP) | docs/smoke-task.md part P | after WPQ | Every step of Gate UP. "Approve the plan" waits during the check. With the setting off, no check run starts. |
 | Reply eval (PR context) | `bun run eval -- --replies --real --repeat 2` | after WP-PN | The recommended pass of WP-PN. |
 | G8, G10, G11 (on hold) | `bun scripts/gate/bitbucket-write.ts --only G8,G10,G11` on the test repository | before WP-A2 (G10) and WP-A5 (G8) | spec of WP-GA. |

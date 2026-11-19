@@ -42,7 +42,8 @@ export type StepShell = Pick<ShellSpec, "mode" | "rules" | "checks" | "bashTimeo
 const GIT_DENY = ["Bash(git *)", "Bash(*/git *)", "Bash(git.exe *)", "Bash(*/git.exe *)", "Bash(*\\git.exe *)"];
 // Read-only search in allowlist mode. The CLI folder check still guards their paths (shell.md, run 2).
 export const SEARCH_RULES = ["grep *", "rg *"];
-const CREDENTIAL_DENY = [...CREDENTIAL_TOOLS.map((t) => `Bash(${t} *)`), "Bash(powershell*)", "Bash(pwsh*)"];
+// Their deny rule has no space after the name, so it also matches powershell.exe and pwsh.exe.
+const PREFIX_DENY = ["powershell", "pwsh"];
 // The config, the database files (config.ts dbPath), and the run folders with their MCP files. The step cwd is in <dataDir>/tasks.
 const DATA_DENY = ["config.json*", "*.sqlite*", "runs/**"];
 const HOME_DENY = ["Read(~/.ssh/**)", "Read(~/.git-credentials)", "Read(~/.netrc)", "Read(~/_netrc)", "Read(~/.claude/.credentials.json)"];
@@ -142,6 +143,21 @@ const lifted = (mode: ShellMode, rules: readonly string[]) => {
   return new Set(NETWORK_TOOLS.filter((n) => named.has(n) && (mode === "allowlist" || ANY_LIFTS.includes(n))));
 };
 
+// The programs that the deny list of a mode refuses, besides git and the hosts, in the order of shellSettings. The capability manifest
+// names the same list (capabilities.ts).
+export function deniedPrograms(mode: ShellMode, rules: readonly string[]): string[] {
+  if (mode === "unrestricted") return [];
+  const open = lifted(mode, rules);
+  const named = new Set(rules.map(programOf));
+  return [
+    ...NETWORK_TOOLS.filter((n) => !open.has(n)),
+    // Outside Windows, the CLI runs xargs with no allow rule. Its folder check misses paths from stdin (shell.md, run 2).
+    ...(mode === "allowlist" && !named.has("xargs") ? ["xargs"] : []),
+    ...CREDENTIAL_TOOLS,
+    ...PREFIX_DENY,
+  ];
+}
+
 // The settings file of a shell step. A network program stays denied unless a saved pattern lifts it (lifted). xargs stays denied in
 // allowlist mode unless a saved pattern names it. Each check also gets the exact rule, which SU15 shows is not needed. Gate B31: the read
 // block refuses every cd, so only allowlist mode keeps it. Unrestricted denies only git and the hosts (user decision of 2026-11-06).
@@ -152,8 +168,6 @@ export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = proce
   if (spec.mode === "allowlist" && !spec.rules.length && !checks.length)
     throw new Error("An allowlist shell step needs at least one pattern.");
   for (const r of [...spec.rules, ...checks]) if (!r.trim() || /[()\r\n]/.test(r)) throw new Error(`Invalid allowlist pattern: ${r}`);
-  const named = new Set(spec.rules.map(programOf));
-  const open = lifted(spec.mode, spec.rules);
   const data = rulePath(longPath(spec.dataDir), platform);
   const allow = [...new Set([...spec.rules, ...checks.flatMap((c) => [`${c} *`, c]), ...SEARCH_RULES])];
   const list = spec.mode === "allowlist";
@@ -167,10 +181,7 @@ export function shellSettings(spec: ShellSpec, platform: NodeJS.Platform = proce
           : [
               ...GIT_DENY,
               ...hosts,
-              ...NETWORK_TOOLS.filter((n) => !open.has(n)).map((n) => `Bash(${n} *)`),
-              // Outside Windows, the CLI runs xargs with no allow rule. Its folder check misses paths from stdin (shell.md, run 2).
-              ...(list && !named.has("xargs") ? ["Bash(xargs *)"] : []),
-              ...CREDENTIAL_DENY,
+              ...deniedPrograms(spec.mode, spec.rules).map((p) => (PREFIX_DENY.includes(p) ? `Bash(${p}*)` : `Bash(${p} *)`)),
               ...DATA_DENY.map((f) => `Read(${data}/${f})`),
               ...HOME_DENY,
             ],

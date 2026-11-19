@@ -2034,6 +2034,8 @@ export type TaskDto = TaskRowDto & {
   subtasks: SubtaskDto[] | null;
   // spec.md section 6.20.9: the Jira status of the task key from the newest read, for the parent row hint. null: not known.
   issueStatus: string | null;
+  // docs/plans/task-builder-v2.md section 4: the manifest lines of the build runs, for "What Claude can do in this task". They name no host.
+  capabilities: string[];
   // spec.md section 6.21. allowAsk: null unless the task waits on blocked kind allow.
   shell: TaskShellDto;
   allowAsk: TaskAllowAskDto | null;

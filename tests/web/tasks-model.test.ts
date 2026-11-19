@@ -229,6 +229,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     issueStatus: null,
     shell: { mode: "allowlist", allow: [], bashTimeoutSec: 600, warned: false, checks: 0 },
     allowAsk: null,
+    capabilities: [],
     ...o,
   };
 }

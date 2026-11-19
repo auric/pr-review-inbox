@@ -3405,6 +3405,51 @@ The design file holds the full transition table, the engine sites, the edge case
 13. AC-SA13. The build view of a stack plan shows one row per part, the primary of the focused part, no tracker action, "Parts: n, one PR each", and "Drop this part".
 14. AC-SA14. The e2e of SA-3 passes.
 
+### 6.33 Task builder v2 (docs/plans/task-builder-v2.md, approved on 2026-11-19)
+
+The design file holds the evidence, the flow, the schemas, the state machines, the migration, and the work packages. This section holds the decisions and the acceptance criteria. Until TB-D1, sections 6.1 to 6.32 keep the behavior of the code.
+
+#### 6.33.1 Decisions
+
+- Every task-builder prompt states the real tools of the build runs: the capability manifest (design section 4). The words come from the same data that builds the shell settings.
+- Plan steps get an owner. A step that needs the app or the user goes to a checklist, and the build gate never waits for it (design section 5).
+- The approval checks each local command against this computer. The app runs the checks in kind order, and a failed build skips the later checks. An environment fault never starts a fix run (design section 6).
+- One typed ask model replaces the blocked kinds and causes. Answers carry over per Jira key. Claude records assumptions instead of small questions (design section 7).
+- Files that Claude leaves in ./out stay with the task (design section 7.6).
+- The task, part, ask, and checklist machines get smaller (design section 11).
+- User answers of 2026-11-19: D3 (Jenkins rebuild POST) is deferred. TB-10 has no date, and a rebuild stays a user step. D1, D2, and D4 to D12 are as recommended.
+- Gate U1 comes first: one real task with "I approve it myself" reaches an open PR (docs/smoke-task.md part V).
+- TB-1 changes prompt lines that sections 6.6 and 6.21.4 quote. The spec rules replace "Give each part acceptance criteria that a test can prove, and name the test for each criterion." with the proof rules, the owner rule, and the manifest block. The implement role line says "You cannot run commands" only for a step with no manifest (resolve). The manifest lines give the mode and the Bash lines (src/server/tasks/capabilities.ts). TB-D1 updates the tables of 6.6 and 6.21.4.
+
+#### 6.33.2 Acceptance criteria
+
+1. AC-TB1. For each mode, the manifest lists exactly the programs that shell.json denies, plus git and the two hosts.
+2. AC-TB2. An allowlist with no pattern gives the line "Claude cannot run commands in this task", in the plan screen and in each prompt.
+3. AC-TB3. The spec and interview prompts hold the build manifest and the owner and proof rules. The Unrestricted lines name ssh, scp, and curl and the try-first rule.
+4. AC-TB4. A plan task whose proof names an unknown command gives a major problem.
+5. AC-TB5. External entries become task_external rows at the approval, with the owner from the kind.
+6. AC-TB6. A Claude result with `outside` marks the task `[-]`, adds a row, and the part reaches self_reviewed.
+7. AC-TB7. FINISHED waits while an external row is open.
+8. AC-TB8. The approval refuses a ticked local command whose program is not found.
+9. AC-TB9. A stored [test, build] list runs the build first. A failed build skips the test with "Skipped: build <name> failed".
+10. AC-TB10. A notRun check raises check_env and starts no fix run. A fix run with checkCause env and a found quote stops the tries.
+11. AC-TB11. A file in ./out survives the next run and shows in the Task view. A link is skipped.
+12. AC-TB12. Every cause has one title and one primary option.
+13. AC-TB13. An answer of an earlier task with the same key is in answers.md.
+14. AC-TB14. A non-blocking Claude ask becomes an assumption. Its override queues one instruct run.
+15. AC-TB15. The old routes are gone. /asks/:ask runs each effect.
+16. AC-TB16. The machines follow the tables of design sections 11.1 to 11.4. Each state is reachable, and only the final states have no exit.
+17. AC-TB17. The migration maps each row of design section 11.6 and keeps the row IDs.
+18. AC-TB18. Stop raises `stopped`. Continue resumes. ABANDON calls no Bitbucket or Jira route.
+19. AC-TB19. The e2e test runs from a key to an open PR on the fake server, with one moved outside task.
+20. AC-TB20. The spec-pr approval gives one push and one PR create on that click. The code parts wait for the spec gate.
+21. AC-TB21. A comment run on the spec part changes only `specs/<KEY>/` files.
+22. AC-TB22. The review choice shows for medium and large only.
+23. AC-TB23. With the grant, a self_reviewed part opens its PR without a click. Without it, nothing pushes.
+24. AC-TB24. A rebuild sends one POST with the parameters of the failed build to the configured origin only. Deferred with D3.
+25. AC-TB25. A host shows in the manifest only when the mode lets ssh run.
+26. AC-TB26. A remote check copies the tree with no shell and runs the quoted command with the real HOME.
+
 ## 7. UX rules check
 
 ### 7.1 Acceptance criteria per rule

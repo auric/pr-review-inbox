@@ -244,6 +244,19 @@ Run this part after part S, when SA-3 of self-approved-plans.md is built. It che
 12. Run 2: merge the PR of part 1 with the squash strategy. Untick "Delete source branch after merging". Click "Check now". Expect "Update from `<TARGET>`" on part 2. Click it, then "Push and move to `<TARGET>`" and confirm. Check Bitbucket: the PR of part 2 targets `<TARGET>`, its Diff tab lists only the files of part 2, and its branch history still holds the head of step 10. So no force push happened.
 13. Open "More actions" and click "Close the task".
 
+## V. Your real task reaches an open PR (Gate U1)
+
+Run this part when TB-1 to TB-4 of docs/plans/task-builder-v2.md are built. It checks that one real task goes from the key to an open PR when you approve the plan yourself. `<KEYV>` is a real Jira task of your daily work on `<REPOV>`. Use the shell mode that you use for daily work. Nothing goes to Bitbucket or Jira before a click.
+
+1. Click "Tasks", then "Build a Jira task". Type `<KEYV>`, pick `<REPOV>`, and click "Build this task".
+2. Answer each question. For each question, record its cause: a real decision, or a question that the code, the task, or an earlier answer settles.
+3. When the plan is ready, open the Plan tab. Expect no plan task that needs a merge, a CI job, a Jira change, a signing key, or a person on a remote host. Such a step shows under "Contracts and risks" as a step for the app or for you.
+4. Expect each Done-when line to name an approved command or a test file.
+5. Pick "I approve the plan myself. Colleagues review only the code PRs." when the size offers it. Tick the commands that run on this computer and click "Approve the plan".
+6. Let the build run. For each stop, record the cause, the title, and the button that you clicked. Expect no stop that asks for work outside the sandbox. Expect no fix run after a check that did not start on this computer.
+7. Open the files that Claude left for you in the Task view. Expect each file of ./out to stay after the next run.
+8. When a part is ready, click "Open the PR" and "Push and open PR". Check Bitbucket: the PR is open, and its files hold only the plan file and the files of the task.
+
 ## Record
 
 - The commit of preparation step 1, the OS, the Bun version, the `git` version, and the `claude` version.
@@ -258,5 +271,6 @@ Run this part after part S, when SA-3 of self-approved-plans.md is built. It che
 - From part N: the repository rows with their access and reason, the proposal (name or "none"), the order of the two creates, and whether Bitbucket named the merge commit.
 - From part T: the Jira deployment, the start and the reason of each plan row, the proposed open PR limit with its reason, the time of the status sync or "manual read", the move names of the dialog, the merge line of step 29, the sentence of ABC-17 after the approval, and whether "Close the task" needed "Stop" first.
 - From part LS: the count of parts, the time from the approval to the start of part 2, and the result of the move in run 1 and of the update in run 2.
+- From part V: each question and stop with its cause, the count of Claude runs by kind, the cost from the Plan tab, the count of fix runs, and the PR number. Gate U1 passes with an open PR, no impossible ask, and no fix run for an environment fault.
 - From part T2: the proposed patterns with their reasons, the count of commands Claude ran, the time of the remote build, each allow request or "no request", and what Stop left on the build host.
 - Clean up: delete the `smoke/` branches and the pull requests on Bitbucket, the task branches of `<MAIN>` and `<SUB>`, and the part T branches with `<PREFIX>ABC-14-early`, close the Jira tasks, and delete the data folder.

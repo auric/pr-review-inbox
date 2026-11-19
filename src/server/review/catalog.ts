@@ -1061,6 +1061,13 @@ export const INTERVIEW_RULES = [
   "In summary, say in plain words what the task asks for and what you plan to build.",
   "In unknowns, list facts that only a small experiment can find out.",
 ];
+// docs/plans/task-builder-v2.md section 4.2: the proof and owner rules. TB-2 adds the external list of the plan.
+export const PROOF_RULES = [
+  "Give each task a proof: an approved command or a test file.",
+  "A Done-when line names an approved command or a test file that a build run can execute.",
+];
+export const OWNER_RULE = "Put a step that needs the app or the user in risks, with that step as check. Never put it in tasks.";
+const INTERVIEW_OWNER_RULE = "A step that needs the app or the user is a step for the user. Do not plan it as a task for Claude.";
 // Rounds after round 1 only.
 export const INTERVIEW_ANSWERS_RULE =
   "./context/answers.md holds the user's answers to the earlier rounds. Do not ask again what they settle.";
@@ -1089,14 +1096,18 @@ export const EXPLORER_RULE = `For a wide read-only search over many files, you c
 
 export const withExplorer = (a: AgentSpec): AgentSpec => ({ ...a, prompt: `${a.prompt}\n${EXPLORER_RULE}\n${AGENT_PARAMS_RULE}` });
 
-// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.1).
-export function interviewAgent(p: Profile, round: number, subtasks = false): AgentSpec {
+// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.1). tools: the manifest block of the build runs (capabilities.ts
+// buildToolLines).
+export function interviewAgent(p: Profile, round: number, subtasks = false, tools: readonly string[] = []): AgentSpec {
   return {
     description: "Read-only questions before the plan of one task.",
     prompt: [
       ...INTERVIEW_RULES,
       ...(round > 1 ? [INTERVIEW_ANSWERS_RULE] : []),
       ...(subtasks ? [SUBTASKS_RULE] : []),
+      ...tools,
+      ...PROOF_RULES,
+      INTERVIEW_OWNER_RULE,
       ...TRUST,
       COVERAGE_RULE,
       ...docsRule(p),
@@ -1106,8 +1117,9 @@ export function interviewAgent(p: Profile, round: number, subtasks = false): Age
 
 const OS_NAME: Record<string, string> = { win32: "Windows", linux: "Linux", darwin: "macOS" };
 
-// platform: process.platform of the machine that runs the commands (checks.ts runs them without a shell).
-export const specRules = (budget: number, platform: string = process.platform) => [
+// platform: process.platform of the machine that runs the commands (checks.ts runs them without a shell). tools: the manifest block of
+// the build runs (capabilities.ts buildToolLines).
+export const specRules = (budget: number, platform: string = process.platform, tools: readonly string[] = []) => [
   "You write the plan for one task: design, behavior, and the parts with their tasks. You cannot change files, and you post nothing.",
   "Read ./context/task.md and ./context/answers.md first. The answers of the user win over the task text.",
   "Base the design on code that you read. Name the files and functions that change.",
@@ -1117,7 +1129,8 @@ export const specRules = (budget: number, platform: string = process.platform) =
   "When the task changes a database schema or an API, set db or api. Then plan expand, migrate, and contract steps.",
   "When the repository uses feature flags, put new behavior behind a flag. Name the flag and the part that removes it.",
   "For each unknown that only code can answer, plan a spike part. A spike is never merged. Its result updates the plan.",
-  "Give each part acceptance criteria that a test can prove, and name the test for each criterion.",
+  ...PROOF_RULES,
+  OWNER_RULE,
   'In testing, give the commands that build and test the repository as argument lists, such as ["bun","test"].',
   "When the Project instructions name a build, test, or setup command, use that command. They win over the repository files.",
   "Else take the commands from the repository files, such as package.json, a Makefile, or the CI configuration.",
@@ -1154,6 +1167,7 @@ export const specRules = (budget: number, platform: string = process.platform) =
   "Use it to find the code that earlier work on this task changed.",
   "Do not plan again what a merged commit already did.",
   `Name at most ${PROPOSALS_MAX} repositories. Never name the main repository, a submodule of it, or a repository that the list shows as skipped.`,
+  ...tools,
 ];
 
 // spec.md section 6.20.4: the lines of the spec run in sub-task mode.
@@ -1173,13 +1187,23 @@ export const subtaskSpecRules = (budget: number) => [
   "Also say how big they are, and how long reviews take in ./context/pr-history.md.",
 ];
 
-// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.4).
-export function specAgent(p: Profile, budget: number, platform: string = process.platform, subtasks = false): AgentSpec {
+// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.4). tools: as in specRules.
+export function specAgent(
+  p: Profile,
+  budget: number,
+  platform: string = process.platform,
+  subtasks = false,
+  tools: readonly string[] = [],
+): AgentSpec {
   return {
     description: "Read-only plan of one task.",
-    prompt: [...specRules(budget, platform), ...(subtasks ? subtaskSpecRules(budget) : []), ...TRUST, COVERAGE_RULE, ...docsRule(p)].join(
-      "\n",
-    ),
+    prompt: [
+      ...specRules(budget, platform, tools),
+      ...(subtasks ? subtaskSpecRules(budget) : []),
+      ...TRUST,
+      COVERAGE_RULE,
+      ...docsRule(p),
+    ].join("\n"),
   };
 }
 
