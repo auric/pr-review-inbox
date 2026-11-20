@@ -1,6 +1,6 @@
 # Jira context before a review
 
-Status: design of 2026-11-18. Approved by the user on 2026-11-18 (section 10). Not started. REVIEW_PROMPT_VERSION does not change.
+Status: design of 2026-11-18. Approved by the user on 2026-11-18 (section 10). WP-JC-D and WP-JC0 to WP-JC4 are on main. WP-JC5 and WP-JC-E are built on a branch. They wait for Gates JC-A and JC-B. REVIEW_PROMPT_VERSION does not change.
 
 ## 1. Request and verdict
 
@@ -179,7 +179,7 @@ Start of an automatic read, `due()` (a pure function with its own table test):
 - Each task section keeps its current lines. New lines and sections come only when the row has the new fields. So an old row gives the same bytes as today.
 - Order in a task section: the head lines, then "- Type", "- Fix versions", "- Components", "- Labels". Then Description, then one "### <field name>" per custom text field, ordered by field ID. Then "### Linked issues", then Comments, then Attachments. Then the family sections when jiraFamily is on.
 - "### Linked issues": one line each, "- <this key> <link phrase> <key>: <summary> (<status>, <type>)".
-- Family: taskParents uses the stored parentIssue. It reads Jira only for a row without that field (old rows).
+- Family: taskParents uses the stored parentIssue. It reads Jira only for a row without that field (old rows). parentIssue null gives no parent section and no read. An issue with an epic and no parent gets "### Epic <KEY>" in place of "### Parent <KEY>".
 - The end of task.md: "## Other pull requests that name these tasks", only when the join finds a PR.
 - Build tasks use the same renderIssue, so their task.md also gets the new fields (question 5). Sub-task sections leave out "### Linked issues", because their "Link:" lines exist.
 - Contract for the obligations step: criteria appear as "### <Jira field name>" under "## Task <KEY>", or in the description.
@@ -242,14 +242,18 @@ New checks in `bun run gate:jira`. They print status codes, key names, counts, b
 - A finder replay cannot show a context change. So the gate runs live finder runs on the local set.
 - Data: `scripts/eval/refetch-tasks.ts` (WP-JC-E) reads the case files and fetches the first 3 keys of each case with the user's Jira, read only. It writes `tasks-overlay.json` beside the set. It drops comments created after the case head commit. It prints counts only.
 - Known bias: statuses and descriptions are from today, not from the PR time. The bias favors the candidate. So Gate JC-A proves "not worse" only, and Gate JC-B shows the value.
-- Control: stored rows, jiraFamily off. Candidate: `--candidate-tasks-overlay <file> --candidate-jira-family`. Same build, prompt 2.8, `--effort medium`. Then eval:label and eval:compare. Exact flags are unverified.
-- run.ts checks that the harness settings have no Jira (settings.jira() gives null), so eval runs never call Jira.
+- Control: stored rows, jiraFamily off. Candidate: `--candidate-tasks-overlay <file> --candidate-jira-family`. Same build, `--effort medium`. The gate runs on the REVIEW_PROMPT_VERSION of that build, against a baseline of the same prompt version. eval:ab refuses a stored baseline of another prompt version. Then eval:label and eval:compare.
+- Commands: `bun run eval:refetch-tasks`, then `bun run eval:ab -- --effort medium --candidate-tasks-overlay <set folder>/tasks-overlay.json --candidate-jira-family`. docs/eval/local.md gives the details.
+- The overlay applies to a case only when its ID and head match the case. It replaces the text of the keys that it holds. The pr_task rows and the set fingerprint stay.
+- run.ts refuses `--tasks-overlay` with `--replay-find`. The result file records the overlay hash in `requested.tasksOverlay`, and `--resume` refuses another overlay.
+- Known bias 2: eval:label gives the judge the stored task rows on both sides. A candidate finding that rests only on overlay text can count as judge fp. This bias works against the candidate, so a pass stays valid.
+- run.ts refuses a case run when the harness settings give a Jira source (settings.jira() is not null), so eval runs never call Jira.
 - Ship rule, candidate against control, on cases with at least one task key:
   1. Grounded recall: the mean is at least the control mean minus S_R (as in risk-check.md section 7).
   2. Grounded noise per case: at most the control plus S_N. Judge fp per case run rise by no more than the control spread.
   3. Findings of module intent: gold matches plus judge tp are at least judge fp.
   4. Cost per case rises by 25% or less. Above that, the user decides.
-  5. The overlay adds text to at least half of the task cases. Else the result is INFO, and Gate JC-B decides.
+  5. The overlay adds text to at least half of the task cases. Else the result is INFO, and Gate JC-B decides. eval:refetch-tasks prints this count: a case counts when the overlay JSON of its first 3 keys is longer than their stored JSON.
 - If rules 1 to 3 fail, run a second candidate without `--candidate-jira-family`.
 
 ### Gate JC-B: the 5 comparison PRs (user, manual)
@@ -302,8 +306,8 @@ Tests never call a live Jira. Unit tests use tests/support/fake-jira.ts. e2e use
 | 5 | WP-JC2: state and fetch | implementer-xhigh | new src/server/context/fetch-machine.ts, new src/server/context/task-fetch.ts, new migration, src/server/context/routes.ts, new tests/context/fetch-machine.test.ts and task-fetch.test.ts, tests/context/routes.test.ts | AC-JC4, 5, 8, 9, 10, 12 in unit tests. | Races between late writes, Clear, and a database change. |
 | 6 | WP-JC3: run wiring | implementer-xhigh | src/server/review/jobs.ts, src/server/review/run-rows.ts, tests/review/jobs.test.ts, the affected tests/e2e/*.e2e.ts | AC-JC1 to 3, 6, 7, 11. `bun run check` and `bun run test:e2e` are green. | jobs.ts conflict. Run after WP-RC1, never at the same time as WP-RC3 or an obligations package. |
 | 7 | WP-JC4: UI and user docs | implementer | src/web/review/TaskChips.tsx, src/web/review/tasks.ts, its web test, new tests/e2e/task-fetch.e2e.ts, README.md, CHANGELOG.md, docs/screenshots (`bun run screenshots`), docs/smoke-r3.md | AC-JC17. The screenshots hold no real names. The shadcn and web-design-guidelines skills ran. First ship point. | The chip text gets too long on narrow panes. |
-| 8 | WP-JC5: task.md sections | implementer | src/server/context/task-file.ts, tests/context/task-file.test.ts | AC-JC14, AC-JC15. On a branch. No push before Gates JC-A and JC-B. | More text dilutes the review. The gates measure it. |
-| 9 | WP-JC-E: eval | implementer | scripts/eval/run.ts, ab.ts, cases.ts, new scripts/eval/refetch-tasks.ts, tests/eval/*.test.ts, docs/eval/local.md | A fake replay applies the overlay and the flag. The no-Jira check exists. | run.ts conflict. Start after WP-RC2 and WP-RC3 are committed. |
+| 8 | WP-JC5: task.md sections | implementer | src/server/context/task-file.ts, tests/context/task-file.test.ts | AC-JC14, AC-JC15. On a branch. No push before Gates JC-A and JC-B. Built. | More text dilutes the review. The gates measure it. |
+| 9 | WP-JC-E: eval | implementer | scripts/eval/run.ts, ab.ts, cases.ts, new scripts/eval/refetch-tasks.ts, tests/eval/*.test.ts, docs/eval/local.md | A fake replay applies the overlay and the flag. The no-Jira check exists. Built before WP-RC3, on the user's request. | run.ts conflict. A later WP-RC3 merges on top. |
 | 10 | Gates JC-A and JC-B | user | none | Section 5. | Overlay bias. JC-B decides the value. |
 | 11 | WP-JC6: family on by default | implementer | src/server/config.ts, src/server/review/catalog.ts, src/web/settings/profiles.ts, the profile upgrade tests, BRIEF.md line 454, CHANGELOG.md | An unedited profile upgrades to true. An edited true stays. Second ship point. | catalog.ts conflict. Start after WP-RC3 is committed. |
 
@@ -341,7 +345,7 @@ Unverified:
 - U-JC2. The textarea type key and the epic-link type key (Gate J5).
 - U-JC3. issuelinks entries hold summary, status, statusCategory, and issuetype (Gate J6, J2 is open).
 - U-JC4. The pull_request table keeps merged and declined PRs long enough for section 3.4.
-- U-JC5. The eval harness settings have no Jira. WP-JC-E adds the check.
+- U-JC5. The eval harness settings have no Jira. run.ts checks it at each case run (WP-JC-E).
 - U-JC6. A field over the 10 MB body cap fails the `*all` read. The narrow read had no such risk. No fallback is planned.
 
 ### User answers of 2026-11-18

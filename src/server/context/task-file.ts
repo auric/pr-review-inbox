@@ -25,6 +25,7 @@ import { type FoundItem, foundItem } from "../../shared/task";
 import { log } from "../log";
 import type { AttachmentFile, ContextFile } from "../review/workspace";
 import { type Raster, resolveFile, sniffFile } from "./attachments";
+import { CAPS } from "./jira";
 import { ATTACHMENT_IMAGE } from "./markdown";
 import { ContextError, type ContextSource, type IssueParent } from "./source";
 
@@ -49,8 +50,28 @@ type FileRow = {
 };
 const FILE_COLUMNS = "att_id, filename, mime, size, file, text, include";
 
+// jira-context.md section 4.5: the lines of the WP-JC1 fields. A row without them gives no line, so an old row keeps its bytes. The
+// read caps of jira.ts apply again, because the eval overlay file also gives rows.
+const listLine = (name: string, v: string[] | undefined) =>
+  v?.length ? [`- ${name}: ${v.slice(0, CAPS.list).map(oneLine).join(", ")}`] : [];
+const factLines = (i: IssueContext) => [
+  ...(i.type ? [`- Type: ${oneLine(i.type)}`] : []),
+  ...listLine("Fix versions", i.versions),
+  ...listLine("Components", i.components),
+  ...listLine("Labels", i.labels),
+];
+const textSections = (i: IssueContext, body: (s: string) => string) =>
+  (i.texts ?? []).slice(0, CAPS.texts).flatMap((t) => [`### ${oneLine(t.name)}`, "", body(t.text.slice(0, CAPS.text).trim()), ""]);
+function linkedSection(key: string, i: IssueContext): string[] {
+  const links = (i.related ?? []).slice(0, CAPS.related);
+  if (!links.length) return [];
+  const line = (l: (typeof links)[number]) =>
+    `- ${key} ${oneLine(l.text)} ${oneLine(l.key)}: ${oneLine(l.summary)} (${oneLine(l.status ?? "no status")}, ${oneLine(l.type ?? "no type")})`;
+  return ["### Linked issues", "", ...links.map(line), ""];
+}
+
 // The section of one issue. lines: the attachment lines. body: the text of a description or a comment. head: the heading word.
-// extra: the lines after the status lines.
+// extra: the lines after the status lines. related: add "### Linked issues". Sub-task sections have their own Link lines.
 function issueSection(
   r: Omit<TaskRow, "json">,
   i: IssueContext,
@@ -58,6 +79,7 @@ function issueSection(
   body: (s: string) => string,
   head = "Task",
   extra: string[] = [],
+  related = true,
 ): string[] {
   const out = [
     `## ${head} ${r.key}: ${oneLine(i.summary)}`,
@@ -66,12 +88,15 @@ function issueSection(
     `- Status: ${oneLine(i.status ?? "(none)")}`,
     `- Fetched: ${new Date(r.fetched_at).toISOString()}`,
     ...(i.truncated ? ["- The app cut this text at its size limits."] : []),
+    ...factLines(i),
     ...extra,
     "",
     "### Description",
     "",
     body(i.description?.trim() || "(none)"),
     "",
+    ...textSections(i, body),
+    ...(related ? linkedSection(r.key, i) : []),
     `### Comments (${i.comments.length} of ${i.commentsTotal})`,
     "",
   ];
@@ -137,7 +162,7 @@ function includer(dataDir: string | null): Includer {
 
 // The task.md section of one issue with its files. The listing comes first, then the downloaded files that it no longer names: a
 // refetch can drop a listed file that the user downloaded before. missing: the state of a listed file without a row. dir: the folder
-// of the issue files, as in Includer. head, extra: as in issueSection.
+// of the issue files, as in Includer. head, extra, related: as in issueSection.
 function renderIssue(
   r: Omit<TaskRow, "json">,
   i: IssueContext,
@@ -147,6 +172,7 @@ function renderIssue(
   dir = "",
   head = "Task",
   extra: string[] = [],
+  related = true,
 ): string[] {
   const listed: AttachmentMeta[] = [
     ...(i.attachments ?? []),
@@ -169,7 +195,7 @@ function renderIssue(
           return file ? `![${name}](./attachments/${file})` : `(image: ${name})`;
         })
       : s;
-  return issueSection(r, i, lines, body, head, extra);
+  return issueSection(r, i, lines, body, head, extra, related);
 }
 
 // shortcut: a fixed cap of sub-task lines per issue, raise it when a real issue lists more.
@@ -178,16 +204,19 @@ export const MAX_SUBTASK_LINES = 100;
 // The parents of a PR run, by parent key. Absent: the profile option "Include the Jira parent and sub-tasks" is off.
 export type TaskParents = ReadonlyMap<string, IssueParent>;
 
-const parentKeys = (db: Database, pr: number) => {
-  const rows = db.query("SELECT json FROM task_context WHERE pr = $pr ORDER BY key").all({ pr }) as { json: string }[];
-  return [...new Set(rows.flatMap((r) => (JSON.parse(r.json) as IssueContext).parent ?? []))];
-};
+const issuesOf = (db: Database, pr: number) =>
+  (db.query("SELECT json FROM task_context WHERE pr = $pr ORDER BY key").all({ pr }) as { json: string }[]).map(
+    (r) => JSON.parse(r.json) as IssueContext,
+  );
 
-// One GET of each parent of the fetched issues of a PR. A failed read leaves that parent out and does not fail the run.
-// jira: the source of the current settings, null without Jira. The call comes only when an issue has a parent.
+// The parents of the fetched issues of a PR. jira-context.md section 4.5: a row with parentIssue gives the stored text, and null gives
+// no parent. Only a row without the field (stored before WP-JC1) gets one GET of its parent. A failed read leaves that parent out and
+// does not fail the run. jira: the source of the current settings, null without Jira. The call comes only for such a row.
 export async function taskParents(db: Database, pr: number, jira: () => Promise<ContextSource | null>): Promise<TaskParents> {
   const out = new Map<string, IssueParent>();
-  const keys = parentKeys(db, pr);
+  const rows = issuesOf(db, pr);
+  for (const i of rows) if (i.parentIssue) out.set(i.parentIssue.key, i.parentIssue);
+  const keys = [...new Set(rows.flatMap((i) => (i.parentIssue === undefined && i.parent ? [i.parent] : [])))].filter((k) => !out.has(k));
   if (!keys.length) return out;
   let source: ContextSource | null;
   try {
@@ -207,19 +236,21 @@ export async function taskParents(db: Database, pr: number, jira: () => Promise<
   return out;
 }
 
-// The Parent and Sub-tasks sections of one issue. Attachments of the parent never go to runs.
+// The Parent (else Epic) and Sub-tasks sections of one issue. Attachments of the parent never go to runs.
 function familySection(i: IssueContext, parents: TaskParents): string[] {
   const out: string[] = [];
-  const p = i.parent ? parents.get(i.parent) : undefined;
+  const up = i.parent ?? i.epic;
+  const p = up ? parents.get(up) : undefined;
   if (p) {
+    const word = i.parent ? "Parent" : "Epic";
     const body = (s: string) => (p.format === "markdown" ? s.replace(ATTACHMENT_IMAGE, (_, name: string) => `(image: ${name})`) : s);
     out.push(
-      `### Parent ${p.key}: ${oneLine(p.summary)}`,
+      `### ${word} ${p.key}: ${oneLine(p.summary)}`,
       "",
       `- Status: ${oneLine(p.status ?? "(none)")}`,
       ...(p.truncated ? ["- The app cut this text at its size limits."] : []),
       "",
-      "#### Parent description",
+      `#### ${word} description`,
       "",
       body(p.description?.trim() || "(none)"),
       "",
@@ -262,7 +293,41 @@ export function taskContext(
       ...(parents ? familySection(i, parents) : []),
     );
   }
+  out.push(...otherPrs(db, pr, rows));
   return { files: [{ name: TASK_FILE, text: out.join("\n") }], attachments: inc.attachments };
+}
+
+export const MAX_OTHER_PRS = 20;
+type OtherPr = {
+  project: string;
+  repo: string;
+  pr_id: number;
+  state: string | null;
+  source_branch: string | null;
+  target_branch: string | null;
+  title: string | null;
+};
+
+// jira-context.md section 3.4: the other stored PRs, from all repositories, whose task keys include a fetched key or its parent or
+// epic key. No URL: the model cannot open it, and it names the host.
+function otherPrs(db: Database, pr: number, rows: TaskRow[]): string[] {
+  const keys = new Set<string>();
+  for (const r of rows) {
+    const i = JSON.parse(r.json) as IssueContext;
+    for (const k of [r.key, i.parent, i.epic]) if (k) keys.add(k);
+  }
+  const found = db
+    .query(
+      `SELECT project, repo, pr_id, state, source_branch, target_branch, title FROM pull_request
+        WHERE id != $pr AND id IN (SELECT pr FROM pr_task WHERE key IN (SELECT value FROM json_each($keys)))
+        ORDER BY CASE state WHEN 'OPEN' THEN 0 WHEN 'MERGED' THEN 1 WHEN 'DECLINED' THEN 2 ELSE 3 END, updated_date DESC, id DESC
+        LIMIT $max`,
+    )
+    .all({ pr, keys: JSON.stringify([...keys]), max: MAX_OTHER_PRS }) as OtherPr[];
+  if (!found.length) return [];
+  const line = (p: OtherPr) =>
+    `- ${oneLine(`${p.project}/${p.repo}`)} PR #${p.pr_id} (${oneLine((p.state ?? "unknown state").toLowerCase())}) from ${oneLine(p.source_branch ?? "(unknown)")} to ${oneLine(p.target_branch ?? "(unknown)")}: ${oneLine(p.title ?? "(no title)")}`;
+  return ["## Other pull requests that name these tasks", "", ...found.map(line), ""];
 }
 
 // task.md alone. No attachment is included.
@@ -397,6 +462,7 @@ function subtasksText(db: Database, t: TaskRef, parent: IssueContext, all: FileR
         `${s.key}/`,
         "Sub-task",
         [...links, ...found],
+        false,
       ),
     );
   }

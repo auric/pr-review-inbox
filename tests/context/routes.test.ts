@@ -122,11 +122,11 @@ describe("task context API", () => {
     expect((await s.call("POST", `/prs/${s.pr}/task-context/ABC-17`)).status).toBe(200);
     expect(stored().parentIssue).toMatchObject({ key: "ABC-30", summary: "Rework the cache layer", status: "In Progress" });
     expect(jira.count("GET", "/rest/api/2/issue/ABC-30")).toBe(1);
-    // task.md shows no new field before WP-JC5.
+    // WP-JC5: task.md shows the new fields. The parent text needs jiraFamily, and taskFiles passes no parents.
     const text = taskFiles(s.db, s.pr).find((f) => f.name === "task.md")?.text ?? "";
     expect(text).toContain("## Task ABC-17");
-    for (const part of ["Sync Worker", "Given a full cache", "Rework the cache layer", "ABC-31", "The app cut this text"])
-      expect(text).not.toContain(part);
+    for (const part of ["- Components: Sync Worker", "Given a full cache", "- ABC-17 blocks ABC-31:"]) expect(text).toContain(part);
+    for (const part of ["Rework the cache layer", "The app cut this text"]) expect(text).not.toContain(part);
 
     jira.routes[key("GET", "/rest/api/2/issue/ABC-30")] = { status: 500, body: { errorMessages: ["BODY-CANARY"] } };
     const lines: string[] = [];

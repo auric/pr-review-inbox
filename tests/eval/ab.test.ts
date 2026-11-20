@@ -123,6 +123,19 @@ async function makeLive() {
       });
   item("posted", [10, 11], {});
   item("discarded", [30, 30], { discardReason: { code: "bug" } });
+  // A task row stored before WP-JC1: the Gate JC-A overlay test replaces it.
+  db.query("INSERT INTO pr_task (pr, key, source, url, ord) VALUES (1, 'ABC-12', 'branch', NULL, 0)").run();
+  db.query("INSERT INTO task_context (pr, key, source, json, fetched_at) VALUES (1, 'ABC-12', 'jira', $json, 1)").run({
+    json: JSON.stringify({
+      key: "ABC-12",
+      summary: "Add the calc helpers",
+      status: "In Progress",
+      description: "Stored task text.",
+      comments: [],
+      commentsTotal: 0,
+      truncated: false,
+    }),
+  });
   db.close();
   return { env };
 }
@@ -166,6 +179,8 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   verifier: null,
   verifierEffort: null,
   replay: false,
+  jiraFamily: false,
+  tasksOverlay: null,
   baselineOnly: false,
   reviewOnly: false,
   large: false,
@@ -212,6 +227,9 @@ describe("eval:ab --baseline checks", () => {
     const a = header("review", "baseline");
     const refused = (r: Partial<EvalResult>, o = opts()) => reuseRefusal("review", { ...a, ...r }, o, FP);
     expect(reuseRefusal("rereview", a, opts(), FP)).toContain("ran the other mode");
+    expect(refused({ requested: { ...(a.requested as NonNullable<EvalResult["requested"]>), tasksOverlay: "0123456789ab" } })).toBe(
+      "Refused: the stored review baseline ran with the task overlay 0123456789ab, but a baseline runs the stored task rows.",
+    );
     expect(reuseRefusal("review", a, opts(), "e".repeat(64))).toContain(
       "ran case set ffffffffffff, but the set now has fingerprint eeeeeeeeeeee",
     );
@@ -295,6 +313,35 @@ describe("eval:ab --baseline checks", () => {
     const only = ["--repeat", "3", "--baseline-only", "--review-only"];
     expect(flagsRefusal(runFlags(parsed(only)), parsed(["--repeat", "2", "--baseline-only", "--review-only"]))).toBeNull();
     expect(flagsRefusal(runFlags(parsed(only)), parsed(["--repeat", "3", "--baseline-only"]))).toContain("--review-only on");
+  });
+
+  test("Gate JC-A: --candidate-jira-family and --candidate-tasks-overlay reach only the candidate, and --resume checks them", () => {
+    const file = join(TMP, "overlay-flag.json");
+    writeFileSync(file, "{}");
+    const o = parseAb(["--candidate-jira-family", "--candidate-tasks-overlay", file]);
+    if ("error" in o) throw new Error(o.error);
+    expect([o.jiraFamily, o.tasksOverlay]).toEqual([true, file]);
+    const cand = runArgs("review", "candidate", o, "out");
+    expect(cand).toContain("--jira-family");
+    expect(cand.slice(cand.indexOf("--tasks-overlay"), cand.indexOf("--tasks-overlay") + 2)).toEqual(["--tasks-overlay", file]);
+    const base = runArgs("review", "baseline", o, "out");
+    expect(base).not.toContain("--jira-family");
+    expect(base).not.toContain("--tasks-overlay");
+    expect(parseAb(["--candidate-tasks-overlay", join(TMP, "none.json")])).toEqual({
+      error: `--candidate-tasks-overlay: no file ${join(TMP, "none.json")}.`,
+    });
+    expect(parseAb(["--candidate-tasks-overlay", file, "--candidate-replay"])).toEqual({
+      error: "--candidate-replay replays the finder of the baseline, but --candidate-tasks-overlay changes the finder input.",
+    });
+    expect(parseAb(["--candidate-jira-family", "--candidate-replay"])).toMatchObject({ error: expect.stringContaining("jiraFamily") });
+    // A cut run of an earlier version recorded neither flag: off and none.
+    const old = runFlags(opts());
+    delete old["--candidate-jira-family"];
+    delete old["--candidate-tasks-overlay"];
+    expect(flagsRefusal(old, opts())).toBeNull();
+    expect(flagsRefusal(old, opts({ jiraFamily: true }))).toBe(
+      "Refused: --resume: the cut run had --candidate-jira-family off, but this run has --candidate-jira-family on. Give the flags of the cut run.",
+    );
   });
 
   test("a usage limit in the finder or the verify phase counts as a limit, a failed or completed run does not", () => {
@@ -792,6 +839,65 @@ describe("eval:ab end to end with the fake CLI", () => {
       // Same base profile, same effort: the candidate adds only variants and modules.
       expect(r.stdout).not.toContain("A and B used different profiles");
       expect(readdirSync(again).sort()).toEqual([FLAGS_FILE, "review-candidate"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "Gate JC-A: the candidate seeds the overlay rows with jiraFamily on, and the baseline keeps the stored rows",
+    async () => {
+      expect(firstRun).toBeGreaterThan(0);
+      const taskFiles = () =>
+        readRecords<{ argv: string[]; context?: Record<string, string> }>(join(dir, "calls.jsonl"))
+          .filter((x) => x.argv.includes("-p"))
+          .map((x) => x.context?.["task.md"] ?? "");
+      const seen = taskFiles().length;
+      const [stored] = readdirSync(join(results, "review-baseline")).filter((x) => x.endsWith(".json"));
+      const c = (JSON.parse(readFileSync(join(results, "review-baseline", stored as string), "utf8")) as EvalResult).cases[0];
+      const issue = {
+        key: "ABC-12",
+        summary: "Add the calc helpers",
+        status: "In Progress",
+        description: "Overlay task text.",
+        comments: [],
+        commentsTotal: 0,
+        truncated: false,
+        format: "markdown",
+        parent: "ABC-10",
+        type: "Story",
+        texts: [{ id: "customfield_10100", name: "Acceptance criteria", text: "Each helper adds one." }],
+        related: [{ key: "ABC-31", text: "blocks", summary: "Remove the old helpers", status: "Done", category: "done", type: "Task" }],
+        parentIssue: { key: "ABC-10", summary: "Calc rework", status: "In Progress", description: "Parent text.", truncated: false },
+      };
+      const file = join(TMP, "tasks-overlay.json");
+      const text = `${JSON.stringify({ format: 1, cases: [{ id: c?.id, head: c?.head, tasks: { "ABC-12": JSON.stringify(issue) } }] })}\n`;
+      writeFileSync(file, text);
+      const out = join(TMP, "results-overlay");
+      const r = await run(["--results", out, "--baseline", results, "--candidate-tasks-overlay", file, "--candidate-jira-family"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      const before = taskFiles().slice(0, seen).filter(Boolean);
+      const after = taskFiles().slice(seen).filter(Boolean);
+      expect(before.length).toBeGreaterThan(0);
+      for (const t of before) {
+        expect(t).toContain("Stored task text.");
+        expect(t).not.toContain("### Linked issues");
+      }
+      expect(after.length).toBeGreaterThan(0);
+      for (const t of after) {
+        expect(t).toContain("Overlay task text.");
+        expect(t).toContain("- Type: Story\n");
+        expect(t).toContain("### Acceptance criteria\n\nEach helper adds one.\n");
+        expect(t).toContain("- ABC-12 blocks ABC-31: Remove the old helpers (Done, Task)");
+        expect(t).toContain("### Parent ABC-10: Calc rework");
+      }
+      const [b] = readdirSync(join(out, "review-candidate")).filter((x) => x.endsWith(".json"));
+      const cand = JSON.parse(readFileSync(join(out, "review-candidate", b as string), "utf8")) as EvalResult & {
+        profile: { jiraFamily: boolean };
+      };
+      expect(cand.profile.jiraFamily).toBe(true);
+      expect(cand.requested?.tasksOverlay).toBe(createHash("sha256").update(text).digest("hex").slice(0, 12));
+      expect(r.stdout).not.toContain(c?.id as string);
     },
     SLOW,
   );

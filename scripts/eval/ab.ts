@@ -24,7 +24,7 @@ import { type EvalResult, endedOnLimit, finished, keptRun, LIMIT_EXIT, score } f
 const REPO = resolve(import.meta.dir, "../..");
 export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}]
   [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-reviewer-mode ${REVIEWER_MODES.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--candidate-verifier-effort ${EFFORTS.join("|")}]
-  [--candidate-replay] [--baseline-only] [--review-only] [--large] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--resume] [--runner <command> <args...>]
+  [--candidate-jira-family] [--candidate-tasks-overlay <tasks-overlay.json>] [--candidate-replay] [--baseline-only] [--review-only] [--large] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--resume] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
 --resume: continue the cut run in --results (run.ts --resume). Each <mode>-<side> folder with one result continues it, and an empty folder runs. It needs --results. Give the flags of the cut run: a different flag is refused. A baseline-only run can take a lower --repeat when the finished runs fit.
 Exit code 3: a run hit the usage limit. Run the same command with --resume after the limit resets.
@@ -35,6 +35,7 @@ Exit code 3: a run hit the usage limit. Run the same command with --resume after
 --candidate-effort: the effort of the candidate runs. Default: the effort of the baseline.
 --candidate-reviewer-effort and --candidate-reviewer-mode: the rl-reviewer effort and mode of the candidate runs. Default: those of the shipped profile.
 --candidate-verifier and --candidate-verifier-effort: the verify mode and effort of the candidate runs. Default: those of the shipped profile.
+--candidate-jira-family and --candidate-tasks-overlay: Gate JC-A (docs/plans/review-v2/jira-context.md). The candidate turns on "Include the Jira parent and sub-tasks", and takes the task rows of eval:refetch-tasks in place of the stored rows. Default: the shipped profile and the stored rows.
 --candidate-replay: the candidate replays the recorded finder calls of the baseline and runs only the verify calls. It refuses a candidate flag that changes the finder.
 --baseline-only: run only the baseline. --review-only: skip the re-review cases.
 --large: run only the review cases that give the baseline the rl-reviewer agent. The re-review cases do not run.
@@ -65,6 +66,9 @@ export type AbOptions = {
   verifierEffort: string | null;
   // The candidate replays the recorded finder and salvage calls of the baseline (run.ts --replay-find).
   replay: boolean;
+  // jira-context.md Gate JC-A: run.ts --jira-family and --tasks-overlay for the candidate. null: the stored task rows.
+  jiraFamily: boolean;
+  tasksOverlay: string | null;
   baselineOnly: boolean;
   reviewOnly: boolean;
   // docs/plans/review-v3.md WP-V13: only the review cases where delegation() of the baseline profile is not null.
@@ -102,6 +106,8 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
         "candidate-verifier": { type: "string" },
         "candidate-verifier-effort": { type: "string" },
         "candidate-replay": { type: "boolean", default: false },
+        "candidate-jira-family": { type: "boolean", default: false },
+        "candidate-tasks-overlay": { type: "string" },
         "baseline-only": { type: "boolean", default: false },
         "review-only": { type: "boolean", default: false },
         large: { type: "boolean", default: false },
@@ -123,6 +129,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
   const build = (["db", "cache", "out", "user", "clean"] as const).flatMap((k) => (v[k] === undefined ? [] : [`--${k}`, str(k) as string]));
   const results = str("results");
   const baseline = str("baseline");
+  const overlay = str("candidate-tasks-overlay");
   const o: AbOptions = {
     repeat: str("repeat") ?? "1",
     candidateRepeat: str("candidate-repeat") ?? null,
@@ -135,6 +142,8 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     verifier: str("candidate-verifier") ?? null,
     verifierEffort: str("candidate-verifier-effort") ?? null,
     replay: v["candidate-replay"] === true,
+    jiraFamily: v["candidate-jira-family"] === true,
+    tasksOverlay: overlay === undefined ? null : resolve(overlay),
     baselineOnly: v["baseline-only"] === true,
     reviewOnly: v["review-only"] === true,
     large: v.large === true,
@@ -148,6 +157,9 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
   if (o.baselineOnly && (o.baseline !== null || o.replay))
     return { error: "--baseline-only runs only the baseline. Leave out --baseline and --candidate-replay." };
   if (o.resume && o.results === null) return { error: "--resume needs --results." };
+  if (o.tasksOverlay !== null && !existsSync(o.tasksOverlay)) return { error: `--candidate-tasks-overlay: no file ${o.tasksOverlay}.` };
+  if (o.tasksOverlay !== null && o.replay)
+    return { error: "--candidate-replay replays the finder of the baseline, but --candidate-tasks-overlay changes the finder input." };
   for (const [flag, e] of [
     ["--effort", o.baseEffort],
     ["--candidate-effort", o.effort],
@@ -187,6 +199,8 @@ export function runFlags(o: AbOptions): Record<string, string | boolean | null> 
     "--candidate-verifier": o.verifier,
     "--candidate-verifier-effort": o.verifierEffort,
     "--candidate-replay": o.replay,
+    "--candidate-jira-family": o.jiraFamily,
+    "--candidate-tasks-overlay": o.tasksOverlay,
     "--baseline-only": o.baselineOnly,
     "--review-only": o.reviewOnly,
     "--large": o.large,
@@ -200,8 +214,10 @@ export function flagsRefusal(saved: Record<string, unknown>, o: AbOptions): stri
   const show = (v: unknown) => (v === true ? "on" : v === false ? "off" : v === null || v === undefined || v === "" ? "none" : String(v));
   for (const [flag, now] of Object.entries(runFlags(o))) {
     if (o.baselineOnly && flag === "--repeat") continue;
-    if ((saved[flag] ?? null) !== now)
-      return `Refused: --resume: the cut run had ${flag} ${show(saved[flag])}, but this run has ${flag} ${show(now)}. Give the flags of the cut run.`;
+    // A flag that a cut run of an earlier version did not record had its default: off, or none.
+    const was = saved[flag] ?? (typeof now === "boolean" ? false : null);
+    if (was !== now)
+      return `Refused: --resume: the cut run had ${flag} ${show(was)}, but this run has ${flag} ${show(now)}. Give the flags of the cut run.`;
   }
   return null;
 }
@@ -241,6 +257,8 @@ export function runArgs(
   if (cand && o.reviewerMode !== null) args.push("--reviewer-mode", o.reviewerMode);
   if (cand && o.verifier !== null) args.push("--verifier", o.verifier);
   if (cand && o.verifierEffort !== null) args.push("--verifier-effort", o.verifierEffort);
+  if (cand && o.jiraFamily) args.push("--jira-family");
+  if (cand && o.tasksOverlay !== null) args.push("--tasks-overlay", o.tasksOverlay);
   if (cand && replay) args.push("--replay-find", replay);
   if (resume) args.push("--resume", resume);
   args.push("--ordinals");
@@ -269,6 +287,8 @@ export function reuseRefusal(
   const ran = a.requested ?? { model: "not recorded", effort: "not recorded" };
   const short = (s: string | undefined) => s?.slice(0, 12) ?? "none";
   if (!!a.rereview !== (mode === "rereview")) return `${it} ran the other mode.`;
+  if (a.requested?.tasksOverlay)
+    return `${it} ran with the task overlay ${a.requested.tasksOverlay}, but a baseline runs the stored task rows.`;
   if (a.fingerprint !== fingerprint)
     return `${it} ran case set ${short(a.fingerprint)}, but the set now has fingerprint ${short(fingerprint)}. Give the --clean of the stored run.`;
   if (ran.effort !== (want.effort ?? "default"))

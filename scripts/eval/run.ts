@@ -7,6 +7,7 @@
 // memory secrets. No run reaches Bitbucket or the user's data folder. The real CLI runs only with --real.
 // Exit codes: 0 done, 1 a failed CLI check or a harness error, 2 a usage error, a refusal, or no --real.
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -77,6 +78,7 @@ import {
   SET_NAMES,
   setDir,
   setFingerprint,
+  tasksOverlay,
 } from "./cases";
 import { readResult, summaryText } from "./compare";
 import {
@@ -109,7 +111,8 @@ const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
   [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--reviewer-effort ${EFFORTS.join("|")}] [--reviewer-mode ${REVIEWER_MODES.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--verifier-effort ${EFFORTS.join("|")}]
-  [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--resume <result.json>] [--runner <command> <args...>]
+  [--variants ${VARIANTS.join(",")}] [--jira-family] [--tasks-overlay <tasks-overlay.json>] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--resume <result.json>] [--runner <command> <args...>]
+--jira-family turns on the profile option "Include the Jira parent and sub-tasks". --tasks-overlay seeds the task rows of eval:refetch-tasks in place of the stored rows of the local cases (Gate JC-A). It refuses --replay-find.
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
 --ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.
@@ -145,6 +148,9 @@ export type Options = {
   variants: Variant[] | null;
   // docs/plans/review-v3.md WP-V3: run the re-review cases as re-reviews.
   rereview: boolean;
+  // jira-context.md Gate JC-A: the profile option jiraFamily, and the tasks-overlay.json file. null: the stored task rows.
+  jiraFamily: boolean;
+  tasksOverlay: string | null;
   // eval:ab: the output names no case. Case IDs, run errors, and coverage text can hold names from the user's own repositories.
   ordinals: boolean;
   repeat: number;
@@ -178,6 +184,8 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         "replay-find": { type: "string" },
         resume: { type: "string" },
         variants: { type: "string" },
+        "jira-family": { type: "boolean", default: false },
+        "tasks-overlay": { type: "string" },
         rereview: { type: "boolean", default: false },
         ordinals: { type: "boolean", default: false },
         repeat: { type: "string", default: "1" },
@@ -227,6 +235,8 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   if (variants?.some((x) => !(VARIANTS as readonly string[]).includes(x)))
     return { error: `--variants must be a comma list of ${VARIANTS.join(", ")}.` };
   const rereview = v.rereview ?? false;
+  if (v["tasks-overlay"] !== undefined && v["replay-find"] !== undefined)
+    return { error: "--tasks-overlay changes the finder input, so --replay-find cannot replay it." };
   return {
     real: v.real ?? false,
     runner,
@@ -246,6 +256,8 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     resume: v.resume === undefined ? null : resolve(v.resume),
     variants: variants as Variant[] | null,
     rereview,
+    jiraFamily: v["jira-family"] ?? false,
+    tasksOverlay: v["tasks-overlay"] === undefined ? null : resolve(v["tasks-overlay"]),
     ordinals: v.ordinals ?? false,
     repeat,
     out: resolve(v.out ?? join(REPO, "eval-results")),
@@ -270,6 +282,7 @@ export function evalProfile(o: Options) {
     ...((o.reviewerEffort || o.reviewerMode) && { reviewer: { ...shipped.reviewer, ...reviewer } }),
     ...((o.verifier || o.verifierEffort) && { verifier: { ...shipped.verifier, ...verifier } }),
     ...(o.variants && { variants: o.variants }),
+    ...(o.jiraFamily && { jiraFamily: true }),
   };
   const list = profileList.safeParse(SHIPPED_PROFILES.map((p) => (p.id === o.profile ? { ...shipped, ...extra } : p)));
   if (!list.success) return { error: `Invalid profile: ${list.error.issues.map((i) => i.message).join("; ")}` };
@@ -621,6 +634,8 @@ type Context = {
   calls: string;
   // --replay-find: the callsDir of the recording, and the head of each recorded case by case ID.
   replay: { dir: string; heads: Map<string, string> } | null;
+  // --tasks-overlay: the IssueContext JSON by task key, by "<case ID> <head>".
+  overlay: Map<string, Record<string, string>>;
 };
 
 // The case of a result file. The case fields serve the slices of review-quality-2026.md E5.
@@ -705,6 +720,8 @@ async function runCase(
     const settings = createSettings({ dir, secrets: createSecrets(null), jiraSecrets: createSecrets(null, "jira-token") });
     const db = settings.db();
     if (!db) throw new Error("The temp database did not open.");
+    // jira-context.md U-JC5: an eval run never reads Jira. The run-start task read of jobs.ts needs these settings to give a source.
+    if (await settings.jira()) throw new Error("The eval settings have Jira settings. An eval run must never read Jira.");
     const remote: GitRemote = {
       url: repo.url,
       sourceUrl: repo.url,
@@ -771,7 +788,10 @@ async function runCase(
         });
       }
       // A local case: the stored task rows of the PR. The attachment files stay out, so task.md lists them without their files.
-      for (const [ord, t] of (c.tasks ?? []).entries()) {
+      // --tasks-overlay replaces the text of each key that it holds for this case and head.
+      const overlay = ctx.overlay.get(`${c.id} ${head}`) ?? {};
+      for (const [ord, stored] of (c.tasks ?? []).entries()) {
+        const t = { ...stored, json: overlay[stored.key] ?? stored.json };
         db.query("INSERT INTO pr_task (pr, key, source, url, ord) VALUES ($pr, $key, $source, NULL, $ord)").run({
           pr,
           key: t.key,
@@ -927,6 +947,18 @@ export async function main(argv: string[]): Promise<number> {
       return 2;
     }
   }
+  const overlay: Context["overlay"] = new Map();
+  let overlayHash: string | null = null;
+  if (o.tasksOverlay) {
+    try {
+      const text = readFileSync(o.tasksOverlay, "utf8");
+      for (const e of tasksOverlay.parse(JSON.parse(text)).cases) overlay.set(`${e.id} ${e.head}`, e.tasks);
+      overlayHash = createHash("sha256").update(text).digest("hex").slice(0, 12);
+    } catch (e) {
+      console.error(`--tasks-overlay: ${(e as Error).message}`);
+      return 2;
+    }
+  }
   if (!o.real && !o.runner) {
     console.log(plan(o, cases, p.profile));
     return 2;
@@ -964,6 +996,7 @@ export async function main(argv: string[]): Promise<number> {
       verifierEffort: verifierEffort(profile),
       reviewerMode: profile.reviewer.mode,
       ...(o.replayFind && { replayOf: basename(o.replayFind) }),
+      ...(overlayHash && { tasksOverlay: overlayHash }),
     };
     let result: EvalResult = {
       format: 1,
@@ -1049,12 +1082,14 @@ export async function main(argv: string[]): Promise<number> {
       rereview: o.rereview,
       calls: callsDir(file),
       replay,
+      overlay,
     };
     console.log(
       `Eval: set ${o.set}${o.rereview ? " (re-reviews)" : ""}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, reviewer mode ${requested.reviewerMode}, verifier ${requested.verifier}, verifier effort ${requested.verifierEffort}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
     );
     if (requested.replayOf)
       console.log(`Replay: the finder and salvage calls come from ${requested.replayOf}. The verify calls run the CLI.`);
+    if (overlayHash) console.log(`Task rows: the overlay ${overlayHash} gives ${overlay.size} case heads.`);
     console.log(runSetup(profile));
     if (o.real) console.log(WARNING);
     if (resumed) console.log(resumed);

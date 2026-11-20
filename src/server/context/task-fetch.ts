@@ -169,8 +169,9 @@ export function plan(db: Database, pr: number, kind: RunKind, now: number): { du
   };
 }
 
-// Section 4.2: the issue, then one read of its parent, else of its epic. A failed parent read stores parentIssue null.
-async function readIssue(source: ContextSource, key: string): Promise<IssueContext> {
+// Section 4.2: the issue, then one read of its parent, else of its epic. A failed parent read stores parentIssue null. The eval
+// refetch (scripts/eval/refetch-tasks.ts) reads with it too.
+export async function readIssue(source: ContextSource, key: string): Promise<IssueContext> {
   const issue = await source.fetchIssue(key);
   const up = issue.parent ?? issue.epic;
   if (!up) return issue;

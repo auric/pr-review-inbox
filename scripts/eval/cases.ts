@@ -157,6 +157,14 @@ export type EvalExtra = z.infer<typeof evalExtra>;
 export type EvalHuman = z.infer<typeof evalHuman>;
 export type CaseFile = z.infer<typeof caseFile>;
 export type LocalCaseFile = z.infer<typeof localCaseFile>;
+// Gate JC-A (docs/plans/review-v2/jira-context.md section 5): the task rows that refetch-tasks.ts read again, beside the local set.
+// run.ts --tasks-overlay seeds them in place of the stored rows of a case with the same ID and head. tasks: the IssueContext JSON by key.
+export const OVERLAY_FILE = "tasks-overlay.json";
+export const tasksOverlay = z.object({
+  format: z.literal(1),
+  cases: z.array(z.object({ id: z.string().min(1), head: commit, tasks: z.record(z.string().min(1), z.string()) })),
+});
+export type TasksOverlay = z.infer<typeof tasksOverlay>;
 export type EvalThreadComment = z.infer<typeof evalThreadComment>;
 // The repository of a local case. bundle: the absolute path of the bundle file. hash: the SHA-256 of case.json, for the set fingerprint.
 // since, sinceBase: the earlier head and its merge base of a re-review case.

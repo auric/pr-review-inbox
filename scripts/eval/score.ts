@@ -165,7 +165,16 @@ export type EvalResult = {
   // verifier: the verify mode that ran, after --verifier. verifierEffort and reviewerMode: the values that ran, after
   // --verifier-effort and --reviewer-mode. Absent in files made before the flags existed. replayOf: the file name of the
   // --replay-find result. Absent: the finder ran.
-  requested?: { model: string; effort: string; verifier?: string; verifierEffort?: string; reviewerMode?: string; replayOf?: string };
+  requested?: {
+    model: string;
+    effort: string;
+    verifier?: string;
+    verifierEffort?: string;
+    reviewerMode?: string;
+    replayOf?: string;
+    // run.ts --tasks-overlay: the first 12 hex characters of the SHA-256 of the file.
+    tasksOverlay?: string;
+  };
   // The case set. Absent in files made before this field existed: v1.
   set?: EvalSet;
   // Set by eval:rescore, which replaces the bugs and traps of each case with the current fixture.

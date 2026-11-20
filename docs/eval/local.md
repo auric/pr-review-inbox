@@ -237,6 +237,22 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 - Gate: build variant "quotes" only when the shares of judge fp are clearly above those of judge tp and must-find.
 - Give the `baseline` folder, not `eval-results/w1`. That folder also holds the probe smoke run, and a `baseline-earlier-<stamp>` folder of a cut run, which the current build of the set refuses.
 
+## Task text read again (Gate JC-A)
+
+Gate JC-A (docs/plans/review-v2/jira-context.md section 5) compares reviews with the stored task rows and with the task rows that Jira gives today.
+
+1. Build the set (`bun run eval:local`, or one `eval:ab` run).
+2. Run `bun run eval:refetch-tasks`. It reads the first 3 task keys of each local case and re-review case with the Jira settings and token of the app. It sends GET requests only. It writes `tasks-overlay.json` in the set folder. `--out <file>` writes another file.
+3. Run `bun run eval:ab -- --effort medium --candidate-tasks-overlay <set folder>/tasks-overlay.json --candidate-jira-family`.
+4. Run `eval:label` on both result folders, then `eval:compare`.
+
+- The refetch reads each key once, with its parent or epic text, as the app reads at a run start. It drops each comment that Jira dates after the head commit of the case, and each comment without a date. It prints counts only: the cases, the keys read and failed, the dropped comments, and the cases where the overlay adds text.
+- A set rebuild keeps `tasks-overlay.json`. An overlay entry applies only to a case with the same ID and head. So a rebuilt case with a new head runs with its stored rows. Run the refetch again after a rebuild.
+- The overlay replaces the stored text of each key that it holds. The pr_task rows stay. The set fingerprint stays, so `--baseline` can reuse a stored baseline of the same prompt version.
+- `--candidate-jira-family` turns on "Include the Jira parent and sub-tasks". The stored parent text in each overlay row gives the Parent section. The eval never reads Jira: run.ts stops a case run when its harness settings give a Jira source.
+- `--candidate-tasks-overlay` refuses `--candidate-replay`, because the task text is finder input. The result file records the overlay hash in `requested.tasksOverlay`. `--resume` refuses another overlay.
+- eval:label gives the judge the stored task rows on both sides.
+
 ## Bisect when the result is mixed
 
 Run the command again with one change at a time: `--candidate-variants broad --candidate-modules ""`, then `--candidate-variants verify2 --candidate-modules ""`, then `--candidate-variants "" --candidate-modules failures`. Each run builds the same set again, so the tables compare.
