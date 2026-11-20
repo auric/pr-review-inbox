@@ -74,6 +74,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Variant "lenses3" | seeded-truth.md section 4 | recommended | Not started | None | Needs the seeded set. |
 | Seeded ground truth: WP-SG0 to WP-SG2, U-SG1, gates SG-P and SG-A | seeded-truth.md | user decided (build approved) | Designed, not built | 5537603 | The 8 decisions of section 14. |
 | Head-to-head with another review app | outside the repository | user decided ("not now") | Deferred | None | None. |
+| Stacked PR context: variant "stack", WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B | stacked-prs.md | user decided (app route, build after the code review gate) | Designed, not started | None | Builds after Joint Gate A and the "preexisting" and "callers" runs. The 12 questions of section 12. |
 
 ## 4. Order and dependencies
 
