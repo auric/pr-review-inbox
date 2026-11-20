@@ -1,6 +1,6 @@
 # Build a Jira task, version 2
 
-Status: design of 2026-11-19, approved by the user on 2026-11-19 (section 15: D3 deferred, the rest as recommended). TB-D0, TB-1, and TB-2 are built. Section 13 holds wording; item 2 (D3) waits. The machine tables of section 11 start from the `sa` machine (guards `noSpecPr` and `specPr`).
+Status: design of 2026-11-19, approved by the user on 2026-11-19 (section 15: D3 deferred, the rest as recommended). TB-D0, TB-1, TB-2, and TB-3 are built. Section 13 holds wording; item 2 (D3) waits. The machine tables of section 11 start from the `sa` machine (guards `noSpecPr` and `specPr`).
 
 ## 0. Summary
 

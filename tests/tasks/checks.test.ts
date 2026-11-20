@@ -12,13 +12,15 @@ import { join } from "node:path";
 import { writeConfig } from "../../src/server/config";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
-import { CHECK_KINDS, checkEnv, checkStep, runChecks, runCommand } from "../../src/server/tasks/checks";
+import { CHECK_KINDS, checkEnv, checkStep, envFault, hostProgram, runChecks, runCommand } from "../../src/server/tasks/checks";
+import { type BaseRun, baseRuns, checkFailure, onBase, quoteFound } from "../../src/server/tasks/loop";
 import { saveRepoSettings } from "../../src/server/tasks/tasks";
 import { openWorktree, taskDir, type Worktree } from "../../src/server/tasks/worktree";
 import { stepDetail, TASK_CACHE_ENV, type TaskCommand } from "../../src/shared/task";
 import { taskCache, taskRemote } from "./fixture";
 
-console.log(`checks.test.ts imported from ${Bun.resolveSync("../../src/server/tasks/checks", import.meta.dir)}`);
+for (const m of ["checks", "loop"])
+  console.log(`checks.test.ts imported from ${Bun.resolveSync(`../../src/server/tasks/${m}`, import.meta.dir)}`);
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
 const SLOW = 60_000;
@@ -117,7 +119,7 @@ const cmd = (id: string, kind: TaskCommand["kind"], code: string, extra: string[
 
 describe("app-run checks", () => {
   test(
-    "run only after the warning, only the stored commands of the kinds, in their order, in the task worktree",
+    "run only after the warning, only the stored commands of the kinds, in kind order, in the task worktree",
     async () => {
       const s = await setup();
       const marker = join(s.root, "ran.txt");
@@ -137,11 +139,11 @@ describe("app-run checks", () => {
       if (r.status !== "ran") throw new Error(r.reason);
       expect(r.green).toBe(false);
       expect(r.commands.map((c) => [c.name, c.exit])).toEqual([
-        ["lint", 0],
         ["test", 3],
+        ["lint", 0],
       ]);
       const lines = readFileSync(marker, "utf8").trim().split("\n");
-      expect(lines.map((l) => l.split(":")[0])).toEqual(["lint", "test"]);
+      expect(lines.map((l) => l.split(":")[0])).toEqual(["test", "lint"]);
       for (const l of lines) expect(realpathSync.native(l.slice(l.indexOf(":") + 1))).toBe(realpathSync.native(s.wt.repo));
       const setupRun = await s.run({ kinds: ["setup"] });
       expect(setupRun.status === "ran" && setupRun.green).toBe(true);
@@ -462,5 +464,132 @@ describe("app-run checks", () => {
     // stdout and stderr are two pipes: ERR can arrive after END.
     expect(r.tail.slice(-6)).toContain("END");
     expect(r.tail).toContain("ERR");
+  });
+});
+
+describe("kind order, skip after a failed build, and the env class (task-builder-v2.md sections 6.1 to 6.3, TB-3)", () => {
+  test(
+    "AC-TB9: a stored [test, lint, build] list runs the build first; a failed or missing build skips the test and lint rows; a green build lets them run",
+    async () => {
+      const s = await setup();
+      const { task, part } = s.taskPart();
+      const marker = join(s.root, "ran.txt");
+      const mark = (id: string) => `require("fs").appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify(`${id}\n`)})`;
+      const test = cmd("test", "test", mark("test"));
+      const lint = cmd("lint", "lint", mark("lint"));
+      const build = (code: string) => ({ ...cmd("b1", "build", `${mark("compile")}; ${code}`), name: "compile" });
+      s.save([test, lint, build("process.exit(1)")]);
+      const red = await checkStep({
+        db: s.db,
+        dataDir: s.dataDir,
+        project: "PROJ",
+        repo: "repo",
+        wt: s.wt,
+        kinds: CHECK_KINDS,
+        task,
+        part,
+      });
+      if (red.status !== "ran") throw new Error(red.reason);
+      expect(red.green).toBe(false);
+      expect(red.commands.map((c) => [c.id, c.exit, c.notRun, c.skipped])).toEqual([
+        ["b1", 1, null, false],
+        ["test", null, "Skipped: build compile failed", true],
+        ["lint", null, "Skipped: build compile failed", true],
+      ]);
+      expect(readFileSync(marker, "utf8")).toBe("compile\n");
+      expect(red.commands.map(envFault)).toEqual([false, false, false]);
+      // The step row keeps the ID and the skip, so the next check compares with the base run by ID.
+      expect(s.detail(red.step).commands.map((c) => [c.id, c.skipped])).toEqual([
+        ["b1", false],
+        ["test", true],
+        ["lint", true],
+      ]);
+      // A build that is not found skips them too, and only the build is a fault of this computer.
+      s.save([test, lint, { ...build(""), argv: ["rl-no-such-build-tb3"] }]);
+      const lost = await s.run();
+      if (lost.status !== "ran") throw new Error(lost.reason);
+      expect(lost.commands.map((c) => [c.name, c.notRun])).toEqual([
+        ["compile", "Not found: rl-no-such-build-tb3"],
+        ["test", "Skipped: build compile failed"],
+        ["lint", "Skipped: build compile failed"],
+      ]);
+      expect(lost.commands.map(envFault)).toEqual([true, false, false]);
+      rmSync(marker);
+      s.save([test, lint, build("")]);
+      const green = await s.run();
+      if (green.status !== "ran") throw new Error(green.reason);
+      expect([green.green, readFileSync(marker, "utf8")]).toEqual([true, "compile\ntest\nlint\n"]);
+    },
+    SLOW,
+  );
+
+  test("the approval check of argv[0]: a bare name and an absolute path resolve here; a path in the repository waits for the run", () => {
+    expect(hostProgram(BUN)).toEqual({ path: BUN });
+    expect(hostProgram("rl-no-such-program-tb3")).toEqual({
+      error: "The command rl-no-such-program-tb3 is not found.",
+      reason: "Not found: rl-no-such-program-tb3",
+      refused: false,
+    });
+    expect(hostProgram("build/unittests")).toBeNull();
+    expect(hostProgram("tools\\gradlew.bat")).toBeNull();
+  });
+
+  test("onBase matches by command ID, and a base row from before the ID matches by name; the skipped rows stay out of failure.md", () => {
+    const base: BaseRun[] = [
+      { id: "b", name: "build", argv: ["make"], red: true, timedOut: false },
+      { id: null, name: "old", argv: ["x"], red: false, timedOut: true },
+    ];
+    expect(onBase({ id: "b", name: "renamed", argv: ["make"] }, base)).toEqual({ red: true, same: true, argv: ["make"], timedOut: false });
+    expect(onBase({ id: "other", name: "build", argv: ["make"] }, base)).toBeNull();
+    expect(onBase({ id: "z", name: "old", argv: ["y"] }, base)).toEqual({ red: false, same: false, argv: ["x"], timedOut: true });
+    const row = { argv: ["make"], ms: 5, tail: "make: *** [all] Error 2", running: false, timedOut: false, timeoutSec: 60, stopped: false };
+    const failure = checkFailure(
+      {
+        status: "ran",
+        green: false,
+        notes: [],
+        commands: [
+          { ...row, id: "b", name: "build", exit: 2, notRun: null, skipped: false },
+          { ...row, id: "t", name: "unit", exit: null, tail: "skip", notRun: "Skipped: build build failed", skipped: true },
+        ],
+      },
+      base,
+    ).text;
+    expect(failure).toContain("The app did not run unit, because a build failed.");
+    expect(failure).toContain("## build: exit 2 after 5 ms");
+    expect(failure).toContain("- On the part base: Also red on the part base.");
+    expect(failure).not.toContain("## unit");
+  });
+
+  test("check-order.md section 3: a test that the base skipped has no base run, so its later failure is new", () => {
+    const row = { argv: ["make"], ms: 5, tail: "", running: false, timedOut: false, timeoutSec: 60 };
+    const base = baseRuns([
+      { ...row, id: "b", name: "build", exit: 2, notRun: null, skipped: false },
+      { ...row, id: "t", name: "unit", argv: ["unit"], exit: null, notRun: "Skipped: build build failed", skipped: true },
+    ]);
+    expect(base.map((b) => [b.id, b.red])).toEqual([["b", true]]);
+    expect(onBase({ id: "t", name: "unit", argv: ["unit"] }, base)).toBeNull();
+    const failure = checkFailure(
+      {
+        status: "ran",
+        green: false,
+        notes: [],
+        commands: [
+          { ...row, id: "t", name: "unit", argv: ["unit"], exit: 1, tail: "1 fail", notRun: null, skipped: false, stopped: false },
+        ],
+      },
+      base,
+    ).text;
+    expect(failure).toContain("## unit: exit 1 after 5 ms");
+    expect(failure).not.toContain("On the part base");
+  });
+
+  test("quoteFound: the quote counts after CRLF to LF and an ANSI strip on both sides; an empty quote never counts", () => {
+    const commands = [{ tail: "\u001b[31merror:\u001b[0m cannot find -lssl\r\nnext line\r\n" }];
+    expect(quoteFound("error: cannot find -lssl\nnext line", commands)).toBe(true);
+    expect(quoteFound("  error: cannot find -lssl  ", commands)).toBe(true);
+    expect(quoteFound("\u001b[1mcannot find\u001b[0m", commands)).toBe(true);
+    expect(quoteFound("cannot find -lcrypto", commands)).toBe(false);
+    expect(quoteFound("   ", commands)).toBe(false);
   });
 });

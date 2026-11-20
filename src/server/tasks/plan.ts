@@ -139,7 +139,8 @@ export type Plan = {
   spec: SpecResult["spec"];
   parts: PlanPart[];
   // allow (spec.md section 6.21, D2): the proposals that pass allowProblem. Absent in a plan stored before: [].
-  testing: { commands: PlanCommand[]; services: string[]; notes: string; allow?: AllowProposal[] };
+  // keep (task-builder-v2.md section 6.1): the saved command IDs that the plan keeps. Absent or null: every saved command.
+  testing: { commands: PlanCommand[]; keep?: string[] | null; services: string[]; notes: string; allow?: AllowProposal[] };
   flag: SpecResult["flag"];
   questions: string[];
   // The part count of the whole plan, for a plan that holds one part of it (spec.md section 6.20.6). Absent: parts.length.
@@ -211,7 +212,7 @@ export function toPlan(
     design: r.design,
     spec: r.spec,
     parts,
-    testing: { commands, services: r.testing.services, notes: r.testing.notes, allow },
+    testing: { commands, keep: r.testing.keep, services: r.testing.services, notes: r.testing.notes, allow },
     flag: r.flag,
     questions: r.questions,
     contracts: r.contracts.map((c, i) => ({ ...c, missing: app?.contracts[i] === true })),

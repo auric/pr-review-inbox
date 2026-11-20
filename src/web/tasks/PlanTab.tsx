@@ -32,7 +32,7 @@ import { AllowEditor, type ShellAsk, ShellDialog, useShellNames } from "./AllowE
 import { type AllowDraft, allowDraftProblem, planAllow, planModeText, toAllowDraft } from "./allow";
 import { BaseField, BranchSection } from "./BranchSection";
 import { CommandsEditor } from "./CommandsEditor";
-import { type CommandDraft, draftProblem, draftsToCommands, toDraft } from "./commands";
+import { type CommandDraft, draftProblem, draftsToCommands, splitArgv, toDraft } from "./commands";
 import { useBranchCheck } from "./data";
 import {
   ACCESS_TEXT,
@@ -74,8 +74,15 @@ const SIZE_RULES = "task-size-rules";
 export function planProblem(t: TaskDto, picks: readonly CommandDraft[], warned: boolean): string | null {
   const plan = t.plan;
   if (!plan) return "The plan is not ready yet.";
-  const bad = picks.find((d) => draftProblem(d));
-  if (bad) return `Fix the command ${bad.name.trim() || "without a name"} first. ${draftProblem(bad)}`;
+  const bad = picks.find((d) => draftProblem(d, picks));
+  if (bad) return `Fix the command ${bad.name.trim() || "without a name"} first. ${draftProblem(bad, picks)}`;
+  // task-builder-v2.md section 6.1: the server refuses a picked command whose program it does not find here.
+  const lost = picks.find((d) => {
+    const c = plan.commands.find((x) => x.id === d.id);
+    const r = splitArgv(d.line);
+    return c && (c.local === "missing" || c.local === "refused") && "argv" in r && r.argv[0] === c.argv[0];
+  });
+  if (lost) return `${lost.name.trim()} cannot run on this computer. Untick it, or change the command.`;
   if (!picks.some((c) => c.kind === "test")) return "Pick at least one test command. The build runs it to see failing and passing tests.";
   if (plan.warning && !warned) return "Read the warning and tick “I understand” first.";
   return null;
@@ -118,7 +125,8 @@ export function PlanApproval(props: {
   const hold = sub ? (pickless ? `Pick the PR that the app tracks for ${pickless.key}.` : startCycle(starts, livePlan(t))) : null;
   const onHold = props.onHold;
   useEffect(() => onHold?.(hold), [hold, onHold]);
-  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(plan?.commands.map((c) => c.id) ?? []));
+  // task-builder-v2.md section 6.1: a saved command that the plan does not keep starts unticked.
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(plan?.commands.filter((c) => !c.unused).map((c) => c.id) ?? []));
   const [drafts, setDrafts] = useState<CommandDraft[]>(() => plan?.commands.map(toDraft) ?? []);
   // spec.md section 6.21.3: the proposals start ticked, as the commands do. A saved pattern stays in the list.
   const [allowPicked, setAllowPicked] = useState<ReadonlySet<string>>(() => new Set(plan?.allow.map((a) => a.id) ?? []));
@@ -148,6 +156,8 @@ export function PlanApproval(props: {
     });
   const picks = drafts.filter((c) => picked.has(c.id));
   const saved = new Set(plan.commands.filter((c) => c.saved).map((c) => c.id));
+  const local = new Map(plan.commands.map((c) => [c.id, { argv0: c.argv[0] as string, local: c.local }]));
+  const notes = new Map(plan.commands.filter((c) => c.unused).map((c) => [c.id, `${runner} did not use this command.`]));
   const allowSaved = new Set(plan.allow.filter((a) => a.saved).map((a) => a.id));
   const togglePattern = (id: string, on: boolean) =>
     setAllowPicked((s) => {
@@ -325,6 +335,8 @@ export function PlanApproval(props: {
           picked={picked}
           onPick={toggle}
           saved={saved}
+          local={local}
+          notes={notes}
           newPrefix="new-u"
           runner={runner}
         />

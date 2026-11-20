@@ -910,6 +910,8 @@ export function taskView(
     switch (b.kind) {
       case "red":
         if (timedOutSetup(t)) return blocked({ kind: "time-limit", label: "Change the time limit" }, [...why, go, STOP]);
+        // task-builder-v2.md section 6.3: Continue runs the checks again and starts no fix run.
+        if (b.cause === "check_env") return blocked({ kind: "resume", label: "Run the checks again" }, [...why, STOP, ...leave]);
         // spec.md section 6.18.3, Checks: red checks after an update offer "Undo the update".
         return blocked(go, [
           ...(t.canUndoUpdate ? [{ kind: "undo-update", label: "Undo the update" } as const] : []),

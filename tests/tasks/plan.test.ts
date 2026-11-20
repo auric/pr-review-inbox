@@ -151,6 +151,7 @@ describe("the stored plan", () => {
       spec({
         testing: {
           commands: [{ name: "x", kind: "test", argv: [""], timeoutSec: null, timeoutReason: "" }],
+          keep: null,
           services: [],
           notes: "",
           allow: [],

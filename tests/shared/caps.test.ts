@@ -98,6 +98,7 @@ describe("the CLI schema keeps only the exact caps", () => {
         "testing.commands[].name",
         "testing.commands[].argv",
         "testing.commands[].argv[]",
+        "testing.keep[]",
         "testing.allow[].pattern",
         "flag.name",
         "repos[].project",

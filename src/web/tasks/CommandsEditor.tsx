@@ -2,27 +2,41 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The editable list of task commands (docs/plans/review-v2/spec.md section 6.3): name, kind, time limit, and the command line of each
-// row, Move up, Move down, Remove, and "Add a command". The list order is the run order. The plan screen adds a tick per row and the
-// reason of a proposed time limit; Settings > Commands has none. A command stays an argv list (commands.ts).
-import { ArrowDown, ArrowUp, CircleAlert, Plus, X } from "lucide-react";
+// row, Move up, Move down, Remove, and "Add a command". The rows stay in run order (task-builder-v2.md section 6.2): by kind, and in list
+// order inside a kind, so Move stays inside a kind. The plan screen adds a tick per row, the check on this computer, and the reason of a
+// proposed time limit; Settings > Commands has none. A command stays an argv list (commands.ts).
+import { ArrowDown, ArrowUp, CircleAlert, CircleCheck, Plus, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { MAX_TASK_COMMANDS } from "../../shared/dto";
-import { CHECK_TIMEOUT_SEC, type CommandKind, SETUP_TIMEOUT_SEC } from "../../shared/task";
+import { cn } from "@/lib/utils";
+import { MAX_TASK_COMMANDS, type TaskPlanDto } from "../../shared/dto";
+import { byKind, CHECK_TIMEOUT_SEC, type CommandKind, SETUP_TIMEOUT_SEC } from "../../shared/task";
 import { Hint } from "../shell/Hint";
 import {
   type CommandDraft,
   commandTimeout,
   defaultMinutes,
-  draftProblem,
   freeId,
   joinArgv,
   KIND_TEXT,
   KINDS,
   LIMIT_PROBLEM,
   moveDraft,
+  placeholderWarning,
+  rowProblem,
   splitArgv,
 } from "./commands";
+
+type Local = TaskPlanDto["commands"][number]["local"];
+// task-builder-v2.md section 6.1: the check of argv[0] on this computer, as the plan screen shows it.
+const LOCAL_TEXT: Record<NonNullable<Local>, string> = {
+  runs: "Runs here",
+  missing: "Not found on this computer",
+  refused: "Runs through cmd.exe, which the app refuses",
+};
+
+// A row moves only past a row of its kind.
+const canMove = (rows: readonly CommandDraft[], i: number, d: -1 | 1) => rows[i] !== undefined && rows[i + d]?.kind === rows[i]?.kind;
 
 const SETUP_MIN = SETUP_TIMEOUT_SEC / 60;
 const CHECK_MIN = CHECK_TIMEOUT_SEC / 60;
@@ -42,6 +56,10 @@ export function CommandsEditor(props: {
   onPick?: (id: string, on: boolean) => void;
   // The IDs of the commands that the repository approved before.
   saved?: ReadonlySet<string>;
+  // The plan screen: the check of argv[0] on this computer per row ID. A row whose program changed shows no check.
+  local?: ReadonlyMap<string, { argv0: string; local: Local }>;
+  // The plan screen: a note per row ID, such as a saved command that the plan does not use.
+  notes?: ReadonlyMap<string, string>;
   // The ID prefix of an added row.
   newPrefix: string;
   // The runner name for the reason of a proposed time limit.
@@ -55,17 +73,17 @@ export function CommandsEditor(props: {
     );
   const add = () => {
     const id = freeId(drafts, props.newPrefix);
-    props.onChange([...drafts, { id, name: "", kind: "test", line: "", minutes: defaultMinutes("test") }], false);
+    props.onChange(byKind([...drafts, { id, name: "", kind: "test", line: "", minutes: defaultMinutes("test") }]), false);
     props.onPick?.(id, true);
     requestAnimationFrame(() => document.getElementById(`${idPrefix}-${id}-name`)?.focus());
   };
   const move = (i: number, d: -1 | 1) => {
     const row = drafts[i];
-    if (!row) return;
-    const j = i + d;
-    props.onChange(moveDraft(drafts, i, d), false);
-    // The button in the same direction is disabled at the end of the list.
-    const end = d < 0 ? j === 0 : j === drafts.length - 1;
+    if (!row || !canMove(drafts, i, d)) return;
+    const next = moveDraft(drafts, i, d);
+    props.onChange(next, false);
+    // The button in the same direction is disabled at the end of the kind.
+    const end = !canMove(next, i + d, d);
     requestAnimationFrame(() => document.getElementById(`${idPrefix}-${row.id}-${d < 0 !== end ? "up" : "down"}`)?.focus());
   };
   return (
@@ -74,10 +92,14 @@ export function CommandsEditor(props: {
         <ul className="m-0 grid list-none gap-2 p-0">
           {drafts.map((d, i) => {
             const id = `${idPrefix}-${d.id}`;
-            const problem = draftProblem(d);
+            const problem = rowProblem(d, drafts, props.picked);
             const limitBad = commandTimeout(d.minutes) === null;
             const r = splitArgv(d.line);
             const label = d.name.trim() || `command ${i + 1}`;
+            const checked = props.local?.get(d.id);
+            const local = checked && "argv" in r && r.argv[0] === checked.argv0 ? checked.local : null;
+            const warning = placeholderWarning(d.line);
+            const note = props.notes?.get(d.id);
             return (
               <li key={d.id} data-command-row className="grid gap-1.5 rounded-md border bg-card px-2.5 py-2">
                 <div className="flex flex-wrap items-center gap-2">
@@ -108,7 +130,10 @@ export function CommandsEditor(props: {
                     value={d.kind}
                     onChange={(e) => {
                       const kind = e.target.value as CommandKind;
-                      set(i, { kind, ...(d.minutes === defaultMinutes(d.kind) && { minutes: defaultMinutes(kind) }) }, false);
+                      const minutes = d.minutes === defaultMinutes(d.kind) ? defaultMinutes(kind) : d.minutes;
+                      props.onChange(byKind(drafts.map((x, k) => (k === i ? { ...x, kind, minutes } : x))), false);
+                      // The row moves to its kind, and a moved node can lose the focus.
+                      requestAnimationFrame(() => document.getElementById(`${id}-kind`)?.focus());
                     }}
                   >
                     {KINDS.map((k) => (
@@ -124,7 +149,7 @@ export function CommandsEditor(props: {
                       id={`${id}-up`}
                       className={`${iconBtn} ml-auto`}
                       aria-label={`Move ${label} up`}
-                      disabled={i === 0}
+                      disabled={!canMove(drafts, i, -1)}
                       onClick={() => move(i, -1)}
                     >
                       <ArrowUp aria-hidden className="size-[15px]" />
@@ -136,7 +161,7 @@ export function CommandsEditor(props: {
                       id={`${id}-down`}
                       className={iconBtn}
                       aria-label={`Move ${label} down`}
-                      disabled={i === drafts.length - 1}
+                      disabled={!canMove(drafts, i, 1)}
                       onClick={() => move(i, 1)}
                     >
                       <ArrowDown aria-hidden className="size-[15px]" />
@@ -200,6 +225,26 @@ export function CommandsEditor(props: {
                     {d.reason}
                   </p>
                 )}
+                {note && <p className="m-0 text-xs text-ink-2">{note}</p>}
+                {local && (
+                  <p
+                    data-command-local={local}
+                    className={cn("m-0 flex items-start gap-[5px] text-xs", local === "runs" ? "text-ink-2" : "font-medium text-warn")}
+                  >
+                    {local === "runs" ? (
+                      <CircleCheck aria-hidden className="mt-px size-[13px] shrink-0" />
+                    ) : (
+                      <TriangleAlert aria-hidden className="mt-px size-[13px] shrink-0" />
+                    )}
+                    {LOCAL_TEXT[local]}
+                  </p>
+                )}
+                {warning && (
+                  <p className="m-0 flex items-start gap-[5px] text-xs font-medium text-warn">
+                    <TriangleAlert aria-hidden className="mt-px size-[13px] shrink-0" />
+                    {warning}
+                  </p>
+                )}
                 {problem && (
                   <p id={`${id}-error`} className="m-0 flex items-start gap-[5px] text-xs text-destructive">
                     <CircleAlert aria-hidden className="mt-px size-[13px] shrink-0" />
@@ -212,9 +257,10 @@ export function CommandsEditor(props: {
         </ul>
       )}
       <p id={`${idPrefix}-help`} className="m-0 text-xs text-muted-foreground">
-        Commands run one at a time, top to bottom. Setup runs first, once per worktree. The app runs each command without a shell, from the
-        repository root. Spaces split the arguments. Quotes keep spaces in one argument. Setup gets {SETUP_MIN} minutes by default, the
-        other commands {CHECK_MIN}. A command stops at its time limit.
+        Commands run one at a time by kind: setup, build, test, then lint. Inside a kind, they run top to bottom. Setup runs once per
+        worktree. A failed build skips the test and lint commands. The app runs each command without a shell, from the repository root.
+        Spaces split the arguments. Quotes keep spaces in one argument. Setup gets {SETUP_MIN} minutes by default, the other commands{" "}
+        {CHECK_MIN}. A command stops at its time limit.
       </p>
       <div>
         <Button type="button" variant="outline" size="sm" disabled={drafts.length >= MAX_TASK_COMMANDS} onClick={add}>

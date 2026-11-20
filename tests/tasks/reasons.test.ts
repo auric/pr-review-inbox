@@ -145,6 +145,8 @@ describe("reason exits in ready", () => {
         [{ kind: "question", cause: "red_before", step: GATE, ...n }, "checking"],
         [{ kind: "question", cause: "no_change", step: GATE, ...n }, "checking"],
         [{ kind: "red", cause: "checks", step: GATE, ...n }, "checking"],
+        // task-builder-v2.md section 6.3: "Run the checks again" runs the gate checks.
+        [{ kind: "red", cause: "check_env", step: GATE, ...n }, "checking"],
         [{ kind: "red", cause: "update", step: GATE, ...n }, "checking"],
         [{ kind: "denied_path", cause: "commit", step: null, part, ...n }, "checking"],
         [{ kind: "red", cause: "setup", step: setupRow, ...n }, "setup"],

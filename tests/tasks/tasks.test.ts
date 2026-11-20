@@ -746,7 +746,9 @@ describe("answers (spec.md sections 6.2 and 6.11, AC-B2 and AC-B3)", () => {
         budget: 400,
         missing: 0,
         base: h.remote.target,
-        commands: [{ id: "new-1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: false }],
+        commands: [
+          { id: "new-1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: false, unused: false, local: "runs" },
+        ],
         warning: true,
         approved: false,
         maxOpen: null,
@@ -1141,8 +1143,9 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
     async () => {
       const h = await setup();
       const t = await h.toPlan();
+      // A path in the repository passes the approval, because only the run can judge it (task-builder-v2.md section 6.1).
       const edited = { id: "new-1", name: "unit", kind: "test", argv: ["build/unittests", "--all"], timeoutSec: 600 };
-      const added = { id: "new-u1", name: "venv", kind: "setup", argv: ["python", "-m", "venv", ".venv"], timeoutSec: 600 };
+      const added = { id: "new-u1", name: "venv", kind: "setup", argv: [process.execPath, "-e", "1"], timeoutSec: 600 };
       const body = { version: t.version, size: "small", warning: true };
       // An object needs an offered ID or a "new-" ID, and the IDs stay unique.
       expect((await h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [{ ...added, id: "cmd9" }] } })).body).toEqual(
@@ -1152,6 +1155,16 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
       );
       expect((await h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: ["new-1", edited] } })).status).toBe(400);
       expect((await h.json(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [{ ...added, argv: [] }] } })).status).toBe(400);
+      // task-builder-v2.md section 6.1 and check-order.md fix 3: a program that this computer does not have, and two picked commands
+      // with one name, give 400 and store nothing.
+      const missing = { ...added, argv: ["rl-no-such-program-tb3", "install"] };
+      expect((await h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [missing, edited] } })).body).toEqual({
+        error: "venv is not found on this computer. Untick it, or change the command.",
+      });
+      expect(
+        (await h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [added, { ...edited, name: "venv" }] } })).body,
+      ).toEqual({ error: "Two commands have the name venv. Give each command its own name." });
+      expect(h.db.query("SELECT commands_json FROM repo_task_settings").all()).toEqual([]);
       const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body: { ...body, commands: [added, edited] } });
       expect(ok.status).toBe(200);
       const row = h.db.query("SELECT commands_json FROM repo_task_settings WHERE project = 'PROJ' AND repo = 'repo'").get() as {
@@ -1212,6 +1225,17 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
     expect((await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body: { ...body, commands: [cmd, cmd] } })).status).toBe(
       400,
     );
+    // check-order.md fix 3: two commands with one name give 400. task-builder-v2.md section 6.2: the list comes back in kind order.
+    const build = { ...cmd, id: "b", name: "build", kind: "build" };
+    const twin = await h.json<ApiError>(`/api/repos/PROJ/repo/task-settings`, {
+      method: "PUT",
+      body: { ...body, commands: [cmd, { ...build, name: "test" }] },
+    });
+    expect([twin.status, twin.body.error]).toEqual([400, "Two commands have the name test. Give each command its own name."]);
+    expect((await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body: { ...body, commands: [cmd, build] } })).status).toBe(
+      200,
+    );
+    expect((await get()).body.commands).toEqual([build, cmd]);
     expect((await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body: { ...body, specDir: "../x" } })).status).toBe(400);
     expect(
       (await h.json(`/api/repos/PROJ/repo/task-settings`, { method: "PUT", body: { ...body, commands: [{ ...cmd, argv: [] }] } })).status,
@@ -1373,7 +1397,9 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
       await h.settle();
       const t = await h.recommend(await h.get(c.body.id));
       expect([t.size, t.plan?.warning]).toEqual(["medium", false]);
-      expect(t.plan?.commands).toEqual([{ id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: true }]);
+      expect(t.plan?.commands).toEqual([
+        { id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: true, unused: false, local: "runs" },
+      ]);
       const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, { body: { version: t.version, size: "large", commands: ["cmd1"] } });
       expect([ok.status, ok.body.state, ok.body.plan?.approved]).toEqual([200, "spec_draft", true]);
     },
@@ -1381,42 +1407,82 @@ describe("plan (spec.md sections 6.1 and 6.4, AC-B4)", () => {
   );
 
   test(
-    "spec.md section 6.3: the plan screen lists the saved commands first, then the new proposals; the approval stores that order without the reason",
+    "task-builder-v2.md sections 6.1 and 6.2: the plan screen lists the commands by kind, saved before proposed, with the check on this computer; the approval stores them without the reason",
     async () => {
       const h = await setup();
       const first = await h.toPlan();
       const body = { version: first.version, size: "small", commands: ["new-1"], warning: true };
       expect((await h.json(`/api/tasks/${first.id}/plan`, { body })).status).toBe(200);
       h.jira.addIssue("ABC-47", "Second task");
-      const venv = { name: "venv", kind: "setup" as const, argv: ["python", "-m", "venv", ".venv"] };
+      const venv = { name: "venv", kind: "setup" as const, argv: [process.execPath, "-e", "1"] };
       const deps = {
         name: "deps",
         kind: "setup" as const,
-        argv: ["conan", "install", "."],
+        argv: ["rl-no-such-program-tb3", "install", "."],
         timeoutSec: 5400,
         timeoutReason: "Downloads the packages.",
       };
+      const unit = { name: "unit", kind: "test" as const, argv: ["build/unittests"] };
       const test = { name: "test", kind: "test", argv: ["bun", "test"] };
-      h.scenario({ spec: specWith({ testing: { ...echoSpec().testing, commands: [venv, deps, test] } }) });
+      h.scenario({ spec: specWith({ testing: { ...echoSpec().testing, commands: [unit, venv, deps, test] } }) });
       const c = await h.create({ project: "PROJ", repo: "repo", key: "ABC-47" });
       await h.settle();
       const t = await h.recommend(await h.get(c.body.id));
+      // context/commands.md lists the saved commands with their IDs.
+      const spec = h.runCalls().findLast((x) => x.stdin.includes("Write the plan for task ABC-47"));
+      expect(spec?.context["commands.md"]).toBe('# Saved commands\n\n- cmd1 (test) test: `["bun","test"]`\n');
+      const fresh = { saved: false, unused: false };
       expect(t.plan?.commands).toEqual([
-        { id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: true },
-        { id: "new-1", ...venv, timeoutSec: 3600, saved: false },
-        { id: "new-2", ...deps, saved: false },
+        { id: "new-2", ...venv, timeoutSec: 3600, ...fresh, local: "runs" },
+        { id: "new-3", ...deps, ...fresh, local: "missing" },
+        { id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: true, unused: false, local: "runs" },
+        { id: "new-1", ...unit, timeoutSec: 600, ...fresh, local: null },
       ]);
+      const picked = ["new-2", "new-3", "cmd1", "new-1"];
+      const no = await h.json<ApiError>(`/api/tasks/${t.id}/plan`, { body: { version: t.version, size: "small", commands: picked } });
+      expect(no.body).toEqual({ error: "deps is not found on this computer. Untick it, or change the command." });
       const ok = await h.json<TaskDto>(`/api/tasks/${t.id}/plan`, {
-        body: { version: t.version, size: "small", commands: ["cmd1", "new-1", "new-2"] },
+        body: { version: t.version, size: "small", commands: picked.filter((x) => x !== "new-3") },
       });
       expect(ok.status).toBe(200);
       const row = h.db.query("SELECT commands_json FROM repo_task_settings WHERE project = 'PROJ' AND repo = 'repo'").get() as {
         commands_json: string;
       };
       expect(JSON.parse(row.commands_json)).toEqual([
-        { id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600 },
         { id: "cmd2", ...venv, timeoutSec: 3600 },
-        { id: "cmd3", name: "deps", kind: "setup", argv: ["conan", "install", "."], timeoutSec: 5400 },
+        { id: "cmd1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600 },
+        { id: "cmd3", ...unit, timeoutSec: 600 },
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "task-builder-v2.md section 6.1: a saved command that the plan does not keep starts unused; a kept one and an old plan keep it",
+    async () => {
+      const h = await setup();
+      const first = await h.toPlan();
+      const body = { version: first.version, size: "small", commands: ["new-1"], warning: true };
+      expect((await h.json(`/api/tasks/${first.id}/plan`, { body })).status).toBe(200);
+      const plan = async (key: string, keep: string[] | null) => {
+        h.jira.addIssue(key, "Next task");
+        const lint = { name: "lint", kind: "lint", argv: [process.execPath, "-e", "1"] };
+        h.scenario({ spec: specWith({ testing: { ...echoSpec().testing, commands: [lint], keep } }) });
+        const c = await h.create({ project: "PROJ", repo: "repo", key });
+        await h.settle();
+        return (await h.recommend(await h.get(c.body.id))).plan?.commands.map((x) => [x.id, x.unused]);
+      };
+      expect(await plan("ABC-47", [])).toEqual([
+        ["cmd1", true],
+        ["new-1", false],
+      ]);
+      expect(await plan("ABC-48", ["cmd1"])).toEqual([
+        ["cmd1", false],
+        ["new-1", false],
+      ]);
+      expect(await plan("ABC-49", null)).toEqual([
+        ["cmd1", false],
+        ["new-1", false],
       ]);
     },
     SLOW,

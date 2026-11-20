@@ -354,11 +354,11 @@ describe("the loop of one part (spec.md section 6.7)", () => {
         step: (fixes[0] as Step).id,
         text: "Needs you: the fix run of part 1 changed no file. See why.",
       });
-      // The part base passed, so the failure is new. The prompt tells Claude to stop with a question for a fault that code cannot fix.
+      // The part base passed, so the failure is new. The prompt tells Claude to stop with checkCause env for a fault that code cannot fix.
       const call = s.runCalls().find((c) => s.modeOf(c) === "fix") as Call;
       expect(call.context["failure.md"]).toContain("- On the part base: New. It passed on the part base.");
       expect(call.stdin).toContain(
-        "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
+        "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set checkCause to env, copy the line of the output that shows the fault into quote, and stop.",
       );
       // part-session.md section 2.3: the fix run forks the transcript of the build run. Its rules digest holds the command lines again.
       expect(call.argv).toContain("--resume");

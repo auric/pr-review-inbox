@@ -242,7 +242,9 @@ const PLAN: NonNullable<TaskDto["plan"]> = {
   budget: 400,
   missing: 0,
   base: "b".repeat(40),
-  commands: [{ id: "new-1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: false }],
+  commands: [
+    { id: "new-1", name: "test", kind: "test", argv: ["bun", "test"], timeoutSec: 600, saved: false, unused: false, local: "runs" },
+  ],
   warning: true,
   approved: false,
   maxOpen: null,
@@ -2825,6 +2827,9 @@ describe("ps5-plan.md section 3 and AC-B367: the primary of each REASON_EXITS ke
   test("the Needs-you row: Continue, then Start this part again while unpushed, See why when the reason names a step, and Stop", () => {
     const at = (key: string) => seeded(key).more.map((a) => a.kind);
     expect(at("red/checks")).toEqual(["restart", "see-why", "stop"]);
+    // task-builder-v2.md section 6.3: a check that cannot run here offers no fix and no restart.
+    expect(seeded("red/check_env").primary).toEqual({ kind: "resume", label: "Run the checks again" });
+    expect(at("red/check_env")).toEqual(["see-why", "stop"]);
     expect(at("stuck/stall")).toEqual(["restart", "see-why", "stop"]);
     expect(at("denied_path/path")).toEqual(["see-why", "stop"]);
     expect(at("blocker")).toEqual(["without", "see-why", "stop"]);

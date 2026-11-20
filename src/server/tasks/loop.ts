@@ -67,7 +67,7 @@ import { repoPath } from "../review/validate";
 import { type BranchRemote, type ContextFile, cachePath, locked, longPath, noUrl } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import { buildShell, manifest } from "./capabilities";
-import { CHECK_KINDS, type ChecksResult, checkStep } from "./checks";
+import { CHECK_KINDS, type ChecksResult, checkStep, envFault } from "./checks";
 import { addExternal, movedTasks, type NewExternal } from "./external";
 import { movedReason } from "./gitstate";
 import {
@@ -351,18 +351,25 @@ export function tickDiff(head: string, disk: string, moved: ReadonlySet<string> 
   return text === d ? ids : null;
 }
 
-// One command of the checks on the part base (StepDetail.baseline). red: it did not exit with 0.
-export type BaseRun = { name: string; argv: string[]; red: boolean };
+// One command of the checks on the part base (StepDetail.baseline). red: it did not exit with 0. id: null in a row from before
+// task-builder-v2.md section 6.2.
+export type BaseRun = { id: string | null; name: string; argv: string[]; red: boolean; timedOut: boolean };
+type RunCommand = { id: string | null; name: string; argv: readonly string[] };
+// The rows of the checks on the part base. task-builder-v2.md section 6.3: a skipped row has no result of its own, so the base has no
+// run of that command.
+export const baseRuns = (commands: StepDetail["commands"]): BaseRun[] =>
+  commands.filter((x) => !x.skipped).map((x) => ({ id: x.id, name: x.name, argv: x.argv, red: x.exit !== 0, timedOut: x.timedOut }));
 
-// A command of a later check against the run on the part base. same: the base ran the same argv. null: the base run has no such
-// command.
-export function onBase(c: { name: string; argv: readonly string[] }, base: readonly BaseRun[] | null) {
-  const b = base?.find((x) => x.name === c.name);
+// A command of a later check against the run on the part base, by command ID (check-order.md fix 3). A base row without an ID matches
+// by name. same: the base ran the same argv. null: the base run has no such command.
+export function onBase(c: RunCommand, base: readonly BaseRun[] | null) {
+  const b = base?.find((x) => (x.id === null ? x.name === c.name : x.id === c.id));
   if (!b) return null;
-  return { red: b.red, same: b.argv.length === c.argv.length && b.argv.every((a, i) => a === c.argv[i]), argv: b.argv };
+  const same = b.argv.length === c.argv.length && b.argv.every((a, i) => a === c.argv[i]);
+  return { red: b.red, same, argv: b.argv, timedOut: b.timedOut };
 }
 
-function beforeLine(c: { name: string; argv: readonly string[] }, base: readonly BaseRun[] | null): string[] {
+function beforeLine(c: RunCommand, base: readonly BaseRun[] | null): string[] {
   const b = onBase(c, base);
   if (!b) return [];
   if (b.red && b.same) return ["- On the part base: Also red on the part base."];
@@ -413,12 +420,14 @@ async function snapshot(trees: readonly RepoTree[]): Promise<string> {
 // context/failure.md of a fix step after red checks: the failed commands with the end of their output, each marked against the checks on
 // the part base. All tails together stay within FAILURE_TAIL (spec.md section 0, OUTPUT_TAIL: 32 KB sent to Claude).
 export function checkFailure(r: Extract<ChecksResult, { status: "ran" }>, base: readonly BaseRun[] | null = null): ContextFile {
-  const failed = r.commands.filter((c) => c.exit !== 0);
+  const failed = r.commands.filter((c) => c.exit !== 0 && !c.skipped);
+  const skipped = r.commands.filter((c) => c.skipped).map((c) => oneLine(c.name));
   const each = Math.floor(FAILURE_TAIL / Math.max(1, failed.length));
   const out = [
     "# Check output",
     "",
     "The app ran the approved commands after your run. These commands failed. Each shows the end of its output.",
+    ...(skipped.length ? [`The app did not run ${skipped.join(", ")}, because a build failed.`] : []),
     "",
   ];
   for (const c of failed) {
@@ -428,6 +437,22 @@ export function checkFailure(r: Extract<ChecksResult, { status: "ran" }>, base: 
     out.push(`- Command: ${oneLine(c.argv.join(" "))}`, ...beforeLine(c, base), "", indentBlock(text.trimEnd() || "(no output)"), "");
   }
   return { name: "failure.md", text: out.join("\n") };
+}
+
+// The checks of a reason text: the check "a", or the checks "a", "b" and "c".
+const checkList = (list: readonly { name: string }[]) => {
+  const names = list.map((x) => `"${oneLine(x.name)}"`);
+  return names.length === 1 ? `the check ${names[0]}` : `the checks ${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+};
+
+// task-builder-v2.md section 6.3: Claude's quote of a fault outside the code counts only when the output of a failed command that ran
+// holds it. Both sides get CRLF to LF and an ANSI strip, as the quote check of PS7a.
+export const QUOTE_LOST =
+  "Claude says that the checks fail outside the code, but the check output does not hold its quote. The fixes go on.";
+export function quoteFound(quote: string, commands: readonly { tail: string }[]): boolean {
+  const norm = (s: string) => Bun.stripANSI(s.replaceAll("\r\n", "\n"));
+  const q = norm(quote).trim();
+  return q !== "" && commands.some((c) => norm(c.tail).includes(q));
 }
 
 type Point = { id: number; payload: FindingPayload };
@@ -1818,7 +1843,20 @@ export function createLoop(opts: LoopOptions) {
   function baselineOf(c: Ctx): BaseRun[] | null {
     const r = c.db.query(Q.baseline).get({ part: c.part.id }) as { detail_json: string } | null;
     if (!r) return null;
-    return stepDetail.parse(JSON.parse(r.detail_json)).commands.map((x) => ({ name: x.name, argv: x.argv, red: x.exit !== 0 }));
+    return baseRuns(stepDetail.parse(JSON.parse(r.detail_json)).commands);
+  }
+
+  // task-builder-v2.md section 6.3 (app facts only): a check that did not start, or that reached its time limit on the part base too, is
+  // a fault of this computer. The part waits on each pass and starts no fix run.
+  function envStop(c: Ctx, k: Extract<ChecksResult, { status: "ran" }> & { step: number }, base: readonly BaseRun[] | null) {
+    const lost = k.commands.filter(envFault);
+    const late = k.commands.filter((x) => x.timedOut && onBase(x, base)?.timedOut === true);
+    if (!lost.length && !late.length) return;
+    const text = lost.length
+      ? `Needs you: ${checkList(lost)} of part ${c.part.ord} cannot run on this computer: ${lost.map((x) => x.notRun).join("; ")}. Change ${lost.length === 1 ? "it" : "them"} in Settings, Commands, then run the checks again.`
+      : `Needs you: ${checkList(late)} of part ${c.part.ord} reached the time limit here and on the part base. Raise the limit in Settings, Commands, then run the checks again.`;
+    send(c, { type: "CHECKS_RED" });
+    block(c, { kind: "red", cause: "check_env", step: k.step, text });
   }
 
   // part-session.md section 2.6 items 3 and 4: the gate. Red checks start at most "Test-fix tries" fix runs (AC-B11). The value is read
@@ -1836,21 +1874,21 @@ export function createLoop(opts: LoopOptions) {
     let k = await checks(c, item);
     const fixTries = runLimitsOf(settings.config()?.runLimits).testFixTries;
     for (let tries = 0; !k.green; tries++) {
-      const failed = k.commands.filter((x) => x.exit !== 0);
+      envStop(c, k, base);
+      // A skipped command follows its build.
+      const failed = k.commands.filter((x) => x.exit !== 0 && !x.skipped);
       const old = failed.filter((x) => {
         const b = onBase(x, base);
         return b?.red === true && b.same;
       });
       if (failed.length && old.length === failed.length && !c.db.query(Q.redBeforeSeen).get({ part: c.part.id, item })) {
-        const names = old.map((x) => `"${oneLine(x.name)}"`);
-        const list = names.length === 1 ? `the check ${names[0]}` : `the checks ${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
         patchStep(c.db, k.step, { redBefore: true });
         send(c, { type: "CHECKS_RED" }, { redBefore: true });
         block(c, {
           kind: "question",
           cause: "red_before",
           step: k.step,
-          text: `Needs you: ${list} of part ${c.part.ord} also failed on the part base. See why. Continue lets Claude try to fix it.`,
+          text: `Needs you: ${checkList(old)} of part ${c.part.ord} also failed on the part base. See why. Continue lets Claude try to fix it.`,
         });
       }
       if (tries >= fixTries) {
@@ -1870,6 +1908,18 @@ export function createLoop(opts: LoopOptions) {
         purpose,
         tries: { n: tries + 1, of: fixTries },
       });
+      // task-builder-v2.md section 6.3: an env cause with a quote that the output holds stops the tries. An env report changes no file.
+      const cause = r.result.checkCause;
+      if (cause?.cause === "env") {
+        if (quoteFound(cause.quote, failed))
+          block(c, {
+            kind: "red",
+            cause: "check_env",
+            step: r.step,
+            text: `Needs you: Claude says that the checks of part ${c.part.ord} fail outside the code: "${oneLine(cause.quote)}". Fix the computer or the command, then run the checks again.`,
+          });
+        patchStep(c.db, r.step, { notes: [...stepDetailOf(c.db, r.step).notes, QUOTE_LOST] });
+      }
       if (r.unchanged) {
         send(c, { type: "RUN_DONE" }, { unchanged: true });
         block(c, {

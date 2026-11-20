@@ -1138,17 +1138,17 @@ describe("the prompt lines of the shell state", () => {
       }
   });
 
-  test("fix mode: a broken command, a missing tool, or an environment fault changes no file and sets question", () => {
+  test("fix mode: a broken command, a missing tool, or an environment fault changes no file and sets checkCause env", () => {
     const l = lines("fix", { mode: "any", rules: [], checks: [], bashTimeoutSec: 600 });
     expect(l[1]).toBe(`${RUNS} When they fail, a fix step gets their output.`);
     expect(l).toContain(
-      "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
+      "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set checkCause to env, copy the line of the output that shows the fault into quote, and stop.",
     );
     expect(l).toContain(
       'failure.md marks a command that also failed on the part base with "Also red on the part base". Do not try to fix that command. Fix only the new failures.',
     );
     expect(l).not.toContain("Run the failing check first to see the failure. Run it again after your change.");
-    expect(lines("implement", null).join("\n")).not.toContain("Set question and give the reason.");
+    expect(lines("implement", null).join("\n")).not.toContain("Set checkCause to env");
   });
 
   test("AC-B335: a fix run with points gets the 6.23.8 lines in a new and a resumed session; other runs do not", () => {

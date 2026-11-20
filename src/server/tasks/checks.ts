@@ -44,7 +44,11 @@ export function checkEnv(home: string | null): Record<string, string> {
 // The program of argv[0]: a path is taken as is (relative to cwd), a bare name goes through PATH of env.
 // Windows: a .cmd or .bat file runs through cmd.exe, which parses the arguments again (CVE-2024-27980), so it is refused.
 // reason: the short text of the Log row.
-export function program(argv0: string, cwd: string, env: Record<string, string>): { path: string } | { error: string; reason: string } {
+export function program(
+  argv0: string,
+  cwd: string,
+  env: Record<string, string>,
+): { path: string } | { error: string; reason: string; refused: boolean } {
   const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
   const path = /[\\/]/.test(argv0)
     ? isAbsolute(argv0)
@@ -52,14 +56,26 @@ export function program(argv0: string, cwd: string, env: Record<string, string>)
       : resolve(cwd, argv0)
     : Bun.which(argv0, { PATH: env[pathKey] ?? "", cwd });
   if (!path || !statSync(path, { throwIfNoEntry: false })?.isFile())
-    return { error: `The command ${argv0} is not found.`, reason: `Not found: ${argv0}` };
+    return { error: `The command ${argv0} is not found.`, reason: `Not found: ${argv0}`, refused: false };
   if (process.platform === "win32" && [".cmd", ".bat"].includes(extname(path).toLowerCase()))
     return {
       error: `${argv0} is a ${extname(path)} script, which runs through cmd.exe. Use the program itself, such as node.exe with the script.`,
       reason: `Refused: ${argv0} runs through cmd.exe`,
+      refused: true,
     };
   return { path };
 }
+
+// task-builder-v2.md section 6.1: the approval judges argv[0] by the rule of program(), with no worktree. A path relative to the
+// worktree can be a file that the setup or the build makes, so only the run can judge it: null.
+export function hostProgram(argv0: string): ReturnType<typeof program> | null {
+  if (/[\\/]/.test(argv0) && !isAbsolute(argv0)) return null;
+  return program(argv0, tmpdir(), checkEnv(null));
+}
+
+// task-builder-v2.md section 6.3: a command that did not start on this computer is a fault of the environment. A skipped row follows
+// its build.
+export const envFault = (c: Pick<StepCommand, "notRun" | "skipped">) => c.notRun !== null && !c.skipped;
 
 // Keeps the last max bytes of a stream of chunks.
 function tailBuffer(max: number) {
@@ -90,7 +106,7 @@ export const OUTPUT_MS = 1_000;
 // Runs one command. The output keeps the last tailBytes of stdout and stderr together, in arrival order. exit is null when the
 // timeout or the signal killed the process tree. onOutput gets the output so far, at most once per OUTPUT_MS, while new output comes.
 export async function runCommand(
-  cmd: Pick<TaskCommand, "name" | "argv" | "timeoutSec">,
+  cmd: Pick<TaskCommand, "name" | "argv" | "timeoutSec"> & { id?: string },
   o: {
     cwd: string;
     env: Record<string, string>;
@@ -100,7 +116,7 @@ export async function runCommand(
   },
 ): Promise<CommandResult> {
   const started = performance.now();
-  const base = { name: cmd.name, argv: cmd.argv, running: false, timeoutSec: cmd.timeoutSec };
+  const base = { id: cmd.id ?? null, name: cmd.name, argv: cmd.argv, running: false, skipped: false, timeoutSec: cmd.timeoutSec };
   const done = (exit: number | null, tail: string, timedOut = false, stopped = false, notRun: string | null = null): CommandResult => ({
     ...base,
     exit,
@@ -201,8 +217,10 @@ export type ChecksResult =
   | { status: "ran"; green: boolean; commands: CommandResult[]; notes: string[] }
   | { status: "refused"; reason: string };
 
-// Runs the approved commands of the kinds in the order of repo_task_settings.commands_json. Green: every command exited with 0. The
-// run stops at a stopped command. The commands come only from the stored settings, never from a caller.
+// Runs the approved commands of the kinds in the order of repoSettings: by kind, and in the order of commands_json inside a kind
+// (task-builder-v2.md section 6.2). After a build that did not exit with 0, each later test and lint command is skipped. Green: every
+// command exited with 0, so a skipped command is red. The run stops at a stopped command. The commands come only from the stored
+// settings, never from a caller.
 export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
   const s = repoSettings(i.db, i.project, i.repo);
   if (s.warnedAt === null) return { status: "refused", reason: "Accept the warning about app-run commands first." };
@@ -215,20 +233,38 @@ export async function runChecks(i: ChecksInput): Promise<ChecksResult> {
   if (cache) env[TASK_CACHE_ENV] = cache;
   const list = s.commands.filter((c) => i.kinds.includes(c.kind));
   const commands: CommandResult[] = [];
+  const row = { exit: null, running: false, skipped: false, timedOut: false };
+  let failedBuild: string | null = null;
   try {
     for (const c of list) {
+      const { id, name, argv, timeoutSec } = c;
+      if (failedBuild !== null && (c.kind === "test" || c.kind === "lint")) {
+        const tail = `The app did not run this command, because the build ${failedBuild} failed.`;
+        commands.push({
+          ...row,
+          id,
+          name,
+          argv,
+          timeoutSec,
+          ms: 0,
+          tail,
+          notRun: `Skipped: build ${failedBuild} failed`,
+          skipped: true,
+          stopped: false,
+        });
+        log(`Task check ${name}: skipped after the build ${failedBuild}.`);
+        continue;
+      }
       const show = (tail: string, ms: number) =>
-        i.onProgress?.([
-          ...commands.map(detailOf),
-          { name: c.name, argv: c.argv, exit: null, ms, tail, notRun: null, running: true, timedOut: false, timeoutSec: c.timeoutSec },
-        ]);
+        i.onProgress?.([...commands.map(detailOf), { ...row, id, name, argv, timeoutSec, ms, tail, notRun: null, running: true }]);
       show("", 0);
       const r = await runCommand(c, { cwd: i.wt.repo, env, signal: i.signal, onOutput: show });
       log(
-        `Task check ${c.name}: ${r.notRun ?? `exit ${r.exit ?? "none"}`} in ${r.ms} ms${r.timedOut ? " (timed out)" : r.stopped ? " (stopped)" : ""}.`,
+        `Task check ${name}: ${r.notRun ?? `exit ${r.exit ?? "none"}`} in ${r.ms} ms${r.timedOut ? " (timed out)" : r.stopped ? " (stopped)" : ""}.`,
       );
       commands.push(r);
       if (r.stopped) break;
+      if (c.kind === "build" && r.exit !== 0) failedBuild ??= name;
     }
   } finally {
     if (home) await rm(home, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});

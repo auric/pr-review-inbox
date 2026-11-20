@@ -11,6 +11,8 @@ import {
   joinArgv,
   LIMIT_PROBLEM,
   moveDraft,
+  placeholderWarning,
+  rowProblem,
   splitArgv,
   toDraft,
 } from "../../src/web/tasks/commands";
@@ -70,5 +72,26 @@ describe("task command lines", () => {
     expect(moveDraft(rows, 5, 1)).toBe(rows);
     expect(rows.map((d) => d.id)).toEqual(["a", "b", "c"]);
     expect(draftsToCommands(moveDraft(rows, 0, 1))?.map((x) => x.id)).toEqual(["b", "a", "c"]);
+  });
+
+  test("check-order.md fix 3 and item 5: a name that two running rows share is a problem; a placeholder is a warning only", () => {
+    const c = (id: string, name: string) => toDraft({ id, name, kind: "test", argv: ["bun", id], timeoutSec: 600 });
+    const unit = c("a", "unit");
+    const rows = [unit, c("b", " unit "), c("c", "lint")];
+    const lint = rows[2] as typeof unit;
+    const twin = "Another command has this name. Give it its own name.";
+    expect(rows.map((d) => draftProblem(d, rows))).toEqual([twin, twin, null]);
+    // A row that does not run, such as an unticked row of the plan screen, does not clash.
+    expect(draftProblem(unit, [unit, lint])).toBeNull();
+    expect(draftsToCommands(rows)).toBeNull();
+    expect(draftsToCommands([unit, lint])?.map((x) => x.id)).toEqual(["a", "c"]);
+    // The plan screen: an unticked twin shows no clash, and the ticked one shows none while it runs alone.
+    const picked = new Set(["a", "c"]);
+    expect(rows.map((d) => rowProblem(d, rows, picked))).toEqual([null, null, null]);
+    expect(rows.map((d) => rowProblem(d, rows))).toEqual([twin, twin, null]);
+    expect(placeholderWarning("make -C <dir> test")).toBe("The command holds a placeholder such as <dir>. Replace it with a real value.");
+    expect(placeholderWarning("bun test")).toBeNull();
+    // Each argument counts alone, so <a and b> in two arguments are no placeholder.
+    expect(placeholderWarning("cmd <a b>")).toBeNull();
   });
 });

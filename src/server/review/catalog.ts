@@ -1179,13 +1179,18 @@ export const specRules = (budget: number, platform: string = process.platform, t
   OWNER_RULE,
   OWNER_KINDS_LINE,
   'In testing, give the commands that build and test the repository as argument lists, such as ["bun","test"].',
+  // task-builder-v2.md section 6.1: the saved commands, so the plan proposes only the missing ones.
+  "./context/commands.md lists the saved commands of the repository. Put the IDs of the commands that the plan needs in testing.keep.",
+  "In testing.commands, give only the commands that ./context/commands.md does not hold.",
   "When the Project instructions name a build, test, or setup command, use that command. They win over the repository files.",
   "Else take the commands from the repository files, such as package.json, a Makefile, or the CI configuration.",
   `The commands run on ${OS_NAME[platform] ?? platform}. The app runs each command without a shell, from the repository root of a fresh checkout.`,
   "On Windows, the Python of a venv is .venv/Scripts/python.exe, not .venv/bin/python.",
   "When the project needs a venv, add a setup command that creates it first, such as python -m venv .venv.",
-  // spec.md section 6.3: the commands run one at a time, in list order. Setup runs first, once per worktree.
-  "Give the setup commands in the order in which they must run. The app runs the commands one at a time, top to bottom.",
+  // task-builder-v2.md section 6.2 (D9) and check-order.md fix 4: the kind order, and the forms that fail without a shell.
+  "The app runs the commands one at a time by kind: setup, build, test, then lint. Inside a kind, it keeps your order.",
+  "Give the setup commands in the order in which they must run. A failed build skips the test and lint commands.",
+  "Give build commands before the tests that need their output. Never use a placeholder such as <dir>. Never use env VAR=value, because no shell runs.",
   `Each command has a time limit: ${limitText(SETUP_TIMEOUT_SEC)} for setup, ${limitText(CHECK_TIMEOUT_SEC)} for the others. Leave timeoutSec null to keep it.`,
   "Set timeoutSec only for a command that downloads or builds much, such as a dependency download. Then give the reason in timeoutReason.",
   "When the tests need a service, such as a database, make its setup the first task.",

@@ -46,6 +46,7 @@ import {
   BASH_TIMEOUT_DEFAULT_SEC,
   BUILDS_AT_ONCE_DEFAULT,
   branchName,
+  byKind,
   INTERVIEW_QUESTIONS,
   INTERVIEW_TURNS,
   type InterviewResult,
@@ -56,6 +57,8 @@ import {
   MAX_OPEN_CAP,
   MAX_OPEN_DEFAULT,
   MERGE_CONFLICTED,
+  nameClash,
+  nameClashText,
   PART_STATE_TEXT,
   type PartState,
   RUN_CANCELLED,
@@ -104,6 +107,7 @@ import { repoPath } from "../review/validate";
 import { type ContextFile, noUrl, remoteHead, type SnapshotRepo } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
 import { buildToolLines, capabilities, capabilityLines } from "./capabilities";
+import { hostProgram } from "./checks";
 import { addExternal, advanceExternal, approveExternal, externalDtos, openChecklist } from "./external";
 import {
   dropFetched,
@@ -638,7 +642,8 @@ export function repoSettings(db: Database, project: string, repo: string): RepoT
     lineBudget: r?.line_budget ?? TASK_DEFAULTS.lineBudget,
     maxOpen: r?.max_open ?? TASK_DEFAULTS.maxOpen,
     approvals: r?.approvals ?? TASK_DEFAULTS.approvals,
-    commands: json<TaskCommand[]>(r?.commands_json ?? null, []),
+    // task-builder-v2.md section 6.2 (D9): the run order.
+    commands: byKind(json<TaskCommand[]>(r?.commands_json ?? null, [])),
     testGlobs: json<string[] | null>(r?.test_globs_json ?? null, null),
     excludeGlobs: json<string[] | null>(r?.exclude_globs_json ?? null, null),
     isolateHome: (r?.isolate_home ?? 1) === 1,
@@ -662,7 +667,7 @@ export function saveAllow(db: Database, project: string, repo: string, allow: re
 
 // PUT /api/repos/:project/:repo/task-settings. hosts: the Bitbucket and Jira host names for allowProblem. Returns the reason for 400,
 // or null. spec.md section 6.21: the first non-empty allowlist, the first switch to "Claude may run the approved checks", and each switch to
-// Most commands or to Unrestricted need shellWarning.
+// Most commands or to Unrestricted need shellWarning. check-order.md fix 3: two commands with the same name give 400.
 export function saveRepoSettings(
   db: Database,
   project: string,
@@ -671,6 +676,8 @@ export function saveRepoSettings(
   hosts: readonly string[] = [],
   now = Date.now(),
 ): string | null {
+  const clash = nameClash(s.commands);
+  if (clash !== null) return nameClashText(clash);
   const cur = repoSettings(db, project, repo);
   const mode = s.shellMode ?? cur.shellMode;
   let allow = cur.allow;
@@ -958,14 +965,39 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
   };
 };
 
-// The commands of the plan screen in run order (spec.md section 6.3): the saved ones of the repository, then the new proposals. A
-// proposal with the argv of a saved command is the same command, so it shows once.
+// The commands of the plan screen in run order (task-builder-v2.md section 6.2): by kind, the saved ones of the repository before the
+// new proposals. A proposal with the argv of a saved command is the same command, so it shows once. unused: a saved command that the plan
+// does not keep (section 6.1). local: the check of argv[0] on this computer, null when only the run can judge it.
 function commandsOf(p: Plan, saved: TaskCommand[]): TaskPlanDto["commands"] {
   const same = (a: TaskCommand, b: TaskCommand) => JSON.stringify(a.argv) === JSON.stringify(b.argv);
-  return [
-    ...saved.map((c) => ({ ...c, saved: true })),
-    ...p.testing.commands.filter((c) => !saved.some((s) => same(s, c))).map((c) => ({ ...c, saved: false })),
-  ];
+  const keep = p.testing.keep ?? null;
+  const proposed = (c: TaskCommand) => p.testing.commands.some((x) => same(x, c));
+  const local = (c: TaskCommand) => {
+    const r = hostProgram(c.argv[0] as string);
+    return r === null ? null : "path" in r ? "runs" : r.refused ? "refused" : "missing";
+  };
+  return byKind([
+    ...saved.map((c) => ({ ...c, saved: true, unused: keep !== null && !keep.includes(c.id) && !proposed(c) })),
+    ...p.testing.commands.filter((c) => !saved.some((s) => same(s, c))).map((c) => ({ ...c, saved: false, unused: false })),
+  ]).map((c) => ({ ...c, local: local(c) }));
+}
+
+// task-builder-v2.md section 6.1: context/commands.md of a spec run, the saved commands of the repository in run order. The user
+// approved each one, so the file has no untrusted banner.
+function commandsFile(saved: readonly TaskCommand[]): ContextFile {
+  const rows = saved.map((c) => `- ${c.id} (${c.kind}) ${oneLine(c.name)}: \`${JSON.stringify(c.argv)}\``);
+  return {
+    name: "commands.md",
+    text: ["# Saved commands", "", ...(rows.length ? rows : ["The repository has no saved commands."]), ""].join("\n"),
+  };
+}
+
+// task-builder-v2.md section 6.1: the reason for 400 when a command cannot run on this computer, or null. A path relative to the worktree
+// passes, because only the run can judge it.
+function localProblem(c: TaskCommand): string | null {
+  const r = hostProgram(c.argv[0] as string);
+  if (r === null || "path" in r) return null;
+  return r.refused ? `${c.name}: ${r.error}` : `${c.name} is not found on this computer. Untick it, or change the command.`;
 }
 
 // spec.md section 6.21 (D2): the saved patterns of the repository, then the proposals of the plan that the list does not hold. A plan
@@ -1905,7 +1937,7 @@ export function createTaskService(opts: TaskServiceOptions) {
       profile: p,
       files: untrusted,
       attachments,
-      own: answers ? [answers] : [],
+      own: [...(answers ? [answers] : []), commandsFile(repoSettings(db, t.project, t.repo).commands)],
       maxTurns: runLimitsOf(settings.config()?.runLimits).planTurns,
       schema: specJsonSchema(),
       agent: specAgent(p, budget, process.platform, subtasks, buildToolLines(capabilities(db, t, "spec", originsOf(settings.config())))),
@@ -2415,8 +2447,15 @@ export function createTaskService(opts: TaskServiceOptions) {
       }
       const c = offered.find((o) => o.id === x);
       if (!c) return { status: 400, error: `Command ${x} is not in the plan.` };
-      const { saved: _, timeoutReason: _r, ...cmd } = c;
+      const { saved: _, timeoutReason: _r, unused: _u, local: _l, ...cmd } = c;
       picked.push(cmd);
+    }
+    // task-builder-v2.md section 6.1 and check-order.md fix 3.
+    const clash = nameClash(picked);
+    if (clash !== null) return { status: 400, error: nameClashText(clash) };
+    for (const c of picked) {
+      const problem = localProblem(c);
+      if (problem) return { status: 400, error: problem };
     }
     // spec.md section 6.21 (D2): the picked command patterns join the list of the repository. The first ones need the shell warning.
     const allowIds = (input.allow ?? []).map((a) => (typeof a === "string" ? a : a.id));

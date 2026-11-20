@@ -627,10 +627,10 @@ export function implementPrompt(
         : "For each task, write or change its tests first. Then change the code.",
       shell ? `Run the tests of the task. When its Done-when lines hold, ${tick}` : `When the Done-when lines of a task hold, ${tick}`,
     ],
-    // check-fix.md items 1 and 3: a failure that code cannot fix ends the step with a question.
+    // check-fix.md items 1 and 3, task-builder-v2.md section 6.3: a failure that code cannot fix ends the step with checkCause env.
     fix: [
       "./context/failure.md holds the failing output or the review findings. Fix the cause. Change a test only when the test is wrong, and say so in notes.",
-      "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set question and give the reason.",
+      "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set checkCause to env, copy the line of the output that shows the fault into quote, and stop.",
       'failure.md marks a command that also failed on the part base with "Also red on the part base". Do not try to fix that command. Fix only the new failures.',
       ...(checks.length ? ["Run the failing check first to see the failure. Run it again after your change."] : []),
       ...(points ? POINTS_LINES : []),

@@ -10,6 +10,7 @@ import {
   type CommandKind,
   defaultTimeoutSec,
   MAX_TASK_COMMAND_ARGS,
+  nameClash,
   type TaskCommand,
 } from "../../shared/task";
 import { timeoutMinutes, timeoutSec } from "./allow";
@@ -71,16 +72,33 @@ export const defaultMinutes = (kind: CommandKind) => timeoutMinutes(defaultTimeo
 export const commandTimeout = (minutes: string) => timeoutSec(minutes, COMMAND_TIMEOUT_MAX_SEC);
 export const LIMIT_PROBLEM = `Enter a time limit from 1 second to ${COMMAND_TIMEOUT_MAX_SEC / 60} minutes.`;
 
-// The problem of a row, or null.
-export function draftProblem(d: CommandDraft): string | null {
+// The problem of a row, or null. running: the rows that run, so a name that two of them share is a problem (check-order.md fix 3).
+export function draftProblem(d: CommandDraft, running: readonly CommandDraft[] = []): string | null {
   if (!d.name.trim()) return "Give the command a name.";
   const r = splitArgv(d.line);
   if ("error" in r) return r.error;
+  if (running.some((x) => x.id !== d.id && x.name.trim() === d.name.trim())) return "Another command has this name. Give it its own name.";
   return commandTimeout(d.minutes) === null ? LIMIT_PROBLEM : null;
 }
 
-// The commands of the rows, or null while a row has a problem.
+// The problem of a row of an editor. picked: the rows that run on the plan screen. Absent: every row runs. A row that does not run
+// clashes with no name.
+export function rowProblem(d: CommandDraft, drafts: readonly CommandDraft[], picked?: ReadonlySet<string>): string | null {
+  if (picked && !picked.has(d.id)) return draftProblem(d);
+  return draftProblem(d, picked ? drafts.filter((x) => picked.has(x.id)) : drafts);
+}
+
+// task-builder-v2.md section 6.1 and check-order.md item 5: a warning, not a problem, for an argument such as <dir>.
+export function placeholderWarning(line: string): string | null {
+  const r = splitArgv(line);
+  return "argv" in r && r.argv.some((a) => /<[^<>]+>/.test(a))
+    ? "The command holds a placeholder such as <dir>. Replace it with a real value."
+    : null;
+}
+
+// The commands of the rows, or null while a row has a problem or two rows share a name.
 export function draftsToCommands(drafts: readonly CommandDraft[]): TaskCommand[] | null {
+  if (nameClash(drafts) !== null) return null;
   const out: TaskCommand[] = [];
   for (const d of drafts) {
     const r = splitArgv(d.line);

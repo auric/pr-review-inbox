@@ -83,7 +83,10 @@ function buildingText(p: TaskRowDto["progress"]): string {
 }
 
 // part-session.md section 9.4: a "<kind>/<cause>" key with its own status. Other causes take the status of their kind.
-const CAUSE_NEEDS: Partial<Record<string, string>> = { "error/restart": "Needs you: the app restarted" };
+const CAUSE_NEEDS: Partial<Record<string, string>> = {
+  "error/restart": "Needs you: the app restarted",
+  "red/check_env": "Needs you: a check cannot run on this computer",
+};
 export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
   const p = r.progress;
   if (r.state === "done") return { text: r.closedAt === null ? "Done" : "Closed", needsYou: false };

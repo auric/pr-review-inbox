@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// docs/plans/review-v2/spec.md sections 6.3 and 6.7: the setup commands in the browser. The plan screen lists the saved commands first,
-// then the new ones, each with "Time limit (min)" and the reason of a proposed limit. The Log tab shows the output of a running setup
+// docs/plans/review-v2/spec.md sections 6.3 and 6.7: the setup commands in the browser. The plan screen lists the commands by kind
+// (task-builder-v2.md section 6.2), each with "Time limit (min)" and the reason of a proposed limit. The Log tab shows the output of a running setup
 // command. A setup command that reaches its time limit shows "time limit" and the status with "Change the time limit". The dialog
 // saves the new limit, and "Run setup again" lets the build go on. Settings > Commands has its own heading and section link, and it
 // saves the "Shared task folder" switch.
@@ -132,7 +132,7 @@ const more = async (page: Page, item: string) => {
   await page.getByRole("menuitem", { name: item }).click();
 };
 
-test("setup: saved commands first, the time limit with its reason, the live output, Change the time limit, and the shared task folder", async ({
+test("setup: commands by kind, the time limit with its reason, the live output, Change the time limit, and the shared task folder", async ({
   page,
 }) => {
   test.setTimeout(600_000);
@@ -162,17 +162,19 @@ test("setup: saved commands first, the time limit with its reason, the live outp
   expect((await api(page, "PUT", SETTINGS, saved)).status).toBe(200);
   await page.reload();
 
-  // 1. The plan screen: the saved command first, then the proposals. Setup gets the proposed limit with Claude's reason.
+  // 1. The plan screen: the commands by kind, the saved one before the proposals of its kind. Setup gets the proposed limit with Claude's
+  // reason. Each command shows that it runs on this computer.
   await buildTask(page, REPO);
   await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
   await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();
   await expect(status(page)).toHaveText("The plan is ready: small, 1 PR, about 5 changed lines.", { timeout: 60_000 });
-  await expect.poll(() => names(page)).toEqual(["version", "deps", "test"]);
+  await expect.poll(() => names(page)).toEqual(["deps", "test", "version"]);
   await expect(page.getByLabel("Time limit (min) of version")).toHaveValue("10");
   await expect(page.getByLabel("Time limit (min) of deps")).toHaveValue("0.1");
   await expect(page.getByLabel("Time limit (min) of test")).toHaveValue("10");
   await expect(page.locator("[data-command-row]", { hasText: REASON })).toHaveCount(1);
-  await expect(page.getByText("Commands run one at a time, top to bottom. Setup runs first, once per worktree.")).toBeVisible();
+  await expect(page.getByText("Commands run one at a time by kind: setup, build, test, then lint.")).toBeVisible();
+  await expect(page.locator("[data-command-local='runs']")).toHaveCount(3);
   await page.getByRole("checkbox", { name: "I understand" }).check();
   await primary(page).click();
 
@@ -204,9 +206,9 @@ test("setup: saved commands first, the time limit with its reason, the live outp
   await expect
     .poll(async () => (await settings(page)).commands.map((c) => [c.name, c.timeoutSec]))
     .toEqual([
-      ["version", 600],
       ["deps", 60],
       ["test", 600],
+      ["version", 600],
     ]);
 
   // 4. Run setup again passes with the new limit, and the build goes on to the own review.

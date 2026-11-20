@@ -430,6 +430,8 @@ export const BLOCKED_CAUSES = [
   "stall",
   "loop",
   "turns",
+  // task-builder-v2.md section 6.3: a check cannot run on this computer. TB-5 makes it the ask check_env.
+  "check_env",
 ] as const;
 export type BlockedCause = (typeof BLOCKED_CAUSES)[number];
 // task.blocked_json: why the loop waits for the user. null while Claude or the app works, and while the app waits for colleagues.
@@ -476,6 +478,8 @@ export const REASON_EXITS = {
   "question/task_done": PLAIN,
   "question/paused": PLAIN,
   "red/checks": RUN_ENDS,
+  // task-builder-v2.md section 6.3: Continue runs the checks again and starts no fix run.
+  "red/check_env": { primary: exit("Run the checks again", "POST /tasks/:id/resume"), other: [SEE_WHY, STOP, LEAVE] },
   "red/setup": { primary: CONTINUE, other: [SEE_WHY, STOP] },
   "red/setup_time": { primary: exit("Change the time limit", "PUT /repos/:project/:repo/task-settings"), other: [CONTINUE, SEE_WHY, STOP] },
   "red/update": {
@@ -548,6 +552,21 @@ export const taskCommand = z.object({
   timeoutSec: z.number().int().min(1).max(COMMAND_TIMEOUT_MAX_SEC),
 });
 export type TaskCommand = z.infer<typeof taskCommand>;
+
+// task-builder-v2.md section 6.2 (D9): the run order of the commands is setup, build, test, lint, and the list order inside a kind.
+export const byKind = <T extends { kind: CommandKind }>(list: readonly T[]): T[] =>
+  [...list].sort((a, b) => COMMAND_KINDS.indexOf(a.kind) - COMMAND_KINDS.indexOf(b.kind));
+// check-order.md fix 3: the first name that two commands share, or null. The proofs of a plan and the Log rows name a command.
+export function nameClash(list: readonly { name: string }[]): string | null {
+  const seen = new Set<string>();
+  for (const c of list) {
+    const name = c.name.trim();
+    if (seen.has(name)) return name;
+    seen.add(name);
+  }
+  return null;
+}
+export const nameClashText = (name: string) => `Two commands have the name ${name}. Give each command its own name.`;
 
 // docs/plans/review-v2/spec.md section 6.21: the commands that Claude may run with the Bash tool. allowlist: the rules Bash(<pattern>).
 // any: every command except the fixed deny list. unrestricted: every command except git and the Bitbucket and Jira hosts
@@ -713,6 +732,8 @@ export const stepDetail = z.object({
   commands: z
     .array(
       z.object({
+        // The ID of the command in commands_json. null in a row from before task-builder-v2.md section 6.2.
+        id: z.string().nullable().default(null),
         name: z.string(),
         argv: z.array(z.string()),
         exit: z.number().int().nullable(),
@@ -720,6 +741,8 @@ export const stepDetail = z.object({
         tail: z.string(),
         // The reason when the command never started, such as "Not found: .venv/bin/python". null: it started.
         notRun: z.string().nullable().default(null),
+        // task-builder-v2.md section 6.2: the app did not start the command, because a build before it failed. notRun names the build.
+        skipped: z.boolean().default(false),
         // running: the command runs now, and tail is its output so far. timedOut: the command reached its time limit timeoutSec.
         running: z.boolean().default(false),
         timedOut: z.boolean().default(false),
@@ -999,6 +1022,13 @@ export const specResult = z.object({
         }),
       )
       .max(10),
+    // task-builder-v2.md section 6.1: the saved commands of ./context/commands.md that the plan keeps. null: a result from before.
+    keep: z
+      .array(exact(z.string().max(40)))
+      .max(20)
+      .nullable()
+      .default(null)
+      .describe("The IDs of the saved commands in ./context/commands.md that the plan needs."),
     services: z.array(z.string().max(200)).max(10),
     notes: z.string().max(2000),
     // spec.md section 6.21 (D2): the command patterns that the implement steps run themselves.
@@ -1085,6 +1115,12 @@ export const implementResult = z.object({
     .object({ cause: z.enum(["code", "test", "infra", "unknown"]), quote: z.string().max(500) })
     .nullable()
     .default(null),
+  // task-builder-v2.md section 6.3: a fix run of red checks says that the fault is outside the code. quote: a line of the check output.
+  checkCause: z
+    .object({ cause: z.enum(["env", "code"]), quote: z.string().max(500) })
+    .nullable()
+    .default(null)
+    .describe("env: a broken command, a missing tool, or a fault of the computer or the network. null: no check failure to judge."),
   // task-builder-v2.md section 5.4 (D10): the open plan tasks that need the app or the user. The app moves each one to the checklist.
   outside: z
     .array(

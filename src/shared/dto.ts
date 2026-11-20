@@ -1946,9 +1946,9 @@ export type TaskRowDto = {
 export type TaskInterviewDto = { round: number; summary: string; unknowns: string[]; done: boolean };
 
 // The checked plan of the newest spec run (spec.md sections 6.1 and 6.4). proposed: the size of Claude. minimum: the lowest size that
-// the app rules allow; rules gives their lines. missing: the map entries that name no code at base. commands: the proposed commands,
-// then the saved ones of the repository. warning: the approval needs the first-use warning. approved: a medium or large plan waits
-// for its spec PR.
+// the app rules allow; rules gives their lines. missing: the map entries that name no code at base. commands: the saved commands of the
+// repository and the proposed ones, in run order. warning: the approval needs the first-use warning. approved: a medium or large plan
+// waits for its spec PR.
 export type TaskPlanDto = {
   proposed: TaskSize;
   minimum: TaskSize;
@@ -1956,8 +1956,15 @@ export type TaskPlanDto = {
   budget: number;
   missing: number;
   base: string;
-  // timeoutReason: why Claude proposes a longer time limit (spec.md section 6.3).
-  commands: (TaskCommand & { saved: boolean; timeoutReason?: string })[];
+  // timeoutReason: why Claude proposes a longer time limit (spec.md section 6.3). task-builder-v2.md section 6.1: unused, a saved command
+  // that the plan does not keep, starts unticked. local: argv[0] runs here, is missing, or is a refused cmd.exe script. null: only the
+  // run can judge it, such as a path in the repository.
+  commands: (TaskCommand & {
+    saved: boolean;
+    timeoutReason?: string;
+    unused: boolean;
+    local: "runs" | "missing" | "refused" | null;
+  })[];
   warning: boolean;
   approved: boolean;
   // spec.md section 6.20.4, sub-task mode only (else null and []). maxOpen: the open PRs at once that Claude proposes. starts: the start

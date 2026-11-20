@@ -537,7 +537,7 @@ Wave 1 makes one real task reach an open PR (Gate U1). One implementer at a time
 - TB-D0. Docs (implementer): spec.md 6.33, these rows, CLAUDE.md status, docs/smoke-task.md part V. Built.
 - TB-1. Manifest and prompts (implementer): capabilities.ts, the spec, interview, and implement prompt lines, TaskDto.capabilities. AC-TB1 to AC-TB3. Built.
 - TB-2. Plan owners and checklist (implementer-xhigh): proof, where, external, task_external, `[-]` tasks. AC-TB4 to AC-TB7. Built.
-- TB-3. Checks (implementer-xhigh): kind order, skip after a failed build, env or code class, the approval program check. AC-TB8 to AC-TB10. Open.
+- TB-3. Checks (implementer-xhigh): kind order, skip after a failed build, env or code class, the approval program check. AC-TB8 to AC-TB10. Built.
 - TB-4. Files from Claude (implementer): ./out, the copy with lstat and caps, the download route. AC-TB11. Open.
 - Gate U1 (user): docs/smoke-task.md part V. Open.
 - TB-5. Asks (implementer-xhigh): ASK_CAUSES, ASK_EFFECTS, /asks/:ask, answers per key, assumptions. AC-TB12 to AC-TB15. After Gate U1. Open.

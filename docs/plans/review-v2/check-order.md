@@ -1,6 +1,6 @@
 # Task check order
 
-Status: analysis and fix plan of 2026-11-19. Not started. Fix 1 changes the "top to bottom" run rule of spec.md section 6.3, so it waits for the user's sign-off.
+Status: analysis and fix plan of 2026-11-19. Fixes 1 to 4 are folded into TB-3 of docs/plans/task-builder-v2.md and built. The user signed off the kind order (D9) with the v2 design. Fix 5 stays out; only the warning for an argument such as <dir> is built.
 
 ## 1. Problem
 
