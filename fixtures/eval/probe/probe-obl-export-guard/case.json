@@ -23,7 +23,7 @@
       "path": "packages/units/src/length.ts",
       "side": "new",
       "lines": [2, 2],
-      "why": "One meter is 3.28084 feet, so feet / FEET_PER_METER gives meters. A finding that the factor is inverted or wrong is wrong."
+      "why": "Multiplying by 0.3048 is exact. A finding that it must divide is wrong."
     }
   ]
 }

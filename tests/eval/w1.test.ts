@@ -9,6 +9,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseAb } from "../../scripts/eval/ab";
+import { loadCases, setDir } from "../../scripts/eval/cases";
 import { parseLabel } from "../../scripts/eval/label";
 import { parseOptions } from "../../scripts/eval/run";
 import type { CaseRun, EvalResult } from "../../scripts/eval/score";
@@ -18,6 +19,8 @@ import { dataDir, dbPath } from "../../src/server/config";
 console.log(`w1.test.ts imported from ${Bun.resolveSync("../../scripts/eval/w1", import.meta.dir)}`);
 
 const ROOT = resolve(import.meta.dir, "../..");
+// The smoke step runs the probe set once.
+const PROBE = loadCases("all", setDir("probe")).length;
 const FAKE = join(ROOT, "tests/support/fake-claude.ts");
 const TMP = mkdtempSync(join(tmpdir(), "rl-eval-w1-test-"));
 const LIVE = join(TMP, "live");
@@ -140,7 +143,7 @@ function deps(s: Script = {}) {
       calls.push({ name: "run", argv });
       // run.ts sets this and does not restore it.
       process.env.REVIEW_LOOP_DATA_DIR = join(TMP, "run-temp");
-      save(flag(argv, "--out"), result(16, 1, s.smoke));
+      save(flag(argv, "--out"), result(PROBE, 1, s.smoke));
       return 0;
     },
     ab: async (argv) => {
@@ -219,7 +222,7 @@ describe("eval:w1", () => {
     expect(f.dataAtAb()).toBe(LIVE);
     expect(markers()).toEqual(["smoke", "baseline", "labels"]);
     expect(r.stdout).toContain("Claude Code ");
-    expect(r.stdout).toContain("Smoke: 16 case runs, 0 failed, $8.00");
+    expect(r.stdout).toContain(`Smoke: ${PROBE} case runs, 0 failed, $${(PROBE / 2).toFixed(2)}`);
     expect(r.stdout).toContain(
       "Measured on 2026-11-14: about 8 minutes and $4 per case run (large cases 13-18 minutes). The baseline runs --repeat 3.",
     );
@@ -227,7 +230,7 @@ describe("eval:w1", () => {
     // The summary: aggregates and ordinals between the markers, no case text and no path.
     const summary = r.stdout.slice(r.stdout.indexOf(BEGIN), r.stdout.indexOf(END));
     expect(r.stdout.indexOf(PASTE)).toBeLessThan(r.stdout.indexOf(BEGIN));
-    expect(summary).toContain("Steps: smoke $8.00");
+    expect(summary).toContain(`Steps: smoke $${(PROBE / 2).toFixed(2)}`);
     expect(summary).toContain("labels $0.46");
     expect(summary).toContain("Baseline: 16 cases x 3 repeats, 48 case runs, 0 failed runs, $24.00.");
     expect(summary).toContain("case 2");
@@ -246,7 +249,7 @@ describe("eval:w1", () => {
     const f = deps({ smoke: { status: "failed", errorKind: "process" } });
     const r = await go(["--results", results, "--yes"], f.d);
     expect(r.code).toBe(1);
-    expect(r.stderr).toContain("The smoke step failed: 1 of 16 case runs failed.");
+    expect(r.stderr).toContain(`The smoke step failed: 1 of ${PROBE} case runs failed.`);
     expect(f.calls.map((c) => c.name)).toEqual(["run"]);
     expect(markers()).toEqual([]);
   });

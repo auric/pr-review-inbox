@@ -1,0 +1,30 @@
+{
+  "id": "probe-obl-criterion-unmet",
+  "title": "Password rules meet two criteria, and the PR skips the audit criterion in silence",
+  "language": "typescript",
+  "pr": {
+    "title": "Check the password rules at sign-up",
+    "description": "Adds the password rules of the sign-up: at least 12 characters and at least one digit. A weak password gets status 400 with every broken rule."
+  },
+  "task": "Add password rules to the sign-up.\n\nAcceptance criteria:\n1. A password has at least 12 characters and at least one digit.\n2. A rejected sign-up gets status 400 with the list of every rule that the password breaks.\n3. Each rejected sign-up writes the audit event signup.rejected with the email and the broken rules. The event never holds the password.",
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/signup/handler.ts",
+      "side": "new",
+      "lines": [8, 8],
+      "severityMin": "minor",
+      "module": "intent",
+      "note": "Criterion 3 is not met: a rejected sign-up writes no audit event signup.rejected. The change has no audit call and no test for it, and the PR text does not mention it. Call audit(\"signup.rejected\", ...) with the email and the broken rules before the 400 reply."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/signup/password.ts",
+      "side": "new",
+      "lines": [6, 6],
+      "why": "A password of exactly 12 characters passes, as criterion 1 asks for at least 12. A finding of an off-by-one here is wrong."
+    }
+  ]
+}

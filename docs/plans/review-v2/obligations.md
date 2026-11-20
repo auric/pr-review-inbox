@@ -130,13 +130,14 @@ export const obligation = z.object({
   evidence: z.string().max(1000).describe("met: path:line. deferred: the line that names the other pull request or ticket. unsure: what is missing."),
   severity: z.enum(severities),
   duplicateOf: lineNo.nullable().default(null).describe("For covered: the block number in ./context/candidates.md. Else null."),
-  finding: defect.nullable().default(null).describe("For missing: the place, the title, and the body. Else null."),
+  finding: defect.extend({ cause: z.object(place).nullable().default(null) }).nullable().default(null).describe("For missing: the place, the title, the body, and the cause. Else null."),
 });
 // verifyResult gets: obligations: z.array(obligation).max(MAX_OBLIGATIONS).default([])
 // verifyJsonSchema(obligations = false) leaves the key out when obligations is false.
 ```
 
 - `defect` is the object of verifyVerdict.finding (review.ts:145-149), moved to a named const. Its JSON schema must not change.
+- The obligation finding adds a cause to `defect`. The anchor can be the unchanged line that must change, such as a doc line. The cause is then the changed line that makes the obligation. The validator keeps an unchanged anchor only with a changed cause.
 - MAX_OBLIGATIONS 5 is the low end of the other app's 5 to 10 points. It is unverified for our runs. Gate A prints the counts.
 
 ### 4.3 OBLIGATION_RULES (draft, rl-verify only)
@@ -170,7 +171,7 @@ export const obligation = z.object({
 26. "covered: a candidate, a question, or a risk in ./context/candidates.md already raises the point. Set duplicateOf to its number."
 27. "missing: the head does not meet the obligation, and no line defers it. Give finding."
 28. "unsure: no file or tool of this run settles it. In evidence, name what is missing."
-29. "In finding, anchor the place on the changed line that makes the obligation, such as the changed signature or export."
+29. "In finding, anchor the place on the line that must change. That line can be in unchanged code." Then: "When the anchor is in unchanged code, set cause to the changed line that makes the obligation." Then: "For example, cause is the changed signature or export. Else set cause to null."
 30. "In body, name the file and line that must change, the consumer, and a fix direction, in 3 sentences or fewer."
 31. "Set the severity of a missing obligation like this. Never use blocker."
 32. "- major: the change does not meet a criterion, in full or in part, and no line defers the rest."
@@ -329,17 +330,23 @@ The Check cell gets one line for each group with an obligations run: "Obligation
 
 ### Probe cases (WP-OB2)
 
-Seven cases in fixtures/eval/probe/, in the format of probe-task-csv-quoting/case.json. No real names.
+Eleven cases in fixtures/eval/probe/, in the format of probe-task-csv-quoting/case.json. No real names. A must-find on a false doc line also matches the doc line (alt).
 
 | ID | Seeded | Expected |
 |---|---|---|
-| probe-obl-guide-signature | A public function gets a new parameter and per-OS behavior. docs/guide.md shows the old call. | Must-find, minor, on the changed signature line. |
+| probe-obl-guide-signature | A public function gets a new parameter and per-OS behavior. docs/guide.md shows the old call. | Must-find, minor, on the changed signature line or on docs/guide.md:5. |
 | probe-obl-export-guard | A package exports a new symbol. tests/exports.test.ts guards the exports of each sibling package, but not of this one. | Must-find, minor, on the changed export line. |
-| probe-obl-doc-contract | docs/api.md says that the lookup returns null when nothing matches. The change makes it throw. | Must-find, minor, on the changed throw line. |
+| probe-obl-doc-contract | docs/api.md says that the lookup returns null when nothing matches. The change makes it throw. | Must-find, minor, on the changed throw line or on docs/api.md:7. |
 | probe-obl-criterion-deferred | The task has two criteria. The change meets one in part. The PR text says "the rest comes later" with no ticket key. | Must-find, minor, on the changed line of that criterion. |
 | probe-obl-met-guide | Clean. The change updates the signature and the guide. | Trap on the guide example. |
 | probe-obl-met-guard | Clean. The change adds an export and its guard entry. | Trap on the export line. |
 | probe-obl-met-followup | Clean. As criterion-deferred, but the PR text names the follow-up ticket SHOP-42. | Trap on the partial line. |
+| probe-obl-platform-guard | A C library gets a macOS build. The Linux build has a symbol script and a symbol test. macOS has neither. | Must-find, minor, on the macOS branch of CMakeLists.txt. |
+| probe-obl-guide-unnamed | The upload limit grows. The user guide states the old size in prose and names no changed symbol. | Must-find, minor, on the guide line or on the changed limit. |
+| probe-obl-header-platform | Linux now returns -1 on a clock failure. The doc comment of the public header still says 0. The header is unchanged code. | Must-find, minor, on the header doc line only. |
+| probe-obl-criterion-unmet | The task has three criteria. The change meets two and skips the audit criterion with no word in the PR text. | Must-find, minor, on the reject line of the handler. |
+
+- probe-obl-guide-unnamed, probe-obl-header-platform, and probe-obl-criterion-unmet model omissions that the finder missed in real reviews. Gate A rule 5 does not count them yet. The user sets their threshold.
 
 - The set fingerprint covers the local set only (run.ts:968). New probe cases still change the case list, so both sides run fresh.
 - Whether eval:ab refuses an older probe baseline is unverified.
@@ -377,7 +384,7 @@ Ship rule, candidate against the reference:
 - AC-R49. Without the mode, each prompt byte, the verify --json-schema, candidates.md, and the start rule stay the same. A snapshot test proves it.
 - AC-R50. rl-verify holds OBLIGATION_RULES only with the mode on. rl-verifier never holds them. Above VERIFY_SPLIT blocks, the delegation keeps the obligations in the main agent. verifyMaxTurns counts MAX_OBLIGATIONS as blocks.
 - AC-R51. settle gives each listed obligation exactly one outcome by rows O1 to O8. The counts add up to listed. listed is at most MAX_OBLIGATIONS.
-- AC-R52. A found obligation is a finding item with category obligation, module core, evidenceStatus code, confidence high, an empty trigger, the verify mark confirmed, and a severity of major or lower. Its anchor is on a changed line. Its cite quote is in the cited file at the head.
+- AC-R52. A found obligation is a finding item with category obligation, module core, evidenceStatus code, confidence high, an empty trigger, the verify mark confirmed, and a severity of major or lower. Its anchor or its cause is on a changed line. Its cite quote is in the cited file at the head.
 - AC-R53. The cite check reads repository files from the cache clone at the head, and only the three named files of ./context. Each other path fails the check.
 - AC-R54. The obligation check never changes summary.verify, never adds a gap, and never makes the run incomplete. This is also true when the check fails with zero blocks.
 - AC-R55. The run line shows one toggle "Obligations: N checked: …" with the counts above zero, and one entry per obligation. A run without the key, or with listed 0, shows no toggle. Review quality shows the sums and the posted and discarded obligation findings per profile and prompt version. Eval run files hold the counts only.

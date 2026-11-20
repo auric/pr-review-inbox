@@ -630,7 +630,7 @@ async function anchorAll(ws: Workspace, made: { n: number; finding: Finding }[])
   const out = new Map<number, AnchoredFinding>();
   if (!made.length) return out;
   const findings = made.map((m) => m.finding);
-  const blobs = await readBlobs(ws, findings);
+  const blobs = await readBlobs(ws, [...findings, ...findings.flatMap((f) => (f.cause ? [f.cause] : []))]);
   const coverage = { read: [], skipped: [], unavailable: [], notChecked: [] };
   const result: ReviewResult = { summary: "", risks: [], questions: [], coverage, findings, answered: [] };
   const anchor = () => validate({ result, diff: ws.diff, ...blobs, agents: [] });
@@ -672,9 +672,10 @@ export const citeHolds = (quote: string, text: string | undefined) => {
   return q !== "" && text !== undefined && collapse(text).includes(q);
 };
 
-// section 4.6: the finding of a missing obligation. Step 6 lowers blocker to major.
-export const obligationFinding = (o: Obligation, at: Defect): Finding =>
-  answerFinding(
+// section 4.6: the finding of a missing obligation. Step 6 lowers blocker to major. The validator keeps an anchor on unchanged code
+// only with a changed cause.
+export const obligationFinding = (o: Obligation, at: Defect & { cause?: Finding["cause"] }): Finding => ({
+  ...answerFinding(
     {
       severity: o.severity === "blocker" ? "major" : o.severity,
       reason: `${o.must.trim()} ${o.consumer.trim()}`,
@@ -682,7 +683,9 @@ export const obligationFinding = (o: Obligation, at: Defect): Finding =>
     },
     at,
     "obligation",
-  );
+  ),
+  cause: at.cause ?? null,
+});
 
 // placeObligations, by list index: the missing obligations with a passed cite, and those with a place that the validator kept.
 export type PlacedObligations = { cited: ReadonlySet<number>; placed: ReadonlyMap<number, AnchoredFinding> };

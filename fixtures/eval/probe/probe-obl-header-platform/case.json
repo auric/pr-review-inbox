@@ -1,0 +1,29 @@
+{
+  "id": "probe-obl-header-platform",
+  "title": "The Linux clock reports a failure as -1, and the public header keeps the old return value",
+  "language": "cpp",
+  "pr": {
+    "title": "Report a clock failure on Linux as -1",
+    "description": "On Linux, clock_uptime_ms() now returns -1 when the monotonic clock fails, so a caller can tell a failure from an uptime of 0. The CLI prints an error then. QueryPerformanceCounter never fails on Windows XP and later, so the Windows branch stays."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "include/clock.h",
+      "side": "new",
+      "lines": [7, 7],
+      "severityMin": "minor",
+      "module": "docs",
+      "note": "The doc comment of clock_uptime_ms in the public header include/clock.h still says that Linux returns 0 when the monotonic clock fails. The change returns -1 there, so a caller that follows the header checks for 0 and takes -1 as an uptime. The header line is unchanged code. Update the Linux line of the comment."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/main.c",
+      "side": "new",
+      "lines": [12, 12],
+      "why": "%lld with a cast to long long prints an int64_t portably. A finding that it must use PRId64 or that the cast loses data is wrong."
+    }
+  ]
+}

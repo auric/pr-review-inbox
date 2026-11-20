@@ -38,6 +38,7 @@ import {
   settle,
 } from "../../src/server/review/judge";
 import { buildVerifyPrompt, type PromptInput } from "../../src/server/review/prompt";
+import { validate } from "../../src/server/review/validate";
 import { type Obligations, obligationOutcomes } from "../../src/shared/dto";
 import {
   type AnchoredFinding,
@@ -97,7 +98,7 @@ const V = (candidate: number, verdict: VerifyVerdict["verdict"]): VerifyVerdict 
   question: "",
   finding: null,
 });
-const PLACE: Defect = {
+const PLACE: Defect & { cause: null } = {
   path: "src/a.ts",
   side: "new",
   line: 9,
@@ -105,6 +106,7 @@ const PLACE: Defect = {
   anchorText: "line 9",
   title: "The guide shows the old call",
   body: "docs/guide.md:4 shows run(a). Readers call it wrong. Show run(a, os).",
+  cause: null,
 };
 const MUST = "docs/guide.md must show the new signature.";
 const O = (status: Obligation["status"], o: Partial<Obligation> = {}): Obligation => ({
@@ -237,7 +239,7 @@ describe("no change without the mode (AC-R49)", () => {
 
 describe("the verify schema (AC-R49, section 4.2)", () => {
   type Node = { properties?: Record<string, Node>; items?: Node; required?: string[]; description?: string; anyOf?: Node[] };
-  test("only the mode adds the obligations key; the finding of an obligation has the shape of the verdict finding", () => {
+  test("only the mode adds the obligations key; the finding of an obligation is the verdict finding plus a cause", () => {
     const off = verifyJsonSchema() as Node;
     const on = verifyJsonSchema(true) as Node;
     expect(Object.keys(off.properties ?? {})).toEqual(["verdicts", "coverage"]);
@@ -259,8 +261,14 @@ describe("the verify schema (AC-R49, section 4.2)", () => {
     ]);
     // The --json-schema lists each key as required, as for the defaults of the verdict.
     expect(item.required).toEqual(Object.keys(item.properties ?? {}));
-    const shape = (n: Node | undefined) => JSON.stringify(n?.anyOf?.find((x) => x.properties)?.properties);
-    expect(shape(item.properties?.finding)).toBe(shape(off.properties?.verdicts?.items?.properties?.finding));
+    const props = (n: Node | undefined) => n?.anyOf?.find((x) => x.properties);
+    const own = props(item.properties?.finding);
+    const verdict = props(off.properties?.verdicts?.items?.properties?.finding);
+    const { cause, ...rest } = own?.properties ?? {};
+    expect(JSON.stringify(rest)).toBe(JSON.stringify(verdict?.properties));
+    expect(own?.required).toEqual([...(verdict?.required ?? []), "cause"]);
+    // The cause has the place keys of the anchor.
+    expect(Object.keys(props(cause)?.properties ?? {})).toEqual(["path", "side", "line", "lineEnd", "anchorText"]);
     // A result stored before the key parses with no obligations.
     expect(verifyResult.parse({ verdicts: [], coverage: NONE }).obligations).toEqual([]);
   });
@@ -397,6 +405,65 @@ describe("the cite check (AC-R53, section 4.4)", () => {
     expect(obligationFinding(o, { ...PLACE, body: " " }).body).toBe(
       "docs/guide.md must show the new signature. A reader of docs/guide.md.",
     );
+  });
+
+  // The shape of probe-task-lockout-reset: the line that must change is unchanged code, and the changed line makes the obligation.
+  test("an anchor on unchanged code stays with a changed cause; without a cause the obligation is open", () => {
+    const diff = [
+      "diff --git a/auth/login.py b/auth/login.py",
+      "--- a/auth/login.py",
+      "+++ b/auth/login.py",
+      "@@ -1,3 +1,3 @@",
+      " def check(user):",
+      "-    limit = 3",
+      "+    limit = 5",
+      " reset = None",
+      "",
+    ].join("\n");
+    const head = "def check(user):\n    limit = 5\nreset = None\n";
+    const base = "def check(user):\n    limit = 3\nreset = None\n";
+    const at = { ...PLACE, path: "auth/login.py", line: 3, anchorText: "reset = None" };
+    const cause = { path: "auth/login.py", side: "new" as const, line: 2, lineEnd: null, anchorText: "    limit = 5" };
+    const run = (finding: Defect & { cause: typeof cause | null }) => {
+      const o = O("missing", { finding });
+      const f = obligationFinding(o, finding);
+      const v = validate({
+        result: { summary: "", risks: [], questions: [], coverage: NONE, findings: [f], answered: [] },
+        diff,
+        newFiles: new Map([["auth/login.py", head]]),
+        oldFiles: new Map([["auth/login.py", base]]),
+        agents: [],
+      });
+      const k = v.kept[0];
+      return { f, v, end: obligationOutcome(o, { cited: true, at: k == null ? undefined : v.findings[k], blocks: new Map() }) };
+    };
+    const kept = run({ ...at, cause });
+    expect(kept.f.cause).toEqual(cause);
+    expect(kept.v.dropped).toEqual([]);
+    expect(kept.end.outcome).toBe("found");
+    expect(kept.end.item?.cause).toMatchObject({ ...cause, anchor: { state: "exact" } });
+    const lost = run({ ...at, cause: null });
+    expect(lost.v.dropped.map((d) => d.reason)).toEqual(["unchanged"]);
+    expect(lost.end).toEqual({ outcome: "open", note: "Missing, but the check could not place it." });
+  });
+
+  test("the cause lines show only with the mode, and each line has at most 20 words", () => {
+    const own = [
+      "In finding, anchor the place on the line that must change. That line can be in unchanged code.",
+      "When the anchor is in unchanged code, set cause to the changed line that makes the obligation.",
+      "For example, cause is the changed signature or export. Else set cause to null.",
+    ];
+    for (const l of own) expect(obligationRules(false, false)).toContain(l);
+    for (const q of [false, true])
+      for (const r of [false, true]) {
+        const off = lines(verifyAgent(general, GOAL, q, [], r).prompt);
+        const on = lines(verifyAgent(general, GOAL, q, [], r, true).prompt);
+        for (const l of own) {
+          expect(off).not.toContain(l);
+          expect(on).toContain(l);
+        }
+      }
+    expect(lines(verifierAgent(bound, GOAL, true, [], true).prompt).filter((l) => own.includes(l))).toEqual([]);
   });
 });
 

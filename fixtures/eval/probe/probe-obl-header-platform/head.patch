@@ -1,0 +1,31 @@
+diff --git a/src/clock.c b/src/clock.c
+index 31f69f2..ab0c807 100644
+--- a/src/clock.c
++++ b/src/clock.c
+@@ -13,7 +13,7 @@ int64_t clock_uptime_ms(void) {
+ 
+ int64_t clock_uptime_ms(void) {
+   struct timespec ts;
+-  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
++  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
+   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+ }
+ #endif
+diff --git a/src/main.c b/src/main.c
+index 36a0d57..be4da3a 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -3,6 +3,12 @@
+ #include "clock.h"
+ 
+ int main(void) {
+-  printf("%lld\n", (long long)clock_uptime_ms());
++  /* A clock failure gives a negative value. */
++  int64_t ms = clock_uptime_ms();
++  if (ms < 0) {
++    fputs("uptime: the clock failed\n", stderr);
++    return 1;
++  }
++  printf("%lld\n", (long long)ms);
+   return 0;
+ }

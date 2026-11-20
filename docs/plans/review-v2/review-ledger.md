@@ -9,6 +9,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 - The variants "preexisting" (WP-V6) and "callers" (the D2 caller rule) are built as opt-in eval variants (81d86d4). No eval run has measured them yet.
 - The seeded ground truth design exists (5537603, seeded-truth.md). The user approved the build. Its section 14 holds 8 open decisions. Nothing is built.
 - WP-JC5 and WP-JC-E are in progress on a branch. They are not on main.
+- The variant "obligations" now keeps a missing obligation anchored on an unchanged line, such as a doc line, when its cause is a changed line. Before, the validator dropped it. The probe set gets doc-line alts, an exact export-guard factor, and three new obligation cases (19 cases). The prompt without the variant is unchanged.
 - The shipped code now has 10 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
 
 ## 2. Version-bump trap

@@ -1,0 +1,30 @@
+diff --git a/src/upload/limits.ts b/src/upload/limits.ts
+index cb3692e..15cf303 100644
+--- a/src/upload/limits.ts
++++ b/src/upload/limits.ts
+@@ -1,4 +1,4 @@
+-export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
++export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+ 
+ export function checkSize(bytes: number): void {
+   if (bytes > MAX_UPLOAD_BYTES) throw new RangeError("The file is too large.");
+diff --git a/tests/upload/limits.test.ts b/tests/upload/limits.test.ts
+new file mode 100644
+index 0000000..09a2617
+--- /dev/null
++++ b/tests/upload/limits.test.ts
+@@ -0,0 +1,14 @@
++import { expect, test } from "vitest";
++import { checkSize, MAX_UPLOAD_BYTES } from "../../src/upload/limits";
++
++test("the limit is 25 MB", () => {
++  expect(MAX_UPLOAD_BYTES).toBe(25 * 1024 * 1024);
++});
++
++test("a file of exactly 25 MB uploads", () => {
++  expect(() => checkSize(25 * 1024 * 1024)).not.toThrow();
++});
++
++test("a larger file fails", () => {
++  expect(() => checkSize(25 * 1024 * 1024 + 1)).toThrow(RangeError);
++});

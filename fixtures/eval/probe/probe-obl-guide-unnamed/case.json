@@ -1,0 +1,30 @@
+{
+  "id": "probe-obl-guide-unnamed",
+  "title": "An upload limit grows, and the user guide states the old size in prose",
+  "language": "typescript",
+  "pr": {
+    "title": "Raise the upload limit to 25 MB",
+    "description": "MAX_UPLOAD_BYTES goes from 10 MB to 25 MB. New tests cover the limit."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "docs/user-guide.md",
+      "side": "new",
+      "lines": [7, 7],
+      "alt": [{ "path": "src/upload/limits.ts", "side": "new", "lines": [1, 1] }],
+      "severityMin": "minor",
+      "module": "docs",
+      "note": "docs/user-guide.md still says that a file of up to 10 MB uploads. The change raises the limit to 25 MB, so a reader of the guide thinks that a file of 10 to 25 MB fails. The guide names neither MAX_UPLOAD_BYTES nor checkSize, so a search for the changed symbol misses it. Update the size in the guide."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "tests/upload/limits.test.ts",
+      "side": "new",
+      "lines": [9, 9],
+      "why": "checkSize throws only when bytes > MAX_UPLOAD_BYTES, so a file of exactly 25 MB uploads. A finding that this test must expect a throw is wrong."
+    }
+  ]
+}

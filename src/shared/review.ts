@@ -192,7 +192,17 @@ export const obligation = z.object({
     .describe("met: path:line. deferred: the line that names the other pull request or ticket. unsure: what is missing."),
   severity: z.enum(severities),
   duplicateOf: lineNo.nullable().default(null).describe("For covered: the block number in ./context/candidates.md. Else null."),
-  finding: defect.nullable().default(null).describe("For missing: the place, the title, and the body. Else null."),
+  finding: defect
+    .extend({
+      cause: z
+        .object(place)
+        .nullable()
+        .default(null)
+        .describe("The changed line that makes the obligation, when the anchor is on unchanged code. Else null."),
+    })
+    .nullable()
+    .default(null)
+    .describe("For missing: the place, the title, the body, and the cause. Else null."),
 });
 
 // Results stored before the obligations key get the default.

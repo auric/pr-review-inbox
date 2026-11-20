@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildRepo, type EvalCase, loadCases, SETS } from "../../scripts/eval/cases";
-import type { EvalResult } from "../../scripts/eval/score";
+import { type EvalItem, type EvalResult, matches } from "../../scripts/eval/score";
 import { git } from "../../src/server/review/git";
 import { readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
@@ -47,8 +47,8 @@ const kind = (c: EvalCase) => {
 };
 
 describe("probe set", () => {
-  test("16 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, 1 clean case, 5 missing obligations, and 3 met obligations", () => {
-    expect(cases).toHaveLength(16);
+  test("19 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, 1 clean case, 8 missing obligations, and 3 met obligations", () => {
+    expect(cases).toHaveLength(19);
     const by = Object.groupBy(cases, kind);
     expect(Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v?.length]))).toEqual({
       "wrong claim": 2,
@@ -57,7 +57,7 @@ describe("probe set", () => {
       "met criterion": 1,
       "no requirement": 1,
       clean: 1,
-      "missing obligation": 5,
+      "missing obligation": 8,
       "met obligation": 3,
     });
     // A trap only, and a clean case has no bug. Each PR text is non-empty, so the intent module runs (catalog.ts lacks).
@@ -67,6 +67,22 @@ describe("probe set", () => {
     // The case IDs differ from the other sets, so eval:rescore finds each case by its ID.
     const ids = Object.values(SETS).flatMap((dir) => loadCases("all", dir).map((c) => c.id));
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  // obligations.md section 8: a missing obligation can sit on the false doc line. An item there matches the seeded omission.
+  test("an item on the doc line of each obligation omission matches it, and the next line does not", () => {
+    const item = (path: string, line: number) => ({ path, side: "new" as const, line, lineEnd: line }) as EvalItem;
+    const bug = (id: string) => cases.find((c) => c.id === id)?.bugs[0];
+    for (const [id, path, line] of [
+      ["probe-obl-doc-contract", "docs/api.md", 7],
+      ["probe-obl-guide-signature", "docs/guide.md", 5],
+      ["probe-obl-guide-unnamed", "docs/user-guide.md", 7],
+      ["probe-obl-header-platform", "include/clock.h", 7],
+    ] as const) {
+      const b = bug(id);
+      if (!b) throw new Error(`${id} has no bug.`);
+      expect({ id, hit: matches(item(path, line), b), next: matches(item(path, line + 1), b) }).toEqual({ id, hit: true, next: false });
+    }
   });
 
   test(

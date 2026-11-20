@@ -12,6 +12,7 @@
       "path": "src/catalog/find.ts",
       "side": "new",
       "lines": [7, 7],
+      "alt": [{ "path": "docs/api.md", "side": "new", "lines": [7, 7] }],
       "severityMin": "minor",
       "module": "docs",
       "note": "docs/api.md still says that findSku returns null when no item matches. The change makes it throw NotFoundError, so a caller that follows the doc checks for null and never catches the error. Update the findSku section of docs/api.md."

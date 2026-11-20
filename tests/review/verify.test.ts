@@ -978,6 +978,35 @@ describe("obligations in the verify phase", () => {
   );
 
   test(
+    "AC-R52: a missing obligation on an unchanged doc line stays with its cause on a changed line of another file",
+    async () => {
+      const h = await setup();
+      const cause = { path: "src/server/app.ts", side: "new", line: 22, lineEnd: null, anchorText: "export const b1 = 1;" };
+      h.runner.write({
+        fixture: h.stream(RESULT([])),
+        bySchema: {
+          verify: {
+            verify: CHECKED([
+              OB("missing", {
+                cite: { path: "docs/guide.md", quote: "Call a3 before a4." },
+                finding: at(0, { path: "docs/guide.md", line: 3, anchorText: "Call a3 before a4.", cause }),
+              }),
+            ]),
+          },
+        },
+      });
+      const d = await h.done(h.start("obligations"));
+      expect(d.run.status).toBe("completed");
+      const made = h.findings(d).map((i) => h.payload(i));
+      expect(made.map((p) => [p.path, p.anchor.state, p.anchor.line, p.cause?.path, p.cause?.anchor?.line])).toEqual([
+        ["docs/guide.md", "outside", 3, "src/server/app.ts", 22],
+      ]);
+      expect(d.run.summary?.obligations?.found).toBe(1);
+    },
+    SLOW,
+  );
+
+  test(
     "AC-R51: with blocks, the task line adds the obligations; met, deferred, covered, and unsure make no item; a place off the change drops",
     async () => {
       const h = await setup();

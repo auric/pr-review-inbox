@@ -11,12 +11,12 @@ index 0000000..c819fac
 --- /dev/null
 +++ b/packages/units/src/length.ts
 @@ -0,0 +1,7 @@
-+// One meter is 3.28084 feet (international foot of 0.3048 m).
-+const FEET_PER_METER = 3.28084;
++// The international foot is exactly 0.3048 m.
++const METERS_PER_FOOT = 0.3048;
 +
 +export function toMeters(feet: number): number {
 +  if (!Number.isFinite(feet)) throw new RangeError("feet must be a finite number");
-+  return feet / FEET_PER_METER;
++  return feet * METERS_PER_FOOT;
 +}
 diff --git a/tests/units/length.test.ts b/tests/units/length.test.ts
 new file mode 100644

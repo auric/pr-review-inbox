@@ -1,0 +1,31 @@
+diff --git a/src/signup/handler.ts b/src/signup/handler.ts
+index f218087..8b493a5 100644
+--- a/src/signup/handler.ts
++++ b/src/signup/handler.ts
+@@ -1,8 +1,11 @@
+ import { audit } from "./log";
++import { passwordErrors } from "./password";
+ import type { Reply, SignupRequest } from "./types";
+ import { createUser } from "./users";
+ 
+ export async function signup(req: SignupRequest): Promise<Reply> {
++  const errors = passwordErrors(req.password);
++  if (errors.length) return { status: 400, body: { errors } };
+   const user = await createUser(req.email, req.password);
+   audit("signup.created", { email: req.email });
+   return { status: 201, body: { id: user.id } };
+diff --git a/src/signup/password.ts b/src/signup/password.ts
+new file mode 100644
+index 0000000..c131b65
+--- /dev/null
++++ b/src/signup/password.ts
+@@ -0,0 +1,9 @@
++const MIN_LENGTH = 12;
++
++// Returns the rules that the password breaks. An empty list means that the password is valid.
++export function passwordErrors(password: string): string[] {
++  const errors: string[] = [];
++  if (password.length < MIN_LENGTH) errors.push(`Use at least ${MIN_LENGTH} characters.`);
++  if (!/[0-9]/.test(password)) errors.push("Use at least one digit.");
++  return errors;
++}
