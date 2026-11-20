@@ -727,6 +727,19 @@ export const updateDetail = z.object({
 });
 export type UpdateDetail = z.infer<typeof updateDetail>;
 
+// docs/plans/task-builder-v2.md section 7.6: the caps of the files that one run leaves in ./out.
+export const OUT_FILES_MAX = 20;
+export const OUT_FILE_BYTES = 10 * 1024 * 1024;
+// dir: the folder name under <task dir>/files/claude/. files: the copied files by path under ./out, sorted. skipped: at most
+// OUT_FILES_MAX entries; more counts the rest.
+export const outDetail = z.object({
+  dir: z.string(),
+  files: z.array(z.object({ path: z.string(), size: z.number().int() })),
+  skipped: z.array(z.object({ path: z.string(), reason: z.string() })),
+  more: z.number().int().default(0),
+});
+export type OutDetail = z.infer<typeof outDetail>;
+
 // task_step.detail_json. Every key has a default, so an older row still parses.
 export const stepDetail = z.object({
   commands: z
@@ -800,6 +813,8 @@ export const stepDetail = z.object({
   // A shell step that ended ok: the new files that git does not ignore and that its Bash commands wrote, from the part folder. The commit
   // leaves them out. The next Claude step reads them in context/failure.md (spec.md section 6.21.5).
   bashFiles: z.array(z.string()).default([]),
+  // task-builder-v2.md section 7.6: the files that the run left in ./out and the app kept. null: none, or a row from before.
+  out: outDetail.nullable().default(null),
   // spec.md section 6.18.6.
   instruct: instructDetail.nullable().default(null),
   update: updateDetail.nullable().default(null),

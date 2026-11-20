@@ -282,6 +282,10 @@ async function shots(browser: Browser) {
   await page.locator("[data-primary]", { hasText: "Open the PR" }).waitFor({ timeout: 3 * RUN_MS });
   await rest();
   await save(page, "task-build");
+  // task-builder-v2.md section 7.6: the file that the code run left in ./out, with Download, in the Log tab.
+  await toTop(page.locator("[data-step-out]").first(), 360);
+  await rest();
+  await save(page, "task-files");
   // The base of the task moves (spec.md section 6.18.5). The app checks the base at most once a minute when the view loads, so the page
   // loads again until the row shows "Update from <base>" with the Tell Claude box under it.
   moveDemoBase();

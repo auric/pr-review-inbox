@@ -4,14 +4,16 @@
 // The Log tab (docs/plans/review-v2/spec.md sections 6.7 and 6.12): the steps, newest first, with their commands, exit codes or time
 // limits, the output tails folded (a running command shows its output so far), the saved patch, the commands that the runner ran and the commands that it asked to allow (section 6.21.6), and a
 // link to the run log of each step with a run (RunLog.tsx). A send of the Tell box is one
-// group "Your instructions" with its text, its result, and its steps inside (section 6.18.1). The runs of one session of a part form one
+// group "Your instructions" with its text, its result, and its steps inside (section 6.18.1). A run that left files in ./out lists
+// them with Download (task-builder-v2.md section 7.6). The runs of one session of a part form one
 // group (ps5-plan.md section 4.8).
 import { CircleAlert, CircleCheck, CircleDashed, CircleMinus, LoaderCircle, ScrollText } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { TaskDto, TaskStepDto } from "../../shared/dto";
 import { limitText, type StepDetail } from "../../shared/task";
+import { sizeText } from "../review/tasks";
 import { DECIDED_TEXT, shellText } from "./allow";
 import {
   isComments,
@@ -85,16 +87,16 @@ export function LogTab({
     <ol aria-label="Steps, newest first" className="m-0 grid list-none gap-2 p-0">
       {sessionRows(logRows(t.steps)).map((r) =>
         "rows" in r ? (
-          <SessionRow key={`session-${firstId(r)}`} t={t} g={r} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />
+          <SessionRow key={`session-${firstId(r)}`} t={t} g={r} task={t.id} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />
         ) : (
-          <LogItem key={rowId(r)} r={r} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />
+          <LogItem key={rowId(r)} r={r} task={t.id} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />
         ),
       )}
     </ol>
   );
 }
 
-type RowProps = { runner: string; onRunLog: (run: number) => void; onDiff?: () => void };
+type RowProps = { task: number; runner: string; onRunLog: (run: number) => void; onDiff?: () => void };
 const rowId = (r: LogRow) => ("send" in r ? r.send.id : r.step.id);
 // The run that started the session stays the same while newer rows join, so the group keeps its key.
 const firstId = (g: SessionGroup) => {
@@ -102,8 +104,8 @@ const firstId = (g: SessionGroup) => {
   return r ? rowId(r) : g.part;
 };
 
-function LogItem({ r, runner, onRunLog, onDiff }: RowProps & { r: LogRow }) {
-  if ("send" in r) return <SendRow g={r} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />;
+function LogItem({ r, task, runner, onRunLog, onDiff }: RowProps & { r: LogRow }) {
+  if ("send" in r) return <SendRow g={r} task={task} runner={runner} onRunLog={onRunLog} onDiff={onDiff} />;
   return (
     <li
       id={stepId(r.step.id)}
@@ -111,7 +113,7 @@ function LogItem({ r, runner, onRunLog, onDiff }: RowProps & { r: LogRow }) {
       tabIndex={-1}
       className="grid gap-1.5 rounded-md border bg-card px-3 py-2 outline-offset-2 focus-visible:outline-2"
     >
-      <StepBody s={r.step} runner={runner} onRunLog={onRunLog} />
+      <StepBody s={r.step} task={task} runner={runner} onRunLog={onRunLog} />
     </li>
   );
 }
@@ -136,7 +138,7 @@ function SessionRow({ t, g, ...props }: RowProps & { t: TaskDto; g: SessionGroup
 }
 
 // spec.md section 6.18.1, Step history: the time, the text as plain text (3 lines, then "Show all"), the result, and the steps.
-function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string; onRunLog: (run: number) => void; onDiff?: () => void }) {
+function SendRow({ g, task, runner, onRunLog, onDiff }: RowProps & { g: SendGroup }) {
   const s = g.send;
   const result = sendResult(g, runner);
   const comments = isComments(s);
@@ -177,6 +179,7 @@ function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string
             {n}
           </p>
         ))}
+      {s.detail.out && <OutFiles out={s.detail.out} task={task} step={s.id} runner={runner} />}
       {g.steps.length > 0 && (
         <ol
           aria-label={comments ? "Steps of this comment run, newest first" : "Steps of these instructions, newest first"}
@@ -186,6 +189,7 @@ function SendRow({ g, runner, onRunLog, onDiff }: { g: SendGroup; runner: string
             <li key={x.id} id={stepId(x.id)} tabIndex={-1} className="grid gap-1.5 outline-offset-2 focus-visible:outline-2">
               <StepBody
                 s={x}
+                task={task}
                 runner={runner}
                 onRunLog={onRunLog}
                 onDiff={x.kind === "commit" && x.item !== "restart" ? onDiff : undefined}
@@ -221,17 +225,7 @@ function SendText({ text }: { text: string }) {
   );
 }
 
-function StepBody({
-  s,
-  runner,
-  onRunLog,
-  onDiff,
-}: {
-  s: TaskStepDto;
-  runner: string;
-  onRunLog: (run: number) => void;
-  onDiff?: () => void;
-}) {
+function StepBody({ s, task, runner, onRunLog, onDiff }: RowProps & { s: TaskStepDto }) {
   const look = stepLook(s);
   const st = ICON[look];
   const Icon = st.icon;
@@ -311,6 +305,7 @@ function StepBody({
         );
       })}
       {d.shell && <ShellRows shell={d.shell} runner={runner} />}
+      {d.out && <OutFiles out={d.out} task={task} step={s.id} runner={runner} />}
       {d.allowAsk && (
         <div className="grid gap-0.5 text-xs text-ink-2">
           <p className="m-0">{runner} asked to allow:</p>
@@ -372,6 +367,41 @@ function StepBody({
     </>
   );
 }
+
+// task-builder-v2.md section 7.6: the files that the run left in ./out, each with its Download link, and one line for the skipped ones.
+function OutFiles({ out, task, step, runner }: { out: NonNullable<StepDetail["out"]>; task: number; step: number; runner: string }) {
+  const n = out.skipped.length + out.more;
+  return (
+    <div data-step-out className="grid gap-0.5 text-xs">
+      {out.files.length > 0 && (
+        <>
+          <p className="m-0 text-ink-2">Files from {runner}:</p>
+          <ul aria-label={`Files from ${runner}`} className="m-0 grid list-none gap-0.5 p-0">
+            {out.files.map((f, i) => (
+              <li key={f.path} className="flex flex-wrap items-baseline gap-x-2">
+                <code translate="no" className="min-w-0 font-mono [overflow-wrap:anywhere]">
+                  {f.path}
+                </code>
+                <span className="text-muted-foreground">{sizeText(f.size)}</span>
+                <a href={outRoute(task, step, i)} download className={buttonVariants({ variant: "link", size: "xs" })}>
+                  Download<span className="sr-only"> {f.path}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {n > 0 && (
+        <p className="m-0 text-ink-2 [overflow-wrap:anywhere]">
+          Not kept: {out.skipped.map((x) => `${x.path} (${x.reason})`).join(", ")}
+          {out.more > 0 && ` and ${out.more} more`}
+        </p>
+      )}
+    </div>
+  );
+}
+
+const outRoute = (task: number, step: number, n: number) => `/api/tasks/${task}/steps/${step}/out/${n}`;
 
 // spec.md section 6.21.6: the mode of a runner step with the Bash tool, and the commands that the runner ran, folded. The run log holds the
 // end of the output of each command.

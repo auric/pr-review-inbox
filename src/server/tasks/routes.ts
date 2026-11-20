@@ -55,12 +55,14 @@ import {
 } from "../../shared/dto";
 import { MAX_REPLY_THREADS } from "../../shared/review";
 import { MAX_INSTRUCTION } from "../../shared/task";
+import { disposition, FILE_HEADERS } from "../context/routes";
 import type { Live } from "../live";
 import { log } from "../log";
 import type { ReviewJobs } from "../review/jobs";
 import { noUrl } from "../review/workspace";
 import type { Settings } from "../settings";
 import { lowerUnread, startable, syncParts } from "./gates";
+import { outFile } from "./implement";
 import { createLoop } from "./loop";
 import { createPrOpener, partDiff } from "./pr";
 import { hostsOf, originsOf } from "./shell";
@@ -87,6 +89,12 @@ const partParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
   const part = positive(v.part);
   return id && part ? { id, part } : c.json<ApiError>({ error: "Invalid task or part ID." }, 400);
+});
+const outParam = validator("param", (v: Record<string, string>, c) => {
+  const id = positive(v.id);
+  const step = positive(v.step);
+  const n = /^[0-9]{1,3}$/.test(v.n ?? "") ? Number(v.n) : null;
+  return id && step && n !== null ? { id, step, n } : c.json<ApiError>({ error: "Invalid task, step, or file." }, 400);
 });
 const itemParam = validator("param", (v: Record<string, string>, c) => {
   const id = positive(v.id);
@@ -570,6 +578,16 @@ export function createTaskRoutes(opts: {
         const { id, run } = c.req.valid("param");
         const d = db && review.taskRunLog(db, id, run);
         return d ? c.json(d, 200) : c.json<ApiError>({ error: "Run not found." }, 404);
+      })
+      // task-builder-v2.md section 7.6: file n of the ./out copy of a step, always as a download.
+      .get("/tasks/:id/steps/:step/out/:n", outParam, (c) => {
+        const db = openDb();
+        const { id, step, n } = c.req.valid("param");
+        const f = db && outFile(review.dataDir, db, id, step, n);
+        if (!f) return c.json<ApiError>({ error: "File not found." }, 404);
+        return new Response(Bun.file(f.path), {
+          headers: { ...FILE_HEADERS, "Content-Type": "application/octet-stream", "Content-Disposition": disposition(f.name) },
+        });
       })
       // spec.md section 6.16.4: the branch check of the plan screen.
       .get(

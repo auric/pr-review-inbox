@@ -51,10 +51,10 @@ export const DOWNLOAD_FAILED: Record<ContextErrorKind, string> = {
   shape: "Jira sent a file of another size. It can be a login page. Check that the token can open attachments.",
 };
 // Headers of every file answer. Only the image route sets another type.
-const FILE_HEADERS = { "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" };
+export const FILE_HEADERS = { "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" };
 
 // RFC 6266 with an RFC 8187 filename*. The quoted name is ASCII only.
-function disposition(name: string): string {
+export function disposition(name: string): string {
   const ascii = name.replace(/[^\x20-\x7e]|[%"\\]/g, "_");
   const ext = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
   return `attachment; filename="${ascii}"; filename*=UTF-8''${ext}`;

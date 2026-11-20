@@ -51,6 +51,7 @@ import {
   implementPrompt,
   insertStep,
   instructionRepos,
+  OUT_LINE,
   partBudget,
   pathCheck,
   type StepInput,
@@ -1053,13 +1054,15 @@ describe("the prompt lines of the shell state", () => {
   test("no shell: no command runs, and the checks are the app's", () => {
     const l = lines("implement", null);
     expect(l[0]).toEndWith("You cannot run commands, and you post nothing.");
-    expect(l[1]).toBe(`${RUNS} You cannot run them. When they fail, a fix step gets their output.`);
+    // task-builder-v2.md section 7.6: the ./out exception comes right after the role line.
+    expect(l[1]).toBe(OUT_LINE);
+    expect(l[2]).toBe(`${RUNS} You cannot run them. When they fail, a fix step gets their output.`);
   });
 
   test("allowlist with approved checks: the check patterns join the list, and the step can run the checks itself", () => {
     const l = lines("fix", { mode: "allowlist", rules: ["echo *"], checks: ["bun test", "bun run lint"], bashTimeoutSec: 600 });
     expect(l[0]).toEndWith("You post nothing.");
-    expect(l[1]).toBe(`${RUNS} You can also run them yourself: \`bun test\`, \`bun run lint\`.`);
+    expect(l[2]).toBe(`${RUNS} You can also run them yourself: \`bun test\`, \`bun run lint\`.`);
     expect(l).toContain(
       "You can run only these commands: `echo *`, `bun test *`, `bun run lint *`. Read-only commands, such as ls, cat, grep, and rg, also run. Claude Code refuses every other command.",
     );
@@ -1140,7 +1143,7 @@ describe("the prompt lines of the shell state", () => {
 
   test("fix mode: a broken command, a missing tool, or an environment fault changes no file and sets checkCause env", () => {
     const l = lines("fix", { mode: "any", rules: [], checks: [], bashTimeoutSec: 600 });
-    expect(l[1]).toBe(`${RUNS} When they fail, a fix step gets their output.`);
+    expect(l[2]).toBe(`${RUNS} When they fail, a fix step gets their output.`);
     expect(l).toContain(
       "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set checkCause to env, copy the line of the output that shows the fault into quote, and stop.",
     );

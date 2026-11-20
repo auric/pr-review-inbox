@@ -4,9 +4,20 @@
 // One Claude step of a task part (docs/plans/review-v2/spec.md sections 6.6 to 6.8): the context files, the stdin, the run in the
 // task worktree, the path check after the step, the reset with the saved patch, the step row, and the time and cost budget of the part.
 import type { Database } from "bun:sqlite";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { rm } from "node:fs/promises";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { RunConflict, RunUsage } from "../../shared/dto";
 import type { RunCut, RunErrorKind } from "../../shared/run-log";
@@ -14,6 +25,9 @@ import { REFUSED_NOTES, type RunEvent } from "../../shared/run-log";
 import {
   type ImplementResult,
   implementResult,
+  OUT_FILE_BYTES,
+  OUT_FILES_MAX,
+  type OutDetail,
   PATCH_LOST,
   RUN_CANCELLED,
   RUN_LIMITS,
@@ -86,6 +100,7 @@ import {
   setupMark,
   status,
   statusSync,
+  taskDir,
   type Worktree,
   wtGit,
 } from "./worktree";
@@ -125,9 +140,18 @@ export type PathCheck = { changed: string[]; problems: PathProblem[]; links: str
 // part-session.md section 2.3 item 4: the folder of the part folder for long command output. The app empties it before each run, and the
 // path check skips it.
 export const SCRATCH = "scratch";
+// task-builder-v2.md section 7.6: the folder of the part folder for the files that a run leaves for the user. The app empties it before
+// each run and copies its regular files to outDir at the run end, so the path check skips it.
+export const OUT = "out";
+export const OUT_LINE = "You may also write a file for the user in ./out/. The app keeps it.";
+// The entries that collectOut reads in one ./out tree.
+const OUT_WALK_MAX = 1000;
+const OUT_ROOT = ["files", "claude"];
+export const outDir = (dataDir: string, db: Database, task: number, name: string) => join(taskDir(dataDir, db, task), ...OUT_ROOT, name);
 
 // The files in the part folder outside repo/ that differ from the context files of the app. A link counts too. skip: the worktree
-// folders of the added repositories (addedFolders), which have their own path check. ./scratch counts only when it is no real folder.
+// folders of the added repositories (addedFolders), which have their own path check. ./scratch and ./out count only when they are no
+// real folder.
 export function outsideRepo(wt: Worktree, context: ReadonlyMap<string, string | Uint8Array>, skip: readonly string[] = []): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
@@ -136,7 +160,7 @@ export function outsideRepo(wt: Worktree, context: ReadonlyMap<string, string | 
       const rel = relative(wt.dir, p).replaceAll("\\", "/");
       if (rel === "repo" || skip.includes(rel)) continue;
       const st = lstatSync(p);
-      if (rel === SCRATCH && st.isDirectory()) continue;
+      if ((rel === SCRATCH || rel === OUT) && st.isDirectory()) continue;
       if (st.isDirectory()) {
         walk(p);
         continue;
@@ -147,6 +171,103 @@ export function outsideRepo(wt: Worktree, context: ReadonlyMap<string, string | 
   };
   walk(wt.dir);
   return out;
+}
+
+// task-builder-v2.md section 7.6: copies the regular files under from (./out of a run) to <task dir>/files/claude/<name>, sorted by path, at most
+// OUT_FILES_MAX of them. A file over OUT_FILE_BYTES takes no place in the count. copyFileSync, mkdirSync, and open follow links, and
+// a Bash command of the run can put a link or a junction on any path. So lstat checks each source and target level (lstat gives a
+// junction as a link), and the open file must be the file that lstat saw. null: ./out holds nothing. It never throws.
+export function collectOut(from: string, task: string, name: string): OutDetail | null {
+  const at = (p: string) => lstatSync(p, { throwIfNoEntry: false });
+  const real = (s: ReturnType<typeof at>) => s?.isDirectory() === true && !s.isSymbolicLink();
+  const skipped: OutDetail["skipped"] = [];
+  const skip = (path: string, reason: string) => skipped.push({ path, reason });
+  const found: { path: string; size: number; dev: bigint; ino: bigint }[] = [];
+  try {
+    const top = at(from);
+    if (!top) return null;
+    if (!real(top)) skip(".", "a link or not a folder");
+    const queue = real(top) ? [""] : [];
+    let seen = 0;
+    while (queue.length) {
+      const rel = queue.shift() as string;
+      for (const n of readdirSync(join(from, rel)).sort()) {
+        const path = rel ? `${rel}/${n}` : n;
+        if (++seen > OUT_WALK_MAX) {
+          skip(path, `the app reads at most ${OUT_WALK_MAX} entries`);
+          queue.length = 0;
+          break;
+        }
+        // bigint: a Windows file ID can exceed 2^53.
+        const st = lstatSync(join(from, path), { bigint: true });
+        if (st.isSymbolicLink()) skip(path, "a link");
+        else if (st.isDirectory()) queue.push(path);
+        else if (!st.isFile()) skip(path, "not a regular file");
+        else if (st.size > BigInt(OUT_FILE_BYTES)) skip(path, `over ${OUT_FILE_BYTES / 1024 / 1024} MB`);
+        else found.push({ path, size: Number(st.size), dev: st.dev, ino: st.ino });
+      }
+    }
+  } catch (e) {
+    skip(".", `the app could not read the folder: ${noUrl((e as Error).message)}`);
+  }
+  found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  for (const f of found.slice(OUT_FILES_MAX)) skip(f.path, `over ${OUT_FILES_MAX} files`);
+  const files: OutDetail["files"] = [];
+  // Each target level is a real folder, or is absent and the app makes it.
+  const target = (rel: string) => {
+    let p = task;
+    if (!real(at(p))) throw new Error("The task folder is a link.");
+    for (const part of [...OUT_ROOT, name, ...rel.split("/").slice(0, -1)]) {
+      p = join(p, part);
+      const s = at(p);
+      if (!s) mkdirSync(p);
+      else if (!real(s)) throw new Error("A folder of the copy is a link.");
+    }
+    return join(p, basename(rel));
+  };
+  for (const f of found.slice(0, OUT_FILES_MAX)) {
+    let fd: number | null = null;
+    try {
+      fd = openSync(join(from, f.path), "r");
+      const s = fstatSync(fd, { bigint: true });
+      if (!s.isFile() || s.dev !== f.dev || s.ino !== f.ino || s.size > BigInt(OUT_FILE_BYTES)) {
+        skip(f.path, "changed during the copy");
+        continue;
+      }
+      // wx: a link that sits on the target name fails the write.
+      writeFileSync(target(f.path), readFileSync(fd), { flag: "wx" });
+      files.push({ path: f.path, size: Number(s.size) });
+    } catch (e) {
+      skip(f.path, `the copy failed: ${noUrl((e as Error).message)}`);
+    } finally {
+      if (fd !== null) closeSync(fd);
+    }
+  }
+  if (!files.length && !skipped.length) return null;
+  return { dir: name, files, skipped: skipped.slice(0, OUT_FILES_MAX), more: Math.max(0, skipped.length - OUT_FILES_MAX) };
+}
+
+// The download of file n of the ./out copy of a step of the task. Only a stored entry counts. Its path stays inside the copy folder,
+// and each level is a real folder and the end a regular file, so no link leads out of it. null: no such file.
+export function outFile(dataDir: string, db: Database, task: number, step: number, n: number): { path: string; name: string } | null {
+  const r = db.query("SELECT detail_json FROM task_step WHERE id = $step AND task = $task").get({ step, task }) as {
+    detail_json: string;
+  } | null;
+  const d = r ? stepDetail.safeParse(JSON.parse(r.detail_json)) : null;
+  const out = d?.success ? d.data.out : null;
+  const e = out?.files[n];
+  if (!out || !e) return null;
+  const top = outDir(dataDir, db, task, "");
+  const root = outDir(dataDir, db, task, out.dir);
+  const path = join(root, e.path);
+  if (root === top || !inside(top, root) || path === root || !inside(root, path)) return null;
+  let p = taskDir(dataDir, db, task);
+  for (const part of relative(p, path).split(sep)) {
+    p = join(p, part);
+    const s = lstatSync(p, { throwIfNoEntry: false });
+    if (!s || s.isSymbolicLink() || !(p === path ? s.isFile() : s.isDirectory())) return null;
+  }
+  return { path, name: basename(e.path) };
 }
 
 // spec.md section 6.8: after each Claude step, each changed path passes deniedPath (edits.ts) and the sparse patterns, and it is no
@@ -680,6 +801,8 @@ export function implementPrompt(
   const ask =
     "When Claude Code refuses a command that the step needs, do not try another form of it. End the step: set allowRequest with the narrowest pattern, the refused command, and a reason. Set done to false.";
   const capLines = caps ? capabilityLines(caps) : [];
+  // An exception to the role line, right after it. A resolve step makes no new file.
+  const outLines = mode === "resolve" ? [] : [OUT_LINE];
   // Gate B31: the read block of allowlist mode refuses every cd. The other modes run `cd repo && <command>`.
   const shellLines = !shell
     ? []
@@ -713,6 +836,7 @@ export function implementPrompt(
   if (session?.resume != null)
     return [
       role,
+      ...outLines,
       `./context/spec/ holds a read-only copy of the plan. Tick tasks only in ${session.tasksFile}: ${tick}`,
       "Read ./context/step.md first. It says what this run does.",
       result,
@@ -741,6 +865,7 @@ export function implementPrompt(
     : [];
   return [
     role,
+    ...outLines,
     commands,
     ...capLines,
     ...shellLines,
@@ -1228,8 +1353,10 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       list: attachments,
     });
     // rmSync deletes a link, not its target.
-    rmSync(join(wt.dir, SCRATCH), { recursive: true, force: true, maxRetries: 3 });
-    mkdirSync(join(wt.dir, SCRATCH));
+    for (const d of [SCRATCH, OUT]) {
+      rmSync(join(wt.dir, d), { recursive: true, force: true, maxRetries: 3 });
+      mkdirSync(join(wt.dir, d));
+    }
   } catch (e) {
     const b: TaskBlocked = { kind: "error", step: null, text: `Needs you: ${noUrl((e as Error).message)}` };
     db.transaction(() => {
@@ -1253,6 +1380,9 @@ export async function startStep(i: StepInput): Promise<StepStart> {
   let snap: GitSnap | null = null;
   let moved: string[] = [];
   let runOut: RunOutcome | null = null;
+  // task-builder-v2.md section 7.6: the run ID from started(), and the files of ./out that after() kept.
+  let runId: number | null = null;
+  let outFiles: OutDetail | null = null;
   // The snapshot for a restart (keepCut). started() writes it to the step row, and endStep clears it.
   let cut: string | null = null;
   // The notes that the run wrote during the run (part-session.md section 2.10). endStep writes the notes again.
@@ -1297,6 +1427,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       session: { keep: session.keep, ...(session.resume && { resume: session.resume }), ...(i.mode !== "resolve" && { live: true }) },
     }),
     started: (d, run) => {
+      runId = run;
       step = runningStep(d, { task: i.task, part: i.part.id, kind: i.mode, run, attempt: i.attempt, item: i.item }, i.step, now());
       if (cut !== null) d.query(STEP_SQL.cut).run({ id: step, cut });
       if (i.tries) patchStep(d, step, { tries: i.tries });
@@ -1314,6 +1445,8 @@ export async function startStep(i: StepInput): Promise<StepStart> {
       } catch (err) {
         broken = `The app could not restore the git state after the step: ${noUrl((err as Error).message)}`;
       }
+      // A run that never started has an empty ./out. collectOut never throws, so a failed copy never fails the run.
+      if (runId !== null) outFiles = collectOut(join(wt.dir, OUT), taskDir(i.review.dataDir, db, i.task), String(runId));
       written = [...new Set((o?.events ?? []).filter((x) => FILE_TOOLS.has(x.tool) && x.status === "ok" && x.target).map((x) => x.target))];
       const e =
         early ??
@@ -1387,6 +1520,7 @@ export async function startStep(i: StepInput): Promise<StepStart> {
           needsBase: result?.needsBase ? { reason: result.needsBaseReason } : null,
           written,
           bashFiles: kept,
+          out: outFiles,
           shell: shellRun,
           checked,
           dirtyBefore: i.dirtyBefore ?? [],

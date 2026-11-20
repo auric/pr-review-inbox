@@ -416,6 +416,8 @@ runner.write({
         writes: [
           { path: "repo/tests/flush.test.ts", text: TASK_TEST },
           { path: "repo/src/cache/flush.ts", text: TASK_FLUSH },
+          // docs/plans/task-builder-v2.md section 7.6: a file for the user in ./out. The Log tab lists it with Download.
+          { path: "out/flush-bench.md", text: "# Flush bench\n\n5000 entries: 41 ms. Longest lock hold: 0.2 ms.\n" },
         ],
         ticks: { path: "*", ids: ["*"] },
       },

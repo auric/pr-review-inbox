@@ -1,6 +1,6 @@
 # Build a Jira task, version 2
 
-Status: design of 2026-11-19, approved by the user on 2026-11-19 (section 15: D3 deferred, the rest as recommended). TB-D0, TB-1, TB-2, and TB-3 are built. Section 13 holds wording; item 2 (D3) waits. The machine tables of section 11 start from the `sa` machine (guards `noSpecPr` and `specPr`).
+Status: design of 2026-11-19, approved by the user on 2026-11-19 (section 15: D3 deferred, the rest as recommended). TB-D0, TB-1, TB-2, TB-3, and TB-4 are built. Section 13 holds wording; item 2 (D3) waits. The machine tables of section 11 start from the `sa` machine (guards `noSpecPr` and `specPr`).
 
 ## 0. Summary
 
@@ -224,7 +224,7 @@ Each cause has one fixed title and one primary option (the AC-B253 rule). Claude
 
 ### 7.6 Files for the user
 
-- Each run gets `./out/`. The prompt says: "Put a file for the user in ./out/. The app keeps it."
+- Each run gets `./out/`. The prompt says: "You may also write a file for the user in ./out/. The app keeps it."
 - At each run end, the app copies regular files only into `<task dir>/files/claude/<run>/`. It checks each file and folder with lstat and copies no link.
 - Caps: 20 files per run and 10 MB per file. The Task view lists them, and Download uses the attachment headers of BRIEF 3.6:183.
 - `scratch` stays a per-run working folder.
