@@ -12,9 +12,17 @@ import { localCaseFile, SEED_KINDS } from "../../scripts/eval/cases";
 import { caseId } from "../../scripts/eval/local";
 import { drawSample, settle } from "../../scripts/eval/seed";
 import { bindingOf, type Host, hostsOf, type SeedKind } from "../../scripts/eval/seed-build";
-import { loadStore, type SeedRecord, type SeedState, saveStore, seedId } from "../../scripts/eval/seed-store";
+import {
+  loadStore,
+  type SeedFields,
+  type SeedRecord,
+  type SeedState,
+  type SeedValidation,
+  saveStore,
+  seedId,
+} from "../../scripts/eval/seed-store";
 import { readRecords } from "../support/fake-claude";
-import { makeNaturalSet, type NaturalSet, PATHS, seedFields } from "../support/seed-fixture";
+import { ARCH, gitIn, makeNaturalSet, type NaturalSet, OMIT, PATHS, seedFields } from "../support/seed-fixture";
 
 console.log(`seed-cli.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed", import.meta.dir)}`);
 
@@ -391,6 +399,97 @@ describe("sample, decide, escalate, retire, list, and show", () => {
       expect((await cli(["show", "sd0000000000"], seeds())).code).toBe(2);
       expect((await cli(["list", "--state", "lost"], seeds())).code).toBe(2);
       expect((await cli(["list", "--state", "retired"], seeds())).stdout).toContain(`${kept.id}  retired`);
+    },
+    SLOW,
+  );
+});
+
+describe("recheck (section 8)", () => {
+  test(
+    "recheck moves a refuted seed whose stored answer passes now, and a seed with severity medium stays refuted",
+    async () => {
+      const seeds = join(TMP, "recheck");
+      const host = (await hostsOf(nat.dir, mkdtempSync(join(TMP, "hosts-")))(nat.host)) as Host;
+      const answer: SeedValidation = {
+        verdict: "breaks",
+        severity: "high",
+        trigger: "t",
+        proof: ["The key keeps its spaces.", "route.ts:3"],
+        originalOk: true,
+        plausible: true,
+        why: "w",
+      };
+      const reason = "The proof names lines that the seeded head does not have: route.ts:3.";
+      const refuted = async (f: SeedFields, validation: SeedValidation): Promise<SeedRecord> => ({
+        ...f,
+        id: seedId(nat.host, f),
+        state: "refuted",
+        host: (await bindingOf(host, f.path)) as SeedRecord["host"],
+        reason,
+        validation,
+      });
+      const pass = await refuted(ARCH, answer);
+      const medium = await refuted(OMIT, { ...answer, severity: "medium" });
+      saveStore(seeds, { format: 1, seeds: [pass, medium] });
+      expect((await cli(["recheck", "--runner", "x"], seeds)).code).toBe(2);
+      const r = await cli(["recheck"], seeds);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Rechecked: 1 refuted seeds are now confirmed, 1 stay refuted, and 0 were not rechecked");
+      const after = loadStore(seeds).seeds;
+      expect(after.map((s) => [s.id, s.state, s.reason])).toEqual([
+        [pass.id, "confirmed", undefined],
+        [medium.id, "refuted", reason],
+      ]);
+      // A second call finds nothing to move.
+      expect((await cli(["recheck"], seeds)).stdout).toContain("Rechecked: 0 refuted seeds are now confirmed, 1 stay refuted");
+    },
+    SLOW,
+  );
+});
+
+describe("a host without code", () => {
+  test(
+    "propose skips a host whose change adds lines to doc files only, before any seeder run",
+    async () => {
+      const docs = await makeNaturalSet(join(TMP, "fx-docs"));
+      // A PR of its own group that changes docs/notes.md only.
+      const ix = { ...docs.env, GIT_INDEX_FILE: join(TMP, "docs.index") };
+      const run = async (args: string[], stdin?: string, env = docs.env) =>
+        (await gitIn(env, docs.repo, args, stdin)).toString("utf8").trim();
+      await run(["read-tree", docs.base], undefined, ix);
+      const blob = await run(["hash-object", "-w", "--no-filters", "--stdin"], "# Notes\n\nThe store keeps values.\nIt has a size.\n");
+      await run(["update-index", "--add", "--cacheinfo", `100644,${blob},docs/notes.md`], undefined, ix);
+      const tree = await run(["write-tree"], undefined, ix);
+      const head = await run(["commit-tree", tree, "-p", docs.base, "-m", "Explain the size"]);
+      await run(["update-ref", `refs/eval/${head}`, head]);
+      await run(["bundle", "create", "-q", join(docs.dir, "bundles", docs.bundle), "--all"]);
+      const id = caseId({ pr: 9, head, base: docs.base });
+      const file = localCaseFile.parse(JSON.parse(readFileSync(join(docs.dir, "cases", docs.host, "case.json"), "utf8")));
+      mkdirSync(join(docs.dir, "cases", id));
+      writeFileSync(
+        join(docs.dir, "cases", id, "case.json"),
+        JSON.stringify(
+          { ...file, id, group: "pr9", bundle: { ...file.bundle, head }, bugs: [], traps: [], extras: [], human: [], threads: [] },
+          null,
+          2,
+        ),
+      );
+      const seeds = join(TMP, "seeds-docs");
+      const plan = await cli(["propose"], seeds, docs.dir);
+      expect(plan.stderr).toBe("");
+      expect(plan.code).toBe(2);
+      expect(plan.stdout).toContain("2 hosts, one per PR group.");
+      expect(plan.stdout).toContain("1 hosts add no line to a file of a known code type and take no seeder run.");
+      expect(plan.stdout).toContain("Seeder runs: 1 (model opus, effort high).");
+      expect(plan.stdout).toContain("about $1.59");
+      const f = fake("seed-propose");
+      const r = await cli(["propose", ...f.runner], seeds, docs.dir);
+      expect(r.code).toBe(0);
+      expect(f.runs()).toHaveLength(1);
+      const stored = loadStore(seeds).seeds;
+      expect(stored.length).toBeGreaterThan(0);
+      expect(stored.every((s) => s.host.id === docs.host)).toBe(true);
     },
     SLOW,
   );

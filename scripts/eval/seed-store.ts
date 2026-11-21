@@ -39,6 +39,7 @@ export const SEED_EVENTS = [
   "retire",
   "host-",
   "host+",
+  "recheck",
 ] as const;
 export type SeedState = (typeof SEED_STATES)[number];
 export type SeedEvent = (typeof SEED_EVENTS)[number];
@@ -52,7 +53,7 @@ const NEXT: Record<SeedState, Partial<Record<SeedEvent, SeedState | "was">>> = {
   kept: { drop: "dropped", retire: "retired", "host-": "stale" },
   stale: { drop: "dropped", retire: "retired", "host+": "was" },
   invalid: {},
-  refuted: {},
+  refuted: { recheck: "confirmed" },
   dropped: {},
   retired: {},
 };
@@ -79,7 +80,9 @@ export const seedValidation = z.object({
   verdict: z.enum(["breaks", "holds", "unsure"]),
   severity: z.enum(SEED_SEVERITIES),
   trigger: z.string(),
-  proof: z.array(z.string()),
+  proof: z
+    .array(z.string())
+    .describe("The path through the code, one step per entry. Each step names path:line, with the path from the root of ./repo."),
   originalOk: z.boolean(),
   plausible: z.boolean(),
   why: z.string(),

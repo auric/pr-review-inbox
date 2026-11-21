@@ -19,6 +19,7 @@ import {
   NO_BLOB,
   proofMissing,
   proposeHost,
+  recheckSeed,
   SEEDER,
   SEEDER_PROMPT,
   SEEDER_SCHEMA,
@@ -34,7 +35,7 @@ import type { SeedRecord, SeedValidation } from "../../scripts/eval/seed-store";
 import { createClaudeRunner } from "../../src/server/review/claude";
 import { UNTRUSTED } from "../../src/server/review/workspace";
 import { readRecords } from "../support/fake-claude";
-import { makeNaturalSet, type NaturalSet, PATHS, PR_TITLE } from "../support/seed-fixture";
+import { ARCH, gitIn, makeNaturalSet, type NaturalSet, PATHS, PR_TITLE } from "../support/seed-fixture";
 
 console.log(`seed-runs.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed-runs", import.meta.dir)}`);
 
@@ -89,9 +90,14 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
   test("the prompts hold the design lines, and the models are those of section 14 decision 4", () => {
     expect(SEEDER_PROMPT).toContain("Give the route name in route. Leave route empty for every other kind.");
     expect(SEEDER_PROMPT).toContain("Do not say that the defect was planted.");
-    expect(SEEDER_PROMPT.split("\n")).toHaveLength(22);
+    expect(SEEDER_PROMPT).toContain(
+      "Edit only files with these extensions: .ts, .tsx, .js, .jsx, .mjs, .cjs, .c, .cc, .cpp, .cxx, .h, .hpp, .cs, .py.",
+    );
+    expect(SEEDER_PROMPT).toContain("The anchor line is a line that the change or the edit adds, or a line within 3 lines of one.");
+    expect(SEEDER_PROMPT.split("\n")).toHaveLength(25);
     expect(VALIDATOR_PROMPT).toContain("When the old lines call code that the new lines leave out, read that code to its end.");
-    expect(VALIDATOR_PROMPT.split("\n")).toHaveLength(9);
+    expect(VALIDATOR_PROMPT).toContain("with the path from the root of ./repo");
+    expect(VALIDATOR_PROMPT.split("\n")).toHaveLength(10);
     expect(SEEDER).toEqual({ model: "opus", effort: "high" });
     expect(VALIDATOR).toEqual({ model: "opus", effort: "medium" });
     const seedProps = (SEEDER_SCHEMA as { properties: { seeds: { items: { properties: Record<string, unknown> } } } }).properties.seeds
@@ -99,9 +105,9 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
     expect(Object.keys(seedProps).sort()).toEqual(
       ["alt", "anchor", "comment", "find", "kind", "path", "replace", "route", "severity", "trigger", "why"].sort(),
     );
-    expect(Object.keys((VALIDATOR_SCHEMA as { properties: Record<string, unknown> }).properties).sort()).toEqual(
-      ["originalOk", "plausible", "proof", "severity", "trigger", "verdict", "why"].sort(),
-    );
+    const valProps = (VALIDATOR_SCHEMA as { properties: Record<string, { description?: string }> }).properties;
+    expect(Object.keys(valProps).sort()).toEqual(["originalOk", "plausible", "proof", "severity", "trigger", "verdict", "why"].sort());
+    expect(valProps.proof?.description).toContain("path:line, with the path from the root of ./repo");
   });
 
   test("kinds.md has a row per kind, the kind order, and the field route", () => {
@@ -110,6 +116,8 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
     expect(KINDS_MD).toContain("1. contract:");
     expect(KINDS_MD).toContain("3. architecture: the route body and its uses at BASE.");
     expect(KINDS_MD).toContain("For every other kind, route is empty.");
+    expect(KINDS_MD).toContain("Edit only files with these extensions: .ts, .tsx,");
+    expect(KINDS_MD).toContain("Each text occurs once in its file.");
   });
 
   test("avoid.md widens each new-side natural place by 6 lines, and edit.md holds no seeder reasoning", () => {
@@ -141,20 +149,47 @@ describe("validator keep conditions (section 5.4)", () => {
   test("originalOk false: refute", () => expect(keepRefusal({ ...ok, originalOk: false }, [])).toContain("old lines fail"));
   test("plausible false: refute", () => expect(keepRefusal({ ...ok, plausible: false }, [])).toContain("not plausible"));
   test("an empty proof: refute", () => expect(keepRefusal({ ...ok, proof: [] }, [])).toContain("no path:line"));
+  test("a proof with no path:line at all: refute", () =>
+    expect(keepRefusal({ ...ok, proof: ["The key keeps its spaces.", "So the lookup fails."] }, [])).toContain("no path:line"));
+  test("a proof entry with no reference beside one with a reference: keep", () =>
+    expect(keepRefusal({ ...ok, proof: ["The key keeps its spaces.", "src/a.ts:1"] }, [])).toBeNull());
   test("a proof line that the seeded head does not have: refute", () => expect(keepRefusal(ok, ["src/a.ts:99"])).toContain("src/a.ts:99"));
 
   test(
-    "proofMissing reads each path:line at the head, a last newline adds no line",
+    "proofMissing reads each path:line at the head, a last newline adds no line, and an entry with no reference is skipped",
     async () => {
       const r = (proof: string[]) => proofMissing(host.repo, host.head, proof);
       // route.ts has 4 lines.
-      expect(await r([`${PATHS.route}:3`, `${PATHS.route}:2-4`, `see ${PATHS.route}:1`])).toEqual([]);
-      expect(await r([`${PATHS.route}:0`, `${PATHS.route}:5`, `${PATHS.route}:3-5`, "src/nope.ts:1", "no reference"])).toEqual([
+      expect(await r([`${PATHS.route}:3`, `${PATHS.route}:2-4`, `see ${PATHS.route}:1`, "no reference"])).toEqual([]);
+      expect(await r([`${PATHS.route}:0`, `${PATHS.route}:5`, `${PATHS.route}:3-5`, "src/nope.ts:1"])).toEqual([
         `${PATHS.route}:0`,
         `${PATHS.route}:5`,
         `${PATHS.route}:3-5`,
         "src/nope.ts:1",
-        "no reference",
+      ]);
+    },
+    SLOW,
+  );
+
+  test(
+    "a bare file name resolves to the one file that ends with it, and an ambiguous or missing one is missing",
+    async () => {
+      // A tree of the head plus lib/route.ts, so the name route.ts ends two paths.
+      const env = { ...host.repo.env, GIT_INDEX_FILE: join(TMP, "dup.index") };
+      const run = async (args: string[], stdin?: string) => (await gitIn(env, host.repo.dir, args, stdin)).toString("utf8").trim();
+      await run(["read-tree", host.head]);
+      const blob = await run(["hash-object", "-w", "--no-filters", "--stdin"], "export const other = 1;\n");
+      await run(["update-index", "--add", "--cacheinfo", `100644,${blob},lib/route.ts`]);
+      const dup = await run(["write-tree"]);
+      expect(await proofMissing(host.repo, host.head, ["route.ts:3", "the writer at route.ts:2-4", "src/route.ts:4"])).toEqual([]);
+      expect(await proofMissing(host.repo, host.head, ["route.ts:5", "nope.ts:1", "c/route.ts:1"])).toEqual([
+        "route.ts:5",
+        "nope.ts:1",
+        "c/route.ts:1",
+      ]);
+      expect(await proofMissing(host.repo, dup, ["route.ts:1", "src/route.ts:4", "lib/route.ts:1", "lib/route.ts:2"])).toEqual([
+        "route.ts:1",
+        "lib/route.ts:2",
       ]);
     },
     SLOW,
@@ -277,6 +312,55 @@ describe("seeder and validator runs with the fake CLI", () => {
       expect(b.reason).toBe("The validator run failed.");
       expect(failed.runs()).toEqual([]);
       expect(failed.ctx.cost.validator.failed).toBe(1);
+    },
+    SLOW,
+  );
+});
+
+describe("recheck (section 8)", () => {
+  const answer: SeedValidation = {
+    verdict: "breaks",
+    severity: "high",
+    trigger: "t",
+    proof: ["The key keeps its spaces.", "route.ts:3", `${PATHS.feature}:22`],
+    originalOk: true,
+    plausible: true,
+    why: "w",
+  };
+  const refuted = async (v: SeedValidation | undefined): Promise<SeedRecord> => ({
+    ...ARCH,
+    id: "sd0000000001",
+    state: "refuted",
+    host: (await bindingOf(host, ARCH.path)) as SeedRecord["host"],
+    reason: "The proof names lines that the seeded head does not have.",
+    ...(v ? { validation: v } : {}),
+  });
+
+  test(
+    "a stored answer that passes the keep conditions now moves the seed to confirmed and removes the reason",
+    async () => {
+      const next = await recheckSeed(host, await refuted(answer));
+      expect(next.state).toBe("confirmed");
+      expect(next.reason).toBeUndefined();
+      expect(next.validation).toEqual(answer);
+    },
+    SLOW,
+  );
+
+  test(
+    "severity medium, verdict holds, originalOk false, plausible false, a missing line, or no answer: the seed stays refuted",
+    async () => {
+      for (const v of [
+        { ...answer, severity: "medium" as const },
+        { ...answer, verdict: "holds" as const },
+        { ...answer, originalOk: false },
+        { ...answer, plausible: false },
+        { ...answer, proof: ["route.ts:9"] },
+        undefined,
+      ]) {
+        const s = await refuted(v);
+        expect(await recheckSeed(host, s)).toBe(s);
+      }
     },
     SLOW,
   );

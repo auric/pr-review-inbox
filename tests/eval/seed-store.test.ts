@@ -27,18 +27,33 @@ afterAll(() => rmSync(TMP, { recursive: true, force: true, maxRetries: 3 }));
 
 // The table of seeded-truth.md section 8, copied as text. "previous state" is the state before host-.
 const TABLE = `
-| proposed | applied | invalid | - | - | - | - | - | - | - | - | - | - | - |
-| applied | - | - | confirmed | refuted | applied | - | - | - | - | - | - | stale | - |
-| confirmed | - | - | - | - | - | sampled | kept | dropped | kept | sampled | - | stale | - |
-| sampled | - | - | - | - | - | - | kept | dropped | - | - | - | stale | - |
-| kept | - | - | - | - | - | - | - | dropped | - | - | retired | stale | - |
-| stale | - | - | - | - | - | - | - | dropped | - | - | retired | - | previous state |
-| invalid | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| refuted | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| dropped | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| retired | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| proposed | applied | invalid | - | - | - | - | - | - | - | - | - | - | - | - |
+| applied | - | - | confirmed | refuted | applied | - | - | - | - | - | - | stale | - | - |
+| confirmed | - | - | - | - | - | sampled | kept | dropped | kept | sampled | - | stale | - | - |
+| sampled | - | - | - | - | - | - | kept | dropped | - | - | - | stale | - | - |
+| kept | - | - | - | - | - | - | - | dropped | - | - | retired | stale | - | - |
+| stale | - | - | - | - | - | - | - | dropped | - | - | retired | - | previous state | - |
+| invalid | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| refuted | - | - | - | - | - | - | - | - | - | - | - | - | - | confirmed |
+| dropped | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| retired | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 `;
-const HEADER = ["chk+", "chk-", "val+", "val-", "val!", "draw", "keep", "drop", "release", "escalate", "retire", "host-", "host+"];
+const HEADER = [
+  "chk+",
+  "chk-",
+  "val+",
+  "val-",
+  "val!",
+  "draw",
+  "keep",
+  "drop",
+  "release",
+  "escalate",
+  "retire",
+  "host-",
+  "host+",
+  "recheck",
+];
 
 const SHA = "a".repeat(40);
 const seed = (state: SeedState, extra: Partial<SeedRecord> = {}): SeedRecord => ({
@@ -60,7 +75,7 @@ const seed = (state: SeedState, extra: Partial<SeedRecord> = {}): SeedRecord => 
 });
 
 describe("seed state machine (section 8)", () => {
-  test("every one of the 130 state and event cells", () => {
+  test("every one of the 140 state and event cells", () => {
     const rows = TABLE.trim()
       .split("\n")
       .map((l) =>
@@ -91,7 +106,7 @@ describe("seed state machine (section 8)", () => {
         expect(seedStore.safeParse({ format: 1, seeds: [got] }).success).toBe(true);
       }
     }
-    expect(cells).toBe(130);
+    expect(cells).toBe(140);
   });
 
   test("host- keeps the previous state in was, and host+ gives it back for each bound state", () => {

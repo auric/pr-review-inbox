@@ -54,8 +54,10 @@ const CODE_TYPES: Record<string, string[]> = {
   ".cxx": C_LIKE,
   ".h": C_LIKE,
   ".hpp": C_LIKE,
+  ".cs": C_LIKE,
   ".py": ["#"],
 };
+export const CODE_EXTS = Object.keys(CODE_TYPES);
 // Check 5.
 const MARKER = /\b(seed|seeded|inject|injected|planted|todo|fixme|xxx|hack|intentional|deliberate|bug)\b/i;
 // Check 10: one identifier, as git grep -w sees a word.
@@ -155,6 +157,12 @@ const diffOf = async (r: Repo, from: string, to: string): Promise<DiffFile[]> =>
 const addedIn = (files: DiffFile[], path: string) =>
   (files.find((f) => f.path === path)?.rows ?? []).filter((x) => x.kind === "add").map((x) => x.new);
 const nearAny = (lines: number[], l: number) => lines.some((a) => Math.abs(a - l) <= NEAR);
+
+// Checks 3 and 4 need a file of a known code type that the change adds lines to. A host without one cannot take a seed.
+export const hasCodeChange = async (h: Pick<Host, "repo" | "base" | "head">) =>
+  (await diffOf(h.repo, h.base, h.head)).some(
+    (f) => f.path !== null && CODE_TYPES[extname(f.path).toLowerCase()] && f.rows.some((x) => x.kind === "add"),
+  );
 
 // ---------- History rewrite (section 5.3) ----------
 

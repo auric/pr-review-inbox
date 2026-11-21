@@ -16,14 +16,15 @@ import { localDir, SEED_KINDS, seedsDir } from "./cases";
 import { readResult } from "./compare";
 import { seededSet } from "./local";
 import { BOOTSTRAP } from "./score";
-import { bindingHolds, buildSeededSet, buildText, HOST_CAP, type Host, hostsOf, rangeOf, type SeedKind } from "./seed-build";
-import { KIND_ORDER, proposeHost, SEEDER, type SeedCtx, seedCtx, step, VALIDATOR, validateSeed } from "./seed-runs";
-import { fire, loadStore, rootRefusal, SEED_STATES, type SeedRecord, type SeedState, saveStore } from "./seed-store";
+import { bindingHolds, buildSeededSet, buildText, HOST_CAP, type Host, hasCodeChange, hostsOf, rangeOf, type SeedKind } from "./seed-build";
+import { KIND_ORDER, proposeHost, recheckSeed, SEEDER, type SeedCtx, seedCtx, step, VALIDATOR, validateSeed } from "./seed-runs";
+import { fire, loadStore, rootRefusal, SEED_STATES, type SeedRecord, type SeedState, type SeedStore, saveStore } from "./seed-store";
 
 export const USAGE = [
   "Usage: bun run eval:seed -- <command>",
   "  propose [--cases <id,...>] [--kinds <kind,...>] (--real | --runner <command> <args...>)",
   "  validate (--real | --runner <command> <args...>)",
+  "  recheck",
   "  sample [--escalate <kind,...> | --escalate all]",
   "  list [--state <state>]",
   "  show <seed>",
@@ -31,6 +32,7 @@ export const USAGE = [
   "  retire <seed> --why <text>",
   "  build",
   "  leaks <result.json>",
+  "recheck runs no claude: it applies the keep conditions again to the stored validator answers of refuted seeds.",
   "propose and validate are paid. Without --real or --runner, they print the plan and an estimate, and exit with code 2. --runner runs the given CLI instead of claude and must come last.",
 ].join("\n");
 
@@ -81,6 +83,7 @@ export function parseSeed(argv: string[]): Args | null {
   const allowed: Record<string, { flags: string[]; pos: number[] }> = {
     propose: { flags: ["--cases", "--kinds", "--real"], pos: [0] },
     validate: { flags: ["--real"], pos: [0] },
+    recheck: { flags: [], pos: [0] },
     sample: { flags: ["--escalate"], pos: [0] },
     list: { flags: ["--state"], pos: [0] },
     show: { flags: [], pos: [1] },
@@ -267,10 +270,13 @@ async function propose(a: Args, seeds: string, local: string): Promise<number> {
       return 2;
     }
     // A plain propose skips the hosts that have seeds, so a second call continues a cut one. --cases runs the given hosts again.
-    const todo = cases ? hosts.filter((h) => cases.includes(h.id)) : hosts.filter((h) => !store.seeds.some((s) => s.host.id === h.id));
+    const asked = cases ? hosts.filter((h) => cases.includes(h.id)) : hosts.filter((h) => !store.seeds.some((s) => s.host.id === h.id));
+    const todo: Host[] = [];
+    for (const h of asked) if (await hasCodeChange(h)) todo.push(h);
     const plan = [
       `eval:seed propose: ${hosts.length} hosts, one per PR group. ${merge.length} more hosts have a merge commit in their range and take no seed.`,
-      `Seeder runs: ${todo.length} (model ${SEEDER.model}, effort ${SEEDER.effort})${kinds ? `, kinds ${kinds.join(", ")} only` : ""}. ${hosts.length - todo.length} hosts are skipped.`,
+      `${asked.length - todo.length} hosts add no line to a file of a known code type and take no seeder run.`,
+      `Seeder runs: ${todo.length} (model ${SEEDER.model}, effort ${SEEDER.effort})${kinds ? `, kinds ${kinds.join(", ")} only` : ""}. ${hosts.length - asked.length} hosts are skipped.`,
     ];
     if (!a.flags.has("--real") && !a.runner) {
       console.log(
@@ -313,6 +319,59 @@ async function propose(a: Args, seeds: string, local: string): Promise<number> {
   }
 }
 
+// Section 8: validate and recheck fire host- on a bound seed whose host changed. Returns the count of new stale seeds.
+async function staleCheck(store: SeedStore, seeds: string, open: (id: string) => Promise<Host | null>): Promise<number> {
+  let stale = 0;
+  for (const [i, s] of store.seeds.entries())
+    if (BOUND.has(s.state) && !(await bindingHolds(await open(s.host.id), s))) {
+      store.seeds[i] = step(s, "host-");
+      stale++;
+    }
+  if (stale) saveStore(seeds, store);
+  return stale;
+}
+
+// Section 8 event recheck: no run. A refuted seed with a stored validator answer and an unchanged binding gets the keep conditions
+// again. The output holds counts only, because a reason names paths.
+async function recheck(seeds: string, local: string): Promise<number> {
+  const store = loadStore(seeds);
+  const tmp = mkdtempSync(join(tmpdir(), "rl-eval-seed-"));
+  try {
+    const open = hostsOf(local, tmp);
+    const stale = await staleCheck(store, seeds, open);
+    const tally = { confirmed: 0, refuted: 0, held: 0 };
+    const errors: string[] = [];
+    for (const [i, s] of store.seeds.entries()) {
+      if (s.state !== "refuted") continue;
+      const h = await open(s.host.id);
+      if (!s.validation || !h || !(await bindingHolds(h, s))) {
+        tally.held++;
+        continue;
+      }
+      try {
+        const next = await recheckSeed(h, s);
+        if (next.state !== "confirmed") {
+          tally.refuted++;
+          continue;
+        }
+        store.seeds[i] = next;
+        saveStore(seeds, store);
+        tally.confirmed++;
+      } catch (e) {
+        tally.held++;
+        errors.push(`Seed ${s.id}: ${(e as Error).message.replaceAll(s.host.id, "its host")}`);
+      }
+    }
+    console.log(
+      `Rechecked: ${tally.confirmed} refuted seeds are now confirmed, ${tally.refuted} stay refuted, and ${tally.held} were not rechecked (no validator answer, a changed host, or a failed check). ${stale} seeds went stale.`,
+    );
+    for (const e of errors) console.log(e);
+    return errors.length ? 1 : 0;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
 async function validate(a: Args, seeds: string, local: string): Promise<number> {
   const store = loadStore(seeds);
   const applied = store.seeds.filter((s) => s.state === "applied");
@@ -345,14 +404,7 @@ async function validate(a: Args, seeds: string, local: string): Promise<number> 
     const ctx = await paidCtx(a, tmp);
     if (!ctx) return 1;
     const open = hostsOf(local, tmp);
-    // Section 8: validate fires host- on a bound seed whose host changed.
-    let stale = 0;
-    for (const [i, s] of store.seeds.entries())
-      if (BOUND.has(s.state) && !(await bindingHolds(await open(s.host.id), s))) {
-        store.seeds[i] = step(s, "host-");
-        stale++;
-      }
-    if (stale) saveStore(seeds, store);
+    const stale = await staleCheck(store, seeds, open);
     const tally = { confirmed: 0, refuted: 0, failed: 0 };
     const hosts = [...new Set(store.seeds.filter((s) => s.state === "applied").map((s) => s.host.id))];
     for (const [n, id] of hosts.entries()) {
@@ -558,12 +610,13 @@ export async function main(argv: string[]): Promise<number> {
     console.error(refused);
     return 2;
   }
-  if (a.cmd === "propose" || a.cmd === "validate") {
+  if (a.cmd === "propose" || a.cmd === "validate" || a.cmd === "recheck") {
     const no = naturalRefusal(local);
     if (no) {
       console.error(no);
       return 2;
     }
+    if (a.cmd === "recheck") return recheck(seeds, local);
     return a.cmd === "propose" ? propose(a, seeds, local) : validate(a, seeds, local);
   }
   const why = a.flags.get("--why") as string | undefined;
