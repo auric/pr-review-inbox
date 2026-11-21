@@ -21,6 +21,8 @@ export type EvalSet = FixtureSet | "local";
 export const SET_NAMES: readonly EvalSet[] = [...(Object.keys(SETS) as FixtureSet[]), "local"];
 // eval-local/ is git-ignored as a safety net (docs/plans/review-v3.md Q4).
 export const localDir = () => resolve(process.env.REVIEW_LOOP_EVAL_LOCAL || join(REPO, "eval-local"));
+// The seed store and the frozen seeded set in set/ (docs/plans/review-v2/seeded-truth.md section 3). git ignores eval-seeds/.
+export const seedsDir = () => resolve(process.env.REVIEW_LOOP_EVAL_SEEDS || join(REPO, "eval-seeds"));
 export const setDir = (set: EvalSet) => (set === "local" ? join(localDir(), "cases") : SETS[set]);
 // The re-review cases of the local set (docs/plans/review-v3.md WP-V3). A plain run never reads them.
 export const rereviewDir = () => join(localDir(), "rereview");
@@ -51,18 +53,27 @@ const commit = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
 // carriedFrom: local set only. The head of the earlier case whose decision this item carries. Absent: a decision at the head of the case.
 const place = { id: z.string().min(1), ...spot, alt: z.array(z.object(spot)).min(1).optional(), carriedFrom: commit.optional() };
 // Who confirmed an item of the local set. posted: you posted the finding. fixed: a fix commit covered it. session: your session
-// accepted it. other: a line comment of another reviewer. own: your own discard, withdrawal, or comment.
-export const ITEM_SOURCES = ["posted", "fixed", "session", "other", "own"] as const;
+// accepted it. other: a line comment of another reviewer. own: your own discard, withdrawal, or comment. seeded: a planted defect of the
+// seeded set (docs/plans/review-v2/seeded-truth.md).
+export const ITEM_SOURCES = ["posted", "fixed", "session", "other", "own", "seeded"] as const;
+// seeded-truth.md section 4.1, with the kind of architecture-bugs.md.
+export const SEED_KINDS = ["lifetime", "contract", "omission", "entry", "concurrency", "leak", "error", "architecture", "local"] as const;
 // Local set only, rules 5. text: the title, trigger, and body of the finding, or the comment text with names replaced. category: the
 // category of the finding. A fixture set has no text: note and why describe its items.
 const gold = { text: z.string().optional(), category: z.string().optional(), source: z.enum(ITEM_SOURCES).optional() };
-export const evalBug = z.object({
-  ...place,
-  severityMin: z.enum(severities),
-  module: z.enum(MODULE_IDS),
-  note: z.string().min(1),
-  ...gold,
-});
+export const evalBug = z
+  .object({
+    ...place,
+    severityMin: z.enum(severities),
+    module: z.enum(MODULE_IDS),
+    note: z.string().min(1),
+    ...gold,
+    seedKind: z.enum(SEED_KINDS).optional(),
+  })
+  .refine((b) => b.seedKind === undefined || b.source === "seeded", {
+    message: "seedKind needs source seeded.",
+    path: ["seedKind"],
+  });
 export const evalTrap = z.object({ ...place, why: z.string().min(1), ...gold });
 // A real issue that is no seeded bug. A shown item on it counts for no metric but extras.
 export const evalExtra = z.object({ ...spot, note: z.string().min(1), ...gold });

@@ -96,9 +96,21 @@ async function ignored(path: string): Promise<boolean> {
   );
 }
 
-// null: --out is missing or empty, or it holds only the files of an earlier build and the label cache.
+// A MANIFEST.json in dir with a seeded key. A missing or unreadable file is no seeded set.
+export function seededSet(dir: string): boolean {
+  try {
+    const m = JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf8")) as unknown;
+    return m !== null && typeof m === "object" && "seeded" in m;
+  } catch {
+    return false;
+  }
+}
+
+// null: --out is missing or empty, or it holds only the files of an earlier build and the label cache. A seeded set has the same names,
+// and its MANIFEST.json has a seeded key (docs/plans/review-v2/seeded-truth.md WP-SG0).
 function outRefusal(out: string): string | null {
   if (!existsSync(out)) return null;
+  if (seededSet(out)) return "Refused: the --out folder holds a seeded set (eval:seed build). Pick another folder.";
   return readdirSync(out).some((f) => !OUT_NAMES.has(f) && !KEPT_NAMES.has(f))
     ? "Refused: the --out folder holds other files. Pick an empty folder or the folder of an earlier build."
     : null;

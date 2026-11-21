@@ -51,10 +51,18 @@ const CACHE = join(LIVE, "git", "PROJ", `${REPO_NAME}.git`);
 mkdirSync(LIVE, { recursive: true });
 mkdirSync(APPDATA, { recursive: true });
 
-async function bun(args: string[]) {
+async function bun(args: string[], extra: Record<string, string> = {}) {
   const p = Bun.spawn([process.execPath, "--preload", NO_REAL, ...args], {
     cwd: ROOT,
-    env: { ...process.env, REVIEW_LOOP_DATA_DIR: LIVE, LOCALAPPDATA: APPDATA, XDG_DATA_HOME: APPDATA, REVIEW_LOOP_EVAL_LOCAL: "" },
+    env: {
+      ...process.env,
+      REVIEW_LOOP_DATA_DIR: LIVE,
+      LOCALAPPDATA: APPDATA,
+      XDG_DATA_HOME: APPDATA,
+      REVIEW_LOOP_EVAL_LOCAL: "",
+      REVIEW_LOOP_EVAL_SEEDS: join(TMP, "no-seeds"),
+      ...extra,
+    },
     stdout: "pipe",
     stderr: "pipe",
     timeout: SLOW,
@@ -169,6 +177,7 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   baselineOnly: false,
   reviewOnly: false,
   large: false,
+  seeded: false,
   build: [],
   results: null,
   baseline: null,
@@ -1065,6 +1074,106 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(r.stdout).toContain("Failed runs: baseline 0, candidate 0.");
       expect(readJson(resultIn(join(res, "review-baseline"))).resumes).toHaveLength(1);
       expect(readJson(resultIn(join(res, "review-candidate"))).resumes).toBeUndefined();
+    },
+    SLOW,
+  );
+});
+
+describe("eval:ab --seeded (docs/plans/review-v2/seeded-truth.md WP-SG0)", () => {
+  const parsed = (argv: string[]) => {
+    const o = parseAb(argv);
+    if ("error" in o) throw new Error(o.error);
+    return o;
+  };
+
+  test("--seeded needs --review-only and refuses each build flag", () => {
+    expect(parseAb(["--seeded"])).toEqual({ error: "--seeded runs only the review cases. Add --review-only." });
+    for (const flag of [
+      ["--clean", "8"],
+      ["--db", "d"],
+      ["--cache", "c"],
+      ["--out", "o"],
+      ["--user", "u"],
+    ])
+      expect(parseAb(["--seeded", "--review-only", ...flag])).toEqual({
+        error: "--seeded runs the frozen seeded set and builds no set. Leave out --clean, --db, --cache, --out, and --user.",
+      });
+    expect(parseAb(["--seeded", "--review-only"])).toMatchObject({ seeded: true, reviewOnly: true, build: [] });
+    expect(parseAb([])).toMatchObject({ seeded: false });
+  });
+
+  test("--resume refuses a flip of --seeded, and a flags file without --seeded means off", () => {
+    const seeded = ["--seeded", "--review-only", "--repeat", "2"];
+    const plain = ["--review-only", "--repeat", "2"];
+    const why = (a: string, b: string) =>
+      `Refused: --resume: the cut run had --seeded ${a}, but this run has --seeded ${b}. Give the flags of the cut run.`;
+    expect(flagsRefusal(runFlags(parsed(seeded)), parsed(seeded))).toBeNull();
+    expect(flagsRefusal(runFlags(parsed(seeded)), parsed(plain))).toBe(why("on", "off"));
+    expect(flagsRefusal(runFlags(parsed(plain)), parsed(seeded))).toBe(why("off", "on"));
+    // The flags file of a cut run from before --seeded existed.
+    const { "--seeded": _, ...old } = runFlags(parsed(plain));
+    expect(flagsRefusal(old, parsed(plain))).toBeNull();
+    expect(flagsRefusal(old, parsed(seeded))).toBe(why("off", "on"));
+  });
+
+  test(
+    "--seeded runs the seeded set with no build, refuses a set without the seeded key, and a plain run refuses the seeded set",
+    async () => {
+      const dir = join(TMP, "seeded");
+      const root = join(dir, "seeds");
+      const set = join(root, "set");
+      // The plain set folder of the children. A build would write here.
+      const local = join(dir, "local");
+      mkdirSync(local, { recursive: true });
+      const scenario = join(dir, "scenario.json");
+      writeFileSync(
+        scenario,
+        JSON.stringify({
+          record: join(dir, "calls.jsonl"),
+          auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
+          fixture: claudeStream(dir, "seeded", "claude-synthetic/review-agent-tree.jsonl", {
+            summary: "Fake review.",
+            risks: [],
+            questions: [],
+            coverage: { read: [PATH], skipped: [], unavailable: [], notChecked: [] },
+            findings: [],
+          }),
+          delayMs: 1,
+        }),
+      );
+      // A plain build stands in for eval:seed build (WP-SG1). Only the seeded key of MANIFEST.json marks a seeded set.
+      const b = await bun([join(ROOT, "scripts/eval/local.ts"), "--out", set]);
+      expect(b.stderr).toBe("");
+      expect(b.code).toBe(0);
+      const env = { REVIEW_LOOP_EVAL_SEEDS: root, REVIEW_LOOP_EVAL_LOCAL: local };
+      const results = join(dir, "results");
+      const args = [AB, "--seeded", "--review-only", "--baseline-only", "--results", results, "--runner", process.execPath, FAKE, scenario];
+
+      const none = await bun(args, env);
+      expect(none.code).toBe(2);
+      expect(none.stderr).toContain(`--seeded: ${set} holds no seeded set.`);
+      expect(readdirSync(dir)).not.toContain("results");
+
+      const at = join(set, "MANIFEST.json");
+      const m = JSON.parse(readFileSync(at, "utf8")) as { fingerprint: string };
+      writeFileSync(at, `${JSON.stringify({ ...m, seeded: { seeds: 1 } }, null, 2)}\n`);
+      const r = await bun(args, env);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).not.toContain("Local eval set");
+      expect(readdirSync(local)).toEqual([]);
+      const out = join(results, "review-baseline");
+      const file = readdirSync(out).find((f) => f.endsWith(".json")) as string;
+      expect((JSON.parse(readFileSync(join(out, file), "utf8")) as EvalResult).fingerprint).toBe(m.fingerprint);
+
+      // A plain eval:ab pointed at the seeded set refuses to build over it.
+      const before = snapshot(set);
+      const plain = await bun([AB, "--review-only", "--baseline-only", "--results", join(dir, "plain"), "--runner", "fake"], {
+        REVIEW_LOOP_EVAL_LOCAL: set,
+      });
+      expect(plain.code).toBe(2);
+      expect(plain.stderr).toContain("Refused: the --out folder holds a seeded set");
+      expect(snapshot(set)).toEqual(before);
     },
     SLOW,
   );

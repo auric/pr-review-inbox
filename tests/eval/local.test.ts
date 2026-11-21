@@ -8,7 +8,16 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { type EvalBug, ITEM_SOURCES, type LocalCaseFile, loadCases, setFingerprint } from "../../scripts/eval/cases";
+import {
+  type EvalBug,
+  evalBug,
+  ITEM_SOURCES,
+  type LocalCaseFile,
+  loadCases,
+  localCaseFile,
+  SEED_KINDS,
+  setFingerprint,
+} from "../../scripts/eval/cases";
 import { refusal } from "../../scripts/eval/compare";
 import {
   BUG_CLASS_NAMES,
@@ -1423,5 +1432,40 @@ describe("eval --set local with the fake CLI", () => {
     const none = await bun([RUN, "--set", "local"], { REVIEW_LOOP_EVAL_LOCAL: join(TMP, "missing") });
     expect(none.code).toBe(2);
     expect(none.stderr).toContain("No local set.");
+  });
+});
+
+describe("seeded set fields (docs/plans/review-v2/seeded-truth.md WP-SG0)", () => {
+  test("a natural case.json keeps its bytes: no seedKind, and the case schema gives the same text back", () => {
+    const ids = readdirSync(join(OUT, "cases"));
+    expect(ids).toHaveLength(2);
+    for (const id of ids) {
+      const text = readFileSync(join(OUT, "cases", id, "case.json"), "utf8");
+      expect(text).not.toContain("seedKind");
+      expect(`${JSON.stringify(localCaseFile.parse(JSON.parse(text)), null, 2)}\n`).toBe(text);
+    }
+  });
+
+  test("seedKind needs source seeded, and SEED_KINDS holds the nine kinds", () => {
+    const bug = { id: "S1", path: PATH, side: "new", lines: [1, 1], severityMin: "major", module: "core", note: "n" };
+    expect(evalBug.safeParse({ ...bug, source: "seeded", seedKind: "architecture" }).success).toBe(true);
+    expect(evalBug.safeParse({ ...bug, source: "seeded" }).success).toBe(true);
+    const wrong = evalBug.safeParse({ ...bug, source: "posted", seedKind: "lifetime" });
+    expect(wrong.success).toBe(false);
+    expect(wrong.error?.issues[0]?.path).toEqual(["seedKind"]);
+    expect(evalBug.safeParse({ ...bug, seedKind: "lifetime" }).success).toBe(false);
+    expect(evalBug.safeParse({ ...bug, source: "seeded", seedKind: "style" }).success).toBe(false);
+    expect(SEED_KINDS).toEqual(["lifetime", "contract", "omission", "entry", "concurrency", "leak", "error", "architecture", "local"]);
+  });
+
+  test("an --out folder that holds a seeded set is refused and kept", async () => {
+    const out = temp("seeded");
+    mkdirSync(join(out, "cases"));
+    writeFileSync(join(out, "MANIFEST.json"), '{"format":1,"seeded":{"seeds":1}}\n');
+    const r = await bun([LOCAL, "--db", dbFile, "--cache", cache, "--out", out]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Refused: the --out folder holds a seeded set");
+    expect(readdirSync(out).sort()).toEqual(["MANIFEST.json", "cases"]);
+    expect(readFileSync(join(out, "MANIFEST.json"), "utf8")).toBe('{"format":1,"seeded":{"seeds":1}}\n');
   });
 });

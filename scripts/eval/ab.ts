@@ -15,16 +15,16 @@ import { parseDiff } from "../../src/server/review/diffmap";
 import { git } from "../../src/server/review/git";
 import { diffArgs } from "../../src/server/review/workspace";
 import { EFFORTS, REVIEWER_MODES, VERIFIER_MODES } from "../../src/shared/dto";
-import { bundleRepo, type EvalCase, loadCases, localDir, setDir, setFingerprint } from "./cases";
+import { bundleRepo, type EvalCase, loadCases, localDir, seedsDir, setDir, setFingerprint } from "./cases";
 import { compareText, readResult, refusal, suiteDelta } from "./compare";
-import { main as buildMain, type Manifest } from "./local";
+import { main as buildMain, type Manifest, seededSet } from "./local";
 import { callsDir, checkoutState, evalProfile, finderChange, parseOptions, main as runMain } from "./run";
 import { type EvalResult, endedOnLimit, finished, keptRun, LIMIT_EXIT, score } from "./score";
 
 const REPO = resolve(import.meta.dir, "../..");
 export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}]
   [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-reviewer-mode ${REVIEWER_MODES.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--candidate-verifier-effort ${EFFORTS.join("|")}]
-  [--candidate-replay] [--baseline-only] [--review-only] [--large] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--resume] [--runner <command> <args...>]
+  [--candidate-replay] [--baseline-only] [--review-only] [--large] [--seeded] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--resume] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
 --resume: continue the cut run in --results (run.ts --resume). Each <mode>-<side> folder with one result continues it, and an empty folder runs. It needs --results. Give the flags of the cut run: a different flag is refused. A baseline-only run can take a lower --repeat when the finished runs fit.
 Exit code 3: a run hit the usage limit. Run the same command with --resume after the limit resets.
@@ -39,6 +39,7 @@ Exit code 3: a run hit the usage limit. Run the same command with --resume after
 --baseline-only: run only the baseline. --review-only: skip the re-review cases.
 --large: run only the review cases that give the baseline the rl-reviewer agent. The re-review cases do not run.
 --clean N: the clean cases of the set build (eval:local --clean). Give the same N to each run that compares with a stored baseline.
+--seeded: run the frozen seeded set in eval-seeds/set (REVIEW_LOOP_EVAL_SEEDS sets the root) and build no set. It needs --review-only and takes no build flag.
 --runner runs the given CLI instead of the claude CLI on PATH and must come last.`;
 // review-quality-2026.md E2: the default candidate is the shipped profile.
 const DEFAULT_VARIANTS = "";
@@ -69,6 +70,8 @@ export type AbOptions = {
   reviewOnly: boolean;
   // docs/plans/review-v3.md WP-V13: only the review cases where delegation() of the baseline profile is not null.
   large: boolean;
+  // docs/plans/review-v2/seeded-truth.md WP-SG0: run <seeds root>/set and skip the build.
+  seeded: boolean;
   build: string[];
   results: string | null;
   // The folder of an earlier eval:ab run whose baseline results this run reuses.
@@ -105,6 +108,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
         "baseline-only": { type: "boolean", default: false },
         "review-only": { type: "boolean", default: false },
         large: { type: "boolean", default: false },
+        seeded: { type: "boolean", default: false },
         clean: { type: "string" },
         db: { type: "string" },
         cache: { type: "string" },
@@ -138,6 +142,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     baselineOnly: v["baseline-only"] === true,
     reviewOnly: v["review-only"] === true,
     large: v.large === true,
+    seeded: v.seeded === true,
     build,
     results: results === undefined ? null : resolve(results),
     baseline: baseline === undefined ? null : resolve(baseline),
@@ -148,6 +153,10 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
   if (o.baselineOnly && (o.baseline !== null || o.replay))
     return { error: "--baseline-only runs only the baseline. Leave out --baseline and --candidate-replay." };
   if (o.resume && o.results === null) return { error: "--resume needs --results." };
+  // The seeded set has no re-review cases, and the seed tool builds it.
+  if (o.seeded && !o.reviewOnly) return { error: "--seeded runs only the review cases. Add --review-only." };
+  if (o.seeded && build.length)
+    return { error: "--seeded runs the frozen seeded set and builds no set. Leave out --clean, --db, --cache, --out, and --user." };
   for (const [flag, e] of [
     ["--effort", o.baseEffort],
     ["--candidate-effort", o.effort],
@@ -190,6 +199,7 @@ export function runFlags(o: AbOptions): Record<string, string | boolean | null> 
     "--baseline-only": o.baselineOnly,
     "--review-only": o.reviewOnly,
     "--large": o.large,
+    "--seeded": o.seeded,
     "--clean": clean < 0 ? null : (o.build[clean + 1] as string),
   };
 }
@@ -200,8 +210,10 @@ export function flagsRefusal(saved: Record<string, unknown>, o: AbOptions): stri
   const show = (v: unknown) => (v === true ? "on" : v === false ? "off" : v === null || v === undefined || v === "" ? "none" : String(v));
   for (const [flag, now] of Object.entries(runFlags(o))) {
     if (o.baselineOnly && flag === "--repeat") continue;
-    if ((saved[flag] ?? null) !== now)
-      return `Refused: --resume: the cut run had ${flag} ${show(saved[flag])}, but this run has ${flag} ${show(now)}. Give the flags of the cut run.`;
+    // The flags file of an older version lacks the boolean flags added since. They were off.
+    const was = saved[flag] ?? (typeof now === "boolean" ? false : null);
+    if (was !== now)
+      return `Refused: --resume: the cut run had ${flag} ${show(was)}, but this run has ${flag} ${show(now)}. Give the flags of the cut run.`;
   }
   return null;
 }
@@ -387,11 +399,17 @@ export async function main(argv: string[]): Promise<number> {
     console.error(flagsRefused);
     return 2;
   }
-  const built = await buildMain(o.build);
-  if (built !== 0) return built;
+  if (!o.seeded) {
+    const built = await buildMain(o.build);
+    if (built !== 0) return built;
+  }
   // The eval runner reads the set from REVIEW_LOOP_EVAL_LOCAL.
   const outAt = o.build.indexOf("--out");
-  const set = resolve(outAt < 0 ? localDir() : (o.build[outAt + 1] as string));
+  const set = o.seeded ? join(seedsDir(), "set") : resolve(outAt < 0 ? localDir() : (o.build[outAt + 1] as string));
+  if (o.seeded && !seededSet(set)) {
+    console.error(`--seeded: ${set} holds no seeded set. Build it with eval:seed build first.`);
+    return 2;
+  }
   process.env.REVIEW_LOOP_EVAL_LOCAL = set;
   const manifest = JSON.parse(readFileSync(join(set, "MANIFEST.json"), "utf8")) as Manifest;
   const { commit } = await checkoutState();

@@ -1,6 +1,6 @@
 # Review quality 2026: eval fixes and ranked reviewer improvements
 
-Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and items 10 and 11 are built as opt-ins. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
+Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and items 10 and 11 are built as opt-ins. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Item 12 (variant "architecture") is designed in architecture-bugs.md and not built. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
 
 Short answer: fix the eval before any reviewer change, because today it cannot measure precision or large-PR recall. Then run cheap tests that cut cost, then verifier tests replayed on fixed finder output, and last the recall bets, each behind a gate that costs nothing to check.
 
@@ -301,6 +301,14 @@ Report other problems too.
 - "callers": the finder checks the callers and consumers of each changed symbol outside the diff (research T6). Ship rule: "better" of section 2.
 - "preexisting": blocker and major problems in unchanged code go to their own fold, never to a post. The eval counts them apart (metric `preexisting`, row "Pre-existing findings"), so they are neither noise nor recall.
 
+### 12. Architecture lines (variant "architecture")
+
+- Hypothesis: the finder never compares the change with how the repository does the same thing. [O] 58-69% of missed known bugs were in files that the finder read but did not name.
+- Change: architecture-bugs.md section 4. Finder lines after the callers lines, and verify lines, only under the variant.
+- Gate (zero cost): the headroom H of architecture-bugs.md section 4.4 from SG-A.
+- Experiment: as part of lenses3 L2, or `--candidate-variants callers,architecture --candidate-repeat 2` on the seeded set.
+- Ship rule: "better" of seeded-truth.md section 6.5. The variant alone cannot pass.
+
 ### Advisor on by default (not an eval item)
 
 - Status: shipped 2026-11-17 as PROFILES_VERSION 9, by user decision. The Review profile runs with a Fable advisor (docs/plans/review-v2/advisor.md). No eval has measured it. The C1b baseline ran version 8 with no advisor. eval:ab refuses that stored baseline, so a new baseline run is needed. `--profile-version 8` reproduces the run without the advisor.
@@ -360,5 +368,6 @@ Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--c
 8. WP-R4 (implementer, only if the gate passes): "classes".
 9. WP-R5 (implementer-xhigh, only if the gate passes): "quotes".
 10. WP-S (implementer, once per winner): `SHIPPED_PROFILES` and `FORMER`, `PROFILES_VERSION`, `REVIEW_PROMPT_VERSION`, CHANGELOG, docs/eval/results.md.
+11. WP-AR1 (implementer): variant "architecture" (architecture-bugs.md section 6).
 
 Assumptions (not verified): the cost factor of high over medium; the label costs; Sonnet 5.5 as `--model sonnet` on the subscription CLI; `prepareWorkspace` and `syncCache` from scripts with a temp data folder; local.ts can read the PR merge state for clean cases; one job slot can run three finder runs in sequence; the size of the rebuilt local set (private, not read).

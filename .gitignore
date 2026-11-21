@@ -8,3 +8,4 @@ test-results/
 .bun-cache/
 eval-results/
 eval-local/
+eval-seeds/

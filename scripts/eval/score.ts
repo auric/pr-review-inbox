@@ -708,8 +708,8 @@ function tallies(r: EvalResult, g?: Grounding): { runs: RunTally[]; grounded: bo
 // The class names of shared/review.ts bugClass, as local.ts BUG_CLASS_NAMES has them.
 const CLASS_NAMES = ["security", "concurrency", "resource", "behavior", "other"] as const;
 
-// review-quality-2026.md E5. Gold slices: severity, source, module, and bug class of the counted must-finds. Case slices: size, task
-// text, and clean cases. The probe set is a set of its own (--set probe), so its result is its slice.
+// review-quality-2026.md E5. Gold slices: severity, source, module, bug class, and seed kind of the counted must-finds. Case slices:
+// size, task text, and clean cases. The probe set is a set of its own (--set probe), so its result is its slice.
 function slices(runs: RunTally[], grounded: boolean, hits: (x: RunTally) => Hits, volume: Volume | null): Slice[] {
   type Acc = { mustFinds: number; found: number; runs: number; noise: number; judgeFp: number | null; gold: boolean };
   const acc = new Map<string, Acc>();
@@ -730,6 +730,7 @@ function slices(runs: RunTally[], grounded: boolean, hits: (x: RunTally) => Hits
         `source ${b.source ?? "none"}`,
         `module ${b.module}`,
         `class ${CLASS_NAMES[bugClass({ module: b.module, category: b.category })] ?? "other"}`,
+        ...(b.seedKind ? [`kind ${b.seedKind}`] : []),
       ]) {
         const a = row(name, true);
         a.mustFinds++;

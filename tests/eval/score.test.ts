@@ -1114,3 +1114,42 @@ describe("polish points (minor-fold.md)", () => {
     ).not.toContain("Polish points (minor-fold.md)");
   });
 });
+
+describe("seeded cases (docs/plans/review-v2/seeded-truth.md WP-SG0)", () => {
+  const seed = (id: string, line: number, seedKind: EvalBug["seedKind"]) => gbug(id, line, { source: "seeded", seedKind });
+  // The seeded set makes the natural bugs of a host extras (seeded-truth.md section 6.1).
+  const natural = {
+    path: "g.ts",
+    side: "new" as const,
+    lines: [50, 50] as [number, number],
+    note: "A natural bug.",
+    source: "posted" as const,
+  };
+
+  test("a seeded case counts only its seeds for recall, and a hit on a natural bug counts as an extra", () => {
+    const c = gcase("s", [seed("S1", 10, "lifetime"), seed("S2", 30, "architecture")], { extras: [natural] });
+    const s = score(gresult([c], [run("s", 1, [at("seed", { line: 10, lineEnd: 10 }), at("natural", { line: 50, lineEnd: 50 })])]));
+    expect(s.suite.recall).toEqual({ mean: 0.5, min: 0.5, max: 0.5 });
+    expect(s.suite.extras).toEqual({ mean: 1, min: 1, max: 1 });
+    expect(s.suite.noise).toEqual({ mean: 0, min: 0, max: 0 });
+    expect(s.suite.precision).toEqual({ mean: 1, min: 1, max: 1 });
+  });
+
+  test("the kind row counts the seeds per kind, and a natural bug has no kind row", () => {
+    const a = gcase("a", [seed("S1", 10, "lifetime"), seed("S2", 30, "architecture")], { extras: [natural] });
+    const b = gcase("b", [seed("S1", 10, "architecture"), gbug("B1", 30, { source: "posted" })]);
+    const r = gresult(
+      [a, b],
+      [
+        run("a", 1, [at("a1", { line: 30, lineEnd: 30 })]),
+        run("b", 1, [at("b1", { line: 10, lineEnd: 10 }), at("b2", { line: 30, lineEnd: 30 })]),
+      ],
+    );
+    const rows = Object.fromEntries(score(r).slices.map((x) => [x.name, x]));
+    expect(rows["kind lifetime"]).toMatchObject({ mustFinds: 1, found: 0, runs: null });
+    expect(rows["kind architecture"]).toMatchObject({ mustFinds: 2, found: 2, runs: null });
+    expect(rows["source seeded"]).toMatchObject({ mustFinds: 3, found: 2 });
+    expect(Object.keys(rows).filter((n) => n.startsWith("kind "))).toEqual(["kind architecture", "kind lifetime"]);
+    expect(summaryText(r, score(r))).toMatch(/kind architecture\s+2\/2/);
+  });
+});
