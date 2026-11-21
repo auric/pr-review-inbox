@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// docs/plans/review-v2/risk-check.md WP-RC1 (AC-R40 to AC-R45): the risk blocks of candidates.md, the verifier lines, the outcome table
-// R0 to R10, and the settle of finder risks. Pure parts only: no process, no git, no database. The runs with the fake CLI are in
+// docs/plans/review-v2/risk-check.md WP-RC1 and WP-RC3 (AC-R40 to AC-R45, a default since prompt 2.9 with the fallback of section 7):
+// the risk blocks of candidates.md, the verifier lines, the outcome table R0 to R10, and the settle of finder risks. Pure parts only: no process, no git, no database. The runs with the fake CLI are in
 // verify.test.ts (a review run) and tests/tasks/loop.test.ts (the own review of a task).
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -13,7 +13,6 @@ import {
   type ReviewContext,
   RISK_BLOCK_RULES,
   reviewerAgent,
-  riskCheck,
   SHIPPED_PROFILES,
   salvageAgent,
   VERIFY_DELEGATE,
@@ -36,13 +35,12 @@ import {
   verdictsOf,
 } from "../../src/server/review/judge";
 import { buildVerifyPrompt, type PromptInput } from "../../src/server/review/prompt";
-import { type FinderRisks, riskOutcomes } from "../../src/shared/dto";
+import { type FinderRisks, riskOutcomes, VARIANTS } from "../../src/shared/dto";
 import { type AnchoredFinding, type FindingPayload, MAX_FINDINGS, type Question, type VerifyVerdict } from "../../src/shared/review";
 
 console.log(`risk-check.test.ts imported from ${Bun.resolveSync("../../src/server/review/judge", import.meta.dir)}`);
 
 const general = SHIPPED_PROFILES[0] as (typeof SHIPPED_PROFILES)[number];
-const risky = { ...general, variants: ["risk-check" as const] };
 const GOAL: ReviewContext = { ...NO_CONTEXT, taskFile: true, goal: true, prContext: true };
 const NONE = { read: [], skipped: [], unavailable: [], notChecked: [] };
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -191,7 +189,7 @@ describe("risk blocks in candidates.md (AC-R40)", () => {
   });
 });
 
-describe("no change without the variant (AC-R41)", () => {
+describe("no change without risks (AC-R41)", () => {
   const i: PromptInput = {
     mergeBase: "a".repeat(40),
     head: "b".repeat(40),
@@ -203,7 +201,7 @@ describe("no change without the variant (AC-R41)", () => {
     attachments: false,
   };
 
-  test("the verify prompts, the task lines, and candidates.md without risks keep the bytes of commit 4bbd974", () => {
+  test("the verify prompts, the task lines, and candidates.md without risks keep the bytes of commit 4bbd974 with the prompt 2.9 lines", () => {
     // Hashes from the tree before WP-RC1. tests/review/prompt.test.ts pins the no-question prompts of every profile too.
     expect({
       verifyQ: sha(withVerifyDelegation(verifyAgent(general, GOAL, true), true, true).prompt),
@@ -225,24 +223,21 @@ describe("no change without the variant (AC-R41)", () => {
         ].join("\n---\n"),
       ),
     }).toEqual({
-      verifyQ: "467a6a7df5076ed1888caca7054d7434a89252acec496cf6af60b6ca924c4915",
-      verifierQ: "30e05d590b45b84dec658a0972988ef3dc0d4722125168fa7b66ffba7441620a",
-      verify: "22561ac5a9ecca7e118a3725684daebda84bc5c9754c35dfc86e88093ff18d03",
-      verifier: "a20e00cbd7e367d7df01a2aa58f3c4389735fb0c2b23d538c7b3d6b0277ecffc",
+      verifyQ: "1347f50fe6f0fcb40f76e183abc2cb161430e636b5abaf53e405dfa6104ddee2",
+      verifierQ: "874db9fa181094c38509b6dea974eb30332f819c0c47ce72d9183b9c5671aabd",
+      verify: "cb2e97550163de06b3b2d6b1aff523fa381ef7ae2a48cf9de5fb9e1502ca018f",
+      verifier: "a4b6c65d217adfd6b52a1bc67d3475375c65c89e38b3c95ffff4b2120345af76",
       task: "928b7fc1fecc9eb475e4db636af71d2b3715098e5633c8b1a6b0c0fd0459041d",
       file: "c8a41830a9a719015eb5dc7d86e42441471669b9d40e1bcd1c17d897b513e543",
     });
   });
 
-  test("the variant alone changes no agent prompt; only risks in candidates.md add lines", () => {
-    expect(riskCheck(risky)).toBe(true);
-    for (const p of SHIPPED_PROFILES) expect(riskCheck(p)).toBe(false);
-    expect(mainAgent(risky, GOAL).prompt).toBe(mainAgent(general, GOAL).prompt);
-    expect(reviewerAgent(risky, GOAL).prompt).toBe(reviewerAgent(general, GOAL).prompt);
-    expect(salvageAgent(risky).prompt).toBe(salvageAgent(general).prompt);
-    for (const q of [false, true]) {
-      expect(verifyAgent(risky, GOAL, q).prompt).toBe(verifyAgent(general, GOAL, q).prompt);
-      expect(verifierAgent(risky, GOAL, q).prompt).toBe(verifierAgent(general, GOAL, q).prompt);
+  test("prompt 2.9: the check needs no variant, and only risks in candidates.md add lines", () => {
+    expect(VARIANTS).not.toContain("risk-check");
+    for (const l of RISK_BLOCK_RULES) {
+      expect(lines(mainAgent(general, GOAL).prompt)).not.toContain(l);
+      expect(lines(reviewerAgent(general, GOAL).prompt)).not.toContain(l);
+      expect(lines(salvageAgent(general).prompt)).not.toContain(l);
     }
     expect(candidatesFile([C(1)], [Q(1)], []).file.text).toBe(candidatesFile([C(1)], [Q(1)]).file.text);
   });
@@ -330,7 +325,7 @@ describe("the outcome table R0 to R10 (AC-R43)", () => {
   const cands = new Map([[1, { title: "Title 1", verdict: "confirmed" }]]);
   const s = (o: Partial<RiskStep> = {}): RiskStep => ({ verify: true, fits: true, failed: false, cands, ...o });
   const placed = placedRisk(V(5, "confirmed", { severity: "minor" }));
-  type Row = { row: string; step: RiskStep; outcome: string; note: string; item?: "finding" | Question };
+  type Row = { row: string; step: RiskStep; outcome: string; note: string; item?: "finding" };
   const rows: Row[] = [
     {
       row: "R0",
@@ -358,34 +353,21 @@ describe("the outcome table R0 to R10 (AC-R43)", () => {
       note: "The TODO is stale",
       item: "finding",
     },
+    // Section 7, the fallback (cascade step 2): R5 and R6 give open with the question in the note and no item.
     {
       row: "R5, no finding",
       step: s({ v: V(5, "confirmed") }),
-      outcome: "asked",
-      note: "Confirmed, but the check could not place it.",
-      item: { text: "The risk.", why: "Reason 5." },
+      outcome: "open",
+      note: "Confirmed, but the check could not place it: The risk.",
     },
     {
       row: "R5, a dropped place",
       step: s({ v: V(5, "confirmed", { finding: PLACE }) }),
-      outcome: "asked",
-      note: "Confirmed, but the check could not place it.",
-      item: { text: "The TODO is stale", why: "Reason 5." },
+      outcome: "open",
+      note: "Confirmed, but the check could not place it: The TODO is stale",
     },
-    {
-      row: "R6",
-      step: s({ v: V(5, "question", { question: " Must b2 ship? " }) }),
-      outcome: "asked",
-      note: "Must b2 ship?",
-      item: { text: "Must b2 ship?", why: "Reason 5." },
-    },
-    {
-      row: "R6, no question text",
-      step: s({ v: V(5, "question") }),
-      outcome: "asked",
-      note: "The risk.",
-      item: { text: "The risk.", why: "Reason 5." },
-    },
+    { row: "R6", step: s({ v: V(5, "question", { question: " Must b2 ship? " }) }), outcome: "open", note: "Must b2 ship?" },
+    { row: "R6, no question text", step: s({ v: V(5, "question") }), outcome: "open", note: "The risk." },
     { row: "R7", step: s({ v: V(5, "refuted") }), outcome: "cleared", note: "Reason 5. Evidence: src/a.ts:5" },
     {
       row: "R8",
@@ -417,10 +399,9 @@ describe("the outcome table R0 to R10 (AC-R43)", () => {
     test(`${r.row}: ${r.outcome}`, () => {
       const e = riskOutcome("The risk.", r.step);
       expect([e.outcome, e.note]).toEqual([r.outcome, r.note]);
-      // Only found and asked make an item.
+      // Only found makes an item.
       if (r.item === undefined) expect(e.item).toBeUndefined();
-      else if (r.item === "finding") expect(e.item?.kind).toBe("finding");
-      else expect(e.item).toEqual({ kind: "question", question: r.item });
+      else expect(e.item?.kind).toBe("finding");
     });
 
   test("AC-R45: the found item is the placed finding with category risk and the confirmed mark", () => {
@@ -465,14 +446,14 @@ describe("settle of finder risks (AC-R43, AC-R44)", () => {
       input({ check: check(verdicts, 2, 1, 8), written: 2, placed: new Map([[4, placedRisk(verdicts[3] as VerifyVerdict)]]), ...o }),
     );
 
-  test("each risk gets one outcome; the counts add up to listed; only found and asked make items", () => {
+  test("each risk gets one outcome; the counts add up to listed; only found makes an item", () => {
     const on = run();
     const off = run({ risks: false });
     const r = on.result?.summary.finderRisks;
     expect(r?.list.map((x) => [x.outcome, x.note])).toEqual([
       ["found", "The TODO is stale"],
-      ["asked", "Confirmed, but the check could not place it."],
-      ["asked", "Must b2 ship?"],
+      ["open", "Confirmed, but the check could not place it: Risk text 1."],
+      ["open", "Must b2 ship?"],
       ["cleared", "Reason 7. Evidence: src/a.ts:7"],
       ["covered", "Same point as: Title 1 (confirmed)"],
       ["open", "The check named no finding for this repeat."],
@@ -481,17 +462,13 @@ describe("settle of finder risks (AC-R43, AC-R44)", () => {
       ["open", "Not checked: the check file reached its size limit."],
     ]);
     expect(r?.list.map((x) => x.text)).toEqual(risks);
-    expect(counts(r)).toEqual([1, 2, 1, 1, 4]);
+    expect(counts(r)).toEqual([1, 0, 1, 1, 6]);
     expect(r?.listed).toBe(risks.length);
     expect(counts(r).reduce((a, b) => a + b, 0)).toBe(risks.length);
-    // Mode off: no key, and the risks make no item.
+    // Mode off (the critic of a task): no key, and the risks make no item.
     expect(off.result?.summary.finderRisks).toBeUndefined();
     const added = (on.result?.items ?? []).filter((i) => !(off.result?.items ?? []).some((x) => x.payload_json === i.payload_json));
-    expect(added.map((i) => [i.kind, i.body])).toEqual([
-      ["finding", "B."],
-      ["question", "Risk text 1."],
-      ["question", "Must b2 ship?"],
-    ]);
+    expect(added.map((i) => [i.kind, i.body])).toEqual([["finding", "B."]]);
     expect(on.result?.items).toHaveLength((off.result?.items.length ?? 0) + (r?.found ?? 0) + (r?.asked ?? 0));
     expect(JSON.parse(added[0]?.payload_json ?? "{}")).toMatchObject({ category: "risk", verify: { verdict: "confirmed" } });
     // AC-R44: verify, coverage, and the run status stay as without the risk check.

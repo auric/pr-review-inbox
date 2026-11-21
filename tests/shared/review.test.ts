@@ -101,8 +101,8 @@ describe("finding v2 (AC-R14)", () => {
     expect(reviewResult.safeParse({ ...V1_RESULT, findings: [{ ...V1_FINDING, cause: { path: "a" } }] }).success).toBe(false);
   });
 
-  test("the review prompts ship as prompt version 2.8 (2.8: Agent calls pass no model or effort)", () => {
-    expect(REVIEW_PROMPT_VERSION).toBe("2.8");
+  test("the review prompts ship as prompt version 2.9 (2.9: the pre-existing lines are a default)", () => {
+    expect(REVIEW_PROMPT_VERSION).toBe("2.9");
   });
 });
 

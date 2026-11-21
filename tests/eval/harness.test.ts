@@ -183,15 +183,13 @@ describe("eval harness without --real (AC-M2)", () => {
     ]);
     expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
-    expect(VERIFY_ONLY).toEqual(["obligations", "refute-issue", "risk-check", "security2-verify", "verify2"]);
+    expect(VERIFY_ONLY).toEqual(["obligations", "refute-issue", "security2-verify", "verify2"]);
     // verifier-rule.md AC-R58: the rule changes only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["refute-issue"] })).toEqual([]);
     expect(finderChange(base, { ...p.profile, variants: ["refute-issue", "callers"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
-    // risk-check.md section 7: the risk check changes only the verify prompts.
-    expect(finderChange(base, { ...p.profile, variants: ["risk-check"] })).toEqual([]);
     // obligations.md section 8: the obligation check changes only the verify prompts.
-    expect(finderChange(base, { ...p.profile, variants: ["risk-check", "obligations"] })).toEqual([]);
+    expect(finderChange(base, { ...p.profile, variants: ["obligations"] })).toEqual([]);
     // A replay runs each verify call live, also one with the obligations schema.
     expect(callKind({ schema: verifyJsonSchema() })).toBe("verify");
     expect(callKind({ schema: verifyJsonSchema(true) })).toBe("verify");
@@ -310,7 +308,7 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(parseOptions([])).toMatchObject({ variants: null });
     expect(parseOptions(["--variants", "verify2, broad"])).toMatchObject({ variants: ["verify2", "broad"] });
     // review-quality-2026.md WP-R1: the retired variants are unknown names.
-    for (const bad of ["bogus", "signal", "order", "rules2", "rereview-strict", "broad,", ""])
+    for (const bad of ["bogus", "signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check", "broad,", ""])
       expect(parseOptions(["--variants", bad])).toHaveProperty("error");
     expect(profileOf([]).variants).toEqual([]);
     expect(profileOf(["--variants", "verify2,broad"]).variants).toEqual(["broad", "verify2"]);
@@ -334,7 +332,7 @@ describe("eval harness without --real (AC-M2)", () => {
       [
         "--variants",
         "rules2",
-        "--variants must be a comma list of architecture, broad, callers, classes, minor-fold, obligations, parts, preexisting, refute-issue, risk-check, security2, security2-verify, verify2.",
+        "--variants must be a comma list of architecture, broad, callers, classes, minor-fold, obligations, parts, refute-issue, security2, security2-verify, verify2.",
       ],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
@@ -933,7 +931,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         return { ...r, file };
       };
       const ids = `probe-clean-axis-ticks,${task.id}`;
-      // Without the variant risk-check, a finder risk changes no call.
+      // risk-check.md WP-RC3: since prompt 2.9, each run checks its finder risks. A run with only a risk starts the verify phase.
       const RISK = "A secret risk text of the fake CLI.";
       const rec = await run("record", [finding], ["--cases", ids], [RISK]);
       expect(rec.stderr).toBe("");
@@ -942,19 +940,24 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       // review-quality-2026.md E5: the slices read the case fields from the result file.
       expect(a.cases.find((c) => c.id === "probe-clean-axis-ticks")).toMatchObject({ clean: true });
       expect(a.cases.find((c) => c.id === task.id)?.task).toBe(task.task as string);
-      // The clean case has no file of the finding, so its run has no candidate and no verify call.
+      // The clean case has no file of the finding, so its verify call checks only the risk.
       expect(readdirSync(callsDir(rec.file)).sort()).toEqual([
         "probe-clean-axis-ticks-1-1.json",
+        "probe-clean-axis-ticks-1-2.json",
         `${task.id}-1-1.json`,
         `${task.id}-1-2.json`,
       ]);
-      expect(calls("record")).toEqual([
+      expect(calls("record").sort()).toEqual([
         ["review", "medium"],
         ["review", "medium"],
+        ["verify", "medium"],
         ["verify", "medium"],
       ]);
       const found = (r: EvalResult) => r.runs.find((x) => x.case === task.id)?.items.map((i) => [i.path, i.line, i.verdict]);
       expect(found(a)).toEqual([[bug.path, bug.lines[0], "confirmed"]]);
+      // The echo check gives no risk verdict, so each risk stays open.
+      const open = { listed: 1, found: 0, asked: 0, cleared: 0, covered: 0, open: 1 };
+      expect(a.runs.map((x) => x.finderRisks)).toEqual([open, open]);
 
       // A live finder of this scenario finds nothing, so the found item comes from the recording.
       const replay = await run("replay", [], ["--cases", ids, "--replay-find", rec.file, "--verifier-effort", "high"]);
@@ -964,28 +967,18 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const b = readResult(replay.file);
       expect(b.requested).toMatchObject({ replayOf: basename(rec.file), verifierEffort: "high", reviewerMode: "auto" });
       expect(found(b)).toEqual(found(a));
-      expect(calls("replay")).toEqual([["verify", "high"]]);
+      expect(calls("replay")).toEqual([
+        ["verify", "high"],
+        ["verify", "high"],
+      ]);
       // The replay records its calls too, so a later replay can use it.
       expect(readdirSync(callsDir(replay.file)).sort()).toEqual(readdirSync(callsDir(rec.file)).sort());
-      expect(b.runs.map((x) => x.finderRisks)).toEqual([undefined, undefined]);
-
-      // risk-check.md section 7: the risk check changes only the verify prompts, so a replay can switch it on.
-      const risky = await run("risky", [], ["--cases", ids, "--replay-find", rec.file, "--variants", "risk-check"]);
-      expect(risky.stderr).toBe("");
-      expect(risky.code).toBe(0);
-      const k = readResult(risky.file);
-      // The echo check gives no risk verdict, so each risk stays open. A run with only a risk starts the verify phase.
-      const open = { listed: 1, found: 0, asked: 0, cleared: 0, covered: 0, open: 1 };
-      expect(k.runs.map((x) => x.finderRisks)).toEqual([open, open]);
-      expect(calls("risky")).toEqual([
-        ["verify", "medium"],
-        ["verify", "medium"],
-      ]);
-      // The result file holds the counts, never the risk text.
-      expect(readFileSync(risky.file, "utf8")).not.toContain(RISK);
-      expect(risky.stdout).toContain("Finder risks, all runs: 2 listed, 0 found, 0 asked, 0 cleared, 0 same as a finding, 2 open.");
-      expect(risky.stdout).toContain("Question items per case run, per repeat (all question items): 1: 0/2 = 0.00. Spread: 0.00.");
-      expect(k.runs.map((x) => x.obligations)).toEqual([undefined, undefined]);
+      expect(b.runs.map((x) => x.finderRisks)).toEqual([open, open]);
+      // risk-check.md section 7: the result file holds the counts, never the risk text.
+      expect(readFileSync(replay.file, "utf8")).not.toContain(RISK);
+      expect(replay.stdout).toContain("Finder risks, all runs: 2 listed, 0 found, 0 asked, 0 cleared, 0 same as a finding, 2 open.");
+      expect(replay.stdout).toContain("Question items per case run, per repeat (all question items): 1: 0/2 = 0.00. Spread: 0.00.");
+      expect(b.runs.map((x) => x.obligations)).toEqual([undefined, undefined]);
 
       // obligations.md section 8: the obligation check changes only the verify prompts, so a replay can switch it on. Its verify call
       // has its own schema, and the replay must still run it live.
@@ -1065,7 +1058,8 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         error: "The recording has no run of this case at this head.",
       });
       expect(runOf(g, "probe-clean-axis-ticks")?.status).toBe(runOf(a, "probe-clean-axis-ticks")?.status);
-      expect(calls("gap")).toEqual([]);
+      // Only the clean case runs its verify call live, for its recorded risk.
+      expect(calls("gap")).toEqual([["verify", "medium"]]);
     },
     SLOW,
   );

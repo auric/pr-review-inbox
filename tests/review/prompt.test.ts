@@ -566,9 +566,9 @@ describe("review v2 finder prompt", () => {
     // WP-R3: the agents of the verify phase are review agents too.
     const check = [withVerifyDelegation(verifyAgent(known, run), true), verifierAgent(known, run)].map((a) => a.prompt).join("\n---\n");
     expect({ version: REVIEW_PROMPT_VERSION, finder: sha(finder), check: sha(check) }).toEqual({
-      version: "2.8",
-      finder: "e1566979be24eb5a1f646031985ed1fcef7daff21284becd0d98d88c074d1d5a",
-      check: "e59857b7382e53bd7f7bf8894f6c49f03ebf81e023f59a08dc3c394943687d5f",
+      version: "2.9",
+      finder: "102ad80998240e252b02fd8c7bfbdd34feb8bbf1b8f88f4a15b14d16c65996d5",
+      check: "0a59ec7ddbea1ce1d107f86cb68b044ae77677d4bebccd6a22d27cdf3779b42f",
     });
   });
 
@@ -695,7 +695,9 @@ describe("review v2 finder prompt", () => {
     }
     expect(reviewer).toContain("\nReport each finding with its place: path, side, line, lineEnd, anchorText, and cause.\n");
     expect(
-      reviewer.endsWith("Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence."),
+      reviewer.endsWith(
+        `Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.\n${PREEXISTING_REVIEWER}`,
+      ),
     ).toBe(true);
     // Without task.md, the intent line names pr.md only. A re-review names the base of its range.
     expect(contextBlock(NO_CONTEXT)[0]).toBe("Read ./context/pr.md first. It tells what the author wants the change to do.");
@@ -741,7 +743,7 @@ describe("review v3 prompt switches", () => {
   const rereviewInput = { ...full, since: "c".repeat(40), rangeBase: "d".repeat(40), earlier: [1, 2], posted: [2] };
   const withVariants = (...variants: ProfileInput["variants"]) => ({ ...general, variants });
 
-  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.7)", () => {
+  test("the default prompt of each run kind is byte for byte the same as its pinned hash (prompt version 2.9)", () => {
     const threads = [{ thread: 1, replyTo: 2 }];
     const kinds: Record<string, string[]> = {
       review: [mainAgent(general, FULL).prompt, reviewerAgent(general, FULL).prompt, buildPrompt(full)],
@@ -771,15 +773,15 @@ describe("review v3 prompt switches", () => {
       ],
     };
     expect(Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, sha(v.join("\n---\n"))]))).toEqual({
-      review: "e49ee371bfc1f4b6eb787af3c05d99880469d0a63465b6e06ccc9981ed400301",
-      rereview: "2e65b5786381304ae4020f7cc796336857082703d1ce92dca0387f1be2f35506",
-      verify: "060475175194948ea9090dd147d225acf66d89386dc1a10576fff6916e7b4765",
+      review: "5c80b8724025ff3899c37440439b86b2bb398cbbcb54dd2b4ba510e6e710f5ee",
+      rereview: "b95e866a8ae2dae81b94f2ba02390f0db6a4a3937556483476c329882453cec0",
+      verify: "eb9f822da699a4157f72e72bb7fd8aa0bd0293bb3493734cc85724eb2b0cd32d",
       explain: "0a2d403ba5bfeea12a2f6249229f77ff3a19b646d202100aec744db3c4eb8b53",
       ask: "65e099f1000e6883cf1961cc02b33bef2864530efc61821d835f6667c6cb0f58",
       reply: "cd085ab743e2fe4908fcf1207db6cf3d061fdd5152161fc51ae9a9dfdea08de5",
       fix: "e3431b38c46d6e2c1d231c7604adca4463033a570580485c47f2d0f94ab4a799",
       discuss: "1f8484da378fa9c68d8c1738e16e719ca970d43657734853de5f879824c8422d",
-      improve: "06f5e3cba8d6a5f8baff029e2e67d493dbe61836bd915079ef04223d7d903a49",
+      improve: "fd460dfd08351728607a4ede6b5e26fee7a31e5f5368168ee5cceed37508ad44",
     });
     expect(SHIPPED_PROFILES.map((p) => p.variants)).toEqual([[], []]);
     for (const p of SHIPPED_PROFILES) for (const m of TRIAL_MODULES) expect(p.modules).not.toContain(m);
@@ -885,8 +887,8 @@ describe("review v3 prompt switches", () => {
   test("verify2: the duplicate, thread claim, and intent lines and the group delegation line reach the verify phase only", () => {
     const v = withVariants("verify2");
     const dup = "duplicate: another candidate of the same group describes the same problem at the same place.";
-    const history =
-      'A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.';
+    // The verify2 lines follow the pre-existing verify lines.
+    const history = PREEXISTING_VERIFY.at(-1) ?? "";
     expect(general.modules).toContain("intent");
     for (const agent of [verifyAgent, verifierAgent])
       for (const q of [false, true]) {
@@ -912,7 +914,7 @@ describe("review v3 prompt switches", () => {
         // Without history.md, the new lines follow the duplicateOf line.
         const noHistory = { ...FULL, history: false };
         expect(agent(v, noHistory, q).prompt).toContain(
-          `${VERIFY2.duplicate}\nSet duplicateOf to the clearer candidate.\n${VERIFY2.thread}\n${VERIFY2.intent}\n`,
+          `${VERIFY2.duplicate}\nSet duplicateOf to the clearer candidate.\n${PREEXISTING_VERIFY.join("\n")}\n${VERIFY2.thread}\n${VERIFY2.intent}\n`,
         );
       }
     // The group line follows the delegation lines, before the questions line. Without delegation, nothing changes.
@@ -1021,53 +1023,49 @@ describe("review v3 prompt switches", () => {
   const REPORT_LINE = "Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.";
   const HISTORY_LINE =
     'A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.';
-  const withPre = (s: string) => s.replace(ANCHOR_LINE, `${ANCHOR_LINE}\n${PREEXISTING_LINES.join("\n")}`);
 
-  test("preexisting: rl-main, rl-reviewer, and salvage get the exception after the anchor line; the verify phase gets its lines", () => {
-    const p = withVariants("preexisting");
+  test("preexisting (prompt 2.9 default): rl-main, rl-reviewer, and salvage get the exception after the anchor line; the verify phase gets its lines", () => {
+    const after = (text: string, line: string, add: readonly string[]) => expect(text).toContain(`\n${[line, ...add].join("\n")}`);
     for (const c of [FULL, RE, NO_CONTEXT]) {
-      expect(mainAgent(p, c).prompt).toBe(withPre(mainAgent(general, c).prompt));
-      expect(reviewerAgent(p, c).prompt).toBe(
-        withPre(reviewerAgent(general, c).prompt).replace(REPORT_LINE, `${REPORT_LINE}\n${PREEXISTING_REVIEWER}`),
-      );
+      after(mainAgent(general, c).prompt, ANCHOR_LINE, PREEXISTING_LINES);
+      after(reviewerAgent(general, c).prompt, ANCHOR_LINE, PREEXISTING_LINES);
+      after(reviewerAgent(general, c).prompt, REPORT_LINE, [PREEXISTING_REVIEWER]);
     }
-    expect(salvageAgent(p).prompt).toBe(withPre(salvageAgent(general).prompt));
+    after(salvageAgent(general).prompt, ANCHOR_LINE, PREEXISTING_LINES);
     // The rule "only what the change adds" stays, and the exception names the severity floor and the cap of Q6.
-    expect(mainAgent(p, FULL).prompt).toContain(
+    expect(mainAgent(general, FULL).prompt).toContain(
       "\nReport only problems that the change adds or makes reachable. BASE..HEAD is the change.\n",
     );
     expect(PREEXISTING_LINES.join(" ")).toContain("only at severity blocker or major. Report at most 5 of them.");
     for (const agent of [verifyAgent, verifierAgent])
-      for (const q of [false, true])
-        expect(agent(p, FULL, q).prompt).toBe(
-          agent(general, FULL, q).prompt.replace(HISTORY_LINE, `${HISTORY_LINE}\n${PREEXISTING_VERIFY.join("\n")}`),
-        );
-    // Every stdin and the other run kinds do not change.
-    expect(buildPrompt({ ...full, profile: p })).toBe(buildPrompt(full));
-    expect(buildRereviewPrompt({ ...rereviewInput, profile: p })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(buildVerifyPrompt({ ...full, profile: p, count: 3, rereview: false })).toBe(
-      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
-    );
-    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(p, FULL).prompt).toBe(kind(general, FULL).prompt);
-    expect(promptVersion(p)).toBe(`${REVIEW_PROMPT_VERSION}+preexisting`);
+      for (const q of [false, true]) after(agent(general, FULL, q).prompt, HISTORY_LINE, PREEXISTING_VERIFY);
+    // The other run kinds do not get the lines.
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent])
+      for (const l of [...PREEXISTING_LINES, PREEXISTING_REVIEWER, ...PREEXISTING_VERIFY])
+        expect(kind(general, FULL).prompt).not.toContain(l);
+    expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
   });
 
-  test("preexisting: the CLI schemas ask for the mark only under the variant; the default schemas keep their bytes", () => {
+  test("preexisting (prompt 2.9 default): every CLI schema asks for the mark", () => {
     const shaOf = (x: unknown) => sha(JSON.stringify(x));
-    // Hashes of the tree before WP-V6 (3663f94).
+    // Hashes of prompt 2.9.
     expect({ review: shaOf(reviewJsonSchema()), explain: shaOf(reviewJsonSchema(true)), rereview: shaOf(rereviewJsonSchema()) }).toEqual({
-      review: "e8b1f996c338c443aace9a291d28bc90619c7c98da2883e8408caee8b757ee7d",
-      explain: "198ba47a7da200b851abdecfdbf18281cf48e96676f7eab44e43e092922d01cd",
-      rereview: "8490b62e8eb23b1cc87f11b65230d8b710952d3ad2ffd5b3a4bc8d3f1df98a54",
+      review: "c3a0769044c8d730604533d29f4a5ae921b8f298b3a041040b75bd80d541d1bf",
+      explain: "38621123b47a51b409a5163a27b0edc760f35e96b858e062fb7918b3b0aa6ca2",
+      rereview: "ef69327e59a9a303efe3f8b5c3a86c376c82510b01bd8c1f2ba32247b6a16b31",
     });
     type Node = { type?: string; required?: string[]; properties?: Record<string, Node>; items?: Node };
     const item = (s: Record<string, unknown>) => (s as Node).properties?.findings?.items as Node;
-    for (const s of [reviewJsonSchema(false, true), reviewJsonSchema(true, true), rereviewJsonSchema(true)]) {
+    for (const s of [
+      reviewJsonSchema(),
+      reviewJsonSchema(true),
+      rereviewJsonSchema(),
+      reviewJsonSchema(false, true),
+      rereviewJsonSchema(true),
+    ]) {
       expect(item(s).required).toContain("preexisting");
       expect(item(s).properties?.preexisting?.type).toBe("boolean");
     }
-    for (const s of [reviewJsonSchema(), reviewJsonSchema(true), rereviewJsonSchema()])
-      expect(Object.keys(item(s).properties ?? {})).not.toContain("preexisting");
   });
 
   // docs/plans/review-v3.md D2 and docs/plans/review-v2/research/review-practice-2026-11.md T6.
@@ -1094,22 +1092,20 @@ describe("review v3 prompt switches", () => {
     expect(buildRereviewPrompt({ ...rereviewInput, profile: k })).toBe(buildRereviewPrompt(rereviewInput));
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(k, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(promptVersion(k)).toBe(`${REVIEW_PROMPT_VERSION}+callers`);
-    // Stacked with preexisting: both sets, each in its place.
-    const both = withVariants("preexisting", "callers");
-    expect(mainAgent(both, FULL).prompt).toBe(plus(withPre(mainAgent(general, FULL).prompt)));
-    expect(promptVersion(both)).toBe(`${REVIEW_PROMPT_VERSION}+callers+preexisting`);
   });
 
-  // docs/plans/review-v2/minor-fold.md sections 4 and 5 (AC-R60, AC-R63).
-  const withPolish = (s: string) => s.replace(ANCHOR_LINE, `${ANCHOR_LINE}\n${POLISH_LINES.join("\n")}`);
-  test("minor-fold: rl-main, rl-reviewer, and salvage get the polish lines after the anchor line; the verify phase gets its lines", () => {
+  // docs/plans/review-v2/minor-fold.md sections 4 and 5 (AC-R60, AC-R63). The polish lines follow the pre-existing lines.
+  const PRE_LAST = PREEXISTING_LINES.at(-1) ?? "";
+  const PRE_VERIFY_LAST = PREEXISTING_VERIFY.at(-1) ?? "";
+  const withPolish = (s: string) => s.replace(`\n${PRE_LAST}\n`, `\n${PRE_LAST}\n${POLISH_LINES.join("\n")}\n`);
+  test("minor-fold: rl-main, rl-reviewer, and salvage get the polish lines after the pre-existing lines; the verify phase gets its lines", () => {
     const m = withVariants("minor-fold");
     expect(minorFold(m)).toBe(true);
     expect(minorFold(general)).toBe(false);
     for (const c of [FULL, RE, NO_CONTEXT]) {
       expect(mainAgent(m, c).prompt).toBe(withPolish(mainAgent(general, c).prompt));
       expect(reviewerAgent(m, c).prompt).toBe(
-        withPolish(reviewerAgent(general, c).prompt).replace(REPORT_LINE, `${REPORT_LINE}\n${POLISH_REVIEWER}`),
+        withPolish(reviewerAgent(general, c).prompt).replace(PREEXISTING_REVIEWER, `${PREEXISTING_REVIEWER}\n${POLISH_REVIEWER}`),
       );
     }
     expect(salvageAgent(m).prompt).toBe(withPolish(salvageAgent(general).prompt));
@@ -1117,7 +1113,7 @@ describe("review v3 prompt switches", () => {
     for (const agent of [verifyAgent, verifierAgent])
       for (const q of [false, true])
         expect(agent(m, FULL, q).prompt).toBe(
-          agent(general, FULL, q).prompt.replace(HISTORY_LINE, `${HISTORY_LINE}\n${POLISH_VERIFY.join("\n")}`),
+          agent(general, FULL, q).prompt.replace(PRE_VERIFY_LAST, `${PRE_VERIFY_LAST}\n${POLISH_VERIFY.join("\n")}`),
         );
     expect(buildPrompt({ ...full, profile: m })).toBe(buildPrompt(full));
     expect(buildRereviewPrompt({ ...rereviewInput, profile: m })).toBe(buildRereviewPrompt(rereviewInput));
@@ -1126,29 +1122,19 @@ describe("review v3 prompt switches", () => {
     );
     for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(m, FULL).prompt).toBe(kind(general, FULL).prompt);
     expect(promptVersion(m)).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold`);
-    // With preexisting: the polish lines follow the pre-existing lines, and the polish verify lines follow the pre-existing ones.
-    const both = withVariants("preexisting", "minor-fold");
-    expect(mainAgent(both, FULL).prompt).toBe(
-      mainAgent(general, FULL).prompt.replace(ANCHOR_LINE, `${ANCHOR_LINE}\n${[...PREEXISTING_LINES, ...POLISH_LINES].join("\n")}`),
-    );
-    expect(verifyAgent(both, FULL).prompt).toBe(
-      verifyAgent(general, FULL).prompt.replace(HISTORY_LINE, `${HISTORY_LINE}\n${[...PREEXISTING_VERIFY, ...POLISH_VERIFY].join("\n")}`),
-    );
-    expect(promptVersion(both)).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold+preexisting`);
   });
 
-  test("minor-fold: the CLI schemas ask for polish only under the variant; preexisting alone has no polish key", () => {
+  test("minor-fold: the CLI schemas ask for polish only under the variant", () => {
     type Node = { type?: string; required?: string[]; properties?: Record<string, Node>; items?: Node };
     const item = (s: Record<string, unknown>) => (s as Node).properties?.findings?.items as Node;
-    for (const s of [reviewJsonSchema(false, false, true), reviewJsonSchema(true, false, true), rereviewJsonSchema(false, true)]) {
+    for (const s of [reviewJsonSchema(false, true), reviewJsonSchema(true, true), rereviewJsonSchema(true)]) {
       expect(item(s).required).toContain("polish");
       expect(item(s).properties?.polish?.type).toBe("boolean");
-      expect(Object.keys(item(s).properties ?? {})).not.toContain("preexisting");
     }
-    for (const s of [reviewJsonSchema(false, true), reviewJsonSchema(true, true), rereviewJsonSchema(true)])
+    for (const s of [reviewJsonSchema(), reviewJsonSchema(true), rereviewJsonSchema()])
       expect(Object.keys(item(s).properties ?? {})).not.toContain("polish");
     // Both marks: both keys, preexisting first.
-    const keys = Object.keys(item(reviewJsonSchema(false, true, true)).properties ?? {});
+    const keys = Object.keys(item(reviewJsonSchema(false, true)).properties ?? {});
     expect(keys.slice(-2)).toEqual(["preexisting", "polish"]);
   });
 
@@ -1178,7 +1164,7 @@ describe("review v3 prompt switches", () => {
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("verify2", "broad"))).toBe("2.8+broad+verify2");
+    expect(promptVersion(withVariants("verify2", "broad"))).toBe("2.9+broad+verify2");
     expect(VARIANTS).toEqual([
       "architecture",
       "broad",
@@ -1187,9 +1173,7 @@ describe("review v3 prompt switches", () => {
       "minor-fold",
       "obligations",
       "parts",
-      "preexisting",
       "refute-issue",
-      "risk-check",
       "security2",
       "security2-verify",
       "verify2",
@@ -1199,7 +1183,7 @@ describe("review v3 prompt switches", () => {
     expect(parsed.variants).toEqual([]);
     expect(profileRevision(parsed)).toBe(profileRevision(general));
     // The retired names drop like any unknown name.
-    const retired = ["signal", "order", "rules2", "rereview-strict"];
+    const retired = ["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"];
     expect(profileInput.parse({ ...old, variants: ["verify2", ...retired, "bogus", 7, "broad", "verify2"] }).variants).toEqual([
       "broad",
       "verify2",
@@ -1213,7 +1197,6 @@ describe("review v3 prompt switches", () => {
       withVariants("classes"),
       withVariants("security2"),
       withVariants("security2-verify"),
-      withVariants("preexisting"),
       withVariants("callers"),
       withVariants("minor-fold"),
       withVariants("architecture"),

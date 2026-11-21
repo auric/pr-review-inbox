@@ -184,7 +184,7 @@ const promptInput: PromptInput = {
 };
 
 describe("no change without the mode (AC-R49)", () => {
-  test("the verify prompts, the task lines, the verify --json-schema, and candidates.md keep the bytes of commit bef39aa", () => {
+  test("the verify prompts, the task lines, the verify --json-schema, and candidates.md keep the bytes of commit bef39aa with the prompt 2.9 lines", () => {
     // Hashes from the tree before WP-OB1. risk-check.test.ts and prompt.test.ts pin more prompts of the same tree.
     const prompts: string[] = [];
     for (const c of [NO_CONTEXT, { ...HISTORY }])
@@ -209,8 +209,9 @@ describe("no change without the mode (AC-R49)", () => {
       tasks: sha(tasks.join("\n---\n")),
       file: sha(candidatesFile([], [], []).file.text),
     }).toEqual({
-      schema: "12d0ab92205e5b868c524af12dbe73180c1b3a4ef6fdf06192991076ea259bc3",
-      agents: "1610f6bd74e59c5123231b51dfe06346b6db8ec500a5308a10df128cc7ff7c5d",
+      // Prompt 2.9 (risk-check.md WP-RC3): the describe text of the verdict finding key names the "## Risk N" block.
+      schema: "54d28e488f2268093986e4c71bbb79c06e0d1b2debe8e36c4927c2014f5eaedb",
+      agents: "bb047589c0ff2299066e71aec0fd462862b6a7a3aaba16bd60ccd63e6355e29d",
       tasks: "629023dedfb26f575866501e1f44abde0329fc193d1464014a8addca9f9ed22a",
       file: "8f6e4acdf7599cf87a5082e11ee4e349eb7f081cb9a74416a7c6ec4ebc8e1000",
     });

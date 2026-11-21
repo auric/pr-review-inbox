@@ -568,15 +568,14 @@ describe("eval:ab arguments", () => {
     // review-quality-2026.md item 10.
     expect(parseAb(["--candidate-variants", "security2"])).toMatchObject({ variants: ["security2"] });
     expect(parseAb(["--candidate-variants", "security2-verify"])).toMatchObject({ variants: ["security2-verify"] });
-    // review-v3.md WP-V6 and the caller rule, with the flags of the Gate A command.
+    // review-v3.md D2, the caller rule, with the flags of the Gate A command.
     const gate = ["--review-only", "--clean", "8", "--repeat", "2"];
-    expect(parseAb([...gate, "--candidate-variants", "preexisting"])).toMatchObject({ variants: ["preexisting"], reviewOnly: true });
-    expect(parseAb([...gate, "--candidate-variants", "callers"])).toMatchObject({ variants: ["callers"], repeat: "2" });
-    expect(parseAb([...gate, "--candidate-variants", "preexisting,callers"])).toMatchObject({ variants: ["preexisting", "callers"] });
-    for (const retired of ["signal", "order", "rules2", "rereview-strict"])
+    expect(parseAb([...gate, "--candidate-variants", "callers"])).toMatchObject({ variants: ["callers"], repeat: "2", reviewOnly: true });
+    // Prompt 2.9 ships "preexisting" and "risk-check" as defaults, so their names are retired.
+    for (const retired of ["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
         error: expect.stringContaining(
-          "--variants must be a comma list of architecture, broad, callers, classes, minor-fold, obligations, parts, preexisting, refute-issue, risk-check, security2, security2-verify, verify2.",
+          "--variants must be a comma list of architecture, broad, callers, classes, minor-fold, obligations, parts, refute-issue, security2, security2-verify, verify2.",
         ),
       });
   });
@@ -623,8 +622,7 @@ describe("eval:ab arguments", () => {
       ["--candidate-variants", "broad,verify2"],
       ["--candidate-variants", "classes"],
       ["--candidate-variants", "security2"],
-      // review-v3.md WP-V6 and the caller rule change the finder prompt.
-      ["--candidate-variants", "preexisting"],
+      // review-v3.md D2: the caller rule changes the finder prompt.
       ["--candidate-variants", "callers"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
       ["--candidate-verifier", "off"],
@@ -640,12 +638,10 @@ describe("eval:ab arguments", () => {
       replay: true,
       variants: ["security2-verify"],
     });
-    // risk-check.md section 7: the risk check changes only the verify prompts.
-    expect(parseAb(["--candidate-replay", "--candidate-variants", "risk-check"])).toMatchObject({ replay: true, variants: ["risk-check"] });
     // obligations.md section 8: the obligation check changes only the verify prompts.
-    expect(parseAb(["--candidate-replay", "--candidate-variants", "risk-check,obligations"])).toMatchObject({
+    expect(parseAb(["--candidate-replay", "--candidate-variants", "obligations"])).toMatchObject({
       replay: true,
-      variants: ["risk-check", "obligations"],
+      variants: ["obligations"],
     });
     // verifier-rule.md section 4.1: the rule changes only the verify prompts.
     expect(parseAb(["--candidate-replay", "--candidate-variants", "refute-issue"])).toMatchObject({

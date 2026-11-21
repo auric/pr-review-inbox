@@ -200,7 +200,7 @@ STACK_VERIFY, in `verifyRules` after the refute line group:
 12. With `parent`: "Confirm a candidate there only when this change relies on it, breaks it, or makes it reachable."
 13. With `children`: "When the title or description of a child names the missing part, give question, not confirmed. Name the child in question."
 
-STACK_PREEXISTING, in `finderRules` after PREEXISTING_LINES, with "preexisting" and `parent`:
+STACK_PREEXISTING, in `finderRules` after PREEXISTING_LINES, with `parent` (the pre-existing lines are a default since prompt 2.9):
 
 14. "A problem in code that only the parent changes is never pre-existing. Set preexisting to false on it."
 
@@ -208,7 +208,7 @@ Interactions:
 
 - "BASE..HEAD is the change" (catalog.ts:596) stays true. Line 2 says why the parent code is outside it.
 - The anchor rule for unchanged code (catalog.ts:597) covers a parent problem that line 5 lets in. It gets a cause on a line of this change.
-- With "preexisting", parent code would pass "exists at BASE without the change" (catalog.ts:572). Line 14 blocks that. A parent problem that this change makes reachable already has preexisting false (catalog.ts:576).
+- With the pre-existing lines, parent code would pass "exists at BASE without the change" (catalog.ts:572). Line 14 blocks that. A parent problem that this change makes reachable already has preexisting false (catalog.ts:576).
 - Line 12 ties line 5 to the refute reason "the problem is not in the change" (catalog.ts:1512).
 - Line 10 refines "A gap between that goal and the code is a finding" (catalog.ts:529). A child that names the missing part plays the named follow-up of probe-obl-met-followup.
 - Lines 10 and 13 need the child text to name the part. A shared file alone is too weak, because the app cannot read child code.

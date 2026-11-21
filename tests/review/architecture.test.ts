@@ -89,7 +89,7 @@ describe("variant architecture (architecture-bugs.md WP-AR1)", () => {
           for (const x of ARCHITECTURE_LINES) expect(l).not.toContain(x);
         }
         for (const a of verifiers(p, c)) for (const x of ARCHITECTURE_VERIFY) expect(lines(a.prompt)).not.toContain(x);
-        for (const a of verifiers(withV(p, "preexisting", "architecture"), c)) {
+        for (const a of verifiers(withV(p, "architecture"), c)) {
           const l = lines(a.prompt);
           expect(at(l, ARCHITECTURE_VERIFY)).toBe(at(l, PREEXISTING_VERIFY) + PREEXISTING_VERIFY.length);
         }

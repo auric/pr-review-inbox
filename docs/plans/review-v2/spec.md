@@ -228,6 +228,7 @@ rl-verify agent prompt, line by line:
 | The rubric lines and the do-not-flag list of section 1.5 | One rubric for both phases. |
 | "Look for no new problems. A finder already ran." | Scope and time. |
 | Only when candidates.md holds finder questions: the "## Question N" lines of review-questions.md (QUESTION_BLOCK_RULES) | AC-R33 to AC-R35. |
+| Only when candidates.md holds finder risks: the "## Risk N" lines of risk-check.md section 4.3 (RISK_BLOCK_RULES) | AC-R40 and AC-R42. |
 | TRUST lines, the coverage line, and the docs rule | Kept. |
 | Delegation (above VERIFY_SPLIT): "Give the candidates to the rl-verifier agent in calls of at most 6 candidates. Give each candidate to one call. Copy each verdict into verdicts." With finder questions, also "Give the questions to the rl-verifier agent too. Each question counts as one candidate of its call." The split counts candidates and questions together. | R3, review-questions.md. |
 
@@ -341,6 +342,13 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 37. AC-R37. The intent module lists the acceptance criteria, reads them with an issue tool when the MCP list has one, reports an unmet criterion with a quote, and puts a criterion that the code cannot show into coverage notChecked.
 38. AC-R38. summary.finderQuestions of a review run holds asked, answered, findings, kept, and answers. Settings, Review quality sums the counts per profile and prompt version and shows "Questions: N asked, A answered, F to findings, K kept" in the Check cell. A group without such a run shows no question line. The own review of a task stays out.
 39. AC-R39. Each run that offers the Agent tool has `Agent(model:*)` and `Agent(effort:*)` in `--disallowedTools`. A run without it keeps its flags. Each lead with the Agent tool has the line "Never pass model or effort on an Agent call. Each agent has its own model and effort." A refused Agent call gets a Log note that names the asked model or effort. REVIEW_PROMPT_VERSION is "2.8" (Gate B38, review-quality-2026.md item 9).
+40. AC-R73. rl-main, rl-reviewer, and the salvage run hold PREEXISTING_LINES after the anchor line, and rl-reviewer also holds PREEXISTING_REVIEWER. rl-verify and rl-verifier hold PREEXISTING_VERIFY. Every review and re-review --json-schema asks for `preexisting`. validate.ts keeps a marked blocker or major finding in unchanged code with cause null, and judge.ts settle keeps at most PREEXISTING_MAX (5). They show in the "Pre-existing" fold. The app does not post them: the single post on a click of review-v3.md D1 is not built. REVIEW_PROMPT_VERSION is "2.9" (review-v3.md WP-V6, Gate A of 2026-11-21).
+41. AC-R40. Each review run, re-review, and own review of a task puts a "## Risk N" block into candidates.md for each finder risk, after the questions. N is written + asked + k + 1. Risk blocks come only when every candidate and question fits. The byte cap and MAX_FINDINGS cover all kinds. A finder result with only risks starts the verify phase. The critic of a task and Explain check no risk (risk-check.md WP-RC3, prompt 2.9).
+42. AC-R41. Without finder risks, each prompt byte and candidates.md stay as without the risk check.
+43. AC-R42. rl-verify and rl-verifier hold RISK_BLOCK_RULES only when candidates.md holds risks. Above VERIFY_SPLIT blocks, the delegation names the risks. The split and the turn cap count risks. The `finding` key of the verify schema names the "## Risk N" block.
+44. AC-R43. settle gives each risk exactly one outcome by rows R0 to R10 of risk-check.md section 4.4. The counts add up to listed. R5 and R6 give open with no item (section 7, cascade step 2). The risk check makes only found items.
+45. AC-R44. A risk verdict never changes summary.verify, never adds a coverage line, and never makes the run incomplete.
+46. AC-R45. A found risk is a finding item with category risk, module core, evidenceStatus code, confidence high, an empty trigger, the verify mark confirmed, and the verdict severity.
 
 ## 2. Part 2: Discuss a finding
 

@@ -171,7 +171,6 @@ async function setup() {
     { ...general, id: "tuned", name: "Tuned", maxTurns: 30, verifier: { mode: "on", model: "haiku", effort: "high" } },
     { ...general, id: "off", name: "Off", verifier: { mode: "off", model: null, effort: null } },
     { ...general, id: "variants", name: "Variants", variants: ["broad", "verify2"] },
-    { ...general, id: "risks", name: "Risks", variants: ["risk-check"] },
     { ...general, id: "obligations", name: "Obligations", variants: ["obligations"] },
     {
       ...general,
@@ -714,8 +713,8 @@ describe("verify phase in a review run", () => {
   );
 });
 
-// docs/plans/review-v2/risk-check.md WP-RC1 (AC-R40 to AC-R45): under the variant "risk-check", the check judges the finder risks.
-// tests/review/risk-check.test.ts holds the pure parts.
+// docs/plans/review-v2/risk-check.md WP-RC1 and WP-RC3 (AC-R40 to AC-R45): since prompt 2.9, the check judges the finder risks of each
+// review run. tests/review/risk-check.test.ts holds the pure parts.
 describe("finder risks in the verify phase", () => {
   const RISKS: [string, string, string] = ["b1 can hold the wrong value.", "The TODO in app.ts is stale.", "Does b2 go into the bundle?"];
   const place = {
@@ -744,7 +743,7 @@ describe("finder risks in the verify phase", () => {
           },
         },
       });
-      const d = await h.done(h.start("risks"));
+      const d = await h.done(h.start());
       expect(d.run.status).toBe("completed");
       expect(h.verifyCalls()).toHaveLength(1);
       const c = h.verifyCalls()[0] as Call & { context: Record<string, string>; agents: Record<string, { prompt: string }> };
@@ -769,20 +768,19 @@ describe("finder risks in the verify phase", () => {
         anchor: { state: "exact", line: 22 },
         verify: { verdict: "confirmed", reason: "The task asks for b1 = 2." },
       });
-      expect(d.items.filter((i) => i.kind === "question").map((i) => i.payload as Question)).toEqual([
-        { text: "Must b2 ship?", why: "No config in ./repo names b2." },
-      ]);
+      // risk-check.md section 7, the fallback: a risk question makes no question item.
+      expect(d.items.filter((i) => i.kind === "question")).toEqual([]);
       expect(d.run.summary?.finderRisks).toEqual({
         listed: 3,
         found: 1,
-        asked: 1,
+        asked: 0,
         cleared: 1,
         covered: 0,
-        open: 0,
+        open: 1,
         list: [
           { text: RISKS[0], outcome: "found", note: "b1 has the wrong value" },
           { text: RISKS[1], outcome: "cleared", note: "src/server/app.ts:23 is no TODO. Evidence: src/server/app.ts:23" },
-          { text: RISKS[2], outcome: "asked", note: "Must b2 ship?" },
+          { text: RISKS[2], outcome: "open", note: "Must b2 ship?" },
         ],
       });
       // AC-R44: the risks stay out of the verdict counts and the coverage.
@@ -802,14 +800,15 @@ describe("finder risks in the verify phase", () => {
   );
 
   test(
-    "without the variant, the same result starts no check, and the summary has no finderRisks key",
+    "with the verifier off, the same result starts no check, and each risk stays open (R0)",
     async () => {
       const h = await setup();
       h.runner.write({ fixture: h.stream({ ...RESULT([]), risks: RISKS }) });
-      const d = await h.done(h.start());
+      const d = await h.done(h.start("off"));
       expect(h.verifyCalls()).toHaveLength(0);
       expect(d.items).toEqual([]);
-      expect(d.run.summary?.finderRisks).toBeUndefined();
+      expect(d.run.summary?.finderRisks).toMatchObject({ listed: 3, open: 3 });
+      expect(d.run.summary?.finderRisks?.list.map((x) => x.note)).toEqual(Array(3).fill("Not checked: the check step is off."));
       expect(d.run.summary?.risks).toEqual(RISKS);
     },
     SLOW,
@@ -821,7 +820,7 @@ describe("finder risks in the verify phase", () => {
       const h = await setup();
       // 10 candidates alone stay at or below VERIFY_SPLIT. With 3 risks, the check delegates.
       h.runner.write({ fixture: h.stream({ ...RESULT(Array.from({ length: 10 }, (_, k) => F(k))), risks: RISKS }) });
-      const d = await h.done(h.start("risks"));
+      const d = await h.done(h.start());
       expect(d.run.status).toBe("completed");
       const c = h.verifyCalls()[0] as Call & { context: Record<string, string>; agents: Record<string, { prompt: string }> };
       expect(c.context["candidates.md"]?.match(/^## Risk \d+$/gm)).toEqual(["## Risk 11", "## Risk 12", "## Risk 13"]);

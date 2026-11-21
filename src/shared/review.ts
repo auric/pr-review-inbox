@@ -22,7 +22,9 @@ const lineNo = z.number().int().min(1);
 // "2.7": the finder looks for answers before it asks, the check judges each finder question, the issue tool lines, and the
 // acceptance criteria of the intent module (docs/plans/review-v2/review-questions.md).
 // "2.8": each lead with the Agent tool passes no model and no effort on an Agent call (Gate B38).
-export const REVIEW_PROMPT_VERSION = "2.8";
+// "2.9": the lines of the former variant "preexisting" are always on, and the CLI schemas ask for the mark (docs/plans/review-v3.md WP-V6).
+// The check of the former variant "risk-check" is always on, without risk question items (docs/plans/review-v2/risk-check.md WP-RC3).
+export const REVIEW_PROMPT_VERSION = "2.9";
 
 const place = {
   path: z.string().describe("File path relative to the repository root, with / separators."),
@@ -56,8 +58,7 @@ export const finding = z.object({
   // validate.ts matches rule verbatim against the loaded instruction files, and module is an ID, so a cut would change them.
   rule: exact(z.string().max(2000)).default("").describe("The exact sentence of the project rule, for a rule finding. Else empty."),
   module: exact(z.string().max(40)).default("core").describe("core, or the ID of the check section that found it."),
-  // docs/plans/review-v3.md WP-V6. Optional, so results without the key parse. The CLI schema lists it only under the variant
-  // "preexisting" (reviewJsonSchema), so the default --json-schema keeps its bytes.
+  // docs/plans/review-v3.md WP-V6. Optional, so results without the key parse. The CLI schemas list it as required (findingList).
   preexisting: z.boolean().optional(),
   // docs/plans/review-v2/minor-fold.md D2. The CLI schema lists it only under the variant "minor-fold".
   polish: z.boolean().optional(),
@@ -71,13 +72,9 @@ const PREEXISTING = z
 // docs/plans/review-v2/minor-fold.md D5: at most this many polish points per run (judge.ts settle).
 export const POLISH_MAX = 3;
 const POLISH = z.boolean().describe("true only for a polish point: todo, stale, naming, or clarity. Else false.");
-const findingList = (preexisting: boolean, polish: boolean) =>
+const findingList = (polish: boolean) =>
   z
-    .array(
-      finding
-        .omit({ preexisting: true, polish: true })
-        .extend({ ...(preexisting && { preexisting: PREEXISTING }), ...(polish && { polish: POLISH }) }),
-    )
+    .array(finding.omit({ preexisting: true, polish: true }).extend({ preexisting: PREEXISTING, ...(polish && { polish: POLISH }) }))
     .max(MAX_FINDINGS);
 
 export const question = z.object({ text: z.string(), why: z.string() });
@@ -143,10 +140,10 @@ export type AnsweredQuestion = z.infer<typeof answeredQuestion>;
 export type ReviewResult = z.infer<typeof reviewResult>;
 
 // The CLI checks the schema with a default Ajv instance, which knows draft-07 only. A 2020-12 $schema fails every run.
-// An Explain run gets no answered key: it judges no answer (docs/plans/thread-outcome.md section 9). preexisting: the variant
-// "preexisting" is on (catalog.ts preexisting). polish: the variant "minor-fold" is on (catalog.ts minorFold).
-export const reviewJsonSchema = (explain = false, preexisting = false, polish = false): Record<string, unknown> => {
-  const r = reviewResult.extend({ findings: findingList(preexisting, polish) });
+// An Explain run gets no answered key: it judges no answer (docs/plans/thread-outcome.md section 9). polish: the variant
+// "minor-fold" is on (catalog.ts minorFold).
+export const reviewJsonSchema = (explain = false, polish = false): Record<string, unknown> => {
+  const r = reviewResult.extend({ findings: findingList(polish) });
   return aiJsonSchema(explain ? r.omit({ answered: true }) : r);
 };
 
@@ -172,11 +169,11 @@ export const verifyVerdict = z.object({
   // The defaults keep entries without these keys valid. --json-schema still lists them as required.
   duplicateOf: lineNo.nullable().default(null).describe("For duplicate: the candidate that it repeats. Else null."),
   question: z.string().max(1000).default("").describe("For question: the question for the author. Else empty."),
-  // docs/plans/review-v2/review-questions.md: the defect that answers a finder question.
+  // docs/plans/review-v2/review-questions.md and risk-check.md section 4.3: the defect that answers a finder question or risk.
   finding: defect
     .nullable()
     .default(null)
-    .describe('For confirmed on a "## Question N" block: the place and the title of the defect. Else null.'),
+    .describe('For confirmed on a "## Question N" or "## Risk N" block: the place and the title of the defect. Else null.'),
 });
 
 // docs/plans/review-v2/obligations.md section 4.2: a thing that must be true at the head for the change to be complete.
@@ -655,8 +652,8 @@ export const rereviewResult = reviewResult.extend({ earlier: z.array(earlierVerd
 export type EarlierVerdict = z.infer<typeof earlierVerdict>;
 export type RereviewResult = z.infer<typeof rereviewResult>;
 
-export const rereviewJsonSchema = (preexisting = false, polish = false): Record<string, unknown> =>
-  aiJsonSchema(rereviewResult.extend({ findings: findingList(preexisting, polish) }));
+export const rereviewJsonSchema = (polish = false): Record<string, unknown> =>
+  aiJsonSchema(rereviewResult.extend({ findings: findingList(polish) }));
 
 // A finding or question that a re-review copied from its base run. from: the source item ID. since: the head that the base run reviewed.
 export type Carried = { from: number; verdict: Verdict; reason: string; since: string };

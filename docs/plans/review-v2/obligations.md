@@ -1,6 +1,6 @@
 # Obligations
 
-Status: design of 2026-11-18. WP-OB1 (07c4d80) and WP-OB2 (dce9f3d) are built as the opt-in variant "obligations". Joint Gate A ran on 2026-11-20. WP-OB3 and WP-OB4 are open. The variant is not measured on current code. Commit ed9fc03 (keep doc-line anchors) is not in the Gate A run commit. Re-measure it before prompt 2.9 lands, because 2.9 voids the Gate A recording. It builds on risk-check.md (WP-RC1 to WP-RC4). REVIEW_PROMPT_VERSION stays until WP-OB3. The criteria AC-R48 to AC-R55 go into spec.md section 1 in WP-OB3.
+Status: design of 2026-11-18. WP-OB1 (07c4d80) and WP-OB2 (dce9f3d) are built as the opt-in variant "obligations". Joint Gate A ran on 2026-11-20. WP-OB3 and WP-OB4 are open. The variant is not measured on current code. Commit ed9fc03 (keep doc-line anchors) is not in the Gate A run commit. Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. The variant stays opt-in. It builds on risk-check.md. Prompt 2.9 ships the risk check (WP-RC3), so the variant stacks on that default. WP-OB3 needs a version step after "2.9". The criteria AC-R48 to AC-R55 go into spec.md section 1 in WP-OB3.
 
 ## 1. Request and verdict
 
@@ -355,11 +355,11 @@ Eleven cases in fixtures/eval/probe/, in the format of probe-task-csv-quoting/ca
 
 - Commit 301e82b made the C1b recording old for the shipped profile. replayRefusal compares the profile (run.ts:318-320).
 - Step 1: one new baseline run of the shipped profile on the 42-case set, with recorded calls. Gate RC-A needs it too.
-- Step 2: three verify-only replays of that baseline: the control, "risk-check", and "risk-check,obligations".
+- Step 2: three verify-only replays of that baseline: the control, "risk-check", and "risk-check,obligations". Prompt 2.9 retires the name "risk-check", so the risk check is in each control from then on, and "obligations" alone is the candidate.
 - Step 3: the probe set, control and candidate, repeat 2.
 - Run the gate before WP-RC3. WP-RC3 raises REVIEW_PROMPT_VERSION, and replayRefusal then refuses the recording (run.ts:315-317).
 - The reference for obligations is the "risk-check" replay when Gate RC-A passes. Else one more replay with "obligations" alone runs against the control.
-- Status: not measured on current code. Commit ed9fc03 (keep doc-line anchors) is not in the Gate A run commit. Re-measure before prompt 2.9 lands, because 2.9 voids the Gate A recording.
+- Status: not measured on current code. Commit ed9fc03 (keep doc-line anchors) is not in the Gate A run commit. Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it.
 - The exact flags are unverified. risk-check.md section 7 gives their shape.
 
 Ship rule, candidate against the reference:
@@ -406,7 +406,7 @@ Order: WP-RC1, WP-RC2, WP-OB1, WP-OB2, Joint Gate A, WP-RC3 with WP-OB3, WP-RC4 
 - Push nothing between WP-OB3 and WP-OB4. The toggle and the running text land in WP-OB4.
 - WP-OB1 reuses WP-RC1 code: the answerFinding category, the start rule beside risks, the block count of verifyMaxTurns, the kinds of buildVerifyPrompt, and the validate pass of placeAnswers.
 - WP-OB2 reuses the count code of WP-RC2 in the same three scripts.
-- WP-OB3 and WP-RC3 can share one version step "2.9" when both gates pass. Else WP-OB3 needs a new baseline after the version step.
+- WP-OB3 and WP-RC3 can share one version step "2.9" when both gates pass. Else WP-OB3 needs a new baseline after the version step. WP-RC3 shipped alone in prompt 2.9 (2026-11-21), so WP-OB3 needs the step after "2.9".
 - WP-OB4 reuses the entry markup and the quality line of WP-RC4.
 
 ## 11. Open questions

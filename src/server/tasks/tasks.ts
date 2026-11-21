@@ -807,9 +807,14 @@ export const taskSettingsOf = settingsOf;
 
 // spec.md section 6.7: the loop fixes the confirmed blocker and major points of its own review. The other points stay listed. ps5-plan.md
 // D3: a point of "Go on without these fixes" stays listed too.
-// docs/plans/review-v2/minor-fold.md D6: the loop never fixes a polish point without a click.
-export const mustFixPoint = (p: Pick<FindingPayload, "verify" | "severity" | "skipFix" | "polish">) =>
-  p.verify?.verdict === "confirmed" && (p.severity === "blocker" || p.severity === "major") && p.skipFix !== true && p.polish !== true;
+// docs/plans/review-v2/minor-fold.md D6: the loop never fixes a polish point without a click. review-v3.md WP-V6: a pre-existing
+// problem is outside the task, so the loop never fixes it.
+export const mustFixPoint = (p: Pick<FindingPayload, "verify" | "severity" | "skipFix" | "polish" | "preexisting">) =>
+  p.verify?.verdict === "confirmed" &&
+  (p.severity === "blocker" || p.severity === "major") &&
+  p.skipFix !== true &&
+  p.polish !== true &&
+  p.preexisting !== true;
 
 // ps4-plan.md section 1 item 4: a critic row is a review row with item critic. It is no own review.
 const POINTS = {

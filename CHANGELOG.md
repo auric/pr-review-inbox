@@ -8,6 +8,8 @@
 - Build a Jira task: Stop of a comment run no longer puts the comment text into the Tell Claude box. The Log names the run "PR comments" and counts the fixed and pushed-back threads.
 - Review: Fix on the pull request of a task now opens the Task view.
 
+- Review: a review now also reports a blocker or major problem in unchanged code that the change touches or relies on. Such findings show in the folded "Pre-existing" group, at most 5 per run. The app does not post them.
+- Review: the check step now also checks each risk area that the reviewer notes. A confirmed risk with a place in the change also becomes a draft finding. Each risk stays in the "Risk areas" list.
 - Review: the app now fetches the Jira task text at the start of each review, re-review, and Explain. Ask, replies, Fix, and discuss fetch only tasks without text.
 - Review: the task chips now show when the app fetched the text, or why it did not, for example "not fetched: no such issue". A hint shows the full reason. A failed refresh keeps the old text and says "refresh failed".
 - Review: Clear text and the new Skip button skip a task. Runs do not read a skipped task. Fetch ends the skip.

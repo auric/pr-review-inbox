@@ -1742,7 +1742,7 @@ describe("language checks", () => {
   );
 
   test(
-    "review v3 WP-V6 and the caller rule: the variants reach the CLI schema and the finder agents; a pre-existing finding stores in its group",
+    "review v3 WP-V6 and the caller rule: the pre-existing mark is a default, the variants reach the finder agents; a pre-existing finding stores in its group",
     async () => {
       const h = await setup();
       // README.md is the same at base and head, so a finding there is in unchanged code.
@@ -1777,26 +1777,25 @@ describe("language checks", () => {
         const find = h.calls().slice(before).find(finderCall) as Call & { agents: Agents };
         return { d, schema: flag(find.argv, "--json-schema") ?? "", agents: find.agents };
       };
+      // Prompt 2.9: the pre-existing lines and the mark need no variant.
       const plain = await run([]);
-      expect(plain.schema).not.toContain('"preexisting"');
-      expect(plain.d.items.some((i) => i.anchor?.path === "README.md")).toBe(false);
-      expect(plain.d.run.summary?.dropped.map((x) => [x.path, x.reason])).toContainEqual(["README.md", "unchanged"]);
+      expect(plain.schema).toContain('"preexisting"');
       for (const name of ["rl-main", "rl-reviewer"]) {
-        expect(plain.agents[name]?.prompt).not.toContain(PREEXISTING_LINES[0]);
+        expect(plain.agents[name]?.prompt).toContain(`\n${PREEXISTING_LINES.join("\n")}\n`);
         expect(plain.agents[name]?.prompt).not.toContain(CALLERS_LINES[0]);
         expect(plain.agents[name]?.prompt).not.toContain(ARCHITECTURE_LINES[0]);
       }
+      const kept = plain.d.items.filter((i) => i.anchor?.path === "README.md");
+      expect(kept.map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "preexisting"]]);
       // architecture-bugs.md WP-AR1: the architecture lines follow the caller lines.
-      const on = await run(["preexisting", "callers", "architecture"]);
+      const on = await run(["callers", "architecture"]);
       expect(on.schema).toContain('"preexisting"');
       for (const name of ["rl-main", "rl-reviewer"]) {
         expect(on.agents[name]?.prompt).toContain(`\n${PREEXISTING_LINES.join("\n")}\n`);
         expect(on.agents[name]?.prompt).toContain(`\n${[...CALLERS_LINES, ...ARCHITECTURE_LINES].join("\n")}\n`);
       }
-      const kept = on.d.items.filter((i) => i.anchor?.path === "README.md");
-      expect(kept.map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "preexisting"]]);
       const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
-      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+architecture+callers+preexisting`);
+      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+architecture+callers`);
     },
     SLOW,
   );
@@ -1844,7 +1843,7 @@ describe("language checks", () => {
       expect(mine(plain.d).map((i) => displayGroup(i.payload as FindingPayload, "balanced"))).toEqual(["main"]);
       const on = await run(["minor-fold"]);
       expect(on.schema).toContain('"polish"');
-      expect(on.schema).not.toContain('"preexisting"');
+      expect(on.schema).toContain('"preexisting"');
       for (const name of ["rl-main", "rl-reviewer"]) expect(on.agents[name]?.prompt).toContain(`\n${POLISH_LINES.join("\n")}\n`);
       expect(on.agents["rl-reviewer"]?.prompt).toContain(`\n${POLISH_REVIEWER}`);
       expect(mine(on.d).map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "fold"]]);

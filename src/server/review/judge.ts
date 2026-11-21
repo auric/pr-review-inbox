@@ -62,7 +62,7 @@ import {
   verifyResult,
 } from "../../shared/review";
 import type { RunErrorKind, RunStatus } from "../../shared/run-log";
-import { minorFold, type Profile, preexisting } from "./catalog";
+import { minorFold, type Profile } from "./catalog";
 import type { RunOutcome } from "./claude";
 import type { Candidate } from "./context-files";
 import { type DiffFile, parseDiff } from "./diffmap";
@@ -322,7 +322,6 @@ export async function judge(
       explain: profile.explain,
       rules,
       addedOnly,
-      preexisting: preexisting(profile),
       polish: minorFold(profile),
     });
   let v = check();
@@ -511,7 +510,8 @@ export type SettleInput = {
   demote?: boolean;
   // placeAnswers: the anchored finding of each confirmed finder question and finder risk, by its number in candidates.md.
   placed?: ReadonlyMap<number, AnchoredFinding>;
-  // The risk check is on (catalog.ts riskCheck). Absent or false: the summary gets no finderRisks key.
+  // The risk check is on: each review run and each own review of a task since prompt 2.9, never the critic. Absent or false: the
+  // summary gets no finderRisks key.
   risks?: boolean;
   // placeObligations: the app checks of the obligations, by list index.
   obligations?: PlacedObligations;
@@ -543,15 +543,13 @@ export type RiskStep = {
 export type RiskEnd = {
   outcome: RiskOutcome;
   note: string;
-  item?: { kind: "finding"; finding: FindingPayload } | { kind: "question"; question: Question };
+  item?: { kind: "finding"; finding: FindingPayload };
 };
 
-// risk-check.md section 4.4, rows R0 to R10: the outcome of one finder risk. The first row that matches wins. Only found and asked
-// make an item.
+// risk-check.md section 4.4, rows R0 to R10: the outcome of one finder risk. The first row that matches wins. Only found makes an
+// item. Since prompt 2.9, no row gives asked; old summaries still hold it.
 export function riskOutcome(text: string, s: RiskStep): RiskEnd {
   const v = s.v;
-  // risk-check.md section 7, the fallback: return { outcome: "open", note: question.text } here, and R5 and R6 make no item.
-  const ask = (question: Question, note: string): RiskEnd => ({ outcome: "asked", note, item: { kind: "question", question } });
   if (!s.verify) return { outcome: "open", note: "Not checked: the check step is off." };
   if (!s.fits) return { outcome: "open", note: "Not checked: the check file reached its size limit." };
   if (s.failed) return { outcome: "open", note: "Not checked: the check did not finish." };
@@ -564,11 +562,11 @@ export function riskOutcome(text: string, s: RiskStep): RiskEnd {
           note: s.at.title?.trim() || s.at.body,
           item: { kind: "finding", finding: { ...s.at, verify: mark(v) } },
         };
-      return ask({ text: v.finding?.title.trim() || text, why: v.reason }, "Confirmed, but the check could not place it.");
-    case "question": {
-      const question = { text: v.question.trim() || text, why: v.reason };
-      return ask(question, question.text);
-    }
+      // risk-check.md section 7, the fallback, cascade step 2 (Gate RC-A, prompt 2.9): R5 and R6 give open with the question in the
+      // note and make no item. Step 1 alone (R6 only) is not measured.
+      return { outcome: "open", note: `Confirmed, but the check could not place it: ${v.finding?.title.trim() || text}` };
+    case "question":
+      return { outcome: "open", note: v.question.trim() || text };
     case "refuted":
       return {
         outcome: "cleared",
@@ -930,7 +928,6 @@ export function settle(f: Found, s: SettleInput): Ending {
   }
   // docs/plans/review-v2/risk-check.md section 4.4: one outcome per finder risk. Risk k has number written + asked + k + 1.
   let finderRisks: FinderRisks | undefined;
-  const riskQuestions: Question[] = [];
   if (s.risks) {
     const written = s.check?.written ?? 0;
     const cands = new Map(
@@ -951,8 +948,7 @@ export function settle(f: Found, s: SettleInput): Ending {
       });
       finderRisks[r.outcome]++;
       finderRisks.list.push({ text, outcome: r.outcome, note: r.note });
-      if (r.item?.kind === "finding") items.push(findingItem(r.item.finding));
-      else if (r.item) riskQuestions.push(r.item.question);
+      if (r.item) items.push(findingItem(r.item.finding));
     }
   }
   // obligations.md section 4.5: one outcome per obligation of a finished check with the mode on. The blocks of candidates.md hold the
@@ -994,13 +990,7 @@ export function settle(f: Found, s: SettleInput): Ending {
         ...(finderRisks && { finderRisks }),
         ...(obligations && { obligations }),
       },
-      items: [
-        ...items,
-        ...kept.map(questionItem),
-        ...riskQuestions.map(questionItem),
-        ...asked.map(questionItem),
-        ...f.replies.map(replyItem),
-      ],
+      items: [...items, ...kept.map(questionItem), ...asked.map(questionItem), ...f.replies.map(replyItem)],
       ...(f.checked && { checked: f.checked }),
       links,
       carried,

@@ -14,10 +14,10 @@ Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It add
 
 Update (2026-11-20): review packages outside this file. review-ledger.md holds the full list.
 
-- risk-check.md: WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) are built as the opt-in variant "risk-check". WP-RC3 and WP-RC4 are not started; they wait for Joint Gate A. WP-RC5 is optional and not started.
+- risk-check.md: WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) are built. WP-RC3 ships the check as the default in prompt 2.9, with all asked risk questions dropped. WP-RC4 is not started. WP-RC5 is optional and not started.
 - obligations.md: WP-OB1 (07c4d80) and WP-OB2 (dce9f3d) are built as the opt-in variant "obligations". WP-OB3 and WP-OB4 are not started; they wait for Joint Gate A.
 - jira-context.md: WP-JC-D, WP-JC0, and Gate JC-G are done (4311cdb, 8e53029). WP-JC1 to WP-JC4 are built (cd0ab6c, 71dbfbc, a77e30a, 5e78593). WP-JC5 and WP-JC-E are in progress on a branch, not on main. Gates JC-A and JC-B and WP-JC6 are open.
-- review-v3.md: the variants "preexisting" (WP-V6) and "callers" (the D2 caller rule) are built opt-in (81d86d4). They run against the Gate A baseline before WP-RC3.
+- review-v3.md: the variants "preexisting" (WP-V6) and "callers" (the D2 caller rule) are built opt-in (81d86d4). Prompt 2.9 ships "preexisting" as the default after Gate A (2026-11-21). "callers" stays opt-in.
 
 ## 0. Rules for every work package
 

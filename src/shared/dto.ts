@@ -209,11 +209,11 @@ export type ModuleId = (typeof MODULE_IDS)[number];
 // docs/plans/review-v3.md V2 and V3: eval switches. Gate U-V1 had no winner, so they stay eval-only. The UI and the Improve prompt do not offer them.
 export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "broad", "verify2", "classes",
-// "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. "risk-check":
-// docs/plans/review-v2/risk-check.md WP-RC1. "obligations": docs/plans/review-v2/obligations.md WP-OB1. "preexisting":
-// docs/plans/review-v3.md WP-V6. "callers": docs/plans/review-v3.md D2, the caller rule. "minor-fold":
+// "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. "obligations":
+// docs/plans/review-v2/obligations.md WP-OB1. "callers": docs/plans/review-v3.md D2, the caller rule. "minor-fold":
 // docs/plans/review-v2/minor-fold.md WP-MF1. "refute-issue": docs/plans/review-v2/verifier-rule.md WP-VR1. "architecture":
-// docs/plans/review-v2/architecture-bugs.md WP-AR1. A retired name ("signal", "order", "rules2", "rereview-strict") drops on read.
+// docs/plans/review-v2/architecture-bugs.md WP-AR1. A retired name ("signal", "order", "rules2", "rereview-strict", "preexisting",
+// "risk-check") drops on read. Prompt 2.9 ships "preexisting" and "risk-check" as defaults.
 export const VARIANTS = [
   "architecture",
   "broad",
@@ -222,9 +222,7 @@ export const VARIANTS = [
   "minor-fold",
   "obligations",
   "parts",
-  "preexisting",
   "refute-issue",
-  "risk-check",
   "security2",
   "security2-verify",
   "verify2",

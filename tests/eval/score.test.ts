@@ -1126,9 +1126,7 @@ describe("pre-existing items (review-v3.md WP-V6)", () => {
     expect(score(r, g).preexisting).toEqual({ runs: 1, shown: 4, gold: 2, tp: 1, fp: 1, unlabeled: 0 });
     expect(score(r).preexisting).toBeNull();
     const text = summaryText(r, score(r, g));
-    expect(text).toMatch(
-      /\npre-existing: findings in the Pre-existing fold, per case \(variant preexisting\); no other row counts them\s+4\.00\s+4\.00\n/,
-    );
+    expect(text).toMatch(/\npre-existing: findings in the Pre-existing fold, per case; no other row counts them\s+4\.00\s+4\.00\n/);
     expect(text).toContain("Pre-existing findings (review-v3.md WP-V6): findings in the Pre-existing fold, per case run");
     const both = compareText(gresult([c], [run("g", 1, base)]), r);
     expect(both).toMatch(

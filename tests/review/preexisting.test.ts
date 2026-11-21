@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// docs/plans/review-v3.md WP-V6, D1, and Q6 (variant "preexisting"): the result schema, the anchor check, the settle floor and cap, the
+// docs/plans/review-v3.md WP-V6, D1, and Q6 (a default since prompt 2.9): the result schema, the anchor check, the settle floor and cap, the
 // candidates file, and the post guard. Pure functions and an in-memory database. No process, no forge.
 import { describe, expect, test } from "bun:test";
 import { buildPlan } from "../../src/server/publish/plan";
@@ -12,6 +12,7 @@ import { answerFinding, type CheckRun, type Found, obligationFinding, type Settl
 import type { NewItem } from "../../src/server/review/run-rows";
 import { validate } from "../../src/server/review/validate";
 import { openDb } from "../../src/server/storage/db";
+import { mustFixPoint } from "../../src/server/tasks/tasks";
 import type { ReviewItemDto } from "../../src/shared/dto";
 import {
   type Anchor,
@@ -65,14 +66,13 @@ const F = (o: Partial<Finding> = {}): Finding => ({
   module: "core",
   ...o,
 });
-const check = (findings: Finding[], preexisting: boolean) =>
+const check = (findings: Finding[]) =>
   validate({
     result: { summary: "", risks: [], questions: [], coverage: NONE, findings, answered: [] },
     diff: DIFF,
     newFiles: NEW_FILES,
     oldFiles: OLD_FILES,
     agents: [],
-    preexisting,
   });
 
 describe("result schema", () => {
@@ -86,9 +86,9 @@ describe("result schema", () => {
 });
 
 describe("anchor check (validate.ts)", () => {
-  test("variant on: a marked major or blocker finding in unchanged code stays, with the mark and no cause", () => {
+  test("a marked major or blocker finding in unchanged code stays, with the mark and no cause", () => {
     const cause = { ...ON_OLD, line: 1, anchorText: "export function load() {" };
-    const v = check([F({ preexisting: true }), F({ preexisting: true, severity: "blocker", cause })], true);
+    const v = check([F({ preexisting: true }), F({ preexisting: true, severity: "blocker", cause })]);
     expect(v.dropped).toEqual([]);
     expect(v.findings.map((f) => [f.preexisting, f.cause, f.anchor.state])).toEqual([
       [true, null, "outside"],
@@ -96,31 +96,28 @@ describe("anchor check (validate.ts)", () => {
     ]);
   });
 
-  test("a minor mark, no mark, or the variant off drops the finding as unchanged, as before", () => {
-    for (const [f, on] of [
-      [F({ preexisting: true, severity: "minor" }), true],
-      [F({ preexisting: true, severity: "nit" }), true],
-      [F({ preexisting: false }), true],
-      [F(), true],
-      [F({ preexisting: true }), false],
-    ] as const) {
-      const v = check([f], on);
+  test("a minor or nit mark, or no mark, drops the finding as unchanged, as before", () => {
+    for (const f of [
+      F({ preexisting: true, severity: "minor" }),
+      F({ preexisting: true, severity: "nit" }),
+      F({ preexisting: false }),
+      F(),
+    ]) {
+      const v = check([f]);
       expect(v.findings).toEqual([]);
       expect(v.dropped.map((d) => d.reason)).toEqual(["unchanged"]);
     }
   });
 
   test("a finding in the change loses the mark: by its anchor, or by its changed cause", () => {
-    for (const on of [true, false]) {
-      const v = check([F({ ...ON_CHANGE, preexisting: true }), F({ preexisting: true, cause: ON_CHANGE })], on);
-      expect(v.dropped).toEqual([]);
-      expect(v.findings.map((f) => "preexisting" in f)).toEqual([false, false]);
-      expect(v.findings[1]?.cause?.anchor?.line).toBe(2);
-    }
+    const v = check([F({ ...ON_CHANGE, preexisting: true }), F({ preexisting: true, cause: ON_CHANGE })]);
+    expect(v.dropped).toEqual([]);
+    expect(v.findings.map((f) => "preexisting" in f)).toEqual([false, false]);
+    expect(v.findings[1]?.cause?.anchor?.line).toBe(2);
   });
 
   test("a wrong quote still drops: the mark needs the anchor quote", () => {
-    expect(check([F({ preexisting: true, anchorText: "return write();" })], true).dropped.map((d) => d.reason)).toEqual(["match"]);
+    expect(check([F({ preexisting: true, anchorText: "return write();" })]).dropped.map((d) => d.reason)).toEqual(["match"]);
   });
 
   test("risk and obligation findings of the verify phase never carry the mark", () => {
@@ -319,5 +316,16 @@ describe("post guard", () => {
     const plan = (items: ReviewItemDto[]) =>
       buildPlan({ me: "me", mark: false, severity: false, runs, items, comments: [] }).flatMap((p) => p.items.map((i) => i.id));
     expect(plan([item(1, payload(2)), item(2, payload(3, { preexisting: undefined }))])).toEqual([2]);
+  });
+});
+
+describe("task loop (tasks.ts mustFixPoint)", () => {
+  test("a confirmed blocker or major pre-existing finding is never a must-fix point", () => {
+    for (const severity of ["blocker", "major"] as const) {
+      const confirmed = { verify: { verdict: "confirmed" } as never, severity };
+      expect(mustFixPoint(confirmed)).toBe(true);
+      expect(mustFixPoint({ ...confirmed, preexisting: true })).toBe(false);
+      expect(mustFixPoint({ ...confirmed, preexisting: false })).toBe(true);
+    }
   });
 });

@@ -554,9 +554,8 @@ describe("the loop of one part (spec.md section 6.7)", () => {
   );
 
   test(
-    "risk-check.md section 4.7: under the variant, the own review of a task checks the finder risks; the critic does not",
+    "risk-check.md section 4.7 (a default since prompt 2.9): the own review of a task checks the finder risks; the critic does not",
     async () => {
-      const risky = { ...SHIPPED_PROFILES[0], id: "risky", name: "Risky", variants: ["risk-check"] } as ProfileInput;
       const risk = "The feature string can go stale.";
       const verdict = {
         candidate: 1,
@@ -568,8 +567,6 @@ describe("the loop of one part (spec.md section 6.7)", () => {
         question: "",
       };
       const s = await setup({
-        profiles: [...SHIPPED_PROFILES, risky],
-        profile: "risky",
         seq: {
           review: [{ review: { ...CLEAN, risks: [risk] } }],
           critic: [{ critic: { ...CLEAN, risks: ["A critic risk."] } }],
@@ -579,7 +576,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
       await s.build();
       expect(s.blocked()).toBeNull();
       expect(s.part().state).toBe("self_reviewed");
-      // Before the variant, a review with no finding started no check.
+      // A review with no finding and one risk starts the check.
       expect(s.runCalls().map(s.modeOf)).toEqual(["build", "fix", "review", "review", "verify"]);
       const check = s.runCalls().find((c) => s.modeOf(c) === "verify") as Call;
       expect(check.context["candidates.md"]?.match(/^## \w+ \d+$/gm)).toEqual(["## Risk 1"]);
@@ -589,7 +586,7 @@ describe("the loop of one part (spec.md section 6.7)", () => {
           summary_json: string;
         }[]
       ).map((r) => JSON.parse(r.summary_json) as RunSummary);
-      // The critic runs with CRITIC_PROFILE, which lacks the variant.
+      // The critic runs no check, so its summary has no finderRisks key.
       expect(summaries.map((x) => x.finderRisks?.listed)).toEqual([undefined, 1]);
       expect(summaries[1]?.finderRisks?.list).toEqual([
         { text: risk, outcome: "cleared", note: "src/feature.ts:1 holds the final value. Evidence: src/feature.ts:1" },

@@ -95,7 +95,6 @@ import {
   moduleNotes,
   obligationCheck,
   type Profile,
-  preexisting,
   profileOf,
   profileRevision,
   promptVersion,
@@ -103,7 +102,6 @@ import {
   type ReviewContext,
   replyAgent,
   reviewerAgent,
-  riskCheck,
   SALVAGE_MAX_TURNS,
   salvageAgent,
   skillLines,
@@ -1137,7 +1135,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   earlier: [...earlier, ...carry.posted].map((r) => r.id),
                   posted: carry.posted.map((r) => r.id),
                 }),
-                schema: rereviewJsonSchema(preexisting(profile), minorFold(profile)),
+                schema: rereviewJsonSchema(minorFold(profile)),
                 main: mainAgent(profile, context),
               }
             : explain
@@ -1150,7 +1148,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   }
                 : {
                     prompt: buildPrompt(input),
-                    schema: reviewJsonSchema(profile.explain, preexisting(profile), minorFold(profile)),
+                    schema: reviewJsonSchema(profile.explain, minorFold(profile)),
                     main: mainAgent(profile, context),
                   };
     // docs/plans/review-v2/spec.md section 1.9: a review run shows phase finding, then checking.
@@ -1266,7 +1264,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         servers,
         demote: profile.verifier.outcome === "demote",
         placed: v.placed,
-        risks: riskCheck(profile),
+        risks: true,
         obligations: v.obligations,
       }),
     );
@@ -1445,8 +1443,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const { profile, context, folders, always, used, task, langs } = r;
     const verify = profile.verifier.mode === "on";
     // docs/plans/review-v2/review-questions.md: the finder questions get a check too, also in a run with no finding.
-    // docs/plans/review-v2/risk-check.md section 4.2: so do the finder risks under the risk check.
-    const listed = riskCheck(profile) ? found.summary.risks : [];
+    // docs/plans/review-v2/risk-check.md section 4.2: so do the finder risks, a default since prompt 2.9.
+    const listed = found.summary.risks;
     // docs/plans/review-v2/obligations.md section 4.1: the obligation check starts also with zero blocks. A re-review has none.
     const obligations = verify && !r.rereview && obligationCheck(profile);
     const file =
@@ -1882,7 +1880,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cwd: ws.work,
         appDir: ws.app,
         prompt: buildPrompt(input),
-        schema: reviewJsonSchema(false, preexisting(profile), minorFold(profile)),
+        schema: reviewJsonSchema(false, minorFold(profile)),
         main: withDelegation(
           withMcp(withSkills(withLanguages(mainAgent(profile, context), langs, !broad(profile)), folders, always, true), tools.used, true),
           delegate,
@@ -1948,7 +1946,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         servers,
         demote: profile.verifier.outcome === "demote",
         placed: v.placed,
-        risks: riskCheck(profile),
+        risks: !t.critic,
         obligations: v.obligations,
       }),
     );

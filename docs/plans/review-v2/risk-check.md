@@ -1,6 +1,6 @@
 # Risk check
 
-Status: design of 2026-11-17. WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) are built as the opt-in variant "risk-check". Gate RC-A passes under the fallback of 2026-11-17 (section 7). The ship step (WP-RC3) waits for the user. WP-RC4 is open. REVIEW_PROMPT_VERSION stays "2.8" until WP-RC3 ships. The criteria AC-R40 to AC-R47 go into spec.md section 1 in WP-RC3.
+Status: design of 2026-11-17. WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) built the opt-in variant "risk-check". Gate RC-A passes under the fallback (section 7). WP-RC3 ships the check as the default in prompt 2.9, together with "preexisting" (review-v3.md WP-V6). It ships with all asked risk questions dropped (cascade step 2), because step 1 alone is not measured. The variant name is retired: a stored profile drops it, and the eval CLIs refuse it. WP-RC4 is open. The criteria AC-R40 to AC-R45 are in spec.md section 1. AC-R46 and AC-R47 go there with WP-RC4.
 
 ## 1. Request and verdict
 
@@ -97,7 +97,7 @@ Run mode:
 
 | Mode | Condition | Result |
 |---|---|---|
-| off | The profile lacks the variant "risk-check" (before WP-RC3), or the run is an Explain run. | No `finderRisks` key. The run line shows "Risk areas: N" as today. |
+| off | The profile lacks the variant "risk-check" (before WP-RC3), the run is an Explain run, or the run is the critic of a task. | No `finderRisks` key. The run line shows "Risk areas: N" as today. |
 | on | The profile has the variant (WP-RC1), or the run is any review run (from WP-RC3). | Each risk gets one outcome by the table below. |
 
 Outcome of one risk. The start state is "listed". settle checks the rows in order. The first match wins.
@@ -115,6 +115,8 @@ Outcome of one risk. The start state is "listed". settle checks the rows in orde
 | R8 | duplicate, and duplicateOf is a candidate number from 1 to written. | covered | none | "Same point as: <candidate title>", with the verdict of that candidate. |
 | R9 | duplicate with any other duplicateOf. | open | none | "The check named no finding for this repeat." |
 | R10 | unsure | open | none | The reason. |
+
+Since prompt 2.9 (WP-RC3), the fallback of section 7 applies, cascade step 2: R5 and R6 give open with no item. The R5 note is "Confirmed, but the check could not place it: <title or risk>". The R6 note is the question text, else the risk. No row gives asked. Stored runs of the variant can still hold asked.
 
 A cancelled run ends as today. settle does not run, so no risk gets an outcome.
 
@@ -250,7 +252,7 @@ Ship rule, candidate against control:
 
 If only rule 4 fails, the fallback applies as a cascade (decided by the user on 2026-11-21, postable-risks.md Q2). Step 1: R6 gives open, with the question in the note and no item. Step 2: if rule 4 still fails, R5 gives open too. Rule 4 counts every question item that remains, R5 included. The replay shows step 2 as question items minus finderRisks.asked. Step 1 needs the R5 and R6 split: the recorded verify calls, or a split in RISK_KEYS. Neither is built.
 
-Result of 2026-11-20 (Gate A recording, prompt 2.8, 50 case runs per repeat, 2 repeats): only rule 4 failed. With step 2, all five rules pass. Recall: +1.3 points. Noise: +0.06 per case, limit 0.08. Judge fp: +0.03 per case run, limit 0.05. Question items: 27 against 27 per 100 case runs. Cost: +11.8% per case. Step 1 alone is not measured. The ship step (WP-RC3) waits for the user.
+Result of 2026-11-20 (Gate A recording, prompt 2.8, 50 case runs per repeat, 2 repeats): only rule 4 failed. With step 2, all five rules pass. Recall: +1.3 points. Noise: +0.06 per case, limit 0.08. Judge fp: +0.03 per case run, limit 0.05. Question items: 27 against 27 per 100 case runs. Cost: +11.8% per case. Step 1 alone is not measured. On 2026-11-21 the user decided to ship. WP-RC3 ships the check in prompt 2.9 with all asked risk questions dropped (cascade step 2), because step 1 alone is not measured.
 
 The replay cannot show the gain on requirement and maintenance items. Rules 1 to 4 show only that the check does no harm.
 
@@ -277,7 +279,7 @@ Draft text of FINDER_RISK_RULES (rl-main and salvage only):
 - AC-R40. With the risk check on, candidates.md holds a "## Risk N" block for each finder risk after the questions. N is written + asked + k + 1. Risk blocks come only when every candidate and question fits. The byte cap and MAX_FINDINGS cover all kinds. A finder result with only risks starts the verify phase.
 - AC-R41. Without the variant (before WP-RC3), each prompt byte and candidates.md stay the same. The snapshot test proves it.
 - AC-R42. rl-verify and rl-verifier hold RISK_BLOCK_RULES only when candidates.md holds risks. Above VERIFY_SPLIT blocks, the delegation names the risks. The split and the turn cap count risks.
-- AC-R43. settle gives each risk exactly one outcome by rows R0 to R10. The counts add up to listed. The risk check makes only found and asked items.
+- AC-R43. settle gives each risk exactly one outcome by rows R0 to R10. The counts add up to listed. The risk check makes only found and asked items. Since prompt 2.9, R5 and R6 give open with no item (section 7, cascade step 2), so the check makes only found items.
 - AC-R44. A risk verdict never changes summary.verify, never adds a coverage line, and never makes the run incomplete.
 - AC-R45. A found risk is a finding item with category risk, module core, evidenceStatus code, confidence high, an empty trigger, the verify mark confirmed, and the verdict severity.
 - AC-R46. The run line shows one toggle "Risks: …" with the counts above zero, and one entry per risk with its outcome word and note. A run without finderRisks shows "Risk areas: N".
@@ -290,7 +292,7 @@ Draft text of FINDER_RISK_RULES (rl-main and salvage only):
 | 1 | WP-RC1: the risk check under the variant "risk-check" | implementer-xhigh | src/shared/dto.ts (VARIANTS, riskOutcomes, FinderRisks, RunSummary.finderRisks, RunDto.checkRisks, ReviewStatsDto.risks); src/server/review/context-files.ts (candidatesFile, riskBlock); catalog.ts (riskCheck, RISK_BLOCK_RULES, verifyRules, verifyAgent, verifierAgent, withVerifyDelegation); prompt.ts (buildVerifyPrompt); judge.ts (CheckRun.risks, verdictsOf, questionVerdicts, placeAnswers, answerFinding, settle); jobs.ts (verifyPhase start, split, turn cap, checkRisks) | A new tests/review/risk-check.test.ts in the shape of finder-questions.test.ts: each row R0 to R10, the numbering, the caps, the start with risks only, the rule lines with and without the variant, and the snapshot without the variant. The question tests stay green. | AC-R40 to AC-R45. `bun run check` is green. |
 | 2 | WP-RC2: eval counts | implementer | scripts/eval/run.ts, score.ts, compare.ts; tests/eval/score.test.ts, ab.test.ts, harness.test.ts; docs/eval/local.md | The sums, the risk row, the compare line, and the replay accepts "risk-check". | `bun run check` is green. A fake replay prints the risk line. |
 | 3 | Gate RC-A | user | none | Section 7. | The ship rule passes, and the user approves. |
-| 4 | WP-RC3: ship the check | implementer | src/shared/review.ts (REVIEW_PROMPT_VERSION "2.9", its comment, the describe text of verifyVerdict.finding); catalog.ts and jobs.ts (the check is always on); dto.ts and run.ts (remove "risk-check"); spec.md (AC-R40 to AC-R47); docs/eval/results.md; docs/eval/local.md | Snapshot updates. An old profile with "risk-check" reads without it. | Each review run has the check. `bun run check` is green. |
+| 4 | WP-RC3: ship the check (built: prompt 2.9, cascade step 2) | implementer | src/shared/review.ts (REVIEW_PROMPT_VERSION "2.9", its comment, the describe text of verifyVerdict.finding); catalog.ts and jobs.ts (the check is always on); dto.ts and run.ts (remove "risk-check"); spec.md (AC-R40 to AC-R47); docs/eval/results.md; docs/eval/local.md | Snapshot updates. An old profile with "risk-check" reads without it. | Each review run has the check. `bun run check` is green. |
 | 5 | WP-RC4: UI, stats, and docs | implementer | src/web/review/RunLine.tsx, model.ts (the toggle, the entries, runningText); src/web/settings/quality.ts; src/server/review/stats.ts (also posted and discarded counts of question items with `fromRisk`, postable-risks.md Q3); scripts/demo.ts; tests/support/fake-claude.ts; tests/web/review-v2.test.ts; the stats.ts test; tests/e2e/review-v2.e2e.ts; README.md; docs/screenshots via `bun run screenshots`; CHANGELOG.md | Unit tests for the toggle label and the entries. One e2e: a run with all five outcomes shows the toggle, the entries, one finding draft, and one question. m2.e2e.ts keeps "Risk areas: 2" for a run without finderRisks. | AC-R46 and AC-R47. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
 | 6 | Gate RC-B | user | none | Section 7. | The user decides. |
 | 7 | WP-RC5 (optional): finder half, variant "risks" | implementer | catalog.ts (FINDER_RISK_RULES in rl-main and salvage only); dto.ts (VARIANTS); tests | The rule lines with and without the variant, and the snapshot. | Gate RC-C passes. |

@@ -217,7 +217,10 @@ describe("skill prompts and profiles", () => {
 
   test("a saved profile with retired variants reads without them and keeps the other variants", () => {
     const dir = temp("cfg");
-    const stored = { ...general, variants: ["signal", "verify2", "order", "rules2", "rereview-strict", "broad"] };
+    const stored = {
+      ...general,
+      variants: ["signal", "verify2", "order", "rules2", "rereview-strict", "preexisting", "risk-check", "broad"],
+    };
     json(join(dir, "config.json"), { baseUrl: "https://example.test", userSlug: "me", notifications: false, profiles: [stored] });
     const read = readConfig(dir)?.profiles?.find((p) => p.id === general.id);
     expect(read).toEqual({ ...general, variants: ["broad", "verify2"] });

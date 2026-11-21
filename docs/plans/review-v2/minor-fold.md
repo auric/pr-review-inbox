@@ -1,6 +1,6 @@
 # Minor fold: polish points in the "More" fold
 
-Status: design of 2026-11-21, main at 93ff232. WP-MF1 and WP-MF2 are built as the opt-in variant "minor-fold". Gate MF-A and WP-MF3 are open. REVIEW_PROMPT_VERSION stays "2.8" until WP-MF3.
+Status: design of 2026-11-21, main at 93ff232. WP-MF1 and WP-MF2 are built as the opt-in variant "minor-fold". The Gate MF-A probe failed rule 1 on 2026-11-21 (section 6.7). The user paused the package on 2026-11-21. The variant stays opt-in. No local-set run follows. WP-MF3 is not started. Prompt 2.9 ships the pre-existing lines, so the polish lines now follow them.
 
 ## 1. Why
 
@@ -191,6 +191,20 @@ bun run eval:compare <baseline review result.json> <candidate review result.json
 - AC-R65. mustFixPoint never picks a polish point.
 - AC-R66. The eval metrics polish, polishRecall, and polishTraps count polish points that are not hidden. A polish point in the fold changes no other metric, unless it raises a counted must-find.
 - AC-R67. Score.polish counts gold matches, must, and judge labels. compare.ts prints the row "Polish points (minor-fold.md)" with the true rate.
+
+### 6.7 Gate MF-A result (2026-11-21)
+
+Only the probe step ran. The probe has the cases probe-polish-todo and probe-polish-stale-comment.
+
+| Rule | Result | Pass |
+|---|---|---|
+| 1. Calibration gives tp to both polish bugs | The judge gives fp to the TODO bug of probe-polish-todo: "not a merge blocker". It gives tp to the stale comment bug of probe-polish-stale-comment. | No |
+| 2. polishRecall is at least 75% | 100% | Yes |
+| 3. polishTraps is 0 | 0 | Yes |
+| 4. Probe recall and trap rate are not below the control | Recall 87.5% to 91.7%. Trap rate 0 on both sides. | Yes |
+
+- Rule 1 fails, so the gate stops at the probe (section 6.4).
+- Decision of the user on 2026-11-21: pause minor-fold. The variant stays opt-in. Do not run the local set.
 
 ## 7. Work packages
 

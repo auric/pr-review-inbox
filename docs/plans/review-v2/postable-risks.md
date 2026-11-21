@@ -1,6 +1,6 @@
 # Postable risks
 
-Status: designed 2026-11-21, not started. The user decided section 8 on 2026-11-21. Gate RC-A (risk-check.md section 7) passes under the fallback of 2026-11-17. The ship step (WP-RC3) waits for the user. WP-PR1 waits until WP-RC3 is decided. Design item 7. It changes no prompt byte and needs no eval gate. It depends on the risk check, which stays opt-in until WP-RC3.
+Status: designed 2026-11-21, not started. The user decided section 8 on 2026-11-21. Gate RC-A (risk-check.md section 7) passes under the fallback of 2026-11-17. WP-RC3 ships the risk check as the default in prompt 2.9, with all asked risk questions dropped (cascade step 2 of Q2). So only found risks make a draft, and only R4 needs the link. Design item 7. It changes no prompt byte and needs no eval gate.
 
 ## 1. Request and answer
 
@@ -19,7 +19,7 @@ How risks are made:
 - Explain risks use another schema, with places (review.ts:386-397). They show only on the Explain page.
 
 How risks are checked (variant "risk-check", WP-RC1):
-- `riskCheck` turns the check on (catalog.ts:1422). The variant is opt-in (src/shared/dto.ts:223). WP-RC3 (on by default) and WP-RC4 (UI) are not started (review-ledger.md section 3).
+- Before prompt 2.9, `riskCheck` turned the check on (catalog.ts:1422), and the variant was opt-in (src/shared/dto.ts:223). WP-RC3 makes the check the default in prompt 2.9. WP-RC4 (UI) is not started (review-ledger.md section 3).
 - settle gives each risk one outcome, by rows R0 to R10 (src/server/review/judge.ts:548-582, 903-929). The outcomes are found, asked, cleared, covered, and open.
 - found (R4): the check confirmed the risk, and the validator anchored the defect. The item is a finding with category "risk", evidenceStatus code, confidence high, and the confirmed mark (judge.ts:557-563, 598-615, 926).
 - asked: R5 (confirmed, but no valid place) and R6 (a question verdict) make a question item {text, why} (judge.ts:551, 564-568, 927, 972). R5 loses the verdict severity.
@@ -156,7 +156,7 @@ WP-PR2:
 | 2 | WP-PR2: risk entries with their drafts | implementer | src/web/review/model.ts (riskEntries), src/web/review/RunLine.tsx, src/web/review/useRunRecord.tsx, tests/web/review-v2.test.ts, a .tsx render test, tests/e2e/review-v2.e2e.ts and its serve.ts profile with the variant, scripts/demo.ts, tests/support/fake-claude.ts, README.md, CHANGELOG.md, docs/screenshots | Section 6 | check and test:e2e are green. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
 
 Order:
-- Hold WP-PR1 until the user decides WP-RC3 (Q4). It acts only under the variant. From then on, each variant run stores the link.
+- Hold WP-PR1 until the user decides WP-RC3 (Q4). WP-RC3 shipped in prompt 2.9, so WP-PR1 can start. Each review run stores the link from then on.
 - WP-PR2 shares RunLine.tsx, model.ts, the demo, the e2e tests, README, and CHANGELOG with WP-RC4. So WP-PR2 is the run-line half of WP-RC4 (the toggle, the entries, and the link). WP-RC4 keeps stats.ts, quality.ts, and the runningText.
 - WP-PR2 ships with WP-RC4, as one package (Q4). Never build them in parallel.
 - Unverified: the e2e and demo setups have no profile with variants yet. Also unverified: whether fake-claude gives verdicts for "## Risk N" blocks. WP-PR2 adds both if they are missing.

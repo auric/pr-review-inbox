@@ -51,8 +51,6 @@ export type ValidateInput = {
   rules?: readonly RuleSource[];
   // The critic (part-session.md section 2.7): a finding stays only when each line of its anchor range is an added line.
   addedOnly?: boolean;
-  // docs/plans/review-v3.md WP-V6: the variant "preexisting" is on. Else every preexisting mark drops.
-  preexisting?: boolean;
   // docs/plans/review-v2/minor-fold.md: the variant "minor-fold" is on. Else every polish mark drops.
   polish?: boolean;
 };
@@ -300,7 +298,7 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     if (!changed(a, f.side)) {
       const c = f.cause ? anchor(f.cause) : null;
       if (f.cause && c !== null && typeof c !== "string" && changed(c, f.cause.side)) cause = { ...f.cause, anchor: c };
-      else if (input.preexisting && marked === true && (f.severity === "blocker" || f.severity === "major")) {
+      else if (marked === true && (f.severity === "blocker" || f.severity === "major")) {
         pre = true;
         cause = null;
       } else {

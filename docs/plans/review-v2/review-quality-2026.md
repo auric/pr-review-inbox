@@ -1,6 +1,6 @@
 # Review quality 2026: eval fixes and ranked reviewer improvements
 
-Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and items 10 and 11 are built as opt-ins. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Item 12 (variant "architecture") is built opt-in (WP-AR1); its gate runs on the seeded set. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
+Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and item 10 is built as an opt-in. Item 11: "preexisting" shipped in prompt 2.9, and "callers" stays opt-in. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Item 12 (variant "architecture") is built opt-in (WP-AR1); its gate runs on the seeded set. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
 
 Short answer: fix the eval before any reviewer change, because today it cannot measure precision or large-PR recall. Then run cheap tests that cut cost, then verifier tests replayed on fixed finder output, and last the recall bets, each behind a gate that costs nothing to check.
 
@@ -306,7 +306,7 @@ Report other problems too.
 
 ### 11. Caller check and pre-existing problems (variants "callers" and "preexisting")
 
-- Status: built 2026-11-19 as opt-in variants for the eval against the Gate A baseline (prompt 2.8, PROFILES_VERSION 9). Not run yet. docs/plans/review-v3.md WP-V6 and WP-V5 hold the rules, the commands, and the ship rule draft.
+- Status: built 2026-11-19 as opt-in variants for the eval against the Gate A baseline (prompt 2.8, PROFILES_VERSION 9). On 2026-11-21, "preexisting" passed the Gate A full run under the noise rule of section 2: noise +0.10 against the limit 0.127, judge fp -0.04, recall 17.5 to 18.5, and cost -2%. Prompt 2.9 ships it as the default. "callers" stays opt-in. docs/plans/review-v3.md WP-V6 and WP-V5 hold the rules, the commands, and the ship rule draft.
 - "callers": the finder checks the callers and consumers of each changed symbol outside the diff (research T6). Ship rule: "better" of section 2.
 - "preexisting": blocker and major problems in unchanged code go to their own fold, never to a post. The eval counts them apart (metric `preexisting`, row "Pre-existing findings"), so they are neither noise nor recall.
 

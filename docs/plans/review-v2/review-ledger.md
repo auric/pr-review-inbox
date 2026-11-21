@@ -1,27 +1,30 @@
 # Review improvements ledger
 
-Status: ledger of 2026-11-20, main at 12fd622. It lists every review improvement, its decision, and its state. Source: the audit of 2026-11-19, kept outside the repository, plus the changes after it. Each status was checked against `git log` and the code. Update this file when a review package or gate ends.
+Status: ledger of 2026-11-21, main at f6f1955 and the prompt 2.9 change (preexisting and the risk check). It lists every review improvement, its decision, and its state. Source: the audit of 2026-11-19, kept outside the repository, plus the changes after it. Each status was checked against `git log` and the code. Update this file when a review package or gate ends.
 
 Decision values: "user decided" means that the source records a user answer. "recommended" means that a design recommends it with no recorded answer. "dropped" means that it failed or lost. "not recorded" means that no source records the decision.
 
 ## 1. Changes since the audit
 
-- The variants "preexisting" (WP-V6) and "callers" (the D2 caller rule) are built as opt-in eval variants (81d86d4). No eval run has measured them yet.
+- Prompt 2.9 ships the variant "preexisting" (WP-V6) as the default (2026-11-21). The Gate A full run passed the noise rule of review-quality-2026.md section 2: noise +0.10 against the limit 0.127, judge fp -0.04, recall 17.5 to 18.5, and cost -2%. The name "preexisting" is retired: a stored profile drops it, and the eval CLIs refuse it. The variant "callers" stays opt-in.
+- Prompt 2.9 also ships the risk check (WP-RC3) as the default (2026-11-21). It ships with all asked risk questions dropped (cascade step 2 of risk-check.md section 7), because step 1 alone is not measured. Gate RC-A numbers: recall +1.3 points, noise +0.06 per case (limit 0.08), judge fp +0.03 per case run (limit 0.05), question items 27 against 27 per 100 case runs, cost +11.8% per case. The name "risk-check" is retired like "preexisting".
+- The Gate A baseline of prompt 2.8 is void for new candidates. eval:ab refuses a stored baseline with another prompt version. The next baseline is SG-A on the seeded set.
+- The Gate MF-A probe of "minor-fold" failed rule 1 on 2026-11-21 (minor-fold.md section 6.7). The user paused minor-fold. It stays opt-in, and no local-set run follows.
 - The seeded ground truth design exists (5537603, seeded-truth.md). The user approved the build. The user decided its section 14 on 2026-11-21. WP-SG0, WP-SG1, and WP-SG2 are built. U-SG1 (the paid seeding) is open: round 1 gave 0 usable seeds, mostly by tool bugs that are now fixed (row "Seeded ground truth").
 - WP-JC5 and WP-JC-E are in progress on a branch. They are not on main.
 - The variant "obligations" now keeps a missing obligation anchored on an unchanged line, such as a doc line, when its cause is a changed line. Before, the validator dropped it. The probe set gets doc-line alts, an exact export-guard factor, and three new obligation cases (19 cases). The prompt without the variant is unchanged.
 - The verifier rule design exists (verifier-rule.md). Gate VR-0 passed narrowly on Gate A: 2.5 must-finds per repeat go to the fold as refuted. WP-VR1 builds the verify-only variant "refute-issue".
-- The shipped code now has 13 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
+- The shipped code now has 11 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
 - The user replaced the S_N noise ship rule on 2026-11-21 (review-quality-2026.md section 2). Noise now passes on the paired grounded noise delta, matched by case: at most 0.08 per case for a verify-only replay, and at most 10% of mean(A) for a full run. The paired judge fp delta per case run is at most 0.05 for a replay and 0.07 for a full run. The gate docs point to this rule. eval:compare prints both deltas, their limits, and pass or fail in its "Noise rule" block. It takes the replay limits when B replayed the finder.
-- Joint Gate A ran on 2026-11-20 at PROFILES_VERSION 9 and prompt 2.8. docs/eval/results.md has no entry for it yet. Gate RC-A passes under the fallback of 2026-11-17: all five rules pass when the asked risk questions are dropped. The ship step (WP-RC3) waits for the user. Commit ed9fc03 is not in the run commit, so the variant "obligations" is not measured on current code.
+- Joint Gate A ran on 2026-11-20 at PROFILES_VERSION 9 and prompt 2.8. docs/eval/results.md has no entry for it yet. Gate RC-A passes under the fallback of 2026-11-17: all five rules pass when the asked risk questions are dropped. WP-RC3 shipped in prompt 2.9 on 2026-11-21. Commit ed9fc03 is not in the run commit, so the variant "obligations" is not measured on current code. Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it.
 - The user decided on 2026-11-21: postable-risks.md section 8, focused-passes.md section 11, architecture-bugs.md question 4, and WP-V7 (superseded by obligations). The reference of each ship step is the shipped default at run time.
 - Three items of 2026-11-21 are open (review-quality-2026.md section 2). The first is a precision rule for output outside gold by design. The second is a blind calibration sample of the judge tp and fp split. The third is the SG-A noise venue and limit.
 
 ## 2. Version-bump trap
 
-- WP-RC3 raises REVIEW_PROMPT_VERSION from "2.8" to "2.9" (risk-check.md section 9, row 4).
+- Prompt 2.9 ships "preexisting" and the risk check (WP-RC3) in one step (2026-11-21). WP-OB3 raises REVIEW_PROMPT_VERSION to the next step after "2.9".
 - `eval:ab` refuses a stored baseline with another prompt version (scripts/eval/ab.ts `reuseRefusal`).
-- So after WP-RC3, the Gate A baseline is no longer usable. A finder variant against that baseline must run before WP-RC3. This applies to "preexisting" and "callers". The verify-only replay of "refute-issue" (Gate VR-A) must also run before WP-RC3.
+- So the Gate A baseline of prompt 2.8 is no longer usable for a new candidate. A new finder variant needs the SG-A baseline on the seeded set.
 - The Joint Gate A baseline was recorded on 2026-11-20 at PROFILES_VERSION 9 (docs/eval/results.md has no Gate A entry yet). Prompt 2.9 voids it.
 
 ## 3. Ledger
@@ -43,15 +46,16 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Item 7: variant "classes" | review-quality-2026.md item 7 | recommended | Opt-in; gate blocked | review-quality-2026.md item 7 | The local set has no labels per bug kind. |
 | Item 10: variants "security2" and "security2-verify" | review-quality-2026.md item 10 | recommended | Opt-in; gate failed | review-quality-2026.md item 10 | Does not ship. |
 | WP-V14: variant "parts" | review-v3.md section 10 | recommended | Opt-in; wave 5 stopped | review-v3.md section 10 | The local set cannot measure recall on large PRs. |
-| WP-RC1: risk check, variant "risk-check", with rule 15 (stale text) | risk-check.md section 9 | user decided (4bbd974) | Opt-in; Gate RC-A passes under the fallback of 2026-11-17 | 4eaa7e0 | WP-RC3 (waits for the user), WP-RC4, Gate RC-B. |
+| WP-RC1: risk check, variant "risk-check", with rule 15 (stale text) | risk-check.md section 9 | user decided (4bbd974) | Shipped default in prompt 2.9 (WP-RC3); the variant name is retired | 4eaa7e0 | WP-RC4, Gate RC-B. |
 | WP-RC2: risk counts in the eval | risk-check.md section 9 | user decided | Built | bef39aa | None. |
-| WP-OB1: obligation check, variant "obligations", with rule 8a | obligations.md section 10 | user decided (77144ca, dd86ad3) | Opt-in; not measured on current code | 07c4d80 | Commit ed9fc03 is not in the Gate A run commit. Re-measure before prompt 2.9 lands. Then WP-OB3, WP-OB4, Gate OB-B. |
+| WP-OB1: obligation check, variant "obligations", with rule 8a | obligations.md section 10 | user decided (77144ca, dd86ad3) | Opt-in; not measured on current code | 07c4d80 | Commit ed9fc03 is not in the Gate A run commit. Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. Then WP-OB3, WP-OB4, Gate OB-B. |
 | WP-OB2: obligation counts and probe cases | obligations.md section 10 | user decided | Built, with 8 probe-obl cases | dce9f3d | The obligations.md table says 7 cases. The repository has 8. |
-| WP-V6: variant "preexisting" | review-v3.md WP-V6, D1; review-quality-2026.md item 11 | user decided (D1) | Opt-in | 81d86d4 | An eval run against the Gate A baseline before WP-RC3. stats.ts count. WP-V9 UI parts. As a default, it must restore D1: never posted by default, a single post on a click. |
-| Caller rule: variant "callers" | review-v3.md D2; review-quality-2026.md item 11 | user decided (D2) | Opt-in | 81d86d4 | An eval run against the Gate A baseline before WP-RC3. CodeGraph by default (WP-V5). |
-| Joint Gate A | risk-check.md section 7; obligations.md section 8 | user step | Ran 2026-11-20. Gate RC-A passes under the fallback; obligations not measured on current code | None in the repository | A docs/eval/results.md entry. The obligations re-measure before prompt 2.9. |
-| WP-RC3 with WP-OB3: ship both checks, one "2.9" step | risk-check.md section 9; obligations.md section 10 | user decided | Not started | None | Waits for the user decision on WP-RC3 and the obligations re-measure. |
-| WP-RC4 with WP-OB4: UI, stats, docs | risk-check.md section 9; obligations.md section 10 | user decided | Not started | None | Waits for WP-RC3 and WP-OB3. |
+| WP-V6: variant "preexisting" | review-v3.md WP-V6, D1; review-quality-2026.md item 11 | user decided (D1; ship decided 2026-11-21) | Shipped default, prompt 2.9 | 81d86d4; Gate A full run: noise +0.10 (limit 0.127), judge fp -0.04, recall 17.5 to 18.5, cost -2% | stats.ts count. WP-V9 UI parts. D1 asks for a single post on a click. items.ts still refuses Accept and Edit of a pre-existing finding. |
+| Caller rule: variant "callers" | review-v3.md D2; review-quality-2026.md item 11 | user decided (D2) | Opt-in | 81d86d4 | Stays opt-in (2026-11-21). A new run needs the SG-A baseline. CodeGraph by default (WP-V5). |
+| Joint Gate A | risk-check.md section 7; obligations.md section 8 | user step | Ran 2026-11-20. Gate RC-A passes under the fallback; obligations not measured on current code | None in the repository | A docs/eval/results.md entry. Obligations: Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. |
+| WP-RC3: ship the risk check, prompt 2.9 | risk-check.md section 9 | user decided (2026-11-21) | Shipped default, prompt 2.9, cascade step 2 (no risk question items) | Gate RC-A: recall +1.3 points, noise +0.06 (limit 0.08), judge fp +0.03 (limit 0.05), questions 27 vs 27 per 100 runs with asked questions dropped, cost +11.8% | Cascade step 1 (drop only R6) is not measured. |
+| WP-OB3: ship the obligation check | obligations.md section 10 | user decided | Not started; "obligations" stays opt-in | None | Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. A version step after "2.9". |
+| WP-RC4 with WP-OB4: UI, stats, docs | risk-check.md section 9; obligations.md section 10 | user decided | Not started | None | WP-RC4 can start after WP-RC3. WP-OB4 waits for WP-OB3. |
 | Gates RC-B and OB-B | risk-check.md section 7; obligations.md section 8 | user step | Open | None | Waits for WP-RC4 and WP-OB4. |
 | WP-RC5: finder half, variant "risks" | risk-check.md section 9 | recommended (optional) | Not started | None | Needs Gate RC-C data. |
 | WP-JC-D, WP-JC0, Gate JC-G | jira-context.md section 8 | user decided (4311cdb) | Done | 4311cdb, 8e53029, 104368c | None. |
@@ -60,7 +64,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | WP-JC5: task.md sections | jira-context.md section 8 | user decided | In progress on a branch, not on main | None on main | No push before Gates JC-A and JC-B. |
 | WP-JC-E: eval overlay | jira-context.md section 8 | user decided | In progress on a branch, not on main | None on main | jira-context.md says it starts after WP-RC3. Its Gate JC-A text names prompt 2.8. The Jira context package owns both points. |
 | Gates JC-A and JC-B | jira-context.md section 5 | user step | Open | None | Waits for WP-JC5 and WP-JC-E. |
-| WP-JC6: Jira family on by default | jira-context.md section 8 | user decided | Not started | None | Waits for Gate JC-A and WP-RC3. |
+| WP-JC6: Jira family on by default | jira-context.md section 8 | user decided | Not started | None | Waits for Gate JC-A. WP-RC3 shipped in prompt 2.9. |
 | WP-V5: CodeGraph by default | review-v3.md WP-V5, D2 | user decided (D2) | Not built | None | Needs the BRIEF 3.5 approval. |
 | WP-V7: task criteria rows | review-v3.md WP-V7 | user decided (2026-11-21) | Superseded by obligations | obligations.md (kind "criterion") | None. |
 | WP-V8: review checks per repository | review-v3.md WP-V8 | recommended | Not built | None | None. |
@@ -75,7 +79,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Count of delegated runs that read task.md | delegation-gaps.md section 4 | recommended | Not started | None | Needs the user's OK. |
 | git history rule and a git_blame gate | the audit of 2026-11-19 | recommended | Not started | None | None. |
 | Verifier rule replay | review-quality-2026.md item 4 | recommended | Not started | None | None. |
-| Verifier rule: refute the problem, not a detail, variant "refute-issue" (WP-VR-D, WP-VR1, WP-VR2) | verifier-rule.md | recommended | Opt-in; failed Gate VR-A (2026-11-21) | verifier-rule.md section 6; commit cd996f0 | Gate VR-A replay against the Gate A control replay, before WP-RC3. WP-VR2 shares the "2.9" step. |
+| Verifier rule: refute the problem, not a detail, variant "refute-issue" (WP-VR-D, WP-VR1, WP-VR2) | verifier-rule.md | recommended | Opt-in; failed Gate VR-A (2026-11-21) | verifier-rule.md section 6; commit cd996f0 | Gate VR-A replay against the Gate A control replay, before WP-RC3. WP-VR2 shares the WP-RC3 step. |
 | Probe thread as a counted must-find | review-ideas.md idea 2 | recommended | Not started | None | The eval runner needs seeded thread comments. |
 | Focused passes: variant lenses3 (WP-L0 to WP-L3) | focused-passes.md | recommended; section 11 user decided (2026-11-21) | Designed, not built | None | Needs the seeded set and the noise-delta print. |
 | Control: variant runs3 (focused-passes.md section 4.7) | focused-passes.md | recommended | Designed, not built | None | Runs with lenses3 as its control. |
@@ -83,14 +87,14 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Seeded ground truth: WP-SG0 to WP-SG2, U-SG1, gates SG-P and SG-A | seeded-truth.md | user decided (build approved) | WP-SG0 to WP-SG2 built; U-SG1, SG-P, and SG-A open | 5537603, 8675012, None (WP-SG2) | U-SG1 round 1 gave 0 usable seeds: 18 seeder runs ($10.54) gave 44 applied and 55 invalid; 44 validator runs ($5.09) gave 0 confirmed and 44 refuted. Refuted by a proof check stricter than the spec (20), severity below high (23), and verdict holds (1). Invalid by unknown file type (34), anchor (16), and other checks (5). Fix: the proof check follows section 5.4 (an entry with no reference is text, a bare file name resolves to one file), the prompts state the file types, the anchor rule, and the proof path form, `.cs` is a code type (section 14 row 14, orchestrator default), propose skips a host with no code change, and `eval:seed recheck` re-applies the keep conditions to stored answers at no cost. Next: recheck, then round 2. The per-kind floor warns only (seeded-truth.md section 14 row 13). architecture-bugs.md adds the ninth kind. |
 | Head-to-head with another review app | outside the repository | user decided ("not now") | Deferred | None | None. |
 | Stacked PR context: variant "stack", WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B | stacked-prs.md | user decided (app route, build after the code review gate) | Designed, not started | None | Builds after Joint Gate A and the "preexisting" and "callers" runs. The 12 questions of section 12. |
-| Minor fold: variant "minor-fold", WP-MF1 and WP-MF2 | minor-fold.md | defaults by the orchestrator (section 10), the user may change them | Opt-in | e56c6ce | Gate MF-A against the Gate A baseline before WP-RC3. Then WP-MF3 and the BRIEF.md change. |
-| Postable risks: link a confirmed risk to its draft (WP-PR0) | postable-risks.md | recommended; section 8 user decided (2026-11-21) | Designed, not started | None | Gate RC-A passes under the fallback of 2026-11-17. The ship step (WP-RC3) waits for the user. WP-PR1 waits until WP-RC3 is decided. WP-PR2 ships with WP-RC4. |
+| Minor fold: variant "minor-fold", WP-MF1 and WP-MF2 | minor-fold.md | defaults by the orchestrator (section 10); paused by the user on 2026-11-21 | Opt-in; paused after the Gate MF-A probe (2026-11-21) | e56c6ce; minor-fold.md section 6.7 | The probe passed rules 2 to 4: polishRecall 100%, polishTraps 0, recall 87.5% to 91.7%, trap rate 0 on both sides. Rule 1 failed: the judge gives fp to the TODO bug, "not a merge blocker". No local-set run. WP-MF3 is not started. |
+| Postable risks: link a confirmed risk to its draft (WP-PR0) | postable-risks.md | recommended; section 8 user decided (2026-11-21) | Designed, not started | None | WP-RC3 shipped in prompt 2.9 with cascade step 2, so only found risks make drafts. WP-PR1 can start. WP-PR2 ships with WP-RC4. |
 
 ## 4. Order and dependencies
 
-1. Run "preexisting" and "callers" against the Gate A baseline, and the "refute-issue" replay (Gate VR-A) against the Gate A control replay. Do this before WP-RC3 (section 2).
-2. Joint Gate A, then WP-RC3 with WP-OB3, then WP-RC4 with WP-OB4, then Gates RC-B and OB-B.
-3. WP-RC3, then WP-JC-E, then Gate JC-A, then WP-JC6. WP-JC-E is in progress before WP-RC3 against this order. The Jira context package must settle it.
+1. "preexisting" passed Gate A and shipped in prompt 2.9. "refute-issue" failed Gate VR-A. "callers" stays opt-in. A new candidate needs the SG-A baseline (section 2).
+2. WP-RC3 shipped in prompt 2.9. Then WP-RC4 and Gate RC-B. WP-OB3 waits for its seeded-set measure, then WP-OB4 and Gate OB-B.
+3. WP-RC3 shipped in prompt 2.9. Then WP-JC-E, then Gate JC-A, then WP-JC6. WP-JC-E started before WP-RC3 against this order. The Jira context package must settle it.
 4. WP-JC5 builds now. It pushes only after Gates JC-A and JC-B.
 5. The seeded set comes before the gates of "runs3" and "lenses3". A win needs about 5 to 6 more bugs of 70 on the natural set.
 6. WP-V7 is superseded by obligations (decided 2026-11-21). This point is closed.

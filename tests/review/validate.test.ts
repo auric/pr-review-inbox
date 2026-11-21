@@ -618,7 +618,8 @@ describe("result schema", () => {
     expect(s.$schema).toBe("http://json-schema.org/draft-07/schema#");
     expect(s.type).toBe("object");
     expect(s.required.sort()).toEqual(["answered", "coverage", "findings", "questions", "risks", "summary"]);
-    expect(s.properties.findings.items.required.sort()).toEqual(Object.keys(F({})).sort());
+    // Prompt 2.9: the CLI schema also asks for the pre-existing mark.
+    expect(s.properties.findings.items.required.sort()).toEqual([...Object.keys(F({})), "preexisting"].sort());
     expect(s.properties.findings.items.additionalProperties).toBe(false);
   });
 

@@ -110,7 +110,7 @@ export function candidatesFile(
       "",
       `- Place: ${oneLine(path)}:${lineRange(a.line, a.lineEnd)} (${f.side} side).${group === null ? "" : ` Group ${group}.`}`,
       ...(c && cause ? [`- Cause: ${cause} (${c.side} side).`] : []),
-      // docs/plans/review-v3.md WP-V6: validate.ts keeps the mark only under the variant "preexisting".
+      // docs/plans/review-v3.md WP-V6: validate.ts keeps the mark only on a blocker or major finding outside the change.
       ...(f.preexisting ? ["- Pre-existing: yes."] : []),
       // docs/plans/review-v2/minor-fold.md: validate.ts keeps the mark only under the variant "minor-fold".
       ...(f.polish ? ["- Polish: yes."] : []),

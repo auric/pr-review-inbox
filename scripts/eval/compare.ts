@@ -52,7 +52,7 @@ const LABEL: Record<Metric, string> = {
   lossDuplicate: "verifier loss, duplicate: counted must-finds whose best finding is a hidden duplicate",
   lossRefuted: "verifier loss, refuted: counted must-finds whose best finding is hidden as refuted",
   refutedShown: "refuted shown: refuted findings that stay in main, per case",
-  preexisting: "pre-existing: findings in the Pre-existing fold, per case (variant preexisting); no other row counts them",
+  preexisting: "pre-existing: findings in the Pre-existing fold, per case; no other row counts them",
   augmentedPrecision: "augmented precision (diagnostic): shown findings that claim a must-find or that the judge gives tp",
   augmentedRecall: "augmented recall (diagnostic): found must-finds and new judge tp, over must-finds and new judge tp",
   newTp: "new tp (diagnostic): unmatched shown findings that the judge gives tp, per case",

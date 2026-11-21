@@ -63,7 +63,7 @@ const F = (o: Partial<Finding> = {}): Finding => ({
   module: "core",
   ...o,
 });
-const check = (findings: Finding[], polish: boolean, preexisting = false) =>
+const check = (findings: Finding[], polish: boolean) =>
   validate({
     result: { summary: "", risks: [], questions: [], coverage: NONE, findings, answered: [] },
     diff: DIFF,
@@ -71,7 +71,6 @@ const check = (findings: Finding[], polish: boolean, preexisting = false) =>
     oldFiles: OLD_FILES,
     agents: [],
     polish,
-    preexisting,
   });
 
 describe("result schema", () => {
@@ -97,7 +96,7 @@ describe("anchor check (validate.ts, AC-R60)", () => {
   });
 
   test("a finding keeps at most one mark: pre-existing wins", () => {
-    const v = check([F({ ...ON_COMMENT, severity: "major", preexisting: true, polish: true })], true, true);
+    const v = check([F({ ...ON_COMMENT, severity: "major", preexisting: true, polish: true })], true);
     expect(v.findings.map((f) => [f.preexisting, "polish" in f])).toEqual([[true, false]]);
   });
 });

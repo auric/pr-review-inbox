@@ -563,10 +563,9 @@ export const FINDER_QUESTION_RULES = [
   "Put a point into questions only when no file and no tool of this run gives the answer. In why, name what you checked and why it did not answer the point.",
 ];
 
-// docs/plans/review-v3.md WP-V6, D1, and Q6: the finder lines of the variant "preexisting". validate.ts keeps such a finding only at
-// blocker or major, and judge.ts settle caps them at PREEXISTING_MAX. A stale comment or doc is never pre-existing: the change must make
-// it false (risk-check.md rule 15), so it has a changed cause.
-export const preexisting = (p: Partial<Pick<Profile, "variants">>) => has(p, "preexisting");
+// docs/plans/review-v3.md WP-V6, D1, and Q6: the pre-existing finder lines, a default since prompt 2.9. validate.ts keeps such a
+// finding only at blocker or major, and judge.ts settle caps them at PREEXISTING_MAX. A stale comment or doc is never pre-existing: the
+// change must make it false (risk-check.md rule 15), so it has a changed cause.
 export const PREEXISTING_LINES = [
   "One exception: you can also report a problem in unchanged code that the change touches or relies on.",
   "Report it only when the problem exists at BASE without the change. Set preexisting to true on it.",
@@ -578,7 +577,7 @@ export const PREEXISTING_LINES = [
   "Set preexisting to false on every other finding.",
 ];
 export const PREEXISTING_REVIEWER = "Also report preexisting for each finding.";
-// The verify lines of the variant. context-files.ts candidatesFile marks a pre-existing candidate.
+// The pre-existing verify lines. context-files.ts candidatesFile marks a pre-existing candidate.
 export const PREEXISTING_VERIFY = [
   'A candidate with the line "Pre-existing: yes" is about unchanged code that the change touches or relies on.',
   "Never refute it only because the problem is not in the change. Check its trigger as for any other candidate.",
@@ -631,7 +630,7 @@ export function finderRules(p: FinderProfile, main: boolean): string[] {
       : "Report every problem that you find, with its severity and its confidence.",
     "Report only problems that the change adds or makes reachable. BASE..HEAD is the change.",
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
-    ...(preexisting(p) ? PREEXISTING_LINES : []),
+    ...PREEXISTING_LINES,
     ...(minorFold(p) ? POLISH_LINES : []),
     ...PLACE_RULES,
     "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.",
@@ -1436,7 +1435,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       ...docsRule(p),
       "Report each finding with its place: path, side, line, lineEnd, anchorText, and cause.",
       "Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.",
-      ...(preexisting(p) ? [PREEXISTING_REVIEWER] : []),
+      PREEXISTING_REVIEWER,
       ...(minorFold(p) ? [POLISH_REVIEWER] : []),
       ...(parts ? [PART_REVIEWER] : []),
     ].join("\n"),
@@ -1478,8 +1477,7 @@ export const QUESTION_BLOCK_RULES = [
 ];
 
 // docs/plans/review-v2/risk-check.md section 4.3: the "## Risk N" blocks of candidates.md. Only a file with risks gets these lines.
-// The verify phase checks finder risks only under the variant "risk-check" (WP-RC1).
-export const riskCheck = (p: Partial<Pick<Profile, "variants">>) => has(p, "risk-check");
+// Each review run checks the finder risks since prompt 2.9 (WP-RC3).
 export const RISK_BLOCK_RULES = [
   'The heading "## Risk N" holds a risk that the finder noted and did not check. N is no finding number.',
   "Give its verdict with candidate N.",
@@ -1598,7 +1596,7 @@ export function verifyRules(
     ...(c.history
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
       : []),
-    ...(preexisting(p) ? PREEXISTING_VERIFY : []),
+    ...PREEXISTING_VERIFY,
     ...(architecture(p) ? ARCHITECTURE_VERIFY : []),
     ...(minorFold(p) ? POLISH_VERIFY : []),
     ...(v2 && c.prContext ? [VERIFY2.thread] : []),
