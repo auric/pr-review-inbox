@@ -1187,6 +1187,7 @@ describe("review v3 prompt switches", () => {
       "obligations",
       "parts",
       "preexisting",
+      "refute-issue",
       "risk-check",
       "security2",
       "security2-verify",

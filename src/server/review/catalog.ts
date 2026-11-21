@@ -1534,6 +1534,21 @@ const QUESTION_FINDING_LINE = QUESTION_BLOCK_RULES.at(-1) as string;
 const QUESTION_RISK_FINDING_LINE =
   "Never give duplicate for a question. Set finding to null in every verdict, except confirmed for a question or a risk.";
 
+// docs/plans/review-v2/verifier-rule.md section 4.2: the verify lines of the variant "refute-issue". They narrow the refuted line of
+// verifyRules and do not replace it. Only rl-verify and rl-verifier get them, so a replay can test them.
+export const refuteIssue = (p: Partial<Pick<Profile, "variants">>) => has(p, "refute-issue");
+export const REFUTE_ISSUE_VERIFY = [
+  "Judge the problem of each candidate. The problem is the defect that the candidate names, at its anchor or its cause.",
+  "The trigger, the input, the caller, the values, and the fix direction are details. A wrong detail does not refute the problem.",
+  "Never refute a candidate only because its stated trigger cannot happen. Look for another trigger of the same defect.",
+  "When you find one, give confirmed. In reason, name the wrong detail, and give the right trigger with path:line.",
+  "Set severity by the trigger and the wrong result that you found.",
+  "When no trigger reaches a wrong result, give refuted. A guard refutes a candidate only when it stops each trigger.",
+  "Another defect is another problem, also at the same lines. Never confirm a candidate for another problem.",
+  'Never refute a candidate as "a choice between two correct designs" when it names a case with a wrong result. Check that case.',
+  "A wrong detail is no reason for unsure.",
+];
+
 // spec.md section 1.6: the rules of rl-verify and rl-verifier. One rubric and one do-not-flag list for both phases.
 // questions: candidates.md holds finder questions. langs: the languages of the change, for the skip lists under "broad". risks:
 // candidates.md holds finder risks.
@@ -1555,6 +1570,7 @@ export function verifyRules(
     "question: only the author can answer the point, and no file or tool of this run answers it. Write the question in question. In reason, name what you checked.",
     "When the code or the task text answers the point, give confirmed or refuted, not question.",
     "For a candidate without a trigger, look for one. When you find it, give confirmed, and put the trigger into reason.",
+    ...(refuteIssue(p) ? REFUTE_ISSUE_VERIFY : []),
     v2 ? VERIFY2.duplicate : "duplicate: another candidate of the same group describes the same problem at the same place.",
     "Set duplicateOf to the clearer candidate.",
     ...(c.history

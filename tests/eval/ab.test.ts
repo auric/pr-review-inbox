@@ -576,7 +576,7 @@ describe("eval:ab arguments", () => {
     for (const retired of ["signal", "order", "rules2", "rereview-strict"])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
         error: expect.stringContaining(
-          "--variants must be a comma list of broad, callers, classes, minor-fold, obligations, parts, preexisting, risk-check, security2, security2-verify, verify2.",
+          "--variants must be a comma list of broad, callers, classes, minor-fold, obligations, parts, preexisting, refute-issue, risk-check, security2, security2-verify, verify2.",
         ),
       });
   });
@@ -646,6 +646,11 @@ describe("eval:ab arguments", () => {
     expect(parseAb(["--candidate-replay", "--candidate-variants", "risk-check,obligations"])).toMatchObject({
       replay: true,
       variants: ["risk-check", "obligations"],
+    });
+    // verifier-rule.md section 4.1: the rule changes only the verify prompts.
+    expect(parseAb(["--candidate-replay", "--candidate-variants", "refute-issue"])).toMatchObject({
+      replay: true,
+      variants: ["refute-issue"],
     });
     // --effort changes both sides, so the finder of the replay matches its baseline.
     expect(parseAb(["--candidate-replay", "--effort", "medium"])).toMatchObject({ replay: true });

@@ -183,7 +183,10 @@ describe("eval harness without --real (AC-M2)", () => {
     ]);
     expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
-    expect(VERIFY_ONLY).toEqual(["obligations", "risk-check", "security2-verify", "verify2"]);
+    expect(VERIFY_ONLY).toEqual(["obligations", "refute-issue", "risk-check", "security2-verify", "verify2"]);
+    // verifier-rule.md AC-R58: the rule changes only the verify prompts.
+    expect(finderChange(base, { ...p.profile, variants: ["refute-issue"] })).toEqual([]);
+    expect(finderChange(base, { ...p.profile, variants: ["refute-issue", "callers"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
     // risk-check.md section 7: the risk check changes only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["risk-check"] })).toEqual([]);
@@ -331,7 +334,7 @@ describe("eval harness without --real (AC-M2)", () => {
       [
         "--variants",
         "rules2",
-        "--variants must be a comma list of broad, callers, classes, minor-fold, obligations, parts, preexisting, risk-check, security2, security2-verify, verify2.",
+        "--variants must be a comma list of broad, callers, classes, minor-fold, obligations, parts, preexisting, refute-issue, risk-check, security2, security2-verify, verify2.",
       ],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
@@ -679,6 +682,11 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(run?.items.map((i) => [i.line, i.verdict, i.check, i.group])).toEqual([
         [bug.lines[0], "refuted", "unchecked", "hidden"],
         [1, "confirmed", "checked", "main"],
+      ]);
+      // verifier-rule.md AC-R59: each finding item keeps the verify reason.
+      expect(run?.items.map((i) => i.checkReason)).toEqual([
+        "The fake check gives candidate 1 the verdict refuted.",
+        "The fake check gives candidate 2 the verdict confirmed.",
       ]);
       expect(run?.verify).toMatchObject({ candidates: 2, confirmed: 1, refuted: 1, unchecked: 0 });
       const s = score(result).suite;
@@ -1031,6 +1039,8 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(refusal(["--verifier", "off"])).toContain("changes the finder setup of the recording: verifier.");
       // review-quality-2026.md item 4: verify2 changes only the verify prompts. broad changes the finder.
       expect(refusal(["--variants", "verify2"])).toBeNull();
+      // verifier-rule.md AC-R58: refute-issue changes only the verify prompts.
+      expect(refusal(["--variants", "refute-issue"])).toBeNull();
       expect(refusal(["--variants", "broad"])).toContain("the recording ran finder prompt version");
       expect(refusal(["--variants", "verify2"], { ...a, promptVersion: `${a.promptVersion}+broad` })).toContain(
         `the recording ran finder prompt version ${a.promptVersion}+broad`,

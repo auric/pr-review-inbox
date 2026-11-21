@@ -10,13 +10,14 @@ Decision values: "user decided" means that the source records a user answer. "re
 - The seeded ground truth design exists (5537603, seeded-truth.md). The user approved the build. The user decided its section 14 on 2026-11-21. WP-SG0 is built.
 - WP-JC5 and WP-JC-E are in progress on a branch. They are not on main.
 - The variant "obligations" now keeps a missing obligation anchored on an unchanged line, such as a doc line, when its cause is a changed line. Before, the validator dropped it. The probe set gets doc-line alts, an exact export-guard factor, and three new obligation cases (19 cases). The prompt without the variant is unchanged.
-- The shipped code now has 10 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
+- The verifier rule design exists (verifier-rule.md). Gate VR-0 passed narrowly on Gate A: 2.5 must-finds per repeat go to the fold as refuted. WP-VR1 builds the verify-only variant "refute-issue".
+- The shipped code now has 12 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
 
 ## 2. Version-bump trap
 
 - WP-RC3 raises REVIEW_PROMPT_VERSION from "2.8" to "2.9" (risk-check.md section 9, row 4).
 - `eval:ab` refuses a stored baseline with another prompt version (scripts/eval/ab.ts `reuseRefusal`).
-- So after WP-RC3, the Gate A baseline is no longer usable. A finder variant against that baseline must run before WP-RC3. This applies to "preexisting" and "callers".
+- So after WP-RC3, the Gate A baseline is no longer usable. A finder variant against that baseline must run before WP-RC3. This applies to "preexisting" and "callers". The verify-only replay of "refute-issue" (Gate VR-A) must also run before WP-RC3.
 - The Joint Gate A baseline is not recorded yet (docs/eval/results.md has no Gate A entry). It needs PROFILES_VERSION 9, because of the Fable advisor.
 
 ## 3. Ledger
@@ -71,18 +72,19 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Count of delegated runs that read task.md | delegation-gaps.md section 4 | recommended | Not started | None | Needs the user's OK. |
 | git history rule and a git_blame gate | the audit of 2026-11-19 | recommended | Not started | None | None. |
 | Verifier rule replay | review-quality-2026.md item 4 | recommended | Not started | None | None. |
+| Verifier rule: refute the problem, not a detail, variant "refute-issue" (WP-VR-D, WP-VR1, WP-VR2) | verifier-rule.md | recommended | Opt-in; Gate VR-0 go (2026-11-21) | verifier-rule.md section 6 | Gate VR-A replay against the Gate A control replay, before WP-RC3. WP-VR2 shares the "2.9" step. |
 | Probe thread as a counted must-find | review-ideas.md idea 2 | recommended | Not started | None | The eval runner needs seeded thread comments. |
 | Variant "lenses3" | seeded-truth.md section 4 | recommended | Not started | None | Needs the seeded set. |
 | Variant "architecture" and seed kind "architecture" | architecture-bugs.md; review-quality-2026.md item 12 | user decided (requirement of 2026-11-21) | Designed, not built | None | Ships inside "lenses3" L2 (decided 2026-11-21), or with "callers" (open question 4). |
 | Seeded ground truth: WP-SG0 to WP-SG2, U-SG1, gates SG-P and SG-A | seeded-truth.md | user decided (build approved) | WP-SG0 built; WP-SG1 and WP-SG2 not built | 5537603 | None. Section 14 decided on 2026-11-21. architecture-bugs.md adds the ninth kind. |
 | Head-to-head with another review app | outside the repository | user decided ("not now") | Deferred | None | None. |
 | Stacked PR context: variant "stack", WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B | stacked-prs.md | user decided (app route, build after the code review gate) | Designed, not started | None | Builds after Joint Gate A and the "preexisting" and "callers" runs. The 12 questions of section 12. |
-| Minor fold: variant "minor-fold", WP-MF1 and WP-MF2 | minor-fold.md | defaults by the orchestrator (section 10), the user may change them | Opt-in | None | Gate MF-A against the Gate A baseline before WP-RC3. Then WP-MF3 and the BRIEF.md change. |
+| Minor fold: variant "minor-fold", WP-MF1 and WP-MF2 | minor-fold.md | defaults by the orchestrator (section 10), the user may change them | Opt-in | e56c6ce | Gate MF-A against the Gate A baseline before WP-RC3. Then WP-MF3 and the BRIEF.md change. |
 | Postable risks: link a confirmed risk to its draft (WP-PR0) | postable-risks.md | recommended | Designed, not started | None | Low priority: the risk check did not pass Gate A. Answer Q2 before any RC-A rerun. |
 
 ## 4. Order and dependencies
 
-1. Run "preexisting" and "callers" against the Gate A baseline. Do this before WP-RC3 (section 2).
+1. Run "preexisting" and "callers" against the Gate A baseline, and the "refute-issue" replay (Gate VR-A) against the Gate A control replay. Do this before WP-RC3 (section 2).
 2. Joint Gate A, then WP-RC3 with WP-OB3, then WP-RC4 with WP-OB4, then Gates RC-B and OB-B.
 3. WP-RC3, then WP-JC-E, then Gate JC-A, then WP-JC6. WP-JC-E is in progress before WP-RC3 against this order. The Jira context package must settle it.
 4. WP-JC5 builds now. It pushes only after Gates JC-A and JC-B.

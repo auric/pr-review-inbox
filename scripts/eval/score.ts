@@ -43,6 +43,8 @@ export type EvalItem = {
   severity: Severity;
   finderSeverity: Severity;
   verdict: string | null;
+  // verifier-rule.md AC-R59: the verify reason. No metric reads it. Absent without a verify verdict and in older files.
+  checkReason?: string;
   // null: a run without a verify phase (prompt version 1).
   check: Check | null;
   group: Group;
