@@ -15,6 +15,7 @@ import {
   evidenceRefs,
   type Grounding,
   type JudgeLabel,
+  noiseRule,
   overlaps,
   pairedDelta,
   score,
@@ -912,6 +913,108 @@ describe("grounded metrics (review-quality-2026.md E5)", () => {
     expect(pairedDelta(a, b)).toEqual(d);
     expect(compareText(a, b)).toContain("Paired delta (information only): B - A hit rate per counted must-find, line match: +50.0 pts");
     expect(pairedDelta(a, { ...b, cases: [] })).toBeNull();
+  });
+
+  describe("noise rule (review-quality-2026.md section 2)", () => {
+    // fp and tp carry those judge labels; un has no judge label. No item matches gold.
+    const ng = grounding({ fp: [], tp: [], un: [] }, { fp: { label: "fp", severity: "low" }, tp: { label: "tp", severity: "low" } });
+    const n1 = gcase("n1", [], { traps: [], extras: [] });
+    const n2 = gcase("n2", [], { traps: [], extras: [] });
+    const runs = (c: string, counts: number[], title = "fp") =>
+      counts.map((k, n) =>
+        run(
+          c,
+          n + 1,
+          Array.from({ length: k }, () => at(title)),
+        ),
+      );
+    const replayed = (r: EvalResult): EvalResult => ({ ...r, requested: { model: "default", effort: "default", replayOf: "a.json" } });
+
+    test("full run: the deltas pair the case means; pooling over case runs gives other numbers", () => {
+      // Case means: A n1 4, n2 0; B n1 4, n2 0. Pooled per case run: A 4/4 = 1, B 12/4 = 3.
+      const a = gresult([n1, n2], [...runs("n1", [4]), ...runs("n2", [0, 0, 0])]);
+      const b = gresult([n1, n2], [...runs("n1", [4, 4, 4]), ...runs("n2", [0])]);
+      const pass = noiseRule(a, b, ng, ng);
+      expect(pass).toEqual({
+        replay: false,
+        cases: 2,
+        noise: { a: 2, b: 2, delta: 0, limit: 0.2, pass: true },
+        judgeFp: { a: 2, b: 2, delta: 0, limit: 0.07, pass: true },
+        unlabeled: [0, 0],
+      });
+      const text = compareText(a, b, (id) => id, b.profile.revision, [ng, ng]);
+      expect(text).toContain(
+        [
+          "Noise rule (review-quality-2026.md section 2), full run (the finder ran), 2 matched cases:",
+          "- grounded noise per case: A 2.0000, B 2.0000, paired delta +0.0000, limit 0.2000 (10% of mean(A)): pass",
+          "- judge fp per case run: A 2.0000, B 2.0000, paired delta +0.0000, limit 0.0700: pass",
+        ].join("\n"),
+      );
+      expect(text).not.toContain("without a judge label");
+      // A case in A only stays out of the pairing and out of mean(A).
+      const n3 = gcase("n3", [], { traps: [], extras: [] });
+      expect(noiseRule(gresult([n1, n2, n3], [...a.runs, ...runs("n3", [9])]), b, ng, ng)).toEqual(pass);
+      // n2 rises by 1 per run: delta 0.5 is above M = 0.2 and above 0.07.
+      const fail = noiseRule(a, gresult([n1, n2], [...runs("n1", [4, 4, 4]), ...runs("n2", [1])]), ng, ng);
+      expect(fail?.noise).toMatchObject({ delta: 0.5, pass: false });
+      expect(fail?.judgeFp).toMatchObject({ delta: 0.5, pass: false });
+      // Same noise, but B turns judge tp into judge fp: noise passes and judge fp fails.
+      const tpA = gresult([n1, n2], [...runs("n1", [4], "tp"), ...runs("n2", [0, 0, 0])]);
+      const split = noiseRule(tpA, b, ng, ng);
+      expect(split?.noise.pass).toBe(true);
+      expect(split?.judgeFp).toMatchObject({ a: 0, b: 2, delta: 2, pass: false });
+    });
+
+    test("replay: M is 0.08 per case and the judge fp limit is 0.05", () => {
+      // One case: A has no noise in one run, B has one item in 16 runs, so both deltas are 0.0625.
+      const a = gresult([n1], runs("n1", [0]));
+      const b = replayed(gresult([n1], runs("n1", [1, ...Array(15).fill(0)])));
+      const r = noiseRule(a, b, ng, ng);
+      expect(r).toMatchObject({ replay: true, cases: 1 });
+      expect(r?.noise).toEqual({ a: 0, b: 0.0625, delta: 0.0625, limit: 0.08, pass: true });
+      expect(r?.judgeFp).toEqual({ a: 0, b: 0.0625, delta: 0.0625, limit: 0.05, pass: false });
+      expect(compareText(a, b, (id) => id, b.profile.revision, [ng, ng])).toContain(
+        "Noise rule (review-quality-2026.md section 2), verify-only replay (the finder was replayed), 1 matched case:\n- grounded noise per case: A 0.0000, B 0.0625, paired delta +0.0625, limit 0.0800: pass\n- judge fp per case run: A 0.0000, B 0.0625, paired delta +0.0625, limit 0.0500: fail",
+      );
+      // A judge tp item instead: judge fp passes. The same numbers as a full run fail noise, because M is 10% of mean(A) = 0.
+      const tp = replayed(gresult([n1], runs("n1", [1, ...Array(15).fill(0)], "tp")));
+      expect(noiseRule(a, tp, ng, ng)?.judgeFp).toMatchObject({ delta: 0, pass: true });
+      const full = noiseRule(a, { ...b, requested: undefined }, ng, ng);
+      expect(full?.noise).toMatchObject({ limit: 0, pass: false });
+      expect(full?.judgeFp).toMatchObject({ limit: 0.07, pass: true });
+      // Only B decides: a replayed A with a full B takes the full-run limits.
+      expect(noiseRule(replayed(a), { ...b, requested: undefined }, ng, ng)).toMatchObject({ replay: false });
+      // Two items in 16 runs: 0.125 is above M = 0.08.
+      const two = replayed(gresult([n1], runs("n1", [1, 1, ...Array(14).fill(0)])));
+      expect(noiseRule(a, two, ng, ng)?.noise).toMatchObject({ delta: 0.125, limit: 0.08, pass: false });
+      // Exactly at M: 37/25 - 35/25 = 0.08, but the float delta is 0.08000000000000007. It passes.
+      const at35 = gresult([n1], runs("n1", [...Array(10).fill(2), ...Array(15).fill(1)]));
+      const at37 = replayed(gresult([n1], runs("n1", [...Array(12).fill(2), ...Array(13).fill(1)])));
+      const edge = noiseRule(at35, at37, ng, ng)?.noise;
+      expect(edge?.delta).toBeGreaterThan(0.08);
+      expect(edge).toMatchObject({ limit: 0.08, pass: true });
+    });
+
+    test("unlabelled unmatched items count as noise and not as judge fp, and the block names their count", () => {
+      const a = gresult([n1], runs("n1", [1]));
+      const b = gresult([n1], [run("n1", 1, [at("fp"), at("un")]), run("n1", 2, [at("un")])]);
+      const r = noiseRule(a, b, ng, ng);
+      expect(r?.noise).toMatchObject({ a: 1, b: 1.5, delta: 0.5 });
+      expect(r?.judgeFp).toMatchObject({ a: 1, b: 0.5, delta: -0.5, pass: true });
+      expect(r?.unlabeled).toEqual([0, 2]);
+      expect(compareText(a, b, (id) => id, b.profile.revision, [ng, ng])).toContain(
+        "- unmatched shown findings without a judge label: A 0, B 2. Noise is more than judge tp + judge fp.",
+      );
+    });
+
+    test("no labels or no shared case: no numbers", () => {
+      const a = gresult([n1], runs("n1", [1]));
+      expect(noiseRule(a, a)).toBeNull();
+      expect(noiseRule(a, gresult([n2], runs("n2", [1])), ng, ng)).toBeNull();
+      expect(compareText(a, a)).toContain(
+        "Noise rule (review-quality-2026.md section 2): no numbers. It needs eval:label labels on A and B and a case with runs in both.",
+      );
+    });
   });
 });
 

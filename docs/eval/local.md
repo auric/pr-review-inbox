@@ -227,6 +227,7 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 - Finder risks, all runs: the sums of the risk outcomes over all runs: listed, found, asked, cleared, same as a finding, and open. Only a run with the variant `risk-check` records them. A result without them prints no such line, as for the finder questions.
 - Question items per case run: all question items of each repeat over its case runs, and the spread over the repeats. The finder questions and the asked risks both count.
 - eval:compare prints a paired delta: the mean of B - A of the hit rate per counted must-find, with a 90% bootstrap interval over the PR groups and a fixed seed. It is information only.
+- eval:compare prints the block "Noise rule (review-quality-2026.md section 2)" when A and B have labels. It shows the paired grounded noise delta and the paired judge fp delta over the matched cases, their limits, and pass or fail. A B with a replayed finder takes the replay limits. The block also counts the unmatched shown findings that have no judge label.
 - A result without labels shows "-" for each grounded and augmented metric.
 
 ### Evidence references (item 8 gate)

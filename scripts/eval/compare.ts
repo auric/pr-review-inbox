@@ -13,6 +13,8 @@ import {
   type Grounding,
   METRICS,
   type Metric,
+  type NoiseRule,
+  noiseRule,
   pairedDelta,
   type Score,
   type Sec,
@@ -350,6 +352,25 @@ export function summaryText(r: EvalResult, s: Score = score(r), name = (id: stri
   return [header(r), left, "", table(rows), "", table(perCase), "", detailText(s)].join("\n");
 }
 
+const signed = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(4)}`;
+// review-quality-2026.md section 2. Counts and means only, no case ID.
+export function noiseText(n: NoiseRule | null): string {
+  const title = "Noise rule (review-quality-2026.md section 2)";
+  if (!n) return `${title}: no numbers. It needs eval:label labels on A and B and a case with runs in both.`;
+  const verdict = (x: NoiseRule["noise"], note = "") =>
+    `${signed(x.delta)}, limit ${x.limit.toFixed(4)}${note}: ${x.pass ? "pass" : "fail"}`;
+  const out = [
+    `${title}, ${n.replay ? "verify-only replay (the finder was replayed)" : "full run (the finder ran)"}, ${n.cases} matched case${n.cases === 1 ? "" : "s"}:`,
+    `- grounded noise per case: A ${n.noise.a.toFixed(4)}, B ${n.noise.b.toFixed(4)}, paired delta ${verdict(n.noise, n.replay ? "" : " (10% of mean(A))")}`,
+    `- judge fp per case run: A ${n.judgeFp.a.toFixed(4)}, B ${n.judgeFp.b.toFixed(4)}, paired delta ${verdict(n.judgeFp)}`,
+  ];
+  if (n.unlabeled[0] || n.unlabeled[1])
+    out.push(
+      `- unmatched shown findings without a judge label: A ${n.unlabeled[0]}, B ${n.unlabeled[1]}. Noise is more than judge tp + judge fp.`,
+    );
+  return out.join("\n");
+}
+
 // One row per metric: the "all cases" numbers of two scores and the delta.
 export function suiteDelta(a: Score, b: Score, names: [string, string]): string {
   return table([
@@ -422,6 +443,7 @@ export function compareText(
       `Paired delta (information only): B - A hit rate per counted must-find, ${pd.grounded ? "matcher" : "line match"}: ${pts(pd.delta)} pts, 90% interval ${pts(pd.low)} to ${pts(pd.high)} pts (bootstrap over ${pd.groups} PR groups, ${pd.mustFinds} must-finds, seed ${BOOTSTRAP.seed}).`,
     );
   }
+  out.push("", noiseText(noiseRule(a, b, g[0], g[1])));
   const ids = [...ta.keys()].filter((id) => tb.has(id)).sort();
   for (const m of METRICS) {
     const rows = [

@@ -365,7 +365,8 @@ type Hits = { shown: Set<string>; raised: Set<string> };
 
 // The grounded counts of one run (review-quality-2026.md E5). tp, fp: shown items that claim a bug or your own comment, or a trap.
 // shown: shown items that claim no extra. unmatched: shown items that claim nothing. newTp, judgeFp, above: null when an unmatched
-// shown item has no judge label. confusion: null when an item has neither a gold item nor a judge label.
+// shown item has no judge label. confusion: null when an item has neither a gold item nor a judge label. all: the Sec counts of all shown
+// items, kept when an unmatched one has no judge label.
 type Ground = {
   hits: Hits;
   loss: Record<State, number>;
@@ -380,6 +381,7 @@ type Ground = {
   security: Omit<Sec, "runs">;
   risk: Omit<Sec, "runs">;
   obligation: Omit<Sec, "runs">;
+  all: Omit<Sec, "runs">;
 };
 
 // null: an item has no matcher answer.
@@ -401,11 +403,12 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
   const unmatched = shown.filter((x) => x.gold === null).map((x) => ({ i: x.i, j: g.judge(c, x.i) }));
   const judged = unmatched.every((x) => x.j !== undefined);
   // The exact category text, as the verify rules of catalog.ts SECURITY2 and judge.ts answerFinding write it.
-  const ofCategory = (category: string): Omit<Sec, "runs"> => {
-    const un = unmatched.filter((x) => x.i.category === category);
+  const ofCategory = (category?: string): Omit<Sec, "runs"> => {
+    const is = (i: EvalItem) => category === undefined || i.category === category;
+    const un = unmatched.filter((x) => is(x.i));
     return {
-      shown: shown.filter((x) => x.i.category === category).length,
-      gold: shown.filter((x) => x.i.category === category && x.gold !== null).length,
+      shown: shown.filter((x) => is(x.i)).length,
+      gold: shown.filter((x) => is(x.i) && x.gold !== null).length,
       tp: un.filter((x) => x.j?.label === "tp").length,
       fp: un.filter((x) => x.j?.label === "fp").length,
       unlabeled: un.filter((x) => x.j === undefined).length,
@@ -441,6 +444,7 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
     security: ofCategory("security"),
     risk: ofCategory("risk"),
     obligation: ofCategory("obligation"),
+    all: ofCategory(),
   };
 }
 
@@ -839,6 +843,64 @@ export function pairedDelta(
   ).sort((x, y) => x - y);
   const at = (q: number) => means[Math.min(means.length - 1, Math.floor(q * means.length))] as number;
   return { delta: mean(all), low: at(0.05), high: at(0.95), mustFinds: all.length, groups: groups.length, grounded };
+}
+
+// review-quality-2026.md section 2, noise rule of 2026-11-21: the limits for a verify-only replay and for a full candidate run. noiseShare:
+// M of a full run is this share of mean(A).
+export const NOISE_RULE = { replay: { noise: 0.08, judgeFp: 0.05 }, full: { noiseShare: 0.1, judgeFp: 0.07 } } as const;
+type NoiseSide = { noise: number; judgeFp: number; unlabeled: number };
+export type NoiseRule = {
+  replay: boolean;
+  cases: number;
+  noise: { a: number; b: number; delta: number; limit: number; pass: boolean };
+  judgeFp: { a: number; b: number; delta: number; limit: number; pass: boolean };
+  unlabeled: [number, number];
+};
+
+// review-quality-2026.md section 2: the paired grounded noise delta and the paired judge fp delta. A pair matches by case ID. Each side
+// of a case is the mean over its runs, and each delta is the mean over the matched cases of B - A. judge fp counts the labelled unmatched
+// items only; unlabeled sums the unmatched shown items without a judge label. A replay: B, the candidate, replayed the finder (replayOf).
+// null: a side has no labels, or no case has runs in both results.
+export function noiseRule(a: EvalResult, b: EvalResult, ga?: Grounding, gb?: Grounding): NoiseRule | null {
+  const ta = tallies(a, ga);
+  const tb = tallies(b, gb);
+  if (!ta.grounded || !tb.grounded) return null;
+  const perCase = (runs: RunTally[]) => {
+    const out = new Map<string, NoiseSide & { runs: number }>();
+    for (const x of runs) {
+      const s = out.get(x.c.id) ?? { noise: 0, judgeFp: 0, unlabeled: 0, runs: 0 };
+      out.set(x.c.id, s);
+      s.noise += x.t.ground?.unmatched ?? 0;
+      s.judgeFp += x.t.ground?.all.fp ?? 0;
+      s.unlabeled += x.t.ground?.all.unlabeled ?? 0;
+      s.runs++;
+    }
+    return out;
+  };
+  const pa = perCase(ta.runs);
+  const pb = perCase(tb.runs);
+  const ids = [...pa.keys()].filter((id) => pb.has(id));
+  if (!ids.length) return null;
+  const mean = (f: (id: string) => number) => ids.reduce((s, id) => s + f(id), 0) / ids.length;
+  const of = (p: typeof pa, id: string, k: "noise" | "judgeFp") => {
+    const s = p.get(id) as NoiseSide & { runs: number };
+    return s[k] / s.runs;
+  };
+  const replay = !!b.requested?.replayOf;
+  const side = (k: "noise" | "judgeFp", limit: (meanA: number) => number) => {
+    const x = mean((id) => of(pa, id, k));
+    const delta = mean((id) => of(pb, id, k) - of(pa, id, k));
+    // 1e-9 absorbs the float error of the case means, so a delta exactly at the limit passes.
+    return { a: x, b: mean((id) => of(pb, id, k)), delta, limit: limit(x), pass: delta <= limit(x) + 1e-9 };
+  };
+  const unlabeled = (p: typeof pa) => ids.reduce((s, id) => s + (p.get(id)?.unlabeled ?? 0), 0);
+  return {
+    replay,
+    cases: ids.length,
+    noise: side("noise", (x) => (replay ? NOISE_RULE.replay.noise : NOISE_RULE.full.noiseShare * x)),
+    judgeFp: side("judgeFp", () => (replay ? NOISE_RULE.replay.judgeFp : NOISE_RULE.full.judgeFp)),
+    unlabeled: [unlabeled(pa), unlabeled(pb)],
+  };
 }
 
 // g: the matcher and judge labels of eval:label. Without g, or when a run has no labels, every grounded metric is null.
