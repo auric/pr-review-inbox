@@ -3,7 +3,7 @@
 
 // Fake `claude` CLI for tests. It replays a stream-json fixture and never calls a model.
 // Usage: bun tests/support/fake-claude.ts <scenario.json> <claude arguments>
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -95,6 +95,8 @@ export type FakeScenario = {
   // the earlier runs of the same call key that matched it, so runs that start at the same time (spec.md section 6.20.6) get their own
   // entries.
   match?: { when: string; seq: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq" | "match">>[]> }[];
+  // seeded-truth.md WP-SG1: the record of a run gets { files }, the text of every file under the cwd at the start, by path under it.
+  files?: boolean;
 };
 
 export type SchemaKind = "verify" | "explain" | "discuss" | "interview" | "spec" | "implement" | "review" | "matcher" | "judge";
@@ -441,7 +443,23 @@ async function main() {
   const mcp = mcpFile ? (JSON.parse(readFileSync(mcpFile, "utf8")) as { mcpServers: Record<string, unknown> }).mcpServers : null;
   const agentsFile = run ? flag("--agents") : undefined;
   const agents = agentsFile ? (JSON.parse(readFileSync(agentsFile, "utf8")) as Record<string, { prompt: string }>) : null;
-  record({ argv: args, env: process.env, cwd: process.cwd(), stdin, pid: process.pid, context, attachments, skills, mcp, agents });
+  const workspace: Record<string, string> = {};
+  if (run && s.files)
+    for (const f of readdirSync(process.cwd(), { recursive: true, encoding: "utf8" }))
+      if (lstatSync(join(process.cwd(), f)).isFile()) workspace[f.replaceAll("\\", "/")] = readFileSync(join(process.cwd(), f), "utf8");
+  record({
+    argv: args,
+    env: process.env,
+    cwd: process.cwd(),
+    stdin,
+    pid: process.pid,
+    context,
+    attachments,
+    skills,
+    mcp,
+    agents,
+    ...(s.files && { files: workspace }),
+  });
 
   if (args[0] === "--version") {
     console.log(s.version ?? "2.1.302 (Claude Code)");

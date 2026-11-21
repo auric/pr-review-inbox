@@ -87,7 +87,7 @@ export function liveFolders(): string[] {
 }
 
 // Only the ignore files of the repository count: the empty global config hides the user's excludes file.
-async function ignored(path: string): Promise<boolean> {
+export async function ignored(path: string): Promise<boolean> {
   const rel = relative(realOf(REPO), realOf(path)).replaceAll("\\", "/");
   // A file name under the folder: a pattern with a trailing slash matches only a folder, and the folder can be missing.
   return git(["-C", REPO, "check-ignore", "-q", "--", `${rel}/MANIFEST.json`], { env: gitEnv("/dev/null") }).then(
