@@ -67,16 +67,16 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Item 1: one agent on large PRs | review-quality-2026.md item 1 | dropped | Failed (C1a) | review-quality-2026.md item 1 | None. |
 | Item 8: variant "quotes" | review-quality-2026.md item 8 | dropped | 0% effect | review-quality-2026.md item 8 | None. |
 | Question source fixes | the audit of 2026-11-19 | dropped for now | Not started | None | 97% of question items came from runs before prompt 2.7. Count again later. |
-| Item 6: variant "runs3" (and "runs3-mixed") | review-quality-2026.md item 6 | recommended | Not started | None | Needs the seeded set (seeded-truth.md section 4). |
 | Item 6b: verifier model | review-quality-2026.md item 6b | recommended | Not started | None | No eval flag. The profile has verifier.model. |
 | Delegation fixes 1, 3, and 4: variant "handoff" | delegation-gaps.md section 3 | recommended | Not started | None | None. |
 | Count of delegated runs that read task.md | delegation-gaps.md section 4 | recommended | Not started | None | Needs the user's OK. |
 | git history rule and a git_blame gate | the audit of 2026-11-19 | recommended | Not started | None | None. |
 | Verifier rule replay | review-quality-2026.md item 4 | recommended | Not started | None | None. |
-| Verifier rule: refute the problem, not a detail, variant "refute-issue" (WP-VR-D, WP-VR1, WP-VR2) | verifier-rule.md | recommended | Opt-in; Gate VR-0 go (2026-11-21) | verifier-rule.md section 6 | Gate VR-A replay against the Gate A control replay, before WP-RC3. WP-VR2 shares the "2.9" step. |
+| Verifier rule: refute the problem, not a detail, variant "refute-issue" (WP-VR-D, WP-VR1, WP-VR2) | verifier-rule.md | recommended | Opt-in; failed Gate VR-A (2026-11-21) | verifier-rule.md section 6; commit cd996f0 | Gate VR-A replay against the Gate A control replay, before WP-RC3. WP-VR2 shares the "2.9" step. |
 | Probe thread as a counted must-find | review-ideas.md idea 2 | recommended | Not started | None | The eval runner needs seeded thread comments. |
-| Variant "lenses3" | seeded-truth.md section 4 | recommended | Not started | None | Needs the seeded set. |
-| Variant "architecture" and seed kind "architecture" | architecture-bugs.md; review-quality-2026.md item 12 | user decided (requirement of 2026-11-21) | Opt-in | None | Ships inside "lenses3" L2 (decided 2026-11-21), or with "callers" (open question 4). |
+| Focused passes: variant lenses3 (WP-L0 to WP-L3) | focused-passes.md | recommended | Designed, not built | None | Needs the seeded set and the noise-delta print. |
+| Control: variant runs3 (focused-passes.md section 4.7) | focused-passes.md | recommended | Designed, not built | None | Runs with lenses3 as its control. |
+| Variant "architecture" and seed kind "architecture" | architecture-bugs.md; review-quality-2026.md item 12 | user decided (requirement of 2026-11-21) | Opt-in | bb1afd0 | Ships inside "lenses3" L2 (decided 2026-11-21), or with "callers" (open question 4). |
 | Seeded ground truth: WP-SG0 to WP-SG2, U-SG1, gates SG-P and SG-A | seeded-truth.md | user decided (build approved) | WP-SG0 built; WP-SG1 and WP-SG2 not built | 5537603 | None. Section 14 decided on 2026-11-21. architecture-bugs.md adds the ninth kind. |
 | Head-to-head with another review app | outside the repository | user decided ("not now") | Deferred | None | None. |
 | Stacked PR context: variant "stack", WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B | stacked-prs.md | user decided (app route, build after the code review gate) | Designed, not started | None | Builds after Joint Gate A and the "preexisting" and "callers" runs. The 12 questions of section 12. |

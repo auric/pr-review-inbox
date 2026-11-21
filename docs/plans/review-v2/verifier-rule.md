@@ -161,6 +161,19 @@ Measured on the Gate A baseline against the Gate A control replay: prompt 2.8, p
 - The variant must still refute about 6.5 false findings per repeat.
 - Grounded noise per case: 1.27 (baseline) and 1.29 (control). Judge fp per case run: 0.11 and 0.08.
 
+### Gate VR-A result (2026-11-21)
+
+Verdict: does not ship. The variant stays opt-in. A later run on the seeded set can measure it with known answers.
+
+- Replay of 100 case runs against the Gate A control replay. 0 failed runs. Baseline reused. Labels complete.
+- Rule 1: lossDemoted 3.2% → 1.9% (2.5 → 1.5 bugs per repeat): pass at the floor. Grounded recall 21.8% → 23.1% (+1.0 bug); paired interval +0.0 to +2.7 pts.
+- Rule 2 (noise rule of 2026-11-21): grounded noise 1.29 → 1.39, paired delta +0.10 against the limit 0.08: fail. Judge fp 0.08 → 0.09 (+0.01, limit 0.05): pass. Of the +0.10, +0.09 is judge-tp findings and +0.01 judge fp. The judge is not calibrated on this set, so whether the extras are true is unverified.
+- Rule 3: severityOk 89.7% → 93.8%: pass.
+- Rule 4: failed runs 0 → 0; incomplete runs 1 → 2: fail by the letter. The new incomplete run had no verify phase; an MCP server did not start.
+- Rule 5: cost per case $2.500 → $2.484 (−0.6%): pass. Minutes per case 0.85 → 0.93.
+- Rule 6 (user spot check of checkReason): open.
+- Gold: 2 must-finds rescued, 0 lost. Verdicts: confirmed 163 → 175, refuted 47 → 36, unsure 15 → 14. Judge-tp findings fold → main: 12 in, 3 out.
+
 ### Gate VR-A: replay (cheap, after WP-VR1, before WP-RC3)
 
 - Run it from the main checkout after WP-VR1 is merged and the running Gate A eval has ended. Before the first run, check that the run prints the commit that holds the variant.
@@ -204,7 +217,7 @@ AC-R50 to AC-R55 belong to obligations.md, and spec.md ends at AC-R39. AC-R56 to
 | 0 | WP-VR-D: save this design | implementer | none | docs/plans/review-v2/verifier-rule.md; review-ledger.md (new row, section 1 count of opt-in variants 10 to 11, section 2 and section 4: the replay runs before WP-RC3) | none | The files are committed. |
 | 1 | Gate VR-0 | user | WP-VR-D | none | Section 6. | Done 2026-11-21: go, narrowly (section 6). |
 | 2 | WP-VR1: the variant, the replay wiring, and `checkReason` | implementer | Gate VR-0 is go | src/shared/dto.ts (VARIANTS and its comment); src/server/review/catalog.ts (refuteIssue, REFUTE_ISSUE_VERIFY, verifyRules); scripts/eval/run.ts (VERIFY_ONLY; `checkReason: p.verify?.reason` in `items`); scripts/eval/score.ts (`EvalItem.checkReason?: string`); docs/eval/local.md (one variant bullet) | A new tests/review/refute-issue.test.ts that prints its import path, in the shape of risk-check.test.ts:237-249. It covers AC-R57 and AC-R58, the 20-word and no-CRITICAL check of the new lines, and SHIPPED_PROFILES without the variant. Control mutation: put line 1 into finderRules, and the finder-bytes test turns red. Updates: tests/review/prompt.test.ts:1123 (VARIANTS); tests/eval/harness.test.ts:186 (VERIFY_ONLY), 334 (error text), and a finderChange case; the run test at harness.test.ts:679 asserts checkReason; tests/eval/ab.test.ts:570 (error text) plus a replay parse case beside 629-639. | `bun run check` is green. The diff changes no pinned hash. The work runs in a sibling worktree, because the running eval reads D:\dev\review-loop. |
-| 3 | Gate VR-A | user | WP-VR1 merged; before WP-RC3 | none | Section 6. | The ship rule passes, and the user approves. Record the numbers in docs/eval/results.md and the ledger. |
+| 3 | Gate VR-A | user | WP-VR1 merged; before WP-RC3 | none | Section 6. | The ship rule passes, and the user approves. Record the numbers in docs/eval/results.md and the ledger. Done 2026-11-21: fail, see "Gate VR-A result". |
 | 4 | WP-VR2: ship the rule | implementer | Gate VR-A. Share the "2.9" step with WP-RC3 and WP-OB3 when all pass. | catalog.ts (lines always on, remove refuteIssue); dto.ts and run.ts (remove the name; an old profile with it drops on read, dto.ts:297-301); src/shared/review.ts (REVIEW_PROMPT_VERSION and its comment); spec.md (AC-R56 to AC-R59); docs/eval/results.md; docs/eval/local.md; CHANGELOG.md (the check keeps a real finding with a wrong detail and names the right trigger) | The pinned verify hashes update together with the version (prompt.test.ts:564, risk-check.test.ts:206-235, the agents hash at obligations.test.ts:206). refute-issue.test.ts checks "always on". | `bun run check` is green. No UI change, so no screenshots. |
 
 Run order: 0, 1, 2, 3, 4. Run one implementer at a time. Run the finder variants "preexisting" and "callers" against the Gate A baseline before WP-VR2, because the version step stops all replays and reuses of that baseline (review-ledger.md section 2).

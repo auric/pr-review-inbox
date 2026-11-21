@@ -1,6 +1,6 @@
 # Review quality 2026: eval fixes and ranked reviewer improvements
 
-Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and items 10 and 11 are built as opt-ins. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Item 12 (variant "architecture") is designed in architecture-bugs.md and not built. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
+Status: design of 2026-11-13, against prompt 2.7 (bfcf638). Item 9 is built (prompt 2.8). Items 2 and 5 shipped, and items 10 and 11 are built as opt-ins. Items 1 and 4 (verify2) failed in W2. Item 3 (broad) failed in W3. Item 12 (variant "architecture") is built opt-in (WP-AR1); its gate runs on the seeded set. Sources: the research report and notes of 2026-11-13 (kept outside the repo, because some notes copy third-party prompt text): Anthropic prompting guidance for Opus 5.x, Anthropic's code-review and security-review designs, SWR-Bench (arXiv 2509.01494), BitsAI-CR (arXiv 2501.15134), GitHub ReviewBench, and industry posts. Evidence classes: [A] Anthropic guidance, [R] measured research, [V] vendor claim, [O] our own data. Every expected effect is a hypothesis until the eval runs.
 
 Short answer: fix the eval before any reviewer change, because today it cannot measure precision or large-PR recall. Then run cheap tests that cut cost, then verifier tests replayed on fixed finder output, and last the recall bets, each behind a gate that costs nothing to check.
 
@@ -210,6 +210,8 @@ The do-not-flag list of each language:
 - Status: shipped 2026-11-15. `eval:rescore --fold-refuted` on the W1 baseline: no must-find left main, noise per case run 2.15 to 1.73, judge false positives 0.43 to 0.25, augmented precision 83.4% to 88.4%. The ship rule passed, and the user approved it. The rule also needs a refuted verdict, because markCopy can keep demoted on a copy that a later check confirmed. It also folds the refuted findings of "Show last" profiles. `foldRefuted` calls `displayGroup`, and new eval runs score with the fold.
 
 ### 6. Three finder runs and a merge ("Deep check", variant "runs3")
+
+focused-passes.md replaces the mechanics of this item (section 4.7). The hypothesis and the zero-cost gate stay.
 
 - Hypothesis: runs differ a lot, so a union finds more. [R] SWR-Bench: n=3 gave about 63% of the n=10 gain; five runs of one model overlapped on only 27 change-points. [V] Bugbot runs passes with shuffled diff order. [O] An earlier app run found 6 of the 7 large-case bugs that later runs never raised.
 - Gate (zero cost): build only when `unionRecall(3) - unionRecall(1)` on the W1 baseline is more than S_R.
