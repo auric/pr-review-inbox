@@ -1,6 +1,6 @@
 # Architecture bugs: find and measure
 
-Status: design of 2026-11-21. WP-AR0 (docs) is done. WP-AR1 is not built. WP-SG0 of seeded-truth.md is built with the ninth kind. User requirement of 2026-11-21: "we should also be able to find the architecture bugs". The user decided questions 1 to 3 of section 10 on 2026-11-21. Question 4 is open. Packages: WP-AR0 (docs), WP-AR1 (variant "architecture"), and deltas to WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md.
+Status: design of 2026-11-21. WP-AR0 (docs) is done. WP-AR1 is built as the opt-in variant "architecture". WP-SG0 of seeded-truth.md is built with the ninth kind. User requirement of 2026-11-21: "we should also be able to find the architecture bugs". The user decided questions 1 to 3 of section 10 on 2026-11-21. Question 4 is open. Packages: WP-AR0 (docs), WP-AR1 (variant "architecture"), and deltas to WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md.
 
 Sources: seeded-truth.md, review-quality-2026.md (items 6, 7, 11), review-v3.md (V2, D2, WP-V8, WP-V12), src/server/review/catalog.ts, src/shared/review.ts, scripts/eval/run.ts, ab.ts, and score.ts. The lenses3 text lives in the recall plan outside the repository. This file names no app, company, host, project, case ID, or PR number.
 
@@ -220,12 +220,22 @@ When both ways give the same result for each reachable input, refute it as a cho
 
 ### WP-AR1. Variant "architecture" (implementer)
 
+Status: built. tests/review/architecture.test.ts holds AC-R68 to AC-R72.
+
 - Files and symbols: src/shared/dto.ts `VARIANTS`; src/server/review/catalog.ts `ARCHITECTURE_LINES`, `ARCHITECTURE_VERIFY`, `mainAgent`, `reviewerAgent`, `verifyRules`; tests/review/prompt.test.ts; tests/review/jobs.test.ts.
 - Behavior change: `--variants architecture` adds the lines of section 4. The default prompts keep their bytes.
 - Tests: the default snapshot hashes do not change. The lines appear in rl-main and rl-reviewer after `CALLERS_LINES`. Stacked with "callers", the order is callers, then architecture. The verify lines appear in rl-verify and rl-verifier only under the variant. The salvage prompt has none. prompt_version ends in "+architecture".
 - Control mutation: add the lines without the variant. The default snapshot test fails.
 - No REVIEW_PROMPT_VERSION, PROFILES_VERSION, or UI change. No file under scripts/eval or tests/eval changes.
 - Risk: Gate A may run in the main checkout. Build in a worktree. The baseline profile keeps its promptVersion and revision (catalog.ts:245, ab.ts:276-283).
+
+Acceptance criteria:
+
+- AC-R68. With the variant off, every prompt keeps its bytes. No prompt holds a line of the variant. DO_NOT_FLAG does not change.
+- AC-R69. With the variant on, rl-main and rl-reviewer hold ARCHITECTURE_LINES once, at the place of CALLERS_LINES. Stacked with "callers", they follow CALLERS_LINES. The Explain rl-main gets none.
+- AC-R70. With the variant on, rl-verify and rl-verifier hold ARCHITECTURE_VERIFY once, after the pre-existing lines. Without the variant, they hold none.
+- AC-R71. The salvage prompt keeps its bytes. promptVersion ends in "+architecture".
+- AC-R72. Each sentence of the lines has at most 20 words. The lines hold no CRITICAL, MUST, or IMPORTANT.
 
 ### Deltas to the seeded packages
 

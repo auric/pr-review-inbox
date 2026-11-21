@@ -1180,6 +1180,7 @@ describe("review v3 prompt switches", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
     expect(promptVersion(withVariants("verify2", "broad"))).toBe("2.8+broad+verify2");
     expect(VARIANTS).toEqual([
+      "architecture",
       "broad",
       "callers",
       "classes",
@@ -1215,6 +1216,7 @@ describe("review v3 prompt switches", () => {
       withVariants("preexisting"),
       withVariants("callers"),
       withVariants("minor-fold"),
+      withVariants("architecture"),
     ].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
     // spec.md section 1.8: outcome hide parses to no key and keeps the revision. Demote changes it.

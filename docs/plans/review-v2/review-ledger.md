@@ -11,7 +11,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 - WP-JC5 and WP-JC-E are in progress on a branch. They are not on main.
 - The variant "obligations" now keeps a missing obligation anchored on an unchanged line, such as a doc line, when its cause is a changed line. Before, the validator dropped it. The probe set gets doc-line alts, an exact export-guard factor, and three new obligation cases (19 cases). The prompt without the variant is unchanged.
 - The verifier rule design exists (verifier-rule.md). Gate VR-0 passed narrowly on Gate A: 2.5 must-finds per repeat go to the fold as refuted. WP-VR1 builds the verify-only variant "refute-issue".
-- The shipped code now has 12 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
+- The shipped code now has 13 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
 - The user replaced the S_N noise ship rule on 2026-11-21 (review-quality-2026.md section 2). Noise now passes on the paired grounded noise delta, matched by case: at most 0.08 per case for a verify-only replay, and at most 10% of mean(A) for a full run. The paired judge fp delta per case run is at most 0.05 for a replay and 0.07 for a full run. The gate docs point to this rule. The eval scripts do not print these two deltas yet.
 
 ## 2. Version-bump trap
@@ -76,7 +76,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Verifier rule: refute the problem, not a detail, variant "refute-issue" (WP-VR-D, WP-VR1, WP-VR2) | verifier-rule.md | recommended | Opt-in; Gate VR-0 go (2026-11-21) | verifier-rule.md section 6 | Gate VR-A replay against the Gate A control replay, before WP-RC3. WP-VR2 shares the "2.9" step. |
 | Probe thread as a counted must-find | review-ideas.md idea 2 | recommended | Not started | None | The eval runner needs seeded thread comments. |
 | Variant "lenses3" | seeded-truth.md section 4 | recommended | Not started | None | Needs the seeded set. |
-| Variant "architecture" and seed kind "architecture" | architecture-bugs.md; review-quality-2026.md item 12 | user decided (requirement of 2026-11-21) | Designed, not built | None | Ships inside "lenses3" L2 (decided 2026-11-21), or with "callers" (open question 4). |
+| Variant "architecture" and seed kind "architecture" | architecture-bugs.md; review-quality-2026.md item 12 | user decided (requirement of 2026-11-21) | Opt-in | None | Ships inside "lenses3" L2 (decided 2026-11-21), or with "callers" (open question 4). |
 | Seeded ground truth: WP-SG0 to WP-SG2, U-SG1, gates SG-P and SG-A | seeded-truth.md | user decided (build approved) | WP-SG0 built; WP-SG1 and WP-SG2 not built | 5537603 | None. Section 14 decided on 2026-11-21. architecture-bugs.md adds the ninth kind. |
 | Head-to-head with another review app | outside the repository | user decided ("not now") | Deferred | None | None. |
 | Stacked PR context: variant "stack", WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B | stacked-prs.md | user decided (app route, build after the code review gate) | Designed, not started | None | Builds after Joint Gate A and the "preexisting" and "callers" runs. The 12 questions of section 12. |

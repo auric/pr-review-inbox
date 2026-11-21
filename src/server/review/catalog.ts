@@ -700,6 +700,26 @@ export const CALLERS_LINES = [
   "When one breaks, report it. In evidence, give the path:line of that caller or consumer.",
 ];
 const callers = (p: Profile) => (has(p, "callers") ? CALLERS_LINES : []);
+// docs/plans/review-v2/architecture-bugs.md sections 4.1 and 4.2: the lines of the variant "architecture". rl-main and rl-reviewer get
+// the finder lines after CALLERS_LINES. The salvage run does not. DO_NOT_FLAG stays the same, so the default prompts keep their bytes.
+export const architecture = (p: Partial<Pick<Profile, "variants">>) => has(p, "architecture");
+export const ARCHITECTURE_LINES = [
+  "For each new call, state, or handler in the change, find how the repository does the same thing elsewhere.",
+  "Search with the codegraph tools when the run has them. Else use Grep and Read.",
+  "The repository way is a helper, a wrapper, a layer, a registry, or one owner of the state.",
+  "It counts only when two places outside the diff use it.",
+  "Compare the change with that way. Find a step of that way that the change skips.",
+  "Examples: a check, a lock, a conversion, an escape, a cleanup, a cache update, or an error mapping.",
+  "The change can also copy state that has an owner elsewhere. Report the copy when a reachable path makes it differ from the owner.",
+  "Report a skipped step when a concrete input reaches it, and the change then gives a wrong result.",
+  "In trigger, give that input and the wrong result. In evidence, also give path:line of the two places.",
+  "A different way that gives the same result for each input is a choice between two correct designs. Do not report it.",
+];
+export const ARCHITECTURE_VERIFY = [
+  "A candidate can say that the change leaves a way that the repository uses elsewhere.",
+  "Read the places that its evidence names. Confirm it only when that way does a step that the change skips, and the trigger reaches that step.",
+  "When both ways give the same result for each reachable input, refute it as a choice between two correct designs.",
+];
 
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.
 export const VOLUME_NITS: Record<Volume, string> = {
@@ -973,6 +993,7 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec 
       ...contextBlock(c),
       ...finderRules(p, true),
       ...callers(p),
+      ...(architecture(p) ? ARCHITECTURE_LINES : []),
       ...finderList(p),
       ...threadClaim(p, c),
       ...rubric(p),
@@ -1407,6 +1428,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       ...contextBlock(c),
       ...finderRules(p, false),
       ...callers(p),
+      ...(architecture(p) ? ARCHITECTURE_LINES : []),
       ...finderList(p),
       ...threadClaim(p, c),
       ...rubric(p),
@@ -1577,6 +1599,7 @@ export function verifyRules(
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
       : []),
     ...(preexisting(p) ? PREEXISTING_VERIFY : []),
+    ...(architecture(p) ? ARCHITECTURE_VERIFY : []),
     ...(minorFold(p) ? POLISH_VERIFY : []),
     ...(v2 && c.prContext ? [VERIFY2.thread] : []),
     ...(v2 && p.modules.includes("intent") && !lacks("intent", c) ? [VERIFY2.intent] : []),

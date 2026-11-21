@@ -12,6 +12,7 @@ import { writeConfig } from "../../src/server/config";
 import { createJiraSource } from "../../src/server/context/jira";
 import { createLive, type LiveEvent } from "../../src/server/live";
 import {
+  ARCHITECTURE_LINES,
   BROAD_THREAD_CLAIM,
   CALLERS_LINES,
   DEFAULT_PROFILE,
@@ -1783,17 +1784,19 @@ describe("language checks", () => {
       for (const name of ["rl-main", "rl-reviewer"]) {
         expect(plain.agents[name]?.prompt).not.toContain(PREEXISTING_LINES[0]);
         expect(plain.agents[name]?.prompt).not.toContain(CALLERS_LINES[0]);
+        expect(plain.agents[name]?.prompt).not.toContain(ARCHITECTURE_LINES[0]);
       }
-      const on = await run(["preexisting", "callers"]);
+      // architecture-bugs.md WP-AR1: the architecture lines follow the caller lines.
+      const on = await run(["preexisting", "callers", "architecture"]);
       expect(on.schema).toContain('"preexisting"');
       for (const name of ["rl-main", "rl-reviewer"]) {
         expect(on.agents[name]?.prompt).toContain(`\n${PREEXISTING_LINES.join("\n")}\n`);
-        expect(on.agents[name]?.prompt).toContain(`\n${CALLERS_LINES.join("\n")}\n`);
+        expect(on.agents[name]?.prompt).toContain(`\n${[...CALLERS_LINES, ...ARCHITECTURE_LINES].join("\n")}\n`);
       }
       const kept = on.d.items.filter((i) => i.anchor?.path === "README.md");
       expect(kept.map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "preexisting"]]);
       const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
-      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+callers+preexisting`);
+      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+architecture+callers+preexisting`);
     },
     SLOW,
   );
