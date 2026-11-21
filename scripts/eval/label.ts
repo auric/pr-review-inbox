@@ -361,8 +361,12 @@ type Ctx = {
   bundles: Map<string, string>;
 };
 
-// One CLI run. A failed run counts, and its text stays out of the output: it can quote the code.
-async function call(ctx: Ctx, kind: Kind, spec: RunSpec): Promise<RunOutcome | null> {
+// One CLI run. A failed run counts, and its text stays out of the output: it can quote the code. The seed runs (seed-runs.ts) use it too.
+export async function call<K extends string>(
+  ctx: Pick<Ctx, "runner" | "errors"> & { cost: Record<K, { runs: number; usd: number; failed: number }> },
+  kind: K,
+  spec: RunSpec,
+): Promise<RunOutcome | null> {
   const o = await ctx.runner.run(spec);
   const c = ctx.cost[kind];
   c.runs++;
@@ -429,8 +433,11 @@ export async function matchCase(caseId: string, cands: Entry[], refs: Entry[], s
 
 // ---------- Judge (E4) ----------
 
+// The case fields that pr.md and task.md show. A local case.json has them too.
+export type CaseText = Pick<EvalCase, "id" | "title" | "pr" | "task" | "tasks">;
+
 // The task rows of a case as the app renders task.md (task-file.ts), from a temp database seeded as run.ts seeds it.
-function taskMd(fx: EvalCase): ContextFile[] {
+function taskMd(fx: CaseText): ContextFile[] {
   if (fx.task === undefined && !fx.tasks?.some((t) => t.json !== null)) return [];
   const db = openDb(":memory:");
   try {
@@ -495,6 +502,17 @@ async function headLines(w: CaseWork, ctx: Pick<Ctx, "tmp" | "bundles">): Promis
 // a label. A local case needs the build of the set that ran (localRefusal), a fixture case its current fixture at the same head.
 async function judgeWorkspace(r: EvalResult, c: EvalCaseInfo, ctx: Ctx): Promise<Judge> {
   const { fx, repo } = await caseRepo(r, c, ctx);
+  return caseWorkspace(fx, repo, ctx);
+}
+
+// The judge workspace of repo.head, with the files beside pr.md and task.md. repo: a bare repository whose refs/heads/feature,
+// refs/heads/main, and refs/pull-requests/1/from point at head and base (cases.ts pointRefs). The seed runs (seed-runs.ts) use it too.
+export async function caseWorkspace(
+  fx: CaseText,
+  repo: { url: string; head: string; base: string },
+  ctx: Pick<Ctx, "tmp" | "workspaces">,
+  files: ContextFile[] = [],
+): Promise<Judge> {
   const remote: GitRemote = {
     url: repo.url,
     sourceUrl: repo.url,
@@ -504,7 +522,7 @@ async function judgeWorkspace(r: EvalResult, c: EvalCaseInfo, ctx: Ctx): Promise
   };
   const author = { slug: EVAL_AUTHOR, name: "Eval Author", login: EVAL_AUTHOR };
   const pr: PullRequest = {
-    ref: { project: "EVAL", repo: c.id, id: 1 },
+    ref: { project: "EVAL", repo: fx.id, id: 1 },
     version: 0,
     title: fx.pr.title,
     description: fx.pr.description,
@@ -525,7 +543,7 @@ async function judgeWorkspace(r: EvalResult, c: EvalCaseInfo, ctx: Ctx): Promise
     pr,
     comments: [],
     remote,
-    files: taskMd(fx),
+    files: [...taskMd(fx), ...files],
   });
   return { ws, git: gitMcpServer(ws, MAIN_ENTRY) };
 }

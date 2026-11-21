@@ -7,7 +7,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 ## 1. Changes since the audit
 
 - The variants "preexisting" (WP-V6) and "callers" (the D2 caller rule) are built as opt-in eval variants (81d86d4). No eval run has measured them yet.
-- The seeded ground truth design exists (5537603, seeded-truth.md). The user approved the build. The user decided its section 14 on 2026-11-21. WP-SG0 is built.
+- The seeded ground truth design exists (5537603, seeded-truth.md). The user approved the build. The user decided its section 14 on 2026-11-21. WP-SG0, WP-SG1, and WP-SG2 are built. U-SG1 (the paid seeding) is open.
 - WP-JC5 and WP-JC-E are in progress on a branch. They are not on main.
 - The variant "obligations" now keeps a missing obligation anchored on an unchanged line, such as a doc line, when its cause is a changed line. Before, the validator dropped it. The probe set gets doc-line alts, an exact export-guard factor, and three new obligation cases (19 cases). The prompt without the variant is unchanged.
 - The verifier rule design exists (verifier-rule.md). Gate VR-0 passed narrowly on Gate A: 2.5 must-finds per repeat go to the fold as refuted. WP-VR1 builds the verify-only variant "refute-issue".
@@ -77,7 +77,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Focused passes: variant lenses3 (WP-L0 to WP-L3) | focused-passes.md | recommended | Designed, not built | None | Needs the seeded set and the noise-delta print. |
 | Control: variant runs3 (focused-passes.md section 4.7) | focused-passes.md | recommended | Designed, not built | None | Runs with lenses3 as its control. |
 | Variant "architecture" and seed kind "architecture" | architecture-bugs.md; review-quality-2026.md item 12 | user decided (requirement of 2026-11-21) | Opt-in | bb1afd0 | Ships inside "lenses3" L2 (decided 2026-11-21), or with "callers" (open question 4). |
-| Seeded ground truth: WP-SG0 to WP-SG2, U-SG1, gates SG-P and SG-A | seeded-truth.md | user decided (build approved) | WP-SG0 built; WP-SG1 and WP-SG2 not built | 5537603 | None. Section 14 decided on 2026-11-21. architecture-bugs.md adds the ninth kind. |
+| Seeded ground truth: WP-SG0 to WP-SG2, U-SG1, gates SG-P and SG-A | seeded-truth.md | user decided (build approved) | WP-SG0 to WP-SG2 built; U-SG1, SG-P, and SG-A open | 5537603, 8675012, None (WP-SG2) | U-SG1. The per-kind floor warns only (seeded-truth.md section 14 row 13). architecture-bugs.md adds the ninth kind. |
 | Head-to-head with another review app | outside the repository | user decided ("not now") | Deferred | None | None. |
 | Stacked PR context: variant "stack", WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B | stacked-prs.md | user decided (app route, build after the code review gate) | Designed, not started | None | Builds after Joint Gate A and the "preexisting" and "callers" runs. The 12 questions of section 12. |
 | Minor fold: variant "minor-fold", WP-MF1 and WP-MF2 | minor-fold.md | defaults by the orchestrator (section 10), the user may change them | Opt-in | e56c6ce | Gate MF-A against the Gate A baseline before WP-RC3. Then WP-MF3 and the BRIEF.md change. |
@@ -97,7 +97,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 
 | Rank | Idea | Source | Note |
 |---|---|---|---|
-| 1 | Seeded ground truth | seeded-truth.md | Designed since the audit (5537603). Build approved. Decisions made on 2026-11-21. |
+| 1 | Seeded ground truth | seeded-truth.md | Designed since the audit (5537603). Build approved. Decisions made on 2026-11-21. WP-SG0 to WP-SG2 are built. |
 | 2 | "lenses3" against "runs3" | seeded-truth.md section 4; review-quality-2026.md item 6 | Needs the seeded set. |
 | 3 | Recall budget by PR size | research/review-practice-2026-11.md T4 | More agents only on large PRs. |
 | 4 | Caller rule and CodeGraph by default | review-v3.md D2; research T6 | The caller rule is built as the variant "callers" (81d86d4). WP-V5 is not built. |

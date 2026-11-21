@@ -243,6 +243,43 @@ Ship decisions use grounded metrics only. Grounded metrics come from the matcher
 - Gate: build variant "quotes" only when the shares of judge fp are clearly above those of judge tp and must-find.
 - Give the `baseline` folder, not `eval-results/w1`. That folder also holds the probe smoke run, and a `baseline-earlier-<stamp>` folder of a cut run, which the current build of the set refuses.
 
+## Seeded set (eval:seed)
+
+`bun run eval:seed -- <command>` makes the seeded set of docs/plans/review-v2/seeded-truth.md. It plants defects (seeds) into the natural set, checks them, and builds a frozen set in `eval-seeds/set/`. The seeds hold private code, and git ignores `eval-seeds/`. `REVIEW_LOOP_EVAL_SEEDS` sets another seeds folder. The natural set is the folder of `REVIEW_LOOP_EVAL_LOCAL` (default `eval-local/`). Build it, and run the last eval:ab step of Gate A, before you seed.
+
+```
+bun run eval:seed -- propose --real
+bun run eval:seed -- validate --real
+bun run eval:seed -- sample
+bun run eval:seed -- list --state sampled
+bun run eval:seed -- show <seed>
+bun run eval:seed -- decide <seed> keep|drop --why "<reason>"
+bun run eval:seed -- build
+```
+
+- propose: one seeder run (Opus, effort high) per host. A host is the case of a PR group whose head has the newest committer date. A tie goes to the lower case ID. A host with a merge commit in its range takes no seed. A plain call skips the hosts that have seeds, so it continues a cut call. `--cases <id,...>` runs those hosts again. `--kinds <kind,...>` keeps only those kinds. App code applies and checks each proposal. A proposal that fails a check stays as invalid, with the check number in its reason.
+- validate: one validator run (Opus, effort medium) per applied seed, in seeder order, until a host has 4 confirmed seeds. The run sees the seeded head with this seed only. A seed is confirmed when the verdict is breaks, the severity is high, originalOk and plausible are true, and each proof path:line exists at the seeded head. First, validate makes a seed stale when its host case, head, or file changed.
+- Without `--real`, propose and validate print the plan and an estimate, write nothing, and exit with code 2. The rates are not measured: $1.59 per seeder run and $0.40 per validator run. With `--real`, the command checks `claude auth status` (authMethod claude.ai) before the first run.
+- sample: the first call draws 1 confirmed seed per kind, then 1 more from each of the five kinds with the most confirmed seeds: 14 seeds for 9 kinds. Ties go by the kind order of seeded-truth.md section 4.1. The draw is the same on every call. `eval-seeds/sample.json` keeps the drawn IDs, and a later call draws nothing new.
+- decide: keep or drop one seed. When every drawn seed has a decision, the release rule applies. A kind with 0 drops releases its other confirmed seeds to kept. A kind with a drop escalates. More than 20% drops in the sample escalate every kind.
+- An escalation needs your OK: `bun run eval:seed -- sample --escalate <kind,...>` or `--escalate all`. The seeds of that kind then wait for your decision one by one. Without the OK, the confirmed seeds of that kind stay out of the build.
+- Run `sample` again after a later validate round. The release rule then releases the new confirmed seeds of a settled kind. A kind with confirmed seeds and no drawn seed needs a decision per seed.
+- `retire <seed> --why "<reason>"` removes a kept seed. It takes effect at the next build, and the next build needs a new seeded baseline.
+- build: builds `eval-seeds/set/` from the kept seeds: at most 3 per host and 1 per file. It prints counts only. It names each kind under 4 kept seeds, and it does not block.
+- `leaks <result.json>` counts the findings whose title, body, trigger, or evidence holds an injection word: seed, seeded, inject, injected, planted, intentional, or deliberate. SG-A needs 0. The output gives the case number, the repeat, and the finding number, not the text.
+- `list [--state <state>]` and `show <seed>` print paths and code. Keep their output out of shared places.
+- Exit codes: 0 done, 1 a CLI run or a step failed, 2 a usage error, a refusal, a refused event (the message names the state), or the plan.
+
+Run and label the seeded set with the env line `REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set`:
+
+```
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval -- --set local --cases <two pilot IDs from build> --repeat 1 --real --out eval-results/seeded/pilot
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/pilot --real
+bun run eval:seed -- leaks <pilot result.json>
+```
+
+The labels go to `eval-seeds/set/labels/`. The seeded baseline runs with `bun run eval:ab -- --seeded ...` (seeded-truth.md section 9, SG-A).
+
 ## Bisect when the result is mixed
 
 Run the command again with one change at a time: `--candidate-variants broad --candidate-modules ""`, then `--candidate-variants verify2 --candidate-modules ""`, then `--candidate-variants "" --candidate-modules failures`. Each run builds the same set again, so the tables compare.

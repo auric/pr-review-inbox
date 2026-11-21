@@ -1,6 +1,6 @@
 # Seeded ground truth for the review eval
 
-Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 is built. WP-SG1 and WP-SG2 are not built. Work: packages WP-SG0 to WP-SG2, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind.
+Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0, WP-SG1, and WP-SG2 are built. U-SG1, SG-P, and SG-A are open. Work: packages WP-SG0 to WP-SG2, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind.
 
 Sources: docs/plans/review-v2/review-quality-2026.md (E1 to E6, items 6 and 7, ship rules), docs/plans/review-v3.md (WP-V1, decision V4), docs/plans/review-v2/research/review-practice-2026-11.md (B1, B2), the recall plan and the comparison of 2026-11-17 (both outside the repository), docs/eval/local.md, and scripts/eval/*.ts. This file names no other app, company, host, project, case ID, or PR number.
 
@@ -48,6 +48,7 @@ Recommendation: option (b), injected into private cases, stored as a generated o
   - local.ts refuses an --out folder that holds any other name (local.ts:54-56, 99-104). A `seeds/` folder there would make the next Gate A step fail.
 - Layout:
   - `eval-seeds/seeds.json`: the seed store, with states (section 8).
+  - `eval-seeds/sample.json`: the seed IDs that the human sample drew (section 5.5). A kept or dropped seed has no sampled state, so the store alone cannot tell them.
   - `eval-seeds/set/cases/<id>/case.json`, `eval-seeds/set/bundles/<16 hex>.bundle`, `eval-seeds/set/MANIFEST.json`: the frozen seeded set.
   - `eval-seeds/set/labels/`: label.ts writes here when the env points at the set (label.ts:181).
 - The override is `REVIEW_LOOP_EVAL_SEEDS`. The seed tool refuses a root inside the repository that git does not ignore, as local.ts does (local.ts:1253).
@@ -517,3 +518,4 @@ The user decided these points on 2026-11-21.
 | 10 | Tier 2 architecture defects (no wrong result today) | Out of scope (architecture-bugs.md question 1). |
 | 11 | lenses3 L2 and `ARCHITECTURE_LINES` | L2 of lenses3 takes `ARCHITECTURE_LINES` (architecture-bugs.md question 2). |
 | 12 | The stacked candidate "callers,architecture" | Open. Ask the user after lenses3 (architecture-bugs.md question 4). |
+| 13 | Per-kind floor of 4 kept seeds | Warn only, never block. Decided by the user on 2026-11-21. The build prints each kind under the floor. |

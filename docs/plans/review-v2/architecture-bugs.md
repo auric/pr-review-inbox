@@ -1,6 +1,6 @@
 # Architecture bugs: find and measure
 
-Status: design of 2026-11-21. WP-AR0 (docs) is done. WP-AR1 is built as the opt-in variant "architecture". WP-SG0 of seeded-truth.md is built with the ninth kind. User requirement of 2026-11-21: "we should also be able to find the architecture bugs". The user decided questions 1 to 3 of section 10 on 2026-11-21. Question 4 is open. Packages: WP-AR0 (docs), WP-AR1 (variant "architecture"), and deltas to WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md.
+Status: design of 2026-11-21. WP-AR0 (docs) is done. WP-AR1 is built as the opt-in variant "architecture". WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md are built with the ninth kind. User requirement of 2026-11-21: "we should also be able to find the architecture bugs". The user decided questions 1 to 3 of section 10 on 2026-11-21. Question 4 is open. Packages: WP-AR0 (docs), WP-AR1 (variant "architecture"), and deltas to WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md.
 
 Sources: seeded-truth.md, review-quality-2026.md (items 6, 7, 11), review-v3.md (V2, D2, WP-V8, WP-V12), src/server/review/catalog.ts, src/shared/review.ts, scripts/eval/run.ts, ab.ts, and score.ts. The lenses3 text lives in the recall plan outside the repository. This file names no app, company, host, project, case ID, or PR number.
 
