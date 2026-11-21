@@ -137,12 +137,12 @@ Files: score.ts (`tally`, `metrics`, `METRICS`, new `unionRecall`), compare.ts (
 
 ## 2. Ranked reviewer improvements
 
-Every prompt change is first a `variants` switch, so the default prompt bytes stay the same (the snapshot test proves it). S_R is the spread (max - min) of grounded recall over the baseline repeats, in bugs; S_N, S_T, and S_S are the spreads of noise, trap rate, and severityOk.
+Every prompt change is first a `variants` switch, so the default prompt bytes stay the same (the snapshot test proves it). S_R is the spread (max - min) of grounded recall over the baseline repeats, in bugs; S_T and S_S are the spreads of trap rate and severityOk. Noise rule, decided by the user on 2026-11-21: grounded noise (`groundedNoise`) counts the shown findings that claim no gold item. These are the judge-true findings outside gold plus the judge false positives, when every one has a judge label. The paired noise delta is B minus A per case, matched by case. Each side of a case is the mean over its runs. The delta is the mean over the matched cases. Noise passes when this delta is at most M. M is 0.08 per case for a verify-only replay. M is 10% of mean(A) for a full candidate run, with mean(A) the grounded noise per case of A. The paired judge fp delta per case run must be at most 0.05 for a replay and at most 0.07 for a full run. These two deltas are not `pairedDelta` (score.ts), which compares must-find hit rates. S_N, the noise spread over the baseline repeats, is dropped. An upper bound of a confidence interval needs 7 to 8 repeats, so it is not adopted. Reason: past noise rises that failed gates were mostly judge-true findings outside gold, so S_N punished correct extra findings.
 
 Ship rules:
 
-- Not worse (cost cutters): mean grounded recall >= mean(A) - S_R; trap rate <= mean(A) + S_T; noise <= mean(A) + S_N; severityOk >= mean(A) - S_S; notCompleted not higher; mean cost below the cheapest baseline repeat.
-- Better (recall raisers): mean grounded recall - mean(A) > S_R; trap rate and noise within the spread; the user decides the cost.
+- Not worse (cost cutters): mean grounded recall >= mean(A) - S_R; trap rate <= mean(A) + S_T; noise passes the noise rule above; severityOk >= mean(A) - S_S; notCompleted not higher; mean cost below the cheapest baseline repeat.
+- Better (recall raisers): mean grounded recall - mean(A) > S_R; trap rate <= mean(A) + S_T; noise passes the noise rule above; the user decides the cost.
 - Cost cutters and recall raisers never share a run.
 
 ### 1. One agent on large PRs, no rl-reviewer
@@ -206,7 +206,7 @@ The do-not-flag list of each language:
 - Change in src/shared/review.ts `displayGroup`: `demoted` in the parameter type and `if (p.demoted && (volume === "quiet" || volume === "balanced")) return "fold";` after the hidden check. Nothing hides. UI change: screenshots and README.
 - Expected: noise in main down by the demoted count; main recall down by the refuted must-finds, which stay visible in the fold. Zero cost.
 - Experiment: `rescore --fold-refuted` on the W1 baseline (zero cost).
-- Ship rule: the refuted must-finds are at most S_R, and noise drops by more than S_N. The user decides first.
+- Ship rule: the refuted must-finds are at most S_R, and noise drops by more than S_N. The user decides first. The user dropped S_N on 2026-11-21 (section 2). This item passed under the old rule, and the new noise rule has no "drop" form.
 - Status: shipped 2026-11-15. `eval:rescore --fold-refuted` on the W1 baseline: no must-find left main, noise per case run 2.15 to 1.73, judge false positives 0.43 to 0.25, augmented precision 83.4% to 88.4%. The ship rule passed, and the user approved it. The rule also needs a refuted verdict, because markCopy can keep demoted on a copy that a later check confirmed. It also folds the refuted findings of "Show last" profiles. `foldRefuted` calls `displayGroup`, and new eval runs score with the fold.
 
 ### 6. Three finder runs and a merge ("Deep check", variant "runs3")

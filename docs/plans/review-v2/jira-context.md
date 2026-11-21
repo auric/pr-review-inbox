@@ -246,7 +246,7 @@ New checks in `bun run gate:jira`. They print status codes, key names, counts, b
 - run.ts checks that the harness settings have no Jira (settings.jira() gives null), so eval runs never call Jira.
 - Ship rule, candidate against control, on cases with at least one task key:
   1. Grounded recall: the mean is at least the control mean minus S_R (as in risk-check.md section 7).
-  2. Grounded noise per case: at most the control plus S_N. Judge fp per case run rise by no more than the control spread.
+  2. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a full candidate run. The paired grounded noise delta against the control is at most 10% of the control mean per case. The paired judge fp delta per case run is at most 0.07.
   3. Findings of module intent: gold matches plus judge tp are at least judge fp.
   4. Cost per case rises by 25% or less. Above that, the user decides.
   5. The overlay adds text to at least half of the task cases. Else the result is INFO, and Gate JC-B decides.

@@ -243,7 +243,7 @@ The Check cell gets one line for each group with a `finderRisks` run: "Risks: 12
 Ship rule, candidate against control:
 
 1. Grounded recall is not worse: the mean is at least the control mean minus S_R.
-2. Grounded noise per case is at most the control plus S_N. Judge fp per case run rise by no more than the control spread.
+2. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a verify-only replay. The paired grounded noise delta against the control is at most 0.08 per case. The paired judge fp delta per case run is at most 0.05.
 3. In the "Shown risk findings" row, gold matches plus judge tp are at least the judge fp.
 4. Question items per case run rise by no more than the control spread.
 5. Cost per case rises by 25% or less. Above that, the user decides.

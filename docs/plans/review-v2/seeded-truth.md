@@ -280,7 +280,7 @@ Built by the tool, valid under `localCaseFile` (cases.ts:131-152):
 ### 6.5 Ship rules on the seeded set
 
 - Recall raiser, "better": mean seeded recall of B minus mean of A is more than S_R of the seeded baseline. Also, the paired 90% interval of the seeded must-finds excludes 0.
-- Guards: noise and trap rate within the seeded baseline spread. Extras matched per case run is not below mean(A) minus its spread. Cost: the user decides.
+- Guards: trap rate within the seeded baseline spread. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. For a full candidate run, the paired grounded noise delta is at most 10% of mean(A) per case, and the paired judge fp delta per case run is at most 0.07. For a verify-only replay of SG-A, these limits are 0.08 per case and 0.05. Extras matched per case run is not below mean(A) minus its spread. Cost: the user decides.
 - lenses3 against runs3: "diversity beats repeats" only when the paired interval of lenses3 minus runs3 excludes 0. Otherwise ship the cheaper one, or neither.
 - Cost cutters and noise gates stay on the natural set.
 

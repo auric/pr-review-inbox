@@ -156,7 +156,7 @@ Probe, control and candidate, repeat 2:
 Local set, the Gate A baseline against the candidate:
 
 5. Grounded recall: the mean is at least the baseline mean minus S_R.
-6. Grounded noise per case is at most the baseline plus S_N. Judge fp per case run rise by no more than the baseline spread.
+6. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a full candidate run. The paired grounded noise delta against the baseline is at most 10% of the baseline mean per case. The paired judge fp delta per case run is at most 0.07.
 7. The polish true rate is at least 50%, the bar of obligations.md section 8 rule 3. It needs at least 10 labelled polish items. With fewer items there is no result, and the user decides.
 8. Question items per case run rise by no more than the baseline spread.
 9. Cost per case rises by 10% or less, and minutes by 1.0 or less. Above that, the user decides.

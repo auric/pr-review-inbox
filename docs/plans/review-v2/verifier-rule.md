@@ -179,7 +179,7 @@ Metrics:
 Ship rule, candidate against control. It mirrors the item 4 rule of review-quality-2026.md on fixed finder output.
 
 1. True findings lost drop: lossDemoted (refuted to the fold) falls by more than S_V(Lost) and by at least 1 bug per repeat. S_V(Lost) is 0 from one pair, so the floor of 1 bug carries this rule. Grounded recall rises by the same amount. If it rises by less, read lossFolded: a refuted finding that turns unsure stays in the fold.
-2. False findings kept in main rise by no more than the control spread: grounded noise per case is at most the control plus S_V(noise). Judge fp per case run is at most the control plus S_V(judge fp). The trap rate is not higher.
+2. False findings kept in main follow the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a verify-only replay. The paired grounded noise delta against the control is at most 0.08 per case. The paired judge fp delta per case run is at most 0.05. The trap rate is not higher.
 3. severityOk is at least the control minus S_V(severityOk).
 4. Failed runs and incomplete runs are not higher. The trigger search can reach the verify turn cap.
 5. Cost per case rises by 10% or less. Above that, the user decides.

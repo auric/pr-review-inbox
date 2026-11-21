@@ -364,7 +364,7 @@ Eleven cases in fixtures/eval/probe/, in the format of probe-task-csv-quoting/ca
 Ship rule, candidate against the reference:
 
 1. Grounded recall is not worse: the mean is at least the reference mean minus S_R, as in Gate RC-A.
-2. Grounded noise per case is at most the reference plus S_N. Judge fp per case run rise by no more than the reference spread.
+2. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a verify-only replay. The paired grounded noise delta against the reference is at most 0.08 per case. The paired judge fp delta per case run is at most 0.05.
 3. In the "Shown obligation findings" row, gold matches plus judge tp are at least the judge fp.
 4. Cost per case rises by 20% or less, and minutes by 1.0 or less. Above that, the user decides.
 5. Probe: the candidate finds at least 4 of the 5 seeded omissions in each repeat. The fifth is the rule 8a case (probe-obl-platform-guard).

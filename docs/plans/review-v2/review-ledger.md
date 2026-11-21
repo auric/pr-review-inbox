@@ -12,6 +12,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 - The variant "obligations" now keeps a missing obligation anchored on an unchanged line, such as a doc line, when its cause is a changed line. Before, the validator dropped it. The probe set gets doc-line alts, an exact export-guard factor, and three new obligation cases (19 cases). The prompt without the variant is unchanged.
 - The verifier rule design exists (verifier-rule.md). Gate VR-0 passed narrowly on Gate A: 2.5 must-finds per repeat go to the fold as refuted. WP-VR1 builds the verify-only variant "refute-issue".
 - The shipped code now has 12 opt-in variants (dto.ts `VARIANTS`). The profile editor keeps `variants` on a save and has no control for them. Only config.json sets them.
+- The user replaced the S_N noise ship rule on 2026-11-21 (review-quality-2026.md section 2). Noise now passes on the paired grounded noise delta, matched by case: at most 0.08 per case for a verify-only replay, and at most 10% of mean(A) for a full run. The paired judge fp delta per case run is at most 0.05 for a replay and 0.07 for a full run. The gate docs point to this rule. The eval scripts do not print these two deltas yet.
 
 ## 2. Version-bump trap
 
