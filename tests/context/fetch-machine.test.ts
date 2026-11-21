@@ -132,7 +132,8 @@ describe("senders and writers", () => {
   const root = join(import.meta.dir, "../../src/server");
   const files = (readdirSync(root, { recursive: true }) as string[])
     .map((f) => f.replaceAll("\\", "/"))
-    .filter((f) => f.endsWith(".ts") && f !== "context/fetch-machine.ts");
+    .filter((f) => f.endsWith(".ts") && f !== "context/fetch-machine.ts")
+    .sort();
   const text = new Map(files.map((f) => [f, readFileSync(join(root, f), "utf8")]));
   // A sender builds the event object `{ type: "E", ...}` or `{ type: "E" }`. The FetchEvent type has `{ type: "E" | ...` and is no sender.
   const senders = (e: string) => files.filter((f) => new RegExp(`\\{ type: "${e}"(?:,| \\})`).test(text.get(f) ?? ""));

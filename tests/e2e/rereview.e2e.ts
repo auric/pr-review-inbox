@@ -162,11 +162,13 @@ test("stale drafts: drafts accepted before a push and a full review are on an ol
   await connect(page);
   const head = await reviewed(page);
   await drafts(page).nth(0).getByRole("button", { name: "Accept" }).click();
-  // The focus moves on to the next draft. The third is the README draft in the More fold.
+  // The focus moves on to the next draft. The third is the README draft in the More fold. It is outside the diff and posts as a general comment.
+  await expect(drafts(page).nth(1)).toBeFocused();
   await page.keyboard.press("a");
+  await expect(drafts(page).nth(2)).toBeFocused();
   await page.keyboard.press("a");
   const bar = page.locator("[data-post-part]");
-  await expect(bar).toContainText("Ready to post: 2 inline comments");
+  await expect(bar).toContainText("Ready to post: 2 inline comments and 1 general comment");
 
   await control("state", { push: true });
   await expect(runLine(page)).toContainText("New commits since");
