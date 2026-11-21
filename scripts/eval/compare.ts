@@ -55,6 +55,9 @@ const LABEL: Record<Metric, string> = {
   augmentedRecall: "augmented recall (diagnostic): found must-finds and new judge tp, over must-finds and new judge tp",
   newTp: "new tp (diagnostic): unmatched shown findings that the judge gives tp, per case",
   severityAbove: "severity above: unmatched judge tp whose app severity is above the judge severity",
+  polish: "polish: polish points that are not hidden, per case (variant minor-fold)",
+  polishRecall: "polish recall: bugs at nit that a polish point matches (variant minor-fold)",
+  polishTraps: "polish traps: polish points on a trap, per case (variant minor-fold)",
 };
 const RATE = new Set<Metric>([
   "recall",
@@ -76,6 +79,7 @@ const RATE = new Set<Metric>([
   "augmentedPrecision",
   "augmentedRecall",
   "severityAbove",
+  "polishRecall",
 ]);
 const DIGITS: Record<Metric, number> = {
   groundedRecall: 1,
@@ -89,6 +93,9 @@ const DIGITS: Record<Metric, number> = {
   lossRefuted: 1,
   refutedShown: 2,
   preexisting: 2,
+  polish: 2,
+  polishRecall: 1,
+  polishTraps: 2,
   augmentedPrecision: 1,
   augmentedRecall: 1,
   newTp: 2,
@@ -220,6 +227,24 @@ export function detailText(s: Score): string {
       "Pre-existing findings (review-v3.md WP-V6): findings in the Pre-existing fold, per case run. Gold match includes extras; judge fp includes trap matches",
       s.preexisting,
     );
+  // docs/plans/review-v2/minor-fold.md section 6.2. A match on a counted must-find counts as not true: it is a defect in the fold.
+  const pol = s.polish;
+  if (pol?.shown) {
+    const den = pol.gold + pol.tp + pol.fp;
+    out.push(
+      "",
+      "Polish points (minor-fold.md): polish points that are not hidden, per case run. must: the gold match is a counted must-find",
+      table([
+        ["case runs", "shown", "gold match", "must", "judge tp", "judge fp", "no label", "true rate", "labelled"],
+        [
+          String(pol.runs),
+          ...[pol.shown, pol.gold, pol.must, pol.tp, pol.fp, pol.unlabeled].map((x) => per(pol.runs ? x / pol.runs : null)),
+          pct(pol.gold - pol.must + pol.tp, den),
+          String(den),
+        ],
+      ]),
+    );
+  }
   if (s.union.length)
     out.push(
       "",

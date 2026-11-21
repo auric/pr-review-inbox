@@ -1,0 +1,36 @@
+{
+  "id": "probe-polish-todo",
+  "title": "An added TODO names no ticket",
+  "language": "typescript",
+  "pr": {
+    "title": "Add an exponential retry delay for uploads",
+    "description": "retryDelayMs() gives the wait before each upload retry. The delay doubles with each attempt and stops at a cap."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/upload/retry.ts",
+      "side": "new",
+      "lines": [10, 10],
+      "severityMin": "nit",
+      "module": "core",
+      "note": "The added TODO names no ticket and no pull request, so nobody tracks the open work. Name a ticket, or read the cap from the settings file now."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/upload/retry.ts",
+      "side": "new",
+      "lines": [8, 8],
+      "why": "This TODO names the ticket SHOP-51, so the open work is tracked. A polish point on it is wrong."
+    },
+    {
+      "id": "T2",
+      "path": "src/upload/retry.ts",
+      "side": "new",
+      "lines": [15, 15],
+      "why": "attempt counts from 1, as the comment and the test show, so 2 ** (attempt - 1) gives the base delay on the first retry. An off-by-one finding is wrong."
+    }
+  ]
+}

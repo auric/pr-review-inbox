@@ -44,6 +44,7 @@ import {
   type NoteProposal,
   neverHidden,
   type Obligation,
+  POLISH_MAX,
   PREEXISTING_MAX,
   type Question,
   type ReplyPayload,
@@ -61,7 +62,7 @@ import {
   verifyResult,
 } from "../../shared/review";
 import type { RunErrorKind, RunStatus } from "../../shared/run-log";
-import { type Profile, preexisting } from "./catalog";
+import { minorFold, type Profile, preexisting } from "./catalog";
 import type { RunOutcome } from "./claude";
 import type { Candidate } from "./context-files";
 import { type DiffFile, parseDiff } from "./diffmap";
@@ -322,6 +323,7 @@ export async function judge(
       rules,
       addedOnly,
       preexisting: preexisting(profile),
+      polish: minorFold(profile),
     });
   let v = check();
   if (v.dropped.some((d) => d.reason === "file" || d.reason === "match")) {
@@ -492,6 +494,7 @@ const COUNT: Record<VerifyVerdictName, Exclude<keyof VerifySummary, "failed" | "
   duplicate: "duplicates",
 };
 const findings = (n: number) => `${n} ${n === 1 ? "finding is" : "findings are"}`;
+const CHECK_ORDER: readonly Check[] = ["checked", "unsure", "unchecked"];
 // The merge of the verifier coverage. Its gaps do not make the run incomplete: a missing verdict does.
 const union = (a: string[], b: string[]) => [...a, ...b.filter((x) => !a.includes(x))];
 
@@ -825,6 +828,10 @@ export function settle(f: Found, s: SettleInput): Ending {
   // a question. A pre-existing finding is never demoted, never asked, and never posted.
   const pres: { item: NewItem; link: CandidateLink; rank: number }[] = [];
   let low = 0;
+  // docs/plans/review-v2/minor-fold.md section 5: the shown new polish points, capped after the loop. asked: those that ended as a
+  // question. Carried polish points are not capped.
+  const polish: { item: NewItem; link: CandidateLink; rank: number }[] = [];
+  let polishAsked = 0;
   for (const c of f.candidates) {
     const v = got.get(c.n);
     if (v) verify[COUNT[v.verdict]]++;
@@ -834,6 +841,11 @@ export function settle(f: Found, s: SettleInput): Ending {
     const link = { n: c.n, duplicateOf: v?.verdict === "duplicate" ? v.duplicateOf : null };
     if (pre && (out.kind === "question" || (out.status === "new" && out.severity !== "blocker" && out.severity !== "major"))) {
       low++;
+      continue;
+    }
+    const pol = c.from === null && c.finding.polish === true;
+    if (pol && out.kind === "question") {
+      polishAsked++;
       continue;
     }
     if (out.kind === "question") {
@@ -863,6 +875,10 @@ export function settle(f: Found, s: SettleInput): Ending {
       pres.push({ item, link, rank: severities.indexOf(out.severity) * confidences.length + confidences.indexOf(c.finding.confidence) });
       continue;
     }
+    if (pol && out.status === "new") {
+      polish.push({ item, link, rank: CHECK_ORDER.indexOf(out.check) * confidences.length + confidences.indexOf(c.finding.confidence) });
+      continue;
+    }
     links.set(item, link);
     items.push(item);
   }
@@ -879,6 +895,15 @@ export function settle(f: Found, s: SettleInput): Ending {
     coverage.notChecked.push(
       `${over} pre-existing ${over === 1 ? "finding was" : "findings were"} left out: a run shows at most ${PREEXISTING_MAX}.`,
     );
+  polish.sort((a, b) => a.rank - b.rank);
+  for (const p of polish.slice(0, POLISH_MAX)) {
+    links.set(p.item, p.link);
+    items.push(p.item);
+  }
+  const polishOver = Math.max(0, polish.length - POLISH_MAX);
+  const points = (n: number) => `${n} polish ${n === 1 ? "point was" : "points were"}`;
+  if (polishAsked) coverage.notChecked.push(`${points(polishAsked)} left out: the check asked a question, or no trigger was named.`);
+  if (polishOver) coverage.notChecked.push(`${points(polishOver)} left out: a run shows at most ${POLISH_MAX}.`);
   // docs/plans/review-v2/review-questions.md: the verdict of each finder question. Question k has number written + k + 1.
   const finderQuestions: FinderQuestions = { asked: f.questions.length, answered: 0, findings: 0, kept: 0, answers: [] };
   const kept: Question[] = [];

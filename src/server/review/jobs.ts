@@ -91,6 +91,7 @@ import {
   MIN_EDIT_TURNS,
   mainAgent,
   mcpLines,
+  minorFold,
   moduleNotes,
   obligationCheck,
   type Profile,
@@ -1136,7 +1137,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   earlier: [...earlier, ...carry.posted].map((r) => r.id),
                   posted: carry.posted.map((r) => r.id),
                 }),
-                schema: rereviewJsonSchema(preexisting(profile)),
+                schema: rereviewJsonSchema(preexisting(profile), minorFold(profile)),
                 main: mainAgent(profile, context),
               }
             : explain
@@ -1149,7 +1150,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   }
                 : {
                     prompt: buildPrompt(input),
-                    schema: reviewJsonSchema(profile.explain, preexisting(profile)),
+                    schema: reviewJsonSchema(profile.explain, preexisting(profile), minorFold(profile)),
                     main: mainAgent(profile, context),
                   };
     // docs/plans/review-v2/spec.md section 1.9: a review run shows phase finding, then checking.
@@ -1881,7 +1882,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cwd: ws.work,
         appDir: ws.app,
         prompt: buildPrompt(input),
-        schema: reviewJsonSchema(false, preexisting(profile)),
+        schema: reviewJsonSchema(false, preexisting(profile), minorFold(profile)),
         main: withDelegation(
           withMcp(withSkills(withLanguages(mainAgent(profile, context), langs, !broad(profile)), folders, always, true), tools.used, true),
           delegate,

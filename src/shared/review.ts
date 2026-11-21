@@ -59,6 +59,8 @@ export const finding = z.object({
   // docs/plans/review-v3.md WP-V6. Optional, so results without the key parse. The CLI schema lists it only under the variant
   // "preexisting" (reviewJsonSchema), so the default --json-schema keeps its bytes.
   preexisting: z.boolean().optional(),
+  // docs/plans/review-v2/minor-fold.md D2. The CLI schema lists it only under the variant "minor-fold".
+  polish: z.boolean().optional(),
 });
 
 // docs/plans/review-v3.md Q6: at most this many pre-existing findings per run (judge.ts settle).
@@ -66,8 +68,17 @@ export const PREEXISTING_MAX = 5;
 const PREEXISTING = z
   .boolean()
   .describe("true only for a blocker or major problem in unchanged code that the change touches or relies on. Else false.");
-const findingList = (preexisting: boolean) =>
-  z.array(preexisting ? finding.extend({ preexisting: PREEXISTING }) : finding.omit({ preexisting: true })).max(MAX_FINDINGS);
+// docs/plans/review-v2/minor-fold.md D5: at most this many polish points per run (judge.ts settle).
+export const POLISH_MAX = 3;
+const POLISH = z.boolean().describe("true only for a polish point: todo, stale, naming, or clarity. Else false.");
+const findingList = (preexisting: boolean, polish: boolean) =>
+  z
+    .array(
+      finding
+        .omit({ preexisting: true, polish: true })
+        .extend({ ...(preexisting && { preexisting: PREEXISTING }), ...(polish && { polish: POLISH }) }),
+    )
+    .max(MAX_FINDINGS);
 
 export const question = z.object({ text: z.string(), why: z.string() });
 
@@ -133,9 +144,9 @@ export type ReviewResult = z.infer<typeof reviewResult>;
 
 // The CLI checks the schema with a default Ajv instance, which knows draft-07 only. A 2020-12 $schema fails every run.
 // An Explain run gets no answered key: it judges no answer (docs/plans/thread-outcome.md section 9). preexisting: the variant
-// "preexisting" is on (catalog.ts preexisting).
-export const reviewJsonSchema = (explain = false, preexisting = false): Record<string, unknown> => {
-  const r = reviewResult.extend({ findings: findingList(preexisting) });
+// "preexisting" is on (catalog.ts preexisting). polish: the variant "minor-fold" is on (catalog.ts minorFold).
+export const reviewJsonSchema = (explain = false, preexisting = false, polish = false): Record<string, unknown> => {
+  const r = reviewResult.extend({ findings: findingList(preexisting, polish) });
   return aiJsonSchema(explain ? r.omit({ answered: true }) : r);
 };
 
@@ -271,18 +282,20 @@ export const checkOf = (p: { verify?: Pick<VerifyMark, "verdict"> }): Check =>
       : "unchecked";
 
 // main: the Drafts list. fold: "More" (quiet and balanced). hidden: refuted and duplicates, in the run record only. preexisting: a
-// problem in unchanged code (docs/plans/review-v3.md WP-V6) in its own fold. The app never posts it.
+// problem in unchanged code (docs/plans/review-v3.md WP-V6) in its own fold. The app never posts it. A polish point
+// (docs/plans/review-v2/minor-fold.md D3) goes to fold at quiet and balanced, whatever its severity.
 export type DisplayGroup = "main" | "fold" | "preexisting" | "hidden";
 
 // spec.md section 1.4: the place of a finding from its check, its severity, and the volume of its run. A run without a volume is from
 // before review v2, which showed every finding. A demoted finding goes to fold (review-quality-2026.md E5). markCopy can keep demoted
 // on a copy that a later check confirmed, so the verdict must also be refuted.
 export function displayGroup(
-  p: Pick<FindingPayload, "severity" | "discardedBy" | "demoted" | "preexisting"> & { verify?: Pick<VerifyMark, "verdict"> },
+  p: Pick<FindingPayload, "severity" | "discardedBy" | "demoted" | "preexisting" | "polish"> & { verify?: Pick<VerifyMark, "verdict"> },
   volume: Volume | undefined,
 ): DisplayGroup {
   if (p.discardedBy === "verify") return "hidden";
   if (p.preexisting === true) return "preexisting";
+  if (p.polish === true && (volume === "quiet" || volume === "balanced")) return "fold";
   if (p.demoted && p.verify?.verdict === "refuted" && (volume === "quiet" || volume === "balanced")) return "fold";
   const check = checkOf(p);
   if (volume === "quiet") return check !== "unsure" && (p.severity === "blocker" || p.severity === "major") ? "main" : "fold";
@@ -642,8 +655,8 @@ export const rereviewResult = reviewResult.extend({ earlier: z.array(earlierVerd
 export type EarlierVerdict = z.infer<typeof earlierVerdict>;
 export type RereviewResult = z.infer<typeof rereviewResult>;
 
-export const rereviewJsonSchema = (preexisting = false): Record<string, unknown> =>
-  aiJsonSchema(rereviewResult.extend({ findings: findingList(preexisting) }));
+export const rereviewJsonSchema = (preexisting = false, polish = false): Record<string, unknown> =>
+  aiJsonSchema(rereviewResult.extend({ findings: findingList(preexisting, polish) }));
 
 // A finding or question that a re-review copied from its base run. from: the source item ID. since: the head that the base run reviewed.
 export type Carried = { from: number; verdict: Verdict; reason: string; since: string };

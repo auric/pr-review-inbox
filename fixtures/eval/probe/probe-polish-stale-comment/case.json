@@ -1,0 +1,30 @@
+{
+  "id": "probe-polish-stale-comment",
+  "title": "A comment still says that the first entry wins",
+  "language": "typescript",
+  "pr": {
+    "title": "Keep the newest contact for each email",
+    "description": "dedupe() now keeps the last entry for each email. The import lists contacts from oldest to newest, so the newest entry wins."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/contacts/dedupe.ts",
+      "side": "new",
+      "lines": [10, 10],
+      "alt": [{ "path": "src/contacts/dedupe.ts", "side": "new", "lines": [11, 11] }],
+      "severityMin": "nit",
+      "module": "docs",
+      "note": "The unchanged comment says that the first entry for each email stays. The change makes the last entry win, so the comment is now false. Update the comment."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/contacts/dedupe.ts",
+      "side": "new",
+      "lines": [3, 3],
+      "why": "The comment says that emails compare in lower case. keyOf still does that, so the comment is true. A stale-comment point on it is wrong."
+    }
+  ]
+}

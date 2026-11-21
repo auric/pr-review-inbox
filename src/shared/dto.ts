@@ -211,12 +211,14 @@ export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "broad", "verify2", "classes",
 // "security2", and "security2-verify": docs/plans/review-v2/review-quality-2026.md items 3, 4, 7, and 10. "risk-check":
 // docs/plans/review-v2/risk-check.md WP-RC1. "obligations": docs/plans/review-v2/obligations.md WP-OB1. "preexisting":
-// docs/plans/review-v3.md WP-V6. "callers": docs/plans/review-v3.md D2, the caller rule. A retired name ("signal", "order", "rules2",
+// docs/plans/review-v3.md WP-V6. "callers": docs/plans/review-v3.md D2, the caller rule. "minor-fold":
+// docs/plans/review-v2/minor-fold.md WP-MF1. A retired name ("signal", "order", "rules2",
 // "rereview-strict") drops on read.
 export const VARIANTS = [
   "broad",
   "callers",
   "classes",
+  "minor-fold",
   "obligations",
   "parts",
   "preexisting",

@@ -331,7 +331,7 @@ describe("eval harness without --real (AC-M2)", () => {
       [
         "--variants",
         "rules2",
-        "--variants must be a comma list of broad, callers, classes, obligations, parts, preexisting, risk-check, security2, security2-verify, verify2.",
+        "--variants must be a comma list of broad, callers, classes, minor-fold, obligations, parts, preexisting, risk-check, security2, security2-verify, verify2.",
       ],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {

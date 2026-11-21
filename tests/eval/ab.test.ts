@@ -567,7 +567,7 @@ describe("eval:ab arguments", () => {
     for (const retired of ["signal", "order", "rules2", "rereview-strict"])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
         error: expect.stringContaining(
-          "--variants must be a comma list of broad, callers, classes, obligations, parts, preexisting, risk-check, security2, security2-verify, verify2.",
+          "--variants must be a comma list of broad, callers, classes, minor-fold, obligations, parts, preexisting, risk-check, security2, security2-verify, verify2.",
         ),
       });
   });

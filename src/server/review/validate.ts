@@ -53,6 +53,8 @@ export type ValidateInput = {
   addedOnly?: boolean;
   // docs/plans/review-v3.md WP-V6: the variant "preexisting" is on. Else every preexisting mark drops.
   preexisting?: boolean;
+  // docs/plans/review-v2/minor-fold.md: the variant "minor-fold" is on. Else every polish mark drops.
+  polish?: boolean;
 };
 
 export const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -271,7 +273,7 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     out.dropped.push({ ...f, reason });
     out.kept.push(null);
   };
-  for (const { preexisting: marked, ...raw } of findings) {
+  for (const { preexisting: marked, polish: polished, ...raw } of findings) {
     let f: Finding = { ...raw, agent: raw.agent !== null && agents.has(raw.agent) ? raw.agent : null };
     let a = anchor(f);
     let movedFrom: AnchoredFinding["movedFrom"];
@@ -313,7 +315,18 @@ export function validate(input: ValidateInput): ValidatedResult & { kept: (numbe
     }
     // A rule from another scope does not apply here. The finding stays as a core finding, and the verify phase judges it.
     const kept = rule === "scope" ? { ...f, module: "core", rule: "" } : f;
-    out.kept.push(out.findings.push({ ...kept, cause, anchor: a, ...(movedFrom && { movedFrom }), ...(pre && { preexisting: true }) }) - 1);
+    // minor-fold.md section 4: a finding keeps at most one of the two marks.
+    const polish = input.polish === true && polished === true && !pre;
+    out.kept.push(
+      out.findings.push({
+        ...kept,
+        cause,
+        anchor: a,
+        ...(movedFrom && { movedFrom }),
+        ...(pre && { preexisting: true }),
+        ...(polish && { polish: true }),
+      }) - 1,
+    );
   }
   return out;
 }

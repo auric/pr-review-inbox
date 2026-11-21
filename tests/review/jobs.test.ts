@@ -20,6 +20,8 @@ import {
   DOCS_RULE,
   ISSUE_LINES,
   type ListTools,
+  POLISH_LINES,
+  POLISH_REVIEWER,
   PREEXISTING_LINES,
   type Profile,
   profileOf,
@@ -1792,6 +1794,59 @@ describe("language checks", () => {
       expect(kept.map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "preexisting"]]);
       const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
       expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+callers+preexisting`);
+    },
+    SLOW,
+  );
+
+  test(
+    "minor-fold (AC-R60): the variant reaches the CLI schema and the finder agents; a polish point stores in the fold at balanced",
+    async () => {
+      const h = await setup();
+      const polish = {
+        path: "src/app.ts",
+        side: "new",
+        line: 3,
+        lineEnd: null,
+        anchorText: "line 3 changed",
+        severity: "minor",
+        category: "todo",
+        body: "Name a ticket in the TODO.",
+        evidence: "src/app.ts:3",
+        evidenceStatus: "code",
+        confidence: "high",
+        agent: null,
+        title: "TODO names no ticket",
+        trigger: "The work stays undone.",
+        cause: null,
+        rule: "",
+        module: "core",
+        polish: true,
+      };
+      const run = async (variants: ProfileInput["variants"]) => {
+        const off = { ...general, variants, verifier: { ...general.verifier, mode: "off" as const } };
+        expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [off] } })).status).toBe(200);
+        await h.brief(NOTE, "general");
+        h.scenario({ fixture: subagentRun({ ...RESULT, findings: [...RESULT.findings, polish] }) });
+        const before = h.calls().length;
+        const d = await h.finish((await h.start()).body.id);
+        expect(d.run.status).toBe("completed");
+        const find = h.calls().slice(before).find(finderCall) as Call & { agents: Agents };
+        return { d, schema: flag(find.argv, "--json-schema") ?? "", agents: find.agents };
+      };
+      const mine = (d: Awaited<ReturnType<typeof run>>["d"]) => d.items.filter((i) => (i.payload as FindingPayload).title === polish.title);
+      const plain = await run([]);
+      expect(plain.schema).not.toContain('"polish"');
+      for (const name of ["rl-main", "rl-reviewer"]) expect(plain.agents[name]?.prompt).not.toContain(POLISH_LINES[0]);
+      // Variant off: the mark drops, so the minor finding shows in main.
+      expect(mine(plain.d).map((i) => displayGroup(i.payload as FindingPayload, "balanced"))).toEqual(["main"]);
+      const on = await run(["minor-fold"]);
+      expect(on.schema).toContain('"polish"');
+      expect(on.schema).not.toContain('"preexisting"');
+      for (const name of ["rl-main", "rl-reviewer"]) expect(on.agents[name]?.prompt).toContain(`\n${POLISH_LINES.join("\n")}\n`);
+      expect(on.agents["rl-reviewer"]?.prompt).toContain(`\n${POLISH_REVIEWER}`);
+      expect(mine(on.d).map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "fold"]]);
+      const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
+      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold`);
     },
     SLOW,
   );

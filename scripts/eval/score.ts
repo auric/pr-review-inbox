@@ -61,6 +61,8 @@ export type EvalItem = {
   evidence?: string;
   anchorText?: string;
   cause?: { path: string; side: Side; line: number; lineEnd: number | null; anchorText: string };
+  // docs/plans/review-v2/minor-fold.md section 6.2: a polish point (variant "minor-fold"). Absent: false.
+  polish?: boolean;
 };
 
 export type EvalDropped = { path: string; side: Side; line: number; lineEnd: number | null; severity: Severity; reason: string };
@@ -311,6 +313,9 @@ export const METRICS = [
   "augmentedRecall",
   "newTp",
   "severityAbove",
+  "polish",
+  "polishRecall",
+  "polishTraps",
 ] as const;
 export type Metric = (typeof METRICS)[number];
 export type Stat = { mean: number; min: number; max: number } | null;
@@ -339,6 +344,9 @@ export type Score = {
   obligation: Sec | null;
   // docs/plans/review-v3.md WP-V6: the same counts for the pre-existing findings. They are not shown in the main list.
   preexisting: Sec | null;
+  // docs/plans/review-v2/minor-fold.md section 6.2: the same counts for the non-hidden polish items. must: items whose gold match is a
+  // counted must-find. They are in gold too.
+  polish: (Sec & { must: number }) | null;
   union: { k: number; shown: number; raised: number }[];
   finderQuestions: { asked: number; answered: number; findings: number; kept: number } | null;
   finderRisks: RiskCounts | null;
@@ -466,15 +474,22 @@ type Tally = {
   refutedShown: number;
   // docs/plans/review-v3.md WP-V6: the pre-existing items of the run, and their labels (null without labels).
   preexisting: number;
+  // docs/plans/review-v2/minor-fold.md section 6.2: the non-hidden polish items, the bugs at nit, those that a polish item matches, the
+  // polish items on a trap, and their labels (null without labels).
+  polish: number;
+  nitBugs: number;
+  polishFound: number;
+  polishTraps: number;
   hits: Hits;
   ground: Ground | null;
   pre: Omit<Sec, "runs"> | null;
+  pol: (Omit<Sec, "runs"> & { must?: number }) | null;
 };
 
 // docs/plans/review-v3.md WP-V6: the pre-existing items of one run. An item outside main takes its first gold match (goldLabels), and
 // label.ts judges only an item without one. gold: the match is a must-find, your own comment, or an extra. fp: the match is a trap, or
-// the judge gives fp. tp: the judge gives tp. null: an item has no matcher answer.
-function preCounts(c: EvalCaseInfo, pre: EvalItem[], g: Grounding): Omit<Sec, "runs"> | null {
+// the judge gives fp. tp: the judge gives tp. null: an item has no matcher answer. must: the counted must-find keys, for the must count.
+function preCounts(c: EvalCaseInfo, pre: EvalItem[], g: Grounding, must?: string[]): (Omit<Sec, "runs"> & { must?: number }) | null {
   const m = pre.map((i) => g.matches(c, i));
   if (m.some((x) => x === undefined)) return null;
   const labels = goldLabels(goldOf(c), pre, (n) => m[n] ?? []);
@@ -486,6 +501,7 @@ function preCounts(c: EvalCaseInfo, pre: EvalItem[], g: Grounding): Omit<Sec, "r
     tp: un.filter((j) => j?.label === "tp").length,
     fp: traps + un.filter((j) => j?.label === "fp").length,
     unlabeled: un.filter((j) => j === undefined).length,
+    ...(must && { must: labels.filter((x) => x !== null && must.includes(x.key)).length }),
   };
 }
 
@@ -495,6 +511,8 @@ function tally(c: EvalCaseInfo, run: CaseRun, t: number, volume: Volume | null, 
   const pre = run.items.filter((i) => i.group === "preexisting");
   const r = pre.length ? { ...run, items: run.items.filter((i) => i.group !== "preexisting") } : run;
   const shown = r.items.filter((i) => i.group === "main");
+  const polish = r.items.filter((i) => i.polish === true && i.group !== "hidden");
+  const nitBugs = c.bugs.filter((b) => b.severityMin === "nit");
   const human = c.human ?? [];
   // docs/plans/review-v3.md WP-V3: a re-raise is a new item on an earlier finding that you posted or discarded. Its lines must be the
   // same at both heads. The copy of a carried finding is no re-raise.
@@ -550,9 +568,21 @@ function tally(c: EvalCaseInfo, run: CaseRun, t: number, volume: Volume | null, 
     // review-quality-2026.md E5: refuted items in main count apart. displayGroup folds them at quiet and balanced, so only thorough and older results have them.
     refutedShown: shown.filter((i) => i.verdict === "refuted").length,
     preexisting: pre.length,
+    polish: polish.length,
+    nitBugs: nitBugs.length,
+    polishFound: nitBugs.filter((b) => polish.some((i) => matches(i, b, t))).length,
+    polishTraps: polish.filter((i) => c.traps.some((x) => matches(i, x))).length,
     hits: { shown: new Set(found.map((b) => `bug:${b.id}`)), raised: new Set(raised.map((b) => `bug:${b.id}`)) },
     ground: g ? ground(c, r, volume, g) : null,
     pre: g ? preCounts(c, pre, g) : null,
+    pol: g
+      ? preCounts(
+          c,
+          polish,
+          g,
+          bugs.map((b) => `bug:${b.id}`),
+        )
+      : null,
   };
 }
 
@@ -639,6 +669,9 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
       gs((x) => x.above),
       newTp,
     ),
+    polish: ratio(sum(ts, "polish"), ts.length),
+    polishRecall: ratio(sum(ts, "polishFound"), sum(ts, "nitBugs")),
+    polishTraps: ratio(sum(ts, "polishTraps"), ts.length),
   };
 }
 
@@ -662,11 +695,12 @@ function tallies(r: EvalResult, g?: Grounding): { runs: RunTally[]; grounded: bo
     const c = byId.get(x.case);
     return c ? [{ repeat: x.repeat, c, t: tally(c, x, r.tolerance ?? 0, r.volume, g) }] : [];
   });
-  const grounded = g !== undefined && runs.every((x) => x.t.ground !== null && x.t.pre !== null);
+  const grounded = g !== undefined && runs.every((x) => x.t.ground !== null && x.t.pre !== null && x.t.pol !== null);
   if (!grounded)
     for (const x of runs) {
       x.t.ground = null;
       x.t.pre = null;
+      x.t.pol = null;
     }
   return { runs, grounded, hits: (x) => x.t.ground?.hits ?? x.t.hits };
 }
@@ -845,6 +879,12 @@ export function score(r: EvalResult, g?: Grounding): Score {
   };
   const pre: Sec | null = grounded ? { runs: runs.length, shown: 0, gold: 0, tp: 0, fp: 0, unlabeled: 0 } : null;
   if (pre) for (const x of runs) for (const k of SEC_KEYS) pre[k] += x.t.pre?.[k] ?? 0;
+  const polish: Score["polish"] = grounded ? { runs: runs.length, shown: 0, gold: 0, tp: 0, fp: 0, unlabeled: 0, must: 0 } : null;
+  if (polish)
+    for (const x of runs) {
+      for (const k of SEC_KEYS) polish[k] += x.t.pol?.[k] ?? 0;
+      polish.must += x.t.pol?.must ?? 0;
+    }
   const fr = r.runs.flatMap((x) => (x.finderRisks ? [x.finderRisks] : []));
   const ob = r.runs.flatMap((x) => (x.obligations ? [x.obligations] : []));
   const known = new Set(r.cases.map((c) => c.id));
@@ -860,6 +900,7 @@ export function score(r: EvalResult, g?: Grounding): Score {
     risk: sum("risk"),
     obligation: sum("obligation"),
     preexisting: pre,
+    polish,
     union,
     finderQuestions: fq.length ? { asked: add("asked"), answered: add("answered"), findings: add("findings"), kept: add("kept") } : null,
     finderRisks: fr.length ? (Object.fromEntries(RISK_KEYS.map((k) => [k, fr.reduce((s, x) => s + x[k], 0)])) as RiskCounts) : null,

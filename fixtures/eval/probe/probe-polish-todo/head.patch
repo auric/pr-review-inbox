@@ -1,0 +1,42 @@
+diff --git a/src/upload/retry.ts b/src/upload/retry.ts
+index 9411789..b50b8c7 100644
+--- a/src/upload/retry.ts
++++ b/src/upload/retry.ts
+@@ -4,3 +4,14 @@ const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+ export function isRetryable(status: number): boolean {
+   return RETRYABLE.has(status);
+ }
++
++// TODO(SHOP-51): move the base delay to the client options.
++const BASE_DELAY_MS = 200;
++// TODO: read the delay cap from the settings file.
++const MAX_DELAY_MS = 10_000;
++
++// attempt counts from 1: the first retry waits BASE_DELAY_MS.
++export function retryDelayMs(attempt: number): number {
++  const delay = BASE_DELAY_MS * 2 ** (attempt - 1);
++  return Math.min(delay, MAX_DELAY_MS);
++}
+diff --git a/tests/upload/retry.test.ts b/tests/upload/retry.test.ts
+new file mode 100644
+index 0000000..2dfac5a
+--- /dev/null
++++ b/tests/upload/retry.test.ts
+@@ -0,0 +1,17 @@
++import { expect, test } from "vitest";
++import { isRetryable, retryDelayMs } from "../../src/upload/retry";
++
++test("the first retry waits the base delay, and each next retry doubles it", () => {
++  expect(retryDelayMs(1)).toBe(200);
++  expect(retryDelayMs(2)).toBe(400);
++  expect(retryDelayMs(3)).toBe(800);
++});
++
++test("the delay stops at the cap", () => {
++  expect(retryDelayMs(20)).toBe(10_000);
++});
++
++test("a server error is retryable, a missing page is not", () => {
++  expect(isRetryable(503)).toBe(true);
++  expect(isRetryable(404)).toBe(false);
++});

@@ -1037,3 +1037,80 @@ describe("pre-existing items (review-v3.md WP-V6)", () => {
     );
   });
 });
+
+// docs/plans/review-v2/minor-fold.md section 6.2 (AC-R66, AC-R67): polish points sit in the fold at balanced and count apart.
+describe("polish points (minor-fold.md)", () => {
+  // B1 is a must-find at g.ts:10. N1 is a nit bug at g.ts:30, which recall leaves out at balanced. T1 is a trap at g.ts:70.
+  const c = gcase("g", [gbug("B1", 10), gbug("N1", 30, { severityMin: "nit" })]);
+  const base = [at("hit", { line: 10, lineEnd: 10, severity: "major" }), at("noise", { line: 20, lineEnd: 20 })];
+  const pol = (title: string, line: number, o: Partial<EvalItem> = {}) =>
+    at(title, { line, lineEnd: line, severity: "nit", group: "fold", polish: true, ...o });
+  const polish = [
+    pol("pol-nit", 30),
+    pol("pol-trap", 70),
+    pol("pol-new", 50),
+    pol("pol-fp", 60),
+    pol("pol-hidden", 30, { group: "hidden" }),
+  ];
+  const g = grounding(
+    {
+      hit: ["bug:B1"],
+      noise: [],
+      "pol-nit": ["bug:N1"],
+      "pol-trap": ["trap:T1"],
+      "pol-new": [],
+      "pol-fp": [],
+      "pol-hidden": ["bug:N1"],
+      "pol-must": ["bug:B1"],
+    },
+    {
+      noise: { label: "fp", severity: "low" },
+      "pol-new": { label: "tp", severity: "low" },
+      "pol-fp": { label: "fp", severity: "low" },
+    },
+  );
+  const POLISH_METRICS = ["polish", "polishRecall", "polishTraps"];
+
+  test("fold polish items off the must-finds change no metric but the polish ones", () => {
+    const without = gresult([c], [run("g", 1, base), run("g", 2, [base[1] as EvalItem])], "balanced");
+    const withPol = gresult([c], [run("g", 1, [...base, ...polish]), run("g", 2, [base[1] as EvalItem, ...polish])], "balanced");
+    for (const grounded of [undefined, g]) {
+      const a = score(without, grounded);
+      const b = score(withPol, grounded);
+      for (const m of Object.keys(a.suite) as (keyof typeof a.suite)[])
+        if (!POLISH_METRICS.includes(m)) expect([m, b.suite[m]]).toEqual([m, a.suite[m]]);
+      expect(b.slices).toEqual(a.slices);
+      expect(b.recallBugs).toEqual(a.recallBugs);
+    }
+    const s = score(withPol).suite;
+    expect([s.polish, s.polishRecall, s.polishTraps]).toEqual([
+      { mean: 4, min: 4, max: 4 },
+      { mean: 1, min: 1, max: 1 },
+      { mean: 1, min: 1, max: 1 },
+    ]);
+    expect(score(without).suite.polish).toEqual({ mean: 0, min: 0, max: 0 });
+    expect(score(without).suite.polishRecall).toEqual({ mean: 0, min: 0, max: 0 });
+  });
+
+  test("a polish item on a must-find shows in must and in lossFolded, and recall drops", () => {
+    const r = gresult([c], [run("g", 1, [base[1] as EvalItem, pol("pol-must", 10)])], "balanced");
+    const s = score(r, g);
+    expect(s.suite.lossFolded).toEqual({ mean: 1, min: 1, max: 1 });
+    expect(s.suite.groundedRecall).toEqual({ mean: 0, min: 0, max: 0 });
+    expect(s.polish).toEqual({ runs: 1, shown: 1, gold: 1, tp: 0, fp: 0, unlabeled: 0, must: 1 });
+  });
+
+  test("with labels, the polish row counts gold, must, and judge labels; compare prints the row and the true rate", () => {
+    const r = gresult([c], [run("g", 1, [...base, ...polish])], "balanced");
+    expect(score(r, g).polish).toEqual({ runs: 1, shown: 4, gold: 1, tp: 1, fp: 2, unlabeled: 0, must: 0 });
+    expect(score(r).polish).toBeNull();
+    const text = summaryText(r, score(r, g));
+    expect(text).toContain("Polish points (minor-fold.md): polish points that are not hidden, per case run");
+    expect(text).toMatch(/\n1\s+4\.00\s+1\.00\s+0\.00\s+1\.00\s+2\.00\s+0\.00\s+50\.0%\s+4\n/);
+    expect(text).toMatch(/\npolish recall: bugs at nit that a polish point matches \(variant minor-fold\)\s+100\.0%\s+100\.0%\n/);
+    // A result without polish items prints no polish row in the details.
+    expect(
+      summaryText(gresult([c], [run("g", 1, base)], "balanced"), score(gresult([c], [run("g", 1, base)], "balanced"), g)),
+    ).not.toContain("Polish points (minor-fold.md)");
+  });
+});

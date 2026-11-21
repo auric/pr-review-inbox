@@ -131,6 +131,7 @@ It prints one table per metric with the delta, for all cases and for each case. 
 - Since prompt version 2.3, a gap of the check phase goes to `notChecked` and does not make the run incomplete. The Build section of `pr-context.md` stays out of coverage. A rule finding that quotes a rule of another scope stays as a core finding.
 - re-raises (`--rereview` only): shown new findings on an earlier finding that you posted or discarded, per case. They also count as noise. A carried copy is no re-raise. The earlier lines move with the diff from the earlier head to the head. An earlier finding on lines that this diff touches gets no re-raise check.
 - verdict ok (`--rereview` only): posted earlier findings with a known thread state whose verdict matches it. A fixed verdict (a resolve proposal) is right for a thread that you resolved later. open or outdated is right for a thread that stayed open.
+- polish, polish recall, polish traps (variant `minor-fold`, docs/plans/review-v2/minor-fold.md section 6.2): polish points that are not hidden, per case. Bugs at severity nit that a polish point matches, over all bugs at nit. Polish points on a trap, per case. No other metric counts a polish point in the fold. With labels, the details print the row "Polish points" with its gold match, must, judge labels, and the true rate.
 - Each number is the mean over the repeats, with the min and the max.
 
 ## v1 cases

@@ -23,11 +23,15 @@ import {
   LARGE_FILE_RULE,
   MODULES,
   mainAgent,
+  minorFold,
   moduleNotes,
   moduleSections,
   NO_CONTEXT,
   NOTES_RULES,
   PART_REVIEWER,
+  POLISH_LINES,
+  POLISH_REVIEWER,
+  POLISH_VERIFY,
   PR_CONTEXT_RULES,
   PREEXISTING_LINES,
   PREEXISTING_REVIEWER,
@@ -1096,6 +1100,58 @@ describe("review v3 prompt switches", () => {
     expect(promptVersion(both)).toBe(`${REVIEW_PROMPT_VERSION}+callers+preexisting`);
   });
 
+  // docs/plans/review-v2/minor-fold.md sections 4 and 5 (AC-R60, AC-R63).
+  const withPolish = (s: string) => s.replace(ANCHOR_LINE, `${ANCHOR_LINE}\n${POLISH_LINES.join("\n")}`);
+  test("minor-fold: rl-main, rl-reviewer, and salvage get the polish lines after the anchor line; the verify phase gets its lines", () => {
+    const m = withVariants("minor-fold");
+    expect(minorFold(m)).toBe(true);
+    expect(minorFold(general)).toBe(false);
+    for (const c of [FULL, RE, NO_CONTEXT]) {
+      expect(mainAgent(m, c).prompt).toBe(withPolish(mainAgent(general, c).prompt));
+      expect(reviewerAgent(m, c).prompt).toBe(
+        withPolish(reviewerAgent(general, c).prompt).replace(REPORT_LINE, `${REPORT_LINE}\n${POLISH_REVIEWER}`),
+      );
+    }
+    expect(salvageAgent(m).prompt).toBe(withPolish(salvageAgent(general).prompt));
+    expect(POLISH_LINES.join(" ")).toContain("Report at most 3 polish points.");
+    for (const agent of [verifyAgent, verifierAgent])
+      for (const q of [false, true])
+        expect(agent(m, FULL, q).prompt).toBe(
+          agent(general, FULL, q).prompt.replace(HISTORY_LINE, `${HISTORY_LINE}\n${POLISH_VERIFY.join("\n")}`),
+        );
+    expect(buildPrompt({ ...full, profile: m })).toBe(buildPrompt(full));
+    expect(buildRereviewPrompt({ ...rereviewInput, profile: m })).toBe(buildRereviewPrompt(rereviewInput));
+    expect(buildVerifyPrompt({ ...full, profile: m, count: 3, rereview: false })).toBe(
+      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
+    );
+    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(m, FULL).prompt).toBe(kind(general, FULL).prompt);
+    expect(promptVersion(m)).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold`);
+    // With preexisting: the polish lines follow the pre-existing lines, and the polish verify lines follow the pre-existing ones.
+    const both = withVariants("preexisting", "minor-fold");
+    expect(mainAgent(both, FULL).prompt).toBe(
+      mainAgent(general, FULL).prompt.replace(ANCHOR_LINE, `${ANCHOR_LINE}\n${[...PREEXISTING_LINES, ...POLISH_LINES].join("\n")}`),
+    );
+    expect(verifyAgent(both, FULL).prompt).toBe(
+      verifyAgent(general, FULL).prompt.replace(HISTORY_LINE, `${HISTORY_LINE}\n${[...PREEXISTING_VERIFY, ...POLISH_VERIFY].join("\n")}`),
+    );
+    expect(promptVersion(both)).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold+preexisting`);
+  });
+
+  test("minor-fold: the CLI schemas ask for polish only under the variant; preexisting alone has no polish key", () => {
+    type Node = { type?: string; required?: string[]; properties?: Record<string, Node>; items?: Node };
+    const item = (s: Record<string, unknown>) => (s as Node).properties?.findings?.items as Node;
+    for (const s of [reviewJsonSchema(false, false, true), reviewJsonSchema(true, false, true), rereviewJsonSchema(false, true)]) {
+      expect(item(s).required).toContain("polish");
+      expect(item(s).properties?.polish?.type).toBe("boolean");
+      expect(Object.keys(item(s).properties ?? {})).not.toContain("preexisting");
+    }
+    for (const s of [reviewJsonSchema(false, true), reviewJsonSchema(true, true), rereviewJsonSchema(true)])
+      expect(Object.keys(item(s).properties ?? {})).not.toContain("polish");
+    // Both marks: both keys, preexisting first.
+    const keys = Object.keys(item(reviewJsonSchema(false, true, true)).properties ?? {});
+    expect(keys.slice(-2)).toEqual(["preexisting", "polish"]);
+  });
+
   test("ASD-STE100: every switch line has at most 20 words", () => {
     expect(
       longSentences([
@@ -1113,6 +1169,9 @@ describe("review v3 prompt switches", () => {
         PREEXISTING_REVIEWER,
         ...PREEXISTING_VERIFY,
         ...CALLERS_LINES,
+        ...POLISH_LINES,
+        POLISH_REVIEWER,
+        ...POLISH_VERIFY,
       ]),
     ).toEqual([]);
   });
@@ -1124,6 +1183,7 @@ describe("review v3 prompt switches", () => {
       "broad",
       "callers",
       "classes",
+      "minor-fold",
       "obligations",
       "parts",
       "preexisting",
@@ -1153,6 +1213,7 @@ describe("review v3 prompt switches", () => {
       withVariants("security2-verify"),
       withVariants("preexisting"),
       withVariants("callers"),
+      withVariants("minor-fold"),
     ].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
     // spec.md section 1.8: outcome hide parses to no key and keeps the revision. Demote changes it.

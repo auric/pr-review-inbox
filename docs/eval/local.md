@@ -70,7 +70,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 
 ## Probe set
 
-`fixtures/eval/probe/` holds 16 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
+`fixtures/eval/probe/` holds 21 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
 
 - 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
 - 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
@@ -84,6 +84,9 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
   - `probe-obl-doc-contract`: `docs/api.md` says that the lookup returns null when nothing matches. The change makes it throw.
   - `probe-obl-criterion-deferred`: the task has two criteria. The change meets one. The PR text says that the rest "comes later" and names no ticket.
   - `probe-obl-platform-guard` (rule 8a): a C library gets a macOS build. A linker symbol script and a symbol test guard the Linux build. The macOS branch gets no guard.
+- 2 cases (`probe-polish-*`, docs/plans/review-v2/minor-fold.md section 6.3) have one bug at severity nit. Recall at balanced leaves it out, so only polish recall counts it:
+  - `probe-polish-todo`: an added TODO names no ticket. A trap is the added TODO that names SHOP-51.
+  - `probe-polish-stale-comment`: the change makes the last entry win. The unchanged comment above it still says that the first entry wins.
 - 3 cases (`probe-obl-met-*`) are clean: the change meets the obligation. Each trap is on the line where a careless check reports it: `probe-obl-met-guide` (the guide shows the new call), `probe-obl-met-guard` (the change adds the guard entry), and `probe-obl-met-followup` (the PR text names the follow-up ticket SHOP-42).
 
 A fixture case can have `threads` and `clean`, as a local case can. The run seeds the threads into the comment table, so `pr-context.md` lists them. A fixture case has no `text` on its items: `note` and `why` describe them.

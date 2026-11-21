@@ -17,7 +17,7 @@ import {
   type Variant,
   type Volume,
 } from "../../shared/dto";
-import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, PREEXISTING_MAX, REVIEW_PROMPT_VERSION } from "../../shared/review";
+import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, POLISH_MAX, PREEXISTING_MAX, REVIEW_PROMPT_VERSION } from "../../shared/review";
 import {
   CHECK_TIMEOUT_SEC,
   EXTERNAL_KINDS,
@@ -587,6 +587,42 @@ export const PREEXISTING_VERIFY = [
   "When a pre-existing candidate and another candidate describe one problem, the pre-existing one is the duplicate.",
 ];
 
+// docs/plans/review-v2/minor-fold.md sections 3 and 4: the finder lines of the variant "minor-fold". validate.ts keeps the mark only
+// under the variant, judge.ts settle caps the points at POLISH_MAX, and displayGroup puts them into fold.
+export const minorFold = (p: Partial<Pick<Profile, "variants">>) => has(p, "minor-fold");
+export const POLISH_LINES = [
+  "You can also report polish points. A polish point is no defect, but a reviewer would ask the author to fix it.",
+  'The do-not-flag list and the line "Give no nits" do not apply to polish points.',
+  "Report only these kinds of polish points, and set category to the kind:",
+  "- todo: an added line holds a TODO or FIXME. The line names no ticket and no pull request.",
+  "- stale: a comment next to changed code states something false about the code at the head.",
+  "- naming: a new or changed name states something false about what its code does.",
+  "- naming: a new name breaks the naming pattern of its own file. Give a line of that pattern in evidence.",
+  "- clarity: an added line holds commented-out code or a debug print.",
+  "- clarity: an added line holds a value whose named constant the repository already has. Give that constant in evidence.",
+  "Never report wording, grammar, formatting, or a choice between two good names.",
+  "A defect, or a false doc that users or callers act on, is no polish point. Report it as a finding.",
+  "Anchor a polish point on its line. When that line is unchanged, set cause to the changed line that makes it false.",
+  "Set severity to nit. In trigger, say what a reader gets wrong, or what stays undone.",
+  `Report at most ${POLISH_MAX} polish points. Pick the points that a reviewer would most likely ask to fix.`,
+  "Set polish to true on each polish point. Set polish to false on every other finding.",
+];
+export const POLISH_REVIEWER = "Also report polish for each finding.";
+// The verify lines of the variant. context-files.ts candidatesFile marks a polish candidate.
+export const POLISH_VERIFY = [
+  'A candidate with the line "Polish: yes" is a polish point. Its category names its kind: todo, stale, naming, or clarity.',
+  "For a polish point, check only the claim at its anchor and its cause. Do not look for a trigger.",
+  'The do-not-flag item "style, naming, formatting, or comment wording" does not apply to a polish point.',
+  "Confirm a todo point only when the line is added and names no ticket and no pull request.",
+  "Confirm a stale point only when the comment states something false about the code at the head.",
+  "The change must also touch that code or make the comment false.",
+  "Confirm a naming point only when the name states something false, or the cited pattern holds in its file.",
+  "Confirm a clarity point only when the line is added and holds what the candidate says.",
+  "Refute a polish point about wording, grammar, formatting, or a choice between two good names.",
+  "When a polish point and another candidate describe one problem, the polish point is the duplicate.",
+  "Never give question for a polish point. Set its severity to nit.",
+];
+
 // spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for.
 export function finderRules(p: FinderProfile, main: boolean): string[] {
   return [
@@ -596,6 +632,7 @@ export function finderRules(p: FinderProfile, main: boolean): string[] {
     "Report only problems that the change adds or makes reachable. BASE..HEAD is the change.",
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
     ...(preexisting(p) ? PREEXISTING_LINES : []),
+    ...(minorFold(p) ? POLISH_LINES : []),
     ...PLACE_RULES,
     "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.",
     ...(main
@@ -1378,6 +1415,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       "Report each finding with its place: path, side, line, lineEnd, anchorText, and cause.",
       "Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.",
       ...(preexisting(p) ? [PREEXISTING_REVIEWER] : []),
+      ...(minorFold(p) ? [POLISH_REVIEWER] : []),
       ...(parts ? [PART_REVIEWER] : []),
     ].join("\n"),
   };
@@ -1523,6 +1561,7 @@ export function verifyRules(
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
       : []),
     ...(preexisting(p) ? PREEXISTING_VERIFY : []),
+    ...(minorFold(p) ? POLISH_VERIFY : []),
     ...(v2 && c.prContext ? [VERIFY2.thread] : []),
     ...(v2 && p.modules.includes("intent") && !lacks("intent", c) ? [VERIFY2.intent] : []),
     ...(security2Verify(p) ? [SECURITY2.verifyHead, ...SECURITY2.verify.map((l) => `- ${l}`)] : []),

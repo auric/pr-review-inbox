@@ -444,6 +444,7 @@ function items(d: RunDetail, volume: Volume | undefined): EvalItem[] {
           cause: { path: p.cause.path, side: p.cause.side, line: p.cause.line, lineEnd: p.cause.lineEnd, anchorText: p.cause.anchorText },
         }),
         ...((p as { carried?: unknown }).carried !== undefined && { carried: true }),
+        ...(p.polish === true && { polish: true }),
       },
     ];
   });
