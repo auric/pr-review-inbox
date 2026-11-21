@@ -1,6 +1,6 @@
 # Postable risks
 
-Status: designed 2026-11-21, not started. Low priority: the risk check (risk-check.md) did not pass Gate A. Design item 7. It changes no prompt byte and needs no eval gate. It depends on the risk check, which stays opt-in until WP-RC3.
+Status: designed 2026-11-21, not started. The user decided section 8 on 2026-11-21. Gate RC-A (risk-check.md section 7) passes under the fallback of 2026-11-17. The ship step (WP-RC3) waits for the user. WP-PR1 waits until WP-RC3 is decided. Design item 7. It changes no prompt byte and needs no eval gate. It depends on the risk check, which stays opt-in until WP-RC3.
 
 ## 1. Request and answer
 
@@ -8,7 +8,7 @@ The request: a real, confirmed risk becomes a PR comment with one click, like a 
 
 - On a default run, no risk can post. A risk is a line of text in the run summary. It is not an item, and the post plan reads only items.
 - Under the variant "risk-check", a confirmed risk is already a draft. A risk with a place becomes a finding draft. A risk without a place becomes a question draft that posts in the general comment. Both post with Accept and Post, like any finding.
-- Three gaps remain. The run line does not show which draft came from which risk. The fallback in risk-check.md section 7 would remove the draft of a confirmed risk without a place. The check is off by default.
+- Three gaps remain. The run line does not show which draft came from which risk. The fallback in risk-check.md section 7 can remove the draft of a confirmed risk without a place. The check is off by default.
 - This design adds no new post path. It links each risk entry to its draft. The check stays the only way that a risk becomes a draft.
 
 ## 2. Facts
@@ -156,9 +156,9 @@ WP-PR2:
 | 2 | WP-PR2: risk entries with their drafts | implementer | src/web/review/model.ts (riskEntries), src/web/review/RunLine.tsx, src/web/review/useRunRecord.tsx, tests/web/review-v2.test.ts, a .tsx render test, tests/e2e/review-v2.e2e.ts and its serve.ts profile with the variant, scripts/demo.ts, tests/support/fake-claude.ts, README.md, CHANGELOG.md, docs/screenshots | Section 6 | check and test:e2e are green. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
 
 Order:
-- Do WP-PR1 first. It is safe now, because it acts only under the variant. From then on, each variant run stores the link.
+- Hold WP-PR1 until the user decides WP-RC3 (Q4). It acts only under the variant. From then on, each variant run stores the link.
 - WP-PR2 shares RunLine.tsx, model.ts, the demo, the e2e tests, README, and CHANGELOG with WP-RC4. So WP-PR2 is the run-line half of WP-RC4 (the toggle, the entries, and the link). WP-RC4 keeps stats.ts, quality.ts, and the runningText.
-- Build WP-PR2 and WP-RC4 as one package, or build WP-PR2 first. Never build them in parallel.
+- WP-PR2 ships with WP-RC4, as one package (Q4). Never build them in parallel.
 - Unverified: the e2e and demo setups have no profile with variants yet. Also unverified: whether fake-claude gives verdicts for "## Risk N" blocks. WP-PR2 adds both if they are missing.
 
 Docs in WP-PR2:
@@ -169,11 +169,11 @@ Docs in WP-PR2:
 
 ## 8. Open questions
 
-Q1. Do open and unchecked risks get any path to a draft, for example "Make a draft" with the risk text? Recommended: no, per the decision of 2026-11-17. A real risk gets its draft from the check.
-Q2. The fallback in risk-check.md section 7: if rule 4 of Gate RC-A fails, R5 makes no item. A confirmed risk without a place then cannot post. Do we apply the fallback to R6 only? Recommended: yes. Rule 4 then counts only R6 question items. Decide this before Gate RC-A runs. Unverified: what share of asked risks are R5.
-Q3. R5 posts without its severity. When the run has two or more question items, R5 posts under "Questions:". Do we make it a statement with the verdict severity? Recommended: not now. It needs a severity in the payload, a change to plan.ts generalText, a change to the Drafts row, and a change to the questions.md label of later runs. Look at the Gate RC-B data first.
-Q4. When does WP-PR2 ship? Option 1: with WP-RC4, after WP-RC3. Option 2: now, visible only under the variant. Recommended: option 1. README lists no opt-in variant, and one screenshot round covers both packages.
-Q5. Do found obligation drafts get the same link (`fromObligation`) in WP-OB4? Recommended: yes, with the same rule as section 4.2.
+Q1. Do open and unchecked risks get any path to a draft? Decided by the user on 2026-11-21: no. An open or unchecked risk never becomes a draft. Only the check makes a risk draft.
+Q2. How does the fallback of risk-check.md section 7 treat R5 and R6? Decided by the user on 2026-11-21: as a cascade, fixed before anyone reads the R5 share. When only rule 4 of Gate RC-A fails, drop the R6 question items first. If rule 4 still fails, drop the R5 question items too. Rule 4 counts every question item that remains, R5 included. The R5 and R6 split needs the recorded verify calls or a split in RISK_KEYS. Neither is built.
+Q3. Does R5 post as a statement with the verdict severity? Decided by the user on 2026-11-21: not now. Gate RC-B counts only findings of category risk, so it cannot answer this. WP-RC4 adds posted and discarded counts of `fromRisk` question items to the stats. The decision follows those counts.
+Q4. When does WP-PR2 ship? Decided by the user on 2026-11-21: WP-PR2 ships with WP-RC4. WP-PR1 waits until WP-RC3 is decided.
+Q5. Do found obligation drafts get the same link (`fromObligation`) in WP-OB4? Decided by the user on 2026-11-21: yes, with the same link rule as section 4.2.
 
 ## 9. Out of scope
 

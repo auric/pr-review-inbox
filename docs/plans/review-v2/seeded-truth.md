@@ -117,7 +117,7 @@ How to read the table:
 - With 9 kinds, the per-kind floor is 36 seeds: MDE 18.6 points, power 16%, 38%, and 64% at +5, +10, and +15 points.
 - A lever on one kind cannot pass alone: 7 of 60 seeds move the delta by 11.7 points at most.
 - More seeds per group give diminishing returns, because DEFF grows with m.
-- lenses3 against runs3 directly (R = 2 each) needs a difference of about 16 to 18 points. A smaller diversity effect stays inconclusive. Then pick the cheaper variant.
+- lenses3 against runs3 directly (R = 2 each) needs a difference of about 16 to 18 points. A smaller diversity effect stays inconclusive. Then the tie rule of section 6.5 picks the variant.
 - S_R on the seeded baseline at R = 3 is about 1.69 x sqrt(sum p(1-p)), about 6 bugs, or 10 points of 60. The interval rule binds before the S_R rule.
 
 Difficulty rules (no tuning on outcomes):
@@ -282,7 +282,7 @@ Built by the tool, valid under `localCaseFile` (cases.ts:131-152):
 
 - Recall raiser, "better": mean seeded recall of B minus mean of A is more than S_R of the seeded baseline. Also, the paired 90% interval of the seeded must-finds excludes 0.
 - Guards: trap rate within the seeded baseline spread. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. For a full candidate run, the paired grounded noise delta is at most 10% of mean(A) per case, and the paired judge fp delta per case run is at most 0.07. For a verify-only replay of SG-A, these limits are 0.08 per case and 0.05. Extras matched per case run is not below mean(A) minus its spread. Cost: the user decides.
-- lenses3 against runs3: "diversity beats repeats" only when the paired interval of lenses3 minus runs3 excludes 0. Otherwise ship the cheaper one, or neither.
+- lenses3 against runs3: "diversity beats repeats" only when the paired interval of lenses3 minus runs3 excludes 0. Otherwise lenses3 ships only when its cost is less than 10% above runs3 (focused-passes.md question 5). Else the cheaper one ships, or neither.
 - Cost cutters and noise gates stay on the natural set.
 
 ## 7. Leakage (Q5)
@@ -513,9 +513,9 @@ The user decided these points on 2026-11-21.
 | 5 | Review effort | The user hand-reviews less than 25% of the seeds: a first sample of 14 seeds. An escalation to more review needs the user's OK at that time. Without it, the unsampled seeds of that kind stay out. Section 5.5 gives the rule. |
 | 6 | Timing | SG-A runs after the next prompt version bump. "preexisting" and "callers" run on the natural set against Gate A. |
 | 7 | Ship venue | Recall raisers ship on the seeded set only. Extras matched is the natural guard. |
-| 8 | lenses3 against runs3 | When their direct interval includes 0, ship the cheaper one, only if it passes "better" against SG-A. |
+| 8 | lenses3 against runs3 | When their direct interval includes 0, ship the cheaper one, only if it passes "better" against SG-A. Refined by the user on 2026-11-21 (focused-passes.md question 5). lenses3 ships when its cost is less than 10% above runs3. |
 | 9 | Architecture bugs (requirement of 2026-11-21) | A ninth kind "architecture" (architecture-bugs.md). |
 | 10 | Tier 2 architecture defects (no wrong result today) | Out of scope (architecture-bugs.md question 1). |
 | 11 | lenses3 L2 and `ARCHITECTURE_LINES` | L2 of lenses3 takes `ARCHITECTURE_LINES` (architecture-bugs.md question 2). |
-| 12 | The stacked candidate "callers,architecture" | Open. Ask the user after lenses3 (architecture-bugs.md question 4). |
+| 12 | The stacked candidate "callers,architecture" | Run both together on the seeded set (about $70-90), after every SG-A candidate that can change the default prompt. Read the G-L2 `pass 2` rows first ($0). A pass ships both. An inconclusive result keeps both opt-in. A pass is no evidence for the architecture lines alone, because that row is descriptive. Decided by the user on 2026-11-21 (architecture-bugs.md question 4). |
 | 13 | Per-kind floor of 4 kept seeds | Warn only, never block. Decided by the user on 2026-11-21. The build prints each kind under the floor. |

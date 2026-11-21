@@ -1,6 +1,6 @@
 # Risk check
 
-Status: design of 2026-11-17. WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) are built as the opt-in variant "risk-check". Joint Gate A, WP-RC3, and WP-RC4 are open. REVIEW_PROMPT_VERSION stays "2.8" until WP-RC3 ships. The criteria AC-R40 to AC-R47 go into spec.md section 1 in WP-RC3.
+Status: design of 2026-11-17. WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) are built as the opt-in variant "risk-check". Gate RC-A passes under the fallback of 2026-11-17 (section 7). The ship step (WP-RC3) waits for the user. WP-RC4 is open. REVIEW_PROMPT_VERSION stays "2.8" until WP-RC3 ships. The criteria AC-R40 to AC-R47 go into spec.md section 1 in WP-RC3.
 
 ## 1. Request and verdict
 
@@ -192,7 +192,7 @@ The run line keeps one toggle in its present place.
 
 ### 4.9 Review quality
 
-The Check cell gets one line for each group with a `finderRisks` run: "Risks: 12 checked: 3 found, 1 asked, 5 cleared, 2 same as a finding, 1 open. Risk findings: 2 posted, 1 discarded." The posted and discarded counts test precision on real reviews.
+The Check cell gets one line for each group with a `finderRisks` run: "Risks: 12 checked: 3 found, 1 asked, 5 cleared, 2 same as a finding, 1 open. Risk findings: 2 posted, 1 discarded. Risk questions: 1 posted, 0 discarded." The posted and discarded counts test precision on real reviews. Risk questions are question items with `fromRisk` (postable-risks.md Q3, decided by the user on 2026-11-21). These counts decide whether R5 posts as a statement.
 
 ### 4.10 The sub-asks
 
@@ -243,12 +243,14 @@ The Check cell gets one line for each group with a `finderRisks` run: "Risks: 12
 Ship rule, candidate against control:
 
 1. Grounded recall is not worse: the mean is at least the control mean minus S_R.
-2. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a verify-only replay. The paired grounded noise delta against the control is at most 0.08 per case. The paired judge fp delta per case run is at most 0.05.
+2. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a verify-only replay. The control is the shipped default at run time (review-quality-2026.md section 2). The paired grounded noise delta against the control is at most 0.08 per case. The paired judge fp delta per case run is at most 0.05.
 3. In the "Shown risk findings" row, gold matches plus judge tp are at least the judge fp.
 4. Question items per case run rise by no more than the control spread.
 5. Cost per case rises by 25% or less. Above that, the user decides.
 
-If only rule 4 fails, the fallback applies. R5 and R6 then give open, with the question in the note and no item. The same replay shows that result: question items minus finderRisks.asked.
+If only rule 4 fails, the fallback applies as a cascade (decided by the user on 2026-11-21, postable-risks.md Q2). Step 1: R6 gives open, with the question in the note and no item. Step 2: if rule 4 still fails, R5 gives open too. Rule 4 counts every question item that remains, R5 included. The replay shows step 2 as question items minus finderRisks.asked. Step 1 needs the R5 and R6 split: the recorded verify calls, or a split in RISK_KEYS. Neither is built.
+
+Result of 2026-11-20 (Gate A recording, prompt 2.8, 50 case runs per repeat, 2 repeats): only rule 4 failed. With step 2, all five rules pass. Recall: +1.3 points. Noise: +0.06 per case, limit 0.08. Judge fp: +0.03 per case run, limit 0.05. Question items: 27 against 27 per 100 case runs. Cost: +11.8% per case. Step 1 alone is not measured. The ship step (WP-RC3) waits for the user.
 
 The replay cannot show the gain on requirement and maintenance items. Rules 1 to 4 show only that the check does no harm.
 
@@ -279,7 +281,7 @@ Draft text of FINDER_RISK_RULES (rl-main and salvage only):
 - AC-R44. A risk verdict never changes summary.verify, never adds a coverage line, and never makes the run incomplete.
 - AC-R45. A found risk is a finding item with category risk, module core, evidenceStatus code, confidence high, an empty trigger, the verify mark confirmed, and the verdict severity.
 - AC-R46. The run line shows one toggle "Risks: …" with the counts above zero, and one entry per risk with its outcome word and note. A run without finderRisks shows "Risk areas: N".
-- AC-R47. Review quality shows the risk sums and the posted and discarded risk findings per profile and prompt version. Eval run files hold the counts only.
+- AC-R47. Review quality shows the risk sums and the posted and discarded risk findings per profile and prompt version. It also shows the posted and discarded question items with `fromRisk`. Eval run files hold the counts only.
 
 ## 9. Work packages
 
@@ -289,7 +291,7 @@ Draft text of FINDER_RISK_RULES (rl-main and salvage only):
 | 2 | WP-RC2: eval counts | implementer | scripts/eval/run.ts, score.ts, compare.ts; tests/eval/score.test.ts, ab.test.ts, harness.test.ts; docs/eval/local.md | The sums, the risk row, the compare line, and the replay accepts "risk-check". | `bun run check` is green. A fake replay prints the risk line. |
 | 3 | Gate RC-A | user | none | Section 7. | The ship rule passes, and the user approves. |
 | 4 | WP-RC3: ship the check | implementer | src/shared/review.ts (REVIEW_PROMPT_VERSION "2.9", its comment, the describe text of verifyVerdict.finding); catalog.ts and jobs.ts (the check is always on); dto.ts and run.ts (remove "risk-check"); spec.md (AC-R40 to AC-R47); docs/eval/results.md; docs/eval/local.md | Snapshot updates. An old profile with "risk-check" reads without it. | Each review run has the check. `bun run check` is green. |
-| 5 | WP-RC4: UI, stats, and docs | implementer | src/web/review/RunLine.tsx, model.ts (the toggle, the entries, runningText); src/web/settings/quality.ts; src/server/review/stats.ts; scripts/demo.ts; tests/support/fake-claude.ts; tests/web/review-v2.test.ts; the stats.ts test; tests/e2e/review-v2.e2e.ts; README.md; docs/screenshots via `bun run screenshots`; CHANGELOG.md | Unit tests for the toggle label and the entries. One e2e: a run with all five outcomes shows the toggle, the entries, one finding draft, and one question. m2.e2e.ts keeps "Risk areas: 2" for a run without finderRisks. | AC-R46 and AC-R47. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
+| 5 | WP-RC4: UI, stats, and docs | implementer | src/web/review/RunLine.tsx, model.ts (the toggle, the entries, runningText); src/web/settings/quality.ts; src/server/review/stats.ts (also posted and discarded counts of question items with `fromRisk`, postable-risks.md Q3); scripts/demo.ts; tests/support/fake-claude.ts; tests/web/review-v2.test.ts; the stats.ts test; tests/e2e/review-v2.e2e.ts; README.md; docs/screenshots via `bun run screenshots`; CHANGELOG.md | Unit tests for the toggle label and the entries. One e2e: a run with all five outcomes shows the toggle, the entries, one finding draft, and one question. m2.e2e.ts keeps "Risk areas: 2" for a run without finderRisks. | AC-R46 and AC-R47. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
 | 6 | Gate RC-B | user | none | Section 7. | The user decides. |
 | 7 | WP-RC5 (optional): finder half, variant "risks" | implementer | catalog.ts (FINDER_RISK_RULES in rl-main and salvage only); dto.ts (VARIANTS); tests | The rule lines with and without the variant, and the snapshot. | Gate RC-C passes. |
 
@@ -301,14 +303,14 @@ WP-RC3 edits files of WP-RC1 and WP-RC2. It runs alone, after both are committed
 2. How many risks does a run give, and which share of the cost is the check? Unverified. The replay prints both.
 3. Does the own review of a task get the check? Recommended: yes, because a confirmed risk is a defect with a place. The effect on the fix loop is unverified.
 4. Do open risks carry into the next re-review through history.md? Recommended: not in this version.
-5. If rule 4 of Gate RC-A fails, does the fallback apply? Recommended: yes.
+5. If rule 4 of Gate RC-A fails, does the fallback apply? Recommended: yes. Decided by the user on 2026-11-17 (below), refined to a cascade on 2026-11-21 (section 7).
 6. Is category "risk" correct for found risks? A confirmed bug from a risk then sorts after the bug classes. Recommended: yes.
 7. Rule 15 narrows "comment wording" for risk blocks only. Does the user want it? Case (b) needs it.
 
 ### User answers of 2026-11-17
 
 - Question 3: yes. The own review of a task gets the risk check.
-- Question 5: yes. If rule 4 of Gate RC-A fails, risk questions become open lines with no item.
+- Question 5: yes. If rule 4 of Gate RC-A fails, risk questions become open lines with no item. On 2026-11-21 the user made this a cascade: R6 first, then R5 (section 7).
 - Question 7: yes, with limits. Rule 15 applies only when the comment, TODO, or doc states something false about the code at the head, and the change touched that code or made the text false. Wording, style, and grammar stay out. The severity is nit or minor, so under "balanced" the finding waits in "More". The rule applies to risk blocks only in WP-RC1. A wider rule for the finder waits for the Gate RC-B data.
 
 ## 11. Out of scope

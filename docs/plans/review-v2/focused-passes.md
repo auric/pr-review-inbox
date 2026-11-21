@@ -1,6 +1,6 @@
 # Focused passes: three finder runs with different lenses (variant "lenses3")
 
-Status: design of 2026-11-21 against main 484a4e5. Not built. WP-AR1 is pushed (bb1afd0). Packages: WP-L0 (docs), WP-L1 (passes in the app), WP-L2 (eval diagnostics). Paid steps: pilot P-L, gates G-L1 and G-L2. The conditional package WP-L3 (merge agent) runs only when the noise rule fails mainly through duplicates. The text names no other app, company, host, project, case ID, or PR number. The recall plan of 2026-11-17 lies outside the repository. Its lens names are reused here, and the lens text in this file is new.
+Status: design of 2026-11-21 against main 484a4e5. Not built. The user decided section 11 on 2026-11-21. WP-AR1 is pushed (bb1afd0). Packages: WP-L0 (docs), WP-L1 (passes in the app), WP-L2 (eval diagnostics). Paid steps: pilot P-L, gates G-L1 and G-L2. The conditional package WP-L3 (merge agent) runs only when the noise rule fails mainly through duplicates. The text names no other app, company, host, project, case ID, or PR number. The recall plan of 2026-11-17 lies outside the repository. Its lens names are reused here, and the lens text in this file is new.
 
 Sources: review-quality-2026.md (items 6, 7, 11, 12, section 2, section 4), architecture-bugs.md, seeded-truth.md (sections 4, 6.5, 9, 14), review-ledger.md, review-v3.md (section 10, WP-V14), parallel-runs.md, and the code: catalog.ts, jobs.ts, judge.ts, validate.ts, context-files.ts, claude.ts, src/shared/dto.ts, review.ts, run-log.ts, scripts/eval/run.ts, ab.ts, score.ts, compare.ts.
 
@@ -9,7 +9,7 @@ Sources: review-quality-2026.md (items 6, 7, 11, 12, section 2, section 4), arch
 - One review runs three finder passes in sequence, in one workspace, run row, and run slot. Each pass is the full default finder with one lens block added.
 - L1 looks at failure paths, ownership, and shared state. L2 takes CALLERS_LINES and ARCHITECTURE_LINES. L3 looks at the whole change: entry points, places it runs, scale, and rollout.
 - Each pass is checked alone by `judge()`. The app then joins the three results into one candidate list. The existing overlap groups and the verifier "duplicate" verdict remove the repeats. One verify phase checks the union.
-- The control "runs3" uses the same code with no lens lines. Today neither variant exists in code.
+- The control "runs3" uses the same code with no lens lines. It differs from lenses3 in the lens text and ARCHITECTURE_VERIFY (section 4.7). Today neither variant exists in code.
 - With both variants off, no prompt, schema, event ID, payload, or version changes. Snapshot tests prove it.
 - The gate runs on the seeded set against SG-A. "Better" needs recall above S_R and a paired interval that excludes 0. The new noise rule, trap rate, extras, and notCompleted also apply. The user decides on cost.
 - Expected cost is 2.4 to 3.0 times one review, and expected minutes are 2.5 to 3 times (estimates). A real +10-point gain has about a one-in-two chance to pass. The noise rule is the likeliest failure, because three passes add true findings outside the seeds and the same bug at two anchors.
@@ -185,7 +185,8 @@ Report other problems too.
 - Definition: the same pass loop, merge, dedupe, verify group line, and caps as lenses3, with lens null in every pass. The three passes get byte-identical prompts. Only lens text and ARCHITECTURE_VERIFY differ from lenses3.
 - runs3 does not exist in code today (section 3). Item 6 of review-quality-2026.md is designed and not built.
 - This file replaces the mechanics of item 6. The order files (./context/order.md) and the merge agent are not built. Item 6 keeps its hypothesis, its zero-cost gate, and "never the default". The merge agent becomes the WP-L3 fallback.
-- Reason: with one difference, the direct runs3 against lenses3 interval measures "diversity beats repeats" alone.
+- Reason: runs3 differs from lenses3 only in the lens text and ARCHITECTURE_VERIFY. So the direct runs3 against lenses3 interval measures "diversity beats repeats". runs3 is not "one difference from the normal review". It also adds the pass loop, the merge, and the shared verify phase.
+- runs3 gets no architecture verify lines (decided by the user on 2026-11-21, question 3).
 
 ### 4.8 Variant off: no change
 
@@ -252,7 +253,7 @@ Pilot total: about $32-53 (estimate). A failed pilot stops the gate. Fix the mec
 
 - Read the union rows of SG-A (compare.ts prints `unionRecall` per side). Δu = unionRecall(3) − unionRecall(1) in seeds.
 - Run runs3 (G-L1) only when Δu is more than S_R of SG-A. Below that, runs3 cannot pass "better".
-- When G-L0 fails, ask the user before G-L2. Then compare lenses3 with the SG-A union(3) number, as information.
+- When G-L0 fails, runs3 does not run (question 4). Ask the user before G-L2. Then compare lenses3 with the SG-A union(3) number, as information only.
 
 ### 5.4 Candidate runs
 
@@ -274,7 +275,9 @@ Each candidate against SG-A:
 
 - Recall: mean seeded recall of B minus mean of A is more than S_R of SG-A. The paired 90% interval of the seeded must-finds also excludes 0.
 - Trap rate: at most mean(A) plus S_T.
-- Noise: the paired grounded noise delta per case is at most 10% of mean(A). The paired judge fp delta per case run is at most 0.07.
+- Noise: the paired grounded noise delta per case is at most 10% of mean(A). The paired judge fp delta per case run is at most 0.07. The compare also prints the judge-tp part, the judge-fp part, and `dupShown` of the grounded noise delta.
+- Audit rule (question 1, decided by the user on 2026-11-21): a blind user audit decides noise when only the judge-tp part breaks the limit. The sample is 20 judge-tp items that the candidate adds. Noise passes when at least 60% of them are real bugs (12 of 20).
+- Audit details, not decided by the user: the draw uses seed 2026 (`BOOTSTRAP.seed` of score.ts). With fewer than 20 items, the user audits all. The user sees no judge label and no variant name.
 - Extras matched per case run: not below mean(A) minus its spread.
 - notCompleted per repeat: not higher than mean(A). Report incomplete runs and their failed-pass lines apart.
 - Leaks: 0.
@@ -282,8 +285,9 @@ Each candidate against SG-A:
 
 Then:
 
-- lenses3 against runs3: "diversity beats repeats" only when the compare interval of lenses3 minus runs3 excludes 0. Otherwise ship the cheaper one, only if it passes "better" against SG-A, or ship neither (decision 8).
+- lenses3 against runs3: "diversity beats repeats" only when the compare interval of lenses3 minus runs3 excludes 0. Otherwise (a tie), lenses3 ships only when its cost per case run is less than 10% above runs3. Else the cheaper one ships. The candidate that ships must pass "better" against SG-A, or neither ships (decision 8, question 5). The architecture benefit of L2 is a preference, not evidence.
 - Information only: the `kind` rows, with `kind local` as the narrowing control, and the `pass k` rows and `dupShown` of WP-L2.
+- L3 drops only after a two-lens run passes against SG-A, never on the `pass 3` rows alone (question 6).
 - A winner ships as an option, never as the default (item 6). WP-LS designs the per-run toggle.
 - When a candidate passes recall and fails only noise, and `dupShown` holds most of the noise delta, plan WP-L3 and ask the user.
 
@@ -346,6 +350,7 @@ Then:
 - Files and symbols: scripts/eval/run.ts (EvalItem `pass` from the payload, next to `agent`, run.ts:447); scripts/eval/score.ts (`slices`: rows `pass <k>` with the seeds that pass k raised and the seeds that only pass k raised; metric `dupShown`: shown items with at least one gold match whose matches are all claimed, per case run); scripts/eval/compare.ts (labels); tests/eval/score.test.ts, harness.test.ts; docs/eval/local.md (the commands of section 5).
 - Tests: a hand-built case with one seed raised by passes 1 and 3 gives "pass 1: 1, only pass 1: 0". A second shown copy of a claimed seed gives `dupShown` 1. A file without `pass` prints "-".
 - Control mutation: count hidden items in `dupShown`, and its test fails.
+- Question 1 adds: the compare noise block prints the judge-tp and judge-fp parts of the paired grounded noise delta. The draw of the audit sample (section 5.5) has no design yet.
 - Acceptance: `bun run check` is green. No file under src/ changes.
 
 ### P-L, G-L0, G-L1, G-L2 (user and orchestrator)
@@ -358,7 +363,7 @@ Then:
 
 ### WP-LS. Ship (conditional)
 
-- Only after a pass. A per-run "Deep check" toggle, as in review-quality question 5. It needs its own design with UI, screenshots, README, and CHANGELOG.
+- Only after a pass. A per-run "Deep check" switch, off by default (decided by the user on 2026-11-21, question 7). It needs its own design with UI, screenshots, README, and CHANGELOG.
 
 ## 7. Invariants and evidence
 
@@ -400,14 +405,14 @@ Then:
 | Idea | Reason |
 |---|---|
 | Parallel passes in one cwd | One runner per process; the run end deletes the shared session folders; replay needs the call order; the pool size. |
-| Parallel passes in three worktrees | Three snapshots and three runners for one PR break the pool's one-run-per-PR rule. Time is the only gain. Open question 2. |
+| Parallel passes in three worktrees | Three snapshots and three runners for one PR break the pool's one-run-per-PR rule. Time is the only gain. Not before a ship (question 2). |
 | Merge before `judge()` | One bad pass would fail the run, and the answered indices would need remapping. A merge at the Found level keeps each pass's checks. |
 | App-side fuzzy dedupe across anchors | A heuristic. The verifier and the overlap groups are the decided route. |
 | A lens that replaces REVIEW_LENS or the do-not-flag list | It narrows (section 4), and an edit changes profileRevision. |
 | A per-pass dollar or turn cap below the profile | No cap exists, and none is measured. A cut pass loses findings to salvage. |
 | Lower effort or another model for passes 2 and 3 | It confounds the lens test. "runs3-mixed" stays a separate idea. |
 | Lens passes in re-reviews | Three `earlier` verdict lists conflict. |
-| Order files and a merge agent in runs3 | They add a second difference to the control (4.7). |
+| Order files and a merge agent in runs3 | They add another difference between runs3 and lenses3 (4.7). |
 
 ## 10. Unverified
 
@@ -422,12 +427,12 @@ Then:
 - UL9: the probe cost per case at the current prompt and advisor.
 - UL10: the original lens text of the recall plan. This text is new.
 
-## 11. Open questions (recommended answers)
+## 11. Questions and decisions
 
-1. With union passes, the 10% grounded noise limit counts true findings outside the seeds. Keep it for lenses3 and runs3? Recommended: keep the rule as decided. Also print the judge-tp, judge-fp, and `dupShown` parts. If only the judge-tp part fails, the user decides.
-2. Run passes in parallel in separate worktrees to cut minutes? Recommended: no, not now. Revisit only after a ship.
-3. Redefine runs3 as three identical passes with no order files and no merge agent? Recommended: yes, so that the control differs in one thing.
-4. Run runs3 when G-L0 fails? Recommended: no. Compare lenses3 with the SG-A union(3) number as information.
-5. When the direct interval includes 0 and the costs differ by less than 10%, which one ships? Recommended: lenses3, because L2 carries the architecture requirement of 2026-11-21. The user decides.
-6. Does L3 stay if its `pass 3` row adds no seed that only it finds? Recommended: decide after G-L2. A two-lens variant needs its own candidate run against SG-A.
-7. How does a winner ship? Recommended: a per-run "Deep check" toggle, default off (review-quality question 5).
+1. With union passes, the 10% grounded noise limit counts true findings outside the seeds. Keep it for lenses3 and runs3? Decided by the user on 2026-11-21: keep the 10% limit, and print the judge-tp and judge-fp parts. If only the judge-tp part fails, the blind audit of section 5.5 decides. It takes 20 items and passes at 60% real bugs.
+2. Run passes in parallel in separate worktrees to cut minutes? Decided by the user on 2026-11-21: no parallel passes until something ships.
+3. Redefine runs3 as three identical passes with no order files and no merge agent? Decided by the user on 2026-11-21: keep the design. It is the control. runs3 differs from lenses3 in the lens text and ARCHITECTURE_VERIFY (section 4.7). It is not "one difference from the normal review". runs3 gets no architecture verify lines.
+4. Run runs3 when G-L0 fails? Decided by the user on 2026-11-21: no. Compare lenses3 with the SG-A union(3) number for information only.
+5. When the direct interval includes 0, which one ships? Decided by the user on 2026-11-21: lenses3 ships only when its cost is less than 10% above runs3. The architecture benefit is a preference, not evidence.
+6. Does L3 stay if its `pass 3` row adds no seed that only it finds? Decided by the user on 2026-11-21: drop L3 only after a two-lens run passes against SG-A. The `pass 3` rows alone never drop it.
+7. How does a winner ship? Decided by the user on 2026-11-21: a per-run "Deep check" switch, off by default.

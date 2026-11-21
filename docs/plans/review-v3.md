@@ -1,6 +1,6 @@
 # Review v3 plan
 
-Status: planned, 2026-10-28. WP-V1, WP-V2, WP-V3, and WP-V4 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removed the lost variants. Wave 5 (section 10, recall on large PRs) stopped on 2026-11-01 after its first gate. Later review work goes on in review-v2/review-quality-2026.md. On 2026-11-19, WP-V6 (pre-existing group) and the caller rule of D2 were built as opt-in variants. Their names are "preexisting" and "callers". The eval compares them with the Gate A baseline. WP-V5 (CodeGraph by default) and WP-V8 are not built. WP-V7 overlaps the obligation kind "criterion" (review-v2/obligations.md), and keep or drop is open. WP-V9 and WP-V10 are blocked, and WP-V12 is superseded by the obligation check. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
+Status: planned, 2026-10-28. WP-V1, WP-V2, WP-V3, and WP-V4 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removed the lost variants. Wave 5 (section 10, recall on large PRs) stopped on 2026-11-01 after its first gate. Later review work goes on in review-v2/review-quality-2026.md. On 2026-11-19, WP-V6 (pre-existing group) and the caller rule of D2 were built as opt-in variants. Their names are "preexisting" and "callers". The eval compares them with the Gate A baseline. WP-V5 (CodeGraph by default) and WP-V8 are not built. WP-V7 is superseded by obligations (review-v2/obligations.md, kind "criterion"), decided by the user on 2026-11-21. WP-V9 and WP-V10 are blocked, and WP-V12 is superseded by the obligation check. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
 
 Sources: a comparison of our review pipeline with a similar app (2026-10-28, not in the repository), BRIEF.md sections 3.5 and 3.6, docs/plans/review-v2/design.md (R1 to R17, M1 to M4), docs/plans/review-v2/tasks.md (package format), scripts/eval/, and src/server/review/{catalog.ts, prompt.ts, validate.ts, codegraph.ts, jobs.ts}. Never name the other app, its author, or any company, host, or project in this repository.
 
@@ -220,6 +220,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 
 ### WP-V7. Task criteria rows (implementer, W3 after WP-V6; idea 5)
 
+- Status: superseded by obligations, decided by the user on 2026-11-21. Do not build.
 - Files: src/server/review/catalog.ts (intent module: one row per acceptance criterion of task.md or pr.md; when none exist, derive 3 to 8 and mark them derived); src/shared/review.ts (reviewResult `requirements`: criterion, source task, pr, or derived, status covered, partial, missing, or unclear, evidence path:line list; optional); src/server/review/judge.ts (quote check: a criterion with source task or pr must be an exact text of that file, else it drops); src/server/review/jobs.ts (store the rows in summary_json); fixtures/eval/hard/<new case with a missed criterion>/; tests/review/judge.test.ts, tests/review/prompt.test.ts.
 - Behavior: rows are a checklist in the run summary. Only the finder's own findings with module intent become drafts. A row never becomes a draft by itself, because lens rows were noisy in the other app.
 - Tests: a quoted criterion holds; a changed quote drops; a derived row needs no quote; old results without the field parse.
@@ -227,14 +228,14 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 - Eval measure: the new hard case (the missed criterion is a bug); the precision of intent findings on the local set.
 - Depends: WP-V6 merged.
 
-### WP-V8. Review checks per repository (implementer-xhigh, W3 after WP-V7; idea 6)
+### WP-V8. Review checks per repository (implementer-xhigh, W3 after WP-V6; idea 6)
 
 - Files: src/server/storage/migrations/040_review_check.sql (review_check: id, project, repo NULL for global, text, origin user or discuss, created, updated, deleted); src/server/storage/db.ts; src/server/review/checks.ts and checks-routes.ts (new: list, add, edit, delete with Undo); src/server/review/context-files.ts (checksFile: context/checks.md, the user's own text, no UNTRUSTED banner, at most 20 checks); src/server/review/catalog.ts (one context line; finding field `check`); src/shared/review.ts (finding `check: number | null`; discussResult `checkProposal`, at most 1); src/server/review/validate.ts (a check ID that is not in the file clears to null); src/server/review/discuss.ts (a proposal needs a live message of the user in the talk, as design.md D12; it counts only after Keep); src/server/review/stats.ts (posted and discarded per check); tests.
 - Behavior: review, re-review, and verify runs get checks.md. Fix, reply, Ask, and Explain runs do not. A repository check comes before a global one.
 - Tests: db.test.ts for 040; the file cap and order; an unknown check ID clears; a proposal without a user message drops; a proposal reaches no run before Keep (stdin and file canary).
 - Control mutation: write a proposed check into checks.md. The canary test must fail.
 - Eval measure: stats per check. A local case with a repository check when the user has one.
-- Depends: WP-V7 merged.
+- Depends: WP-V6 merged.
 
 ### WP-V9. Wave 3 UI (frontend-implementer, W3 after each server part)
 

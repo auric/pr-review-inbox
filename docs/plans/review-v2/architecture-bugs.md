@@ -1,6 +1,6 @@
 # Architecture bugs: find and measure
 
-Status: design of 2026-11-21. WP-AR0 (docs) is done. WP-AR1 is built as the opt-in variant "architecture". WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md are built with the ninth kind. User requirement of 2026-11-21: "we should also be able to find the architecture bugs". The user decided questions 1 to 3 of section 10 on 2026-11-21. Question 4 is open. Packages: WP-AR0 (docs), WP-AR1 (variant "architecture"), and deltas to WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md.
+Status: design of 2026-11-21. WP-AR0 (docs) is done. WP-AR1 is built as the opt-in variant "architecture". WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md are built with the ninth kind. User requirement of 2026-11-21: "we should also be able to find the architecture bugs". The user decided questions 1 to 4 of section 10 on 2026-11-21. Packages: WP-AR0 (docs), WP-AR1 (variant "architecture"), and deltas to WP-SG0, WP-SG1, and WP-SG2 of seeded-truth.md.
 
 Sources: seeded-truth.md, review-quality-2026.md (items 6, 7, 11), review-v3.md (V2, D2, WP-V8, WP-V12), src/server/review/catalog.ts, src/shared/review.ts, scripts/eval/run.ts, ab.ts, and score.ts. The lenses3 text lives in the recall plan outside the repository. This file names no app, company, host, project, case ID, or PR number.
 
@@ -187,7 +187,9 @@ When both ways give the same result for each reachable input, refute it as a cho
 - Route 1: L2 of "lenses3" takes `CALLERS_LINES` and `ARCHITECTURE_LINES`. The lenses3 text is outside the repository (question 2, decided: L2 takes the lines). No extra run.
 - Route 2: the stacked candidate "callers,architecture", one finder run. It targets the contract, omission, and architecture seeds, about 20 of 60.
 - Zero-cost gate for route 2, from SG-A: H = 100 x sum over k in {contract, omission, architecture} of n_k x (1 - r_k) / n. n_k is the seed count of kind k. r_k is the SG-A recall of row "kind k". n is the count of all seeds. Run the candidate only when H is at least the SG-A MDE at R_B = 2. This is a necessary condition only.
-- Command (after SG-A, with `--seeded` of WP-SG0): `bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants callers,architecture --candidate-repeat 2 --review-only --results eval-results/seeded/outside`.
+- Timing (question 4): run it after every SG-A candidate that can change the default prompt. Read the G-L2 `pass 2` rows first ($0).
+- Outcome: a pass ships both variants. An inconclusive result keeps both opt-in. A pass is no evidence for the architecture lines alone: the `kind architecture` row is descriptive.
+- Command (with `--seeded` of WP-SG0): `bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants callers,architecture --candidate-repeat 2 --review-only --results eval-results/seeded/outside`.
 - Cost: about $70-90 at C1b prices. The cost factor of 1.2 to 1.5 is not measured.
 - Ship rule: "better" of seeded-truth.md section 6.5. A pass ships "callers" and "architecture" together. The kind rows give no attribution.
 - `--candidate-replay` refuses both variants, because they change the finder (run.ts:288-301).
@@ -210,7 +212,7 @@ When both ways give the same result for each reachable input, refute it as a cho
 | U-SG1 | WP-SG0 to WP-SG2 with the deltas | At least 48 seeds. Each kind except architecture has at least 4. Architecture has at least 4, or the build prints "under floor". |
 | SG-A | the next prompt version bump | seeded-truth.md section 9. It prints the `kind architecture` row. |
 | runs3 and lenses3 | SG-A | seeded-truth.md section 6.5. The architecture row is information only. |
-| callers,architecture | SG-A, the zero-cost gate, open question 4 | seeded-truth.md section 6.5. |
+| callers,architecture | SG-A, every SG-A candidate that can change the default prompt, the G-L2 `pass 2` rows, the zero-cost gate (question 4) | seeded-truth.md section 6.5. A pass ships both variants. |
 
 ## 6. Work packages
 
@@ -279,4 +281,4 @@ Acceptance criteria:
 1. Tier 2 (a convention break with no wrong result today): keep it out of scope? Recommended: yes. Written rules stay with the rules module. Tier 2 cannot be seeded, and it needs a precision design on the natural set. Decided 2026-11-21: yes, out of scope.
 2. Does the lenses3 package take `ARCHITECTURE_LINES` into L2? Recommended: yes. Without it, the stacked candidate is the only ship route. Decided 2026-11-21: yes.
 3. Is "less than 25%" the first sample (14 seeds, escalation stays) or a hard cap? Recommended: the first sample. A hard cap replaces escalation with "the unsampled seeds of the kind stay out", and the set can fall under 48. Decided 2026-11-21: the first sample of 14 seeds. An escalation to more review needs the user's OK at that time, because the user may have no time. Without the OK, the unsampled seeds of that kind stay out.
-4. Run the stacked candidate "callers,architecture" after runs3 and lenses3, when the zero-cost gate passes (about $70-90)? Recommended: yes. A pass ships both variants together. Open: ask the user after lenses3.
+4. Run the stacked candidate "callers,architecture" after runs3 and lenses3, when the zero-cost gate passes (about $70-90)? Decided by the user on 2026-11-21: yes, on the seeded set. Run it after every SG-A candidate that can change the default prompt. Read the G-L2 `pass 2` rows first ($0). A pass ships both variants. An inconclusive result keeps both opt-in. A pass is no evidence for the architecture lines alone, because that row is descriptive.

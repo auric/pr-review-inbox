@@ -144,6 +144,13 @@ Ship rules:
 - Not worse (cost cutters): mean grounded recall >= mean(A) - S_R; trap rate <= mean(A) + S_T; noise passes the noise rule above; severityOk >= mean(A) - S_S; notCompleted not higher; mean cost below the cheapest baseline repeat.
 - Better (recall raisers): mean grounded recall - mean(A) > S_R; trap rate <= mean(A) + S_T; noise passes the noise rule above; the user decides the cost.
 - Cost cutters and recall raisers never share a run.
+- Reference (A) of each ship step: the shipped default at run time. For the obligation check, it is the "risk-check" replay if Gate RC-A passes (obligations.md section 8). Else "obligations" alone runs against the control.
+
+Open items of 2026-11-21 (not decided):
+
+- Some features give output outside gold by design: the risk check, obligations, lenses3 extras, and the verifier. They may need a precision rule instead of the noise rule. Decide this before the next gate.
+- The judge tp and fp split needs a blind user calibration sample before any gate rests on it.
+- The noise venue and limit of SG-A. seeded-truth.md section 6.5 applies the noise rule on the seeded set. The same section keeps noise gates on the natural set. Decide this before SG-A.
 
 ### 1. One agent on large PRs, no rl-reviewer
 
@@ -356,7 +363,7 @@ Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--c
 2. Baseline size: repeat 3 with 8 clean cases (about $140-180), or repeat 2 (about $95-120)? Recommended: repeat 3.
 3. Fold refuted protected findings under balanced and quiet? Recommended: yes, if the rescore passes the rule of improvement 5. Answered 2026-11-15: yes, shipped.
 4. If one agent wins on large PRs, ship reviewer mode "off" with "auto" left as a choice? Recommended: yes. Answered 2026-11-16: one agent lost on large PRs (C1a), so the mode stays "auto".
-5. Deep check as a per-run toggle in the brief (default off) or a profile option? Recommended: the per-run toggle.
+5. Deep check as a per-run toggle in the brief (default off) or a profile option? Recommended: the per-run toggle. Decided by the user on 2026-11-21: a per-run "Deep check" switch, off by default (focused-passes.md question 7).
 
 ## 6. Work packages (in this order)
 

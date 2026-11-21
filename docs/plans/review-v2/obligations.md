@@ -1,6 +1,6 @@
 # Obligations
 
-Status: design of 2026-11-18. WP-OB1 (07c4d80) and WP-OB2 (dce9f3d) are built as the opt-in variant "obligations". Joint Gate A, WP-OB3, and WP-OB4 are open. It builds on risk-check.md (WP-RC1 to WP-RC4). REVIEW_PROMPT_VERSION stays until WP-OB3. The criteria AC-R48 to AC-R55 go into spec.md section 1 in WP-OB3.
+Status: design of 2026-11-18. WP-OB1 (07c4d80) and WP-OB2 (dce9f3d) are built as the opt-in variant "obligations". Joint Gate A ran on 2026-11-20. WP-OB3 and WP-OB4 are open. The variant is not measured on current code. Commit ed9fc03 (keep doc-line anchors) is not in the Gate A run commit. Re-measure it before prompt 2.9 lands, because 2.9 voids the Gate A recording. It builds on risk-check.md (WP-RC1 to WP-RC4). REVIEW_PROMPT_VERSION stays until WP-OB3. The criteria AC-R48 to AC-R55 go into spec.md section 1 in WP-OB3.
 
 ## 1. Request and verdict
 
@@ -359,12 +359,13 @@ Eleven cases in fixtures/eval/probe/, in the format of probe-task-csv-quoting/ca
 - Step 3: the probe set, control and candidate, repeat 2.
 - Run the gate before WP-RC3. WP-RC3 raises REVIEW_PROMPT_VERSION, and replayRefusal then refuses the recording (run.ts:315-317).
 - The reference for obligations is the "risk-check" replay when Gate RC-A passes. Else one more replay with "obligations" alone runs against the control.
+- Status: not measured on current code. Commit ed9fc03 (keep doc-line anchors) is not in the Gate A run commit. Re-measure before prompt 2.9 lands, because 2.9 voids the Gate A recording.
 - The exact flags are unverified. risk-check.md section 7 gives their shape.
 
 Ship rule, candidate against the reference:
 
 1. Grounded recall is not worse: the mean is at least the reference mean minus S_R, as in Gate RC-A.
-2. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a verify-only replay. The paired grounded noise delta against the reference is at most 0.08 per case. The paired judge fp delta per case run is at most 0.05.
+2. Noise follows the noise rule of review-quality-2026.md section 2, decided by the user on 2026-11-21. This gate is a verify-only replay. The reference is the shipped default at run time (review-quality-2026.md section 2), as fixed above. The paired grounded noise delta against the reference is at most 0.08 per case. The paired judge fp delta per case run is at most 0.05.
 3. In the "Shown obligation findings" row, gold matches plus judge tp are at least the judge fp.
 4. Cost per case rises by 20% or less, and minutes by 1.0 or less. Above that, the user decides.
 5. Probe: the candidate finds at least 4 of the 5 seeded omissions in each repeat. The fifth is the rule 8a case (probe-obl-platform-guard).
