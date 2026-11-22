@@ -1,6 +1,6 @@
 # Seeded ground truth for the review eval
 
-Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG6 are built. U-SG1 ran three rounds (section 9 U-SG1 results). SG-P and SG-A are open. Work: packages WP-SG0 to WP-SG6, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
+Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG6 are built. U-SG1 ran four rounds and built 33 seeds (section 9 U-SG1 results). SG-P passed on 2026-11-22. SG-A is running. Work: packages WP-SG0 to WP-SG6, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
 
 Sources: docs/plans/review-v2/review-quality-2026.md (E1 to E6, items 6 and 7, ship rules), docs/plans/review-v3.md (WP-V1, decision V4), docs/plans/review-v2/research/review-practice-2026-11.md (B1, B2), the recall plan and the comparison of 2026-11-17 (both outside the repository), docs/eval/local.md, and scripts/eval/*.ts. This file names no other app, company, host, project, case ID, or PR number.
 
@@ -550,6 +550,18 @@ U-SG1 results (2026-11-22, before WP-SG5):
 - SG-A power: the MDE is about 24.7 points at 21 seeds, against the bar of 18 points. So SG-A would fail fitness.
 - Estimated with WP-SG5 alone: 29 to 33 seeds, MDE 20 to 21.5 points.
 - Estimated with hosts that have a merge commit in range: about 40 to 44 seeds in 18 groups, MDE 17.6 to 18.3 points. 5 hosts have such a merge. Each merge brings the target branch into the PR branch, so the first-parent chain holds the PR commits. The user decided this support on 2026-11-22: WP-SG6 builds it (section 14 row 26).
+
+U-SG1 round 4 (2026-11-22, after WP-SG5 and WP-SG6):
+
+- Round 4 cost $15.52: security propose $1.30, propose $9.16, validate $5.06. The total of U-SG1 is about $57.
+- Review: the same AI review (xhigh with an advisor) checked every confirmed seed one by one under the middle rule.
+- Measured, the rebuilt set: 16 cases, 33 seeds, fingerprint 756c4e2f53e3. Spares: 11. Security seeds: 0.
+- Kinds under the floor of 4: omission, leak, security, architecture.
+- Acceptance fails: 33 seeds against the floor of 48. The estimates above gave 40 to 44 seeds with both fixes. SG-A measures the real MDE.
+
+SG-P result (2026-11-22): passed. 2 of 2 runs finished. Seeds found: 2 of 2. Leaks: 0. Judge calibration on seeds: 2 of 2. Cost $1.51.
+
+SG-A: running (2026-11-22). No result yet.
 
 ### SG-P. Pilot (paid, about $3-8)
 

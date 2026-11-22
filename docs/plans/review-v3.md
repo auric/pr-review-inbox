@@ -48,7 +48,7 @@ Plan decisions that follow from D1 to D3 and the comparison:
 | W2 | WP-V2 ∥ WP-V3 | WP-V1 |
 | U-V1 | User gate: `bun run eval:ab`, the shipped profile against the candidate (section 5) | WP-V1, WP-V2, WP-V3 |
 | W2b | WP-V4 | U-V1 |
-| W3 | WP-V5, then WP-V6, then WP-V7, then WP-V8 (shared files, merge order); WP-V9 after each server part merges | WP-V4; WP-V5 also needs the BRIEF 3.5 approval (section 6) |
+| W3 | WP-V5, then WP-V6, then WP-V7 (superseded by obligations, 2026-11-21), then WP-V8 (shared files, merge order); WP-V9 after each server part merges | WP-V4; WP-V5 also needs the BRIEF 3.5 approval (section 6) |
 | U-V3 | User gate: CodeGraph on against off, and the pre-existing count; smoke docs/smoke-review-v3.md | W3 |
 | W4 | WP-V10a, then WP-V10b; WP-VCI0 (gate, read only) | U-V3 (V10); D3 facts and the BRIEF 3.6 approval (VCI) |
 | W4b | WP-VCI1, then WP-VCI2; WP-V12 only when U-V3 leaves a gap | WP-VCI0 passed; the gap rule of WP-V12 |
@@ -58,12 +58,12 @@ Shared-file ownership (merge order):
 | File | Owners |
 |---|---|
 | scripts/eval/* | WP-V1 → WP-V3 → WP-V2 (flags) → WP-V5 (`--variants codegraph`) |
-| src/server/review/catalog.ts, prompt.ts | WP-V2 → WP-V4 → WP-V5 → WP-V6 → WP-V7 → WP-V8 → WP-V12 |
-| src/shared/review.ts, src/shared/dto.ts | WP-V2 → WP-V6 → WP-V7 → WP-V8 → WP-V10a (additive only) |
-| src/server/review/jobs.ts, judge.ts, validate.ts | WP-V5 → WP-V6 → WP-V7 → WP-V8 → WP-VCI1 |
+| src/server/review/catalog.ts, prompt.ts | WP-V2 → WP-V4 → WP-V5 → WP-V6 → WP-V7 (superseded) → WP-V8 → WP-V12 |
+| src/shared/review.ts, src/shared/dto.ts | WP-V2 → WP-V6 → WP-V7 (superseded) → WP-V8 → WP-V10a (additive only) |
+| src/server/review/jobs.ts, judge.ts, validate.ts | WP-V5 → WP-V6 → WP-V7 (superseded) → WP-V8 → WP-VCI1 |
 | migration 040 (review_check) | WP-V8 |
 | src/web/review/*, src/web/settings/* | WP-V9 → WP-V10b → WP-VCI2 |
-| tests/support/fake-claude.ts, tests/e2e/serve.ts | WP-V6 → WP-V7 → WP-V8 → WP-V9 → WP-V10b (adds only) |
+| tests/support/fake-claude.ts, tests/e2e/serve.ts | WP-V6 → WP-V7 (superseded) → WP-V8 → WP-V9 → WP-V10b (adds only) |
 
 ## 4. Work packages
 
@@ -77,7 +77,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 | WP-V4 | implementer | 7737/7738/7739 |
 | WP-V5 | implementer-xhigh | 7747/7748/7749 |
 | WP-V6 | implementer-xhigh | 7757/7758/7759 |
-| WP-V7 | implementer | 7767/7768/7769 |
+| WP-V7 (superseded by obligations; do not build) | implementer | 7767/7768/7769 |
 | WP-V8 | implementer-xhigh | 7777/7778/7779 |
 | WP-V9 | frontend-implementer | 7787/7788/7789 |
 | WP-V10a | implementer | 7797/7798/7799 |
@@ -328,7 +328,7 @@ No BRIEF 3.6 change: the server is a local stdio process and calls no origin. WP
 | A switch that turns TLS verification off | BRIEF 3.6: never disable TLS verification. A corporate CA file covers the need. |
 | Raw PR, task, or comment text in the prompt | BRIEF 3.5 and design.md R12: stdin never quotes PR or tracker text. Context files carry it as untrusted data. |
 | JSON parsed out of free text with a regex | We use `structured_output` with a zod schema. A missing block cannot fail a run. |
-| Lens rows as drafts by themselves | The other app's own data shows 33% to 34% discards for such rows. Our rows stay display only (WP-V7). |
+| Lens rows as drafts by themselves | The other app's own data shows 33% to 34% discards for such rows. Our rows stay display only (WP-V7, superseded by obligations on 2026-11-21). |
 | A quote check with a tolerance window | validate.ts checks the exact anchor range. A window accepts wrong anchors. |
 
 ## 8. Points where the comparison and the code differ
