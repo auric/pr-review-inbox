@@ -479,6 +479,32 @@ describe("settle of finder risks (AC-R43, AC-R44)", () => {
     expect(on.result?.summary.finderQuestions).toEqual(off.result?.summary.finderQuestions);
   });
 
+  test("postable-risks.md 4.1: only the found item gets fromRisk, the index of its entry", () => {
+    // Risk 2 (number 6) is the found one, so fromRisk is not 0 by chance.
+    const vs = [V(1, "confirmed"), V(3, "confirmed", { finding: PLACE }), V(6, "confirmed", { severity: "minor", finding: PLACE })];
+    const e = settle(
+      found([C(1), C(2)], [Q(1)], risks.slice(0, 3)),
+      input({
+        check: check(vs, 2, 1, 3),
+        written: 2,
+        placed: new Map([
+          [3, placedRisk(vs[1] as VerifyVerdict)],
+          [6, placedRisk(vs[2] as VerifyVerdict)],
+        ]),
+      }),
+    );
+    expect(e.result?.summary.finderRisks?.list.map((x) => x.outcome)).toEqual(["open", "open", "found"]);
+    const payloads = (e.result?.items ?? []).map((i) => [i.kind, JSON.parse(i.payload_json) as { fromRisk?: number }] as const);
+    expect(payloads.filter(([, p]) => p.fromRisk !== undefined).map(([k, p]) => [k, p.fromRisk])).toEqual([["finding", 2]]);
+    // Candidates 1 and 2 and the confirmed finder question stay without the key.
+    expect(payloads.filter(([k]) => k === "finding")).toHaveLength(4);
+    // AC-R45: the found item equals the placed finding plus fromRisk.
+    const v2 = vs[2] as VerifyVerdict;
+    const step = { verify: true, fits: true, failed: false, v: v2, at: placedRisk(v2), cands: new Map() };
+    const risk = payloads.find(([, p]) => p.fromRisk !== undefined)?.[1];
+    expect(risk).toEqual({ ...(riskOutcome(R(2), step).item?.finding ?? {}), fromRisk: 2 });
+  });
+
   test("R0, R1, and R2 through settle: the check off, no check file, and a failed check", () => {
     const listed = (e: ReturnType<typeof settle>) => e.result?.summary.finderRisks?.list.map((x) => x.note);
     expect(listed(settle(found([], [], [R(0)]), input({ verify: false })))).toEqual(["Not checked: the check step is off."]);

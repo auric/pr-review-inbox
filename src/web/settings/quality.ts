@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Addressed rate of posted findings (docs/plans/review-v2/spec.md AC-R30): one row per prompt version over all profiles.
-import type { PostOutcomes, ReviewStatsDto } from "../../shared/dto";
+import { type PostOutcomes, type ReviewStatsDto, riskOutcomes } from "../../shared/dto";
 import { type Severity, severities } from "../../shared/review";
+import { RISK_WORD } from "../review/model";
 
 export type AddressedRow = { promptVersion: string; all: PostOutcomes; bySeverity: Record<Severity, PostOutcomes> };
 
@@ -48,5 +49,25 @@ export const addressedText = (o: PostOutcomes) => `Addressed: ${share(o, " poste
 // docs/plans/review-v2/review-questions.md: the finder questions of the runs with counts. Empty: no such run.
 export const questionsText = (q: ReviewStatsDto["questions"]) =>
   q.runs ? `Questions: ${q.asked} asked, ${q.answered} answered, ${q.findings} to findings, ${q.kept} kept` : "";
+// docs/plans/review-v2/risk-check.md section 4.9: the risk sums of the runs with finderRisks, and the posted and discarded risk
+// findings. The outcomes show above zero. Risk questions (postable-risks.md Q3) show only when one posted or was discarded. One string
+// per line, so the Check column stays narrow. Empty: no such run.
+export function risksText(r: ReviewStatsDto["risks"]): string[] {
+  if (!r?.runs) return [];
+  const q = r.questions;
+  return [
+    `Risks: ${r.listed} listed`,
+    ...(r.listed
+      ? [
+          riskOutcomes
+            .filter((k) => r[k] > 0)
+            .map((k) => `${r[k]} ${RISK_WORD[k]}`)
+            .join(", "),
+        ]
+      : []),
+    `Risk findings: ${r.posted} posted, ${r.discarded} discarded`,
+    ...(q.posted + q.discarded ? [`Risk questions: ${q.posted} posted, ${q.discarded} discarded`] : []),
+  ];
+}
 export const severityText = (o: PostOutcomes) => (o.addressed + o.open + o.pending ? share(o, "") : "–");
 export const pendingText = (o: PostOutcomes) => (o.pending ? `${o.pending} pending` : "");

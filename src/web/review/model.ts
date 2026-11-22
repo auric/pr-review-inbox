@@ -14,6 +14,7 @@ import type {
   PrRow,
   ReviewerMode,
   ReviewItemDto,
+  RiskOutcome,
   RunDetail,
   RunDto,
   RunKind,
@@ -743,15 +744,67 @@ export function answeredQuestions(s: RunSummary | null | undefined): { label: st
   };
 }
 
+// docs/plans/review-v2/risk-check.md section 4.8: the word of each risk outcome on the toggle and on line 1 of an entry.
+export const RISK_WORD: Record<RiskOutcome, string> = {
+  found: "found",
+  asked: "asked",
+  cleared: "cleared",
+  covered: "same as a finding",
+  open: "open",
+};
+const RISK_ORDER: RiskOutcome[] = ["found", "asked", "cleared", "covered", "open"];
+
+// The toggle of the risk list. null: the run has no finderRisks key (before prompt 2.9) or no risk.
+export function risksLabel(s: RunSummary | null | undefined): string | null {
+  const r = s?.finderRisks;
+  if (!r?.listed) return null;
+  return `Risks: ${RISK_ORDER.filter((k) => r[k] > 0)
+    .map((k) => `${r[k]} ${RISK_WORD[k]}`)
+    .join(", ")}`;
+}
+
+export type RiskEntry = {
+  text: string;
+  outcome: RiskOutcome;
+  // Line 2 without a draft.
+  note: string;
+  // linked: Drafts shows the item, so "Show draft" can open it. Drafts drops posted items.
+  draft?: { id: number; state: string; title: string; linked: boolean };
+};
+
+const RISK_NOTE: Partial<Record<RiskOutcome, string>> = { found: "Draft", asked: "Question", cleared: "The check says" };
+
+// docs/plans/review-v2/postable-risks.md sections 4.2 and 4.3: each entry of finderRisks with the one item of the same run that has
+// fromRisk k. A carried copy points into the list of an older run, and a Discuss revision is no draft, so neither matches.
+// null: the run has no finderRisks key.
+export function riskEntries(s: RunSummary | null | undefined, items: readonly ReviewItemDto[], run: number): RiskEntry[] | null {
+  const r = s?.finderRisks;
+  if (!r) return null;
+  const byRisk = new Map<number, ReviewItemDto>();
+  for (const it of items) {
+    const p = it.payload as FindingPayload & { carried?: unknown };
+    if (it.run === run && typeof p.fromRisk === "number" && !p.carried && p.revises === undefined) byRisk.set(p.fromRisk, it);
+  }
+  return r.list.map((e, k) => {
+    const label = RISK_NOTE[e.outcome];
+    const entry: RiskEntry = { text: e.text, outcome: e.outcome, note: label ? `${label}: ${e.note}` : e.note };
+    const it = byRisk.get(k);
+    if (!it) return entry;
+    const state =
+      it.status === "new" ? "Draft" : it.status === "accepted" ? "Accepted" : it.status === "posted" ? "Posted" : closedLabel(it);
+    return { ...entry, draft: { id: it.id, state, title: draftTitle(it), linked: it.status !== "posted" } };
+  });
+}
+
 // spec.md section 1.1: the state of a running run. A review names its phase.
 export function runningText(r: RunDto): string {
   if (r.phase === "indexing") return "Indexing for codegraph…";
   if (r.kind !== "review" || r.explain) return RUN_TEXT[r.kind].running;
-  // docs/plans/review-v2/review-questions.md: a check of finder questions only names the questions.
-  if (r.phase === "checking")
-    return !r.candidates && r.checkQuestions
-      ? `Checking ${plural(r.checkQuestions, "question")}…`
-      : `Checking ${plural(r.candidates ?? 0, "finding")}…`;
+  // review-questions.md and risk-check.md section 4.2: a check with no candidate names its questions and risks.
+  if (r.phase === "checking") {
+    const rest = [r.checkQuestions && plural(r.checkQuestions, "question"), r.checkRisks && plural(r.checkRisks, "risk")].filter(Boolean);
+    return !r.candidates && rest.length ? `Checking ${rest.join(" and ")}…` : `Checking ${plural(r.candidates ?? 0, "finding")}…`;
+  }
   return r.since ? `Finding problems in the changes since ${shortHash(r.since.head)}…` : "Finding problems…";
 }
 

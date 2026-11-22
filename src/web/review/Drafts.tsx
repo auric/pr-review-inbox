@@ -16,6 +16,7 @@ import { Text } from "../pr/Thread";
 import { snippet } from "../pr/threads";
 import { FindingRevision, TalkLink } from "./Discuss";
 import { withdrawnNote } from "./discuss-model";
+import { Inline } from "./Inline";
 import {
   anchorNote,
   CHECK_LABEL,
@@ -44,19 +45,7 @@ import { Acts, Editor, Mover, ReasonChips, type TriageCtx, type TriageMode } fro
 const icon = "size-[15px] shrink-0";
 const base = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
-// Backticks become code. The text is the runner's output, so nothing else renders as markup.
-export function Inline({ text }: { text: string }) {
-  return text.split(/(`[^`\n]+`)/).map((part, i) =>
-    part.length > 2 && part.startsWith("`") && part.endsWith("`") ? (
-      // biome-ignore lint/suspicious/noArrayIndexKey: the parts of one text keep their order.
-      <code key={i} className="rounded-[3px] bg-sunken px-[3px] font-mono text-[0.9em]">
-        {part.slice(1, -1)}
-      </code>
-    ) : (
-      part
-    ),
-  );
-}
+export { Inline };
 
 export function AiAvatar({ meta }: { meta: MetaDto }) {
   return (

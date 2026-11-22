@@ -140,8 +140,10 @@ test("a brief with a note and a profile; drafts, summary, and the subagent tree;
   await gaps.click();
   await expect(page.getByText("1 finding dropped: its code reference did not match the snapshot.")).toBeVisible();
   await expect(runRow(page)).toContainText("Also not done, by design: Tests did not run, because the review has read-only tools.");
-  await runRow(page).getByRole("button", { name: "Risk areas: 2" }).click();
+  // risk-check.md section 4.8: each review run since prompt 2.9 checks its risks. The echo check gives no risk verdict.
+  await runRow(page).getByRole("button", { name: "Risks: 2 open" }).click();
   await expect(runRow(page).getByText("Readers of the cache during a flush.")).toBeVisible();
+  await expect(runRow(page).locator("[data-risk-entry='open']")).toHaveCount(2);
   // The ledger counts the question too. It opens the question row after the findings.
   await runLine(page).getByRole("button", { name: "1 question" }).click();
   await expect(page.locator("[data-draft-question]")).toBeFocused();

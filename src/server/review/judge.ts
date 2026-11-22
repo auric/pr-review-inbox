@@ -948,7 +948,11 @@ export function settle(f: Found, s: SettleInput): Ending {
       });
       finderRisks[r.outcome]++;
       finderRisks.list.push({ text, outcome: r.outcome, note: r.note });
-      if (r.item) items.push(findingItem(r.item.finding));
+      if (r.item) {
+        // postable-risks.md section 4.1: the link from the draft to its entry. k indexes finderRisks.list of this run.
+        const linked: FindingPayload = { ...r.item.finding, fromRisk: k };
+        items.push(findingItem(linked));
+      }
     }
   }
   // obligations.md section 4.5: one outcome per obligation of a finished check with the mode on. The blocks of candidates.md hold the

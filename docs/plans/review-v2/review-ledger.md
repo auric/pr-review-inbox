@@ -55,8 +55,8 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Joint Gate A | risk-check.md section 7; obligations.md section 8 | user step | Ran 2026-11-20. Gate RC-A passes under the fallback; obligations not measured on current code | None in the repository | A docs/eval/results.md entry. Obligations: Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. |
 | WP-RC3: ship the risk check, prompt 2.9 | risk-check.md section 9 | user decided (2026-11-21) | Shipped default, prompt 2.9, cascade step 2 (no risk question items) | Gate RC-A: recall +1.3 points, noise +0.06 (limit 0.08), judge fp +0.03 (limit 0.05), questions 27 vs 27 per 100 runs with asked questions dropped, cost +11.8% | Cascade step 1 (drop only R6) is not measured. |
 | WP-OB3: ship the obligation check | obligations.md section 10 | user decided | Not started; "obligations" stays opt-in | None | Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. A version step after "2.9". |
-| WP-RC4 with WP-OB4: UI, stats, docs | risk-check.md section 9; obligations.md section 10 | user decided | Not started | None | WP-RC4 can start after WP-RC3. WP-OB4 waits for WP-OB3. |
-| Gates RC-B and OB-B | risk-check.md section 7; obligations.md section 8 | user step | Open | None | Waits for WP-RC4 and WP-OB4. |
+| WP-RC4 with WP-OB4: UI, stats, docs | risk-check.md section 9; obligations.md section 10 | user decided | WP-RC4 built, with WP-PR1 and WP-PR2; WP-OB4 not started | None | WP-OB4 waits for WP-OB3. |
+| Gates RC-B and OB-B | risk-check.md section 7; obligations.md section 8 | user step | Open | None | Gate RC-B can start: WP-RC4 is built. Gate OB-B waits for WP-OB4. |
 | WP-RC5: finder half, variant "risks" | risk-check.md section 9 | recommended (optional) | Not started | None | Needs Gate RC-C data. |
 | WP-JC-D, WP-JC0, Gate JC-G | jira-context.md section 8 | user decided (4311cdb) | Done | 4311cdb, 8e53029, 104368c | None. |
 | WP-JC1: Jira client reads more fields | jira-context.md section 8 | user decided | Built | cd0ab6c | The new fields reach no prompt until WP-JC5. |
@@ -88,12 +88,12 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Head-to-head with another review app | outside the repository | user decided ("not now") | Deferred | None | None. |
 | Stacked PR context: variant "stack", WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B | stacked-prs.md | user decided (app route, build after the code review gate) | Designed, not started | None | Builds after Joint Gate A and the "preexisting" and "callers" runs. The 12 questions of section 12. |
 | Minor fold: variant "minor-fold", WP-MF1 and WP-MF2 | minor-fold.md | defaults by the orchestrator (section 10); paused by the user on 2026-11-21 | Opt-in; paused after the Gate MF-A probe (2026-11-21) | e56c6ce; minor-fold.md section 6.7 | The probe passed rules 2 to 4: polishRecall 100%, polishTraps 0, recall 87.5% to 91.7%, trap rate 0 on both sides. Rule 1 failed: the judge gives fp to the TODO bug, "not a merge blocker". No local-set run. WP-MF3 is not started. |
-| Postable risks: link a confirmed risk to its draft (WP-PR0) | postable-risks.md | recommended; section 8 user decided (2026-11-21) | Designed, not started | None | WP-RC3 shipped in prompt 2.9 with cascade step 2, so only found risks make drafts. WP-PR1 can start. WP-PR2 ships with WP-RC4. |
+| Postable risks: link a confirmed risk to its draft (WP-PR0) | postable-risks.md | recommended; section 8 user decided (2026-11-21) | WP-PR1 and WP-PR2 built with WP-RC4 | None | Only found risks make drafts since prompt 2.9, so the fromRisk question counts (Q3) stay at 0. |
 
 ## 4. Order and dependencies
 
 1. "preexisting" passed Gate A and shipped in prompt 2.9. "refute-issue" failed Gate VR-A. "callers" stays opt-in. A new candidate needs the SG-A baseline (section 2).
-2. WP-RC3 shipped in prompt 2.9. Then WP-RC4 and Gate RC-B. WP-OB3 waits for its seeded-set measure, then WP-OB4 and Gate OB-B.
+2. WP-RC3 shipped in prompt 2.9, and WP-RC4 is built. Gate RC-B is next. WP-OB3 waits for its seeded-set measure, then WP-OB4 and Gate OB-B.
 3. WP-RC3 shipped in prompt 2.9. Then WP-JC-E, then Gate JC-A, then WP-JC6. WP-JC-E started before WP-RC3 against this order. The Jira context package must settle it.
 4. WP-JC5 builds now. It pushes only after Gates JC-A and JC-B.
 5. The seeded set comes before the gates of "runs3" and "lenses3". A win needs about 5 to 6 more bugs of 70 on the natural set.

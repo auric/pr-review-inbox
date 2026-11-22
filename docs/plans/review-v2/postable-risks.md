@@ -1,14 +1,14 @@
 # Postable risks
 
-Status: designed 2026-11-21, not started. The user decided section 8 on 2026-11-21. Gate RC-A (risk-check.md section 7) passes under the fallback of 2026-11-17. WP-RC3 ships the risk check as the default in prompt 2.9, with all asked risk questions dropped (cascade step 2 of Q2). So only found risks make a draft, and only R4 needs the link. Design item 7. It changes no prompt byte and needs no eval gate.
+Status: designed 2026-11-21. WP-PR1 and WP-PR2 are built together with WP-RC4. The user decided section 8 on 2026-11-21. Gate RC-A (risk-check.md section 7) passes under the fallback of 2026-11-17. WP-RC3 ships the risk check as the default in prompt 2.9, with all asked risk questions dropped (cascade step 2 of Q2). So only found risks make a draft, and only R4 needs the link. Design item 7. It changes no prompt byte and needs no eval gate.
 
 ## 1. Request and answer
 
 The request: a real, confirmed risk becomes a PR comment with one click, like a finding. Nothing posts without a user click. The app posts, not the AI.
 
-- On a default run, no risk can post. A risk is a line of text in the run summary. It is not an item, and the post plan reads only items.
-- Under the variant "risk-check", a confirmed risk is already a draft. A risk with a place becomes a finding draft. A risk without a place becomes a question draft that posts in the general comment. Both post with Accept and Post, like any finding.
-- Three gaps remain. The run line does not show which draft came from which risk. The fallback in risk-check.md section 7 can remove the draft of a confirmed risk without a place. The check is off by default.
+- Before prompt 2.9, no risk could post on a default run. A risk was a line of text in the run summary. It is not an item, and the post plan reads only items.
+- Since prompt 2.9, each review run checks its risks. A confirmed risk with a place is a finding draft. It posts with Accept and Post, like any finding. A confirmed risk without a place gives open with no item (risk-check.md section 7, cascade step 2).
+- One gap remained: the run line did not show which draft came from which risk.
 - This design adds no new post path. It links each risk entry to its draft. The check stays the only way that a risk becomes a draft.
 
 ## 2. Facts
@@ -71,9 +71,9 @@ Anchor rules. The code does not change. The rules are:
 ### 4.1 Data path (WP-PR1)
 
 - settle writes the risk index k into the payload of each item that a risk row makes: `fromRisk: k`. k is the index in `summary.finderRisks.list` of the same run.
-- In the settle loop (judge.ts:914-928), the R4 finding payload and the R5 and R6 question payloads get `fromRisk: k`.
+- In the settle loop (judge.ts), the R4 finding payload gets `fromRisk: k`. Since prompt 2.9, R5 and R6 make no item. If a later step brings their question items back, they get `fromRisk: k` too.
 - riskOutcome stays pure and keeps its signature. Its row tests do not change.
-- Only TypeScript types change. FindingPayload gets `fromRisk?: number` (review.ts:234-253). The shared intersection of ReviewItemDto.payload gets `fromRisk?: number` (dto.ts:749-755). The zod objects `finding`, `question`, and `verifyVerdict` do not change, so `--json-schema` keeps its bytes.
+- Only TypeScript types change. FindingPayload gets `fromRisk?: number` (review.ts). The shared intersection of ReviewItemDto.payload gets `fromRisk?: number` (dto.ts:749-755). The zod objects `finding`, `question`, and `verifyVerdict` do not change, so `--json-schema` keeps its bytes.
 - No migration, no new item kind, no new route, and no change to `FinderRisks`.
 - Runs stored before WP-PR1 have no link. Their entries show only the note.
 
@@ -124,8 +124,8 @@ The item route updates the run cache (useTriage.ts:103-104), so the entry change
 ### 4.6 Invariants
 
 - I1. Nothing posts without the user's Accept and Post confirm. The design adds no write route and no automatic accept (items.ts:107-114, plan.ts:120).
-- I2. No prompt byte changes. The zod schemas behind `--json-schema` do not change. No prompt builder writes payload JSON (context-files.ts:634-640). REVIEW_PROMPT_VERSION stays "2.8".
-- I3. Only the risk rows set `fromRisk`. Without the variant, no item has it, and the run line does not change.
+- I2. No prompt byte changes. The zod schemas behind `--json-schema` do not change. No prompt builder writes payload JSON (context-files.ts:634-640). REVIEW_PROMPT_VERSION stays "2.9".
+- I3. Only the risk rows set `fromRisk`. Since prompt 2.9, only R4 sets it. A run without finderRisks keeps "Risk areas: N".
 - I4. An item links to at most one entry, and an entry links to at most one item (section 4.2).
 - I5. Runs from before WP-PR1 read the same as today, because the key is optional and the payload gets no zod parse (run-rows.ts:407-438).
 
@@ -136,30 +136,30 @@ No eval gate is necessary. WP-PR1 and WP-PR2 change no prompt, no agent definiti
 ## 6. Tests
 
 WP-PR1:
-- risk-check.test.ts, settle: a run with risks for R4, R5, R6, R7, R8, and R10. The R4 finding and the R5 and R6 questions have `fromRisk` equal to their list index. cleared, covered, and open make no item. No candidate finding, finder question, asked question, or obligation item has `fromRisk`.
+- risk-check.test.ts, settle: a run with a found risk that is not the first risk. The R4 finding has `fromRisk` equal to its list index. R5, R6, cleared, covered, and open make no item. No candidate finding and no finder question item has `fromRisk`.
 - The AC-R45 test: the found item equals the placed finding plus `fromRisk`.
 - The AC-R41 byte test and prompt.test.ts stay green with no snapshot change.
 - tests/tasks/loop.test.ts:557 (task review under the variant) stays green.
 
 WP-PR2:
-- tests/web/review-v2.test.ts, riskEntries: each state word is correct. A posted draft gives no link. A carried copy and a Discuss revision never match. An item of another run never matches. A run from before WP-PR1 shows only the note. A run without finderRisks gives null.
+- tests/web/risks.test.tsx, riskEntries: each state word is correct. A posted draft gives no link. A carried copy and a Discuss revision never match. An item of another run never matches. A run from before WP-PR1 shows only the note. A run without finderRisks gives null.
 - One render test in a .tsx file, in the shape of tests/web/preexisting.test.tsx: "Show draft" calls openDraft with the item ID.
-- tests/e2e/review-v2.e2e.ts: a variant run with found, asked, cleared, covered, and open risks. "Show draft" on the found entry opens and focuses its row, also when the row is in the More fold. Accept, then Post: the confirm lists the inline comment. After the post, the entry says "Posted" and has no link.
-- m2.e2e.ts keeps "Risk areas: 2" for a run without finderRisks.
+- No new e2e test. "Show draft" calls `openDraft`, which the Ledger e2e tests already cover. The demo run shows found, cleared, covered, and open risks for the screenshots.
+- m2.e2e.ts checks "Risks: 2 open", because each review run since prompt 2.9 has finderRisks. A unit test keeps "Risk areas: N" for a run without finderRisks.
 
 ## 7. Work packages
 
 | # | Package | Tier | Files | Tests | Done when |
 |---|---|---|---|---|---|
 | 0 | WP-PR0: docs | main session | This file. risk-check.md section 4.8 (one link per entry with a draft) and the WP-RC4 row of section 9 (add the link). review-ledger.md (a row "Postable risks: WP-PR1, WP-PR2"). | none | committed |
-| 1 | WP-PR1: risk link in the payload | implementer | src/shared/review.ts (FindingPayload type), src/shared/dto.ts (ReviewItemDto.payload type), src/server/review/judge.ts (settle risk loop), tests/review/risk-check.test.ts | Section 6 | `bun run check` is green, and the byte tests do not change. |
-| 2 | WP-PR2: risk entries with their drafts | implementer | src/web/review/model.ts (riskEntries), src/web/review/RunLine.tsx, src/web/review/useRunRecord.tsx, tests/web/review-v2.test.ts, a .tsx render test, tests/e2e/review-v2.e2e.ts and its serve.ts profile with the variant, scripts/demo.ts, tests/support/fake-claude.ts, README.md, CHANGELOG.md, docs/screenshots | Section 6 | check and test:e2e are green. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
+| 1 | WP-PR1: risk link in the payload (built) | implementer | src/shared/review.ts (FindingPayload type), src/shared/dto.ts (ReviewItemDto.payload type), src/server/review/judge.ts (settle risk loop), tests/review/risk-check.test.ts | Section 6 | `bun run check` is green, and the byte tests do not change. |
+| 2 | WP-PR2: risk entries with their drafts (built with WP-RC4) | implementer | src/web/review/model.ts (riskEntries), src/web/review/RunLine.tsx, src/web/review/useRunRecord.tsx, tests/web/review-v2.test.ts, a .tsx render test, tests/e2e/review-v2.e2e.ts and its serve.ts profile with the variant, scripts/demo.ts, tests/support/fake-claude.ts, README.md, CHANGELOG.md, docs/screenshots | Section 6 | check and test:e2e are green. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
 
 Order:
 - Hold WP-PR1 until the user decides WP-RC3 (Q4). WP-RC3 shipped in prompt 2.9, so WP-PR1 can start. Each review run stores the link from then on.
 - WP-PR2 shares RunLine.tsx, model.ts, the demo, the e2e tests, README, and CHANGELOG with WP-RC4. So WP-PR2 is the run-line half of WP-RC4 (the toggle, the entries, and the link). WP-RC4 keeps stats.ts, quality.ts, and the runningText.
 - WP-PR2 ships with WP-RC4, as one package (Q4). Never build them in parallel.
-- Unverified: the e2e and demo setups have no profile with variants yet. Also unverified: whether fake-claude gives verdicts for "## Risk N" blocks. WP-PR2 adds both if they are missing.
+- fake-claude gives no verdict for a "## Risk N" block, so its risks end as open. The demo sets its own verdicts for its four risks.
 
 Docs in WP-PR2:
 - README, review section, one paragraph: "With the risk check, the run line lists each risk with its outcome. A confirmed risk becomes a draft. Show draft opens it in the Drafts list."
@@ -171,7 +171,7 @@ Docs in WP-PR2:
 
 Q1. Do open and unchecked risks get any path to a draft? Decided by the user on 2026-11-21: no. An open or unchecked risk never becomes a draft. Only the check makes a risk draft.
 Q2. How does the fallback of risk-check.md section 7 treat R5 and R6? Decided by the user on 2026-11-21: as a cascade, fixed before anyone reads the R5 share. When only rule 4 of Gate RC-A fails, drop the R6 question items first. If rule 4 still fails, drop the R5 question items too. Rule 4 counts every question item that remains, R5 included. The R5 and R6 split needs the recorded verify calls or a split in RISK_KEYS. Neither is built.
-Q3. Does R5 post as a statement with the verdict severity? Decided by the user on 2026-11-21: not now. Gate RC-B counts only findings of category risk, so it cannot answer this. WP-RC4 adds posted and discarded counts of `fromRisk` question items to the stats. The decision follows those counts.
+Q3. Does R5 post as a statement with the verdict severity? Decided by the user on 2026-11-21: not now. Gate RC-B counts only findings of category risk, so it cannot answer this. WP-RC4 adds posted and discarded counts of `fromRisk` question items to the stats. The decision follows those counts. Note: since prompt 2.9, R5 and R6 make no item, so these counts stay at 0. They count only after a step brings R5 or R6 question items back.
 Q4. When does WP-PR2 ship? Decided by the user on 2026-11-21: WP-PR2 ships with WP-RC4. WP-PR1 waits until WP-RC3 is decided.
 Q5. Do found obligation drafts get the same link (`fromObligation`) in WP-OB4? Decided by the user on 2026-11-21: yes, with the same link rule as section 4.2.
 

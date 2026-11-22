@@ -266,6 +266,54 @@ describe("reviewStats (AC-M4)", () => {
     expect(s.row("2.6").questions).toEqual({ runs: 0, asked: 0, answered: 0, findings: 0, kept: 0 });
   });
 
+  test("AC-R47: the risk sums, the risk findings, and the fromRisk questions count per group; old runs give no risks key", () => {
+    const s = setup();
+    const fr = (found: number, asked: number, cleared: number, covered: number, open: number) => ({
+      finderRisks: { listed: found + asked + cleared + covered + open, found, asked, cleared, covered, open, list: [] },
+    });
+    const a = s.run({ version: "2.9", started: NOW - DAY, summary: fr(2, 0, 1, 1, 1) });
+    s.run({ version: "2.9", started: NOW - DAY, summary: fr(0, 1, 0, 0, 2) });
+    s.run({ version: "2.9", started: NOW - DAY });
+    s.run({ version: "2.8", started: NOW - DAY });
+    const risk = { category: "risk", fromRisk: 0 };
+    s.finding(a, "posted", risk);
+    const source = s.finding(a, "discarded", risk);
+    s.finding(a, "discarded", { ...risk, discardReason: { code: "bug" } });
+    s.finding(a, "discarded", { ...risk, fixed: { id: 1, commit: "c", short: "c", was: "new" } });
+    s.finding(a, "posted");
+    // A re-review copy gives the later outcome of its source.
+    const b = s.run({ version: "2.9", started: NOW - DAY + 1 });
+    s.finding(b, "posted", { ...risk, carried: { from: source, verdict: "open", reason: "", since: "h" } });
+    const question = (r: number, status: string, p: object) =>
+      (
+        s.db
+          .query(
+            `INSERT INTO review_item (run, kind, payload_json, body, status, revision) VALUES ($run, 'question', $p, 'q', $status, 0) RETURNING id`,
+          )
+          .get({ run: r, p: JSON.stringify({ text: "Q?", why: "", ...p }), status }) as { id: number }
+      ).id;
+    question(a, "posted", { fromRisk: 1 });
+    question(a, "discarded", { fromRisk: 2 });
+    const asked = question(a, "discarded", { fromRisk: 3 });
+    question(b, "posted", { fromRisk: 3, carried: { from: asked, verdict: "open", reason: "", since: "h" } });
+    question(a, "posted", {});
+    expect(s.row("2.9").risks).toEqual({
+      runs: 2,
+      listed: 8,
+      found: 2,
+      asked: 1,
+      cleared: 1,
+      covered: 1,
+      open: 3,
+      posted: 2,
+      discarded: 1,
+      questions: { posted: 2, discarded: 1 },
+    });
+    // The other counts do not see the question items.
+    expect(s.row("2.9")).toMatchObject({ runs: 4, posted: 3 });
+    expect(s.row("2.8").risks).toBeUndefined();
+  });
+
   test("the window leaves out older runs", () => {
     const s = seeded();
     expect(s.stats(1).map((r) => [r.promptVersion, r.runs])).toEqual([

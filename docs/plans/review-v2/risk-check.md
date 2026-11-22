@@ -1,6 +1,6 @@
 # Risk check
 
-Status: design of 2026-11-17. WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) built the opt-in variant "risk-check". Gate RC-A passes under the fallback (section 7). WP-RC3 ships the check as the default in prompt 2.9, together with "preexisting" (review-v3.md WP-V6). It ships with all asked risk questions dropped (cascade step 2), because step 1 alone is not measured. The variant name is retired: a stored profile drops it, and the eval CLIs refuse it. WP-RC4 is open. The criteria AC-R40 to AC-R45 are in spec.md section 1. AC-R46 and AC-R47 go there with WP-RC4.
+Status: design of 2026-11-17. WP-RC1 (4eaa7e0) and WP-RC2 (bef39aa) built the opt-in variant "risk-check". Gate RC-A passes under the fallback (section 7). WP-RC3 ships the check as the default in prompt 2.9, together with "preexisting" (review-v3.md WP-V6). It ships with all asked risk questions dropped (cascade step 2), because step 1 alone is not measured. The variant name is retired: a stored profile drops it, and the eval CLIs refuse it. WP-RC4 is built, together with WP-PR1 and WP-PR2 (postable-risks.md). The criteria AC-R40 to AC-R47 are in spec.md section 1.
 
 ## 1. Request and verdict
 
@@ -170,7 +170,7 @@ export type FinderRisks = Record<RiskOutcome, number> & {
 - `CheckRun` gets `risks`, the number of risk blocks. verdictsOf accepts numbers up to written + asked + risks (judge.ts:392).
 - questionVerdicts and placeAnswers run when asked + risks is above 0, not only when asked is (judge.ts:481).
 - RunDto gets `checkRisks` beside `checkQuestions`.
-- ReviewStatsDto gets `risks`: the sums of the counts, `runs`, and the `posted` and `discarded` findings of category "risk".
+- ReviewStatsDto gets `risks`: the sums of the counts, `runs`, the `posted` and `discarded` findings of category "risk", and `questions` with the posted and discarded question items with `fromRisk` (postable-risks.md Q3). A group without a finderRisks run has no `risks` key.
 - No zod change before WP-RC3. WP-RC3 changes only the describe text of `verifyVerdict.finding`.
 
 ### 4.7 Re-review, task review, and Explain
@@ -186,15 +186,16 @@ The run line keeps one toggle in its present place.
 
 - With `finderRisks`, the toggle says "Risks: 1 found, 2 cleared, 1 open". A count of zero drops. The words are found, asked, cleared, same as a finding, and open.
 - The open list has one entry per risk. Line 1 holds the outcome word in bold, then the risk text.
-- Line 2 is muted: "Draft: <title>", "Question: <text>", "The check says: <reason>", "Finding: <title>", or "Not settled: <reason>".
-- The entry reuses the markup of "N questions answered by the check" (RunLine.tsx:533-556).
-- No post button, no action per line, and no new panel.
+- Line 2 is muted. found gives "Draft: <title>", asked gives "Question: <text>", and cleared gives "The check says: <reason>". covered and open give the note as it is: "Same point as: <title> (<verdict>)", or the reason that the risk stays open.
+- An entry with a draft shows "<state>: <draft title>" and the link "Show draft" (postable-risks.md section 4.3). A posted draft has no link.
+- The entry reuses the markup of "N questions answered by the check" (RunLine.tsx).
+- No post button and no new panel. "Show draft" is the only control.
 - Without `finderRisks`, the old "Risk areas: N" list stays.
 - A cleared reason is the claim of the check. The app does not test its path:line, the same as for refuted reasons today. The words "The check says" make this clear.
 
 ### 4.9 Review quality
 
-The Check cell gets one line for each group with a `finderRisks` run: "Risks: 12 checked: 3 found, 1 asked, 5 cleared, 2 same as a finding, 1 open. Risk findings: 2 posted, 1 discarded. Risk questions: 1 posted, 0 discarded." The posted and discarded counts test precision on real reviews. Risk questions are question items with `fromRisk` (postable-risks.md Q3, decided by the user on 2026-11-21). These counts decide whether R5 posts as a statement.
+The Check cell gets these lines for each group with a `finderRisks` run: "Risks: 12 listed", "3 found, 1 asked, 5 cleared, 2 same as a finding, 1 open" (counts above zero), "Risk findings: 2 posted, 1 discarded", and "Risk questions: 1 posted, 0 discarded". Short lines keep the table narrow. The posted and discarded counts test precision on real reviews. Risk questions are question items with `fromRisk` (postable-risks.md Q3, decided by the user on 2026-11-21). Their line shows only when one posted or was discarded. Since prompt 2.9, no risk makes a question item, so the line stays hidden until a later step brings R5 or R6 items back.
 
 ### 4.10 The sub-asks
 
@@ -282,8 +283,8 @@ Draft text of FINDER_RISK_RULES (rl-main and salvage only):
 - AC-R43. settle gives each risk exactly one outcome by rows R0 to R10. The counts add up to listed. The risk check makes only found and asked items. Since prompt 2.9, R5 and R6 give open with no item (section 7, cascade step 2), so the check makes only found items.
 - AC-R44. A risk verdict never changes summary.verify, never adds a coverage line, and never makes the run incomplete.
 - AC-R45. A found risk is a finding item with category risk, module core, evidenceStatus code, confidence high, an empty trigger, the verify mark confirmed, and the verdict severity.
-- AC-R46. The run line shows one toggle "Risks: …" with the counts above zero, and one entry per risk with its outcome word and note. A run without finderRisks shows "Risk areas: N".
-- AC-R47. Review quality shows the risk sums and the posted and discarded risk findings per profile and prompt version. It also shows the posted and discarded question items with `fromRisk`. Eval run files hold the counts only.
+- AC-R46. The run line shows one toggle "Risks: …" with the counts above zero, and one entry per risk with its outcome word and note. A found entry with its draft shows its state, its title, and "Show draft". A run without finderRisks shows "Risk areas: N".
+- AC-R47. Review quality shows the risk sums and the posted and discarded risk findings per profile and prompt version. It also shows the posted and discarded question items with `fromRisk`, when there are any. Eval run files hold the counts only.
 
 ## 9. Work packages
 
@@ -293,7 +294,7 @@ Draft text of FINDER_RISK_RULES (rl-main and salvage only):
 | 2 | WP-RC2: eval counts | implementer | scripts/eval/run.ts, score.ts, compare.ts; tests/eval/score.test.ts, ab.test.ts, harness.test.ts; docs/eval/local.md | The sums, the risk row, the compare line, and the replay accepts "risk-check". | `bun run check` is green. A fake replay prints the risk line. |
 | 3 | Gate RC-A | user | none | Section 7. | The ship rule passes, and the user approves. |
 | 4 | WP-RC3: ship the check (built: prompt 2.9, cascade step 2) | implementer | src/shared/review.ts (REVIEW_PROMPT_VERSION "2.9", its comment, the describe text of verifyVerdict.finding); catalog.ts and jobs.ts (the check is always on); dto.ts and run.ts (remove "risk-check"); spec.md (AC-R40 to AC-R47); docs/eval/results.md; docs/eval/local.md | Snapshot updates. An old profile with "risk-check" reads without it. | Each review run has the check. `bun run check` is green. |
-| 5 | WP-RC4: UI, stats, and docs | implementer | src/web/review/RunLine.tsx, model.ts (the toggle, the entries, runningText); src/web/settings/quality.ts; src/server/review/stats.ts (also posted and discarded counts of question items with `fromRisk`, postable-risks.md Q3); scripts/demo.ts; tests/support/fake-claude.ts; tests/web/review-v2.test.ts; the stats.ts test; tests/e2e/review-v2.e2e.ts; README.md; docs/screenshots via `bun run screenshots`; CHANGELOG.md | Unit tests for the toggle label and the entries. One e2e: a run with all five outcomes shows the toggle, the entries, one finding draft, and one question. m2.e2e.ts keeps "Risk areas: 2" for a run without finderRisks. | AC-R46 and AC-R47. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
+| 5 | WP-RC4: UI, stats, and docs (built, with WP-PR1 and WP-PR2) | implementer | src/web/review/RunLine.tsx, model.ts (the toggle, the entries, runningText); src/web/settings/quality.ts; src/server/review/stats.ts (also posted and discarded counts of question items with `fromRisk`, postable-risks.md Q3); scripts/demo.ts; tests/support/fake-claude.ts; tests/web/review-v2.test.ts; the stats.ts test; tests/e2e/review-v2.e2e.ts; README.md; docs/screenshots via `bun run screenshots`; CHANGELOG.md | Unit tests for the toggle label, the entries, the links, and the stats. Since prompt 2.9 each review run has finderRisks, so m2.e2e.ts checks "Risks: 2 open", and a unit test keeps "Risk areas: N" for a run without finderRisks. No risk makes a question item, so no e2e checks one. | AC-R46 and AC-R47. The screenshots hold no real names. The skills shadcn, vercel-react-best-practices, and web-design-guidelines ran. |
 | 6 | Gate RC-B | user | none | Section 7. | The user decides. |
 | 7 | WP-RC5 (optional): finder half, variant "risks" | implementer | catalog.ts (FINDER_RISK_RULES in rl-main and salvage only); dto.ts (VARIANTS); tests | The rule lines with and without the variant, and the snapshot. | Gate RC-C passes. |
 

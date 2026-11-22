@@ -138,12 +138,16 @@ async function shots(browser: Browser) {
     await page.getByLabel("Your note").fill("Check the lock order in evict(). Callers hold the cache lock today.");
     await save(page, "brief");
   });
-  // The review record: the plain-word ledger, the refuted points with their reasons, and the "Not checked" list. The list starts
+  // The review record: the plain-word ledger, the refuted points with their reasons, the risk list, and the "Not checked" list. The list starts
   // open when the run has gaps.
   const gaps = runRow(page, "review").getByRole("button", { name: /^Not checked/ });
   if ((await gaps.getAttribute("aria-expanded")) !== "true") await gaps.click();
   await runRow(page, "review")
     .getByRole("button", { name: /refuted by the check/ })
+    .click();
+  // The risk list: each finder risk with its outcome, and the confirmed one with its draft (risk-check.md section 4.8).
+  await runRow(page, "review")
+    .getByRole("button", { name: /^Risks: / })
     .click();
   await toTop(page.locator("#runline"), 64);
   await save(page, "review");

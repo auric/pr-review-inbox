@@ -4,7 +4,8 @@
 // The rows of the run record (plan r2 R14): the newest run of each kind with its state, its stale note, its ledger, and its task text.
 import type { CommitDto, FixDto, MetaDto, ReviewItemDto, RunDetail, RunDto, RunKind } from "../../shared/dto";
 import { useRun } from "./data";
-import { type DraftGroups, ledgerParts, questionJump, runLine, staleText } from "./model";
+import { type DraftGroups, ledgerParts, questionJump, riskEntries, runLine, staleText } from "./model";
+import { RiskEntries } from "./RiskEntries";
 import { Ledger, Refuted } from "./RunLine";
 import { useTaskContext } from "./TaskChips";
 import { contextLines, trackerOf } from "./tasks";
@@ -63,6 +64,8 @@ export function useRunRecord(
       // The ledger and the refuted list follow the drafts of latestReview. The record shows them only for a done run.
       ledger: review ? <Ledger parts={ledger} onDraft={o.openDraft} /> : null,
       refuted: review ? <Refuted hidden={o.groups.hidden} busy={o.busy} onRestore={o.restore} /> : null,
+      // postable-risks.md section 4.3: o.items holds every item of latestReview, posted ones too.
+      risks: review ? <RiskEntries entries={riskEntries(shown.summary, o.items, r.id)} onDraft={o.openDraft} /> : null,
       context: taskText(shown),
     };
   });

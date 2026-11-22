@@ -4,7 +4,15 @@
 // Review quality (docs/plans/review-v2/spec.md section 4.2, design.md M3): outcome counts per profile name and prompt version,
 // from the existing rows. No table of its own.
 import type { Database } from "bun:sqlite";
-import { DISCARD_REASONS, type PostOutcomes, type ReviewStatsDto, type RunSummary, type RunUsage, type Volume } from "../../shared/dto";
+import {
+  DISCARD_REASONS,
+  type PostOutcomes,
+  type ReviewStatsDto,
+  type RunSummary,
+  type RunUsage,
+  riskOutcomes,
+  type Volume,
+} from "../../shared/dto";
 import { type Carried, displayGroup, type FindingPayload, type SessionMark, severities } from "../../shared/review";
 
 const DAY_MS = 86_400_000;
@@ -38,6 +46,11 @@ const SQL = {
     FROM review_item i JOIN review_run r ON r.id = i.run
     WHERE i.kind = 'finding' AND r.pr IS NOT NULL AND r.kind = 'review' AND r.status IN ('completed', 'incomplete') AND r.started_at >= $since
     ORDER BY i.id`,
+  // postable-risks.md Q3: the question items that a risk made, with their carried copies. A copy keeps fromRisk.
+  riskQuestions: `SELECT i.id, i.run, i.status, i.payload_json FROM review_item i JOIN review_run r ON r.id = i.run
+    WHERE i.kind = 'question' AND json_extract(i.payload_json, '$.fromRisk') IS NOT NULL
+      AND r.pr IS NOT NULL AND r.kind = 'review' AND r.status IN ('completed', 'incomplete') AND r.started_at >= $since
+    ORDER BY i.id`,
 };
 
 type RunRow = {
@@ -61,6 +74,7 @@ type ItemRow = {
   moved: number;
   copied: number;
 };
+type QuestionRow = { id: number; run: number; status: string; payload_json: string };
 export type StatsPayload = FindingPayload & {
   carried?: Carried;
   fixed?: unknown;
@@ -68,6 +82,21 @@ export type StatsPayload = FindingPayload & {
   revises?: number;
   discardReason?: { code: string };
 };
+
+type RiskStats = NonNullable<ReviewStatsDto["risks"]>;
+const riskStats = (d: ReviewStatsDto): RiskStats =>
+  (d.risks ??= {
+    runs: 0,
+    listed: 0,
+    found: 0,
+    asked: 0,
+    cleared: 0,
+    covered: 0,
+    open: 0,
+    posted: 0,
+    discarded: 0,
+    questions: { posted: 0, discarded: 0 },
+  });
 
 // A discard by the check, a fix commit, a closing re-review, or a session reject is not a triage by the user.
 // A reason chip comes only from the user. hasCopy: a re-review carried the item, which discarded the source.
@@ -89,6 +118,17 @@ export function postOutcome(o: { resolved: boolean; changed: boolean; moved: boo
   return o.moved ? "open" : "pending";
 }
 
+// The newest copy of each carried item. Copies have higher IDs than their sources.
+function lastCopy<T extends { id: number; p: { carried?: Carried } }>(items: T[]): (i: T) => T {
+  const copyOf = new Map<number, T>();
+  for (const i of items) if (i.p.carried) copyOf.set(i.p.carried.from, i);
+  return (i) => {
+    let at = i;
+    for (let next = copyOf.get(at.id); next; next = copyOf.get(at.id)) at = next;
+    return at;
+  };
+}
+
 function median(xs: number[]): number | null {
   if (!xs.length) return null;
   const s = [...xs].sort((a, b) => a - b);
@@ -101,14 +141,7 @@ export function reviewStats(db: Database, days: number, now = Date.now()): Revie
   const since = now - days * DAY_MS;
   const runs = db.query(SQL.runs).all({ since }) as RunRow[];
   const items = (db.query(SQL.items).all({ since }) as ItemRow[]).map((r) => ({ ...r, p: JSON.parse(r.payload_json) as StatsPayload }));
-  // The newest copy of each carried item. Copies have higher IDs than their sources.
-  const copyOf = new Map<number, (typeof items)[number]>();
-  for (const i of items) if (i.p.carried) copyOf.set(i.p.carried.from, i);
-  const last = (i: (typeof items)[number]) => {
-    let at = i;
-    for (let next = copyOf.get(at.id); next; next = copyOf.get(at.id)) at = next;
-    return at;
-  };
+  const last = lastCopy(items);
 
   const groups = new Map<string, { dto: ReviewStatsDto; minutes: number[] }>();
   const runInfo = new Map<number, { group: ReviewStatsDto; volume: Volume | undefined; checked: boolean }>();
@@ -159,6 +192,14 @@ export function reviewStats(db: Database, days: number, now = Date.now()): Revie
       d.questions.findings += q.findings;
       d.questions.kept += q.kept;
     }
+    // risk-check.md section 4.9: runs before the risk check have no finderRisks key.
+    const fr = summary.finderRisks;
+    if (fr) {
+      const r = riskStats(d);
+      r.runs++;
+      for (const k of riskOutcomes) r[k] += fr[k];
+      r.listed += fr.listed;
+    }
     if (r.usage_json) {
       const u = JSON.parse(r.usage_json) as RunUsage;
       d.usage.costUsd += u.costUsd ?? 0;
@@ -195,6 +236,25 @@ export function reviewStats(db: Database, days: number, now = Date.now()): Revie
       const code = end.p.discardReason?.code;
       d.discarded.byReason[code && code in d.discarded.byReason ? (code as keyof typeof d.discarded.byReason) : "none"]++;
     }
+    if (i.p.category === "risk") {
+      const r = riskStats(d);
+      if (end.status === "posted") r.posted++;
+      if (end.status === "discarded" && userDiscard(end.p, end.copied === 1)) r.discarded++;
+    }
+  }
+
+  const questions = (db.query(SQL.riskQuestions).all({ since }) as QuestionRow[]).map((r) => ({
+    ...r,
+    p: JSON.parse(r.payload_json) as { carried?: Carried },
+  }));
+  const lastQuestion = lastCopy(questions);
+  for (const i of questions) {
+    const run = runInfo.get(i.run);
+    if (!run || i.p.carried) continue;
+    const end = lastQuestion(i);
+    const r = riskStats(run.group).questions;
+    if (end.status === "posted") r.posted++;
+    if (end.status === "discarded") r.discarded++;
   }
 
   return [...groups.values()]

@@ -32,16 +32,16 @@ import {
   phaseParts,
   plural,
   type RunLineState,
+  risksLabel,
   runningText,
   setupText,
   shortHash,
   skillsText,
 } from "./model";
+import { linkish, revealList } from "./RiskEntries";
 import { sizeText } from "./tasks";
 
 const icon = "size-[15px] shrink-0";
-const linkish =
-  "rl-hit inline-flex cursor-pointer items-center gap-1 rounded text-sm font-medium text-pen hover:underline disabled:cursor-default disabled:opacity-60";
 
 function Elapsed({ from }: { from: number }) {
   const now = useNow(true);
@@ -186,13 +186,14 @@ export function Refuted({
 }
 
 // stale: staleText of the run. ledger: the open drafts of the newest review run. refuted: its refuted and duplicate findings.
-// context: the task text that the run read.
+// risks: the RiskEntries of a run with finderRisks. context: the task text that the run read.
 export type KindRun = {
   run: RunDto;
   state: RunLineState;
   stale: string | null;
   ledger: ReactNode;
   refuted: ReactNode;
+  risks: ReactNode;
   context: string;
 };
 
@@ -292,7 +293,6 @@ function Reveal({ id, on, children }: { id: string; on: boolean; children: React
   );
 }
 
-const revealList = "m-0 grid list-none gap-1.5 p-0";
 const revealItem = "grid grid-cols-[16px_minmax(0,1fr)] gap-2 [overflow-wrap:anywhere]";
 
 // first: the newest run. Only it can run, so only its state is a live region. Key 3 opens its log.
@@ -408,6 +408,8 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
   const ids = tasks.map((t) => t.key).join(", ");
   const range = run.since?.incremental ? shortHash(run.since.head) : null;
   const risks = sum?.risks ?? [];
+  // A run before prompt 2.9 has no finderRisks and keeps the old list.
+  const riskLabel = risksLabel(sum);
   const files = sum?.coverage.read ?? [];
   return (
     <li data-run-kind={run.kind} data-run-state={s.kind} className="grid gap-2.5">
@@ -561,10 +563,16 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
               </Disc>
             )}
             {ncButton}
-            {risks.length > 0 && (
+            {riskLabel ? (
               <Disc on={risk.on} controls={risk.id} onClick={risk.flip}>
-                Risk areas: {risks.length}
+                {riskLabel}
               </Disc>
+            ) : (
+              risks.length > 0 && (
+                <Disc on={risk.on} controls={risk.id} onClick={risk.flip}>
+                  Risk areas: {risks.length}
+                </Disc>
+              )
             )}
           </div>
           <Reveal id={read.id} on={read.on}>
@@ -604,7 +612,12 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
           <p className="m-0 text-xs text-muted-foreground">{nc.design ? `${nc.design} ` : ""}The Log shows each step.</p>
         </Reveal>
       )}
-      {review && risks.length > 0 && (
+      {review && riskLabel && (
+        <Reveal id={risk.id} on={risk.on}>
+          {row.risks}
+        </Reveal>
+      )}
+      {review && !riskLabel && risks.length > 0 && (
         <Reveal id={risk.id} on={risk.on}>
           <ul className="m-0 list-disc pl-[18px]">
             {risks.map((r) => (

@@ -748,12 +748,14 @@ export type ReviewItemDto = {
   // session: the verdict of your session (docs/plans/session-consult.md part C).
   // discardReason: the reason chip of a finding that the user discarded (docs/plans/review-v2/spec.md section 4.1).
   // withdrawn: findings only, a discuss run withdrew the finding (spec.md section 2.2).
+  // fromRisk: the index of the summary.finderRisks.list entry that made the item (postable-risks.md section 4.1).
   payload: (AnchoredFinding | Question | ReplyPayload) & {
     carried?: Carried;
     fixed?: FixedMark;
     session?: SessionMark;
     discardReason?: { code: DiscardReason };
     withdrawn?: WithdrawnMark;
+    fromRisk?: number;
   };
   // Findings only: the current anchor.
   anchor: (Anchor & { side: Side }) | null;
@@ -1462,8 +1464,14 @@ export type ReviewStatsDto = {
   // The sums of summary.finderQuestions. runs: the runs with that key.
   questions: Omit<FinderQuestions, "answers"> & { runs: number };
   // docs/plans/review-v2/risk-check.md section 4.6: the sums of summary.finderRisks, and the posted and discarded findings of category
-  // risk. runs: the runs with that key. Absent until stats.ts fills it (WP-RC4).
-  risks?: Omit<FinderRisks, "list"> & { runs: number; posted: number; discarded: number };
+  // risk. runs: the runs with that key. questions: the question items with fromRisk (postable-risks.md Q3). discarded counts only
+  // discards by you. Absent: the group has no run with finderRisks and no risk item.
+  risks?: Omit<FinderRisks, "list"> & {
+    runs: number;
+    posted: number;
+    discarded: number;
+    questions: { posted: number; discarded: number };
+  };
   // docs/plans/review-v2/obligations.md section 4.7: the sums of summary.obligations, and the posted and discarded findings of category
   // obligation. runs: the runs with that key. Absent until stats.ts fills it (WP-OB4).
   obligations?: Omit<Obligations, "list"> & { runs: number; posted: number; discarded: number };

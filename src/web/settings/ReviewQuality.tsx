@@ -10,7 +10,7 @@ import { severities } from "../../shared/review";
 import { api } from "../api";
 import { DISCARD_LABEL, SEVERITY } from "../review/model";
 import { read } from "../shell/data";
-import { type AddressedRow, addressedRows, addressedText, pendingText, questionsText, severityText } from "./quality";
+import { type AddressedRow, addressedRows, addressedText, pendingText, questionsText, risksText, severityText } from "./quality";
 
 const DAYS = 30;
 
@@ -162,6 +162,11 @@ export function ReviewQuality() {
                           {questionsText(s.questions)}
                         </span>
                       )}
+                      {risksText(s.risks).map((line) => (
+                        <span key={line} className={sub} data-stats-risks>
+                          {line}
+                        </span>
+                      ))}
                     </td>
                     {/* One denominator: the shown findings. Accepts from a fold count apart, so the share never exceeds 100%. */}
                     <td className={`${td} whitespace-nowrap`}>

@@ -119,8 +119,29 @@ const VERIFY = {
     verdict(1, "confirmed", "blocker", "`write()` reads the batch between two entries without the lock.", "src/cache/flush.ts:4"),
     verdict(2, "refuted", "minor", "The caller releases the lock in a `finally` block.", "src/cache/flush.ts:9"),
     verdict(3, "unsure", "nit", "No reader of the README depends on the flush order.", "README.md:1"),
+    // The finder risks of DEMO_RESULT are blocks 5 to 8, after the three candidates and the question (risk-check.md section 4.2).
+    { ...verdict(5, "duplicate", "blocker", "Candidate 1 reports the same lock scope.", "src/cache/flush.ts:3"), duplicateOf: 1 },
+    {
+      ...verdict(6, "confirmed", "major", "A reader runs between two entries and sees a partial batch.", "src/cache/flush.ts:3"),
+      finding: {
+        path: "src/cache/flush.ts",
+        side: "new",
+        line: 3,
+        lineEnd: null,
+        anchorText: "const lock = cache.lock();",
+        title: "A reader can see a partly flushed batch",
+        body: "A reader of the cache runs between two entries and gets old and new entries mixed. Keep one lock for the whole batch.",
+      },
+    },
+    verdict(7, "refuted", "minor", "The cache owner calls `flush()` from one worker only.", "src/cache/worker.ts:12"),
+    verdict(8, "unsure", "nit", "No file of this run names the flush order. The README owner can say if it matters.", ""),
   ],
   coverage: { read: ["src/cache/flush.ts"], skipped: [], unavailable: [], notChecked: [] },
+};
+// The finder result of each demo review: REVIEW_RESULT with two more risks, so the run line shows each risk outcome.
+const DEMO_RESULT = {
+  ...REVIEW_RESULT,
+  risks: [...REVIEW_RESULT.risks, "`flush()` can run on two threads at once.", "The README does not name the flush order."],
 };
 // The result of each Explain run (docs/plans/review-v2/spec.md section 3.3). Its links and risks name lines of the flush.ts diff of
 // the source commit (tests/support/review-fixture.ts), so the app keeps them on every PR with that commit.
@@ -380,7 +401,7 @@ const SUB_SPEC = {
 // The verify phase of a review run gets one tool call and no subagent (docs/plans/review-v2/spec.md section 1.6).
 const NO_AGENTS = claudeStream(claudeDir, "check", "claude-synthetic/review-flat.jsonl");
 runner.write({
-  fixture: claudeStream(claudeDir, "tree", "claude-synthetic/review-agent-tree.jsonl", REVIEW_RESULT),
+  fixture: claudeStream(claudeDir, "tree", "claude-synthetic/review-agent-tree.jsonl", DEMO_RESULT),
   fix: FIX,
   answered: ANSWERED,
   verify: VERIFY,

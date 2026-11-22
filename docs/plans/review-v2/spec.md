@@ -349,6 +349,8 @@ Wrong file (validate.ts relocate): when the anchor of a finding drops with "file
 44. AC-R43. settle gives each risk exactly one outcome by rows R0 to R10 of risk-check.md section 4.4. The counts add up to listed. R5 and R6 give open with no item (section 7, cascade step 2). The risk check makes only found items.
 45. AC-R44. A risk verdict never changes summary.verify, never adds a coverage line, and never makes the run incomplete.
 46. AC-R45. A found risk is a finding item with category risk, module core, evidenceStatus code, confidence high, an empty trigger, the verify mark confirmed, and the verdict severity.
+47. AC-R46. The run line shows one toggle "Risks: …" with the counts above zero, and one entry per risk with its outcome word and note. A found entry with its draft shows "<state>: <draft title>" and the link "Show draft", which opens the draft in Drafts. A posted draft has no link. A run without finderRisks shows "Risk areas: N" (risk-check.md section 4.8, postable-risks.md section 4.3).
+48. AC-R47. Review quality shows the risk sums and the posted and discarded risk findings per profile and prompt version. It shows the posted and discarded question items with `fromRisk` when there are any. A group without finderRisks runs shows no risk line. Eval run files hold the counts only.
 
 ## 2. Part 2: Discuss a finding
 
