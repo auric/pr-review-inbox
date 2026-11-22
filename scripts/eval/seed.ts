@@ -27,7 +27,6 @@ import {
   hasCodeChange,
   hostsOf,
   rangeOf,
-  rewriteHistory,
   type SeedKind,
   unusedNames,
 } from "./seed-build";
@@ -59,7 +58,7 @@ export const USAGE = [
   "  build",
   "  leaks <result.json>",
   "recheck runs no claude: it applies the keep conditions again to the stored validator answers of refuted seeds.",
-  "report runs no claude and changes no state: it lists by ID the bound seeds that fail a check, leave a name unused (check 11), or show a removed token in the PR description or the fold commit subject (check 12), and the twin hosts.",
+  "report runs no claude and changes no state: it lists by ID the bound seeds that fail a check, leave a name unused (check 11), or show a removed token in the PR description (check 12), and the twin hosts.",
   "propose and validate are paid. Without --real or --runner, they print the plan and an estimate, and exit with code 2. --runner runs the given CLI instead of claude and must come last.",
 ].join("\n");
 
@@ -69,8 +68,9 @@ const SEEDER_USD = 1.59;
 const VALIDATOR_USD = 0.4;
 // Section 5.4: validate a host until it has its cap plus one confirmed seeds.
 const CONFIRM_TARGET = HOST_CAP + 1;
-// Section 5.5: the second draws go to the five largest kinds, and more than 20% drops in the sample escalate every kind.
-const SECOND_DRAWS = 5;
+// Section 5.5: the second draws go to the four largest kinds, so 10 kinds give 14 seeds. More than 20% drops in the sample escalate every
+// kind.
+const SECOND_DRAWS = 4;
 const DROP_SHARE = 0.2;
 // Section 8: the states with a binding that validate checks (host-).
 const BOUND = new Set<SeedState>(["applied", "confirmed", "sampled", "kept"]);
@@ -167,7 +167,7 @@ const mulberry32 = (seed: number) => () => {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 };
 
-// One confirmed seed per kind, then one more from each of the five kinds with the most confirmed seeds. Ties go by the kind order. The
+// One confirmed seed per kind, then one more from each of the four kinds with the most confirmed seeds. Ties go by the kind order. The
 // draw reads only the confirmed seeds, each kind in ID order, so it is the same on every call. It keeps the build caps (pickSeeds): with
 // the kept and sampled seeds, at most HOST_CAP seeds per host and one per file. Twin hosts count as one host. The first draws go to the
 // smallest kinds first, so a kind with few seeds keeps its chance on a full host.
@@ -443,8 +443,7 @@ async function report(seeds: string, local: string): Promise<number> {
         tally.names++;
         console.log(`${row}  check 11: ${flagged.join(", ")}`);
       }
-      const rewrite = await rewriteHistory(h.repo, h.base, h.head, [{ ...s, ...c }]);
-      const where = rewrite ? await giveaways(h, s, rewrite.folds[0] as string) : [];
+      const where = giveaways(h, s);
       if (where.length) {
         tally.giveaways++;
         console.log(`${row}  check 12: ${where.join(", ")}`);
@@ -453,7 +452,7 @@ async function report(seeds: string, local: string): Promise<number> {
     const { twins } = await selectHosts(local, open);
     for (const t of twins) console.log(`Twin hosts: ${t.of.id} and ${t.host.id}. They count as one host.`);
     console.log(
-      `Report: ${tally.checked} bound seeds checked. ${tally.failed} fail a check, ${tally.names} leave a name unused or dangling (check 11), and ${tally.giveaways} show a removed token in the PR description or the fold commit subject (check 12). ${tally.changed} have a changed host. Twin hosts: ${twins.length}.`,
+      `Report: ${tally.checked} bound seeds checked. ${tally.failed} fail a check, ${tally.names} leave a name unused or dangling (check 11), and ${tally.giveaways} show a removed token in the PR description (check 12). ${tally.changed} have a changed host. Twin hosts: ${twins.length}.`,
     );
     return 0;
   } finally {

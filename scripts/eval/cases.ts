@@ -57,7 +57,18 @@ const place = { id: z.string().min(1), ...spot, alt: z.array(z.object(spot)).min
 // seeded set (docs/plans/review-v2/seeded-truth.md).
 export const ITEM_SOURCES = ["posted", "fixed", "session", "other", "own", "seeded"] as const;
 // seeded-truth.md section 4.1, with the kind of architecture-bugs.md.
-export const SEED_KINDS = ["lifetime", "contract", "omission", "entry", "concurrency", "leak", "error", "architecture", "local"] as const;
+export const SEED_KINDS = [
+  "lifetime",
+  "contract",
+  "omission",
+  "entry",
+  "concurrency",
+  "leak",
+  "error",
+  "architecture",
+  "security",
+  "local",
+] as const;
 // Local set only, rules 5. text: the title, trigger, and body of the finding, or the comment text with names replaced. category: the
 // category of the finding. A fixture set has no text: note and why describe its items.
 const gold = { text: z.string().optional(), category: z.string().optional(), source: z.enum(ITEM_SOURCES).optional() };

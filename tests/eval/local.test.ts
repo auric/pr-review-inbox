@@ -1446,7 +1446,7 @@ describe("seeded set fields (docs/plans/review-v2/seeded-truth.md WP-SG0)", () =
     }
   });
 
-  test("seedKind needs source seeded, and SEED_KINDS holds the nine kinds", () => {
+  test("seedKind needs source seeded, and SEED_KINDS holds the ten kinds", () => {
     const bug = { id: "S1", path: PATH, side: "new", lines: [1, 1], severityMin: "major", module: "core", note: "n" };
     expect(evalBug.safeParse({ ...bug, source: "seeded", seedKind: "architecture" }).success).toBe(true);
     expect(evalBug.safeParse({ ...bug, source: "seeded" }).success).toBe(true);
@@ -1455,7 +1455,18 @@ describe("seeded set fields (docs/plans/review-v2/seeded-truth.md WP-SG0)", () =
     expect(wrong.error?.issues[0]?.path).toEqual(["seedKind"]);
     expect(evalBug.safeParse({ ...bug, seedKind: "lifetime" }).success).toBe(false);
     expect(evalBug.safeParse({ ...bug, source: "seeded", seedKind: "style" }).success).toBe(false);
-    expect(SEED_KINDS).toEqual(["lifetime", "contract", "omission", "entry", "concurrency", "leak", "error", "architecture", "local"]);
+    expect(SEED_KINDS).toEqual([
+      "lifetime",
+      "contract",
+      "omission",
+      "entry",
+      "concurrency",
+      "leak",
+      "error",
+      "architecture",
+      "security",
+      "local",
+    ]);
   });
 
   test("an --out folder that holds a seeded set is refused and kept", async () => {

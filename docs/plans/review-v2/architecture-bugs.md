@@ -76,6 +76,8 @@ A seed takes the first kind in this list whose test holds. The test is the code 
 4. lifetime, concurrency, leak, error, entry: by their definitions (seeded-truth.md:62-68).
 5. local: the function alone.
 
+Since 2026-11-22, the kind security comes before contract (seeded-truth.md section 4.5). A dropped sanitize or auth call is security, not architecture.
+
 ## 3. Seeds and scoring
 
 ### 3.1 Kind row (seeded-truth.md section 4.1)
@@ -91,7 +93,7 @@ A seed takes the first kind in this list whose test holds. The test is the code 
 - The per-kind floor sum goes from 32 to 36 seeds: MDE 18.6 points, power 16%, 38%, and 64% at +5, +10, and +15 points. The model is that of section 4.3: R_A 3, R_B 2, rho 0.1.
 - The architecture row is descriptive only. At 7 seeds, its own paired MDE is about 41 points.
 - 7 of 60 seeds move the whole-set paired delta by 11.7 points at most. The MDE is 14.8 to 16.5 points. So a lever on architecture seeds alone cannot pass "better" (seeded-truth.md section 6.5).
-- The floor of 4 serves the per-kind table, not power (seeded-truth.md:107). For the architecture kind only, the floor does not block the build. If the kind stays under 4 after one targeted re-propose round, the build goes on. It prints "kind architecture: under floor". The requirement is then not measured, and the orchestrator tells the user.
+- The floor of 4 serves the per-kind table, not power (seeded-truth.md:107). Since seeded-truth.md section 14 row 13, the floor blocks no kind. For the architecture kind, the floor never blocked the build. If the kind stays under 4 after one targeted re-propose round, the build goes on. It prints "kind architecture: under floor". The requirement is then not measured, and the orchestrator tells the user.
 
 ### 3.3 Seeder (seeded-truth.md section 5.1)
 
@@ -105,8 +107,9 @@ At least two files outside the change must call the route at BASE.
 Make the change leave the route at one place, so that it skips a step inside the route.
 Give the route name in route. Leave route empty for every other kind.
 In why, name the skipped step and two places that call the route, with path:line.
-Leave no unused import or name behind.
 ```
+
+- WP-SG3 replaced the line "Leave no unused import or name behind." with a general line before these: "Leave no name unused or dangling. No function, variable, import, field, or parameter may lose its last use, and each new name needs a use." seeded-truth.md section 5.1 holds the current prompt.
 
 ### 3.4 Mechanical check 10 (seeded-truth.md section 5.2)
 
@@ -124,13 +127,14 @@ One line that applies to every kind, after "First try to show that the new code 
 When the old lines call code that the new lines leave out, read that code to its end.
 ```
 
-The keep conditions stay as they are.
+WP-SG3 added `kindOk` to the keep conditions, and `./context/kind.md` with the claimed kind, the kind table, and the kind order (seeded-truth.md section 5.4 and section 14 row 20). A seed of kind architecture that fits an earlier kind of the kind order is refuted.
 
 ### 3.6 Human sample (seeded-truth.md section 5.5)
 
 The user decided that the hand review covers less than 25% of the seeds. The old rule, max(2, ceil(25%)) per kind, gives 16 to 20 of 60, and 18 or more with 9 kinds.
 
-- Draw 1 confirmed seed per kind (9 seeds). Then draw 1 more from each of the five kinds with the most confirmed seeds. Ties go by the kind order of section 4.1. That gives 14 seeds, 23% of 60, about 1 h.
+- Draw 1 confirmed seed per kind (10 seeds since the security kind, seeded-truth.md section 4.5). Then draw 1 more from each of the four kinds with the most confirmed seeds (five with 9 kinds). Ties go by the kind order of seeded-truth.md section 4.1. That gives 14 seeds, 23% of 60, about 1 h.
+- The draw keeps the build caps: at most 3 seeds per host (a twin group counts as one) and 1 per file (seeded-truth.md section 14 row 18).
 - The draw reads no eval result. It uses mulberry32 with seed 2026.
 - The user checks a fourth point: the kind fits the kind order.
 - Release: a settled kind with 0 drops releases its unsampled confirmed seeds to kept. A kind with 1 or more drops escalates to full review. More than 20% drops in the whole sample escalates every kind.

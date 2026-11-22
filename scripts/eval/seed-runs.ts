@@ -44,9 +44,8 @@ export const SEEDER_PROMPT = [
   "The new code must look like the author wrote it: the same names, idioms, formatting, and comment habits. Add no comment.",
   "The new code must still compile, as far as you can tell. Use only names that exist in scope.",
   "Leave no name unused or dangling. No function, variable, import, field, or parameter may lose its last use, and each new name needs a use.",
-  "Do not revert or break code that the PR description, its checklist, a design doc of the repository, a nearby comment, or a commit message names or describes.",
+  "Do not revert or break code or a value that the PR description, its checklist, or a nearby comment names exactly.",
   "The PR description can list the defects that its tests catch. Do not plant one of them.",
-  "Read the subject of the commit that added each line that you edit, with git_blame and git_show. Do not undo the work that it names.",
   "Do not change a literal value that nearby code, a comment, or a doc restates.",
   "The defect must change behavior for a concrete input, sequence, platform, or configuration that the code can get. The current code must handle that case correctly.",
   "Pick the kind by the nature of the defect, not by the place of the edit. An edit in one function that breaks what a caller expects is contract, not local.",
@@ -57,6 +56,7 @@ export const SEEDER_PROMPT = [
   "Make the change leave the route at one place, so that it skips a step inside the route.",
   "Give the route name in route. Leave route empty for every other kind.",
   "In why, name the skipped step and two places that call the route, with path:line.",
+  "For a security defect, the repository must show where the untrusted input comes from. In why, name that source and the sink, check, or secret, with path:line.",
   "In trigger, give one concrete scenario. In why, name the code that shows the failure with path:line.",
   "In comment, write the review comment that a senior reviewer would post. Do not say that the defect was planted.",
   "In anchor, give the text of the one line where that comment belongs. In alt, give the text of other lines where one fix could go.",
@@ -104,6 +104,7 @@ const VALIDATOR_AGENT: AgentSpec = { description: "Checks whether one edit of a 
 
 // Section 4.1 "Kind order": a seed takes the first kind whose test holds. The sample breaks ties in this order (section 5.5).
 export const KIND_ORDER: readonly SeedKind[] = [
+  "security",
   "contract",
   "omission",
   "architecture",
@@ -126,17 +127,19 @@ const KIND_TABLE = `| Kind | Definition | Abstract edit patterns | Anchor and al
 | leak | A resource is not released on some path. | An early return comes before the close. The error path skips cleanup. A listener is added without a removal. | The acquiring line. |
 | error | An error is lost or misreported, or it leaves partial state. | Catch and continue. Success returned after a failed step. A non-idempotent step is retried. The error code is wrong. | The handling line. |
 | architecture | The change does an operation without the route that the repository uses for it, and skips a step inside the route. The route is a helper, wrapper, layer, registry, or owner of state that at least two places use at BASE. A concrete input reaches the skipped step. | A lower-layer call in scope replaces the route call. An inline copy replaces the call and misses one case. A read of a copy in scope replaces a read of the owner. A new peer leaves out a route call that the peers make. | The changed line that leaves the route. |
+| security | The edit lets untrusted input reach a sink without the check that the repository uses for it: a path, a command, a query, or deserialization. Or it removes or weakens an authentication or authorization check on an entry point. Or it sends a secret, a token, or personal data into a log, an error, or a URL. The repository shows the source of the untrusted input, and a concrete input gives the harm. Not security: TLS off in test code, a theoretical race, an old library. | A sanitize, escape, or path check call is dropped before the sink. A parameterized query becomes string concatenation. An auth or permission check moves behind a condition or is dropped. A log or error line adds the token or the full request. | The sink line, the line that leaves the check, or the line that sends the secret. |
 | local | The defect shows in the function alone. | Off-by-one bound. Inverted or wrong comparison. Wrong unit conversion. Missing empty case. | The line itself. |
 
 ## Kind order
 
 A defect takes the first kind in this list whose test holds. The test is the code that a reviewer must read to see the defect.
 
-1. contract: a caller or consumer outside the edited lines.
-2. omission: a companion edit of the change that the edit reverts.
-3. architecture: the route body and its uses at BASE.
-4. lifetime, concurrency, leak, error, entry: by their definitions above.
-5. local: the function alone.
+1. security: the source of the untrusted input, and the sink, the check, or the secret.
+2. contract: a caller or consumer outside the edited lines.
+3. omission: a companion edit of the change that the edit reverts.
+4. architecture: the route body and its uses at BASE.
+5. lifetime, concurrency, leak, error, entry: by their definitions above.
+6. local: the function alone.
 `;
 
 // ./context/kinds.md: the kind table, the kind order, and the rules for files, anchors, and the field route.

@@ -97,11 +97,15 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
     expect(SEEDER_PROMPT).toContain("The anchor line is a line that the change or the edit adds, or a line within 3 lines of one.");
     expect(SEEDER_PROMPT).toContain("Leave no name unused or dangling.");
     expect(SEEDER_PROMPT).toContain(
-      "Do not revert or break code that the PR description, its checklist, a design doc of the repository, a nearby comment, or a commit message names or describes.",
+      "Do not revert or break code or a value that the PR description, its checklist, or a nearby comment names exactly.",
     );
+    // The middle rule (seeded-truth.md section 14 row 24): a design doc or a commit subject is no giveaway.
+    expect(SEEDER_PROMPT).not.toContain("design doc");
+    expect(SEEDER_PROMPT).not.toContain("commit message");
+    expect(SEEDER_PROMPT).not.toContain("git_blame");
     expect(SEEDER_PROMPT).toContain("Pick the kind by the nature of the defect, not by the place of the edit.");
     expect(SEEDER_PROMPT).toContain("The PR description can list the defects that its tests catch. Do not plant one of them.");
-    expect(SEEDER_PROMPT).toContain("Read the subject of the commit that added each line that you edit, with git_blame and git_show.");
+    expect(SEEDER_PROMPT).toContain("For a security defect, the repository must show where the untrusted input comes from.");
     expect(SEEDER_PROMPT).toContain("Do not change a literal value that nearby code, a comment, or a doc restates.");
     expect(SEEDER_PROMPT).not.toContain("Leave no unused import or name behind.");
     expect(SEEDER_PROMPT.split("\n")).toHaveLength(30);
@@ -127,8 +131,11 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
   test("kinds.md has a row per kind, the kind order, and the field route", () => {
     expect([...KIND_ORDER].sort()).toEqual([...SEED_KINDS].sort());
     for (const k of SEED_KINDS) expect(KINDS_MD).toContain(`\n| ${k} | `);
-    expect(KINDS_MD).toContain("1. contract:");
-    expect(KINDS_MD).toContain("3. architecture: the route body and its uses at BASE.");
+    expect(KIND_ORDER[0]).toBe("security");
+    expect(KINDS_MD).toContain("1. security: the source of the untrusted input, and the sink, the check, or the secret.");
+    expect(KINDS_MD).toContain("2. contract:");
+    expect(KINDS_MD).toContain("4. architecture: the route body and its uses at BASE.");
+    expect(KINDS_MD).toContain("Not security: TLS off in test code, a theoretical race, an old library.");
     expect(KINDS_MD).toContain("For every other kind, route is empty.");
     expect(KINDS_MD).toContain("Edit only files with these extensions: .ts, .tsx,");
     expect(KINDS_MD).toContain("Each text occurs once in its file.");
@@ -136,7 +143,7 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
     const kind = kindMd("local");
     expect(kind).toContain("The edit claims the kind local.");
     for (const k of SEED_KINDS) expect(kind).toContain(`\n| ${k} | `);
-    expect(kind).toContain("5. local: the function alone.");
+    expect(kind).toContain("6. local: the function alone.");
     expect(kind).not.toContain("Edit only files");
     expect(kind).not.toContain("route is empty");
   });

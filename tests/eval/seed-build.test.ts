@@ -198,6 +198,10 @@ describe("mechanical checks (section 5.2)", () => {
       "\n",
     );
     expect([...commentLines(py, "src/a.py")]).toEqual([2, 4, 7]);
+    // A $ before a quote opens no interpolation outside C#, and an open hole ends at the end of its line.
+    expect([...commentLines('$("a{b");\n// note', "src/a.ts")]).toEqual([2]);
+    expect([...commentLines('var s = $"a{b";\n// note', "src/a.cs")]).toEqual([2]);
+    expect([...commentLines('var s = $"a{b}";\n// note', "src/a.cs")]).toEqual([2]);
   });
 
   test(
@@ -399,6 +403,8 @@ describe("check 11: unused and dangling names (section 5.2)", () => {
           ts,
         ),
       ).toEqual(["saveRecord"]);
+      // A template hole is code: the edit drops the declaration, and the hole keeps a dangling use.
+      expect(await at("src/x.ts", "const zebraGone = 1;", "", `log(\`n \${zebraGone}\`);\n`)).toEqual(["zebraGone"]);
       const py = "from lib import helper_one, helper_two\n\ndef run():\n    return helper_two()\n";
       expect(await at("src/x.py", "    return helper_one() + helper_two()", "    return helper_two()", py)).toEqual(["helper_one"]);
     },
@@ -430,32 +436,44 @@ describe("check 11: unused and dangling names (section 5.2)", () => {
       expect(
         await at("src/x.py", "    total = 1", "    zebra_total = 1", "def f():\n    zebra_total = 1\n    return zebra_total\n"),
       ).toEqual([]);
+      // The edit removes zebraFlush with all its code uses. Only a log message or only a comment still names it, and neither is a use.
+      const logged = 'const log = (s: string) => s;\nexport const g = () => {\n  log("zebraFlush done");\n};\n';
+      expect(await at("src/x.ts", "  zebraFlush();", '  log("zebraFlush done");', logged)).toEqual([]);
+      const noted = 'const log = (s: string) => s;\nexport const g = () => {\n  log("done"); // zebraFlush\n};\n';
+      expect(await at("src/x.ts", "  zebraFlush();", '  log("done"); // zebraFlush', noted)).toEqual([]);
+      // Outside C#, a $ before a quote is a name, so {zebraKey} stays inside the string.
+      expect(await at("src/x.ts", "  zebraKey();", "", 'const $ = (s: string) => s;\nexport const g = () => $("#{zebraKey}");\n')).toEqual(
+        [],
+      );
+      expect(
+        await at(
+          "src/x.py",
+          "    zebra_flush()",
+          '    log("zebra_flush done")',
+          'def log(s):\n    return s\n\ndef g():\n    log("zebra_flush done")\n',
+        ),
+      ).toEqual([]);
     },
     SLOW,
   );
 });
 
 describe("check 12: giveaway tokens (section 5.2, report only)", () => {
-  const described = (description: string) => ({ repo: host.repo, file: { ...host.file, pr: { ...host.file.pr, description } } });
+  const described = (description: string) => ({ file: { ...host.file, pr: { ...host.file.pr, description } } });
 
-  test(
-    "a removed code-like word, number, or string body in the PR description or the fold commit subject",
-    async () => {
-      const c1 = nat.commits[0] as string;
-      expect(await giveaways(described("Apply writes through saveRecord."), ARCH, c1)).toEqual(["description"]);
-      expect(await giveaways(host, ARCH, c1)).toEqual([]);
-      // c3 has the subject "Raise o30 and o31 for the café".
-      const o30 = { find: "export const o30 = 30 + 1;", replace: "export const o29 = 30 + 1;" };
-      expect(await giveaways(host, o30, nat.commits[2] as string)).toEqual(["commit subject"]);
-      const busy = { find: '  retry(25, "busy state");', replace: "  retry(5);" };
-      expect(await giveaways(described("Retry 25 times."), busy, c1)).toEqual(["description"]);
-      expect(await giveaways(described("It waits on a 'busy state' flag."), busy, c1)).toEqual(["description"]);
-      // Plain lower-case words match English text, so they do not count. A token that replace keeps does not count.
-      expect(await giveaways(described("The store is cleared."), { find: "  store.clear();", replace: "" }, c1)).toEqual([]);
-      expect(await giveaways(described("Retry 25 times."), { find: "  retry(25);", replace: "  retry(25, 1);" }, c1)).toEqual([]);
-    },
-    SLOW,
-  );
+  test("a removed code-like word, number, or string body in the PR description; a commit subject is no source", () => {
+    expect(giveaways(described("Apply writes through saveRecord."), ARCH)).toEqual(["description"]);
+    expect(giveaways(host, ARCH)).toEqual([]);
+    // The middle rule (section 14 row 24): c3 has the subject "Raise o30 and o31 for the café", and that is no giveaway.
+    const o30 = { find: "export const o30 = 30 + 1;", replace: "export const o29 = 30 + 1;" };
+    expect(giveaways(host, o30)).toEqual([]);
+    const busy = { find: '  retry(25, "busy state");', replace: "  retry(5);" };
+    expect(giveaways(described("Retry 25 times."), busy)).toEqual(["description"]);
+    expect(giveaways(described("It waits on a 'busy state' flag."), busy)).toEqual(["description"]);
+    // Plain lower-case words match English text, so they do not count. A token that replace keeps does not count.
+    expect(giveaways(described("The store is cleared."), { find: "  store.clear();", replace: "" })).toEqual([]);
+    expect(giveaways(described("Retry 25 times."), { find: "  retry(25);", replace: "  retry(25, 1);" })).toEqual([]);
+  });
 });
 
 describe("history rewrite (section 5.3)", () => {
@@ -692,9 +710,11 @@ describe("seeded set build (sections 6.1 and 8)", () => {
       ) as SeededInfo["byKind"],
     );
     expect(text).toContain(
-      "Kept seeds by kind: lifetime 1, contract 0, omission 2, entry 0, concurrency 0, leak 0, error 0, architecture 1, local 0.",
+      "Kept seeds by kind: lifetime 1, contract 0, omission 2, entry 0, concurrency 0, leak 0, error 0, architecture 1, security 0, local 0.",
     );
-    expect(text).toContain("Kinds under the floor of 4 kept seeds: lifetime, contract, omission, entry, concurrency, leak, error, local.");
+    expect(text).toContain(
+      "Kinds under the floor of 4 kept seeds: lifetime, contract, omission, entry, concurrency, leak, error, security, local.",
+    );
     expect(text.split("\n")).toContain("kind architecture: under floor");
     expect(text).toContain(`Pilot cases: ${caseId({ pr: 7, head: headP, base: nat.base })}.`);
     for (const secret of ["src/", "saveRecord", "Zebra", "sd00000000"]) expect(text).not.toContain(secret);

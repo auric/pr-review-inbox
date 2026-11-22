@@ -63,13 +63,19 @@ const MARKER = /\b(seed|seeded|inject|injected|planted|todo|fixme|xxx|hack|inten
 // Check 10: one identifier, as git grep -w sees a word.
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // Section 6.1.
-const MODULE: Partial<Record<SeedKind, (typeof MODULE_IDS)[number]>> = { concurrency: "concurrency", contract: "api", omission: "api" };
+const MODULE: Partial<Record<SeedKind, (typeof MODULE_IDS)[number]>> = {
+  concurrency: "concurrency",
+  contract: "api",
+  omission: "api",
+  security: "security",
+};
 const CATEGORY: Partial<Record<SeedKind, string>> = {
   lifetime: "ownership",
   leak: "resource",
   concurrency: "concurrency",
   contract: "behavior",
   omission: "behavior",
+  security: "security",
 };
 // The builder writes only these names into <seeds>/set. eval:label keeps labels/ there.
 const SET_NAMES = ["cases", "bundles", "MANIFEST.json"] as const;
@@ -475,10 +481,13 @@ export async function checkSeed(h: Host, s: SeedFields): Promise<Checked | Rejec
   };
 }
 
-// Check 4: the 1-based lines of text whose code is all comment or docstring. C-like: line comments and block comments, /** */ too.
-// Python: line comments and triple-quoted strings. A string literal opens no comment.
-export function commentLines(text: string, path: string): Set<number> {
+// Per character of text: 1 in a comment or docstring, 2 in a string literal, 0 in code. C-like: line comments and block comments, /** */
+// too. Python: line comments and triple-quoted strings. A string literal opens no comment. The holes of an interpolated string stay code:
+// ${...} in a JS template, {...} in a Python f-string or a C# $-string, where {{ is a literal brace.
+// shortcut: a Python f-string with triple quotes counts as a docstring, so its holes are masked; parse it if a check 11 miss shows up.
+function scanNotes(text: string, path: string): Uint8Array {
   const py = extname(path).toLowerCase() === ".py";
+  const cs = extname(path).toLowerCase() === ".cs";
   const note = new Uint8Array(text.length);
   const upTo = (from: number, end: string) => {
     const e = text.indexOf(end, from);
@@ -502,16 +511,39 @@ export function commentLines(text: string, path: string): Set<number> {
       note.fill(1, i, end);
       i = end;
     } else if (c === '"' || c === "'" || (c === "`" && !py)) {
+      const prefix = text.slice(Math.max(0, i - 3), i);
+      const interpolated = py ? /(^|\W)([fF][rR]?|[rR][fF])$/.test(prefix) : cs && /(^|[^\w$@])(\$@?|@\$)$/.test(prefix);
+      const open = c === "`" ? "${" : interpolated ? "{" : null;
+      const holes: [number, number][] = [];
       let j = i + 1;
-      while (j < text.length && text[j] !== c && (c === "`" || text[j] !== "\n")) j += text[j] === "\\" ? 2 : 1;
+      while (j < text.length && text[j] !== c && (c === "`" || text[j] !== "\n")) {
+        if (open === "{" && text.startsWith("{{", j)) j += 2;
+        else if (open !== null && text.startsWith(open, j)) {
+          let k = j + open.length - 1;
+          for (let depth = 0; k < text.length && (c === "`" || text[k] !== "\n"); k++) {
+            if (text[k] === "{") depth++;
+            else if (text[k] === "}" && --depth === 0) break;
+          }
+          holes.push([j + open.length, k]);
+          j = text[k] === "}" ? k + 1 : k;
+        } else j += text[j] === "\\" ? 2 : 1;
+      }
+      note.fill(2, i, Math.min(j + 1, text.length));
+      for (const [a, b] of holes) note.fill(0, a, b);
       i = j + 1;
     } else i++;
   }
+  return note;
+}
+
+// Check 4: the 1-based lines of text whose code is all comment or docstring. A line with a string literal is code.
+export function commentLines(text: string, path: string): Set<number> {
+  const note = scanNotes(text, path);
   const out = new Set<number>();
   let at = 0;
   for (const [k, line] of text.split("\n").entries()) {
     let code = false;
-    for (let j = 0; j < line.length && !code; j++) code = !note[at + j] && !/\s/.test(line[j] as string);
+    for (let j = 0; j < line.length && !code; j++) code = note[at + j] !== 1 && !/\s/.test(line[j] as string);
     if (line.trim() && !code) out.add(k + 1);
     at += line.length + 1;
   }
@@ -546,7 +578,8 @@ function inImport(lines: string[], k: number): boolean {
 
 // Check 11: the names that the edit leaves at one place of the file, where that place is no member access (".", "->", "::"), and the place
 // is in an import statement or no other file at the head has the name. A removed name at one place lost its use. An added name at one place
-// has no use or no declaration. A name at 0 places left the file with its uses, so it does not count.
+// has no use or no declaration. A name at 0 places left the file with its uses, so it does not count. A word in a string or a comment
+// is no place.
 export async function unusedNames(
   h: Pick<Host, "repo" | "head">,
   s: Pick<SeedFields, "path" | "find" | "replace">,
@@ -556,10 +589,11 @@ export async function unusedNames(
   const before = wordsOf(s.find, prefixes);
   const after = wordsOf(s.replace, prefixes);
   const lines = c.text.split("\n");
+  const note = scanNotes(c.text, s.path);
   const out: string[] = [];
   for (const n of [...new Set([...before, ...after])].sort()) {
     if (before.has(n) && after.has(n)) continue;
-    const hits = [...c.text.matchAll(new RegExp(`\\b${n}\\b`, "g"))];
+    const hits = [...c.text.matchAll(new RegExp(`\\b${n}\\b`, "g"))].filter((m) => !note[m.index]);
     if (hits.length !== 1) continue;
     const at = (hits[0] as RegExpExecArray).index;
     const lead = c.text.slice(Math.max(0, at - 2), at);
@@ -591,13 +625,12 @@ function tokensOf(text: string): Set<string> {
 }
 
 // Check 12, a report only: where a token that the edit removes stands as written. "description": the PR description of the host case.
-// "commit subject": the subject of the commit that the seed folds into (fold, a commit of the original range).
-export async function giveaways(h: Pick<Host, "repo" | "file">, s: Pick<SeedFields, "find" | "replace">, fold: string): Promise<string[]> {
+// A commit subject or a design doc is no giveaway (the middle rule, seeded-truth.md section 14 row 24).
+export function giveaways(h: Pick<Host, "file">, s: Pick<SeedFields, "find" | "replace">): string[] {
   const kept = tokensOf(s.replace);
   const removed = [...tokensOf(s.find)].filter((t) => !kept.has(t));
   const holds = (text: string) => removed.some((t) => new RegExp(`(?<!\\w)${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?!\\w)`).test(text));
-  const subject = await gText(h.repo, ["log", "-1", "--format=%s", fold]);
-  return [...(holds(h.file.pr.description) ? ["description"] : []), ...(holds(subject) ? ["commit subject"] : [])];
+  return holds(h.file.pr.description) ? ["description"] : [];
 }
 
 // ---------- The seeded case (section 6.1) ----------
