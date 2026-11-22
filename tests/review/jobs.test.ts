@@ -1241,7 +1241,18 @@ describe("editable profiles (M4)", () => {
       const repo = join(c.cwd, "repo");
       const servers = JSON.parse(readFileSync(flag(c.argv, "--mcp-config") as string, "utf8")).mcpServers;
       expect(servers.cg.args.map((x: string) => x.toLowerCase())).toEqual(
-        [FAKE_CG, "serve", "--mcp", "--path", repo, "--no-watch"].map((x) => x.toLowerCase()),
+        [
+          join(import.meta.dir, "../../src/server/main.ts"),
+          "--codegraph-mcp",
+          "--",
+          process.execPath,
+          FAKE_CG,
+          "serve",
+          "--mcp",
+          "--path",
+          repo,
+          "--no-watch",
+        ].map((x) => x.toLowerCase()),
       );
       expect(servers.cg.env).toMatchObject({
         CODEGRAPH_NO_DAEMON: "1",

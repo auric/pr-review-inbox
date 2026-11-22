@@ -5,11 +5,12 @@
 // Usage: bun codegraph.js init --yes <path> | sync <path> | status --json <path> | serve --mcp [...]
 // FAKE_CG: fail (every index command exits 1), fail-sync, hang, outside (status names another index folder), unmarked (serve marks no
 // tool read only).
-// FAKE_CG_LOG: a file that gets one JSON line per call.
+// FAKE_CG_LOG: a file that gets one JSON line per call, and one line { call, arguments, pid } per codegraph_explore call.
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 
 const [cmd, ...rest] = process.argv.slice(2);
 const mode = process.env.FAKE_CG ?? "";
@@ -26,12 +27,19 @@ if (process.env.FAKE_CG_LOG) appendFileSync(process.env.FAKE_CG_LOG, `${JSON.str
 
 if (cmd === "serve") {
   const server = new McpServer({ name: "fake-codegraph", version: "1.0.0" });
+  // projectPath as in codegraph 1.6.3: it opens the index above any path. The app's proxy must hide and refuse it.
   server.registerTool(
     "codegraph_explore",
-    { description: "Explores the fake index.", annotations: mode === "unmarked" ? {} : { readOnlyHint: true } },
-    async () => ({
-      content: [{ type: "text", text: "explore" }],
-    }),
+    {
+      description: "Explores the fake index.",
+      inputSchema: { query: z.string().optional(), projectPath: z.string().optional() },
+      annotations: mode === "unmarked" ? {} : { readOnlyHint: true },
+    },
+    async (args) => {
+      if (process.env.FAKE_CG_LOG)
+        appendFileSync(process.env.FAKE_CG_LOG, `${JSON.stringify({ call: "codegraph_explore", arguments: args, pid: process.pid })}\n`);
+      return { content: [{ type: "text", text: "explore" }] };
+    },
   );
   // A tool without readOnlyHint, for the read-only rule of the app-run server.
   server.registerTool("codegraph_note", { description: "Has no annotations." }, async () => ({

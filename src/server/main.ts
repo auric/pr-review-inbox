@@ -12,6 +12,7 @@ import { createLive } from "./live";
 import { log } from "./log";
 import { createOutbox } from "./publish/outbox";
 import { pruneRefs } from "./review/clone";
+import { runCodegraphMcp } from "./review/codegraph-mcp";
 import { runGitMcp } from "./review/git-mcp";
 import { createReviewJobs } from "./review/jobs";
 import { createSettings } from "./settings";
@@ -56,8 +57,12 @@ export function stopOnSignals(stop: () => Promise<unknown>, exit: (code: number)
 }
 
 // A compiled binary puts extra entries before --git-mcp in argv (U13), so the flag position varies.
+// The codegraph child command follows --codegraph-mcp, so that flag goes first.
+const codegraphMcpAt = process.argv.indexOf("--codegraph-mcp");
 const gitMcpAt = process.argv.indexOf("--git-mcp");
-if (import.meta.main && gitMcpAt >= 0) {
+if (import.meta.main && codegraphMcpAt >= 0) {
+  await runCodegraphMcp(process.argv.slice(codegraphMcpAt + 1));
+} else if (import.meta.main && gitMcpAt >= 0) {
   await runGitMcp(process.argv.slice(gitMcpAt + 1));
 } else if (import.meta.main) {
   const port = Number(process.env.REVIEW_LOOP_PORT ?? DEFAULT_PORT);

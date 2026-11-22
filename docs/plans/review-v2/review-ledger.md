@@ -65,7 +65,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | WP-JC-E: eval overlay | jira-context.md section 8 | user decided | In progress on a branch, not on main | None on main | jira-context.md says it starts after WP-RC3. Its Gate JC-A text names prompt 2.8. The Jira context package owns both points. |
 | Gates JC-A and JC-B | jira-context.md section 5 | user step | Open | None | Waits for WP-JC5 and WP-JC-E. |
 | WP-JC6: Jira family on by default | jira-context.md section 8 | user decided | Not started | None | Waits for Gate JC-A. WP-RC3 shipped in prompt 2.9. |
-| WP-V5: CodeGraph by default | review-v3.md WP-V5, D2 | user decided (D2) | Opt-in | None | Built as the variant "codegraph" on 2026-11-22. A run against SG-A comes next. A default needs the BRIEF 3.5 approval. |
+| WP-V5: CodeGraph by default | review-v3.md WP-V5, D2 | user decided (D2) | Opt-in | None | Built as the variant "codegraph" on 2026-11-22. Since 2026-11-22, every codegraph server runs behind the app's MCP proxy, which refuses `projectPath`. A run against SG-A comes next. A default needs the BRIEF 3.5 approval. |
 | WP-V7: task criteria rows | review-v3.md WP-V7 | user decided (2026-11-21) | Superseded by obligations | obligations.md (kind "criterion") | None. |
 | WP-V8: review checks per repository | review-v3.md WP-V8 | recommended | Not built | None | None. |
 | WP-V9, WP-V10a, WP-V10b: wave 3 UI, CodeGraph impact | review-v3.md section 4 | recommended | Blocked | None | Waits for WP-V5 and WP-V6 as defaults. |

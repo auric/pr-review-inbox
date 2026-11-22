@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Review and Build a Jira task: the CodeGraph tools of a run can no longer open the index of another project, such as your own clone. They read only the index of the run's code.
 - Build a Jira task: after Hold or another action in the More menu, the focus now stays on the new main button, for example Continue. Before, it sometimes went back to More.
 - Build a Jira task: a medium plan now builds right after you approve it. It gives one pull request with the plan and the code. Before, a medium plan waited after its approval.
 - Build a Jira task: a large plan now builds. "Plan review" under the large size offers "I approve the plan myself. Colleagues review only the code PRs." The plan then builds as part pull requests, one after another. Each part builds on the branch of the part before it, and its pull request targets that branch. The Task view lists the parts under "Parts: 3, one PR each", with "Drop this part" and "Skip this part". "Colleagues review the plan first, in a spec PR." stays disabled until a later version.

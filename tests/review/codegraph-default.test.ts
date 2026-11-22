@@ -40,6 +40,8 @@ import { FAKE_TOKEN, FAKE_USER } from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner, reviewRemote, stubListTools } from "../support/review-fixture";
 
+const MAIN = join(import.meta.dir, "../../src/server/main.ts");
+
 process.env.REVIEW_LOOP_SECRETS = "memory";
 console.log(`codegraph-default.test.ts imported from ${Bun.resolveSync("../../src/server/review/jobs", import.meta.dir)}`);
 
@@ -327,7 +329,9 @@ describe("variant codegraph: review runs with the fake CLI (review-v3.md WP-V5)"
       expect(calls.every((x) => !x.args.includes("npx"))).toBe(true);
       const s = c.mcp?.codegraph as { command: string; args: string[]; env: Record<string, string> };
       expect([s.command, ...s.args].map((a) => a.toLowerCase())).toEqual(
-        [process.execPath, h.wrapper, "serve", "--mcp", "--path", repo, "--no-watch"].map((a) => a.toLowerCase()),
+        [process.execPath, MAIN, "--codegraph-mcp", "--", process.execPath, h.wrapper, "serve", "--mcp", "--path", repo, "--no-watch"].map(
+          (a) => a.toLowerCase(),
+        ),
       );
       expect(s.env).toMatchObject({
         CODEGRAPH_NO_DAEMON: "1",

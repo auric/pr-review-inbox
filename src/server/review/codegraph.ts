@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import { COMPILED } from "../build";
 import { childEnv, killTree, type UserMcpEntry } from "./claude";
 import { expand, expandAll } from "./user-mcp";
 import { gitSetup } from "./workspace";
@@ -29,12 +30,23 @@ export function codegraphIndex(entry: UserMcpEntry): number {
 // codegraph 1.6.2 npm-shim.js downloads a missing platform bundle from GitHub unless CODEGRAPH_NO_DOWNLOAD is set.
 // dist/upgrade/update-check: CODEGRAPH_NO_UPDATE_CHECK or DO_NOT_TRACK turns the update check off.
 // The run's entry: the user's command up to `serve`, then a fixed project path. Other serve options of the user drop out.
-export function codegraphEntry(entry: Extract<UserMcpEntry, { type: "stdio" }>, repo: string): UserMcpEntry {
+// The command runs behind the app's proxy (codegraph-mcp.ts). main is the script that main.ts runs. A compiled binary takes no main.
+export function codegraphEntry(entry: Extract<UserMcpEntry, { type: "stdio" }>, repo: string, main = Bun.main): UserMcpEntry {
   const i = codegraphIndex(entry);
   return {
     type: "stdio",
-    command: entry.command,
-    args: [...entry.args.slice(0, i + 1), "--mcp", "--path", repo, "--no-watch"],
+    command: process.execPath,
+    args: [
+      ...(COMPILED ? [] : [main]),
+      "--codegraph-mcp",
+      "--",
+      entry.command,
+      ...entry.args.slice(0, i + 1),
+      "--mcp",
+      "--path",
+      repo,
+      "--no-watch",
+    ],
     env: {
       ...entry.env,
       CODEGRAPH_NO_DAEMON: "1",

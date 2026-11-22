@@ -50,10 +50,22 @@ describe("codegraph detection", () => {
       CODEGRAPH_DIR: "x",
       KEEP: "1",
     });
-    expect(codegraphEntry(user, "/data/runs/7/work/repo")).toEqual({
+    expect(codegraphEntry(user, "/data/runs/7/work/repo", "/app/main.ts")).toEqual({
       type: "stdio",
-      command: "npx",
-      args: ["-y", "@colbymchenry/codegraph", "serve", "--mcp", "--path", "/data/runs/7/work/repo", "--no-watch"],
+      command: process.execPath,
+      args: [
+        "/app/main.ts",
+        "--codegraph-mcp",
+        "--",
+        "npx",
+        "-y",
+        "@colbymchenry/codegraph",
+        "serve",
+        "--mcp",
+        "--path",
+        "/data/runs/7/work/repo",
+        "--no-watch",
+      ],
       env: {
         KEEP: "1",
         CODEGRAPH_DIR: "",
