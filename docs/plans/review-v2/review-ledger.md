@@ -51,7 +51,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | WP-OB1: obligation check, variant "obligations", with rule 8a | obligations.md section 10 | user decided (77144ca, dd86ad3) | Opt-in; not measured on current code | 07c4d80 | Commit ed9fc03 is not in the Gate A run commit. Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. Then WP-OB3, WP-OB4, Gate OB-B. |
 | WP-OB2: obligation counts and probe cases | obligations.md section 10 | user decided | Built, with 8 probe-obl cases | dce9f3d | The obligations.md table says 7 cases. The repository has 8. |
 | WP-V6: variant "preexisting" | review-v3.md WP-V6, D1; review-quality-2026.md item 11 | user decided (D1; ship decided 2026-11-21) | Shipped default, prompt 2.9 | 81d86d4; Gate A full run: noise +0.10 (limit 0.127), judge fp -0.04, recall 17.5 to 18.5, cost -2% | stats.ts count. WP-V9 UI parts. D1 asks for a single post on a click. items.ts still refuses Accept and Edit of a pre-existing finding. |
-| Caller rule: variant "callers" | review-v3.md D2; review-quality-2026.md item 11 | user decided (D2) | Opt-in | 81d86d4 | Stays opt-in (2026-11-21). A new run needs the SG-A baseline. CodeGraph by default (WP-V5). |
+| Caller rule: variant "callers" | review-v3.md D2; review-quality-2026.md item 11 | user decided (D2) | Opt-in | 81d86d4 | Stays opt-in (2026-11-21). A new run needs the SG-A baseline. With the variant "codegraph" (WP-V5), the rule gets the codegraph tools. |
 | Joint Gate A | risk-check.md section 7; obligations.md section 8 | user step | Ran 2026-11-20. Gate RC-A passes under the fallback; obligations not measured on current code | None in the repository | A docs/eval/results.md entry. Obligations: Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. |
 | WP-RC3: ship the risk check, prompt 2.9 | risk-check.md section 9 | user decided (2026-11-21) | Shipped default, prompt 2.9, cascade step 2 (no risk question items) | Gate RC-A: recall +1.3 points, noise +0.06 (limit 0.08), judge fp +0.03 (limit 0.05), questions 27 vs 27 per 100 runs with asked questions dropped, cost +11.8% | Cascade step 1 (drop only R6) is not measured. |
 | WP-OB3: ship the obligation check | obligations.md section 10 | user decided | Not started; "obligations" stays opt-in | None | Not re-measured before 2.9 (decided by the user on 2026-11-21). Measure it soon as an early candidate on the seeded set against the SG-A baseline (prompt 2.9), where the seed kind omission tests it. A version step after "2.9". |
@@ -65,7 +65,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | WP-JC-E: eval overlay | jira-context.md section 8 | user decided | In progress on a branch, not on main | None on main | jira-context.md says it starts after WP-RC3. Its Gate JC-A text names prompt 2.8. The Jira context package owns both points. |
 | Gates JC-A and JC-B | jira-context.md section 5 | user step | Open | None | Waits for WP-JC5 and WP-JC-E. |
 | WP-JC6: Jira family on by default | jira-context.md section 8 | user decided | Not started | None | Waits for Gate JC-A. WP-RC3 shipped in prompt 2.9. |
-| WP-V5: CodeGraph by default | review-v3.md WP-V5, D2 | user decided (D2) | Not built | None | Needs the BRIEF 3.5 approval. |
+| WP-V5: CodeGraph by default | review-v3.md WP-V5, D2 | user decided (D2) | Opt-in | None | Built as the variant "codegraph" on 2026-11-22. A run against SG-A comes next. A default needs the BRIEF 3.5 approval. |
 | WP-V7: task criteria rows | review-v3.md WP-V7 | user decided (2026-11-21) | Superseded by obligations | obligations.md (kind "criterion") | None. |
 | WP-V8: review checks per repository | review-v3.md WP-V8 | recommended | Not built | None | None. |
 | WP-V9, WP-V10a, WP-V10b: wave 3 UI, CodeGraph impact | review-v3.md section 4 | recommended | Blocked | None | Waits for WP-V5 and WP-V6 as defaults. |
@@ -107,7 +107,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | 1 | Seeded ground truth | seeded-truth.md | Designed since the audit (5537603). Build approved. Decisions made on 2026-11-21. WP-SG0 to WP-SG6 are built. U-SG1 built 21 seeds, under the floor of 48. |
 | 2 | "lenses3" against "runs3" | seeded-truth.md section 4; review-quality-2026.md item 6 | Needs the seeded set. |
 | 3 | Recall budget by PR size | research/review-practice-2026-11.md T4 | More agents only on large PRs. |
-| 4 | Caller rule and CodeGraph by default | review-v3.md D2; research T6 | The caller rule is built as the variant "callers" (81d86d4). WP-V5 is not built. |
+| 4 | Caller rule and CodeGraph by default | review-v3.md D2; research T6 | The caller rule is built as the variant "callers" (81d86d4). WP-V5 is built as the opt-in variant "codegraph". |
 | 5 | Map step with blame and earlier fixes | the comparison of 2026-11-17, outside the repository | About +30% to +50% cost by estimate. |
 | 6 | Repository facts profile | the comparison of 2026-11-17 | None. |
 | 7 | Senior reviewer framing line | the comparison of 2026-11-17 | None. |

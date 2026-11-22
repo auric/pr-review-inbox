@@ -19,8 +19,10 @@ import {
   type ExplainDto,
   type FixDto,
   type InstructionFileDto,
+  type McpToolDto,
   MOVED_ON,
   type MovedConflict,
+  mcpToolSafety,
   type PrTask,
   type ReviewItemDto,
   type RunConflict,
@@ -130,8 +132,10 @@ import {
   type RunOutcome,
   SESSION_GATES,
   sweepCwdFolders,
+  type UserMcpEntry,
+  type UserServerSpec,
 } from "./claude";
-import { codegraphEntry, codegraphIndex, indexCodegraph } from "./codegraph";
+import { APP_CODEGRAPH, appCodegraphEntry, codegraphEntry, codegraphIndex, indexCodegraph } from "./codegraph";
 import {
   askConversation,
   candidatesFile,
@@ -221,7 +225,7 @@ import {
   toRunDto,
 } from "./run-rows";
 import { alwaysProblems, type CopiedSkill, claudeConfigDir, copySkills, copyTaskSkills, type SkillRepo } from "./skills";
-import { claudeJsonPath, userServers } from "./user-mcp";
+import { claudeJsonPath, listUserTools, McpListError, userServers } from "./user-mcp";
 import type { AskedThread } from "./validate";
 import {
   type AttachmentFile,
@@ -255,6 +259,9 @@ const SESSION_TIMEOUT_MS = 20 * 60_000;
 const MAIN_ENTRY = join(import.meta.dir, "..", "main.ts");
 // The skills folder of an implement run, from its cwd. writeContext (src/server/tasks/implement.ts) writes context/ again before each step.
 const IMPLEMENT_SKILLS = "context/skills";
+// docs/plans/review-v3.md WP-V5: the mcp.json key of the app-run CodeGraph server.
+const APP_SERVER = "codegraph";
+type UserStdio = Extract<UserMcpEntry, { type: "stdio" }>;
 // The notification of a review, re-review, or explain run end. One tab claims it (src/web/notify.ts). A cancelled run gives none.
 const RUN_NOTE = "INSERT INTO event (pr, kind, ref, created_at) VALUES ($pr, $kind, $ref, $now) ON CONFLICT DO NOTHING";
 const runNoted = (j: { kind: RunKind; cancelled?: boolean }, e: Ending) =>
@@ -297,6 +304,8 @@ export type ReviewJobsOptions = {
   runnerWrap?: (r: Runner) => Runner;
   // Absent: JIRA_WAIT_MS. The tests pass a shorter wait.
   jiraWaitMs?: number;
+  // The argv prefix of the codegraph executable for the variant "codegraph". Absent: codegraph on PATH. The tests pass the fake.
+  codegraphCommand?: string[];
 };
 
 export type Runner = ReturnType<typeof createClaudeRunner>;
@@ -797,8 +806,51 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return parts.length ? `# Project instructions\n\n${IMPLEMENT_TRUST}\n\n${parts.join("\n")}` : "";
   }
 
+  // Indexes repo with the codegraph command of entry and shows the indexing phase. Returns the reason of a failed index, else null.
+  async function indexRepo(j: Job | TaskJob, entry: UserStdio, repo: string, ref: { project: string; repo: string }) {
+    j.phase = "indexing";
+    j.abort = new AbortController();
+    notify(j.id);
+    const started = now();
+    const failed = await indexCodegraph({
+      entry,
+      repo,
+      dataDir,
+      cacheDb: join(dataDir, "cache", "codegraph", ref.project, ref.repo, "codegraph.db"),
+      signal: j.abort.signal,
+    });
+    j.phase = undefined;
+    j.abort = undefined;
+    notify(j.id);
+    if (!j.cancelled) log(`Review run ${j.id}: codegraph index: ${failed ?? "ready"} after ${now() - started} ms.`);
+    return failed;
+  }
+
+  // docs/plans/review-v3.md WP-V5: the app-run CodeGraph server of the variant "codegraph". The run gets only its read-only tools.
+  // A string is a gap line. null: Cancel came.
+  async function appCodegraph(j: Job, repo: string, ref: { project: string; repo: string }): Promise<UserServerSpec | string | null> {
+    const command = opts.codegraphCommand ?? APP_CODEGRAPH;
+    if (!Bun.which(command[0] as string)) return "CodeGraph: the codegraph executable is not installed";
+    const entry = appCodegraphEntry(command);
+    const failed = await indexRepo(j, entry, repo, ref);
+    if (j.cancelled) return null;
+    if (failed) return `CodeGraph: no index (${failed})`;
+    const pinned = codegraphEntry(entry, repo);
+    let tools: McpToolDto[];
+    try {
+      tools = await listUserTools(pinned);
+    } catch (e) {
+      return `CodeGraph: unavailable (${e instanceof McpListError ? e.message : "error"})`;
+    }
+    if (j.cancelled) return null;
+    const read = tools.filter((t) => mcpToolSafety(t) === "readOnly").map((t) => t.name);
+    if (!read.length) return "CodeGraph: the server has no read-only tools";
+    return { user: pinned, tools: read, deny: tools.map((t) => t.name).filter((t) => !read.includes(t)) };
+  }
+
   // The docs servers and the user servers of the profile. A picked codegraph server indexes repo first. null: Cancel came.
-  async function profileServers(j: Job | TaskJob, profile: Profile, repo: string, ref: { project: string; repo: string }) {
+  // app: a review run, where the variant "codegraph" adds the app-run server.
+  async function profileServers(j: Job | TaskJob, profile: Profile, repo: string, ref: { project: string; repo: string }, app?: Job) {
     const [docs, user] = await Promise.all([
       docServers(profile),
       userServers(
@@ -812,30 +864,27 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const graphs = Object.entries(user.servers).filter(([, s]) => codegraphIndex(s.user) >= 0);
     const first = graphs[0]?.[1].user;
     if (first?.type === "stdio") {
-      j.phase = "indexing";
-      j.abort = new AbortController();
-      notify(j.id);
-      const started = now();
-      const failed = await indexCodegraph({
-        entry: first,
-        repo,
-        dataDir,
-        cacheDb: join(dataDir, "cache", "codegraph", ref.project, ref.repo, "codegraph.db"),
-        signal: j.abort.signal,
-      });
-      j.phase = undefined;
-      j.abort = undefined;
-      notify(j.id);
+      const failed = await indexRepo(j, first, repo, ref);
       if (j.cancelled) return null;
-      log(`Review run ${j.id}: codegraph index: ${failed ?? "ready"} after ${now() - started} ms.`);
       for (const [key, s] of graphs)
         if (failed) {
           delete user.servers[key];
           user.gaps.push(`MCP server ${key}: no codegraph index (${failed})`);
         } else if (s.user.type === "stdio") user.servers[key] = { ...s, user: codegraphEntry(s.user, repo) };
     }
+    // A picked codegraph server wins, so one index serves the run.
+    const own =
+      app?.profile.variants.includes("codegraph") && !graphs.length && !user.servers[APP_SERVER]
+        ? await appCodegraph(app, repo, ref)
+        : undefined;
+    if (j.cancelled) return null;
+    if (typeof own === "string") user.gaps.push(own);
     for (const g of user.gaps) log(`Review run ${j.id}: ${g}.`);
-    const used = Object.entries(user.servers).map(([server, s]) => ({ server, tools: s.tools, remote: s.user.type !== "stdio" }));
+    const used: McpUse[] = Object.entries(user.servers).map(([server, s]) => ({ server, tools: s.tools, remote: s.user.type !== "stdio" }));
+    if (own && typeof own !== "string") {
+      user.servers[APP_SERVER] = own;
+      used.push({ server: APP_SERVER, tools: own.tools, remote: false, app: true });
+    }
     if (used.length) log(`Review run ${j.id} MCP servers: ${used.map((u) => `${u.server} (${u.tools.length} tools)`).join(", ")}.`);
     const unmarked = user.unmarked.length ? `Unmarked MCP tools allowed: ${user.unmarked.join(", ")}.` : null;
     if (unmarked) log(`Review run ${j.id}: ${unmarked}`);
@@ -1063,7 +1112,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (j.cancelled) return cancelled();
 
     const profile = j.profile;
-    const tools = await profileServers(j, profile, ws.repo, pr);
+    const tools = await profileServers(j, profile, ws.repo, pr, profile.explain ? undefined : j);
     if (!tools) return cancelled();
     const mcpServers = { [GIT_SERVER]: gitMcpServer(ws, MAIN_ENTRY), ...tools.servers };
     const { used, unmarked } = tools;

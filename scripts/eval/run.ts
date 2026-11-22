@@ -226,6 +226,9 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   const variants = v.variants === undefined ? null : v.variants.split(",").map((s) => s.trim());
   if (variants?.some((x) => !(VARIANTS as readonly string[]).includes(x)))
     return { error: `--variants must be a comma list of ${VARIANTS.join(", ")}.` };
+  // docs/plans/review-v3.md WP-V5: without the executable, every run of the variant "codegraph" would be a baseline run.
+  if (v.real && variants?.includes("codegraph") && !Bun.which("codegraph"))
+    return { error: "--variants codegraph needs the codegraph executable on PATH." };
   const rereview = v.rereview ?? false;
   return {
     real: v.real ?? false,

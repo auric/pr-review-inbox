@@ -1,6 +1,6 @@
 # Review v3 plan
 
-Status: planned, 2026-10-28. WP-V1, WP-V2, WP-V3, and WP-V4 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removed the lost variants. Wave 5 (section 10, recall on large PRs) stopped on 2026-11-01 after its first gate. Later review work goes on in review-v2/review-quality-2026.md. On 2026-11-19, WP-V6 (pre-existing group) and the caller rule of D2 were built as opt-in variants. Their names are "preexisting" and "callers". On 2026-11-21, prompt 2.9 shipped "preexisting" as the default after Gate A, and "callers" stays opt-in. WP-V5 (CodeGraph by default) and WP-V8 are not built. WP-V7 is superseded by obligations (review-v2/obligations.md, kind "criterion"), decided by the user on 2026-11-21. WP-V9 and WP-V10 are blocked, and WP-V12 is superseded by the obligation check. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
+Status: planned, 2026-10-28. WP-V1, WP-V2, WP-V3, and WP-V4 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removed the lost variants. Wave 5 (section 10, recall on large PRs) stopped on 2026-11-01 after its first gate. Later review work goes on in review-v2/review-quality-2026.md. On 2026-11-19, WP-V6 (pre-existing group) and the caller rule of D2 were built as opt-in variants. Their names are "preexisting" and "callers". On 2026-11-21, prompt 2.9 shipped "preexisting" as the default after Gate A, and "callers" stays opt-in. On 2026-11-22, WP-V5 was built as the opt-in variant "codegraph", so the seeded set can measure it against SG-A. It is not on by default, because the BRIEF 3.5 text of section 6 has no approval yet. WP-V8 is not built. WP-V7 is superseded by obligations (review-v2/obligations.md, kind "criterion"), decided by the user on 2026-11-21. WP-V9 and WP-V10 are blocked, and WP-V12 is superseded by the obligation check. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
 
 Sources: a comparison of our review pipeline with a similar app (2026-10-28, not in the repository), BRIEF.md sections 3.5 and 3.6, docs/plans/review-v2/design.md (R1 to R17, M1 to M4), docs/plans/review-v2/tasks.md (package format), scripts/eval/, and src/server/review/{catalog.ts, prompt.ts, validate.ts, codegraph.ts, jobs.ts}. Never name the other app, its author, or any company, host, or project in this repository.
 
@@ -57,7 +57,7 @@ Shared-file ownership (merge order):
 
 | File | Owners |
 |---|---|
-| scripts/eval/* | WP-V1 → WP-V3 → WP-V2 (flags) → WP-V5 (`--codegraph`) |
+| scripts/eval/* | WP-V1 → WP-V3 → WP-V2 (flags) → WP-V5 (`--variants codegraph`) |
 | src/server/review/catalog.ts, prompt.ts | WP-V2 → WP-V4 → WP-V5 → WP-V6 → WP-V7 → WP-V8 → WP-V12 |
 | src/shared/review.ts, src/shared/dto.ts | WP-V2 → WP-V6 → WP-V7 → WP-V8 → WP-V10a (additive only) |
 | src/server/review/jobs.ts, judge.ts, validate.ts | WP-V5 → WP-V6 → WP-V7 → WP-V8 → WP-VCI1 |
@@ -180,7 +180,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 - Behavior: the run indexes repo/ of the snapshot with the existing indexCodegraph (120 s cap, cache in the data folder). The run allows only tools with readOnlyHint, as the user MCP safety rule does. A failed or slow index leaves the server out, and the run log and the Brief gaps say so. A missing executable gives one gap line, and the run goes on. A user-picked codegraph server wins over the default, so one index serves the run.
 - Tests: a fake `codegraph` script on a temp PATH: switch on and found, switch on and missing, switch off, a user pick and the default together (one index), index timeout, an npx command never runs.
 - Control mutations: run the default when the switch is off (switch test fails); allow a tool without readOnlyHint (allowlist test fails).
-- Eval measure: U-V3, `--codegraph on` against `off` on the local set and set hard. Watch recall, minutes, and cost. The index time counts in minutes.
+- Eval measure: U-V3, `--variants codegraph` against the baseline on the local set and set hard. Since 2026-11-22, first on the seeded set against SG-A (docs/eval/local.md, "CodeGraph"). Watch recall, minutes, and cost. The index time counts in minutes.
 - Depends: WP-V4; the BRIEF 3.5 approval before merge. UI parts go to WP-V9.
 - Caller rule first (2026-11-19, variant "callers"): rl-main and rl-reviewer get `CALLERS_LINES` (catalog.ts) after the finder rules. The finder takes each changed function, type, config key, and message format. It finds their callers and consumers outside the diff, also in tests, scripts, and build files. It uses the codegraph tools when the run has them, else Grep and Read. A broken caller gives a finding with the caller path:line in evidence. The salvage run and the verify phase do not get the lines. The eval profile has no MCP server, so Gate A measures the rule with Grep only. The codegraph clause stays untested until WP-V5.
 - Eval of the caller rule: `bun run eval:ab -- --baseline eval-results/gate-a/baseline --review-only --clean 8 --repeat 2 --candidate-variants callers --results eval-results/gate-a/callers`. Give the same `--effort` as the baseline when it had one. `--candidate-replay` refuses the variant, because it changes the finder. It has no counter of its own: the "better" rule of review-quality-2026.md section 2 decides on grounded recall and noise.
@@ -191,6 +191,16 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
   - Cleanup: the index goes with the run folder (workspace.ts `remove`: `rm` of `runs/<runId>`, then `git worktree prune`). `pruneWorkspaces` deletes every run folder at start. Nothing deletes the cache of a repository today.
   - Network: the run entry and the index set `DO_NOT_TRACK`, `CODEGRAPH_NO_UPDATE_CHECK`, `CODEGRAPH_NO_DOWNLOAD`, and `CODEGRAPH_NO_DAEMON` (serve only). The index runs the command of the server that the user picked, which can be an npx spec. The app adds no command of its own today.
   - What WP-V5 adds: a default entry for an installed `codegraph` (Bun.which), the profile switch, and the eval flag `--codegraph`. The index, the cache, and the cleanup above already exist.
+- Implementation notes (2026-11-22, built as the opt-in variant "codegraph"; the user decided on 2026-11-22 to measure it first):
+  - Switch: the variant "codegraph" (dto.ts VARIANTS), not the profile field `codegraph` and not the eval flag `--codegraph on|off`. The eval selects it with `--variants codegraph` or `eval:ab --candidate-variants codegraph`, and prompt_version gets "+codegraph". The profile field, its default fill, and PROFILES_VERSION come with a ship as a default, after U-V3 and the BRIEF 3.5 approval.
+  - Scope: review and re-review runs only, and not with an Explain profile. Task, implement, and own-review runs keep the user pick path only.
+  - Executable: jobs.ts finds `codegraph` with Bun.which. The command is the bare name `codegraph`, as in a user config that the CLI starts. jobs.ts `codegraphCommand` replaces it in tests. The app never runs npx for it. A missing executable gives the gap line "CodeGraph: the codegraph executable is not installed".
+  - Index: the same indexCodegraph as a user pick (120 s cap, the cache per repository, the indexing phase, Cancel). A failed index gives "CodeGraph: no index (<reason>)". A gap line makes the run incomplete, as every app gap does.
+  - Tools: after the index, the app lists the tools of the pinned entry (codegraphEntry: `--path <repo> --no-watch`, no daemon, no download, no update check). The run allows only tools with readOnlyHint true, and denies the others. This is stricter than a user pick, which also allows unmarked tools. codegraph 1.6.3 marks its 8 tools read only (dist/mcp/tools.js READ_ONLY_ANNOTATIONS). No read-only tool gives a gap line.
+  - Server key: `codegraph` in mcp.json. A picked codegraph server, or a picked server with that key, wins. The variant then adds nothing, so one index serves the run.
+  - Prompt: catalog.ts mcpLines gives the app server one line in place of the user MCP lines: "The app indexed ./repo for these CodeGraph tools: <names>. Use them to find the callers and dependents of each changed symbol." The line shows only when the server is in the run. A missing executable or a failed index gives no line. With the variant off, every prompt, the stdin, the --json-schema files, and candidates.md keep their bytes (tests/review/codegraph-default.test.ts).
+  - Eval: `bun run eval -- --real --variants codegraph` exits 2 when `codegraph` is not on PATH, because every run would then be a baseline run. docs/eval/local.md section "CodeGraph" gives the SG-A commands.
+  - Not built: the profile field and its UI (WP-V9), the Brief line, the integration-check.md row, and the BRIEF 3.5 bullet. Section 6 still needs approval before a default.
 
 ### WP-V6. Pre-existing group (implementer-xhigh, W3 after WP-V5; idea 8, D1)
 
@@ -247,7 +257,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 
 ### Gate U-V3. CodeGraph and the new groups (user)
 
-- `bun run eval -- --real --set local --repeat 2 --codegraph on` and `off`, and the same on set hard.
+- `bun run eval:ab -- --candidate-variants codegraph --candidate-repeat 2`, and the same on set hard.
 - Keep CodeGraph on by default only when recall rises and minutes stay within section 0. Else the shipped profile turns it off, and the switch stays.
 - The user runs docs/smoke-review-v3.md on a real PR.
 

@@ -20,6 +20,7 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `refute-issue` (docs/plans/review-v2/verifier-rule.md): the verify phase judges the problem of a candidate, not its details. A wrong trigger does not refute a real defect. The verifier looks for another trigger and names it in reason. The variant changes only the verify prompts, so `--candidate-replay` can test it. Each finding item of a run file holds the verify reason as `checkReason`. No metric reads it.
 - `architecture` (docs/plans/review-v2/architecture-bugs.md): rl-main and rl-reviewer compare each new call, state, or handler with the way the repository does it elsewhere. They report a skipped step only with a concrete input and a wrong result. The verify phase refutes a different way that gives the same result. The variant changes the finder, so `--candidate-replay` refuses it.
 - `lenses3` and `runs3` (docs/plans/review-v2/focused-passes.md): a full review runs three finder passes in sequence, then one verify phase over the union. Under `lenses3`, pass 1 looks at failure paths, pass 2 at contracts and callers, and pass 3 at the whole change, and the verify phase also gets the lines of `architecture`. Under `runs3`, the three passes get the same prompts. A re-review keeps one pass. Both variants change the finder, so `--candidate-replay` refuses them. See "Finder passes".
+- `codegraph` (docs/plans/review-v3.md WP-V5): a review run indexes repo/ of the snapshot with the installed `codegraph` executable. The agents of the run get its read-only tools and one line that asks for the callers and dependents of each changed symbol. The index time counts in the run minutes. `bun run eval -- --real` with this variant exits with code 2 when `codegraph` is not on PATH. The variant changes the finder, so `--candidate-replay` refuses it. See "CodeGraph".
 - `parts`: see "Part files". `failures`: a trial module with a failure checklist.
 - The variants `signal`, `order`, `rules2`, and `rereview-strict` are removed. The first three lost in U-V1 (docs/eval/results.md). U-V1 gave no decision for `rereview-strict`, and no plan uses it. A saved profile that still lists one loads without it. `--variants` and `--candidate-variants` refuse them. No run reads `REVIEW.md` now.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
@@ -207,6 +208,31 @@ REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/
 bun run eval:seed -- leaks <each candidate result.json>
 bun run eval:compare -- <runs3 candidate result.json> <lenses3 candidate result.json>
 ```
+
+## CodeGraph
+
+The variant `codegraph` (docs/plans/review-v3.md WP-V5) is opt-in. Its candidate runs against SG-A, the seeded baseline of prompt 2.9. Install `codegraph` first, so that `codegraph --version` works in the same shell. The app never runs npx for it.
+
+Pilot on two seeded hosts first. Check that each run has no `CodeGraph:` line and that the index time in the app log stays well under 120 s:
+
+```
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval -- --set local --cases <two pilot IDs> --variants codegraph --repeat 1 --real --out eval-results/seeded/codegraph-pilot
+```
+
+Then the candidate against SG-A:
+
+```
+bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants codegraph --candidate-repeat 2 --review-only --results eval-results/seeded/codegraph
+bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants callers,codegraph --candidate-repeat 2 --review-only --results eval-results/seeded/callers-codegraph
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/codegraph/review-candidate --real
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/callers-codegraph/review-candidate --real
+bun run eval:seed -- leaks <each candidate result.json>
+```
+
+- The first command measures the server alone. The second adds the caller rule of `callers`, which names the codegraph tools when the run has them.
+- Each run of the candidate must have had the server. The coverage text of a run in the result file holds a line that starts with `CodeGraph:` when the app left it out: the executable is missing, the index failed or took more than 120 s, the tool list failed, or the server has no read-only tools. It holds `MCP server codegraph: failed` or `absent` when the CLI did not start it. Such a run is a baseline run, so drop the result and fix the cause.
+- The app log shows `codegraph index: ready after N ms` and `MCP servers: codegraph (N tools)` per run.
+- A profile that picks a codegraph server of the user's Claude config keeps it. The variant then adds no second server, and one index serves the run.
 
 ## Run W1 in one command
 

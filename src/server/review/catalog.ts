@@ -1420,8 +1420,9 @@ export const withInstructions = (a: AgentSpec, text: string): AgentSpec =>
 export const withSkills = (a: AgentSpec, folders: string[], always: string[] = [], task = false): AgentSpec =>
   folders.length ? { ...a, prompt: [a.prompt, ...skillLines(folders, always, "skills", task)].join("\n") } : a;
 
-// A server of the user's Claude config in a run. remote: the server is reached over the network.
-export type McpUse = { server: string; tools: string[]; remote: boolean };
+// A server of the user's Claude config in a run. remote: the server is reached over the network. app: the app-run CodeGraph server
+// of the variant "codegraph" (docs/plans/review-v3.md WP-V5).
+export type McpUse = { server: string; tools: string[]; remote: boolean; app?: true };
 
 export const REMOTE_RULE = "Never put code, file contents, paths, or company or product names into a query to a remote server.";
 
@@ -1437,16 +1438,24 @@ export const ISSUE_REMOTE_RULE = "The one exception is a task key of this change
 
 // issues: the run is a review, a verify phase, or a salvage run (ISSUE_LINES).
 export function mcpLines(used: McpUse[], issues = false): string[] {
-  if (!used.length) return [];
-  const remote = used.filter((u) => u.remote).map((u) => u.server);
+  const mine = used.filter((u) => !u.app);
+  const app = used.filter((u) => u.app).flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`));
+  const remote = mine.filter((u) => u.remote).map((u) => u.server);
   return [
-    `The user added these MCP tools: ${used.flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`)).join(", ")}.`,
+    ...(mine.length
+      ? [`The user added these MCP tools: ${mine.flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`)).join(", ")}.`]
+      : []),
     ...(remote.length
       ? [`These MCP servers are remote: ${remote.join(", ")}. ${REMOTE_RULE}${issues ? ` ${ISSUE_REMOTE_RULE}` : ""}`]
       : []),
-    ...(issues ? ISSUE_LINES : []),
+    ...(mine.length && issues ? ISSUE_LINES : []),
+    ...(app.length ? [codegraphLine(app)] : []),
   ];
 }
+
+// docs/plans/review-v3.md WP-V5: the context line of the app-run CodeGraph server. tools: the full tool names.
+export const codegraphLine = (tools: string[]) =>
+  `The app indexed ./repo for these CodeGraph tools: ${tools.join(", ")}. Use them to find the callers and dependents of each changed symbol.`;
 
 // Adds the user MCP tools to the prompt of an agent.
 export const withMcp = (a: AgentSpec, used: McpUse[], issues = false): AgentSpec =>

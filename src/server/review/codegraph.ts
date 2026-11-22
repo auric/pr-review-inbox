@@ -46,6 +46,15 @@ export function codegraphEntry(entry: Extract<UserMcpEntry, { type: "stdio" }>, 
   };
 }
 
+// docs/plans/review-v3.md WP-V5 and V5: the app-run server of the variant "codegraph" runs only an installed executable, never npx.
+export const APP_CODEGRAPH = ["codegraph"];
+export const appCodegraphEntry = ([command = "codegraph", ...args]: string[]): Extract<UserMcpEntry, { type: "stdio" }> => ({
+  type: "stdio",
+  command,
+  args: [...args, "serve", "--mcp"],
+  env: {},
+});
+
 export type IndexInput = {
   // A stdio entry for which codegraphIndex is not -1.
   entry: Extract<UserMcpEntry, { type: "stdio" }>;
