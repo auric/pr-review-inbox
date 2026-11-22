@@ -1,6 +1,6 @@
 # Seeded ground truth for the review eval
 
-Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG6 are built. U-SG1 ran four rounds and built 33 seeds (section 9 U-SG1 results). SG-P passed on 2026-11-22. SG-A is running. Work: packages WP-SG0 to WP-SG6, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
+Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG6 are built. U-SG1 ran four rounds and built 33 seeds (section 9 U-SG1 results). SG-P passed on 2026-11-22. SG-A ran on 2026-11-23: the set is fit by MDE, but recall sits at 90.9%, so it has no headroom for a recall raiser (section 9 SG-A result). For now the seeded set is a guard for noise, regressions, and verify-only candidates. Work: packages WP-SG0 to WP-SG6, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
 
 Sources: docs/plans/review-v2/review-quality-2026.md (E1 to E6, items 6 and 7, ship rules), docs/plans/review-v3.md (WP-V1, decision V4), docs/plans/review-v2/research/review-practice-2026-11.md (B1, B2), the recall plan and the comparison of 2026-11-17 (both outside the repository), docs/eval/local.md, and scripts/eval/*.ts. This file names no other app, company, host, project, case ID, or PR number.
 
@@ -561,7 +561,20 @@ U-SG1 round 4 (2026-11-22, after WP-SG5 and WP-SG6):
 
 SG-P result (2026-11-22): passed. 2 of 2 runs finished. Seeds found: 2 of 2. Leaks: 0. Judge calibration on seeds: 2 of 2. Cost $1.51.
 
-SG-A: running (2026-11-22). No result yet.
+SG-A result (2026-11-23, prompt 2.9, default profile, 16 cases, 33 seeds, repeat 3; docs/eval/results.md):
+
+- Runs: 48 of 48 finished, 1 incomplete (coverage gaps), 0 failed. Cost $100.30 plus $2.11 for labels, so $2.089 and 4.2 min per case run. Leaks: 0 of 137 findings.
+- Recall: 90.9% per run (30, 28, and 32 of 33). unionRecall(2) 98.0%, unionRecall(3) 100%.
+- Seed hits: 26 seeds found 3 of 3, 5 found 2 of 3, 2 found 1 of 3, 0 never. The measured mean p(1-p) is 0.047, against 0.23 in section 4.3.
+- By kind: architecture 3/3, concurrency 12/12, contract 18/18, entry 11/12, error 11/12, leak 3/3, lifetime 8/9, local 23/27, omission 1/3.
+- Noise: grounded noise 0.54 per case (large 1.25, small 0.31). Judge fp 0.00 per case run. Unlabeled 0. Question items 0.13 to 0.19 per case run.
+- S_R: 4 seeds (12.1 points), as eval:compare prints it.
+- Fitness: the MDE is about 9 to 11 points by the section 4.3 formula with the measured hit rates. It passes the bar of 18 points.
+- Ceiling: the mean recall of 90.9% leaves at most 3 seeds of gain. S_R is 4 seeds. So no recall raiser can pass the "better" rule of section 6.5 on this set. The MDE passes only because the seeds are easy, which also removes the headroom.
+- G-L0 fails: Δu is 3 seeds (9.1 points), not more than S_R (focused-passes.md section 5.3).
+- U4 answer, why the seeds are easy (free checks): line match and the matcher agree on 90 of 99 seed results, and the matcher was right on all 9 disagreements. About 8 of 33 seeds fail a test that the PR itself adds or changes. 3 seeds sit in test code. The natural known issues on the same cases (25 extras) were found 8 of 75 times (about 11%), against 91% for seeds.
+- Role now: the seeded set is a guard for noise, regressions, and verify-only candidates, such as an obligations replay of SG-A (section 6.4). It does not gate recall raisers.
+- Pending with the user (2026-11-23), not decided: stop seeding for recall. Measure the recall raisers (lenses3, callers, codegraph) on the natural local set against a new prompt 2.9 baseline. The seeded runs of callers+codegraph and lenses3 are held until the user decides.
 
 ### SG-P. Pilot (paid, about $3-8)
 
@@ -586,6 +599,7 @@ bun run eval:seed -- leaks <baseline result.json>
   - No failed run remains after resume.
   - The leaks count is 0 (else retire, build, and record again).
   - The MDE from the measured p-hat at R_B = 2 is 18 points or less (else add hosts or kinds, not repeats).
+- Proposal of 2026-11-23, pending the user, not decided: a set for recall raisers also needs headroom. The baseline recall must leave a possible gain of more than S_R, for example baseline recall at most about 70%. SG-A passed the MDE bar at 90.9% recall and left only 3 seeds of gain against S_R of 4.
 - Information only: the seed hit distribution against the natural set, judge calibration on seeds, verifier verdicts on seed matches.
 - The next gates belong to the runs3 and lenses3 packages: `bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants runs3 --candidate-repeat 2 --review-only --results eval-results/seeded/runs3`. The same command runs lenses3. Ship rule: section 6.5.
 
@@ -634,7 +648,7 @@ bun run eval:seed -- leaks <baseline result.json>
 - U1: how many hosts have a side-branch merge in base..head. propose and the build print it. The study of 2026-11-22 found 5 hosts with a merge commit, and each merge brought the target branch in. Since WP-SG6, these hosts take seeds. The count of seeds that the merge refusal costs is not measured.
 - U2: cost per case run with the advisor. Gate A measures it.
 - U3: rho, the within-group correlation of seed deltas. The first candidate gate measures it.
-- U4: whether the seeds are easier than natural misses. SG-A prints the distribution.
+- U4: whether the seeds are easier than natural misses. Answered by SG-A (2026-11-23): yes. Seeds were found 91% of the time, and the natural known issues on the same cases about 11% (section 9 SG-A result).
 - U5: whether a PR description or task text quotes a commit hash that the rewrite changes.
 - U6: whether a seeder or validator run can write auto-memory or session data that a later finder run reads.
 - U7: the real seed capacity per host.

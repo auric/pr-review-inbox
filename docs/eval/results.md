@@ -84,11 +84,19 @@ Aggregate numbers only. The local set holds company code, so no case names, path
 - 2 of 2 runs finished. Seeds found: 2 of 2. Leaks: 0. Judge calibration on seeds: 2 of 2. Cost $1.51.
 - Decision: SG-P passed. The pilot is never a baseline.
 
-## 2026-11-22: SG-A (seeded baseline, prompt 2.9)
+## 2026-11-23: SG-A (seeded baseline, prompt 2.9)
 
-- Status: running. No result yet.
-- Recall:
-- Noise:
-- MDE:
-- Leaks:
-- Cost:
+- Run: the default profile, prompt 2.9, the seeded set of 16 cases and 33 seeds, repeat 3, then labels and the leaks check.
+- Runs: 48 of 48 finished. 1 run is incomplete (coverage gaps). 0 runs failed.
+- Cost: $100.30 for the runs plus $2.11 for labels. One case run costs $2.089 and takes 4.2 min.
+- Leaks: 0 of 137 findings.
+- Recall: 90.9% per run (30, 28, and 32 of 33 seeds). unionRecall(2) 98.0%, unionRecall(3) 100%.
+- Seed hits: 26 seeds found 3 of 3 times, 5 found 2 of 3, 2 found 1 of 3, and 0 never found. The measured mean p(1-p) is 0.047. The plan assumed 0.23.
+- Recall by kind: architecture 3/3, concurrency 12/12, contract 18/18, entry 11/12, error 11/12, leak 3/3, lifetime 8/9, local 23/27, omission 1/3.
+- Noise: grounded noise 0.54 per case (large cases 1.25, small cases 0.31). Judge fp 0.00 per case run. Unlabeled items 0. Question items 0.13 to 0.19 per case run.
+- S_R: 4 seeds (12.1 points), as eval:compare prints it.
+- Fitness: the MDE is about 9 to 11 points by the formula of seeded-truth.md section 4.3 with the measured hit rates. It passes the bar of 18 points.
+- G-L0 (focused-passes.md section 5.3): Δu is 3 seeds (9.1 points). That is not more than S_R (4 seeds), so G-L0 fails and runs3 does not run.
+- Ceiling: the mean recall of 90.9% leaves at most 3 seeds of gain. That is less than S_R, so no recall raiser can pass the "better" rule on this set. The set is a noise and regression guard only.
+- Why the seeds are easy (free checks): line match and the matcher agree on 90 of 99 seed results, and the matcher was right on all 9 disagreements. About 8 of 33 seeds fail a test that the PR itself adds or changes. 3 seeds sit in test code. The natural known issues on the same cases (25 extras) were found 8 of 75 times (about 11%), against 91% for seeds.
+- Decision: pending with the user (2026-11-23). The proposal: stop seeding for recall, and keep the seeded set as a guard for noise, regressions, and verify-only candidates such as obligations. Measure the recall raisers (lenses3, callers, codegraph) on the natural local set against a new prompt 2.9 baseline. The seeded runs of callers+codegraph and lenses3 are held.
