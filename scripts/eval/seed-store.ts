@@ -118,6 +118,14 @@ export const seedId = (host: string, s: Pick<SeedFields, "path" | "find" | "repl
 // Twin hosts: two host cases with one base and one head hold one commit series. Caps, the sample, validate, and the build count them as
 // one host.
 export const twinKey = (s: { host: Pick<SeedRecord["host"], "base" | "head"> }) => `${s.host.base}..${s.host.head}`;
+// The states that passed the validator.
+export const PASSED = new Set<SeedState>(["confirmed", "sampled", "kept"]);
+// The paths that hold a passed seed, per twin group. The build takes one seed per file (check 9).
+export function passedPaths(seeds: readonly SeedRecord[]): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const s of seeds) if (PASSED.has(s.state)) out.set(twinKey(s), (out.get(twinKey(s)) ?? new Set()).add(s.path));
+  return out;
+}
 // The kind that the build uses.
 export const kindOf = (s: Pick<SeedRecord, "kind" | "label">) => s.label ?? s.kind;
 

@@ -35,6 +35,7 @@ import {
   fire,
   kindOf,
   loadStore,
+  passedPaths,
   rootRefusal,
   SEED_STATES,
   type SeedRecord,
@@ -66,16 +67,12 @@ export const USAGE = [
 // review run at the C1b price ($1.59). With that, 80 validator runs at $0.40 give about $69, the middle of the range.
 const SEEDER_USD = 1.59;
 const VALIDATOR_USD = 0.4;
-// Section 5.4: validate a host until it has its cap plus one confirmed seeds.
-const CONFIRM_TARGET = HOST_CAP + 1;
 // Section 5.5: the second draws go to the four largest kinds, so 10 kinds give 14 seeds. More than 20% drops in the sample escalate every
 // kind.
 const SECOND_DRAWS = 4;
 const DROP_SHARE = 0.2;
 // Section 8: the states with a binding that validate checks (host-).
 const BOUND = new Set<SeedState>(["applied", "confirmed", "sampled", "kept"]);
-// The states that passed the validator. They count toward the confirm target.
-const PASSED = new Set<SeedState>(["confirmed", "sampled", "kept"]);
 // A drawn seed is decided when the user kept, dropped, or retired it. A stale seed counts by its state before host-.
 const DECIDED = new Set<SeedState>(["kept", "dropped", "retired"]);
 // Section 7 "Finder notices injection": the injection words of check 5. Its code markers (todo, fixme, xxx, hack, bug) are ordinary
@@ -310,13 +307,17 @@ async function propose(a: Args, seeds: string, local: string): Promise<number> {
       return 2;
     }
     // A plain propose skips the hosts that have seeds, also on a twin, so a second call continues a cut one. --cases runs the given hosts
-    // again.
+    // again, except a full host: its passed seeds cover HOST_CAP files, the build cap (WP-SG5).
     const seeded = new Set(store.seeds.map(twinKey));
-    const asked = cases ? hosts.filter((h) => cases.includes(h.id)) : hosts.filter((h) => !seeded.has(twinKey({ host: h })));
+    const paths = passedPaths(store.seeds);
+    const isFull = (h: Host) => (paths.get(twinKey({ host: h }))?.size ?? 0) >= HOST_CAP;
+    const full = hosts.filter(isFull).length;
+    const asked = hosts.filter((h) => (cases ? cases.includes(h.id) && !isFull(h) : !seeded.has(twinKey({ host: h }))));
     const todo: Host[] = [];
     for (const h of asked) if (await hasCodeChange(h)) todo.push(h);
     const plan = [
       `eval:seed propose: ${hosts.length} hosts, one per PR group. ${merge.length} more hosts have a merge commit in their range and take no seed. ${twins.length} more hosts are twins: they have the base and head of a host, and take no seed.`,
+      `${full} hosts are full: their passed seeds cover ${HOST_CAP} files, and they take no seeder run.`,
       `${asked.length - todo.length} hosts add no line to a file of a known code type and take no seeder run.`,
       `Seeder runs: ${todo.length} (model ${SEEDER.model}, effort ${SEEDER.effort})${kinds ? `, kinds ${kinds.join(", ")} only` : ""}. ${hosts.length - asked.length} hosts are skipped.`,
     ];
@@ -338,7 +339,8 @@ async function propose(a: Args, seeds: string, local: string): Promise<number> {
     for (const [n, h] of todo.entries()) {
       console.log(`Host ${n + 1}/${todo.length}`);
       try {
-        const r = await proposeHost(h, ctx, { kinds: kinds as SeedKind[] | null, known: new Set(store.seeds.map((s) => s.id)) });
+        const earlier = store.seeds.filter((s) => twinKey(s) === twinKey({ host: h }));
+        const r = await proposeHost(h, ctx, { kinds: kinds as SeedKind[] | null, known: new Set(store.seeds.map((s) => s.id)), earlier });
         if (!r) continue;
         store.seeds.push(...r.seeds);
         saveStore(seeds, store);
@@ -463,24 +465,30 @@ async function report(seeds: string, local: string): Promise<number> {
 async function validate(a: Args, seeds: string, local: string): Promise<number> {
   const store = loadStore(seeds);
   const applied = store.seeds.filter((s) => s.state === "applied");
-  // Twin hosts count as one host.
+  // Twin hosts count as one host. The build takes one seed per file and HOST_CAP files per host (WP-SG5): an applied seed in a file with a
+  // passed seed takes no run, and a host stops when its passed seeds cover HOST_CAP files.
   const byHost = Map.groupBy(applied, twinKey);
-  const passed = (key: string) => store.seeds.filter((s) => twinKey(s) === key && PASSED.has(s.state)).length;
+  const filesOf = (key: string) => passedPaths(store.seeds).get(key) ?? new Set<string>();
   let low = 0;
   let high = 0;
+  let inFull = 0;
   for (const [key, list] of byHost) {
-    const room = Math.max(0, CONFIRM_TARGET - passed(key));
-    low += Math.min(list.length, room);
-    high += room ? list.length : 0;
+    const files = filesOf(key);
+    const room = Math.max(0, HOST_CAP - files.size);
+    const left = list.filter((s) => !files.has(s.path));
+    inFull += list.length - left.length;
+    low += Math.min(new Set(left.map((s) => s.path)).size, room);
+    high += room ? left.length : 0;
   }
+  const fullLine = `${inFull} applied seeds are in a file that holds a passed seed, and take no run.`;
   if (!high) {
-    console.log("eval:seed validate: no applied seed needs a validator run.");
+    console.log(`eval:seed validate: no applied seed needs a validator run. ${fullLine}`);
     return 0;
   }
   if (!a.flags.has("--real") && !a.runner) {
     console.log(
       [
-        `eval:seed validate: ${applied.length} applied seeds at ${byHost.size} hosts. Each host stops at ${CONFIRM_TARGET} confirmed seeds.`,
+        `eval:seed validate: ${applied.length} applied seeds at ${byHost.size} hosts. Each host stops when its passed seeds cover ${HOST_CAP} files. ${fullLine}`,
         `Validator runs: ${low} to ${high} (model ${VALIDATOR.model}, effort ${VALIDATOR.effort}).`,
         `Estimate at ${usd(VALIDATOR_USD)} per validator run (not measured): about ${usd(low * VALIDATOR_USD)} to ${usd(high * VALIDATOR_USD)}.`,
         "Add --real to run your Claude CLI. It uses your plan quota.",
@@ -494,12 +502,17 @@ async function validate(a: Args, seeds: string, local: string): Promise<number> 
     if (!ctx) return 1;
     const open = hostsOf(local, tmp);
     const stale = await staleCheck(store, seeds, open);
-    const tally = { confirmed: 0, refuted: 0, checks: 0, failed: 0 };
+    const tally = { confirmed: 0, refuted: 0, checks: 0, failed: 0, skipped: 0 };
     const hosts = [...new Set(store.seeds.filter((s) => s.state === "applied").map(twinKey))];
     for (const [n, key] of hosts.entries()) {
       for (const [i, s] of store.seeds.entries()) {
         if (twinKey(s) !== key || s.state !== "applied") continue;
-        if (passed(key) >= CONFIRM_TARGET) break;
+        const files = filesOf(key);
+        if (files.size >= HOST_CAP) break;
+        if (files.has(s.path)) {
+          tally.skipped++;
+          continue;
+        }
         console.log(`Host ${n + 1}/${hosts.length}, seed ${s.id}`);
         const id = s.host.id;
         try {
@@ -516,7 +529,7 @@ async function validate(a: Args, seeds: string, local: string): Promise<number> 
       }
     }
     console.log(
-      `Validated: ${tally.confirmed} confirmed, ${tally.refuted} refuted, ${tally.checks} refuted by a check without a run, ${tally.failed} failed runs (still applied). ${stale} seeds went stale.`,
+      `Validated: ${tally.confirmed} confirmed, ${tally.refuted} refuted, ${tally.checks} refuted by a check without a run, ${tally.failed} failed runs (still applied). ${tally.skipped} skipped for a full file (still applied). ${stale} seeds went stale.`,
     );
     console.log(costLine(ctx));
     for (const e of ctx.errors) console.log(e);

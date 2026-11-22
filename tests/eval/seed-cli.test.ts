@@ -165,7 +165,7 @@ describe("propose, validate, and build", () => {
   );
 
   test(
-    "validate fires host- through the binding, and validates in seeder order until a host has 4 confirmed seeds",
+    "validate fires host- through the binding, and validates in seeder order until the passed seeds of a host cover 3 files",
     async () => {
       const host = (await hostsOf(nat.dir, mkdtempSync(join(TMP, "hosts-")))(c3)) as Host;
       const entry = seedFields({
@@ -185,7 +185,10 @@ describe("propose, validate, and build", () => {
 
       const plan = await cli(["validate"], seeds());
       expect(plan.code).toBe(2);
-      expect(plan.stdout).toContain("Validator runs: 4 to 6 (model opus, effort medium).");
+      expect(plan.stdout).toContain(
+        "Each host stops when its passed seeds cover 3 files. 0 applied seeds are in a file that holds a passed seed",
+      );
+      expect(plan.stdout).toContain("Validator runs: 3 to 6 (model opus, effort medium).");
       expect(readFileSync(join(seeds(), "seeds.json"), "utf8")).toBe(before);
 
       const f = fake("seed-validate");
@@ -193,23 +196,32 @@ describe("propose, validate, and build", () => {
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
       expect(r.stdout).toContain(
-        "Validated: 4 confirmed, 0 refuted, 0 refuted by a check without a run, 0 failed runs (still applied). 1 seeds went stale.",
+        "Validated: 3 confirmed, 0 refuted, 0 refuted by a check without a run, 0 failed runs (still applied). 0 skipped for a full file (still applied). 1 seeds went stale.",
       );
-      expect(f.runs()).toHaveLength(4);
+      expect(f.runs()).toHaveLength(3);
       expect(store().map((s) => [s.kind, s.state, s.was])).toEqual([
         ["architecture", "confirmed", undefined],
         ["omission", "confirmed", undefined],
         ["local", "confirmed", undefined],
         ["leak", "invalid", undefined],
         ["error", "invalid", undefined],
-        ["lifetime", "confirmed", undefined],
+        ["lifetime", "applied", undefined],
         ["entry", "applied", undefined],
         ["entry", "stale", "applied"],
       ]);
-      // The host has 4 confirmed seeds, so no run is left.
+      // The passed seeds cover 3 files, so no run is left. The lifetime seed is in a file with a passed seed.
       const done = await cli(["validate"], seeds());
       expect(done.code).toBe(0);
-      expect(done.stdout).toContain("no applied seed needs a validator run");
+      expect(done.stdout).toContain(
+        "no applied seed needs a validator run. 1 applied seeds are in a file that holds a passed seed, and take no run.",
+      );
+      // WP-SG5: propose skips the full host, also under --cases.
+      const p = fake("seed-propose");
+      const full = await cli(["propose", "--cases", c3, ...p.runner], seeds());
+      expect(full.code).toBe(0);
+      expect(full.stdout).toContain("1 hosts are full: their passed seeds cover 3 files, and they take no seeder run.");
+      expect(full.stdout).toContain("Seeder runs: 0");
+      expect(p.runs()).toEqual([]);
     },
     SLOW,
   );
@@ -221,7 +233,7 @@ describe("propose, validate, and build", () => {
       const r = await cli(["build"], seeds());
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      expect(r.stdout).toContain("Seeded set: 1 cases with 3 seeds. Spare kept seeds: 1.");
+      expect(r.stdout).toContain("Seeded set: 1 cases with 3 seeds. Spare kept seeds: 0.");
       // The floor warns and never blocks (seeded-truth.md section 14 row 13).
       expect(r.stdout).toContain("kind architecture: under floor");
       expect(r.stdout).toContain("Kinds under the floor of 4 kept seeds:");
@@ -602,7 +614,7 @@ describe("report (checks 11 and 12, twin hosts)", () => {
 
 describe("twin hosts in propose and validate", () => {
   test(
-    "propose takes one twin, skips a twin group with seeds, refuses a twin in --cases, and validate stops a twin group at 4 confirmed seeds",
+    "propose takes one twin, skips a twin group with seeds, refuses a twin in --cases, and validate stops a twin group at 3 passed files",
     async () => {
       const fx = await makeNaturalSet(join(TMP, "fx-twins"));
       const twin = addTwin(fx, fx.host, 9);
@@ -619,23 +631,74 @@ describe("twin hosts in propose and validate", () => {
       // A seed on the twin: the host of the group has seeds, so propose skips it.
       const host = (await hostsOf(fx.dir, mkdtempSync(join(TMP, "hosts-")))(fx.host)) as Host;
       const bound = (await bindingOf(host, PATHS.feature)) as SeedRecord["host"];
-      const rec = (n: number, state: SeedState, id: string): SeedRecord => {
-        const f = seedFields({
-          kind: "local",
-          path: PATHS.feature,
-          find: `f${n}();`,
-          replace: "g();",
-          anchor: { path: PATHS.feature, text: "g();" },
-        });
+      const rec = (n: number, state: SeedState, id: string, path: string = PATHS.feature): SeedRecord => {
+        const f = seedFields({ kind: "local", path, find: `f${n}();`, replace: "g();", anchor: { path, text: "g();" } });
         return { ...f, id: seedId(id, f), state, host: { ...bound, id } };
       };
       saveStore(seeds, { format: 1, seeds: [rec(0, "applied", twin)] });
       expect((await cli(["propose"], seeds, fx.dir)).stdout).toContain("Seeder runs: 0");
-      // 4 confirmed seeds on the host and 1 applied seed on its twin: the twin group is full.
-      saveStore(seeds, { format: 1, seeds: [1, 2, 3, 4].map((n) => rec(n, "confirmed", fx.host)).concat(rec(0, "applied", twin)) });
+      // WP-SG5: passed seeds in 2 files of the twin group. An applied seed in one of them takes no run. One in a third file takes one.
+      const two = [rec(1, "confirmed", fx.host), rec(2, "kept", twin, PATHS.other), rec(3, "confirmed", fx.host, PATHS.other)];
+      saveStore(seeds, { format: 1, seeds: [...two, rec(0, "applied", twin)] });
+      const skip = await cli(["validate"], seeds, fx.dir);
+      expect(skip.code).toBe(0);
+      expect(skip.stdout).toContain("no applied seed needs a validator run. 1 applied seeds are in a file that holds a passed seed");
+      saveStore(seeds, { format: 1, seeds: [...two, rec(0, "applied", twin), rec(4, "applied", twin, "src/block.ts")] });
+      const one = await cli(["validate"], seeds, fx.dir);
+      expect(one.code).toBe(2);
+      expect(one.stdout).toContain("1 applied seeds are in a file that holds a passed seed, and take no run.");
+      expect(one.stdout).toContain("Validator runs: 1 to 1");
+      // Passed seeds in 3 files, split across the twins: the twin group is full for validate and propose.
+      saveStore(seeds, { format: 1, seeds: [...two, rec(5, "sampled", twin, PATHS.route), rec(4, "applied", twin, "src/block.ts")] });
       const done = await cli(["validate"], seeds, fx.dir);
       expect(done.code).toBe(0);
-      expect(done.stdout).toContain("no applied seed needs a validator run");
+      expect(done.stdout).toContain("no applied seed needs a validator run. 0 applied seeds are in a file that holds a passed seed");
+      expect((await cli(["propose", "--cases", fx.host], seeds, fx.dir)).stdout).toContain(
+        "1 hosts are full: their passed seeds cover 3 files, and they take no seeder run.",
+      );
+    },
+    SLOW,
+  );
+});
+
+describe("validate takes one passed seed per file (WP-SG5)", () => {
+  test(
+    "an applied seed in a file with a passed seed takes no run and stays applied, and the host stops at 3 files",
+    async () => {
+      const seeds = join(TMP, "seeds-full-file");
+      const f = fake("seed-propose");
+      expect((await cli(["propose", ...f.runner], seeds)).code).toBe(0);
+      const host = (await hostsOf(nat.dir, mkdtempSync(join(TMP, "hosts-")))(c3)) as Host;
+      const entry = seedFields({
+        kind: "entry",
+        path: "src/crlf.ts",
+        find: "export const c12 = 12 + 1;",
+        replace: "export const c12 = 12;",
+        anchor: { path: "src/crlf.ts", text: "export const c11 = 11 + 1;" },
+      });
+      const all = loadStore(seeds).seeds;
+      const of = (kind: string) => all.find((s) => s.kind === kind) as SeedRecord;
+      // feature, feature, other, block, crlf: run, skip, run, run, stop.
+      const order = [of("architecture"), of("lifetime"), of("omission"), of("local"), of("leak"), of("error")];
+      order.push({ ...entry, id: seedId(c3, entry), state: "applied", host: (await bindingOf(host, entry.path)) as SeedRecord["host"] });
+      saveStore(seeds, { format: 1, seeds: order });
+      const v = fake("seed-validate");
+      const r = await cli(["validate", ...v.runner], seeds);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(
+        "Validated: 3 confirmed, 0 refuted, 0 refuted by a check without a run, 0 failed runs (still applied). 1 skipped for a full file (still applied). 0 seeds went stale.",
+      );
+      expect(v.runs()).toHaveLength(3);
+      expect(loadStore(seeds).seeds.map((s) => [s.kind, s.state])).toEqual([
+        ["architecture", "confirmed"],
+        ["lifetime", "applied"],
+        ["omission", "confirmed"],
+        ["local", "confirmed"],
+        ["leak", "invalid"],
+        ["error", "invalid"],
+        ["entry", "applied"],
+      ]);
     },
     SLOW,
   );

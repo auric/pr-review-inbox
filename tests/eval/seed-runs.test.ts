@@ -26,6 +26,7 @@ import {
   SEEDER_SCHEMA,
   SEEDER_STDIN,
   seedCtx,
+  seedSpots,
   VALIDATOR,
   VALIDATOR_PROMPT,
   VALIDATOR_SCHEMA,
@@ -148,6 +149,29 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
     expect(kind).not.toContain("route is empty");
   });
 
+  test(
+    "seedSpots gives the whole-line range of a find text, and no range when the file does not hold it once as whole lines",
+    async () => {
+      const f = seedFields({ kind: "local", path: PATHS.route, find: "x", replace: "y", anchor: { path: PATHS.route, text: "y" } });
+      const at = (find: string, path: string = PATHS.route) =>
+        seedSpots(host, [
+          {
+            ...f,
+            path,
+            find,
+            id: "sd0000000000",
+            state: "invalid",
+            host: { id: host.id, base: host.base, head: host.head, blob: NO_BLOB },
+          },
+        ]);
+      expect(await at("  store.set(key.trim(), value);\n")).toEqual([{ path: PATHS.route, lines: [3, 3] }]);
+      expect(await at("no such text anywhere\n")).toEqual([]);
+      expect(await at("value")).toEqual([]);
+      expect(await at("x\n", "src/nope.ts")).toEqual([]);
+    },
+    SLOW,
+  );
+
   test("avoid.md widens each new-side natural place by 6 lines, and edit.md holds no seeder reasoning", () => {
     expect(avoidMd(host)).toContain(`- ${PATHS.feature}: lines 39 to 51\n`);
     expect(avoidMd(host)).toContain(`- ${PATHS.other}: lines 32 to 44\n`);
@@ -233,7 +257,7 @@ describe("seeder and validator runs with the fake CLI", () => {
     "a seeder answer becomes proposed seeds and passes through the checks",
     async () => {
       const f = fake("seed-propose");
-      const got = await proposeHost(host, f.ctx, { kinds: null, known: new Set() });
+      const got = await proposeHost(host, f.ctx, { kinds: null, known: new Set(), earlier: [] });
       expect(f.ctx.errors).toEqual([]);
       expect(got?.otherKind).toBe(0);
       expect(got?.repeated).toBe(0);
@@ -270,15 +294,37 @@ describe("seeder and validator runs with the fake CLI", () => {
   );
 
   test(
-    "--kinds keeps only its kinds, and a known ID is no new seed",
+    "--kinds keeps only its kinds, a known ID is no new seed, and avoid.md lists the earlier edits and each file with a passed seed",
     async () => {
       const f = fake("seed-propose");
       const arch = proposed[0] as SeedRecord;
-      const got = await proposeHost(host, f.ctx, { kinds: ["architecture", "local"], known: new Set([arch.id]) });
+      // WP-SG5: architecture passed in feature.ts. The other earlier seeds give their find lines, in any state.
+      const earlier = proposed.map((s, n) => (n === 0 ? { ...s, state: "confirmed" as const } : s));
+      const got = await proposeHost(host, f.ctx, { kinds: ["architecture", "local"], known: new Set([arch.id]), earlier });
       expect(got?.seeds.map((s) => s.kind)).toEqual(["local"]);
       expect(got?.otherKind).toBe(4);
       expect(got?.repeated).toBe(1);
-      expect(f.runs()[0]?.stdin).toBe(`${SEEDER_STDIN}\nPropose only defects of these kinds: architecture, local.`);
+      const [run] = f.runs();
+      expect(run?.stdin).toBe(`${SEEDER_STDIN}\nPropose only defects of these kinds: architecture, local.`);
+      const avoid = run?.context["avoid.md"] ?? "";
+      expect(avoid).toBe(UNTRUSTED + avoidMd(host, await seedSpots(host, earlier)));
+      const lines = (path: string) => (run?.files?.[`repo/${path}`] ?? "").replaceAll("\r", "").replace(/\n$/, "").split("\n");
+      expect(avoid).toContain(`- ${PATHS.feature}: lines 1 to ${lines(PATHS.feature).length}\n`);
+      const others = proposed.filter((x) => x.path !== PATHS.feature && x.path !== "src/missing.ts");
+      expect(others.length).toBe(3);
+      for (const s of others) {
+        const first = s.find.split("\n")[0] as string;
+        const at = lines(s.path).indexOf(first) + 1;
+        const end = at + s.find.replace(/\r?\n$/, "").split("\n").length - 1;
+        expect(at).toBeGreaterThan(0);
+        expect(avoid).toContain(`- ${s.path}: lines ${at} to ${end}\n`);
+      }
+      // The lifetime seed is in feature.ts, so the whole file covers it. The error seed has no file at the head.
+      const lifetime = lines(PATHS.feature).indexOf((proposed[5] as SeedRecord).find.replace(/\n$/, "")) + 1;
+      expect(lifetime).toBeGreaterThan(0);
+      expect(avoid).not.toContain(`- ${PATHS.feature}: lines ${lifetime} to ${lifetime}\n`);
+      expect(avoidMd(host)).not.toContain(`- ${PATHS.feature}: lines 1 to`);
+      expect(avoid).not.toContain("src/missing.ts");
     },
     SLOW,
   );

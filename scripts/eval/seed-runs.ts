@@ -17,6 +17,7 @@ import { pointRefs } from "./cases";
 import { call, caseWorkspace } from "./label";
 import { evidenceRefs, LOCAL_TOLERANCE } from "./score";
 import {
+  applySeed,
   bindingOf,
   type Checked,
   CODE_EXTS,
@@ -28,7 +29,7 @@ import {
   type SeedKind,
   unusedNames,
 } from "./seed-build";
-import { fire, type SeedEvent, type SeedRecord, type SeedValidation, seedAnswer, seedFields, seedId } from "./seed-store";
+import { fire, PASSED, type SeedEvent, type SeedRecord, type SeedValidation, seedAnswer, seedFields, seedId } from "./seed-store";
 
 // ---------- Prompts and schemas (sections 5.1 and 5.4, verbatim) ----------
 
@@ -162,13 +163,41 @@ export const kindMd = (kind: SeedKind) => `# Claimed kind\n\nThe edit claims the
 
 // ---------- Context files ----------
 
-// ./context/avoid.md: the new-side places of the natural items of the host, widened by the check 6 distance (seed-build.ts GAP - 1).
-export function avoidMd(h: Pick<Host, "file">): string {
+export type AvoidRange = { path: string; lines: [number, number] };
+
+// ./context/avoid.md: the new-side places of the natural items of the host, widened by the check 6 distance (seed-build.ts GAP - 1),
+// then the earlier edits of the twin group (seedSpots), not widened.
+export function avoidMd(h: Pick<Host, "file">, earlier: readonly AvoidRange[] = []): string {
   const wide = 2 * LOCAL_TOLERANCE;
   const rows = naturalSpots(h.file)
     .filter((x) => x.side === "new")
-    .map((x) => `- ${oneLine(x.path)}: lines ${Math.max(1, x.lines[0] - wide)} to ${x.lines[1] + wide}`);
-  return `# Lines to avoid\n\nEach range holds a known item of the change, widened by ${wide} lines on both ends. Do not edit a line in these ranges.\n\n${rows.length ? [...new Set(rows)].join("\n") : "None."}\n`;
+    .map((x) => `- ${oneLine(x.path)}: lines ${Math.max(1, x.lines[0] - wide)} to ${x.lines[1] + wide}`)
+    .concat(earlier.map((x) => `- ${oneLine(x.path)}: lines ${x.lines[0]} to ${x.lines[1]}`));
+  return `# Lines to avoid\n\nEach range holds a known item of the change, widened by ${wide} lines on both ends, or an earlier edit, or a whole file. Do not edit a line in these ranges.\n\n${rows.length ? [...new Set(rows)].join("\n") : "None."}\n`;
+}
+
+// The earlier edits of the twin group of h, at h.head (WP-SG5): the find lines of each earlier seed in any state, so the seeder does not
+// propose them again, and the whole file of each passed seed, because the build takes one seed per file. A find text that the file does
+// not hold once as whole lines (applySeed, as check 2) gives no range.
+export async function seedSpots(h: Pick<Host, "repo" | "head">, earlier: readonly SeedRecord[]): Promise<AvoidRange[]> {
+  const texts = new Map<string, string | null>();
+  const textOf = async (path: string) => {
+    if (!texts.has(path))
+      texts.set(path, await git(["--git-dir", h.repo.dir, "cat-file", "blob", `${h.head}:${path}`], { env: h.repo.env }).catch(() => null));
+    return texts.get(path) ?? null;
+  };
+  const spots: AvoidRange[] = [];
+  const full = new Set(earlier.filter((s) => PASSED.has(s.state)).map((s) => s.path));
+  for (const s of earlier) {
+    const text = full.has(s.path) ? null : await textOf(s.path);
+    const at = text === null ? null : applySeed(text, s);
+    if (at && "start" in at) spots.push({ path: s.path, lines: [at.start, at.end] });
+  }
+  for (const path of full) {
+    const lines = (await textOf(path))?.split("\n");
+    if (lines) spots.push({ path, lines: [1, lines.at(-1) === "" ? lines.length - 1 : lines.length] });
+  }
+  return spots;
 }
 
 // ./context/edit.md: the path, the old and new lines, and the claimed failure only (section 5.4). why, comment, kind, and route stay out.
@@ -245,19 +274,19 @@ async function runAt(
 }
 
 // Section 5.1: one seeder run at the host head. Each proposal gets its ID and binding, then the mechanical checks fire chk+ or chk-.
-// kinds: only these kinds stay (propose --kinds). known: the IDs in the store; a repeat stays out. null: the run failed, or its answer is
-// invalid.
+// kinds: only these kinds stay (propose --kinds). known: the IDs in the store; a repeat stays out. earlier: the seeds of the twin group of
+// h, for avoid.md. null: the run failed, or its answer is invalid.
 export async function proposeHost(
   h: Host,
   ctx: SeedCtx,
-  o: { kinds: readonly SeedKind[] | null; known: ReadonlySet<string> },
+  o: { kinds: readonly SeedKind[] | null; known: ReadonlySet<string>; earlier: readonly SeedRecord[] },
 ): Promise<{ seeds: SeedRecord[]; otherKind: number; repeated: number } | null> {
   const out = await runAt(
     h,
     h.head,
     ctx,
     "seeder",
-    [{ name: "avoid.md", text: avoidMd(h) }],
+    [{ name: "avoid.md", text: avoidMd(h, await seedSpots(h, o.earlier)) }],
     { "kinds.md": KINDS_MD },
     {
       prompt: o.kinds ? `${SEEDER_STDIN}\n${kindsLine(o.kinds)}` : SEEDER_STDIN,

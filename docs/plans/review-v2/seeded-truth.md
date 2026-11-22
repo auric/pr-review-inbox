@@ -1,6 +1,6 @@
 # Seeded ground truth for the review eval
 
-Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG4 are built. U-SG1, SG-P, and SG-A are open. Work: packages WP-SG0 to WP-SG4, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
+Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG5 are built. U-SG1 ran three rounds (section 9 U-SG1 results). SG-P and SG-A are open. Work: packages WP-SG0 to WP-SG5, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
 
 Sources: docs/plans/review-v2/review-quality-2026.md (E1 to E6, items 6 and 7, ship rules), docs/plans/review-v3.md (WP-V1, decision V4), docs/plans/review-v2/research/review-practice-2026-11.md (B1, B2), the recall plan and the comparison of 2026-11-17 (both outside the repository), docs/eval/local.md, and scripts/eval/*.ts. This file names no other app, company, host, project, case ID, or PR number.
 
@@ -90,7 +90,7 @@ Recommendation: option (b), injected into private cases, stored as a generated o
 - Reason: cost scales with cases, and power scales with seeds and groups. Cases of one PR share most of their code, so a second host in a group adds cost without new groups.
 - At most 3 seeds per host and at most 1 seed per file. Recall falls as a PR holds more issues (review-practice B2: 38.4% at 1 issue against 8.9% at 5 or more). The build prints the issue count per host (natural plus seeds).
 - A host with a merge commit in its base..head range takes no seed (section 5.3).
-- Twin hosts: two hosts of two PR groups with one base and one head hold one commit series. propose takes only the twin with the lowest case ID and skips a twin group that has seeds. validate stops a twin group at 4 confirmed seeds. The sample and the build apply the caps to the twin group. The build makes one case, on the twin with the lowest case ID among the kept seeds. A seed of another twin must pass checks 1 to 10 at that host, else it is a spare (check 6 reads the case file of the host). `eval:seed report` lists the twin hosts.
+- Twin hosts: two hosts of two PR groups with one base and one head hold one commit series. propose takes only the twin with the lowest case ID and skips a twin group that has seeds. validate stops a twin group when its passed seeds are in 3 files (WP-SG5). The sample and the build apply the caps to the twin group. The build makes one case, on the twin with the lowest case ID among the kept seeds. A seed of another twin must pass checks 1 to 10 at that host, else it is a spare (check 6 reads the case file of the host). `eval:seed report` lists the twin hosts.
 - The build picks kept seeds per host in host-ID order. It first picks the kind with the lowest count so far, then the seeder order (the store order). The kind is the build kind: the user label when there is one (section 8). The order is deterministic.
 
 ### 4.3 Power math
@@ -169,7 +169,7 @@ Decided by the user on 2026-11-22 (section 14 row 25). The natural set has too f
 
 - A Claude seeder with a fixed, committed prompt runs once per host. It proposes up to 6 seeds of different kinds. Templates are too weak for contract, omission, and lifetime seeds across TypeScript, C++, and Python. Hand writing 60 seeds costs too much user time.
 - The seeder runs as the judge runs: a sanitized workspace of the host head, structured output, no agents, read tools and rl-git only, and the auth check first (label.ts:494-560, 883-887). It never edits files. App code applies each edit.
-- Context files: `./context/pr.md` and `task.md` (as for the judge), `kinds.md` (section 4.1 text), and `avoid.md` (the line ranges of natural items and traps of the host). The seeder is not under test, so these files do not leak into any finder run.
+- Context files: `./context/pr.md` and `task.md` (as for the judge), `kinds.md` (section 4.1 text), and `avoid.md` (the line ranges of natural items and traps of the host, the find lines of every earlier seed of the twin group, and the whole file of each passed seed; WP-SG5). The seeder is not under test, so these files do not leak into any finder run.
 - Output schema: `{ seeds: [{ kind, path, find, replace, anchor: { path, text }, alt: [{ path, text }], trigger, why, comment, severity, route }] }`, at most 6. `route` is a string. It is empty for every kind except architecture.
 
 Seeder prompt:
@@ -251,7 +251,7 @@ A seed moves from proposed to applied only when every check passes. Each failure
 
 ### 5.4 Validator
 
-- One run per applied seed, in a sanitized workspace of the seeded head with only this seed applied. It uses the same runner pattern as the judge. The tool validates in seeder order until each host has 4 confirmed seeds (cap plus 1) or no applied seed is left.
+- One run per applied seed, in a sanitized workspace of the seeded head with only this seed applied. It uses the same runner pattern as the judge. The tool validates in seeder order until the passed seeds of each host are in 3 files (the host cap) or no applied seed is left. It skips an applied seed in a file that already holds a passed seed, because the build takes one seed per file. A skipped seed stays applied (WP-SG5).
 - Keep conditions: verdict `breaks`, severity `high`, `originalOk` true, `plausible` true, `kindOk` true. Also, each path:line in the proof must exist at the seeded head (app check). A stored answer from before `kindOk` has none, and recheck passes it on that condition. No free step can ask an old answer the kind question. A user relabel at keep (section 8) is the free path for a wrong kind.
 - The proof check: the proof holds at least one path:line reference (score.ts `evidenceRefs`). An entry with no reference is explanation text, and the check skips it. A reference path that the seeded head does not have resolves to the one file whose path ends with `/<path>` (`git ls-tree -r --name-only`). No such file, or more than one, rejects the seed. The line or range must exist in the resolved file.
 - The validator runs in a fresh session with a refute-first prompt. It never sees the seeder's text, except the claimed failure and the claimed kind. `./context/kind.md` holds the claimed kind, the kind table of section 4.1, and the kind order. `edit.md` holds no kind. The kind question is required (section 14 row 20).
@@ -496,6 +496,18 @@ Two decisions of 2026-11-22 (section 14 rows 24 and 25), and one check 11 fix.
 - Tests: the prompt pins, the kind count, the sample with 10 kinds, check 12 without the subject, check 11 with a log message and a template hole, and a security seed through sample, decide, and build.
 - Gate: none paid.
 
+### WP-SG5. The fill fix (implementer)
+
+U-SG1 round 3 cost $12.00 and added 2 usable seeds. A design study found three causes: the seeder saw no earlier seed and proposed 12 repeats, validate counted spares and ignored the one-seed-per-file cap, and propose ran hosts that were already full.
+
+- Files and symbols:
+  - scripts/eval/seed-runs.ts: `seedSpots` and `avoidMd`. avoid.md adds the find lines of every earlier seed of the twin group, in any state, and one whole-file range for each file with a passed seed. The seeder prompt stays verbatim.
+  - scripts/eval/seed-store.ts: `PASSED` and `passedPaths` (the paths of the passed seeds per twin group).
+  - scripts/eval/seed.ts: `propose` and `validate`. `CONFIRM_TARGET` is removed.
+- Behavior change: a host is full when its passed seeds (confirmed, sampled, kept) are in `HOST_CAP` (3) files. propose skips a full host, also under `--cases`, and prints the count. validate skips an applied seed in a file with a passed seed, stops a host when it is full, and prints the skipped count. A skipped seed stays applied. The state table of section 8 does not change.
+- Tests: avoid.md holds the earlier find lines and the passed-seed files; validate skips a seed in a full file and stops at 3 files, also for twins; propose skips a full host under `--cases`.
+- Gate: none paid.
+
 ### U-SG1. Seeding (user, paid, about $40-100 once)
 
 ```
@@ -511,6 +523,16 @@ bun run eval:seed -- build
 
 - Acceptance: at least 4 kept seeds per kind (the floor warns only, section 14 row 13) and at least 48 in the set (target 60). The first sample holds 14 seeds. More review after it needs the user's OK at that time. Without the OK, the unsampled seeds of an escalated kind stay out of the set. The build prints counts only.
 - If a kind stays under 4, run `propose --cases <hosts with spare capacity> --kinds <kind> --real`.
+
+U-SG1 results (2026-11-22, before WP-SG5):
+
+- Runs: three seeding rounds and one validate step of 9 seeds. Total cost $41.67: round 1 $15.63, round 2 $13.56, the 9-seed validate $0.48, round 3 $12.00 (security propose $2.75, propose $6.06, validate $3.19).
+- Review: an AI review (xhigh with an advisor) checked every confirmed seed one by one under the middle rule (section 14 row 24). The sample of rounds 1 and 2 is archived as `sample-r12.json`, so the user decides each new seed one by one.
+- The built set: 12 cases, 21 seeds, 40 issues, fingerprint b0a1bd095b95. Folds: lines 21. Spares: 11. Security seeds: 0.
+- Acceptance fails: 21 seeds against the floor of 48.
+- SG-A power: the MDE is about 24.7 points at 21 seeds, against the bar of 18 points. So SG-A would fail fitness.
+- Estimated with WP-SG5 alone: 29 to 33 seeds, MDE 20 to 21.5 points.
+- Estimated with hosts that have a merge commit in range: about 40 to 44 seeds in 18 groups, MDE 17.6 to 18.3 points. 5 hosts have such a merge. Each merge brings the target branch into the PR branch, so the first-parent chain holds the PR commits. This support is an open user decision.
 
 ### SG-P. Pilot (paid, about $3-8)
 
