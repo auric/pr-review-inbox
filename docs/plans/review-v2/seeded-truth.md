@@ -140,8 +140,8 @@ S is the summed cost of one repeat over the hosts. At C1b prices ($1.59 per case
 | U-SG1 seeding (once) | 23 seeder runs, about 70 to 90 validator runs | $40-100, plus about 1 h of user time |
 | SG-P pilot | 2 hosts x 1 repeat, labels | $3-8 |
 | SG-A seeded baseline | 23 hosts x 3 repeats, labels | 3S + $5-10, about $95-140 |
-| runs3 candidate | 23 x 2, cost factor 2.5-3.2 | about $150-200 |
-| lenses3 candidate | 23 x 2, cost factor 2.2-2.8 | about $130-170 |
+| runs3 candidate | 23 x 2, cost factor 2.4-3.0 (focused-passes.md section 5.6) | about $150-190 |
+| lenses3 candidate | 23 x 2, cost factor 2.4-3.0 (focused-passes.md section 5.6) | about $150-190 |
 | Alternative: all 50 cases as hosts | S about $80-90 | baseline about $250-280, each candidate about $400-550 |
 
 ### 4.5 The security kind

@@ -61,8 +61,8 @@ import {
   type VerifyVerdictName,
   verifyResult,
 } from "../../shared/review";
-import type { RunErrorKind, RunStatus } from "../../shared/run-log";
-import { minorFold, type Profile } from "./catalog";
+import type { RunErrorKind, RunEvent, RunStatus } from "../../shared/run-log";
+import { type Lens, minorFold, type Profile, passLabel } from "./catalog";
 import type { RunOutcome } from "./claude";
 import type { Candidate } from "./context-files";
 import { type DiffFile, parseDiff } from "./diffmap";
@@ -1213,6 +1213,39 @@ export function salvaged(f: Found, o: RunOutcome, line: string): Found {
     ...f,
     raw: cap(`${rawOutput(o)}\n# Salvage phase\n\n${f.raw}`),
     summary: { ...f.summary, coverage: { ...c, notChecked: [line, ...c.notChecked] } },
+  };
+}
+
+// docs/plans/review-v2/focused-passes.md section 4.4: one Found from the usable passes of a multi-pass review, in pass order. list: at
+// least one entry. n: the pass count. gaps: the app lines of the failed and skipped passes. events: the events of all passes.
+export function mergeFound(
+  list: { k: number; lens: Lens | null; found: Found }[],
+  n: number,
+  extra: { gaps: string[]; events: RunEvent[] },
+): Found {
+  const uniq = (xs: string[]) => [...new Set(xs)];
+  const first = (list[0] as (typeof list)[number]).found;
+  const findings = list.flatMap(({ k, found }) => found.candidates.map((c) => ({ ...c.finding, pass: k })));
+  const groups = overlapGroups(findings.map((f) => ({ side: f.side, anchor: f.anchor })));
+  const cov = list.map((x) => x.found.summary.coverage);
+  return {
+    raw: cap(list.map(({ k, lens, found }) => `# Pass ${k} of ${n} (${passLabel(lens)})\n\n${found.raw}`).join("\n")),
+    outcome: { ...first.outcome, events: extra.events },
+    summary: {
+      summary: first.summary.summary,
+      risks: uniq(list.flatMap((x) => x.found.summary.risks)),
+      coverage: {
+        read: uniq(cov.flatMap((c) => c.read)),
+        skipped: uniq([...cov.flatMap((c) => c.skipped), ...extra.gaps]),
+        unavailable: uniq(cov.flatMap((c) => c.unavailable)),
+        notChecked: uniq(cov.flatMap((c) => c.notChecked)),
+      },
+      dropped: list.flatMap((x) => x.found.summary.dropped),
+    },
+    candidates: findings.map((finding, i) => ({ finding, from: null, n: i + 1, group: groups[i] ?? null })),
+    questions: list.flatMap((x) => x.found.questions),
+    replies: list.find((x) => x.k === 1)?.found.replies ?? [],
+    gaps: uniq([...list.flatMap((x) => x.found.gaps), ...extra.gaps]),
   };
 }
 

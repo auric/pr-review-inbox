@@ -730,6 +730,8 @@ export type AnchoredFinding = Omit<StoredFinding, "cause"> & {
   cause?: (Cause & { anchor?: Anchor }) | null;
   anchor: Anchor;
   movedFrom?: { path: string; line: number };
+  // docs/plans/review-v2/focused-passes.md section 4.4: the finder pass of the finding, from 1. Only judge.ts mergeFound sets it.
+  pass?: number;
 };
 
 // path: absolute, "..", or outside the snapshot. file: no such file on that side. match: the quote is not in the file.

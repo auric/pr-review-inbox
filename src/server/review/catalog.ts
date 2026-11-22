@@ -720,6 +720,47 @@ export const ARCHITECTURE_VERIFY = [
   "When both ways give the same result for each reachable input, refute it as a choice between two correct designs.",
 ];
 
+// docs/plans/review-v2/focused-passes.md sections 4.1 and 4.6: the finder passes of the variants "lenses3" and "runs3". The lens text is
+// frozen. An edit voids every earlier lenses3 result.
+export type Lens = "failure" | "contract" | "system";
+export const LENS_LINES: Record<Lens, readonly string[]> = {
+  failure: [
+    "Look hardest at what the change does when a step fails, stops early, or overlaps another step.",
+    "Follow each exit of a changed function to its end: a return, a throw, a cancel, or a timeout.",
+    "Check what each exit leaves behind: held resources, partial state, and errors that nobody sees.",
+    "For each object, handle, task, and callback that the change creates or keeps, find its owner and its end.",
+    "Check each use of state that two threads or tasks share.",
+    "Report other problems too.",
+  ],
+  contract: [
+    "Look hardest at how the change fits the code outside the diff.",
+    ...CALLERS_LINES,
+    "Check what each caller and consumer expects from the changed code, and what it now gets.",
+    "For each change, find the other places that must change with it. Report each place that the change misses.",
+    ...ARCHITECTURE_LINES,
+    "Report other problems too.",
+  ],
+  system: [
+    "Look hardest at the change as a whole, as a senior engineer who will run it in production.",
+    "Follow each main flow of the change from its entry point to its effect.",
+    "Check each way that the code starts and each place where it runs, not only the default.",
+    "Check the change at scale: large inputs, many calls, and slow or failed dependencies.",
+    "Check the rollout: existing data, older clients, a partial deploy, a restart, and a rollback.",
+    "Report other problems too.",
+  ],
+};
+// The pass label in the mark event, the gap lines, and the raw output. null: a runs3 pass.
+export const passLabel = (lens: Lens | null) =>
+  lens === null ? "repeat" : { failure: "failure paths", contract: "contracts and callers", system: "the whole change" }[lens];
+// One entry per finder pass of a full review. lenses3 wins over runs3.
+export const passLenses = (p: Partial<Pick<Profile, "variants">>): (Lens | null)[] =>
+  has(p, "lenses3") ? ["failure", "contract", "system"] : has(p, "runs3") ? [null, null, null] : [null];
+// The finder variant lines after the finder rules. A line keeps its first copy, so a stacked variant adds no line twice. With lens null,
+// the lines and their order are those of "callers" and "architecture".
+const focus = (p: Profile, lens: Lens | null) => [
+  ...new Set([...callers(p), ...(architecture(p) ? ARCHITECTURE_LINES : []), ...(lens ? LENS_LINES[lens] : [])]),
+];
+
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.
 export const VOLUME_NITS: Record<Volume, string> = {
   quiet: "Give no nits.",
@@ -981,7 +1022,8 @@ export const ANSWERED_RULES = [
 
 // spec.md section 1.5: the agent prompt order of rl-main. The caller adds languages, skills, MCP tools, and the delegation lines.
 // An Explain profile gets the Explain agent: it gives no findings and judges no answer.
-export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec {
+// lens: the lens of a finder pass (focused-passes.md section 4.6).
+export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT, lens: Lens | null = null): AgentSpec {
   if (p.explain) return explainAgent(p);
   return {
     description: "Read-only review of one pull request.",
@@ -991,8 +1033,7 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT): AgentSpec 
       ...classes(p),
       ...contextBlock(c),
       ...finderRules(p, true),
-      ...callers(p),
-      ...(architecture(p) ? ARCHITECTURE_LINES : []),
+      ...focus(p, lens),
       ...finderList(p),
       ...threadClaim(p, c),
       ...rubric(p),
@@ -1414,8 +1455,8 @@ export const withMcp = (a: AgentSpec, used: McpUse[], issues = false): AgentSpec
 // model and effort are agent definition fields (code.claude.com/docs/en/sub-agents). Gate B13 (2.1.301): the CLI accepts both, and
 // it refuses the whole --agents file for an unknown effort. prepare in claude.ts checks each effort first.
 // spec.md section 1.5: the rl-reviewer prompt. The caller adds languages, skills, MCP tools, and the project instructions.
-// parts: the run has part files (withDelegation).
-export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts = false): AgentSpec {
+// parts: the run has part files (withDelegation). lens: see mainAgent.
+export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts = false, lens: Lens | null = null): AgentSpec {
   return {
     ...(p.reviewer.model !== null && { model: p.reviewer.model }),
     ...(p.reviewer.effort !== null && { effort: p.reviewer.effort }),
@@ -1426,8 +1467,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       ...classes(p),
       ...contextBlock(c),
       ...finderRules(p, false),
-      ...callers(p),
-      ...(architecture(p) ? ARCHITECTURE_LINES : []),
+      ...focus(p, lens),
       ...finderList(p),
       ...threadClaim(p, c),
       ...rubric(p),
@@ -1597,7 +1637,8 @@ export function verifyRules(
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
       : []),
     ...PREEXISTING_VERIFY,
-    ...(architecture(p) ? ARCHITECTURE_VERIFY : []),
+    // focused-passes.md section 4.5: the L2 pass of lenses3 holds ARCHITECTURE_LINES. runs3 gets no verify lines.
+    ...(architecture(p) || has(p, "lenses3") ? ARCHITECTURE_VERIFY : []),
     ...(minorFold(p) ? POLISH_VERIFY : []),
     ...(v2 && c.prContext ? [VERIFY2.thread] : []),
     ...(v2 && p.modules.includes("intent") && !lacks("intent", c) ? [VERIFY2.intent] : []),

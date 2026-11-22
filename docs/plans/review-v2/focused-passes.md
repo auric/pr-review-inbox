@@ -1,6 +1,6 @@
 # Focused passes: three finder runs with different lenses (variant "lenses3")
 
-Status: design of 2026-11-21 against main 484a4e5. Not built. The user decided section 11 on 2026-11-21. WP-AR1 is pushed (bb1afd0). Packages: WP-L0 (docs), WP-L1 (passes in the app), WP-L2 (eval diagnostics). Paid steps: pilot P-L, gates G-L1 and G-L2. The conditional package WP-L3 (merge agent) runs only when the noise rule fails mainly through duplicates. The text names no other app, company, host, project, case ID, or PR number. The recall plan of 2026-11-17 lies outside the repository. Its lens names are reused here, and the lens text in this file is new.
+Status: design of 2026-11-21 against main 484a4e5. WP-L0, WP-L1, and WP-L2 are built opt-in (section 12). The user decided section 11 on 2026-11-21. WP-AR1 is pushed (bb1afd0). Packages: WP-L0 (docs), WP-L1 (passes in the app), WP-L2 (eval diagnostics). Paid steps: pilot P-L, gates G-L1 and G-L2. The conditional package WP-L3 (merge agent) runs only when the noise rule fails mainly through duplicates. The text names no other app, company, host, project, case ID, or PR number. The recall plan of 2026-11-17 lies outside the repository. Its lens names are reused here, and the lens text in this file is new.
 
 Sources: review-quality-2026.md (items 6, 7, 11, 12, section 2, section 4), architecture-bugs.md, seeded-truth.md (sections 4, 6.5, 9, 14), review-ledger.md, review-v3.md (section 10, WP-V14), parallel-runs.md, and the code: catalog.ts, jobs.ts, judge.ts, validate.ts, context-files.ts, claude.ts, src/shared/dto.ts, review.ts, run-log.ts, scripts/eval/run.ts, ab.ts, score.ts, compare.ts.
 
@@ -436,3 +436,17 @@ Then:
 5. When the direct interval includes 0, which one ships? Decided by the user on 2026-11-21: lenses3 ships only when its cost is less than 10% above runs3. The architecture benefit is a preference, not evidence.
 6. Does L3 stay if its `pass 3` row adds no seed that only it finds? Decided by the user on 2026-11-21: drop L3 only after a two-lens run passes against SG-A. The `pass 3` rows alone never drop it.
 7. How does a winner ship? Decided by the user on 2026-11-21: a per-run "Deep check" switch, off by default.
+
+## 12. Build notes (WP-L0 to WP-L2)
+
+- The code follows sections 4 and 6. The facts below fill the places that the design leaves open.
+- A failed or skipped pass adds its gap line to coverage skipped and to the gaps. The run is then incomplete. A salvaged pass adds its turn-cap line to notChecked, as a one-pass salvage does.
+- Row 11: the run ends with the ending of pass 1, but its usage is the sum of all passes.
+- A cancel in the verify phase also keeps the usage of all passes.
+- A salvage that fails with a usage limit does not stop the later passes. Row 10 gives it kind max_turns.
+- Each pass outcome starts with its mark event, so a salvage run of pass k tags its events after the events of pass k.
+- The "Deep check" switch (question 7) belongs to WP-LS. It is not built.
+- The integration tests are in tests/review/passes.test.ts, not in jobs.test.ts. The existing jobs tests have no edit.
+- WP-L2: the pass rows are slice rows "pass k" and "only pass k" of the counted must-finds. `eval:compare` also prints them side by side, with "-" for a file without passes. `dupShown` is a metric row. It needs eval:label labels.
+- The noise block prints the paired deltas per case of the judge tp part, the judge fp part, and dupShown. The draw of the audit sample (section 5.5) is not built.
+- The L3 line "not only the default" holds the word "only". It narrows nothing, so the text stays as frozen in section 4.6.

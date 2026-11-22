@@ -49,6 +49,9 @@ export const REFUSED_NOTES: readonly string[] = [...Object.values(REFUSED_NOTE),
 export const CHECK_EVENT = "check:";
 // The events of a salvage run (docs/plans/review-v2/spec.md section 1.6) get this prefix. They count as finder events.
 export const SALVAGE_EVENT = "salvage:";
+// docs/plans/review-v2/focused-passes.md section 4.9: with two or more finder passes, each event of pass k gets this prefix. A one-pass
+// run stays untagged. The events of a pass count as finder events.
+export const passEvent = (k: number) => `pass${k}:`;
 export const eventPhase = (e: Pick<RunEvent, "id">): "find" | "check" => (e.id.startsWith(CHECK_EVENT) ? "check" : "find");
 
 // ---------- stream-json messages (SDKMessage) ----------

@@ -65,6 +65,8 @@ export type EvalItem = {
   cause?: { path: string; side: Side; line: number; lineEnd: number | null; anchorText: string };
   // docs/plans/review-v2/minor-fold.md section 6.2: a polish point (variant "minor-fold"). Absent: false.
   polish?: boolean;
+  // docs/plans/review-v2/focused-passes.md WP-L2: the finder pass, from 1 (variants "lenses3" and "runs3"). Absent: a one-pass run.
+  pass?: number;
 };
 
 export type EvalDropped = { path: string; side: Side; line: number; lineEnd: number | null; severity: Severity; reason: string };
@@ -318,6 +320,7 @@ export const METRICS = [
   "polish",
   "polishRecall",
   "polishTraps",
+  "dupShown",
 ] as const;
 export type Metric = (typeof METRICS)[number];
 export type Stat = { mean: number; min: number; max: number } | null;
@@ -361,12 +364,25 @@ export type Sec = { runs: number; shown: number; gold: number; tp: number; fp: n
 const SEC_KEYS = ["shown", "gold", "tp", "fp", "unlabeled"] as const;
 
 // The counted must-finds (goldOf keys) that a shown item finds and that any item raises.
-type Hits = { shown: Set<string>; raised: Set<string> };
+// byPass: the counted must-finds that the items of each finder pass raise (focused-passes.md WP-L2). Empty for a one-pass run.
+type Hits = { shown: Set<string>; raised: Set<string>; byPass: Map<number, Set<string>> };
+// The keys that the items of each pass raise. keys(n): the counted must-find keys of item n.
+const passHits = (items: EvalItem[], keys: (n: number) => readonly string[]) => {
+  const out = new Map<number, Set<string>>();
+  items.forEach((i, n) => {
+    if (i.pass === undefined) return;
+    const set = out.get(i.pass) ?? new Set<string>();
+    out.set(i.pass, set);
+    for (const k of keys(n)) set.add(k);
+  });
+  return out;
+};
 
 // The grounded counts of one run (review-quality-2026.md E5). tp, fp: shown items that claim a bug or your own comment, or a trap.
 // shown: shown items that claim no extra. unmatched: shown items that claim nothing. newTp, judgeFp, above: null when an unmatched
 // shown item has no judge label. confusion: null when an item has neither a gold item nor a judge label. all: the Sec counts of all shown
-// items, kept when an unmatched one has no judge label.
+// items, kept when an unmatched one has no judge label. dupShown (focused-passes.md WP-L2): shown items with a gold match whose matches
+// another shown item claimed first. They are part of unmatched.
 type Ground = {
   hits: Hits;
   loss: Record<State, number>;
@@ -382,6 +398,7 @@ type Ground = {
   risk: Omit<Sec, "runs">;
   obligation: Omit<Sec, "runs">;
   all: Omit<Sec, "runs">;
+  dupShown: number;
 };
 
 // null: an item has no matcher answer.
@@ -429,8 +446,13 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
     });
     confusion = rows;
   }
+  const gold = new Set(goldOf(c).map((x) => x.key));
   return {
-    hits: { shown: new Set(shownKeys), raised: new Set(raisedKeys) },
+    hits: {
+      shown: new Set(shownKeys),
+      raised: new Set(raisedKeys),
+      byPass: passHits(r.items, (n) => of(n).filter((k) => counted.includes(k))),
+    },
     loss,
     tp: shown.filter((x) => x.gold?.kind === "bug" || x.gold?.kind === "human").length,
     fp: shown.filter((x) => x.gold?.kind === "trap").length,
@@ -445,6 +467,7 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
     risk: ofCategory("risk"),
     obligation: ofCategory("obligation"),
     all: ofCategory(),
+    dupShown: r.items.filter((i, n) => i.group === "main" && labels[n] === null && of(n).some((k) => gold.has(k))).length,
   };
 }
 
@@ -487,6 +510,8 @@ type Tally = {
   polishFound: number;
   polishTraps: number;
   hits: Hits;
+  // The highest finder pass of the run's items, 0 for a one-pass run.
+  passes: number;
   ground: Ground | null;
   pre: Omit<Sec, "runs"> | null;
   pol: (Omit<Sec, "runs"> & { must?: number }) | null;
@@ -578,7 +603,12 @@ function tally(c: EvalCaseInfo, run: CaseRun, t: number, volume: Volume | null, 
     nitBugs: nitBugs.length,
     polishFound: nitBugs.filter((b) => polish.some((i) => matches(i, b, t))).length,
     polishTraps: polish.filter((i) => c.traps.some((x) => matches(i, x))).length,
-    hits: { shown: new Set(found.map((b) => `bug:${b.id}`)), raised: new Set(raised.map((b) => `bug:${b.id}`)) },
+    hits: {
+      shown: new Set(found.map((b) => `bug:${b.id}`)),
+      raised: new Set(raised.map((b) => `bug:${b.id}`)),
+      byPass: passHits(r.items, (n) => bugs.filter((b) => matches(r.items[n] as EvalItem, b, t)).map((b) => `bug:${b.id}`)),
+    },
+    passes: Math.max(0, ...r.items.map((i) => i.pass ?? 0)),
     ground: g ? ground(c, r, volume, g) : null,
     pre: g ? preCounts(c, pre, g) : null,
     pol: g
@@ -678,6 +708,10 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
     polish: ratio(sum(ts, "polish"), ts.length),
     polishRecall: ratio(sum(ts, "polishFound"), sum(ts, "nitBugs")),
     polishTraps: ratio(sum(ts, "polishTraps"), ts.length),
+    dupShown: of(
+      gs((x) => x.dupShown),
+      ts.length,
+    ),
   };
 }
 
@@ -715,7 +749,8 @@ function tallies(r: EvalResult, g?: Grounding): { runs: RunTally[]; grounded: bo
 const CLASS_NAMES = ["security", "concurrency", "resource", "behavior", "other"] as const;
 
 // review-quality-2026.md E5. Gold slices: severity, source, module, bug class, and seed kind of the counted must-finds. Case slices:
-// size, task text, and clean cases. The probe set is a set of its own (--set probe), so its result is its slice.
+// size, task text, and clean cases. The probe set is a set of its own (--set probe), so its result is its slice. focused-passes.md WP-L2:
+// with finder passes, "pass k" counts the must-finds that an item of pass k raised, and "only pass k" those that no other pass raised.
 function slices(runs: RunTally[], grounded: boolean, hits: (x: RunTally) => Hits, volume: Volume | null): Slice[] {
   type Acc = { mustFinds: number; found: number; runs: number; noise: number; judgeFp: number | null; gold: boolean };
   const acc = new Map<string, Acc>();
@@ -727,9 +762,20 @@ function slices(runs: RunTally[], grounded: boolean, hits: (x: RunTally) => Hits
     }
     return a;
   };
+  const passes = Math.max(0, ...runs.map((x) => x.t.passes));
   for (const x of runs) {
     const h = hits(x);
     for (const b of mustFind(x.c, volume)) {
+      const key = `bug:${b.id}`;
+      for (let k = 1; k <= passes; k++) {
+        const by = h.byPass.get(k)?.has(key) === true;
+        const all = row(`pass ${k}`, true);
+        all.mustFinds++;
+        all.found += by ? 1 : 0;
+        const only = row(`only pass ${k}`, true);
+        only.mustFinds++;
+        only.found += by && [...h.byPass].every(([j, s]) => j === k || !s.has(key)) ? 1 : 0;
+      }
       const hit = h.shown.has(`bug:${b.id}`) ? 1 : 0;
       for (const name of [
         `severity ${b.severityMin === "blocker" || b.severityMin === "major" ? "blocker, major" : "minor, nit"}`,
@@ -848,13 +894,16 @@ export function pairedDelta(
 // review-quality-2026.md section 2, noise rule of 2026-11-21: the limits for a verify-only replay and for a full candidate run. noiseShare:
 // M of a full run is this share of mean(A).
 export const NOISE_RULE = { replay: { noise: 0.08, judgeFp: 0.05 }, full: { noiseShare: 0.1, judgeFp: 0.07 } } as const;
-type NoiseSide = { noise: number; judgeFp: number; unlabeled: number };
+type NoiseSide = { noise: number; judgeFp: number; unlabeled: number; judgeTp: number; dupShown: number };
 export type NoiseRule = {
   replay: boolean;
   cases: number;
   noise: { a: number; b: number; delta: number; limit: number; pass: boolean };
   judgeFp: { a: number; b: number; delta: number; limit: number; pass: boolean };
   unlabeled: [number, number];
+  // focused-passes.md section 5.5 and question 1: the paired deltas per case of the judge tp and judge fp parts of the grounded noise, and
+  // of dupShown, which is part of them.
+  parts: { judgeTp: number; judgeFp: number; dupShown: number };
 };
 
 // review-quality-2026.md section 2: the paired grounded noise delta and the paired judge fp delta. A pair matches by case ID. Each side
@@ -868,10 +917,12 @@ export function noiseRule(a: EvalResult, b: EvalResult, ga?: Grounding, gb?: Gro
   const perCase = (runs: RunTally[]) => {
     const out = new Map<string, NoiseSide & { runs: number }>();
     for (const x of runs) {
-      const s = out.get(x.c.id) ?? { noise: 0, judgeFp: 0, unlabeled: 0, runs: 0 };
+      const s = out.get(x.c.id) ?? { noise: 0, judgeFp: 0, unlabeled: 0, judgeTp: 0, dupShown: 0, runs: 0 };
       out.set(x.c.id, s);
       s.noise += x.t.ground?.unmatched ?? 0;
       s.judgeFp += x.t.ground?.all.fp ?? 0;
+      s.judgeTp += x.t.ground?.all.tp ?? 0;
+      s.dupShown += x.t.ground?.dupShown ?? 0;
       s.unlabeled += x.t.ground?.all.unlabeled ?? 0;
       s.runs++;
     }
@@ -882,7 +933,7 @@ export function noiseRule(a: EvalResult, b: EvalResult, ga?: Grounding, gb?: Gro
   const ids = [...pa.keys()].filter((id) => pb.has(id));
   if (!ids.length) return null;
   const mean = (f: (id: string) => number) => ids.reduce((s, id) => s + f(id), 0) / ids.length;
-  const of = (p: typeof pa, id: string, k: "noise" | "judgeFp") => {
+  const of = (p: typeof pa, id: string, k: "noise" | "judgeFp" | "judgeTp" | "dupShown") => {
     const s = p.get(id) as NoiseSide & { runs: number };
     return s[k] / s.runs;
   };
@@ -894,12 +945,14 @@ export function noiseRule(a: EvalResult, b: EvalResult, ga?: Grounding, gb?: Gro
     return { a: x, b: mean((id) => of(pb, id, k)), delta, limit: limit(x), pass: delta <= limit(x) + 1e-9 };
   };
   const unlabeled = (p: typeof pa) => ids.reduce((s, id) => s + (p.get(id)?.unlabeled ?? 0), 0);
+  const part = (k: "judgeFp" | "judgeTp" | "dupShown") => mean((id) => of(pb, id, k) - of(pa, id, k));
   return {
     replay,
     cases: ids.length,
     noise: side("noise", (x) => (replay ? NOISE_RULE.replay.noise : NOISE_RULE.full.noiseShare * x)),
     judgeFp: side("judgeFp", () => (replay ? NOISE_RULE.replay.judgeFp : NOISE_RULE.full.judgeFp)),
     unlabeled: [unlabeled(pa), unlabeled(pb)],
+    parts: { judgeTp: part("judgeTp"), judgeFp: part("judgeFp"), dupShown: part("dupShown") },
   };
 }
 

@@ -19,6 +19,7 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `obligations` (docs/plans/review-v2/obligations.md): the verify phase lists at most 5 obligations of the change and checks each one. It also starts with zero blocks. A missing obligation with an app-checked cite becomes a finding of category obligation. The variant changes only the verify prompts and the verify schema, so `--candidate-replay` can test it. A replay runs each verify call live, also one with the obligations schema. A run file holds the obligation counts, never the obligation text.
 - `refute-issue` (docs/plans/review-v2/verifier-rule.md): the verify phase judges the problem of a candidate, not its details. A wrong trigger does not refute a real defect. The verifier looks for another trigger and names it in reason. The variant changes only the verify prompts, so `--candidate-replay` can test it. Each finding item of a run file holds the verify reason as `checkReason`. No metric reads it.
 - `architecture` (docs/plans/review-v2/architecture-bugs.md): rl-main and rl-reviewer compare each new call, state, or handler with the way the repository does it elsewhere. They report a skipped step only with a concrete input and a wrong result. The verify phase refutes a different way that gives the same result. The variant changes the finder, so `--candidate-replay` refuses it.
+- `lenses3` and `runs3` (docs/plans/review-v2/focused-passes.md): a full review runs three finder passes in sequence, then one verify phase over the union. Under `lenses3`, pass 1 looks at failure paths, pass 2 at contracts and callers, and pass 3 at the whole change, and the verify phase also gets the lines of `architecture`. Under `runs3`, the three passes get the same prompts. A re-review keeps one pass. Both variants change the finder, so `--candidate-replay` refuses them. See "Finder passes".
 - `parts`: see "Part files". `failures`: a trial module with a failure checklist.
 - The variants `signal`, `order`, `rules2`, and `rereview-strict` are removed. The first three lost in U-V1 (docs/eval/results.md). U-V1 gave no decision for `rereview-strict`, and no plan uses it. A saved profile that still lists one loads without it. `--variants` and `--candidate-variants` refuse them. No run reads `REVIEW.md` now.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
@@ -170,6 +171,42 @@ Each run records two more facts:
 - `partsRead`: the part files that an rl-reviewer call read. A read by rl-main does not count.
 
 The tables show "part files per case" and "parts read" next to "rl-reviewer calls per case". A result file from before these facts shows "-".
+
+## Finder passes (variants lenses3 and runs3)
+
+Each finding item of a multi-pass run holds its pass as `pass`, from 1. A one-pass run has no `pass`.
+
+- The slice table gets the rows `pass k` and `only pass k`: the counted must-finds that an item of pass k raised, hidden items included, and those that no other pass raised.
+- `eval:compare` prints the same rows for A and B side by side. A file without passes shows "-".
+- `dupShown` (metric row): shown findings whose gold matches another shown finding claimed first, per case run. They count as grounded noise. It needs eval:label labels.
+- The noise block also prints the paired deltas per case of the judge tp part, the judge fp part, and dupShown.
+
+The commands of focused-passes.md section 5. Pilot P-L1 on two seeded pilot hosts:
+
+```
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval -- --set local --cases <two pilot IDs> --variants lenses3 --repeat 1 --real --out eval-results/seeded/lenses3-pilot
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/lenses3-pilot --real
+bun run eval:seed -- leaks <pilot result.json>
+```
+
+Pilot P-L2 on the probe set:
+
+```
+bun run eval -- --set probe --repeat 1 --real --out eval-results/lenses3/probe-base
+bun run eval -- --set probe --variants lenses3 --repeat 1 --real --out eval-results/lenses3/probe-lenses3
+bun run eval:compare -- <probe-base result.json> <probe-lenses3 result.json>
+```
+
+The candidate runs against SG-A. Run runs3 only when gate G-L0 passes:
+
+```
+bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants runs3 --candidate-repeat 2 --review-only --results eval-results/seeded/runs3
+bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants lenses3 --candidate-repeat 2 --review-only --results eval-results/seeded/lenses3
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/lenses3/review-candidate --real
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/runs3/review-candidate --real
+bun run eval:seed -- leaks <each candidate result.json>
+bun run eval:compare -- <runs3 candidate result.json> <lenses3 candidate result.json>
+```
 
 ## Run W1 in one command
 

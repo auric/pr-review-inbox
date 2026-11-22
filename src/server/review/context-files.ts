@@ -185,6 +185,7 @@ const questionBlock = (n: number, q: Question) => [
 
 // docs/plans/review-v2/spec.md section 1.6, salvage: context/salvage-notes.md, the notes of a finder that reached its turn cap.
 // Indented blocks keep each note text from starting a heading.
+export const SALVAGE_NOTES = "salvage-notes.md";
 export function salvageNotesFile(notes: readonly RunNote[]): ContextFile {
   const out = [
     "# Notes",
@@ -193,7 +194,7 @@ export function salvageNotesFile(notes: readonly RunNote[]): ContextFile {
     "",
   ];
   for (const [i, n] of notes.entries()) out.push(`## Note ${i + 1}: ${oneLine(n.from)}`, "", indentBlock(n.text), "");
-  return { name: "salvage-notes.md", text: out.join("\n") };
+  return { name: SALVAGE_NOTES, text: out.join("\n") };
 }
 
 // part-session.md section 2.2, Fresh session: context/continue.md of a new session of a part with earlier runs. commits: the subject

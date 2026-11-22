@@ -446,6 +446,7 @@ function items(d: RunDetail, volume: Volume | undefined): EvalItem[] {
         }),
         ...((p as { carried?: unknown }).carried !== undefined && { carried: true }),
         ...(p.polish === true && { polish: true }),
+        ...(p.pass !== undefined && { pass: p.pass }),
       },
     ];
   });

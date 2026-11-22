@@ -60,6 +60,7 @@ const LABEL: Record<Metric, string> = {
   polish: "polish: polish points that are not hidden, per case (variant minor-fold)",
   polishRecall: "polish recall: bugs at nit that a polish point matches (variant minor-fold)",
   polishTraps: "polish traps: polish points on a trap, per case (variant minor-fold)",
+  dupShown: "dupShown: shown findings whose gold matches another shown finding claimed first, per case (part of grounded noise)",
 };
 const RATE = new Set<Metric>([
   "recall",
@@ -98,6 +99,7 @@ const DIGITS: Record<Metric, number> = {
   polish: 2,
   polishRecall: 1,
   polishTraps: 2,
+  dupShown: 2,
   augmentedPrecision: 1,
   augmentedRecall: 1,
   newTp: 2,
@@ -175,6 +177,8 @@ const header = (r: EvalResult) => {
   return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}${resumed.length ? `, resumed at commit ${resumed.join(", ")}` : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
 };
 
+// "pass 1", "only pass 1", "pass 2", and so on.
+const passOrder = (name: string) => Number(/\d+$/.exec(name)?.[0] ?? 0) * 2 + (name.startsWith("only ") ? 1 : 0);
 const pct = (a: number, b: number) => (b === 0 ? "-" : `${((a / b) * 100).toFixed(1)}%`);
 const per = (x: number | null) => (x === null ? "-" : x.toFixed(2));
 
@@ -364,6 +368,10 @@ export function noiseText(n: NoiseRule | null): string {
     `- grounded noise per case: A ${n.noise.a.toFixed(4)}, B ${n.noise.b.toFixed(4)}, paired delta ${verdict(n.noise, n.replay ? "" : " (10% of mean(A))")}`,
     `- judge fp per case run: A ${n.judgeFp.a.toFixed(4)}, B ${n.judgeFp.b.toFixed(4)}, paired delta ${verdict(n.judgeFp)}`,
   ];
+  const p = n.parts;
+  out.push(
+    `- parts of the grounded noise delta per case: judge tp ${signed(p.judgeTp)}, judge fp ${signed(p.judgeFp)}; dupShown ${signed(p.dupShown)} (within the judge parts)`,
+  );
   if (n.unlabeled[0] || n.unlabeled[1])
     out.push(
       `- unmatched shown findings without a judge label: A ${n.unlabeled[0]}, B ${n.unlabeled[1]}. Noise is more than judge tp + judge fp.`,
@@ -457,6 +465,20 @@ export function compareText(
     ];
     out.push("", LABEL[m], table(rows));
   }
+  // focused-passes.md WP-L2: the pass rows side by side. A file without finder passes prints "-".
+  const passRows = (s: Score) => new Map(s.slices.filter((x) => /^(only )?pass \d+$/.test(x.name)).map((x) => [x.name, x]));
+  const [pa, pb] = [passRows(sa), passRows(sb)];
+  const names = [...new Set([...pa.keys(), ...pb.keys()])].sort((x, y) => passOrder(x) - passOrder(y));
+  const side = (m: Map<string, Score["slices"][number]>, k: string) => {
+    const x = m.get(k);
+    return x ? `${x.found}/${x.mustFinds}` : "-";
+  };
+  if (names.length)
+    out.push(
+      "",
+      "Finder passes (focused-passes.md WP-L2): counted must-finds that an item of pass k raised, and those that only pass k raised",
+      table([["row", "A", "B"], ...names.map((k) => [k, side(pa, k), side(pb, k)])]),
+    );
   out.push("", `A: ${detailText(sa)}`, "", `B: ${detailText(sb)}`);
   return out.join("\n");
 }

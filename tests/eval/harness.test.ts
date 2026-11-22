@@ -182,6 +182,9 @@ describe("eval harness without --real (AC-M2)", () => {
       "reviewer",
     ]);
     expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
+    // focused-passes.md section 5.4: --candidate-replay refuses lenses3 and runs3, because they change the finder.
+    expect(finderChange(base, { ...p.profile, variants: ["lenses3"] })).toEqual(["variants"]);
+    expect(finderChange(base, { ...p.profile, variants: ["runs3"] })).toEqual(["variants"]);
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
     expect(VERIFY_ONLY).toEqual(["obligations", "refute-issue", "security2-verify", "verify2"]);
     // verifier-rule.md AC-R58: the rule changes only the verify prompts.
@@ -332,7 +335,7 @@ describe("eval harness without --real (AC-M2)", () => {
       [
         "--variants",
         "rules2",
-        "--variants must be a comma list of architecture, broad, callers, classes, minor-fold, obligations, parts, refute-issue, security2, security2-verify, verify2.",
+        "--variants must be a comma list of architecture, broad, callers, classes, lenses3, minor-fold, obligations, parts, refute-issue, runs3, security2, security2-verify, verify2.",
       ],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
@@ -607,6 +610,33 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const partsResult = JSON.parse(readFileSync(join(partsOut, partsFile), "utf8")) as EvalResult;
       expect(partsResult.promptVersion).toBe(`${REVIEW_PROMPT_VERSION}+parts`);
       expect(partsResult.runs[0]).toMatchObject({ status: "completed", parts: 0, partsRead: 0 });
+
+      // focused-passes.md WP-L2: each item of a lenses3 run carries its pass. The calls record 3 finder calls, then the verify call.
+      const lensOut = join(dir, "lenses3");
+      const lensed = await bun([
+        RUN,
+        "--cases",
+        c.id,
+        "--variants",
+        "lenses3",
+        "--out",
+        lensOut,
+        "--runner",
+        process.execPath,
+        FAKE,
+        scenario,
+      ]);
+      expect(lensed.code).toBe(0);
+      const lensFile = join(lensOut, readdirSync(lensOut).find((f) => f.endsWith(".json")) as string);
+      const lensResult = JSON.parse(readFileSync(lensFile, "utf8")) as EvalResult;
+      expect(lensResult.promptVersion).toBe(`${REVIEW_PROMPT_VERSION}+lenses3`);
+      const passes = lensResult.runs[0]?.items.map((i) => i.pass) ?? [];
+      expect(passes).toEqual([...findings.map(() => 1), ...findings.map(() => 2), ...findings.map(() => 3)]);
+      const recorded = readdirSync(callsDir(lensFile))
+        .sort((x, y) => Number(/-(\d+)\.json$/.exec(x)?.[1]) - Number(/-(\d+)\.json$/.exec(y)?.[1]))
+        .map((f) => (JSON.parse(readFileSync(join(callsDir(lensFile), f), "utf8")) as { kind: string }).kind);
+      expect(recorded).toEqual(["find", "find", "find", "verify"]);
+      expect(result.runs[0]?.items.some((i) => i.pass !== undefined)).toBe(false);
     },
     SLOW,
   );

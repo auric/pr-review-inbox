@@ -30,6 +30,7 @@ import {
   type RunnerCheckDto,
   type RunPhase,
   type RunSlotsDto,
+  type RunUsage,
 } from "../../shared/dto";
 import { isMe } from "../../shared/me";
 import { plural } from "../../shared/outcome";
@@ -56,7 +57,7 @@ import {
   reviewJsonSchema,
   verifyJsonSchema,
 } from "../../shared/review";
-import { CHECK_EVENT, type RunEvent, SALVAGE_EVENT } from "../../shared/run-log";
+import { CHECK_EVENT, passEvent, type RunErrorKind, type RunEvent, SALVAGE_EVENT } from "../../shared/run-log";
 import { implementJsonSchema, runLimitsOf, type TaskRunKind } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { PrRef } from "../../shared/types";
@@ -86,6 +87,7 @@ import {
   explorerAgent,
   fixAgent,
   GIT_SERVER,
+  type Lens,
   type ListTools,
   type McpUse,
   MIN_EDIT_TURNS,
@@ -95,6 +97,8 @@ import {
   moduleNotes,
   obligationCheck,
   type Profile,
+  passLabel,
+  passLenses,
   profileOf,
   profileRevision,
   promptVersion,
@@ -141,6 +145,7 @@ import {
   planSection,
   prContextFile,
   questionsFile,
+  SALVAGE_NOTES,
   salvageNotesFile,
 } from "./context-files";
 import { runEffort } from "./defaults";
@@ -169,6 +174,7 @@ import {
   judgeReplies,
   judgeSession,
   markCopy,
+  mergeFound,
   type PlacedObligations,
   placeAnswers,
   placeObligations,
@@ -1158,63 +1164,180 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       notify(j.id);
     }
     const findStart = now();
-    const o = await j.runner.run(
-      {
-        cwd: ws.work,
-        appDir: ws.app,
-        ...spec,
-        main: withDelegation(
-          withMcp(withSkills(withLanguages(spec.main, langs, !broad(profile)), folders, always), used, finder),
-          delegate,
-          parts.length,
-        ),
-        maxTurns: d
-          ? Math.min(profile.maxTurns, DISCUSS_MAX_TURNS)
-          : reply || fix
-            ? Math.max(profile.maxTurns, MIN_EDIT_TURNS)
-            : profile.maxTurns,
-        model: profile.model,
-        effort: profile.effort,
-        advisor: profile.advisor,
-        // Only a delegating review gets subagents. With agents {}, the CLI gets no Agent tool.
-        agents: delegate
-          ? {
-              [REVIEWER]: withInstructions(
-                withInstructions(
-                  withMcp(
-                    withSkills(withLanguages(reviewerAgent(profile, context, parts.length > 0), langs, !broad(profile)), folders, always),
-                    used,
-                    finder,
+    // One finder process. reviewer: the rl-reviewer agent before its languages, skills, and MCP lines. tag: the event tag of a pass.
+    const findRun = (main: AgentSpec, reviewer: AgentSpec, prompt: string, tag = (e: RunEvent) => e) =>
+      j.runner.run(
+        {
+          cwd: ws.work,
+          appDir: ws.app,
+          ...spec,
+          prompt,
+          main: withDelegation(
+            withMcp(withSkills(withLanguages(main, langs, !broad(profile)), folders, always), used, finder),
+            delegate,
+            parts.length,
+          ),
+          maxTurns: d
+            ? Math.min(profile.maxTurns, DISCUSS_MAX_TURNS)
+            : reply || fix
+              ? Math.max(profile.maxTurns, MIN_EDIT_TURNS)
+              : profile.maxTurns,
+          model: profile.model,
+          effort: profile.effort,
+          advisor: profile.advisor,
+          // Only a delegating review gets subagents. With agents {}, the CLI gets no Agent tool.
+          agents: delegate
+            ? {
+                [REVIEWER]: withInstructions(
+                  withInstructions(
+                    withMcp(withSkills(withLanguages(reviewer, langs, !broad(profile)), folders, always), used, finder),
+                    instructions.text,
                   ),
-                  instructions.text,
+                  noteSection(brief.note),
                 ),
-                noteSection(brief.note),
-              ),
-            }
-          : {},
-        mcpServers,
-      },
-      (events) => {
-        j.db.transaction(() => upsertEvents(j.db, j.id, events))();
-        notify(j.id);
-      },
-    );
-    let find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
-    // The runner ignores a cancel that comes after the process ended.
-    if (j.cancelled) return cancelled(o);
+              }
+            : {},
+          mcpServers,
+        },
+        (events) => {
+          j.db.transaction(() => upsertEvents(j.db, j.id, events.map(tag)))();
+          notify(j.id);
+        },
+      );
     const servers = Object.keys(mcpServers);
-    const unread = unreadAlways(o, skills.alwaysCopied);
     const left = questions?.left
       ? [`${questions.left} threads with your posted questions were left out of ./context/questions.md: it reached its size limit.`]
       : [];
     const modules = j.kind === "review" && !profile.explain ? moduleNotes(profile, context) : [];
-    const unparted = partNotes(o.events, parts);
-    const noted = (e: Ending): Ending => {
-      e.result?.summary.coverage.notChecked.push(...texts.lines, ...unread, ...left, ...modules, ...unparted);
-      if (!unmarked) return e;
-      e.result?.summary.coverage.notChecked.push(unmarked);
-      return { ...e, raw: `${unmarked}\n\n${e.raw}` };
+    // o: the finder outcome with the events of every pass.
+    const notedBy = (o: RunOutcome) => {
+      const unread = unreadAlways(o, skills.alwaysCopied);
+      const unparted = partNotes(o.events, parts);
+      return (e: Ending): Ending => {
+        e.result?.summary.coverage.notChecked.push(...texts.lines, ...unread, ...left, ...modules, ...unparted);
+        if (!unmarked) return e;
+        e.result?.summary.coverage.notChecked.push(unmarked);
+        return { ...e, raw: `${unmarked}\n\n${e.raw}` };
+      };
     };
+    const verifyInput = { profile, context, input, rereview: !!carry, folders, always, used, instructions, mcpServers, langs };
+    const settled = (found: Found, find: RunPhase, v: Exclude<Awaited<ReturnType<typeof verifyPhase>>, Ending>) =>
+      settle(found, {
+        volume: profile.volume,
+        find,
+        check: v.check,
+        verify: v.verify,
+        written: v.written,
+        servers,
+        demote: profile.verifier.outcome === "demote",
+        placed: v.placed,
+        risks: true,
+        obligations: v.obligations,
+      });
+    // docs/plans/review-v2/focused-passes.md sections 4.1 to 4.3: lenses3 and runs3 run their passes in sequence in this workspace, run
+    // row, and run slot. A re-review, an Explain run, and every other run kind keep one pass.
+    const lenses = finder && !carry ? passLenses(profile) : [null];
+    if (lenses.length > 1) {
+      const n = lenses.length;
+      const events: RunEvent[] = [];
+      const usable: { k: number; lens: Lens | null; found: Found }[] = [];
+      const lines: string[] = [];
+      let usage: RunUsage | null = null;
+      let endedAt = findStart;
+      // The ending of pass 1 as a one-pass run gives it. The run ends with it when no pass is usable (row 11).
+      let first: Ending | null = null;
+      let stop: { k: number; kind: RunErrorKind } | null = null;
+      const cancel = (o?: RunOutcome): Ending => ({ ...cancelledEnding(o && { ...o, events }), usage });
+      for (const [i, lens] of lenses.entries()) {
+        const k = i + 1;
+        const label = `Pass ${k} of ${n} (${passLabel(lens)})`;
+        if (stop) {
+          lines.push(`${label} did not run, because pass ${stop.k} hit ${stop.kind}.`);
+          continue;
+        }
+        const pre = passEvent(k);
+        const offset = events.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
+        const at = now();
+        const mark: RunEvent = {
+          id: `${pre}start`,
+          seq: offset,
+          parent: null,
+          tool: "Pass",
+          target: "",
+          status: "ok",
+          note: `Pass ${k} of ${n}: ${passLabel(lens)}.`,
+          agent: null,
+          model: null,
+          tokens: null,
+          builtin: false,
+          startedAt: at,
+          endedAt: at,
+        };
+        const tag = (e: RunEvent): RunEvent => ({
+          ...e,
+          id: pre + e.id,
+          parent: e.parent === null ? null : pre + e.parent,
+          seq: e.seq + offset + 1,
+        });
+        j.db.transaction(() => upsertEvents(j.db, j.id, [mark]))();
+        events.push(mark);
+        notify(j.id);
+        // Passes 2 and 3 get no questions.md line and no ANSWERED_RULES, so only pass 1 makes reply drafts.
+        const c = k === 1 ? context : { ...context, questions: false };
+        const prompt = k === 1 ? spec.prompt : buildPrompt({ ...input, questions: false });
+        // No await between this check and run(), so a later Cancel reaches the new process.
+        if (j.cancelled) return cancel();
+        const ran = await findRun(mainAgent(profile, c, lens), reviewerAgent(profile, c, parts.length > 0, lens), prompt, tag);
+        const o: RunOutcome = { ...ran, events: [mark, ...ran.events.map(tag)] };
+        events.push(...o.events.slice(1));
+        endedAt = now();
+        if (j.cancelled) {
+          usage = addUsage(usage, usageOf(o));
+          return cancel(o);
+        }
+        const line = `${label} reached its turn cap (${profile.maxTurns}). Its findings come from its notes so far.`;
+        const salvage: RunEvent[] = [];
+        const s =
+          o.status === "failed" && o.kind === "max_turns"
+            ? await salvagePhase(j, ws, o, { profile, input, schema: spec.schema, rereview: null, used, mcpServers, line }, pre, salvage)
+            : null;
+        events.push(...salvage);
+        if (s) {
+          // focused-passes.md section 4.2: no later pass reads the notes of this pass.
+          rmSync(join(ws.context, SALVAGE_NOTES), { force: true });
+          endedAt = now();
+        }
+        if (s && "status" in s) {
+          usage = addUsage(usage, s.usage !== undefined ? s.usage : usageOf(o));
+          if (s.status === "cancelled") return cancel(o);
+          if (k === 1) first = s;
+          lines.push(`${label} failed: max_turns. Its findings are missing.`);
+          continue;
+        }
+        usage = addUsage(usage, s ? addUsage(usageOf(o), usageOf(s.o)) : usageOf(o));
+        const judged = await judge(s?.o ?? o, ws, profile, servers, gaps, null, k === 1 ? j.asked : [], instructions.sources);
+        if (!("candidates" in judged)) {
+          const kind = s ? "max_turns" : (judged.kind ?? "process");
+          if (k === 1) first = s ? salvageFailed(o, `The salvage run from its notes failed: ${judged.text}`, s.o) : judged;
+          lines.push(`${label} failed: ${kind}. Its findings are missing.`);
+          if (kind === "usage_limit" || kind === "auth") stop = { k, kind };
+          continue;
+        }
+        usable.push({ k, lens, found: s ? salvaged(judged, o, line) : judged });
+      }
+      const all: RunOutcome = { ...((first?.outcome ?? usable[0]?.found.outcome) as RunOutcome), events };
+      const noted = notedBy(all);
+      if (!usable.length) return noted({ ...(first as Ending), outcome: all, usage });
+      const found = mergeFound(usable, n, { gaps: lines, events });
+      const v = await verifyPhase(j, ws, found.outcome, found, { ...verifyInput, group: true, findUsage: usage });
+      if ("status" in v) return v;
+      return noted(settled(found, { name: "find", startedAt: findStart, endedAt, usage }, v));
+    }
+    const o = await findRun(spec.main, reviewerAgent(profile, context, parts.length > 0), spec.prompt);
+    let find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
+    // The runner ignores a cancel that comes after the process ended.
+    if (j.cancelled) return cancelled(o);
+    const noted = notedBy(o);
     if (d) return noted(judgeDiscuss(o, servers, gaps));
     if (reply) return noted(judgeReplies(o, reply, servers, gaps, new Set(liveThreads(j.db, j.pr, null).keys())));
     if (fix) return noted(await judgeFix(o, ws, fix, j.findings, servers, gaps));
@@ -1241,33 +1364,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (!("candidates" in judged)) return noted(judged);
     const found = s ? salvaged(judged, o, line) : judged;
     if (s) find = { ...find, endedAt: s.endedAt, usage: addUsage(find.usage, usageOf(s.o)) };
-    const v = await verifyPhase(j, ws, s?.o ?? o, found, {
-      profile,
-      context,
-      input,
-      rereview: !!carry,
-      folders,
-      always,
-      used,
-      instructions,
-      mcpServers,
-      langs,
-    });
+    const v = await verifyPhase(j, ws, s?.o ?? o, found, verifyInput);
     if ("status" in v) return v;
-    return noted(
-      settle(found, {
-        volume: profile.volume,
-        find,
-        check: v.check,
-        verify: v.verify,
-        written: v.written,
-        servers,
-        demote: profile.verifier.outcome === "demote",
-        placed: v.placed,
-        risks: true,
-        obligations: v.obligations,
-      }),
-    );
+    return noted(settled(found, find, v));
   }
 
   // The skills in the run folder (review, re-review, and every task step). dest: the skills folder. root: dest from the run cwd.
@@ -1342,7 +1441,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
 
   // docs/plans/review-v2/spec.md section 1.6, salvage: one new run after a finder that reached its turn cap, in the same workspace, run
   // row, and run slot. It reads only the notes of that finder. It is no resume (BRIEF 3.5). o: the finder outcome. line: the coverage
-  // line. An Ending: no notes, a failed salvage run, or Cancel.
+  // line. An Ending: no notes, a failed salvage run, or Cancel. prefix: the event tag of a finder pass (focused-passes.md section 4.9).
+  // sink: gets the stored events of the salvage run, also when it fails.
   async function salvagePhase(
     j: Job,
     ws: Workspace,
@@ -1356,6 +1456,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       mcpServers: Record<string, McpServerSpec>;
       line: string;
     },
+    prefix = "",
+    sink: RunEvent[] = [],
   ): Promise<{ o: RunOutcome; endedAt: number } | Ending> {
     const notes = o.notes ?? [];
     if (!notes.length) return salvageFailed(o, "The run left no notes to salvage.");
@@ -1365,7 +1467,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const offset = o.events.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
     const at = now();
     const mark: RunEvent = {
-      id: `${SALVAGE_EVENT}start`,
+      id: `${prefix}${SALVAGE_EVENT}start`,
       seq: offset,
       parent: null,
       tool: "Salvage",
@@ -1381,11 +1483,12 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     };
     const tag = (e: RunEvent): RunEvent => ({
       ...e,
-      id: SALVAGE_EVENT + e.id,
-      parent: e.parent === null ? null : SALVAGE_EVENT + e.parent,
+      id: prefix + SALVAGE_EVENT + e.id,
+      parent: e.parent === null ? null : prefix + SALVAGE_EVENT + e.parent,
       seq: e.seq + offset + 1,
     });
     j.db.transaction(() => upsertEvents(j.db, j.id, [mark]))();
+    sink.push(mark);
     notify(j.id);
     // No await between this check and run(), so a later Cancel reaches the new process.
     if (j.cancelled) return cancelledEnding(o);
@@ -1410,6 +1513,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       },
     );
     j.db.transaction(() => upsertEvents(j.db, j.id, s.events.map(tag)))();
+    sink.push(...s.events.map(tag));
     if (j.cancelled) return cancelledCheck(o, s, "Salvage phase");
     if (s.status !== "completed") return salvageFailed(o, `The salvage run from its notes failed: ${s.text ?? s.kind}`, s);
     return { o: { ...s, init: o.init ?? s.init, events: [...o.events, mark, ...s.events.map(tag)] }, endedAt: now() };
@@ -1435,6 +1539,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       mcpServers: Record<string, McpServerSpec>;
       // The languages of the finder. Under "broad", the verify phase gets their skip lists.
       langs: Language[];
+      // focused-passes.md sections 4.5 and 4.3: a run with two or more finder passes. group: VERIFY2.group. findUsage: the usage of all
+      // passes for a cancel, because o holds the result of one pass only.
+      group?: boolean;
+      findUsage?: RunUsage | null;
     },
   ): Promise<
     | { check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding>; obligations?: PlacedObligations }
@@ -1478,7 +1586,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       r.instructions.text,
     );
     // No await between this check and run(), so a later Cancel reaches the new process.
-    if (j.cancelled) return cancelledEnding(o);
+    if (j.cancelled) return r.findUsage === undefined ? cancelledEnding(o) : { ...cancelledEnding(o), usage: r.findUsage };
     const startedAt = now();
     const o2 = await j.runner.run(
       {
@@ -1490,7 +1598,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           withMcp(withSkills(verifyAgent(profile, context, asked > 0, langs, risks > 0, obligations), folders, always, task), used, true),
           split,
           asked > 0,
-          profile.variants.includes("verify2"),
+          profile.variants.includes("verify2") || r.group === true,
           risks > 0,
           obligations,
         ),
@@ -1508,7 +1616,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       },
     );
     j.db.transaction(() => upsertEvents(j.db, j.id, o2.events.map(tag)))();
-    if (j.cancelled) return cancelledCheck(o, o2);
+    if (j.cancelled)
+      return r.findUsage === undefined ? cancelledCheck(o, o2) : { ...cancelledCheck(o, o2), usage: addUsage(r.findUsage, usageOf(o2)) };
     const check: CheckRun = { o: o2, startedAt, endedAt: now(), written, asked, risks, ...(obligations && { obligations }) };
     return {
       check,

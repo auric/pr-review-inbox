@@ -373,7 +373,7 @@ Every eval:ab command of the W-series gives the same `--clean` value as W1 (`--c
 4. User gate W1.
 5. WP-R1 (implementer): variants "broad" and "verify2" (catalog.ts, languages.ts, jobs.ts, dto.ts `VARIANTS`, tests). WP-V4 deletes the lost variants first.
 6. WP-R2 (implementer, after question 3): `displayGroup`, tests, screenshots, README.
-7. WP-R3 (implementer-xhigh, only if the gate passes): runs3.
+7. WP-R3 became focused-passes.md WP-L1. runs3 and lenses3 are built opt-in.
 8. WP-R4 (implementer, only if the gate passes): "classes".
 9. WP-R5 (implementer-xhigh, only if the gate passes): "quotes".
 10. WP-S (implementer, once per winner): `SHIPPED_PROFILES` and `FORMER`, `PROFILES_VERSION`, `REVIEW_PROMPT_VERSION`, CHANGELOG, docs/eval/results.md.

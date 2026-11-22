@@ -941,6 +941,7 @@ describe("grounded metrics (review-quality-2026.md E5)", () => {
         noise: { a: 2, b: 2, delta: 0, limit: 0.2, pass: true },
         judgeFp: { a: 2, b: 2, delta: 0, limit: 0.07, pass: true },
         unlabeled: [0, 0],
+        parts: { judgeTp: 0, judgeFp: 0, dupShown: 0 },
       });
       const text = compareText(a, b, (id) => id, b.profile.revision, [ng, ng]);
       expect(text).toContain(
@@ -1252,5 +1253,68 @@ describe("seeded cases (docs/plans/review-v2/seeded-truth.md WP-SG0)", () => {
     expect(rows["source seeded"]).toMatchObject({ mustFinds: 3, found: 2 });
     expect(Object.keys(rows).filter((n) => n.startsWith("kind "))).toEqual(["kind architecture", "kind lifetime"]);
     expect(summaryText(r, score(r))).toMatch(/kind architecture\s+2\/2/);
+  });
+});
+
+// docs/plans/review-v2/focused-passes.md WP-L2: the pass rows and dupShown of a multi-pass run.
+describe("finder passes (focused-passes.md WP-L2)", () => {
+  // B1 and B2 are counted must-finds. Pass 1 and pass 3 raise B1. Pass 2 alone raises B2, with a hidden item.
+  const c = gcase("p", [gbug("B1", 10), gbug("B2", 30)]);
+  const items = [
+    at("p1-b1", { line: 10, lineEnd: 10, pass: 1 }),
+    at("p2-b2", { line: 30, lineEnd: 30, pass: 2, group: "hidden", verdict: "refuted" }),
+    at("p3-b1", { line: 10, lineEnd: 10, pass: 3 }),
+    at("p3-b1-hidden", { line: 10, lineEnd: 10, pass: 3, group: "hidden", verdict: "duplicate" }),
+    at("p3-noise", { line: 20, lineEnd: 20, pass: 3 }),
+  ];
+  const g = grounding(
+    { "p1-b1": ["bug:B1"], "p2-b2": ["bug:B2"], "p3-b1": ["bug:B1"], "p3-b1-hidden": ["bug:B1"], "p3-noise": [] },
+    { "p3-b1": { label: "tp", severity: "high" }, "p3-noise": { label: "fp", severity: "low" } },
+  );
+  const rows = (s: ReturnType<typeof score>) =>
+    Object.fromEntries(s.slices.filter((x) => /pass \d$/.test(x.name)).map((x) => [x.name, `${x.found}/${x.mustFinds}`]));
+
+  test("pass k counts the must-finds that pass k raised; only pass k those that no other pass raised", () => {
+    const r = gresult([c], [run("p", 1, items)]);
+    const want = {
+      "pass 1": "1/2",
+      "only pass 1": "0/2",
+      "pass 2": "1/2",
+      "only pass 2": "1/2",
+      "pass 3": "1/2",
+      "only pass 3": "0/2",
+    };
+    expect(rows(score(r, g))).toEqual(want);
+    // The line match gives the same rows.
+    expect(rows(score(r))).toEqual(want);
+    expect(summaryText(r, score(r, g))).toMatch(/\npass 1\s+1\/2\s+50\.0%/);
+    expect(summaryText(r, score(r, g))).toMatch(/\nonly pass 1\s+0\/2\s+0\.0%/);
+  });
+
+  test("dupShown counts a shown second copy of a claimed must-find, never a hidden one; a one-pass file prints - for the pass rows", () => {
+    const r = gresult([c], [run("p", 1, items)]);
+    expect(score(r, g).suite.dupShown).toEqual({ mean: 1, min: 1, max: 1 });
+    expect(score(r).suite.dupShown).toBeNull();
+    // A one-pass file: the pass 1 and pass 2 items without pass.
+    const one = gresult(
+      [c],
+      [
+        run(
+          "p",
+          1,
+          items.slice(0, 2).map(({ pass: _, ...i }) => i),
+        ),
+      ],
+    );
+    expect(rows(score(one, g))).toEqual({});
+    const text = compareText(one, r, (id) => id, r.profile.revision, [g, g]);
+    expect(text).toContain("Finder passes (focused-passes.md WP-L2)");
+    expect(text).toMatch(/\npass 1\s+-\s+1\/2\n/);
+    expect(text).toMatch(/\nonly pass 2\s+-\s+1\/2\n/);
+    // The noise block names the parts of the grounded noise delta. B adds p3-b1 (judge tp, a dupShown) and p3-noise (judge fp).
+    expect(text).toContain("- parts of the grounded noise delta per case: judge tp +1.0000, judge fp +1.0000; dupShown +1.0000");
+    expect(text).toMatch(
+      /\ndupShown: shown findings whose gold matches another shown finding claimed first[^\n]*\ncase\s+A\s+B\s+delta\nall cases\s+0\.00\s+1\.00\s+\+1\.00\n/,
+    );
   });
 });
