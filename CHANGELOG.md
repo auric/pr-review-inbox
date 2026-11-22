@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build a Jira task: after Hold or another action in the More menu, the focus now stays on the new main button, for example Continue. Before, it sometimes went back to More.
 - Build a Jira task: a medium plan now builds right after you approve it. It gives one pull request with the plan and the code. Before, a medium plan waited after its approval.
 - Build a Jira task: a large plan now builds. "Plan review" under the large size offers "I approve the plan myself. Colleagues review only the code PRs." The plan then builds as part pull requests, one after another. Each part builds on the branch of the part before it, and its pull request targets that branch. The Task view lists the parts under "Parts: 3, one PR each", with "Drop this part" and "Skip this part". "Colleagues review the plan first, in a spec PR." stays disabled until a later version.
 - Build a Jira task: the comments on the pull request of a task now get "Sort the comments". Claude drafts the replies and groups the threads. Pick Fix, Push back, or Reply only for each group, then "Send N groups to Claude". Claude fixes the code in the session of the part or pushes back with a reason, and drafts "Fixed in <commit>" or the reason as the reply. "Push and post N replies" pushes the branch and posts the accepted replies after one confirm.

@@ -689,7 +689,8 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
                   finalFocus={() => {
                     const el = menuFocus.current;
                     menuFocus.current = null;
-                    if (!el) return true;
+                    // AC-UX10: a state change while the menu closes moved the focus to the new primary. Keep it there.
+                    if (!el) return !primaryRef.current || document.activeElement !== primaryRef.current;
                     // A mouse click shows no :focus-visible, so data-jump marks the target ([data-jump]:focus in index.css).
                     el.setAttribute("data-jump", "");
                     // The lib of TypeScript 5 has no focusVisible.
