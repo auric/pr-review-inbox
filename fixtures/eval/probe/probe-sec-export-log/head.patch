@@ -1,0 +1,58 @@
+diff --git a/src/api/exports.ts b/src/api/exports.ts
+new file mode 100644
+index 0000000..ae9f538
+--- /dev/null
++++ b/src/api/exports.ts
+@@ -0,0 +1,24 @@
++import { log } from "../log/logger";
++
++const EXPORT_SERVICE = process.env.EXPORT_SERVICE_URL ?? "https://exports.internal.test";
++const SERVICE_KEY = process.env.EXPORT_SERVICE_KEY ?? "";
++const FORMATS = new Set(["csv", "json"]);
++
++// POST /api/exports. The client sends the session token of the user as "Authorization: Bearer <token>".
++export async function startExport(req: Request): Promise<Response> {
++  const { format } = (await req.json().catch(() => ({}))) as { format?: unknown };
++  if (typeof format !== "string" || !FORMATS.has(format)) return new Response("format must be csv or json", { status: 400 });
++  const res = await fetch(`${EXPORT_SERVICE}/v1/jobs`, {
++    method: "POST",
++    headers: { "Content-Type": "application/json", "X-Api-Key": SERVICE_KEY },
++    body: JSON.stringify({ format }),
++  });
++  if (!res.ok) {
++    log.error("export: the export service failed", {
++      status: res.status,
++      request: { url: req.url, headers: Object.fromEntries(req.headers) },
++    });
++    return new Response("Export failed", { status: 502 });
++  }
++  return Response.json(await res.json(), { status: 202 });
++}
+diff --git a/tests/api/exports.test.ts b/tests/api/exports.test.ts
+new file mode 100644
+index 0000000..3a90ffa
+--- /dev/null
++++ b/tests/api/exports.test.ts
+@@ -0,0 +1,22 @@
++import { afterEach, expect, test, vi } from "vitest";
++import { startExport } from "../../src/api/exports";
++
++const request = (body: unknown) =>
++  new Request("http://app.test/api/exports", {
++    method: "POST",
++    headers: { Authorization: "Bearer test-token-0000", "Content-Type": "application/json" },
++    body: JSON.stringify(body),
++  });
++
++afterEach(() => vi.unstubAllGlobals());
++
++test("a known format starts a job", async () => {
++  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ job: "j-1" })));
++  const res = await startExport(request({ format: "csv" }));
++  expect(res.status).toBe(202);
++  expect(await res.json()).toEqual({ job: "j-1" });
++});
++
++test("an unknown format gets 400", async () => {
++  expect((await startExport(request({ format: "xml" }))).status).toBe(400);
++});

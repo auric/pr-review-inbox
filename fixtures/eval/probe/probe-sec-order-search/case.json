@@ -1,0 +1,40 @@
+{
+  "id": "probe-sec-order-search",
+  "title": "An order search puts the query status into the SQL text",
+  "language": "python",
+  "pr": {
+    "title": "Add an order search with a status filter, a sort, and a limit",
+    "description": "GET /orders lists the orders of the signed-in customer. The query takes status, sort (newest, oldest, total), and limit (1 to 100)."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "app/db/orders.py",
+      "side": "new",
+      "lines": [29, 30],
+      "alt": [
+        { "path": "app/web/orders.py", "side": "new", "lines": [25, 25] },
+        { "path": "app/web/orders.py", "side": "new", "lines": [28, 28] }
+      ],
+      "severityMin": "major",
+      "module": "security",
+      "note": "status comes from request.args (web/orders.py) and goes into the SQL text in quotes. status=x' OR 1=1 -- returns the orders of every customer, and a UNION SELECT reads other tables. The module doc says that a request value goes in as a ? parameter, as get_order and count_by_status do. Use status = ? and pass (customer_id, status)."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "app/db/orders.py",
+      "side": "new",
+      "lines": [27, 27],
+      "why": "column comes from SORT_COLUMNS, a fixed map. An unknown sort key gives the newest column, so no request text reaches ORDER BY. An SQL injection finding here is wrong."
+    },
+    {
+      "id": "T2",
+      "path": "app/db/orders.py",
+      "side": "new",
+      "lines": [28, 28],
+      "why": "int(limit) is an integer, and the route clamps it to 1 to 100. No request text reaches LIMIT, so an SQL injection finding here is wrong."
+    }
+  ]
+}

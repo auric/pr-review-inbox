@@ -1,0 +1,50 @@
+diff --git a/app/admin/routes.py b/app/admin/routes.py
+index 42ee36c..c50194e 100644
+--- a/app/admin/routes.py
++++ b/app/admin/routes.py
+@@ -1,8 +1,10 @@
+ import logging
++import secrets
+ 
+ from flask import Blueprint, g, jsonify
+ 
+ from app.auth import login_required, require_role
++from app.passwords import hash_password
+ from app.users import store
+ 
+ log = logging.getLogger(__name__)
+@@ -30,3 +32,15 @@ def enable_user(user_id):
+     store.set_disabled(user_id, False)
+     log.info("user %s enabled by %s", user_id, g.user.id)
+     return jsonify(ok=True)
++
++
++# The admin reads the one-time password to the user by phone. The user must change it at the next sign-in.
++@bp.post("/users/<int:user_id>/reset-password")
++@login_required
++def reset_password(user_id):
++    if store.get(user_id) is None:
++        return jsonify(error="no such user"), 404
++    temporary = secrets.token_urlsafe(12)
++    store.set_password(user_id, hash_password(temporary), must_change=True)
++    log.info("password of user %s reset by %s", user_id, g.user.id)
++    return jsonify(temporaryPassword=temporary)
+diff --git a/tests/admin/test_reset_password.py b/tests/admin/test_reset_password.py
+new file mode 100644
+index 0000000..575b031
+--- /dev/null
++++ b/tests/admin/test_reset_password.py
+@@ -0,0 +1,13 @@
++from app.users import store
++
++
++def test_admin_gets_a_one_time_password(admin_client):
++    store._users[7] = store.User(id=7, email="user7@example.invalid")
++    res = admin_client.post("/admin/users/7/reset-password")
++    assert res.status_code == 200
++    assert len(res.json["temporaryPassword"]) >= 16
++    assert store.get(7).must_change_password
++
++
++def test_unknown_user_is_404(admin_client):
++    assert admin_client.post("/admin/users/999/reset-password").status_code == 404

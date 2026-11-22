@@ -1,0 +1,36 @@
+{
+  "id": "probe-sec-admin-reset",
+  "title": "A new admin route skips the admin role check",
+  "language": "python",
+  "pr": {
+    "title": "Let an admin reset the password of a user",
+    "description": "POST /admin/users/<id>/reset-password sets a one-time password and returns it. The admin reads it to the user by phone, and the user must change it at the next sign-in."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "app/admin/routes.py",
+      "side": "new",
+      "lines": [38, 40],
+      "severityMin": "major",
+      "module": "security",
+      "note": "The route has login_required but not require_role(\"admin\"), unlike disable_user and enable_user. The blueprint comment says that every signed-in user can reach it. User IDs count up from 1 (store.py), so any signed-in user can POST /admin/users/1/reset-password, read the one-time password in the response, and take over that account. Add @require_role(\"admin\") and a test with user_client that expects 403."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "app/admin/routes.py",
+      "side": "new",
+      "lines": [43, 43],
+      "why": "secrets.token_urlsafe(12) uses the CSPRNG of the OS and gives 96 random bits. The password is one-time and must change at the next sign-in. A weak random or weak password finding is wrong."
+    },
+    {
+      "id": "T2",
+      "path": "app/admin/routes.py",
+      "side": "new",
+      "lines": [45, 45],
+      "why": "The log line holds two numeric user IDs and no password, as the sibling routes do. A secret or personal data in the log finding is wrong."
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+diff --git a/src/links/preview.ts b/src/links/preview.ts
+new file mode 100644
+index 0000000..423a778
+--- /dev/null
++++ b/src/links/preview.ts
+@@ -0,0 +1,12 @@
++import { readLimited } from "../net/read";
++
++const TITLE = /<title[^>]*>([^<]*)<\/title>/i;
++
++// POST /api/link-preview with the JSON body { url }. The chat client sends each link that a user pastes into a message.
++export async function linkPreview(req: Request): Promise<Response> {
++  const { url } = (await req.json().catch(() => ({}))) as { url?: unknown };
++  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return new Response("Bad URL", { status: 400 });
++  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
++  const html = await readLimited(res, 65_536);
++  return Response.json({ url, title: TITLE.exec(html)?.[1]?.trim() || null });
++}
+diff --git a/src/server/routes.ts b/src/server/routes.ts
+index 38f8482..907bc89 100644
+--- a/src/server/routes.ts
++++ b/src/server/routes.ts
+@@ -1,6 +1,8 @@
+ import { importAvatar } from "../integrations/avatar-import";
++import { linkPreview } from "../links/preview";
+ 
+ // Any signed-in user can call each route. Bodies come from the client as typed.
+ export const routes: Record<string, (req: Request) => Promise<Response>> = {
+   "POST /api/avatar/import": importAvatar,
++  "POST /api/link-preview": linkPreview,
+ };
+diff --git a/src/web/LinkCard.tsx b/src/web/LinkCard.tsx
+new file mode 100644
+index 0000000..7cd1ba4
+--- /dev/null
++++ b/src/web/LinkCard.tsx
+@@ -0,0 +1,10 @@
++export type Preview = { url: string; title: string | null };
++
++// Shows the preview of a pasted link under the chat message.
++export function LinkCard({ preview }: { preview: Preview }) {
++  return (
++    <a className="link-card" href={preview.url} target="_blank" rel="noreferrer">
++      {preview.title ?? preview.url}
++    </a>
++  );
++}

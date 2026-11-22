@@ -1,0 +1,36 @@
+{
+  "id": "probe-sec-export-log",
+  "title": "An error path logs the Authorization header of the user",
+  "language": "typescript",
+  "pr": {
+    "title": "Start data exports through the export service",
+    "description": "POST /api/exports starts an export job in CSV or JSON. A failure of the export service is logged and answers 502."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/api/exports.ts",
+      "side": "new",
+      "lines": [17, 20],
+      "severityMin": "major",
+      "module": "security",
+      "note": "Object.fromEntries(req.headers) logs every request header, with the Authorization header that holds the session token of the user. logger.ts sends each line to the shared log store that support staff read, so a reader of the log can act as the user. profile.ts logs redactHeaders(req.headers). Use redactHeaders here."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/api/exports.ts",
+      "side": "new",
+      "lines": [13, 13],
+      "why": "The API key comes from an environment variable that the operator sets, and it goes only to the export service, never to a log or a response. A secret exposure finding on this line is wrong."
+    },
+    {
+      "id": "T2",
+      "path": "tests/api/exports.test.ts",
+      "side": "new",
+      "lines": [7, 7],
+      "why": "test-token-0000 is a placeholder in test code that a stubbed fetch never checks. A hard-coded secret finding on test code is wrong."
+    }
+  ]
+}

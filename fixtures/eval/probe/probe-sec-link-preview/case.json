@@ -1,0 +1,29 @@
+{
+  "id": "probe-sec-link-preview",
+  "title": "A link preview fetches a user URL without the host allow-list",
+  "language": "typescript",
+  "pr": {
+    "title": "Show a title preview for links in chat messages",
+    "description": "The server fetches each link that a user pastes into a chat message and returns the page title. The chat shows it as a link card."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/links/preview.ts",
+      "side": "new",
+      "lines": [7, 9],
+      "severityMin": "major",
+      "module": "security",
+      "note": "The URL comes from the request body that a user sends. The check accepts any http or https URL, so the server fetches http://169.254.169.254/latest/meta-data/ or an internal host such as http://10.0.0.5/admin and returns its title. importAvatar calls isAllowedUrl() first, which allows only https and the hosts of ALLOWED_FETCH_HOSTS. Call isAllowedUrl() and stop redirects, as importAvatar does."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/web/LinkCard.tsx",
+      "side": "new",
+      "lines": [7, 7],
+      "why": "React escapes the title as text output, and the server accepts only http and https URLs for href. A cross-site scripting finding here is wrong."
+    }
+  ]
+}

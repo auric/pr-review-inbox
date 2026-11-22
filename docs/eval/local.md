@@ -73,7 +73,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 
 ## Probe set
 
-`fixtures/eval/probe/` holds 21 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
+`fixtures/eval/probe/` holds 26 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
 
 - 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
 - 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
@@ -91,6 +91,24 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
   - `probe-polish-todo`: an added TODO names no ticket. A trap is the added TODO that names SHOP-51.
   - `probe-polish-stale-comment`: the change makes the last entry win. The unchanged comment above it still says that the first entry wins.
 - 3 cases (`probe-obl-met-*`) are clean: the change meets the obligation. Each trap is on the line where a careless check reports it: `probe-obl-met-guide` (the guide shows the new call), `probe-obl-met-guard` (the change adds the guard entry), and `probe-obl-met-followup` (the PR text names the follow-up ticket SHOP-42).
+- 5 cases (`probe-sec-*`, review-quality-2026.md item 10) have one security bug of module `security` and severity major. The repository shows where the untrusted input comes from and the safe pattern of the siblings. The traps look like security holes but are safe. Some match the exclusions of the security2 verify rules (operator config, test code, framework escaping). Others are a checked path, a fixed allow-list, or a CSPRNG:
+  - `probe-sec-report-path` (TypeScript): a download joins the query name into a file path without `resolveInside()`.
+  - `probe-sec-admin-reset` (Python): a new admin route has `login_required` but not `require_role("admin")`.
+  - `probe-sec-export-log` (TypeScript): an error path logs all request headers, with the Authorization token, where a sibling uses `redactHeaders()`.
+  - `probe-sec-order-search` (Python): the query status goes into the SQL text, where the siblings use `?` parameters.
+  - `probe-sec-link-preview` (TypeScript): a link preview fetches a user URL without `isAllowedUrl()` (SSRF).
+
+The security cases measure the variants security2 and security2-verify, because the seeded set has no security seed yet. Run the variants and a control run without them on the same cases, label both, and compare:
+
+```
+bun run eval -- --real --set probe --cases probe-sec-admin-reset,probe-sec-export-log,probe-sec-link-preview,probe-sec-order-search,probe-sec-report-path --repeat 2 --out eval-results/security2/probe-base
+bun run eval -- --real --set probe --cases probe-sec-admin-reset,probe-sec-export-log,probe-sec-link-preview,probe-sec-order-search,probe-sec-report-path --repeat 2 --variants security2 --out eval-results/security2/probe-security2
+bun run eval:label -- eval-results/security2/probe-base --real
+bun run eval:label -- eval-results/security2/probe-security2 --real
+bun run eval:compare -- <probe-base result.json> <probe-security2 result.json>
+```
+
+`--variants security2` also applies the verify rules. For the verify half alone, run the second command with `--variants security2-verify`. Compare the "Shown security findings" row and the "class security" slice row.
 
 A fixture case can have `threads` and `clean`, as a local case can. The run seeds the threads into the comment table, so `pr-context.md` lists them. A fixture case has no `text` on its items: `note` and `why` describe them.
 

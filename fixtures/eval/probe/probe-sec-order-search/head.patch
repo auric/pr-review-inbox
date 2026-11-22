@@ -1,0 +1,37 @@
+diff --git a/app/db/orders.py b/app/db/orders.py
+index 8790bfa..288c938 100644
+--- a/app/db/orders.py
++++ b/app/db/orders.py
+@@ -16,3 +16,15 @@ def count_by_status(conn: sqlite3.Connection, customer_id: int, status: str) ->
+         (customer_id, status),
+     ).fetchone()
+     return row[0]
++
++
++# The sort keys of the API. Only these column names reach the SQL text.
++SORT_COLUMNS = {"newest": "created_at DESC", "oldest": "created_at ASC", "total": "total_cents DESC"}
++
++
++def search_orders(conn: sqlite3.Connection, customer_id: int, status: str, sort: str, limit: int):
++    column = SORT_COLUMNS.get(sort, SORT_COLUMNS["newest"])
++    order = f" ORDER BY {column}"
++    page = f" LIMIT {int(limit)}"
++    sql = f"SELECT id, status, total_cents FROM orders WHERE customer_id = ? AND status = '{status}'"
++    return conn.execute(sql + order + page, (customer_id,)).fetchall()
+diff --git a/app/web/orders.py b/app/web/orders.py
+index bc46bab..0cf55aa 100644
+--- a/app/web/orders.py
++++ b/app/web/orders.py
+@@ -18,3 +18,12 @@ def show(order_id):
+ def count():
+     status = request.args.get("status", "open")
+     return jsonify(count=orders.count_by_status(g.db, g.user.id, status))
++
++
++@bp.get("/orders")
++def search():
++    status = request.args.get("status", "open")
++    sort = request.args.get("sort", "newest")
++    limit = max(1, min(request.args.get("limit", 20, type=int), 100))
++    rows = orders.search_orders(g.db, g.user.id, status, sort, limit)
++    return jsonify(orders=[dict(r) for r in rows])

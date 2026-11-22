@@ -1,0 +1,36 @@
+{
+  "id": "probe-sec-report-path",
+  "title": "A report download joins the query name into a file path",
+  "language": "typescript",
+  "pr": {
+    "title": "Add downloads for monthly reports and yearly report archives",
+    "description": "Two new routes let a signed-in user download one monthly report by its file name, or the archive of one year. REPORT_ROOT sets the report folder."
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/files/reports.ts",
+      "side": "new",
+      "lines": [19, 21],
+      "severityMin": "major",
+      "module": "security",
+      "note": "The name comes from the query string of the client (routes.ts, avatars.ts). join() keeps '..', so name=../../../etc/passwd or ../../app/.env reads any file that the server process can read. avatars.ts and downloadArchive use resolveInside(), which refuses a path outside the root. Use resolveInside(REPORT_ROOT, `monthly/${name}`)."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/config.ts",
+      "side": "new",
+      "lines": [3, 3],
+      "why": "REPORT_ROOT comes from an environment variable that the operator sets at deploy time, as the comment says. Operator config is trusted, so a path traversal or injection finding on it is wrong."
+    },
+    {
+      "id": "T2",
+      "path": "src/files/reports.ts",
+      "side": "new",
+      "lines": [28, 28],
+      "why": "The year goes through resolveInside(), which returns null for a path outside REPORT_ROOT, so send() answers 404. A path traversal finding here is wrong."
+    }
+  ]
+}
