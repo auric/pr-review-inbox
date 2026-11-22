@@ -50,7 +50,7 @@ const NEXT: Record<SeedState, Partial<Record<SeedEvent, SeedState | "was">>> = {
   applied: { "val+": "confirmed", "val-": "refuted", "val!": "applied", "host-": "stale" },
   confirmed: { draw: "sampled", keep: "kept", drop: "dropped", release: "kept", escalate: "sampled", "host-": "stale" },
   sampled: { keep: "kept", drop: "dropped", "host-": "stale" },
-  kept: { drop: "dropped", retire: "retired", "host-": "stale" },
+  kept: { keep: "kept", drop: "dropped", retire: "retired", "host-": "stale" },
   stale: { drop: "dropped", retire: "retired", "host+": "was" },
   invalid: {},
   refuted: { recheck: "confirmed" },
@@ -75,8 +75,8 @@ export const seedFields = z.object({
   severity: z.enum(SEED_SEVERITIES),
   route: z.string(),
 });
-// The validator answer (section 5.4).
-export const seedValidation = z.object({
+// The validator answer (section 5.4). A new answer must have kindOk.
+export const seedAnswer = z.object({
   verdict: z.enum(["breaks", "holds", "unsure"]),
   severity: z.enum(SEED_SEVERITIES),
   trigger: z.string(),
@@ -85,10 +85,14 @@ export const seedValidation = z.object({
     .describe("The path through the code, one step per entry. Each step names path:line, with the path from the root of ./repo."),
   originalOk: z.boolean(),
   plausible: z.boolean(),
+  kindOk: z.boolean(),
   why: z.string(),
 });
+// A stored answer. Answers from before kindOk existed have no kindOk.
+export const seedValidation = seedAnswer.extend({ kindOk: z.boolean().optional() });
 // host: the binding of the seed. id: the case ID of the host in the natural set. blob: the blob of path at head.
 // reason: why the checks, the validator, or the user rejected or removed the seed.
+// label: the kind that the user gave at keep (decide --kind). The build uses it in place of kind. The checks and the sample use kind.
 export const seedRecord = seedFields
   .extend({
     id: z.string().regex(/^sd[0-9a-f]{10}$/),
@@ -97,6 +101,7 @@ export const seedRecord = seedFields
     host: z.object({ id: z.string().min(1), base: commit, head: commit, blob: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/) }),
     reason: z.string().optional(),
     validation: seedValidation.optional(),
+    label: z.enum(SEED_KINDS).optional(),
   })
   .refine((s) => (s.state === "stale") === (s.was !== undefined), { message: "Only a stale seed has was.", path: ["was"] });
 export const seedStore = z
@@ -110,6 +115,11 @@ export type SeedStore = z.infer<typeof seedStore>;
 // The ID of a proposal at a host. The same edit at the same host gets the same ID.
 export const seedId = (host: string, s: Pick<SeedFields, "path" | "find" | "replace">) =>
   `sd${createHash("sha256").update(`${host}\0${s.path}\0${s.find}\0${s.replace}`).digest("hex").slice(0, 10)}`;
+// Twin hosts: two host cases with one base and one head hold one commit series. Caps, the sample, validate, and the build count them as
+// one host.
+export const twinKey = (s: { host: Pick<SeedRecord["host"], "base" | "head"> }) => `${s.host.base}..${s.host.head}`;
+// The kind that the build uses.
+export const kindOf = (s: Pick<SeedRecord, "kind" | "label">) => s.label ?? s.kind;
 
 // One event on one seed. A refused event returns the reason and changes nothing (section 8).
 export function fire(s: SeedRecord, event: SeedEvent): SeedRecord | { refused: string } {

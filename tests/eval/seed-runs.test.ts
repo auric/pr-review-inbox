@@ -16,6 +16,7 @@ import {
   KIND_ORDER,
   KINDS_MD,
   keepRefusal,
+  kindMd,
   NO_BLOB,
   proofMissing,
   proposeHost,
@@ -35,7 +36,7 @@ import type { SeedRecord, SeedValidation } from "../../scripts/eval/seed-store";
 import { createClaudeRunner } from "../../src/server/review/claude";
 import { UNTRUSTED } from "../../src/server/review/workspace";
 import { readRecords } from "../support/fake-claude";
-import { ARCH, gitIn, makeNaturalSet, type NaturalSet, PATHS, PR_TITLE } from "../support/seed-fixture";
+import { ARCH, gitIn, makeNaturalSet, type NaturalSet, PATHS, PR_TITLE, seedFields } from "../support/seed-fixture";
 
 console.log(`seed-runs.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed-runs", import.meta.dir)}`);
 
@@ -94,10 +95,20 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
       "Edit only files with these extensions: .ts, .tsx, .js, .jsx, .mjs, .cjs, .c, .cc, .cpp, .cxx, .h, .hpp, .cs, .py.",
     );
     expect(SEEDER_PROMPT).toContain("The anchor line is a line that the change or the edit adds, or a line within 3 lines of one.");
-    expect(SEEDER_PROMPT.split("\n")).toHaveLength(25);
+    expect(SEEDER_PROMPT).toContain("Leave no name unused or dangling.");
+    expect(SEEDER_PROMPT).toContain(
+      "Do not revert or break code that the PR description, its checklist, a design doc of the repository, a nearby comment, or a commit message names or describes.",
+    );
+    expect(SEEDER_PROMPT).toContain("Pick the kind by the nature of the defect, not by the place of the edit.");
+    expect(SEEDER_PROMPT).toContain("The PR description can list the defects that its tests catch. Do not plant one of them.");
+    expect(SEEDER_PROMPT).toContain("Read the subject of the commit that added each line that you edit, with git_blame and git_show.");
+    expect(SEEDER_PROMPT).toContain("Do not change a literal value that nearby code, a comment, or a doc restates.");
+    expect(SEEDER_PROMPT).not.toContain("Leave no unused import or name behind.");
+    expect(SEEDER_PROMPT.split("\n")).toHaveLength(30);
     expect(VALIDATOR_PROMPT).toContain("When the old lines call code that the new lines leave out, read that code to its end.");
     expect(VALIDATOR_PROMPT).toContain("with the path from the root of ./repo");
-    expect(VALIDATOR_PROMPT.split("\n")).toHaveLength(10);
+    expect(VALIDATOR_PROMPT).toContain("Set kindOk to false when the failure does not fit the claimed kind by that kind order.");
+    expect(VALIDATOR_PROMPT.split("\n")).toHaveLength(12);
     expect(SEEDER).toEqual({ model: "opus", effort: "high" });
     expect(VALIDATOR).toEqual({ model: "opus", effort: "medium" });
     const seedProps = (SEEDER_SCHEMA as { properties: { seeds: { items: { properties: Record<string, unknown> } } } }).properties.seeds
@@ -106,7 +117,10 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
       ["alt", "anchor", "comment", "find", "kind", "path", "replace", "route", "severity", "trigger", "why"].sort(),
     );
     const valProps = (VALIDATOR_SCHEMA as { properties: Record<string, { description?: string }> }).properties;
-    expect(Object.keys(valProps).sort()).toEqual(["originalOk", "plausible", "proof", "severity", "trigger", "verdict", "why"].sort());
+    expect(Object.keys(valProps).sort()).toEqual(
+      ["kindOk", "originalOk", "plausible", "proof", "severity", "trigger", "verdict", "why"].sort(),
+    );
+    expect((VALIDATOR_SCHEMA as { required: string[] }).required).toContain("kindOk");
     expect(valProps.proof?.description).toContain("path:line, with the path from the root of ./repo");
   });
 
@@ -118,6 +132,13 @@ describe("prompts, schemas, and kinds.md (sections 5.1 and 5.4)", () => {
     expect(KINDS_MD).toContain("For every other kind, route is empty.");
     expect(KINDS_MD).toContain("Edit only files with these extensions: .ts, .tsx,");
     expect(KINDS_MD).toContain("Each text occurs once in its file.");
+    // kind.md of the validator: the claim, the table, and the kind order, without the seeder rules.
+    const kind = kindMd("local");
+    expect(kind).toContain("The edit claims the kind local.");
+    for (const k of SEED_KINDS) expect(kind).toContain(`\n| ${k} | `);
+    expect(kind).toContain("5. local: the function alone.");
+    expect(kind).not.toContain("Edit only files");
+    expect(kind).not.toContain("route is empty");
   });
 
   test("avoid.md widens each new-side natural place by 6 lines, and edit.md holds no seeder reasoning", () => {
@@ -143,6 +164,8 @@ describe("validator keep conditions (section 5.4)", () => {
     why: "w",
   };
   test("all conditions hold: keep", () => expect(keepRefusal(ok, [])).toBeNull());
+  test("kindOk true: keep", () => expect(keepRefusal({ ...ok, kindOk: true }, [])).toBeNull());
+  test("kindOk false: refute", () => expect(keepRefusal({ ...ok, kindOk: false }, [])).toContain("does not fit the claimed kind"));
   test("verdict holds: refute", () => expect(keepRefusal({ ...ok, verdict: "holds" }, [])).toContain("verdict holds"));
   test("verdict unsure: refute", () => expect(keepRefusal({ ...ok, verdict: "unsure" }, [])).toContain("verdict unsure"));
   test("severity medium: refute", () => expect(keepRefusal({ ...ok, severity: "medium" }, [])).toContain("severity medium"));
@@ -273,7 +296,9 @@ describe("seeder and validator runs with the fake CLI", () => {
       const edit = run.context["edit.md"] ?? "";
       for (const t of [arch.path, "  saveRecord(store, k, value);", "  store.set(k, v);", arch.trigger]) expect(edit).toContain(t);
       for (const t of [arch.why, arch.comment, "architecture", "Willow"]) expect(edit).not.toContain(t);
-      expect(Object.keys(run.context).sort()).toEqual(["edit.md", "pr.md"]);
+      expect(Object.keys(run.context).sort()).toEqual(["edit.md", "kind.md", "pr.md"]);
+      expect(run.context["kind.md"]).toBe(kindMd("architecture"));
+      expect(next.validation?.kindOk).toBe(true);
       // The worktree holds this seed and no other seed of the host.
       const files = run.files ?? {};
       expect(files[`repo/${PATHS.feature}`]).toContain("  store.set(k, v);");
@@ -291,6 +316,48 @@ describe("seeder and validator runs with the fake CLI", () => {
       expect(next.state).toBe("refuted");
       expect(next.reason).toBe(`The proof names lines that the seeded head does not have: ${PATHS.feature}:999.`);
       expect(next.validation?.verdict).toBe("breaks");
+    },
+    SLOW,
+  );
+
+  test(
+    "check 11, or a failed check 1 to 10, refutes an applied seed before any run, with its reason",
+    async () => {
+      const f = fake("seed-validate");
+      const flagged = seedFields({
+        kind: "contract",
+        path: PATHS.feature,
+        find: "  saveRecord(store, k, value);",
+        replace: "  saveRecord(store, key, value);",
+        anchor: { path: PATHS.feature, text: "saveRecord(store, key, value);" },
+      });
+      const s: SeedRecord = {
+        ...flagged,
+        id: "sd00000000b1",
+        state: "applied",
+        host: (await bindingOf(host, PATHS.feature)) as SeedRecord["host"],
+      };
+      const next = await validateSeed(host, s, f.ctx);
+      expect(next.state).toBe("refuted");
+      expect(next.reason).toBe("check 11: The edit leaves these names unused or dangling: k.");
+      expect(next.validation).toBeUndefined();
+      expect(f.runs()).toEqual([]);
+      expect(f.ctx.cost.validator.runs).toBe(0);
+      // A seed that fails a check that is newer than the seed (here check 4 on a docstring line) also gets val- and no run.
+      const doc = await validateSeed(
+        host,
+        {
+          ...s,
+          id: "sd00000000b2",
+          find: "  saveRecord(store, k, value);",
+          replace: "  saveRecord(store, k, value); /*\n  the value stays as given */",
+          anchor: { path: PATHS.feature, text: "saveRecord(store, k, value); /*" },
+        },
+        f.ctx,
+      );
+      expect(doc.state).toBe("refuted");
+      expect(doc.reason).toBe("check 4: The seed adds a line inside a comment or a docstring.");
+      expect(f.runs()).toEqual([]);
     },
     SLOW,
   );
@@ -361,6 +428,22 @@ describe("recheck (section 8)", () => {
         const s = await refuted(v);
         expect(await recheckSeed(host, s)).toBe(s);
       }
+    },
+    SLOW,
+  );
+
+  test(
+    "a stored answer that passes the keep conditions, on a seed that check 11 flags: the seed stays refuted",
+    async () => {
+      const s = {
+        ...(await refuted(answer)),
+        kind: "contract" as const,
+        route: "",
+        find: "  saveRecord(store, k, value);",
+        replace: "  saveRecord(store, key, value);",
+        anchor: { path: PATHS.feature, text: "saveRecord(store, key, value);" },
+      };
+      expect(await recheckSeed(host, s)).toBe(s);
     },
     SLOW,
   );

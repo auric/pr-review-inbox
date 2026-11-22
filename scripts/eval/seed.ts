@@ -4,7 +4,7 @@
 // The seed CLI (docs/plans/review-v2/seeded-truth.md sections 4.2, 5, 8, and 9 WP-SG2; architecture-bugs.md section 3.6). It proposes,
 // validates, samples, and decides seeds in <seeds>/seeds.json, and builds the frozen seeded set. The natural set is the folder of
 // REVIEW_LOOP_EVAL_LOCAL (default eval-local/), and the seeds root the folder of REVIEW_LOOP_EVAL_SEEDS (default eval-seeds/).
-// The seeds hold private code: only list and show print paths or code, and only to this terminal.
+// The seeds hold private code: only list, show, and report print paths or code, and only to this terminal.
 // Exit codes: 0 done, 1 a CLI run or a step failed, 2 a usage error, a refusal, or the plan of a paid command.
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,23 +16,50 @@ import { localDir, SEED_KINDS, seedsDir } from "./cases";
 import { readResult } from "./compare";
 import { seededSet } from "./local";
 import { BOOTSTRAP } from "./score";
-import { bindingHolds, buildSeededSet, buildText, HOST_CAP, type Host, hasCodeChange, hostsOf, rangeOf, type SeedKind } from "./seed-build";
+import {
+  bindingHolds,
+  buildSeededSet,
+  buildText,
+  checkSeed,
+  giveaways,
+  HOST_CAP,
+  type Host,
+  hasCodeChange,
+  hostsOf,
+  rangeOf,
+  rewriteHistory,
+  type SeedKind,
+  unusedNames,
+} from "./seed-build";
 import { KIND_ORDER, proposeHost, recheckSeed, SEEDER, type SeedCtx, seedCtx, step, VALIDATOR, validateSeed } from "./seed-runs";
-import { fire, loadStore, rootRefusal, SEED_STATES, type SeedRecord, type SeedState, type SeedStore, saveStore } from "./seed-store";
+import {
+  fire,
+  kindOf,
+  loadStore,
+  rootRefusal,
+  SEED_STATES,
+  type SeedRecord,
+  type SeedState,
+  type SeedStore,
+  saveStore,
+  twinKey,
+} from "./seed-store";
 
 export const USAGE = [
   "Usage: bun run eval:seed -- <command>",
   "  propose [--cases <id,...>] [--kinds <kind,...>] (--real | --runner <command> <args...>)",
   "  validate (--real | --runner <command> <args...>)",
   "  recheck",
+  "  report",
   "  sample [--escalate <kind,...> | --escalate all]",
   "  list [--state <state>]",
   "  show <seed>",
-  "  decide <seed> keep|drop [--why <text>]",
+  "  decide <seed> keep|drop [--why <text>] [--kind <kind>]",
   "  retire <seed> --why <text>",
   "  build",
   "  leaks <result.json>",
   "recheck runs no claude: it applies the keep conditions again to the stored validator answers of refuted seeds.",
+  "report runs no claude and changes no state: it lists by ID the bound seeds that fail a check, leave a name unused (check 11), or show a removed token in the PR description or the fold commit subject (check 12), and the twin hosts.",
   "propose and validate are paid. Without --real or --runner, they print the plan and an estimate, and exit with code 2. --runner runs the given CLI instead of claude and must come last.",
 ].join("\n");
 
@@ -60,7 +87,7 @@ const usd = (x: number) => `$${x.toFixed(2)}`;
 // ---------- Args ----------
 
 type Args = { cmd: string; pos: string[]; flags: Map<string, string | true>; runner: string[] | null };
-const VALUE_FLAGS = new Set(["--cases", "--kinds", "--state", "--why", "--escalate"]);
+const VALUE_FLAGS = new Set(["--cases", "--kinds", "--state", "--why", "--escalate", "--kind"]);
 
 export function parseSeed(argv: string[]): Args | null {
   const at = argv.indexOf("--runner");
@@ -84,10 +111,11 @@ export function parseSeed(argv: string[]): Args | null {
     propose: { flags: ["--cases", "--kinds", "--real"], pos: [0] },
     validate: { flags: ["--real"], pos: [0] },
     recheck: { flags: [], pos: [0] },
+    report: { flags: [], pos: [0] },
     sample: { flags: ["--escalate"], pos: [0] },
     list: { flags: ["--state"], pos: [0] },
     show: { flags: [], pos: [1] },
-    decide: { flags: ["--why"], pos: [2] },
+    decide: { flags: ["--why", "--kind"], pos: [2] },
     retire: { flags: ["--why"], pos: [1] },
     build: { flags: [], pos: [0] },
     leaks: { flags: [], pos: [1] },
@@ -105,7 +133,7 @@ const listFlag = (a: Args, name: string) =>
 // ---------- Hosts (section 4.2) ----------
 
 // User decision 1: one host per PR group, the case whose head commit has the newest committer date. A tie goes to the lower case ID.
-// merge: the hosts whose range has a merge commit. They take no seed (section 5.3).
+// merge: the hosts whose range has a merge commit. They take no seed (section 5.3). Twin hosts count once (section 4.2).
 export async function selectHosts(local: string, open: (id: string) => Promise<Host | null>) {
   const best = new Map<string, { h: Host; at: number }>();
   for (const id of readdirSync(join(local, "cases")).sort()) {
@@ -118,9 +146,14 @@ export async function selectHosts(local: string, open: (id: string) => Promise<H
   }
   const hosts: Host[] = [];
   const merge: Host[] = [];
-  for (const { h } of [...best.values()].sort((a, b) => (a.h.id < b.h.id ? -1 : 1)))
-    ((await rangeOf(h.repo, h.base, h.head)).merge ? merge : hosts).push(h);
-  return { hosts, merge };
+  // twins: a host with the base and head of a host with a lower case ID. Its PR is the same commit series, so it takes no seed.
+  const twins: { host: Host; of: Host }[] = [];
+  for (const { h } of [...best.values()].sort((a, b) => (a.h.id < b.h.id ? -1 : 1))) {
+    const of = [...hosts, ...merge].find((x) => x.base === h.base && x.head === h.head);
+    if (of) twins.push({ host: h, of });
+    else ((await rangeOf(h.repo, h.base, h.head)).merge ? merge : hosts).push(h);
+  }
+  return { hosts, merge, twins };
 }
 
 // ---------- Sample (section 5.5) ----------
@@ -135,25 +168,30 @@ const mulberry32 = (seed: number) => () => {
 };
 
 // One confirmed seed per kind, then one more from each of the five kinds with the most confirmed seeds. Ties go by the kind order. The
-// draw reads only the confirmed seeds, each kind in ID order, so it is the same on every call.
+// draw reads only the confirmed seeds, each kind in ID order, so it is the same on every call. It keeps the build caps (pickSeeds): with
+// the kept and sampled seeds, at most HOST_CAP seeds per host and one per file. Twin hosts count as one host. The first draws go to the
+// smallest kinds first, so a kind with few seeds keeps its chance on a full host.
 export function drawSample(seeds: readonly SeedRecord[]): string[] {
   const rand = mulberry32(BOOTSTRAP.seed);
-  const pool = new Map(
-    KIND_ORDER.map((k) => [
-      k,
-      seeds
-        .filter((s) => s.state === "confirmed" && s.kind === k)
-        .map((s) => s.id)
-        .sort(),
-    ]),
-  );
+  const confirmed = seeds.filter((s) => s.state === "confirmed").sort((a, b) => (a.id < b.id ? -1 : 1));
+  const pool = new Map(KIND_ORDER.map((k) => [k, confirmed.filter((s) => s.kind === k)]));
   const size = new Map([...pool].map(([k, p]) => [k, p.length]));
-  const take = (k: SeedKind) => {
-    const p = pool.get(k) as string[];
-    return p.length ? p.splice(Math.floor(rand() * p.length), 1) : [];
+  const taken = seeds.filter((s) => s.state === "kept" || s.state === "sampled");
+  const fits = (s: SeedRecord) => {
+    const mine = taken.filter((x) => twinKey(x) === twinKey(s));
+    return mine.length < HOST_CAP && !mine.some((x) => x.path === s.path);
   };
-  const first = KIND_ORDER.flatMap(take);
+  const take = (k: SeedKind) => {
+    const p = pool.get(k) as SeedRecord[];
+    const open = p.filter(fits);
+    if (!open.length) return [];
+    const s = open[Math.floor(rand() * open.length)] as SeedRecord;
+    p.splice(p.indexOf(s), 1);
+    taken.push(s);
+    return [s.id];
+  };
   // sort is stable, so equal sizes keep the kind order.
+  const first = [...KIND_ORDER].sort((a, b) => (size.get(a) ?? 0) - (size.get(b) ?? 0)).flatMap(take);
   const largest = [...KIND_ORDER].sort((a, b) => (size.get(b) ?? 0) - (size.get(a) ?? 0)).slice(0, SECOND_DRAWS);
   return [...first, ...largest.flatMap(take)];
 }
@@ -262,19 +300,23 @@ async function propose(a: Args, seeds: string, local: string): Promise<number> {
   const tmp = mkdtempSync(join(tmpdir(), "rl-eval-seed-"));
   try {
     const open = hostsOf(local, tmp);
-    const { hosts, merge } = await selectHosts(local, open);
+    const { hosts, merge, twins } = await selectHosts(local, open);
     const cases = listFlag(a, "--cases");
     const missing = cases?.find((id) => !hosts.some((h) => h.id === id));
     if (missing !== undefined) {
-      console.error(`Refused: case ${missing} is no host. A host is the newest case of its PR group, with no merge commit in its range.`);
+      console.error(
+        `Refused: case ${missing} is no host. A host is the newest case of its PR group, with no merge commit in its range and no twin with a lower case ID.`,
+      );
       return 2;
     }
-    // A plain propose skips the hosts that have seeds, so a second call continues a cut one. --cases runs the given hosts again.
-    const asked = cases ? hosts.filter((h) => cases.includes(h.id)) : hosts.filter((h) => !store.seeds.some((s) => s.host.id === h.id));
+    // A plain propose skips the hosts that have seeds, also on a twin, so a second call continues a cut one. --cases runs the given hosts
+    // again.
+    const seeded = new Set(store.seeds.map(twinKey));
+    const asked = cases ? hosts.filter((h) => cases.includes(h.id)) : hosts.filter((h) => !seeded.has(twinKey({ host: h })));
     const todo: Host[] = [];
     for (const h of asked) if (await hasCodeChange(h)) todo.push(h);
     const plan = [
-      `eval:seed propose: ${hosts.length} hosts, one per PR group. ${merge.length} more hosts have a merge commit in their range and take no seed.`,
+      `eval:seed propose: ${hosts.length} hosts, one per PR group. ${merge.length} more hosts have a merge commit in their range and take no seed. ${twins.length} more hosts are twins: they have the base and head of a host, and take no seed.`,
       `${asked.length - todo.length} hosts add no line to a file of a known code type and take no seeder run.`,
       `Seeder runs: ${todo.length} (model ${SEEDER.model}, effort ${SEEDER.effort})${kinds ? `, kinds ${kinds.join(", ")} only` : ""}. ${hosts.length - asked.length} hosts are skipped.`,
     ];
@@ -372,15 +414,63 @@ async function recheck(seeds: string, local: string): Promise<number> {
   }
 }
 
+// The free report (sections 4.2 and 5.2): no run, and no state change. One line per finding on a bound seed whose binding holds: a failed
+// check with its number, check 11 with the names, and check 12 with the sources only. Then the twin hosts. The output holds names and
+// case IDs, so it goes only to this terminal.
+async function report(seeds: string, local: string): Promise<number> {
+  const store = loadStore(seeds);
+  const tmp = mkdtempSync(join(tmpdir(), "rl-eval-seed-"));
+  try {
+    const open = hostsOf(local, tmp);
+    const tally = { checked: 0, failed: 0, names: 0, giveaways: 0, changed: 0 };
+    for (const s of store.seeds) {
+      if (!BOUND.has(s.state)) continue;
+      const h = await open(s.host.id);
+      if (!h || !(await bindingHolds(h, s))) {
+        tally.changed++;
+        continue;
+      }
+      tally.checked++;
+      const row = `${s.id}  ${s.state.padEnd(9)}  ${kindOf(s).padEnd(12)}`;
+      const c = await checkSeed(h, s);
+      if ("check" in c) {
+        tally.failed++;
+        console.log(`${row}  fails check ${c.check}`);
+        continue;
+      }
+      const flagged = await unusedNames(h, s, c);
+      if (flagged.length) {
+        tally.names++;
+        console.log(`${row}  check 11: ${flagged.join(", ")}`);
+      }
+      const rewrite = await rewriteHistory(h.repo, h.base, h.head, [{ ...s, ...c }]);
+      const where = rewrite ? await giveaways(h, s, rewrite.folds[0] as string) : [];
+      if (where.length) {
+        tally.giveaways++;
+        console.log(`${row}  check 12: ${where.join(", ")}`);
+      }
+    }
+    const { twins } = await selectHosts(local, open);
+    for (const t of twins) console.log(`Twin hosts: ${t.of.id} and ${t.host.id}. They count as one host.`);
+    console.log(
+      `Report: ${tally.checked} bound seeds checked. ${tally.failed} fail a check, ${tally.names} leave a name unused or dangling (check 11), and ${tally.giveaways} show a removed token in the PR description or the fold commit subject (check 12). ${tally.changed} have a changed host. Twin hosts: ${twins.length}.`,
+    );
+    return 0;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
 async function validate(a: Args, seeds: string, local: string): Promise<number> {
   const store = loadStore(seeds);
   const applied = store.seeds.filter((s) => s.state === "applied");
-  const byHost = Map.groupBy(applied, (s) => s.host.id);
-  const passed = (id: string) => store.seeds.filter((s) => s.host.id === id && PASSED.has(s.state)).length;
+  // Twin hosts count as one host.
+  const byHost = Map.groupBy(applied, twinKey);
+  const passed = (key: string) => store.seeds.filter((s) => twinKey(s) === key && PASSED.has(s.state)).length;
   let low = 0;
   let high = 0;
-  for (const [id, list] of byHost) {
-    const room = Math.max(0, CONFIRM_TARGET - passed(id));
+  for (const [key, list] of byHost) {
+    const room = Math.max(0, CONFIRM_TARGET - passed(key));
     low += Math.min(list.length, room);
     high += room ? list.length : 0;
   }
@@ -405,19 +495,20 @@ async function validate(a: Args, seeds: string, local: string): Promise<number> 
     if (!ctx) return 1;
     const open = hostsOf(local, tmp);
     const stale = await staleCheck(store, seeds, open);
-    const tally = { confirmed: 0, refuted: 0, failed: 0 };
-    const hosts = [...new Set(store.seeds.filter((s) => s.state === "applied").map((s) => s.host.id))];
-    for (const [n, id] of hosts.entries()) {
-      const h = (await open(id)) as Host;
+    const tally = { confirmed: 0, refuted: 0, checks: 0, failed: 0 };
+    const hosts = [...new Set(store.seeds.filter((s) => s.state === "applied").map(twinKey))];
+    for (const [n, key] of hosts.entries()) {
       for (const [i, s] of store.seeds.entries()) {
-        if (s.host.id !== id || s.state !== "applied") continue;
-        if (passed(id) >= CONFIRM_TARGET) break;
+        if (twinKey(s) !== key || s.state !== "applied") continue;
+        if (passed(key) >= CONFIRM_TARGET) break;
         console.log(`Host ${n + 1}/${hosts.length}, seed ${s.id}`);
+        const id = s.host.id;
         try {
-          const next = await validateSeed(h, s, ctx);
+          const next = await validateSeed((await open(id)) as Host, s, ctx);
           store.seeds[i] = next;
           saveStore(seeds, store);
           if (next.state === "confirmed") tally.confirmed++;
+          else if (next.state === "refuted" && !next.validation) tally.checks++;
           else if (next.state === "refuted") tally.refuted++;
           else tally.failed++;
         } catch (e) {
@@ -426,7 +517,7 @@ async function validate(a: Args, seeds: string, local: string): Promise<number> 
       }
     }
     console.log(
-      `Validated: ${tally.confirmed} confirmed, ${tally.refuted} refuted, ${tally.failed} failed runs (still applied). ${stale} seeds went stale.`,
+      `Validated: ${tally.confirmed} confirmed, ${tally.refuted} refuted, ${tally.checks} refuted by a check without a run, ${tally.failed} failed runs (still applied). ${stale} seeds went stale.`,
     );
     console.log(costLine(ctx));
     for (const e of ctx.errors) console.log(e);
@@ -488,7 +579,7 @@ function list(a: Args, seeds: string): number {
   }
   const all = loadStore(seeds).seeds;
   const rows = all.filter((s) => want === undefined || s.state === want);
-  for (const s of rows) console.log(`${s.id}  ${s.state.padEnd(9)}  ${s.kind.padEnd(12)}  ${s.host.id}  ${s.path}`);
+  for (const s of rows) console.log(`${s.id}  ${s.state.padEnd(9)}  ${kindOf(s).padEnd(12)}  ${s.host.id}  ${s.path}`);
   console.log(`${rows.length} seeds. By state: ${SEED_STATES.map((x) => `${x} ${all.filter((s) => s.state === x).length}`).join(", ")}.`);
   return 0;
 }
@@ -509,7 +600,7 @@ function show(a: Args, seeds: string): number {
   const v = s.validation;
   console.log(
     [
-      `Seed ${s.id}: ${s.state}${s.was ? ` (was ${s.was})` : ""}, kind ${s.kind}, severity ${s.severity}${s.route ? `, route ${s.route}` : ""}.`,
+      `Seed ${s.id}: ${s.state}${s.was ? ` (was ${s.was})` : ""}, kind ${s.kind}${s.label ? ` (build kind ${s.label}, set by the user)` : ""}, severity ${s.severity}${s.route ? `, route ${s.route}` : ""}.`,
       `Host ${s.host.id}`,
       `--- ${s.path}`,
       `+++ ${s.path}`,
@@ -522,7 +613,7 @@ function show(a: Args, seeds: string): number {
       `Comment: ${s.comment}`,
       ...(v
         ? [
-            `Validator: ${v.verdict}, severity ${v.severity}, originalOk ${v.originalOk}, plausible ${v.plausible}.`,
+            `Validator: ${v.verdict}, severity ${v.severity}, originalOk ${v.originalOk}, plausible ${v.plausible}, kindOk ${v.kindOk ?? "not asked"}.`,
             `Validator trigger: ${v.trigger}`,
             ...v.proof.map((p) => `Proof: ${p}`),
             `Validator why: ${v.why}`,
@@ -534,8 +625,9 @@ function show(a: Args, seeds: string): number {
   return 0;
 }
 
-// One user event on one seed: keep, drop, or retire. why: the stored reason.
-function decide(seeds: string, id: string, event: "keep" | "drop" | "retire", why: string | undefined): number {
+// One user event on one seed: keep, drop, or retire. why: the stored reason. kind: keep only, the kind that the build uses (label). The
+// seeder kind stays in kind, so the checks and the sample do not change. A kind equal to the seeder kind removes the label.
+function decide(seeds: string, id: string, event: "keep" | "drop" | "retire", why: string | undefined, kind?: SeedKind): number {
   const store = loadStore(seeds);
   const i = store.seeds.findIndex((s) => s.id === id);
   const s = store.seeds[i];
@@ -548,10 +640,12 @@ function decide(seeds: string, id: string, event: "keep" | "drop" | "retire", wh
     console.error(next.refused);
     return 2;
   }
-  store.seeds[i] = why === undefined ? next : { ...next, reason: why };
+  const { label: _, ...bare } = next;
+  const labeled = kind === undefined ? next : kind === s.kind ? bare : { ...bare, label: kind };
+  store.seeds[i] = why === undefined ? labeled : { ...labeled, reason: why };
   const st = settle(store.seeds, loadSample(seeds));
   saveStore(seeds, { ...store, seeds: st.seeds });
-  console.log(`Seed ${id} is ${next.state}.`);
+  console.log(`Seed ${id} is ${next.state}${kind === undefined ? "" : `, with kind ${kind} in the build`}.`);
   if (event === "retire") console.log("The retire takes effect at the next build. The next build needs a new seeded baseline.");
   else if (loadSample(seeds).length) for (const l of settleText(st)) console.log(l);
   return 0;
@@ -610,13 +704,14 @@ export async function main(argv: string[]): Promise<number> {
     console.error(refused);
     return 2;
   }
-  if (a.cmd === "propose" || a.cmd === "validate" || a.cmd === "recheck") {
+  if (a.cmd === "propose" || a.cmd === "validate" || a.cmd === "recheck" || a.cmd === "report") {
     const no = naturalRefusal(local);
     if (no) {
       console.error(no);
       return 2;
     }
     if (a.cmd === "recheck") return recheck(seeds, local);
+    if (a.cmd === "report") return report(seeds, local);
     return a.cmd === "propose" ? propose(a, seeds, local) : validate(a, seeds, local);
   }
   const why = a.flags.get("--why") as string | undefined;
@@ -629,11 +724,16 @@ export async function main(argv: string[]): Promise<number> {
       return show(a, seeds);
     case "decide": {
       const verdict = a.pos[1];
-      if (verdict !== "keep" && verdict !== "drop") {
+      const kind = a.flags.get("--kind") as string | undefined;
+      if ((verdict !== "keep" && verdict !== "drop") || (kind !== undefined && verdict !== "keep")) {
         console.error(USAGE);
         return 2;
       }
-      return decide(seeds, a.pos[0] as string, verdict, why);
+      if (kind !== undefined && !(SEED_KINDS as readonly string[]).includes(kind)) {
+        console.error(`Unknown kind: ${kind}. Kinds: ${SEED_KINDS.join(", ")}.`);
+        return 2;
+      }
+      return decide(seeds, a.pos[0] as string, verdict, why, kind as SeedKind | undefined);
     }
     case "retire":
       if (!why) {

@@ -17,7 +17,9 @@ import {
   buildText,
   type Checked,
   checkSeed,
+  commentLines,
   editCommit,
+  giveaways,
   type Host,
   hostsOf,
   pickSeeds,
@@ -26,11 +28,12 @@ import {
   type SeedBuild,
   type SeededInfo,
   type SeededManifest,
+  unusedNames,
 } from "../../scripts/eval/seed-build";
 import { loadStore, type SeedFields, type SeedRecord, saveStore } from "../../scripts/eval/seed-store";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { diffArgs } from "../../src/server/review/workspace";
-import { ARCH, gitIn, keptSeed, makeNaturalSet, type NaturalSet, OMIT, PATHS, SPARE, seedFields } from "../support/seed-fixture";
+import { ARCH, addTwin, gitIn, keptSeed, makeNaturalSet, type NaturalSet, OMIT, PATHS, SPARE, seedFields } from "../support/seed-fixture";
 
 console.log(`seed-build.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed-build", import.meta.dir)}`);
 
@@ -165,9 +168,37 @@ describe("mechanical checks (section 5.2)", () => {
           anchor: { path: F, text: "export const f25 = 25 + 2;" },
         }),
       ).toEqual({ check: 4, reason: "The seed adds a comment line." });
+      // The second added line starts with no comment prefix, but it is inside a block comment.
+      expect(
+        await check({
+          kind: "local",
+          path: F,
+          find: "  saveRecord(store, k, value);",
+          replace: "  saveRecord(store, k, value); /*\n  the value stays as given */",
+          anchor: { path: F, text: "saveRecord(store, k, value); /*" },
+        }),
+      ).toEqual({ check: 4, reason: "The seed adds a line inside a comment or a docstring." });
     },
     SLOW,
   );
+
+  test("check 4: commentLines finds doc comments and docstrings, and a string opens no comment", () => {
+    const ts = [
+      "/**",
+      " * Returns the size.",
+      " */",
+      "export const s = '/* no comment */';",
+      "const t = 1; /* trailing */",
+      "/// A triple-slash line.",
+      "const u = `a",
+      "/* still a string */`;",
+    ].join("\n");
+    expect([...commentLines(ts, "src/a.ts")]).toEqual([1, 2, 3, 6]);
+    const py = ["def f():", '    """Return the size.', "", '    Twice."""', "    x = '#no'  # yes", '    y = """data', '    """'].join(
+      "\n",
+    );
+    expect([...commentLines(py, "src/a.py")]).toEqual([2, 4, 7]);
+  });
 
   test(
     "check 5: no marker word in an added line",
@@ -316,6 +347,117 @@ describe("mechanical checks (section 5.2)", () => {
   });
 });
 
+describe("check 11: unused and dangling names (section 5.2)", () => {
+  const names = async (f: Partial<SeedFields> & Pick<SeedFields, "kind" | "path" | "find" | "replace" | "anchor">) => {
+    const c = await check(f);
+    if ("check" in c) throw new Error(c.reason);
+    return unusedNames(host, f, c);
+  };
+  // A file that is not in the repository: the text after the edit is given, and git grep reads the host head for the other files.
+  const at = (path: string, find: string, replace: string, text: string) => unusedNames(host, { path, find, replace }, { text });
+
+  test(
+    "a removed use that leaves its declaration alone, and an added name with no other place, are flagged",
+    async () => {
+      const base = { kind: "contract" as const, path: F, anchor: { path: F, text: "saveRecord(store, key, value);" } };
+      expect(await names({ ...base, find: "  saveRecord(store, k, value);", replace: "  saveRecord(store, key, value);" })).toEqual(["k"]);
+      // k loses its declaration and keeps one use. kk is new and has no use.
+      expect(
+        await names({ ...base, find: "  const k = key;", replace: "  const kk = key;", anchor: { path: F, text: "const kk = key;" } }),
+      ).toEqual(["k", "kk"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "the fixture seeds and the local seed are not flagged: a name at 0 places, a member access, and an unchanged word set",
+    async () => {
+      for (const s of [ARCH, OMIT, SPARE]) expect(await names(s)).toEqual([]);
+      expect(
+        await names({
+          kind: "local",
+          path: "src/block.ts",
+          find: "  for (const x of list) total += x;",
+          replace: "  for (const x of list) total -= x;",
+          anchor: { path: "src/block.ts", text: "for (const x of list) total -= x;" },
+        }),
+      ).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "an import keeps its last name: flagged, also when other files have the name",
+    async () => {
+      const ts =
+        'import {\n  rareHelper,\n  saveRecord,\n} from "./route";\nexport const run = (m: Map<string, number>) => rareHelper(m.size);\n';
+      expect(
+        await at(
+          "src/x.ts",
+          'export const run = (m: Map<string, number>) => saveRecord(m, "a", rareHelper(m.size));',
+          "export const run = (m: Map<string, number>) => rareHelper(m.size);",
+          ts,
+        ),
+      ).toEqual(["saveRecord"]);
+      const py = "from lib import helper_one, helper_two\n\ndef run():\n    return helper_two()\n";
+      expect(await at("src/x.py", "    return helper_one() + helper_two()", "    return helper_two()", py)).toEqual(["helper_one"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "not flagged: a name that other files have, a member access, a word in a string or a comment, and a name at two places",
+    async () => {
+      // return goes from 2 places to 1, and other files of the head have it.
+      const ret = "export function f(n: number) {\n  return n;\n}\n";
+      expect(await at("src/x.ts", "  if (n < 0) return 0;", "", ret)).toEqual([]);
+      expect(
+        await at(
+          "src/x.ts",
+          "  m.clear();",
+          "  m.flushAllZebra();",
+          "export const g = (m: Map<string, number>) => {\n  m.flushAllZebra();\n};\n",
+        ),
+      ).toEqual([]);
+      expect(
+        await at(
+          "src/x.ts",
+          '  log("a");',
+          '  log("zebraword"); // zebranote',
+          'const log = (s: string) => s;\n  log("zebraword"); // zebranote\n',
+        ),
+      ).toEqual([]);
+      expect(
+        await at("src/x.py", "    total = 1", "    zebra_total = 1", "def f():\n    zebra_total = 1\n    return zebra_total\n"),
+      ).toEqual([]);
+    },
+    SLOW,
+  );
+});
+
+describe("check 12: giveaway tokens (section 5.2, report only)", () => {
+  const described = (description: string) => ({ repo: host.repo, file: { ...host.file, pr: { ...host.file.pr, description } } });
+
+  test(
+    "a removed code-like word, number, or string body in the PR description or the fold commit subject",
+    async () => {
+      const c1 = nat.commits[0] as string;
+      expect(await giveaways(described("Apply writes through saveRecord."), ARCH, c1)).toEqual(["description"]);
+      expect(await giveaways(host, ARCH, c1)).toEqual([]);
+      // c3 has the subject "Raise o30 and o31 for the café".
+      const o30 = { find: "export const o30 = 30 + 1;", replace: "export const o29 = 30 + 1;" };
+      expect(await giveaways(host, o30, nat.commits[2] as string)).toEqual(["commit subject"]);
+      const busy = { find: '  retry(25, "busy state");', replace: "  retry(5);" };
+      expect(await giveaways(described("Retry 25 times."), busy, c1)).toEqual(["description"]);
+      expect(await giveaways(described("It waits on a 'busy state' flag."), busy, c1)).toEqual(["description"]);
+      // Plain lower-case words match English text, so they do not count. A token that replace keeps does not count.
+      expect(await giveaways(described("The store is cleared."), { find: "  store.clear();", replace: "" }, c1)).toEqual([]);
+      expect(await giveaways(described("Retry 25 times."), { find: "  retry(25);", replace: "  retry(25, 1);" }, c1)).toEqual([]);
+    },
+    SLOW,
+  );
+});
+
 describe("history rewrite (section 5.3)", () => {
   // The lines of a commit object without tree, parent, and gpgsig.
   const rest = (raw: Buffer) => {
@@ -338,42 +480,58 @@ describe("history rewrite (section 5.3)", () => {
     );
   });
 
+  // The changed rows of each commit of a range against its parent, without line numbers: the patch that a reviewer reads.
+  const patches = async (r: string, base: string, commits: string[]) => {
+    const out: string[][] = [];
+    for (const [k, c] of commits.entries()) {
+      const files = parseDiff(await git(["diff", ...diffArgs, k ? (commits[k - 1] as string) : base, c], r));
+      out.push(files.flatMap((f) => f.rows.filter((x) => x.kind !== "ctx").map((x) => `${f.path} ${x.kind} ${x.text}`)));
+    }
+    return out;
+  };
+
   test(
-    "the seed lands in the last commit of each file, the raw text stays, and diff(base, H') is diff(base, H) plus the seed",
+    "the seed lands in the last commit that changed its lines, the raw text stays, every other commit keeps its patch, and diff(base, H') is diff(base, H) plus the seed",
     async () => {
       const r = host.repo;
       const a = (await checkSeed(host, ARCH)) as Checked;
       const o = (await checkSeed(host, OMIT)) as Checked;
-      const blobs = [
-        { path: F, mode: a.mode, sha: a.seeded },
-        { path: PATHS.other, mode: o.mode, sha: o.seeded },
+      const folds = [
+        { ...ARCH, ...a },
+        { ...OMIT, ...o },
       ];
-      const head = (await rewriteHistory(r, nat.base, nat.head, blobs)) as string;
+      const got = await rewriteHistory(r, nat.base, nat.head, folds);
+      if (!got) throw new Error("no rewrite");
+      const { head } = got;
       expect(head).toMatch(/^[0-9a-f]{40}$/);
+      // ARCH edits line 22, which c1 adds. c2 changes only line 45 of that file. OMIT edits line 31, which c3 changes last.
+      expect(got.rules).toEqual(["lines", "lines"]);
       const { commits, merge } = await rangeOf(r, nat.base, head);
       expect(merge).toBe(false);
       expect(commits).toHaveLength(4);
-      // c1 changes both files, but c2 and c3 change them later. So c1 stays, and the seed adds no commit.
-      expect(commits[0]).toBe(nat.commits[0] as string);
-      for (let k = 1; k < 4; k++) {
+      for (let k = 0; k < 4; k++) {
         expect(commits[k]).not.toBe(nat.commits[k] as string);
         const before = await gitIn(nat.env, r.dir, ["cat-file", "commit", nat.commits[k] as string]);
         const after = await gitIn(nat.env, r.dir, ["cat-file", "commit", commits[k] as string]);
         expect(rest(after).equals(rest(before))).toBe(true);
         expect(after.toString("latin1")).not.toContain("gpgsig");
-        expect(after.toString("latin1")).toContain(`parent ${commits[k - 1]}\n`);
+        expect(after.toString("latin1")).toContain(`parent ${k ? commits[k - 1] : nat.base}\n`);
       }
       const signed = await gitIn(nat.env, r.dir, ["cat-file", "commit", nat.commits[1] as string]);
       expect(signed.toString("latin1")).toContain("gpgsig -----BEGIN PGP SIGNATURE-----");
       const latin = await gitIn(nat.env, r.dir, ["cat-file", "commit", commits[2] as string]);
       expect(latin.includes(Buffer.from("encoding ISO-8859-1\n"))).toBe(true);
       expect(latin.includes(Buffer.from([0x63, 0x61, 0x66, 0xe9]))).toBe(true);
-      const log = (path: string) => git(["log", "-1", "--format=%H", head, "--", path], r.dir);
-      expect(await log(F)).toBe(commits[1] as string);
-      expect(await log(PATHS.other)).toBe(commits[2] as string);
-      const landed = await git(["diff", ...diffArgs, commits[0] as string, commits[1] as string, "--", F], r.dir);
+      // The seed is in the patch of c1 ("Add apply"), not in the patch of c2 ("Raise f45").
+      const landed = await git(["diff", ...diffArgs, nat.base, commits[0] as string, "--", F], r.dir);
       expect(landed).toContain("\n+  store.set(k, v);\n");
-      expect(landed).toContain("\n+export const f45 = 45 + 1;\n");
+      expect(landed).not.toContain("saveRecord(store, k, value)");
+      const now = await patches(r.dir, nat.base, commits);
+      const was = await patches(r.dir, nat.base, nat.commits);
+      expect(now[1]).toEqual(was[1] as string[]);
+      expect(now[1]).toEqual([`${F} del export const f45 = 45;`, `${F} add export const f45 = 45 + 1;`]);
+      expect(now[3]).toEqual(was[3] as string[]);
+      expect(now[2]).toEqual([`${PATHS.other} del export const o30 = 30;`, `${PATHS.other} add export const o30 = 30 + 1;`]);
       // The tree of H' is the tree of H with the two seeded blobs, so diff(base, H') is diff(base, H) plus the seed.
       const seeds = parseDiff(await git(["diff", ...diffArgs, nat.head, head], r.dir));
       expect(seeds.map((f) => [f.path, f.rows.filter((x) => x.kind !== "ctx").map((x) => `${x.kind} ${x.text}`)])).toEqual([
@@ -385,7 +543,70 @@ describe("history rewrite (section 5.3)", () => {
         await git(["diff", ...diffArgs, nat.base, nat.head, "--", ".", ...others], r.dir),
       );
       // The rewrite is deterministic.
-      expect(await rewriteHistory(r, nat.base, nat.head, blobs)).toBe(head);
+      expect(await rewriteHistory(r, nat.base, nat.head, folds)).toEqual(got);
+    },
+    SLOW,
+  );
+
+  test(
+    "fallback near: a seed on lines from the merge base lands in the last commit that changed a line within 3 lines of it",
+    async () => {
+      const r = host.repo;
+      // Line 19 is a base line. c1 adds lines 20 to 26, and c2 is the last commit on the file.
+      const near = seedFields({
+        kind: "local",
+        path: F,
+        find: "export const f19 = 19;",
+        replace: "export const f19 = 20;",
+        anchor: { path: F, text: "export const f19 = 20;" },
+      });
+      const c = (await checkSeed(host, near)) as Checked;
+      expect(c).not.toHaveProperty("check");
+      const got = await rewriteHistory(r, nat.base, nat.head, [{ ...near, ...c }]);
+      if (!got) throw new Error("no rewrite");
+      expect(got.rules).toEqual(["near"]);
+      const { commits } = await rangeOf(r, nat.base, got.head);
+      expect(await git(["log", "--format=%H", "-G", "f19 = 20", got.head], r.dir)).toBe(commits[0] as string);
+      const now = await patches(r.dir, nat.base, commits);
+      const was = await patches(r.dir, nat.base, nat.commits);
+      for (const k of [1, 2, 3]) expect(now[k]).toEqual(was[k] as string[]);
+    },
+    SLOW,
+  );
+
+  test(
+    "fallback file: when the find text is not unique in the commit that changed its lines, the seed lands in the last commit on the file",
+    async () => {
+      // A small repository: c1 adds "  run();" twice, and c2 removes the second copy. Blame gives c1, but find is not unique there.
+      const dir = join(TMP, "dup.git");
+      const env = nat.env;
+      await gitIn(env, null, ["init", "-q", "--bare", "--template=", dir]);
+      const ix = { ...env, GIT_INDEX_FILE: join(TMP, "dup.index") };
+      const text = (lines: string[]) => `${lines.join("\n")}\n`;
+      const body = Array.from({ length: 40 }, (_, k) => `const v${k + 1} = ${k + 1};`);
+      const commit = async (parent: string | null, file: string, msg: string) => {
+        const sha = (await gitIn(env, dir, ["hash-object", "-w", "--stdin"], file)).toString().trim();
+        await gitIn(ix, dir, ["read-tree", "--empty"]);
+        await gitIn(ix, dir, ["update-index", "--add", "--cacheinfo", `100644,${sha},src/dup.ts`]);
+        const tree = (await gitIn(ix, dir, ["write-tree"])).toString().trim();
+        return (await gitIn(env, dir, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", msg])).toString().trim();
+      };
+      const base = await commit(null, text(body), "base");
+      const withRun = (lines: string[], at: number[]) => lines.flatMap((l, k) => (at.includes(k + 1) ? [l, "  run();"] : [l]));
+      const c1 = await commit(base, text(withRun(body, [5, 30])), "Add run");
+      const c2 = await commit(c1, text(withRun(body, [5])), "Remove the second run");
+      const headText = text(withRun(body, [5]));
+      const s = { path: "src/dup.ts", find: "  run();", replace: "  stop();" };
+      const applied = applySeed(headText, s) as { text: string; start: number; end: number };
+      const seeded = (await gitIn(env, dir, ["hash-object", "-w", "--stdin"], applied.text)).toString().trim();
+      const repo = { dir, env, index: join(TMP, "dup-rewrite.index") };
+      const fold = { ...s, mode: "100644", seeded, region: [applied.start, applied.end] as [number, number] };
+      const got = await rewriteHistory(repo, base, c2, [fold]);
+      if (!got) throw new Error("no rewrite");
+      expect(got.rules).toEqual(["file"]);
+      const { commits } = await rangeOf(repo, base, got.head);
+      expect(commits[0]).toBe(c1);
+      expect(await git(["log", "--format=%H", "-G", "stop", got.head], dir)).toBe(commits[1] as string);
     },
     SLOW,
   );
@@ -395,7 +616,8 @@ describe("history rewrite (section 5.3)", () => {
     async () => {
       expect((await rangeOf(mergeHost.repo, nat.base, nat.mergeHead)).merge).toBe(true);
       const blob = await git(["rev-parse", `${nat.mergeHead}:${PATHS.other}`]);
-      expect(await rewriteHistory(mergeHost.repo, nat.base, nat.mergeHead, [{ path: PATHS.other, mode: "100644", sha: blob }])).toBeNull();
+      const fold = { ...OMIT, find: "export const o5 = 5 + 1;", mode: "100644", seeded: blob, region: [5, 5] as [number, number] };
+      expect(await rewriteHistory(mergeHost.repo, nat.base, nat.mergeHead, [fold])).toBeNull();
     },
     SLOW,
   );
@@ -455,12 +677,14 @@ describe("seeded set build (sections 6.1 and 8)", () => {
       mergeHosts: 1,
       hostFingerprint: setFingerprint([{ id: nat.host, hash: createHash("sha256").update(hostText).digest("hex") }]),
       seedsHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      folds: { sd00000000a1: "lines", sd00000000a2: "lines" },
     });
     expect(m.counts).toEqual({ cases: 1, runs: 0, repositories: 1, bugs: 2, traps: 1, extras: 4, human: 0 });
     expect(m.rereview.counts.cases).toBe(0);
     expect(m.threads).toMatchObject({ cases: 1, threads: 4, comments: 5, overlap: 2 });
     const text = buildText(first);
     expect(text).toContain("Seeded set: 1 cases with 2 seeds. Spare kept seeds: 2. Hosts with a merge commit, left out: 1.");
+    expect(text).toContain("Folds: lines 2, near 0, file 0.");
     // The floor counts kept seeds, spares included: omission has 2 (one on the merge host), but 1 in the set.
     expect(first.kept).toEqual(
       Object.fromEntries(
@@ -636,4 +860,50 @@ describe("seeded set build (sections 6.1 and 8)", () => {
       refused: "The natural set folder holds a seeded set. Point REVIEW_LOOP_EVAL_LOCAL at the natural set.",
     });
   });
+});
+
+describe("twin hosts and the build kind (sections 4.2 and 8)", () => {
+  test(
+    "twins give one case on the lower case ID: the same edit on both is one seed and one spare, a twin seed that fails check 6 there is a spare, and the label is the build kind",
+    async () => {
+      const fx = await makeNaturalSet(join(TMP, "fx-twin"));
+      const twin = addTwin(fx, fx.host, 9);
+      mkdirSync(join(TMP, "hosts-twin"));
+      const open = hostsOf(fx.dir, join(TMP, "hosts-twin"));
+      const a = (await open(fx.host)) as Host;
+      const b = (await open(twin)) as Host;
+      expect([a.base, a.head]).toEqual([b.base, b.head]);
+      // The twin case has no natural items. The comment of the host at line 38 lies within 6 lines of o33.
+      const near = seedFields({
+        kind: "local",
+        path: PATHS.other,
+        find: "export const o33 = 33;",
+        replace: "export const o33 = 34;",
+        anchor: { path: PATHS.other, text: "export const o33 = 34;" },
+      });
+      expect(await checkSeed(b, near)).not.toHaveProperty("check");
+      expect(await checkSeed(a, near)).toMatchObject({ check: 6 });
+      const bind = async (h: Host, path: string) => (await bindingOf(h, path)) as SeedRecord["host"];
+      const root = join(TMP, "seeds-twin");
+      saveStore(root, {
+        format: 1,
+        seeds: [
+          { ...keptSeed("sd00000000c1", ARCH, await bind(a, F)), label: "contract" },
+          keptSeed("sd00000000c2", ARCH, await bind(b, F)),
+          keptSeed("sd00000000c3", near, await bind(b, PATHS.other)),
+        ],
+      });
+      const got = (await buildSeededSet({ seeds: root, local: fx.dir })) as SeedBuild;
+      expect(got).not.toHaveProperty("refused");
+      expect(got.manifest.seeded).toMatchObject({ seeds: 1, hosts: 1, spares: 2, mergeHosts: 0 });
+      expect(got.manifest.seeded.byKind).toMatchObject({ contract: 1, architecture: 0, local: 0 });
+      expect(got.kept).toMatchObject({ contract: 1, architecture: 1, local: 1 });
+      const [id] = readdirSync(join(root, "set", "cases"));
+      const file = localCaseFile.parse(JSON.parse(readFileSync(join(root, "set", "cases", id as string, "case.json"), "utf8")));
+      expect(file.group).toBe("pr7");
+      expect(file.bugs).toHaveLength(1);
+      expect(file.bugs[0]).toMatchObject({ seedKind: "contract", module: "api", note: "Seeded contract defect." });
+    },
+    SLOW,
+  );
 });

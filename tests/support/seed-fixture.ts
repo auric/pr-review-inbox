@@ -4,7 +4,7 @@
 // A synthetic natural set for the seed tests (docs/plans/review-v2/seeded-truth.md WP-SG1): one repository with a linear PR (a signed
 // commit and a commit with an encoding header in its range), a PR with a merge commit, their two host cases, and one bundle.
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type LocalCaseFile, localCaseFile } from "../../scripts/eval/cases";
 import { caseId } from "../../scripts/eval/local";
@@ -219,6 +219,17 @@ export async function makeNaturalSet(root: string): Promise<NaturalSet> {
   write({ ...common(mergeHost, merge, "pr8"), bugs: [], traps: [], extras: [] });
   writeFileSync(join(dir, "MANIFEST.json"), `${JSON.stringify({ format: 1, fingerprint: "natural" }, null, 2)}\n`);
   return { dir, repo, env, base, commits: [c1, c2, c3, c4], head: c4, mergeHead: merge, host, mergeHost, bundle };
+}
+
+// A twin host case: a case of PR group pr<pr> with the base and head of case src, and no natural items or threads. Returns its ID.
+export function addTwin(set: Pick<NaturalSet, "dir">, src: string, pr: number): string {
+  const file = localCaseFile.parse(JSON.parse(readFileSync(join(set.dir, "cases", src, "case.json"), "utf8")));
+  const id = caseId({ pr, head: file.bundle.head, base: file.bundle.base });
+  const { threads: _, ...rest } = file;
+  const twin = localCaseFile.parse({ ...rest, id, group: `pr${pr}`, bugs: [], traps: [], extras: [], human: [] });
+  mkdirSync(join(set.dir, "cases", id), { recursive: true });
+  writeFileSync(join(set.dir, "cases", id, "case.json"), `${JSON.stringify(twin, null, 2)}\n`);
+  return id;
 }
 
 // Seeds that pass every check at the host of makeNaturalSet.

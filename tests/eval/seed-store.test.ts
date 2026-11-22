@@ -31,7 +31,7 @@ const TABLE = `
 | applied | - | - | confirmed | refuted | applied | - | - | - | - | - | - | stale | - | - |
 | confirmed | - | - | - | - | - | sampled | kept | dropped | kept | sampled | - | stale | - | - |
 | sampled | - | - | - | - | - | - | kept | dropped | - | - | - | stale | - | - |
-| kept | - | - | - | - | - | - | - | dropped | - | - | retired | stale | - | - |
+| kept | - | - | - | - | - | - | kept | dropped | - | - | retired | stale | - | - |
 | stale | - | - | - | - | - | - | - | dropped | - | - | retired | - | previous state | - |
 | invalid | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | refuted | - | - | - | - | - | - | - | - | - | - | - | - | - | confirmed |
@@ -140,6 +140,22 @@ describe("seed store", () => {
     expect(existsSync(join(root, "seeds.json"))).toBe(false);
     writeFileSync(join(TMP, "seeds.json"), '{"format":1,"seeds":[{"id":"x"}]}');
     expect(() => loadStore(TMP)).toThrow();
+  });
+
+  test("a stored validator answer without kindOk still loads, and a label must be a kind", () => {
+    const old = {
+      verdict: "breaks" as const,
+      severity: "high" as const,
+      trigger: "t",
+      proof: ["a.ts:1"],
+      originalOk: true,
+      plausible: true,
+      why: "w",
+    };
+    expect(seedStore.safeParse({ format: 1, seeds: [seed("confirmed", { validation: old })] }).success).toBe(true);
+    expect(seedStore.safeParse({ format: 1, seeds: [seed("kept", { label: "contract" })] }).success).toBe(true);
+    const bad = { ...seed("kept"), label: "style" };
+    expect(seedStore.safeParse({ format: 1, seeds: [bad] }).success).toBe(false);
   });
 
   test("the seed ID follows the host and the edit", () => {

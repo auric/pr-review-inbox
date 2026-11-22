@@ -5,13 +5,14 @@
 // its binding pass and stop rule, the sample draw, the release and escalate rules, the user events, build, and leaks. The seeds root and
 // the natural set are temp folders; tests/support/seed-fixture.ts makes the natural set.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { localCaseFile, SEED_KINDS } from "../../scripts/eval/cases";
 import { caseId } from "../../scripts/eval/local";
 import { drawSample, settle } from "../../scripts/eval/seed";
-import { bindingOf, type Host, hostsOf, type SeedKind } from "../../scripts/eval/seed-build";
+import { bindingOf, type Host, hostsOf, pickSeeds, type SeedKind } from "../../scripts/eval/seed-build";
 import {
   loadStore,
   type SeedFields,
@@ -20,9 +21,10 @@ import {
   type SeedValidation,
   saveStore,
   seedId,
+  twinKey,
 } from "../../scripts/eval/seed-store";
 import { readRecords } from "../support/fake-claude";
-import { ARCH, gitIn, makeNaturalSet, type NaturalSet, OMIT, PATHS, seedFields } from "../support/seed-fixture";
+import { ARCH, addTwin, gitIn, makeNaturalSet, type NaturalSet, OMIT, PATHS, seedFields } from "../support/seed-fixture";
 
 console.log(`seed-cli.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed", import.meta.dir)}`);
 
@@ -190,7 +192,9 @@ describe("propose, validate, and build", () => {
       const r = await cli(["validate", ...f.runner], seeds());
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      expect(r.stdout).toContain("Validated: 4 confirmed, 0 refuted, 0 failed runs (still applied). 1 seeds went stale.");
+      expect(r.stdout).toContain(
+        "Validated: 4 confirmed, 0 refuted, 0 refuted by a check without a run, 0 failed runs (still applied). 1 seeds went stale.",
+      );
       expect(f.runs()).toHaveLength(4);
       expect(store().map((s) => [s.kind, s.state, s.was])).toEqual([
         ["architecture", "confirmed", undefined],
@@ -252,11 +256,15 @@ const COUNTS: Record<SeedKind, number> = {
   local: 6,
 };
 const HOST = { id: "pr1-aaaaaaaaaaaa-bbbbbbbb", base: "a".repeat(40), head: "b".repeat(40), blob: "c".repeat(40) };
+// A head commit ID per commit series.
+const series = (name: string) => createHash("sha1").update(name).digest("hex");
+// One host per seed, each with its own head, so the build caps do not limit the draw.
 const confirmed = (): SeedRecord[] =>
   SEED_KINDS.flatMap((kind) =>
     Array.from({ length: COUNTS[kind] }, (_, n) => {
       const f = seedFields({ kind, path: `src/${kind}${n}.ts`, find: "a();", replace: "b();", anchor: { path: "x.ts", text: "b();" } });
-      return { ...f, id: seedId(HOST.id, f), state: "confirmed" as const, host: HOST };
+      const host = { ...HOST, id: `${kind}-${n}`, head: series(`${kind}-${n}`) };
+      return { ...f, id: seedId(host.id, f), state: "confirmed" as const, host };
     }),
   );
 const kindsOf = (ids: string[], seeds: SeedRecord[]) =>
@@ -285,6 +293,52 @@ describe("the sample draw and the release rule", () => {
     // Only confirmed seeds take part.
     const one = seeds.find((s) => s.kind === "error") as SeedRecord;
     expect(drawSample(withState(seeds, [one.id], "kept"))).not.toContain(one.id);
+  });
+
+  test("the draw keeps the build caps: at most 3 seeds per host with the kept seeds and its twins, one per file, and the build takes every one", () => {
+    let n = 0;
+    const mk = (kind: SeedKind, hostId: string, path: string, state: SeedState = "confirmed", of = hostId): SeedRecord => {
+      const f = seedFields({ kind, path, find: `a${++n}();`, replace: "b();", anchor: { path, text: "b();" } });
+      return { ...f, id: seedId(hostId, f), state, host: { ...HOST, id: hostId, head: series(of) } };
+    };
+    const seeds = [
+      // Host a: seven seeds, two pairs on one file, and the only error seed. Host a2 is its twin.
+      mk("local", "a", "src/1.ts"),
+      mk("local", "a", "src/2.ts"),
+      mk("contract", "a", "src/1.ts"),
+      mk("contract", "a", "src/3.ts"),
+      mk("omission", "a", "src/4.ts"),
+      mk("leak", "a", "src/5.ts"),
+      mk("error", "a", "src/6.ts"),
+      mk("concurrency", "a2", "src/7.ts", "confirmed", "a"),
+      mk("entry", "a2", "src/8.ts", "confirmed", "a"),
+      // Host b: a kept seed takes one place and its file.
+      mk("lifetime", "b", "src/1.ts", "kept"),
+      mk("lifetime", "b", "src/1.ts"),
+      mk("lifetime", "b", "src/2.ts"),
+      mk("contract", "b", "src/3.ts"),
+      mk("local", "b", "src/4.ts"),
+      // Host c: two seeds on one file.
+      mk("omission", "c", "src/1.ts"),
+      mk("leak", "c", "src/1.ts"),
+      mk("local", "c", "src/2.ts"),
+    ];
+    const drawn = drawSample(seeds);
+    expect(drawSample(seeds)).toEqual(drawn);
+    expect(drawSample([...seeds].reverse())).toEqual(drawn);
+    const used = seeds.filter((s) => drawn.includes(s.id) || s.state === "kept");
+    for (const [, list] of Map.groupBy(used, twinKey)) {
+      expect(list.length).toBeLessThanOrEqual(3);
+      expect(new Set(list.map((s) => s.path)).size).toBe(list.length);
+    }
+    // The build is the oracle: it takes every drawn seed and the kept seed, with no spare.
+    expect(pickSeeds(Map.groupBy(used, twinKey)).spares).toBe(0);
+    // The smallest kinds draw first, ties in the kind order: concurrency, error, and entry have one seed each, all on hosts a and a2.
+    // Their twin group is then full, so no other seed of host a is drawn.
+    expect(drawn.slice(0, 3)).toEqual([seeds[7]?.id, seeds[6]?.id, seeds[8]?.id] as string[]);
+    expect(drawn.filter((id) => seeds.find((s) => s.id === id)?.host.head === series("a"))).toHaveLength(3);
+    // The places: 3 on hosts a and a2, 2 on host b beside the kept seed, and 2 files on host c.
+    expect(drawn.length).toBeLessThanOrEqual(7);
   });
 
   test("a kind releases on 0 drops, escalates on 1, and every kind escalates above 20% drops", () => {
@@ -358,11 +412,11 @@ describe("sample, decide, escalate, retire, list, and show", () => {
           .map((s) => s.kind),
       ).toEqual(Array(4).fill("local"));
 
-      // A refused event names the state and changes nothing.
+      // A refused event names the state and changes nothing. A dropped seed takes no keep.
       const before = readFileSync(join(seeds(), "seeds.json"), "utf8");
-      const refused = await cli(["decide", drawn[0] as string, "keep"], seeds());
+      const refused = await cli(["decide", local, "keep"], seeds());
       expect(refused.code).toBe(2);
-      expect(refused.stderr).toContain("is kept");
+      expect(refused.stderr).toContain("is dropped");
       const wrongKind = await cli(["sample", "--escalate", "contract"], seeds());
       expect(wrongKind.code).toBe(2);
       expect(wrongKind.stderr).toContain("kind contract does not escalate");
@@ -443,6 +497,118 @@ describe("recheck (section 8)", () => {
       ]);
       // A second call finds nothing to move.
       expect((await cli(["recheck"], seeds)).stdout).toContain("Rechecked: 0 refuted seeds are now confirmed, 1 stay refuted");
+    },
+    SLOW,
+  );
+});
+
+describe("report (checks 11 and 12, twin hosts)", () => {
+  test(
+    "report lists by ID the bound seeds that fail a check, leave a name unused, or show a removed token, lists the twin hosts, and changes nothing",
+    async () => {
+      const fx = await makeNaturalSet(join(TMP, "fx-report"));
+      const twin = addTwin(fx, fx.host, 9);
+      const seeds = join(TMP, "report");
+      const host = (await hostsOf(fx.dir, mkdtempSync(join(TMP, "hosts-")))(fx.host)) as Host;
+      const rec = async (f: Partial<SeedFields> & Pick<SeedFields, "path" | "find" | "replace">, state: SeedState): Promise<SeedRecord> => {
+        const fields = seedFields({ kind: "contract", anchor: { path: f.path, text: f.replace }, ...f });
+        return { ...fields, id: seedId(fx.host, fields), state, host: (await bindingOf(host, f.path)) as SeedRecord["host"] };
+      };
+      const names = await rec(
+        { path: PATHS.feature, find: "  saveRecord(store, k, value);", replace: "  saveRecord(store, key, value);" },
+        "kept",
+      );
+      // c3 "Raise o30 and o31 for the café" adds line 30, and the seed removes the token o30.
+      const subject = await rec(
+        { path: PATHS.other, find: "export const o30 = 30 + 1;", replace: "export const o29 = 30 + 1;" },
+        "confirmed",
+      );
+      const broken = await rec({ path: PATHS.feature, find: "  nothing();", replace: "  something();" }, "applied");
+      const good = await rec(OMIT, "sampled");
+      // A refuted seed is not bound, so report does not read it.
+      const off = await rec({ path: PATHS.feature, find: "  nothing();", replace: "  other();" }, "refuted");
+      saveStore(seeds, { format: 1, seeds: [names, subject, broken, good, off] });
+      const before = readFileSync(join(seeds, "seeds.json"), "utf8");
+      expect((await cli(["report", "x"], seeds, fx.dir)).code).toBe(2);
+      const r = await cli(["report"], seeds, fx.dir);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim().split("\n")).toEqual([
+        `${names.id}  kept       contract      check 11: k`,
+        `${subject.id}  confirmed  contract      check 12: commit subject`,
+        `${broken.id}  applied    contract      fails check 1`,
+        `Twin hosts: ${fx.host} and ${twin}. They count as one host.`,
+        "Report: 4 bound seeds checked. 1 fail a check, 1 leave a name unused or dangling (check 11), and 1 show a removed token in the PR description or the fold commit subject (check 12). 0 have a changed host. Twin hosts: 1.",
+      ]);
+      expect(readFileSync(join(seeds, "seeds.json"), "utf8")).toBe(before);
+    },
+    SLOW,
+  );
+});
+
+describe("twin hosts in propose and validate", () => {
+  test(
+    "propose takes one twin, skips a twin group with seeds, refuses a twin in --cases, and validate stops a twin group at 4 confirmed seeds",
+    async () => {
+      const fx = await makeNaturalSet(join(TMP, "fx-twins"));
+      const twin = addTwin(fx, fx.host, 9);
+      const seeds = join(TMP, "twins");
+      const plan = await cli(["propose"], seeds, fx.dir);
+      expect(plan.code).toBe(2);
+      expect(plan.stdout).toContain(
+        "1 hosts, one per PR group. 1 more hosts have a merge commit in their range and take no seed. 1 more hosts are twins: they have the base and head of a host, and take no seed.",
+      );
+      expect(plan.stdout).toContain("Seeder runs: 1 (model opus, effort high).");
+      const notHost = await cli(["propose", "--cases", twin], seeds, fx.dir);
+      expect(notHost.code).toBe(2);
+      expect(notHost.stderr).toContain(`case ${twin} is no host`);
+      // A seed on the twin: the host of the group has seeds, so propose skips it.
+      const host = (await hostsOf(fx.dir, mkdtempSync(join(TMP, "hosts-")))(fx.host)) as Host;
+      const bound = (await bindingOf(host, PATHS.feature)) as SeedRecord["host"];
+      const rec = (n: number, state: SeedState, id: string): SeedRecord => {
+        const f = seedFields({
+          kind: "local",
+          path: PATHS.feature,
+          find: `f${n}();`,
+          replace: "g();",
+          anchor: { path: PATHS.feature, text: "g();" },
+        });
+        return { ...f, id: seedId(id, f), state, host: { ...bound, id } };
+      };
+      saveStore(seeds, { format: 1, seeds: [rec(0, "applied", twin)] });
+      expect((await cli(["propose"], seeds, fx.dir)).stdout).toContain("Seeder runs: 0");
+      // 4 confirmed seeds on the host and 1 applied seed on its twin: the twin group is full.
+      saveStore(seeds, { format: 1, seeds: [1, 2, 3, 4].map((n) => rec(n, "confirmed", fx.host)).concat(rec(0, "applied", twin)) });
+      const done = await cli(["validate"], seeds, fx.dir);
+      expect(done.code).toBe(0);
+      expect(done.stdout).toContain("no applied seed needs a validator run");
+    },
+    SLOW,
+  );
+});
+
+describe("decide --kind (the build kind)", () => {
+  test(
+    "keep --kind sets the build kind and keeps the seeder kind, a second keep changes it, and the seeder kind removes it",
+    async () => {
+      const seeds = join(TMP, "relabel");
+      const [a, b] = confirmed().filter((s) => s.kind === "local");
+      if (!a || !b) throw new Error("no seeds");
+      saveStore(seeds, { format: 1, seeds: [a, b] });
+      const one = (id: string) => loadStore(seeds).seeds.find((s) => s.id === id) as SeedRecord;
+      const r = await cli(["decide", a.id, "keep", "--kind", "contract", "--why", "A caller breaks."], seeds);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`Seed ${a.id} is kept, with kind contract in the build.`);
+      expect(one(a.id)).toMatchObject({ state: "kept", kind: "local", label: "contract", reason: "A caller breaks." });
+      // A kept seed takes keep again, so a wrong label can change.
+      expect((await cli(["decide", a.id, "keep", "--kind", "error"], seeds)).code).toBe(0);
+      expect(one(a.id)).toMatchObject({ state: "kept", kind: "local", label: "error" });
+      expect((await cli(["decide", a.id, "keep", "--kind", "local"], seeds)).code).toBe(0);
+      expect(one(a.id).label).toBeUndefined();
+      // --kind goes with keep only, and it must be a kind.
+      expect((await cli(["decide", b.id, "drop", "--kind", "contract"], seeds)).code).toBe(2);
+      expect((await cli(["decide", b.id, "keep", "--kind", "style"], seeds)).code).toBe(2);
+      expect(one(b.id).state).toBe("confirmed");
     },
     SLOW,
   );

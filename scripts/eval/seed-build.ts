@@ -25,7 +25,7 @@ import {
 } from "./cases";
 import { caseId, type Manifest, noThreads, seededSet } from "./local";
 import { LOCAL_TOLERANCE, overlaps } from "./score";
-import { fire, loadStore, rootRefusal, type SeedFields, type SeedRecord, saveStore } from "./seed-store";
+import { fire, kindOf, loadStore, rootRefusal, type SeedFields, type SeedRecord, saveStore, twinKey } from "./seed-store";
 
 export type SeedKind = (typeof SEED_KINDS)[number];
 type Side = "new" | "old";
@@ -203,37 +203,80 @@ export function editCommit(raw: Uint8Array, tree: string, parents: Map<string, s
   ]);
 }
 
-// Folds each blob into the last commit of base..head that changes its path, and gives the commits after it new trees (section 5.3).
-// null: the range has a merge commit, so the host takes no seed.
+// Section 5.3: the fold rules in the order that the rewrite tries them.
+export const FOLD_RULES = ["lines", "near", "file"] as const;
+export type FoldRule = (typeof FOLD_RULES)[number];
+// One seed for the rewrite: the edit, and the file mode, seeded blob, and find lines at the head from checkSeed.
+export type Fold = Pick<SeedFields, "path" | "find" | "replace"> & Pick<Checked, "mode" | "seeded" | "region">;
+
+// The index in commits of the last commit that changed the find lines, and of the last that changed a line within NEAR of them (check
+// 3). -1: no commit of the range. Plain blame without -M or -C, so a moved line counts for the commit whose patch moves it.
+async function lastTouch(r: Repo, base: string, head: string, s: Fold, commits: string[]): Promise<{ lines: number; near: number }> {
+  const text = (await textAt(r, head, s.path)) ?? "";
+  const n = text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+  const range = `${Math.max(1, s.region[0] - NEAR)},${Math.min(n, s.region[1] + NEAR)}`;
+  const out = await gText(r, ["blame", "--line-porcelain", "-L", range, `${base}..${head}`, "--", s.path]);
+  let lines = -1;
+  let near = -1;
+  for (const m of out.matchAll(/^([0-9a-f]{40,64}) \d+ (\d+)/gm)) {
+    const k = commits.indexOf(m[1] as string);
+    const l = Number(m[2]);
+    near = Math.max(near, k);
+    if (l >= s.region[0] && l <= s.region[1]) lines = Math.max(lines, k);
+  }
+  return { lines, near };
+}
+
+// Folds each seed into one commit of base..head and gives the commits after it new trees (section 5.3). Each commit from the fold on gets
+// the seed applied to its own text of the path, so every other commit keeps its patch. rules, folds: the fold rule and the original fold
+// commit of each seed, in input order. null: the range has a merge commit, so the host takes no seed.
 export async function rewriteHistory(
   r: Repo,
   base: string,
   head: string,
-  blobs: { path: string; mode: string; sha: string }[],
-): Promise<string | null> {
+  seeds: Fold[],
+): Promise<{ head: string; rules: FoldRule[]; folds: string[] } | null> {
   const { commits, merge } = await rangeOf(r, base, head);
   if (merge) return null;
-  const at = new Map<string, number>();
-  for (const b of blobs) {
-    const last = await gText(r, ["rev-list", "-1", `${base}..${head}`, "--", b.path]);
-    const k = commits.indexOf(last);
-    if (k < 0) throw new Error(`No commit of the range changes a seeded path, so the seed has no commit to go into.`);
-    at.set(b.path, k);
+  const plans: { at: number; rule: FoldRule; blobs: Map<number, { mode: string; sha: string }> }[] = [];
+  for (const s of seeds) {
+    const file = commits.indexOf(await gText(r, ["rev-list", "-1", `${base}..${head}`, "--", s.path]));
+    if (file < 0) throw new Error(`No commit of the range changes a seeded path, so the seed has no commit to go into.`);
+    // From the last commit on the path, the path equals its head text, so the seeded head blob applies.
+    const blobs = new Map<number, { mode: string; sha: string }>();
+    for (let k = file; k < commits.length; k++) blobs.set(k, { mode: s.mode, sha: s.seeded });
+    const t = await lastTouch(r, base, head, s, commits);
+    // Before that commit, the seed must apply to each text of the path. The first text without one find match stops the walk.
+    const low = Math.min(...[t.lines, t.near].filter((x) => x >= 0), file);
+    let from = file;
+    for (let k = file - 1; k >= low; k--) {
+      const e = await entryAt(r, commits[k] as string, s.path);
+      const text = await textAt(r, commits[k] as string, s.path);
+      const applied = text === null ? null : applySeed(text, s);
+      if (!e || !applied || "reason" in applied) break;
+      blobs.set(k, { mode: e.mode, sha: await writeBlob(r, ENC.encode(applied.text)) });
+      from = k;
+    }
+    const [at, rule]: [number, FoldRule] = t.lines >= from ? [t.lines, "lines"] : t.near >= from ? [t.near, "near"] : [file, "file"];
+    plans.push({ at, rule, blobs });
   }
-  const from = Math.min(...at.values());
+  const from = Math.min(...plans.map((p) => p.at));
   const map = new Map<string, string>();
   for (let k = from; k < commits.length; k++) {
     const c = commits[k] as string;
     const tree = await treeWith(
       r,
       c,
-      blobs.filter((b) => (at.get(b.path) as number) <= k),
+      seeds.flatMap((s, i) => {
+        const p = plans[i] as (typeof plans)[number];
+        return p.at <= k ? [{ path: s.path, ...(p.blobs.get(k) as { mode: string; sha: string }) }] : [];
+      }),
     );
     const raw = (await g(r, ["cat-file", "commit", c])).out;
     const sha = ascii((await g(r, ["hash-object", "-t", "commit", "-w", "--no-filters", "--stdin"], editCommit(raw, tree, map))).out);
     map.set(c, sha.trim());
   }
-  return map.get(head) ?? head;
+  return { head: map.get(head) ?? head, rules: plans.map((p) => p.rule), folds: plans.map((p) => commits[p.at] as string) };
 }
 
 // ---------- One seed: apply and check (section 5.2) ----------
@@ -368,6 +411,8 @@ export async function checkSeed(h: Host, s: SeedFields): Promise<Checked | Rejec
   const prefixes = CODE_TYPES[extname(s.path).toLowerCase()];
   if (!prefixes) return no(4, "The file is not of a known code type.");
   if (added.some((l) => prefixes.some((p) => l.trimStart().startsWith(p)))) return no(4, "The seed adds a comment line.");
+  const notes = commentLines(applied.text, s.path);
+  if (rows.some((x) => x.kind === "add" && notes.has(x.new))) return no(4, "The seed adds a line inside a comment or a docstring.");
   // 5
   const marker = added.map((l) => MARKER.exec(l)?.[1]).find(Boolean);
   if (marker) return no(5, `An added line holds the marker word "${marker.toLowerCase()}".`);
@@ -430,6 +475,131 @@ export async function checkSeed(h: Host, s: SeedFields): Promise<Checked | Rejec
   };
 }
 
+// Check 4: the 1-based lines of text whose code is all comment or docstring. C-like: line comments and block comments, /** */ too.
+// Python: line comments and triple-quoted strings. A string literal opens no comment.
+export function commentLines(text: string, path: string): Set<number> {
+  const py = extname(path).toLowerCase() === ".py";
+  const note = new Uint8Array(text.length);
+  const upTo = (from: number, end: string) => {
+    const e = text.indexOf(end, from);
+    return e < 0 ? text.length : end === "\n" ? e : e + end.length;
+  };
+  for (let i = 0; i < text.length; ) {
+    const c = text[i] as string;
+    const three = text.slice(i, i + 3);
+    const end = py
+      ? c === "#"
+        ? upTo(i, "\n")
+        : three === '"""' || three === "'''"
+          ? upTo(i + 3, three)
+          : -1
+      : text.startsWith("//", i)
+        ? upTo(i, "\n")
+        : text.startsWith("/*", i)
+          ? upTo(i + 2, "*/")
+          : -1;
+    if (end >= 0) {
+      note.fill(1, i, end);
+      i = end;
+    } else if (c === '"' || c === "'" || (c === "`" && !py)) {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && (c === "`" || text[j] !== "\n")) j += text[j] === "\\" ? 2 : 1;
+      i = j + 1;
+    } else i++;
+  }
+  const out = new Set<number>();
+  let at = 0;
+  for (const [k, line] of text.split("\n").entries()) {
+    let code = false;
+    for (let j = 0; j < line.length && !code; j++) code = !note[at + j] && !/\s/.test(line[j] as string);
+    if (line.trim() && !code) out.add(k + 1);
+    at += line.length + 1;
+  }
+  return out;
+}
+
+// ---------- Checks 11 and 12: unused names and giveaway tokens (section 5.2) ----------
+
+const WORD = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
+const STRING = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g;
+
+// The words of code lines without string literals and comments.
+function wordsOf(text: string, prefixes: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(STRING, '""');
+    const cut = Math.min(line.length, ...prefixes.map((p) => line.indexOf(p)).filter((i) => i >= 0));
+    for (const m of line.slice(0, cut).matchAll(WORD)) out.add(m[0]);
+  }
+  return out;
+}
+
+// Line k is in an import statement: it starts one, or it is a name list line under an import line that opens a list.
+function inImport(lines: string[], k: number): boolean {
+  for (let i = k; i >= 0; i--) {
+    const t = (lines[i] ?? "").trim();
+    if (/^(import|from|using)\b/.test(t)) return i === k || /[{(]$/.test(t);
+    if (!/^[\w$\s,*]+$/.test(t)) return false;
+  }
+  return false;
+}
+
+// Check 11: the names that the edit leaves at one place of the file, where that place is no member access (".", "->", "::"), and the place
+// is in an import statement or no other file at the head has the name. A removed name at one place lost its use. An added name at one place
+// has no use or no declaration. A name at 0 places left the file with its uses, so it does not count.
+export async function unusedNames(
+  h: Pick<Host, "repo" | "head">,
+  s: Pick<SeedFields, "path" | "find" | "replace">,
+  c: Pick<Checked, "text">,
+): Promise<string[]> {
+  const prefixes = CODE_TYPES[extname(s.path).toLowerCase()] ?? [];
+  const before = wordsOf(s.find, prefixes);
+  const after = wordsOf(s.replace, prefixes);
+  const lines = c.text.split("\n");
+  const out: string[] = [];
+  for (const n of [...new Set([...before, ...after])].sort()) {
+    if (before.has(n) && after.has(n)) continue;
+    const hits = [...c.text.matchAll(new RegExp(`\\b${n}\\b`, "g"))];
+    if (hits.length !== 1) continue;
+    const at = (hits[0] as RegExpExecArray).index;
+    const lead = c.text.slice(Math.max(0, at - 2), at);
+    if (lead.endsWith(".") || lead === "->" || lead === "::") continue;
+    if (!inImport(lines, c.text.slice(0, at).split("\n").length - 1)) {
+      const files = ascii((await g(h.repo, ["grep", "-w", "-F", "-l", "-e", n, h.head], undefined, [0, 1])).out)
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => l.slice(h.head.length + 1));
+      if (files.some((p) => p !== s.path)) continue;
+    }
+    out.push(n);
+  }
+  return out;
+}
+
+// Check 12 tokens of a text: string bodies of 3 or more characters, numbers of 2 or more characters, and code-like words (an upper-case
+// letter after the first, a digit, or an underscore). A plain word also matches English text, so it does not count.
+function tokensOf(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`((?:\\.|[^`\\])*)`/g)) {
+    const body = m[1] ?? m[2] ?? m[3] ?? "";
+    if (body.trim().length >= 3) out.add(body);
+  }
+  const code = text.replace(STRING, '""');
+  for (const m of code.matchAll(/\b\d[\w.]*\b/g)) if (m[0].length >= 2) out.add(m[0]);
+  for (const m of code.matchAll(WORD)) if (/[A-Z0-9_]/.test(m[0].slice(1))) out.add(m[0]);
+  return out;
+}
+
+// Check 12, a report only: where a token that the edit removes stands as written. "description": the PR description of the host case.
+// "commit subject": the subject of the commit that the seed folds into (fold, a commit of the original range).
+export async function giveaways(h: Pick<Host, "repo" | "file">, s: Pick<SeedFields, "find" | "replace">, fold: string): Promise<string[]> {
+  const kept = tokensOf(s.replace);
+  const removed = [...tokensOf(s.find)].filter((t) => !kept.has(t));
+  const holds = (text: string) => removed.some((t) => new RegExp(`(?<!\\w)${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?!\\w)`).test(text));
+  const subject = await gText(h.repo, ["log", "-1", "--format=%s", fold]);
+  return [...(holds(h.file.pr.description) ? ["description"] : []), ...(holds(subject) ? ["commit subject"] : [])];
+}
+
 // ---------- The seeded case (section 6.1) ----------
 
 export type PlacedSeed = { seed: SeedRecord; anchor: Place; alt: Place[] };
@@ -455,18 +625,21 @@ export function seededCase(
     return { ...s, path: m.path, lines: m.lines };
   };
   const one = (p: Place): Spot => ({ path: p.path, side: "new", lines: [p.line, p.line] });
-  const bugs: EvalBug[] = o.seeds.map(({ seed, anchor, alt }, k) => ({
-    id: `S${k + 1}`,
-    ...one(anchor),
-    ...(alt.length > 0 && { alt: alt.map(one) }),
-    severityMin: "major",
-    module: MODULE[seed.kind] ?? "core",
-    note: `Seeded ${seed.kind} defect.`,
-    text: seed.comment,
-    ...(CATEGORY[seed.kind] && { category: CATEGORY[seed.kind] }),
-    source: "seeded",
-    seedKind: seed.kind,
-  }));
+  const bugs: EvalBug[] = o.seeds.map(({ seed, anchor, alt }, k) => {
+    const kind = kindOf(seed);
+    return {
+      id: `S${k + 1}`,
+      ...one(anchor),
+      ...(alt.length > 0 && { alt: alt.map(one) }),
+      severityMin: "major",
+      module: MODULE[kind] ?? "core",
+      note: `Seeded ${kind} defect.`,
+      text: seed.comment,
+      ...(CATEGORY[kind] && { category: CATEGORY[kind] }),
+      source: "seeded",
+      seedKind: kind,
+    };
+  });
   const extra = (x: { note: string; text?: string; category?: string; source?: EvalExtra["source"] }, s: Spot): EvalExtra => ({
     ...move(s),
     note: x.note,
@@ -519,7 +692,7 @@ export function seededCase(
 // ---------- The build ----------
 
 // Section 4.2: hosts in ID order. Per host, the kind with the lowest count so far first, then the seeder order. At most HOST_CAP seeds per
-// host and one per file (check 9). The rest are spares.
+// host and one per file (check 9). The rest are spares. The kind is the build kind (kindOf).
 export function pickSeeds(byHost: Map<string, SeedRecord[]>): { picked: Map<string, SeedRecord[]>; spares: number } {
   const count = new Map<SeedKind, number>();
   const picked = new Map<string, SeedRecord[]>();
@@ -530,10 +703,10 @@ export function pickSeeds(byHost: Map<string, SeedRecord[]>): { picked: Map<stri
     while (got.length < HOST_CAP) {
       const open = all.filter((s) => !got.includes(s) && !got.some((x) => x.path === s.path));
       if (!open.length) break;
-      const low = Math.min(...open.map((s) => count.get(s.kind) ?? 0));
-      const s = open.find((x) => (count.get(x.kind) ?? 0) === low) as SeedRecord;
+      const low = Math.min(...open.map((s) => count.get(kindOf(s)) ?? 0));
+      const s = open.find((x) => (count.get(kindOf(x)) ?? 0) === low) as SeedRecord;
       got.push(s);
-      count.set(s.kind, (count.get(s.kind) ?? 0) + 1);
+      count.set(kindOf(s), (count.get(kindOf(s)) ?? 0) + 1);
     }
     spares += all.length - got.length;
     if (got.length) picked.set(id, got);
@@ -549,6 +722,8 @@ export type SeededInfo = {
   mergeHosts: number;
   hostFingerprint: string;
   seedsHash: string;
+  // The fold rule of each seed by seed ID (section 5.3).
+  folds: Record<string, FoldRule>;
 };
 export type SeededManifest = Manifest & { seeded: SeededInfo };
 // stale, restored: the seeds that the binding pass made stale or brought back. issues: the natural must-finds plus the seeds per case,
@@ -612,11 +787,23 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
     if (stale || restored) saveStore(root, { ...store, seeds });
 
     const keptAll = seeds.filter((s) => s.state === "kept");
-    const keptByKind = Object.fromEntries(SEED_KINDS.map((k) => [k, keptAll.filter((s) => s.kind === k).length])) as Record<
+    const keptByKind = Object.fromEntries(SEED_KINDS.map((k) => [k, keptAll.filter((s) => kindOf(s) === k).length])) as Record<
       SeedKind,
       number
     >;
-    const kept = Map.groupBy(keptAll, (s) => s.host.id);
+    // Twin hosts give one case, on the twin with the lowest case ID. A seed of another twin must pass the checks there. Check 6 reads
+    // the case of the host, so a seed can fail there. It is then a spare.
+    const kept = new Map<string, SeedRecord[]>();
+    let twinSpares = 0;
+    for (const list of Map.groupBy(keptAll, twinKey).values()) {
+      const id = list.map((s) => s.host.id).sort()[0] as string;
+      const h = (await hostOf(id)) as Host;
+      const fit: SeedRecord[] = [];
+      for (const s of list)
+        if (s.host.id !== id && "check" in (await checkSeed(h, s))) twinSpares++;
+        else fit.push(s);
+      kept.set(id, fit);
+    }
     let mergeHosts = 0;
     let mergeSeeds = 0;
     for (const [id, list] of [...kept]) {
@@ -635,6 +822,7 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
     const hostsUsed: { id: string; hash: string }[] = [];
     const used: SeedRecord[] = [];
     const issues: { id: string; n: number; lines: number }[] = [];
+    const folds: Record<string, FoldRule> = {};
     const tally = noThreads();
     let traps = 0;
     let extras = 0;
@@ -646,13 +834,15 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
         if ("check" in c) throw new Error(`Seed ${s.id} fails check ${c.check}: ${c.reason} Drop or retire it, then build again.`);
         checked.push(c);
       }
-      const head = await rewriteHistory(
+      const rewrite = await rewriteHistory(
         h.repo,
         h.base,
         h.head,
-        list.map((s, k) => ({ path: s.path, mode: (checked[k] as Checked).mode, sha: (checked[k] as Checked).seeded })),
+        list.map((s, k) => ({ ...s, ...(checked[k] as Checked) })),
       );
-      if (head === null) throw new Error(`Host ${id} has a merge commit in its range.`);
+      if (rewrite === null) throw new Error(`Host ${id} has a merge commit in its range.`);
+      const { head } = rewrite;
+      for (const [k, s] of list.entries()) folds[s.id] = rewrite.rules[k] as FoldRule;
       // The places at H' with every seed of the host.
       const texts = new Map(list.map((s, k) => [s.path, (checked[k] as Checked).text]));
       const at = async (p: { path: string; text: string }, seed: string): Promise<Place> => {
@@ -697,7 +887,7 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
       tally.overlap += dropped;
     }
 
-    const byKind = Object.fromEntries(SEED_KINDS.map((k) => [k, used.filter((s) => s.kind === k).length])) as Record<SeedKind, number>;
+    const byKind = Object.fromEntries(SEED_KINDS.map((k) => [k, used.filter((s) => kindOf(s) === k).length])) as Record<SeedKind, number>;
     const sorted = [...used].sort((a, b) => (a.id < b.id ? -1 : 1));
     const manifest: SeededManifest = {
       format: 1,
@@ -736,10 +926,11 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
         seeds: used.length,
         byKind,
         hosts: written.length,
-        spares: spares + mergeSeeds,
+        spares: spares + mergeSeeds + twinSpares,
         mergeHosts,
         hostFingerprint: setFingerprint(hostsUsed),
         seedsHash: createHash("sha256").update(JSON.stringify(sorted)).digest("hex"),
+        folds: Object.fromEntries(sorted.map((s) => [s.id, folds[s.id] as FoldRule])),
       },
     };
     writeFileSync(join(work, "MANIFEST.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -774,6 +965,7 @@ export function buildText(b: SeedBuild): string {
     `Seeds by kind: ${SEED_KINDS.map((k) => `${k} ${s.byKind[k]}`).join(", ")}.`,
     `Issues per case (natural must-finds plus seeds): ${b.issues.join(", ") || "none"}.`,
     `Bindings: ${b.stale} seeds went stale, and ${b.restored} came back.`,
+    `Folds: ${FOLD_RULES.map((r) => `${r} ${Object.values(s.folds).filter((x) => x === r).length}`).join(", ")}.`,
   ];
   lines.push(`Kept seeds by kind: ${SEED_KINDS.map((k) => `${k} ${b.kept[k]}`).join(", ")}.`);
   const low = SEED_KINDS.filter((k) => k !== "architecture" && b.kept[k] < KIND_FLOOR);
