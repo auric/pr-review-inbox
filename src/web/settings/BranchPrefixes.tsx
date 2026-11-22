@@ -8,10 +8,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, CircleAlert, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
+import { Switch } from "@/components/ui/switch";
 import type { SettingsDto, SettingsInput } from "../../shared/dto";
 import { PREFIX_MAX, PREFIXES_MAX } from "../../shared/task";
 import { api } from "../api";
-import { read } from "../shell/data";
+import { useMeta } from "../meta";
+import { read, useSaveSettings } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { SaveStatus, TYPING_MS, useSaver } from "./autosave";
 import {
@@ -198,7 +201,31 @@ export function BranchPrefixes({ settings }: { settings: SettingsDto }) {
           </span>
         )}
       </div>
+      <PlanCheckSwitch settings={settings} />
       <RunLimits settings={settings} />
     </section>
+  );
+}
+
+// spec.md section 6.22.9: the plan check run of each new plan. It saves at once.
+function PlanCheckSwitch({ settings }: { settings: SettingsDto }) {
+  const save = useSaveSettings();
+  const runner = useMeta().data?.runner.short ?? "";
+  return (
+    <Field orientation="horizontal" className="border-t pt-3">
+      <Switch
+        id="task-plan-check"
+        aria-describedby="task-plan-check-help"
+        checked={settings.taskPlanCheck}
+        disabled={save.isPending}
+        onCheckedChange={(taskPlanCheck) => save.mutate({ baseUrl: settings.baseUrl ?? "", caFile: settings.caFile ?? "", taskPlanCheck })}
+      />
+      <FieldContent>
+        <FieldLabel htmlFor="task-plan-check">Check each plan with a second {runner} run</FieldLabel>
+        <FieldDescription id="task-plan-check-help">
+          {runner} checks a new plan against the code before you see it. A blocker or major problem starts one more plan run. Saves at once.
+        </FieldDescription>
+      </FieldContent>
+    </Field>
   );
 }

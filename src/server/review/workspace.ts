@@ -540,13 +540,16 @@ export type TaskWorkspaceInput = {
   // The task ID. The fetched head stays at refs/rl/task/<task>/target.
   task: number;
   branch: string;
-  remote: BranchRemote;
   files?: ContextFile[];
   attachments?: AttachmentFile[];
   long?: LongGit;
   // The submodule folders of the fetched head. Absent: none, as in the review snapshot of a PR.
   nested?: (cache: string, head: string) => Promise<SnapshotRepo[]>;
-};
+} & (
+  | { remote: BranchRemote; commit?: undefined }
+  // spec.md section 6.22.5: a commit of the task cache, such as the base of a plan. Nothing is fetched, and the commit must exist.
+  | { remote?: undefined; commit: string }
+);
 
 // A task run reads the newest head of the target branch (spec.md section 6.14). HEAD, BASE, and TARGET of the git tools are all
 // that commit. The run folder has the layout of prepareWorkspace, with no pr.md and an empty diff.
@@ -566,34 +569,46 @@ export async function prepareTaskWorkspace(input: TaskWorkspaceInput): Promise<W
   const { empty, env } = gitSetup(dataDir);
   const g = (args: string[]) => git([`--git-dir=${cache}`, ...args], { env });
   const target = `refs/rl/task/${input.task}/target`;
-  const head = await locked(cache, async () => {
-    await initCache(cache, env);
-    try {
-      await git(
-        [
-          `--git-dir=${cache}`,
-          "fetch",
-          "--no-tags",
-          "--no-write-fetch-head",
-          "--quiet",
-          "--end-of-options",
-          input.remote.url,
-          `+${branchRef}:${target}`,
-        ],
-        {
-          env: gitEnv(empty, input.remote.config),
-          ...input.long,
-        },
-      );
-    } catch (e) {
-      throw fetchError(e, input.remote.config);
-    }
-    return (await g(["rev-parse", "--verify", "--quiet", `${target}^{commit}`])).trim();
-  });
+  const { remote } = input;
+  const head = remote
+    ? await locked(cache, async () => {
+        await initCache(cache, env);
+        try {
+          await git(
+            [
+              `--git-dir=${cache}`,
+              "fetch",
+              "--no-tags",
+              "--no-write-fetch-head",
+              "--quiet",
+              "--end-of-options",
+              remote.url,
+              `+${branchRef}:${target}`,
+            ],
+            {
+              env: gitEnv(empty, remote.config),
+              ...input.long,
+            },
+          );
+        } catch (e) {
+          throw fetchError(e, remote.config);
+        }
+        return (await g(["rev-parse", "--verify", "--quiet", `${target}^{commit}`])).trim();
+      })
+    : await cachedCommit(cache, env, input.commit as string, input.project, input.repo);
   if (!HEAD.test(head)) throw new WorkspaceError(`The branch ${input.branch} has no commit.`);
   const nested = input.nested ? await input.nested(cache, head) : [];
   const at = { sourceHead: head, targetHead: head, mergeBase: head, rangeBase: head, diff: "" };
   return taskSnapshot({ dataDir, cache, env, runId, task: input.task, files, attachments, long: input.long, nested }, at);
+}
+
+// A commit that the task cache must already hold. Nothing is fetched.
+async function cachedCommit(cache: string, env: Record<string, string>, commit: string, project: string, repo: string): Promise<string> {
+  if (!HEAD.test(commit)) throw new WorkspaceError(`Invalid commit hash: ${commit}`);
+  if (!existsSync(join(cache, "HEAD"))) throw new WorkspaceError(`The app has no copy of ${project}/${repo} yet.`);
+  const found = await git([`--git-dir=${cache}`, "rev-parse", "--verify", "--quiet", `${commit}^{commit}`], { env }).catch(() => "");
+  if (found.trim() !== commit) throw new WorkspaceError(`The commit ${commit.slice(0, 12)} is not in the app copy of the repository.`);
+  return commit;
 }
 
 // The mode-120000 paths of a commit.
@@ -704,13 +719,9 @@ export async function prepareCommitWorkspace(input: CommitWorkspaceInput): Promi
       throw new WorkspaceError(`Invalid attachment name: ${a.name}`);
   const dataDir = longData(input.dataDir);
   const cache = cachePath(dataDir, { project: input.project, repo: input.repo, id: input.task });
-  if (!existsSync(join(cache, "HEAD"))) throw new WorkspaceError(`The app has no copy of ${input.project}/${input.repo} yet.`);
   const { env } = gitSetup(dataDir);
   const g = (args: string[]) => git([`--git-dir=${cache}`, ...args], { env });
-  for (const c of [input.base, input.head]) {
-    const found = await g(["rev-parse", "--verify", "--quiet", `${c}^{commit}`]).catch(() => "");
-    if (found.trim() !== c) throw new WorkspaceError(`The commit ${c.slice(0, 12)} is not in the app copy of the repository.`);
-  }
+  for (const c of [input.base, input.head]) await cachedCommit(cache, env, c, input.project, input.repo);
   const diff = await g(["diff", ...diffArgs, input.base, input.head]);
   const at = { sourceHead: input.head, targetHead: input.base, mergeBase: input.base, rangeBase: input.base, diff };
   return taskSnapshot({ dataDir, cache, env, runId, task: input.task, files, attachments, long: input.long }, at);

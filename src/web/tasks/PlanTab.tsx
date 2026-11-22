@@ -5,7 +5,8 @@
 // rule lines, the branch (BranchSection.tsx), the repositories of a task with several (section 6.16.5), the approved commands with the
 // first-use warning, the commands that the runner may run with their own first-use warning (section 6.21.3), and the map check line. The
 // header button "Approve the plan" submits this form.
-// PlanParts is the Plan tab: the parts with their state in plain words, the tasks with check marks, and the lines against the limit.
+// PlanParts is the Plan tab: the contracts and risks, the plan check, and the app checks (section 6.22.9), then the parts with their state
+// in plain words, the tasks with check marks, and the lines against the limit.
 import { Check, Circle, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -21,6 +22,7 @@ import {
   BUILDS_AT_ONCE_DEFAULT,
   MAX_OPEN_CAP,
   PART_STATE_TEXT,
+  type PlanProblem,
   type StartMode,
   sizeRank,
   TASK_SIZES,
@@ -39,6 +41,7 @@ import {
   type BranchPick,
   basePicks,
   branchApproval,
+  checkLine,
   codeParts,
   continuable,
   firstPick,
@@ -49,14 +52,18 @@ import {
   mergedPr,
   ON_TOP,
   openPrs,
+  otherChecksLine,
   partLabel,
   pickedPrefix,
   plannedTasks,
   prefixProblem,
+  problemPart,
   proposals,
+  repairAnswer,
   repoName,
   reviewChoice,
   roleText,
+  SEVERITY_WORD,
   SIZE_LINE,
   type StartPick,
   showRepos,
@@ -115,6 +122,9 @@ export function PlanApproval(props: {
   const { t, runner } = props;
   const names = useShellNames();
   const plan = t.plan;
+  // spec.md section 6.22.9: the lines under the missing map line.
+  const checked = checkLine(t, runner);
+  const others = otherChecksLine(t);
   const several = showRepos(t);
   const sub = t.subtasks !== null;
   const [starts, setStarts] = useState<StartPick[]>(() => firstStarts(t));
@@ -323,6 +333,12 @@ export function PlanApproval(props: {
           The Spec tab marks them.
         </p>
       )}
+      {checked && (
+        <p data-plan-check className="m-0 text-sm text-ink-2">
+          {checked}
+        </p>
+      )}
+      {others && <p className="m-0 text-sm text-ink-2">{others}</p>}
       <FieldSet className="gap-1.5">
         <FieldLegend className="text-sm font-semibold">Commands that the app runs after each step</FieldLegend>
         {plan.commands.length === 0 && (
@@ -918,7 +934,107 @@ function partTime(t: TaskDto, part: number) {
   return ms > 0 ? `${minutes(ms)} min` : null;
 }
 
-export function PlanParts({ t }: { t: TaskDto }) {
+// One problem of the plan check or of the app checks (spec.md section 6.22.9). answer: the repair answer of a repaired check.
+function ProblemItem({ t, p, answer }: { t: TaskDto; p: PlanProblem; answer?: string }) {
+  const where = [problemPart(t, p.part), p.path ? `${p.path}${p.line === null ? "" : `:${p.line}`}` : null].filter(Boolean);
+  return (
+    <li data-plan-problem={p.id} className="grid gap-0.5 text-sm">
+      <span>
+        <span className="font-medium">{SEVERITY_WORD[p.severity]}:</span> {p.text}
+      </span>
+      {p.fix && <span className="text-ink-2">Fix: {p.fix}</span>}
+      {answer && <span className="text-ink-2">{answer}</span>}
+      {where.length > 0 && (
+        <span translate="no" className="font-mono text-xs text-muted-foreground">
+          {where.join(" · ")}
+        </span>
+      )}
+    </li>
+  );
+}
+
+const CHANGE_WORD = { add: "Add", change: "Change", remove: "Remove" } as const;
+
+// spec.md section 6.22.9, Plan tab: three blocks above the parts.
+function PlanQuality({ t, runner }: { t: TaskDto; runner: string }) {
+  const plan = t.plan;
+  if (!plan) return null;
+  const c = plan.check;
+  const line = checkLine(t, runner, false);
+  const repaired = c?.state === "repaired";
+  const items = repaired ? c.sent : (c?.problems ?? []);
+  const heading = "m-0 text-sm font-semibold";
+  const list = "m-0 grid list-none gap-2 p-0";
+  return (
+    <div className="grid gap-4">
+      <section aria-labelledby="plan-contracts" className="grid gap-1.5">
+        <h3 id="plan-contracts" className={heading}>
+          Contracts and risks
+        </h3>
+        {plan.contracts.length + plan.risks.length === 0 ? (
+          <p className="m-0 text-sm text-ink-2">The plan names no contract and no risk.</p>
+        ) : (
+          <ul className={list}>
+            {plan.contracts.map((x) => (
+              <li key={`c-${x.name}-${x.change}-${x.path}`} className="grid gap-0.5 text-sm">
+                <span>
+                  <code translate="no" className="font-mono text-xs">
+                    {x.name}
+                  </code>{" "}
+                  · {CHANGE_WORD[x.change]} ·{" "}
+                  <span translate="no" className="font-mono text-xs">
+                    {x.path || "new"}
+                  </span>
+                </span>
+                <span className="text-ink-2">
+                  Users: {x.users} Compat: {x.compat}
+                </span>
+              </li>
+            ))}
+            {plan.risks.map((x) => (
+              <li key={`r-${x.text}`} className="grid gap-0.5 text-sm">
+                <span>Risk: {x.text}</span>
+                <span className="text-ink-2">Caught by: {x.check}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {c && (
+        <section aria-labelledby="plan-check" className="grid gap-1.5">
+          <h3 id="plan-check" className={heading}>
+            Plan check
+          </h3>
+          {line && <p className="m-0 text-sm text-ink-2">{line}</p>}
+          {items.length > 0 && (
+            <ul className={list}>
+              {items.map((p) => (
+                <ProblemItem key={p.id} t={t} p={p} answer={repaired ? repairAnswer(t, p.id, runner) : undefined} />
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+      <section aria-labelledby="plan-app-checks" className="grid gap-1.5">
+        <h3 id="plan-app-checks" className={heading}>
+          App checks
+        </h3>
+        {plan.checks.length === 0 ? (
+          <p className="m-0 text-sm text-ink-2">The app found no problem in the plan.</p>
+        ) : (
+          <ul className={list}>
+            {plan.checks.map((p) => (
+              <ProblemItem key={p.id} t={t} p={p} />
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+export function PlanParts({ t, runner }: { t: TaskDto; runner: string }) {
+  const quality = t.plan ? <PlanQuality t={t} runner={runner} /> : null;
   const parts = codeParts(t);
   const tasks = plannedTasks(t);
   const budget = t.settings.lineBudget ?? t.plan?.budget ?? null;
@@ -945,39 +1061,45 @@ export function PlanParts({ t }: { t: TaskDto }) {
   );
   if (!parts.length)
     return (
-      <div className="grid gap-2">
-        <p className="m-0 text-sm text-ink-2">The build has not started. The plan has these tasks:</p>
-        {tasks.length ? taskList(tasks) : <p className="m-0 text-sm text-muted-foreground">No task yet.</p>}
+      <div className="grid gap-4">
+        {quality}
+        <div className="grid gap-2">
+          <p className="m-0 text-sm text-ink-2">The build has not started. The plan has these tasks:</p>
+          {tasks.length ? taskList(tasks) : <p className="m-0 text-sm text-muted-foreground">No task yet.</p>}
+        </div>
       </div>
     );
   return (
-    <ul className="m-0 grid list-none gap-3 p-0">
-      {parts.map((p) => {
-        const time = partTime(t, p.id);
-        const stage = stageBadge(t, p);
-        const own = plannedTasks(t, p);
-        return (
-          <li key={p.id} data-task-item tabIndex={-1} className="grid gap-1.5 rounded-md border bg-card px-3 py-2.5 outline-offset-2">
-            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
-              <span className="font-semibold">
-                {t.subtasks ? `${partLabel(t, p)}: ${p.title}` : parts.length > 1 ? `Part ${p.ord}: ${p.title}` : p.title}
-              </span>
-              <Badge variant="quiet">{PART_STATE_TEXT[p.state]}</Badge>
-              {stage && <Badge variant="quiet">{stage}</Badge>}
-              {p.remotePr !== null && <span className="text-ink-2">PR #{p.remotePr}</span>}
-            </div>
-            <p className="m-0 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-ink-2">
-              <span translate="no" className="font-mono">
-                {p.branch}
-              </span>
-              {p.lines !== null && <span>{budget ? `${p.lines} of ${budget} lines` : `${p.lines} lines`}</span>}
-              {time && <span>Time: {time}</span>}
-              {p.usage && <span>{p.usage.turns} turns</span>}
-            </p>
-            {own.length > 0 && taskList(own)}
-          </li>
-        );
-      })}
-    </ul>
+    <div className="grid gap-4">
+      {quality}
+      <ul className="m-0 grid list-none gap-3 p-0">
+        {parts.map((p) => {
+          const time = partTime(t, p.id);
+          const stage = stageBadge(t, p);
+          const own = plannedTasks(t, p);
+          return (
+            <li key={p.id} data-task-item tabIndex={-1} className="grid gap-1.5 rounded-md border bg-card px-3 py-2.5 outline-offset-2">
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
+                <span className="font-semibold">
+                  {t.subtasks ? `${partLabel(t, p)}: ${p.title}` : parts.length > 1 ? `Part ${p.ord}: ${p.title}` : p.title}
+                </span>
+                <Badge variant="quiet">{PART_STATE_TEXT[p.state]}</Badge>
+                {stage && <Badge variant="quiet">{stage}</Badge>}
+                {p.remotePr !== null && <span className="text-ink-2">PR #{p.remotePr}</span>}
+              </div>
+              <p className="m-0 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-ink-2">
+                <span translate="no" className="font-mono">
+                  {p.branch}
+                </span>
+                {p.lines !== null && <span>{budget ? `${p.lines} of ${budget} lines` : `${p.lines} lines`}</span>}
+                {time && <span>Time: {time}</span>}
+                {p.usage && <span>{p.usage.turns} turns</span>}
+              </p>
+              {own.length > 0 && taskList(own)}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }

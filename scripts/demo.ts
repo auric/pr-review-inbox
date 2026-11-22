@@ -398,6 +398,43 @@ const SUB_SPEC = {
   maxOpenReason: "Two sub-tasks can run side by side, and your PRs take about 2 days to merge.",
 };
 
+// docs/plans/review-v2/spec.md sections 6.22.5 and 6.22.6: the plan check of ABC-10688 finds a major problem, so its plan gets one
+// repair. Each other plan check finds one minor problem.
+const CHECK_MAJOR = {
+  summary: "The map misses the release of the lock on a throw.",
+  problems: [
+    {
+      id: "p1",
+      severity: "major",
+      part: 1,
+      path: "src/cache/flush.ts",
+      line: 6,
+      text: "The plan does not say that write() can throw while the entry holds the lock.",
+      fix: "Release the lock in a finally block, as the answers ask.",
+    },
+  ],
+  coverage: READ_FLUSH,
+};
+const CHECK_MINOR = {
+  summary: "The plan fits the code.",
+  problems: [
+    {
+      id: "p1",
+      severity: "minor",
+      part: 1,
+      path: "",
+      line: null,
+      text: "The plan names no test for an empty input.",
+      fix: "Add a test for an empty input.",
+    },
+  ],
+  coverage: READ_FLUSH,
+};
+const TASK_REPAIRED = {
+  ...TASK_SPEC,
+  repairs: [{ id: "p1", fixed: true, note: "T1 now releases the lock in a finally block." }],
+};
+
 // The verify phase of a review run gets one tool call and no subagent (docs/plans/review-v2/spec.md section 1.6).
 const NO_AGENTS = claudeStream(claudeDir, "check", "claude-synthetic/review-flat.jsonl");
 runner.write({
@@ -409,9 +446,11 @@ runner.write({
   discuss: DISCUSS,
   interview: TASK_INTERVIEW,
   spec: TASK_SPEC,
+  planCheck: CHECK_MINOR,
   taskReview: { summary: "The lock moves into the loop.", risks: [], questions: [], findings: [], coverage: READ_FLUSH },
   seq: {
-    spec: [{ spec: TASK_SPEC }, { spec: MULTI_SPEC }, { spec: SUB_SPEC }],
+    // The repair of ABC-10688 counts as the second spec run. Its result comes from match.
+    spec: [{ spec: TASK_SPEC }, { spec: TASK_REPAIRED }, { spec: MULTI_SPEC }, { spec: SUB_SPEC }],
     "implement:build": [
       // ABC-10688 asks to allow one command (spec.md section 6.21.4). Its next try runs it.
       {
@@ -459,8 +498,15 @@ runner.write({
     ],
     "implement:fix": [{ writes: [{ path: "repo/src/cache/flush.ts", text: TASK_FLUSH }] }],
   },
+  // The repair run holds the problems of the check, so it matches first.
+  match: [
+    { when: "## Problems of the plan check", seq: { spec: [{ spec: TASK_REPAIRED }] } },
+    { when: "# Plan check of ABC-10688", seq: { planCheck: [{ planCheck: CHECK_MAJOR }] } },
+  ],
   // The task runs get no subagent, as the verify phase.
-  bySchema: Object.fromEntries((["verify", "interview", "spec", "implement"] as const).map((k) => [k, { fixture: NO_AGENTS }])),
+  bySchema: Object.fromEntries(
+    (["verify", "interview", "spec", "planCheck", "implement"] as const).map((k) => [k, { fixture: NO_AGENTS }]),
+  ),
 });
 const SOURCE_PRS = [1001, 1002, 31, 210, 212, 77, 74, 33, 215, 9, 5, 2, 1004];
 const remote = await reviewRemote(claudeDir, { ...Object.fromEntries(SOURCE_PRS.map((id) => [id, "source" as const])), 81: "next" });

@@ -160,6 +160,25 @@ export const externalMachine = setup({ types: { events: {} as ExternalEvent } })
   },
 });
 
+export const PLAN_CHECK_EVENTS = ["CLEAN", "SHOWN", "REPAIR", "REPAIRED", "FAILED", "STOPPED"] as const;
+export type PlanCheckEvent = { type: (typeof PLAN_CHECK_EVENTS)[number] };
+
+// spec.md sections 6.22.5 and 6.22.6: task.docs_json.check of one plan version. The spec run finish writes the initial state. A repair
+// that fails keeps the first plan, so FAILED in repairing gives shown. A new spec run replaces the docs and so ends the machine.
+export const planCheckMachine = setup({ types: { events: {} as PlanCheckEvent } }).createMachine({
+  id: "planCheck",
+  initial: "pending",
+  states: {
+    pending: { on: { CLEAN: "clean", SHOWN: "shown", REPAIR: "repairing", FAILED: "failed", STOPPED: "stopped" } },
+    repairing: { on: { REPAIRED: "repaired", FAILED: "shown", STOPPED: "stopped" } },
+    clean: { type: "final" },
+    shown: { type: "final" },
+    repaired: { type: "final" },
+    failed: { type: "final" },
+    stopped: { type: "final" },
+  },
+});
+
 export const PHASES = [
   "idle",
   "setup",

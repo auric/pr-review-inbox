@@ -1,6 +1,6 @@
 # Build a Jira task manual smoke test
 
-This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Part U is Gate UTU: "Tell Claude" and "Update from <base>" on a release base (`tests/e2e/task-tell.e2e.ts` is its automated twin). Part N is a task that changes a repository and its submodule (`tests/e2e/task-repos.e2e.ts` is its automated twin). Part T is Gate UT: a Jira task with sub-tasks, one branch and one PR per sub-task (`tests/e2e/task-subtasks.e2e.ts` is its automated twin). Part T2 is a remote build over ssh that a skill describes, with the commands that Claude may run. Parts M (medium task) and L (large task) come with the later work packages.
+This test checks "Build a Jira task" (review v2 part 6) against a real Bitbucket Server, a real Jira server, a personal test repository, and the real `claude` CLI. The user runs it. The automated suites use the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote only (`tests/e2e/task-small.e2e.ts`). Part S is Gate US of docs/plans/review-v2/tasks.md: a small task from the Jira key to the pull request. Part B is Gate UBR: the branch prefixes, the base branch, and a branch that exists on the server. Part U is Gate UTU: "Tell Claude" and "Update from <base>" on a release base (`tests/e2e/task-tell.e2e.ts` is its automated twin). Part N is a task that changes a repository and its submodule (`tests/e2e/task-repos.e2e.ts` is its automated twin). Part T is Gate UT: a Jira task with sub-tasks, one branch and one PR per sub-task (`tests/e2e/task-subtasks.e2e.ts` is its automated twin). Part T2 is a remote build over ssh that a skill describes, with the commands that Claude may run. Part PQ is Gate UP: the plan check and its repair round (`tests/e2e/task-plan-check.e2e.ts` is its automated twin). Parts M (medium task) and L (large task) come with the later work packages.
 
 ## Rules
 
@@ -257,6 +257,20 @@ Run this part when TB-1 to TB-4 of docs/plans/task-builder-v2.md are built. It c
 7. Open the Log tab. Under a run that left files in ./out, expect "Files from Claude" with each name, its size, and Download. Click Download and check the file. Expect each file to stay listed and to download after the next run.
 8. When a part is ready, click "Open the PR" and "Push and open PR". Check Bitbucket: the PR is open, and its files hold only the plan file and the files of the task.
 9. Click Done or Waive on each checklist step. After the PR merges, expect the task to stay open with "Needs you: finish your checklist" until no step is open.
+
+## PQ. Plan quality: the plan check and the repair (Gate UP)
+
+Run this part after part S. It checks the plan check run and its repair round (docs/plans/review-v2/spec.md section 6.22). `tests/e2e/task-plan-check.e2e.ts` is its automated twin. Use `<KEY3>` and `<KEY4>`. Each check run is read-only and has at most 40 turns. Expect two to five more runs: one check per plan, and one repair when the check finds a blocker or a major problem.
+
+1. Open Settings and go to the section "Tasks". Expect the switch "Check each plan with a second Claude run" on, with "Claude checks a new plan against the code before you see it. A blocker or major problem starts one more plan run."
+2. Start `<KEY3>` as in S1 and answer the questions. After "Claude is writing the plan.", expect "Claude is checking the plan against the code." with no main button, and the row "Checking the plan". Record the time of the check. No "Needs you" notification comes before the check ends.
+3. While the check runs, open the same task in a second browser tab and click "Approve the plan" if it shows. Expect no approval.
+4. When the check found a blocker or a major problem, expect "Claude is writing the plan again to fix `<n>` problems of the check." Then expect "The plan is ready: …" with the button "Approve the plan". Record which of these lines shows under the commands: "Claude checked the plan against the code and found no problem.", "The plan check found `<n>` problems: …", or "Claude wrote the plan again to fix `<n>` problems of the check."
+5. Open the Plan tab. Expect "Contracts and risks", "Plan check", and "App checks", each with its items. After a repair, each item of "Plan check" ends with "Claude: fixed.", "Claude: not changed.", or "Claude gave no answer for this problem." Record the count of problems by severity, the count of fixed problems, and the count of "not checked" lines in the coverage of the plan run.
+6. Open the Log tab. Expect "Plan check" and, after a repair, "Plan again after the check". Record the turns of the check run from the run log.
+7. Read each problem against the code. Record how many are real, and how many name a wrong file or line. Close the task.
+8. Start `<KEY4>`. When "Claude is checking the plan against the code." shows, open "More actions" and click "Stop". Expect "Stopped at: checking the plan." Click "Continue". Expect the plan with "You stopped the plan check. You can still approve the plan." and no new run in the Log tab.
+9. Open Settings, Tasks, and turn "Check each plan with a second Claude run" off. Close the task of `<KEY4>`, and start `<KEY4>` again. Expect the plan with no check line and no "Plan check" step in the Log. Turn the switch on again. Close the task.
 
 ## Record
 

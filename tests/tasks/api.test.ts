@@ -58,7 +58,7 @@ const SLOW = { budgetMs: 5_000, retryBudgetMs: 5_000 };
 
 async function setup(taskBudget = SLOW) {
   const dir = join(root, `case-${n++}`);
-  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
+  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, taskPlanCheck: false });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings: Settings = createSettings({ dir, secrets, taskBudget });

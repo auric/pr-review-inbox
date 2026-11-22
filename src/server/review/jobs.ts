@@ -378,6 +378,8 @@ export type TaskRunStart = {
   repos?: (db: Database, head: string) => Promise<SnapshotRepo[]>;
   // task-subagents.md decision 1: the run can start rl-explorer, and its prompt says so. Absent: no Agent tool, as for the plan check.
   explorer?: true;
+  // spec.md section 6.22.5: the snapshot is this commit of the task cache, with no fetch. Absent: the fetched head of branch.
+  commit?: string;
 };
 
 // spec.md section 6.7: one repository of an implement step. commit: the target commit in the cache of the repository. path: the folder
@@ -1788,7 +1790,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         repo: t.repo,
         task: t.task,
         branch: t.branch,
-        remote: await taskRemote(t.project, t.repo),
+        ...(t.commit ? { commit: t.commit } : { remote: await taskRemote(t.project, t.repo) }),
         files: t.files,
         attachments: t.attachments,
         long: { signal: j.abort.signal, timeoutMs: RUN_TIMEOUT_MS },

@@ -107,6 +107,7 @@ export function rowStatus(r: TaskRowDto): { text: string; needsYou: boolean } {
   // ps5-plan.md D6: held lives in the part rows only.
   if (p.held > 0) return { text: "On hold", needsYou: false };
   if (r.state === "interview") return { text: "Reading the task", needsYou: false };
+  if (r.state === "spec_draft" && p.checking) return { text: "Checking the plan", needsYou: false };
   if (r.state === "spec_draft")
     return p.planReady ? { text: "Needs you: approve the plan", needsYou: true } : { text: "Writing the plan", needsYou: false };
   if (r.state === "implementing") {

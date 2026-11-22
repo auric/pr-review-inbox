@@ -47,6 +47,8 @@ const config = z.object({
   usageResume: z.boolean().optional().catch(undefined),
   // Absent: on. Off: the user acknowledged the company AI policy for task attachments, so "Include in runs" does not ask.
   askAttachments: z.boolean().optional().catch(undefined),
+  // Absent: on. Off: a new plan gets no plan check run (docs/plans/review-v2/spec.md section 6.22.10).
+  taskPlanCheck: z.boolean().optional().catch(undefined),
   // Absent: DEFAULT_BRANCH_PREFIXES (src/shared/task.ts).
   taskBranchPrefixes: branchPrefixList.optional().catch(undefined),
   // Absent: RUN_LIMITS defaults (src/shared/task.ts runLimitsOf). Only the changed keys are present.

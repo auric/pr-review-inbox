@@ -24,6 +24,7 @@ import {
   externalOwner,
   limitText,
   MAX_OPEN_CAP,
+  PLAN_PROBLEMS_MAX,
   PROPOSALS_MAX,
   SETUP_TIMEOUT_SEC,
 } from "../../shared/task";
@@ -1337,19 +1338,64 @@ export const subtaskSpecRules = (budget: number) => [
   "Also say how big they are, and how long reviews take in ./context/pr-history.md.",
 ];
 
-// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.4). tools: as in specRules.
+// spec.md section 6.22.8: the lines of a repair run only.
+export const repairRules = [
+  "./context/plan-check.md holds your earlier plan and the problems that the app and a second check found.",
+  "Check each problem in the code. Fix the plan where the problem is real.",
+  "Keep the parts of the earlier plan that have no problem.",
+  "In repairs, give one entry for each problem ID. Set fixed, and say in note what you changed or why not.",
+];
+
+// subtasks: the task builds its Jira sub-tasks (spec.md section 6.20.4). tools: as in specRules. repair: a repair run (section 6.22.6).
 export function specAgent(
   p: Profile,
   budget: number,
   platform: string = process.platform,
   subtasks = false,
   tools: readonly string[] = [],
+  repair = false,
 ): AgentSpec {
   return {
     description: "Read-only plan of one task.",
     prompt: [
       ...specRules(budget, platform, tools),
       ...(subtasks ? subtaskSpecRules(budget) : []),
+      ...(repair ? repairRules : []),
+      ...TRUST,
+      COVERAGE_RULE,
+      ...docsRule(p),
+    ].join("\n"),
+  };
+}
+
+// spec.md section 6.22.8: the read-only check of a plan against the code. It has no subagent. budget: the line budget of one PR.
+// subtasks: the task builds its Jira sub-tasks.
+export function planCheckAgent(p: Profile, budget: number, subtasks = false): AgentSpec {
+  return {
+    description: "Read-only check of the plan of one task.",
+    prompt: [
+      "You check the plan of one task against the code. You cannot change files, and you post nothing.",
+      "Read ./context/plan-check.md first. It holds the plan and the results of the app checks.",
+      "Read ./context/task.md and ./context/answers.md. The answers of the user win over the task text.",
+      FIND_CODE,
+      "Check that each map entry names the right file, line, and symbol for its kind.",
+      "Check that the map lists each file that a task changes, and each caller and test that the change affects.",
+      "Check that the contracts list each route, schema, type, and config key that the change adds, changes, or removes.",
+      "Check that each compat line is true for the current users in the code.",
+      "Check that each part builds and passes its tests alone, in the plan order.",
+      `Check that each part stays under ${budget} changed lines.`,
+      "Check that a test can prove each acceptance criterion, and that the plan names that test.",
+      "Do not repeat a problem from the App checks section.",
+      "Report only problems that you confirmed in the code. Give the path and the line that show each problem.",
+      "Use blocker when the plan cannot work as written.",
+      "Use major when the build would follow a wrong file, line, or order, or miss a caller, contract, or test.",
+      "Use minor for all other problems.",
+      "In fix, say what the plan must say instead.",
+      "Set part to the number of the part that the problem concerns, else null.",
+      `Give at most ${PLAN_PROBLEMS_MAX} problems, the most severe first. An empty list means that the plan fits the code.`,
+      ...(subtasks
+        ? [SUBTASKS_RULE, "Check that each part names the right sub-task keys, and that its start matches the code and the Jira links."]
+        : []),
       ...TRUST,
       COVERAGE_RULE,
       ...docsRule(p),

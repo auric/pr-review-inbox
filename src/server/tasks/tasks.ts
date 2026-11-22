@@ -61,6 +61,11 @@ import {
   nameClashText,
   PART_STATE_TEXT,
   type PartState,
+  PLAN_CHECK_TURNS,
+  type PlanCheck,
+  type PlanProblem,
+  planCheckJsonSchema,
+  planCheckResult,
   RUN_CANCELLED,
   runLimitsOf,
   SHELL_WARNING_FIRST,
@@ -98,11 +103,11 @@ import { buildOf } from "../inbox/builds";
 import { followKey } from "../inbox/queries";
 import type { Live } from "../live";
 import { log } from "../log";
-import { interviewAgent, type Profile, profileOf, specAgent } from "../review/catalog";
+import { interviewAgent, type Profile, planCheckAgent, profileOf, specAgent } from "../review/catalog";
 import { gitEnv } from "../review/git";
 import type { ReviewJobs, TaskRunStart } from "../review/jobs";
 import { type Ending, judgeTask } from "../review/judge";
-import { buildInterviewPrompt, buildSpecPrompt } from "../review/prompt";
+import { buildInterviewPrompt, buildPlanCheckPrompt, buildSpecPrompt } from "../review/prompt";
 import { repoPath } from "../review/validate";
 import { type ContextFile, noUrl, remoteHead, type SnapshotRepo } from "../review/workspace";
 import { branchPrefixesOf, type Settings } from "../settings";
@@ -133,7 +138,7 @@ import {
   type QuestionRow,
   recommendedAnswer,
 } from "./interview";
-import { type PartEvent, partMachine, type TaskEvent, taskMachine } from "./machine";
+import { type PartEvent, type PlanCheckEvent, partMachine, type TaskEvent, taskMachine } from "./machine";
 import {
   atLeast,
   checkLines,
@@ -154,6 +159,18 @@ import {
   sizeFloor,
   toPlan,
 } from "./plan";
+import {
+  CHECK_WAITS_TEXT,
+  checkWaits,
+  couldNotRepair,
+  keepProblems,
+  nextCheck,
+  pendingCheck,
+  planCheckFile,
+  type Repair,
+  repairNeeded,
+  sentProblems,
+} from "./plan-check";
 import { relatedWorkFile } from "./related";
 import { prRows, type RepoDeps, repoDtos, resolveTaskRepos, saveMainRepo, taskRepos, updateRepos } from "./repos";
 import { nextPart, type Schedule } from "./schedule";
@@ -313,6 +330,28 @@ export function advancePart(
 // built between two steps gets error/restart with no step. Held and waiting part rows stay, and so does a waiting message (ps4-plan.md
 // WP-7). Call it before the run recovery (run-rows.ts SQL.recover), which ends the runs themselves with kind restart. dataDir: the
 // data folder. With it, a cut run whose snapshot passes the checks keeps its work (implement.ts keepCut).
+// spec.md section 6.22.5: the only writer of task.docs_json.check other than a new plan. It acts only when the check and the stored plan
+// both have version (the version guard), and the machine takes the event. fields: the other fields of the check. true: it wrote.
+export function moveCheck(
+  db: Database,
+  id: number,
+  version: number,
+  event: PlanCheckEvent["type"],
+  fields: Partial<Omit<PlanCheck, "state" | "version">> = {},
+  now = Date.now(),
+): boolean {
+  const t = taskRow(db, id);
+  const docs = t && docsOf(t);
+  const c = docs?.check;
+  if (!t || !docs || !c || c.version !== version || docs.version !== version) return false;
+  const state = nextCheck(c.state, event);
+  if (state === null) return false;
+  patch(db, id, t.version, { docs_json: JSON.stringify({ ...docs, check: { ...c, ...fields, state } }) }, now);
+  return true;
+}
+
+export const CHECK_RESTART_TEXT = "The app stopped during the plan check.";
+
 export const RESTART_TEXT = (ord: number | null) =>
   `Needs you: the app stopped during the work on ${ord === null ? "the task" : `part ${ord}`}. Continue goes on from there.`;
 export const UPDATE_RESTART = "The update stopped: the app stopped during the update. The branch is as it was.";
@@ -343,6 +382,10 @@ export function recoverTasks(db: Database, now = Date.now(), dataDir?: string) {
         o.task_state === "implementing",
     );
     const open = all.filter((o) => !keep.includes(o));
+    for (const { id } of db.query(Q.waitingChecks).all() as { id: number }[]) {
+      const v = docsOf(taskRow(db, id) as TaskRow)?.check?.version;
+      if (v !== undefined) moveCheck(db, id, v, "STOPPED", { text: CHECK_RESTART_TEXT }, now);
+    }
     db.query(SQL.restartUpdates).run();
     db.query(SQL.failSteps).run({ now, keep: JSON.stringify(keep.map((o) => o.id)) });
     for (const s of cut) keepCut(db, dataDir as string, s);
@@ -550,8 +593,11 @@ const Q = {
   busy: "SELECT 1 FROM task_step WHERE task = $id AND state IN ('waiting', 'running')",
   session: `SELECT 1 FROM task_step WHERE part = $part AND state = 'running' AND run IS NOT NULL
     AND kind IN ('implement', 'fix', 'instruct')`,
-  stepInsert: `INSERT INTO task_step (task, kind, run, state, ord, started_at)
-    VALUES ($task, $kind, $run, 'running', (SELECT COALESCE(MAX(ord), 0) + 1 FROM task_step WHERE task = $task), $now) RETURNING id`,
+  stepInsert: `INSERT INTO task_step (task, kind, run, state, ord, item, started_at)
+    VALUES ($task, $kind, $run, 'running', (SELECT COALESCE(MAX(ord), 0) + 1 FROM task_step WHERE task = $task), $item, $now)
+    RETURNING id`,
+  // spec.md section 6.22.5, Restart: the checks that wait or run.
+  waitingChecks: "SELECT id FROM task WHERE json_extract(docs_json, '$.check.state') IN ('pending', 'repairing')",
   stepEnd: "UPDATE task_step SET state = $state, ended_at = $now WHERE run = $run AND state = 'running' RETURNING id",
   question: `INSERT INTO task_question (task, source, round, ord, text, why, kind, options_json, recommended, step, asked_at)
     VALUES ($task, 'interview', $round, $ord, $text, $why, $kind, $options, $recommended, $step, $now)`,
@@ -716,6 +762,9 @@ export function saveRepoSettings(
   })();
   return null;
 }
+
+// The checked plan of a spec run and what the finish stores with it.
+type NewPlan = { plan: Plan; sub: SubtaskPlan | null; proposals: SpecResult["repos"]; head: string | null };
 
 const settingsOf = (t: Pick<TaskRow, "settings_json">): TaskSettings => {
   const r = taskSettings.safeParse(JSON.parse(t.settings_json));
@@ -945,9 +994,11 @@ export const rowDto = (db: Database, t: TaskRow): TaskRowDto => {
   const merged = (p: (typeof code)[number]) => p.state === "merged" || p.pr_state === "MERGED";
   const open = code.find((p) => !merged(p) && p.state !== "abandoned");
   const docs = docsOf(t);
+  const checking = t.state === "spec_draft" && checkWaits(docs?.check);
   return {
     progress: {
-      planReady: t.state === "spec_draft" && docs !== null && !docs.approved,
+      planReady: t.state === "spec_draft" && docs !== null && !docs.approved && !checking,
+      checking,
       part: open?.ord ?? 0,
       parts: code.length,
       ready: open?.state === "self_reviewed",
@@ -1094,6 +1145,7 @@ function planDto(db: Database, t: TaskRow, docs: Docs): TaskPlanDto {
     contracts: docs.parsed.contracts ?? [],
     risks: docs.parsed.risks ?? [],
     checks: docs.parsed.checks ?? [],
+    check: docs.check ? (({ version: _, ...c }) => c)(docs.check) : null,
     allow: allowOf(docs.parsed, repo.allow),
     shellWarning: repo.shellWarnedAt === null,
   };
@@ -1751,8 +1803,9 @@ export function createTaskService(opts: TaskServiceOptions) {
   // spec.md section 6.16.5: the interview and the spec run read every repository with access edit or read.
   const repos = (t: TaskRow) => (d: Database, head: string) => resolveTaskRepos(d, repoDeps, taskRow(d, t.id) ?? t, head);
 
-  function insertStep(db: Database, task: number, kind: "interview" | "spec", run: number) {
-    db.query(Q.stepInsert).get({ task, kind, run, now: now() });
+  // item: "check" or "repair" for the runs of spec.md section 6.22.10.
+  function insertStep(db: Database, task: number, kind: "interview" | "spec", run: number, item: "check" | "repair" | null = null) {
+    db.query(Q.stepInsert).get({ task, kind, run, item, now: now() });
   }
 
   function endStep(db: Database, run: number, e: Ending): number | null {
@@ -1873,9 +1926,170 @@ export function createTaskService(opts: TaskServiceOptions) {
     }
   }
 
+  // The fields of a new plan of a spec run, and its proposals (spec.md section 6.16.5). check: the plan check of the new plan, if any.
+  function storePlan(d: Database, cur: TaskRow, done: NewPlan, check?: PlanCheck) {
+    const { plan, sub } = done;
+    const subtasks = cur.subtasks === 1;
+    // spec.md section 6.20.4: each part of a sub-task task is one small PR. The size rules of section 6.1 do not apply.
+    const size = subtasks ? "small" : atLeast(plan.proposed, sizeFloor(plan.estimate, budgetOf(d, cur)).minimum);
+    const docs: SubDocs = {
+      ...renderDocs(cur.key, cur.title, size, plan),
+      version: (docsOf(cur)?.version ?? 0) + 1,
+      parsed: plan,
+      approved: false,
+      ...(sub && { subtasks: sub }),
+      ...(check && { check }),
+    };
+    patch(
+      d,
+      cur.id,
+      cur.version,
+      {
+        docs_json: JSON.stringify(docs),
+        estimate_json: JSON.stringify(plan.estimate),
+        size,
+        size_by: size === plan.proposed && !subtasks ? "claude" : "rule",
+        base_commit: done.head,
+        blocked_json: null,
+      },
+      now(),
+    );
+    // spec.md section 6.16.5: the proposals of this run replace the ones that wait for Add or Skip.
+    d.query(Q.dropProposals).run({ task: cur.id });
+    for (const x of done.proposals)
+      d.query(Q.propose).run({ task: cur.id, project: x.project, repo: x.repo, reason: x.reason, now: now() });
+  }
+
+  // spec.md section 6.22.5: the effect after a spec run that wrote a plan with a pending check. A task that left spec_draft gets the
+  // state stopped. A refused start gets failed with the refusal sentence.
+  function startCheck(db: Database, id: number, version: number) {
+    return () => {
+      const t = taskRow(db, id);
+      const docs = t && docsOf(t);
+      if (!t || !docs || docs.check?.state !== "pending" || docs.check.version !== version) return;
+      if (t.state !== "spec_draft") moveCheck(db, id, version, "STOPPED", {}, now());
+      else {
+        const r = review.taskRun(db, planCheckRun(db, t, docs));
+        if (r.status !== 202) moveCheck(db, id, version, "FAILED", { text: r.conflict.error }, now());
+      }
+      changed(id);
+    };
+  }
+
+  // spec.md section 6.22.5: the read-only check of the plan of docs at plan.base, with no fetch and no subagent.
+  function planCheckRun(db: Database, t: TaskRow, docs: Docs): TaskRunStart {
+    const p = profile(t);
+    const budget = budgetOf(db, t);
+    const { files, attachments } = taskFiles(db, t);
+    const answers = answersFile(interviewRows(db, t.id), interviewOf(db, t.id));
+    const { version, parsed } = docs;
+    let nested: SnapshotRepo[] = [];
+    let kept: { summary: string; problems: PlanProblem[] } | null = null;
+    return {
+      task: t.id,
+      kind: "spec",
+      key: `task:${t.id}:check`,
+      repos: async (d, head) => {
+        nested = await repos(t)(d, head);
+        return nested;
+      },
+      project: t.project,
+      repo: t.repo,
+      branch: t.target_branch,
+      profile: p,
+      files: [...files, planCheckFile(t.key, docs)],
+      attachments,
+      own: answers ? [answers] : [],
+      maxTurns: PLAN_CHECK_TURNS,
+      schema: planCheckJsonSchema(),
+      agent: planCheckAgent(p, budget, t.subtasks === 1),
+      commit: parsed.base,
+      prompt: (head, instructions) =>
+        buildPlanCheckPrompt({
+          key: t.key,
+          project: t.project,
+          repo: t.repo,
+          branch: t.target_branch,
+          head,
+          taskFile: files.length > 0,
+          attachments: attachments.length > 0,
+          answers: answers !== null,
+          instructions,
+          budget,
+        }),
+      judge: (o, ws, servers, gaps) =>
+        judgeTask(o, planCheckResult, "plan check", servers, gaps, async (r) => {
+          const k = await keepProblems(r, parsed, ws.cache, gitEnv("/dev/null"), nested);
+          kept = { summary: r.summary, problems: k.problems };
+          return { result: r, skipped: k.skipped };
+        }),
+      started: (d, run) => insertStep(d, t.id, "spec", run, "check"),
+      finish: (d, run, e) => {
+        endStep(d, run.id, e);
+        const cur = taskRow(d, t.id);
+        // A Stop moves the task to stopped before the run ends.
+        if (e.status === "cancelled" || cur?.state !== "spec_draft") {
+          moveCheck(d, t.id, version, "STOPPED", {}, now());
+          return undefined;
+        }
+        const k = kept as { summary: string; problems: PlanProblem[] } | null;
+        if (!k || !e.result) {
+          moveCheck(d, t.id, version, "FAILED", { text: e.text ?? "The run failed." }, now());
+          return undefined;
+        }
+        const checks = parsed.checks ?? [];
+        if (!repairNeeded(k.problems, checks)) {
+          moveCheck(d, t.id, version, k.problems.length ? "SHOWN" : "CLEAN", k, now());
+          return undefined;
+        }
+        if (!moveCheck(d, t.id, version, "REPAIR", { ...k, sent: sentProblems(k.problems, checks) }, now())) return undefined;
+        return startRepair(d, t.id, version);
+      },
+    };
+  }
+
+  // spec.md section 6.22.6: the effect after a check that found a blocker or major problem. It starts the one repair run of the plan.
+  function startRepair(db: Database, id: number, version: number) {
+    return () => {
+      const t = taskRow(db, id);
+      const docs = t && docsOf(t);
+      const c = docs?.check;
+      if (!t || !docs || c?.state !== "repairing" || c.version !== version) return;
+      if (t.state !== "spec_draft") moveCheck(db, id, version, "STOPPED", {}, now());
+      else {
+        const repair: Repair = { file: planCheckFile(t.key, docs, c.sent), commit: docs.parsed.base, version };
+        const r = review.taskRun(db, specRun(db, t, undefined, repair));
+        if (r.status !== 202) moveCheck(db, id, version, "FAILED", { text: couldNotRepair(r.conflict.error) }, now());
+      }
+      changed(id);
+    };
+  }
+
+  // The finish of a repair run. done: the checked plan of a run with a result, else null. A failure keeps the first plan and does not
+  // stop the task. A repair run starts no check.
+  function repairFinish(d: Database, id: number, repair: Repair, done: (NewPlan & { repairs: SpecResult["repairs"] }) | null, e: Ending) {
+    const cur = taskRow(d, id);
+    if (e.status === "cancelled" || cur?.state !== "spec_draft") {
+      moveCheck(d, id, repair.version, "STOPPED", {}, now());
+      return undefined;
+    }
+    if (!done) {
+      moveCheck(d, id, repair.version, "FAILED", { text: couldNotRepair(e.text ?? "The run failed.") }, now());
+      return undefined;
+    }
+    const docs = docsOf(cur);
+    const c = docs?.check;
+    // The version guard of moveCheck: the repair replaces only the plan that it repairs.
+    if (!c || c.version !== repair.version || docs?.version !== repair.version) return undefined;
+    const state = nextCheck(c.state, "REPAIRED");
+    if (state === null) return undefined;
+    storePlan(d, cur, done, { ...c, state, version: repair.version + 1, repairs: done.repairs, text: "" });
+    return undefined;
+  }
+
   // add: the keys of "Add to plan" (spec.md section 6.20.14). The run then plans parts for these keys only, and its checked plan waits
-  // in docs_json.adding. The approved plan and the task fields stay as they are.
-  function specRun(db: Database, t: TaskRow, add?: string[]): TaskRunStart {
+  // in docs_json.adding. The approved plan and the task fields stay as they are. repair: the repair round of spec.md section 6.22.6.
+  function specRun(db: Database, t: TaskRow, add?: string[], repair?: Repair): TaskRunStart {
     const p = profile(t);
     const budget = budgetOf(db, t);
     const { files, attachments } = taskFiles(db, t);
@@ -1887,8 +2101,9 @@ export function createTaskService(opts: TaskServiceOptions) {
     let nested: SnapshotRepo[] = [];
     const subtasks = t.subtasks === 1;
     // The untrusted files of the snapshot: the task files, context/repo-list.md, context/related-work.md, and context/pr-history.md of a
-    // sub-task task.
-    const untrusted = [...files];
+    // sub-task task. A repair run adds context/plan-check.md.
+    const untrusted = [...files, ...(repair ? [repair.file] : [])];
+    let repairs: SpecResult["repairs"] = [];
     return {
       task: t.id,
       kind: "spec",
@@ -1946,8 +2161,16 @@ export function createTaskService(opts: TaskServiceOptions) {
       own: [...(answers ? [answers] : []), commandsFile(repoSettings(db, t.project, t.repo).commands)],
       maxTurns: runLimitsOf(settings.config()?.runLimits).planTurns,
       schema: specJsonSchema(),
-      agent: specAgent(p, budget, process.platform, subtasks, buildToolLines(capabilities(db, t, "spec", originsOf(settings.config())))),
+      agent: specAgent(
+        p,
+        budget,
+        process.platform,
+        subtasks,
+        buildToolLines(capabilities(db, t, "spec", originsOf(settings.config()))),
+        repair !== undefined,
+      ),
       explorer: true,
+      ...(repair && { commit: repair.commit }),
       prompt: (head, instructions) => {
         const text = buildSpecPrompt({
           key: t.key,
@@ -1960,6 +2183,7 @@ export function createTaskService(opts: TaskServiceOptions) {
           answers: answers !== null,
           instructions,
           budget,
+          ...(repair && { repair: true }),
         });
         return add ? `${text}\n\n${addLines(add)}` : text;
       },
@@ -1995,12 +2219,14 @@ export function createTaskService(opts: TaskServiceOptions) {
             skipped.push(...sub.notes);
           }
           plan = toPlan(r, base, app, skipped, hostsOf(originsOf(settings.config())));
+          repairs = r.repairs;
           return { result: { ...r, repos: proposals }, skipped };
         }),
-      started: (d, run) => insertStep(d, t.id, "spec", run),
+      started: (d, run) => insertStep(d, t.id, "spec", run, repair ? "repair" : null),
       finish: (d, run, e) => {
         const step = endStep(d, run.id, e);
         const cur = taskRow(d, t.id);
+        if (repair) return repairFinish(d, t.id, repair, plan && e.result ? { plan, sub, repairs, proposals, head: run.head } : null, e);
         if (add) {
           // A failed run keeps the approved plan and the build. The Log tab shows the step, and "Add to plan" can run again.
           const docs = cur && (cur.state === "implementing" || cur.state === "ready") ? docsOf(cur) : null;
@@ -2015,33 +2241,11 @@ export function createTaskService(opts: TaskServiceOptions) {
           stopTask(d, cur, step, e);
           return undefined;
         }
-        // spec.md section 6.20.4: each part of a sub-task task is one small PR. The size rules of section 6.1 do not apply.
-        const size = subtasks ? "small" : atLeast(plan.proposed, sizeFloor(plan.estimate, budgetOf(d, cur)).minimum);
-        const docs: SubDocs = {
-          ...renderDocs(cur.key, cur.title, size, plan),
-          version: (docsOf(cur)?.version ?? 0) + 1,
-          parsed: plan,
-          approved: false,
-          ...(sub && { subtasks: sub }),
-        };
-        patch(
-          d,
-          t.id,
-          cur.version,
-          {
-            docs_json: JSON.stringify(docs),
-            estimate_json: JSON.stringify(plan.estimate),
-            size,
-            size_by: size === plan.proposed && !subtasks ? "claude" : "rule",
-            base_commit: run.head,
-            blocked_json: null,
-          },
-          now(),
-        );
-        // spec.md section 6.16.5: the proposals of this run replace the ones that wait for Add or Skip.
-        d.query(Q.dropProposals).run({ task: t.id });
-        for (const x of proposals) d.query(Q.propose).run({ task: t.id, project: x.project, repo: x.repo, reason: x.reason, now: now() });
-        return undefined;
+        // spec.md section 6.22.5: a new plan gets one check run unless the setting is off.
+        const version = (docsOf(cur)?.version ?? 0) + 1;
+        const check = settings.config()?.taskPlanCheck !== false;
+        storePlan(d, cur, { plan, sub, proposals, head: run.head }, check ? pendingCheck(version) : undefined);
+        return check ? startCheck(d, t.id, version) : undefined;
       },
       // The parts of "Add to plan" start from the newest base head, so the run keeps no base ref.
       ...(!add && { keep: "base" }),
@@ -2351,8 +2555,16 @@ export function createTaskService(opts: TaskServiceOptions) {
     return { status: 202, task: taskDto(db, taskRow(db, id) as TaskRow) };
   }
 
+  // spec.md section 6.22.5, Plan approval: the plan actions wait while the plan check or its repair waits or runs.
+  function checkConflict(db: Database, id: number, version: number): TaskResult | null {
+    const t = taskRow(db, id);
+    return t?.version === version && t.state === "spec_draft" && checkWaits(docsOf(t)?.check) ? conflict(db, t, CHECK_WAITS_TEXT) : null;
+  }
+
   // The plan screen actions need the plan of the spec run.
   function loadPlan(db: Database, id: number, version: number): { t: TaskRow; docs: Docs } | TaskResult {
+    const waits = checkConflict(db, id, version);
+    if (waits) return waits;
     const t = load(db, id, version, "spec_draft");
     if ("status" in t) return t;
     const docs = docsOf(t);
@@ -2369,7 +2581,13 @@ export function createTaskService(opts: TaskServiceOptions) {
   function resized(t: TaskRow, docs: Docs, size: TaskSize, approved: boolean): Patch {
     const from = t.size ?? docs.parsed.proposed;
     if (from === size) return { docs_json: JSON.stringify({ ...docs, approved }), size, size_by: t.size_by };
-    const next: Docs = { ...convertDocs(t.key, t.title, from, size, docs), version: docs.version + 1, parsed: docs.parsed, approved };
+    const next: Docs = {
+      ...convertDocs(t.key, t.title, from, size, docs),
+      version: docs.version + 1,
+      parsed: docs.parsed,
+      approved,
+      ...(docs.check && { check: docs.check }),
+    };
     return { docs_json: JSON.stringify(next), size, size_by: "user" };
   }
 
@@ -2770,6 +2988,8 @@ export function createTaskService(opts: TaskServiceOptions) {
     if (!t) return { status: 404, error: "Task not found." };
     if (t.version !== input.version) return conflict(db, t, TASK_CHANGED);
     if (t.state !== "interview" && t.state !== "spec_draft") return conflict(db, t, "The base branch changes only before the build.");
+    const waits = checkConflict(db, id, input.version);
+    if (waits) return waits;
     if (db.query(Q.busy).get({ id })) return conflict(db, t, "Claude is still working on this task. Wait for the step to end.");
     const rows = taskRepos(db, t);
     const own = input.taskRepo === undefined || rows.find((r) => r.id === input.taskRepo)?.role === "main";

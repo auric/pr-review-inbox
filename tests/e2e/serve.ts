@@ -183,6 +183,7 @@ function setClaude(c: ClaudeScenario) {
     // Part 6 (docs/plans/review-v2/spec.md section 6.5): the task runs, the files of an implement step, and the per-call results.
     interview: c.interview,
     spec: c.spec,
+    planCheck: c.planCheck,
     implement: c.implement,
     review: c.review,
     seq: usageSeq(c.seq, c.usageAt),
@@ -672,9 +673,18 @@ let secrets = createSecrets(null);
 let jiraSecrets = createSecrets(null, "jira-token");
 // part-session.md section 2.9: the live gate of claude.ts SESSION_GATES. /__control/live-gate sets it, and a reset puts it back.
 let liveGate = true;
+// spec.md section 6.22.5: the plan check stays off, so the task tests approve the plan at once. /__control/plan-check turns it on.
+let planCheck = false;
 function boot() {
   const live = createLive();
-  const settings = createSettings({ dir: dataDir, secrets, jiraSecrets });
+  const stored = createSettings({ dir: dataDir, secrets, jiraSecrets });
+  const settings = {
+    ...stored,
+    config: () => {
+      const c = stored.config();
+      return c && !planCheck ? { ...c, taskPlanCheck: false } : c;
+    },
+  };
   const sync = createSyncEngine({ settings, live });
   // A task (docs/plans/review-v2/spec.md section 6.2) builds on main of the local remote and pushes its branch there. PROJ1/app and
   // PROJ1/lib have their own remotes.
@@ -731,6 +741,7 @@ r[key("POST", "/__control/reset")] = async () => {
   await halt();
   await removeDir(dataDir);
   mkdirSync(dataDir);
+  planCheck = false;
   secrets = createSecrets(null);
   jiraSecrets = createSecrets(null, "jira-token");
   sc = { ...INITIAL };
@@ -792,6 +803,11 @@ r[key("POST", "/__control/skill")] = async (req) => {
 // The stream and the mode of the next fake CLI run.
 r[key("POST", "/__control/claude")] = async (req) => {
   setClaude((await req.json()) as ClaudeScenario);
+  return NO_CONTENT;
+};
+// spec.md section 6.22.5: turns the plan check on or off for the next spec runs. /__control/reset turns it off.
+r[key("POST", "/__control/plan-check")] = async (req) => {
+  planCheck = ((await req.json()) as { on: boolean }).on;
   return NO_CONTENT;
 };
 r[key("POST", "/__control/restart")] = async () => {

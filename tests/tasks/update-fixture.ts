@@ -149,7 +149,12 @@ async function app(
   const scenario = (s: FakeScenario["seq"]) => runner.write({ fixture: stream, seq: { review: [{ review: CLEAN }], ...s } });
   scenario(seq);
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: forge ?? "http://127.0.0.1:9", userSlug: forge ? FAKE_USER : "u", notifications: false });
+  writeConfig(dataDir, {
+    baseUrl: forge ?? "http://127.0.0.1:9",
+    userSlug: forge ? FAKE_USER : "u",
+    notifications: false,
+    taskPlanCheck: false,
+  });
   const secrets = createSecrets(null);
   if (forge) await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });

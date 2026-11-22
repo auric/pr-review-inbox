@@ -54,6 +54,7 @@ const KIND: Record<TaskStepDto["kind"], string> = {
   update: "Update from the base",
   resolve: "Conflicts",
 };
+const SPEC_ITEM = { check: "Plan check", repair: "Plan again after the check" } as const;
 
 const ICON: Record<StepLook, { icon: typeof CircleCheck; className?: string }> = {
   ok: { icon: CircleCheck },
@@ -234,13 +235,15 @@ function StepBody({ s, task, runner, onRunLog, onDiff }: RowProps & { s: TaskSte
   const session = sessionNote(s);
   // part-session.md section 2.7: the critic is a quick review before the own review.
   const critic = s.kind === "review" && s.item === "critic";
+  // spec.md section 6.22.9: the plan check run and its repair.
+  const specItem = s.kind === "spec" && (s.item === "check" || s.item === "repair") ? s.item : null;
   const patch = d.patch ? patchText(d.patch, false) : null;
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
         <Icon aria-hidden className={cn("size-4 shrink-0", st.className)} />
-        <span className="font-semibold">{critic ? "Quick review" : KIND[s.kind]}</span>
-        {s.item && !critic && (
+        <span className="font-semibold">{critic ? "Quick review" : specItem ? SPEC_ITEM[specItem] : KIND[s.kind]}</span>
+        {s.item && !critic && !specItem && (
           <code translate="no" className="font-mono text-xs text-ink-2">
             {s.item}
           </code>

@@ -28,6 +28,8 @@ import {
   type FoundItem,
   PART_STATE_TEXT,
   PATCH_LOST,
+  type PlanProblem,
+  type PlanSeverity,
   REASON_EXITS,
   type RepoAccess,
   START_MODES,
@@ -673,6 +675,10 @@ export function stepSentence(t: TaskDto, s: TaskStepDto, runner: string, name?: 
     case "interview":
       return `${runner} is reading the task and the code.`;
     case "spec":
+      // spec.md section 6.22.9: the plan check run and its repair are spec steps with an item.
+      if (s.item === "check") return checkingText(runner);
+      if (s.item === "repair") return repairingText(t, runner);
+      return `${runner} is writing the plan.`;
     case "replan":
       return `${runner} is writing the plan.`;
     // A step of the PR rows names its repository (pr.ts runRows). The one-PR route names the part branch.
@@ -705,6 +711,13 @@ const DOING: Partial<Record<TaskStepDto["kind"], string>> = {
   update: "the update from the base",
   resolve: "the conflicts of the update",
 };
+// spec.md section 6.22.9: the plan check and its repair are spec steps with an item.
+const SPEC_ITEMS: Record<string, string> = { check: "checking the plan", repair: "writing the plan again" };
+const doingOf = (s: TaskStepDto): string[] => {
+  const d = (s.kind === "spec" && s.item ? SPEC_ITEMS[s.item] : undefined) ?? DOING[s.kind];
+  return d ? [d] : [];
+};
+
 export function stoppedAt(t: TaskDto): string {
   const s = t.steps[0];
   if (!s) return "Stopped.";
@@ -712,9 +725,86 @@ export function stoppedAt(t: TaskDto): string {
   const where = [
     ...(ord !== null && codeParts(t).length > 1 ? [`part ${ord}`] : []),
     ...(s.item && /^T\d/.test(s.item) ? [`task ${s.item}`] : []),
-    ...(isComments(s) ? ["the PR comments"] : DOING[s.kind] ? [DOING[s.kind] as string] : []),
+    ...(isComments(s) ? ["the PR comments"] : doingOf(s)),
   ];
   return where.length ? `Stopped at: ${where.join(", ")}.` : "Stopped.";
+}
+
+// ---------- The plan check (spec.md section 6.22.9) ----------
+
+const checkingText = (runner: string) => `${runner} is checking the plan against the code.`;
+const repairingText = (t: TaskDto, runner: string) =>
+  `${runner} is writing the plan again to fix ${plural(t.plan?.check?.sent.length ?? 0, "problem")} of the check.`;
+
+// The status while the check or its repair waits or runs, else null.
+export function checkWaitText(t: TaskDto, runner: string): string | null {
+  const c = t.plan?.check;
+  return c?.state === "pending" ? checkingText(runner) : c?.state === "repairing" ? repairingText(t, runner) : null;
+}
+
+export const SEVERITY_WORD: Record<PlanSeverity, string> = { blocker: "Blocker", major: "Major", minor: "Minor", info: "Note" };
+
+// "1 major, 2 minor": the counts by severity, the most severe first.
+export function severityCounts(list: readonly Pick<PlanProblem, "severity">[]): string {
+  return (["blocker", "major", "minor"] as const)
+    .map((v) => [v, list.filter((p) => p.severity === v).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([v, n]) => `${n} ${v}`)
+    .join(", ");
+}
+
+const sentence = (s: string) => (/[.!?]$/.test(s.trim()) ? s.trim() : `${s.trim()}.`);
+const STILL = "You can still approve the plan.";
+
+// The check line of the plan screen. tab: false drops the pointer to the Plan tab (the Plan tab itself).
+export function checkLine(t: TaskDto, runner: string, tab = true): string | null {
+  const c = t.plan?.check;
+  if (!c) return null;
+  const more = (s: string) => (tab ? ` ${s}` : "");
+  switch (c.state) {
+    case "clean":
+      return `${runner} checked the plan against the code and found no problem.`;
+    case "shown": {
+      const n = c.problems.length;
+      const found = n
+        ? `The plan check found ${plural(n, "problem")}: ${severityCounts(c.problems)}.${more("The Plan tab lists them.")}`
+        : "";
+      // spec.md section 6.22.6: a failed repair keeps the first plan, with its reason.
+      const why = c.text ? `${sentence(c.text)} ${STILL}` : "";
+      return [found, why].filter(Boolean).join(" ") || `${runner} checked the plan against the code and found no problem.`;
+    }
+    case "repaired":
+      return `${runner} wrote the plan again to fix ${plural(c.sent.length, "problem")} of the check.${more("The Plan tab shows the result.")}`;
+    case "failed":
+      return `The plan check failed: ${sentence(c.text || "The run failed.")} ${STILL}`;
+    case "stopped":
+      return `You stopped the plan check. ${STILL}`;
+    default:
+      return null;
+  }
+}
+
+// spec.md section 6.22.9: the app checks other than the missing map lines, without info. Each missing map line has one major check.
+export function otherChecksLine(t: TaskDto, tab = true): string | null {
+  const p = t.plan;
+  if (!p) return null;
+  const n = Math.max(0, p.checks.filter((c) => c.severity !== "info").length - p.missing);
+  if (!n) return null;
+  return `The app found ${plural(n, "other problem")} in the plan.${tab ? (n === 1 ? " The Plan tab lists it." : " The Plan tab lists them.") : ""}`;
+}
+
+// The label of a plan part in a problem: the first sub-task key in sub-task mode, else "Part n".
+export function problemPart(t: TaskDto, part: number | null): string | null {
+  if (part === null) return null;
+  const key = t.subtasks ? t.plan?.starts.find((x) => x.n === part)?.keys[0] : undefined;
+  return key ?? `Part ${part}`;
+}
+
+// The answer of the repair run to one sent problem.
+export function repairAnswer(t: TaskDto, id: string, runner: string): string {
+  const r = t.plan?.check?.repairs.find((x) => x.id === id);
+  if (!r) return `${runner} gave no answer for this problem.`;
+  return `${runner}: ${r.fixed ? "fixed." : "not changed."}${r.note ? ` ${r.note}` : ""}`;
 }
 
 // spec.md section 6.12, spec_draft ready: "The plan is ready: medium, 1 code PR, about 300 changed lines."
@@ -827,7 +917,11 @@ export function taskView(
   }
 
   if (t.state === "spec_draft") {
-    if (run || !t.plan) return working(`${R} is writing the plan.`, [STOP], "plan");
+    // spec.md section 6.22.9: while the check or its repair waits or runs, the plan has no primary.
+    const checking = checkWaitText(t, R);
+    if (checking) return working(checking, [STOP], "plan");
+    if (run) return working(stepSentence(t, run, R), [STOP], "plan");
+    if (!t.plan) return working(`${R} is writing the plan.`, [STOP], "plan");
     return {
       ...base,
       // self-approved-plans.md section 6: a second approval of a plan that waits for a spec PR builds it.

@@ -70,7 +70,7 @@ async function setup(spec: unknown = echoSpec()) {
   const jira = startFakeJira();
   jira.addSubtaskSet();
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
+  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, taskPlanCheck: false });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });
@@ -615,6 +615,28 @@ describe("found work, the plan, and its approval (spec.md sections 6.20.2, 6.20.
         [3, ["ABC-14"], "pr_open", true],
       ]);
       expect(r.body.state).toBe("ready");
+    },
+    SLOW,
+  );
+});
+
+describe("the plan check of a sub-task task (spec.md section 6.22.5, AC-B103 server part)", () => {
+  test(
+    "one check run checks the whole plan with subtasks.md and the sub-task lines",
+    async () => {
+      const h = await setup();
+      const on = await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, taskPlanCheck: true } });
+      expect(on.status).toBe(200);
+      const c = await h.create();
+      const t = await h.settle(c.body.id);
+      expect(t.plan?.check?.state).toBe("clean");
+      const checks = h.calls().filter((x) => x.argv[x.argv.indexOf("--json-schema") + 1]?.includes('"problems"'));
+      expect(checks.length).toBe(1);
+      const check = checks[0] as Call;
+      expect(check.context["subtasks.md"]).toBeDefined();
+      expect(check.context["plan-check.md"]).toContain(`# Plan check of ${SUBTASK_PARENT}`);
+      expect(check.agents?.["rl-main"]?.prompt).toContain(SUBTASKS_RULE);
+      expect(check.agents?.["rl-main"]?.prompt).toContain("Check that each part names the right sub-task keys");
     },
     SLOW,
   );

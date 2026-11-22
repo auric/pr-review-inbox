@@ -107,7 +107,7 @@ async function setup(approved: boolean) {
   const fake = startFakeBitbucket();
   const writes = repoWrites(fake, "PROJ", "repo");
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
+  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, taskPlanCheck: false });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });

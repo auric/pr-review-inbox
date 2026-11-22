@@ -2620,6 +2620,8 @@ AC-B104 holds this section. Its items are AC-B104.1 to AC-B104.18, so the number
 
 ### 6.22 Plan quality: app checks, contracts and risks, related work, and the plan check (user decisions of 2026-11-02)
 
+Status: WP-PQ1 to WP-PQ5 are built. Gate UP (docs/smoke-task.md part PQ) is open. machine.ts `planCheckMachine` holds the states of `docs_json.check`, and tests/tasks/plan-check.test.ts tests its table.
+
 Examples use the task ABC-12 with the parent ABC-10, the repository PROJ/app, and the base develop.
 
 Constants (src/shared/task.ts):

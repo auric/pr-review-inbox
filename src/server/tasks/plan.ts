@@ -16,6 +16,7 @@ import {
   type ExternalOwner,
   externalOwner,
   LARGE_REPOS_TEXT,
+  type PlanCheck,
   type PlanProblem,
   type PlanSeverity,
   type SpecResult,
@@ -152,8 +153,9 @@ export type Plan = {
   // task-builder-v2.md section 5.1. Absent in a plan stored before: [].
   external?: PlanExternal[];
 };
-// task.docs_json. approved: a medium or large plan waits for its spec PR.
-export type Docs = Partial<Record<TaskDoc, string>> & { version: number; parsed: Plan; approved: boolean };
+// task.docs_json. approved: a medium or large plan waits for its spec PR. check: the plan check of spec.md section 6.22.5. Absent: no
+// check ran for this plan.
+export type Docs = Partial<Record<TaskDoc, string>> & { version: number; parsed: Plan; approved: boolean; check?: PlanCheck };
 
 export const NEW_COMMAND = "new-";
 // A proposed command. timeoutReason: why Claude proposes a longer time limit. The plan approval does not store it.

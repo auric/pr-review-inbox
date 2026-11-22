@@ -265,6 +265,8 @@ async function shots(browser: Browser) {
   await save(page, "task-questions");
   await questions.getByRole("button", { name: "Send answers" }).click();
   await page.locator("#task-plan").waitFor({ timeout: RUN_MS });
+  // spec.md section 6.22.5: the plan check and the repair of ABC-10688 (scripts/demo.ts CHECK_MAJOR) end before the approval.
+  await page.locator("[data-primary]", { hasText: "Approve the plan" }).waitFor({ timeout: 3 * RUN_MS });
   await page.getByRole("checkbox", { name: "I understand" }).check();
   // The tick scrolls the pane to the warning. The shot shows the top of the plan.
   await toTop(page.locator("[data-task]"));
@@ -274,6 +276,11 @@ async function shots(browser: Browser) {
   await toTop(page.locator("[data-plan-allow]"), 16);
   await rest();
   await save(page, "task-plan-commands");
+  // The Plan tab (spec.md section 6.22.9): the contracts and risks, the plan check with the answer of the repair, and the app checks.
+  await page.getByRole("tab", { name: "Plan" }).click();
+  await toTop(page.locator("#plan-contracts"), 16);
+  await rest();
+  await save(page, "task-plan-check");
   await page.locator("[data-primary]").click();
   await page.getByRole("dialog").getByRole("button", { name: "I understand" }).click();
   // The code step asks to allow a command (spec.md section 6.21.4). Continue takes "Allow once".
@@ -396,6 +403,7 @@ async function shots(browser: Browser) {
   await asked.getByRole("button", { name: "Send answers" }).click();
   const repos = m.getByRole("list", { name: "Repositories of the task" });
   await repos.waitFor({ timeout: RUN_MS });
+  await m.locator("[data-primary]", { hasText: "Approve the plan" }).waitFor({ timeout: 2 * RUN_MS });
   await m.getByRole("checkbox", { name: "I understand" }).check();
   const calm = async () => {
     await m.mouse.move(0, 0);
@@ -437,6 +445,7 @@ async function shots(browser: Browser) {
   await subAsked.getByRole("button", { name: "Send answers" }).click();
   const planned = s.getByRole("list", { name: "Sub-tasks of the plan" });
   await planned.waitFor({ timeout: RUN_MS });
+  await s.locator("[data-primary]", { hasText: "Approve the plan" }).waitFor({ timeout: 2 * RUN_MS });
   const still = async () => {
     await s.mouse.move(0, 0);
     await s.waitForTimeout(400);

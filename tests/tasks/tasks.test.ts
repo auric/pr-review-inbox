@@ -119,6 +119,7 @@ async function setup(o: { config?: string; profiles?: ProfileInput[]; runLimits?
     baseUrl: fake.url,
     userSlug: FAKE_USER,
     notifications: false,
+    taskPlanCheck: false,
     ...(o.profiles && { profiles: o.profiles }),
     ...(o.runLimits && { runLimits: o.runLimits }),
   });
@@ -758,6 +759,7 @@ describe("answers (spec.md sections 6.2 and 6.11, AC-B2 and AC-B3)", () => {
         contracts: [],
         risks: [],
         checks: [],
+        check: null,
         allow: [],
         shellWarning: true,
       });

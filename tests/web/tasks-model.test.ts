@@ -32,6 +32,7 @@ import {
   branchApproval,
   branchesError,
   branchNote,
+  checkLine,
   defaultFocus,
   elapsed,
   type FileChoice,
@@ -49,6 +50,7 @@ import {
   logRows,
   NO_MERGE,
   openQuestions,
+  otherChecksLine,
   overLimit,
   parentHint,
   partLabel,
@@ -63,6 +65,7 @@ import {
   pointerRow,
   prBuild,
   prefixProblem,
+  problemPart,
   proposals,
   prRowLook,
   prTarget,
@@ -71,6 +74,7 @@ import {
   questionSource,
   REPOS_SHOWN,
   readyNotes,
+  repairAnswer,
   repoChoices,
   repoMatches,
   repoName,
@@ -194,7 +198,7 @@ function task(o: Partial<TaskDto> = {}): TaskDto {
     version: 3,
     updatedAt: NOW,
     closedAt: null,
-    progress: { planReady: false, part: 0, parts: 0, ready: false, merged: false, building: [], held: 0, checklist: 0 },
+    progress: { planReady: false, checking: false, part: 0, parts: 0, ready: false, merged: false, building: [], held: 0, checklist: 0 },
     interview: null,
     plan: null,
     strip: { steps: ["Questions", "Plan", "Build", "Done"], current: 0 },
@@ -254,6 +258,7 @@ const PLAN: NonNullable<TaskDto["plan"]> = {
   contracts: [],
   risks: [],
   checks: [],
+  check: null,
   allow: [],
   shellWarning: true,
 };
@@ -1063,6 +1068,113 @@ describe("AC-B57: the 'Your instructions' group of the Log tab (spec.md section 
   });
 });
 
+describe("the plan check rows (spec.md section 6.22.9)", () => {
+  type Check = NonNullable<NonNullable<TaskDto["plan"]>["check"]>;
+  const p = (id: string, severity: "blocker" | "major" | "minor" | "info", part: number | null = null) => ({
+    id,
+    severity,
+    part,
+    path: "src/a.ts",
+    line: 3,
+    text: `Text ${id}.`,
+    fix: `Fix ${id}.`,
+  });
+  const check = (o: Partial<Check>): Check => ({ state: "clean", summary: "", problems: [], sent: [], repairs: [], text: "", ...o });
+  const draft = (c: Check | null, o: Partial<TaskDto> = {}) =>
+    task({ state: "spec_draft", size: "small", plan: { ...PLAN, check: c }, estimate: ESTIMATE, ...o });
+
+  test("the check waits or runs: the status names it, there is no primary, and More has Stop", () => {
+    expect(shape(view(draft(check({ state: "pending" }))))).toEqual({
+      status: "Claude is checking the plan against the code.",
+      primary: null,
+      more: ["Stop"],
+      screen: "plan",
+    });
+    const run = draft(check({ state: "pending" }), {
+      steps: [step({ id: 4, kind: "spec", item: "check", state: "running", endedAt: null })],
+    });
+    expect(shape(view(run)).status).toBe("Claude is checking the plan against the code.");
+  });
+
+  test("the repair waits or runs: the status counts the sent problems, with no primary", () => {
+    const v = view(draft(check({ state: "repairing", sent: [p("a1", "major"), p("p1", "major"), p("p2", "minor")] })));
+    expect(shape(v)).toEqual({
+      status: "Claude is writing the plan again to fix 3 problems of the check.",
+      primary: null,
+      more: ["Stop"],
+      screen: "plan",
+    });
+  });
+
+  test("stopped during the check: Stopped at: checking the plan, and Continue", () => {
+    const t = task({
+      state: "stopped",
+      stoppedFrom: "spec_draft",
+      plan: { ...PLAN, check: check({ state: "stopped" }) },
+      steps: [step({ id: 4, kind: "spec", item: "check", state: "cancelled" })],
+    });
+    expect(stoppedAt(t)).toBe("Stopped at: checking the plan.");
+    expect(shape(view(t)).primary).toBe("Continue");
+    const repair = { ...t, steps: [step({ id: 5, kind: "spec", item: "repair", state: "cancelled" })] };
+    expect(stoppedAt(repair)).toBe("Stopped at: writing the plan again.");
+  });
+
+  test("after the check the plan waits for the approval again", () => {
+    expect(shape(view(draft(check({ state: "shown", problems: [p("p1", "minor")] })))).primary).toBe("Approve the plan");
+  });
+
+  test("the plan screen line of each end state, and the other app checks", () => {
+    expect(checkLine(draft(null), R)).toBeNull();
+    expect(checkLine(draft(check({ state: "pending" })), R)).toBeNull();
+    expect(checkLine(draft(check({})), R)).toBe("Claude checked the plan against the code and found no problem.");
+    const shown = draft(check({ state: "shown", problems: [p("p1", "major"), p("p2", "minor"), p("p3", "minor")] }));
+    expect(checkLine(shown, R)).toBe("The plan check found 3 problems: 1 major, 2 minor. The Plan tab lists them.");
+    expect(checkLine(shown, R, false)).toBe("The plan check found 3 problems: 1 major, 2 minor.");
+    const lost = draft(check({ state: "shown", problems: [p("p1", "major")], text: "Claude could not write the plan again: no result" }));
+    expect(checkLine(lost, R)).toBe(
+      "The plan check found 1 problem: 1 major. The Plan tab lists them. Claude could not write the plan again: no result. You can still approve the plan.",
+    );
+    expect(checkLine(draft(check({ state: "repaired", sent: [p("p1", "major"), p("a1", "major")] })), R)).toBe(
+      "Claude wrote the plan again to fix 2 problems of the check. The Plan tab shows the result.",
+    );
+    expect(checkLine(draft(check({ state: "failed", text: "The run failed." })), R)).toBe(
+      "The plan check failed: The run failed. You can still approve the plan.",
+    );
+    expect(checkLine(draft(check({ state: "stopped" })), R)).toBe("You stopped the plan check. You can still approve the plan.");
+    const checks = [p("a1", "major"), p("a2", "major"), p("a3", "minor"), p("a4", "info")];
+    expect(otherChecksLine(draft(null, { plan: { ...PLAN, checks, missing: 1 } }))).toBe(
+      "The app found 2 other problems in the plan. The Plan tab lists them.",
+    );
+    expect(otherChecksLine(draft(null, { plan: { ...PLAN, checks: [p("a1", "major")], missing: 1 } }))).toBeNull();
+  });
+
+  test("a problem shows its part label: the sub-task key in sub-task mode; the repair answer of each sent problem", () => {
+    expect(problemPart(draft(null), 2)).toBe("Part 2");
+    expect(problemPart(draft(null), null)).toBeNull();
+    const sub = draft(null, {
+      subtasks: [],
+      plan: {
+        ...PLAN,
+        starts: [{ n: 2, keys: ["ABC-13"], start: "stack", after: null, reason: "", skip: false, title: "T", lines: null }],
+      },
+    });
+    expect(problemPart(sub, 2)).toBe("ABC-13");
+    expect(problemPart(sub, 3)).toBe("Part 3");
+    const done = draft(
+      check({
+        state: "repaired",
+        repairs: [
+          { id: "p1", fixed: true, note: "Moved." },
+          { id: "p2", fixed: false, note: "" },
+        ],
+      }),
+    );
+    expect(repairAnswer(done, "p1", R)).toBe("Claude: fixed. Moved.");
+    expect(repairAnswer(done, "p2", R)).toBe("Claude: not changed.");
+    expect(repairAnswer(done, "p3", R)).toBe("Claude gave no answer for this problem.");
+  });
+});
+
 describe("plain-word helpers", () => {
   test("elapsed says the time so far, never a time left", () => {
     expect(elapsed(20_000)).toBe("Started less than a minute ago.");
@@ -1193,6 +1305,7 @@ describe("the Tasks row status (spec.md section 6.12, Inbox; AC-UX9)", () => {
   };
   const progress = (o: Partial<TaskRowDto["progress"]>) => ({
     planReady: false,
+    checking: false,
     part: 0,
     parts: 0,
     ready: false,

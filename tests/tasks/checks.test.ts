@@ -59,7 +59,7 @@ async function setup() {
   dirs.push(root);
   const r = await taskRemote(root);
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: "http://127.0.0.1:9", userSlug: "u", notifications: false });
+  writeConfig(dataDir, { baseUrl: "http://127.0.0.1:9", userSlug: "u", notifications: false, taskPlanCheck: false });
   const settings = createSettings({ dir: dataDir, secrets: createSecrets(null), jiraSecrets: createSecrets(null, "jira-token") });
   const db = settings.db() as Database;
   cleanup.push(() => db.close());

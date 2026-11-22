@@ -70,7 +70,7 @@ async function setup() {
   const jira = startFakeJira();
   jira.addSubtaskSet();
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, askAttachments: false });
+  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, taskPlanCheck: false, askAttachments: false });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });
@@ -92,9 +92,9 @@ async function setup() {
     jira.stop();
     db.close();
   });
-  const json = async <T>(path: string, init: { body?: unknown } = {}) => {
+  const json = async <T>(path: string, init: { method?: string; body?: unknown } = {}) => {
     const res = await app.request(`${ORIGIN}${path}`, {
-      method: init.body === undefined ? "GET" : "POST",
+      method: init.method ?? (init.body === undefined ? "GET" : "POST"),
       headers: HEADERS,
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
     });
@@ -175,6 +175,10 @@ test(
     h.runner.write({ fixture: h.fixture, interview: NO_QUESTIONS, spec });
     const again = (body: Record<string, unknown>) => h.json<TaskDto & ApiError>(`/api/tasks/${h.id}/plan-again`, { body });
     expect((await again({ version: t.version - 1, text: "Add ABC-17 to the plan.", add: true })).status).toBe(409);
+    // spec.md section 6.22.5 (AC-B102): an "Add to plan" run starts no check run, also with the check on.
+    const base = (await h.json<{ baseUrl: string }>("/api/settings")).body.baseUrl;
+    expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: base, taskPlanCheck: true } })).status).toBe(200);
+    t = await h.get(h.id);
     const runs = h.calls().length;
     const r = await again({ version: t.version, text: "Add ABC-17 to the plan.", add: true });
     expect(r.status).toBe(202);
@@ -187,6 +191,7 @@ test(
     expect(t.files.find((f) => f.id === "9017")?.issue).toBe("ABC-17");
     expect(t.state).toBe("ready");
     expect(t.plan?.adding).toBe(true);
+    expect([t.plan?.check, t.progress.checking]).toEqual([null, false]);
     expect(t.plan?.starts.map((s) => [s.n, s.keys, s.start, s.after, s.skip])).toEqual([
       [4, ["ABC-17"], "stack", "ABC-13", false],
       // A skipped part keeps the start of the schema default (stack): no part follows from it.

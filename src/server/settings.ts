@@ -179,6 +179,7 @@ export function createSettings(
       sessions: c?.sessions === true,
       usageResume: c?.usageResume === true,
       askAttachments: c?.askAttachments !== false,
+      taskPlanCheck: c?.taskPlanCheck !== false,
       taskBranchPrefixes: branchPrefixesOf(c),
       runLimits: runLimitsOf(c?.runLimits),
     };
@@ -439,6 +440,7 @@ export function createSettings(
             sessions: input.sessions === undefined ? prev?.sessions : input.sessions || undefined,
             usageResume: input.usageResume === undefined ? prev?.usageResume : input.usageResume || undefined,
             askAttachments: input.askAttachments === undefined ? prev?.askAttachments : input.askAttachments ? undefined : false,
+            taskPlanCheck: input.taskPlanCheck === undefined ? prev?.taskPlanCheck : input.taskPlanCheck ? undefined : false,
             taskBranchPrefixes: input.taskBranchPrefixes ?? prev?.taskBranchPrefixes,
             runLimits: input.runLimits ? { ...prev?.runLimits, ...input.runLimits } : prev?.runLimits,
           };

@@ -202,6 +202,7 @@ export async function setup(o: Setup = {}) {
     baseUrl: "http://127.0.0.1:9",
     userSlug: "u",
     notifications: false,
+    taskPlanCheck: false,
     ...(o.profiles && { profiles: o.profiles }),
     ...(o.runLimits && { runLimits: o.runLimits }),
     ...(o.usageResume && { usageResume: true }),

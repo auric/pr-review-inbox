@@ -44,6 +44,8 @@ export type FakeScenario = {
   // echo.
   interview?: unknown;
   spec?: unknown;
+  // spec.md section 6.22.5: the plan check result (properties.problems). Absent: a check with no problem.
+  planCheck?: unknown;
   // Part 6 (spec.md section 6.7): the implement result (properties.specChange). Absent: the echo. writes: the files that the run
   // writes before its stream, by path relative to the cwd. A path outside the cwd is refused, as --restricted refuses it (Gate B17), and
   // the record gets { refused: path }. junction: a folder link to that target in place of a file.
@@ -99,7 +101,17 @@ export type FakeScenario = {
   files?: boolean;
 };
 
-export type SchemaKind = "verify" | "explain" | "discuss" | "interview" | "spec" | "implement" | "review" | "matcher" | "judge";
+export type SchemaKind =
+  | "verify"
+  | "explain"
+  | "discuss"
+  | "interview"
+  | "spec"
+  | "planCheck"
+  | "implement"
+  | "review"
+  | "matcher"
+  | "judge";
 // The review v2 run kind that a --json-schema shape names, else null. A re-review has its own key (earlier), so it is no review.
 export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
   props.verdicts !== undefined
@@ -120,7 +132,9 @@ export const schemaKind = (props: Record<string, unknown>): SchemaKind | null =>
                   ? "matcher"
                   : props.labels !== undefined
                     ? "judge"
-                    : null;
+                    : props.problems !== undefined
+                      ? "planCheck"
+                      : null;
 
 // AC-B333: a critic run is a review run whose stdin holds the critic task line. This is a copy of CRITIC_TASK of
 // src/server/review/prompt.ts, so a run does not load the prompt modules. tests/review/fake-claude.test.ts checks that both are equal.
@@ -664,6 +678,7 @@ async function main() {
     if (kind === "discuss") return s.discuss ?? echoDiscuss(stdin);
     if (kind === "interview") return s.interview ?? echoInterview(stdin);
     if (kind === "spec") return s.spec ?? echoSpec();
+    if (kind === "planCheck") return s.planCheck ?? { summary: "Echo: the plan fits the code.", problems: [], coverage: NO_COVERAGE };
     if (kind === "implement") {
       const r = (s.implement ?? echoImplement()) as { points?: unknown[] };
       const judge = s.pointVerdicts ?? [];

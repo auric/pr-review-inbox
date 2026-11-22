@@ -54,6 +54,7 @@ import {
   type PartKind,
   type PartState,
   PLAN_REVIEWS,
+  type PlanCheck,
   type PlanProblem,
   PREFIX_MAX,
   PREFIXES_MAX,
@@ -356,6 +357,8 @@ export const settingsInput = z.object({
   usageResume: z.boolean().optional(),
   // Absent keeps the stored value. Off records the company AI policy acknowledgement for task attachments.
   askAttachments: z.boolean().optional(),
+  // Absent keeps the stored value. Off: a new plan gets no plan check run (spec.md section 6.22.10).
+  taskPlanCheck: z.boolean().optional(),
   // Absent keeps the stored list (docs/plans/review-v2/spec.md section 6.16.1).
   taskBranchPrefixes: z.lazy(() => branchPrefixList).optional(),
   // Absent keeps the stored limits. A given key replaces its stored value.
@@ -396,6 +399,8 @@ export type SettingsDto = {
   usageResume: boolean;
   // Ask the company AI policy question before a task attachment is included in runs. Default on.
   askAttachments: boolean;
+  // "Check each plan with a second Claude run" (spec.md section 6.22.9). Default on.
+  taskPlanCheck: boolean;
   // spec.md section 6.16.1: Settings > Tasks "Branch prefixes".
   taskBranchPrefixes: string[];
   // Settings > Tasks run limits, with the default for each unset key.
@@ -1947,6 +1952,8 @@ export type TaskRowDto = {
   // held: the number of parts on hold (ps5-plan.md D6).
   progress: {
     planReady: boolean;
+    // spec.md section 6.22.5: the plan check or its repair waits or runs.
+    checking: boolean;
     part: number;
     parts: number;
     ready: boolean;
@@ -2004,6 +2011,8 @@ export type TaskPlanDto = {
   contracts: SpecResult["contracts"];
   risks: SpecResult["risks"];
   checks: PlanProblem[];
+  // spec.md section 6.22.7: the plan check of the plan. null: no check ran.
+  check: Omit<PlanCheck, "version"> | null;
   // spec.md section 6.21 (D2): the saved command patterns of the repository (saved true, "approved before"), then the proposals of the
   // plan with the IDs "new-1" and up. warning: the text for an interpreter pattern. shellWarning: picks need the first-use warning.
   allow: { id: string; pattern: string; reason: string; saved: boolean; warning: string | null }[];

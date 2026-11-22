@@ -10,7 +10,7 @@ Update (2026-10-26): the user decided Q52 and Q53 (design.md section 10.6): the 
 
 Update (2026-10-29): the user approved Q64 to Q76 (design.md section 10.8): build a Jira task with sub-tasks, one branch and one PR per sub-task (spec.md section 6.20). They add WP-ST-D, WP-ST-G, WP-ST1 to WP-ST7 (wave W9d), Gates G19 and J1 to J4, and the user smoke UT. WP-B8 shrinks to the large-task wiring of the sub-task engine. The prerequisites exist: WP-CA1 of docs/plans/ci-builds.md (pr_build, 2734de5) and Jira Cloud auth (698b7aa, de32843).
 
-Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It adds WP-PQ-D and WP-PQ1 to WP-PQ5 (wave WPQ) and the user smoke UP. Its open questions and their recommended defaults are in spec.md section 6.22.14. WP-PQ-D, WP-PQ1, and WP-PQ2 are built. WP-PQ3 to WP-PQ5 and Gate UP are open.
+Update (2026-11-03): the user queued plan quality (spec.md section 6.22). It adds WP-PQ-D and WP-PQ1 to WP-PQ5 (wave WPQ) and the user smoke UP. Its open questions and their recommended defaults are in spec.md section 6.22.14. WP-PQ-D and WP-PQ1 to WP-PQ5 are built. Gate UP (docs/smoke-task.md part PQ) is open.
 
 Update (2026-11-20): review packages outside this file. review-ledger.md holds the full list.
 
@@ -60,7 +60,7 @@ Update (2026-11-20): review packages outside this file. review-ledger.md holds t
 | W9d | WP-ST-D, then WP-ST-G, then WP-ST1, WP-ST2, WP-ST3, WP-ST4, WP-ST5, WP-ST6, WP-ST7 (one branch, one after another) | UTU; the user approved the rule changes (2026-10-29); G19 and J1 to J4 recorded before WP-ST4 and WP-ST5 merge (until then the fakes follow the docs) |
 | UT | User smoke docs/smoke-task.md part T (a parent with 4 sub-tasks, 2 in review outside the app, one squash merge) | W9d |
 | WPQ | WP-PQ-D, then WP-PQ1, WP-PQ2, WP-PQ3, WP-PQ4, WP-PQ5 (one branch, one after another; shared files) | W9d merged (done) |
-| UP | User smoke docs/smoke-task.md part P (plan quality) | WPQ |
+| UP | User smoke docs/smoke-task.md part PQ (plan quality) | WPQ |
 | WSA | WP-SA-D, then WP-SA-1, WP-SA-2, WP-SA-3 (one branch, one after another; shared files) | the user answers of 2026-11-19 (self-approved-plans.md section 2) |
 | UL-S | User smoke docs/smoke-task.md part LS (a self-approved large task) | WSA |
 | W10 | WP-B6 ∥ WP-B7 | UN and UTU (the medium code PR uses the several-repository PR flow of WP-MR2) |
@@ -510,7 +510,7 @@ Integration first. They change the spec run (tasks.ts `specRun`), the plan model
 
 ### WP-PQ5. Plan quality UI (frontend-implementer, WPQ after WP-PQ4, ports 7687/7688/7689; skills shadcn, vercel-react-best-practices, web-design-guidelines)
 
-- Files: src/web/tasks/PlanTab.tsx (the PlanApproval check line, and the PlanParts blocks "Contracts and risks", "Plan check", and "App checks"); src/web/tasks/model.ts (stepSentence for spec items check and repair, the waiting check state, and DOING "checking the plan"); src/web/tasks/LogTab.tsx (the item labels); src/web/settings/BranchPrefixes.tsx (the switch); tests/web/tasks-model.test.ts, tests/web/ui-words.test.ts; tests/e2e/task-plan-check.e2e.ts (new); tests/e2e/serve.ts (a control that sets the fake planCheck result and turns the setting on); scripts/demo.ts (one task with a shown check and one with a repaired check); docs/smoke-task.md (part P); README.md; CHANGELOG.md; docs/screenshots.
+- Files: src/web/tasks/PlanTab.tsx (the PlanApproval check line, and the PlanParts blocks "Contracts and risks", "Plan check", and "App checks"); src/web/tasks/model.ts (stepSentence for spec items check and repair, the waiting check state, and DOING "checking the plan"); src/web/tasks/LogTab.tsx (the item labels); src/web/settings/BranchPrefixes.tsx (the switch); tests/web/tasks-model.test.ts, tests/web/ui-words.test.ts; tests/e2e/task-plan-check.e2e.ts (new); tests/e2e/serve.ts (a control that sets the fake planCheck result and turns the setting on); scripts/demo.ts (one task with a shown check and one with a repaired check); docs/smoke-task.md (part PQ; part P already holds Hold, Stop, and Continue); README.md; CHANGELOG.md; docs/screenshots.
 - Behavior: spec.md section 6.22.9. AC-B103, and AC-B102 (UI part).
 - Tests: model: one test per new status row, and no primary while the check waits; the AC-UX2 word scan of the new strings; e2e: a spec run, then a check with one major, then the repair; the Plan tab shows "Claude: fixed." and the contracts; Approve works; a sub-task task shows a problem under its sub-task label.
 - Gates: e2e green on own ports with the `E2E code:` line; screenshots checked for real names; AC-UX1 primary count; web-design-guidelines; axe.
@@ -518,7 +518,7 @@ Integration first. They change the spec run (tasks.ts `specRun`), the plan model
 
 ### Gate UP: plan quality smoke (user)
 
-- docs/smoke-task.md part P on the test repository. Build one small task with the check on. Record the check state, the problems, any repair, the turns and time per run, and the unchecked symbol count. Check that "Approve the plan" waits during the check. Stop one check and resume. Turn the setting off, build again, and check that no check run starts.
+- docs/smoke-task.md part PQ on the test repository. Build one small task with the check on. Record the check state, the problems, any repair, the turns and time per run, and the unchecked symbol count. Check that "Approve the plan" waits during the check. Stop one check and resume. Turn the setting off, build again, and check that no check run starts.
 
 ### Self-approved plans (wave WSA, spec.md section 6.32, self-approved-plans.md)
 
@@ -552,7 +552,7 @@ Wave 1 makes one real task reach an open PR (Gate U1). One implementer at a time
 - TB-11. Build hosts (implementer): Settings > Tasks hosts, "Test the host", manifest hosts. AC-TB25. After TB-9. Open.
 - TB-12. Remote checks, D4 (implementer-xhigh): AC-TB26. Open.
 - TB-D1. Final docs (implementer): BRIEF section 13 wording, spec.md 6.1 to 6.28, smoke files, CHANGELOG. Takes over PS8. Open.
-- WP-PQ3 to WP-PQ5 and Gate UP wait for Gate U2 (D12).
+- WP-PQ3 to WP-PQ5 and Gate UP wait for Gate U2 (D12). WP-PQ3 and WP-PQ4 were built on 2026-11-22, before Gate U2.
 
 ### WP-B6. Spec PR flow (implementer-xhigh, W10)
 
@@ -621,7 +621,7 @@ Wave 1 makes one real task reach an open PR (Gate U1). One implementer at a time
 | J1 to J4 | `bun scripts/gate/jira.ts --only J1,J2,J3` (read only), then `--only J4 --authorize-transition` on a test issue; on Server or Data Center and on Cloud | after WP-ST-G, before WP-ST1 merges (J1, J2) and WP-ST5 merges (J3, J4) | The shapes of subtasks with statusCategory and of issuelinks, the transitions list, the comment and Cloud image links, and a 204 for the POST. |
 | Smoke task T (UT) | docs/smoke-task.md part T | after W9d | Every step as written. Nothing goes to Bitbucket or Jira without a click. |
 | Smoke task V (U1) | docs/smoke-task.md part V | after TB-4 | The real task reaches an open PR. No impossible ask. No fix run for an environment fault. |
-| Smoke task P (UP) | docs/smoke-task.md part P | after WPQ | Every step of Gate UP. "Approve the plan" waits during the check. With the setting off, no check run starts. |
+| Smoke task PQ (UP) | docs/smoke-task.md part PQ | after WPQ | Every step of Gate UP. "Approve the plan" waits during the check. With the setting off, no check run starts. |
 | Reply eval (PR context) | `bun run eval -- --replies --real --repeat 2` | after WP-PN | The recommended pass of WP-PN. |
 | G8, G10, G11 (on hold) | `bun scripts/gate/bitbucket-write.ts --only G8,G10,G11` on the test repository | before WP-A2 (G10) and WP-A5 (G8) | spec of WP-GA. |
 | UA1 (on hold) | docs/smoke-autopilot.md part 1 | after WA3 | A draft for each scripted comment, one notification per burst, "Post this reply" posts once, nothing posts by itself. |

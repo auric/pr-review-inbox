@@ -176,6 +176,10 @@ export const RELATED_PRS = 20;
 export const RELATED_BRANCHES = 10;
 export const RELATED_BYTES = 16 * 1024;
 export const RELATED_LOG_MS = 30_000;
+// spec.md section 6.22.5: the plan check run and context/plan-check.md.
+export const PLAN_PROBLEMS_MAX = 15;
+export const PLAN_CHECK_TURNS = 40;
+export const PLAN_CHECK_BYTES = 64 * 1024;
 
 // spec.md section 6.16.5: the repositories of a task (task_repo.role, task_repo.access) and the reasons that the plan screen shows.
 export const REPO_ROLES = ["main", "submodule", "added"] as const;
@@ -1064,6 +1068,12 @@ export const specResult = z.object({
   maxOpenReason: z.string().max(300).default(""),
   contracts: z.array(contract).max(12).default([]),
   risks: z.array(risk).max(8).default([]),
+  // spec.md section 6.22.6: the answers of a repair run.
+  repairs: z
+    .array(z.object({ id: problemId, fixed: z.boolean(), note: z.string().max(300) }))
+    .max(APP_CHECKS_MAX + PLAN_PROBLEMS_MAX)
+    .default([])
+    .describe("Only when ./context/plan-check.md exists: one entry for each problem ID in it. Else empty."),
   // task-builder-v2.md section 5.1: the steps that need the app or the user. They are never plan tasks.
   external: z
     .array(
@@ -1083,6 +1093,43 @@ export const specResult = z.object({
 });
 export type SpecResult = z.infer<typeof specResult>;
 export const specJsonSchema = (): Record<string, unknown> => aiJsonSchema(specResult);
+
+// spec.md section 6.22.7: the result of the plan check run.
+export const planCheckResult = z.object({
+  summary: z.string().max(500).describe("One or two lines: does the plan fit the code?"),
+  problems: z
+    .array(
+      z.object({
+        id: z.string().regex(/^p[0-9]{1,2}$/),
+        severity: z.enum(["blocker", "major", "minor"]),
+        part: z.number().int().min(1).nullable().describe("The plan part that the problem concerns, else null."),
+        path: exact(z.string().max(400))
+          .default("")
+          .describe("The file at the base commit that shows the problem. Empty when no file shows it."),
+        line: z.number().int().min(1).nullable().default(null),
+        text: z.string().max(500).describe("What is wrong, in one or two sentences."),
+        fix: z.string().max(500).describe("What the plan must say instead."),
+      }),
+    )
+    .max(PLAN_PROBLEMS_MAX),
+  coverage,
+});
+export type PlanCheckResult = z.infer<typeof planCheckResult>;
+export const planCheckJsonSchema = (): Record<string, unknown> => aiJsonSchema(planCheckResult);
+
+// task.docs_json.check (spec.md section 6.22.7). machine.ts planCheckMachine holds the transitions. version: docs.version of the plan
+// that the state belongs to. sent: the problems of the repair run. text: the reason of failed or stopped, or a note.
+export const PLAN_CHECK_STATES = ["pending", "clean", "shown", "repairing", "repaired", "failed", "stopped"] as const;
+export type PlanCheckState = (typeof PLAN_CHECK_STATES)[number];
+export type PlanCheck = {
+  state: PlanCheckState;
+  version: number;
+  summary: string;
+  problems: PlanProblem[];
+  sent: PlanProblem[];
+  repairs: SpecResult["repairs"];
+  text: string;
+};
 
 // pushback.md section 6.23.2: why Claude pushes back on a review point.
 export const PUSHBACK_WHYS = ["already", "invalid", "plan", "scope"] as const;

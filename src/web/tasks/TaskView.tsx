@@ -817,7 +817,7 @@ const Loaded = forwardRef<TaskApi, { t: TaskDto; meta: MetaDto; onPr: (ref: PrRe
               onSave={(doc, text) => send({ kind: "docs", doc, text }, () => setEditing(null))}
             />
           )}
-          {shown === "plan" && <PlanParts t={t} />}
+          {shown === "plan" && <PlanParts t={t} runner={runner} />}
           {shown === "log" && (
             <LogTab
               t={t}

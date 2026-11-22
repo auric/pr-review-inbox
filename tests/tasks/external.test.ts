@@ -137,7 +137,7 @@ async function setup(build: { writes: { path: string; text: string }[]; blocking
   // The pre-flight reads the repository from the fake server.
   repoWrites(fake, "PROJ", "repo");
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
+  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, taskPlanCheck: false });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });

@@ -51,7 +51,7 @@ async function setup(o: { cloud?: boolean } = {}) {
   const jira = startFakeJira({ cloud: o.cloud });
   jira.addSubtaskSet();
   const dataDir = join(root, "data");
-  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
+  writeConfig(dataDir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, taskPlanCheck: false });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir: dataDir, secrets, jiraSecrets: createSecrets(null, "jira-token") });

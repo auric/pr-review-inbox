@@ -87,6 +87,7 @@ describe("settings API", () => {
       sessions: false,
       usageResume: false,
       askAttachments: true,
+      taskPlanCheck: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
       runLimits: {
         reviewMinutes: 60,
@@ -127,6 +128,7 @@ describe("settings API", () => {
       sessions: false,
       usageResume: false,
       askAttachments: true,
+      taskPlanCheck: true,
       taskBranchPrefixes: ["feature/", "bugfix/", "hotfix/"],
       runLimits: {
         reviewMinutes: 60,
@@ -395,6 +397,22 @@ describe("settings API", () => {
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), askAttachments: "off" }));
     again.settings.close();
     expect((await setup().get()).askAttachments).toBe(true);
+  });
+
+  test("the plan check starts on, off is stored, and on removes the key (spec.md section 6.22.10)", async () => {
+    const s = setup();
+    expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
+    const file = join(dir, "config.json");
+    expect(JSON.parse(readFileSync(file, "utf8")).taskPlanCheck).toBeUndefined();
+    expect((await s.get()).taskPlanCheck).toBe(true);
+    expect(await (await s.put({ baseUrl: fake.url, taskPlanCheck: false })).json()).toMatchObject({ taskPlanCheck: false });
+    expect(JSON.parse(readFileSync(file, "utf8")).taskPlanCheck).toBe(false);
+    // A PUT without the key keeps the value.
+    expect((await s.put({ baseUrl: fake.url, markAi: false })).status).toBe(200);
+    expect(JSON.parse(readFileSync(file, "utf8")).taskPlanCheck).toBe(false);
+    expect((await s.put({ baseUrl: fake.url, taskPlanCheck: "no" })).status).toBe(400);
+    expect(await (await s.put({ baseUrl: fake.url, taskPlanCheck: true })).json()).toMatchObject({ taskPlanCheck: true });
+    expect(JSON.parse(readFileSync(file, "utf8")).taskPlanCheck).toBeUndefined();
   });
 
   test("GET gives the two shipped profiles with their full prompts", async () => {

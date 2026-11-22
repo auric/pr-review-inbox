@@ -184,6 +184,8 @@ export type ClaudeScenario = {
   // run of one call key, such as the files of each implement step.
   interview?: unknown;
   spec?: unknown;
+  // spec.md section 6.22.5: the result of the plan check run. Absent: a check with no problem.
+  planCheck?: unknown;
   implement?: unknown;
   review?: unknown;
   seq?: FakeScenario["seq"];
@@ -213,7 +215,8 @@ export type PostBody = { text: string; parent?: { id: number }; anchor?: Record<
 export async function control(action: "reset" | "restart" | "shutdown" | "task-pr-approve"): Promise<void>;
 export async function control(action: "state", change: Partial<Scenario>): Promise<void>;
 export async function control(action: "claude", change: ClaudeScenario): Promise<void>;
-export async function control(action: string, change?: Partial<Scenario> | ClaudeScenario) {
+export async function control(action: "plan-check", change: { on: boolean }): Promise<void>;
+export async function control(action: string, change?: Partial<Scenario> | ClaudeScenario | { on: boolean }) {
   const res = await fetch(`${FAKE_URL}/__control/${action}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${E2E_TOKEN}`, "Content-Type": "application/json" },
