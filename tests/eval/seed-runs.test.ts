@@ -37,7 +37,7 @@ import type { SeedRecord, SeedValidation } from "../../scripts/eval/seed-store";
 import { createClaudeRunner } from "../../src/server/review/claude";
 import { UNTRUSTED } from "../../src/server/review/workspace";
 import { readRecords } from "../support/fake-claude";
-import { ARCH, gitIn, makeNaturalSet, type NaturalSet, PATHS, PR_TITLE, seedFields } from "../support/seed-fixture";
+import { ARCH, addTargetMerge, gitIn, makeNaturalSet, type NaturalSet, PATHS, PR_TITLE, seedFields } from "../support/seed-fixture";
 
 console.log(`seed-runs.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed-runs", import.meta.dir)}`);
 
@@ -410,6 +410,35 @@ describe("seeder and validator runs with the fake CLI", () => {
       );
       expect(doc.state).toBe("refuted");
       expect(doc.reason).toBe("check 4: The seed adds a line inside a comment or a docstring.");
+      expect(f.runs()).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "a seed whose fold commit lies before a merge on its file gets val- and no run (WP-SG6)",
+    async () => {
+      const f = fake("seed-validate");
+      const target = (await hostsOf(nat.dir, mkdtempSync(join(TMP, "hosts-")))(addTargetMerge(nat))) as Host;
+      const path = "src/block.ts";
+      const fields = seedFields({
+        kind: "local",
+        path,
+        find: "  for (const x of list) total += x;",
+        replace: "  for (const x of list) total -= x;",
+        anchor: { path, text: "for (const x of list) total -= x;" },
+      });
+      const s: SeedRecord = {
+        ...fields,
+        id: "sd00000000b3",
+        state: "applied",
+        host: (await bindingOf(target, path)) as SeedRecord["host"],
+      };
+      const next = await validateSeed(target, s, f.ctx);
+      expect(next.state).toBe("refuted");
+      expect(next.reason).toBe(
+        "fold: The fold commit is a merge, or a later merge changes the path, so git show of that merge can print the seed.",
+      );
       expect(f.runs()).toEqual([]);
     },
     SLOW,

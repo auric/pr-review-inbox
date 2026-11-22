@@ -24,7 +24,7 @@ import {
   twinKey,
 } from "../../scripts/eval/seed-store";
 import { readRecords } from "../support/fake-claude";
-import { ARCH, addTwin, gitIn, makeNaturalSet, type NaturalSet, OMIT, PATHS, seedFields } from "../support/seed-fixture";
+import { ARCH, addTargetMerge, addTwin, gitIn, makeNaturalSet, type NaturalSet, OMIT, PATHS, seedFields } from "../support/seed-fixture";
 
 console.log(`seed-cli.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed", import.meta.dir)}`);
 
@@ -106,7 +106,7 @@ describe("propose, validate, and build", () => {
       const r = await cli(["propose"], seeds());
       expect(r.stderr).toBe("");
       expect(r.code).toBe(2);
-      expect(r.stdout).toContain("1 hosts, one per PR group. 1 more hosts have a merge commit in their range and take no seed.");
+      expect(r.stdout).toContain("1 hosts, one per PR group. 1 more hosts have a side-branch merge in their range and take no seed.");
       expect(r.stdout).toContain("Seeder runs: 1 (model opus, effort high).");
       expect(r.stdout).toContain("about $1.59");
       expect(r.stdout).toContain("Add --real");
@@ -130,7 +130,7 @@ describe("propose, validate, and build", () => {
   );
 
   test(
-    "propose takes one host per PR group by the newest committer date, skips merge hosts, and skips hosts with seeds",
+    "propose takes one host per PR group by the newest committer date, skips side-branch merge hosts, and skips hosts with seeds",
     async () => {
       const f = fake("seed-propose");
       const r = await cli(["propose", ...f.runner], seeds());
@@ -622,7 +622,7 @@ describe("twin hosts in propose and validate", () => {
       const plan = await cli(["propose"], seeds, fx.dir);
       expect(plan.code).toBe(2);
       expect(plan.stdout).toContain(
-        "1 hosts, one per PR group. 1 more hosts have a merge commit in their range and take no seed. 1 more hosts are twins: they have the base and head of a host, and take no seed.",
+        "1 hosts, one per PR group. 1 more hosts have a side-branch merge in their range and take no seed. 1 more hosts are twins: they have the base and head of a host, and take no seed.",
       );
       expect(plan.stdout).toContain("Seeder runs: 1 (model opus, effort high).");
       const notHost = await cli(["propose", "--cases", twin], seeds, fx.dir);
@@ -802,4 +802,26 @@ describe("leaks (section 7)", () => {
     expect(r.stdout).toContain("Leak words: 1 of 2 findings.");
     expect(r.stdout).not.toContain("on purpose");
   });
+});
+
+describe("target-merge hosts (WP-SG6)", () => {
+  test(
+    "propose takes a host whose range merges the target branch, and still leaves out a side-branch merge",
+    async () => {
+      const fx = await makeNaturalSet(join(TMP, "fx-target"));
+      const id = addTargetMerge(fx);
+      const seeds = join(TMP, "target");
+      const plan = await cli(["propose"], seeds, fx.dir);
+      expect(plan.code).toBe(2);
+      expect(plan.stdout).toContain("2 hosts, one per PR group. 1 more hosts have a side-branch merge in their range and take no seed.");
+      expect(plan.stdout).toContain("Seeder runs: 2 (model opus, effort high).");
+      const one = await cli(["propose", "--cases", id], seeds, fx.dir);
+      expect(one.stderr).toBe("");
+      expect(one.code).toBe(2);
+      expect(one.stdout).toContain("Seeder runs: 1 (model opus, effort high).");
+      expect((await cli(["propose", "--cases", fx.mergeHost], seeds, fx.dir)).stderr).toContain(`case ${fx.mergeHost} is no host`);
+      expect(existsSync(seeds)).toBe(false);
+    },
+    SLOW,
+  );
 });

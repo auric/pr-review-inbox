@@ -1,6 +1,6 @@
 # Seeded ground truth for the review eval
 
-Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG5 are built. U-SG1 ran three rounds (section 9 U-SG1 results). SG-P and SG-A are open. Work: packages WP-SG0 to WP-SG5, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
+Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG6 are built. U-SG1 ran three rounds (section 9 U-SG1 results). SG-P and SG-A are open. Work: packages WP-SG0 to WP-SG6, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
 
 Sources: docs/plans/review-v2/review-quality-2026.md (E1 to E6, items 6 and 7, ship rules), docs/plans/review-v3.md (WP-V1, decision V4), docs/plans/review-v2/research/review-practice-2026-11.md (B1, B2), the recall plan and the comparison of 2026-11-17 (both outside the repository), docs/eval/local.md, and scripts/eval/*.ts. This file names no other app, company, host, project, case ID, or PR number.
 
@@ -89,7 +89,7 @@ Recommendation: option (b), injected into private cases, stored as a generated o
 - One host per PR group: the case whose head commit has the newest committer date. The current build has 50 review cases in 23 PR groups (folder count, 2026-11-19).
 - Reason: cost scales with cases, and power scales with seeds and groups. Cases of one PR share most of their code, so a second host in a group adds cost without new groups.
 - At most 3 seeds per host and at most 1 seed per file. Recall falls as a PR holds more issues (review-practice B2: 38.4% at 1 issue against 8.9% at 5 or more). The build prints the issue count per host (natural plus seeds).
-- A host with a merge commit in its base..head range takes no seed (section 5.3).
+- A host with a side-branch merge in its base..head range takes no seed (section 5.3). A side-branch merge has a later parent that is not an ancestor of base, so its branch adds commits to the range. WP-SG6 (decided by the user on 2026-11-22, section 14 row 26): a merge of the target branch into the PR branch has only later parents that are ancestors of base, and its host takes seeds. Before WP-SG6, every merge commit in the range blocked the host.
 - Twin hosts: two hosts of two PR groups with one base and one head hold one commit series. propose takes only the twin with the lowest case ID and skips a twin group that has seeds. validate stops a twin group when its passed seeds are in 3 files (WP-SG5). The sample and the build apply the caps to the twin group. The build makes one case, on the twin with the lowest case ID among the kept seeds. A seed of another twin must pass checks 1 to 10 at that host, else it is a spare (check 6 reads the case file of the host). `eval:seed report` lists the twin hosts.
 - The build picks kept seeds per host in host-ID order. It first picks the kind with the lowest count so far, then the seeder order (the store order). The kind is the build kind: the user label when there is one (section 8). The order is deterministic.
 
@@ -237,15 +237,19 @@ A seed moves from proposed to applied only when every check passes. Each failure
 ### 5.3 History rewrite
 
 - rl-git exposes `git_show` of one commit with `--format=fuller` and its patch. It also exposes `git_blame -M -C` per line and `git_log` per path with `--follow` (git-mcp.ts:155-246). A separate seed commit would isolate the seed hunk. So the seed goes into the author's own commit.
-- Linear range (no merge commit in base..H): each seed goes into one fold commit c_f of the range. The rewrite tries these rules in order and records the rule that it used (section 14 row 15):
-  1. lines: the last commit that changed a line of `find` at H. `git blame --line-porcelain -L <find lines> base..H -- p`, without -M or -C, so a moved line counts for the commit whose patch moves it. A commit outside the range means "not changed in the series".
+- Range shape (WP-SG6, section 14 row 26): `rangeOf` reads `git rev-list --parents base..H`. A side-branch merge has a later parent in that list. Without one, every commit of the range is on the first-parent chain of H. Reason: each path from H to a commit of the range holds only commits of the range, and a step to a later parent there is a side-branch merge. The rewrite walks this chain. Before WP-SG6, any merge commit in the range blocked the host.
+- No side-branch merge in base..H: each seed goes into one fold commit c_f of the range. The rewrite tries these rules in order and records the rule that it used (section 14 row 15):
+  1. lines: the last commit that changed a line of `find` at H. `git blame --line-porcelain -L <find lines> base..H -- p`, without -M or -C, so a moved line counts for the commit whose patch moves it. A commit outside the range means "not changed in the series". Blame gives a line that a merge brings from the target branch to a commit of that branch, outside the range. The blame has no `--first-parent`: with it, blame names the merge for each such line (experiment with git 2.56, 2026-11-22).
   2. near: the last commit that changed a line within 3 lines of `find` (the check 3 distance). Check 3 puts an added line there, so this rule has a commit when rule 1 has none.
-  3. file: the last commit in the range that changes p (the old rule).
-- A rule applies only when the seed applies to the text of p at each commit from c_f to the last commit on p. A text where `find` does not occur once as whole lines (a duplicate that a later commit removes, or a rename) makes the rewrite take the next rule. Rule 3 always applies.
+  3. file: the last commit in the range that changes p (the old rule). `git rev-list -1 --first-parent base..H -- p`. Without `--first-parent`, a merge whose p equals its second parent hides the earlier commits on p (experiment with git 2.56, 2026-11-22).
+- A rule applies only when the seed applies to the text of p at each commit from c_f to the last commit on p. A text where `find` does not occur once as whole lines (a duplicate that a later commit removes, or a rename) makes the rewrite take the next rule. Rule 3 always applies, but a merge can refuse the seed (next bullet).
+- Merges (WP-SG6, section 14 row 26): the rules pick c_f as before. Then the rewrite refuses the seed when c_f is a merge, or when a later merge of the chain changes p against its first parent. `git rev-list -1 --first-parent --merges base..H -- p` finds the last such merge. The rewrite also refuses a seed when no commit of the chain changes p: a merge kept p of the PR branch against a change of the target branch. validate refutes a refused seed with the reason `fold: ...` and no run. The build stops at such a kept seed. So a fold never goes into a merge.
+- Why a merge refuses the seed: rl-git `git_show` runs `git show --format=fuller --stat --patch`. For a merge, git prints the stat against the first parent and a dense combined patch (`--cc`). A seed line in the first parent of a merge differs from the second parent. So a merge that changes p can print the seed line, as a line of the PR branch. It can also print a hunk that the unseeded merge does not print (experiment with git 2.56, 2026-11-22). A merge that keeps p of its first parent prints nothing for p, with or without the seed. A later c_f is no fix: when the series wrote the seeded lines, its patch would show the line before the seed. The PR diff never shows that line (the leak that row 15 removed).
+- A merge after c_f gets a new tree like every other commit: the seed applied to its own text of p. The rewrite maps only the parents inside the range, so the second parent of a merge stays the same commit. The tree of H' is the tree of H with each seeded blob (test).
 - Every commit from c_f to H gets a new tree: the old tree with p set to the seeded text of p at that commit. So each commit after c_f keeps its own patch, and the tree of H' is the same for every rule. The proof check reads the tree of H', so it gives the same result for a stored answer.
 - The fold is not stored. The build, validate, recheck, and report compute it, so a kept seed gets the rule at the next build with no paid step. The build writes the rule of each seed into MANIFEST.json (`seeded.folds`, by seed ID) and prints the count per rule. H' and the seeded case IDs change at the next build, so the set fingerprint changes too.
 - Each new commit object is the raw text of the old commit (`git cat-file commit`). Only the `tree` line and the mapped `parent` lines change. The rewrite removes `gpgsig` and `gpgsig-sha256` headers with their continuation lines. Author, committer, both dates, encoding, and message bytes stay. `git hash-object -t commit -w --stdin` writes the object.
-- Range with a merge commit: the host takes no seed. The build prints the count. That count is unverified today.
+- Range with a side-branch merge: the host takes no seed. propose and the build print the count (section 13 U1).
 - The seeded bundle holds only `refs/eval/<base>` and `refs/eval/<H'>`. It holds no ref to the original head. The cache fetches only the PR ref and the target ref (workspace.ts:259-263), so the original head never reaches a run. The bundle rule adds defense in depth.
 - All git calls use an isolated config and `--no-filters`, as buildRepo does (cases.ts:299-327).
 
@@ -428,7 +432,7 @@ General rules: tasks.md section 0 applies. Each new file starts with the SPDX an
   - One rejecting test per check.
   - The rewrite keeps the raw commit text except tree, parent, and gpgsig.
   - The seed lands in the last commit that changed its lines (WP-SG3 changed the old rule "the last commit that touched the file").
-  - A merge range takes no seed.
+  - A merge range takes no seed. WP-SG6 narrowed this to a range with a side-branch merge.
   - diff(base, H') equals diff(base, H) plus the seed.
   - The bundle has no original-head ref or object.
   - Natural items, alt places, and threads remap. An overlapping thread drops.
@@ -508,6 +512,19 @@ U-SG1 round 3 cost $12.00 and added 2 usable seeds. A design study found three c
 - Tests: avoid.md holds the earlier find lines and the passed-seed files; validate skips a seed in a full file and stops at 3 files, also for twins; propose skips a full host under `--cases`.
 - Gate: none paid.
 
+### WP-SG6. Hosts with the target branch merged in (implementer)
+
+U-SG1 left out 5 hosts with a merge commit in base..H. A read-only study of the store found that each such merge brings the target branch into the PR branch. Its second parent is an ancestor of base, so the range is a first-parent chain, and the merge changes few seedable files. The user decided it on 2026-11-22 (section 14 row 26).
+
+- Files and symbols:
+  - scripts/eval/seed-build.ts: `rangeOf` returns `side` (a side-branch merge) in place of `merge`. `rewriteHistory` finds the last commit on p with `--first-parent`. It returns `{ refused, seed }` when the fold commit is a merge, when a later merge changes p, or when no commit of the chain changes p. `buildSeededSet` leaves out only side-branch hosts, and it stops at a refused kept seed.
+  - scripts/eval/seed-runs.ts: `seededHead` gives the failed reason `fold: <reason>`, so validate refutes the seed with no run.
+  - scripts/eval/seed.ts: `selectHosts` returns `side`. The propose plan, the `--cases` refusal, and the build line name side-branch merges.
+- Behavior change: propose, validate, and build take a host whose merges bring the target branch in. A side-branch merge still blocks the host. MANIFEST `seeded.mergeHosts` counts only the side-branch hosts.
+- rl-git: `git_log` shows hashes, dates, authors, and subjects only. `git_blame` of a seed line names the fold commit. `git_show` of a merge prints the stat against the first parent and a `--cc` patch. The refusal keeps both the same for each merge after the fold (section 5.3, test).
+- Tests (fakes only; `addTargetMerge` in tests/support/seed-fixture.ts): propose takes the host and still leaves out the side-branch merge; a fold before the merge on a file that the merge keeps, and a fold after the merge on a file that it changes; refusals when blame "near" names the merge, when blame "lines" names a commit before a merge on the file, when the merge is the last commit on the file, and when no chain commit changes the file; validate refutes a refused seed with no run; the rewritten merge keeps its second parent, its commit text, and its git show output; H' is H plus the seeds; blame names the fold commit. Control: with a fold into the merge allowed, the refusal test fails.
+- Gate: none paid. A plain `propose --real` runs the seeder on the new hosts.
+
 ### U-SG1. Seeding (user, paid, about $40-100 once)
 
 ```
@@ -532,7 +549,7 @@ U-SG1 results (2026-11-22, before WP-SG5):
 - Acceptance fails: 21 seeds against the floor of 48.
 - SG-A power: the MDE is about 24.7 points at 21 seeds, against the bar of 18 points. So SG-A would fail fitness.
 - Estimated with WP-SG5 alone: 29 to 33 seeds, MDE 20 to 21.5 points.
-- Estimated with hosts that have a merge commit in range: about 40 to 44 seeds in 18 groups, MDE 17.6 to 18.3 points. 5 hosts have such a merge. Each merge brings the target branch into the PR branch, so the first-parent chain holds the PR commits. This support is an open user decision.
+- Estimated with hosts that have a merge commit in range: about 40 to 44 seeds in 18 groups, MDE 17.6 to 18.3 points. 5 hosts have such a merge. Each merge brings the target branch into the PR branch, so the first-parent chain holds the PR commits. The user decided this support on 2026-11-22: WP-SG6 builds it (section 14 row 26).
 
 ### SG-P. Pilot (paid, about $3-8)
 
@@ -581,6 +598,7 @@ bun run eval:seed -- leaks <baseline result.json>
 | The judge pattern: sanitized workspace, structured output, no agents, rl-git, auth check. | label.ts:494-560, 883-887 |
 | `evalExtra` has no alt places. | cases.ts:68 |
 | `mapSpot` maps new-side ranges over a diff. | cases.ts:193-207 |
+| rl-git `git_show` of a merge prints the stat against the first parent and a `--cc` patch. The WP-SG6 refusal keeps that output the same for each merge after the fold. | git-mcp.ts:243-246; experiment with git 2.56; seed-build.test.ts (WP-SG6) |
 
 ## 11. Risks
 
@@ -601,7 +619,7 @@ bun run eval:seed -- leaks <baseline result.json>
 
 ## 13. Unverified
 
-- U1: how many hosts have a merge commit in base..head. The build prints it.
+- U1: how many hosts have a side-branch merge in base..head. propose and the build print it. The study of 2026-11-22 found 5 hosts with a merge commit, and each merge brought the target branch in. Since WP-SG6, these hosts take seeds. The count of seeds that the merge refusal costs is not measured.
 - U2: cost per case run with the advisor. Gate A measures it.
 - U3: rho, the within-group correlation of seed deltas. The first candidate gate measures it.
 - U4: whether the seeds are easier than natural misses. SG-A prints the distribution.
@@ -614,7 +632,7 @@ bun run eval:seed -- leaks <baseline result.json>
 
 ## 14. Decisions (user, 2026-11-21)
 
-The user decided these points on 2026-11-21. Row 14 is an orchestrator default. Rows 15 to 23 are requirements of 2026-11-22 (WP-SG3). Rows 24 and 25 are decisions of 2026-11-22 (WP-SG4). Each row names its implementer defaults.
+The user decided these points on 2026-11-21. Row 14 is an orchestrator default. Rows 15 to 23 are requirements of 2026-11-22 (WP-SG3). Rows 24 and 25 are decisions of 2026-11-22 (WP-SG4). Row 26 is a decision of 2026-11-22 (WP-SG6). Each row names its implementer defaults.
 
 | # | Question | Decision |
 |---|---|---|
@@ -643,3 +661,4 @@ The user decided these points on 2026-11-21. Row 14 is an orchestrator default. 
 | 23 | Docstrings in check 4 (requirement of 2026-11-22) | A line all inside a block comment, a doc comment, a line comment, or a Python triple-quoted string counts as a comment line. |
 | 24 | The middle rule for giveaways | Decided by the user on 2026-11-22: the middle rule. A seed is a giveaway only when the PR description or its checklist names the exact removed code or value, or lists the exact mutation among those its tests catch. A commit subject or a design doc of the repository that describes the intended behavior is no giveaway: natural bugs also contradict them, and catching that is good reviewing. The seeder prompt and check 12 follow it. |
 | 25 | A tenth kind "security" | Decided by the user on 2026-11-22. Section 4.5 defines it. Purpose: measure "security2" and "security2-verify" against the default. Tier 1 only. The kind order puts it first, and the sample draws 4 second seeds; both are implementer defaults for the orchestrator to confirm. |
+| 26 | Hosts with the target branch merged in (WP-SG6) | Decided by the user on 2026-11-22, with the strict refusal rule. A merge whose later parents are ancestors of base no longer blocks its host. A side-branch merge still does. The rules of row 15 pick the fold commit as before. The seed is refused when that commit is a merge or a later merge changes the seeded file, so git show of a merge never prints a seed line. This is stricter than "never into a merge". It costs each seed whose fold commit lies at or before a merge on its file; the count is not measured. Note, not built: a later fold commit gives more seeds, but its patch can show the line before the seed. A fold before the merge gives the most seeds, but git show of the merge can print the seed as a line of the PR branch. |

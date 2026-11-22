@@ -376,12 +376,13 @@ export async function proofMissing(r: Repo, head: string, proof: readonly string
 }
 
 // The seeded head of s: checks 1 to 8 and 10 at the unchanged host, then the history rewrite with this seed only. The store keeps no
-// seeded head, so validate and recheck compute it here. failed: the stored reason of a failed check.
+// seeded head, so validate and recheck compute it here. failed: the stored reason of a failed check, or of a seed with no fold commit.
 async function seededHead(h: Host, s: SeedRecord): Promise<{ head: string; c: Checked } | { failed: string }> {
   const c = await checkSeed(h, s);
   if ("check" in c) return { failed: `check ${c.check}: ${c.reason}` };
   const rewrite = await rewriteHistory(h.repo, h.base, h.head, [{ ...s, ...c }]);
-  if (rewrite === null) throw new Error(`Seed ${s.id}: the host has a merge commit in its range.`);
+  if (rewrite === null) throw new Error(`Seed ${s.id}: the host has a side-branch merge in its range.`);
+  if ("refused" in rewrite) return { failed: `fold: ${rewrite.refused}` };
   return { head: rewrite.head, c };
 }
 

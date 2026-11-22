@@ -33,7 +33,19 @@ import {
 import { loadStore, type SeedFields, type SeedRecord, saveStore } from "../../scripts/eval/seed-store";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { diffArgs } from "../../src/server/review/workspace";
-import { ARCH, addTwin, gitIn, keptSeed, makeNaturalSet, type NaturalSet, OMIT, PATHS, SPARE, seedFields } from "../support/seed-fixture";
+import {
+  ARCH,
+  addTargetMerge,
+  addTwin,
+  gitIn,
+  keptSeed,
+  makeNaturalSet,
+  type NaturalSet,
+  OMIT,
+  PATHS,
+  SPARE,
+  seedFields,
+} from "../support/seed-fixture";
 
 console.log(`seed-build.test.ts imported from ${Bun.resolveSync("../../scripts/eval/seed-build", import.meta.dir)}`);
 
@@ -45,18 +57,34 @@ afterAll(() => rmSync(TMP, { recursive: true, force: true, maxRetries: 3 }));
 let nat: NaturalSet;
 let host: Host;
 let mergeHost: Host;
+let target: Host;
 beforeAll(async () => {
   nat = await makeNaturalSet(join(TMP, "fx"));
   mkdirSync(join(TMP, "hosts"));
   const open = hostsOf(nat.dir, join(TMP, "hosts"));
   host = (await open(nat.host)) as Host;
   mergeHost = (await open(nat.mergeHost)) as Host;
+  target = (await open(addTargetMerge(nat))) as Host;
 }, SLOW);
 
 const git = async (args: string[], dir = nat.repo) => (await gitIn(nat.env, dir, args)).toString("utf8").trim();
 const check = (f: Partial<SeedFields> & Pick<SeedFields, "kind" | "path" | "find" | "replace" | "anchor">) =>
   checkSeed(host, seedFields(f));
 const F = PATHS.feature;
+const O = PATHS.other;
+
+// WP-SG6 seeds on the target-merge PR of the fixture. p1 forks before t1 (the base), m merges t1 into the PR branch, and p3 follows.
+const local = (path: string, find: string, replace: string) =>
+  seedFields({ kind: "local", path, find, replace, anchor: { path, text: replace.trim() } });
+// Blame "near" names p3 (o30), which comes after m.
+const AFTER = local(O, "export const o31 = 31;", "export const o31 = 32;");
+// Refused: blame "near" names m (o14); blame "lines" names p1, and m changes other.ts later; m is the last commit on block.ts; no commit
+// of the chain changes util.ts.
+const INTO = local(O, "export const o15 = 15;", "export const o15 = 16;");
+const BEFORE = local(O, "export const o11 = 11 + 1;", "export const o11 = 11 + 2;");
+const LAST = local("src/block.ts", "  for (const x of list) total += x;", "  for (const x of list) total -= x;");
+const NONE = local("src/util.ts", "export const u = 1;", "export const u = 0;");
+const REFUSED = "The fold commit is a merge, or a later merge changes the path, so git show of that merge can print the seed.";
 
 describe("applySeed", () => {
   test("whole lines, the line ending of the file, and the last line", () => {
@@ -519,13 +547,13 @@ describe("history rewrite (section 5.3)", () => {
         { ...OMIT, ...o },
       ];
       const got = await rewriteHistory(r, nat.base, nat.head, folds);
-      if (!got) throw new Error("no rewrite");
+      if (!got || "refused" in got) throw new Error("no rewrite");
       const { head } = got;
       expect(head).toMatch(/^[0-9a-f]{40}$/);
       // ARCH edits line 22, which c1 adds. c2 changes only line 45 of that file. OMIT edits line 31, which c3 changes last.
       expect(got.rules).toEqual(["lines", "lines"]);
-      const { commits, merge } = await rangeOf(r, nat.base, head);
-      expect(merge).toBe(false);
+      const { commits, side } = await rangeOf(r, nat.base, head);
+      expect(side).toBe(false);
       expect(commits).toHaveLength(4);
       for (let k = 0; k < 4; k++) {
         expect(commits[k]).not.toBe(nat.commits[k] as string);
@@ -581,7 +609,7 @@ describe("history rewrite (section 5.3)", () => {
       const c = (await checkSeed(host, near)) as Checked;
       expect(c).not.toHaveProperty("check");
       const got = await rewriteHistory(r, nat.base, nat.head, [{ ...near, ...c }]);
-      if (!got) throw new Error("no rewrite");
+      if (!got || "refused" in got) throw new Error("no rewrite");
       expect(got.rules).toEqual(["near"]);
       const { commits } = await rangeOf(r, nat.base, got.head);
       expect(await git(["log", "--format=%H", "-G", "f19 = 20", got.head], r.dir)).toBe(commits[0] as string);
@@ -620,7 +648,7 @@ describe("history rewrite (section 5.3)", () => {
       const repo = { dir, env, index: join(TMP, "dup-rewrite.index") };
       const fold = { ...s, mode: "100644", seeded, region: [applied.start, applied.end] as [number, number] };
       const got = await rewriteHistory(repo, base, c2, [fold]);
-      if (!got) throw new Error("no rewrite");
+      if (!got || "refused" in got) throw new Error("no rewrite");
       expect(got.rules).toEqual(["file"]);
       const { commits } = await rangeOf(repo, base, got.head);
       expect(commits[0]).toBe(c1);
@@ -630,12 +658,97 @@ describe("history rewrite (section 5.3)", () => {
   );
 
   test(
-    "a range with a merge commit takes no seed",
+    "a range that merges a side branch takes no seed; a range with the target branch merged in is the first-parent chain",
     async () => {
-      expect((await rangeOf(mergeHost.repo, nat.base, nat.mergeHead)).merge).toBe(true);
+      expect((await rangeOf(mergeHost.repo, nat.base, nat.mergeHead)).side).toBe(true);
       const blob = await git(["rev-parse", `${nat.mergeHead}:${PATHS.other}`]);
       const fold = { ...OMIT, find: "export const o5 = 5 + 1;", mode: "100644", seeded: blob, region: [5, 5] as [number, number] };
       expect(await rewriteHistory(mergeHost.repo, nat.base, nat.mergeHead, [fold])).toBeNull();
+      expect(await rangeOf(target.repo, nat.target.base, nat.target.head)).toEqual({ commits: nat.target.commits, side: false });
+    },
+    SLOW,
+  );
+
+  // WP-SG6: the target-merge PR of the fixture (seeds above). The changed rows of commit c against its first parent.
+  const own = async (c: string) =>
+    parseDiff(await git(["diff", ...diffArgs, `${c}^1`, c], target.repo.dir)).flatMap((f) =>
+      f.rows.filter((x) => x.kind !== "ctx").map((x) => `${f.path} ${x.kind} ${x.text}`),
+    );
+  // The stat and patch that rl-git git_show prints for c (git-mcp.ts), without the commit header.
+  const show = (c: string) =>
+    git(["show", "--no-color", "--no-ext-diff", "--no-textconv", "--format=", "--stat", "--patch", c, "--"], target.repo.dir);
+
+  test(
+    "target merged into the PR branch: a fold before the merge on a file that the merge keeps, and after the merge on a file that it changes; the merge keeps its second parent and its git show output; H' is H plus the seeds",
+    async () => {
+      const r = target.repo;
+      const { base, head, commits: was, merge } = nat.target;
+      const a = (await checkSeed(target, ARCH)) as Checked;
+      const o = (await checkSeed(target, AFTER)) as Checked;
+      expect(a).not.toHaveProperty("check");
+      expect(o).not.toHaveProperty("check");
+      const got = await rewriteHistory(r, base, head, [
+        { ...ARCH, ...a },
+        { ...AFTER, ...o },
+      ]);
+      if (!got || "refused" in got) throw new Error("no rewrite");
+      // ARCH: p1 adds line 22, and m keeps feature.ts of p1. AFTER: o31 is a base line, and p3 changes o30.
+      expect(got.rules).toEqual(["lines", "near"]);
+      expect(got.folds).toEqual([was[0] as string, was[2] as string]);
+      const { commits, side } = await rangeOf(r, base, got.head);
+      expect(side).toBe(false);
+      expect(commits).toHaveLength(3);
+      expect(commits.some((c) => was.includes(c))).toBe(false);
+      const m = await gitIn(nat.env, r.dir, ["cat-file", "commit", commits[1] as string]);
+      expect(m.toString("latin1")).toContain(`\nparent ${commits[0]}\nparent ${base}\n`);
+      expect(rest(m).equals(rest(await gitIn(nat.env, r.dir, ["cat-file", "commit", merge])))).toBe(true);
+      expect(await git(["show", `${commits[1]}:${F}`], r.dir)).toContain("\n  store.set(k, v);\n");
+      // git_show of the merge prints the same stat and patch, and that patch is not empty.
+      const before = await show(merge);
+      expect(before).toContain("diff --cc src/other.ts");
+      expect(await show(commits[1] as string)).toBe(before);
+      // Each commit keeps its patch against its first parent, but for the seed lines in its fold commit.
+      expect(await own(commits[1] as string)).toEqual(await own(merge));
+      expect(await own(commits[0] as string)).toContain(`${F} add   store.set(k, v);`);
+      expect(await own(commits[2] as string)).toEqual([
+        `${F} del export const f45 = 45;`,
+        `${F} add export const f45 = 45 + 1;`,
+        `${O} del export const o30 = 30;`,
+        `${O} del export const o31 = 31;`,
+        `${O} add export const o30 = 30 + 1;`,
+        `${O} add export const o31 = 32;`,
+      ]);
+      // The tree of H' is the tree of H with the two seeded blobs.
+      expect(await git(["diff", "--name-only", head, got.head], r.dir)).toBe(`${F}\n${O}`);
+      expect(await git(["rev-parse", `${got.head}:${F}`], r.dir)).toBe(a.seeded);
+      expect(await git(["rev-parse", `${got.head}:${O}`], r.dir)).toBe(o.seeded);
+      // rl-git git_blame names the fold commit for each seed line.
+      const blame = async (path: string, line: number) =>
+        (await git(["blame", "-l", "-M", "-C", "-L", `${line},${line}`, got.head, "--", path], r.dir)).slice(0, 40);
+      expect(await blame(F, 23)).toBe(commits[0] as string);
+      expect(await blame(O, 31)).toBe(commits[2] as string);
+    },
+    SLOW,
+  );
+
+  test(
+    "a seed is refused when its fold commit is the merge, lies before a merge that changes its file, or does not exist",
+    async () => {
+      const { base, head, merge } = nat.target;
+      // git show of m prints the line of p1 that BEFORE edits.
+      expect(await show(merge)).toContain("\n +export const o11 = 11 + 1;\n");
+      const a = (await checkSeed(target, ARCH)) as Checked;
+      for (const s of [INTO, BEFORE, LAST, NONE]) {
+        const c = (await checkSeed(target, s)) as Checked;
+        expect(c).not.toHaveProperty("check");
+        const refused = s === NONE ? "No commit of the series changes the path, so no commit takes the seed." : REFUSED;
+        expect(
+          await rewriteHistory(target.repo, base, head, [
+            { ...ARCH, ...a },
+            { ...s, ...c },
+          ]),
+        ).toEqual({ refused, seed: 1 });
+      }
     },
     SLOW,
   );
@@ -701,7 +814,7 @@ describe("seeded set build (sections 6.1 and 8)", () => {
     expect(m.rereview.counts.cases).toBe(0);
     expect(m.threads).toMatchObject({ cases: 1, threads: 4, comments: 5, overlap: 2 });
     const text = buildText(first);
-    expect(text).toContain("Seeded set: 1 cases with 2 seeds. Spare kept seeds: 2. Hosts with a merge commit, left out: 1.");
+    expect(text).toContain("Seeded set: 1 cases with 2 seeds. Spare kept seeds: 2. Hosts with a side-branch merge, left out: 1.");
     expect(text).toContain("Folds: lines 2, near 0, file 0.");
     // The floor counts kept seeds, spares included: omission has 2 (one on the merge host), but 1 in the set.
     expect(first.kept).toEqual(
@@ -880,6 +993,32 @@ describe("seeded set build (sections 6.1 and 8)", () => {
       refused: "The natural set folder holds a seeded set. Point REVIEW_LOOP_EVAL_LOCAL at the natural set.",
     });
   });
+
+  test(
+    "WP-SG6: a kept seed on a target-merge host builds a case whose bundle holds the rewritten merge and its second parent; a refused kept seed stops the build",
+    async () => {
+      const root = join(TMP, "seeds-target");
+      const bind = async (path: string) => (await bindingOf(target, path)) as SeedRecord["host"];
+      saveStore(root, { format: 1, seeds: [keptSeed("sd00000000d1", ARCH, await bind(F))] });
+      const b = (await buildSeededSet({ seeds: root, local: nat.dir })) as SeedBuild;
+      expect(b.manifest.seeded).toMatchObject({ seeds: 1, hosts: 1, mergeHosts: 0, folds: { sd00000000d1: "lines" } });
+      const [c] = loadCases("all", join(root, "set", "cases"));
+      const h = c?.local?.head as string;
+      const fresh = join(TMP, "fresh-target.git");
+      await gitIn(nat.env, null, ["init", "-q", "--bare", "--template=", fresh]);
+      await gitIn(nat.env, fresh, ["fetch", "-q", "--no-tags", c?.local?.bundle as string, "+refs/*:refs/*"]);
+      // The rewritten merge is the second commit of the chain, and its second parent is t1, the base.
+      const chain = (await gitIn(nat.env, fresh, ["rev-list", "--parents", "--first-parent", "--reverse", `${nat.target.base}..${h}`]))
+        .toString("utf8")
+        .trim()
+        .split("\n");
+      expect(chain).toHaveLength(3);
+      expect(chain[1]?.split(" ")[2]).toBe(nat.target.base);
+      saveStore(root, { format: 1, seeds: [keptSeed("sd00000000d2", INTO, await bind(O))] });
+      await expect(buildSeededSet({ seeds: root, local: nat.dir })).rejects.toThrow(`Seed sd00000000d2: ${REFUSED} Drop or retire it`);
+    },
+    SLOW,
+  );
 });
 
 describe("twin hosts and the build kind (sections 4.2 and 8)", () => {

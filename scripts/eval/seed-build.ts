@@ -172,11 +172,13 @@ export const hasCodeChange = async (h: Pick<Host, "repo" | "base" | "head">) =>
 
 // ---------- History rewrite (section 5.3) ----------
 
-// The commits of base..head, oldest first, with their parents. merge: a commit in the range has more than one parent.
-export async function rangeOf(r: Repo, base: string, head: string): Promise<{ commits: string[]; merge: boolean }> {
+// The commits of base..head, oldest first. side: a merge in the range has a later parent in the range, so that parent is no ancestor
+// of base (a side-branch merge). Without one, every commit of the range is on the first-parent chain of head.
+export async function rangeOf(r: Repo, base: string, head: string): Promise<{ commits: string[]; side: boolean }> {
   const out = await gText(r, ["rev-list", "--parents", "--topo-order", "--reverse", `${base}..${head}`]);
   const rows = out ? out.split("\n").map((l) => l.split(" ")) : [];
-  return { commits: rows.map((x) => x[0] as string), merge: rows.some((x) => x.length > 2) };
+  const commits = rows.map((x) => x[0] as string);
+  return { commits, side: rows.some((x) => x.slice(2).some((p) => commits.includes(p))) };
 }
 
 // The raw commit with a new tree line and mapped parent lines. gpgsig and gpgsig-sha256 go with their continuation lines. Every other
@@ -235,19 +237,24 @@ async function lastTouch(r: Repo, base: string, head: string, s: Fold, commits: 
 
 // Folds each seed into one commit of base..head and gives the commits after it new trees (section 5.3). Each commit from the fold on gets
 // the seed applied to its own text of the path, so every other commit keeps its patch. rules, folds: the fold rule and the original fold
-// commit of each seed, in input order. null: the range has a merge commit, so the host takes no seed.
+// commit of each seed, in input order. refused: seed (an input index) has no fold commit. null: the range has a side-branch merge, so the
+// host takes no seed.
 export async function rewriteHistory(
   r: Repo,
   base: string,
   head: string,
   seeds: Fold[],
-): Promise<{ head: string; rules: FoldRule[]; folds: string[] } | null> {
-  const { commits, merge } = await rangeOf(r, base, head);
-  if (merge) return null;
+): Promise<{ head: string; rules: FoldRule[]; folds: string[] } | { refused: string; seed: number } | null> {
+  const { commits, side } = await rangeOf(r, base, head);
+  if (side) return null;
   const plans: { at: number; rule: FoldRule; blobs: Map<number, { mode: string; sha: string }> }[] = [];
-  for (const s of seeds) {
-    const file = commits.indexOf(await gText(r, ["rev-list", "-1", `${base}..${head}`, "--", s.path]));
-    if (file < 0) throw new Error(`No commit of the range changes a seeded path, so the seed has no commit to go into.`);
+  for (const [i, s] of seeds.entries()) {
+    // --first-parent: without it, a merge with the path of its second parent hides the earlier commits on the path.
+    const last = async (...flags: string[]) =>
+      commits.indexOf(await gText(r, ["rev-list", "-1", "--first-parent", ...flags, `${base}..${head}`, "--", s.path]));
+    const file = await last();
+    // A merge that keeps the path of the PR branch against a change of the target branch leaves the path in the diff with no commit.
+    if (file < 0) return { refused: "No commit of the series changes the path, so no commit takes the seed.", seed: i };
     // From the last commit on the path, the path equals its head text, so the seeded head blob applies.
     const blobs = new Map<number, { mode: string; sha: string }>();
     for (let k = file; k < commits.length; k++) blobs.set(k, { mode: s.mode, sha: s.seeded });
@@ -264,6 +271,13 @@ export async function rewriteHistory(
       from = k;
     }
     const [at, rule]: [number, FoldRule] = t.lines >= from ? [t.lines, "lines"] : t.near >= from ? [t.near, "near"] : [file, "file"];
+    // git show prints a merge as a combined diff. A merge from the fold on that changes the path against its first parent can print the
+    // seed line there. A later fold commit would print the line before the seed (section 5.3).
+    if (at <= (await last("--merges")))
+      return {
+        refused: "The fold commit is a merge, or a later merge changes the path, so git show of that merge can print the seed.",
+        seed: i,
+      };
     plans.push({ at, rule, blobs });
   }
   const from = Math.min(...plans.map((p) => p.at));
@@ -752,6 +766,7 @@ export type SeededInfo = {
   byKind: Record<SeedKind, number>;
   hosts: number;
   spares: number;
+  // The hosts left out for a side-branch merge in their range (section 5.3).
   mergeHosts: number;
   hostFingerprint: string;
   seedsHash: string;
@@ -841,7 +856,7 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
     let mergeSeeds = 0;
     for (const [id, list] of [...kept]) {
       const h = (await hostOf(id)) as Host;
-      if ((await rangeOf(h.repo, h.base, h.head)).merge) {
+      if ((await rangeOf(h.repo, h.base, h.head)).side) {
         mergeHosts++;
         mergeSeeds += list.length;
         kept.delete(id);
@@ -873,7 +888,8 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
         h.head,
         list.map((s, k) => ({ ...s, ...(checked[k] as Checked) })),
       );
-      if (rewrite === null) throw new Error(`Host ${id} has a merge commit in its range.`);
+      if (rewrite === null) throw new Error(`Host ${id} has a side-branch merge in its range.`);
+      if ("refused" in rewrite) throw new Error(`Seed ${list[rewrite.seed]?.id}: ${rewrite.refused} Drop or retire it, then build again.`);
       const { head } = rewrite;
       for (const [k, s] of list.entries()) folds[s.id] = rewrite.rules[k] as FoldRule;
       // The places at H' with every seed of the host.
@@ -960,6 +976,7 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
         byKind,
         hosts: written.length,
         spares: spares + mergeSeeds + twinSpares,
+        // Side-branch hosts only: a host with the target branch merged in takes seeds (WP-SG6).
         mergeHosts,
         hostFingerprint: setFingerprint(hostsUsed),
         seedsHash: createHash("sha256").update(JSON.stringify(sorted)).digest("hex"),
@@ -994,7 +1011,7 @@ export async function buildSeededSet(o: { seeds: string; local: string }): Promi
 export function buildText(b: SeedBuild): string {
   const s = b.manifest.seeded;
   const lines = [
-    `Seeded set: ${b.manifest.counts.cases} cases with ${s.seeds} seeds. Spare kept seeds: ${s.spares}. Hosts with a merge commit, left out: ${s.mergeHosts}.`,
+    `Seeded set: ${b.manifest.counts.cases} cases with ${s.seeds} seeds. Spare kept seeds: ${s.spares}. Hosts with a side-branch merge, left out: ${s.mergeHosts}.`,
     `Seeds by kind: ${SEED_KINDS.map((k) => `${k} ${s.byKind[k]}`).join(", ")}.`,
     `Issues per case (natural must-finds plus seeds): ${b.issues.join(", ") || "none"}.`,
     `Bindings: ${b.stale} seeds went stale, and ${b.restored} came back.`,

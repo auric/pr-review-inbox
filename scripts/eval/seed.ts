@@ -130,7 +130,7 @@ const listFlag = (a: Args, name: string) =>
 // ---------- Hosts (section 4.2) ----------
 
 // User decision 1: one host per PR group, the case whose head commit has the newest committer date. A tie goes to the lower case ID.
-// merge: the hosts whose range has a merge commit. They take no seed (section 5.3). Twin hosts count once (section 4.2).
+// side: the hosts whose range has a side-branch merge. They take no seed (section 5.3). Twin hosts count once (section 4.2).
 export async function selectHosts(local: string, open: (id: string) => Promise<Host | null>) {
   const best = new Map<string, { h: Host; at: number }>();
   for (const id of readdirSync(join(local, "cases")).sort()) {
@@ -142,15 +142,15 @@ export async function selectHosts(local: string, open: (id: string) => Promise<H
     if (!b || at > b.at) best.set(group, { h, at });
   }
   const hosts: Host[] = [];
-  const merge: Host[] = [];
+  const side: Host[] = [];
   // twins: a host with the base and head of a host with a lower case ID. Its PR is the same commit series, so it takes no seed.
   const twins: { host: Host; of: Host }[] = [];
   for (const { h } of [...best.values()].sort((a, b) => (a.h.id < b.h.id ? -1 : 1))) {
-    const of = [...hosts, ...merge].find((x) => x.base === h.base && x.head === h.head);
+    const of = [...hosts, ...side].find((x) => x.base === h.base && x.head === h.head);
     if (of) twins.push({ host: h, of });
-    else ((await rangeOf(h.repo, h.base, h.head)).merge ? merge : hosts).push(h);
+    else ((await rangeOf(h.repo, h.base, h.head)).side ? side : hosts).push(h);
   }
-  return { hosts, merge, twins };
+  return { hosts, side, twins };
 }
 
 // ---------- Sample (section 5.5) ----------
@@ -297,12 +297,12 @@ async function propose(a: Args, seeds: string, local: string): Promise<number> {
   const tmp = mkdtempSync(join(tmpdir(), "rl-eval-seed-"));
   try {
     const open = hostsOf(local, tmp);
-    const { hosts, merge, twins } = await selectHosts(local, open);
+    const { hosts, side, twins } = await selectHosts(local, open);
     const cases = listFlag(a, "--cases");
     const missing = cases?.find((id) => !hosts.some((h) => h.id === id));
     if (missing !== undefined) {
       console.error(
-        `Refused: case ${missing} is no host. A host is the newest case of its PR group, with no merge commit in its range and no twin with a lower case ID.`,
+        `Refused: case ${missing} is no host. A host is the newest case of its PR group, with no side-branch merge in its range and no twin with a lower case ID.`,
       );
       return 2;
     }
@@ -316,7 +316,7 @@ async function propose(a: Args, seeds: string, local: string): Promise<number> {
     const todo: Host[] = [];
     for (const h of asked) if (await hasCodeChange(h)) todo.push(h);
     const plan = [
-      `eval:seed propose: ${hosts.length} hosts, one per PR group. ${merge.length} more hosts have a merge commit in their range and take no seed. ${twins.length} more hosts are twins: they have the base and head of a host, and take no seed.`,
+      `eval:seed propose: ${hosts.length} hosts, one per PR group. ${side.length} more hosts have a side-branch merge in their range and take no seed. ${twins.length} more hosts are twins: they have the base and head of a host, and take no seed.`,
       `${full} hosts are full: their passed seeds cover ${HOST_CAP} files, and they take no seeder run.`,
       `${asked.length - todo.length} hosts add no line to a file of a known code type and take no seeder run.`,
       `Seeder runs: ${todo.length} (model ${SEEDER.model}, effort ${SEEDER.effort})${kinds ? `, kinds ${kinds.join(", ")} only` : ""}. ${hosts.length - asked.length} hosts are skipped.`,

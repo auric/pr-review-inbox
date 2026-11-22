@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // A synthetic natural set for the seed tests (docs/plans/review-v2/seeded-truth.md WP-SG1): one repository with a linear PR (a signed
-// commit and a commit with an encoding header in its range), a PR with a merge commit, their two host cases, and one bundle.
+// commit and a commit with an encoding header in its range), a PR with a side-branch merge, their two host cases, and one bundle. The
+// repository also holds a PR with the target branch merged in (WP-SG6). addTargetMerge writes its case.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -89,6 +90,8 @@ export type NaturalSet = {
   host: string;
   mergeHost: string;
   bundle: string;
+  // The target-merge PR: base is t1, commits are p1, m, and p3. addTargetMerge writes its host case.
+  target: { base: string; commits: string[]; head: string; merge: string };
 };
 
 // The natural set in root/natural: cases/<id>/case.json, bundles/<16 hex>.bundle, and MANIFEST.json. root must be empty.
@@ -150,8 +153,30 @@ export async function makeNaturalSet(root: string): Promise<NaturalSet> {
   const m1 = await commit([base], { "src/util.ts": "export const u = 2;\n" }, "Raise u");
   const s1 = await commit([base], { [PATHS.other]: other([5]) }, "Raise o5");
   const merge = await commit([m1, s1], { "src/util.ts": "export const u = 2;\n", [PATHS.other]: other([5]) }, "Merge the side branch");
+  // The target-merge PR (WP-SG6): t1 is the target branch and the case base. p1 forks before t1, and m merges t1 into the PR branch.
+  // feature.ts: t1 does not change it, so m keeps the text of p1. other.ts: m takes o35 from t1 and makes o14 itself. block.ts: m takes
+  // the signature from t1, and no later commit changes the file. util.ts: m keeps the text of p1 against t1, so no chain commit changes it.
+  const run2 = (sig: string, loop: boolean) =>
+    `export function run(list: ${sig}) {\n  let total = 0;\n${loop ? "  for (const x of list) total += x;\n" : ""}  return total;\n}\n`;
+  const merged = other([10, 11, 12, 35]).replace("o14 = 14;", "o14 = 14 + 2;");
+  const t1 = await commit(
+    [base],
+    { [PATHS.other]: other([35]), "src/block.ts": run2("readonly number[]", false), "src/util.ts": "export const u = 3;\n" },
+    "Raise o35",
+  );
+  const p1 = await commit(
+    [base],
+    { [PATHS.feature]: feature([20, 21, 22, 23, 24, 25, 26]), [PATHS.other]: other([10, 11, 12]), "src/block.ts": run2("number[]", true) },
+    "Add apply",
+  );
+  const m = await commit([p1, t1], { [PATHS.other]: merged, "src/block.ts": run2("readonly number[]", true) }, "Merge main into the PR");
+  const p3 = await commit(
+    [m],
+    { [PATHS.feature]: feature([20, 21, 22, 23, 24, 25, 26, 45]), [PATHS.other]: merged.replace("o30 = 30;", "o30 = 30 + 1;") },
+    "Raise f45 and o30",
+  );
 
-  for (const c of [base, c4, merge]) await run(["update-ref", `refs/eval/${c}`, c]);
+  for (const c of [base, c4, merge, t1, p3]) await run(["update-ref", `refs/eval/${c}`, c]);
   const bundle = `${createHash("sha256").update("PROJ/repo").digest("hex").slice(0, 16)}.bundle`;
   mkdirSync(join(dir, "bundles"), { recursive: true });
   await run(["bundle", "create", "-q", join(dir, "bundles", bundle), "--all"]);
@@ -218,7 +243,31 @@ export async function makeNaturalSet(root: string): Promise<NaturalSet> {
   });
   write({ ...common(mergeHost, merge, "pr8"), bugs: [], traps: [], extras: [] });
   writeFileSync(join(dir, "MANIFEST.json"), `${JSON.stringify({ format: 1, fingerprint: "natural" }, null, 2)}\n`);
-  return { dir, repo, env, base, commits: [c1, c2, c3, c4], head: c4, mergeHead: merge, host, mergeHost, bundle };
+  return {
+    dir,
+    repo,
+    env,
+    base,
+    commits: [c1, c2, c3, c4],
+    head: c4,
+    mergeHead: merge,
+    host,
+    mergeHost,
+    bundle,
+    target: { base: t1, commits: [p1, m, p3], head: p3, merge: m },
+  };
+}
+
+// The host case of the target-merge PR (PR group pr9), with no natural items or threads. A separate call keeps the host counts of
+// makeNaturalSet. Returns its ID.
+export function addTargetMerge(set: Pick<NaturalSet, "dir" | "mergeHost" | "target">): string {
+  const file = localCaseFile.parse(JSON.parse(readFileSync(join(set.dir, "cases", set.mergeHost, "case.json"), "utf8")));
+  const { base, head } = set.target;
+  const id = caseId({ pr: 9, head, base });
+  const host = localCaseFile.parse({ ...file, id, group: "pr9", bundle: { ...file.bundle, base, head } });
+  mkdirSync(join(set.dir, "cases", id), { recursive: true });
+  writeFileSync(join(set.dir, "cases", id, "case.json"), `${JSON.stringify(host, null, 2)}\n`);
+  return id;
 }
 
 // A twin host case: a case of PR group pr<pr> with the base and head of case src, and no natural items or threads. Returns its ID.
