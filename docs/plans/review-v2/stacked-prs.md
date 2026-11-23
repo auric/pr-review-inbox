@@ -336,7 +336,7 @@ Run: `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G9,G12,G20`. The t
 | U-SK5 | `isLastPage` and `limit` behave as in G9. |
 
 - Until G9, G12, and G20 pass, `STACK_READS` stays false. Stored rows still work.
-- The branch model read (question 1) joins G20 only when the user says yes.
+- The branch model read (question 1) is out of G20 by the decision of 2026-11-23. G20 reads the default branch only.
 
 ## 12. Open questions
 

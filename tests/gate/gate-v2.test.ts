@@ -192,14 +192,14 @@ describe("claude-checks.ts B34", () => {
   }, 120_000);
 });
 
-describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
+describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G20", () => {
   test("a dry run passes all checks against the loopback fake and prints no host", () => {
     const r = run(BITBUCKET_WRITE, ["--dry-run"], GIT_DIR);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     for (const id of ["G1", "G2", "G3", "G4", "G5", "G6"]) expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("INFO    G7 ");
-    for (const id of ["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G19"]) expect(r.out).toContain(`PASS    ${id} `);
+    for (const id of ["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G19", "G20"]) expect(r.out).toContain(`PASS    ${id} `);
     expect(r.out).toContain("(stale info)");
     const g3 = r.out.split("\n").find((l) => l.startsWith("PASS    G3 ")) ?? "";
     expect(g3).toContain("of the new gate commit: HTTP 200 keys=failed,inProgress,successful counts=0/0/0");
@@ -223,11 +223,11 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     const g9 = r.out.split("\n").find((l) => l.startsWith("PASS    G9 ")) ?? "";
-    expect(g9).toContain("open PRs (limit 50): HTTP 200 count=2 isLastPage=true page schema=ok");
+    expect(g9).toContain("open PRs (limit 50): HTTP 200 count=6 isLastPage=true page schema=ok");
     expect(g9).toContain("PR keys=author,fromRef,id,links,participants,properties,reviewers,state,title,toRef,updatedDate,version");
     expect(g9).toContain("X-AUSERNAME=present");
     const g12 = r.out.split("\n").find((l) => l.startsWith("PASS    G12 ")) ?? "";
-    expect(g12).toContain("open PRs read=2 without the user=1");
+    expect(g12).toContain("open PRs read=6 without the user=1");
     expect(g12).toContain(
       "changes of a PR without the user: HTTP 200 count=2 isLastPage=true page schema=ok change keys=path,srcPath,type types=MODIFY,MOVE",
     );
@@ -266,9 +266,29 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
     const g18 = r.out.split("\n").find((l) => l.startsWith("PASS    G18 ")) ?? "";
-    expect(g18).toContain("mergeResult keys=current,outcome with outcome and current=2 of 2");
+    expect(g18).toContain("mergeResult keys=current,outcome with outcome and current=6 of 6");
     expect(g18).toContain("outcomes=CLEAN/current=true,CONFLICTED/current=true; CONFLICTED with current true=true");
     for (const secret of ["dry-user", "dry-other", "Dry peer", "127.0.0.1", tmpdir()]) expect(r.out).not.toContain(secret);
+    expect(r.out).toContain("dry run: PASS");
+  }, 120_000);
+
+  test("a dry run of the read check G20 finds the stack, reads each direction with GET only, and prints no name", () => {
+    const r = run(BITBUCKET_WRITE, ["--dry-run", "--only", "G9,G12,G20"], GIT_DIR);
+    console.log(`G20 code under test: ${BITBUCKET_WRITE}`);
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    const g20 = r.out.split("\n").find((l) => l.startsWith("PASS    G20 ")) ?? "";
+    expect(g20).toContain("open PRs read=6 complete=true stack found=true");
+    expect(g20).toContain("U-SK1 OUTGOING at A: HTTP 200 count=1 isLastPage=true limit=50 exactly A=true");
+    expect(g20).toContain("U-SK2 INCOMING at B: HTTP 200 count=1 isLastPage=true limit=50 exactly C=true");
+    expect(g20).toContain("U-SK3 OUTGOING at the default branch: HTTP 200 count=0 isLastPage=true limit=50 only from it=true");
+    expect(g20).toContain("INCOMING at the default branch: HTTP 200 count=4 isLastPage=true limit=50 only into it=true lists A=true");
+    expect(g20).toContain("U-SK4 values=6 with fromRef.repository=6 with toRef.id=6 fromRef.repository keys=project,slug");
+    expect(g20).toContain("cross-repository PRs in the open list=1; U-SK5 isLastPage and limit typed=true");
+    // The gate made nothing, so it declines and deletes nothing.
+    expect(r.out).toContain("cleanup: declined PRs=none; deleted branches=none");
+    for (const secret of ["feature/", "refs/heads/", "dry-repo", "DRY", "dry-user", "Dry peer", "127.0.0.1", tmpdir()])
+      expect(r.out).not.toContain(secret);
     expect(r.out).toContain("dry run: PASS");
   }, 120_000);
 
@@ -315,6 +335,8 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G19", () => {
     [["--repo", REPO, "--target", "main"], "Refused: G1 to G7 create branches"],
     [["--repo", REPO, "--only", "G9,G1"], "Refused: G1 to G7 create branches"],
     [["--only", "G9,G12"], "--repo is required"],
+    [["--only", "G9,G12,G20"], "--repo is required"],
+    [["--repo", REPO, "--only", "G20,G1"], "Refused: G1 to G7 create branches"],
     [["--repo", "https://example.invalid/browse", "G12"], "--repo is not a repository URL"],
     [["--repo", "ssh://user@example.invalid/projects/A/repos/b", "G9"], "--repo needs an http or https URL"],
     [["--repo", REPO, "--target", "main", "--authorize-writes", "G2"], "G2 needs --reviewer"],

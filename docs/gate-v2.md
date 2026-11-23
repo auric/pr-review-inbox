@@ -1,6 +1,6 @@
 # Gate v2: CLI and Bitbucket facts for review v2 and task building
 
-This gate records facts that review v2 and the task builder need (docs/plans/review-v2/tasks.md, WP-G0). You run each check on your own machine. B17 to B20 use your Claude Code login. G1 to G7 write to a Bitbucket test repository. G9, G12, and G13 to G18 only read from it.
+This gate records facts that review v2 and the task builder need (docs/plans/review-v2/tasks.md, WP-G0). You run each check on your own machine. B17 to B20 use your Claude Code login. G1 to G7 write to a Bitbucket test repository. G9, G12, G13 to G18, and G20 only read from it.
 
 | Checks | Run before | Script |
 |---|---|---|
@@ -25,6 +25,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | G15 | WP-MR1. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G16, G17 | WP-MR2. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G18 | WP-TU1 merges. Read only. | `scripts/gate/bitbucket-write.ts` |
+| G20 | WP-SK1 turns on `STACK_READS` after G9, G12, and G20 pass. Read only. | `scripts/gate/bitbucket-write.ts` |
 
 ## Record the results
 
@@ -370,3 +371,27 @@ G18 sends only GET requests (tasks.md WP-TU1, spec.md section 6.18.5). It needs 
 | G18 | Reads the open PRs (`GET .../pull-requests?state=OPEN&limit=50`) and records the keys of `properties` and `properties.mergeResult`, and each pair of outcome and current. | Each open PR has `properties.mergeResult` with a string `outcome` and a boolean `current`, and one PR reports `CONFLICTED` with current true. INFO: no PR reports `CONFLICTED`; check the conflicted PR and run again. SKIPPED: no open PR. |
 
 Record G18 in its "Review v2" row of integration-check.md. The app reads outcome `CONFLICTED` with current true as a PR with conflicts (src/shared/task.ts MERGE_CONFLICTED). A different outcome value changes that constant before WP-TU1 merges.
+
+## Part G20, read only: the reads of a stack of PRs
+
+G20 sends only GET requests (docs/plans/review-v2/stacked-prs.md section 11, WP-SK0). It needs no `--authorize-writes` and no `--target`. It needs `--repo` with your test repository. Token, origin rule, and output rules are the same as for G1 to G7. A token with Repository read is enough. G20 reads the default branch only. It does not read the branch model (stacked-prs.md question 1).
+
+### Before you run
+
+1. Make a stack of three open PRs in the test repository: PR A from branch A into the default branch, PR B from branch B into branch A, and PR C from branch C into branch B. Each branch needs one commit of its own.
+2. Open no other PR from branch A and no other PR into branch B.
+3. Keep fewer than 50 open PRs in the test repository, so that one page holds all of them.
+4. Run the dry run: `bun scripts/gate/bitbucket-write.ts --dry-run --only G9,G12,G20`. It must print `dry run: PASS`.
+
+### Run
+
+- `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G9,G12,G20`
+- The console and `.gate0/bitbucket-write/result.g9-g12-g20.json` hold only status codes, counts, booleans, and key names. They never hold a branch name, a PR title, a repository name, a project key, or a host.
+
+### What the check does
+
+| Check | What it does | PASS |
+|---|---|---|
+| G20 | Reads the open PRs (`GET .../pull-requests?state=OPEN&limit=50`) and the default branch, and finds the stack A, B, C in that list. Then it reads `GET .../pull-requests?state=OPEN&at=refs/heads/<branch>&direction=<OUTGOING or INCOMING>&limit=50` four times: OUTGOING at A, INCOMING at B, OUTGOING at the default branch, and INCOMING at the default branch. It records the count, `isLastPage`, `limit`, the `fromRef.repository` keys, and the number of PRs from another repository. | U-SK1: OUTGOING at A lists exactly A. U-SK2: INCOMING at B lists exactly C. U-SK3: OUTGOING at the default branch lists only PRs from it, and INCOMING lists only PRs into it, A among them. U-SK4: each value has `fromRef.repository` and `toRef.id`. U-SK5: each page has a boolean `isLastPage` and a number `limit`, and the open-PR list is complete. SKIPPED: no stack in the open PRs. |
+
+Record G20 in its "Review v2" row of integration-check.md. A PR from a fork is optional: the evidence then shows "cross-repository PRs in the open list" above 0.

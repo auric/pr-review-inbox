@@ -7,12 +7,14 @@
 // G13 to G17 (WP-GB) only read: the default branch, the branch search, the write permission and branch restrictions, the
 // repository list, and the merge commit of a merged PR.
 // G18 (WP-TU1) only reads: properties.mergeResult of the open PRs, with one PR that the user made conflicted by hand.
+// G20 (WP-SK0) only reads: the open PRs at a branch of a stack of three open PRs, OUTGOING and INCOMING.
 // G19 (WP-ST-G) WRITES: three gate branches, two PRs, a squash merge of the lower PR into the gate base branch, and a push of the upper branch.
 // Usage: bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes [--only G1,G2] [G3 ...]
 //          [--reviewer <user slug>] [--build-commit <commit>] [--readonly-token-env <VAR>] [--jira-key <KEY>] [--keep]
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G13,G14,G15,G16,G17
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G18
+//        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12,G20
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes --only G19
 //        bun scripts/gate/bitbucket-write.ts --repo <repository URL> --authorize-writes --cleanup
 //        bun scripts/gate/bitbucket-write.ts --dry-run [--only G1,G2]
@@ -40,10 +42,10 @@ const G5_WAIT_MS = 30_000;
 const G5_POLL_MS = 2_000;
 // Every branch that the script creates or deletes has this prefix. The target branch never gets a push.
 const PREFIX = "rl-gate-";
-const CHECKS = ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G19"] as const;
+const CHECKS = ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G19", "G20"] as const;
 type CheckId = (typeof CHECKS)[number];
 // These checks send only GET requests. They need no --authorize-writes and no --target.
-const READ_ONLY = new Set<CheckId>(["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18"]);
+const READ_ONLY = new Set<CheckId>(["G9", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G20"]);
 // The open-PR list of G9 and G12: one page, as provider.listOpenPullRequests reads it (spec.md section 2.8).
 const OPEN_PR_LIMIT = 50;
 // G14: the page size of the base branch picker (spec.md section 6.16). G16: the repository pages that the app reads at most.
@@ -56,6 +58,7 @@ const USAGE = [
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G13,G14,G15,G16,G17",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G18",
+  "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --only G9,G12,G20",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes --only G19",
   "       bun scripts/gate/bitbucket-write.ts --repo <repository URL> --authorize-writes --cleanup",
   "       bun scripts/gate/bitbucket-write.ts --dry-run [--only G1,G2]",
@@ -632,6 +635,70 @@ async function g12(s: Session): Promise<Result> {
   };
 }
 
+// ---------- G20: the stack reads (docs/plans/review-v2/stacked-prs.md section 11, U-SK1 to U-SK5) ----------
+type StackPr = { id?: unknown; fromRef?: { id?: unknown; repository?: unknown }; toRef?: { id?: unknown; repository?: unknown } };
+const repoKey = (r: unknown) => {
+  const v = r as { slug?: unknown; project?: { key?: unknown } } | null | undefined;
+  return typeof v?.slug === "string" && typeof v.project?.key === "string" ? `${v.project.key.toUpperCase()}/${v.slug}` : null;
+};
+const sameRepo = (p: StackPr) => repoKey(p.fromRef?.repository) !== null && repoKey(p.fromRef?.repository) === repoKey(p.toRef?.repository);
+
+async function g20(s: Session): Promise<Result> {
+  const list = await s.openPrs();
+  const d = (await s.defaultBranch()).body as Ref | null;
+  const def = typeof d?.id === "string" ? d.id : null;
+  if (list.status !== 200 || !def)
+    return { check: "G20", status: "FAIL", evidence: `open PRs: ${pageLine(list)}; default branch read=${def !== null}` };
+  const all = valuesOf(list.body) as StackPr[];
+  const into = (ref: unknown) => all.filter((p) => sameRepo(p) && typeof ref === "string" && p.toRef?.id === ref);
+  let stack: [StackPr, StackPr, StackPr] | undefined;
+  for (const a of into(def))
+    for (const b of into(a.fromRef?.id)) {
+      const c = into(b.fromRef?.id)[0];
+      if (c && !stack) stack = [a, b, c];
+    }
+  if (!stack)
+    return {
+      check: "G20",
+      status: "SKIPPED",
+      evidence: `open PRs read=${all.length}. No stack of three open PRs in the first ${OPEN_PR_LIMIT}: A into the default branch, B into A, C into B. Open one and run again.`,
+    };
+  const [a, b, c] = stack;
+  // The same query as provider.listOpenPullRequests with a branch, plus the INCOMING form.
+  const at = (ref: string, direction: "OUTGOING" | "INCOMING") =>
+    s.call("GET", `${s.repoPath}/pull-requests?state=OPEN&at=${encodeURIComponent(ref)}&direction=${direction}&limit=${OPEN_PR_LIMIT}`);
+  const reads = {
+    aOut: await at(a.fromRef?.id as string, "OUTGOING"),
+    bIn: await at(b.fromRef?.id as string, "INCOMING"),
+    defOut: await at(def, "OUTGOING"),
+    defIn: await at(def, "INCOMING"),
+  };
+  const ids = (r: Call) => (valuesOf(r.body) as StackPr[]).map((v) => v.id);
+  const exactly = (r: Call, pr: StackPr) => pageOk(r) && ids(r).length === 1 && ids(r)[0] === pr.id;
+  const sk1 = exactly(reads.aOut, a);
+  const sk2 = exactly(reads.bIn, c);
+  const defOutVals = valuesOf(reads.defOut.body) as StackPr[];
+  const defInVals = valuesOf(reads.defIn.body) as StackPr[];
+  const onlyFrom = defOutVals.every((v) => v.fromRef?.id === def);
+  const onlyInto = defInVals.every((v) => v.toRef?.id === def);
+  // The unfiltered list is the oracle only when it is complete.
+  const complete = isLast(list.body) === true;
+  const intoCount = all.filter((p) => p.toRef?.id === def).length;
+  const sk3 = pageOk(reads.defOut) && pageOk(reads.defIn) && onlyFrom && onlyInto && defInVals.some((v) => v.id === a.id);
+  const vals = Object.values(reads).flatMap((r) => valuesOf(r.body) as StackPr[]);
+  const withRepo = vals.filter((v) => keysOf(v.fromRef?.repository).length > 0).length;
+  const withTo = vals.filter((v) => typeof v.toRef?.id === "string").length;
+  const sk4 = withRepo === vals.length && withTo === vals.length;
+  const limits = Object.values(reads).map((r) => (r.body as { limit?: unknown } | null)?.limit);
+  const sk5 = Object.values(reads).every(pageOk) && limits.every((l) => typeof l === "number");
+  const line = (r: Call) => `${pageLine(r)} limit=${String((r.body as { limit?: unknown } | null)?.limit ?? "absent")}`;
+  return {
+    check: "G20",
+    status: sk1 && sk2 && sk3 && sk4 && sk5 && complete ? "PASS" : "FAIL",
+    evidence: `open PRs read=${all.length} complete=${complete} stack found=true; U-SK1 OUTGOING at A: ${line(reads.aOut)} exactly A=${sk1}; U-SK2 INCOMING at B: ${line(reads.bIn)} exactly C=${sk2}; U-SK3 OUTGOING at the default branch: ${line(reads.defOut)} only from it=${onlyFrom}; INCOMING at the default branch: ${line(reads.defIn)} only into it=${onlyInto} lists A=${defInVals.some((v) => v.id === a.id)} open list into it=${intoCount}; U-SK4 values=${vals.length} with fromRef.repository=${withRepo} with toRef.id=${withTo} fromRef.repository keys=${keyUnion(vals.map((v) => v.fromRef?.repository))} cross-repository PRs in the open list=${all.filter((p) => !sameRepo(p)).length}; U-SK5 isLastPage and limit typed=${sk5}`,
+  };
+}
+
 // ---------- G13 to G17: reads for task branches, base branches, and several repositories (spec.md section 6.16) ----------
 type Ref = { id?: unknown; displayId?: unknown; type?: unknown };
 const SHA = /^[0-9a-f]{40}$/;
@@ -945,6 +1012,7 @@ const RUNNERS: Record<CheckId, (s: Session) => Promise<Result>> = {
   G17: g17,
   G18: g18,
   G19: g19,
+  G20: g20,
 };
 
 async function runGate(ctx: Ctx) {
@@ -1028,6 +1096,18 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
     { ...peer(102, "dry-other", "dry-reviewer"), ...merge(MERGE_CONFLICTED) },
     { ...peer(101, "dry-user", "dry-reviewer"), ...merge("CLEAN") },
   ];
+  // G20: the stack 201 into main, 202 into 201, 203 into 202, and 204 from a fork into main.
+  const stackPr = (id: number, from: string, to: string) => ({
+    ...peer(id, "dry-user", "dry-reviewer"),
+    ...merge("CLEAN"),
+    fromRef: peerRef(from),
+    toRef: peerRef(to),
+  });
+  const forkRef = { ...peerRef("feature/fork"), repository: { slug: "dry-repo", project: { key: "~DRY-FORK" } } };
+  peers.push(stackPr(201, "feature/a", "main"), stackPr(202, "feature/b", "feature/a"), stackPr(203, "feature/c", "feature/b"), {
+    ...stackPr(204, "feature/fork", "main"),
+    fromRef: forkRef,
+  });
   const peerChanges: Record<number, unknown[]> = {
     101: [{ path: { toString: "README.md" }, type: "MODIFY" }],
     102: [
@@ -1132,7 +1212,10 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
         const at = url.searchParams.get("at");
         // The repository list (no at) holds only the seeded PRs: the gate PRs lack the read schema fields.
         if (!at) return json(200, { size: peers.length, limit: 50, start: 0, isLastPage: true, values: peers });
-        return json(200, { values: [...prs.values()].filter((x) => x.fromRef.id === at && x.state === "OPEN"), isLastPage: true });
+        // Bitbucket defaults to INCOMING.
+        const side = url.searchParams.get("direction") === "OUTGOING" ? "fromRef" : "toRef";
+        const values = [...peers, ...prs.values()].filter((x) => x[side].id === at && x.state === "OPEN");
+        return json(200, { size: values.length, limit: Number(url.searchParams.get("limit") ?? 25), start: 0, isLastPage: true, values });
       }
       const am = p.match(/\/pull-requests\/(\d+)\/activities$/);
       if (req.method === "GET" && am && activities.has(Number(am[1]))) {
@@ -1200,8 +1283,8 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
           version: 0,
           title: b.title,
           state: "OPEN",
-          fromRef: { id: b.fromRef.id },
-          toRef: { id: b.toRef.id },
+          fromRef: { id: b.fromRef.id, repository: peerRef("main").repository },
+          toRef: { id: b.toRef.id, repository: peerRef("main").repository },
           reviewers: (b.reviewers ?? []).map((r) => ({ user: { name: r.user?.name }, role: "REVIEWER", status: "UNAPPROVED" })),
           links: {},
         };
@@ -1223,7 +1306,7 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
       if (b.version !== pr.version) return json(409, { errors: [{ exceptionName: "dry.OutOfDate" }] });
       if (b.toRef?.id) {
         if (!exists(b.toRef.id)) return json(404, { errors: [{ exceptionName: "dry.NoSuchBranch" }] });
-        pr.toRef = { id: b.toRef.id };
+        pr.toRef = { ...pr.toRef, id: b.toRef.id };
       }
       pr.version++;
       return json(200, pr);
@@ -1289,7 +1372,7 @@ if (DRY) {
   const writes = cleanupMode || selected.some((c) => !READ_ONLY.has(c));
   if (writes && !flags.has("--authorize-writes"))
     usage(
-      "Refused: G1 to G7 create branches and pull requests and delete a branch, and G19 merges a gate pull request. Add --authorize-writes for your test repository, or select only the read checks G9, G12, and G13 to G18.",
+      "Refused: G1 to G7 create branches and pull requests and delete a branch, and G19 merges a gate pull request. Add --authorize-writes for your test repository, or select only the read checks G9, G12, G13 to G18, and G20.",
     );
   const repo = parseRepoUrl(opt["--repo"]);
   const target = opt["--target"];
