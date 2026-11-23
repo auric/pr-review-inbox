@@ -4,18 +4,22 @@
 // docs/plans/review-v2 AC-M2 and AC-M3: the eval harness refuses to run without --real, the fixture cases are valid, and one case runs
 // end to end with the fake CLI. Each child bun process preloads no-real-claude.ts, so a lookup of the real CLI ends it with exit 1.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
   buildRepo,
+  bundleRepo,
   type EvalCase,
   FIXTURE_SUFFIX,
   type FixtureSet,
   INSTRUCTION_FILE,
+  loadCase,
   loadCases,
   MANIFEST_FILE,
+  rereviewDir,
   SETS,
+  setDir,
 } from "../../scripts/eval/cases";
 import { compareText, readResult } from "../../scripts/eval/compare";
 import {
@@ -38,6 +42,7 @@ import { PROFILES_VERSION } from "../../src/server/config";
 import { profileRevision, SHIPPED_PROFILES, shippedProfileAt } from "../../src/server/review/catalog";
 import { git } from "../../src/server/review/git";
 import { createStreamParser } from "../../src/server/review/stream";
+import { movedGitlinks } from "../../src/server/review/submodules";
 import { DEFAULT_VERIFIER } from "../../src/shared/dto";
 import { REVIEW_PROMPT_VERSION, reviewJsonSchema, verifyJsonSchema } from "../../src/shared/review";
 import { CHECK_EVENT, type RunEvent } from "../../src/shared/run-log";
@@ -378,7 +383,8 @@ describe("eval cases", () => {
             .split("\n")
             .reduce((s, l) => s + Number(l.split("\t")[0]) + Number(l.split("\t")[1]), 0);
           expect({ id: c.id, lines: c.changedLines }).toEqual({ id: c.id, lines: counted });
-          const lim = LIMITS[set];
+          // A submodule case can move only the gitlink: its 2 changed lines are the "Subproject commit" lines.
+          const lim = c.submodule ? { ...LIMITS[set], lines: [2, LIMITS[set].lines[1]] as [number, number] } : LIMITS[set];
           expect({ id: c.id, lines: within(c.changedLines, lim.lines), bugs: within(c.bugs.length, lim.bugs) }).toEqual({
             id: c.id,
             lines: true,
@@ -412,7 +418,8 @@ describe("eval cases", () => {
         }
       expect(instructionFiles).toBeGreaterThan(0);
     },
-    SLOW,
+    // It builds each case repository one by one: 80 s alone on 2026-11-23, and more on a loaded machine.
+    SLOW * 5,
   );
 
   test("no file under fixtures has a name that Claude Code loads as instructions", () => {
@@ -1095,55 +1102,62 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
   );
 });
 
+type Call = { argv: string[]; stdin: string; context: Record<string, string>; agents: unknown; mcp: Record<string, { args?: string[] }> };
+const sha = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");
+// A fake eval run of probe cases. Without findings, one finder call per case and no verify call. Each call answers with findings.
+async function fakeEval(ids: string, variants: string[] = [], findings: unknown[] = []) {
+  const dir = temp("probe");
+  const record = join(dir, "calls.jsonl");
+  const scenario = join(dir, "scenario.json");
+  const structured = {
+    summary: "Fake review.",
+    risks: [],
+    questions: [],
+    coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
+    findings,
+  };
+  writeFileSync(
+    scenario,
+    JSON.stringify({
+      record,
+      auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
+      fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", structured),
+      delayMs: 1,
+    }),
+  );
+  const r = await bun([
+    RUN,
+    "--set",
+    "probe",
+    "--cases",
+    ids,
+    ...variants,
+    "--out",
+    join(dir, "out"),
+    "--runner",
+    process.execPath,
+    FAKE,
+    scenario,
+  ]);
+  expect(r.stderr).toBe("");
+  expect(r.code).toBe(0);
+  const out = join(dir, "out");
+  const file = readdirSync(out).find((f) => f.endsWith(".json")) as string;
+  return {
+    calls: readRecords<Call>(record).filter((x) => x.argv.includes("-p")),
+    result: JSON.parse(readFileSync(join(out, file), "utf8")) as EvalResult,
+  };
+}
+const fakeRun = async (ids: string, variants: string[] = []) => (await fakeEval(ids, variants)).calls;
+const prompt = (c: Call) => JSON.stringify(c.agents) + c.stdin;
+
 // docs/plans/review-v2/stacked-prs.md WP-SK3: the probe cases of the variant "stack". The pins come from the harness before WP-SK3.
 describe("stacked probe cases with the fake CLI (WP-SK3)", () => {
   console.log(`Code under test: ${Bun.resolveSync("../../scripts/eval/run.ts", import.meta.dir)}`);
-  type Call = { argv: string[]; stdin: string; context: Record<string, string>; agents: unknown; mcp: Record<string, { args?: string[] }> };
-  const sha = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");
-  // One finder call per case: no finding, so no verify call.
-  async function fakeRun(ids: string, variants: string[] = []) {
-    const dir = temp("stack");
-    const record = join(dir, "calls.jsonl");
-    const scenario = join(dir, "scenario.json");
-    const structured = {
-      summary: "Fake review.",
-      risks: [],
-      questions: [],
-      coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
-      findings: [],
-    };
-    writeFileSync(
-      scenario,
-      JSON.stringify({
-        record,
-        auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
-        fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", structured),
-        delayMs: 1,
-      }),
-    );
-    const r = await bun([
-      RUN,
-      "--set",
-      "probe",
-      "--cases",
-      ids,
-      ...variants,
-      "--out",
-      join(dir, "out"),
-      "--runner",
-      process.execPath,
-      FAKE,
-      scenario,
-    ]);
-    expect(r.stderr).toBe("");
-    expect(r.code).toBe(0);
-    return readRecords<Call>(record).filter((x) => x.argv.includes("-p"));
-  }
-  const prompt = (c: Call) => JSON.stringify(c.agents) + c.stdin;
   const parentBase = (c: Call) => c.mcp["rl-git"]?.args?.find((a) => a.startsWith("--parent-base="));
 
   test(
-    "a case without stack keeps its repository, prompt, and context files, also with the variant",
+    "a case without stack or submodule keeps its repository, prompt, and context files, also with the variant stack or submodules",
     async () => {
       const [c] = loadCases("probe-obl-criterion-deferred", SETS.probe);
       if (!c) throw new Error("The case probe-obl-criterion-deferred is missing.");
@@ -1153,7 +1167,9 @@ describe("stacked probe cases with the fake CLI (WP-SK3)", () => {
       expect(await ref("refs/heads/parent")).toBe("");
       const [plain] = await fakeRun(c.id);
       const [variant] = await fakeRun(c.id, ["--variants", "stack"]);
-      for (const x of [plain, variant]) {
+      // submodule-prs.md AC-SM2: without a moved gitlink, the variant "submodules" changes no byte.
+      const [sub] = await fakeRun(c.id, ["--variants", "submodules"]);
+      for (const x of [plain, variant, sub]) {
         if (!x) throw new Error("No finder call.");
         // task.md holds the fetch time, so it is left out.
         expect({
@@ -1170,6 +1186,7 @@ describe("stacked probe cases with the fake CLI (WP-SK3)", () => {
         });
         expect(prompt(x)).not.toContain("stacked");
         expect(parentBase(x)).toBeUndefined();
+        expect(Object.keys(x.context)).not.toContain("submodules.md");
       }
     },
     SLOW,
@@ -1236,5 +1253,152 @@ describe("stacked probe cases with the fake CLI (WP-SK3)", () => {
       for (const x of [relies, unreached]) expect(parentBase(x as Call)).toMatch(/^--parent-base=[0-9a-f]{40}$/);
     },
     SLOW,
+  );
+});
+
+// docs/plans/review-v2/submodule-prs.md WP-SM3: the probe cases of the variant "submodules".
+describe("submodule probe cases with the fake CLI (WP-SM3)", () => {
+  console.log(`Code under test: ${Bun.resolveSync("../../scripts/eval/run.ts", import.meta.dir)}`);
+  const IDS = ["probe-sub-caller", "probe-sub-signature", "probe-sub-unreached"];
+  const load = (id: string) => {
+    const [c] = loadCases(id, SETS.probe);
+    if (!c?.submodule) throw new Error(`The submodule case ${id} is missing.`);
+    return { ...c, submodule: c.submodule };
+  };
+
+  test(
+    "a submodule case builds the submodule repository, and the main head moves the gitlink",
+    async () => {
+      const c = load("probe-sub-signature");
+      const repo = await buildRepo(c, temp("repo"));
+      if (!repo.sub) throw new Error("No submodule repository.");
+      const sub = repo.sub;
+      const g = (dir: string, args: string[]) => git(["--git-dir", dir, ...args], { env: repo.env }).then((s) => s.trim());
+      expect(await g(sub.url, ["rev-parse", "refs/heads/main"])).toBe(sub.head);
+      expect(await g(sub.url, ["rev-parse", `${sub.head}^`])).toBe(sub.base);
+      expect(await g(sub.url, ["log", "-1", "--format=%s", sub.head])).toBe(c.submodule.title);
+      expect(await g(sub.url, ["show", `${sub.base}:src/clamp.ts`])).toContain("clamp(value: number, min: number, max: number)");
+      expect(await g(sub.url, ["show", `${sub.head}:src/clamp.ts`])).toContain("clamp(min: number, max: number, value: number)");
+      expect(await repo.show(repo.base, ".gitmodules")).toBe(
+        '[submodule "vendor/mathlib"]\n\tpath = vendor/mathlib\n\turl = ../mathlib.git\n',
+      );
+      // ls-tree: "<mode> <type> <object>\t<path>".
+      const link = (commit: string) => g(repo.url, ["ls-tree", commit, "vendor/mathlib"]);
+      expect(await link(repo.base)).toBe(`160000 commit ${sub.base}\tvendor/mathlib`);
+      expect(await link(repo.head)).toBe(`160000 commit ${sub.head}\tvendor/mathlib`);
+      expect(await movedGitlinks(repo.url, repo.env, repo.base, repo.head)).toEqual([
+        { path: "vendor/mathlib", old: sub.base, new: sub.head },
+      ]);
+      // An empty head.patch moves only the gitlink.
+      const caller = await buildRepo(load("probe-sub-caller"), temp("repo"));
+      expect(await g(caller.url, ["diff", "--name-only", caller.base, caller.head])).toBe("vendor/configkit");
+    },
+    SLOW,
+  );
+
+  test(
+    "a fake run of the 3 cases gives submodules.md and the prompt lines with the variant, and neither without it",
+    async () => {
+      const calls = await fakeRun(IDS.join(","), ["--variants", "submodules"]);
+      expect(calls).toHaveLength(3);
+      for (const [i, x] of calls.entries()) {
+        const c = load(IDS[i] as string);
+        const file = x.context["submodules.md"] ?? "";
+        expect(file).toContain("# Submodule changes");
+        expect(file).toMatch(new RegExp(`## Diff of ${c.submodule.path}: git diff [0-9a-f]{12} [0-9a-f]{12}`));
+        expect(file).toContain(c.submodule.title);
+        expect(prompt(x)).toContain("./context/submodules.md shows what the new commit brings.");
+      }
+      expect(calls[0]?.context["submodules.md"]).toContain('+  if (raw === "unlimited") return null;');
+      expect(calls[1]?.context["submodules.md"]).toContain("+export function clamp(min: number, max: number, value: number): number {");
+      expect(calls[2]?.context["submodules.md"]).toContain("+  if (size < 0) return Math.round(size * factor);");
+
+      // The control: the same repositories with no submodule facts.
+      const plain = await fakeRun(IDS.join(","));
+      expect(plain).toHaveLength(3);
+      for (const x of plain) {
+        expect(Object.keys(x.context)).not.toContain("submodules.md");
+        expect(prompt(x)).not.toContain("submodules.md");
+      }
+    },
+    SLOW * 2,
+  );
+
+  test(
+    "a must-find on an unchanged caller with its cause on the gitlink line stays and scores as found only with the variant",
+    async () => {
+      const c = load("probe-sub-caller");
+      const bug = c.bugs[0];
+      if (!bug) throw new Error("The case has no bug.");
+      const repo = await buildRepo(c, temp("repo"));
+      if (!repo.sub) throw new Error("No submodule repository.");
+      // The must-find is on unchanged code: the main change touches no line of its file.
+      expect(await git(["--git-dir", repo.url, "diff", "--name-only", repo.base, repo.head, "--", bug.path], { env: repo.env })).toBe("");
+      const text = (await repo.show(repo.head, bug.path)).split("\n");
+      const finding = {
+        path: bug.path,
+        side: "new",
+        line: bug.lines[0],
+        lineEnd: bug.lines[1],
+        anchorText: text.slice(bug.lines[0] - 1, bug.lines[1]).join("\n"),
+        severity: "major",
+        category: "logic",
+        body: "A finding of the fake CLI.",
+        evidence: `${bug.path}:${bug.lines[0]}`,
+        evidenceStatus: "code",
+        confidence: "high",
+        agent: null,
+        cause: { path: c.submodule.path, side: "new", line: 1, lineEnd: null, anchorText: `Subproject commit ${repo.sub.head}` },
+        preexisting: false,
+      };
+      const kept = await fakeEval(c.id, ["--variants", "submodules"], [finding]);
+      const [run] = kept.result.runs;
+      expect(run?.status).toBe("completed");
+      expect(run?.items.map((i) => [i.path, i.line, i.lineEnd])).toEqual([[bug.path, bug.lines[0], bug.lines[1]]]);
+      expect(score(kept.result).suite.recall?.mean).toBe(1);
+      // Without the variant, the judge has no gitlinks, so the finding drops as unchanged.
+      const dropped = await fakeEval(c.id, [], [finding]);
+      expect(dropped.result.runs[0]?.items).toEqual([]);
+      expect(score(dropped.result).suite.recall?.mean).toBe(0);
+    },
+    SLOW * 2,
+  );
+
+  // SD3 premise: no case of the local set moves a gitlink, so the variant changes nothing there. The local set is private, so the check
+  // prints and compares counts only. It runs only with REVIEW_LOOP_GITLINK_CHECK=1, so bun run check never reads eval-local.
+  test.skipIf(process.env.REVIEW_LOOP_GITLINK_CHECK !== "1" || !existsSync(setDir("local")))(
+    "no case of the local set moves a gitlink (skipped without REVIEW_LOOP_GITLINK_CHECK=1 and eval-local)",
+    async () => {
+      const root = temp("local");
+      const bundles = new Map<string, string>();
+      let checked = 0;
+      let moved = 0;
+      let failed = 0;
+      for (const dir of [setDir("local"), rereviewDir()]) {
+        if (!existsSync(dir)) continue;
+        for (const f of readdirSync(dir).filter((x) => existsSync(join(dir, x, "case.json")))) {
+          try {
+            const c = loadCase(join(dir, f));
+            if (!c.local) throw new Error("Not a local case.");
+            const repo = await bundleRepo(c.local, root, bundles);
+            const ranges: [string, string][] = [[repo.base, repo.head]];
+            if (repo.since && repo.sinceBase) ranges.push([repo.sinceBase, repo.since]);
+            let hit = false;
+            for (const [from, to] of ranges) {
+              // A review run reads the gitlinks from the merge base to the head (submodules.ts movedGitlinks).
+              const base = (await git(["--git-dir", repo.url, "merge-base", from, to], { env: repo.env })).trim();
+              if ((await movedGitlinks(repo.url, repo.env, base, to)).length) hit = true;
+            }
+            checked++;
+            if (hit) moved++;
+          } catch {
+            failed++;
+          }
+        }
+      }
+      console.log(`Local set gitlink check: ${checked} cases checked, ${moved} move a gitlink, ${failed} not read.`);
+      expect({ checked: checked > 0, moved, failed }).toEqual({ checked: true, moved: 0, failed: 0 });
+    },
+    SLOW * 5,
   );
 });

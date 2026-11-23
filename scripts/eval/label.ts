@@ -27,7 +27,18 @@ import { indentBlock, oneLine } from "../../src/shared/consult";
 import type { IssueContext } from "../../src/shared/dto";
 import { coverage } from "../../src/shared/review";
 import type { PullRequest } from "../../src/shared/types";
-import { buildRepo, bundleRepo, EVAL_AUTHOR, type EvalCase, findCase, loadCase, localDir, rereviewDir, setDir } from "./cases";
+import {
+  buildRepo,
+  bundleRepo,
+  EVAL_AUTHOR,
+  type EvalCase,
+  findCase,
+  loadCase,
+  localDir,
+  rereviewDir,
+  setDir,
+  targetBranch,
+} from "./cases";
 import { evidenceText, readResult, summaryText } from "./compare";
 import { localRefusal } from "./rescore";
 import {
@@ -434,7 +445,7 @@ export async function matchCase(caseId: string, cands: Entry[], refs: Entry[], s
 // ---------- Judge (E4) ----------
 
 // The case fields that pr.md and task.md show. A local case.json has them too.
-export type CaseText = Pick<EvalCase, "id" | "title" | "pr" | "task" | "tasks">;
+export type CaseText = Pick<EvalCase, "id" | "title" | "pr" | "task" | "tasks" | "stack">;
 
 // The task rows of a case as the app renders task.md (task-file.ts), from a temp database seeded as run.ts seeds it.
 function taskMd(fx: CaseText): ContextFile[] {
@@ -506,7 +517,7 @@ async function judgeWorkspace(r: EvalResult, c: EvalCaseInfo, ctx: Ctx): Promise
 }
 
 // The judge workspace of repo.head, with the files beside pr.md and task.md. repo: a bare repository whose refs/heads/feature,
-// refs/heads/main, and refs/pull-requests/1/from point at head and base (cases.ts pointRefs). The seed runs (seed-runs.ts) use it too.
+// refs/heads/<targetBranch>, and refs/pull-requests/1/from point at head and base (cases.ts buildRepo). seed-runs.ts uses it too.
 export async function caseWorkspace(
   fx: CaseText,
   repo: { url: string; head: string; base: string },
@@ -517,7 +528,7 @@ export async function caseWorkspace(
     url: repo.url,
     sourceUrl: repo.url,
     sourceRef: "refs/heads/feature",
-    targetRef: "refs/heads/main",
+    targetRef: `refs/heads/${targetBranch(fx)}`,
     fetchConfig: [],
   };
   const author = { slug: EVAL_AUTHOR, name: "Eval Author", login: EVAL_AUTHOR };
@@ -532,7 +543,7 @@ export async function caseWorkspace(
     sourceHead: repo.head,
     targetHead: repo.base,
     sourceBranch: "feature/eval",
-    targetBranch: "main",
+    targetBranch: targetBranch(fx),
     updatedDate: 0,
   };
   const dataDir = join(ctx.tmp, "data");

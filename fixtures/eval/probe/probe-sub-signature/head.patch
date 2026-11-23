@@ -1,0 +1,26 @@
+diff --git a/src/audio/mixer.ts b/src/audio/mixer.ts
+index 4759311..5cc1d89 100644
+--- a/src/audio/mixer.ts
++++ b/src/audio/mixer.ts
+@@ -2,8 +2,20 @@ import { clamp } from "../../vendor/mathlib/src/clamp";
+ 
+ export const MIN_VOLUME = 0;
+ export const MAX_VOLUME = 100;
++export const MAX_BALANCE = 50;
++export const MAX_FADE_MS = 5000;
+ 
+ // The volume from a slider value.
+ export function volumeLevel(raw: number): number {
+-  return clamp(raw, MIN_VOLUME, MAX_VOLUME);
++  return clamp(MIN_VOLUME, MAX_VOLUME, raw);
++}
++
++// The fade time in ms from the settings page.
++export function fadeMs(raw: number): number {
++  return clamp(0, MAX_FADE_MS, raw);
++}
++
++// The left-right balance from a slider value. A negative value pans left.
++export function balance(raw: number): number {
++  return clamp(raw, -MAX_BALANCE, MAX_BALANCE);
+ }

@@ -45,6 +45,8 @@ const kind = (c: EvalCase) => {
   if (c.id.startsWith("probe-sec-")) return "security";
   // stacked-prs.md WP-SK3: a stack in case.json, for the variant "stack".
   if (c.stack) return "stack";
+  // submodule-prs.md WP-SM3: a submodule in case.json, for the variant "submodules".
+  if (c.submodule) return "submodule";
   if (c.clean) return "clean";
   if (onBug && claim && c.bugs.length === 1) return "wrong claim";
   if (onTrap && !c.bugs.length) return "right claim";
@@ -53,8 +55,8 @@ const kind = (c: EvalCase) => {
 };
 
 describe("probe set", () => {
-  test("29 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, 1 clean case, 8 missing obligations, 3 met obligations, 2 polish points, 5 security cases, and 3 stack cases", () => {
-    expect(cases).toHaveLength(29);
+  test("32 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, 1 clean case, 8 missing obligations, 3 met obligations, 2 polish points, 5 security cases, 3 stack cases, and 3 submodule cases", () => {
+    expect(cases).toHaveLength(32);
     const by = Object.groupBy(cases, kind);
     expect(Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v?.length]))).toEqual({
       "wrong claim": 2,
@@ -68,7 +70,10 @@ describe("probe set", () => {
       "polish point": 2,
       security: 5,
       stack: 3,
+      submodule: 3,
     });
+    // Only the submodule cases have a submodule.
+    expect(cases.filter((c) => c.submodule).map((c) => c.id)).toEqual(["probe-sub-caller", "probe-sub-signature", "probe-sub-unreached"]);
     // Only the stack cases have a stack.
     expect(cases.filter((c) => c.stack).map((c) => c.id)).toEqual([
       "probe-stack-child-fills",

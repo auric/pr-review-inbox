@@ -1,0 +1,28 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3b2d8d7..9da887d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,9 @@
+ # Changes
+ 
++## 3.0
++
++- parseQuota returns null for "unlimited". It returned -1 before.
++
+ ## 2.4
+ 
+ - Add readInterval.
+diff --git a/src/quota.ts b/src/quota.ts
+index bf5af1f..7348e4c 100644
+--- a/src/quota.ts
++++ b/src/quota.ts
+@@ -1,6 +1,6 @@
+-// Parses a quota setting. "unlimited" gives -1. A value that is not a number gives 0.
+-export function parseQuota(raw: string): number {
+-  if (raw === "unlimited") return -1;
++// Parses a quota setting. "unlimited" gives null, so no number stands for "no limit". A value that is not a number gives 0.
++export function parseQuota(raw: string): number | null {
++  if (raw === "unlimited") return null;
+   const n = Number.parseInt(raw, 10);
+   return Number.isNaN(n) ? 0 : n;
+ }

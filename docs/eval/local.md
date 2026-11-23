@@ -73,7 +73,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 
 ## Probe set
 
-`fixtures/eval/probe/` holds 29 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
+`fixtures/eval/probe/` holds 32 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
 
 - 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
 - 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
@@ -124,6 +124,22 @@ Gate SK-P (stacked-prs.md section 7) runs the 3 cases with the variant and witho
 bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3 --out eval-results/stack/probe-base
 bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3 --variants stack --out eval-results/stack/probe-stack
 bun run eval:compare -- <probe-base result.json> <probe-stack result.json>
+```
+
+3 cases (`probe-sub-*`, docs/plans/review-v2/submodule-prs.md section 7) move the gitlink of a submodule. `submodule` in case.json gives the path, the .gitmodules URL, and the subject of the new submodule commit. `sub/base/` and `sub/head.patch` build the bare submodule repository. The base commit gets .gitmodules and the gitlink at the submodule base, and the head moves the gitlink to the submodule head. An empty head.patch moves only the gitlink. Only the variant "submodules" gives the run the stub reads and the fetch from the local submodule repository. Without it, the run gets the same repository with no submodules.md and no prompt lines:
+
+- `probe-sub-signature`: the submodule commit swaps `clamp(value, min, max)` to `clamp(min, max, value)`. The change adds `balance` with the old order. Must-find, major, on that call. The traps are the two calls with the new order.
+- `probe-sub-caller`: the submodule commit makes `parseQuota("unlimited")` return null instead of -1. The change moves only the gitlink. Must-find, major, on the unchanged `quota < 0` line of `canStore`. A finding there stays only with its cause on line 1 of the gitlink path. A trap is on `quotaLabel`, which handles "unlimited" before the call.
+- `probe-sub-unreached` (clean): the submodule commit has a wrong branch for a negative size in `scale`. The change calls `scale` only with constants above zero. A trap is on the call lines.
+
+In the control run, `probe-sub-caller` has no way to keep its must-find: the app drops a finding on an unchanged line without a gitlink cause (reason unchanged). Read the dropped list for it.
+
+Gate SM-P (submodule-prs.md section 7) runs the 3 cases with the variant and without it, then compares the two results:
+
+```
+bun run eval -- --real --set probe --cases probe-sub-signature,probe-sub-caller,probe-sub-unreached --repeat 3 --out eval-results/submodules/probe-base
+bun run eval -- --real --set probe --cases probe-sub-signature,probe-sub-caller,probe-sub-unreached --repeat 3 --variants submodules --out eval-results/submodules/probe-submodules
+bun run eval:compare -- <probe-base result.json> <probe-submodules result.json>
 ```
 
 A fixture case can have `threads` and `clean`, as a local case can. The run seeds the threads into the comment table, so `pr-context.md` lists them. A fixture case has no `text` on its items: `note` and `why` describe them.

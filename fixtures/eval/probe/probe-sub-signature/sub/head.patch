@@ -1,0 +1,24 @@
+diff --git a/README.md b/README.md
+index 864bc33..e49e221 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,7 @@
+ # mathlib
+ 
+ Small number helpers for the UI.
++
++## 2.0
++
++clamp takes (min, max, value) now. Update each call.
+diff --git a/src/clamp.ts b/src/clamp.ts
+index 3457f9a..89d9829 100644
+--- a/src/clamp.ts
++++ b/src/clamp.ts
+@@ -1,5 +1,5 @@
+-// Limits value to the range min..max.
+-export function clamp(value: number, min: number, max: number): number {
++// Limits value to the range min..max. The range comes first, as in the other range helpers of this library.
++export function clamp(min: number, max: number, value: number): number {
+   if (value < min) return min;
+   if (value > max) return max;
+   return value;

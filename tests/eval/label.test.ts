@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildRepo, type EvalBug, type EvalTrap, findCase, setFingerprint } from "../../scripts/eval/cases";
 import {
+  caseWorkspace,
   chunkPairs,
   findingsText,
   groundingOf,
@@ -39,6 +40,24 @@ console.log(`Code under test: ${Bun.resolveSync("../../scripts/eval/label.ts", i
 
 const TMP = mkdtempSync(join(tmpdir(), "rl-eval-label-test-"));
 afterAll(() => rmSync(TMP, { recursive: true, force: true, maxRetries: 3 }));
+
+// stacked-prs.md WP-SK3: the judge reads the change from the target of the case, so a stacked case leaves the parent change out.
+describe("judge workspace", () => {
+  test(
+    "the merge base is the target of the case: the parent head of a stacked case, main otherwise",
+    async () => {
+      for (const id of ["probe-stack-relies", "probe-stack-child-fills"]) {
+        const fx = findCase(id);
+        if (!fx) throw new Error(`The case ${id} is missing.`);
+        const root = mkdtempSync(join(TMP, "ws-"));
+        const repo = await buildRepo(fx, root);
+        const j = await caseWorkspace(fx, repo, { tmp: root, workspaces: 0 });
+        expect({ id, mergeBase: j.ws.mergeBase }).toEqual({ id, mergeBase: repo.base });
+      }
+    },
+    SLOW,
+  );
+});
 
 describe("chunk pairs (E3)", () => {
   test("pairs only share a file, chunks hold 10 by 10, and a known or asked pair needs no new chunk", () => {

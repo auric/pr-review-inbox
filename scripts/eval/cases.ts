@@ -137,6 +137,13 @@ export const evalStack = z
     children: z.array(z.object({ ...stackPr, paths: z.array(z.string().min(1)).min(1) })).optional(),
   })
   .refine((s) => s.parent !== undefined || (s.children?.length ?? 0) > 0, "A stack needs a parent or a child.");
+// docs/plans/review-v2/submodule-prs.md WP-SM3: the submodule that the change moves. sub/base/ and sub/head.patch build its repository,
+// and title is the subject of its head commit. url goes into .gitmodules as given, so a relative URL resolves against the main clone link.
+export const evalSubmodule = z.object({
+  path: z.string().regex(/^[a-z0-9]+(?:[/-][a-z0-9]+)*$/),
+  url: z.string().min(1),
+  title: z.string().min(1),
+});
 // tests/eval/harness.test.ts checks the bug, trap, and line counts of each set.
 export const caseFile = z.object({
   id: z.string().regex(CASE_ID),
@@ -156,6 +163,8 @@ export const caseFile = z.object({
   clean: z.literal(true).optional(),
   // A stacked PR. run.ts gives it to the variant "stack" only. Absent: the repository and every context file keep their bytes.
   stack: evalStack.optional(),
+  // A change that moves a gitlink. run.ts gives the submodule reads to the variant "submodules" only. Absent: no .gitmodules and no gitlink.
+  submodule: evalSubmodule.optional(),
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1), ...gold });
@@ -254,6 +263,11 @@ const storedRenamed = (name: string) => INSTRUCTION_FILE.test(name) || MANIFEST_
 export const EARLIER_PATCH = "earlier.patch";
 // The patch from base/ to the head of the parent PR of a stacked fixture. head.patch then starts at the parent head.
 export const PARENT_PATCH = "parent.patch";
+// The target branch of the PR of a case: parent for a stacked fixture with a parent, else main (buildRepo).
+export const targetBranch = (c: Pick<EvalCase, "stack">) => (c.stack?.parent ? "parent" : "main");
+// The submodule repository of a submodule fixture: the files of its base commit, and the patch to its head commit.
+export const SUB_BASE = "sub/base";
+export const SUB_PATCH = "sub/head.patch";
 
 export function loadCase(dir: string): EvalCase {
   const text = readFileSync(join(dir, "case.json"), "utf8");
@@ -299,7 +313,10 @@ export function loadCase(dir: string): EvalCase {
   if (c.stack && c.rereview) throw new Error(`Case ${c.id} has a stack and a rereview block.`);
   if ((c.stack?.parent !== undefined) !== existsSync(join(dir, PARENT_PATCH)))
     throw new Error(`Case ${c.id} needs ${PARENT_PATCH} exactly when its stack has a parent.`);
-  return { ...c, dir, base, patch, changedLines: changedLines(patch) };
+  if (!!c.submodule !== existsSync(join(dir, SUB_PATCH)))
+    throw new Error(`Case ${c.id} needs ${SUB_PATCH} exactly when it has a submodule.`);
+  // The moved gitlink adds one removed and one added "Subproject commit" line to the diff.
+  return { ...c, dir, base, patch, changedLines: changedLines(patch) + (c.submodule ? 2 : 0) };
 }
 
 // ids: case IDs, or "all". The order is the folder order.
@@ -337,41 +354,73 @@ const AUTHOR = {
 // The git config is isolated, so no user filter or hook changes the files. A re-review fixture also makes the earlier head (base plus
 // earlier.patch, child of base), and the head becomes its child, as a push of new commits does. A stacked fixture with a parent also
 // makes refs/heads/parent (base plus parent.patch, child of base), and the head becomes its child. Then base is the parent head, the
-// target of the PR, and main keeps the base commit.
-export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr" | "rereview" | "stack">, root: string) {
+// target of the PR, and main keeps the base commit. A submodule fixture also makes the bare repository sub.git, whose main holds the head
+// of sub/base plus sub/head.patch. The base commit gets .gitmodules and the gitlink at the submodule base, and the head moves the gitlink.
+export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr" | "rereview" | "stack" | "submodule">, root: string) {
   const empty = join(root, "empty.gitconfig");
   writeFileSync(empty, "");
-  const url = join(root, "remote.git");
   const env = { ...gitEnv(empty), ...AUTHOR, GIT_INDEX_FILE: join(root, "eval.index") };
-  const g = async (args: string[], stdin?: string) => (await git(["--git-dir", url, ...args], { env, stdin })).trim();
-  await git(["init", "-q", "--bare", "--template=", url], { env });
-  const entries = [...c.base.entries()];
-  const blobs = entries.map(([, text], i) => {
-    const f = join(root, `blob-${i}`);
-    writeFileSync(f, text);
-    return f;
-  });
-  const shas = (await g(["hash-object", "-w", "--no-filters", "--stdin-paths"], `${blobs.join("\n")}\n`)).split("\n");
-  await g(["update-index", "--index-info"], `${entries.map(([p], i) => `100644 ${shas[i]}\t${p}`).join("\n")}\n`);
+  const bare = async (name: string, index: string) => {
+    const at = join(root, name);
+    const e = { ...env, GIT_INDEX_FILE: join(root, index) };
+    await git(["init", "-q", "--bare", "--template=", at], { env: e });
+    return async (args: string[], stdin?: string) => (await git(["--git-dir", at, ...args], { env: e, stdin })).trim();
+  };
+  // Writes the files as blobs and sets the index to them and to the extra index-info lines.
+  const index = async (g: (args: string[], stdin?: string) => Promise<string>, tag: string, list: [string, string][], extra: string[]) => {
+    const blobs = list.map(([, text], i) => {
+      const f = join(root, `${tag}blob-${i}`);
+      writeFileSync(f, text);
+      return f;
+    });
+    const shas = (await g(["hash-object", "-w", "--no-filters", "--stdin-paths"], `${blobs.join("\n")}\n`)).split("\n");
+    await g(["update-index", "--index-info"], `${[...list.map(([p], i) => `100644 ${shas[i]}\t${p}`), ...extra].join("\n")}\n`);
+  };
+  // git apply refuses a patch with no file in it. A submodule fixture can move only the gitlink.
+  const apply = async (g: (args: string[]) => Promise<string>, patch: string) => {
+    if (statSync(patch).size) await g(["apply", "--cached", "--whitespace=nowarn", patch]);
+  };
+  let sub: { url: string; base: string; head: string } | undefined;
+  if (c.submodule) {
+    const s = await bare("sub.git", "sub.index");
+    const subBase = join(c.dir, SUB_BASE);
+    await index(
+      s,
+      "sub-",
+      files(subBase).map((p) => [p, readFileSync(join(subBase, p), "utf8")]),
+      [],
+    );
+    const first = await s(["commit-tree", await s(["write-tree"]), "-m", "base"]);
+    await apply(s, join(c.dir, SUB_PATCH));
+    const last = await s(["commit-tree", await s(["write-tree"]), "-p", first, "-m", c.submodule.title]);
+    await s(["update-ref", "refs/heads/main", last]);
+    sub = { url: join(root, "sub.git"), base: first, head: last };
+  }
+  const url = join(root, "remote.git");
+  const g = await bare("remote.git", "eval.index");
+  const m = c.submodule;
+  const modules: [string, string][] = m ? [[".gitmodules", `[submodule "${m.path}"]\n\tpath = ${m.path}\n\turl = ${m.url}\n`]] : [];
+  await index(g, "", [...c.base.entries(), ...modules], sub && m ? [`160000 ${sub.base}\t${m.path}`] : []);
   const main = await g(["commit-tree", await g(["write-tree"]), "-m", "base"]);
   let base = main;
   if (c.stack?.parent) {
-    await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, PARENT_PATCH)]);
+    await apply(g, join(c.dir, PARENT_PATCH));
     base = await g(["commit-tree", await g(["write-tree"]), "-p", main, "-m", c.stack.parent.title]);
   }
   let since: string | undefined;
   if (c.rereview) {
-    await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, EARLIER_PATCH)]);
+    await apply(g, join(c.dir, EARLIER_PATCH));
     since = await g(["commit-tree", await g(["write-tree"]), "-p", base, "-m", "earlier"]);
     await g(["read-tree", base]);
   }
-  await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, "head.patch")]);
+  await apply(g, join(c.dir, "head.patch"));
+  if (sub && m) await g(["update-index", "--cacheinfo", `160000,${sub.head},${m.path}`]);
   const head = await g(["commit-tree", await g(["write-tree"]), "-p", since ?? base, "-m", c.pr.title]);
   await pointRefs(url, env, main, head);
   if (base !== main) await g(["update-ref", "refs/heads/parent", base]);
   // The file text of a commit, for checks of the case lines.
   const show = (commit: string, path: string) => git(["--git-dir", url, "show", `${commit}:${path}`], { env });
-  return { url, base, head, env, show, ...(since && { since, sinceBase: base }) };
+  return { url, base, head, env, show, ...(since && { since, sinceBase: base }), ...(sub && { sub }) };
 }
 
 // Points the remote refs of buildRepo at one head and its target: the earlier head of a re-review first, then the head.

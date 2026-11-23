@@ -1,6 +1,6 @@
 # Submodule pull request context
 
-Status: Designed 2026-11-23. WP-RP0, WP-SM0, WP-SM1, and WP-SM2 are built (2026-11-23). Open: WP-SM3, Gates SM-P and SM-B, and WP-SM4. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. The user accepted the section 11 answers on 2026-11-23. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
+Status: Designed 2026-11-23. WP-RP0 and WP-SM0 to WP-SM3 are built (2026-11-23). Open: Gates SM-P and SM-B, and WP-SM4. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. The user accepted the section 11 answers on 2026-11-23. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
 
 ## 1. Request
 
@@ -230,7 +230,7 @@ Interactions:
 
 ## 7. Eval and proof
 
-- The natural set: SD3 makes the variant a no-op when no case moves a gitlink. Unverified: no case of the local set moves a gitlink. WP-SM3 checks this with `git diff --raw` over the case ranges.
+- The natural set: SD3 makes the variant a no-op when no case moves a gitlink. WP-SM3 checked this on 2026-11-23 with `movedGitlinks` (`git diff --raw`) from the merge base to the head of each case range: 67 cases of eval-local/cases and eval-local/rereview together, 0 move a gitlink. The check prints counts only. `bun run check` skips it. To run it again: `REVIEW_LOOP_GITLINK_CHECK=1 bun test tests/eval/harness.test.ts -t "no case of the local set moves a gitlink"`. In a worktree, also set `REVIEW_LOOP_EVAL_LOCAL` to the eval-local folder of the main checkout.
 
 ### Probe cases (WP-SM3)
 
@@ -245,11 +245,20 @@ Three cases in fixtures/eval/probe/. `case.json` gets `submodule: { path, url }`
 - Harness: `buildRepo` (scripts/eval/cases.ts) makes a bare submodule repository with a base and a head commit. It writes .gitmodules and the gitlink to the main base commit, then moves the gitlink in the head commit with `git update-index --cacheinfo 160000,<hash>,<path>`.
 - run.ts passes `repoRemote` (the URL goes to the local bare repository) and a `submoduleReader` stub. The stub gives the clone link `<BASE_URL>/scm/eval/<repo>.git` and no PRs.
 - Without "submodules", the same cases run with no file. That is the control.
-- Unverified: the probe matcher accepts a must-find on an unchanged line. WP-SM3 checks it.
+- WP-SM3 verified that the probe matcher accepts a must-find on an unchanged line. A fake finding on the unchanged caller of probe-sub-caller, with its cause on line 1 of the gitlink path, stays and scores as found with the variant. Without the variant, it drops as unchanged.
+
+WP-SM3 build notes (2026-11-23), where the build differs from the plan:
+
+- `submodule` in case.json also has `title`, the subject of the new submodule commit. submodules.md lists the commit subjects.
+- The .gitmodules URL is relative (`../<name>.git`). It resolves against the stub clone link of the main repository, so the run maps it through `mapRepoUrl` as for a real PR.
+- The stub gives each repository the clone link `<BASE_URL>/scm/<project>/<slug>.git` and the default branch `main`. `repoRemote` gives the local bare submodule repository, whose main is the submodule head.
+- probe-sub-caller has an empty head.patch. buildRepo skips `git apply` for an empty patch. `changedLines` counts the 2 "Subproject commit" lines of a submodule case. The probe line limit of the case test starts at 2 for a submodule case.
+- probe-sub-caller has a trap, because each case needs one: `quotaLabel`, an unchanged caller that handles "unlimited" before the call.
+- label.ts and run.ts take the target branch from `targetBranch` (cases.ts). Before, label.ts used main and refused each stacked case with a parent ("The target head moved"). replies.ts still uses main; it builds no stacked case.
 
 ### Gate SM-P (probe, the user runs it)
 
-- `bun run eval -- --set probe --cases probe-sub-signature,probe-sub-caller,probe-sub-unreached --repeat 3`, once with `--variants submodules` and once without.
+- `bun run eval -- --real --set probe --cases probe-sub-signature,probe-sub-caller,probe-sub-unreached --repeat 3`, once with `--variants submodules` and once without. docs/eval/local.md has the full commands.
 - Pass: with the variant, each must-find is found in at least 2 of 3 runs. The trap hits are 0 over the 9 runs. The count of failed runs does not rise. Cost per case rises by at most 25%.
 
 ### Gate SM-B (manual, the user)

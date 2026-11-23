@@ -1,0 +1,12 @@
+diff --git a/src/scale.ts b/src/scale.ts
+index 42934cd..a81b860 100644
+--- a/src/scale.ts
++++ b/src/scale.ts
+@@ -1,4 +1,5 @@
+-// Scales a size in pixels by a factor and rounds it.
++// Scales a size in pixels by a factor and rounds it. The result is never below 0.
+ export function scale(size: number, factor: number): number {
+-  return Math.round(size * factor);
++  if (size < 0) return Math.round(size * factor);
++  return Math.max(0, Math.round(size * factor));
+ }

@@ -1,0 +1,16 @@
+diff --git a/src/ui/thumbs.ts b/src/ui/thumbs.ts
+index b66e2d6..1727c6b 100644
+--- a/src/ui/thumbs.ts
++++ b/src/ui/thumbs.ts
+@@ -1,2 +1,11 @@
++import { scale } from "../../vendor/mathlib/src/scale";
++
+ export const THUMB_WIDTH = 160;
+ export const THUMB_HEIGHT = 90;
++
++// The thumbnail sizes for screens of 1x, 2x, and 3x pixel density.
++export const THUMB_SIZES = [
++  { width: scale(THUMB_WIDTH, 1), height: scale(THUMB_HEIGHT, 1) },
++  { width: scale(THUMB_WIDTH, 2), height: scale(THUMB_HEIGHT, 2) },
++  { width: scale(THUMB_WIDTH, 3), height: scale(THUMB_HEIGHT, 3) },
++];

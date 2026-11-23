@@ -1,0 +1,25 @@
+{
+  "id": "probe-sub-unreached",
+  "title": "A change moves a submodule with a wrong negative branch, and calls it only with constants above zero",
+  "language": "typescript",
+  "pr": {
+    "title": "Add thumbnail sizes for high-density screens",
+    "description": "Adds THUMB_SIZES for screens of 1x, 2x, and 3x pixel density. Moves vendor/mathlib to the commit that keeps scale at 0 or above."
+  },
+  "submodule": {
+    "path": "vendor/mathlib",
+    "url": "../mathlib.git",
+    "title": "Keep scale at 0 or above"
+  },
+  "clean": true,
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/ui/thumbs.ts",
+      "side": "new",
+      "lines": [8, 10],
+      "why": "scale of the new mathlib commit returns a negative result for a negative size, against its comment. The submodule change owns that branch, and it has its own review. This change calls scale only with the constants 160 and 90 and the factors 1, 2, and 3, so it never reaches the branch."
+    }
+  ]
+}

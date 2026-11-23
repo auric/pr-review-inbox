@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import type { RepoInfo } from "../../src/server/bitbucket/provider";
 import { PROFILES_VERSION, writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import {
@@ -31,7 +32,7 @@ import type { Stack, StackPr } from "../../src/server/review/context-files";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
-import { createReviewJobs, type ReviewJobs, type Runner } from "../../src/server/review/jobs";
+import { createReviewJobs, type ReviewJobs, type ReviewJobsOptions, type Runner } from "../../src/server/review/jobs";
 import { partsOf, unreadParts } from "../../src/server/review/parts";
 import { diffArgs, type GitRemote, syncCache } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
@@ -79,6 +80,7 @@ import {
   SET_NAMES,
   setDir,
   setFingerprint,
+  targetBranch,
 } from "./cases";
 import { readResult, summaryText } from "./compare";
 import {
@@ -728,6 +730,31 @@ export function caseStack(c: EvalCase, parentHead: string): Stack | null {
   };
 }
 
+// docs/plans/review-v2/submodule-prs.md WP-SM3: the Bitbucket reads of a submodule case for the variant "submodules". Each repository
+// has the clone link <BASE_URL>/scm/<project>/<slug>.git, so the relative URL of .gitmodules maps. The fetch goes to the local bare
+// repository of the submodule. No PR has the new commit as its head.
+export function caseSubmodule(subUrl: string): Pick<ReviewJobsOptions, "submoduleReader" | "repoRemote"> {
+  const info = (project: string, slug: string): RepoInfo => ({
+    project,
+    slug,
+    name: slug,
+    clone: [{ name: "http", href: `${BASE_URL}/scm/${project.toLowerCase()}/${slug}.git` }],
+  });
+  return {
+    submoduleReader: {
+      origin: BASE_URL,
+      repository: async (project, slug) => info(project, slug),
+      readableRepos: async () => ({ repos: [], complete: true }),
+      defaultBranch: async () => "main",
+      getPullRequest: async () => {
+        throw new Error("The eval stores no submodule pull request.");
+      },
+      listOpenPullRequests: async () => ({ items: [], complete: true }),
+    },
+    repoRemote: async () => ({ url: subUrl, config: [] }),
+  };
+}
+
 async function runCase(
   c: EvalCase,
   repeat: number,
@@ -756,13 +783,14 @@ async function runCase(
       url: repo.url,
       sourceUrl: repo.url,
       sourceRef: "refs/heads/feature",
-      targetRef: c.stack?.parent ? "refs/heads/parent" : "refs/heads/main",
+      targetRef: `refs/heads/${targetBranch(c)}`,
       fetchConfig: [],
     };
     const missing: { name: string | null } = { name: null };
     const stack = caseStack(c, base);
     const jobs = createReviewJobs({
       ...(stack && { stackReader: async () => stack }),
+      ...("sub" in repo && repo.sub && caseSubmodule(repo.sub.url)),
       settings,
       live: createLive(),
       dataDir: dir,
@@ -792,7 +820,7 @@ async function runCase(
         )
         .get({
           source: SOURCE_BRANCH,
-          target: c.stack?.parent ? "parent" : "main",
+          target: targetBranch(c),
           project: PROJECT,
           repo: c.id,
           title: c.pr.title,

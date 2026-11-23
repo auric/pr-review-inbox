@@ -1,0 +1,41 @@
+{
+  "id": "probe-sub-signature",
+  "title": "A change moves a submodule whose clamp swaps its parameters, and adds a call with the old order",
+  "language": "typescript",
+  "pr": {
+    "title": "Add the fade and balance settings",
+    "description": "Adds the fade time and the left-right balance to the mixer. Moves vendor/mathlib to its newest commit."
+  },
+  "submodule": {
+    "path": "vendor/mathlib",
+    "url": "../mathlib.git",
+    "title": "Put the range first in clamp"
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/audio/mixer.ts",
+      "side": "new",
+      "lines": [20, 20],
+      "severityMin": "major",
+      "module": "core",
+      "note": "The new mathlib commit changes clamp to clamp(min, max, value). balance still passes the value first, so clamp gets min = raw, max = -50, and value = 50, and the balance is wrong for each slider value. Call clamp(-MAX_BALANCE, MAX_BALANCE, raw)."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/audio/mixer.ts",
+      "side": "new",
+      "lines": [15, 15],
+      "why": "fadeMs passes the range first, which is the order of the new mathlib commit. The call is correct."
+    },
+    {
+      "id": "T2",
+      "path": "src/audio/mixer.ts",
+      "side": "new",
+      "lines": [10, 10],
+      "why": "volumeLevel moves to the new order of clamp together with the submodule commit. The call is correct."
+    }
+  ]
+}
