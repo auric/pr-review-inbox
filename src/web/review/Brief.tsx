@@ -68,6 +68,7 @@ import { loadLastProfile, putBrief, useSaveProfile } from "./data";
 import {
   type BriefState,
   briefProfile,
+  keepModEnter,
   LANGUAGE_LABEL,
   MODULE_LABEL,
   MORE_CHECKS,
@@ -443,6 +444,7 @@ function Attachments(props: { pr: number; t: TaskContextDto; source: string; run
                           size="sm"
                           checked={f.include}
                           disabled={wait}
+                          onKeyDown={keepModEnter}
                           onCheckedChange={(on) => {
                             if (!on) return void act(r, "exclude");
                             if (!mustAsk(settings?.askAttachments)) return void act(r, "include");

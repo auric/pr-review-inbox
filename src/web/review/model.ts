@@ -51,6 +51,11 @@ export { plural, shortHash, touchedDraft };
 const base = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 export const lineText = (a: { line: number; lineEnd: number }) => (a.lineEnd > a.line ? `${a.line}–${a.lineEnd}` : `${a.line}`);
 
+// Base UI Switch clicks itself on Enter with no modifier check and skips the click only on a prevented keydown.
+export const keepModEnter = (e: { key: string; ctrlKey: boolean; metaKey: boolean; preventDefault: () => void }) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.preventDefault();
+};
+
 // run-log.ts: the agent tool is always "Agent".
 export const AGENT = "Agent";
 

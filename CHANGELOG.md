@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Review: Ctrl+Enter on the "Include <file> in runs" switch of an attachment now starts the review and keeps the file included. Before, it also turned the attachment off, so the run got no attachment.
 - Notes: "Waits for PR" now also takes a pull request of another repository. Write "PROJ/repo#45" or paste the pull request link. A bad value or a link of another server shows an error under the field.
 - Explain: Explain looks in the code and the linked task before it asks you a question.
 - Review and Build a Jira task: the CodeGraph tools of a run can no longer open the index of another project, such as your own clone. They read only the index of the run's code.

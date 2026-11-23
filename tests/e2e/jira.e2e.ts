@@ -432,14 +432,16 @@ test("attachments: download all, the inline image, save, include after the polic
   await include.click();
   await policy.check();
   await dialog.getByRole("button", { name: "Include in runs" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(include).toBeFocused();
   await expect(include).toBeChecked();
   await expect(png).toContainText("Included in runs.");
   await expect(status(page)).toHaveText("screenshot.png is included in runs.");
   await expect(log.getByRole("switch", { name: "Include sync-worker.log in runs" })).not.toBeChecked();
 
-  // A run gets the included image only.
+  // A run gets the included image only. Ctrl+Enter on the focused switch starts the run and keeps the switch on.
   await control("claude", { stream: "tree", hang: true });
-  await page.getByLabel("Your note").press("Control+Enter");
+  await include.press("Control+Enter");
   await expect(runLine(page)).toContainText("Finding problems…", { timeout: RUN_MS });
   await expect.poll(runAttachments, { timeout: RUN_MS }).toEqual(["10100.png"]);
   await runLine(page).getByRole("button", { name: "Cancel" }).click();
@@ -448,6 +450,7 @@ test("attachments: download all, the inline image, save, include after the polic
   // Open folder without a file manager shows the path with Copy. serve.ts gives the server a recorder, so no window opens.
   await page.keyboard.press("Shift+R");
   await task.locator("summary").click();
+  await expect(include).toBeChecked();
   await files.getByRole("button", { name: "Open folder" }).click();
   await expect(files).toContainText("No file manager opened the folder. Copy the path.");
   const [path = ""] = await openFolder();
