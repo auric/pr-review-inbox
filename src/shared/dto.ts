@@ -214,7 +214,7 @@ export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // docs/plans/review-v2/obligations.md WP-OB1. "callers": docs/plans/review-v3.md D2, the caller rule. "minor-fold":
 // docs/plans/review-v2/minor-fold.md WP-MF1. "refute-issue": docs/plans/review-v2/verifier-rule.md WP-VR1. "architecture":
 // docs/plans/review-v2/architecture-bugs.md WP-AR1. "lenses3" and "runs3": docs/plans/review-v2/focused-passes.md WP-L1. "codegraph":
-// docs/plans/review-v3.md WP-V5, an app-run CodeGraph server on the snapshot. A retired
+// docs/plans/review-v3.md WP-V5, an app-run CodeGraph server on the snapshot. "stack": docs/plans/review-v2/stacked-prs.md WP-SK1. A retired
 // name ("signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check") drops on read. Prompt 2.9 ships "preexisting" and
 // "risk-check" as defaults.
 export const VARIANTS = [
@@ -231,6 +231,7 @@ export const VARIANTS = [
   "runs3",
   "security2",
   "security2-verify",
+  "stack",
   "verify2",
 ] as const;
 export type Variant = (typeof VARIANTS)[number];

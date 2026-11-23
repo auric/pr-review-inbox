@@ -689,6 +689,12 @@ export const PEER_PRS_SHOWN = 10;
 export const PEER_PATHS_SHOWN = 10;
 export const PEER_READ_MS = 15_000;
 export const SNIPPET_CHARS = 300;
+// docs/plans/review-v2/stacked-prs.md section 5.3. The parent shows 30 paths, the other PRs 10.
+export const STACK_SECTION_BYTES = 8 * 1024;
+export const STACK_UP_MAX = 3;
+export const STACK_CHILDREN_SHOWN = 3;
+export const STACK_PATHS_SHOWN = { parent: 30, other: 10 };
+export const STACK_DESCRIPTION_BYTES = 1024;
 // Rule 2 of the trim rule: the root and this many newest messages of a focus thread always stay.
 const FOCUS_KEEP = 3;
 
@@ -732,6 +738,24 @@ export type PeerPr = {
   updated: number | null;
   paths: string[];
 };
+// paths: null when no change list was stored or read.
+export type StackPr = {
+  prId: number;
+  title: string;
+  author: string;
+  mine: boolean;
+  state: string;
+  source: string;
+  target: string;
+  targetRef?: string;
+  sourceHead: string | null;
+  updated: number | null;
+  paths: string[] | null;
+  description: string;
+};
+// parents[0] is the parent, the next ones go up the stack. children: at most STACK_CHILDREN_SHOWN. notes: the "Not read" and
+// "Not followed" lines.
+export type Stack = { parents: StackPr[]; children: StackPr[]; childrenLeft: number; notes: string[] };
 // threads: every thread with a live message. focus: the thread IDs of the run. paths: the paths of the focus threads and the discussed
 // finding. peerNotes: the lines after the peer list, such as "Only PRs in your inbox are listed: <reason>.".
 export type PrContextInput = {
@@ -756,6 +780,8 @@ export type PrContextInput = {
   paths: string[];
   peers: PeerPr[];
   peerNotes: string[];
+  // Absent: no stack, and the file keeps the bytes it had without the variant "stack".
+  stack?: Stack;
 };
 
 const utc = (ms: number) => `${new Date(ms).toISOString().slice(0, 16)}Z`;
@@ -873,6 +899,92 @@ function peerSection(peers: PeerPr[], notes: string[]): { text: string | null; s
   return { text: out.join("\n"), shown };
 }
 
+// docs/plans/review-v2/stacked-prs.md section 5.3. Over STACK_SECTION_BYTES, the cut order is: child descriptions, the parents above the
+// parent (the highest first), the children (the last first), the parent paths after the tenth, the parent description.
+function stackSection(s: Stack): string {
+  const [parent, ...uppers] = s.parents;
+  const title = (p: StackPr) =>
+    `#${p.prId} "${oneLine(p.title)}" by ${oneLine(p.author)}${p.mine ? " (the user)" : ""}, ${STATES[p.state] ?? p.state.toLowerCase()}${p.updated === null ? "" : `, updated ${utcDay(p.updated)}`}`;
+  const paths = (p: StackPr, max: number) =>
+    p.paths === null
+      ? []
+      : [
+          `- Changed paths (${p.paths.length})${p.paths.length ? `: ${p.paths.slice(0, max).map(oneLine).join(", ")}${p.paths.length > max ? ` +${p.paths.length - max} more` : ""}` : ""}.`,
+        ];
+  const description = (p: StackPr) => {
+    const d = p.description.trim();
+    if (!d) return [];
+    const cut = size(d) > STACK_DESCRIPTION_BYTES;
+    return [
+      cut ? `- Description (the first ${STACK_DESCRIPTION_BYTES / 1024} KB):` : "- Description:",
+      "",
+      indentBlock(cut ? cutBytes(d, STACK_DESCRIPTION_BYTES) : d),
+    ];
+  };
+  const k = {
+    childDescriptions: true,
+    uppers: uppers.length,
+    children: s.children.length,
+    parentPaths: STACK_PATHS_SHOWN.parent,
+    parentDescription: true,
+  };
+  const render = () => {
+    const out = ["## Stacked pull requests"];
+    if (parent)
+      out.push(
+        "",
+        [
+          `### Parent ${title(parent)}`,
+          `- Source: ${oneLine(parent.source)}${parent.sourceHead ? ` at ${parent.sourceHead.slice(0, 7)}` : ""}. Target: ${oneLine(parent.target)}.`,
+          ...paths(parent, k.parentPaths),
+          ...(k.parentDescription ? description(parent) : []),
+        ].join("\n"),
+      );
+    for (const [n, p] of uppers.slice(0, k.uppers).entries())
+      out.push(
+        "",
+        [
+          `### Parent of #${(s.parents[n] as StackPr).prId}: ${title(p)}`,
+          `- Source: ${oneLine(p.source)}. Target: ${oneLine(p.target)}.`,
+          ...paths(p, STACK_PATHS_SHOWN.other),
+        ].join("\n"),
+      );
+    for (const c of s.children.slice(0, k.children))
+      out.push(
+        "",
+        [
+          `### Child ${title(c)}`,
+          `- Source: ${oneLine(c.source)}. Target: ${oneLine(c.target)}, the source branch of this pull request.`,
+          ...paths(c, STACK_PATHS_SHOWN.other),
+          ...(k.childDescriptions ? description(c) : []),
+        ].join("\n"),
+      );
+    const left = s.childrenLeft + s.children.length - k.children;
+    const tail = [...(left ? [`${left} more child pull requests left out.`] : []), ...s.notes.map(oneLine)];
+    if (tail.length) out.push("", tail.join("\n"));
+    return out.join("\n");
+  };
+  let text = render();
+  const over = () => size(text) > STACK_SECTION_BYTES;
+  if (over()) {
+    k.childDescriptions = false;
+    text = render();
+  }
+  for (; over() && k.uppers > 0; text = render()) k.uppers--;
+  for (; over() && k.children > 0; text = render()) k.children--;
+  if (over()) {
+    k.parentPaths = STACK_PATHS_SHOWN.other;
+    text = render();
+  }
+  if (over()) {
+    k.parentDescription = false;
+    text = render();
+  }
+  // Long titles or notes alone can pass the cap. The heading and the parent line come first, so the cut keeps them.
+  const CUT = "\n\nThe app cut this section at its size limit.";
+  return !over() ? text : cutBytes(text, STACK_SECTION_BYTES - size(CUT)) + CUT;
+}
+
 // docs/plans/review-v2/spec.md section 2.8. Pure: the same input gives the same bytes. workspace.ts writes the UNTRUSTED banner before
 // the text, and the banner counts toward PR_CONTEXT_BYTES. threads: the shown threads. left: the other threads that the cap left out.
 export function prContextFile(i: PrContextInput): ContextFile & { threads: number; left: number; peers: number } {
@@ -916,7 +1028,13 @@ export function prContextFile(i: PrContextInput): ContextFile & { threads: numbe
   const focusIds = new Set(i.focus);
   const focused = i.threads.filter((t) => focusIds.has(t.id)).sort((a, z) => a.id - z.id);
   const focus = focusSection(focused);
-  const peers = peerSection(i.peers, i.peerNotes);
+  const stack = i.stack ? stackSection(i.stack) : null;
+  // stacked-prs.md K16: a PR of the stack section is not a peer too.
+  const inStack = new Set([...(i.stack?.parents ?? []), ...(i.stack?.children ?? [])].map((p) => p.prId));
+  const peers = peerSection(
+    i.peers.filter((p) => !inStack.has(p.prId)),
+    i.peerNotes,
+  );
 
   // Rule 4: unresolved threads on a focus path, the other unresolved threads, then resolved threads. Newest message first, then ID.
   const paths = new Set(i.paths);
@@ -926,7 +1044,7 @@ export function prContextFile(i: PrContextInput): ContextFile & { threads: numbe
     .filter((t) => !focusIds.has(t.id) && t.msgs.length)
     .sort((a, z) => group(a) - group(z) || newest(z) - newest(a) || z.id - a.id);
   const heading = focus ? "## Other threads" : "## Threads";
-  const fixed = [head, tasks, build, ...(focus ? [focus] : []), ...(peers.text ? [peers.text] : [])];
+  const fixed = [head, ...(stack ? [stack] : []), tasks, build, ...(focus ? [focus] : []), ...(peers.text ? [peers.text] : [])];
   const LEFT = (n: number) => `${n} more threads left out. pr.md holds every message.`;
   const room =
     PR_CONTEXT_BYTES - size(UNTRUSTED) - fixed.reduce((n, s) => n + size(s) + 2, 0) - size(heading) - 2 - size(LEFT(others.length)) - 2;
@@ -940,7 +1058,7 @@ export function prContextFile(i: PrContextInput): ContextFile & { threads: numbe
   }
   const left = others.length - blocks.length;
   const list = [heading, ...(others.length ? blocks : ["None."]), ...(left ? [LEFT(left)] : [])].join("\n\n");
-  const parts = [head, tasks, build, ...(focus ? [focus] : []), list, ...(peers.text ? [peers.text] : [])];
+  const parts = [head, ...(stack ? [stack] : []), tasks, build, ...(focus ? [focus] : []), list, ...(peers.text ? [peers.text] : [])];
   let text = `${parts.join("\n\n")}\n`;
   // Many linked tasks can fill the file alone. The cut keeps the file under PR_CONTEXT_BYTES.
   const CUT = "\n\nThe app cut this file at its size limit. pr.md holds the rest.\n";

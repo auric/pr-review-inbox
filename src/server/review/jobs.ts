@@ -604,17 +604,21 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const provider = await settings.provider().catch(() => null);
       const focus = j.kind === "reply" || j.kind === "fix" || j.kind === "discuss" ? (j.threads ?? []).map((t) => t.thread) : [];
       const me = settings.config()?.userSlug ?? null;
+      // docs/plans/review-v2/stacked-prs.md K4: first reviews and re-reviews only.
+      const stack = j.kind === "review" && !j.profile.explain && j.profile.variants.includes("stack");
       const c = await loadPrContext(j.db, provider, pr, { threads: focus, paths: j.discuss?.paths }, j.abort.signal, {
         me,
         dataDir,
         now: now(),
+        stack,
       });
+      if (c.input.stack) j.db.query(SQL.related).run({ id: j.id, json: JSON.stringify([{ label: "Stack", text: c.stack, warn: false }]) });
       j.peers = c.peers;
       const file = prContextFile(c.input);
       const notes = notesFile(c.notes, pr);
       const kb = Math.round(Buffer.byteLength(UNTRUSTED + file.text) / 1024);
       log(
-        `Review run ${j.id} context: pr-context.md ${kb} KB, ${file.threads} threads${file.left ? ` (${file.left} left out)` : ""}, ${file.peers} other PRs, build ${c.build ? "read" : "not read"}; ${notes ? `notes.md ${c.notes.length} notes` : "no notes.md"}.`,
+        `Review run ${j.id} context: pr-context.md ${kb} KB, ${file.threads} threads${file.left ? ` (${file.left} left out)` : ""}, ${file.peers} other PRs, build ${c.build ? "read" : "not read"}${c.stack === null ? "" : `, stack: ${c.stack}`}; ${notes ? `notes.md ${c.notes.length} notes` : "no notes.md"}.`,
       );
       return { file, notes };
     } finally {

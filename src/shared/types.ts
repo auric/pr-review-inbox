@@ -26,6 +26,9 @@ export type PullRequest = {
   targetHead: string;
   sourceBranch: string;
   targetBranch: string;
+  // fromRef.repository: the fork for a PR from a fork. targetRef: toRef.id, the full ref name, such as refs/heads/main.
+  sourceRepo?: { project: string; repo: string };
+  targetRef?: string;
   // Present only when the server link has the configured origin.
   webUrl?: string;
   // The repository browse link of the target repository. Present only when it has the configured origin.

@@ -54,7 +54,7 @@ async function waitFor(pred: () => boolean, ms = 30_000) {
 }
 
 // Threads, with me = FAKE_USER: 101 by ALEX with my reply 102 and ALEX's answer 103; 230 by ALEX only; 300 by ALEX, deleted.
-async function setup(o: { author?: boolean } = {}) {
+async function setup(o: { author?: boolean; profiles?: typeof SHIPPED_PROFILES } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rl-wppn-"));
   dirs.push(root);
   const remote = await reviewRemote(root, { 2: "source" });
@@ -67,7 +67,13 @@ async function setup(o: { author?: boolean } = {}) {
   const writes = repoWrites(fake);
 
   const dir = join(root, "data");
-  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, markAi: false });
+  writeConfig(dir, {
+    baseUrl: fake.url,
+    userSlug: FAKE_USER,
+    notifications: false,
+    markAi: false,
+    ...(o.profiles && { profiles: o.profiles }),
+  });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir, secrets });
@@ -510,6 +516,60 @@ describe("run kinds (spec.md section 2.7)", () => {
       expect(call.stdin).not.toContain("pr-context.md");
       expect(call.stdin).not.toContain("notes.md");
       await h.cancel(run);
+      // stacked-prs.md AC-SK1: without the variant "stack", no run reads the default branch.
+      expect(h.fake.requests.filter((r) => r.includes("/default-branch"))).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "stacked-prs.md AC-SK3 and AC-SK10: with the variant, a review run reads the stack and stores its run line; Ask and fix runs read nothing new",
+    async () => {
+      const profiles = SHIPPED_PROFILES.map((p) => (p.explain ? p : { ...p, variants: [...p.variants, "stack" as const] }));
+      const h = await setup({ author: true, profiles });
+      const created = await fetch(`${h.fake.url}${h.writes.path}/pull-requests`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${FAKE_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ title: "Add the quota parser", fromRef: { id: "refs/heads/feat-a" }, toRef: { id: "refs/heads/main" } }),
+      });
+      const parent = (await created.json()) as { id: number; fromRef: Record<string, unknown>; toRef: Record<string, unknown> };
+      h.db
+        .query(
+          `INSERT INTO pull_request (project, repo, pr_id, title, author_name, state, source_branch, target_branch, updated_date)
+            VALUES ('PROJ', 'repo', $id, 'Add the quota parser', 'Anna Kim', 'OPEN', 'feat-a', 'main', 1)`,
+        )
+        .run({ id: parent.id });
+      // PR 2 of the setup, as the server shows it: from "feature" into the parent's source branch.
+      h.fake.routes[key("GET", `${h.writes.path}/pull-requests/2`)] = {
+        status: 200,
+        body: {
+          ...parent,
+          id: 2,
+          fromRef: { ...parent.fromRef, id: "refs/heads/feature", displayId: "feature" },
+          toRef: { ...parent.toRef, id: "refs/heads/feat-a", displayId: "feat-a" },
+        },
+      };
+      const review = await h.hang(() => h.json<Start>(`/api/prs/${h.pr}/review`, { method: "POST" }));
+      const ctx = readFileSync(join(review.call.cwd, "context", "pr-context.md"), "utf8");
+      expect(ctx).toContain(`## Stacked pull requests\n\n### Parent #${parent.id} "Add the quota parser" by User jdoe (the user), open`);
+      expect(h.db.query("SELECT related_json AS r, prompt_version AS v FROM review_run WHERE id = $id").get({ id: review.run })).toEqual({
+        r: JSON.stringify([{ label: "Stack", text: `parent #${parent.id}, 0 children`, warn: false }]),
+        v: "2.9+stack",
+      });
+      await h.cancel(review.run);
+      expect(h.fake.requests.filter((r) => r.includes("/default-branch"))).toHaveLength(1);
+
+      h.fake.requests.length = 0;
+      for (const startRun of [
+        () => h.json<Start>(`/api/prs/${h.pr}/ask`, { body: { question: "What is left?" } }),
+        () => h.json<Start>(`/api/prs/${h.pr}/fix-run`, { body: { threads: [101] } }),
+      ]) {
+        const { run, call } = await h.hang(startRun);
+        expect(readFileSync(join(call.cwd, "context", "pr-context.md"), "utf8")).not.toContain("Stacked");
+        expect(h.db.query("SELECT related_json AS r FROM review_run WHERE id = $id").get({ id: run })).toEqual({ r: null });
+        await h.cancel(run);
+      }
+      expect(h.fake.requests.filter((r) => r.includes("/default-branch") || r === `GET ${h.writes.path}/pull-requests/2`)).toEqual([]);
     },
     SLOW,
   );

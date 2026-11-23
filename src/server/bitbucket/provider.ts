@@ -255,6 +255,8 @@ export function createBitbucketProvider(opts: ClientOptions) {
       targetHead: p.toRef.latestCommit,
       sourceBranch: p.fromRef.displayId,
       targetBranch: p.toRef.displayId,
+      sourceRepo: { project: p.fromRef.repository.project.key, repo: p.fromRef.repository.slug },
+      ...(p.toRef.id !== undefined && { targetRef: p.toRef.id }),
       webUrl: own(p.links?.self?.[0]?.href),
       repoUrl,
       sourceBranchUrl: branchUrl(own(p.fromRef.repository.links?.self?.[0]?.href), p.fromRef.id),
@@ -301,10 +303,16 @@ export function createBitbucketProvider(opts: ClientOptions) {
     return { items: items.slice(0, REPO_LIST_MAX), complete: false };
   }
 
-  // One page of OPEN PRs of a repository. branch: only the PRs from this branch.
-  // Pending Gate G9: the open-PR list of a repository is checked only by the gate fake (spec.md section 2.8).
-  async function listOpenPullRequests(project: string, repo: string, branch?: string): Promise<ListResult<PullRequest>> {
-    const at = branch === undefined ? "" : `&at=${encodeURIComponent(`refs/heads/${branch}`)}&direction=OUTGOING`;
+  // One page of OPEN PRs of a repository. branch: only the PRs from this branch (OUTGOING) or into it (INCOMING).
+  // Pending Gates G9 and G20: the open-PR list of a repository and the direction filter are checked only by the gate fake (spec.md section
+  // 2.8, docs/plans/review-v2/stacked-prs.md section 11).
+  async function listOpenPullRequests(
+    project: string,
+    repo: string,
+    branch?: string,
+    direction: "OUTGOING" | "INCOMING" = "OUTGOING",
+  ): Promise<ListResult<PullRequest>> {
+    const at = branch === undefined ? "" : `&at=${encodeURIComponent(`refs/heads/${branch}`)}&direction=${direction}`;
     const path = `${repoPath(project, repo)}/pull-requests?state=OPEN${at}&limit=${OPEN_PR_LIMIT}`;
     const { data } = await client.get(path, page(pullRequest));
     const items = data.values.map(toPr);

@@ -17,6 +17,8 @@ import {
   type PrContextInput,
   type PrContextThread,
   prContextFile,
+  STACK_SECTION_BYTES,
+  type StackPr,
 } from "../../src/server/review/context-files";
 import { clearPeerCache, loadPrContext, PEER_GATE_TEXT, type PrContextReader } from "../../src/server/review/pr-context";
 import type { Heads } from "../../src/server/review/run-rows";
@@ -271,6 +273,69 @@ describe("prContextFile", () => {
   });
 });
 
+describe("prContextFile with a stack (stacked-prs.md section 5.3)", () => {
+  const pr = (prId: number, o: Partial<StackPr> = {}): StackPr => ({
+    prId,
+    title: `PR ${prId}`,
+    author: "Anna Kim",
+    mine: false,
+    state: "OPEN",
+    source: `feat/${prId}`,
+    target: "main",
+    sourceHead: HEAD,
+    updated: Date.UTC(2026, 10, 20),
+    paths: [],
+    description: "",
+    ...o,
+  });
+  const paths = (n: number, len: number, tag: string) => Array.from({ length: n }, (_, k) => `${tag}${k}/`.padEnd(len, "x"));
+
+  test("K3: an absent stack gives the bytes of today; the section stands after the PR and before the tasks", () => {
+    const plain = prContextFile(input());
+    expect(prContextFile(input({ stack: undefined })).text).toBe(plain.text);
+    expect(plain.text).not.toContain("Stacked");
+    const text = prContextFile(input({ stack: { parents: [pr(40)], children: [], childrenLeft: 0, notes: [] } })).text;
+    expect(text.indexOf("## Pull request")).toBe(0);
+    expect(text).toContain(
+      '\n\n## Stacked pull requests\n\n### Parent #40 "PR 40" by Anna Kim, open, updated 2026-11-20\n- Source: feat/40 at a1b2c3d. Target: main.\n- Changed paths (0).\n\n## Linked tasks',
+    );
+  });
+
+  test("AC-SK6: the section stays within 8 KB and cuts in the order of section 5.3; the heading and the parent line stay", () => {
+    const stages = new Set<number>();
+    for (let len = 20; len <= 760; len += 10) {
+      const stack = {
+        parents: [
+          pr(40, { paths: paths(30, len, "p"), description: "PARENT-DESC ".repeat(100) }),
+          pr(41, { paths: paths(10, len, "u") }),
+          pr(42, { paths: paths(10, len, "u") }),
+        ],
+        children: [50, 51, 52].map((id) => pr(id, { paths: paths(10, len, "c"), description: "CHILD-DESC ".repeat(100) })),
+        childrenLeft: 2,
+        notes: ["Not read: the changed paths of #60 (Bitbucket error timeout)."],
+      };
+      const text = prContextFile(input({ stack })).text;
+      const section = text.slice(text.indexOf("## Stacked pull requests"), text.indexOf("## Linked tasks") - 2);
+      expect(size(section)).toBeLessThanOrEqual(STACK_SECTION_BYTES);
+      expect(section).toContain('### Parent #40 "PR 40" by Anna Kim, open');
+      const childDesc = section.includes("CHILD-DESC");
+      const uppers = (section.match(/### Parent of/g) ?? []).length;
+      const children = (section.match(/### Child/g) ?? []).length;
+      const parentCut = section.includes("+20 more");
+      const parentDesc = section.includes("PARENT-DESC");
+      if (childDesc) expect([uppers, children, parentCut, parentDesc]).toEqual([2, 3, false, true]);
+      if (uppers) expect(children).toBe(3);
+      if (children < 3) expect(uppers).toBe(0);
+      if (parentCut) expect(children).toBe(0);
+      if (!parentDesc) expect(parentCut).toBe(true);
+      expect(section).toContain(`${2 + 3 - children} more child pull requests left out.`);
+      stages.add(childDesc ? 0 : uppers ? 1 : children ? 2 : !parentCut ? 3 : parentDesc ? 4 : 5);
+    }
+    // Each step of the cut order ran for some length.
+    expect([...stages].sort()).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+});
+
 describe("notesFile", () => {
   test("kept notes, oldest first, one line each with the link state; null without a note", () => {
     expect(notesFile([], { project: "PROJ", repo: "repo" })).toBeNull();
@@ -384,6 +449,7 @@ const stub = (o: Partial<PrContextReader> = {}): PrContextReader => ({
   listOpenPullRequests: never,
   listChanges: never,
   getPullRequest: never,
+  defaultBranch: never,
   ...o,
 });
 const load = (s: Setup, provider: PrContextReader | null, o: { focus?: number[]; peerReads?: boolean; signal?: AbortSignal } = {}) =>

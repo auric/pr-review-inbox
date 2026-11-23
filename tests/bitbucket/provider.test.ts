@@ -702,6 +702,26 @@ describe("forge data", () => {
     expect(pr.sourceBranchUrl).toBe(`${fake.url}/users/asmith/repos/sample-repo-1/browse?at=refs%2Fheads%2Ffeature%2Fx`);
     expect(pr.targetBranchUrl).toBe(`${fake.url}/projects/PROJ1/repos/sample-repo-1/browse?at=refs%2Fheads%2Ftopic%2Fsample-2`);
     expect(pr.repoUrl).toBe(`${fake.url}/projects/PROJ1/repos/sample-repo-1/browse`);
+    // stacked-prs.md section 6: the source repository and the full target ref name.
+    expect(pr.sourceRepo).toEqual({ project: "~ASMITH", repo: "sample-repo-1" });
+    expect(pr.targetRef).toBe("refs/heads/topic/sample-2");
+    delete (body.body.toRef as { id?: string }).id;
+    expect("targetRef" in (await p.getPullRequest(PR_REF))).toBe(false);
+  });
+
+  test("the open-PR list: OUTGOING keeps its bytes; INCOMING lists the PRs into the branch (stacked-prs.md section 6)", async () => {
+    const repo = "/rest/api/1.0/projects/PROJ1/repos/sample-repo-1";
+    const p = setup({
+      [key("GET", `${repo}/pull-requests`)]: { status: 200, body: { size: 0, limit: 50, start: 0, isLastPage: true, values: [] } },
+    });
+    await p.listOpenPullRequests("PROJ1", "sample-repo-1", "feat/b");
+    await p.listOpenPullRequests("PROJ1", "sample-repo-1", "feat/b", "INCOMING");
+    await p.listOpenPullRequests("PROJ1", "sample-repo-1");
+    expect(fake.requests).toEqual([
+      `GET ${repo}/pull-requests?state=OPEN&at=refs%2Fheads%2Ffeat%2Fb&direction=OUTGOING&limit=50`,
+      `GET ${repo}/pull-requests?state=OPEN&at=refs%2Fheads%2Ffeat%2Fb&direction=INCOMING&limit=50`,
+      `GET ${repo}/pull-requests?state=OPEN&limit=50`,
+    ]);
   });
 
   test("a ref without its full name gets no branch link", async () => {
