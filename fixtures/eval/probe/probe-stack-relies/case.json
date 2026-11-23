@@ -1,0 +1,35 @@
+{
+  "id": "probe-stack-relies",
+  "title": "A stacked PR uses a parent parser that returns null, with no null check",
+  "language": "typescript",
+  "pr": {
+    "title": "Read the daily quota from API_QUOTA",
+    "description": "Reads the daily request quota of each API key from API_QUOTA. It uses parseQuota from the parent pull request."
+  },
+  "stack": {
+    "parent": {
+      "title": "Add parseQuota for quota settings",
+      "description": "Adds parseQuota. It parses values such as \"500\" or \"2k\" and returns null for a missing or malformed value, so the caller picks the fallback."
+    }
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/api/limits.ts",
+      "side": "new",
+      "lines": [8, 9],
+      "severityMin": "major",
+      "module": "core",
+      "note": "parseQuota of the parent returns null for a missing or malformed API_QUOTA, as its comment says. The non-null assertion hides that. dailyQuota then returns null, and used < null is false, so every request is refused when API_QUOTA is not set. Fall back to DEFAULT_QUOTA."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/config/quota.ts",
+      "side": "new",
+      "lines": [4, 8],
+      "why": "The parent pull request adds parseQuota, and null is its documented result for a bad value. This change does not touch it. A finding on the return null lines blames parent code; the defect is the caller in src/api/limits.ts."
+    }
+  ]
+}

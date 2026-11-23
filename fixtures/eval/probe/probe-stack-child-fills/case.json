@@ -1,0 +1,37 @@
+{
+  "id": "probe-stack-child-fills",
+  "title": "A rate limit meets one criterion, and an open child PR adds the rest",
+  "language": "typescript",
+  "pr": {
+    "title": "Limit the requests of each API key",
+    "description": "Adds the limit of 100 requests per minute for each API key. A request over the limit gets status 429. The Retry-After header comes later."
+  },
+  "task": "Add a rate limit to the public API.\n\nAcceptance criteria:\n1. Each API key gets at most 100 requests per minute. A request over the limit gets status 429.\n2. The 429 reply has a Retry-After header with the seconds until the current window ends.",
+  "stack": {
+    "children": [
+      {
+        "title": "Add the Retry-After header",
+        "description": "Adds the Retry-After header to the 429 reply of the rate limit. Its value is the seconds until the current window ends. This meets criterion 2 of the rate limit task.",
+        "paths": ["src/api/limit.ts", "src/api/server.ts"]
+      }
+    ]
+  },
+  "clean": true,
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/api/server.ts",
+      "side": "new",
+      "lines": [6, 6],
+      "why": "The 429 reply has no Retry-After header yet, so criterion 2 is not met here. The open child pull request \"Add the Retry-After header\" builds on this branch and adds it. A finding that criterion 2 is unmet is wrong. A question that names the child is correct."
+    },
+    {
+      "id": "T2",
+      "path": "src/api/limit.ts",
+      "side": "new",
+      "lines": [8, 8],
+      "why": "A fixed window of one minute is what criterion 1 asks for: at most 100 requests per minute. The new window resets the count. A finding of a sliding-window or off-by-one problem here is wrong."
+    }
+  ]
+}

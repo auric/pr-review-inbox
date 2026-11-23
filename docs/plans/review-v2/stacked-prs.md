@@ -1,6 +1,6 @@
 # Stacked pull requests
 
-Status: Designed 2026-11-20. WP-SK0, WP-SK1, and WP-SK2 are built (2026-11-23). Branch reads stay off (STACK_READS=false) until the user runs Gates G9, G12, and G20. Open: WP-SK3, Gates SK-P and SK-B, and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
+Status: Designed 2026-11-20. WP-SK0 to WP-SK3 are built (2026-11-23). Branch reads stay off (STACK_READS=false) until the user runs Gates G9, G12, and G20. Open: Gates SK-P and SK-B, and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
 
 ## 1. Request
 
@@ -271,7 +271,7 @@ Three cases in fixtures/eval/probe/, in the format of probe-obl-criterion-deferr
 
 ### Gate SK-P (probe, user runs)
 
-- `bun run eval -- --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3`, once with `--variants stack` and once without. Both sides run fresh, so the version of a stored baseline does not matter.
+- `bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3`, once with `--variants stack` and once without. docs/eval/local.md has the full commands. Both sides run fresh, so the version of a stored baseline does not matter.
 - Pass: with "stack", 0 trap hits over the 9 runs. The must-find of probe-stack-relies is found at least as often as in the control. Failed runs do not rise. Cost per case rises by at most 25%.
 - The gate checks behavior, not recall. 3 cases cannot show a recall gain.
 
@@ -331,6 +331,16 @@ WP-SK2 build notes (2026-11-23), where the build differs from the plan:
 - `STACK_LINES` and `STACK_VERIFY` hold one list per flag. With "submodules" too, the stack lines come first, and `STACK_VERIFY` follows `SUBMODULE_VERIFY`.
 - Tests: the `pruneRefs` check is in tests/review/prune-refs.test.ts. tests/review/jobs.test.ts runs a stacked review with the fake CLI, with and without PARENT_BASE.
 - REVIEW_PROMPT_VERSION and every prompt hash pin stay the same. A git-mcp test pins the sha256 of the rl-git tool list without the pin.
+
+WP-SK3 build notes (2026-11-23), where the build differs from the plan:
+
+- WP-SK1 did not add `stackReader`. WP-SK3 adds it to `createReviewJobs`: `(pr) => Promise<Stack>`. With it, the run reads no stack from Bitbucket and uses the given stack. It needs the variant "stack" and a review run, as the reads do.
+- `stack` in case.json has an optional `parent` (title, description) and optional `children` (title, description, paths). One of them must exist. parent.patch must exist exactly when `parent` does.
+- The parent is PR 2 from `parent` into `main`, at the parent head, with the paths of parent.patch. The children are PR 3 and up, from `feature/eval-child-<n>` into the source branch, with no head.
+- `probe-stack-child-fills` has a child and no parent, so its target stays `main` and it gets no PARENT_BASE.
+- The app drops a finding outside BASE..HEAD (reason unchanged), so a trap on a parent line alone can never be hit. `probe-stack-unreached` adds an alt on the call line (send.ts:7). In `probe-stack-relies`, the call line is the must-find, so its trap counts only in the dropped list.
+- `buildRepo` gives `base` as the parent head for a case with a parent, and `main` keeps the base commit. A case with `stack` and `rereview` is refused.
+- Tests: tests/eval/harness.test.ts pins the repository, stdin, pr-context.md, and pr.md bytes of a case without `stack`, with and without the variant. tests/eval/probe.test.ts counts 29 cases.
 
 ## 11. Gates
 

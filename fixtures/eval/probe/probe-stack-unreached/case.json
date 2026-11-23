@@ -1,0 +1,27 @@
+{
+  "id": "probe-stack-unreached",
+  "title": "A stacked PR calls a parent helper only with inputs where the helper is right",
+  "language": "typescript",
+  "pr": {
+    "title": "Retry a refused notification three times",
+    "description": "A refused notification now waits and tries again, up to three times. The waits come from backoffMs of the parent pull request."
+  },
+  "stack": {
+    "parent": {
+      "title": "Add backoffMs for retry waits",
+      "description": "Adds backoffMs. Retry 1 waits 500 ms, and each next retry waits twice as long, up to 30 s."
+    }
+  },
+  "clean": true,
+  "bugs": [],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/notify/backoff.ts",
+      "side": "new",
+      "lines": [6, 6],
+      "alt": [{ "path": "src/notify/send.ts", "side": "new", "lines": [7, 7] }],
+      "why": "The branch for an attempt below 1 grows without the MAX_DELAY_MS cap, so backoffMs is wrong for zero or negative input. The parent pull request owns this code. This change calls backoffMs only with the constants 1, 2, and 3, so it never reaches the branch. A finding here, or on the call line of this change that the anchor rule moves it to, blames parent code that this change does not rely on."
+    }
+  ]
+}

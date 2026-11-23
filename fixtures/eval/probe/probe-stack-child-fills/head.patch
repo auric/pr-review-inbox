@@ -1,0 +1,37 @@
+diff --git a/src/api/limit.ts b/src/api/limit.ts
+new file mode 100644
+index 0000000..5eea84c
+--- /dev/null
++++ b/src/api/limit.ts
+@@ -0,0 +1,16 @@
++const LIMIT = 100;
++const WINDOW_MS = 60_000;
++
++// Counts per API key, for the current fixed window only.
++const counts = new Map<string, { window: number; used: number }>();
++
++export function allow(apiKey: string, now: number): boolean {
++  const window = Math.floor(now / WINDOW_MS);
++  const entry = counts.get(apiKey);
++  if (!entry || entry.window !== window) {
++    counts.set(apiKey, { window, used: 1 });
++    return true;
++  }
++  entry.used++;
++  return entry.used <= LIMIT;
++}
+diff --git a/src/api/server.ts b/src/api/server.ts
+index 57d4136..6bfbf00 100644
+--- a/src/api/server.ts
++++ b/src/api/server.ts
+@@ -1,5 +1,9 @@
++import { allow } from "./limit";
+ import type { Handler, Reply, Request } from "./types";
+ 
+ export function serve(handler: Handler): (req: Request) => Reply {
+-  return (req) => handler(req);
++  return (req) => {
++    if (!allow(req.apiKey, req.now)) return { status: 429, headers: {}, body: "Too many requests." };
++    return handler(req);
++  };
+ }

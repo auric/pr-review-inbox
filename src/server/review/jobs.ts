@@ -150,6 +150,7 @@ import {
   prContextFile,
   questionsFile,
   SALVAGE_NOTES,
+  type Stack,
   salvageNotesFile,
 } from "./context-files";
 import { runEffort } from "./defaults";
@@ -318,6 +319,9 @@ export type ReviewJobsOptions = {
   // The Bitbucket reads of the variant "submodules" (docs/plans/review-v2/submodule-prs.md section 6). Absent: the forge provider. The
   // eval passes a stub.
   submoduleReader?: SubmoduleReader;
+  // The stack of the variant "stack" (docs/plans/review-v2/stacked-prs.md section 6), in place of the Bitbucket reads. Absent: the
+  // forge provider. The eval passes the stack of a case. It must hold a parent or a child (K3).
+  stackReader?: (pr: Heads) => Promise<Stack>;
 };
 
 export type Runner = ReturnType<typeof createClaudeRunner>;
@@ -618,12 +622,17 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const me = settings.config()?.userSlug ?? null;
       // docs/plans/review-v2/stacked-prs.md K4: first reviews and re-reviews only.
       const stack = j.kind === "review" && !j.profile.explain && j.profile.variants.includes("stack");
+      const given = stack && opts.stackReader ? await opts.stackReader(pr) : null;
       const c = await loadPrContext(j.db, provider, pr, { threads: focus, paths: j.discuss?.paths }, j.abort.signal, {
         me,
         dataDir,
         now: now(),
-        stack,
+        stack: stack && !given,
       });
+      if (given) {
+        c.input.stack = given;
+        c.stack = `${given.parents[0] ? `parent #${given.parents[0].prId}` : "no parent"}, ${given.children.length + given.childrenLeft} children`;
+      }
       // The submodule step writes the column again with these parts first.
       const related = c.input.stack ? [{ label: "Stack", text: c.stack ?? "", warn: false }] : [];
       if (related.length) j.db.query(SQL.related).run({ id: j.id, json: JSON.stringify(related) });

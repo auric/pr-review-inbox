@@ -1,0 +1,25 @@
+diff --git a/src/notify/send.ts b/src/notify/send.ts
+index 641c96c..6552b44 100644
+--- a/src/notify/send.ts
++++ b/src/notify/send.ts
+@@ -1,6 +1,17 @@
++import { backoffMs } from "./backoff";
++
+ export type Send = () => Promise<boolean>;
++export type Sleep = (ms: number) => Promise<void>;
++
++// Three retries after the first try: 500 ms, 1 s, and 2 s.
++const RETRY_DELAYS_MS = [backoffMs(1), backoffMs(2), backoffMs(3)];
+ 
+-// Sends one notification. It gives true when the receiver accepted it.
+-export async function deliver(send: Send): Promise<boolean> {
+-  return send();
++// Sends one notification. It gives true when the receiver accepted it. A refused send waits and tries again, up to three times.
++export async function deliver(send: Send, sleep: Sleep): Promise<boolean> {
++  if (await send()) return true;
++  for (const delay of RETRY_DELAYS_MS) {
++    await sleep(delay);
++    if (await send()) return true;
++  }
++  return false;
+ }

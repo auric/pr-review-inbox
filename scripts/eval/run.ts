@@ -27,6 +27,7 @@ import {
   verifierEffort,
 } from "../../src/server/review/catalog";
 import { createClaudeRunner, type RunOutcome } from "../../src/server/review/claude";
+import type { Stack, StackPr } from "../../src/server/review/context-files";
 import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
@@ -72,6 +73,7 @@ import {
   loadCases,
   localDir,
   mapSpot,
+  PARENT_PATCH,
   pointRefs,
   rereviewDir,
   SET_NAMES,
@@ -686,6 +688,45 @@ function recorder(c: EvalCase, repeat: number, ctx: Context, missing: { name: st
 }
 
 const USER = EVAL_USER;
+// The source branch of the PR row that runCase seeds.
+const SOURCE_BRANCH = "feature/eval";
+
+// docs/plans/review-v2/stacked-prs.md WP-SK3: the stack of a case for the stackReader of the variant "stack". The parent is PR 2 from
+// branch parent into main at parentHead, with the paths of parent.patch. The children are PRs 3 and up into the source branch.
+export function caseStack(c: EvalCase, parentHead: string): Stack | null {
+  if (!c.stack) return null;
+  const pr = (prId: number, p: { title: string; description: string }, more: Partial<StackPr>): StackPr => ({
+    prId,
+    title: p.title,
+    description: p.description,
+    author: "Eval Author",
+    mine: false,
+    state: "OPEN",
+    source: "",
+    target: "",
+    sourceHead: null,
+    updated: null,
+    paths: null,
+    ...more,
+  });
+  const { parent, children = [] } = c.stack;
+  return {
+    parents: parent
+      ? [
+          pr(2, parent, {
+            source: "parent",
+            target: "main",
+            targetRef: "refs/heads/main",
+            sourceHead: parentHead,
+            paths: parseDiff(readFileSync(join(c.dir, PARENT_PATCH), "utf8")).flatMap((f) => f.path ?? f.oldPath ?? []),
+          }),
+        ]
+      : [],
+    children: children.map((x, i) => pr(3 + i, x, { source: `feature/eval-child-${i + 1}`, target: SOURCE_BRANCH, paths: x.paths })),
+    childrenLeft: 0,
+    notes: [],
+  };
+}
 
 async function runCase(
   c: EvalCase,
@@ -715,11 +756,13 @@ async function runCase(
       url: repo.url,
       sourceUrl: repo.url,
       sourceRef: "refs/heads/feature",
-      targetRef: "refs/heads/main",
+      targetRef: c.stack?.parent ? "refs/heads/parent" : "refs/heads/main",
       fetchConfig: [],
     };
     const missing: { name: string | null } = { name: null };
+    const stack = caseStack(c, base);
     const jobs = createReviewJobs({
+      ...(stack && { stackReader: async () => stack }),
       settings,
       live: createLive(),
       dataDir: dir,
@@ -744,10 +787,12 @@ async function runCase(
         .query(
           `INSERT INTO pull_request (project, repo, pr_id, title, description, author_slug, author_name, my_role, state, source_head,
             target_head, source_branch, target_branch, web_url, updated_date, on_dashboard, followed)
-          VALUES ($project, $repo, 1, $title, $description, $author, 'Eval Author', 'REVIEWER', 'OPEN', $head, $base, 'feature/eval',
-            'main', $web, $now, 1, 1) RETURNING id`,
+          VALUES ($project, $repo, 1, $title, $description, $author, 'Eval Author', 'REVIEWER', 'OPEN', $head, $base, $source,
+            $target, $web, $now, 1, 1) RETURNING id`,
         )
         .get({
+          source: SOURCE_BRANCH,
+          target: c.stack?.parent ? "parent" : "main",
           project: PROJECT,
           repo: c.id,
           title: c.pr.title,

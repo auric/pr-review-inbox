@@ -127,6 +127,16 @@ export const evalThreadComment = z.object({
   deleted: z.literal(true).optional(),
   earlier: z.string().min(1).optional(),
 });
+// docs/plans/review-v2/stacked-prs.md WP-SK3: the other pull requests of a stacked case. parent: parent.patch applies to base/ and makes
+// the target branch "parent", and head.patch applies on top of it. children: open pull requests into the source branch. They have no
+// commits, so paths names their changed paths.
+const stackPr = { title: z.string().min(1), description: z.string() };
+export const evalStack = z
+  .object({
+    parent: z.object(stackPr).optional(),
+    children: z.array(z.object({ ...stackPr, paths: z.array(z.string().min(1)).min(1) })).optional(),
+  })
+  .refine((s) => s.parent !== undefined || (s.children?.length ?? 0) > 0, "A stack needs a parent or a child.");
 // tests/eval/harness.test.ts checks the bug, trap, and line counts of each set.
 export const caseFile = z.object({
   id: z.string().regex(CASE_ID),
@@ -144,6 +154,8 @@ export const caseFile = z.object({
   threads: z.array(evalThreadComment).optional(),
   // A PR with no known defect: a probe case, or a clean case of the local set (local.ts --clean). It has no bugs.
   clean: z.literal(true).optional(),
+  // A stacked PR. run.ts gives it to the variant "stack" only. Absent: the repository and every context file keep their bytes.
+  stack: evalStack.optional(),
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1), ...gold });
@@ -240,6 +252,8 @@ export const FIXTURE_SUFFIX = ".fixture";
 const storedRenamed = (name: string) => INSTRUCTION_FILE.test(name) || MANIFEST_FILE.test(name);
 // The patch from base/ to the earlier head of a re-review fixture. head.patch also starts at base/.
 export const EARLIER_PATCH = "earlier.patch";
+// The patch from base/ to the head of the parent PR of a stacked fixture. head.patch then starts at the parent head.
+export const PARENT_PATCH = "parent.patch";
 
 export function loadCase(dir: string): EvalCase {
   const text = readFileSync(join(dir, "case.json"), "utf8");
@@ -281,6 +295,10 @@ export function loadCase(dir: string): EvalCase {
   if (!base.size) throw new Error(`Case ${c.id} has no base files.`);
   const patch = readFileSync(join(dir, "head.patch"), "utf8");
   if (c.rereview && !existsSync(join(dir, EARLIER_PATCH))) throw new Error(`Case ${c.id} has a rereview block but no ${EARLIER_PATCH}.`);
+  // run.ts points refs/heads/main at the base of a re-review, so the parent branch would not hold.
+  if (c.stack && c.rereview) throw new Error(`Case ${c.id} has a stack and a rereview block.`);
+  if ((c.stack?.parent !== undefined) !== existsSync(join(dir, PARENT_PATCH)))
+    throw new Error(`Case ${c.id} needs ${PARENT_PATCH} exactly when its stack has a parent.`);
   return { ...c, dir, base, patch, changedLines: changedLines(patch) };
 }
 
@@ -317,8 +335,10 @@ const AUTHOR = {
 
 // A bare repository in root: main holds the base commit, feature and refs/pull-requests/1/from hold base plus head.patch.
 // The git config is isolated, so no user filter or hook changes the files. A re-review fixture also makes the earlier head (base plus
-// earlier.patch, child of base), and the head becomes its child, as a push of new commits does.
-export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr" | "rereview">, root: string) {
+// earlier.patch, child of base), and the head becomes its child, as a push of new commits does. A stacked fixture with a parent also
+// makes refs/heads/parent (base plus parent.patch, child of base), and the head becomes its child. Then base is the parent head, the
+// target of the PR, and main keeps the base commit.
+export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr" | "rereview" | "stack">, root: string) {
   const empty = join(root, "empty.gitconfig");
   writeFileSync(empty, "");
   const url = join(root, "remote.git");
@@ -333,7 +353,12 @@ export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr" | "rerev
   });
   const shas = (await g(["hash-object", "-w", "--no-filters", "--stdin-paths"], `${blobs.join("\n")}\n`)).split("\n");
   await g(["update-index", "--index-info"], `${entries.map(([p], i) => `100644 ${shas[i]}\t${p}`).join("\n")}\n`);
-  const base = await g(["commit-tree", await g(["write-tree"]), "-m", "base"]);
+  const main = await g(["commit-tree", await g(["write-tree"]), "-m", "base"]);
+  let base = main;
+  if (c.stack?.parent) {
+    await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, PARENT_PATCH)]);
+    base = await g(["commit-tree", await g(["write-tree"]), "-p", main, "-m", c.stack.parent.title]);
+  }
   let since: string | undefined;
   if (c.rereview) {
     await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, EARLIER_PATCH)]);
@@ -342,7 +367,8 @@ export async function buildRepo(c: Pick<EvalCase, "base" | "dir" | "pr" | "rerev
   }
   await g(["apply", "--cached", "--whitespace=nowarn", join(c.dir, "head.patch")]);
   const head = await g(["commit-tree", await g(["write-tree"]), "-p", since ?? base, "-m", c.pr.title]);
-  await pointRefs(url, env, base, head);
+  await pointRefs(url, env, main, head);
+  if (base !== main) await g(["update-ref", "refs/heads/parent", base]);
   // The file text of a commit, for checks of the case lines.
   const show = (commit: string, path: string) => git(["--git-dir", url, "show", `${commit}:${path}`], { env });
   return { url, base, head, env, show, ...(since && { since, sinceBase: base }) };

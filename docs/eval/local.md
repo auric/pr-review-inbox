@@ -73,7 +73,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 
 ## Probe set
 
-`fixtures/eval/probe/` holds 26 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
+`fixtures/eval/probe/` holds 29 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
 
 - 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
 - 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
@@ -109,6 +109,22 @@ bun run eval:compare -- <probe-base result.json> <probe-security2 result.json>
 ```
 
 `--variants security2` also applies the verify rules. For the verify half alone, run the second command with `--variants security2-verify`. Compare the "Shown security findings" row and the "class security" slice row.
+
+3 cases (`probe-stack-*`, docs/plans/review-v2/stacked-prs.md section 7) are stacked PRs. `stack` in case.json names the parent and the children. `parent.patch` applies to base/ and makes the branch `parent`, the target of the PR. head.patch applies on top of it. Only the variant "stack" gives the stack to the run. Without it, the run gets the same repository with no section and no PARENT_BASE:
+
+- `probe-stack-relies`: the parent adds `parseQuota`, which returns null for a bad value. The change uses the result with a non-null assertion. Must-find, major, on the caller. A trap is on the `return null` lines of the parent.
+- `probe-stack-unreached` (clean): the parent helper `backoffMs` has no cap for an attempt below 1. The change calls it only with 1, 2, and 3. A trap is on that parent branch.
+- `probe-stack-child-fills` (clean): the twin of `probe-obl-criterion-deferred`, with no parent. An open child PR "Add the Retry-After header" adds the missing criterion. A trap is on the 429 line. A question that names the child is correct.
+
+The app drops a finding on a line outside the change (reason unchanged). So a finding that blames parent code counts as a trap hit only when it lands on a changed line. `probe-stack-unreached` has its trap alt on the call line. In `probe-stack-relies`, the call line is the must-find, so a parent-blaming finding there counts as found. Read the dropped list of both results for findings on the parent lines. In the control run, `probe-stack-child-fills` is `probe-obl-criterion-deferred`, so a correct finding on the 429 line counts as a trap hit there.
+
+Gate SK-P (stacked-prs.md section 7) runs the 3 cases with the variant and without it, then compares the two results:
+
+```
+bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3 --out eval-results/stack/probe-base
+bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3 --variants stack --out eval-results/stack/probe-stack
+bun run eval:compare -- <probe-base result.json> <probe-stack result.json>
+```
 
 A fixture case can have `threads` and `clean`, as a local case can. The run seeds the threads into the comment table, so `pr-context.md` lists them. A fixture case has no `text` on its items: `note` and `why` describe them.
 

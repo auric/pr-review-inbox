@@ -43,6 +43,8 @@ const kind = (c: EvalCase) => {
   if (c.id.startsWith("probe-polish-")) return "polish point";
   // review-quality-2026.md item 10: one security bug, and traps that look like security holes but are safe.
   if (c.id.startsWith("probe-sec-")) return "security";
+  // stacked-prs.md WP-SK3: a stack in case.json, for the variant "stack".
+  if (c.stack) return "stack";
   if (c.clean) return "clean";
   if (onBug && claim && c.bugs.length === 1) return "wrong claim";
   if (onTrap && !c.bugs.length) return "right claim";
@@ -51,8 +53,8 @@ const kind = (c: EvalCase) => {
 };
 
 describe("probe set", () => {
-  test("26 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, 1 clean case, 8 missing obligations, 3 met obligations, 2 polish points, and 5 security cases", () => {
-    expect(cases).toHaveLength(26);
+  test("29 cases: 2 wrong claims, 1 right claim, 2 unmet criteria, 1 met criterion, 1 invented requirement, 1 clean case, 8 missing obligations, 3 met obligations, 2 polish points, 5 security cases, and 3 stack cases", () => {
+    expect(cases).toHaveLength(29);
     const by = Object.groupBy(cases, kind);
     expect(Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v?.length]))).toEqual({
       "wrong claim": 2,
@@ -65,7 +67,14 @@ describe("probe set", () => {
       "met obligation": 3,
       "polish point": 2,
       security: 5,
+      stack: 3,
     });
+    // Only the stack cases have a stack.
+    expect(cases.filter((c) => c.stack).map((c) => c.id)).toEqual([
+      "probe-stack-child-fills",
+      "probe-stack-relies",
+      "probe-stack-unreached",
+    ]);
     // Each polish case has one nit bug, so recall at balanced leaves it out and only polishRecall counts it.
     for (const c of by["polish point"] ?? []) expect(c.bugs.map((b) => b.severityMin)).toEqual(["nit"]);
     // Each security case has one bug of module security, so the class security slice counts it.

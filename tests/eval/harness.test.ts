@@ -1094,3 +1094,147 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
     SLOW,
   );
 });
+
+// docs/plans/review-v2/stacked-prs.md WP-SK3: the probe cases of the variant "stack". The pins come from the harness before WP-SK3.
+describe("stacked probe cases with the fake CLI (WP-SK3)", () => {
+  console.log(`Code under test: ${Bun.resolveSync("../../scripts/eval/run.ts", import.meta.dir)}`);
+  type Call = { argv: string[]; stdin: string; context: Record<string, string>; agents: unknown; mcp: Record<string, { args?: string[] }> };
+  const sha = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");
+  // One finder call per case: no finding, so no verify call.
+  async function fakeRun(ids: string, variants: string[] = []) {
+    const dir = temp("stack");
+    const record = join(dir, "calls.jsonl");
+    const scenario = join(dir, "scenario.json");
+    const structured = {
+      summary: "Fake review.",
+      risks: [],
+      questions: [],
+      coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
+      findings: [],
+    };
+    writeFileSync(
+      scenario,
+      JSON.stringify({
+        record,
+        auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
+        fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", structured),
+        delayMs: 1,
+      }),
+    );
+    const r = await bun([
+      RUN,
+      "--set",
+      "probe",
+      "--cases",
+      ids,
+      ...variants,
+      "--out",
+      join(dir, "out"),
+      "--runner",
+      process.execPath,
+      FAKE,
+      scenario,
+    ]);
+    expect(r.stderr).toBe("");
+    expect(r.code).toBe(0);
+    return readRecords<Call>(record).filter((x) => x.argv.includes("-p"));
+  }
+  const prompt = (c: Call) => JSON.stringify(c.agents) + c.stdin;
+  const parentBase = (c: Call) => c.mcp["rl-git"]?.args?.find((a) => a.startsWith("--parent-base="));
+
+  test(
+    "a case without stack keeps its repository, prompt, and context files, also with the variant",
+    async () => {
+      const [c] = loadCases("probe-obl-criterion-deferred", SETS.probe);
+      if (!c) throw new Error("The case probe-obl-criterion-deferred is missing.");
+      const repo = await buildRepo(c, temp("repo"));
+      expect([repo.base, repo.head]).toEqual(["3dea3d52b9ae35f29d3eb47dc9efe6dfda0f25e3", "bb323f6520d9a4ba0e13e9ccb0cdad8a032af7c4"]);
+      const ref = (name: string) => git(["--git-dir", repo.url, "rev-parse", "--verify", "-q", name], { env: repo.env }).catch(() => "");
+      expect(await ref("refs/heads/parent")).toBe("");
+      const [plain] = await fakeRun(c.id);
+      const [variant] = await fakeRun(c.id, ["--variants", "stack"]);
+      for (const x of [plain, variant]) {
+        if (!x) throw new Error("No finder call.");
+        // task.md holds the fetch time, so it is left out.
+        expect({
+          stdin: sha(x.stdin),
+          prContext: sha(x.context["pr-context.md"] ?? ""),
+          pr: sha(x.context["pr.md"] ?? ""),
+          agents: sha(JSON.stringify(x.agents)),
+        }).toEqual({
+          stdin: "8146d0b96eed6e046b8708d996584e1c5e80b5a1471185849442b93a9a842d56",
+          prContext: "c2a6d3d041135f89ac1b4127f72cea904a9cd796f5d4cecd7d2e178a070a119a",
+          pr: "bb514415e70b2ac1c35a280b5af825236a885ac1a438060cb2d9499d637a8110",
+          // A prompt change of catalog.ts changes this pin.
+          agents: "26d79267f825fb89532da6ad8ec4e9904c58973676171b4efe9b7490949f20a0",
+        });
+        expect(prompt(x)).not.toContain("stacked");
+        expect(parentBase(x)).toBeUndefined();
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "a stack case builds the parent branch, and the variant gives the section, the prompt lines, and PARENT_BASE",
+    async () => {
+      const [c] = loadCases("probe-stack-relies", SETS.probe);
+      if (!c) throw new Error("The case probe-stack-relies is missing.");
+      const repo = await buildRepo(c, temp("repo"));
+      const ref = (name: string) => git(["--git-dir", repo.url, "rev-parse", name], { env: repo.env }).then((s) => s.trim());
+      const main = await ref("refs/heads/main");
+      // base is the parent head, the child of main. The head is the child of the parent head.
+      expect(await ref("refs/heads/parent")).toBe(repo.base);
+      expect(await ref(`${repo.base}^`)).toBe(main);
+      expect(await ref(`${repo.head}^`)).toBe(repo.base);
+      expect(await repo.show(repo.base, "src/config/quota.ts")).toContain("export function parseQuota");
+      expect(await repo.show(main, "src/api/limits.ts")).toContain("return DEFAULT_QUOTA;");
+
+      const [stacked] = await fakeRun(c.id, ["--variants", "stack"]);
+      const file = stacked?.context["pr-context.md"] ?? "";
+      expect(file).toContain(`- Source: feature/eval at ${repo.head.slice(0, 7)}. Target: parent at ${repo.base.slice(0, 7)}.`);
+      expect(file).toContain(
+        [
+          "## Stacked pull requests",
+          "",
+          '### Parent #2 "Add parseQuota for quota settings" by Eval Author, open',
+          `- Source: parent at ${repo.base.slice(0, 7)}. Target: main.`,
+          "- Changed paths (1): src/config/quota.ts.",
+        ].join("\n"),
+      );
+      expect(file).not.toContain("### Child");
+      expect(prompt(stacked as Call)).toContain("This pull request is stacked.");
+      expect(prompt(stacked as Call)).toContain("git_diff from PARENT_BASE to TARGET shows the change of the parent pull request.");
+      expect(parentBase(stacked as Call)).toBe(`--parent-base=${main}`);
+
+      // The control: the same repository with no stack facts.
+      const [plain] = await fakeRun(c.id);
+      expect(plain?.context["pr-context.md"]).not.toContain("## Stacked pull requests");
+      expect(prompt(plain as Call)).not.toContain("stacked");
+      expect(parentBase(plain as Call)).toBeUndefined();
+    },
+    SLOW,
+  );
+
+  test(
+    "a fake run of the 3 stack cases shows the section in each, and a child with no parent gives no PARENT_BASE",
+    async () => {
+      const ids = ["probe-stack-child-fills", "probe-stack-relies", "probe-stack-unreached"];
+      const calls = await fakeRun(ids.join(","), ["--variants", "stack"]);
+      expect(calls).toHaveLength(3);
+      const files = calls.map((x) => x.context["pr-context.md"] ?? "");
+      for (const f of files) expect(f).toContain("## Stacked pull requests");
+      const [fills, relies, unreached] = calls;
+      expect(files[0]).toContain('### Child #3 "Add the Retry-After header" by Eval Author, open');
+      expect(files[0]).toContain("- Source: feature/eval-child-1. Target: feature/eval, the source branch of this pull request.");
+      expect(files[0]).toContain("- Changed paths (2): src/api/limit.ts, src/api/server.ts.");
+      expect(files[0]).not.toContain("### Parent");
+      expect(files[0]).toContain("Target: main at");
+      expect(prompt(fills as Call)).toContain("A child pull request builds on this change.");
+      expect(parentBase(fills as Call)).toBeUndefined();
+      expect(files[2]).toContain('### Parent #2 "Add backoffMs for retry waits"');
+      for (const x of [relies, unreached]) expect(parentBase(x as Call)).toMatch(/^--parent-base=[0-9a-f]{40}$/);
+    },
+    SLOW,
+  );
+});

@@ -1,0 +1,14 @@
+diff --git a/src/notify/backoff.ts b/src/notify/backoff.ts
+new file mode 100644
+index 0000000..3bbda75
+--- /dev/null
++++ b/src/notify/backoff.ts
+@@ -0,0 +1,8 @@
++export const BASE_DELAY_MS = 500;
++export const MAX_DELAY_MS = 30_000;
++
++// The wait before retry number attempt. Retry 1 waits BASE_DELAY_MS, and each next retry waits twice as long, up to MAX_DELAY_MS.
++export function backoffMs(attempt: number): number {
++  if (attempt < 1) return BASE_DELAY_MS * 2 ** -attempt;
++  return Math.min(BASE_DELAY_MS * 2 ** (attempt - 1), MAX_DELAY_MS);
++}
