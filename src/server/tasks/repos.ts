@@ -47,6 +47,13 @@ export async function readGitlinks(cache: string, env: Record<string, string>, c
     if (m) links.push({ path: m[2] as string, pinned: m[1] as string });
   }
   if (!links.length) return [];
+  const urls = await gitmoduleUrls(cache, env, commit);
+  return links.map((l) => ({ ...l, url: urls.get(l.path) ?? null }));
+}
+
+// The submodule URL of each path in .gitmodules of commit. A missing or broken .gitmodules gives an empty map.
+export async function gitmoduleUrls(cache: string, env: Record<string, string>, commit: string): Promise<Map<string, string>> {
+  if (!HASH.test(commit)) throw new WorkspaceError(`Invalid commit hash: ${commit}`);
   // git-config(1): --blob reads the file of a commit, and --no-includes leaves out include.path. With --null, an entry is
   // "<key>\n<value>\0".
   const text = await git([`--git-dir=${cache}`, "config", "--no-includes", `--blob=${commit}:.gitmodules`, "--null", "--list"], {
@@ -63,7 +70,7 @@ export async function readGitlinks(cache: string, env: Record<string, string>, c
   }
   const urls = new Map<string, string>();
   for (const e of byName.values()) if (e.path && e.url) urls.set(e.path.replace(/\/+$/, ""), e.url);
-  return links.map((l) => ({ ...l, url: urls.get(l.path) ?? null }));
+  return urls;
 }
 
 export const isRelativeUrl = (url: string) => url.startsWith("./") || url.startsWith("../");
@@ -118,6 +125,47 @@ export function candidate(url: string): { project: string; repo: string } | null
 // trailing "/" and then one trailing ".git".
 const repoKey = (url: string | null) => url?.replace(/\/$/, "").replace(/\.git$/, "") ?? null;
 export const cloneMatch = (info: RepoInfo, url: string) => info.clone.some((c) => repoKey(normalizeUrl(c.href)) === repoKey(url));
+
+// The host set of the server: the host of the configured origin and of each clone link of the main repository.
+export function serverHosts(p: Pick<RepoProvider, "origin">, main: RepoInfo): Set<string> {
+  const hosts = new Set<string>();
+  for (const u of [p.origin, ...main.clone.map((c) => c.href)]) {
+    const h = hostOf(u);
+    if (h) hosts.add(h);
+  }
+  return hosts;
+}
+
+// otherServer: the URL names a host outside hosts, and no request went out. url: the normalized URL, null when it has no candidate
+// project key and slug. info: the repository whose clone link equals url, else null.
+export type RepoMatch = { otherServer: boolean; url: string | null; info: RepoInfo | null };
+
+// spec.md section 6.16.5: maps a submodule URL to a repository of the server. A relative URL resolves against parentUrl. readable gives
+// the REPO_READ list (Gate G16); a caller passes a memoized function to ask for it once.
+export async function mapRepoUrl(
+  p: Pick<RepoProvider, "repository" | "readableRepos">,
+  hosts: Set<string>,
+  parentUrl: string,
+  raw: string,
+  readable: () => Promise<RepoInfo[]> = async () => (await p.readableRepos()).repos,
+): Promise<RepoMatch> {
+  const resolved = isRelativeUrl(raw) ? relativeUrl(parentUrl, raw) : raw;
+  const host = resolved && hostOf(resolved);
+  if (host && !hosts.has(host)) return { otherServer: true, url: null, info: null };
+  const url = resolved && normalizeUrl(resolved);
+  const cand = url && candidate(url);
+  if (!url || !cand) return { otherServer: false, url: null, info: null };
+  let info: RepoInfo | null = null;
+  try {
+    info = await p.repository(cand.project, cand.repo);
+  } catch (e) {
+    if (!(e instanceof ForgeError && e.kind === "not_found")) throw e;
+  }
+  // The candidate key is the URL part as given. Without a match there, the REPO_READ list gives the repository whose clone link equals
+  // the URL. Both ways accept only that equality.
+  if (!info || !cloneMatch(info, url)) info = (await readable()).find((r) => cloneMatch(r, url)) ?? null;
+  return { otherServer: false, url, info };
+}
 
 // ---------- Write permission (spec.md section 6.16.7 step 1, Gate G15) ----------
 
@@ -518,11 +566,7 @@ export async function resolveTaskRepos(db: Database, deps: RepoDeps, t: TaskRef,
     const p = await deps.provider();
     if (!p) throw new WorkspaceError("Configure the Bitbucket URL and token first.");
     const main = await p.repository(t.project, t.repo);
-    const hosts = new Set<string>();
-    for (const u of [p.origin, ...main.clone.map((c) => c.href)]) {
-      const h = hostOf(u);
-      if (h) hosts.add(h);
-    }
+    const hosts = serverHosts(p, main);
     // -1: the main repository.
     const seen = new Map<string, number>([[`${main.project}/${main.slug}`, -1]]);
     const http = (r: RepoInfo) => r.clone.find((c) => c.name === "http")?.href ?? "";
@@ -547,28 +591,14 @@ export async function resolveTaskRepos(db: Database, deps: RepoDeps, t: TaskRef,
         found.push(row);
         const at = found.length - 1;
         if (l.url === null) continue;
-        const resolved = isRelativeUrl(l.url) ? relativeUrl(parentUrl, l.url) : l.url;
-        const host = resolved && hostOf(resolved);
-        if (host && !hosts.has(host)) {
+        const m = await mapRepoUrl(p, hosts, parentUrl, l.url, async () => (readable ??= (await p.readableRepos()).repos));
+        if (m.otherServer) {
           row.reason = REPO_REASON.otherServer;
           continue;
         }
-        const url = resolved && normalizeUrl(resolved);
-        const cand = url && candidate(url);
-        if (!url || !cand) continue;
-        row.url = url;
-        let info: RepoInfo | null = null;
-        try {
-          info = await p.repository(cand.project, cand.repo);
-        } catch (e) {
-          if (!(e instanceof ForgeError && e.kind === "not_found")) throw e;
-        }
-        // The candidate key is the URL part as given. Without a match there, the REPO_READ list (Gate G16) gives the repository whose clone
-        // link equals the URL. Both ways accept only that equality.
-        if (!info || !cloneMatch(info, url)) {
-          readable ??= (await p.readableRepos()).repos;
-          info = readable.find((r) => cloneMatch(r, url)) ?? null;
-        }
+        if (!m.url) continue;
+        row.url = m.url;
+        const info = m.info;
         if (!info) continue;
         const k = `${info.project}/${info.slug}`;
         const first = seen.get(k);

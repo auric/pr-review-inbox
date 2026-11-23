@@ -500,6 +500,7 @@ export async function remoteHead(dataDir: string, remote: BranchRemote, long: Lo
 }
 
 // Fetches refspecs from remote into the bare cache of project/repo, which it makes when missing. One call per cache runs at a time.
+// prune: git-fetch(1) --prune deletes only the local refs under the destination side of these refspecs.
 export async function fetchInto(
   dataDir: string,
   project: string,
@@ -507,6 +508,7 @@ export async function fetchInto(
   remote: BranchRemote,
   refspecs: string[],
   long: LongGit = {},
+  prune = false,
 ) {
   const dir = longData(dataDir);
   const cache = cachePath(dir, { project, repo, id: 0 });
@@ -515,7 +517,17 @@ export async function fetchInto(
     await initCache(cache, env);
     try {
       await git(
-        [`--git-dir=${cache}`, "fetch", "--no-tags", "--no-write-fetch-head", "--quiet", "--end-of-options", remote.url, ...refspecs],
+        [
+          `--git-dir=${cache}`,
+          "fetch",
+          "--no-tags",
+          "--no-write-fetch-head",
+          "--quiet",
+          ...(prune ? ["--prune"] : []),
+          "--end-of-options",
+          remote.url,
+          ...refspecs,
+        ],
         {
           env: gitEnv(empty, remote.config),
           ...long,

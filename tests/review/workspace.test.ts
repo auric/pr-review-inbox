@@ -23,6 +23,7 @@ import {
   type AttachmentFile,
   type ContextFile,
   cachePath,
+  fetchInto,
   type GitRemote,
   locked,
   prepareCommitWorkspace,
@@ -901,6 +902,28 @@ describe("workspace", () => {
       expect(await worktrees(s, cache)).toHaveLength(4);
       await Promise.all(all.map((ws) => ws.remove()));
       expect(await worktrees(s, cache)).toHaveLength(1);
+    },
+    SLOW,
+  );
+});
+
+describe("fetchInto prune (submodule-prs.md SD11)", () => {
+  test(
+    "prune removes a deleted branch ref only under its refspec",
+    async () => {
+      const s = await scenario("prune", { "src/app.ts": `${APP}feature\n` });
+      const remote = { url: s.remote, config: [] as [string, string][] };
+      const spec = ["+refs/heads/*:refs/rl/sub/heads/*"];
+      const cache = await fetchInto(s.dataDir, "PRJ", "app", remote, spec);
+      await fetchInto(s.dataDir, "PRJ", "app", remote, ["+refs/heads/feature:refs/rl/other/feature"]);
+      const refs = async () =>
+        (await git([`--git-dir=${cache}`, "for-each-ref", "--format=%(refname)"], { env: s.env })).trim().split("\n").sort();
+      expect(await refs()).toEqual(["refs/rl/other/feature", "refs/rl/sub/heads/feature", "refs/rl/sub/heads/main"]);
+      await s.g(["update-ref", "-d", "refs/heads/feature"]);
+      await fetchInto(s.dataDir, "PRJ", "app", remote, spec);
+      expect(await refs()).toContain("refs/rl/sub/heads/feature");
+      await fetchInto(s.dataDir, "PRJ", "app", remote, spec, {}, true);
+      expect(await refs()).toEqual(["refs/rl/other/feature", "refs/rl/sub/heads/main"]);
     },
     SLOW,
   );
