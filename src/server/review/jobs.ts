@@ -170,6 +170,7 @@ import {
   type Ending,
   type Found,
   failure,
+  type Gitlinks,
   judge,
   judgeAsk,
   judgeDiscuss,
@@ -225,6 +226,14 @@ import {
   toRunDto,
 } from "./run-rows";
 import { alwaysProblems, type CopiedSkill, claudeConfigDir, copySkills, copyTaskSkills, type SkillRepo } from "./skills";
+import {
+  SUBMODULE_LABEL,
+  SUBMODULES_FILE,
+  type SubmoduleContext,
+  type SubmoduleReader,
+  submoduleContext,
+  submoduleRun,
+} from "./submodules";
 import { claudeJsonPath, listUserTools, McpListError, userServers } from "./user-mcp";
 import type { AskedThread } from "./validate";
 import {
@@ -306,6 +315,9 @@ export type ReviewJobsOptions = {
   jiraWaitMs?: number;
   // The argv prefix of the codegraph executable for the variant "codegraph". Absent: codegraph on PATH. The tests pass the fake.
   codegraphCommand?: string[];
+  // The Bitbucket reads of the variant "submodules" (docs/plans/review-v2/submodule-prs.md section 6). Absent: the forge provider. The
+  // eval passes a stub.
+  submoduleReader?: SubmoduleReader;
 };
 
 export type Runner = ReturnType<typeof createClaudeRunner>;
@@ -612,7 +624,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         now: now(),
         stack,
       });
-      if (c.input.stack) j.db.query(SQL.related).run({ id: j.id, json: JSON.stringify([{ label: "Stack", text: c.stack, warn: false }]) });
+      // The submodule step writes the column again with these parts first.
+      const related = c.input.stack ? [{ label: "Stack", text: c.stack ?? "", warn: false }] : [];
+      if (related.length) j.db.query(SQL.related).run({ id: j.id, json: JSON.stringify(related) });
       j.peers = c.peers;
       const file = prContextFile(c.input);
       const notes = notesFile(c.notes, pr);
@@ -620,10 +634,50 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       log(
         `Review run ${j.id} context: pr-context.md ${kb} KB, ${file.threads} threads${file.left ? ` (${file.left} left out)` : ""}, ${file.peers} other PRs, build ${c.build ? "read" : "not read"}${c.stack === null ? "" : `, stack: ${c.stack}`}; ${notes ? `notes.md ${c.notes.length} notes` : "no notes.md"}.`,
       );
-      return { file, notes, stack: c.input.stack };
+      return { file, notes, stack: c.input.stack, related };
     } finally {
       j.abort = undefined;
     }
+  }
+
+  // docs/plans/review-v2/submodule-prs.md section 5.1: review and re-review runs with the variant "submodules" only (SD4), after the
+  // workspace, with their own AbortController (SD5). A failed read or fetch does not stop the run. Without a moved gitlink, null and no
+  // write. related: the parts that prContext stored, which stay first.
+  async function submodules(j: Job, ws: Workspace, pr: Heads, related: { label: string; text: string; warn: boolean }[]) {
+    if (!submoduleRun(j.kind, j.profile)) return null;
+    j.abort = new AbortController();
+    let subs: SubmoduleContext | null;
+    try {
+      subs = await submoduleContext({
+        dataDir,
+        cache: ws.cache,
+        mergeBase: ws.mergeBase,
+        head: ws.sourceHead,
+        project: pr.project,
+        repo: pr.repo,
+        reader: opts.submoduleReader ?? (await settings.provider().catch(() => null)),
+        db: j.db,
+        remote: taskRemote,
+        signal: j.abort.signal,
+        timeoutMs: RUN_TIMEOUT_MS,
+      });
+    } catch (e) {
+      if (j.cancelled) return "cancelled";
+      const text = `not checked (${noUrl((e as Error).message)})`;
+      log(`Review run ${j.id} submodules: ${text}.`);
+      j.db.query(SQL.related).run({ id: j.id, json: JSON.stringify([...related, { label: SUBMODULE_LABEL, text, warn: true }]) });
+      notify(j.id);
+      return null;
+    } finally {
+      j.abort = undefined;
+    }
+    if (j.cancelled) return "cancelled";
+    if (!subs) return null;
+    if (subs.file !== null) writeFileSync(join(ws.context, SUBMODULES_FILE), UNTRUSTED + subs.file);
+    j.db.query(SQL.related).run({ id: j.id, json: JSON.stringify([...related, ...subs.related]) });
+    notify(j.id);
+    log(`Review run ${j.id} submodules: ${subs.log.join("; ")}.`);
+    return subs;
   }
 
   // The checks of the note proposals of a reply or discuss run. A run without a PR row stores none.
@@ -1110,6 +1164,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       writeFileSync(task, existsSync(task) ? `${readFileSync(task, "utf8").trimEnd()}\n\n${plan}` : UNTRUSTED + plan);
     }
     const taskFile = files.length > 0 || plan !== null;
+    const subs = await submodules(j, ws, pr, ctx?.related ?? []);
+    if (subs === "cancelled") return cancelled();
 
     const changed = parseDiff(ws.diff);
     const instructions = await loadInstructions(
@@ -1156,6 +1212,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       ...(ctx?.stack && {
         stack: { parent: ctx.stack.parents.length > 0, parentBase: ws.parentBase !== null, children: ctx.stack.children.length > 0 },
       }),
+      // submodule-prs.md SD20: no key without context/submodules.md.
+      ...(subs?.file != null && { submodules: true }),
     };
     const gaps = [...tools.gaps, ...skills.gaps];
     const input = {
@@ -1282,7 +1340,19 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         return { ...e, raw: `${unmarked}\n\n${e.raw}` };
       };
     };
-    const verifyInput = { profile, context, input, rereview: !!carry, folders, always, used, instructions, mcpServers, langs };
+    const verifyInput = {
+      profile,
+      context,
+      input,
+      rereview: !!carry,
+      folders,
+      always,
+      used,
+      instructions,
+      mcpServers,
+      langs,
+      gitlinks: subs?.gitlinks,
+    };
     const settled = (found: Found, find: RunPhase, v: Exclude<Awaited<ReturnType<typeof verifyPhase>>, Ending>) =>
       settle(found, {
         volume: profile.volume,
@@ -1377,7 +1447,18 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           continue;
         }
         usage = addUsage(usage, s ? addUsage(usageOf(o), usageOf(s.o)) : usageOf(o));
-        const judged = await judge(s?.o ?? o, ws, profile, servers, gaps, null, k === 1 ? j.asked : [], instructions.sources);
+        const judged = await judge(
+          s?.o ?? o,
+          ws,
+          profile,
+          servers,
+          gaps,
+          null,
+          k === 1 ? j.asked : [],
+          instructions.sources,
+          false,
+          subs?.gitlinks,
+        );
         if (!("candidates" in judged)) {
           const kind = s ? "max_turns" : (judged.kind ?? "process");
           if (k === 1) first = s ? salvageFailed(o, `The salvage run from its notes failed: ${judged.text}`, s.o) : judged;
@@ -1421,7 +1502,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           })
         : null;
     if (s && "status" in s) return noted(s);
-    const judged = await judge(s?.o ?? o, ws, profile, servers, gaps, rereview, j.asked, instructions.sources);
+    const judged = await judge(s?.o ?? o, ws, profile, servers, gaps, rereview, j.asked, instructions.sources, false, subs?.gitlinks);
     if (s && !("candidates" in judged)) return noted(salvageFailed(o, `The salvage run from its notes failed: ${judged.text}`, s.o));
     if (!("candidates" in judged)) return noted(judged);
     const found = s ? salvaged(judged, o, line) : judged;
@@ -1605,6 +1686,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       // passes for a cancel, because o holds the result of one pass only.
       group?: boolean;
       findUsage?: RunUsage | null;
+      // submodule-prs.md AC-SM8: judge gitlinks, for the findings that the check adds.
+      gitlinks?: Gitlinks;
     },
   ): Promise<
     | { check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding>; obligations?: PlacedObligations }
@@ -1685,8 +1768,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       check,
       verify,
       written,
-      placed: await placeAnswers(ws, check),
-      ...(obligations && { obligations: await placeObligations(ws, check) }),
+      placed: await placeAnswers(ws, check, r.gitlinks),
+      ...(obligations && { obligations: await placeObligations(ws, check, r.gitlinks) }),
     };
   }
 

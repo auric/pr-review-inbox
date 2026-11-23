@@ -9,9 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import type { RunOutcome } from "../../src/server/review/claude";
-import { type Found, type Gitlinks, judge } from "../../src/server/review/judge";
+import { type CheckRun, type Found, type Gitlinks, judge, placeObligations } from "../../src/server/review/judge";
 import { diffArgs, type Workspace } from "../../src/server/review/workspace";
-import type { Finding } from "../../src/shared/review";
+import type { Finding, Obligation } from "../../src/shared/review";
 
 console.log(`judge-gitlinks.test.ts imported from ${Bun.resolveSync("../../src/server/review/judge", import.meta.dir)}`);
 
@@ -122,5 +122,61 @@ describe("gitlink cause (submodule-prs.md SD21, AC-SM8)", () => {
     const f = await run();
     expect(f.candidates).toEqual([]);
     expect(f.summary.dropped.map((d) => d.reason)).toEqual(["unchanged"]);
+  });
+});
+
+// A finder question or risk gets no cause (answerFinding). A missing obligation is the check-added finding that carries one.
+const obligation: Obligation = {
+  source: "surface",
+  must: "src/use.ts must read the new parse result.",
+  consumer: "Any caller of read.",
+  cite: { path: "src/use.ts", quote: "parse(s).value" },
+  status: "missing",
+  evidence: "src/use.ts:2",
+  severity: "minor",
+  duplicateOf: null,
+  finding: {
+    path: caller.path,
+    side: "new",
+    line: 2,
+    lineEnd: null,
+    anchorText: caller.anchorText,
+    title: caller.title,
+    body: caller.body,
+    cause: caller.cause,
+  },
+};
+const checkRun: CheckRun = {
+  o: {
+    ...outcome,
+    result: {
+      ...(outcome.result as NonNullable<RunOutcome["result"]>),
+      structured_output: {
+        verdicts: [],
+        coverage: { read: ["src/use.ts"], skipped: [], unavailable: [], notChecked: [] },
+        obligations: [obligation],
+      },
+    },
+  },
+  startedAt: 1,
+  endedAt: 2,
+  written: 0,
+  asked: 0,
+  obligations: true,
+};
+
+describe("check-added finding with a gitlink cause (submodule-prs.md AC-SM8)", () => {
+  test("with gitlinks, a missing obligation on an unchanged caller with its cause on line 1 of the gitlink path stays", async () => {
+    const r = await placeObligations(ws, checkRun, new Map([["lib", { old: OLD, new: NEW }]]));
+    expect([...r.cited]).toEqual([0]);
+    const kept = r.placed.get(0);
+    expect(kept?.path).toBe("src/use.ts");
+    expect(kept?.cause?.anchor).toMatchObject({ path: "lib", line: 1, lineEnd: 1 });
+  });
+
+  test("without gitlinks, the same obligation gets no place", async () => {
+    const r = await placeObligations(ws, checkRun);
+    expect([...r.cited]).toEqual([0]);
+    expect(r.placed.size).toBe(0);
   });
 });

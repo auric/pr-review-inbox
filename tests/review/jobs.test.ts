@@ -32,12 +32,16 @@ import {
   STACK_LINES,
   STACK_PREEXISTING,
   STACK_VERIFY,
+  SUBMODULE_FINDER,
+  SUBMODULE_LINES,
+  SUBMODULE_VERIFY,
   VERIFY2,
 } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
 import { createReviewJobs } from "../../src/server/review/jobs";
 import { LANGUAGE_INTRO, languageSkipLines, SKIP_COMMON } from "../../src/server/review/languages";
-import { type GitRemote, UNTRUSTED } from "../../src/server/review/workspace";
+import { SUBMODULE_LABEL } from "../../src/server/review/submodules";
+import { type BranchRemote, fetchInto, type GitRemote, UNTRUSTED } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import type { SyncEngine } from "../../src/server/sync/engine";
@@ -57,6 +61,7 @@ import { displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION } from "../../
 import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, type Route, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoExplain, type FakeScenario, readRecords } from "../support/fake-claude";
 import { type FakeJira, JIRA_TOKEN, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira";
+import { bareRepo, gitmodules } from "../tasks/repos-fixture";
 
 const SLOW = 120_000;
 const FAKE = join(import.meta.dir, "../support/fake-claude.ts");
@@ -166,10 +171,12 @@ function derive(file: string, o: { tools?: string[]; mcp?: string; structured?: 
 }
 const subagentRun = (structured: unknown = RESULT, mcp?: string) => derive(join(SYNTHETIC, "review-agent-tree.jsonl"), { structured, mcp });
 
-type Entry = string | { link: string };
+// gitlink: a submodule entry (mode 160000) that pins this commit.
+type Entry = string | { link: string } | { gitlink: string };
 
 // A bare remote. Commits go through a temp index, so link entries need no files on disk. extra: more files of the source commit.
-async function remoteRepo(root: string, extra: Record<string, Entry> = {}) {
+// baseExtra: more files of the base commit, which the target and the source keep.
+async function remoteRepo(root: string, extra: Record<string, Entry> = {}, baseExtra: Record<string, Entry> = {}) {
   mkdirSync(root, { recursive: true });
   const empty = join(root, "author.gitconfig");
   writeFileSync(empty, "");
@@ -187,18 +194,21 @@ async function remoteRepo(root: string, extra: Record<string, Entry> = {}) {
   let n = 0;
   async function commit(parent: string | null, files: Record<string, Entry>, msg: string) {
     await g(parent ? ["read-tree", parent] : ["read-tree", "--empty"]);
-    const entries = Object.entries(files);
+    const entries = Object.entries(files).flatMap(([path, v]) => (typeof v === "object" && "gitlink" in v ? [] : [[path, v] as const]));
     const blobs = entries.map(([, v]) => {
       const f = join(root, `blob-${n++}`);
       writeFileSync(f, typeof v === "string" ? v : v.link);
       return f;
     });
     const shas = (await g(["hash-object", "-w", "--no-filters", "--stdin-paths"], `${blobs.join("\n")}\n`)).split("\n");
-    const info = entries.map(([path, v], i) => `${typeof v === "string" ? "100644" : "120000"} ${shas[i]}\t${path}`);
+    const info = [
+      ...entries.map(([path, v], i) => `${typeof v === "string" ? "100644" : "120000"} ${shas[i]}\t${path}`),
+      ...Object.entries(files).flatMap(([path, v]) => (typeof v === "object" && "gitlink" in v ? [`160000 ${v.gitlink}\t${path}`] : [])),
+    ];
     await g(["update-index", "--index-info"], `${info.join("\n")}\n`);
     return g(["commit-tree", await g(["write-tree"]), ...(parent ? ["-p", parent] : []), "-m", msg]);
   }
-  const base = await commit(null, { "src/app.ts": APP, "README.md": "# Sample\n" }, "base");
+  const base = await commit(null, { "src/app.ts": APP, "README.md": "# Sample\n", ...baseExtra }, "base");
   const target = await commit(
     base,
     { "docs/main.md": "main\n", "CLAUDE.md": TARGET_RULES, "REVIEW.md": "REVIEW-RULES-CANARY\n" },
@@ -258,6 +268,10 @@ async function setup(
     listTools?: ListTools;
     claudeConfigDir?: string;
     source?: Record<string, Entry>;
+    // More files of the base commit.
+    base?: Record<string, Entry>;
+    // The remote of another repository, for the submodule step.
+    repoRemote?: (project: string, repo: string) => Promise<BranchRemote>;
     remoteUrl?: string;
     // The fake Jira URL. Absent: no Jira.
     jira?: string;
@@ -268,7 +282,7 @@ async function setup(
 ) {
   const root = mkdtempSync(join(tmpdir(), "rl-wp10-"));
   dirs.push(root);
-  const repo = await remoteRepo(join(root, "remote"), o.source);
+  const repo = await remoteRepo(join(root, "remote"), o.source, o.base);
   const fake: FakeBitbucket = startFakeBitbucket();
   cleanup.push(() => fake.stop());
 
@@ -345,6 +359,7 @@ async function setup(
     dataDir: dir,
     runnerCommand: [process.execPath, FAKE, scenarioFile],
     gitRemote: o.forgeRemote ? undefined : async () => remoteOf(o.remoteUrl ?? repo.remote),
+    repoRemote: o.repoRemote,
     listTools: o.listTools ?? stubTools,
     claudeConfigDir: o.claudeConfigDir,
     jiraWaitMs: o.jiraWaitMs,
@@ -1973,6 +1988,299 @@ describe("stacked PR context (stacked-prs.md WP-SK2)", () => {
       expect(off.git).toEqual(failed.git);
       for (const c of [off.find, off.check])
         for (const a of Object.values(c.agents)) for (const l of [...stacked, ...lines, ...children]) expect(a.prompt).not.toContain(l);
+    },
+    SLOW,
+  );
+});
+
+describe("submodule PR context (submodule-prs.md WP-SM2)", () => {
+  type Rec = Call & { agents: Agents; context: Record<string, string> };
+  const s = (h: string) => h.slice(0, 12);
+  const SUB_LINES = SUBMODULE_LINES.join("\n");
+  const SUB_FINDER = SUBMODULE_FINDER.join("\n");
+  const SUB_VERIFY = SUBMODULE_VERIFY.join("\n");
+  const ALL = [...SUBMODULE_LINES, ...SUBMODULE_FINDER, ...SUBMODULE_VERIFY];
+
+  // PROJ/repo pins PROJ/lib by the relative URL ../lib.git. The PR moves the pin from the lib base to lib2 on the lib branch feature.
+  // missing: the remote of lib is a folder without a repository, so the fetch fails. The remote config carries the token.
+  async function subSetup(o: { missing?: boolean; gitlink?: boolean } = {}) {
+    const root = mkdtempSync(join(tmpdir(), "rl-sm2-jobs-"));
+    dirs.push(root);
+    const lib = await bareRepo(root, "lib", { "lib.c": "int lib;\n" });
+    const lib2 = await lib.commit({ "lib.c": "int lib = 2;\n" }, {}, lib.base);
+    await lib.g(["update-ref", "refs/heads/feature", lib2]);
+    const remoteCalls: string[] = [];
+    const h = await setup({
+      ...(o.gitlink !== false && {
+        base: { ".gitmodules": gitmodules({ lib: "../lib.git" }), lib: { gitlink: lib.base } },
+        source: { lib: { gitlink: lib2 } },
+      }),
+      repoRemote: async (project, repo) => {
+        remoteCalls.push(`${project}/${repo}`);
+        return {
+          url: o.missing ? join(root, "missing.git") : lib.remote,
+          config: [["http.extraHeader", `Authorization: Bearer ${FAKE_TOKEN}`]],
+        };
+      },
+    });
+    // The http clone link of PROJ/repo resolves ../lib.git. PROJ/lib is in the REPO_READ list.
+    const w = repoWrites(h.fake);
+    repoWrites(h.fake, "PROJ", "lib");
+    const put = (variants: ProfileInput["variants"]) =>
+      h.json("/api/settings", {
+        method: "PUT",
+        body: {
+          baseUrl: h.fake.url,
+          profiles: [{ ...GENERAL, variants }, ...SHIPPED_PROFILES.slice(1).map((p) => (p.explain ? { ...p, variants } : p))],
+        },
+      });
+    // One complete run with this finder result. find and check: the finder and the verify call.
+    const run = async (variants: ProfileInput["variants"], structured: unknown = RESULT) => {
+      expect((await put(variants)).status).toBe(200);
+      await h.brief(NOTE, "general");
+      h.scenario({ fixture: subagentRun(structured) });
+      const before = h.calls().length;
+      const requests = h.fake.requests.length;
+      const d = await h.finish((await h.start()).body.id);
+      const calls = h
+        .calls()
+        .slice(before)
+        .filter((c) => c.argv?.includes("-p")) as Rec[];
+      const find = calls.find(finderCall) as Rec;
+      const check = calls.find((c) => !finderCall(c));
+      return { d, find, check, requests: h.fake.requests.slice(requests) };
+    };
+    return { root, h, w, lib, lib2, remoteCalls, put, run };
+  }
+
+  // A finding on an unchanged line of src/app.ts whose cause is line 1 of the moved gitlink (SD21).
+  const caller = (lib2: string) => ({
+    ...RESULT,
+    questions: [],
+    findings: [
+      {
+        path: "src/app.ts",
+        side: "new",
+        line: 10,
+        lineEnd: null,
+        anchorText: "line 10",
+        severity: "major",
+        category: "correctness",
+        body: "The new lib value breaks this line.",
+        evidence: "src/app.ts:10",
+        evidenceStatus: "code",
+        confidence: "high",
+        agent: null,
+        cause: { path: "lib", side: "new", line: 1, lineEnd: null, anchorText: `Subproject commit ${lib2}` },
+        preexisting: false,
+      },
+    ],
+  });
+  const kept = (d: RunDetail) =>
+    d.items.filter((i) => i.kind === "finding").map((i) => [i.anchor?.path, i.anchor?.line, (i.payload as FindingPayload).cause?.path]);
+
+  test(
+    "the variant gives submodules.md, the lines of every agent, the run line after the Stack line, the log line, and a kept finding whose cause is the gitlink line",
+    async () => {
+      const { h, w, lib, lib2, remoteCalls, run } = await subSetup();
+      // stacked-prs.md: the PR builds on feat/a, so the run also stores a Stack line (the WP-SK2 world).
+      const empty = join(h.root, "stack.gitconfig");
+      writeFileSync(empty, "");
+      await git(["--git-dir", h.repo.remote, "update-ref", "refs/heads/trunk", h.repo.base], { env: gitEnv(empty) });
+      const post = async (from: string, to: string) =>
+        (
+          (await (
+            await fetch(`${h.fake.url}${w.path}/pull-requests`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${FAKE_TOKEN}`, "content-type": "application/json" },
+              body: JSON.stringify({ title: `PR ${from}`, fromRef: { id: `refs/heads/${from}` }, toRef: { id: `refs/heads/${to}` } }),
+            })
+          ).json()) as { id: number }
+        ).id;
+      const parent = await post("feat/a", "trunk");
+      const self = w.prs.get(await post("feature/ABC-1-flush", "feat/a"));
+      h.fake.routes[key("GET", `${w.path}/pull-requests/2`)] = () => ({ status: 200, body: { ...self, id: 2 } });
+      h.db.query("UPDATE pull_request SET target_branch = 'feat/a' WHERE id = $pr").run({ pr: h.pr });
+      h.db
+        .query(
+          `INSERT INTO pull_request (project, repo, pr_id, title, author_slug, author_name, my_role, state, source_head, target_head,
+            source_branch, target_branch, updated_date) VALUES ('PROJ', 'repo', $prId, 'Add the quota parser', 'anna', 'Anna Kim',
+            'REVIEWER', 'OPEN', $head, $base, 'feat/a', 'trunk', 1000)`,
+        )
+        .run({ prId: parent, head: h.repo.target, base: h.repo.base });
+
+      const lines: string[] = [];
+      const spy = spyOn(console, "log").mockImplementation((...l: unknown[]) => {
+        lines.push(l.map(String).join(" "));
+      });
+      let on: Awaited<ReturnType<typeof run>>;
+      try {
+        on = await run(["stack", "submodules"], caller(lib2));
+      } finally {
+        spy.mockRestore();
+      }
+      expect(on.d.run.status).toBe("completed");
+      const file = on.find.context["submodules.md"] ?? "";
+      expect(file.startsWith(`${UNTRUSTED}# Submodule changes\n`)).toBe(true);
+      expect(file).toContain(`\n## lib: PROJ/lib\n- Pinned commit: ${s(lib.base)} at the merge base, ${s(lib2)} at the head.`);
+      expect(file).toContain("\n    -int lib;\n    +int lib = 2;\n");
+      for (const name of ["rl-main", "rl-reviewer"]) expect(on.find.agents[name]?.prompt).toContain(`\n${SUB_LINES}\n`);
+      expect(on.find.agents["rl-main"]?.prompt).toContain(`\n${SUB_FINDER}\n`);
+      expect(on.check?.agents["rl-main"]?.prompt).toContain(`\n${SUB_LINES}\n`);
+      expect(on.check?.agents["rl-main"]?.prompt).toContain(`\n${SUB_VERIFY}\n`);
+      // RunDto.related: the Stack part that prContext stored stays first.
+      expect(on.d.run.related?.map((r) => r.label)).toEqual(["Stack", SUBMODULE_LABEL]);
+      expect(on.d.run.related?.[1]).toEqual({
+        label: SUBMODULE_LABEL,
+        text: `lib: PROJ/lib ${s(lib.base)}..${s(lib2)}, 1 files, no pull request found`,
+        warn: false,
+      });
+      expect(lines.filter((l) => l.includes(" submodules: "))).toEqual([
+        expect.stringMatching(
+          new RegExp(`^Review run ${on.d.run.id} submodules: lib read \\(PROJ/lib, 1 files, fetch \\d+\\.\\d s\\)\\.$`),
+        ),
+      ]);
+      // AC-SM8 through the run: the cause on line 1 of the gitlink path keeps the finding on the unchanged line.
+      expect(kept(on.d)).toEqual([["src/app.ts", 10, "lib"]]);
+      expect(remoteCalls).toEqual(["PROJ/lib"]);
+      expect(h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id })).toEqual({
+        prompt_version: `${REVIEW_PROMPT_VERSION}+stack+submodules`,
+      });
+      expect(JSON.stringify(on.d.run.related)).not.toContain(FAKE_TOKEN);
+      for (const l of lines) expect(l).not.toContain(FAKE_TOKEN);
+
+      // Without the variant: no file, no line, no read, and the finding drops as unchanged.
+      const off = await run([], caller(lib2));
+      expect(off.find.context["submodules.md"]).toBeUndefined();
+      for (const c of [off.find, off.check])
+        for (const a of Object.values(c?.agents ?? {})) for (const l of ALL) expect(a.prompt).not.toContain(l);
+      expect(kept(off.d)).toEqual([]);
+      expect(off.d.run.summary?.dropped.map((x) => [x.path, x.reason])).toEqual([["src/app.ts", "unchanged"]]);
+      expect(off.d.run.related).toBeUndefined();
+      expect(remoteCalls).toEqual(["PROJ/lib"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "Cancel during the step cancels the run before the CLI; a failed fetch does not stop the run and shows no token",
+    async () => {
+      const { h, put, run, remoteCalls } = await subSetup({ missing: true });
+      expect((await put(["submodules"])).status).toBe(200);
+      await h.brief(NOTE, "general");
+      // The first read of the step: the target repository, for the host set and the relative URL.
+      const main = key("GET", "/rest/api/1.0/projects/PROJ/repos/repo");
+      const route = h.fake.routes[main];
+      h.fake.routes[main] = { hang: true };
+      const r = await h.start();
+      expect(await waitFor(() => h.fake.requests.includes(main))).toBe(true);
+      expect((await h.call(`/api/runs/${r.body.id}/cancel`, { method: "POST" })).status).toBe(202);
+      const d = await h.finish(r.body.id);
+      expect(d.run.status).toBe("cancelled");
+      expect(h.runCall()).toBeUndefined();
+      expect(remoteCalls).toEqual([]);
+      h.fake.release();
+      if (route) h.fake.routes[main] = route;
+
+      const failed = await run(["submodules"]);
+      expect(failed.d.run.status).toBe("completed");
+      expect(failed.d.run.related?.map((x) => [x.label, x.text.startsWith("lib: not read (fetch failed: "), x.warn])).toEqual([
+        [SUBMODULE_LABEL, true, true],
+      ]);
+      expect(JSON.stringify(failed.d.run.related)).not.toContain(FAKE_TOKEN);
+      expect(failed.find.context["submodules.md"]).toBeUndefined();
+      for (const a of Object.values(failed.find.agents)) for (const l of ALL) expect(a.prompt).not.toContain(l);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-SM2: without a moved gitlink, the variant sends no request and changes no prompt, file, or judge input; only the stored version differs",
+    async () => {
+      const { h, run, remoteCalls } = await subSetup({ gitlink: false });
+      const quiet = { ...RESULT, findings: [], questions: [], risks: [] };
+      // A first run, so both compared runs get the same history.md.
+      await run([], quiet);
+      const on = await run(["submodules"], quiet);
+      const off = await run([], quiet);
+      expect(on.find.stdin).toBe(off.find.stdin);
+      expect(on.find.agents).toEqual(off.find.agents);
+      // history.md names the newest earlier run, which differs by design.
+      const runless = (c: Record<string, string>) => ({ ...c, "history.md": c["history.md"]?.replace(/^- Run: \d+$/m, "- Run: N") });
+      expect(off.find.context["history.md"]).toContain(`\n- Run: ${on.d.run.id}\n`);
+      expect(runless(on.find.context)).toEqual(runless(off.find.context));
+      expect(on.check?.stdin).toBe(off.check?.stdin);
+      expect(on.check?.agents).toEqual(off.check?.agents);
+      expect(on.requests.sort()).toEqual(off.requests.sort());
+      expect(remoteCalls).toEqual([]);
+      expect(on.d.run.related).toBeUndefined();
+      expect(
+        h.db.query("SELECT prompt_version FROM review_run WHERE id IN ($a, $b) ORDER BY id").all({ a: off.d.run.id, b: on.d.run.id }),
+      ).toEqual([{ prompt_version: `${REVIEW_PROMPT_VERSION}+submodules` }, { prompt_version: REVIEW_PROMPT_VERSION }]);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-SM9: ask, reply, fix, and Explain runs with the variant and a moved gitlink get no submodule step",
+    async () => {
+      const { h, put, remoteCalls } = await subSetup();
+      expect((await put(["submodules"])).status).toBe(200);
+      h.db.query("UPDATE pull_request SET my_role = 'AUTHOR' WHERE id = $pr").run({ pr: h.pr });
+      await h.brief(NOTE, "general");
+      const starts: [string, () => Promise<{ body: { id: number; kind?: string } }>][] = [
+        ["ask", () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } })],
+        ["reply", () => h.json<RunDto>(`/api/prs/${h.pr}/reply-run`, { body: { threads: [101] } })],
+        ["fix", () => h.json<RunDto>(`/api/prs/${h.pr}/fix-run`, { body: { threads: [101] } })],
+      ];
+      for (const [kind, start] of starts) expect((await hungAgents(h, start)).kind).toBe(kind);
+      await h.brief(NOTE, "explain");
+      await hungAgents(h, h.start);
+      for (const c of h.calls().filter((x) => x.argv?.includes("-p")) as Rec[]) expect(c.context["submodules.md"]).toBeUndefined();
+      expect(remoteCalls).toEqual([]);
+      expect(h.db.query("SELECT kind, related_json FROM review_run ORDER BY id").all()).toEqual(
+        ["ask", "reply", "fix", "explain"].map((kind) => ({ kind, related_json: null })),
+      );
+    },
+    SLOW,
+  );
+
+  test(
+    "a re-review reads the gitlinks from the merge base, not from the base of the reviewed range",
+    async () => {
+      const { root, h, lib2, run } = await subSetup();
+      const first = await run(["submodules"], { ...RESULT, findings: [], questions: [], risks: [] });
+      // s0: the merge base with the moved gitlink only. The earlier run reviewed it, so the reviewed range s0..head keeps the pin.
+      const empty = join(root, "s0.gitconfig");
+      writeFileSync(empty, "");
+      const env = {
+        ...gitEnv(empty),
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+        GIT_INDEX_FILE: join(root, "s0.index"),
+      };
+      const g = async (args: string[], stdin?: string) => (await git(["--git-dir", h.repo.remote, ...args], { env, stdin })).trim();
+      await g(["read-tree", h.repo.base]);
+      await g(["update-index", "--index-info"], `160000 ${lib2}\tlib\n`);
+      const s0 = await g(["commit-tree", await g(["write-tree"]), "-p", h.repo.base, "-m", "s0"]);
+      // The cache needs s0 for the range base (workspace.ts rangeBaseOf).
+      await g(["update-ref", "refs/heads/s0", s0]);
+      await fetchInto(h.dir, "PROJ", "repo", { url: h.repo.remote, config: [] }, ["+refs/heads/s0:refs/rl/2/s0"]);
+      h.db.query("UPDATE review_run SET source_head = $head WHERE id = $id").run({ head: s0, id: first.d.run.id });
+      const r = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/rereview`, { method: "POST" }));
+      expect(r.stdin).toContain(`An earlier run reviewed this change at ${s0}.`);
+      const re = h
+        .calls()
+        .filter((c) => c.argv?.includes("-p"))
+        .at(-1) as Rec;
+      expect(h.db.query("SELECT kind, range_base FROM review_run ORDER BY id DESC LIMIT 1").get()).toEqual({
+        kind: "review",
+        range_base: s0,
+      });
+      expect(re.context["submodules.md"]).toContain("\n## lib: PROJ/lib\n");
+      for (const name of ["rl-main", "rl-reviewer"]) expect(r.agents[name]?.prompt).toContain(`\n${SUB_LINES}\n`);
     },
     SLOW,
   );

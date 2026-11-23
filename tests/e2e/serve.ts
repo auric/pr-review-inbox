@@ -242,6 +242,7 @@ const INITIAL: Scenario = {
   consult: false,
   resolved: false,
   noRepoList: false,
+  submodule: false,
 };
 let sc: Scenario = { ...INITIAL };
 
@@ -330,10 +331,27 @@ await releaseBase();
 // A bare remote keeps no ref log by default. /__control/task-remote reads the log to count the pushes of each task branch.
 await remoteGit(["config", "core.logAllRefUpdates", "always"]);
 
+// submodule-prs.md WP-SM2: the source head plus the gitlink lib (relative URL ../lib.git). The merge base has no gitlink, so the
+// submodule step gives "added" with no Bitbucket read and no fetch. tests/review/submodules.test.ts covers the reads.
+const subEnv = {
+  ...remoteEnv,
+  GIT_AUTHOR_NAME: "e2e",
+  GIT_AUTHOR_EMAIL: "e2e@example.invalid",
+  GIT_COMMITTER_NAME: "e2e",
+  GIT_COMMITTER_EMAIL: "e2e@example.invalid",
+  GIT_INDEX_FILE: join(claudeDir, "submodule.index"),
+};
+const subGit = async (args: string[], stdin?: string) => (await git(["--git-dir", remote.remote, ...args], { env: subEnv, stdin })).trim();
+await subGit(["read-tree", remote.source]);
+const subModules = await subGit(["hash-object", "-w", "--stdin"], '[submodule "lib"]\n\tpath = lib\n\turl = ../lib.git\n');
+await subGit(["update-index", "--index-info"], `100644 ${subModules}\t.gitmodules\n160000 ${"1".repeat(40)}\tlib\n`);
+const subHead = await subGit(["commit-tree", await subGit(["write-tree"]), "-p", remote.source, "-m", "Pin the lib submodule"]);
+
 // The dashboard and the PR route share the PR A object, so both report the pushed head and the description.
 // The git remote moves the PR ref too, so a review after the push fetches the pushed head (plan r2 UI-RR).
 const headA = async () => {
-  A.pr.fromRef.latestCommit = pushed.get(1001)?.head ?? (sc.push ? remote.next : sc.native ? remote.native : remote.source);
+  A.pr.fromRef.latestCommit =
+    pushed.get(1001)?.head ?? (sc.push ? remote.next : sc.native ? remote.native : sc.submodule ? subHead : remote.source);
   A.pr.description = sc.task ? `Synthetic e2e data. Implements ${JIRA_ISSUE}. See ABC-404.` : "Synthetic e2e data.";
   await remoteGit(["update-ref", "refs/pull-requests/1001/from", A.pr.fromRef.latestCommit]);
 };

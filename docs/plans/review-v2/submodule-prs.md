@@ -53,12 +53,12 @@ Pick B. It needs no new endpoint and no new gate for the code. The main PR diff 
 | SD3 | With the variant and no moved gitlink, the run makes one local git call. It makes no read and writes no file, prompt line, or run line. | The natural set needs no new run. A snapshot test proves it. |
 | SD4 | Review and re-review runs only. | The same scope as stacked-prs.md K4 (question 1). |
 | SD5 | The step runs after `prepareWorkspace`, with its own AbortController. Cancel stops it. It never shares the 15 s deadline of `loadPrContext`. | Fact 4. |
-| SD6 | Detect with `git diff --raw -z --no-renames <merge base> <head>` in the main cache. An entry with mode 160000 on either side is a gitlink change. | Exact, and one call. A re-review also uses the merge base (question 2). |
+| SD6 | Detect with `git diff --raw -z --no-renames --no-abbrev <merge base> <head>` in the main cache. An entry with mode 160000 on either side is a gitlink change. | Exact, and one call. A re-review also uses the merge base (question 2). Without `--no-abbrev`, `--raw` gives short object IDs (git 2.56, WP-SM2). |
 | SD7 | The new side takes its URL from .gitmodules of the head commit. The old side uses .gitmodules of the merge base. Both go through `relativeUrl`, `hostOf`, `normalizeUrl`, `candidate`, and `cloneMatch`. | Fact 5. .gitmodules is PR data, so only an equal clone link maps. |
 | SD8 | A relative URL resolves against the http clone link of the target repository. | The merged result uses the target repository. A PR from a fork resolves the same way. |
 | SD9 | A host outside the server host set gets no request. | Fact 9. |
 | SD10 | Fetch only into the cache of the submodule repository, never into the PR clone or a worktree. Refs live under `refs/rl/sub/`. | `pruneRefs` touches only numeric names (fact 10). A ref named by the main PR number would collide with a PR of the submodule repository. |
-| SD11 | Fetch order. (1) Fetch the default branch to `refs/rl/sub/base`, and the PR ref to `refs/rl/sub/pr` when a PR matched. (2) When the server refuses the PR ref, fetch its source branch by name. (3) When a pinned commit is still missing, fetch all branches to `refs/rl/sub/heads/*` with `--prune`. | A moved commit often sits on a PR branch. The PR ref saves the fetch of all branches. Step 2 copies `fetchHeads` (BRIEF 10.2). |
+| SD11 | Fetch order. (1) Fetch the default branch to `refs/rl/sub/base`, and the PR ref of the first matched PR of each path to `refs/rl/sub/pr/<PR number>`. (2) When the server refuses the PR ref, fetch its source branch by name to the same ref. A fork PR gets no step 2. (3) When a pinned commit is still missing, fetch all branches to `refs/rl/sub/heads/*` with `--prune`. A refused step 1 or 2 only leads to the next step. | A moved commit often sits on a PR branch. The PR ref saves the fetch of all branches. Step 2 copies `fetchHeads` (BRIEF 10.2). WP-SM2: one fetch serves all paths of a repository, and two paths can match two PRs, so each PR ref has its number. |
 | SD12 | The fetch shares the run time limit and Cancel, as the main fetch does. It has no cap of its own. | Git keeps no partial pack. So a short cap that a large repository never meets fails on every run (question 3). |
 | SD13 | REST reads get their own 15 s deadline (`PEER_READ_MS`). A failed PR read keeps the code diff. | The PR adds text. The diff is the fact. |
 | SD14 | A PR matches when its head equals the new pinned commit. Sources: stored rows of any state (fact 12), checked by `getPullRequest`. After Gates G9 and G12 pass (`PEER_READS`), also the open-PR list of the submodule repository. | Exact. An ancestor match waits (question 4). |
@@ -96,15 +96,16 @@ No state lives between runs, so the check order below is the whole machine. The 
 | 1 | No gitlink at the merge base | added | `<path>: added, not compared` | Listed when the file exists |
 | 2 | No gitlink at the head | removed | `<path>: removed` | Listed |
 | 3 | No URL at the head | no_url | `<path>: not read (no URL in .gitmodules)` | No |
-| 4 | The old and the new URL normalize to different values | url_changed | `<path>: not read (the URL changed in this pull request)` | Listed |
+| 4 | The old and the new URL normalize to different values. A relative or scp-like URL compares as text. No URL at the merge base counts as a change. | url_changed | `<path>: not read (the URL changed in this pull request)` | Listed |
 | 5 | The host is not in the server host set | other_server | `<path>: not read (another server)` | No |
-| 6 | No Bitbucket URL or token | no_connection | `<path>: not read (no Bitbucket connection)` | No |
-| 7 | No repository maps (HTTP 404, no equal clone link, not in the REPO_READ list, or a private repository) | no_access | `<path>: not read (no read access, or no such repository)` | No |
+| 6 | No Bitbucket URL or token. Without a connection, no host set exists for check 5, so check 6 applies first. | no_connection | `<path>: not read (no Bitbucket connection)` | No |
+| 7 | No repository maps (HTTP 404, 401, or 403, no equal clone link, not in the REPO_READ list, or a private repository) | no_access | `<path>: not read (no read access, or no such repository)` | No |
+| 7b | A read of check 5 or 7 fails in another way, or the 15 s run out (WP-SM2) | read_failed | `<path>: not read (<why>)`, with the reason text of pr-context.ts `why` | No |
 | 8 | `SUBMODULES_MAX` entries came before it | capped | `<path>: not read (the app reads at most 5 submodules)` | Listed |
-| 9 | The fetch fails | fetch_failed | `<path>: not read (fetch failed: <redacted reason>)` | No |
+| 9 | The remote read fails, a fetch hits the time limit, or a commit is missing and the step 3 fetch fails | fetch_failed | `<path>: not read (fetch failed: <redacted reason>)`. The reason is one line of at most 200 characters. | No |
 | 10 | The new commit is not in the cache after SD11 step 3 | new_missing | `<path>: <repo>: commit <short> is on no branch` | No |
 | 11 | The old commit is not in the cache | old_missing | `<path>: <repo>: the old commit <short> is on no branch` | No |
-| 12 | None of the above | read | `<path>: <repo> PR #<n> (<state>), <k> files` or `<path>: <repo> <old>..<new>, <k> files, no pull request found`. Add `, cut` when the diff is cut. | Full section |
+| 12 | None of the above | read | `<path>: <repo> PR #<n> (<state>), <k> files`, `<path>: <repo> PRs #<n>, #<m>, <k> files`, or `<path>: <repo> <old>..<new>, <k> files, no pull request found`. A failed PR read without a match gives `, pull request not read (<why>)` in place of the last part. Add `, cut` when the diff is cut. | Full section |
 
 - Cancel during the step ends the run as cancelled, as it does today.
 - Two paths that map to one repository fetch once. Each path gets its own range.
@@ -152,7 +153,12 @@ The app wrote the facts. Commit messages, titles, descriptions, and the diff com
 - Direction text: "follows the old one" when old is an ancestor of new. "goes back <k> commits" when new is an ancestor of old. "is on another line of history" for neither.
 - The summaries come first. The diffs follow in path order.
 - After the summaries, each diff gets an equal share of the 200 KB. A diff is cut at a file boundary. The cut files go to "Not in the diff below".
+- WP-SM2: a file that does not fit in its share goes to "Not in the diff below", and a later file that fits stays. That list shows at most 200 names and then "... <k> more". Each share keeps room for its 200 longest names.
+- WP-SM2: when the summaries alone exceed the cap, the app cuts the text at the cap and adds "The file reached its size limit here." Only very long paths or commit subjects can cause this.
 - The commit list shows at most 20 subjects. The changed-file list shows at most 200 paths.
+- WP-SM2 texts: `<short>` is the first 12 characters of the commit ID. The default branch line says "is on" or "is not on". It shows only when the step fetched the default branch. With no commit in old..new, the line is "Commits <old>..<new>: none." Several PRs give "<n> pull requests have this commit as their head: #<n>, #<m>." A failed PR read without a match gives "Pull request: not read (<why>)."
+- WP-SM2 headings of the listed outcomes: "## <path>: removed, not compared.", "## <path>: the URL changed in this pull request, not compared.", and "## <path>: not read. The app reads at most 5 submodules."
+- Known limit: `git diff <old> <new>` reads the whole range into memory, as the diff of the main PR does.
 - The indent keeps a "#" line or a fence in the diff from becoming markdown structure.
 - Hunks of CLAUDE.md, .claude/, and .mcp.json stay in the diff. The file is text under the banner, and the CLI loads nothing from context/. The rl-git git_diff tool shows such hunks of the main PR the same way.
 - The sanitizer has nothing to remove: no submodule file is checked out. The banner covers the text.
@@ -194,7 +200,8 @@ Interactions:
 
 - The run log footer gets `Submodule context: <text>; <text>` (RunLog.tsx). A part with "not read" or "on no branch" uses the destructive color, as "Not loaded" does.
 - RunLine.tsx shows only the "not read" and "on no branch" parts, as it does for "Not loaded".
-- Server log: `Review run <id> submodules: <path> read (<repo> PR #<n>, <k> files, fetch <s> s); <path> not read (<reason>).` `noUrl` applies.
+- Server log: `Review run <id> submodules: <path> read (<repo> PR #<n>, <k> files, fetch <s> s); <path> not read (<reason>).` `noUrl` applies. WP-SM2: an entry that is not read logs its run line text.
+- WP-SM2: when the step fails in another way, for example in the detection git call, the run goes on without the file. The run line gets the warn part "not checked (<reason>)", and the log gets the same text.
 
 ### 5.7 Security
 
@@ -213,12 +220,13 @@ Interactions:
 - Migration 058, or the next free number at build time: `ALTER TABLE review_run ADD COLUMN related_json TEXT`. WP-RP0 adds it.
 - `RunDto.related?: { label: string; text: string; warn: boolean }[]`. The server writes the text. Older runs do not have it.
 - `SubmoduleChange = { path; old: string | null; new: string | null; oldUrl: string | null; newUrl: string | null }`.
-- `SubmoduleRead = { path; repo: { project; slug } | null; outcome; pr: { id; title; author; state; source; target; description } | null; prs: number[]; files: number; cut: string[] }`.
+- `SubmoduleRead = { path; repo: { project; slug } | null; outcome; pr: { id; title; author; state; source; target; description } | null; prs: number[]; files: number; cut: string[] }`. WP-SM2 builds it as `SubmoduleChange & { outcome; repo; prs: PullRequest[]; files; cut; text; warn }`, where text and warn are the run line part.
+- WP-SM2: `submoduleRun(kind, profile)` in submodules.ts is the run-kind check of SD4 and AC-SM9. The RunDto.related label is "Submodule context".
 - `finderRules(p, main, files?: RunFiles)`. `RunFiles.submodules?: boolean`.
 - The judge gets an optional `gitlinks: Map<path, { old: string | null; new: string | null }>`.
 - `createReviewJobs` gets an optional `submoduleReader`: the provider members `origin`, `repository`, `readableRepos`, `defaultBranch`, `getPullRequest`, and `listOpenPullRequests`. The eval passes a stub.
 - The constants in src/server/review/submodules.ts are `SUBMODULES_MAX` 5, `SUBMODULE_COMMITS_SHOWN` 20, and `SUBMODULE_FILES_SHOWN` 200. The file cap reuses `CANDIDATES_BYTES`, the description cap reuses `DESCRIPTION_BYTES`, and the read deadline reuses `PEER_READ_MS`.
-- The submodule cache gets the refs `refs/rl/sub/base`, `refs/rl/sub/pr`, and `refs/rl/sub/heads/*`. The next fetch moves them. `--prune` removes the refs of deleted branches. Nothing else deletes them, as for the task refs `refs/rl/task/<task>/sub/*`.
+- The submodule cache gets the refs `refs/rl/sub/base`, `refs/rl/sub/pr/<PR number>`, and `refs/rl/sub/heads/*`. The next fetch moves them. The ref of a PR that no later run matches stays, one ref per matched PR. `--prune` removes the refs of deleted branches. Nothing else deletes them, as for the task refs `refs/rl/task/<task>/sub/*`.
 
 ## 7. Eval and proof
 

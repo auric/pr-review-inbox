@@ -153,6 +153,8 @@ export type Scenario = {
   resolved: boolean;
   // The repository list of the token (GET /rest/api/1.0/repos) answers HTTP 500.
   noRepoList: boolean;
+  // PR 1001 (submodule-prs.md WP-SM2): the source branch moves one commit on, which adds the gitlink lib and its .gitmodules entry.
+  submodule: boolean;
 };
 
 // The next fake Claude Code run. tree: a subagent run with drafts. schema: a result that fails the schema. limit: a usage limit.

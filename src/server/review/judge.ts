@@ -631,21 +631,26 @@ export const answerFinding = (
 
 // The anchored finding of each confirmed finder question and finder risk with a place, by its number in candidates.md. The finder
 // validator anchors it. A place that it drops gives no entry, so the question stays, and the risk gets asked (risk-check.md R5).
-export async function placeAnswers(ws: Workspace, check: CheckRun | null): Promise<Map<number, AnchoredFinding>> {
+export async function placeAnswers(ws: Workspace, check: CheckRun | null, gitlinks?: Gitlinks): Promise<Map<number, AnchoredFinding>> {
   const made = [...questionVerdicts(check)].flatMap(([n, v]) =>
     v.verdict === "confirmed" && v.finding
       ? [{ n, finding: answerFinding(v, v.finding, check && n > check.written + check.asked ? "risk" : "question") }]
       : [],
   );
-  return anchorAll(ws, made);
+  return anchorAll(ws, made, gitlinks);
 }
 
 // The finder validator pass of placeAnswers and placeObligations: n keys each made finding. A dropped place gives no entry.
-async function anchorAll(ws: Workspace, made: { n: number; finding: Finding }[]): Promise<Map<number, AnchoredFinding>> {
+// gitlinks: readBlobs.
+async function anchorAll(
+  ws: Workspace,
+  made: { n: number; finding: Finding }[],
+  gitlinks?: Gitlinks,
+): Promise<Map<number, AnchoredFinding>> {
   const out = new Map<number, AnchoredFinding>();
   if (!made.length) return out;
   const findings = made.map((m) => m.finding);
-  const blobs = await readBlobs(ws, [...findings, ...findings.flatMap((f) => (f.cause ? [f.cause] : []))]);
+  const blobs = await readBlobs(ws, [...findings, ...findings.flatMap((f) => (f.cause ? [f.cause] : []))], gitlinks);
   const coverage = { read: [], skipped: [], unavailable: [], notChecked: [] };
   const result: ReviewResult = { summary: "", risks: [], questions: [], coverage, findings, answered: [] };
   const anchor = () => validate({ result, diff: ws.diff, ...blobs, agents: [] });
@@ -707,7 +712,7 @@ export type PlacedObligations = { cited: ReadonlySet<number>; placed: ReadonlyMa
 
 // section 4.4: the app checks of each missing obligation. The cite reads a repository file from the cache clone at the head, never
 // from the sanitized worktree. A context cite reads only the files of CITE_CONTEXT.
-export async function placeObligations(ws: Workspace, check: CheckRun | null): Promise<PlacedObligations> {
+export async function placeObligations(ws: Workspace, check: CheckRun | null, gitlinks?: Gitlinks): Promise<PlacedObligations> {
   const missing = obligationsOf(check).flatMap((o, i) => (o.status === "missing" ? [{ i, o, src: citeSource(o.cite.path) }] : []));
   const repo = missing.flatMap((m) => (m.src?.kind === "repo" ? [{ path: m.src.path, side: "new" as const }] : []));
   const blobs = repo.length ? await readBlobs(ws, repo) : null;
@@ -726,7 +731,7 @@ export async function placeObligations(ws: Workspace, check: CheckRun | null): P
       .map((m) => m.i),
   );
   const made = missing.flatMap(({ i, o }) => (cited.has(i) && o.finding ? [{ n: i, finding: obligationFinding(o, o.finding) }] : []));
-  return { cited, placed: await anchorAll(ws, made) };
+  return { cited, placed: await anchorAll(ws, made, gitlinks) };
 }
 
 // section 4.5: what settle knows about one obligation. cited: the cite check passed. at: the anchored finding. blocks: the text of each

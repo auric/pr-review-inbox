@@ -1194,6 +1194,7 @@ describe("review v3 prompt switches", () => {
       "security2",
       "security2-verify",
       "stack",
+      "submodules",
       "verify2",
     ]);
     const { variants: _, ...old } = general;
