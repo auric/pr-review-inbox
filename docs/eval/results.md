@@ -109,4 +109,19 @@ Aggregate numbers only. The local set holds company code, so no case names, path
 - Re-roll floor: Gate A (prompt 2.8, 2 runs per case) found 1 of the 10 never-found issues in 1 of 20 runs. 9 of the 10 were missed in all 5 runs.
 - Natural recall per run (matcher): SG-A 14.7% (11 of 75), unionRecall(3) 20.0%. Gate A on the same issues: 20.0% per run. The drop mixes prompt 2.9 and the seeds, and the sample is small.
 - Full natural set (Joint Gate A): 78 must-finds, matcher recall 22.4% per run, unionRecall(2) 29.5%. About 75% are class (a), by a sample of 20 (a guess).
-- Decision (proposed, waits for the user): no paid natural-set gate now. It costs about $830 to $1,150 and has about 27% power at +3 bugs. Next: a paid pilot of the stacked finder candidate "lenses3,codegraph" on 1 or 2 cases (up to $25). Then a screen at repeat 2 on the SG-A cases that hold the 10 never-found issues. It passes at 4 or more of 10 found, against the stored SG-A records. A screen pass is a signal, not a ship gate.
+- A full natural-set gate costs about $830 to $1,150 and has about 27% power at +3 bugs. The pilot below replaced the proposed screen.
+
+### 2026-11-23: pilot P-LC (lenses3,codegraph) and the never-found issues
+
+- Pilot P-LC: 2 seeded cases that hold 4 of the 10 never-found issues, repeat 1, prompt 2.9. Cost $16.15 ($15.91 eval, $0.24 labels).
+- Cost factor against SG-A on the same cases: 4.25x (3.8x and 5.7x). Time factor: 3.7x. The P-L1 cost limit is 3.2x, so the pilot fails on cost.
+- Seeds found: 4 of 4, the same as SG-A. Never-found issues raised: 0 of 4. This is weak evidence: at the old hit rate, 0 of 4 is likely with no change.
+- Shown findings: 3.0 per case run, against 2.0 in SG-A. The extras were judged 1 tp and 1 fp. lenses3 ran 3 passes.
+- codegraph was not tested. The runs made 3 successful explore calls in 298 tool calls. 1 call failed with "No such tool" on the bare tool name. review-ledger.md records this usage problem in the codegraph row.
+- The screen on 7 cases (about $79 to $118) does not run.
+- Coverage: in 34 of 34 issue-runs (30 SG-A, 4 pilot), a tool result held the issue hunk. 27 read the whole file. 0 hit a cap. So the misses are judgment, not coverage. A coverage pass, a diff order change, or a cap raise will not help.
+- Origin: all 10 come from findings that the app raised and the user posted (prompts 2.3 to 2.8, Opus at medium effort). For each issue, exactly 1 app run produced a finding in that file. The PRs had 1 to 9 runs.
+- Every posting run had the user's per-PR note. The eval stores an empty note (scripts/eval/run.ts:797). In 3 of 10, the note names the issue file. So these 10 are rare one-off finds, partly helped by the note. They are weak gold for a recall gate.
+- Position: never-found issues sit later in the diff (median 0.85 of files) than found seeds (0.63). The permutation p is about 0.045, but the items are not independent, so the evidence is weak.
+- Decision (2026-11-23): option 2 stands. The seeded set is a guard. No paid recall gate runs now.
+- Open ideas, not approved: (a) eval fidelity: carry the PR note into the local set, so the eval matches the app. (b) An "oracle look" script (about $3 to $7) gives a fresh run only the file and hunk of each issue. It tests whether focused attention finds them. (c) Fix the codegraph tool-name problem before any codegraph measurement.
