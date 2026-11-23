@@ -32,6 +32,7 @@ import {
   phaseParts,
   plural,
   type RunLineState,
+  relatedWarnings,
   risksLabel,
   runningText,
   setupText,
@@ -404,6 +405,7 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
   }
   const instructions = instructionsText(run);
   const skills = skillsText(run);
+  const related = relatedWarnings(run);
   const tasks = run.tasks ?? [];
   const ids = tasks.map((t) => t.key).join(", ");
   const range = run.since?.incremental ? shortHash(run.since.head) : null;
@@ -502,6 +504,12 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
           {instructions.notLoaded}
         </p>
       )}
+      {related.map((w) => (
+        <p key={w} className="m-0 flex items-start gap-1.5 text-destructive" data-run-related>
+          <CircleAlert aria-hidden className={cn(icon, "mt-0.5")} />
+          {w}
+        </p>
+      ))}
       {failedCheck && (
         <p className="m-0 flex flex-wrap items-start gap-x-3 gap-y-1 font-semibold text-warn" data-check-failed>
           <span className="inline-flex items-start gap-1.5">

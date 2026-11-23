@@ -623,8 +623,9 @@ export const POLISH_VERIFY = [
   "Never give question for a polish point. Set its severity to nit.",
 ];
 
-// spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for.
-export function finderRules(p: FinderProfile, main: boolean): string[] {
+// spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for. _files: the context files of the run.
+// The Improve prompt and the salvage agent pass none (submodule-prs.md and stacked-prs.md WP-RP0).
+export function finderRules(p: FinderProfile, main: boolean, _files?: RunFiles): string[] {
   return [
     checked(p)
       ? "Report every problem that you find. A second step checks each finding, so do not leave out a finding because you are not sure."
@@ -1033,7 +1034,7 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT, lens: Lens 
       p.prompt,
       ...classes(p),
       ...contextBlock(c),
-      ...finderRules(p, true),
+      ...finderRules(p, true, c),
       ...focus(p, lens),
       ...finderList(p),
       ...threadClaim(p, c),
@@ -1521,7 +1522,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       p.prompt,
       ...classes(p),
       ...contextBlock(c),
-      ...finderRules(p, false),
+      ...finderRules(p, false, c),
       ...focus(p, lens),
       ...finderList(p),
       ...threadClaim(p, c),

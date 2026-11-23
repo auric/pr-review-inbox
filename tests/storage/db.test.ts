@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 54;
+const LATEST = 55;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -110,8 +110,16 @@ const R3_COLUMNS = {
   skills_json: null,
   consult_json: null,
 };
-// 030_review_v2.sql, 032_ask_parent.sql, and 033_task.sql.
-const V2_COLUMNS = { prompt_version: null, item: null, discuss_json: null, explain_json: null, parent_run: null, task: null };
+// 030_review_v2.sql, 032_ask_parent.sql, 033_task.sql, and 058_run_related.sql.
+const V2_COLUMNS = {
+  prompt_version: null,
+  item: null,
+  discuss_json: null,
+  explain_json: null,
+  parent_run: null,
+  task: null,
+  related_json: null,
+};
 const V2_NAMES = Object.keys(V2_COLUMNS);
 
 test("migration from a version-9 database keeps every run", () => {
@@ -815,7 +823,12 @@ test("a migration statement that fails before the last one rolls back the whole 
 
 // The review_run rows of a dump after 032_ask_parent.sql and 033_task.sql.
 const withParent = (d: object) =>
-  ((d as Record<string, unknown>).review_run as Record<string, unknown>[]).map((r) => ({ ...r, parent_run: null, task: null }));
+  ((d as Record<string, unknown>).review_run as Record<string, unknown>[]).map((r) => ({
+    ...r,
+    parent_run: null,
+    task: null,
+    related_json: null,
+  }));
 
 const V30 = [
   ...V23,
@@ -939,7 +952,7 @@ test("migration from a version-31 database keeps every row and adds parent_run w
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
     const after = { ...dump(db), notes: db.query("SELECT * FROM pr_note").all(), fix: db.query("SELECT * FROM fix_edit").all() };
     expect(after as Record<string, unknown>).toEqual({ ...before, review_run: withParent(before) });
-    expect(columns(db, "review_run").slice(-2)).toEqual(["parent_run", "task"]);
+    expect(columns(db, "review_run").slice(-3)).toEqual(["parent_run", "task", "related_json"]);
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'review_run_parent'").all()).toEqual([{ name: "review_run_parent" }]);
 
     const ask = (id: number, parent: number | null) =>
@@ -1003,10 +1016,10 @@ test("migration from a version-32 database keeps every row and child row; task r
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
     expect((db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(columns(db, "review_run")).toEqual([...oldColumns, "task"]);
+    expect(columns(db, "review_run")).toEqual([...oldColumns, "task", "related_json"]);
     expect({ ...dump(db), ...extra(db) } as Record<string, unknown>).toEqual({
       ...before,
-      review_run: (before.review_run as Record<string, unknown>[]).map((r) => ({ ...r, task: null })),
+      review_run: (before.review_run as Record<string, unknown>[]).map((r) => ({ ...r, task: null, related_json: null })),
     });
     expect(
       (db.query("PRAGMA table_info(review_run)").all() as { name: string; notnull: number }[]).find((c) => c.name === "pr")?.notnull,
@@ -1975,6 +1988,30 @@ test("migration from a version-53 database keeps the task rows and adds an empty
     expect(db.query("SELECT why, host FROM task_external WHERE ord = 1").get()).toEqual({ why: "", host: "" });
     db.run("DELETE FROM task WHERE id = 1");
     expect(db.query("SELECT COUNT(*) AS n FROM task_external").get()).toEqual({ n: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+// ---------- The related context line of a run (058_run_related.sql) ----------
+
+// docs/plans/review-v2/submodule-prs.md section 6 (WP-RP0): an old run row stays and has no related_json value.
+test("migration from a version-54 database keeps the run rows and adds related_json as NULL", () => {
+  const path = join(dir, "v54.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  const files = readdirSync(join(import.meta.dir, "../../src/server/storage/migrations")).filter((f) => f >= "031" && f < "058");
+  migrate(old, [...V30, ...files.sort()]);
+  old.exec("PRAGMA user_version = 54");
+  old.exec(`INSERT INTO pull_request (id, project, repo, pr_id) VALUES (1, 'P', 'r', 2);
+    INSERT INTO review_run (id, pr, kind, profile, profile_name, explain, note, idem_key, source_head, target_head, merge_base, status, started_at)
+    VALUES (1, 1, 'review', 'general', 'General', 0, '', 'k', 'h', 't', 'm', 'completed', 1);`);
+  const before = old.query("SELECT * FROM review_run").all() as object[];
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("SELECT * FROM review_run").all()).toEqual(before.map((r) => ({ ...r, related_json: null })));
   } finally {
     db.close();
   }

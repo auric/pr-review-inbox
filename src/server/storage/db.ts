@@ -56,6 +56,7 @@ import m053_step_cut from "./migrations/053_step_cut.sql" with { type: "text" };
 import m054_task_question_point from "./migrations/054_task_question_point.sql" with { type: "text" };
 import m056_task_fetch from "./migrations/056_task_fetch.sql" with { type: "text" };
 import m057_task_external from "./migrations/057_task_external.sql" with { type: "text" };
+import m058_run_related from "./migrations/058_run_related.sql" with { type: "text" };
 
 // Index i holds the SQL that raises user_version from i to i + 1. The list order, not the file number, sets the version.
 const MIGRATIONS = [
@@ -116,6 +117,7 @@ const MIGRATIONS = [
   // ps6-ps7-plan.md reserves 055 for PS7b. Its entry goes after this one, because a database can have user_version 53 already.
   m056_task_fetch,
   m057_task_external,
+  m058_run_related,
 ];
 
 const tables = (db: Database) =>

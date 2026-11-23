@@ -718,6 +718,9 @@ export type RunDto = {
   // The skills that the run got. always: the profile marks the skill Always use. available: a task step got the skill, but the profile
   // does not tick it. Absent for runs made before it was stored.
   skills?: { id: string; always: boolean; available?: boolean }[];
+  // docs/plans/review-v2/submodule-prs.md section 6: the related context that the run read, one entry per part. The run log footer shows
+  // "<label>: <text>; <text>". warn: the run line shows the part too. Absent for runs made before it was stored.
+  related?: { label: string; text: string; warn: boolean }[];
   // The finding items of the run that a re-review did not find fixed or outdated and the verify phase did not discard. 0 for other kinds.
   findings: number;
   // A running run: indexing builds the codegraph index of the snapshot before the CLI starts. A review run: finding is the first CLI

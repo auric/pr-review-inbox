@@ -73,6 +73,8 @@ export type RunRow = {
   instructions_json: string | null;
   // null for runs made before the run skills were stored.
   skills_json: string | null;
+  // null for runs made before WP-RP0, and for runs that read no related context.
+  related_json: string | null;
   // A session run only: SessionRecord.
   consult_json: string | null;
   // An ask run only: the ask run that it follows (docs/plans/review-v2/spec.md section 2.15).
@@ -170,12 +172,13 @@ export const SQL = {
   run: `SELECT r.id, r.pr, r.kind, r.profile, r.profile_name, r.explain, r.note, r.source_head, r.target_head, r.merge_base, r.fetch_via, r.status, r.error_kind, r.error_text,
       r.session_id, r.cli_version, r.model, r.effort, r.effort_default, r.usage_json, r.summary_json, r.raw_output IS NOT NULL AS has_raw, r.started_at, r.finished_at,
       p.source_head AS pr_source, p.target_head AS pr_target, r.since_head, r.range_base, r.question, r.answer, r.fix_json, r.tasks_json, r.instructions_json, r.skills_json,
-      r.consult_json, r.parent_run,
+      r.consult_json, r.related_json, r.parent_run,
       ${OPEN_FINDINGS} AS findings
     FROM review_run r JOIN pull_request p ON p.id = r.pr`,
   workspace: "UPDATE review_run SET merge_base = $base, range_base = $range, fetch_via = $via WHERE id = $id",
   instructions: "UPDATE review_run SET instructions_json = $json WHERE id = $id",
   skills: "UPDATE review_run SET skills_json = $json WHERE id = $id",
+  related: "UPDATE review_run SET related_json = $json WHERE id = $id",
   end: `UPDATE review_run SET status = $status, error_kind = $kind, error_text = $text, session_id = $session, cli_version = $cli, model = COALESCE($model, model),
       effort_default = CASE WHEN $init_effort THEN $effort_default ELSE effort_default END, usage_json = $usage, summary_json = $summary, answer = $answer, fix_json = $fix,
       explain_json = $explain, raw_output = $raw, finished_at = $now
@@ -387,6 +390,7 @@ export function toRunDto(r: RunRow, resolve = effortsNow()): RunDto {
     ...(r.tasks_json !== null && { tasks: JSON.parse(r.tasks_json) as NonNullable<RunDto["tasks"]> }),
     ...(r.instructions_json !== null && { instructions: JSON.parse(r.instructions_json) as NonNullable<RunDto["instructions"]> }),
     ...(r.skills_json !== null && { skills: JSON.parse(r.skills_json) as NonNullable<RunDto["skills"]> }),
+    ...(r.related_json !== null && { related: JSON.parse(r.related_json) as NonNullable<RunDto["related"]> }),
     findings: r.findings,
     ...(r.consult_json !== null && { consult: sessionOf(JSON.parse(r.consult_json) as SessionRecord) }),
   };

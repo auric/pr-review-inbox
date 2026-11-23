@@ -489,6 +489,21 @@ export function instructionsText(
   };
 }
 
+// docs/plans/review-v2/submodule-prs.md section 5.6: the related context that a run read, one line per label in stored order. The run
+// log footer shows each line. Empty: no related context, or a run made before it was stored.
+export function relatedText(run: Pick<RunDto, "related">): { label: string; parts: { text: string; warn: boolean }[] }[] {
+  const lines = new Map<string, { text: string; warn: boolean }[]>();
+  for (const { label, text, warn } of run.related ?? []) lines.set(label, [...(lines.get(label) ?? []), { text, warn }]);
+  return [...lines].map(([label, parts]) => ({ label, parts }));
+}
+
+// The warn parts of relatedText, one "<label>: <text>; <text>" per label. The run line shows only these, as it does for "Not loaded".
+export const relatedWarnings = (run: Pick<RunDto, "related">) =>
+  relatedText(run).flatMap(({ label, parts }) => {
+    const warn = parts.filter((p) => p.warn).map((p) => p.text);
+    return warn.length ? [`${label}: ${warn.join("; ")}`] : [];
+  });
+
 // The skills that a run got. null: no skill, or a run made before the skills were stored.
 export const skillsText = (run: Pick<RunDto, "skills">) => {
   if (!run.skills?.length) return null;

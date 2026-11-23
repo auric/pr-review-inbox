@@ -37,6 +37,7 @@ import {
   tokenTotal,
   toolCalls,
 } from "./model";
+import { RelatedLines } from "./RelatedLines";
 
 const ST: Record<RunEventStatus, string> = { ok: "ok", error: "error", running: "…", stopped: "stop" };
 const REFUSED = new Set(REFUSED_NOTES);
@@ -252,6 +253,7 @@ export function RunLog(props: {
             Skills: {skills}
           </span>
         )}
+        {run && <RelatedLines run={run} />}
         {instructions?.notLoaded && (
           <span data-run-not-loaded className="text-destructive">
             {instructions.notLoaded}
