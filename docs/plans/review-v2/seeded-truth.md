@@ -2,6 +2,8 @@
 
 Status: design of 2026-11-19. The user approved the build and decided section 14 on 2026-11-21. WP-SG0 to WP-SG6 are built. U-SG1 ran four rounds and built 33 seeds (section 9 U-SG1 results). SG-P passed on 2026-11-22. SG-A ran on 2026-11-23: the set is fit by MDE, but recall sits at 90.9%, so it has no headroom for a recall raiser (section 9 SG-A result). For now the seeded set is a guard for noise, regressions, and verify-only candidates. Work: packages WP-SG0 to WP-SG6, user step U-SG1, gates SG-P and SG-A. architecture-bugs.md adds the ninth kind. Section 4.5 adds the tenth kind, security.
 
+The SG-A natural-issue analysis (docs/eval/results.md, section "SG-A natural-issue analysis") shows that the finder loses the missed natural issues, and it proposes the next recall screen.
+
 Sources: docs/plans/review-v2/review-quality-2026.md (E1 to E6, items 6 and 7, ship rules), docs/plans/review-v3.md (WP-V1, decision V4), docs/plans/review-v2/research/review-practice-2026-11.md (B1, B2), the recall plan and the comparison of 2026-11-17 (both outside the repository), docs/eval/local.md, and scripts/eval/*.ts. This file names no other app, company, host, project, case ID, or PR number.
 
 ## 0. Short answer

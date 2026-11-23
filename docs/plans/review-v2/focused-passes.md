@@ -2,6 +2,8 @@
 
 Status: design of 2026-11-21 against main 484a4e5. WP-L0, WP-L1, and WP-L2 are built opt-in (section 12). The user decided section 11 on 2026-11-21. WP-AR1 is pushed (bb1afd0). G-L0 failed on SG-A (2026-11-23), so runs3 does not run. lenses3 waits for a natural-set baseline, pending the user (section 5.3). Packages: WP-L0 (docs), WP-L1 (passes in the app), WP-L2 (eval diagnostics). Paid steps: pilot P-L, gates G-L1 and G-L2. The conditional package WP-L3 (merge agent) runs only when the noise rule fails mainly through duplicates. The text names no other app, company, host, project, case ID, or PR number. The recall plan of 2026-11-17 lies outside the repository. Its lens names are reused here, and the lens text in this file is new.
 
+The SG-A natural-issue analysis (docs/eval/results.md, section "SG-A natural-issue analysis") shows that the finder loses the missed natural issues, and it proposes the next recall screen.
+
 Sources: review-quality-2026.md (items 6, 7, 11, 12, section 2, section 4), architecture-bugs.md, seeded-truth.md (sections 4, 6.5, 9, 14), review-ledger.md, review-v3.md (section 10, WP-V14), parallel-runs.md, and the code: catalog.ts, jobs.ts, judge.ts, validate.ts, context-files.ts, claude.ts, src/shared/dto.ts, review.ts, run-log.ts, scripts/eval/run.ts, ab.ts, score.ts, compare.ts.
 
 ## 0. Short answer
@@ -245,7 +247,7 @@ bun run eval:compare -- <probe-base result.json> <probe-lenses3 result.json>
 
 - Pass: lenses3 probe recall is at least the base minus 1 must-find. Trap rate is not higher, and notCompleted is 0.
 - The probe set sits near its ceiling, so a drop there shows narrowing.
-- Estimate: 21 cases at about $0.35 each (E6, before the advisor), so $7 plus $18-22.
+- Estimate: 26 cases (21 when this estimate was made) at about $0.35 each (E6, before the advisor), so $7 plus $18-22.
 
 Pilot total: about $32-53 (estimate). A failed pilot stops the gate. Fix the mechanics, not the lens text.
 
@@ -303,7 +305,7 @@ Then:
 |---|---|---|
 | WP-L1, WP-L2 tests | fake CLI | $0 |
 | P-L1 | 2 hosts x 1 | $7-24 |
-| P-L2 | 21 probe cases x 1, both sides | $25-29 |
+| P-L2 | 26 probe cases x 1, both sides | $25-29 (estimate for 21 cases) |
 | G-L0 | SG-A union rows | $0 |
 | G-L1 runs3 | 23 x 2, labels | $150-190 |
 | G-L2 lenses3 | 23 x 2, labels | $150-190 |
