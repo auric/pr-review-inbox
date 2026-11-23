@@ -960,6 +960,25 @@ describe("brief and meta", () => {
   });
 });
 
+type Agents = Record<string, { prompt: string }>;
+
+// Starts a run that hangs, reads its agents file, and cancels the run. The workspace holds agents.json only while the run is active.
+async function hungAgents(h: Awaited<ReturnType<typeof setup>>, start: () => Promise<{ body: { id: number; kind?: string } }>) {
+  h.scenario({ fixture: subagentRun(), hang: true });
+  const hung = () => h.calls().filter((c) => c.childPid).length;
+  const before = hung();
+  const r = await start();
+  expect(await waitFor(() => hung() > before)).toBe(true);
+  const c = h
+    .calls()
+    .filter((c) => c.argv?.includes("-p"))
+    .at(-1) as Call;
+  const agents = JSON.parse(readFileSync(flag(c.argv, "--agents") as string, "utf8")) as Agents;
+  expect((await h.call(`/api/runs/${r.body.id}/cancel`, { method: "POST" })).status).toBe(202);
+  expect((await h.finish(r.body.id)).run.status).toBe("cancelled");
+  return { agents, kind: r.body.kind, stdin: c.stdin };
+}
+
 describe("editable profiles (M4)", () => {
   const general = GENERAL;
   const putProfiles = (h: Awaited<ReturnType<typeof setup>>, profiles: ProfileInput[]) =>
@@ -1193,6 +1212,25 @@ describe("editable profiles (M4)", () => {
       const stored =
         JSON.stringify(h.db.query("SELECT * FROM run_event").all()) + JSON.stringify(h.db.query("SELECT * FROM review_run").all());
       expect(stored).not.toContain("ENV-SECRET");
+
+      // review-questions.md: an explain run gets the issue tool lines too. An ask run does not.
+      const ask = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
+      expect(ask.kind).toBe("ask");
+      expect(ask.agents["rl-main"]?.prompt).toContain("The user added these MCP tools: mcp__fake__search, mcp__fake__note_tool.");
+      expect(ask.agents["rl-main"]?.prompt).not.toContain(ISSUE_LINES[0] as string);
+      const explainProfile = SHIPPED_PROFILES.find((p) => p.explain) as ProfileInput;
+      expect(
+        (
+          await putProfiles(h, [
+            { ...general, mcp },
+            { ...explainProfile, mcp },
+          ])
+        ).status,
+      ).toBe(200);
+      await h.brief(NOTE, "explain");
+      const explain = await hungAgents(h, h.start);
+      expect(explain.kind).toBe("explain");
+      expect(explain.agents["rl-main"]?.prompt).toContain(ISSUE_LINES.join("\n"));
     },
     SLOW,
   );
@@ -1567,24 +1605,6 @@ describe("language checks", () => {
     "tools/check.py": "print(1)\n",
   };
   const INTRO = LANGUAGE_INTRO[0] as string;
-  type Agents = Record<string, { prompt: string }>;
-
-  // Starts a run that hangs, reads its agents file, and cancels the run. The workspace holds agents.json only while the run is active.
-  async function hungAgents(h: Awaited<ReturnType<typeof setup>>, start: () => Promise<{ body: { id: number; kind?: string } }>) {
-    h.scenario({ fixture: subagentRun(), hang: true });
-    const hung = () => h.calls().filter((c) => c.childPid).length;
-    const before = hung();
-    const r = await start();
-    expect(await waitFor(() => hung() > before)).toBe(true);
-    const c = h
-      .calls()
-      .filter((c) => c.argv?.includes("-p"))
-      .at(-1) as Call;
-    const agents = JSON.parse(readFileSync(flag(c.argv, "--agents") as string, "utf8")) as Agents;
-    expect((await h.call(`/api/runs/${r.body.id}/cancel`, { method: "POST" })).status).toBe(202);
-    expect((await h.finish(r.body.id)).run.status).toBe("cancelled");
-    return { agents, kind: r.body.kind, stdin: c.stdin };
-  }
 
   test(
     "review and re-review runs give rl-main and rl-reviewer the lists for the languages of the change; the profile switch turns them off",

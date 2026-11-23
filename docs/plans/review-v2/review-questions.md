@@ -17,7 +17,7 @@ User decisions:
 - **A, the finder.** rl-main and the salvage run write `questions[]` (catalog.ts finderRules, `main` true). rl-reviewer has no questions field. Before 2.7, these questions skipped the verify phase: `settle` added them to the items as they were, and candidates.md held only findings.
 - **B, the question verdict.** The verify phase gives `question` for a finding candidate. `capOf` turns it into a question item.
 - **C, no trigger.** A finding candidate with an empty trigger and no `confirmed` verdict becomes the question "No concrete case was named." (`capOf`).
-- **D, the Explain lens.** "Ask a question where the intent is not clear." It is out of scope, because a change needs a PROFILES_VERSION step.
+- **D, the Explain run.** The lens line "Ask a question where the intent is not clear." stays, because a change needs a PROFILES_VERSION step. Since 2026-11-23 (user decision), EXPLAIN_RULES holds the Explain question rules below, and Explain gets the issue lines.
 
 ## Rules
 
@@ -27,6 +27,12 @@ User decisions:
 - "Before you ask a question, look for the answer yourself. Read the changed code, its callers, its tests, its config, and the files in ./context."
 - "When you find the answer, ask nothing. When the answer shows a defect, report a finding with that evidence."
 - "Put a point into questions only when no file and no tool of this run gives the answer. In why, name what you checked and why it did not answer the point."
+
+### Explain (EXPLAIN_RULES)
+
+- Finder rule 2 (look for the answer) and finder rule 4 (put a point into questions only when no file and no tool answers it), as the same constants.
+- "When you find the answer, ask nothing. When the answer shows a problem, put it into risks." It replaces finder rule 3, because Explain gives no findings.
+- Explain questions get no verify phase.
 
 ### Finder questions in the verify phase
 
@@ -60,7 +66,7 @@ User decisions:
 
 ### Issue tools
 
-- `withMcp` gets an `issues` flag. The review finder (rl-main and rl-reviewer), the verify phase, the salvage run, and the own review of a task set it. Explain, Ask, Fix, Discuss, reply runs, and task steps do not.
+- `withMcp` gets an `issues` flag. The review finder (rl-main and rl-reviewer), the verify phase, the salvage run, Explain (since 2026-11-23), and the own review of a task set it. Ask, Fix, Discuss, reply runs, and task steps do not.
 - With at least one picked MCP tool, the flag adds: "Find the tools in this list that read issues from the issue tracker. Use them to read the tasks of this change and their acceptance criteria. The Metadata section and the files in ./context name the tasks. Use these tools only to read. Never create, edit, move, or comment through them. A task key of this change may go into a query to such a tool."
 - The task named "the Task IDs line". That line is only in the stdin of the main process, and it says "none" in the own review of a task. Subagents read task.md and pr-context.md instead. So the lines name the Metadata section and the files in ./context.
 - REMOTE_RULE stays. With the flag, the remote line adds: "The one exception is a task key of this change in a query to an issue tool."
@@ -83,13 +89,13 @@ User decisions:
 - AC-R33. candidates.md holds a "## Question N" block for each finder question after the finding candidates, with N after the last candidate number. The byte cap and MAX_FINDINGS cover both kinds. A finder result with questions and no finding starts the verify phase.
 - AC-R34. A question block gets the result of the verdict table above. No verdict never makes the run incomplete. Question verdicts do not change `summary.verify`.
 - AC-R35. rl-verify and rl-verifier hold the three verifier lines above. The question block lines are only in a prompt whose candidates.md holds questions. Above VERIFY_SPLIT blocks, the delegation also names the questions.
-- AC-R36. With picked MCP tools, the issue lines and the remote exception are in the review finder, the verify phase, the salvage run, and the own review of a task, and in no other run. Without picked tools, no run has them.
+- AC-R36. With picked MCP tools, the issue lines and the remote exception are in the review finder, the verify phase, the salvage run, Explain, and the own review of a task, and in no other run. Without picked tools, no run has them.
 - AC-R37. The intent module holds the three acceptance criterion lines.
 - AC-R38. `summary.finderQuestions` holds the four counts and the answers. Review quality shows the sums per profile and prompt version. A group without a 2.7 run shows no question line.
 
 ## Out of scope
 
-- Source D, the Explain lens. It needs a PROFILES_VERSION step.
+- A change of the Explain lens line. It needs a PROFILES_VERSION step.
 - Duplicate checks between questions, and between a question and a finding candidate. A duplicate verdict on a question reads as unsure.
 - A view of the dropped questions and their answers. They stay in summary_json and in the raw output of the check.
 - BRIEF.md section 7 (the Prompt item) still states the remote query rule without the task key exception.

@@ -138,7 +138,7 @@ function defaultBytes(p: (s: Shipped) => Shipped) {
   };
 }
 
-// The MCP lines of the user servers in each shipped profile. Hash of main f96ed42, before the variant existed.
+// The MCP lines of the user servers in each shipped profile. First pinned at main f96ed42. The Explain question rules of 2026-11-23 changed it.
 function mcpBytes() {
   const out: string[] = [];
   for (const p of SHIPPED_PROFILES)
@@ -156,14 +156,14 @@ describe("variant codegraph: prompts (review-v3.md WP-V5)", () => {
   test("the variant alone changes no prompt, stdin, schema, or candidates.md; the user MCP lines keep the bytes of main", () => {
     // The hashes that tests/review/passes.test.ts pins for main.
     const main = {
-      agents: "3d8ab5496a9b4f4dc0dd8780338023f24db97f89ae1a29a307a254a81a1e89f5",
+      agents: "ef2425086d5d5a9675e0bc1f6da32165cb0b074200ff88df6f0e10eee7db9148",
       stdin: "6e2209d2e28204fe397333590c8813ac50a96c659cb7dba9b55ccd4b037a62bc",
       schemas: "ba9856660e7af30f719ff44e874af06e6defd430ed222db830311e8f814484fe",
       candidates: "d80a93c3b1ebd4eb0d7857f3b53bd99eea168143571c4ce11d9511f4c373b32d",
     };
     expect(defaultBytes((s) => s)).toEqual(main);
     expect(defaultBytes((s) => withV(s, "codegraph"))).toEqual(main);
-    expect(mcpBytes()).toBe("94bee248512466163228cd7f0c586797990e6e1148066d58c5c6a6dd5acc3396");
+    expect(mcpBytes()).toBe("1ed42b00e77744f3974dc4faa7d89b8bbb7071d70835885054e24e61683beb10");
     expect(promptVersion(withV(general, "codegraph"))).toBe(`${REVIEW_PROMPT_VERSION}+codegraph`);
   });
 

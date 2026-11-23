@@ -579,12 +579,12 @@ const PLACE_RULES = [
   "Copy anchorText exactly from the lines line to lineEnd on that side. The app compares it with the file.",
 ];
 
-// docs/plans/review-v2/review-questions.md: the finder looks for the answer before it asks. Only rl-main and salvage give questions.
+// docs/plans/review-v2/review-questions.md: the finder looks for the answer before it asks. Only rl-main and salvage give questions. EXPLAIN_RULES reuses lines 0 and 2.
 export const FINDER_QUESTION_RULES = [
   "Before you ask a question, look for the answer yourself. Read the changed code, its callers, its tests, its config, and the files in ./context.",
   "When you find the answer, ask nothing. When the answer shows a defect, report a finding with that evidence.",
   "Put a point into questions only when no file and no tool of this run gives the answer. In why, name what you checked and why it did not answer the point.",
-];
+] as const;
 
 // docs/plans/review-v3.md WP-V6, D1, and Q6: the pre-existing finder lines, a default since prompt 2.9. validate.ts keeps such a
 // finding only at blocker or major, and judge.ts settle caps them at PREEXISTING_MAX. A stale comment or doc is never pre-existing: the
@@ -1005,6 +1005,9 @@ export const EXPLAIN_RULES = [
   "Use no style, classDef, click, or %%{ lines. Use at most 25 nodes per diagram.",
   "In sequenceDiagram, declare each participant as participant A as Name, with no quotes. Use no semicolon in a message.",
   "Write in plain words with short sentences. Explain each project term in glossary.",
+  FINDER_QUESTION_RULES[0],
+  "When you find the answer, ask nothing. When the answer shows a problem, put it into risks.",
+  FINDER_QUESTION_RULES[2],
   ...TRUST,
   COVERAGE_RULE,
 ];
@@ -1506,7 +1509,7 @@ export const ISSUE_LINES = [
 ];
 export const ISSUE_REMOTE_RULE = "The one exception is a task key of this change in a query to an issue tool.";
 
-// issues: the run is a review, a verify phase, or a salvage run (ISSUE_LINES).
+// issues: the run is a review, an explain run, a verify phase, or a salvage run (ISSUE_LINES).
 export function mcpLines(used: McpUse[], issues = false): string[] {
   const mine = used.filter((u) => !u.app);
   const app = used.filter((u) => u.app).flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`));

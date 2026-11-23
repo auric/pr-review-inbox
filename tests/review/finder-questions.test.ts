@@ -5,6 +5,7 @@
 // each finder question, the issue tool lines, and the question counts. Pure parts only: no process, no git, no database.
 import { describe, expect, test } from "bun:test";
 import {
+  explainAgent,
   FINDER_QUESTION_RULES,
   ISSUE_LINES,
   ISSUE_REMOTE_RULE,
@@ -142,6 +143,17 @@ describe("finder rules (AC-R32)", () => {
     // The old lines are gone.
     expect(mainAgent(general, GOAL).prompt).not.toContain("instead of a finding");
     expect(mainAgent(general, GOAL).prompt).not.toContain("Put open points about the intent into questions.");
+  });
+
+  test("Explain looks for the answer before it asks, puts a found problem into risks, and gets the issue lines", () => {
+    const explain = SHIPPED_PROFILES.find((p) => p.explain) as (typeof SHIPPED_PROFILES)[number];
+    const p = lines(explainAgent(explain).prompt);
+    expect(p).toContain(FINDER_QUESTION_RULES[0]);
+    expect(p).toContain("When you find the answer, ask nothing. When the answer shows a problem, put it into risks.");
+    expect(p).toContain(FINDER_QUESTION_RULES[2]);
+    expect(p).not.toContain(FINDER_QUESTION_RULES[1]);
+    expect(mainAgent(explain, GOAL).prompt).toBe(explainAgent(explain).prompt);
+    expect(withMcp(explainAgent(explain), [{ server: "web", tools: ["b"], remote: true }], true).prompt).toContain(ISSUE_LINES.join("\n"));
   });
 
   test("AC-R37: the intent module lists the acceptance criteria, reads them with an issue tool when there is one, and notes the rest", () => {

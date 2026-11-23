@@ -148,7 +148,7 @@ function defaultBytes() {
 describe("variants lenses3 and runs3: prompts (focused-passes.md WP-L1)", () => {
   test("without the variants, every prompt, the stdin, both schemas, and candidates.md keep the bytes of main", () => {
     expect(defaultBytes()).toEqual({
-      agents: "3d8ab5496a9b4f4dc0dd8780338023f24db97f89ae1a29a307a254a81a1e89f5",
+      agents: "ef2425086d5d5a9675e0bc1f6da32165cb0b074200ff88df6f0e10eee7db9148",
       stdin: "6e2209d2e28204fe397333590c8813ac50a96c659cb7dba9b55ccd4b037a62bc",
       schemas: "ba9856660e7af30f719ff44e874af06e6defd430ed222db830311e8f814484fe",
       candidates: "d80a93c3b1ebd4eb0d7857f3b53bd99eea168143571c4ce11d9511f4c373b32d",

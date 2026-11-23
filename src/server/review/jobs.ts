@@ -1228,7 +1228,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           ...spec,
           prompt,
           main: withDelegation(
-            withMcp(withSkills(withLanguages(main, langs, !broad(profile)), folders, always), used, finder),
+            withMcp(withSkills(withLanguages(main, langs, !broad(profile)), folders, always), used, finder || explain),
             delegate,
             parts.length,
           ),
