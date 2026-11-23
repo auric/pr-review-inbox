@@ -1,6 +1,6 @@
 # Stacked pull requests
 
-Status: Designed 2026-11-20. Not started. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
+Status: Designed 2026-11-20. WP-SK0, WP-SK1, and WP-SK2 are built. `STACK_READS` stays false until Gates G9, G12, and G20 pass. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
 
 ## 1. Request
 
@@ -320,6 +320,17 @@ Three cases in fixtures/eval/probe/, in the format of probe-obl-criterion-deferr
 - WP-SK1 and WP-SK2 edit jobs.ts and context-files.ts. Run them one after the other.
 - WP-JC5 edits task-file.ts, not the files of WP-SK1 and WP-SK2. No file clash is known.
 - WP-SK4 waits for the Gate A order of review-ledger.md section 4. Push nothing between WP-SK4 and its version step.
+
+WP-SK2 build notes (2026-11-23), where the build differs from the plan:
+
+- Only the review run start passes `parentTarget` to `prepareWorkspace`. `gitMcpServer` reads `ws.parentBase`, so its call sites do not change. Task workspaces give `parentBase: null`.
+- The section 2 fact on the rl-git call sites is out of date. Of the three workspace sites, only the PR run steps are a review run. The other two are the task snapshot and the task own review.
+- The parent fetch runs after `syncCache`, in its own cache lock. A parent ref that fails the ref check counts as a failed fetch.
+- A Cancel during the parent fetch also gives `parentBase: null`. The next git step of the workspace then stops the run.
+- The rl-git regex error and the describe text name PARENT_BASE. The `resolve` error keeps "HEAD, BASE, or TARGET", because PARENT_BASE is an ancestor of TARGET (K17).
+- `STACK_LINES` and `STACK_VERIFY` hold one list per flag. With "submodules" too, the stack lines come first, and `STACK_VERIFY` follows `SUBMODULE_VERIFY`.
+- Tests: the `pruneRefs` check is in tests/review/prune-refs.test.ts. tests/review/jobs.test.ts runs a stacked review with the fake CLI, with and without PARENT_BASE.
+- REVIEW_PROMPT_VERSION and every prompt hash pin stay the same. A git-mcp test pins the sha256 of the rl-git tool list without the pin.
 
 ## 11. Gates
 

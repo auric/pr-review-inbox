@@ -48,6 +48,10 @@ import {
   SECURITY2,
   SHIPPED_PROFILES,
   SPARSE_VERSION,
+  STACK_FINDER,
+  STACK_LINES,
+  STACK_PREEXISTING,
+  STACK_VERIFY,
   SUBMODULE_FINDER,
   SUBMODULE_LINES,
   SUBMODULE_VERIFY,
@@ -605,6 +609,10 @@ describe("review v2 finder prompt", () => {
       ...SUBMODULE_LINES,
       ...SUBMODULE_FINDER,
       ...SUBMODULE_VERIFY,
+      ...Object.values(STACK_LINES).flat(),
+      ...STACK_FINDER,
+      ...STACK_PREEXISTING,
+      ...Object.values(STACK_VERIFY).flat(),
     ];
     expect(longSentences(texts)).toEqual([]);
     for (const p of [
@@ -1490,6 +1498,94 @@ describe("submodule lines (submodule-prs.md section 5.5, WP-SM1)", () => {
       goal: "G",
     });
     for (const l of [...SUBMODULE_LINES, ...SUBMODULE_FINDER, ...SUBMODULE_VERIFY]) {
+      expect(improve).not.toContain(l);
+      expect(sharedRules(general).join("\n")).not.toContain(l);
+    }
+  });
+});
+
+describe("stack lines (stacked-prs.md section 5.5, WP-SK2)", () => {
+  const RUN: ReviewContext = { ...NO_CONTEXT, taskFile: true, history: true, prContext: true, notes: true };
+  const FLAGS = { parent: true, parentBase: true, children: true };
+  const PARENT = { parent: true, parentBase: false, children: false };
+  const CHILDREN = { parent: false, parentBase: false, children: true };
+  const ALL: ReviewContext = { ...RUN, stack: FLAGS };
+  const all = { ...general, modules: [...MODULE_IDS] };
+  const block = (l: string[]) => l.join("\n");
+  const PARENT_BASE_LINE = STACK_LINES.parent[1] as string;
+  const STACK_ALL = [...Object.values(STACK_LINES).flat(), ...STACK_FINDER, ...STACK_PREEXISTING, ...Object.values(STACK_VERIFY).flat()];
+  const agents = (c: ReviewContext) => [mainAgent(all, c), reviewerAgent(all, c), verifyAgent(all, c), verifierAgent(all, c)];
+
+  test("contextBlock puts the stack groups after the BASE line, each only with its flag; PARENT_BASE needs the pin", () => {
+    expect(PARENT_BASE_LINE).toBe("git_diff from PARENT_BASE to TARGET shows the change of the parent pull request.");
+    const plain = contextBlock(RUN);
+    const base = plain.findIndex((l) => l.startsWith("./repo holds the source branch"));
+    const after = (lines: string[]) => plain.toSpliced(base + 1, 0, ...lines);
+    const { stacked, parent, children } = STACK_LINES;
+    expect(contextBlock(ALL)).toEqual(after([...stacked, ...parent, ...children]));
+    expect(contextBlock({ ...RUN, stack: { ...FLAGS, parentBase: false } })).toEqual(
+      after([...stacked, ...parent.filter((l) => l !== PARENT_BASE_LINE), ...children]),
+    );
+    expect(contextBlock({ ...RUN, stack: PARENT })).toEqual(after([...stacked, ...parent.filter((l) => l !== PARENT_BASE_LINE)]));
+    expect(contextBlock({ ...RUN, stack: { ...PARENT, parentBase: true } })).toEqual(after([...stacked, ...parent]));
+    expect(contextBlock({ ...RUN, stack: CHILDREN })).toEqual(after([...stacked, ...children]));
+    // With the submodule lines too: the stack lines come first.
+    expect(contextBlock({ ...ALL, submodules: true })).toEqual(after([...stacked, ...parent, ...children, ...SUBMODULE_LINES]));
+    for (const a of agents(ALL)) expect(a.prompt).toContain(block([...stacked, ...parent, ...children]));
+    for (const a of agents({ ...RUN, stack: CHILDREN })) for (const l of parent) expect(a.prompt).not.toContain(l);
+  });
+
+  test("finderRules puts STACK_PREEXISTING after PREEXISTING_LINES with parent, and STACK_FINDER at the end of rl-main with children", () => {
+    for (const main of [true, false]) {
+      const plain = finderRules(general, main, RUN);
+      const pre = plain.indexOf(PREEXISTING_LINES.at(-1) as string);
+      expect(finderRules(general, main, { ...RUN, stack: PARENT })).toEqual(plain.toSpliced(pre + 1, 0, ...STACK_PREEXISTING));
+      expect(finderRules(general, main, { ...RUN, stack: CHILDREN })).toEqual(main ? [...plain, ...STACK_FINDER] : plain);
+      expect(finderRules(general, main, ALL)).toEqual([
+        ...plain.toSpliced(pre + 1, 0, ...STACK_PREEXISTING),
+        ...(main ? STACK_FINDER : []),
+      ]);
+    }
+    for (const a of [mainAgent(all, ALL), reviewerAgent(all, ALL)]) expect(a.prompt).toContain(block(STACK_PREEXISTING));
+    expect(mainAgent(all, ALL).prompt).toContain(block(STACK_FINDER));
+    // rl-reviewer has no question field. The verify phase turns its gap finding into a question (STACK_VERIFY.children).
+    expect(reviewerAgent(all, ALL).prompt).not.toContain(STACK_FINDER[0] as string);
+    for (const a of [verifyAgent(all, ALL), verifierAgent(all, ALL)])
+      for (const l of [...STACK_FINDER, ...STACK_PREEXISTING]) expect(a.prompt).not.toContain(l);
+  });
+
+  test("verifyRules puts STACK_VERIFY after the refute lines and the submodule lines, each group only with its flag", () => {
+    for (const p of [general, { ...general, variants: ["refute-issue" as const] }]) {
+      const rules = verifyRules(p, RUN);
+      const dup = rules.findIndex((l) => l.startsWith("duplicate:"));
+      expect(verifyRules(p, ALL)).toEqual(rules.toSpliced(dup, 0, ...STACK_VERIFY.parent, ...STACK_VERIFY.children));
+      expect(verifyRules(p, { ...RUN, stack: PARENT })).toEqual(rules.toSpliced(dup, 0, ...STACK_VERIFY.parent));
+      expect(verifyRules(p, { ...RUN, stack: CHILDREN })).toEqual(rules.toSpliced(dup, 0, ...STACK_VERIFY.children));
+      expect(verifyRules(p, { ...ALL, submodules: true })).toEqual(
+        rules.toSpliced(dup, 0, ...SUBMODULE_VERIFY, ...STACK_VERIFY.parent, ...STACK_VERIFY.children),
+      );
+    }
+    for (const a of [verifyAgent(all, ALL), verifierAgent(all, ALL)])
+      expect(a.prompt).toContain(block([...STACK_VERIFY.parent, ...STACK_VERIFY.children]));
+    for (const a of [mainAgent(all, ALL), reviewerAgent(all, ALL)])
+      for (const l of Object.values(STACK_VERIFY).flat()) expect(a.prompt).not.toContain(l);
+  });
+
+  test("K3: without a stack, no agent, no shared rule, and no Improve prompt has a stack line", () => {
+    const improve = buildImprovePrompt({
+      name: "General",
+      note: "N",
+      prompt: "P",
+      explain: false,
+      docs: true,
+      languageChecks: true,
+      model: null,
+      effort: null,
+      goal: "G",
+    });
+    for (const c of [NO_CONTEXT, RUN, { ...RUN, rereview: true }])
+      for (const a of agents(c)) for (const l of STACK_ALL) expect(a.prompt).not.toContain(l);
+    for (const l of STACK_ALL) {
       expect(improve).not.toContain(l);
       expect(sharedRules(general).join("\n")).not.toContain(l);
     }

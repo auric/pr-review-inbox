@@ -90,7 +90,12 @@ export type WorkspaceInput = {
   since?: string;
   // The fetch and `worktree add` of a run.
   long?: LongGit;
+  // stacked-prs.md section 5.4: the target ref of the parent PR, for example refs/heads/main. Server text.
+  parentTarget?: string;
 };
+
+// stacked-prs.md section 5.4 and question 11: the time cap of the parent fetch. A timeout only drops PARENT_BASE.
+export const STACK_FETCH_MS = 60_000;
 
 export type Workspace = {
   run: string;
@@ -105,6 +110,8 @@ export type Workspace = {
   mergeBase: string;
   // The base of the reviewed range: BASE of the git MCP server.
   rangeBase: string;
+  // PARENT_BASE of the git MCP server: the merge base of the parent's target and TARGET. null: no parent, or its fetch failed.
+  parentBase: string | null;
   via: "pull-request-ref" | "branch";
   // `git diff -M -U3 <mergeBase> <sourceHead>` for the validator.
   diff: string;
@@ -384,6 +391,41 @@ async function rangeBaseOf(g: (args: string[], extra?: Record<string, string>) =
   }
 }
 
+// stacked-prs.md section 5.4: fetches the parent's target ref to refs/rl/<PR ID>/parent-target and gives merge-base(it, TARGET). pruneRefs
+// removes the ref with the PR. A separate fetch, so a failure never starts the branch fallback of fetchHeads. A failure gives null.
+async function parentBaseOf(dataDir: string, cache: string, pr: PullRequest, remote: GitRemote, parentTarget: string, long: LongGit) {
+  const ref = `refs/rl/${pr.ref.id}/parent-target`;
+  try {
+    if (!REF.test(parentTarget)) throw new WorkspaceError(`Invalid ref: ${parentTarget}`);
+    return await locked(cache, async () => {
+      const { empty, env } = gitSetup(dataDir);
+      try {
+        await git(
+          [
+            `--git-dir=${cache}`,
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--quiet",
+            "--end-of-options",
+            remote.url,
+            `+${parentTarget}:${ref}`,
+          ],
+          { env: gitEnv(empty, remote.fetchConfig), ...long, timeoutMs: STACK_FETCH_MS },
+        );
+      } catch (e) {
+        throw fetchError(e, remote.fetchConfig);
+      }
+      const base = (await git([`--git-dir=${cache}`, "merge-base", ref, pr.targetHead], { env })).trim();
+      if (!HEAD.test(base)) throw new WorkspaceError("git merge-base gave no commit.");
+      return base;
+    });
+  } catch (e) {
+    log(`Pull request ${pr.ref.id}: the run has no PARENT_BASE. ${noUrl((e as Error).message)}`);
+    return null;
+  }
+}
+
 // The bytes of one attachment in context/attachments/. root: <dataDir>/attachments with the long data folder path. A source that
 // resolves outside it, also by a link, is refused. A text file gets the UNTRUSTED banner and is cut at RUN_TEXT_BYTES.
 export async function attachmentBytes(root: string, a: AttachmentFile): Promise<Uint8Array> {
@@ -429,6 +471,8 @@ export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace
     names.add(a.name);
   }
   const { dataDir, cache, env, via, mergeBase } = await syncCache({ dataDir: input.dataDir, pr, remote: input.remote, long: input.long });
+  const parentBase =
+    input.parentTarget === undefined ? null : await parentBaseOf(dataDir, cache, pr, input.remote, input.parentTarget, input.long ?? {});
   const g = (args: string[], extra: Record<string, string> = {}) => git([`--git-dir=${cache}`, ...args], { env: { ...env, ...extra } });
   const keep = async (ref = "reviewed") => {
     const full = `refs/rl/${pr.ref.id}/${ref}`;
@@ -467,7 +511,7 @@ export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace
     for (const f of files) writeFileSync(join(context, f.name), UNTRUSTED + f.text);
     if (attachments.length) await copyAttachments(join(dataDir, "attachments"), join(context, "attachments"), attachments);
     const heads = { sourceHead: pr.sourceHead, targetHead: pr.targetHead };
-    return { run, work, repo, context, app, cache, ...heads, mergeBase, rangeBase, via, diff, keep, remove };
+    return { run, work, repo, context, app, cache, ...heads, mergeBase, rangeBase, parentBase, via, diff, keep, remove };
   } catch (e) {
     await remove();
     throw e;
@@ -694,7 +738,7 @@ async function taskSnapshot(
     for (const b of beside) await sanitize(b.at, b.links);
     for (const f of i.files) writeFileSync(join(context, f.name), UNTRUSTED + f.text);
     if (i.attachments.length) await copyAttachments(join(i.dataDir, "attachments"), join(context, "attachments"), i.attachments);
-    return { run, work, repo, context, app, cache, ...at, via: "branch" as const, keep, remove };
+    return { run, work, repo, context, app, cache, ...at, parentBase: null, via: "branch" as const, keep, remove };
   } catch (e) {
     await remove();
     throw e;

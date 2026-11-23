@@ -47,7 +47,9 @@ test("a closed PR without an open fix commit loses refs/rl/<PR ID>/; an open fix
         .query("INSERT INTO pull_request (project, repo, pr_id, state) VALUES ('PRJ', 'repo', $n, $state) RETURNING id")
         .get({ n, state }) as { id: number };
       rows.set(n, row);
-      for (const ref of ["source", "target", "fix/1", "fix-commit/2"]) await g(["update-ref", `refs/rl/${n}/${ref}`, commit]);
+      // parent-target: the parent fetch of a stacked review run (stacked-prs.md section 5.4).
+      for (const ref of ["source", "target", "parent-target", "fix/1", "fix-commit/2"])
+        await g(["update-ref", `refs/rl/${n}/${ref}`, commit]);
     }
     const fix = (n: number, state: string) => {
       const pr = rows.get(n) as number;
@@ -67,7 +69,7 @@ test("a closed PR without an open fix commit loses refs/rl/<PR ID>/; an open fix
 
     await pruneRefs(db, dir);
     const left = (await g(["for-each-ref", "--format=%(refname)", "refs/rl"])).split("\n").filter(Boolean).sort();
-    const of = (n: number) => ["fix/1", "fix-commit/2", "source", "target"].map((r) => `refs/rl/${n}/${r}`);
+    const of = (n: number) => ["fix/1", "fix-commit/2", "parent-target", "source", "target"].map((r) => `refs/rl/${n}/${r}`);
     expect(left).toEqual([...of(50), ...of(6)].sort());
   } finally {
     db.close();

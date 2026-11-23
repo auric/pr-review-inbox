@@ -537,6 +537,77 @@ describe("workspace", () => {
   );
 
   test(
+    "stacked-prs.md section 5.4: the parent fetch gives PARENT_BASE; a failed or refused fetch gives null, and the run goes on",
+    async () => {
+      const s = await scenario("parent", { "src/app.ts": `${APP}x\n` });
+      // The parent's target branch is at base, so PARENT_BASE is merge-base(base, TARGET) = base.
+      await s.ref("refs/heads/trunk", s.base);
+      const env = isolated(s.root);
+      const at = (ws: Workspace) =>
+        git(["--git-dir", ws.cache, "rev-parse", "--verify", "--quiet", "refs/rl/2/parent-target"], { env }).then(
+          (h) => h.trim(),
+          () => null,
+        );
+      const run = (runId: string, parentTarget?: string) =>
+        prepareWorkspace({
+          dataDir: s.dataDir,
+          runId,
+          pr: prOf(s.source, s.target),
+          comments: [],
+          remote: remoteOf(s.remote),
+          ...(parentTarget !== undefined && { parentTarget }),
+        });
+
+      const plain = await run("1");
+      expect(plain.parentBase).toBeNull();
+      expect(await at(plain)).toBeNull();
+      await plain.remove();
+
+      const stacked = await run("2", "refs/heads/trunk");
+      expect(stacked.parentBase).toBe(s.base);
+      expect(await at(stacked)).toBe(s.base);
+      expect([stacked.mergeBase, stacked.via]).toEqual([s.base, "pull-request-ref"]);
+      await stacked.remove();
+
+      // The ref of run 2 stays. A failed fetch must not reuse it.
+      const spawn = spyOn(Bun, "spawn");
+      const logs = spyOn(console, "log").mockImplementation(() => {});
+      let calls: string[][] = [];
+      let logged = "";
+      const out: Workspace[] = [];
+      try {
+        for (const target of ["refs/heads/gone", "refs/heads/a:b", "main"]) out.push(await run(`3-${out.length}`, target));
+      } finally {
+        calls = (spawn.mock.calls as unknown as [string[]][]).map(([argv]) => argv);
+        logged = logs.mock.calls.flat().join("\n");
+        spawn.mockRestore();
+        logs.mockRestore();
+      }
+      expect(out).toHaveLength(3);
+      for (const ws of out) {
+        expect([ws.parentBase, ws.via, existsSync(join(ws.repo, "src", "app.ts"))]).toEqual([null, "pull-request-ref", true]);
+        await ws.remove();
+      }
+      // One PR fetch per run. Only the valid ref gets a parent fetch, and no failure starts the source branch fallback.
+      const fetches = calls.filter((a) => a.includes("fetch"));
+      expect(fetches.map((a) => a.at(-1))).toEqual([
+        "+refs/heads/main:refs/rl/2/target",
+        "+refs/heads/gone:refs/rl/2/parent-target",
+        "+refs/heads/main:refs/rl/2/target",
+        "+refs/heads/main:refs/rl/2/target",
+      ]);
+      expect(calls.some((a) => a.includes("merge-base") && a.includes("refs/rl/2/parent-target"))).toBe(false);
+      expect(logged.match(/the run has no PARENT_BASE/g)).toHaveLength(3);
+      expect(logged).toContain("Invalid ref: refs/heads/a:b");
+      expect(logged).toContain("Invalid ref: main");
+      expect(logged).not.toContain("refs/pull-requests/2/from failed");
+      for (const a of calls) expect(a.join(" ")).not.toContain(TOKEN);
+      expect(logged).not.toContain(TOKEN);
+    },
+    SLOW,
+  );
+
+  test(
     "context holds pr.md and no patch or file list, and ./repo holds the head files",
     async () => {
       const app = APP.replace("line 3\n", "line three\nline 3b\n").replace("line 30\n", "").replace("line 38\n", "line 38\nline 38b\n");

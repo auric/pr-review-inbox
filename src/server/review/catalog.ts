@@ -489,7 +489,15 @@ export type ReviewContext = {
 
 // docs/plans/review-v2/spec.md section 2.10: ./context/pr-context.md and ./context/notes.md exist. plan: ./context/task.md holds the plan
 // of the task (docs/plans/review-v2/ps6-ps7-plan.md AC-B386). submodules: ./context/submodules.md holds the diff of a moved gitlink.
-export type RunFiles = { prContext?: boolean; notes?: boolean; plan?: boolean; submodules?: boolean };
+// stack: pr-context.md has the section "Stacked pull requests" (stacked-prs.md section 5.5). parent: the section names a parent.
+// parentBase: rl-git has the alias PARENT_BASE. children: the section names a child. Absent when the run found no stack (K3).
+export type RunFiles = {
+  prContext?: boolean;
+  notes?: boolean;
+  plan?: boolean;
+  submodules?: boolean;
+  stack?: { parent: boolean; parentBase: boolean; children: boolean };
+};
 
 // submodule-prs.md section 5.5: the lines of a run with ./context/submodules.md.
 export const SUBMODULE_LINES = [
@@ -511,6 +519,41 @@ export const SUBMODULE_VERIFY = [
   "Code that only the submodule change adds is not in the change.",
   "Confirm a candidate there only when this change relies on it, breaks with it, or makes it reachable.",
 ];
+
+// stacked-prs.md section 5.5: each group shows only when its RunFiles.stack flag is true. parent[1] needs the flag parentBase too.
+export const STACK_LINES = {
+  stacked: ['This pull request is stacked. The section "Stacked pull requests" in ./context/pr-context.md names the other pull requests.'],
+  parent: [
+    "TARGET is the head of the parent pull request, so the parent change is not in BASE..HEAD.",
+    "git_diff from PARENT_BASE to TARGET shows the change of the parent pull request.",
+    "The parent pull request has its own review. Code that only the parent changes is not part of this change.",
+    "A problem in that code counts only when this change relies on it, breaks it, or makes it reachable.",
+    "When this change calls, extends, or relies on code that the parent adds or changes, read that parent code first.",
+    "git_log with rev TARGET and since HEAD lists the parent commits that this change does not have.",
+    "Check that this change still works with them.",
+  ],
+  children: ["A child pull request builds on this change. It can add what this change lacks."],
+};
+const PARENT_BASE_LINE = STACK_LINES.parent[1];
+const stackLines = (s: RunFiles["stack"]) =>
+  s
+    ? [
+        ...STACK_LINES.stacked,
+        ...(s.parent ? STACK_LINES.parent.filter((l) => s.parentBase || l !== PARENT_BASE_LINE) : []),
+        ...(s.children ? STACK_LINES.children : []),
+      ]
+    : [];
+// rl-main only, with children: rl-reviewer has no question field.
+export const STACK_FINDER = ["When the title or description of a child names the missing part, ask about the gap. Name the child."];
+// With parent: parent code exists at BASE, so the pre-existing lines would let it in.
+export const STACK_PREEXISTING = ["A problem in code that only the parent changes is never pre-existing. Set preexisting to false on it."];
+export const STACK_VERIFY = {
+  parent: [
+    "Code that only the parent changes is not in the change.",
+    "Confirm a candidate there only when this change relies on it, breaks it, or makes it reachable.",
+  ],
+  children: ["When the title or description of a child names the missing part, give question, not confirmed. Name the child in question."],
+};
 
 // spec.md section 2.10: the context block of every agent of a run with ./context/pr-context.md. The notes line shows only with notes.md.
 export const PR_CONTEXT_RULES = [
@@ -560,6 +603,7 @@ export function contextBlock(c: ReviewContext): string[] {
       : []),
     ...(c.questions ? ["./context/questions.md holds the questions and findings that the user posted, with the newer messages."] : []),
     `./repo holds the source branch at the head commit. The rl-git tool git_diff shows the change from BASE, ${c.rereview ? "the base of the reviewed range" : "the merge base"}, to HEAD.`,
+    ...stackLines(c.stack),
     ...(c.submodules ? SUBMODULE_LINES : []),
     LARGE_FILE_RULE,
     ...prContextRules(c),
@@ -656,6 +700,7 @@ export function finderRules(p: FinderProfile, main: boolean, files?: RunFiles): 
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
     ...(files?.submodules ? SUBMODULE_FINDER : []),
     ...PREEXISTING_LINES,
+    ...(files?.stack?.parent ? STACK_PREEXISTING : []),
     ...(minorFold(p) ? POLISH_LINES : []),
     ...PLACE_RULES,
     "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.",
@@ -669,6 +714,7 @@ export function finderRules(p: FinderProfile, main: boolean, files?: RunFiles): 
     "Set module to core, or to the ID of the check section that found it.",
     "Set category to security, concurrency, resource, or behavior for a finding of that class. resource: a leak or a missing release. behavior: a change that users or callers see.",
     ...(main ? FINDER_QUESTION_RULES : []),
+    ...(main && files?.stack?.children ? STACK_FINDER : []),
   ];
 }
 
@@ -1714,6 +1760,8 @@ export function verifyRules(
     "For a candidate without a trigger, look for one. When you find it, give confirmed, and put the trigger into reason.",
     ...(refuteIssue(p) ? REFUTE_ISSUE_VERIFY : []),
     ...(c.submodules ? SUBMODULE_VERIFY : []),
+    ...(c.stack?.parent ? STACK_VERIFY.parent : []),
+    ...(c.stack?.children ? STACK_VERIFY.children : []),
     v2 ? VERIFY2.duplicate : "duplicate: another candidate of the same group describes the same problem at the same place.",
     "Set duplicateOf to the clearer candidate.",
     ...(c.history

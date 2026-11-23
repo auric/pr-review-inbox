@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
@@ -279,6 +280,44 @@ describe("git MCP server", () => {
     expect(await ok("git_show", { rev: "BASE^2", path: "a.txt" }, rereviewClient)).toBe("one\ntwo\nthree\n");
     expect(await ok("git_diff", { from: c.c7, stat_only: true }, rereviewClient)).toContain("src/b.txt");
     for (const r of [c.c5, `${c.c5}~0`, "side", "refs/rl/1/reviewed"]) await refused("git_show", { rev: r }, rereviewClient);
+  });
+
+  test("stacked-prs.md section 5.4: PARENT_BASE exists only with the pin; without it the tool list keeps its bytes", async () => {
+    const ws = { cache, sourceHead: c.c4, rangeBase: c.c1, targetHead: c.c2 };
+    // A parent whose target branch is at c1: PARENT_BASE is merge-base(c1, TARGET).
+    const stacked = gitMcpServer({ ...ws, parentBase: c.c1 }, MAIN);
+    expect(gitMcpServer({ ...ws, parentBase: null }, MAIN)).toEqual(gitMcpServer(ws, MAIN));
+    expect(stacked.args).toEqual([...gitMcpServer(ws, MAIN).args, `--parent-base=${c.c1}`]);
+    // The sha256 of tools/list before WP-SK2 (2.9). An MCP SDK or zod update can change the schema output and this hash.
+    const listed = async (on: Client) =>
+      createHash("sha256")
+        .update(JSON.stringify((await on.listTools()).tools))
+        .digest("hex");
+    expect(await listed(client)).toBe("2dfb912df4acf7aef196dae1e03c253dbd61a7c81e6e4d1fed714fd56e377f87");
+    expect(JSON.stringify((await client.listTools()).tools)).not.toContain("PARENT_BASE");
+    expect(await refused("git_diff", { from: "PARENT_BASE", to: "TARGET" })).toContain("or HEAD, BASE, or TARGET, optionally");
+
+    const parent = new Client({ name: "wp-sk2-test", version: "0" });
+    await parent.connect(new StdioClientTransport({ command: stacked.command, args: stacked.args, stderr: "pipe" }));
+    try {
+      const rev = (await parent.listTools()).tools.find((t) => t.name === "git_show")?.inputSchema.properties?.rev as {
+        description: string;
+        pattern: string;
+      };
+      expect(rev.description).toContain(
+        "TARGET (target branch head, the parent pull request head), or PARENT_BASE (the base of the parent pull request change).",
+      );
+      expect(rev.pattern).toContain("|PARENT_BASE)");
+      expect(await ok("git_diff", { from: "PARENT_BASE", to: "TARGET" }, parent)).toContain("+four");
+      expect(await ok("git_show", { rev: "PARENT_BASE" }, parent)).toContain("first commit");
+      expect(await ok("git_log", { rev: "TARGET", since: "PARENT_BASE" }, parent)).toContain(c.c2);
+      expect(await refused("git_show", { rev: "PARENT_BASE~1" }, parent)).toContain("Unknown or ambiguous commit");
+      expect(await refused("git_show", { rev: "PARENT_BASEX" }, parent)).toContain("HEAD, BASE, TARGET, or PARENT_BASE");
+      // The pin adds no history: a commit outside HEAD, BASE, and TARGET stays refused.
+      expect(await refused("git_show", { rev: c.c5 }, parent)).toContain("not in the history");
+    } finally {
+      await parent.close();
+    }
   });
 
   test("git_diff pages a 20,000-line change without a gap", async () => {

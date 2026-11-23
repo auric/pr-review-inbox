@@ -620,7 +620,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       log(
         `Review run ${j.id} context: pr-context.md ${kb} KB, ${file.threads} threads${file.left ? ` (${file.left} left out)` : ""}, ${file.peers} other PRs, build ${c.build ? "read" : "not read"}${c.stack === null ? "" : `, stack: ${c.stack}`}; ${notes ? `notes.md ${c.notes.length} notes` : "no notes.md"}.`,
       );
-      return { file, notes };
+      return { file, notes, stack: c.input.stack };
     } finally {
       j.abort = undefined;
     }
@@ -1073,6 +1073,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     ];
     const ctx = await prContext(j, pr);
     if (ctx) extra.push(ctx.file);
+    // stacked-prs.md section 5.4: only a review run with a parent gets the parent fetch and PARENT_BASE.
+    const parentTarget = ctx?.stack?.parents[0]?.targetRef;
     // Cancel stops the fetch and `worktree add`. A large repository can take as long as the run may take.
     j.abort = new AbortController();
     try {
@@ -1086,6 +1088,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         files: [...files, ...extra],
         attachments,
         ...(carry && { since: carry.since }),
+        ...(parentTarget !== undefined && { parentTarget }),
         long: { signal: j.abort.signal, timeoutMs: RUN_TIMEOUT_MS },
       });
     } catch (e) {
@@ -1149,6 +1152,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       prContext: !!ctx,
       notes: !!ctx?.notes,
       plan: plan !== null,
+      // stacked-prs.md K3 and K18: no key without a stack.
+      ...(ctx?.stack && {
+        stack: { parent: ctx.stack.parents.length > 0, parentBase: ws.parentBase !== null, children: ctx.stack.children.length > 0 },
+      }),
     };
     const gaps = [...tools.gaps, ...skills.gaps];
     const input = {

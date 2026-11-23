@@ -18,17 +18,23 @@ export const MAX_BLAME_LINES = 400;
 const FULL = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 // A hash or an alias, then only ~N and ^N steps. No ref names, @{...}, ^{...}, :/text, ranges, or paths.
 const REV = /^(?:[0-9a-f]{4,40}|[0-9a-f]{64}|HEAD|BASE|TARGET)(?:~\d{1,4}|\^[12]?)*$/;
-const ALIAS = /^(HEAD|BASE|TARGET)(.*)$/;
+// stacked-prs.md section 5.4: PARENT_BASE exists only with the --parent-base pin. Without it, REV and the texts keep their bytes.
+const PARENT_REV = /^(?:[0-9a-f]{4,40}|[0-9a-f]{64}|HEAD|BASE|TARGET|PARENT_BASE)(?:~\d{1,4}|\^[12]?)*$/;
+const ALIAS = /^(HEAD|BASE|TARGET|PARENT_BASE)(.*)$/;
 // Pathspec magic stays off (--literal-pathspecs). "-" would read as an option.
 const CONTROL = /\p{Cc}/u;
 // --no-optional-locks: a read never writes the index or other optional files.
 const GLOBAL = ["--no-pager", "--no-optional-locks", "--literal-pathspecs"];
 const NO_DIFF_HELPERS = ["--no-ext-diff", "--no-textconv"];
 
-type Pins = { gitDir: string; head: string; base: string; target: string };
+// parentBase: the PARENT_BASE pin of a stacked review run. It is an ancestor of target, so resolve needs no other check.
+type Pins = { gitDir: string; head: string; base: string; target: string; parentBase?: string };
 
 // The RunSpec.mcpServers entry for one workspace. entry is the script that main.ts runs. A compiled binary takes no entry (U13).
-export function gitMcpServer(ws: Pick<Workspace, "cache" | "sourceHead" | "rangeBase" | "targetHead">, entry = Bun.main): StdioServerSpec {
+export function gitMcpServer(
+  ws: Pick<Workspace, "cache" | "sourceHead" | "rangeBase" | "targetHead"> & Partial<Pick<Workspace, "parentBase">>,
+  entry = Bun.main,
+): StdioServerSpec {
   return {
     command: process.execPath,
     args: [
@@ -38,20 +44,32 @@ export function gitMcpServer(ws: Pick<Workspace, "cache" | "sourceHead" | "range
       `--head=${ws.sourceHead}`,
       `--base=${ws.rangeBase}`,
       `--target=${ws.targetHead}`,
+      ...(ws.parentBase ? [`--parent-base=${ws.parentBase}`] : []),
     ],
     tools: [...GIT_MCP_TOOLS],
   };
 }
 
-const rev = z
-  .string()
-  .regex(
-    REV,
-    "Use a hex commit hash (4 to 40 characters) or HEAD, BASE, or TARGET, optionally followed by ~N or ^N (for example HEAD~1 or BASE^).",
-  )
-  .describe(
-    "A commit: a hex hash, or HEAD (PR source head), BASE (the base of the reviewed range, the merge base in a first review), or TARGET (target branch head). Add ~N for the Nth first-parent ancestor or ^N for the Nth parent, for example HEAD~1 or BASE^.",
-  );
+const revOf = (parent: boolean) =>
+  parent
+    ? z
+        .string()
+        .regex(
+          PARENT_REV,
+          "Use a hex commit hash (4 to 40 characters) or HEAD, BASE, TARGET, or PARENT_BASE, optionally followed by ~N or ^N (for example HEAD~1 or BASE^).",
+        )
+        .describe(
+          "A commit: a hex hash, or HEAD (PR source head), BASE (the base of the reviewed range, the merge base in a first review), TARGET (target branch head, the parent pull request head), or PARENT_BASE (the base of the parent pull request change). Add ~N for the Nth first-parent ancestor or ^N for the Nth parent, for example HEAD~1 or BASE^.",
+        )
+    : z
+        .string()
+        .regex(
+          REV,
+          "Use a hex commit hash (4 to 40 characters) or HEAD, BASE, or TARGET, optionally followed by ~N or ^N (for example HEAD~1 or BASE^).",
+        )
+        .describe(
+          "A commit: a hex hash, or HEAD (PR source head), BASE (the base of the reviewed range, the merge base in a first review), or TARGET (target branch head). Add ~N for the Nth first-parent ancestor or ^N for the Nth parent, for example HEAD~1 or BASE^.",
+        );
 
 const path = z
   .string()
@@ -118,7 +136,13 @@ export function createGitMcp(pins: Pins) {
   const env = gitEnv("/dev/null");
   // ponytail: git() buffers the full stdout, and each page runs git again. Cache the output per call if large diffs get slow.
   const run = (args: string[]) => git([...GLOBAL, `--git-dir=${pins.gitDir}`, ...args], { env, timeoutMs: 60_000 });
-  const aliases: Record<string, string> = { HEAD: pins.head, BASE: pins.base, TARGET: pins.target };
+  const aliases: Record<string, string> = {
+    HEAD: pins.head,
+    BASE: pins.base,
+    TARGET: pins.target,
+    ...(pins.parentBase !== undefined && { PARENT_BASE: pins.parentBase }),
+  };
+  const rev = revOf(pins.parentBase !== undefined);
 
   const isAncestor = async (a: string, b: string) => {
     try {
@@ -302,11 +326,19 @@ export async function runGitMcp(args: string[]) {
   const { values } = parseArgs({
     args,
     strict: true,
-    options: { "git-dir": { type: "string" }, head: { type: "string" }, base: { type: "string" }, target: { type: "string" } },
+    options: {
+      "git-dir": { type: "string" },
+      head: { type: "string" },
+      base: { type: "string" },
+      target: { type: "string" },
+      "parent-base": { type: "string" },
+    },
   });
-  const pins = { gitDir: values["git-dir"] ?? "", head: values.head ?? "", base: values.base ?? "", target: values.target ?? "" };
-  if (!isAbsolute(pins.gitDir) || ![pins.head, pins.target].every((h) => FULL.test(h))) {
-    console.error("usage: --git-mcp --git-dir=<absolute path> --head=<hash> --base=<hash> --target=<hash>");
+  const pins: Pins = { gitDir: values["git-dir"] ?? "", head: values.head ?? "", base: values.base ?? "", target: values.target ?? "" };
+  const parentBase = values["parent-base"];
+  if (parentBase !== undefined) pins.parentBase = parentBase;
+  if (!isAbsolute(pins.gitDir) || ![pins.head, pins.target, parentBase ?? pins.head].every((h) => FULL.test(h))) {
+    console.error("usage: --git-mcp --git-dir=<absolute path> --head=<hash> --base=<hash> --target=<hash> [--parent-base=<hash>]");
     process.exit(2);
   }
   await createGitMcp(pins).connect(new StdioServerTransport());

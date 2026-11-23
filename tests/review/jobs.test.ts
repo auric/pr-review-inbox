@@ -28,6 +28,10 @@ import {
   profileOf,
   profileRevision,
   SHIPPED_PROFILES,
+  STACK_FINDER,
+  STACK_LINES,
+  STACK_PREEXISTING,
+  STACK_VERIFY,
   VERIFY2,
 } from "../../src/server/review/catalog";
 import { git, gitEnv } from "../../src/server/review/git";
@@ -50,7 +54,7 @@ import type {
   RunDto,
 } from "../../src/shared/dto";
 import { displayGroup, type FindingPayload, REVIEW_PROMPT_VERSION } from "../../src/shared/review";
-import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, type Route, startFakeBitbucket } from "../support/fake-bitbucket";
+import { FAKE_TOKEN, FAKE_USER, type FakeBitbucket, key, type Route, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { echoExplain, type FakeScenario, readRecords } from "../support/fake-claude";
 import { type FakeJira, JIRA_TOKEN, SUBTASK_PARENT, startFakeJira } from "../support/fake-jira";
 
@@ -1880,6 +1884,95 @@ describe("language checks", () => {
       expect(mine(on.d).map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "fold"]]);
       const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
       expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold`);
+    },
+    SLOW,
+  );
+});
+
+describe("stacked PR context (stacked-prs.md WP-SK2)", () => {
+  const general = GENERAL;
+  type Rec = Call & { agents: Agents; mcp: Record<string, { args: string[] }> };
+
+  test(
+    "a stacked review run pins PARENT_BASE and gives the agents the stack lines; a failed parent fetch drops only PARENT_BASE",
+    async () => {
+      const h = await setup();
+      const w = repoWrites(h.fake);
+      const empty = join(h.root, "stack.gitconfig");
+      writeFileSync(empty, "");
+      // The parent PR goes from feat/a into trunk. trunk is at base, so PARENT_BASE is merge-base(base, TARGET) = base.
+      await git(["--git-dir", h.repo.remote, "update-ref", "refs/heads/trunk", h.repo.base], { env: gitEnv(empty) });
+      const post = async (from: string, to: string) =>
+        (
+          (await (
+            await fetch(`${h.fake.url}${w.path}/pull-requests`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${FAKE_TOKEN}`, "content-type": "application/json" },
+              body: JSON.stringify({ title: `PR ${from}`, fromRef: { id: `refs/heads/${from}` }, toRef: { id: `refs/heads/${to}` } }),
+            })
+          ).json()) as { id: number }
+        ).id;
+      const parent = await post("feat/a", "trunk");
+      const self = w.prs.get(await post("feature/ABC-1-flush", "feat/a"));
+      h.fake.routes[key("GET", `${w.path}/pull-requests/2`)] = () => ({ status: 200, body: { ...self, id: 2 } });
+      h.db.query("UPDATE pull_request SET target_branch = 'feat/a' WHERE id = $pr").run({ pr: h.pr });
+      const row = (prId: number, from: string, to: string, title: string) =>
+        h.db
+          .query(
+            `INSERT INTO pull_request (project, repo, pr_id, title, author_slug, author_name, my_role, state, source_head, target_head,
+              source_branch, target_branch, updated_date) VALUES ('PROJ', 'repo', $prId, $title, 'anna', 'Anna Kim', 'REVIEWER', 'OPEN',
+              $head, $base, $from, $to, 1000)`,
+          )
+          .run({ prId, title, head: h.repo.target, base: h.repo.base, from, to });
+      row(parent, "feat/a", "trunk", "Add the quota parser");
+      row(900, "feat/c", "feature/ABC-1-flush", "Add the Retry-After header");
+
+      const run = async (variants: ProfileInput["variants"]) => {
+        const put = { baseUrl: h.fake.url, profiles: [{ ...general, variants }] };
+        expect((await h.json("/api/settings", { method: "PUT", body: put })).status).toBe(200);
+        await h.brief(NOTE, "general");
+        h.scenario({ fixture: subagentRun() });
+        const before = h.calls().length;
+        const d = await h.finish((await h.start()).body.id);
+        expect(d.run.status).toBe("completed");
+        const calls = h
+          .calls()
+          .slice(before)
+          .filter((c) => c.argv?.includes("-p")) as Rec[];
+        const find = calls.find(finderCall);
+        const check = calls.find((c) => !finderCall(c));
+        if (!find || !check) throw new Error("no finder or verify call");
+        return { find, check, git: find.mcp["rl-git"]?.args ?? [] };
+      };
+      const { stacked, parent: lines, children } = STACK_LINES;
+      const withBase = [...stacked, ...lines, ...children].join("\n");
+      const noBase = [...stacked, ...lines.filter((l) => !l.includes("PARENT_BASE")), ...children].join("\n");
+
+      const on = await run(["stack"]);
+      expect(on.git.at(-1)).toBe(`--parent-base=${h.repo.base}`);
+      expect(on.check.mcp["rl-git"]?.args).toEqual(on.git);
+      for (const name of ["rl-main", "rl-reviewer"]) expect(on.find.agents[name]?.prompt).toContain(`\n${withBase}\n`);
+      expect(on.find.agents["rl-main"]?.prompt).toContain(`\n${STACK_FINDER.join("\n")}`);
+      expect(on.find.agents["rl-main"]?.prompt).toContain(`\n${STACK_PREEXISTING.join("\n")}\n`);
+      expect(on.check.agents["rl-main"]?.prompt).toContain(`\n${withBase}\n`);
+      expect(on.check.agents["rl-main"]?.prompt).toContain(`\n${[...STACK_VERIFY.parent, ...STACK_VERIFY.children].join("\n")}\n`);
+
+      // The parent's target ref is not on the remote: the run completes with the parent lines and without PARENT_BASE.
+      const pr = w.prs.get(parent) as { toRef: { id: string; displayId: string } };
+      pr.toRef = { ...pr.toRef, id: "refs/heads/gone", displayId: "gone" };
+      const failed = await run(["stack"]);
+      expect(failed.git.some((a) => a.startsWith("--parent-base="))).toBe(false);
+      expect(failed.git).toEqual(on.git.slice(0, -1));
+      for (const name of ["rl-main", "rl-reviewer"]) {
+        expect(failed.find.agents[name]?.prompt).toContain(`\n${noBase}\n`);
+        expect(failed.find.agents[name]?.prompt).not.toContain("PARENT_BASE");
+      }
+
+      // Without the variant: no stack read, no line, and no pin.
+      const off = await run([]);
+      expect(off.git).toEqual(failed.git);
+      for (const c of [off.find, off.check])
+        for (const a of Object.values(c.agents)) for (const l of [...stacked, ...lines, ...children]) expect(a.prompt).not.toContain(l);
     },
     SLOW,
   );
