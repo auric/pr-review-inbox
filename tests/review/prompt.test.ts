@@ -48,6 +48,9 @@ import {
   SECURITY2,
   SHIPPED_PROFILES,
   SPARSE_VERSION,
+  SUBMODULE_FINDER,
+  SUBMODULE_LINES,
+  SUBMODULE_VERIFY,
   salvageAgent,
   sharedRules,
   storeProfiles,
@@ -599,6 +602,9 @@ describe("review v2 finder prompt", () => {
       ...PR_CONTEXT_RULES,
       ...NOTES_RULES,
       ...DISCUSS_RULES,
+      ...SUBMODULE_LINES,
+      ...SUBMODULE_FINDER,
+      ...SUBMODULE_VERIFY,
     ];
     expect(longSentences(texts)).toEqual([]);
     for (const p of [
@@ -1433,5 +1439,59 @@ describe("ask follow-ups", () => {
     expect(longSentences([FOLLOW_UP_RULE])).toEqual([]);
     // With the PR context, the line stays next to the answer rule.
     expect(askAgent(general, { prContext: true }, true).prompt).toContain(`short Markdown.\n${FOLLOW_UP_RULE}\n`);
+  });
+});
+
+describe("submodule lines (submodule-prs.md section 5.5, WP-SM1)", () => {
+  const RUN: ReviewContext = { ...NO_CONTEXT, taskFile: true, history: true, prContext: true, notes: true };
+  const SUB = { ...RUN, submodules: true };
+  const all = { ...general, modules: [...MODULE_IDS] };
+  const block = (l: string[]) => l.join("\n");
+
+  test("contextBlock puts SUBMODULE_LINES after the BASE line only with the flag", () => {
+    const base = contextBlock(RUN).findIndex((l) => l.startsWith("./repo holds the source branch"));
+    expect(contextBlock(SUB)).toEqual(contextBlock(RUN).toSpliced(base + 1, 0, ...SUBMODULE_LINES));
+    for (const a of [mainAgent(all, SUB), reviewerAgent(all, SUB), verifyAgent(all, SUB), verifierAgent(all, SUB)])
+      expect(a.prompt).toContain(block(SUBMODULE_LINES));
+    for (const a of [mainAgent(all, RUN), reviewerAgent(all, RUN), verifyAgent(all, RUN), verifierAgent(all, RUN)])
+      for (const l of [...SUBMODULE_LINES, ...SUBMODULE_FINDER, ...SUBMODULE_VERIFY]) expect(a.prompt).not.toContain(l);
+  });
+
+  test("finderRules puts SUBMODULE_FINDER after the anchor rule only with the flag", () => {
+    const anchor = finderRules(general, true).findIndex((l) => l.startsWith("Anchor each finding on the changed line"));
+    for (const main of [true, false]) {
+      expect(finderRules(general, main, SUB)).toEqual(finderRules(general, main).toSpliced(anchor + 1, 0, ...SUBMODULE_FINDER));
+      expect(finderRules(general, main, RUN)).toEqual(finderRules(general, main));
+    }
+    for (const a of [mainAgent(all, SUB), reviewerAgent(all, SUB)]) expect(a.prompt).toContain(block(SUBMODULE_FINDER));
+    for (const a of [verifyAgent(all, SUB), verifierAgent(all, SUB)]) expect(a.prompt).not.toContain(SUBMODULE_FINDER[0] as string);
+  });
+
+  test("verifyRules puts SUBMODULE_VERIFY after the refute lines only with the flag", () => {
+    for (const p of [general, { ...general, variants: ["refute-issue" as const] }]) {
+      const rules = verifyRules(p, RUN);
+      const dup = rules.findIndex((l) => l.startsWith("duplicate:"));
+      expect(verifyRules(p, SUB)).toEqual(rules.toSpliced(dup, 0, ...SUBMODULE_VERIFY));
+    }
+    for (const a of [verifyAgent(all, SUB), verifierAgent(all, SUB)]) expect(a.prompt).toContain(block(SUBMODULE_VERIFY));
+    for (const a of [mainAgent(all, SUB), reviewerAgent(all, SUB)]) expect(a.prompt).not.toContain(SUBMODULE_VERIFY[0] as string);
+  });
+
+  test("the Improve prompt and the shared rules have no submodule line", () => {
+    const improve = buildImprovePrompt({
+      name: "General",
+      note: "N",
+      prompt: "P",
+      explain: false,
+      docs: true,
+      languageChecks: true,
+      model: null,
+      effort: null,
+      goal: "G",
+    });
+    for (const l of [...SUBMODULE_LINES, ...SUBMODULE_FINDER, ...SUBMODULE_VERIFY]) {
+      expect(improve).not.toContain(l);
+      expect(sharedRules(general).join("\n")).not.toContain(l);
+    }
   });
 });

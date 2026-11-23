@@ -488,8 +488,29 @@ export type ReviewContext = {
 } & RunFiles;
 
 // docs/plans/review-v2/spec.md section 2.10: ./context/pr-context.md and ./context/notes.md exist. plan: ./context/task.md holds the plan
-// of the task (docs/plans/review-v2/ps6-ps7-plan.md AC-B386).
-export type RunFiles = { prContext?: boolean; notes?: boolean; plan?: boolean };
+// of the task (docs/plans/review-v2/ps6-ps7-plan.md AC-B386). submodules: ./context/submodules.md holds the diff of a moved gitlink.
+export type RunFiles = { prContext?: boolean; notes?: boolean; plan?: boolean; submodules?: boolean };
+
+// submodule-prs.md section 5.5: the lines of a run with ./context/submodules.md.
+export const SUBMODULE_LINES = [
+  "This change moves the pinned commit of a submodule. ./context/submodules.md shows what the new commit brings.",
+  "./repo has no submodule files. submodules.md holds the only submodule code of this run.",
+  "The submodule change has its own review. Its code is not part of this change.",
+  "Use it to check how this change calls, extends, or relies on the submodule code.",
+];
+// SD22: Bitbucket may refuse a comment on a gitlink line, so the line is a cause only. judge.ts gives it the text (SD21).
+export const SUBMODULE_FINDER = [
+  "Never anchor a finding in a submodule file or on the Subproject commit line.",
+  "A problem in submodule code counts only when this change relies on it, breaks with it, or makes it reachable.",
+  "Anchor it on the line of ./repo that relies on the submodule code.",
+  "When the new submodule commit breaks unchanged code of ./repo, set cause to line 1 of the submodule path.",
+  "Set the side of that cause to new.",
+  "The change then makes the problem reachable, so set preexisting to false.",
+];
+export const SUBMODULE_VERIFY = [
+  "Code that only the submodule change adds is not in the change.",
+  "Confirm a candidate there only when this change relies on it, breaks with it, or makes it reachable.",
+];
 
 // spec.md section 2.10: the context block of every agent of a run with ./context/pr-context.md. The notes line shows only with notes.md.
 export const PR_CONTEXT_RULES = [
@@ -539,6 +560,7 @@ export function contextBlock(c: ReviewContext): string[] {
       : []),
     ...(c.questions ? ["./context/questions.md holds the questions and findings that the user posted, with the newer messages."] : []),
     `./repo holds the source branch at the head commit. The rl-git tool git_diff shows the change from BASE, ${c.rereview ? "the base of the reviewed range" : "the merge base"}, to HEAD.`,
+    ...(c.submodules ? SUBMODULE_LINES : []),
     LARGE_FILE_RULE,
     ...prContextRules(c),
     ...TRUST,
@@ -623,15 +645,16 @@ export const POLISH_VERIFY = [
   "Never give question for a polish point. Set its severity to nit.",
 ];
 
-// spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for. _files: the context files of the run.
+// spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for. files: the context files of the run.
 // The Improve prompt and the salvage agent pass none (submodule-prs.md and stacked-prs.md WP-RP0).
-export function finderRules(p: FinderProfile, main: boolean, _files?: RunFiles): string[] {
+export function finderRules(p: FinderProfile, main: boolean, files?: RunFiles): string[] {
   return [
     checked(p)
       ? "Report every problem that you find. A second step checks each finding, so do not leave out a finding because you are not sure."
       : "Report every problem that you find, with its severity and its confidence.",
     "Report only problems that the change adds or makes reachable. BASE..HEAD is the change.",
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
+    ...(files?.submodules ? SUBMODULE_FINDER : []),
     ...PREEXISTING_LINES,
     ...(minorFold(p) ? POLISH_LINES : []),
     ...PLACE_RULES,
@@ -1687,6 +1710,7 @@ export function verifyRules(
     "When the code or the task text answers the point, give confirmed or refuted, not question.",
     "For a candidate without a trigger, look for one. When you find it, give confirmed, and put the trigger into reason.",
     ...(refuteIssue(p) ? REFUTE_ISSUE_VERIFY : []),
+    ...(c.submodules ? SUBMODULE_VERIFY : []),
     v2 ? VERIFY2.duplicate : "duplicate: another candidate of the same group describes the same problem at the same place.",
     "Set duplicateOf to the clearer candidate.",
     ...(c.history

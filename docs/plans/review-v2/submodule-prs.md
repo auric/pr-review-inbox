@@ -174,18 +174,19 @@ SUBMODULE_FINDER, in `finderRules` after the anchor rule, through the optional `
 5. "Never anchor a finding in a submodule file or on the Subproject commit line."
 6. "A problem in submodule code counts only when this change relies on it, breaks with it, or makes it reachable."
 7. "Anchor it on the line of ./repo that relies on the submodule code."
-8. "When unchanged code of ./repo breaks with the new submodule commit, set cause to line 1 of the submodule path, side new."
-9. "The change then makes the problem reachable, so set preexisting to false."
+8. "When the new submodule commit breaks unchanged code of ./repo, set cause to line 1 of the submodule path."
+9. "Set the side of that cause to new."
+10. "The change then makes the problem reachable, so set preexisting to false."
 
 SUBMODULE_VERIFY, in `verifyRules` after the refute lines:
 
-10. "Code that only the submodule change adds is not in the change."
-11. "Confirm a candidate there only when this change relies on it, breaks with it, or makes it reachable."
+11. "Code that only the submodule change adds is not in the change."
+12. "Confirm a candidate there only when this change relies on it, breaks with it, or makes it reachable."
 
 Interactions:
 
-- Line 8 uses the cause rule of catalog.ts:633 and SD21. The cause text is "Subproject commit <new hash>", at line 1, side new.
-- Line 9 repeats PREEXISTING_LINES "When the change makes the problem reachable or worse ..." (catalog.ts:576) for this case. A candidate with preexisting false does not get PREEXISTING_VERIFY, including "Never refute it only because the problem is not in the change" (catalog.ts:584).
+- Lines 8 and 9 use the cause rule of catalog.ts:633 and SD21. The cause text is "Subproject commit <new hash>", at line 1, side new.
+- Line 10 repeats PREEXISTING_LINES "When the change makes the problem reachable or worse ..." (catalog.ts:576) for this case. A candidate with preexisting false does not get PREEXISTING_VERIFY, including "Never refute it only because the problem is not in the change" (catalog.ts:584).
 - "BASE..HEAD is the change" (catalog.ts:632) stays true. The gitlink line is part of the change.
 - The Improve prompt passes no `RunFiles`, so its bytes do not change.
 

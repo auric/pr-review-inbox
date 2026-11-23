@@ -227,8 +227,12 @@ function ended(raw: string, o: RunOutcome, result: NonNullable<Ending["result"]>
 
 type Placed = Pick<StoredFinding, "path" | "side">;
 
+// submodule-prs.md SD21: the moved gitlinks of the run by path, with the pinned commit of each side. null: no gitlink on that side.
+export type Gitlinks = ReadonlyMap<string, { old: string | null; new: string | null }>;
+
 // Reads the finding files from the cache clone, never from the sanitized worktree. The lookup matches validate().
-async function readBlobs(ws: Workspace, findings: Placed[]) {
+// gitlinks: a gitlink path has no blob. Its text is the line of git diff, so a cause on line 1 of that path validates.
+async function readBlobs(ws: Workspace, findings: Placed[], gitlinks?: Gitlinks) {
   const byNew = new Map<string, DiffFile>();
   const byOld = new Map<string, DiffFile>();
   for (const f of parseDiff(ws.diff)) {
@@ -238,6 +242,10 @@ async function readBlobs(ws: Workspace, findings: Placed[]) {
   const newFiles = new Map<string, string>();
   const oldFiles = new Map<string, string>();
   const big = new Set<string>();
+  for (const [path, g] of gitlinks ?? []) {
+    if (g.new !== null) newFiles.set(path, `Subproject commit ${g.new}`);
+    if (g.old !== null) oldFiles.set(path, `Subproject commit ${g.old}`);
+  }
   const blobOf = (f: Placed) => {
     const p = repoPath(f.path);
     if (p === null) return null;
@@ -291,7 +299,8 @@ export type Found = {
 
 // Validates the finder result of a review run. servers: the MCP servers of the spec. gaps: the servers and skills left out of the spec.
 // rereview: the earlier findings of a re-review at their current lines. asked: the threads of context/questions.md.
-// rules: the project instruction files of the run. addedOnly: validate.ts ValidateInput.addedOnly. An Ending: the finder failed.
+// rules: the project instruction files of the run. addedOnly: validate.ts ValidateInput.addedOnly. gitlinks: readBlobs. An Ending: the
+// finder failed.
 export async function judge(
   o: RunOutcome,
   ws: Workspace,
@@ -302,6 +311,7 @@ export async function judge(
   asked: AskedThread[],
   rules: readonly RuleSource[] = [],
   addedOnly = false,
+  gitlinks?: Gitlinks,
 ): Promise<Ending | Found> {
   const raw = rawOutput(o);
   if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
@@ -312,7 +322,11 @@ export async function judge(
   // Only a finished Agent call returned a report.
   const agents = o.events.filter((e) => e.tool === "Agent" && e.agent !== null && e.status === "ok").map((e) => e.agent as string);
   const causes = parsed.data.findings.flatMap((f) => (f.cause ? [{ ...f, ...f.cause }] : []));
-  const blobs = await readBlobs(ws, [...parsed.data.findings, ...causes, ...earlierCases(earlier, items).cases.map((c) => c.finding)]);
+  const blobs = await readBlobs(
+    ws,
+    [...parsed.data.findings, ...causes, ...earlierCases(earlier, items).cases.map((c) => c.finding)],
+    gitlinks,
+  );
   const check = () =>
     validate({
       result: parsed.data,
