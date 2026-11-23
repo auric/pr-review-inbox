@@ -83,6 +83,29 @@ test("AC-P12: add a note, keep a suggestion on the draft card, edit, delete, and
   await expect(block.locator("li").filter({ hasText: "No retry in the client." })).toHaveCount(1);
   await expect(block.getByRole("button", { name: "Add a note" })).toBeFocused();
 
+  // A wait for a PR of another repository. A bad value and a link of another server show an inline error and block Save.
+  await add.click();
+  await block.getByLabel("Note", { exact: true }).fill("Ship after the export removal.");
+  const waits = block.getByLabel("Waits for PR");
+  const save = block.getByRole("button", { name: "Save" });
+  await waits.fill("PROJ1/sample-repo-3");
+  await expect(waits).toHaveAttribute("aria-invalid", "true");
+  await expect(block).toContainText("Write a PR number, such as 45, PROJ/repo#45, or a PR link.");
+  await expect(save).toBeDisabled();
+  await waits.fill("https://elsewhere.example.test/projects/PROJ1/repos/sample-repo-3/pull-requests/77");
+  await expect(block).toContainText("The link is for another server.");
+  await expect(save).toBeDisabled();
+  await waits.fill("PROJ1/sample-repo-3#77");
+  await expect(waits).not.toHaveAttribute("aria-invalid");
+  await save.click();
+  await expect(said(page, "Note saved.")).toHaveCount(1);
+  const linked = block.locator("li").filter({ hasText: "Ship after the export removal." });
+  await expect(linked).toContainText("PR PROJ1/sample-repo-3#77 open");
+  // Edit shows the full name, so a text edit keeps the link.
+  await linked.getByRole("button", { name: "Edit" }).click();
+  await expect(block.getByLabel("Waits for PR")).toHaveValue("PROJ1/sample-repo-3#77");
+  await page.keyboard.press("Escape");
+
   // Draft replies: the reply run proposes a note for my thread. The card and the block show the same suggestion.
   await page.locator("#replies-btn").click();
   const card = page.locator(`#t-${THREAD} [data-reply-draft]`);

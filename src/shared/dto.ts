@@ -808,12 +808,14 @@ export type NoteDto = {
   updatedAt: number;
   deletedAt?: number | null;
 };
-// project and repo default to the PR's own.
-const noteRefInput = z.object({
-  prId: positiveInt,
-  project: z.string().trim().min(1).max(200).optional(),
-  repo: z.string().trim().min(1).max(200).optional(),
-});
+// project and repo default to the PR's own. Each is one REST path segment: no separator, no space, no dot segment.
+const refSegment = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^(?!\.{1,2}$)[^\s/\\?#%]+$/, "Write a project key and a repository slug, such as PROJ/repo#45.");
+const noteRefInput = z.object({ prId: positiveInt, project: refSegment.optional(), repo: refSegment.optional() });
 const NOTE_EMPTY_TEXT = "Write a note.";
 const NOTE_LONG_TEXT = "The note is too long. Keep it under 100,000 characters.";
 const noteText = z.string().trim().min(1, NOTE_EMPTY_TEXT).max(NOTE_TEXT_MAX, NOTE_LONG_TEXT);

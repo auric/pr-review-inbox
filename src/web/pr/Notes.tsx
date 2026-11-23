@@ -12,11 +12,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type { MetaDto, NoteConflict, NoteDto, NoteUpdateInput } from "../../shared/dto";
+import { foldCase } from "../../shared/me";
 import { api } from "../api";
 import { useMeta } from "../meta";
 import { replyKey } from "../review/data";
 import type { Focus } from "../review/useReview";
-import { chipText, fromText, THREAD_DELETED } from "./notes-model";
+import { useSettings } from "../shell/data";
+import { chipText, fromText, parseWaitsFor, THREAD_DELETED, WAITS_HELP, type WaitsFor, waitsText } from "./notes-model";
 import type { ThreadModel } from "./threads";
 
 const param = (id: number) => ({ param: { id: String(id) } });
@@ -102,6 +104,7 @@ export function Notes(props: {
 }) {
   const { pr, own, threads, announce, focusAfter } = props;
   const meta: MetaDto | undefined = useMeta().data;
+  const baseUrl = useSettings().data?.baseUrl ?? null;
   const list = useNotes(pr).data ?? [];
   const send = useNoteSend(pr);
   const [edit, setEdit] = useState<Edit | null>(null);
@@ -191,10 +194,12 @@ export function Notes(props: {
     announce("Note restored.");
     focusAfter({ id: back.state === "proposed" ? `note-keep-${n.id}` : `note-edit-${n.id}`, block: "nearest", flash: false });
   };
-  // A new note, an edit, or an edit of a suggestion, which keeps it in one step. ref: only a changed PR number goes out.
-  const save = async (e: Edit, text: string, prId: number | null) => {
+  // A new note, an edit, or an edit of a suggestion, which keeps it in one step. ref: only a changed link goes out.
+  const save = async (e: Edit, text: string, next: WaitsFor | null) => {
     const cur = e.id === "new" ? null : list.find((x) => x.id === e.id);
-    const ref = prId === (cur?.ref?.prId ?? null) ? undefined : prId === null ? null : { prId };
+    const was = foldCase(waitsText(cur?.ref ?? null, own));
+    const now = next && foldCase(waitsText({ project: next.project ?? own.project, repo: next.repo ?? own.repo, prId: next.prId }, own));
+    const ref = (now ?? "") === was ? undefined : next;
     const note =
       e.id === "new"
         ? await run(
@@ -226,10 +231,12 @@ export function Notes(props: {
       <NoteBox
         key={id}
         text={n?.text ?? ""}
-        prId={n?.ref?.prId ?? null}
+        waits={waitsText(n?.ref ?? null, own)}
+        own={own}
+        baseUrl={baseUrl}
         busy={busy.has(id)}
         error={error?.id === id ? error.text : null}
-        save={(text, prId) => save(edit, text, prId)}
+        save={(text, ref) => save(edit, text, ref)}
         cancel={() => close(edit)}
       />
     );
@@ -388,29 +395,31 @@ function Deleted(props: { n: NoteDto; busy: boolean; undo: () => void; error: Re
   );
 }
 
-// The inline box of "Add a note" and "Edit": the text, an optional PR number, Save (Ctrl+Enter), Cancel (Esc).
+// The inline box of "Add a note" and "Edit": the text, an optional PR link, Save (Ctrl+Enter), Cancel (Esc).
 function NoteBox(props: {
   text: string;
-  prId: number | null;
+  waits: string;
+  own: { project: string; repo: string };
+  baseUrl: string | null;
   busy: boolean;
   error: string | null;
-  save: (text: string, prId: number | null) => void;
+  save: (text: string, ref: WaitsFor | null) => void;
   cancel: () => void;
 }) {
   const id = useId();
   const ref = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState(props.text);
-  const [pr, setPr] = useState(props.prId === null ? "" : String(props.prId));
+  const [pr, setPr] = useState(props.waits);
   useEffect(() => {
     const ta = ref.current;
     ta?.focus();
     ta?.setSelectionRange(ta.value.length, ta.value.length);
   }, []);
-  const prId = /^\d+$/.test(pr.trim()) && Number(pr.trim()) > 0 ? Number(pr.trim()) : null;
-  const bad = pr.trim() !== "" && prId === null;
+  const parsed = parseWaitsFor(pr, props.own, props.baseUrl);
+  const bad = "error" in parsed ? parsed.error : null;
   const go = () => {
-    if (!text.trim() || bad || props.busy) return;
-    props.save(text.trim(), prId);
+    if (!text.trim() || "error" in parsed || props.busy) return;
+    props.save(text.trim(), parsed.ref);
   };
   // Esc closes only this box. The shell key handler never sees it.
   const keys = (e: KeyboardEvent) => {
@@ -441,26 +450,28 @@ function NoteBox(props: {
       />
       <div className="flex flex-wrap items-center gap-2">
         <label htmlFor={`${id}-pr`} className="text-sm">
-          Waits for PR #
+          Waits for PR
         </label>
         <Input
           id={`${id}-pr`}
           name="waits-for-pr"
-          inputMode="numeric"
           autoComplete="off"
           spellCheck={false}
-          className="w-24"
+          className="w-72 max-w-full"
+          placeholder="45 or PROJ/repo#45"
           value={pr}
-          aria-invalid={bad || undefined}
-          aria-describedby={bad ? `${id}-bad` : undefined}
+          aria-invalid={!!bad || undefined}
+          aria-describedby={bad ? `${id}-help ${id}-bad` : `${id}-help`}
           onChange={(e) => setPr(e.target.value)}
           onKeyDown={keys}
         />
-        <span className="text-xs text-muted-foreground">Optional</span>
+        <span id={`${id}-help`} className="text-xs text-muted-foreground">
+          Optional. {WAITS_HELP}
+        </span>
       </div>
       {bad && (
         <p id={`${id}-bad`} className="m-0 text-sm text-destructive">
-          Write a PR number, such as 45.
+          {bad}
         </p>
       )}
       {props.error && (
@@ -471,7 +482,7 @@ function NoteBox(props: {
       <div className="flex flex-wrap items-center gap-1.5">
         <Button
           size="sm"
-          disabled={props.busy || !text.trim() || bad}
+          disabled={props.busy || !text.trim() || !!bad}
           aria-keyshortcuts="Control+Enter"
           title="Key: Ctrl+Enter"
           onClick={go}

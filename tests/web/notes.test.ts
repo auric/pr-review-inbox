@@ -4,7 +4,16 @@
 // docs/plans/review-v2/spec.md section 2.7: the chip of a linked PR and the "From the thread of" line of a suggestion.
 import { describe, expect, test } from "bun:test";
 import type { CommentDto } from "../../src/shared/dto";
-import { chipText, fromText, THREAD_DELETED } from "../../src/web/pr/notes-model";
+import {
+  chipText,
+  fromText,
+  parseWaitsFor,
+  THREAD_DELETED,
+  WAITS_BAD,
+  WAITS_NO_SERVER,
+  WAITS_OTHER_SERVER,
+  waitsText,
+} from "../../src/web/pr/notes-model";
 import { buildThreads } from "../../src/web/pr/threads";
 
 const own = { project: "PROJ", repo: "repo" };
@@ -51,5 +60,46 @@ describe("notes model", () => {
     expect(fromText({ thread: 60 }, threads)).toBe(THREAD_DELETED);
     expect(fromText({ thread: 99 }, threads)).toBe(THREAD_DELETED);
     expect(fromText({ thread: null }, threads)).toBeNull();
+  });
+
+  test("the Waits for PR field takes a number, PROJ/repo#N, or a PR link of the connected server", () => {
+    console.log(`notes model tests import ${Bun.resolveSync("../../src/web/pr/notes-model", import.meta.dir)}`);
+    const base = "https://git.example.test/bb";
+    const w = (s: string, b: string | null = base) => parseWaitsFor(s, own, b);
+    expect(w("")).toEqual({ ref: null });
+    expect(w("  ")).toEqual({ ref: null });
+    expect(w("45")).toEqual({ ref: { prId: 45 } });
+    expect(w(" #45 ")).toEqual({ ref: { prId: 45 } });
+    expect(w("OTHER/api#3")).toEqual({ ref: { project: "OTHER", repo: "api", prId: 3 } });
+    expect(w("~JDOE/tools#7")).toEqual({ ref: { project: "~JDOE", repo: "tools", prId: 7 } });
+    // Own repository in another case: a plain number goes out.
+    expect(w("proj/REPO#45")).toEqual({ ref: { prId: 45 } });
+    expect(w(`${base}/projects/OTHER/repos/api/pull-requests/3/overview`)).toEqual({ ref: { project: "OTHER", repo: "api", prId: 3 } });
+    expect(w(`${base}/users/jdoe/repos/tools/pull-requests/7`)).toEqual({ ref: { project: "~JDOE", repo: "tools", prId: 7 } });
+    expect(w(`${base}/projects/PROJ/repos/repo/pull-requests/45`)).toEqual({ ref: { prId: 45 } });
+    for (const bad of [
+      "0",
+      "#0",
+      "-1",
+      "4.5",
+      "abc",
+      "OTHER/api",
+      "OTHER/api#",
+      "OTHER/api#0",
+      "a/b/c#1",
+      "OTHER api#3",
+      "99999999999999999999",
+    ])
+      expect(w(bad)).toEqual({ error: WAITS_BAD });
+    expect(w(`${base}/projects/OTHER/repos/api/browse`)).toEqual({ error: WAITS_BAD });
+    expect(w("https://elsewhere.example.test/projects/OTHER/repos/api/pull-requests/3")).toEqual({ error: WAITS_OTHER_SERVER });
+    expect(w(`${base}/projects/OTHER/repos/api/pull-requests/3`, null)).toEqual({ error: WAITS_NO_SERVER });
+  });
+
+  test("the field text of a stored link names another repository only", () => {
+    expect(waitsText(null, own)).toBe("");
+    expect(waitsText({ ...own, prId: 45 }, own)).toBe("45");
+    expect(waitsText({ project: "OTHER", repo: "api", prId: 3 }, own)).toBe("OTHER/api#3");
+    expect(chipText({ project: "proj", repo: "REPO", prId: 45, title: null, state: null }, own)).toBe("PR #45");
   });
 });

@@ -19,7 +19,7 @@ import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
 import type { ApiError, NoteDto, ReviewItemDto, RunConflict, RunDetail, RunDto } from "../../src/shared/dto";
 import type { NoteProposal, ReplyPayload } from "../../src/shared/review";
-import { FAKE_TOKEN, FAKE_USER, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
+import { FAKE_TOKEN, FAKE_USER, key, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
 import { type FakeScenario, readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner, reviewRemote, stubListTools } from "../support/review-fixture";
 
@@ -320,6 +320,54 @@ describe("notes routes", () => {
       expect(after.ref?.state).toBe("MERGED");
       // The refresh is no change of the user: the version stays.
       expect(after.version).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a link to a PR of another repository: create, the 404 sentence, no access, bad names, edit, and MISSING after a refresh",
+    async () => {
+      const h = await setup();
+      const other = repoWrites(h.fake, "OTHER", "lib");
+      const created = await fetch(`${h.fake.url}${other.path}/pull-requests`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${FAKE_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ title: "Lib retry API", fromRef: { id: "refs/heads/api" }, toRef: { id: "refs/heads/main" } }),
+      });
+      const peer = ((await created.json()) as { id: number }).id;
+      const add = (body: unknown) => h.json<NoteDto & ApiError>(`/api/prs/${h.pr}/notes`, { body });
+      const put = (id: number, body: unknown) => h.json<NoteDto & ApiError>(`/api/notes/${id}`, { method: "PUT", body });
+
+      const a = await add({ text: "Wait for the lib API.", ref: { prId: peer, project: "OTHER", repo: "lib" } });
+      expect(a.status).toBe(201);
+      expect(a.body.ref).toEqual({ project: "OTHER", repo: "lib", prId: peer, title: "Lib retry API", state: "OPEN" });
+      // The own number in another repository is no self link.
+      expect((await add({ text: "Lib 2.", ref: { prId: 2, project: "OTHER", repo: "lib" } })).body.error).toBe("No PR #2 in OTHER/lib.");
+      // Own repository in another case is the own PR.
+      expect((await add({ text: "Own.", ref: { prId: 2, project: "proj", repo: "REPO" } })).body.error).toBe(
+        "A note cannot wait for its own PR.",
+      );
+      for (const bad of ["..", ".", "a/b", "a b", "a?b", "a#b", "a%2Fb", "a\\b", ""])
+        expect((await add({ text: "Bad.", ref: { prId: 3, project: bad, repo: "lib" } })).status).toBe(400);
+      // No access: the link stays without a state.
+      h.fake.routes[key("GET", "/rest/api/1.0/projects/SECRET/repos/vault/pull-requests/4")] = {
+        status: 403,
+        body: { errors: [{ message: "No." }] },
+      };
+      const locked = await add({ text: "Wait for the vault.", ref: { prId: 4, project: "SECRET", repo: "vault" } });
+      expect(locked.status).toBe(201);
+      expect(locked.body.ref).toEqual({ project: "SECRET", repo: "vault", prId: 4, title: null, state: null });
+
+      // Edit: a same-repository link moves to the other repository.
+      const b = await add({ text: "Move me." });
+      const moved = await put(b.body.id, { version: 0, ref: { prId: peer, project: "OTHER", repo: "lib" } });
+      expect(moved.body.ref).toMatchObject({ project: "OTHER", repo: "lib", prId: peer, state: "OPEN" });
+
+      // The PR goes away: the refresh gives MISSING and the GET does not fail.
+      delete h.fake.routes[key("GET", `${other.path}/pull-requests/${peer}`)];
+      h.db.query("UPDATE pr_note SET ref_checked_at = ref_checked_at - $age").run({ age: LINK_AGE_MS + 1 });
+      const list = await h.notes();
+      expect(list.filter((n) => n.ref?.repo === "lib").map((n) => n.ref?.state)).toEqual(["MISSING", "MISSING"]);
     },
     SLOW,
   );

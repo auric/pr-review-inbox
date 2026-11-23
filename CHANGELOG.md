@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Notes: "Waits for PR" now also takes a pull request of another repository. Write "PROJ/repo#45" or paste the pull request link. A bad value or a link of another server shows an error under the field.
 - Review and Build a Jira task: the CodeGraph tools of a run can no longer open the index of another project, such as your own clone. They read only the index of the run's code.
 - Build a Jira task: a second read-only Claude run now checks each new plan against the code before you approve it. A blocker or major problem starts one more plan run that fixes the plan. The plan screen says what the check found, and the Plan tab lists the contracts, the risks, and each problem with its fix. "Check each plan with a second Claude run" in Settings, Tasks turns the check off.
 - Build a Jira task: after Hold or another action in the More menu, the focus now stays on the new main button, for example Continue. Before, it sometimes went back to More.

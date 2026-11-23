@@ -151,7 +151,7 @@ The post confirm lists the drafts that cannot post now in groups by reason: out 
 
 ### PR notes
 
-The Notes block under the description holds your notes for the pull request, such as "No retry in the client" or "Ship after the scheduler PR". "Add a note" opens a box with an optional "Waits for PR #" field. A note has no length limit, and a pull request can hold any number of notes. A linked PR shows a chip with its state: open, merged, declined, or not found. Delete asks no confirm and offers Undo for 10 seconds. Claude reads your notes before each review, reply, fix, and Ask run, and follows them. It says so when the code or a newer message contradicts a note.
+The Notes block under the description holds your notes for the pull request, such as "No retry in the client" or "Ship after the scheduler PR". "Add a note" opens a box with an optional "Waits for PR" field. It takes a number such as 45, "PROJ/repo#45" for a pull request of another repository, or a pull request link of your Bitbucket server. A note has no length limit, and a pull request can hold any number of notes. A linked PR shows a chip with its state: open, merged, declined, or not found. Delete asks no confirm and offers Undo for 10 seconds. Claude reads your notes before each review, reply, fix, and Ask run, and follows them. It says so when the code or a newer message contradicts a note.
 
 ![The Notes block with a kept note that waits for a merged PR, and a suggestion with Keep, Edit, and Dismiss](docs/screenshots/notes.webp)
 
