@@ -1,6 +1,6 @@
 # Submodule pull request context
 
-Status: Designed 2026-11-23. Not started. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. The user accepted the section 11 answers on 2026-11-23. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
+Status: Designed 2026-11-23. WP-RP0, WP-SM0, WP-SM1, and WP-SM2 are built (2026-11-23). Open: WP-SM3, Gates SM-P and SM-B, and WP-SM4. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. The user accepted the section 11 answers on 2026-11-23. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
 
 ## 1. Request
 
