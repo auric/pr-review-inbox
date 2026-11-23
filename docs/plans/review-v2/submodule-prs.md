@@ -1,6 +1,6 @@
 # Submodule pull request context
 
-Status: Designed 2026-11-23. Not started. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
+Status: Designed 2026-11-23. Not started. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. The user accepted the section 11 answers on 2026-11-23. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
 
 ## 1. Request
 
@@ -293,20 +293,20 @@ Three cases in fixtures/eval/probe/. `case.json` gets `submodule: { path, url }`
 - jobs.ts, catalog.ts, and dto.ts are also in the stack packages. Run one package at a time, in the wave RP order of review-ledger.md section 4.
 - The tests use the fake claude only (tests/support/no-real-claude.ts).
 
-## 11. Open questions
+## 11. Questions (decided by the user on 2026-11-23)
 
-1. Should Ask, discuss, and fix runs get the file? Recommended: after WP-SM4, Ask and discuss first, as stacked-prs.md question 5.
-2. A re-review range: merge base..head or range base..head? Recommended: merge base, because the whole PR relies on the moved commit.
-3. Should the fetch have its own time cap? Recommended: no in v1. Gate SM-B records the first fetch time. Add a cap only when a fetch blocks a run.
-4. Should an open PR count when its commits hold the new commit but its head moved on? Recommended: yes, in a later package. It needs the PR head and target in the cache and two `merge-base --is-ancestor` checks. v1 keeps the exact head match.
-5. May a finding anchor on the gitlink line, for example "pins a commit of an unmerged branch"? Recommended: not in v1. It needs a fact that Bitbucket accepts an inline comment on a submodule path. Add that fact (U-SM1) to the G20 run when the user agrees.
-6. Should a prompt line treat a commit that is not on the default branch as a question for the author? Recommended: not in v1. The file and the run line show the PR state, and Gate SM-B shows the need.
-7. Should an added submodule show its file list? Recommended: not in v1. A whole repository is not a diff.
-8. Old commit missing, but a PR matched: show the PR's own diff instead? Recommended: not in v1. Gate SM-B counts how often it happens.
-9. Nested submodules (depth 2)? Recommended: not in v1.
-10. Are the caps right: 5 submodules, 200 KB, 20 commits, 200 files? Recommended: yes, until Gate SM-B shows a cut that lost a needed fact.
-11. Should rl-git read the submodule cache? Recommended: no. git-mcp binds one cache, and one text file is enough for v1.
-12. Should "submodules" ship with "stack" in one version step? Recommended: yes, the next step after 2.9.
+1. Should Ask, discuss, and fix runs get the file? Decided by the user on 2026-11-23: after WP-SM4, Ask and discuss first, as stacked-prs.md question 5.
+2. A re-review range: merge base..head or range base..head? Decided by the user on 2026-11-23: merge base, because the whole PR relies on the moved commit.
+3. Should the fetch have its own time cap? Decided by the user on 2026-11-23: no in v1. Gate SM-B records the first fetch time. Add a cap only when a fetch blocks a run.
+4. Should an open PR count when its commits hold the new commit but its head moved on? Decided by the user on 2026-11-23: yes, in a later package. It needs the PR head and target in the cache and two `merge-base --is-ancestor` checks. v1 keeps the exact head match.
+5. May a finding anchor on the gitlink line, for example "pins a commit of an unmerged branch"? Decided by the user on 2026-11-23: not in v1. It needs a fact that Bitbucket accepts an inline comment on a submodule path. Add that fact (U-SM1) to the G20 run when the user agrees.
+6. Should a prompt line treat a commit that is not on the default branch as a question for the author? Decided by the user on 2026-11-23: not in v1. The file and the run line show the PR state, and Gate SM-B shows the need.
+7. Should an added submodule show its file list? Decided by the user on 2026-11-23: not in v1. A whole repository is not a diff.
+8. Old commit missing, but a PR matched: show the PR's own diff instead? Decided by the user on 2026-11-23: not in v1. Gate SM-B counts how often it happens.
+9. Nested submodules (depth 2)? Decided by the user on 2026-11-23: not in v1.
+10. Are the caps right: 5 submodules, 200 KB, 20 commits, 200 files? Decided by the user on 2026-11-23: yes, until Gate SM-B shows a cut that lost a needed fact.
+11. Should rl-git read the submodule cache? Decided by the user on 2026-11-23: no. git-mcp binds one cache, and one text file is enough for v1.
+12. Should "submodules" ship with "stack" in one version step? Decided by the user on 2026-11-23: yes, the next step after 2.9.
 
 ## 12. Out of scope
 

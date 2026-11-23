@@ -1,6 +1,6 @@
 # Stacked pull requests
 
-Status: Designed 2026-11-20. Not started. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
+Status: Designed 2026-11-20. Not started. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
 
 ## 1. Request
 
@@ -65,7 +65,7 @@ Pick B. The user chose the app route.
 | K16 | The peer section leaves out the PRs of the stack section. | One PR, one line. |
 | K17 | Code: one fetch of the parent's target branch to `refs/rl/<this PR id>/parent-target`. New alias PARENT_BASE. No PARENT alias, no child code. | TARGET is already the parent head. PARENT_BASE is an ancestor of TARGET, so `resolve` needs no new pin. |
 | K18 | Prompt lines only when the run has a stack. Parent lines and child lines are separate. | K3. |
-| K19 | No chip and no setting in v1. One run log footer line from `review_run.related_json` (WP-RP0, shared with submodule-prs.md). Proposed 2026-11-23, waits for the user. | The user must see what the run read. The user wants light UX (question 6). |
+| K19 | No chip and no setting in v1. One run log footer line from `review_run.related_json` (WP-RP0, shared with submodule-prs.md). Decided by the user on 2026-11-23. | The user must see what the run read. The user wants light UX (question 6). |
 | K20 | Proof: 3 probe cases (Gate SK-P) and a manual check of 5 real stacked PRs (Gate SK-B). | The local set has no stack data (section 2). |
 | K21 | WP-SK4 makes "stack" a default and raises REVIEW_PROMPT_VERSION with the next planned step. | `eval:ab` refuses a baseline with another version (review-ledger.md section 2). |
 | K22 | The rule "a child that relies on this PR's contract is a caller to check" is not in v1. The child lines cover a gap that a child names. | Child code is not in the cache. The child builds on this head, so it already fits this change (question 4). |
@@ -224,7 +224,7 @@ Interactions:
 
 ### 5.7 UI
 
-- Proposed 2026-11-23, waits for the user: no chip and no setting in v1. Only config.json sets variants (review-ledger.md section 1).
+- Decided by the user on 2026-11-23: no chip and no setting in v1. Only config.json sets variants (review-ledger.md section 1).
 - With "stack" on and a stack found, the run log footer gets one line from `review_run.related_json` (WP-RP0, shared with submodule-prs.md). Without a stack, it gets no line (K3).
 - With "stack" on, the server log line of jobs.ts:616 gets one more part. It is ", stack: parent #N, C children", ", stack: none", or ", stack: not read (<reason>)".
 
@@ -341,29 +341,29 @@ Run: `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G9,G12,G20`. The t
 ## 12. Open questions
 
 1. Should the branch model's development and production branches also never link a stack? It covers a git-flow repository with an open develop-into-main PR. Recommended: yes, if Gate G20 shows the read works with a non-admin token. Else the default branch only.
-   - Recommended default (2026-11-23, waits for the user): The default branch only. Add the branch model after Gate G20 shows that a non-admin token can read it.
+   - Decided by the user on 2026-11-23: The default branch only. Add the branch model after Gate G20 shows that a non-admin token can read it.
 2. Several first-level parent candidates: no parent part (K10), or a list without the alias? Recommended: no parent part, because a wrong parent misleads the review.
-   - Recommended default (2026-11-23, waits for the user): Several candidates show no parent part (K10).
+   - Decided by the user on 2026-11-23: Several candidates show no parent part (K10).
 3. Should the section hold the open thread texts of the parent? Recommended: not in v1. Gate SK-B records each case where a parent thread would have helped.
-   - Recommended default (2026-11-23, waits for the user): No parent thread texts in v1.
+   - Decided by the user on 2026-11-23: No parent thread texts in v1.
 4. Should rl-git get child code (a CHILD alias)? Recommended: not in v1. The child builds on this head, so it already fits this change.
-   - Recommended default (2026-11-23, waits for the user): No CHILD alias in v1.
+   - Decided by the user on 2026-11-23: No CHILD alias in v1.
 5. Should Ask, discuss, reply, and fix runs get the section? Recommended: after WP-SK4, Ask and discuss first.
-   - Recommended default (2026-11-23, waits for the user): Review runs only. After WP-SK4, add Ask and discuss first.
+   - Decided by the user on 2026-11-23: Review runs only. After WP-SK4, add Ask and discuss first.
 6. Should the PR view show a "Stacked on #N" chip from stored rows? Recommended: not in v1. The user wants light UX, and Gate SK-B shows the need.
-   - Recommended default (2026-11-23, waits for the user): No chip. One run log line through `review_run.related_json` (WP-RP0).
+   - Decided by the user on 2026-11-23: No chip. One run log line through `review_run.related_json` (WP-RP0).
 7. Should the stack section and the WP-JC5 task.md list drop each other's PRs? Recommended: no. They are different files, and each line states its relation.
-   - Recommended default (2026-11-23, waits for the user): Do not join the stack section with the WP-JC5 task.md list.
+   - Decided by the user on 2026-11-23: Do not join the stack section with the WP-JC5 task.md list.
 8. Keep lines 7 and 8 (parent commits that this change lacks)? They add a tool call when the child is up to date. Recommended: keep. Gate SK-B records noise from them.
-   - Recommended default (2026-11-23, waits for the user): Keep lines 7 and 8. Gate SK-B records the noise.
+   - Decided by the user on 2026-11-23: Keep lines 7 and 8. Gate SK-B records the noise.
 9. Should WP-SK4 share the next planned version step? Recommended: yes, so the natural-set baseline survives one step fewer.
-   - Recommended default (2026-11-23, waits for the user): Yes. WP-SK4 and WP-SM4 share the next version step after 2.9.
+   - Decided by the user on 2026-11-23: Yes. WP-SK4 and WP-SM4 share the next version step after 2.9.
 10. The task own review of stacked part PRs (self-approved-plans.md SA-2) knows its stack from task rows. Recommended: out of scope. A later package can feed the same section from those rows.
-   - Recommended default (2026-11-23, waits for the user): SA-2 task-part stacks stay out of scope.
+   - Decided by the user on 2026-11-23: SA-2 task-part stacks stay out of scope.
 11. Are the caps right: 3 up, 3 children, 8 KB, 60 s for the fetch? Recommended: yes, until Gate SK-B shows a cut or a timeout that lost a needed fact.
-   - Recommended default (2026-11-23, waits for the user): Keep the caps until Gate SK-B shows a lost fact.
+   - Decided by the user on 2026-11-23: Keep the caps until Gate SK-B shows a lost fact.
 12. Is a question right for a gap that a child names (lines 10 and 13)? It turns a confirmable gap into a question. Recommended: yes, because the app cannot read child code, and the author answers in one line. Gate SK-B and probe-stack-child-fills check it.
-   - Recommended default (2026-11-23, waits for the user): Yes, a question for a gap that a child PR names.
+   - Decided by the user on 2026-11-23: Yes, a question for a gap that a child PR names.
 
 ## 13. Out of scope
 
