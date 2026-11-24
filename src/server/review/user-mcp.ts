@@ -15,7 +15,7 @@ import { DOC_SERVERS, GIT_SERVER } from "./catalog";
 import { childEnv, killTree, NAME, type UserMcpEntry, type UserServerSpec } from "./claude";
 import { claudeConfigDir, enabledPlugins, readJson } from "./skills";
 
-const LIST_TIMEOUT_MS = 10_000;
+export const LIST_TIMEOUT_MS = 10_000;
 const MAX_PAGES = 10;
 const MAX_DESCRIPTION = 500;
 // The app's own servers keep these names.

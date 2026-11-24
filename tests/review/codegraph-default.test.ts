@@ -200,13 +200,35 @@ type Call = {
   argv: string[];
   cwd: string;
   mcp: Record<string, { command: string; args: string[]; env: Record<string, string> }> | null;
-  agents: Record<string, { prompt: string }>;
+  agents: Record<string, { prompt: string; tools?: string[] }>;
 };
 type CgCall = { cmd: string; args: string[]; cwd: string; env: Record<string, string | null> };
 const flag = (argv: string[], name: string) => argv[argv.indexOf(name) + 1] as string;
 const NONE = { read: [], skipped: [], unavailable: [], notChecked: [] };
 const RESULT = { summary: "One line.", risks: [], questions: [], coverage: NONE, findings: [] };
 const LINE = codegraphLine(["mcp__codegraph__codegraph_explore"]);
+const FULL_NAME = /^mcp__([A-Za-z0-9-]+)__([A-Za-z0-9_-]+)$/;
+
+// The CLI exposes a server tool only as mcp__<server>__<tool>. In each agent prompt of a run, a tool of a run server appears only by
+// that full name, and each full name in a prompt is in the agent tools and in --allowedTools. Returns the full names in the prompts.
+function expectFullToolNames(c: Call): string[] {
+  const allowed = flag(c.argv, "--allowedTools").split(",");
+  const denied = c.argv.includes("--disallowedTools") ? flag(c.argv, "--disallowedTools").split(",") : [];
+  const tools = [...allowed, ...denied].flatMap((t) => FULL_NAME.exec(t)?.slice(2, 3) ?? []);
+  const seen: string[] = [];
+  for (const [agent, def] of Object.entries(c.agents)) {
+    for (const tool of tools)
+      expect({ agent, tool, bare: new RegExp(`(?<!\\w)${tool}(?!\\w)`).test(def.prompt) }).toMatchObject({ bare: false });
+    for (const full of def.prompt.match(/mcp__[A-Za-z0-9-]+__[A-Za-z0-9_-]+/g) ?? []) {
+      expect({ agent, full, tool: def.tools?.includes(full), allowed: allowed.includes(full) }).toMatchObject({
+        tool: true,
+        allowed: true,
+      });
+      seen.push(full);
+    }
+  }
+  return seen;
+}
 
 // command: the codegraph argv prefix of the app. Absent: a wrapper of the fake codegraph that logs each call. mode: FAKE_CG.
 async function setup(o: { mode?: string; command?: string[]; pick?: boolean } = {}) {
@@ -231,8 +253,15 @@ async function setup(o: { mode?: string; command?: string[]; pick?: boolean } = 
   );
   const profiles: ProfileInput[] = [
     general,
-    { ...general, id: "cg", name: "CodeGraph", variants: ["codegraph"] },
-    { ...general, id: "pick", name: "Pick", variants: ["codegraph"], mcp: [{ server: "cg", tools: ["codegraph_explore"] }] },
+    { ...general, id: "cg", name: "CodeGraph", variants: ["codegraph"], reviewer: { ...general.reviewer, mode: "always" } },
+    {
+      ...general,
+      id: "pick",
+      name: "Pick",
+      variants: ["codegraph"],
+      mcp: [{ server: "cg", tools: ["codegraph_explore"] }],
+      reviewer: { ...general.reviewer, mode: "always" },
+    },
   ];
   const dir = join(root, "data");
   writeConfig(dir, { baseUrl: "http://127.0.0.1:9", userSlug: FAKE_USER, notifications: false, markAi: false, profiles });
@@ -289,7 +318,8 @@ async function setup(o: { mode?: string; command?: string[]; pick?: boolean } = 
       (c) => c.argv?.includes("-p") && !flag(c.argv, "--json-schema").includes('"verdicts"'),
     ) as Call;
   const cg = () => (existsSync(log) ? readRecords<CgCall>(log) : []);
-  return { root, dir, run, finder, cg, wrapper };
+  const runs = () => readRecords<Call>(join(root, "calls.jsonl")).filter((c) => c.argv?.includes("-p"));
+  return { root, dir, run, finder, runs, cg, wrapper };
 }
 
 describe("variant codegraph: review runs with the fake CLI (review-v3.md WP-V5)", () => {
@@ -329,9 +359,20 @@ describe("variant codegraph: review runs with the fake CLI (review-v3.md WP-V5)"
       expect(calls.every((x) => !x.args.includes("npx"))).toBe(true);
       const s = c.mcp?.codegraph as { command: string; args: string[]; env: Record<string, string> };
       expect([s.command, ...s.args].map((a) => a.toLowerCase())).toEqual(
-        [process.execPath, MAIN, "--codegraph-mcp", "--", process.execPath, h.wrapper, "serve", "--mcp", "--path", repo, "--no-watch"].map(
-          (a) => a.toLowerCase(),
-        ),
+        [
+          process.execPath,
+          MAIN,
+          "--codegraph-mcp",
+          "codegraph",
+          "--",
+          process.execPath,
+          h.wrapper,
+          "serve",
+          "--mcp",
+          "--path",
+          repo,
+          "--no-watch",
+        ].map((a) => a.toLowerCase()),
       );
       expect(s.env).toMatchObject({
         CODEGRAPH_NO_DAEMON: "1",
@@ -343,6 +384,8 @@ describe("variant codegraph: review runs with the fake CLI (review-v3.md WP-V5)"
       expect(flag(c.argv, "--allowedTools")).not.toContain("codegraph_note");
       expect(flag(c.argv, "--disallowedTools").split(",")).toContain("mcp__codegraph__codegraph_note");
       expect(c.agents["rl-main"]?.prompt.split("\n")).toContain(LINE);
+      expect(Object.keys(c.agents)).toContain("rl-reviewer");
+      expect(h.runs().flatMap(expectFullToolNames)).toContain("mcp__codegraph__codegraph_explore");
       expect(existsSync(join(h.dir, "cache", "codegraph", "PROJ", "repo", "codegraph.db"))).toBe(true);
       expect(d.run.summary?.coverage.unavailable.filter((g) => g.startsWith("CodeGraph"))).toEqual([]);
     },
@@ -408,6 +451,8 @@ describe("variant codegraph: review runs with the fake CLI (review-v3.md WP-V5)"
       expect(Object.keys(c.mcp ?? {})).not.toContain("codegraph");
       expect(flag(c.argv, "--allowedTools")).toContain("mcp__cg__codegraph_explore");
       expect(c.agents["rl-main"]?.prompt).not.toContain(LINE);
+      expect(Object.keys(c.agents)).toContain("rl-reviewer");
+      expect(h.runs().flatMap(expectFullToolNames)).toContain("mcp__cg__codegraph_explore");
     },
     SLOW,
   );

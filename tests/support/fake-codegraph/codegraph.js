@@ -26,12 +26,16 @@ const env = Object.fromEntries(keys.map((k) => [k, process.env[k] ?? null]));
 if (process.env.FAKE_CG_LOG) appendFileSync(process.env.FAKE_CG_LOG, `${JSON.stringify({ cmd, args: rest, cwd: process.cwd(), env })}\n`);
 
 if (cmd === "serve") {
-  const server = new McpServer({ name: "fake-codegraph", version: "1.0.0" });
+  // Bare tool names as in codegraph 1.6.3 server-instructions.js. The proxy must write the full names.
+  const server = new McpServer(
+    { name: "fake-codegraph", version: "1.0.0" },
+    { instructions: "Call `codegraph_explore` first. codegraph_note writes notes. codegraph_explorer is no tool." },
+  );
   // projectPath as in codegraph 1.6.3: it opens the index above any path. The app's proxy must hide and refuse it.
   server.registerTool(
     "codegraph_explore",
     {
-      description: "Explores the fake index.",
+      description: "Explores the fake index. codegraph_note writes notes.",
       inputSchema: { query: z.string().optional(), projectPath: z.string().optional() },
       annotations: mode === "unmarked" ? {} : { readOnlyHint: true },
     },

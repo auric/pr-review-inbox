@@ -5,6 +5,7 @@
 - Review: Ctrl+Enter on the "Include <file> in runs" switch of an attachment now starts the review and keeps the file included. Before, it also turned the attachment off, so the run got no attachment.
 - Notes: "Waits for PR" now also takes a pull request of another repository. Write "PROJ/repo#45" or paste the pull request link. A bad value or a link of another server shows an error under the field.
 - Explain: Explain looks in the code and the linked task before it asks you a question.
+- Review and Build a Jira task: the CodeGraph guidance now names each tool by the name that Claude can call. Before, Claude sometimes called a CodeGraph tool by its short name, and the call failed with "No such tool".
 - Review and Build a Jira task: the CodeGraph tools of a run can no longer open the index of another project, such as your own clone. They read only the index of the run's code.
 - Build a Jira task: a second read-only Claude run now checks each new plan against the code before you approve it. A blocker or major problem starts one more plan run that fixes the plan. The plan screen says what the check found, and the Plan tab lists the contracts, the risks, and each problem with its fix. "Check each plan with a second Claude run" in Settings, Tasks turns the check off.
 - Build a Jira task: after Hold or another action in the More menu, the focus now stays on the new main button, for example Continue. Before, it sometimes went back to More.

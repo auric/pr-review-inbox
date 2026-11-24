@@ -1301,6 +1301,7 @@ describe("editable profiles (M4)", () => {
         [
           join(import.meta.dir, "../../src/server/main.ts"),
           "--codegraph-mcp",
+          "cg",
           "--",
           process.execPath,
           FAKE_CG,

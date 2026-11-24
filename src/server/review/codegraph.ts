@@ -31,7 +31,13 @@ export function codegraphIndex(entry: UserMcpEntry): number {
 // dist/upgrade/update-check: CODEGRAPH_NO_UPDATE_CHECK or DO_NOT_TRACK turns the update check off.
 // The run's entry: the user's command up to `serve`, then a fixed project path. Other serve options of the user drop out.
 // The command runs behind the app's proxy (codegraph-mcp.ts). main is the script that main.ts runs. A compiled binary takes no main.
-export function codegraphEntry(entry: Extract<UserMcpEntry, { type: "stdio" }>, repo: string, main = Bun.main): UserMcpEntry {
+// server: the mcp.json key of the entry. The proxy writes it into the full tool names of the server instructions.
+export function codegraphEntry(
+  entry: Extract<UserMcpEntry, { type: "stdio" }>,
+  repo: string,
+  server: string,
+  main = Bun.main,
+): UserMcpEntry {
   const i = codegraphIndex(entry);
   return {
     type: "stdio",
@@ -39,6 +45,7 @@ export function codegraphEntry(entry: Extract<UserMcpEntry, { type: "stdio" }>, 
     args: [
       ...(COMPILED ? [] : [main]),
       "--codegraph-mcp",
+      server,
       "--",
       entry.command,
       ...entry.args.slice(0, i + 1),

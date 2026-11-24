@@ -8,7 +8,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, CallToolResultSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
-import { killTree } from "./claude";
+import { killTree, NAME } from "./claude";
+import { LIST_TIMEOUT_MS } from "./user-mcp";
 
 const PROJECT_PATH = "projectPath";
 // The CLI owns the tool deadline. This is the largest setTimeout delay.
@@ -30,14 +31,29 @@ export function hideProjectPath(tool: Tool): Tool {
   };
 }
 
-// The proxy server for a connected codegraph client. Only tools/list and tools/call pass.
-export function createCodegraphProxy(client: Client): Server {
-  const server = new Server({ name: "codegraph", version: "1" }, { capabilities: { tools: {} }, instructions: client.getInstructions() });
-  server.setRequestHandler(ListToolsRequestSchema, async (req, extra) => {
+// The CLI exposes a tool only as mcp__<server>__<tool> (code.claude.com/docs/en/mcp). codegraph 1.6.3 server-instructions.js and the
+// tool descriptions of tools.js name the bare tool, and a call by that name fails with "No such tool". Tool results keep their text,
+// because they hold source code.
+export function fullToolNames(text: string, server: string, tools: string[]): string {
+  const names = tools.filter((t) => NAME.test(t));
+  if (!names.length) return text;
+  return text.replace(new RegExp(`(?<!\\w)(?:${names.join("|")})(?!\\w)`, "g"), (t) => `mcp__${server}__${t}`);
+}
+
+// The proxy server for a connected codegraph client. Only tools/list and tools/call pass. server: the mcp.json key of the proxy.
+// tools: the tool names of the client.
+export function createCodegraphProxy(client: Client, server: string, tools: string[]): Server {
+  const text = client.getInstructions();
+  const proxy = new Server(
+    { name: "codegraph", version: "1" },
+    { capabilities: { tools: {} }, instructions: text && fullToolNames(text, server, tools) },
+  );
+  proxy.setRequestHandler(ListToolsRequestSchema, async (req, extra) => {
     const r = await client.listTools(req.params, { signal: extra.signal, timeout: NO_DEADLINE_MS });
-    return { ...r, tools: r.tools.map(hideProjectPath) };
+    const full = (t: Tool) => (t.description ? { ...t, description: fullToolNames(t.description, server, tools) } : t);
+    return { ...r, tools: r.tools.map((t) => full(hideProjectPath(t))) };
   });
-  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
+  proxy.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     if (req.params.arguments && Object.hasOwn(req.params.arguments, PROJECT_PATH))
       return { content: [{ type: "text", text: REFUSED }], isError: true };
     return client.request({ method: "tools/call", params: req.params }, CallToolResultSchema, {
@@ -45,14 +61,14 @@ export function createCodegraphProxy(client: Client): Server {
       timeout: NO_DEADLINE_MS,
     });
   });
-  return server;
+  return proxy;
 }
 
-// argv: -- <codegraph command> serve --mcp ... The child gets the proxy's environment and working folder.
+// argv: <server> -- <codegraph command> serve --mcp ... The child gets the proxy's environment and working folder.
 export async function runCodegraphMcp(argv: string[]) {
-  const [command, ...args] = argv[0] === "--" ? argv.slice(1) : argv;
-  if (!command) {
-    console.error("usage: --codegraph-mcp -- <codegraph command> serve --mcp --path <repo>");
+  const [server, sep, command, ...args] = argv;
+  if (!server || !NAME.test(server) || sep !== "--" || !command) {
+    console.error("usage: --codegraph-mcp <server> -- <codegraph command> serve --mcp --path <repo>");
     process.exit(2);
   }
   const env: Record<string, string> = {};
@@ -77,7 +93,21 @@ export async function runCodegraphMcp(argv: string[]) {
     await end(1);
     return;
   }
+  const tools: string[] = [];
+  try {
+    const signal = AbortSignal.timeout(LIST_TIMEOUT_MS);
+    let cursor: string | undefined;
+    do {
+      const r = await client.listTools(cursor ? { cursor } : undefined, { signal, timeout: LIST_TIMEOUT_MS });
+      tools.push(...r.tools.map((t) => t.name));
+      cursor = r.nextCursor;
+    } while (cursor);
+  } catch (e) {
+    console.error(`codegraph did not list its tools: ${(e as Error).message}`);
+    await end(1);
+    return;
+  }
   process.stdin.on("end", () => void end(0));
   process.stdin.on("close", () => void end(0));
-  await createCodegraphProxy(client).connect(new StdioServerTransport());
+  await createCodegraphProxy(client, server, tools).connect(new StdioServerTransport());
 }

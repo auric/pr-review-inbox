@@ -904,7 +904,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const failed = await indexRepo(j, entry, repo, ref);
     if (j.cancelled) return null;
     if (failed) return `CodeGraph: no index (${failed})`;
-    const pinned = codegraphEntry(entry, repo, MAIN_ENTRY);
+    const pinned = codegraphEntry(entry, repo, APP_SERVER, MAIN_ENTRY);
     let tools: McpToolDto[];
     try {
       tools = await listUserTools(pinned);
@@ -939,7 +939,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         if (failed) {
           delete user.servers[key];
           user.gaps.push(`MCP server ${key}: no codegraph index (${failed})`);
-        } else if (s.user.type === "stdio") user.servers[key] = { ...s, user: codegraphEntry(s.user, repo, MAIN_ENTRY) };
+        } else if (s.user.type === "stdio") user.servers[key] = { ...s, user: codegraphEntry(s.user, repo, key, MAIN_ENTRY) };
     }
     // A picked codegraph server wins, so one index serves the run.
     const own =

@@ -1014,7 +1014,7 @@ describe("implement run with the profile tools", () => {
       // CodeGraph indexes the worktree repo/ of the part, not a cache snapshot.
       const cg = call.mcp?.cg?.args ?? [];
       expect(cg.slice(-3).map((x) => x.toLowerCase())).toEqual(["--path", s.wt.repo.toLowerCase(), "--no-watch"]);
-      expect(cg.slice(1, 3)).toEqual(["--codegraph-mcp", "--"]);
+      expect(cg.slice(1, 4)).toEqual(["--codegraph-mcp", "cg", "--"]);
       // The skills sit in context/, outside repo/, and the stdin names them there.
       expect(call.context?.["skills/tdd/SKILL.md"]).toContain("Write the test first.");
       expect(call.stdin).toContain("Before you start, read ./context/skills/tdd/SKILL.md and follow it for the whole run.");

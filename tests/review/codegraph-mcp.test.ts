@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { hideProjectPath, REFUSED } from "../../src/server/review/codegraph-mcp";
+import { fullToolNames, hideProjectPath, REFUSED } from "../../src/server/review/codegraph-mcp";
 
 const MAIN = join(import.meta.dir, "../../src/server/main.ts");
 const FAKE_CG = join(import.meta.dir, "../support/fake-codegraph/codegraph.js");
@@ -18,7 +18,7 @@ const SLOW = 30_000;
 let n = 0;
 function fixture() {
   const log = join(root, `calls-${n++}.jsonl`);
-  const argv = [MAIN, "--codegraph-mcp", "--", process.execPath, FAKE_CG, "serve", "--mcp"];
+  const argv = [MAIN, "--codegraph-mcp", "cg", "--", process.execPath, FAKE_CG, "serve", "--mcp"];
   const env: Record<string, string> = { FAKE_CG_LOG: log };
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] ??= v;
   const calls = () =>
@@ -74,6 +74,28 @@ describe("codegraph MCP proxy", () => {
     });
   });
 
+  test("fullToolNames writes the full name of each listed tool and keeps other words", () => {
+    expect(fullToolNames("Use `a_b`, a_b. Not a_bc or x_a_b or mcp__s__a_b.", "s", ["a_b", "bad name"])).toBe(
+      "Use `mcp__s__a_b`, mcp__s__a_b. Not a_bc or x_a_b or mcp__s__a_b.",
+    );
+    expect(fullToolNames("text", "s", [])).toBe("text");
+  });
+
+  test(
+    "the server instructions name each tool by the full name that the CLI exposes",
+    async () => {
+      const client = await connect(fixture());
+      try {
+        expect(client.getInstructions()).toBe(
+          "Call `mcp__cg__codegraph_explore` first. mcp__cg__codegraph_note writes notes. codegraph_explorer is no tool.",
+        );
+      } finally {
+        await client.close();
+      }
+    },
+    SLOW,
+  );
+
   test(
     "lists the tools without projectPath and keeps the annotations",
     async () => {
@@ -84,6 +106,7 @@ describe("codegraph MCP proxy", () => {
         expect(Object.keys(explore?.inputSchema.properties ?? {})).toEqual(["query"]);
         expect(explore?.inputSchema.required ?? []).not.toContain("projectPath");
         expect(explore?.annotations?.readOnlyHint).toBe(true);
+        expect(explore?.description).toBe("Explores the fake index. mcp__cg__codegraph_note writes notes.");
         expect(tools.map((t) => t.name).sort()).toEqual(["codegraph_explore", "codegraph_note"]);
       } finally {
         await client.close();

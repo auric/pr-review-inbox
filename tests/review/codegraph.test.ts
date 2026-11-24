@@ -50,12 +50,13 @@ describe("codegraph detection", () => {
       CODEGRAPH_DIR: "x",
       KEEP: "1",
     });
-    expect(codegraphEntry(user, "/data/runs/7/work/repo", "/app/main.ts")).toEqual({
+    expect(codegraphEntry(user, "/data/runs/7/work/repo", "cg", "/app/main.ts")).toEqual({
       type: "stdio",
       command: process.execPath,
       args: [
         "/app/main.ts",
         "--codegraph-mcp",
+        "cg",
         "--",
         "npx",
         "-y",

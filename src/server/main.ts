@@ -57,7 +57,7 @@ export function stopOnSignals(stop: () => Promise<unknown>, exit: (code: number)
 }
 
 // A compiled binary puts extra entries before --git-mcp in argv (U13), so the flag position varies.
-// The codegraph child command follows --codegraph-mcp, so that flag goes first.
+// The server key and the codegraph child command follow --codegraph-mcp, so that flag goes first.
 const codegraphMcpAt = process.argv.indexOf("--codegraph-mcp");
 const gitMcpAt = process.argv.indexOf("--git-mcp");
 if (import.meta.main && codegraphMcpAt >= 0) {
