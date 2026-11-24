@@ -11,6 +11,26 @@ const external = { target: "_blank", rel: "noopener noreferrer" } as const;
 // The image source of a task attachment (plan r3 S-JMD): attachment:<id>.
 const ATTACHMENT = "attachment:";
 const plugins = [remarkGfm];
+
+type HastNode = NonNullable<ExtraProps["node"]>["children"][number];
+// The text of a node without its nested lists.
+const ownText = (n: HastNode): string =>
+  n.type === "text" ? n.value : n.type === "element" && n.tagName !== "ul" && n.tagName !== "ol" ? n.children.map(ownText).join("") : "";
+// A GFM task list box has no label. It gets the text of its item as its name. A loose list puts the box in a <p>.
+function taskBoxNames() {
+  const walk = (n: HastNode | { type: "root"; children: HastNode[] }) => {
+    if (n.type !== "element" && n.type !== "root") return;
+    if (n.type === "element" && n.tagName === "li") {
+      const first = n.children.find((c) => c.type === "element");
+      const box = first?.type === "element" && first.tagName === "p" ? first.children.find((c) => c.type === "element") : first;
+      if (box?.type === "element" && box.tagName === "input" && box.properties.type === "checkbox")
+        box.properties.ariaLabel = n.children.map(ownText).join("").replace(/\s+/g, " ").trim();
+    }
+    for (const c of n.children) walk(c);
+  };
+  return walk;
+}
+const rehype = [taskBoxNames];
 // The diagram code loads on the first ```mermaid block. The block shows as code until then.
 const Diagram = lazy(() => import("../explain/Diagram").then((m) => ({ default: m.Diagram })));
 
@@ -106,7 +126,13 @@ export function Markdown({
   );
   return (
     <div className="rl-md">
-      <ReactMarkdown skipHtml remarkPlugins={plugins} components={components} urlTransform={links ? diffTransform : urlTransform}>
+      <ReactMarkdown
+        skipHtml
+        remarkPlugins={plugins}
+        rehypePlugins={rehype}
+        components={components}
+        urlTransform={links ? diffTransform : urlTransform}
+      >
         {text}
       </ReactMarkdown>
     </div>

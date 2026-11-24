@@ -181,7 +181,7 @@ describe("Markdown component", () => {
         '<tbody><tr><td style="text-align:left"><strong>1</strong></td><td style="text-align:right">2</td></tr></tbody></table></div>',
     );
     expect(html).toContain("<del>old</del>");
-    expect(html).toContain('<li class="task-list-item"><input type="checkbox" disabled="" checked=""/> done</li>');
+    expect(html).toContain('<li class="task-list-item"><input type="checkbox" disabled="" aria-label="done" checked=""/> done</li>');
   });
 
   test("links: only http(s) and in-page links; GFM autolinks and footnotes make no other scheme", () => {

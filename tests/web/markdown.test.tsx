@@ -36,3 +36,13 @@ test("With diagrams, a mermaid block shows its code until the diagram loads", ()
   expect(html).not.toContain("language-mermaid");
   expect(html).toContain('<pre><code class="language-ts">');
 });
+
+// axe "label": a task list box needs a name. It gets the text of its item without the nested list.
+test("A task list box gets the text of its item as its name", () => {
+  const html = renderToStaticMarkup(<Markdown text={"- [x] Take the **lock**\n  - [ ] Inner step\n- [ ] Loose\n\n  More text"} />);
+  expect(html).toContain('aria-label="Take the lock"');
+  expect(html).toContain('aria-label="Inner step"');
+  expect(html).toContain('aria-label="Loose More text"');
+  expect(html.match(/type="checkbox"/g)?.length).toBe(3);
+  expect(html.match(/aria-label=/g)?.length).toBe(3);
+});

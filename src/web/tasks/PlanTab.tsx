@@ -42,6 +42,7 @@ import {
   basePicks,
   branchApproval,
   checkLine,
+  checkWaitText,
   codeParts,
   continuable,
   firstPick,
@@ -960,11 +961,12 @@ function PlanQuality({ t, runner }: { t: TaskDto; runner: string }) {
   const plan = t.plan;
   if (!plan) return null;
   const c = plan.check;
-  const line = checkLine(t, runner, false);
+  const line = checkLine(t, runner, false) ?? checkWaitText(t, runner);
   const repaired = c?.state === "repaired";
   const items = repaired ? c.sent : (c?.problems ?? []);
   const heading = "m-0 text-sm font-semibold";
-  const list = "m-0 grid list-none gap-2 p-0";
+  // Paths and names from the plan can have no break point. Without a wrap they widen the whole task pane.
+  const list = "m-0 grid list-none gap-2 p-0 [overflow-wrap:anywhere]";
   return (
     <div className="grid gap-4">
       <section aria-labelledby="plan-contracts" className="grid gap-1.5">
