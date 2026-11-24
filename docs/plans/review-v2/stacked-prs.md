@@ -1,6 +1,6 @@
 # Stacked pull requests
 
-Status: Designed 2026-11-20. WP-SK0 to WP-SK2 are built (2026-11-23). WP-SK3 is built (2026-11-24, 3f152e5). Branch reads stay off (STACK_READS=false) until the user runs Gates G9, G12, and G20. Gate SK-P passed (2026-11-24 rerun, docs/eval/results.md). Open: Gate SK-B and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
+Status: Designed 2026-11-20. WP-SK0 to WP-SK2 are built (2026-11-23). WP-SK3 is built (2026-11-24, 3f152e5). Branch reads stay off (STACK_READS=false) until Gate G20 passes. Gate G9 passed on 2026-11-24. Gate SK-P passed (2026-11-24 rerun, docs/eval/results.md). Open: Gate SK-B and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
 
 ## 1. Request
 
@@ -58,7 +58,7 @@ Pick B. The user chose the app route.
 | K9 | Walk up to 3 PRs up. Look one level down, and show at most 3 children. | Each level costs up to 3 reads. Child code is not available, so deeper children add little. |
 | K10 | Several parent candidates on the first level: no parent part, and one log line. Children still count. | No server fact picks one. A wrong parent misleads the review. |
 | K11 | Merged and declined PRs are never part of the stack. | Their code is in the target, or it will not merge. |
-| K12 | Sources: stored rows always. The branch search and the change lists of other PRs only after the stack gates pass (`STACK_READS`). The stack gates are G9, G12, and G20. | The same pattern as `PEER_READS`. An inbox parent works before the gate. |
+| K12 | Sources: stored rows always. The branch search and the change lists of other PRs only after the stack gates pass (`STACK_READS`). The stack gates are G9 and G20. User decision 2026-11-24: G12 no longer gates stack reads. | The same pattern as `PEER_READS`. An inbox parent works before the gate. |
 | K13 | No table. The app finds the stack at each review run start, within the 15 s of the PR context reads. | BRIEF 3.5: no memory between runs. The change lists use an in-memory cache, as `peerCache` does. |
 | K14 | A read failure inside a known stack gives a "Not read" line. A failure before a stack is known gives no section, only a log line. | A line on a PR with no stack breaks K3 and gives the model nothing to act on. |
 | K15 | Context: a section "## Stacked pull requests" in pr-context.md, right after "## Pull request". Cap 8 KB. | The facts are untrusted text, so they stay under the banner. The stack changes how to read the diff, so it comes first. |
@@ -234,7 +234,7 @@ Interactions:
 - The child gets no new tool. rl-git stays read-only, and `resolve` still checks ancestry.
 - Titles, descriptions, and paths of other PRs are untrusted. They stay inside pr-context.md under the UNTRUSTED banner.
 - BRIEF 3.5 needs no change.
-- BRIEF 3.6 draft line. WP-SK1 adds it. "Stacked PRs (stacked-prs.md, variant "stack"): a review run start reads the PR and the default branch. It also reads each stored parent candidate. After Gates G9, G12, and G20 pass, it reads the open PRs from and into the stack branches. It also reads their change lists. The app fetches the parent's target branch into the cache. These calls are GET only. They share the 15 s of the PR context reads."
+- BRIEF 3.6 draft line. WP-SK1 adds it. "Stacked PRs (stacked-prs.md, variant "stack"): a review run start reads the PR and the default branch. It also reads each stored parent candidate. After Gates G9 and G20 pass, it reads the open PRs from and into the stack branches. It also reads their change lists. The app fetches the parent's target branch into the cache. These calls are GET only. They share the 15 s of the PR context reads."
 
 ## 6. Data
 
@@ -247,7 +247,7 @@ Interactions:
 - `WorkspaceInput` gets optional `parentTarget`. `Workspace` gets `parentBase: string | null`.
 - Constants in context-files.ts: `STACK_SECTION_BYTES`, `STACK_UP_MAX`, `STACK_CHILDREN_SHOWN`, `STACK_PATHS_SHOWN`, `STACK_DESCRIPTION_BYTES`.
 - `STACK_FETCH_MS` in workspace.ts.
-- `STACK_READS` in pr-context.ts, false until the user records Gates G9, G12, and G20 as PASS.
+- `STACK_READS` in pr-context.ts, false until the user records Gates G9 and G20 as PASS.
 - `createReviewJobs` gets an optional `stackReader`, as it has `gitRemote`. The eval passes the stack of a case through it.
 
 ## 7. Eval and proof
@@ -356,17 +356,17 @@ WP-SK3 build notes (2026-11-23), where the build differs from the plan:
 
 ### Gate G20: stack reads (read-only, user)
 
-Run: `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G9,G12,G20`. The test repository needs a stack of 3 PRs: A into main, B into A, C into B.
+Run: `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G9,G12,G20`. The test repository needs a stack of 2 open PRs: A into the default branch, B into A. Own PRs are enough.
 
 | Fact | Checks |
 |---|---|
 | U-SK1 | `state=OPEN&at=refs/heads/<A>&direction=OUTGOING` lists exactly PR A. |
-| U-SK2 | `state=OPEN&at=refs/heads/<B>&direction=INCOMING` lists exactly PR C. |
+| U-SK2 | `state=OPEN&at=refs/heads/<A>&direction=INCOMING` lists exactly PR B. |
 | U-SK3 | `at` with the default branch and OUTGOING lists only PRs from it. INCOMING lists the PRs into it. |
 | U-SK4 | `fromRef.repository` and `toRef.id` keys of each value. A PR from a fork, if the test setup has one. |
 | U-SK5 | `isLastPage` and `limit` behave as in G9. |
 
-- Until G9, G12, and G20 pass, `STACK_READS` stays false. Stored rows still work.
+- Until G9 and G20 pass, `STACK_READS` stays false. Stored rows still work.
 - The branch model read (question 1) is out of G20 by the decision of 2026-11-23. G20 reads the default branch only.
 
 ## 12. Open questions

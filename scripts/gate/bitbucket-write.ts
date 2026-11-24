@@ -7,7 +7,7 @@
 // G13 to G17 (WP-GB) only read: the default branch, the branch search, the write permission and branch restrictions, the
 // repository list, and the merge commit of a merged PR.
 // G18 (WP-TU1) only reads: properties.mergeResult of the open PRs, with one PR that the user made conflicted by hand.
-// G20 (WP-SK0) only reads: the open PRs at a branch of a stack of three open PRs, OUTGOING and INCOMING.
+// G20 (WP-SK0) only reads: the open PRs at a branch of a stack of two open PRs, OUTGOING and INCOMING.
 // G19 (WP-ST-G) WRITES: three gate branches, two PRs, a squash merge of the lower PR into the gate base branch, and a push of the upper branch.
 // Usage: bun scripts/gate/bitbucket-write.ts --repo <repository URL> --target <branch> --authorize-writes [--only G1,G2] [G3 ...]
 //          [--reviewer <user slug>] [--build-commit <commit>] [--readonly-token-env <VAR>] [--jira-key <KEY>] [--keep]
@@ -23,6 +23,7 @@
 // Console output and .gate0/bitbucket-write/*.json hold only status codes, booleans, key names, enum-like strings, and gate branch names.
 // One exception: G19 prints the Bitbucket error messages of a failed merge, with every known name masked.
 // GATE_DRY_SQUASH=off (dry run only): the fake repository disables squash, so G19 shows its failure output.
+// GATE_DRY_STACK=2 (dry run only): the fake stack has only A and B, so G20 shows that two PRs are enough.
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -651,32 +652,31 @@ async function g20(s: Session): Promise<Result> {
     return { check: "G20", status: "FAIL", evidence: `open PRs: ${pageLine(list)}; default branch read=${def !== null}` };
   const all = valuesOf(list.body) as StackPr[];
   const into = (ref: unknown) => all.filter((p) => sameRepo(p) && typeof ref === "string" && p.toRef?.id === ref);
-  let stack: [StackPr, StackPr, StackPr] | undefined;
-  for (const a of into(def))
-    for (const b of into(a.fromRef?.id)) {
-      const c = into(b.fromRef?.id)[0];
-      if (c && !stack) stack = [a, b, c];
-    }
+  let stack: [StackPr, StackPr] | undefined;
+  for (const a of into(def)) {
+    const b = into(a.fromRef?.id)[0];
+    if (b && !stack) stack = [a, b];
+  }
   if (!stack)
     return {
       check: "G20",
       status: "SKIPPED",
-      evidence: `open PRs read=${all.length}. No stack of three open PRs in the first ${OPEN_PR_LIMIT}: A into the default branch, B into A, C into B. Open one and run again.`,
+      evidence: `open PRs read=${all.length}. No stack of two open PRs in the first ${OPEN_PR_LIMIT}: A into the default branch, B into A. Open one and run again.`,
     };
-  const [a, b, c] = stack;
+  const [a, b] = stack;
   // The same query as provider.listOpenPullRequests with a branch, plus the INCOMING form.
   const at = (ref: string, direction: "OUTGOING" | "INCOMING") =>
     s.call("GET", `${s.repoPath}/pull-requests?state=OPEN&at=${encodeURIComponent(ref)}&direction=${direction}&limit=${OPEN_PR_LIMIT}`);
   const reads = {
     aOut: await at(a.fromRef?.id as string, "OUTGOING"),
-    bIn: await at(b.fromRef?.id as string, "INCOMING"),
+    aIn: await at(a.fromRef?.id as string, "INCOMING"),
     defOut: await at(def, "OUTGOING"),
     defIn: await at(def, "INCOMING"),
   };
   const ids = (r: Call) => (valuesOf(r.body) as StackPr[]).map((v) => v.id);
   const exactly = (r: Call, pr: StackPr) => pageOk(r) && ids(r).length === 1 && ids(r)[0] === pr.id;
   const sk1 = exactly(reads.aOut, a);
-  const sk2 = exactly(reads.bIn, c);
+  const sk2 = exactly(reads.aIn, b);
   const defOutVals = valuesOf(reads.defOut.body) as StackPr[];
   const defInVals = valuesOf(reads.defIn.body) as StackPr[];
   const onlyFrom = defOutVals.every((v) => v.fromRef?.id === def);
@@ -695,7 +695,7 @@ async function g20(s: Session): Promise<Result> {
   return {
     check: "G20",
     status: sk1 && sk2 && sk3 && sk4 && sk5 && complete ? "PASS" : "FAIL",
-    evidence: `open PRs read=${all.length} complete=${complete} stack found=true; U-SK1 OUTGOING at A: ${line(reads.aOut)} exactly A=${sk1}; U-SK2 INCOMING at B: ${line(reads.bIn)} exactly C=${sk2}; U-SK3 OUTGOING at the default branch: ${line(reads.defOut)} only from it=${onlyFrom}; INCOMING at the default branch: ${line(reads.defIn)} only into it=${onlyInto} lists A=${defInVals.some((v) => v.id === a.id)} open list into it=${intoCount}; U-SK4 values=${vals.length} with fromRef.repository=${withRepo} with toRef.id=${withTo} fromRef.repository keys=${keyUnion(vals.map((v) => v.fromRef?.repository))} cross-repository PRs in the open list=${all.filter((p) => !sameRepo(p)).length}; U-SK5 isLastPage and limit typed=${sk5}`,
+    evidence: `open PRs read=${all.length} complete=${complete} stack found=true; U-SK1 OUTGOING at A: ${line(reads.aOut)} exactly A=${sk1}; U-SK2 INCOMING at A: ${line(reads.aIn)} exactly B=${sk2}; U-SK3 OUTGOING at the default branch: ${line(reads.defOut)} only from it=${onlyFrom}; INCOMING at the default branch: ${line(reads.defIn)} only into it=${onlyInto} lists A=${defInVals.some((v) => v.id === a.id)} open list into it=${intoCount}; U-SK4 values=${vals.length} with fromRef.repository=${withRepo} with toRef.id=${withTo} fromRef.repository keys=${keyUnion(vals.map((v) => v.fromRef?.repository))} cross-repository PRs in the open list=${all.filter((p) => !sameRepo(p)).length}; U-SK5 isLastPage and limit typed=${sk5}`,
   };
 }
 
@@ -1096,7 +1096,7 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
     { ...peer(102, "dry-other", "dry-reviewer"), ...merge(MERGE_CONFLICTED) },
     { ...peer(101, "dry-user", "dry-reviewer"), ...merge("CLEAN") },
   ];
-  // G20: the stack 201 into main, 202 into 201, 203 into 202, and 204 from a fork into main.
+  // G20: the stack 201 into main, 202 into 201, 203 into 202 (not with GATE_DRY_STACK=2), and 204 from a fork into main.
   const stackPr = (id: number, from: string, to: string) => ({
     ...peer(id, "dry-user", "dry-reviewer"),
     ...merge("CLEAN"),
@@ -1104,10 +1104,11 @@ function fakeServer(token: string, origin: string, buildCommit: string, env: Rec
     toRef: peerRef(to),
   });
   const forkRef = { ...peerRef("feature/fork"), repository: { slug: "dry-repo", project: { key: "~DRY-FORK" } } };
-  peers.push(stackPr(201, "feature/a", "main"), stackPr(202, "feature/b", "feature/a"), stackPr(203, "feature/c", "feature/b"), {
+  peers.push(stackPr(201, "feature/a", "main"), stackPr(202, "feature/b", "feature/a"), {
     ...stackPr(204, "feature/fork", "main"),
     fromRef: forkRef,
   });
+  if (process.env.GATE_DRY_STACK !== "2") peers.push(stackPr(203, "feature/c", "feature/b"));
   const peerChanges: Record<number, unknown[]> = {
     101: [{ path: { toString: "README.md" }, type: "MODIFY" }],
     102: [

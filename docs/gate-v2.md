@@ -25,7 +25,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | G15 | WP-MR1. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G16, G17 | WP-MR2. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G18 | WP-TU1 merges. Read only. | `scripts/gate/bitbucket-write.ts` |
-| G20 | WP-SK1 turns on `STACK_READS` after G9, G12, and G20 pass. Read only. | `scripts/gate/bitbucket-write.ts` |
+| G20 | WP-SK1 turns on `STACK_READS` after G9 and G20 pass. Read only. | `scripts/gate/bitbucket-write.ts` |
 
 ## Record the results
 
@@ -378,8 +378,8 @@ G20 sends only GET requests (docs/plans/review-v2/stacked-prs.md section 11, WP-
 
 ### Before you run
 
-1. Make a stack of three open PRs in the test repository: PR A from branch A into the default branch, PR B from branch B into branch A, and PR C from branch C into branch B. Each branch needs one commit of its own.
-2. Open no other PR from branch A and no other PR into branch B.
+1. Make a stack of two open PRs in the test repository: PR A from branch A into the default branch, and PR B from branch B into branch A. Each branch needs one commit of its own. Your own PRs are enough.
+2. Open no other PR from branch A and no other PR into branch A.
 3. Keep fewer than 50 open PRs in the test repository, so that one page holds all of them.
 4. Run the dry run: `bun scripts/gate/bitbucket-write.ts --dry-run --only G9,G12,G20`. It must print `dry run: PASS`.
 
@@ -392,6 +392,6 @@ G20 sends only GET requests (docs/plans/review-v2/stacked-prs.md section 11, WP-
 
 | Check | What it does | PASS |
 |---|---|---|
-| G20 | Reads the open PRs (`GET .../pull-requests?state=OPEN&limit=50`) and the default branch, and finds the stack A, B, C in that list. Then it reads `GET .../pull-requests?state=OPEN&at=refs/heads/<branch>&direction=<OUTGOING or INCOMING>&limit=50` four times: OUTGOING at A, INCOMING at B, OUTGOING at the default branch, and INCOMING at the default branch. It records the count, `isLastPage`, `limit`, the `fromRef.repository` keys, and the number of PRs from another repository. | U-SK1: OUTGOING at A lists exactly A. U-SK2: INCOMING at B lists exactly C. U-SK3: OUTGOING at the default branch lists only PRs from it, and INCOMING lists only PRs into it, A among them. U-SK4: each value has `fromRef.repository` and `toRef.id`. U-SK5: each page has a boolean `isLastPage` and a number `limit`, and the open-PR list is complete. SKIPPED: no stack in the open PRs. |
+| G20 | Reads the open PRs (`GET .../pull-requests?state=OPEN&limit=50`) and the default branch, and finds the stack A, B in that list. Then it reads `GET .../pull-requests?state=OPEN&at=refs/heads/<branch>&direction=<OUTGOING or INCOMING>&limit=50` four times: OUTGOING at A, INCOMING at A, OUTGOING at the default branch, and INCOMING at the default branch. It records the count, `isLastPage`, `limit`, the `fromRef.repository` keys, and the number of PRs from another repository. | U-SK1: OUTGOING at A lists exactly A. U-SK2: INCOMING at A lists exactly B. U-SK3: OUTGOING at the default branch lists only PRs from it, and INCOMING lists only PRs into it, A among them. U-SK4: each value has `fromRef.repository` and `toRef.id`. U-SK5: each page has a boolean `isLastPage` and a number `limit`, and the open-PR list is complete. SKIPPED: no stack in the open PRs. |
 
 Record G20 in its "Review v2" row of integration-check.md. A PR from a fork is optional: the evidence then shows "cross-repository PRs in the open list" above 0.

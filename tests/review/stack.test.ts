@@ -147,6 +147,21 @@ describe("loadStack before the stack gates (stored rows only)", () => {
     );
   });
 
+  test("a stack of two own PRs: B gets parent A, and A gets child B", async () => {
+    const x = world();
+    const a = await x.create("feat/a", "main");
+    const b = await x.create("feat/b", "feat/a");
+    x.db.query("UPDATE pull_request SET my_role = 'AUTHOR', author_slug = 'jdoe', author_name = 'J Doe'").run();
+    const up = await x.load(b);
+    expect(up.stack).toBe(`parent #${a}, 0 children`);
+    expect(up.input.stack?.parents.map((p) => p.prId)).toEqual([a]);
+    const down = await x.load(a);
+    expect(down.stack).toBe("no parent, 1 children");
+    expect(down.input.stack?.children.map((p) => p.prId)).toEqual([b]);
+    expect(x.searches()).toEqual([]);
+    expect(prContextFile(down.input).text).toContain(`### Child #${b} "PR feat/b" by J Doe (the user), open`);
+  });
+
   test("AC-SK2 and K3: no stack gives no section and the same bytes as a run without the variant; the default branch stops the walk", async () => {
     const x = world();
     const b = await x.create("feat/b", "main");

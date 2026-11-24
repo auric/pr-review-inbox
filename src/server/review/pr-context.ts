@@ -34,8 +34,9 @@ import type { Heads } from "./run-rows";
 export const PEER_READS = false;
 export const PEER_GATE_TEXT = "Only PRs in your inbox are listed: the app does not read other open pull requests from Bitbucket yet.";
 
-// docs/plans/review-v2/stacked-prs.md K12: Gates G9, G12, and G20 are not run yet. Until the user records all three as PASS, only stored
-// PRs join a stack: no branch search, and no change list of a PR outside the inbox. Set it to true after the PASS.
+// docs/plans/review-v2/stacked-prs.md K12: the stack gates are G9 and G20. G12 does not gate stack reads (user decision 2026-11-24).
+// Until the user records both as PASS, only stored PRs join a stack: no branch search, and no change list of a PR outside the inbox.
+// Set it to true after the PASS.
 export const STACK_READS = false;
 
 export type PrContextReader = Pick<

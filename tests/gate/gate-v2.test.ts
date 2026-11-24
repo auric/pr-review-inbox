@@ -280,13 +280,26 @@ describe("bitbucket-write.ts G1 to G7, G9, G12, and G13 to G20", () => {
     const g20 = r.out.split("\n").find((l) => l.startsWith("PASS    G20 ")) ?? "";
     expect(g20).toContain("open PRs read=6 complete=true stack found=true");
     expect(g20).toContain("U-SK1 OUTGOING at A: HTTP 200 count=1 isLastPage=true limit=50 exactly A=true");
-    expect(g20).toContain("U-SK2 INCOMING at B: HTTP 200 count=1 isLastPage=true limit=50 exactly C=true");
+    expect(g20).toContain("U-SK2 INCOMING at A: HTTP 200 count=1 isLastPage=true limit=50 exactly B=true");
     expect(g20).toContain("U-SK3 OUTGOING at the default branch: HTTP 200 count=0 isLastPage=true limit=50 only from it=true");
     expect(g20).toContain("INCOMING at the default branch: HTTP 200 count=4 isLastPage=true limit=50 only into it=true lists A=true");
     expect(g20).toContain("U-SK4 values=6 with fromRef.repository=6 with toRef.id=6 fromRef.repository keys=project,slug");
     expect(g20).toContain("cross-repository PRs in the open list=1; U-SK5 isLastPage and limit typed=true");
     // The gate made nothing, so it declines and deletes nothing.
     expect(r.out).toContain("cleanup: declined PRs=none; deleted branches=none");
+    for (const secret of ["feature/", "refs/heads/", "dry-repo", "DRY", "dry-user", "Dry peer", "127.0.0.1", tmpdir()])
+      expect(r.out).not.toContain(secret);
+    expect(r.out).toContain("dry run: PASS");
+  }, 120_000);
+
+  test("a dry run of the read check G20 passes on a stack of two PRs: A into the default branch and B into A", () => {
+    const r = run(BITBUCKET_WRITE, ["--dry-run", "--only", "G20"], GIT_DIR, { GATE_DRY_STACK: "2" });
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    const g20 = r.out.split("\n").find((l) => l.startsWith("PASS    G20 ")) ?? "";
+    expect(g20).toContain("open PRs read=5 complete=true stack found=true");
+    expect(g20).toContain("U-SK1 OUTGOING at A: HTTP 200 count=1 isLastPage=true limit=50 exactly A=true");
+    expect(g20).toContain("U-SK2 INCOMING at A: HTTP 200 count=1 isLastPage=true limit=50 exactly B=true");
     for (const secret of ["feature/", "refs/heads/", "dry-repo", "DRY", "dry-user", "Dry peer", "127.0.0.1", tmpdir()])
       expect(r.out).not.toContain(secret);
     expect(r.out).toContain("dry run: PASS");
