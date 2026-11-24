@@ -246,6 +246,7 @@ describe("resumeRefusal", () => {
     const asked = saved().requested as NonNullable<EvalResult["requested"]>;
     expect(refused({ requested: { ...asked, effort: "low" } })).toBe(`${it} requested effort high, but this run has low.`);
     expect(refused({ requested: { ...asked, replayOf: "x.json" } })).toBe(`${it} requested replayOf none, but this run has x.json.`);
+    expect(refused({ requested: { ...asked, notes: true } })).toBe(`${it} requested notes none, but this run has true.`);
   });
 
   test("the finished runs must fit the cases and the repeats of this run; a failed run need not", () => {

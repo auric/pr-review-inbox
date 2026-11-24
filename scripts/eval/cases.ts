@@ -218,6 +218,8 @@ export type EvalCase = Omit<CaseFile, "language"> & {
   hasTask?: boolean;
   large?: boolean;
   local?: LocalRepo;
+  // The text of NOTE_FILE of a local case. Absent: the case has no note.
+  note?: string;
 };
 
 // The fingerprint of a local set: the hash of each case.json in ID order. compare.ts refuses two results with different ones.
@@ -265,6 +267,8 @@ export const EARLIER_PATCH = "earlier.patch";
 export const PARENT_PATCH = "parent.patch";
 // The target branch of the PR of a case: parent for a stacked fixture with a parent, else main (buildRepo).
 export const targetBranch = (c: Pick<EvalCase, "stack">) => (c.stack?.parent ? "parent" : "main");
+// The PR note of the source run of a local case (local.ts), beside case.json. run.ts gives it to the brief only with --notes.
+export const NOTE_FILE = "note.md";
 // The submodule repository of a submodule fixture: the files of its base commit, and the patch to its head commit.
 export const SUB_BASE = "sub/base";
 export const SUB_PATCH = "sub/head.patch";
@@ -280,8 +284,10 @@ export function loadCase(dir: string): EvalCase {
     if (!existsSync(bundle)) throw new Error(`Case ${c.id}: the bundle ${c.bundle.file} is missing. Build the set again.`);
     const hash = createHash("sha256").update(text).digest("hex");
     const { rereview, ...rest } = c;
+    const note = join(dir, NOTE_FILE);
     return {
       ...rest,
+      ...(existsSync(note) && { note: readFileSync(note, "utf8") }),
       ...(rereview && { rereview: { earlier: rereview.earlier } }),
       dir,
       base: new Map(),

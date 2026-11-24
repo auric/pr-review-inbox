@@ -170,8 +170,16 @@ export type EvalResult = {
   // The --model and --effort values of the run, or "default" for no flag. Absent in files made before this field existed.
   // verifier: the verify mode that ran, after --verifier. verifierEffort and reviewerMode: the values that ran, after
   // --verifier-effort and --reviewer-mode. Absent in files made before the flags existed. replayOf: the file name of the
-  // --replay-find result. Absent: the finder ran.
-  requested?: { model: string; effort: string; verifier?: string; verifierEffort?: string; reviewerMode?: string; replayOf?: string };
+  // --replay-find result. Absent: the finder ran. notes: --notes gave each local case its PR note (cases.ts NOTE_FILE). Absent: no note.
+  requested?: {
+    model: string;
+    effort: string;
+    verifier?: string;
+    verifierEffort?: string;
+    reviewerMode?: string;
+    replayOf?: string;
+    notes?: true;
+  };
   // The case set. Absent in files made before this field existed: v1.
   set?: EvalSet;
   // Set by eval:rescore, which replaces the bugs and traps of each case with the current fixture.

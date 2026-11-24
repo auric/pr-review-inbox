@@ -113,9 +113,10 @@ const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
   [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--reviewer-effort ${EFFORTS.join("|")}] [--reviewer-mode ${REVIEWER_MODES.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--verifier-effort ${EFFORTS.join("|")}]
-  [--variants ${VARIANTS.join(",")}] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--resume <result.json>] [--runner <command> <args...>]
+  [--variants ${VARIANTS.join(",")}] [--notes] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--resume <result.json>] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
+--notes gives each local case the PR note of its source run, as the app did. Without it, each run has an empty note.
 --ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.
 Each run records its CLI calls in <result>.calls/. --replay-find takes the finder and salvage calls from the recording of that result and runs only the verify calls. It refuses a change of the finder setup.
 --resume continues a cut result and writes to that file. It keeps the completed and incomplete runs and runs the other case runs. It refuses a change of the run setup.`;
@@ -149,6 +150,8 @@ export type Options = {
   variants: Variant[] | null;
   // docs/plans/review-v3.md WP-V3: run the re-review cases as re-reviews.
   rereview: boolean;
+  // Give a local case its note.md in the brief. false: an empty note, as before this flag.
+  notes: boolean;
   // eval:ab: the output names no case. Case IDs, run errors, and coverage text can hold names from the user's own repositories.
   ordinals: boolean;
   repeat: number;
@@ -183,6 +186,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         resume: { type: "string" },
         variants: { type: "string" },
         rereview: { type: "boolean", default: false },
+        notes: { type: "boolean", default: false },
         ordinals: { type: "boolean", default: false },
         repeat: { type: "string", default: "1" },
         out: { type: "string" },
@@ -253,6 +257,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     resume: v.resume === undefined ? null : resolve(v.resume),
     variants: variants as Variant[] | null,
     rereview,
+    notes: v.notes ?? false,
     ordinals: v.ordinals ?? false,
     repeat,
     out: resolve(v.out ?? join(REPO, "eval-results")),
@@ -318,6 +323,7 @@ export function replayRefusal(rec: EvalResult, o: Options, profile: Profile): st
   const it = "Refused: --replay-find";
   if (!o.replayFind || !existsSync(callsDir(o.replayFind))) return `${it}: the result has no recorded calls.`;
   if (!!rec.rereview !== o.rereview) return `${it}: the recording ran the other mode.`;
+  if (!!rec.requested?.notes !== o.notes) return `${it}: the recording ran ${o.notes ? "without" : "with"} --notes.`;
   if ((rec.set ?? "v1") !== o.set) return `${it}: the recording ran set ${rec.set ?? "v1"}, but this run has set ${o.set}.`;
   if (o.repeat > rec.repeat) return `${it}: the recording has ${rec.repeat} repeats, but this run asks for ${o.repeat}.`;
   const was = finderVersion(rec.promptVersion);
@@ -627,6 +633,7 @@ type Context = {
   // bundleRepo: the bare repository of each bundle file.
   bundles: Map<string, string>;
   rereview: boolean;
+  notes: boolean;
   // callsDir of the result file: the run writes each CLI call there.
   calls: string;
   // --replay-find: the callsDir of the recording, and the head of each recorded case by case ID.
@@ -867,7 +874,7 @@ async function runCase(
       }
       if (c.instructions !== undefined)
         saveInstructionSettings(db, { project: PROJECT, repo: c.id }, { target: true, local: [], extra: c.instructions });
-      jobs.saveBrief(db, pr, { note: "", profile: ctx.profile });
+      jobs.saveBrief(db, pr, { note: ctx.notes ? (c.note ?? "") : "", profile: ctx.profile });
       const roots = rr ? seedEarlier(db, pr, ctx.profile, rr, rr.earlier, USER) : new Map<number, string>();
       const earlierRoots = new Map([...roots].map(([root, id]) => [id, root]));
       seedThreads(db, pr, { head, base }, c.threads ?? [], rr ? rr.earlier.length : 0, earlierRoots);
@@ -1043,6 +1050,7 @@ export async function main(argv: string[]): Promise<number> {
       verifierEffort: verifierEffort(profile),
       reviewerMode: profile.reviewer.mode,
       ...(o.replayFind && { replayOf: basename(o.replayFind) }),
+      ...(o.notes && { notes: true as const }),
     };
     let result: EvalResult = {
       format: 1,
@@ -1126,6 +1134,7 @@ export async function main(argv: string[]): Promise<number> {
       },
       bundles: new Map(),
       rereview: o.rereview,
+      notes: o.notes,
       calls: callsDir(file),
       replay,
     };
@@ -1134,6 +1143,11 @@ export async function main(argv: string[]): Promise<number> {
     );
     if (requested.replayOf)
       console.log(`Replay: the finder and salvage calls come from ${requested.replayOf}. The verify calls run the CLI.`);
+    console.log(
+      o.notes
+        ? `PR notes: on. Cases with a note: ${cases.filter((c) => c.note?.trim()).length} of ${cases.length}.`
+        : "PR notes: off. Each run has an empty note.",
+    );
     console.log(runSetup(profile));
     if (o.real) console.log(WARNING);
     if (resumed) console.log(resumed);

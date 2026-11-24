@@ -172,7 +172,7 @@ const header = (r: EvalResult) => {
   const set = `set ${r.set ?? "v1"}${r.fingerprint ? ` (fingerprint ${r.fingerprint.slice(0, 12)})` : ""}, tolerance ${r.tolerance ?? 0} lines`;
   // review-quality-2026.md E2. A file made before these fields existed does not record them.
   const e2 = r.requested;
-  const replay = e2?.replayOf ? `, finder replayed from ${e2.replayOf}` : "";
+  const replay = `${e2?.replayOf ? `, finder replayed from ${e2.replayOf}` : ""}${e2?.notes ? ", PR notes on" : ""}`;
   const resumed = (r.resumes ?? []).map((x) => `${x.commit}${x.dirty ? " (uncommitted changes)" : ""} (CLI ${x.cliVersion})`);
   return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}${resumed.length ? `, resumed at commit ${resumed.join(", ")}` : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
 };
@@ -434,6 +434,9 @@ export function compareText(
   if ((qa && qb && qa.model !== qb.model) || !same(ran(a), ran(b))) out.push("A and B used different models. The numbers do not compare.");
   if ((qa && qb && qa.effort !== qb.effort) || !same(usedEfforts(a), usedEfforts(b)))
     out.push("A and B used different efforts. The numbers do not compare.");
+  // A PR note can name the file of an issue, so a run with notes has an easier task. The set fingerprint does not cover the notes.
+  if (!!qa?.notes !== !!qb?.notes)
+    out.push(`A and B differ in PR notes: only ${qa?.notes ? "A" : "B"} ran with --notes. The numbers do not compare.`);
   const known = verifierOf(a) !== "not recorded" && verifierOf(b) !== "not recorded";
   if (known && verifierOf(a) !== verifierOf(b))
     out.push(`A and B used different verify modes: ${verifierOf(a)} and ${verifierOf(b)}. The numbers do not compare.`);

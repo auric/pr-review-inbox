@@ -1063,6 +1063,11 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(refusal([])).toBeNull();
       expect(refusal(["--verifier-effort", "max"])).toBeNull();
       expect(refusal(["--rereview"])).toContain("the recording ran the other mode");
+      // A PR note changes the finder prompt.
+      expect(refusal(["--notes"])).toContain("the recording ran without --notes");
+      expect(refusal([], { ...a, requested: { model: "default", effort: "default", ...a.requested, notes: true } })).toContain(
+        "the recording ran with --notes",
+      );
       expect(refusal(["--set", "hard"])).toContain("the recording ran set probe, but this run has set hard");
       expect(refusal(["--repeat", "2"])).toContain("the recording has 1 repeats, but this run asks for 2");
       expect(refusal([], { ...a, promptVersion: "2.0" })).toContain("the recording ran finder prompt version 2.0");
@@ -1169,7 +1174,9 @@ describe("stacked probe cases with the fake CLI (WP-SK3)", () => {
       const [variant] = await fakeRun(c.id, ["--variants", "stack"]);
       // submodule-prs.md AC-SM2: without a moved gitlink, the variant "submodules" changes no byte.
       const [sub] = await fakeRun(c.id, ["--variants", "submodules"]);
-      for (const x of [plain, variant, sub]) {
+      // A probe case has no note.md, so --notes changes no byte.
+      const [notes] = await fakeRun(c.id, ["--notes"]);
+      for (const x of [plain, variant, sub, notes]) {
         if (!x) throw new Error("No finder call.");
         // task.md holds the fetch time, so it is left out.
         expect({

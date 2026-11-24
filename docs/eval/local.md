@@ -58,6 +58,20 @@ The matcher and the judge of docs/plans/review-v2/review-quality-2026.md (E3, E4
 - MANIFEST.json `categories` counts the findings by decision before the conflict rule and carry, as `sources` does. The decisions are `posted`, `fixed`, `session`, `withdrawn`, `notBugOrIntended`, `otherDiscard`, and `refuted`. `byClass` counts per bug class of shared/review.ts `bugClass`: `security`, `concurrency`, `resource`, `behavior`, and `other`. `byCategory` counts per category in lower case, with `none` for a finding without one. `byModule` counts per module. MANIFEST.json holds no text.
 - case.json now holds company text in each item. Keep `eval-local/` out of git. The result files of eval runs copy the items, so `eval-results/` also holds the text.
 
+## PR notes (--notes)
+
+In the app, each review run gets your PR note from the brief. A note can name the file of a problem, so a run without the note has a harder task. The eval gives each run an empty note by default, so old and new baselines compare.
+
+- The build writes `note.md` beside `case.json` when the source run had a note. The text is `review_run.note`, the note that the app copied from the brief at the run start. A plain case takes the note of its first run, as for the thread cutoff. A re-review case takes the note of its own run. An empty note writes no file.
+- `note.md` is not in case.json, so the note does not change the set fingerprint. The file holds your private text. It stays in `eval-local/`, which git ignores.
+- `bun run eval -- --set local --notes ...` gives each case with `note.md` its note in the brief. A case without `note.md` keeps an empty note. Without `--notes`, every run keeps its bytes.
+- The run header prints `PR notes: on. Cases with a note: N of M.` or `PR notes: off.` The result file has `requested.notes: true` only with the flag.
+- `eval:compare` shows "PR notes on" in the header of such a result. When only one side ran with `--notes`, it prints a warning line. It does not refuse the pair.
+- `--resume` and `--replay-find` refuse a change of `--notes`, because the note changes the finder prompt.
+- A set built before this change has no `note.md`. Build it again with `bun run eval:local` and the same `--clean N` as before. The case.json files keep their bytes, so the fingerprint stays the same unless the app has new decisions.
+- `eval:ab` does not pass `--notes`. The fixture, probe, and seeded sets have no notes, so `--notes` changes nothing there.
+- Limit: a plain case can merge the decisions of more runs on one head. It replays only the note of the first run.
+
 ## Clean cases
 
 A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). `bun run eval:local -- --clean N` adds up to N clean cases. The default is 0.

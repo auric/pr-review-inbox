@@ -18,7 +18,7 @@ import {
   SEED_KINDS,
   setFingerprint,
 } from "../../scripts/eval/cases";
-import { refusal } from "../../scripts/eval/compare";
+import { readResult, refusal } from "../../scripts/eval/compare";
 import {
   BUG_CLASS_NAMES,
   carry,
@@ -63,6 +63,9 @@ const OTHER_TEXT = `Moe Mine says ${"z".repeat(2500)}`;
 // Your edit of a finding body. It gets the names replaced, as your comments do.
 const EDITED = "Your edit of the body. Zelda Quux agrees.";
 const EDITED_CLEAN = "Your edit of the body. reviewer-2 agrees.";
+// The PR notes of the two runs of case A. local.ts takes the note of the first run.
+const RUN_NOTE = "Synthetic note: start with the add helpers in src/calc.ts.";
+const RUN_NOTE_LATER = "Synthetic note of the second run.";
 // The review runs start after the head commit time (2026-01-01).
 const RUN_START = Date.UTC(2027, 0, 1);
 
@@ -158,14 +161,14 @@ function makeDb(dir: string, h: Heads) {
     json: JSON.stringify({ ...issue, truncated: false }),
   });
   let keys = 0;
-  const run = (pr: number, head: string, base: string | null, status = "completed") =>
+  const run = (pr: number, head: string, base: string | null, status = "completed", note = "") =>
     (
       db
         .query(
           `INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, merge_base, status, started_at)
-          VALUES ($pr, 'review', 'general', '', $key, $head, $base, $mb, $status, $started) RETURNING id`,
+          VALUES ($pr, 'review', 'general', $note, $key, $head, $base, $mb, $status, $started) RETURNING id`,
         )
-        .get({ pr, key: `k${keys++}`, head, base: h.base, mb: base, status, started: RUN_START }) as { id: number }
+        .get({ pr, key: `k${keys++}`, head, base: h.base, mb: base, status, started: RUN_START, note }) as { id: number }
     ).id;
   // A finding as judge.ts stores it: the body column starts as the body of the payload. edited: the body column after your edit.
   const item = (r: number, status: string, lines: [number, number], p: Record<string, unknown> = {}, edited?: string) => {
@@ -243,8 +246,8 @@ function makeDb(dir: string, h: Heads) {
     orphaned,
   });
 
-  const r1 = run(1, h.a, h.base);
-  const r2 = run(1, h.a, h.base);
+  const r1 = run(1, h.a, h.base, "completed", RUN_NOTE);
+  const r2 = run(1, h.a, h.base, "completed", RUN_NOTE_LATER);
   const r3 = run(1, h.b, h.base);
   const failed = run(1, h.a, h.base, "failed");
   run(1, h.a, null);
@@ -412,6 +415,16 @@ describe("eval:local selection", () => {
     // run.ts gives the same fingerprint for a run of the whole set.
     const loaded = loadCases("all", join(OUT, "cases"));
     expect(setFingerprint(loaded.flatMap((c) => (c.local ? [{ id: c.id, hash: c.local.hash }] : [])))).toBe(m.fingerprint);
+  });
+
+  test("a case gets the PR note of its first run in note.md, out of case.json, and a case without a note gets no file", () => {
+    const dirOf = (head: string) => join(OUT, "cases", `pr1-${head.slice(0, 12)}-${heads.base.slice(0, 8)}`);
+    expect(readFileSync(join(dirOf(heads.a), "note.md"), "utf8")).toBe(RUN_NOTE);
+    expect(existsSync(join(dirOf(heads.b), "note.md"))).toBe(false);
+    expect(readFileSync(join(dirOf(heads.a), "case.json"), "utf8")).not.toContain("Synthetic note");
+    expect(built.stdout).not.toContain("Synthetic note");
+    const noteOf = (head: string) => loadCases("all", join(OUT, "cases")).find((c) => c.local?.head === head)?.note;
+    expect([noteOf(heads.a), noteOf(heads.b)]).toEqual([RUN_NOTE, undefined]);
   });
 
   test("a posted finding is a bug at its anchor with the posted severity", () => {
@@ -1419,6 +1432,80 @@ describe("eval --set local with the fake CLI", () => {
       );
       const refused = await bun([THREADS, join(oldOut, oldFile as string)], { REVIEW_LOOP_EVAL_LOCAL: OUT });
       expect(refused.code).toBe(2);
+    },
+    SLOW,
+  );
+
+  test(
+    "--notes gives case A its note, and without the flag or without note.md the run keeps its bytes",
+    async () => {
+      const dir = temp("notes");
+      const record = join(dir, "calls.jsonl");
+      const scenario = join(dir, "scenario.json");
+      writeFileSync(
+        scenario,
+        JSON.stringify({
+          record,
+          auth: { loggedIn: true, authMethod: "claude.ai", projectsDirectory: join(dir, "projects") },
+          fixture: claudeStream(dir, "eval", "claude-synthetic/review-agent-tree.jsonl", {
+            summary: "Fake review.",
+            risks: [],
+            questions: [],
+            coverage: { read: [PATH], skipped: [], unavailable: [], notChecked: [] },
+            findings: [],
+          }),
+          delayMs: 1,
+        }),
+      );
+      const a = caseOf(heads.a);
+      const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+      const go = async (name: string, set: string, flags: string[]) => {
+        const out = join(dir, name);
+        const r = await bun(
+          [RUN, "--set", "local", "--cases", a.id, ...flags, "--out", out, "--runner", process.execPath, FAKE, scenario],
+          {
+            REVIEW_LOOP_EVAL_LOCAL: set,
+          },
+        );
+        expect(r.stderr).toBe("");
+        expect(r.code).toBe(0);
+        const [file] = readdirSync(out).filter((f) => f.endsWith(".json"));
+        const call = readRecords<{ argv: string[]; stdin: string; agents: unknown }>(record)
+          .filter((x) => x.argv.includes("-p"))
+          .at(-1);
+        if (!call) throw new Error("No finder call.");
+        return { stdout: r.stdout, file: join(out, file as string), stdin: call.stdin, agents: JSON.stringify(call.agents) };
+      };
+      // The pins come from run.ts before --notes existed.
+      const PIN = {
+        stdin: "62a88c89a1ed43efaaa179dec1ba361e366af2ef5ebce919ec28260ef71772d3",
+        agents: "26d79267f825fb89532da6ad8ec4e9904c58973676171b4efe9b7490949f20a0",
+      };
+      const off = await go("off", OUT, []);
+      expect({ stdin: sha(off.stdin), agents: sha(off.agents) }).toEqual(PIN);
+      expect(off.stdout).toContain("PR notes: off. Each run has an empty note.");
+      expect(readResult(off.file).requested?.notes).toBeUndefined();
+
+      const on = await go("on", OUT, ["--notes"]);
+      expect(on.stdin).toContain(["# Your instructions", "", "The user wrote the text below. Follow it.", "", RUN_NOTE].join("\n"));
+      expect(on.stdout).toContain("PR notes: on. Cases with a note: 1 of 1.");
+      expect(on.stdout).not.toContain("Synthetic note");
+      expect(readResult(on.file).requested?.notes).toBe(true);
+      const cmp = await bun([COMPARE, off.file, on.file]);
+      expect(cmp.code).toBe(0);
+      expect(cmp.stdout).toContain("A and B differ in PR notes: only B ran with --notes. The numbers do not compare.");
+      expect(cmp.stdout).toContain(", PR notes on,");
+
+      // A case built before notes existed: --notes changes no byte.
+      const old = join(dir, "old-set");
+      mkdirSync(join(old, "cases", a.id), { recursive: true });
+      mkdirSync(join(old, "bundles"));
+      writeFileSync(join(old, "cases", a.id, "case.json"), readFileSync(join(OUT, "cases", a.id, "case.json")));
+      writeFileSync(join(old, "bundles", a.bundle.file), readFileSync(join(OUT, "bundles", a.bundle.file)));
+      writeFileSync(join(old, "MANIFEST.json"), readFileSync(join(OUT, "MANIFEST.json")));
+      const none = await go("none", old, ["--notes"]);
+      expect({ stdin: sha(none.stdin), agents: sha(none.agents) }).toEqual(PIN);
+      expect(none.stdout).toContain("PR notes: on. Cases with a note: 0 of 1.");
     },
     SLOW,
   );

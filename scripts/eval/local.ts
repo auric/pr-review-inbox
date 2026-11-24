@@ -37,6 +37,7 @@ import {
   localDir,
   MODULE_IDS,
   mapSpot,
+  NOTE_FILE,
   setFingerprint,
 } from "./cases";
 import { overlaps } from "./score";
@@ -172,7 +173,8 @@ const SQL = {
   // The people of the whole database, read only to remove their names from the thread text.
   people: `SELECT author_slug AS slug, author_login AS login, author_name AS name FROM comment
     UNION SELECT author_slug, NULL, author_name FROM pull_request`,
-  starts: "SELECT id, started_at AS at FROM review_run",
+  // note: the PR note that jobs.ts copied from the brief into the run row at its start. The run used this text.
+  starts: "SELECT id, started_at AS at, note FROM review_run",
   // The thread root of each posted finding (run-rows.ts posted).
   postedRoots: `SELECT json_extract(items_json, '$[0].id') AS item, remote_id AS root FROM post
     WHERE kind = 'inline' AND state = 'confirmed' AND remote_id IS NOT NULL`,
@@ -937,6 +939,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
     let threadRows: Map<number, ThreadRow[]>;
     let people: Person[];
     let starts: Map<number, number>;
+    let notes: Map<number, string>;
     let postedRoots: Map<number, number>;
     try {
       threadRows = Map.groupBy(db.query(SQL.threadRows).all() as ThreadRow[], (r) => r.pr);
@@ -950,7 +953,9 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
       sel = select(db, o.me, textOf);
       prs = new Map((db.query(SQL.prs).all() as PrRow[]).map((p) => [p.id, p]));
       tasks = db.query(SQL.tasks).all() as TaskRow[];
-      starts = new Map((db.query(SQL.starts).all() as { id: number; at: number }[]).map((r) => [r.id, r.at]));
+      const runRows = db.query(SQL.starts).all() as { id: number; at: number; note: string }[];
+      starts = new Map(runRows.map((r) => [r.id, r.at]));
+      notes = new Map(runRows.map((r) => [r.id, r.note]));
       postedRoots = new Map((db.query(SQL.postedRoots).all() as { item: number; root: number }[]).map((r) => [r.item, r.root]));
     } finally {
       db.close();
@@ -1095,6 +1100,12 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
         const list = await caseThreads(threadRows.get(d.pr) ?? [], { me: o.me, before, skip, must, people, earlier, place }, threadTally);
         return list.length ? { threads: list } : {};
       };
+      // The note of the run that threadsOf takes. It stays out of case.json, so the set fingerprint does not change. An empty note
+      // writes no file, as noteSection gives no section.
+      const writeNote = (d: Draft | RereviewDraft, dir: string) => {
+        const note = notes.get("since" in d ? d.run : d.first) ?? "";
+        if (note.trim()) writeFileSync(join(dir, NOTE_FILE), note);
+      };
       // The fields of each case: the PR text, the task rows, the commits, the size, and the rules 5 fields.
       const fields = async (d: Draft | RereviewDraft) => {
         const p = prs.get(d.pr) as PrRow;
@@ -1132,6 +1143,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
         const text = `${JSON.stringify(c, null, 2)}\n`;
         mkdirSync(join(o.out, "cases", c.id));
         writeFileSync(join(o.out, "cases", c.id, "case.json"), text);
+        writeNote(d, join(o.out, "cases", c.id));
         written.push({ id: c.id, hash: createHash("sha256").update(text).digest("hex") });
         runs += d.runs;
       }
@@ -1150,6 +1162,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
         const text = `${JSON.stringify(c, null, 2)}\n`;
         mkdirSync(join(o.out, "rereview", c.id));
         writeFileSync(join(o.out, "rereview", c.id, "case.json"), text);
+        writeNote(d, join(o.out, "rereview", c.id));
         rrWritten.push({ id: c.id, hash: createHash("sha256").update(text).digest("hex") });
       }
     }
