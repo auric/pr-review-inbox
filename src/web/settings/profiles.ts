@@ -14,6 +14,8 @@ import {
   type McpToolSafety,
   type ProfileInput,
   type ReviewerMode,
+  VARIANTS,
+  type Variant,
   type VerifierOutcome,
 } from "../../shared/dto";
 
@@ -72,7 +74,7 @@ export type Draft = {
   volume: ProfileInput["volume"];
   // outcome: what a refuted finding does (spec.md section 1.8).
   verifier: { mode: ProfileInput["verifier"]["mode"]; model: string; effort: Effort | ""; outcome: VerifierOutcome };
-  // docs/plans/review-v3.md WP-V2: eval switches. The editor has no control for them, and a save keeps them.
+  // docs/plans/review-v3.md WP-V2: eval switches. The editor has controls for "stack" and "submodules" only. A save keeps the others.
   variants: ProfileInput["variants"];
 };
 
@@ -286,6 +288,7 @@ export type Edit = Partial<
     | "modules"
     | "volume"
     | "verifier"
+    | "variants"
   >
 >;
 
@@ -298,7 +301,11 @@ export type Change =
   | { act: "duplicate"; i: number }
   | { act: "reset"; i: number; field: ShippedField; shipped: ProfileInput };
 
-// The fields of a shipped profile that the editor can change and reset, in form order. variants has no control.
+// The list with v on or off, in the VARIANTS order of the server parse, so a saved list compares equal.
+export const withVariant = (list: readonly Variant[], v: Variant, on: boolean): Variant[] =>
+  VARIANTS.filter((x) => (x === v ? on : list.includes(x)));
+
+// The fields of a shipped profile that the editor can change and reset, in form order. variants has no reset: no shipped profile has one.
 export const SHIPPED_FIELDS = [
   ["name", "Name"],
   ["note", "Note"],
@@ -461,6 +468,8 @@ export type Part =
   | "docs"
   | "lang"
   | "family"
+  | "stack"
+  | "submodules"
   | "model"
   | "model-id"
   | "effort"

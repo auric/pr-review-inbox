@@ -38,6 +38,7 @@ import {
   unmarkedListQuestion,
   unmarkedQuestion,
   valueText,
+  withVariant,
 } from "../../src/web/settings/profiles";
 
 const p = (id: string, name: string, o: Partial<ProfileInput> = {}): ProfileInput => ({
@@ -453,6 +454,25 @@ describe("the no flag choice", () => {
     expect(defaultChoice(null)).toBe("Default");
     expect(defaultChoice(undefined)).toBe("Default");
     expect(defaultChoice("xhigh")).toBe("Default (xhigh)");
+  });
+});
+
+describe("stack and submodules switches", () => {
+  test("withVariant changes only its own name and keeps the VARIANTS order", () => {
+    expect(withVariant(["runs3", "codegraph"], "stack", true)).toEqual(["codegraph", "runs3", "stack"]);
+    expect(withVariant(["codegraph", "stack", "submodules"], "stack", false)).toEqual(["codegraph", "submodules"]);
+    expect(withVariant([], "submodules", false)).toEqual([]);
+    expect(withVariant(["submodules"], "submodules", true)).toEqual(["submodules"]);
+  });
+
+  test("an edit of the switch saves the server form, so the saved list compares equal", () => {
+    const saved = p("general", "General", { variants: ["codegraph", "runs3"] });
+    const next = change(toDrafts([saved]), { act: "edit", i: 0, patch: { variants: withVariant(["codegraph", "runs3"], "stack", true) } });
+    const out = toProfiles(next);
+    const parsed = profileInput.parse(out[0]);
+    expect(parsed.variants).toEqual(["codegraph", "runs3", "stack"]);
+    expect(sameProfiles(out, [parsed])).toBe(true);
+    expect(toProfiles(change(next, { act: "duplicate", i: 0 }))[1]?.variants).toEqual(["codegraph", "runs3", "stack"]);
   });
 });
 

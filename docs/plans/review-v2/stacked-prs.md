@@ -330,6 +330,7 @@ Status: passed on 2026-11-24 (rerun at f7d354c). Stack: 0 trap hits over 12 runs
 - WP-SK1 and WP-SK2 edit jobs.ts and context-files.ts. Run them one after the other.
 - WP-JC5 edits task-file.ts, not the files of WP-SK1 and WP-SK2. No file clash is known.
 - WP-SK4 waits for the Gate A order of review-ledger.md section 4. Push nothing between WP-SK4 and its version step.
+- Built ahead of WP-SK4 (2026-11-24): the profile editor has the switch "Stacked PRs" for the variant "stack". It changes no prompt. WP-SK4 removes the switch with the variant.
 
 WP-SK2 build notes (2026-11-23), where the build differs from the plan:
 

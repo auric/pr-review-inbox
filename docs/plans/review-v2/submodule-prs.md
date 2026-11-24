@@ -312,6 +312,7 @@ Build note (2026-11-24), empty gitlink quote: Gate SM-P showed that the finder g
 
 - jobs.ts, catalog.ts, and dto.ts are also in the stack packages. Run one package at a time, in the wave RP order of review-ledger.md section 4.
 - The tests use the fake claude only (tests/support/no-real-claude.ts).
+- Built ahead of WP-SM4 (2026-11-24): the profile editor has the switch "Submodule changes" for the variant "submodules". It changes no prompt. WP-SM4 removes the switch with the variant.
 
 ## 11. Questions (decided by the user on 2026-11-23)
 

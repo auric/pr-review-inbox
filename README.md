@@ -95,6 +95,8 @@ The checks add checklists to the review: Security, Threads and races, Performanc
 
 "Include the Jira parent and sub-tasks" is off by default. When you turn it on, each run of the profile adds the parent and the sub-tasks of each fetched Jira issue to the task text. The parent shows its key, summary, status, and description. Each sub-task shows its key, summary, and status. The run reads the parent from Jira once when it starts. When that read fails, the run continues without the parent.
 
+"Stacked PRs" and "Submodule changes" are off by default. With "Stacked PRs" on, a review run of a PR that is stacked on another open PR gets the parent and child PRs and can read the parent change. With "Submodule changes" on, a review run of a PR that moves a submodule gets the commits of the moved submodule. Both apply to review runs only.
+
 ![Settings, Review profiles: the prompt, the checks, and the volume](docs/screenshots/settings-profiles.webp)
 
 The review brief holds the task, your note, the checks, and the volume: "Only what matters", "Balanced", or "Show everything". A change of a check or of the volume saves to the profile at once. The profile picker shows when you have two or more review profiles. Explain has its own page. A review starts only from the brief.

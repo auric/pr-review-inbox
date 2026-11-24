@@ -81,6 +81,7 @@ import {
   unmarkedListQuestion,
   unmarkedQuestion,
   valueText,
+  withVariant,
 } from "./profiles";
 
 // The TaskRules.tsx control styles.
@@ -812,6 +813,20 @@ function ProfileRow(rowProps: RowProps) {
           checked={d.jiraFamily}
           onChange={(jiraFamily) => edit({ jiraFamily })}
           reset={reset("jiraFamily", "family")}
+        />
+        <Toggle
+          id={profileId(i, "stack")}
+          label={<>Stacked PRs{of}</>}
+          help="Adds the parent and child PRs of a stacked PR. Review runs only."
+          checked={d.variants.includes("stack")}
+          onChange={(on) => edit({ variants: withVariant(d.variants, "stack", on) })}
+        />
+        <Toggle
+          id={profileId(i, "submodules")}
+          label={<>Submodule changes{of}</>}
+          help="Adds the commits of each moved submodule. Review runs only."
+          checked={d.variants.includes("submodules")}
+          onChange={(on) => edit({ variants: withVariant(d.variants, "submodules", on) })}
         />
       </div>
       <ChecksField {...props} />
