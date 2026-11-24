@@ -256,6 +256,8 @@ WP-SM3 build notes (2026-11-23), where the build differs from the plan:
 - probe-sub-caller has a trap, because each case needs one: `quotaLabel`, an unchanged caller that handles "unlimited" before the call.
 - label.ts and run.ts take the target branch from `targetBranch` (cases.ts). Before, label.ts used main and refused each stacked case with a parent ("The target head moved"). replies.ts still uses main; it builds no stacked case.
 
+Build note (2026-11-24), empty gitlink quote: Gate SM-P showed that the finder gives the gitlink cause an empty anchorText, because ./repo has no file of the gitlink and no prompt line names its text. The validator drops an empty quote with reason "match", so all 3 runs of probe-sub-caller lost the must-find as "unchanged". Now judge.ts `quoteGitlinks` gives a cause on line 1 of a moved gitlink path with an empty quote the SD21 text "Subproject commit <hash>" of its side, before validation. It applies in `judge` and in `anchorAll` (check-added findings). An empty quote on any other place still drops. The prompt and REVIEW_PROMPT_VERSION do not change. The tests now use an empty cause quote.
+
 ### Gate SM-P (probe, the user runs it)
 
 - `bun run eval -- --real --set probe --cases probe-sub-signature,probe-sub-caller,probe-sub-unreached --repeat 3`, once with `--variants submodules` and once without. docs/eval/local.md has the full commands.

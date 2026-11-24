@@ -1355,7 +1355,8 @@ describe("submodule probe cases with the fake CLI (WP-SM3)", () => {
         evidenceStatus: "code",
         confidence: "high",
         agent: null,
-        cause: { path: c.submodule.path, side: "new", line: 1, lineEnd: null, anchorText: `Subproject commit ${repo.sub.head}` },
+        // ./repo has no file of the gitlink, so the finder gives an empty quote for its line (Gate SM-P).
+        cause: { path: c.submodule.path, side: "new", line: 1, lineEnd: null, anchorText: "" },
         preexisting: false,
       };
       const kept = await fakeEval(c.id, ["--variants", "submodules"], [finding]);

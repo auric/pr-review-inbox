@@ -19,6 +19,8 @@ const OLD = "1".repeat(40);
 const NEW = "2".repeat(40);
 const USE = ["import { parse } from '../lib/parse';", "export const read = (s: string) => parse(s).value;", ""].join("\n");
 
+const ADDED = "export const added = 1;\n";
+
 let dir = "";
 let ws: Workspace;
 
@@ -45,6 +47,8 @@ beforeAll(() => {
   git(repo, env, "update-index", "--add", "--cacheinfo", `160000,${OLD},lib`);
   git(repo, env, "commit", "-q", "-m", "base");
   git(repo, env, "update-index", "--cacheinfo", `160000,${NEW},lib`);
+  writeFileSync(join(repo, "src/added.ts"), ADDED);
+  git(repo, env, "add", "src/added.ts");
   git(repo, env, "commit", "-q", "-m", "head");
   const mergeBase = git(repo, env, "rev-parse", "HEAD~1").trim();
   const sourceHead = git(repo, env, "rev-parse", "HEAD").trim();
@@ -102,7 +106,18 @@ const outcome: RunOutcome = {
   stderrTail: "",
 };
 const profile = SHIPPED_PROFILES[0] as (typeof SHIPPED_PROFILES)[number];
-const run = (gitlinks?: Gitlinks) => judge(outcome, ws, profile, [], [], null, [], [], false, gitlinks) as Promise<Found>;
+const withFinding = (f: Finding): RunOutcome => ({
+  ...outcome,
+  result: {
+    ...(outcome.result as NonNullable<RunOutcome["result"]>),
+    structured_output: { ...(outcome.result?.structured_output as object), findings: [f] },
+  },
+});
+const run = (gitlinks?: Gitlinks, f = caller) =>
+  judge(withFinding(f), ws, profile, [], [], null, [], [], false, gitlinks) as Promise<Found>;
+const links: Gitlinks = new Map([["lib", { old: OLD, new: NEW }]]);
+// ./repo has no file of a gitlink, so the finder can give an empty quote for the gitlink line.
+const emptyQuote = (path: string): Finding => ({ ...caller, cause: { path, side: "new", line: 1, lineEnd: null, anchorText: "" } });
 
 describe("gitlink cause (submodule-prs.md SD21, AC-SM8)", () => {
   test("git diff shows the moved gitlink as one hunk at line 1", () => {
@@ -120,6 +135,26 @@ describe("gitlink cause (submodule-prs.md SD21, AC-SM8)", () => {
 
   test("without gitlinks, the same finding drops as unchanged", async () => {
     const f = await run();
+    expect(f.candidates).toEqual([]);
+    expect(f.summary.dropped.map((d) => d.reason)).toEqual(["unchanged"]);
+  });
+
+  test("with gitlinks, a cause with an empty quote on line 1 of the gitlink path takes the gitlink text and stays", async () => {
+    const f = await run(links, emptyQuote("lib"));
+    expect(f.summary.dropped).toEqual([]);
+    const cause = f.candidates[0]?.finding.cause;
+    expect(cause?.anchorText).toBe(`Subproject commit ${NEW}`);
+    expect(cause?.anchor).toMatchObject({ path: "lib", line: 1, lineEnd: 1 });
+  });
+
+  test("a cause with an empty quote on an added line of a normal file still drops as unchanged", async () => {
+    expect(ws.diff).toContain(`+${ADDED.trim()}`);
+    const quoted = await run(links, {
+      ...caller,
+      cause: { path: "src/added.ts", side: "new", line: 1, lineEnd: null, anchorText: ADDED.trim() },
+    });
+    expect(quoted.summary.dropped).toEqual([]);
+    const f = await run(links, emptyQuote("src/added.ts"));
     expect(f.candidates).toEqual([]);
     expect(f.summary.dropped.map((d) => d.reason)).toEqual(["unchanged"]);
   });
@@ -172,6 +207,14 @@ describe("check-added finding with a gitlink cause (submodule-prs.md AC-SM8)", (
     const kept = r.placed.get(0);
     expect(kept?.path).toBe("src/use.ts");
     expect(kept?.cause?.anchor).toMatchObject({ path: "lib", line: 1, lineEnd: 1 });
+  });
+
+  test("with gitlinks, a cause with an empty quote on line 1 of the gitlink path gets a place", async () => {
+    const empty = { ...obligation, finding: { ...obligation.finding, cause: emptyQuote("lib").cause } } as Obligation;
+    const out = checkRun.o.result as NonNullable<RunOutcome["result"]>;
+    const o = { ...checkRun.o, result: { ...out, structured_output: { ...(out.structured_output as object), obligations: [empty] } } };
+    const r = await placeObligations(ws, { ...checkRun, o }, links);
+    expect(r.placed.get(0)?.cause?.anchor).toMatchObject({ path: "lib", line: 1, lineEnd: 1 });
   });
 
   test("without gitlinks, the same obligation gets no place", async () => {

@@ -283,6 +283,18 @@ async function readBlobs(ws: Workspace, findings: Placed[], gitlinks?: Gitlinks)
   return { newFiles, oldFiles, oversized, loadChanged };
 }
 
+// submodule-prs.md SD21: ./repo has no file of a gitlink, so the finder can give a cause on line 1 of a gitlink path with an empty quote.
+// That cause gets the readBlobs text of its side as the quote. An empty quote on any other place stays empty and drops.
+function quoteGitlinks<T extends Pick<Finding, "cause">>(findings: T[], gitlinks?: Gitlinks): T[] {
+  return findings.map((f) => {
+    const c = f.cause;
+    if (!c || c.line !== 1 || collapse(c.anchorText)) return f;
+    const p = repoPath(c.path);
+    const sha = p === null ? null : gitlinks?.get(p)?.[c.side];
+    return sha ? { ...f, cause: { ...c, anchorText: `Subproject commit ${sha}` } } : f;
+  });
+}
+
 // The finder result of a review run after validation and dedupe, before the verify phase (spec.md sections 1.6 and 1.7).
 // candidates: the kept findings in finder order, then the open carried findings of a re-review. replies: the answered questions.
 export type Found = {
@@ -329,7 +341,7 @@ export async function judge(
   );
   const check = () =>
     validate({
-      result: parsed.data,
+      result: { ...parsed.data, findings: quoteGitlinks(parsed.data.findings, gitlinks) },
       diff: ws.diff,
       ...blobs,
       agents,
@@ -649,7 +661,10 @@ async function anchorAll(
 ): Promise<Map<number, AnchoredFinding>> {
   const out = new Map<number, AnchoredFinding>();
   if (!made.length) return out;
-  const findings = made.map((m) => m.finding);
+  const findings = quoteGitlinks(
+    made.map((m) => m.finding),
+    gitlinks,
+  );
   const blobs = await readBlobs(ws, [...findings, ...findings.flatMap((f) => (f.cause ? [f.cause] : []))], gitlinks);
   const coverage = { read: [], skipped: [], unavailable: [], notChecked: [] };
   const result: ReviewResult = { summary: "", risks: [], questions: [], coverage, findings, answered: [] };

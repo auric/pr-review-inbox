@@ -2054,8 +2054,9 @@ describe("submodule PR context (submodule-prs.md WP-SM2)", () => {
     return { root, h, w, lib, lib2, remoteCalls, put, run };
   }
 
-  // A finding on an unchanged line of src/app.ts whose cause is line 1 of the moved gitlink (SD21).
-  const caller = (lib2: string) => ({
+  // A finding on an unchanged line of src/app.ts whose cause is line 1 of the moved gitlink (SD21). ./repo has no file of the gitlink,
+  // so the finder gives an empty quote.
+  const caller = {
     ...RESULT,
     questions: [],
     findings: [
@@ -2072,11 +2073,11 @@ describe("submodule PR context (submodule-prs.md WP-SM2)", () => {
         evidenceStatus: "code",
         confidence: "high",
         agent: null,
-        cause: { path: "lib", side: "new", line: 1, lineEnd: null, anchorText: `Subproject commit ${lib2}` },
+        cause: { path: "lib", side: "new", line: 1, lineEnd: null, anchorText: "" },
         preexisting: false,
       },
     ],
-  });
+  };
   const kept = (d: RunDetail) =>
     d.items.filter((i) => i.kind === "finding").map((i) => [i.anchor?.path, i.anchor?.line, (i.payload as FindingPayload).cause?.path]);
 
@@ -2116,7 +2117,7 @@ describe("submodule PR context (submodule-prs.md WP-SM2)", () => {
       });
       let on: Awaited<ReturnType<typeof run>>;
       try {
-        on = await run(["stack", "submodules"], caller(lib2));
+        on = await run(["stack", "submodules"], caller);
       } finally {
         spy.mockRestore();
       }
@@ -2151,7 +2152,7 @@ describe("submodule PR context (submodule-prs.md WP-SM2)", () => {
       for (const l of lines) expect(l).not.toContain(FAKE_TOKEN);
 
       // Without the variant: no file, no line, no read, and the finding drops as unchanged.
-      const off = await run([], caller(lib2));
+      const off = await run([], caller);
       expect(off.find.context["submodules.md"]).toBeUndefined();
       for (const c of [off.find, off.check])
         for (const a of Object.values(c?.agents ?? {})) for (const l of ALL) expect(a.prompt).not.toContain(l);
