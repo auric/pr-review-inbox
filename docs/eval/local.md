@@ -412,6 +412,28 @@ bun run eval:seed -- leaks <pilot result.json>
 
 The labels go to `eval-seeds/set/labels/`. The seeded baseline runs with `bun run eval:ab -- --seeded ...` (seeded-truth.md section 9, SG-A).
 
+## Oracle look (eval:oracle)
+
+The oracle look tells attention misses from reasoning misses. It points a fresh read-only run at the place of each natural known issue (extra) that no run of a result found. If the run finds the issue when it is pointed, the miss was attention. If it does not, the miss was reasoning.
+
+- Selection: an extra with no line match within 3 lines and no matcher match in the label store, over all runs of its case. `--issues n,n` keeps only these issues, by the 0-based index over all extras of the result in case order. `--exclude n,n` drops issues by the same index, for example known stale issues. The printout counts them apart. The result needs eval:label first.
+- Snapshot: on a seeded set, the calls review the natural head without the seeds (`--unseeded`, the default). The seeded bundle holds no natural head, so the oracle takes it from the natural set (`--natural <folder>`, default `eval-local`). The seed store in the parent folder of the seeded set binds each seed to its host. The host must have the bound base and head, and its natural items must give the seeded extras in order. The issue place is the place of that item at the natural head. A case without such a host keeps the seeded head. `--seeded` keeps the seeded head for all cases. On the seeded head, an issue answer with findings only within 3 lines of a seed counts as "taken by seeds", not as a scored call, and the matcher sees only the other findings.
+- Levels (`--levels`, default `file,lines`): `file` names only the path. `lines` names the path and the line range. The prompt never holds the issue text.
+- Decoys (`--decoys K`, default 10): added-line runs in the same cases, at least 3 lines away from each gold place, in a file type that holds a gold place. They run at the `lines` level. A decoy answer is a false claim when a finding of severity major or above lies within 3 lines of the decoy and within 3 lines of no gold place (bugs and seeds, traps, extras, your comments, and alt places). "Other findings" counts the major and blocker findings that are no false claim. The result JSON keeps the gold places (no text) of each target.
+- Scoring: the matcher of eval:label compares each answer with its issue only. A line match does not count, because the prompt names the lines. A failed call or matcher call is unscored and stays out of the counts.
+- Rescore (`--rescore <oracle.json>`): scores the stored answers again with the current rules and prints the counts. It makes no CLI call and does not change the file. It applies the decoy rule and the "taken by seeds" status, and keeps the matcher verdicts. An older result has no stored places, so it reads them from the case.json of the set in REVIEW_LOOP_EVAL_LOCAL. It also prints the decoy count of the old rule (any major finding anywhere).
+- Repeats (`--repeat N`, default 3): each pointed call runs N times. The calls go round by repeat, so a stop leaves even cells.
+- Model and effort: the model of the record runs and the rl-reviewer effort of the record profile. The run has no advisor and no subagent. It uses the sanitized workspace, rl-git, and Read, Grep, and Glob, as the judge does.
+- Cost: the plan prints calls x the mean find-phase cost of the record, plus $0.03 per issue call for the matcher. This is an upper bound, because the find phase reviews the whole change. `--max-usd X` (default 60) stops new calls when the spent cost reaches X.
+- Without `--real`, the command prints the plan and exits with code 2. With `--real`, it checks `claude auth status` (authMethod claude.ai) first.
+
+```
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:oracle -- <SG-A result.json> --issues <indexes> --natural eval-local --real --out eval-results/oracle
+REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:oracle -- --rescore eval-results/oracle/<oracle.json> --exclude <indexes>
+```
+
+Read the output per level. "Found in at least 1 call" and "Found in a majority" count issues. "Per issue" gives the spread of found calls per issue. A high found rate at `lines` and a low decoy false-claim rate mean attention misses. A low found rate at `lines` means reasoning misses. A found rate near the decoy rate means pointing alone makes the claims. The printout holds counts only. The result JSON in `--out` holds paths, finding text, and summaries. Keep it out of git.
+
 ## Bisect when the result is mixed
 
 Run the command again with one change at a time: `--candidate-variants broad --candidate-modules ""`, then `--candidate-variants verify2 --candidate-modules ""`, then `--candidate-variants "" --candidate-modules failures`. Each run builds the same set again, so the tables compare.
