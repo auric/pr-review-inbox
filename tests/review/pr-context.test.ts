@@ -457,7 +457,7 @@ const load = (s: Setup, provider: PrContextReader | null, o: { focus?: number[];
     me: "ihor",
     dataDir: "/tmp/rl-none",
     now: T0,
-    peerReads: o.peerReads,
+    peerReads: o.peerReads ?? false,
   });
 const openPr = (id: number, updatedDate: number): PullRequest =>
   ({
@@ -505,6 +505,22 @@ describe("loadPrContext", () => {
       build: { error: "no Bitbucket connection" },
       peerNotes: [expect.stringContaining("no Bitbucket connection")],
     });
+  });
+
+  test("PEER_READS is on: a run without the option reads the open-PR list (Gates G9 and G12)", async () => {
+    const s = setup();
+    changes(s.db, s.pr.id, [["src/client.ts", null]]);
+    const provider = stub({
+      listOpenPullRequests: async () => ({ items: [openPr(60, 5)], complete: true }),
+      listChanges: async () => ({ items: [{ path: "src/client.ts", srcPath: null, type: "MODIFY" }], complete: true }),
+    });
+    const c = await loadPrContext(s.db, provider, s.pr, { threads: [] }, new AbortController().signal, {
+      me: "ihor",
+      dataDir: "/tmp/rl-none",
+      now: T0,
+    });
+    expect(c.input.peers.map((p) => p.prId)).toEqual([60]);
+    expect(c.input.peerNotes).toEqual([]);
   });
 
   test("AC-P5: a stored open PR of the same repository that changes a path shows with it; a rename matches through src_path; no overlap, another repo, or a merged PR does not show", async () => {

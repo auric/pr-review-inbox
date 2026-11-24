@@ -29,15 +29,13 @@ import { prFixes } from "./fix-routes";
 import { keptNotes, refreshLinks, within } from "./notes";
 import type { Heads } from "./run-rows";
 
-// Gates G9 and G12 (integration-check.md) are not run yet. Until the user records both as PASS, only stored PRs are listed
-// (spec.md section 2.8, tasks.md WP-PN). Set it to true after the PASS.
-export const PEER_READS = false;
+// Gates G9 and G12 passed on 2026-11-24 (integration-check.md). False: only stored PRs are listed (spec.md section 2.8).
+export const PEER_READS = true;
 export const PEER_GATE_TEXT = "Only PRs in your inbox are listed: the app does not read other open pull requests from Bitbucket yet.";
 
-// docs/plans/review-v2/stacked-prs.md K12: the stack gates are G9 and G20. G12 does not gate stack reads (user decision 2026-11-24).
-// Until the user records both as PASS, only stored PRs join a stack: no branch search, and no change list of a PR outside the inbox.
-// Set it to true after the PASS.
-export const STACK_READS = false;
+// docs/plans/review-v2/stacked-prs.md K12: the stack gates are G9 and G20. Both passed on 2026-11-24 (integration-check.md).
+// False: only stored PRs join a stack, with no branch search and no change list of a PR outside the inbox.
+export const STACK_READS = true;
 
 export type PrContextReader = Pick<
   ForgeProvider,

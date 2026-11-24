@@ -82,7 +82,8 @@ function world() {
       dataDir: "/tmp/rl-none",
       now: T0,
       stack: o.stack ?? true,
-      stackReads: o.stackReads,
+      peerReads: false,
+      stackReads: o.stackReads ?? false,
     });
   const body = (id: number) => w.prs.get(id) as unknown as PrBody;
   const gets = () => fake.requests.filter((r) => r.startsWith("GET "));
@@ -365,6 +366,23 @@ describe("loadStack after the stack gates (stackReads)", () => {
     const failed = await x.load(b, { stackReads: true });
     expect(failed.input.stack?.parents[0]?.paths).toBeNull();
     expect(failed.input.stack?.notes).toEqual([`Not read: the changed paths of #${a} (Bitbucket error server 500).`]);
+  });
+
+  test("STACK_READS is on: a run without the option searches the branches (Gates G9 and G20)", async () => {
+    const x = world();
+    const a = await x.create("feat/a", "main", { store: false });
+    const b = await x.create("feat/b", "feat/a");
+    x.fake.requests.length = 0;
+    const self = x.db.query("SELECT * FROM pull_request WHERE pr_id = $id").get({ id: b }) as Heads;
+    const r = await loadPrContext(x.db, x.provider, self, { threads: [] }, new AbortController().signal, {
+      me: "jdoe",
+      dataDir: "/tmp/rl-none",
+      now: T0,
+      stack: true,
+      peerReads: false,
+    });
+    expect(r.input.stack?.parents.map((p) => p.prId)).toEqual([a]);
+    expect(x.searches().length).toBeGreaterThan(0);
   });
 
   test("AC-SK5: a failed children search inside a known stack gives its Not read line", async () => {

@@ -1,6 +1,6 @@
 # Submodule pull request context
 
-Status: Designed 2026-11-23. WP-RP0 and WP-SM0 to WP-SM2 are built (2026-11-23). WP-SM3 is built (2026-11-24, e4c2764). Gate SM-P passed (2026-11-24). Open: Gate SM-B (the user) and WP-SM4. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. The user accepted the section 11 answers on 2026-11-23. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
+Status: Designed 2026-11-23. WP-RP0 and WP-SM0 to WP-SM2 are built (2026-11-23). WP-SM3 is built (2026-11-24, e4c2764). Gate SM-P passed (2026-11-24). Gates G9 and G12 passed on 2026-11-24, so the open-PR list is read (`PEER_READS`=true). Open: Gate SM-B (the user) and WP-SM4. The user decided on 2026-11-23 to build it with the stacked PR context (stacked-prs.md) in one wave RP. The user accepted the section 11 answers on 2026-11-23. Work: packages WP-RP0 and WP-SM0 to WP-SM4, gates SM-P and SM-B. REVIEW_PROMPT_VERSION does not change until WP-SM4.
 
 ## 1. Request
 

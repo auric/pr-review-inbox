@@ -79,6 +79,7 @@ async function world(o: MultiOptions = {}) {
       remote: m.remote,
       signal: new AbortController().signal,
       timeoutMs: 60_000,
+      peerReads: false,
       ...x,
     });
   };

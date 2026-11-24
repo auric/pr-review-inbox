@@ -1,6 +1,6 @@
 # Stacked pull requests
 
-Status: Designed 2026-11-20. WP-SK0 to WP-SK2 are built (2026-11-23). WP-SK3 is built (2026-11-24, 3f152e5). Branch reads stay off (STACK_READS=false) until Gate G20 passes. Gate G9 passed on 2026-11-24. Gate SK-P passed (2026-11-24 rerun, docs/eval/results.md). Open: Gate SK-B and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
+Status: Designed 2026-11-20. WP-SK0 to WP-SK2 are built (2026-11-23). WP-SK3 is built (2026-11-24, 3f152e5). Gates G9, G12, and G20 passed on 2026-11-24, and branch reads are on (STACK_READS=true) since then. Gate SK-P passed (2026-11-24 rerun, docs/eval/results.md). Open: Gate SK-B and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
 
 ## 1. Request
 
@@ -10,10 +10,10 @@ Status: Designed 2026-11-20. WP-SK0 to WP-SK2 are built (2026-11-23). WP-SK3 is 
 ## 2. Facts
 
 - pr-context.md lists other OPEN PRs of the same repository that change the same paths (context-files.ts:846-871, pr-context.ts:48-49 and 167-182). It reads stored rows only.
-- Bitbucket reads of other PRs exist (pr-context.ts:184-227), but `PEER_READS` is false until Gates G9 and G12 pass (pr-context.ts:27-30). Both are NOT RUN (integration-check.md:401-402).
+- Bitbucket reads of other PRs exist (pr-context.ts:184-227), and `PEER_READS` gated them on Gates G9 and G12. Both passed on 2026-11-24, and `PEER_READS` is true.
 - Caps: `PEER_SECTION_BYTES` 6 KB, `PEER_PRS_SHOWN` 10, `PEER_PATHS_SHOWN` 10, `PEER_READ_MS` 15 s (context-files.ts:686-690). One deadline covers all reads of one build (pr-context.ts:139).
 - `listOpenPullRequests(project, repo, branch)` adds `at=refs/heads/<branch>&direction=OUTGOING` (provider.ts:304-312). It has no INCOMING form. The createPullRequest fallback uses it (provider.ts:438).
-- integration-check.md has no fact on `at` or `direction`. G9 does not cover the filter. The fake Bitbucket supports both (tests/support/fake-bitbucket.ts:268-272).
+- Gate G20 recorded the `at` and `direction` facts on 2026-11-24 (U-SK1 to U-SK5 in integration-check.md). G9 does not cover the filter. The fake Bitbucket supports both (tests/support/fake-bitbucket.ts:268-272).
 - The default branch read is verified (Gate G13, integration-check.md:403, provider.ts:384-388).
 - The PR schema holds `fromRef.repository`, the fork for a PR from a fork (schemas.ts:13-19). `toPr` drops it (provider.ts:244-265, src/shared/types.ts:17-41).
 - The `pull_request` table has `source_branch` and `target_branch` (001_m1.sql:19-20).
@@ -247,7 +247,7 @@ Interactions:
 - `WorkspaceInput` gets optional `parentTarget`. `Workspace` gets `parentBase: string | null`.
 - Constants in context-files.ts: `STACK_SECTION_BYTES`, `STACK_UP_MAX`, `STACK_CHILDREN_SHOWN`, `STACK_PATHS_SHOWN`, `STACK_DESCRIPTION_BYTES`.
 - `STACK_FETCH_MS` in workspace.ts.
-- `STACK_READS` in pr-context.ts, false until the user records Gates G9 and G20 as PASS.
+- `STACK_READS` in pr-context.ts. It was false until Gates G9 and G20 passed. It is true since 2026-11-24.
 - `createReviewJobs` gets an optional `stackReader`, as it has `gitRemote`. The eval passes the stack of a case through it.
 
 ## 7. Eval and proof
@@ -366,7 +366,7 @@ Run: `bun scripts/gate/bitbucket-write.ts --repo <URL> --only G9,G12,G20`. The t
 | U-SK4 | `fromRef.repository` and `toRef.id` keys of each value. A PR from a fork, if the test setup has one. |
 | U-SK5 | `isLastPage` and `limit` behave as in G9. |
 
-- Until G9 and G20 pass, `STACK_READS` stays false. Stored rows still work.
+- `STACK_READS` waited for G9 and G20. Both passed on 2026-11-24, and `STACK_READS` is true. Stored rows still work.
 - The branch model read (question 1) is out of G20 by the decision of 2026-11-23. G20 reads the default branch only.
 
 ## 12. Open questions
@@ -412,7 +412,7 @@ The user decided on 2026-11-23 to build this design and submodule-prs.md in one 
 
 - WP-RP0: the column `review_run.related_json`, `RunDto.related`, and the RunLog and RunLine lines. Both variants write their run line through it.
 - WP-RP0: `finderRules(p, main, files?: RunFiles)`. `RunFiles` gets the `stack` and `submodules` flags. Without the argument, the finder text keeps its bytes.
-- `listOpenPullRequests` stays behind `PEER_READS`. One user run of Gates G9, G12, and G20 unblocks both designs.
+- `listOpenPullRequests` stays behind `PEER_READS`. Gates G9, G12, and G20 passed on 2026-11-24, so both flags are true.
 - Eval: the VARIANTS entries, the `stackReader` and `submoduleReader` options of `createReviewJobs`, and `buildRepo` in scripts/eval/cases.ts.
 - One ship step: WP-SK4 and WP-SM4 share the next version step after 2.9.
 - Not shared: the 15 s deadline. The stack reads run in `loadPrContext`. The submodule step runs after the workspace, with its own deadline.
@@ -422,4 +422,4 @@ The user decided on 2026-11-23 to build this design and submodule-prs.md in one 
 WP-SK0 -> the user runs Gates G9, G12, and G20 -> WP-RP0 -> WP-SK1 -> WP-SK2 -> WP-SM0 -> WP-SM1 -> WP-SM2 -> WP-SK3 -> WP-SM3 -> Gates SK-P and SM-P -> Gates SK-B and SM-B -> WP-SK4 with WP-SM4.
 
 - Run one package at a time. The packages edit the same files.
-- Gates G9 and G12 are NOT RUN (integration-check.md:401-402). WP-JC5 is still on branch jc5, not on main.
+- Gates G9, G12, and G20 passed on 2026-11-24 (integration-check.md). WP-JC5 is still on branch jc5, not on main.

@@ -25,7 +25,7 @@ This gate records facts that review v2 and the task builder need (docs/plans/rev
 | G15 | WP-MR1. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G16, G17 | WP-MR2. Read only. | `scripts/gate/bitbucket-write.ts` |
 | G18 | WP-TU1 merges. Read only. | `scripts/gate/bitbucket-write.ts` |
-| G20 | WP-SK1 turns on `STACK_READS` after G9 and G20 pass. Read only. | `scripts/gate/bitbucket-write.ts` |
+| G20 | `STACK_READS` is on since G9 and G20 passed on 2026-11-24. Read only. | `scripts/gate/bitbucket-write.ts` |
 
 ## Record the results
 

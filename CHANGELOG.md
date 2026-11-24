@@ -14,6 +14,7 @@
 - Build a Jira task: the comments on the pull request of a task now get "Sort the comments". Claude drafts the replies and groups the threads. Pick Fix, Push back, or Reply only for each group, then "Send N groups to Claude". Claude fixes the code in the session of the part or pushes back with a reason, and drafts "Fixed in <commit>" or the reason as the reply. "Push and post N replies" pushes the branch and posts the accepted replies after one confirm.
 - Build a Jira task: Stop of a comment run no longer puts the comment text into the Tell Claude box. The Log names the run "PR comments" and counts the fixed and pushed-back threads.
 - Review: Fix on the pull request of a task now opens the Task view.
+- Review, replies, Fix, and finding discussions: Claude now also knows the other open pull requests of the repository that change the same files, also when they are not in your inbox. Before, it knew only the pull requests in your inbox.
 
 - Review: a review now also reports a blocker or major problem in unchanged code that the change touches or relies on. Such findings show in the folded "Pre-existing" group, at most 5 per run. The app does not post them.
 - Review: the check step now also checks each risk area that the reviewer notes. A confirmed risk with a place in the change also becomes a draft finding.
