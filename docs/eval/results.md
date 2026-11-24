@@ -164,3 +164,4 @@ Probe gates SK-P and SM-P (synthetic cases, commit e4c2764, about $6 in total):
 - In all 3 variant runs, the finder raised the must-find with a gitlink cause and an empty quote. The validator dropped it as "unchanged".
 - A fix is built: the judge fills the gitlink quote with "Subproject commit <hash>". A rerun of that case follows after the push.
 - probe-sub-signature: control 2 of 3, variant 3 of 3. Without the variant, runs asked 14 questions over 9 runs and cost twice as much.
+- Rerun after 2232671: probe-sub-caller with the variant found the must-find in 3 of 3 runs, 0 trap hits. SM-P passes.
