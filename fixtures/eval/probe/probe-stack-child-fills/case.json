@@ -7,6 +7,8 @@
     "description": "Adds the limit of 100 requests per minute for each API key. A request over the limit gets status 429. The Retry-After header comes later."
   },
   "task": "Add a rate limit to the public API.\n\nAcceptance criteria:\n1. Each API key gets at most 100 requests per minute. A request over the limit gets status 429.\n2. The 429 reply has a Retry-After header with the seconds until the current window ends.",
+  "taskSummary": "Add a rate limit to the public API",
+  "expectMention": ["#3", "eval-child-1", "\"Add the Retry-After header\""],
   "stack": {
     "children": [
       {

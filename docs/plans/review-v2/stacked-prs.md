@@ -257,13 +257,21 @@ Interactions:
 
 ### Probe cases (WP-SK3)
 
-Three cases in fixtures/eval/probe/, in the format of probe-obl-criterion-deferred/case.json. `parent.patch` applies to base/, and head.patch applies on top of it. `stack` in case.json names the parent and the children.
+Four cases in fixtures/eval/probe/, in the format of probe-obl-criterion-deferred/case.json. `parent.patch` applies to base/, and head.patch applies on top of it. `stack` in case.json names the parent and the children.
 
 | ID | Seeded | Expected |
 |---|---|---|
 | probe-stack-relies | The parent adds `parseQuota`, which returns null for a bad value. Its comment says so. The child uses the result with no null check. | Must-find, major, on the child line. Trap on the parent `return null` line. |
 | probe-stack-unreached | The parent helper is wrong for negative input. The child calls it only with constants above zero. | Clean. Trap on the negative branch of the parent helper. |
 | probe-stack-child-fills | This PR meets criterion 1 of 2. A child PR "Add the Retry-After header" changes src/api/server.ts. Twin of probe-obl-criterion-deferred. | Clean. Trap on the partial line. A question that names the child is correct. |
+| probe-stack-meaning | The parent moves the SQL of `customerOrders` and adds `DESC`. The doc comment still says "oldest first". The child takes index 0 as the first order. | Must-find, major, on the child line. Trap on the parent query line. |
+
+SK-P rerun fixes (2026-11-24), after the first SK-P did not discriminate:
+
+- The task summary of a case came from its title, so the title of probe-stack-child-fills told the control about the child. `taskSummary` in case.json now sets the summary. Absent, the title stays, so the other task cases keep their bytes.
+- probe-stack-meaning needs the parent diff: no case of the first 3 did. Without the variant, only an untouched file shows the flip.
+- `expectMention` in case.json lists texts that only the stack section gives. The run line shows `mention yes` or `mention no`, and the result stores the flag `mentioned`. probe-stack-child-fills uses it.
+- Known limits: the case ID is the repository slug, so both arms see "stack". rl-git lets the control read TARGET~1..TARGET, which is the parent commit.
 
 - Harness: `buildRepo` (scripts/eval/cases.ts:296-340) makes branch `parent` from parent.patch. The remote target ref becomes `refs/heads/parent`.
 - The `stackReader` of the case gives PR number 2 for the parent, with paths from parent.patch.
@@ -271,8 +279,8 @@ Three cases in fixtures/eval/probe/, in the format of probe-obl-criterion-deferr
 
 ### Gate SK-P (probe, user runs)
 
-- `bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3`, once with `--variants stack` and once without. docs/eval/local.md has the full commands. Both sides run fresh, so the version of a stored baseline does not matter.
-- Pass: with "stack", 0 trap hits over the 9 runs. The must-find of probe-stack-relies is found at least as often as in the control. Failed runs do not rise. Cost per case rises by at most 25%.
+- `bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills,probe-stack-meaning --repeat 3`, once with `--variants stack` and once without. docs/eval/local.md has the full commands. Both sides run fresh, so the version of a stored baseline does not matter.
+- Pass: with "stack", 0 trap hits over the 12 runs. The must-finds of probe-stack-relies and probe-stack-meaning are found at least as often as in the control. Failed runs do not rise. Cost per case rises by at most 25%.
 - The gate checks behavior, not recall. 3 cases cannot show a recall gain.
 
 ### Gate SK-B (manual, user)
@@ -288,7 +296,7 @@ Three cases in fixtures/eval/probe/, in the format of probe-obl-criterion-deferr
 - A PR with no stack: 2 more GETs at run start. After the stack gates, up to 4. They run in parallel with the build stats read. No model tokens.
 - A stacked PR: up to 15 GETs, with cached change lists. One fetch of a branch that the cache mostly holds. Up to 8 KB of context, about 2,000 tokens.
 - Model cost per stacked review: about +$0.05 to +$0.25 by estimate, for the parent reads. Unverified. Gate SK-B records it.
-- Gate SK-P: 18 probe runs at about $0.15 each (results.md:41), about $3. Unverified.
+- Gate SK-P: 24 probe runs. The first SK-P and SM-P together cost about $6 for 36 runs, so about $4. Unverified.
 - Build: about 600 to 900 lines with tests over WP-SK1 to WP-SK3. Unverified.
 
 ## 9. Acceptance criteria

@@ -1,0 +1,16 @@
+diff --git a/src/billing/loyalty.ts b/src/billing/loyalty.ts
+new file mode 100644
+index 0000000..f91d6c2
+--- /dev/null
++++ b/src/billing/loyalty.ts
+@@ -0,0 +1,10 @@
++import type { Db } from "../db/types";
++import { customerOrders } from "../orders/store";
++
++const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
++
++// A customer whose first order is two or more years old gets the loyalty discount.
++export function hasLoyaltyDiscount(db: Db, customerId: string, now: number): boolean {
++  const first = customerOrders(db, customerId)[0];
++  return first !== undefined && now - first.createdAt >= 2 * YEAR_MS;
++}

@@ -88,7 +88,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 
 ## Probe set
 
-`fixtures/eval/probe/` holds 32 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
+`fixtures/eval/probe/` holds 33 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
 
 - 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
 - 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
@@ -125,20 +125,23 @@ bun run eval:compare -- <probe-base result.json> <probe-security2 result.json>
 
 `--variants security2` also applies the verify rules. For the verify half alone, run the second command with `--variants security2-verify`. Compare the "Shown security findings" row and the "class security" slice row.
 
-3 cases (`probe-stack-*`, docs/plans/review-v2/stacked-prs.md section 7) are stacked PRs. `stack` in case.json names the parent and the children. `parent.patch` applies to base/ and makes the branch `parent`, the target of the PR. head.patch applies on top of it. Only the variant "stack" gives the stack to the run. Without it, the run gets the same repository with no section and no PARENT_BASE:
+4 cases (`probe-stack-*`, docs/plans/review-v2/stacked-prs.md section 7) are stacked PRs. `stack` in case.json names the parent and the children. `parent.patch` applies to base/ and makes the branch `parent`, the target of the PR. head.patch applies on top of it. Only the variant "stack" gives the stack to the run. Without it, the run gets the same repository with no section and no PARENT_BASE:
 
 - `probe-stack-relies`: the parent adds `parseQuota`, which returns null for a bad value. The change uses the result with a non-null assertion. Must-find, major, on the caller. A trap is on the `return null` lines of the parent.
 - `probe-stack-unreached` (clean): the parent helper `backoffMs` has no cap for an attempt below 1. The change calls it only with 1, 2, and 3. A trap is on that parent branch.
-- `probe-stack-child-fills` (clean): the twin of `probe-obl-criterion-deferred`, with no parent. An open child PR "Add the Retry-After header" adds the missing criterion. A trap is on the 429 line. A question that names the child is correct.
+- `probe-stack-child-fills` (clean): the twin of `probe-obl-criterion-deferred`, with no parent. An open child PR "Add the Retry-After header" adds the missing criterion. A trap is on the 429 line. A question that names the child is correct. `taskSummary` gives the task summary, so the case title stays out of task.md. `expectMention` lists the child number, its branch, and its quoted title. The run line then shows `mention yes` when a shown finding, a question, or an open risk names one of them, else `mention no`. The result file stores only the flag `mentioned`.
+- `probe-stack-meaning`: the parent moves the SQL of `customerOrders` into src/db/queries.ts and adds `DESC`. The doc comment still says "oldest first", and the parent text does not name the new order. The change takes index 0 as the first order of a customer. Must-find, major, on the caller. A trap is on the parent query line. The parent diff (PARENT_BASE to TARGET) shows the flip. Without it, only src/db/queries.ts, which the change does not touch, shows `DESC`.
 
 The app drops a finding on a line outside the change (reason unchanged). So a finding that blames parent code counts as a trap hit only when it lands on a changed line. `probe-stack-unreached` has its trap alt on the call line. In `probe-stack-relies`, the call line is the must-find, so a parent-blaming finding there counts as found. Read the dropped list of both results for findings on the parent lines. In the control run, `probe-stack-child-fills` is `probe-obl-criterion-deferred`, so a correct finding on the 429 line counts as a trap hit there.
 
-Gate SK-P (stacked-prs.md section 7) runs the 3 cases with the variant and without it, then compares the two results:
+The case ID is the repository slug. It reaches pr-context.md and the prompt in both arms, so each run sees "stack" in the slug.
+
+Gate SK-P (stacked-prs.md section 7) runs the 4 cases with the variant and without it, then compares the two results:
 
 ```
-bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3 --out eval-results/stack/probe-base
-bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills --repeat 3 --variants stack --out eval-results/stack/probe-stack
-bun run eval:compare -- <probe-base result.json> <probe-stack result.json>
+bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills,probe-stack-meaning --repeat 3 --out eval-results/stack/probe2-base
+bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills,probe-stack-meaning --repeat 3 --variants stack --out eval-results/stack/probe2-stack
+bun run eval:compare -- <probe2-base result.json> <probe2-stack result.json>
 ```
 
 3 cases (`probe-sub-*`, docs/plans/review-v2/submodule-prs.md section 7) move the gitlink of a submodule. `submodule` in case.json gives the path, the .gitmodules URL, and the subject of the new submodule commit. `sub/base/` and `sub/head.patch` build the bare submodule repository. The base commit gets .gitmodules and the gitlink at the submodule base, and the head moves the gitlink to the submodule head. An empty head.patch moves only the gitlink. Only the variant "submodules" gives the run the stub reads and the fetch from the local submodule repository. Without it, the run gets the same repository with no submodules.md and no prompt lines:

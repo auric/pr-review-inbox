@@ -1,0 +1,32 @@
+diff --git a/src/account/page.ts b/src/account/page.ts
+index c9a52dc..34d37af 100644
+--- a/src/account/page.ts
++++ b/src/account/page.ts
+@@ -3,5 +3,5 @@ import { customerOrders } from "../orders/store";
+ 
+ // The last 20 orders on the account page, newest first.
+ export function accountOrders(db: Db, customerId: string) {
+-  return customerOrders(db, customerId).reverse().slice(0, 20);
++  return customerOrders(db, customerId).slice(0, 20);
+ }
+diff --git a/src/db/queries.ts b/src/db/queries.ts
+new file mode 100644
+index 0000000..bc62d94
+--- /dev/null
++++ b/src/db/queries.ts
+@@ -0,0 +1,2 @@
++// The SQL of the order reads.
++export const ORDERS_OF_CUSTOMER = "SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC";
+diff --git a/src/orders/store.ts b/src/orders/store.ts
+index bf505ce..e18c474 100644
+--- a/src/orders/store.ts
++++ b/src/orders/store.ts
+@@ -1,6 +1,7 @@
++import { ORDERS_OF_CUSTOMER } from "../db/queries";
+ import type { Db, Order } from "../db/types";
+ 
+ // The orders of a customer, oldest first.
+ export function customerOrders(db: Db, customerId: string): Order[] {
+-  return db.all<Order>("SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at", customerId);
++  return db.all<Order>(ORDERS_OF_CUSTOMER, customerId);
+ }

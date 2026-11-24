@@ -1110,7 +1110,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
 type Call = { argv: string[]; stdin: string; context: Record<string, string>; agents: unknown; mcp: Record<string, { args?: string[] }> };
 const sha = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");
 // A fake eval run of probe cases. Without findings, one finder call per case and no verify call. Each call answers with findings.
-async function fakeEval(ids: string, variants: string[] = [], findings: unknown[] = []) {
+async function fakeEval(ids: string, variants: string[] = [], findings: unknown[] = [], more: object = {}) {
   const dir = temp("probe");
   const record = join(dir, "calls.jsonl");
   const scenario = join(dir, "scenario.json");
@@ -1120,6 +1120,7 @@ async function fakeEval(ids: string, variants: string[] = [], findings: unknown[
     questions: [],
     coverage: { read: [], skipped: [], unavailable: [], notChecked: [] },
     findings,
+    ...more,
   };
   writeFileSync(
     scenario,
@@ -1236,6 +1237,83 @@ describe("stacked probe cases with the fake CLI (WP-SK3)", () => {
       expect(plain?.context["pr-context.md"]).not.toContain("## Stacked pull requests");
       expect(prompt(plain as Call)).not.toContain("stacked");
       expect(parentBase(plain as Call)).toBeUndefined();
+    },
+    SLOW,
+  );
+
+  test(
+    "the parent of probe-stack-meaning flips the order of customerOrders, and only the variant gives the parent facts",
+    async () => {
+      const [c] = loadCases("probe-stack-meaning", SETS.probe);
+      if (!c) throw new Error("The case probe-stack-meaning is missing.");
+      const repo = await buildRepo(c, temp("repo"));
+      const ref = (name: string) => git(["--git-dir", repo.url, "rev-parse", name], { env: repo.env }).then((s) => s.trim());
+      const main = await ref("refs/heads/main");
+      expect(await ref("refs/heads/parent")).toBe(repo.base);
+      expect(await ref(`${repo.head}^`)).toBe(repo.base);
+      expect(await repo.show(main, "src/orders/store.ts")).toContain('ORDER BY created_at"');
+      expect(await repo.show(repo.base, "src/db/queries.ts")).toContain("ORDER BY created_at DESC");
+      // The comment keeps the old meaning, so the head alone looks right.
+      expect(await repo.show(repo.head, "src/orders/store.ts")).toContain("// The orders of a customer, oldest first.");
+      const changed = await git(["--git-dir", repo.url, "diff", "--name-only", repo.base, repo.head], { env: repo.env });
+      expect(changed.trim()).toBe("src/billing/loyalty.ts");
+
+      const [stacked] = await fakeRun(c.id, ["--variants", "stack"]);
+      expect(stacked?.context["pr-context.md"]).toContain(
+        [
+          '### Parent #2 "Move the order SQL into src/db/queries.ts" by Eval Author, open',
+          `- Source: parent at ${repo.base.slice(0, 7)}. Target: main.`,
+          "- Changed paths (3): src/account/page.ts, src/db/queries.ts, src/orders/store.ts.",
+        ].join("\n"),
+      );
+      expect(parentBase(stacked as Call)).toBe(`--parent-base=${main}`);
+      const [plain] = await fakeRun(c.id);
+      expect(plain?.context["pr-context.md"]).not.toContain("## Stacked pull requests");
+      expect(parentBase(plain as Call)).toBeUndefined();
+    },
+    SLOW,
+  );
+
+  test(
+    "the case title reaches no input of a stack run, and a task case without taskSummary keeps its task.md bytes",
+    async () => {
+      const stackIds = ["probe-stack-child-fills", "probe-stack-meaning", "probe-stack-relies", "probe-stack-unreached"];
+      const all = loadCases([...stackIds, "probe-obl-criterion-deferred"].join(","), SETS.probe);
+      const fetched = (s: string) => s.replace(/^- Fetched: .*$/m, "- Fetched: (time)");
+      for (const variants of [[], ["--variants", "stack"]]) {
+        const calls = await fakeRun(all.map((c) => c.id).join(","), variants);
+        expect(calls).toHaveLength(5);
+        for (const [i, c] of all.entries()) {
+          const x = calls[i] as Call;
+          // Each call holds the stdin, every context file, the agents, and the MCP arguments.
+          if (stackIds.includes(c.id)) expect({ id: c.id, leak: JSON.stringify(x).includes(c.title) }).toEqual({ id: c.id, leak: false });
+          const task = x.context["task.md"];
+          if (c.id === "probe-stack-child-fills") expect(task).toContain("## Task EVAL-1: Add a rate limit to the public API\n");
+          // The pin comes from the harness before taskSummary.
+          if (c.id === "probe-obl-criterion-deferred")
+            expect(sha(fetched(task ?? ""))).toBe("afa70b1c70f1bf6dc8114192ffc11f506a048d434279c315bd749e1b40a1cb04");
+        }
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "expectMention: a question that names the child sets mentioned, and a run without one clears it",
+    async () => {
+      const q = (text: string) => ({ questions: [{ text, why: "The task asks for the header." }] });
+      const hit = await fakeEval(
+        "probe-stack-child-fills",
+        ["--variants", "stack"],
+        [],
+        q("Does the child PR #3 add the Retry-After header?"),
+      );
+      expect(hit.result.runs.map((r) => r.mentioned)).toEqual([true]);
+      const miss = await fakeEval("probe-stack-child-fills", [], [], q("Where is the Retry-After header?"));
+      expect(miss.result.runs.map((r) => r.mentioned)).toEqual([false]);
+      // A case without expectMention has no flag.
+      const none = await fakeEval("probe-stack-relies");
+      expect(none.result.runs.map((r) => "mentioned" in r)).toEqual([false]);
     },
     SLOW,
   );

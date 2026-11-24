@@ -56,6 +56,7 @@ import {
   checkOf,
   displayGroup,
   type FindingPayload,
+  type Question,
   REVIEW_PROMPT_VERSION,
   type ReplyPayload,
   verifyJsonSchema,
@@ -841,7 +842,7 @@ async function runCase(
       if (c.task !== undefined) {
         const issue: IssueContext = {
           key: TASK_KEY,
-          summary: c.title,
+          summary: c.taskSummary ?? c.title,
           status: "In Progress",
           description: c.task,
           comments: [],
@@ -903,6 +904,13 @@ async function runCase(
       const fq = r.summary?.finderQuestions;
       const fr = r.summary?.finderRisks;
       const ob = r.summary?.obligations;
+      const found = items(d, r.summary?.volume);
+      const said = [
+        ...found.filter((i) => i.group === "main").map((i) => [i.title, i.body, i.trigger ?? ""].join("\n")),
+        ...d.items.flatMap((i) => (i.kind === "question" ? [`${(i.payload as Question).text}\n${(i.payload as Question).why}`] : [])),
+        ...(r.summary?.risks ?? []),
+        ...(fr?.list ?? []).filter((x) => x.outcome === "open").map((x) => `${x.text}\n${x.note}`),
+      ].map((s) => s.toLowerCase());
       return {
         earlier,
         run: {
@@ -923,7 +931,7 @@ async function runCase(
           coverage: r.summary?.coverage ?? null,
           verify: r.summary?.verify ?? null,
           phases: r.summary?.phases ?? [],
-          items: items(d, r.summary?.volume),
+          items: found,
           dropped: (r.summary?.dropped ?? []).map((x) => ({
             path: x.path,
             side: x.side,
@@ -946,6 +954,8 @@ async function runCase(
           ...runFacts(d.events),
           ...partFacts(d.events, partsOf(profile, changed).length),
           ...(rr && { resolves }),
+          // A flag only: the result file keeps the run text out.
+          ...(c.expectMention && { mentioned: c.expectMention.some((m) => said.some((s) => s.includes(m.toLowerCase()))) }),
         },
         head,
         base,
@@ -1180,7 +1190,8 @@ export async function main(argv: string[]): Promise<number> {
               .join("")
           : "";
         const error = !run.error ? "" : o.ordinals ? " (an error: the result file holds it)" : ` (${run.error})`;
-        console.log(`[${n}/${total}] ${name(c.id)} #${repeat}: ${run.status}${time}, ${shown} shown, ${recall}${error}${gaps}`);
+        const mention = run.mentioned === undefined ? "" : `, mention ${run.mentioned ? "yes" : "no"}`;
+        console.log(`[${n}/${total}] ${name(c.id)} #${repeat}: ${run.status}${time}, ${shown} shown, ${recall}${mention}${error}${gaps}`);
       }
     console.log(`\n${summaryText(result, score(result), name)}\nResult: ${file}`);
     return stopping ? 130 : 0;

@@ -115,6 +115,8 @@ export type CaseRun = {
   finderRisks?: RiskCounts;
   // The counts of summary.obligations (obligations.md section 8). Absent in files made before this field existed, and in a run without them.
   obligations?: ObligationCounts;
+  // A case with expectMention only (cases.ts): a shown finding, a question, or an open risk names one of its texts.
+  mentioned?: boolean;
 };
 export type RiskCounts = { listed: number; found: number; asked: number; cleared: number; covered: number; open: number };
 const RISK_KEYS = ["listed", "found", "asked", "cleared", "covered", "open"] as const;

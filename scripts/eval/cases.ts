@@ -151,6 +151,10 @@ export const caseFile = z.object({
   language: z.enum(LANGUAGES),
   pr: z.object({ title: z.string().min(1), description: z.string() }),
   task: z.string().optional(),
+  // The Jira summary of task. Absent: the title. A case whose title names the expected outcome sets it, so the run cannot read it.
+  taskSummary: z.string().min(1).optional(),
+  // The stacked probe cases: the run line reports whether a shown finding, a question, or an open risk names one of these texts.
+  expectMention: z.array(z.string().min(1)).min(1).optional(),
   instructions: z.string().optional(),
   bugs: z.array(evalBug).max(3),
   traps: z.array(evalTrap).min(1).max(4),

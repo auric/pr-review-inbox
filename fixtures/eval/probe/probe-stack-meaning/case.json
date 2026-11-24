@@ -1,0 +1,35 @@
+{
+  "id": "probe-stack-meaning",
+  "title": "A stacked PR relies on the old order of a parent helper, and only the parent change shows that the order flipped",
+  "language": "typescript",
+  "pr": {
+    "title": "Give the loyalty discount after two years",
+    "description": "Adds hasLoyaltyDiscount. A customer whose first order is two or more years old gets the loyalty discount. It reads the orders with customerOrders."
+  },
+  "stack": {
+    "parent": {
+      "title": "Move the order SQL into src/db/queries.ts",
+      "description": "Moves the SQL of customerOrders into src/db/queries.ts, so later reports share one place for the order queries."
+    }
+  },
+  "bugs": [
+    {
+      "id": "B1",
+      "path": "src/billing/loyalty.ts",
+      "side": "new",
+      "lines": [8, 9],
+      "severityMin": "major",
+      "module": "core",
+      "note": "The parent pull request moved the SQL of customerOrders and added DESC, so the newest order comes first. The doc comment still says oldest first. Index 0 is now the newest order, so a loyal customer with a recent order never gets the discount. Take the oldest order, for example the last entry or the minimum createdAt."
+    }
+  ],
+  "traps": [
+    {
+      "id": "T1",
+      "path": "src/db/queries.ts",
+      "side": "new",
+      "lines": [2, 2],
+      "why": "The parent pull request adds DESC, and the account page of the parent relies on it. This change does not touch it. A finding on the query blames parent code; the defect is the caller in src/billing/loyalty.ts."
+    }
+  ]
+}
